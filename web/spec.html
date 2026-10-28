@@ -114,7 +114,14 @@
 <li><a href="#testsbad">负向用例清单（节选，全部位于 tests/bad/）</a></li>
 </ul>
 </li>
-<li><a href="#18-v03-v02">18. v0.3 变更摘要（相对 v0.2）</a></li>
+<li><a href="#18-gc">18. 内存宪法（防 GC 铁律）</a><ul>
+<li><a href="#181-gc">18.1 永远拒绝 GC</a></li>
+<li><a href="#182">18.2 编译期接管内存</a></li>
+<li><a href="#183">18.3 显式指针回收（未来裸指针的契约）</a></li>
+<li><a href="#184">18.4 为什么这是底线</a></li>
+</ul>
+</li>
+<li><a href="#19-v03-v02">19. v0.3 变更摘要（相对 v0.2）</a></li>
 </ul>
 </li>
 </ul>
@@ -158,6 +165,10 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 <tr>
 <td><strong>比 C 更严格</strong></td>
 <td>强制初始化、强制不可变性、禁止隐式窄化转换、禁止省略结构体字段——把 C 中大量"未定义行为"变成"编译期错误"</td>
+</tr>
+<tr>
+<td><strong>无 GC 底线（内存宪法）</strong></td>
+<td>永不引入追踪式 GC；确定性内存管理靠 ARC + 编译期分析 +（未来）显式裸指针，见 §18</td>
 </tr>
 </tbody>
 </table>
@@ -1369,7 +1380,63 @@ int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
 </tbody>
 </table>
 <hr />
-<h2 id="18-v03-v02">18. v0.3 变更摘要（相对 v0.2）</h2>
+<h2 id="18-gc">18. 内存宪法（防 GC 铁律）</h2>
+<blockquote>
+<p>这是 Dial 区别于 Java / Go / C# 的<strong>核心底线</strong>，也是本语言不可动摇的内存契约：
+<strong>绝不背追踪式垃圾回收的历史包袱。</strong> 以下四条在任何版本中都不得违反。</p>
+</blockquote>
+<h3 id="181-gc">18.1 永远拒绝 GC</h3>
+<p>Dial 的设计<strong>绝不引入任何形式的追踪式垃圾回收（Tracing GC）</strong>——没有 mark-sweep、没有 STW（Stop-The-World）停顿、没有分代回收。
+内存回收的时机与开销在 Dial 程序里必须是<strong>确定性的、可推理的</strong>，而不是由运行时在某次不可预期的 GC 周期里"替你决定"。</p>
+<p>这是 Dial 与 Java / Go / C# 最根本的分道扬镳：后者把内存管理的不可预测性藏进运行时，Dial 把它摊在编译期与显式契约上。</p>
+<h3 id="182">18.2 编译期接管内存</h3>
+<p>Dial 依托<strong>不透明指针 + C Runtime 的 ARC（自动引用计数）</strong>，结合编译器前端的<strong>逃逸分析与移动语义</strong>，实现"零 GC 停顿的确定性内存管理"：</p>
+<ul>
+<li>值类型（如结构体）在栈上分配，作用域结束即回收，<strong>零运行时参与</strong>；</li>
+<li>引用类型（<code>string</code> / <code>int[]</code> / <code>Map</code>）由 ARC 管理；编译器在编译期通过数据流分析，尽量把 <code>retain</code> / <code>release</code> 静态消除
+  （移动语义零开销、只读共享 O(1)），只有跨边界等静态分析失效处，才由 C Runtime 在<strong>写入瞬间</strong>按引用计数兜底（COW，见 §13）；</li>
+<li><strong>没有任何后台线程、没有并发回收、没有不可预期的暂停。</strong></li>
+</ul>
+<h3 id="183">18.3 显式指针回收（未来裸指针的契约）</h3>
+<p>未来若引入裸指针（<code>raw ptr</code>），Dial 坚持<strong>"谁申请、谁释放"</strong>的显式契约：</p>
+<ul>
+<li>裸指针<strong>绝对不受 ARC 保护</strong>，不会被任何引用计数自动回收；</li>
+<li>它的生命周期完全交由开发者显式管理，例如调用底层 <code>dial_raw_free</code> 归还；</li>
+<li>这一设计与 §18.2 的 ARC 容器<strong>互补</strong>：日常用 ARC 容器获得确定性安全，需要极致性能或底层控制时再用裸指针并自行负责回收；</li>
+<li>裸指针与 ARC 容器之间<strong>不允许</strong>隐式转换——这正是"不透明指针契约"的延伸，避免把受管指针与不受管指针混为一谈而引入悬挂。</li>
+</ul>
+<h3 id="184">18.4 为什么这是底线</h3>
+<table>
+<thead>
+<tr>
+<th>语言</th>
+<th>内存回收方式</th>
+<th>Dial 的立场</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Java / Go / C#</td>
+<td>追踪式 GC（存在 STW 停顿）</td>
+<td>❌ <strong>永不引入</strong></td>
+</tr>
+<tr>
+<td>C / C++</td>
+<td>手动 <code>free</code> / RAII</td>
+<td>借鉴"确定性"，但用 ARC + 编译期分析消除大部分手写负担</td>
+</tr>
+<tr>
+<td><strong>Dial</strong></td>
+<td>ARC + 编译期移动/逃逸分析 +（未来）显式裸指针</td>
+<td>✅ 确定性、零 GC 停顿、可控</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>这条底线写进语言本身，而非仅仅写在文档里：任何试图为 Dial 添加追踪式 GC 的提案，都在原则上被否决。</p>
+</blockquote>
+<hr />
+<h2 id="19-v03-v02">19. v0.3 变更摘要（相对 v0.2）</h2>
 <p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
 <table>
 <thead>
