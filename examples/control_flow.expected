@@ -1,0 +1,14 @@
+[cf] classify(-5) = -1 ->
+-1
+[cf] classify(0) = 0 ->
+0
+[cf] classify(7) = 1 ->
+1
+[cf] classify(100) = 2 ->
+2
+[cf] for i in 0..5 求和 = 0+1+2+3+4 = 10 ->
+10
+[cf] for k in 0..3 写入平方 ->
+0
+1
+4

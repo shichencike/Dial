@@ -111,6 +111,7 @@ pub fn type_of<V>(
             match ot {
                 Type::String => string_method_type(method, args, scopes, funcs, structs),
                 Type::Array(_) => array_method_type(method, args, scopes, funcs, structs),
+                Type::Map => map_method_type(method, args, scopes, funcs, structs),
                 _ => Err(DialcError::new(
                     format!("语义错误：类型 '{}' 不支持方法调用 '{}'", ot.name(), method),
                     0, 0,
@@ -311,6 +312,24 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::Int);
                 }
+                "new_map" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new(
+                            "语义错误：new_map 不接受参数",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Map);
+                }
+                "read_line" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new(
+                            "语义错误：read_line 不接受参数",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::String);
+                }
                 _ => {}
             }
             if name == "print" {
@@ -332,6 +351,12 @@ pub fn type_of<V>(
                     Type::Struct(_) => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print 结构体，请逐字段打印",
+                            0, 0,
+                        ))
+                    }
+                    Type::Map => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print 哈希表，请逐值打印 print(m.get(k))",
                             0, 0,
                         ))
                     }
@@ -497,6 +522,66 @@ fn array_method_type<V>(
         }
         _ => Err(DialcError::new(
             format!("语义错误：array 无方法 '{}'", method),
+            0, 0,
+        )),
+    }
+}
+
+/// 哈希表方法（int -> int，C 侧 ARC 管理）的签名与返回类型。
+fn map_method_type<V>(
+    method: &str,
+    args: &[Expr],
+    scopes: &Scopes<V>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<Type> {
+    let arg_t = |i: usize| type_of(&args[i], scopes, funcs, structs);
+    match method {
+        "put" => {
+            if args.len() != 2 || arg_t(0)? != Type::Int || arg_t(1)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：map.put(k, v) 需要 2 个 int 参数（键与值）",
+                    0, 0,
+                ));
+            }
+            // 返回（可能更新后的）Map 指针，编译器把新指针写回接收变量（与 array.push 一致）。
+            Ok(Type::Map)
+        }
+        "get" => {
+            if args.len() != 1 || arg_t(0)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：map.get(k) 需要 1 个 int 参数（键），未命中返回 -1",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Int)
+        }
+        "contains" => {
+            if args.len() != 1 || arg_t(0)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：map.contains(k) 需要 1 个 int 参数（键）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Bool)
+        }
+        "remove" => {
+            if args.len() != 1 || arg_t(0)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：map.remove(k) 需要 1 个 int 参数（键），未命中返回 -1",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Int)
+        }
+        "size" => {
+            if !args.is_empty() {
+                return Err(DialcError::new("语义错误：map.size() 不接受参数", 0, 0));
+            }
+            Ok(Type::Int)
+        }
+        _ => Err(DialcError::new(
+            format!("语义错误：map 无方法 '{}'", method),
             0, 0,
         )),
     }
@@ -850,6 +935,36 @@ fn check_stmt(
             scopes.pop();
             Ok(())
         }
+        Stmt::For { var, start, end, body } => {
+            let st = type_of(start, scopes, funcs, structs)?;
+            let et = type_of(end, scopes, funcs, structs)?;
+            if st != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：for 循环下界（start）必须是 int 类型",
+                    0, 0,
+                ));
+            }
+            if et != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：for 循环上界（end）必须是 int 类型",
+                    0, 0,
+                ));
+            }
+            if scopes.last().unwrap().contains_key(var) {
+                return Err(DialcError::new(
+                    format!("语义错误：循环变量 '{}' 与外层变量重名", var),
+                    0, 0,
+                ));
+            }
+            // 循环变量作用域限定在循环体内；声明为可变（用户可在体内重新赋值）。
+            scopes.push(HashMap::new());
+            scopes.last_mut().unwrap().insert(var.clone(), (Type::Int, true));
+            for s in body {
+                check_stmt(s, scopes, funcs, f, structs)?;
+            }
+            scopes.pop();
+            Ok(())
+        }
         Stmt::Return(Some(e), line, col) => {
             let t = type_of(e, scopes, funcs, structs)?;
             if !types_compatible(&t, &f.ret) {
@@ -884,7 +999,7 @@ fn check_stmt(
             //   - 字段 / 下标等表达式作为接收者也无法被可靠地写回，同样报错。
             // 若只需获得新容器而不就地修改，请以表达式形式使用：let b: int[] = a.push(v);
             if let Expr::Method(obj, method, _) = e {
-                if matches!(method.as_str(), "push" | "set") {
+                if matches!(method.as_str(), "push" | "set" | "put") {
                     match obj.as_ref() {
                         Expr::Var(name) => {
                             let mutable = scopes
@@ -1005,6 +1120,11 @@ fn collect_refs(stmts: &[Stmt], si: &mut usize, loop_d: usize, cond_d: usize, re
                 record_expr_refs(cond, *si, unsafe_ctx, refs);
                 collect_refs(body, si, loop_d + 1, cond_d, refs);
             }
+            Stmt::For { var: _, start, end, body } => {
+                record_expr_refs(start, *si, unsafe_ctx, refs);
+                record_expr_refs(end, *si, unsafe_ctx, refs);
+                collect_refs(body, si, loop_d + 1, cond_d, refs);
+            }
             Stmt::Return(Some(e), ..) => {
                 record_expr_refs(e, *si, unsafe_ctx, refs);
             }
@@ -1043,6 +1163,9 @@ fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, f
                 }
             }
             Stmt::While { body, .. } => {
+                set_moves(body, si, loop_d + 1, cond_d, facts);
+            }
+            Stmt::For { body, .. } => {
                 set_moves(body, si, loop_d + 1, cond_d, facts);
             }
             _ => {}

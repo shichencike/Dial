@@ -39,7 +39,7 @@ FOOTER = """
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.3 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+    <span class="muted">v0.4 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
   </div>
 </footer>
 """
@@ -190,6 +190,9 @@ def render_index() -> str:
         ("零隐式转换", "int 与 float 之间无隐式提升或窄化，必须显式调用 int_to_float / float_to_int。"),
         ("短路求值", "and / or 与 C 的 && / || 一致短路，保证判空等代码不会因盲目求值而崩溃。"),
         ("产物零 LLVM 依赖", "用户程序只依赖 C Runtime（libc），绝不链接 libLLVM。"),
+        ("无 GC 底线（内存宪法）", "永不引入追踪式 GC。确定性内存管理靠 ARC 引用计数 + 编译期逃逸分析/移动语义，未来裸指针坚持「谁申请谁释放」。"),
+        ("哈希表 map（ARC + COW）", "v0.4 新增 map 类型（int → int），与 string / int[] 共用同一套引用计数；put 触发扩容或写时复制后由编译器把新指针写回接收变量。"),
+        ("for 范围循环 / else if", "v0.4 新增 for (i in start..end)（半开区间、循环变量可重新赋值）与 else if 语法糖（编译期展开为嵌套 if，零运行时开销）。"),
     ]
     card_html = "".join(
         f'<div class="card"><h3>{c[0]}</h3><p>{c[1]}</p></div>' for c in cards)
@@ -213,10 +216,11 @@ def render_index() -> str:
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
     </div>
     <div class="kpis">
-      <span><b>v0.3</b> 当前版本</span>
+      <span><b>v0.4</b> 当前版本</span>
       <span><b>Rust + inkwell</b> / LLVM 18</span>
       <span><b>零</b> LLVM 运行时依赖</span>
       <span><b>短路</b> and / or</span>
+      <span><b>无 GC</b> 内存宪法</span>
     </div>
   </div>
 </section>
@@ -241,7 +245,7 @@ cargo build --release          # 产物：target/release/dialc
     return 0;
 }}</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.3.zip">dialc-v0.3.zip</a>（或自行 clone 仓库后构建）
+    下载源码包：<a href="../dialc-v0.4.zip">dialc-v0.4.zip</a>（或自行 clone 仓库后构建）
   </p>
 </section>
 {FOOTER}

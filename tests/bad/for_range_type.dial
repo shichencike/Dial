@@ -1,0 +1,7 @@
+// 应当编译失败：for 循环的上界必须是 int，这里传了 string
+fn main(): int {
+    for (i in 0.."5") {
+        print(i);
+    }
+    return 0;
+}

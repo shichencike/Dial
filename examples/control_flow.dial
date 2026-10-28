@@ -1,0 +1,49 @@
+// dialc v0.4 示例：else if 语法糖 + for 范围循环
+//
+//  - `else if (c) {..}` 是语法糖，编译期为嵌套 if（无需新 AST 节点）。
+//  - `for (i in start..end) {..}`：循环变量 i 为 int，从 start 迭代到 end-1（end 独占），
+//    可在循环体内被重新赋值；与 while 一样走作用域化的 retain/release。
+
+fn classify(n: int): int {
+    if (n < 0) {
+        return -1;
+    } else if (n == 0) {
+        return 0;
+    } else if (n < 10) {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+fn main(): int {
+    // —— else if 语法糖 ——
+    print("[cf] classify(-5) = -1 ->");
+    print(classify(-5));
+    print("[cf] classify(0) = 0 ->");
+    print(classify(0));
+    print("[cf] classify(7) = 1 ->");
+    print(classify(7));
+    print("[cf] classify(100) = 2 ->");
+    print(classify(100));
+
+    // —— for 范围循环：i 从 0 到 4（end 独占）——
+    print("[cf] for i in 0..5 求和 = 0+1+2+3+4 = 10 ->");
+    var sum: int = 0;
+    for (i in 0..5) {
+        sum = sum + i;
+    }
+    print(sum);
+
+    // —— for + map：用下标生成平方表 ——
+    print("[cf] for k in 0..3 写入平方 ->");
+    var m: map = new_map();
+    for (k in 0..3) {
+        m.put(k, k * k);
+    }
+    print(m.get(0));   // 0
+    print(m.get(1));   // 1
+    print(m.get(2));   // 4
+
+    return 0;
+}

@@ -1,0 +1,8 @@
+// 应当编译失败：let 声明的不可变变量不可调用原地修改方法 map.put
+// （put 可能触发扩容/COW 并更换底层指针，编译器需把新指针写回接收变量，
+//  因此接收者必须是 var 变量，与 array.push / array.set 的契约一致）
+fn main(): int {
+    let m: map = new_map();
+    m.put(1, 1);
+    return 0;
+}

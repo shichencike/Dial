@@ -1,0 +1,6 @@
+// 应当编译失败：map.put(k, v) 的两个参数都必须是整数，这里传了 string
+fn main(): int {
+    var m: map = new_map();
+    m.put("k", 1);
+    return 0;
+}

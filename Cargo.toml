@@ -1,8 +1,8 @@
 [package]
 name = "dialc"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "dialc 编译型编程语言 v0.3 编译器（Rust + LLVM/inkwell）"
+description = "dialc 编译型编程语言 v0.4 编译器（Rust + LLVM/inkwell）"
 license = "MIT"
 
 [[bin]]

@@ -25,6 +25,8 @@ pub enum TokenKind {
     If,
     Else,
     While,
+    For,
+    In,
     Return,
     And,
     Or,
@@ -36,6 +38,7 @@ pub enum TokenKind {
     BoolT,
     StringT,
     VoidT,
+    MapT,
 
     // 运算符与标点
     Plus,
@@ -57,6 +60,7 @@ pub enum TokenKind {
     RBrace,
     Colon,
     Dot,
+    DotDot, // ..
     LBracket,
     RBracket,
 
@@ -153,7 +157,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 i += 1;
                 col += 1;
             }
-            if i < chars.len() && chars[i] == '.' {
+            // 仅当小数点后紧跟数字才视为浮点（否则 `..` 应被识别为范围运算符）。
+            if i < chars.len() && chars[i] == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() {
                 num.push('.');
                 i += 1;
                 col += 1;
@@ -192,6 +197,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "if" => TokenKind::If,
                 "else" => TokenKind::Else,
                 "while" => TokenKind::While,
+                "for" => TokenKind::For,
+                "in" => TokenKind::In,
                 "return" => TokenKind::Return,
                 "and" => TokenKind::And,
                 "or" => TokenKind::Or,
@@ -204,6 +211,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "bool" => TokenKind::BoolT,
                 "string" => TokenKind::StringT,
                 "void" => TokenKind::VoidT,
+                "map" => TokenKind::MapT,
                 _ => TokenKind::Ident(id),
             };
             push(kind, start_line, start_col, &mut tokens);
@@ -320,11 +328,18 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 i += 1;
                 col += 1;
             }
-            '.' => {
-                push(TokenKind::Dot, start_line, start_col, &mut tokens);
-                i += 1;
-                col += 1;
-            }
+            '.' => match peek {
+                Some('.') => {
+                    push(TokenKind::DotDot, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
+                _ => {
+                    push(TokenKind::Dot, start_line, start_col, &mut tokens);
+                    i += 1;
+                    col += 1;
+                }
+            },
             '[' => {
                 push(TokenKind::LBracket, start_line, start_col, &mut tokens);
                 i += 1;

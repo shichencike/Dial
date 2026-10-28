@@ -1,0 +1,22 @@
+[map] 初始 size = 0 ->
+0
+[map] 写入 3 对后 size = 3 ->
+3
+[map] get(2) = 200 ->
+200
+[map] contains(2) = true ->
+true
+[map] contains(9) = false ->
+false
+[map] get(9) 未命中 = -1 ->
+-1
+[map] put(2,222) 后 get(2) = 222 ->
+222
+[map] remove(2) = 222 ->
+222
+[map] 删除后 size = 2 ->
+2
+[map] get(2) 再次未命中 = -1 ->
+-1
+[io] read_line() 读到空行 -> length = 0 ->
+0

@@ -1,0 +1,55 @@
+// dialc v0.4 示例：哈希表 Map(int -> int) + 控制台输入 read_line
+//
+// `map` 在 IR 中同样只是一个 `ptr`（i8*）。其内存布局
+// `[int64 cap][int64 count][entries...]` 由 C 侧私有维护，并走与 String / Array
+// 同一套 ARC 引用计数（dial_map_retain / dial_map_release）。
+//
+// 关键：put 可能触发扩容或写时复制（COW），因此它**返回** Map 指针，
+// 编译期强制把返回值写回接收变量（与 array.push 一致），杜绝“旧指针失效”悬垂。
+
+fn main(): int {
+    // 创建空表
+    var m: map = new_map();
+
+    print("[map] 初始 size = 0 ->");
+    print(m.size());
+
+    // 写入若干键值对
+    m.put(1, 100);
+    m.put(2, 200);
+    m.put(3, 300);
+    print("[map] 写入 3 对后 size = 3 ->");
+    print(m.size());
+
+    print("[map] get(2) = 200 ->");
+    print(m.get(2));
+
+    print("[map] contains(2) = true ->");
+    print(m.contains(2));
+    print("[map] contains(9) = false ->");
+    print(m.contains(9));
+
+    print("[map] get(9) 未命中 = -1 ->");
+    print(m.get(9));
+
+    // 命中更新：值被覆盖
+    m.put(2, 222);
+    print("[map] put(2,222) 后 get(2) = 222 ->");
+    print(m.get(2));
+
+    // 删除：返回被移除的值
+    print("[map] remove(2) = 222 ->");
+    print(m.remove(2));
+    print("[map] 删除后 size = 2 ->");
+    print(m.size());
+    print("[map] get(2) 再次未命中 = -1 ->");
+    print(m.get(2));
+
+    // read_line：从标准输入读取一行（无参数，返回 string）。
+    // 演示脚本以 EOF 喂入（空输入），dial_read_line 返回空串（安全，绝不崩溃）。
+    var s: string = read_line();
+    print("[io] read_line() 读到空行 -> length = 0 ->");
+    print(s.length());
+
+    return 0;
+}

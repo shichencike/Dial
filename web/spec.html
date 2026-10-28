@@ -22,7 +22,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc-dial-v03">dialc — Dial 语言编译器 v0.3</a><ul>
+<li><a href="#dialc-dial-v04">dialc — Dial 语言编译器 v0.4</a><ul>
 <li><a href="#1">1. 设计原则</a></li>
 <li><a href="#2">2. 目录结构</a></li>
 <li><a href="#3">3. 构建与使用</a><ul>
@@ -58,8 +58,9 @@
 </li>
 <li><a href="#8">8. 语句与控制流</a><ul>
 <li><a href="#81">8.1 语句一览</a></li>
-<li><a href="#82-if-while">8.2 if / while</a></li>
-<li><a href="#83">8.3 块与作用域</a></li>
+<li><a href="#82-if-else-if-while">8.2 if / else if / while</a></li>
+<li><a href="#83-for">8.3 范围 for 循环</a></li>
+<li><a href="#84">8.4 块与作用域</a></li>
 </ul>
 </li>
 <li><a href="#9">9. 函数</a><ul>
@@ -84,49 +85,61 @@
 <li><a href="#115">11.5 越界行为</a></li>
 </ul>
 </li>
-<li><a href="#12-string">12. 字符串 string</a><ul>
-<li><a href="#121">12.1 方法</a></li>
-<li><a href="#122">12.2 不可变语义</a></li>
+<li><a href="#12-mapint-int">12. 哈希表 map（int → int）</a><ul>
+<li><a href="#121">12.1 构造</a></li>
+<li><a href="#122">12.2 方法</a></li>
+<li><a href="#123-put">12.3 为什么 put 要返回指针</a></li>
+<li><a href="#124-var">12.4 接收者必须是可变变量（var）</a></li>
+<li><a href="#125-arc">12.5 ARC 与确定性内存</a></li>
 </ul>
 </li>
-<li><a href="#13">13. 内存与所有权模型</a><ul>
-<li><a href="#131">13.1 不透明指针契约</a></li>
-<li><a href="#132">13.2 引用计数对象的布局</a></li>
-<li><a href="#133">13.3 编译期三种绑定策略</a></li>
-<li><a href="#134">13.4 栈分配与逃逸分析</a></li>
-<li><a href="#135-cow">13.5 COW 的触发时机</a></li>
-<li><a href="#136">13.6 自赋值安全</a></li>
-<li><a href="#137">13.7 返回值不被提前释放</a></li>
+<li><a href="#13-string">13. 字符串 string</a><ul>
+<li><a href="#131">13.1 方法</a></li>
+<li><a href="#132">13.2 不可变语义</a></li>
 </ul>
 </li>
-<li><a href="#14-ffi-dial-c">14. FFI 契约：Dial 语法 → C 函数</a><ul>
+<li><a href="#14">14. 内存与所有权模型</a><ul>
+<li><a href="#141">14.1 不透明指针契约</a></li>
+<li><a href="#142">14.2 引用计数对象的布局</a></li>
+<li><a href="#143">14.3 编译期三种绑定策略</a></li>
+<li><a href="#144">14.4 栈分配与逃逸分析</a></li>
+<li><a href="#145-cow">14.5 COW 的触发时机</a></li>
+<li><a href="#146">14.6 自赋值安全</a></li>
+<li><a href="#147">14.7 返回值不被提前释放</a></li>
+</ul>
+</li>
+<li><a href="#15-ffi-dial-c">15. FFI 契约：Dial 语法 → C 函数</a><ul>
 <li><a href="#c-runtime">C Runtime 导出函数</a></li>
 </ul>
 </li>
-<li><a href="#15-print">15. 内置 print</a></li>
-<li><a href="#16">16. 未定义行为与已实现边界</a><ul>
-<li><a href="#161-c">16.1 未定义行为（与 C 一致的部分）</a></li>
-<li><a href="#162-v02">16.2 v0.2 未实现（不要指望能编译）</a></li>
+<li><a href="#16-print">16. 内置 print</a></li>
+<li><a href="#17">17. 未定义行为与已实现边界</a><ul>
+<li><a href="#171-c">17.1 未定义行为（与 C 一致的部分）</a></li>
+<li><a href="#172-v04">17.2 v0.4 尚未实现（不要指望能编译）</a></li>
 </ul>
 </li>
-<li><a href="#17">17. 测试</a><ul>
+<li><a href="#18">18. 测试</a><ul>
 <li><a href="#_1">示例清单</a></li>
 <li><a href="#testsbad">负向用例清单（节选，全部位于 tests/bad/）</a></li>
 </ul>
 </li>
-<li><a href="#18-gc">18. 内存宪法（防 GC 铁律）</a><ul>
-<li><a href="#181-gc">18.1 永远拒绝 GC</a></li>
-<li><a href="#182">18.2 编译期接管内存</a></li>
-<li><a href="#183">18.3 显式指针回收（未来裸指针的契约）</a></li>
-<li><a href="#184">18.4 为什么这是底线</a></li>
+<li><a href="#19-gc">19. 内存宪法（防 GC 铁律）</a><ul>
+<li><a href="#191-gc">19.1 永远拒绝 GC</a></li>
+<li><a href="#192">19.2 编译期接管内存</a></li>
+<li><a href="#193">19.3 显式指针回收（未来裸指针的契约）</a></li>
+<li><a href="#194">19.4 为什么这是底线</a></li>
 </ul>
 </li>
-<li><a href="#19-v03-v02">19. v0.3 变更摘要（相对 v0.2）</a></li>
+<li><a href="#20">20. 版本变更摘要</a><ul>
+<li><a href="#201-v04-v03">20.1 v0.4（相对 v0.3）</a></li>
+<li><a href="#202-v03-v02">20.2 v0.3（相对 v0.2）</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
 </div>
-<h1 id="dialc-dial-v03">dialc — Dial 语言编译器 v0.3</h1>
+<h1 id="dialc-dial-v04">dialc — Dial 语言编译器 v0.4</h1>
 <p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
@@ -168,7 +181,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 </tr>
 <tr>
 <td><strong>无 GC 底线（内存宪法）</strong></td>
-<td>永不引入追踪式 GC；确定性内存管理靠 ARC + 编译期分析 +（未来）显式裸指针，见 §18</td>
+<td>永不引入追踪式 GC；确定性内存管理靠 ARC + 编译期分析 +（未来）显式裸指针，见 §19</td>
 </tr>
 </tbody>
 </table>
@@ -413,7 +426,7 @@ let j: int = float_to_int(3.7);          // j == 3（截断）
 </code></pre>
 <blockquote>
 <p><code>int_to_float</code> / <code>float_to_int</code> 是纯编译器内联的 LLVM 指令，<strong>不经过任何 C 运行时函数</strong>，
-因此不会引入额外依赖（见 §14）。</p>
+因此不会引入额外依赖（见 §15）。</p>
 </blockquote>
 <hr />
 <h2 id="6">6. 变量与可变性</h2>
@@ -640,17 +653,35 @@ a[0] = 4;                  // 下标赋值
 print(e);                  // 打印语句
 f(1, 2);                   // 表达式语句
 if (cond) { ... } else { ... }
+if (cond) { ... } else if (c2) { ... } else { ... }   // else if 语法糖
+for (i in 0..n) { ... }    // 范围 for 循环（end 独占）
 while (cond) { ... }
 return e;                  // 或 return;（仅 void 函数）
 </code></pre>
-<h3 id="82-if-while">8.2 <code>if</code> / <code>while</code></h3>
+<h3 id="82-if-else-if-while">8.2 <code>if</code> / <code>else if</code> / <code>while</code></h3>
 <p>条件<strong>必须带括号</strong>，且类型必须是 <code>bool</code>：</p>
 <pre><code class="language-dial">if (x &gt; 0) { ... } else { ... }
+
+// else if 是语法糖：编译期展开为嵌套 if，无需新语法节点
+if (x &lt; 0) { ... }
+else if (x == 0) { ... }
+else if (x &lt; 10) { ... }
+else { ... }
+
 while (i &lt; n) { ... }
 </code></pre>
-<p>无 <code>else if</code> 语法糖，需嵌套书写；无 <code>for</code>、无 <code>break</code>、无 <code>continue</code>。</p>
-<h3 id="83">8.3 块与作用域</h3>
-<p><code>{ ... }</code> 只能作为函数体或 <code>if</code>/<code>while</code> 的分支体，<strong>不能</strong>作为独立的裸块语句。</p>
+<p>无 <code>break</code>、无 <code>continue</code>（v0.5 计划）；循环体内可用 <code>return</code> 提前返回。</p>
+<h3 id="83-for">8.3 范围 <code>for</code> 循环</h3>
+<p><code>for (i in start..end)</code>：循环变量 <code>i</code> 为 <code>int</code>，从 <code>start</code> 迭代到 <code>end - 1</code>（<code>end</code> <strong>独占</strong>，半开区间）。
+<code>start</code> / <code>end</code> 必须为 <code>int</code> 表达式，<code>i</code> 在循环体内为可变变量（可被重新赋值）。</p>
+<pre><code class="language-dial">var sum: int = 0;
+for (i in 0..5) {        // i = 0,1,2,3,4
+    sum = sum + i;       // 0+1+2+3+4 = 10
+}
+</code></pre>
+<p>循环变量作用域限定在循环体内；<code>start</code>/<code>end</code> 在每次迭代开始前各求值一次（不支持 C 式「每次迭代重新求值边界」的语义，等价于把上下界快照到循环前）。</p>
+<h3 id="84">8.4 块与作用域</h3>
+<p><code>{ ... }</code> 只能作为函数体或 <code>if</code>/<code>while</code>/<code>for</code> 的分支体，<strong>不能</strong>作为独立的裸块语句。</p>
 <hr />
 <h2 id="9">9. 函数</h2>
 <h3 id="91">9.1 定义</h3>
@@ -768,7 +799,7 @@ print(r.origin.x);     // 支持链式
 <li>在 LLVM 中以 <code>alloca</code> 落在栈上，字段访问编译为 <code>getelementptr</code>，零运行时开销。</li>
 <li>赋值、传参、返回均为<strong>值拷贝</strong>。</li>
 <li>若结构体含有 <code>string</code> / <code>int[]</code> 字段，值拷贝时这些字段按<strong>共享引用</strong>处理：
-  编译期插入对称的 <code>retain</code>，作用域结束时插入对称的 <code>release</code>（详见 §13.4）。</li>
+  编译期插入对称的 <code>retain</code>，作用域结束时插入对称的 <code>release</code>（详见 §14.4）。</li>
 </ul>
 <hr />
 <h2 id="11-int">11. 动态数组 <code>int[]</code></h2>
@@ -872,9 +903,89 @@ C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并
 <h3 id="115">11.5 越界行为</h3>
 <p><strong>无边界检查</strong>。越界读写是未定义行为（与 C 一致）。</p>
 <hr />
-<h2 id="12-string">12. 字符串 <code>string</code></h2>
+<h2 id="12-mapint-int">12. 哈希表 <code>map</code>（int → int）</h2>
+<p><code>map</code> 是 Dial 的哈希表类型，键与值均固定为 <code>int</code>（v0.4）。在 IR 中它同样只是一个 <code>ptr</code>（<code>i8*</code>），
+其内存布局 <code>[int64 cap][int64 count][entries...]</code> 由 C 侧私有维护，并走与 <code>string</code> / <code>int[]</code>
+<strong>同一套 ARC 引用计数</strong>（<code>dial_map_retain</code> / <code>dial_map_release</code>）。这完全契合 <a href="#19-内存宪法防-gc-铁律">§19 内存宪法</a>：
+确定性、零 GC 停顿、所有权可控。</p>
+<p>每条 entry 24 字节：<code>{ int64 key; int64 val; int64 used; }</code>，采用线性探测（linear probing）开放寻址，
+删除采用「左移紧凑」维护簇连续性。负载因子超过 3/4 时自动扩容并重新哈希。</p>
+<h3 id="121">12.1 构造</h3>
+<pre><code class="language-dial">var m: map = new_map();   // 创建空表，返回 map 类型（ARC 引用计数 1）
+</code></pre>
+<p><code>new_map()</code> 无参数，在 C 侧调用 <code>dial_map_new</code>，分配一个 <code>cap = 8</code> 的空表。</p>
+<h3 id="122">12.2 方法</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>签名</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>put</code></td>
+<td><code>m.put(k: int, v: int)</code></td>
+<td><code>map</code>（可能更新的指针）</td>
+<td>写入键值对；命中覆盖值，未命中追加</td>
+</tr>
+<tr>
+<td><code>get</code></td>
+<td><code>m.get(k: int)</code></td>
+<td><code>int</code></td>
+<td>返回值；<strong>未命中返回 -1</strong></td>
+</tr>
+<tr>
+<td><code>contains</code></td>
+<td><code>m.contains(k: int)</code></td>
+<td><code>bool</code></td>
+<td>命中返回 <code>true</code></td>
+</tr>
+<tr>
+<td><code>remove</code></td>
+<td><code>m.remove(k: int)</code></td>
+<td><code>int</code></td>
+<td>移除并返回其值；未命中返回 -1</td>
+</tr>
+<tr>
+<td><code>size</code></td>
+<td><code>m.size()</code></td>
+<td><code>int</code></td>
+<td>当前条目数</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-dial">var m: map = new_map();
+m.put(1, 100);
+m.put(2, 200);
+print(m.get(2));        // 200
+print(m.contains(2));   // true
+print(m.size());        // 2
+m.remove(2);
+print(m.get(2));        // -1（已删除）
+</code></pre>
+<h3 id="123-put">12.3 为什么 <code>put</code> 要返回指针</h3>
+<p>与 <code>int[].push</code> / <code>int[].set</code> 完全一致（见 <a href="#113-为什么-push--set-要返回指针">§11.3</a>）：<code>put</code> 在底层可能因
+<strong>扩容</strong>或<strong>写时复制（COW）</strong>更换底层 buffer 指针。编译器在编译期把 <code>put</code> 的返回值强制写回接收变量：</p>
+<pre><code class="language-dial">var m: map = new_map();
+m = m.put(1, 1);   // 等价写法：编译器也允许直接 m.put(1, 1); 写回 m
+</code></pre>
+<p>若 <code>m</code> 当前被多者共享（例如已作为实参传入某函数），<code>dial_map_put</code> 会先 COW 克隆再修改，
+<strong>调用方持有的旧指针不受影响</strong>（ARC 隔离，见 <a href="#135-cow-的触发时机">§13.5</a>）。</p>
+<h3 id="124-var">12.4 接收者必须是可变变量（<code>var</code>）</h3>
+<p>与数组一致：<code>put</code> 可能更换指针，因此接收者必须是顶层 <code>var</code> 变量。<code>let</code> 变量、字段、下标均不可作接收者：</p>
+<pre><code class="language-dial">let m: map = new_map();
+m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
+</code></pre>
+<h3 id="125-arc">12.5 ARC 与确定性内存</h3>
+<p><code>map</code> 与 <code>string</code> / <code>int[]</code> 共享同一份引用计数实现（<code>runtime/dial_rt_mem.h</code> 的 <code>dial_rc_*</code>）。
+作用域结束时编译器插入对称 <code>release</code>，归零即释放，<strong>绝不引入追踪式 GC</strong>。</p>
+<hr />
+<h2 id="13-string">13. 字符串 <code>string</code></h2>
 <p><code>string</code> 是不透明指针，内存布局 <code>[refcount][len][data...]</code> 由 C 侧私有维护。</p>
-<h3 id="121">12.1 方法</h3>
+<h3 id="131">13.1 方法</h3>
 <table>
 <thead>
 <tr>
@@ -924,13 +1035,13 @@ C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并
 </tbody>
 </table>
 <p><code>==</code> / <code>!=</code> 对 <code>string</code> 按<strong>内容</strong>比较（编译为 <code>dial_string_eq</code>），而非比较指针地址。</p>
-<h3 id="122">12.2 不可变语义</h3>
+<h3 id="132">13.2 不可变语义</h3>
 <p>v0.2 未提供任何原地修改字符串的接口：所有操作（<code>concat</code>、<code>substring</code>）都产生新对象。
 字符串因此天生满足"只读推断"，跨函数共享永远是 O(1)。</p>
 <hr />
-<h2 id="13">13. 内存与所有权模型</h2>
+<h2 id="14">14. 内存与所有权模型</h2>
 <p>这是 Dial 相对 C 的核心增值点：<strong>尽可能在编译期把内存管理开销消掉</strong>。</p>
-<h3 id="131">13.1 不透明指针契约</h3>
+<h3 id="141">14.1 不透明指针契约</h3>
 <p>Dial 代码中的 <code>string</code> / <code>int[]</code> 只是 <code>i8*</code>：</p>
 <pre><code class="language-llvm">; s.length() 的唯一形态
 %len = call i64 @dial_string_length(ptr %s)
@@ -942,13 +1053,13 @@ C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并
 <li>直接 <code>free</code> 它。</li>
 </ul>
 <p>一切都必须经由 C 导出的 <code>dial_*</code> 函数。</p>
-<h3 id="132">13.2 引用计数对象的布局</h3>
+<h3 id="142">14.2 引用计数对象的布局</h3>
 <pre><code>[ int64 refcount ][ payload ... ]
                     ^
                     └─ Dial 看到的&quot;不透明指针&quot;指向这里
 </code></pre>
 <p><code>dial_rc_alloc</code> 返回 payload 指针；<code>dial_rc_retain/release</code> 操作其前 8 字节。</p>
-<h3 id="133">13.3 编译期三种绑定策略</h3>
+<h3 id="143">14.3 编译期三种绑定策略</h3>
 <p>Sema 阶段对每条 <code>let/var x = y;</code> 做数据流分析，判定下列三种策略之一：</p>
 <table>
 <thead>
@@ -983,7 +1094,7 @@ C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并
 <p>前两种在编译期即消除了运行时开销；只有第三种可能真的复制内存。</p>
 <p>判定"最后一次引用"时，位于循环或分支内的引用被视为<strong>不安全上下文</strong>，
 不参与移动判定（因为该语句可能被执行零次或多次）。</p>
-<h3 id="134">13.4 栈分配与逃逸分析</h3>
+<h3 id="144">14.4 栈分配与逃逸分析</h3>
 <ul>
 <li><strong>结构体</strong>：值类型，一律在栈上 <code>alloca</code>，字段访问是 <code>getelementptr</code>。
   这是确定的，不依赖逃逸分析结果。</li>
@@ -998,7 +1109,7 @@ C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并
 </ul>
 <p>验证方式：把循环次数从 1 万提到 100 万，峰值 RSS 基本不变即为平衡
   （见 <code>examples/ownership_stress.dial</code>）。</p>
-<h3 id="135-cow">13.5 COW 的触发时机</h3>
+<h3 id="145-cow">14.5 COW 的触发时机</h3>
 <pre><code>                     ┌─ 编译期能证明独占 ──→ 移动语义：零开销
 let/var x = y;  ─────┤
                      ├─ 编译期能证明只读 ──→ 共享：一次 retain，O(1)
@@ -1011,12 +1122,12 @@ let/var x = y;  ─────┤
                       原地写入，零拷贝                    先克隆再写（真实复制）
 </code></pre>
 <p>C 侧 <code>dial_rc_clone</code> 是这一兜底的落点：唯一持有时直接返回自身，否则深拷贝。</p>
-<h3 id="136">13.6 自赋值安全</h3>
+<h3 id="146">14.6 自赋值安全</h3>
 <p><code>x = x</code> 必须安全。编译器采用"<strong>先取得新值所有权，再释放旧值</strong>"的顺序：</p>
 <pre><code class="language-dial">x = x;   // 先 retain（计数 1→2），再 release（2→1），绝不会先 free 再 use
 </code></pre>
 <p>若顺序颠倒，计数会先归零被 <code>free</code>，随后的 <code>retain</code> 即 use-after-free。</p>
-<h3 id="137">13.7 返回值不被提前释放</h3>
+<h3 id="147">14.7 返回值不被提前释放</h3>
 <p><code>return</code> 的处理顺序是<strong>强制</strong>的：</p>
 <ol>
 <li>求值返回表达式；</li>
@@ -1026,7 +1137,7 @@ let/var x = y;  ─────┤
 </ol>
 <p>若在求值之前就释放全部局部变量，返回的对象会被提前销毁。</p>
 <hr />
-<h2 id="14-ffi-dial-c">14. FFI 契约：Dial 语法 → C 函数</h2>
+<h2 id="15-ffi-dial-c">15. FFI 契约：Dial 语法 → C 函数</h2>
 <p>编译器前端把 Dial 语法<strong>逐条</strong>翻译为对 C 导出函数的调用，不重新实现任何容器：</p>
 <table>
 <thead>
@@ -1089,16 +1200,44 @@ let/var x = y;  ─────┤
 <td><code>call ptr @dial_array_clone(ptr %a)</code></td>
 </tr>
 <tr>
+<td><code>new_map()</code></td>
+<td><code>call ptr @dial_map_new()</code></td>
+</tr>
+<tr>
+<td><code>m.put(k, v)</code></td>
+<td><code>%m = call ptr @dial_map_put(ptr %m, i64 %k, i64 %v)</code> 并写回 <code>%m</code></td>
+</tr>
+<tr>
+<td><code>m.get(k)</code></td>
+<td><code>call i64 @dial_map_get(ptr %m, i64 %k)</code></td>
+</tr>
+<tr>
+<td><code>m.contains(k)</code></td>
+<td><code>call i64 @dial_map_contains(ptr %m, i64 %k)</code> 后与 0 比较</td>
+</tr>
+<tr>
+<td><code>m.remove(k)</code></td>
+<td><code>call i64 @dial_map_remove(ptr %m, i64 %k)</code></td>
+</tr>
+<tr>
+<td><code>m.size()</code></td>
+<td><code>call i64 @dial_map_size(ptr %m)</code></td>
+</tr>
+<tr>
+<td><code>read_line()</code></td>
+<td><code>call ptr @dial_read_line()</code></td>
+</tr>
+<tr>
 <td><code>print(x)</code></td>
 <td><code>dial_print_int</code> / <code>dial_print_float</code> / <code>dial_print_bool</code> / <code>dial_print_string</code></td>
 </tr>
 <tr>
 <td>变量绑定（共享）</td>
-<td><code>dial_string_retain</code> / <code>dial_array_retain</code></td>
+<td><code>dial_string_retain</code> / <code>dial_array_retain</code> / <code>dial_map_retain</code></td>
 </tr>
 <tr>
 <td>作用域结束</td>
-<td><code>dial_string_release</code> / <code>dial_array_release</code></td>
+<td><code>dial_string_release</code> / <code>dial_array_release</code> / <code>dial_map_release</code></td>
 </tr>
 </tbody>
 </table>
@@ -1136,15 +1275,20 @@ void      dial_array_release(DialArray a);
 void       dial_print_float(double v);
 void       dial_print_bool(int64_t b);      // 0/1 → false/true
 void       dial_print_string(DialString s);
-DialString dial_read_line(void);            // C 侧已实现，v0.2 语言层未暴露
+DialString dial_read_line(void);                  // 已暴露为 read_line()
 </code></pre>
-<p><strong><code>stdlib/dial_map.h</code></strong>（C 侧已实现，v0.2 语言层<strong>未暴露</strong>类型，暂无 Dial 语法可访问）</p>
-<pre><code class="language-c">DialMap  dial_map_new(void);
-void     dial_map_put(DialMap m, int64_t key, int64_t val);
-int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
+<p><strong><code>stdlib/dial_map.h</code></strong>（与 <code>string</code> / <code>int[]</code> 共用 ARC；已暴露为 <code>map</code> 类型）</p>
+<pre><code class="language-c">DialMap  dial_map_new(void);                           // 已暴露为 new_map()
+DialMap  dial_map_put(DialMap m, int64_t key, int64_t val); // 返回（可能更新的）指针；已暴露为 m.put(k,v)
+int64_t  dial_map_get(DialMap m, int64_t key);         // 未命中返回 -1；已暴露为 m.get(k)
+int64_t  dial_map_contains(DialMap m, int64_t key);    // 命中返回 1；已暴露为 m.contains(k)
+int64_t  dial_map_remove(DialMap m, int64_t key);      // 移除并返回其值，未命中返回 -1；已暴露为 m.remove(k)
+int64_t  dial_map_size(DialMap m);                    // 已暴露为 m.size()
+void     dial_map_retain(DialMap m);                  // 与 string/array 对称
+void     dial_map_release(DialMap m);
 </code></pre>
 <hr />
-<h2 id="15-print">15. 内置 <code>print</code></h2>
+<h2 id="16-print">16. 内置 <code>print</code></h2>
 <pre><code class="language-dial">print(e);
 </code></pre>
 <ul>
@@ -1186,9 +1330,9 @@ int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
 </tbody>
 </table>
 <hr />
-<h2 id="16">16. 未定义行为与已实现边界</h2>
+<h2 id="17">17. 未定义行为与已实现边界</h2>
 <p>诚实列出边界，避免"文档写了、实现没有"的冲突。</p>
-<h3 id="161-c">16.1 未定义行为（与 C 一致的部分）</h3>
+<h3 id="171-c">17.1 未定义行为（与 C 一致的部分）</h3>
 <table>
 <thead>
 <tr>
@@ -1211,7 +1355,11 @@ int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
 </tr>
 </tbody>
 </table>
-<h3 id="162-v02">16.2 v0.2 未实现（不要指望能编译）</h3>
+<h3 id="172-v04">17.2 v0.4 尚未实现（不要指望能编译）</h3>
+<blockquote>
+<p>相对 v0.2 已落地的能力：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
+<code>let</code> + 原地修改方法（push/set/put）的接收者约束。其余仍按计划未实现：</p>
+</blockquote>
 <table>
 <thead>
 <tr>
@@ -1220,14 +1368,6 @@ int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
 </tr>
 </thead>
 <tbody>
-<tr>
-<td>哈希表 / Map</td>
-<td>C 侧已实现 <code>dial_map_*</code>，但 Dial 语言层<strong>无 Map 类型</strong>，暂不可访问</td>
-</tr>
-<tr>
-<td>读行 <code>read_line</code></td>
-<td>C 侧已实现 <code>dial_read_line</code>，语言层<strong>未暴露</strong></td>
-</tr>
 <tr>
 <td>文件 IO</td>
 <td>未实现</td>
@@ -1245,8 +1385,8 @@ int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
 <td>未实现，字符以 <code>int</code> 表示</td>
 </tr>
 <tr>
-<td><code>else if</code> / <code>for</code> / <code>break</code> / <code>continue</code></td>
-<td>不支持</td>
+<td><code>break</code> / <code>continue</code></td>
+<td>不支持（v0.5 计划）</td>
 </tr>
 <tr>
 <td>裸块 <code>{ ... }</code></td>
@@ -1279,7 +1419,7 @@ int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
 </tbody>
 </table>
 <hr />
-<h2 id="17">17. 测试</h2>
+<h2 id="18">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
 <p>三组检查，全部通过才算绿：</p>
@@ -1380,32 +1520,32 @@ int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
 </tbody>
 </table>
 <hr />
-<h2 id="18-gc">18. 内存宪法（防 GC 铁律）</h2>
+<h2 id="19-gc">19. 内存宪法（防 GC 铁律）</h2>
 <blockquote>
 <p>这是 Dial 区别于 Java / Go / C# 的<strong>核心底线</strong>，也是本语言不可动摇的内存契约：
 <strong>绝不背追踪式垃圾回收的历史包袱。</strong> 以下四条在任何版本中都不得违反。</p>
 </blockquote>
-<h3 id="181-gc">18.1 永远拒绝 GC</h3>
+<h3 id="191-gc">19.1 永远拒绝 GC</h3>
 <p>Dial 的设计<strong>绝不引入任何形式的追踪式垃圾回收（Tracing GC）</strong>——没有 mark-sweep、没有 STW（Stop-The-World）停顿、没有分代回收。
 内存回收的时机与开销在 Dial 程序里必须是<strong>确定性的、可推理的</strong>，而不是由运行时在某次不可预期的 GC 周期里"替你决定"。</p>
 <p>这是 Dial 与 Java / Go / C# 最根本的分道扬镳：后者把内存管理的不可预测性藏进运行时，Dial 把它摊在编译期与显式契约上。</p>
-<h3 id="182">18.2 编译期接管内存</h3>
+<h3 id="192">19.2 编译期接管内存</h3>
 <p>Dial 依托<strong>不透明指针 + C Runtime 的 ARC（自动引用计数）</strong>，结合编译器前端的<strong>逃逸分析与移动语义</strong>，实现"零 GC 停顿的确定性内存管理"：</p>
 <ul>
 <li>值类型（如结构体）在栈上分配，作用域结束即回收，<strong>零运行时参与</strong>；</li>
 <li>引用类型（<code>string</code> / <code>int[]</code> / <code>Map</code>）由 ARC 管理；编译器在编译期通过数据流分析，尽量把 <code>retain</code> / <code>release</code> 静态消除
-  （移动语义零开销、只读共享 O(1)），只有跨边界等静态分析失效处，才由 C Runtime 在<strong>写入瞬间</strong>按引用计数兜底（COW，见 §13）；</li>
+  （移动语义零开销、只读共享 O(1)），只有跨边界等静态分析失效处，才由 C Runtime 在<strong>写入瞬间</strong>按引用计数兜底（COW，见 §14）；</li>
 <li><strong>没有任何后台线程、没有并发回收、没有不可预期的暂停。</strong></li>
 </ul>
-<h3 id="183">18.3 显式指针回收（未来裸指针的契约）</h3>
+<h3 id="193">19.3 显式指针回收（未来裸指针的契约）</h3>
 <p>未来若引入裸指针（<code>raw ptr</code>），Dial 坚持<strong>"谁申请、谁释放"</strong>的显式契约：</p>
 <ul>
 <li>裸指针<strong>绝对不受 ARC 保护</strong>，不会被任何引用计数自动回收；</li>
 <li>它的生命周期完全交由开发者显式管理，例如调用底层 <code>dial_raw_free</code> 归还；</li>
-<li>这一设计与 §18.2 的 ARC 容器<strong>互补</strong>：日常用 ARC 容器获得确定性安全，需要极致性能或底层控制时再用裸指针并自行负责回收；</li>
+<li>这一设计与 §19.2 的 ARC 容器<strong>互补</strong>：日常用 ARC 容器获得确定性安全，需要极致性能或底层控制时再用裸指针并自行负责回收；</li>
 <li>裸指针与 ARC 容器之间<strong>不允许</strong>隐式转换——这正是"不透明指针契约"的延伸，避免把受管指针与不受管指针混为一谈而引入悬挂。</li>
 </ul>
-<h3 id="184">18.4 为什么这是底线</h3>
+<h3 id="194">19.4 为什么这是底线</h3>
 <table>
 <thead>
 <tr>
@@ -1436,7 +1576,48 @@ int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
 <p>这条底线写进语言本身，而非仅仅写在文档里：任何试图为 Dial 添加追踪式 GC 的提案，都在原则上被否决。</p>
 </blockquote>
 <hr />
-<h2 id="19-v03-v02">19. v0.3 变更摘要（相对 v0.2）</h2>
+<h2 id="20">20. 版本变更摘要</h2>
+<h3 id="201-v04-v03">20.1 v0.4（相对 v0.3）</h3>
+<p>本版落地<strong>部分标准库</strong>与<strong>语言特性扩充</strong>，并正式写入<a href="#19-内存宪法防-gc-铁律">内存宪法</a>：</p>
+<table>
+<thead>
+<tr>
+<th>新增 / 修正点</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>map</code> 类型（int → int）</strong></td>
+<td>新增哈希表类型，内存布局 <code>[cap][count][entries...]</code>，与 <code>string</code> / <code>int[]</code> 共用同一套 <strong>ARC 引用计数</strong>（<code>dial_map_retain</code> / <code>dial_map_release</code>）；线性探测 + 左移紧凑删除；负载超 3/4 自动扩容重哈希</td>
+</tr>
+<tr>
+<td><strong><code>map</code> 方法</strong></td>
+<td><code>put(k,v)</code>（返回可能更新的指针，编译器写回接收变量）、<code>get(k)</code>（未命中 -1）、<code>contains(k)</code>（bool）、<code>remove(k)</code>（返回其值，未命中 -1）、<code>size()</code></td>
+</tr>
+<tr>
+<td><strong><code>new_map()</code> / <code>read_line()</code></strong></td>
+<td>两个无参内置函数：<code>new_map()</code> 构造空表；<code>read_line()</code> 从标准输入读一行（EOF 返回空串，绝不崩溃）</td>
+</tr>
+<tr>
+<td><strong><code>else if</code> 语法糖</strong></td>
+<td><code>else if (c) {..}</code> 编译期展开为嵌套 <code>if</code>（不引入新 AST 节点），见 <a href="#82-if--else-if--while">§8.2</a></td>
+</tr>
+<tr>
+<td><strong><code>for</code> 范围循环</strong></td>
+<td><code>for (i in start..end)</code>：循环变量 <code>i</code> 为 int，半开区间 <code>[start, end)</code>，可在体内重新赋值，见 <a href="#83-范围-for-循环">§8.3</a></td>
+</tr>
+<tr>
+<td><strong>内存宪法写入 README</strong></td>
+<td>新增 <a href="#19-内存宪法防-gc-铁律">§19 内存宪法（防 GC 铁律）</a>：永不追踪式 GC；确定性内存靠 ARC + 编译期分析 +（未来）显式裸指针</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>设计约束：Map 的 ARC 实现与 <code>int[]</code> 完全对称（inline-entries、put 触发扩容 / COW 并写回指针），<strong>不引入任何非 ARC 的堆管理</strong>，与内存宪法一致。</p>
+</blockquote>
+<p>相关文档同步更新：§5.1（基本类型新增 <code>map</code>）、§12（哈希表专章）、§15（FFI 表与 C 导出函数新增 <code>dial_map_*</code> / <code>dial_read_line</code>）、§17.2（从「未实现」移除 Map 与 read_line）。</p>
+<h3 id="202-v03-v02">20.2 v0.3（相对 v0.2）</h3>
 <p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
 <table>
 <thead>
@@ -1479,7 +1660,7 @@ int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.3 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+    <span class="muted">v0.4 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
   </div>
 </footer>
 

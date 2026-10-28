@@ -160,6 +160,10 @@ impl Parser {
                 self.advance();
                 Type::Void
             }
+            TokenKind::MapT => {
+                self.advance();
+                Type::Map
+            }
             TokenKind::Ident(n) => {
                 self.advance();
                 Type::Struct(n)
@@ -197,6 +201,7 @@ impl Parser {
             TokenKind::Var | TokenKind::Let => self.parse_var_decl(),
             TokenKind::If => self.parse_if(),
             TokenKind::While => self.parse_while(),
+            TokenKind::For => self.parse_for(),
             TokenKind::Return => self.parse_return(),
             // 结构体定义只允许出现在顶层（收集进 Program.structs），函数体内一律拒绝。
             TokenKind::Struct => Err(DialcError::new(
@@ -283,12 +288,37 @@ impl Parser {
         let mut else_branch = None;
         if self.check(&TokenKind::Else) {
             self.advance();
-            else_branch = Some(self.parse_block()?);
+            // 语法糖 `else if (c) {..}`：递归解析为一个嵌套的 if，包成单元素 else 块。
+            // 这样无需新增 AST 节点——语义/代码生成看到的依然是普通的嵌套 If。
+            if self.check(&TokenKind::If) {
+                let nested = self.parse_if()?;
+                else_branch = Some(vec![nested]);
+            } else {
+                else_branch = Some(self.parse_block()?);
+            }
         }
         Ok(Stmt::If {
             cond,
             then_branch,
             else_branch,
+        })
+    }
+
+    fn parse_for(&mut self) -> Result<Stmt> {
+        self.expect(TokenKind::For)?;
+        self.expect(TokenKind::LParen)?;
+        let var = self.expect_ident()?;
+        self.expect(TokenKind::In)?;
+        let start = self.parse_expr()?;
+        self.expect(TokenKind::DotDot)?;
+        let end = self.parse_expr()?;
+        self.expect(TokenKind::RParen)?;
+        let body = self.parse_block()?;
+        Ok(Stmt::For {
+            var,
+            start,
+            end,
+            body,
         })
     }
 

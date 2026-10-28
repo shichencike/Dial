@@ -5,6 +5,42 @@
 
 ---
 
+## [0.4.0] — 2026-11-02
+
+本版落地**部分标准库**与**控制流语法糖**，并正式写入[内存宪法](#内存宪法防-gc-铁律)（见 README §19）。
+
+### Added（新增）
+- **`map` 类型（int → int）**：新增哈希表类型，内存布局 `[int64 cap][int64 count][entries...]`，
+  与 `string` / `int[]` 共用同一套 **ARC 引用计数**（`dial_map_retain` / `dial_map_release`）。
+  采用线性探测开放寻址，删除用左移紧凑；负载因子超过 3/4 自动扩容并重新哈希。
+- **`map` 方法**：`put(k,v)`（返回可能更新的指针，编译器写回接收变量）、`get(k)`（未命中 -1）、
+  `contains(k)`（bool）、`remove(k)`（返回其值，未命中 -1）、`size()`。
+- **`new_map()`**：无参内置函数，构造空表。
+- **`read_line()`**：无参内置函数，从标准输入读一行；EOF 返回空串（绝不崩溃）。
+- **`else if` 语法糖**：`else if (c) {..}` 编译期展开为嵌套 `if`，不引入新 AST 节点（见 README §8.2）。
+- **范围 `for` 循环**：`for (i in start..end)` 循环变量 `i` 为 int，半开区间 `[start, end)`，
+  可在循环体内重新赋值（见 README §8.3）。
+- 新增示例 `examples/map_demo.dial`、`examples/control_flow.dial`；
+  新增负向用例 `tests/bad/map_let_put.dial`、`tests/bad/map_bad_arg.dial`、`tests/bad/for_range_type.dial`。
+
+### Changed（变更）
+- `dial_map.c` 由旧版「非 ARC 的 `Map*` 堆分配（进程退出时由 OS 回收）」重写为与 `dial_array.c`
+  **完全对称**的 inline-entries ARC 实现：指针因扩容 / COW 可能更换，编译器负责把新指针写回接收变量。
+  这消除了旧实现与[内存宪法](#内存宪法防-gc-铁律)（防 GC 铁律）的矛盾。
+- Map 与 `read_line` 从「未实现」清单移除（v0.4 已暴露）。
+
+### Fixed（修复）
+- 修正 `0..5` 这类范围字面量此前被数字词法器误识别为浮点 `0.5` 的问题：仅当小数点后紧跟数字才视为浮点，
+  `..` 现被正确识别为范围运算符。
+
+### Docs（文档）
+- README 新增 [§12 哈希表 `map`](#12-哈希表-mapint--int)、[§8.2 `else if`](#82-if--else-if--while)、[§8.3 范围 `for`](#83-范围-for-循环)、
+  [§19 内存宪法](#19-内存宪法防-gc-铁律)；并将 FFI 表与 C 导出函数清单补齐 `dial_map_*` / `dial_read_line`。
+- 官网文档（`web/`）随 README / CHANGELOG 重新生成。
+- 版本号升级至 `0.4.0`。
+
+---
+
 ## [0.3.0] — 2026-10-28
 
 本版只修改**语义与诊断**，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。
@@ -51,10 +87,8 @@
 
 ---
 
-## 未实现（-Unreleased-，v0.2/v0.3 语言层均未暴露）
-- 哈希表 `Map`：C 侧 `dial_map_*` 已实现，但语言层无 `Map` 类型。
-- `read_line`：C 侧 `dial_read_line` 已实现，语言层未暴露。
+## 未实现（-Unreleased-，v0.2/v0.3 语言层均未暴露，v0.4 起部分已落地）
 - 文件 IO、多维数组、非 `int` 元素数组、`char` 类型。
-- `else if` / `for` / `break` / `continue`、裸块 `{ ... }`。
+- `break` / `continue`（v0.5 计划）、裸块 `{ ... }`。
 - 模块 / 包 / import、泛型、接口、trait、闭包。
 - 指针、地址取值、指针算术（永不提供）；运算符重载（永不提供）；全局变量。

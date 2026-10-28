@@ -156,13 +156,19 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_array_clone", i8b, &[i8b.into()]);
         self.decl_void("dial_array_retain", &[i8b.into()]);
         self.decl_void("dial_array_release", &[i8b.into()]);
-        // Map
+        // Map (int -> int, ARC)
         self.decl_func("dial_map_new", i8b, &[]);
-        self.decl_void(
+        self.decl_func(
             "dial_map_put",
+            i8b,
             &[i8b.into(), i64b.into(), i64b.into()],
         );
         self.decl_func("dial_map_get", i64b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_map_contains", i64b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_map_remove", i64b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_map_size", i64b, &[i8b.into()]);
+        self.decl_void("dial_map_retain", &[i8b.into()]);
+        self.decl_void("dial_map_release", &[i8b.into()]);
         // IO / 打印
         self.decl_void("dial_print_int", &[i64b.into()]);
         self.decl_void("dial_print_float", &[f64b.into()]);
@@ -199,7 +205,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Int => self.context.i64_type().into(),
             Type::Float => self.context.f64_type().into(),
             Type::Bool => self.context.bool_type().into(),
-            Type::String | Type::Array(_) => self.i8ptr().into(),
+            Type::String | Type::Array(_) | Type::Map => self.i8ptr().into(),
             Type::Struct(ref n) => (*self
                 .struct_types
                 .get(n)
@@ -252,7 +258,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Int => self.context.i64_type().const_int(0, false).into(),
             Type::Float => self.context.f64_type().const_float(0.0).into(),
             Type::Bool => self.context.bool_type().const_int(0, false).into(),
-            Type::String | Type::Array(_) => self.i8ptr().const_null().into(),
+            Type::String | Type::Array(_) | Type::Map => self.i8ptr().const_null().into(),
             Type::Struct(_) => {
                 // 结构体默认值：对 v0.2 仅用于 main 收尾，构造一个零初始化聚合
                 let bte = self.dialc_type_to_llvm(t);
@@ -331,6 +337,7 @@ impl<'ctx> CodeGen<'ctx> {
         let name = match *ty {
             Type::String => "dial_string_retain",
             Type::Array(_) => "dial_array_retain",
+            Type::Map => "dial_map_retain",
             _ => return,
         };
         self.call_c_void(name, &[val.into()]);
@@ -340,6 +347,7 @@ impl<'ctx> CodeGen<'ctx> {
         let name = match *ty {
             Type::String => "dial_string_release",
             Type::Array(_) => "dial_array_release",
+            Type::Map => "dial_map_release",
             _ => return,
         };
         let v = self.builder.build_load(self.i8ptr(), ptr, "ldrel").unwrap();
@@ -347,7 +355,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn is_heap_type(t: &Type) -> bool {
-        matches!(*t, Type::String | Type::Array(_))
+        matches!(*t, Type::String | Type::Array(_) | Type::Map)
     }
 
     /// 在函数的 **entry 块** 里分配栈槽。
@@ -398,7 +406,7 @@ impl<'ctx> CodeGen<'ctx> {
                 .build_struct_gep(llvm_sty, ptr, i as u32, "frtn")
                 .unwrap();
             match fty {
-                Type::String | Type::Array(_) => {
+                Type::String | Type::Array(_) | Type::Map => {
                     let v = self.builder.build_load(self.i8ptr(), gep, "lfr").unwrap();
                     self.retain(fty, v);
                 }
@@ -429,7 +437,7 @@ impl<'ctx> CodeGen<'ctx> {
                 .build_struct_gep(llvm_sty, ptr, i as u32, "frel")
                 .unwrap();
             match fty {
-                Type::String | Type::Array(_) => self.release(fty, gep),
+                Type::String | Type::Array(_) | Type::Map => self.release(fty, gep),
                 Type::Struct(_) => self.release_struct_fields(fty, gep, structs),
                 _ => {}
             }
@@ -743,6 +751,54 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.position_at_end(exit_bb);
                 Ok(())
             }
+            Stmt::For { var, start, end, body } => {
+                let i64t = self.context.i64_type();
+                // 循环变量：在入口块分配，跨迭代存活。
+                let var_ptr = self.alloca_in_entry(function, i64t.into(), var);
+                let start_val = self.gen_expr(start, function, scopes, func_values, functions, structs)?;
+                let start_i64 = self.to_i64(start_val, &type_of(start, scopes, functions, structs)?);
+                self.builder.build_store(var_ptr, start_i64).unwrap();
+                // 把循环变量登记进作用域（int 非堆类型，无需 retain/release）。
+                scopes.push(HashMap::new());
+                scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(var.clone(), (Type::Int, (true, var_ptr)));
+
+                let header_bb = self.context.append_basic_block(function, "for.cond");
+                let body_bb = self.context.append_basic_block(function, "for.body");
+                let exit_bb = self.context.append_basic_block(function, "for.end");
+                self.builder.build_unconditional_branch(header_bb).unwrap();
+                self.builder.position_at_end(header_bb);
+                let cur = self.builder.build_load(i64t, var_ptr, "i").unwrap();
+                let end_val = self.gen_expr(end, function, scopes, func_values, functions, structs)?;
+                let end_i64 = self.to_i64(end_val, &type_of(end, scopes, functions, structs)?);
+                let cond = self
+                    .builder
+                    .build_int_compare(IntPredicate::SLT, cur.into_int_value(), end_i64, "forcond")
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(cond, body_bb, exit_bb)
+                    .unwrap();
+                self.builder.position_at_end(body_bb);
+                for s in body {
+                    self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
+                }
+                self.release_scope_locals(scopes.last().unwrap(), structs);
+                // i = i + 1
+                let cur2 = self.builder.build_load(i64t, var_ptr, "i").unwrap();
+                let next = self
+                    .builder
+                    .build_int_add(cur2.into_int_value(), i64t.const_int(1, false), "iinc")
+                    .unwrap();
+                self.builder.build_store(var_ptr, next).unwrap();
+                if !self.is_terminated() {
+                    self.builder.build_unconditional_branch(header_bb).unwrap();
+                }
+                self.builder.position_at_end(exit_bb);
+                scopes.pop();
+                Ok(())
+            }
             Stmt::Return(e, line, col) => {
                 match e {
                     None => {
@@ -790,7 +846,7 @@ impl<'ctx> CodeGen<'ctx> {
             Stmt::Expr(e) => {
                 // 语句级方法调用且返回新容器指针（push/set）-> 把结果写回接收变量
                 if let Expr::Method(obj, method, args) = e {
-                    if matches!(method.as_str(), "push" | "set") {
+                    if matches!(method.as_str(), "push" | "set" | "put") {
                         if let Expr::Var(name) = obj.as_ref() {
                             let info = scopes
                                 .iter()
@@ -1016,6 +1072,8 @@ impl<'ctx> CodeGen<'ctx> {
                             .unwrap()
                             .into())
                     }
+                    "new_map" => Ok(self.call_c("dial_map_new", &[])),
+                    "read_line" => Ok(self.call_c("dial_read_line", &[])),
                     _ => {
                         if name == "print" {
                             let arg = &args[0];
@@ -1103,6 +1161,25 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(self.call_c("dial_array_set", &[optr.into(), i.into(), v.into()]))
             }
             (Type::Array(_), "clone") => Ok(self.call_c("dial_array_clone", &[optr.into()])),
+            (Type::Map, "put") => {
+                let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
+                let v = self.to_i64(self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?, &type_of(&args[1], scopes, functions, structs)?);
+                Ok(self.call_c("dial_map_put", &[optr.into(), k.into(), v.into()]))
+            }
+            (Type::Map, "get") => {
+                let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
+                Ok(self.call_c("dial_map_get", &[optr.into(), k.into()]))
+            }
+            (Type::Map, "contains") => {
+                let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
+                let r = self.call_c("dial_map_contains", &[optr.into(), k.into()]);
+                Ok(self.builder.build_int_compare(IntPredicate::NE, r.into_int_value(), i64t.const_int(0, false), "mcontains").unwrap().into())
+            }
+            (Type::Map, "remove") => {
+                let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
+                Ok(self.call_c("dial_map_remove", &[optr.into(), k.into()]))
+            }
+            (Type::Map, "size") => Ok(self.call_c("dial_map_size", &[optr.into()])),
             _ => Err(DialcError::new(
                 format!("语义错误：类型 '{}' 无方法 '{}'（应由 Sema 先行拦截）", ot.name(), method),
                 0, 0,
@@ -1271,6 +1348,12 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Struct(_) => {
                 return Err(DialcError::new(
                     "语义错误：当前版本不支持直接 print 结构体，请逐字段打印",
+                    0, 0,
+                ));
+            }
+            Type::Map => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print 哈希表，请逐值打印 print(m.get(k))",
                     0, 0,
                 ));
             }

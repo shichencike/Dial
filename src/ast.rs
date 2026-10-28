@@ -14,6 +14,7 @@ pub enum Type {
     Bool,   // 布尔
     String, // UTF-8 字符串（IR 为 i8*，C 侧引用计数）
     Array(Box<Type>), // 动态数组（v0.2 元素固定为 Int）
+    Map,    // 哈希表（int -> int，不透明指针，C 侧引用计数 ARC）
     Struct(String),   // 用户结构体（按名引用），值语义
 }
 
@@ -27,6 +28,7 @@ impl Type {
             Type::Bool => "bool",
             Type::String => "string",
             Type::Array(_) => "array",
+            Type::Map => "map",
             Type::Struct(_) => "struct",
         }
     }
@@ -117,6 +119,14 @@ pub enum Stmt {
     },
     While {
         cond: Expr,
+        body: Vec<Stmt>,
+    },
+    /// 范围 for 循环：`for (i in start..end) { ... }`
+    /// 循环变量 `i` 为 int，从 `start` 迭代到 `end - 1`（end 独占），可在循环体内被重新赋值。
+    For {
+        var: String,
+        start: Expr,
+        end: Expr,
         body: Vec<Stmt>,
     },
     Return(Option<Expr>, usize, usize),
