@@ -1,0 +1,11 @@
+// Fail-Fast 用例：负下标必须被捕获。
+// codegen 用一次无符号比较同时判定 idx < 0 与 idx >= len：
+// 负数 idx 的位模式是巨大无符号数，必然 >= len。
+
+fn main(): int {
+    var a: int[] = [10, 20, 30];
+    var i: int = 0 - 1;
+    print(a[i]);    // i == -1
+    print(9999);    // 哨兵：绝不可达
+    return 0;
+}

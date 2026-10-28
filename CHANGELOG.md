@@ -5,6 +5,50 @@
 
 ---
 
+## [0.6.0] — 2026-10-29
+
+本版把 Zig 式 **Fail-Fast** 确立为与内存宪法并列的语言底线（见 README §20）：
+**宁可当场崩溃，绝不产生未定义行为或静默错误数据。**
+
+### Added（新增）
+
+- **Fail-Fast 陷阱基础设施**：新增 `runtime/dial_rt_trap.h` / `.c`，提供 `dial_trap()`（`__builtin_trap`，
+  x86 生成 `ud2`）、`dial_bounds_fail` / `dial_null_fail` / `dial_assert_fail`（先打印诊断再 trap）。
+  诊断走 `write(2)` 直写 stderr，并在陷阱前冲刷 stdout 缓冲，保证崩溃上下文完整。
+- **LLVM Codegen 硬插入检查**：
+  - 数组下标读（`Expr::Index`）与写（`a[i] = v`）前插入边界检查，用一次**无符号比较**
+    同时判定 `idx < 0` 与 `idx >= len`（负数的位模式必然 >= len）。
+  - 整数除法前插入除零检查——LLVM 的 `sdiv` 除数为 0 时结果是 poison（UB），
+    优化器可据此把后续代码整段删掉，比崩溃危险得多。
+  - 失败分支发射 `llvm.debugtrap`（Debug → x86 `int3`，可被调试器当断点捕获）
+    或 `llvm.trap`（ReleaseSafe → x86 `ud2`，指令更短），随后 `unreachable`。
+- **C Runtime 边界检查**：`dial_array_get` / `dial_array_set` / `dial_string_get` /
+  `dial_string_substring` 全部加入边界检查，越界调用 `dial_bounds_fail`。
+  另新增：OOM 不再返回 NULL（`dial_assert_fail`）、引用计数下溢检测（重复释放 /
+  use-after-free 当场终止）、`dial_array_length` / `dial_map_size` 的内部一致性断言。
+- **三档安全等级**：`--safety debug|safe|fast`，简写 `--release`（safe）、`--fast`（fast）。
+  等级**同时**作用于 LLVM IR 与 C Runtime（`-DDIAL_SAFETY=N`），是编译期常量，
+  ReleaseFast 下检查代码被编译器完全消除。默认永远是 Debug——安全是默认值。
+- **测试组 D / E**：新增 `tests/trap/`（5 个用例），D 组断言必须当场因信号终止且
+  **不得打印哨兵 9999**；E 组用 `--fast` 作对照组，证明陷阱确由编译器插入而非碰巧崩溃。
+
+### Changed（变更）
+
+- `dialc build` / `run` 新增 `--safety` / `--release` / `--fast` 参数。
+- C 静态库按安全等级分目录构建（`.dialc_build/safety-<N>/`），避免不同等级的 `.o` 互相污染。
+- README §17.1「未定义行为」重写：越界 / 除零在默认等级下**不再是 UB**，而是确定性崩溃。
+- README §11.5 越界行为：由「无边界检查」改为「默认有边界检查，仅 `--fast` 回落到 UB」。
+
+### 实测对照（同一份越界代码，三档行为）
+
+| 等级 | `a[99]`（长度 3） | `100 / 0` |
+| --- | --- | --- |
+| Debug（默认） | SIGTRAP(5)，`int3` 当场终止 | SIGTRAP(5) 当场终止 |
+| ReleaseSafe | SIGILL(4)，`ud2` 当场终止 | SIGILL(4) 当场终止 |
+| ReleaseFast | 读出 `0` 并继续执行，打印哨兵 | 打印 `0` 并继续执行（**静默错误结果**） |
+
+---
+
 ## [0.5.0] — 2026-10-29
 
 本版补齐循环控制流，并把**代码编写纪律**正式写入规范（见 README §20）。

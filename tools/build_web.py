@@ -14,6 +14,7 @@ stay in sync with the source docs. Run: python3 tools/build_web.py
 from __future__ import annotations
 
 import pathlib
+import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
@@ -39,7 +40,7 @@ FOOTER = """
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.5 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+    <span class="muted">v0.6 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
   </div>
 </footer>
 """
@@ -130,9 +131,26 @@ a:hover{text-decoration:underline}
 """
 
 
+def dial_slugify(value: str, separator: str) -> str:
+    """
+    保留中文的锚点生成器。
+
+    python-markdown 默认 slugify 会丢弃非 ASCII 字符，"19. 内存宪法（防 GC 铁律）"
+    会被压成 "19-gc"，导致所有中文标题的内部链接失效。这里自行处理：
+    去掉标点与括号，空白折叠为分隔符，中英文数字一律保留。
+    """
+    v = value.strip()
+    v = re.sub(r"[（）()【】\[\]《》,，。.、：:；;！!？?\"'“”‘’/\\|]+", "", v)
+    v = re.sub(r"\s+", separator, v)
+    return v.strip(separator).lower()
+
+
 def md_body(text: str, with_toc: bool) -> str:
     exts = ["extra", "toc", "fenced_code", "sane_lists"]
-    md = markdown.Markdown(extensions=exts)
+    md = markdown.Markdown(
+        extensions=exts,
+        extension_configs={"toc": {"slugify": dial_slugify, "permalink": False}},
+    )
     src = ("[TOC]\n\n" + text) if with_toc else text
     return md.convert(src)
 
@@ -194,6 +212,8 @@ def render_index() -> str:
         ("哈希表 map（ARC + COW）", "v0.4 新增 map 类型（int → int），与 string / int[] 共用同一套引用计数；put 触发扩容或写时复制后由编译器把新指针写回接收变量。"),
         ("for / else if / break / continue", "v0.4–v0.5 新增：for (i in start..end) 半开区间循环、else if 语法糖（编译期展开为嵌套 if）、break 与 continue（for 的 continue 先自增再判条件，不会死循环）。"),
         ("代码编写纪律", "拒绝过度抽象——宁可 WET 绝不 DRY 过头；不引入无用依赖；允许安全与性能的冗余；能用一个循环和一个 if 解决的绝不套设计模式。"),
+        ("Fail-Fast 铁律（v0.6）", "宁可当场段错误，绝不产生未定义行为或静默错误数据。越界读写、负下标、整数除零一律当场终止：Debug 发射 int3、ReleaseSafe 发射 ud2，由操作系统接管 Core Dump。"),
+        ("三档安全等级", "默认 Debug 崩溃保护全开；--release 保留防 UB 检查但陷阱更精简；--fast 关闭全部检查换取极限性能。等级同时作用于 LLVM IR 与 C Runtime。"),
     ]
     card_html = "".join(
         f'<div class="card"><h3>{c[0]}</h3><p>{c[1]}</p></div>' for c in cards)
@@ -217,10 +237,11 @@ def render_index() -> str:
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
     </div>
     <div class="kpis">
-      <span><b>v0.5</b> 当前版本</span>
+      <span><b>v0.6</b> 当前版本</span>
       <span><b>Rust + inkwell</b> / LLVM 18</span>
       <span><b>零</b> LLVM 运行时依赖</span>
       <span><b>短路</b> and / or</span>
+      <span><b>Fail-Fast</b> 越界即 ud2 / int3</span>
       <span><b>无 GC</b> 内存宪法</span>
     </div>
   </div>
@@ -246,7 +267,7 @@ cargo build --release          # 产物：target/release/dialc
     return 0;
 }}</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.5.zip">dialc-v0.5.zip</a>（或自行 clone 仓库后构建）
+    下载源码包：<a href="../dialc-v0.6.zip">dialc-v0.6.zip</a>（或自行 clone 仓库后构建）
   </p>
 </section>
 {FOOTER}

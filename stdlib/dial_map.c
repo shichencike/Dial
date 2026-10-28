@@ -1,5 +1,6 @@
 #include "dial_map.h"
 #include "dial_rt_mem.h"
+#include "dial_rt_trap.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -148,7 +149,11 @@ int64_t dial_map_remove(DialMap mh, int64_t k) {
     return val;
 }
 
-int64_t dial_map_size(DialMap mh) { return m_count((void *)mh); }
+int64_t dial_map_size(DialMap mh) {
+    DIAL_ASSERT(m_count((void *)mh) >= 0 && m_count((void *)mh) <= m_cap((void *)mh),
+                "map 内部损坏：count 超出 [0, cap]");
+    return m_count((void *)mh);
+}
 
 void dial_map_retain(DialMap mh)  { dial_rc_retain((void *)mh); }
 void dial_map_release(DialMap mh) { dial_rc_release((void *)mh); }

@@ -22,6 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use codegen::SafetyMode;
 use semantic::analyze;
 
 fn main() {
@@ -41,11 +42,39 @@ fn main() {
     // 解析可选参数
     let mut out_path: Option<PathBuf> = None;
     let mut no_link = false;
+    let mut safety = SafetyMode::Debug; // 默认：崩溃保护全开
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
             "--no-link" => {
                 no_link = true;
+                i += 1;
+            }
+            // Fail-Fast 安全等级：debug（默认） / safe / fast
+            "--safety" => {
+                if i + 1 < args.len() {
+                    safety = match args[i + 1].as_str() {
+                        "debug" => SafetyMode::Debug,
+                        "safe" => SafetyMode::ReleaseSafe,
+                        "fast" => SafetyMode::ReleaseFast,
+                        other => {
+                            eprintln!("未知安全等级 '{}'（可选 debug / safe / fast）", other);
+                            std::process::exit(1);
+                        }
+                    };
+                    i += 2;
+                } else {
+                    eprintln!("选项 --safety 缺少等级（debug / safe / fast）");
+                    std::process::exit(1);
+                }
+            }
+            // 简写：--release == --safety safe，--fast == --safety fast
+            "--release" => {
+                safety = SafetyMode::ReleaseSafe;
+                i += 1;
+            }
+            "--fast" => {
+                safety = SafetyMode::ReleaseFast;
                 i += 1;
             }
             "-o" => {
@@ -101,7 +130,7 @@ fn main() {
 
     // 4) 代码生成（第一步：emit .o，需在 LLVM 存在时执行）
     let (obj_path, exe_path) = output_paths(&src_path, out_path.as_deref());
-    if let Err(e) = codegen::compile(&program, &functions, &structs, &obj_path) {
+    if let Err(e) = codegen::compile(&program, &functions, &structs, &obj_path, safety) {
         eprintln!("{}", e);
         std::process::exit(1);
     }
@@ -112,7 +141,8 @@ fn main() {
     }
 
     // 5) 链接（第二步：用 C 编译器把 C 标准库做成静态库并链接）
-    if let Err(e) = link(&obj_path, &exe_path) {
+    //    同一个安全等级必须同时作用于 LLVM IR 与 C Runtime，否则两侧检查会不一致。
+    if let Err(e) = link(&obj_path, &exe_path, safety) {
         eprintln!("{}", e);
         std::process::exit(1);
     }
@@ -191,14 +221,17 @@ fn cc_command() -> (String, Vec<String>) {
 }
 
 /// 第二步：编译 C 标准库/运行时为静态库 libdial_std.a，再与用户 .o 链接。
-fn link(obj: &Path, exe: &Path) -> Result<(), String> {
+/// `safety` 通过 -DDIAL_SAFETY=N 注入，决定 C 侧的边界/断言检查是否编译进去。
+fn link(obj: &Path, exe: &Path, safety: SafetyMode) -> Result<(), String> {
     let base = find_project_base()
         .ok_or_else(|| "找不到 stdlib/ 与 runtime/ 目录（请用 DIALC_STDLIB_DIR 指定工程根）".to_string())?;
     let runtime_dir = base.join("runtime");
     let stdlib_dir = base.join("stdlib");
 
-    // 临时构建目录
-    let build_dir = base.join(".dialc_build");
+    // 临时构建目录（按安全等级分目录，避免不同等级的 .o 互相污染）
+    let build_dir = base
+        .join(".dialc_build")
+        .join(format!("safety-{}", safety.as_c_macro()));
     fs::create_dir_all(&build_dir).map_err(|e| format!("创建构建目录失败: {}", e))?;
 
     let (cc, cc_prefix) = cc_command();
@@ -206,6 +239,11 @@ fn link(obj: &Path, exe: &Path) -> Result<(), String> {
         "ℹ️  C 编译器: {} {}（编译 stdlib/ 与 runtime/ 为 libdial_std.a）",
         cc,
         cc_prefix.join(" ")
+    );
+    println!(
+        "ℹ️  安全等级: {:?}（-DDIAL_SAFETY={}）",
+        safety,
+        safety.as_c_macro()
     );
 
     // 编译所有 C 源文件 -> .o
@@ -226,6 +264,8 @@ fn link(obj: &Path, exe: &Path) -> Result<(), String> {
         let mut cmd = Command::new(&cc);
         cmd.args(&cc_prefix)
             .arg("-O2")
+            // Fail-Fast 等级注入 C Runtime：等级 0 时检查代码被编译器完全消除
+            .arg(format!("-DDIAL_SAFETY={}", safety.as_c_macro()))
             .arg("-I")
             .arg(&runtime_dir)
             .arg("-I")

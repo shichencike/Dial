@@ -1,0 +1,11 @@
+// Fail-Fast 用例：字符串下标越界由 **C Runtime** 捕获（dial_string_get 内的边界检查）。
+// 这个用例专门覆盖 Runtime 侧的防线，而非 codegen 插入的检查。
+
+fn main(): int {
+    var s: string = "abc";
+    print(s.length());
+    print(s.get(1));
+    print(s.get(99));  // 越界：长度 3
+    print(9999);       // 哨兵：绝不可达
+    return 0;
+}

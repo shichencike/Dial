@@ -32,6 +32,36 @@ use crate::semantic::{type_of, FuncInfo, StructTable};
 type Local<'ctx> = (Type, (bool, PointerValue<'ctx>));
 type CgScopes<'ctx> = Vec<HashMap<String, Local<'ctx>>>;
 
+/*
+ * ============================================================================
+ *  Fail-Fast 安全等级（与 C Runtime 的 DIAL_SAFETY 一一对应）
+ * ============================================================================
+ *  Debug（默认）  ：全检查。越界/除零 → llvm.debugtrap（x86 int3，调试器可当断点捕获）
+ *  ReleaseSafe    ：保留防 UB 的检查，陷阱改用 llvm.trap（x86 ud2，指令更短）
+ *  ReleaseFast    ：不插入任何检查，越界/除零即 UB（与 C 一致），只为极限性能
+ *
+ *  为什么除法也要检查：LLVM 的 sdiv 在除数为 0 时结果是 **poison**（未定义行为），
+ *  优化器有权把后续代码整段删掉。这不是"崩溃"，而是更坏——程序会静默跑出错误结果。
+ * ============================================================================
+ */
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SafetyMode {
+    Debug,
+    ReleaseSafe,
+    ReleaseFast,
+}
+
+impl SafetyMode {
+    /// 对应 C Runtime 的 -DDIAL_SAFETY=N
+    pub fn as_c_macro(self) -> &'static str {
+        match self {
+            SafetyMode::Debug => "2",
+            SafetyMode::ReleaseSafe => "1",
+            SafetyMode::ReleaseFast => "0",
+        }
+    }
+}
+
 pub struct CodeGen<'ctx> {
     context: &'ctx Context,
     module: inkwell::module::Module<'ctx>,
@@ -44,6 +74,8 @@ pub struct CodeGen<'ctx> {
     /// 循环跳转目标栈：(continue 目标块, break 目标块)。
     /// for 的 continue 目标是「自增块」而非条件块——否则 continue 会跳过 i++ 造成死循环。
     loop_targets: RefCell<Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>>,
+    /// Fail-Fast 安全等级：决定是否在 IR 里插入边界/除零检查与 trap。
+    safety: SafetyMode,
 }
 
 /// 编译入口：接收校验后的 AST、函数签名表、结构体表，生成并写出目标文件 `.o`。
@@ -52,6 +84,7 @@ pub fn compile(
     functions: &HashMap<String, FuncInfo>,
     structs: &StructTable,
     out_path: &Path,
+    safety: SafetyMode,
 ) -> Result<()> {
     let context = Context::create();
     let module = context.create_module("dialc");
@@ -65,6 +98,7 @@ pub fn compile(
         str_id: std::cell::Cell::new(0),
         moved: RefCell::new(std::collections::HashSet::new()),
         loop_targets: RefCell::new(Vec::new()),
+        safety,
     };
 
     cg.build_struct_types(program);
@@ -88,6 +122,84 @@ pub fn compile(
 }
 
 impl<'ctx> CodeGen<'ctx> {
+    /*
+     * ------------------------------------------------------------------
+     *  Fail-Fast：陷阱发射与运行时检查插入（代码纪律 §20.4：直白，无框架）
+     * ------------------------------------------------------------------
+     */
+
+    /// 发射一条陷阱指令并标记不可达。LLVM 会把 intrinsic 翻译成平台非法指令：
+    /// `llvm.debugtrap` → x86 `int3`（可被调试器当作断点捕获）；
+    /// `llvm.trap`      → x86 `ud2` / ARM `udf`（指令更短，ReleaseSafe 用）。
+    fn emit_trap(&self) {
+        let name = if self.safety == SafetyMode::Debug {
+            "llvm.debugtrap"
+        } else {
+            "llvm.trap"
+        };
+        let f = self.module.get_function(name).unwrap_or_else(|| {
+            let ty = self.context.void_type().fn_type(&[], false);
+            self.module.add_function(name, ty, None)
+        });
+        self.builder.build_call(f, &[], "").unwrap();
+        self.builder.build_unreachable().unwrap();
+    }
+
+    /// ReleaseFast 下不插入任何检查。
+    fn checks_enabled(&self) -> bool {
+        self.safety != SafetyMode::ReleaseFast
+    }
+
+    /// 下标边界检查：`0 <= idx < len` 不成立则 trap。
+    ///
+    /// 用**无符号**比较一次搞定两个条件：负数 idx 的位模式是巨大无符号数，
+    /// 必然 `>= len`，无需再单独和 0 比较。
+    fn emit_bounds_check(
+        &self,
+        function: FunctionValue<'ctx>,
+        len: IntValue<'ctx>,
+        idx: IntValue<'ctx>,
+    ) {
+        if !self.checks_enabled() {
+            return;
+        }
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, idx, len, "bchk")
+            .unwrap();
+        let ok_bb = self.context.append_basic_block(function, "bounds.ok");
+        let bad_bb = self.context.append_basic_block(function, "bounds.fail");
+        self.builder
+            .build_conditional_branch(ok, ok_bb, bad_bb)
+            .unwrap();
+        self.builder.position_at_end(bad_bb);
+        self.emit_trap();
+        self.builder.position_at_end(ok_bb);
+    }
+
+    /// 整数除零检查：除数为 0 时 trap。
+    ///
+    /// 没有这条检查，`sdiv` / `srem` 的结果在 LLVM 里是 poison（UB），
+    /// 优化器有权据此把后续任何代码当成不可达删掉——比崩溃危险得多。
+    fn emit_div_zero_check(&self, function: FunctionValue<'ctx>, divisor: IntValue<'ctx>) {
+        if !self.checks_enabled() {
+            return;
+        }
+        let zero = self.context.i64_type().const_int(0, false);
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, divisor, zero, "dchk")
+            .unwrap();
+        let ok_bb = self.context.append_basic_block(function, "div.ok");
+        let bad_bb = self.context.append_basic_block(function, "div.fail");
+        self.builder
+            .build_conditional_branch(ok, ok_bb, bad_bb)
+            .unwrap();
+        self.builder.position_at_end(bad_bb);
+        self.emit_trap();
+        self.builder.position_at_end(ok_bb);
+    }
+
     fn i8ptr(&self) -> inkwell::types::PointerType<'ctx> {
         self.context.ptr_type(AddressSpace::default())
     }
@@ -682,6 +794,12 @@ impl<'ctx> CodeGen<'ctx> {
                 let idxi64 = self.to_i64(idx, &type_of(index, scopes, functions, structs)?);
                 let val = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
                 let vali64 = self.to_i64(val, &type_of(value, scopes, functions, structs)?);
+                // Fail-Fast：越界写是 C 里最阴险的 Bug（悄悄改坏相邻数据），当场 trap。
+                // ReleaseFast 下这段（含这次 length 调用）被整段消除，零开销。
+                if self.checks_enabled() {
+                    let len = self.call_c("dial_array_length", &[cur.into()]);
+                    self.emit_bounds_check(function, len.into_int_value(), idxi64);
+                }
                 let newp = self.call_c(
                     "dial_array_set",
                     &[cur.into(), idxi64.into(), vali64.into()],
@@ -1026,6 +1144,12 @@ impl<'ctx> CodeGen<'ctx> {
                     Type::Array(e) => *e,
                     _ => Type::Int,
                 };
+                // Fail-Fast：只读也要检查——越界读会把相邻内存当成合法数据返回，
+                // 让 Bug 在几万行之后才爆发。ReleaseFast 下整段消除。
+                if self.checks_enabled() {
+                    let len = self.call_c("dial_array_length", &[aptr.into()]);
+                    self.emit_bounds_check(function, len.into_int_value(), ii64);
+                }
                 let res = self.call_c("dial_array_get", &[aptr.into(), ii64.into()]);
                 // 元素是 int（v0.2）；若将来支持其他元素类型在此分支
                 let _ = elem_t;
@@ -1302,6 +1426,11 @@ impl<'ctx> CodeGen<'ctx> {
                 } else {
                     let a = lval.into_int_value();
                     let b = rval.into_int_value();
+                    // Fail-Fast：sdiv 除数为 0 在 LLVM 中是 UB（poison），
+                    // 优化器可以据此把后续代码整段删掉。必须先检查再除。
+                    if op == BinOp::Div {
+                        self.emit_div_zero_check(function, b);
+                    }
                     match op {
                         BinOp::Add => self.builder.build_int_add(a, b, "add").unwrap().into(),
                         BinOp::Sub => self.builder.build_int_sub(a, b, "sub").unwrap().into(),

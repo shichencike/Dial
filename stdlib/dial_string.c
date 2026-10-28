@@ -1,5 +1,6 @@
 #include "dial_string.h"
 #include "dial_rt_mem.h"
+#include "dial_rt_trap.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -15,8 +16,16 @@ DialString dial_string_new(const char *lit) {
     return p;
 }
 
-int64_t dial_string_length(DialString s) { return ((int64_t *)s)[0]; }
-int64_t dial_string_get(DialString s, int64_t i) { return (int64_t)(unsigned char)s_data(s)[i]; }
+int64_t dial_string_length(DialString s) {
+    DIAL_ASSERT(((int64_t *)s)[0] >= 0, "字符串内部损坏：len < 0");
+    return ((int64_t *)s)[0];
+}
+
+int64_t dial_string_get(DialString s, int64_t i) {
+    /* Fail-Fast：越界读直接终止，绝不返回 '\0' 之后的脏字节 */
+    DIAL_CHECK_BOUNDS(i, ((int64_t *)s)[0]);
+    return (int64_t)(unsigned char)s_data(s)[i];
+}
 
 DialString dial_string_concat(DialString a, DialString b) {
     int64_t la = ((int64_t *)a)[0];
@@ -38,6 +47,11 @@ int64_t dial_string_eq(DialString a, DialString b) {
 }
 
 DialString dial_string_substring(DialString s, int64_t from, int64_t to) {
+    int64_t slen = ((int64_t *)s)[0];
+    /* Fail-Fast：半开区间 [from, to) 必须完全落在 [0, slen] 内 */
+    if (DIAL_SAFETY >= DIAL_SAFETY_SAFE && (from < 0 || to < from || to > slen)) {
+        dial_bounds_fail(from < 0 || to > slen ? (from < 0 ? from : to) : to, slen);
+    }
     int64_t len = to - from;
     void *p = dial_rc_alloc(8 + len + 1);
     ((int64_t *)p)[0] = len;
