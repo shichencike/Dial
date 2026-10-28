@@ -1,3 +1,9 @@
+# 构建产物
 /target/
 /.dialc_build/
-/examples/*.o
+
+# 编译 Dial 源码时会在同目录产出的目标文件（examples/、tests/ 等）
+*.o
+
+# 本地生成的测试日志（每次跑测试都会覆盖，不入库）
+TEST_RUN_*.log
