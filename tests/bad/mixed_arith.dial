@@ -1,0 +1,6 @@
+// 负向：int 与 float 在算术运算中不可隐式混用（必须 int_to_float 显式转换）
+fn main(): int {
+    let r: float = 1 + 2.0;
+    print(r);
+    return 0;
+}

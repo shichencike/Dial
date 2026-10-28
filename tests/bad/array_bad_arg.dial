@@ -1,0 +1,5 @@
+// 应当编译失败：array.get() 需要 1 个 int 参数，这里传了 string
+fn main(): int {
+    var a: int[] = [1, 2, 3];
+    return a.get("0");
+}

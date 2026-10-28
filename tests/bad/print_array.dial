@@ -1,0 +1,6 @@
+// 应当编译失败：v0.2 不支持直接 print 数组（数组是二进制 payload，不能当字符串打印）
+fn main(): int {
+    var a: int[] = [1,2];
+    print(a);
+    return 0;
+}

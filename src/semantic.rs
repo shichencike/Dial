@@ -1,0 +1,1077 @@
+//! 语义分析 / 静态类型检查 / 数据流与逃逸分析。
+//!
+//! 设计要点：
+//! - 由于采用「静态强类型 + 显式标注」，所有类型在编译期确定。
+//! - `type_of` 设计为泛型函数，语义检查与代码生成共用，避免两份类型推导逻辑分歧。
+//! - 额外实现两 passes 的**数据流分析**：
+//!   1) collect_refs：统计每个变量在函数中被“读取引用”的所有语句位置与上下文（是否位于循环/分支内）。
+//!   2) set_moves：若某次「把变量 a 复制给 b」恰好是 a 的“最后一次引用”、且不在循环/分支里，
+//!      则判定可走**移动语义**（move_hint=true），codegen 直接转移指针、跳过 refcount retain，
+//!      这即是需求中的「只读推断 + 移动语义 → O(1) 共享 / 零开销转移」。
+//! - 逃逸分析（栈分配）：struct 一律值语义、在 IR 中以 alloca 落在栈上；其是否“逃逸”（传入函数/
+//!   被返回）决定传参方式（见 codegen）。容器（String/Array）则是不透明指针，交由 C Runtime 管理。
+
+use std::collections::HashMap;
+
+use crate::ast::*;
+use crate::error::{DialcError, Result};
+
+/// 函数签名表：参数类型列表 + 返回类型。语义检查与代码生成共用。
+#[derive(Debug, Clone)]
+pub struct FuncInfo {
+    pub params: Vec<Type>,
+    pub ret: Type,
+}
+
+/// 结构体表：名字 -> 字段(名字, 类型)。
+pub type StructTable = HashMap<String, Vec<(String, Type)>>;
+
+/// 作用域栈：外层 Vec 是作用域层级，内层 HashMap 存「名字 -> (类型, 附加信息)」。
+/// 附加信息 V 在语义阶段是「是否可变(bool)」，在代码生成阶段是「(是否可变, 指针)」。
+pub type Scopes<V> = Vec<HashMap<String, (Type, V)>>;
+
+/// 在作用域栈中按由内到外顺序查找变量类型。
+pub fn lookup_type<V>(scopes: &Scopes<V>, name: &str) -> Option<Type> {
+    for scope in scopes.iter().rev() {
+        if let Some((t, _)) = scope.get(name) {
+            return Some(t.clone());
+        }
+    }
+    None
+}
+
+fn is_numeric(t: &Type) -> bool {
+    matches!(*t, Type::Int | Type::Float)
+}
+
+/// 类型兼容性：**零隐式转换铁律**。
+///
+/// 两条类型只有在“完全相同”时才兼容——不存在 int→float 之类的隐式提升，
+/// 也不存在 float→int 的隐式窄化。凡类型不同，一律视为不兼容，需在源码中
+/// 用内置函数 `int_to_float` / `float_to_int` 显式转换。
+///
+/// 这与 §1「比 C 更严格」一致：C 允许 `int` 与 `float` 在算术/比较中隐式混用，
+/// Dial 认为那正是大量隐蔽精度 bug 的来源，因此在编译期即切断。
+pub fn types_compatible(arg: &Type, target: &Type) -> bool {
+    arg == target
+}
+
+/// 求 lvalue 表达式根部的变量名（用于判断字段/索引赋值是否作用于可变变量）。
+fn lvalue_root(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Var(n) => Some(n),
+        Expr::Field(o, _) => lvalue_root(o),
+        Expr::Index(o, _) => lvalue_root(o),
+        _ => None,
+    }
+}
+
+/// 推导表达式静态类型。泛型 V 仅作用于作用域附加信息，类型推导只用类型部分。
+pub fn type_of<V>(
+    expr: &Expr,
+    scopes: &Scopes<V>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<Type> {
+    let lookup = |name: &str| lookup_type(scopes, name);
+    match expr {
+        Expr::IntLit(_) => Ok(Type::Int),
+        Expr::FloatLit(_) => Ok(Type::Float),
+        Expr::BoolLit(_) => Ok(Type::Bool),
+        Expr::StringLit(_) => Ok(Type::String),
+        Expr::Var(name) => lookup(name).ok_or_else(|| {
+            DialcError::new(format!("语义错误：未声明的变量 '{}'", name), 0, 0)
+        }),
+        Expr::Field(obj, field) => {
+            let ot = type_of(obj, scopes, funcs, structs)?;
+            match ot {
+                Type::Struct(sname) => {
+                    let fields = structs
+                        .get(&sname)
+                        .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", sname), 0, 0))?;
+                    fields
+                        .iter()
+                        .find(|(f, _)| f == field)
+                        .map(|(_, t)| t.clone())
+                        .ok_or_else(|| {
+                            DialcError::new(
+                                format!("语义错误：结构体 '{}' 没有字段 '{}'", sname, field),
+                                0, 0,
+                            )
+                        })
+                }
+                _ => Err(DialcError::new(
+                    format!("语义错误：类型 '{}' 没有字段 '{}'", ot.name(), field),
+                    0, 0,
+                )),
+            }
+        }
+        Expr::Method(obj, method, args) => {
+            let ot = type_of(obj, scopes, funcs, structs)?;
+            match ot {
+                Type::String => string_method_type(method, args, scopes, funcs, structs),
+                Type::Array(_) => array_method_type(method, args, scopes, funcs, structs),
+                _ => Err(DialcError::new(
+                    format!("语义错误：类型 '{}' 不支持方法调用 '{}'", ot.name(), method),
+                    0, 0,
+                )),
+            }
+        }
+        Expr::Index(arr, idx) => {
+            let at = type_of(arr, scopes, funcs, structs)?;
+            let it = type_of(idx, scopes, funcs, structs)?;
+            if it != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：数组索引必须是 int 类型",
+                    0, 0,
+                ));
+            }
+            match at {
+                Type::Array(elem) => Ok(*elem),
+                _ => Err(DialcError::new(
+                    format!("语义错误：类型 '{}' 不能被索引", at.name()),
+                    0, 0,
+                )),
+            }
+        }
+        Expr::ArrayLit(elems) => {
+            if elems.is_empty() {
+                return Err(DialcError::new(
+                    "语义错误：空数组字面量无法推断元素类型（当前版本暂不支持）",
+                    0, 0,
+                ));
+            }
+            // 元素类型由第一个元素确定，且**只能是 int**（C 侧按 int64 存储，
+            // 若允许 float 会在跨越 FFI 边界时被静默截断，故编译期即拒绝）
+            let mut elem_t = None;
+            for e in elems {
+                let t = type_of(e, scopes, funcs, structs)?;
+                if t != Type::Int {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：数组字面量元素只支持 int，遇到 {} 元素",
+                            t.name()
+                        ),
+                        0, 0,
+                    ));
+                }
+                elem_t = Some(t);
+            }
+            Ok(Type::Array(Box::new(elem_t.unwrap_or(Type::Int))))
+        }
+        Expr::StructLit(name, fields) => {
+            let sdef = structs
+                .get(name)
+                .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", name), 0, 0))?;
+            if fields.len() != sdef.len() {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：结构体 '{}' 需要 {} 个字段，但提供了 {}",
+                        name,
+                        sdef.len(),
+                        fields.len()
+                    ),
+                    0, 0,
+                ));
+            }
+            for (fname, fe) in fields {
+                let expected = sdef
+                    .iter()
+                    .find(|(f, _)| f == fname)
+                    .map(|(_, t)| t.clone())
+                    .ok_or_else(|| {
+                        DialcError::new(
+                            format!("语义错误：结构体 '{}' 没有字段 '{}'", name, fname),
+                            0, 0,
+                        )
+                    })?;
+                let ft = type_of(fe, scopes, funcs, structs)?;
+                if !types_compatible(&ft, &expected) {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：结构体 '{}' 字段 '{}' 类型不匹配（实参 {}，期望 {}）",
+                            name, fname, ft.name(), expected.name()
+                        ),
+                        0, 0,
+                    ));
+                }
+            }
+            Ok(Type::Struct(name.clone()))
+        }
+        Expr::Unary(UnOp::Neg, e) => {
+            let t = type_of(e, scopes, funcs, structs)?;
+            if t == Type::Int || t == Type::Float {
+                Ok(t)
+            } else {
+                Err(DialcError::new(
+                    "语义错误：一元负号 '-' 只能用于数值类型（int/float）",
+                    0, 0,
+                ))
+            }
+        }
+        Expr::Unary(UnOp::Not, e) => {
+            let t = type_of(e, scopes, funcs, structs)?;
+            if t == Type::Bool {
+                Ok(Type::Bool)
+            } else {
+                Err(DialcError::new(
+                    "语义错误：逻辑非 'not' 只能用于 bool 类型",
+                    0, 0,
+                ))
+            }
+        }
+        Expr::Binary(left, op, right) => {
+            let lt = type_of(left, scopes, funcs, structs)?;
+            let rt = type_of(right, scopes, funcs, structs)?;
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                    // 零隐式转换：两个操作数必须类型完全相同，且同为 int 或同为 float。
+                    // `1 + 2.0` 这类 int/float 混合不在编译期默默提升为 float，而是直接报错，
+                    // 强制用户写 `int_to_float(1) + 2.0`。
+                    if lt == rt && is_numeric(&lt) {
+                        Ok(lt)
+                    } else {
+                        Err(DialcError::new(
+                            "语义错误：算术运算(+ - * /)要求两个操作数类型完全相同且均为数值类型（int 或 float）；int 与 float 之间无隐式转换，请用 int_to_float / float_to_int 显式转换",
+                            0, 0,
+                        ))
+                    }
+                }
+                BinOp::Eq | BinOp::Neq => {
+                    // 同样禁止 int/float 混合比较：必须同类型。
+                    if lt == rt && is_numeric(&lt) {
+                        Ok(Type::Bool)
+                    } else if lt == Type::Bool && rt == Type::Bool {
+                        Ok(Type::Bool)
+                    } else if lt == Type::String && rt == Type::String {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(DialcError::new(
+                            "语义错误：相等/不相等(==, !=)要求两个操作数类型完全相同：数值（int 或 float，不可混合）、bool，或 string",
+                            0, 0,
+                        ))
+                    }
+                }
+                BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                    if lt == rt && is_numeric(&lt) {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(DialcError::new(
+                            "语义错误：比较运算(< > <= >=)要求两个操作数类型完全相同且均为数值类型（int 或 float，不可混合）",
+                            0, 0,
+                        ))
+                    }
+                }
+                BinOp::And | BinOp::Or => {
+                    if lt == Type::Bool && rt == Type::Bool {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(DialcError::new(
+                            "语义错误：逻辑运算(and/or)要求两个操作数均为 bool 类型",
+                            0, 0,
+                        ))
+                    }
+                }
+            }
+        }
+        Expr::Call(name, args) => {
+            // 内置类型转换函数：零隐式转换铁律的“安全阀”。
+            // 它们是显式的、命名清晰的转换入口，编译为 LLVM 的 sitofp / fptosi，
+            // 不依赖任何 C 运行时函数。
+            match name.as_str() {
+                "int_to_float" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：int_to_float 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if at != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：int_to_float 的参数必须是 int",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Float);
+                }
+                "float_to_int" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：float_to_int 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if at != Type::Float {
+                        return Err(DialcError::new(
+                            "语义错误：float_to_int 的参数必须是 float",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Int);
+                }
+                _ => {}
+            }
+            if name == "print" {
+                if args.len() != 1 {
+                    return Err(DialcError::new(
+                        "语义错误：内置函数 print 需要恰好 1 个参数",
+                        0, 0,
+                    ));
+                }
+                let pt = type_of(&args[0], scopes, funcs, structs)?;
+                match pt {
+                    Type::Int | Type::Float | Type::Bool | Type::String => {}
+                    Type::Array(_) => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print 数组，请逐元素打印 print(a.get(i))",
+                            0, 0,
+                        ))
+                    }
+                    Type::Struct(_) => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print 结构体，请逐字段打印",
+                            0, 0,
+                        ))
+                    }
+                    Type::Void => {
+                        return Err(DialcError::new(
+                            "语义错误：print 的参数不能是 void",
+                            0, 0,
+                        ))
+                    }
+                }
+                // print 是**语句**而非表达式：无返回值，因此不能出现在
+                // 赋值右侧、return 或任何需要值的位置。
+                Ok(Type::Void)
+            } else {
+                let info = funcs.get(name).ok_or_else(|| {
+                    DialcError::new(format!("语义错误：调用了未定义的函数 '{}'", name), 0, 0)
+                })?;
+                if info.params.len() != args.len() {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：函数 '{}' 需要 {} 个参数，但传入了 {} 个",
+                            name,
+                            info.params.len(),
+                            args.len()
+                        ),
+                        0, 0,
+                    ));
+                }
+                for (a, pt) in args.iter().zip(info.params.iter()) {
+                    let at = type_of(a, scopes, funcs, structs)?;
+                    if !types_compatible(&at, pt) {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：函数 '{}' 第 {} 个参数类型不匹配（实参 {}，形参 {}）",
+                                name,
+                                pt.name(),
+                                at.name(),
+                                pt.name()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                }
+                Ok(info.ret.clone())
+            }
+        }
+    }
+}
+
+/// 字符串方法的签名与返回类型。
+fn string_method_type<V>(
+    method: &str,
+    args: &[Expr],
+    scopes: &Scopes<V>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<Type> {
+    let arg_t = |i: usize| type_of(&args[i], scopes, funcs, structs);
+    match method {
+        "length" => {
+            if !args.is_empty() {
+                return Err(DialcError::new("语义错误：string.length() 不接受参数", 0, 0));
+            }
+            Ok(Type::Int)
+        }
+        "concat" => {
+            if args.len() != 1 || arg_t(0)? != Type::String {
+                return Err(DialcError::new(
+                    "语义错误：string.concat() 需要 1 个 string 参数",
+                    0, 0,
+                ));
+            }
+            Ok(Type::String)
+        }
+        "get" => {
+            if args.len() != 1 || arg_t(0)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：string.get() 需要 1 个 int 参数（返回字符的 int 码）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Int)
+        }
+        "substring" => {
+            if args.len() != 2 || arg_t(0)? != Type::Int || arg_t(1)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：string.substring(from, to) 需要 2 个 int 参数",
+                    0, 0,
+                ));
+            }
+            Ok(Type::String)
+        }
+        "clone" => {
+            if !args.is_empty() {
+                return Err(DialcError::new("语义错误：string.clone() 不接受参数", 0, 0));
+            }
+            Ok(Type::String)
+        }
+        "eq" => {
+            if args.len() != 1 || arg_t(0)? != Type::String {
+                return Err(DialcError::new(
+                    "语义错误：string.eq() 需要 1 个 string 参数，返回 bool",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Bool)
+        }
+        _ => Err(DialcError::new(
+            format!("语义错误：string 无方法 '{}'", method),
+            0, 0,
+        )),
+    }
+}
+
+/// 动态数组方法（v0.2 元素为 int）的签名与返回类型。
+fn array_method_type<V>(
+    method: &str,
+    args: &[Expr],
+    scopes: &Scopes<V>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<Type> {
+    let arg_t = |i: usize| type_of(&args[i], scopes, funcs, structs);
+    match method {
+        "length" => {
+            if !args.is_empty() {
+                return Err(DialcError::new("语义错误：array.length() 不接受参数", 0, 0));
+            }
+            Ok(Type::Int)
+        }
+        "push" => {
+            if args.len() != 1 || arg_t(0)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：array.push() 需要 1 个 int 参数（元素类型固定为 int）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Array(Box::new(Type::Int)))
+        }
+        "get" => {
+            if args.len() != 1 || arg_t(0)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：array.get() 需要 1 个 int 参数",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Int)
+        }
+        "set" => {
+            if args.len() != 2 || arg_t(0)? != Type::Int || arg_t(1)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：array.set(i, v) 需要 int 索引与 int 值 v",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Array(Box::new(Type::Int)))
+        }
+        "clone" => {
+            if !args.is_empty() {
+                return Err(DialcError::new("语义错误：array.clone() 不接受参数", 0, 0));
+            }
+            Ok(Type::Array(Box::new(Type::Int)))
+        }
+        _ => Err(DialcError::new(
+            format!("语义错误：array 无方法 '{}'", method),
+            0, 0,
+        )),
+    }
+}
+
+// ===================== 入口 =====================
+
+/// 入口：收集函数签名 + 结构体表，校验 main，逐一检查函数体，最后跑数据流分析写入 move_hint。
+pub fn analyze(program: &mut Program) -> Result<(HashMap<String, FuncInfo>, StructTable)> {
+    // 1) 结构体表
+    let mut structs: StructTable = HashMap::new();
+    for s in &program.structs {
+        if structs.contains_key(&s.name) {
+            return Err(DialcError::new(
+                format!("语义错误：结构体 '{}' 重复定义", s.name),
+                s.line, s.col,
+            ));
+        }
+        structs.insert(s.name.clone(), s.fields.clone());
+    }
+    // 校验字段类型引用的结构体确实存在
+    for s in &program.structs {
+        for (_, t) in &s.fields {
+            if let Type::Struct(n) = t {
+                if !structs.contains_key(n) {
+                    return Err(DialcError::new(
+                        format!("语义错误：结构体 '{}' 的字段引用了未定义的结构体 '{}'", s.name, n),
+                        s.line, s.col,
+                    ));
+                }
+            }
+        }
+    }
+
+    // 2) 函数签名
+    let mut funcs: HashMap<String, FuncInfo> = HashMap::new();
+    for f in &program.functions {
+        if funcs.contains_key(&f.name) {
+            return Err(DialcError::new(
+                format!("语义错误：函数 '{}' 重复定义", f.name),
+                0, 0,
+            ));
+        }
+        funcs.insert(
+            f.name.clone(),
+            FuncInfo {
+                params: f.params.iter().map(|(_, t)| t.clone()).collect(),
+                ret: f.ret.clone(),
+            },
+        );
+    }
+
+    if !funcs.contains_key("main") {
+        return Err(DialcError::new("语义错误：缺少程序入口函数 main()", 0, 0));
+    }
+    if funcs["main"].ret.clone() != Type::Int {
+        return Err(DialcError::new(
+            "语义错误：main 函数必须返回 int（作为进程退出码）",
+            0, 0,
+        ));
+    }
+
+    for f in &program.functions {
+        check_function(f, &funcs, &structs)?;
+    }
+
+    // 3) 数据流分析：写入 move_hint
+    for f in &mut program.functions {
+        run_usage_analysis(f, &structs);
+    }
+
+    Ok((funcs, structs))
+}
+
+/// 类型良构性检查：拒绝当前版本尚无法正确实现的类型。
+///
+/// 动态数组的 C 实现（dial_array_*）以 int64 存储元素，因此元素类型**只允许 int**。
+/// 若放任 `float[]`，元素会在传入 C 时被 fptosi 静默截断——这正是必须在
+/// 编译期就拒绝而非运行期静默降级的地方。
+fn check_type_wellformed(t: &Type, ctx: &str, line: usize, col: usize) -> Result<()> {
+    match t {
+        Type::Array(elem) => {
+            if matches!(elem.as_ref(), Type::Int) {
+                Ok(())
+            } else {
+                Err(DialcError::new(
+                    format!(
+                        "语义错误：{} 是 {}[] 类型，但当前版本动态数组元素类型只支持 int",
+                        ctx,
+                        elem.as_ref().name()
+                    ),
+                    line,
+                    col,
+                ))
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+fn check_function(
+    f: &Func,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<()> {
+    // 形参类型良构性
+    for (pname, pty) in &f.params {
+        check_type_wellformed(pty, &format!("函数 '{}' 的形参 '{}'", f.name, pname), 0, 0)?;
+    }
+    // 返回类型良构性
+    check_type_wellformed(
+        &f.ret,
+        &format!("函数 '{}' 的返回类型", f.name),
+        0,
+        0,
+    )?;
+
+    let mut scopes: Scopes<bool> = vec![HashMap::new()];
+    for (pname, pty) in &f.params {
+        scopes[0].insert(pname.clone(), (pty.clone(), true));
+    }
+    for stmt in &f.body {
+        check_stmt(stmt, &mut scopes, funcs, f, structs)?;
+    }
+    Ok(())
+}
+
+fn check_stmt(
+    stmt: &Stmt,
+    scopes: &mut Scopes<bool>,
+    funcs: &HashMap<String, FuncInfo>,
+    f: &Func,
+    structs: &StructTable,
+) -> Result<()> {
+    match stmt {
+        Stmt::VarDecl {
+            name,
+            ty,
+            mutable,
+            value,
+            line,
+            col,
+            ..
+        } => {
+            // 声明类型必须先良构，再谈兼容
+            check_type_wellformed(ty, &format!("变量 '{}'", name), *line, *col)?;
+            let vt = type_of(value, scopes, funcs, structs)?;
+            if !types_compatible(&vt, ty) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：变量 '{}' 的初始化表达式类型为 {}，与声明类型 {} 不兼容",
+                        name,
+                        vt.name(),
+                        ty.name()
+                    ),
+                    *line, *col,
+                ));
+            }
+            if scopes.last().unwrap().contains_key(name) {
+                return Err(DialcError::new(
+                    format!("语义错误：变量 '{}' 在当前作用域重复声明", name),
+                    *line, *col,
+                ));
+            }
+            // 可变性如实登记：var -> true，let -> false。
+            // 绝不可一律记为 true，否则 let 的“不可变”承诺形同虚设。
+            scopes
+                .last_mut()
+                .unwrap()
+                .insert(name.clone(), (ty.clone(), *mutable));
+            Ok(())
+        }
+        Stmt::Assign {
+            name,
+            value,
+            line,
+            col,
+            ..
+        } => {
+            let info = lookup_type(scopes, name).ok_or_else(|| {
+                DialcError::new(format!("语义错误：未声明的变量 '{}'", name), *line, *col)
+            })?;
+            let (_ty, mutable) = scopes
+                .iter()
+                .rev()
+                .find_map(|s| s.get(name).map(|v| v.clone()))
+                .unwrap();
+            if !mutable {
+                return Err(DialcError::new(
+                    format!("语义错误：变量 '{}' 由 let 声明，不可重新赋值", name),
+                    *line, *col,
+                ));
+            }
+            let vt = type_of(value, scopes, funcs, structs)?;
+            if !types_compatible(&vt, &info) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：对 '{}' 的赋值类型不兼容（实参 {}，变量 {}）",
+                        name,
+                        vt.name(),
+                        info.name()
+                    ),
+                    *line, *col,
+                ));
+            }
+            Ok(())
+        }
+        Stmt::AssignField {
+            obj,
+            field,
+            value,
+            line,
+            col,
+        } => {
+            let ot = type_of(obj, scopes, funcs, structs)?;
+            match ot {
+                Type::Struct(sname) => {
+                    let fields = structs
+                        .get(&sname)
+                        .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", sname), *line, *col))?;
+                    let expected = fields
+                        .iter()
+                        .find(|(fld, _)| fld == field)
+                        .map(|(_, t)| t.clone())
+                        .ok_or_else(|| {
+                            DialcError::new(
+                                format!("语义错误：结构体 '{}' 没有字段 '{}'", sname, field),
+                                *line, *col,
+                            )
+                        })?;
+                    let vt = type_of(value, scopes, funcs, structs)?;
+                    if !types_compatible(&vt, &expected) {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：对字段 '{}' 的赋值类型不兼容（实参 {}，字段 {}）",
+                                field, vt.name(), expected.name()
+                            ),
+                            *line, *col,
+                        ));
+                    }
+                    // 写入目标必须是可变变量
+                    if let Some(root) = lvalue_root(obj) {
+                        let mutable = scopes
+                            .iter()
+                            .rev()
+                            .find_map(|s| s.get(root).map(|v| v.1))
+                            .unwrap_or(false);
+                        if !mutable {
+                            return Err(DialcError::new(
+                                format!("语义错误：字段赋值目标 '{}' 不是可变变量", root),
+                                *line, *col,
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(DialcError::new(
+                        format!("语义错误：类型 '{}' 没有字段 '{}'", ot.name(), field),
+                        *line, *col,
+                    ))
+                }
+            }
+            Ok(())
+        }
+        Stmt::AssignIndex {
+            arr,
+            index,
+            value,
+            line,
+            col,
+        } => {
+            let at = type_of(arr, scopes, funcs, structs)?;
+            let it = type_of(index, scopes, funcs, structs)?;
+            if it != Type::Int {
+                return Err(DialcError::new("语义错误：数组索引必须是 int 类型", *line, *col));
+            }
+            match at {
+                Type::Array(elem) => {
+                    let vt = type_of(value, scopes, funcs, structs)?;
+                    if !types_compatible(&vt, elem.as_ref()) {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：数组元素赋值类型不兼容（实参 {}，元素 {}）",
+                                vt.name(),
+                                elem.name()
+                            ),
+                            *line, *col,
+                        ));
+                    }
+                    if let Some(root) = lvalue_root(arr) {
+                        let mutable = scopes
+                            .iter()
+                            .rev()
+                            .find_map(|s| s.get(root).map(|v| v.1))
+                            .unwrap_or(false);
+                        if !mutable {
+                            return Err(DialcError::new(
+                                format!("语义错误：数组赋值目标 '{}' 必须是可变变量", root),
+                                *line, *col,
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(DialcError::new(
+                        format!("语义错误：类型 '{}' 不能被索引赋值", at.name()),
+                        *line, *col,
+                    ))
+                }
+            }
+            Ok(())
+        }
+        Stmt::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let ct = type_of(cond, scopes, funcs, structs)?;
+            if ct != Type::Bool {
+                return Err(DialcError::new(
+                    "语义错误：if 条件表达式必须是 bool 类型",
+                    0, 0,
+                ));
+            }
+            scopes.push(HashMap::new());
+            for s in then_branch {
+                check_stmt(s, scopes, funcs, f, structs)?;
+            }
+            scopes.pop();
+            if let Some(eb) = else_branch {
+                scopes.push(HashMap::new());
+                for s in eb {
+                    check_stmt(s, scopes, funcs, f, structs)?;
+                }
+                scopes.pop();
+            }
+            Ok(())
+        }
+        Stmt::While { cond, body } => {
+            let ct = type_of(cond, scopes, funcs, structs)?;
+            if ct != Type::Bool {
+                return Err(DialcError::new(
+                    "语义错误：while 条件表达式必须是 bool 类型",
+                    0, 0,
+                ));
+            }
+            scopes.push(HashMap::new());
+            for s in body {
+                check_stmt(s, scopes, funcs, f, structs)?;
+            }
+            scopes.pop();
+            Ok(())
+        }
+        Stmt::Return(Some(e), line, col) => {
+            let t = type_of(e, scopes, funcs, structs)?;
+            if !types_compatible(&t, &f.ret) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：return 表达式类型 {} 与函数返回类型 {} 不兼容",
+                        t.name(),
+                        f.ret.name()
+                    ),
+                    *line, *col,
+                ));
+            }
+            Ok(())
+        }
+        Stmt::Return(None, line, col) => {
+            if f.ret != Type::Void {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：函数 '{}' 返回类型为 {}，return 必须带表达式",
+                        f.name, f.ret.name()
+                    ),
+                    *line, *col,
+                ));
+            }
+            Ok(())
+        }
+        Stmt::Expr(e) => {
+            // 「原地修改型」方法约束（push / set）：
+            // 这两种操作会修改容器，且因 COW 可能更换底层指针，编译器把返回指针写回接收变量。
+            // 因此接收者必须是**可重新赋值**的顶层变量（var）。
+            //   - let 变量不可被原地修改（与不可变契约一致），调用即编译错误；
+            //   - 字段 / 下标等表达式作为接收者也无法被可靠地写回，同样报错。
+            // 若只需获得新容器而不就地修改，请以表达式形式使用：let b: int[] = a.push(v);
+            if let Expr::Method(obj, method, _) = e {
+                if matches!(method.as_str(), "push" | "set") {
+                    match obj.as_ref() {
+                        Expr::Var(name) => {
+                            let mutable = scopes
+                                .iter()
+                                .rev()
+                                .find_map(|s| s.get(name).map(|v| v.1))
+                                .unwrap_or(false);
+                            if !mutable {
+                                return Err(DialcError::new(
+                                    format!(
+                                        "语义错误：变量 '{}' 由 let 声明，不可调用原地修改方法 '{}'（容器可能被修改并更换指针，必须是 var 变量）",
+                                        name, method
+                                    ),
+                                    0, 0,
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：方法 '{}' 会原地修改容器并可能更换指针，必须作用于顶层可变变量（var），不能直接作用于字段/下标等表达式",
+                                    method
+                                ),
+                                0, 0,
+                            ));
+                        }
+                    }
+                }
+            }
+            type_of(e, scopes, funcs, structs)?;
+            Ok(())
+        }
+    }
+}
+
+// ===================== 数据流 / 逃逸分析 =====================
+
+/// 单次引用的位置与上下文安全性（是否处于循环/分支中，处于则不能作为“安全移动”的最后一次使用）。
+#[derive(Debug, Clone)]
+struct RefEntry {
+    stmt: usize,
+    unsafe_ctx: bool,
+}
+
+/// 每个变量的引用事实：最后一次引用语句序号、是否存在不安全上下文。
+#[derive(Debug, Clone, Default)]
+struct VarFacts {
+    last: usize,
+    unsafe_ctx: bool,
+}
+
+fn record_expr_refs(e: &Expr, si: usize, unsafe_ctx: bool, refs: &mut HashMap<String, Vec<RefEntry>>) {
+    match e {
+        Expr::Var(n) => refs.entry(n.clone()).or_default().push(RefEntry { stmt: si, unsafe_ctx }),
+        Expr::Field(o, _) => record_expr_refs(o, si, unsafe_ctx, refs),
+        Expr::Index(o, i) => {
+            record_expr_refs(o, si, unsafe_ctx, refs);
+            record_expr_refs(i, si, unsafe_ctx, refs);
+        }
+        Expr::Method(o, _, args) => {
+            record_expr_refs(o, si, unsafe_ctx, refs);
+            for a in args {
+                record_expr_refs(a, si, unsafe_ctx, refs);
+            }
+        }
+        Expr::ArrayLit(elems) => {
+            for el in elems {
+                record_expr_refs(el, si, unsafe_ctx, refs);
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, fe) in fields {
+                record_expr_refs(fe, si, unsafe_ctx, refs);
+            }
+        }
+        Expr::Binary(l, _, r) => {
+            record_expr_refs(l, si, unsafe_ctx, refs);
+            record_expr_refs(r, si, unsafe_ctx, refs);
+        }
+        Expr::Unary(_, x) => record_expr_refs(x, si, unsafe_ctx, refs),
+        Expr::Call(_, args) => {
+            for a in args {
+                record_expr_refs(a, si, unsafe_ctx, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 第一遍：收集所有变量引用位置。
+fn collect_refs(stmts: &[Stmt], si: &mut usize, loop_d: usize, cond_d: usize, refs: &mut HashMap<String, Vec<RefEntry>>) {
+    for stmt in stmts {
+        let unsafe_ctx = loop_d > 0 || cond_d > 0;
+        match stmt {
+            Stmt::VarDecl { value, .. } => {
+                record_expr_refs(value, *si, unsafe_ctx, refs);
+            }
+            Stmt::Assign { value, .. } => {
+                record_expr_refs(value, *si, unsafe_ctx, refs);
+            }
+            Stmt::AssignField { obj, value, .. } => {
+                record_expr_refs(obj, *si, unsafe_ctx, refs);
+                record_expr_refs(value, *si, unsafe_ctx, refs);
+            }
+            Stmt::AssignIndex { arr, index, value, .. } => {
+                record_expr_refs(arr, *si, unsafe_ctx, refs);
+                record_expr_refs(index, *si, unsafe_ctx, refs);
+                record_expr_refs(value, *si, unsafe_ctx, refs);
+            }
+            Stmt::If { cond, then_branch, else_branch } => {
+                record_expr_refs(cond, *si, unsafe_ctx, refs);
+                collect_refs(then_branch, si, loop_d, cond_d + 1, refs);
+                if let Some(eb) = else_branch {
+                    collect_refs(eb, si, loop_d, cond_d + 1, refs);
+                }
+            }
+            Stmt::While { cond, body } => {
+                record_expr_refs(cond, *si, unsafe_ctx, refs);
+                collect_refs(body, si, loop_d + 1, cond_d, refs);
+            }
+            Stmt::Return(Some(e), ..) => {
+                record_expr_refs(e, *si, unsafe_ctx, refs);
+            }
+            Stmt::Expr(e) => {
+                record_expr_refs(e, *si, unsafe_ctx, refs);
+            }
+            _ => {}
+        }
+        *si += 1;
+    }
+}
+
+/// 第二遍：依据引用事实，对「Var 复制」形式的赋值写入 move_hint。
+fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, facts: &HashMap<String, VarFacts>) {
+    for stmt in stmts.iter_mut() {
+        let _unsafe_ctx = loop_d > 0 || cond_d > 0;
+        match stmt {
+            Stmt::VarDecl { value, move_hint, .. } => {
+                if let Expr::Var(src) = value {
+                    if let Some(f) = facts.get(src) {
+                        *move_hint = (f.last == *si) && !f.unsafe_ctx;
+                    }
+                }
+            }
+            Stmt::Assign { value, move_hint, .. } => {
+                if let Expr::Var(src) = value {
+                    if let Some(f) = facts.get(src) {
+                        *move_hint = (f.last == *si) && !f.unsafe_ctx;
+                    }
+                }
+            }
+            Stmt::If { cond: _, then_branch, else_branch } => {
+                set_moves(then_branch, si, loop_d, cond_d + 1, facts);
+                if let Some(eb) = else_branch {
+                    set_moves(eb, si, loop_d, cond_d + 1, facts);
+                }
+            }
+            Stmt::While { body, .. } => {
+                set_moves(body, si, loop_d + 1, cond_d, facts);
+            }
+            _ => {}
+        }
+        *si += 1;
+    }
+}
+
+/// 对单个函数运行数据流分析：先收集引用，再写回 move_hint。
+fn run_usage_analysis(f: &mut Func, _structs: &StructTable) {
+    let mut refs: HashMap<String, Vec<RefEntry>> = HashMap::new();
+    let mut si = 0usize;
+    collect_refs(&f.body, &mut si, 0, 0, &mut refs);
+
+    let mut facts: HashMap<String, VarFacts> = HashMap::new();
+    for (name, entries) in &refs {
+        let mut last = 0usize;
+        let mut unsafe_ctx = false;
+        for e in entries {
+            if e.stmt > last {
+                last = e.stmt;
+            }
+            if e.unsafe_ctx {
+                unsafe_ctx = true;
+            }
+        }
+        facts.insert(name.clone(), VarFacts { last, unsafe_ctx });
+    }
+
+    let mut si2 = 0usize;
+    set_moves(&mut f.body, &mut si2, 0, 0, &facts);
+}

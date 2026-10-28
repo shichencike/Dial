@@ -1,0 +1,23 @@
+[array] 字面量 [10, 20, 30]
+[array] length = 3 ->
+3
+[array] 逐元素输出 ->
+10
+20
+30
+[array] push(40) 后 length = 4 ->
+4
+[array] a.get(3) = 40 ->
+40
+[array] a[0] 等价于 a.get(0) = 10 ->
+10
+[array] a[0] = 99 后 ->
+99
+[array] 其余元素不受影响 ->
+20
+30
+40
+[array] sum_all(a) = 99+20+30+40 = 189 ->
+189
+[array] 调用后 length 仍为 4 ->
+4

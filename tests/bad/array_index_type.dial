@@ -1,0 +1,5 @@
+// 应当编译失败：string 不能当作数组下标使用
+fn main(): int {
+    var a: int[] = [1, 2, 3];
+    return a["0"];
+}

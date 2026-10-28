@@ -1,0 +1,79 @@
+// dialc v0.2 示例：结构体（值语义，栈分配）
+//
+// 结构体是**值类型**：不经过 C Runtime 的引用计数，完全由 LLVM 在栈上
+// 分配（逃逸分析结论：未逃出函数作用域）。字段访问编译为 LLVM
+// getelementptr，零运行时开销。
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+struct Rect {
+    origin: Point,
+    w: int,
+    h: int,
+}
+
+// 结构体作为返回值：按值返回，无堆分配
+fn make_point(x: int, y: int): Point {
+    return Point { x: x, y: y };
+}
+
+// 结构体作为参数：按值传入
+fn manhattan(p: Point): int {
+    var ax: int = p.x;
+    if (ax < 0) {
+        ax = 0 - ax;
+    }
+    var ay: int = p.y;
+    if (ay < 0) {
+        ay = 0 - ay;
+    }
+    return ax + ay;
+}
+
+fn area(r: Rect): int {
+    return r.w * r.h;
+}
+
+fn main(): int {
+    // 完整字段初始化
+    let p: Point = Point { x: 3, y: 4 };
+    print("[struct] p = (3, 4)");
+    print(p.x);
+    print(p.y);
+
+    // 字段顺序无关：字面量按**字段名**定位，无需与声明顺序一致
+    let q: Point = Point { y: 10, x: 20 };
+    print("[struct] q 字段顺序无关: q.x, q.y =");
+    print(q.x);
+    print(q.y);
+
+    // 结构体可写（var 声明）
+    var m: Point = make_point(7, 8);
+    print("[struct] m = make_point(7, 8)");
+    print(m.x);
+    print(m.y);
+
+    // 字段赋值
+    m.x = 100;
+    print("[struct] m.x 赋值为 100 ->");
+    print(m.x);
+
+    // 嵌套结构体
+    var r: Rect = Rect { origin: p, w: 5, h: 6 };
+    print("[struct] 嵌套: r.origin.x, r.w, r.h =");
+    print(r.origin.x);
+    print(r.w);
+    print(r.h);
+
+    // 结构体求值：manhattan((3,4)) = 7，area = 30
+    let d: int = manhattan(p);
+    print("[struct] manhattan(p) = 7 ->");
+    print(d);
+    print("[struct] area(r) = 30 ->");
+    print(area(r));
+
+    return 0;
+}

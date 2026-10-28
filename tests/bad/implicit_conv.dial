@@ -1,0 +1,6 @@
+// 负向：let 变量不允许 int -> float 隐式转换（零隐式转换铁律）
+fn main(): int {
+    let x: int = 10;
+    let y: float = x;
+    return 0;
+}

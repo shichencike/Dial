@@ -1,0 +1,17 @@
+[record] 结构体字段（逐字段打印）->
+Alice
+18
+[record] scores 逐元素打印 ->
+90
+85
+95
+[record] total(stu) = 270 ->
+270
+[record] 复制后 copy.name 与 stu.name 一致 ->
+Alice
+[record] 复制后 copy.scores.length() = 3 ->
+3
+[record] copy.age 改为 20 ->
+20
+[record] stu.age 不受影响，仍为 18 ->
+18

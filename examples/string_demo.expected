@@ -1,0 +1,19 @@
+[string] "Hello".length() = 5 ->
+5
+[string] s.concat(t) ->
+Hello, Dial
+[string] 拼接结果长度 = 11 ->
+11
+[string] u.get(0) = 'H' = 72 ->
+72
+[string] u.substring(0, 5) ->
+Hello
+[string] substring(0,5) 与 "Hello" 内容相等 -> 1
+[string] == 按内容比较成立
+[string] != 按内容比较成立
+[string] "Hello" != "World" 成立
+[string] s.clone() 内容 ->
+Hello
+[string] s.concat(" World") ->
+Hello World
+11

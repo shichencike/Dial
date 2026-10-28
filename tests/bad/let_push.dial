@@ -1,0 +1,6 @@
+// 负向：let 变量不可调用原地修改方法 push（必须 var）
+fn main(): int {
+    let a: int[] = [1, 2, 3];
+    a.push(4);
+    return 0;
+}

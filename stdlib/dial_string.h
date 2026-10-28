@@ -1,0 +1,34 @@
+#ifndef DIAL_STRING_H
+#define DIAL_STRING_H
+
+#include <stdint.h>
+
+/*
+ * String 是不透明引用计数对象。Dial 侧只持有 i8*，绝不能直接读内存。
+ * payload 布局：[ int64 len ][ char data[] ]（data 以 '\0' 结尾，便于调试）。
+ */
+
+typedef void *DialString;
+
+/* 从 C 字符串字面量构造（Dial 的 "abc" 字面量走这里） */
+DialString dial_string_new(const char *lit);
+
+int64_t  dial_string_length(DialString s);
+DialString dial_string_concat(DialString a, DialString b);
+int64_t  dial_string_get(DialString s, int64_t i);
+
+/* 返回 1 表示相等，0 表示不等（Dial 的 s == t 走这里，而非裸 strcmp） */
+int64_t  dial_string_eq(DialString a, DialString b);
+
+DialString dial_string_substring(DialString s, int64_t from, int64_t to);
+
+/* COW 感知克隆：唯一持有返回自身，否则深拷贝 */
+DialString dial_string_clone(DialString s);
+
+void dial_string_retain(DialString s);
+void dial_string_release(DialString s);
+
+/* 打印并换行（对接 Dial 的 print(s)） */
+void dial_print_string(DialString s);
+
+#endif /* DIAL_STRING_H */

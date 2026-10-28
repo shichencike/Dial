@@ -1,0 +1,62 @@
+// dialc v0.2 示例：编译期所有权优化（只读推断 / 移动语义 / COW 兜底）
+//
+// Sema 阶段对每条 `let/var x = y;` 做数据流分析，判定三种绑定策略：
+//
+//   1) 移动语义（Move）：y 在此之后再未被引用 => 直接转移所有权，
+//      不生成任何 retain/release 调用，零开销。
+//   2) 只读共享（Share）：y 之后仍被读取、但从未被写入 => 生成一次
+//      retain，双方共享同一不透明指针，O(1) 且无需复制。
+//   3) COW 兜底（Copy）：静态分析无法证明独占（例如穿过函数边界）时，
+//      交给 C Runtime 的引用计数在**写入瞬间**决定是否深拷贝。
+//
+// 只有第 3 种会真正产生内存复制；前两种在编译期即被消除。
+
+// 穿过函数边界：编译期无法证明 a 未被他人持有，
+// 因此这里的写入由 C Runtime 的 dial_array_set 执行 COW 判定。
+fn write_first(a: int[], v: int): int[] {
+    a[0] = v;
+    return a;
+}
+
+fn main(): int {
+    var x: int[] = [1, 2, 3];
+
+    // (2) 只读共享：x 之后仍被读取，故 y 与 x 共享同一指针（一次 retain）
+    let y: int[] = x;
+    print("[cow] 共享后 x 与 y 内容一致 ->");
+    print(x[0]);
+    print(y[0]);
+
+    // (3) COW 触发点：x 当前被 x 与 y 共同持有（refcount > 1），
+    //     函数内对 a[0] 的写入会在 C 侧先克隆再写，绝不污染 x / y。
+    let z: int[] = write_first(x, 999);
+
+    print("[cow] COW 之后 x[0] 仍为 1（未被污染）->");
+    print(x[0]);
+    print("[cow] COW 之后 y[0] 仍为 1（未被污染）->");
+    print(y[0]);
+    print("[cow] 返回值 z[0] 为 999 ->");
+    print(z[0]);
+    print("[cow] 三者长度均为 3 ->");
+    print(x.length());
+    print(y.length());
+    print(z.length());
+
+    // (1) 移动语义：x 在此之后不再被引用，所有权直接转移给 m，
+    //     编译期不插入 retain/release
+    let m: int[] = x;
+    print("[cow] 移动后 m[0] = 1 ->");
+    print(m[0]);
+
+    // 字符串同样遵循上述三类策略
+    let s: string = "shared";
+    let s2: string = s;      // 共享：s 之后仍被读取
+    print("[cow] s 与 s2 共享 ->");
+    print(s);
+    print(s2);
+    let s3: string = s;      // 移动：s 之后不再被使用
+    print("[cow] 移动后 s3 ->");
+    print(s3);
+
+    return 0;
+}

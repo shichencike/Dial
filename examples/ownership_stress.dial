@@ -1,0 +1,38 @@
+// dialc v0.2 示例：所有权压力测试（栈槽复用 + 引用计数平衡）
+//
+// 这个例子同时压两条路径：
+//   1) 循环体内声明变量 —— 所有 alloca 必须落在函数 entry 块上，
+//      否则每轮迭代都会多压一个栈槽，迭代一多就会把栈耗尽（段错误）。
+//   2) 结构体中持有 string / int[] —— 结构体值被复制时，其堆字段必须对称
+//      retain；作用域结束时对称 release。两者数量必须严格相等，
+//      否则要么泄漏、要么双重释放。
+//
+// 判定方法：把循环次数从 1 万提到 100 万，峰值 RSS 基本不变化即为平衡。
+// 期望输出：45009750000
+
+struct Item {
+    name: string,
+    data: int[],
+    n: int,
+}
+
+fn make_item(i: int): Item {
+    return Item { name: "a-long-enough-string-payload", data: [1, 2, 3, 4, 5], n: i };
+}
+
+fn use_item(it: Item): int {
+    return it.n + it.data.length() + it.name.length();
+}
+
+fn main(): int {
+    var i: int = 0;
+    var acc: int = 0;
+    while (i < 300000) {
+        let it: Item = make_item(i);
+        var copy: Item = it;
+        acc = acc + use_item(copy);
+        i = i + 1;
+    }
+    print(acc);
+    return 0;
+}

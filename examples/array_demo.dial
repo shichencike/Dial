@@ -1,0 +1,64 @@
+// dialc v0.2 示例：动态数组 —— 不透明指针 + C 标准库 FFI 契约
+//
+// `int[]` 在 IR 中同样只是一个 `ptr`（i8*）。其内存布局
+// `[int64 refcount][int64 len][int64 cap][int64 elems[]]` 由 C 侧私有维护。
+// 元素类型在编译期由类型系统固定：v0.2 仅支持 int 元素。
+//
+// 关键：push / set 可能触发写时复制（COW），因此它们**返回**数组指针，
+// 编译期强制把返回值写回接收变量，杜绝“旧指针失效”这类悬垂问题。
+
+fn sum_all(a: int[]): int {
+    var total: int = 0;
+    var i: int = 0;
+    while (i < a.length()) {
+        total = total + a.get(i);
+        i = i + 1;
+    }
+    return total;
+}
+
+fn main(): int {
+    // 数组字面量：依次 dial_array_new + 若干 dial_array_push
+    var a: int[] = [10, 20, 30];
+
+    print("[array] 字面量 [10, 20, 30]");
+    print("[array] length = 3 ->");
+    print(a.length());
+
+    print("[array] 逐元素输出 ->");
+    var i: int = 0;
+    while (i < a.length()) {
+        print(a.get(i));
+        i = i + 1;
+    }
+
+    // push：返回（可能新的）指针，编译器自动写回 a
+    a.push(40);
+    print("[array] push(40) 后 length = 4 ->");
+    print(a.length());
+    print("[array] a.get(3) = 40 ->");
+    print(a.get(3));
+
+    // 下标读取：a[i] 等价于 a.get(i)
+    print("[array] a[0] 等价于 a.get(0) = 10 ->");
+    print(a[0]);
+
+    // 下标写入：a[i] = v 编译为 dial_array_set，并写回返回指针
+    a[0] = 99;
+    print("[array] a[0] = 99 后 ->");
+    print(a[0]);
+    print("[array] 其余元素不受影响 ->");
+    print(a[1]);
+    print(a[2]);
+    print(a[3]);
+
+    // 数组作为函数参数：按不透明指针传递，C 侧保证 COW 隔离
+    print("[array] sum_all(a) = 99+20+30+40 = 189 ->");
+    print(sum_all(a));
+
+    // 数组内部状态未被 callee 修改（读取语义）
+    print("[array] 调用后 length 仍为 4 ->");
+    print(a.length());
+
+    return 0;
+}

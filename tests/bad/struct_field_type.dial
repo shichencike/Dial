@@ -1,0 +1,10 @@
+// 应当编译失败：结构体字面量字段类型与声明不符（y 声明为 int，却给了 string）
+struct Point {
+    x: int,
+    y: int,
+}
+
+fn main(): int {
+    let p: Point = Point { x: 1, y: "two" };
+    return p.x;
+}

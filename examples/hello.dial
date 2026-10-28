@@ -1,0 +1,7 @@
+// dialc v0.1 示例：最小程序
+// 编译: dialc build hello.dial  -> 生成可执行文件 ./hello
+// 运行: dialc run hello.dial
+fn main(): int {
+    print("Hello, dialc!");
+    return 0;
+}

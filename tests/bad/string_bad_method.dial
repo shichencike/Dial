@@ -1,0 +1,5 @@
+// 应当编译失败：string 上不存在方法 reverse()
+fn main(): int {
+    let s: string = "abc";
+    return s.reverse();
+}

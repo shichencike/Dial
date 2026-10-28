@@ -1,0 +1,29 @@
+// dialc v0.3 示例：零隐式转换铁律下的显式类型转换
+// int_to_float / float_to_int 是唯一的合法转换通道，编译为 LLVM 的 sitofp / fptosi，不经 C 运行时。
+// 预期输出:
+//   12.500000
+//   3
+//   25.500000
+//   10
+
+fn main(): int {
+    let i: int = 10;
+
+    // int 必须显式转换为 float 才能参与浮点运算
+    let f: float = int_to_float(i) + 2.5;
+    print(f);                          // 12.5
+
+    // float 截断回 int（向零截断，与 C 的 (int) 一致）
+    let j: int = float_to_int(3.7);
+    print(j);                          // 3
+
+    // 混合运算先转换一侧：int 侧用 int_to_float 提升，float 侧保持
+    let k: float = int_to_float(5) * 5.1;
+    print(k);                          // 25.5
+
+    // 反向：float 转 int 后做整数除法
+    let m: int = float_to_int(10.9) / 1;
+    print(m);                          // 10
+
+    return 0;
+}

@@ -1,0 +1,6 @@
+// 应当编译失败：let 声明的变量不可变，不能重新赋值（改用 var）
+fn main(): int {
+    let n: int = 1;
+    n = 2;
+    return 0;
+}

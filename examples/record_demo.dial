@@ -1,0 +1,60 @@
+// dialc v0.2 示例：组合类型 —— 结构体中同时持有 string 与 int[]
+//
+// 这个例子用来说明三件事的边界：
+//   1) 结构体本身是**值类型**，在栈上分配（alloca + getelementptr）；
+//   2) 结构体里的 string / int[] 字段是**不透明指针**，其所有权由字段持有，
+//      随结构体值的复制而共享（引用计数 +1）；
+//   3) 打印必须落到具体标量：结构体与数组本身不可 print，需逐字段/逐元素打印。
+
+struct Student {
+    name: string,
+    scores: int[],
+    age: int,
+}
+
+fn total(s: Student): int {
+    var sum: int = 0;
+    var i: int = 0;
+    while (i < s.scores.length()) {
+        sum = sum + s.scores.get(i);
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn main(): int {
+    var stu: Student = Student {
+        name: "Alice",
+        scores: [90, 85, 95],
+        age: 18,
+    };
+
+    print("[record] 结构体字段（逐字段打印）->");
+    print(stu.name);
+    print(stu.age);
+    print("[record] scores 逐元素打印 ->");
+    var i: int = 0;
+    while (i < stu.scores.length()) {
+        print(stu.scores.get(i));
+        i = i + 1;
+    }
+
+    print("[record] total(stu) = 270 ->");
+    print(total(stu));
+
+    // 结构体整体复制：值语义。string/array 字段按共享引用传递（O(1)，无深拷贝）
+    var copy: Student = stu;
+    print("[record] 复制后 copy.name 与 stu.name 一致 ->");
+    print(copy.name);
+    print("[record] 复制后 copy.scores.length() = 3 ->");
+    print(copy.scores.length());
+
+    // 结构体字段可写（copy 由 var 声明）
+    copy.age = 20;
+    print("[record] copy.age 改为 20 ->");
+    print(copy.age);
+    print("[record] stu.age 不受影响，仍为 18 ->");
+    print(stu.age);
+
+    return 0;
+}

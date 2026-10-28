@@ -1,0 +1,41 @@
+// dialc v0.3 示例：and / or 短路求值
+// 用"副作用是否被触发"来证明短路：被跳过的分支其 print 不会出现。
+// 预期输出:
+//   L=0     (例1 AND，左为假 => 短路，右侧 R=1 不打印)
+//   false
+//   R=1     (例2 OR， 左为真 => 短路，右侧 R=0 不打印)
+//   true
+//   R=1     (例3 AND，左为真 => 必须求值右操作数)
+//   R=0
+//   false
+
+fn left_false(): bool {
+    print("L=0");
+    return false;
+}
+
+fn right_true(): bool {
+    print("R=1");
+    return true;
+}
+
+fn right_false(): bool {
+    print("R=0");
+    return false;
+}
+
+fn main(): int {
+    // 例1: AND，左为假 -> 短路，右操作数绝不求值
+    let a: bool = left_false() and right_true();
+    print(a);
+
+    // 例2: OR，左为真 -> 短路，右操作数绝不求值
+    let b: bool = right_true() or right_false();
+    print(b);
+
+    // 例3: AND，左为真 -> 必须求值右操作数
+    let c: bool = right_true() and right_false();
+    print(c);
+
+    return 0;
+}

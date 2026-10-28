@@ -1,0 +1,13 @@
+[package]
+name = "dialc"
+version = "0.3.0"
+edition = "2021"
+description = "dialc 编译型编程语言 v0.3 编译器（Rust + LLVM/inkwell）"
+license = "MIT"
+
+[[bin]]
+name = "dialc"
+path = "src/main.rs"
+
+[dependencies]
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm18-1-prefer-dynamic"] }

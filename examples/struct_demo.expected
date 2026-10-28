@@ -1,0 +1,19 @@
+[struct] p = (3, 4)
+3
+4
+[struct] q 字段顺序无关: q.x, q.y =
+20
+10
+[struct] m = make_point(7, 8)
+7
+8
+[struct] m.x 赋值为 100 ->
+100
+[struct] 嵌套: r.origin.x, r.w, r.h =
+3
+5
+6
+[struct] manhattan(p) = 7 ->
+7
+[struct] area(r) = 30 ->
+30

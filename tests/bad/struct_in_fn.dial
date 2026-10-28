@@ -1,0 +1,7 @@
+// 应当编译失败：struct 定义只能出现在顶层，不能写在函数体内
+fn main(): int {
+    struct Point {
+        x: int,
+    }
+    return 0;
+}

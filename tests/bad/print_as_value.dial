@@ -1,0 +1,5 @@
+// 应当编译失败：print 是语句（返回 void），不能当作值赋给变量
+fn main(): int {
+    let n: int = print("hi");
+    return 0;
+}

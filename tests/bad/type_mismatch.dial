@@ -1,0 +1,6 @@
+// 应当编译失败：把 string 赋值给 int 变量（类型不兼容）
+fn main(): int {
+    var s: string = "hi";
+    var n: int = s;
+    return 0;
+}

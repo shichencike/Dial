@@ -1,0 +1,70 @@
+// dialc v0.2 示例：string —— 不透明指针 + C 标准库 FFI 契约
+//
+// 在 Dial 生成的 LLVM IR 中，string 只是一个 `ptr`（i8*）。用户**永远无法**
+// 直接触碰其内存布局；一切操作都降级为对 C 导出函数的调用，例如：
+//     s.length()  ==>  call i64 @dial_string_length(ptr %s)
+// 内存布局 `[int64 refcount][int64 len][char data[]]` 被完全封装在 C 侧。
+
+fn main(): int {
+    let s: string = "Hello";
+    let t: string = ", Dial";
+
+    // length() -> dial_string_length
+    print("[string] \"Hello\".length() = 5 ->");
+    print(s.length());
+
+    // concat(t) -> dial_string_concat（产生新对象，不修改 s）
+    let u: string = s.concat(t);
+    print("[string] s.concat(t) ->");
+    print(u);
+    print("[string] 拼接结果长度 = 11 ->");
+    print(u.length());
+
+    // get(i) -> dial_string_get，返回字符的 int 码（v0.2 无 char 类型）
+    print("[string] u.get(0) = 'H' = 72 ->");
+    print(u.get(0));
+
+    // substring(from, to) -> dial_string_substring，半开区间 [from, to)
+    let sub: string = u.substring(0, 5);
+    print("[string] u.substring(0, 5) ->");
+    print(sub);
+
+    // 相等比较：编译为 dial_string_eq，按**内容**比较而非指针比较
+    if (sub.eq(s)) {
+        print("[string] substring(0,5) 与 \"Hello\" 内容相等 -> 1");
+    } else {
+        print("[string] 不应到达此分支");
+    }
+
+    // `==` / `!=` 对 string 同样按内容比较（而非比较指针地址）
+    if (sub == s) {
+        print("[string] == 按内容比较成立");
+    } else {
+        print("[string] == 不应到达此分支");
+    }
+    if (sub != s) {
+        print("[string] != 不应到达此分支");
+    } else {
+        print("[string] != 按内容比较成立");
+    }
+    let other: string = "World";
+    if (s == other) {
+        print("[string] 不应到达此分支");
+    } else {
+        print("[string] \"Hello\" != \"World\" 成立");
+    }
+
+    // clone() -> dial_rc_clone：引用计数为 1 时零拷贝返回自身（COW 命中）
+    let c: string = s.clone();
+    print("[string] s.clone() 内容 ->");
+    print(c);
+
+    // 说明：`+` 运算符**不**对 string 重载。Dial 不做隐式运算符重载，
+    // 字符串拼接必须显式调用 concat()，语义唯一、无歧义。
+    let w: string = s.concat(" World");
+    print("[string] s.concat(\" World\") ->");
+    print(w);
+    print(w.length());
+
+    return 0;
+}

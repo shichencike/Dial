@@ -1,0 +1,9 @@
+// 应当编译失败：函数 add 定义 2 个参数，调用时传了 3 个
+fn add(a: int, b: int): int {
+    return a + b;
+}
+
+fn main(): int {
+    var x: int = add(1, 2, 3);
+    return 0;
+}

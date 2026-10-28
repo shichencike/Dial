@@ -1,0 +1,3 @@
+/target/
+/.dialc_build/
+/examples/*.o
