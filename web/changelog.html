@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 · Dial 语言</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="index.html">首页</a>
+      <a href="spec.html">语言规范</a>
+      <a href="changelog.html" class="active">更新日志</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
+<ul>
+<li><a href="#changelog">更新日志 / Changelog</a><ul>
+<li><a href="#030-2026-10-28">[0.3.0] — 2026-10-28</a><ul>
+<li><a href="#added">Added（新增）</a></li>
+<li><a href="#changed">Changed（变更）</a></li>
+<li><a href="#fixed">Fixed（修复）</a></li>
+<li><a href="#docs">Docs（文档）</a></li>
+</ul>
+</li>
+<li><a href="#020">[0.2.0] — 基线版本（本仓库首个规范化基线）</a></li>
+<li><a href="#-unreleased-v02v03">未实现（-Unreleased-，v0.2/v0.3 语言层均未暴露）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="changelog">更新日志 / Changelog</h1>
+<p>本文件记录 Dial 语言编译器 <code>dialc</code> 的每个发布版本的相对变更。所有版本均遵循
+<a href="https://semver.org/lang/zh-CN/">语义化版本</a> 的精神：不兼容的语义变更属于同主版本内的修订（v0.x 阶段语言尚不稳定，修订号递增即可能含破坏性语义调整）。</p>
+<hr />
+<h2 id="030-2026-10-28">[0.3.0] — 2026-10-28</h2>
+<p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
+<h3 id="added">Added（新增）</h3>
+<ul>
+<li>内置类型转换函数 <code>int_to_float(int): float</code>，编译为 LLVM <code>sitofp</code>（x86-64：<code>cvtsi2sd</code>）。</li>
+<li>内置类型转换函数 <code>float_to_int(float): int</code>，编译为 LLVM <code>fptosi</code>（x86-64：<code>cvttsd2si</code>，向零截断，与 C 的 <code>(int)</code> 一致）。</li>
+<li>两者均为<strong>纯编译期内联</strong>，不经过任何 C 运行时函数，因此不引入额外依赖。</li>
+<li>新增示例 <code>examples/short_circuit.dial</code>（证明短路求值）、<code>examples/conversions.dial</code>（证明显式转换）。</li>
+<li>新增负向用例 <code>tests/bad/let_push.dial</code>、<code>tests/bad/implicit_conv.dial</code>、<code>tests/bad/mixed_arith.dial</code>。</li>
+</ul>
+<h3 id="changed">Changed（变更）</h3>
+<ul>
+<li><strong><code>and</code> / <code>or</code> 改为短路求值</strong>，与 C 的 <code>&amp;&amp;</code> / <code>||</code> 一致：先求左操作数，若已能决定结果则不再求值右操作数。
+  这保证了"判空后访问"类代码在左操作数为假时不会因右操作数被盲目求值而崩溃。</li>
+<li><strong>严格执行"零隐式转换铁律"</strong>：算术、相等、比较运算均要求两个操作数类型<strong>完全相同</strong>；<code>int</code> 与 <code>float</code>
+  之间不再有隐式提升或窄化，混用一律编译错误，必须显式调用 <code>int_to_float</code> / <code>float_to_int</code>。</li>
+<li><code>let</code> 变量调用 <code>push</code> / <code>set</code> 等"原地修改且可能更换指针"的方法现在会在语义阶段被<strong>明确拒绝</strong>；
+  此类方法的接收者必须是顶层 <code>var</code> 变量（详见 README §6.2、§11.3–§11.4）。</li>
+</ul>
+<h3 id="fixed">Fixed（修复）</h3>
+<ul>
+<li>修复了此前 <code>and</code> / <code>or</code> 不短路可能导致的判空崩溃隐患（如 <code>p != null and p.x &gt; 0</code> 在 <code>p</code> 为空时仍会求值右操作数）。</li>
+<li>修复了 <code>int → float</code> 隐式转换可能造成的静默精度丢失（如 <code>1 + 2.0</code> 曾默默将 <code>int</code> 提升为 <code>double</code>）。</li>
+<li>修复了 <code>let</code> 变量调用 <code>push</code> 时"容器被原地修改但接收者无法接收新指针"的悬垂风险，将其提前到编译期拒绝。</li>
+</ul>
+<h3 id="docs">Docs（文档）</h3>
+<ul>
+<li>README 同步更新：§5.3 零隐式转换铁律、§6.2 可变性判定（含 <code>push</code>/<code>set</code>）、§7.2 类型规则、
+  §7.3 语义细则表（修正 <code>and</code>/<code>or</code> 与混合算术两行）、§11.3–§11.4 接收者须为 <code>var</code>、§18 v0.3 变更摘要。</li>
+<li>新增 <code>REPORT_v0.3.md</code>：基于 <code>objdump -d</code> 真实反汇编的短路求值与 <code>int_to_float</code>/<code>float_to_int</code> 落地证据，
+  以及端到端自测结果与产物零 LLVM 依赖契约校验。</li>
+</ul>
+<hr />
+<h2 id="020">[0.2.0] — 基线版本（本仓库首个规范化基线）</h2>
+<blockquote>
+<p>注：本仓库的历史从 v0.3.0 的源码状态起记。<code>0.2.0</code> 及以下版本的特性以下列条目作为基线描述，
+具体提交不在本仓库历史中。</p>
+</blockquote>
+<ul>
+<li>编译器前端（Rust + inkwell）把 Dial AST 翻译为 LLVM IR；IR 全程在内存中构建并直接 <code>write_to_file</code> 写出 <code>.o</code>。</li>
+<li>两步构建：<code>zig cc</code> 把 <code>stdlib/</code> 与 <code>runtime/</code> 编译归档为 <code>libdial_std.a</code>，再与用户 <code>.o</code> 链接。</li>
+<li>不透明指针契约：<code>string</code> / <code>int[]</code> 在 IR 中只是 <code>ptr</code>，用户代码无法触碰其内存布局。</li>
+<li>引用计数 + COW 所有权模型，Sema 阶段做数据流/逃逸分析以静态消除运行时开销。</li>
+<li>基本类型 <code>int</code> / <code>float</code> / <code>bool</code> / <code>string</code> / <code>int[]</code> / 结构体（值类型）。</li>
+<li><code>and</code> / <code>or</code> 在 v0.2 中为<strong>非短路</strong>（旧行为，v0.3 已改为短路）；<code>int→float</code> 在 v0.2 中存在隐式提升（v0.3 已废除）。</li>
+</ul>
+<hr />
+<h2 id="-unreleased-v02v03">未实现（-Unreleased-，v0.2/v0.3 语言层均未暴露）</h2>
+<ul>
+<li>哈希表 <code>Map</code>：C 侧 <code>dial_map_*</code> 已实现，但语言层无 <code>Map</code> 类型。</li>
+<li><code>read_line</code>：C 侧 <code>dial_read_line</code> 已实现，语言层未暴露。</li>
+<li>文件 IO、多维数组、非 <code>int</code> 元素数组、<code>char</code> 类型。</li>
+<li><code>else if</code> / <code>for</code> / <code>break</code> / <code>continue</code>、裸块 <code>{ ... }</code>。</li>
+<li>模块 / 包 / import、泛型、接口、trait、闭包。</li>
+<li>指针、地址取值、指针算术（永不提供）；运算符重载（永不提供）；全局变量。</li>
+</ul></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v0.3 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+  </div>
+</footer>
+
+</body>
+</html>

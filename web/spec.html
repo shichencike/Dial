@@ -1,0 +1,1420 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>语言规范 · Dial 语言</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="index.html">首页</a>
+      <a href="spec.html" class="active">语言规范</a>
+      <a href="changelog.html">更新日志</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
+<ul>
+<li><a href="#dialc-dial-v03">dialc — Dial 语言编译器 v0.3</a><ul>
+<li><a href="#1">1. 设计原则</a></li>
+<li><a href="#2">2. 目录结构</a></li>
+<li><a href="#3">3. 构建与使用</a><ul>
+<li><a href="#31">3.1 构建编译器</a></li>
+<li><a href="#32-dial">3.2 编译 Dial 程序</a></li>
+<li><a href="#33">3.3 产物依赖契约</a></li>
+</ul>
+</li>
+<li><a href="#4">4. 词法结构</a><ul>
+<li><a href="#41">4.1 注释</a></li>
+<li><a href="#42">4.2 标识符</a></li>
+<li><a href="#43">4.3 关键字</a></li>
+<li><a href="#44">4.4 字面量</a></li>
+<li><a href="#45">4.5 运算符与标点</a></li>
+</ul>
+</li>
+<li><a href="#5">5. 类型系统</a><ul>
+<li><a href="#51">5.1 基本类型</a></li>
+<li><a href="#52">5.2 类型良构性约束</a></li>
+<li><a href="#53">5.3 类型转换</a></li>
+</ul>
+</li>
+<li><a href="#6">6. 变量与可变性</a><ul>
+<li><a href="#61">6.1 声明</a></li>
+<li><a href="#62">6.2 可变性判定</a></li>
+</ul>
+</li>
+<li><a href="#7">7. 表达式与运算符</a><ul>
+<li><a href="#71">7.1 优先级（由低到高）</a></li>
+<li><a href="#72">7.2 类型规则</a></li>
+<li><a href="#73-c">7.3 语义细则（与 C 的重要差异）</a></li>
+</ul>
+</li>
+<li><a href="#8">8. 语句与控制流</a><ul>
+<li><a href="#81">8.1 语句一览</a></li>
+<li><a href="#82-if-while">8.2 if / while</a></li>
+<li><a href="#83">8.3 块与作用域</a></li>
+</ul>
+</li>
+<li><a href="#9">9. 函数</a><ul>
+<li><a href="#91">9.1 定义</a></li>
+<li><a href="#92">9.2 入口函数</a></li>
+<li><a href="#93">9.3 参数传递与所有权</a></li>
+<li><a href="#94">9.4 返回值的确定性</a></li>
+</ul>
+</li>
+<li><a href="#10">10. 结构体</a><ul>
+<li><a href="#101">10.1 定义</a></li>
+<li><a href="#102">10.2 字面量</a></li>
+<li><a href="#103">10.3 访问与赋值</a></li>
+<li><a href="#104">10.4 语义</a></li>
+</ul>
+</li>
+<li><a href="#11-int">11. 动态数组 int[]</a><ul>
+<li><a href="#111">11.1 构造</a></li>
+<li><a href="#112">11.2 方法</a></li>
+<li><a href="#113-push-set">11.3 为什么 push / set 要返回指针</a></li>
+<li><a href="#114-var">11.4 接收者必须是可变变量（var）</a></li>
+<li><a href="#115">11.5 越界行为</a></li>
+</ul>
+</li>
+<li><a href="#12-string">12. 字符串 string</a><ul>
+<li><a href="#121">12.1 方法</a></li>
+<li><a href="#122">12.2 不可变语义</a></li>
+</ul>
+</li>
+<li><a href="#13">13. 内存与所有权模型</a><ul>
+<li><a href="#131">13.1 不透明指针契约</a></li>
+<li><a href="#132">13.2 引用计数对象的布局</a></li>
+<li><a href="#133">13.3 编译期三种绑定策略</a></li>
+<li><a href="#134">13.4 栈分配与逃逸分析</a></li>
+<li><a href="#135-cow">13.5 COW 的触发时机</a></li>
+<li><a href="#136">13.6 自赋值安全</a></li>
+<li><a href="#137">13.7 返回值不被提前释放</a></li>
+</ul>
+</li>
+<li><a href="#14-ffi-dial-c">14. FFI 契约：Dial 语法 → C 函数</a><ul>
+<li><a href="#c-runtime">C Runtime 导出函数</a></li>
+</ul>
+</li>
+<li><a href="#15-print">15. 内置 print</a></li>
+<li><a href="#16">16. 未定义行为与已实现边界</a><ul>
+<li><a href="#161-c">16.1 未定义行为（与 C 一致的部分）</a></li>
+<li><a href="#162-v02">16.2 v0.2 未实现（不要指望能编译）</a></li>
+</ul>
+</li>
+<li><a href="#17">17. 测试</a><ul>
+<li><a href="#_1">示例清单</a></li>
+<li><a href="#testsbad">负向用例清单（节选，全部位于 tests/bad/）</a></li>
+</ul>
+</li>
+<li><a href="#18-v03-v02">18. v0.3 变更摘要（相对 v0.2）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="dialc-dial-v03">dialc — Dial 语言编译器 v0.3</h1>
+<p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
+只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
+Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
+<p>本文件是 v0.3 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
+不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。</p>
+<hr />
+<h2 id="1">1. 设计原则</h2>
+<table>
+<thead>
+<tr>
+<th>原则</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>静态强类型，无推断</strong></td>
+<td>每个变量、参数、返回值都必须显式标注类型；不存在 <code>auto</code> / 类型推导</td>
+</tr>
+<tr>
+<td><strong>不透明指针（Opaque Pointer）</strong></td>
+<td><code>string</code> 与 <code>int[]</code> 在 IR 中只是一个 <code>ptr</code>；用户代码永远无法触碰其内存布局</td>
+</tr>
+<tr>
+<td><strong>C 承担一切容器</strong></td>
+<td>字符串、动态数组、哈希表、IO、内存管理全部由 <code>stdlib/</code> 与 <code>runtime/</code> 的 C 代码实现</td>
+</tr>
+<tr>
+<td><strong>编译期所有权优化</strong></td>
+<td>Sema 阶段做数据流分析，尽可能把引用计数开销静态消除；只有静态分析失效时才由 C Runtime 的 COW 兜底</td>
+</tr>
+<tr>
+<td><strong>产物零 LLVM 依赖</strong></td>
+<td>用户编译出的可执行文件只依赖 C Runtime（libc），<strong>绝不</strong>依赖 libLLVM</td>
+</tr>
+<tr>
+<td><strong>比 C 更严格</strong></td>
+<td>强制初始化、强制不可变性、禁止隐式窄化转换、禁止省略结构体字段——把 C 中大量"未定义行为"变成"编译期错误"</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="2">2. 目录结构</h2>
+<pre><code>dialc/
+├── src/                    # 编译器前端（Rust + inkwell）
+│   ├── main.rs             #   驱动：两步构建（emit .o / 链接）
+│   ├── lexer.rs            #   词法分析
+│   ├── parser.rs           #   语法分析（递归下降 + 优先级）
+│   ├── ast.rs              #   抽象语法树与类型定义
+│   ├── semantic.rs         #   语义分析 + 数据流分析（移动/共享判定）
+│   ├── codegen.rs          #   LLVM IR 生成（inkwell，内存中构建，直接 emit .o）
+│   └── error.rs            #   带行列号的错误类型
+├── runtime/                # C 运行时（引用计数原语）
+│   └── dial_rt_mem.h / .c  #   refcount 分配 / retain / release / COW clone
+├── stdlib/                 # C 标准库（Dial 语言的实际能力来源）
+│   ├── dial_string.h / .c  #   String
+│   ├── dial_array.h / .c   #   Array&lt;int&gt;
+│   ├── dial_map.h / .c     #   Map（C 侧已实现，v0.2 语言层未暴露）
+│   └── dial_io.h / .c      #   打印 / 读行
+├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
+├── tests/
+│   ├── run_tests.sh        # 端到端测试
+│   └── bad/                # 必须编译失败的负向用例
+└── README.md               # 本文件
+</code></pre>
+<hr />
+<h2 id="3">3. 构建与使用</h2>
+<h3 id="31">3.1 构建编译器</h3>
+<pre><code class="language-bash">export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18   # 按本机 LLVM 18 安装路径调整
+cargo build --release                          # 产物：target/release/dialc
+</code></pre>
+<p><code>dialc</code> 自身链接 libLLVM——这是<strong>编译器</strong>的依赖，与用户程序无关。</p>
+<h3 id="32-dial">3.2 编译 Dial 程序</h3>
+<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link]
+dialc run   &lt;源文件.dial&gt; [-o 可执行文件]
+</code></pre>
+<p><code>dialc build</code> 严格分成两步，这是架构约束而非实现细节：</p>
+<table>
+<thead>
+<tr>
+<th>步骤</th>
+<th>负责组件</th>
+<th>是否需要 LLVM</th>
+<th>产物</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>第一步：代码生成</strong></td>
+<td>inkwell 在<strong>内存中</strong>构建 IR，再由 <code>TargetMachine::write_to_file</code> 直接写出机器码</td>
+<td><strong>需要</strong></td>
+<td><code>&lt;源文件&gt;.o</code></td>
+</tr>
+<tr>
+<td><strong>第二步：链接</strong></td>
+<td><code>zig cc</code>（缺失时回退 <code>clang</code>）把 <code>stdlib/</code> 与 <code>runtime/</code> 的 C 代码编译并归档为 <code>libdial_std.a</code>，再与用户 <code>.o</code> 链接</td>
+<td><strong>不需要</strong></td>
+<td>可执行文件</td>
+</tr>
+</tbody>
+</table>
+<p>要点：</p>
+<ul>
+<li>第一步不导出 <code>.ll</code> 文本、不调用外部命令，IR 全程在内存中。</li>
+<li>第二步完全交给 <code>zig cc</code>，此时 LLVM 已退出舞台。</li>
+<li><code>--no-link</code> 只执行第一步，便于交叉编译或自行接管链接。</li>
+<li>中间产物落在工程根的 <code>.dialc_build/</code>（C 的 <code>.o</code> 与 <code>libdial_std.a</code>）。</li>
+</ul>
+<h3 id="33">3.3 产物依赖契约</h3>
+<p>用户编译出的可执行文件<strong>只允许</strong>依赖 C Runtime：</p>
+<pre><code class="language-bash">$ ldd examples/hello
+    linux-vdso.so.1
+    libc.so.6 =&gt; /lib/x86_64-linux-gnu/libc.so.6
+    /lib64/ld-linux-x86-64.so.2
+</code></pre>
+<p><code>tests/run_tests.sh</code> 的 C 组会把"产物不得依赖 libLLVM"作为<strong>硬断言</strong>执行。</p>
+<hr />
+<h2 id="4">4. 词法结构</h2>
+<h3 id="41">4.1 注释</h3>
+<p><code>//</code> 到行尾。无块注释。</p>
+<h3 id="42">4.2 标识符</h3>
+<p>以字母或 <code>_</code> 开头，后接字母、数字或 <code>_</code>。</p>
+<h3 id="43">4.3 关键字</h3>
+<pre><code>var  let  fn  struct  if  else  while  return
+and  or   not
+true false
+int  float  bool  string  void
+</code></pre>
+<h3 id="44">4.4 字面量</h3>
+<table>
+<thead>
+<tr>
+<th>类别</th>
+<th>写法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>整数</td>
+<td><code>123</code></td>
+<td>十进制，对应 <code>int</code>（i64）</td>
+</tr>
+<tr>
+<td>浮点</td>
+<td><code>3.14</code></td>
+<td>必须含小数点，对应 <code>float</code>（f64）</td>
+</tr>
+<tr>
+<td>布尔</td>
+<td><code>true</code> / <code>false</code></td>
+<td>对应 <code>bool</code></td>
+</tr>
+<tr>
+<td>字符串</td>
+<td><code>"hello"</code></td>
+<td>双引号；转义仅支持 <code>\n</code> <code>\t</code> <code>\\</code> <code>\"</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="45">4.5 运算符与标点</h3>
+<pre><code>+  -  *  /  ==  !=  &lt;  &gt;  &lt;=  &gt;=  =  .  [  ]  ;  ,  (  )  {  }  :
+</code></pre>
+<blockquote>
+<p><strong>注意</strong>：单独的 <code>!</code> 是词法错误。逻辑非必须写关键字 <code>not</code>。</p>
+</blockquote>
+<hr />
+<h2 id="5">5. 类型系统</h2>
+<h3 id="51">5.1 基本类型</h3>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>底层表示</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int</code></td>
+<td>LLVM <code>i64</code></td>
+<td>整数</td>
+</tr>
+<tr>
+<td><code>float</code></td>
+<td>LLVM <code>double</code></td>
+<td>双精度浮点</td>
+</tr>
+<tr>
+<td><code>bool</code></td>
+<td>LLVM <code>i1</code></td>
+<td>布尔</td>
+</tr>
+<tr>
+<td><code>string</code></td>
+<td>LLVM <code>ptr</code>（不透明）</td>
+<td>由 C Runtime 管理的引用计数字符串</td>
+</tr>
+<tr>
+<td><code>int[]</code></td>
+<td>LLVM <code>ptr</code>（不透明）</td>
+<td>由 C Runtime 管理的动态数组，<strong>元素类型固定为 <code>int</code></strong></td>
+</tr>
+<tr>
+<td><code>void</code></td>
+<td>LLVM <code>void</code></td>
+<td><strong>仅可用作函数返回类型</strong></td>
+</tr>
+<tr>
+<td>结构体</td>
+<td>LLVM 具名 struct</td>
+<td>值类型，栈分配</td>
+</tr>
+</tbody>
+</table>
+<h3 id="52">5.2 类型良构性约束</h3>
+<p>以下写法在编译期即被拒绝（而非运行期静默降级）：</p>
+<table>
+<thead>
+<tr>
+<th>写法</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>float[]</code></td>
+<td>❌ 错误。v0.2 数组元素只支持 <code>int</code></td>
+</tr>
+<tr>
+<td><code>int[][]</code></td>
+<td>❌ 错误。不支持嵌套数组</td>
+</tr>
+<tr>
+<td><code>var v: void = ...</code></td>
+<td>❌ 错误。<code>void</code> 不能作为变量类型</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>之所以在编译期拒绝 <code>float[]</code>：C 侧 <code>dial_array_*</code> 以 <code>int64</code> 存储元素，
+若允许 <code>float[]</code>，元素会在跨越 FFI 边界时被 <code>fptosi</code> <strong>静默截断</strong>。
+宁可拒绝，不可静默损坏数据。</p>
+</blockquote>
+<h3 id="53">5.3 类型转换</h3>
+<p><strong>零隐式转换铁律。</strong></p>
+<p>Dial <strong>不存在任何</strong>隐式类型转换——既没有 <code>int → float</code> 的隐式提升，也没有 <code>float → int</code> 的隐式窄化，
+更没有 <code>int</code>/<code>float</code> 在算术或比较中的隐式混用。两个操作数只要类型不完全相同，就一律编译错误。
+这比 C 更严格：C 允许 <code>1 + 2.0</code> 把 <code>int</code> 默默提升为 <code>double</code>，正是大量隐蔽精度 bug 的温床，
+Dial 在编译期即切断。</p>
+<p>唯一的合法转换通道是<strong>命名清晰的内置函数</strong>，它们把"发生过转换"这件事明明白白写出来：</p>
+<table>
+<thead>
+<tr>
+<th>内置函数</th>
+<th>签名</th>
+<th>编译为</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int_to_float</code></td>
+<td><code>int_to_float(x: int): float</code></td>
+<td>LLVM <code>sitofp</code></td>
+<td>整数 → 双精度浮点</td>
+</tr>
+<tr>
+<td><code>float_to_int</code></td>
+<td><code>float_to_int(x: float): int</code></td>
+<td>LLVM <code>fptosi</code></td>
+<td>浮点 → 整数（向零截断，与 C 的 <code>(int)</code> 一致）</td>
+</tr>
+</tbody>
+</table>
+<p>示例：</p>
+<pre><code class="language-dial">let i: int = 10;
+let f: float = int_to_float(i) + 2.5;   // 必须先显式转换，再参与浮点运算
+let j: int = float_to_int(3.7);          // j == 3（截断）
+</code></pre>
+<blockquote>
+<p><code>int_to_float</code> / <code>float_to_int</code> 是纯编译器内联的 LLVM 指令，<strong>不经过任何 C 运行时函数</strong>，
+因此不会引入额外依赖（见 §14）。</p>
+</blockquote>
+<hr />
+<h2 id="6">6. 变量与可变性</h2>
+<h3 id="61">6.1 声明</h3>
+<pre><code class="language-dial">var x: int = 10;      // 可变
+let y: int = 20;      // 不可变
+</code></pre>
+<p>规则：</p>
+<ol>
+<li><strong>必须显式标注类型</strong>，无类型推断。</li>
+<li><strong>必须初始化</strong>，不存在未初始化变量（这一点比 C 严格）。</li>
+<li><code>let</code> 变量<strong>不可重新赋值</strong>，也不可经字段/下标写入。违反即编译错误：</li>
+</ol>
+<p><code>语义错误：变量 'n' 由 let 声明，不可重新赋值</code></p>
+<ol start="4">
+<li>同一作用域内不可重复声明。</li>
+<li><code>if</code> / <code>while</code> 体内构成内层作用域，允许声明与外层同名的变量（遮蔽外层）。</li>
+</ol>
+<h3 id="62">6.2 可变性判定</h3>
+<p>写入操作的合法性取决于<strong>根变量</strong>的可变性：</p>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>要求</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>x = e</code></td>
+<td><code>x</code> 必须是 <code>var</code></td>
+</tr>
+<tr>
+<td><code>x.f = e</code></td>
+<td><code>x</code> 必须是 <code>var</code></td>
+</tr>
+<tr>
+<td><code>x[i] = e</code></td>
+<td><code>x</code> 必须是 <code>var</code></td>
+</tr>
+<tr>
+<td><code>x.push(v)</code> / <code>x[i] = v</code>（原地修改）</td>
+<td><code>x</code> 必须是顶层 <code>var</code>；<code>let</code> 变量、字段、下标均不可作接收者（见 §11.3）</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>为什么 <code>let</code> 变量不能调用 <code>push</code> / <code>set</code></strong>：这两种操作会原地修改容器，且因 COW 可能<strong>更换底层指针</strong>；
+编译器必须把返回的新指针写回接收者。接收者若不可重新赋值（<code>let</code>）或根本不是可写回的顶层变量
+（字段、下标），就无法可靠地完成这次"写回"，于是编译器在<strong>语义阶段即拒绝</strong>，而非把旧指针留在原地酿成悬垂。
+若只是想获得一个新容器而不就地修改，请以表达式形式使用：<code>let b: int[] = a.push(v);</code></p>
+</blockquote>
+<hr />
+<h2 id="7">7. 表达式与运算符</h2>
+<h3 id="71">7.1 优先级（由低到高）</h3>
+<table>
+<thead>
+<tr>
+<th>层级</th>
+<th>运算符</th>
+<th>结合性</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>or</code></td>
+<td>左</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>and</code></td>
+<td>左</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>not</code>（前缀）</td>
+<td>右</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>==</code> <code>!=</code></td>
+<td>左</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>&lt;</code> <code>&gt;</code> <code>&lt;=</code> <code>&gt;=</code></td>
+<td>左</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>+</code> <code>-</code></td>
+<td>左</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>*</code> <code>/</code></td>
+<td>左</td>
+</tr>
+<tr>
+<td>8</td>
+<td><code>-</code>（一元负号）</td>
+<td>右</td>
+</tr>
+<tr>
+<td>9</td>
+<td><code>.field</code> <code>.method(args)</code> <code>[index]</code></td>
+<td>左（可链式）</td>
+</tr>
+<tr>
+<td>10</td>
+<td>字面量、变量、调用、数组/结构体字面量</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>因此 <code>not a == b</code> 解析为 <code>not (a == b)</code>。</p>
+<h3 id="72">7.2 类型规则</h3>
+<table>
+<thead>
+<tr>
+<th>运算符</th>
+<th>操作数要求</th>
+<th>结果类型</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>+</code> <code>-</code> <code>*</code> <code>/</code></td>
+<td>两侧<strong>必须同为 <code>int</code></strong>（→<code>int</code>）或同为 <code>float</code>（→<code>float</code>），<strong>不可混合</strong></td>
+<td><code>int</code> 或 <code>float</code></td>
+</tr>
+<tr>
+<td><code>==</code> <code>!=</code></td>
+<td>两侧类型完全相同：同为数值（<code>int</code> 或 <code>float</code>，不可混合）、或同为 <code>bool</code>、或同为 <code>string</code></td>
+<td><code>bool</code></td>
+</tr>
+<tr>
+<td><code>&lt;</code> <code>&gt;</code> <code>&lt;=</code> <code>&gt;=</code></td>
+<td>两侧类型完全相同且均为数值（<code>int</code> 或 <code>float</code>，不可混合）</td>
+<td><code>bool</code></td>
+</tr>
+<tr>
+<td><code>and</code> <code>or</code></td>
+<td>两侧均为 <code>bool</code>，<strong>短路求值</strong></td>
+<td><code>bool</code></td>
+</tr>
+<tr>
+<td><code>-</code>（一元）</td>
+<td><code>int</code> 或 <code>float</code>（与原操作数同类型）</td>
+<td>同操作数</td>
+</tr>
+<tr>
+<td><code>not</code></td>
+<td><code>bool</code></td>
+<td><code>bool</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>所有二元运算都要求操作数<strong>类型完全相同</strong>。特别地，<code>1 + 2.0</code> 在 C 里合法（int 提升为 double），
+在 Dial 里是<strong>编译错误</strong>——必须先写 <code>int_to_float(1) + 2.0</code>。这把"隐式混用"从运行期隐患提前到编译期拒绝。</p>
+</blockquote>
+<p>违反以上任一条即编译错误。</p>
+<h3 id="73-c">7.3 语义细则（与 C 的重要差异）</h3>
+<table>
+<thead>
+<tr>
+<th>行为</th>
+<th>Dial 的规定</th>
+<th>对比 C</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>整数除法 <code>7 / 2</code></td>
+<td>整数除法，结果 <code>3</code></td>
+<td>同 C</td>
+</tr>
+<tr>
+<td>混合算术 <code>7 / 2.0</code></td>
+<td>❌ <strong>编译错误</strong>：<code>int</code> 与 <code>float</code> 无隐式转换，必须先 <code>int_to_float(7) / 2.0</code></td>
+<td>C 隐式把 <code>int</code> 提升为 <code>double</code>，结果 <code>3.5</code></td>
+</tr>
+<tr>
+<td><code>and</code> / <code>or</code> 求值</td>
+<td><strong>短路求值</strong>（与 C 的 <code>&amp;&amp;</code> / <code>\|\|</code> 一致）</td>
+<td>C 同样短路</td>
+</tr>
+<tr>
+<td>字符串 <code>==</code></td>
+<td>按<strong>内容</strong>比较（<code>dial_string_eq</code>）</td>
+<td>C 的 <code>==</code> 比指针</td>
+</tr>
+<tr>
+<td>数组 <code>==</code></td>
+<td>❌ 不支持</td>
+<td>—</td>
+</tr>
+<tr>
+<td>结构体 <code>==</code></td>
+<td>❌ 不支持</td>
+<td>—</td>
+</tr>
+<tr>
+<td>运算符重载</td>
+<td>❌ 不存在。字符串拼接必须写 <code>concat()</code></td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><code>and</code> / <code>or</code> 的短路求值是一项<strong>强制语义</strong>：先求左操作数，若已能决定结果（<code>and</code> 遇假、<code>or</code> 遇真）则不再求值右操作数。
+这保证了诸如"判空后访问"这类依赖短路的代码不会因右操作数被盲目求值而崩溃——这是现代语言的常识。
+若需要两侧副作用都必然发生，请显式写成两条独立语句。</p>
+</blockquote>
+<hr />
+<h2 id="8">8. 语句与控制流</h2>
+<h3 id="81">8.1 语句一览</h3>
+<pre><code class="language-dial">var x: int = 1;            // 变量声明
+x = 2;                     // 赋值
+p.x = 3;                   // 字段赋值
+a[0] = 4;                  // 下标赋值
+print(e);                  // 打印语句
+f(1, 2);                   // 表达式语句
+if (cond) { ... } else { ... }
+while (cond) { ... }
+return e;                  // 或 return;（仅 void 函数）
+</code></pre>
+<h3 id="82-if-while">8.2 <code>if</code> / <code>while</code></h3>
+<p>条件<strong>必须带括号</strong>，且类型必须是 <code>bool</code>：</p>
+<pre><code class="language-dial">if (x &gt; 0) { ... } else { ... }
+while (i &lt; n) { ... }
+</code></pre>
+<p>无 <code>else if</code> 语法糖，需嵌套书写；无 <code>for</code>、无 <code>break</code>、无 <code>continue</code>。</p>
+<h3 id="83">8.3 块与作用域</h3>
+<p><code>{ ... }</code> 只能作为函数体或 <code>if</code>/<code>while</code> 的分支体，<strong>不能</strong>作为独立的裸块语句。</p>
+<hr />
+<h2 id="9">9. 函数</h2>
+<h3 id="91">9.1 定义</h3>
+<pre><code class="language-dial">fn add(a: int, b: int): int {
+    return a + b;
+}
+
+fn log(msg: string): void {
+    print(msg);
+    return;
+}
+</code></pre>
+<ul>
+<li>参数与返回类型均须显式标注。</li>
+<li>返回类型可以是 <code>void</code>。</li>
+</ul>
+<h3 id="92">9.2 入口函数</h3>
+<p>程序<strong>必须</strong>定义 <code>main</code>，且返回类型必须是 <code>int</code>：</p>
+<pre><code class="language-dial">fn main(): int {
+    return 0;
+}
+</code></pre>
+<p><code>main</code> 的返回值作为进程退出码（C ABI 下为 <code>i32</code>）。</p>
+<h3 id="93">9.3 参数传递与所有权</h3>
+<table>
+<thead>
+<tr>
+<th>参数类型</th>
+<th>传递方式</th>
+<th>被调方所有权</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int</code> <code>float</code> <code>bool</code></td>
+<td>按值</td>
+<td>无</td>
+</tr>
+<tr>
+<td><code>string</code> <code>int[]</code></td>
+<td>不透明指针按值传递</td>
+<td>入口 <code>retain</code>，出口 <code>release</code>（借用语义）</td>
+</tr>
+<tr>
+<td>结构体</td>
+<td>按值拷贝（含其堆字段指针的复制）</td>
+<td>入口递归 <code>retain</code> 堆字段，出口递归 <code>release</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="94">9.4 返回值的确定性</h3>
+<p>非 <code>void</code> 函数若执行到函数体末尾仍无 <code>return</code>，返回该类型的<strong>零值</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>零值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int</code></td>
+<td><code>0</code></td>
+</tr>
+<tr>
+<td><code>float</code></td>
+<td><code>0.0</code></td>
+</tr>
+<tr>
+<td><code>bool</code></td>
+<td><code>false</code></td>
+</tr>
+<tr>
+<td><code>string</code> / <code>int[]</code></td>
+<td>空指针</td>
+</tr>
+<tr>
+<td>结构体</td>
+<td>各字段取其零值</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>这比 C 严格：C 中"非 void 函数落到末尾"是<strong>未定义行为</strong>，Dial 定义为确定的零值。</p>
+</blockquote>
+<hr />
+<h2 id="10">10. 结构体</h2>
+<h3 id="101">10.1 定义</h3>
+<p>只能在<strong>顶层</strong>定义，写在函数体内是语法错误：</p>
+<pre><code class="language-dial">struct Point {
+    x: int,
+    y: int,
+}
+</code></pre>
+<p>字段类型可以是 <code>int</code> / <code>float</code> / <code>bool</code> / <code>string</code> / <code>int[]</code> / 另一个结构体。</p>
+<h3 id="102">10.2 字面量</h3>
+<pre><code class="language-dial">let p: Point = Point { x: 3, y: 4 };
+let q: Point = Point { y: 10, x: 20 };   // 顺序无关
+</code></pre>
+<p>规则：</p>
+<ol>
+<li><strong>必须显式列出全部字段。</strong> 不支持"省略即零初始化"——C 允许 <code>Point p = {.x=1}</code>，
+   Dial 不允许，以此杜绝漏初始化字段。</li>
+<li><strong>字段顺序与声明顺序无关</strong>，字面量按<strong>字段名</strong>定位下标（不会因顺序不同而错位）。</li>
+<li>字段类型必须与该字段声明类型兼容。</li>
+</ol>
+<h3 id="103">10.3 访问与赋值</h3>
+<pre><code class="language-dial">print(p.x);            // 读
+p.x = 100;             // 写（p 必须是 var）
+print(r.origin.x);     // 支持链式
+</code></pre>
+<h3 id="104">10.4 语义</h3>
+<p>结构体是<strong>值类型</strong>：</p>
+<ul>
+<li>在 LLVM 中以 <code>alloca</code> 落在栈上，字段访问编译为 <code>getelementptr</code>，零运行时开销。</li>
+<li>赋值、传参、返回均为<strong>值拷贝</strong>。</li>
+<li>若结构体含有 <code>string</code> / <code>int[]</code> 字段，值拷贝时这些字段按<strong>共享引用</strong>处理：
+  编译期插入对称的 <code>retain</code>，作用域结束时插入对称的 <code>release</code>（详见 §13.4）。</li>
+</ul>
+<hr />
+<h2 id="11-int">11. 动态数组 <code>int[]</code></h2>
+<p><code>int[]</code> 是不透明指针，内存布局 <code>[refcount][len][cap][elems...]</code> 由 C 侧私有维护。</p>
+<h3 id="111">11.1 构造</h3>
+<pre><code class="language-dial">var a: int[] = [10, 20, 30];
+</code></pre>
+<p>空数组字面量 <code>[]</code> 不支持（无法推断元素类型）。</p>
+<h3 id="112">11.2 方法</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>等价于 C 调用</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>a.length()</code></td>
+<td><code>dial_array_length</code></td>
+<td><code>int</code></td>
+<td>元素个数</td>
+</tr>
+<tr>
+<td><code>a.get(i)</code></td>
+<td><code>dial_array_get</code></td>
+<td><code>int</code></td>
+<td>按下标读</td>
+</tr>
+<tr>
+<td><code>a.push(v)</code></td>
+<td><code>dial_array_push</code></td>
+<td><code>int[]</code></td>
+<td>追加；<strong>返回（可能更新后的）数组指针</strong></td>
+</tr>
+<tr>
+<td><code>a.set(i, v)</code></td>
+<td><code>dial_array_set</code></td>
+<td><code>int[]</code></td>
+<td>按下标写；被共享时内部触发 COW，<strong>返回新指针</strong></td>
+</tr>
+<tr>
+<td><code>a.clone()</code></td>
+<td><code>dial_array_clone</code></td>
+<td><code>int[]</code></td>
+<td>COW 感知克隆</td>
+</tr>
+</tbody>
+</table>
+<p>下标语法 <code>a[i]</code> 等价于 <code>a.get(i)</code>；<code>a[i] = v</code> 等价于 <code>a = a.set(i, v)</code>。</p>
+<h3 id="113-push-set">11.3 为什么 <code>push</code> / <code>set</code> 要返回指针</h3>
+<p>这两种操作在需要扩容或存在多个持有者时，会产生<strong>新的</strong>不透明指针。
+编译器强制把返回值写回接收变量，杜绝"旧指针失效"的悬垂问题：</p>
+<pre><code class="language-dial">var a: int[] = [10, 20, 30];
+a.push(40);     // 编译器自动写回 a，无需（也不允许）手写 a = a.push(40)
+a[0] = 99;      // 同理
+</code></pre>
+<blockquote>
+<p>此处<strong>不</strong>对旧指针做 <code>release</code>：<code>dial_array_push</code> / <code>dial_array_set</code> 已经在
+C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并释放本调用者的引用）。
+若编译器再补一次 <code>release</code>，会造成悬垂指针或双重释放。</p>
+</blockquote>
+<h3 id="114-var">11.4 接收者必须是可变变量（<code>var</code>）</h3>
+<p><code>push</code> / <code>set</code> 会修改容器并可能更换指针，因此<strong>接收表达式必须是顶层可变变量</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>调用形式</th>
+<th>是否允许</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>var a: int[] = ...; a.push(v);</code></td>
+<td>✅ 允许（编译器把新指针写回 <code>a</code>）</td>
+</tr>
+<tr>
+<td><code>let a: int[] = ...; a.push(v);</code></td>
+<td>❌ 编译错误（<code>let</code> 不可重新赋值，见 §6.2）</td>
+</tr>
+<tr>
+<td><code>rec.field.push(v);</code></td>
+<td>❌ 编译错误（字段不可被可靠写回）</td>
+</tr>
+<tr>
+<td><code>arr[i].push(v);</code></td>
+<td>❌ 编译错误（下标不可被可靠写回）</td>
+</tr>
+<tr>
+<td><code>let b: int[] = a.push(v);</code></td>
+<td>✅ 允许（以表达式形式获取新容器，不就地修改原变量）</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>这一约束把"容器被原地修改但接收者无法接收新指针"这一类悬垂 Bug <strong>提前到编译期拒绝</strong>，
+而不是留到运行期靠运气。</p>
+</blockquote>
+<h3 id="115">11.5 越界行为</h3>
+<p><strong>无边界检查</strong>。越界读写是未定义行为（与 C 一致）。</p>
+<hr />
+<h2 id="12-string">12. 字符串 <code>string</code></h2>
+<p><code>string</code> 是不透明指针，内存布局 <code>[refcount][len][data...]</code> 由 C 侧私有维护。</p>
+<h3 id="121">12.1 方法</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>等价于 C 调用</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>s.length()</code></td>
+<td><code>dial_string_length</code></td>
+<td><code>int</code></td>
+<td>字节长度</td>
+</tr>
+<tr>
+<td><code>s.concat(t)</code></td>
+<td><code>dial_string_concat</code></td>
+<td><code>string</code></td>
+<td>拼接，产生新对象</td>
+</tr>
+<tr>
+<td><code>s.get(i)</code></td>
+<td><code>dial_string_get</code></td>
+<td><code>int</code></td>
+<td>取第 <code>i</code> 个字符的<strong>整数码</strong>（v0.2 无 <code>char</code> 类型）</td>
+</tr>
+<tr>
+<td><code>s.substring(from, to)</code></td>
+<td><code>dial_string_substring</code></td>
+<td><code>string</code></td>
+<td>半开区间 <code>[from, to)</code></td>
+</tr>
+<tr>
+<td><code>s.clone()</code></td>
+<td><code>dial_string_clone</code></td>
+<td><code>string</code></td>
+<td>COW 感知克隆</td>
+</tr>
+<tr>
+<td><code>s.eq(t)</code></td>
+<td><code>dial_string_eq</code></td>
+<td><code>bool</code></td>
+<td>按内容比较</td>
+</tr>
+</tbody>
+</table>
+<p><code>==</code> / <code>!=</code> 对 <code>string</code> 按<strong>内容</strong>比较（编译为 <code>dial_string_eq</code>），而非比较指针地址。</p>
+<h3 id="122">12.2 不可变语义</h3>
+<p>v0.2 未提供任何原地修改字符串的接口：所有操作（<code>concat</code>、<code>substring</code>）都产生新对象。
+字符串因此天生满足"只读推断"，跨函数共享永远是 O(1)。</p>
+<hr />
+<h2 id="13">13. 内存与所有权模型</h2>
+<p>这是 Dial 相对 C 的核心增值点：<strong>尽可能在编译期把内存管理开销消掉</strong>。</p>
+<h3 id="131">13.1 不透明指针契约</h3>
+<p>Dial 代码中的 <code>string</code> / <code>int[]</code> 只是 <code>i8*</code>：</p>
+<pre><code class="language-llvm">; s.length() 的唯一形态
+%len = call i64 @dial_string_length(ptr %s)
+</code></pre>
+<p>用户代码<strong>永远无法</strong>：</p>
+<ul>
+<li>计算其偏移量、做指针算术；</li>
+<li>读取 refcount 或容量字段；</li>
+<li>直接 <code>free</code> 它。</li>
+</ul>
+<p>一切都必须经由 C 导出的 <code>dial_*</code> 函数。</p>
+<h3 id="132">13.2 引用计数对象的布局</h3>
+<pre><code>[ int64 refcount ][ payload ... ]
+                    ^
+                    └─ Dial 看到的&quot;不透明指针&quot;指向这里
+</code></pre>
+<p><code>dial_rc_alloc</code> 返回 payload 指针；<code>dial_rc_retain/release</code> 操作其前 8 字节。</p>
+<h3 id="133">13.3 编译期三种绑定策略</h3>
+<p>Sema 阶段对每条 <code>let/var x = y;</code> 做数据流分析，判定下列三种策略之一：</p>
+<table>
+<thead>
+<tr>
+<th>策略</th>
+<th>触发条件</th>
+<th>生成的代码</th>
+<th>开销</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>移动语义（Move）</strong></td>
+<td><code>y</code> 在此之后再未被引用，且不在循环/分支内</td>
+<td>只复制指针，<strong>不生成任何 retain/release</strong></td>
+<td>零</td>
+</tr>
+<tr>
+<td><strong>只读共享（Share）</strong></td>
+<td><code>y</code> 之后仍被读取但从未被写入</td>
+<td>一次 <code>retain</code>，双方共享同一指针</td>
+<td>O(1)</td>
+</tr>
+<tr>
+<td><strong>COW 兜底（Copy）</strong></td>
+<td>静态分析无法证明独占（如穿过函数边界）</td>
+<td>交给 C Runtime，在<strong>写入瞬间</strong>按 refcount 决定是否深拷贝</td>
+<td>仅在此刻可能 O(n)</td>
+</tr>
+</tbody>
+</table>
+<p>前两种在编译期即消除了运行时开销；只有第三种可能真的复制内存。</p>
+<p>判定"最后一次引用"时，位于循环或分支内的引用被视为<strong>不安全上下文</strong>，
+不参与移动判定（因为该语句可能被执行零次或多次）。</p>
+<h3 id="134">13.4 栈分配与逃逸分析</h3>
+<ul>
+<li><strong>结构体</strong>：值类型，一律在栈上 <code>alloca</code>，字段访问是 <code>getelementptr</code>。
+  这是确定的，不依赖逃逸分析结果。</li>
+<li><strong>所有局部变量的栈槽</strong>：统一分配在函数的 <strong>entry 块</strong>上。
+  这不只是优化，而是<strong>正确性要求</strong>：局部变量声明可能出现在循环体内，
+  若在当时所在块直接 <code>alloca</code>，每轮迭代都会多压一个栈槽，
+  迭代次数一多就会耗尽栈空间（段错误）。提到 entry 块后每个变量只占一个
+  固定栈槽、跨迭代复用，<strong>栈用量与循环次数无关</strong>。</li>
+<li><strong>结构体中的堆字段</strong>：结构体值被复制时，其 <code>string</code> / <code>int[]</code> 字段按共享引用处理，
+  编译期插入<strong>对称</strong>的 <code>retain</code>；作用域结束时插入对称的 <code>release</code>。
+  <code>retain</code> 与 <code>release</code> 的数量严格相等——不多（泄漏）、不少（双重释放）。</li>
+</ul>
+<p>验证方式：把循环次数从 1 万提到 100 万，峰值 RSS 基本不变即为平衡
+  （见 <code>examples/ownership_stress.dial</code>）。</p>
+<h3 id="135-cow">13.5 COW 的触发时机</h3>
+<pre><code>                     ┌─ 编译期能证明独占 ──→ 移动语义：零开销
+let/var x = y;  ─────┤
+                     ├─ 编译期能证明只读 ──→ 共享：一次 retain，O(1)
+                     └─ 静态分析失效 ─────→ 交给 C Runtime
+                                              │
+                                    写入瞬间检查 refcount
+                                              │
+                            ┌─────────────────┴─────────────────┐
+                      refcount == 1                        refcount &gt; 1
+                      原地写入，零拷贝                    先克隆再写（真实复制）
+</code></pre>
+<p>C 侧 <code>dial_rc_clone</code> 是这一兜底的落点：唯一持有时直接返回自身，否则深拷贝。</p>
+<h3 id="136">13.6 自赋值安全</h3>
+<p><code>x = x</code> 必须安全。编译器采用"<strong>先取得新值所有权，再释放旧值</strong>"的顺序：</p>
+<pre><code class="language-dial">x = x;   // 先 retain（计数 1→2），再 release（2→1），绝不会先 free 再 use
+</code></pre>
+<p>若顺序颠倒，计数会先归零被 <code>free</code>，随后的 <code>retain</code> 即 use-after-free。</p>
+<h3 id="137">13.7 返回值不被提前释放</h3>
+<p><code>return</code> 的处理顺序是<strong>强制</strong>的：</p>
+<ol>
+<li>求值返回表达式；</li>
+<li>若返回的是局部变量，标记"已移动"（所有权随返回值转移）；</li>
+<li>释放其余<strong>未被转移</strong>的局部变量；</li>
+<li>生成 <code>ret</code>。</li>
+</ol>
+<p>若在求值之前就释放全部局部变量，返回的对象会被提前销毁。</p>
+<hr />
+<h2 id="14-ffi-dial-c">14. FFI 契约：Dial 语法 → C 函数</h2>
+<p>编译器前端把 Dial 语法<strong>逐条</strong>翻译为对 C 导出函数的调用，不重新实现任何容器：</p>
+<table>
+<thead>
+<tr>
+<th>Dial 写法</th>
+<th>生成的 LLVM IR</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"abc"</code></td>
+<td><code>call ptr @dial_string_new(ptr @str)</code></td>
+</tr>
+<tr>
+<td><code>s.length()</code></td>
+<td><code>call i64 @dial_string_length(ptr %s)</code></td>
+</tr>
+<tr>
+<td><code>s.concat(t)</code></td>
+<td><code>call ptr @dial_string_concat(ptr %s, ptr %t)</code></td>
+</tr>
+<tr>
+<td><code>s.get(i)</code></td>
+<td><code>call i64 @dial_string_get(ptr %s, i64 %i)</code></td>
+</tr>
+<tr>
+<td><code>s.substring(a, b)</code></td>
+<td><code>call ptr @dial_string_substring(ptr %s, i64 %a, i64 %b)</code></td>
+</tr>
+<tr>
+<td><code>s.clone()</code></td>
+<td><code>call ptr @dial_string_clone(ptr %s)</code></td>
+</tr>
+<tr>
+<td><code>s == t</code></td>
+<td><code>call i64 @dial_string_eq(ptr %s, ptr %t)</code> 后与 0 比较</td>
+</tr>
+<tr>
+<td><code>[1, 2, 3]</code></td>
+<td><code>call ptr @dial_array_new()</code> + 三次 <code>dial_array_push</code></td>
+</tr>
+<tr>
+<td><code>a.length()</code></td>
+<td><code>call i64 @dial_array_length(ptr %a)</code></td>
+</tr>
+<tr>
+<td><code>a.get(i)</code> / <code>a[i]</code></td>
+<td><code>call i64 @dial_array_get(ptr %a, i64 %i)</code></td>
+</tr>
+<tr>
+<td><code>a.push(v)</code></td>
+<td><code>call ptr @dial_array_push(ptr %a, i64 %v)</code> 并写回 <code>%a</code></td>
+</tr>
+<tr>
+<td><code>a[i] = v</code></td>
+<td><code>%a = call ptr @dial_array_set(ptr %a, i64 %i, i64 %v)</code></td>
+</tr>
+<tr>
+<td><code>a.clone()</code></td>
+<td><code>call ptr @dial_array_clone(ptr %a)</code></td>
+</tr>
+<tr>
+<td><code>print(x)</code></td>
+<td><code>dial_print_int</code> / <code>dial_print_float</code> / <code>dial_print_bool</code> / <code>dial_print_string</code></td>
+</tr>
+<tr>
+<td>变量绑定（共享）</td>
+<td><code>dial_string_retain</code> / <code>dial_array_retain</code></td>
+</tr>
+<tr>
+<td>作用域结束</td>
+<td><code>dial_string_release</code> / <code>dial_array_release</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="c-runtime">C Runtime 导出函数</h3>
+<p><strong><code>runtime/dial_rt_mem.h</code></strong>（引用计数原语）</p>
+<pre><code class="language-c">void *dial_rc_alloc(int64_t payload_size);          // refcount 初始为 1
+void  dial_rc_retain(void *p);                      // +1
+void  dial_rc_release(void *p);                     // -1，归零则释放
+void *dial_rc_clone(void *p, int64_t payload_size); // 唯一持有时返回自身（COW 命中）
+</code></pre>
+<p><strong><code>stdlib/dial_string.h</code></strong></p>
+<pre><code class="language-c">DialString dial_string_new(const char *lit);
+int64_t    dial_string_length(DialString s);
+DialString dial_string_concat(DialString a, DialString b);
+int64_t    dial_string_get(DialString s, int64_t i);          // 返回字符的整数码
+int64_t    dial_string_eq(DialString a, DialString b);        // 相等返回 1
+DialString dial_string_substring(DialString s, int64_t from, int64_t to);
+DialString dial_string_clone(DialString s);
+void       dial_string_retain(DialString s);
+void       dial_string_release(DialString s);
+void       dial_print_string(DialString s);
+</code></pre>
+<p><strong><code>stdlib/dial_array.h</code></strong></p>
+<pre><code class="language-c">DialArray dial_array_new(void);
+DialArray dial_array_push(DialArray a, int64_t v);            // 返回（可能更新的）指针
+int64_t   dial_array_get(DialArray a, int64_t i);
+DialArray dial_array_set(DialArray a, int64_t i, int64_t v);  // 共享时内部 COW
+int64_t   dial_array_length(DialArray a);
+DialArray dial_array_clone(DialArray a);
+void      dial_array_retain(DialArray a);
+void      dial_array_release(DialArray a);
+</code></pre>
+<p><strong><code>stdlib/dial_io.h</code></strong></p>
+<pre><code class="language-c">void       dial_print_int(int64_t v);
+void       dial_print_float(double v);
+void       dial_print_bool(int64_t b);      // 0/1 → false/true
+void       dial_print_string(DialString s);
+DialString dial_read_line(void);            // C 侧已实现，v0.2 语言层未暴露
+</code></pre>
+<p><strong><code>stdlib/dial_map.h</code></strong>（C 侧已实现，v0.2 语言层<strong>未暴露</strong>类型，暂无 Dial 语法可访问）</p>
+<pre><code class="language-c">DialMap  dial_map_new(void);
+void     dial_map_put(DialMap m, int64_t key, int64_t val);
+int64_t  dial_map_get(DialMap m, int64_t key);   // 未命中返回 -1
+</code></pre>
+<hr />
+<h2 id="15-print">15. 内置 <code>print</code></h2>
+<pre><code class="language-dial">print(e);
+</code></pre>
+<ul>
+<li><code>print</code> 是<strong>语句</strong>，返回 <code>void</code>，因此<strong>不能</strong>出现在赋值右侧、返回值或任何需要值的位置：</li>
+</ul>
+<p><code>dial
+  let n: int = print("hi");   // ❌ 编译错误：void 与 int 不兼容</code></p>
+<ul>
+<li>恰好接受 1 个参数。</li>
+<li>支持的参数类型：<code>int</code>、<code>float</code>、<code>bool</code>、<code>string</code>。</li>
+<li><strong>不支持</strong> <code>int[]</code> 与结构体——必须逐元素 / 逐字段打印。
+  若放任会把二进制 payload 当字符串吐出乱码，故在编译期直接拒绝。</li>
+<li>输出格式：</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>格式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int</code></td>
+<td>十进制整数 + 换行</td>
+</tr>
+<tr>
+<td><code>float</code></td>
+<td><code>%f</code>（6 位小数）+ 换行</td>
+</tr>
+<tr>
+<td><code>bool</code></td>
+<td><code>true</code> / <code>false</code> + 换行</td>
+</tr>
+<tr>
+<td><code>string</code></td>
+<td>内容 + 换行</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="16">16. 未定义行为与已实现边界</h2>
+<p>诚实列出边界，避免"文档写了、实现没有"的冲突。</p>
+<h3 id="161-c">16.1 未定义行为（与 C 一致的部分）</h3>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数组/字符串下标越界</td>
+<td>未定义（无边界检查）</td>
+</tr>
+<tr>
+<td>整数除零</td>
+<td>未定义（陷阱，进程终止）</td>
+</tr>
+<tr>
+<td>整数溢出</td>
+<td>按 i64 二进制补码回绕</td>
+</tr>
+</tbody>
+</table>
+<h3 id="162-v02">16.2 v0.2 未实现（不要指望能编译）</h3>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>状态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>哈希表 / Map</td>
+<td>C 侧已实现 <code>dial_map_*</code>，但 Dial 语言层<strong>无 Map 类型</strong>，暂不可访问</td>
+</tr>
+<tr>
+<td>读行 <code>read_line</code></td>
+<td>C 侧已实现 <code>dial_read_line</code>，语言层<strong>未暴露</strong></td>
+</tr>
+<tr>
+<td>文件 IO</td>
+<td>未实现</td>
+</tr>
+<tr>
+<td>多维数组 <code>int[][]</code></td>
+<td>编译期拒绝</td>
+</tr>
+<tr>
+<td>非 <code>int</code> 元素数组</td>
+<td>编译期拒绝</td>
+</tr>
+<tr>
+<td><code>char</code> 类型</td>
+<td>未实现，字符以 <code>int</code> 表示</td>
+</tr>
+<tr>
+<td><code>else if</code> / <code>for</code> / <code>break</code> / <code>continue</code></td>
+<td>不支持</td>
+</tr>
+<tr>
+<td>裸块 <code>{ ... }</code></td>
+<td>不支持</td>
+</tr>
+<tr>
+<td>模块 / 包 / import</td>
+<td>不支持</td>
+</tr>
+<tr>
+<td>泛型、接口、trait、闭包</td>
+<td>不支持</td>
+</tr>
+<tr>
+<td>指针、地址取值、指针算术</td>
+<td><strong>永不提供</strong>（与不透明指针契约冲突）</td>
+</tr>
+<tr>
+<td>运算符重载</td>
+<td><strong>永不提供</strong></td>
+</tr>
+<tr>
+<td>全局变量</td>
+<td>不支持</td>
+</tr>
+<tr>
+<td>数组/结构体字面量作为常量表达式</td>
+<td>不支持（需先赋给变量）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="17">17. 测试</h2>
+<pre><code class="language-bash">./tests/run_tests.sh
+</code></pre>
+<p>三组检查，全部通过才算绿：</p>
+<table>
+<thead>
+<tr>
+<th>组</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A. 正向</strong></td>
+<td><code>examples/*.dial</code> 必须编译成功，且运行输出与同名 <code>.expected</code> 黄金文件<strong>逐字节一致</strong></td>
+</tr>
+<tr>
+<td><strong>B. 负向</strong></td>
+<td><code>tests/bad/*.dial</code> 必须编译失败，用于锁定诊断信息不被弱化</td>
+</tr>
+<tr>
+<td><strong>C. 契约</strong></td>
+<td>产物可执行文件不得依赖 libLLVM</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_1">示例清单</h3>
+<table>
+<thead>
+<tr>
+<th>示例</th>
+<th>覆盖点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hello.dial</code></td>
+<td>最小程序</td>
+</tr>
+<tr>
+<td><code>flow.dial</code></td>
+<td>变量、<code>while</code>、<code>if/else</code>、函数调用</td>
+</tr>
+<tr>
+<td><code>struct_demo.dial</code></td>
+<td>结构体：定义、字面量、字段读写、嵌套、作为参数与返回值</td>
+</tr>
+<tr>
+<td><code>string_demo.dial</code></td>
+<td>字符串全部方法、<code>==</code>/<code>!=</code> 内容比较</td>
+</tr>
+<tr>
+<td><code>array_demo.dial</code></td>
+<td>数组字面量、<code>push</code>/<code>get</code>/<code>set</code>、下标读写、作为函数参数</td>
+</tr>
+<tr>
+<td><code>cow_demo.dial</code></td>
+<td>移动语义、只读共享、COW 触发与隔离验证</td>
+</tr>
+<tr>
+<td><code>record_demo.dial</code></td>
+<td>结构体持有 <code>string</code> 与 <code>int[]</code> 的组合场景</td>
+</tr>
+<tr>
+<td><code>ownership_stress.dial</code></td>
+<td>所有权压力测试：栈槽复用 + 引用计数平衡</td>
+</tr>
+<tr>
+<td><code>short_circuit.dial</code></td>
+<td><code>and</code> / <code>or</code> 短路求值（以"副作用是否被触发"证明）</td>
+</tr>
+<tr>
+<td><code>conversions.dial</code></td>
+<td><code>int_to_float</code> / <code>float_to_int</code> 显式转换（零隐式转换铁律）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="testsbad">负向用例清单（节选，全部位于 <code>tests/bad/</code>）</h3>
+<table>
+<thead>
+<tr>
+<th>用例</th>
+<th>锁定行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>let_push.dial</code></td>
+<td><code>let</code> 变量调用 <code>push</code> 必须在编译期拒绝</td>
+</tr>
+<tr>
+<td><code>implicit_conv.dial</code></td>
+<td><code>let y: float = x</code>（x 为 int）隐式转换必须在编译期拒绝</td>
+</tr>
+<tr>
+<td><code>mixed_arith.dial</code></td>
+<td><code>1 + 2.0</code> 这类 int/float 混合算术必须在编译期拒绝</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="18-v03-v02">18. v0.3 变更摘要（相对 v0.2）</h2>
+<p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
+<table>
+<thead>
+<tr>
+<th>修正点</th>
+<th>v0.2 行为</th>
+<th>v0.3 行为</th>
+<th>动机</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>and</code> / <code>or</code> 求值</strong></td>
+<td>两侧都求值，不短路</td>
+<td><strong>短路求值</strong>，与 C 的 <code>&amp;&amp;</code> / <code>\|\|</code> 一致</td>
+<td>现代语言常识；不短路会让"判空后访问"类代码在左操作数为假时崩溃</td>
+</tr>
+<tr>
+<td><strong><code>int</code> ↔ <code>float</code> 转换</strong></td>
+<td>曾允许 <code>int→float</code> 隐式提升（算术/比较中混用）</td>
+<td><strong>零隐式转换铁律</strong>：混用即编译错误，必须写 <code>int_to_float</code> / <code>float_to_int</code></td>
+<td>杜绝静默精度丢失；比 C 更严格</td>
+</tr>
+<tr>
+<td><strong><code>let</code> 变量调 <code>push</code> / <code>set</code></strong></td>
+<td>未明确定义</td>
+<td><strong>编译期拒绝</strong>（<code>let</code> 不可重新赋值，无法接收 COW 换回的新指针）；接收者须为顶层 <code>var</code></td>
+<td>把"容器被原地修改但接收者无法接收新指针"的悬垂 Bug 提前到编译期</td>
+</tr>
+<tr>
+<td><strong>新增内置函数</strong></td>
+<td>—</td>
+<td><code>int_to_float(int): float</code>（LLVM <code>sitofp</code>）、<code>float_to_int(float): int</code>（LLVM <code>fptosi</code>），纯编译期内联、不经 C 运行时</td>
+<td>零隐式转换铁律的"显式安全阀"</td>
+</tr>
+</tbody>
+</table>
+<p>相关文档同步更新：§5.3（零隐式转换铁律）、§6.2（可变性判定含 <code>push</code>/<code>set</code>）、§7.2（类型规则）、§7.3（语义细则表，修正 <code>and</code>/<code>or</code> 与混合算术两行）、§11.3–§11.4（接收者须为 <code>var</code>）。</p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v0.3 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+  </div>
+</footer>
+
+</body>
+</html>
