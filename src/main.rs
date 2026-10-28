@@ -93,6 +93,17 @@ fn main() {
         }
     }
 
+    // Fail-Fast 铁律的最后一道提醒：选择关闭崩溃保护，必须当场被告知代价。
+    if safety == SafetyMode::ReleaseFast {
+        eprintln!("⚠️  关于 --fast 模式（ReleaseFast）：");
+        eprintln!("   此模式会关闭所有边界检查、除零检查和空指针保护，以换取极致的性能。");
+        eprintln!("   除非你是正在编写底层核心算法、且完全确信你的数组下标绝对不会越界，");
+        eprintln!("   否则请永远不要使用此模式。");
+        eprintln!("   在 --fast 下发生的越界，将退化为 C 语言的未定义行为（UB），");
+        eprintln!("   可能导致静默的错误数据甚至灾难性后果。");
+        eprintln!();
+    }
+
     let source = match fs::read_to_string(&src_path) {
         Ok(s) => s,
         Err(e) => {

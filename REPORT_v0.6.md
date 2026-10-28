@@ -197,6 +197,11 @@ ReleaseFast 那一列正是 C 的行为——**这就是我们要消灭的东西
 
 - **默认安全，性能显式选择。** 默认等级永远是 Debug。想要性能必须主动写 `--fast`，
   并且要接受"回到 C 的静默损坏模式"这一后果。
+- **选择放弃保护的人必须当场被告知代价。** 使用 `--fast` 时编译器直接打印警告：
+  > ⚠️ 关于 `--fast` 模式（ReleaseFast）：此模式会关闭所有边界检查、除零检查和空指针保护，
+  > 以换取极致的性能。除非你是正在编写底层核心算法、且完全确信你的数组下标绝对不会越界，
+  > 否则请永远不要使用此模式。在 `--fast` 下发生的越界，将退化为 C 语言的未定义行为（UB），
+  > 可能导致静默的错误数据甚至灾难性后果。
 - **Debug 用 `debugtrap` 而非 `trap`。** `int3` 在有调试器附加时会被当作断点捕获，
   停在越界的那一条指令上；`ud2` 则无条件终止。ReleaseSafe 用 `ud2` 是因为指令更短。
 - **三档不是"全开/全关"，而是分层。** 边界与除零检查（`DIAL_SAFETY >= 1`）防的是 UB，
@@ -220,7 +225,7 @@ ReleaseFast 那一列正是 C 的行为——**这就是我们要消灭的东西
 | `stdlib/dial_string.c` | `get` 加边界检查；`substring` 检查 `[from, to)` 范围 |
 | `stdlib/dial_map.c` | `size` 加 `count ∈ [0, cap]` 一致性断言 |
 | `src/codegen.rs` | `SafetyMode` 三档；`emit_trap` / `emit_bounds_check` / `emit_div_zero_check` |
-| `src/main.rs` | `--safety` / `--release` / `--fast`；`-DDIAL_SAFETY=N` 注入 C 编译 |
+| `src/main.rs` | `--safety` / `--release` / `--fast`；`-DDIAL_SAFETY=N` 注入 C 编译；`--fast` 时打印危险警告 |
 | `tests/trap/*.dial` | **新增** 5 个 Fail-Fast 用例 |
 | `tests/run_tests.sh` | 新增 D / E 两组 |
 | `README.md` | 新增 §20 Fail-Fast 铁律；§17.1 UB 清单重写；§11.5 / §3.2 / §1 同步 |

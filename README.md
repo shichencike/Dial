@@ -78,9 +78,15 @@ dialc run   <源文件.dial> [-o 可执行文件] [--safety debug|safe|fast]
 | --- | --- | --- |
 | （默认） | Debug | 崩溃保护全开，陷阱用 `llvm.debugtrap`（x86 `int3`） |
 | `--release` / `--safety safe` | ReleaseSafe | 保留防 UB 检查，陷阱用 `llvm.trap`（x86 `ud2`） |
-| `--fast` / `--safety fast` | ReleaseFast | 关闭全部检查，越界/除零即 UB（与 C 一致） |
+| `--fast` / `--safety fast` | ReleaseFast | 关闭全部检查，越界/除零即 UB（与 C 一致）——⚠️ **危险，详见下方警告** |
 
 等级同时作用于 LLVM IR 与 C Runtime（`-DDIAL_SAFETY=N`），两侧口径一致。
+
+> ⚠️ **关于 `--fast` 模式（ReleaseFast）：此模式会关闭所有边界检查、除零检查和空指针保护，
+> 以换取极致的性能。除非你是正在编写底层核心算法、且完全确信你的数组下标绝对不会越界，
+> 否则请永远不要使用此模式。在 `--fast` 下发生的越界，将退化为 C 语言的未定义行为（UB），
+> 可能导致静默的错误数据甚至灾难性后果。**
+> （详见 [§20.4](#204-性能模式的切换)）
 
 `dialc build` 严格分成两步，这是架构约束而非实现细节：
 
@@ -1067,6 +1073,12 @@ dialc build app.dial --release       # ReleaseSafe：保留防 UB 检查，陷�
 dialc build app.dial --fast          # ReleaseFast：关闭全部检查，越界即 UB
 dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 ```
+
+> <span id="warn-fast">⚠️ **关于 `--fast` 模式（ReleaseFast）**</span>
+>
+> **此模式会关闭所有边界检查、除零检查和空指针保护，以换取极致的性能。**
+> **除非你是正在编写底层核心算法、且完全确信你的数组下标绝对不会越界，否则请永远不要使用此模式。**
+> **在 `--fast` 下发生的越界，将退化为 C 语言的未定义行为（UB），可能导致静默的错误数据甚至灾难性后果。**
 
 同一个等级**同时**作用于 LLVM IR 与 C Runtime（通过 `-DDIAL_SAFETY=N` 注入），
 保证两侧检查口径一致。等级是编译期常量，ReleaseFast 下检查代码被编译器完全消除：

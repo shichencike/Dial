@@ -1,5 +1,7 @@
 == 0) 构建 dialc 编译器 ==
-    Finished `release` profile [optimized] target(s) in 0.03s
+   Compiling inkwell v0.11.0 (https://github.com/TheDan64/inkwell?branch=master#4da592ef)
+   Compiling dialc v0.6.0 (/workspace/dialc)
+    Finished `release` profile [optimized] target(s) in 3.88s
 
 == A) 正向：编译 + 运行 + 输出比对 ==
   ✅ array_demo 输出一致
@@ -41,15 +43,15 @@
   ✅ undeclared.dial -> [dialc 错误] 第 3 行 第 5 列: 语义错误：未声明的变量 'x'
 
 == D) Fail-Fast：越界/除零必须当场终止（默认 Debug 等级）==
-tests/run_tests.sh: line 80: 175661 Trace/breakpoint trap   "$bin" > "${TMP}/tout.txt" 2> "${TMP}/terr.txt"
+tests/run_tests.sh: line 80: 104009 Trace/breakpoint trap   "$bin" > "${TMP}/tout.txt" 2> "${TMP}/terr.txt"
   ✅ array_negative_index 信号 5 终止
-tests/run_tests.sh: line 80: 176045 Trace/breakpoint trap   "$bin" > "${TMP}/tout.txt" 2> "${TMP}/terr.txt"
+tests/run_tests.sh: line 80: 104393 Trace/breakpoint trap   "$bin" > "${TMP}/tout.txt" 2> "${TMP}/terr.txt"
   ✅ array_oob_read 信号 5 终止
-tests/run_tests.sh: line 80: 176429 Trace/breakpoint trap   "$bin" > "${TMP}/tout.txt" 2> "${TMP}/terr.txt"
+tests/run_tests.sh: line 80: 104777 Trace/breakpoint trap   "$bin" > "${TMP}/tout.txt" 2> "${TMP}/terr.txt"
   ✅ array_oob_write 信号 5 终止
-tests/run_tests.sh: line 80: 176813 Trace/breakpoint trap   "$bin" > "${TMP}/tout.txt" 2> "${TMP}/terr.txt"
+tests/run_tests.sh: line 80: 105161 Trace/breakpoint trap   "$bin" > "${TMP}/tout.txt" 2> "${TMP}/terr.txt"
   ✅ div_by_zero 信号 5 终止
-tests/run_tests.sh: line 80: 177197 Illegal instruction     "$bin" > "${TMP}/tout.txt" 2> "${TMP}/terr.txt"
+tests/run_tests.sh: line 80: 105545 Illegal instruction     "$bin" > "${TMP}/tout.txt" 2> "${TMP}/terr.txt"
   ✅ string_oob_get 信号 4 终止（诊断: dial: 下标越界（Fail-Fast 终止）: index = 99, length = 3）
 
 == E) 对照组：--fast 关闭检查后，同一份代码应恢复 C 的“静默”行为 ==
@@ -60,6 +62,6 @@ tests/run_tests.sh: line 80: 177197 Illegal instruction     "$bin" > "${TMP}/tou
   ✅ string_oob_get (--fast) 检查已关闭，产生未定义行为（符合预期）
 
 == C) 契约：产物不得依赖 libLLVM ==
-  ✅ 用户程序仅依赖 C Runtime： linux-vdso.so.1 (0x00007ffeed7e8000)| libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f95f73e3000)| /lib64/ld-linux-x86-64.so.2 (0x00007f95f7606000)|
+  ✅ 用户程序仅依赖 C Runtime： linux-vdso.so.1 (0x00007ffef5fc6000)| libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f5995880000)| /lib64/ld-linux-x86-64.so.2 (0x00007f5995aa3000)|
 
 == 全部测试通过 ✅ ==
