@@ -704,17 +704,19 @@ fn check_function(
         scopes[0].insert(pname.clone(), (pty.clone(), true));
     }
     for stmt in &f.body {
-        check_stmt(stmt, &mut scopes, funcs, f, structs)?;
+        check_stmt(stmt, &mut scopes, funcs, f, structs, false)?;
     }
     Ok(())
 }
 
+/// in_loop：当前是否处于循环体内（用于约束 break / continue）。
 fn check_stmt(
     stmt: &Stmt,
     scopes: &mut Scopes<bool>,
     funcs: &HashMap<String, FuncInfo>,
     f: &Func,
     structs: &StructTable,
+    in_loop: bool,
 ) -> Result<()> {
     match stmt {
         Stmt::VarDecl {
@@ -908,13 +910,13 @@ fn check_stmt(
             }
             scopes.push(HashMap::new());
             for s in then_branch {
-                check_stmt(s, scopes, funcs, f, structs)?;
+                check_stmt(s, scopes, funcs, f, structs, in_loop)?;
             }
             scopes.pop();
             if let Some(eb) = else_branch {
                 scopes.push(HashMap::new());
                 for s in eb {
-                    check_stmt(s, scopes, funcs, f, structs)?;
+                    check_stmt(s, scopes, funcs, f, structs, in_loop)?;
                 }
                 scopes.pop();
             }
@@ -930,7 +932,7 @@ fn check_stmt(
             }
             scopes.push(HashMap::new());
             for s in body {
-                check_stmt(s, scopes, funcs, f, structs)?;
+                check_stmt(s, scopes, funcs, f, structs, true)?;
             }
             scopes.pop();
             Ok(())
@@ -960,9 +962,27 @@ fn check_stmt(
             scopes.push(HashMap::new());
             scopes.last_mut().unwrap().insert(var.clone(), (Type::Int, true));
             for s in body {
-                check_stmt(s, scopes, funcs, f, structs)?;
+                check_stmt(s, scopes, funcs, f, structs, true)?;
             }
             scopes.pop();
+            Ok(())
+        }
+        Stmt::Break(line, col) => {
+            if !in_loop {
+                return Err(DialcError::new(
+                    "语义错误：break 只能出现在循环（while / for）体内",
+                    *line, *col,
+                ));
+            }
+            Ok(())
+        }
+        Stmt::Continue(line, col) => {
+            if !in_loop {
+                return Err(DialcError::new(
+                    "语义错误：continue 只能出现在循环（while / for）体内",
+                    *line, *col,
+                ));
+            }
             Ok(())
         }
         Stmt::Return(Some(e), line, col) => {

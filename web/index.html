@@ -30,7 +30,7 @@
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
     </div>
     <div class="kpis">
-      <span><b>v0.4</b> 当前版本</span>
+      <span><b>v0.5</b> 当前版本</span>
       <span><b>Rust + inkwell</b> / LLVM 18</span>
       <span><b>零</b> LLVM 运行时依赖</span>
       <span><b>短路</b> and / or</span>
@@ -39,7 +39,7 @@
   </div>
 </section>
 <div class="cards">
-  <div class="card"><h3>静态强类型，无推断</h3><p>每个变量、参数、返回值都必须显式标注类型。不存在 auto / 类型推导，杜绝隐式行为。</p></div><div class="card"><h3>不透明指针契约</h3><p>string 与 int[] 在 IR 中只是 ptr，用户代码永远无法触碰其内存布局，一切经由 C 导出函数。</p></div><div class="card"><h3>C 承担一切容器</h3><p>字符串、动态数组、哈希表、IO、内存管理全部由 C 实现，Dial 只负责把调用翻译出去。</p></div><div class="card"><h3>零隐式转换</h3><p>int 与 float 之间无隐式提升或窄化，必须显式调用 int_to_float / float_to_int。</p></div><div class="card"><h3>短路求值</h3><p>and / or 与 C 的 && / || 一致短路，保证判空等代码不会因盲目求值而崩溃。</p></div><div class="card"><h3>产物零 LLVM 依赖</h3><p>用户程序只依赖 C Runtime（libc），绝不链接 libLLVM。</p></div><div class="card"><h3>无 GC 底线（内存宪法）</h3><p>永不引入追踪式 GC。确定性内存管理靠 ARC 引用计数 + 编译期逃逸分析/移动语义，未来裸指针坚持「谁申请谁释放」。</p></div><div class="card"><h3>哈希表 map（ARC + COW）</h3><p>v0.4 新增 map 类型（int → int），与 string / int[] 共用同一套引用计数；put 触发扩容或写时复制后由编译器把新指针写回接收变量。</p></div><div class="card"><h3>for 范围循环 / else if</h3><p>v0.4 新增 for (i in start..end)（半开区间、循环变量可重新赋值）与 else if 语法糖（编译期展开为嵌套 if，零运行时开销）。</p></div>
+  <div class="card"><h3>静态强类型，无推断</h3><p>每个变量、参数、返回值都必须显式标注类型。不存在 auto / 类型推导，杜绝隐式行为。</p></div><div class="card"><h3>不透明指针契约</h3><p>string 与 int[] 在 IR 中只是 ptr，用户代码永远无法触碰其内存布局，一切经由 C 导出函数。</p></div><div class="card"><h3>C 承担一切容器</h3><p>字符串、动态数组、哈希表、IO、内存管理全部由 C 实现，Dial 只负责把调用翻译出去。</p></div><div class="card"><h3>零隐式转换</h3><p>int 与 float 之间无隐式提升或窄化，必须显式调用 int_to_float / float_to_int。</p></div><div class="card"><h3>短路求值</h3><p>and / or 与 C 的 && / || 一致短路，保证判空等代码不会因盲目求值而崩溃。</p></div><div class="card"><h3>产物零 LLVM 依赖</h3><p>用户程序只依赖 C Runtime（libc），绝不链接 libLLVM。</p></div><div class="card"><h3>无 GC 底线（内存宪法）</h3><p>永不引入追踪式 GC。确定性内存管理靠 ARC 引用计数 + 编译期逃逸分析/移动语义，未来裸指针坚持「谁申请谁释放」。</p></div><div class="card"><h3>哈希表 map（ARC + COW）</h3><p>v0.4 新增 map 类型（int → int），与 string / int[] 共用同一套引用计数；put 触发扩容或写时复制后由编译器把新指针写回接收变量。</p></div><div class="card"><h3>for / else if / break / continue</h3><p>v0.4–v0.5 新增：for (i in start..end) 半开区间循环、else if 语法糖（编译期展开为嵌套 if）、break 与 continue（for 的 continue 先自增再判条件，不会死循环）。</p></div><div class="card"><h3>代码编写纪律</h3><p>拒绝过度抽象——宁可 WET 绝不 DRY 过头；不引入无用依赖；允许安全与性能的冗余；能用一个循环和一个 if 解决的绝不套设计模式。</p></div>
 </div>
 <section class="quickstart">
   <h2>快速开始</h2>
@@ -59,14 +59,14 @@ cargo build --release          # 产物：target/release/dialc
     return 0;
 }</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.4.zip">dialc-v0.4.zip</a>（或自行 clone 仓库后构建）
+    下载源码包：<a href="../dialc-v0.5.zip">dialc-v0.5.zip</a>（或自行 clone 仓库后构建）
   </p>
 </section>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.4 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+    <span class="muted">v0.5 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
   </div>
 </footer>
 

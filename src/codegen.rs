@@ -16,6 +16,7 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType};
+use inkwell::basic_block::BasicBlock;
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
 };
@@ -40,6 +41,9 @@ pub struct CodeGen<'ctx> {
     str_id: std::cell::Cell<u32>,
     /// 已被“移动”的局部变量名（转移所有权，跳过作用域结束时的 release）。
     moved: RefCell<std::collections::HashSet<String>>,
+    /// 循环跳转目标栈：(continue 目标块, break 目标块)。
+    /// for 的 continue 目标是「自增块」而非条件块——否则 continue 会跳过 i++ 造成死循环。
+    loop_targets: RefCell<Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>>,
 }
 
 /// 编译入口：接收校验后的 AST、函数签名表、结构体表，生成并写出目标文件 `.o`。
@@ -60,6 +64,7 @@ pub fn compile(
         struct_types: HashMap::new(),
         str_id: std::cell::Cell::new(0),
         moved: RefCell::new(std::collections::HashSet::new()),
+        loop_targets: RefCell::new(Vec::new()),
     };
 
     cg.build_struct_types(program);
@@ -739,16 +744,44 @@ impl<'ctx> CodeGen<'ctx> {
                     .build_conditional_branch(cond_i1, body_bb, exit_bb)
                     .unwrap();
                 self.builder.position_at_end(body_bb);
+                // while 的 continue 直接回到条件判定
+                self.loop_targets.borrow_mut().push((header_bb, exit_bb));
                 scopes.push(HashMap::new());
                 for s in body {
                     self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
                 }
                 self.release_scope_locals(scopes.last().unwrap(), structs);
                 scopes.pop();
+                self.loop_targets.borrow_mut().pop();
                 if !self.is_terminated() {
                     self.builder.build_unconditional_branch(header_bb).unwrap();
                 }
                 self.builder.position_at_end(exit_bb);
+                Ok(())
+            }
+            Stmt::Break(line, col) => {
+                let target = self
+                    .loop_targets
+                    .borrow()
+                    .last()
+                    .map(|t| t.1)
+                    .ok_or_else(|| DialcError::new("内部错误：break 不在循环内", *line, *col))?;
+                self.builder.build_unconditional_branch(target).unwrap();
+                // 后续语句（若有）落进新块，避免往已终结的块里继续追加指令
+                let dead = self.context.append_basic_block(function, "after.brk");
+                self.builder.position_at_end(dead);
+                Ok(())
+            }
+            Stmt::Continue(line, col) => {
+                let target = self
+                    .loop_targets
+                    .borrow()
+                    .last()
+                    .map(|t| t.0)
+                    .ok_or_else(|| DialcError::new("内部错误：continue 不在循环内", *line, *col))?;
+                self.builder.build_unconditional_branch(target).unwrap();
+                let dead = self.context.append_basic_block(function, "after.cont");
+                self.builder.position_at_end(dead);
                 Ok(())
             }
             Stmt::For { var, start, end, body } => {
@@ -765,8 +798,11 @@ impl<'ctx> CodeGen<'ctx> {
                     .unwrap()
                     .insert(var.clone(), (Type::Int, (true, var_ptr)));
 
+                // 注意：自增必须落在独立的 for.inc 块，continue 跳到这里而非 for.cond，
+                // 否则 continue 会跳过 i = i + 1 造成死循环。
                 let header_bb = self.context.append_basic_block(function, "for.cond");
                 let body_bb = self.context.append_basic_block(function, "for.body");
+                let inc_bb = self.context.append_basic_block(function, "for.inc");
                 let exit_bb = self.context.append_basic_block(function, "for.end");
                 self.builder.build_unconditional_branch(header_bb).unwrap();
                 self.builder.position_at_end(header_bb);
@@ -781,10 +817,17 @@ impl<'ctx> CodeGen<'ctx> {
                     .build_conditional_branch(cond, body_bb, exit_bb)
                     .unwrap();
                 self.builder.position_at_end(body_bb);
+                // for 的 continue 目标是自增块 for.inc（先 i++ 再回到条件判定）
+                self.loop_targets.borrow_mut().push((inc_bb, exit_bb));
                 for s in body {
                     self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
                 }
                 self.release_scope_locals(scopes.last().unwrap(), structs);
+                self.loop_targets.borrow_mut().pop();
+                if !self.is_terminated() {
+                    self.builder.build_unconditional_branch(inc_bb).unwrap();
+                }
+                self.builder.position_at_end(inc_bb);
                 // i = i + 1
                 let cur2 = self.builder.build_load(i64t, var_ptr, "i").unwrap();
                 let next = self
@@ -792,9 +835,7 @@ impl<'ctx> CodeGen<'ctx> {
                     .build_int_add(cur2.into_int_value(), i64t.const_int(1, false), "iinc")
                     .unwrap();
                 self.builder.build_store(var_ptr, next).unwrap();
-                if !self.is_terminated() {
-                    self.builder.build_unconditional_branch(header_bb).unwrap();
-                }
+                self.builder.build_unconditional_branch(header_bb).unwrap();
                 self.builder.position_at_end(exit_bb);
                 scopes.pop();
                 Ok(())

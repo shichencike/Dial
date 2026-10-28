@@ -5,6 +5,28 @@
 
 ---
 
+## [0.5.0] — 2026-10-29
+
+本版补齐循环控制流，并把**代码编写纪律**正式写入规范（见 README §20）。
+
+### Added（新增）
+- **`break`**：跳出最内层循环；仅允许出现在 `while` / `for` 循环体内，写在别处是编译错误（见 README §8.4）。
+- **`continue`**：进入下一次迭代。关键语义——`for` 的 `continue` **先执行 `i = i + 1` 再回到条件判定**：
+  实现上把自增放在独立的 `for.inc` 块，`continue` 跳到该块而非条件块；若跳到条件块就会跳过自增造成死循环。
+- 新增示例 `examples/loop_control.dial`（覆盖 for+continue、for+break、while+continue/break 三种组合）。
+- 新增负向用例 `tests/bad/break_outside_loop.dial`、`tests/bad/continue_outside_loop.dial`。
+
+### Docs（文档）
+- README 新增 [§20 代码编写纪律（防臃肿与允许冗余原则）](#20-代码编写纪律防臃肿与允许冗余原则)：
+  ① 绝对拒绝过度抽象（宁可 WET，绝不 DRY 过头）② 不引入无用依赖 ③ 允许安全与性能的冗余
+  ④ 保持代码直白（能用一个循环和一个 if 解决的，绝不套设计模式）。
+- README §8.1 语句一览、§8.4 `break` / `continue`、§17.2 未实现清单（移除已落地的 break/continue）同步更新。
+- 新增 `REPORT_v0.5.md`（`objdump` 真实反汇编证据）与 `TEST_RUN_v0.5.log`。
+- 官网 `web/` 重新生成，首页版本同步 v0.5。
+- 版本号升级至 `0.5.0`。
+
+---
+
 ## [0.4.0] — 2026-11-02
 
 本版落地**部分标准库**与**控制流语法糖**，并正式写入[内存宪法](#内存宪法防-gc-铁律)（见 README §19）。

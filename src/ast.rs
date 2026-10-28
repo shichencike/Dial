@@ -121,6 +121,11 @@ pub enum Stmt {
         cond: Expr,
         body: Vec<Stmt>,
     },
+    /// `break;`：跳出最内层循环（while / for）。仅允许出现在循环体内。
+    Break(usize, usize),
+    /// `continue;`：跳到下一次迭代。
+    /// while 中回到条件判定；for 中先执行 `i = i + 1` 再回到条件判定（否则会死循环）。
+    Continue(usize, usize),
     /// 范围 for 循环：`for (i in start..end) { ... }`
     /// 循环变量 `i` 为 int，从 `start` 迭代到 `end - 1`（end 独占），可在循环体内被重新赋值。
     For {

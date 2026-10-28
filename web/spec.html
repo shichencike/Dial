@@ -22,7 +22,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc-dial-v04">dialc — Dial 语言编译器 v0.4</a><ul>
+<li><a href="#dialc-dial-v05">dialc — Dial 语言编译器 v0.5</a><ul>
 <li><a href="#1">1. 设计原则</a></li>
 <li><a href="#2">2. 目录结构</a></li>
 <li><a href="#3">3. 构建与使用</a><ul>
@@ -60,7 +60,8 @@
 <li><a href="#81">8.1 语句一览</a></li>
 <li><a href="#82-if-else-if-while">8.2 if / else if / while</a></li>
 <li><a href="#83-for">8.3 范围 for 循环</a></li>
-<li><a href="#84">8.4 块与作用域</a></li>
+<li><a href="#84-break-continue">8.4 break / continue</a></li>
+<li><a href="#85">8.5 块与作用域</a></li>
 </ul>
 </li>
 <li><a href="#9">9. 函数</a><ul>
@@ -115,7 +116,7 @@
 <li><a href="#16-print">16. 内置 print</a></li>
 <li><a href="#17">17. 未定义行为与已实现边界</a><ul>
 <li><a href="#171-c">17.1 未定义行为（与 C 一致的部分）</a></li>
-<li><a href="#172-v04">17.2 v0.4 尚未实现（不要指望能编译）</a></li>
+<li><a href="#172-v05">17.2 v0.5 尚未实现（不要指望能编译）</a></li>
 </ul>
 </li>
 <li><a href="#18">18. 测试</a><ul>
@@ -130,16 +131,24 @@
 <li><a href="#194">19.4 为什么这是底线</a></li>
 </ul>
 </li>
-<li><a href="#20">20. 版本变更摘要</a><ul>
-<li><a href="#201-v04-v03">20.1 v0.4（相对 v0.3）</a></li>
-<li><a href="#202-v03-v02">20.2 v0.3（相对 v0.2）</a></li>
+<li><a href="#20">20. 代码编写纪律（防臃肿与允许冗余原则）</a><ul>
+<li><a href="#201">20.1 绝对拒绝过度抽象</a></li>
+<li><a href="#202">20.2 不引入无用依赖</a></li>
+<li><a href="#203">20.3 允许安全与性能上的冗余</a></li>
+<li><a href="#204">20.4 保持代码直白</a></li>
+</ul>
+</li>
+<li><a href="#21">21. 版本变更摘要</a><ul>
+<li><a href="#211-v05-v04">21.1 v0.5（相对 v0.4）</a></li>
+<li><a href="#212-v04-v03">21.2 v0.4（相对 v0.3）</a></li>
+<li><a href="#213-v03-v02">21.3 v0.3（相对 v0.2）</a></li>
 </ul>
 </li>
 </ul>
 </li>
 </ul>
 </div>
-<h1 id="dialc-dial-v04">dialc — Dial 语言编译器 v0.4</h1>
+<h1 id="dialc-dial-v05">dialc — Dial 语言编译器 v0.5</h1>
 <p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
@@ -656,6 +665,8 @@ if (cond) { ... } else { ... }
 if (cond) { ... } else if (c2) { ... } else { ... }   // else if 语法糖
 for (i in 0..n) { ... }    // 范围 for 循环（end 独占）
 while (cond) { ... }
+break;                     // 跳出最内层循环（仅循环体内）
+continue;                  // 进入下一次迭代（仅循环体内）
 return e;                  // 或 return;（仅 void 函数）
 </code></pre>
 <h3 id="82-if-else-if-while">8.2 <code>if</code> / <code>else if</code> / <code>while</code></h3>
@@ -670,7 +681,7 @@ else { ... }
 
 while (i &lt; n) { ... }
 </code></pre>
-<p>无 <code>break</code>、无 <code>continue</code>（v0.5 计划）；循环体内可用 <code>return</code> 提前返回。</p>
+<p>循环体内可用 <code>break</code> / <code>continue</code>（见 §8.4）与 <code>return</code> 提前退出。</p>
 <h3 id="83-for">8.3 范围 <code>for</code> 循环</h3>
 <p><code>for (i in start..end)</code>：循环变量 <code>i</code> 为 <code>int</code>，从 <code>start</code> 迭代到 <code>end - 1</code>（<code>end</code> <strong>独占</strong>，半开区间）。
 <code>start</code> / <code>end</code> 必须为 <code>int</code> 表达式，<code>i</code> 在循环体内为可变变量（可被重新赋值）。</p>
@@ -680,7 +691,28 @@ for (i in 0..5) {        // i = 0,1,2,3,4
 }
 </code></pre>
 <p>循环变量作用域限定在循环体内；<code>start</code>/<code>end</code> 在每次迭代开始前各求值一次（不支持 C 式「每次迭代重新求值边界」的语义，等价于把上下界快照到循环前）。</p>
-<h3 id="84">8.4 块与作用域</h3>
+<h3 id="84-break-continue">8.4 <code>break</code> / <code>continue</code></h3>
+<p><code>break</code> 跳出<strong>最内层</strong>循环；<code>continue</code> 进入下一次迭代。两者<strong>只允许出现在 <code>while</code> / <code>for</code> 循环体内</strong>，
+写在别处（包括 <code>if</code> 但外层无循环）都是编译错误。</p>
+<pre><code class="language-dial">var sum: int = 0;
+for (i in 0..6) {
+    if (i == 3) {
+        continue;      // 跳过 3
+    }
+    sum = sum + i;     // 0+1+2+4+5 = 12
+}
+</code></pre>
+<p><strong>关键语义</strong>：<code>for</code> 的 <code>continue</code> 会<strong>先执行 <code>i = i + 1</code> 再回到条件判定</strong>。
+实现上自增落在独立的 <code>for.inc</code> 块，<code>continue</code> 跳到该块而非条件块——若跳到条件块就会跳过自增造成死循环。
+<code>while</code> 的 <code>continue</code> 则直接回到条件判定，因此<strong>自增语句必须写在 <code>continue</code> 之前</strong>（否则同样死循环）：</p>
+<pre><code class="language-dial">var n: int = 0;
+while (n &lt; 10) {
+    n = n + 1;         // 自增在前：continue 不会漏掉它
+    if (n == 2) { continue; }
+    ...
+}
+</code></pre>
+<h3 id="85">8.5 块与作用域</h3>
 <p><code>{ ... }</code> 只能作为函数体或 <code>if</code>/<code>while</code>/<code>for</code> 的分支体，<strong>不能</strong>作为独立的裸块语句。</p>
 <hr />
 <h2 id="9">9. 函数</h2>
@@ -1355,10 +1387,11 @@ void     dial_map_release(DialMap m);
 </tr>
 </tbody>
 </table>
-<h3 id="172-v04">17.2 v0.4 尚未实现（不要指望能编译）</h3>
+<h3 id="172-v05">17.2 v0.5 尚未实现（不要指望能编译）</h3>
 <blockquote>
 <p>相对 v0.2 已落地的能力：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
-<code>let</code> + 原地修改方法（push/set/put）的接收者约束。其余仍按计划未实现：</p>
+<code>let</code> + 原地修改方法（push/set/put）的接收者约束、<code>else if</code> 语法糖、<code>for</code> 范围循环、<code>break</code> / <code>continue</code>。
+其余仍按计划未实现：</p>
 </blockquote>
 <table>
 <thead>
@@ -1383,10 +1416,6 @@ void     dial_map_release(DialMap m);
 <tr>
 <td><code>char</code> 类型</td>
 <td>未实现，字符以 <code>int</code> 表示</td>
-</tr>
-<tr>
-<td><code>break</code> / <code>continue</code></td>
-<td>不支持（v0.5 计划）</td>
 </tr>
 <tr>
 <td>裸块 <code>{ ... }</code></td>
@@ -1576,8 +1605,84 @@ void     dial_map_release(DialMap m);
 <p>这条底线写进语言本身，而非仅仅写在文档里：任何试图为 Dial 添加追踪式 GC 的提案，都在原则上被否决。</p>
 </blockquote>
 <hr />
-<h2 id="20">20. 版本变更摘要</h2>
-<h3 id="201-v04-v03">20.1 v0.4（相对 v0.3）</h3>
+<h2 id="20">20. 代码编写纪律（防臃肿与允许冗余原则）</h2>
+<p>本节约束<strong>编译器前端（Rust）与 C Runtime 自身的实现代码</strong>，而非 Dial 用户代码。
+它与 <a href="#19-内存宪法防-gc-铁律">§19 内存宪法</a> 同为工程底线：一个是内存模型的底线，一个是代码形状的底线。</p>
+<h3 id="201">20.1 绝对拒绝过度抽象</h3>
+<p>严禁为了复用而把代码抽象成极度复杂的高阶函数、宏或泛型。
+<strong>如果复制粘贴几行代码能让逻辑更直观、调试更方便，就果断复制粘贴——宁可 WET，绝不 DRY 过头。</strong></p>
+<ul>
+<li>典型体现：<code>array_method_type</code> 与 <code>map_method_type</code> 是<strong>两份各自独立的直白函数</strong>，
+  不合并成一个带泛型的"通用方法签名解析器"；<code>dial_array.c</code> 与 <code>dial_map.c</code> 也各自独立实现，
+  不为省几行而引入共享的"通用容器抽象层"。</li>
+<li>判据：新增一个抽象前先问——它是让<strong>读代码的人</strong>更快理解，还是只让<strong>写代码的人</strong>少敲几行？后者一律不做。</li>
+</ul>
+<h3 id="202">20.2 不引入无用依赖</h3>
+<p>Rust 前端与 C Runtime 的代码<strong>尽量只依赖标准库</strong>。任何新引入的 Crate 或 C 库，
+必须能证明它<strong>不可替代且极其轻量</strong>。</p>
+<ul>
+<li>当前事实：<code>Cargo.toml</code> 的唯一依赖是 <code>inkwell</code>（LLVM 绑定，不可替代——需要它 emit 目标文件）；
+  C Runtime 只用 <code>&lt;stdlib.h&gt;</code> / <code>&lt;string.h&gt;</code> / <code>&lt;stdio.h&gt;</code> / <code>&lt;stdint.h&gt;</code>。</li>
+<li>判据：能用 <code>for</code> + <code>if</code> 写完的，绝不引一个 Crate；能自己算的哈希，绝不引哈希库。</li>
+</ul>
+<h3 id="203">20.3 允许安全与性能上的冗余</h3>
+<p>明确<strong>允许</strong>两类冗余，它们不是"多余代码"：</p>
+<table>
+<thead>
+<tr>
+<th>冗余类型</th>
+<th>允许的形式</th>
+<th>现实例子</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>边界防御</td>
+<td>跨语言（Dial ↔ C）边界处的少量防御性判断，防止崩溃</td>
+<td><code>dial_map_put</code> 在共享时先 COW 再改；<code>dial_read_line</code> 在 <code>fgets</code> 返回 NULL 时返回空串而非空指针</td>
+</tr>
+<tr>
+<td>性能冗余</td>
+<td>C 数据结构中为内存对齐、预分配留出的冗余空间</td>
+<td><code>dial_map</code> 的 entry 用 <code>int64_t used</code>（而非 <code>int8_t</code>）保持 8 字节对齐；<code>new_map()</code> 直接预分配 <code>cap = 8</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="204">20.4 保持代码直白</h3>
+<p><strong>能用一个循环和一个 <code>if</code> 解决的事情，绝对不要用设计模式套壳。</strong></p>
+<ul>
+<li>线性探测就是一层 <code>while</code> 循环查找空槽；删除就是一层"左移紧凑"循环——不套迭代器、不套策略模式。</li>
+<li>编译器的 pass 就是顺序执行的几个函数（收集签名 → 检查函数体 → 数据流分析 → 代码生成），
+  不引入 visitor 框架或 IR 中间层的插件机制。</li>
+</ul>
+<hr />
+<h2 id="21">21. 版本变更摘要</h2>
+<h3 id="211-v05-v04">21.1 v0.5（相对 v0.4）</h3>
+<p>本版补齐循环控制流，并把<a href="#20-代码编写纪律防臃肿与允许冗余原则">代码编写纪律</a>正式写入规范。</p>
+<table>
+<thead>
+<tr>
+<th>新增 / 修正点</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>break</code></strong></td>
+<td>跳出最内层循环（仅允许出现在 <code>while</code> / <code>for</code> 体内，见 §8.4）</td>
+</tr>
+<tr>
+<td><strong><code>continue</code></strong></td>
+<td>进入下一次迭代；<code>for</code> 中先执行 <code>i = i + 1</code> 再回到条件判定（自增落在独立的 <code>for.inc</code> 块，避免死循环）</td>
+</tr>
+<tr>
+<td><strong>代码编写纪律</strong></td>
+<td>新增 <a href="#20-代码编写纪律防臃肿与允许冗余原则">§20 代码编写纪律</a>：拒绝过度抽象（宁可 WET）、不引入无用依赖、允许安全与性能冗余、保持代码直白</td>
+</tr>
+</tbody>
+</table>
+<p>相关文档同步更新：§8.1（语句一览）、§8.4（<code>break</code> / <code>continue</code>）、§17.2（从「未实现」移除 break/continue）。</p>
+<h3 id="212-v04-v03">21.2 v0.4（相对 v0.3）</h3>
 <p>本版落地<strong>部分标准库</strong>与<strong>语言特性扩充</strong>，并正式写入<a href="#19-内存宪法防-gc-铁律">内存宪法</a>：</p>
 <table>
 <thead>
@@ -1617,7 +1722,7 @@ void     dial_map_release(DialMap m);
 <p>设计约束：Map 的 ARC 实现与 <code>int[]</code> 完全对称（inline-entries、put 触发扩容 / COW 并写回指针），<strong>不引入任何非 ARC 的堆管理</strong>，与内存宪法一致。</p>
 </blockquote>
 <p>相关文档同步更新：§5.1（基本类型新增 <code>map</code>）、§12（哈希表专章）、§15（FFI 表与 C 导出函数新增 <code>dial_map_*</code> / <code>dial_read_line</code>）、§17.2（从「未实现」移除 Map 与 read_line）。</p>
-<h3 id="202-v03-v02">20.2 v0.3（相对 v0.2）</h3>
+<h3 id="213-v03-v02">21.3 v0.3（相对 v0.2）</h3>
 <p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
 <table>
 <thead>
@@ -1660,7 +1765,7 @@ void     dial_map_release(DialMap m);
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.4 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+    <span class="muted">v0.5 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
   </div>
 </footer>
 

@@ -1,0 +1,8 @@
+// 应当编译失败：continue 只能出现在循环（while / for）体内
+fn main(): int {
+    var i: int = 0;
+    while (i < 3) {
+        i = i + 1;
+    }
+    continue;
+}

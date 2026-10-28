@@ -1,0 +1,7 @@
+// 应当编译失败：break 只能出现在循环（while / for）体内
+fn main(): int {
+    if (true) {
+        break;
+    }
+    return 0;
+}

@@ -23,18 +23,23 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
 <li><a href="#changelog">更新日志 / Changelog</a><ul>
-<li><a href="#040-2026-11-02">[0.4.0] — 2026-11-02</a><ul>
+<li><a href="#050-2026-10-29">[0.5.0] — 2026-10-29</a><ul>
 <li><a href="#added">Added（新增）</a></li>
-<li><a href="#changed">Changed（变更）</a></li>
-<li><a href="#fixed">Fixed（修复）</a></li>
 <li><a href="#docs">Docs（文档）</a></li>
 </ul>
 </li>
-<li><a href="#030-2026-10-28">[0.3.0] — 2026-10-28</a><ul>
+<li><a href="#040-2026-11-02">[0.4.0] — 2026-11-02</a><ul>
 <li><a href="#added_1">Added（新增）</a></li>
+<li><a href="#changed">Changed（变更）</a></li>
+<li><a href="#fixed">Fixed（修复）</a></li>
+<li><a href="#docs_1">Docs（文档）</a></li>
+</ul>
+</li>
+<li><a href="#030-2026-10-28">[0.3.0] — 2026-10-28</a><ul>
+<li><a href="#added_2">Added（新增）</a></li>
 <li><a href="#changed_1">Changed（变更）</a></li>
 <li><a href="#fixed_1">Fixed（修复）</a></li>
-<li><a href="#docs_1">Docs（文档）</a></li>
+<li><a href="#docs_2">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#020">[0.2.0] — 基线版本（本仓库首个规范化基线）</a></li>
@@ -47,9 +52,30 @@
 <p>本文件记录 Dial 语言编译器 <code>dialc</code> 的每个发布版本的相对变更。所有版本均遵循
 <a href="https://semver.org/lang/zh-CN/">语义化版本</a> 的精神：不兼容的语义变更属于同主版本内的修订（v0.x 阶段语言尚不稳定，修订号递增即可能含破坏性语义调整）。</p>
 <hr />
+<h2 id="050-2026-10-29">[0.5.0] — 2026-10-29</h2>
+<p>本版补齐循环控制流，并把<strong>代码编写纪律</strong>正式写入规范（见 README §20）。</p>
+<h3 id="added">Added（新增）</h3>
+<ul>
+<li><strong><code>break</code></strong>：跳出最内层循环；仅允许出现在 <code>while</code> / <code>for</code> 循环体内，写在别处是编译错误（见 README §8.4）。</li>
+<li><strong><code>continue</code></strong>：进入下一次迭代。关键语义——<code>for</code> 的 <code>continue</code> <strong>先执行 <code>i = i + 1</code> 再回到条件判定</strong>：
+  实现上把自增放在独立的 <code>for.inc</code> 块，<code>continue</code> 跳到该块而非条件块；若跳到条件块就会跳过自增造成死循环。</li>
+<li>新增示例 <code>examples/loop_control.dial</code>（覆盖 for+continue、for+break、while+continue/break 三种组合）。</li>
+<li>新增负向用例 <code>tests/bad/break_outside_loop.dial</code>、<code>tests/bad/continue_outside_loop.dial</code>。</li>
+</ul>
+<h3 id="docs">Docs（文档）</h3>
+<ul>
+<li>README 新增 <a href="#20-代码编写纪律防臃肿与允许冗余原则">§20 代码编写纪律（防臃肿与允许冗余原则）</a>：
+  ① 绝对拒绝过度抽象（宁可 WET，绝不 DRY 过头）② 不引入无用依赖 ③ 允许安全与性能的冗余
+  ④ 保持代码直白（能用一个循环和一个 if 解决的，绝不套设计模式）。</li>
+<li>README §8.1 语句一览、§8.4 <code>break</code> / <code>continue</code>、§17.2 未实现清单（移除已落地的 break/continue）同步更新。</li>
+<li>新增 <code>REPORT_v0.5.md</code>（<code>objdump</code> 真实反汇编证据）与 <code>TEST_RUN_v0.5.log</code>。</li>
+<li>官网 <code>web/</code> 重新生成，首页版本同步 v0.5。</li>
+<li>版本号升级至 <code>0.5.0</code>。</li>
+</ul>
+<hr />
 <h2 id="040-2026-11-02">[0.4.0] — 2026-11-02</h2>
 <p>本版落地<strong>部分标准库</strong>与<strong>控制流语法糖</strong>，并正式写入<a href="#内存宪法防-gc-铁律">内存宪法</a>（见 README §19）。</p>
-<h3 id="added">Added（新增）</h3>
+<h3 id="added_1">Added（新增）</h3>
 <ul>
 <li><strong><code>map</code> 类型（int → int）</strong>：新增哈希表类型，内存布局 <code>[int64 cap][int64 count][entries...]</code>，
   与 <code>string</code> / <code>int[]</code> 共用同一套 <strong>ARC 引用计数</strong>（<code>dial_map_retain</code> / <code>dial_map_release</code>）。
@@ -76,7 +102,7 @@
 <li>修正 <code>0..5</code> 这类范围字面量此前被数字词法器误识别为浮点 <code>0.5</code> 的问题：仅当小数点后紧跟数字才视为浮点，
   <code>..</code> 现被正确识别为范围运算符。</li>
 </ul>
-<h3 id="docs">Docs（文档）</h3>
+<h3 id="docs_1">Docs（文档）</h3>
 <ul>
 <li>README 新增 <a href="#12-哈希表-mapint--int">§12 哈希表 <code>map</code></a>、<a href="#82-if--else-if--while">§8.2 <code>else if</code></a>、<a href="#83-范围-for-循环">§8.3 范围 <code>for</code></a>、
   <a href="#19-内存宪法防-gc-铁律">§19 内存宪法</a>；并将 FFI 表与 C 导出函数清单补齐 <code>dial_map_*</code> / <code>dial_read_line</code>。</li>
@@ -86,7 +112,7 @@
 <hr />
 <h2 id="030-2026-10-28">[0.3.0] — 2026-10-28</h2>
 <p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
-<h3 id="added_1">Added（新增）</h3>
+<h3 id="added_2">Added（新增）</h3>
 <ul>
 <li>内置类型转换函数 <code>int_to_float(int): float</code>，编译为 LLVM <code>sitofp</code>（x86-64：<code>cvtsi2sd</code>）。</li>
 <li>内置类型转换函数 <code>float_to_int(float): int</code>，编译为 LLVM <code>fptosi</code>（x86-64：<code>cvttsd2si</code>，向零截断，与 C 的 <code>(int)</code> 一致）。</li>
@@ -109,7 +135,7 @@
 <li>修复了 <code>int → float</code> 隐式转换可能造成的静默精度丢失（如 <code>1 + 2.0</code> 曾默默将 <code>int</code> 提升为 <code>double</code>）。</li>
 <li>修复了 <code>let</code> 变量调用 <code>push</code> 时"容器被原地修改但接收者无法接收新指针"的悬垂风险，将其提前到编译期拒绝。</li>
 </ul>
-<h3 id="docs_1">Docs（文档）</h3>
+<h3 id="docs_2">Docs（文档）</h3>
 <ul>
 <li>README 同步更新：§5.3 零隐式转换铁律、§6.2 可变性判定（含 <code>push</code>/<code>set</code>）、§7.2 类型规则、
   §7.3 语义细则表（修正 <code>and</code>/<code>or</code> 与混合算术两行）、§11.3–§11.4 接收者须为 <code>var</code>、§18 v0.3 变更摘要。</li>
@@ -142,7 +168,7 @@
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.4 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+    <span class="muted">v0.5 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
   </div>
 </footer>
 

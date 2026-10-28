@@ -203,6 +203,16 @@ impl Parser {
             TokenKind::While => self.parse_while(),
             TokenKind::For => self.parse_for(),
             TokenKind::Return => self.parse_return(),
+            TokenKind::Break => {
+                self.advance();
+                self.expect(TokenKind::Semicolon)?;
+                Ok(Stmt::Break(tok.line, tok.col))
+            }
+            TokenKind::Continue => {
+                self.advance();
+                self.expect(TokenKind::Semicolon)?;
+                Ok(Stmt::Continue(tok.line, tok.col))
+            }
             // 结构体定义只允许出现在顶层（收集进 Program.structs），函数体内一律拒绝。
             TokenKind::Struct => Err(DialcError::new(
                 "语法错误：struct 定义只能出现在顶层，不能写在函数体内",
