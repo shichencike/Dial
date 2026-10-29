@@ -1,0 +1,7 @@
+// 负向：recv 的参数不是 channel —— 必须编译失败
+fn main(): int {
+    var n: int = 1;
+    let r: string = recv(n);
+    print(r);
+    return 0;
+}

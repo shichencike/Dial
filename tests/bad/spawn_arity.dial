@@ -1,0 +1,10 @@
+// 负向：spawn 实参个数与线程入口函数不匹配 —— 必须编译失败
+fn worker(s: string): void {
+}
+fn main(): int {
+    let s: string = "a";
+    var n: int = 1;
+    let t: thread = spawn(worker, s, n);
+    join(t);
+    return 0;
+}

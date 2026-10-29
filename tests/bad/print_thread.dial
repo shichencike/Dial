@@ -1,0 +1,9 @@
+// 负向：直接 print thread 句柄（违反不透明指针契约）—— 必须编译失败
+fn worker(): void {
+}
+fn main(): int {
+    let t: thread = spawn(worker);
+    print(t);
+    join(t);
+    return 0;
+}

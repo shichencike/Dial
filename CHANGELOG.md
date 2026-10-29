@@ -7,6 +7,54 @@
 
 ---
 
+## [0.8.0] — 2026-10-30
+
+本版落地**所有权转移 `move_to` 与多线程并发（`thread` / `channel`）**
+（见 README [§27](#27-所有权转移与多线程并发move_to--thread--channel)）。
+核心主张：**用「转移所有权」取代「共享内存 + 锁」**——数据不共享、只移交，
+队列里流动的指针永远只有一个持有者，因此不存在数据竞争，也就不需要任何互斥锁。
+
+### Added（新增）
+- **类型**：`thread`（线程句柄，显式 `join` / `detach`，不受 ARC 管理）与
+  `channel<T>`（通道句柄，跨线程共享 → **原子**引用计数 ARC）。
+- **内建 `spawn(fn, args...)`**：创建并**立即**启动线程。所有实参在 `pthread_create`
+  **之前**写进 argcell —— 零竞争窗口，这也是「move_to 到线程」的**唯一**合法形式。
+- **内建 `move_to(x, ch)`**：编译期 intrinsic，把 `x` 的所有权移交给通道。
+- **内建 `join` / `detach` / `channel(cap)` / `recv(ch)`**。
+- **C Runtime**：新增 `stdlib/dial_thread.{h,c}`（argcell + `pthread_create` 封装）与
+  `stdlib/dial_channel.{h,c}`（有界环形队列 + 互斥量 + 条件变量 + 原子引用计数）。
+- **Moved 状态进 Sema**：被移交的变量此后**读取 / 写入 / 再次转移**全部编译期拒绝
+  （「变量已转移，无法使用」）。标记落在声明该变量的作用域，分支内移交也会被保守拦下。
+- **`spawn` thunk**：编译器为每个被 spawn 的函数生成私有 thunk（`void f(ptr argcell)`），
+  按 8 字节槽宽取出实参后调用真函数，并负责释放被移交进来的那一份所有权。
+- **保留名校验**：`spawn` / `join` / `detach` / `channel` / `recv` / `move_to` / `thread`
+  不能用作函数名或结构体名。
+- **示例**：`examples/{thread_spawn,thread_scalar,channel_move,channel_thread,channel_array}.dial`；
+  **负向用例** 19 个（含 `move_use_after` / `move_twice` / `spawn_non_void_ret` /
+  `spawn_struct_param` / `channel_int_elem` / `fn_named_move_to` 等）。
+
+### Changed（变更）
+- **`moved` 集合由「变量名」改为「栈槽指针」**：变量名会跨作用域 / 跨函数重名，按名字记账
+  会让同名变量互相误伤（该 release 的被跳过 → 泄漏）。改为按 alloca 槽位记账后天然精确。
+- **结构体字段 ARC 补全**：`retain_struct_fields` / `release_struct_fields` 此前漏了 `Type::Error`
+  （与两侧不对称），本次一并补上 `Error` 与 `Channel`。
+- **链接**：C 编译追加 `-pthread`、链接追加 `-lpthread`（glibc ≥ 2.34 已并入 libc，此处为兼容老 glibc）。
+
+### 设计约束（本版刻意不做）
+- **通道元素只能是句柄**（`string` / `int[]` / `map` / `error` / `channel`）：标量需装箱，
+  编译期拒绝。
+- **不支持 `move_to` 到已启动的线程**：那条路必然有竞争，移交只能在 `spawn` 时完成。
+- **不支持 `close(ch)` / `try_recv` / `select` / 线程池 / 原子类型**。
+- **线程入口必须返回 `void`、禁止 `struct` 形参**；`spawn` 首参只能是顶层具名函数（Dial 无一等函数）。
+
+### 验证
+- A/B/D/E/C 五组全绿（新增 5 正向 + 19 负向），C 组产物仍**仅依赖 libc**（无 LLVM、无额外 .so）。
+- **零隐式负担**：`hello.dial` 产物中不含任何 `pthread` / `dial_channel` / `dial_thread` 符号。
+- **所有权会计压力测试**：20 万次「构造 → move_to → recv → 释放」后 RSS 稳定在 1.3 MB 不增长
+  （若漏释放应约 7 MB），且无 double-free abort。
+
+---
+
 ## [0.7.0] — 2026-10-30
 
 本版落地**可恢复异常（try / catch / throw）**（见 README [§26](#26-可恢复异常trycatchthrow)），

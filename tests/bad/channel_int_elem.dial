@@ -1,0 +1,5 @@
+// 负向：通道元素类型是标量 int（会迫使每次发送都装箱）—— 必须编译失败
+fn main(): int {
+    let ch: channel<int> = channel(2);
+    return 0;
+}

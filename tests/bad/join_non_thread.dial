@@ -1,0 +1,6 @@
+// 负向：join 的参数不是 thread 句柄 —— 必须编译失败
+fn main(): int {
+    var n: int = 1;
+    join(n);
+    return 0;
+}

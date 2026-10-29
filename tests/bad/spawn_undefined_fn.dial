@@ -1,0 +1,6 @@
+// 负向：spawn 引用了不存在的函数 —— 必须编译失败
+fn main(): int {
+    let t: thread = spawn(nosuchfn);
+    join(t);
+    return 0;
+}

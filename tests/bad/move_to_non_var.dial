@@ -1,0 +1,6 @@
+// 负向：move_to 的第一个参数不是变量（没有确定存储位置）—— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    move_to("literal", ch);
+    return 0;
+}

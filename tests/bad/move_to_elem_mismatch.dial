@@ -1,0 +1,7 @@
+// 负向：被移交变量的类型与通道元素类型不匹配 —— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    var n: int = 1;
+    move_to(n, ch);
+    return 0;
+}

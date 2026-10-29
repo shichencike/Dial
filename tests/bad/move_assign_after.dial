@@ -1,0 +1,8 @@
+// 负向：move_to 之后再给该变量赋值（写入）—— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    var s: string = "payload";
+    move_to(s, ch);
+    s = "again";
+    return 0;
+}

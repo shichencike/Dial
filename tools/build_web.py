@@ -40,7 +40,7 @@ FOOTER = """
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.7 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
+    <span class="muted">v0.8 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
   </div>
 </footer>
 """
@@ -216,6 +216,7 @@ def render_index() -> str:
         ("三档安全等级", "默认 Debug 崩溃保护全开；--release 保留防 UB 检查但陷阱更精简；--fast 关闭全部检查换取极限性能，等级同时作用于 LLVM IR 与 C Runtime。⚠️ --fast 下的越界将退化为 C 的未定义行为——除非你正在写底层核心算法且确信下标绝不越界，否则永远不要使用它。"),
         ("文件 IO（v0.61，v0.7 改抛 Error）", "新增 file 不透明句柄，仅封装 C 标准库 fopen / fread / fwrite / fclose；open / read / write / close 是最基础的 C 风格 API。无全局变量、无 Result 封装；v0.7 起失败即抛出 Error（业务失败与系统崩溃分离），用后即焚务必 close。"),
         ("可恢复异常 try / catch / throw（v0.7）", "throw Error(\"msg\") 抛出；try { } catch e { } 捕获（catch 后无圆括号）；catch { } 省略变量名忽略具体错误。严禁抛出非 Error 类型。跳转前自动释放 try 作用域内所有活跃 ARC 局部，绝不泄漏；无异常的代码运行时开销为零（已用 nm 实测）。"),
+        ("所有权转移与多线程并发（v0.8）", "move_to(x, ch) 是编译期 intrinsic：只发三条 IR 指令（取指针 → 入队 → 原槽清零），O(1) 且零 retain / release。移交后变量进入 Moved 状态，再读 / 再写 / 再转移一律编译期拒绝。spawn(fn, args...) 在 pthread_create 之前把实参写进 argcell，零竞争窗口；channel<T> 用原子 ARC 共享，send / recv 只传所有权不传引用 —— 用转移取代锁。"),
         ("三重开源许可", "GPL-3.0 OR MIT OR Apache-2.0 —— 三者任选其一遵守。三份协议原文与说明文档随源码及发布包完整分发；本许可只覆盖编译器源码，你用 Dial 写出的程序只链接 libc，不受其约束。"),
     ]
     card_html = "".join(
@@ -240,7 +241,7 @@ def render_index() -> str:
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
     </div>
     <div class="kpis">
-      <span><b>v0.7</b> 当前版本</span>
+      <span><b>v0.8</b> 当前版本</span>
       <span><b>Rust + inkwell</b> / LLVM 18</span>
       <span><b>零</b> LLVM 运行时依赖</span>
       <span><b>短路</b> and / or</span>
@@ -270,7 +271,7 @@ cargo build --release          # 产物：target/release/dialc
     return 0;
 }}</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.7.zip">dialc-v0.7.zip</a>（或自行 clone 仓库后构建）
+    下载源码包：<a href="../dialc-v0.8.zip">dialc-v0.8.zip</a>（或自行 clone 仓库后构建）
   </p>
 </section>
 {FOOTER}

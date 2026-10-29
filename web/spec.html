@@ -187,6 +187,16 @@
 <li><a href="#268-当前边界">26.8 当前边界</a></li>
 </ul>
 </li>
+<li><a href="#27-所有权转移与多线程并发move_to-·-thread-·-channel">27. 所有权转移与多线程并发（move_to · thread · channel）</a><ul>
+<li><a href="#271-三个新东西">27.1 三个新东西</a></li>
+<li><a href="#272-channel&lt;t&gt;-与所有权移交">27.2 channel&lt;T&gt; 与所有权移交</a></li>
+<li><a href="#273-零竞争移交与-o1-论证">27.3 零竞争移交与 O(1) 论证</a></li>
+<li><a href="#274-移交之后编译器的死命令">27.4 移交之后：编译器的死命令</a></li>
+<li><a href="#275-spawn-的底层thunk-+-argcell">27.5 spawn 的底层：thunk + argcell</a></li>
+<li><a href="#276-确定性纪律写并发代码时必须遵守">27.6 确定性纪律（写并发代码时必须遵守）</a></li>
+<li><a href="#277-当前边界">27.7 当前边界</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -374,12 +384,16 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
 try  catch  throw
 and  or   not
 true false
-int  float  bool  string  void  file  error
+int  float  bool  string  void  file  error  thread  channel
 </code></pre>
 <blockquote>
 <p><code>try</code> / <code>catch</code> / <code>throw</code> 是 v0.7 引入的可恢复异常关键字（见 <a href="#26-可恢复异常trycatchthrow">§26</a>）。
 注意 <strong><code>error</code> 不是关键字</strong>——它是内建构造函数名（与 <code>open</code> / <code>print</code> 同类），写作 <code>Error("...")</code>。
 同理 <code>catch</code> 后<strong>不跟圆括号</strong>：<code>catch e { }</code>，而非 <code>catch (e) { }</code>。</p>
+<p><code>thread</code> / <code>channel</code> 在<strong>词法上也不是关键字</strong>，只是 <code>parse_type</code> 对标识符的特判——
+否则 <code>channel(8)</code> 这个内建调用会被当成类型名而无法解析。并发内建（<code>spawn</code> / <code>join</code> /
+<code>detach</code> / <code>channel</code> / <code>recv</code> / <code>move_to</code>）全部按名字匹配，<strong>不能用作函数名或结构体名</strong>
+（见 <a href="#27-所有权转移与多线程并发move_to--thread--channel">§27</a>）。</p>
 </blockquote>
 <h3 id="44-字面量">4.4 字面量</h3>
 <table>
@@ -465,6 +479,16 @@ int  float  bool  string  void  file  error
 <td><code>error</code></td>
 <td>LLVM <code>ptr</code>（不透明）</td>
 <td><strong>可恢复异常对象</strong>（v0.7），由 C Runtime 管理的 ARC 类型；由 <code>Error("msg")</code> 构造、<code>throw</code> 抛出、<code>catch</code> 捕获（见 <a href="#26-可恢复异常trycatchthrow">§26</a>）</td>
+</tr>
+<tr>
+<td><code>thread</code></td>
+<td>LLVM <code>ptr</code>（不透明）</td>
+<td>线程句柄（v0.8）；显式 <code>join</code> / <code>detach</code>，<strong>不受 ARC 管理</strong>（见 <a href="#27-所有权转移与多线程并发move_to--thread--channel">§27</a>）</td>
+</tr>
+<tr>
+<td><code>channel&lt;T&gt;</code></td>
+<td>LLVM <code>ptr</code>（不透明）</td>
+<td>通道句柄（v0.8），元素类型仅编译期可见；跨线程共享 → <strong>原子</strong>引用计数 ARC。元素只能是 <code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code> / <code>channel</code>（见 <a href="#27-所有权转移与多线程并发move_to--thread--channel">§27</a>）</td>
 </tr>
 <tr>
 <td><code>void</code></td>
@@ -1560,9 +1584,10 @@ void     dial_map_release(DialMap m);
 </table>
 <h3 id="172-v06-尚未实现不要指望能编译">17.2 v0.6 尚未实现（不要指望能编译）</h3>
 <blockquote>
-<p>相对 v0.2 已落地的能力：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
+<p>已落地：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
 <code>let</code> + 原地修改方法（push/set/put）的接收者约束、<code>else if</code> 语法糖、<code>for</code> 范围循环、<code>break</code> / <code>continue</code>、
-Fail-Fast 运行时检查（§20）。其余仍按计划未实现：</p>
+Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§26）、
+所有权转移与多线程并发（§27）。其余仍按计划未实现：</p>
 </blockquote>
 <table>
 <thead>
@@ -1594,7 +1619,7 @@ Fail-Fast 运行时检查（§20）。其余仍按计划未实现：</p>
 </tr>
 <tr>
 <td>泛型、接口、trait、闭包</td>
-<td>不支持</td>
+<td>不支持（<code>channel&lt;T&gt;</code> 是内建特化语法，不是用户泛型）</td>
 </tr>
 <tr>
 <td>指针、地址取值、指针算术</td>
@@ -1613,12 +1638,32 @@ Fail-Fast 运行时检查（§20）。其余仍按计划未实现：</p>
 <td>不支持（需先赋给变量）</td>
 </tr>
 <tr>
-<td>所有权转移 <code>move_to</code>（编译期 intrinsic）</td>
-<td><strong>未实现（规划中）</strong>——设计目标：Sema 标记 <code>Moved</code> 后禁止再用，Codegen 生成 O(1) 指针搬运且跳过 retain/release</td>
+<td>通道关闭 <code>close(ch)</code> 与 EOF 语义</td>
+<td>未实现——通道生命周期完全由原子 ARC 管住，不支持「关闭」广播</td>
 </tr>
 <tr>
-<td>多线程并发（<code>thread</code> / <code>channel</code>）</td>
-<td><strong>未实现（规划中）</strong>——<code>move_to</code> 的前置设施，待专属版本落地</td>
+<td><code>try_recv</code> / <code>select</code> / 多路复用</td>
+<td>未实现</td>
+</tr>
+<tr>
+<td>线程池、协程、异步</td>
+<td>未实现</td>
+</tr>
+<tr>
+<td>原子类型、无锁数据结构</td>
+<td>未实现</td>
+</tr>
+<tr>
+<td><code>move_to</code> 到<strong>已启动的</strong>线程</td>
+<td>编译期不支持——移交只能在 <code>spawn</code> 时完成（见 <a href="#273-零竞争移交与-o1-论证">§27.3</a>）</td>
+</tr>
+<tr>
+<td>通道元素为标量（<code>int</code> / <code>float</code> / <code>bool</code>）</td>
+<td>编译期拒绝（需装箱，见 <a href="#272-channel-与所有权移交">§27.2</a>）</td>
+</tr>
+<tr>
+<td>一等函数 / 函数指针</td>
+<td>不支持——<code>spawn</code> 首参只能是顶层具名函数</td>
 </tr>
 </tbody>
 </table>
@@ -2863,7 +2908,218 @@ after
 </tr>
 <tr>
 <td>跨函数抛出</td>
-<td><code>try</code> 只捕获<strong>本函数内</strong>（含被调函数）抛出的异常；Dial 无多线程，不存在跨栈问题</td>
+<td><code>try</code> 只捕获<strong>本函数内</strong>（含被调函数）抛出的异常</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="27-所有权转移与多线程并发move_to-·-thread-·-channel">27. 所有权转移与多线程并发（<code>move_to</code> · <code>thread</code> · <code>channel</code>）</h2>
+<blockquote>
+<p>v0.8 起可用。<strong>Dial 用「转移所有权」取代「共享内存 + 锁」</strong>：
+数据不共享，只移交。队列里流动的指针永远只有一个持有者，因此根本不存在数据竞争，
+也就不需要任何互斥锁——这是本节全部设计的出发点。</p>
+</blockquote>
+<h3 id="271-三个新东西">27.1 三个新东西</h3>
+<table>
+<thead>
+<tr>
+<th>名字</th>
+<th>类别</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>thread</code></td>
+<td>类型</td>
+<td>线程句柄（不透明指针）。<strong>不受 ARC 管理</strong>，必须显式 <code>join</code> 或 <code>detach</code> 之一</td>
+</tr>
+<tr>
+<td><code>channel&lt;T&gt;</code></td>
+<td>类型</td>
+<td>通道句柄（不透明指针）。跨线程共享 → <strong>原子</strong>引用计数 ARC</td>
+</tr>
+<tr>
+<td><code>spawn(fn, args...)</code></td>
+<td>内建</td>
+<td>创建并<strong>立即</strong>启动线程，返回 <code>thread</code></td>
+</tr>
+<tr>
+<td><code>join(t)</code> / <code>detach(t)</code></td>
+<td>内建</td>
+<td>等待线程结束 / 分离线程；二者选一且仅一次</td>
+</tr>
+<tr>
+<td><code>channel(cap)</code></td>
+<td>内建</td>
+<td>创建容量为 <code>cap</code> 的有界通道</td>
+</tr>
+<tr>
+<td><code>recv(ch)</code></td>
+<td>内建</td>
+<td>阻塞取出一个元素，返回类型即 <code>T</code>，接收方成为其唯一所有者</td>
+</tr>
+<tr>
+<td><code>move_to(x, ch)</code></td>
+<td>内建（intrinsic）</td>
+<td>把 <code>x</code> 的所有权<strong>移交</strong>给通道 <code>ch</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="272-channel&lt;t&gt;-与所有权移交">27.2 <code>channel&lt;T&gt;</code> 与所有权移交</h3>
+<pre><code class="language-dial">fn producer(ch: channel&lt;string&gt;): void {
+    var s: string = &quot;from-thread&quot;;
+    move_to(s, ch);          // 移交：s 此后不可再用
+}
+
+fn main(): int {
+    let ch: channel&lt;string&gt; = channel(2);
+    let t: thread = spawn(producer, ch);
+    let r: string = recv(ch);
+    join(t);
+    print(r);                // from-thread
+    return 0;
+}
+</code></pre>
+<ul>
+<li><strong>元素类型白名单</strong>：只能是 <code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code> / <code>channel&lt;...&gt;</code>。
+  通道传的是所有权，只有句柄能做到 O(1) 的指针搬运；<code>int</code> / <code>float</code> / <code>bool</code> 每发一次都要
+  装箱（malloc 8 字节），既砸掉「零分配移交」的立身之本，又让 C 侧无法判断槽里的东西
+  该 <code>free</code> 还是直接丢——因此在<strong>编译期</strong>就拒绝。</li>
+<li><strong>元素类型是编译期的</strong>：<code>channel(cap)</code> 返回 <code>channel&lt;void&gt;</code>（未定占位），声明处写出
+  <code>let ch: channel&lt;string&gt; = ...</code> 才确定 <code>T</code>。运行时已擦除（队列只存 <code>void*</code>），
+  <code>recv</code> 的返回类型从变量自身的静态类型取出。</li>
+<li><strong><code>send</code> / <code>recv</code> 不做任何 retain / release</strong>：指针进出队列，引用计数一个数都不动。</li>
+</ul>
+<h3 id="273-零竞争移交与-o1-论证">27.3 零竞争移交与 O(1) 论证</h3>
+<p><code>move_to(x, ch)</code> <strong>不是函数调用</strong>，是编译期 intrinsic。Codegen 只发三条 IR 指令：</p>
+<pre><code class="language-llvm">%v = load ptr, ptr %x_slot             ; 取指针（不 retain）
+call void @dial_channel_send(ptr %ch, ptr %v)
+store ptr null, ptr %x_slot            ; 原槽清零
+</code></pre>
+<ul>
+<li><strong>O(1)</strong>：没有调用栈、没有参数编组、没有引用计数操作，就是一次指针入队加一次清零。</li>
+<li><strong>零竞争</strong>：<code>spawn</code> 的所有实参都在 <code>pthread_create</code> <strong>之前</strong>写进线程的 argcell，
+  因此不存在「先启动、再移交」的窗口。这也是为什么<strong>不支持</strong>「move_to 到一个已启动的线程」——
+  那条路必然有竞争，Dial 选择在编译期就把它关掉。<code>spawn(fn, x)</code> 本身就是「move_to 到线程」。</li>
+</ul>
+<h3 id="274-移交之后编译器的死命令">27.4 移交之后：编译器的死命令</h3>
+<p>一旦 <code>move_to</code>（或 <code>spawn</code> 的堆类型实参移交）发生，该变量即进入 <strong>Moved</strong> 状态，
+此后<strong>读取、写入、再次转移</strong>全部当场编译失败：</p>
+<pre><code>[dialc 错误] 第 N 行: 语义错误：变量 's' 已转移，无法使用
+</code></pre>
+<p>Moved 标记落在<strong>声明该变量的那个作用域</strong>上（而非最内层），所以「if 分支里移交、
+主流程再用」也会被保守拦下。生命周期交接的会计规则：</p>
+<table>
+<thead>
+<tr>
+<th>实参类型</th>
+<th><code>spawn</code> 时的行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int</code> / <code>float</code> / <code>bool</code></td>
+<td><strong>按值拷贝</strong>（8 字节直存），源变量不受影响、之后照用</td>
+</tr>
+<tr>
+<td><code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code></td>
+<td><strong>移交</strong>：源槽清零 + 标 Moved，<strong>不 retain 不 release</strong></td>
+</tr>
+<tr>
+<td><code>channel&lt;T&gt;</code></td>
+<td><strong>共享</strong>：原子 <code>retain</code> +1，源变量仍可用（通道天生要被两端持有）</td>
+</tr>
+</tbody>
+</table>
+<p>被移交的那一份所有权，由<strong>接收方</strong>负责最终释放：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>引用计数推演</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>spawn(worker, s)</code>，worker 不再移交</td>
+<td>main 移交 rc=1 → worker 入口 retain(2) → worker 出口 release(1) → thunk release(0) ✅</td>
+</tr>
+<tr>
+<td>worker 内 <code>move_to(a0, ch)</code></td>
+<td>入口 retain(2) → <code>moved</code> 使出口<strong>跳过</strong> release → 2 → thunk release(1，归通道) → 接收方释放(0) ✅</td>
+</tr>
+<tr>
+<td><code>channel</code> 作 spawn 实参</td>
+<td>原子 retain(2) → worker 入口(3) → 出口(2) → main 作用域结束(1) → thunk release(0) ✅</td>
+</tr>
+<tr>
+<td><code>let r : string = recv(ch)</code></td>
+<td><code>recv</code> 是调用而非变量引用，VarDecl <strong>不会</strong> retain → 直接取得所有权(1) → 作用域结束(0) ✅</td>
+</tr>
+</tbody>
+</table>
+<h3 id="275-spawn-的底层thunk-+-argcell">27.5 <code>spawn</code> 的底层：thunk + argcell</h3>
+<p>C 的 <code>pthread_create</code> 只认统一签名 <code>void (*)(void*)</code>，而 Dial 函数实参类型各异。
+编译器为每个被 spawn 的函数生成一个<strong>私有 thunk</strong>：</p>
+<pre><code class="language-llvm">define private void @__dial_thunk_producer(ptr %cell) {
+  %p0 = getelementptr ptr, ptr %cell, i64 0
+  %a0 = load ptr, ptr %p0                       ; 取出 channel 实参
+  call void @producer(ptr %a0)
+  call void @dial_channel_release(ptr %a0)      ; 移交来的那一份由本线程最终释放
+  ret void
+}
+</code></pre>
+<ul>
+<li>argcell <strong>每槽固定 8 字节</strong>：指针 / <code>i64</code> / <code>f64</code> 直接 <code>store</code>；<code>bool(i1)</code> 存前 <code>zext</code>、
+  取后 <code>trunc</code>。</li>
+<li>线程句柄内部<strong>只存 <code>pthread_t</code></strong>，启动参数包由子线程第一时间取走并释放，
+  因此 <code>join</code> / <code>detach</code> 可以立即回收句柄，无需与子线程做原子握手。</li>
+<li><code>join</code> / <code>detach</code> 之后 IR 会把句柄槽置 <code>null</code>，二次 <code>join</code> 触发 <code>DIAL_HEAP_ASSERT</code> 当场 Fail-Fast，
+  而不是退化成 use-after-free。</li>
+</ul>
+<h3 id="276-确定性纪律写并发代码时必须遵守">27.6 确定性纪律（写并发代码时必须遵守）</h3>
+<blockquote>
+<p><strong>子线程一律不要 <code>print</code></strong>，要观察结果就走 channel 汇聚回 main 后按序打印。
+多线程输出的交错顺序不确定，会让「逐字节比对」的黄金测试随机变红且极难复现。
+多生产者通道的到达顺序同样不确定——需要确定顺序时用<strong>单生产者</strong>。</p>
+</blockquote>
+<h3 id="277-当前边界">27.7 当前边界</h3>
+<table>
+<thead>
+<tr>
+<th>边界</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>线程入口必须返回 <code>void</code></td>
+<td>返回值无处安放；堆类型返回值还会无人释放地泄漏，故编译期拒绝</td>
+</tr>
+<tr>
+<td>线程入口禁止 <code>struct</code> 形参</td>
+<td>值语义聚合体塞不进 8 字节实参槽</td>
+</tr>
+<tr>
+<td>无一等函数</td>
+<td><code>spawn</code> 首参只能是顶层具名函数（<code>spawn(worker, ...)</code>），不能传闭包或函数值</td>
+</tr>
+<tr>
+<td>通道不能 <code>close</code></td>
+<td>生命周期完全由原子 ARC 管住；没有「关闭」广播，也就没有 EOF 语义</td>
+</tr>
+<tr>
+<td><code>recv</code> 会阻塞</td>
+<td>队列空时一直等；没有 <code>try_recv</code> / <code>select</code> / 超时</td>
+</tr>
+<tr>
+<td>无线程池 / 无异步</td>
+<td>一个 <code>spawn</code> 就是一个真线程</td>
+</tr>
+<tr>
+<td><code>join</code> 后句柄失效</td>
+<td>二次 <code>join</code> / <code>detach</code> 触发 Fail-Fast 断言</td>
 </tr>
 </tbody>
 </table></main></div>
@@ -2871,7 +3127,7 @@ after
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.7 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
+    <span class="muted">v0.8 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
   </div>
 </footer>
 

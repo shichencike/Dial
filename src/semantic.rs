@@ -27,8 +27,25 @@ pub struct FuncInfo {
 pub type StructTable = HashMap<String, Vec<(String, Type)>>;
 
 /// 作用域栈：外层 Vec 是作用域层级，内层 HashMap 存「名字 -> (类型, 附加信息)」。
-/// 附加信息 V 在语义阶段是「是否可变(bool)」，在代码生成阶段是「(是否可变, 指针)」。
+/// 附加信息 V 在语义阶段是 `VarState`，在代码生成阶段是「(是否可变, 指针)」。
 pub type Scopes<V> = Vec<HashMap<String, (Type, V)>>;
+
+/// 语义阶段的变量附加信息。
+///
+/// `moved` 是 v0.8 所有权转移的核心状态：变量一旦被 `move_to` 移交，
+/// 就永久进入「已转移」状态，此后任何读取 / 写入 / 再次转移都在编译期被拒绝。
+/// 这是把「move 后不可再用」从**约定**升级为**编译器死命令**的那一位。
+#[derive(Debug, Clone, Copy)]
+pub struct VarState {
+    pub mutable: bool,
+    pub moved: bool,
+}
+
+impl VarState {
+    pub fn new(mutable: bool) -> Self {
+        Self { mutable, moved: false }
+    }
+}
 
 /// 在作用域栈中按由内到外顺序查找变量类型。
 pub fn lookup_type<V>(scopes: &Scopes<V>, name: &str) -> Option<Type> {
@@ -54,6 +71,21 @@ fn is_numeric(t: &Type) -> bool {
 /// Dial 认为那正是大量隐蔽精度 bug 的来源，因此在编译期即切断。
 pub fn types_compatible(arg: &Type, target: &Type) -> bool {
     arg == target
+}
+
+/// `channel(cap)` 的类型是 `Channel(Void)` ——「元素类型未定」的占位。
+/// 声明处写出具体元素类型 `channel<T>` 时，在这里统一为 T。
+///
+/// 之所以可行：元素类型对运行时毫无意义（队列只存 void*），它只服务于编译期
+/// 的 `move_to` 类型匹配与 `recv` 的返回类型推导——后者从变量自身的静态类型取，
+/// 因此无需把 T 回填进 AST，只需在声明处判定「占位可以兼容任意具体元素类型」。
+fn channel_placeholder_compat(arg: &Type, target: &Type) -> bool {
+    match (arg, target) {
+        (Type::Channel(a), Type::Channel(t)) => {
+            matches!(a.as_ref(), Type::Void) && !matches!(t.as_ref(), Type::Void)
+        }
+        _ => false,
+    }
 }
 
 /// 求 lvalue 表达式根部的变量名（用于判断字段/索引赋值是否作用于可变变量）。
@@ -82,6 +114,15 @@ pub fn type_of<V>(
         Expr::Var(name) => lookup(name).ok_or_else(|| {
             DialcError::new(format!("语义错误：未声明的变量 '{}'", name), 0, 0)
         }),
+        // 函数引用只在 spawn 首参位置有意义；出现在别处一律是误用。
+        Expr::FuncRef(name) => Err(DialcError::new(
+            format!(
+                "语义错误：函数引用 '{}' 只能作为 spawn 的第一个参数（Dial 没有一等函数，函数不能当值传递）",
+                name
+            ),
+            0,
+            0,
+        )),
         Expr::Field(obj, field) => {
             let ot = type_of(obj, scopes, funcs, structs)?;
             match ot {
@@ -397,6 +438,9 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::Int);
                 }
+                // 注意：close **不**扩展给 channel。通道的生命周期完全由原子 ARC 管住
+                // （两端各自持有引用，最后一个退出作用域者释放），再给一个手动 close
+                // 只会引入「关了之后变量还在、再 release 一次」的二次释放风险。
                 "close" => {
                     if args.len() != 1 {
                         return Err(DialcError::new(
@@ -428,6 +472,187 @@ pub fn type_of<V>(
                         ));
                     }
                     return Ok(Type::Error);
+                }
+
+                // ==================================================================
+                //  所有权转移与多线程并发（v0.8）
+                // ==================================================================
+                // 创建并**立即**启动线程。首参必须是具名函数（FuncRef）——Dial 没有
+                // 一等函数与闭包，线程入口只能是一个顶层具名函数。
+                "spawn" => {
+                    if args.is_empty() {
+                        return Err(DialcError::new(
+                            "语义错误：spawn 至少需要 1 个参数（线程入口函数名）",
+                            0, 0,
+                        ));
+                    }
+                    let fname = match &args[0] {
+                        Expr::FuncRef(n) => n.clone(),
+                        _ => {
+                            return Err(DialcError::new(
+                                "语义错误：spawn 的第一个参数必须是函数名（Dial 没有一等函数与闭包，线程入口只能是顶层具名函数）",
+                                0, 0,
+                            ))
+                        }
+                    };
+                    let target = funcs.get(&fname).ok_or_else(|| {
+                        DialcError::new(
+                            format!("语义错误：spawn 引用了未定义的函数 '{}'", fname),
+                            0, 0,
+                        )
+                    })?;
+                    // 线程入口必须返回 void：返回值无处安放，而堆类型返回值还会在
+                    // 无人释放的情况下泄漏——与其静默泄漏，不如编译期拒绝。
+                    if target.ret != Type::Void {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：spawn 的线程入口函数 '{}' 必须返回 void，其返回类型为 {}（线程返回值无处安放）",
+                                fname,
+                                target.ret.name()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    // 结构体是值语义的聚合体，塞不进 8 字节的实参槽。
+                    for pty in &target.params {
+                        if matches!(pty, Type::Struct(_)) {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：spawn 的线程入口函数 '{}' 含 struct 形参，当前版本不支持（线程实参槽固定 8 字节，装不下值语义聚合体）",
+                                    fname
+                                ),
+                                0, 0,
+                            ));
+                        }
+                    }
+                    if args.len() - 1 != target.params.len() {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：spawn 传给 '{}' 的实参个数为 {}，但该函数需要 {} 个参数",
+                                fname,
+                                args.len() - 1,
+                                target.params.len()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    for (i, pty) in target.params.iter().enumerate() {
+                        let at = type_of(&args[i + 1], scopes, funcs, structs)?;
+                        if !types_compatible(&at, pty) {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：spawn 传给 '{}' 的第 {} 个实参类型为 {}，与形参类型 {} 不兼容",
+                                    fname,
+                                    i + 1,
+                                    at.name(),
+                                    pty.name()
+                                ),
+                                0, 0,
+                            ));
+                        }
+                    }
+                    return Ok(Type::Thread);
+                }
+                "join" | "detach" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 1 个参数（thread 句柄）", name),
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Thread {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 的参数必须是 thread 句柄", name),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Void);
+                }
+                // 创建有界通道。返回 Channel(Void) —— 元素类型未定，由声明处统一。
+                "channel" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：channel 需要 1 个参数（容量 cap: int）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：channel 的参数（容量）必须是 int",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Channel(Box::new(Type::Void)));
+                }
+                "recv" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：recv 需要 1 个参数（channel）",
+                            0, 0,
+                        ));
+                    }
+                    let ct = type_of(&args[0], scopes, funcs, structs)?;
+                    match ct {
+                        // 返回「元素类型」：接收方成为该指针的唯一所有者（不做 retain）。
+                        Type::Channel(elem) => {
+                            if matches!(elem.as_ref(), Type::Void) {
+                                return Err(DialcError::new(
+                                    "语义错误：recv 的通道元素类型未定，请在声明处写出具体类型（例如 let ch: channel<string> = channel(8);）",
+                                    0, 0,
+                                ));
+                            }
+                            return Ok(elem.as_ref().clone());
+                        }
+                        _ => {
+                            return Err(DialcError::new(
+                                format!("语义错误：recv 的参数必须是 channel，实际为 {}", ct.name()),
+                                0, 0,
+                            ))
+                        }
+                    }
+                }
+                // move_to(变量, 通道)：编译期 intrinsic，把变量的所有权 O(1) 移交给通道。
+                // 第一个参数必须是**变量**（而非任意表达式）——因为「清零原槽 + 标记
+                // Moved」这两件事都只有在有确定存储位置时才成立。
+                "move_to" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：move_to 需要 2 个参数（变量, 目标 channel）",
+                            0, 0,
+                        ));
+                    }
+                    if !matches!(&args[0], Expr::Var(_)) {
+                        return Err(DialcError::new(
+                            "语义错误：move_to 的第一个参数必须是变量（所有权转移需要有确定的存储位置）",
+                            0, 0,
+                        ));
+                    }
+                    let vt = type_of(&args[0], scopes, funcs, structs)?;
+                    let ct = type_of(&args[1], scopes, funcs, structs)?;
+                    match ct {
+                        Type::Channel(elem) => {
+                            if *elem.as_ref() != vt {
+                                return Err(DialcError::new(
+                                    format!(
+                                        "语义错误：move_to 的目标通道元素类型为 {}，与被移交变量的类型 {} 不匹配",
+                                        elem.as_ref().name(),
+                                        vt.name()
+                                    ),
+                                    0, 0,
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：move_to 的第二个参数必须是 channel，实际为 {}",
+                                    ct.name()
+                                ),
+                                0, 0,
+                            ))
+                        }
+                    }
+                    return Ok(Type::Void);
                 }
                 _ => {}
             }
@@ -466,6 +691,19 @@ pub fn type_of<V>(
                         ))
                     }
                     Type::Error => {}
+                    // 句柄打印没有任何可读语义，且与「不透明指针」契约冲突（打印就等于泄露内部）。
+                    Type::Thread => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print thread 句柄",
+                            0, 0,
+                        ))
+                    }
+                    Type::Channel(_) => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print channel；请 recv 出元素后再打印",
+                            0, 0,
+                        ))
+                    }
                     Type::Void => {
                         return Err(DialcError::new(
                             "语义错误：print 的参数不能是 void",
@@ -585,7 +823,7 @@ fn error_method_type<V>(
     funcs: &HashMap<String, FuncInfo>,
     structs: &StructTable,
 ) -> Result<Type> {
-    let arg_t = |i: usize| type_of(&args[i], scopes, funcs, structs);
+    let _arg_t = |i: usize| type_of(&args[i], scopes, funcs, structs);
     match method {
         // e.msg()：返回错误消息字符串。
         "msg" => {
@@ -723,7 +961,38 @@ fn map_method_type<V>(
 // ===================== 入口 =====================
 
 /// 入口：收集函数签名 + 结构体表，校验 main，逐一检查函数体，最后跑数据流分析写入 move_hint。
+/// 保留名：这些标识符在 `type_of` 里按**名字**匹配为内建函数/类型，
+/// 与用户函数的查找是两条路。若允许用户定义同名函数，`Expr::Call` 的
+/// 内建分支会被静默绕过（或反之）——因此必须在编译期直接拒绝。
+const RESERVED_NAMES: &[&str] = &[
+    "spawn", "join", "detach", "channel", "recv", "move_to", "thread",
+];
+
 pub fn analyze(program: &mut Program) -> Result<(HashMap<String, FuncInfo>, StructTable)> {
+    // 0) 保留名校验（函数名与结构体名都不能撞内建）
+    for f in &program.functions {
+        if RESERVED_NAMES.contains(&f.name.as_str()) {
+            return Err(DialcError::new(
+                format!(
+                    "语义错误：'{}' 是并发内建的保留名，不能用作函数名",
+                    f.name
+                ),
+                0, 0,
+            ));
+        }
+    }
+    for s in &program.structs {
+        if RESERVED_NAMES.contains(&s.name.as_str()) {
+            return Err(DialcError::new(
+                format!(
+                    "语义错误：'{}' 是并发内建的保留名，不能用作结构体名",
+                    s.name
+                ),
+                s.line, s.col,
+            ));
+        }
+    }
+
     // 1) 结构体表
     let mut structs: StructTable = HashMap::new();
     for s in &program.structs {
@@ -811,6 +1080,28 @@ fn check_type_wellformed(t: &Type, ctx: &str, line: usize, col: usize) -> Result
                 ))
             }
         }
+        // 通道元素类型白名单：只放行**句柄**（不透明指针）。
+        //
+        // 通道传的是所有权，只有句柄能做到 O(1) 的指针搬运。标量（int/float/bool）
+        // 每发一次都要装箱（malloc 8 字节），既砸掉「零分配移交」的立身之本，
+        // 又让 C 侧无法判断槽里的东西该 free 还是直接丢——所以编译期就拒绝。
+        Type::Channel(elem) => {
+            if matches!(elem.as_ref(), Type::Void) {
+                return Ok(()); // 占位：元素类型未定
+            }
+            match elem.as_ref() {
+                Type::String | Type::Array(_) | Type::Map | Type::Error | Type::Channel(_) => Ok(()),
+                _ => Err(DialcError::new(
+                    format!(
+                        "语义错误：{} 是 channel<{}> 类型，但通道元素类型只支持不透明句柄（string / int[] / map / error / channel）",
+                        ctx,
+                        elem.as_ref().name()
+                    ),
+                    line,
+                    col,
+                )),
+            }
+        }
         _ => Ok(()),
     }
 }
@@ -832,9 +1123,10 @@ fn check_function(
         0,
     )?;
 
-    let mut scopes: Scopes<bool> = vec![HashMap::new()];
+    let mut scopes: Scopes<VarState> = vec![HashMap::new()];
     for (pname, pty) in &f.params {
-        scopes[0].insert(pname.clone(), (pty.clone(), true));
+        // 形参一律按可变登记（与既有行为一致：形参可在函数体内被重新赋值）。
+        scopes[0].insert(pname.clone(), (pty.clone(), VarState::new(true)));
     }
     for stmt in &f.body {
         check_stmt(stmt, &mut scopes, funcs, f, structs, false, 0)?;
@@ -842,17 +1134,194 @@ fn check_function(
     Ok(())
 }
 
+/// 取语句的行列号（用于诊断定位）；该语句不带位置时退化为 (0,0)。
+fn stmt_line_col(stmt: &Stmt) -> (usize, usize) {
+    match stmt {
+        Stmt::VarDecl { line, col, .. } => (*line, *col),
+        Stmt::Assign { line, col, .. } => (*line, *col),
+        Stmt::AssignField { line, col, .. } => (*line, *col),
+        Stmt::AssignIndex { line, col, .. } => (*line, *col),
+        Stmt::Break(l, c) => (*l, *c),
+        Stmt::Continue(l, c) => (*l, *c),
+        Stmt::Return(_, l, c) => (*l, *c),
+        Stmt::Throw(_, l, c) => (*l, *c),
+        Stmt::Try { line, col, .. } => (*line, *col),
+        _ => (0, 0),
+    }
+}
+
+/// 把变量标记为「已转移」。向外找到**声明它的那个作用域**再置位，
+/// 而不是只写 `last()`：这样「if 分支里 move 之后，主流程再用」也会被保守拦下。
+fn mark_moved(scopes: &mut Scopes<VarState>, name: &str) {
+    for scope in scopes.iter_mut().rev() {
+        if let Some((_, st)) = scope.get_mut(name) {
+            st.moved = true;
+            return;
+        }
+    }
+}
+
+/// 语句级所有权检查：在类型检查**之前**执行。
+///
+/// 被 `move_to` 移交、或被 `spawn` 当作堆类型实参移交的变量，此后任何引用
+/// ——读取、写入、再次转移——都在编译期当场拒绝。三者都必然经过一次
+/// `Expr::Var` 引用，因此在这一处拦截即可同源覆盖，无需在各调用点分别判断语境。
+///
+/// 只遍历本语句自身的表达式，**不**下探嵌套语句块：嵌套块由 `check_stmt`
+/// 递归时各自检查，重复下探只会造成重复标记。
+fn check_moved_stmt(
+    stmt: &Stmt,
+    scopes: &mut Scopes<VarState>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<()> {
+    let (line, col) = stmt_line_col(stmt);
+    match stmt {
+        Stmt::VarDecl { value, .. } => check_moved_expr(value, scopes, funcs, structs, line, col),
+        Stmt::Assign { name, value, .. } => {
+            // 写入目标同样受约束：给已转移的变量赋值，与读取它一样是错误。
+            if scopes
+                .iter()
+                .rev()
+                .find_map(|s| s.get(name))
+                .map(|v| v.1.moved)
+                .unwrap_or(false)
+            {
+                return Err(DialcError::new(
+                    format!("语义错误：变量 '{}' 已转移，无法使用", name),
+                    line,
+                    col,
+                ));
+            }
+            check_moved_expr(value, scopes, funcs, structs, line, col)
+        }
+        Stmt::AssignField { obj, value, .. } => {
+            check_moved_expr(obj, scopes, funcs, structs, line, col)?;
+            check_moved_expr(value, scopes, funcs, structs, line, col)
+        }
+        Stmt::AssignIndex { arr, index, value, .. } => {
+            check_moved_expr(arr, scopes, funcs, structs, line, col)?;
+            check_moved_expr(index, scopes, funcs, structs, line, col)?;
+            check_moved_expr(value, scopes, funcs, structs, line, col)
+        }
+        Stmt::If { cond, .. } => check_moved_expr(cond, scopes, funcs, structs, line, col),
+        Stmt::While { cond, .. } => check_moved_expr(cond, scopes, funcs, structs, line, col),
+        Stmt::For { start, end, .. } => {
+            check_moved_expr(start, scopes, funcs, structs, line, col)?;
+            check_moved_expr(end, scopes, funcs, structs, line, col)
+        }
+        Stmt::Return(Some(e), ..) | Stmt::Throw(e, ..) | Stmt::Expr(e) => {
+            check_moved_expr(e, scopes, funcs, structs, line, col)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 表达式级所有权检查（由 `check_moved_stmt` 驱动）。
+fn check_moved_expr(
+    e: &Expr,
+    scopes: &mut Scopes<VarState>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+    line: usize,
+    col: usize,
+) -> Result<()> {
+    match e {
+        Expr::Var(name) => {
+            let moved = scopes
+                .iter()
+                .rev()
+                .find_map(|s| s.get(name))
+                .map(|v| v.1.moved)
+                .unwrap_or(false);
+            if moved {
+                Err(DialcError::new(
+                    format!("语义错误：变量 '{}' 已转移，无法使用", name),
+                    line,
+                    col,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Expr::Field(o, _) => check_moved_expr(o, scopes, funcs, structs, line, col),
+        Expr::Index(o, i) => {
+            check_moved_expr(o, scopes, funcs, structs, line, col)?;
+            check_moved_expr(i, scopes, funcs, structs, line, col)
+        }
+        Expr::Method(o, _, args) => {
+            check_moved_expr(o, scopes, funcs, structs, line, col)?;
+            for a in args {
+                check_moved_expr(a, scopes, funcs, structs, line, col)?;
+            }
+            Ok(())
+        }
+        Expr::Binary(l, _, r) => {
+            check_moved_expr(l, scopes, funcs, structs, line, col)?;
+            check_moved_expr(r, scopes, funcs, structs, line, col)
+        }
+        Expr::Unary(_, o) => check_moved_expr(o, scopes, funcs, structs, line, col),
+        Expr::ArrayLit(elems) => {
+            for a in elems {
+                check_moved_expr(a, scopes, funcs, structs, line, col)?;
+            }
+            Ok(())
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, a) in fields {
+                check_moved_expr(a, scopes, funcs, structs, line, col)?;
+            }
+            Ok(())
+        }
+        Expr::FuncRef(_) => Ok(()),
+        Expr::Call(name, args) => {
+            // move_to(x, ch)：x 的所有权当场移交给通道。
+            if name == "move_to" && args.len() == 2 {
+                if let Expr::Var(x) = &args[0] {
+                    // 先校验（若 x 此前已被转移，这里就会报「已转移，无法使用」），通过后再标记。
+                    check_moved_expr(&args[0], scopes, funcs, structs, line, col)?;
+                    check_moved_expr(&args[1], scopes, funcs, structs, line, col)?;
+                    mark_moved(scopes, x);
+                    return Ok(());
+                }
+            }
+            // spawn(fn, args...)：堆类型实参按所有权移交（channel 例外——它是共享的）。
+            if name == "spawn" && args.len() >= 2 {
+                for a in &args[1..] {
+                    check_moved_expr(a, scopes, funcs, structs, line, col)?;
+                    if let Expr::Var(v) = a {
+                        if let Ok(t) = type_of(a, scopes, funcs, structs) {
+                            if matches!(t, Type::String | Type::Array(_) | Type::Map | Type::Error) {
+                                mark_moved(scopes, v);
+                            }
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            for a in args {
+                check_moved_expr(a, scopes, funcs, structs, line, col)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// in_loop：当前是否处于循环体内（用于约束 break / continue）。
 /// try_depth：当前嵌套的 try 层数（用于约束 throw 必须出现在 try 内）。
 fn check_stmt(
     stmt: &Stmt,
-    scopes: &mut Scopes<bool>,
+    scopes: &mut Scopes<VarState>,
     funcs: &HashMap<String, FuncInfo>,
     f: &Func,
     structs: &StructTable,
     in_loop: bool,
     try_depth: usize,
 ) -> Result<()> {
+    // 所有权检查必须排在类型检查之前：已移交的变量连「被引用」的资格都没有，
+    // 更不该走到类型推导里去产生一条误导性的类型错误。
+    check_moved_stmt(stmt, scopes, funcs, structs)?;
     match stmt {
         Stmt::VarDecl {
             name,
@@ -866,7 +1335,7 @@ fn check_stmt(
             // 声明类型必须先良构，再谈兼容
             check_type_wellformed(ty, &format!("变量 '{}'", name), *line, *col)?;
             let vt = type_of(value, scopes, funcs, structs)?;
-            if !types_compatible(&vt, ty) {
+            if !types_compatible(&vt, ty) && !channel_placeholder_compat(&vt, ty) {
                 return Err(DialcError::new(
                     format!(
                         "语义错误：变量 '{}' 的初始化表达式类型为 {}，与声明类型 {} 不兼容",
@@ -888,7 +1357,7 @@ fn check_stmt(
             scopes
                 .last_mut()
                 .unwrap()
-                .insert(name.clone(), (ty.clone(), *mutable));
+                .insert(name.clone(), (ty.clone(), VarState::new(*mutable)));
             Ok(())
         }
         Stmt::Assign {
@@ -901,19 +1370,19 @@ fn check_stmt(
             let info = lookup_type(scopes, name).ok_or_else(|| {
                 DialcError::new(format!("语义错误：未声明的变量 '{}'", name), *line, *col)
             })?;
-            let (_ty, mutable) = scopes
+            let (_ty, st) = scopes
                 .iter()
                 .rev()
                 .find_map(|s| s.get(name).map(|v| v.clone()))
                 .unwrap();
-            if !mutable {
+            if !st.mutable {
                 return Err(DialcError::new(
                     format!("语义错误：变量 '{}' 由 let 声明，不可重新赋值", name),
                     *line, *col,
                 ));
             }
             let vt = type_of(value, scopes, funcs, structs)?;
-            if !types_compatible(&vt, &info) {
+            if !types_compatible(&vt, &info) && !channel_placeholder_compat(&vt, &info) {
                 return Err(DialcError::new(
                     format!(
                         "语义错误：对 '{}' 的赋值类型不兼容（实参 {}，变量 {}）",
@@ -964,7 +1433,7 @@ fn check_stmt(
                         let mutable = scopes
                             .iter()
                             .rev()
-                            .find_map(|s| s.get(root).map(|v| v.1))
+                            .find_map(|s| s.get(root).map(|v| v.1.mutable))
                             .unwrap_or(false);
                         if !mutable {
                             return Err(DialcError::new(
@@ -1012,7 +1481,7 @@ fn check_stmt(
                         let mutable = scopes
                             .iter()
                             .rev()
-                            .find_map(|s| s.get(root).map(|v| v.1))
+                            .find_map(|s| s.get(root).map(|v| v.1.mutable))
                             .unwrap_or(false);
                         if !mutable {
                             return Err(DialcError::new(
@@ -1095,7 +1564,10 @@ fn check_stmt(
             }
             // 循环变量作用域限定在循环体内；声明为可变（用户可在体内重新赋值）。
             scopes.push(HashMap::new());
-            scopes.last_mut().unwrap().insert(var.clone(), (Type::Int, true));
+            scopes
+                .last_mut()
+                .unwrap()
+                .insert(var.clone(), (Type::Int, VarState::new(true)));
             for s in body {
                 check_stmt(s, scopes, funcs, f, structs, true, try_depth)?;
             }
@@ -1166,7 +1638,7 @@ fn check_stmt(
             }
             Ok(())
         }
-        Stmt::Try { body, catch, line, col } => {
+        Stmt::Try { body, catch, .. } => {
             // try 块体处于 try 上下文（try_depth+1），使块内嵌套 throw 合法。
             scopes.push(HashMap::new());
             for s in body {
@@ -1180,7 +1652,7 @@ fn check_stmt(
                 scopes
                     .last_mut()
                     .unwrap()
-                    .insert(name.clone(), (Type::Error, false));
+                    .insert(name.clone(), (Type::Error, VarState::new(false)));
             }
             for s in &catch.body {
                 check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth + 1)?;
@@ -1202,7 +1674,7 @@ fn check_stmt(
                             let mutable = scopes
                                 .iter()
                                 .rev()
-                                .find_map(|s| s.get(name).map(|v| v.1))
+                                .find_map(|s| s.get(name).map(|v| v.1.mutable))
                                 .unwrap_or(false);
                             if !mutable {
                                 return Err(DialcError::new(

@@ -1,0 +1,9 @@
+// 负向：spawn 实参类型与线程入口形参不匹配 —— 必须编译失败
+fn worker(n: int): void {
+}
+fn main(): int {
+    let s: string = "a";
+    let t: thread = spawn(worker, s);
+    join(t);
+    return 0;
+}

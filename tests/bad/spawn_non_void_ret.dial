@@ -1,0 +1,9 @@
+// 负向：spawn 的线程入口函数返回非 void —— 必须编译失败
+fn worker(): int {
+    return 1;
+}
+fn main(): int {
+    let t: thread = spawn(worker);
+    join(t);
+    return 0;
+}

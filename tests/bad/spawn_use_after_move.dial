@@ -1,0 +1,10 @@
+// 负向：spawn 移交出去的堆类型实参，之后又被使用 —— 必须编译失败
+fn worker(s: string): void {
+}
+fn main(): int {
+    var s: string = "payload";
+    let t: thread = spawn(worker, s);
+    print(s);
+    join(t);
+    return 0;
+}

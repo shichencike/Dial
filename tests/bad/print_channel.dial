@@ -1,0 +1,6 @@
+// 负向：直接 print channel —— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    print(ch);
+    return 0;
+}

@@ -170,7 +170,24 @@ impl Parser {
             }
             TokenKind::Ident(n) => {
                 self.advance();
-                Type::Struct(n)
+                match n.as_str() {
+                    // channel<T>：泛型通道。`<` / `>` 词法已存在（Lt / Gt），无需新增 token。
+                    // 省略 <T> 时得到 Channel(Void) —— 「元素类型未定」占位，
+                    // 由变量声明处的类型标注统一（见 semantic 的 VarDecl 分支）。
+                    "channel" => {
+                        if self.check(&TokenKind::Lt) {
+                            self.advance();
+                            let elem = self.parse_type()?;
+                            self.expect(TokenKind::Gt)?;
+                            Type::Channel(Box::new(elem))
+                        } else {
+                            Type::Channel(Box::new(Type::Void))
+                        }
+                    }
+                    // thread：线程句柄（不透明指针，不是泛型）
+                    "thread" => Type::Thread,
+                    _ => Type::Struct(n),
+                }
             }
             _ => {
                 return Err(DialcError::new(
@@ -588,6 +605,14 @@ impl Parser {
                 if self.check(&TokenKind::LParen) {
                     self.advance();
                     let mut args = Vec::new();
+                    // spawn 的首参是「函数引用」，不是表达式：Dial 没有一等函数与闭包，
+                    // 线程入口只能是一个顶层具名函数，因此这里直接消费标识符。
+                    if name == "spawn" && !self.check(&TokenKind::RParen) {
+                        args.push(Expr::FuncRef(self.expect_ident()?));
+                        if self.check(&TokenKind::Comma) {
+                            self.advance();
+                        }
+                    }
                     if !self.check(&TokenKind::RParen) {
                         loop {
                             args.push(self.parse_expr()?);

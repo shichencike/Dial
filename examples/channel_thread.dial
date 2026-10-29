@@ -1,0 +1,18 @@
+// v0.8 示例：子线程把字符串移交给通道，main 汇聚后打印
+//
+// 这是 Dial 取代锁机制的标准姿势：数据不共享，只**转移所有权**。
+// 通道两端各自持有一个引用（原子引用计数），队列里流动的指针永远只有一个持有者，
+// 因此根本不存在数据竞争，也就不需要任何互斥锁。
+fn producer(ch: channel<string>): void {
+    var s: string = "from-thread";
+    move_to(s, ch);
+}
+
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    let t: thread = spawn(producer, ch);
+    let r: string = recv(ch);
+    join(t);
+    print(r);
+    return 0;
+}

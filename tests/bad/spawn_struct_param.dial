@@ -1,0 +1,12 @@
+// 负向：spawn 的线程入口含 struct 形参（8 字节实参槽装不下值语义聚合体）—— 必须编译失败
+struct Box {
+    n: int
+}
+fn worker(b: Box): void {
+}
+fn main(): int {
+    var b: Box = Box { n: 1 };
+    let t: thread = spawn(worker, b);
+    join(t);
+    return 0;
+}

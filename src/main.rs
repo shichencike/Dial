@@ -275,6 +275,9 @@ fn link(obj: &Path, exe: &Path, safety: SafetyMode) -> Result<(), String> {
         let mut cmd = Command::new(&cc);
         cmd.args(&cc_prefix)
             .arg("-O2")
+            // 并发运行时（stdlib/dial_thread.c、dial_channel.c）用到 pthread：
+            // 必须让编译器生成线程安全的代码（并暴露 _REENTRANT 相关声明）。
+            .arg("-pthread")
             // Fail-Fast 等级注入 C Runtime：等级 0 时检查代码被编译器完全消除
             .arg(format!("-DDIAL_SAFETY={}", safety.as_c_macro()))
             .arg("-I")
@@ -308,6 +311,9 @@ fn link(obj: &Path, exe: &Path, safety: SafetyMode) -> Result<(), String> {
         .args(&cc_prefix)
         .arg(obj)
         .arg(&lib)
+        // 线程库：glibc ≥ 2.34 已并入 libc（此处是空操作），
+        // 保留是为了在老 glibc 上仍能链接，不做任何代价。
+        .arg("-lpthread")
         .arg("-o")
         .arg(exe);
     if !run_ok(&mut link_cmd) {

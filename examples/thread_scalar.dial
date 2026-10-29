@@ -1,0 +1,18 @@
+// v0.8 示例：标量实参按值拷贝，不触发所有权转移
+//
+// int / float / bool 是值语义，8 字节直接进 argcell，源变量不受任何影响。
+// 只有 string / int[] / map / error 这类句柄才会被「移交」。
+fn burn(x: int): void {
+    var i: int = 0;
+    while (i < x) {
+        i = i + 1;
+    }
+}
+
+fn main(): int {
+    var n: int = 42;
+    let t: thread = spawn(burn, n);
+    join(t);
+    print(n);
+    return 0;
+}

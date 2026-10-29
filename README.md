@@ -149,12 +149,17 @@ var  let  fn  struct  if  else  while  for  in  return
 try  catch  throw
 and  or   not
 true false
-int  float  bool  string  void  file  error
+int  float  bool  string  void  file  error  thread  channel
 ```
 
 > `try` / `catch` / `throw` 是 v0.7 引入的可恢复异常关键字（见 [§26](#26-可恢复异常trycatchthrow)）。
 > 注意 **`error` 不是关键字**——它是内建构造函数名（与 `open` / `print` 同类），写作 `Error("...")`。
 > 同理 `catch` 后**不跟圆括号**：`catch e { }`，而非 `catch (e) { }`。
+>
+> `thread` / `channel` 在**词法上也不是关键字**，只是 `parse_type` 对标识符的特判——
+> 否则 `channel(8)` 这个内建调用会被当成类型名而无法解析。并发内建（`spawn` / `join` /
+> `detach` / `channel` / `recv` / `move_to`）全部按名字匹配，**不能用作函数名或结构体名**
+>（见 [§27](#27-所有权转移与多线程并发move_to--thread--channel)）。
 
 ### 4.4 字面量
 
@@ -188,6 +193,8 @@ int  float  bool  string  void  file  error
 | `int[]` | LLVM `ptr`（不透明） | 由 C Runtime 管理的动态数组，**元素类型固定为 `int`** |
 | `file` | LLVM `ptr`（不透明） | 文件句柄，封装 C 的 `FILE*`；显式 `open` / `close`，**不受 ARC 管理**（见 [§24](#24-文件-iofile-句柄)） |
 | `error` | LLVM `ptr`（不透明） | **可恢复异常对象**（v0.7），由 C Runtime 管理的 ARC 类型；由 `Error("msg")` 构造、`throw` 抛出、`catch` 捕获（见 [§26](#26-可恢复异常trycatchthrow)） |
+| `thread` | LLVM `ptr`（不透明） | 线程句柄（v0.8）；显式 `join` / `detach`，**不受 ARC 管理**（见 [§27](#27-所有权转移与多线程并发move_to--thread--channel)） |
+| `channel<T>` | LLVM `ptr`（不透明） | 通道句柄（v0.8），元素类型仅编译期可见；跨线程共享 → **原子**引用计数 ARC。元素只能是 `string` / `int[]` / `map` / `error` / `channel`（见 [§27](#27-所有权转移与多线程并发move_to--thread--channel)） |
 | `void` | LLVM `void` | **仅可用作函数返回类型** |
 | 结构体 | LLVM 具名 struct | 值类型，栈分配 |
 
@@ -929,9 +936,10 @@ print(e);
 
 ### 17.2 v0.6 尚未实现（不要指望能编译）
 
-> 相对 v0.2 已落地的能力：`Map`（int → int，ARC 管理）、`read_line()`、短路求值、零隐式转换铁律、
+> 已落地：`Map`（int → int，ARC 管理）、`read_line()`、短路求值、零隐式转换铁律、
 > `let` + 原地修改方法（push/set/put）的接收者约束、`else if` 语法糖、`for` 范围循环、`break` / `continue`、
-> Fail-Fast 运行时检查（§20）。其余仍按计划未实现：
+> Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§26）、
+> 所有权转移与多线程并发（§27）。其余仍按计划未实现：
 
 | 能力 | 状态 |
 | --- | --- |
@@ -940,13 +948,18 @@ print(e);
 | `char` 类型 | 未实现，字符以 `int` 表示 |
 | 裸块 `{ ... }` | 不支持 |
 | 模块 / 包 / import | 不支持（生态规划草案见 [§25](#25-包分发与依赖管理生态规划--草案)） |
-| 泛型、接口、trait、闭包 | 不支持 |
+| 泛型、接口、trait、闭包 | 不支持（`channel<T>` 是内建特化语法，不是用户泛型） |
 | 指针、地址取值、指针算术 | **永不提供**（与不透明指针契约冲突） |
 | 运算符重载 | **永不提供** |
 | 全局变量 | 不支持 |
 | 数组/结构体字面量作为常量表达式 | 不支持（需先赋给变量） |
-| 所有权转移 `move_to`（编译期 intrinsic） | **未实现（规划中）**——设计目标：Sema 标记 `Moved` 后禁止再用，Codegen 生成 O(1) 指针搬运且跳过 retain/release |
-| 多线程并发（`thread` / `channel`） | **未实现（规划中）**——`move_to` 的前置设施，待专属版本落地 |
+| 通道关闭 `close(ch)` 与 EOF 语义 | 未实现——通道生命周期完全由原子 ARC 管住，不支持「关闭」广播 |
+| `try_recv` / `select` / 多路复用 | 未实现 |
+| 线程池、协程、异步 | 未实现 |
+| 原子类型、无锁数据结构 | 未实现 |
+| `move_to` 到**已启动的**线程 | 编译期不支持——移交只能在 `spawn` 时完成（见 [§27.3](#273-零竞争移交与-o1-论证)） |
+| 通道元素为标量（`int` / `float` / `bool`） | 编译期拒绝（需装箱，见 [§27.2](#272-channel-与所有权移交)） |
+| 一等函数 / 函数指针 | 不支持——`spawn` 首参只能是顶层具名函数 |
 
 ---
 
@@ -1735,4 +1748,133 @@ after
 | `catch` 不做类型/条件过滤 | 只有一个 `catch`，捕获一切 `Error`；不做多 catch 分支匹配 |
 | `Error` 只有 `.msg()` | 不提供错误码、错误链、自定义子类 |
 | `finally` | 不支持（用 try 之后的代码即可，Dial 无异常穿透的清理需求） |
-| 跨函数抛出 | `try` 只捕获**本函数内**（含被调函数）抛出的异常；Dial 无多线程，不存在跨栈问题 |
+| 跨函数抛出 | `try` 只捕获**本函数内**（含被调函数）抛出的异常 |
+
+---
+
+## 27. 所有权转移与多线程并发（`move_to` · `thread` · `channel`）
+
+> v0.8 起可用。**Dial 用「转移所有权」取代「共享内存 + 锁」**：
+> 数据不共享，只移交。队列里流动的指针永远只有一个持有者，因此根本不存在数据竞争，
+> 也就不需要任何互斥锁——这是本节全部设计的出发点。
+
+### 27.1 三个新东西
+
+| 名字 | 类别 | 说明 |
+| --- | --- | --- |
+| `thread` | 类型 | 线程句柄（不透明指针）。**不受 ARC 管理**，必须显式 `join` 或 `detach` 之一 |
+| `channel<T>` | 类型 | 通道句柄（不透明指针）。跨线程共享 → **原子**引用计数 ARC |
+| `spawn(fn, args...)` | 内建 | 创建并**立即**启动线程，返回 `thread` |
+| `join(t)` / `detach(t)` | 内建 | 等待线程结束 / 分离线程；二者选一且仅一次 |
+| `channel(cap)` | 内建 | 创建容量为 `cap` 的有界通道 |
+| `recv(ch)` | 内建 | 阻塞取出一个元素，返回类型即 `T`，接收方成为其唯一所有者 |
+| `move_to(x, ch)` | 内建（intrinsic） | 把 `x` 的所有权**移交**给通道 `ch` |
+
+### 27.2 `channel<T>` 与所有权移交
+
+```dial
+fn producer(ch: channel<string>): void {
+    var s: string = "from-thread";
+    move_to(s, ch);          // 移交：s 此后不可再用
+}
+
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    let t: thread = spawn(producer, ch);
+    let r: string = recv(ch);
+    join(t);
+    print(r);                // from-thread
+    return 0;
+}
+```
+
+- **元素类型白名单**：只能是 `string` / `int[]` / `map` / `error` / `channel<...>`。
+  通道传的是所有权，只有句柄能做到 O(1) 的指针搬运；`int` / `float` / `bool` 每发一次都要
+  装箱（malloc 8 字节），既砸掉「零分配移交」的立身之本，又让 C 侧无法判断槽里的东西
+  该 `free` 还是直接丢——因此在**编译期**就拒绝。
+- **元素类型是编译期的**：`channel(cap)` 返回 `channel<void>`（未定占位），声明处写出
+  `let ch: channel<string> = ...` 才确定 `T`。运行时已擦除（队列只存 `void*`），
+  `recv` 的返回类型从变量自身的静态类型取出。
+- **`send` / `recv` 不做任何 retain / release**：指针进出队列，引用计数一个数都不动。
+
+### 27.3 零竞争移交与 O(1) 论证
+
+`move_to(x, ch)` **不是函数调用**，是编译期 intrinsic。Codegen 只发三条 IR 指令：
+
+```llvm
+%v = load ptr, ptr %x_slot             ; 取指针（不 retain）
+call void @dial_channel_send(ptr %ch, ptr %v)
+store ptr null, ptr %x_slot            ; 原槽清零
+```
+
+- **O(1)**：没有调用栈、没有参数编组、没有引用计数操作，就是一次指针入队加一次清零。
+- **零竞争**：`spawn` 的所有实参都在 `pthread_create` **之前**写进线程的 argcell，
+  因此不存在「先启动、再移交」的窗口。这也是为什么**不支持**「move_to 到一个已启动的线程」——
+  那条路必然有竞争，Dial 选择在编译期就把它关掉。`spawn(fn, x)` 本身就是「move_to 到线程」。
+
+### 27.4 移交之后：编译器的死命令
+
+一旦 `move_to`（或 `spawn` 的堆类型实参移交）发生，该变量即进入 **Moved** 状态，
+此后**读取、写入、再次转移**全部当场编译失败：
+
+```
+[dialc 错误] 第 N 行: 语义错误：变量 's' 已转移，无法使用
+```
+
+Moved 标记落在**声明该变量的那个作用域**上（而非最内层），所以「if 分支里移交、
+主流程再用」也会被保守拦下。生命周期交接的会计规则：
+
+| 实参类型 | `spawn` 时的行为 |
+| --- | --- |
+| `int` / `float` / `bool` | **按值拷贝**（8 字节直存），源变量不受影响、之后照用 |
+| `string` / `int[]` / `map` / `error` | **移交**：源槽清零 + 标 Moved，**不 retain 不 release** |
+| `channel<T>` | **共享**：原子 `retain` +1，源变量仍可用（通道天生要被两端持有） |
+
+被移交的那一份所有权，由**接收方**负责最终释放：
+
+| 场景 | 引用计数推演 |
+| --- | --- |
+| `spawn(worker, s)`，worker 不再移交 | main 移交 rc=1 → worker 入口 retain(2) → worker 出口 release(1) → thunk release(0) ✅ |
+| worker 内 `move_to(a0, ch)` | 入口 retain(2) → `moved` 使出口**跳过** release → 2 → thunk release(1，归通道) → 接收方释放(0) ✅ |
+| `channel` 作 spawn 实参 | 原子 retain(2) → worker 入口(3) → 出口(2) → main 作用域结束(1) → thunk release(0) ✅ |
+| `let r : string = recv(ch)` | `recv` 是调用而非变量引用，VarDecl **不会** retain → 直接取得所有权(1) → 作用域结束(0) ✅ |
+
+### 27.5 `spawn` 的底层：thunk + argcell
+
+C 的 `pthread_create` 只认统一签名 `void (*)(void*)`，而 Dial 函数实参类型各异。
+编译器为每个被 spawn 的函数生成一个**私有 thunk**：
+
+```llvm
+define private void @__dial_thunk_producer(ptr %cell) {
+  %p0 = getelementptr ptr, ptr %cell, i64 0
+  %a0 = load ptr, ptr %p0                       ; 取出 channel 实参
+  call void @producer(ptr %a0)
+  call void @dial_channel_release(ptr %a0)      ; 移交来的那一份由本线程最终释放
+  ret void
+}
+```
+
+- argcell **每槽固定 8 字节**：指针 / `i64` / `f64` 直接 `store`；`bool(i1)` 存前 `zext`、
+  取后 `trunc`。
+- 线程句柄内部**只存 `pthread_t`**，启动参数包由子线程第一时间取走并释放，
+  因此 `join` / `detach` 可以立即回收句柄，无需与子线程做原子握手。
+- `join` / `detach` 之后 IR 会把句柄槽置 `null`，二次 `join` 触发 `DIAL_HEAP_ASSERT` 当场 Fail-Fast，
+  而不是退化成 use-after-free。
+
+### 27.6 确定性纪律（写并发代码时必须遵守）
+
+> **子线程一律不要 `print`**，要观察结果就走 channel 汇聚回 main 后按序打印。
+> 多线程输出的交错顺序不确定，会让「逐字节比对」的黄金测试随机变红且极难复现。
+> 多生产者通道的到达顺序同样不确定——需要确定顺序时用**单生产者**。
+
+### 27.7 当前边界
+
+| 边界 | 说明 |
+| --- | --- |
+| 线程入口必须返回 `void` | 返回值无处安放；堆类型返回值还会无人释放地泄漏，故编译期拒绝 |
+| 线程入口禁止 `struct` 形参 | 值语义聚合体塞不进 8 字节实参槽 |
+| 无一等函数 | `spawn` 首参只能是顶层具名函数（`spawn(worker, ...)`），不能传闭包或函数值 |
+| 通道不能 `close` | 生命周期完全由原子 ARC 管住；没有「关闭」广播，也就没有 EOF 语义 |
+| `recv` 会阻塞 | 队列空时一直等；没有 `try_recv` / `select` / 超时 |
+| 无线程池 / 无异步 | 一个 `spawn` 就是一个真线程 |
+| `join` 后句柄失效 | 二次 `join` / `detach` 触发 Fail-Fast 断言 |

@@ -1,0 +1,26 @@
+// v0.8 示例：spawn 启动线程 + 所有权移交
+//
+// 要点：
+//  1. spawn(fn, args...) 在 pthread_create **之前**把实参写进线程结构体的 argcell，
+//     因此不存在「先启动再移交」的竞争窗口。
+//  2. string 实参是**移交**（原变量此后不可再用，编译期强制），int 实参是**按值拷贝**
+//     （原变量之后照样能用）。
+//  3. 子线程一律不 print —— 多线程输出的交错顺序不确定，会让黄金输出随机变红。
+//     要观察子线程的结果，走 channel 汇聚回 main（见 channel_thread.dial）。
+fn worker(tag: string, times: int): void {
+    var i: int = 0;
+    while (i < times) {
+        i = i + 1;
+    }
+}
+
+fn main(): int {
+    let s: string = "hello";
+    var n: int = 100;
+    let t: thread = spawn(worker, s, n);
+    join(t);
+    print("joined");
+    // n 是按值拷贝进线程的，此处依然可用；s 已被移交，若再用会当场编译失败。
+    print(n);
+    return 0;
+}

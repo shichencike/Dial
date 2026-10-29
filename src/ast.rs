@@ -16,7 +16,11 @@ pub enum Type {
     Array(Box<Type>), // 动态数组（v0.2 元素固定为 Int）
     Map,    // 哈希表（int -> int，不透明指针，C 侧引用计数 ARC）
     File,   // 文件句柄（不透明指针，封装 C 的 FILE*；显式 open/close，不受 ARC 管理）
-    Error,  // 可恢复异常（不透明指针，ARC 管理；由 throw 抛出、catch 捕获，见 §25）
+    Error,  // 可恢复异常（不透明指针，ARC 管理；由 throw 抛出、catch 捕获，见 §26）
+    Thread, // 线程句柄（不透明指针；显式 join / detach，不受 ARC 管理，见 §27）
+    /// 通道（不透明指针；元素类型仅编译期可见，运行时已擦除）。
+    /// 跨线程共享 -> 走**原子**引用计数 ARC；send/recv 是所有权移交，不做 retain/release。
+    Channel(Box<Type>),
     Struct(String),   // 用户结构体（按名引用），值语义
 }
 
@@ -33,6 +37,8 @@ impl Type {
             Type::Map => "map",
             Type::File => "file",
             Type::Error => "error",
+            Type::Thread => "thread",
+            Type::Channel(_) => "channel",
             Type::Struct(_) => "struct",
         }
     }
@@ -75,6 +81,9 @@ pub enum Expr {
     Unary(UnOp, Box<Expr>),
     /// 普通函数调用（print 或用户函数）
     Call(String, Vec<Expr>),
+    /// 函数引用：`spawn(worker, ...)` 的首参。Dial 没有一等函数与闭包，
+    /// 因此线程入口只能是一个顶层具名函数；FuncRef 仅允许出现在 spawn 首参位置。
+    FuncRef(String),
 }
 
 /// 语句。

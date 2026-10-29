@@ -1,0 +1,16 @@
+// v0.8 示例：move_to 把变量的所有权移交给 channel（单线程内自收发）
+//
+// move_to(x, ch) 是**编译期 intrinsic**：
+//   - 不生成任何函数调用栈，只发三条 IR 指令：取指针 -> 入队 -> 原槽清零；
+//   - 全程零 retain / 零 release（所有权完整交给通道，引用计数一个数都不动）；
+//   - 之后再用 x，编译期当场报「变量已转移，无法使用」。
+fn main(): int {
+    let ch: channel<string> = channel(4);
+    var s: string = "payload";
+    move_to(s, ch);
+    // 此刻 s 的栈槽已被清零，且被标记为 moved —— 下面这句若放开会被编译器拒绝：
+    // print(s);
+    let r: string = recv(ch);
+    print(r);
+    return 0;
+}

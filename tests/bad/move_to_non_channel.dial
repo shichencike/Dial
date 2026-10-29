@@ -1,0 +1,7 @@
+// 负向：move_to 的目标不是 channel —— 必须编译失败
+fn main(): int {
+    var s: string = "payload";
+    var n: int = 1;
+    move_to(s, n);
+    return 0;
+}

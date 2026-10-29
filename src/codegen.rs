@@ -69,8 +69,12 @@ pub struct CodeGen<'ctx> {
     cfuns: HashMap<String, FunctionValue<'ctx>>,
     struct_types: HashMap<String, StructType<'ctx>>,
     str_id: std::cell::Cell<u32>,
-    /// 已被“移动”的局部变量名（转移所有权，跳过作用域结束时的 release）。
-    moved: RefCell<std::collections::HashSet<String>>,
+    /// 已被“移动”的局部变量**栈槽指针**（转移所有权，跳过作用域结束时的 release）。
+    ///
+    /// 按**槽位指针**而非变量名记账：变量名会跨作用域/跨函数重名，按名字记账会让
+    /// 同名变量互相误伤（该 release 的被跳过 -> 泄漏）。槽位指针由 alloca 唯一确定，
+    /// 天然精确。`move_to` 是用户日常 API，这一位必须是准的。
+    moved: RefCell<std::collections::HashSet<PointerValue<'ctx>>>,
     /// 循环跳转目标栈：(continue 目标块, break 目标块)。
     /// for 的 continue 目标是「自增块」而非条件块——否则 continue 会跳过 i++ 造成死循环。
     loop_targets: RefCell<Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>>,
@@ -102,6 +106,8 @@ pub fn compile(
         struct_types: HashMap::new(),
         str_id: std::cell::Cell::new(0),
         moved: RefCell::new(std::collections::HashSet::new()),
+        // 注：HashSet<PointerValue> 无需按函数清空——每条 alloca 的 PointerValue 全局唯一，
+        // 不同函数的同名变量不会互串。
         loop_targets: RefCell::new(Vec::new()),
         exbuf_stack: RefCell::new(Vec::new()),
         safety,
@@ -329,6 +335,23 @@ impl<'ctx> CodeGen<'ctx> {
             self.context.create_enum_attribute(rt_kind, 0),
         );
         self.cfuns.insert("setjmp".to_string(), setjmp_fn);
+
+        // ---- 多线程并发（v0.8）：线程与通道 ----
+        // 线程：argcell（每槽 8 字节）+ 统一签名 void(*)(void*) 的入口。
+        self.decl_func("dial_thread_argcell", i8b, &[self.context.i64_type().into()]);
+        self.decl_func(
+            "dial_thread_new",
+            i8b,
+            &[i8b.into(), i8b.into()], // (DialThreadFn thunk, void* argcell)
+        );
+        self.decl_void("dial_thread_join", &[i8b.into()]);
+        self.decl_void("dial_thread_detach", &[i8b.into()]);
+        // 通道：send/recv 只搬运指针（所有权移交），retain/release 走原子引用计数。
+        self.decl_func("dial_channel_new", i8b, &[self.context.i64_type().into()]);
+        self.decl_void("dial_channel_send", &[i8b.into(), i8b.into()]);
+        self.decl_func("dial_channel_recv", i8b, &[i8b.into()]);
+        self.decl_void("dial_channel_retain", &[i8b.into()]);
+        self.decl_void("dial_channel_release", &[i8b.into()]);
     }
 
     fn declare_dial_function(
@@ -360,7 +383,13 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Int => self.context.i64_type().into(),
             Type::Float => self.context.f64_type().into(),
             Type::Bool => self.context.bool_type().into(),
-            Type::String | Type::Array(_) | Type::Map | Type::File | Type::Error => self.i8ptr().into(),
+            Type::String
+            | Type::Array(_)
+            | Type::Map
+            | Type::File
+            | Type::Error
+            | Type::Thread
+            | Type::Channel(_) => self.i8ptr().into(),
             Type::Struct(ref n) => (*self
                 .struct_types
                 .get(n)
@@ -413,7 +442,13 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Int => self.context.i64_type().const_int(0, false).into(),
             Type::Float => self.context.f64_type().const_float(0.0).into(),
             Type::Bool => self.context.bool_type().const_int(0, false).into(),
-            Type::String | Type::Array(_) | Type::Map | Type::File | Type::Error => self.i8ptr().const_null().into(),
+            Type::String
+            | Type::Array(_)
+            | Type::Map
+            | Type::File
+            | Type::Error
+            | Type::Thread
+            | Type::Channel(_) => self.i8ptr().const_null().into(),
             Type::Struct(_) => {
                 // 结构体默认值：对 v0.2 仅用于 main 收尾，构造一个零初始化聚合
                 let bte = self.dialc_type_to_llvm(t);
@@ -489,30 +524,61 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn retain(&self, ty: &Type, val: BasicValueEnum<'ctx>) {
-        let name = match *ty {
+        let name = match ty {
             Type::String => "dial_string_retain",
             Type::Array(_) => "dial_array_retain",
             Type::Map => "dial_map_retain",
             Type::Error => "dial_error_retain",
+            // 通道跨线程共享，因此走**原子**引用计数（与 string/map 的非原子 rc 不同）。
+            Type::Channel(_) => "dial_channel_retain",
             _ => return,
         };
         self.call_c_void(name, &[val.into()]);
     }
 
+    /// 按**槽位**释放：从 ptr 里 load 出指针再 release（用于局部变量）。
     fn release(&self, ty: &Type, ptr: PointerValue<'ctx>) {
-        let name = match *ty {
+        let v = self.builder.build_load(self.i8ptr(), ptr, "ldrel").unwrap();
+        self.release_value(ty, v);
+    }
+
+    /// 按**值**释放：直接对已取出的指针调 release（供线程 thunk 使用——
+    /// 那里持有的是实参值，没有对应的 alloca 槽位）。
+    fn release_value(&self, ty: &Type, val: BasicValueEnum<'ctx>) {
+        let name = match ty {
             Type::String => "dial_string_release",
             Type::Array(_) => "dial_array_release",
             Type::Map => "dial_map_release",
             Type::Error => "dial_error_release",
+            Type::Channel(_) => "dial_channel_release",
             _ => return,
         };
-        let v = self.builder.build_load(self.i8ptr(), ptr, "ldrel").unwrap();
-        self.call_c_void(name, &[v.into()]);
+        self.call_c_void(name, &[val.into()]);
     }
 
+    /// 按名查找局部变量的栈槽（由内到外）。
+    fn lookup_slot(scopes: &CgScopes<'ctx>, name: &str) -> Option<PointerValue<'ctx>> {
+        scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.get(name))
+            .map(|(_ty, (_m, ptr))| *ptr)
+    }
+
+    /// 标记「该变量的栈槽已转移所有权」：作用域结束时跳过它的 release。
+    fn mark_moved(&self, scopes: &CgScopes<'ctx>, name: &str) {
+        if let Some(p) = Self::lookup_slot(scopes, name) {
+            self.moved.borrow_mut().insert(p);
+        }
+    }
+
+    /// 受 ARC 管理的类型。**不含** File（显式 open/close）与 Thread（显式 join/detach）——
+    /// 这两者都是「显式终结」资源，交给 ARC 反而会让生命周期语义变得含混。
     fn is_heap_type(t: &Type) -> bool {
-        matches!(*t, Type::String | Type::Array(_) | Type::Map | Type::Error)
+        matches!(
+            *t,
+            Type::String | Type::Array(_) | Type::Map | Type::Error | Type::Channel(_)
+        )
     }
 
     /// 在函数的 **entry 块** 里分配栈槽。
@@ -563,7 +629,8 @@ impl<'ctx> CodeGen<'ctx> {
                 .build_struct_gep(llvm_sty, ptr, i as u32, "frtn")
                 .unwrap();
             match fty {
-                Type::String | Type::Array(_) | Type::Map => {
+                // v0.8 补上 Error 与 Channel（此前漏掉，与 release_struct_fields 不对称）。
+                Type::String | Type::Array(_) | Type::Map | Type::Error | Type::Channel(_) => {
                     let v = self.builder.build_load(self.i8ptr(), gep, "lfr").unwrap();
                     self.retain(fty, v);
                 }
@@ -594,7 +661,9 @@ impl<'ctx> CodeGen<'ctx> {
                 .build_struct_gep(llvm_sty, ptr, i as u32, "frel")
                 .unwrap();
             match fty {
-                Type::String | Type::Array(_) | Type::Map => self.release(fty, gep),
+                Type::String | Type::Array(_) | Type::Map | Type::Error | Type::Channel(_) => {
+                    self.release(fty, gep)
+                }
                 Type::Struct(_) => self.release_struct_fields(fty, gep, structs),
                 _ => {}
             }
@@ -652,14 +721,122 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
+    /// 为 `spawn(fn, ...)` 生成线程入口 thunk：`void __dial_thunk_fn(ptr argcell)`。
+    ///
+    /// 为什么必须有一个 thunk：C 的 `pthread_create` 只认统一签名 `void (*)(void*)`，
+    /// 而 Dial 函数的实参类型各不相同（ptr / i64 / f64 / i1）。thunk 负责从 argcell
+    /// 里按 8 字节槽宽把实参取出来，再按真实签名调用目标函数。
+    ///
+    /// **所有权会计（易错点）**：被调函数在入口 retain、出口 release（净零，它只是借用）；
+    /// 移交进来的那一份由 thunk 在调用返回后无条件释放。若被调函数内部把某个形参
+    /// `move_to` 进了通道，它的出口 release 会被跳过，计数恰好落在 thunk 这一份上，
+    /// 最终由通道的接收方释放——既不泄漏也不双释放。
+    fn gen_spawn_thunk(
+        &self,
+        fname: &str,
+        params: &[Type],
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        structs: &StructTable,
+    ) -> Result<FunctionValue<'ctx>> {
+        let thunk_name = format!("__dial_thunk_{}", fname);
+        // 同一函数可能被多处 spawn：thunk 只生成一次（重复 add_function 会被 LLVM 改名）。
+        if let Some(existing) = self.module.get_function(&thunk_name) {
+            return Ok(existing);
+        }
+        // 生成 thunk 会移动 builder 的插入点，必须先把调用方的位置存下来再还原，
+        // 否则后续 IR 会被写进 thunk 的函数体里。
+        let saved = self.builder.get_insert_block();
+
+        let ft = self
+            .context
+            .void_type()
+            .fn_type(&[self.i8ptr().into()], false);
+        let thunk = self.module.add_function(&thunk_name, ft, None);
+        let entry = self.context.append_basic_block(thunk, "entry");
+        self.builder.position_at_end(entry);
+        let cell = thunk.get_nth_param(0).unwrap().into_pointer_value();
+
+        let fv = *func_values.get(fname).ok_or_else(|| {
+            DialcError::new(format!("缺少函数 '{}' 的 LLVM 定义", fname), 0, 0)
+        })?;
+
+        let mut arg_vals: Vec<BasicValueEnum<'ctx>> = Vec::new();
+        let mut meta: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        for (i, pty) in params.iter().enumerate() {
+            let idx = self.context.i64_type().const_int(i as u64, false);
+            let v: BasicValueEnum<'ctx> = match pty {
+                Type::Float => {
+                    let slot = unsafe {
+                        self.builder
+                            .build_gep(self.context.f64_type(), cell, &[idx], "th.slot")
+                            .unwrap()
+                    };
+                    self.builder
+                        .build_load(self.context.f64_type(), slot, "th.arg")
+                        .unwrap()
+                }
+                Type::Bool => {
+                    let slot = unsafe {
+                        self.builder
+                            .build_gep(self.context.i64_type(), cell, &[idx], "th.slot")
+                            .unwrap()
+                    };
+                    let w = self
+                        .builder
+                        .build_load(self.context.i64_type(), slot, "th.argw")
+                        .unwrap()
+                        .into_int_value();
+                    self.builder
+                        .build_int_truncate(w, self.context.bool_type(), "th.arg")
+                        .unwrap()
+                        .into()
+                }
+                Type::String | Type::Array(_) | Type::Map | Type::Error | Type::Channel(_) => {
+                    let slot = unsafe {
+                        self.builder
+                            .build_gep(self.i8ptr(), cell, &[idx], "th.slot")
+                            .unwrap()
+                    };
+                    self.builder.build_load(self.i8ptr(), slot, "th.arg").unwrap()
+                }
+                _ => {
+                    let slot = unsafe {
+                        self.builder
+                            .build_gep(self.context.i64_type(), cell, &[idx], "th.slot")
+                            .unwrap()
+                    };
+                    self.builder
+                        .build_load(self.context.i64_type(), slot, "th.arg")
+                        .unwrap()
+                }
+            };
+            arg_vals.push(v);
+            meta.push(v.into());
+        }
+
+        self.builder.build_call(fv, &meta, "th.call").unwrap();
+
+        // 被移交进来的那一份所有权，由本线程负责最终释放（无条件，不查 moved）。
+        for (pty, v) in params.iter().zip(arg_vals.iter()) {
+            self.release_value(pty, *v);
+        }
+        self.builder.build_return(None).unwrap();
+
+        if let Some(bb) = saved {
+            self.builder.position_at_end(bb);
+        }
+        let _ = structs;
+        Ok(thunk)
+    }
+
     fn release_scope_locals(
         &self,
         scope: &HashMap<String, Local<'ctx>>,
         structs: &StructTable,
     ) {
         let moved = self.moved.borrow();
-        for (name, (ty, (_m, ptr))) in scope.iter() {
-            if moved.contains(name) {
+        for (_name, (ty, (_m, ptr))) in scope.iter() {
+            if moved.contains(ptr) {
                 continue;
             }
             if Self::is_heap_type(ty) {
@@ -680,7 +857,7 @@ impl<'ctx> CodeGen<'ctx> {
                         continue;
                     }
                 }
-                if moved.contains(name) {
+                if moved.contains(ptr) {
                     continue;
                 }
                 if Self::is_heap_type(ty) {
@@ -715,7 +892,7 @@ impl<'ctx> CodeGen<'ctx> {
             let moved = self.moved.borrow();
             for scope in scopes.iter().skip(depth) {
                 for (_name, (ty, (_m, ptr))) in scope.iter() {
-                    if moved.contains(_name) {
+                    if moved.contains(ptr) {
                         continue;
                     }
                     if Self::is_heap_type(ty) {
@@ -772,7 +949,7 @@ impl<'ctx> CodeGen<'ctx> {
                         self.retain(ty, stored);
                     }
                     if *move_hint {
-                        self.moved.borrow_mut().insert(src.clone());
+                        self.mark_moved(scopes, src);
                     }
                 }
                 self.builder.build_store(ptr, stored).unwrap();
@@ -833,7 +1010,7 @@ impl<'ctx> CodeGen<'ctx> {
 
                 if let Expr::Var(src) = value {
                     if *move_hint {
-                        self.moved.borrow_mut().insert(src.clone());
+                        self.mark_moved(scopes, src);
                     }
                 }
                 Ok(())
@@ -1070,7 +1247,7 @@ impl<'ctx> CodeGen<'ctx> {
                         //   4) 生成 ret。
                         let val = self.gen_expr(expr, function, scopes, func_values, functions, structs)?;
                         if let Expr::Var(n) = expr {
-                            self.moved.borrow_mut().insert(n.clone());
+                            self.mark_moved(scopes, n);
                         }
                         // 处理 main 返回 i32（C ABI）
                         let ret_bte = function.get_type().get_return_type();
@@ -1099,7 +1276,7 @@ impl<'ctx> CodeGen<'ctx> {
                 let val =
                     self.gen_expr(e, function, scopes, func_values, functions, structs)?;
                 if let Expr::Var(n) = e {
-                    self.moved.borrow_mut().insert(n.clone());
+                    self.mark_moved(scopes, n);
                 }
                 self.emit_throw(val, scopes, structs)?;
                 Ok(())
@@ -1336,6 +1513,16 @@ impl<'ctx> CodeGen<'ctx> {
                 let llvm_ty = self.dialc_type_to_llvm(&ty);
                 Ok(self.builder.build_load(llvm_ty, ptr, name).unwrap())
             }
+            // 函数引用只在 spawn 首参位置出现；那里由 Call("spawn") 分支直接消费名字，
+            // 不会走到这里。落到此处说明它被用在了别的位置——语义阶段已拒绝，此处为防御。
+            Expr::FuncRef(name) => Err(DialcError::new(
+                format!(
+                    "内部错误：函数引用 '{}' 只能作为 spawn 的第一个参数，不应参与求值",
+                    name
+                ),
+                0,
+                0,
+            )),
             Expr::Field(obj, field) => {
                 let lptr = self.gen_lvalue_ptr(obj, function, scopes, func_values, functions, structs)?;
                 let ot = type_of(obj, scopes, functions, structs)?;
@@ -1511,12 +1698,176 @@ impl<'ctx> CodeGen<'ctx> {
                         self.call_c_void("dial_file_close", &[f.into()]);
                         Ok(self.context.i64_type().const_int(0, false).into())
                     }
-                    // 可恢复异常（v0.7）：Error("msg") 构造一个带引用计数的错误对象（ARC 类型，见 §25）。
+                    // 可恢复异常（v0.7）：Error("msg") 构造一个带引用计数的错误对象（ARC 类型，见 §26）。
                     // 严禁裸的 int/string —— 该约束由 Sema 在编译期拦截；此处 msg 必为 string。
                     "Error" => {
                         let msg =
                             self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         Ok(self.call_c("dial_error_new", &[msg.into()]))
+                    }
+
+                    // ==================================================================
+                    //  所有权转移与多线程并发（v0.8）
+                    // ==================================================================
+                    "channel" => {
+                        let cap = self.to_i64(
+                            self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?,
+                            &Type::Int,
+                        );
+                        Ok(self.call_c("dial_channel_new", &[cap.into()]))
+                    }
+                    // 取出一个元素的所有权：队列里存的就是裸指针，弹出即归接收者所有（不做 retain）。
+                    "recv" => {
+                        let ch =
+                            self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_channel_recv", &[ch.into()]))
+                    }
+                    // move_to(变量, 通道)：**编译期 intrinsic**，不生成任何函数调用栈。
+                    // 三条 IR 指令完成所有权移交：取指针 -> 入队 -> 原槽清零。
+                    // 全程零 retain / 零 release（所有权完整交给通道，计数不变）。
+                    "move_to" => {
+                        let src = match &args[0] {
+                            Expr::Var(n) => n.clone(),
+                            _ => {
+                                return Err(DialcError::new(
+                                    "内部错误：move_to 的第一个参数必须是变量",
+                                    0,
+                                    0,
+                                ))
+                            }
+                        };
+                        let slot = Self::lookup_slot(scopes, &src).ok_or_else(|| {
+                            DialcError::new(format!("未声明的变量 '{}'", src), 0, 0)
+                        })?;
+                        let ety = type_of(&args[0], scopes, functions, structs)?;
+                        let llvm_ty = self.dialc_type_to_llvm(&ety);
+                        let v = self.builder.build_load(llvm_ty, slot, "mv").unwrap();
+                        let ch =
+                            self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                        self.call_c_void("dial_channel_send", &[ch.into(), v.into()]);
+                        // 原变量所在的栈槽清零 —— 从这一刻起它不再持有任何东西。
+                        self.builder
+                            .build_store(slot, self.i8ptr().const_null())
+                            .unwrap();
+                        // 标记 moved：作用域结束时跳过该槽的 release（其所有权已随指针出走）。
+                        self.moved.borrow_mut().insert(slot);
+                        Ok(self.context.i64_type().const_int(0, false).into())
+                    }
+                    "join" | "detach" => {
+                        let t =
+                            self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        self.call_c_void(
+                            if name == "join" {
+                                "dial_thread_join"
+                            } else {
+                                "dial_thread_detach"
+                            },
+                            &[t.into()],
+                        );
+                        // 句柄已被 C 侧回收：把槽置 null，使二次 join/detach 当场 Fail-Fast
+                        // 而不是退化成 use-after-free。
+                        if let Expr::Var(n) = &args[0] {
+                            if let Some(p) = Self::lookup_slot(scopes, n) {
+                                self.builder
+                                    .build_store(p, self.i8ptr().const_null())
+                                    .unwrap();
+                            }
+                        }
+                        Ok(self.context.i64_type().const_int(0, false).into())
+                    }
+                    // spawn(fn, args...)：**先把实参全部写进 argcell，再创建线程**。
+                    // 顺序是这个语言的并发安全基石——pthread_create 之前实参已就位，
+                    // 因此不存在「先启动再移交」的竞争窗口。
+                    "spawn" => {
+                        let fname = match &args[0] {
+                            Expr::FuncRef(n) => n.clone(),
+                            _ => {
+                                return Err(DialcError::new(
+                                    "内部错误：spawn 的第一个参数必须是函数名",
+                                    0,
+                                    0,
+                                ))
+                            }
+                        };
+                        let target = functions.get(&fname).ok_or_else(|| {
+                            DialcError::new(format!("未定义的函数 '{}'", fname), 0, 0)
+                        })?;
+                        let n = target.params.len();
+                        let cell = self.call_c(
+                            "dial_thread_argcell",
+                            &[self.context.i64_type().const_int(n as u64, false).into()],
+                        );
+                        for (i, pty) in target.params.iter().enumerate() {
+                            let v = self.gen_expr(
+                                &args[i + 1],
+                                function,
+                                scopes,
+                                func_values,
+                                functions,
+                                structs,
+                            )?;
+                            let idx = self.context.i64_type().const_int(i as u64, false);
+                            // 槽宽固定 8 字节：指针 / i64 / f64 都能直接 store；
+                            // bool(i1) 先 zext 成 i64 再存（thunk 侧 trunc 回来）。
+                            let slot = unsafe {
+                                match pty {
+                                    Type::Float => self.builder.build_gep(
+                                        self.context.f64_type(),
+                                        cell.into_pointer_value(),
+                                        &[idx],
+                                        "sp.slot",
+                                    ),
+                                    Type::Int | Type::Bool => self.builder.build_gep(
+                                        self.context.i64_type(),
+                                        cell.into_pointer_value(),
+                                        &[idx],
+                                        "sp.slot",
+                                    ),
+                                    _ => self.builder.build_gep(
+                                        self.i8ptr(),
+                                        cell.into_pointer_value(),
+                                        &[idx],
+                                        "sp.slot",
+                                    ),
+                                }
+                                .unwrap()
+                            };
+                            match pty {
+                                // 移动：指针入槽 + 源槽清零 + 源槽标 moved（无 retain / release）
+                                Type::String | Type::Array(_) | Type::Map | Type::Error => {
+                                    self.builder.build_store(slot, v).unwrap();
+                                    if let Expr::Var(s) = &args[i + 1] {
+                                        if let Some(sp) = Self::lookup_slot(scopes, s) {
+                                            self.builder
+                                                .build_store(sp, self.i8ptr().const_null())
+                                                .unwrap();
+                                            self.moved.borrow_mut().insert(sp);
+                                        }
+                                    }
+                                }
+                                // 共享：通道天生要被两端持有，因此原子 +1，源变量仍可用。
+                                Type::Channel(_) => {
+                                    self.retain(pty, v);
+                                    self.builder.build_store(slot, v).unwrap();
+                                }
+                                Type::Bool => {
+                                    let w = self.to_i64(v, &Type::Bool);
+                                    self.builder.build_store(slot, w).unwrap();
+                                }
+                                _ => {
+                                    self.builder.build_store(slot, v).unwrap();
+                                }
+                            }
+                        }
+                        let thunk = self.gen_spawn_thunk(
+                            &fname,
+                            &target.params,
+                            func_values,
+                            structs,
+                        )?;
+                        // 函数值必须先转成指针值才能作为参数传递（IR 里线程入口就是个 ptr）。
+                        let thunk_ptr = thunk.as_global_value().as_pointer_value();
+                        Ok(self.call_c("dial_thread_new", &[thunk_ptr.into(), cell.into()]))
                     }
                     _ => {
                         if name == "print" {
@@ -1817,6 +2168,19 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Error => {
                 let msg = self.call_c("dial_error_msg", &[val.into()]);
                 self.call_c_void("dial_print_string", &[msg.into()]);
+            }
+            // 句柄打印没有任何可读语义，且违反「不透明指针」契约（打印就等于泄露内部）。
+            Type::Thread => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print thread 句柄",
+                    0, 0,
+                ));
+            }
+            Type::Channel(_) => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print channel；请 recv 出元素后再打印",
+                    0, 0,
+                ));
             }
             Type::Void => {
                 return Err(DialcError::new("语义错误：print 的参数不能是 void", 0, 0));

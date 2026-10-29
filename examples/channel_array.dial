@@ -1,0 +1,19 @@
+// v0.8 示例：channel<int[]> —— 通道元素只能是不透明句柄
+//
+// 通道传的是所有权，只有句柄能做到 O(1) 的指针搬运。int / float / bool 这类标量
+// 每发一次都要装箱（malloc），既砸掉「零分配移交」的立身之本，又让 C 侧无法判断
+// 槽里的东西该 free 还是直接丢，因此在编译期就被拒绝（见 tests/bad/channel_int_elem.dial）。
+fn sender(ch: channel<int[]>): void {
+    var a: int[] = [10, 20, 30];
+    move_to(a, ch);
+}
+
+fn main(): int {
+    let ch: channel<int[]> = channel(2);
+    let t: thread = spawn(sender, ch);
+    var r: int[] = recv(ch);
+    join(t);
+    print(r.get(0));
+    print(r.get(2));
+    return 0;
+}
