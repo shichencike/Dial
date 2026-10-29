@@ -164,6 +164,10 @@ impl Parser {
                 self.advance();
                 Type::Map
             }
+            TokenKind::FileT => {
+                self.advance();
+                Type::File
+            }
             TokenKind::Ident(n) => {
                 self.advance();
                 Type::Struct(n)

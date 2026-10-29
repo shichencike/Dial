@@ -23,27 +23,34 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
 <li><a href="#更新日志-changelog">更新日志 / Changelog</a><ul>
-<li><a href="#060-—-2026-10-29">[0.6.0] — 2026-10-29</a><ul>
+<li><a href="#0610-—-2026-10-29">[0.61.0] — 2026-10-29</a><ul>
 <li><a href="#added新增">Added（新增）</a></li>
 <li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#设计约束用户拍板">设计约束（用户拍板）</a></li>
+</ul>
+</li>
+<li><a href="#060-—-2026-10-29">[0.6.0] — 2026-10-29</a><ul>
+<li><a href="#added新增_1">Added（新增）</a></li>
+<li><a href="#changed变更_1">Changed（变更）</a></li>
+<li><a href="#added060-补充">Added（0.6.0 补充）</a></li>
 <li><a href="#实测对照同一份越界代码三档行为">实测对照（同一份越界代码，三档行为）</a></li>
 </ul>
 </li>
 <li><a href="#050-—-2026-10-29">[0.5.0] — 2026-10-29</a><ul>
-<li><a href="#added新增_1">Added（新增）</a></li>
+<li><a href="#added新增_2">Added（新增）</a></li>
 <li><a href="#docs文档">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#040-—-2026-11-02">[0.4.0] — 2026-11-02</a><ul>
-<li><a href="#added新增_2">Added（新增）</a></li>
-<li><a href="#changed变更_1">Changed（变更）</a></li>
+<li><a href="#added新增_3">Added（新增）</a></li>
+<li><a href="#changed变更_2">Changed（变更）</a></li>
 <li><a href="#fixed修复">Fixed（修复）</a></li>
 <li><a href="#docs文档_1">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#030-—-2026-10-28">[0.3.0] — 2026-10-28</a><ul>
-<li><a href="#added新增_3">Added（新增）</a></li>
-<li><a href="#changed变更_2">Changed（变更）</a></li>
+<li><a href="#added新增_4">Added（新增）</a></li>
+<li><a href="#changed变更_3">Changed（变更）</a></li>
 <li><a href="#fixed修复_1">Fixed（修复）</a></li>
 <li><a href="#docs文档_2">Docs（文档）</a></li>
 </ul>
@@ -57,11 +64,34 @@
 <h1 id="更新日志-changelog">更新日志 / Changelog</h1>
 <p>本文件记录 Dial 语言编译器 <code>dialc</code> 的每个发布版本的相对变更。所有版本均遵循
 <a href="https://semver.org/lang/zh-CN/">语义化版本</a> 的精神：不兼容的语义变更属于同主版本内的修订（v0.x 阶段语言尚不稳定，修订号递增即可能含破坏性语义调整）。</p>
+<p><strong>版本号规则</strong>：Dial 采用<strong>十进制递增</strong>（非语义化版本的三段式）——重大更新 / 新引擎 / 大重构 <code>+0.1</code>，小功能 / 新语法 <code>+0.01</code>，补丁 / 次要改动 <code>+0.001</code>，且<strong>禁止一次跳版</strong>（除非用户明确要求）。详见 <a href="#23-版本号规则">README §23</a>。</p>
+<hr />
+<h2 id="0610-—-2026-10-29">[0.61.0] — 2026-10-29</h2>
+<p>本版落地<strong>文件 IO（file 句柄）</strong>（见 README <a href="#24-文件-iofile-句柄">§24</a>），并正式确立<strong>版本号规则</strong>（十进制递增、禁止跳版，见 README <a href="#23-版本号规则">§23</a>）。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong><code>file</code> 不透明指针类型</strong>：新增 <code>file</code> 类型，IR 中为 <code>ptr</code>，封装 C 的 <code>FILE*</code>，<strong>不受 ARC 管理</strong>；用户必须显式 <code>open</code> / <code>close</code>（与内存宪法显式指针回收契约一致）。</li>
+<li><strong><code>open</code> / <code>read</code> / <code>write</code> / <code>close</code></strong>：仅封装 C 标准库 <code>fopen</code> / <code>fread</code> / <code>fwrite</code> / <code>fclose</code>，Rust 前端不重写任何文件逻辑；只提供最基础的 C 风格 API，无链式流、无额外语法糖。</li>
+<li><strong>C 侧实现</strong>：<code>stdlib/dial_io.c</code> 新增 <code>dial_file_open</code> / <code>dial_file_read</code> / <code>dial_file_write</code> / <code>dial_file_close</code>；<code>stdlib/dial_string.c</code> 新增 <code>dial_string_cstr</code> / <code>dial_string_from_bytes</code>（供 <code>read</code> 从字节缓冲区构造字符串）。</li>
+<li><strong>示例与负向用例</strong>：<code>examples/file_demo.dial</code>（写后读回并打印，黄金输出 <code>dialc-file-io</code>）；<code>tests/bad/io_bad_arg.dial</code>（open 参数类型错误须在编译期拒绝）。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li>遵循版本号规则：本版属「小功能 / 新语法」，<code>+0.01</code>，版本号 <code>0.6.0 → 0.61.0</code>（Cargo <code>version</code> 写作 <code>0.61.0</code>，语义等同 <code>0.61</code>）。</li>
+<li>README 同步：§4.3 关键字、§5.1 基本类型、§15 FFI 表与 C 导出函数、§17.2（从「未实现」移除文件 IO）、新增 <a href="#24-文件-iofile-句柄">§24 文件 IO</a> 与 <a href="#22-版本变更摘要">§22 版本变更摘要</a>。</li>
+</ul>
+<h3 id="设计约束用户拍板">设计约束（用户拍板）</h3>
+<ul>
+<li><strong>绝不引入全局变量</strong>：文件句柄显式传递。</li>
+<li><strong>底层走 C 标准库</strong>：直接封装 <code>FILE*</code>，不在 Rust 前端重写文件系统逻辑。</li>
+<li><strong>错误处理（无异常）</strong>：打开失败返回空指针、读失败返回空串、写失败返回 <code>-1</code>；不引入 <code>Result</code> 封装。</li>
+<li><strong>不搞花哨语法</strong>：只做 <code>open</code> / <code>read</code> / <code>write</code> / <code>close</code> 基础 API，无链式文件读取流。</li>
+</ul>
 <hr />
 <h2 id="060-—-2026-10-29">[0.6.0] — 2026-10-29</h2>
 <p>本版把 Zig 式 <strong>Fail-Fast</strong> 确立为与内存宪法并列的语言底线（见 README §20）：
 <strong>宁可当场崩溃，绝不产生未定义行为或静默错误数据。</strong></p>
-<h3 id="added新增">Added（新增）</h3>
+<h3 id="added新增_1">Added（新增）</h3>
 <ul>
 <li><strong>Fail-Fast 陷阱基础设施</strong>：新增 <code>runtime/dial_rt_trap.h</code> / <code>.c</code>，提供 <code>dial_trap()</code>（<code>__builtin_trap</code>，
   x86 生成 <code>ud2</code>）、<code>dial_bounds_fail</code> / <code>dial_null_fail</code> / <code>dial_assert_fail</code>（先打印诊断再 trap）。
@@ -83,12 +113,19 @@
 <li><strong>测试组 D / E</strong>：新增 <code>tests/trap/</code>（5 个用例），D 组断言必须当场因信号终止且
   <strong>不得打印哨兵 9999</strong>；E 组用 <code>--fast</code> 作对照组，证明陷阱确由编译器插入而非碰巧崩溃。</li>
 </ul>
-<h3 id="changed变更">Changed（变更）</h3>
+<h3 id="changed变更_1">Changed（变更）</h3>
 <ul>
 <li><code>dialc build</code> / <code>run</code> 新增 <code>--safety</code> / <code>--release</code> / <code>--fast</code> 参数。</li>
 <li>C 静态库按安全等级分目录构建（<code>.dialc_build/safety-&lt;N&gt;/</code>），避免不同等级的 <code>.o</code> 互相污染。</li>
 <li>README §17.1「未定义行为」重写：越界 / 除零在默认等级下<strong>不再是 UB</strong>，而是确定性崩溃。</li>
 <li>README §11.5 越界行为：由「无边界检查」改为「默认有边界检查，仅 <code>--fast</code> 回落到 UB」。</li>
+</ul>
+<h3 id="added060-补充">Added（0.6.0 补充）</h3>
+<ul>
+<li><strong><code>--fast</code> 危险警告</strong>：编译器在使用 <code>--fast</code>（ReleaseFast）时<strong>当场打印醒目警告</strong>，
+  说明该模式会关闭所有边界检查、除零检查和空指针保护，越界将退化为 C 的 UB。
+  文档侧同步写入 README §3.2 与 §20.4，并出现在官网首页卡片。
+  安全性是默认值，选择放弃它的人必须当场被告知代价。</li>
 </ul>
 <h3 id="实测对照同一份越界代码三档行为">实测对照（同一份越界代码，三档行为）</h3>
 <table>
@@ -120,7 +157,7 @@
 <hr />
 <h2 id="050-—-2026-10-29">[0.5.0] — 2026-10-29</h2>
 <p>本版补齐循环控制流，并把<strong>代码编写纪律</strong>正式写入规范（见 README §20）。</p>
-<h3 id="added新增_1">Added（新增）</h3>
+<h3 id="added新增_2">Added（新增）</h3>
 <ul>
 <li><strong><code>break</code></strong>：跳出最内层循环；仅允许出现在 <code>while</code> / <code>for</code> 循环体内，写在别处是编译错误（见 README §8.4）。</li>
 <li><strong><code>continue</code></strong>：进入下一次迭代。关键语义——<code>for</code> 的 <code>continue</code> <strong>先执行 <code>i = i + 1</code> 再回到条件判定</strong>：
@@ -141,7 +178,7 @@
 <hr />
 <h2 id="040-—-2026-11-02">[0.4.0] — 2026-11-02</h2>
 <p>本版落地<strong>部分标准库</strong>与<strong>控制流语法糖</strong>，并正式写入<a href="#内存宪法防-gc-铁律">内存宪法</a>（见 README §19）。</p>
-<h3 id="added新增_2">Added（新增）</h3>
+<h3 id="added新增_3">Added（新增）</h3>
 <ul>
 <li><strong><code>map</code> 类型（int → int）</strong>：新增哈希表类型，内存布局 <code>[int64 cap][int64 count][entries...]</code>，
   与 <code>string</code> / <code>int[]</code> 共用同一套 <strong>ARC 引用计数</strong>（<code>dial_map_retain</code> / <code>dial_map_release</code>）。
@@ -156,7 +193,7 @@
 <li>新增示例 <code>examples/map_demo.dial</code>、<code>examples/control_flow.dial</code>；
   新增负向用例 <code>tests/bad/map_let_put.dial</code>、<code>tests/bad/map_bad_arg.dial</code>、<code>tests/bad/for_range_type.dial</code>。</li>
 </ul>
-<h3 id="changed变更_1">Changed（变更）</h3>
+<h3 id="changed变更_2">Changed（变更）</h3>
 <ul>
 <li><code>dial_map.c</code> 由旧版「非 ARC 的 <code>Map*</code> 堆分配（进程退出时由 OS 回收）」重写为与 <code>dial_array.c</code>
   <strong>完全对称</strong>的 inline-entries ARC 实现：指针因扩容 / COW 可能更换，编译器负责把新指针写回接收变量。
@@ -178,7 +215,7 @@
 <hr />
 <h2 id="030-—-2026-10-28">[0.3.0] — 2026-10-28</h2>
 <p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
-<h3 id="added新增_3">Added（新增）</h3>
+<h3 id="added新增_4">Added（新增）</h3>
 <ul>
 <li>内置类型转换函数 <code>int_to_float(int): float</code>，编译为 LLVM <code>sitofp</code>（x86-64：<code>cvtsi2sd</code>）。</li>
 <li>内置类型转换函数 <code>float_to_int(float): int</code>，编译为 LLVM <code>fptosi</code>（x86-64：<code>cvttsd2si</code>，向零截断，与 C 的 <code>(int)</code> 一致）。</li>
@@ -186,7 +223,7 @@
 <li>新增示例 <code>examples/short_circuit.dial</code>（证明短路求值）、<code>examples/conversions.dial</code>（证明显式转换）。</li>
 <li>新增负向用例 <code>tests/bad/let_push.dial</code>、<code>tests/bad/implicit_conv.dial</code>、<code>tests/bad/mixed_arith.dial</code>。</li>
 </ul>
-<h3 id="changed变更_2">Changed（变更）</h3>
+<h3 id="changed变更_3">Changed（变更）</h3>
 <ul>
 <li><strong><code>and</code> / <code>or</code> 改为短路求值</strong>，与 C 的 <code>&amp;&amp;</code> / <code>||</code> 一致：先求左操作数，若已能决定结果则不再求值右操作数。
   这保证了"判空后访问"类代码在左操作数为假时不会因右操作数被盲目求值而崩溃。</li>
@@ -225,8 +262,8 @@
 <hr />
 <h2 id="未实现-unreleased-v02v03-语言层均未暴露v04-起部分已落地">未实现（-Unreleased-，v0.2/v0.3 语言层均未暴露，v0.4 起部分已落地）</h2>
 <ul>
-<li>文件 IO、多维数组、非 <code>int</code> 元素数组、<code>char</code> 类型。</li>
-<li><code>break</code> / <code>continue</code>（v0.5 计划）、裸块 <code>{ ... }</code>。</li>
+<li>多维数组、非 <code>int</code> 元素数组、<code>char</code> 类型。</li>
+<li>裸块 <code>{ ... }</code>。</li>
 <li>模块 / 包 / import、泛型、接口、trait、闭包。</li>
 <li>指针、地址取值、指针算术（永不提供）；运算符重载（永不提供）；全局变量。</li>
 </ul></main></div>
@@ -234,7 +271,7 @@
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.6 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+    <span class="muted">v0.61 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
   </div>
 </footer>
 

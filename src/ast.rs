@@ -15,6 +15,7 @@ pub enum Type {
     String, // UTF-8 字符串（IR 为 i8*，C 侧引用计数）
     Array(Box<Type>), // 动态数组（v0.2 元素固定为 Int）
     Map,    // 哈希表（int -> int，不透明指针，C 侧引用计数 ARC）
+    File,   // 文件句柄（不透明指针，封装 C 的 FILE*；显式 open/close，不受 ARC 管理）
     Struct(String),   // 用户结构体（按名引用），值语义
 }
 
@@ -29,6 +30,7 @@ impl Type {
             Type::String => "string",
             Type::Array(_) => "array",
             Type::Map => "map",
+            Type::File => "file",
             Type::Struct(_) => "struct",
         }
     }

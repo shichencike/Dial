@@ -1,0 +1,6 @@
+// 负向用例：open 的第一个参数必须是 string，传入 int 必须在编译期拒绝。
+fn main(): int {
+    var f: file = open(123, "w");
+    close(f);
+    return 0;
+}

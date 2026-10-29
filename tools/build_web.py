@@ -40,7 +40,7 @@ FOOTER = """
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.6 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+    <span class="muted">v0.61 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
   </div>
 </footer>
 """
@@ -214,6 +214,7 @@ def render_index() -> str:
         ("代码编写纪律", "拒绝过度抽象——宁可 WET 绝不 DRY 过头；不引入无用依赖；允许安全与性能的冗余；能用一个循环和一个 if 解决的绝不套设计模式。"),
         ("Fail-Fast 铁律（v0.6）", "宁可当场段错误，绝不产生未定义行为或静默错误数据。越界读写、负下标、整数除零一律当场终止：Debug 发射 int3、ReleaseSafe 发射 ud2，由操作系统接管 Core Dump。"),
         ("三档安全等级", "默认 Debug 崩溃保护全开；--release 保留防 UB 检查但陷阱更精简；--fast 关闭全部检查换取极限性能，等级同时作用于 LLVM IR 与 C Runtime。⚠️ --fast 下的越界将退化为 C 的未定义行为——除非你正在写底层核心算法且确信下标绝不越界，否则永远不要使用它。"),
+        ("文件 IO（v0.61）", "新增 file 不透明句柄，仅封装 C 标准库 fopen / fread / fwrite / fclose；open / read / write / close 是最基础的 C 风格 API。无全局变量、无异常、无 Result 封装：打开失败返回空指针、读失败返回空串、写失败返回 -1，用后即焚务必 close。"),
     ]
     card_html = "".join(
         f'<div class="card"><h3>{c[0]}</h3><p>{c[1]}</p></div>' for c in cards)
@@ -237,7 +238,7 @@ def render_index() -> str:
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
     </div>
     <div class="kpis">
-      <span><b>v0.6</b> 当前版本</span>
+      <span><b>v0.61</b> 当前版本</span>
       <span><b>Rust + inkwell</b> / LLVM 18</span>
       <span><b>零</b> LLVM 运行时依赖</span>
       <span><b>短路</b> and / or</span>
@@ -267,7 +268,7 @@ cargo build --release          # 产物：target/release/dialc
     return 0;
 }}</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.6.zip">dialc-v0.6.zip</a>（或自行 clone 仓库后构建）
+    下载源码包：<a href="../dialc-v0.61.zip">dialc-v0.61.zip</a>（或自行 clone 仓库后构建）
   </p>
 </section>
 {FOOTER}

@@ -7,6 +7,28 @@
 
 ---
 
+## [0.61.0] — 2026-10-29
+
+本版落地**文件 IO（file 句柄）**（见 README [§24](#24-文件-iofile-句柄)），并正式确立**版本号规则**（十进制递增、禁止跳版，见 README [§23](#23-版本号规则)）。
+
+### Added（新增）
+- **`file` 不透明指针类型**：新增 `file` 类型，IR 中为 `ptr`，封装 C 的 `FILE*`，**不受 ARC 管理**；用户必须显式 `open` / `close`（与内存宪法显式指针回收契约一致）。
+- **`open` / `read` / `write` / `close`**：仅封装 C 标准库 `fopen` / `fread` / `fwrite` / `fclose`，Rust 前端不重写任何文件逻辑；只提供最基础的 C 风格 API，无链式流、无额外语法糖。
+- **C 侧实现**：`stdlib/dial_io.c` 新增 `dial_file_open` / `dial_file_read` / `dial_file_write` / `dial_file_close`；`stdlib/dial_string.c` 新增 `dial_string_cstr` / `dial_string_from_bytes`（供 `read` 从字节缓冲区构造字符串）。
+- **示例与负向用例**：`examples/file_demo.dial`（写后读回并打印，黄金输出 `dialc-file-io`）；`tests/bad/io_bad_arg.dial`（open 参数类型错误须在编译期拒绝）。
+
+### Changed（变更）
+- 遵循版本号规则：本版属「小功能 / 新语法」，`+0.01`，版本号 `0.6.0 → 0.61.0`（Cargo `version` 写作 `0.61.0`，语义等同 `0.61`）。
+- README 同步：§4.3 关键字、§5.1 基本类型、§15 FFI 表与 C 导出函数、§17.2（从「未实现」移除文件 IO）、新增 [§24 文件 IO](#24-文件-iofile-句柄) 与 [§22 版本变更摘要](#22-版本变更摘要)。
+
+### 设计约束（用户拍板）
+- **绝不引入全局变量**：文件句柄显式传递。
+- **底层走 C 标准库**：直接封装 `FILE*`，不在 Rust 前端重写文件系统逻辑。
+- **错误处理（无异常）**：打开失败返回空指针、读失败返回空串、写失败返回 `-1`；不引入 `Result` 封装。
+- **不搞花哨语法**：只做 `open` / `read` / `write` / `close` 基础 API，无链式文件读取流。
+
+---
+
 ## [0.6.0] — 2026-10-29
 
 本版把 Zig 式 **Fail-Fast** 确立为与内存宪法并列的语言底线（见 README §20）：
@@ -163,7 +185,7 @@
 ---
 
 ## 未实现（-Unreleased-，v0.2/v0.3 语言层均未暴露，v0.4 起部分已落地）
-- 文件 IO、多维数组、非 `int` 元素数组、`char` 类型。
-- `break` / `continue`（v0.5 计划）、裸块 `{ ... }`。
+- 多维数组、非 `int` 元素数组、`char` 类型。
+- 裸块 `{ ... }`。
 - 模块 / 包 / import、泛型、接口、trait、闭包。
 - 指针、地址取值、指针算术（永不提供）；运算符重载（永不提供）；全局变量。

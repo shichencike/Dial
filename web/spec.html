@@ -22,7 +22,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc-—-dial-语言编译器-v06">dialc — Dial 语言编译器 v0.6</a><ul>
+<li><a href="#dialc-—-dial-语言编译器-v061">dialc — Dial 语言编译器 v0.61</a><ul>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
 <li><a href="#3-构建与使用">3. 构建与使用</a><ul>
@@ -147,21 +147,30 @@
 </ul>
 </li>
 <li><a href="#22-版本变更摘要">22. 版本变更摘要</a><ul>
+<li><a href="#220-v061相对-v06">22.0 v0.61（相对 v0.6）</a></li>
 <li><a href="#221-v06相对-v05">22.1 v0.6（相对 v0.5）</a></li>
 <li><a href="#222-v05相对-v04">22.2 v0.5（相对 v0.4）</a></li>
 <li><a href="#223-v04相对-v03">22.3 v0.4（相对 v0.3）</a></li>
 <li><a href="#224-v03相对-v02">22.4 v0.3（相对 v0.2）</a></li>
 </ul>
 </li>
+<li><a href="#23-版本号规则">23. 版本号规则</a></li>
+<li><a href="#24-文件-iofile-句柄">24. 文件 IO（file 句柄）</a><ul>
+<li><a href="#241-api">24.1 API</a></li>
+<li><a href="#242-错误处理无异常无-result-封装">24.2 错误处理：无异常、无 Result 封装</a></li>
+<li><a href="#243-用后即焚必须-close">24.3 用后即焚：必须 close</a></li>
+<li><a href="#244-完整示例">24.4 完整示例</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
 </div>
-<h1 id="dialc-—-dial-语言编译器-v06">dialc — Dial 语言编译器 v0.6</h1>
+<h1 id="dialc-—-dial-语言编译器-v061">dialc — Dial 语言编译器 v0.61</h1>
 <p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
-<p>本文件是 v0.3 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
+<p>本文件是 v0.61 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。</p>
 <hr />
 <h2 id="1-设计原则">1. 设计原则</h2>
@@ -329,7 +338,7 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
 <pre><code>var  let  fn  struct  if  else  while  return
 and  or   not
 true false
-int  float  bool  string  void
+int  float  bool  string  void  file
 </code></pre>
 <h3 id="44-字面量">4.4 字面量</h3>
 <table>
@@ -405,6 +414,11 @@ int  float  bool  string  void
 <td><code>int[]</code></td>
 <td>LLVM <code>ptr</code>（不透明）</td>
 <td>由 C Runtime 管理的动态数组，<strong>元素类型固定为 <code>int</code></strong></td>
+</tr>
+<tr>
+<td><code>file</code></td>
+<td>LLVM <code>ptr</code>（不透明）</td>
+<td>文件句柄，封装 C 的 <code>FILE*</code>；显式 <code>open</code> / <code>close</code>，<strong>不受 ARC 管理</strong>（见 <a href="#24-文件-iofile-句柄">§24</a>）</td>
 </tr>
 <tr>
 <td><code>void</code></td>
@@ -1312,6 +1326,22 @@ let/var x = y;  ─────┤
 <td><code>call ptr @dial_read_line()</code></td>
 </tr>
 <tr>
+<td><code>open(p, m)</code></td>
+<td><code>call ptr @dial_file_open(ptr %p, ptr %m)</code>（失败返回 null）</td>
+</tr>
+<tr>
+<td><code>read(f, n)</code></td>
+<td><code>call ptr @dial_file_read(ptr %f, i64 %n)</code>（读最多 n 字节，失败返回空串）</td>
+</tr>
+<tr>
+<td><code>write(f, c)</code></td>
+<td><code>call i64 @dial_file_write(ptr %f, ptr %c)</code>（返回写入字节数，失败 -1）</td>
+</tr>
+<tr>
+<td><code>close(f)</code></td>
+<td><code>call void @dial_file_close(ptr %f)</code>（空指针安全）</td>
+</tr>
+<tr>
 <td><code>print(x)</code></td>
 <td><code>dial_print_int</code> / <code>dial_print_float</code> / <code>dial_print_bool</code> / <code>dial_print_string</code></td>
 </tr>
@@ -1360,6 +1390,13 @@ void       dial_print_float(double v);
 void       dial_print_bool(int64_t b);      // 0/1 → false/true
 void       dial_print_string(DialString s);
 DialString dial_read_line(void);                  // 已暴露为 read_line()
+
+// 文件 IO（v0.61）：文件句柄是不透明的 FILE*（经 void* 传递），显式 open/close，不受 ARC 管理。
+typedef void *DialFile;
+DialFile  dial_file_open(DialString path, DialString mode);   // 已暴露为 open(p, m)，失败返回 NULL
+DialString dial_file_read(DialFile f, int64_t n);            // 已暴露为 read(f, n)，读最多 n 字节
+int64_t   dial_file_write(DialFile f, DialString content);   // 已暴露为 write(f, c)，返回写入字节数
+void      dial_file_close(DialFile f);                       // 已暴露为 close(f)，空指针安全
 </code></pre>
 <p><strong><code>stdlib/dial_map.h</code></strong>（与 <code>string</code> / <code>int[]</code> 共用 ARC；已暴露为 <code>map</code> 类型）</p>
 <pre><code class="language-c">DialMap  dial_map_new(void);                           // 已暴露为 new_map()
@@ -1489,10 +1526,6 @@ Fail-Fast 运行时检查（§20）。其余仍按计划未实现：</p>
 </tr>
 </thead>
 <tbody>
-<tr>
-<td>文件 IO</td>
-<td>未实现</td>
-</tr>
 <tr>
 <td>多维数组 <code>int[][]</code></td>
 <td>编译期拒绝</td>
@@ -1900,6 +1933,41 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 </ul>
 <hr />
 <h2 id="22-版本变更摘要">22. 版本变更摘要</h2>
+<h3 id="220-v061相对-v06">22.0 v0.61（相对 v0.6）</h3>
+<p>本版落地<strong>文件 IO（file 句柄）</strong>，并正式确立<a href="#23-版本号规则">版本号规则</a>（十进制递增、禁止跳版）：</p>
+<table>
+<thead>
+<tr>
+<th>新增 / 修正点</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>file</code> 不透明指针类型</strong></td>
+<td>新增 <code>file</code> 类型，IR 中为 <code>ptr</code>；封装 C 的 <code>FILE*</code>，<strong>不受 ARC 管理</strong>，由用户显式 <code>open</code> / <code>close</code>（与内存宪法 <a href="#19-内存宪法防-gc-铁律">§19</a> 显式指针回收一致）</td>
+</tr>
+<tr>
+<td><strong><code>open</code> / <code>read</code> / <code>write</code> / <code>close</code></strong></td>
+<td>仅封装 C 标准库 <code>fopen</code> / <code>fread</code> / <code>fwrite</code> / <code>fclose</code>，Rust 前端不重写任何文件逻辑；最基础的 C 风格 API，无链式流、无额外语法糖</td>
+</tr>
+<tr>
+<td><strong>错误处理（无异常）</strong></td>
+<td>严格遵循「无异常」原则：打开失败返回<strong>空指针</strong>、读失败返回<strong>空串</strong>、写失败返回 <strong>-1</strong>；不为其引入 Result 封装或自动抛错</td>
+</tr>
+<tr>
+<td><strong>无全局变量</strong></td>
+<td>文件句柄必须显式传递，绝不引入全局文件状态</td>
+</tr>
+<tr>
+<td>示例与负向用例</td>
+<td>新增 <code>examples/file_demo.dial</code>（写后读回并打印）；新增 <code>tests/bad/io_bad_arg.dial</code>（open 参数类型错误须在编译期拒绝）</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>版本号按<a href="#23-版本号规则">版本号规则</a>：本版属「小功能 / 新语法」，递增 <code>+0.01</code>（<code>0.6.0 → 0.61.0</code>）。</p>
+</blockquote>
 <h3 id="221-v06相对-v05">22.1 v0.6（相对 v0.5）</h3>
 <p>本版把 Zig 式 <strong>Fail-Fast</strong> 确立为与内存宪法并列的语言底线（<a href="#20-fail-fast-铁律宁可崩溃绝不静默损坏">§20</a>）：
 宁可当场崩溃，绝不产生未定义行为或静默错误数据。</p>
@@ -2042,12 +2110,125 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 </tr>
 </tbody>
 </table>
-<p>相关文档同步更新：§5.3（零隐式转换铁律）、§6.2（可变性判定含 <code>push</code>/<code>set</code>）、§7.2（类型规则）、§7.3（语义细则表，修正 <code>and</code>/<code>or</code> 与混合算术两行）、§11.3–§11.4（接收者须为 <code>var</code>）。</p></main></div>
+<p>相关文档同步更新：§5.3（零隐式转换铁律）、§6.2（可变性判定含 <code>push</code>/<code>set</code>）、§7.2（类型规则）、§7.3（语义细则表，修正 <code>and</code>/<code>or</code> 与混合算术两行）、§11.3–§11.4（接收者须为 <code>var</code>）。</p>
+<hr />
+<h2 id="23-版本号规则">23. 版本号规则</h2>
+<p>Dial 目前处于 v0.x 快速演进阶段。版本号采用<strong>十进制递增</strong>规则（非语义化版本的「主.次.修订」三段式），并<strong>严格禁止一次跳过多个档位</strong>——必须逐档推进，除非用户明确要求跳版。</p>
+<table>
+<thead>
+<tr>
+<th>变更类型</th>
+<th>版本增量</th>
+<th>从 0.6.0 起的演进示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>重大更新</strong></td>
+<td><code>+0.1</code></td>
+<td><code>0.6.0 → 0.7.0</code></td>
+</tr>
+<tr>
+<td><strong>增加新引擎 / 大重构</strong></td>
+<td><code>+0.1</code></td>
+<td><code>0.6.0 → 0.7.0</code></td>
+</tr>
+<tr>
+<td><strong>增加小功能 / 新语法</strong></td>
+<td><code>+0.01</code></td>
+<td><code>0.6.0 → 0.61.0</code></td>
+</tr>
+<tr>
+<td><strong>补丁 / 其他不重要改动</strong></td>
+<td><code>+0.001</code></td>
+<td><code>0.6.0 → 0.601.0</code></td>
+</tr>
+</tbody>
+</table>
+<p>约定与约束：</p>
+<ul>
+<li><strong>十进制递增</strong>：版本号是单一十进制数（如 <code>0.61</code>、<code>0.601</code>）。为兼容 Cargo 对三段式 <code>version</code> 字段的要求，源码 <code>Cargo.toml</code> 写作 <code>0.61.0</code>（语义等同 <code>0.61</code>），文档与官网统一显示为 <code>v0.61</code>。</li>
+<li><strong>不可跳版</strong>：例如不能从 <code>0.6.0</code> 直接到 <code>0.7.0</code>；必须按 <code>0.61</code>、<code>0.62</code>……逐档推进，除非用户明确要求。</li>
+<li><strong>每档一次完整交付</strong>：每一个版本号都对应一次完整交付——代码实现 + 端到端测试（A/B/D/E/C 全绿）+ README/CHANGELOG 文档 + 官网重新生成 + git 提交 + 含 <code>.git</code> 目录的发布压缩包。</li>
+<li><strong>与既有档位的关系</strong>：v0.2→v0.3→v0.4→v0.5→v0.6 每一档都是一次「重大更新 / 功能批次」（<code>+0.1</code>）；自 v0.6 起引入更细的粒度，单个小功能或新语法即按 <code>+0.01</code> 推进。</li>
+</ul>
+<hr />
+<h2 id="24-文件-iofile-句柄">24. 文件 IO（file 句柄）</h2>
+<p>文件 IO 在 v0.61 落地。设计严守两条底线：<strong>绝不引入全局变量</strong>、<strong>不重写文件逻辑（只封装 C 标准库）</strong>。
+文件句柄是显式传递的不透明指针（<code>file</code> 类型，IR 中为 <code>ptr</code>），封装 C 的 <code>FILE*</code>，<strong>不受 ARC 管理</strong>——
+用户必须自己 <code>open</code> 后 <code>close</code>，这与<a href="#19-内存宪法防-gc-铁律">内存宪法 §19</a>的「显式指针回收」契约一致。</p>
+<h3 id="241-api">24.1 API</h3>
+<table>
+<thead>
+<tr>
+<th>函数</th>
+<th>签名</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>open</code></td>
+<td><code>open(path: string, mode: string): file</code></td>
+<td><code>file</code></td>
+<td>打开文件；底层 <code>fopen(path, mode)</code>。失败返回<strong>空指针</strong>（null）</td>
+</tr>
+<tr>
+<td><code>read</code></td>
+<td><code>read(f: file, n: int): string</code></td>
+<td><code>string</code></td>
+<td>从 <code>f</code> 读取<strong>最多 <code>n</code> 字节</strong>，返回字符串；失败（含 <code>f</code> 为空指针）返回<strong>空串</strong></td>
+</tr>
+<tr>
+<td><code>write</code></td>
+<td><code>write(f: file, content: string): int</code></td>
+<td><code>int</code></td>
+<td>把 <code>content</code> 写入 <code>f</code>，返回<strong>实际写入字节数</strong>；失败返回 <code>-1</code></td>
+</tr>
+<tr>
+<td><code>close</code></td>
+<td><code>close(f: file): void</code></td>
+<td><code>void</code></td>
+<td>关闭文件（<code>fclose</code>）；<code>f</code> 为空指针时安全无操作</td>
+</tr>
+</tbody>
+</table>
+<p><code>open</code> 的 <code>mode</code> 直接透传给 C 的 <code>fopen</code>，即 <code>"r"</code> / <code>"w"</code> / <code>"a"</code> / <code>"rb"</code> 等标准模式。</p>
+<h3 id="242-错误处理无异常无-result-封装">24.2 错误处理：无异常、无 Result 封装</h3>
+<p>Dial 没有异常机制，文件 IO 也不引入 <code>Result</code> 这类包装。错误通过「返回空指针 / 空串 / 错误码」表达：</p>
+<ul>
+<li><code>open</code> 打不开文件 → 返回空指针（后续 <code>read</code> / <code>write</code> / <code>close</code> 对空指针均安全无操作 / 返回空串 / -1）。</li>
+<li><code>read</code> 失败或句柄为空 → 返回空串（与 <code>read_line</code> 在 EOF 返回空串的既有约定一致）。</li>
+<li><code>write</code> 失败或句柄为空 → 返回 <code>-1</code>。</li>
+</ul>
+<blockquote>
+<p>这避免了「打不开文件就崩溃」或「用异常打断控制流」两种极端，把错误处理权交还调用者，
+同时不破坏<a href="#21-代码编写纪律防臃肿与允许冗余原则">代码编写纪律 §21</a>对依赖与抽象的限制。</p>
+</blockquote>
+<h3 id="243-用后即焚必须-close">24.3 用后即焚：必须 <code>close</code></h3>
+<p><code>file</code> 句柄<strong>不受 ARC 管理</strong>，编译器不会在作用域结束时自动关闭或释放它。忘记 <code>close</code> 会造成文件描述符泄漏
+（与 C 的 <code>FILE*</code> 完全一致——这是显式指针回收的代价，也是它确定性的来源）。示例见 <code>examples/file_demo.dial</code>。</p>
+<h3 id="244-完整示例">24.4 完整示例</h3>
+<pre><code class="language-dial">fn main(): int {
+    let path: string = &quot;/tmp/dialc_io_demo.txt&quot;;
+    var wf: file = open(path, &quot;w&quot;);
+    write(wf, &quot;dialc-file-io&quot;);
+    close(wf);                 // 写完务必关闭
+
+    var rf: file = open(path, &quot;r&quot;);
+    var content: string = read(rf, 100);
+    print(content);           // dialc-file-io
+    close(rf);
+    return 0;
+}
+</code></pre>
+<p><code>file</code> 句柄不能 <code>print</code> 直接打印（会编译期报错），请先 <code>read</code> 成 <code>string</code> 再打印。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.6 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+    <span class="muted">v0.61 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
   </div>
 </footer>
 

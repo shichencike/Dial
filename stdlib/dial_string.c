@@ -16,6 +16,18 @@ DialString dial_string_new(const char *lit) {
     return p;
 }
 
+const char *dial_string_cstr(DialString s) { return (const char *)s + 8; }
+
+DialString dial_string_from_bytes(const char *buf, int64_t len) {
+    if (len < 0) len = 0;
+    void *p = dial_rc_alloc(8 + len + 1);
+    ((int64_t *)p)[0] = len;
+    char *d = (char *)p + 8;
+    if (buf && len > 0) memcpy(d, buf, (size_t)len);
+    d[len] = '\0';
+    return p;
+}
+
 int64_t dial_string_length(DialString s) {
     DIAL_ASSERT(((int64_t *)s)[0] >= 0, "字符串内部损坏：len < 0");
     return ((int64_t *)s)[0];

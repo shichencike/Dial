@@ -41,6 +41,7 @@ pub enum TokenKind {
     StringT,
     VoidT,
     MapT,
+    FileT,
 
     // 运算符与标点
     Plus,
@@ -216,6 +217,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "string" => TokenKind::StringT,
                 "void" => TokenKind::VoidT,
                 "map" => TokenKind::MapT,
+                "file" => TokenKind::FileT,
                 _ => TokenKind::Ident(id),
             };
             push(kind, start_line, start_col, &mut tokens);

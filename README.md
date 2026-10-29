@@ -1,10 +1,10 @@
-# dialc — Dial 语言编译器 v0.6
+# dialc — Dial 语言编译器 v0.61
 
 Dial 是一门**静态强类型、显式标注、无 GC** 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；**所有容器与运行时能力都由 C 语言实现**，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。
 
-本文件是 v0.3 的**规范性文档**：描述的语言行为与 `src/` 中的实现逐条对应，
+本文件是 v0.61 的**规范性文档**：描述的语言行为与 `src/` 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。
 
 ---
@@ -133,7 +133,7 @@ $ ldd examples/hello
 var  let  fn  struct  if  else  while  return
 and  or   not
 true false
-int  float  bool  string  void
+int  float  bool  string  void  file
 ```
 
 ### 4.4 字面量
@@ -166,6 +166,7 @@ int  float  bool  string  void
 | `bool` | LLVM `i1` | 布尔 |
 | `string` | LLVM `ptr`（不透明） | 由 C Runtime 管理的引用计数字符串 |
 | `int[]` | LLVM `ptr`（不透明） | 由 C Runtime 管理的动态数组，**元素类型固定为 `int`** |
+| `file` | LLVM `ptr`（不透明） | 文件句柄，封装 C 的 `FILE*`；显式 `open` / `close`，**不受 ARC 管理**（见 [§24](#24-文件-iofile-句柄)） |
 | `void` | LLVM `void` | **仅可用作函数返回类型** |
 | 结构体 | LLVM 具名 struct | 值类型，栈分配 |
 
@@ -775,6 +776,10 @@ x = x;   // 先 retain（计数 1→2），再 release（2→1），绝不会先
 | `m.remove(k)` | `call i64 @dial_map_remove(ptr %m, i64 %k)` |
 | `m.size()` | `call i64 @dial_map_size(ptr %m)` |
 | `read_line()` | `call ptr @dial_read_line()` |
+| `open(p, m)` | `call ptr @dial_file_open(ptr %p, ptr %m)`（失败返回 null） |
+| `read(f, n)` | `call ptr @dial_file_read(ptr %f, i64 %n)`（读最多 n 字节，失败返回空串） |
+| `write(f, c)` | `call i64 @dial_file_write(ptr %f, ptr %c)`（返回写入字节数，失败 -1） |
+| `close(f)` | `call void @dial_file_close(ptr %f)`（空指针安全） |
 | `print(x)` | `dial_print_int` / `dial_print_float` / `dial_print_bool` / `dial_print_string` |
 | 变量绑定（共享） | `dial_string_retain` / `dial_array_retain` / `dial_map_retain` |
 | 作用域结束 | `dial_string_release` / `dial_array_release` / `dial_map_release` |
@@ -826,6 +831,13 @@ void       dial_print_float(double v);
 void       dial_print_bool(int64_t b);      // 0/1 → false/true
 void       dial_print_string(DialString s);
 DialString dial_read_line(void);                  // 已暴露为 read_line()
+
+// 文件 IO（v0.61）：文件句柄是不透明的 FILE*（经 void* 传递），显式 open/close，不受 ARC 管理。
+typedef void *DialFile;
+DialFile  dial_file_open(DialString path, DialString mode);   // 已暴露为 open(p, m)，失败返回 NULL
+DialString dial_file_read(DialFile f, int64_t n);            // 已暴露为 read(f, n)，读最多 n 字节
+int64_t   dial_file_write(DialFile f, DialString content);   // 已暴露为 write(f, c)，返回写入字节数
+void      dial_file_close(DialFile f);                       // 已暴露为 close(f)，空指针安全
 ```
 
 **`stdlib/dial_map.h`**（与 `string` / `int[]` 共用 ARC；已暴露为 `map` 类型）
@@ -902,7 +914,6 @@ print(e);
 
 | 能力 | 状态 |
 | --- | --- |
-| 文件 IO | 未实现 |
 | 多维数组 `int[][]` | 编译期拒绝 |
 | 非 `int` 元素数组 | 编译期拒绝 |
 | `char` 类型 | 未实现，字符以 `int` 表示 |
@@ -1154,6 +1165,20 @@ Rust 前端与 C Runtime 的代码**尽量只依赖标准库**。任何新引入
 
 ## 22. 版本变更摘要
 
+### 22.0 v0.61（相对 v0.6）
+
+本版落地**文件 IO（file 句柄）**，并正式确立[版本号规则](#23-版本号规则)（十进制递增、禁止跳版）：
+
+| 新增 / 修正点 | 说明 |
+| --- | --- |
+| **`file` 不透明指针类型** | 新增 `file` 类型，IR 中为 `ptr`；封装 C 的 `FILE*`，**不受 ARC 管理**，由用户显式 `open` / `close`（与内存宪法 [§19](#19-内存宪法防-gc-铁律) 显式指针回收一致） |
+| **`open` / `read` / `write` / `close`** | 仅封装 C 标准库 `fopen` / `fread` / `fwrite` / `fclose`，Rust 前端不重写任何文件逻辑；最基础的 C 风格 API，无链式流、无额外语法糖 |
+| **错误处理（无异常）** | 严格遵循「无异常」原则：打开失败返回**空指针**、读失败返回**空串**、写失败返回 **-1**；不为其引入 Result 封装或自动抛错 |
+| **无全局变量** | 文件句柄必须显式传递，绝不引入全局文件状态 |
+| 示例与负向用例 | 新增 `examples/file_demo.dial`（写后读回并打印）；新增 `tests/bad/io_bad_arg.dial`（open 参数类型错误须在编译期拒绝） |
+
+> 版本号按[版本号规则](#23-版本号规则)：本版属「小功能 / 新语法」，递增 `+0.01`（`0.6.0 → 0.61.0`）。
+
 ### 22.1 v0.6（相对 v0.5）
 
 本版把 Zig 式 **Fail-Fast** 确立为与内存宪法并列的语言底线（[§20](#20-fail-fast-铁律宁可崩溃绝不静默损坏)）：
@@ -1232,3 +1257,57 @@ Dial 目前处于 v0.x 快速演进阶段。版本号采用**十进制递增**�
 - **不可跳版**：例如不能从 `0.6.0` 直接到 `0.7.0`；必须按 `0.61`、`0.62`……逐档推进，除非用户明确要求。
 - **每档一次完整交付**：每一个版本号都对应一次完整交付——代码实现 + 端到端测试（A/B/D/E/C 全绿）+ README/CHANGELOG 文档 + 官网重新生成 + git 提交 + 含 `.git` 目录的发布压缩包。
 - **与既有档位的关系**：v0.2→v0.3→v0.4→v0.5→v0.6 每一档都是一次「重大更新 / 功能批次」（`+0.1`）；自 v0.6 起引入更细的粒度，单个小功能或新语法即按 `+0.01` 推进。
+
+---
+
+## 24. 文件 IO（file 句柄）
+
+文件 IO 在 v0.61 落地。设计严守两条底线：**绝不引入全局变量**、**不重写文件逻辑（只封装 C 标准库）**。
+文件句柄是显式传递的不透明指针（`file` 类型，IR 中为 `ptr`），封装 C 的 `FILE*`，**不受 ARC 管理**——
+用户必须自己 `open` 后 `close`，这与[内存宪法 §19](#19-内存宪法防-gc-铁律)的「显式指针回收」契约一致。
+
+### 24.1 API
+
+| 函数 | 签名 | 返回 | 说明 |
+| --- | --- | --- | --- |
+| `open` | `open(path: string, mode: string): file` | `file` | 打开文件；底层 `fopen(path, mode)`。失败返回**空指针**（null） |
+| `read` | `read(f: file, n: int): string` | `string` | 从 `f` 读取**最多 `n` 字节**，返回字符串；失败（含 `f` 为空指针）返回**空串** |
+| `write` | `write(f: file, content: string): int` | `int` | 把 `content` 写入 `f`，返回**实际写入字节数**；失败返回 `-1` |
+| `close` | `close(f: file): void` | `void` | 关闭文件（`fclose`）；`f` 为空指针时安全无操作 |
+
+`open` 的 `mode` 直接透传给 C 的 `fopen`，即 `"r"` / `"w"` / `"a"` / `"rb"` 等标准模式。
+
+### 24.2 错误处理：无异常、无 Result 封装
+
+Dial 没有异常机制，文件 IO 也不引入 `Result` 这类包装。错误通过「返回空指针 / 空串 / 错误码」表达：
+
+- `open` 打不开文件 → 返回空指针（后续 `read` / `write` / `close` 对空指针均安全无操作 / 返回空串 / -1）。
+- `read` 失败或句柄为空 → 返回空串（与 `read_line` 在 EOF 返回空串的既有约定一致）。
+- `write` 失败或句柄为空 → 返回 `-1`。
+
+> 这避免了「打不开文件就崩溃」或「用异常打断控制流」两种极端，把错误处理权交还调用者，
+> 同时不破坏[代码编写纪律 §21](#21-代码编写纪律防臃肿与允许冗余原则)对依赖与抽象的限制。
+
+### 24.3 用后即焚：必须 `close`
+
+`file` 句柄**不受 ARC 管理**，编译器不会在作用域结束时自动关闭或释放它。忘记 `close` 会造成文件描述符泄漏
+（与 C 的 `FILE*` 完全一致——这是显式指针回收的代价，也是它确定性的来源）。示例见 `examples/file_demo.dial`。
+
+### 24.4 完整示例
+
+```dial
+fn main(): int {
+    let path: string = "/tmp/dialc_io_demo.txt";
+    var wf: file = open(path, "w");
+    write(wf, "dialc-file-io");
+    close(wf);                 // 写完务必关闭
+
+    var rf: file = open(path, "r");
+    var content: string = read(rf, 100);
+    print(content);           // dialc-file-io
+    close(rf);
+    return 0;
+}
+```
+
+`file` 句柄不能 `print` 直接打印（会编译期报错），请先 `read` 成 `string` 再打印。

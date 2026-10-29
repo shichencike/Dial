@@ -330,6 +330,87 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::String);
                 }
+                // 文件 IO（v0.61）：file 句柄是不透明的 FILE* 封装，显式 open/close，不受 ARC 管理。
+                // 错误处理遵循“无异常”原则：打开失败返回空指针、读失败返回空串、写失败返回 -1，
+                // 绝不引入 Result 封装或自动抛错。
+                "open" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：open 需要 2 个参数（path: string, mode: string）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::String {
+                        return Err(DialcError::new(
+                            "语义错误：open 的第一个参数（path）必须是 string",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[1], scopes, funcs, structs)? != Type::String {
+                        return Err(DialcError::new(
+                            "语义错误：open 的第二个参数（mode）必须是 string",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::File);
+                }
+                "read" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：read 需要 2 个参数（f: file, n: int）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::File {
+                        return Err(DialcError::new(
+                            "语义错误：read 的第一个参数必须是 file 句柄",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[1], scopes, funcs, structs)? != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：read 的第二个参数（读取字节数）必须是 int",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::String);
+                }
+                "write" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：write 需要 2 个参数（f: file, content: string）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::File {
+                        return Err(DialcError::new(
+                            "语义错误：write 的第一个参数必须是 file 句柄",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[1], scopes, funcs, structs)? != Type::String {
+                        return Err(DialcError::new(
+                            "语义错误：write 的第二个参数（内容）必须是 string",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Int);
+                }
+                "close" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：close 需要 1 个参数（file 句柄）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::File {
+                        return Err(DialcError::new(
+                            "语义错误：close 的参数必须是 file 句柄",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Void);
+                }
                 _ => {}
             }
             if name == "print" {
@@ -357,6 +438,12 @@ pub fn type_of<V>(
                     Type::Map => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print 哈希表，请逐值打印 print(m.get(k))",
+                            0, 0,
+                        ))
+                    }
+                    Type::File => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print 文件句柄（file）；请改用 read 读成 string 后再打印",
                             0, 0,
                         ))
                     }

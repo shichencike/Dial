@@ -28,6 +28,12 @@ DialString dial_string_clone(DialString s);
 void dial_string_retain(DialString s);
 void dial_string_release(DialString s);
 
+/* 取得内部 C 字符串（data 起始于 s+8）；仅供内部 / IO 使用，外部不得释放 */
+const char *dial_string_cstr(DialString s);
+
+/* 从任意字节缓冲区构造字符串（长度显式，可为二进制，不必以 '\0' 结尾） */
+DialString dial_string_from_bytes(const char *buf, int64_t len);
+
 /* 打印并换行（对接 Dial 的 print(s)） */
 void dial_print_string(DialString s);
 

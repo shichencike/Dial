@@ -1,0 +1,18 @@
+// 文件 IO 演示（v0.61）：file 句柄是显式传递的不透明指针，必须 open 后 close。
+// 错误处理遵循「无异常」原则：open 失败返回空指针、read 失败返回空串、write 失败返回 -1。
+fn main(): int {
+    let path: string = "/tmp/dialc_io_demo.txt";
+
+    // 写：打开 -> 写入 -> 关闭
+    var wf: file = open(path, "w");
+    write(wf, "dialc-file-io");
+    close(wf);
+
+    // 读：打开 -> 读回 -> 关闭
+    var rf: file = open(path, "r");
+    var content: string = read(rf, 100);
+    print(content);            // 打印读到的内容（无结尾换行）
+    close(rf);
+
+    return 0;
+}

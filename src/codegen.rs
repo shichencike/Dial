@@ -291,6 +291,11 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_void("dial_print_float", &[f64b.into()]);
         self.decl_void("dial_print_bool", &[i64b.into()]);
         self.decl_func("dial_read_line", i8b, &[]);
+        // 文件 IO：file 句柄是不透明的 FILE* 封装，显式 open/close，不受 ARC 管理。
+        self.decl_func("dial_file_open", i8b, &[i8b.into(), i8b.into()]);
+        self.decl_func("dial_file_read", i8b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_file_write", i64b, &[i8b.into(), i8b.into()]);
+        self.decl_void("dial_file_close", &[i8b.into()]);
     }
 
     fn declare_dial_function(
@@ -322,7 +327,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Int => self.context.i64_type().into(),
             Type::Float => self.context.f64_type().into(),
             Type::Bool => self.context.bool_type().into(),
-            Type::String | Type::Array(_) | Type::Map => self.i8ptr().into(),
+            Type::String | Type::Array(_) | Type::Map | Type::File => self.i8ptr().into(),
             Type::Struct(ref n) => (*self
                 .struct_types
                 .get(n)
@@ -375,7 +380,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Int => self.context.i64_type().const_int(0, false).into(),
             Type::Float => self.context.f64_type().const_float(0.0).into(),
             Type::Bool => self.context.bool_type().const_int(0, false).into(),
-            Type::String | Type::Array(_) | Type::Map => self.i8ptr().const_null().into(),
+            Type::String | Type::Array(_) | Type::Map | Type::File => self.i8ptr().const_null().into(),
             Type::Struct(_) => {
                 // 结构体默认值：对 v0.2 仅用于 main 收尾，构造一个零初始化聚合
                 let bte = self.dialc_type_to_llvm(t);
@@ -1239,6 +1244,30 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                     "new_map" => Ok(self.call_c("dial_map_new", &[])),
                     "read_line" => Ok(self.call_c("dial_read_line", &[])),
+                    // 文件 IO（v0.61）：file 句柄 = 不透明 ptr，不做 retain/release，显式 close。
+                    "open" => {
+                        let p = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let m = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_file_open", &[p.into(), m.into()]))
+                    }
+                    "read" => {
+                        let f = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let n = self.to_i64(
+                            self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?,
+                            &type_of(&args[1], scopes, functions, structs)?,
+                        );
+                        Ok(self.call_c("dial_file_read", &[f.into(), n.into()]))
+                    }
+                    "write" => {
+                        let f = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let c = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_file_write", &[f.into(), c.into()]))
+                    }
+                    "close" => {
+                        let f = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        self.call_c_void("dial_file_close", &[f.into()]);
+                        Ok(self.context.i64_type().const_int(0, false).into())
+                    }
                     _ => {
                         if name == "print" {
                             let arg = &args[0];
@@ -1524,6 +1553,12 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Map => {
                 return Err(DialcError::new(
                     "语义错误：当前版本不支持直接 print 哈希表，请逐值打印 print(m.get(k))",
+                    0, 0,
+                ));
+            }
+            Type::File => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print 文件句柄（file）；请改用 read 读成 string 后再打印",
                     0, 0,
                 ));
             }
