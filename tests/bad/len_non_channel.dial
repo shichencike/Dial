@@ -1,0 +1,6 @@
+// 负向：len 的参数不是 channel（数组/字符串长度应用 .len() 方法）—— 必须编译失败
+fn main(): int {
+    var s: string = "abc";
+    print(len(s));
+    return 0;
+}

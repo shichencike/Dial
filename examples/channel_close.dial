@@ -1,0 +1,39 @@
+// v0.81 示例：close + done —— 「生产者结束 → 消费者收尾」的完整范式
+//
+// v0.8 的通道没有 EOF：生产者一旦退出，消费者就永远卡在 recv 上，**程序死锁**。
+// 这是并发模型里最常见也最致命的一个缺口，v0.81 把它补上了：
+//
+//   close(ch)   生产者宣告「不会再有元素」，并广播唤醒所有等待者
+//   done(ch)    已关闭 且 已空 —— EOF 的精确定义，且**单调**为真
+//   recv(ch)    已关闭且已空时立即返回，不再永久阻塞
+//
+// 单调性是关键：关闭不可逆，且关闭后 send 被禁止，元素只会越取越少。
+// 所以 `while (!done(ch))` 这个循环**必然终止**，不存在「刚判断完又有新元素」的窗口。
+
+fn producer(ch: channel<string>): void {
+    var a: string = "one";
+    move_to(a, ch);
+    var b: string = "two";
+    move_to(b, ch);
+    var c: string = "three";
+    move_to(c, ch);
+    // 关闭广播。注意 close 并不释放通道对象（那仍由原子 ARC 负责），
+    // 它只是置标志 + 唤醒等待者，因此不会与 ARC 打架。
+    close(ch);
+}
+
+fn main(): int {
+    let ch: channel<string> = channel(4);
+    let t: thread = spawn(producer, ch);
+
+    // 收到 done 之前，recv 要么立刻返回（有元素），要么阻塞等一个一定会来的元素。
+    // 因此这个循环既不会漏收，也不会死锁。
+    while (not done(ch)) {
+        var r: string = recv(ch);
+        print(r);
+    }
+
+    join(t);
+    print("done");
+    return 0;
+}

@@ -438,19 +438,24 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::Int);
                 }
-                // 注意：close **不**扩展给 channel。通道的生命周期完全由原子 ARC 管住
-                // （两端各自持有引用，最后一个退出作用域者释放），再给一个手动 close
-                // 只会引入「关了之后变量还在、再 release 一次」的二次释放风险。
+                // close 同时服务于 file 句柄与 channel：二者都是「显式终结」资源，
+                // 语义相同，因此复用同一个名字，而非为通道另造一个 close_channel。
+                //
+                // v0.8 时曾刻意不把 close 扩展到 channel，担心「关掉之后变量还在、
+                // 作用域结束再 release 一次」造成二次释放；v0.81 复核后确认该担心不成立：
+                // close 只**置标志 + 广播唤醒**，从不释放通道对象，也不动引用计数；
+                // 对象的销毁仍然**只由原子 ARC 归零触发一次**。二者职责不重叠。
                 "close" => {
                     if args.len() != 1 {
                         return Err(DialcError::new(
-                            "语义错误：close 需要 1 个参数（file 句柄）",
+                            "语义错误：close 需要 1 个参数（file 句柄或 channel）",
                             0, 0,
                         ));
                     }
-                    if type_of(&args[0], scopes, funcs, structs)? != Type::File {
+                    let ct = type_of(&args[0], scopes, funcs, structs)?;
+                    if ct != Type::File && !matches!(ct, Type::Channel(_)) {
                         return Err(DialcError::new(
-                            "语义错误：close 的参数必须是 file 句柄",
+                            "语义错误：close 的参数必须是 file 句柄或 channel",
                             0, 0,
                         ));
                     }
@@ -584,10 +589,16 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::Channel(Box::new(Type::Void)));
                 }
-                "recv" => {
+                // recv：阻塞取出；try_recv：非阻塞取出（队列空立即返回）。
+                // 二者返回类型与所有权规则完全一致（都返回元素类型 T，接收方成为唯一所有者），
+                // 唯一区别是「空的时候等不等」——因此合并为一条校验，只按名字区分报错文案。
+                //
+                // v0.81 EOF 语义：通道已关闭且已空时，recv 不再永久阻塞而是返回
+                // 「空值」；是否真的结束了由 done(ch) 判定，详见 README §27.8。
+                "recv" | "try_recv" => {
                     if args.len() != 1 {
                         return Err(DialcError::new(
-                            "语义错误：recv 需要 1 个参数（channel）",
+                            format!("语义错误：{} 需要 1 个参数（channel）", name),
                             0, 0,
                         ));
                     }
@@ -597,7 +608,7 @@ pub fn type_of<V>(
                         Type::Channel(elem) => {
                             if matches!(elem.as_ref(), Type::Void) {
                                 return Err(DialcError::new(
-                                    "语义错误：recv 的通道元素类型未定，请在声明处写出具体类型（例如 let ch: channel<string> = channel(8);）",
+                                    format!("语义错误：{} 的通道元素类型未定，请在声明处写出具体类型（例如 let ch: channel<string> = channel(8);）", name),
                                     0, 0,
                                 ));
                             }
@@ -605,11 +616,47 @@ pub fn type_of<V>(
                         }
                         _ => {
                             return Err(DialcError::new(
-                                format!("语义错误：recv 的参数必须是 channel，实际为 {}", ct.name()),
+                                format!("语义错误：{} 的参数必须是 channel，实际为 {}", name, ct.name()),
                                 0, 0,
                             ))
                         }
                     }
+                }
+                // 通道状态查询（v0.81）：三个都只接受 channel，返回标量。
+                //   closed(ch) -> bool：是否已调用过 close
+                //   len(ch)    -> int ：队列中当前的剩余元素数
+                //   done(ch)   -> bool：已关闭 且 已空 —— EOF 的精确定义，**单调**为真
+                // done 的存在是为了让「while (!done(ch)) { r = recv(ch); }」这一行
+                // 就能表达完整的收尾循环，用户不必自己拼 `len(ch) == 0 && closed(ch)`。
+                "closed" | "done" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 1 个参数（channel）", name),
+                            0, 0,
+                        ));
+                    }
+                    if !matches!(type_of(&args[0], scopes, funcs, structs)?, Type::Channel(_)) {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 的参数必须是 channel", name),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Bool);
+                }
+                "len" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：len 需要 1 个参数（channel）",
+                            0, 0,
+                        ));
+                    }
+                    if !matches!(type_of(&args[0], scopes, funcs, structs)?, Type::Channel(_)) {
+                        return Err(DialcError::new(
+                            "语义错误：len 的参数必须是 channel（数组/字符串长度请用 .len() 方法）",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Int);
                 }
                 // move_to(变量, 通道)：编译期 intrinsic，把变量的所有权 O(1) 移交给通道。
                 // 第一个参数必须是**变量**（而非任意表达式）——因为「清零原槽 + 标记
@@ -966,6 +1013,9 @@ fn map_method_type<V>(
 /// 内建分支会被静默绕过（或反之）——因此必须在编译期直接拒绝。
 const RESERVED_NAMES: &[&str] = &[
     "spawn", "join", "detach", "channel", "recv", "move_to", "thread",
+    // v0.81 通道收尾：close 早已是 file 的内建（本就在按名字匹配，只是此前未列入此表），
+    // 一并补齐；closed / len / done / try_recv 为本次新增。
+    "close", "closed", "len", "done", "try_recv",
 ];
 
 pub fn analyze(program: &mut Program) -> Result<(HashMap<String, FuncInfo>, StructTable)> {
@@ -974,7 +1024,7 @@ pub fn analyze(program: &mut Program) -> Result<(HashMap<String, FuncInfo>, Stru
         if RESERVED_NAMES.contains(&f.name.as_str()) {
             return Err(DialcError::new(
                 format!(
-                    "语义错误：'{}' 是并发内建的保留名，不能用作函数名",
+                    "语义错误：'{}' 是内建函数的保留名，不能用作函数名",
                     f.name
                 ),
                 0, 0,
@@ -985,7 +1035,7 @@ pub fn analyze(program: &mut Program) -> Result<(HashMap<String, FuncInfo>, Stru
         if RESERVED_NAMES.contains(&s.name.as_str()) {
             return Err(DialcError::new(
                 format!(
-                    "语义错误：'{}' 是并发内建的保留名，不能用作结构体名",
+                    "语义错误：'{}' 是内建函数的保留名，不能用作结构体名",
                     s.name
                 ),
                 s.line, s.col,

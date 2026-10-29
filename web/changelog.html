@@ -23,47 +23,54 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
 <li><a href="#更新日志-changelog">更新日志 / Changelog</a><ul>
-<li><a href="#080-—-2026-10-30">[0.8.0] — 2026-10-30</a><ul>
+<li><a href="#0810-—-2026-10-30">[0.81.0] — 2026-10-30</a><ul>
 <li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed语义变更">Changed（语义变更）</a></li>
+<li><a href="#修正的设计回退">修正的设计回退</a></li>
+<li><a href="#测试">测试</a></li>
+</ul>
+</li>
+<li><a href="#080-—-2026-10-30">[0.8.0] — 2026-10-30</a><ul>
+<li><a href="#added新增_1">Added（新增）</a></li>
 <li><a href="#changed变更">Changed（变更）</a></li>
 <li><a href="#设计约束本版刻意不做">设计约束（本版刻意不做）</a></li>
 <li><a href="#验证">验证</a></li>
 </ul>
 </li>
 <li><a href="#070-—-2026-10-30">[0.7.0] — 2026-10-30</a><ul>
-<li><a href="#added新增_1">Added（新增）</a></li>
+<li><a href="#added新增_2">Added（新增）</a></li>
 <li><a href="#changed变更_1">Changed（变更）</a></li>
 <li><a href="#设计约束用户拍板">设计约束（用户拍板）</a></li>
 <li><a href="#推迟不在本版">推迟（不在本版）</a></li>
 </ul>
 </li>
 <li><a href="#0610-—-2026-10-29">[0.61.0] — 2026-10-29</a><ul>
-<li><a href="#added新增_2">Added（新增）</a></li>
+<li><a href="#added新增_3">Added（新增）</a></li>
 <li><a href="#changed变更_2">Changed（变更）</a></li>
 <li><a href="#设计约束用户拍板_1">设计约束（用户拍板）</a></li>
 </ul>
 </li>
 <li><a href="#060-—-2026-10-29">[0.6.0] — 2026-10-29</a><ul>
-<li><a href="#added新增_3">Added（新增）</a></li>
+<li><a href="#added新增_4">Added（新增）</a></li>
 <li><a href="#changed变更_3">Changed（变更）</a></li>
 <li><a href="#added060-补充">Added（0.6.0 补充）</a></li>
 <li><a href="#实测对照同一份越界代码三档行为">实测对照（同一份越界代码，三档行为）</a></li>
 </ul>
 </li>
 <li><a href="#050-—-2026-10-29">[0.5.0] — 2026-10-29</a><ul>
-<li><a href="#added新增_4">Added（新增）</a></li>
+<li><a href="#added新增_5">Added（新增）</a></li>
 <li><a href="#docs文档">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#040-—-2026-11-02">[0.4.0] — 2026-11-02</a><ul>
-<li><a href="#added新增_5">Added（新增）</a></li>
+<li><a href="#added新增_6">Added（新增）</a></li>
 <li><a href="#changed变更_4">Changed（变更）</a></li>
 <li><a href="#fixed修复">Fixed（修复）</a></li>
 <li><a href="#docs文档_1">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#030-—-2026-10-28">[0.3.0] — 2026-10-28</a><ul>
-<li><a href="#added新增_6">Added（新增）</a></li>
+<li><a href="#added新增_7">Added（新增）</a></li>
 <li><a href="#changed变更_5">Changed（变更）</a></li>
 <li><a href="#fixed修复_1">Fixed（修复）</a></li>
 <li><a href="#docs文档_2">Docs（文档）</a></li>
@@ -80,12 +87,63 @@
 <a href="https://semver.org/lang/zh-CN/">语义化版本</a> 的精神：不兼容的语义变更属于同主版本内的修订（v0.x 阶段语言尚不稳定，修订号递增即可能含破坏性语义调整）。</p>
 <p><strong>版本号规则</strong>：Dial 采用<strong>十进制递增</strong>（非语义化版本的三段式）——重大更新 / 新引擎 / 大重构 <code>+0.1</code>，小功能 / 新语法 <code>+0.01</code>，补丁 / 次要改动 <code>+0.001</code>，且<strong>禁止一次跳版</strong>（除非用户明确要求）。详见 <a href="#23-版本号规则">README §23</a>。</p>
 <hr />
+<h2 id="0810-—-2026-10-30">[0.81.0] — 2026-10-30</h2>
+<p>本版补上 v0.8 并发模型<strong>唯一的功能缺口：通道的关闭与 EOF</strong>
+（见 README <a href="#277-通道关闭与-eofv081">§27.7</a>）。</p>
+<blockquote>
+<p><strong>缺口本身</strong>：v0.8 的通道没有 EOF。生产者一旦退出，消费者就永远卡在 <code>recv</code> 上——
+程序不是跑错，而是<strong>死锁</strong>。也就是说「生产者结束 → 消费者收尾」这个最常见的并发范式
+在 v0.8 里<strong>根本写不出来</strong>。v0.81 让它可以写了。</p>
+</blockquote>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong>内建 <code>close(ch)</code></strong>：关闭通道（幂等），广播唤醒所有阻塞在 <code>send</code> / <code>recv</code> 上的线程。
+  同时服务于 <code>file</code> 与 <code>channel</code>（二者都是「显式终结」），按实参静态类型分派。</li>
+<li><strong>内建 <code>done(ch): bool</code></strong>：<strong>已关闭 且 已空</strong> —— EOF 的精确定义，且<strong>单调</strong>为真，
+  因此 <code>while (not done(ch)) { r = recv(ch); }</code> 这个循环<strong>必然终止</strong>。</li>
+<li><strong>内建 <code>closed(ch): bool</code></strong> 与 <strong><code>len(ch): int</code></strong>：是否已关闭 / 队列中当前的剩余元素数。</li>
+<li><strong>内建 <code>try_recv(ch): T</code></strong>：非阻塞取出，队列空立即返回，绝不等待
+  （配合 <code>len(ch) &gt; 0</code> 使用；单选消费者下该条件保证必然取到）。</li>
+<li><strong>C Runtime</strong>：<code>dial_channel_close</code> / <code>closed</code> / <code>len</code> / <code>done</code> / <code>try_recv</code>。
+  <code>closed</code> 标志<strong>不设 atomic</strong>——因为 <code>done</code> 必须与元素计数在同一互斥临界区内判定，
+  拆成两个原子读反而会读到不同时刻的状态。</li>
+</ul>
+<h3 id="changed语义变更">Changed（语义变更）</h3>
+<ul>
+<li><strong><code>recv</code> 具备 EOF 语义</strong>：「已关闭且已空」时<strong>立即返回空指针</strong>，不再永久阻塞。
+  未关闭时行为完全不变（既有代码不受影响）。</li>
+<li><strong><code>send</code> 到已关闭通道 → Fail-Fast</strong>：元素会永久滞留，使 <code>done</code> 永远为假，
+  消费者的收尾循环永不结束——一次「关了还发」会把 EOF 语义整个废掉。
+  ReleaseSafe 及以上当场终止；<code>--fast</code> 下关闭该检查。</li>
+<li><strong><code>print</code> 一个 NULL <code>string</code> → Fail-Fast</strong>：EOF 之后误用取回的值时，
+  在使用点打印诊断并 <code>ud2</code>，而不是解引用 NULL 变成一次无解释的段错误。</li>
+<li><strong>保留名校验补齐</strong>：<code>close</code> / <code>closed</code> / <code>len</code> / <code>done</code> / <code>try_recv</code>
+  不能用作函数名或结构体名（此前 <code>close</code> 虽按名字分派内建却未列入保留表）。</li>
+</ul>
+<h3 id="修正的设计回退">修正的设计回退</h3>
+<ul>
+<li>v0.8 曾刻意<strong>不</strong>把 <code>close</code> 扩展到 <code>channel</code>，担心「关掉之后变量还在、作用域结束再
+  <code>release</code> 一次」造成二次释放。复核后确认该担心<strong>不成立</strong>：<code>close</code> 只置标志 + 广播，
+  既不释放通道对象也不动引用计数；对象销毁仍<strong>只由原子 ARC 归零触发一次</strong>。二者职责不重叠。</li>
+</ul>
+<h3 id="测试">测试</h3>
+<ul>
+<li>A 组新增 <code>examples/channel_close.dial</code>（生产者 <code>close</code> → 消费者 <code>done</code> 收尾）与
+  <code>examples/channel_try_recv.dial</code>（<code>len</code> / <code>try_recv</code> / <code>closed</code> / <code>done</code> 状态机），
+  各连跑 10 次输出逐字节一致。</li>
+<li>B 组新增 11 个负向用例（错用 <code>close</code> / <code>closed</code> / <code>done</code> / <code>len</code> / <code>try_recv</code>、
+  元素类型未定就 <code>try_recv</code>、用保留名定义函数与结构体）。</li>
+<li>D 组新增 <code>tests/trap/channel_send_after_close.dial</code>：关闭后 <code>send</code> 必须信号终止且不打印哨兵；
+  E 组 <code>--fast</code> 下恢复 UB（打印哨兵），证明陷阱确由编译器插入。</li>
+<li>压力测试：20 万次移交 + EOF 收尾，RSS 稳定 1.4 MB 不增长，无死锁、无泄漏。</li>
+</ul>
+<hr />
 <h2 id="080-—-2026-10-30">[0.8.0] — 2026-10-30</h2>
 <p>本版落地<strong>所有权转移 <code>move_to</code> 与多线程并发（<code>thread</code> / <code>channel</code>）</strong>
 （见 README <a href="#27-所有权转移与多线程并发move_to--thread--channel">§27</a>）。
 核心主张：<strong>用「转移所有权」取代「共享内存 + 锁」</strong>——数据不共享、只移交，
 队列里流动的指针永远只有一个持有者，因此不存在数据竞争，也就不需要任何互斥锁。</p>
-<h3 id="added新增">Added（新增）</h3>
+<h3 id="added新增_1">Added（新增）</h3>
 <ul>
 <li><strong>类型</strong>：<code>thread</code>（线程句柄，显式 <code>join</code> / <code>detach</code>，不受 ARC 管理）与
   <code>channel&lt;T&gt;</code>（通道句柄，跨线程共享 → <strong>原子</strong>引用计数 ARC）。</li>
@@ -132,7 +190,7 @@
 <h2 id="070-—-2026-10-30">[0.7.0] — 2026-10-30</h2>
 <p>本版落地<strong>可恢复异常（try / catch / throw）</strong>（见 README <a href="#26-可恢复异常trycatchthrow">§26</a>），
 补齐了 v0.6 只有 <code>ud2</code>（不可恢复崩溃）的那一半；同时正式声明<strong>三重开源许可</strong>。</p>
-<h3 id="added新增_1">Added（新增）</h3>
+<h3 id="added新增_2">Added（新增）</h3>
 <ul>
 <li><strong>可恢复异常语法</strong>：<code>throw Error("msg");</code> 抛出；<code>try { } catch e { }</code> 捕获（<strong>catch 后无圆括号</strong>，
   <code>e</code> 类型自动推导为 <code>error</code>）；<code>try { } catch { }</code> 省略变量名表示忽略具体错误。</li>
@@ -172,7 +230,7 @@
 <hr />
 <h2 id="0610-—-2026-10-29">[0.61.0] — 2026-10-29</h2>
 <p>本版落地<strong>文件 IO（file 句柄）</strong>（见 README <a href="#24-文件-iofile-句柄">§24</a>），并正式确立<strong>版本号规则</strong>（十进制递增、禁止跳版，见 README <a href="#23-版本号规则">§23</a>）。</p>
-<h3 id="added新增_2">Added（新增）</h3>
+<h3 id="added新增_3">Added（新增）</h3>
 <ul>
 <li><strong><code>file</code> 不透明指针类型</strong>：新增 <code>file</code> 类型，IR 中为 <code>ptr</code>，封装 C 的 <code>FILE*</code>，<strong>不受 ARC 管理</strong>；用户必须显式 <code>open</code> / <code>close</code>（与内存宪法显式指针回收契约一致）。</li>
 <li><strong><code>open</code> / <code>read</code> / <code>write</code> / <code>close</code></strong>：仅封装 C 标准库 <code>fopen</code> / <code>fread</code> / <code>fwrite</code> / <code>fclose</code>，Rust 前端不重写任何文件逻辑；只提供最基础的 C 风格 API，无链式流、无额外语法糖。</li>
@@ -195,7 +253,7 @@
 <h2 id="060-—-2026-10-29">[0.6.0] — 2026-10-29</h2>
 <p>本版把 Zig 式 <strong>Fail-Fast</strong> 确立为与内存宪法并列的语言底线（见 README §20）：
 <strong>宁可当场崩溃，绝不产生未定义行为或静默错误数据。</strong></p>
-<h3 id="added新增_3">Added（新增）</h3>
+<h3 id="added新增_4">Added（新增）</h3>
 <ul>
 <li><strong>Fail-Fast 陷阱基础设施</strong>：新增 <code>runtime/dial_rt_trap.h</code> / <code>.c</code>，提供 <code>dial_trap()</code>（<code>__builtin_trap</code>，
   x86 生成 <code>ud2</code>）、<code>dial_bounds_fail</code> / <code>dial_null_fail</code> / <code>dial_assert_fail</code>（先打印诊断再 trap）。
@@ -261,7 +319,7 @@
 <hr />
 <h2 id="050-—-2026-10-29">[0.5.0] — 2026-10-29</h2>
 <p>本版补齐循环控制流，并把<strong>代码编写纪律</strong>正式写入规范（见 README §20）。</p>
-<h3 id="added新增_4">Added（新增）</h3>
+<h3 id="added新增_5">Added（新增）</h3>
 <ul>
 <li><strong><code>break</code></strong>：跳出最内层循环；仅允许出现在 <code>while</code> / <code>for</code> 循环体内，写在别处是编译错误（见 README §8.4）。</li>
 <li><strong><code>continue</code></strong>：进入下一次迭代。关键语义——<code>for</code> 的 <code>continue</code> <strong>先执行 <code>i = i + 1</code> 再回到条件判定</strong>：
@@ -282,7 +340,7 @@
 <hr />
 <h2 id="040-—-2026-11-02">[0.4.0] — 2026-11-02</h2>
 <p>本版落地<strong>部分标准库</strong>与<strong>控制流语法糖</strong>，并正式写入<a href="#内存宪法防-gc-铁律">内存宪法</a>（见 README §19）。</p>
-<h3 id="added新增_5">Added（新增）</h3>
+<h3 id="added新增_6">Added（新增）</h3>
 <ul>
 <li><strong><code>map</code> 类型（int → int）</strong>：新增哈希表类型，内存布局 <code>[int64 cap][int64 count][entries...]</code>，
   与 <code>string</code> / <code>int[]</code> 共用同一套 <strong>ARC 引用计数</strong>（<code>dial_map_retain</code> / <code>dial_map_release</code>）。
@@ -319,7 +377,7 @@
 <hr />
 <h2 id="030-—-2026-10-28">[0.3.0] — 2026-10-28</h2>
 <p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
-<h3 id="added新增_6">Added（新增）</h3>
+<h3 id="added新增_7">Added（新增）</h3>
 <ul>
 <li>内置类型转换函数 <code>int_to_float(int): float</code>，编译为 LLVM <code>sitofp</code>（x86-64：<code>cvtsi2sd</code>）。</li>
 <li>内置类型转换函数 <code>float_to_int(float): int</code>，编译为 LLVM <code>fptosi</code>（x86-64：<code>cvttsd2si</code>，向零截断，与 C 的 <code>(int)</code> 一致）。</li>
@@ -375,7 +433,7 @@
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.8 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
+    <span class="muted">v0.81 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
   </div>
 </footer>
 

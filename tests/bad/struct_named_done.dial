@@ -1,0 +1,8 @@
+// 负向：用并发内建保留名 done 定义结构体 —— 必须编译失败
+struct done {
+    n: int
+}
+fn main(): int {
+    var d: done = done { n: 1 };
+    return d.n;
+}

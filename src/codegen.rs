@@ -352,6 +352,16 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_channel_recv", i8b, &[i8b.into()]);
         self.decl_void("dial_channel_retain", &[i8b.into()]);
         self.decl_void("dial_channel_release", &[i8b.into()]);
+        // v0.81 通道收尾：关闭 / 状态查询 / 非阻塞取出
+        self.decl_func("dial_channel_try_recv", i8b, &[i8b.into()]);
+        self.decl_void("dial_channel_close", &[i8b.into()]);
+        self.decl_func(
+            "dial_channel_closed",
+            self.context.i64_type().into(),
+            &[i8b.into()],
+        );
+        self.decl_func("dial_channel_len", self.context.i64_type().into(), &[i8b.into()]);
+        self.decl_func("dial_channel_done", self.context.i64_type().into(), &[i8b.into()]);
     }
 
     fn declare_dial_function(
@@ -1693,9 +1703,22 @@ impl<'ctx> CodeGen<'ctx> {
                         self.builder.position_at_end(ok_bb);
                         Ok(w)
                     }
+                    // close 按实参的静态类型分派：file 走 fclose，channel 走关闭广播。
+                    // 二者语义不同（前者真的释放资源，后者只置标志 + 唤醒等待者，
+                    // 通道对象仍由原子 ARC 销毁），但都是「显式终结」，故共用一个名字。
                     "close" => {
-                        let f = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
-                        self.call_c_void("dial_file_close", &[f.into()]);
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        match type_of(&args[0], scopes, functions, structs)? {
+                            Type::File => self.call_c_void("dial_file_close", &[v.into()]),
+                            Type::Channel(_) => self.call_c_void("dial_channel_close", &[v.into()]),
+                            other => {
+                                return Err(DialcError::new(
+                                    format!("内部错误：close 收到了 {} 类型的实参", other.name()),
+                                    0,
+                                    0,
+                                ))
+                            }
+                        }
                         Ok(self.context.i64_type().const_int(0, false).into())
                     }
                     // 可恢复异常（v0.7）：Error("msg") 构造一个带引用计数的错误对象（ARC 类型，见 §26）。
@@ -1717,10 +1740,51 @@ impl<'ctx> CodeGen<'ctx> {
                         Ok(self.call_c("dial_channel_new", &[cap.into()]))
                     }
                     // 取出一个元素的所有权：队列里存的就是裸指针，弹出即归接收者所有（不做 retain）。
-                    "recv" => {
+                    //
+                    // v0.81 EOF：通道已关闭且已空时，recv / try_recv 返回 NULL（不再永久阻塞）。
+                    // NULL 意味着「没有值」——用户应当用 done(ch) 守在循环条件上，
+                    // 这样正常路径永远取不到 NULL；一旦取到并继续使用，Runtime 会在
+                    // 使用点（例如 print）当场 Fail-Fast，而不是让它伪装成空值流下去。
+                    "recv" | "try_recv" => {
                         let ch =
                             self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
-                        Ok(self.call_c("dial_channel_recv", &[ch.into()]))
+                        Ok(self.call_c(
+                            if name == "recv" {
+                                "dial_channel_recv"
+                            } else {
+                                "dial_channel_try_recv"
+                            },
+                            &[ch.into()],
+                        ))
+                    }
+                    // 通道状态查询（v0.81）。C 侧统一返回 int64，此处按 Dial 的静态类型收口：
+                    // closed / done 是 bool（LLVM i1），len 是 int（i64）。
+                    "closed" | "done" => {
+                        let ch =
+                            self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let r = self.call_c(
+                            if name == "closed" {
+                                "dial_channel_closed"
+                            } else {
+                                "dial_channel_done"
+                            },
+                            &[ch.into()],
+                        );
+                        let b = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::NE,
+                                r.into_int_value(),
+                                self.context.i64_type().const_int(0, false),
+                                "cheof",
+                            )
+                            .unwrap();
+                        Ok(b.into())
+                    }
+                    "len" => {
+                        let ch =
+                            self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_channel_len", &[ch.into()]))
                     }
                     // move_to(变量, 通道)：**编译期 intrinsic**，不生成任何函数调用栈。
                     // 三条 IR 指令完成所有权移交：取指针 -> 入队 -> 原槽清零。

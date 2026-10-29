@@ -1,0 +1,33 @@
+// v0.81 示例：len / try_recv（非阻塞取值）与 close / done 状态查询
+//
+// recv    —— 阻塞：队列空且未关闭时一直等
+// try_recv —— 非阻塞：队列空立即返回，绝不等待
+//
+// 单线程下演示状态机的每一步，输出完全确定。
+//
+// 注意 try_recv 「有没有取到」的判据是 **len(ch)**：单选消费者下 `len(ch) > 0`
+// 保证这次 try_recv 必然拿到元素。Dial 没有 Option 类型，不靠返回值区分
+// 「取到空串」与「没取到」——那两种状态本来就都该用 len / done 判断。
+
+fn main(): int {
+    let ch: channel<string> = channel(4);
+
+    var s: string = "hello";
+    move_to(s, ch);
+
+    var n: int = len(ch);
+    print(n);              // 1
+
+    if (n > 0) {
+        var r: string = try_recv(ch);
+        print(r);          // hello
+    }
+
+    print(len(ch));        // 0 —— 已取空
+
+    close(ch);
+    print(closed(ch));     // true —— 确实已关闭
+    print(done(ch));       // true —— 已关闭 且 已空 = EOF
+
+    return 0;
+}

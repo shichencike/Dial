@@ -1,0 +1,7 @@
+// 负向：用并发内建保留名 len 定义函数 —— 必须编译失败
+fn len(a: int): int {
+    return a;
+}
+fn main(): int {
+    return len(1);
+}

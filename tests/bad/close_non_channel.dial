@@ -1,0 +1,6 @@
+// 负向：close 的参数既不是 file 也不是 channel —— 必须编译失败
+fn main(): int {
+    var n: int = 1;
+    close(n);
+    return 0;
+}

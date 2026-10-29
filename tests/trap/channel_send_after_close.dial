@@ -1,0 +1,19 @@
+// Fail-Fast 用例：往**已关闭**的通道发送数据，必须当场终止。
+//
+// 为什么必须检查：close 之后绝不会再有人接收（done 的判定就是「已关闭且已空」），
+// 此时 send 进去的元素会永久滞留在队列里——而只要队列非空，done 就永远为假，
+// 消费者侧的收尾循环 `while (not done(ch))` 将**永不结束**。
+//
+// 也就是说：一次「关了还发」会把 v0.81 好不容易补上的 EOF 语义整个废掉，
+// 让程序重新退化为死锁。这种错误绝不能静默放过，必须在发生的那一行立刻终止。
+
+fn main(): int {
+    let ch: channel<string> = channel(4);
+    close(ch);
+
+    var s: string = "too late";
+    move_to(s, ch);     // 已关闭 -> 当场 Fail-Fast
+
+    print(9999);        // 哨兵：绝不可达
+    return 0;
+}

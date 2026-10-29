@@ -81,6 +81,10 @@ void dial_string_retain(DialString s) { dial_rc_retain(s); }
 void dial_string_release(DialString s) { dial_rc_release(s); }
 
 void dial_print_string(DialString s) {
+    /* v0.81：recv / try_recv 在 EOF 时返回 NULL。若用户没用 done(ch) 守住就直接使用，
+     * 这里必须当场受控 Fail-Fast（打印原因 + ud2），而不是解引用 NULL 变成一次
+     * 无解释的段错误，更不能让它伪装成空串流进业务逻辑（§20 铁律）。 */
+    DIAL_HEAP_ASSERT(s != NULL, "print 了一个 NULL string（多半是通道 EOF 之后仍在用取回的值）");
     fwrite(s_data(s), 1, (size_t)((int64_t *)s)[0], stdout);
     putchar('\n');
 }
