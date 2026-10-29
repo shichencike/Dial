@@ -23,7 +23,7 @@ MINOR=$(echo "$VERSION" | cut -d. -f2)
 PATCH=$(echo "$VERSION" | cut -d. -f3)
 if [ "$PATCH" = "0" ]; then SHORT="${MAJOR}.${MINOR}"; else SHORT="${VERSION}"; fi
 
-OUT="../${REPO}-v${SHORT}.zip"
+OUT="$(cd .. && pwd)/${REPO}-v${SHORT}.zip"   # 绝对路径：下面打包时会 cd ..，相对路径会失效
 echo "== 打包 ${REPO} v${VERSION} -> ${OUT} =="
 
 # ---- 2) 硬性校验：四份许可文件必须存在 ----
