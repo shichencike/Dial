@@ -1,9 +1,9 @@
 [package]
 name = "dialc"
-version = "0.61.0"
+version = "0.7.0"
 edition = "2021"
-description = "dialc 编译型编程语言 v0.61 编译器（Rust + LLVM/inkwell）"
-license = "MIT"
+description = "dialc 编译型编程语言 v0.7 编译器（Rust + LLVM/inkwell）：可恢复异常 try/catch/throw"
+license = "GPL-3.0 OR MIT OR Apache-2.0"
 
 [[bin]]
 name = "dialc"

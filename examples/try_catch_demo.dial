@@ -1,0 +1,30 @@
+// dialc v0.7 示例：可恢复异常 try / catch / throw（§25）
+//
+// 三条铁律在本例中都能看到：
+//   1. 极简语法：throw Error("msg") 抛出；try { } catch e { } 捕获（catch 后无圆括号）；
+//      try { } catch { } 省略变量名，表示忽略具体错误。
+//   2. 失败与业务分离：文件不存在属于「业务失败」——C Runtime 返回错误标志，
+//      Dial 层把它转成 throw Error；而越界/除零属于「系统崩溃」，仍走 ud2（Fail-Fast，§20）。
+//   3. 抛出前自动释放 try 作用域内的 ARC 局部，绝不泄漏（见 emit_throw 实现）。
+
+fn main(): int {
+    // --- 1) 捕获「业务失败」：open 打不开文件 -> 抛 Error -> 被 catch e 捕获 ---
+    try {
+        let f: file = open("no_such_file.txt", "r");
+        close(f);
+    } catch e {
+        let prefix: string = "caught: ";
+        print(prefix.concat(e.msg()));
+    }
+
+    // --- 2) catch 省略变量名：忽略具体错误，只要捕获到不崩溃即可 ---
+    try {
+        throw Error("boom");
+    } catch {
+        print("ignored");
+    }
+
+    // --- 3) 捕获之后程序继续正常执行 ---
+    print("after");
+    return 0;
+}

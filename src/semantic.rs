@@ -112,6 +112,7 @@ pub fn type_of<V>(
                 Type::String => string_method_type(method, args, scopes, funcs, structs),
                 Type::Array(_) => array_method_type(method, args, scopes, funcs, structs),
                 Type::Map => map_method_type(method, args, scopes, funcs, structs),
+                Type::Error => error_method_type(method, args, scopes, funcs, structs),
                 _ => Err(DialcError::new(
                     format!("语义错误：类型 '{}' 不支持方法调用 '{}'", ot.name(), method),
                     0, 0,
@@ -411,6 +412,23 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::Void);
                 }
+                // 可恢复异常（v0.7）：Error 是内置构造函数，只能构造 Error 类型，
+                // 且 throw 只允许抛出 Error（杜绝裸 int/string 被抛出，强制规范化）。
+                "Error" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：Error 需要恰好 1 个参数（错误消息 string）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::String {
+                        return Err(DialcError::new(
+                            "语义错误：Error 的参数必须是 string（错误消息）",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Error);
+                }
                 _ => {}
             }
             if name == "print" {
@@ -447,6 +465,7 @@ pub fn type_of<V>(
                             0, 0,
                         ))
                     }
+                    Type::Error => {}
                     Type::Void => {
                         return Err(DialcError::new(
                             "语义错误：print 的参数不能是 void",
@@ -553,6 +572,33 @@ fn string_method_type<V>(
         }
         _ => Err(DialcError::new(
             format!("语义错误：string 无方法 '{}'", method),
+            0, 0,
+        )),
+    }
+}
+
+/// 可恢复异常（v0.7）Error 类型的方法签名与返回类型。
+fn error_method_type<V>(
+    method: &str,
+    args: &[Expr],
+    scopes: &Scopes<V>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<Type> {
+    let arg_t = |i: usize| type_of(&args[i], scopes, funcs, structs);
+    match method {
+        // e.msg()：返回错误消息字符串。
+        "msg" => {
+            if !args.is_empty() {
+                return Err(DialcError::new(
+                    "语义错误：error.msg() 不接受参数",
+                    0, 0,
+                ));
+            }
+            Ok(Type::String)
+        }
+        _ => Err(DialcError::new(
+            format!("语义错误：error 无方法 '{}'（当前仅支持 .msg()）", method),
             0, 0,
         )),
     }
@@ -791,12 +837,13 @@ fn check_function(
         scopes[0].insert(pname.clone(), (pty.clone(), true));
     }
     for stmt in &f.body {
-        check_stmt(stmt, &mut scopes, funcs, f, structs, false)?;
+        check_stmt(stmt, &mut scopes, funcs, f, structs, false, 0)?;
     }
     Ok(())
 }
 
 /// in_loop：当前是否处于循环体内（用于约束 break / continue）。
+/// try_depth：当前嵌套的 try 层数（用于约束 throw 必须出现在 try 内）。
 fn check_stmt(
     stmt: &Stmt,
     scopes: &mut Scopes<bool>,
@@ -804,6 +851,7 @@ fn check_stmt(
     f: &Func,
     structs: &StructTable,
     in_loop: bool,
+    try_depth: usize,
 ) -> Result<()> {
     match stmt {
         Stmt::VarDecl {
@@ -997,13 +1045,13 @@ fn check_stmt(
             }
             scopes.push(HashMap::new());
             for s in then_branch {
-                check_stmt(s, scopes, funcs, f, structs, in_loop)?;
+                check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth)?;
             }
             scopes.pop();
             if let Some(eb) = else_branch {
                 scopes.push(HashMap::new());
                 for s in eb {
-                    check_stmt(s, scopes, funcs, f, structs, in_loop)?;
+                    check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth)?;
                 }
                 scopes.pop();
             }
@@ -1019,7 +1067,7 @@ fn check_stmt(
             }
             scopes.push(HashMap::new());
             for s in body {
-                check_stmt(s, scopes, funcs, f, structs, true)?;
+                check_stmt(s, scopes, funcs, f, structs, true, try_depth)?;
             }
             scopes.pop();
             Ok(())
@@ -1049,7 +1097,7 @@ fn check_stmt(
             scopes.push(HashMap::new());
             scopes.last_mut().unwrap().insert(var.clone(), (Type::Int, true));
             for s in body {
-                check_stmt(s, scopes, funcs, f, structs, true)?;
+                check_stmt(s, scopes, funcs, f, structs, true, try_depth)?;
             }
             scopes.pop();
             Ok(())
@@ -1096,6 +1144,48 @@ fn check_stmt(
                     *line, *col,
                 ));
             }
+            Ok(())
+        }
+        Stmt::Throw(e, line, col) => {
+            // 纪律：throw 只能出现在 try 块内，否则异常没有捕获点，等于“裸奔”崩溃。
+            if try_depth == 0 {
+                return Err(DialcError::new(
+                    "语义错误：throw 必须出现在 try 块内（没有捕获点，异常无法被处理）",
+                    *line, *col,
+                ));
+            }
+            let t = type_of(e, scopes, funcs, structs)?;
+            if t != Type::Error {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：只能抛出 Error 类型，禁止抛出裸的 {}（请使用 Error(\"...\") 构造可恢复异常）",
+                        t.name()
+                    ),
+                    *line, *col,
+                ));
+            }
+            Ok(())
+        }
+        Stmt::Try { body, catch, line, col } => {
+            // try 块体处于 try 上下文（try_depth+1），使块内嵌套 throw 合法。
+            scopes.push(HashMap::new());
+            for s in body {
+                check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth + 1)?;
+            }
+            scopes.pop();
+            // catch 子句：自成一个作用域。若声明了捕获变量，登记为 Error 类型；
+            // 变量名与外层（含 try 块）重名时由正常的重复声明检查在 body 内拦截。
+            scopes.push(HashMap::new());
+            if let Some(name) = &catch.var {
+                scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(name.clone(), (Type::Error, false));
+            }
+            for s in &catch.body {
+                check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth + 1)?;
+            }
+            scopes.pop();
             Ok(())
         }
         Stmt::Expr(e) => {
@@ -1235,6 +1325,13 @@ fn collect_refs(stmts: &[Stmt], si: &mut usize, loop_d: usize, cond_d: usize, re
             Stmt::Return(Some(e), ..) => {
                 record_expr_refs(e, *si, unsafe_ctx, refs);
             }
+            Stmt::Throw(e, ..) => {
+                record_expr_refs(e, *si, unsafe_ctx, refs);
+            }
+            Stmt::Try { body, catch, .. } => {
+                collect_refs(body, si, loop_d, cond_d, refs);
+                collect_refs(&catch.body, si, loop_d, cond_d, refs);
+            }
             Stmt::Expr(e) => {
                 record_expr_refs(e, *si, unsafe_ctx, refs);
             }
@@ -1274,6 +1371,10 @@ fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, f
             }
             Stmt::For { body, .. } => {
                 set_moves(body, si, loop_d + 1, cond_d, facts);
+            }
+            Stmt::Try { body, catch, .. } => {
+                set_moves(body, si, loop_d, cond_d, facts);
+                set_moves(&mut catch.body, si, loop_d, cond_d, facts);
             }
             _ => {}
         }

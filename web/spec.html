@@ -22,7 +22,8 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc-—-dial-语言编译器-v061">dialc — Dial 语言编译器 v0.61</a><ul>
+<li><a href="#dialc-—-dial-语言编译器-v07">dialc — Dial 语言编译器 v0.7</a><ul>
+<li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
 <li><a href="#3-构建与使用">3. 构建与使用</a><ul>
@@ -157,16 +158,50 @@
 <li><a href="#23-版本号规则">23. 版本号规则</a></li>
 <li><a href="#24-文件-iofile-句柄">24. 文件 IO（file 句柄）</a><ul>
 <li><a href="#241-api">24.1 API</a></li>
-<li><a href="#242-错误处理无异常无-result-封装">24.2 错误处理：无异常、无 Result 封装</a></li>
+<li><a href="#242-错误处理v07-起失败即抛出-error">24.2 错误处理（v0.7 起）：失败即抛出 Error</a></li>
 <li><a href="#243-用后即焚必须-close">24.3 用后即焚：必须 close</a></li>
 <li><a href="#244-完整示例">24.4 完整示例</a></li>
+</ul>
+</li>
+<li><a href="#25-包分发与依赖管理生态规划-·-草案">25. 包分发与依赖管理（生态规划 · 草案）</a><ul>
+<li><a href="#251-专属格式与自动解压防呆设计">25.1 专属格式与自动解压（防呆设计）</a></li>
+<li><a href="#252-包内结构与接口签名供-lsp-与-sema-使用">25.2 包内结构与接口签名（供 LSP 与 Sema 使用）</a><ul>
+<li><a href="#xxxdiali-——-签名即契约">xxx.diali —— 签名即契约</a></li>
+<li><a href="#manifesttxt-——-元信息与指纹">manifest.txt —— 元信息与指纹</a></li>
+</ul>
+</li>
+<li><a href="#253-绝对零版本冲突底层兼容">25.3 绝对零版本冲突（底层兼容）</a></li>
+<li><a href="#254-sha256-强制校验防断网与防篡改">25.4 SHA256 强制校验（防断网与防篡改）</a></li>
+<li><a href="#255-这套规范刻意不做的事">25.5 这套规范刻意不做的事</a></li>
+<li><a href="#256-一图流从下载到链接">25.6 一图流：从下载到链接</a></li>
+</ul>
+</li>
+<li><a href="#26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</a><ul>
+<li><a href="#261-语法catch-后无圆括号">26.1 语法（catch 后无圆括号）</a></li>
+<li><a href="#262-error-类型内建arc-管理">26.2 Error 类型：内建、ARC 管理</a></li>
+<li><a href="#263-失败与业务分离两码事">26.3 失败与业务分离（两码事）</a></li>
+<li><a href="#264-抛出前自动释放-arc-引用防漏核心">26.4 抛出前自动释放 ARC 引用（防漏核心）</a></li>
+<li><a href="#265-未捕获异常终止绝不静默继续">26.5 未捕获异常：终止，绝不静默继续</a></li>
+<li><a href="#266-零隐式负担零成本抽象">26.6 零隐式负担（零成本抽象）</a></li>
+<li><a href="#267-完整示例">26.7 完整示例</a></li>
+<li><a href="#268-当前边界">26.8 当前边界</a></li>
 </ul>
 </li>
 </ul>
 </li>
 </ul>
 </div>
-<h1 id="dialc-—-dial-语言编译器-v061">dialc — Dial 语言编译器 v0.61</h1>
+<h1 id="dialc-—-dial-语言编译器-v07">dialc — Dial 语言编译器 v0.7</h1>
+<blockquote>
+<h2 id="开源许可三重许可任选其一">开源许可：三重许可（任选其一）</h2>
+<p>Dial 以 <strong>GPL-3.0、MIT、Apache-2.0</strong> 三份协议<strong>同时</strong>发布，用 <code>OR</code> 连接：</p>
+<p><code>GPL-3.0 OR MIT OR Apache-2.0</code></p>
+<p><strong>你可以任选其中一份遵守</strong>，无需同时满足三者（详见 <a href="LICENSE"><code>LICENSE</code></a>）。
+三份协议原文随源码与发布压缩包<strong>完整分发</strong>：<a href="LICENSE-GPLv3"><code>LICENSE-GPLv3</code></a>、
+<a href="LICENSE-MIT"><code>LICENSE-MIT</code></a>、<a href="LICENSE-APACHE"><code>LICENSE-APACHE</code></a>。</p>
+<p>注意：本许可只覆盖 <strong>Dial 编译器与标准库的源码</strong>。你用 Dial <strong>写出来的程序</strong>
+只链接 libc，不链接 LLVM 运行库，因此<strong>不受本许可约束</strong>（见 <a href="#33-产物依赖契约">§3.3 产物依赖契约</a>）。</p>
+</blockquote>
 <p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
@@ -335,11 +370,17 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
 <h3 id="42-标识符">4.2 标识符</h3>
 <p>以字母或 <code>_</code> 开头，后接字母、数字或 <code>_</code>。</p>
 <h3 id="43-关键字">4.3 关键字</h3>
-<pre><code>var  let  fn  struct  if  else  while  return
+<pre><code>var  let  fn  struct  if  else  while  for  in  return
+try  catch  throw
 and  or   not
 true false
-int  float  bool  string  void  file
+int  float  bool  string  void  file  error
 </code></pre>
+<blockquote>
+<p><code>try</code> / <code>catch</code> / <code>throw</code> 是 v0.7 引入的可恢复异常关键字（见 <a href="#26-可恢复异常trycatchthrow">§26</a>）。
+注意 <strong><code>error</code> 不是关键字</strong>——它是内建构造函数名（与 <code>open</code> / <code>print</code> 同类），写作 <code>Error("...")</code>。
+同理 <code>catch</code> 后<strong>不跟圆括号</strong>：<code>catch e { }</code>，而非 <code>catch (e) { }</code>。</p>
+</blockquote>
 <h3 id="44-字面量">4.4 字面量</h3>
 <table>
 <thead>
@@ -419,6 +460,11 @@ int  float  bool  string  void  file
 <td><code>file</code></td>
 <td>LLVM <code>ptr</code>（不透明）</td>
 <td>文件句柄，封装 C 的 <code>FILE*</code>；显式 <code>open</code> / <code>close</code>，<strong>不受 ARC 管理</strong>（见 <a href="#24-文件-iofile-句柄">§24</a>）</td>
+</tr>
+<tr>
+<td><code>error</code></td>
+<td>LLVM <code>ptr</code>（不透明）</td>
+<td><strong>可恢复异常对象</strong>（v0.7），由 C Runtime 管理的 ARC 类型；由 <code>Error("msg")</code> 构造、<code>throw</code> 抛出、<code>catch</code> 捕获（见 <a href="#26-可恢复异常trycatchthrow">§26</a>）</td>
 </tr>
 <tr>
 <td><code>void</code></td>
@@ -1544,7 +1590,7 @@ Fail-Fast 运行时检查（§20）。其余仍按计划未实现：</p>
 </tr>
 <tr>
 <td>模块 / 包 / import</td>
-<td>不支持</td>
+<td>不支持（生态规划草案见 <a href="#25-包分发与依赖管理生态规划--草案">§25</a>）</td>
 </tr>
 <tr>
 <td>泛型、接口、trait、闭包</td>
@@ -1565,6 +1611,14 @@ Fail-Fast 运行时检查（§20）。其余仍按计划未实现：</p>
 <tr>
 <td>数组/结构体字面量作为常量表达式</td>
 <td>不支持（需先赋给变量）</td>
+</tr>
+<tr>
+<td>所有权转移 <code>move_to</code>（编译期 intrinsic）</td>
+<td><strong>未实现（规划中）</strong>——设计目标：Sema 标记 <code>Moved</code> 后禁止再用，Codegen 生成 O(1) 指针搬运且跳过 retain/release</td>
+</tr>
+<tr>
+<td>多线程并发（<code>thread</code> / <code>channel</code>）</td>
+<td><strong>未实现（规划中）</strong>——<code>move_to</code> 的前置设施，待专属版本落地</td>
 </tr>
 </tbody>
 </table>
@@ -2172,19 +2226,19 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <td><code>open</code></td>
 <td><code>open(path: string, mode: string): file</code></td>
 <td><code>file</code></td>
-<td>打开文件；底层 <code>fopen(path, mode)</code>。失败返回<strong>空指针</strong>（null）</td>
+<td>打开文件；底层 <code>fopen(path, mode)</code>。<strong>失败（打不开）→ 抛出 <code>Error</code></strong></td>
 </tr>
 <tr>
 <td><code>read</code></td>
 <td><code>read(f: file, n: int): string</code></td>
 <td><code>string</code></td>
-<td>从 <code>f</code> 读取<strong>最多 <code>n</code> 字节</strong>，返回字符串；失败（含 <code>f</code> 为空指针）返回<strong>空串</strong></td>
+<td>从 <code>f</code> 读取<strong>最多 <code>n</code> 字节</strong>，返回字符串。<strong>失败 → 抛出 <code>Error</code></strong></td>
 </tr>
 <tr>
 <td><code>write</code></td>
 <td><code>write(f: file, content: string): int</code></td>
 <td><code>int</code></td>
-<td>把 <code>content</code> 写入 <code>f</code>，返回<strong>实际写入字节数</strong>；失败返回 <code>-1</code></td>
+<td>把 <code>content</code> 写入 <code>f</code>，返回<strong>实际写入字节数</strong>。<strong>失败 → 抛出 <code>Error</code></strong></td>
 </tr>
 <tr>
 <td><code>close</code></td>
@@ -2195,16 +2249,31 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 </tbody>
 </table>
 <p><code>open</code> 的 <code>mode</code> 直接透传给 C 的 <code>fopen</code>，即 <code>"r"</code> / <code>"w"</code> / <code>"a"</code> / <code>"rb"</code> 等标准模式。</p>
-<h3 id="242-错误处理无异常无-result-封装">24.2 错误处理：无异常、无 Result 封装</h3>
-<p>Dial 没有异常机制，文件 IO 也不引入 <code>Result</code> 这类包装。错误通过「返回空指针 / 空串 / 错误码」表达：</p>
-<ul>
-<li><code>open</code> 打不开文件 → 返回空指针（后续 <code>read</code> / <code>write</code> / <code>close</code> 对空指针均安全无操作 / 返回空串 / -1）。</li>
-<li><code>read</code> 失败或句柄为空 → 返回空串（与 <code>read_line</code> 在 EOF 返回空串的既有约定一致）。</li>
-<li><code>write</code> 失败或句柄为空 → 返回 <code>-1</code>。</li>
-</ul>
+<h3 id="242-错误处理v07-起失败即抛出-error">24.2 错误处理（v0.7 起）：失败即抛出 <code>Error</code></h3>
 <blockquote>
-<p>这避免了「打不开文件就崩溃」或「用异常打断控制流」两种极端，把错误处理权交还调用者，
-同时不破坏<a href="#21-代码编写纪律防臃肿与允许冗余原则">代码编写纪律 §21</a>对依赖与抽象的限制。</p>
+<p><strong>v0.7 变更</strong>：文件 IO 由「返回错误标志」改为「<strong>失败即抛出 <code>Error</code></strong>」。
+这是<a href="#263-失败与业务分离两码事">§26.3 失败与业务分离</a>的直接落地——
+文件不存在属于<strong>业务失败</strong>，不该让程序崩溃，也不该逼用户去判空指针。</p>
+</blockquote>
+<ul>
+<li><code>open</code> 打不开文件 → 抛出 <code>Error</code>（消息形如「无法打开文件（路径不存在或无访问权限）」）。</li>
+<li><code>read</code> 失败（句柄无效 / 内存不足）→ 抛出 <code>Error</code>。</li>
+<li><code>write</code> 失败（句柄无效 / 写入中断）→ 抛出 <code>Error</code>。</li>
+<li><code>close</code> 从不失败（空句柄上安全无操作）。</li>
+</ul>
+<p>未被 <code>try</code> 包裹时，抛出的 <code>Error</code> 属于<strong>未捕获异常</strong>——程序打印诊断并终止（§26.5），
+<strong>绝不静默继续</strong>。要恢复，用 <code>try { } catch e { }</code> 包住：</p>
+<pre><code class="language-dial">try {
+    let f: file = open(&quot;no_such_file.txt&quot;, &quot;r&quot;);
+    close(f);
+} catch e {
+    print(&quot;caught: &quot;.concat(e.msg()));
+}
+</code></pre>
+<blockquote>
+<p>底层仍是「C Runtime 返回错误标志（NULL / -1）+ Dial 层转成 <code>throw</code>」的两段式：
+判据在 C 侧，抛出在 Dial 侧，不含任何 LLVM 运行时依赖，也不破坏
+<a href="#21-代码编写纪律防臃肿与允许冗余原则">代码编写纪律 §21</a>对依赖与抽象的限制。</p>
 </blockquote>
 <h3 id="243-用后即焚必须-close">24.3 用后即焚：必须 <code>close</code></h3>
 <p><code>file</code> 句柄<strong>不受 ARC 管理</strong>，编译器不会在作用域结束时自动关闭或释放它。忘记 <code>close</code> 会造成文件描述符泄漏
@@ -2223,12 +2292,586 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
     return 0;
 }
 </code></pre>
-<p><code>file</code> 句柄不能 <code>print</code> 直接打印（会编译期报错），请先 <code>read</code> 成 <code>string</code> 再打印。</p></main></div>
+<p><code>file</code> 句柄不能 <code>print</code> 直接打印（会编译期报错），请先 <code>read</code> 成 <code>string</code> 再打印。</p>
+<hr />
+<h2 id="25-包分发与依赖管理生态规划-·-草案">25. 包分发与依赖管理（生态规划 · 草案）</h2>
+<blockquote>
+<p><strong>状态：草案 / 尚未实现。</strong>
+本章是 Dial 生态的<strong>前瞻性设计规范</strong>，用于提前锁定未来包分发的形态。<strong>当前版本完全不支持</strong>——
+现在连 <code>import</code> 都不存在（见 <a href="#172-v06-尚未实现不要指望能编译">§17.2</a>），本章不描述任何今天可用的功能。</p>
+<p>之所以现在就把规范写死：让「不透明指针 + C ABI」这条底层设计（<a href="#141-不透明指针契约">§14.1</a>、<a href="#15-ffi-契约dial-语法--c-函数">§15</a>）
+从第一天起就为包分发服务，而不是等生态长歪了再回头打补丁。规范先于实现，是防止依赖地狱的唯一低成本时机。</p>
+</blockquote>
+<p>Dial 的包分发只解决一件事：<strong>把别人写好的机器码 + 函数签名，安全、确定地接进你的程序</strong>。</p>
+<p>它<strong>不是</strong>一个包管理器：不做版本求解、不做依赖树仲裁、不做语义化版本区间匹配。
+它是一套<strong>极简、防呆、零歧义</strong>的分发格式——把复杂度的根部直接砍断（见 <a href="#253-绝对零版本冲突底层兼容">§25.3</a>）。</p>
+<h3 id="251-专属格式与自动解压防呆设计">25.1 专属格式与自动解压（防呆设计）</h3>
+<table>
+<thead>
+<tr>
+<th>决策</th>
+<th>规定</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>容器格式</td>
+<td><strong>拒绝</strong>直接用 <code>.zip</code> / <code>.tar.gz</code> 裸分发</td>
+</tr>
+<tr>
+<td>专属扩展名</td>
+<td><strong><code>.dialpkg</code></strong>（Dial Package）</td>
+</tr>
+<tr>
+<td>用户是否手动解压</td>
+<td><strong>永远不需要</strong></td>
+</tr>
+<tr>
+<td>解压位置</td>
+<td>本地缓存目录 <code>~/.dial/packages/&lt;包名&gt;/</code>，<strong>绝不污染当前项目目录</strong></td>
+</tr>
+<tr>
+<td>触发时机</td>
+<td>源码中出现 <code>import</code> 时，<code>dialc</code> 自动识别并<strong>静默</strong>解压</td>
+</tr>
+</tbody>
+</table>
+<p>要点：</p>
+<ul>
+<li><strong>必须有专属扩展名。</strong> 不用 <code>.dpkg</code>——它会与 Debian 的 <code>dpkg</code> 撞名，造成工具链与人的双重误判；
+  <code>.dialpkg</code> 全局唯一，双击/命令行都不会被当成别的东西。</li>
+<li><strong>用户永远不手动解压。</strong> 用户把包下载到本地，在代码里 <code>import</code>，<code>dialc</code> 自动识别 <code>.dialpkg</code> 格式、
+  解压到全局缓存 <code>~/.dial/packages/</code>。<strong>项目目录里不会出现任何解压产物</strong>——
+  既不污染版本控制，也不会让「第三方代码」混进用户的源码树。</li>
+<li><strong>静默但有痕。</strong> 解压是静默的（不打满屏日志），但缓存目录是真实可读的目录，用户可以 <code>ls</code> 查看、
+  也可以整目录删除后让编译器重新解压——缓存永远是<strong>可重建的派生数据</strong>，不是权威来源。</li>
+</ul>
+<blockquote>
+<p>与<a href="#21-代码编写纪律防臃肿与允许冗余原则">代码编写纪律 §21</a>一致：不引入「包管理器框架」这种抽象，
+<code>dialc</code> 自己认识自己的格式，一步到位。</p>
+</blockquote>
+<h3 id="252-包内结构与接口签名供-lsp-与-sema-使用">25.2 包内结构与接口签名（供 LSP 与 Sema 使用）</h3>
+<p>解压后的包<strong>必须</strong>包含以下三个核心文件：</p>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>作用</th>
+<th>是否含实现代码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>libxxx.a</code>（Linux/macOS） / <code>xxx.lib</code>（Windows）</td>
+<td><strong>机器码库</strong>，链接期真正被链进产物</td>
+<td>是（二进制）</td>
+</tr>
+<tr>
+<td><code>xxx.diali</code></td>
+<td><strong>接口签名文件</strong>：<code>extern fn</code> 签名、类型定义、注释</td>
+<td><strong>否</strong>（纯文本，只有声明）</td>
+</tr>
+<tr>
+<td><code>manifest.txt</code></td>
+<td><strong>元信息</strong>：包名、架构、ABI 版本号、上述两个文件的 sha256</td>
+<td>否（纯文本）</td>
+</tr>
+</tbody>
+</table>
+<h4 id="xxxdiali-——-签名即契约"><code>xxx.diali</code> —— 签名即契约</h4>
+<p><code>.diali</code> 是<strong>纯文本</strong>的接口签名文件，只含声明，<strong>不含任何实现代码</strong>。
+<code>dialc</code> 与 LSP <strong>只读取这个文件</strong>来完成：类型检查（Sema）、代码补全、悬停提示（hover）。</p>
+<pre><code class="language-dial">// sqlite.diali —— 接口签名文件（纯文本，无实现）
+// dialc 用它做类型检查；LSP 用它做补全与悬停提示。
+
+/// 不透明句柄：外部代码只拿到指针，永远不知道内部布局（见 §14.1）
+type Db;
+
+/// 打开数据库；失败返回空句柄。
+/// 句柄不受 ARC 管理，必须显式 db_close（§19.3 显式指针回收契约）。
+extern fn db_open(path: string): Db;
+
+/// 执行 SQL，返回受影响行数
+extern fn db_exec(db: Db, sql: string): int;
+
+/// 关闭数据库；空句柄上安全无操作
+extern fn db_close(db: Db): void;
+</code></pre>
+<p>由此得到两个直接收益：</p>
+<ul>
+<li><strong>Sema 不需要读二进制。</strong> 类型检查只依赖 <code>.diali</code>，不必解析 <code>.a</code> 里的符号表——
+  交叉编译、跨架构检查因此成为可能（<code>.diali</code> 与架构无关）。</li>
+<li><strong>LSP 与编译器共用同一份真相。</strong> 补全/悬停与编译期检查读的是同一个文件，
+  杜绝「编辑器说能过、编译器说不能过」的经典分裂。文档注释（<code>///</code>）就是悬停提示的来源。</li>
+</ul>
+<h4 id="manifesttxt-——-元信息与指纹"><code>manifest.txt</code> —— 元信息与指纹</h4>
+<pre><code class="language-ini">name    = sqlite
+version = 1.4.0
+arch    = x86_64-linux
+abi     = 1
+lib     = libsqlite.a
+iface   = sqlite.diali
+sha256.lib   = 9f2b7c...（省略）...c1
+sha256.iface = 3a7e04...（省略）...d8
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>包名（同时决定缓存子目录名）</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>包作者的版本号（<strong>仅用于展示与人工核对，编译器不做版本求解</strong>）</td>
+</tr>
+<tr>
+<td><code>arch</code></td>
+<td>目标架构三元组，如 <code>x86_64-linux</code> / <code>aarch64-macos</code>；不匹配即拒绝</td>
+</tr>
+<tr>
+<td><code>abi</code></td>
+<td><strong>ABI 版本号</strong>；这才是编译器唯一关心的兼容性判据（见 §25.3）</td>
+</tr>
+<tr>
+<td><code>lib</code> / <code>iface</code></td>
+<td>机器码库与签名文件的文件名</td>
+</tr>
+<tr>
+<td><code>sha256.*</code></td>
+<td>上述两个文件各自的 SHA256，<strong>加载时强制校验</strong>（见 §25.4）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="253-绝对零版本冲突底层兼容">25.3 绝对零版本冲突（底层兼容）</h3>
+<p>这是整套规范的核心赌注，也是它敢不做版本求解的底气：</p>
+<blockquote>
+<p>因为 Dial 的底层<strong>严格采用不透明指针（Opaque Handle）</strong>，对外只暴露<strong>标准 C ABI 函数</strong>
+（<a href="#141-不透明指针契约">§14.1</a>、<a href="#15-ffi-契约dial-语法--c-函数">§15</a>），
+外部代码只是<strong>把句柄传给底层函数</strong>来操作，完全不知道底层内存布局。</p>
+</blockquote>
+<p>由此推出：</p>
+<table>
+<thead>
+<tr>
+<th>结论</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>内部结构随便改</strong></td>
+<td>库作者可以任意重构内部数据结构、增删字段、换算法——只要函数签名与语义不变</td>
+</tr>
+<tr>
+<td><strong>旧代码零改动</strong></td>
+<td>调用方只需<strong>链接新的 <code>.a</code> 文件</strong>即可完美运行，无需重新编译、无需改一行源码</td>
+</tr>
+<tr>
+<td><strong>依赖地狱被消灭</strong></td>
+<td>不存在「A 要 v1、B 要 v2 所以装不上」的局面：同一进程里只有一个 ABI，一个包只有一个版本</td>
+</tr>
+<tr>
+<td><strong>判据是 <code>abi</code> 字段</strong></td>
+<td>只要 <code>manifest.txt</code> 里的 <strong>ABI 版本号不变</strong>，就承诺二进制兼容；ABI 变更必须递增该号，编译器据此拒绝</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>一个包 = 一个 ABI = 无版本矩阵。</strong> 规范里 <code>version</code> 只用于人类阅读与人工核对；
+  编译器的兼容性判据<strong>只有 <code>abi</code></strong>。这从根上取消了「版本区间求解」这个 NP 难题的存在理由。</li>
+<li><strong>ABI 变更是显式事件。</strong> 库作者改坏了兼容性，就必须递增 <code>abi</code>；<code>dialc</code> 加载时若发现
+  调用方期望的 ABI 与包声明不符，<strong>当场报错</strong>，而不是让不匹配的二进制悄悄链进产物。</li>
+</ul>
+<blockquote>
+<p>这不是「尽力兼容」，而是<strong>由类型系统强制的不可能冲突</strong>：
+你拿不到布局，就无法依赖布局；无法依赖布局，内部结构怎么改都不会破坏你。</p>
+</blockquote>
+<h3 id="254-sha256-强制校验防断网与防篡改">25.4 SHA256 强制校验（防断网与防篡改）</h3>
+<p><code>dialc</code> <strong>在加载包时</strong>，必须先计算机器码库与签名文件各自的 SHA256，
+并与 <code>manifest.txt</code> 中记录的哈希<strong>逐一比对</strong>。</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>下载时网络中断 → 文件残缺</td>
+<td><strong>当场拦截并报错</strong>，绝不让残缺二进制进入链接器</td>
+</tr>
+<tr>
+<td>文件被恶意篡改（植入后门）</td>
+<td><strong>当场拦截并报错</strong></td>
+</tr>
+<tr>
+<td>哈希比对通过</td>
+<td>正常解压、链接</td>
+</tr>
+</tbody>
+</table>
+<p>铁律：</p>
+<ul>
+<li><strong>校验先于一切。</strong> 校验发生在解压之后、进入链接器<strong>之前</strong>。残缺或被篡改的二进制
+  <strong>绝不允许</strong>流到链接阶段——否则就会产生「链接通过、运行随机崩」的幽灵 Bug：
+  它不报编译错、不报链接错，只在客户机器上偶发，极难复现，最终全部变成无效的客服纠纷。</li>
+<li><strong>两个文件都要校验。</strong> <code>.a</code>（机器码）与 <code>.diali</code>（签名）<strong>各自</strong>都有独立哈希。
+  只校验其中一个是不够的：<code>.diali</code> 被篡改同样致命——它会让「类型检查通过」建立在谎言之上
+  （签名说返回 <code>int</code>，真实库返回指针）。</li>
+<li><strong>失败即终止，不做降级。</strong> 与 <a href="#20-fail-fast-铁律宁可崩溃绝不静默损坏">Fail-Fast 铁律 §20</a>同调：
+  宁可让编译当场失败并给出明确原因，也绝不带病产出可执行文件。</li>
+</ul>
+<h3 id="255-这套规范刻意不做的事">25.5 这套规范刻意不做的事</h3>
+<p>把边界写清楚，和规范本身同等重要：</p>
+<table>
+<thead>
+<tr>
+<th>不做</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>版本区间求解 / 语义化版本匹配</td>
+<td>ABI 不变即兼容，冲突不存在，求解无对象（§25.3）</td>
+</tr>
+<tr>
+<td>传递依赖自动解析</td>
+<td>包内不含依赖声明；依赖由使用者显式 <code>import</code>，保持可见与可控</td>
+</tr>
+<tr>
+<td>中央仓库 / 网络下载</td>
+<td><code>dialc</code> 只认识<strong>本地已下载</strong>的 <code>.dialpkg</code>；不做联网、不做索引、不做账号体系</td>
+</tr>
+<tr>
+<td>源码分发 / 就地编译</td>
+<td>只分发<strong>机器码 + 签名</strong>，用户机器无需装对方的工具链</td>
+</tr>
+<tr>
+<td>包内执行构建脚本</td>
+<td>无脚本、无钩子，包是<strong>纯数据</strong>，解压即可用，无可执行的副作用面</td>
+</tr>
+<tr>
+<td>覆盖/污染用户项目目录</td>
+<td>一律解压到 <code>~/.dial/packages/</code>，项目目录零侵入（§25.1）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="256-一图流从下载到链接">25.6 一图流：从下载到链接</h3>
+<pre><code>  用户下载 sqlite.dialpkg（放到任意本地目录）
+            │
+            ▼
+  源码里 import sqlite
+            │
+            ▼
+  dialc 识别 .dialpkg → 静默解压到 ~/.dial/packages/sqlite/
+            │
+            ▼
+  读 manifest.txt：校验 arch、abi，比对 lib / iface 的 SHA256
+            │            └── 任一不符 → 当场报错终止（绝不进链接器）
+            ▼
+  Sema / LSP 只读 sqlite.diali 做类型检查、补全、悬停
+            │
+            ▼
+  链接 libsqlite.a → 产出只依赖 libc 的可执行文件（§3.3 产物依赖契约）
+</code></pre>
+<hr />
+<blockquote>
+<p>本章为<strong>未来规划草案</strong>，不含任何实现承诺与时间表。规范一旦在真实包上落地，
+将同步更新本章与 <a href="CHANGELOG.md">CHANGELOG.md</a>；在此之前，<code>import</code> 仍按
+<a href="#172-v06-尚未实现不要指望能编译">§17.2</a> 视为<strong>不支持</strong>。</p>
+</blockquote>
+<hr />
+<h2 id="26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</h2>
+<p>v0.7 落地。Dial 至此拥有<strong>两套互补的错误机制</strong>，各管一半，绝不混用：</p>
+<table>
+<thead>
+<tr>
+<th>类别</th>
+<th>例子</th>
+<th>机制</th>
+<th>能否恢复</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>系统崩溃</strong>（程序员的错）</td>
+<td>数组越界、除零、重复释放</td>
+<td>Fail-Fast：<code>int3</code> / <code>ud2</code> <strong>当场终止</strong>（<a href="#20-fail-fast-铁律宁可崩溃绝不静默损坏">§20</a>）</td>
+<td><strong>否</strong>（也不该恢复）</td>
+</tr>
+<tr>
+<td><strong>业务失败</strong>（运行环境的错）</td>
+<td>文件不存在、网络超时、磁盘满</td>
+<td><strong>可恢复异常</strong>：<code>throw Error(...)</code> / <code>try ... catch</code></td>
+<td><strong>是</strong></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>v0.6 只有 <code>ud2</code>（不可恢复）这一半；v0.7 补上另一半，但<strong>绝不</strong>用它去接越界/除零——
+那些是 bug，不是业务分支，恢复它们只会把 crash 变成更贵的幽灵 bug。</p>
+</blockquote>
+<h3 id="261-语法catch-后无圆括号">26.1 语法（catch 后无圆括号）</h3>
+<pre><code class="language-dial">// 1) 捕获并拿到错误对象：catch e { }   —— 注意没有圆括号
+try {
+    let f: file = open(&quot;no_such_file.txt&quot;, &quot;r&quot;);
+    close(f);
+} catch e {
+    print(e.msg());          // e 的类型自动推导为内建 Error
+}
+
+// 2) 忽略具体错误：catch { }            —— 只要捕获到不崩溃即可
+try {
+    throw Error(&quot;boom&quot;);
+} catch {
+    print(&quot;ignored&quot;);
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>写法</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>throw Error("msg");</code></td>
+<td>抛出一个错误对象；<strong>只能</strong>抛 <code>Error</code> 类型</td>
+</tr>
+<tr>
+<td><code>try { ... } catch e { ... }</code></td>
+<td>捕获，并把错误对象绑定到 <code>e</code>（<code>e</code> 自动推导为 <code>error</code>）</td>
+</tr>
+<tr>
+<td><code>try { ... } catch { ... }</code></td>
+<td>捕获但<strong>忽略</strong>具体错误（错误对象被立即释放，不泄漏）</td>
+</tr>
+</tbody>
+</table>
+<p>语法上的两条硬性约束（违反即编译期拒绝）：</p>
+<ul>
+<li><strong><code>catch</code> 后不得写圆括号。</strong> <code>catch (e) { }</code> 会报
+  「语法错误：catch 后不得使用圆括号，直接写变量名，例如 <code>catch e { ... }</code>」。
+  理由与<a href="#21-代码编写纪律防臃肿与允许冗余原则">代码编写纪律 §21</a>一致：括号在 C 骨架里属于函数或条件专属，
+  用在 <code>catch</code> 后面只会造成视觉污染，且对解析器毫无帮助。</li>
+<li><strong><code>throw</code> 必须出现在 <code>try</code> 块内。</strong> 否则报「throw 必须出现在 try 块内（没有捕获点，异常无法被处理）」。</li>
+</ul>
+<h3 id="262-error-类型内建arc-管理">26.2 <code>Error</code> 类型：内建、ARC 管理</h3>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>类型名</td>
+<td><code>error</code>（底层 LLVM <code>ptr</code>，<strong>不透明</strong>——与 string/int[] 同一契约，见 <a href="#141-不透明指针契约">§14.1</a>）</td>
+</tr>
+<tr>
+<td>构造</td>
+<td><code>Error("消息")</code>，<strong>唯一</strong>的构造方式（不是关键字，与 <code>open</code>/<code>print</code> 同类的内建函数）</td>
+</tr>
+<tr>
+<td>内存</td>
+<td><strong>受 ARC 管理</strong>（带引用计数），与 <code>string</code> / <code>int[]</code> / <code>map</code> 同等对待</td>
+</tr>
+<tr>
+<td>方法</td>
+<td><code>.msg()</code> → 返回消息字符串（<code>string</code>）</td>
+</tr>
+<tr>
+<td>打印</td>
+<td><code>print(e)</code> 等价于打印 <code>e.msg()</code></td>
+</tr>
+<tr>
+<td>存储</td>
+<td>可赋给变量、可作参数/返回值，引用计数自动维护</td>
+</tr>
+</tbody>
+</table>
+<p><strong>严禁抛出非 <code>Error</code> 类型</strong>——这条由 Sema 强制，编译期即拒绝：</p>
+<pre><code class="language-dial">throw 42;                 // ❌ 语义错误：只能抛出 Error 类型，禁止抛出裸的 int
+throw &quot;oops&quot;;             // ❌ 同上（string 也不行）
+throw Error(&quot;oops&quot;);      // ✅
+</code></pre>
+<h3 id="263-失败与业务分离两码事">26.3 失败与业务分离（两码事）</h3>
+<p>判据只有一条：<strong>这是 bug，还是运行环境的正常分支？</strong></p>
+<table>
+<thead>
+<tr>
+<th>判为「系统崩溃」走 <code>ud2</code></th>
+<th>判为「业务失败」走 <code>throw</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>下标越界（数组 / 字符串）</td>
+<td>文件不存在 / 无访问权限</td>
+</tr>
+<tr>
+<td>整数除零</td>
+<td>网络超时、连接被拒</td>
+</tr>
+<tr>
+<td>重复释放 / use-after-free</td>
+<td>磁盘写满、配额不足</td>
+</tr>
+<tr>
+<td>内存分配失败（OOM）</td>
+<td>外部输入格式非法</td>
+</tr>
+</tbody>
+</table>
+<p>实现上严格两段式，<strong>判据在 C 侧、抛出在 Dial 侧</strong>：</p>
+<ol>
+<li>C Runtime 只返回<strong>错误标志</strong>（<code>open</code> 返回 <code>NULL</code>、<code>write</code> 返回 <code>-1</code>），绝不自己 longjmp；</li>
+<li>Dial 层（<code>open</code>/<code>read</code>/<code>write</code> 内置的 codegen）识别该标志，构造 <code>Error</code> 并 <code>throw</code>。</li>
+</ol>
+<blockquote>
+<p>这样 C Runtime 保持纯粹（可单独复用、可测试），Dial 层独占控制流的跳转权。</p>
+</blockquote>
+<h3 id="264-抛出前自动释放-arc-引用防漏核心">26.4 抛出前自动释放 ARC 引用（防漏核心）</h3>
+<p>异常最容易埋的雷是<strong>内存泄漏</strong>：控制流一跳走，try 体里的 <code>string</code> / <code>int[]</code> / <code>error</code> 局部
+就随栈展开而"丢失"，引用计数永不清零。</p>
+<p>Dial 的做法：<strong>在 <code>longjmp</code> 之前，编译器自动为「try 作用域内」所有活跃 ARC 局部插入 <code>release</code></strong>。</p>
+<pre><code class="language-dial">try {
+    let s: string = &quot;很长的字符串……&quot;;   // rc = 1
+    let a: int[] = [1, 2, 3];           // rc = 1
+    throw Error(&quot;炸了&quot;);                 // ← 跳转前：先 release(s)、release(a)，再 longjmp
+} catch e {
+    print(e.msg());                      // s 与 a 已正确释放，无泄漏
+}
+</code></pre>
+<p>释放范围的精确界定（实现细节）：</p>
+<ul>
+<li>编译器在 <code>try</code> 入口记录<strong>当时的作用域深度</strong> <code>depth</code>；抛出时只释放 <code>scopes[depth..]</code>——
+  即「try 体 + 其中嵌套块」的局部，<strong>绝不触碰外层作用域</strong>的变量。
+  比"记录变量名集合"更稳健：天然兼容同名遮蔽，不会误放外层的同名变量。</li>
+<li><strong>被抛出的错误对象本身不被释放</strong>：若它来自某个局部变量（如 <code>throw myErr;</code>），
+  该变量在 <code>throw</code> 处被标记 <code>moved</code>，所有权随异常转移给 <code>catch</code>，因此不会被误放（避免 UAF）。</li>
+<li>结构体虽是值类型，但其<strong>堆字段</strong>（string/int[]）同样被递归释放。</li>
+</ul>
+<h3 id="265-未捕获异常终止绝不静默继续">26.5 未捕获异常：终止，绝不静默继续</h3>
+<p><code>throw</code> 若不在任何 <code>try</code> 内（或 <code>catch</code> 块里再次抛出且外层无 <code>try</code>），属于<strong>未捕获异常</strong>。
+此时程序打印诊断并<strong>终止进程</strong>：</p>
+<pre><code>dial: 未捕获的异常（panic）: boom
+</code></pre>
+<blockquote>
+<p>与 <a href="#20-fail-fast-铁律宁可崩溃绝不静默损坏">Fail-Fast §20</a>同调：宁可当场死，
+也绝不让一个没人处理的错误被悄悄吞掉——那才是真正昂贵的失败模式。
+注意编译器已在 Sema 阶段直接拒绝「<code>throw</code> 不在 <code>try</code> 内」，所以这条通常只在
+运行期由 <code>open</code>/<code>read</code>/<code>write</code> 等业务失败触发。</p>
+</blockquote>
+<h3 id="266-零隐式负担零成本抽象">26.6 零隐式负担（零成本抽象）</h3>
+<p><strong>没有异常的代码，运行时开销严格为零。</strong></p>
+<table>
+<thead>
+<tr>
+<th>代码里有 try/catch 吗</th>
+<th>生成的东西</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>没有</strong></td>
+<td><strong>完全没有</strong>异常相关指令：无 <code>setjmp</code>、无异常缓冲区分配、无 ARC 释放插入</td>
+</tr>
+<tr>
+<td>有</td>
+<td>进入时一次 <code>dial_exbuf_new</code> + <code>setjmp</code>；正常结束时一次 <code>dial_exbuf_free</code>；<strong>仅当真的抛出时</strong>才做 ARC 释放</td>
+</tr>
+</tbody>
+</table>
+<p>实测（<code>nm</code> 检查产物符号，见 <code>examples/error_zero_cost.dial</code>）：</p>
+<pre><code># 无 try/catch 的程序（error_zero_cost）：
+$ nm ./error_zero_cost | grep -iE &quot;setjmp|exbuf|dial_throw|dial_error&quot;
+（无任何输出 —— 零开销）
+
+# 有 try/catch 的程序（try_catch_demo）：
+$ nm ./try_catch_demo | grep -iE &quot;setjmp|exbuf|dial_throw|dial_error&quot;
+0000000001002bb0 T dial_exbuf_new
+0000000001002c10 T dial_throw_to
+...
+</code></pre>
+<blockquote>
+<p>底层用 <code>setjmp</code> / <code>longjmp</code>（经 C Runtime 封装 <code>jmp_buf</code>，对 IR 只暴露为 <code>i8*</code>）。
+<strong>关键约束</strong>：<code>setjmp</code> 必须由「包含 try 的那个函数」亲自调用——
+<code>jmp_buf</code> 里存的是调用点的栈指针，若把它包在某个 C 助手函数里、助手一返回，
+之后再 <code>longjmp</code> 就是跳进一个已死的栈帧（未定义行为）。
+因此 IR 直接发起 <code>setjmp</code>（并标 <code>returns_twice</code> 属性），而 <code>longjmp</code> 由 C 侧的 <code>dial_throw_to</code> 发起。</p>
+</blockquote>
+<h3 id="267-完整示例">26.7 完整示例</h3>
+<p>见 <code>examples/try_catch_demo.dial</code>（黄金输出 <code>try_catch_demo.expected</code>）：</p>
+<pre><code class="language-dial">fn main(): int {
+    // 1) 捕获「业务失败」：open 打不开文件 -&gt; 抛 Error -&gt; 被 catch e 捕获
+    try {
+        let f: file = open(&quot;no_such_file.txt&quot;, &quot;r&quot;);
+        close(f);
+    } catch e {
+        let prefix: string = &quot;caught: &quot;;
+        print(prefix.concat(e.msg()));
+    }
+
+    // 2) catch 省略变量名：忽略具体错误，只要捕获到不崩溃即可
+    try {
+        throw Error(&quot;boom&quot;);
+    } catch {
+        print(&quot;ignored&quot;);
+    }
+
+    // 3) 捕获之后程序继续正常执行
+    print(&quot;after&quot;);
+    return 0;
+}
+</code></pre>
+<p>输出：</p>
+<pre><code>caught: 无法打开文件（路径不存在或无访问权限）
+ignored
+after
+</code></pre>
+<h3 id="268-当前边界">26.8 当前边界</h3>
+<table>
+<thead>
+<tr>
+<th>边界</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>catch</code> 不做类型/条件过滤</td>
+<td>只有一个 <code>catch</code>，捕获一切 <code>Error</code>；不做多 catch 分支匹配</td>
+</tr>
+<tr>
+<td><code>Error</code> 只有 <code>.msg()</code></td>
+<td>不提供错误码、错误链、自定义子类</td>
+</tr>
+<tr>
+<td><code>finally</code></td>
+<td>不支持（用 try 之后的代码即可，Dial 无异常穿透的清理需求）</td>
+</tr>
+<tr>
+<td>跨函数抛出</td>
+<td><code>try</code> 只捕获<strong>本函数内</strong>（含被调函数）抛出的异常；Dial 无多线程，不存在跨栈问题</td>
+</tr>
+</tbody>
+</table></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.61 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖</span>
+    <span class="muted">v0.7 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
   </div>
 </footer>
 

@@ -1,0 +1,10 @@
+// 负向用例：catch 后不得使用圆括号（视觉污染，且不属于 C 骨架里的函数/条件专属）
+// 期望：语法期拒绝 —— "catch 后不得使用圆括号，直接写变量名，例如 catch e { ... }"
+fn main(): int {
+    try {
+        let x: int = 1;
+    } catch (e) {
+        print("never reached");
+    }
+    return 0;
+}

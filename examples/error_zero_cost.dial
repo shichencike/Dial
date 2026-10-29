@@ -1,0 +1,18 @@
+// dialc v0.7 示例：零隐式负担验证（§25）
+//
+// 这份代码里**没有任何** try / catch / throw。
+// 因此编译器不会为它生成任何异常相关指令：无 dial_exbuf_new、无 dial_try、无 setjmp。
+// 「没有异常抛出的正常代码，绝对不能有任何运行时的性能损耗」——零成本抽象。
+
+fn main(): int {
+    let a: int = 10;
+    let b: int = 3;
+
+    print(a + b);              // 13
+    print(a * b);              // 30
+
+    let s: string = "hello";
+    print(s.length());         // 5
+
+    return 0;
+}

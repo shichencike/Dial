@@ -7,6 +7,46 @@
 
 ---
 
+## [0.7.0] — 2026-10-30
+
+本版落地**可恢复异常（try / catch / throw）**（见 README [§26](#26-可恢复异常trycatchthrow)），
+补齐了 v0.6 只有 `ud2`（不可恢复崩溃）的那一半；同时正式声明**三重开源许可**。
+
+### Added（新增）
+- **可恢复异常语法**：`throw Error("msg");` 抛出；`try { } catch e { }` 捕获（**catch 后无圆括号**，
+  `e` 类型自动推导为 `error`）；`try { } catch { }` 省略变量名表示忽略具体错误。
+- **内建 `Error` 类型**：`error`，底层 `ptr`（不透明），**受 ARC 管理**；构造 `Error("msg")`，
+  方法 `.msg()` 取消息字符串；`print(e)` 等价于打印 `e.msg()`。
+- **C Runtime**：新增 `stdlib/dial_error.{h,c}`（引用计数错误对象）与
+  `stdlib/dial_exc.{h,c}`（`jmp_buf` 容器 `DialExBuf` + `dial_throw_to` / `dial_exbuf_take_err` / `dial_panic`）。
+- **失败与业务分离**：`open` / `read` / `write` 失败由「返回错误标志」改为**抛出 Error**
+  （判据在 C 侧、抛出在 Dial 侧）；越界 / 除零**仍走** `ud2` / Fail-Fast，绝不混入异常。
+- **三重开源许可**：`GPL-3.0 OR MIT OR Apache-2.0`（任选其一）。三份协议原文
+  `LICENSE-GPLv3` / `LICENSE-MIT` / `LICENSE-APACHE` 与说明文档 `LICENSE` 随源码及发布包分发。
+- **打包脚本** `tools/package.sh`：发布压缩包**强制校验**四份许可文件与 `.git` 均在包内，缺一即拒绝打包。
+- **生态规划草案**：README 新增 [§25 包分发与依赖管理](#25-包分发与依赖管理生态规划--草案)
+  （`.dialpkg` 专属格式、自动解压到 `~/.dial/packages/`、接口签名文件 `.diali`、SHA256 强制校验、零版本冲突）。
+- **示例与负向用例**：`examples/try_catch_demo.dial`、`examples/error_zero_cost.dial`；
+  `tests/bad/{throw_non_error,catch_with_paren,throw_outside_try}.dial`。
+
+### Changed（变更）
+- `dial_file_read` 的失败语义由「返回空串」改为**返回 `NULL`**，使「读取失败」与「读到空内容」不再混淆
+  （成功读取 0 字节仍返回空串）。
+- `readme` 同步：顶部三重许可说明、§4.3 关键字（补 `try`/`catch`/`throw`）、§5.1 类型表（补 `error`）、
+  §17.2（补回 `move_to` / 并发为「规划中」）、§24.2（文件 IO 现抛 Error）、新增 §25 与 §26。
+
+### 设计约束（用户拍板）
+- **极简语法**：只 `throw Error(...)` 与 `try/catch`；**严禁抛出非 `Error` 类型**（裸 int/string 编译期拒绝）。
+- **catch 后不得有圆括号**：括号在 C 骨架里属于函数或条件专属，用在 `catch` 后属视觉污染。
+- **底层防漏**：跳转前**必须**自动为 try 作用域内所有活跃 ARC 局部插入 `release`，绝不泄漏。
+- **失败与业务分离**：系统崩溃走 `ud2`（Fail-Fast），业务失败走 `throw`（可恢复）。
+- **零隐式负担**：无异常的代码运行时开销为零；已用 `nm` 实测验证（见 §26.6）。
+
+### 推迟（不在本版）
+- `move_to` 所有权转移与多线程并发（thread / channel）——需先有并发原语，留待后续专属版本。
+
+---
+
 ## [0.61.0] — 2026-10-29
 
 本版落地**文件 IO（file 句柄）**（见 README [§24](#24-文件-iofile-句柄)），并正式确立**版本号规则**（十进制递增、禁止跳版，见 README [§23](#23-版本号规则)）。

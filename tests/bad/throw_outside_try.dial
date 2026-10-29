@@ -1,0 +1,6 @@
+// 负向用例：throw 必须出现在 try 块内（没有捕获点，等于未捕获异常）
+// 期望：编译期拒绝 —— "throw 必须出现在 try 块内"
+fn main(): int {
+    throw Error("x");
+    return 0;
+}

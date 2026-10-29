@@ -207,6 +207,8 @@ impl Parser {
             TokenKind::While => self.parse_while(),
             TokenKind::For => self.parse_for(),
             TokenKind::Return => self.parse_return(),
+            TokenKind::Try => self.parse_try(),
+            TokenKind::Throw => self.parse_throw(),
             TokenKind::Break => {
                 self.advance();
                 self.expect(TokenKind::Semicolon)?;
@@ -356,6 +358,49 @@ impl Parser {
             self.expect(TokenKind::Semicolon)?;
             Ok(Stmt::Return(Some(e), start.line, start.col))
         }
+    }
+
+    fn parse_try(&mut self) -> Result<Stmt> {
+        let start = self.advance(); // try
+        let body = self.parse_block()?;
+        if !self.check(&TokenKind::Catch) {
+            return Err(DialcError::new(
+                "语法错误：try 块后必须紧跟 catch 子句",
+                start.line,
+                start.col,
+            ));
+        }
+        self.advance(); // catch
+        // catch 后：可选变量名（无圆括号），或直接 { 块。
+        // 显式拒绝圆括号，避免视觉污染（用户要求：catch 后直接跟变量名）。
+        let catch_var = match self.peek_kind().clone() {
+            TokenKind::LParen => {
+                return Err(DialcError::new(
+                    "语法错误：catch 后不得使用圆括号，直接写变量名，例如 catch e { ... }",
+                    start.line,
+                    start.col,
+                ))
+            }
+            TokenKind::Ident(_) => Some(self.expect_ident()?),
+            _ => None,
+        };
+        let catch_body = self.parse_block()?;
+        Ok(Stmt::Try {
+            body,
+            catch: Catch {
+                var: catch_var,
+                body: catch_body,
+            },
+            line: start.line,
+            col: start.col,
+        })
+    }
+
+    fn parse_throw(&mut self) -> Result<Stmt> {
+        let start = self.advance(); // throw
+        let e = self.parse_expr()?;
+        self.expect(TokenKind::Semicolon)?;
+        Ok(Stmt::Throw(e, start.line, start.col))
     }
 
     // ---- 表达式（优先级） ----

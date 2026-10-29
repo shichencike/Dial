@@ -16,6 +16,7 @@ pub enum Type {
     Array(Box<Type>), // 动态数组（v0.2 元素固定为 Int）
     Map,    // 哈希表（int -> int，不透明指针，C 侧引用计数 ARC）
     File,   // 文件句柄（不透明指针，封装 C 的 FILE*；显式 open/close，不受 ARC 管理）
+    Error,  // 可恢复异常（不透明指针，ARC 管理；由 throw 抛出、catch 捕获，见 §25）
     Struct(String),   // 用户结构体（按名引用），值语义
 }
 
@@ -31,6 +32,7 @@ impl Type {
             Type::Array(_) => "array",
             Type::Map => "map",
             Type::File => "file",
+            Type::Error => "error",
             Type::Struct(_) => "struct",
         }
     }
@@ -137,8 +139,26 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     Return(Option<Expr>, usize, usize),
+    /// `throw <expr>;`：抛出可恢复异常。expr 必须是 Error 类型（编译期强制规范化）。
+    Throw(Expr, usize, usize),
+    /// `try { body } catch var { ... }` 或 `try { body } catch { ... }`（catch 无圆括号）。
+    /// catch 捕获的错误变量名可选；省略时表示忽略具体错误，只要捕获到不崩溃即可。
+    Try {
+        body: Vec<Stmt>,
+        catch: Catch,
+        line: usize,
+        col: usize,
+    },
     /// 表达式语句（例如 print(...)、obj.method() 等）。
     Expr(Expr),
+}
+
+/// catch 子句：直接含一个可选的捕获变量名（Identifier）与一个代码块（Block）。
+/// 变量名省略时，catch 块内无法引用具体错误，仅用于「捕获到即不崩溃」。
+#[derive(Debug, Clone)]
+pub struct Catch {
+    pub var: Option<String>,
+    pub body: Vec<Stmt>,
 }
 
 /// 函数定义。

@@ -16,7 +16,12 @@ DialString dial_read_line(void) {
     return dial_string_new(buf);
 }
 
-/* ---- 文件 IO（v0.61）：FILE* 封装，显式 open/close，不受 ARC 管理 ---- */
+/* ---- 文件 IO（v0.61）：FILE* 封装，显式 open/close，不受 ARC 管理 ----
+ * v0.7 起，D 失败即返回「空哨兵」交由 Dial 层抛出 Error（业务失败与系统崩溃分离）：
+ *   - open  失败 -> 返回 NULL；
+ *   - read  失败（句柄无效/分配失败）-> 返回 NULL；读 0 字节请求仍返回空串（成功）；
+ *   - write 失败 -> 返回 -1。
+ * Dial 的 open/read/write 内置据此转换成 throw Error（见 codegen）。 */
 
 DialFile dial_file_open(DialString path, DialString mode) {
     if (!path || !mode) return NULL;
@@ -25,9 +30,10 @@ DialFile dial_file_open(DialString path, DialString mode) {
 }
 
 DialString dial_file_read(DialFile f, int64_t n) {
-    if (!f || n <= 0) return dial_string_new("");
+    if (!f) return NULL;
+    if (n <= 0) return dial_string_new("");
     char *buf = (char *)malloc((size_t)n);
-    if (!buf) return dial_string_new("");
+    if (!buf) return NULL;
     size_t got = fread(buf, 1, (size_t)n, (FILE *)f);
     DialString s = dial_string_from_bytes(buf, (int64_t)got);
     free(buf);

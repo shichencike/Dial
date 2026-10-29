@@ -74,6 +74,11 @@ pub struct CodeGen<'ctx> {
     /// 循环跳转目标栈：(continue 目标块, break 目标块)。
     /// for 的 continue 目标是「自增块」而非条件块——否则 continue 会跳过 i++ 造成死循环。
     loop_targets: RefCell<Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>>,
+    /// 异常缓冲区栈：每个元素 = (exbuf 指针 alloca, try 入口时的作用域深度)。
+    /// 第 2 项记录「try 压栈前 scopes.len()」，使 emit_throw 能精确释放「try 作用域及其中嵌套块」的活跃 ARC 局部，
+    /// 而不触碰外层作用域变量（比记录变量名集合更稳健：天然兼容同名校验/遮蔽情况）。
+    /// try 压栈、catch/merge 弹栈；throw 取栈顶，释放 try 作用域内活跃 ARC 局部后 dial_throw_to（零成本：仅真正抛出才释放）。
+    exbuf_stack: RefCell<Vec<(PointerValue<'ctx>, usize)>>,
     /// Fail-Fast 安全等级：决定是否在 IR 里插入边界/除零检查与 trap。
     safety: SafetyMode,
 }
@@ -98,6 +103,7 @@ pub fn compile(
         str_id: std::cell::Cell::new(0),
         moved: RefCell::new(std::collections::HashSet::new()),
         loop_targets: RefCell::new(Vec::new()),
+        exbuf_stack: RefCell::new(Vec::new()),
         safety,
     };
 
@@ -296,6 +302,33 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_file_read", i8b, &[i8b.into(), i64b.into()]);
         self.decl_func("dial_file_write", i64b, &[i8b.into(), i8b.into()]);
         self.decl_void("dial_file_close", &[i8b.into()]);
+        // 可恢复异常（v0.7）：Error 是带引用计数的 ARC 类型（与 string/map 同等对待）。
+        self.decl_func("dial_error_new", i8b, &[i8b.into()]);
+        self.decl_func("dial_error_msg", i8b, &[i8b.into()]);
+        self.decl_void("dial_error_retain", &[i8b.into()]);
+        self.decl_void("dial_error_release", &[i8b.into()]);
+        // 异常缓冲区（jmp_buf 容器）：对 IR 仅暴露 i8*。
+        self.decl_func("dial_exbuf_new", i8b, &[]);
+        self.decl_func("dial_exbuf_env_ptr", i8b, &[i8b.into()]);
+        self.decl_void("dial_throw_to", &[i8b.into(), i8b.into()]);
+        self.decl_func("dial_exbuf_err", i8b, &[i8b.into()]);
+        self.decl_func("dial_exbuf_take_err", i8b, &[i8b.into()]);
+        self.decl_void("dial_exbuf_free", &[i8b.into()]);
+        self.decl_void("dial_panic", &[i8b.into()]);
+
+        // setjmp **必须**由「包含 try 的那个函数」亲自调用（IR 侧直接发起）：
+        // jmp_buf 里存的是调用点的栈指针，若包在 C 助手函数里、助手一返回，
+        // 再 longjmp 就是跳进已死的栈帧（UB，实测当场崩溃）。
+        // 因此这里直连 libc setjmp，并打上 returns_twice 属性——否则优化器会误判控制流，
+        // 认为它只返回一次，进而破坏异常跳转。（longjmp 由 dial_throw_to 在 C 侧发起。）
+        let setjmp_ty = self.context.i32_type().fn_type(&[self.i8ptr().into()], false);
+        let setjmp_fn = self.module.add_function("setjmp", setjmp_ty, None);
+        let rt_kind = inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice");
+        setjmp_fn.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            self.context.create_enum_attribute(rt_kind, 0),
+        );
+        self.cfuns.insert("setjmp".to_string(), setjmp_fn);
     }
 
     fn declare_dial_function(
@@ -327,7 +360,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Int => self.context.i64_type().into(),
             Type::Float => self.context.f64_type().into(),
             Type::Bool => self.context.bool_type().into(),
-            Type::String | Type::Array(_) | Type::Map | Type::File => self.i8ptr().into(),
+            Type::String | Type::Array(_) | Type::Map | Type::File | Type::Error => self.i8ptr().into(),
             Type::Struct(ref n) => (*self
                 .struct_types
                 .get(n)
@@ -380,7 +413,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Int => self.context.i64_type().const_int(0, false).into(),
             Type::Float => self.context.f64_type().const_float(0.0).into(),
             Type::Bool => self.context.bool_type().const_int(0, false).into(),
-            Type::String | Type::Array(_) | Type::Map | Type::File => self.i8ptr().const_null().into(),
+            Type::String | Type::Array(_) | Type::Map | Type::File | Type::Error => self.i8ptr().const_null().into(),
             Type::Struct(_) => {
                 // 结构体默认值：对 v0.2 仅用于 main 收尾，构造一个零初始化聚合
                 let bte = self.dialc_type_to_llvm(t);
@@ -460,6 +493,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::String => "dial_string_retain",
             Type::Array(_) => "dial_array_retain",
             Type::Map => "dial_map_retain",
+            Type::Error => "dial_error_retain",
             _ => return,
         };
         self.call_c_void(name, &[val.into()]);
@@ -470,6 +504,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::String => "dial_string_release",
             Type::Array(_) => "dial_array_release",
             Type::Map => "dial_map_release",
+            Type::Error => "dial_error_release",
             _ => return,
         };
         let v = self.builder.build_load(self.i8ptr(), ptr, "ldrel").unwrap();
@@ -477,7 +512,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn is_heap_type(t: &Type) -> bool {
-        matches!(*t, Type::String | Type::Array(_) | Type::Map)
+        matches!(*t, Type::String | Type::Array(_) | Type::Map | Type::Error)
     }
 
     /// 在函数的 **entry 块** 里分配栈槽。
@@ -655,6 +690,57 @@ impl<'ctx> CodeGen<'ctx> {
                 }
             }
         }
+    }
+
+    /// 抛出可恢复异常（v0.7）。
+    ///
+    /// 在真正跳转前，**必须**释放当前 try 作用域内所有活跃 ARC 局部（string/int[]/map/error 及含堆字段的结构体），
+    /// 否则异常一抛、这些局部就随栈展开而“丢失”，其引用计数永不清零 -> 内存泄漏。
+    /// 释放范围由 exbuf_stack 栈顶记录的「try 入口作用域深度」精确界定：仅释放 `scopes[depth..]`
+    /// （try 体及其内部嵌套块的局部），绝不触碰外层作用域的变量——比记录变量名集合更稳健（天然兼容遮蔽）。
+    ///
+    /// 被抛出的错误对象本身（payload）不会被释放：若它来自某个局部变量，该变量已在 Throw 处被标记 moved 而跳过。
+    ///
+    /// 跳转到栈顶 exbuf：dial_throw_to(buf, err) 把 err 存入缓冲区后 longjmp 回 dial_try 调用点；
+    /// 若缓冲区里原先已有值（re-throw 场景），由 C 侧先释放旧值，避免泄漏。
+    /// 若无任何 try 包裹（栈空）：未捕获异常 -> dial_panic（打印消息并终止进程，绝不静默继续）。
+    fn emit_throw(
+        &self,
+        err: BasicValueEnum<'ctx>,
+        scopes: &CgScopes<'ctx>,
+        structs: &StructTable,
+    ) -> Result<()> {
+        if let Some(top) = self.exbuf_stack.borrow().last().cloned() {
+            let depth = top.1;
+            let moved = self.moved.borrow();
+            for scope in scopes.iter().skip(depth) {
+                for (_name, (ty, (_m, ptr))) in scope.iter() {
+                    if moved.contains(_name) {
+                        continue;
+                    }
+                    if Self::is_heap_type(ty) {
+                        self.release(ty, *ptr);
+                    } else if matches!(ty, Type::Struct(_)) {
+                        self.release_struct_fields(ty, *ptr, structs);
+                    }
+                }
+            }
+            // dial_throw_to(buf, err)：把 err 写入缓冲区（覆盖前由 C 侧释放旧值，re-throw 安全），
+            // 再 longjmp 回 dial_try 调用点。C 侧封装了 setjmp/longjmp 的 returns_twice / noreturn 语义。
+            let buf_alloca = top.0;
+            let buf = self
+                .builder
+                .build_load(self.i8ptr(), buf_alloca, "exbuf.throw")
+                .unwrap();
+            self.call_c_void("dial_throw_to", &[buf.into(), err.into()]);
+        } else {
+            // 未捕获异常：打印错误消息并终止进程（绝不静默继续，避免逻辑雪崩）。
+            let msg = self.call_c("dial_error_msg", &[err.into()]);
+            self.call_c_void("dial_panic", &[msg.into()]);
+        }
+        // dial_throw_to（内含 longjmp）与 dial_panic（内含 abort）均不返回，标记当前块不可达。
+        self.builder.build_unreachable().unwrap();
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1007,6 +1093,124 @@ impl<'ctx> CodeGen<'ctx> {
                 }
                 Ok(())
             }
+            Stmt::Throw(e, _line, _col) => {
+                // 求值被抛出的错误对象，并把它源变量标记为 moved，
+                // 使 emit_throw 释放 try 作用域 ARC 局部时跳过该 payload（否则会把正要抛出的 Error 一起释放 -> UAF）。
+                let val =
+                    self.gen_expr(e, function, scopes, func_values, functions, structs)?;
+                if let Expr::Var(n) = e {
+                    self.moved.borrow_mut().insert(n.clone());
+                }
+                self.emit_throw(val, scopes, structs)?;
+                Ok(())
+            }
+            Stmt::Try { body, catch, .. } => {
+                let setup_bb = self.context.append_basic_block(function, "try.setup");
+                let body_bb = self.context.append_basic_block(function, "try.body");
+                let catch_bb = self.context.append_basic_block(function, "try.catch");
+                let cont_bb = self.context.append_basic_block(function, "try.cont");
+                let merge_bb = self.context.append_basic_block(function, "try.merge");
+
+                self.builder.build_unconditional_branch(setup_bb).unwrap();
+
+                // ---- try.setup：建立异常缓冲区、setjmp（必须在本帧内发起） ----
+                self.builder.position_at_end(setup_bb);
+                let buf = self.call_c("dial_exbuf_new", &[]);
+                let buf_alloca = self.alloca_in_entry(function, self.i8ptr().into(), "exbuf");
+                self.builder.build_store(buf_alloca, buf).unwrap();
+                let depth = scopes.len();
+                self.exbuf_stack.borrow_mut().push((buf_alloca, depth));
+                // setjmp：首次返回 0（进入 try 体），longjmp 回来时返回非 0（进入 catch）。
+                // 必须由本函数亲自调用（jmp_buf 保存的是本帧栈指针，见 declare_stdlib 注释）。
+                let env_ptr = self.call_c("dial_exbuf_env_ptr", &[buf.into()]);
+                let r = self.call_c("setjmp", &[env_ptr.into()]);
+                let is_throw = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        r.into_int_value(),
+                        self.context.i32_type().const_int(0, false),
+                        "try.isthrow",
+                    )
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(is_throw, catch_bb, body_bb)
+                    .unwrap();
+
+                // ---- try.body ----
+                self.builder.position_at_end(body_bb);
+                scopes.push(HashMap::new());
+                for s in body {
+                    self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
+                    if self.is_terminated() {
+                        break;
+                    }
+                }
+                let body_done = !self.is_terminated();
+                if body_done {
+                    // 正常走完：释放 try 体局部后汇入 merge（merge 负责 free exbuf）。
+                    self.release_scope_locals(scopes.last().unwrap(), structs);
+                    self.builder.build_unconditional_branch(merge_bb).unwrap();
+                }
+                scopes.pop();
+
+                // ---- try.catch：捕获点 ----
+                self.builder.position_at_end(catch_bb);
+                // 弹出本层 exbuf（使 catch 体内的 re-throw 路由到外层 try）。
+                let (buf_alloca, _d) = self.exbuf_stack.borrow_mut().pop().unwrap();
+                let buf = self
+                    .builder
+                    .build_load(self.i8ptr(), buf_alloca, "exbuf.ld")
+                    .unwrap();
+                // 取出错误对象（所有权转移给 catch 作用域），随后 free 缓冲区（b->err 已置 NULL，不会重复释放）。
+                let err = self.call_c("dial_exbuf_take_err", &[buf.into()]);
+                self.call_c_void("dial_exbuf_free", &[buf.into()]);
+                scopes.push(HashMap::new());
+                match &catch.var {
+                    // catch e { }：把捕获到的 Error 绑定到 e（e 是独立 alloca，作用域结束时自动 release，零额外开销）。
+                    Some(name) => {
+                        let e_slot =
+                            self.alloca_in_entry(function, self.i8ptr().into(), name);
+                        self.builder.build_store(e_slot, err).unwrap();
+                        scopes
+                            .last_mut()
+                            .unwrap()
+                            .insert(name.clone(), (Type::Error, (false, e_slot)));
+                    }
+                    // catch { }：无人接收错误对象 -> 立即 release，避免泄漏。
+                    None => {
+                        self.call_c_void("dial_error_release", &[err.into()]);
+                    }
+                }
+                for s in &catch.body {
+                    self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
+                    if self.is_terminated() {
+                        break;
+                    }
+                }
+                let catch_done = !self.is_terminated();
+                if catch_done {
+                    self.release_scope_locals(scopes.last().unwrap(), structs);
+                    self.builder.build_unconditional_branch(cont_bb).unwrap();
+                }
+                scopes.pop();
+
+                // ---- try.merge：仅「try 体正常完成」路径到达，free exbuf 并汇入 cont ----
+                self.builder.position_at_end(merge_bb);
+                if let Some((buf_alloca, _d)) = self.exbuf_stack.borrow().last().cloned() {
+                    let buf = self
+                        .builder
+                        .build_load(self.i8ptr(), buf_alloca, "exbuf.ld2")
+                        .unwrap();
+                    self.call_c_void("dial_exbuf_free", &[buf.into()]);
+                    self.exbuf_stack.borrow_mut().pop();
+                }
+                self.builder.build_unconditional_branch(cont_bb).unwrap();
+
+                // ---- try.cont：try/catch 之后的统一续跑点 ----
+                self.builder.position_at_end(cont_bb);
+                Ok(())
+            }
             Stmt::Expr(e) => {
                 // 语句级方法调用且返回新容器指针（push/set）-> 把结果写回接收变量
                 if let Expr::Method(obj, method, args) = e {
@@ -1245,10 +1449,24 @@ impl<'ctx> CodeGen<'ctx> {
                     "new_map" => Ok(self.call_c("dial_map_new", &[])),
                     "read_line" => Ok(self.call_c("dial_read_line", &[])),
                     // 文件 IO（v0.61）：file 句柄 = 不透明 ptr，不做 retain/release，显式 close。
+                    // v0.7 起：失败即抛出 Error（业务失败与系统崩溃分离——越界/除零仍走 ud2/Fail-Fast）。
                     "open" => {
                         let p = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         let m = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
-                        Ok(self.call_c("dial_file_open", &[p.into(), m.into()]))
+                        let f = self.call_c("dial_file_open", &[p.into(), m.into()]);
+                        // 返回 NULL = 打开失败 -> 抛出 Error（无 try 包裹则升级为 panic 终止）。
+                        let f_int = self.builder.build_ptr_to_int(f.into_pointer_value(), self.context.i64_type(), "fint").unwrap();
+                        let is_null = self.builder.build_int_compare(IntPredicate::EQ, f_int, self.context.i64_type().const_int(0, false), "opennull").unwrap();
+                        let ok_bb = self.context.append_basic_block(function, "open.ok");
+                        let fail_bb = self.context.append_basic_block(function, "open.fail");
+                        self.builder.build_conditional_branch(is_null, fail_bb, ok_bb).unwrap();
+                        self.builder.position_at_end(fail_bb);
+                        let g = self.global_string("dialc.err.open", "无法打开文件（路径不存在或无访问权限）");
+                        let msg = self.call_c("dial_string_new", &[g.into()]);
+                        let err = self.call_c("dial_error_new", &[msg.into()]);
+                        self.emit_throw(err, scopes, structs)?;
+                        self.builder.position_at_end(ok_bb);
+                        Ok(f)
                     }
                     "read" => {
                         let f = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
@@ -1256,17 +1474,49 @@ impl<'ctx> CodeGen<'ctx> {
                             self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?,
                             &type_of(&args[1], scopes, functions, structs)?,
                         );
-                        Ok(self.call_c("dial_file_read", &[f.into(), n.into()]))
+                        let s = self.call_c("dial_file_read", &[f.into(), n.into()]);
+                        // 返回 NULL = 读取失败（句柄无效/分配失败）-> 抛出 Error。
+                        let s_int = self.builder.build_ptr_to_int(s.into_pointer_value(), self.context.i64_type(), "sint").unwrap();
+                        let is_null = self.builder.build_int_compare(IntPredicate::EQ, s_int, self.context.i64_type().const_int(0, false), "readnull").unwrap();
+                        let ok_bb = self.context.append_basic_block(function, "read.ok");
+                        let fail_bb = self.context.append_basic_block(function, "read.fail");
+                        self.builder.build_conditional_branch(is_null, fail_bb, ok_bb).unwrap();
+                        self.builder.position_at_end(fail_bb);
+                        let g = self.global_string("dialc.err.read", "读取文件失败（句柄无效或内存不足）");
+                        let msg = self.call_c("dial_string_new", &[g.into()]);
+                        let err = self.call_c("dial_error_new", &[msg.into()]);
+                        self.emit_throw(err, scopes, structs)?;
+                        self.builder.position_at_end(ok_bb);
+                        Ok(s)
                     }
                     "write" => {
                         let f = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         let c = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
-                        Ok(self.call_c("dial_file_write", &[f.into(), c.into()]))
+                        let w = self.call_c("dial_file_write", &[f.into(), c.into()]);
+                        // 返回 -1 = 写入失败 -> 抛出 Error。
+                        let is_fail = self.builder.build_int_compare(IntPredicate::EQ, w.into_int_value(), self.context.i64_type().const_int(-1i64 as u64, false), "writefail").unwrap();
+                        let ok_bb = self.context.append_basic_block(function, "write.ok");
+                        let fail_bb = self.context.append_basic_block(function, "write.fail");
+                        self.builder.build_conditional_branch(is_fail, fail_bb, ok_bb).unwrap();
+                        self.builder.position_at_end(fail_bb);
+                        let g = self.global_string("dialc.err.write", "写入文件失败（句柄无效或写入中断）");
+                        let msg = self.call_c("dial_string_new", &[g.into()]);
+                        let err = self.call_c("dial_error_new", &[msg.into()]);
+                        self.emit_throw(err, scopes, structs)?;
+                        self.builder.position_at_end(ok_bb);
+                        Ok(w)
                     }
                     "close" => {
                         let f = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         self.call_c_void("dial_file_close", &[f.into()]);
                         Ok(self.context.i64_type().const_int(0, false).into())
+                    }
+                    // 可恢复异常（v0.7）：Error("msg") 构造一个带引用计数的错误对象（ARC 类型，见 §25）。
+                    // 严禁裸的 int/string —— 该约束由 Sema 在编译期拦截；此处 msg 必为 string。
+                    "Error" => {
+                        let msg =
+                            self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_error_new", &[msg.into()]))
                     }
                     _ => {
                         if name == "print" {
@@ -1374,6 +1624,7 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(self.call_c("dial_map_remove", &[optr.into(), k.into()]))
             }
             (Type::Map, "size") => Ok(self.call_c("dial_map_size", &[optr.into()])),
+            (Type::Error, "msg") => Ok(self.call_c("dial_error_msg", &[optr.into()])),
             _ => Err(DialcError::new(
                 format!("语义错误：类型 '{}' 无方法 '{}'（应由 Sema 先行拦截）", ot.name(), method),
                 0, 0,
@@ -1561,6 +1812,11 @@ impl<'ctx> CodeGen<'ctx> {
                     "语义错误：当前版本不支持直接 print 文件句柄（file）；请改用 read 读成 string 后再打印",
                     0, 0,
                 ));
+            }
+            // 可恢复异常（v0.7）：print(error) 打印其错误消息字符串。
+            Type::Error => {
+                let msg = self.call_c("dial_error_msg", &[val.into()]);
+                self.call_c_void("dial_print_string", &[msg.into()]);
             }
             Type::Void => {
                 return Err(DialcError::new("语义错误：print 的参数不能是 void", 0, 0));

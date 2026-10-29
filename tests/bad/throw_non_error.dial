@@ -1,0 +1,10 @@
+// 负向用例：禁止抛出非 Error 类型（裸的 int）
+// 期望：编译期拒绝 —— "只能抛出 Error 类型，禁止抛出裸的 ..."
+fn main(): int {
+    try {
+        throw 42;
+    } catch e {
+        print("never reached");
+    }
+    return 0;
+}
