@@ -14,23 +14,48 @@ use crate::ast::*;
 use crate::error::{DialcError, Result};
 use crate::lexer::{Token, TokenKind};
 
-pub fn parse(tokens: Vec<Token>) -> Result<Program> {
-    let mut p = Parser { tokens, pos: 0 };
+/// 解析入口。`opaque_types` 是**已导入包**用 `type X;` 声明的不透明句柄名——
+/// 它们在源码里直接当类型名用（如 `var h: DemoHandle = demo_new(1);`），
+/// 但既不是内建类型、也不是本程序定义的结构体，因此必须由解析阶段就知道。
+///
+/// 之所以要外部传入：包要先 `import` 才能知道它有哪些句柄，而 `import` 本身
+/// 又在源码里——所以调用方先解析一遍拿到 import 列表、解析好包，再带着这批名字重新解析。
+/// 解析一遍的成本可以忽略，换来的是「类型名在语法阶段就正确」。
+pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program> {
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        opaque: opaque_types.to_vec(),
+    };
+    let mut imports = Vec::new();
     let mut structs = Vec::new();
     let mut functions = Vec::new();
     while !p.at_end() {
-        if p.check(&TokenKind::Struct) {
+        if p.check(&TokenKind::Import) {
+            imports.push(p.parse_import()?);
+        } else if p.check(&TokenKind::Struct) {
             structs.push(p.parse_struct_def()?);
         } else {
             functions.push(p.parse_function()?);
         }
     }
-    Ok(Program { structs, functions })
+    Ok(Program {
+        imports,
+        structs,
+        functions,
+    })
+}
+
+/// 无包上下文的解析（供测试或不需要 import 的场景使用）。
+pub fn parse(tokens: Vec<Token>) -> Result<Program> {
+    parse_with(tokens, &[])
 }
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// 已导入包声明的不透明句柄名（见 `parse_with`）。
+    opaque: Vec<String>,
 }
 
 impl Parser {
@@ -82,6 +107,37 @@ impl Parser {
     }
 
     // ---- 顶层 ----
+
+    /// `import "<包名>";`
+    ///
+    /// 包名是**字符串字面量**而非标识符，这是刻意的：
+    /// 包可能带命名空间（`"std/io"`），用标识符会逼出一套 `.` 或 `::` 的解析规则——
+    /// 那是毫无收益的额外语法。字符串一眼就能看出「这是外部世界的一个名字」。
+    fn parse_import(&mut self) -> Result<String> {
+        let t = self.advance(); // 消费 import
+        let name_tok = self.peek().clone();
+        let name = match &name_tok.kind {
+            TokenKind::StringLit(s) => {
+                self.advance();
+                s.clone()
+            }
+            other => {
+                return Err(DialcError::new(
+                    format!(
+                        "语法错误：import 后必须是包名的字符串字面量，例如 import \"sqlite\"; 但遇到 {:?}",
+                        other
+                    ),
+                    name_tok.line,
+                    name_tok.col,
+                ))
+            }
+        };
+        if name.trim().is_empty() {
+            return Err(DialcError::new("语法错误：import 的包名不能为空", t.line, t.col));
+        }
+        self.expect(TokenKind::Semicolon)?;
+        Ok(name)
+    }
 
     fn parse_struct_def(&mut self) -> Result<StructDef> {
         let start = self.advance(); // struct
@@ -190,7 +246,15 @@ impl Parser {
                     }
                     // thread：线程句柄（不透明指针，不是泛型）
                     "thread" => Type::Thread,
-                    _ => Type::Struct(n),
+                    _ => {
+                        // 已导入包声明的不透明句柄优先于「当成结构体」：
+                        // 它是包私有的不透明指针，用户拿不到布局（见 ast::Type::Opaque）。
+                        if self.opaque.iter().any(|o| o == &n) {
+                            Type::Opaque(n)
+                        } else {
+                            Type::Struct(n)
+                        }
+                    }
                 }
             }
             _ => {

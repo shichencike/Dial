@@ -1,0 +1,23 @@
+// 包分发端到端用例（v0.92）：import 一个 .dialpkg 提供的包并调用它的函数。
+//
+// 覆盖四种签名形态：
+//   demo_add(int, int) -> int      纯数值
+//   demo_version()     -> int      无参
+//   demo_new(int)      -> DemoHandle   返回**不透明句柄**
+//   demo_get(DemoHandle) -> int    以不透明句柄为参数
+//   demo_free(DemoHandle) -> void  释放（void，只能作语句调用）
+//
+// 本例刻意不写任何路径、平台或版本——全部由编译器自行决策
+// （ARCHITECTURE.md §4.3「无缝」的确切含义）。
+
+import "demo";
+
+fn main(): int {
+    print(demo_add(3, 4));      // 7
+    print(demo_version());      // 42
+
+    var h: DemoHandle = demo_new(99);
+    print(demo_get(h));         // 99
+    demo_free(h);               // void 调用：只做事、不给值
+    return 0;
+}

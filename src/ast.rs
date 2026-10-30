@@ -32,6 +32,12 @@ pub enum Type {
     /// 跨线程共享 -> 走**原子**引用计数 ARC；send/recv 是所有权移交，不做 retain/release。
     Channel(Box<Type>),
     Struct(String),   // 用户结构体（按名引用），值语义
+    /// 包提供的**不透明句柄**（v0.92，见 ARCHITECTURE.md §1.3 的 `type Db;`）。
+    ///
+    /// 与 `file` / `thread` 同一阵营：IR 层是 `ptr`，**不受 ARC 管理**，
+    /// 生命周期由包自己的 `xxx_open` / `xxx_close` 这类显式函数掌管。
+    /// 用户拿不到内部布局——这正是「内部结构随便改也不破坏调用方」的根基（§4.4）。
+    Opaque(String),
 }
 
 impl Type {
@@ -51,6 +57,16 @@ impl Type {
             Type::Thread => "thread",
             Type::Channel(_) => "channel",
             Type::Struct(_) => "struct",
+            Type::Opaque(_) => "opaque",
+        }
+    }
+
+    /// 类型显示名（含具体名，用于诊断信息）——包句柄要显示它自己的名字。
+    pub fn display(&self) -> String {
+        match self {
+            Type::Struct(n) => format!("struct {}", n),
+            Type::Opaque(n) => n.clone(),
+            other => other.name().to_string(),
         }
     }
 }
@@ -236,9 +252,14 @@ pub struct StructDef {
     pub col: usize,
 }
 
-/// 整个程序 = 顶层结构体集合 + 顶层函数集合。
+/// 整个程序 = `import` 列表 + 顶层结构体集合 + 顶层函数集合。
+///
+/// `imports` 是**包名**列表（v0.92）。包名只是名字——它引用的是
+/// `~/.dial/packages/<name>/` 下已安装的包，编译器自行完成解压、选库与链接，
+/// 用户不写路径、不写平台、不写版本（见 ARCHITECTURE.md §4.3「无缝」的确切含义）。
 #[derive(Debug, Clone)]
 pub struct Program {
+    pub imports: Vec<String>,
     pub structs: Vec<StructDef>,
     pub functions: Vec<Func>,
 }

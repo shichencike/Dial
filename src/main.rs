@@ -14,6 +14,7 @@ mod ast;
 mod codegen;
 mod error;
 mod lexer;
+mod package;
 mod parser;
 mod semantic;
 
@@ -34,8 +35,32 @@ fn main() {
     let command = args[1].as_str();
     let src_path = args[2].clone();
 
+    // `dialc install <包.dialpkg>`：解压到全局缓存，项目目录零侵入（§25.1）。
+    //
+    // 当前支持**本地文件**。URL 下载（§3.1 的 `dialc install <URL>`）需要引入 HTTP 客户端，
+    // 属后续工作——缓存与校验这条链路与「包从哪来」无关，先把它做对。
+    if command == "install" {
+        let pkg = Path::new(&src_path);
+        match package::install(pkg) {
+            Ok((dir, manifest)) => {
+                println!("✅ 已安装包 '{}' v{}（ABI {}）", manifest.name, manifest.version, manifest.abi);
+                println!("   许可: {}", manifest.license);
+                println!("   位置: {}", dir.display());
+                println!(
+                    "   支持平台: {}",
+                    manifest.supported_triples().join(", ")
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     if !matches!(command, "build" | "run") {
-        eprintln!("未知命令 '{}'，仅支持 build / run", command);
+        eprintln!("未知命令 '{}'，仅支持 build / run / install", command);
         std::process::exit(1);
     }
 
@@ -121,8 +146,32 @@ fn main() {
         }
     };
 
-    // 2) 语法
-    let mut program = match parser::parse(tokens) {
+    // 2) 语法（**两阶段**解析）
+    //
+    //    阶段一：先解析一遍，只为拿到 `import` 列表；
+    //    阶段二：解析完这些包（从而知道它们声明了哪些不透明类型名）之后再重新解析，
+    //            这样 `var h: DemoHandle = demo_new(1);` 里的包类型名
+    //            在**语法阶段**就能被识别为 Type::Opaque，而不是被误当成结构体。
+    //    多解析一遍的成本可以忽略；换来的是类型名从一开始就正确。
+    let probe = match parser::parse(tokens.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // 2.5) 解析 import：定位包 -> 校验哈希 -> 读 .diali 签名 -> 选出本平台机器码
+    //      编译器在这里替用户做完**全部**决策：不写路径、不写平台、不写版本。
+    let (externs, pkg_libs, opaque_types) = match resolve_imports(&probe.imports) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let mut program = match parser::parse_with(tokens, &opaque_types) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{}", e);
@@ -131,7 +180,7 @@ fn main() {
     };
 
     // 3) 语义 + 数据流/逃逸分析
-    let (functions, structs) = match analyze(&mut program) {
+    let (functions, structs) = match analyze(&mut program, &externs) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{}", e);
@@ -141,7 +190,7 @@ fn main() {
 
     // 4) 代码生成（第一步：emit .o，需在 LLVM 存在时执行）
     let (obj_path, exe_path) = output_paths(&src_path, out_path.as_deref());
-    if let Err(e) = codegen::compile(&program, &functions, &structs, &obj_path, safety) {
+    if let Err(e) = codegen::compile(&program, &functions, &structs, &obj_path, safety, &externs) {
         eprintln!("{}", e);
         std::process::exit(1);
     }
@@ -153,7 +202,7 @@ fn main() {
 
     // 5) 链接（第二步：用 C 编译器把 C 标准库做成静态库并链接）
     //    同一个安全等级必须同时作用于 LLVM IR 与 C Runtime，否则两侧检查会不一致。
-    if let Err(e) = link(&obj_path, &exe_path, safety) {
+    if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs) {
         eprintln!("{}", e);
         std::process::exit(1);
     }
@@ -173,6 +222,91 @@ fn main() {
         },
         _ => unreachable!(),
     }
+}
+
+/// 解析 `import` 列表：定位已安装的包 → 校验 → 读 `.diali` 签名 → 选出本平台机器码。
+///
+/// 返回 `(外部函数表, 待链接的静态库列表)`。
+///
+/// 这一步是 ARCHITECTURE.md §4.2「包处理流水线」的 ②③④：
+/// 读 manifest → 按 Triple 查映射字典 → 校验哈希 → 读 .diali 喂给 Sema；
+/// 第 ⑤ 步（把库加进链接命令）在 `link` 里完成。
+fn resolve_imports(
+    imports: &[String],
+) -> Result<(Vec<(String, semantic::FuncInfo)>, Vec<PathBuf>, Vec<String>), String> {
+    let mut externs: Vec<(String, semantic::FuncInfo)> = Vec::new();
+    let mut libs: Vec<PathBuf> = Vec::new();
+    let mut opaque: Vec<String> = Vec::new();
+    if imports.is_empty() {
+        return Ok((externs, libs, opaque));
+    }
+
+    let triple = package::host_triple();
+    for name in imports {
+        let found = package::find_installed(name).map_err(|e| e.to_string())?;
+        let (dir, manifest) = match found {
+            Some(x) => x,
+            None => {
+                let root = package::cache_root().map_err(|e| e.to_string())?;
+                return Err(format!(
+                    "找不到已安装的包 '{}'（缓存目录: {}）。\
+                     请先用 `dialc install <包.dialpkg>` 安装，或把 .dialpkg 放到项目目录",
+                    name,
+                    root.display()
+                ));
+            }
+        };
+
+        // §25.8：让许可**可见**。dialc 不替用户做法务判断，但必须回显到构建日志。
+        println!(
+            "ℹ️  包 '{}' v{}（ABI {}，许可 {}）",
+            manifest.name, manifest.version, manifest.abi, manifest.license
+        );
+
+        // 校验 .diali 的哈希（被篡改的签名会让类型检查建立在谎言之上）
+        let iface_path = package::verify_iface(&dir, &manifest).map_err(|e| e.to_string())?;
+        let iface_text = fs::read_to_string(&iface_path)
+            .map_err(|e| format!("读取 {} 失败: {}", iface_path.display(), e))?;
+        let iface = package::parse_diali(&iface_text).map_err(|e| e.to_string())?;
+
+        // 包声明的不透明句柄名：源码里可以直接当类型名用（如 DemoHandle）
+        for t in &iface.opaque_types {
+            if opaque.iter().any(|o| o == t) {
+                return Err(format!(
+                    "包 '{}' 声明的不透明类型 '{}' 与另一个包重名；当前版本要求包名之间类型名不冲突",
+                    manifest.name, t
+                ));
+            }
+            opaque.push(t.clone());
+        }
+
+        // .diali 的签名 -> Sema 认识的函数表
+        for f in &iface.fns {
+            let mut params = Vec::new();
+            for (_pn, pt) in &f.params {
+                let t = package::resolve_type_name(pt, &iface.opaque_types).map_err(|e| e.to_string())?;
+                params.push(t);
+            }
+            let ret = package::resolve_type_name(&f.ret, &iface.opaque_types)
+                .map_err(|e| e.to_string())?;
+            externs.push((
+                f.name.clone(),
+                semantic::FuncInfo { params, ret },
+            ));
+        }
+
+        // 按当前 Triple 选库，并校验该份机器码的哈希
+        let lib = package::resolve_lib(&dir, &manifest).map_err(|e| e.to_string())?;
+        println!(
+            "ℹ️  链接 {} -> {}（目标 {}）",
+            manifest.name,
+            lib.display(),
+            triple
+        );
+        libs.push(lib);
+    }
+
+    Ok((externs, libs, opaque))
 }
 
 /// 根据源文件路径推导目标文件与可执行文件路径（同目录、同名）。
@@ -233,7 +367,7 @@ fn cc_command() -> (String, Vec<String>) {
 
 /// 第二步：编译 C 标准库/运行时为静态库 libdial_std.a，再与用户 .o 链接。
 /// `safety` 通过 -DDIAL_SAFETY=N 注入，决定 C 侧的边界/断言检查是否编译进去。
-fn link(obj: &Path, exe: &Path, safety: SafetyMode) -> Result<(), String> {
+fn link(obj: &Path, exe: &Path, safety: SafetyMode, extra_libs: &[PathBuf]) -> Result<(), String> {
     let base = find_project_base()
         .ok_or_else(|| "找不到 stdlib/ 与 runtime/ 目录（请用 DIALC_STDLIB_DIR 指定工程根）".to_string())?;
     let runtime_dir = base.join("runtime");
@@ -310,7 +444,13 @@ fn link(obj: &Path, exe: &Path, safety: SafetyMode) -> Result<(), String> {
     link_cmd
         .args(&cc_prefix)
         .arg(obj)
-        .arg(&lib)
+        .arg(&lib);
+    // import 引入的包的机器码：**按 Target Triple 选出的那一份**静态库。
+    // 交叉编译到 Windows 时这里自动变成包内的 .lib，无需用户干预（§4.3）。
+    for pl in extra_libs {
+        link_cmd.arg(pl);
+    }
+    link_cmd
         // 线程库：glibc ≥ 2.34 已并入 libc（此处是空操作），
         // 保留是为了在老 glibc 上仍能链接，不做任何代价。
         .arg("-lpthread")

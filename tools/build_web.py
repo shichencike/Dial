@@ -41,7 +41,7 @@ FOOTER = """
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.92 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.93 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 """
@@ -222,6 +222,7 @@ def render_index() -> str:
         ("判空 · 多消费者安全 · 超时（v0.9）", "is_null(x) 让用户能分辨「没有值」与「真实值」——这是 Dial 此前完全缺失的能力；recv_timeout(ch, ms) 用 pthread_cond_timedwait 实现限时接收，绝不无限期阻塞。更重要的是修掉了一个真实死锁：通道通知此前用 signal 只唤醒一个等待者，多消费者下会让其余消费者带着失效条件睡死（对照实验：signal 版本 25 秒挂死，broadcast 版本 4.25 秒跑完 100 万元素）。"),
         ("多路复用 select（v0.91）", "select { case recv(ch) as v { ... } default { ... } } —— Dial 风格：接收永远是函数调用（没有 Go 的 <- 运算符），绑定用 as 关键字，select 是语句不是表达式。等待是事件驱动的（全局事件纪元 + 条件变量广播），实测 50 万次收发 wall 0.19s；多通道同时就绪时随机选取以防饿死。全体 EOF 时 select 直接结束、不执行任何分支。"),
         ("char 类型（v0.92）", "char 是「一个 Unicode 码点」：值类型、无 ARC、无空指针，与 int 同为 i64 但类型独立。字面量写作 'a' / '\\n' / '中'。可比较（按码点序）、可经 char_to_int / int_to_char 零成本互转；但绝不参与 + - * /，也不与 int 混用——'a' + 1 的意图无法判定，源码必须把意图写清楚。print(c) 输出字符本身（按 UTF-8 编码），非法码点当场 Fail-Fast 终止。"),
+        ("import 与 .dialpkg 包分发（v0.93）", "import \"包名\"; 即可引入预编译好的机器码——不写路径、不写平台、不写版本。dialc install 把 .dialpkg 解压到 ~/.dial/packages/（项目目录零侵入），按 Target Triple 索引出本平台的 .a / .lib 自动链入，并对 .diali 签名与那份机器码做 SHA256 强制校验：残缺或被篡改的二进制绝不进入链接器。包用 type Db; 声明不透明句柄——你永远拿不到内部布局，这正是「库作者随意重构、调用方零改动」的根基。"),
         ("三重开源许可（含许可隔离）", "GPL-3.0 OR MIT OR Apache-2.0 —— 三者任选其一遵守。三份协议原文与说明文档随源码及发布包完整分发。<b>许可按组件划分</b>：编译器前端（dialc 本体）为三重许可；但被静态链进你程序的标准库 libdial_std.a <b>强制锁定为 MIT 或 Apache-2.0，绝不允许以 GPL 条款链接进闭源程序</b>——工具可以是 GPL，被链进你程序里的运行时绝不能是。"),
     ]
     card_html = "".join(
@@ -246,7 +247,7 @@ def render_index() -> str:
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
     </div>
     <div class="kpis">
-      <span><b>v0.92</b> 当前版本</span>
+      <span><b>v0.93</b> 当前版本</span>
       <span><b>Rust + inkwell</b> / LLVM 18</span>
       <span><b>零</b> LLVM 运行时依赖</span>
       <span><b>短路</b> and / or</span>
@@ -280,7 +281,7 @@ cargo build --release          # 产物：target/release/dialc
     return 0;
 }}</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.92.zip">dialc-v0.92.zip</a>（或自行 clone 仓库后构建）
+    下载源码包：<a href="../dialc-v0.93.zip">dialc-v0.93.zip</a>（或自行 clone 仓库后构建）
   </p>
 </section>
 {FOOTER}

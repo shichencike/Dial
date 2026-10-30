@@ -881,6 +881,18 @@ pub fn type_of<V>(
                             0, 0,
                         ))
                     }
+                    // 包提供的不透明句柄：与 thread / channel 同理，打印没有可读语义。
+                    Type::Opaque(n) => {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：当前版本不支持直接 print 包句柄 '{}'（不透明指针）；\
+                                 请改用该包提供的取值函数",
+                                n
+                            ),
+                            0,
+                            0,
+                        ))
+                    }
                     Type::Void => {
                         return Err(DialcError::new(
                             "语义错误：print 的参数不能是 void",
@@ -1150,7 +1162,13 @@ const RESERVED_NAMES: &[&str] = &[
     "is_null", "recv_timeout",
 ];
 
-pub fn analyze(program: &mut Program) -> Result<(HashMap<String, FuncInfo>, StructTable)> {
+/// `externs`：由 `import` 引入的**包外部函数**（v0.92，见 package.rs）。
+/// 它们没有函数体，只有 `.diali` 里的签名——但对调用方而言与本地函数别无二致：
+/// 类型检查照做、调用照写，区别仅在于「函数体在别人的 `.a` 里」。
+pub fn analyze(
+    program: &mut Program,
+    externs: &[(String, FuncInfo)],
+) -> Result<(HashMap<String, FuncInfo>, StructTable)> {
     // 0) 保留名校验（函数名与结构体名都不能撞内建）
     for f in &program.functions {
         if RESERVED_NAMES.contains(&f.name.as_str()) {
@@ -1216,6 +1234,23 @@ pub fn analyze(program: &mut Program) -> Result<(HashMap<String, FuncInfo>, Stru
                 ret: f.ret.clone(),
             },
         );
+    }
+
+    // 2.5) 导入的包外部函数。
+    // 名字冲突当场拒绝：本地函数与包函数同名时，链接期会变成「到底链了哪一个」的悬案，
+    // 而这里能用一句明确的错误把它钉死。
+    for (name, info) in externs {
+        if funcs.contains_key(name) {
+            return Err(DialcError::new(
+                format!(
+                    "语义错误：导入的包函数 '{}' 与本程序中的函数重名；请重命名本地函数",
+                    name
+                ),
+                0,
+                0,
+            ));
+        }
+        funcs.insert(name.clone(), info.clone());
     }
 
     if !funcs.contains_key("main") {

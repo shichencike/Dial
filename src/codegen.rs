@@ -94,6 +94,7 @@ pub fn compile(
     structs: &StructTable,
     out_path: &Path,
     safety: SafetyMode,
+    externs: &[(String, FuncInfo)],
 ) -> Result<()> {
     let context = Context::create();
     let module = context.create_module("dialc");
@@ -121,6 +122,16 @@ pub fn compile(
     for f in &program.functions {
         let fv = cg.declare_dial_function(f, functions);
         func_values.insert(f.name.clone(), fv);
+    }
+
+    // 1.5) 声明 import 引入的包外部函数（v0.92）。
+    //
+    // 它们**只有声明、没有函数体**——函数体在包提供的预编译 `.a` 里，
+    // 由链接期（见 main.rs 的 link）把那份机器码缝进来。
+    // 对 codegen 而言与本地函数毫无区别：调用点照常发射 `call` 指令。
+    for (name, info) in externs {
+        let fv = cg.declare_extern_function(name, info);
+        func_values.insert(name.clone(), fv);
     }
 
     // 2) 生成函数体
@@ -400,6 +411,24 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_channel_done", self.context.i64_type().into(), &[i8b.into()]);
     }
 
+    /// 声明一个由 `import` 引入的包外部函数（只有签名，无函数体）。
+    ///
+    /// 与 C 侧 FFI 函数（declare_stdlib）用的是同一套机制：LLVM 的
+    /// **外部链接声明**——模块里只出现 `declare`，定义由链接器从 `.a` 中解析。
+    fn declare_extern_function(&self, name: &str, info: &FuncInfo) -> FunctionValue<'ctx> {
+        let param_tys: Vec<BasicMetadataTypeEnum> = info
+            .params
+            .iter()
+            .map(|t| self.dialc_type_to_llvm(t).into())
+            .collect();
+        let ft = if info.ret == Type::Void {
+            self.context.void_type().fn_type(&param_tys, false)
+        } else {
+            self.dialc_type_to_llvm(&info.ret).fn_type(&param_tys, false)
+        };
+        self.module.add_function(name, ft, None)
+    }
+
     fn declare_dial_function(
         &self,
         f: &Func,
@@ -438,7 +467,8 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::File
             | Type::Error
             | Type::Thread
-            | Type::Channel(_) => self.i8ptr().into(),
+            | Type::Channel(_)
+            | Type::Opaque(_) => self.i8ptr().into(),
             Type::Struct(ref n) => (*self
                 .struct_types
                 .get(n)
@@ -498,7 +528,8 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::File
             | Type::Error
             | Type::Thread
-            | Type::Channel(_) => self.i8ptr().const_null().into(),
+            | Type::Channel(_)
+            | Type::Opaque(_) => self.i8ptr().const_null().into(),
             Type::Struct(_) => {
                 // 结构体默认值：对 v0.2 仅用于 main 收尾，构造一个零初始化聚合
                 let bte = self.dialc_type_to_llvm(t);
@@ -2257,12 +2288,17 @@ impl<'ctx> CodeGen<'ctx> {
                             let metadata: Vec<BasicMetadataValueEnum> =
                                 arg_vals.iter().map(|v| (*v).into()).collect();
                             let call = self.builder.build_call(*fv, &metadata, name).unwrap();
-                            let rv = call.try_as_basic_value().basic().ok_or_else(|| {
-                                DialcError::new(
-                                    format!("函数 '{}' 返回 void，当前版本暂不支持用作表达式", name),
-                                    0, 0,
-                                )
-                            })?;
+                            // void 调用（v0.92）：`close(f);` / `demo_free(h);` 这类
+                            // 「只做事、不给值」的调用是包生态里最常见的形态。
+                            // 这里发射调用后返回一个占位值——**它只可能出现在语句位置**，
+                            // 因为「把 void 当值用」（赋值给变量、参与运算、作为实参）
+                            // 已由 **语义层** 用 types_compatible 挡住（void 与任何类型都不兼容）。
+                            // 于是「返回 void 却仍能写成一个语句」与「void 不能被当值」
+                            // 两条规则各司其职，不必在 codegen 里重复判定。
+                            let rv = match call.try_as_basic_value().basic() {
+                                Some(v) => v,
+                                None => self.context.i64_type().const_int(0, false).into(),
+                            };
                             Ok(rv)
                         }
                     }
@@ -2552,6 +2588,18 @@ impl<'ctx> CodeGen<'ctx> {
                 return Err(DialcError::new(
                     "语义错误：当前版本不支持直接 print channel；请 recv 出元素后再打印",
                     0, 0,
+                ));
+            }
+            // 包句柄同样是不透明指针：打印它既没有可读语义，也等于泄露包内部结构。
+            Type::Opaque(ref n) => {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：当前版本不支持直接 print 包句柄 '{}'（不透明指针）；\
+                         请改用该包提供的取值函数",
+                        n
+                    ),
+                    0,
+                    0,
                 ));
             }
             Type::Void => {

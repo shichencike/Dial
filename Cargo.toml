@@ -1,9 +1,9 @@
 [package]
 name = "dialc"
-version = "0.92.0"
+version = "0.93.0"
 edition = "2021"
 repository = "https://github.com/shichencike/Dial"
-description = "Dial 语言编译器 v0.92：静态强类型、无 GC、C ABI 前端；v0.7 可恢复异常 try/catch/throw，v0.8 move_to 所有权转移与多线程并发（thread/channel），v0.81 通道关闭与 EOF，v0.9 is_null 判空与多消费者安全，v0.91 多路复用 select，v0.92 char 字符类型"
+description = "Dial 语言编译器 v0.93：静态强类型、无 GC、C ABI 前端；v0.7 可恢复异常 try/catch/throw，v0.8 move_to 所有权转移与多线程并发（thread/channel），v0.81 通道关闭与 EOF，v0.9 is_null 判空与多消费者安全，v0.91 多路复用 select，v0.92 char 字符类型，v0.93 import 与 .dialpkg 包分发"
 license = "GPL-3.0 OR MIT OR Apache-2.0"
 
 [[bin]]
@@ -12,3 +12,14 @@ path = "src/main.rs"
 
 [dependencies]
 inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm18-1-prefer-dynamic"] }
+
+# 包分发（v0.92 起，见 ARCHITECTURE.md / README §25）：
+#  .dialpkg 是 zip 容器（专属扩展名，但复用成熟容器格式而非自造轮子）；
+#  manifest.txt 是 JSON 映射字典。二者都是外部输入的**格式解析**，
+#  手写实现只会引入安全漏洞（路径穿越、畸形 JSON），因此各引入一个成熟依赖。
+#  这是本仓库首次引入第三方依赖，且都只服务于「读外部数据」这一处。
+zip = { version = "2", default-features = false, features = ["deflate"] }
+serde_json = "1"
+# SHA256 是包分发的**安全保证**（§25.4：残缺或被篡改的二进制绝不允许进入链接器）。
+# 这类校验代码不手写——手写哈希实现出 bug 的代价是「恶意包被判为可信」。
+sha2 = "0.10"

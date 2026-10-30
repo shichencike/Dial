@@ -10,6 +10,7 @@
 #   F. 并发压测：C Runtime 多消费者抢同一通道（v0.9 新增，绕开编译器直压 stdlib）。
 #   G. 未捕获异常：内建函数的隐式抛出允许写在 try 外，运行期必须 panic 且打印真实消息
 #      （v0.92 新增；不参与 E 组对照——异常不是安全等级检查，--fast 不该关掉它）。
+#   H. 包分发：示例 .dialpkg 的安装 + import 后编译运行 + SHA256 篡改必须被拦截（v0.93 新增）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -213,6 +214,44 @@ for src in tests/uncaught/*.dial; do
     fi
     echo "  ✅ $name 信号 $((rc - 128)) 终止且消息正确（诊断: $(head -1 "${TMP}/gerr.txt")）"
 done
+
+echo
+echo "== H) 包分发：.dialpkg 安装 + import + SHA256 篡改拦截（v0.93） =="
+pkgdir="${TMP}/samplepkg"
+if ! bash tools/make_sample_pkg.sh "$pkgdir" >"${TMP}/hbuild.log" 2>&1; then
+    echo "  ❌ 示例包构建失败"; sed 's/^/       /' "${TMP}/hbuild.log"; fail=1
+else
+    if ! "$DIALC" install "$pkgdir/demo.dialpkg" >"${TMP}/hinstall.log" 2>&1; then
+        echo "  ❌ 包安装失败"; sed 's/^/       /' "${TMP}/hinstall.log"; fail=1
+    else
+        echo "  ✅ 示例包构建并安装成功"
+        # 1) import 之后能编译、能运行，且输出与黄金文件一致
+        if ! "$DIALC" build tests/pkg/use_demo.dial -o "${TMP}/use_demo" >"${TMP}/hcomp.log" 2>&1; then
+            echo "  ❌ use_demo 编译失败"; sed 's/^/       /' "${TMP}/hcomp.log"; fail=1
+        elif ! diff -u tests/pkg/use_demo.expected <("${TMP}/use_demo" 2>&1) >"${TMP}/hdiff.txt" 2>&1; then
+            echo "  ❌ use_demo 输出不一致："; sed 's/^/       /' "${TMP}/hdiff.txt"; fail=1
+        else
+            echo "  ✅ use_demo 输出一致（import 的外部函数与不透明句柄均可用）"
+        fi
+
+        # 2) 篡改机器码必须被 SHA256 当场拦截——绝不让它流到链接器
+        dlib=$(find "${HOME}/.dial/packages/demo/lib" -name '*.a' 2>/dev/null | head -1)
+        if [ -z "$dlib" ]; then
+            echo "  ❌ 找不到已安装包的机器码，无法校验篡改拦截"; fail=1
+        else
+            cp "$dlib" "${TMP}/dlib.bak"
+            printf '\x00' >> "$dlib"
+            if "$DIALC" build tests/pkg/use_demo.dial -o "${TMP}/use_demo2" >"${TMP}/htamper.log" 2>&1; then
+                echo "  ❌ 篡改后的机器码竟然通过了 SHA256 校验"; fail=1
+            elif ! grep -q "SHA256" "${TMP}/htamper.log"; then
+                echo "  ❌ 篡改被拦截，但报错里没有说明是 SHA256 问题"; fail=1
+            else
+                echo "  ✅ 篡改机器码被 SHA256 拦截（$(grep -o 'SHA256 校验失败' "${TMP}/htamper.log" | head -1)）"
+            fi
+            cp "${TMP}/dlib.bak" "$dlib"   # 还原，避免污染后续用例
+        fi
+    fi
+fi
 
 echo
 if [ $fail -eq 0 ]; then

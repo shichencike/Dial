@@ -15,6 +15,60 @@
 
 ---
 
+## [v0.93] — 2026-10-31
+
+本版落地 **`import` 与 `.dialpkg` 包分发**（见 README [§25.9](#259-用法import-与-dialc-installv092-已实现)），
+完成了 ARCHITECTURE.md 实现路线的**阶段 1 / 3 / 4** 与阶段 2 的本地安装部分。
+这是让「标准库能跑起来」的第一块地基。
+
+### Added（新增）
+- **`import "包名";` 语句**（词法 / 语法 / 两阶段解析）。包名是字符串字面量而非标识符——
+  刻意避开为命名空间再引入一套 `.` / `::` 解析规则。
+- **新增模块 `src/package.rs`**：`.dialpkg` 解包、缓存管理、manifest 解析、`.diali` 解析。
+- **`dialc install <包.dialpkg>`**：解压到 `~/.dial/packages/<name>/`，**项目目录零侵入**；
+  缓存是可重建的派生数据。
+- **`.dialpkg` 解包**：zip 容器 + **路径穿越防护**（拒绝绝对路径、`..` 逃逸、Windows 盘符）。
+- **`manifest.txt` 解析**（JSON）：`name` / `version` / `abi` / `iface` / `license` /
+  `targets`（Triple 映射字典）/ `sha256`（逐文件哈希）。字段缺失一律报错，绝不静默补默认值。
+- **按 Target Triple 选库**：编译器按自己的 triple 索引 `targets`，
+  查不到就报错并**列出本包支持哪些 triple**；交叉编译到 Windows 时自动链 `.lib`。
+- **SHA256 强制校验**：`.diali` 与**本次实际要用的那份**机器码各自校验（§5.1）。
+  残缺或被篡改的二进制**绝不进入链接器**。
+- **`.diali` 解析**：`type X;`（不透明句柄）与 `extern fn f(a: T): R;`，
+  签名接入 Sema 做类型检查；未声明又非内建的类型名一律报错。
+- **新类型 `Type::Opaque(name)`**：包提供的不透明句柄，IR 为 `ptr`、**不受 ARC 管理**
+  （生命周期由包自己的 open/close 掌管），与 `file` / `thread` 同一阵营。
+- **链接期自动链库**：把选定平台的 `.a`（或 `.lib`）加入链接命令，用户不写路径。
+- **许可可见**（§25.8）：`manifest.txt` 的 `license` 为必填字段，构建时回显到日志。
+
+### Changed（变更）
+- **两阶段解析**：先解析一遍取 `import` 列表 → 解析包（拿到不透明类型名）→ 再重新解析，
+  使 `var h: DemoHandle = ...` 这类包类型名在**语法阶段**就被识别为 `Opaque` 而非结构体。
+- **`analyze` 与 `compile` 接受外部函数表**：包函数对调用方与本地函数别无二致，
+  区别仅是「函数体在别人的 `.a` 里」。名字冲突当场报错。
+- **void 函数调用可作语句**：`close(f);` / `demo_free(h);` 这类「只做事、不给值」的调用
+  此前在 codegen 被拒（「返回 void，暂不支持用作表达式」），现已放行。
+  「把 void 当值用」仍由**语义层**挡住——两条规则各司其职。
+- **首次引入第三方依赖** `zip` / `serde_json` / `sha2`：都只服务于「读外部数据」这一处；
+  哈希与容器解析不手写（手写出 bug 的代价是「恶意包被判为可信」）。
+
+### Added（测试）
+- 测试组 **H**：用 `tools/make_sample_pkg.sh` 现场构建示例包 → 安装 → `import` 后编译运行并比对输出
+  → **故意篡改一个字节**验证 SHA256 确实拦得住。
+- `tests/pkg/use_demo.dial` 覆盖四种签名形态：纯数值、无参、返回不透明句柄、
+  以不透明句柄为参数，以及 void 释放函数。
+
+### 尚未实现（本版刻意留白）
+- `dialc install <URL>`（网络下载；本地文件安装已可用）。
+- 一键安装脚本（`install-dial.sh` / `.ps1`）、Windows 线程后端、官方标准库的 `.dialpkg` 化。
+- `.diali` 接入 LSP（补全 / 悬停）——待 LSP 骨架落地。
+
+### 验证
+- A/B/D/E/C/F/G **七组原有测试全绿**，新增 H 组通过；端到端实测
+  `demo_add`→7、`demo_version`→42、不透明句柄 `demo_new`+`demo_get`→99、void `demo_free` 正常。
+
+---
+
 ## [v0.92] — 2026-10-31
 
 本版落地 **`char` 单字符类型**（见 README [§5.4](#54-char单字符类型v092)），

@@ -35,6 +35,8 @@ pub enum TokenKind {
     Try,
     Catch,
     Throw,
+    /// `import "<包名>";`（v0.92，见 ARCHITECTURE.md）
+    Import,
     // 多路复用（v0.91）：select { case recv(ch) as val { ... } default { ... } }
     Select,
     Case,
@@ -284,6 +286,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "try" => TokenKind::Try,
                 "catch" => TokenKind::Catch,
                 "throw" => TokenKind::Throw,
+                "import" => TokenKind::Import,
                 "select" => TokenKind::Select,
                 "case" => TokenKind::Case,
                 "default" => TokenKind::Default,
