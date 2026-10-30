@@ -7,3 +7,6 @@
 
 # 本地生成的测试日志（每次跑测试都会覆盖，不入库）
 TEST_RUN_*.log
+token.txt
+examples/hello
+examples/flow
