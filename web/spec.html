@@ -185,7 +185,10 @@
 <li><a href="#253-绝对零版本冲突底层兼容">25.3 绝对零版本冲突（底层兼容）</a></li>
 <li><a href="#254-sha256-强制校验防断网与防篡改">25.4 SHA256 强制校验（防断网与防篡改）</a></li>
 <li><a href="#255-分发渠道拒绝中心化服务器">25.5 分发渠道：拒绝中心化服务器</a></li>
-<li><a href="#256-一键安装与无缝链接">25.6 一键安装与无缝链接</a></li>
+<li><a href="#256-一键安装与无缝链接">25.6 一键安装与无缝链接</a><ul>
+<li><a href="#2561-三条硬规则已落地">25.6.1 三条硬规则（已落地）</a></li>
+</ul>
+</li>
 <li><a href="#257-这套规范刻意不做的事">25.7 这套规范刻意不做的事</a></li>
 <li><a href="#258-许可隔离第三方包同样绝不以-gpl-链接进用户程序">25.8 许可隔离：第三方包同样绝不以 GPL 链接进用户程序</a></li>
 <li><a href="#259-用法import-与-dialc-installv092-已实现">25.9 用法：import 与 dialc install（v0.92 已实现）</a></li>
@@ -2074,7 +2077,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <h2 id="18-测试">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
-<p>九组检查，全部通过才算绿：</p>
+<p>十组检查，全部通过才算绿：</p>
 <table>
 <thead>
 <tr>
@@ -2118,6 +2121,10 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <tr>
 <td><strong>I. LSP</strong>（v0.94 新增）</td>
 <td>真起一个 <code>dialc lsp</code> 子进程、按 JSON-RPC 往返：初始化能力、诊断定位到<strong>出错那一行</strong>、语义 token 的差分解码与<strong>源码子串反查</strong>（含中文的 UTF-16 换算）、<code>shutdown</code> 后干净退出。见 <code>tests/lsp_smoke.py</code></td>
+</tr>
+<tr>
+<td><strong>J. 包安装三条硬规则</strong>（v0.94 收尾）</td>
+<td><code>dialc install</code>：① 同名包 <strong>ABI 相同则覆盖、不同则报错要求先卸载</strong>；② <code>targets</code> 的库文件<strong>只允许 <code>.a</code> / <code>.lib</code> 静态库，拒绝 <code>.so</code> / <code>.dll</code> 动态库</strong>；③ 卸载即 <code>rm -rf ~/.dial/packages/&lt;名&gt;/</code>（缓存是纯派生数据）。三条均被 J 组锁死</td>
 </tr>
 </tbody>
 </table>
@@ -3200,6 +3207,47 @@ extern fn db_close(db: Db): void;
 <p><strong>「无缝」的含义</strong>：用户不写依赖列表、不写路径、不写平台；包未解压就自动解压，
 哈希不符就自动拦截，目标缺失就明确报错而不是静默降级。
 <strong>接口契约由 <code>.diali</code> 单独统一提供，与底层是哪个平台的机器码完全解耦。</strong></p>
+<h4 id="2561-三条硬规则已落地">25.6.1 三条硬规则（已落地）</h4>
+<p><strong>① 强制静态库——拒绝一切动态库。</strong>
+<code>targets</code> 映射的库文件，后缀<strong>必须为 <code>.a</code>（Linux/Termux）或 <code>.lib</code>（Windows）</strong>；
+形如 <code>.so</code> / <code>.dll</code> 的动态库一律在安装解析 <code>manifest.txt</code> 时<strong>当场拒绝</strong>。
+理由：Dial 产物的依赖契约是「<strong>只链 libc，绝不引入运行时动态依赖</strong>」（见 <a href="#34-产物依赖契约">§3.4 产物依赖契约</a>）。
+一旦允许 <code>.so</code> / <code>.dll</code> 混进来，用户程序就会多出一份运行期必须随附的动态依赖，
+既违背「零运行时依赖」的承诺，也会让 <code>ldd</code> 契约检查（测试 C 组）失效。</p>
+<p><strong>② 重复安装——ABI 相同覆盖，ABI 不同报错。</strong>
+缓存目录 <code>~/.dial/packages/&lt;name&gt;/</code> 下已存在同名包时，<code>dialc install</code> 会先读出旧 <code>manifest.txt</code> 比对 <code>abi</code>：</p>
+<table>
+<thead>
+<tr>
+<th>情形</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>ABI 相同</strong></td>
+<td>直接<strong>覆盖</strong>——整目录删除后重新解压，避免残留旧平台的机器码或陈旧的 <code>.diali</code></td>
+</tr>
+<tr>
+<td><strong>ABI 不同</strong></td>
+<td><strong>报错并拒绝</strong>，提示先卸载旧包再装（见下），防止不兼容的二进制悄悄链进用户程序</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>「为什么不让不同 ABI 共存？」因为同一包名在 <code>import</code> 侧只凭名字引用，
+若允许同名不同 ABI 的包同时躺在缓存里，编译器无法判断该链哪一份——版本冲突的口子就开了。
+Dial 选择「同名即唯一」，把冲突暴露成「先卸载再装」的显式动作，而非静默选错。</p>
+</blockquote>
+<p><strong>③ 卸载——直接删目录即可。</strong>
+Dial 目前<strong>没有</strong> <code>dialc uninstall</code> 命令，因为缓存是<strong>纯派生数据</strong>：包的所有内容都来自
+<code>.dialpkg</code>，删了随时能重装。要卸载一个包，直接在终端删除它的缓存目录即可：</p>
+<pre><code class="language-bash">rm -rf ~/.dial/packages/&lt;包名&gt;/
+</code></pre>
+<blockquote>
+<p>注意这条与 ② 的报错提示是自洽的：ABI 冲突时，运行上面这行删掉旧包，再 <code>dialc install</code>
+新包即可，无需任何额外工具。</p>
+</blockquote>
 <h3 id="257-这套规范刻意不做的事">25.7 这套规范刻意不做的事</h3>
 <p>把边界写清楚，和规范本身同等重要：</p>
 <table>

@@ -140,6 +140,19 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
             .get("lib")
             .and_then(|x| x.as_str())
             .ok_or_else(|| DialcError::new(format!("manifest.txt 的 targets['{}'] 缺少 'lib' 字段", triple), 0, 0))?;
+        // §25：targets 映射的库文件**只允许静态库**（.a / .lib），
+        // 拒绝一切 .so / .dll 动态库——保证 Dial 产物依赖的纯粹性（只链 libc，绝不引入运行时动态依赖）。
+        if !lib.ends_with(".a") && !lib.ends_with(".lib") {
+            return Err(DialcError::new(
+                format!(
+                    "manifest.txt 的 targets['{}'].lib = '{}'：Dial 只接受静态库（.a / .lib），\
+                     拒绝动态库（.so / .dll），以保证产物依赖纯粹性",
+                    triple, lib
+                ),
+                0,
+                0,
+            ));
+        }
         targets.insert(triple.clone(), lib.to_string());
     }
 
@@ -169,7 +182,11 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
 
 /// 把 `.dialpkg` 解压到缓存目录，返回其 manifest。
 ///
-/// 若同名包已存在于缓存，直接复用（缓存是派生数据，重复解压无意义）。
+/// 重复安装规则（§25.6）：
+/// - 缓存 `~/.dial/packages/<name>/` 下已存在同名包时，先读出旧 manifest 比对 `abi`；
+/// - **ABI 相同** → 直接覆盖（整目录删除后重新解压，避免残留旧文件）；
+/// - **ABI 不同** → 报错，要求用户先卸载旧包（`rm -rf ~/.dial/packages/<name>/`）再装，
+///   防止不兼容的二进制悄悄链进用户程序。
 pub fn install(pkg_path: &Path) -> Result<(PathBuf, Manifest)> {
     if !pkg_path.exists() {
         return Err(DialcError::new(
@@ -196,8 +213,28 @@ pub fn install(pkg_path: &Path) -> Result<(PathBuf, Manifest)> {
 
     let dest = cache_root()?.join(&manifest.name);
     if dest.join("manifest.txt").exists() {
-        // 已安装：复用缓存（可由用户整目录删除后重新解压）
-        return Ok((dest, manifest));
+        // 已安装：读出旧 manifest 比对 ABI，决定覆盖还是拒绝。
+        let old_text = fs::read_to_string(dest.join("manifest.txt")).map_err(|e| {
+            DialcError::new(format!("读取已安装包 manifest 失败 {}: {}", dest.display(), e), 0, 0)
+        })?;
+        let old = parse_manifest(&old_text)?;
+        if old.abi != manifest.abi {
+            return Err(DialcError::new(
+                format!(
+                    "包 '{}' 已安装（abi={}），但待安装包 abi={} 与之不同。\n\
+                     为避免 ABI 冲突，请先卸载旧包再安装：\n\
+                       rm -rf ~/.dial/packages/{}\n\
+                     卸载后重新运行：dialc install {}",
+                    manifest.name, old.abi, manifest.abi, manifest.name, pkg_path.display()
+                ),
+                0,
+                0,
+            ));
+        }
+        // ABI 相同：整目录删除后重新解压（覆盖，避免残留旧文件）。
+        fs::remove_dir_all(&dest).map_err(|e| {
+            DialcError::new(format!("覆盖安装时删除旧目录失败 {}: {}", dest.display(), e), 0, 0)
+        })?;
     }
     fs::create_dir_all(&dest)
         .map_err(|e| DialcError::new(format!("创建包缓存目录失败 {}: {}", dest.display(), e), 0, 0))?;

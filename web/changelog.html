@@ -29,6 +29,8 @@
 <li><a href="#changed变更">Changed（变更）</a></li>
 <li><a href="#added测试">Added（测试）</a></li>
 <li><a href="#刻意未做">刻意未做</a></li>
+<li><a href="#收尾补丁包安装三条硬规则">收尾补丁（包安装三条硬规则）</a></li>
+<li><a href="#docs文档">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#v093-—-2026-10-31">[v0.93] — 2026-10-31</a><ul>
@@ -98,21 +100,21 @@
 </li>
 <li><a href="#v05-—-2026-10-29">[v0.5] — 2026-10-29</a><ul>
 <li><a href="#added新增_10">Added（新增）</a></li>
-<li><a href="#docs文档">Docs（文档）</a></li>
+<li><a href="#docs文档_1">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#v04-—-2026-10-29">[v0.4] — 2026-10-29</a><ul>
 <li><a href="#added新增_11">Added（新增）</a></li>
 <li><a href="#changed变更_6">Changed（变更）</a></li>
 <li><a href="#fixed修复_3">Fixed（修复）</a></li>
-<li><a href="#docs文档_1">Docs（文档）</a></li>
+<li><a href="#docs文档_2">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#v03-—-2026-10-28">[v0.3] — 2026-10-28</a><ul>
 <li><a href="#added新增_12">Added（新增）</a></li>
 <li><a href="#changed变更_7">Changed（变更）</a></li>
 <li><a href="#fixed修复_4">Fixed（修复）</a></li>
-<li><a href="#docs文档_2">Docs（文档）</a></li>
+<li><a href="#docs文档_3">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#v02-—-基线版本本仓库首个规范化基线">[v0.2] — 基线版本（本仓库首个规范化基线）</a></li>
@@ -180,6 +182,33 @@
 <h3 id="刻意未做">刻意未做</h3>
 <p>补全 / 跳转定义 / 悬停 / 重命名 / 格式化——这些都建立在<strong>跨文件符号表</strong>之上，
 而 Dial 目前一次编译一个文件，没有符号表可查。硬做只能做出「猜」的结果，比不做更糟。</p>
+<h3 id="收尾补丁包安装三条硬规则">收尾补丁（包安装三条硬规则）</h3>
+<p>进入 v0.95（LSP 增强）前的收尾，全部落在 <code>src/package.rs</code> 与 <a href="#2561-三条硬规则已落地">§25.6.1</a>，
+并由新增的 <strong>J 组</strong>测试锁死：</p>
+<ol>
+<li><strong>重复安装</strong>：<code>~/.dial/packages/&lt;name&gt;/</code> 下已存在同名包时，先读旧 <code>manifest.txt</code> 比对 <code>abi</code>。
+   - <strong>ABI 相同</strong> → 整目录删除后重新解压（覆盖，避免残留旧机器码 / 旧 <code>.diali</code>）；
+   - <strong>ABI 不同</strong> → <strong>报错并拒绝</strong>，提示先 <code>rm -rf ~/.dial/packages/&lt;name&gt;/</code> 再装，
+     防止不兼容二进制悄悄链入。拒绝「同名不同 ABI 共存」——<code>import</code> 只凭名字引用，共存会重新打开版本冲突的口子。</li>
+<li><strong>强制静态库</strong>：<code>targets</code> 映射的库文件后缀<strong>必须为 <code>.a</code>（Linux/Termux）或 <code>.lib</code>（Windows）</strong>，
+   形如 <code>.so</code> / <code>.dll</code> 的动态库在解析 <code>manifest.txt</code> 时<strong>当场拒绝</strong>。
+   理由：Dial 产物契约是「只链 libc，绝不引入运行时动态依赖」（<a href="#34-产物依赖契约">§3.4 产物依赖契约</a>），
+   动态库会破坏这条契约并让 <code>ldd</code> 检查（C 组）失效。</li>
+<li><strong>卸载</strong>：缓存是纯派生数据，没有 <code>dialc uninstall</code> 命令——直接 <code>rm -rf ~/.dial/packages/&lt;name&gt;/</code> 即可，
+   随时可重装。这条与「ABI 冲突报错提示」自洽。</li>
+</ol>
+<h3 id="docs文档">Docs（文档）</h3>
+<ul>
+<li><strong><a href="#31-运行环境要求linux--动态-glibc">§3.1 运行环境要求</a></strong>：明确 Dial <strong>只支持 Linux（x86_64 · 动态 glibc）</strong>，
+  并只在<strong>近两年内发布的发行版</strong>上验证（Ubuntu 24.04 LTS / Fedora 42 / Debian 13 等）；
+  <strong>明确排除 musl 系统（Alpine 等）</strong>——编译器本体与产物都依赖 glibc，跨 ABI 用不了。
+  列出工具链版本（Rust ≥ 1.80、LLVM 18 开发库、<code>zig cc</code> 或 <code>clang</code>）与运行 <code>dialc</code> 本体所需的
+  <code>LD_LIBRARY_PATH</code>（仅影响编译器，不影响产物）。</li>
+<li><strong><a href="#32-从源码构建克隆--进入--编译">§3.2 从源码构建</a></strong>：把流程钉死为
+  <strong>克隆 → 进入（<code>cd Dial</code>，仓库根即编译器本体）→ 编译（<code>cargo build --release</code>）</strong>，
+  并说明仓库根就是 <code>Cargo.toml</code> 与 <code>src/</code> 所在之处（没有嵌套的 <code>dialc/</code> 子目录），避免读者多进一层目录。</li>
+<li>官网「快速开始」同步加了 Linux/glibc 提示、<code>LD_LIBRARY_PATH</code> 步骤与十组自测命令。</li>
+</ul>
 <h2 id="v093-—-2026-10-31">[v0.93] — 2026-10-31</h2>
 <p>本版落地 <strong><code>import</code> 与 <code>.dialpkg</code> 包分发</strong>（见 README <a href="#259-用法import-与-dialc-installv092-已实现">§25.9</a>），
 完成了 ARCHITECTURE.md 实现路线的<strong>阶段 1 / 3 / 4</strong> 与阶段 2 的本地安装部分。
@@ -691,7 +720,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li>新增示例 <code>examples/loop_control.dial</code>（覆盖 for+continue、for+break、while+continue/break 三种组合）。</li>
 <li>新增负向用例 <code>tests/bad/break_outside_loop.dial</code>、<code>tests/bad/continue_outside_loop.dial</code>。</li>
 </ul>
-<h3 id="docs文档">Docs（文档）</h3>
+<h3 id="docs文档_1">Docs（文档）</h3>
 <ul>
 <li>README 新增 <a href="#20-代码编写纪律防臃肿与允许冗余原则">§20 代码编写纪律（防臃肿与允许冗余原则）</a>：
   ① 绝对拒绝过度抽象（宁可 WET，绝不 DRY 过头）② 不引入无用依赖 ③ 允许安全与性能的冗余
@@ -731,7 +760,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li>修正 <code>0..5</code> 这类范围字面量此前被数字词法器误识别为浮点 <code>0.5</code> 的问题：仅当小数点后紧跟数字才视为浮点，
   <code>..</code> 现被正确识别为范围运算符。</li>
 </ul>
-<h3 id="docs文档_1">Docs（文档）</h3>
+<h3 id="docs文档_2">Docs（文档）</h3>
 <ul>
 <li>README 新增 <a href="#12-哈希表-mapint--int">§12 哈希表 <code>map</code></a>、<a href="#82-if--else-if--while">§8.2 <code>else if</code></a>、<a href="#83-范围-for-循环">§8.3 范围 <code>for</code></a>、
   <a href="#19-内存宪法防-gc-铁律">§19 内存宪法</a>；并将 FFI 表与 C 导出函数清单补齐 <code>dial_map_*</code> / <code>dial_read_line</code>。</li>
@@ -764,7 +793,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li>修复了 <code>int → float</code> 隐式转换可能造成的静默精度丢失（如 <code>1 + 2.0</code> 曾默默将 <code>int</code> 提升为 <code>double</code>）。</li>
 <li>修复了 <code>let</code> 变量调用 <code>push</code> 时"容器被原地修改但接收者无法接收新指针"的悬垂风险，将其提前到编译期拒绝。</li>
 </ul>
-<h3 id="docs文档_2">Docs（文档）</h3>
+<h3 id="docs文档_3">Docs（文档）</h3>
 <ul>
 <li>README 同步更新：§5.3 零隐式转换铁律、§6.2 可变性判定（含 <code>push</code>/<code>set</code>）、§7.2 类型规则、
   §7.3 语义细则表（修正 <code>and</code>/<code>or</code> 与混合算术两行）、§11.3–§11.4 接收者须为 <code>var</code>、§18 v0.3 变更摘要。</li>

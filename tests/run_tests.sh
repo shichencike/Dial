@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 九组检查，全部通过才算绿：
+# 十组检查，全部通过才算绿：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   D. Fail-Fast：tests/trap/*.dial 越界/除零必须当场因信号终止，且不得打印哨兵；
@@ -253,6 +253,63 @@ else
             cp "${TMP}/dlib.bak" "$dlib"   # 还原，避免污染后续用例
         fi
     fi
+fi
+
+echo
+echo "== J) 包安装三条硬规则（v0.94.1）：覆盖 / 静态库限制 / ABI 冲突 =="
+# 复用 H 组已构建并安装的 demo（abi=1）。若没装，先装一次。
+if [ ! -f "${HOME}/.dial/packages/demo/manifest.txt" ]; then
+    "$DIALC" install "$pkgdir/demo.dialpkg" >/dev/null 2>&1 || true
+fi
+# 1) 同 ABI 重复安装 → 必须覆盖成功（不退出版本冲突）
+if "$DIALC" install "$pkgdir/demo.dialpkg" >"${TMP}/j_reinstall.log" 2>&1; then
+    echo "  ✅ 同 ABI 重复安装成功（已覆盖）"
+else
+    echo "  ❌ 同 ABI 重复安装本应覆盖却失败："; sed 's/^/       /' "${TMP}/j_reinstall.log"; fail=1
+fi
+
+# 2) 动态库（.so）包 → 必须当场拒绝
+python3 - "$pkgdir" "${TMP}" <<'PY'
+import json, os, zipfile, sys
+pkgdir, tmp = sys.argv[1], sys.argv[2]
+os.makedirs(f"{tmp}/sobad/lib", exist_ok=True)
+open(f"{tmp}/sobad/lib/x86_64-linux-gnu.so","wb").write(b"\x7fELF")  # 假 .so
+open(f"{tmp}/sobad/demo.diali","w").write("type X;\n")
+m={"name":"sobad","version":"1.0.0","abi":1,"iface":"demo.diali","license":"MIT",
+   "targets":{"x86_64-linux-gnu":{"lib":"lib/x86_64-linux-gnu.so"}},
+   "sha256":{"demo.diali":"00","lib/x86_64-linux-gnu.so":"00"}}
+open(f"{tmp}/sobad/manifest.txt","w").write(json.dumps(m))
+with zipfile.ZipFile(f"{tmp}/sobad/sobad.dialpkg","w") as z:
+    z.write(f"{tmp}/sobad/manifest.txt","manifest.txt")
+    z.write(f"{tmp}/sobad/demo.diali","demo.diali")
+PY
+if "$DIALC" install "${TMP}/sobad/sobad.dialpkg" >"${TMP}/j_so.log" 2>&1; then
+    echo "  ❌ 含 .so 动态库的包竟然被安装了（应拒绝）"; fail=1
+elif ! grep -q "静态库" "${TMP}/j_so.log"; then
+    echo "  ❌ .so 包被拒绝，但报错没说明是静态库限制："; sed 's/^/       /' "${TMP}/j_so.log"; fail=1
+else
+    echo "  ✅ 含 .so 动态库的包被拒绝（静态库限制生效）"
+fi
+
+# 3) 不同 ABI 的同名包 → 必须报错并提示先卸载
+python3 - "$pkgdir" "${TMP}" <<'PY'
+import json, zipfile, sys
+pkgdir, tmp = sys.argv[1], sys.argv[2]
+import shutil, os
+d=f"{tmp}/abidiff"; shutil.rmtree(d, ignore_errors=True); shutil.copytree(pkgdir, d)
+m=json.load(open(f"{d}/manifest.txt")); m["abi"]=2; m["version"]="2.0.0"
+open(f"{d}/manifest.txt","w").write(json.dumps(m))
+with zipfile.ZipFile(f"{d}/demo.dialpkg","w",zipfile.ZIP_DEFLATED) as z:
+    z.write(f"{d}/manifest.txt","manifest.txt")
+    z.write(f"{d}/demo.diali","demo.diali")
+    z.write(f"{d}/lib/x86_64-linux-gnu.a","lib/x86_64-linux-gnu.a")
+PY
+if "$DIALC" install "${TMP}/abidiff/demo.dialpkg" >"${TMP}/j_abi.log" 2>&1; then
+    echo "  ❌ 不同 ABI 的同名包竟然被安装了（应报错）"; fail=1
+elif ! grep -q "ABI" "${TMP}/j_abi.log" || ! grep -q "rm -rf" "${TMP}/j_abi.log"; then
+    echo "  ❌ ABI 冲突被拦截，但报错未说明冲突 / 未给出卸载提示："; sed 's/^/       /' "${TMP}/j_abi.log"; fail=1
+else
+    echo "  ✅ 不同 ABI 的同名包被拒绝并提示先卸载"
 fi
 
 echo
