@@ -1,0 +1,7 @@
+// 负向用例：int 值不得赋给 char 变量（零隐式转换铁律）。
+// 想从码点构造字符，必须显式写 int_to_char(97)。
+fn main(): int {
+    var c: char = 97;
+    print(c);
+    return 0;
+}

@@ -14,6 +14,8 @@ pub enum TokenKind {
     IntLit(i64),
     FloatLit(f64),
     BoolLit(bool),
+    /// 字符字面量 `'a'`（v0.92）。值为该字符的 Unicode 码点。
+    CharLit(i64),
     StringLit(String),
     Ident(String),
 
@@ -46,6 +48,7 @@ pub enum TokenKind {
     IntT,
     FloatT,
     BoolT,
+    CharT, // char（v0.92）
     StringT,
     VoidT,
     MapT,
@@ -117,6 +120,71 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 i += 1;
                 col += 1;
             }
+            continue;
+        }
+
+        // 字符字面量 'a'（v0.92）
+        //
+        // 刻意与字符串字面量分开处理，而不是「切出一个子串再复用」：
+        // 字符的合法内容只有一个码点（或一对转义），空 `''` 与多字符 `'ab'`
+        // 都必须在**词法阶段**当场拒绝——它们不是「类型错了」，而是「根本不是一个字符」。
+        if c == '\'' {
+            let start_line = line;
+            let start_col = col;
+            i += 1;
+            col += 1;
+            if i >= chars.len() {
+                return Err(DialcError::new(
+                    "字符字面量未闭合（缺少结束的单引号 '）",
+                    start_line,
+                    start_col,
+                ));
+            }
+            let code = if chars[i] == '\\' {
+                // 转义序列：\n \t \r \0 \\ \' \"
+                if i + 1 >= chars.len() {
+                    return Err(DialcError::new(
+                        "字符字面量中的转义序列不完整（反斜杠后缺少字符）",
+                        start_line,
+                        start_col,
+                    ));
+                }
+                let nxt = chars[i + 1];
+                let esc = match nxt {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '0' => '\0',
+                    '\\' => '\\',
+                    '\'' => '\'',
+                    '"' => '"',
+                    _ => {
+                        return Err(DialcError::new(
+                            format!("字符字面量中无法识别的转义序列 '\\{}'", nxt),
+                            start_line,
+                            start_col,
+                        ))
+                    }
+                };
+                i += 2;
+                col += 2;
+                esc as i64
+            } else {
+                let ch = chars[i];
+                i += 1;
+                col += 1;
+                ch as i64
+            };
+            if i >= chars.len() || chars[i] != '\'' {
+                return Err(DialcError::new(
+                    "字符字面量只能包含一个字符，且必须以单引号 ' 结束",
+                    start_line,
+                    start_col,
+                ));
+            }
+            i += 1; // 跳过结束单引号
+            col += 1;
+            push(TokenKind::CharLit(code), start_line, start_col, &mut tokens);
             continue;
         }
 
@@ -229,6 +297,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "int" => TokenKind::IntT,
                 "float" => TokenKind::FloatT,
                 "bool" => TokenKind::BoolT,
+                "char" => TokenKind::CharT,
                 "string" => TokenKind::StringT,
                 "void" => TokenKind::VoidT,
                 "map" => TokenKind::MapT,

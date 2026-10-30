@@ -7,6 +7,14 @@
 void dial_print_int(int64_t v);
 void dial_print_float(double v);
 void dial_print_bool(int64_t b);   /* 内部以 0/1 表示 false/true */
+/*
+ * 打印一个 char（v0.92）：输出该码点对应的 **UTF-8 字符**，而不是码点数字。
+ * 码点是 Unicode 标量值；输出时按 UTF-8 编码为 1~4 字节后写出。
+ * 非法码点（负数、> 0x10FFFF、UTF-16 代理区 D800~DFFF）一律按 Fail-Fast 处理：
+ * 当场向 stderr 打印诊断并终止，绝不输出半个坏字符——
+ * 静默产出乱码比当场崩溃更危险，它会在下游变成无法复现的数据损坏。
+ */
+void dial_print_char(int64_t code);
 void dial_print_string(DialString s);
 
 /* 从 stdin 读取一行（去掉结尾换行），返回不透明 String 指针 */

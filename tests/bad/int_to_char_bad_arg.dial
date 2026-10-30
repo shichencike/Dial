@@ -1,0 +1,6 @@
+// 负向用例：int_to_char 的参数必须是 int。
+// 传入 char 属于重复转换（char 已经是 char），是逻辑冗余，编译期拒绝。
+fn main(): int {
+    print(int_to_char('a'));
+    return 0;
+}

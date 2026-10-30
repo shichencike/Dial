@@ -23,14 +23,17 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc-—-dial-语言编译器-v091">dialc — Dial 语言编译器 v0.91</a><ul>
+<li><a href="#dialc-—-dial-语言编译器-v092">dialc — Dial 语言编译器 v0.92</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
 <li><a href="#3-构建与使用">3. 构建与使用</a><ul>
 <li><a href="#31-构建编译器">3.1 构建编译器</a></li>
 <li><a href="#32-编译-dial-程序">3.2 编译 Dial 程序</a></li>
-<li><a href="#33-产物依赖契约">3.3 产物依赖契约</a></li>
+<li><a href="#33-产物依赖契约">3.3 产物依赖契约</a><ul>
+<li><a href="#331-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.3.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li><a href="#4-词法结构">4. 词法结构</a><ul>
@@ -45,6 +48,7 @@
 <li><a href="#51-基本类型">5.1 基本类型</a></li>
 <li><a href="#52-类型良构性约束">5.2 类型良构性约束</a></li>
 <li><a href="#53-类型转换">5.3 类型转换</a></li>
+<li><a href="#54-char单字符类型v092">5.4 char：单字符类型（v0.92）</a></li>
 </ul>
 </li>
 <li><a href="#6-变量与可变性">6. 变量与可变性</a><ul>
@@ -118,7 +122,7 @@
 <li><a href="#16-内置-print">16. 内置 print</a></li>
 <li><a href="#17-未定义行为与已实现边界">17. 未定义行为与已实现边界</a><ul>
 <li><a href="#171-未定义行为">17.1 未定义行为</a></li>
-<li><a href="#172-尚未实现的能力截至-v091">17.2 尚未实现的能力（截至 v0.91）</a></li>
+<li><a href="#172-尚未实现的能力截至-v092">17.2 尚未实现的能力（截至 v0.92）</a></li>
 </ul>
 </li>
 <li><a href="#18-测试">18. 测试</a><ul>
@@ -177,10 +181,14 @@
 <li><a href="#255-分发渠道拒绝中心化服务器">25.5 分发渠道：拒绝中心化服务器</a></li>
 <li><a href="#256-一键安装与无缝链接">25.6 一键安装与无缝链接</a></li>
 <li><a href="#257-这套规范刻意不做的事">25.7 这套规范刻意不做的事</a></li>
+<li><a href="#258-许可隔离第三方包同样绝不以-gpl-链接进用户程序">25.8 许可隔离：第三方包同样绝不以 GPL 链接进用户程序</a></li>
 </ul>
 </li>
 <li><a href="#26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</a><ul>
-<li><a href="#261-语法catch-后无圆括号">26.1 语法（catch 后无圆括号）</a></li>
+<li><a href="#261-语法catch-后无圆括号">26.1 语法（catch 后无圆括号）</a><ul>
+<li><a href="#2611-显式-throw-与内建函数的隐式抛出两条不同的规则">26.1.1 显式 throw 与内建函数的隐式抛出：两条不同的规则</a></li>
+</ul>
+</li>
 <li><a href="#262-error-类型内建arc-管理">26.2 Error 类型：内建、ARC 管理</a></li>
 <li><a href="#263-失败与业务分离两码事">26.3 失败与业务分离（两码事）</a></li>
 <li><a href="#264-抛出前自动释放-arc-引用防漏核心">26.4 抛出前自动释放 ARC 引用（防漏核心）</a></li>
@@ -217,6 +225,7 @@
 <li><a href="#2793-事件驱动底层怎么等">27.9.3 事件驱动：底层怎么等</a></li>
 <li><a href="#2794-随机选取防饿死">27.9.4 随机选取：防饿死</a></li>
 <li><a href="#2795-⚠️-警告default-是空转与死锁的来源">27.9.5 ⚠️ 警告：default 是空转与死锁的来源</a></li>
+<li><a href="#27951-⚠️-while-true-{-select-{-}-}-是空转陷阱">27.9.5.1 ⚠️ while (true) { select { ... } } 是空转陷阱</a></li>
 <li><a href="#2796-未来展望消除惊群">27.9.6 未来展望：消除惊群</a></li>
 </ul>
 </li>
@@ -227,7 +236,7 @@
 </li>
 </ul>
 </div>
-<h1 id="dialc-—-dial-语言编译器-v091">dialc — Dial 语言编译器 v0.91</h1>
+<h1 id="dialc-—-dial-语言编译器-v092">dialc — Dial 语言编译器 v0.92</h1>
 <blockquote>
 <p><strong>GitHub Repository：</strong> https://github.com/shichencike/Dial</p>
 <h2 id="开源许可三重许可任选其一">开源许可：三重许可（任选其一）</h2>
@@ -242,7 +251,7 @@
 <p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
-<p>本文件是 v0.91 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
+<p>本文件是 v0.92 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。</p>
 <hr />
 <h2 id="1-设计原则">1. 设计原则</h2>
@@ -400,6 +409,69 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
     /lib64/ld-linux-x86-64.so.2
 </code></pre>
 <p><code>tests/run_tests.sh</code> 的 C 组会把"产物不得依赖 libLLVM"作为<strong>硬断言</strong>执行。</p>
+<h4 id="331-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.3.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</h4>
+<p>上表的 <code>libc</code> 之外还有一个<strong>被静态链入</strong>用户产物的组件：<strong><code>libdial_std.a</code></strong>
+（<code>stdlib/</code> 与 <code>runtime/</code> 编译归档而成的 C Runtime，见 <a href="#15-ffi-契约dial-语法--c-函数">§15</a>）。
+它随每一个 Dial 程序一起进入最终可执行文件，因此它的许可条款<strong>直接作用于用户的程序</strong>：</p>
+<blockquote>
+<p><strong>Dial 编译器前端（<code>dialc</code> 本体）采用三重许可：<code>GPL-3.0 OR MIT OR Apache-2.0</code>，任选其一。</strong>
+<strong>但 Dial 的标准库（<code>libdial_std.a</code>）必须额外豁免，并强制锁定为 <code>MIT</code> 或 <code>Apache-2.0</code> 二选一；
+绝对不允许以 GPL 协议的条款把它链接进用户的程序（尤其是闭源程序），以避免法务传染。</strong></p>
+</blockquote>
+<p>为什么必须这样切分：</p>
+<table>
+<thead>
+<tr>
+<th>事实</th>
+<th>后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>libdial_std.a</code> 是<strong>静态链接</strong>进用户可执行文件的</td>
+<td>它构成用户程序的<strong>一部分</strong>，用户的产物是它的衍生作品</td>
+</tr>
+<tr>
+<td><strong>GPL-3.0 具有传染性</strong></td>
+<td>若标准库按 GPL-3.0 授权，<strong>任何</strong>链接它的程序（含闭源商业软件）都必须整体以 GPL-3.0 开源</td>
+</tr>
+<tr>
+<td>而用户只是想用一门语言写程序</td>
+<td>一旦被传染，等于<strong>强制公开自己的全部源码</strong>——这事实上否决了 Dial 的一切闭源与商业用途</td>
+</tr>
+</tbody>
+</table>
+<p>因此本项目的执行口径是<strong>按组件划分</strong>，而非全仓库一刀切：</p>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>许可</th>
+<th>理由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>编译器前端</strong>（<code>src/</code>，<code>dialc</code> 本体）</td>
+<td><code>GPL-3.0 OR MIT OR Apache-2.0</code> 三重许可</td>
+<td>它只是<strong>工具</strong>，不进入用户产物，无传染风险</td>
+</tr>
+<tr>
+<td><strong>标准库 / C Runtime</strong>（<code>stdlib/</code>、<code>runtime/</code> → <code>libdial_std.a</code>）</td>
+<td><strong>强制 <code>MIT</code> 或 <code>Apache-2.0</code></strong></td>
+<td>它被<strong>静态链入</strong>用户程序，必须免传染</td>
+</tr>
+<tr>
+<td>用户用 Dial 写出的程序</td>
+<td><strong>不受 Dial 许可约束</strong></td>
+<td>前提是上述隔离成立；用户的代码是用户自己的</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>一句话：工具可以是 GPL，被链进你程序里的运行时绝不能是。</strong>
+为标准库选择许可时，请在 MIT 与 Apache-2.0 之间选，不要选 GPL-3.0。</p>
+</blockquote>
 <hr />
 <h2 id="4-词法结构">4. 词法结构</h2>
 <h3 id="41-注释">4.1 注释</h3>
@@ -412,9 +484,12 @@ try  catch  throw
 select  case  default  as
 and  or   not
 true false
-int  float  bool  string  void  file  error  thread  channel
+int  float  bool  char  string  void  file  error  thread  channel
 </code></pre>
 <blockquote>
+<p><code>char</code> 是 v0.92 引入的单字符类型：<strong>一个 Unicode 码点</strong>，底层与 <code>int</code> 同为 <code>i64</code>，
+但类型独立——不参与算术，只可比较或经 <code>char_to_int</code> / <code>int_to_char</code> 显式转换
+（见 <a href="#51-基本类型">§5.1</a> 与 <a href="#172-尚未实现的能力截至-v092">§17.2</a>）。</p>
 <p><code>try</code> / <code>catch</code> / <code>throw</code> 是 v0.7 引入的可恢复异常关键字（见 <a href="#26-可恢复异常trycatchthrow">§26</a>）。
 注意 <strong><code>error</code> 不是关键字</strong>——它是内建构造函数名（与 <code>open</code> / <code>print</code> 同类），写作 <code>Error("...")</code>。
 同理 <code>catch</code> 后<strong>不跟圆括号</strong>：<code>catch e { }</code>，而非 <code>catch (e) { }</code>。</p>
@@ -487,6 +562,11 @@ int  float  bool  string  void  file  error  thread  channel
 <td><code>bool</code></td>
 <td>LLVM <code>i1</code></td>
 <td>布尔</td>
+</tr>
+<tr>
+<td><code>char</code></td>
+<td>LLVM <code>i64</code></td>
+<td><strong>单个 Unicode 码点</strong>（v0.92）。<strong>值类型</strong>：无 ARC、无堆分配、无空指针。与 <code>int</code> 同表示但<strong>类型独立</strong>——不参与 <code>+ - * /</code>，只可比较，或经 <code>char_to_int</code> / <code>int_to_char</code> 显式转换。字面量写作 <code>'a'</code>、<code>'\n'</code>、<code>'中'</code></td>
 </tr>
 <tr>
 <td><code>string</code></td>
@@ -588,6 +668,18 @@ Dial 在编译期即切断。</p>
 <td>LLVM <code>fptosi</code></td>
 <td>浮点 → 整数（向零截断，与 C 的 <code>(int)</code> 一致）</td>
 </tr>
+<tr>
+<td><code>char_to_int</code></td>
+<td><code>char_to_int(c: char): int</code></td>
+<td><strong>无指令</strong>（恒等）</td>
+<td>字符 → 码点（v0.92）</td>
+</tr>
+<tr>
+<td><code>int_to_char</code></td>
+<td><code>int_to_char(n: int): char</code></td>
+<td><strong>无指令</strong>（恒等）</td>
+<td>码点 → 字符（v0.92）；非法码点在<strong>打印时</strong>才会被 C Runtime 拦截</td>
+</tr>
 </tbody>
 </table>
 <p>示例：</p>
@@ -598,7 +690,105 @@ let j: int = float_to_int(3.7);          // j == 3（截断）
 <blockquote>
 <p><code>int_to_float</code> / <code>float_to_int</code> 是纯编译器内联的 LLVM 指令，<strong>不经过任何 C 运行时函数</strong>，
 因此不会引入额外依赖（见 §15）。</p>
+<p><code>char_to_int</code> / <code>int_to_char</code> 更彻底：<strong>连一条指令都不产生</strong>——<code>char</code> 与 <code>int</code> 在 IR 层就是
+同一个 <code>i64</code>，转换纯粹是编译期的类型视图切换（零成本）。它仍然不是「隐式转换」，
+因为源码里必须写出函数名。</p>
 </blockquote>
+<h3 id="54-char单字符类型v092">5.4 <code>char</code>：单字符类型（v0.92）</h3>
+<p><code>char</code> 是<strong>一个 Unicode 码点</strong>——不是字节、不是 UTF-8 片段。它补齐了 Dial 在字符层面的空白，
+是字符串操作的基础类型。</p>
+<pre><code class="language-dial">var c: char = 'a';
+print(c);                  // a        （打印字符本身）
+print(char_to_int(c));     // 97       （打印码点）
+print(int_to_char(98));    // b
+print('中');                // 中       （多字节 UTF-8，输出时按码点编码）
+print('\n');               // 转义：\n \t \r \0 \\ \' \&quot; 均支持
+</code></pre>
+<p><strong>字面量规则</strong>（词法阶段即校验）：</p>
+<table>
+<thead>
+<tr>
+<th>写法</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>'a'</code>、<code>'中'</code>、<code>'é'</code></td>
+<td>✅ 单个字符（可为任意 Unicode 码点）</td>
+</tr>
+<tr>
+<td><code>'\n'</code>、<code>'\t'</code>、<code>'\0'</code>、<code>'\\'</code>、<code>'\''</code>、<code>'\"'</code></td>
+<td>✅ 转义序列</td>
+</tr>
+<tr>
+<td><code>''</code></td>
+<td>❌ 词法错误：字符字面量不能为空</td>
+</tr>
+<tr>
+<td><code>'ab'</code></td>
+<td>❌ 词法错误：字符字面量只能包含一个字符</td>
+</tr>
+<tr>
+<td><code>'a</code>（未闭合）</td>
+<td>❌ 词法错误：缺少结束的单引号</td>
+</tr>
+</tbody>
+</table>
+<p><strong>能做什么 / 不能做什么</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>是否允许</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>赋值、作参数、作返回值</td>
+<td>✅</td>
+<td>值语义，与 <code>int</code> 一致</td>
+</tr>
+<tr>
+<td><code>==</code> <code>!=</code> <code>&lt;</code> <code>&gt;</code> <code>&lt;=</code> <code>&gt;=</code></td>
+<td>✅</td>
+<td>按<strong>码点序</strong>比较：<code>'a' &lt; 'b'</code> 为真</td>
+</tr>
+<tr>
+<td><code>char_to_int</code> / <code>int_to_char</code></td>
+<td>✅</td>
+<td>与 <code>int</code> 互转，零成本</td>
+</tr>
+<tr>
+<td><code>+ - * /</code> 算术</td>
+<td>❌ <strong>编译期拒绝</strong></td>
+<td><code>'a' + 1</code> 语义可疑（下一个字母？还是数值计算？），一律拒绝</td>
+</tr>
+<tr>
+<td>与 <code>int</code> 混用（<code>'a' == 97</code>）</td>
+<td>❌ <strong>编译期拒绝</strong></td>
+<td>零隐式转换铁律；请写 <code>char_to_int('a') == 97</code></td>
+</tr>
+<tr>
+<td>作为 <code>channel&lt;T&gt;</code> 的元素类型</td>
+<td>❌ <strong>编译期拒绝</strong></td>
+<td>通道元素只能是不透明句柄（§27.2）</td>
+</tr>
+<tr>
+<td>判空 <code>is_null(c)</code></td>
+<td>❌ <strong>编译期拒绝</strong></td>
+<td><code>char</code> 是值类型，永远非空，与 <code>int</code> / <code>bool</code> 同理</td>
+</tr>
+</tbody>
+</table>
+<p><strong>为什么不让 char 参与算术</strong>：<code>'a' + 1</code> 的意图无法判定——是「下一个字母」还是「拿码点做加法」？
+Dial 的选择是让源码把意图写清楚：要码点就 <code>char_to_int('a') + 1</code>，要下一个字母就 <code>int_to_char(char_to_int('a') + 1)</code>。
+<strong>宁可多写一次转换，也不接受一个含混的运算符。</strong></p>
+<p><strong>打印语义与 Fail-Fast</strong>：<code>print(c)</code> 输出的是<strong>字符</strong>（按 UTF-8 编码为 1~4 字节），不是码点数字。
+若码点非法（负数、&gt; <code>0x10FFFF</code>、或落在 UTF-16 代理区 <code>D800~DFFF</code>），
+C Runtime 会在打印时<strong>当场打印诊断并终止</strong>，绝不输出半个坏字符——
+静默产出乱码比当场崩溃更危险，它会在下游变成无法复现的数据损坏（Fail-Fast 铁律 §20）。</p>
 <hr />
 <h2 id="6-变量与可变性">6. 变量与可变性</h2>
 <h3 id="61-声明">6.1 声明</h3>
@@ -1124,7 +1314,7 @@ C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并
 <tr>
 <td><code>put</code></td>
 <td><code>m.put(k: int, v: int)</code></td>
-<td><code>map</code>（可能更新的指针）</td>
+<td><code>map</code>（可能更新的指针，<strong>由编译器自动写回</strong>）</td>
 <td>写入键值对；命中覆盖值，未命中追加</td>
 </tr>
 <tr>
@@ -1163,11 +1353,45 @@ m.remove(2);
 print(m.get(2));        // -1（已删除）
 </code></pre>
 <h3 id="123-为什么-put-要返回指针">12.3 为什么 <code>put</code> 要返回指针</h3>
-<p>与 <code>int[].push</code> / <code>int[].set</code> 完全一致（见 <a href="#113-为什么-push-set-要返回指针">§11.3</a>）：<code>put</code> 在底层可能因
-<strong>扩容</strong>或<strong>写时复制（COW）</strong>更换底层 buffer 指针。编译器在编译期把 <code>put</code> 的返回值强制写回接收变量：</p>
+<p>与 <code>int[].push</code> / <code>int[].set</code> <strong>完全一致</strong>（见 <a href="#113-为什么-push-set-要返回指针">§11.3</a>）：<code>put</code> 在底层可能因
+<strong>扩容</strong>或<strong>写时复制（COW）</strong>更换底层 buffer 指针。</p>
+<p><strong>统一规则（强制）</strong>：</p>
+<blockquote>
+<p><strong>所有原地修改并触发 COW 的方法（<code>push</code> / <code>put</code>），编译器自动写回接收变量，
+严禁用户手写赋值。</strong></p>
+</blockquote>
 <pre><code class="language-dial">var m: map = new_map();
-m = m.put(1, 1);   // 等价写法：编译器也允许直接 m.put(1, 1); 写回 m
+m.put(1, 1);       // ✅ 正确：编译器自动把新指针写回 m
+
+m = m.put(1, 1);   // ❌ 禁止：严禁手写赋值（与数组规则统一，见下）
 </code></pre>
+<p>为什么废弃 <code>m = m.put(...)</code> 这种写法：</p>
+<table>
+<thead>
+<tr>
+<th>理由</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>与数组规则不统一</strong></td>
+<td>数组写 <code>a.push(40)</code>，map 却要写 <code>m = m.put(...)</code>——这是纯粹的不一致，没有任何技术理由支撑</td>
+</tr>
+<tr>
+<td><strong>诱导错误的所有权直觉</strong></td>
+<td>手写赋值看起来像「由用户把返回值赋回去」，实则<strong>无论写不写，编译器都会写回</strong>；两种写法并存只会让人误以为二者有区别</td>
+</tr>
+<tr>
+<td><strong>ARC 归属容易被误判</strong></td>
+<td><code>dial_map_put</code> 已在 C 侧完成所有权交接（独占时返回同一指针、共享时克隆并释放本调用者的引用）。让用户侧再参与赋值，只会模糊 retain/release 的归属</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>与数组一致：此处<strong>不</strong>对旧指针做 <code>release</code>，C 侧已完成所有权交接；
+若编译器再补一次 <code>release</code>，会造成悬垂指针或双重释放（同 §11.3 的说明）。</p>
+</blockquote>
 <p>若 <code>m</code> 当前被多者共享（例如已作为实参传入某函数），<code>dial_map_put</code> 会先 COW 克隆再修改，
 <strong>调用方持有的旧指针不受影响</strong>（ARC 隔离，见 <a href="#145-cow-的触发时机">§13.5</a>）。</p>
 <h3 id="124-接收者必须是可变变量var">12.4 接收者必须是可变变量（<code>var</code>）</h3>
@@ -1208,7 +1432,7 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 <td><code>s.get(i)</code></td>
 <td><code>dial_string_get</code></td>
 <td><code>int</code></td>
-<td>取第 <code>i</code> 个字符的<strong>整数码</strong>（v0.2 无 <code>char</code> 类型）</td>
+<td>取第 <code>i</code> 个字符的<strong>整数码</strong>；想要 <code>char</code> 请显式转换 <code>int_to_char(s.get(i))</code>（v0.92 起）</td>
 </tr>
 <tr>
 <td><code>s.substring(from, to)</code></td>
@@ -1610,12 +1834,13 @@ void     dial_map_release(DialMap m);
 </tr>
 </tbody>
 </table>
-<h3 id="172-尚未实现的能力截至-v091">17.2 尚未实现的能力（截至 v0.91）</h3>
+<h3 id="172-尚未实现的能力截至-v092">17.2 尚未实现的能力（截至 v0.92）</h3>
 <blockquote>
 <p>已落地：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
 <code>let</code> + 原地修改方法（push/set/put）的接收者约束、<code>else if</code> 语法糖、<code>for</code> 范围循环、<code>break</code> / <code>continue</code>、
 Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§26）、
-所有权转移与多线程并发（§27，含 v0.81 的通道关闭与 EOF、v0.9 的判空与多消费者安全）。
+所有权转移与多线程并发（§27，含 v0.81 的通道关闭与 EOF、v0.9 的判空与多消费者安全）、
+<strong><code>char</code> 类型（v0.92，见 §5.1）</strong>。
 其余仍按计划未实现：</p>
 </blockquote>
 <table>
@@ -1633,10 +1858,6 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <tr>
 <td>非 <code>int</code> 元素数组</td>
 <td>编译期拒绝</td>
-</tr>
-<tr>
-<td><code>char</code> 类型</td>
-<td>未实现，字符以 <code>int</code> 表示</td>
 </tr>
 <tr>
 <td>裸块 <code>{ ... }</code></td>
@@ -2122,7 +2343,7 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <hr />
 <h2 id="22-版本变更摘要">22. 版本变更摘要</h2>
 <h3 id="220-v061相对-v06">22.0 v0.61（相对 v0.6）</h3>
-<p>本版落地<strong>文件 IO（file 句柄）</strong>，并正式确立<a href="#23-版本号规则">版本号规则</a>（十进制递增、禁止跳版）：</p>
+<p>本版落地<strong>文件 IO（file 句柄）</strong>，并正式确立<a href="#23-版本号规则">版本号规则</a>（最多两位小数、禁止跳版、严格按时间递增）：</p>
 <table>
 <thead>
 <tr>
@@ -2154,7 +2375,7 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 </tbody>
 </table>
 <blockquote>
-<p>版本号按<a href="#23-版本号规则">版本号规则</a>：本版属「小功能 / 新语法」，递增 <code>+0.01</code>（<code>0.6.0 → 0.61.0</code>）。</p>
+<p>版本号按<a href="#23-版本号规则">版本号规则</a>：本版属「小功能 / 新语法」，递增 <code>+0.01</code>（<code>v0.6 → v0.61</code>）。</p>
 </blockquote>
 <h3 id="221-v06相对-v05">22.1 v0.6（相对 v0.5）</h3>
 <p>本版把 Zig 式 <strong>Fail-Fast</strong> 确立为与内存宪法并列的语言底线（<a href="#20-fail-fast-铁律宁可崩溃绝不静默损坏">§20</a>）：
@@ -2301,45 +2522,49 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <p>相关文档同步更新：§5.3（零隐式转换铁律）、§6.2（可变性判定含 <code>push</code>/<code>set</code>）、§7.2（类型规则）、§7.3（语义细则表，修正 <code>and</code>/<code>or</code> 与混合算术两行）、§11.3–§11.4（接收者须为 <code>var</code>）。</p>
 <hr />
 <h2 id="23-版本号规则">23. 版本号规则</h2>
-<p>Dial 目前处于 v0.x 快速演进阶段。版本号采用<strong>十进制递增</strong>规则（非语义化版本的「主.次.修订」三段式），并<strong>严格禁止一次跳过多个档位</strong>——必须逐档推进，除非用户明确要求跳版。</p>
+<p>Dial 目前处于 v0.x 快速演进阶段。版本号采用<strong>最多两位小数</strong>的单一十进制数，
+<strong>不再使用</strong>语义化版本的「主.次.修订」三段式。</p>
 <table>
 <thead>
 <tr>
 <th>变更类型</th>
 <th>版本增量</th>
-<th>从 0.6.0 起的演进示例</th>
+<th>演进示例</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><strong>重大更新</strong></td>
+<td><strong>重大更新 / 新引擎 / 大重构</strong></td>
 <td><code>+0.1</code></td>
-<td><code>0.6.0 → 0.7.0</code></td>
+<td><code>v0.6 → v0.7</code></td>
 </tr>
 <tr>
-<td><strong>增加新引擎 / 大重构</strong></td>
-<td><code>+0.1</code></td>
-<td><code>0.6.0 → 0.7.0</code></td>
-</tr>
-<tr>
-<td><strong>增加小功能 / 新语法</strong></td>
+<td><strong>小功能 / 新语法</strong></td>
 <td><code>+0.01</code></td>
-<td><code>0.6.0 → 0.61.0</code></td>
+<td><code>v0.9 → v0.91</code></td>
 </tr>
 <tr>
-<td><strong>补丁 / 其他不重要改动</strong></td>
-<td><code>+0.001</code></td>
-<td><code>0.6.0 → 0.601.0</code></td>
+<td><strong>补丁 / 次要改动</strong></td>
+<td><code>+0.01</code>（与上一种同档）</td>
+<td><code>v0.91 → v0.92</code></td>
 </tr>
 </tbody>
 </table>
-<p>约定与约束：</p>
-<ul>
-<li><strong>十进制递增</strong>：版本号是单一十进制数（如 <code>0.61</code>、<code>0.601</code>）。为兼容 Cargo 对三段式 <code>version</code> 字段的要求，源码 <code>Cargo.toml</code> 写作 <code>0.61.0</code>（语义等同 <code>0.61</code>），文档与官网统一显示为 <code>v0.61</code>。</li>
-<li><strong>不可跳版</strong>：例如不能从 <code>0.6.0</code> 直接到 <code>0.7.0</code>；必须按 <code>0.61</code>、<code>0.62</code>……逐档推进，除非用户明确要求。</li>
-<li><strong>每档一次完整交付</strong>：每一个版本号都对应一次完整交付——代码实现 + 端到端测试（A/B/D/E/C 全绿）+ README/CHANGELOG 文档 + 官网重新生成 + git 提交 + 含 <code>.git</code> 目录的发布压缩包。</li>
-<li><strong>与既有档位的关系</strong>：v0.2→v0.3→v0.4→v0.5→v0.6 每一档都是一次「重大更新 / 功能批次」（<code>+0.1</code>）；自 v0.6 起引入更细的粒度，单个小功能或新语法即按 <code>+0.01</code> 推进。</li>
-</ul>
+<p>约定与约束（强制）：</p>
+<ol>
+<li><strong>最多两位小数</strong>：<code>v0.1</code>、<code>v0.2</code>、…、<code>v0.9</code>、<code>v0.91</code>、<code>v0.92</code>……
+   不存在 <code>v0.601</code> 这类三位小数的版本——补丁不再单独占一个数量级，
+   与小功能同按 <code>+0.01</code> 推进，避免版本号无意义地膨胀、也避免「补丁」与「小功能」纠缠不清。</li>
+<li><strong>标题带 <code>v</code>、不写补丁位</strong>：文档与 CHANGELOG 的版本标题一律写作 <strong><code>[v0.91]</code></strong>，
+   <strong>不是</strong> <code>[0.91.0]</code>。源码 <code>Cargo.toml</code> 的 <code>version</code> 字段受 Cargo 三段式限制仍写作 <code>0.91.0</code>，
+   那只是<strong>存储格式</strong>，对外一律显示为 <code>v0.91</code>。</li>
+<li><strong>不可跳版</strong>：例如不能从 <code>v0.6</code> 直接到 <code>v0.7</code>；必须按 <code>v0.61</code>、<code>v0.62</code>……逐档推进，
+   除非用户明确要求跳版。</li>
+<li><strong>版本号必须严格按时间递增，绝不许倒流</strong>：后发版本的日期不得早于先前版本。
+   CHANGELOG 中一旦出现日期倒流（例如 <code>v0.4</code> 的日期晚于 <code>v0.5</code>），即视为文档缺陷，必须当场修正。</li>
+<li><strong>每档一次完整交付</strong>：每一个版本号都对应一次完整交付——代码实现 + 端到端测试（A/B/D/E/C 全绿）
+   + README/CHANGELOG 文档 + 官网重新生成 + git 提交 + 含 <code>.git</code> 目录的发布压缩包。</li>
+</ol>
 <hr />
 <h2 id="24-文件-iofile-句柄">24. 文件 IO（file 句柄）</h2>
 <p>文件 IO 在 v0.61 落地。设计严守两条底线：<strong>绝不引入全局变量</strong>、<strong>不重写文件逻辑（只封装 C 标准库）</strong>。
@@ -2849,6 +3074,63 @@ extern fn db_close(db: Db): void;
 </tr>
 </tbody>
 </table>
+<h3 id="258-许可隔离第三方包同样绝不以-gpl-链接进用户程序">25.8 许可隔离：第三方包同样绝不以 GPL 链接进用户程序</h3>
+<p>包分发的机器码（<code>lib/</code> 下的 <code>.a</code> / <code>.lib</code>）会被<strong>静态链入</strong>用户的可执行文件，
+因此<strong>每一个包</strong>都与 <a href="#331-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">§3.3.1</a> 的标准库
+面临完全相同的法务传染问题，并且风险更大——包的作者不是 Dial 自己，用户无从替他做担保。</p>
+<blockquote>
+<p><strong>包内的机器码与 <code>.diali</code> 接口签名，其许可由包作者自行决定；
+但 Dial 官方标准库（<code>libdial_std.a</code>）必须额外豁免，并强制锁定为 <code>MIT</code> 或 <code>Apache-2.0</code>，
+绝对不允许以 GPL 协议的条款链接进用户的闭源程序，避免造成法务传染。</strong></p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>许可要求</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Dial 官方标准库</strong>（<code>libdial_std.a</code>）</td>
+<td><strong>强制 <code>MIT</code> 或 <code>Apache-2.0</code></strong></td>
+<td>官方运行时被链进<strong>每一个</strong> Dial 程序，必须免传染</td>
+</tr>
+<tr>
+<td><strong>第三方包</strong>（<code>~/.dial/packages/*/lib/*.a</code>）</td>
+<td>由包作者声明，<strong><code>dialc</code> 不做审查</strong></td>
+<td>但 <code>manifest.txt</code> <strong>必须</strong>含 <code>license</code> 字段，<code>dialc</code> 在链接时把它打印到构建日志</td>
+</tr>
+</tbody>
+</table>
+<p>因此 <code>manifest.txt</code> 增加一项<strong>必填</strong>字段：</p>
+<pre><code class="language-json">{
+  &quot;name&quot;: &quot;sqlite&quot;,
+  &quot;abi&quot;: 1,
+  &quot;license&quot;: &quot;MIT OR Apache-2.0&quot;,
+  &quot;...&quot;: &quot;...&quot;
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>license</code></td>
+<td><strong>必填</strong>。SPDX 许可表达式。<code>dialc</code> <strong>不校验</strong>其相容性（那是法务判断，不是编译器职责），但<strong>必须存在且非空</strong>——缺失即拒绝加载该包</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>编译器的职责边界</strong>：<code>dialc</code> 负责让许可<strong>可见</strong>（强制声明 + 构建日志回显），
+但<strong>不替用户做法务判断</strong>。是否接受某个包的条款，由使用者自己决定。
+唯一被<strong>强制</strong>的，是 Dial 自己的标准库：它必须是 MIT 或 Apache-2.0，绝不可以是 GPL。</p>
+</blockquote>
 <hr />
 <blockquote>
 <p>本章为<strong>生态规划</strong>，不含任何实现承诺与时间表。<strong>完整规范</strong>（平台矩阵、包内目录树、
@@ -2932,8 +3214,84 @@ try {
   「语法错误：catch 后不得使用圆括号，直接写变量名，例如 <code>catch e { ... }</code>」。
   理由与<a href="#21-代码编写纪律防臃肿与允许冗余原则">代码编写纪律 §21</a>一致：括号在 C 骨架里属于函数或条件专属，
   用在 <code>catch</code> 后面只会造成视觉污染，且对解析器毫无帮助。</li>
-<li><strong><code>throw</code> 必须出现在 <code>try</code> 块内。</strong> 否则报「throw 必须出现在 try 块内（没有捕获点，异常无法被处理）」。</li>
+<li><strong>显式 <code>throw Error(...)</code> 必须出现在 <code>try</code> 块内。</strong> 否则报
+  「throw 必须出现在 try 块内（没有捕获点，异常无法被处理）」。
+  注意这条<strong>只约束你手写的 <code>throw</code></strong>，不约束内建函数的隐式抛出——见 <a href="#2611-显式-throw-与内建函数的隐式抛出两条不同的规则">§26.1.1</a>。</li>
 </ul>
+<h4 id="2611-显式-throw-与内建函数的隐式抛出两条不同的规则">26.1.1 显式 <code>throw</code> 与内建函数的隐式抛出：两条不同的规则</h4>
+<p>「必须写在 <code>try</code> 里」这条约束<strong>只适用于你自己手写的 <code>throw</code></strong>。
+Dial 里有<strong>两种</strong>产生异常的方式，它们的编译期待遇<strong>完全不同</strong>，必须严格区分：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>① <strong>显式 throw</strong>（你自己抛）</th>
+<th>② <strong>内建函数的隐式抛出</strong>（运行环境的错）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>写法</td>
+<td><code>throw Error("msg");</code></td>
+<td><code>open(...)</code> / <code>read(...)</code> / <code>write(...)</code> 失败</td>
+</tr>
+<tr>
+<td>不在 <code>try</code> 块内时</td>
+<td><strong>编译期报错，拒绝编译</strong></td>
+<td><strong>编译通过</strong></td>
+</tr>
+<tr>
+<td>运行到该处且无捕获时</td>
+<td>（已编译失败，不存在此情形）</td>
+<td>触发<strong>未捕获异常（panic）</strong>，打印消息并终止进程</td>
+</tr>
+<tr>
+<td>为什么</td>
+<td>你明确写了一个异常却没有准备捕获点——这是<strong>代码缺陷</strong>，应在编译期挡住</td>
+<td>失败取决于运行时的文件系统/网络，编译器<strong>无从预知</strong>，无权替你决定「这里一定要捕获」</td>
+</tr>
+</tbody>
+</table>
+<p><strong>① 显式 throw —— 编译期强制必须有捕获点</strong></p>
+<pre><code class="language-dial">fn bad(): void {
+    throw Error(&quot;boom&quot;);      // ❌ 编译错误：throw 必须出现在 try 块内
+}
+
+fn good(): void {
+    try {
+        throw Error(&quot;boom&quot;);  // ✅ 有捕获点
+    } catch e {
+        print(e.msg());
+    }
+}
+</code></pre>
+<p><strong>② 内建函数的隐式抛出 —— 允许写在任何地方</strong></p>
+<pre><code class="language-dial">fn h(): void {
+    let f: file = open(&quot;maybe_missing.txt&quot;, &quot;r&quot;);   // ✅ 编译通过（无论是否在 try 内）
+    close(f);
+}
+</code></pre>
+<p>上面 <code>h()</code> <strong>能通过编译</strong>。<code>open</code> 会不会失败，取决于运行那一刻文件是否存在，编译期无法判断。
+一旦它真的失败、且调用链上没有任何 <code>try</code> 捕获，进程会这样终止（<strong>实测输出</strong>）：</p>
+<pre><code>dial: 未捕获的异常（panic）: 无法打开文件（路径不存在或无访问权限）   ← stderr
+（进程以 SIGABRT 终止，退出码 134）
+</code></pre>
+<p>同样的失败若被 <code>try</code> 接住，则只是<strong>一次普通的业务分支</strong>，程序继续运行（<strong>实测输出</strong>）：</p>
+<pre><code>caught:
+无法打开文件（路径不存在或无访问权限）
+still alive
+</code></pre>
+<blockquote>
+<p>这不是「编译器漏检」，而是<strong>刻意的语义分工</strong>：</p>
+<ul>
+<li>显式 <code>throw</code> 是你<strong>写死的控制流</strong>，没有捕获点就是写错了 → <strong>编译期拒绝</strong>；</li>
+<li>内建函数的失败是<strong>运行环境的分支</strong>，编译器放行到运行期；
+  未被捕获就以 panic <strong>当场明确终止</strong>，而不是让你静默拿到一个坏句柄继续跑
+  （与 <a href="#20-fail-fast-铁律宁可崩溃绝不静默损坏">Fail-Fast 铁律 §20</a>同调）。</li>
+</ul>
+<p>想要「不终止」，就在调用处包一层 <code>try / catch</code>。<strong>是否捕获是你的选择，
+编译器只负责让失败可见、且绝不静默。</strong></p>
+</blockquote>
 <h3 id="262-error-类型内建arc-管理">26.2 <code>Error</code> 类型：内建、ARC 管理</h3>
 <table>
 <thead>
@@ -3623,12 +3981,57 @@ while (n &lt; 1000) {
     }
 }
 </code></pre>
-<p><strong>另外</strong>：不带 <code>default</code> 的 select 是<strong>阻塞</strong>的——没有就绪的通道时它会睡到有事件为止，
-<strong>不会空转</strong>。所以「`while (true) { select { ... } }」这种写法本身是安全的：</p>
-<ul>
-<li>通道未关闭 → select 阻塞等待（不空转）；</li>
-<li>全体 EOF → select <strong>直接结束</strong>，于是循环靠自己的退出条件收敛。</li>
-</ul>
+<h4 id="27951-⚠️-while-true-{-select-{-}-}-是空转陷阱">27.9.5.1 ⚠️ <code>while (true) { select { ... } }</code> 是空转陷阱</h4>
+<p>不带 <code>default</code> 的 select 是<strong>阻塞</strong>的——没有就绪通道时它会睡到有事件为止，
+单看一次 select 确实不空转。<strong>但把它放进 <code>while (true)</code> 就不是了</strong>：</p>
+<blockquote>
+<p>全体通道 EOF 时，select 只是<strong>直接结束</strong>（一个分支都不执行），
+它<strong>不会</strong>替你跳出外层循环。外层若写成 <code>while (true)</code>，
+那么 EOF 之后每一轮 select 都立刻结束、循环立刻重入 ——
+<strong>这就是一个 100% CPU 的空转死循环</strong>（本仓库实测：5 秒超时挂死，<code>exit 124</code>）。</p>
+</blockquote>
+<p>因此 <strong>select 循环必须自带退出条件</strong>，只有下面两种正确写法：</p>
+<p><strong>写法一（推荐）：把退出条件写进 <code>while</code> 条件</strong></p>
+<pre><code class="language-dial">// ✅ 对：以「未收到 EOF」为循环条件，通道关空后自然收敛
+while (not done(ch)) {
+    select {
+        case recv(ch) as x {
+            ... 处理 x ...
+        }
+    }
+}
+</code></pre>
+<p><strong>写法二：在 case 内主动 <code>break</code></strong></p>
+<pre><code class="language-dial">// ✅ 对：满足结束条件时在分支里跳出（break 跳出的是 select 外层的那个循环）
+while (true) {
+    select {
+        case recv(ch) as x {
+            if (x.eq(&quot;quit&quot;)) { break; }
+            ... 处理 x ...
+        }
+    }
+}
+</code></pre>
+<p>两种写法各自对应一个可运行的正例，均已连跑 10 次输出稳定（<code>got=2</code> 后正常退出，退出码 0）：</p>
+<table>
+<thead>
+<tr>
+<th>写法</th>
+<th>示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>写法一（<code>while (not done(ch))</code>）</td>
+<td><code>examples/select_exit_condition.dial</code></td>
+</tr>
+<tr>
+<td>写法二（case 内 <code>break</code>）</td>
+<td><code>examples/select_exit_break.dial</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>凡是写不出「某条路径能让循环终止」的 select 循环，一律视为缺陷。</strong></p>
 <blockquote>
 <p>若确实需要在「等待 + 超时」之间做选择，用
 <a href="#278-判空多消费者安全与超时v09"><code>recv_timeout</code></a> 单独接收，而不是给 select 加 default。</p>
@@ -3703,7 +4106,7 @@ while (n &lt; 1000) {
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.91 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.92 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

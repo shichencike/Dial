@@ -12,6 +12,16 @@ pub enum Type {
     Int,    // 64 位有符号整数
     Float,  // 64 位浮点数
     Bool,   // 布尔
+    /// 单个字符（v0.92）。
+    ///
+    /// 语义上是**一个 Unicode 码点**（不是字节、不是 UTF-8 片段），
+    /// IR 层与 `int` 同为 i64 —— 这样它天然是**值类型**：
+    /// 无 ARC、无堆分配、无空指针，与 `int` / `float` / `bool` 同一阵营。
+    ///
+    /// 之所以不复用 `int` 表示字符：`'a' + 1` 这种算术在语义上是可疑的，
+    /// 而 `int` 允许任何算术。独立成类型后，编译期就能把「字符误当数字用」
+    /// 挡在门外（char 不参与 + - * /，只可比较与显式转换）。
+    Char,
     String, // UTF-8 字符串（IR 为 i8*，C 侧引用计数）
     Array(Box<Type>), // 动态数组（v0.2 元素固定为 Int）
     Map,    // 哈希表（int -> int，不透明指针，C 侧引用计数 ARC）
@@ -32,6 +42,7 @@ impl Type {
             Type::Int => "int",
             Type::Float => "float",
             Type::Bool => "bool",
+            Type::Char => "char",
             Type::String => "string",
             Type::Array(_) => "array",
             Type::Map => "map",
@@ -65,6 +76,8 @@ pub enum Expr {
     IntLit(i64),
     FloatLit(f64),
     BoolLit(bool),
+    /// 字符字面量 `'a'`。值为该字符的 **Unicode 码点**（i64），与 `int` 同表示。
+    CharLit(i64),
     StringLit(String),
     Var(String),
     /// 字段访问：<expr>.<field>

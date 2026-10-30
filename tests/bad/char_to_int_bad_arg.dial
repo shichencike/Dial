@@ -1,0 +1,6 @@
+// 负向用例：char_to_int 的参数必须是 char。
+// 传入 int 属于误用——它什么也不转换，只会把「数字」伪装成「来自字符的数字」。
+fn main(): int {
+    print(char_to_int(65));
+    return 0;
+}

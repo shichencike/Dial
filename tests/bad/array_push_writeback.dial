@@ -1,0 +1,10 @@
+// 负向用例：数组的 push 由编译器自动写回接收变量，严禁手写赋值。
+//
+// 与 map 的 put 同一条规则（README §11.3 / §12.3 已统一）：
+// 写 a.push(3) 即可，编译器会把新指针自动写回 a。
+fn main(): int {
+    var a: int[] = [1, 2];
+    a = a.push(3);
+    print(a.get(2));
+    return 0;
+}

@@ -1,5 +1,6 @@
 #include "dial_io.h"
 #include "dial_string.h"
+#include "dial_rt_trap.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -7,6 +8,43 @@
 void dial_print_int(int64_t v)   { printf("%lld\n", (long long)v); }
 void dial_print_float(double v)  { printf("%lf\n", v); }
 void dial_print_bool(int64_t b)  { printf("%s\n", b ? "true" : "false"); }
+
+/*
+ * 打印一个 char（v0.92）：char 的语义是「一个 Unicode 码点」，
+ * 因此输出时必须按 UTF-8 重新编码为 1~4 字节，而不是把码点当数字打印。
+ * 这与 print(int) 形成明确分工：
+ *     print('a')            -> a
+ *     print(char_to_int('a')) -> 97
+ */
+void dial_print_char(int64_t code) {
+    /* Fail-Fast：非法码点绝不静默输出半个坏字符。
+     * 负数、超出 Unicode 上界、以及 UTF-16 代理区（D800~DFFF）都不是合法标量值。 */
+    if (code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
+        fprintf(stderr, "dial: 非法的 char 码点: %lld\n", (long long)code);
+        fflush(stdout);
+        dial_assert_fail("dial_print_char: 非法 Unicode 码点（合法范围 0~0x10FFFF，且不含 UTF-16 代理区 D800~DFFF）");
+    }
+
+    char buf[5];
+    int n = 0;
+    if (code < 0x80) {
+        buf[n++] = (char)code;                                    /* 0xxxxxxx            */
+    } else if (code < 0x800) {
+        buf[n++] = (char)(0xC0 | (code >> 6));                    /* 110xxxxx 10xxxxxx   */
+        buf[n++] = (char)(0x80 | (code & 0x3F));
+    } else if (code < 0x10000) {
+        buf[n++] = (char)(0xE0 | (code >> 12));                   /* 1110xxxx 10xxxxxx x2 */
+        buf[n++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        buf[n++] = (char)(0x80 | (code & 0x3F));
+    } else {
+        buf[n++] = (char)(0xF0 | (code >> 18));                   /* 11110xxx 10xxxxxx x3 */
+        buf[n++] = (char)(0x80 | ((code >> 12) & 0x3F));
+        buf[n++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        buf[n++] = (char)(0x80 | (code & 0x3F));
+    }
+    buf[n] = '\0';
+    printf("%s\n", buf);
+}
 
 DialString dial_read_line(void) {
     char buf[4096];

@@ -1,0 +1,18 @@
+// 未捕获异常契约（v0.92）：内建函数的隐式抛出**允许**写在 try 块之外。
+//
+// `open` 失败时会抛出 Error。本例刻意**不**用 try 包裹，用于锁定两件事：
+//
+//   1) **编译必须通过** —— 隐式抛出不受「throw 必须在 try 内」的约束，
+//      那条规则只适用于源码里手写的 `throw Error(...)`（见 README §26.1.1）；
+//   2) **运行期必须 panic** —— 以信号终止，且 stderr 打印**真正的错误消息**。
+//
+// 第 2 点是一条真实缺陷的回归锁：dial_error_msg 返回的是不透明 DialString 句柄，
+// 若直接把它当 const char* 交给 dial_panic，打印出来的会是结构体头部的字节
+// （实测只输出一个 "9"），而不是错误消息。必须经过 dial_string_cstr 转换。
+
+fn main(): int {
+    let f: file = open("/nonexistent_file_for_dial_test", "r");
+    close(f);
+    print(9999);   // 哨兵：绝不可达（panic 在此之前就终止了进程）
+    return 0;
+}

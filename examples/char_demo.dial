@@ -1,0 +1,43 @@
+// char 类型演示（v0.92）
+//
+// char 是「一个 Unicode 码点」：值类型、无 ARC、无空指针，与 int 同表示（i64），
+// 但**类型独立**——它不参与算术，只可比较或经 char_to_int / int_to_char 显式转换。
+
+fn main(): int {
+    // 1) 基本字面量与打印：打印的是字符本身，不是码点数字
+    var c: char = 'a';
+    print(c);                  // a
+
+    let z: char = 'z';
+    print(z);                  // z
+
+    // 2) 转义字符
+    print('\n');               // 换行符本身（故这里会多出一个空行）
+    print('\t');               // 制表符
+    print('\'');               // 单引号
+    print('\\');               // 反斜杠
+
+    // 3) 多字节 UTF-8：char 是码点，输出时按 UTF-8 编码
+    print('中');               // 中
+    print('é');                // é
+
+    // 4) 比较：按码点序
+    if ('a' < 'b') {
+        print('y');            // y
+    } else {
+        print('n');
+    }
+    if ('a' == 'a') {
+        print('e');            // e
+    }
+
+    // 5) 显式转换：char <-> int 是零成本的视图切换
+    print(char_to_int('a'));   // 97
+    print(int_to_char(97));    // a
+
+    // 6) char 可以重新赋值（var 可变）
+    c = 'Q';
+    print(c);                  // Q
+
+    return 0;
+}

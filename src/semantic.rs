@@ -131,6 +131,7 @@ pub fn type_of<V>(
         Expr::IntLit(_) => Ok(Type::Int),
         Expr::FloatLit(_) => Ok(Type::Float),
         Expr::BoolLit(_) => Ok(Type::Bool),
+        Expr::CharLit(_) => Ok(Type::Char),
         Expr::StringLit(_) => Ok(Type::String),
         Expr::Var(name) => lookup(name).ok_or_else(|| {
             DialcError::new(format!("语义错误：未声明的变量 '{}'", name), 0, 0)
@@ -307,21 +308,27 @@ pub fn type_of<V>(
                         Ok(Type::Bool)
                     } else if lt == Type::Bool && rt == Type::Bool {
                         Ok(Type::Bool)
+                    } else if lt == Type::Char && rt == Type::Char {
+                        // char 按码点比较：'a' < 'b' 成立，因为 97 < 98。
+                        Ok(Type::Bool)
                     } else if lt == Type::String && rt == Type::String {
                         Ok(Type::Bool)
                     } else {
                         Err(DialcError::new(
-                            "语义错误：相等/不相等(==, !=)要求两个操作数类型完全相同：数值（int 或 float，不可混合）、bool，或 string",
+                            "语义错误：相等/不相等(==, !=)要求两个操作数类型完全相同：数值（int 或 float，不可混合）、bool、char，或 string",
                             0, 0,
                         ))
                     }
                 }
                 BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                    if lt == rt && is_numeric(&lt) {
+                    // char 可以比大小（码点序），但**不能与 int 混用**：
+                    // 想拿码点数值请用 char_to_int 显式转换，绝不隐式把字符当数字。
+                    let both_char = lt == Type::Char && rt == Type::Char;
+                    if (lt == rt && is_numeric(&lt)) || both_char {
                         Ok(Type::Bool)
                     } else {
                         Err(DialcError::new(
-                            "语义错误：比较运算(< > <= >=)要求两个操作数类型完全相同且均为数值类型（int 或 float，不可混合）",
+                            "语义错误：比较运算(< > <= >=)要求两个操作数类型完全相同且均为数值类型（int 或 float，不可混合）或同为 char",
                             0, 0,
                         ))
                     }
@@ -374,6 +381,42 @@ pub fn type_of<V>(
                         ));
                     }
                     return Ok(Type::Int);
+                }
+                // char ↔ int 显式转换（v0.92）：与上面同族的「安全阀」。
+                // char 在 IR 层就是 i64 码点，与 int 同表示，因此这两个转换
+                // **不产生任何指令**——纯粹是编译期的类型视图切换（零成本）。
+                // 想拿 'a' 的码点写 char_to_int('a')，想从码点构造字符写 int_to_char(97)。
+                "char_to_int" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：char_to_int 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if at != Type::Char {
+                        return Err(DialcError::new(
+                            "语义错误：char_to_int 的参数必须是 char",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Int);
+                }
+                "int_to_char" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：int_to_char 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if at != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：int_to_char 的参数必须是 int",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Char);
                 }
                 "new_map" => {
                     if !args.is_empty() {
@@ -798,7 +841,8 @@ pub fn type_of<V>(
                 }
                 let pt = type_of(&args[0], scopes, funcs, structs)?;
                 match pt {
-                    Type::Int | Type::Float | Type::Bool | Type::String => {}
+                    // char 打印的是字符本身（不是码点数字），与 int 明确区分。
+                    Type::Int | Type::Float | Type::Bool | Type::Char | Type::String => {}
                     Type::Array(_) => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print 数组，请逐元素打印 print(a.get(i))",
@@ -1536,6 +1580,30 @@ fn check_stmt(
                     format!("语义错误：变量 '{}' 由 let 声明，不可重新赋值", name),
                     *line, *col,
                 ));
+            }
+            // 【统一容器写回规则】`push` / `put` 这类「原地修改且可能因 COW 更换指针」的方法，
+            // 其返回值由**编译器自动写回**接收变量（README §11.3 / §12.3）。
+            // 因此严禁用户再手写 `a = a.push(...)` / `m = m.put(...)`：
+            //   ① 与数组规则不统一——数组从来不这么写，map 没理由例外；
+            //   ② 手写赋值暗示「由用户负责赋回」，而实际上编译器**无条件**写回，
+            //      两种写法并存只会让人误以为它们有区别；
+            //   ③ ARC 的交接由 C 侧完成（独占返回同指针、共享时克隆并释放本调用者的引用），
+            //      让用户侧再参与赋值只会模糊 retain/release 的归属。
+            // 把结果赋给**另一个**变量是允许的（那是取得新容器，不是就地修改），
+            // 所以只在「接收者恰好就是被赋值的这个变量」时才拒绝。
+            if let Expr::Method(recv, method, _args) = value {
+                let is_cow_method = matches!(method.as_str(), "push" | "put");
+                let same_receiver = lvalue_root(recv) == Some(name.as_str());
+                if is_cow_method && same_receiver {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：'{}' 的返回值由编译器自动写回接收变量，严禁手写赋值；请直接写 {}.{}(...)，而不是 {} = {}.{}(...)",
+                            method, name, method, name, name, method
+                        ),
+                        *line,
+                        *col,
+                    ));
+                }
             }
             let vt = type_of(value, scopes, funcs, structs)?;
             if !types_compatible(&vt, &info) && !channel_placeholder_compat(&vt, &info) {

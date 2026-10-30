@@ -1,0 +1,36 @@
+// v0.92 示例：select 循环的安全退出（写法二）—— 在 case 内主动 break
+//
+// 当退出条件不是「EOF」而是某个业务条件（比如收到结束哨兵）时，
+// 用 `while (true)` + 在 case 里 `break`。
+// 注意：`break` 跳出的是 select 外层的**那个循环**（select 是语句，不是可 break 的块）。
+//
+// 关键是**必须存在一条能让循环终止的路径**；若 case 里永远不 break，
+// 就退化成 §27.9.5.1 的空转陷阱。
+
+fn producer(ch: channel<string>): void {
+    var a: string = "a";
+    move_to(a, ch);
+    var q: string = "quit";
+    move_to(q, ch);
+    close(ch);
+}
+
+fn main(): int {
+    let ch: channel<string> = channel(4);
+    let t: thread = spawn(producer, ch);
+
+    var got: int = 0;
+    while (true) {
+        select {
+            case recv(ch) as x {
+                got = got + 1;
+                if (x.eq("quit")) {
+                    break;          // 收到哨兵 -> 跳出外层 while
+                }
+            }
+        }
+    }
+    join(t);
+    print(got);      // 2 —— 收到 "a" 与 "quit" 后退出
+    return 0;
+}

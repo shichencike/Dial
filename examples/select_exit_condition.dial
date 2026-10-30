@@ -1,0 +1,34 @@
+// v0.92 示例：select 循环的安全退出（写法一）—— 把退出条件写进 while 条件
+//
+// 这是 select 循环的**推荐写法**：用 `not done(ch)` 作为循环条件。
+// 单个通道时 done(ch) 就是精确的 EOF 判据（已关闭且已空），
+// 通道关空后循环自然收敛，不需要任何 break，也不会空转。
+//
+// 反面教材：`while (true) { select { ... } }` —— 全体 EOF 时 select 只是「直接结束」，
+// 它不会替你跳出循环，于是每一轮都立刻结束又立刻重入，成为 100% CPU 的空转死循环
+// （实测 5 秒超时挂死 exit 124）。详见 README §27.9.5.1。
+
+fn producer(ch: channel<string>): void {
+    var a: string = "a";
+    move_to(a, ch);
+    var b: string = "b";
+    move_to(b, ch);
+    close(ch);
+}
+
+fn main(): int {
+    let ch: channel<string> = channel(4);
+    let t: thread = spawn(producer, ch);
+
+    var got: int = 0;
+    while (not done(ch)) {
+        select {
+            case recv(ch) as x {
+                got = got + 1;
+            }
+        }
+    }
+    join(t);
+    print(got);      // 2 —— 两个元素都收到，随后 done 为真，循环收敛
+    return 0;
+}

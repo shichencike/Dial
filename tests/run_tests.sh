@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 五组检查，全部通过才算绿：
+# 七组检查，全部通过才算绿：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   D. Fail-Fast：tests/trap/*.dial 越界/除零必须当场因信号终止，且不得打印哨兵；
 #   E. 对照组：同一批用例在 --fast 下应关闭检查（证明陷阱确由编译器插入，而非碰巧崩溃）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
 #   F. 并发压测：C Runtime 多消费者抢同一通道（v0.9 新增，绕开编译器直压 stdlib）。
+#   G. 未捕获异常：内建函数的隐式抛出允许写在 try 外，运行期必须 panic 且打印真实消息
+#      （v0.92 新增；不参与 E 组对照——异常不是安全等级检查，--fast 不该关掉它）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -173,6 +175,44 @@ else
         echo "  ✅ 多消费者并发压测通过： $(grep -m1 received= "${TMP}/mt.log")"
     fi
 fi
+
+echo
+echo "== G) 未捕获异常：隐式抛出可写在 try 外，运行期 panic 且打印真实消息 =="
+# 与 D 组（Fail-Fast 陷阱）不同，这一组**不**参与 E 组的 --fast 对照：
+# 未捕获异常不是「安全等级检查」，--fast 不会（也不该）把它关掉。
+for src in tests/uncaught/*.dial; do
+    name=$(basename "$src" .dial)
+    bin="${TMP}/uncaught_${name}"
+
+    # 1) 必须能编译：内建函数的隐式抛出允许出现在 try 块之外（§26.1.1）
+    if ! "$DIALC" build "$src" -o "$bin" >"${TMP}/gbuild.log" 2>&1; then
+        echo "  ❌ $name 编译失败（内建函数的隐式抛出必须允许写在 try 块外）"
+        sed 's/^/       /' "${TMP}/gbuild.log"
+        fail=1
+        continue
+    fi
+
+    "$bin" >"${TMP}/gout.txt" 2>"${TMP}/gerr.txt"
+    rc=$?
+    if [ $rc -lt 128 ]; then
+        echo "  ❌ $name 未捕获异常却没有终止进程（退出码 $rc）"
+        fail=1
+        continue
+    fi
+    if grep -q "9999" "${TMP}/gout.txt"; then
+        echo "  ❌ $name panic 之后仍继续执行（哨兵 9999 被打印）"
+        fail=1
+        continue
+    fi
+    # 2) 关键回归点：必须是**真实的错误消息**，而不是把 DialString 句柄
+    #    当 const char* 打印出来的乱码或单个数字（缺 dial_string_cstr 的症状）
+    if ! grep -q "无法打开文件" "${TMP}/gerr.txt"; then
+        echo "  ❌ $name panic 未打印真实错误消息（诊断: $(head -1 "${TMP}/gerr.txt")）"
+        fail=1
+        continue
+    fi
+    echo "  ✅ $name 信号 $((rc - 128)) 终止且消息正确（诊断: $(head -1 "${TMP}/gerr.txt")）"
+done
 
 echo
 if [ $fail -eq 0 ]; then

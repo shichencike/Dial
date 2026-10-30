@@ -152,6 +152,10 @@ impl Parser {
                 self.advance();
                 Type::Bool
             }
+            TokenKind::CharT => {
+                self.advance();
+                Type::Char
+            }
             TokenKind::StringT => {
                 self.advance();
                 Type::String
@@ -682,6 +686,10 @@ impl Parser {
             TokenKind::BoolLit(b) => {
                 self.advance();
                 Ok(Expr::BoolLit(b))
+            }
+            TokenKind::CharLit(c) => {
+                self.advance();
+                Ok(Expr::CharLit(c))
             }
             TokenKind::StringLit(s) => {
                 self.advance();

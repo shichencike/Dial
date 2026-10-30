@@ -313,6 +313,8 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_void("dial_print_int", &[i64b.into()]);
         self.decl_void("dial_print_float", &[f64b.into()]);
         self.decl_void("dial_print_bool", &[i64b.into()]);
+        // char 打印（v0.92）：打印字符本身而非码点数字。
+        self.decl_void("dial_print_char", &[i64b.into()]);
         self.decl_func("dial_read_line", i8b, &[]);
         // 文件 IO：file 句柄是不透明的 FILE* 封装，显式 open/close，不受 ARC 管理。
         self.decl_func("dial_file_open", i8b, &[i8b.into(), i8b.into()]);
@@ -331,6 +333,11 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_exbuf_err", i8b, &[i8b.into()]);
         self.decl_func("dial_exbuf_take_err", i8b, &[i8b.into()]);
         self.decl_void("dial_exbuf_free", &[i8b.into()]);
+        // DialString -> const char*：把不透明字符串句柄转成真正的 C 字符串（跳过 8 字节头部）。
+        // 凡是想把 Dial 的 string 交给**期望 const char* 的 C 函数**（例如 dial_panic），
+        // 必须先经过这一步。直接把 DialString 当 char* 传，会把结构体头部字节当成文本打印
+        // （未捕获异常曾因此只打印出一个数字，而不是错误消息）。
+        self.decl_func("dial_string_cstr", i8b, &[i8b.into()]);
         self.decl_void("dial_panic", &[i8b.into()]);
 
         // setjmp **必须**由「包含 try 的那个函数」亲自调用（IR 侧直接发起）：
@@ -422,6 +429,9 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Int => self.context.i64_type().into(),
             Type::Float => self.context.f64_type().into(),
             Type::Bool => self.context.bool_type().into(),
+            // char 与 int 同为 i64：它就是一个码点数值，只是**类型**被独立出来
+            // 以拦住「把字符当数字做算术」。表示层不付出任何额外代价。
+            Type::Char => self.context.i64_type().into(),
             Type::String
             | Type::Array(_)
             | Type::Map
@@ -481,6 +491,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Int => self.context.i64_type().const_int(0, false).into(),
             Type::Float => self.context.f64_type().const_float(0.0).into(),
             Type::Bool => self.context.bool_type().const_int(0, false).into(),
+            Type::Char => self.context.i64_type().const_int(0, false).into(),
             Type::String
             | Type::Array(_)
             | Type::Map
@@ -951,8 +962,14 @@ impl<'ctx> CodeGen<'ctx> {
             self.call_c_void("dial_throw_to", &[buf.into(), err.into()]);
         } else {
             // 未捕获异常：打印错误消息并终止进程（绝不静默继续，避免逻辑雪崩）。
+            //
+            // 注意 **必须**先 dial_string_cstr 再交给 dial_panic：
+            // dial_error_msg 返回的是不透明的 DialString 句柄（[refcount][len][data...]），
+            // 而 dial_panic 的形参是 const char*。少这一步转换，打印出来的就是
+            // 结构体头部的字节而不是错误消息（曾实测只打印出一个 "9"）。
             let msg = self.call_c("dial_error_msg", &[err.into()]);
-            self.call_c_void("dial_panic", &[msg.into()]);
+            let cstr = self.call_c("dial_string_cstr", &[msg.into()]);
+            self.call_c_void("dial_panic", &[cstr.into()]);
         }
         // dial_throw_to（内含 longjmp）与 dial_panic（内含 abort）均不返回，标记当前块不可达。
         self.builder.build_unreachable().unwrap();
@@ -1750,6 +1767,9 @@ impl<'ctx> CodeGen<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>> {
         match expr {
             Expr::IntLit(n) => Ok(self.context.i64_type().const_int(*n as u64, false).into()),
+            // char 字面量就是一个 i64 码点常量，与 IntLit 完全同构——
+            // 差异只存在于**类型层面**（Sema 已拦住把它当数字用的写法）。
+            Expr::CharLit(c) => Ok(self.context.i64_type().const_int(*c as u64, false).into()),
             Expr::FloatLit(f) => Ok(self.context.f64_type().const_float(*f).into()),
             Expr::BoolLit(b) => Ok(self.context.bool_type().const_int(if *b { 1 } else { 0 }, false).into()),
             Expr::StringLit(s) => {
@@ -1874,6 +1894,12 @@ impl<'ctx> CodeGen<'ctx> {
                             )
                             .unwrap()
                             .into())
+                    }
+                    // char<->int 是**零指令**的类型视图切换：char 与 int 同为 i64，
+                    // 因此这里直接原样返回实参值，不发射任何 LLVM 指令。
+                    // 它不是「隐式转换」，因为源码里必须显式写出 char_to_int / int_to_char。
+                    "char_to_int" | "int_to_char" => {
+                        self.gen_expr(&args[0], function, scopes, func_values, functions, structs)
                     }
                     "float_to_int" => {
                         let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
@@ -2475,6 +2501,11 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Bool => {
                 let i = self.to_i64(val, &Type::Bool);
                 self.call_c_void("dial_print_bool", &[i.into()]);
+            }
+            // char 打印字符本身（'a' 输出 a），而不是它的码点 97——
+            // 后者是 char_to_int(c) 的语义，两者在源码里必须能一眼区分。
+            Type::Char => {
+                self.call_c_void("dial_print_char", &[val.into()]);
             }
             Type::String => {
                 self.call_c_void("dial_print_string", &[val.into()]);
