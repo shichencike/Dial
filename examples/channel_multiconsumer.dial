@@ -1,0 +1,76 @@
+// v0.9 示例：多消费者安全 —— 两个消费者抢同一个通道，元素**恰好**被取走一次
+//
+// 这正是 is_null 的用武之地：多个消费者共用一个通道时，「队列空」和「通道已关闭」
+// 必须区分开——只有后者才是真正的结束信号，而 recv 只在后者返回空指针。
+// 于是消费者的标准写法是：
+//
+//     while (true) {
+//         var r: string = recv(ch);     // 只在「已关闭且已空」时返回空指针
+//         if (is_null(r)) { break; }     // 这才是 EOF
+//         ... 处理 r ...
+//     }
+//
+// 注意不能用 try_recv 来判结束：try_recv 在「队列暂时空」时也返回空指针，
+// 那不是 EOF，只是「现在没有」。多消费者下用 try_recv 会漏收元素。
+//
+// 每个消费者把收到的元素转发到**自己**的报告通道，主线程从两个报告通道分别取数后
+// 相加。总数恒为 100 —— 因为每个元素只会被弹出一次、也只会被转发一次。
+// 这个「总数守恒」正是我们要的确定性断言：各消费者分到多少是不确定的，
+// 但它们的和必须是确定的。
+
+fn producer(ch: channel<string>): void {
+    var i: int = 0;
+    while (i < 100) {
+        var s: string = "item";
+        move_to(s, ch);
+        i = i + 1;
+    }
+    close(ch);                 // 宣告结束：消费者据此收到 EOF
+}
+
+fn consumer(ch: channel<string>, rep: channel<string>): void {
+    while (true) {
+        var r: string = recv(ch);
+        if (is_null(r)) {
+            break;             // 真正的 EOF：已关闭且已空
+        }
+        move_to(r, rep);       // 收到的元素原样转发到自己的报告通道
+    }
+    close(rep);                // 报告完毕，主线程据此收尾
+}
+
+fn main(): int {
+    let ch: channel<string> = channel(8);
+    let repA: channel<string> = channel(256);
+    let repB: channel<string> = channel(256);
+
+    let tp: thread = spawn(producer, ch);
+    let ta: thread = spawn(consumer, ch, repA);
+    let tb: thread = spawn(consumer, ch, repB);
+
+    var total: int = 0;
+
+    // 先收 A 的报告：A 结束（close(repA)）的前提是 ch 已关闭且已空，
+    // 也就是所有元素都已被弹出——所以先收谁都不会丢元素。
+    while (true) {
+        var s: string = recv(repA);
+        if (is_null(s)) {
+            break;
+        }
+        total = total + 1;
+    }
+    while (true) {
+        var s: string = recv(repB);
+        if (is_null(s)) {
+            break;
+        }
+        total = total + 1;
+    }
+
+    join(tp);
+    join(ta);
+    join(tb);
+
+    print(total);              // 恒为 100
+    return 0;
+}

@@ -1,0 +1,7 @@
+// 负向：recv_timeout 的第一个参数不是 channel —— 必须编译失败
+fn main(): int {
+    var n: int = 1;
+    var s: string = recv_timeout(n, 100);
+    print(s);
+    return 0;
+}

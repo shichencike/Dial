@@ -6,7 +6,8 @@
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   D. Fail-Fast：tests/trap/*.dial 越界/除零必须当场因信号终止，且不得打印哨兵；
 #   E. 对照组：同一批用例在 --fast 下应关闭检查（证明陷阱确由编译器插入，而非碰巧崩溃）；
-#   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）。
+#   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
+#   F. 并发压测：C Runtime 多消费者抢同一通道（v0.9 新增，绕开编译器直压 stdlib）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -137,6 +138,40 @@ if ldd "$bin" 2>/dev/null | grep -qi "LLVM"; then
     fail=1
 else
     echo "  ✅ 用户程序仅依赖 C Runtime：$(ldd "$bin" | tr -s ' \t' ' ' | tr '\n' '|')"
+fi
+
+echo
+echo "== F) C Runtime 并发压测：多消费者抢同一通道（v0.9 新增）=="
+# 这一组绕开编译器，直接压 stdlib/dial_channel.c，验证三件 Dial 层看不见、
+# 但多消费者下会致命的事：
+#   1) 不丢唤醒：8 个消费者 + 100 万元素。只要有一个消费者被 signal 吞掉，
+#      join 就永远挂住 -> timeout 杀掉 -> 判失败。
+#   2) 每个元素恰好被取走一次（位图 + 原子 fetch_or）：重复领取 = 必然 double-free。
+#   3) 不丢失：收到的总数必须恰好等于发出的总数。
+# 注意：这一组**不经过 dialc**，因此不能用 --fast（它直接编译 C 源文件）。
+mt_bin="${TMP}/channel_mt"
+# 编译器探测与 dialc 内部保持一致（main.rs 的 cc_command）：优先 zig cc，其次 clang。
+if command -v zig >/dev/null 2>&1; then
+    CC_CMD=(zig cc)
+elif command -v clang >/dev/null 2>&1; then
+    CC_CMD=(clang)
+else
+    CC_CMD=(cc)
+fi
+if ! "${CC_CMD[@]}" -O2 -g -DDIAL_SAFETY=2 -Iruntime -Istdlib \
+        tests/stress/channel_mt.c stdlib/dial_channel.c \
+        runtime/dial_rt_trap.c -o "$mt_bin" -lpthread >"${TMP}/mtbuild.log" 2>&1; then
+    echo "  ❌ 并发压测用例编译失败"
+    sed 's/^/       /' "${TMP}/mtbuild.log"
+    fail=1
+else
+    if ! timeout 120 "$mt_bin" >"${TMP}/mt.log" 2>&1; then
+        echo "  ❌ 多消费者并发压测失败（超时挂死 = 丢唤醒；或断言失败）"
+        sed 's/^/       /' "${TMP}/mt.log"
+        fail=1
+    else
+        echo "  ✅ 多消费者并发压测通过： $(grep -m1 received= "${TMP}/mt.log")"
+    fi
 fi
 
 echo

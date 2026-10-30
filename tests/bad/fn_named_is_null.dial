@@ -1,0 +1,7 @@
+// 负向：用内建保留名 is_null 定义函数 —— 必须编译失败
+fn is_null(x: int): bool {
+    return false;
+}
+fn main(): int {
+    return 0;
+}

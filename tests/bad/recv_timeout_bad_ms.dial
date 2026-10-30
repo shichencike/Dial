@@ -1,0 +1,7 @@
+// 负向：recv_timeout 的超时参数不是 int —— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    var s: string = recv_timeout(ch, "100");
+    print(s);
+    return 0;
+}

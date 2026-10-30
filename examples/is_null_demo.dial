@@ -1,0 +1,41 @@
+// v0.9 示例：is_null —— 判别「没有值」与「这是一个真实值」
+//
+// v0.81 起 recv 在 EOF（通道已关闭且已空）时返回**空指针**；
+// v0.9 起 recv_timeout 超时也返回空指针。
+// 而 Dial 没有 Option 类型、没有 null 字面量 —— 用户此前**无从分辨**
+// 「这是没有值」还是「这是一个真实值」，直接使用会撞上 Runtime 的 Fail-Fast。
+// is_null 给出这条判别路径。
+
+fn main(): int {
+    // 情形一：EOF（通道已关闭且已空）
+    let ch: channel<string> = channel(2);
+    close(ch);
+
+    var r: string = recv(ch);
+    if (is_null(r)) {
+        print("eof");
+    } else {
+        print("got");
+    }
+
+    // 情形二：超时（通道还开着，但等不到数据）
+    let ch2: channel<string> = channel(2);
+    var t: string = recv_timeout(ch2, 50);
+    if (is_null(t)) {
+        print("timeout");
+    } else {
+        print("got");
+    }
+
+    // 情形三：真的拿到了值 —— is_null 为 false
+    var s: string = "real";
+    move_to(s, ch2);
+    var u: string = recv_timeout(ch2, 1000);
+    if (is_null(u)) {
+        print("timeout");
+    } else {
+        print(u);
+    }
+
+    return 0;
+}

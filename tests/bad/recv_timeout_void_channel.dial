@@ -1,0 +1,7 @@
+// 负向：通道元素类型未定就 recv_timeout —— 必须编译失败
+fn main(): int {
+    let ch: channel = channel(2);
+    var s: string = recv_timeout(ch, 100);
+    print(s);
+    return 0;
+}

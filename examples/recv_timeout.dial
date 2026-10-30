@@ -1,0 +1,31 @@
+// v0.9 示例：recv_timeout —— 带超时的接收
+//
+// recv 会一直等到有数据为止。若生产者异常退出（没走 close），消费者就永久挂起。
+// recv_timeout(ch, ms) 至多等 ms 毫秒，等不到就返回**空指针**（用 is_null 判别）。
+//
+// 超时是**边界情况下的兜底**，不是常态：正常收尾仍应使用 close + recv 的 EOF 路径。
+
+fn main(): int {
+    let ch: channel<string> = channel(2);
+
+    // 空队列 + 100 毫秒超时 -> 空值
+    var t: string = recv_timeout(ch, 100);
+    print(is_null(t));        // true
+
+    // 投递一个元素后再收 -> 必然拿到（超时是上限，不是下限）
+    var s: string = "here";
+    move_to(s, ch);
+    var u: string = recv_timeout(ch, 1000);
+    if (is_null(u)) {
+        print("timeout");
+    } else {
+        print(u);             // here
+    }
+
+    // 超时**不会**吞掉元素：超时判定后 while 循环会重新检查队列，
+    // 因此「元素恰好在超时这一刻到达」也能被正常取走。
+    var v: string = recv_timeout(ch, 100);
+    print(is_null(v));        // true —— 队列确实空了
+
+    return 0;
+}

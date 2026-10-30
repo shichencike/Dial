@@ -1,0 +1,6 @@
+// 负向：is_null 参数个数不对 —— 必须编译失败
+fn main(): int {
+    var s: string = "a";
+    print(is_null(s, s));
+    return 0;
+}

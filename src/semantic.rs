@@ -73,6 +73,27 @@ pub fn types_compatible(arg: &Type, target: &Type) -> bool {
     arg == target
 }
 
+/// 该类型**可能**为空指针吗？（v0.9 的 `is_null` 的准入名单）
+///
+/// Dial 的句柄类型在 IR 里一律是 `i8*`，其中只有「可能取到空值」的那些才值得判空：
+/// - `recv` / `try_recv` / `recv_timeout` 在 EOF 或超时后返回空指针
+/// - `open` 之类可能返回空句柄的调用
+///
+/// `int` / `float` / `bool` 是**值类型**，永远非空；对它们判空是纯粹的噪音，
+/// 因此在编译期直接拒绝，而不是让它变成一个恒为 false 的死代码。
+pub fn is_nullable_type(t: &Type) -> bool {
+    matches!(
+        t,
+        Type::String
+            | Type::Array(_)
+            | Type::Map
+            | Type::Error
+            | Type::Channel(_)
+            | Type::Thread
+            | Type::File
+    )
+}
+
 /// `channel(cap)` 的类型是 `Channel(Void)` ——「元素类型未定」的占位。
 /// 声明处写出具体元素类型 `channel<T>` 时，在这里统一为 T。
 ///
@@ -622,6 +643,71 @@ pub fn type_of<V>(
                         }
                     }
                 }
+                // recv_timeout(ch, ms)：带超时的接收。
+                // 返回类型与所有权规则与 recv 完全一致（取出的元素归接收者所有），
+                // 唯一区别是「等不到就返回空值」而不是无限期阻塞。
+                // 返回空值（null）时用 is_null(x) 判别——这正是 v0.9 引入 is_null 的直接原因。
+                "recv_timeout" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：recv_timeout 需要 2 个参数（channel, 超时毫秒数 int）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[1], scopes, funcs, structs)? != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：recv_timeout 的超时参数必须是 int（毫秒）",
+                            0, 0,
+                        ));
+                    }
+                    let ct = type_of(&args[0], scopes, funcs, structs)?;
+                    match ct {
+                        Type::Channel(elem) => {
+                            if matches!(elem.as_ref(), Type::Void) {
+                                return Err(DialcError::new(
+                                    "语义错误：recv_timeout 的通道元素类型未定，请在声明处写出具体类型（例如 let ch: channel<string> = channel(8);）",
+                                    0, 0,
+                                ));
+                            }
+                            return Ok(elem.as_ref().clone());
+                        }
+                        _ => {
+                            return Err(DialcError::new(
+                                format!("语义错误：recv_timeout 的参数必须是 channel，实际为 {}", ct.name()),
+                                0, 0,
+                            ))
+                        }
+                    }
+                }
+                // is_null(x)：判断一个句柄是否为「空」。
+                //
+                // 这是 v0.9 的关键补充：recv / try_recv / recv_timeout 在 EOF 或超时后
+                // 返回的是**空指针**，而 Dial 没有 Option 类型、没有 null 字面量，
+                // 用户此前**无从分辨**「这是没有值」还是「这是一个真实值」——
+                // 直接使用会撞上 Runtime 的 Fail-Fast 断言。
+                // is_null 给出这条判别路径，让多消费者 / 超时场景可以被安全地写出。
+                //
+                // 只接受**可能为空**的句柄类型；int / float / bool 永远非空，
+                // 对它们判空是纯粹的噪音，编译期直接拒绝。
+                "is_null" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：is_null 需要 1 个参数（句柄）",
+                            0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if !is_nullable_type(&at) {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：is_null 的参数不能是 {}（标量永远非空，只有句柄才可能为空）",
+                                at.name()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Bool);
+                }
                 // 通道状态查询（v0.81）：三个都只接受 channel，返回标量。
                 //   closed(ch) -> bool：是否已调用过 close
                 //   len(ch)    -> int ：队列中当前的剩余元素数
@@ -1016,6 +1102,8 @@ const RESERVED_NAMES: &[&str] = &[
     // v0.81 通道收尾：close 早已是 file 的内建（本就在按名字匹配，只是此前未列入此表），
     // 一并补齐；closed / len / done / try_recv 为本次新增。
     "close", "closed", "len", "done", "try_recv",
+    // v0.9：判空与超时接收
+    "is_null", "recv_timeout",
 ];
 
 pub fn analyze(program: &mut Program) -> Result<(HashMap<String, FuncInfo>, StructTable)> {

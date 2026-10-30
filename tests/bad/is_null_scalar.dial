@@ -1,0 +1,6 @@
+// 负向：is_null 的参数是标量 —— 永远非空，判空是纯噪音 —— 必须编译失败
+fn main(): int {
+    var n: int = 1;
+    print(is_null(n));
+    return 0;
+}

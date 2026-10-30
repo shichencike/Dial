@@ -201,7 +201,14 @@
 <li><a href="#关闭后-send-=-fail-fast">关闭后 send = Fail-Fast</a></li>
 </ul>
 </li>
-<li><a href="#278-当前边界">27.8 当前边界</a></li>
+<li><a href="#278-判空多消费者安全与超时v09">27.8 判空、多消费者安全与超时（v0.9）</a><ul>
+<li><a href="#2781-is_nullxdial-终于有了判空">27.8.1 is_null(x)：Dial 终于有了判空</a></li>
+<li><a href="#2782-多消费者一个被实证过的死锁">27.8.2 多消费者：一个被实证过的死锁</a></li>
+<li><a href="#2783-recv_timeoutch-ms带超时的接收">27.8.3 recv_timeout(ch, ms)：带超时的接收</a></li>
+<li><a href="#2784-arc-会计不变但被验证了">27.8.4 ARC 会计：不变，但被验证了</a></li>
+</ul>
+</li>
+<li><a href="#279-当前边界">27.9 当前边界</a></li>
 </ul>
 </li>
 </ul>
@@ -1594,7 +1601,8 @@ void     dial_map_release(DialMap m);
 <p>已落地：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
 <code>let</code> + 原地修改方法（push/set/put）的接收者约束、<code>else if</code> 语法糖、<code>for</code> 范围循环、<code>break</code> / <code>continue</code>、
 Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§26）、
-所有权转移与多线程并发（§27，含 v0.81 的通道关闭与 EOF）。其余仍按计划未实现：</p>
+所有权转移与多线程并发（§27，含 v0.81 的通道关闭与 EOF、v0.9 的判空与多消费者安全）。
+其余仍按计划未实现：</p>
 </blockquote>
 <table>
 <thead>
@@ -1646,7 +1654,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td><code>select</code> / 多路复用</td>
-<td>未实现——<code>try_recv</code> 已落地（v0.81），但无法同时监听多个通道</td>
+<td>未实现——<code>try_recv</code>（v0.81）与 <code>recv_timeout</code>（v0.9）已落地，但无法同时监听多个通道</td>
 </tr>
 <tr>
 <td>通道关闭的「反向」操作（重新打开）</td>
@@ -1707,6 +1715,10 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td><strong>C. 契约</strong></td>
 <td>产物可执行文件不得依赖 libLLVM</td>
 </tr>
+<tr>
+<td><strong>F. 并发压测</strong>（v0.9 新增）</td>
+<td>绕开编译器直压 <code>stdlib/dial_channel.c</code>：8 个消费者抢同一个通道、100 万元素、队列深 64。校验「每个元素恰好被取走一次」（位图 + 原子 <code>fetch_or</code>，重复领取即失败）与「总数守恒」。若发生丢唤醒，消费者 <code>join</code> 会永远挂住，由 timeout 判失败</td>
+</tr>
 </tbody>
 </table>
 <h3 id="示例清单">示例清单</h3>
@@ -1757,6 +1769,46 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <tr>
 <td><code>conversions.dial</code></td>
 <td><code>int_to_float</code> / <code>float_to_int</code> 显式转换（零隐式转换铁律）</td>
+</tr>
+<tr>
+<td><code>thread_spawn.dial</code></td>
+<td>线程创建、<code>spawn</code> 移交 string、<code>join</code></td>
+</tr>
+<tr>
+<td><code>channel_move.dial</code></td>
+<td><code>move_to</code> 把所有权移交进通道，<code>recv</code> 取回</td>
+</tr>
+<tr>
+<td><code>channel_thread.dial</code></td>
+<td>子线程 <code>move_to</code> → 主线程 <code>recv</code> → <code>join</code></td>
+</tr>
+<tr>
+<td><code>channel_array.dial</code></td>
+<td><code>channel&lt;int[]&gt;</code> 传数组</td>
+</tr>
+<tr>
+<td><code>thread_scalar.dial</code></td>
+<td>标量实参按值拷贝（源变量不 Moved，之后仍可用）</td>
+</tr>
+<tr>
+<td><code>channel_close.dial</code></td>
+<td>生产者 <code>close</code> → 消费者 <code>done</code> 收尾（EOF 全流程）</td>
+</tr>
+<tr>
+<td><code>channel_try_recv.dial</code></td>
+<td><code>len</code> / <code>try_recv</code> / <code>closed</code> / <code>done</code> 状态机</td>
+</tr>
+<tr>
+<td><code>is_null_demo.dial</code></td>
+<td><code>is_null</code> 判别 EOF / 超时 / 真实值三种情形</td>
+</tr>
+<tr>
+<td><code>recv_timeout.dial</code></td>
+<td><code>recv_timeout</code> 超时返回空值；超时不会吞掉元素</td>
+</tr>
+<tr>
+<td><code>channel_multiconsumer.dial</code></td>
+<td><strong>两个消费者抢同一个通道</strong>，元素总数守恒（多消费者安全）</td>
 </tr>
 </tbody>
 </table>
@@ -3166,7 +3218,90 @@ store ptr null, ptr %x_slot            ; 原槽清零
 <blockquote>
 <p><code>close</code> 同时服务于 <code>file</code> 与 <code>channel</code>（二者都是「显式终结」），按实参静态类型分派。</p>
 </blockquote>
-<h3 id="278-当前边界">27.8 当前边界</h3>
+<h3 id="278-判空多消费者安全与超时v09">27.8 判空、多消费者安全与超时（v0.9）</h3>
+<p>v0.81 补上了 EOF，但并发底座还剩三处硬伤。v0.9 一次把它们清干净。</p>
+<h4 id="2781-is_nullxdial-终于有了判空">27.8.1 <code>is_null(x)</code>：Dial 终于有了判空</h4>
+<p><code>recv</code> / <code>try_recv</code> / <code>recv_timeout</code> 在 EOF 或超时后返回的是<strong>空指针</strong>。而 Dial 没有 <code>Option</code>
+类型、没有 <code>null</code> 字面量——用户此前<strong>无从分辨</strong>「这是没有值」还是「这是一个真实值」，
+直接使用会撞上 Runtime 的 Fail-Fast 断言（<a href="#20-fail-fast-铁律宁可崩溃绝不静默损坏">§20</a>）。</p>
+<pre><code class="language-dial">var r: string = recv(ch);
+if (is_null(r)) {
+    // 没有值（EOF 或超时）
+} else {
+    // r 是一个真实的值
+}
+</code></pre>
+<p>准入名单：<code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code> / <code>channel&lt;T&gt;</code> / <code>thread</code> / <code>file</code>。
+<code>int</code> / <code>float</code> / <code>bool</code> 是<strong>值类型，永远非空</strong>，对它们判空是纯噪音——编译期直接拒绝，
+而不是让它变成一段恒为 <code>false</code> 的死代码。</p>
+<p>落到 IR 上只是一次指针比较（<code>ptrtoint</code> + <code>icmp eq 0</code>，优化器会折叠回 <code>icmp eq ptr %p, null</code>），
+<strong>不产生任何函数调用，也不碰引用计数</strong>。</p>
+<h4 id="2782-多消费者一个被实证过的死锁">27.8.2 多消费者：一个被实证过的死锁</h4>
+<p>v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>——只唤醒<strong>一个</strong>等待者。
+单消费者时看不出问题；多消费者时，「队列非空」是<strong>众多消费者共享的状态</strong>：</p>
+<blockquote>
+<p>唤醒其中一个消费者后，若队列里<strong>还剩元素</strong>，其余消费者会带着<strong>已经失效的等待条件</strong>
+（「队列为空」）继续睡死——直到下一次 <code>send</code> 才被叫醒。而那次 <code>send</code> 又只唤醒一个。
+于是只要队列深度大于 1、消费者多于 1，就会有消费者永久阻塞。</p>
+</blockquote>
+<p>这就是经典的<strong>丢唤醒（lost wakeup）</strong>。本仓库用对照实验坐实了它（<code>tests/stress/channel_mt.c</code>）：</p>
+<table>
+<thead>
+<tr>
+<th>版本</th>
+<th>8 个消费者抢 100 万个元素（队列深 64）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pthread_cond_signal</code>（v0.8 / v0.81）</td>
+<td><strong>25 秒后超时挂死</strong>（exit 124）</td>
+</tr>
+<tr>
+<td><code>pthread_cond_broadcast</code>（v0.9）</td>
+<td><strong>4.25 秒跑完</strong>，总数恰好 100 万，零重复、零丢失</td>
+</tr>
+</tbody>
+</table>
+<p>修复只有一处：所有「队列状态变化」的通知一律改用 <code>broadcast</code>，让每个等待者都重新检查条件。
+正确性优先于惊群开销——Dial 的并发规模远不值得为省一点唤醒去换一次死锁。</p>
+<p><strong>多消费者的标准写法</strong>：</p>
+<pre><code class="language-dial">while (true) {
+    var r: string = recv(ch);     // 只在「已关闭且已空」时返回空指针
+    if (is_null(r)) { break; }     // 这才是 EOF
+    ... 处理 r ...
+}
+</code></pre>
+<p>注意<strong>不能</strong>用 <code>try_recv</code> 判结束：<code>try_recv</code> 在「队列暂时空」时也返回空指针，
+那不是 EOF，只是「现在没有」。多消费者下用 <code>try_recv</code> 会漏收元素。</p>
+<blockquote>
+<p>单消费者场景仍推荐 <code>while (not done(ch))</code>（<a href="#277-通道关闭与-eofv081">§27.7</a>）——
+它连一次多余的 <code>recv</code> 都不需要。</p>
+</blockquote>
+<h4 id="2783-recv_timeoutch-ms带超时的接收">27.8.3 <code>recv_timeout(ch, ms)</code>：带超时的接收</h4>
+<pre><code class="language-dial">var s: string = recv_timeout(ch, 500);   // 最多等 500 毫秒
+if (is_null(s)) {
+    // 超时（或者通道已关闭且已空）
+}
+</code></pre>
+<ul>
+<li><strong>超时是上限，不是下限</strong>：元素提前到了就立刻返回。</li>
+<li><strong>超时不会吞掉元素</strong>：<code>pthread_cond_timedwait</code> 返回 <code>ETIMEDOUT</code> 后会回到 <code>while</code> 条件
+  重新判定，若此刻队列非空则正常取走——「元素恰好在超时这一刻到达」也能被拿到。</li>
+<li>所有权规则与 <code>recv</code> 完全一致：取出的元素归接收者所有，不做 retain / release。</li>
+<li>底层实现就是 <code>pthread_cond_timedwait</code> + 一个绝对时刻，<strong>没有引入任何状态机</strong>。</li>
+</ul>
+<blockquote>
+<p>超时是<strong>边界情况下的兜底</strong>，不是常态。正常收尾仍应走 <code>close</code> + <code>recv</code> 的 EOF 路径——
+超时会让「生产者在慢、消费者在快」这种正常节奏也变成一次失败的等待。</p>
+</blockquote>
+<h4 id="2784-arc-会计不变但被验证了">27.8.4 ARC 会计：不变，但被验证了</h4>
+<p>多消费者不会破坏所有权会计：环形队列的每一次出队都在<strong>同一个互斥量</strong>下完成，
+因此每个元素只会被弹出一次，也就只会有一个持有者——<strong>结构上不可能 double-free</strong>。</p>
+<p><code>tests/stress/channel_mt.c</code> 用「位图 + 原子 <code>fetch_or</code>」逐个记录每个序号的领取情况，
+重复领取即判失败；<code>examples/channel_multiconsumer.dial</code> 从 Dial 层验证同一件事
+（两个消费者抢同一个通道，元素总数守恒）。</p>
+<h3 id="279-当前边界">27.9 当前边界</h3>
 <table>
 <thead>
 <tr>
@@ -3193,15 +3328,15 @@ store ptr null, ptr %x_slot            ; 原槽清零
 </tr>
 <tr>
 <td><code>recv</code> 仍会阻塞</td>
-<td>未关闭时队列空就一直等；要非阻塞请用 <code>try_recv</code>。<strong>没有</strong> <code>select</code> / 超时</td>
+<td>未关闭时队列空就一直等；要非阻塞请用 <code>try_recv</code>，要限时请用 <code>recv_timeout</code>。<strong>没有</strong> <code>select</code> / 多路复用（规划中，见 <a href="#278-判空多消费者安全与超时v09">§27.8</a>）</td>
 </tr>
 <tr>
 <td>无 <code>Option</code> 类型</td>
-<td>「有没有取到」靠 <code>len(ch)</code> / <code>done(ch)</code> 判断，不看返回值</td>
+<td>「有没有取到」用 <code>is_null(x)</code> 判断；没有 <code>Some</code> / <code>None</code> 这类包装</td>
 </tr>
 <tr>
-<td>多消费者需自行协调</td>
-<td><code>done</code> 的单调性只对<strong>单消费者</strong>保证不会误判；多消费者仍可能有一个卡在 <code>recv</code></td>
+<td>多消费者</td>
+<td><strong>已支持</strong>（v0.9）。前提是消费者用 <code>recv</code> + <code>is_null</code> 判结束；用 <code>try_recv</code> 判结束会漏收</td>
 </tr>
 <tr>
 <td>无线程池 / 无异步</td>
@@ -3217,7 +3352,7 @@ store ptr null, ptr %x_slot            ; 原槽清零
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.81 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
+    <span class="muted">v0.9 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
   </div>
 </footer>
 

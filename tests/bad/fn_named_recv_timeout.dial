@@ -1,0 +1,7 @@
+// 负向：用内建保留名 recv_timeout 定义函数 —— 必须编译失败
+fn recv_timeout(ch: int, ms: int): int {
+    return ms;
+}
+fn main(): int {
+    return 0;
+}

@@ -1,0 +1,7 @@
+// 负向：recv_timeout 参数个数不对（缺超时毫秒）—— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    var s: string = recv_timeout(ch);
+    print(s);
+    return 0;
+}

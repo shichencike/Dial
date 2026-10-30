@@ -355,6 +355,12 @@ impl<'ctx> CodeGen<'ctx> {
         // v0.81 通道收尾：关闭 / 状态查询 / 非阻塞取出
         self.decl_func("dial_channel_try_recv", i8b, &[i8b.into()]);
         self.decl_void("dial_channel_close", &[i8b.into()]);
+        // v0.9：带超时的接收（超时由 C 侧的 pthread_cond_timedwait 实现）
+        self.decl_func(
+            "dial_channel_recv_timeout",
+            i8b,
+            &[i8b.into(), self.context.i64_type().into()],
+        );
         self.decl_func(
             "dial_channel_closed",
             self.context.i64_type().into(),
@@ -1756,6 +1762,39 @@ impl<'ctx> CodeGen<'ctx> {
                             },
                             &[ch.into()],
                         ))
+                    }
+                    // recv_timeout(ch, ms)：带超时的接收。超时或已关闭且已空时返回 NULL，
+                    // 用 is_null(x) 判别。超时由 C 侧 pthread_cond_timedwait 实现，
+                    // IR 层只是多传一个毫秒数。
+                    "recv_timeout" => {
+                        let ch =
+                            self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let ms = self.to_i64(
+                            self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?,
+                            &Type::Int,
+                        );
+                        Ok(self.call_c("dial_channel_recv_timeout", &[ch.into(), ms.into()]))
+                    }
+                    // is_null(x)：句柄判空。直接落到 LLVM 的指针比较上——
+                    // ptrtoint 后与 0 比较，instcombine 会把它折叠回 icmp eq ptr %p, null。
+                    // 全程不产生任何函数调用，也不碰引用计数。
+                    "is_null" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let p = v.into_pointer_value();
+                        let i = self
+                            .builder
+                            .build_ptr_to_int(p, self.context.i64_type(), "pint")
+                            .unwrap();
+                        let b = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::EQ,
+                                i,
+                                self.context.i64_type().const_int(0, false),
+                                "isnull",
+                            )
+                            .unwrap();
+                        Ok(b.into())
                     }
                     // 通道状态查询（v0.81）。C 侧统一返回 int64，此处按 Dial 的静态类型收口：
                     // closed / done 是 bool（LLVM i1），len 是 int（i64）。
