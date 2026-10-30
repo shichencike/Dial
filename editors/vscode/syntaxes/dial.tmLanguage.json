@@ -1,0 +1,62 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Dial",
+  "scopeName": "source.dial",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.dial",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.dial",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.dial",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "chars": {
+      "name": "string.quoted.single.dial",
+      "begin": "'",
+      "end": "'",
+      "patterns": [
+        {
+          "name": "constant.character.escape.dial",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "numbers": {
+      "name": "constant.numeric.dial",
+      "match": "\\b[0-9][0-9_]*(\\.[0-9]+)?\\b"
+    },
+    "keywords": {
+      "name": "keyword.control.dial",
+      "match": "\\b(var|let|fn|struct|if|else|while|for|in|break|continue|return|try|catch|throw|select|case|default|as|and|or|not|import|true|false)\\b"
+    },
+    "types": {
+      "name": "entity.name.type.dial",
+      "match": "\\b(int|float|bool|char|string|void|map|file|error|thread|channel)\\b"
+    },
+    "operators": {
+      "name": "keyword.operator.dial",
+      "match": "(==|!=|<=|>=|\\.\\.|[-+*/=<>:;,.!])"
+    }
+  }
+}

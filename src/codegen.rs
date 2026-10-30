@@ -1171,6 +1171,7 @@ impl<'ctx> CodeGen<'ctx> {
                 cond,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 let cond_val = self.gen_expr(cond, function, scopes, func_values, functions, structs)?;
                 let cond_i1 = cond_val.into_int_value();
@@ -1205,7 +1206,7 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.position_at_end(merge_bb);
                 Ok(())
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 let header_bb = self.context.append_basic_block(function, "while.cond");
                 let body_bb = self.context.append_basic_block(function, "while.body");
                 let exit_bb = self.context.append_basic_block(function, "while.end");
@@ -1257,7 +1258,7 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.position_at_end(dead);
                 Ok(())
             }
-            Stmt::For { var, start, end, body } => {
+            Stmt::For { var, start, end, body, .. } => {
                 let i64t = self.context.i64_type();
                 // 循环变量：在入口块分配，跨迭代存活。
                 let var_ptr = self.alloca_in_entry(function, i64t.into(), var);
@@ -1690,7 +1691,7 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.position_at_end(end_bb);
                 Ok(())
             }
-            Stmt::Expr(e) => {
+            Stmt::Expr(e, ..) => {
                 // 语句级方法调用且返回新容器指针（push/set）-> 把结果写回接收变量
                 if let Expr::Method(obj, method, args) = e {
                     if matches!(method.as_str(), "push" | "set" | "put") {

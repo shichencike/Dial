@@ -295,6 +295,16 @@ pub fn type_of<V>(
                     // 强制用户写 `int_to_float(1) + 2.0`。
                     if lt == rt && is_numeric(&lt) {
                         Ok(lt)
+                    } else if lt == Type::Char || rt == Type::Char {
+                        // char 不参与算术（§5.4）。这里单独给一条诊断：
+                        // 通用那条消息会让人以为「补个转换就能做算术」，
+                        // 而对 char 来说，`'a' + 1` 的意图根本无法判定——
+                        // 想取下一个字母请 char_to_int 后自己算，再把结果 int_to_char 回来。
+                        Err(DialcError::new(
+                            "语义错误：char 不参与算术运算（+ - * /）。'a' + 1 的意图无法判定（取下一个字母？还是拿码点做数值计算？）；\
+                             请先 char_to_int(c) 得到码点，算完再用 int_to_char(x) 转回字符",
+                            0, 0,
+                        ))
                     } else {
                         Err(DialcError::new(
                             "语义错误：算术运算(+ - * /)要求两个操作数类型完全相同且均为数值类型（int 或 float）；int 与 float 之间无隐式转换，请用 int_to_float / float_to_int 显式转换",
@@ -1346,7 +1356,7 @@ fn check_function(
         scopes[0].insert(pname.clone(), (pty.clone(), VarState::new(true)));
     }
     for stmt in &f.body {
-        check_stmt(stmt, &mut scopes, funcs, f, structs, false, 0)?;
+        check_stmt_at(stmt, &mut scopes, funcs, f, structs, false, 0)?;
     }
     Ok(())
 }
@@ -1427,7 +1437,7 @@ fn check_moved_stmt(
             check_moved_expr(start, scopes, funcs, structs, line, col)?;
             check_moved_expr(end, scopes, funcs, structs, line, col)
         }
-        Stmt::Return(Some(e), ..) | Stmt::Throw(e, ..) | Stmt::Expr(e) => {
+        Stmt::Return(Some(e), ..) | Stmt::Throw(e, ..) | Stmt::Expr(e, ..) => {
             check_moved_expr(e, scopes, funcs, structs, line, col)
         }
         // select（v0.91）：case 里的通道表达式与各分支体都要受所有权约束。
@@ -1545,6 +1555,58 @@ fn check_moved_expr(
 
 /// in_loop：当前是否处于循环体内（用于约束 break / continue）。
 /// try_depth：当前嵌套的 try 层数（用于约束 throw 必须出现在 try 内）。
+/// 取一条语句在源码中的位置。
+///
+/// v0.93 起**所有**语句都带位置（连 `If` / `While` / `For` / `Expr` 都补上了）。
+/// 这不是洁癖：语义错误发生在**表达式**里，而 Dial 的 `Expr` 不携带行列，
+/// 因此一条 `let c: char = 'a' + 1;` 报出来的错误天然是「不知道在哪」。
+/// 有了语句位置，`check_stmt_at` 就能把它盖到出错的那条语句上——
+/// 否则编辑器里看到的是「第一行一个红点，真正的错误你自己找」。
+fn stmt_pos(stmt: &Stmt) -> (usize, usize) {
+    match stmt {
+        Stmt::VarDecl { line, col, .. }
+        | Stmt::Assign { line, col, .. }
+        | Stmt::AssignField { line, col, .. }
+        | Stmt::AssignIndex { line, col, .. }
+        | Stmt::If { line, col, .. }
+        | Stmt::While { line, col, .. }
+        | Stmt::For { line, col, .. }
+        | Stmt::Try { line, col, .. }
+        | Stmt::Select { line, col, .. }
+        | Stmt::Return(_, line, col)
+        | Stmt::Throw(_, line, col)
+        | Stmt::Break(line, col)
+        | Stmt::Continue(line, col)
+        | Stmt::Expr(_, line, col) => (*line, *col),
+    }
+}
+
+/// `check_stmt` 的位置兜底包装。
+///
+/// 只补**缺失**的位置（`line == 0 && col == 0`）：已经带位置的错误
+/// （语法阶段、以及少数本来就精确定位的语义检查）原样放行，绝不被覆盖。
+///
+/// 所有调用点都必须走这里，包括 `check_stmt` 自身的递归——
+/// 漏掉一处递归，那棵子树里的错误就又会掉回「文件开头」。
+fn check_stmt_at(
+    stmt: &Stmt,
+    scopes: &mut Scopes<VarState>,
+    funcs: &HashMap<String, FuncInfo>,
+    f: &Func,
+    structs: &StructTable,
+    in_loop: bool,
+    try_depth: usize,
+) -> Result<()> {
+    let (line, col) = stmt_pos(stmt);
+    check_stmt(stmt, scopes, funcs, f, structs, in_loop, try_depth).map_err(|e| {
+        if e.line == 0 && e.col == 0 {
+            DialcError::new(e.message, line, col)
+        } else {
+            e
+        }
+    })
+}
+
 fn check_stmt(
     stmt: &Stmt,
     scopes: &mut Scopes<VarState>,
@@ -1763,6 +1825,7 @@ fn check_stmt(
             cond,
             then_branch,
             else_branch,
+            ..
         } => {
             let ct = type_of(cond, scopes, funcs, structs)?;
             if ct != Type::Bool {
@@ -1773,19 +1836,19 @@ fn check_stmt(
             }
             scopes.push(HashMap::new());
             for s in then_branch {
-                check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth)?;
+                check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth)?;
             }
             scopes.pop();
             if let Some(eb) = else_branch {
                 scopes.push(HashMap::new());
                 for s in eb {
-                    check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth)?;
+                    check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth)?;
                 }
                 scopes.pop();
             }
             Ok(())
         }
-        Stmt::While { cond, body } => {
+        Stmt::While { cond, body, .. } => {
             let ct = type_of(cond, scopes, funcs, structs)?;
             if ct != Type::Bool {
                 return Err(DialcError::new(
@@ -1795,12 +1858,12 @@ fn check_stmt(
             }
             scopes.push(HashMap::new());
             for s in body {
-                check_stmt(s, scopes, funcs, f, structs, true, try_depth)?;
+                check_stmt_at(s, scopes, funcs, f, structs, true, try_depth)?;
             }
             scopes.pop();
             Ok(())
         }
-        Stmt::For { var, start, end, body } => {
+        Stmt::For { var, start, end, body, .. } => {
             let st = type_of(start, scopes, funcs, structs)?;
             let et = type_of(end, scopes, funcs, structs)?;
             if st != Type::Int {
@@ -1828,7 +1891,7 @@ fn check_stmt(
                 .unwrap()
                 .insert(var.clone(), (Type::Int, VarState::new(true)));
             for s in body {
-                check_stmt(s, scopes, funcs, f, structs, true, try_depth)?;
+                check_stmt_at(s, scopes, funcs, f, structs, true, try_depth)?;
             }
             scopes.pop();
             Ok(())
@@ -1901,7 +1964,7 @@ fn check_stmt(
             // try 块体处于 try 上下文（try_depth+1），使块内嵌套 throw 合法。
             scopes.push(HashMap::new());
             for s in body {
-                check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth + 1)?;
+                check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth + 1)?;
             }
             scopes.pop();
             // catch 子句：自成一个作用域。若声明了捕获变量，登记为 Error 类型；
@@ -1914,7 +1977,7 @@ fn check_stmt(
                     .insert(name.clone(), (Type::Error, VarState::new(false)));
             }
             for s in &catch.body {
-                check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth + 1)?;
+                check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth + 1)?;
             }
             scopes.pop();
             Ok(())
@@ -1978,7 +2041,7 @@ fn check_stmt(
                     .unwrap()
                     .insert(arm.var.clone(), (elem, VarState::new(true)));
                 for s in &arm.body {
-                    check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth)?;
+                    check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth)?;
                 }
                 scopes.pop();
             }
@@ -1986,13 +2049,13 @@ fn check_stmt(
             if let Some(db) = default_body {
                 scopes.push(HashMap::new());
                 for s in db {
-                    check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth)?;
+                    check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth)?;
                 }
                 scopes.pop();
             }
             Ok(())
         }
-        Stmt::Expr(e) => {
+        Stmt::Expr(e, ..) => {
             // 「原地修改型」方法约束（push / set）：
             // 这两种操作会修改容器，且因 COW 可能更换底层指针，编译器把返回指针写回接收变量。
             // 因此接收者必须是**可重新赋值**的顶层变量（var）。
@@ -2110,18 +2173,18 @@ fn collect_refs(stmts: &[Stmt], si: &mut usize, loop_d: usize, cond_d: usize, re
                 record_expr_refs(index, *si, unsafe_ctx, refs);
                 record_expr_refs(value, *si, unsafe_ctx, refs);
             }
-            Stmt::If { cond, then_branch, else_branch } => {
+            Stmt::If { cond, then_branch, else_branch, .. } => {
                 record_expr_refs(cond, *si, unsafe_ctx, refs);
                 collect_refs(then_branch, si, loop_d, cond_d + 1, refs);
                 if let Some(eb) = else_branch {
                     collect_refs(eb, si, loop_d, cond_d + 1, refs);
                 }
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 record_expr_refs(cond, *si, unsafe_ctx, refs);
                 collect_refs(body, si, loop_d + 1, cond_d, refs);
             }
-            Stmt::For { var: _, start, end, body } => {
+            Stmt::For { var: _, start, end, body, .. } => {
                 record_expr_refs(start, *si, unsafe_ctx, refs);
                 record_expr_refs(end, *si, unsafe_ctx, refs);
                 collect_refs(body, si, loop_d + 1, cond_d, refs);
@@ -2148,7 +2211,7 @@ fn collect_refs(stmts: &[Stmt], si: &mut usize, loop_d: usize, cond_d: usize, re
                     collect_refs(db, si, loop_d, cond_d, refs);
                 }
             }
-            Stmt::Expr(e) => {
+            Stmt::Expr(e, ..) => {
                 record_expr_refs(e, *si, unsafe_ctx, refs);
             }
             _ => {}
@@ -2176,7 +2239,7 @@ fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, f
                     }
                 }
             }
-            Stmt::If { cond: _, then_branch, else_branch } => {
+            Stmt::If { cond: _, then_branch, else_branch, .. } => {
                 set_moves(then_branch, si, loop_d, cond_d + 1, facts);
                 if let Some(eb) = else_branch {
                     set_moves(eb, si, loop_d, cond_d + 1, facts);

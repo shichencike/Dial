@@ -1,9 +1,9 @@
 [package]
 name = "dialc"
-version = "0.93.0"
+version = "0.94.0"
 edition = "2021"
 repository = "https://github.com/shichencike/Dial"
-description = "Dial 语言编译器 v0.93：静态强类型、无 GC、C ABI 前端；v0.7 可恢复异常 try/catch/throw，v0.8 move_to 所有权转移与多线程并发（thread/channel），v0.81 通道关闭与 EOF，v0.9 is_null 判空与多消费者安全，v0.91 多路复用 select，v0.92 char 字符类型，v0.93 import 与 .dialpkg 包分发"
+description = "Dial 语言编译器 v0.94：静态强类型、无 GC、C ABI 前端；v0.7 可恢复异常 try/catch/throw，v0.8 move_to 所有权转移与多线程并发（thread/channel），v0.81 通道关闭与 EOF，v0.9 is_null 判空与多消费者安全，v0.91 多路复用 select，v0.92 char 字符类型，v0.93 import 与 .dialpkg 包分发，v0.94 dialc lsp 语言服务器骨架"
 license = "GPL-3.0 OR MIT OR Apache-2.0"
 
 [[bin]]

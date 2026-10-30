@@ -3,6 +3,8 @@
 //! 用法：
 //!   dialc build <源文件.dial> [-o 可执行文件] [--no-link]
 //!   dialc run   <源文件.dial> [-o 可执行文件]
+//!   dialc install <包.dialpkg>
+//!   dialc lsp              （编辑器用的 Language Server，走 stdio，不由人手敲）
 //!
 //! 编译流水线（两步式）：
 //!   1) 源码 -> 词法 -> 语法 -> 语义(含数据流/逃逸分析) -> inkwell 内存中构建 IR -> write_to_file 直接 emit .o
@@ -14,6 +16,7 @@ mod ast;
 mod codegen;
 mod error;
 mod lexer;
+mod lsp;
 mod package;
 mod parser;
 mod semantic;
@@ -28,8 +31,20 @@ use semantic::analyze;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    // `dialc lsp`：Language Server。它不带文件参数，且**绝不能**往 stdout 打任何
+    // 人类可读的提示——stdout 是协议通道，写进去一个字客户端就解析失败。
+    // 因此它必须在下面「参数不足就打印用法」的检查之前先分流。
+    if args.len() >= 2 && args[1] == "lsp" {
+        if let Err(e) = lsp::run() {
+            eprintln!("[dialc lsp] 退出：{}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if args.len() < 3 {
-        eprintln!("用法: dialc <build|run> <源文件.dial> [-o 输出] [--no-link]");
+        eprintln!("用法: dialc <build|run|install> <源文件.dial|包.dialpkg> [-o 输出] [--no-link]");
         std::process::exit(1);
     }
     let command = args[1].as_str();
@@ -50,6 +65,31 @@ fn main() {
                     "   支持平台: {}",
                     manifest.supported_triples().join(", ")
                 );
+                // 装完就把「你能调什么」直接列出来。
+                // `.diali` 里的 `///` 文档注释在这里第一次派上用场——
+                // 否则用户装完包还得自己去找接口文件翻。
+                if let Ok(iface_path) = package::verify_iface(&dir, &manifest) {
+                    if let Ok(text) = fs::read_to_string(&iface_path) {
+                        if let Ok(iface) = package::parse_diali(&text) {
+                            if !iface.opaque_types.is_empty() {
+                                println!("   不透明类型: {}", iface.opaque_types.join(", "));
+                            }
+                            println!("   导出函数 ({} 个):", iface.fns.len());
+                            for f in &iface.fns {
+                                let params = f
+                                    .params
+                                    .iter()
+                                    .map(|(n, t)| format!("{}: {}", n, t))
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                println!("     extern fn {}({}): {}", f.name, params, f.ret);
+                                for d in &f.doc {
+                                    println!("       /// {}", d);
+                                }
+                            }
+                        }
+                    }
+                }
                 return;
             }
             Err(e) => {
@@ -231,7 +271,7 @@ fn main() {
 /// 这一步是 ARCHITECTURE.md §4.2「包处理流水线」的 ②③④：
 /// 读 manifest → 按 Triple 查映射字典 → 校验哈希 → 读 .diali 喂给 Sema；
 /// 第 ⑤ 步（把库加进链接命令）在 `link` 里完成。
-fn resolve_imports(
+pub fn resolve_imports(
     imports: &[String],
 ) -> Result<(Vec<(String, semantic::FuncInfo)>, Vec<PathBuf>, Vec<String>), String> {
     let mut externs: Vec<(String, semantic::FuncInfo)> = Vec::new();

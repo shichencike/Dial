@@ -158,10 +158,14 @@ pub enum Stmt {
         cond: Expr,
         then_branch: Vec<Stmt>,
         else_branch: Option<Vec<Stmt>>,
+        line: usize,
+        col: usize,
     },
     While {
         cond: Expr,
         body: Vec<Stmt>,
+        line: usize,
+        col: usize,
     },
     /// `break;`：跳出最内层循环（while / for）。仅允许出现在循环体内。
     Break(usize, usize),
@@ -175,6 +179,8 @@ pub enum Stmt {
         start: Expr,
         end: Expr,
         body: Vec<Stmt>,
+        line: usize,
+        col: usize,
     },
     Return(Option<Expr>, usize, usize),
     /// `throw <expr>;`：抛出可恢复异常。expr 必须是 Error 类型（编译期强制规范化）。
@@ -210,7 +216,10 @@ pub enum Stmt {
         col: usize,
     },
     /// 表达式语句（例如 print(...)、obj.method() 等）。
-    Expr(Expr),
+    ///
+    /// 带位置是所有语句的**统一要求**（v0.93）：诊断要能落在源码里，
+    /// 不能一律报到文件开头。见 `semantic::stmt_pos`。
+    Expr(Expr, usize, usize),
 }
 
 /// catch 子句：直接含一个可选的捕获变量名（Identifier）与一个代码块（Block）。

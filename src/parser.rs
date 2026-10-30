@@ -353,7 +353,7 @@ impl Parser {
                     }
                     _ => {
                         self.expect(TokenKind::Semicolon)?;
-                        Ok(Stmt::Expr(expr))
+                        Ok(Stmt::Expr(expr, tok.line, tok.col))
                     }
                 }
             }
@@ -382,6 +382,7 @@ impl Parser {
     }
 
     fn parse_if(&mut self) -> Result<Stmt> {
+        let start = self.peek().clone();
         self.expect(TokenKind::If)?;
         self.expect(TokenKind::LParen)?;
         let cond = self.parse_expr()?;
@@ -403,10 +404,14 @@ impl Parser {
             cond,
             then_branch,
             else_branch,
+            line: start.line,
+            col: start.col,
         })
     }
 
     fn parse_for(&mut self) -> Result<Stmt> {
+        // `start` 已被循环起始表达式占用，关键字位置另取一个名字
+        let kw = self.peek().clone();
         self.expect(TokenKind::For)?;
         self.expect(TokenKind::LParen)?;
         let var = self.expect_ident()?;
@@ -421,16 +426,24 @@ impl Parser {
             start,
             end,
             body,
+            line: kw.line,
+            col: kw.col,
         })
     }
 
     fn parse_while(&mut self) -> Result<Stmt> {
+        let start = self.peek().clone();
         self.expect(TokenKind::While)?;
         self.expect(TokenKind::LParen)?;
         let cond = self.parse_expr()?;
         self.expect(TokenKind::RParen)?;
         let body = self.parse_block()?;
-        Ok(Stmt::While { cond, body })
+        Ok(Stmt::While {
+            cond,
+            body,
+            line: start.line,
+            col: start.col,
+        })
     }
 
     fn parse_return(&mut self) -> Result<Stmt> {

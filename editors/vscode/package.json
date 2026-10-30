@@ -1,0 +1,80 @@
+{
+  "name": "dial",
+  "displayName": "Dial",
+  "description": "Dial 语言支持：诊断（保存即报）与语义高亮，由 dialc lsp 提供",
+  "version": "0.94.0",
+  "publisher": "dial-lang",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:dial"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "dial",
+        "aliases": [
+          "Dial",
+          "dial"
+        ],
+        "extensions": [
+          ".dial"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dial",
+        "scopeName": "source.dial",
+        "path": "./syntaxes/dial.tmLanguage.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "dial",
+        "scopes": {
+          "keyword": [
+            "keyword.control.dial"
+          ],
+          "string": [
+            "string.quoted.double.dial"
+          ],
+          "number": [
+            "constant.numeric.dial"
+          ],
+          "operator": [
+            "keyword.operator.dial"
+          ],
+          "variable": [
+            "variable.other.dial"
+          ],
+          "type": [
+            "entity.name.type.dial"
+          ]
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Dial",
+      "properties": {
+        "dial.lsp.path": {
+          "type": "string",
+          "default": "dialc",
+          "description": "dialc 可执行文件的路径（必须支持 lsp 子命令，即 v0.94 及以上）"
+        },
+        "dial.lsp.trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "把 LSP 收发记录打印到「输出 - Dial Language Server」面板（排障用）"
+        }
+      }
+    }
+  }
+}

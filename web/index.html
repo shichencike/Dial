@@ -31,7 +31,7 @@
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
     </div>
     <div class="kpis">
-      <span><b>v0.93</b> 当前版本</span>
+      <span><b>v0.94</b> 当前版本</span>
       <span><b>Rust + inkwell</b> / LLVM 18</span>
       <span><b>零</b> LLVM 运行时依赖</span>
       <span><b>短路</b> and / or</span>
@@ -41,22 +41,30 @@
   </div>
 </section>
 <div class="cards">
-  <div class="card"><h3>静态强类型，无推断</h3><p>每个变量、参数、返回值都必须显式标注类型。不存在 auto / 类型推导，杜绝隐式行为。</p></div><div class="card"><h3>不透明指针契约</h3><p>string 与 int[] 在 IR 中只是 ptr，用户代码永远无法触碰其内存布局，一切经由 C 导出函数。</p></div><div class="card"><h3>C 承担一切容器</h3><p>字符串、动态数组、哈希表、IO、内存管理全部由 C 实现，Dial 只负责把调用翻译出去。</p></div><div class="card"><h3>零隐式转换</h3><p>int 与 float 之间无隐式提升或窄化，必须显式调用 int_to_float / float_to_int。</p></div><div class="card"><h3>短路求值</h3><p>and / or 与 C 的 && / || 一致短路，保证判空等代码不会因盲目求值而崩溃。</p></div><div class="card"><h3>产物零 LLVM 依赖</h3><p>用户程序只依赖 C Runtime（libc），绝不链接 libLLVM。</p></div><div class="card"><h3>无 GC 底线（内存宪法）</h3><p>永不引入追踪式 GC。确定性内存管理靠 ARC 引用计数 + 编译期逃逸分析/移动语义，未来裸指针坚持「谁申请谁释放」。</p></div><div class="card"><h3>哈希表 map（ARC + COW）</h3><p>v0.4 新增 map 类型（int → int），与 string / int[] 共用同一套引用计数；put 触发扩容或写时复制后由编译器把新指针写回接收变量。</p></div><div class="card"><h3>for / else if / break / continue</h3><p>v0.4–v0.5 新增：for (i in start..end) 半开区间循环、else if 语法糖（编译期展开为嵌套 if）、break 与 continue（for 的 continue 先自增再判条件，不会死循环）。</p></div><div class="card"><h3>代码编写纪律</h3><p>拒绝过度抽象——宁可 WET 绝不 DRY 过头；不引入无用依赖；允许安全与性能的冗余；能用一个循环和一个 if 解决的绝不套设计模式。</p></div><div class="card"><h3>Fail-Fast 铁律（v0.6）</h3><p>宁可当场段错误，绝不产生未定义行为或静默错误数据。越界读写、负下标、整数除零一律当场终止：Debug 发射 int3、ReleaseSafe 发射 ud2，由操作系统接管 Core Dump。</p></div><div class="card"><h3>三档安全等级</h3><p>默认 Debug 崩溃保护全开；--release 保留防 UB 检查但陷阱更精简；--fast 关闭全部检查换取极限性能，等级同时作用于 LLVM IR 与 C Runtime。⚠️ --fast 下的越界将退化为 C 的未定义行为——除非你正在写底层核心算法且确信下标绝不越界，否则永远不要使用它。</p></div><div class="card"><h3>文件 IO（v0.61，v0.7 改抛 Error）</h3><p>新增 file 不透明句柄，仅封装 C 标准库 fopen / fread / fwrite / fclose；open / read / write / close 是最基础的 C 风格 API。无全局变量、无 Result 封装；v0.7 起失败即抛出 Error（业务失败与系统崩溃分离），用后即焚务必 close。</p></div><div class="card"><h3>可恢复异常 try / catch / throw（v0.7）</h3><p>throw Error("msg") 抛出；try { } catch e { } 捕获（catch 后无圆括号）；catch { } 省略变量名忽略具体错误。严禁抛出非 Error 类型。跳转前自动释放 try 作用域内所有活跃 ARC 局部，绝不泄漏；无异常的代码运行时开销为零（已用 nm 实测）。</p></div><div class="card"><h3>所有权转移与多线程并发（v0.8）</h3><p>move_to(x, ch) 是编译期 intrinsic：只发三条 IR 指令（取指针 → 入队 → 原槽清零），O(1) 且零 retain / release。移交后变量进入 Moved 状态，再读 / 再写 / 再转移一律编译期拒绝。spawn(fn, args...) 在 pthread_create 之前把实参写进 argcell，零竞争窗口；channel<T> 用原子 ARC 共享，send / recv 只传所有权不传引用 —— 用转移取代锁。</p></div><div class="card"><h3>通道关闭与 EOF（v0.81）</h3><p>补上并发模型唯一的功能缺口：没有 EOF 时，生产者一退出消费者就永远卡在 recv 上 —— 程序不是跑错而是死锁。现在 close(ch) 广播关闭，done(ch) 给出「已关闭且已空」的单调判据，于是 while (not done(ch)) { r = recv(ch); } 必然终止；try_recv 提供非阻塞取值，len(ch) 用于判断有没有取到。关闭后再 send 会废掉 EOF 语义，故当场 Fail-Fast。</p></div><div class="card"><h3>判空 · 多消费者安全 · 超时（v0.9）</h3><p>is_null(x) 让用户能分辨「没有值」与「真实值」——这是 Dial 此前完全缺失的能力；recv_timeout(ch, ms) 用 pthread_cond_timedwait 实现限时接收，绝不无限期阻塞。更重要的是修掉了一个真实死锁：通道通知此前用 signal 只唤醒一个等待者，多消费者下会让其余消费者带着失效条件睡死（对照实验：signal 版本 25 秒挂死，broadcast 版本 4.25 秒跑完 100 万元素）。</p></div><div class="card"><h3>多路复用 select（v0.91）</h3><p>select { case recv(ch) as v { ... } default { ... } } —— Dial 风格：接收永远是函数调用（没有 Go 的 <- 运算符），绑定用 as 关键字，select 是语句不是表达式。等待是事件驱动的（全局事件纪元 + 条件变量广播），实测 50 万次收发 wall 0.19s；多通道同时就绪时随机选取以防饿死。全体 EOF 时 select 直接结束、不执行任何分支。</p></div><div class="card"><h3>char 类型（v0.92）</h3><p>char 是「一个 Unicode 码点」：值类型、无 ARC、无空指针，与 int 同为 i64 但类型独立。字面量写作 'a' / '\n' / '中'。可比较（按码点序）、可经 char_to_int / int_to_char 零成本互转；但绝不参与 + - * /，也不与 int 混用——'a' + 1 的意图无法判定，源码必须把意图写清楚。print(c) 输出字符本身（按 UTF-8 编码），非法码点当场 Fail-Fast 终止。</p></div><div class="card"><h3>import 与 .dialpkg 包分发（v0.93）</h3><p>import "包名"; 即可引入预编译好的机器码——不写路径、不写平台、不写版本。dialc install 把 .dialpkg 解压到 ~/.dial/packages/（项目目录零侵入），按 Target Triple 索引出本平台的 .a / .lib 自动链入，并对 .diali 签名与那份机器码做 SHA256 强制校验：残缺或被篡改的二进制绝不进入链接器。包用 type Db; 声明不透明句柄——你永远拿不到内部布局，这正是「库作者随意重构、调用方零改动」的根基。</p></div><div class="card"><h3>三重开源许可（含许可隔离）</h3><p>GPL-3.0 OR MIT OR Apache-2.0 —— 三者任选其一遵守。三份协议原文与说明文档随源码及发布包完整分发。<b>许可按组件划分</b>：编译器前端（dialc 本体）为三重许可；但被静态链进你程序的标准库 libdial_std.a <b>强制锁定为 MIT 或 Apache-2.0，绝不允许以 GPL 条款链接进闭源程序</b>——工具可以是 GPL，被链进你程序里的运行时绝不能是。</p></div>
+  <div class="card"><h3>静态强类型，无推断</h3><p>每个变量、参数、返回值都必须显式标注类型。不存在 auto / 类型推导，杜绝隐式行为。</p></div><div class="card"><h3>不透明指针契约</h3><p>string 与 int[] 在 IR 中只是 ptr，用户代码永远无法触碰其内存布局，一切经由 C 导出函数。</p></div><div class="card"><h3>C 承担一切容器</h3><p>字符串、动态数组、哈希表、IO、内存管理全部由 C 实现，Dial 只负责把调用翻译出去。</p></div><div class="card"><h3>零隐式转换</h3><p>int 与 float 之间无隐式提升或窄化，必须显式调用 int_to_float / float_to_int。</p></div><div class="card"><h3>短路求值</h3><p>and / or 与 C 的 && / || 一致短路，保证判空等代码不会因盲目求值而崩溃。</p></div><div class="card"><h3>产物零 LLVM 依赖</h3><p>用户程序只依赖 C Runtime（libc），绝不链接 libLLVM。</p></div><div class="card"><h3>无 GC 底线（内存宪法）</h3><p>永不引入追踪式 GC。确定性内存管理靠 ARC 引用计数 + 编译期逃逸分析/移动语义，未来裸指针坚持「谁申请谁释放」。</p></div><div class="card"><h3>哈希表 map（ARC + COW）</h3><p>v0.4 新增 map 类型（int → int），与 string / int[] 共用同一套引用计数；put 触发扩容或写时复制后由编译器把新指针写回接收变量。</p></div><div class="card"><h3>for / else if / break / continue</h3><p>v0.4–v0.5 新增：for (i in start..end) 半开区间循环、else if 语法糖（编译期展开为嵌套 if）、break 与 continue（for 的 continue 先自增再判条件，不会死循环）。</p></div><div class="card"><h3>代码编写纪律</h3><p>拒绝过度抽象——宁可 WET 绝不 DRY 过头；不引入无用依赖；允许安全与性能的冗余；能用一个循环和一个 if 解决的绝不套设计模式。</p></div><div class="card"><h3>Fail-Fast 铁律（v0.6）</h3><p>宁可当场段错误，绝不产生未定义行为或静默错误数据。越界读写、负下标、整数除零一律当场终止：Debug 发射 int3、ReleaseSafe 发射 ud2，由操作系统接管 Core Dump。</p></div><div class="card"><h3>三档安全等级</h3><p>默认 Debug 崩溃保护全开；--release 保留防 UB 检查但陷阱更精简；--fast 关闭全部检查换取极限性能，等级同时作用于 LLVM IR 与 C Runtime。⚠️ --fast 下的越界将退化为 C 的未定义行为——除非你正在写底层核心算法且确信下标绝不越界，否则永远不要使用它。</p></div><div class="card"><h3>文件 IO（v0.61，v0.7 改抛 Error）</h3><p>新增 file 不透明句柄，仅封装 C 标准库 fopen / fread / fwrite / fclose；open / read / write / close 是最基础的 C 风格 API。无全局变量、无 Result 封装；v0.7 起失败即抛出 Error（业务失败与系统崩溃分离），用后即焚务必 close。</p></div><div class="card"><h3>可恢复异常 try / catch / throw（v0.7）</h3><p>throw Error("msg") 抛出；try { } catch e { } 捕获（catch 后无圆括号）；catch { } 省略变量名忽略具体错误。严禁抛出非 Error 类型。跳转前自动释放 try 作用域内所有活跃 ARC 局部，绝不泄漏；无异常的代码运行时开销为零（已用 nm 实测）。</p></div><div class="card"><h3>所有权转移与多线程并发（v0.8）</h3><p>move_to(x, ch) 是编译期 intrinsic：只发三条 IR 指令（取指针 → 入队 → 原槽清零），O(1) 且零 retain / release。移交后变量进入 Moved 状态，再读 / 再写 / 再转移一律编译期拒绝。spawn(fn, args...) 在 pthread_create 之前把实参写进 argcell，零竞争窗口；channel<T> 用原子 ARC 共享，send / recv 只传所有权不传引用 —— 用转移取代锁。</p></div><div class="card"><h3>通道关闭与 EOF（v0.81）</h3><p>补上并发模型唯一的功能缺口：没有 EOF 时，生产者一退出消费者就永远卡在 recv 上 —— 程序不是跑错而是死锁。现在 close(ch) 广播关闭，done(ch) 给出「已关闭且已空」的单调判据，于是 while (not done(ch)) { r = recv(ch); } 必然终止；try_recv 提供非阻塞取值，len(ch) 用于判断有没有取到。关闭后再 send 会废掉 EOF 语义，故当场 Fail-Fast。</p></div><div class="card"><h3>判空 · 多消费者安全 · 超时（v0.9）</h3><p>is_null(x) 让用户能分辨「没有值」与「真实值」——这是 Dial 此前完全缺失的能力；recv_timeout(ch, ms) 用 pthread_cond_timedwait 实现限时接收，绝不无限期阻塞。更重要的是修掉了一个真实死锁：通道通知此前用 signal 只唤醒一个等待者，多消费者下会让其余消费者带着失效条件睡死（对照实验：signal 版本 25 秒挂死，broadcast 版本 4.25 秒跑完 100 万元素）。</p></div><div class="card"><h3>多路复用 select（v0.91）</h3><p>select { case recv(ch) as v { ... } default { ... } } —— Dial 风格：接收永远是函数调用（没有 Go 的 <- 运算符），绑定用 as 关键字，select 是语句不是表达式。等待是事件驱动的（全局事件纪元 + 条件变量广播），实测 50 万次收发 wall 0.19s；多通道同时就绪时随机选取以防饿死。全体 EOF 时 select 直接结束、不执行任何分支。</p></div><div class="card"><h3>char 类型（v0.92）</h3><p>char 是「一个 Unicode 码点」：值类型、无 ARC、无空指针，与 int 同为 i64 但类型独立。字面量写作 'a' / '\n' / '中'。可比较（按码点序）、可经 char_to_int / int_to_char 零成本互转；但绝不参与 + - * /，也不与 int 混用——'a' + 1 的意图无法判定，源码必须把意图写清楚。print(c) 输出字符本身（按 UTF-8 编码），非法码点当场 Fail-Fast 终止。</p></div><div class="card"><h3>import 与 .dialpkg 包分发（v0.93）</h3><p>import "包名"; 即可引入预编译好的机器码——不写路径、不写平台、不写版本。dialc install 把 .dialpkg 解压到 ~/.dial/packages/（项目目录零侵入），按 Target Triple 索引出本平台的 .a / .lib 自动链入，并对 .diali 签名与那份机器码做 SHA256 强制校验：残缺或被篡改的二进制绝不进入链接器。包用 type Db; 声明不透明句柄——你永远拿不到内部布局，这正是「库作者随意重构、调用方零改动」的根基。</p></div><div class="card"><h3>dialc lsp 语言服务器（v0.94）</h3><p>编辑器里的红线与 dialc build 的报错是同一条错误、同一个位置、同一句文案——因为语言服务器直接调用编译器的词法 / 语法 / 语义，不另写第二套解析器（两套实现必然慢慢长歪）。保存即报诊断，语义高亮用的也是编译器自己的词法器。附带免 npm 安装的 VS Code 扩展：LSP 客户端是手写的 200 行，拷进扩展目录即可用。刻意不做补全与跳转定义——那需要跨文件符号表，硬做只能做出「猜」的结果，比不做更糟。</p></div><div class="card"><h3>三重开源许可（含许可隔离）</h3><p>GPL-3.0 OR MIT OR Apache-2.0 —— 三者任选其一遵守。三份协议原文与说明文档随源码及发布包完整分发。<b>许可按组件划分</b>：编译器前端（dialc 本体）为三重许可；但被静态链进你程序的标准库 libdial_std.a <b>强制锁定为 MIT 或 Apache-2.0，绝不允许以 GPL 条款链接进闭源程序</b>——工具可以是 GPL，被链进你程序里的运行时绝不能是。</p></div>
 </div>
 <section class="quickstart">
   <h2>快速开始</h2>
+  <p class="muted" style="text-align:center;margin-bottom:12px">
+    ⚠️ 仅支持 <b>Linux（x86_64 · 动态 glibc）</b>，且主要在 <b>近两年内发布的发行版</b>上验证
+    （Ubuntu 24.04 LTS / Fedora 42 / Debian 13 等）。musl 系统（如 Alpine）不支持——编译器本体与产物都依赖 glibc。
+  </p>
   <pre><code># 获取源码
 git clone https://github.com/shichencike/Dial.git
-cd Dial
+cd Dial                                # 仓库根即为编译器本体（Cargo.toml 与 src/ 都在根）
 
-# 构建编译器（需要本机 LLVM 18）
+# 构建编译器（需要本机 LLVM 18 开发库）
 export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18
-cargo build --release          # 产物：target/release/dialc
+cargo build --release                  # 产物：target/release/dialc
+
+# 让编译器本体能找到 libLLVM（仅影响编译器，不影响你编出来的程序）
+export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
+./target/release/dialc --version
 
 # 编译并运行一个 Dial 程序
 ./target/release/dialc run examples/hello.dial
 
-# 端到端自测（正向 + 负向 + 产物契约）
+# 端到端自测（正向 + 负向 + 产物契约 + LSP 等九组）
 ./tests/run_tests.sh</code></pre>
   <h2>最小示例</h2>
   <pre><code>fn main(): int {
@@ -65,14 +73,14 @@ cargo build --release          # 产物：target/release/dialc
     return 0;
 }</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.93.zip">dialc-v0.93.zip</a>（或自行 clone 仓库后构建）
+    下载源码包：<a href="../dialc-v0.94.zip">dialc-v0.94.zip</a>（或自行 clone 仓库后构建）
   </p>
 </section>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.93 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.94 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

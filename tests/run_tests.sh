@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 七组检查，全部通过才算绿：
+# 九组检查，全部通过才算绿：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   D. Fail-Fast：tests/trap/*.dial 越界/除零必须当场因信号终止，且不得打印哨兵；
@@ -11,6 +11,8 @@
 #   G. 未捕获异常：内建函数的隐式抛出允许写在 try 外，运行期必须 panic 且打印真实消息
 #      （v0.92 新增；不参与 E 组对照——异常不是安全等级检查，--fast 不该关掉它）。
 #   H. 包分发：示例 .dialpkg 的安装 + import 后编译运行 + SHA256 篡改必须被拦截（v0.93 新增）。
+#   I. LSP：`dialc lsp` 按真实 JSON-RPC 协议跑一遍——初始化、诊断定位、语义 token 的
+#      列偏移（含 UTF-16 换算）、以及 shutdown 后的干净退出（v0.93 新增）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -251,6 +253,21 @@ else
             cp "${TMP}/dlib.bak" "$dlib"   # 还原，避免污染后续用例
         fi
     fi
+fi
+
+echo
+echo "== I) LSP：dialc lsp 端到端协议往返（v0.93） =="
+# 单独一个 Python 脚本驱动：LSP 的语义 token 是差分编码的整数流，
+# 要在 shell 里解码 5 元组并反查源码子串根本不现实，
+# 而「反查子串」恰恰是能证明列偏移没算错的唯一手段。
+if command -v python3 >/dev/null 2>&1; then
+    if python3 tests/lsp_smoke.py; then
+        :
+    else
+        fail=1
+    fi
+else
+    echo "  ⚠️  跳过（未找到 python3）"
 fi
 
 echo

@@ -23,15 +23,21 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc-—-dial-语言编译器-v093">dialc — Dial 语言编译器 v0.93</a><ul>
+<li><a href="#dialc-—-dial-语言编译器-v094">dialc — Dial 语言编译器 v0.94</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
 <li><a href="#3-构建与使用">3. 构建与使用</a><ul>
-<li><a href="#31-构建编译器">3.1 构建编译器</a></li>
-<li><a href="#32-编译-dial-程序">3.2 编译 Dial 程序</a></li>
-<li><a href="#33-产物依赖契约">3.3 产物依赖契约</a><ul>
-<li><a href="#331-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.3.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</a></li>
+<li><a href="#31-运行环境要求linux-·-动态-glibc">3.1 运行环境要求（Linux · 动态 glibc）</a><ul>
+<li><a href="#311-操作系统近两年内的新发行版本">3.1.1 操作系统：近两年内的新发行版本</a></li>
+<li><a href="#312-工具链">3.1.2 工具链</a></li>
+<li><a href="#313-运行-dialc-本体时的动态库要求">3.1.3 运行 dialc 本体时的动态库要求</a></li>
+</ul>
+</li>
+<li><a href="#32-从源码构建克隆-→-进入-→-编译">3.2 从源码构建：克隆 → 进入 → 编译</a></li>
+<li><a href="#33-编译-dial-程序">3.3 编译 Dial 程序</a></li>
+<li><a href="#34-产物依赖契约">3.4 产物依赖契约</a><ul>
+<li><a href="#341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</a></li>
 </ul>
 </li>
 </ul>
@@ -122,7 +128,7 @@
 <li><a href="#16-内置-print">16. 内置 print</a></li>
 <li><a href="#17-未定义行为与已实现边界">17. 未定义行为与已实现边界</a><ul>
 <li><a href="#171-未定义行为">17.1 未定义行为</a></li>
-<li><a href="#172-尚未实现的能力截至-v093">17.2 尚未实现的能力（截至 v0.93）</a></li>
+<li><a href="#172-尚未实现的能力截至-v094">17.2 尚未实现的能力（截至 v0.94）</a></li>
 </ul>
 </li>
 <li><a href="#18-测试">18. 测试</a><ul>
@@ -233,11 +239,19 @@
 <li><a href="#2710-当前边界">27.10 当前边界</a></li>
 </ul>
 </li>
+<li><a href="#28-语言服务器-dialc-lspv094-骨架">28. 语言服务器 dialc lsp（v0.94 骨架）</a><ul>
+<li><a href="#281-为什么是「同一套代码」而不是独立的解析器">28.1 为什么是「同一套代码」而不是独立的解析器</a></li>
+<li><a href="#282-已支持">28.2 已支持</a></li>
+<li><a href="#283-两个容易出错已经处理好的细节">28.3 两个容易出错、已经处理好的细节</a></li>
+<li><a href="#284-刻意没做的部分">28.4 刻意没做的部分</a></li>
+<li><a href="#285-诊断位置v094-顺带修掉的一个缺陷">28.5 诊断位置（v0.94 顺带修掉的一个缺陷）</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
 </div>
-<h1 id="dialc-—-dial-语言编译器-v093">dialc — Dial 语言编译器 v0.93</h1>
+<h1 id="dialc-—-dial-语言编译器-v094">dialc — Dial 语言编译器 v0.94</h1>
 <blockquote>
 <p><strong>GitHub Repository：</strong> https://github.com/shichencike/Dial</p>
 <h2 id="开源许可三重许可任选其一">开源许可：三重许可（任选其一）</h2>
@@ -247,12 +261,12 @@
 三份协议原文随源码与发布压缩包<strong>完整分发</strong>：<a href="LICENSE-GPLv3"><code>LICENSE-GPLv3</code></a>、
 <a href="LICENSE-MIT"><code>LICENSE-MIT</code></a>、<a href="LICENSE-APACHE"><code>LICENSE-APACHE</code></a>。</p>
 <p>注意：本许可只覆盖 <strong>Dial 编译器与标准库的源码</strong>。你用 Dial <strong>写出来的程序</strong>
-只链接 libc，不链接 LLVM 运行库，因此<strong>不受本许可约束</strong>（见 <a href="#33-产物依赖契约">§3.3 产物依赖契约</a>）。</p>
+只链接 libc，不链接 LLVM 运行库，因此<strong>不受本许可约束</strong>（见 <a href="#34-产物依赖契约">§3.4 产物依赖契约</a>）。</p>
 </blockquote>
 <p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
-<p>本文件是 v0.93 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
+<p>本文件是 v0.94 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。</p>
 <hr />
 <h2 id="1-设计原则">1. 设计原则</h2>
@@ -326,12 +340,145 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 </code></pre>
 <hr />
 <h2 id="3-构建与使用">3. 构建与使用</h2>
-<h3 id="31-构建编译器">3.1 构建编译器</h3>
-<pre><code class="language-bash">export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18   # 按本机 LLVM 18 安装路径调整
+<h3 id="31-运行环境要求linux-·-动态-glibc">3.1 运行环境要求（Linux · 动态 glibc）</h3>
+<p>Dial <strong>只在 Linux 上开发与验证</strong>，并且要求系统使用 <strong>glibc 动态链接</strong>（不是 musl）。</p>
+<blockquote>
+<p><strong>为什么强调「动态 glibc」？</strong>
+- <code>dialc</code> 编译器本体链接 <code>libLLVM.so</code>，而 libLLVM 是 <strong>glibc ABI</strong> 的产物；
+  musl 系统（如 Alpine）里既没有它，跨 ABI 也用不了。
+- 用户编译出的可执行文件<strong>动态链接 libc</strong>（见 <a href="#34-产物依赖契约">§3.4 产物依赖契约</a>），
+  因此它也只能在 glibc 系统上跑。
+- 所以：<strong>请用带 glibc 的常规发行版</strong>；<strong>Alpine Linux、Void(musl)、Gentoo(musl profile) 等 musl 系统不在支持范围。</strong></p>
+</blockquote>
+<h4 id="311-操作系统近两年内的新发行版本">3.1.1 操作系统：近两年内的新发行版本</h4>
+<p>我们只在<strong>近两年内发布、且采用 glibc 的发行版</strong>上验证过。下表是已知可工作的范围
+（x86_64 架构）：</p>
+<table>
+<thead>
+<tr>
+<th>发行版</th>
+<th>推荐版本（发布年份）</th>
+<th>glibc 动态链接</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Ubuntu</strong></td>
+<td>24.04 LTS（2024）/ 24.10 / 25.04 / 25.10</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>Debian</strong></td>
+<td>13 trixie（2025）/ 12 bookworm（2023，下限）</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>Fedora</strong></td>
+<td>40 / 41 / 42（2024–2025）</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>Linux Mint</strong></td>
+<td>22（2024，基于 Ubuntu 24.04）</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>openSUSE</strong></td>
+<td>Leap 15.6（2024）/ Tumbleweed（滚动）</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>Arch Linux</strong></td>
+<td>滚动（持续在近两年内）</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>❌ <strong>Alpine</strong></td>
+<td>任意版本</td>
+<td>❌ musl，不支持</td>
+</tr>
+<tr>
+<td>❌ <strong>Void / Gentoo（musl）</strong></td>
+<td>任意版本</td>
+<td>❌ musl，不支持</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>一句话：装一台 <strong>2024 年之后发布的、带 glibc 的 x86_64 Linux</strong>（例如 Ubuntu 24.04 LTS 或 Fedora 42），
+就满足操作系统层面的要求。更老的系统若 glibc 版本过低（&lt; 2.35）也可能无法运行预编译产物，
+因此「近两年」既是验证范围，也是稳妥下限。</p>
+</blockquote>
+<h4 id="312-工具链">3.1.2 工具链</h4>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>版本要求</th>
+<th>用途</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Rust 工具链</strong>（<code>cargo</code> / <code>rustc</code>）</td>
+<td>stable（≥ 1.80）</td>
+<td>编译 <code>dialc</code> 本体</td>
+<td>用 <code>rustup</code> 安装最省事</td>
+</tr>
+<tr>
+<td><strong>LLVM 18 开发库</strong></td>
+<td>18.x</td>
+<td><code>dialc</code> 链接 <code>libLLVM.so</code></td>
+<td>提供 <code>libLLVM.so.18</code>、<code>llvm-config</code></td>
+</tr>
+<tr>
+<td><strong>C 编译器</strong>：<code>zig cc</code> 优先，缺失时回退 <code>clang</code></td>
+<td>zig ≥ 0.11 <strong>或</strong> clang ≥ 18</td>
+<td>链接阶段把 <code>stdlib/</code> + <code>runtime/</code> 编成 <code>libdial_std.a</code> 并链接</td>
+<td>见 <a href="#33-编译-dial-程序">§3.3</a></td>
+</tr>
+</tbody>
+</table>
+<p>安装示例（Ubuntu 24.04）：</p>
+<pre><code class="language-bash"># LLVM 18（含 libLLVM.so 与 clang）
+sudo apt-get update
+sudo apt-get install -y llvm-18-dev clang-18 libclang-18-dev
+
+# Rust（若尚未安装）
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source &quot;$HOME/.cargo/env&quot;
+
+# 链接阶段用的 C 编译器：优先 zig；装了就无需 clang
+#   sudo apt-get install -y zig        # 可选，未装则自动回退 clang-18
+</code></pre>
+<h4 id="313-运行-dialc-本体时的动态库要求">3.1.3 运行 <code>dialc</code> 本体时的动态库要求</h4>
+<p><code>dialc</code> 自身依赖 <code>libLLVM.so.18</code>。如果该库不在系统默认库路径里，运行 <code>dialc</code> 前需要把它加进
+<code>LD_LIBRARY_PATH</code>（<strong>仅影响编译器，不影响你编出来的程序</strong>）：</p>
+<pre><code class="language-bash">export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH   # 按本机路径调整
+dialc --version
+</code></pre>
+<blockquote>
+<p>把 <code>libLLVM.so.18</code> 装进 <code>/usr/lib</code> 或 <code>/usr/lib/x86_64-linux-gnu</code> 等默认路径后，
+这一行就可以省掉——它只是给「编译器启动」用的，与最终产物的依赖无关。</p>
+</blockquote>
+<h3 id="32-从源码构建克隆-→-进入-→-编译">3.2 从源码构建：克隆 → 进入 → 编译</h3>
+<pre><code class="language-bash"># 1) 克隆源码
+git clone https://github.com/shichencike/Dial.git
+cd Dial                                  # 进入工程根目录（编译器本体就在这里：Cargo.toml 与 src/ 都在根）
+
+# 2) 编译（编译器本体就位于仓库根，无需再进子目录）
+export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18   # 指向本机 LLVM 18（见 §3.1.2）
 cargo build --release                          # 产物：target/release/dialc
+
+# 3) 让编译器本体能找到 libLLVM（见 §3.1.3）
+export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
+
+# 4) 验证
+./target/release/dialc --version
 </code></pre>
 <p><code>dialc</code> 自身链接 libLLVM——这是<strong>编译器</strong>的依赖，与用户程序无关。</p>
-<h3 id="32-编译-dial-程序">3.2 编译 Dial 程序</h3>
+<h3 id="33-编译-dial-程序">3.3 编译 Dial 程序</h3>
 <pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast]
 dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fast]
 </code></pre>
@@ -402,7 +549,7 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
 <li><code>--no-link</code> 只执行第一步，便于交叉编译或自行接管链接。</li>
 <li>中间产物落在工程根的 <code>.dialc_build/</code>（C 的 <code>.o</code> 与 <code>libdial_std.a</code>）。</li>
 </ul>
-<h3 id="33-产物依赖契约">3.3 产物依赖契约</h3>
+<h3 id="34-产物依赖契约">3.4 产物依赖契约</h3>
 <p>用户编译出的可执行文件<strong>只允许</strong>依赖 C Runtime：</p>
 <pre><code class="language-bash">$ ldd examples/hello
     linux-vdso.so.1
@@ -410,7 +557,7 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
     /lib64/ld-linux-x86-64.so.2
 </code></pre>
 <p><code>tests/run_tests.sh</code> 的 C 组会把"产物不得依赖 libLLVM"作为<strong>硬断言</strong>执行。</p>
-<h4 id="331-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.3.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</h4>
+<h4 id="341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</h4>
 <p>上表的 <code>libc</code> 之外还有一个<strong>被静态链入</strong>用户产物的组件：<strong><code>libdial_std.a</code></strong>
 （<code>stdlib/</code> 与 <code>runtime/</code> 编译归档而成的 C Runtime，见 <a href="#15-ffi-契约dial-语法--c-函数">§15</a>）。
 它随每一个 Dial 程序一起进入最终可执行文件，因此它的许可条款<strong>直接作用于用户的程序</strong>：</p>
@@ -1835,13 +1982,14 @@ void     dial_map_release(DialMap m);
 </tr>
 </tbody>
 </table>
-<h3 id="172-尚未实现的能力截至-v093">17.2 尚未实现的能力（截至 v0.93）</h3>
+<h3 id="172-尚未实现的能力截至-v094">17.2 尚未实现的能力（截至 v0.94）</h3>
 <blockquote>
 <p>已落地：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
 <code>let</code> + 原地修改方法（push/set/put）的接收者约束、<code>else if</code> 语法糖、<code>for</code> 范围循环、<code>break</code> / <code>continue</code>、
 Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§26）、
 所有权转移与多线程并发（§27，含 v0.81 的通道关闭与 EOF、v0.9 的判空与多消费者安全）、
-<strong><code>char</code> 类型（v0.92，见 §5.1）</strong>。
+<strong><code>char</code> 类型（v0.92，见 §5.1）</strong>、<strong><code>import</code> 与 <code>.dialpkg</code> 包分发（v0.93，见 §25）</strong>、
+<strong><code>dialc lsp</code> 语言服务器骨架（v0.94，见 §28）</strong>。
 其余仍按计划未实现：</p>
 </blockquote>
 <table>
@@ -1916,13 +2064,17 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td>一等函数 / 函数指针</td>
 <td>不支持——<code>spawn</code> 首参只能是顶层具名函数</td>
 </tr>
+<tr>
+<td>LSP 的补全 / 跳转定义 / 悬停 / 重命名 / 格式化</td>
+<td><strong>未实现</strong>（v0.94 只有诊断与语义高亮，见 <a href="#284-刻意没做的部分">§28.4</a>）——这些都要跨文件符号表，不是「再写几个请求」的事</td>
+</tr>
 </tbody>
 </table>
 <hr />
 <h2 id="18-测试">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
-<p>五组检查，全部通过才算绿：</p>
+<p>九组检查，全部通过才算绿：</p>
 <table>
 <thead>
 <tr>
@@ -1954,6 +2106,18 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <tr>
 <td><strong>F. 并发压测</strong>（v0.9 新增）</td>
 <td>绕开编译器直压 <code>stdlib/dial_channel.c</code>：8 个消费者抢同一个通道、100 万元素、队列深 64。校验「每个元素恰好被取走一次」（位图 + 原子 <code>fetch_or</code>，重复领取即失败）与「总数守恒」。若发生丢唤醒，消费者 <code>join</code> 会永远挂住，由 timeout 判失败</td>
+</tr>
+<tr>
+<td><strong>G. 未捕获异常</strong>（v0.92 新增）</td>
+<td>内建函数的隐式抛出允许写在 <code>try</code> 外：必须编译通过，运行期 panic 终止并打印<strong>真实消息</strong>（锁定的是「消息没被当成整数打印」这个曾经的缺陷）。不参与 E 组对照——异常不是安全等级检查，<code>--fast</code> 不该关掉它</td>
+</tr>
+<tr>
+<td><strong>H. 包分发</strong>（v0.93 新增）</td>
+<td>构建示例 <code>.dialpkg</code> → 安装 → <code>import</code> 后编译运行比对黄金输出 → <strong>篡改一个字节后必须被 SHA256 拦下</strong>，绝不允许流到链接器</td>
+</tr>
+<tr>
+<td><strong>I. LSP</strong>（v0.94 新增）</td>
+<td>真起一个 <code>dialc lsp</code> 子进程、按 JSON-RPC 往返：初始化能力、诊断定位到<strong>出错那一行</strong>、语义 token 的差分解码与<strong>源码子串反查</strong>（含中文的 UTF-16 换算）、<code>shutdown</code> 后干净退出。见 <code>tests/lsp_smoke.py</code></td>
 </tr>
 </tbody>
 </table>
@@ -2415,7 +2579,7 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 </tr>
 </tbody>
 </table>
-<p>相关文档同步更新：§1（设计原则表）、§2（目录结构）、§3.2（安全等级参数）、§11.5（越界行为）、
+<p>相关文档同步更新：§1（设计原则表）、§2（目录结构）、§3.3（安全等级参数）、§11.5（越界行为）、
 §17.1（UB 清单重写）、§18（测试组）、§21.3（冗余原则与 Fail-Fast 的关系）。</p>
 <h3 id="222-v05相对-v04">22.2 v0.5（相对 v0.4）</h3>
 <p>本版补齐循环控制流，并把<a href="#21-代码编写纪律防臃肿与允许冗余原则">代码编写纪律</a>正式写入规范。</p>
@@ -3082,7 +3246,7 @@ extern fn db_close(db: Db): void;
 </table>
 <h3 id="258-许可隔离第三方包同样绝不以-gpl-链接进用户程序">25.8 许可隔离：第三方包同样绝不以 GPL 链接进用户程序</h3>
 <p>包分发的机器码（<code>lib/</code> 下的 <code>.a</code> / <code>.lib</code>）会被<strong>静态链入</strong>用户的可执行文件，
-因此<strong>每一个包</strong>都与 <a href="#331-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">§3.3.1</a> 的标准库
+因此<strong>每一个包</strong>都与 <a href="#341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">§3.4.1</a> 的标准库
 面临完全相同的法务传染问题，并且风险更大——包的作者不是 Dial 自己，用户无从替他做担保。</p>
 <blockquote>
 <p><strong>包内的机器码与 <code>.diali</code> 接口签名，其许可由包作者自行决定；
@@ -4197,12 +4361,122 @@ while (true) {
 <td>二次 <code>join</code> / <code>detach</code> 触发 Fail-Fast 断言</td>
 </tr>
 </tbody>
-</table></main></div>
+</table>
+<hr />
+<h2 id="28-语言服务器-dialc-lspv094-骨架">28. 语言服务器 <code>dialc lsp</code>（v0.94 骨架）</h2>
+<pre><code class="language-bash">dialc lsp
+</code></pre>
+<p>它不从终端读命令、也不往终端写报告：<strong>stdin 收 JSON-RPC，stdout 回 JSON-RPC</strong>，
+按 <code>Content-Length</code> 分帧。你不会手敲这条命令——它由编辑器启动
+（<a href="editors/vscode/"><code>editors/vscode/</code></a> 下有一个免安装依赖的 VS Code 扩展）。</p>
+<pre><code>编辑器  ──stdin──▶  dialc lsp  ──stdout──▶  编辑器
+                        │
+                        └─ 词法 → 语法 → 语义（与 dialc build 同一套代码）
+</code></pre>
+<h3 id="281-为什么是「同一套代码」而不是独立的解析器">28.1 为什么是「同一套代码」而不是独立的解析器</h3>
+<p>编辑器里的诊断最容易出的毛病不是报错太少，而是<strong>与编译器不一致</strong>：
+编辑器说没问题、编译器说有；或者反过来。根因几乎总是——编辑器侧另写了一套解析器，
+两套实现慢慢长歪。</p>
+<p><code>dialc lsp</code> 不写第二套：它直接调用 <code>lexer::lex</code> / <code>parser::parse_with</code> / <code>semantic::analyze</code>。
+因此<strong>编辑器里的红线与 <code>dialc build</code> 的报错是同一条错误、同一个位置、同一句文案</strong>。
+代价是每次诊断都要跑一遍完整前端；收益是「所见即所编」，这个代价值得。</p>
+<h3 id="282-已支持">28.2 已支持</h3>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>时机</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>诊断</strong></td>
+<td><code>didOpen</code>、<code>didSave</code></td>
+<td>词法 / 语法 / 语义三阶段任一失败即停，只报<strong>第一个</strong>错误（与 <code>dialc build</code> 一致：第一个错误之后的位置信息已经失真，报一串连锁错误只会淹没真正的问题）</td>
+</tr>
+<tr>
+<td><strong>诊断清空</strong></td>
+<td><code>didSave</code>（改正后）、<code>didClose</code></td>
+<td>关掉文件后不留残留红线</td>
+</tr>
+<tr>
+<td><strong>语义高亮</strong></td>
+<td><code>textDocument/semanticTokens/full</code></td>
+<td>关键字 / 字符串 / 数字 / 运算符 / 类型 / 标识符</td>
+</tr>
+<tr>
+<td>能力协商</td>
+<td><code>initialize</code></td>
+<td>声明 <code>textDocumentSync = 1</code>（全量同步）与语义 token 的 legend</td>
+</tr>
+</tbody>
+</table>
+<p>刻意<strong>不</strong>在 <code>didChange</code> 时发诊断：打字到一半的代码必然是错的，
+边打边报会让红线在半句话上反复闪。诊断留给保存时——这也是本节标题写「保存时诊断」的原因。</p>
+<h3 id="283-两个容易出错已经处理好的细节">28.3 两个容易出错、已经处理好的细节</h3>
+<p><strong>行列基准不同。</strong> dialc 内部的 <code>line</code> / <code>col</code> 都从 <strong>1</strong> 起，LSP 的 <code>line</code> / <code>character</code>
+都从 <strong>0</strong> 起。少减一个 1，整列高亮就会偏移一格。</p>
+<p><strong>列的计量单位不同。</strong> 词法器按 <strong>char</strong> 记列，LSP 按 <strong>UTF-16 码元</strong>记列。</p>
+<p>这里有个容易搞错的直觉：很多人以为「有中文就要换算」，<strong>并不对</strong>。
+中文「你」在 BMP 内，1 个 char 就是 1 个码元，<code>"你好"</code> 连引号是 4 个 char 也是 <strong>4 个码元</strong>——
+它根本测不出换算错误。真正分叉的是 BMP <strong>之外</strong>的字符（emoji 等）：
+<code>"🙂"</code> 是 <strong>3 个 char 但 4 个码元</strong>，少算那一个码元，这一行后面所有 token 会整体右偏一格。</p>
+<p>I 组测试因此<strong>同时</strong>放了两行：中文那行证明长度本身没算错，emoji 那行才真正锁定换算。
+我们验证过这个测试不是摆设：把换算那一行代码删掉重跑，只有 emoji 那条变红（中文那条依然绿）——
+正是上面这段分析所预期的样子。</p>
+<h3 id="284-刻意没做的部分">28.4 刻意没做的部分</h3>
+<table>
+<thead>
+<tr>
+<th>没做</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>补全、跳转定义、悬停、重命名、格式化</td>
+<td>都建立在<strong>跨文件符号表</strong>之上。Dial 目前一次编译一个文件，还没有符号表可查——硬做只能做出「猜」的结果，那比不做更糟</td>
+</tr>
+<tr>
+<td>区分变量名与函数名（高亮上）</td>
+<td>同上，需要符号表。当前标识符一律标 <code>variable</code>：<strong>宁可不标，也不标错</strong></td>
+</tr>
+<tr>
+<td>行注释高亮</td>
+<td>词法器直接丢弃注释、不产 token，语义 token 也就拿不到它。注释高亮交给编辑器的 TextMate 语法（已在扩展里提供），那才是它的主场</td>
+</tr>
+<tr>
+<td>增量文档同步</td>
+<td>全量同步（<code>textDocumentSync = 1</code>）对当前规模足够了；增量同步省下的那点带宽，换不来它带来的偏移换算复杂度</td>
+</tr>
+<tr>
+<td>引入 LSP 框架（tower-lsp 等）</td>
+<td>本骨架只需要「读一条 JSON、写一条 JSON」。框架带来的异步运行时与依赖树，远超它省下的那点代码</td>
+</tr>
+</tbody>
+</table>
+<h3 id="285-诊断位置v094-顺带修掉的一个缺陷">28.5 诊断位置（v0.94 顺带修掉的一个缺陷）</h3>
+<p>Dial 的 <code>Expr</code> 不携带行列，因此表达式里的语义错误（比如 <code>'a' + 1</code>）天然「不知道在哪」，
+原先一律报 <code>第 0 行 第 0 列</code>——在编辑器里就是<strong>第一行一个红点</strong>，等于没定位。</p>
+<p>v0.94 的处理：给<strong>所有</strong>语句补上位置（连 <code>If</code> / <code>While</code> / <code>For</code> / 表达式语句都补了，
+此前只有 <code>var</code> / <code>return</code> 这类带），然后在语义检查的语句边界上做<strong>兜底包装</strong>：</p>
+<pre><code class="language-rust">// 只补「缺失」的位置，已经精确定位的错误原样放行
+check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
+    DialcError::new(e.message, line, col)   // line/col = 本语句的位置
+} else { e })
+</code></pre>
+<p>于是 <code>let c: char = 'a' + 1;</code> 的诊断落在<strong>这一行</strong>，而不是文件开头。
+代价是精度只到「语句级」而非「表达式级」——这是不做 Expr span 的必然结果，
+也是当前规模下正确的取舍：语句级定位已经够用，而给每个 Expr 加 span 会牵动
+解析器与代码生成的每一处构造点。</p>
+<p>顺带一提，也是这次改动让 B 组负向用例的输出全部带上了「第 N 行 第 M 列」。</p>
+<hr /></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.93 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.94 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 
