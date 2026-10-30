@@ -30,6 +30,7 @@ NAV = """
       <a href="index.html">首页</a>
       <a href="spec.html">语言规范</a>
       <a href="changelog.html">更新日志</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
       <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
     </nav>
   </div>
@@ -40,7 +41,7 @@ FOOTER = """
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.91 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
+    <span class="muted">v0.91 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 """
@@ -258,7 +259,11 @@ def render_index() -> str:
 </div>
 <section class="quickstart">
   <h2>快速开始</h2>
-  <pre><code># 构建编译器（需要本机 LLVM 18）
+  <pre><code># 获取源码
+git clone https://github.com/shichencike/Dial.git
+cd Dial
+
+# 构建编译器（需要本机 LLVM 18）
 export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18
 cargo build --release          # 产物：target/release/dialc
 

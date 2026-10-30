@@ -1,5 +1,7 @@
 # dialc — Dial 语言编译器 v0.91
 
+> **GitHub Repository：** https://github.com/shichencike/Dial
+
 > ## 开源许可：三重许可（任选其一）
 >
 > Dial 以 **GPL-3.0、MIT、Apache-2.0** 三份协议**同时**发布，用 `OR` 连接：
