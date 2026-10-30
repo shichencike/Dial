@@ -23,64 +23,72 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
 <li><a href="#更新日志-changelog">更新日志 / Changelog</a><ul>
-<li><a href="#090-—-2026-10-30">[0.9.0] — 2026-10-30</a><ul>
+<li><a href="#0910-—-2026-10-30">[0.91.0] — 2026-10-30</a><ul>
 <li><a href="#added新增">Added（新增）</a></li>
-<li><a href="#fixed修复">Fixed（修复）</a></li>
 <li><a href="#added测试与示例">Added（测试与示例）</a></li>
+<li><a href="#fixed修复">Fixed（修复）</a></li>
+<li><a href="#性能数据">性能数据</a></li>
+<li><a href="#已知限制与未来方向">已知限制与未来方向</a></li>
+</ul>
+</li>
+<li><a href="#090-—-2026-10-30">[0.9.0] — 2026-10-30</a><ul>
+<li><a href="#added新增_1">Added（新增）</a></li>
+<li><a href="#fixed修复_1">Fixed（修复）</a></li>
+<li><a href="#added测试与示例_1">Added（测试与示例）</a></li>
 <li><a href="#changed文档">Changed（文档）</a></li>
 <li><a href="#验证数据">验证数据</a></li>
 </ul>
 </li>
 <li><a href="#0810-—-2026-10-30">[0.81.0] — 2026-10-30</a><ul>
-<li><a href="#added新增_1">Added（新增）</a></li>
+<li><a href="#added新增_2">Added（新增）</a></li>
 <li><a href="#changed语义变更">Changed（语义变更）</a></li>
 <li><a href="#修正的设计回退">修正的设计回退</a></li>
 <li><a href="#测试">测试</a></li>
 </ul>
 </li>
 <li><a href="#080-—-2026-10-30">[0.8.0] — 2026-10-30</a><ul>
-<li><a href="#added新增_2">Added（新增）</a></li>
+<li><a href="#added新增_3">Added（新增）</a></li>
 <li><a href="#changed变更">Changed（变更）</a></li>
 <li><a href="#设计约束本版刻意不做">设计约束（本版刻意不做）</a></li>
 <li><a href="#验证">验证</a></li>
 </ul>
 </li>
 <li><a href="#070-—-2026-10-30">[0.7.0] — 2026-10-30</a><ul>
-<li><a href="#added新增_3">Added（新增）</a></li>
+<li><a href="#added新增_4">Added（新增）</a></li>
 <li><a href="#changed变更_1">Changed（变更）</a></li>
 <li><a href="#设计约束用户拍板">设计约束（用户拍板）</a></li>
 <li><a href="#推迟不在本版">推迟（不在本版）</a></li>
 </ul>
 </li>
 <li><a href="#0610-—-2026-10-29">[0.61.0] — 2026-10-29</a><ul>
-<li><a href="#added新增_4">Added（新增）</a></li>
+<li><a href="#added新增_5">Added（新增）</a></li>
 <li><a href="#changed变更_2">Changed（变更）</a></li>
 <li><a href="#设计约束用户拍板_1">设计约束（用户拍板）</a></li>
 </ul>
 </li>
 <li><a href="#060-—-2026-10-29">[0.6.0] — 2026-10-29</a><ul>
-<li><a href="#added新增_5">Added（新增）</a></li>
+<li><a href="#added新增_6">Added（新增）</a></li>
 <li><a href="#changed变更_3">Changed（变更）</a></li>
 <li><a href="#added060-补充">Added（0.6.0 补充）</a></li>
 <li><a href="#实测对照同一份越界代码三档行为">实测对照（同一份越界代码，三档行为）</a></li>
 </ul>
 </li>
 <li><a href="#050-—-2026-10-29">[0.5.0] — 2026-10-29</a><ul>
-<li><a href="#added新增_6">Added（新增）</a></li>
+<li><a href="#added新增_7">Added（新增）</a></li>
 <li><a href="#docs文档">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#040-—-2026-11-02">[0.4.0] — 2026-11-02</a><ul>
-<li><a href="#added新增_7">Added（新增）</a></li>
+<li><a href="#added新增_8">Added（新增）</a></li>
 <li><a href="#changed变更_4">Changed（变更）</a></li>
-<li><a href="#fixed修复_1">Fixed（修复）</a></li>
+<li><a href="#fixed修复_2">Fixed（修复）</a></li>
 <li><a href="#docs文档_1">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#030-—-2026-10-28">[0.3.0] — 2026-10-28</a><ul>
-<li><a href="#added新增_8">Added（新增）</a></li>
+<li><a href="#added新增_9">Added（新增）</a></li>
 <li><a href="#changed变更_5">Changed（变更）</a></li>
-<li><a href="#fixed修复_2">Fixed（修复）</a></li>
+<li><a href="#fixed修复_3">Fixed（修复）</a></li>
 <li><a href="#docs文档_2">Docs（文档）</a></li>
 </ul>
 </li>
@@ -95,6 +103,83 @@
 <a href="https://semver.org/lang/zh-CN/">语义化版本</a> 的精神：不兼容的语义变更属于同主版本内的修订（v0.x 阶段语言尚不稳定，修订号递增即可能含破坏性语义调整）。</p>
 <p><strong>版本号规则</strong>：Dial 采用<strong>十进制递增</strong>（非语义化版本的三段式）——重大更新 / 新引擎 / 大重构 <code>+0.1</code>，小功能 / 新语法 <code>+0.01</code>，补丁 / 次要改动 <code>+0.001</code>，且<strong>禁止一次跳版</strong>（除非用户明确要求）。详见 <a href="#23-版本号规则">README §23</a>。</p>
 <hr />
+<h2 id="0910-—-2026-10-30">[0.91.0] — 2026-10-30</h2>
+<p>本版落地<strong>多路复用 <code>select</code></strong>（见 README <a href="README.md#279-多路复用-selectv091">§27.9</a>）——
+同时监听多个通道，任一就绪即执行对应分支。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong>新语法</strong>（4 个关键字）：
+  <code>dial
+  select {
+      case recv(chA) as a { ... }
+      case recv(chB) as b { ... }
+      default { ... }
+  }</code>
+  <strong>刻意不照搬 Go</strong>：接收永远是<strong>函数调用</strong> <code>recv(ch)</code>（没有 <code>&lt;-</code> 运算符），
+  绑定变量用 <strong><code>as</code></strong> 关键字（不是 <code>:=</code>）。<code>select</code> 是<strong>语句</strong>不是表达式——
+  各 case 的绑定变量类型可以互不相同，不存在统一返回类型，编译期拒绝 <code>let x = select {...}</code>。</li>
+<li><strong>内建语义三条</strong>：
+  1. <strong>case 只拿真实值</strong>：分支体内绝不会拿到空指针（底层非阻塞取，元素被抢走会自动重挑）；
+  2. <strong>全体 EOF → select 直接结束</strong>：所有通道都「已关闭且已空」时，select 语句结束，
+     <strong>一个分支都不执行</strong>（包括 <code>default</code>）；
+  3. <strong><code>default</code> 使 select 非阻塞</strong>：没有任何通道就绪时立刻执行 default，绝不等待。</li>
+<li><strong>事件驱动的等待原语</strong>（C Runtime）：全局事件纪元 <code>epoch</code> + 全局条件变量广播。</li>
+<li><strong>不丢唤醒</strong>：先读 epoch → 再查就绪 → 再睡到 epoch 变化，过期的等待假设永不成立；</li>
+<li><strong>不死锁</strong>：notify 一律在<strong>释放通道本地锁之后</strong>调用，
+    「持通道锁 → 取全局锁」与「持全局锁 → 取通道锁」两种嵌套<strong>都不存在</strong>。</li>
+<li><strong>随机选取就绪通道（防饿死）</strong>：多通道同时有数据时随机挑一个，
+  起点用<strong>原子递增</strong>计数器取模（不用 <code>rand()</code>——它不是线程安全的）。</li>
+<li><strong>C Runtime</strong>：<code>dial_chan_epoch</code> / <code>dial_chan_wait</code> / <code>dial_channel_pick_ready</code>，
+  以及 selector 对象（<code>dial_sel_new</code> / <code>add</code> / <code>pick</code> / <code>recv</code> / <code>free</code>）。</li>
+</ul>
+<h3 id="added测试与示例">Added（测试与示例）</h3>
+<ul>
+<li><code>examples/select_two_channels.dial</code>：<strong>双通道并发</strong>——两个生产者往不同通道发数据，
+  一个消费者同时监听；顺带校验「收到的确实是本通道的元素」（防串通道）。</li>
+<li><code>examples/select_default.dial</code>：<code>default</code> 的非阻塞语义。</li>
+<li><code>examples/select_eof.dial</code>：全体 EOF 时 select 直接结束。</li>
+<li><code>examples/select_fairness.dial</code>：随机选取的防饿死断言（两个通道都必须被处理过）。</li>
+<li>负向用例新增 9 个（case 非 channel / 元素类型未定 / 缺 <code>as</code> / 绑定变量作用域外使用 /
+  case 不是 recv 调用 / select 为空 / 两个 default / select 当表达式 / case 用 try_recv）。</li>
+</ul>
+<h3 id="fixed修复">Fixed（修复）</h3>
+<ul>
+<li><strong>IR 生成缺一条跳转导致编译器段错误</strong>：select 的 setup 块原先没有接上调用方当前块，
+  使 <code>while</code> 的 body 块变成无终结指令的空块，LLVM 在分支概率分析时段错误。
+  已补上「当前块 → setup」的跳转。</li>
+</ul>
+<h3 id="性能数据">性能数据</h3>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>50 万次 send + select（阻塞式，事件驱动）</td>
+<td><strong>wall 0.19 s</strong>，CPU 0.36 s</td>
+</tr>
+<tr>
+<td>同等工作量改用 <code>default</code>（非阻塞轮询）</td>
+<td>空转 0.38 s 后<strong>卡死在 join</strong>（队列塞满、生产者永久阻塞），120 s 超时</td>
+</tr>
+<tr>
+<td>8 消费者 / 100 万元素并发压测（F 组）</td>
+<td>回归不变：<code>received=1000000 duplicate=0</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="已知限制与未来方向">已知限制与未来方向</h3>
+<ul>
+<li><strong>惊群</strong>：全局广播会唤醒所有 select 等待者，多数醒来后发现「不是我」。
+  基线实现选择「逻辑正确 + 低延迟」优先于惊群开销（惊群只造成少量无谓唤醒，
+  轮询方案则持续 CPU 空转 + 毫秒级延迟）。
+  Linux 上可用 <strong>epoll + eventfd</strong> 消除惊群——v0.92 之后的优化方向，不影响本版语义。</li>
+<li><code>select</code> <strong>不带超时</strong>：要「等一会儿再看」请用 <code>recv_timeout</code> 单独接收。</li>
+</ul>
+<hr />
 <h2 id="090-—-2026-10-30">[0.9.0] — 2026-10-30</h2>
 <p>本版做的是<strong>并发底座的安全加固</strong>：判空、多消费者安全、超时接收
 （见 README <a href="#278-判空多消费者安全与超时v09">§27.8</a>）。</p>
@@ -106,7 +191,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 对照实验（8 消费者 / 100 万元素 / 队列深 64）：<code>signal</code> 版本 <strong>25 秒后超时挂死</strong>，
 <code>broadcast</code> 版本 <strong>4.25 秒跑完</strong>，总数恰好 100 万、零重复、零丢失。</p>
 </blockquote>
-<h3 id="added新增">Added（新增）</h3>
+<h3 id="added新增_1">Added（新增）</h3>
 <ul>
 <li><strong>内建 <code>is_null(x)</code></strong>：句柄判空。准入名单 <code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code> /
   <code>channel&lt;T&gt;</code> / <code>thread</code> / <code>file</code>；<code>int</code> / <code>float</code> / <code>bool</code> 是值类型、永远非空，
@@ -121,7 +206,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
   （<code>tests/stress/channel_mt.c</code>）：8 个消费者抢同一个通道、100 万元素、队列深 64。
   用「位图 + 原子 <code>fetch_or</code>」逐个记录领取情况，重复领取即判失败；总数必须守恒。</li>
 </ul>
-<h3 id="fixed修复">Fixed（修复）</h3>
+<h3 id="fixed修复_1">Fixed（修复）</h3>
 <ul>
 <li><strong>多消费者丢唤醒（死锁）</strong>：通道的所有状态变化通知由 <code>pthread_cond_signal</code>
   改为 <code>pthread_cond_broadcast</code>。单消费者下无差别，多消费者下前者会让某个消费者
@@ -129,7 +214,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li><strong>超时不会吞掉元素</strong>：<code>pthread_cond_timedwait</code> 返回 <code>ETIMEDOUT</code> 后回到 <code>while</code> 条件
   重新判定，若此刻队列非空则正常取走——「元素恰好在超时这一刻到达」也能被拿到。</li>
 </ul>
-<h3 id="added测试与示例">Added（测试与示例）</h3>
+<h3 id="added测试与示例_1">Added（测试与示例）</h3>
 <ul>
 <li><code>examples/is_null_demo.dial</code>：EOF / 超时 / 真实值三种情形下 <code>is_null</code> 的判定。</li>
 <li><code>examples/recv_timeout.dial</code>：超时返回空值；超时与到达同时发生时以「有元素」为准。</li>
@@ -182,7 +267,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 程序不是跑错，而是<strong>死锁</strong>。也就是说「生产者结束 → 消费者收尾」这个最常见的并发范式
 在 v0.8 里<strong>根本写不出来</strong>。v0.81 让它可以写了。</p>
 </blockquote>
-<h3 id="added新增_1">Added（新增）</h3>
+<h3 id="added新增_2">Added（新增）</h3>
 <ul>
 <li><strong>内建 <code>close(ch)</code></strong>：关闭通道（幂等），广播唤醒所有阻塞在 <code>send</code> / <code>recv</code> 上的线程。
   同时服务于 <code>file</code> 与 <code>channel</code>（二者都是「显式终结」），按实参静态类型分派。</li>
@@ -230,7 +315,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 （见 README <a href="#27-所有权转移与多线程并发move_to--thread--channel">§27</a>）。
 核心主张：<strong>用「转移所有权」取代「共享内存 + 锁」</strong>——数据不共享、只移交，
 队列里流动的指针永远只有一个持有者，因此不存在数据竞争，也就不需要任何互斥锁。</p>
-<h3 id="added新增_2">Added（新增）</h3>
+<h3 id="added新增_3">Added（新增）</h3>
 <ul>
 <li><strong>类型</strong>：<code>thread</code>（线程句柄，显式 <code>join</code> / <code>detach</code>，不受 ARC 管理）与
   <code>channel&lt;T&gt;</code>（通道句柄，跨线程共享 → <strong>原子</strong>引用计数 ARC）。</li>
@@ -277,7 +362,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <h2 id="070-—-2026-10-30">[0.7.0] — 2026-10-30</h2>
 <p>本版落地<strong>可恢复异常（try / catch / throw）</strong>（见 README <a href="#26-可恢复异常trycatchthrow">§26</a>），
 补齐了 v0.6 只有 <code>ud2</code>（不可恢复崩溃）的那一半；同时正式声明<strong>三重开源许可</strong>。</p>
-<h3 id="added新增_3">Added（新增）</h3>
+<h3 id="added新增_4">Added（新增）</h3>
 <ul>
 <li><strong>可恢复异常语法</strong>：<code>throw Error("msg");</code> 抛出；<code>try { } catch e { }</code> 捕获（<strong>catch 后无圆括号</strong>，
   <code>e</code> 类型自动推导为 <code>error</code>）；<code>try { } catch { }</code> 省略变量名表示忽略具体错误。</li>
@@ -317,7 +402,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <hr />
 <h2 id="0610-—-2026-10-29">[0.61.0] — 2026-10-29</h2>
 <p>本版落地<strong>文件 IO（file 句柄）</strong>（见 README <a href="#24-文件-iofile-句柄">§24</a>），并正式确立<strong>版本号规则</strong>（十进制递增、禁止跳版，见 README <a href="#23-版本号规则">§23</a>）。</p>
-<h3 id="added新增_4">Added（新增）</h3>
+<h3 id="added新增_5">Added（新增）</h3>
 <ul>
 <li><strong><code>file</code> 不透明指针类型</strong>：新增 <code>file</code> 类型，IR 中为 <code>ptr</code>，封装 C 的 <code>FILE*</code>，<strong>不受 ARC 管理</strong>；用户必须显式 <code>open</code> / <code>close</code>（与内存宪法显式指针回收契约一致）。</li>
 <li><strong><code>open</code> / <code>read</code> / <code>write</code> / <code>close</code></strong>：仅封装 C 标准库 <code>fopen</code> / <code>fread</code> / <code>fwrite</code> / <code>fclose</code>，Rust 前端不重写任何文件逻辑；只提供最基础的 C 风格 API，无链式流、无额外语法糖。</li>
@@ -340,7 +425,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <h2 id="060-—-2026-10-29">[0.6.0] — 2026-10-29</h2>
 <p>本版把 Zig 式 <strong>Fail-Fast</strong> 确立为与内存宪法并列的语言底线（见 README §20）：
 <strong>宁可当场崩溃，绝不产生未定义行为或静默错误数据。</strong></p>
-<h3 id="added新增_5">Added（新增）</h3>
+<h3 id="added新增_6">Added（新增）</h3>
 <ul>
 <li><strong>Fail-Fast 陷阱基础设施</strong>：新增 <code>runtime/dial_rt_trap.h</code> / <code>.c</code>，提供 <code>dial_trap()</code>（<code>__builtin_trap</code>，
   x86 生成 <code>ud2</code>）、<code>dial_bounds_fail</code> / <code>dial_null_fail</code> / <code>dial_assert_fail</code>（先打印诊断再 trap）。
@@ -406,7 +491,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <hr />
 <h2 id="050-—-2026-10-29">[0.5.0] — 2026-10-29</h2>
 <p>本版补齐循环控制流，并把<strong>代码编写纪律</strong>正式写入规范（见 README §20）。</p>
-<h3 id="added新增_6">Added（新增）</h3>
+<h3 id="added新增_7">Added（新增）</h3>
 <ul>
 <li><strong><code>break</code></strong>：跳出最内层循环；仅允许出现在 <code>while</code> / <code>for</code> 循环体内，写在别处是编译错误（见 README §8.4）。</li>
 <li><strong><code>continue</code></strong>：进入下一次迭代。关键语义——<code>for</code> 的 <code>continue</code> <strong>先执行 <code>i = i + 1</code> 再回到条件判定</strong>：
@@ -427,7 +512,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <hr />
 <h2 id="040-—-2026-11-02">[0.4.0] — 2026-11-02</h2>
 <p>本版落地<strong>部分标准库</strong>与<strong>控制流语法糖</strong>，并正式写入<a href="#内存宪法防-gc-铁律">内存宪法</a>（见 README §19）。</p>
-<h3 id="added新增_7">Added（新增）</h3>
+<h3 id="added新增_8">Added（新增）</h3>
 <ul>
 <li><strong><code>map</code> 类型（int → int）</strong>：新增哈希表类型，内存布局 <code>[int64 cap][int64 count][entries...]</code>，
   与 <code>string</code> / <code>int[]</code> 共用同一套 <strong>ARC 引用计数</strong>（<code>dial_map_retain</code> / <code>dial_map_release</code>）。
@@ -449,7 +534,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
   这消除了旧实现与<a href="#内存宪法防-gc-铁律">内存宪法</a>（防 GC 铁律）的矛盾。</li>
 <li>Map 与 <code>read_line</code> 从「未实现」清单移除（v0.4 已暴露）。</li>
 </ul>
-<h3 id="fixed修复_1">Fixed（修复）</h3>
+<h3 id="fixed修复_2">Fixed（修复）</h3>
 <ul>
 <li>修正 <code>0..5</code> 这类范围字面量此前被数字词法器误识别为浮点 <code>0.5</code> 的问题：仅当小数点后紧跟数字才视为浮点，
   <code>..</code> 现被正确识别为范围运算符。</li>
@@ -464,7 +549,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <hr />
 <h2 id="030-—-2026-10-28">[0.3.0] — 2026-10-28</h2>
 <p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
-<h3 id="added新增_8">Added（新增）</h3>
+<h3 id="added新增_9">Added（新增）</h3>
 <ul>
 <li>内置类型转换函数 <code>int_to_float(int): float</code>，编译为 LLVM <code>sitofp</code>（x86-64：<code>cvtsi2sd</code>）。</li>
 <li>内置类型转换函数 <code>float_to_int(float): int</code>，编译为 LLVM <code>fptosi</code>（x86-64：<code>cvttsd2si</code>，向零截断，与 C 的 <code>(int)</code> 一致）。</li>
@@ -481,7 +566,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li><code>let</code> 变量调用 <code>push</code> / <code>set</code> 等"原地修改且可能更换指针"的方法现在会在语义阶段被<strong>明确拒绝</strong>；
   此类方法的接收者必须是顶层 <code>var</code> 变量（详见 README §6.2、§11.3–§11.4）。</li>
 </ul>
-<h3 id="fixed修复_2">Fixed（修复）</h3>
+<h3 id="fixed修复_3">Fixed（修复）</h3>
 <ul>
 <li>修复了此前 <code>and</code> / <code>or</code> 不短路可能导致的判空崩溃隐患（如 <code>p != null and p.x &gt; 0</code> 在 <code>p</code> 为空时仍会求值右操作数）。</li>
 <li>修复了 <code>int → float</code> 隐式转换可能造成的静默精度丢失（如 <code>1 + 2.0</code> 曾默默将 <code>int</code> 提升为 <code>double</code>）。</li>
@@ -520,7 +605,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.9 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
+    <span class="muted">v0.91 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0</span>
   </div>
 </footer>
 

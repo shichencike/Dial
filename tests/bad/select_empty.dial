@@ -1,0 +1,7 @@
+// 负向：select 至少要有一个分支 —— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    select {
+    }
+    return 0;
+}

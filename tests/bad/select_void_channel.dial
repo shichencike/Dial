@@ -1,0 +1,10 @@
+// 负向：通道元素类型未定就 select —— 必须编译失败
+fn main(): int {
+    let ch: channel = channel(2);
+    select {
+        case recv(ch) as v {
+            print(v);
+        }
+    }
+    return 0;
+}

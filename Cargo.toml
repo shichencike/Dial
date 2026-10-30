@@ -1,8 +1,8 @@
 [package]
 name = "dialc"
-version = "0.9.0"
+version = "0.91.0"
 edition = "2021"
-description = "Dial 语言编译器 v0.9：静态强类型、无 GC、C ABI 前端；v0.7 可恢复异常 try/catch/throw，v0.8 move_to 所有权转移与多线程并发（thread/channel），v0.81 通道关闭与 EOF 语义，v0.9 is_null 判空、多消费者安全与 recv_timeout 超时"
+description = "Dial 语言编译器 v0.91：静态强类型、无 GC、C ABI 前端；v0.7 可恢复异常 try/catch/throw，v0.8 move_to 所有权转移与多线程并发（thread/channel），v0.81 通道关闭与 EOF，v0.9 is_null 判空与多消费者安全，v0.91 多路复用 select"
 license = "GPL-3.0 OR MIT OR Apache-2.0"
 
 [[bin]]

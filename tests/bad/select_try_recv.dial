@@ -1,0 +1,10 @@
+// 负向：case 只能用 recv（阻塞语义），不能用 try_recv —— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    select {
+        case try_recv(ch) as v {
+            print(v);
+        }
+    }
+    return 0;
+}

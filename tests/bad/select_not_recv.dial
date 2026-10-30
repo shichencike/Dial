@@ -1,0 +1,10 @@
+// 负向：case 必须是接收调用 recv(ch)，不能是别的表达式 —— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    select {
+        case ch as v {
+            print(v);
+        }
+    }
+    return 0;
+}

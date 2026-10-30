@@ -1,0 +1,11 @@
+// 负向：绑定变量的作用域严格限制在 case 的 {} 内，出了块就不能再用 —— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    select {
+        case recv(ch) as v {
+            print(v);
+        }
+    }
+    print(v);
+    return 0;
+}

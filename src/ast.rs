@@ -158,6 +158,28 @@ pub enum Stmt {
         line: usize,
         col: usize,
     },
+    /// 多路复用（v0.91）：
+    /// ```dial
+    /// select {
+    ///     case recv(ch1) as a { ... }
+    ///     case recv(ch2) as b { ... }
+    ///     default { ... }
+    /// }
+    /// ```
+    /// **是语句而非表达式**——各 case 绑定的变量类型可以互不相同，
+    /// 因此不存在「统一返回类型」可言，绝不能当表达式用。
+    ///
+    /// `default_body` 为 `None` 时 select 阻塞等待；为 `Some` 时是**非阻塞**语义：
+    /// 没有任何通道就绪就立刻走 default。
+    ///
+    /// 全体通道 EOF（已关闭且已空）时，select **直接结束**，不执行任何分支
+    /// （包括 default）——EOF 是终止信号，不是「又一个可触发的事件」。
+    Select {
+        arms: Vec<SelectArm>,
+        default_body: Option<Vec<Stmt>>,
+        line: usize,
+        col: usize,
+    },
     /// 表达式语句（例如 print(...)、obj.method() 等）。
     Expr(Expr),
 }
@@ -167,6 +189,19 @@ pub enum Stmt {
 #[derive(Debug, Clone)]
 pub struct Catch {
     pub var: Option<String>,
+    pub body: Vec<Stmt>,
+}
+
+/// `select` 的一个 case 分支（v0.91）。
+///
+/// `chan` 必须是接收调用 `recv(ch)`——Dial 没有 Go 的 `<-` 运算符，
+/// 接收永远是函数调用（与 `move_to` / `spawn` 一样是内建）。
+/// `var` 是该 case 内绑定变量的名字，其类型由通道的元素类型自动推导，
+/// 生命周期**严格限制**在本 case 的 `{}` 内。
+#[derive(Debug, Clone)]
+pub struct SelectArm {
+    pub var: String,
+    pub chan: Expr,
     pub body: Vec<Stmt>,
 }
 

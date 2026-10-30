@@ -1,0 +1,65 @@
+// v0.91 示例：多通道就绪时的**随机选取**（防饿死）
+//
+// 当多个通道同时有数据时，select 必须**随机**挑一个就绪的 case 执行。
+// 若固定总挑第一个，第二个通道的数据会被一直压着——
+// 这就是经典的「饥饿」。
+//
+// 底层实现：C 侧的 dial_channel_pick_ready 从一个**原子递增**的随机起点
+// 开始扫描就绪通道（不能用 rand()，它不是线程安全的）。
+//
+// 本例两个通道各有 200 个元素，select 一共跑 400 轮。
+// 只断言「两个通道**都**被处理过」——各通道具体分到多少轮是不确定的，
+// 但若存在饥饿，其中一个就会是 0，那才是 bug。
+
+fn producerA(ch: channel<string>): void {
+    var i: int = 0;
+    while (i < 200) {
+        var s: string = "A";
+        move_to(s, ch);
+        i = i + 1;
+    }
+    close(ch);
+}
+
+fn producerB(ch: channel<string>): void {
+    var i: int = 0;
+    while (i < 200) {
+        var s: string = "B";
+        move_to(s, ch);
+        i = i + 1;
+    }
+    close(ch);
+}
+
+fn main(): int {
+    let chA: channel<string> = channel(4);
+    let chB: channel<string> = channel(4);
+
+    let ta: thread = spawn(producerA, chA);
+    let tb: thread = spawn(producerB, chB);
+
+    var hitA: bool = false;
+    var hitB: bool = false;
+    var rounds: int = 0;
+
+    while (rounds < 400) {
+        select {
+            case recv(chA) as x {
+                hitA = true;
+                rounds = rounds + 1;
+            }
+            case recv(chB) as y {
+                hitB = true;
+                rounds = rounds + 1;
+            }
+        }
+    }
+
+    join(ta);
+    join(tb);
+
+    print(hitA);      // true —— A 通道没有被饿死
+    print(hitB);      // true —— B 通道也没有被饿死
+    print(rounds);    // 400
+    return 0;
+}

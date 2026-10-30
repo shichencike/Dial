@@ -1,0 +1,10 @@
+// 负向：select 的 case 监听的不是 channel —— 必须编译失败
+fn main(): int {
+    var n: int = 1;
+    select {
+        case recv(n) as v {
+            print(v);
+        }
+    }
+    return 0;
+}

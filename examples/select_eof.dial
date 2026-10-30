@@ -1,0 +1,41 @@
+// v0.91 示例：全体 EOF 时，select 直接结束（不执行任何分支）
+//
+// 这是 select 与 recv 在 EOF 上的关键差别：
+//
+//   recv    在「已关闭且已空」时返回**空指针**，由用户用 is_null 判断；
+//   select  在**全体通道**都「已关闭且已空」时，**直接结束 select 语句**，
+//           一个分支都不执行。
+//
+// 因此 select 的 case 里**永远不会拿到空指针**——不需要（也不能）
+// 在 case 里用 is_null 判 EOF；EOF 的判据就是「select 语句结束了」。
+//
+// 本例跑 5 轮 select：第 1 轮取到元素，后 4 轮全体 EOF 而直接结束，
+// 于是 rounds 照常累加到 5，而 got 停在 1。
+
+fn producer(ch: channel<string>): void {
+    var s: string = "only";
+    move_to(s, ch);
+    close(ch);
+}
+
+fn main(): int {
+    let ch: channel<string> = channel(4);
+    let t: thread = spawn(producer, ch);
+
+    var got: int = 0;
+    var rounds: int = 0;
+
+    while (rounds < 5) {
+        select {
+            case recv(ch) as x {
+                got = got + 1;
+            }
+        }
+        rounds = rounds + 1;
+    }
+
+    join(t);
+    print(got);       // 1 —— 只有第一轮真的收到了元素
+    print(rounds);    // 5 —— 后 4 轮全体 EOF，select 直接结束
+    return 0;
+}

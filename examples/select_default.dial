@@ -1,0 +1,35 @@
+// v0.91 示例：select 的 default 分支（非阻塞语义）
+//
+// default 的语义是「**当前没有任何通道就绪**」时立刻执行——因此
+// **带 default 的 select 永不阻塞**。
+//
+// 这意味着：把带 default 的 select 放进 while 循环里，就是一个
+// 100% CPU 的空转循环（每轮都立即返回）。务必自己控制退出条件。
+// 详见 README §27.10 的警告与反例。
+//
+// 本例用一个**有界**的 for 风格循环演示：跑固定 5 轮，
+// 队列一直是空的，于是 5 轮全部走 default。
+
+fn main(): int {
+    let ch: channel<string> = channel(4);
+
+    var hits: int = 0;
+    var misses: int = 0;
+
+    var i: int = 0;
+    while (i < 5) {
+        select {
+            case recv(ch) as x {
+                hits = hits + 1;
+            }
+            default {
+                misses = misses + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    print(hits);      // 0 —— 队列一直是空的
+    print(misses);    // 5 —— 每一轮都走了 default
+    return 0;
+}

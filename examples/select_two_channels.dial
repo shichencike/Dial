@@ -1,0 +1,69 @@
+// v0.91 示例：双通道 select —— 两个生产者往不同通道发数据，一个消费者同时监听
+//
+// select { case recv(ch) as v { ... } default { ... } }
+//
+// Dial 风格的两点：
+//   1. 接收永远是**函数调用** recv(ch)，没有 Go 的 `<-` 运算符；
+//   2. 绑定变量用 `as`：case recv(ch) as v { ... }。
+//
+// 绑定变量的类型自动推导为通道的元素类型（这里是 string），
+// 生命周期**严格限制**在 case 的 {} 内。
+//
+// 输出为什么是确定的：两个通道的元素到达顺序是随机的，直接打印内容
+// 会让黄金测试随机变红。因此这里**只统计各通道各收到几个**，并顺带
+// 校验「收到的确实是本通道的元素」（否则说明 select 分派串了通道）。
+
+fn producerA(ch: channel<string>): void {
+    var s1: string = "A1";
+    move_to(s1, ch);
+    var s2: string = "A2";
+    move_to(s2, ch);
+    close(ch);
+}
+
+fn producerB(ch: channel<string>): void {
+    var s1: string = "B1";
+    move_to(s1, ch);
+    var s2: string = "B2";
+    move_to(s2, ch);
+    close(ch);
+}
+
+fn main(): int {
+    let chA: channel<string> = channel(4);
+    let chB: channel<string> = channel(4);
+
+    let ta: thread = spawn(producerA, chA);
+    let tb: thread = spawn(producerB, chB);
+
+    var nA: int = 0;
+    var nB: int = 0;
+    var wrong: int = 0;
+
+    while (nA + nB < 4) {
+        select {
+            case recv(chA) as x {
+                if (x == "A1" or x == "A2") {
+                    nA = nA + 1;
+                } else {
+                    wrong = wrong + 1;
+                }
+            }
+            case recv(chB) as y {
+                if (y == "B1" or y == "B2") {
+                    nB = nB + 1;
+                } else {
+                    wrong = wrong + 1;
+                }
+            }
+        }
+    }
+
+    join(ta);
+    join(tb);
+
+    print(nA);        // 2 —— A 通道恰好两个元素
+    print(nB);        // 2
+    print(wrong);     // 0 —— 没有任何一次串通道
+    return 0;
+}

@@ -129,6 +129,17 @@ pub fn compile(
     }
 
     // 3) 写出目标文件
+    //
+    // IR 结构自检：块缺少终结指令这类错误，LLVM 往往要到优化阶段的
+    // BranchProbabilityInfo 才以**段错误**的形式炸出来（而不是给出可读的诊断）。
+    // 这里先 verify 一遍，把问题挡在编译期、报成人能读懂的文字。
+    // 调试时设 DIALC_DUMP_IR=1 可把完整 IR 打到 stderr。
+    if std::env::var("DIALC_DUMP_IR").is_ok() {
+        eprintln!("{}", cg.module.print_to_string().to_string());
+    }
+    if let Err(e) = cg.module.verify() {
+        eprintln!("[dialc] IR 验证失败: {}", e);
+    }
     cg.emit_object(out_path)?;
     Ok(())
 }
@@ -361,6 +372,18 @@ impl<'ctx> CodeGen<'ctx> {
             i8b,
             &[i8b.into(), self.context.i64_type().into()],
         );
+        // v0.91 多路复用：全局事件广播 + 选择器对象
+        self.decl_func("dial_chan_epoch", self.context.i64_type().into(), &[]);
+        self.decl_void("dial_chan_wait", &[self.context.i64_type().into()]);
+        self.decl_func("dial_sel_new", i8b, &[]);
+        self.decl_void("dial_sel_add", &[i8b.into(), i8b.into()]);
+        self.decl_func("dial_sel_pick", self.context.i64_type().into(), &[i8b.into()]);
+        self.decl_func(
+            "dial_sel_recv",
+            i8b,
+            &[i8b.into(), self.context.i64_type().into()],
+        );
+        self.decl_void("dial_sel_free", &[i8b.into()]);
         self.decl_func(
             "dial_channel_closed",
             self.context.i64_type().into(),
@@ -1402,6 +1425,221 @@ impl<'ctx> CodeGen<'ctx> {
 
                 // ---- try.cont：try/catch 之后的统一续跑点 ----
                 self.builder.position_at_end(cont_bb);
+                Ok(())
+            }
+            // ==================================================================
+            //  多路复用 select（v0.91）
+            // ==================================================================
+            //   select { case recv(ch1) as a { ... } default { ... } }
+            //
+            //  控制流骨架：
+            //      setup   -> 建选择器、登记各 case 的通道
+            //      loop    -> 取 epoch、挑一个就绪通道（随机起点，防饿死）
+            //      dispatch-> switch 到对应的 take 块
+            //      take_i  -> 从第 i 个通道非阻塞取一个元素
+            //                 取到 NULL 说明「被别人抢走了」-> 回 loop 重挑
+            //      case_i  -> 绑定变量、执行分支体
+            //      nowait  -> 无就绪时：有 default 就走 default，否则等事件
+            //      eof     -> 全体 EOF：释放选择器、直接结束（不执行任何分支）
+            //
+            //  等待是**事件驱动**的（挂在全局条件变量上），不是轮询——
+            //  被 send 唤醒的延迟是微秒级。
+            Stmt::Select {
+                arms,
+                default_body,
+                line,
+                col,
+            } => {
+                let n_arms = arms.len();
+                let setup_bb = self.context.append_basic_block(function, "select.setup");
+                let loop_bb = self.context.append_basic_block(function, "select.loop");
+                let chk_bb = self.context.append_basic_block(function, "select.chk");
+                let dispatch_bb = self.context.append_basic_block(function, "select.dispatch");
+                let nowait_bb = self.context.append_basic_block(function, "select.nowait");
+                let eof_bb = self.context.append_basic_block(function, "select.eof");
+                let end_bb = self.context.append_basic_block(function, "select.end");
+
+                // 选择器句柄的槽必须在 entry block（否则栈帧会随循环增长）。
+                let sel_slot = self.alloca_in_entry(function, self.i8ptr().into(), "select.sel");
+
+                // ---- setup：建选择器并登记各 case 的通道 ----
+                // 先把**当前块**接到 setup 上（当前块可能是 while 的 body 块）。
+                // 少了这一步，调用方的那个块会变成没有终结指令的空块。
+                if !self.is_terminated() {
+                    self.builder.build_unconditional_branch(setup_bb).unwrap();
+                }
+                self.builder.position_at_end(setup_bb);
+                let sel = self.call_c("dial_sel_new", &[]);
+                self.builder.build_store(sel_slot, sel).unwrap();
+                for arm in arms {
+                    // case 的形状在 Sema 已校验（必须是 recv(ch)），这里只取通道表达式。
+                    let ch_expr = match &arm.chan {
+                        Expr::Call(fname, cargs) if fname == "recv" && cargs.len() == 1 => &cargs[0],
+                        _ => {
+                            return Err(DialcError::new(
+                                "内部错误：select 的 case 必须是 recv(ch) 形式",
+                                *line,
+                                *col,
+                            ))
+                        }
+                    };
+                    let ch = self.gen_expr(
+                        ch_expr,
+                        function,
+                        scopes,
+                        func_values,
+                        functions,
+                        structs,
+                    )?;
+                    self.call_c_void("dial_sel_add", &[sel.into(), ch.into()]);
+                }
+                self.builder.build_unconditional_branch(loop_bb).unwrap();
+
+                // ---- loop：挑一个就绪通道 ----
+                self.builder.position_at_end(loop_bb);
+                // 先读 epoch，再挑通道：若两者之间发生了变化，epoch 已经变了，
+                // 后面的 wait 会立即返回而不是带着过期假设睡死（不丢唤醒）。
+                let epoch = self.call_c("dial_chan_epoch", &[]);
+                let idx = self.call_c("dial_sel_pick", &[sel.into()]);
+                let is_eof = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        idx.into_int_value(),
+                        self.context.i64_type().const_int((-2i64) as u64, true),
+                        "sel.eof",
+                    )
+                    .unwrap();
+                let is_ready = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::SGE,
+                        idx.into_int_value(),
+                        self.context.i64_type().const_int(0, false),
+                        "sel.ready",
+                    )
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(is_eof, eof_bb, chk_bb)
+                    .unwrap();
+
+                // ---- chk：三路分支的中间块（LLVM 的条件分支只有两路）----
+                self.builder.position_at_end(chk_bb);
+                self.builder
+                    .build_conditional_branch(is_ready, dispatch_bb, nowait_bb)
+                    .unwrap();
+
+                // ---- dispatch：按就绪下标分派 ----
+                self.builder.position_at_end(dispatch_bb);
+                let mut switch_cases: Vec<(IntValue<'ctx>, BasicBlock<'ctx>)> = Vec::new();
+                let mut take_blocks: Vec<BasicBlock<'ctx>> = Vec::new();
+                let mut case_blocks: Vec<BasicBlock<'ctx>> = Vec::new();
+                for i in 0..n_arms {
+                    let tb = self
+                        .context
+                        .append_basic_block(function, &format!("select.take{}", i));
+                    let cb = self
+                        .context
+                        .append_basic_block(function, &format!("select.case{}", i));
+                    switch_cases.push((self.context.i64_type().const_int(i as u64, false), tb));
+                    take_blocks.push(tb);
+                    case_blocks.push(cb);
+                }
+                // 理论上不会落到 default（下标必在范围内），落回 loop 重来。
+                self.builder
+                    .build_switch(idx.into_int_value(), loop_bb, &switch_cases)
+                    .unwrap();
+
+                // ---- 每个 case 的 take / case 块 ----
+                for (i, arm) in arms.iter().enumerate() {
+                    // take：从第 i 个通道非阻塞取一个元素
+                    self.builder.position_at_end(take_blocks[i]);
+                    let v = self.call_c(
+                        "dial_sel_recv",
+                        &[sel.into(), self.context.i64_type().const_int(i as u64, false).into()],
+                    );
+                    let vnull = self
+                        .builder
+                        .build_ptr_to_int(v.into_pointer_value(), self.context.i64_type(), "vp")
+                        .unwrap();
+                    let isnull = self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            vnull,
+                            self.context.i64_type().const_int(0, false),
+                            "sel.null",
+                        )
+                        .unwrap();
+                    // NULL = 「在我们挑出它之后、被别的消费者抢走了」-> 重挑，**不是 EOF**。
+                    self.builder
+                        .build_conditional_branch(isnull, loop_bb, case_blocks[i])
+                        .unwrap();
+
+                    // case：绑定变量 + 执行分支体
+                    self.builder.position_at_end(case_blocks[i]);
+                    // 选择器到此为止已完成使命（元素已取走），立即释放。
+                    // 放在分支体之前：分支体里即使 return，也不会泄漏。
+                    self.call_c_void("dial_sel_free", &[sel.into()]);
+                    let elem_ty = type_of(&arm.chan, scopes, functions, structs)?;
+                    let llvm_ty = self.dialc_type_to_llvm(&elem_ty);
+                    let var_slot = self.alloca_in_entry(function, llvm_ty, "select.var");
+                    self.builder.build_store(var_slot, v).unwrap();
+                    // 绑定变量的作用域严格限制在本 case 的块内。
+                    scopes.push(HashMap::new());
+                    scopes
+                        .last_mut()
+                        .unwrap()
+                        .insert(arm.var.clone(), (elem_ty, (true, var_slot)));
+                    for s in &arm.body {
+                        self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
+                        if self.is_terminated() {
+                            break;
+                        }
+                    }
+                    let done = !self.is_terminated();
+                    if done {
+                        // 分支体结束 -> 释放绑定变量（它独占着一个从通道取来的元素）。
+                        self.release_scope_locals(scopes.last().unwrap(), structs);
+                        self.builder.build_unconditional_branch(end_bb).unwrap();
+                    }
+                    scopes.pop();
+                }
+
+                // ---- nowait：没有就绪的通道 ----
+                self.builder.position_at_end(nowait_bb);
+                if default_body.is_some() {
+                    let def_bb = self.context.append_basic_block(function, "select.default");
+                    self.builder.build_unconditional_branch(def_bb).unwrap();
+                    // ---- default：没有任何通道就绪时执行（非阻塞语义）----
+                    self.builder.position_at_end(def_bb);
+                    self.call_c_void("dial_sel_free", &[sel.into()]);
+                    scopes.push(HashMap::new());
+                    for s in default_body.as_ref().unwrap() {
+                        self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
+                        if self.is_terminated() {
+                            break;
+                        }
+                    }
+                    let done = !self.is_terminated();
+                    if done {
+                        self.release_scope_locals(scopes.last().unwrap(), structs);
+                        self.builder.build_unconditional_branch(end_bb).unwrap();
+                    }
+                    scopes.pop();
+                } else {
+                    // 无 default：阻塞等待事件（事件驱动，非轮询）。
+                    self.call_c_void("dial_chan_wait", &[epoch.into()]);
+                    self.builder.build_unconditional_branch(loop_bb).unwrap();
+                }
+
+                // ---- eof：全体通道已关闭且已空 -> select 直接结束，不执行任何分支 ----
+                self.builder.position_at_end(eof_bb);
+                self.call_c_void("dial_sel_free", &[sel.into()]);
+                self.builder.build_unconditional_branch(end_bb).unwrap();
+
+                // ---- end：select 之后的统一续跑点 ----
+                self.builder.position_at_end(end_bb);
                 Ok(())
             }
             Stmt::Expr(e) => {

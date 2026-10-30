@@ -226,6 +226,7 @@ impl Parser {
             TokenKind::Return => self.parse_return(),
             TokenKind::Try => self.parse_try(),
             TokenKind::Throw => self.parse_throw(),
+            TokenKind::Select => self.parse_select(),
             TokenKind::Break => {
                 self.advance();
                 self.expect(TokenKind::Semicolon)?;
@@ -418,6 +419,93 @@ impl Parser {
         let e = self.parse_expr()?;
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::Throw(e, start.line, start.col))
+    }
+
+    /// 解析 select 语句（v0.91）：
+    /// ```dial
+    /// select {
+    ///     case recv(ch1) as a { ... }
+    ///     case recv(ch2) as b { ... }
+    ///     default { ... }
+    /// }
+    /// ```
+    ///
+    /// Dial 风格的两点适配（与 Go 的 `<-` 语法刻意不同）：
+    ///   1. 接收永远是**函数调用** `recv(ch)`——没有 `<-` 运算符；
+    ///   2. 绑定变量用 `as` 关键字：`case recv(ch) as v { ... }`。
+    ///
+    /// `default` 必须在所有 case 之后，且至多一个。
+    fn parse_select(&mut self) -> Result<Stmt> {
+        let start = self.advance(); // select
+        self.expect(TokenKind::LBrace)?;
+
+        let mut arms: Vec<SelectArm> = Vec::new();
+        let mut default_body: Option<Vec<Stmt>> = None;
+
+        loop {
+            if self.check(&TokenKind::Case) {
+                let case_tok = self.advance(); // case
+                // case 后是一个接收调用：recv(ch)
+                let chan = self.parse_expr()?;
+                // as <变量名>
+                if !self.check(&TokenKind::As) {
+                    return Err(DialcError::new(
+                        "语法错误：case 后必须用 as 绑定变量名，例如 case recv(ch) as v { ... }",
+                        case_tok.line,
+                        case_tok.col,
+                    ));
+                }
+                self.advance(); // as
+                let var = self.expect_ident()?;
+                let body = self.parse_block()?;
+                arms.push(SelectArm { var, chan, body });
+                continue;
+            }
+            if self.check(&TokenKind::Default) {
+                if !arms.is_empty() && default_body.is_some() {
+                    return Err(DialcError::new(
+                        "语法错误：default 至多只能出现一次，且必须放在所有 case 之后",
+                        start.line,
+                        start.col,
+                    ));
+                }
+                if default_body.is_some() {
+                    return Err(DialcError::new(
+                        "语法错误：default 至多只能出现一次",
+                        start.line,
+                        start.col,
+                    ));
+                }
+                self.advance(); // default
+                default_body = Some(self.parse_block()?);
+                // default 之后不再允许 case —— 直接结束循环
+                if self.check(&TokenKind::Case) {
+                    return Err(DialcError::new(
+                        "语法错误：default 必须放在所有 case 之后",
+                        start.line,
+                        start.col,
+                    ));
+                }
+                break;
+            }
+            break;
+        }
+
+        if arms.is_empty() && default_body.is_none() {
+            return Err(DialcError::new(
+                "语法错误：select 至少需要一个 case 分支",
+                start.line,
+                start.col,
+            ));
+        }
+
+        self.expect(TokenKind::RBrace)?;
+        Ok(Stmt::Select {
+            arms,
+            default_body,
+            line: start.line,
+            col: start.col,
+        })
     }
 
     // ---- 表达式（优先级） ----

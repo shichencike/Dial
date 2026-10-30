@@ -104,4 +104,74 @@ int64_t dial_channel_done(DialChannel ch);
 void  dial_channel_retain(DialChannel ch);
 void  dial_channel_release(DialChannel ch);
 
+/*
+ * ============================================================================
+ *  多路复用原语（v0.91）：全局事件广播 + 就绪通道挑选
+ * ============================================================================
+ *
+ *  select 需要同时监听多个通道。它不用「一把大锁锁住所有队列」（那会引入
+ *  复杂的锁顺序问题），而是走**事件驱动**路线：
+ *
+ *      任何通道的状态变化（send / recv / close）都递增一个全局 epoch 计数，
+ *      并在**全局条件变量**上广播。select 等待时先记住 epoch，再检查各通道
+ *      是否就绪，若都不就绪就睡到 epoch 变化为止。
+ *
+ *  两个关键性质：
+ *
+ *  1) **不会丢唤醒。** epoch 是「先读后查」的：等待前若已有事件发生，epoch
+ *     已经变了，等待条件立即不成立，绝不会带着过期的假设睡死。
+ *  2) **不会死锁。** 通知（notify）一律在**释放通道本地锁之后**才调用，
+ *     于是全局锁与通道锁**永不嵌套**：
+ *       - 持通道锁 -> 取全局锁：不存在（notify 在放锁之后）
+ *       - 持全局锁 -> 取通道锁：不存在（挑选就绪通道时不持全局锁）
+ *     「持通道锁时取全局锁」是这类设计最经典的死锁成因，这里从结构上排除。
+ *
+ *  Windows 说明：Windows 没有 pthread，本组函数在 Windows 后端里对应
+ *  `WakeConditionVariable` / `SetEvent`（见 ARCHITECTURE.md §0.2 的线程后端规划）。
+ *  Linux / Termux 用 pthread_cond_broadcast + pthread_cond_wait。
+ *
+ *  惊群：一次广播会唤醒全部 select 等待者（惊群）。基线实现选择
+ *  **逻辑正确 + 低延迟**优先于惊群开销——惊群只造成少量无谓唤醒，
+ *  而轮询方案会造成持续 CPU 空转与毫秒级延迟。未来在 Linux 上可用
+ *  epoll / eventfd 消除惊群（见 README §27.10 的展望）。
+ */
+
+/* 取当前全局事件纪元（每次通道状态变化 +1）。 */
+int64_t dial_chan_epoch(void);
+
+/* 等待直到全局 epoch 发生变化（即至少有一个通道的状态变了）。 */
+void    dial_chan_wait(int64_t since);
+
+/*
+ * 在就绪的通道中挑一个（多通道同时就绪时**随机**挑选，防饿死）。
+ *
+ * 返回值：
+ *   >= 0  就绪通道在数组中的下标（调用方据此取元素）
+ *   -1    当前没有任何通道就绪（但也没有全部 EOF —— 应当等待）
+ *   -2    **全体 EOF**（所有通道都已关闭且已空）—— select 语句就此结束
+ *
+ * 数组元素为 DialChannel；元素本身不会被本函数加引用计数，
+ * 调用方需保证数组在调用期间有效。
+ */
+int64_t dial_channel_pick_ready(DialChannel *chs, int64_t n);
+
+/*
+ * ---- 选择器对象（v0.91 的 select 用它）----
+ *
+ *  IR 侧不构造通道数组（那需要在 LLVM 里摆弄 [n x i8*] 数组类型），
+ *  而是把「挑一个就绪通道 + 从它取走一个元素」这两件事整体交给 C 侧的
+ *  选择器对象。IR 侧只持有一个 i8* 句柄，逐个 add 通道即可。
+ *
+ *  生命周期：dial_sel_new -> (add)* -> pick/recv* -> dial_sel_free。
+ *  IR 侧保证每条控制流路径上**恰好 free 一次**（元素取走成功后才 free，
+ *  因为「被别的消费者抢走」需要重试，selector 还得留着）。
+ */
+typedef struct DialSelector DialSelector;
+
+DialSelector *dial_sel_new(void);
+void          dial_sel_add(DialSelector *s, DialChannel ch);
+int64_t       dial_sel_pick(DialSelector *s);        /* >=0 就绪下标 / -1 无就绪 / -2 全体 EOF */
+void         *dial_sel_recv(DialSelector *s, int64_t idx);  /* 取元素；可能返回 NULL（被抢走） */
+void          dial_sel_free(DialSelector *s);
+
 #endif /* DIAL_CHANNEL_H */

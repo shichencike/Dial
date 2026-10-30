@@ -1351,6 +1351,24 @@ fn check_moved_stmt(
         Stmt::Return(Some(e), ..) | Stmt::Throw(e, ..) | Stmt::Expr(e) => {
             check_moved_expr(e, scopes, funcs, structs, line, col)
         }
+        // select（v0.91）：case 里的通道表达式与各分支体都要受所有权约束。
+        // 分支体不在 Stmt 枚举里（是 Vec<Stmt>），因此必须手动递归。
+        Stmt::Select {
+            arms, default_body, ..
+        } => {
+            for arm in arms {
+                check_moved_expr(&arm.chan, scopes, funcs, structs, line, col)?;
+                for s in &arm.body {
+                    check_moved_stmt(s, scopes, funcs, structs)?;
+                }
+            }
+            if let Some(db) = default_body {
+                for s in db {
+                    check_moved_stmt(s, scopes, funcs, structs)?;
+                }
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -1798,6 +1816,79 @@ fn check_stmt(
             scopes.pop();
             Ok(())
         }
+        // 多路复用（v0.91）：
+        //   select { case recv(ch) as v { ... } default { ... } }
+        //
+        // 三条硬规则：
+        //   1) case 必须是**接收调用** `recv(ch)`——Dial 没有 Go 的 `<-` 运算符，
+        //      接收永远是函数调用。
+        //   2) 绑定变量的类型 = 通道的元素类型（自动推导），元素类型必须已确定
+        //      （不允许 channel<void>）。
+        //   3) 绑定变量的作用域**严格限制**在本 case 的 `{}` 内——
+        //      它是「这一轮收到的那个值」，出了这个块就不该再被使用。
+        Stmt::Select {
+            arms,
+            default_body,
+            line,
+            col,
+        } => {
+            for arm in arms {
+                // 规则 1：形状校验
+                let chan_expr = match &arm.chan {
+                    Expr::Call(fname, cargs) if fname == "recv" && cargs.len() == 1 => &cargs[0],
+                    _ => {
+                        return Err(DialcError::new(
+                            "语义错误：select 的 case 必须是接收调用 recv(ch)（Dial 没有 <- 运算符，接收永远是函数调用）",
+                            *line,
+                            *col,
+                        ))
+                    }
+                };
+                // 规则 2：元素类型必须已确定
+                let ct = type_of(chan_expr, scopes, funcs, structs)?;
+                let elem = match ct {
+                    Type::Channel(e) => {
+                        if matches!(e.as_ref(), Type::Void) {
+                            return Err(DialcError::new(
+                                "语义错误：select 的通道元素类型未定，请在声明处写出具体类型（例如 let ch: channel<string> = channel(8);）",
+                                *line,
+                                *col,
+                            ));
+                        }
+                        e.as_ref().clone()
+                    }
+                    other => {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：select 的 case 只能监听 channel，实际为 {}",
+                                other.name()
+                            ),
+                            *line,
+                            *col,
+                        ))
+                    }
+                };
+                // 规则 3：绑定变量只在本 case 的块内可见
+                scopes.push(HashMap::new());
+                scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(arm.var.clone(), (elem, VarState::new(true)));
+                for s in &arm.body {
+                    check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth)?;
+                }
+                scopes.pop();
+            }
+            // default 分支自成一个作用域，没有绑定变量。
+            if let Some(db) = default_body {
+                scopes.push(HashMap::new());
+                for s in db {
+                    check_stmt(s, scopes, funcs, f, structs, in_loop, try_depth)?;
+                }
+                scopes.pop();
+            }
+            Ok(())
+        }
         Stmt::Expr(e) => {
             // 「原地修改型」方法约束（push / set）：
             // 这两种操作会修改容器，且因 COW 可能更换底层指针，编译器把返回指针写回接收变量。
@@ -1942,6 +2033,18 @@ fn collect_refs(stmts: &[Stmt], si: &mut usize, loop_d: usize, cond_d: usize, re
                 collect_refs(body, si, loop_d, cond_d, refs);
                 collect_refs(&catch.body, si, loop_d, cond_d, refs);
             }
+            // select（v0.91）：各 case 的通道表达式与分支体都要纳入引用分析。
+            Stmt::Select {
+                arms, default_body, ..
+            } => {
+                for arm in arms {
+                    record_expr_refs(&arm.chan, *si, unsafe_ctx, refs);
+                    collect_refs(&arm.body, si, loop_d, cond_d, refs);
+                }
+                if let Some(db) = default_body {
+                    collect_refs(db, si, loop_d, cond_d, refs);
+                }
+            }
             Stmt::Expr(e) => {
                 record_expr_refs(e, *si, unsafe_ctx, refs);
             }
@@ -1985,6 +2088,17 @@ fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, f
             Stmt::Try { body, catch, .. } => {
                 set_moves(body, si, loop_d, cond_d, facts);
                 set_moves(&mut catch.body, si, loop_d, cond_d, facts);
+            }
+            // select（v0.91）
+            Stmt::Select {
+                arms, default_body, ..
+            } => {
+                for arm in arms {
+                    set_moves(&mut arm.body, si, loop_d, cond_d, facts);
+                }
+                if let Some(db) = default_body {
+                    set_moves(db, si, loop_d, cond_d, facts);
+                }
             }
             _ => {}
         }

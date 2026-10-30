@@ -1,0 +1,16 @@
+// 负向：default 至多只能出现一次 —— 必须编译失败
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    select {
+        case recv(ch) as v {
+            print(v);
+        }
+        default {
+            print("d");
+        }
+        default {
+            print("d2");
+        }
+    }
+    return 0;
+}
