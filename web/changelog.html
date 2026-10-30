@@ -213,6 +213,11 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
   永久阻塞。正确性优先于惊群开销。</li>
 <li><strong>超时不会吞掉元素</strong>：<code>pthread_cond_timedwait</code> 返回 <code>ETIMEDOUT</code> 后回到 <code>while</code> 条件
   重新判定，若此刻队列非空则正常取走——「元素恰好在超时这一刻到达」也能被拿到。</li>
+<li><strong>超时基准钟从 <code>CLOCK_REALTIME</code> 切回 <code>CLOCK_MONOTONIC</code></strong>：底层超时取用的绝对时刻
+  原先取自 <code>CLOCK_REALTIME</code>，会被 NTP 校时跳变干扰（校时回拨可能让等待被提前唤醒、
+  前拨则拖长等待）。现已切回单调钟 <code>CLOCK_MONOTONIC</code>，借助 Linux vDSO 直接在用户态读取、
+  无需系统调用，时间读取更快，且彻底不受 NTP 校时影响；因彻底放弃 macOS，
+  无需为 <code>pthread_condattr_setclock</code> 的兼容性做任何妥协。</li>
 </ul>
 <h3 id="added测试与示例_1">Added（测试与示例）</h3>
 <ul>

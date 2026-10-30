@@ -101,6 +101,11 @@
   永久阻塞。正确性优先于惊群开销。
 - **超时不会吞掉元素**：`pthread_cond_timedwait` 返回 `ETIMEDOUT` 后回到 `while` 条件
   重新判定，若此刻队列非空则正常取走——「元素恰好在超时这一刻到达」也能被拿到。
+- **超时基准钟从 `CLOCK_REALTIME` 切回 `CLOCK_MONOTONIC`**：底层超时取用的绝对时刻
+  原先取自 `CLOCK_REALTIME`，会被 NTP 校时跳变干扰（校时回拨可能让等待被提前唤醒、
+  前拨则拖长等待）。现已切回单调钟 `CLOCK_MONOTONIC`，借助 Linux vDSO 直接在用户态读取、
+  无需系统调用，时间读取更快，且彻底不受 NTP 校时影响；因彻底放弃 macOS，
+  无需为 `pthread_condattr_setclock` 的兼容性做任何妥协。
 
 ### Added（测试与示例）
 - `examples/is_null_demo.dial`：EOF / 超时 / 真实值三种情形下 `is_null` 的判定。
