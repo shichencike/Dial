@@ -404,6 +404,8 @@ pub struct ExternFn {
     pub ret: String,
     /// `///` 文档注释（供 LSP 悬停提示）
     pub doc: Vec<String>,
+    /// 声明所在行（1 起）——供 LSP 跳转定义跳进 `.diali`（v0.95）。
+    pub line: usize,
 }
 
 /// `.diali` 解析结果。
@@ -411,6 +413,8 @@ pub struct ExternFn {
 pub struct DialIface {
     /// `type Db;` 声明的不透明句柄名。
     pub opaque_types: Vec<String>,
+    /// 同上，但额外带声明行号（v0.95：跳转定义用）。
+    pub opaque_lines: Vec<(String, usize)>,
     pub fns: Vec<ExternFn>,
 }
 
@@ -423,6 +427,7 @@ pub struct DialIface {
 /// 因为「看不懂的声明」比「缺一个声明」危险得多。
 pub fn parse_diali(text: &str) -> Result<DialIface> {
     let mut opaque_types = Vec::new();
+    let mut opaque_lines = Vec::new();
     let mut fns = Vec::new();
     let mut doc: Vec<String> = Vec::new();
 
@@ -453,17 +458,19 @@ pub fn parse_diali(text: &str) -> Result<DialIface> {
                     0,
                 ));
             }
-            opaque_types.push(name);
+            opaque_types.push(name.clone());
+            opaque_lines.push((name, lnum));
             doc.clear();
             continue;
         }
         if line.starts_with("extern") {
-            let f = parse_extern_fn(line, lnum)?;
+            let (fname, params, ret, fline) = parse_extern_fn(line, lnum)?;
             fns.push(ExternFn {
-                name: f.0,
-                params: f.1,
-                ret: f.2,
+                name: fname,
+                params,
+                ret,
                 doc: std::mem::take(&mut doc),
+                line: fline,
             });
             continue;
         }
@@ -477,7 +484,11 @@ pub fn parse_diali(text: &str) -> Result<DialIface> {
         ));
     }
 
-    Ok(DialIface { opaque_types, fns })
+    Ok(DialIface {
+        opaque_types,
+        opaque_lines,
+        fns,
+    })
 }
 
 /// 把 `.diali` 里的**类型名**解析为 Dial 的 `Type`。
@@ -528,8 +539,8 @@ pub fn resolve_type_name(name: &str, opaque: &[String]) -> Result<crate::ast::Ty
     Ok(t)
 }
 
-/// 解析 `extern fn name(a: T, b: U): R;`
-fn parse_extern_fn(line: &str, lnum: usize) -> Result<(String, Vec<(String, String)>, String)> {
+/// 解析 `extern fn name(a: T, b: U): R;`，并回传声明行号（v0.95：跳转定义用）。
+fn parse_extern_fn(line: &str, lnum: usize) -> Result<(String, Vec<(String, String)>, String, usize)> {
     let body = line
         .strip_prefix("extern")
         .unwrap()
@@ -592,5 +603,5 @@ fn parse_extern_fn(line: &str, lnum: usize) -> Result<(String, Vec<(String, Stri
         }
     }
 
-    Ok((fname, params, ret))
+    Ok((fname, params, ret, lnum))
 }

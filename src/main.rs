@@ -15,6 +15,7 @@
 mod ast;
 mod codegen;
 mod error;
+mod index;
 mod lexer;
 mod lsp;
 mod package;

@@ -248,6 +248,13 @@
 <li><a href="#283-两个容易出错已经处理好的细节">28.3 两个容易出错、已经处理好的细节</a></li>
 <li><a href="#284-刻意没做的部分">28.4 刻意没做的部分</a></li>
 <li><a href="#285-诊断位置v094-顺带修掉的一个缺陷">28.5 诊断位置（v0.94 顺带修掉的一个缺陷）</a></li>
+<li><a href="#286-lsp-增强hover-跳转定义-补全v095">28.6 LSP 增强：Hover / 跳转定义 / 补全（v0.95）</a><ul>
+<li><a href="#2861-作用域链「由内向外」查找遮蔽查的是内层">28.6.1 作用域链「由内向外」查找（遮蔽查的是内层）</a></li>
+<li><a href="#2862-跨文件符号import-驱动的自动扫描">28.6.2 跨文件符号：import 驱动的自动扫描</a></li>
+<li><a href="#2863-三个能力的契约">28.6.3 三个能力的契约</a></li>
+<li><a href="#2864-刻意仍不做">28.6.4 刻意仍不做</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -4454,9 +4461,24 @@ while (true) {
 <td>关键字 / 字符串 / 数字 / 运算符 / 类型 / 标识符</td>
 </tr>
 <tr>
+<td><strong>悬停（Hover）</strong></td>
+<td><code>textDocument/hover</code></td>
+<td>显示符号名称、推断类型、声明片段；包符号额外显示 <code>.diali</code> 的 <code>///</code> 文档并标注「外部函数」</td>
+</tr>
+<tr>
+<td><strong>跳转定义</strong></td>
+<td><code>textDocument/definition</code></td>
+<td>文件内符号回本文件精确 <code>Location</code>（UTF-16 列换算）；包符号跳进 <code>.diali</code> 的声明行</td>
+</tr>
+<tr>
+<td><strong>基础补全</strong></td>
+<td><code>textDocument/completion</code>（<code>.</code> 触发）</td>
+<td>收集光标可见作用域内的全部符号，按已输入前缀过滤；空白光标给全量候选</td>
+</tr>
+<tr>
 <td>能力协商</td>
 <td><code>initialize</code></td>
-<td>声明 <code>textDocumentSync = 1</code>（全量同步）与语义 token 的 legend</td>
+<td>声明 <code>textDocumentSync = 1</code>（全量同步）、语义 token 的 legend，以及 <code>hoverProvider</code> / <code>definitionProvider</code> / <code>completionProvider</code></td>
 </tr>
 </tbody>
 </table>
@@ -4483,12 +4505,16 @@ while (true) {
 </thead>
 <tbody>
 <tr>
-<td>补全、跳转定义、悬停、重命名、格式化</td>
-<td>都建立在<strong>跨文件符号表</strong>之上。Dial 目前一次编译一个文件，还没有符号表可查——硬做只能做出「猜」的结果，那比不做更糟</td>
+<td>悬停、跳转定义、补全</td>
+<td><strong>已在 v0.95 落地</strong>（见 <a href="#286-lsp-增强-hover--跳转定义--补全v095">§28.6</a>）。它们建立在 v0.95 新增的<strong>跨文件符号表</strong>（<code>src/index.rs</code>）之上——该模块独立于类型检查、可容错，半句没写完的代码也能索引</td>
+</tr>
+<tr>
+<td>重命名、跨文件引用查找、格式化</td>
+<td>重命名需要全工作区引用图，当前索引器只建符号、不建引用边；格式化交给编辑器/用户。<strong>本版仍不做</strong></td>
 </tr>
 <tr>
 <td>区分变量名与函数名（高亮上）</td>
-<td>同上，需要符号表。当前标识符一律标 <code>variable</code>：<strong>宁可不标，也不标错</strong></td>
+<td>需要符号表。当前标识符一律标 <code>variable</code>：<strong>宁可不标，也不标错</strong>（v0.95 的 Hover/补全已能区分种类，但语义高亮的 legend 暂未细分）</td>
 </tr>
 <tr>
 <td>行注释高亮</td>
@@ -4519,12 +4545,104 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 也是当前规模下正确的取舍：语句级定位已经够用，而给每个 Expr 加 span 会牵动
 解析器与代码生成的每一处构造点。</p>
 <p>顺带一提，也是这次改动让 B 组负向用例的输出全部带上了「第 N 行 第 M 列」。</p>
+<hr />
+<h3 id="286-lsp-增强hover-跳转定义-补全v095">28.6 LSP 增强：Hover / 跳转定义 / 补全（v0.95）</h3>
+<p>v0.94 把「编辑体验」的第一块地基（诊断 + 高亮）铺好了，但当时<strong>刻意没做</strong>悬停、跳转定义、补全——
+理由是「都建立在跨文件符号表之上，Dial 还没有符号表可查」。</p>
+<p>v0.95 补上的，正是这座符号表。它不是把 <code>semantic::analyze</code> 的副产品拿过来用，
+而是<strong>另起一座独立、可容错的索引</strong>（<code>src/index.rs</code>）：</p>
+<blockquote>
+<p>索引器<strong>不调用</strong>语义分析，只复用前端的「解析成形」（<code>parse_diali</code> / <code>resolve_type_name</code>）。
+因此<strong>半句没写完的代码也能索引</strong>——你打字打到一半、缺括号、少分号，Hover 与补全照样有反应，
+不会因为「语义没过」就整个崩掉。代价是索引不保证类型一定正确，但它<strong>宁可给一个保守的答案，也不标错</strong>。</p>
+</blockquote>
+<h4 id="2861-作用域链「由内向外」查找遮蔽查的是内层">28.6.1 作用域链「由内向外」查找（遮蔽查的是内层）</h4>
+<p>符号按<strong>作用域树</strong>组织：每个 <code>if</code> / <code>while</code> / <code>for</code> / <code>try</code> / <code>select</code> / <code>else</code> 块各开一个子作用域，
+挂到外层作用域的 <code>parent</code> 上。查找时<strong>从最内层作用域沿 parent 链一路向外</strong>：</p>
+<pre><code class="language-text">fn main() {
+    let x: string = &quot;outer&quot;;      // 外层 x
+    if (true) {
+        let x: int = 2;           // 内层 x，开了一个子作用域
+        total = demo_add(x, 3);   // 这里的 x 查到的是内层那个 int
+    }
+}
+</code></pre>
+<p>这与 <code>semantic::lookup_type</code> 的语义<strong>完全对齐</strong>——所以 Hover / 跳转定义 / 补全三处对「遮蔽」的判定
+和编译器对「遮蔽」的判定是同一套规则，不会编辑器里查的是内层、编译器实际用的是外层。</p>
+<h4 id="2862-跨文件符号import-驱动的自动扫描">28.6.2 跨文件符号：import 驱动的自动扫描</h4>
+<p>索引器不需要任何用户配置。它顺着 <code>import "demo";</code> 去 <code>~/.dial/packages/demo/</code> 找已安装的包，
+复用 v0.93 的 <code>find_installed</code> / <code>verify_iface</code> / <code>parse_diali</code> 三件套，把包装进内存符号表：</p>
+<table>
+<thead>
+<tr>
+<th>包装导出</th>
+<th>进来后是什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>type DemoHandle;</code></td>
+<td>不透明类型符号（<code>OpaqueType</code>），补全是 <code>DemoHandle</code></td>
+</tr>
+<tr>
+<td><code>extern fn demo_add(a: int, b: int): int;</code></td>
+<td>外部函数符号（<code>ExternFn</code>），补全是 <code>demo_add</code></td>
+</tr>
+<tr>
+<td><code>/// 两数相加</code></td>
+<td>挂到对应 <code>extern fn</code> 的 <code>doc</code> 上，Hover 时显示</td>
+</tr>
+</tbody>
+</table>
+<p>两样东西是「跳进 <code>.diali</code>」和「Hover 显示包文档」的关键素材，v0.95 把它们一并记下来：</p>
+<ul>
+<li><strong>声明行号</strong>：每个 <code>extern fn</code> / 不透明类型在 <code>.diali</code> 里的行号——跳转定义据此把光标送进 <code>.diali</code> 的精确一行；</li>
+<li><strong><code>///</code> 文档</strong>：Hover 包函数时直接渲染出来，并标注 <strong>「外部函数」</strong>，与本地函数区分开。</li>
+</ul>
+<h4 id="2863-三个能力的契约">28.6.3 三个能力的契约</h4>
+<p><strong>Hover</strong>（<code>textDocument/hover</code>）
+- 文件内符号 → 名称 + <strong>推断类型</strong> + 声明处片段；
+- 包符号 → 函数签名 + <code>.diali</code> 的 <code>///</code> 文档 + 「外部函数」标注。</p>
+<p><strong>跳转定义</strong>（<code>textDocument/definition</code>）
+- 文件内符号 → 返回<strong>本文件</strong>的精确 <code>Location</code>，列偏移按 UTF-16 换算到标识符起止；
+- 包符号 → 返回 <code>.diali</code> 文件的 <code>Location</code>，落点正是该 <code>extern fn</code> 的<strong>声明行</strong>。</p>
+<p><strong>基础补全</strong>（<code>textDocument/completion</code>，触发字符 <code>.</code>）
+- 收集光标<strong>可见作用域</strong>内的全部符号（本文件局部 + 全局函数/结构体 + 已 import 的包符号）；
+- 按光标处<strong>已输入前缀</strong>过滤：<code>demo_</code> 前缀只留 <code>demo_add</code>，不会把 <code>total</code> / <code>DemoHandle</code> 混进来；
+- 即使光标落在空白（前缀为空）也返回当前可见的全部候选。</p>
+<h4 id="2864-刻意仍不做">28.6.4 刻意仍不做</h4>
+<table>
+<thead>
+<tr>
+<th>没做</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>重命名、跨文件引用查找</td>
+<td>需要全工作区引用图；当前索引器只建符号、不建引用边</td>
+</tr>
+<tr>
+<td>格式化</td>
+<td>Dial 没有官定代码风格，交给编辑器/用户</td>
+</tr>
+<tr>
+<td>诊断下放到 <code>didChange</code></td>
+<td>打字到一半的代码必然有错，边打边报只会让红线在半句话上闪；诊断仍留给保存时</td>
+</tr>
+<tr>
+<td>LSP 框架（tower-lsp 等）</td>
+<td>本服务仍是手写的「读 JSON / 写 JSON」，框架的异步运行时与依赖树不划算</td>
+</tr>
+</tbody>
+</table>
 <hr /></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.94 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.95 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

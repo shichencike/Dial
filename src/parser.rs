@@ -92,11 +92,16 @@ impl Parser {
         }
     }
     fn expect_ident(&mut self) -> Result<String> {
+        Ok(self.expect_ident_pos()?.0)
+    }
+
+    /// 与 `expect_ident` 相同，但额外回传标识符的 1 起行列（v0.95：位置信息）。
+    fn expect_ident_pos(&mut self) -> Result<(String, usize, usize)> {
         let t = self.peek().clone();
         match t.kind {
             TokenKind::Ident(name) => {
                 self.advance();
-                Ok(name)
+                Ok((name, t.line, t.col))
             }
             _ => Err(DialcError::new(
                 format!("语法错误：期望标识符，但遇到 {:?}", t.kind),
@@ -141,7 +146,7 @@ impl Parser {
 
     fn parse_struct_def(&mut self) -> Result<StructDef> {
         let start = self.advance(); // struct
-        let name = self.expect_ident()?;
+        let (name, nline, ncol) = self.expect_ident_pos()?;
         self.expect(TokenKind::LBrace)?;
         let mut fields = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
@@ -159,20 +164,24 @@ impl Parser {
             fields,
             line: start.line,
             col: start.col,
+            name_line: nline,
+            name_col: ncol,
         })
     }
 
     fn parse_function(&mut self) -> Result<Func> {
         self.expect(TokenKind::Fn)?;
-        let name = self.expect_ident()?;
+        let (name, nline, ncol) = self.expect_ident_pos()?;
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
+        let mut param_pos = Vec::new();
         if !self.check(&TokenKind::RParen) {
             loop {
-                let pname = self.expect_ident()?;
+                let (pname, pline, pcol) = self.expect_ident_pos()?;
                 self.expect(TokenKind::Colon)?;
                 let pty = self.parse_type()?;
                 params.push((pname, pty));
+                param_pos.push((pline, pcol));
                 if self.check(&TokenKind::Comma) {
                     self.advance();
                     continue;
@@ -188,8 +197,11 @@ impl Parser {
         Ok(Func {
             name,
             params,
+            param_pos,
             ret,
             body,
+            line: nline,
+            col: ncol,
         })
     }
 
@@ -364,7 +376,7 @@ impl Parser {
         let start = self.peek().clone();
         let mutable = matches!(start.kind, TokenKind::Var);
         self.advance(); // 消费 var / let
-        let name = self.expect_ident()?;
+        let (name, nline, ncol) = self.expect_ident_pos()?;
         self.expect(TokenKind::Colon)?;
         let ty = self.parse_type()?;
         self.expect(TokenKind::Assign)?;
@@ -378,6 +390,8 @@ impl Parser {
             move_hint: false,
             line: start.line,
             col: start.col,
+            name_line: nline,
+            name_col: ncol,
         })
     }
 
@@ -414,7 +428,7 @@ impl Parser {
         let kw = self.peek().clone();
         self.expect(TokenKind::For)?;
         self.expect(TokenKind::LParen)?;
-        let var = self.expect_ident()?;
+        let (var, vline, vcol) = self.expect_ident_pos()?;
         self.expect(TokenKind::In)?;
         let start = self.parse_expr()?;
         self.expect(TokenKind::DotDot)?;
@@ -428,6 +442,8 @@ impl Parser {
             body,
             line: kw.line,
             col: kw.col,
+            var_line: vline,
+            var_col: vcol,
         })
     }
 
@@ -480,15 +496,25 @@ impl Parser {
                     start.col,
                 ))
             }
-            TokenKind::Ident(_) => Some(self.expect_ident()?),
+            TokenKind::Ident(_) => {
+                let (cv, cvl, cvc) = self.expect_ident_pos()?;
+                Some((cv, cvl, cvc))
+            }
             _ => None,
         };
         let catch_body = self.parse_block()?;
+        let (catch_name, catch_line, catch_col) = catch_var.unwrap_or((
+            String::new(),
+            start.line,
+            start.col,
+        ));
         Ok(Stmt::Try {
             body,
             catch: Catch {
-                var: catch_var,
+                var: if catch_name.is_empty() { None } else { Some(catch_name) },
                 body: catch_body,
+                var_line: catch_line,
+                var_col: catch_col,
             },
             line: start.line,
             col: start.col,
@@ -537,9 +563,15 @@ impl Parser {
                     ));
                 }
                 self.advance(); // as
-                let var = self.expect_ident()?;
+                let (var, vline, vcol) = self.expect_ident_pos()?;
                 let body = self.parse_block()?;
-                arms.push(SelectArm { var, chan, body });
+                arms.push(SelectArm {
+                    var,
+                    chan,
+                    body,
+                    var_line: vline,
+                    var_col: vcol,
+                });
                 continue;
             }
             if self.check(&TokenKind::Default) {

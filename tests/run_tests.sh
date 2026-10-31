@@ -13,6 +13,8 @@
 #   H. 包分发：示例 .dialpkg 的安装 + import 后编译运行 + SHA256 篡改必须被拦截（v0.93 新增）。
 #   I. LSP：`dialc lsp` 按真实 JSON-RPC 协议跑一遍——初始化、诊断定位、语义 token 的
 #      列偏移（含 UTF-16 换算）、以及 shutdown 后的干净退出（v0.93 新增）。
+#   K. LSP 增强：Hover（变量遮蔽 + 跨文件 .diali 文档）、跳转定义（文件内 / 包符号跳
+#      .diali）、基础补全（可见符号收集 + 前缀过滤）（v0.95 新增）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -319,6 +321,22 @@ echo "== I) LSP：dialc lsp 端到端协议往返（v0.93） =="
 # 而「反查子串」恰恰是能证明列偏移没算错的唯一手段。
 if command -v python3 >/dev/null 2>&1; then
     if python3 tests/lsp_smoke.py; then
+        :
+    else
+        fail=1
+    fi
+else
+    echo "  ⚠️  跳过（未找到 python3）"
+fi
+
+echo
+echo "== K) LSP 增强特性：Hover / 跳转定义 / 补全（v0.95） =="
+# 真起子进程、按 LSP 协议往返，聚焦三件事：
+#   1) Hover 区分同名变量遮蔽、并从 import 的包 .diali 拿文档；
+#   2) 跳转定义对文件内符号回本文件 Location、对包符号跳进 .diali；
+#   3) 补全收集光标可见符号并按已输入前缀过滤。
+if command -v python3 >/dev/null 2>&1; then
+    if python3 tests/lsp_features.py; then
         :
     else
         fail=1

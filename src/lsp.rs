@@ -16,6 +16,7 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 
 use crate::error::DialcError;
+use crate::index::{self, Symbol, SymbolKind, WorkspaceIndex};
 use crate::lexer::{self, TokenKind};
 use crate::parser;
 use crate::semantic;
@@ -58,12 +59,14 @@ pub fn run() -> io::Result<()> {
     // 诊断与响应都写 stdout；日志一律走 stderr，避免污染协议流。
     let mut out = stdout.lock();
     let mut docs: Docs = HashMap::new();
+    // 跨文件符号索引（v0.95）：当前打开文件 + import 的包。
+    let mut ws: WorkspaceIndex = WorkspaceIndex::default();
 
     loop {
         match read_message(&mut reader)? {
             None => return Ok(()), // EOF：客户端断开
             Some(msg) => {
-                let is_exit = handle(&msg, &mut docs, &mut out)?;
+                let is_exit = handle(&msg, &mut docs, &mut ws, &mut out)?;
                 if is_exit {
                     return Ok(());
                 }
@@ -112,9 +115,17 @@ fn write_message<W: Write>(out: &mut W, msg: &Value) -> io::Result<()> {
 }
 
 /// 处理一条消息。返回 `true` 表示收到 `exit`，应结束进程。
-fn handle<W: Write>(msg: &Value, docs: &mut Docs, out: &mut W) -> io::Result<bool> {
+fn handle<W: Write>(
+    msg: &Value,
+    docs: &mut Docs,
+    ws: &mut WorkspaceIndex,
+    out: &mut W,
+) -> io::Result<bool> {
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
+
+    // 把 (uri, line, character) 从 params 里取出（Hover / 定义 / 补全共用）。
+    let pos = doc_position(msg);
 
     match method {
         // ---- 生命周期 ----
@@ -131,7 +142,11 @@ fn handle<W: Write>(msg: &Value, docs: &mut Docs, out: &mut W) -> io::Result<boo
                         },
                         "full": { "delta": false },
                         "range": false
-                    }
+                    },
+                    // v0.95：悬停 / 跳转定义 / 补全
+                    "hoverProvider": true,
+                    "definitionProvider": true,
+                    "completionProvider": { "triggerCharacters": ["."] }
                 },
                 "serverInfo": { "name": "dialc", "version": env!("CARGO_PKG_VERSION") }
             });
@@ -149,19 +164,22 @@ fn handle<W: Write>(msg: &Value, docs: &mut Docs, out: &mut W) -> io::Result<boo
                     p.pointer("/textDocument/text").and_then(|t| t.as_str()),
                 ) {
                     docs.insert(uri.to_string(), text.to_string());
+                    index_document(ws, uri, text); // 维护符号索引（v0.95）
                     publish_diagnostics(out, uri, text)?;
                 }
             }
         }
         "textDocument/didChange" => {
             // 记录最新文本，但**不**在这里发诊断——避免打字过程中刷屏。
-            // 诊断在 didSave（以及 didOpen）时发布。
+            // 诊断在 didSave（以及 didOpen）时发布。符号索引则**每次都更新**，
+            // 这样补全在打字过程中也能给出当前可见的符号。
             if let Some(p) = msg.get("params") {
                 if let (Some(uri), Some(text)) = (
                     p.pointer("/textDocument/uri").and_then(|u| u.as_str()),
                     p.pointer("/contentChanges/0/text").and_then(|t| t.as_str()),
                 ) {
                     docs.insert(uri.to_string(), text.to_string());
+                    index_document(ws, uri, text);
                 }
             }
         }
@@ -175,11 +193,13 @@ fn handle<W: Write>(msg: &Value, docs: &mut Docs, out: &mut W) -> io::Result<boo
                 Some(t) => t.clone(),
                 None => String::new(),
             };
+            index_document(ws, &uri, &text);
             publish_diagnostics(out, &uri, &text)?;
         }
         "textDocument/didClose" => {
             if let Some(uri) = msg.pointer("/params/textDocument/uri").and_then(|u| u.as_str()) {
                 docs.remove(uri);
+                ws.files.remove(uri); // 一并清掉索引，避免残留
                 // 清空该文件的诊断，避免关掉后还留着红色波浪线
                 let params = json!({ "uri": uri, "diagnostics": [] });
                 notify(out, "textDocument/publishDiagnostics", params)?;
@@ -195,6 +215,30 @@ fn handle<W: Write>(msg: &Value, docs: &mut Docs, out: &mut W) -> io::Result<boo
             let text = docs.get(uri).cloned().unwrap_or_default();
             let data = semantic_tokens(&text);
             respond(out, id, json!({ "data": data }))?;
+        }
+
+        // ---- v0.95：悬停 / 跳转定义 / 补全 ----
+        "textDocument/hover" => {
+            let reply = pos
+                .as_ref()
+                .and_then(|(uri, line, character)| hover(ws, docs, uri, *line, *character));
+            respond(out, id, reply.unwrap_or(Value::Null))?;
+        }
+        "textDocument/definition" => {
+            let reply = pos
+                .as_ref()
+                .and_then(|(uri, line, character)| definition(ws, docs, uri, *line, *character));
+            respond(out, id, reply.unwrap_or(Value::Null))?;
+        }
+        "textDocument/completion" => {
+            let items = pos
+                .map(|(uri, line, character)| completion(ws, docs, &uri, line, character))
+                .unwrap_or_default();
+            respond(
+                out,
+                id,
+                json!({ "isIncomplete": false, "items": items }),
+            )?;
         }
 
         // 未知方法：静默忽略（LSP 允许客户端发送我们不认识的通知）
@@ -583,4 +627,242 @@ fn char_col_to_utf16(line_text: &str, char_col: usize) -> usize {
     let take = char_col.saturating_sub(1); // 词法器 1 起
     let prefix: String = line_text.chars().take(take).collect();
     prefix.encode_utf16().count()
+}
+
+// ---------------------------------------------------------------------------
+// v0.95：符号索引辅助（Hover / 跳转定义 / 补全）
+// ---------------------------------------------------------------------------
+
+/// 从请求里取出 `(uri, 0 起行, 0 起 UTF-16 列)`。缺 position 时返回 None。
+fn doc_position(msg: &Value) -> Option<(String, u32, u32)> {
+    let uri = msg
+        .pointer("/params/textDocument/uri")
+        .and_then(|u| u.as_str())?
+        .to_string();
+    let line = msg.pointer("/params/position/line").and_then(|l| l.as_u64())? as u32;
+    let character = msg
+        .pointer("/params/position/character")
+        .and_then(|c| c.as_u64())? as u32;
+    Some((uri, line, character))
+}
+
+/// 把一份文档重新解析并写入 `ws.files`。解析失败（半成品代码）就移除旧索引。
+fn index_document(ws: &mut WorkspaceIndex, uri: &str, text: &str) {
+    // 1) 词法
+    let tokens = match lexer::lex(text) {
+        Ok(t) => t,
+        Err(_) => {
+            ws.files.remove(uri);
+            return;
+        }
+    };
+    // 2) 语法（只取 import 列表）
+    let probe = match parser::parse(tokens.clone()) {
+        Ok(p) => p,
+        Err(_) => {
+            ws.files.remove(uri);
+            return;
+        }
+    };
+    // 3) 载入 import 的包符号（与编译器同源；不往 stdout 打日志以免污染协议）
+    let mut opaque = Vec::new();
+    for imp in &probe.imports {
+        if index::ensure_package(ws, imp) {
+            if let Some(syms) = ws.packages.get(imp) {
+                for s in &syms.opaque {
+                    opaque.push(s.name.clone());
+                }
+            }
+        }
+    }
+    // 4) 带包类型名重新解析 + 构建索引
+    let program = match parser::parse_with(tokens, &opaque) {
+        Ok(p) => p,
+        Err(_) => {
+            ws.files.remove(uri);
+            return;
+        }
+    };
+    let indexed = index::index_program(uri, &program, &program.imports);
+    ws.files.insert(uri.to_string(), indexed);
+}
+
+/// 把 dialc 内部（1 起行, 1 起 char 列）的区间换算成 LSP 的 [start, end) 范围。
+///
+/// 行内包含 emoji 时 char 列与 UTF-16 列不同，因此要用行文本重算。
+fn char_span_to_lsp(line_text: &str, c1: usize, c2: usize) -> (u32, u32) {
+    let chars: Vec<char> = line_text.chars().collect();
+    let to_utf16 = |c: usize| -> u32 {
+        let take = c.saturating_sub(1).min(chars.len());
+        chars.iter().take(take).map(|ch| ch.len_utf16()).sum::<usize>() as u32
+    };
+    (to_utf16(c1), to_utf16(c2))
+}
+
+/// 光标前的部分标识符（用于补全前缀过滤），按 UTF-16 列从行尾回扫。
+fn partial_identifier(line_text: &str, utf16_col: u32) -> String {
+    let chars: Vec<char> = line_text.chars().collect();
+    let mut acc = 0usize;
+    let mut idx = 0;
+    for (i, ch) in chars.iter().enumerate() {
+        let w = ch.len_utf16();
+        if acc + w > utf16_col as usize {
+            idx = i;
+            break;
+        }
+        acc += w;
+        idx = i + 1;
+    }
+    let mut s = String::new();
+    let mut j = idx;
+    while j > 0 {
+        let ch = chars[j - 1];
+        if ch.is_alphanumeric() || ch == '_' {
+            s.insert(0, ch);
+            j -= 1;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// 符号种类的可读名（中文）。
+fn kind_label(k: SymbolKind) -> &'static str {
+    match k {
+        SymbolKind::Function => "函数",
+        SymbolKind::Struct => "结构体",
+        SymbolKind::Var => "变量",
+        SymbolKind::Param => "形参",
+        SymbolKind::OpaqueType => "不透明类型",
+        SymbolKind::ExternFn => "外部函数",
+    }
+}
+
+/// 补全/悬停用的类型详情字符串。
+fn symbol_detail(s: &Symbol) -> String {
+    match s.kind {
+        SymbolKind::Function | SymbolKind::ExternFn => {
+            format!("{} → {}", kind_label(s.kind), s.ty.display())
+        }
+        SymbolKind::Struct => "结构体".to_string(),
+        SymbolKind::OpaqueType => "不透明类型（包内部布局对用户不可见）".to_string(),
+        SymbolKind::Var | SymbolKind::Param => {
+            format!("{}: {}", kind_label(s.kind), s.ty.display())
+        }
+    }
+}
+
+/// 取光标下的符号（文件内优先，否则查 import 的包）。
+///
+/// 返回克隆出的 `Symbol`：包含它的 span（指向定义处）、文档与 decl_uri（包符号指向 .diali）。
+fn symbol_at_cursor<'a>(
+    ws: &'a WorkspaceIndex,
+    docs: &Docs,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Option<Symbol> {
+    let text = docs.get(uri)?;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line1 = line as usize + 1;
+    let line_text = lines.get(line as usize).copied().unwrap_or("");
+    let char1 = index::utf16_to_char_col(line_text, character as usize);
+    let name = index::identifier_at(&text, line1, char1)?;
+    let indexed = ws.files.get(uri)?;
+    let point = (line1, char1);
+    if let Some(scope_id) = indexed.scope_at(point) {
+        if let Some(s) = indexed.lookup_local(scope_id, &name) {
+            return Some(s.clone());
+        }
+    }
+    indexed.lookup_package(ws, &name).cloned()
+}
+
+/// Hover：返回 Markdown 内容（含类型与文档）。
+fn hover(ws: &WorkspaceIndex, docs: &Docs, uri: &str, line: u32, character: u32) -> Option<Value> {
+    let s = symbol_at_cursor(ws, docs, uri, line, character)?;
+    let mut md = format!("**{}** — {}\n\n", s.name, kind_label(s.kind));
+    md.push_str(&symbol_detail(&s));
+    md.push('\n');
+    if !s.doc.is_empty() {
+        md.push('\n');
+        md.push_str(&s.doc.join("\n"));
+    }
+    Some(json!({ "contents": { "kind": "markdown", "value": md } }))
+}
+
+/// 跳转定义：返回 Location（文件内符号指向本文件；包符号指向 .diali）。
+fn definition(
+    ws: &WorkspaceIndex,
+    docs: &Docs,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Option<Value> {
+    let s = symbol_at_cursor(ws, docs, uri, line, character)?;
+    if let Some(decl_uri) = &s.decl_uri {
+        // 包符号：跳到 .diali 的声明行（列定为行首）。
+        // 这里不持有 .diali 文本，行内精确定位交由编辑器自行滚到该行。
+        let l0 = (s.span.0 as u32).saturating_sub(1);
+        return Some(json!({
+            "uri": decl_uri,
+            "range": { "start": { "line": l0, "character": 0 }, "end": { "line": l0, "character": 0 } }
+        }));
+    }
+    // 文件内符号：精确区间（带 UTF-16 列换算）。
+    let text = docs.get(uri).cloned().unwrap_or_default();
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line_text = lines
+        .get((s.span.0 as u32).saturating_sub(1) as usize)
+        .copied()
+        .unwrap_or("");
+    let (sc, ec) = char_span_to_lsp(line_text, s.span.1, s.span.3);
+    let l0 = (s.span.0 as u32).saturating_sub(1);
+    Some(json!({
+        "uri": uri,
+        "range": { "start": { "line": l0, "character": sc }, "end": { "line": l0, "character": ec } }
+    }))
+}
+
+/// 补全：收集光标处可见的全部符号，按已输入前缀过滤。
+///
+/// 与 Hover / 定义不同，补全**不要求光标下方必须是个标识符**——
+/// 光标在空白上（例如刚敲完 `(`）也应该能给出当前可见的符号，
+/// 因此这里直接从行文本推算前缀，再用 `scope_at` 定位作用域，不经由 `symbol_at_cursor`。
+fn completion(ws: &WorkspaceIndex, docs: &Docs, uri: &str, line: u32, character: u32) -> Vec<Value> {
+    let text = match docs.get(uri) {
+        Some(t) => t.clone(),
+        None => return Vec::new(),
+    };
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line1 = line as usize + 1;
+    let line_text = lines.get(line as usize).copied().unwrap_or("");
+    let char1 = index::utf16_to_char_col(line_text, character as usize);
+    let prefix = partial_identifier(line_text, character);
+
+    let indexed = match ws.files.get(uri) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let scope_id = indexed.scope_at((line1, char1)).unwrap_or(indexed.top_scope);
+    let mut items = Vec::new();
+    for s in indexed.visible_symbols(ws, scope_id) {
+        if !prefix.is_empty() && !s.name.starts_with(&prefix) {
+            continue;
+        }
+        let doc_val = if s.doc.is_empty() {
+            Value::Null
+        } else {
+            json!({ "kind": "markdown", "value": s.doc.join("\n") })
+        };
+        items.push(json!({
+            "label": s.name,
+            "kind": s.kind.completion_kind(),
+            "detail": symbol_detail(&s),
+            "documentation": doc_val,
+            "insertText": s.name
+        }));
+    }
+    items
 }

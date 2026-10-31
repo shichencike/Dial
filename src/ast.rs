@@ -129,6 +129,9 @@ pub enum Stmt {
         move_hint: bool,
         line: usize,
         col: usize,
+        /// 标识符**本身**的位置（v0.95）：Hover / 跳转定义用，定位到名字而非语句起点。
+        name_line: usize,
+        name_col: usize,
     },
     /// 赋值语句（仅可对 var 变量赋值）。
     Assign {
@@ -181,6 +184,9 @@ pub enum Stmt {
         body: Vec<Stmt>,
         line: usize,
         col: usize,
+        /// 循环变量**名**的位置（v0.95）。
+        var_line: usize,
+        var_col: usize,
     },
     Return(Option<Expr>, usize, usize),
     /// `throw <expr>;`：抛出可恢复异常。expr 必须是 Error 类型（编译期强制规范化）。
@@ -228,6 +234,9 @@ pub enum Stmt {
 pub struct Catch {
     pub var: Option<String>,
     pub body: Vec<Stmt>,
+    /// 捕获变量**名**的位置（v0.95）。
+    pub var_line: usize,
+    pub var_col: usize,
 }
 
 /// `select` 的一个 case 分支（v0.91）。
@@ -241,6 +250,9 @@ pub struct SelectArm {
     pub var: String,
     pub chan: Expr,
     pub body: Vec<Stmt>,
+    /// 绑定变量**名**的位置（v0.95）。
+    pub var_line: usize,
+    pub var_col: usize,
 }
 
 /// 函数定义。
@@ -248,8 +260,13 @@ pub struct SelectArm {
 pub struct Func {
     pub name: String,
     pub params: Vec<(String, Type)>,
+    /// 形参**名**的位置（v0.95）：与 `params` 一一对应，供形参 Hover / 跳转定义。
+    pub param_pos: Vec<(usize, usize)>,
     pub ret: Type,
     pub body: Vec<Stmt>,
+    /// 函数名位置（v0.95）：跳转定义指向这里。
+    pub line: usize,
+    pub col: usize,
 }
 
 /// 结构体定义。
@@ -259,6 +276,9 @@ pub struct StructDef {
     pub fields: Vec<(String, Type)>,
     pub line: usize,
     pub col: usize,
+    /// 结构体名位置（v0.95）。
+    pub name_line: usize,
+    pub name_col: usize,
 }
 
 /// 整个程序 = `import` 列表 + 顶层结构体集合 + 顶层函数集合。

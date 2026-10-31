@@ -15,6 +15,60 @@
 
 ---
 
+## [v0.95] — 2026-10-31
+
+本版是 **`dialc lsp` 的第一次增强**（见 README [§28.6](#286-lsp-增强-hover--跳转定义--补全v095)）：
+把 v0.94 骨架里「刻意没做」的三件符号表能力——**悬停（Hover）/ 跳转定义（Go to Definition）/ 基础补全（Completion）**
+——一次性补齐。底层是一座**与类型检查解耦、可容错的跨文件符号表**（`src/index.rs`），
+它复用 `parse_diali` / `resolve_type_name`，但**不调用 `semantic::analyze`**，
+所以半句没写完的代码也照样能索引、照样能给 Hover 与补全。
+
+### Added（新增）
+- **新增模块 `src/index.rs`**：作用域树（Scope，parent 链）+ 符号表（Symbol），独立于类型检查。
+  - **作用域链「由内向外」查找**，与 `semantic::lookup_type` 语义一致，因此 `if` 块里 `let x: int` 遮蔽外层
+    `let x: string` 在 Hover / 定义 / 补全三处都查的是**内层那个 `x`**。
+  - **跨文件符号**：通过 `import` 自动扫描 `~/.dial/packages/<name>/`，复用现有
+    `find_installed` / `verify_iface` / `parse_diali` 拿到包的导出（不透明类型 + `extern fn`），
+    并记下来自 `.diali` 的**声明行号**与 `///` 文档——这两样是「跳进 `.diali`」与「Hover 显示包文档」的素材。
+- **Hover**（`textDocument/hover`）：
+  - 文件内符号（函数 / 结构体 / 局部变量 / 形参）显示名称、**推断类型**与声明处片段；
+  - 包符号显示函数签名 + `.diali` 里的 `///` 文档，并标注 **「外部函数」**。
+- **跳转定义**（`textDocument/definition`）：
+  - 文件内符号 → 返回**本文件**的精确 `Location`（UTF-16 列换算，精确到标识符起止）；
+  - 包符号 → 返回 `.diali` 文件的 `Location`，落点正是该 `extern fn` 的**声明行**。
+- **基础补全**（`textDocument/completion`，触发字符 `.`）：
+  - 收集光标**可见作用域**内的全部符号（本文件局部 + 全局函数/结构体 + 已 import 的包符号）；
+  - 按光标处**已输入前缀**过滤（`demo_` 前缀只留 `demo_add`，不会把 `total` / `DemoHandle` 混进来）；
+  - 即使光标落在空白（前缀为空）也返回当前可见的全部候选。
+- **AST / 解析器 / 包接口补上位置字段**（稀疏、小改）：`VarDecl` / `For` / `Catch` / `SelectArm` 的变量名位置，
+  `Func` 的名字与每个形参位置，`StructDef` 的名字位置；`.diali` 的 `type X;` 与 `extern fn f` 也记下声明行号。
+
+### Changed（变更）
+- `initialize` 能力协商新增 `hoverProvider: true` / `definitionProvider: true` /
+  `completionProvider: { triggerCharacters: ["."] }`（v0.94 仅有语义高亮与诊断）。
+- `didOpen` / `didChange` / `didSave` 在发诊断之外，额外把文件喂给符号表索引；
+  `didClose` 时从工作区索引里移除该文件，避免残留。
+
+### Added（测试）
+- 测试组 **K**（`tests/lsp_features.py`）：真起 `dialc lsp` 子进程按 LSP 协议往返，覆盖：
+  1. Hover 区分同名变量遮蔽（内层 `x: int` ≠ 外层 `x: string`）；
+  2. Hover 包函数的 `.diali` `///` 文档与「外部函数」标注（跨文件符号）；
+  3. 跳转定义对文件内符号回本文件、对包符号跳进 `.diali`；
+  4. 补全收集可见符号 + 前缀过滤（含空白光标全量）。
+
+### 刻意未做（与 v0.94 规划一致，本版仍不做）
+- **重命名（rename）** 与 **跨文件引用查找**：需要全工作区重索引 + 引用图，当前索引器只建符号、不建引用边。
+- **格式化**：Dial 没有官定代码风格，格式化交给编辑器/用户。
+- **诊断下放到 `didChange`**：打字到一半的代码必然有错，边打边报只会让红线在半句话上闪；诊断仍留给保存时。
+- **LSP 框架（tower-lsp 等）**：本服务仍是手写的「读 JSON / 写 JSON」，框架的异步运行时与依赖树不划算。
+
+### 验证
+- A/B/D/E/C/F/G/H/I **九组原有测试全绿**，新增 **K 组 25 项断言全通过**；
+  端到端实测：Hover 内层 `x` → `int`、Hover `demo_add` → 显示 `/// 两数相加`；
+  定义内层 `x` → 本文件 line=6、定义 `demo_add` → `.diali`；补全前缀 `demo_` 只留 `demo_add`。
+
+---
+
 ## [v0.94] — 2026-10-31
 
 本版落地 **`dialc lsp` 语言服务器骨架**（见 README [§28](#28-语言服务器-dialc-lspv094-骨架)），
