@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 十组检查，全部通过才算绿：
+# 十一组检查，全部通过才算绿（顺序即 A→K，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
+#   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
 #   D. Fail-Fast：tests/trap/*.dial 越界/除零必须当场因信号终止，且不得打印哨兵；
 #   E. 对照组：同一批用例在 --fast 下应关闭检查（证明陷阱确由编译器插入，而非碰巧崩溃）；
-#   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
 #   F. 并发压测：C Runtime 多消费者抢同一通道（v0.9 新增，绕开编译器直压 stdlib）。
 #   G. 未捕获异常：内建函数的隐式抛出允许写在 try 外，运行期必须 panic 且打印真实消息
 #      （v0.92 新增；不参与 E 组对照——异常不是安全等级检查，--fast 不该关掉它）。
 #   H. 包分发：示例 .dialpkg 的安装 + import 后编译运行 + SHA256 篡改必须被拦截（v0.93 新增）。
 #   I. LSP：`dialc lsp` 按真实 JSON-RPC 协议跑一遍——初始化、诊断定位、语义 token 的
-#      列偏移（含 UTF-16 换算）、以及 shutdown 后的干净退出（v0.93 新增）。
+#      列偏移（含 UTF-16 换算）、以及 shutdown 后的干净退出（v0.94 新增）。
+#   J. 包安装三条硬规则：覆盖 / 静态库限制 / ABI 冲突（v0.94 收尾新增；复用 H 组装好的 demo 包）。
 #   K. LSP 增强：Hover（变量遮蔽 + 跨文件 .diali 文档）、跳转定义（文件内 / 包符号跳
 #      .diali）、基础补全（可见符号收集 + 前缀过滤）（v0.95 新增）。
 set -u
@@ -81,6 +82,18 @@ for f in tests/bad/*.dial; do
 done
 
 echo
+echo "== C) 契约：产物不得依赖 libLLVM =="
+bin="${TMP}/contract_hello"
+"$DIALC" build examples/hello.dial -o "$bin" >/dev/null 2>&1
+if ldd "$bin" 2>/dev/null | grep -qi "LLVM"; then
+    echo "  ❌ 用户程序依赖了 libLLVM，违反契约"
+    ldd "$bin" | sed 's/^/       /'
+    fail=1
+else
+    echo "  ✅ 用户程序仅依赖 C Runtime：$(ldd "$bin" | tr -s ' \t' ' ' | tr '\n' '|')"
+fi
+
+echo
 echo "== D) Fail-Fast：越界/除零必须当场终止（默认 Debug 等级）=="
 # 判定标准两条，缺一不可：
 #   1) 进程因信号而死（退出码 >= 128：SIGILL=4 / SIGTRAP=5 / SIGSEGV=11）
@@ -134,18 +147,6 @@ for src in tests/trap/*.dial; do
         echo "  ⚠️  $name (--fast) 仍以退出码 $rc 终止（该平台下越界恰好命中不可访问内存）"
     fi
 done
-
-echo
-echo "== C) 契约：产物不得依赖 libLLVM =="
-bin="${TMP}/contract_hello"
-"$DIALC" build examples/hello.dial -o "$bin" >/dev/null 2>&1
-if ldd "$bin" 2>/dev/null | grep -qi "LLVM"; then
-    echo "  ❌ 用户程序依赖了 libLLVM，违反契约"
-    ldd "$bin" | sed 's/^/       /'
-    fail=1
-else
-    echo "  ✅ 用户程序仅依赖 C Runtime：$(ldd "$bin" | tr -s ' \t' ' ' | tr '\n' '|')"
-fi
 
 echo
 echo "== F) C Runtime 并发压测：多消费者抢同一通道（v0.9 新增）=="
@@ -258,6 +259,21 @@ else
 fi
 
 echo
+echo "== I) LSP：dialc lsp 端到端协议往返（v0.94） =="
+# 单独一个 Python 脚本驱动：LSP 的语义 token 是差分编码的整数流，
+# 要在 shell 里解码 5 元组并反查源码子串根本不现实，
+# 而「反查子串」恰恰是能证明列偏移没算错的唯一手段。
+if command -v python3 >/dev/null 2>&1; then
+    if python3 tests/lsp_smoke.py; then
+        :
+    else
+        fail=1
+    fi
+else
+    echo "  ⚠️  跳过（未找到 python3）"
+fi
+
+echo
 echo "== J) 包安装三条硬规则（v0.94.1）：覆盖 / 静态库限制 / ABI 冲突 =="
 # 复用 H 组已构建并安装的 demo（abi=1）。若没装，先装一次。
 if [ ! -f "${HOME}/.dial/packages/demo/manifest.txt" ]; then
@@ -312,21 +328,6 @@ elif ! grep -q "ABI" "${TMP}/j_abi.log" || ! grep -q "rm -rf" "${TMP}/j_abi.log"
     echo "  ❌ ABI 冲突被拦截，但报错未说明冲突 / 未给出卸载提示："; sed 's/^/       /' "${TMP}/j_abi.log"; fail=1
 else
     echo "  ✅ 不同 ABI 的同名包被拒绝并提示先卸载"
-fi
-
-echo
-echo "== I) LSP：dialc lsp 端到端协议往返（v0.93） =="
-# 单独一个 Python 脚本驱动：LSP 的语义 token 是差分编码的整数流，
-# 要在 shell 里解码 5 元组并反查源码子串根本不现实，
-# 而「反查子串」恰恰是能证明列偏移没算错的唯一手段。
-if command -v python3 >/dev/null 2>&1; then
-    if python3 tests/lsp_smoke.py; then
-        :
-    else
-        fail=1
-    fi
-else
-    echo "  ⚠️  跳过（未找到 python3）"
 fi
 
 echo

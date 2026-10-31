@@ -64,7 +64,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 # 编译并运行一个 Dial 程序
 ./target/release/dialc run examples/hello.dial
 
-# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装规则等十组）
+# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装规则等十一组）
 ./tests/run_tests.sh</code></pre>
   <h2>最小示例</h2>
   <pre><code>fn main(): int {
@@ -73,7 +73,9 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
     return 0;
 }</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.95.zip">dialc-v0.95.zip</a>（或自行 clone 仓库后构建）
+    下载源码包：<a href="../dialc-v0.95.zip">dialc-v0.95.zip</a>（或自行 clone 仓库后构建）<br>
+    发布包由 <a class="ext" href="https://github.com/shichencike/Dial/actions/workflows/ci.yml" target="_blank" rel="noopener">GitHub Actions</a>
+    自动构建：装 LLVM 18 → 编译 → 跑全部十一组端到端测试 → 打包上传 Release。
   </p>
 </section>
 

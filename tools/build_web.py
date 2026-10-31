@@ -134,16 +134,25 @@ a:hover{text-decoration:underline}
 
 def dial_slugify(value: str, separator: str) -> str:
     """
-    保留中文的锚点生成器。
+    锚点生成器：**严格复刻 GitHub（github-slugger）的规则**。
 
-    python-markdown 默认 slugify 会丢弃非 ASCII 字符，"19. 内存宪法（防 GC 铁律）"
-    会被压成 "19-gc"，导致所有中文标题的内部链接失效。这里自行处理：
-    去掉标点与括号，空白折叠为分隔符，中英文数字一律保留。
+    python-markdown 默认的 slugify 会丢弃非 ASCII 字符，"19. 内存宪法（防 GC 铁律）"
+    会被压成 "19-gc"，导致所有中文标题的内部链接失效。这里保留中文。
+
+    为什么必须与 GitHub 逐字节一致：README.md 里的手写锚点（例如
+    `#145-cow-的触发时机`）是按 GitHub 的规则写的。如果官网生成的锚点与它不同，
+    同一份链接就会「在 GitHub 上能跳、在官网上跳不动」。因此两处必须同源。
+
+    GitHub 的规则（依次执行）：
+      1. 转小写；
+      2. 删除除「字母 / 数字 / 下划线 / 连字符 / **空格**」以外的所有字符
+         （因此 `.` `:` `（` `）` `` ` `` `/` 等标点一律消失，但**空格要留着**）；
+      3. 每个空格换成一个连字符。
+    第 3 步**不合并**连续空格，所以 "a / b" 得到 "a--b"——两个空格对应两个连字符。
     """
-    v = value.strip()
-    v = re.sub(r"[（）()【】\[\]《》,，。.、：:；;！!？?\"'“”‘’/\\|]+", "", v)
-    v = re.sub(r"\s+", separator, v)
-    return v.strip(separator).lower()
+    v = value.strip().lower()
+    v = re.sub(r"[^\w\-\s]", "", v, flags=re.UNICODE)
+    return v.replace(" ", separator)
 
 
 def md_body(text: str, with_toc: bool) -> str:
@@ -283,7 +292,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 # 编译并运行一个 Dial 程序
 ./target/release/dialc run examples/hello.dial
 
-# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装规则等十组）
+# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装规则等十一组）
 ./tests/run_tests.sh</code></pre>
   <h2>最小示例</h2>
   <pre><code>fn main(): int {{
@@ -292,7 +301,9 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
     return 0;
 }}</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.95.zip">dialc-v0.95.zip</a>（或自行 clone 仓库后构建）
+    下载源码包：<a href="../dialc-v0.95.zip">dialc-v0.95.zip</a>（或自行 clone 仓库后构建）<br>
+    发布包由 <a class="ext" href="https://github.com/shichencike/Dial/actions/workflows/ci.yml" target="_blank" rel="noopener">GitHub Actions</a>
+    自动构建：装 LLVM 18 → 编译 → 跑全部十一组端到端测试 → 打包上传 Release。
   </p>
 </section>
 {FOOTER}

@@ -23,18 +23,18 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc-—-dial-语言编译器-v094">dialc — Dial 语言编译器 v0.94</a><ul>
+<li><a href="#dialc--dial-语言编译器-v095">dialc — Dial 语言编译器 v0.95</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
 <li><a href="#3-构建与使用">3. 构建与使用</a><ul>
-<li><a href="#31-运行环境要求linux-·-动态-glibc">3.1 运行环境要求（Linux · 动态 glibc）</a><ul>
+<li><a href="#31-运行环境要求linux--动态-glibc">3.1 运行环境要求（Linux · 动态 glibc）</a><ul>
 <li><a href="#311-操作系统近两年内的新发行版本">3.1.1 操作系统：近两年内的新发行版本</a></li>
 <li><a href="#312-工具链">3.1.2 工具链</a></li>
 <li><a href="#313-运行-dialc-本体时的动态库要求">3.1.3 运行 dialc 本体时的动态库要求</a></li>
 </ul>
 </li>
-<li><a href="#32-从源码构建克隆-→-进入-→-编译">3.2 从源码构建：克隆 → 进入 → 编译</a></li>
+<li><a href="#32-从源码构建克隆--进入--编译">3.2 从源码构建：克隆 → 进入 → 编译</a></li>
 <li><a href="#33-编译-dial-程序">3.3 编译 Dial 程序</a></li>
 <li><a href="#34-产物依赖契约">3.4 产物依赖契约</a><ul>
 <li><a href="#341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</a></li>
@@ -70,9 +70,9 @@
 </li>
 <li><a href="#8-语句与控制流">8. 语句与控制流</a><ul>
 <li><a href="#81-语句一览">8.1 语句一览</a></li>
-<li><a href="#82-if-else-if-while">8.2 if / else if / while</a></li>
+<li><a href="#82-if--else-if--while">8.2 if / else if / while</a></li>
 <li><a href="#83-范围-for-循环">8.3 范围 for 循环</a></li>
-<li><a href="#84-break-continue">8.4 break / continue</a></li>
+<li><a href="#84-break--continue">8.4 break / continue</a></li>
 <li><a href="#85-块与作用域">8.5 块与作用域</a></li>
 </ul>
 </li>
@@ -93,12 +93,12 @@
 <li><a href="#11-动态数组-int">11. 动态数组 int[]</a><ul>
 <li><a href="#111-构造">11.1 构造</a></li>
 <li><a href="#112-方法">11.2 方法</a></li>
-<li><a href="#113-为什么-push-set-要返回指针">11.3 为什么 push / set 要返回指针</a></li>
+<li><a href="#113-为什么-push--set-要返回指针">11.3 为什么 push / set 要返回指针</a></li>
 <li><a href="#114-接收者必须是可变变量var">11.4 接收者必须是可变变量（var）</a></li>
 <li><a href="#115-越界行为">11.5 越界行为</a></li>
 </ul>
 </li>
-<li><a href="#12-哈希表-mapint-→-int">12. 哈希表 map（int → int）</a><ul>
+<li><a href="#12-哈希表-mapint--int">12. 哈希表 map（int → int）</a><ul>
 <li><a href="#121-构造">12.1 构造</a></li>
 <li><a href="#122-方法">12.2 方法</a></li>
 <li><a href="#123-为什么-put-要返回指针">12.3 为什么 put 要返回指针</a></li>
@@ -121,24 +121,28 @@
 <li><a href="#147-返回值不被提前释放">14.7 返回值不被提前释放</a></li>
 </ul>
 </li>
-<li><a href="#15-ffi-契约dial-语法-→-c-函数">15. FFI 契约：Dial 语法 → C 函数</a><ul>
+<li><a href="#15-ffi-契约dial-语法--c-函数">15. FFI 契约：Dial 语法 → C 函数</a><ul>
 <li><a href="#c-runtime-导出函数">C Runtime 导出函数</a></li>
 </ul>
 </li>
 <li><a href="#16-内置-print">16. 内置 print</a></li>
 <li><a href="#17-未定义行为与已实现边界">17. 未定义行为与已实现边界</a><ul>
 <li><a href="#171-未定义行为">17.1 未定义行为</a></li>
-<li><a href="#172-尚未实现的能力截至-v094">17.2 尚未实现的能力（截至 v0.94）</a></li>
+<li><a href="#172-尚未实现的能力截至-v095">17.2 尚未实现的能力（截至 v0.95）</a></li>
 </ul>
 </li>
 <li><a href="#18-测试">18. 测试</a><ul>
+<li><a href="#持续集成github-actions">持续集成（GitHub Actions）</a></li>
 <li><a href="#示例清单">示例清单</a></li>
 <li><a href="#负向用例清单节选全部位于-testsbad">负向用例清单（节选，全部位于 tests/bad/）</a></li>
 </ul>
 </li>
 <li><a href="#19-内存宪法防-gc-铁律">19. 内存宪法（防 GC 铁律）</a><ul>
 <li><a href="#191-永远拒绝-gc">19.1 永远拒绝 GC</a></li>
-<li><a href="#192-编译期接管内存">19.2 编译期接管内存</a></li>
+<li><a href="#192-编译期接管内存">19.2 编译期接管内存</a><ul>
+<li><a href="#arc-不解决循环引用这是它的已知边界不是遗漏">ARC 不解决循环引用——这是它的已知边界，不是遗漏</a></li>
+</ul>
+</li>
 <li><a href="#193-显式指针回收未来裸指针的契约">19.3 显式指针回收（未来裸指针的契约）</a></li>
 <li><a href="#194-为什么这是底线">19.4 为什么这是底线</a></li>
 </ul>
@@ -158,7 +162,7 @@
 <li><a href="#214-保持代码直白">21.4 保持代码直白</a></li>
 </ul>
 </li>
-<li><a href="#22-版本变更摘要">22. 版本变更摘要</a><ul>
+<li><a href="#22-早期版本摘要v03-及以前">22. 早期版本摘要（v0.3 及以前）</a><ul>
 <li><a href="#220-v061相对-v06">22.0 v0.61（相对 v0.6）</a></li>
 <li><a href="#221-v06相对-v05">22.1 v0.6（相对 v0.5）</a></li>
 <li><a href="#222-v05相对-v04">22.2 v0.5（相对 v0.4）</a></li>
@@ -174,12 +178,12 @@
 <li><a href="#244-完整示例">24.4 完整示例</a></li>
 </ul>
 </li>
-<li><a href="#25-包分发与依赖管理生态规划-·-最终规范">25. 包分发与依赖管理（生态规划 · 最终规范）</a><ul>
+<li><a href="#25-包分发与依赖管理生态规划--最终规范">25. 包分发与依赖管理（生态规划 · 最终规范）</a><ul>
 <li><a href="#250-目标平台">25.0 目标平台</a></li>
 <li><a href="#251-专属格式与自动解压防呆设计">25.1 专属格式与自动解压（防呆设计）</a></li>
 <li><a href="#252-包内结构与接口签名供-lsp-与-sema-使用">25.2 包内结构与接口签名（供 LSP 与 Sema 使用）</a><ul>
-<li><a href="#xxxdiali-——-签名即契约">xxx.diali —— 签名即契约</a></li>
-<li><a href="#manifesttxt-——-映射字典与元信息">manifest.txt —— 映射字典与元信息</a></li>
+<li><a href="#xxxdiali--签名即契约">xxx.diali —— 签名即契约</a></li>
+<li><a href="#manifesttxt--映射字典与元信息">manifest.txt —— 映射字典与元信息</a></li>
 </ul>
 </li>
 <li><a href="#253-绝对零版本冲突底层兼容">25.3 绝对零版本冲突（底层兼容）</a></li>
@@ -191,7 +195,7 @@
 </li>
 <li><a href="#257-这套规范刻意不做的事">25.7 这套规范刻意不做的事</a></li>
 <li><a href="#258-许可隔离第三方包同样绝不以-gpl-链接进用户程序">25.8 许可隔离：第三方包同样绝不以 GPL 链接进用户程序</a></li>
-<li><a href="#259-用法import-与-dialc-installv092-已实现">25.9 用法：import 与 dialc install（v0.92 已实现）</a></li>
+<li><a href="#259-用法import-与-dialc-installv093-已实现">25.9 用法：import 与 dialc install（v0.93 已实现）</a></li>
 </ul>
 </li>
 <li><a href="#26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</a><ul>
@@ -208,18 +212,18 @@
 <li><a href="#268-当前边界">26.8 当前边界</a></li>
 </ul>
 </li>
-<li><a href="#27-所有权转移与多线程并发move_to-·-thread-·-channel">27. 所有权转移与多线程并发（move_to · thread · channel）</a><ul>
+<li><a href="#27-所有权转移与多线程并发move_to--thread--channel">27. 所有权转移与多线程并发（move_to · thread · channel）</a><ul>
 <li><a href="#271-三个新东西">27.1 三个新东西</a></li>
-<li><a href="#272-channel&lt;t&gt;-与所有权移交">27.2 channel&lt;T&gt; 与所有权移交</a></li>
+<li><a href="#272-channelt-与所有权移交">27.2 channel&lt;T&gt; 与所有权移交</a></li>
 <li><a href="#273-零竞争移交与-o1-论证">27.3 零竞争移交与 O(1) 论证</a></li>
 <li><a href="#274-移交之后编译器的死命令">27.4 移交之后：编译器的死命令</a></li>
-<li><a href="#275-spawn-的底层thunk-+-argcell">27.5 spawn 的底层：thunk + argcell</a></li>
+<li><a href="#275-spawn-的底层thunk--argcell">27.5 spawn 的底层：thunk + argcell</a></li>
 <li><a href="#276-确定性纪律写并发代码时必须遵守">27.6 确定性纪律（写并发代码时必须遵守）</a></li>
 <li><a href="#277-通道关闭与-eofv081">27.7 通道关闭与 EOF（v0.81）</a><ul>
 <li><a href="#done-为什么是-eof-的正确判据">done 为什么是 EOF 的正确判据</a></li>
 <li><a href="#close-与-arc-为什么不会打架">close 与 ARC 为什么不会打架</a></li>
 <li><a href="#eof-之后拿到的是什么">EOF 之后拿到的是什么</a></li>
-<li><a href="#关闭后-send-=-fail-fast">关闭后 send = Fail-Fast</a></li>
+<li><a href="#关闭后-send--fail-fast">关闭后 send = Fail-Fast</a></li>
 </ul>
 </li>
 <li><a href="#278-判空多消费者安全与超时v09">27.8 判空、多消费者安全与超时（v0.9）</a><ul>
@@ -234,22 +238,22 @@
 <li><a href="#2792-三条语义">27.9.2 三条语义</a></li>
 <li><a href="#2793-事件驱动底层怎么等">27.9.3 事件驱动：底层怎么等</a></li>
 <li><a href="#2794-随机选取防饿死">27.9.4 随机选取：防饿死</a></li>
-<li><a href="#2795-⚠️-警告default-是空转与死锁的来源">27.9.5 ⚠️ 警告：default 是空转与死锁的来源</a></li>
-<li><a href="#27951-⚠️-while-true-{-select-{-}-}-是空转陷阱">27.9.5.1 ⚠️ while (true) { select { ... } } 是空转陷阱</a></li>
+<li><a href="#2795--警告default-是空转与死锁的来源">27.9.5 ⚠️ 警告：default 是空转与死锁的来源</a></li>
+<li><a href="#27951--while-true--select-----是空转陷阱">27.9.5.1 ⚠️ while (true) { select { ... } } 是空转陷阱</a></li>
 <li><a href="#2796-未来展望消除惊群">27.9.6 未来展望：消除惊群</a></li>
 </ul>
 </li>
 <li><a href="#2710-当前边界">27.10 当前边界</a></li>
 </ul>
 </li>
-<li><a href="#28-语言服务器-dialc-lspv094-骨架">28. 语言服务器 dialc lsp（v0.94 骨架）</a><ul>
-<li><a href="#281-为什么是「同一套代码」而不是独立的解析器">28.1 为什么是「同一套代码」而不是独立的解析器</a></li>
+<li><a href="#28-语言服务器-dialc-lspv094-骨架--v095-增强">28. 语言服务器 dialc lsp（v0.94 骨架 → v0.95 增强）</a><ul>
+<li><a href="#281-为什么是同一套代码而不是独立的解析器">28.1 为什么是「同一套代码」而不是独立的解析器</a></li>
 <li><a href="#282-已支持">28.2 已支持</a></li>
 <li><a href="#283-两个容易出错已经处理好的细节">28.3 两个容易出错、已经处理好的细节</a></li>
 <li><a href="#284-刻意没做的部分">28.4 刻意没做的部分</a></li>
 <li><a href="#285-诊断位置v094-顺带修掉的一个缺陷">28.5 诊断位置（v0.94 顺带修掉的一个缺陷）</a></li>
-<li><a href="#286-lsp-增强hover-跳转定义-补全v095">28.6 LSP 增强：Hover / 跳转定义 / 补全（v0.95）</a><ul>
-<li><a href="#2861-作用域链「由内向外」查找遮蔽查的是内层">28.6.1 作用域链「由内向外」查找（遮蔽查的是内层）</a></li>
+<li><a href="#286-lsp-增强hover--跳转定义--补全v095">28.6 LSP 增强：Hover / 跳转定义 / 补全（v0.95）</a><ul>
+<li><a href="#2861-作用域链由内向外查找遮蔽查的是内层">28.6.1 作用域链「由内向外」查找（遮蔽查的是内层）</a></li>
 <li><a href="#2862-跨文件符号import-驱动的自动扫描">28.6.2 跨文件符号：import 驱动的自动扫描</a></li>
 <li><a href="#2863-三个能力的契约">28.6.3 三个能力的契约</a></li>
 <li><a href="#2864-刻意仍不做">28.6.4 刻意仍不做</a></li>
@@ -261,7 +265,9 @@
 </li>
 </ul>
 </div>
-<h1 id="dialc-—-dial-语言编译器-v094">dialc — Dial 语言编译器 v0.94</h1>
+<h1 id="dialc--dial-语言编译器-v095">dialc — Dial 语言编译器 v0.95</h1>
+<p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
+<a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
 <p><strong>GitHub Repository：</strong> https://github.com/shichencike/Dial</p>
 <h2 id="开源许可三重许可任选其一">开源许可：三重许可（任选其一）</h2>
@@ -276,7 +282,7 @@
 <p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
-<p>本文件是 v0.94 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
+<p>本文件是 v0.95 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。</p>
 <hr />
 <h2 id="1-设计原则">1. 设计原则</h2>
@@ -332,6 +338,9 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── ast.rs              #   抽象语法树与类型定义
 │   ├── semantic.rs         #   语义分析 + 数据流分析（移动/共享判定）
 │   ├── codegen.rs          #   LLVM IR 生成（inkwell，内存中构建，直接 emit .o）
+│   ├── index.rs            #   跨文件符号表 + 作用域树（LSP 用，v0.95）
+│   ├── lsp.rs              #   语言服务器：诊断 / 语义高亮 / 悬停 / 跳转定义 / 补全
+│   ├── package.rs          #   .dialpkg 解包 / .diali 接口解析 / SHA256 校验
 │   └── error.rs            #   带行列号的错误类型
 ├── runtime/                # C 运行时（引用计数原语 + Fail-Fast 陷阱）
 │   ├── dial_rt_mem.h / .c  #   refcount 分配 / retain / release / COW clone
@@ -343,14 +352,25 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   └── dial_io.h / .c      #   打印 / 读行
 ├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
 ├── tests/
-│   ├── run_tests.sh        # 端到端测试（A 正向 / B 负向 / D Fail-Fast / E 对照 / C 契约）
+│   ├── run_tests.sh        # 端到端测试（A 正向 / B 负向 / C 契约 / D Fail-Fast / E 对照 /
+│   │                       #   F 并发压测 / G 未捕获异常 / H 包分发 / I LSP / J 安装规则 / K LSP 增强）
 │   ├── bad/                # 必须编译失败的负向用例
-│   └── trap/               # 必须当场因信号终止的 Fail-Fast 用例
+│   ├── trap/               # 必须当场因信号终止的 Fail-Fast 用例
+│   ├── lsp_smoke.py        # I 组：LSP 协议往返（诊断 + 语义高亮）
+│   └── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
+├── tools/
+│   ├── build_web.py        # 生成官网 web/（规范 / 更新日志 / 首页）
+│   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
+│   ├── package.sh          # 打发布包 dialc-v&lt;版本&gt;.zip（含许可与 .git）
+│   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J 组用）
+├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十一组测试 + 打包发布
+├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
+├── web/                    # 官网产物（由 tools/build_web.py 生成）
 └── README.md               # 本文件
 </code></pre>
 <hr />
 <h2 id="3-构建与使用">3. 构建与使用</h2>
-<h3 id="31-运行环境要求linux-·-动态-glibc">3.1 运行环境要求（Linux · 动态 glibc）</h3>
+<h3 id="31-运行环境要求linux--动态-glibc">3.1 运行环境要求（Linux · 动态 glibc）</h3>
 <p>Dial <strong>只在 Linux 上开发与验证</strong>，并且要求系统使用 <strong>glibc 动态链接</strong>（不是 musl）。</p>
 <blockquote>
 <p><strong>为什么强调「动态 glibc」？</strong>
@@ -472,7 +492,7 @@ dialc --version
 <p>把 <code>libLLVM.so.18</code> 装进 <code>/usr/lib</code> 或 <code>/usr/lib/x86_64-linux-gnu</code> 等默认路径后，
 这一行就可以省掉——它只是给「编译器启动」用的，与最终产物的依赖无关。</p>
 </blockquote>
-<h3 id="32-从源码构建克隆-→-进入-→-编译">3.2 从源码构建：克隆 → 进入 → 编译</h3>
+<h3 id="32-从源码构建克隆--进入--编译">3.2 从源码构建：克隆 → 进入 → 编译</h3>
 <pre><code class="language-bash"># 1) 克隆源码
 git clone https://github.com/shichencike/Dial.git
 cd Dial                                  # 进入工程根目录（编译器本体就在这里：Cargo.toml 与 src/ 都在根）
@@ -634,6 +654,9 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
 <h2 id="4-词法结构">4. 词法结构</h2>
 <h3 id="41-注释">4.1 注释</h3>
 <p><code>//</code> 到行尾。无块注释。</p>
+<blockquote>
+<p><strong><code>///</code> 文档注释不是语言层语法。</strong> 三斜杠 <code>///</code> <strong>仅出现在 <code>.diali</code> 接口签名文件里</strong>（标注包导出函数的文档，供 LSP 悬停提示读取，见 <a href="#252-包内结构与接口签名供-lsp-与-sema-使用">§25.2</a>），<strong>不能</strong>写在 <code>.dial</code> 源码中——Dial 源码只有 <code>//</code> 一种注释。</p>
+</blockquote>
 <h3 id="42-标识符">4.2 标识符</h3>
 <p>以字母或 <code>_</code> 开头，后接字母、数字或 <code>_</code>。</p>
 <h3 id="43-关键字">4.3 关键字</h3>
@@ -645,9 +668,10 @@ true false
 int  float  bool  char  string  void  file  error  thread  channel
 </code></pre>
 <blockquote>
+<p><strong>以上仅限 <code>.dial</code> 源码的关键字。</strong> 接口签名文件 <code>.diali</code> 另有 <code>type</code> / <code>extern fn</code> 等<strong>专用语法</strong>（见 <a href="#252-包内结构与接口签名供-lsp-与-sema-使用">§25.2</a>），它们<strong>不是</strong> Dial 语言的关键字，由包解析器 <code>src/package.rs</code> 单独处理，不会出现在 <code>.dial</code> 源码里。</p>
 <p><code>char</code> 是 v0.92 引入的单字符类型：<strong>一个 Unicode 码点</strong>，底层与 <code>int</code> 同为 <code>i64</code>，
 但类型独立——不参与算术，只可比较或经 <code>char_to_int</code> / <code>int_to_char</code> 显式转换
-（见 <a href="#51-基本类型">§5.1</a> 与 <a href="#172-尚未实现的能力截至-v092">§17.2</a>）。</p>
+（见 <a href="#51-基本类型">§5.1</a> 与 <a href="#172-尚未实现的能力截至-v095">§17.2</a>）。</p>
 <p><code>try</code> / <code>catch</code> / <code>throw</code> 是 v0.7 引入的可恢复异常关键字（见 <a href="#26-可恢复异常trycatchthrow">§26</a>）。
 注意 <strong><code>error</code> 不是关键字</strong>——它是内建构造函数名（与 <code>open</code> / <code>print</code> 同类），写作 <code>Error("...")</code>。
 同理 <code>catch</code> 后<strong>不跟圆括号</strong>：<code>catch e { }</code>，而非 <code>catch (e) { }</code>。</p>
@@ -1179,7 +1203,7 @@ break;                     // 跳出最内层循环（仅循环体内）
 continue;                  // 进入下一次迭代（仅循环体内）
 return e;                  // 或 return;（仅 void 函数）
 </code></pre>
-<h3 id="82-if-else-if-while">8.2 <code>if</code> / <code>else if</code> / <code>while</code></h3>
+<h3 id="82-if--else-if--while">8.2 <code>if</code> / <code>else if</code> / <code>while</code></h3>
 <p>条件<strong>必须带括号</strong>，且类型必须是 <code>bool</code>：</p>
 <pre><code class="language-dial">if (x &gt; 0) { ... } else { ... }
 
@@ -1201,7 +1225,7 @@ for (i in 0..5) {        // i = 0,1,2,3,4
 }
 </code></pre>
 <p>循环变量作用域限定在循环体内；<code>start</code>/<code>end</code> 在每次迭代开始前各求值一次（不支持 C 式「每次迭代重新求值边界」的语义，等价于把上下界快照到循环前）。</p>
-<h3 id="84-break-continue">8.4 <code>break</code> / <code>continue</code></h3>
+<h3 id="84-break--continue">8.4 <code>break</code> / <code>continue</code></h3>
 <p><code>break</code> 跳出<strong>最内层</strong>循环；<code>continue</code> 进入下一次迭代。两者<strong>只允许出现在 <code>while</code> / <code>for</code> 循环体内</strong>，
 写在别处（包括 <code>if</code> 但外层无循环）都是编译错误。</p>
 <pre><code class="language-dial">var sum: int = 0;
@@ -1240,6 +1264,9 @@ fn log(msg: string): void {
 <li>参数与返回类型均须显式标注。</li>
 <li>返回类型可以是 <code>void</code>。</li>
 </ul>
+<blockquote>
+<p><strong><code>.dial</code> 源码里没有 <code>extern</code> 关键字。</strong> 外部函数（来自已安装包）用 <code>extern fn</code> 在 <code>.diali</code> 里<strong>声明签名</strong>（见 <a href="#252-包内结构与接口签名供-lsp-与-sema-使用">§25.2</a>），调用方在 <code>.dial</code> 里照常写 <code>函数名(...)</code> 即可，与普通本地函数无差别——<code>extern</code> 只存在于包接口层，不存在于语言层。</p>
+</blockquote>
 <h3 id="92-入口函数">9.2 入口函数</h3>
 <p>程序<strong>必须</strong>定义 <code>main</code>，且返回类型必须是 <code>int</code>：</p>
 <pre><code class="language-dial">fn main(): int {
@@ -1394,7 +1421,7 @@ print(r.origin.x);     // 支持链式
 </tbody>
 </table>
 <p>下标语法 <code>a[i]</code> 等价于 <code>a.get(i)</code>；<code>a[i] = v</code> 等价于 <code>a = a.set(i, v)</code>。</p>
-<h3 id="113-为什么-push-set-要返回指针">11.3 为什么 <code>push</code> / <code>set</code> 要返回指针</h3>
+<h3 id="113-为什么-push--set-要返回指针">11.3 为什么 <code>push</code> / <code>set</code> 要返回指针</h3>
 <p>这两种操作在需要扩容或存在多个持有者时，会产生<strong>新的</strong>不透明指针。
 编译器强制把返回值写回接收变量，杜绝"旧指针失效"的悬垂问题：</p>
 <pre><code class="language-dial">var a: int[] = [10, 20, 30];
@@ -1447,7 +1474,7 @@ C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并
 由 codegen 插入的检查（§20.2）与 C Runtime 的检查（§20.3）双重保证。
 仅在 <code>--fast</code>（ReleaseFast）下才回落到"无边界检查、越界即 UB"的 C 行为。</p>
 <hr />
-<h2 id="12-哈希表-mapint-→-int">12. 哈希表 <code>map</code>（int → int）</h2>
+<h2 id="12-哈希表-mapint--int">12. 哈希表 <code>map</code>（int → int）</h2>
 <p><code>map</code> 是 Dial 的哈希表类型，键与值均固定为 <code>int</code>（v0.4）。在 IR 中它同样只是一个 <code>ptr</code>（<code>i8*</code>），
 其内存布局 <code>[int64 cap][int64 count][entries...]</code> 由 C 侧私有维护，并走与 <code>string</code> / <code>int[]</code>
 <strong>同一套 ARC 引用计数</strong>（<code>dial_map_retain</code> / <code>dial_map_release</code>）。这完全契合 <a href="#19-内存宪法防-gc-铁律">§19 内存宪法</a>：
@@ -1511,7 +1538,7 @@ m.remove(2);
 print(m.get(2));        // -1（已删除）
 </code></pre>
 <h3 id="123-为什么-put-要返回指针">12.3 为什么 <code>put</code> 要返回指针</h3>
-<p>与 <code>int[].push</code> / <code>int[].set</code> <strong>完全一致</strong>（见 <a href="#113-为什么-push-set-要返回指针">§11.3</a>）：<code>put</code> 在底层可能因
+<p>与 <code>int[].push</code> / <code>int[].set</code> <strong>完全一致</strong>（见 <a href="#113-为什么-push--set-要返回指针">§11.3</a>）：<code>put</code> 在底层可能因
 <strong>扩容</strong>或<strong>写时复制（COW）</strong>更换底层 buffer 指针。</p>
 <p><strong>统一规则（强制）</strong>：</p>
 <blockquote>
@@ -1551,7 +1578,7 @@ m = m.put(1, 1);   // ❌ 禁止：严禁手写赋值（与数组规则统一，
 若编译器再补一次 <code>release</code>，会造成悬垂指针或双重释放（同 §11.3 的说明）。</p>
 </blockquote>
 <p>若 <code>m</code> 当前被多者共享（例如已作为实参传入某函数），<code>dial_map_put</code> 会先 COW 克隆再修改，
-<strong>调用方持有的旧指针不受影响</strong>（ARC 隔离，见 <a href="#145-cow-的触发时机">§13.5</a>）。</p>
+<strong>调用方持有的旧指针不受影响</strong>（ARC 隔离，见 <a href="#145-cow-的触发时机">§14.5</a>）。</p>
 <h3 id="124-接收者必须是可变变量var">12.4 接收者必须是可变变量（<code>var</code>）</h3>
 <p>与数组一致：<code>put</code> 可能更换指针，因此接收者必须是顶层 <code>var</code> 变量。<code>let</code> 变量、字段、下标均不可作接收者：</p>
 <pre><code class="language-dial">let m: map = new_map();
@@ -1715,7 +1742,7 @@ let/var x = y;  ─────┤
 </ol>
 <p>若在求值之前就释放全部局部变量，返回的对象会被提前销毁。</p>
 <hr />
-<h2 id="15-ffi-契约dial-语法-→-c-函数">15. FFI 契约：Dial 语法 → C 函数</h2>
+<h2 id="15-ffi-契约dial-语法--c-函数">15. FFI 契约：Dial 语法 → C 函数</h2>
 <p>编译器前端把 Dial 语法<strong>逐条</strong>翻译为对 C 导出函数的调用，不重新实现任何容器：</p>
 <table>
 <thead>
@@ -1992,7 +2019,7 @@ void     dial_map_release(DialMap m);
 </tr>
 </tbody>
 </table>
-<h3 id="172-尚未实现的能力截至-v094">17.2 尚未实现的能力（截至 v0.94）</h3>
+<h3 id="172-尚未实现的能力截至-v095">17.2 尚未实现的能力（截至 v0.95）</h3>
 <blockquote>
 <p>已落地：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
 <code>let</code> + 原地修改方法（push/set/put）的接收者约束、<code>else if</code> 语法糖、<code>for</code> 范围循环、<code>break</code> / <code>continue</code>、
@@ -2024,7 +2051,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>模块 / 包 / import</td>
-<td><strong>已支持</strong>（v0.92）：<code>import "包名";</code> + <code>dialc install &lt;包.dialpkg&gt;</code>，见 <a href="#25-包分发与依赖管理生态规划--最终规范">§25</a>。<strong>尚未实现</strong>：<code>dialc install &lt;URL&gt;</code>（本地文件安装已可用）、源码形式的模块拆分（无 <code>mod</code>）</td>
+<td><strong>已支持</strong>（v0.93）：<code>import "包名";</code> + <code>dialc install &lt;包.dialpkg&gt;</code>，见 <a href="#25-包分发与依赖管理生态规划--最终规范">§25</a>。<strong>尚未实现</strong>：<code>dialc install &lt;URL&gt;</code>（本地文件安装已可用）、源码形式的模块拆分（无 <code>mod</code>）</td>
 </tr>
 <tr>
 <td>泛型、接口、trait、闭包</td>
@@ -2047,8 +2074,8 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td>不支持（需先赋给变量）</td>
 </tr>
 <tr>
-<td><code>select</code> 的超时 / 多路复用超时</td>
-<td><strong>未实现</strong>——<code>select</code> 本身已落地（v0.91），但它<strong>不带超时</strong>；要「等一会儿再看」请用 <code>recv_timeout</code> 单独接收</td>
+<td><code>select</code> 语句级超时（<code>select</code> 块本身没有超时参数）</td>
+<td><strong>未实现</strong>——<code>select</code>（v0.91 已落地）一旦进入就阻塞到「有通道就绪」或「全体 EOF」，<strong>没有超时参数</strong>。要「最多等 N 毫秒」，用<strong>已实现</strong>的 <code>recv_timeout(ch, ms)</code>（v0.9 起，作用于<strong>单个通道</strong>）——它不能替代多路复用，只是「等一会儿再看」的手段</td>
 </tr>
 <tr>
 <td>通道关闭的「反向」操作（重新打开）</td>
@@ -2068,15 +2095,15 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>通道元素为标量（<code>int</code> / <code>float</code> / <code>bool</code>）</td>
-<td>编译期拒绝（需装箱，见 <a href="#272-channel-与所有权移交">§27.2</a>）</td>
+<td>编译期拒绝（需装箱，见 <a href="#272-channelt-与所有权移交">§27.2</a>）</td>
 </tr>
 <tr>
 <td>一等函数 / 函数指针</td>
 <td>不支持——<code>spawn</code> 首参只能是顶层具名函数</td>
 </tr>
 <tr>
-<td>LSP 的补全 / 跳转定义 / 悬停 / 重命名 / 格式化</td>
-<td><strong>未实现</strong>（v0.94 只有诊断与语义高亮，见 <a href="#284-刻意没做的部分">§28.4</a>）——这些都要跨文件符号表，不是「再写几个请求」的事</td>
+<td>LSP 的重命名 / 跨文件引用查找 / 格式化</td>
+<td><strong>未实现</strong>——悬停、跳转定义、基础补全<strong>已在 v0.95 落地</strong>（见 <a href="#286-lsp-增强hover--跳转定义--补全v095">§28.6</a>）；剩下的三项需要全工作区引用图或代码风格约定，不是「再写几个请求」的事</td>
 </tr>
 </tbody>
 </table>
@@ -2084,7 +2111,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <h2 id="18-测试">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
-<p>十组检查，全部通过才算绿：</p>
+<p>十一组检查，全部通过才算绿（顺序即 A→K）：</p>
 <table>
 <thead>
 <tr>
@@ -2102,16 +2129,16 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td><code>tests/bad/*.dial</code> 必须编译失败，用于锁定诊断信息不被弱化</td>
 </tr>
 <tr>
+<td><strong>C. 契约</strong></td>
+<td>产物可执行文件不得依赖 libLLVM（只链 libc）</td>
+</tr>
+<tr>
 <td><strong>D. Fail-Fast</strong></td>
 <td><code>tests/trap/*.dial</code> 必须<strong>当场因信号终止</strong>（SIGILL/SIGTRAP/SIGSEGV），且<strong>不得打印哨兵 9999</strong>——证明它在越界那一行就停了，而不是带病跑完</td>
 </tr>
 <tr>
 <td><strong>E. 对照组</strong></td>
 <td>同一批用例在 <code>--fast</code> 下应当关闭检查并跑完（证明陷阱确由编译器插入，而非碰巧崩溃）</td>
-</tr>
-<tr>
-<td><strong>C. 契约</strong></td>
-<td>产物可执行文件不得依赖 libLLVM</td>
 </tr>
 <tr>
 <td><strong>F. 并发压测</strong>（v0.9 新增）</td>
@@ -2133,8 +2160,49 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td><strong>J. 包安装三条硬规则</strong>（v0.94 收尾）</td>
 <td><code>dialc install</code>：① 同名包 <strong>ABI 相同则覆盖、不同则报错要求先卸载</strong>；② <code>targets</code> 的库文件<strong>只允许 <code>.a</code> / <code>.lib</code> 静态库，拒绝 <code>.so</code> / <code>.dll</code> 动态库</strong>；③ 卸载即 <code>rm -rf ~/.dial/packages/&lt;名&gt;/</code>（缓存是纯派生数据）。三条均被 J 组锁死</td>
 </tr>
+<tr>
+<td><strong>K. LSP 增强</strong>（v0.95 新增）</td>
+<td>Hover / 跳转定义 / 补全：真起 <code>dialc lsp</code> 子进程按 LSP 协议往返，验证变量遮蔽的 Hover、跨文件 <code>.diali</code> 文档、跳转定义（文件内→本文件、包符号→<code>.diali</code>）、可见符号收集与前缀过滤。见 <code>tests/lsp_features.py</code></td>
+</tr>
 </tbody>
 </table>
+<h4 id="持续集成github-actions">持续集成（GitHub Actions）</h4>
+<p>十一组检查由 <code>.github/workflows/ci.yml</code> 在<strong>每次 push / PR</strong> 上自动执行：</p>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>做什么</th>
+<th>不通过的后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>编译</strong></td>
+<td>装 LLVM 18 + Rust → <code>cargo build --release --locked</code></td>
+<td>立即失败，PR 不可合并</td>
+</tr>
+<tr>
+<td><strong>测试</strong></td>
+<td><code>bash tests/run_tests.sh</code>（A～K 全部十一组）</td>
+<td>立即失败</td>
+</tr>
+<tr>
+<td><strong>锚点校验</strong></td>
+<td><code>python3 tools/check_links.py</code>——README / CHANGELOG 的内部链接必须全部可解析</td>
+<td>立即失败（防止再次出现「点不动的链接」）</td>
+</tr>
+<tr>
+<td><strong>官网同步</strong></td>
+<td>重新生成 <code>web/</code> 并与仓库内容比对</td>
+<td>立即失败（文档改了但官网没重新生成）</td>
+</tr>
+</tbody>
+</table>
+<p>打 <strong><code>v*</code> 标签</strong>时，额外的 <code>release</code> 作业会把编译器二进制一并打进
+<code>dialc-v&lt;版本&gt;.zip</code>（含源码、<code>.git</code>、四份许可文件、<code>web/</code>、VS Code 扩展），
+上传为 GitHub Release 产物——即官网首页的下载链接。
+打包脚本 <code>tools/package.sh</code> 有<strong>硬性校验</strong>：许可文件不全、或缺 <code>.git</code>、或混入构建产物，一律拒绝出包。</p>
 <h3 id="示例清单">示例清单</h3>
 <table>
 <thead>
@@ -2283,6 +2351,61 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
   （移动语义零开销、只读共享 O(1)），只有跨边界等静态分析失效处，才由 C Runtime 在<strong>写入瞬间</strong>按引用计数兜底（COW，见 §14）；</li>
 <li><strong>没有任何后台线程、没有并发回收、没有不可预期的暂停。</strong></li>
 </ul>
+<h4 id="arc-不解决循环引用这是它的已知边界不是遗漏">ARC 不解决循环引用——这是它的已知边界，不是遗漏</h4>
+<p><code>string</code> / <code>int[]</code> / <code>map</code> 的 ARC 是<strong>引用计数</strong>，不是追踪 GC。因此<strong>互相持有引用会形成引用环</strong>：
+环上每个对象的计数都 ≥ 1，「归零即释放」的条件<strong>永远不成立</strong>，结果是<strong>内存泄漏</strong>。</p>
+<p>必须把两种后果分清楚：</p>
+<table>
+<thead>
+<tr>
+<th>后果</th>
+<th>性质</th>
+<th>Dial 的选择</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>内存泄漏</strong>（环上的对象永不释放）</td>
+<td>安全——程序逻辑照常正确，进程退出时由 OS 回收</td>
+<td><strong>接受</strong>。绝不用追踪 GC 去「自动」打破环：那会引入停顿与不可预测的回收时机，与 §19.1 的底线直接冲突</td>
+</tr>
+<tr>
+<td><strong>悬垂指针 / 重复释放</strong>（提前释放）</td>
+<td><strong>不安全</strong>——会读写已释放内存</td>
+<td><strong>绝不容忍</strong>。ARC + 编译期分析保证「释放后不再有人持有该引用」</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>一句话：<strong>宁可泄漏，不可悬垂。</strong> 这是 Dial 内存模型的取舍，不是待补的缺口。</p>
+</blockquote>
+<p>环的成因是可以靠纪律规避的，因此有明确的处置办法：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>处置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>值类型数据（结构体、标量）</td>
+<td><strong>不产生环</strong>——结构体按值传递，其字段里的指针仍指向独立对象</td>
+</tr>
+<tr>
+<td>确实需要「互相引用」的图结构</td>
+<td>用<strong>不透明句柄</strong>（<code>file</code> / <code>thread</code> / 包的 <code>Type::Opaque</code>）：它们<strong>不受 ARC 管理</strong>，由 <code>close</code> / <code>join</code> 显式回收，<strong>天然不参与引用环</strong></td>
+</tr>
+<tr>
+<td>确需共享同一份数据</td>
+<td>用<strong>只读共享</strong>（多个持有者只读同一 <code>string</code> / <code>int[]</code>）——只读不构成环</td>
+</tr>
+<tr>
+<td>未来需要可变共享的图</td>
+<td>走 <a href="#193-显式指针回收未来裸指针的契约">§19.3</a> 的 <code>raw ptr</code> + 显式 <code>dial_raw_free</code>，<strong>而不是</strong>依赖 GC</td>
+</tr>
+</tbody>
+</table>
 <h3 id="193-显式指针回收未来裸指针的契约">19.3 显式指针回收（未来裸指针的契约）</h3>
 <p>未来若引入裸指针（<code>raw ptr</code>），Dial 坚持<strong>"谁申请、谁释放"</strong>的显式契约：</p>
 <ul>
@@ -2520,7 +2643,12 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
   不引入 visitor 框架或 IR 中间层的插件机制。</li>
 </ul>
 <hr />
-<h2 id="22-版本变更摘要">22. 版本变更摘要</h2>
+<h2 id="22-早期版本摘要v03-及以前">22. 早期版本摘要（v0.3 及以前）</h2>
+<blockquote>
+<p>本节仅保留 <strong>v0.3 及以前</strong> 的相对变更摘要（早期历史）。
+<strong>v0.4 及之后</strong> 的每个版本相对变更、跨文件符号表（v0.95）等<strong>完整记录见 <a href="CHANGELOG.md">CHANGELOG.md</a></strong>，
+官网同步渲染为 <a href="web/changelog.html">changelog.html</a>；最新版本号与能力矩阵见 <a href="web/index.html">首页 index.html</a>。</p>
+</blockquote>
 <h3 id="220-v061相对-v06">22.0 v0.61（相对 v0.6）</h3>
 <p>本版落地<strong>文件 IO（file 句柄）</strong>，并正式确立<a href="#23-版本号规则">版本号规则</a>（最多两位小数、禁止跳版、严格按时间递增）：</p>
 <table>
@@ -2644,7 +2772,7 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 </tr>
 <tr>
 <td><strong><code>else if</code> 语法糖</strong></td>
-<td><code>else if (c) {..}</code> 编译期展开为嵌套 <code>if</code>（不引入新 AST 节点），见 <a href="#82-if-else-if-while">§8.2</a></td>
+<td><code>else if (c) {..}</code> 编译期展开为嵌套 <code>if</code>（不引入新 AST 节点），见 <a href="#82-if--else-if--while">§8.2</a></td>
 </tr>
 <tr>
 <td><strong><code>for</code> 范围循环</strong></td>
@@ -2817,32 +2945,42 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <p><code>file</code> 句柄<strong>不受 ARC 管理</strong>，编译器不会在作用域结束时自动关闭或释放它。忘记 <code>close</code> 会造成文件描述符泄漏
 （与 C 的 <code>FILE*</code> 完全一致——这是显式指针回收的代价，也是它确定性的来源）。示例见 <code>examples/file_demo.dial</code>。</p>
 <h3 id="244-完整示例">24.4 完整示例</h3>
+<blockquote>
+<p><code>open</code> / <code>read</code> / <code>write</code> <strong>失败即抛 <code>Error</code></strong>（<a href="#242-错误处理v07-起失败即抛出-error">§24.2</a>），
+因此<strong>整段 IO 必须被 <code>try</code> 包住</strong>——不包就是未捕获异常，程序会打印诊断并终止（§26.5）。</p>
+</blockquote>
 <pre><code class="language-dial">fn main(): int {
     let path: string = &quot;/tmp/dialc_io_demo.txt&quot;;
-    var wf: file = open(path, &quot;w&quot;);
-    write(wf, &quot;dialc-file-io&quot;);
-    close(wf);                 // 写完务必关闭
 
-    var rf: file = open(path, &quot;r&quot;);
-    var content: string = read(rf, 100);
-    print(content);           // dialc-file-io
-    close(rf);
+    try {
+        var wf: file = open(path, &quot;w&quot;);
+        write(wf, &quot;dialc-file-io&quot;);
+        close(wf);                 // 写完务必关闭
+
+        var rf: file = open(path, &quot;r&quot;);
+        var content: string = read(rf, 100);
+        print(content);           // dialc-file-io
+        close(rf);
+    } catch e {
+        print(&quot;IO 失败: &quot;.concat(e.msg()));
+        return 1;
+    }
     return 0;
 }
 </code></pre>
 <p><code>file</code> 句柄不能 <code>print</code> 直接打印（会编译期报错），请先 <code>read</code> 成 <code>string</code> 再打印。</p>
 <hr />
-<h2 id="25-包分发与依赖管理生态规划-·-最终规范">25. 包分发与依赖管理（生态规划 · 最终规范）</h2>
+<h2 id="25-包分发与依赖管理生态规划--最终规范">25. 包分发与依赖管理（生态规划 · 最终规范）</h2>
 <blockquote>
-<p><strong>状态：规范已定稿；v0.92 起核心链路已实现。</strong>
+<p><strong>状态：规范已定稿；v0.93 起核心链路已实现。</strong>
 本章是 Dial 生态<strong>最终规范</strong>的决策摘要。<strong>完整规范见
 <a href="ARCHITECTURE.md">ARCHITECTURE.md《Dial 标准库与包分发最终规范》</a></strong>——
 那里有完整的平台矩阵、包内目录树、JSON 映射字典格式、安装流程、
 与旧草案的逐条修订记录。</p>
-<p><strong>v0.92 已落地</strong>：<code>import "包名";</code> 语句、<code>.dialpkg</code> 解包（含路径穿越防护）、
+<p><strong>v0.93 已落地</strong>：<code>import "包名";</code> 语句、<code>.dialpkg</code> 解包（含路径穿越防护）、
 <code>manifest.txt</code> 解析、按 Target Triple 选库、<strong>SHA256 强制校验</strong>、
 <code>.diali</code> 签名解析接入 Sema、链接期自动链入对应平台的机器码。
-见 <a href="#259-用法import-与-dialc-installv092-已实现">§25.9</a>。
+见 <a href="#259-用法import-与-dialc-installv093-已实现">§25.9</a>。
 <strong>尚未实现</strong>：<code>dialc install &lt;URL&gt;</code>（网络下载；本地文件安装已可用）、一键安装脚本、
 官方标准库的 <code>.dialpkg</code> 化、Windows 线程后端。</p>
 <p>之所以现在就把规范写死：让「不透明指针 + C ABI」这条底层设计（<a href="#141-不透明指针契约">§14.1</a>、<a href="#15-ffi-契约dial-语法--c-函数">§15</a>）
@@ -2977,9 +3115,15 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 移到<strong>编译器侧</strong>：用户只管写代码，一个包走天下。详见
 <a href="ARCHITECTURE.md#2-多平台机器码揉捏与字典映射">ARCHITECTURE.md §2</a>。</p>
 </blockquote>
-<h4 id="xxxdiali-——-签名即契约"><code>xxx.diali</code> —— 签名即契约</h4>
+<h4 id="xxxdiali--签名即契约"><code>xxx.diali</code> —— 签名即契约</h4>
 <p><code>.diali</code> 是<strong>纯文本</strong>的接口签名文件，只含声明，<strong>不含任何实现代码</strong>。
 <code>dialc</code> 与 LSP <strong>只读取这个文件</strong>来完成：类型检查（Sema）、代码补全、悬停提示（hover）。</p>
+<blockquote>
+<p><strong>⚠️ 以下语法只属于 <code>.diali</code>，不是 Dial 编程语言本身。</strong> 本文件的 <code>type</code> / <code>extern fn</code> / <code>///</code>
+由包解析器 <code>src/package.rs</code> 单独处理，<strong>不会</strong>出现在 <code>.dial</code> 源码中，也<strong>不在</strong> §4.3 关键字表与 §9 函数定义里。
+语言层的关键字与函数定义语法分别见 <a href="#43-关键字">§4.3</a> 与 <a href="#91-定义">§9.1</a>；<code>.diali</code> 能写的声明只有两种（见下方示例与 <a href="#259-用法import-与-dialc-installv093-已实现">§25.9</a>）：
+<code>type X;</code>（不透明句柄）与 <code>extern fn f(a: T, ...): R;</code>（外部函数签名）。</p>
+</blockquote>
 <pre><code class="language-dial">// sqlite.diali —— 接口签名文件（纯文本，无实现）
 // dialc 用它做类型检查；LSP 用它做补全与悬停提示。
 
@@ -3003,7 +3147,7 @@ extern fn db_close(db: Db): void;
 <li><strong>LSP 与编译器共用同一份真相。</strong> 补全/悬停与编译期检查读的是同一个文件，
   杜绝「编辑器说能过、编译器说不能过」的经典分裂。文档注释（<code>///</code>）就是悬停提示的来源。</li>
 </ul>
-<h4 id="manifesttxt-——-映射字典与元信息"><code>manifest.txt</code> —— 映射字典与元信息</h4>
+<h4 id="manifesttxt--映射字典与元信息"><code>manifest.txt</code> —— 映射字典与元信息</h4>
 <p>采用 <strong>JSON</strong>（映射字典的本质是「键 → 值」的嵌套结构，JSON 表达力足够，
 且几乎所有语言的 JSON 解析都是三行代码，不引入新依赖）：</p>
 <pre><code class="language-json">{
@@ -3356,7 +3500,7 @@ Dial 目前<strong>没有</strong> <code>dialc uninstall</code> 命令，因为�
 但<strong>不替用户做法务判断</strong>。是否接受某个包的条款，由使用者自己决定。
 唯一被<strong>强制</strong>的，是 Dial 自己的标准库：它必须是 MIT 或 Apache-2.0，绝不可以是 GPL。</p>
 </blockquote>
-<h3 id="259-用法import-与-dialc-installv092-已实现">25.9 用法：<code>import</code> 与 <code>dialc install</code>（v0.92 已实现）</h3>
+<h3 id="259-用法import-与-dialc-installv093-已实现">25.9 用法：<code>import</code> 与 <code>dialc install</code>（v0.93 已实现）</h3>
 <p><strong>第一步：安装一个包</strong>（本地 <code>.dialpkg</code> 文件）</p>
 <pre><code class="language-bash">$ dialc install sqlite.dialpkg
 ✅ 已安装包 'sqlite' v1.4.0（ABI 1）
@@ -3384,7 +3528,7 @@ fn main(): int {
 </code></pre>
 <p><strong>用户不写路径、不写平台、不写版本</strong>——编译器按自己的 Target Triple 索引，
 交叉编译到 Windows 时自动改为链包内的 <code>.lib</code>。</p>
-<p><strong><code>.diali</code> 里能写什么</strong>（v0.92 支持两种声明，其余一律报错）：</p>
+<p><strong><code>.diali</code> 里能写什么</strong>（v0.93 支持两种声明，其余一律报错）：</p>
 <table>
 <thead>
 <tr>
@@ -3452,7 +3596,7 @@ fn main(): int {
 JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 <strong><a href="ARCHITECTURE.md">ARCHITECTURE.md《Dial 标准库与包分发最终规范》</a></strong>。
 规范一旦在真实包上落地，将同步更新本章、ARCHITECTURE.md 与 <a href="CHANGELOG.md">CHANGELOG.md</a>；
-在此之前，<code>import</code> 仍按 <a href="#172-尚未实现的能力截至-v091">§17.2</a> 视为<strong>不支持</strong>。</p>
+在此之前，<code>import</code> 仍按 <a href="#172-尚未实现的能力截至-v095">§17.2</a> 视为<strong>不支持</strong>。</p>
 </blockquote>
 <hr />
 <h2 id="26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</h2>
@@ -3810,7 +3954,7 @@ after
 </tbody>
 </table>
 <hr />
-<h2 id="27-所有权转移与多线程并发move_to-·-thread-·-channel">27. 所有权转移与多线程并发（<code>move_to</code> · <code>thread</code> · <code>channel</code>）</h2>
+<h2 id="27-所有权转移与多线程并发move_to--thread--channel">27. 所有权转移与多线程并发（<code>move_to</code> · <code>thread</code> · <code>channel</code>）</h2>
 <blockquote>
 <p>v0.8 起可用。<strong>Dial 用「转移所有权」取代「共享内存 + 锁」</strong>：
 数据不共享，只移交。队列里流动的指针永远只有一个持有者，因此根本不存在数据竞争，
@@ -3863,7 +4007,7 @@ after
 </tr>
 </tbody>
 </table>
-<h3 id="272-channel&lt;t&gt;-与所有权移交">27.2 <code>channel&lt;T&gt;</code> 与所有权移交</h3>
+<h3 id="272-channelt-与所有权移交">27.2 <code>channel&lt;T&gt;</code> 与所有权移交</h3>
 <pre><code class="language-dial">fn producer(ch: channel&lt;string&gt;): void {
     var s: string = &quot;from-thread&quot;;
     move_to(s, ch);          // 移交：s 此后不可再用
@@ -3956,7 +4100,7 @@ store ptr null, ptr %x_slot            ; 原槽清零
 </tr>
 </tbody>
 </table>
-<h3 id="275-spawn-的底层thunk-+-argcell">27.5 <code>spawn</code> 的底层：thunk + argcell</h3>
+<h3 id="275-spawn-的底层thunk--argcell">27.5 <code>spawn</code> 的底层：thunk + argcell</h3>
 <p>C 的 <code>pthread_create</code> 只认统一签名 <code>void (*)(void*)</code>，而 Dial 函数实参类型各异。
 编译器为每个被 spawn 的函数生成一个<strong>私有 thunk</strong>：</p>
 <pre><code class="language-llvm">define private void @__dial_thunk_producer(ptr %cell) {
@@ -4049,7 +4193,7 @@ store ptr null, ptr %x_slot            ; 原槽清零
 （例如 <code>print</code> 一个 NULL string 会打印诊断并 <code>ud2</code>），而不是让它伪装成空串悄悄流进业务逻辑——
 这正是 <a href="#20-fail-fast-铁律宁可崩溃绝不静默损坏">§20 Fail-Fast 铁律</a> 的要求。</p>
 <p>正常写法压根碰不到它：<code>while (not done(ch))</code> 守住了循环，<code>done</code> 为真时根本不会进去。</p>
-<h4 id="关闭后-send-=-fail-fast">关闭后 <code>send</code> = Fail-Fast</h4>
+<h4 id="关闭后-send--fail-fast">关闭后 <code>send</code> = Fail-Fast</h4>
 <p>关了还发是最危险的一种误用：元素会<strong>永久滞留</strong>在队列里，而只要队列非空 <code>done</code> 就永远为假，
 消费者的收尾循环将永不结束——一次「关了还发」会把 EOF 语义整个废掉，让程序重新退化成死锁。
 因此 ReleaseSafe 及以上当场终止；只有 <code>--fast</code> 才关闭该检查（后果自负）。</p>
@@ -4256,7 +4400,7 @@ if (is_null(s)) {
 若固定总挑第一个，第二个通道的数据会被一直压着——这就是经典的<strong>饥饿</strong>。</p>
 <p>底层用一个<strong>原子递增</strong>的计数器取随机起点（不能用 <code>rand()</code>，它不是线程安全的）。
 <code>examples/select_fairness.dial</code> 断言「两个通道都被处理过」。</p>
-<h4 id="2795-⚠️-警告default-是空转与死锁的来源">27.9.5 ⚠️ 警告：<code>default</code> 是空转与死锁的来源</h4>
+<h4 id="2795--警告default-是空转与死锁的来源">27.9.5 ⚠️ 警告：<code>default</code> 是空转与死锁的来源</h4>
 <blockquote>
 <p><strong><code>default</code> 使 select 永不阻塞。</strong> 因此把带 <code>default</code> 的 select 放进 <code>while</code> 循环里，
 就是一个 <strong>100% CPU 的空转循环</strong>——每一轮都立刻返回，什么也没等到。</p>
@@ -4296,7 +4440,7 @@ while (n &lt; 1000) {
     }
 }
 </code></pre>
-<h4 id="27951-⚠️-while-true-{-select-{-}-}-是空转陷阱">27.9.5.1 ⚠️ <code>while (true) { select { ... } }</code> 是空转陷阱</h4>
+<h4 id="27951--while-true--select-----是空转陷阱">27.9.5.1 ⚠️ <code>while (true) { select { ... } }</code> 是空转陷阱</h4>
 <p>不带 <code>default</code> 的 select 是<strong>阻塞</strong>的——没有就绪通道时它会睡到有事件为止，
 单看一次 select 确实不空转。<strong>但把它放进 <code>while (true)</code> 就不是了</strong>：</p>
 <blockquote>
@@ -4396,6 +4540,10 @@ while (true) {
 <td>全局广播会唤醒所有等待者，多数醒来后发现「不是我」。Linux 上可用 epoll/eventfd 消除（见 <a href="#2796-未来展望消除惊群">§27.9.6</a>）</td>
 </tr>
 <tr>
+<td><code>select</code> <strong>不受安全等级影响</strong></td>
+<td><code>--fast</code>（ReleaseFast）<strong>不改变 select 的任何语义</strong>：阻塞等待、全体 EOF 判定、<code>default</code> 非阻塞、随机选取防饿死，在三档等级下<strong>完全一致</strong>——这些是<strong>协议语义</strong>，不是「安全检查」。唯一随等级变化的是<strong>向已关闭通道 <code>send</code></strong>：Debug / ReleaseSafe 下当场 Fail-Fast；<code>--fast</code> 下该断言被<strong>编译期消除</strong>（<code>DIAL_HEAP_ASSERT</code> 仅在 <code>DIAL_SAFETY &gt;= SAFE</code> 时生效），于是元素被静默丢弃、<code>done</code> 可能永远为假 → 接收方<strong>永久阻塞</strong>。与 G 组的约定同理：<strong>协议语义不随安全等级漂移</strong></td>
+</tr>
+<tr>
 <td><code>select</code> 不支持表达式</td>
 <td>它是<strong>语句</strong>：各 case 的绑定变量类型可以互不相同，没有统一返回类型</td>
 </tr>
@@ -4418,7 +4566,7 @@ while (true) {
 </tbody>
 </table>
 <hr />
-<h2 id="28-语言服务器-dialc-lspv094-骨架">28. 语言服务器 <code>dialc lsp</code>（v0.94 骨架）</h2>
+<h2 id="28-语言服务器-dialc-lspv094-骨架--v095-增强">28. 语言服务器 <code>dialc lsp</code>（v0.94 骨架 → v0.95 增强）</h2>
 <pre><code class="language-bash">dialc lsp
 </code></pre>
 <p>它不从终端读命令、也不往终端写报告：<strong>stdin 收 JSON-RPC，stdout 回 JSON-RPC</strong>，
@@ -4428,7 +4576,7 @@ while (true) {
                         │
                         └─ 词法 → 语法 → 语义（与 dialc build 同一套代码）
 </code></pre>
-<h3 id="281-为什么是「同一套代码」而不是独立的解析器">28.1 为什么是「同一套代码」而不是独立的解析器</h3>
+<h3 id="281-为什么是同一套代码而不是独立的解析器">28.1 为什么是「同一套代码」而不是独立的解析器</h3>
 <p>编辑器里的诊断最容易出的毛病不是报错太少，而是<strong>与编译器不一致</strong>：
 编辑器说没问题、编译器说有；或者反过来。根因几乎总是——编辑器侧另写了一套解析器，
 两套实现慢慢长歪。</p>
@@ -4496,6 +4644,13 @@ while (true) {
 我们验证过这个测试不是摆设：把换算那一行代码删掉重跑，只有 emoji 那条变红（中文那条依然绿）——
 正是上面这段分析所预期的样子。</p>
 <h3 id="284-刻意没做的部分">28.4 刻意没做的部分</h3>
+<blockquote>
+<p><strong>本节记录的是 v0.94 骨架当时的决策。</strong> 当时「不做」的理由是：<strong>缺少跨文件符号表</strong>，
+硬做只能做出「猜」的结果——那比不做更糟。</p>
+<p>其中<strong>前三项（悬停 / 跳转定义 / 补全）已在 v0.95 补上</strong>（见 <a href="#286-lsp-增强hover--跳转定义--补全v095">§28.6</a>）。
+表格里仍保留它们，是为了记录<strong>这个决策后来如何被推翻</strong>——而不是说它们至今未实现。
+<strong>至今仍未实现</strong>的，是下表中除首行以外的那些项（重命名 / 跨文件引用查找 / 格式化等）。</p>
+</blockquote>
 <table>
 <thead>
 <tr>
@@ -4506,7 +4661,7 @@ while (true) {
 <tbody>
 <tr>
 <td>悬停、跳转定义、补全</td>
-<td><strong>已在 v0.95 落地</strong>（见 <a href="#286-lsp-增强-hover--跳转定义--补全v095">§28.6</a>）。它们建立在 v0.95 新增的<strong>跨文件符号表</strong>（<code>src/index.rs</code>）之上——该模块独立于类型检查、可容错，半句没写完的代码也能索引</td>
+<td><strong>v0.94 当时刻意不做</strong>（无跨文件符号表）；<strong>已在 v0.95 落地</strong>（见 <a href="#286-lsp-增强hover--跳转定义--补全v095">§28.6</a>）。它们建立在 v0.95 新增的<strong>跨文件符号表</strong>（<code>src/index.rs</code>）之上——该模块独立于类型检查、可容错，半句没写完的代码也能索引</td>
 </tr>
 <tr>
 <td>重命名、跨文件引用查找、格式化</td>
@@ -4546,7 +4701,7 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 解析器与代码生成的每一处构造点。</p>
 <p>顺带一提，也是这次改动让 B 组负向用例的输出全部带上了「第 N 行 第 M 列」。</p>
 <hr />
-<h3 id="286-lsp-增强hover-跳转定义-补全v095">28.6 LSP 增强：Hover / 跳转定义 / 补全（v0.95）</h3>
+<h3 id="286-lsp-增强hover--跳转定义--补全v095">28.6 LSP 增强：Hover / 跳转定义 / 补全（v0.95）</h3>
 <p>v0.94 把「编辑体验」的第一块地基（诊断 + 高亮）铺好了，但当时<strong>刻意没做</strong>悬停、跳转定义、补全——
 理由是「都建立在跨文件符号表之上，Dial 还没有符号表可查」。</p>
 <p>v0.95 补上的，正是这座符号表。它不是把 <code>semantic::analyze</code> 的副产品拿过来用，
@@ -4556,7 +4711,7 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 因此<strong>半句没写完的代码也能索引</strong>——你打字打到一半、缺括号、少分号，Hover 与补全照样有反应，
 不会因为「语义没过」就整个崩掉。代价是索引不保证类型一定正确，但它<strong>宁可给一个保守的答案，也不标错</strong>。</p>
 </blockquote>
-<h4 id="2861-作用域链「由内向外」查找遮蔽查的是内层">28.6.1 作用域链「由内向外」查找（遮蔽查的是内层）</h4>
+<h4 id="2861-作用域链由内向外查找遮蔽查的是内层">28.6.1 作用域链「由内向外」查找（遮蔽查的是内层）</h4>
 <p>符号按<strong>作用域树</strong>组织：每个 <code>if</code> / <code>while</code> / <code>for</code> / <code>try</code> / <code>select</code> / <code>else</code> 块各开一个子作用域，
 挂到外层作用域的 <code>parent</code> 上。查找时<strong>从最内层作用域沿 parent 链一路向外</strong>：</p>
 <pre><code class="language-text">fn main() {

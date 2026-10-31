@@ -1,0 +1,167 @@
+# dialc —— 编译 / 测试 / 发布流水线（GitHub Actions）
+#
+# 两个作业：
+#   build   —— 每次 push / PR 都跑：装 LLVM 18 + Rust → 编译 → 跑全部十一组端到端测试
+#              → 校验内部锚点 → 校验官网产物与文档同步。
+#   release —— 打 `v*` 标签时跑：复用 build 的产物，打包 dialc-v<版本>.zip 并上传到 GitHub Release。
+#
+# 环境要求与 README §3.1 一致：Linux x86_64 · 动态 glibc，
+# 在近两年内发布的发行版上验证（这里用 Ubuntu 24.04 LTS）。
+# 编译器本体依赖 libLLVM-18，产物只链 libc（C 组会断言这一点）。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的新推送会取消旧运行，避免排队浪费
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LLVM_SYS_181_PREFIX: /usr/lib/llvm-18
+  LD_LIBRARY_PATH: /usr/lib/llvm-18/lib
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: 编译 + 端到端测试
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # 发布包要求含完整 .git（提交历史必须完整）
+
+      - name: 安装 LLVM 18 与工具链
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            wget gnupg ca-certificates lsb-release software-properties-common \
+            zip unzip python3 build-essential
+          # LLVM 18 官方 APT 源（Ubuntu 24.04 自带的版本可能偏旧）
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          sudo chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 18 all
+          sudo apt-get install -y --no-install-recommends \
+            llvm-18-dev libpolly-18-dev clang-18 zlib1g-dev
+          # 编译器与测试脚本都优先找 `clang`（无 zig 时回退到 clang）
+          sudo ln -sf /usr/bin/clang-18 /usr/bin/clang
+          clang --version | head -1
+          llvm-config-18 --version
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: 编译 dialc（release）
+        run: cargo build --release --locked
+
+      - name: 端到端测试（A～K 共十一组）
+        run: bash tests/run_tests.sh
+
+      - name: 校验内部锚点（README / CHANGELOG）
+        run: python3 tools/check_links.py
+
+      - name: 校验官网产物与文档同步
+        run: |
+          set -euo pipefail
+          python3 tools/build_web.py
+          if ! git diff --exit-code -- web/; then
+            echo "::error::web/ 与文档不同步，请重新运行 python3 tools/build_web.py 后提交"
+            exit 1
+          fi
+          echo "✅ web/ 与文档同步"
+
+      - name: 上传编译器二进制（供 release 作业复用）
+        uses: actions/upload-artifact@v4
+        with:
+          name: dialc-binary
+          path: target/release/dialc
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: 打包并发布
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write        # 上传 Release 产物需要
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 取回编译器二进制
+        uses: actions/download-artifact@v4
+        with:
+          name: dialc-binary
+          path: target/release
+
+      - name: 准备二进制（补回可执行位）
+        run: |
+          set -euo pipefail
+          chmod +x target/release/dialc
+          mkdir -p .dialc_build
+          ./target/release/dialc --version || true   # --version 未实现时打印用法，不算失败
+
+      - name: 打包 dialc-v<版本>.zip
+        env:
+          INCLUDE_BIN: "1"
+          GITHUB_SHA: ${{ github.sha }}
+        run: bash tools/package.sh
+
+      - name: 上传到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ../dialc-v*.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            ## dialc 发布包
+
+            压缩包 `dialc-v<版本>.zip` 内含：
+
+            | 内容 | 说明 |
+            | --- | --- |
+            | `src/` `stdlib/` `runtime/` `examples/` `tests/` `tools/` | 完整源码 |
+            | `.git/` | 提交历史（一次完整交付，不是快照） |
+            | `LICENSE` `LICENSE-GPLv3` `LICENSE-MIT` `LICENSE-APACHE` | 三重许可的说明与三份协议原文 |
+            | `web/` | 语言规范与更新日志的静态站点 |
+            | `editors/vscode/` | 免 npm 安装的 VS Code 扩展 |
+            | `bin/dialc` | 本次 CI 构建好的编译器二进制 |
+
+            ### 使用
+
+            ```bash
+            unzip dialc-v<版本>.zip
+            cd Dial
+            cargo build --release            # 需要 LLVM 18 开发库
+            export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
+            ./target/release/dialc --version
+            ```
+
+            环境要求见 README §3.1：仅支持 Linux（x86_64 · 动态 glibc），
+            且只在近两年内发布的发行版上验证；产物只链 libc，绝不依赖 libLLVM。
