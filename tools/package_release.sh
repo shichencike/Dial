@@ -131,7 +131,10 @@ FAIL=0
 if [ -n "$ZIP_TOOL" ] && command -v unzip >/dev/null 2>&1; then
   LISTING=$(unzip -l "$OUT")
 elif [ -n "$SEVENZIP" ]; then
-  LISTING=$("$SEVENZIP" l -ba -slt "$(to_win "$OUT")" 2>/dev/null | grep -i "^Path = " || true)
+  # 7z 的清单是 "Path = Dial\LICENSE"：取 Path 行并把反斜杠统一成斜杠，
+  # 才能和后面 ${PKG_ROOT}/$f 的查找形式对上。
+  LISTING=$("$SEVENZIP" l -ba -slt "$(to_win "$OUT")" 2>/dev/null \
+    | sed -n 's/^[Pp][Aa][Tt][Hh] *= *//p' | sed 's|\\|/|g' || true)
 else
   LISTING=$(powershell -NoProfile -Command \
     "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead('$(to_win "$OUT")').Entries.FullName" 2>/dev/null || true)

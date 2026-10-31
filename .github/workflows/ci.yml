@@ -307,6 +307,10 @@ jobs:
             apk add --no-cache curl bash git make binutils zip unzip gcc g++ clang \
               zlib-static zstd-static xz-static ncurses-static libxml2-static libffi-dev \
               llvm18-dev llvm18-static
+            # 强制静态链接 libffi：产物里若残留 NEEDED libffi.so.8，Termux（无该库）
+            # 上执行会直接 not found。libffi.a 由 libffi-dev 提供，删掉 .so 让链接器
+            # 只能命中静态归档（实测 --system-libs 并不含 -lffi，它来自别处的符号解析）。
+            rm -f /usr/lib/libffi.so*
             # 确保 LLVM_SYS_181_PREFIX 下有 llvm-config（Alpine 只提供 llvm-config-18）
             [ -e /usr/lib/llvm18/bin/llvm-config ] \
               || ln -sf /usr/bin/llvm-config-18 /usr/lib/llvm18/bin/llvm-config
@@ -338,7 +342,7 @@ jobs:
             # （注：linker-features=-lld 在 musl 目标上是 unstable，需 -Z unstable-options，故改用 -C linker=gcc）
             # -lgcc：libLLVM.a 各组件引用 __clear_cache，该符号由 libgcc.a 提供；
             #        全静态时它不会自动进入链接，需显式补上（放最后以解析前面的未定义符号）。
-            export RUSTFLAGS="-C target-feature=+crt-static -C linker=gcc -C link-arg=-static -C link-arg=-lgcc"
+            export RUSTFLAGS="-C target-feature=+crt-static -C linker=gcc -C link-arg=-static -C link-arg=-lgcc -C link-arg=/usr/lib/libffi.a"
             echo "RUSTFLAGS=$RUSTFLAGS"
             rustc --version && llvm-config-18 --version
             echo "--- llvm-config --link-static --libs ---"; llvm-config-18 --link-static --libs | head -c 300; echo
