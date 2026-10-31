@@ -74,6 +74,16 @@ Ok "目录树: $DialcHome\{bin,packages,cache\downloads}"
 Copy-Item -Force $DialcBin (Join-Path $DialcHome "bin\dialc.exe")
 Ok "编译器已安装到 $DialcHome\bin\dialc.exe"
 
+# LLVM-C.dll 必须和 dialc.exe 同目录，否则运行期加载失败（Windows 走官方 MSVC
+# 构建的 LLVM 18 的 C 接口，纯 C ABI，跨工具链无冲突，但 DLL 必须随行）。
+$llvmDll = Join-Path $DialcSrc "LLVM-C.dll"
+if (Test-Path $llvmDll) {
+    Copy-Item -Force $llvmDll (Join-Path $DialcHome "bin\LLVM-C.dll")
+    Ok "LLVM-C.dll 已随编译器安装到 $DialcHome\bin\（dialc.exe 运行期依赖）"
+} else {
+    Warn "在 $DialcSrc 下没找到 LLVM-C.dll。`n  dialc.exe 运行期需要它（与 dialc.exe 同目录）。`n  请从 LLVM 18 发行包复制 LLVM-C.dll 到 $DialcHome\bin\。"
+}
+
 # **标准库与运行时也要装**：编译器按「可执行文件所在位置」向上找 stdlib\ 与 runtime\
 # （find_project_base：<exe_dir>\..\..\ 即工程根）。装到 %USERPROFILE%\.dial\bin\dialc.exe 后，
 # 那个位置正好是 %USERPROFILE%\.dial\ —— 所以把 stdlib\ 与 runtime\ 放这里即可。

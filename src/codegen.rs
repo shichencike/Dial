@@ -567,6 +567,19 @@ impl<'ctx> CodeGen<'ctx> {
         n
     }
 
+    /// 当前宿主架构对应的 LLVM CPU 名（原生构建时即目标 CPU）。
+    ///
+    /// 曾经写死 `"x86-64"`，会导致在 aarch64 上无法生成机器码。
+    /// 按架构推导：x86_64 → x86-64；aarch64 → generic（LLVM 接受）；
+    /// 其余留空，让 LLVM 选用该 triple 的默认 CPU。
+    fn host_cpu() -> &'static str {
+        match std::env::consts::ARCH {
+            "x86_64" => "x86-64",
+            "aarch64" => "generic",
+            _ => "",
+        }
+    }
+
     fn emit_object(&self, out: &Path) -> Result<()> {
         Target::initialize_all(&InitializationConfig::default());
         let triple = TargetMachine::get_default_triple();
@@ -575,7 +588,7 @@ impl<'ctx> CodeGen<'ctx> {
         let tm = target
             .create_target_machine(
                 &triple,
-                "x86-64",
+                Self::host_cpu(),
                 "",
                 OptimizationLevel::Default,
                 RelocMode::Default,

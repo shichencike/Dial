@@ -40,16 +40,22 @@
 
 | Target Triple | 平台 | libc | 机器码文件名 | 备注 |
 | --- | --- | --- | --- | --- |
-| `x86_64-linux-gnu` | Linux x86_64 | glibc | `lib/linux-x86_64.a` | 主流桌面 / 服务器 |
-| `x86_64-linux-musl` | Linux x86_64 | musl | `lib/linux-x86_64-musl.a` | 静态链接友好 |
-| `aarch64-linux-gnu` | Linux ARM64 | glibc | `lib/linux-aarch64.a` | ARM 服务器 / 树莓派 |
-| `aarch64-linux-android` | **Termux**（Android ARM64） | bionic | `lib/termux-aarch64.a` | Termux 官方环境 |
-| `x86_64-pc-windows-msvc` | Windows x64 | ucrt | `lib/windows-x86_64.lib` | MSVC 工具链 |
-| `aarch64-pc-windows-msvc` | Windows ARM64 | ucrt | `lib/windows-arm64.lib` | Windows on ARM |
-| `x86_64-pc-windows-gnu` | Windows x64（MinGW） | msvcrt | `lib/windows-x86_64-mingw.a` | 可选 |
+| `x86_64-linux-gnu` | Linux x86_64 | glibc | `lib/linux-x86_64.a` | 主流桌面 / 服务器 ✅ 已支持 |
+| `aarch64-unknown-linux-musl` | **Termux**（ARM64） | musl | `lib/termux-aarch64.a` | musl 全静态单文件 ✅ 已支持 |
+| `x86_64-pc-windows-gnu` | Windows x64 | msvcrt | `lib/windows-x86_64-mingw.a` | MinGW 工具链 ✅ 已支持 |
+| `x86_64-linux-musl` | Linux x86_64 | musl | `lib/linux-x86_64-musl.a` | 静态链接友好（未来变体） |
+| `aarch64-linux-gnu` | Linux ARM64 | glibc | `lib/linux-aarch64.a` | ARM 服务器 / 树莓派（未来变体） |
+| `aarch64-linux-android` | Android ARM64 | bionic | `lib/termux-aarch64.a` | bionic 变体（未来变体） |
+| `x86_64-pc-windows-msvc` | Windows x64 | ucrt | `lib/windows-x86_64.lib` | MSVC 工具链（未来变体） |
+| `aarch64-pc-windows-msvc` | Windows ARM64 | ucrt | `lib/windows-arm64.lib` | Windows on ARM（未来变体） |
+
+> **v0.97 已落地三平台原生构建**：Linux x86_64（glibc）、Windows x64（**MinGW / gnu**）、
+> Termux aarch64（**musl 全静态**）。下方带 ✅ 的三行即当前实际支持的 triple。
+> `host_triple()` 完全由编译期 `cfg!` 宏推导（见 `src/package.rs`）——各平台均**原生构建**，
+> 编译时的 target 即运行时的真实平台，无需运行时猜测，也无需交叉编译的 ABI 兜底。
 
 > **Target Triple 是唯一的寻址键。** 不另造「arch」字段——「架构」不足以定位一份机器码：
-> 同为 x86_64，Linux/glibc、Linux/musl、Windows/MSVC、Windows/MinGW 四者的 ABI 互不兼容。
+> 同为 x86_64，Linux/glibc、Linux/musl、Windows/GNU、Windows/MSVC 四者的 ABI 互不兼容。
 > 编译器手里本来就有完整的 triple（`rustc --print cfg` / LLVM 的 target triple），
 > 用它做键，天然与编译产物同源，不需要任何额外的配置或猜测。
 
@@ -61,12 +67,14 @@
 | 平台 | pthread 可用性 | 备注 |
 | --- | --- | --- |
 | Linux（glibc / musl） | ✅ 原生 | glibc ≥ 2.34 已并入 libc |
-| Termux（Android bionic） | ✅ 原生 | bionic 提供完整 POSIX 线程 |
-| **Windows** | ❌ **没有 pthread** | 必须改用 Win32 原生线程 API（`CreateThread` / `WaitForSingleObject` / `Sleep` / `WaitForMultipleObjects`）或引入 winpthreads |
+| Termux（musl / bionic） | ✅ 原生 | musl / bionic 均提供完整 POSIX 线程 |
+| **Windows（MinGW + winpthreads）** | ✅ **winpthreads 兼容层** | MinGW 工具链自带 winpthreads，提供与 pthread 兼容的 API，因此 stdlib 的线程代码**无需改写**即可在 Windows 编译运行 |
 
-因此**支持 Windows 的前置工作**是：为 C Runtime 抽出一层极薄的「线程后端」抽象，
-Linux/Termux 走 pthread，Windows 走 Win32。对上层（`spawn` / `join` / `channel` / `recv_timeout`）
-的语义**完全不变**——这正是 §4「接口契约与机器码解耦」的精神在 Runtime 内部的延伸。
+因此**支持 Windows 的前置工作**（阶段 6）在 MinGW 路线下被大幅简化：由于 winpthreads 已提供
+pthread 兼容层，`dial_thread.c` / `dial_channel.c` 中的 `pthread_*` 调用在 Windows 上**原样可用**，
+阶段 6 的「Win32 原生线程后端」因此可**延后**——仅在需要脱离 MinGW、改用纯 MSVC 工具链时才必须落地。
+对上层（`spawn` / `join` / `channel` / `recv_timeout`）的语义**完全不变**——这正是 §4
+「接口契约与机器码解耦」的精神在 Runtime 内部的延伸。
 
 另有一处**待办**：v0.9 的 `recv_timeout` 出于 macOS 兼容考虑，把超时基准钟定为
 `CLOCK_REALTIME`（因为 `pthread_condattr_setclock` 在 macOS 上不存在）。
@@ -460,14 +468,15 @@ dialc build main.dial
 | 3 | `import` 语句的词法 / 语法 / Sema；`.diali` 解析器接入 Sema 与 LSP | 阶段 2 | ✅ **已完成**（LSP 侧已由 v0.95 的跨文件符号表落地：补全 / 悬停 / 跳转定义） |
 | 4 | `manifest.txt` 解析 + Target Triple 索引 + 链接期选库 | 阶段 3 | ✅ **已完成** |
 | 5 | 一键安装脚本（`install-dial.sh` / `install-dial.ps1`） | 阶段 2 | ✅ **已完成**（v0.96）——初始化环境（编译器 + `stdlib/` + `runtime/` + PATH + 配置）→ 自动重新扫描并安装 `.dialpkg` |
-| 6 | Windows 线程后端（C Runtime 抽象层），使 `spawn` / `channel` 在 Windows 可用 | 独立 | ⬜ 待做 |
+| 6 | Windows 线程后端（C Runtime 抽象层），使 `spawn` / `channel` 在 Windows 可用 | 独立 | 🟡 **MinGW 路线下已非阻塞**（winpthreads 提供 pthread 兼容层，stdlib 线程代码无需改写即可在 Windows 编译运行）；纯 MSVC 工具链所需的 Win32 后端仍待做 |
 | 7 | 官方标准库改造为 `.dialpkg` 形态并走 GitHub Releases 发布 | 阶段 4 | ⬜ 待做 |
 
 > 以上为路线记录，**不含实现承诺与时间表**。
-> 截至 v0.96，已完成阶段 1 / 2 / 3 / 4 / 5，
+> 截至 v0.97，已完成阶段 1 / 2 / 3 / 4 / 5，并落地了**三平台原生构建**
+> （Linux x86_64 · Windows x64-MinGW · Termux aarch64-musl 全静态，见 [§0.1](#01-平台矩阵与-target-triple)）；
 > 因此 `import` **已可使用**（见 [README §25.9](README.md#259-用法import-与-dialc-installv093-已实现v096-支持-url)），
 > 不再是「不支持」；包的来源既可以是本地文件，也可以是 **URL**。
-> 剩余阶段 6（Windows 线程后端）与阶段 7（官方标准库 `.dialpkg` 化）尚未开始。
+> 剩余：阶段 6 的**纯 MSVC 后端**（MinGW 路线下非阻塞）、阶段 7（官方标准库 `.dialpkg` 化）。
 
 ---
 

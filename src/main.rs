@@ -397,6 +397,12 @@ fn output_paths(src_path: &str, out: Option<&Path>) -> (PathBuf, PathBuf) {
         Some(p) => p.to_path_buf(),
         None => parent.join(&stem),
     };
+    // Windows 可执行文件需要 .exe 后缀；显式给了 -o 则尊重用户（除非它已带后缀）。
+    let exe = if cfg!(windows) && exe.extension().is_none() {
+        exe.with_extension("exe")
+    } else {
+        exe
+    };
     (obj, exe)
 }
 
@@ -426,18 +432,45 @@ fn find_project_base() -> Option<PathBuf> {
     None
 }
 
-/// 返回 (程序名, 前置参数)：优先 zig cc，缺失则 clang。
+/// 返回 (程序名, 前置参数)：按平台挑选可用的 C 编译器。
+///
+/// - Windows（MinGW）：优先 `gcc`（MSYS2 mingw64 的 `x86_64-w64-mingw32-gcc`），
+///   其次 `clang` / `zig cc` / `cc`。MinGW 自带 winpthreads，故 stdlib 的 pthread
+///   代码无需改动即可编译（阶段 6 的 Win32 后端因此可延后）。
+/// - 其它平台：优先 `zig cc`（统一交叉能力），其次 `clang` / `cc` / `gcc`。
 fn cc_command() -> (String, Vec<String>) {
-    if Command::new("zig")
-        .arg("version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        ("zig".to_string(), vec!["cc".to_string()])
+    let candidates: Vec<(&'static str, Vec<String>)> = if cfg!(windows) {
+        vec![
+            ("gcc", vec![]),
+            ("clang", vec![]),
+            ("zig", vec!["cc".to_string()]),
+            ("cc", vec![]),
+        ]
     } else {
-        ("clang".to_string(), vec![])
+        vec![
+            ("zig", vec!["cc".to_string()]),
+            ("clang", vec![]),
+            ("cc", vec![]),
+            ("gcc", vec![]),
+        ]
+    };
+    for (prog, args) in candidates {
+        // 不同编译器识别的版本参数不完全一致，两种都试一下
+        let ok = Command::new(prog)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+            || Command::new(prog)
+                .arg("version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+        if ok {
+            return (prog.to_string(), args);
+        }
     }
+    ("cc".to_string(), vec![])
 }
 
 /// 第二步：编译 C 标准库/运行时为静态库 libdial_std.a，再与用户 .o 链接。
@@ -526,11 +559,21 @@ fn link(obj: &Path, exe: &Path, safety: SafetyMode, extra_libs: &[PathBuf]) -> R
         link_cmd.arg(pl);
     }
     link_cmd
-        // 线程库：glibc ≥ 2.34 已并入 libc（此处是空操作），
-        // 保留是为了在老 glibc 上仍能链接，不做任何代价。
-        .arg("-lpthread")
-        .arg("-o")
-        .arg(exe);
+        // 线程库：
+        // - Linux（glibc/musl）：`-lpthread` 链接 pthread（glibc ≥ 2.34 已并入 libc，此处是空操作）。
+        // - Windows（MinGW + winpthreads）：`-Wl,-Bstatic -lpthread -Wl,-Bdynamic`
+        //   把 winpthreads 静态链入，使最终 .exe 不依赖 libwinpthread-1.dll
+        //   （单文件可执行程序）。winpthreads 提供与 pthread 兼容的 API，
+        //   因此 stdlib 的线程代码无需为 Windows 单独改写（阶段 6 的 Win32 后端可延后）。
+        .arg(if cfg!(windows) {
+            "-Wl,-Bstatic"
+        } else {
+            "-lpthread"
+        });
+    if cfg!(windows) {
+        link_cmd.arg("-lpthread").arg("-Wl,-Bdynamic");
+    }
+    link_cmd.arg("-o").arg(exe);
     if !run_ok(&mut link_cmd) {
         return Err(format!("链接失败：无法用 {} 生成 {}", cc, exe.display()));
     }

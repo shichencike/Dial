@@ -23,19 +23,21 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v096">dialc — Dial 语言编译器 v0.96</a><ul>
+<li><a href="#dialc--dial-语言编译器-v097">dialc — Dial 语言编译器 v0.97</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
 <li><a href="#3-构建与使用">3. 构建与使用</a><ul>
-<li><a href="#31-运行环境要求linux--动态-glibc">3.1 运行环境要求（Linux · 动态 glibc）</a><ul>
-<li><a href="#311-操作系统近两年内的新发行版本">3.1.1 操作系统：近两年内的新发行版本</a></li>
-<li><a href="#312-工具链">3.1.2 工具链</a></li>
-<li><a href="#313-运行-dialc-本体时的动态库要求">3.1.3 运行 dialc 本体时的动态库要求</a></li>
+<li><a href="#31-运行环境要求三平台">3.1 运行环境要求（三平台）</a><ul>
+<li><a href="#311-linux-x86_64动态-glibc">3.1.1 Linux x86_64（动态 glibc）</a></li>
+<li><a href="#312-windows-x64mingw">3.1.2 Windows x64（MinGW）</a></li>
+<li><a href="#313-termux-aarch64musl-全静态">3.1.3 Termux aarch64（musl 全静态）</a></li>
+<li><a href="#314-通用工具链">3.1.4 通用工具链</a></li>
+<li><a href="#315-运行-dialc-本体时的动态库要求linux">3.1.5 运行 dialc 本体时的动态库要求（Linux）</a></li>
 </ul>
 </li>
 <li><a href="#32-从源码构建克隆--进入--编译">3.2 从源码构建：克隆 → 进入 → 编译</a></li>
-<li><a href="#321-一键安装v096-起">3.2.1 一键安装（v0.96 起）</a></li>
+<li><a href="#321-一键安装v097-起三平台">3.2.1 一键安装（v0.97 起，三平台）</a></li>
 <li><a href="#33-编译-dial-程序">3.3 编译 Dial 程序</a></li>
 <li><a href="#34-产物依赖契约">3.4 产物依赖契约</a><ul>
 <li><a href="#341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</a></li>
@@ -269,7 +271,7 @@
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v096">dialc — Dial 语言编译器 v0.96</h1>
+<h1 id="dialc--dial-语言编译器-v097">dialc — Dial 语言编译器 v0.97</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -286,7 +288,7 @@
 <p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
-<p>本文件是 v0.96 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
+<p>本文件是 v0.97 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。</p>
 <hr />
 <h2 id="1-设计原则">1. 设计原则</h2>
@@ -377,76 +379,65 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 </code></pre>
 <hr />
 <h2 id="3-构建与使用">3. 构建与使用</h2>
-<h3 id="31-运行环境要求linux--动态-glibc">3.1 运行环境要求（Linux · 动态 glibc）</h3>
-<p>Dial <strong>只在 Linux 上开发与验证</strong>，并且要求系统使用 <strong>glibc 动态链接</strong>（不是 musl）。</p>
-<blockquote>
-<p><strong>为什么强调「动态 glibc」？</strong>
-- <code>dialc</code> 编译器本体链接 <code>libLLVM.so</code>，而 libLLVM 是 <strong>glibc ABI</strong> 的产物；
-  musl 系统（如 Alpine）里既没有它，跨 ABI 也用不了。
-- 用户编译出的可执行文件<strong>动态链接 libc</strong>（见 <a href="#34-产物依赖契约">§3.4 产物依赖契约</a>），
-  因此它也只能在 glibc 系统上跑。
-- 所以：<strong>请用带 glibc 的常规发行版</strong>；<strong>Alpine Linux、Void(musl)、Gentoo(musl profile) 等 musl 系统不在支持范围。</strong></p>
-</blockquote>
-<h4 id="311-操作系统近两年内的新发行版本">3.1.1 操作系统：近两年内的新发行版本</h4>
-<p>我们只在<strong>近两年内发布、且采用 glibc 的发行版</strong>上验证过。下表是已知可工作的范围
-（x86_64 架构）：</p>
+<h3 id="31-运行环境要求三平台">3.1 运行环境要求（三平台）</h3>
+<p>Dial v0.97 起提供<strong>三个平台</strong>的预编译包，均为<strong>原生构建</strong>（CI 在各平台宿主上直接编译，
+编译期目标即运行期平台，无交叉编译的 ABI 陷阱）：</p>
 <table>
 <thead>
 <tr>
-<th>发行版</th>
-<th>推荐版本（发布年份）</th>
-<th>glibc 动态链接</th>
+<th>平台</th>
+<th>包 slug</th>
+<th>编译器 <code>dialc</code> 的运行依赖</th>
+<th>你编出的程序</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><strong>Ubuntu</strong></td>
-<td>24.04 LTS（2024）/ 24.10 / 25.04 / 25.10</td>
-<td>✅</td>
+<td><strong>Linux x86_64</strong></td>
+<td><code>linux-x86_64</code></td>
+<td>系统装 <code>libLLVM-18.so</code>（动态 glibc）</td>
+<td>仅依赖 libc（glibc）</td>
 </tr>
 <tr>
-<td><strong>Debian</strong></td>
-<td>13 trixie（2025）/ 12 bookworm（2023，下限）</td>
-<td>✅</td>
+<td><strong>Windows x64（MinGW）</strong></td>
+<td><code>windows-x86_64</code></td>
+<td>同目录的 <code>LLVM-C.dll</code>（随包分发）</td>
+<td>单文件 <code>.exe</code>，无外部依赖</td>
 </tr>
 <tr>
-<td><strong>Fedora</strong></td>
-<td>40 / 41 / 42（2024–2025）</td>
-<td>✅</td>
-</tr>
-<tr>
-<td><strong>Linux Mint</strong></td>
-<td>22（2024，基于 Ubuntu 24.04）</td>
-<td>✅</td>
-</tr>
-<tr>
-<td><strong>openSUSE</strong></td>
-<td>Leap 15.6（2024）/ Tumbleweed（滚动）</td>
-<td>✅</td>
-</tr>
-<tr>
-<td><strong>Arch Linux</strong></td>
-<td>滚动（持续在近两年内）</td>
-<td>✅</td>
-</tr>
-<tr>
-<td>❌ <strong>Alpine</strong></td>
-<td>任意版本</td>
-<td>❌ musl，不支持</td>
-</tr>
-<tr>
-<td>❌ <strong>Void / Gentoo（musl）</strong></td>
-<td>任意版本</td>
-<td>❌ musl，不支持</td>
+<td><strong>Termux aarch64（musl）</strong></td>
+<td><code>termux-aarch64</code></td>
+<td><strong>无</strong>（musl 全静态）</td>
+<td>单文件，无外部依赖</td>
 </tr>
 </tbody>
 </table>
 <blockquote>
-<p>一句话：装一台 <strong>2024 年之后发布的、带 glibc 的 x86_64 Linux</strong>（例如 Ubuntu 24.04 LTS 或 Fedora 42），
-就满足操作系统层面的要求。更老的系统若 glibc 版本过低（&lt; 2.35）也可能无法运行预编译产物，
-因此「近两年」既是验证范围，也是稳妥下限。</p>
+<p>三个平台的 <code>dialc</code> 都通过 <strong>LLVM 18 的 C 接口</strong>与 LLVM 交互，因此产物（你写的 Dial 程序）
+一律<strong>不依赖 libLLVM</strong>——这一契约在每条平台的 CI 里都做了断言（见 <a href="#34-产物依赖契约">§3.4</a>）。</p>
 </blockquote>
-<h4 id="312-工具链">3.1.2 工具链</h4>
+<h4 id="311-linux-x86_64动态-glibc">3.1.1 Linux x86_64（动态 glibc）</h4>
+<p>要求系统使用 <strong>glibc 动态链接</strong>。<code>dialc</code> 编译器本体链接 <code>libLLVM-18.so</code>，因此运行期需要系统装有
+LLVM 18 的开发库（提供 <code>libLLVM.so.18</code> 与 <code>llvm-config</code>）。近两年内发布、带 glibc 的 x86_64 发行版
+（Ubuntu 24.04 LTS / Fedora 42 / Debian 13 / Arch 滚动等）均可。musl 系统（Alpine）<strong>不适用于此包</strong>——
+请用下面的 Termux/musl 包（它已在 Alpine aarch64 上构建并静态链接）。</p>
+<h4 id="312-windows-x64mingw">3.1.2 Windows x64（MinGW）</h4>
+<ul>
+<li><code>dialc.exe</code> 走 <strong>MinGW 目标</strong>（<code>x86_64-pc-windows-gnu</code>），运行期需要同目录的 <strong><code>LLVM-C.dll</code></strong>
+  （由官方 MSVC 构建的 LLVM 18 提供，纯 C ABI，跨工具链无冲突；该 DLL 已随包分发）。</li>
+<li>用 <code>dialc</code> 编译你的 <code>.dial</code> 程序时，需要 <strong>MinGW-w64 工具链</strong>（<code>gcc</code> + <code>winpthreads</code>）。
+  标准库的 <code>pthread</code> 代码由 winpthreads 提供，因此 <strong>Windows 上无需改写 Runtime</strong>，
+  产物为<strong>单文件 <code>.exe</code></strong>（winpthreads 已静态链入）。</li>
+<li>推荐安装 <a href="https://www.msys2.org/">MSYS2</a> 并执行 <code>pacman -S mingw-w64-x86_64-toolchain</code>，
+  或在 PATH 中放一份 MinGW-w64 <code>gcc</code>。</li>
+</ul>
+<h4 id="313-termux-aarch64musl-全静态">3.1.3 Termux aarch64（musl 全静态）</h4>
+<ul>
+<li>在 <strong>Alpine aarch64</strong> 容器内原生构建，<strong>完全静态链接 musl libc + 静态 LLVM</strong>，
+  得到的是<strong>单文件、零外部依赖</strong>的 <code>dialc</code>，可在 Termux、任意 ARM64 Linux 上直接运行。</li>
+<li>用 <code>dialc</code> 编译你的程序只需本机装有 <code>gcc</code> / <code>clang</code>，产物同样无外部依赖。</li>
+</ul>
+<h4 id="314-通用工具链">3.1.4 通用工具链</h4>
 <table>
 <thead>
 <tr>
@@ -464,20 +455,20 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 <td>用 <code>rustup</code> 安装最省事</td>
 </tr>
 <tr>
-<td><strong>LLVM 18 开发库</strong></td>
+<td><strong>LLVM 18</strong></td>
 <td>18.x</td>
-<td><code>dialc</code> 链接 <code>libLLVM.so</code></td>
-<td>提供 <code>libLLVM.so.18</code>、<code>llvm-config</code></td>
+<td><code>dialc</code> 通过 C 接口（<code>LLVM-C</code>）使用</td>
+<td>Linux 需 <code>libLLVM-18.so</code> + <code>llvm-config</code>；Windows 随包含 <code>LLVM-C.dll</code>；Termux 静态链入</td>
 </tr>
 <tr>
-<td><strong>C 编译器</strong>：<code>zig cc</code> 优先，缺失时回退 <code>clang</code></td>
-<td>zig ≥ 0.11 <strong>或</strong> clang ≥ 18</td>
+<td><strong>C 编译器</strong>：<code>zig cc</code> 优先，缺失时回退 <code>clang</code> / <code>gcc</code></td>
+<td>zig ≥ 0.11 <strong>或</strong> clang ≥ 18 <strong>或</strong> gcc（MinGW）</td>
 <td>链接阶段把 <code>stdlib/</code> + <code>runtime/</code> 编成 <code>libdial_std.a</code> 并链接</td>
 <td>见 <a href="#33-编译-dial-程序">§3.3</a></td>
 </tr>
 </tbody>
 </table>
-<p>安装示例（Ubuntu 24.04）：</p>
+<p>安装示例（Ubuntu 24.04，构建 Linux 包）：</p>
 <pre><code class="language-bash"># LLVM 18（含 libLLVM.so 与 clang）
 sudo apt-get update
 sudo apt-get install -y llvm-18-dev clang-18 libclang-18-dev
@@ -489,7 +480,7 @@ source &quot;$HOME/.cargo/env&quot;
 # 链接阶段用的 C 编译器：优先 zig；装了就无需 clang
 #   sudo apt-get install -y zig        # 可选，未装则自动回退 clang-18
 </code></pre>
-<h4 id="313-运行-dialc-本体时的动态库要求">3.1.3 运行 <code>dialc</code> 本体时的动态库要求</h4>
+<h4 id="315-运行-dialc-本体时的动态库要求linux">3.1.5 运行 <code>dialc</code> 本体时的动态库要求（Linux）</h4>
 <p><code>dialc</code> 自身依赖 <code>libLLVM.so.18</code>。如果该库不在系统默认库路径里，运行 <code>dialc</code> 前需要把它加进
 <code>LD_LIBRARY_PATH</code>（<strong>仅影响编译器，不影响你编出来的程序</strong>）：</p>
 <pre><code class="language-bash">export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH   # 按本机路径调整
@@ -515,15 +506,25 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 ./target/release/dialc --version
 </code></pre>
 <p><code>dialc</code> 自身链接 libLLVM——这是<strong>编译器</strong>的依赖，与用户程序无关。</p>
-<h3 id="321-一键安装v096-起">3.2.1 一键安装（v0.96 起）</h3>
-<p>不想自己编译？用发行包里的<strong>一键安装脚本</strong>（ARCHITECTURE.md §3.2 阶段 5）：</p>
-<pre><code class="language-bash"># Linux / Termux
-unzip dialc-v0.96.zip &amp;&amp; cd Dial
+<h3 id="321-一键安装v097-起三平台">3.2.1 一键安装（v0.97 起，三平台）</h3>
+<p>不想自己编译？每个平台有独立的预编译包 <code>dialc-v&lt;版本&gt;-&lt;slug&gt;.zip</code>，内含编译器、标准库、运行时
+与一键安装脚本（ARCHITECTURE.md §3.2 阶段 5）：</p>
+<pre><code class="language-bash"># Linux x86_64
+curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.97-linux-x86_64.zip
+unzip dialc-v0.97-linux-x86_64.zip &amp;&amp; cd Dial
 bash tools/install-dial.sh                 # 扫描当前目录及其子目录
 bash tools/install-dial.sh /path/to/pkgs   # 或扫描指定目录
 </code></pre>
-<pre><code class="language-powershell"># Windows
-Expand-Archive dialc-v0.96.zip -DestinationPath .
+<pre><code class="language-bash"># Termux aarch64（musl 全静态，包名 slug = termux-aarch64）
+curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.97-termux-aarch64.zip
+unzip dialc-v0.97-termux-aarch64.zip &amp;&amp; cd Dial
+bash tools/install-dial.sh
+</code></pre>
+<pre><code class="language-powershell"># Windows x64（MinGW）：一行式从最新 Release 拉取并安装
+irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
+
+# 或手动：解压后运行 PowerShell 安装脚本
+Expand-Archive dialc-v0.97-windows-x86_64.zip -DestinationPath .
 powershell -ExecutionPolicy Bypass -File tools\install-dial.ps1
 </code></pre>
 <p>脚本承担两件事（<strong>顺序不能反</strong>）：</p>
@@ -625,7 +626,9 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
     libc.so.6 =&gt; /lib/x86_64-linux-gnu/libc.so.6
     /lib64/ld-linux-x86-64.so.2
 </code></pre>
-<p><code>tests/run_tests.sh</code> 的 C 组会把"产物不得依赖 libLLVM"作为<strong>硬断言</strong>执行。</p>
+<p><code>tests/run_tests.sh</code> 的 C 组会把"产物不得依赖 libLLVM"作为<strong>硬断言</strong>执行。该契约在三条平台
+（Linux / Windows / Termux）的 CI 里都做了断言：Windows 用 <code>llvm-readobj --coff-imports</code> 检查
+用户程序不导入 <code>LLVM-C.dll</code>，Termux 用 <code>readelf -d</code> 检查产物无动态依赖，Linux 用 <code>ldd</code> 检查无 libLLVM。</p>
 <h4 id="341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</h4>
 <p>上表的 <code>libc</code> 之外还有一个<strong>被静态链入</strong>用户产物的组件：<strong><code>libdial_std.a</code></strong>
 （<code>stdlib/</code> 与 <code>runtime/</code> 编译归档而成的 C Runtime，见 <a href="#15-ffi-契约dial-语法--c-函数">§15</a>）。

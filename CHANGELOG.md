@@ -15,6 +15,55 @@
 
 ---
 
+## [v0.97] — 2026-10-31
+
+本版把 Dial 从「仅 Linux x86_64」扩展到**三平台原生构建**——各平台均为 CI 在对应宿主上
+直接编译（编译期目标即运行期平台，无交叉编译 ABI 陷阱）：
+
+| 平台 | 包 slug | 编译器运行依赖 | 用户程序 |
+| --- | --- | --- | --- |
+| **Linux x86_64** | `linux-x86_64` | 系统 `libLLVM-18.so`（动态 glibc） | 仅依赖 libc |
+| **Windows x64（MinGW）** | `windows-x86_64` | 同目录 `LLVM-C.dll`（随包分发） | 单文件 `.exe`，无外部依赖 |
+| **Termux aarch64（musl）** | `termux-aarch64` | **无**（musl 全静态） | 单文件，无外部依赖 |
+
+### Added（新增）
+- **三平台 CI 构建与发布流水线**（`ci.yml`）：`build-linux` / `build-windows` / `build-termux`
+  三个作业各自原生构建，打 `v*` 标签时由 `release` 作业把三个平台的 `dialc-v<版本>-<slug>.zip`
+  一并上传到 GitHub Release。
+- **Windows（MinGW / `x86_64-pc-windows-gnu`）**：使用官方 MSVC 构建的 LLVM 18 全量包，
+  但只取 **C 接口**（`LLVM-C.lib` 导入库 + `LLVM-C.dll` 运行期）。纯 C ABI 跨 MSVC / MinGW
+  无名字改写冲突，因此 `dialc.exe` 直接用 MinGW 目标链接它，无需自编译 LLVM。
+  - 配套 `tools/llvm-config.win.cmd`：llvm-sys 的精确垫片，把 LLVM 当 C 接口暴露给链接器，
+    屏蔽官方 MSVC `llvm-config` 的 `--cflags` 怪癖。
+  - 用户程序由 **MinGW `gcc` + winpthreads** 编译，stdlib 的 `pthread` 代码**零改动**即用
+    （winpthreads 提供兼容层），产物 `-Wl,-Bstatic -lpthread` 静态链入 winpthreads → 单文件 `.exe`。
+- **Termux aarch64（musl 全静态）**：在 Alpine aarch64 容器内（QEMU 模拟）原生构建，
+  `rustup` 安装 `aarch64-unknown-linux-musl` 宿主工具链，`llvm18-static` 提供静态 LLVM，
+  `RUSTFLAGS=-C target-feature=+crt-static` → **完全静态**、零外部依赖的 `dialc`。
+
+### Changed（变更）
+- `src/codegen.rs`：`emit_object` 的 CPU 不再写死 `"x86-64"`，改为按宿主架构推导
+  （x86_64→`x86-64`、aarch64→`generic`），aarch64 也能出正确机器码。
+- `src/package.rs`：`host_triple()` 改用编译期 `cfg!` 宏推导（Windows→`x86_64-pc-windows-gnu`、
+  aarch64+musl→`aarch64-unknown-linux-musl`、aarch64→`aarch64-linux-gnu`、x86_64-linux→`x86_64-linux-gnu`），
+  保持与既有测试 / 包清单键兼容。
+- `src/main.rs`：`link()` / `output_paths()` / `cc_command()` 平台化——Windows 产物补 `.exe`、
+  C 编译器候选按平台排序、链接时静态链入 winpthreads；其余平台行为不变。
+- `tools/package_release.sh`：新增精简的**单平台**发布打包（替代旧的全量源码包），产出
+  `dialc-v<版本>-<slug>.zip`（含 `dialc[.exe]` + `stdlib/` + `runtime/` + 许可 + 安装脚本；
+  Windows 包额外附带 `LLVM-C.dll`）。
+- `tools/install-dial.sh` / `install-dial.ps1`：支持 `dialc.exe`、Windows 下随附复制 `LLVM-C.dll`；
+  `install-dial.ps1` 可从 GitHub 最新 Release 拉取本平台资产一键安装。
+- ARCHITECTURE.md §0.1 / §0.2 / §8、README §3.1 / §3.2.1 / §3.4：同步三平台支持说明。
+
+### Notes（说明）
+- **LLVM 18 必须保留**：Alpine 3.22 恰好只提供 llvm18，升版会断 Termux 路线；故 Windows 走官方
+  MSVC 包 + C 接口，而非 MSYS2（其 mingw64-llvm 现已是 23.x，18.x 已下架）。
+- 路线图 7 阶段已完成 1 / 2 / 3 / 4 / 5；阶段 6（**纯 MSVC** 线程后端）在 MinGW 路线下已非阻塞，
+  阶段 7（官方标准库 `.dialpkg` 化）待做。
+
+---
+
 ## [v0.96] — 2026-10-31
 
 本版补齐 **ARCHITECTURE.md §8 实现路线** 的**阶段 2 剩余部分**与**阶段 5**：

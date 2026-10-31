@@ -1,13 +1,19 @@
-# dialc —— 编译 / 测试 / 发布流水线（GitHub Actions）
+# dialc —— 三平台编译 / 测试 / 发布流水线（GitHub Actions）
 #
-# 两个作业：
-#   build   —— 每次 push / PR 都跑：装 LLVM 18 + Rust → 编译 → 跑全部十一组端到端测试
-#              → 校验内部锚点 → 校验官网产物与文档同步。
-#   release —— 打 `v*` 标签时跑：复用 build 的产物，打包 dialc-v<版本>.zip 并上传到 GitHub Release。
+# 三个构建作业，各平台**原生构建**（CI 用对应宿主 runner / 容器，编译期目标即运行期平台）：
+#   build-linux     Linux x86_64（动态 glibc）—— 全量 A~L 端到端测试 + 锚点/官网同步校验
+#   build-windows   Windows x64（MinGW / gnu）—— 核心冒烟（编译+运行+平台契约）
+#   build-termux    Termux aarch64（musl 全静态）—— 核心冒烟
+# 发布作业在打 `v*` 标签时把三个平台的产物上传到 GitHub Release。
 #
-# 环境要求与 README §3.1 一致：Linux x86_64 · 动态 glibc，
-# 在近两年内发布的发行版上验证（这里用 Ubuntu 24.04 LTS）。
-# 编译器本体依赖 libLLVM-18，产物只链 libc（C 组会断言这一点）。
+# 平台决策（用户拍板 + 工具链可得性约束）：
+#   - Linux x86_64      : glibc 动态链接，运行期需要系统 libLLVM-18
+#   - Windows x64       : MinGW（x86_64-pc-windows-gnu）。LLVM 用官方 MSVC 构建的 18 全量包，
+#                         仅取 C 接口（LLVM-C.lib 导入库 + LLVM-C.dll 运行期），纯 C ABI 跨工具链无冲突；
+#                         stdlib 的 pthread 代码由 winpthreads 提供，无需改写（阶段 6 的 Win32 后端可延后）。
+#   - Termux aarch64    : musl 全静态（单文件、无外部依赖），在 Alpine aarch64 容器内构建。
+#   注：LLVM 18 必须保留——Alpine 3.22 恰好只提供 llvm18，升版会断 Termux 路线。
+#   注：MSYS2 现仅提供 LLVM 23、WinLibs 的 18.x 已下架，故 Windows 走官方 MSVC 包 + C 接口路线。
 
 name: CI
 
@@ -28,21 +34,22 @@ permissions:
   contents: read
 
 env:
-  LLVM_SYS_181_PREFIX: /usr/lib/llvm-18
-  LD_LIBRARY_PATH: /usr/lib/llvm-18/lib
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: 编译 + 端到端测试
+  # ===========================================================================
+  # Linux x86_64 —— 全量测试（A~L 十二组）+ 文档/官网同步校验
+  # ===========================================================================
+  build-linux:
+    name: Linux x86_64（全量测试）
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: 检出源码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0        # 发布包要求含完整 .git（提交历史必须完整）
+          fetch-depth: 0
 
       - name: 安装 LLVM 18 与工具链
         run: |
@@ -51,13 +58,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             wget gnupg ca-certificates lsb-release software-properties-common \
             zip unzip python3 python3-venv python3-pip build-essential
-          # LLVM 18 官方 APT 源（Ubuntu 24.04 自带的版本可能偏旧）
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           sudo chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 18 all
           sudo apt-get install -y --no-install-recommends \
             llvm-18-dev libpolly-18-dev clang-18 zlib1g-dev
-          # 编译器与测试脚本都优先找 `clang`（无 zig 时回退到 clang）
           sudo ln -sf /usr/bin/clang-18 /usr/bin/clang
           clang --version | head -1
           llvm-config-18 --version
@@ -65,9 +70,6 @@ jobs:
       - name: 安装 Python 依赖（官网生成器）
         run: |
           set -euo pipefail
-          # 官网生成器依赖 python-markdown。**版本必须钉死**：不同版本的 markdown
-          # 生成的 HTML 会有细微差异，而下面的「官网与文档同步」校验是逐字节 diff，
-          # 版本一漂移就会误报失败。3.10.1 = 本地生成 web/ 时所用的版本。
           python3 -m venv /tmp/webvenv
           /tmp/webvenv/bin/pip install --quiet --upgrade pip
           /tmp/webvenv/bin/pip install --quiet "markdown==3.10.1"
@@ -87,7 +89,7 @@ jobs:
       - name: 编译 dialc（release）
         run: cargo build --release --locked
 
-      - name: 端到端测试（A～K 共十一组）
+      - name: 端到端测试（A~L 共十二组）
         run: bash tests/run_tests.sh
 
       - name: 校验内部锚点（README / CHANGELOG）
@@ -104,22 +106,30 @@ jobs:
           fi
           echo "✅ web/ 与文档同步"
 
-      - name: 上传编译器二进制（供 release 作业复用）
+      - name: 打包发布 zip（linux-x86_64）
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: bash tools/package_release.sh linux-x86_64 target/release/dialc
+
+      - name: 上传发布产物
         uses: actions/upload-artifact@v4
         with:
-          name: dialc-binary
-          path: target/release/dialc
+          name: dialc-linux-x86_64
+          path: dialc-v*-linux-x86_64.zip
           if-no-files-found: error
           retention-days: 7
 
-  release:
-    name: 打包并发布
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: write        # 上传 Release 产物需要
+  # ===========================================================================
+  # Windows x64（MinGW / gnu）—— 核心冒烟
+  # ===========================================================================
+  build-windows:
+    name: Windows x64（MinGW 核心冒烟）
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    env:
+      LLVM_SYS_181_PREFIX: C:\llvm-shim
+      LLVM18_DIR: C:\llvm18
 
     steps:
       - name: 检出源码
@@ -127,54 +137,193 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 取回编译器二进制
-        uses: actions/download-artifact@v4
-        with:
-          name: dialc-binary
-          path: target/release
+      - name: 安装 MinGW-w64（gcc + winpthreads，供编译用户程序）
+        shell: bash
+        run: choco install mingw -y
 
-      - name: 准备二进制（补回可执行位）
+      - name: 下载并解压官方 LLVM 18（MSVC 全量包，提供 C 接口：LLVM-C.lib / LLVM-C.dll / 头文件）
+        shell: bash
         run: |
           set -euo pipefail
-          chmod +x target/release/dialc
-          mkdir -p .dialc_build
-          ./target/release/dialc --version || true   # --version 未实现时打印用法，不算失败
+          curl -fSL --retry 3 -o /tmp/llvm18.tar.xz \
+            https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz
+          mkdir -p "$LLVM18_DIR"
+          tar -xf /tmp/llvm18.tar.xz -C "$LLVM18_DIR" --strip-components=1
+          ls "$LLVM18_DIR/bin/LLVM-C.dll" "$LLVM18_DIR/lib/LLVM-C.lib"
 
-      - name: 打包 dialc-v<版本>.zip
+      - name: 放置 llvm-config 垫片（让 llvm-sys 把 LLVM 当 C 接口链接）
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /c/llvm-shim/bin
+          cp tools/llvm-config.win.cmd /c/llvm-shim/bin/llvm-config.cmd
+          "/c/llvm-shim/bin/llvm-config.cmd" --version
+
+      - name: 安装 Rust 工具链并加 MinGW 目标
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: 编译 dialc（release，x86_64-pc-windows-gnu）
+        shell: bash
         env:
-          INCLUDE_BIN: "1"
+          PATH: C:\tools\mingw64\bin;C:\llvm18\bin:$PATH
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
+        run: |
+          set -euo pipefail
+          cargo build --release --target x86_64-pc-windows-gnu --locked
+          ls -la target/x86_64-pc-windows-gnu/release/dialc.exe
+
+      - name: 核心冒烟：编译并运行示例
+        shell: bash
+        env:
+          PATH: C:\tools\mingw64\bin;C:\llvm18\bin:$PATH
+        run: |
+          set -euo pipefail
+          BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
+          # dialc.exe 运行期需要 LLVM-C.dll（已在 PATH 的 C:\llvm18\bin 中）
+          "$BIN" --version 2>/dev/null || true
+          "$BIN" build examples/hello.dial -o /tmp/hello.exe
+          /tmp/hello.exe | tee /tmp/hello.out
+          grep -q "Hello, dialc" /tmp/hello.out && echo "✅ Windows 冒烟通过" || { echo "❌ 输出不符"; exit 1; }
+
+      - name: 平台契约：用户程序不依赖 LLVM-C.dll
+        shell: bash
+        env:
+          PATH: C:\tools\mingw64\bin;C:\llvm18\bin:$PATH
+        run: |
+          set -euo pipefail
+          BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
+          "$BIN" build examples/hello.dial -o /tmp/hello2.exe
+          # 用 llvm-readobj / dumpbin 检查导入表：只允许系统 DLL，不应出现 LLVM-C.dll（那是 dialc.exe 自己的依赖）
+          if command -v llvm-readobj >/dev/null 2>&1; then
+            IMPORTS=$(llvm-readobj --coff-imports /tmp/hello2.exe 2>/dev/null | grep -i "LLVM" || true)
+          else
+            IMPORTS=""
+          fi
+          if [ -n "$IMPORTS" ]; then echo "❌ 用户程序依赖 LLVM"; echo "$IMPORTS"; exit 1; fi
+          echo "✅ 用户程序无 LLVM 依赖"
+
+      - name: 打包发布 zip（windows-x86_64，含 LLVM-C.dll）
+        shell: bash
+        env:
           GITHUB_SHA: ${{ github.sha }}
-        run: bash tools/package.sh
+          LLVM18_DIR: C:\llvm18
+        run: bash tools/package_release.sh windows-x86_64 target/x86_64-pc-windows-gnu/release/dialc.exe
+
+      - name: 上传发布产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dialc-windows-x86_64
+          path: dialc-v*-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # ===========================================================================
+  # Termux aarch64（musl 全静态）—— 在 Alpine aarch64 容器内用 QEMU 原生构建
+  # ===========================================================================
+  build-termux:
+    name: Termux aarch64（musl 全静态核心冒烟）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 在 Alpine aarch64 容器内原生构建（QEMU）
+        uses: uraimo/run-on-arch-action@v3
+        with:
+          arch: aarch64
+          distro: alpine_latest
+          githubToken: ${{ github.token }}
+          env: |
+            LLVM_SYS_181_PREFIX: /usr/lib/llvm18
+            RUSTFLAGS: -C target-feature=+crt-static
+            GITHUB_SHA: ${{ github.sha }}
+          install: |
+            apk add --no-cache curl bash git make binutils zip unzip gcc g++ \
+              zlib-static zstd-static libxml2-static libffi-dev \
+              llvm18-dev llvm18-static
+          run: |
+            set -euo pipefail
+            # 安装 rustup（aarch64-unknown-linux-musl 宿主工具链）
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-host aarch64-unknown-linux-musl --profile minimal
+            source "$HOME/.cargo/env"
+            rustc --version
+            llvm-config-18 --version
+            # 原生构建（host == target）
+            cargo build --release --target aarch64-unknown-linux-musl --locked
+            ls -la target/aarch64-unknown-linux-musl/release/dialc
+            # 核心冒烟
+            ./target/aarch64-unknown-linux-musl/release/dialc build examples/hello.dial -o /tmp/hello
+            /tmp/hello | tee /tmp/hello.out
+            grep -q "Hello, dialc" /tmp/hello.out && echo "✅ Termux 冒烟通过" || { echo "❌ 输出不符"; exit 1; }
+            # 平台契约：完全静态（无动态依赖）
+            readelf -d /tmp/hello 2>/dev/null | grep -q "Shared library" && { echo "❌ 存在动态依赖"; readelf -d /tmp/hello; exit 1; } || echo "✅ 用户程序完全静态（无动态依赖）"
+            # 打包
+            bash tools/package_release.sh termux-aarch64 target/aarch64-unknown-linux-musl/release/dialc
+
+      - name: 上传发布产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dialc-termux-aarch64
+          path: dialc-v*-termux-aarch64.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # ===========================================================================
+  # 发布：tag 触发，收集三平台产物上传到 GitHub Release
+  # ===========================================================================
+  release:
+    name: 打包并发布（三平台）
+    needs: [build-linux, build-windows, build-termux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write        # 上传 Release 产物需要
+
+    steps:
+      - name: 取回三平台产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "*"
+          merge-multiple: false
+
+      - name: 列出待发布资产
+        run: find dist -name 'dialc-v*.zip' -printf '  %p (%s 字节)\n'
 
       - name: 上传到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ../dialc-v*.zip
+          files: dist/**/dialc-v*.zip
           fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
-            ## dialc 发布包
+            ## dialc 三平台发布包
 
-            压缩包 `dialc-v<版本>.zip` 内含：
+            本次发布为三个平台各提供一个**精简二进制分发包**，命名 `dialc-v<版本>-<平台>.zip`：
 
-            | 内容 | 说明 |
-            | --- | --- |
-            | `src/` `stdlib/` `runtime/` `examples/` `tests/` `tools/` | 完整源码 |
-            | `.git/` | 提交历史（一次完整交付，不是快照） |
-            | `LICENSE` `LICENSE-GPLv3` `LICENSE-MIT` `LICENSE-APACHE` | 三重许可的说明与三份协议原文 |
-            | `web/` | 语言规范与更新日志的静态站点 |
-            | `editors/vscode/` | 免 npm 安装的 VS Code 扩展 |
-            | `bin/dialc` | 本次 CI 构建好的编译器二进制 |
+            | 平台 | 文件名 slug | 运行环境要求 |
+            | --- | --- | --- |
+            | **Linux x86_64** | `linux-x86_64` | 动态 glibc；运行期需系统装有 libLLVM-18（apt.llvm.org 的 llvm-18，或设置 `LD_LIBRARY_PATH` 指向 `libLLVM-18.so`） |
+            | **Windows x64** | `windows-x86_64` | MinGW（gnu）目标；`dialc.exe` 运行期需同目录的 `LLVM-C.dll`（已随包分发）；编译你的 `.dial` 程序需 MinGW-w64 工具链（gcc + winpthreads），产物为单文件 `.exe` |
+            | **Termux aarch64** | `termux-aarch64` | **musl 全静态**，单文件、无外部依赖；编译你的程序仅需本机 `gcc`/`clang` |
 
-            ### 使用
+            ### 安装
 
             ```bash
-            unzip dialc-v<版本>.zip
-            cd Dial
-            cargo build --release            # 需要 LLVM 18 开发库
-            export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
-            ./target/release/dialc --version
+            # Linux / Termux
+            curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v<版本>-linux-x86_64.zip
+            unzip dialc-v<版本>-linux-x86_64.zip && cd Dial && sudo bash install-dial.sh
+
+            # Windows（PowerShell）
+            irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
             ```
 
-            环境要求见 README §3.1：仅支持 Linux（x86_64 · 动态 glibc），
-            且只在近两年内发布的发行版上验证；产物只链 libc，绝不依赖 libLLVM。
+            每个包内含 `dialc`(`dialc.exe`)、`stdlib/`、`runtime/`、四份许可文件与对应安装脚本。

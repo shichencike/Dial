@@ -28,7 +28,15 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIALC_HOME="${DIALC_HOME:-$HOME/.dial}"
-DIALC_BIN="${DIALC_BIN:-$SCRIPT_DIR/dialc}"
+
+# 编译器本体可能是 dialc（Linux / Termux）或 dialc.exe（Windows / MinGW）。
+if [ -x "$SCRIPT_DIR/dialc.exe" ]; then
+  DIALC_BIN="${DIALC_BIN:-$SCRIPT_DIR/dialc.exe}"
+elif [ -x "$SCRIPT_DIR/dialc" ]; then
+  DIALC_BIN="${DIALC_BIN:-$SCRIPT_DIR/dialc}"
+else
+  DIALC_BIN="${DIALC_BIN:-$SCRIPT_DIR/dialc}"
+fi
 DIALC_SRC="${DIALC_SRC:-$SCRIPT_DIR}"
 
 say()  { printf '  %s\n' "$*"; }
@@ -63,8 +71,9 @@ mkdir -p "$DIALC_HOME/bin" "$DIALC_HOME/packages" "$DIALC_HOME/cache/downloads" 
 ok "目录树: $DIALC_HOME/{bin,packages,cache/downloads}"
 
 # 把 dialc 挂进 ~/.dial/bin（PATH 里加这一条即可全局可用）
-cp -f "$DIALC_BIN" "$DIALC_HOME/bin/dialc" 2>/dev/null && \
-    ok "编译器已安装到 $DIALC_HOME/bin/dialc" || \
+DST_BIN="$DIALC_HOME/bin/$(basename "$DIALC_BIN")"
+cp -f "$DIALC_BIN" "$DST_BIN" 2>/dev/null && \
+    ok "编译器已安装到 $DST_BIN" || \
     warn "复制编译器到 $DIALC_HOME/bin 失败（可稍后手动处理）"
 
 # **标准库与运行时也要装**：编译器按「可执行文件所在位置」向上找 stdlib/ 与 runtime/
@@ -105,7 +114,7 @@ fi
 # 工具链配置：记录本机信息，便于排查「这台机器上装的是啥」
 cat > "$DIALC_HOME/config.txt" <<EOF
 # Dial 环境配置（由 install-dial.sh 生成）
-dialc_path   = $DIALC_HOME/bin/dialc
+dialc_path   = $DST_BIN
 installed_at = $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 uname        = $(uname -srm)
 EOF
@@ -142,8 +151,8 @@ else
     FAILED=0
     for f in "${PKGS[@]}"; do
         echo "  → 安装 $f"
-        # 用 ~/.dial/bin/dialc（刚装好的那个），保证「装的包」与「装的编译器」配套
-        if "$DIALC_HOME/bin/dialc" install "$f"; then
+        # 用刚装好的编译器（保证「装的包」与「装的编译器」配套）
+        if "$DST_BIN" install "$f"; then
             INSTALLED=$((INSTALLED + 1))
         else
             FAILED=$((FAILED + 1))

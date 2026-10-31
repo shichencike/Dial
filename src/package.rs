@@ -53,23 +53,43 @@ fn dirs_home() -> Result<PathBuf> {
 /// 当前编译目标的 **Target Triple**（唯一的寻址键）。
 ///
 /// 用 `DIAL_TARGET` 可显式覆盖（交叉编译或测试用）；否则由编译期常量推导。
-/// 之所以不另造「arch」字段：同为 x86_64，Linux/glibc、Linux/musl、Windows/MSVC
-/// 的 ABI 互不兼容，「架构」不足以定位一份机器码。
+/// 之所以不另造「arch」字段：同为 x86_64，Linux/glibc、Linux/musl、Windows/gnu、
+/// Windows/MSVC 的 ABI 互不兼容，「架构」不足以定位一份机器码。
+///
+/// 推导完全基于编译期 `cfg!` 宏——dialc 在各平台都**原生构建**（CI 用对应宿主
+/// runner/容器），因此编译时的 target 即运行时的真实平台，无需运行时猜测。
 pub fn host_triple() -> String {
     if let Ok(t) = std::env::var("DIAL_TARGET") {
         if !t.trim().is_empty() {
             return t.trim().to_string();
         }
     }
-    let arch = std::env::consts::ARCH; // x86_64 / aarch64
-    let os = std::env::consts::OS; // linux / windows / android
-    match (arch, os) {
-        ("x86_64", "linux") => "x86_64-linux-gnu".to_string(),
-        ("aarch64", "linux") => "aarch64-linux-gnu".to_string(),
-        ("aarch64", "android") => "aarch64-linux-android".to_string(), // Termux
-        ("x86_64", "windows") => "x86_64-pc-windows-msvc".to_string(),
-        ("aarch64", "windows") => "aarch64-pc-windows-msvc".to_string(),
-        _ => format!("{}-{}", arch, os),
+    // ---- Windows：用户选择 MinGW（gnu），与 ARCHITECTURE §0.1 一致 ----
+    if cfg!(target_os = "windows") {
+        return if cfg!(target_env = "gnu") {
+            "x86_64-pc-windows-gnu".to_string()
+        } else {
+            "x86_64-pc-windows-msvc".to_string()
+        };
+    }
+    // ---- Termux / Android（bionic）----
+    if cfg!(target_os = "android") {
+        return "aarch64-linux-android".to_string();
+    }
+    // ---- aarch64 Linux：musl 静态（Termux 推荐形态）vs glibc ----
+    if cfg!(target_arch = "aarch64") {
+        return if cfg!(target_env = "musl") {
+            "aarch64-unknown-linux-musl".to_string()
+        } else {
+            "aarch64-linux-gnu".to_string()
+        };
+    }
+    // ---- x86_64 Linux：musl 静态 vs glibc ----
+    if cfg!(target_env = "musl") {
+        "x86_64-unknown-linux-musl".to_string()
+    } else {
+        // 保持与既有测试 / 包清单键一致：glibc 用非 Rust 风格短名
+        "x86_64-linux-gnu".to_string()
     }
 }
 
