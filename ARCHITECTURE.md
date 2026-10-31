@@ -8,8 +8,8 @@
 > `.diali` 解析接入 Sema 与链接期自动链库——即下方 [§8 实现路线](#8-实现路线尚未开始供后续版本参考)
 > 的阶段 1 / 3 / 4。用法见 [README §25.9](README.md#259-用法import-与-dialc-installv092-已实现)。
 >
-> **仍待实现**：阶段 2 的 `dialc install <URL>`（网络下载；本地文件安装已可用）、
-> 阶段 5 的一键安装脚本、阶段 6 的 Windows 线程后端、阶段 7 的官方标准库 `.dialpkg` 化。
+> **v0.96 已补齐**：阶段 2 的 `dialc install <URL>`（网络下载）与阶段 5 的一键安装脚本。
+> **仍待实现**：阶段 6 的 Windows 线程后端、阶段 7 的官方标准库 `.dialpkg` 化。
 >
 > 之所以在实现之前就把规范写死：让「不透明指针 + C ABI」这条底层设计
 > （[§14.1](README.md#141-不透明指针契约)、[§15](README.md#15-ffi-契约dial-语法--c-函数)）
@@ -453,20 +453,21 @@ dialc build main.dial
 
 ## 8. 实现路线
 
-| 阶段 | 内容 | 依赖 | 状态（v0.92） |
+| 阶段 | 内容 | 依赖 | 状态（v0.96） |
 | --- | --- | --- | --- |
 | 1 | `.dialpkg` 容器格式定义 + 解包器（含路径穿越防护）+ 整包 SHA256 校验 | 无 | ✅ **已完成** |
-| 2 | `dialc install <URL>` / `dialc install <本地文件>` + 缓存目录管理 | 阶段 1 | 🟡 **部分完成**——本地文件安装已可用；`<URL>` 网络下载待做 |
-| 3 | `import` 语句的词法 / 语法 / Sema；`.diali` 解析器接入 Sema 与 LSP | 阶段 2 | ✅ **已完成**（LSP 侧待 LSP 骨架落地） |
+| 2 | `dialc install <URL>` / `dialc install <本地文件>` + 缓存目录管理 | 阶段 1 | ✅ **已完成**——`<URL>` 网络下载于 v0.96 落地（https 强制；`--sha256` 可钉死整包哈希；解压前逐文件校验） |
+| 3 | `import` 语句的词法 / 语法 / Sema；`.diali` 解析器接入 Sema 与 LSP | 阶段 2 | ✅ **已完成**（LSP 侧已由 v0.95 的跨文件符号表落地：补全 / 悬停 / 跳转定义） |
 | 4 | `manifest.txt` 解析 + Target Triple 索引 + 链接期选库 | 阶段 3 | ✅ **已完成** |
-| 5 | 一键安装脚本（`install-dial.sh` / `install-dial.ps1`） | 阶段 2 | ⬜ 待做 |
+| 5 | 一键安装脚本（`install-dial.sh` / `install-dial.ps1`） | 阶段 2 | ✅ **已完成**（v0.96）——初始化环境（编译器 + `stdlib/` + `runtime/` + PATH + 配置）→ 自动重新扫描并安装 `.dialpkg` |
 | 6 | Windows 线程后端（C Runtime 抽象层），使 `spawn` / `channel` 在 Windows 可用 | 独立 | ⬜ 待做 |
 | 7 | 官方标准库改造为 `.dialpkg` 形态并走 GitHub Releases 发布 | 阶段 4 | ⬜ 待做 |
 
 > 以上为路线记录，**不含实现承诺与时间表**。
-> v0.92 已完成阶段 1 / 3 / 4 与阶段 2 的本地安装部分，
-> 因此 `import` **已可使用**（见 [README §25.9](README.md#259-用法import-与-dialc-installv092-已实现)），
-> 不再是「不支持」。
+> 截至 v0.96，已完成阶段 1 / 2 / 3 / 4 / 5，
+> 因此 `import` **已可使用**（见 [README §25.9](README.md#259-用法import-与-dialc-installv093-已实现v096-支持-url)），
+> 不再是「不支持」；包的来源既可以是本地文件，也可以是 **URL**。
+> 剩余阶段 6（Windows 线程后端）与阶段 7（官方标准库 `.dialpkg` 化）尚未开始。
 
 ---
 

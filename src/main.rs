@@ -45,19 +45,53 @@ fn main() {
     }
 
     if args.len() < 3 {
-        eprintln!("用法: dialc <build|run|install> <源文件.dial|包.dialpkg> [-o 输出] [--no-link]");
+        eprintln!("用法: dialc <build|run|install> <源文件.dial|包.dialpkg|包URL> [-o 输出] [--no-link]");
+        eprintln!("      dialc install <URL> [--sha256 <哈希>]   从 URL 安装包（见 README §25.9）");
         std::process::exit(1);
     }
     let command = args[1].as_str();
     let src_path = args[2].clone();
 
-    // `dialc install <包.dialpkg>`：解压到全局缓存，项目目录零侵入（§25.1）。
+    // `dialc install <包.dialpkg | URL>`：解压到全局缓存，项目目录零侵入（§25.1）。
     //
-    // 当前支持**本地文件**。URL 下载（§3.1 的 `dialc install <URL>`）需要引入 HTTP 客户端，
-    // 属后续工作——缓存与校验这条链路与「包从哪来」无关，先把它做对。
+    // 包从哪来可以是**本地文件**，也可以是 **URL**（§3.1）：URL 会先下载、
+    // 再做「整包哈希（若给了 --sha256）」与「解压前逐文件 SHA256」两道校验，
+    // 全过才解压（§5.1：校验先于一切）。
     if command == "install" {
-        let pkg = Path::new(&src_path);
-        match package::install(pkg) {
+        // 解析可选的 --sha256 <hex>（只有 install 用得到）
+        let mut expected_sha256: Option<String> = None;
+        let mut i = 3;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--sha256" => {
+                    i += 1;
+                    match args.get(i) {
+                        Some(v) => expected_sha256 = Some(v.clone()),
+                        None => {
+                            eprintln!("--sha256 后面缺少哈希值");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                other => {
+                    eprintln!("install: 不认识的参数 '{}'", other);
+                    std::process::exit(1);
+                }
+            }
+            i += 1;
+        }
+
+        let is_url = src_path.starts_with("http://") || src_path.starts_with("https://");
+        let result = if is_url {
+            package::install_from_url(&src_path, expected_sha256.as_deref())
+        } else {
+            if expected_sha256.is_some() {
+                eprintln!("--sha256 只对 URL 安装有意义（本地文件安装的校验由包内 manifest 负责）");
+                std::process::exit(1);
+            }
+            package::install(Path::new(&src_path))
+        };
+        match result {
             Ok((dir, manifest)) => {
                 println!("✅ 已安装包 '{}' v{}（ABI {}）", manifest.name, manifest.version, manifest.abi);
                 println!("   许可: {}", manifest.license);

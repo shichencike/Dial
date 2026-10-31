@@ -47,7 +47,7 @@ FOOTER = """
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.95 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.96 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 """
@@ -241,6 +241,7 @@ def render_index() -> str:
         ("包安装三条硬规则（v0.94 收尾）", "dialc install 的边界钉死：① 同名包 <b>ABI 相同则覆盖、不同则报错要求先卸载</b>，拒绝「同名不同 ABI 共存」重新打开版本冲突的口子；② targets 的库文件 <b>只允许静态库（.a / .lib），拒绝一切 .so / .dll 动态库</b>——Dial 产物的依赖契约是只链 libc，动态库会破坏它；③ 卸载无需专用命令，直接 rm -rf ~/.dial/packages/&lt;名&gt;/ 即可（缓存是纯派生数据，随时可重装）。三条均被测试 J 组锁死。"),
         ("dialc lsp 语言服务器（v0.94 → v0.95）", "编辑器里的红线与 dialc build 的报错是同一条错误、同一个位置、同一句文案——因为语言服务器直接调用编译器的词法 / 语法 / 语义，不另写第二套解析器（两套实现必然慢慢长歪）。保存即报诊断，语义高亮用的也是编译器自己的词法器。附带免 npm 安装的 VS Code 扩展：LSP 客户端是手写的 200 行，拷进扩展目录即可用。v0.95 在骨架之上补上了跨文件符号表，把悬停、跳转定义、基础补全一并做齐。"),
         ("LSP 增强：Hover / 跳转定义 / 补全（v0.95）", "一座独立于类型检查、可容错的符号表（src/index.rs）：半句没写完的代码也能索引，Hover 与补全照样有反应。作用域链「由内向外」查找，所以 if 块里 let x: int 遮蔽外层 let x: string 在悬停 / 定义 / 补全三处都查的是内层那个；顺着 import 自动扫描 ~/.dial/packages/ 把包的不透明类型与 extern fn 装进内存符号表，Hover 包函数时直接渲染 .diali 的 /// 文档并标注「外部函数」，跳转定义对包符号直接送进 .diali 的声明行。均由测试组 K 端到端锁死。"),
+        ("包 URL 安装 + 一键安装（v0.96）", "包可以直接从 URL 装：dialc install https://.../pkg.dialpkg —— 不用先手动下载。只允许 https（本机除外），明文 http 能被中间人改写，而 SHA256 挡不住「换了内容还带着正确哈希」的伪造，所以宁可装不上也不降级。--sha256 可钉死整包哈希，比对发生在解压之前；而无论给不给，包里每个文件都要按 manifest 登记的哈希先验一遍——校验先于解压，一个字节都还没落到磁盘。另有 install-dial.sh / .ps1 一键脚本：初始化环境（编译器 + stdlib + runtime + PATH）→ 自动重新扫描并装上目录里的所有 .dialpkg——包就在那里，脚本看得见，用户不必记住包名。"),
         ("三重开源许可（含许可隔离）", "GPL-3.0 OR MIT OR Apache-2.0 —— 三者任选其一遵守。三份协议原文与说明文档随源码及发布包完整分发。<b>许可按组件划分</b>：编译器前端（dialc 本体）为三重许可；但被静态链进你程序的标准库 libdial_std.a <b>强制锁定为 MIT 或 Apache-2.0，绝不允许以 GPL 条款链接进闭源程序</b>——工具可以是 GPL，被链进你程序里的运行时绝不能是。"),
     ]
     card_html = "".join(
@@ -265,7 +266,7 @@ def render_index() -> str:
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
     </div>
     <div class="kpis">
-      <span><b>v0.95</b> 当前版本</span>
+      <span><b>v0.96</b> 当前版本</span>
       <span><b>Rust + inkwell</b> / LLVM 18</span>
       <span><b>零</b> LLVM 运行时依赖</span>
       <span><b>短路</b> and / or</span>
@@ -298,7 +299,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 # 编译并运行一个 Dial 程序
 ./target/release/dialc run examples/hello.dial
 
-# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装规则等十一组）
+# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装等十二组）
 ./tests/run_tests.sh</code></pre>
   <h2>最小示例</h2>
   <pre><code>fn main(): int {{
@@ -307,7 +308,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
     return 0;
 }}</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.95.zip">dialc-v0.95.zip</a>（或自行 clone 仓库后构建）<br>
+    下载源码包：<a href="../dialc-v0.96.zip">dialc-v0.96.zip</a>（或自行 clone 仓库后构建）<br>
     发布包由 <a class="ext" href="https://github.com/shichencike/Dial/actions/workflows/ci.yml" target="_blank" rel="noopener">GitHub Actions</a>
     自动构建：装 LLVM 18 → 编译 → 跑全部十一组端到端测试 → 打包上传 Release。
   </p>

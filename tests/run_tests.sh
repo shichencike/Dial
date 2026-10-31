@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 十一组检查，全部通过才算绿（顺序即 A→K，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 十二组检查，全部通过才算绿（顺序即 A→L，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -16,6 +16,8 @@
 #   J. 包安装三条硬规则：覆盖 / 静态库限制 / ABI 冲突（v0.94 收尾新增；复用 H 组装好的 demo 包）。
 #   K. LSP 增强：Hover（变量遮蔽 + 跨文件 .diali 文档）、跳转定义（文件内 / 包符号跳
 #      .diali）、基础补全（可见符号收集 + 前缀过滤）（v0.95 新增）。
+#   L. 包 URL 安装：真起本机 HTTP 服务器提供 .dialpkg，用 `dialc install <URL>` 装——
+#      坏包（篡改 / 哈希不符 / 404 / 非 https）一律装不进去，且失败后缓存无残骸（v0.96 新增）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -338,6 +340,24 @@ echo "== K) LSP 增强特性：Hover / 跳转定义 / 补全（v0.95） =="
 #   3) 补全收集光标可见符号并按已输入前缀过滤。
 if command -v python3 >/dev/null 2>&1; then
     if python3 tests/lsp_features.py; then
+        :
+    else
+        fail=1
+    fi
+else
+    echo "  ⚠️  跳过（未找到 python3）"
+fi
+
+echo
+echo "== L) 包 URL 安装：下载 → 校验 → 解压（v0.96） =="
+# 真起一个本机 HTTP 服务器提供 .dialpkg，用真正的 `dialc install <URL>` 去装。
+# 重点不在「能装上」，而在**坏包一律装不进去**：
+#   · 内容被篡改 -> 解压前逐文件 SHA256 拦下，且不落盘；
+#   · --sha256 不符 / 404 / 非 https -> 直接失败；
+#   · 失败后缓存目录不留残骸（半截的包绝不能留在 ~/.dial 里）。
+# 全部用例在隔离的 HOME 下跑，不碰用户真实缓存。
+if command -v python3 >/dev/null 2>&1; then
+    if python3 tests/pkg_install_url.py; then
         :
     else
         fail=1

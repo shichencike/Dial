@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
@@ -188,6 +189,276 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
 /// - **ABI 不同** → 报错，要求用户先卸载旧包（`rm -rf ~/.dial/packages/<name>/`）再装，
 ///   防止不兼容的二进制悄悄链进用户程序。
 pub fn install(pkg_path: &Path) -> Result<(PathBuf, Manifest)> {
+    install_inner(pkg_path)
+}
+
+/// 从 **URL** 安装包（阶段 2：`dialc install <URL>`）。
+///
+/// 流程严格按 ARCHITECTURE.md §3.1 / §5.1：
+///
+/// 1. **下载**到临时文件（`curl`）——https 强制（仅 localhost 例外）；
+/// 2. **整包哈希校验**（若给了 `expected_sha256`）——**在解压之前**，不符即删临时文件并报错；
+/// 3. **解压前逐文件校验**（`verify_archive`）——把包内每个文件按 manifest 登记的
+///    SHA256 校验一遍，**一个字节都不落到磁盘**；
+/// 4. 解压到 `~/.dial/packages/<name>/`（复用本地安装的同一套逻辑：路径穿越防护 +
+///    ABI 覆盖规则）。
+///
+/// `expected_sha256` 为 `None` 时仍会做第 3 步（能发现残缺与篡改），
+/// 但**无法**证明「这就是我要的那一份包」——此时会打印一条明确提示，
+/// 绝不静默降级（§5.1：失败即终止，不做降级）。
+pub fn install_from_url(url: &str, expected_sha256: Option<&str>) -> Result<(PathBuf, Manifest)> {
+    let tmp_dir = download_dir()?;
+    let fname = url_filename(url)?;
+    let tmp = tmp_dir.join(format!("{}.part", fname));
+
+    let res = (|| -> Result<(PathBuf, Manifest)> {
+        download_to(url, &tmp)?;
+
+        // 整包哈希：钉死「这就是我要的那一份」。
+        if let Some(want) = expected_sha256 {
+            let want = want.trim().to_ascii_lowercase();
+            let got = sha256_file(&tmp)?;
+            if got != want {
+                return Err(DialcError::new(
+                    format!(
+                        "下载的包 SHA256 不符：期望 {}，实际 {}\n\
+                         下载物已删除，绝不安装未经校验的文件。\n\
+                         请核对哈希来源（发行页提供的校验值），或先手动下载后用 \
+                         `dialc install <本地文件>` 安装。",
+                        want, got
+                    ),
+                    0,
+                    0,
+                ));
+            }
+        } else {
+            println!(
+                "ℹ️  未指定 --sha256：本次只校验包内各文件与 manifest.txt 的一致性\n\
+                 （能发现残缺与篡改），**未**校验整包来源。\n\
+                 若需强保证，请追加 --sha256 <发行页给出的哈希>。"
+            );
+        }
+
+        let r = install_inner(&tmp);
+        r
+    })();
+
+    // 临时文件一律清掉：成功也删（解压已完成），失败也删（不留残骸）。
+    let _ = fs::remove_file(&tmp);
+    res
+}
+
+/// 下载缓存目录：`~/.dial/cache/downloads/`。
+fn download_dir() -> Result<PathBuf> {
+    let home = dirs_home()?;
+    let d = home.join(".dial").join("cache").join("downloads");
+    fs::create_dir_all(&d)
+        .map_err(|e| DialcError::new(format!("创建下载缓存目录失败 {}: {}", d.display(), e), 0, 0))?;
+    Ok(d)
+}
+
+/// 从 URL 里取出文件名（用于临时文件命名）。
+fn url_filename(url: &str) -> Result<String> {
+    let tail = url.split(['?', '#']).next().unwrap_or(url);
+    let name = tail.rsplit('/').next().unwrap_or("").trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+        return Err(DialcError::new(
+            format!("无法从 URL 推断文件名: {}（请用 --sha256 之外的方式确认下载内容）", url),
+            0,
+            0,
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// 是否允许用明文 http 下载。
+///
+/// 只放行 **localhost / 127.0.0.1 / ::1**——那是本机自测与本地镜像；
+/// 其余一律要求 https，避免「链接被改写成 http 就静默降级到明文」这类中间人攻击。
+fn http_allowed(url: &str) -> bool {
+    let rest = match url.split_once("://") {
+        Some((_, r)) => r,
+        None => return false,
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or("").to_ascii_lowercase();
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+/// 用 `curl` 把 URL 下载到 `dest`。
+///
+/// 为什么用外部 `curl` 而不是引入 Rust 的 HTTP 库：
+///
+/// - 本编译器**本来就依赖外部工具链**（`zig cc` / `clang` / `ar`），下载器属同一类依赖，
+///   不新增「运行期还要装个东西」的新负担；
+/// - 引入 TLS 栈（rustls 等）会显著拉长编译时间与依赖树，与 §21「不引入无用依赖」相悖；
+/// - **TLS 绝不手写**——证书校验、主机名校验、重定向全部交给 curl 背后的成熟实现。
+///
+/// 安全约束（宁可失败，也不降级）：
+///
+/// - 只允许 `https`（localhost 除外，见 [`http_allowed`]）；
+/// - `--proto '=https'` 禁止 curl 降级协议、禁止跟随到 `file://`；
+/// - `-f` 让 HTTP 错误码（404/500…）直接失败；
+/// - 下载后必须**非空**。
+fn download_to(url: &str, dest: &Path) -> Result<()> {
+    let is_https = url.starts_with("https://");
+    if !is_https && !http_allowed(url) {
+        return Err(DialcError::new(
+            format!(
+                "只允许 https:// 下载（当前: {}）。\n\
+                 明文 http 会被中间人改写，SHA256 也挡不住「换了内容还带着正确哈希」的伪造，\
+                 因此非本机地址一律拒绝。",
+                url
+            ),
+            0,
+            0,
+        ));
+    }
+    let curl = which("curl").ok_or_else(|| {
+        DialcError::new(
+            "未找到 curl，无法下载包。\n\
+             请先安装 curl（Debian/Ubuntu: apt install curl；Fedora: dnf install curl；\
+             Termux: pkg install curl），\n\
+             或手动下载后用 `dialc install <本地文件>` 安装。",
+            0,
+            0,
+        )
+    })?;
+
+    let mut cmd = Command::new(&curl);
+    cmd.arg("--fail")
+        .arg("--location")
+        .arg("--silent")
+        .arg("--show-error")
+        .arg("--proto")
+        .arg("=https,http")
+        .arg("--tlsv1.2")
+        .arg("--connect-timeout")
+        .arg("15")
+        .arg("--max-time")
+        .arg("600")
+        .arg("--retry")
+        .arg("2")
+        .arg("--output")
+        .arg(dest)
+        .arg(url);
+
+    let out = cmd.output().map_err(|e| {
+        DialcError::new(format!("调用 curl 失败（{}）: {}", curl.display(), e), 0, 0)
+    })?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(DialcError::new(
+            format!(
+                "下载失败: {}\n{}",
+                url,
+                err.trim().lines().last().unwrap_or("（无详细输出）")
+            ),
+            0,
+            0,
+        ));
+    }
+    let meta = fs::metadata(dest)
+        .map_err(|e| DialcError::new(format!("下载后找不到文件 {}: {}", dest.display(), e), 0, 0))?;
+    if meta.len() == 0 {
+        return Err(DialcError::new(format!("下载得到空文件: {}", url), 0, 0));
+    }
+    Ok(())
+}
+
+/// 在 `PATH` 里找可执行文件（跨平台：Windows 需额外试 `.exe`）。
+fn which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join(name);
+        if cand.is_file() {
+            return Some(cand);
+        }
+        if cfg!(windows) {
+            let cand = dir.join(format!("{}.exe", name));
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// 解压**之前**逐文件校验包内内容（§5.1「校验先于一切」「每个文件都要校验」）。
+///
+/// 只读 zip 内容做哈希，**不写任何字节到磁盘**——校验通过之前，
+/// 包里的机器码一个也不会落到文件系统里。
+///
+/// 规则：
+///
+/// - `manifest.txt` 自身不校验（它是其余哈希的来源，不能自证）；
+/// - 目录项跳过；
+/// - 其余每个文件**必须**在 `manifest.sha256` 中登记，且哈希**必须**相符；
+///   未登记 → 拒绝（无法校验的文件不允许进入缓存）；登记但不符 → 拒绝（已被篡改）。
+pub fn verify_archive<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    manifest: &Manifest,
+) -> Result<()> {
+    let mut checked = 0usize;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| DialcError::new(format!("读取包内第 {} 项失败: {}", i, e), 0, 0))?;
+        let name = entry.name().to_string();
+        if name.ends_with('/') || name == "manifest.txt" {
+            continue;
+        }
+        let expected = match manifest.sha256.get(&name) {
+            Some(h) => h.clone(),
+            None => {
+                return Err(DialcError::new(
+                    format!(
+                        "包 '{}' 的文件 '{}' 未在 manifest.txt 的 sha256 中登记。\n\
+                         每个文件都必须登记哈希——未登记的文件无法校验，\
+                         残缺或被篡改的机器码绝不允许进入链接阶段。",
+                        manifest.name, name
+                    ),
+                    0,
+                    0,
+                ));
+            }
+        };
+        let mut h = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = entry
+                .read(&mut buf)
+                .map_err(|e| DialcError::new(format!("读取包内 {} 失败: {}", name, e), 0, 0))?;
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+        }
+        let actual = format!("{:x}", h.finalize());
+        if actual != expected {
+            return Err(DialcError::new(
+                format!(
+                    "包 '{}' 的 SHA256 校验失败: {}（期望 {}，实际 {}）——\
+                     文件已残缺或被篡改，绝不允许进入链接阶段",
+                    manifest.name, name, expected, actual
+                ),
+                0,
+                0,
+            ));
+        }
+        checked += 1;
+    }
+    if checked == 0 {
+        return Err(DialcError::new(
+            format!("包 '{}' 内没有任何可校验的文件，拒绝安装", manifest.name),
+            0,
+            0,
+        ));
+    }
+    Ok(())
+}
+
+/// 本地安装的真正实现（`install` 与 `install_from_url` 共用）。
+fn install_inner(pkg_path: &Path) -> Result<(PathBuf, Manifest)> {
     if !pkg_path.exists() {
         return Err(DialcError::new(
             format!("找不到包文件: {}", pkg_path.display()),
@@ -210,6 +481,10 @@ pub fn install(pkg_path: &Path) -> Result<(PathBuf, Manifest)> {
             .map_err(|e| DialcError::new(format!("读取 manifest.txt 失败: {}", e), 0, 0))?;
         parse_manifest(&s)?
     };
+
+    // **校验先于解压**（§5.1）：先把包里每个文件按 manifest 登记的哈希验一遍，
+    // 一个字节都还没落到磁盘上。校验不过就地失败，绝不留下半个残缺的包。
+    verify_archive(&mut archive, &manifest)?;
 
     let dest = cache_root()?.join(&manifest.name);
     if dest.join("manifest.txt").exists() {

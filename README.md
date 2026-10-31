@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v0.95
+# dialc — Dial 语言编译器 v0.96
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -24,7 +24,7 @@ Dial 是一门**静态强类型、显式标注、无 GC** 的编译型语言。�
 只负责把 Dial 源码翻译成 LLVM IR；**所有容器与运行时能力都由 C 语言实现**，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。
 
-本文件是 v0.95 的**规范性文档**：描述的语言行为与 `src/` 中的实现逐条对应，
+本文件是 v0.96 的**规范性文档**：描述的语言行为与 `src/` 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。
 
 ---
@@ -74,12 +74,15 @@ dialc/
 │   ├── bad/                # 必须编译失败的负向用例
 │   ├── trap/               # 必须当场因信号终止的 Fail-Fast 用例
 │   ├── lsp_smoke.py        # I 组：LSP 协议往返（诊断 + 语义高亮）
-│   └── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
+│   ├── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
+│   └── pkg_install_url.py  # L 组：包 URL 安装 + 一键安装脚本
 ├── tools/
 │   ├── build_web.py        # 生成官网 web/（规范 / 更新日志 / 首页）
 │   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
 │   ├── package.sh          # 打发布包 dialc-v<版本>.zip（含许可与 .git）
-│   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J 组用）
+│   ├── install-dial.sh     # 一键安装（Linux / Termux）
+│   ├── install-dial.ps1    # 一键安装（Windows / PowerShell）
+│   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
 ├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十一组测试 + 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
 ├── web/                    # 官网产物（由 tools/build_web.py 生成）
@@ -176,6 +179,47 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 ```
 
 `dialc` 自身链接 libLLVM——这是**编译器**的依赖，与用户程序无关。
+
+### 3.2.1 一键安装（v0.96 起）
+
+不想自己编译？用发行包里的**一键安装脚本**（ARCHITECTURE.md §3.2 阶段 5）：
+
+```bash
+# Linux / Termux
+unzip dialc-v0.96.zip && cd Dial
+bash tools/install-dial.sh                 # 扫描当前目录及其子目录
+bash tools/install-dial.sh /path/to/pkgs   # 或扫描指定目录
+```
+
+```powershell
+# Windows
+Expand-Archive dialc-v0.96.zip -DestinationPath .
+powershell -ExecutionPolicy Bypass -File tools\install-dial.ps1
+```
+
+脚本承担两件事（**顺序不能反**）：
+
+1. **初始化 Dial 环境**：建 `~/.dial/` 目录树（`bin` / `packages` / `cache/downloads`）、
+   把 `dialc` 装进 `~/.dial/bin/` 并挂进 `PATH`、把 `stdlib/` 与 `runtime/` 一并装到
+   `~/.dial/`、写一份 `~/.dial/config.txt` 工具链配置；
+2. **自动安装已下载的包**：初始化完成后**重新扫描**找到的 `.dialpkg`（当前目录及其子目录，
+   或参数指定的目录），逐个执行 `dialc install`。
+
+> **为什么脚本要「自动重新扫描」而不是让用户逐个点名**：一键安装的语义是
+> 「我把这个目录交给你，你把该装的都装上」。用户不该需要记住包名、也不该需要
+> 为每个包敲一条命令——包就在那里，脚本看得见。
+
+> **为什么 `stdlib/` 与 `runtime/` 也要装**：编译器按**可执行文件所在位置**向上找
+> `stdlib/` 与 `runtime/`（`target/release/dialc` → 工程根）。装到 `~/.dial/bin/dialc` 后，
+> 那个位置正好是 `~/.dial/`——所以把它们放这里即可。少了这一步，
+> 用户在自己项目里编译会报「找不到 stdlib/ 与 runtime/ 目录」。
+
+装完之后，在**你自己的项目目录**里直接用：
+
+```bash
+export PATH="$PATH:$HOME/.dial/bin"   # 脚本已写入 ~/.profile / ~/.bashrc，重开终端后自动生效
+dialc build main.dial -o main
+```
 
 ### 3.3 编译 Dial 程序
 
@@ -285,7 +329,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 
 > `char` 是 v0.92 引入的单字符类型：**一个 Unicode 码点**，底层与 `int` 同为 `i64`，
 > 但类型独立——不参与算术，只可比较或经 `char_to_int` / `int_to_char` 显式转换
-> （见 [§5.1](#51-基本类型) 与 [§17.2](#172-尚未实现的能力截至-v095)）。
+> （见 [§5.1](#51-基本类型) 与 [§17.2](#172-尚未实现的能力截至-v096)）。
 
 > `try` / `catch` / `throw` 是 v0.7 引入的可恢复异常关键字（见 [§26](#26-可恢复异常trycatchthrow)）。
 > 注意 **`error` 不是关键字**——它是内建构造函数名（与 `open` / `print` 同类），写作 `Error("...")`。
@@ -1141,7 +1185,7 @@ print(e);
 | --- | --- |
 | 整数溢出 | 按 i64 二进制补码回绕（Debug 等级亦不检查） |
 
-### 17.2 尚未实现的能力（截至 v0.95）
+### 17.2 尚未实现的能力（截至 v0.96）
 
 > 已落地：`Map`（int → int，ARC 管理）、`read_line()`、短路求值、零隐式转换铁律、
 > `let` + 原地修改方法（push/set/put）的接收者约束、`else if` 语法糖、`for` 范围循环、`break` / `continue`、
@@ -1156,7 +1200,7 @@ print(e);
 | 多维数组 `int[][]` | 编译期拒绝 |
 | 非 `int` 元素数组 | 编译期拒绝 |
 | 裸块 `{ ... }` | 不支持 |
-| 模块 / 包 / import | **已支持**（v0.93）：`import "包名";` + `dialc install <包.dialpkg>`，见 [§25](#25-包分发与依赖管理生态规划--最终规范)。**尚未实现**：`dialc install <URL>`（本地文件安装已可用）、源码形式的模块拆分（无 `mod`） |
+| 模块 / 包 / import | **已支持**（v0.93；`dialc install <URL>` 于 v0.96 落地）：`import "包名";` + `dialc install <本地文件\|URL>`，见 [§25](#25-包分发与依赖管理生态规划--最终规范)。**尚未实现**：源码形式的模块拆分（无 `mod`） |
 | 泛型、接口、trait、闭包 | 不支持（`channel<T>` 是内建特化语法，不是用户泛型） |
 | 指针、地址取值、指针算术 | **永不提供**（与不透明指针契约冲突） |
 | 运算符重载 | **永不提供** |
@@ -1179,7 +1223,7 @@ print(e);
 ./tests/run_tests.sh
 ```
 
-十一组检查，全部通过才算绿（顺序即 A→K）：
+十二组检查，全部通过才算绿（顺序即 A→L）：
 
 | 组 | 内容 |
 | --- | --- |
@@ -1194,6 +1238,7 @@ print(e);
 | **I. LSP**（v0.94 新增） | 真起一个 `dialc lsp` 子进程、按 JSON-RPC 往返：初始化能力、诊断定位到**出错那一行**、语义 token 的差分解码与**源码子串反查**（含中文的 UTF-16 换算）、`shutdown` 后干净退出。见 `tests/lsp_smoke.py` |
 | **J. 包安装三条硬规则**（v0.94 收尾） | `dialc install`：① 同名包 **ABI 相同则覆盖、不同则报错要求先卸载**；② `targets` 的库文件**只允许 `.a` / `.lib` 静态库，拒绝 `.so` / `.dll` 动态库**；③ 卸载即 `rm -rf ~/.dial/packages/<名>/`（缓存是纯派生数据）。三条均被 J 组锁死 |
 | **K. LSP 增强**（v0.95 新增） | Hover / 跳转定义 / 补全：真起 `dialc lsp` 子进程按 LSP 协议往返，验证变量遮蔽的 Hover、跨文件 `.diali` 文档、跳转定义（文件内→本文件、包符号→`.diali`）、可见符号收集与前缀过滤。见 `tests/lsp_features.py` |
+| **L. 包安装**（v0.96 新增） | **URL 安装**：真起一个本机 HTTP 服务器提供 `.dialpkg`，用 `dialc install <URL>` 装——正常装得上，`--sha256` 钉死也能装；坏包（内容篡改 / 哈希不符 / 404 / 非 https）**一律装不进去**，且失败后缓存目录无残骸。**一键脚本**：`install-dial.sh` 初始化环境（编译器 + `stdlib/` + `runtime/`）→ 自动扫描并安装 `.dialpkg` → 在**与源码树无关的独立项目目录**里编译 import 程序并运行。见 `tests/pkg_install_url.py` |
 
 #### 持续集成（GitHub Actions）
 
@@ -1667,7 +1712,7 @@ fn main(): int {
 > **v0.93 已落地**：`import "包名";` 语句、`.dialpkg` 解包（含路径穿越防护）、
 > `manifest.txt` 解析、按 Target Triple 选库、**SHA256 强制校验**、
 > `.diali` 签名解析接入 Sema、链接期自动链入对应平台的机器码。
-> 见 [§25.9](#259-用法import-与-dialc-installv093-已实现)。
+> 见 [§25.9](#259-用法import-与-dialc-installv093-已实现v096-支持-url)。
 > **尚未实现**：`dialc install <URL>`（网络下载；本地文件安装已可用）、一键安装脚本、
 > 官方标准库的 `.dialpkg` 化、Windows 线程后端。
 >
@@ -1754,7 +1799,7 @@ sqlite.dialpkg
 
 > **⚠️ 以下语法只属于 `.diali`，不是 Dial 编程语言本身。** 本文件的 `type` / `extern fn` / `///`
 > 由包解析器 `src/package.rs` 单独处理，**不会**出现在 `.dial` 源码中，也**不在** §4.3 关键字表与 §9 函数定义里。
-> 语言层的关键字与函数定义语法分别见 [§4.3](#43-关键字) 与 [§9.1](#91-定义)；`.diali` 能写的声明只有两种（见下方示例与 [§25.9](#259-用法import-与-dialc-installv093-已实现)）：
+> 语言层的关键字与函数定义语法分别见 [§4.3](#43-关键字) 与 [§9.1](#91-定义)；`.diali` 能写的声明只有两种（见下方示例与 [§25.9](#259-用法import-与-dialc-installv093-已实现v096-支持-url)）：
 > `type X;`（不透明句柄）与 `extern fn f(a: T, ...): R;`（外部函数签名）。
 
 ```dial
@@ -2013,9 +2058,9 @@ rm -rf ~/.dial/packages/<包名>/
 > 但**不替用户做法务判断**。是否接受某个包的条款，由使用者自己决定。
 > 唯一被**强制**的，是 Dial 自己的标准库：它必须是 MIT 或 Apache-2.0，绝不可以是 GPL。
 
-### 25.9 用法：`import` 与 `dialc install`（v0.93 已实现）
+### 25.9 用法：`import` 与 `dialc install`（v0.93 已实现，v0.96 支持 URL）
 
-**第一步：安装一个包**（本地 `.dialpkg` 文件）
+**第一步：安装一个包**——本地 `.dialpkg` 文件，或 **URL**（v0.96 起）
 
 ```bash
 $ dialc install sqlite.dialpkg
@@ -2027,6 +2072,41 @@ $ dialc install sqlite.dialpkg
 
 包**永远**解压到 `~/.dial/packages/<name>/`，项目目录零侵入。
 缓存是可重建的派生数据，整个删掉后编译器会重新解压。
+
+#### 从 URL 安装（v0.96）
+
+包也可以直接给 URL——**不用先手动下载**：
+
+```bash
+$ dialc install https://github.com/某人/sqlite/releases/download/v1.4.0/sqlite.dialpkg
+```
+
+**只允许 `https://`**（本机 `localhost` / `127.0.0.1` 例外，可用于本地镜像与自测）：
+明文 http 能被中间人改写，而 SHA256 挡不住「换了内容还带着正确哈希」的伪造，
+因此非本机地址一律拒绝——**宁可装不上，也不降级到明文**。
+
+**下载 → 校验 → 解压**三步，一步都不省（[ARCHITECTURE.md §3.1 / §5.1](ARCHITECTURE.md#3-一键安装与本地缓存)）：
+
+| 步骤 | 做什么 | 失败时 |
+| --- | --- | --- |
+| 1. 下载 | 用 `curl` 取到临时文件（临时文件**成功失败都删**，不留残骸） | 立即报错，缓存目录无残留 |
+| 2. 整包哈希（可选） | 给了 `--sha256` 就比对**整个下载物**的哈希——这能证明「这就是我要的那一份包」 | **解压之前**就失败 |
+| 3. 逐文件校验 | 按包内 `manifest.txt` 登记的 SHA256，把包里**每个文件**验一遍——**一个字节都还没落到磁盘** | **解压之前**就失败 |
+
+第 3 步是 [§5.1「校验先于一切」](#254-sha256-强制校验防断网与防篡改) 的字面实现：
+残缺或被篡改的机器码**绝不允许**进入缓存、更绝不允许进入链接器。
+
+```bash
+$ dialc install https://.../sqlite.dialpkg --sha256 3f786850e387550fdab836ed7e6dc881de23001b
+```
+
+**没给 `--sha256` 也能装**，但会明确提示你这次只验了「包内文件与 manifest 是否一致」
+（能发现残缺与篡改），**没验整包来源**——不静默降级。想要强保证就把发行页给出的哈希传进来。
+
+> 下载用外部 `curl` 而非引入 Rust 的 HTTP 库：编译器**本来就依赖外部工具链**
+> （`zig cc` / `clang` / `ar`），下载器属同一类依赖，不新增「运行期还要装个东西」的负担；
+> 引入 TLS 栈会显著拉长编译时间与依赖树（与 [§21](#21-代码编写纪律防臃肿与允许冗余原则) 相悖）。
+> **TLS 绝不手写**——证书校验、主机名校验、重定向全部交给 curl 背后的成熟实现。
 
 **第二步：源码里 `import`，然后照常编译**
 
@@ -2084,7 +2164,7 @@ $ dialc build main.dial -o main
 > JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 > **[ARCHITECTURE.md《Dial 标准库与包分发最终规范》](ARCHITECTURE.md)**。
 > 规范一旦在真实包上落地，将同步更新本章、ARCHITECTURE.md 与 [CHANGELOG.md](CHANGELOG.md)；
-> 在此之前，`import` 仍按 [§17.2](#172-尚未实现的能力截至-v095) 视为**不支持**。
+> 在此之前，`import` 仍按 [§17.2](#172-尚未实现的能力截至-v096) 视为**不支持**。
 
 ---
 

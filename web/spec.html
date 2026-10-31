@@ -23,7 +23,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v095">dialc — Dial 语言编译器 v0.95</a><ul>
+<li><a href="#dialc--dial-语言编译器-v096">dialc — Dial 语言编译器 v0.96</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -35,6 +35,7 @@
 </ul>
 </li>
 <li><a href="#32-从源码构建克隆--进入--编译">3.2 从源码构建：克隆 → 进入 → 编译</a></li>
+<li><a href="#321-一键安装v096-起">3.2.1 一键安装（v0.96 起）</a></li>
 <li><a href="#33-编译-dial-程序">3.3 编译 Dial 程序</a></li>
 <li><a href="#34-产物依赖契约">3.4 产物依赖契约</a><ul>
 <li><a href="#341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</a></li>
@@ -128,7 +129,7 @@
 <li><a href="#16-内置-print">16. 内置 print</a></li>
 <li><a href="#17-未定义行为与已实现边界">17. 未定义行为与已实现边界</a><ul>
 <li><a href="#171-未定义行为">17.1 未定义行为</a></li>
-<li><a href="#172-尚未实现的能力截至-v095">17.2 尚未实现的能力（截至 v0.95）</a></li>
+<li><a href="#172-尚未实现的能力截至-v096">17.2 尚未实现的能力（截至 v0.96）</a></li>
 </ul>
 </li>
 <li><a href="#18-测试">18. 测试</a><ul>
@@ -195,7 +196,10 @@
 </li>
 <li><a href="#257-这套规范刻意不做的事">25.7 这套规范刻意不做的事</a></li>
 <li><a href="#258-许可隔离第三方包同样绝不以-gpl-链接进用户程序">25.8 许可隔离：第三方包同样绝不以 GPL 链接进用户程序</a></li>
-<li><a href="#259-用法import-与-dialc-installv093-已实现">25.9 用法：import 与 dialc install（v0.93 已实现）</a></li>
+<li><a href="#259-用法import-与-dialc-installv093-已实现v096-支持-url">25.9 用法：import 与 dialc install（v0.93 已实现，v0.96 支持 URL）</a><ul>
+<li><a href="#从-url-安装v096">从 URL 安装（v0.96）</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li><a href="#26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</a><ul>
@@ -265,7 +269,7 @@
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v095">dialc — Dial 语言编译器 v0.95</h1>
+<h1 id="dialc--dial-语言编译器-v096">dialc — Dial 语言编译器 v0.96</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -282,7 +286,7 @@
 <p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
-<p>本文件是 v0.95 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
+<p>本文件是 v0.96 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。</p>
 <hr />
 <h2 id="1-设计原则">1. 设计原则</h2>
@@ -357,12 +361,15 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── bad/                # 必须编译失败的负向用例
 │   ├── trap/               # 必须当场因信号终止的 Fail-Fast 用例
 │   ├── lsp_smoke.py        # I 组：LSP 协议往返（诊断 + 语义高亮）
-│   └── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
+│   ├── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
+│   └── pkg_install_url.py  # L 组：包 URL 安装 + 一键安装脚本
 ├── tools/
 │   ├── build_web.py        # 生成官网 web/（规范 / 更新日志 / 首页）
 │   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
 │   ├── package.sh          # 打发布包 dialc-v&lt;版本&gt;.zip（含许可与 .git）
-│   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J 组用）
+│   ├── install-dial.sh     # 一键安装（Linux / Termux）
+│   ├── install-dial.ps1    # 一键安装（Windows / PowerShell）
+│   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
 ├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十一组测试 + 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
 ├── web/                    # 官网产物（由 tools/build_web.py 生成）
@@ -508,6 +515,38 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 ./target/release/dialc --version
 </code></pre>
 <p><code>dialc</code> 自身链接 libLLVM——这是<strong>编译器</strong>的依赖，与用户程序无关。</p>
+<h3 id="321-一键安装v096-起">3.2.1 一键安装（v0.96 起）</h3>
+<p>不想自己编译？用发行包里的<strong>一键安装脚本</strong>（ARCHITECTURE.md §3.2 阶段 5）：</p>
+<pre><code class="language-bash"># Linux / Termux
+unzip dialc-v0.96.zip &amp;&amp; cd Dial
+bash tools/install-dial.sh                 # 扫描当前目录及其子目录
+bash tools/install-dial.sh /path/to/pkgs   # 或扫描指定目录
+</code></pre>
+<pre><code class="language-powershell"># Windows
+Expand-Archive dialc-v0.96.zip -DestinationPath .
+powershell -ExecutionPolicy Bypass -File tools\install-dial.ps1
+</code></pre>
+<p>脚本承担两件事（<strong>顺序不能反</strong>）：</p>
+<ol>
+<li><strong>初始化 Dial 环境</strong>：建 <code>~/.dial/</code> 目录树（<code>bin</code> / <code>packages</code> / <code>cache/downloads</code>）、
+   把 <code>dialc</code> 装进 <code>~/.dial/bin/</code> 并挂进 <code>PATH</code>、把 <code>stdlib/</code> 与 <code>runtime/</code> 一并装到
+   <code>~/.dial/</code>、写一份 <code>~/.dial/config.txt</code> 工具链配置；</li>
+<li><strong>自动安装已下载的包</strong>：初始化完成后<strong>重新扫描</strong>找到的 <code>.dialpkg</code>（当前目录及其子目录，
+   或参数指定的目录），逐个执行 <code>dialc install</code>。</li>
+</ol>
+<blockquote>
+<p><strong>为什么脚本要「自动重新扫描」而不是让用户逐个点名</strong>：一键安装的语义是
+「我把这个目录交给你，你把该装的都装上」。用户不该需要记住包名、也不该需要
+为每个包敲一条命令——包就在那里，脚本看得见。</p>
+<p><strong>为什么 <code>stdlib/</code> 与 <code>runtime/</code> 也要装</strong>：编译器按<strong>可执行文件所在位置</strong>向上找
+<code>stdlib/</code> 与 <code>runtime/</code>（<code>target/release/dialc</code> → 工程根）。装到 <code>~/.dial/bin/dialc</code> 后，
+那个位置正好是 <code>~/.dial/</code>——所以把它们放这里即可。少了这一步，
+用户在自己项目里编译会报「找不到 stdlib/ 与 runtime/ 目录」。</p>
+</blockquote>
+<p>装完之后，在<strong>你自己的项目目录</strong>里直接用：</p>
+<pre><code class="language-bash">export PATH=&quot;$PATH:$HOME/.dial/bin&quot;   # 脚本已写入 ~/.profile / ~/.bashrc，重开终端后自动生效
+dialc build main.dial -o main
+</code></pre>
 <h3 id="33-编译-dial-程序">3.3 编译 Dial 程序</h3>
 <pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast]
 dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fast]
@@ -671,7 +710,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 <p><strong>以上仅限 <code>.dial</code> 源码的关键字。</strong> 接口签名文件 <code>.diali</code> 另有 <code>type</code> / <code>extern fn</code> 等<strong>专用语法</strong>（见 <a href="#252-包内结构与接口签名供-lsp-与-sema-使用">§25.2</a>），它们<strong>不是</strong> Dial 语言的关键字，由包解析器 <code>src/package.rs</code> 单独处理，不会出现在 <code>.dial</code> 源码里。</p>
 <p><code>char</code> 是 v0.92 引入的单字符类型：<strong>一个 Unicode 码点</strong>，底层与 <code>int</code> 同为 <code>i64</code>，
 但类型独立——不参与算术，只可比较或经 <code>char_to_int</code> / <code>int_to_char</code> 显式转换
-（见 <a href="#51-基本类型">§5.1</a> 与 <a href="#172-尚未实现的能力截至-v095">§17.2</a>）。</p>
+（见 <a href="#51-基本类型">§5.1</a> 与 <a href="#172-尚未实现的能力截至-v096">§17.2</a>）。</p>
 <p><code>try</code> / <code>catch</code> / <code>throw</code> 是 v0.7 引入的可恢复异常关键字（见 <a href="#26-可恢复异常trycatchthrow">§26</a>）。
 注意 <strong><code>error</code> 不是关键字</strong>——它是内建构造函数名（与 <code>open</code> / <code>print</code> 同类），写作 <code>Error("...")</code>。
 同理 <code>catch</code> 后<strong>不跟圆括号</strong>：<code>catch e { }</code>，而非 <code>catch (e) { }</code>。</p>
@@ -2019,7 +2058,7 @@ void     dial_map_release(DialMap m);
 </tr>
 </tbody>
 </table>
-<h3 id="172-尚未实现的能力截至-v095">17.2 尚未实现的能力（截至 v0.95）</h3>
+<h3 id="172-尚未实现的能力截至-v096">17.2 尚未实现的能力（截至 v0.96）</h3>
 <blockquote>
 <p>已落地：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
 <code>let</code> + 原地修改方法（push/set/put）的接收者约束、<code>else if</code> 语法糖、<code>for</code> 范围循环、<code>break</code> / <code>continue</code>、
@@ -2051,7 +2090,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>模块 / 包 / import</td>
-<td><strong>已支持</strong>（v0.93）：<code>import "包名";</code> + <code>dialc install &lt;包.dialpkg&gt;</code>，见 <a href="#25-包分发与依赖管理生态规划--最终规范">§25</a>。<strong>尚未实现</strong>：<code>dialc install &lt;URL&gt;</code>（本地文件安装已可用）、源码形式的模块拆分（无 <code>mod</code>）</td>
+<td><strong>已支持</strong>（v0.93；<code>dialc install &lt;URL&gt;</code> 于 v0.96 落地）：<code>import "包名";</code> + <code>dialc install &lt;本地文件\|URL&gt;</code>，见 <a href="#25-包分发与依赖管理生态规划--最终规范">§25</a>。<strong>尚未实现</strong>：源码形式的模块拆分（无 <code>mod</code>）</td>
 </tr>
 <tr>
 <td>泛型、接口、trait、闭包</td>
@@ -2111,7 +2150,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <h2 id="18-测试">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
-<p>十一组检查，全部通过才算绿（顺序即 A→K）：</p>
+<p>十二组检查，全部通过才算绿（顺序即 A→L）：</p>
 <table>
 <thead>
 <tr>
@@ -2163,6 +2202,10 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <tr>
 <td><strong>K. LSP 增强</strong>（v0.95 新增）</td>
 <td>Hover / 跳转定义 / 补全：真起 <code>dialc lsp</code> 子进程按 LSP 协议往返，验证变量遮蔽的 Hover、跨文件 <code>.diali</code> 文档、跳转定义（文件内→本文件、包符号→<code>.diali</code>）、可见符号收集与前缀过滤。见 <code>tests/lsp_features.py</code></td>
+</tr>
+<tr>
+<td><strong>L. 包安装</strong>（v0.96 新增）</td>
+<td><strong>URL 安装</strong>：真起一个本机 HTTP 服务器提供 <code>.dialpkg</code>，用 <code>dialc install &lt;URL&gt;</code> 装——正常装得上，<code>--sha256</code> 钉死也能装；坏包（内容篡改 / 哈希不符 / 404 / 非 https）<strong>一律装不进去</strong>，且失败后缓存目录无残骸。<strong>一键脚本</strong>：<code>install-dial.sh</code> 初始化环境（编译器 + <code>stdlib/</code> + <code>runtime/</code>）→ 自动扫描并安装 <code>.dialpkg</code> → 在<strong>与源码树无关的独立项目目录</strong>里编译 import 程序并运行。见 <code>tests/pkg_install_url.py</code></td>
 </tr>
 </tbody>
 </table>
@@ -2980,7 +3023,7 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <p><strong>v0.93 已落地</strong>：<code>import "包名";</code> 语句、<code>.dialpkg</code> 解包（含路径穿越防护）、
 <code>manifest.txt</code> 解析、按 Target Triple 选库、<strong>SHA256 强制校验</strong>、
 <code>.diali</code> 签名解析接入 Sema、链接期自动链入对应平台的机器码。
-见 <a href="#259-用法import-与-dialc-installv093-已实现">§25.9</a>。
+见 <a href="#259-用法import-与-dialc-installv093-已实现v096-支持-url">§25.9</a>。
 <strong>尚未实现</strong>：<code>dialc install &lt;URL&gt;</code>（网络下载；本地文件安装已可用）、一键安装脚本、
 官方标准库的 <code>.dialpkg</code> 化、Windows 线程后端。</p>
 <p>之所以现在就把规范写死：让「不透明指针 + C ABI」这条底层设计（<a href="#141-不透明指针契约">§14.1</a>、<a href="#15-ffi-契约dial-语法--c-函数">§15</a>）
@@ -3121,7 +3164,7 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <blockquote>
 <p><strong>⚠️ 以下语法只属于 <code>.diali</code>，不是 Dial 编程语言本身。</strong> 本文件的 <code>type</code> / <code>extern fn</code> / <code>///</code>
 由包解析器 <code>src/package.rs</code> 单独处理，<strong>不会</strong>出现在 <code>.dial</code> 源码中，也<strong>不在</strong> §4.3 关键字表与 §9 函数定义里。
-语言层的关键字与函数定义语法分别见 <a href="#43-关键字">§4.3</a> 与 <a href="#91-定义">§9.1</a>；<code>.diali</code> 能写的声明只有两种（见下方示例与 <a href="#259-用法import-与-dialc-installv093-已实现">§25.9</a>）：
+语言层的关键字与函数定义语法分别见 <a href="#43-关键字">§4.3</a> 与 <a href="#91-定义">§9.1</a>；<code>.diali</code> 能写的声明只有两种（见下方示例与 <a href="#259-用法import-与-dialc-installv093-已实现v096-支持-url">§25.9</a>）：
 <code>type X;</code>（不透明句柄）与 <code>extern fn f(a: T, ...): R;</code>（外部函数签名）。</p>
 </blockquote>
 <pre><code class="language-dial">// sqlite.diali —— 接口签名文件（纯文本，无实现）
@@ -3500,8 +3543,8 @@ Dial 目前<strong>没有</strong> <code>dialc uninstall</code> 命令，因为�
 但<strong>不替用户做法务判断</strong>。是否接受某个包的条款，由使用者自己决定。
 唯一被<strong>强制</strong>的，是 Dial 自己的标准库：它必须是 MIT 或 Apache-2.0，绝不可以是 GPL。</p>
 </blockquote>
-<h3 id="259-用法import-与-dialc-installv093-已实现">25.9 用法：<code>import</code> 与 <code>dialc install</code>（v0.93 已实现）</h3>
-<p><strong>第一步：安装一个包</strong>（本地 <code>.dialpkg</code> 文件）</p>
+<h3 id="259-用法import-与-dialc-installv093-已实现v096-支持-url">25.9 用法：<code>import</code> 与 <code>dialc install</code>（v0.93 已实现，v0.96 支持 URL）</h3>
+<p><strong>第一步：安装一个包</strong>——本地 <code>.dialpkg</code> 文件，或 <strong>URL</strong>（v0.96 起）</p>
 <pre><code class="language-bash">$ dialc install sqlite.dialpkg
 ✅ 已安装包 'sqlite' v1.4.0（ABI 1）
    许可: MIT OR Apache-2.0
@@ -3510,6 +3553,52 @@ Dial 目前<strong>没有</strong> <code>dialc uninstall</code> 命令，因为�
 </code></pre>
 <p>包<strong>永远</strong>解压到 <code>~/.dial/packages/&lt;name&gt;/</code>，项目目录零侵入。
 缓存是可重建的派生数据，整个删掉后编译器会重新解压。</p>
+<h4 id="从-url-安装v096">从 URL 安装（v0.96）</h4>
+<p>包也可以直接给 URL——<strong>不用先手动下载</strong>：</p>
+<pre><code class="language-bash">$ dialc install https://github.com/某人/sqlite/releases/download/v1.4.0/sqlite.dialpkg
+</code></pre>
+<p><strong>只允许 <code>https://</code></strong>（本机 <code>localhost</code> / <code>127.0.0.1</code> 例外，可用于本地镜像与自测）：
+明文 http 能被中间人改写，而 SHA256 挡不住「换了内容还带着正确哈希」的伪造，
+因此非本机地址一律拒绝——<strong>宁可装不上，也不降级到明文</strong>。</p>
+<p><strong>下载 → 校验 → 解压</strong>三步，一步都不省（<a href="ARCHITECTURE.md#3-一键安装与本地缓存">ARCHITECTURE.md §3.1 / §5.1</a>）：</p>
+<table>
+<thead>
+<tr>
+<th>步骤</th>
+<th>做什么</th>
+<th>失败时</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1. 下载</td>
+<td>用 <code>curl</code> 取到临时文件（临时文件<strong>成功失败都删</strong>，不留残骸）</td>
+<td>立即报错，缓存目录无残留</td>
+</tr>
+<tr>
+<td>2. 整包哈希（可选）</td>
+<td>给了 <code>--sha256</code> 就比对<strong>整个下载物</strong>的哈希——这能证明「这就是我要的那一份包」</td>
+<td><strong>解压之前</strong>就失败</td>
+</tr>
+<tr>
+<td>3. 逐文件校验</td>
+<td>按包内 <code>manifest.txt</code> 登记的 SHA256，把包里<strong>每个文件</strong>验一遍——<strong>一个字节都还没落到磁盘</strong></td>
+<td><strong>解压之前</strong>就失败</td>
+</tr>
+</tbody>
+</table>
+<p>第 3 步是 <a href="#254-sha256-强制校验防断网与防篡改">§5.1「校验先于一切」</a> 的字面实现：
+残缺或被篡改的机器码<strong>绝不允许</strong>进入缓存、更绝不允许进入链接器。</p>
+<pre><code class="language-bash">$ dialc install https://.../sqlite.dialpkg --sha256 3f786850e387550fdab836ed7e6dc881de23001b
+</code></pre>
+<p><strong>没给 <code>--sha256</code> 也能装</strong>，但会明确提示你这次只验了「包内文件与 manifest 是否一致」
+（能发现残缺与篡改），<strong>没验整包来源</strong>——不静默降级。想要强保证就把发行页给出的哈希传进来。</p>
+<blockquote>
+<p>下载用外部 <code>curl</code> 而非引入 Rust 的 HTTP 库：编译器<strong>本来就依赖外部工具链</strong>
+（<code>zig cc</code> / <code>clang</code> / <code>ar</code>），下载器属同一类依赖，不新增「运行期还要装个东西」的负担；
+引入 TLS 栈会显著拉长编译时间与依赖树（与 <a href="#21-代码编写纪律防臃肿与允许冗余原则">§21</a> 相悖）。
+<strong>TLS 绝不手写</strong>——证书校验、主机名校验、重定向全部交给 curl 背后的成熟实现。</p>
+</blockquote>
 <p><strong>第二步：源码里 <code>import</code>，然后照常编译</strong></p>
 <pre><code class="language-dial">import &quot;sqlite&quot;;                 // 包名是字符串字面量
 
@@ -3596,7 +3685,7 @@ fn main(): int {
 JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 <strong><a href="ARCHITECTURE.md">ARCHITECTURE.md《Dial 标准库与包分发最终规范》</a></strong>。
 规范一旦在真实包上落地，将同步更新本章、ARCHITECTURE.md 与 <a href="CHANGELOG.md">CHANGELOG.md</a>；
-在此之前，<code>import</code> 仍按 <a href="#172-尚未实现的能力截至-v095">§17.2</a> 视为<strong>不支持</strong>。</p>
+在此之前，<code>import</code> 仍按 <a href="#172-尚未实现的能力截至-v096">§17.2</a> 视为<strong>不支持</strong>。</p>
 </blockquote>
 <hr />
 <h2 id="26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</h2>
@@ -4797,7 +4886,7 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.95 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.96 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 
