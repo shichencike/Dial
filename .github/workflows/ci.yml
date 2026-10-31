@@ -11,7 +11,8 @@
 #   - Windows x64       : MinGW（x86_64-pc-windows-gnu）。LLVM 用官方 MSVC 构建的 18 全量包，
 #                         仅取 C 接口（LLVM-C.lib 导入库 + LLVM-C.dll 运行期），纯 C ABI 跨工具链无冲突；
 #                         stdlib 的 pthread 代码由 winpthreads 提供，无需改写（阶段 6 的 Win32 后端可延后）。
-#   - Termux aarch64    : musl 全静态（单文件、无外部依赖），在 Alpine aarch64 容器内构建。
+#   - Termux aarch64    : musl 全静态（单文件、无外部依赖），在原生 ARM64 宿主
+#                         （ubuntu-24.04-arm）的 Alpine aarch64 容器内构建。
 #   注：LLVM 18 必须保留——Alpine 3.22 恰好只提供 llvm18，升版会断 Termux 路线。
 #   注：MSYS2 现仅提供 LLVM 23、WinLibs 的 18.x 已下架，故 Windows 走官方 MSVC 包 + C 接口路线。
 
@@ -128,7 +129,9 @@ jobs:
     timeout-minutes: 90
 
     env:
-      LLVM_SYS_181_PREFIX: C:\llvm-shim
+      # 注意：Windows 上 Rust 的 Command::new 对无扩展名路径只补 .exe、不补 .cmd，
+      # 因此 LLVM_SYS_181_PREFIX 指向的 llvm-config（.cmd 垫片）无法被 llvm-sys 解析。
+      # 改为把 C:\llvm-shim\bin 放进 PATH，让 llvm-sys 在 PATH 中按 PATHEXT 裸名找到 llvm-config.cmd。
       LLVM18_DIR: C:\llvm18
 
     steps:
@@ -167,7 +170,7 @@ jobs:
       - name: 编译 dialc（release，x86_64-pc-windows-gnu）
         shell: bash
         env:
-          PATH: C:\tools\mingw64\bin;C:\llvm18\bin:$PATH
+          PATH: C:\llvm-shim\bin;C:\tools\mingw64\bin;C:\llvm18\bin:$PATH
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
         run: |
           set -euo pipefail
@@ -257,10 +260,14 @@ jobs:
               | sh -s -- -y --default-host aarch64-unknown-linux-musl --profile minimal
             source "$HOME/.cargo/env"
             export LLVM_SYS_181_PREFIX=/usr/lib/llvm18
-            export RUSTFLAGS="-C target-feature=+crt-static"
+            # 完全静态链接：musl libc 静态（crt-static）+ C++ 运行时（libstdc++/libgcc）也静态（-static），
+            # 产出单文件无动态依赖的 dialc（满足 Termux「musl 全静态」要求，且运行不再依赖解释器）。
+            export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static"
             rustc --version && llvm-config-18 --version
             cargo build --release --target aarch64-unknown-linux-musl --locked
             ls -la target/aarch64-unknown-linux-musl/release/dialc
+            file target/aarch64-unknown-linux-musl/release/dialc || true
+            ldd target/aarch64-unknown-linux-musl/release/dialc 2>&1 | head || true
             ./target/aarch64-unknown-linux-musl/release/dialc build examples/hello.dial -o /tmp/hello
             /tmp/hello | tee /tmp/hello.out
             grep -q "Hello, dialc" /tmp/hello.out || { echo "❌ 输出不符"; exit 1; }
