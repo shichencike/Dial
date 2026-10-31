@@ -29,9 +29,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
+
 int main(int argc, char **argv) {
     const char *dir = getenv("LLVM18_DIR");
     const char *a;
+
+#ifdef _WIN32
+    /*
+     * 关键：Windows 的 stdout 默认是**文本模式**，会把 "\n" 转成 "\r\n"。
+     * llvm-sys 的 extract_library() 只按 ' ' 和 '\n' 切词，于是 --libnames 的
+     * 输出会变成 "LLVM-C.lib\r"，strip_suffix(".lib") 失败并 panic：
+     *   "'LLVM-C.lib\n' does not look like a shared library name"
+     * 同理 --libdir 会带上 '\r'，导致链接搜索路径失效。
+     * 这里把 stdout 切成二进制模式，输出干净的 "\n"。
+     */
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
 
     if (dir == NULL || dir[0] == '\0') {
         dir = "C:\\llvm18";
