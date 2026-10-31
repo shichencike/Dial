@@ -115,6 +115,27 @@
   端到端实测：Hover 内层 `x` → `int`、Hover `demo_add` → 显示 `/// 两数相加`；
   定义内层 `x` → 本文件 line=6、定义 `demo_add` → `.diali`；补全前缀 `demo_` 只留 `demo_add`。
 
+#### 流水线实跑记录（GitHub Actions 已验证）
+本版的 CI 不是「写完就交」——**已实跑并全绿**：
+
+| 运行 | 提交 | 结果 |
+| --- | --- | --- |
+| 首次 CI | `02cf561` | ❌ 官网同步校验失败——runner 缺 python-markdown（`ModuleNotFoundError`）。**编译与十一组测试当时已通过**，只有这一步挂。已修：CI 改用 venv 装 `markdown==3.10.1`（版本必须钉死，否则逐字节 diff 会误报） |
+| 修复后 CI | `348f916` | ✅ **全绿**：编译 → 十一组测试 → 锚点校验 → 官网同步校验 → 上传二进制，五步全过 |
+| 发布流程 | tag `v0.95` | ✅ `build` + `release` 两个作业全过，自动产出 [GitHub Release v0.95](https://github.com/shichencike/Dial/releases/tag/v0.95)，资产 `dialc-v0.95.zip`（1.7 MB） |
+
+发布包已做**反向验证**（不是只看它上传成功）：下载 → `unzip -t` 完整性通过 → 解压 →
+本地重新 `cargo build --release` 成功 → 在解压出来的源码树上再跑一遍**十一组测试，全绿**；
+并抽查包内 `bin/dialc`（CI 构建的二进制，ELF x86-64）、`BUILD_INFO.txt`（记录构建提交与时间）、
+四份许可文件、`.git/`、`web/`、`editors/vscode/` 齐备，而**已废弃的 `REPORT_v0.x.md`、
+`TEST_RUN_*.log`、`target/` 确实不在包里**。
+
+> 一处环境差异记录在案：CI 产出的二进制链接的是 apt.llvm.org 的 `libLLVM-18.so.18.1`，
+> 与本机自带的 `libLLVM.so.18.1rc` **符号版本不同**（`LLVM_18.1` vs `LLVM_18.1rc`），
+> 因此不能直接拿本机的 libLLVM 跑它——这正是 `BUILD_INFO.txt` 里写明
+> 「需 `LD_LIBRARY_PATH=/usr/lib/llvm-18/lib`」的原因。**发布包里的源码不受影响**：
+> 它在本机重新构建后一切正常（上面的反向验证即是如此）。
+
 ---
 
 ## [v0.94] — 2026-10-31

@@ -30,7 +30,10 @@
 <li><a href="#added测试">Added（测试）</a></li>
 <li><a href="#刻意未做与-v094-规划一致本版仍不做">刻意未做（与 v0.94 规划一致，本版仍不做）</a></li>
 <li><a href="#docs文档">Docs（文档）</a></li>
-<li><a href="#验证">验证</a></li>
+<li><a href="#验证">验证</a><ul>
+<li><a href="#流水线实跑记录github-actions-已验证">流水线实跑记录（GitHub Actions 已验证）</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li><a href="#v094--2026-10-31">[v0.94] — 2026-10-31</a><ul>
@@ -250,6 +253,46 @@
   端到端实测：Hover 内层 <code>x</code> → <code>int</code>、Hover <code>demo_add</code> → 显示 <code>/// 两数相加</code>；
   定义内层 <code>x</code> → 本文件 line=6、定义 <code>demo_add</code> → <code>.diali</code>；补全前缀 <code>demo_</code> 只留 <code>demo_add</code>。</li>
 </ul>
+<h4 id="流水线实跑记录github-actions-已验证">流水线实跑记录（GitHub Actions 已验证）</h4>
+<p>本版的 CI 不是「写完就交」——<strong>已实跑并全绿</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>运行</th>
+<th>提交</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>首次 CI</td>
+<td><code>02cf561</code></td>
+<td>❌ 官网同步校验失败——runner 缺 python-markdown（<code>ModuleNotFoundError</code>）。<strong>编译与十一组测试当时已通过</strong>，只有这一步挂。已修：CI 改用 venv 装 <code>markdown==3.10.1</code>（版本必须钉死，否则逐字节 diff 会误报）</td>
+</tr>
+<tr>
+<td>修复后 CI</td>
+<td><code>348f916</code></td>
+<td>✅ <strong>全绿</strong>：编译 → 十一组测试 → 锚点校验 → 官网同步校验 → 上传二进制，五步全过</td>
+</tr>
+<tr>
+<td>发布流程</td>
+<td>tag <code>v0.95</code></td>
+<td>✅ <code>build</code> + <code>release</code> 两个作业全过，自动产出 <a href="https://github.com/shichencike/Dial/releases/tag/v0.95">GitHub Release v0.95</a>，资产 <code>dialc-v0.95.zip</code>（1.7 MB）</td>
+</tr>
+</tbody>
+</table>
+<p>发布包已做<strong>反向验证</strong>（不是只看它上传成功）：下载 → <code>unzip -t</code> 完整性通过 → 解压 →
+本地重新 <code>cargo build --release</code> 成功 → 在解压出来的源码树上再跑一遍<strong>十一组测试，全绿</strong>；
+并抽查包内 <code>bin/dialc</code>（CI 构建的二进制，ELF x86-64）、<code>BUILD_INFO.txt</code>（记录构建提交与时间）、
+四份许可文件、<code>.git/</code>、<code>web/</code>、<code>editors/vscode/</code> 齐备，而<strong>已废弃的 <code>REPORT_v0.x.md</code>、
+<code>TEST_RUN_*.log</code>、<code>target/</code> 确实不在包里</strong>。</p>
+<blockquote>
+<p>一处环境差异记录在案：CI 产出的二进制链接的是 apt.llvm.org 的 <code>libLLVM-18.so.18.1</code>，
+与本机自带的 <code>libLLVM.so.18.1rc</code> <strong>符号版本不同</strong>（<code>LLVM_18.1</code> vs <code>LLVM_18.1rc</code>），
+因此不能直接拿本机的 libLLVM 跑它——这正是 <code>BUILD_INFO.txt</code> 里写明
+「需 <code>LD_LIBRARY_PATH=/usr/lib/llvm-18/lib</code>」的原因。<strong>发布包里的源码不受影响</strong>：
+它在本机重新构建后一切正常（上面的反向验证即是如此）。</p>
+</blockquote>
 <hr />
 <h2 id="v094--2026-10-31">[v0.94] — 2026-10-31</h2>
 <p>本版落地 <strong><code>dialc lsp</code> 语言服务器骨架</strong>（见 README <a href="README.md#28-语言服务器-dialc-lspv094-骨架--v095-增强">§28</a>），
