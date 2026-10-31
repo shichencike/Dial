@@ -97,15 +97,45 @@ fi
   echo "构建时间:   $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 } > "$DEST/BUILD_INFO.txt"
 
+# ---- 选打包工具 ----
+# Linux / Termux 有 zip+unzip；Windows runner 两者都没有，
+# 退回 7-Zip（runner 预装）或 PowerShell 的 Compress-Archive。
+ZIP_TOOL=""
+command -v zip >/dev/null 2>&1 && ZIP_TOOL=zip
+SEVENZIP=""
+if [ -z "$ZIP_TOOL" ]; then
+  for c in 7z 7za "/c/Program Files/7-Zip/7z.exe" "/c/Program Files/7-Zip/7za.exe"; do
+    if command -v "$c" >/dev/null 2>&1; then SEVENZIP="$c"; break; fi
+  done
+fi
+to_win() { cygpath -w "$1" 2>/dev/null || printf '%s' "$1"; }
+
 # ---- 打包 ----
 rm -f "$OUT"
-( cd "$STAGE" && zip -r -q "$OUT" "$PKG_ROOT" )
+if [ -n "$ZIP_TOOL" ]; then
+  ( cd "$STAGE" && zip -r -q "$OUT" "$PKG_ROOT" )
+else
+  OUTW=$(to_win "$OUT")
+  if [ -n "$SEVENZIP" ]; then
+    ( cd "$STAGE" && "$SEVENZIP" a -tzip -bso0 -bsp0 "$OUTW" "$PKG_ROOT" >/dev/null )
+  else
+    ( cd "$STAGE" && powershell -NoProfile -Command \
+        "Compress-Archive -Path './$PKG_ROOT' -DestinationPath '$OUTW' -Force" )
+  fi
+fi
 
 # ---- 自检 ----
 echo "-- 自检 --"
 FAIL=0
 # 先把清单读进变量再 grep，避免 pipefail 下 grep -q 提前关闭管道导致 unzip 收 SIGPIPE 的假阴性
-LISTING=$(unzip -l "$OUT")
+if [ -n "$ZIP_TOOL" ] && command -v unzip >/dev/null 2>&1; then
+  LISTING=$(unzip -l "$OUT")
+elif [ -n "$SEVENZIP" ]; then
+  LISTING=$("$SEVENZIP" l -ba -slt "$(to_win "$OUT")" 2>/dev/null | grep -i "^Path = " || true)
+else
+  LISTING=$(powershell -NoProfile -Command \
+    "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead('$(to_win "$OUT")').Entries.FullName" 2>/dev/null || true)
+fi
 for f in LICENSE LICENSE-GPLv3 LICENSE-MIT LICENSE-APACHE "$BASENAME" stdlib runtime install-dial.sh; do
   if echo "$LISTING" | grep -q "${PKG_ROOT}/$f"; then
     echo "   ✅ 包内含 $f"

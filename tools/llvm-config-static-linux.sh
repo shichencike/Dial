@@ -65,7 +65,9 @@ case "${1:-}" in
         # 于是这里即使整体 -static，-lffi 仍会被当作 dylib 链成 libffi.so.8，
         # 二进制因此在 Termux 上 "not found"。
         # 对策：改成 -l:<精确文件名>，直接指向静态归档（绕开 -Bdynamic 的 .so 偏好）。
-        syslibs="$("$REAL" --link-static --system-libs)"
+        # 参数顺序必须与 llvm-sys 的调用完全一致（llvm_config(path, ["--system-libs", link_arg])）：
+        # 实测 llvm-config 在「--link-static 在前 / 在后」两种顺序下输出可能不同。
+        syslibs="$("$REAL" --system-libs --link-static)"
         ffi_a=""
         for f in /usr/lib/libffi.a /usr/local/lib/libffi.a /usr/lib/*/libffi.a; do
             if [ -f "$f" ]; then ffi_a="$f"; break; fi

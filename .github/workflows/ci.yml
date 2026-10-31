@@ -325,7 +325,9 @@ jobs:
             "/usr/local/llvm18-static/bin/llvm-config" --version
             echo "--- 静态库名（应含 libLLVM.a）---"
             "/usr/local/llvm18-static/bin/llvm-config" --libnames --link-static | head -c 200; echo
-            echo "--- 原始 --system-libs --link-static ---"
+            echo "--- 原始 --system-libs --link-static（与 llvm-sys 调用顺序一致）---"
+            llvm-config-18 --system-libs --link-static
+            echo "--- 对照：--link-static --system-libs ---"
             llvm-config-18 --link-static --system-libs
             echo "--- libffi 静态归档是否存在 ---"
             ls -la /usr/lib/libffi.a /usr/lib/*/libffi.a 2>/dev/null || echo "(未找到 libffi.a)"
