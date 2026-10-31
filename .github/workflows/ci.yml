@@ -144,6 +144,20 @@ jobs:
         shell: bash
         run: choco install mingw -y
 
+      - name: 定位 MinGW 并写入 PATH（choco 不会跨步骤持久化 PATH）
+        shell: bash
+        run: |
+          set -euo pipefail
+          MINGW_BIN=""
+          for d in /c/ProgramData/mingw64/mingw64/bin /c/tools/mingw64/bin; do
+            if [ -x "$d/gcc.exe" ]; then MINGW_BIN="$d"; break; fi
+          done
+          [ -n "$MINGW_BIN" ] || { echo "❌ 未找到 MinGW gcc"; exit 1; }
+          echo "MINGW_BIN=$MINGW_BIN" >> "$GITHUB_ENV"
+          # 写入 GITHUB_PATH 后，后续所有步骤（build / 冒烟）都能通过 PATH 找到 gcc.exe
+          echo "$MINGW_BIN" >> "$GITHUB_PATH"
+          "$MINGW_BIN/gcc.exe" --version | head -1
+
       - name: 下载并解压官方 LLVM 18（MSVC 全量包，提供 C 接口：LLVM-C.lib / LLVM-C.dll / 头文件）
         shell: bash
         run: |
@@ -170,7 +184,7 @@ jobs:
       - name: 编译 dialc（release，x86_64-pc-windows-gnu）
         shell: bash
         env:
-          PATH: C:\llvm-shim\bin;C:\tools\mingw64\bin;C:\llvm18\bin:$PATH
+          PATH: C:\llvm-shim\bin;C:\llvm18\bin:$PATH
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
         run: |
           set -euo pipefail
@@ -183,11 +197,12 @@ jobs:
       - name: 核心冒烟：编译并运行示例
         shell: bash
         env:
-          PATH: C:\tools\mingw64\bin;C:\llvm18\bin:$PATH
+          PATH: C:\llvm18\bin:$PATH
         run: |
           set -euo pipefail
           BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
-          # dialc.exe 运行期需要 LLVM-C.dll（已在 PATH 的 C:\llvm18\bin 中）
+          # dialc.exe 运行期需要 LLVM-C.dll（已在 PATH 的 C:\llvm18\bin 中）；
+          # 编译用户程序需要 gcc（已由「定位 MinGW」步骤写入 GITHUB_PATH）。
           "$BIN" --version 2>/dev/null || true
           "$BIN" build examples/hello.dial -o /tmp/hello.exe
           /tmp/hello.exe | tee /tmp/hello.out
@@ -196,7 +211,7 @@ jobs:
       - name: 平台契约：用户程序不依赖 LLVM-C.dll
         shell: bash
         env:
-          PATH: C:\tools\mingw64\bin;C:\llvm18\bin:$PATH
+          PATH: C:\llvm18\bin:$PATH
         run: |
           set -euo pipefail
           BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
@@ -251,7 +266,7 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work arm64v8/alpine:3.22 sh -c '
             set -euo pipefail
             apk add --no-cache curl bash git make binutils zip unzip gcc g++ clang \
-              zlib-static zstd-static libxml2-static libffi-dev \
+              zlib-static zstd-static xz-static ncurses-static libxml2-static libffi-dev \
               llvm18-dev llvm18-static
             # 确保 LLVM_SYS_181_PREFIX 下有 llvm-config（Alpine 只提供 llvm-config-18）
             [ -e /usr/lib/llvm18/bin/llvm-config ] \
@@ -259,23 +274,29 @@ jobs:
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --default-host aarch64-unknown-linux-musl --profile minimal
             source "$HOME/.cargo/env"
+            # 关键：llvm-sys 默认动态链接 LLVM（-lLLVM -> libLLVM.so），
+            # 必须显式要求静态，否则产物会动态依赖 libLLVM.so 并可能带入 glibc 解释器，
+            # 导致在 Termux（仅 bionic/musl）上无法运行。
             export LLVM_SYS_181_PREFIX=/usr/lib/llvm18
-            # 完全静态链接：musl libc 静态（crt-static）+ C++ 运行时（libstdc++/libgcc）也静态（-static），
-            # 产出单文件无动态依赖的 dialc（满足 Termux「musl 全静态」要求，且运行不再依赖解释器）。
-            export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static"
+            export LLVM_SYS_181_STATIC=1
+            # 完全静态：musl libc 静态（crt-static）+ 强制 GCC 链接器（非 rust-lld）以经典方式 -static，
+            # 连同 libstdc++/libgcc/libz/libzstd/libxml2/libffi/liblzma 一并静态，产出单文件无动态依赖的 dialc。
+            export RUSTFLAGS="-C target-feature=+crt-static -C linker-features=-lld -C link-arg=-static"
+            echo "RUSTFLAGS=$RUSTFLAGS"
             rustc --version && llvm-config-18 --version
+            echo "--- llvm-config --link-static --libs ---"; llvm-config-18 --link-static --libs | head -c 300; echo
             cargo build --release --target aarch64-unknown-linux-musl --locked
-            ls -la target/aarch64-unknown-linux-musl/release/dialc
-            file target/aarch64-unknown-linux-musl/release/dialc || true
-            ldd target/aarch64-unknown-linux-musl/release/dialc 2>&1 | head || true
-            ./target/aarch64-unknown-linux-musl/release/dialc build examples/hello.dial -o /tmp/hello
+            BIN=target/aarch64-unknown-linux-musl/release/dialc
+            ls -la "$BIN"
+            echo "--- INTERP ---"; readelf -l "$BIN" | grep -A1 INTERP || echo "(无可执行解释器 = 完全静态)"
+            echo "--- NEEDED ---"; readelf -d "$BIN" | grep NEEDED || echo "(无动态依赖)"
+            "$BIN" build examples/hello.dial -o /tmp/hello
             /tmp/hello | tee /tmp/hello.out
             grep -q "Hello, dialc" /tmp/hello.out || { echo "❌ 输出不符"; exit 1; }
             echo "✅ Termux 冒烟通过"
-            readelf -d /tmp/hello 2>/dev/null | grep -q "Shared library" \
-              && { echo "❌ 存在动态依赖"; readelf -d /tmp/hello; exit 1; } \
-              || echo "✅ 用户程序完全静态（无动态依赖）"
-            bash tools/package_release.sh termux-aarch64 target/aarch64-unknown-linux-musl/release/dialc
+            echo "--- 用户程序依赖（仅供参考，用户侧由 Termux 自带编译器产出 bionic 程序）---"
+            readelf -d /tmp/hello 2>/dev/null | grep -c NEEDED | xargs -I{} echo "用户程序动态依赖数: {}"
+            bash tools/package_release.sh termux-aarch64 "$BIN"
           '
 
       - name: 上传发布产物
