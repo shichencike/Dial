@@ -168,13 +168,23 @@ jobs:
           tar -xf /tmp/llvm18.tar.xz -C "$LLVM18_DIR" --strip-components=1
           ls "$LLVM18_DIR/bin/LLVM-C.dll" "$LLVM18_DIR/lib/LLVM-C.lib"
 
-      - name: 放置 llvm-config 垫片（让 llvm-sys 把 LLVM 当 C 接口链接）
+      - name: 编译并放置 llvm-config 垫片（真正的 .exe，让 llvm-sys 只链 LLVM-C）
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /c/llvm-shim/bin
-          cp tools/llvm-config.win.cmd /c/llvm-shim/bin/llvm-config.cmd
-          "/c/llvm-shim/bin/llvm-config.cmd" --version
+          # 必须生成**真正的 .exe**（不能用 .cmd/.bat）：
+          #   llvm-sys 在 Windows 上先尝试 "llvm-config.exe"，再尝试裸名；
+          #   而 CreateProcess 对不带扩展名的名字只补 ".exe"、不补 ".cmd"，
+          #   所以批处理垫片永远不会被找到（表现为 No suitable version of LLVM）。
+          # gcc 由「定位 MinGW」步骤写入的 GITHUB_PATH 提供。
+          gcc -O2 -o /c/llvm-shim/bin/llvm-config.exe tools/llvm-config-win-shim.c
+          "/c/llvm-shim/bin/llvm-config.exe" --version
+          "/c/llvm-shim/bin/llvm-config.exe" --libnames --link-static
+          # GNU ld 的 -lLLVM-C 按 lib<name>.a 查找；MSVC 导入库名为 LLVM-C.lib，
+          # 补一份同内容副本，确保链接器一定能解析到。
+          cp "$LLVM18_DIR/lib/LLVM-C.lib" "$LLVM18_DIR/lib/libLLVM-C.a"
+          ls -la "$LLVM18_DIR/lib/LLVM-C.lib" "$LLVM18_DIR/lib/libLLVM-C.a" "$LLVM18_DIR/bin/LLVM-C.dll"
 
       - name: 安装 Rust 工具链并加 MinGW 目标
         uses: dtolnay/rust-toolchain@stable
@@ -278,11 +288,18 @@ jobs:
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --default-host aarch64-unknown-linux-musl --profile minimal
             source "$HOME/.cargo/env"
-            # 关键：llvm-sys 默认动态链接 LLVM（-lLLVM -> libLLVM.so），
-            # 必须显式要求静态，否则产物会动态依赖 libLLVM.so 并可能带入 glibc 解释器，
-            # 导致在 Termux（仅 bionic/musl）上无法运行。
-            export LLVM_SYS_181_PREFIX=/usr/lib/llvm18
-            export LLVM_SYS_181_STATIC=1
+            # 关键：inkwell 的 llvm18-1-prefer-dynamic 会让 llvm-sys **主动优先动态**
+            # 链接 libLLVM.so；那样的二进制在 Termux（无 glibc/musl 加载器）上无法执行。
+            # llvm-sys 没有 *_STATIC 环境变量可覆盖，故用「只静态」垫片接管 llvm-config：
+            # 它对 --libnames --link-shared 返回非零，迫使 llvm-sys 回退到 --link-static。
+            mkdir -p /usr/local/llvm18-static/bin
+            cp tools/llvm-config-static-linux.sh /usr/local/llvm18-static/bin/llvm-config
+            chmod 0755 /usr/local/llvm18-static/bin/llvm-config
+            export LLVM_CONFIG_REAL=llvm-config-18
+            export LLVM_SYS_181_PREFIX=/usr/local/llvm18-static
+            "/usr/local/llvm18-static/bin/llvm-config" --version
+            echo "--- 静态库名（应含 libLLVM.a）---"
+            "/usr/local/llvm18-static/bin/llvm-config" --libnames --link-static | head -c 200; echo
             # 完全静态：musl libc 静态（crt-static）+ 显式用 GCC 链接器（musl gcc，稳定且支持经典 -static），
             # 连同 libstdc++/libgcc/libz/libzstd/libxml2/libffi/liblzma 一并静态，产出单文件无动态依赖的 dialc。
             # （注：linker-features=-lld 在 musl 目标上是 unstable，需 -Z unstable-options，故改用 -C linker=gcc）
