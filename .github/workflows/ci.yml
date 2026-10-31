@@ -208,6 +208,17 @@ jobs:
           cargo build --release --target x86_64-pc-windows-gnu --locked
           ls -la target/x86_64-pc-windows-gnu/release/dialc.exe
 
+      - name: 诊断 dialc.exe 的 DLL 依赖
+        shell: bash
+        env:
+          PATH: C:\llvm18\bin:$PATH
+        run: |
+          set -euo pipefail
+          BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
+          echo "--- COFF 导入表（LLVM / MinGW 运行时）---"
+          llvm-readobj --coff-imports "$BIN" 2>/dev/null | grep -iE "LLVM|gcc|winpthread|stdc" || true
+          ls -la "$BIN"
+
       - name: 核心冒烟：编译并运行示例
         shell: bash
         env:
@@ -215,10 +226,18 @@ jobs:
         run: |
           set -euo pipefail
           BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
-          # dialc.exe 运行期需要 LLVM-C.dll（已在 PATH 的 C:\llvm18\bin 中）；
+          D=$(dirname "$BIN")
+          # Windows 加载 DLL 时**优先搜索可执行文件所在目录**：把运行期依赖
+          # （LLVM-C.dll 与 MinGW 运行时 DLL）复制到 dialc.exe 同目录，确保必定能加载。
           # 编译用户程序需要 gcc（已由「定位 MinGW」步骤写入 GITHUB_PATH）。
+          cp "$LLVM18_DIR/bin/LLVM-C.dll" "$D/"
+          for dll in libgcc_s_seh-1.dll libwinpthread-1.dll libstdc++-6.dll; do
+            if [ -f "$MINGW_BIN/$dll" ]; then cp "$MINGW_BIN/$dll" "$D/"; fi
+          done
+          ls -la "$D"/*.dll || true
           "$BIN" --version 2>/dev/null || true
           "$BIN" build examples/hello.dial -o /tmp/hello.exe
+          ls -la /tmp/hello.exe
           /tmp/hello.exe | tee /tmp/hello.out
           grep -q "Hello, dialc" /tmp/hello.out && echo "✅ Windows 冒烟通过" || { echo "❌ 输出不符"; exit 1; }
 

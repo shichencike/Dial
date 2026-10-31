@@ -47,15 +47,35 @@ case "${1:-}" in
                     if [ -n "$out" ]; then
                         echo "$out"
                     else
-                        ls "$LIBDIR"/libLLVM*.a 2>/dev/null | xargs -n1 basename
+                        found=$(ls "$LIBDIR"/libLLVM*.a 2>/dev/null || true)
+                        if [ -n "$found" ]; then
+                            echo "$found" | xargs -n1 basename
+                        fi
                     fi
                 fi
                 ;;
         esac
         ;;
     --system-libs)
-        # 静态分支下的系统库（libz/libzstd/libxml2/libffi 等）
-        exec "$REAL" --link-static --system-libs
+        # 静态分支下的系统库（libz/libzstd/libxml2/libffi 等）。
+        #
+        # 注意（坑）：llvm-sys 里系统库的链接种类取自
+        #   sys_lib_kind = if cfg!(target_feature = "crt-static") { Static } else { Dynamic }
+        # 而这个 cfg 是 **build script 自身（宿主）** 的编译特征，并非目标平台特征，
+        # 于是这里即使整体 -static，-lffi 仍会被当作 dylib 链成 libffi.so.8，
+        # 二进制因此在 Termux 上 "not found"。
+        # 对策：改成 -l:<精确文件名>，直接指向静态归档（绕开 -Bdynamic 的 .so 偏好）。
+        syslibs="$("$REAL" --link-static --system-libs)"
+        ffi_a=""
+        for f in /usr/lib/libffi.a /usr/local/lib/libffi.a /usr/lib/*/libffi.a; do
+            if [ -f "$f" ]; then ffi_a="$f"; break; fi
+        done
+        if [ -n "$ffi_a" ]; then
+            echo "$syslibs" | sed "s|-lffi|-l:$ffi_a|g"
+        else
+            # 没有静态归档就只能去掉：LLVM 的 C API 代码路径本身不依赖 libffi
+            echo "$syslibs" | sed 's/-lffi//g'
+        fi
         ;;
     *)
         # 其余查询（--version/--libdir/--cflags/--build-mode…）原样转发
