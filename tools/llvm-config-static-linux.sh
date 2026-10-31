@@ -71,7 +71,10 @@ case "${1:-}" in
             if [ -f "$f" ]; then ffi_a="$f"; break; fi
         done
         if [ -n "$ffi_a" ]; then
-            echo "$syslibs" | sed "s|-lffi|-l:$ffi_a|g"
+            # 用 -l:<裸文件名>：GNU ld 的 -l:namespec 会**按精确文件名**在库搜索路径中查找，
+            # 因此即使外层是 -Bdynamic 也只会命中 libffi.a，而不会退回 libffi.so。
+            # （写成绝对路径不行：-l: 与绝对路径组合无法正确匹配。）
+            echo "$syslibs" | sed 's|-lffi|-l:libffi.a|g'
         else
             # 没有静态归档就只能去掉：LLVM 的 C API 代码路径本身不依赖 libffi
             echo "$syslibs" | sed 's/-lffi//g'

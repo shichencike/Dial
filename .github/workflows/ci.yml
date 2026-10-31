@@ -225,6 +225,11 @@ jobs:
           PATH: C:\llvm18\bin:$PATH
         run: |
           set -euo pipefail
+          # dialc 按 gcc -> clang -> zig -> cc 的顺序挑选 C 编译器。GITHUB_PATH 的追加
+          # 并未覆盖到本步，若不显式前置 MinGW，dialc 会退到 Git Bash 的 cc（实际不可用，
+          # 编译 stdlib/runtime 时静默失败）。这里把 MinGW 提到 PATH 最前。
+          export PATH="$MINGW_BIN:$PATH"
+          command -v gcc && gcc --version | head -1
           BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
           D=$(dirname "$BIN")
           # Windows 加载 DLL 时**优先搜索可执行文件所在目录**：把运行期依赖
@@ -247,6 +252,7 @@ jobs:
           PATH: C:\llvm18\bin:$PATH
         run: |
           set -euo pipefail
+          export PATH="$MINGW_BIN:$PATH"
           BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
           "$BIN" build examples/hello.dial -o /tmp/hello2.exe
           # 用 llvm-readobj / dumpbin 检查导入表：只允许系统 DLL，不应出现 LLVM-C.dll（那是 dialc.exe 自己的依赖）
@@ -319,6 +325,12 @@ jobs:
             "/usr/local/llvm18-static/bin/llvm-config" --version
             echo "--- 静态库名（应含 libLLVM.a）---"
             "/usr/local/llvm18-static/bin/llvm-config" --libnames --link-static | head -c 200; echo
+            echo "--- 原始 --system-libs --link-static ---"
+            llvm-config-18 --link-static --system-libs
+            echo "--- libffi 静态归档是否存在 ---"
+            ls -la /usr/lib/libffi.a /usr/lib/*/libffi.a 2>/dev/null || echo "(未找到 libffi.a)"
+            echo "--- 垫片输出 --system-libs --link-static ---"
+            "/usr/local/llvm18-static/bin/llvm-config" --system-libs --link-static
             # 完全静态：musl libc 静态（crt-static）+ 显式用 GCC 链接器（musl gcc，稳定且支持经典 -static），
             # 连同 libstdc++/libgcc/libz/libzstd/libxml2/libffi/liblzma 一并静态，产出单文件无动态依赖的 dialc。
             # （注：linker-features=-lld 在 musl 目标上是 unstable，需 -Z unstable-options，故改用 -C linker=gcc）
