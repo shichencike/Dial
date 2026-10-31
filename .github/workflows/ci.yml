@@ -50,7 +50,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             wget gnupg ca-certificates lsb-release software-properties-common \
-            zip unzip python3 build-essential
+            zip unzip python3 python3-venv python3-pip build-essential
           # LLVM 18 官方 APT 源（Ubuntu 24.04 自带的版本可能偏旧）
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           sudo chmod +x /tmp/llvm.sh
@@ -61,6 +61,18 @@ jobs:
           sudo ln -sf /usr/bin/clang-18 /usr/bin/clang
           clang --version | head -1
           llvm-config-18 --version
+
+      - name: 安装 Python 依赖（官网生成器）
+        run: |
+          set -euo pipefail
+          # 官网生成器依赖 python-markdown。**版本必须钉死**：不同版本的 markdown
+          # 生成的 HTML 会有细微差异，而下面的「官网与文档同步」校验是逐字节 diff，
+          # 版本一漂移就会误报失败。3.10.1 = 本地生成 web/ 时所用的版本。
+          python3 -m venv /tmp/webvenv
+          /tmp/webvenv/bin/pip install --quiet --upgrade pip
+          /tmp/webvenv/bin/pip install --quiet "markdown==3.10.1"
+          /tmp/webvenv/bin/python -c "import markdown; print('markdown', markdown.__version__)"
+          echo "WEBPY=/tmp/webvenv/bin/python" >> "$GITHUB_ENV"
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -84,9 +96,10 @@ jobs:
       - name: 校验官网产物与文档同步
         run: |
           set -euo pipefail
-          python3 tools/build_web.py
+          "$WEBPY" tools/build_web.py
           if ! git diff --exit-code -- web/; then
-            echo "::error::web/ 与文档不同步，请重新运行 python3 tools/build_web.py 后提交"
+            echo "::error::web/ 与文档不同步，请本地运行 python3 tools/build_web.py 后提交 web/"
+            git diff --stat -- web/
             exit 1
           fi
           echo "✅ web/ 与文档同步"

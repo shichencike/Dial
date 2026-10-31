@@ -20,7 +20,13 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
 ASSETS = WEB / "assets"
 
-import markdown  # noqa: E402
+try:
+    import markdown  # noqa: E402
+except ImportError:  # pragma: no cover
+    raise SystemExit(
+        "缺少依赖 python-markdown。安装：pip install 'markdown==3.10.1'\n"
+        "（版本必须与生成 web/ 时一致，否则 HTML 会有差异、CI 的同步校验会误报。）"
+    )
 
 NAV = """
 <header class="site-header">
