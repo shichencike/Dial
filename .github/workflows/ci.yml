@@ -171,6 +171,9 @@ jobs:
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
         run: |
           set -euo pipefail
+          # windows-2022 runner 已预装 rustup，dtolnay action 不会把 cargo 写进 PATH，需手动补
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo --version
           cargo build --release --target x86_64-pc-windows-gnu --locked
           ls -la target/x86_64-pc-windows-gnu/release/dialc.exe
 
@@ -220,11 +223,14 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
-  # Termux aarch64（musl 全静态）—— 在 Alpine aarch64 容器内用 QEMU 原生构建
+  # Termux aarch64（musl 全静态）—— 原生 ARM64 宿主 + Alpine 容器构建
+  #   ubuntu-24.04-arm 是 GitHub 免费提供的**原生 ARM64** runner；在其上跑
+  #   arm64v8/alpine 容器是原生执行（无需 QEMU），彻底绕开 QEMU binfmt 故障。
+  #   Alpine 提供 musl 原生的 LLVM 18 静态库，全程 musl，产物完全静态。
   # ===========================================================================
   build-termux:
     name: Termux aarch64（musl 全静态核心冒烟）
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
 
     steps:
@@ -233,39 +239,37 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 在 Alpine aarch64 容器内原生构建（QEMU）
-        uses: uraimo/run-on-arch-action@v3
-        with:
-          arch: aarch64
-          distro: alpine_latest
-          githubToken: ${{ github.token }}
-          env: |
-            LLVM_SYS_181_PREFIX: /usr/lib/llvm18
-            RUSTFLAGS: -C target-feature=+crt-static
-            GITHUB_SHA: ${{ github.sha }}
-          install: |
-            apk add --no-cache curl bash git make binutils zip unzip gcc g++ \
+      - name: 确保 docker 可用（ARM64 宿主原生运行 arm64 容器）
+        run: docker --version || { sudo apt-get update && sudo apt-get install -y docker.io && sudo systemctl start docker; }
+
+      - name: 在 Alpine aarch64 容器内原生构建（Docker，无 QEMU）
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/work" -w /work arm64v8/alpine:3.22 sh -c '
+            set -euo pipefail
+            apk add --no-cache curl bash git make binutils zip unzip gcc g++ clang \
               zlib-static zstd-static libxml2-static libffi-dev \
               llvm18-dev llvm18-static
-          run: |
-            set -euo pipefail
-            # 安装 rustup（aarch64-unknown-linux-musl 宿主工具链）
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            # 确保 LLVM_SYS_181_PREFIX 下有 llvm-config（Alpine 只提供 llvm-config-18）
+            [ -e /usr/lib/llvm18/bin/llvm-config ] \
+              || ln -sf /usr/bin/llvm-config-18 /usr/lib/llvm18/bin/llvm-config
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --default-host aarch64-unknown-linux-musl --profile minimal
             source "$HOME/.cargo/env"
-            rustc --version
-            llvm-config-18 --version
-            # 原生构建（host == target）
+            export LLVM_SYS_181_PREFIX=/usr/lib/llvm18
+            export RUSTFLAGS="-C target-feature=+crt-static"
+            rustc --version && llvm-config-18 --version
             cargo build --release --target aarch64-unknown-linux-musl --locked
             ls -la target/aarch64-unknown-linux-musl/release/dialc
-            # 核心冒烟
             ./target/aarch64-unknown-linux-musl/release/dialc build examples/hello.dial -o /tmp/hello
             /tmp/hello | tee /tmp/hello.out
-            grep -q "Hello, dialc" /tmp/hello.out && echo "✅ Termux 冒烟通过" || { echo "❌ 输出不符"; exit 1; }
-            # 平台契约：完全静态（无动态依赖）
-            readelf -d /tmp/hello 2>/dev/null | grep -q "Shared library" && { echo "❌ 存在动态依赖"; readelf -d /tmp/hello; exit 1; } || echo "✅ 用户程序完全静态（无动态依赖）"
-            # 打包
+            grep -q "Hello, dialc" /tmp/hello.out || { echo "❌ 输出不符"; exit 1; }
+            echo "✅ Termux 冒烟通过"
+            readelf -d /tmp/hello 2>/dev/null | grep -q "Shared library" \
+              && { echo "❌ 存在动态依赖"; readelf -d /tmp/hello; exit 1; } \
+              || echo "✅ 用户程序完全静态（无动态依赖）"
             bash tools/package_release.sh termux-aarch64 target/aarch64-unknown-linux-musl/release/dialc
+          '
 
       - name: 上传发布产物
         uses: actions/upload-artifact@v4
