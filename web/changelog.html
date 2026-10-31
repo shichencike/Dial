@@ -205,13 +205,26 @@
 <li><strong>Windows（MinGW / <code>x86_64-pc-windows-gnu</code>）</strong>：使用官方 MSVC 构建的 LLVM 18 全量包，
   但只取 <strong>C 接口</strong>（<code>LLVM-C.lib</code> 导入库 + <code>LLVM-C.dll</code> 运行期）。纯 C ABI 跨 MSVC / MinGW
   无名字改写冲突，因此 <code>dialc.exe</code> 直接用 MinGW 目标链接它，无需自编译 LLVM。</li>
-<li>配套 <code>tools/llvm-config.win.cmd</code>：llvm-sys 的精确垫片，把 LLVM 当 C 接口暴露给链接器，
-    屏蔽官方 MSVC <code>llvm-config</code> 的 <code>--cflags</code> 怪癖。</li>
+<li>配套 <code>tools/llvm-config-win-shim.c</code>：由 MinGW <code>gcc</code> 编译成<strong>真正的 <code>llvm-config.exe</code></strong>，
+    把 LLVM 当 C 接口暴露给链接器（<code>--libnames</code> 只返回 <code>LLVM-C.lib</code>），屏蔽官方 MSVC
+    <code>llvm-config</code> 的怪癖（它运行期依赖包内并未提供的 <code>LLVM-18.dll</code>）。
+    <strong>必须是 <code>.exe</code> 而不是 <code>.cmd</code>/<code>.bat</code></strong>：llvm-sys 先尝试 <code>llvm-config.exe</code>、再尝试裸名，
+    而 Windows <code>CreateProcess</code> 对不带扩展名的程序名只补 <code>.exe</code>，批处理垫片永远不会被找到。</li>
 <li>用户程序由 <strong>MinGW <code>gcc</code> + winpthreads</strong> 编译，stdlib 的 <code>pthread</code> 代码<strong>零改动</strong>即用
     （winpthreads 提供兼容层），产物 <code>-Wl,-Bstatic -lpthread</code> 静态链入 winpthreads → 单文件 <code>.exe</code>。</li>
-<li><strong>Termux aarch64（musl 全静态）</strong>：在 Alpine aarch64 容器内（QEMU 模拟）原生构建，
-  <code>rustup</code> 安装 <code>aarch64-unknown-linux-musl</code> 宿主工具链，<code>llvm18-static</code> 提供静态 LLVM，
-  <code>RUSTFLAGS=-C target-feature=+crt-static</code> → <strong>完全静态</strong>、零外部依赖的 <code>dialc</code>。</li>
+<li><strong>Termux aarch64（musl 全静态）</strong>：在 GitHub <strong>原生 ARM64</strong> runner（<code>ubuntu-24.04-arm</code>）上的
+  Alpine aarch64 容器内构建（<strong>不用 QEMU</strong>——QEMU 用户态模拟在新 runner 上会报
+  <code>Could not open '/lib/ld-linux-aarch64.so.1'</code>）。<code>rustup</code> 装 <code>aarch64-unknown-linux-musl</code>
+  宿主工具链，<code>llvm18-static</code> 提供静态 LLVM，配合
+  <code>RUSTFLAGS="-C target-feature=+crt-static -C linker=gcc -C link-arg=-static -C link-arg=-lgcc -C link-arg=/usr/lib/libffi.a"</code>
+  → <strong>完全静态</strong>、零外部依赖的 <code>dialc</code>（实测：无 <code>INTERP</code> 段、无 <code>NEEDED</code>，约 118 MB）。</li>
+<li>配套 <code>tools/llvm-config-static-linux.sh</code>（<strong>只静态</strong>垫片）：inkwell 启用的是
+    <code>llvm18-1-prefer-dynamic</code>，llvm-sys 会<strong>主动优先</strong> <code>--libnames --link-shared</code>、把 LLVM
+    动态链成 <code>libLLVM.so</code>；垫片对 <code>--libnames --link-shared</code> 返回非零码，迫使 llvm-sys 回退到
+    <code>--link-static</code>。（llvm-sys 并没有 <code>LLVM_SYS_&lt;ver&gt;_STATIC</code> 之类的环境变量可覆盖该偏好。）</li>
+<li><code>-lgcc</code> 与 <code>libffi.a</code> 都是补链接缺口：静态 LLVM 组件引用的 <code>__clear_cache</code> 在 <code>libgcc.a</code>；
+    系统库种类取自 build script <strong>自身</strong>的 <code>cfg!(target_feature="crt-static")</code>（宿主而非目标），
+    若不处理会残留 <code>NEEDED libffi.so.8</code>，而 Termux 上没有它 → 执行即 <code>not found</code>。</li>
 </ul>
 <h3 id="changed变更">Changed（变更）</h3>
 <ul>
@@ -235,6 +248,11 @@
   MSVC 包 + C 接口，而非 MSYS2（其 mingw64-llvm 现已是 23.x，18.x 已下架）。</li>
 <li>路线图 7 阶段已完成 1 / 2 / 3 / 4 / 5；阶段 6（<strong>纯 MSVC</strong> 线程后端）在 MinGW 路线下已非阻塞，
   阶段 7（官方标准库 <code>.dialpkg</code> 化）待做。</li>
+<li><strong>实跑结果</strong>：<code>v0.97</code> 三平台作业全部通过并已发布（run <code>41253324073</code>，<code>release</code> 作业 success），
+  三个资产 <code>dialc-v0.97-{linux-x86_64,windows-x86_64,termux-aarch64}.zip</code> 均已上传。
+  下载后反向验证：Linux 包编译 <code>hello.dial</code> 输出 <code>Hello, dialc!</code>（产物仅 <code>NEEDED libc.so.6</code>）；
+  Termux 包 <code>readelf</code> 确认 <strong>AArch64 / 无 <code>INTERP</code> / 无 <code>NEEDED</code></strong>（真全静态）；
+  Windows 包含 <code>dialc.exe</code> + <code>LLVM-C.dll</code> + <code>install-dial.ps1</code>，CI 冒烟通过。</li>
 </ul>
 <hr />
 <h2 id="v096--2026-10-31">[v0.96] — 2026-10-31</h2>

@@ -33,13 +33,26 @@
 - **Windows（MinGW / `x86_64-pc-windows-gnu`）**：使用官方 MSVC 构建的 LLVM 18 全量包，
   但只取 **C 接口**（`LLVM-C.lib` 导入库 + `LLVM-C.dll` 运行期）。纯 C ABI 跨 MSVC / MinGW
   无名字改写冲突，因此 `dialc.exe` 直接用 MinGW 目标链接它，无需自编译 LLVM。
-  - 配套 `tools/llvm-config.win.cmd`：llvm-sys 的精确垫片，把 LLVM 当 C 接口暴露给链接器，
-    屏蔽官方 MSVC `llvm-config` 的 `--cflags` 怪癖。
+  - 配套 `tools/llvm-config-win-shim.c`：由 MinGW `gcc` 编译成**真正的 `llvm-config.exe`**，
+    把 LLVM 当 C 接口暴露给链接器（`--libnames` 只返回 `LLVM-C.lib`），屏蔽官方 MSVC
+    `llvm-config` 的怪癖（它运行期依赖包内并未提供的 `LLVM-18.dll`）。
+    **必须是 `.exe` 而不是 `.cmd`/`.bat`**：llvm-sys 先尝试 `llvm-config.exe`、再尝试裸名，
+    而 Windows `CreateProcess` 对不带扩展名的程序名只补 `.exe`，批处理垫片永远不会被找到。
   - 用户程序由 **MinGW `gcc` + winpthreads** 编译，stdlib 的 `pthread` 代码**零改动**即用
     （winpthreads 提供兼容层），产物 `-Wl,-Bstatic -lpthread` 静态链入 winpthreads → 单文件 `.exe`。
-- **Termux aarch64（musl 全静态）**：在 Alpine aarch64 容器内（QEMU 模拟）原生构建，
-  `rustup` 安装 `aarch64-unknown-linux-musl` 宿主工具链，`llvm18-static` 提供静态 LLVM，
-  `RUSTFLAGS=-C target-feature=+crt-static` → **完全静态**、零外部依赖的 `dialc`。
+- **Termux aarch64（musl 全静态）**：在 GitHub **原生 ARM64** runner（`ubuntu-24.04-arm`）上的
+  Alpine aarch64 容器内构建（**不用 QEMU**——QEMU 用户态模拟在新 runner 上会报
+  `Could not open '/lib/ld-linux-aarch64.so.1'`）。`rustup` 装 `aarch64-unknown-linux-musl`
+  宿主工具链，`llvm18-static` 提供静态 LLVM，配合
+  `RUSTFLAGS="-C target-feature=+crt-static -C linker=gcc -C link-arg=-static -C link-arg=-lgcc -C link-arg=/usr/lib/libffi.a"`
+  → **完全静态**、零外部依赖的 `dialc`（实测：无 `INTERP` 段、无 `NEEDED`，约 118 MB）。
+  - 配套 `tools/llvm-config-static-linux.sh`（**只静态**垫片）：inkwell 启用的是
+    `llvm18-1-prefer-dynamic`，llvm-sys 会**主动优先** `--libnames --link-shared`、把 LLVM
+    动态链成 `libLLVM.so`；垫片对 `--libnames --link-shared` 返回非零码，迫使 llvm-sys 回退到
+    `--link-static`。（llvm-sys 并没有 `LLVM_SYS_<ver>_STATIC` 之类的环境变量可覆盖该偏好。）
+  - `-lgcc` 与 `libffi.a` 都是补链接缺口：静态 LLVM 组件引用的 `__clear_cache` 在 `libgcc.a`；
+    系统库种类取自 build script **自身**的 `cfg!(target_feature="crt-static")`（宿主而非目标），
+    若不处理会残留 `NEEDED libffi.so.8`，而 Termux 上没有它 → 执行即 `not found`。
 
 ### Changed（变更）
 - `src/codegen.rs`：`emit_object` 的 CPU 不再写死 `"x86-64"`，改为按宿主架构推导
@@ -61,6 +74,11 @@
   MSVC 包 + C 接口，而非 MSYS2（其 mingw64-llvm 现已是 23.x，18.x 已下架）。
 - 路线图 7 阶段已完成 1 / 2 / 3 / 4 / 5；阶段 6（**纯 MSVC** 线程后端）在 MinGW 路线下已非阻塞，
   阶段 7（官方标准库 `.dialpkg` 化）待做。
+- **实跑结果**：`v0.97` 三平台作业全部通过并已发布（run `41253324073`，`release` 作业 success），
+  三个资产 `dialc-v0.97-{linux-x86_64,windows-x86_64,termux-aarch64}.zip` 均已上传。
+  下载后反向验证：Linux 包编译 `hello.dial` 输出 `Hello, dialc!`（产物仅 `NEEDED libc.so.6`）；
+  Termux 包 `readelf` 确认 **AArch64 / 无 `INTERP` / 无 `NEEDED`**（真全静态）；
+  Windows 包含 `dialc.exe` + `LLVM-C.dll` + `install-dial.ps1`，CI 冒烟通过。
 
 ---
 
