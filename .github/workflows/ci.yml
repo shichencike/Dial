@@ -184,7 +184,11 @@ jobs:
       - name: 编译 dialc（release，x86_64-pc-windows-gnu）
         shell: bash
         env:
-          PATH: C:\llvm-shim\bin;C:\llvm18\bin:$PATH
+          # 关键：build 步 PATH **不能**包含 C:\llvm18\bin——官方 MSVC 包自带真正的
+          # llvm-config.exe，会盖过我们的 .cmd 垫片，报 "LLVM-18.dll is missing"。
+          # 只留 C:\llvm-shim\bin（垫片）；MinGW gcc 已通过「定位 MinGW」写入 GITHUB_PATH。
+          # 链接所需的 LLVM-C.lib 由垫片返回的 -L C:\llvm18\lib 提供，无需 bin 在 PATH。
+          PATH: C:\llvm-shim\bin:$PATH
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
         run: |
           set -euo pipefail
@@ -279,9 +283,10 @@ jobs:
             # 导致在 Termux（仅 bionic/musl）上无法运行。
             export LLVM_SYS_181_PREFIX=/usr/lib/llvm18
             export LLVM_SYS_181_STATIC=1
-            # 完全静态：musl libc 静态（crt-static）+ 强制 GCC 链接器（非 rust-lld）以经典方式 -static，
+            # 完全静态：musl libc 静态（crt-static）+ 显式用 GCC 链接器（musl gcc，稳定且支持经典 -static），
             # 连同 libstdc++/libgcc/libz/libzstd/libxml2/libffi/liblzma 一并静态，产出单文件无动态依赖的 dialc。
-            export RUSTFLAGS="-C target-feature=+crt-static -C linker-features=-lld -C link-arg=-static"
+            # （注：linker-features=-lld 在 musl 目标上是 unstable，需 -Z unstable-options，故改用 -C linker=gcc）
+            export RUSTFLAGS="-C target-feature=+crt-static -C linker=gcc -C link-arg=-static"
             echo "RUSTFLAGS=$RUSTFLAGS"
             rustc --version && llvm-config-18 --version
             echo "--- llvm-config --link-static --libs ---"; llvm-config-18 --link-static --libs | head -c 300; echo
