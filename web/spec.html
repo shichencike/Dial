@@ -263,7 +263,7 @@
 <li><a href="#2861-作用域链由内向外查找遮蔽查的是内层">28.6.1 作用域链「由内向外」查找（遮蔽查的是内层）</a></li>
 <li><a href="#2862-跨文件符号import-驱动的自动扫描">28.6.2 跨文件符号：import 驱动的自动扫描</a></li>
 <li><a href="#2863-三个能力的契约">28.6.3 三个能力的契约</a></li>
-<li><a href="#2864-刻意仍不做">28.6.4 刻意仍不做</a></li>
+<li><a href="#2864-刻意仍不做v095-当时-后续已补">28.6.4 刻意仍不做（v0.95 当时）/ 后续已补</a></li>
 </ul>
 </li>
 <li><a href="#287-编辑器插件安装包v098">28.7 编辑器插件安装包（v0.98）</a><ul>
@@ -4808,7 +4808,8 @@ while (true) {
 硬做只能做出「猜」的结果——那比不做更糟。</p>
 <p>其中<strong>前三项（悬停 / 跳转定义 / 补全）已在 v0.95 补上</strong>（见 <a href="#286-lsp-增强hover--跳转定义--补全v095">§28.6</a>）。
 表格里仍保留它们，是为了记录<strong>这个决策后来如何被推翻</strong>——而不是说它们至今未实现。
-<strong>至今仍未实现</strong>的，是下表中除首行以外的那些项（重命名 / 跨文件引用查找 / 格式化等）。</p>
+<strong>重命名 / 引用查找 / 签名帮助已在 v0.98 轮 2 补上</strong>（见 <a href="#2871-当前-lsp-能力清单">§28.7.1</a>）；
+真正至今仍未实现的，是格式化、codeAction、folding、selection 等（见路线表，轮 3 / 轮 4）。</p>
 </blockquote>
 <table>
 <thead>
@@ -4924,22 +4925,26 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 - 收集光标<strong>可见作用域</strong>内的全部符号（本文件局部 + 全局函数/结构体 + 已 import 的包符号）；
 - 按光标处<strong>已输入前缀</strong>过滤：<code>demo_</code> 前缀只留 <code>demo_add</code>，不会把 <code>total</code> / <code>DemoHandle</code> 混进来；
 - 即使光标落在空白（前缀为空）也返回当前可见的全部候选。</p>
-<h4 id="2864-刻意仍不做">28.6.4 刻意仍不做</h4>
+<h4 id="2864-刻意仍不做v095-当时-后续已补">28.6.4 刻意仍不做（v0.95 当时）/ 后续已补</h4>
+<blockquote>
+<p>下表是 v0.95 当时的「暂不做」清单。<strong>重命名 / 引用查找 / 签名帮助已在 v0.98 轮 2 补上</strong>——
+索引器新增引用边（<code>Ref</code>），不再「只建符号、不建引用边」。其余项仍保持原决策。</p>
+</blockquote>
 <table>
 <thead>
 <tr>
-<th>没做</th>
+<th>没做 / 已补</th>
 <th>原因</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>重命名、跨文件引用查找</td>
-<td>需要全工作区引用图；当前索引器只建符号、不建引用边</td>
+<td>重命名、引用查找、签名帮助</td>
+<td><strong>轮 2 已实现</strong>（v0.98）：基于引用边，所见即所改、同名遮蔽天然正确</td>
 </tr>
 <tr>
 <td>格式化</td>
-<td>Dial 没有官定代码风格，交给编辑器/用户</td>
+<td>非破坏性格式化留给轮 3；Dial 没有官定代码风格，激进格式化易误伤</td>
 </tr>
 <tr>
 <td>诊断下放到 <code>didChange</code></td>
@@ -5030,19 +5035,29 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 <td>按客户端 <code>capabilities</code> 动态广播，老客户端不报能力也不报错</td>
 </tr>
 <tr>
-<td>文档符号 / 工作区符号</td>
-<td>🔜 轮 2</td>
-<td>文件大纲、跨文件符号搜索</td>
+<td>文档符号（大纲）</td>
+<td>✅ 已实现（轮 2）</td>
+<td>顶层 fn/struct 为根，函数体形参与局部变量为子节点（递归 DocumentSymbol）</td>
 </tr>
 <tr>
-<td>引用查找 / 重命名</td>
-<td>🔜 轮 2</td>
-<td>需索引器补「引用边」</td>
+<td>工作区符号</td>
+<td>✅ 已实现（轮 2）</td>
+<td>跨所有已打开文件 + 已加载包，按名字子串模糊搜索</td>
+</tr>
+<tr>
+<td>引用查找</td>
+<td>✅ 已实现（轮 2）</td>
+<td>基于索引器的引用边（<code>Ref</code>）；<code>includeDeclaration</code> 可含声明</td>
+</tr>
+<tr>
+<td>重命名（含 prepareRename）</td>
+<td>✅ 已实现（轮 2）</td>
+<td>同符号的全部引用（含声明）一次改全；包符号只读不重命名</td>
 </tr>
 <tr>
 <td>签名帮助</td>
-<td>🔜 轮 2</td>
-<td>函数调用参数提示</td>
+<td>✅ 已实现（轮 2）</td>
+<td><code>(</code> / <code>,</code> 触发；解析光标前函数名，返回完整签名与参数标签、活动参数序号</td>
 </tr>
 <tr>
 <td>格式化 / inlay hint</td>
@@ -5057,8 +5072,11 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 </tbody>
 </table>
 <blockquote>
-<p>路线：v0.98 完成<strong>轮 1（基础稳健 + 补全增强 + 三编辑器接通）</strong>，能力协商与补全精确替换已落地；
-导航类（大纲 / 引用 / 重命名 / 签名）在轮 2，编写辅助在轮 3，高级能力在轮 4——循序渐进，每轮可独立验证。</p>
+<p>路线：v0.98 完成<strong>轮 1（基础稳健 + 补全增强 + 三编辑器接通）</strong> 与 <strong>轮 2（导航全家桶）</strong>；
+编写辅助在轮 3，高级能力在轮 4——循序渐进，每轮可独立验证（见 <code>tools/lsp_smoke.py</code>）。</p>
+<p>实现要点：引用 / 重命名依赖 <code>src/index.rs</code> 新增的<strong>引用边</strong>——索引不再只建符号、也记录每个标识符解析到哪个符号
+（<code>Ref.symbol_index</code>），因此<strong>同名遮蔽天然正确</strong>（内层同名变量不会被误并入外层引用）。Dial 单文件编译，
+重命名只作用于当前 <code>.dial</code>，包符号（<code>.diali</code>）只读。</p>
 </blockquote>
 <hr /></main></div>
 

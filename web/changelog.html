@@ -27,6 +27,7 @@
 <li><a href="#v098--2026-11-01">[v0.98] — 2026-11-01</a><ul>
 <li><a href="#added新增">Added（新增）</a></li>
 <li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#轮-2导航已完成">轮 2（导航，已完成）</a></li>
 <li><a href="#后续轮次路线">后续轮次（路线）</a></li>
 </ul>
 </li>
@@ -199,9 +200,17 @@
 <li>文档同步：<code>README §28.7</code>（编辑器插件安装包与 LSP 能力清单）、<code>ARCHITECTURE</code>、<code>CHANGELOG</code> 更新；
   各编辑器 README 与 <code>web/</code> 重新生成。</li>
 </ul>
+<h3 id="轮-2导航已完成">轮 2（导航，已完成）</h3>
+<ul>
+<li><strong>LSP 导航全家桶</strong>：<code>src/index.rs</code> 新增<strong>引用边</strong>（<code>Ref</code>），<code>dialc lsp</code> 落地文档符号大纲、工作区符号、引用查找、重命名（含 <code>prepareRename</code>）、签名帮助。</li>
+<li>文档符号：顶层 fn/struct 为根，函数体形参与局部变量递归为子节点（<code>DocumentSymbol</code>）。</li>
+<li>工作区符号：跨所有已打开文件 + 已加载包，按名字子串模糊搜索。</li>
+<li>引用 / 重命名：基于引用边，同名遮蔽天然正确（内层同名变量不会被误并入外层引用）；包符号（<code>.diali</code>）只读不重命名。</li>
+<li>签名帮助：<code>(</code> / <code>,</code> 触发，解析光标前函数名返回完整签名与各参数标签、活动参数序号。</li>
+<li>冒烟测试 <code>tools/lsp_smoke.py</code> 扩展到轮 2 全部能力断言（能力协商 / 大纲 / 工作区符号 / 引用 / 重命名 / 签名）。</li>
+</ul>
 <h3 id="后续轮次路线">后续轮次（路线）</h3>
 <ul>
-<li>轮 2：导航（文档符号 / 工作区符号 / 引用查找 / 重命名 / 签名帮助）</li>
 <li>轮 3：编写辅助（格式化 / inlay hint / 补全增强）</li>
 <li>轮 4：高级（codeAction / folding / selection / documentLink）</li>
 </ul>

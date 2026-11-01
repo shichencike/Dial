@@ -16,7 +16,7 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 
 use crate::error::DialcError;
-use crate::index::{self, Symbol, SymbolKind, WorkspaceIndex};
+use crate::index::{self, IndexedFile, Symbol, SymbolKind, WorkspaceIndex};
 use crate::lexer::{self, TokenKind};
 use crate::parser;
 use crate::semantic;
@@ -230,6 +230,63 @@ fn handle<W: Write>(
             )?;
         }
 
+        // ---- 轮2：导航 ----
+        "textDocument/documentSymbol" => {
+            let uri = msg
+                .pointer("/params/textDocument/uri")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+            let syms = build_document_symbols(ws, docs, &uri);
+            respond(out, id, json!(syms))?;
+        }
+        "workspace/symbol" => {
+            let q = msg
+                .pointer("/params/query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let items = workspace_symbols(ws, docs, &q);
+            respond(out, id, json!(items))?;
+        }
+        "textDocument/references" => {
+            let include_decl = msg
+                .pointer("/params/context/includeDeclaration")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let items = pos
+                .map(|(uri, line, character)| {
+                    references_at(ws, docs, &uri, line, character, include_decl)
+                })
+                .unwrap_or_default();
+            respond(out, id, json!(items))?;
+        }
+        "textDocument/prepareRename" => {
+            let reply = pos
+                .map(|(uri, line, character)| prepare_rename_at(ws, docs, &uri, line, character))
+                .unwrap_or(Value::Null);
+            respond(out, id, reply)?;
+        }
+        "textDocument/rename" => {
+            let new_name = msg
+                .pointer("/params/newName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let reply = pos
+                .map(|(uri, line, character)| {
+                    rename_at(ws, docs, &uri, line, character, &new_name)
+                })
+                .unwrap_or(Value::Null);
+            respond(out, id, reply)?;
+        }
+        "textDocument/signatureHelp" => {
+            let reply = pos
+                .map(|(uri, line, character)| signature_help_at(ws, docs, &uri, line, character))
+                .unwrap_or(Value::Null);
+            respond(out, id, reply)?;
+        }
+
         // 未知方法：静默忽略（LSP 允许客户端发送我们不认识的通知）
         _ => {
             // 若是**请求**（带 id）而不只是通知，必须回应，否则客户端会一直等待。
@@ -306,6 +363,22 @@ fn negotiate_capabilities(client: Option<&Value>) -> Value {
     }
     if supports("/textDocument/completion") {
         caps["completionProvider"] = json!({ "triggerCharacters": ["."] });
+    }
+    if supports("/textDocument/documentSymbol") {
+        caps["documentSymbolProvider"] = json!(true);
+    }
+    if supports("/workspace/symbol") {
+        caps["workspaceSymbolProvider"] = json!(true);
+    }
+    if supports("/textDocument/references") {
+        caps["referencesProvider"] = json!(true);
+    }
+    if supports("/textDocument/rename") {
+        // prepareProvider=true：先发 prepareRename 让客户端确认可重命名区间。
+        caps["renameProvider"] = json!({ "prepareProvider": true });
+    }
+    if supports("/textDocument/signatureHelp") {
+        caps["signatureHelpProvider"] = json!({ "triggerCharacters": ["(", ","] });
     }
     caps
 }
@@ -720,7 +793,8 @@ fn index_document(ws: &mut WorkspaceIndex, uri: &str, text: &str) {
             return;
         }
     };
-    let indexed = index::index_program(uri, &program, &program.imports);
+    let mut indexed = index::index_program(uri, &program, &program.imports);
+    indexed.collect_references(text);
     ws.files.insert(uri.to_string(), indexed);
 }
 
@@ -920,4 +994,365 @@ fn completion(ws: &WorkspaceIndex, docs: &Docs, uri: &str, line: u32, character:
         }));
     }
     items
+}
+
+// ---------------------------------------------------------------------------
+// 轮2：导航能力（大纲 / 工作区符号 / 引用 / 重命名 / 签名帮助）
+// ---------------------------------------------------------------------------
+
+/// 符号种类 → LSP SymbolKind 数值。
+fn lsp_symbol_kind(k: SymbolKind) -> u32 {
+    match k {
+        SymbolKind::Function | SymbolKind::ExternFn => 12, // Function
+        SymbolKind::Struct => 23,                         // Struct
+        SymbolKind::OpaqueType => 22,                     // Class
+        SymbolKind::Var | SymbolKind::Param => 13,        // Variable
+    }
+}
+
+/// 文档大纲：顶层 fn/struct 为根节点，函数的形参与局部变量为子节点。
+fn build_document_symbols(ws: &WorkspaceIndex, docs: &Docs, uri: &str) -> Vec<Value> {
+    let file = match ws.files.get(uri) {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+    let text = docs.get(uri).cloned().unwrap_or_default();
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out = Vec::new();
+    for &si in &file.scopes[file.top_scope].symbols {
+        out.push(symbol_node(file, &lines, si));
+    }
+    out
+}
+
+/// 取某作用域**严格后代**作用域内的所有符号下标（供大纲子节点）。
+fn descendant_symbols(file: &IndexedFile, scope_id: usize) -> Vec<usize> {
+    let mut result = Vec::new();
+    let mut stack = vec![scope_id];
+    while let Some(s) = stack.pop() {
+        for child in 0..file.scopes.len() {
+            if file.scopes[child].parent == Some(s) {
+                stack.push(child);
+                result.extend(file.scopes[child].symbols.iter().copied());
+            }
+        }
+    }
+    result
+}
+
+/// 把一个符号渲染成 LSP 的 DocumentSymbol（递归子节点）。
+fn symbol_node(file: &IndexedFile, lines: &[&str], si: usize) -> Value {
+    let sym = &file.symbols[si];
+    let l0 = (sym.span.0 as u32).saturating_sub(1);
+    let line_text = lines.get(sym.span.0.saturating_sub(1)).copied().unwrap_or("");
+    let (sc, ec) = char_span_to_lsp(line_text, sym.span.1, sym.span.3);
+    let range = json!({
+        "start": { "line": l0, "character": sc },
+        "end": { "line": l0, "character": ec }
+    });
+    let mut children = Vec::new();
+    // 只有函数有「自己的作用域」（函数体），其后代符号作为子节点。
+    if let Some(&body) = file.fn_bodies.get(&si) {
+        for cs in descendant_symbols(file, body) {
+            children.push(symbol_node(file, lines, cs));
+        }
+    }
+    json!({
+        "name": sym.name,
+        "kind": lsp_symbol_kind(sym.kind),
+        "range": range,
+        "selectionRange": range,
+        "children": children
+    })
+}
+
+/// 工作区符号搜索：跨所有已打开文件 + 已加载包，按名字子串模糊匹配。
+fn workspace_symbols(ws: &WorkspaceIndex, docs: &Docs, q: &str) -> Vec<Value> {
+    let ql = q.to_lowercase();
+    let mut out = Vec::new();
+    for (uri, file) in &ws.files {
+        let text = docs.get(uri).cloned().unwrap_or_default();
+        let lines: Vec<&str> = text.split('\n').collect();
+        for &si in &file.scopes[file.top_scope].symbols {
+            let sym = &file.symbols[si];
+            if !matches!(
+                sym.kind,
+                SymbolKind::Function | SymbolKind::Struct | SymbolKind::ExternFn | SymbolKind::OpaqueType
+            ) {
+                continue;
+            }
+            if !ql.is_empty() && !sym.name.to_lowercase().contains(&ql) {
+                continue;
+            }
+            let l0 = (sym.span.0 as u32).saturating_sub(1);
+            let line_text = lines.get(sym.span.0.saturating_sub(1)).copied().unwrap_or("");
+            let (sc, ec) = char_span_to_lsp(line_text, sym.span.1, sym.span.3);
+            out.push(json!({
+                "name": sym.name,
+                "kind": lsp_symbol_kind(sym.kind),
+                "location": {
+                    "uri": uri,
+                    "range": {
+                        "start": { "line": l0, "character": sc },
+                        "end": { "line": l0, "character": ec }
+                    }
+                }
+            }));
+        }
+    }
+    for (_pname, syms) in &ws.packages {
+        for s in syms.fns.iter().chain(syms.opaque.iter()) {
+            if !ql.is_empty() && !s.name.to_lowercase().contains(&ql) {
+                continue;
+            }
+            let l0 = (s.span.0 as u32).saturating_sub(1);
+            // 包符号的 .diali 文本我们不一定持有，但包名/符号名都是 ASCII，可直接用 char 列。
+            let (sc, ec) = char_span_to_lsp("", s.span.1, s.span.3);
+            out.push(json!({
+                "name": s.name,
+                "kind": lsp_symbol_kind(s.kind),
+                "location": {
+                    "uri": s.decl_uri.clone().unwrap_or_default(),
+                    "range": {
+                        "start": { "line": l0, "character": sc },
+                        "end": { "line": l0, "character": ec }
+                    }
+                }
+            }));
+        }
+    }
+    out
+}
+
+/// 取光标下符号在 `symbols` 中的下标（仅文件内符号；包符号返回 None，因为包只读不可重命名）。
+fn symbol_index_at_cursor(
+    ws: &WorkspaceIndex,
+    docs: &Docs,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Option<usize> {
+    let text = docs.get(uri)?;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line1 = line as usize + 1;
+    let line_text = lines.get(line as usize).copied().unwrap_or("");
+    let char1 = index::utf16_to_char_col(line_text, character as usize);
+    let name = index::identifier_at(text, line1, char1)?;
+    let indexed = ws.files.get(uri)?;
+    let point = (line1, char1);
+    if let Some(scope_id) = indexed.scope_at(point) {
+        return indexed.lookup_local_index(scope_id, &name);
+    }
+    None
+}
+
+/// 查找引用：返回光标符号在文件内的所有使用位置（含声明，除非 includeDeclaration=false）。
+fn references_at(
+    ws: &WorkspaceIndex,
+    docs: &Docs,
+    uri: &str,
+    line: u32,
+    character: u32,
+    include_decl: bool,
+) -> Vec<Value> {
+    let target = match symbol_index_at_cursor(ws, docs, uri, line, character) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let file = match ws.files.get(uri) {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+    let sym_span = file.symbols[target].span; // 声明位置，用于判断是否跳过声明
+    let text = docs.get(uri).cloned().unwrap_or_default();
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out = Vec::new();
+    for r in &file.references {
+        if r.symbol_index != target {
+            continue;
+        }
+        if !include_decl && r.span == sym_span {
+            continue;
+        }
+        let l0 = (r.span.0 as u32).saturating_sub(1);
+        let line_text = lines.get(r.span.0.saturating_sub(1)).copied().unwrap_or("");
+        let (sc, ec) = char_span_to_lsp(line_text, r.span.1, r.span.3);
+        out.push(json!({
+            "uri": uri,
+            "range": {
+                "start": { "line": l0, "character": sc },
+                "end": { "line": l0, "character": ec }
+            }
+        }));
+    }
+    out
+}
+
+/// 合法标识符判定：首字符字母或 `_`，后续字母/数字/`_`。
+fn is_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// 重命名：对光标符号的所有引用（含声明）生成跨位置编辑。仅允许合法标识符；包符号返回 null。
+fn rename_at(
+    ws: &WorkspaceIndex,
+    docs: &Docs,
+    uri: &str,
+    line: u32,
+    character: u32,
+    new_name: &str,
+) -> Value {
+    if new_name.is_empty() || !is_ident(new_name) {
+        return Value::Null;
+    }
+    let target = match symbol_index_at_cursor(ws, docs, uri, line, character) {
+        Some(i) => i,
+        None => return Value::Null,
+    };
+    let file = match ws.files.get(uri) {
+        Some(f) => f,
+        None => return Value::Null,
+    };
+    let text = docs.get(uri).cloned().unwrap_or_default();
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut edits = Vec::new();
+    for r in &file.references {
+        if r.symbol_index != target {
+            continue;
+        }
+        let l0 = (r.span.0 as u32).saturating_sub(1);
+        let line_text = lines.get(r.span.0.saturating_sub(1)).copied().unwrap_or("");
+        let (sc, ec) = char_span_to_lsp(line_text, r.span.1, r.span.3);
+        edits.push(json!({
+            "range": {
+                "start": { "line": l0, "character": sc },
+                "end": { "line": l0, "character": ec }
+            },
+            "newText": new_name
+        }));
+    }
+    if edits.is_empty() {
+        return Value::Null;
+    }
+    json!({ "changes": { uri: edits } })
+}
+
+/// prepareRename：返回可重命名的区间与占位名；不可重命名处返回 null。
+fn prepare_rename_at(ws: &WorkspaceIndex, docs: &Docs, uri: &str, line: u32, character: u32) -> Value {
+    let target = match symbol_index_at_cursor(ws, docs, uri, line, character) {
+        Some(i) => i,
+        None => return Value::Null,
+    };
+    let file = match ws.files.get(uri) {
+        Some(f) => f,
+        None => return Value::Null,
+    };
+    let sym = &file.symbols[target];
+    let l0 = (sym.span.0 as u32).saturating_sub(1);
+    let text = docs.get(uri).cloned().unwrap_or_default();
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line_text = lines.get(sym.span.0.saturating_sub(1)).copied().unwrap_or("");
+    let (sc, ec) = char_span_to_lsp(line_text, sym.span.1, sym.span.3);
+    json!({
+        "range": {
+            "start": { "line": l0, "character": sc },
+            "end": { "line": l0, "character": ec }
+        },
+        "placeholder": sym.name
+    })
+}
+
+/// 从光标所在行推导出「当前正在调用的函数名」与「活动参数序号」。
+///
+/// 思路：从光标向前扫描，跳过配平的 `)`，找到与当前实参列表对应的那个 `(`，
+/// 它前面的标识符就是被调用的函数名；`(` 与光标之间未配平的 `,` 数即活动参数序号。
+fn call_context(line_text: &str, char1: usize) -> Option<(String, usize)> {
+    let chars: Vec<char> = line_text.chars().collect();
+    let end = char1; // 光标前（含最后一个紧邻字符）的字符数 = LSP character 列
+    let mut depth = 0i32;
+    let mut i = end;
+    let mut call_open: Option<usize> = None;
+    let mut active_param = 0usize;
+    while i > 0 {
+        i -= 1;
+        let c = chars[i];
+        if c == ')' {
+            depth += 1;
+        } else if c == '(' {
+            if depth == 0 {
+                call_open = Some(i);
+                break;
+            } else {
+                depth -= 1;
+            }
+        } else if c == ',' && depth == 0 {
+            active_param += 1;
+        }
+    }
+    let op = call_open?;
+    // 函数名：op 之前紧邻的标识符
+    let mut j = op;
+    let mut name = String::new();
+    while j > 0 {
+        let c = chars[j - 1];
+        if c.is_alphanumeric() || c == '_' {
+            name.insert(0, c);
+            j -= 1;
+        } else {
+            break;
+        }
+    }
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, active_param))
+}
+
+/// 签名帮助：在 `(` 后按光标前函数名查签名，返回 SignatureInformation。
+fn signature_help_at(ws: &WorkspaceIndex, docs: &Docs, uri: &str, line: u32, character: u32) -> Value {
+    let text = match docs.get(uri) {
+        Some(t) => t.clone(),
+        None => return Value::Null,
+    };
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line1 = line as usize + 1;
+    let line_text = lines.get(line as usize).copied().unwrap_or("");
+    let char1 = index::utf16_to_char_col(line_text, character as usize);
+    let (name, active_param) = match call_context(line_text, char1) {
+        Some(x) => x,
+        None => return Value::Null,
+    };
+    let indexed = match ws.files.get(uri) {
+        Some(f) => f,
+        None => return Value::Null,
+    };
+    // 先查文件内符号，再查 import 的包。
+    let mut sig_params: Option<(String, Vec<String>)> = None;
+    let point = (line1, char1);
+    if let Some(scope_id) = indexed.scope_at(point) {
+        if let Some(sidx) = indexed.lookup_local_index(scope_id, &name) {
+            sig_params = indexed.signatures.get(&sidx).cloned();
+        }
+    }
+    if sig_params.is_none() && indexed.lookup_package(ws, &name).is_some() {
+        sig_params = ws.package_sigs.get(&name).cloned();
+    }
+    let (sig, params) = match sig_params {
+        Some(x) => x,
+        None => return Value::Null,
+    };
+    let param_infos: Vec<Value> = params.iter().map(|p| json!({ "label": p })).collect();
+    json!({
+        "signatures": [{
+            "label": sig,
+            "parameters": param_infos
+        }],
+        "activeSignature": 0,
+        "activeParameter": active_param
+    })
 }

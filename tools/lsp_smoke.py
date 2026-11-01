@@ -148,7 +148,11 @@ def main():
                 "semanticTokens": {},
                 "documentSymbol": {},
                 "synchronization": {"dynamicRegistration": False},
-            }
+                "references": {},
+                "rename": {"prepareSupport": True},
+                "signatureHelp": {"signatureInformation": {"parameterInformation": {"labelOffsetSupport": True}}},
+            },
+            "workspace": {"symbol": {"dynamicRegistration": False}},
         }
         init = client.request(
             "initialize",
@@ -160,7 +164,16 @@ def main():
         )
         srv_caps = init.get("capabilities", {})
         print(f"[smoke] 服务端能力: {json.dumps(srv_caps, ensure_ascii=False)}")
-        for key in ("hoverProvider", "definitionProvider", "completionProvider"):
+        for key in (
+            "hoverProvider",
+            "definitionProvider",
+            "completionProvider",
+            "documentSymbolProvider",
+            "referencesProvider",
+            "renameProvider",
+            "workspaceSymbolProvider",
+            "signatureHelpProvider",
+        ):
             if not srv_caps.get(key):
                 fails.append(f"能力协商缺失: {key}")
         if srv_caps.get("textDocumentSync") != 1:
@@ -243,6 +256,82 @@ def main():
             fails.append("semanticTokens 返回空")
         else:
             print(f"[smoke] semanticTokens 产出 {len(data) // 5} 个 token")
+
+        # 7) documentSymbol：大纲应含 add / main 两个顶层函数
+        doc_sym = client.request(
+            "textDocument/documentSymbol",
+            {"textDocument": {"uri": args.uri}},
+        ) or []
+        names = [d.get("name") for d in doc_sym]
+        if not doc_sym:
+            fails.append("documentSymbol 返回空")
+        elif "add" not in names or "main" not in names:
+            fails.append(f"documentSymbol 大纲缺失函数: {names}")
+        else:
+            print(f"[smoke] documentSymbol 大纲: {names}")
+
+        # 8) workspace/symbol：按 "add" 模糊搜索应命中
+        ws_sym = client.request("workspace/symbol", {"query": "add"}) or []
+        if not ws_sym:
+            fails.append("workspace/symbol 搜索 'add' 返回空")
+        else:
+            print(f"[smoke] workspace/symbol 'add' 命中 {len(ws_sym)} 项")
+
+        # 9) references：在 add 使用处（行5 列17）查引用，含声明应 >= 2
+        refs = client.request(
+            "textDocument/references",
+            {
+                "textDocument": {"uri": args.uri},
+                "position": {"line": 5, "character": 17},
+                "context": {"includeDeclaration": True},
+            },
+        ) or []
+        if len(refs) < 2:
+            fails.append(f"references(含声明) 应 >=2，实际 {len(refs)}")
+        else:
+            print(f"[smoke] references(含声明) 命中 {len(refs)} 处")
+
+        # 10) prepareRename：应返回可重命名区间
+        prep = client.request(
+            "textDocument/prepareRename",
+            {
+                "textDocument": {"uri": args.uri},
+                "position": {"line": 5, "character": 17},
+            },
+        )
+        if not prep or "range" not in prep:
+            fails.append("prepareRename 未返回区间")
+        else:
+            print(f"[smoke] prepareRename 区间: {json.dumps(prep['range'], ensure_ascii=False)}")
+
+        # 11) rename：把 add 改名为 sum，应生成含 2 处编辑的 WorkspaceEdit
+        rn = client.request(
+            "textDocument/rename",
+            {
+                "textDocument": {"uri": args.uri},
+                "position": {"line": 5, "character": 17},
+                "newName": "sum",
+            },
+        ) or {}
+        edits = (rn.get("changes") or {}).get(args.uri, [])
+        if len(edits) < 2:
+            fails.append(f"rename 应生成 >=2 处编辑，实际 {len(edits)}")
+        else:
+            print(f"[smoke] rename 'add'->'sum' 生成 {len(edits)} 处编辑")
+
+        # 12) signatureHelp：在 add( 的实参处（行5 列21）应返回签名
+        sig = client.request(
+            "textDocument/signatureHelp",
+            {
+                "textDocument": {"uri": args.uri},
+                "position": {"line": 5, "character": 21},
+            },
+        ) or {}
+        sigs = sig.get("signatures") or []
+        if not sigs:
+            fails.append("signatureHelp 未返回签名")
+        else:
+            print(f"[smoke] signatureHelp 签名: {sigs[0].get('label')}")
 
         client.request("shutdown", {})
     finally:

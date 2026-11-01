@@ -40,6 +40,23 @@ impl SymbolKind {
     }
 }
 
+/// 函数签名信息：`(完整签名标签, 各参数标签)`。
+/// 用于 `signatureHelp`——`Symbol.ty` 只存返回类型，参数表需单独保留。
+pub type SigInfo = (String, Vec<String>);
+
+/// 一个标识符「使用」位置（引用），用于查找引用与重命名。
+#[derive(Debug, Clone)]
+pub struct Ref {
+    /// 该引用解析到的符号在 `symbols` 中的下标。
+    /// 与定义共用同一身份 → 天然正确处理「同名遮蔽」（内层的同名变量不会被误并进来）。
+    pub symbol_index: usize,
+    /// 标识符文本（冗余存储，便于断言 / 调试）。
+    #[allow(dead_code)]
+    pub name: String,
+    /// 标识符本身的源码区间（1 起、char 列）：`(line1, char1, line1, char2)`。
+    pub span: (usize, usize, usize, usize),
+}
+
 /// 一个声明的符号。
 #[derive(Debug, Clone)]
 pub struct Symbol {
@@ -80,6 +97,12 @@ pub struct IndexedFile {
     pub top_scope: usize,
     /// 本文件 import 的包名（供包符号查询）。
     pub imports: Vec<String>,
+    /// 本文件中所有标识符「使用」位置（引用）。供 references / rename 使用。
+    pub references: Vec<Ref>,
+    /// 函数符号下标 → 其函数体作用域 id（供 documentSymbol 大纲派生子节点）。
+    pub fn_bodies: HashMap<usize, usize>,
+    /// 函数符号下标 → 签名信息（供 signatureHelp）。
+    pub signatures: HashMap<usize, SigInfo>,
 }
 
 /// 一个已安装包导出的符号（来自 `.diali`）。
@@ -94,6 +117,8 @@ pub struct PackageSyms {
 pub struct WorkspaceIndex {
     pub files: HashMap<String, IndexedFile>,
     pub packages: HashMap<String, PackageSyms>,
+    /// 外部函数名 → 签名信息（供 signatureHelp；来自已加载的 `.diali`）。
+    pub package_sigs: HashMap<String, SigInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -140,12 +165,19 @@ pub fn ensure_package(ws: &mut WorkspaceIndex, name: &str) -> bool {
     let mut fns = Vec::new();
     for f in &iface.fns {
         let mut params = Vec::new();
-        for (_pn, pt) in &f.params {
+        let mut param_labels = Vec::new();
+        for (pn, pt) in &f.params {
             if let Ok(t) = package::resolve_type_name(pt, &iface.opaque_types) {
                 params.push(t);
             }
+            param_labels.push(format!("{}: {}", pn, pt));
         }
         let ret = package::resolve_type_name(&f.ret, &iface.opaque_types).unwrap_or(Type::Void);
+        // 保留签名信息供 signatureHelp（包符号只读，.diali 里的声明行）。
+        let mut sig = format!("{}(", f.name);
+        sig.push_str(&param_labels.join(", "));
+        sig.push_str(&format!("): {}", ret.display()));
+        ws.package_sigs.insert(f.name.clone(), (sig, param_labels));
         fns.push(Symbol {
             kind: SymbolKind::ExternFn,
             name: f.name.clone(),
@@ -190,7 +222,7 @@ pub fn index_program(uri: &str, program: &Program, imports: &[String]) -> Indexe
     }
 
     for f in &program.functions {
-        ix.add(
+        let fn_idx = ix.add(
             top,
             Symbol {
                 kind: SymbolKind::Function,
@@ -202,8 +234,19 @@ pub fn index_program(uri: &str, program: &Program, imports: &[String]) -> Indexe
                 decl_uri: None,
             },
         );
+        // 保留签名信息（函数名 + 形参 + 返回类型）供 signatureHelp 使用。
+        let params: Vec<String> = f
+            .params
+            .iter()
+            .map(|(pn, pt)| format!("{}: {}", pn, pt.display()))
+            .collect();
+        let mut sig = format!("{}(", f.name);
+        sig.push_str(&params.join(", "));
+        sig.push_str(&format!("): {}", f.ret.display()));
+        ix.signatures.insert(fn_idx, (sig, params));
         ix.mark(top, (f.line, f.col));
         let body = ix.push_scope(Some(top));
+        ix.fn_bodies.insert(fn_idx, body);
         for (i, (pname, pty)) in f.params.iter().enumerate() {
             let (pl, pc) = f.param_pos.get(i).copied().unwrap_or((f.line, f.col));
             ix.add(
@@ -229,6 +272,9 @@ pub fn index_program(uri: &str, program: &Program, imports: &[String]) -> Indexe
         symbols: ix.symbols,
         top_scope: top,
         imports: imports.to_vec(),
+        references: Vec::new(),
+        fn_bodies: ix.fn_bodies,
+        signatures: ix.signatures,
     };
     f.finalize_spans();
     f
@@ -237,6 +283,8 @@ pub fn index_program(uri: &str, program: &Program, imports: &[String]) -> Indexe
 struct Indexer {
     scopes: Vec<Scope>,
     symbols: Vec<Symbol>,
+    fn_bodies: HashMap<usize, usize>,
+    signatures: HashMap<usize, SigInfo>,
 }
 
 impl Indexer {
@@ -244,6 +292,8 @@ impl Indexer {
         Indexer {
             scopes: Vec::new(),
             symbols: Vec::new(),
+            fn_bodies: HashMap::new(),
+            signatures: HashMap::new(),
         }
     }
 
@@ -259,10 +309,11 @@ impl Indexer {
         id
     }
 
-    fn add(&mut self, scope_id: usize, sym: Symbol) {
+    fn add(&mut self, scope_id: usize, sym: Symbol) -> usize {
         let idx = self.symbols.len();
         self.symbols.push(sym);
         self.scopes[scope_id].symbols.push(idx);
+        idx
     }
 
     fn mark(&mut self, scope_id: usize, pos: (usize, usize)) {
@@ -535,6 +586,47 @@ impl IndexedFile {
             }
         }
         out
+    }
+
+    /// 沿作用域链按名字查找符号，返回其在 `symbols` 中的下标。
+    /// 与 `lookup_local` 类似，但返回下标（重命名 / 引用去重需要身份而非克隆）。
+    pub fn lookup_local_index(&self, scope_id: usize, name: &str) -> Option<usize> {
+        let mut cur = Some(scope_id);
+        while let Some(id) = cur {
+            let sc = self.scopes.get(id)?;
+            for &si in &sc.symbols {
+                if self.symbols[si].name == name {
+                    return Some(si);
+                }
+            }
+            cur = sc.parent;
+        }
+        None
+    }
+
+    /// 重新扫描全文，记录每个标识符解析到的符号（引用）。
+    /// 必须在 `finalize_spans` 之后调用（依赖 scope 包围盒）。
+    pub fn collect_references(&mut self, text: &str) {
+        let tokens = match crate::lexer::lex(text) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        for tk in tokens {
+            if let crate::lexer::TokenKind::Ident(name) = &tk.kind {
+                let line1 = tk.line;
+                let char1 = tk.col;
+                let char2 = tk.col + name.chars().count();
+                if let Some(scope_id) = self.scope_at((line1, char1)) {
+                    if let Some(sidx) = self.lookup_local_index(scope_id, name) {
+                        self.references.push(Ref {
+                            symbol_index: sidx,
+                            name: name.clone(),
+                            span: (line1, char1, line1, char2),
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 
