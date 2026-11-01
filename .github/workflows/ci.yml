@@ -496,6 +496,14 @@ jobs:
       contents: write        # 上传 Release 产物需要
 
     steps:
+      # 源码检出：**构建 .vsix 需要 editors/vscode/ 目录**（本作业只下载三平台产物，
+      # 产物里没有源码树）。少了这一步，`bash editors/vscode/build.sh` 会因
+      # 「文件不存在」而失败——而它恰好是整个发布流程的最后一道关。
+      - name: 检出源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: 取回三平台产物
         uses: actions/download-artifact@v4
         with:
