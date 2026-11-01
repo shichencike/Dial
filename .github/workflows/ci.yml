@@ -130,8 +130,9 @@ jobs:
 
     env:
       # 注意：Windows 上 Rust 的 Command::new 对无扩展名路径只补 .exe、不补 .cmd，
-      # 因此 LLVM_SYS_181_PREFIX 指向的 llvm-config（.cmd 垫片）无法被 llvm-sys 解析。
-      # 改为把 C:\llvm-shim\bin 放进 PATH，让 llvm-sys 在 PATH 中按 PATHEXT 裸名找到 llvm-config.cmd。
+      # 因此旧版 .cmd 垫片无法被 llvm-sys 解析（表现为 No suitable version of LLVM）。
+      # 改为把 C:\llvm-shim\bin 放进 PATH，让 llvm-sys 在 PATH 中按 PATHEXT 裸名找到
+      # 我们由 tools/llvm-config-win-shim.c 编译出的**真正的 llvm-config.exe**（见下方步骤）。
       LLVM18_DIR: C:\llvm18
 
     steps:
@@ -395,6 +396,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/**/dialc-v*.zip
+          overwrite: true          # 允许重发时覆盖同名资产（重指标签重跑发布用）
           fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
@@ -419,4 +421,4 @@ jobs:
             irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
             ```
 
-            每个包内含 `dialc`(`dialc.exe`)、`stdlib/`、`runtime/`、四份许可文件与对应安装脚本。
+            每个包内含 `dialc`(`dialc.exe`)、`stdlib/`、`runtime/`、四份许可文件、对应安装脚本，以及编译发布流程 `.github/workflows/ci.yml`。

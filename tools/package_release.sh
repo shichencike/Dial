@@ -63,6 +63,16 @@ cp "$BIN" "$DEST/$BASENAME"
 cp -r stdlib runtime "$DEST/"
 for f in LICENSE LICENSE-GPLv3 LICENSE-MIT LICENSE-APACHE; do cp "$f" "$DEST/"; done
 cp tools/install-dial.sh "$DEST/install-dial.sh"
+
+# 编译发布流程（GitHub Actions 工作流），一并随包分发（原计划要求「放进压缩包」）
+mkdir -p "$DEST/.github/workflows"
+if [ -f .github/workflows/ci.yml ]; then
+  cp .github/workflows/ci.yml "$DEST/.github/workflows/ci.yml"
+  echo "   ✅ 已随包附带 ci.yml（编译发布流程）"
+else
+  echo "   ⚠️  未找到 .github/workflows/ci.yml，跳过" >&2
+fi
+
 if [ "$SLUG" = "windows-x86_64" ]; then
   cp tools/install-dial.ps1 "$DEST/install-dial.ps1"
   # LLVM-C.dll：dialc.exe 运行期依赖（与官方 MSVC LLVM 18 的 C 接口配套）
@@ -139,7 +149,7 @@ else
   LISTING=$(powershell -NoProfile -Command \
     "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead('$(to_win "$OUT")').Entries.FullName" 2>/dev/null || true)
 fi
-for f in LICENSE LICENSE-GPLv3 LICENSE-MIT LICENSE-APACHE "$BASENAME" stdlib runtime install-dial.sh; do
+for f in LICENSE LICENSE-GPLv3 LICENSE-MIT LICENSE-APACHE "$BASENAME" stdlib runtime install-dial.sh .github/workflows/ci.yml; do
   if echo "$LISTING" | grep -q "${PKG_ROOT}/$f"; then
     echo "   ✅ 包内含 $f"
   else
