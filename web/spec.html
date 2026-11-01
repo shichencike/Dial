@@ -23,7 +23,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v097">dialc — Dial 语言编译器 v0.97</a><ul>
+<li><a href="#dialc--dial-语言编译器-v098">dialc — Dial 语言编译器 v0.98</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -131,7 +131,7 @@
 <li><a href="#16-内置-print">16. 内置 print</a></li>
 <li><a href="#17-未定义行为与已实现边界">17. 未定义行为与已实现边界</a><ul>
 <li><a href="#171-未定义行为">17.1 未定义行为</a></li>
-<li><a href="#172-尚未实现的能力截至-v096">17.2 尚未实现的能力（截至 v0.96）</a></li>
+<li><a href="#172-尚未实现的能力截至-v098">17.2 尚未实现的能力（截至 v0.98）</a></li>
 </ul>
 </li>
 <li><a href="#18-测试">18. 测试</a><ul>
@@ -276,7 +276,7 @@
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v097">dialc — Dial 语言编译器 v0.97</h1>
+<h1 id="dialc--dial-语言编译器-v098">dialc — Dial 语言编译器 v0.98</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -293,7 +293,7 @@
 <p>Dial 是一门<strong>静态强类型、显式标注、无 GC</strong> 的编译型语言。编译器前端（Rust + inkwell）
 只负责把 Dial 源码翻译成 LLVM IR；<strong>所有容器与运行时能力都由 C 语言实现</strong>，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。</p>
-<p>本文件是 v0.97 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
+<p>本文件是 v0.98 的<strong>规范性文档</strong>：描述的语言行为与 <code>src/</code> 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。</p>
 <hr />
 <h2 id="1-设计原则">1. 设计原则</h2>
@@ -515,21 +515,21 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 <p>不想自己编译？每个平台有独立的预编译包 <code>dialc-v&lt;版本&gt;-&lt;slug&gt;.zip</code>，内含编译器、标准库、运行时
 与一键安装脚本（ARCHITECTURE.md §3.2 阶段 5）：</p>
 <pre><code class="language-bash"># Linux x86_64
-curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.97-linux-x86_64.zip
-unzip dialc-v0.97-linux-x86_64.zip &amp;&amp; cd Dial
+curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.98-linux-x86_64.zip
+unzip dialc-v0.98-linux-x86_64.zip &amp;&amp; cd Dial
 bash tools/install-dial.sh                 # 扫描当前目录及其子目录
 bash tools/install-dial.sh /path/to/pkgs   # 或扫描指定目录
 </code></pre>
 <pre><code class="language-bash"># Termux aarch64（musl 全静态，包名 slug = termux-aarch64）
-curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.97-termux-aarch64.zip
-unzip dialc-v0.97-termux-aarch64.zip &amp;&amp; cd Dial
+curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.98-termux-aarch64.zip
+unzip dialc-v0.98-termux-aarch64.zip &amp;&amp; cd Dial
 bash tools/install-dial.sh
 </code></pre>
 <pre><code class="language-powershell"># Windows x64（MinGW）：一行式从最新 Release 拉取并安装
 irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
 
 # 或手动：解压后运行 PowerShell 安装脚本
-Expand-Archive dialc-v0.97-windows-x86_64.zip -DestinationPath .
+Expand-Archive dialc-v0.98-windows-x86_64.zip -DestinationPath .
 powershell -ExecutionPolicy Bypass -File tools\install-dial.ps1
 </code></pre>
 <p>脚本承担两件事（<strong>顺序不能反</strong>）：</p>
@@ -718,7 +718,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 <p><strong>以上仅限 <code>.dial</code> 源码的关键字。</strong> 接口签名文件 <code>.diali</code> 另有 <code>type</code> / <code>extern fn</code> 等<strong>专用语法</strong>（见 <a href="#252-包内结构与接口签名供-lsp-与-sema-使用">§25.2</a>），它们<strong>不是</strong> Dial 语言的关键字，由包解析器 <code>src/package.rs</code> 单独处理，不会出现在 <code>.dial</code> 源码里。</p>
 <p><code>char</code> 是 v0.92 引入的单字符类型：<strong>一个 Unicode 码点</strong>，底层与 <code>int</code> 同为 <code>i64</code>，
 但类型独立——不参与算术，只可比较或经 <code>char_to_int</code> / <code>int_to_char</code> 显式转换
-（见 <a href="#51-基本类型">§5.1</a> 与 <a href="#172-尚未实现的能力截至-v096">§17.2</a>）。</p>
+（见 <a href="#51-基本类型">§5.1</a> 与 <a href="#172-尚未实现的能力截至-v098">§17.2</a>）。</p>
 <p><code>try</code> / <code>catch</code> / <code>throw</code> 是 v0.7 引入的可恢复异常关键字（见 <a href="#26-可恢复异常trycatchthrow">§26</a>）。
 注意 <strong><code>error</code> 不是关键字</strong>——它是内建构造函数名（与 <code>open</code> / <code>print</code> 同类），写作 <code>Error("...")</code>。
 同理 <code>catch</code> 后<strong>不跟圆括号</strong>：<code>catch e { }</code>，而非 <code>catch (e) { }</code>。</p>
@@ -2066,14 +2066,15 @@ void     dial_map_release(DialMap m);
 </tr>
 </tbody>
 </table>
-<h3 id="172-尚未实现的能力截至-v096">17.2 尚未实现的能力（截至 v0.96）</h3>
+<h3 id="172-尚未实现的能力截至-v098">17.2 尚未实现的能力（截至 v0.98）</h3>
 <blockquote>
 <p>已落地：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
 <code>let</code> + 原地修改方法（push/set/put）的接收者约束、<code>else if</code> 语法糖、<code>for</code> 范围循环、<code>break</code> / <code>continue</code>、
 Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§26）、
 所有权转移与多线程并发（§27，含 v0.81 的通道关闭与 EOF、v0.9 的判空与多消费者安全）、
 <strong><code>char</code> 类型（v0.92，见 §5.1）</strong>、<strong><code>import</code> 与 <code>.dialpkg</code> 包分发（v0.93，见 §25）</strong>、
-<strong><code>dialc lsp</code> 语言服务器骨架（v0.94，见 §28）</strong>。
+<strong>三平台原生构建（v0.97：Linux x86_64 / Windows x64-MinGW / Termux aarch64-musl 全静态）</strong>、
+<strong><code>dialc lsp</code> 语言服务器（v0.94 骨架 → v0.95 增强 → v0.98 工业化，见 §28）</strong>。
 其余仍按计划未实现：</p>
 </blockquote>
 <table>
@@ -3755,7 +3756,7 @@ fn main(): int {
 JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 <strong><a href="ARCHITECTURE.md">ARCHITECTURE.md《Dial 标准库与包分发最终规范》</a></strong>。
 规范一旦在真实包上落地，将同步更新本章、ARCHITECTURE.md 与 <a href="CHANGELOG.md">CHANGELOG.md</a>；
-在此之前，<code>import</code> 仍按 <a href="#172-尚未实现的能力截至-v096">§17.2</a> 视为<strong>不支持</strong>。</p>
+在此之前，<code>import</code> 仍按 <a href="#172-尚未实现的能力截至-v098">§17.2</a> 视为<strong>不支持</strong>。</p>
 </blockquote>
 <hr />
 <h2 id="26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</h2>
@@ -5145,7 +5146,7 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.96 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.98 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

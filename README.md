@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v0.97
+# dialc — Dial 语言编译器 v0.98
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -24,7 +24,7 @@ Dial 是一门**静态强类型、显式标注、无 GC** 的编译型语言。�
 只负责把 Dial 源码翻译成 LLVM IR；**所有容器与运行时能力都由 C 语言实现**，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。
 
-本文件是 v0.97 的**规范性文档**：描述的语言行为与 `src/` 中的实现逐条对应，
+本文件是 v0.98 的**规范性文档**：描述的语言行为与 `src/` 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。
 
 ---
@@ -193,16 +193,16 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 
 ```bash
 # Linux x86_64
-curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.97-linux-x86_64.zip
-unzip dialc-v0.97-linux-x86_64.zip && cd Dial
+curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.98-linux-x86_64.zip
+unzip dialc-v0.98-linux-x86_64.zip && cd Dial
 bash tools/install-dial.sh                 # 扫描当前目录及其子目录
 bash tools/install-dial.sh /path/to/pkgs   # 或扫描指定目录
 ```
 
 ```bash
 # Termux aarch64（musl 全静态，包名 slug = termux-aarch64）
-curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.97-termux-aarch64.zip
-unzip dialc-v0.97-termux-aarch64.zip && cd Dial
+curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.98-termux-aarch64.zip
+unzip dialc-v0.98-termux-aarch64.zip && cd Dial
 bash tools/install-dial.sh
 ```
 
@@ -211,7 +211,7 @@ bash tools/install-dial.sh
 irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
 
 # 或手动：解压后运行 PowerShell 安装脚本
-Expand-Archive dialc-v0.97-windows-x86_64.zip -DestinationPath .
+Expand-Archive dialc-v0.98-windows-x86_64.zip -DestinationPath .
 powershell -ExecutionPolicy Bypass -File tools\install-dial.ps1
 ```
 
@@ -349,7 +349,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 
 > `char` 是 v0.92 引入的单字符类型：**一个 Unicode 码点**，底层与 `int` 同为 `i64`，
 > 但类型独立——不参与算术，只可比较或经 `char_to_int` / `int_to_char` 显式转换
-> （见 [§5.1](#51-基本类型) 与 [§17.2](#172-尚未实现的能力截至-v096)）。
+> （见 [§5.1](#51-基本类型) 与 [§17.2](#172-尚未实现的能力截至-v098)）。
 
 > `try` / `catch` / `throw` 是 v0.7 引入的可恢复异常关键字（见 [§26](#26-可恢复异常trycatchthrow)）。
 > 注意 **`error` 不是关键字**——它是内建构造函数名（与 `open` / `print` 同类），写作 `Error("...")`。
@@ -1205,14 +1205,15 @@ print(e);
 | --- | --- |
 | 整数溢出 | 按 i64 二进制补码回绕（Debug 等级亦不检查） |
 
-### 17.2 尚未实现的能力（截至 v0.96）
+### 17.2 尚未实现的能力（截至 v0.98）
 
 > 已落地：`Map`（int → int，ARC 管理）、`read_line()`、短路求值、零隐式转换铁律、
 > `let` + 原地修改方法（push/set/put）的接收者约束、`else if` 语法糖、`for` 范围循环、`break` / `continue`、
 > Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§26）、
 > 所有权转移与多线程并发（§27，含 v0.81 的通道关闭与 EOF、v0.9 的判空与多消费者安全）、
 > **`char` 类型（v0.92，见 §5.1）**、**`import` 与 `.dialpkg` 包分发（v0.93，见 §25）**、
-> **`dialc lsp` 语言服务器骨架（v0.94，见 §28）**。
+> **三平台原生构建（v0.97：Linux x86_64 / Windows x64-MinGW / Termux aarch64-musl 全静态）**、
+> **`dialc lsp` 语言服务器（v0.94 骨架 → v0.95 增强 → v0.98 工业化，见 §28）**。
 > 其余仍按计划未实现：
 
 | 能力 | 状态 |
@@ -2224,7 +2225,7 @@ $ dialc build main.dial -o main
 > JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 > **[ARCHITECTURE.md《Dial 标准库与包分发最终规范》](ARCHITECTURE.md)**。
 > 规范一旦在真实包上落地，将同步更新本章、ARCHITECTURE.md 与 [CHANGELOG.md](CHANGELOG.md)；
-> 在此之前，`import` 仍按 [§17.2](#172-尚未实现的能力截至-v096) 视为**不支持**。
+> 在此之前，`import` 仍按 [§17.2](#172-尚未实现的能力截至-v098) 视为**不支持**。
 
 ---
 

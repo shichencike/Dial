@@ -112,6 +112,9 @@ jobs:
       - name: 校验内部锚点（README / CHANGELOG）
         run: python3 tools/check_links.py
 
+      - name: 校验版本号一致性（README / CHANGELOG / 官网）
+        run: python3 tools/check_version.py
+
       - name: 校验官网产物与文档同步
         run: |
           set -euo pipefail

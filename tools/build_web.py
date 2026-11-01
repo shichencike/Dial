@@ -20,6 +20,29 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
 ASSETS = WEB / "assets"
 
+
+def current_version() -> tuple[str, str]:
+    """从 **Cargo.toml** 取版本号——全站唯一真相。
+
+    官网的 footer、KPI、下载链接都从这里取，而不是各自硬编码一份。
+    硬编码的版本号必然随发布漂移（v0.96 → v0.97 → v0.98 就漂过三轮：
+    footer 停在 v0.96、首页 KPI 停在 v0.96、下载链接还指着早已不存在的
+    `dialc-v0.96.zip`）。**版本号只能有一个出处**，否则每次发版都要手工追一遍。
+
+    返回 `(显示版本 "v0.98", 完整版本 "0.98.0")`。
+    显示版本取「两位小数」是本项目的版本号规则（见 README §23）。
+    """
+    cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    m = re.search(r'^version\s*=\s*"([0-9]+(?:\.[0-9]+)*)"', cargo, re.M)
+    if not m:
+        raise SystemExit("无法从 Cargo.toml 解析版本号")
+    full = m.group(1)
+    major_minor = ".".join(full.split(".")[:2])
+    return f"v{major_minor}", full
+
+
+VERSION, VERSION_FULL = current_version()
+
 try:
     import markdown  # noqa: E402
 except ImportError:  # pragma: no cover
@@ -47,10 +70,10 @@ FOOTER = """
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.96 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">{ver} · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
-"""
+""".replace("{ver}", VERSION)
 
 CSS = """
 :root{
@@ -243,6 +266,8 @@ def render_index() -> str:
         ("LSP 增强：Hover / 跳转定义 / 补全（v0.95）", "一座独立于类型检查、可容错的符号表（src/index.rs）：半句没写完的代码也能索引，Hover 与补全照样有反应。作用域链「由内向外」查找，所以 if 块里 let x: int 遮蔽外层 let x: string 在悬停 / 定义 / 补全三处都查的是内层那个；顺着 import 自动扫描 ~/.dial/packages/ 把包的不透明类型与 extern fn 装进内存符号表，Hover 包函数时直接渲染 .diali 的 /// 文档并标注「外部函数」，跳转定义对包符号直接送进 .diali 的声明行。均由测试组 K 端到端锁死。"),
         ("包 URL 安装 + 一键安装（v0.96）", "包可以直接从 URL 装：dialc install https://.../pkg.dialpkg —— 不用先手动下载。只允许 https（本机除外），明文 http 能被中间人改写，而 SHA256 挡不住「换了内容还带着正确哈希」的伪造，所以宁可装不上也不降级。--sha256 可钉死整包哈希，比对发生在解压之前；而无论给不给，包里每个文件都要按 manifest 登记的哈希先验一遍——校验先于解压，一个字节都还没落到磁盘。另有 install-dial.sh / .ps1 一键脚本：初始化环境（编译器 + stdlib + runtime + PATH）→ 自动重新扫描并装上目录里的所有 .dialpkg——包就在那里，脚本看得见，用户不必记住包名。"),
         ("三重开源许可（含许可隔离）", "GPL-3.0 OR MIT OR Apache-2.0 —— 三者任选其一遵守。三份协议原文与说明文档随源码及发布包完整分发。<b>许可按组件划分</b>：编译器前端（dialc 本体）为三重许可；但被静态链进你程序的标准库 libdial_std.a <b>强制锁定为 MIT 或 Apache-2.0，绝不允许以 GPL 条款链接进闭源程序</b>——工具可以是 GPL，被链进你程序里的运行时绝不能是。"),
+        ("三平台原生构建（v0.97）", "Linux x86_64 · Windows x64-MinGW · Termux aarch64-musl 全静态——三者均为 CI 在各平台宿主上<b>直接编译</b>：编译期目标即运行期平台，没有交叉编译的 ABI 陷阱。Windows 走官方 MSVC 构建的 LLVM 18 全量包，但只取纯 C ABI 的 C 接口，跨 MSVC / MinGW 无名字改写冲突；Termux 侧 musl 全静态，用户程序零外部依赖。"),
+        ("LSP 工业化 + 三编辑器接入（v0.98）", "dialc lsp 分四轮打磨到工业级：<b>基础稳健</b>（能力协商、补全增强）·<b>导航全家桶</b>（文档大纲 / 工作区符号 / 引用查找 / 重命名 / 签名帮助）·<b>编写辅助</b>（保守格式化 / 参数 inlay 提示）·<b>高级能力</b>（代码动作 / 折叠 / 选择范围 / 文档链接）。诊断带稳定错误码、缺包会明确报出并给「一键安装这个包」的 quickfix。编辑器侧交付 VS Code（手写 LSP 客户端，零 npm）、Neovim（内置客户端，零依赖）与 Emacs（eglot 原生连，不开发插件）三套接入。"),
     ]
     card_html = "".join(
         f'<div class="card"><h3>{c[0]}</h3><p>{c[1]}</p></div>' for c in cards)
@@ -266,7 +291,7 @@ def render_index() -> str:
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
     </div>
     <div class="kpis">
-      <span><b>v0.96</b> 当前版本</span>
+      <span><b>{VERSION}</b> 当前版本</span>
       <span><b>Rust + inkwell</b> / LLVM 18</span>
       <span><b>零</b> LLVM 运行时依赖</span>
       <span><b>短路</b> and / or</span>
@@ -281,8 +306,11 @@ def render_index() -> str:
 <section class="quickstart">
   <h2>快速开始</h2>
   <p class="muted" style="text-align:center;margin-bottom:12px">
-    ⚠️ 仅支持 <b>Linux（x86_64 · 动态 glibc）</b>，且主要在 <b>近两年内发布的发行版</b>上验证
-    （Ubuntu 24.04 LTS / Fedora 42 / Debian 13 等）。musl 系统（如 Alpine）不支持——编译器本体与产物都依赖 glibc。
+    ⚠️ 三个平台各有各的运行时依赖（详见 <a href="spec.html">语言规范</a> 与 Releases 说明）：
+    <b>Linux x86_64</b>（动态 glibc，需系统装 libLLVM-18）·
+    <b>Windows x64-MinGW</b>（随包分发 LLVM-C.dll）·
+    <b>Termux aarch64</b>（musl 全静态，无外部依赖）。
+    三者均为<b>原生构建</b>——CI 在各平台宿主上直接编译，编译期目标即运行期平台，没有交叉编译的 ABI 陷阱。
   </p>
   <pre><code># 获取源码
 git clone https://github.com/shichencike/Dial.git
@@ -299,7 +327,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 # 编译并运行一个 Dial 程序
 ./target/release/dialc run examples/hello.dial
 
-# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装等十二组）
+# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装等十三组）
 ./tests/run_tests.sh</code></pre>
   <h2>最小示例</h2>
   <pre><code>fn main(): int {{
@@ -308,9 +336,10 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
     return 0;
 }}</code></pre>
   <p class="muted" style="text-align:center">
-    下载源码包：<a href="../dialc-v0.96.zip">dialc-v0.96.zip</a>（或自行 clone 仓库后构建）<br>
+    下载发布包：<a class="ext" href="https://github.com/shichencike/Dial/releases/download/{VERSION}/dialc-{VERSION}-linux-x86_64.zip">dialc-{VERSION}-linux-x86_64.zip</a>
+    （Windows / Termux 见 <a class="ext" href="https://github.com/shichencike/Dial/releases">Releases</a>；或自行 clone 仓库后构建）<br>
     发布包由 <a class="ext" href="https://github.com/shichencike/Dial/actions/workflows/ci.yml" target="_blank" rel="noopener">GitHub Actions</a>
-    自动构建：装 LLVM 18 → 编译 → 跑全部十一组端到端测试 → 打包上传 Release。
+    自动构建：装 LLVM 18 → 编译 → 跑全部十三组端到端测试 → 打包上传 Release。
   </p>
 </section>
 {FOOTER}
