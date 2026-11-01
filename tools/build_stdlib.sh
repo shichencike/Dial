@@ -30,9 +30,13 @@ if [ ! -d "$STDLIB_DIR" ] || [ ! -d "$RUNTIME_DIR" ]; then
     exit 1
 fi
 
-# ---- 选择 C 编译器（与 link() 的 cc_command 同序：优先本机 gcc/clang）----
+# ---- 选择 C 编译器 ----
+# 顺序：显式 $CC → zig cc（本地开发首选，跨平台一致）→ gcc → clang → cc。
+# 注意：clang 在部分平台会动态加载 LLVM（Termux 容器内删掉 libffi.so 后失效；
+# 而 Windows 的 MSVC clang 缺 unistd.h），故 gcc 优先于 clang，让 stdlib 用各平台
+# 自包含的 GNU C 编译器编译。这与 link() 回退编译路径（gcc 优先）保持一致。
 CC=""
-for cand in "${CC:-}" "zig cc" clang gcc cc; do
+for cand in "${CC:-}" "zig cc" gcc clang cc; do
     [ -z "$cand" ] && continue
     if command -v "${cand%% *}" >/dev/null 2>&1; then
         CC="$cand"

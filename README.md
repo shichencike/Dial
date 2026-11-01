@@ -1732,7 +1732,7 @@ fn main(): int {
 > **v0.93 已落地**：`import "包名";` 语句、`.dialpkg` 解包（含路径穿越防护）、
 > `manifest.txt` 解析、按 Target Triple 选库、**SHA256 强制校验**、
 > `.diali` 签名解析接入 Sema、链接期自动链入对应平台的机器码。
-> 见 [§25.9](#259-用法import-与-dialc-installv093-已实现v096-支持-url)、[§25.10](#2510-官方标准库stdlibdialpkg-独立发布)。
+> 见 [§25.9](#259-用法import-与-dialc-installv093-已实现v096-支持-url)、[§25.10](#2510-官方标准库-stdlibdialpkg独立发布)。
 > 截至 v0.96 + 官方标准库 v1.0.0，`dialc install <URL>`、一键安装脚本、`stdlib.dialpkg` 化均已落地；
 > 仅**纯 MSVC 线程后端**仍在规划（MinGW 路线下非阻塞）。
 >
