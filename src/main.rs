@@ -301,6 +301,37 @@ fn main() {
     }
 }
 
+/// 「找不到已安装的包」的标准文案。
+///
+/// **CLI 与 LSP 必须用同一句**：否则用户在编辑器里看到的提示与命令行看到的对不上，
+/// 反而更困惑。LSP 侧还会给它挂上稳定错误码 `dialc.package.missing`。
+pub fn missing_package_message(name: &str) -> String {
+    let root = package::cache_root()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "~/.dial/packages".to_string());
+    format!(
+        "找不到已安装的包 '{}'（缓存目录: {}）。\
+         请先用 `dialc install <包.dialpkg>` 安装，或把 .dialpkg 放到项目目录",
+        name, root
+    )
+}
+
+/// 只问「包装了没」，不做校验、不读 `.diali`。
+///
+/// LSP 需要它来给出「找不到已安装的包 'x'」的诊断：`resolve_imports` 的错误只是一个
+/// 字符串，丢了「是哪个包」这个关键信息；这里单独问一次，答案才是结构化的。
+///
+/// 只报**第一个**缺失的包——一次报十个缺失包，等于没报。
+pub fn first_missing_package(imports: &[String]) -> Option<String> {
+    for name in imports {
+        match package::find_installed(name) {
+            Ok(Some(_)) => {}
+            _ => return Some(name.clone()),
+        }
+    }
+    None
+}
+
 /// 解析 `import` 列表：定位已安装的包 → 校验 → 读 `.diali` 签名 → 选出本平台机器码。
 ///
 /// 返回 `(外部函数表, 待链接的静态库列表)`。
@@ -331,13 +362,7 @@ pub fn resolve_imports(
         let (dir, manifest) = match found {
             Some(x) => x,
             None => {
-                let root = package::cache_root().map_err(|e| e.to_string())?;
-                return Err(format!(
-                    "找不到已安装的包 '{}'（缓存目录: {}）。\
-                     请先用 `dialc install <包.dialpkg>` 安装，或把 .dialpkg 放到项目目录",
-                    name,
-                    root.display()
-                ));
+                return Err(missing_package_message(name));
             }
         };
 

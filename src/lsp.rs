@@ -537,7 +537,7 @@ fn collect_diagnostics(text: &str, log: &mut dyn FnMut(&str)) -> Vec<Value> {
     let tokens = match lexer::lex(text) {
         Ok(t) => t,
         Err(e) => {
-            diags.push(diagnostic(&e));
+            diags.push(diagnostic(&e, "dialc.lex"));
             return diags;
         }
     };
@@ -545,14 +545,23 @@ fn collect_diagnostics(text: &str, log: &mut dyn FnMut(&str)) -> Vec<Value> {
     let probe = match parser::parse(tokens.clone()) {
         Ok(p) => p,
         Err(e) => {
-            diags.push(diagnostic(&e));
+            diags.push(diagnostic(&e, "dialc.parse"));
             return diags;
         }
     };
 
-    // 2.5) 解析 import —— 拿不到包不算是「代码错误」，
-    //      而是环境问题，因此失败时**静默降级**为空外部函数表，
-    //      继续做本地的检查（否则装个包之前连语法高亮都看不到错误）。
+    // 2.5) 解析 import —— 先问「包装了没」。
+    //
+    // 缺包**必须报出来**：它是环境问题，用户看得见才能去装。
+    // 而且此时继续做语义检查只会产出一堆「未定义的函数」——那是**后果**不是**原因**，
+    // 报出来只会淹没真正要修的那一条。所以缺包时直接返回，只报这一条。
+    //
+    // （此前这里把 resolve_imports 的失败**静默吞掉**，于是「import 了没装的包」
+    //   在编辑器里毫无提示——用户只能去命令行才知道少了什么。）
+    if let Some(pkg) = crate::first_missing_package(&probe.imports) {
+        diags.push(package_missing_diagnostic(&pkg, &tokens));
+        return diags;
+    }
     let (externs, _libs, opaque) = match crate::resolve_imports(&probe.imports, log) {
         Ok(r) => r,
         Err(_) => (Vec::new(), Vec::new(), Vec::new()),
@@ -562,26 +571,75 @@ fn collect_diagnostics(text: &str, log: &mut dyn FnMut(&str)) -> Vec<Value> {
     let mut program = match parser::parse_with(tokens, &opaque) {
         Ok(p) => p,
         Err(e) => {
-            diags.push(diagnostic(&e));
+            diags.push(diagnostic(&e, "dialc.parse"));
             return diags;
         }
     };
     if let Err(e) = semantic::analyze(&mut program, &externs) {
-        diags.push(diagnostic(&e));
+        diags.push(diagnostic(&e, "dialc.sema"));
     }
     diags
+}
+
+/// 「找不到已安装的包 'x'」的诊断。
+///
+/// - **错误码** `dialc.package.missing`：工具据此给「安装这个包」的 quickfix。
+/// - **`data.package`**：把包名以**结构化**方式带上。LSP 的 diagnostic 允许携带任意
+///   `data`，工具应优先读它——而不是去解析消息文本（措辞会变）。
+/// - 位置定位到对应的 `import` 语句（靠重扫 token 流：`Import` + `StringLit` 一对）。
+fn package_missing_diagnostic(pkg: &str, tokens: &[lexer::Token]) -> Value {
+    let (line, col) = import_stmt_pos(pkg, tokens).unwrap_or((1, 1));
+    // 走**统一**的诊断构造路径：错误自带更具体的码时，以自带的为准。
+    let e = DialcError::with_code(
+        "dialc.package.missing",
+        crate::missing_package_message(pkg),
+        line,
+        col,
+    );
+    let mut d = diagnostic(&e, "dialc.package.missing");
+    // 再补上结构化的包名，供 quickfix 直接取用（不必解析消息文本）。
+    d["data"] = json!({ "package": pkg });
+    d
+}
+
+/// 找到 `import "pkg";` 语句的位置（1 起的行列）。
+///
+/// `probe.imports` 只有包名、没有位置；而 import 语句在 token 流里是
+/// `Import` + `StringLit` 一对，认起来很直接。
+fn import_stmt_pos(pkg: &str, tokens: &[lexer::Token]) -> Option<(usize, usize)> {
+    for (i, t) in tokens.iter().enumerate() {
+        if !matches!(t.kind, TokenKind::Import) {
+            continue;
+        }
+        if let Some(TokenKind::StringLit(s)) = tokens.get(i + 1).map(|t| &t.kind) {
+            if s == pkg {
+                return Some((t.line, t.col));
+            }
+        }
+    }
+    None
 }
 
 /// 把 `DialcError` 转成 LSP 的 Diagnostic。
 ///
 /// 行列转换是这里唯一容易出错的地方：dialc 的 line / col 都是 **1 起**，
 /// 而 LSP 的 line / character 都是 **0 起**，且**未饱和**（可能越界）。
-fn diagnostic(e: &DialcError) -> Value {
+///
+/// `phase_code` 是该阶段的**默认**错误码：错误自带更具体的码时以自带的为准
+/// （如 `dialc.package.missing`），否则用阶段级码（`dialc.lex` / `dialc.parse` / `dialc.sema`）。
+///
+/// **错误码是给工具看的**：编辑器可按码过滤或忽略某类诊断，LSP 侧据此给出
+/// 针对性 quickfix。消息文本会随版本调整，工具**不该**去匹配它——
+/// 改一次措辞就废掉一个工具，这种坑我们不踩第二次。
+///
+/// 行列换算：dialc 的 line / col 都是 **1 起**，LSP 的 line / character 都是 **0 起**。
+fn diagnostic(e: &DialcError, phase_code: &str) -> Value {
     let (line, col) = if e.line == 0 || e.col == 0 {
         (0usize, 0usize) // 无位置信息（很多语义错误是 0,0）——落在文件开头
     } else {
         (e.line - 1, e.col - 1)
     };
+    let code = if e.code.is_empty() { phase_code } else { e.code };
     json!({
         "range": {
             "start": { "line": line, "character": col },
@@ -589,6 +647,7 @@ fn diagnostic(e: &DialcError) -> Value {
         },
         "severity": 1,          // 1 = Error
         "source": "dialc",
+        "code": code,
         "message": e.message
     })
 }
@@ -1787,28 +1846,37 @@ fn extract_missing_pkg(msg: &str) -> Option<String> {
 fn code_action(_uri: &str, _range: &Value, diagnostics: &[Value]) -> Vec<Value> {
     let mut out = Vec::new();
     for d in diagnostics {
+        let code = d.get("code").and_then(|c| c.as_str()).unwrap_or("");
         let msg = d.get("message").and_then(|m| m.as_str()).unwrap_or("");
-        if let Some(pkg) = extract_missing_pkg(msg) {
-            out.push(json!({
-                "title": format!("安装包 '{}'（dialc install）", pkg),
-                "kind": "quickfix",
-                "command": {
-                    "title": format!("dialc install {}", pkg),
-                    "command": "dialc.install",
-                    "arguments": [pkg]
-                }
-            }));
-        } else {
-            out.push(json!({
-                "title": "在终端运行 dialc build 查看完整错误",
-                "kind": "quickfix",
-                "command": {
-                    "title": "dialc build",
-                    "command": "dialc.build",
-                    "arguments": []
-                }
-            }));
+        // 包名优先取**结构化**的 `data.package`；客户端没保留 data 时才回退到解析消息文本。
+        let pkg = d
+            .pointer("/data/package")
+            .and_then(|p| p.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| extract_missing_pkg(msg));
+        if code == "dialc.package.missing" {
+            if let Some(pkg) = pkg {
+                out.push(json!({
+                    "title": format!("安装包 '{}'（dialc install）", pkg),
+                    "kind": "quickfix",
+                    "command": {
+                        "title": format!("dialc install {}", pkg),
+                        "command": "dialc.install",
+                        "arguments": [pkg]
+                    }
+                }));
+                continue;
+            }
         }
+        out.push(json!({
+            "title": "在终端运行 dialc build 查看完整错误",
+            "kind": "quickfix",
+            "command": {
+                "title": "dialc build",
+                "command": "dialc.build",
+                "arguments": []
+            }
+        }));
     }
     out
 }

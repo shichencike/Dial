@@ -39,6 +39,8 @@ class LspClient:
         self.next_id = 1
         # 协议污染检测：stdout 上出现任何非协议字节都记在这里（见 _read_one）。
         self.pollution = []
+        # 收到的**通知**（如 publishDiagnostics）——断言诊断内容时要用。
+        self.notifications = []
         # 超时自杀：请求迟迟没有响应时，由看门狗杀掉进程，避免 CI 无限挂住。
         self.timed_out = None
         self._stderr_thread = threading.Thread(
@@ -108,7 +110,11 @@ class LspClient:
                 self.buf += chunk
             body = self.buf[start : start + m]
             self.buf = self.buf[start + m :]
-            return json.loads(body.decode("utf-8", "replace"))
+            msg = json.loads(body.decode("utf-8", "replace"))
+            # 通知（无 id）顺手存一份：断言诊断内容时要用，而 request() 只等响应。
+            if msg.get("id") is None and msg.get("method"):
+                self.notifications.append(msg)
+            return msg
 
     def request(self, method: str, params: dict, timeout: float = 30.0) -> object:
         rid = self.next_id
@@ -445,6 +451,8 @@ def main():
             print(f"[smoke] selectionRange 命中 range: {json.dumps(sel['range'], ensure_ascii=False)}")
 
         # 17) codeAction：缺失包诊断 → 给出 dialc.install；普通诊断 → 给出 dialc.build
+        #     诊断按**真实形状**构造：带稳定错误码 + 结构化 data.package。
+        #     （quickfix 现在认错误码，不认消息文本——所以合成诊断必须带 code。）
         ca_pkg = client.request(
             "textDocument/codeAction",
             {
@@ -452,7 +460,11 @@ def main():
                 "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
                 "context": {
                     "diagnostics": [
-                        {"message": "找不到已安装的包 'demo'（缓存目录: ...）。请先用 dialc install 安装"}
+                        {
+                            "code": "dialc.package.missing",
+                            "data": {"package": "demo"},
+                            "message": "找不到已安装的包 'demo'（缓存目录: ...）。请先用 dialc install 安装",
+                        }
                     ]
                 },
             },
@@ -513,6 +525,116 @@ def main():
             fails.append("selectionRange(positions 数组) 的元素缺少 range")
         else:
             print(f"[smoke] selectionRange 规范形式（positions 数组）返回 {len(sel_multi)} 条")
+
+        # 22) 诊断要带**稳定错误码**：缺包必须真的报出来（此前被静默吞掉，
+        #     于是编辑器里毫无提示，轮4 的「安装包」quickfix 也从不触发）。
+        miss_uri = "file:///missing_pkg.dial"
+        client.notify(
+            "textDocument/didOpen",
+            {
+                "textDocument": {
+                    "uri": miss_uri,
+                    "languageId": "dial",
+                    "version": 1,
+                    "text": 'import "definitely_not_installed_pkg";\n\nfn main(): int {\n    return 0;\n}\n',
+                }
+            },
+        )
+        # 发一个请求把紧随其后的诊断通知消费掉（request 只等带 id 的响应）
+        client.request("textDocument/documentSymbol", {"textDocument": {"uri": miss_uri}})
+        miss_diags = []
+        for n in client.notifications:
+            if (
+                n.get("method") == "textDocument/publishDiagnostics"
+                and n.get("params", {}).get("uri") == miss_uri
+            ):
+                miss_diags = n["params"].get("diagnostics", [])
+        if not miss_diags:
+            fails.append("缺包时应当发布诊断（此前被静默吞掉，编辑器毫无提示）")
+        elif miss_diags[0].get("code") != "dialc.package.missing":
+            fails.append(
+                f"缺包诊断的错误码应为 dialc.package.missing，实际 {miss_diags[0].get('code')!r}"
+            )
+        elif (miss_diags[0].get("data") or {}).get("package") != "definitely_not_installed_pkg":
+            fails.append(
+                f"缺包诊断应带结构化 data.package，实际 {miss_diags[0].get('data')!r}"
+            )
+        else:
+            print("[smoke] 缺包诊断已发布（code=dialc.package.missing，data.package 齐备）")
+
+        # 23) 语义错误的诊断：必须有码，且**位置落在出错的语句上**（不是文件开头）。
+        sem_uri = "file:///semantic_err.dial"
+        sem_src = (
+            "fn helper(): int {\n"
+            "    return 1;\n"
+            "}\n"
+            "\n"
+            "fn main(): int {\n"
+            "    let c: string = helper();\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        client.notify(
+            "textDocument/didOpen",
+            {
+                "textDocument": {
+                    "uri": sem_uri,
+                    "languageId": "dial",
+                    "version": 1,
+                    "text": sem_src,
+                }
+            },
+        )
+        client.request("textDocument/documentSymbol", {"textDocument": {"uri": sem_uri}})
+        sem_diags = []
+        for n in client.notifications:
+            if (
+                n.get("method") == "textDocument/publishDiagnostics"
+                and n.get("params", {}).get("uri") == sem_uri
+            ):
+                sem_diags = n["params"].get("diagnostics", [])
+        if not sem_diags:
+            fails.append("语义错误应发布诊断")
+        elif sem_diags[0].get("code") != "dialc.sema":
+            fails.append(f"语义诊断的错误码应为 dialc.sema，实际 {sem_diags[0].get('code')!r}")
+        elif sem_diags[0]["range"]["start"]["line"] != 5:
+            fails.append(
+                f"语义诊断应落在出错语句（第 6 行 / 0 起第 5 行），"
+                f"实际第 {sem_diags[0]['range']['start']['line']} 行"
+            )
+        else:
+            print("[smoke] 语义诊断带码且定位到出错语句（第 6 行）")
+
+        # 24) codeAction 认**错误码**，不认消息文本：给一条带 code 的诊断，
+        #     即便消息文本与真实缺包文案不同，也该给出「安装包」动作。
+        ca_by_code = client.request(
+            "textDocument/codeAction",
+            {
+                "textDocument": {"uri": miss_uri},
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+                "context": {
+                    "diagnostics": [
+                        {
+                            "code": "dialc.package.missing",
+                            "data": {"package": "some_pkg"},
+                            "message": "（消息文本故意与真实文案不同）",
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 1},
+                            },
+                        }
+                    ]
+                },
+            },
+        ) or []
+        if not any(
+            a.get("command", {}).get("command") == "dialc.install"
+            and "some_pkg" in str(a.get("title", ""))
+            for a in ca_by_code
+        ):
+            fails.append("codeAction 应按错误码 + data.package 给出安装动作")
+        else:
+            print("[smoke] codeAction 按错误码与结构化包名给出安装动作")
 
         # 21) 协议流纯净性：stdout 上不得出现任何非协议字节。
         if client.pollution:

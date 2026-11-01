@@ -1187,7 +1187,8 @@ pub fn analyze(
                     "语义错误：'{}' 是内建函数的保留名，不能用作函数名",
                     f.name
                 ),
-                0, 0,
+                f.line,
+                f.col,
             ));
         }
     }
@@ -1234,7 +1235,8 @@ pub fn analyze(
         if funcs.contains_key(&f.name) {
             return Err(DialcError::new(
                 format!("语义错误：函数 '{}' 重复定义", f.name),
-                0, 0,
+                f.line,
+                f.col,
             ));
         }
         funcs.insert(
@@ -1267,9 +1269,17 @@ pub fn analyze(
         return Err(DialcError::new("语义错误：缺少程序入口函数 main()", 0, 0));
     }
     if funcs["main"].ret.clone() != Type::Int {
+        // 定位到 main 的定义处（而不是文件开头）：用户一眼就能看到是哪个 main 的问题。
+        let main_pos = program
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .map(|f| (f.line, f.col))
+            .unwrap_or((0, 0));
         return Err(DialcError::new(
             "语义错误：main 函数必须返回 int（作为进程退出码）",
-            0, 0,
+            main_pos.0,
+            main_pos.1,
         ));
     }
 
@@ -1340,14 +1350,19 @@ fn check_function(
 ) -> Result<()> {
     // 形参类型良构性
     for (pname, pty) in &f.params {
-        check_type_wellformed(pty, &format!("函数 '{}' 的形参 '{}'", f.name, pname), 0, 0)?;
+        check_type_wellformed(
+            pty,
+            &format!("函数 '{}' 的形参 '{}'", f.name, pname),
+            f.line,
+            f.col,
+        )?;
     }
     // 返回类型良构性
     check_type_wellformed(
         &f.ret,
         &format!("函数 '{}' 的返回类型", f.name),
-        0,
-        0,
+        f.line,
+        f.col,
     )?;
 
     let mut scopes: Scopes<VarState> = vec![HashMap::new()];
@@ -1359,22 +1374,6 @@ fn check_function(
         check_stmt_at(stmt, &mut scopes, funcs, f, structs, false, 0)?;
     }
     Ok(())
-}
-
-/// 取语句的行列号（用于诊断定位）；该语句不带位置时退化为 (0,0)。
-fn stmt_line_col(stmt: &Stmt) -> (usize, usize) {
-    match stmt {
-        Stmt::VarDecl { line, col, .. } => (*line, *col),
-        Stmt::Assign { line, col, .. } => (*line, *col),
-        Stmt::AssignField { line, col, .. } => (*line, *col),
-        Stmt::AssignIndex { line, col, .. } => (*line, *col),
-        Stmt::Break(l, c) => (*l, *c),
-        Stmt::Continue(l, c) => (*l, *c),
-        Stmt::Return(_, l, c) => (*l, *c),
-        Stmt::Throw(_, l, c) => (*l, *c),
-        Stmt::Try { line, col, .. } => (*line, *col),
-        _ => (0, 0),
-    }
 }
 
 /// 把变量标记为「已转移」。向外找到**声明它的那个作用域**再置位，
@@ -1402,7 +1401,7 @@ fn check_moved_stmt(
     funcs: &HashMap<String, FuncInfo>,
     structs: &StructTable,
 ) -> Result<()> {
-    let (line, col) = stmt_line_col(stmt);
+    let (line, col) = stmt_pos(stmt);
     match stmt {
         Stmt::VarDecl { value, .. } => check_moved_expr(value, scopes, funcs, structs, line, col),
         Stmt::Assign { name, value, .. } => {
@@ -1598,13 +1597,10 @@ fn check_stmt_at(
     try_depth: usize,
 ) -> Result<()> {
     let (line, col) = stmt_pos(stmt);
-    check_stmt(stmt, scopes, funcs, f, structs, in_loop, try_depth).map_err(|e| {
-        if e.line == 0 && e.col == 0 {
-            DialcError::new(e.message, line, col)
-        } else {
-            e
-        }
-    })
+    // 语义错误多半来自表达式（Expr 不带位置），但「错在哪条语句」我们**有**——
+    // 填上它，波浪线才不会落在文件开头。
+    // `e.at(..)` 保留消息**与错误码**：工具据此按类处理，不该再去匹配文本。
+    check_stmt(stmt, scopes, funcs, f, structs, in_loop, try_depth).map_err(|e| e.at(line, col))
 }
 
 fn check_stmt(
