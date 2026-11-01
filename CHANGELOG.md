@@ -31,6 +31,10 @@
 ### Changed（变更）
 - **LSP 能力协商**：`initialize` 读取客户端 `capabilities`，按声明动态广播能力（老客户端不报能力也不报错）；
   并新增 `window/logMessage` 自诊断通道（不污染协议流、不进 stdout）。
+- **VS Code 插件接通轮 2~4 的全部能力**：文档大纲、引用查找、重命名（含 prepareRename）、签名帮助、
+  保守格式化、参数 inlay 提示、代码动作、折叠范围、选择范围、文档链接——插件不再只转发三个 provider。
+- **Neovim 插件补上新能力的键位**：`<leader>f` 格式化、`<leader>a` 代码动作、`<leader>ds` 文档大纲，
+  并启用 Neovim 0.10+ 的 `foldingRange` 客户端（0.9 用 `pcall` 兜住）。
 - **补全增强**：补全项带 `textEdit` 精确替换范围（修正旧实现「名字重复拼在后面」的 bug）+ `sortText`
   排序（函数/外部函数最前、结构体/不透明类型次之、变量/形参最后）+ `.` 触发字符。
 - **VS Code 插件接通 hover / 跳转定义 / 补全**：原扩展仅接了诊断与语义高亮，现补齐三个 provider 转发到
@@ -60,7 +64,8 @@
 - **折叠范围**（`textDocument/foldingRange`）：按作用域包围盒给出可折叠区间（顶层作用域与单行区间不报）。
 - **选择范围**（`textDocument/selectionRange`）：从光标处逐级向外构造嵌套 `SelectionRange`（表达式 → 语句 → 块 → 函数）。
 - **文档链接**（`textDocument/documentLink`）：`import "pkg";` 的字符串字面量指向该包的 `.diali` 接口文件，可点击跳转。
-- 冒烟测试 `tools/lsp_smoke.py` 扩展到轮 4（折叠 / 选择 / 代码动作 / 文档链接断言均已通过）。
+- 冒烟测试 `tools/lsp_smoke.py` 扩展到轮 4（折叠 / 选择 / 代码动作 / 文档链接断言均已通过），并在
+  `tests/run_tests.sh` 新增 **M 组**（LSP 全能力往返 + 协议流纯净性）。
 
 ### Fixed（修复）
 - **能力协商把「没声明」误判成「不支持」**（轮 1 引入，本版才被自家测试抓到）：

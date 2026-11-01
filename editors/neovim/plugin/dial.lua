@@ -4,6 +4,8 @@
 --   1. 打开 .dial 文件时启动 `dialc lsp`（stdio）。
 --   2. 把 Hover / 跳转定义 / 引用 / 重命名 / 补全 接到常用键位。
 --   3. 启用 LSP 语义高亮（Neovim 0.9+ 会据此给关键字/字符串/数字等上色）。
+--   4. 轮2~4 的新能力（大纲 / 格式化 / 代码动作 / 折叠）也接上——
+--      内置 LSP 客户端会按服务端广播的 capability 自动启用，无需手动协商。
 --
 -- 唯一前置条件：dialc 在 PATH 中（`dialc lsp` 可用，即 v0.98+）。
 
@@ -47,12 +49,18 @@ vim.api.nvim_create_autocmd("FileType", {
     vim.keymap.set("n", "<leader>rn", vim.lsp.buf.rename, opts)   -- 重命名
     vim.keymap.set("n", "<C-k>", vim.lsp.buf.signature_help, opts)-- 签名帮助
     vim.keymap.set("i", "<C-Space>", vim.lsp.buf.completion, opts) -- 补全
+    vim.keymap.set("n", "<leader>f", vim.lsp.buf.format, opts)     -- 格式化（保守版）
+    vim.keymap.set("n", "<leader>a", vim.lsp.buf.code_action, opts) -- 代码动作
+    vim.keymap.set("n", "<leader>ds", vim.lsp.buf.document_symbol, opts) -- 文档大纲
 
     ensure_dial_lsp()
 
     -- 语义高亮：Neovim 0.9+ 在会话刷新时会自动请求；这里显式启动一次，
     -- 确保打开文件即上色。
     pcall(vim.lsp.semantic_tokens.start, 0)
+
+    -- 折叠：Neovim 0.10+ 才有 foldingRange 客户端（0.9 会报字段不存在，用 pcall 兜住）。
+    pcall(function() vim.lsp.folding_range.enable(true) end)
   end,
 })
 

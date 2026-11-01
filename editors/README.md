@@ -15,9 +15,11 @@
 
 ## 已支持的 LSP 能力
 
-诊断（保存即报）、语义高亮、Hover、跳转定义、补全（精确替换 + 排序）。
-其余（文档符号大纲 / 引用查找 / 重命名 / 签名帮助 / 格式化 / inlay hint 等）在后续 LSP 轮次补齐，
-详见主仓库 README [§28.7](https://github.com/shichencike/Dial/blob/main/README.md#287-编辑器插件安装包v098)。
+诊断（保存即报）、语义高亮、Hover、跳转定义、补全（精确替换 + 排序）、文档符号大纲、
+工作区符号、引用查找、重命名（含 prepareRename）、签名帮助、保守格式化、参数 inlay 提示、
+codeAction、折叠范围、选择范围、文档链接。
+
+能力清单与实现要点详见主仓库 README [§28.7](https://github.com/shichencike/Dial/blob/main/README.md#287-编辑器插件安装包v098)。
 
 ## 为什么只做三套
 

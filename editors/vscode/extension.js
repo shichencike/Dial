@@ -22,6 +22,23 @@ const { spawn } = require("child_process");
 const TOKEN_TYPES = ["keyword", "string", "number", "operator", "variable", "type"];
 const TOKEN_MODIFIERS = [];
 
+// LSP 的 Range 与 VS Code 的 Range 字段同名同义，直接转。
+function toRange(r) {
+  return new vscode.Range(r.start.line, r.start.character, r.end.line, r.end.character);
+}
+
+// LSP 的 SymbolKind 从 1 起（File=1），VS Code 的 SymbolKind 枚举从 0 起 —— 差一位。
+function toSymbolKind(k) {
+  return typeof k === "number" && k >= 1 ? k - 1 : vscode.SymbolKind.Variable;
+}
+
+// LSP 的 FoldingRangeKind 是字符串，VS Code 的是枚举。
+const FOLDING_KINDS = {
+  comment: 1, // vscode.FoldingRangeKind.Comment
+  imports: 2, // vscode.FoldingRangeKind.Imports
+  region: 3, // vscode.FoldingRangeKind.Region
+};
+
 let client = null;
 
 function activate(context) {
@@ -90,6 +107,81 @@ function activate(context) {
       { language: "dial" },
       { provideCompletionItems: (doc, pos) => client.completion(doc, pos) },
       "." // 触发字符：`.` 后主动触发成员补全
+    )
+  );
+
+  // ---- 轮 2：导航（大纲 / 引用 / 重命名 / 签名帮助）----
+  context.subscriptions.push(
+    vscode.languages.registerDocumentSymbolProvider(
+      { language: "dial" },
+      { provideDocumentSymbols: (doc) => client.documentSymbols(doc) }
+    )
+  );
+  context.subscriptions.push(
+    vscode.languages.registerReferenceProvider(
+      { language: "dial" },
+      { provideReferences: (doc, pos, ctx) => client.references(doc, pos, ctx) }
+    )
+  );
+  context.subscriptions.push(
+    vscode.languages.registerRenameProvider(
+      { language: "dial" },
+      {
+        prepareRename: (doc, pos) => client.prepareRename(doc, pos),
+        provideRenameEdits: (doc, pos, newName) => client.rename(doc, pos, newName),
+      }
+    )
+  );
+  context.subscriptions.push(
+    vscode.languages.registerSignatureHelpProvider(
+      { language: "dial" },
+      {
+        provideSignatureHelp: (doc, pos) => client.signatureHelp(doc, pos),
+        signatureHelpTriggerCharacters: ["(", ","],
+        signatureHelpRetriggerCharacters: [","],
+      },
+      "(",
+      ","
+    )
+  );
+
+  // ---- 轮 3：格式化 / inlay 提示 ----
+  context.subscriptions.push(
+    vscode.languages.registerDocumentFormattingEditProvider(
+      { language: "dial" },
+      { provideDocumentFormattingEdits: (doc) => client.formatting(doc) }
+    )
+  );
+  context.subscriptions.push(
+    vscode.languages.registerInlayHintsProvider(
+      { language: "dial" },
+      { provideInlayHints: (doc, range) => client.inlayHints(doc, range) }
+    )
+  );
+
+  // ---- 轮 4：代码动作 / 折叠 / 选择范围 / 文档链接 ----
+  context.subscriptions.push(
+    vscode.languages.registerCodeActionsProvider(
+      { language: "dial" },
+      { provideCodeActions: (doc, range, ctx) => client.codeActions(doc, range, ctx) }
+    )
+  );
+  context.subscriptions.push(
+    vscode.languages.registerFoldingRangeProvider(
+      { language: "dial" },
+      { provideFoldingRanges: (doc) => client.foldingRanges(doc) }
+    )
+  );
+  context.subscriptions.push(
+    vscode.languages.registerSelectionRangeProvider(
+      { language: "dial" },
+      { provideSelectionRanges: (doc, pos, ranges) => client.selectionRanges(doc, pos, ranges) }
+    )
+  );
+  context.subscriptions.push(
+    vscode.languages.registerDocumentLinkProvider(
+      { language: "dial" },
+      { provideDocumentLinks: (doc) => client.documentLinks(doc) }
     )
   );
 
@@ -243,6 +335,34 @@ class LspClient {
           definition: { dynamicRegistration: false },
           completion: { completionItem: { snippetSupport: true }, dynamicRegistration: false },
           synchronization: { dynamicRegistration: false },
+          // 服务端无条件广播 semanticTokensProvider，这里如实声明（否则声明与实际不符）。
+          semanticTokens: {
+            dynamicRegistration: false,
+            requests: { full: true },
+            tokenTypes: TOKEN_TYPES,
+            tokenModifiers: TOKEN_MODIFIERS,
+            formats: ["relative"],
+          },
+          // 轮2（导航）
+          documentSymbol: { dynamicRegistration: false, hierarchicalDocumentSymbolSupport: true },
+          references: { dynamicRegistration: false },
+          rename: { dynamicRegistration: false, prepareSupport: true },
+          signatureHelp: {
+            dynamicRegistration: false,
+            signatureInformation: { documentationFormat: ["markdown", "plaintext"] },
+            contextSupport: true,
+          },
+          // 轮3（编写辅助）
+          formatting: { dynamicRegistration: false },
+          inlayHint: { dynamicRegistration: false },
+          // 轮4（高级）
+          codeAction: { dynamicRegistration: false },
+          foldingRange: { dynamicRegistration: false, lineFoldingOnly: true },
+          selectionRange: { dynamicRegistration: false },
+          documentLink: { dynamicRegistration: false },
+        },
+        workspace: {
+          symbol: { dynamicRegistration: false },
         },
       },
     });
@@ -395,6 +515,231 @@ class LspClient {
     }
     this.diagnostics.dispose();
   }
+
+  // -------------------------------------------------------------------------
+  // 轮 2：导航
+  // -------------------------------------------------------------------------
+
+  async documentSymbols(doc) {
+    if (!this.ready) return [];
+    const result = await this.request("textDocument/documentSymbol", {
+      textDocument: { uri: doc.uri.toString() },
+    });
+    if (!Array.isArray(result)) return [];
+    const toSymbol = (s) => {
+      const range = toRange(s.range);
+      const sel = s.selectionRange ? toRange(s.selectionRange) : range;
+      const children = (s.children || []).map(toSymbol);
+      return new vscode.DocumentSymbol(
+        s.name,
+        s.detail || "",
+        toSymbolKind(s.kind),
+        range,
+        sel,
+        children
+      );
+    };
+    return result.map(toSymbol);
+  }
+
+  async references(doc, position, ctx) {
+    if (!this.ready) return [];
+    const result = await this.request("textDocument/references", {
+      textDocument: { uri: doc.uri.toString() },
+      position: { line: position.line, character: position.character },
+      context: { includeDeclaration: !!(ctx && ctx.includeDeclaration) },
+    });
+    if (!Array.isArray(result)) return [];
+    return result.map(
+      (loc) => new vscode.Location(vscode.Uri.parse(loc.uri), toRange(loc.range))
+    );
+  }
+
+  async prepareRename(doc, position) {
+    if (!this.ready) return null;
+    const result = await this.request("textDocument/prepareRename", {
+      textDocument: { uri: doc.uri.toString() },
+      position: { line: position.line, character: position.character },
+    });
+    if (!result || !result.range) return null;
+    return toRange(result.range);
+  }
+
+  async rename(doc, position, newName) {
+    if (!this.ready) return null;
+    const result = await this.request("textDocument/rename", {
+      textDocument: { uri: doc.uri.toString() },
+      position: { line: position.line, character: position.character },
+      newName: newName,
+    });
+    if (!result || !result.changes) return null;
+    // 服务端按 uri 分组返回编辑，这里聚成一个 WorkspaceEdit。
+    const edit = new vscode.WorkspaceEdit();
+    for (const uri of Object.keys(result.changes)) {
+      const target = vscode.Uri.parse(uri);
+      for (const e of result.changes[uri]) {
+        edit.replace(target, toRange(e.range), e.newText);
+      }
+    }
+    return edit;
+  }
+
+  async signatureHelp(doc, position) {
+    if (!this.ready) return null;
+    const result = await this.request("textDocument/signatureHelp", {
+      textDocument: { uri: doc.uri.toString() },
+      position: { line: position.line, character: position.character },
+    });
+    if (!result || !result.signatures || !result.signatures.length) return null;
+    const signatures = result.signatures.map((s) => {
+      const params = (s.parameters || []).map(
+        (p) =>
+          new vscode.ParameterInformation(
+            typeof p.label === "string" ? p.label : p.label[0],
+            p.documentation ? new vscode.MarkdownString(p.documentation) : undefined
+          )
+      );
+      return new vscode.SignatureInformation(
+        s.label,
+        s.documentation ? new vscode.MarkdownString(s.documentation) : undefined,
+        params
+      );
+    });
+    return new vscode.SignatureHelp(
+      signatures,
+      result.activeSignature || 0,
+      result.activeParameter || 0
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // 轮 3：格式化 / inlay 提示
+  // -------------------------------------------------------------------------
+
+  async formatting(doc) {
+    if (!this.ready) return [];
+    const result = await this.request("textDocument/formatting", {
+      textDocument: { uri: doc.uri.toString() },
+      options: { tabSize: 4, insertSpaces: true },
+    });
+    if (!Array.isArray(result)) return [];
+    return result.map((e) => vscode.TextEdit.replace(toRange(e.range), e.newText));
+  }
+
+  async inlayHints(doc, range) {
+    if (!this.ready) return [];
+    const result = await this.request("textDocument/inlayHint", {
+      textDocument: { uri: doc.uri.toString() },
+      range: {
+        start: { line: range.start.line, character: range.start.character },
+        end: { line: range.end.line, character: range.end.character },
+      },
+    });
+    if (!Array.isArray(result)) return [];
+    return result.map((h) => {
+      const label = Array.isArray(h.label) ? h.label : [h.label];
+      const text = label
+        .map((p) => (typeof p === "string" ? p : p.value))
+        .join("");
+      const pos = h.position || (h.range && h.range.start);
+      return new vscode.InlayHint(
+        text,
+        new vscode.Position(pos.line, pos.character),
+        h.kind === 1 ? vscode.InlayHintKind.Type : vscode.InlayHintKind.Parameter
+      );
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 轮 4：代码动作 / 折叠 / 选择范围 / 文档链接
+  // -------------------------------------------------------------------------
+
+  async codeActions(doc, range, ctx) {
+    if (!this.ready) return [];
+    const diagnostics = ((ctx && ctx.diagnostics) || []).map((d) => ({
+      range: {
+        start: { line: d.range.start.line, character: d.range.start.character },
+        end: { line: d.range.end.line, character: d.range.end.character },
+      },
+      message: d.message,
+      severity: d.severity,
+      source: d.source,
+    }));
+    const result = await this.request("textDocument/codeAction", {
+      textDocument: { uri: doc.uri.toString() },
+      range: {
+        start: { line: range.start.line, character: range.start.character },
+        end: { line: range.end.line, character: range.end.character },
+      },
+      context: { diagnostics: diagnostics },
+    });
+    if (!Array.isArray(result)) return [];
+    return result.map((a) => {
+      const kind =
+        a.kind === "quickfix"
+          ? vscode.CodeActionKind.QuickFix
+          : vscode.CodeActionKind.Source;
+      const action = new vscode.CodeAction(a.title, kind);
+      if (a.command) {
+        action.command = {
+          command: a.command.command,
+          title: a.command.title,
+          arguments: a.command.arguments || [],
+        };
+      }
+      return action;
+    });
+  }
+
+  async foldingRanges(doc) {
+    if (!this.ready) return [];
+    const result = await this.request("textDocument/foldingRange", {
+      textDocument: { uri: doc.uri.toString() },
+    });
+    if (!Array.isArray(result)) return [];
+    return result.map((f) => {
+      const kind = FOLDING_KINDS[f.kind];
+      return new vscode.FoldingRange(
+        f.startLine,
+        f.endLine,
+        kind ? kind : undefined
+      );
+    });
+  }
+
+  async selectionRanges(doc, position, ranges) {
+    if (!this.ready) return [];
+    const positions = ranges && ranges.length ? ranges : [position];
+    const result = await this.request("textDocument/selectionRange", {
+      textDocument: { uri: doc.uri.toString() },
+      positions: positions.map((p) => ({ line: p.line, character: p.character })),
+    });
+    if (!Array.isArray(result)) return [];
+    return result.map(toSelectionRange);
+  }
+
+  async documentLinks(doc) {
+    if (!this.ready) return [];
+    const result = await this.request("textDocument/documentLink", {
+      textDocument: { uri: doc.uri.toString() },
+    });
+    if (!Array.isArray(result)) return [];
+    return result.map((l) =>
+      new vscode.DocumentLink(
+        toRange(l.range),
+        l.target ? vscode.Uri.parse(l.target) : undefined
+      )
+    );
+  }
+}
+
+// LSP 的 SelectionRange 是「每层都带 parent」的嵌套结构，逐层还原。
+function toSelectionRange(r) {
+  if (!r || !r.range) return null;
+  return new vscode.SelectionRange(
+    toRange(r.range),
+    r.parent ? toSelectionRange(r.parent) : undefined
+  );
 }
 
 module.exports = { activate, deactivate };
