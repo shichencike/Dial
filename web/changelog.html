@@ -30,6 +30,7 @@
 <li><a href="#轮-2导航已完成">轮 2（导航，已完成）</a></li>
 <li><a href="#轮-3编写辅助已完成">轮 3（编写辅助，已完成）</a></li>
 <li><a href="#轮-4高级已完成">轮 4（高级，已完成）</a></li>
+<li><a href="#lsp-规范符合性只用标准形状不自定义扩展">LSP 规范符合性：只用标准形状，不自定义扩展</a></li>
 <li><a href="#诊断错误码--定位--缺包不再静默">诊断：错误码 + 定位 + 缺包不再静默</a></li>
 <li><a href="#fixed修复">Fixed（修复）</a></li>
 <li><a href="#后续轮次路线">后续轮次（路线）</a></li>
@@ -248,6 +249,28 @@
 <li>冒烟测试 <code>tools/lsp_smoke.py</code> 扩展到轮 4（折叠 / 选择 / 代码动作 / 文档链接断言均已通过），并在
   <code>tests/run_tests.sh</code> 新增 <strong>M 组</strong>（LSP 全能力往返 + 协议流纯净性）。</li>
 </ul>
+<h3 id="lsp-规范符合性只用标准形状不自定义扩展">LSP 规范符合性：只用标准形状，不自定义扩展</h3>
+<p>按 LSP 3.17 规范逐条核对实现，<strong>查出并修掉两处形状偏离</strong>（此前它们是「按自己的理解」写的）：
+- <strong><code>textDocument/formatting</code> 的结果</strong>：规范规定是 <strong><code>TextEdit[]</code> 本身</strong>，此前返回的是
+  <code>{ "edits": [...] }</code> —— 那是私自定义包装，客户端按规范解析会拿到对象而不是数组。现改回数组。
+- <strong><code>WorkspaceEdit</code> 的形状</strong>：规范原文「若客户端既不支持 <code>documentChanges</code> 也不支持
+  <code>workspace.workspaceEdit.resourceOperations</code>，那么<strong>只有 <code>changes</code> 里的纯 TextEdit 是被
+  支持的</strong>」——所以用哪个形状<strong>由客户端能力决定</strong>，不能我们单方面决定。
+  现按 <code>workspace.workspaceEdit.documentChanges</code> 能力<strong>二选一</strong>：声明了就发 <code>documentChanges</code>
+  （并如实填客户端给的文档版本号，未打开的文件按规范填 <code>null</code>），没声明就回退 <code>changes</code>。</p>
+<p><strong>诊断错误码不是「私自扩展」</strong>：规范对 <code>Diagnostic.code</code> 的定义是 <code>integer | string</code>，
+注释为 <em>"The diagnostic's code, which usually appear in the user interface."</em>——
+<strong>码值由语言服务器自定，规范不设中央码表</strong>（故 <code>dialc.</code> 前缀命名空间化即可）；
+<code>Diagnostic.data</code> 的定义更是直接点名用途：<em>"A data entry field that is preserved between a
+<code>textDocument/publishDiagnostics</code> notification and <code>textDocument/codeAction</code> request."</em>——
+我们用 <code>data.package</code> 把包名从诊断带到 quickfix，正是这个字段的设计用途。</p>
+<p><strong>符合性从此是自动检查的</strong>：冒烟测试新增一张<strong>返回形状对照表</strong>，逐个方法核对响应结构与
+规范一致（<code>Hover</code> 要 <code>contents</code>、<code>CompletionList</code> 要 <code>isIncomplete</code>+<code>items</code>、<code>formatting</code>
+必须是 <code>TextEdit[]</code>、<code>SelectionRange[]</code> 只能有 <code>range</code>/<code>parent</code> 两个键……），
+并额外验证「客户端没声明 <code>documentChanges</code> 能力时正确回退到 <code>changes</code>」。
+已做负向验证：把 formatting 改回违规形状，三处断言同时报错。</p>
+<p>另修正文档残留：README §18 的「十二组 / A→L」「十一组 / A～K」全部更正为
+「十三组 / A～M」并补上 M 组与两道新检查；§2 目录结构同步。</p>
 <h3 id="诊断错误码--定位--缺包不再静默">诊断：错误码 + 定位 + 缺包不再静默</h3>
 <ul>
 <li><strong>诊断带稳定错误码</strong>（LSP 的 <code>code</code> 字段）：<code>dialc.lex</code> / <code>dialc.parse</code> / <code>dialc.sema</code> /

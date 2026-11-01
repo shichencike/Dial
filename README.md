@@ -70,7 +70,8 @@ dialc/
 ├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
 ├── tests/
 │   ├── run_tests.sh        # 端到端测试（A 正向 / B 负向 / C 契约 / D Fail-Fast / E 对照 /
-│   │                       #   F 并发压测 / G 未捕获异常 / H 包分发 / I LSP / J 安装规则 / K LSP 增强）
+│   │                       #   F 并发压测 / G 未捕获异常 / H 包分发 / I LSP / J 安装规则 /
+│   │                       #   K LSP 增强 / L 包安装 / M LSP 全能力 + 协议流纯净性）
 │   ├── bad/                # 必须编译失败的负向用例
 │   ├── trap/               # 必须当场因信号终止的 Fail-Fast 用例
 │   ├── lsp_smoke.py        # I 组：LSP 协议往返（诊断 + 语义高亮）
@@ -79,11 +80,14 @@ dialc/
 ├── tools/
 │   ├── build_web.py        # 生成官网 web/（规范 / 更新日志 / 首页）
 │   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
-│   ├── package.sh          # 打发布包 dialc-v<版本>.zip（含许可与 .git）
+│   ├── check_version.py    # 校验版本号在 README / CHANGELOG / 官网三处一致
+│   ├── check_lsp_stdout_purity.py  # 校验 LSP 路径上不出现 stdout 裸输出（协议流纯净性）
+│   ├── lsp_smoke.py        # M 组：LSP 全能力往返 + 协议流纯净性断言
+│   ├── package.sh          # 打发布包 dialc-v<版本>-<平台>.zip（含许可与 .git）
 │   ├── install-dial.sh     # 一键安装（Linux / Termux）
 │   ├── install-dial.ps1    # 一键安装（Windows / PowerShell）
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
-├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十一组测试 + 打包发布
+├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十三组测试 + 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
 ├── web/                    # 官网产物（由 tools/build_web.py 生成）
 └── README.md               # 本文件
@@ -1244,7 +1248,7 @@ print(e);
 ./tests/run_tests.sh
 ```
 
-十二组检查，全部通过才算绿（顺序即 A→L）：
+十三组检查，全部通过才算绿（顺序即 A→M）：
 
 | 组 | 内容 |
 | --- | --- |
@@ -1260,20 +1264,24 @@ print(e);
 | **J. 包安装三条硬规则**（v0.94 收尾） | `dialc install`：① 同名包 **ABI 相同则覆盖、不同则报错要求先卸载**；② `targets` 的库文件**只允许 `.a` / `.lib` 静态库，拒绝 `.so` / `.dll` 动态库**；③ 卸载即 `rm -rf ~/.dial/packages/<名>/`（缓存是纯派生数据）。三条均被 J 组锁死 |
 | **K. LSP 增强**（v0.95 新增） | Hover / 跳转定义 / 补全：真起 `dialc lsp` 子进程按 LSP 协议往返，验证变量遮蔽的 Hover、跨文件 `.diali` 文档、跳转定义（文件内→本文件、包符号→`.diali`）、可见符号收集与前缀过滤。见 `tests/lsp_features.py` |
 | **L. 包安装**（v0.96 新增） | **URL 安装**：真起一个本机 HTTP 服务器提供 `.dialpkg`，用 `dialc install <URL>` 装——正常装得上，`--sha256` 钉死也能装；坏包（内容篡改 / 哈希不符 / 404 / 非 https）**一律装不进去**，且失败后缓存目录无残骸。**一键脚本**：`install-dial.sh` 初始化环境（编译器 + `stdlib/` + `runtime/`）→ 自动扫描并安装 `.dialpkg` → 在**与源码树无关的独立项目目录**里编译 import 程序并运行。见 `tests/pkg_install_url.py` |
+| **M. LSP 全能力 + 协议流纯净性**（v0.98 新增） | 真起 `dialc lsp` 子进程把轮 2~4 的能力全跑一遍（文档大纲 / 工作区符号 / 引用查找 / 重命名 / 签名帮助 / 格式化 / inlay 提示 / 代码动作 / 折叠 / 选择范围 / 文档链接），并断言 **stdout 上只有协议字节**——混进一行裸文本就会让客户端分帧错位，症状是**编辑器卡死**而非报错；另配一道**静态**守卫：`tools/check_lsp_stdout_purity.py` 扫 LSP 运行时用到的模块与函数，出现 `println!` 即失败。见 `tools/lsp_smoke.py` |
 
 #### 持续集成（GitHub Actions）
 
-十一组检查由 `.github/workflows/ci.yml` 在**每次 push / PR** 上自动执行：
+十三组检查由 `.github/workflows/ci.yml` 在**每次 push / PR** 上自动执行：
 
 | 阶段 | 做什么 | 不通过的后果 |
 | --- | --- | --- |
 | **编译** | 装 LLVM 18 + Rust → `cargo build --release --locked` | 立即失败，PR 不可合并 |
-| **测试** | `bash tests/run_tests.sh`（A～K 全部十一组） | 立即失败 |
+| **测试** | `bash tests/run_tests.sh`（A～M 全部十三组） | 立即失败 |
 | **锚点校验** | `python3 tools/check_links.py`——README / CHANGELOG 的内部链接必须全部可解析 | 立即失败（防止再次出现「点不动的链接」） |
+| **协议流纯净性** | `python3 tools/check_lsp_stdout_purity.py`——LSP 运行时用到的模块与被 LSP 调用的函数里不得出现 `println!` | 立即失败（stdout 是协议流，裸输出会让编辑器卡死） |
+| **版本号一致性** | `python3 tools/check_version.py`——README / CHANGELOG / 官网三处产物的版本号必须一致 | 立即失败（防止「代码已发版、文档还停在旧版」） |
 | **官网同步** | 重新生成 `web/` 并与仓库内容比对 | 立即失败（文档改了但官网没重新生成） |
 
 打 **`v*` 标签**时，额外的 `release` 作业会把编译器二进制一并打进
-`dialc-v<版本>.zip`（含源码、`.git`、四份许可文件、`web/`、VS Code 扩展），
+`dialc-v<版本>-<平台>.zip`（**三个平台各一个**：linux-x86_64 / windows-x86_64 / termux-aarch64；
+含源码、`.git`、四份许可文件、`web/`、VS Code 扩展），
 上传为 GitHub Release 产物——即官网首页的下载链接。
 打包脚本 `tools/package.sh` 有**硬性校验**：许可文件不全、或缺 `.git`、或混入构建产物，一律拒绝出包。
 
@@ -3221,5 +3229,26 @@ fn main() {
 > 工具**应按码处理**，不要去匹配消息文本——消息措辞会随版本调整，改一次就废掉一个工具。
 > 缺包诊断会**真的报出来**（旧行为是被静默吞掉，编辑器里毫无提示），
 > 并且带 `data.package`，于是「安装这个包」的 quickfix 靠结构化数据就能给出，不必猜。
+>
+> **这些码为什么不算「私自扩展」**——LSP 3.17 规范对 `Diagnostic` 的原文是：
+> ```
+> code?: integer | string;      // "The diagnostic's code, which usually appear in the user interface."
+> data?: LSPAny;                // "A data entry field that is preserved between a
+>                               //  textDocument/publishDiagnostics notification and
+>                               //  textDocument/codeAction request."   (@since 3.16.0)
+> ```
+> 即：**码值由语言服务器自定，规范不设中央码表**（类型是 `integer | string`，我们用
+> `dialc.` 前缀命名空间化，避免与其他服务器的码撞车）；而 `data` 的用途——**在诊断通知与
+> codeAction 请求之间保留结构化数据**——正是我们传包名的做法，一字不差地对上规范。
+>
+> **规范符合性是被自动检查的**：`tools/lsp_smoke.py` 里有一张**返回形状对照表**，
+> 逐个方法核对响应结构与规范一致（`Hover` 要 `contents`、`CompletionList` 要
+> `isIncomplete`+`items`、`formatting` 必须是 **`TextEdit[]` 本身**而不是任何包装、
+> `SelectionRange[]` 只能有 `range`/`parent` 两个键……），
+> 形状一旦跑偏当场失败。`WorkspaceEdit` 用哪个形状也**由客户端能力决定**：
+> 客户端声明了 `workspace.workspaceEdit.documentChanges` 就发 `documentChanges`（带版本号），
+> 没声明就回退到 `changes`——规范原文：「若客户端既不支持 `documentChanges` 也不支持
+> `workspace.workspaceEdit.resourceOperations`，那么**只有 `changes` 里的纯 TextEdit
+> 是被支持的**」。
 
 ---

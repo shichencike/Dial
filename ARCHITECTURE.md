@@ -519,9 +519,9 @@ dialc build main.dial
 | 语义高亮 | `textDocument/semanticTokens/full` | 复用编译器自己的词法器 |
 | Hover / 跳转定义 / 补全 | `hover` / `definition` / `completion` | 补全带精确替换范围与排序 |
 | 文档符号 / 工作区符号 | `documentSymbol` / `workspace/symbol` | 大纲递归到局部变量 |
-| 引用查找 / 重命名 | `references` / `rename`(+`prepareRename`) | 基于索引器的**引用边**，同名遮蔽天然正确 |
+| 引用查找 / 重命名 | `references` / `rename`(+`prepareRename`) | 基于索引器的**引用边**，同名遮蔽天然正确；重命名按客户端能力选 `WorkspaceEdit` 形状（见 §9.4） |
 | 签名帮助 | `signatureHelp` | `(` / `,` 触发 |
-| 格式化 / inlay 提示 | `formatting` / `inlayHint` | 格式化**保守**（只去行尾空白，不重排） |
+| 格式化 / inlay 提示 | `formatting` / `inlayHint` | 格式化**保守**（只去行尾空白，不重排）；结果按规范是 `TextEdit[]` 本身 |
 | 代码动作 / 折叠 / 选择范围 / 文档链接 | `codeAction` / `foldingRange` / `selectionRange` / `documentLink` | 代码动作只发 `Command`，不擅自改代码 |
 
 能力**按客户端声明动态广播**：客户端没提的能力我们不广播。
@@ -540,7 +540,29 @@ dialc build main.dial
 
 工具**应按码处理**，不要去匹配消息文本——消息措辞会随版本调整，改一次就废掉一个工具。
 
-### 9.4 协议流纯净性（铁律）
+**这些码不是「私自扩展」**：LSP 3.17 规范原文是
+`code?: integer | string`（注释：*"The diagnostic's code, which usually appear in the user
+interface."*）——**码值由语言服务器自定，规范不设中央码表**；我们用 `dialc.` 前缀命名空间化，
+避免与其他服务器的码撞车。规范对 `data` 的定义更直接：*"A data entry field that is preserved
+between a `textDocument/publishDiagnostics` notification and `textDocument/codeAction` request."*
+——我们用 `data.package` 把包名从诊断带到 quickfix，正是这个字段的设计用途。
+
+### 9.4 规范符合性（只用标准，不自定义形状）
+
+实现只使用**标准 LSP 方法与标准字段**，没有任何私有扩展：广播的 14 项能力、
+处理的 24 个方法全部是 LSP 3.17 的标准方法；响应形状逐个对照规范。
+
+两条容易被忽略、但必须照做的规定：
+
+| 规定 | 规范原文 | 本实现 |
+| --- | --- | --- |
+| `textDocument/formatting` 的结果 | `TextEdit[]`（**数组本身**，不是任何包装） | 返回数组本身 |
+| `WorkspaceEdit` 用哪个形状 | *"If a client neither supports `documentChanges` nor `workspace.workspaceEdit.resourceOperations` then only plain `TextEdit`s using the `changes` property are supported."* | **由客户端能力决定**：声明了 `workspace.workspaceEdit.documentChanges` 就发 `documentChanges`（带文档版本号），没声明就回退 `changes` |
+
+这两条都写成了**自动化断言**（`tools/lsp_smoke.py` 的返回形状对照表），
+形状一旦跑偏当场失败——而不是等某个客户端连上来才发现不对。
+
+### 9.5 协议流纯净性（铁律）
 
 LSP 的 stdout 跑的是 `Content-Length` 分帧协议。**任何非协议字节都会让客户端分帧错位**——
 症状不是报错，而是**编辑器卡死**（客户端在等一条永远对不上的消息）。
@@ -549,7 +571,7 @@ LSP 的 stdout 跑的是 `Content-Length` 分帧协议。**任何非协议字节
 这条纪律由两路自动化守住：冒烟测试的**动态**断言（发现裸字节即失败）
 与 `tools/check_lsp_stdout_purity.py` 的**静态**守卫（LSP 路径上出现 `println!` 即失败）。
 
-### 9.5 安装包获取方式
+### 9.6 安装包获取方式
 
 | 方式 | 步骤 |
 | --- | --- |

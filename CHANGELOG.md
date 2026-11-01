@@ -79,6 +79,32 @@
 - 冒烟测试 `tools/lsp_smoke.py` 扩展到轮 4（折叠 / 选择 / 代码动作 / 文档链接断言均已通过），并在
   `tests/run_tests.sh` 新增 **M 组**（LSP 全能力往返 + 协议流纯净性）。
 
+### LSP 规范符合性：只用标准形状，不自定义扩展
+按 LSP 3.17 规范逐条核对实现，**查出并修掉两处形状偏离**（此前它们是「按自己的理解」写的）：
+- **`textDocument/formatting` 的结果**：规范规定是 **`TextEdit[]` 本身**，此前返回的是
+  `{ "edits": [...] }` —— 那是私自定义包装，客户端按规范解析会拿到对象而不是数组。现改回数组。
+- **`WorkspaceEdit` 的形状**：规范原文「若客户端既不支持 `documentChanges` 也不支持
+  `workspace.workspaceEdit.resourceOperations`，那么**只有 `changes` 里的纯 TextEdit 是被
+  支持的**」——所以用哪个形状**由客户端能力决定**，不能我们单方面决定。
+  现按 `workspace.workspaceEdit.documentChanges` 能力**二选一**：声明了就发 `documentChanges`
+  （并如实填客户端给的文档版本号，未打开的文件按规范填 `null`），没声明就回退 `changes`。
+
+**诊断错误码不是「私自扩展」**：规范对 `Diagnostic.code` 的定义是 `integer | string`，
+注释为 *"The diagnostic's code, which usually appear in the user interface."*——
+**码值由语言服务器自定，规范不设中央码表**（故 `dialc.` 前缀命名空间化即可）；
+`Diagnostic.data` 的定义更是直接点名用途：*"A data entry field that is preserved between a
+`textDocument/publishDiagnostics` notification and `textDocument/codeAction` request."*——
+我们用 `data.package` 把包名从诊断带到 quickfix，正是这个字段的设计用途。
+
+**符合性从此是自动检查的**：冒烟测试新增一张**返回形状对照表**，逐个方法核对响应结构与
+规范一致（`Hover` 要 `contents`、`CompletionList` 要 `isIncomplete`+`items`、`formatting`
+必须是 `TextEdit[]`、`SelectionRange[]` 只能有 `range`/`parent` 两个键……），
+并额外验证「客户端没声明 `documentChanges` 能力时正确回退到 `changes`」。
+已做负向验证：把 formatting 改回违规形状，三处断言同时报错。
+
+另修正文档残留：README §18 的「十二组 / A→L」「十一组 / A～K」全部更正为
+「十三组 / A～M」并补上 M 组与两道新检查；§2 目录结构同步。
+
 ### 诊断：错误码 + 定位 + 缺包不再静默
 - **诊断带稳定错误码**（LSP 的 `code` 字段）：`dialc.lex` / `dialc.parse` / `dialc.sema` /
   `dialc.package.missing`。**消息是给人看的、码是给工具看的**——工具按码处理，

@@ -364,7 +364,8 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 ├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
 ├── tests/
 │   ├── run_tests.sh        # 端到端测试（A 正向 / B 负向 / C 契约 / D Fail-Fast / E 对照 /
-│   │                       #   F 并发压测 / G 未捕获异常 / H 包分发 / I LSP / J 安装规则 / K LSP 增强）
+│   │                       #   F 并发压测 / G 未捕获异常 / H 包分发 / I LSP / J 安装规则 /
+│   │                       #   K LSP 增强 / L 包安装 / M LSP 全能力 + 协议流纯净性）
 │   ├── bad/                # 必须编译失败的负向用例
 │   ├── trap/               # 必须当场因信号终止的 Fail-Fast 用例
 │   ├── lsp_smoke.py        # I 组：LSP 协议往返（诊断 + 语义高亮）
@@ -373,11 +374,14 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 ├── tools/
 │   ├── build_web.py        # 生成官网 web/（规范 / 更新日志 / 首页）
 │   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
-│   ├── package.sh          # 打发布包 dialc-v&lt;版本&gt;.zip（含许可与 .git）
+│   ├── check_version.py    # 校验版本号在 README / CHANGELOG / 官网三处一致
+│   ├── check_lsp_stdout_purity.py  # 校验 LSP 路径上不出现 stdout 裸输出（协议流纯净性）
+│   ├── lsp_smoke.py        # M 组：LSP 全能力往返 + 协议流纯净性断言
+│   ├── package.sh          # 打发布包 dialc-v&lt;版本&gt;-&lt;平台&gt;.zip（含许可与 .git）
 │   ├── install-dial.sh     # 一键安装（Linux / Termux）
 │   ├── install-dial.ps1    # 一键安装（Windows / PowerShell）
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
-├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十一组测试 + 打包发布
+├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十三组测试 + 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
 ├── web/                    # 官网产物（由 tools/build_web.py 生成）
 └── README.md               # 本文件
@@ -2159,7 +2163,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <h2 id="18-测试">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
-<p>十二组检查，全部通过才算绿（顺序即 A→L）：</p>
+<p>十三组检查，全部通过才算绿（顺序即 A→M）：</p>
 <table>
 <thead>
 <tr>
@@ -2216,10 +2220,14 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td><strong>L. 包安装</strong>（v0.96 新增）</td>
 <td><strong>URL 安装</strong>：真起一个本机 HTTP 服务器提供 <code>.dialpkg</code>，用 <code>dialc install &lt;URL&gt;</code> 装——正常装得上，<code>--sha256</code> 钉死也能装；坏包（内容篡改 / 哈希不符 / 404 / 非 https）<strong>一律装不进去</strong>，且失败后缓存目录无残骸。<strong>一键脚本</strong>：<code>install-dial.sh</code> 初始化环境（编译器 + <code>stdlib/</code> + <code>runtime/</code>）→ 自动扫描并安装 <code>.dialpkg</code> → 在<strong>与源码树无关的独立项目目录</strong>里编译 import 程序并运行。见 <code>tests/pkg_install_url.py</code></td>
 </tr>
+<tr>
+<td><strong>M. LSP 全能力 + 协议流纯净性</strong>（v0.98 新增）</td>
+<td>真起 <code>dialc lsp</code> 子进程把轮 2~4 的能力全跑一遍（文档大纲 / 工作区符号 / 引用查找 / 重命名 / 签名帮助 / 格式化 / inlay 提示 / 代码动作 / 折叠 / 选择范围 / 文档链接），并断言 <strong>stdout 上只有协议字节</strong>——混进一行裸文本就会让客户端分帧错位，症状是<strong>编辑器卡死</strong>而非报错；另配一道<strong>静态</strong>守卫：<code>tools/check_lsp_stdout_purity.py</code> 扫 LSP 运行时用到的模块与函数，出现 <code>println!</code> 即失败。见 <code>tools/lsp_smoke.py</code></td>
+</tr>
 </tbody>
 </table>
 <h4 id="持续集成github-actions">持续集成（GitHub Actions）</h4>
-<p>十一组检查由 <code>.github/workflows/ci.yml</code> 在<strong>每次 push / PR</strong> 上自动执行：</p>
+<p>十三组检查由 <code>.github/workflows/ci.yml</code> 在<strong>每次 push / PR</strong> 上自动执行：</p>
 <table>
 <thead>
 <tr>
@@ -2236,13 +2244,23 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td><strong>测试</strong></td>
-<td><code>bash tests/run_tests.sh</code>（A～K 全部十一组）</td>
+<td><code>bash tests/run_tests.sh</code>（A～M 全部十三组）</td>
 <td>立即失败</td>
 </tr>
 <tr>
 <td><strong>锚点校验</strong></td>
 <td><code>python3 tools/check_links.py</code>——README / CHANGELOG 的内部链接必须全部可解析</td>
 <td>立即失败（防止再次出现「点不动的链接」）</td>
+</tr>
+<tr>
+<td><strong>协议流纯净性</strong></td>
+<td><code>python3 tools/check_lsp_stdout_purity.py</code>——LSP 运行时用到的模块与被 LSP 调用的函数里不得出现 <code>println!</code></td>
+<td>立即失败（stdout 是协议流，裸输出会让编辑器卡死）</td>
+</tr>
+<tr>
+<td><strong>版本号一致性</strong></td>
+<td><code>python3 tools/check_version.py</code>——README / CHANGELOG / 官网三处产物的版本号必须一致</td>
+<td>立即失败（防止「代码已发版、文档还停在旧版」）</td>
 </tr>
 <tr>
 <td><strong>官网同步</strong></td>
@@ -2252,7 +2270,8 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tbody>
 </table>
 <p>打 <strong><code>v*</code> 标签</strong>时，额外的 <code>release</code> 作业会把编译器二进制一并打进
-<code>dialc-v&lt;版本&gt;.zip</code>（含源码、<code>.git</code>、四份许可文件、<code>web/</code>、VS Code 扩展），
+<code>dialc-v&lt;版本&gt;-&lt;平台&gt;.zip</code>（<strong>三个平台各一个</strong>：linux-x86_64 / windows-x86_64 / termux-aarch64；
+含源码、<code>.git</code>、四份许可文件、<code>web/</code>、VS Code 扩展），
 上传为 GitHub Release 产物——即官网首页的下载链接。
 打包脚本 <code>tools/package.sh</code> 有<strong>硬性校验</strong>：许可文件不全、或缺 <code>.git</code>、或混入构建产物，一律拒绝出包。</p>
 <h3 id="示例清单">示例清单</h3>
@@ -5140,6 +5159,23 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 <p>工具<strong>应按码处理</strong>，不要去匹配消息文本——消息措辞会随版本调整，改一次就废掉一个工具。
 缺包诊断会<strong>真的报出来</strong>（旧行为是被静默吞掉，编辑器里毫无提示），
 并且带 <code>data.package</code>，于是「安装这个包」的 quickfix 靠结构化数据就能给出，不必猜。</p>
+<p><strong>这些码为什么不算「私自扩展」</strong>——LSP 3.17 规范对 <code>Diagnostic</code> 的原文是：
+<code>code?: integer | string;      // "The diagnostic's code, which usually appear in the user interface."
+data?: LSPAny;                // "A data entry field that is preserved between a
+                              //  textDocument/publishDiagnostics notification and
+                              //  textDocument/codeAction request."   (@since 3.16.0)</code>
+即：<strong>码值由语言服务器自定，规范不设中央码表</strong>（类型是 <code>integer | string</code>，我们用
+<code>dialc.</code> 前缀命名空间化，避免与其他服务器的码撞车）；而 <code>data</code> 的用途——<strong>在诊断通知与
+codeAction 请求之间保留结构化数据</strong>——正是我们传包名的做法，一字不差地对上规范。</p>
+<p><strong>规范符合性是被自动检查的</strong>：<code>tools/lsp_smoke.py</code> 里有一张<strong>返回形状对照表</strong>，
+逐个方法核对响应结构与规范一致（<code>Hover</code> 要 <code>contents</code>、<code>CompletionList</code> 要
+<code>isIncomplete</code>+<code>items</code>、<code>formatting</code> 必须是 <strong><code>TextEdit[]</code> 本身</strong>而不是任何包装、
+<code>SelectionRange[]</code> 只能有 <code>range</code>/<code>parent</code> 两个键……），
+形状一旦跑偏当场失败。<code>WorkspaceEdit</code> 用哪个形状也<strong>由客户端能力决定</strong>：
+客户端声明了 <code>workspace.workspaceEdit.documentChanges</code> 就发 <code>documentChanges</code>（带版本号），
+没声明就回退到 <code>changes</code>——规范原文：「若客户端既不支持 <code>documentChanges</code> 也不支持
+<code>workspace.workspaceEdit.resourceOperations</code>，那么<strong>只有 <code>changes</code> 里的纯 TextEdit
+是被支持的</strong>」。</p>
 </blockquote>
 <hr /></main></div>
 
