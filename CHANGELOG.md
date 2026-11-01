@@ -31,6 +31,14 @@
 ### Changed（变更）
 - **LSP 能力协商**：`initialize` 读取客户端 `capabilities`，按声明动态广播能力（老客户端不报能力也不报错）；
   并新增 `window/logMessage` 自诊断通道（不污染协议流、不进 stdout）。
+- **一键安装脚本自动补齐配套件**：除编译器、`stdlib/`+`runtime/`、`.dialpkg` 外，
+  现在还会**自动下载并安装 VS Code 插件**（从 Release 取 `dial-<版本>.vsix`，
+  再用 `code --install-extension` 装上），不必再自己去 Release 页翻资产、手动侧载。
+  - 版本只从 `DIAL_VERSION` 一处推导（Release 标签 `v0.98` 与资产名 `dial-0.98.0.vsix`
+    都由它算出），不会出现三处各说各话、下次发版又忘了改其中一个。
+  - 没装 VS Code / 离线时**只告警、不阻断**安装（编译器与包安装不受影响）。
+  - **不加 `--force`**：用户若已装了更新版插件，不该在「一键安装」里被悄悄降级。
+  - Neovim / Emacs 侧无需安装动作（零依赖配置），故不动。
 - **VS Code 插件接通轮 2~4 的全部能力**：文档大纲、引用查找、重命名（含 prepareRename）、签名帮助、
   保守格式化、参数 inlay 提示、代码动作、折叠范围、选择范围、文档链接——插件不再只转发三个 provider。
 - **Neovim 插件补上新能力的键位**：`<leader>f` 格式化、`<leader>a` 代码动作、`<leader>ds` 文档大纲，

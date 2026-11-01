@@ -3153,6 +3153,16 @@ fn main() {
 > 编辑器（JetBrains / Zed / Sublime 等）只要能启动 `dialc lsp`，用各自的 LSP 客户端连上即可，
 > 不再单独维护插件——把精力留给语言本身。
 
+**一键安装顺带装插件**：跑 `install-dial.sh` / `install-dial.ps1` 时，脚本除编译器与标准库外，
+还会**自动下载并安装 VS Code 插件**（从 Release 取 `dial-<版本>.vsix`，再用 `code --install-extension` 装上），
+不必再自己去 Release 页翻资产、手动侧载。
+
+- 版本只有一个来源：`DIAL_VERSION`（默认 `0.98.0`）——Release 标签（`v0.98`）与资产文件名
+  （`dial-0.98.0.vsix`）都由它推导，不会三处各说各话。
+- **没装 VS Code / 离线时只告警、不阻断安装**：编译器本体与包安装不受影响。
+- **不加 `--force`**：用户若已装了更新版本的插件，不该在「一键安装」里被悄悄降级。
+- Neovim 与 Emacs 侧无需安装动作（零依赖配置，拷进 `runtimepath` 或配几行 eglot 即可）。
+
 #### 28.7.1 当前 LSP 能力清单
 
 | 能力 | 状态 | 说明 |

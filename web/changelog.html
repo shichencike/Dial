@@ -196,6 +196,14 @@
 <ul>
 <li><strong>LSP 能力协商</strong>：<code>initialize</code> 读取客户端 <code>capabilities</code>，按声明动态广播能力（老客户端不报能力也不报错）；
   并新增 <code>window/logMessage</code> 自诊断通道（不污染协议流、不进 stdout）。</li>
+<li><strong>一键安装脚本自动补齐配套件</strong>：除编译器、<code>stdlib/</code>+<code>runtime/</code>、<code>.dialpkg</code> 外，
+  现在还会<strong>自动下载并安装 VS Code 插件</strong>（从 Release 取 <code>dial-&lt;版本&gt;.vsix</code>，
+  再用 <code>code --install-extension</code> 装上），不必再自己去 Release 页翻资产、手动侧载。</li>
+<li>版本只从 <code>DIAL_VERSION</code> 一处推导（Release 标签 <code>v0.98</code> 与资产名 <code>dial-0.98.0.vsix</code>
+    都由它算出），不会出现三处各说各话、下次发版又忘了改其中一个。</li>
+<li>没装 VS Code / 离线时<strong>只告警、不阻断</strong>安装（编译器与包安装不受影响）。</li>
+<li><strong>不加 <code>--force</code></strong>：用户若已装了更新版插件，不该在「一键安装」里被悄悄降级。</li>
+<li>Neovim / Emacs 侧无需安装动作（零依赖配置），故不动。</li>
 <li><strong>VS Code 插件接通轮 2~4 的全部能力</strong>：文档大纲、引用查找、重命名（含 prepareRename）、签名帮助、
   保守格式化、参数 inlay 提示、代码动作、折叠范围、选择范围、文档链接——插件不再只转发三个 provider。</li>
 <li><strong>Neovim 插件补上新能力的键位</strong>：<code>&lt;leader&gt;f</code> 格式化、<code>&lt;leader&gt;a</code> 代码动作、<code>&lt;leader&gt;ds</code> 文档大纲，

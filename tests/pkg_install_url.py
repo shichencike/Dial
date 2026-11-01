@@ -221,6 +221,10 @@ def main():
         check(os.path.isdir(os.path.join(dial_home, "packages", "demo")),
               "一键脚本自动扫描并安装了 .dialpkg", p.stdout[-600:])
         check("找到 1 个包" in p.stdout, "一键脚本报告了扫描到的包", p.stdout[-400:])
+        # 一键安装还应包含 VS Code 插件那一步（下载 .vsix + code --install-extension）。
+        # 没装 VS Code 时它只告警不阻断——所以这里只查「步骤在、且没让脚本失败」。
+        check("安装 VS Code 插件" in p.stdout,
+              "一键脚本包含 VS Code 插件安装步骤", p.stdout[-600:])
 
         # ---- 11) 装好后，在**用户自己的项目目录**里能编译 import 程序 ----
         # 这一条是「一键安装」的意义所在：编译器、stdlib、runtime、包，四者齐备，

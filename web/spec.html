@@ -4995,6 +4995,16 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 编辑器（JetBrains / Zed / Sublime 等）只要能启动 <code>dialc lsp</code>，用各自的 LSP 客户端连上即可，
 不再单独维护插件——把精力留给语言本身。</p>
 </blockquote>
+<p><strong>一键安装顺带装插件</strong>：跑 <code>install-dial.sh</code> / <code>install-dial.ps1</code> 时，脚本除编译器与标准库外，
+还会<strong>自动下载并安装 VS Code 插件</strong>（从 Release 取 <code>dial-&lt;版本&gt;.vsix</code>，再用 <code>code --install-extension</code> 装上），
+不必再自己去 Release 页翻资产、手动侧载。</p>
+<ul>
+<li>版本只有一个来源：<code>DIAL_VERSION</code>（默认 <code>0.98.0</code>）——Release 标签（<code>v0.98</code>）与资产文件名
+  （<code>dial-0.98.0.vsix</code>）都由它推导，不会三处各说各话。</li>
+<li><strong>没装 VS Code / 离线时只告警、不阻断安装</strong>：编译器本体与包安装不受影响。</li>
+<li><strong>不加 <code>--force</code></strong>：用户若已装了更新版本的插件，不该在「一键安装」里被悄悄降级。</li>
+<li>Neovim 与 Emacs 侧无需安装动作（零依赖配置，拷进 <code>runtimepath</code> 或配几行 eglot 即可）。</li>
+</ul>
 <h4 id="2871-当前-lsp-能力清单">28.7.1 当前 LSP 能力清单</h4>
 <table>
 <thead>

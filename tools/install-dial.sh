@@ -2,11 +2,13 @@
 #
 # Dial 一键安装脚本（Linux / Termux）——ARCHITECTURE.md §3.2 阶段 5。
 #
-# 承担两件事（顺序不能反）：
+# 承担三件事（顺序不能反）：
 #
 #   1. **初始化 Dial 环境**：建 ~/.dial/ 目录树、把 dialc 挂进 PATH、写工具链配置；
 #   2. **自动安装已下载的包**：初始化完成后**重新扫描**找到的 `.dialpkg`
 #      （当前目录及其子目录，或脚本参数指定的目录），逐个执行安装命令。
+#   3. **补齐配套件**：官方标准库（stdlib.dialpkg）与 VS Code 插件（.vsix）
+#      静默下载并安装——都是「装上编译器后自然该有」的东西，不该让用户再手动跑一遍。
 #
 # 为什么脚本要「自动重新扫描」而不是让用户逐个点名：一键安装的语义是
 # 「我把这个目录交给你，你把该装的都装上」。用户不该需要记住包名、也不该需要
@@ -23,6 +25,8 @@
 #   DIALC_HOME  指定 ~/.dial 的位置（默认：$HOME/.dial）
 #   DIALC_SRC   指定 Dial 发行包的根目录（含 stdlib/ 与 runtime/）
 #                （默认：脚本所在目录）
+#   DIALC_VERSION 指定配套件的版本（默认：0.98.0）。Release 标签（v0.98）与
+#                插件文件名（dial-0.98.0.vsix）都由它推导，只改这一处即可。
 #
 set -uo pipefail
 
@@ -153,6 +157,55 @@ else
     warn "未找到 curl，跳过自动安装标准库（链接时将回退到源码编译 stdlib）。"
 fi
 rm -f "$STDLIB_TMP" 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# 第 2.7 步：自动下载并安装 VS Code 插件（.vsix）
+#   编译器装好了，编辑器插件也得跟上——否则用户还得自己去 Release 页翻 .vsix、
+#   再手动 `code --install-extension`，「一键」就名不副实了。
+#   与标准库同理：失败（离线 / 没装 VS Code / 没装 curl）只告警、不阻断安装。
+#
+#   版本只有一个来源：DIAL_VERSION（形如 0.98.0）。Release 标签由它推导
+#   （v0.98），插件文件名也由它推导（dial-0.98.0.vsix）——三者不会各说各话。
+# ---------------------------------------------------------------------------
+echo
+echo "-- 安装 VS Code 插件 --"
+DIAL_VERSION="${DIAL_VERSION:-0.98.0}"
+DIAL_TAG="v$(printf '%s' "$DIAL_VERSION" | cut -d. -f1,2)"
+VSIX_FILE="dial-${DIAL_VERSION}.vsix"
+VSIX_URL="https://github.com/shichencike/Dial/releases/download/${DIAL_TAG}/${VSIX_FILE}"
+
+# 找 VS Code 的命令行入口（不同发行版名字不同）
+CODE_CLI=""
+for c in code code-insiders codium; do
+    if command -v "$c" >/dev/null 2>&1; then
+        CODE_CLI="$c"
+        break
+    fi
+done
+
+if [ -z "$CODE_CLI" ]; then
+    warn "未找到 VS Code 命令行（code / code-insiders / codium），跳过插件安装。
+  装好 VS Code 后手动执行即可：
+    $VSIX_URL
+    code --install-extension <下载到的 .vsix>"
+elif ! command -v curl >/dev/null 2>&1; then
+    warn "未找到 curl，跳过 VS Code 插件安装（编译器本体不受影响）。"
+else
+    VSIX_TMP="$(mktemp -t dialplugin.XXXXXX.vsix)"
+    if curl -fSL --retry 2 --proto '=https' -o "$VSIX_TMP" "$VSIX_URL" 2>/dev/null && [ -s "$VSIX_TMP" ]; then
+        # 不加 --force：用户若已装了更新版本，VS Code 会保留新版本，
+        # 我们不该在「一键安装」里悄悄把人家降级。
+        if "$CODE_CLI" --install-extension "$VSIX_TMP"; then
+            ok "VS Code 插件已安装（$VSIX_FILE）"
+        else
+            warn "VS Code 插件安装失败，可稍后手动执行：
+    $CODE_CLI --install-extension $VSIX_FILE"
+        fi
+    else
+        warn "下载 VS Code 插件失败（可能离线）；可稍后手动安装。"
+    fi
+    rm -f "$VSIX_TMP" 2>/dev/null
+fi
 
 # ---------------------------------------------------------------------------
 # 第 3 步：重新扫描 .dialpkg 并逐个安装

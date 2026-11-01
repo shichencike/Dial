@@ -3,12 +3,14 @@
     Dial 一键安装脚本（Windows / PowerShell）——ARCHITECTURE.md §3.2 阶段 5。
 
 .DESCRIPTION
-    承担两件事（顺序不能反）：
+    承担三件事（顺序不能反）：
 
     1. 初始化 Dial 环境：建 %USERPROFILE%\.dial\ 目录树、把 dialc 挂进 PATH、
        写工具链配置；
     2. 自动安装已下载的包：初始化完成后重新扫描找到的 .dialpkg
-       （当前目录及其子目录，或脚本参数指定的目录），逐个执行安装命令。
+       （当前目录及其子目录，或脚本参数指定的目录），逐个执行安装命令；
+    3. 补齐配套件：官方标准库（stdlib.dialpkg）与 VS Code 插件（.vsix）
+       静默下载并安装——都是「装上编译器后自然该有」的东西，不该让用户再手动跑一遍。
 
     为什么脚本要「自动重新扫描」而不是让用户逐个点名：一键安装的语义是
     「我把这个目录交给你，你把该装的都装上」。用户不该需要记住包名、
@@ -23,6 +25,8 @@
       DIALC_BIN   指定要挂进 PATH 的 dialc 可执行文件（默认：脚本同目录的 .\dialc.exe）
       DIALC_HOME  指定 .dial 的位置（默认：%USERPROFILE%\.dial）
       DIALC_SRC   指定 Dial 发行包的根目录（含 stdlib\ 与 runtime\）（默认：脚本所在目录）
+      DIALC_VERSION 指定配套件的版本（默认：0.98.0）。Release 标签（v0.98）与
+                  插件文件名（dial-0.98.0.vsix）都由它推导，只改这一处即可。
 #>
 
 param(
@@ -38,6 +42,12 @@ $ErrorActionPreference = 'Stop'
 # 安装脚本在装好编译器后，会自动静默拉取该版本的标准库包并通过 dialc install 安装。
 # 升级标准库时只需改这里的标签（与 Dial Releases 里的 stdlib-v* 对应）。
 $StdlibRelease = if ($env:STDLIB_RELEASE) { $env:STDLIB_RELEASE } else { "stdlib-v1.0.0" }
+
+# 配套件（VS Code 插件）版本：只此一个来源。Release 标签（v0.98）与插件文件名
+# （dial-0.98.0.vsix）都由它推导，避免三者各说各话、下次发版又忘了改其中一个。
+$DialVersion = if ($env:DIALC_VERSION) { $env:DIALC_VERSION } else { "0.98.0" }
+$DialTag = "v" + (($DialVersion -split '\.')[0..1] -join '.')
+$VsixFile = "dial-$DialVersion.vsix"
 
 function Say  { param([string]$m) Write-Host "  $m" }
 function Ok   { param([string]$m) Write-Host "  [OK] $m" }
@@ -153,6 +163,54 @@ if ($downloaded -and (Test-Path $StdlibTmp -PathType Leaf) -and ((Get-Item $Stdl
     Warn "下载官方标准库失败（可能离线）；链接时将回退到源码编译 stdlib。"
 }
 if (Test-Path $StdlibTmp) { Remove-Item -Force $StdlibTmp -ErrorAction SilentlyContinue }
+
+# ---------------------------------------------------------------------------
+# 第 2.7 步：自动下载并安装 VS Code 插件（.vsix）
+#   编译器装好了，编辑器插件也得跟上——否则用户还得自己去 Release 页翻 .vsix、
+#   再手动 `code --install-extension`，「一键」就名不副实了。
+#   与标准库同理：失败（离线 / 没装 VS Code）只告警、不阻断安装。
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- 安装 VS Code 插件 --"
+$VsixUrl = "https://github.com/shichencike/Dial/releases/download/$DialTag/$VsixFile"
+
+# 找 VS Code 的命令行入口：先看 PATH，再看默认安装位置
+$codeCli = $null
+foreach ($c in @("code", "code-insiders", "codium")) {
+    $cmd = Get-Command $c -ErrorAction SilentlyContinue
+    if ($cmd) { $codeCli = $cmd.Source; break }
+}
+if (-not $codeCli) {
+    $defaultCli = Join-Path $env:LOCALAPPDATA "Programs\Microsoft VS Code\bin\code.cmd"
+    if (Test-Path $defaultCli -PathType Leaf) { $codeCli = $defaultCli }
+}
+
+if (-not $codeCli) {
+    Warn "未找到 VS Code 命令行（code / code-insiders / codium），跳过插件安装。`n  装好 VS Code 后手动执行即可：`n    $VsixUrl`n    code --install-extension <下载到的 .vsix>"
+} else {
+    $vsixTmp = Join-Path $env:TEMP ("dialplugin-" + [guid]::NewGuid().ToString("N") + ".vsix")
+    $got = $false
+    try {
+        if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+            curl.exe -fSL --retry 2 --proto "=https" -o $vsixTmp $VsixUrl 2>$null
+            if ($LASTEXITCODE -eq 0) { $got = $true }
+        } else {
+            Invoke-WebRequest -Uri $VsixUrl -OutFile $vsixTmp -ErrorAction Stop
+            $got = $true
+        }
+    } catch {
+        $got = $false
+    }
+    if ($got -and (Test-Path $vsixTmp -PathType Leaf) -and ((Get-Item $vsixTmp).Length -gt 0)) {
+        # 不加 --force：用户若已装了更新版本，不该在「一键安装」里被悄悄降级
+        & $codeCli --install-extension $vsixTmp
+        if ($LASTEXITCODE -eq 0) { Ok "VS Code 插件已安装（$VsixFile）" }
+        else { Warn "VS Code 插件安装失败，可稍后手动执行：`n    & `"$codeCli`" --install-extension $VsixFile" }
+    } else {
+        Warn "下载 VS Code 插件失败（可能离线）；可稍后手动安装。"
+    }
+    if (Test-Path $vsixTmp) { Remove-Item -Force $vsixTmp -ErrorAction SilentlyContinue }
+}
 
 # ---------------------------------------------------------------------------
 # 第 3 步：重新扫描 .dialpkg 并逐个安装
