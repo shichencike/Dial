@@ -202,6 +202,7 @@
 <li><a href="#从-url-安装v096">从 URL 安装（v0.96）</a></li>
 </ul>
 </li>
+<li><a href="#2510-官方标准库-stdlibdialpkg独立发布">25.10 官方标准库 stdlib.dialpkg（独立发布）</a></li>
 </ul>
 </li>
 <li><a href="#26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</a><ul>
@@ -3026,9 +3027,9 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <p><strong>v0.93 已落地</strong>：<code>import "包名";</code> 语句、<code>.dialpkg</code> 解包（含路径穿越防护）、
 <code>manifest.txt</code> 解析、按 Target Triple 选库、<strong>SHA256 强制校验</strong>、
 <code>.diali</code> 签名解析接入 Sema、链接期自动链入对应平台的机器码。
-见 <a href="#259-用法import-与-dialc-installv093-已实现v096-支持-url">§25.9</a>。
-<strong>尚未实现</strong>：<code>dialc install &lt;URL&gt;</code>（网络下载；本地文件安装已可用）、一键安装脚本、
-官方标准库的 <code>.dialpkg</code> 化、Windows 线程后端。</p>
+见 <a href="#259-用法import-与-dialc-installv093-已实现v096-支持-url">§25.9</a>、<a href="#2510-官方标准库-stdlibdialpkg独立发布">§25.10</a>。
+截至 v0.96 + 官方标准库 v1.0.0，<code>dialc install &lt;URL&gt;</code>、一键安装脚本、<code>stdlib.dialpkg</code> 化均已落地；
+仅<strong>纯 MSVC 线程后端</strong>仍在规划（MinGW 路线下非阻塞）。</p>
 <p>之所以现在就把规范写死：让「不透明指针 + C ABI」这条底层设计（<a href="#141-不透明指针契约">§14.1</a>、<a href="#15-ffi-契约dial-语法--c-函数">§15</a>）
 从第一天起就为包分发服务，而不是等生态长歪了再回头打补丁。规范先于实现，是防止依赖地狱的唯一低成本时机。</p>
 </blockquote>
@@ -3681,6 +3682,68 @@ fn main(): int {
 <p>自测覆盖：<code>tests/run_tests.sh</code> 的 <strong>H 组</strong>会用 <code>tools/make_sample_pkg.sh</code>
 现场构建一个示例包、安装、<code>import</code> 后编译运行并比对输出，
 再<strong>故意篡改一个字节</strong>验证 SHA256 确实拦得住。</p>
+</blockquote>
+<h3 id="2510-官方标准库-stdlibdialpkg独立发布">25.10 官方标准库 <code>stdlib.dialpkg</code>（独立发布）</h3>
+<p>官方标准库（<code>stdlib/</code> + <code>runtime/</code> 编译归档而成的 <code>libdial_std.a</code>，被<strong>每一个</strong> Dial 程序静态链入）
+已改造为 <code>.dialpkg</code> 形态，<strong>独立发版、与编译器解耦</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Release 名称 / Tag</strong></td>
+<td><code>stdlib-v1.0.0</code></td>
+</tr>
+<tr>
+<td><strong><code>abi</code></strong></td>
+<td><code>1</code>（编译器 <code>package::STDLIB_ABI</code> 同步锁定）</td>
+</tr>
+<tr>
+<td><strong><code>version</code></strong></td>
+<td><code>1.0.0</code></td>
+</tr>
+<tr>
+<td><strong><code>license</code></strong></td>
+<td><code>MIT OR Apache-2.0</code>（强制免传染，见 §25.8）</td>
+</tr>
+<tr>
+<td><strong>包名</strong></td>
+<td><code>stdlib</code>（<code>dialc</code> 按此名自动加载，用户无感知）</td>
+</tr>
+<tr>
+<td><strong>三平台机器码</strong></td>
+<td><code>lib/x86_64-linux-gnu/libdial_std.a</code> · <code>lib/x86_64-pc-windows-gnu/libdial_std.a</code> · <code>lib/aarch64-unknown-linux-musl/libdial_std.a</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>预编译安全等级：官方标准库默认以 <code>ReleaseSafe</code>（<code>-DDIAL_SAFETY=1</code>）级别预编译，兼顾极致性能与绝对安全。</strong>
+即越界/空指针等 UB 在 C Runtime 层被 <code>ud2</code> Fail-Fast 拦下，既不丢性能也不静默损坏内存——
+这与用户程序自身的 <code>--release</code> / <code>--fast</code> 安全等级是<strong>两件事</strong>（标准库是预编译产物，等级在发布时已钉死）。</p>
+<p><strong>全自动、零配置</strong>：</p>
+<ol>
+<li><strong>一键脚本自动拉取</strong>：<code>install-dial.sh</code> / <code>install-dial.ps1</code> 把 <code>dialc</code> 装好后，会<strong>静默</strong>从
+   <code>https://github.com/shichencike/Dial/releases/download/stdlib-v1.0.0/stdlib.dialpkg</code>
+   拉取对应版本的 <code>stdlib.dialpkg</code> 并执行 <code>dialc install</code>（<code>STDLIB_RELEASE</code> 环境变量可钉死版本，离线/失败仅告警不阻断）。</li>
+<li><strong><code>dialc build</code> 优先链入预编译包</strong>：链接期先找已安装的 <code>stdlib</code> 包，按本机 Target Triple 取对应 <code>.a</code>；
+   日志会打印「使用已安装的标准库包: stdlib v1.0.0（ABI 1，目标 …）」。</li>
+<li><strong>缺失回退源码编译</strong>：若未安装该包（离线/脚本跳过），<code>dialc</code> 退化为实时编译 <code>stdlib/</code> + <code>runtime/</code>
+   的 C 源码（默认 Debug 安全等级），保证<strong>任何环境下都能编译出程序</strong>，不会因拿不到包而卡死。</li>
+<li><strong>ABI 不兼容明确报错</strong>：若已安装包的 <code>manifest.abi ≠ STDLIB_ABI</code>，<code>dialc</code> <strong>当场报错并给出重装方案</strong>
+   （<code>rm -rf ~/.dial/packages/stdlib</code> 后重新 <code>dialc install</code>），<strong>绝不静默崩溃或链错二进制</strong>。</li>
+</ol>
+<p><strong>CI 自动构建与发布</strong>：<code>.github/workflows/ci.yml</code> 在 <code>stdlib-v*</code> 标签触发时，
+由 <code>build-linux</code> / <code>build-windows</code> / <code>build-termux</code> 三个作业各自产出本平台 <code>libdial_std.a</code>，
+再由 <code>publish-stdlib</code> 作业用 <code>tools/make_stdlib_pkg.py</code> 打包成 <code>stdlib.dialpkg</code> 并发布到同标签 Release。
+构建脚本 <code>tools/build_stdlib.sh &lt;输出 .a&gt; [安全等级]</code> 统一选 <code>zig cc</code>/<code>clang</code>/<code>gcc</code> 与 <code>ar</code>，
+把 <code>runtime/*.c</code> + <code>stdlib/*.c</code> 编译归档为单份静态库。</p>
+<blockquote>
+<p>标准库走<strong>独立 tag</strong>（<code>stdlib-v*</code>）而非编译器版本（<code>v*</code>），二者升级互不阻塞：
+修标准库 bug 只发 <code>stdlib-v1.0.1</code>，无需重新发布编译器；破坏性 ABI 变更时
+同步递增 <code>STDLIB_ABI</code> 与发布 <code>abi</code>，旧用户会收到明确的「ABI 不兼容」报错与重装指引。</p>
 </blockquote>
 <hr />
 <blockquote>
