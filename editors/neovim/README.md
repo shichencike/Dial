@@ -56,6 +56,13 @@ use {
 | `\rn` | 重命名 |
 | `<C-k>` | 签名帮助 |
 | `<C-Space>`（插入模式） | 触发补全 |
+| `<leader>f` | 格式化（保守版：只去行尾空白，不重排） |
+| `<leader>a` | 代码动作（缺包时可一键「安装这个包」） |
+| `<leader>ds` | 文档符号大纲 |
+
+> 内置 LSP 客户端会按服务端下发的 capability **自动启用**对应功能，
+> 所以引用查找、重命名、签名帮助、折叠等无需额外配置。
+> 折叠需要 Neovim 0.10+（0.9 会自动跳过，不会报错）。
 
 ## 语义高亮
 
@@ -66,6 +73,12 @@ Neovim 0.9+ 会按服务端下发的语义 token 自动上色（关键字 / 字�
 ```lua
 vim.cmd("highlight default link LspSemanticTokensKeyword Keyword")
 ```
+
+## 诊断
+
+打开 `.dial` 文件后，语义错误会实时显示在对应行上（诊断带稳定错误码
+`dialc.lex` / `dialc.parse` / `dialc.sema` / `dialc.package.missing`）。
+`import` 了**未安装**的包时，也会明确报出来——不会像从前那样静悄悄什么也不说。
 
 ## 排障
 

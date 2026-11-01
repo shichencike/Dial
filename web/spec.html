@@ -4844,6 +4844,14 @@ while (true) {
 <td>引入 LSP 框架（tower-lsp 等）</td>
 <td>本骨架只需要「读一条 JSON、写一条 JSON」。框架带来的异步运行时与依赖树，远超它省下的那点代码</td>
 </tr>
+<tr>
+<td>补全时自动补 <code>import</code> 语句（<code>additionalTextEdits</code>）</td>
+<td>轮 3 规划时留的占位，最终<strong>不做</strong>：插入位置有歧义（文件头？现有 import 之后？），而 Dial 的 <code>import</code> 还要求包<strong>已安装</strong>——自动插一行 <code>import "x";</code> 却没装包，只会把「缺包」这个真问题推迟到编译期才暴露。更要紧的是 LSP 的 <code>additionalTextEdits</code> 会<strong>在用户接受补全时静默改文件</strong>，而用户只请求了「补一个名字」。宁可让用户自己写 import，也不擅自改他没要求改的地方</td>
+</tr>
+<tr>
+<td>诊断的表达式级精确定位</td>
+<td>语义错误目前定位到<strong>语句</strong>级（语句带位置，表达式 <code>Expr</code> 不带）。要精确到表达式，得给 15 个 <code>Expr</code> 变体全部加上位置并贯穿解析器与语义分析器——改动面太大，而收益只是波浪线短几个字符。<strong>先保证「落在正确的语句上」</strong>（旧行为是落在文件开头）</td>
+</tr>
 </tbody>
 </table>
 <h3 id="285-诊断位置v094-顺带修掉的一个缺陷">28.5 诊断位置（v0.94 顺带修掉的一个缺陷）</h3>
@@ -5121,6 +5129,16 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 提到了该段却漏掉某项 = 明确不支持 → 不广播。
 理由很直接：多广播一个用不上的能力零代价，少广播则让功能<strong>静悄悄消失</strong>、用户查不出原因。
 （<code>tests/lsp_features.py</code> 用的就是 <code>capabilities: {}</code>，正因如此才暴露过轮 1 的误判。）</p>
+<p><strong>诊断带稳定错误码</strong>：消息是给人看的、码是给工具看的，两者职责不同。
+| 码 | 含义 |
+| --- | --- |
+| <code>dialc.lex</code> | 词法错误 |
+| <code>dialc.parse</code> | 语法错误 |
+| <code>dialc.sema</code> | 语义错误 |
+| <code>dialc.package.missing</code> | <code>import</code> 的包未安装（附 <code>data.package</code> 结构化包名） |</p>
+<p>工具<strong>应按码处理</strong>，不要去匹配消息文本——消息措辞会随版本调整，改一次就废掉一个工具。
+缺包诊断会<strong>真的报出来</strong>（旧行为是被静默吞掉，编辑器里毫无提示），
+并且带 <code>data.package</code>，于是「安装这个包」的 quickfix 靠结构化数据就能给出，不必猜。</p>
 </blockquote>
 <hr /></main></div>
 

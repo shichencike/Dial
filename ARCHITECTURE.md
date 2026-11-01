@@ -239,7 +239,7 @@ extern fn db_close(db: Db): void;
 | 入口 | 行为 |
 | --- | --- |
 | **`dialc install <URL>`** | 下载 `.dialpkg` → **解压前强制 SHA256 校验** → 解压到本地缓存目录 |
-| **一键脚本**（Linux / Termux：`install-dial.sh`；Windows：`install-dial.ps1`） | 初始化 Dial 环境，**并自动扫描找到的 `.dialpkg` 逐个执行安装命令** |
+| **一键脚本**（Linux / Termux：`install-dial.sh`；Windows：`install-dial.ps1`） | 初始化 Dial 环境，**并自动扫描找到的 `.dialpkg` 逐个执行安装命令**；同时补齐配套件（官方标准库、VS Code 插件） |
 
 - **缓存目录**：`~/.dial/packages/<name>/`（Windows：`%USERPROFILE%\.dial\packages\<name>\`）。
   **绝不污染用户的当前项目目录。**
@@ -247,11 +247,13 @@ extern fn db_close(db: Db): void;
 
 ### 3.2 一键脚本的行为
 
-一键脚本承担两件事：
+一键脚本承担三件事：
 
 1. **初始化 Dial 环境**：创建 `~/.dial/` 目录树、把 `dialc` 挂进 `PATH`、写入工具链配置。
 2. **自动安装已下载的包**：脚本在初始化完成后，**重新扫描**找到的 `.dialpkg`
    （当前目录及其子目录，或脚本参数指定的目录），对每一个执行安装命令。
+3. **补齐配套件**：官方标准库（`stdlib.dialpkg`）与 VS Code 插件（`dial-<版本>.vsix`）
+   静默下载并安装——它们都是「装上编译器后自然该有」的东西，不该再让用户手动跑一遍。
 
 ```
 用户把 sqlite.dialpkg 丢进项目目录
@@ -260,6 +262,9 @@ extern fn db_close(db: Db): void;
    运行 install-dial.sh（Linux / Termux）或 install-dial.ps1（Windows）
             │
             ├── 初始化环境：建 ~/.dial/、挂 PATH、写配置
+            │
+            ├── 补齐配套件：stdlib.dialpkg / VS Code 插件（.vsix）
+            │      └── 失败只告警、不阻断（离线或没装 VS Code 时照常装完编译器）
             │
             └── 重新扫描 → 找到 sqlite.dialpkg → 执行安装
                               │
@@ -273,6 +278,12 @@ extern fn db_close(db: Db): void;
 > **为什么脚本要「自动重新扫描」而不是让用户逐个点名**：一键安装的语义是
 > 「我把这个目录交给你，你把该装的都装上」。用户不该需要记住包名、也不该需要为每个包
 > 敲一条命令——包就在那里，脚本看得见。
+
+> **配套件的版本只有一个来源**：`DIAL_VERSION`（默认 `0.98.0`）。Release 标签（`v0.98`）
+> 与插件文件名（`dial-0.98.0.vsix`）都由它推导——三处各写一份的做法，下次发版必然忘掉
+> 改其中一个。下载地址可用 `DIAL_VSIX_URL` 覆盖（自建镜像 / 网络受限时用）。
+> 下载**必须带超时**（`--connect-timeout` / `--max-time`）：GitHub 不可达时 curl 会一直挂着，
+> 「一键安装」变成「一键卡住」比装不上更让人手足无措。
 
 ### 3.3 解压格式与安全性
 
@@ -461,7 +472,7 @@ dialc build main.dial
 
 ## 8. 实现路线
 
-| 阶段 | 内容 | 依赖 | 状态（v0.96） |
+| 阶段 | 内容 | 依赖 | 状态（v0.98） |
 | --- | --- | --- | --- |
 | 1 | `.dialpkg` 容器格式定义 + 解包器（含路径穿越防护）+ 整包 SHA256 校验 | 无 | ✅ **已完成** |
 | 2 | `dialc install <URL>` / `dialc install <本地文件>` + 缓存目录管理 | 阶段 1 | ✅ **已完成**——`<URL>` 网络下载于 v0.96 落地（https 强制；`--sha256` 可钉死整包哈希；解压前逐文件校验） |
@@ -470,15 +481,81 @@ dialc build main.dial
 | 5 | 一键安装脚本（`install-dial.sh` / `install-dial.ps1`） | 阶段 2 | ✅ **已完成**（v0.96）——初始化环境（编译器 + `stdlib/` + `runtime/` + PATH + 配置）→ 自动重新扫描并安装 `.dialpkg` |
 | 6 | Windows 线程后端（C Runtime 抽象层），使 `spawn` / `channel` 在 Windows 可用 | 独立 | 🟡 **MinGW 路线下已非阻塞**（winpthreads 提供 pthread 兼容层，stdlib 线程代码无需改写即可在 Windows 编译运行）；纯 MSVC 工具链所需的 Win32 后端仍待做 |
 | 7 | 官方标准库改造为 `.dialpkg` 形态并走 GitHub Releases 发布 | 阶段 4 | ✅ **已完成**（v1.0.0 独立 Release：`tag stdlib-v1.0.0`，与编译器解耦；三平台预编译 `libdial_std.a` 打包为 `stdlib.dialpkg`，统一 **ReleaseSafe=1**（`-DDIAL_SAFETY=1`）预编译；`dialc` 链接期**优先自动链入**已安装包、缺失则回退源码、ABI 不兼容明确报错要求重装） |
+| 8 | LSP 工业化（四轮打磨）+ 三套编辑器接入 | 独立 | ✅ **已完成**（v0.98：能力协商 / 导航 / 编写辅助 / 高级能力四轮落地；诊断带稳定错误码；协议流纯净性有静态 + 动态两路守卫；VS Code / Neovim / Emacs 接入见 [§9](#9-编辑器支持与语言服务器)） |
 
 > 以上为路线记录，**不含实现承诺与时间表**。
-> 截至 v0.97 + 官方标准库 v1.0.0，已完成阶段 1 / 2 / 3 / 4 / 5 / 7，并落地了**三平台原生构建**
+> 截至 v0.98 + 官方标准库 v1.0.0，已完成阶段 1 / 2 / 3 / 4 / 5 / 7，并落地了**三平台原生构建**
 > （Linux x86_64 · Windows x64-MinGW · Termux aarch64-musl 全静态，见 [§0.1](#01-平台矩阵与-target-triple)）；
 > 因此 `import` **已可使用**（见 [README §25.9](README.md#259-用法import-与-dialc-installv093-已实现v096-支持-url)），
 > 不再是「不支持」；包的来源既可以是本地文件，也可以是 **URL**。
 > 官方标准库 `stdlib.dialpkg` 以独立 Release `stdlib-v1.0.0` 发布（见 [README §25.10](#2510-官方标准库stdlibdialpkg-独立发布)），
 > 三平台预编译静态库由 CI 自动构建并打包发布。
 > 剩余：阶段 6 的**纯 MSVC 后端**（MinGW 路线下非阻塞）。
+
+---
+
+## 9. 编辑器支持与语言服务器
+
+`dialc lsp` 是**唯一**的编辑器后端（stdio JSON-RPC）。v0.98 起，编辑器接入不再是
+「装个插件就行」——能力清单、错误码、协议纪律都定下来了，写在这里以免各处各说各话。
+
+### 9.1 编辑器支持矩阵
+
+| 编辑器 | 接入方式 | 安装包 | 说明 |
+| --- | --- | --- | --- |
+| **VS Code** | 手写 LSP 客户端（无 npm 依赖） | `dial-<版本>.vsix`（`code --install-extension` 侧载） | 免 Node / npm / 联网；能力最全 |
+| **Neovim** | 内置 LSP 客户端 | 拷进 `runtimepath` 即可 | 零依赖，不需要 nvim-lspconfig |
+| **Emacs** | 内置 `eglot` | 仅 `init.el` 片段 | **不开发插件**——eglot 原生连 LSP |
+| 其它（JetBrains / Zed / Sublime …） | 各自客户端启动 `dialc lsp` | — | 不单独维护插件 |
+
+> 只做三套主流编辑器是**有意的取舍**：编译型语言的编辑器支持是必做的苦活，
+> 但精力优先留给语言本身。三套之外的环境只要能启动 `dialc lsp` 就能用。
+
+### 9.2 LSP 能力清单（v0.98）
+
+| 能力 | 方法 | 说明 |
+| --- | --- | --- |
+| 诊断 | `textDocument/publishDiagnostics` | 只报第一个错误（与 `dialc build` 同因同位置） |
+| 语义高亮 | `textDocument/semanticTokens/full` | 复用编译器自己的词法器 |
+| Hover / 跳转定义 / 补全 | `hover` / `definition` / `completion` | 补全带精确替换范围与排序 |
+| 文档符号 / 工作区符号 | `documentSymbol` / `workspace/symbol` | 大纲递归到局部变量 |
+| 引用查找 / 重命名 | `references` / `rename`(+`prepareRename`) | 基于索引器的**引用边**，同名遮蔽天然正确 |
+| 签名帮助 | `signatureHelp` | `(` / `,` 触发 |
+| 格式化 / inlay 提示 | `formatting` / `inlayHint` | 格式化**保守**（只去行尾空白，不重排） |
+| 代码动作 / 折叠 / 选择范围 / 文档链接 | `codeAction` / `foldingRange` / `selectionRange` / `documentLink` | 代码动作只发 `Command`，不擅自改代码 |
+
+能力**按客户端声明动态广播**：客户端没提的能力我们不广播。
+（多广播一个用不上的能力零代价；少广播则让功能**静悄悄消失**，用户查不出原因。）
+
+### 9.3 诊断错误码
+
+诊断带**稳定错误码**（LSP 的 `code` 字段）。消息是给人看的、码是给工具看的：
+
+| 码 | 含义 |
+| --- | --- |
+| `dialc.lex` | 词法错误 |
+| `dialc.parse` | 语法错误 |
+| `dialc.sema` | 语义错误 |
+| `dialc.package.missing` | `import` 的包未安装（附带 `data.package` 结构化包名） |
+
+工具**应按码处理**，不要去匹配消息文本——消息措辞会随版本调整，改一次就废掉一个工具。
+
+### 9.4 协议流纯净性（铁律）
+
+LSP 的 stdout 跑的是 `Content-Length` 分帧协议。**任何非协议字节都会让客户端分帧错位**——
+症状不是报错，而是**编辑器卡死**（客户端在等一条永远对不上的消息）。
+
+因此 stdout 只允许出现协议字节；日志一律走 stderr（CLI）或 `window/logMessage` 通知（LSP）。
+这条纪律由两路自动化守住：冒烟测试的**动态**断言（发现裸字节即失败）
+与 `tools/check_lsp_stdout_purity.py` 的**静态**守卫（LSP 路径上出现 `println!` 即失败）。
+
+### 9.5 安装包获取方式
+
+| 方式 | 步骤 |
+| --- | --- |
+| **一键安装**（推荐） | 下载发行 zip → 解压 → `bash install-dial.sh`（Windows：`install-dial.ps1`）。脚本装好编译器、标准库，**并自动装上 VS Code 插件** |
+| **Release 资产** | 从 [Releases](https://github.com/shichencike/Dial/releases) 直接下载 `dialc-v<版本>-<平台>.zip` 与 `dial-<版本>.vsix` |
+| **源码目录** | 克隆仓库后 `cargo build --release`，产物在 `target/release/dialc`；插件用 `bash editors/vscode/build.sh` 现构建 |
 
 ---
 
