@@ -363,6 +363,8 @@ class LspClient {
         },
         workspace: {
           symbol: { dynamicRegistration: false },
+          // 声明支持带版本的文档编辑 -> 服务端会用 WorkspaceEdit 的 documentChanges 形状
+          workspaceEdit: { documentChanges: true },
         },
       },
     });
@@ -572,9 +574,23 @@ class LspClient {
       position: { line: position.line, character: position.character },
       newName: newName,
     });
-    if (!result || !result.changes) return null;
-    // 服务端按 uri 分组返回编辑，这里聚成一个 WorkspaceEdit。
+    // LSP 规范：`WorkspaceEdit` 有两种形状，**由服务端按客户端能力决定**——
+    // 声明了 `workspace.workspaceEdit.documentChanges` 就给 `documentChanges`（带版本号），
+    // 否则给 `changes`。这里两种都认，免得以后任一边改了形状就静默失效。
+    if (!result) return null;
     const edit = new vscode.WorkspaceEdit();
+    if (Array.isArray(result.documentChanges)) {
+      for (const dc of result.documentChanges) {
+        if (!dc.textDocument || !Array.isArray(dc.edits)) continue;
+        const target = vscode.Uri.parse(dc.textDocument.uri);
+        for (const e of dc.edits) {
+          edit.replace(target, toRange(e.range), e.newText);
+        }
+      }
+      return edit;
+    }
+    if (!result.changes) return null;
+    // 旧形状：按 uri 分组
     for (const uri of Object.keys(result.changes)) {
       const target = vscode.Uri.parse(uri);
       for (const e of result.changes[uri]) {

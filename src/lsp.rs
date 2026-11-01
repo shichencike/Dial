@@ -52,6 +52,25 @@ const T_TYPE: u32 = 5;
 /// 已打开的文档：`uri -> 文本`。
 type Docs = HashMap<String, String>;
 
+/// 客户端能力里我们**真正要区分**的那一项。
+///
+/// 为什么只记这一项：LSP 规范说得很明确——「若客户端既不支持 `documentChanges`、
+/// 也不支持 `workspace.workspaceEdit.resourceOperations`，那么**只有 `changes` 里的
+/// 纯 TextEdit 是被支持的**」。所以 `WorkspaceEdit` 该用哪个形状，**由客户端说了算**，
+/// 不能我们单方面决定。
+#[derive(Default, Clone, Copy)]
+struct ClientCaps {
+    /// `workspace.workspaceEdit.documentChanges` —— 客户端支持带版本的文档编辑。
+    workspace_edit_document_changes: bool,
+}
+
+/// 已打开文档的版本号：`uri -> version`。
+///
+/// 为什么需要它：LSP 的 `WorkspaceEdit.documentChanges` 用
+/// `OptionalVersionedTextDocumentIdentifier`，其中 `version` 要如实填客户端给我们的
+/// 版本号（未打开的文件才填 null）。不跟踪版本就只能填 null——那是「降级」而非「照抄」。
+type DocVersions = HashMap<String, i64>;
+
 /// LSP 主循环：读 stdin 的 JSON-RPC 消息，处理后往 stdout 写响应。
 pub fn run() -> io::Result<()> {
     let stdin = io::stdin();
@@ -60,6 +79,10 @@ pub fn run() -> io::Result<()> {
     // 诊断与响应都写 stdout；日志一律走 stderr，避免污染协议流。
     let mut out = stdout.lock();
     let mut docs: Docs = HashMap::new();
+    // 文档版本号（供 WorkspaceEdit.documentChanges 使用）
+    let mut versions: DocVersions = HashMap::new();
+    // 客户端能力（决定 WorkspaceEdit 用 changes 还是 documentChanges）
+    let mut caps = ClientCaps::default();
     // 跨文件符号索引（v0.95）：当前打开文件 + import 的包。
     let mut ws: WorkspaceIndex = WorkspaceIndex::default();
 
@@ -67,7 +90,7 @@ pub fn run() -> io::Result<()> {
         match read_message(&mut reader)? {
             None => return Ok(()), // EOF：客户端断开
             Some(msg) => {
-                let is_exit = handle(&msg, &mut docs, &mut ws, &mut out)?;
+                let is_exit = handle(&msg, &mut docs, &mut versions, &mut caps, &mut ws, &mut out)?;
                 if is_exit {
                     return Ok(());
                 }
@@ -119,6 +142,8 @@ fn write_message<W: Write>(out: &mut W, msg: &Value) -> io::Result<()> {
 fn handle<W: Write>(
     msg: &Value,
     docs: &mut Docs,
+    versions: &mut DocVersions,
+    caps: &mut ClientCaps,
     ws: &mut WorkspaceIndex,
     out: &mut W,
 ) -> io::Result<bool> {
@@ -135,6 +160,12 @@ fn handle<W: Write>(
             // 我们据此决定是否广播——客户端没说支持 hover，我们就别广播 hoverProvider，
             // 否则客户端收了声明却用不了，体验更糟。
             let client_caps = msg.pointer("/params/capabilities");
+            // 记下 `workspace.workspaceEdit.documentChanges`——规范要求 WorkspaceEdit 的
+            // 形状**由客户端能力决定**，不能我们单方面只发一种。
+            caps.workspace_edit_document_changes = client_caps
+                .and_then(|c| c.pointer("/workspace/workspaceEdit/documentChanges"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let result = json!({
                 "capabilities": negotiate_capabilities(client_caps),
                 "serverInfo": { "name": "dialc", "version": env!("CARGO_PKG_VERSION") }
@@ -154,6 +185,9 @@ fn handle<W: Write>(
                     p.pointer("/textDocument/text").and_then(|t| t.as_str()),
                 ) {
                     docs.insert(uri.to_string(), text.to_string());
+                    if let Some(v) = p.pointer("/textDocument/version").and_then(|v| v.as_i64()) {
+                        versions.insert(uri.to_string(), v);
+                    }
                     index_document(ws, uri, text); // 维护符号索引（v0.95）
                     publish_diagnostics(out, uri, text)?;
                 }
@@ -169,6 +203,9 @@ fn handle<W: Write>(
                     p.pointer("/contentChanges/0/text").and_then(|t| t.as_str()),
                 ) {
                     docs.insert(uri.to_string(), text.to_string());
+                    if let Some(v) = p.pointer("/textDocument/version").and_then(|v| v.as_i64()) {
+                        versions.insert(uri.to_string(), v);
+                    }
                     index_document(ws, uri, text);
                 }
             }
@@ -189,6 +226,7 @@ fn handle<W: Write>(
         "textDocument/didClose" => {
             if let Some(uri) = msg.pointer("/params/textDocument/uri").and_then(|u| u.as_str()) {
                 docs.remove(uri);
+                versions.remove(uri);
                 ws.files.remove(uri); // 一并清掉索引，避免残留
                 // 清空该文件的诊断，避免关掉后还留着红色波浪线
                 let params = json!({ "uri": uri, "diagnostics": [] });
@@ -276,7 +314,7 @@ fn handle<W: Write>(
                 .to_string();
             let reply = pos
                 .map(|(uri, line, character)| {
-                    rename_at(ws, docs, &uri, line, character, &new_name)
+                    rename_at(ws, docs, versions, caps, &uri, line, character, &new_name)
                 })
                 .unwrap_or(Value::Null);
             respond(out, id, reply)?;
@@ -1414,6 +1452,8 @@ fn is_ident(s: &str) -> bool {
 fn rename_at(
     ws: &WorkspaceIndex,
     docs: &Docs,
+    versions: &DocVersions,
+    caps: &ClientCaps,
     uri: &str,
     line: u32,
     character: u32,
@@ -1451,7 +1491,27 @@ fn rename_at(
     if edits.is_empty() {
         return Value::Null;
     }
-    json!({ "changes": { uri: edits } })
+    // LSP 规范对 `WorkspaceEdit` 有两条规定，本实现**两条都照办**：
+    //  1. `documentChanges` 里的 `TextDocumentEdit` 带**文档版本号**——版本号要如实填
+    //     客户端给我们的（未打开的文件按规范填 null）。
+    //  2. 「若客户端既不支持 `documentChanges` 也不支持
+    //     `workspace.workspaceEdit.resourceOperations`，那么**只有 `changes` 里的纯
+    //     TextEdit 是被支持的**」——所以用哪个形状**由客户端能力决定**，
+    //     不能我们单方面只发一种。
+    if caps.workspace_edit_document_changes {
+        let version = match versions.get(uri) {
+            Some(v) => json!(v),
+            None => Value::Null,
+        };
+        json!({
+            "documentChanges": [{
+                "textDocument": { "uri": uri, "version": version },
+                "edits": edits
+            }]
+        })
+    } else {
+        json!({ "changes": { uri: edits } })
+    }
 }
 
 /// prepareRename：返回可重命名的区间与占位名；不可重命名处返回 null。
@@ -1601,15 +1661,16 @@ fn format_document(text: &str) -> Value {
     } else {
         segs.last().map(|l| utf16_len(l.trim_end()) as u32).unwrap_or(0)
     };
-    json!({
-        "edits": [{
-            "range": {
-                "start": { "line": 0, "character": 0 },
-                "end": { "line": end_line, "character": end_char }
-            },
-            "newText": result
-        }]
-    })
+    // LSP 规范：`textDocument/formatting` 的结果是 **`TextEdit[]` 本身**，
+    // 不是 `{ "edits": [...] }` 那种自定义包装——后者是私自定义形状，
+    // 客户端按规范解析会拿到一个对象而不是数组。
+    json!([{
+        "range": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": end_line, "character": end_char }
+        },
+        "newText": result
+    }])
 }
 
 /// 调用帧：扫描源码时维护 `(` 的配对与参数起始位置。

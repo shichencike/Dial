@@ -211,7 +211,11 @@ def main():
                 "selectionRange": {},
                 "documentLink": {},
             },
-            "workspace": {"symbol": {"dynamicRegistration": False}},
+            "workspace": {
+                "symbol": {"dynamicRegistration": False},
+                # 声明支持带版本的文档编辑 -> 服务端会用 documentChanges 形状
+                "workspaceEdit": {"documentChanges": True},
+            },
         }
         init = client.request(
             "initialize",
@@ -369,7 +373,9 @@ def main():
         else:
             print(f"[smoke] prepareRename 区间: {json.dumps(prep['range'], ensure_ascii=False)}")
 
-        # 11) rename：把 add 改名为 sum，应生成含 2 处编辑的 WorkspaceEdit
+        # 11) rename：把 add 改名为 sum，应生成含 2 处编辑的 WorkspaceEdit。
+        #     规范当前的形状是 `documentChanges`（元素为 TextDocumentEdit）；
+        #     旧的 `changes` 自 3.16 起已废弃——这里断言用的是**新**形状。
         rn = client.request(
             "textDocument/rename",
             {
@@ -378,11 +384,17 @@ def main():
                 "newName": "sum",
             },
         ) or {}
-        edits = (rn.get("changes") or {}).get(args.uri, [])
+        if "changes" in rn:
+            fails.append("客户端已声明支持 documentChanges，rename 却用了 changes")
+        doc_changes = rn.get("documentChanges") or []
+        edits = []
+        for dc in doc_changes:
+            if dc.get("textDocument", {}).get("uri") == args.uri:
+                edits = dc.get("edits") or []
         if len(edits) < 2:
             fails.append(f"rename 应生成 >=2 处编辑，实际 {len(edits)}")
         else:
-            print(f"[smoke] rename 'add'->'sum' 生成 {len(edits)} 处编辑")
+            print(f"[smoke] rename 'add'->'sum' 生成 {len(edits)} 处编辑（documentChanges）")
 
         # 12) signatureHelp：在 add( 的实参处（行5 列21）应返回签名
         sig = client.request(
@@ -402,8 +414,12 @@ def main():
         fmt = client.request(
             "textDocument/formatting",
             {"textDocument": {"uri": args.uri}, "options": {"tabSize": 4, "insertSpaces": True}},
-        ) or {}
-        edits = fmt.get("edits", [])
+        ) or []
+        # 规范：`textDocument/formatting` 的结果就是 **TextEdit[]** 本身，
+        # 不是 `{ "edits": [...] }` 那种自定义包装。
+        if isinstance(fmt, dict):
+            fails.append("formatting 应直接返回 TextEdit[]，不该是 {edits:[...]} 这类自定义包装")
+        edits = fmt if isinstance(fmt, list) else []
         if len(edits) != 1:
             fails.append(f"formatting 应返回 1 个 TextEdit，实际 {len(edits)}")
         else:
@@ -635,6 +651,116 @@ def main():
             fails.append("codeAction 应按错误码 + data.package 给出安装动作")
         else:
             print("[smoke] codeAction 按错误码与结构化包名给出安装动作")
+
+        # 26) **规范符合性**：逐项核对响应的**形状**与 LSP 3.17 规范一致。
+        #     这是「只用标准、不私自扩展」的自动化保证——形状一旦跑偏，当场失败。
+        #     依据（规范原文）：
+        #       · Diagnostic.code?: integer | string —— 值由语言服务器自定，**无中央码表**；
+        #       · Diagnostic.data?: LSPAny —— 规范明说「在 publishDiagnostics 与
+        #         codeAction 之间保留」，正是我们传包名的方式；
+        #       · WorkspaceEdit —— 「客户端不支持 documentChanges 时，只有 changes 里的
+        #         纯 TextEdit 被支持」，故形状由客户端能力决定；
+        #       · textDocument/formatting 的结果是 **TextEdit[] 本身**（不是任何包装）。
+        def _is_loc(v):
+            return isinstance(v, dict) and "uri" in v and "range" in v
+
+        CONFORM = [
+            ("textDocument/hover", {"textDocument": {"uri": args.uri}, "position": {"line": 0, "character": 3}},
+             lambda r: r is None or (isinstance(r, dict) and "contents" in r),
+             "null | {contents, range?}（Hover）"),
+            ("textDocument/definition", {"textDocument": {"uri": args.uri}, "position": {"line": 0, "character": 3}},
+             lambda r: r is None or _is_loc(r) or (isinstance(r, list) and all(_is_loc(x) for x in r)),
+             "null | Location | Location[]（Definition）"),
+            ("textDocument/completion", {"textDocument": {"uri": args.uri}, "position": {"line": 5, "character": 17}},
+             lambda r: isinstance(r, dict) and "items" in r and "isIncomplete" in r,
+             "{isIncomplete, items}（CompletionList）"),
+            ("textDocument/documentSymbol", {"textDocument": {"uri": args.uri}},
+             lambda r: isinstance(r, list) and all(
+                 {"name", "kind", "range", "selectionRange"} <= set(x.keys()) for x in r),
+             "DocumentSymbol[]（含 name/kind/range/selectionRange）"),
+            ("workspace/symbol", {"query": "add"},
+             lambda r: isinstance(r, list) and all(
+                 {"name", "kind", "location"} <= set(x.keys()) for x in r),
+             "SymbolInformation[]（含 name/kind/location）"),
+            ("textDocument/references", {"textDocument": {"uri": args.uri},
+                                          "position": {"line": 0, "character": 3},
+                                          "context": {"includeDeclaration": True}},
+             lambda r: isinstance(r, list) and all(_is_loc(x) for x in r),
+             "Location[]（含 uri/range）"),
+            ("textDocument/prepareRename", {"textDocument": {"uri": args.uri},
+                                            "position": {"line": 0, "character": 3}},
+             lambda r: r is None or (isinstance(r, dict) and "range" in r),
+             "null | Range | {range, placeholder}"),
+            ("textDocument/rename", {"textDocument": {"uri": args.uri},
+                                      "position": {"line": 0, "character": 3}, "newName": "zz"},
+             lambda r: isinstance(r, dict) and (
+                 ("documentChanges" in r and all(
+                     {"textDocument", "edits"} <= set(dc.keys()) and
+                     {"uri", "version"} <= set(dc["textDocument"].keys())
+                     for dc in r["documentChanges"]))
+                 or ("changes" in r and all(
+                     _is_loc(e) or ("range" in e and "newText" in e)
+                     for lst in r["changes"].values() for e in lst))),
+             "WorkspaceEdit（documentChanges 或 changes，按客户端能力）"),
+            ("textDocument/signatureHelp", {"textDocument": {"uri": args.uri},
+                                            "position": {"line": 5, "character": 21}},
+             lambda r: r is None or (isinstance(r, dict) and "signatures" in r),
+             "null | {signatures, activeSignature?, activeParameter?}"),
+            ("textDocument/formatting", {"textDocument": {"uri": args.uri},
+                                          "options": {"tabSize": 4, "insertSpaces": True}},
+             lambda r: isinstance(r, list) and all(
+                 {"range", "newText"} <= set(x.keys()) for x in r),
+             "TextEdit[]（**直接是数组**，不是 {edits:[...]}）"),
+            ("textDocument/inlayHint", {"textDocument": {"uri": args.uri},
+                                         "range": {"start": {"line": 0, "character": 0},
+                                                   "end": {"line": 20, "character": 0}}},
+             lambda r: isinstance(r, list) and all(
+                 {"position", "label"} <= set(x.keys()) for x in r),
+             "InlayHint[]（含 position/label）"),
+            ("textDocument/codeAction", {"textDocument": {"uri": args.uri},
+                                          "range": {"start": {"line": 0, "character": 0},
+                                                    "end": {"line": 0, "character": 1}},
+                                          "context": {"diagnostics": []}},
+             lambda r: isinstance(r, list) and all("title" in x for x in r),
+             "CodeAction[]（含 title）"),
+            ("textDocument/foldingRange", {"textDocument": {"uri": args.uri}},
+             lambda r: isinstance(r, list) and all(
+                 {"startLine", "endLine"} <= set(x.keys()) for x in r),
+             "FoldingRange[]（含 startLine/endLine）"),
+            ("textDocument/selectionRange", {"textDocument": {"uri": args.uri},
+                                              "positions": [{"line": 1, "character": 4}]},
+             lambda r: isinstance(r, list) and all(
+                 "range" in x and set(x.keys()) <= {"range", "parent"} for x in r),
+             "SelectionRange[]（含 range，可嵌套 parent）"),
+            ("textDocument/documentLink", {"textDocument": {"uri": args.uri}},
+             lambda r: isinstance(r, list) and all("range" in x for x in r),
+             "DocumentLink[]（含 range/target?）"),
+        ]
+        for label, params, ok, spec in CONFORM:
+            resp = client.request(label, params)
+            if not ok(resp):
+                fails.append(f"{label} 的返回形状不符合 LSP 规范：应为 {spec}，实际 {str(resp)[:120]}")
+        print(f"[smoke] 规范符合性：{len(CONFORM)} 个方法的返回形状逐项核对完毕")
+
+        # 27) WorkspaceEdit 的形状**由客户端能力决定**：客户端没声明
+        #     `workspace.workspaceEdit.documentChanges` 时，规范说「只有 changes 里的
+        #     纯 TextEdit 被支持」——此时服务端必须回退到 changes。
+        mini = LspClient(dialc)
+        try:
+            mini.request("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
+            mini.notify("textDocument/didOpen", {"textDocument": {
+                "uri": args.uri, "languageId": "dial", "version": 7, "text": SAMPLE}})
+            rn_mini = mini.request("textDocument/rename", {
+                "textDocument": {"uri": args.uri},
+                "position": {"line": 5, "character": 17}, "newName": "zz"}) or {}
+            if "changes" not in rn_mini:
+                fails.append("客户端未声明 documentChanges 能力时，rename 应回退到 changes 形状")
+            elif "documentChanges" in rn_mini:
+                fails.append("客户端未声明 documentChanges 能力时，不应发 documentChanges")
+            else:
+                print("[smoke] 未声明 documentChanges 的客户端 → 正确回退到 changes 形状")
+        finally:
+            mini.close()
 
         # 21) 协议流纯净性：stdout 上不得出现任何非协议字节。
         if client.pollution:
