@@ -140,7 +140,10 @@ echo "-- 安装官方标准库 stdlib.dialpkg --"
 STDLIB_PKG_URL="https://github.com/shichencike/Dial/releases/download/${STDLIB_RELEASE}/stdlib.dialpkg"
 STDLIB_TMP="$(mktemp -t stdlib.XXXXXX.dialpkg)"
 if command -v curl >/dev/null 2>&1; then
-    if curl -fSL --retry 2 --proto '=https' -o "$STDLIB_TMP" "$STDLIB_PKG_URL" 2>/dev/null; then
+    # --connect-timeout / --max-time：**必须有**。否则 GitHub 不可达时 curl 会一直挂着，
+    # 「一键安装」就变成「一键卡住」——用户看到的是脚本不动，而不是一句清晰的失败提示。
+    if curl -fSL --retry 2 --proto '=https' --connect-timeout 15 --max-time 180 \
+         -o "$STDLIB_TMP" "$STDLIB_PKG_URL" 2>/dev/null; then
         if [ -s "$STDLIB_TMP" ]; then
             if "$DST_BIN" install "$STDLIB_TMP"; then
                 ok "官方标准库已安装（${STDLIB_RELEASE}）"
@@ -172,7 +175,9 @@ echo "-- 安装 VS Code 插件 --"
 DIAL_VERSION="${DIAL_VERSION:-0.98.0}"
 DIAL_TAG="v$(printf '%s' "$DIAL_VERSION" | cut -d. -f1,2)"
 VSIX_FILE="dial-${DIAL_VERSION}.vsix"
-VSIX_URL="https://github.com/shichencike/Dial/releases/download/${DIAL_TAG}/${VSIX_FILE}"
+# URL 可覆盖：某些网络环境访问 GitHub 不稳（或想走自建镜像）时，
+# 用 DIAL_VSIX_URL 指向自己的地址即可，其余逻辑完全不变。
+VSIX_URL="${DIAL_VSIX_URL:-https://github.com/shichencike/Dial/releases/download/${DIAL_TAG}/${VSIX_FILE}}"
 
 # 找 VS Code 的命令行入口（不同发行版名字不同）
 CODE_CLI=""
@@ -192,7 +197,8 @@ elif ! command -v curl >/dev/null 2>&1; then
     warn "未找到 curl，跳过 VS Code 插件安装（编译器本体不受影响）。"
 else
     VSIX_TMP="$(mktemp -t dialplugin.XXXXXX.vsix)"
-    if curl -fSL --retry 2 --proto '=https' -o "$VSIX_TMP" "$VSIX_URL" 2>/dev/null && [ -s "$VSIX_TMP" ]; then
+    if curl -fSL --retry 2 --proto '=https' --connect-timeout 15 --max-time 60 \
+         -o "$VSIX_TMP" "$VSIX_URL" 2>/dev/null && [ -s "$VSIX_TMP" ]; then
         # 不加 --force：用户若已装了更新版本，VS Code 会保留新版本，
         # 我们不该在「一键安装」里悄悄把人家降级。
         if "$CODE_CLI" --install-extension "$VSIX_TMP"; then

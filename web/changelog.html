@@ -203,7 +203,11 @@
     都由它算出），不会出现三处各说各话、下次发版又忘了改其中一个。</li>
 <li>没装 VS Code / 离线时<strong>只告警、不阻断</strong>安装（编译器与包安装不受影响）。</li>
 <li><strong>不加 <code>--force</code></strong>：用户若已装了更新版插件，不该在「一键安装」里被悄悄降级。</li>
+<li>下载 URL 可用 <code>DIAL_VSIX_URL</code> 覆盖（自建镜像 / 网络受限时用）。</li>
 <li>Neovim / Emacs 侧无需安装动作（零依赖配置），故不动。</li>
+<li><strong>一键安装脚本不再「一键卡住」</strong>：下载标准库与插件的 curl 补上
+  <code>--connect-timeout 15 --max-time</code>。此前没有超时——GitHub 不可达时 curl 会一直挂着，
+  用户看到的是脚本<strong>不动</strong>，而不是一句清晰的失败提示。一键安装卡死比装不上更让人手足无措。</li>
 <li><strong>VS Code 插件接通轮 2~4 的全部能力</strong>：文档大纲、引用查找、重命名（含 prepareRename）、签名帮助、
   保守格式化、参数 inlay 提示、代码动作、折叠范围、选择范围、文档链接——插件不再只转发三个 provider。</li>
 <li><strong>Neovim 插件补上新能力的键位</strong>：<code>&lt;leader&gt;f</code> 格式化、<code>&lt;leader&gt;a</code> 代码动作、<code>&lt;leader&gt;ds</code> 文档大纲，

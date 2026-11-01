@@ -145,10 +145,12 @@ $StdlibUrl  = "https://github.com/shichencike/Dial/releases/download/$StdlibRele
 $StdlibTmp  = Join-Path $env:TEMP ("stdlib-" + [guid]::NewGuid().ToString("N") + ".dialpkg")
 $downloaded = $false
 try {
-    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-        curl.exe -fSL --retry 2 --proto "=https" -o $StdlibTmp $StdlibUrl 2>$null
-        if ($LASTEXITCODE -eq 0) { $downloaded = $true }
-    } else {
+        if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+            # --connect-timeout / --max-time：**必须有**。否则 GitHub 不可达时 curl 会一直挂着，
+            # 「一键安装」就变成「一键卡住」——用户看到的是脚本不动，而不是一句清晰的失败提示。
+            curl.exe -fSL --retry 2 --proto "=https" --connect-timeout 15 --max-time 180 -o $StdlibTmp $StdlibUrl 2>$null
+            if ($LASTEXITCODE -eq 0) { $downloaded = $true }
+        } else {
         Invoke-WebRequest -Uri $StdlibUrl -OutFile $StdlibTmp -ErrorAction Stop
         $downloaded = $true
     }
@@ -172,7 +174,7 @@ if (Test-Path $StdlibTmp) { Remove-Item -Force $StdlibTmp -ErrorAction SilentlyC
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "-- 安装 VS Code 插件 --"
-$VsixUrl = "https://github.com/shichencike/Dial/releases/download/$DialTag/$VsixFile"
+$VsixUrl = if ($env:DIAL_VSIX_URL) { $env:DIAL_VSIX_URL } else { "https://github.com/shichencike/Dial/releases/download/$DialTag/$VsixFile" }
 
 # 找 VS Code 的命令行入口：先看 PATH，再看默认安装位置
 $codeCli = $null
@@ -192,7 +194,7 @@ if (-not $codeCli) {
     $got = $false
     try {
         if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-            curl.exe -fSL --retry 2 --proto "=https" -o $vsixTmp $VsixUrl 2>$null
+            curl.exe -fSL --retry 2 --proto "=https" --connect-timeout 15 --max-time 60 -o $vsixTmp $VsixUrl 2>$null
             if ($LASTEXITCODE -eq 0) { $got = $true }
         } else {
             Invoke-WebRequest -Uri $VsixUrl -OutFile $vsixTmp -ErrorAction Stop
