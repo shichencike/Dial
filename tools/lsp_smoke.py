@@ -37,6 +37,10 @@ class LspClient:
         self.buf = b""
         self.lock = threading.Lock()
         self.next_id = 1
+        # 协议污染检测：stdout 上出现任何非协议字节都记在这里（见 _read_one）。
+        self.pollution = []
+        # 超时自杀：请求迟迟没有响应时，由看门狗杀掉进程，避免 CI 无限挂住。
+        self.timed_out = None
         self._stderr_thread = threading.Thread(
             target=self._drain_stderr, daemon=True
         )
@@ -44,8 +48,10 @@ class LspClient:
 
     def _drain_stderr(self):
         for line in self.proc.stderr:
-            # 仅用于本地调试，不影响断言
-            pass
+            # server 的日志一律走 stderr（stdout 属于协议流）。
+            # 这里原样转发，方便失败时定位；不影响任何断言。
+            sys.stderr.write("[server] " + line.decode("utf-8", "replace"))
+            sys.stderr.flush()
 
     def _write(self, msg: dict):
         body = json.dumps(msg).encode("utf-8")
@@ -55,11 +61,28 @@ class LspClient:
             self.proc.stdin.flush()
 
     def _read_one(self) -> dict:
+        """读一条 LSP 消息。
+
+        协议流必须是 `Content-Length: N\\r\\n\\r\\n` + N 字节的严格序列。
+        这里**不做**任何"猜测式"修复：一旦发现裸字节（污染），就记下来并重新同步，
+        让测试**明确失败**——而不是像从前那样悄悄错位、最后以超时收场。
+        """
         while True:
+            if not self.buf.startswith(b"Content-Length:"):
+                # 缓冲区开头不是消息头：要么头还没到齐，要么混进了裸字节。
+                idx = self.buf.find(b"Content-Length:")
+                if idx < 0:
+                    chunk = self.proc.stdout.read1(65536)
+                    if not chunk:
+                        raise EOFError("LSP 进程提前退出")
+                    self.buf += chunk
+                    continue
+                # 确认是污染：裸字节夹在两条消息之间
+                self.pollution.append(self.buf[:idx])
+                self.buf = self.buf[idx:]
+                continue
             header_end = self.buf.find(b"\r\n\r\n")
             if header_end < 0:
-                # 注意：对管道不能用 read(N)——它会等满 N 字节或 EOF 才返回，
-                # 而 LSP 消息往往不足 N 字节，导致永久阻塞。read1 只读「当前可用的」字节。
                 chunk = self.proc.stdout.read1(65536)
                 if not chunk:
                     raise EOFError("LSP 进程提前退出")
@@ -71,10 +94,14 @@ class LspClient:
                 if line.lower().startswith("content-length:"):
                     m = int(line.split(":", 1)[1].strip())
             if m is None:
+                # 头部没有长度：同样视为污染，跳过这一段
+                self.pollution.append(self.buf[:header_end + 4])
                 self.buf = self.buf[header_end + 4 :]
                 continue
             start = header_end + 4
             if len(self.buf) < start + m:
+                # 注意：对管道不能用 read(N)——它会等满 N 字节或 EOF 才返回，
+                # 而 LSP 消息往往不足 N 字节，导致永久阻塞。read1 只读「当前可用的」字节。
                 chunk = self.proc.stdout.read(start + m - len(self.buf))
                 if not chunk:
                     raise EOFError("LSP 进程提前退出")
@@ -83,18 +110,38 @@ class LspClient:
             self.buf = self.buf[start + m :]
             return json.loads(body.decode("utf-8", "replace"))
 
-    def request(self, method: str, params: dict) -> object:
+    def request(self, method: str, params: dict, timeout: float = 30.0) -> object:
         rid = self.next_id
         self.next_id += 1
         self._write({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
-        # 只收带该 id 的响应（忽略途中可能到来的通知）
-        while True:
-            msg = self._read_one()
-            if msg.get("id") == rid:
-                if "error" in msg:
-                    raise RuntimeError(f"{method} 返回错误: {msg['error']}")
-                return msg.get("result")
-            # 通知（无 id）：跳过
+        # 看门狗：超时就杀掉进程，把「永久挂住」变成「快速失败 + 明确原因」。
+        timer = threading.Timer(timeout, self._on_timeout, args=(method,))
+        timer.daemon = True
+        timer.start()
+        try:
+            # 只收带该 id 的响应（忽略途中可能到来的通知）
+            while True:
+                msg = self._read_one()
+                if msg.get("id") == rid:
+                    if "error" in msg:
+                        raise RuntimeError(f"{method} 返回错误: {msg['error']}")
+                    return msg.get("result")
+                # 通知（无 id）：跳过
+        except EOFError:
+            if self.timed_out:
+                raise RuntimeError(
+                    f"{method} 超时 {timeout:.0f}s 无响应（server 卡死？）"
+                ) from None
+            raise
+        finally:
+            timer.cancel()
+
+    def _on_timeout(self, method: str):
+        self.timed_out = method
+        try:
+            self.proc.kill()
+        except Exception:
+            pass
 
     def notify(self, method: str, params: dict):
         self._write({"jsonrpc": "2.0", "method": method, "params": params})
@@ -151,6 +198,8 @@ def main():
                 "references": {},
                 "rename": {"prepareSupport": True},
                 "signatureHelp": {"signatureInformation": {"parameterInformation": {"labelOffsetSupport": True}}},
+                "formatting": {},
+                "inlayHint": {"dynamicRegistration": False},
             },
             "workspace": {"symbol": {"dynamicRegistration": False}},
         }
@@ -173,6 +222,8 @@ def main():
             "renameProvider",
             "workspaceSymbolProvider",
             "signatureHelpProvider",
+            "documentFormattingProvider",
+            "inlayHintProvider",
         ):
             if not srv_caps.get(key):
                 fails.append(f"能力协商缺失: {key}")
@@ -332,6 +383,35 @@ def main():
             fails.append("signatureHelp 未返回签名")
         else:
             print(f"[smoke] signatureHelp 签名: {sigs[0].get('label')}")
+
+        # 13) formatting：保守格式化应返回覆盖全文的单个 TextEdit，且结果无行尾空白
+        fmt = client.request(
+            "textDocument/formatting",
+            {"textDocument": {"uri": args.uri}, "options": {"tabSize": 4, "insertSpaces": True}},
+        ) or {}
+        edits = fmt.get("edits", [])
+        if len(edits) != 1:
+            fails.append(f"formatting 应返回 1 个 TextEdit，实际 {len(edits)}")
+        else:
+            new_text = edits[0].get("newText", "")
+            if any(ln != ln.rstrip() for ln in new_text.split("\n")):
+                fails.append("formatting 结果仍存在行尾空白")
+            else:
+                print(f"[smoke] formatting 产出 {len(new_text)} 字节（无行尾空白）")
+
+        # 14) inlayHint：在 add(1, 2) 调用处应给出 a: / b: 形参名提示
+        inlay = client.request(
+            "textDocument/inlayHint",
+            {
+                "textDocument": {"uri": args.uri},
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 20, "character": 0}},
+            },
+        ) or []
+        labels = [h.get("label", "") for h in inlay]
+        if len(inlay) < 2 or not any("a:" in l for l in labels) or not any("b:" in l for l in labels):
+            fails.append(f"inlayHint 应给出 a:/b: 形参名提示，实际 {labels}")
+        else:
+            print(f"[smoke] inlayHint 形参提示: {labels}")
 
         client.request("shutdown", {})
     finally:

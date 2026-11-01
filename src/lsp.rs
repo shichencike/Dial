@@ -287,6 +287,32 @@ fn handle<W: Write>(
             respond(out, id, reply)?;
         }
 
+        // ---- 轮3：编写辅助 ----
+        "textDocument/formatting" => {
+            let uri = msg
+                .pointer("/params/textDocument/uri")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+            let text = docs.get(&uri).cloned().unwrap_or_default();
+            let edits = format_document(&text);
+            respond(out, id, edits)?;
+        }
+        "textDocument/inlayHint" => {
+            let uri = msg
+                .pointer("/params/textDocument/uri")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+            let range = msg
+                .get("params")
+                .and_then(|p| p.get("range"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let hints = inlay_hints(ws, docs, &uri, &range);
+            respond(out, id, json!(hints))?;
+        }
+
         // 未知方法：静默忽略（LSP 允许客户端发送我们不认识的通知）
         _ => {
             // 若是**请求**（带 id）而不只是通知，必须回应，否则客户端会一直等待。
@@ -332,15 +358,34 @@ fn log_msg<W: Write>(out: &mut W, level: u8, message: &str) -> io::Result<()> {
 
 /// 能力协商：根据客户端声明的能力，决定本端广播哪些 capability。
 ///
+/// 判据是「**客户端有没有提到这一段**」，而不是「客户端有没有逐项点名」：
 /// - 客户端**完全没发** capabilities（极老客户端）→ 默认全开。
-/// - 客户端**发了** capabilities 但没声明某项 → 那项不广播（避免客户端收了声明却用不了）。
+/// - 客户端发了 `textDocument` 段 → 该段内逐项判断：没点名的项视为不支持，不广播。
+/// - 客户端**压根没提** `textDocument` / `workspace` 段 → 它没表达任何偏好，此时全开。
+///
+/// 为什么「多广播」比「少广播」安全：客户端没声明某能力，多半只是**忘了填**
+/// （不少客户端干脆发一个空的 `capabilities: {}`）。我们因此不广播，客户端就会
+/// 安安静静地少一个功能——用户查不出原因；反过来多广播一个用不上的能力，
+/// 客户端自己不会去调，零代价。
 /// 文档同步与语义高亮是本项目必开项，无条件广播。
 fn negotiate_capabilities(client: Option<&Value>) -> Value {
-    // 客户端显式声明了某能力路径才返回 true；没发 capabilities 时一律 true（全开）。
     let supports = |path: &str| -> bool {
-        match client {
-            None => true,
-            Some(c) => c.pointer(path).is_some(),
+        let c = match client {
+            None => return true,
+            Some(c) => c,
+        };
+        // path 形如 "/textDocument/hover"：父段 "/textDocument" 才是「客户端表态」的粒度。
+        let (parent, leaf) = match path.rfind('/') {
+            Some(i) => (&path[..i], &path[i + 1..]),
+            None => ("", path),
+        };
+        if parent.is_empty() {
+            return c.pointer(path).is_some();
+        }
+        match c.pointer(parent) {
+            Some(section) if section.is_object() => section.get(leaf).is_some(),
+            // 整段都没提到（或不是对象）→ 客户端没表达偏好 → 保守全开。
+            _ => true,
         }
     };
     let mut caps = json!({
@@ -379,6 +424,12 @@ fn negotiate_capabilities(client: Option<&Value>) -> Value {
     }
     if supports("/textDocument/signatureHelp") {
         caps["signatureHelpProvider"] = json!({ "triggerCharacters": ["(", ","] });
+    }
+    if supports("/textDocument/formatting") {
+        caps["documentFormattingProvider"] = json!(true);
+    }
+    if supports("/textDocument/inlayHint") {
+        caps["inlayHintProvider"] = json!(true);
     }
     caps
 }
@@ -1355,4 +1406,174 @@ fn signature_help_at(ws: &WorkspaceIndex, docs: &Docs, uri: &str, line: u32, cha
         "activeSignature": 0,
         "activeParameter": active_param
     })
+}
+
+// ---------------------------------------------------------------------------
+// 轮3：编写辅助（保守格式化 / 参数 inlay 提示）
+// ---------------------------------------------------------------------------
+
+/// 保守、非破坏性格式化：只做两件事 —— 去除每行行尾空白、确保文件末尾恰有一行换行。
+///
+/// **刻意不做**任何重排 / 换行的激进格式化（那会误伤对齐敏感的代码，且 Dial 没有官定代码风格）。
+/// 缩进层级一律保留原样；只动行尾的空白与文件末尾的换行。返回覆盖全文的单个 TextEdit。
+fn format_document(text: &str) -> Value {
+    let segs: Vec<&str> = text.split('\n').collect();
+    let n = segs.len();
+    let mut result = String::new();
+    for (i, line) in segs.iter().enumerate() {
+        if i + 1 < n {
+            // 非最后一段：原样（去行尾空白）后补换行
+            result.push_str(line.trim_end());
+            result.push('\n');
+        } else {
+            // 最后一段：若非空则保留并补一个换行（确保文件末尾换行）；为空（原文件以换行结尾）则不补
+            if !line.is_empty() {
+                result.push_str(line.trim_end());
+                result.push('\n');
+            }
+        }
+    }
+    // 全文范围：起点 (0,0)，终点在最后一个 '\n' 之后那一行行首（或末行行尾）。
+    let end_line = text.matches('\n').count() as u32;
+    let end_char = if text.ends_with('\n') {
+        0u32
+    } else {
+        segs.last().map(|l| utf16_len(l.trim_end()) as u32).unwrap_or(0)
+    };
+    json!({
+        "edits": [{
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": end_line, "character": end_char }
+            },
+            "newText": result
+        }]
+    })
+}
+
+/// 调用帧：扫描源码时维护 `(` 的配对与参数起始位置。
+struct CallFrame {
+    depth: i32,
+    name: Option<String>,
+    arg_starts: Vec<(u32, u32)>, // (0 起行, 0 起 UTF-16 列)
+}
+
+/// 参数 inlay 提示：在函数调用实参前标注形参名（如 `a: ` / `b: `）。
+///
+/// 仅做**安全**的一种：形参名来自已索引的签名，不做类型推断（索引独立于语义、半成品代码拿不到类型）。
+/// 扫描 token 流，按括号深度配对调用，记录每个顶层实参的起始位置，再按签名里的形参名生成提示。
+fn inlay_hints(ws: &WorkspaceIndex, docs: &Docs, uri: &str, range: &Value) -> Vec<Value> {
+    let text = match docs.get(uri) {
+        Some(t) => t.clone(),
+        None => return Vec::new(),
+    };
+    let indexed = match ws.files.get(uri) {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+    let start_line = range
+        .pointer("/start/line")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let end_line = range
+        .pointer("/end/line")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(text.split('\n').count() as u64) as usize;
+    let tokens = match crate::lexer::lex(&text) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line_utf16 = |line1: usize, char1: usize| -> u32 {
+        let lt = lines.get(line1.saturating_sub(1)).copied().unwrap_or("");
+        char_col_to_utf16(lt, char1) as u32
+    };
+    let mut out = Vec::new();
+    let mut stack: Vec<CallFrame> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut prev_ident: Option<String> = None;
+    // 区分「函数声明 fn name(」与「函数调用 name(」：仅当「前一个 token 是标识符、
+    // 且该标识符的前一个 token 是 fn 关键字」时，才是声明参数列表，不算调用（不给 inlay）。
+    let mut prev_was_ident = false;
+    let mut prev_was_fn = false;
+    let mut last_ident_pre_was_fn = false;
+    for tk in &tokens {
+        let is_ident = matches!(tk.kind, TokenKind::Ident(_));
+        let is_fn = matches!(tk.kind, TokenKind::Fn);
+        match &tk.kind {
+            TokenKind::Ident(name) => {
+                last_ident_pre_was_fn = prev_was_fn;
+                prev_ident = Some(name.clone());
+            }
+            TokenKind::LParen => {
+                depth += 1;
+                let is_call = !(prev_was_ident && last_ident_pre_was_fn);
+                let l0 = (tk.line as u32).saturating_sub(1);
+                let c0 = line_utf16(tk.line, tk.col + 1);
+                let name = if is_call { prev_ident.take() } else { None };
+                stack.push(CallFrame {
+                    depth,
+                    name,
+                    arg_starts: vec![(l0, c0)], // 第一个实参起始 = '(' 之后
+                });
+                prev_ident = None;
+            }
+            TokenKind::RParen => {
+                if let Some(f) = stack.pop() {
+                    if let Some(ref name) = f.name {
+                        let params = lookup_param_names(indexed, ws, name);
+                        for (i, &(l0, c0)) in f.arg_starts.iter().enumerate() {
+                            if i >= params.len() {
+                                break;
+                            }
+                            let lr = l0 as usize;
+                            if lr + 1 < start_line || lr > end_line {
+                                continue;
+                            }
+                            out.push(json!({
+                                "position": { "line": l0, "character": c0 },
+                                "label": format!("{}: ", params[i]),
+                                "kind": 2, // InlayHintKind.Parameter
+                                "paddingLeft": true
+                            }));
+                        }
+                    }
+                }
+                depth -= 1;
+            }
+            TokenKind::Comma => {
+                if let Some(f) = stack.last_mut() {
+                    if f.depth == depth {
+                        let l0 = (tk.line as u32).saturating_sub(1);
+                        let c0 = line_utf16(tk.line, tk.col + 1);
+                        f.arg_starts.push((l0, c0)); // 后续实参起始 = ',' 之后
+                    }
+                }
+            }
+            _ => {}
+        }
+        prev_was_ident = is_ident;
+        prev_was_fn = is_fn;
+    }
+    out
+}
+
+/// 按函数名查其形参名列表（仅名字，去掉类型部分）；文件内函数优先，其次包函数。
+fn lookup_param_names(indexed: &IndexedFile, ws: &WorkspaceIndex, name: &str) -> Vec<String> {
+    for (idx, sym) in indexed.symbols.iter().enumerate() {
+        if sym.name == name && matches!(sym.kind, SymbolKind::Function) {
+            if let Some((_, params)) = indexed.signatures.get(&idx) {
+                return params.iter().map(|p| param_name(p)).collect();
+            }
+        }
+    }
+    if let Some((_, params)) = ws.package_sigs.get(name) {
+        return params.iter().map(|p| param_name(p)).collect();
+    }
+    Vec::new()
+}
+
+/// "a: int" -> "a"（取形参名部分）。
+fn param_name(label: &str) -> String {
+    label.split(':').next().unwrap_or(label).trim().to_string()
 }
