@@ -103,8 +103,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: 端到端测试（A~L 共十二组）
+      - name: 端到端测试（A~M 共十三组）
         run: bash tests/run_tests.sh
+
+      - name: 校验 LSP 协议流纯净性（stdout 不得有非协议字节）
+        run: python3 tools/check_lsp_stdout_purity.py
 
       - name: 校验内部锚点（README / CHANGELOG）
         run: python3 tools/check_links.py

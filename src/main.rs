@@ -238,7 +238,9 @@ fn main() {
 
     // 2.5) 解析 import：定位包 -> 校验哈希 -> 读 .diali 签名 -> 选出本平台机器码
     //      编译器在这里替用户做完**全部**决策：不写路径、不写平台、不写版本。
-    let (externs, pkg_libs, opaque_types) = match resolve_imports(&probe.imports) {
+    let (externs, pkg_libs, opaque_types) = match resolve_imports(&probe.imports, &mut |m| {
+        println!("{}", m)
+    }) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{}", e);
@@ -306,8 +308,15 @@ fn main() {
 /// 这一步是 ARCHITECTURE.md §4.2「包处理流水线」的 ②③④：
 /// 读 manifest → 按 Triple 查映射字典 → 校验哈希 → 读 .diali 喂给 Sema；
 /// 第 ⑤ 步（把库加进链接命令）在 `link` 里完成。
+///
+/// **日志去向由调用方注入**（`log`）：本函数**绝不**自己往 stdout 写东西。
+/// 原因：`dialc lsp` 的 stdout 是 LSP 协议流，混入任何非协议字节都会让客户端
+/// 的分帧解析错位（实测表现为「一打开 import 了包的文档就卡死」）。
+/// CLI 构建传 stdout（构建日志），LSP 传 `window/logMessage` 通知——由调用方决定，
+/// 函数本身无权替调用方选往哪儿写。
 pub fn resolve_imports(
     imports: &[String],
+    log: &mut dyn FnMut(&str),
 ) -> Result<(Vec<(String, semantic::FuncInfo)>, Vec<PathBuf>, Vec<String>), String> {
     let mut externs: Vec<(String, semantic::FuncInfo)> = Vec::new();
     let mut libs: Vec<PathBuf> = Vec::new();
@@ -333,10 +342,10 @@ pub fn resolve_imports(
         };
 
         // §25.8：让许可**可见**。dialc 不替用户做法务判断，但必须回显到构建日志。
-        println!(
+        log(&format!(
             "ℹ️  包 '{}' v{}（ABI {}，许可 {}）",
             manifest.name, manifest.version, manifest.abi, manifest.license
-        );
+        ));
 
         // 校验 .diali 的哈希（被篡改的签名会让类型检查建立在谎言之上）
         let iface_path = package::verify_iface(&dir, &manifest).map_err(|e| e.to_string())?;
@@ -372,12 +381,12 @@ pub fn resolve_imports(
 
         // 按当前 Triple 选库，并校验该份机器码的哈希
         let lib = package::resolve_lib(&dir, &manifest).map_err(|e| e.to_string())?;
-        println!(
+        log(&format!(
             "ℹ️  链接 {} -> {}（目标 {}）",
             manifest.name,
             lib.display(),
             triple
-        );
+        ));
         libs.push(lib);
     }
 

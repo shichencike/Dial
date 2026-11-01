@@ -513,13 +513,24 @@ fn negotiate_capabilities(client: Option<&Value>) -> Value {
 /// 这与 `dialc build` 的行为一致：第一个错误之后的位置信息往往已经失真，
 /// 报一串连锁错误只会淹没真正的问题。
 fn publish_diagnostics<W: Write>(out: &mut W, uri: &str, text: &str) -> io::Result<()> {
-    let diags = collect_diagnostics(text);
+    // 编译前端的过程日志（如「包 'demo' v1.0.0」）走 `window/logMessage` 通知，
+    // 而不是 stdout 的裸文本——stdout 是协议流，混入裸文本会让客户端分帧错位。
+    // 闭包借用 out，因此必须限制在块内，块结束后才能再次借用 out 发诊断。
+    let diags = {
+        let mut log = |m: &str| {
+            let _ = log_msg(out, 3, m);
+        };
+        collect_diagnostics(text, &mut log)
+    };
     let params = json!({ "uri": uri, "diagnostics": diags });
     notify(out, "textDocument/publishDiagnostics", params)
 }
 
 /// 跑前端并收集诊断（返回 LSP 的 Diagnostic 数组）。
-fn collect_diagnostics(text: &str) -> Vec<Value> {
+///
+/// `log` 是过程日志的出口——由调用方决定送到哪儿（LSP 里是 `window/logMessage`）。
+/// 本函数**不直接**写 stdout：stdout 属于协议流，只能由分帧器统一写。
+fn collect_diagnostics(text: &str, log: &mut dyn FnMut(&str)) -> Vec<Value> {
     let mut diags = Vec::new();
 
     // 1) 词法
@@ -542,7 +553,7 @@ fn collect_diagnostics(text: &str) -> Vec<Value> {
     // 2.5) 解析 import —— 拿不到包不算是「代码错误」，
     //      而是环境问题，因此失败时**静默降级**为空外部函数表，
     //      继续做本地的检查（否则装个包之前连语法高亮都看不到错误）。
-    let (externs, _libs, opaque) = match crate::resolve_imports(&probe.imports) {
+    let (externs, _libs, opaque) = match crate::resolve_imports(&probe.imports, log) {
         Ok(r) => r,
         Err(_) => (Vec::new(), Vec::new(), Vec::new()),
     };

@@ -72,6 +72,18 @@
 - **selectionRange 不认规范形状**：LSP 规定 `textDocument/selectionRange` 用 `positions`（**数组**，可多选），
   真实客户端（VS Code）发的就是这个形状；旧实现只认单数 `position`，于是真实客户端**根本拿不到结果**。
   现按规范收数组、返数组，同时保留单数形式（老客户端不至于拿到数组而崩）。
+- **LSP 协议流被裸文本污染 → 编辑器卡死**（本版最严重的一个）：
+  `resolve_imports()` 是 CLI 构建与 LSP 诊断**共用**的函数，其中两处 `println!`
+  （「包 'x' v…」「链接 x -> …」）会把纯文本写进 **stdout**——而 stdout 跑的正是 LSP 的
+  `Content-Length` 分帧协议。客户端一旦读到裸字节，分帧立刻错位：症状**不是报错，而是卡死**
+  （编辑器在等一条永远对不上的消息）。触发条件却极常见：打开一个 `import` 了**已安装**包的文档。
+  - **修复**：`resolve_imports()` 改为**日志出口由调用方注入**（`log: &mut dyn FnMut(&str)`），
+    函数本身不再有资格写 stdout；CLI 构建传 stdout，LSP 传 `window/logMessage` 通知（编辑器可见、协议合法）。
+  - **加固一（动态）**：冒烟测试新增**协议流纯净性**断言——stdout 上出现任何非协议字节即判失败；
+    并给每次请求加**超时看门狗**，服务器卡死会**快速失败并指名道姓**，而不是把 CI 挂死。
+  - **加固二（静态）**：新增 `tools/check_lsp_stdout_purity.py`——LSP 用到的库模块与被 LSP 调用的函数里
+    出现 `println!` 即失败（CI 独立步骤 + `tests/run_tests.sh` M 组双重把关）。
+
 ### 后续轮次（路线）
 - 轮 5（待定）：语义化重构（rename 时区分局部/全局）、诊断码（diagnostic code）、工作区符号的模糊匹配排序优化。
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 十二组检查，全部通过才算绿（顺序即 A→L，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 十三组检查，全部通过才算绿（顺序即 A→M，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -18,6 +18,8 @@
 #      .diali）、基础补全（可见符号收集 + 前缀过滤）（v0.95 新增）。
 #   L. 包 URL 安装：真起本机 HTTP 服务器提供 .dialpkg，用 `dialc install <URL>` 装——
 #      坏包（篡改 / 哈希不符 / 404 / 非 https）一律装不进去，且失败后缓存无残骸（v0.96 新增）。
+#   M. LSP 全能力 + 协议流纯净性：轮2~4 的导航/编写/高级能力做一遍黑盒往返，
+#      并静态+动态两路守住「stdout 只有协议字节」这条铁律（v0.98 新增）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -358,6 +360,32 @@ echo "== L) 包 URL 安装：下载 → 校验 → 解压（v0.96） =="
 # 全部用例在隔离的 HOME 下跑，不碰用户真实缓存。
 if command -v python3 >/dev/null 2>&1; then
     if python3 tests/pkg_install_url.py; then
+        :
+    else
+        fail=1
+    fi
+else
+    echo "  ⚠️  跳过（未找到 python3）"
+fi
+
+echo
+echo "== M) LSP 全能力往返 + 协议流纯净性（v0.98 轮2~4） =="
+# 1) 黑盒往返：文档符号 / 工作区符号 / 引用 / 重命名 / 签名帮助 / 格式化 /
+#    inlay 提示 / codeAction / folding / selection / documentLink 等能力，
+#    外加「stdout 上不得出现任何非协议字节」的动态断言。
+# 2) 静态守卫：LSP 运行时用到的模块与函数里不得有 stdout 打印。
+#
+# 第 2 条绝不是"锦上添花"：LSP 的 stdout 跑的是 Content-Length 分帧协议，
+# 混入一行日志就会让客户端分帧错位——症状不是报错，而是**编辑器卡死**。
+# 真实事故：`resolve_imports()`（CLI 与 LSP 共用）里有两处 println!，
+# 于是"打开一个 import 了已安装包的文档"就必卡（v0.98 修复）。
+if command -v python3 >/dev/null 2>&1; then
+    if python3 tools/lsp_smoke.py; then
+        :
+    else
+        fail=1
+    fi
+    if python3 tools/check_lsp_stdout_purity.py; then
         :
     else
         fail=1

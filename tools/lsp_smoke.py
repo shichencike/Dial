@@ -514,6 +514,16 @@ def main():
         else:
             print(f"[smoke] selectionRange 规范形式（positions 数组）返回 {len(sel_multi)} 条")
 
+        # 21) 协议流纯净性：stdout 上不得出现任何非协议字节。
+        if client.pollution:
+            sample = client.pollution[0][:120]
+            fails.append(
+                f"stdout 出现非协议内容 {len(client.pollution)} 处，"
+                f"协议流已被打乱（首例: {sample!r}）"
+            )
+        else:
+            print("[smoke] stdout 协议流纯净（无裸字节）")
+
         client.request("shutdown", {})
     finally:
         client.close()
