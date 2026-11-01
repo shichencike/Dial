@@ -4809,7 +4809,8 @@ while (true) {
 <p>其中<strong>前三项（悬停 / 跳转定义 / 补全）已在 v0.95 补上</strong>（见 <a href="#286-lsp-增强hover--跳转定义--补全v095">§28.6</a>）。
 表格里仍保留它们，是为了记录<strong>这个决策后来如何被推翻</strong>——而不是说它们至今未实现。
 <strong>重命名 / 引用查找 / 签名帮助已在 v0.98 轮 2 补上</strong>（见 <a href="#2871-当前-lsp-能力清单">§28.7.1</a>）；
-真正至今仍未实现的，是格式化、codeAction、folding、selection 等（见路线表，轮 3 / 轮 4）。</p>
+<strong>格式化 / inlay 提示在轮 3 补上</strong>，<strong>codeAction / folding / selection / documentLink 在轮 4 补上</strong>——
+至此本表列举的能力<strong>全部已实现</strong>（下表保留历史理由，是为记录决策如何被推翻）。</p>
 </blockquote>
 <table>
 <thead>
@@ -4825,7 +4826,7 @@ while (true) {
 </tr>
 <tr>
 <td>重命名、跨文件引用查找、格式化</td>
-<td>重命名需要全工作区引用图，当前索引器只建符号、不建引用边；格式化交给编辑器/用户。<strong>本版仍不做</strong></td>
+<td>重命名需要全工作区引用图，当前索引器只建符号、不建引用边；格式化交给编辑器/用户。<strong>v0.98 轮 2（重命名 / 引用）与轮 3（保守格式化）已补上</strong>——重命名靠索引器新增的<strong>引用边</strong>，格式化只做「去行尾空白 + 末尾换行」这类<strong>绝不重排</strong>的非破坏性动作</td>
 </tr>
 <tr>
 <td>区分变量名与函数名（高亮上）</td>
@@ -5060,23 +5061,53 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 <td><code>(</code> / <code>,</code> 触发；解析光标前函数名，返回完整签名与参数标签、活动参数序号</td>
 </tr>
 <tr>
-<td>格式化 / inlay hint</td>
-<td>🔜 轮 3</td>
-<td>保守、非破坏性</td>
+<td>格式化（保守）</td>
+<td>✅ 已实现（轮 3）</td>
+<td>仅去除行尾空白 + 确保文件末尾恰有一行换行；<strong>绝不</strong>重排/换行的激进格式化（非破坏性）</td>
 </tr>
 <tr>
-<td>codeAction / folding / selection</td>
-<td>🔜 轮 4</td>
-<td>安全 quickfix、基于作用域包围盒的折叠</td>
+<td>参数 inlay 提示</td>
+<td>✅ 已实现（轮 3）</td>
+<td>调用实参前标注形参名（如 <code>a:</code> / <code>b:</code>）；索引独立于语义、半成品代码拿不到类型，故不做类型 inlay</td>
+</tr>
+<tr>
+<td>codeAction</td>
+<td>✅ 已实现（轮 4）</td>
+<td>按诊断给安全 quickfix：缺失包 → 「安装包 'x'（dialc install）」；只发 <code>Command</code>、不擅自改代码</td>
+</tr>
+<tr>
+<td>折叠范围</td>
+<td>✅ 已实现（轮 4）</td>
+<td>基于作用域包围盒；顶层作用域与单行区间不报</td>
+</tr>
+<tr>
+<td>选择范围</td>
+<td>✅ 已实现（轮 4）</td>
+<td>从光标处逐级向外构造嵌套 <code>SelectionRange</code>（表达式 → 语句 → 块 → 函数）</td>
+</tr>
+<tr>
+<td>文档链接</td>
+<td>✅ 已实现（轮 4）</td>
+<td><code>import "pkg";</code> 的字符串字面量指向该包的 <code>.diali</code> 接口文件，可点击跳转</td>
 </tr>
 </tbody>
 </table>
 <blockquote>
-<p>路线：v0.98 完成<strong>轮 1（基础稳健 + 补全增强 + 三编辑器接通）</strong> 与 <strong>轮 2（导航全家桶）</strong>；
-编写辅助在轮 3，高级能力在轮 4——循序渐进，每轮可独立验证（见 <code>tools/lsp_smoke.py</code>）。</p>
+<p>路线：v0.98 完成<strong>轮 1（基础稳健 + 补全增强 + 三编辑器接通）</strong>、<strong>轮 2（导航全家桶）</strong>、<strong>轮 3（编写辅助）</strong>
+与 <strong>轮 4（高级能力）</strong>——循序渐进，每轮可独立验证（见 <code>tools/lsp_smoke.py</code>）。</p>
 <p>实现要点：引用 / 重命名依赖 <code>src/index.rs</code> 新增的<strong>引用边</strong>——索引不再只建符号、也记录每个标识符解析到哪个符号
 （<code>Ref.symbol_index</code>），因此<strong>同名遮蔽天然正确</strong>（内层同名变量不会被误并入外层引用）。Dial 单文件编译，
 重命名只作用于当前 <code>.dial</code>，包符号（<code>.diali</code>）只读。</p>
+<p><strong>协议流纯净性（铁律）</strong>：LSP 的 stdout 跑的是 <code>Content-Length</code> 分帧协议，
+<strong>任何非协议字节都会让客户端分帧错位</strong>——症状不是报错，而是<strong>编辑器卡死</strong>。
+因此 stdout 只允许出现协议字节；日志一律走 stderr（CLI）或 <code>window/logMessage</code> 通知（LSP）。
+这条纪律由两路自动化守住：<code>tools/lsp_smoke.py</code> 的<strong>动态</strong>断言（发现裸字节即失败）
+与 <code>tools/check_lsp_stdout_purity.py</code> 的<strong>静态</strong>守卫（LSP 路径上出现 <code>println!</code> 即失败）。</p>
+<p><strong>能力协商的判据</strong>：按「客户端有没有<strong>提到这一段</strong>」判断，而不是「有没有逐项点名」——
+客户端压根没提 <code>textDocument</code> / <code>workspace</code> 段 = 它没表达偏好 → <strong>全开</strong>；
+提到了该段却漏掉某项 = 明确不支持 → 不广播。
+理由很直接：多广播一个用不上的能力零代价，少广播则让功能<strong>静悄悄消失</strong>、用户查不出原因。
+（<code>tests/lsp_features.py</code> 用的就是 <code>capabilities: {}</code>，正因如此才暴露过轮 1 的误判。）</p>
 </blockquote>
 <hr /></main></div>
 
