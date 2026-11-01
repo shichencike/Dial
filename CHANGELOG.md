@@ -54,6 +54,14 @@
   索引独立于语义、半成品代码拿不到类型，故只做形参名、不做类型 inlay。
 - 冒烟测试 `tools/lsp_smoke.py` 扩展到轮 3（格式化 / inlay 断言均已通过）。
 
+### 轮 4（高级，已完成）
+- **代码动作**（`textDocument/codeAction`）：按诊断给出**安全的 quickfix**——缺失包 → 「安装包 'x'（dialc install）」，
+  其余诊断 → 「在终端运行 dialc build 查看完整错误」。只发 `Command`、**不擅自改代码**，避免误伤用户代码。
+- **折叠范围**（`textDocument/foldingRange`）：按作用域包围盒给出可折叠区间（顶层作用域与单行区间不报）。
+- **选择范围**（`textDocument/selectionRange`）：从光标处逐级向外构造嵌套 `SelectionRange`（表达式 → 语句 → 块 → 函数）。
+- **文档链接**（`textDocument/documentLink`）：`import "pkg";` 的字符串字面量指向该包的 `.diali` 接口文件，可点击跳转。
+- 冒烟测试 `tools/lsp_smoke.py` 扩展到轮 4（折叠 / 选择 / 代码动作 / 文档链接断言均已通过）。
+
 ### Fixed（修复）
 - **能力协商把「没声明」误判成「不支持」**（轮 1 引入，本版才被自家测试抓到）：
   `negotiate_capabilities` 原按「客户端有没有**逐项点名**」判断能力，于是发 `capabilities: {}` 的
@@ -61,9 +69,11 @@
   现改为按「客户端有没有**提到这一段**」判断：压根没提 `textDocument` / `workspace` 段 = 没表达偏好 → 全开；
   提到了该段却漏掉某项 = 明确不支持 → 不广播。
   （多广播一个用不上的能力零代价；少广播则让功能**静悄悄消失**，用户查不出原因。）
-
+- **selectionRange 不认规范形状**：LSP 规定 `textDocument/selectionRange` 用 `positions`（**数组**，可多选），
+  真实客户端（VS Code）发的就是这个形状；旧实现只认单数 `position`，于是真实客户端**根本拿不到结果**。
+  现按规范收数组、返数组，同时保留单数形式（老客户端不至于拿到数组而崩）。
 ### 后续轮次（路线）
-- 轮 4：高级（codeAction / folding / selection / documentLink）
+- 轮 5（待定）：语义化重构（rename 时区分局部/全局）、诊断码（diagnostic code）、工作区符号的模糊匹配排序优化。
 
 ---
 

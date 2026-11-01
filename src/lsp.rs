@@ -16,8 +16,9 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 
 use crate::error::DialcError;
-use crate::index::{self, IndexedFile, Symbol, SymbolKind, WorkspaceIndex};
+use crate::index::{self, IndexedFile, Scope, Symbol, SymbolKind, WorkspaceIndex};
 use crate::lexer::{self, TokenKind};
+use crate::package;
 use crate::parser;
 use crate::semantic;
 
@@ -313,6 +314,62 @@ fn handle<W: Write>(
             respond(out, id, json!(hints))?;
         }
 
+        // ---- 轮4：高级 ----
+        "textDocument/codeAction" => {
+            let uri = msg
+                .pointer("/params/textDocument/uri")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+            let range = msg
+                .pointer("/params/range")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let diags = msg
+                .pointer("/params/context/diagnostics")
+                .and_then(|d| d.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let actions = code_action(&uri, &range, &diags);
+            respond(out, id, json!(actions))?;
+        }
+        "textDocument/foldingRange" => {
+            let uri = msg
+                .pointer("/params/textDocument/uri")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+            let ranges = folding_ranges(ws, &uri);
+            respond(out, id, json!(ranges))?;
+        }
+        "textDocument/selectionRange" => {
+            // LSP 规范用 `positions`（**数组**，支持多选）；历史上我们也收单数 `position`。
+            // 返回形状跟着请求走：数组进数组出，单数进单数出（老客户端不至于拿到数组而崩）。
+            let multi = msg.pointer("/params/positions").and_then(|p| p.as_array()).is_some();
+            let reply = match selection_positions(msg) {
+                Some((uri, ps)) if ps.is_empty() => Value::Null,
+                Some((uri, ps)) if multi => {
+                    let arr: Vec<Value> = ps
+                        .iter()
+                        .map(|(l, c)| selection_range(ws, docs, &uri, *l, *c))
+                        .collect();
+                    json!(arr)
+                }
+                Some((uri, ps)) => selection_range(ws, docs, &uri, ps[0].0, ps[0].1),
+                None => Value::Null,
+            };
+            respond(out, id, reply)?;
+        }
+        "textDocument/documentLink" => {
+            let uri = msg
+                .pointer("/params/textDocument/uri")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+            let links = document_links(ws, docs, &uri);
+            respond(out, id, json!(links))?;
+        }
+
         // 未知方法：静默忽略（LSP 允许客户端发送我们不认识的通知）
         _ => {
             // 若是**请求**（带 id）而不只是通知，必须回应，否则客户端会一直等待。
@@ -430,6 +487,18 @@ fn negotiate_capabilities(client: Option<&Value>) -> Value {
     }
     if supports("/textDocument/inlayHint") {
         caps["inlayHintProvider"] = json!(true);
+    }
+    if supports("/textDocument/codeAction") {
+        caps["codeActionProvider"] = json!(true);
+    }
+    if supports("/textDocument/foldingRange") {
+        caps["foldingRangeProvider"] = json!(true);
+    }
+    if supports("/textDocument/selectionRange") {
+        caps["selectionRangeProvider"] = json!(true);
+    }
+    if supports("/textDocument/documentLink") {
+        caps["documentLinkProvider"] = json!(true);
     }
     caps
 }
@@ -805,6 +874,28 @@ fn doc_position(msg: &Value) -> Option<(String, u32, u32)> {
         .pointer("/params/position/character")
         .and_then(|c| c.as_u64())? as u32;
     Some((uri, line, character))
+}
+
+/// 取 `textDocument/selectionRange` 的位置列表：`positions`（规范，数组）或 `position`（单数）。
+fn selection_positions(msg: &Value) -> Option<(String, Vec<(u32, u32)>)> {
+    let uri = msg
+        .pointer("/params/textDocument/uri")
+        .and_then(|u| u.as_str())?
+        .to_string();
+    if let Some(arr) = msg.pointer("/params/positions").and_then(|p| p.as_array()) {
+        let mut out = Vec::with_capacity(arr.len());
+        for p in arr {
+            let line = p.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as u32;
+            let character = p.get("character").and_then(|c| c.as_u64()).unwrap_or(0) as u32;
+            out.push((line, character));
+        }
+        return Some((uri, out));
+    }
+    let line = msg.pointer("/params/position/line").and_then(|l| l.as_u64())? as u32;
+    let character = msg
+        .pointer("/params/position/character")
+        .and_then(|c| c.as_u64())? as u32;
+    Some((uri, vec![(line, character)]))
 }
 
 /// 把一份文档重新解析并写入 `ws.files`。解析失败（半成品代码）就移除旧索引。
@@ -1576,4 +1667,192 @@ fn lookup_param_names(indexed: &IndexedFile, ws: &WorkspaceIndex, name: &str) ->
 /// "a: int" -> "a"（取形参名部分）。
 fn param_name(label: &str) -> String {
     label.split(':').next().unwrap_or(label).trim().to_string()
+}
+
+// ---------------------------------------------------------------------------
+// 轮4：高级（codeAction / foldingRange / selectionRange / documentLink）
+// ---------------------------------------------------------------------------
+
+/// 把 Scope 的包围盒换算成 LSP 范围。
+fn scope_range(sc: &Scope, lines: &[&str]) -> Value {
+    let sl = (sc.span.0 as u32).saturating_sub(1);
+    let el = (sc.span.2 as u32).saturating_sub(1);
+    let start_text = lines.get(sc.span.0.saturating_sub(1)).copied().unwrap_or("");
+    let end_text = lines.get(sc.span.2.saturating_sub(1)).copied().unwrap_or("");
+    let (s0, _) = char_span_to_lsp(start_text, sc.span.1, sc.span.1);
+    let (_, e0) = char_span_to_lsp(end_text, sc.span.3, sc.span.3);
+    json!({
+        "start": { "line": sl, "character": s0 },
+        "end": { "line": el, "character": e0 }
+    })
+}
+
+/// 折叠区间：基于各作用域的包围盒，多行作用域各产生一个 region 折叠。
+fn folding_ranges(ws: &WorkspaceIndex, uri: &str) -> Vec<Value> {
+    let file = match ws.files.get(uri) {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for sc in &file.scopes {
+        // 不折叠整个文件（top_scope 覆盖全文），单行作用域也不值得折叠。
+        if sc.id == file.top_scope {
+            continue;
+        }
+        let (sl, _, el, _) = sc.span;
+        if sl == 0 || el == 0 || sl == el {
+            continue;
+        }
+        out.push(json!({
+            "startLine": (sl as u32).saturating_sub(1),
+            "endLine": (el as u32).saturating_sub(1),
+            "kind": "region"
+        }));
+    }
+    out
+}
+
+/// 选择范围：从光标所在最内层作用域逐级向外扩展，构成嵌套的 SelectionRange 链。
+fn selection_range(
+    ws: &WorkspaceIndex,
+    docs: &Docs,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Value {
+    let file = match ws.files.get(uri) {
+        Some(f) => f,
+        None => return Value::Null,
+    };
+    let text = docs.get(uri).cloned().unwrap_or_default();
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line1 = line as usize + 1;
+    let line_text = lines.get(line as usize).copied().unwrap_or("");
+    let char1 = index::utf16_to_char_col(line_text, character as usize);
+    let point = (line1, char1);
+
+    // 收集从最内层到最外层的 scope id 链。
+    let mut chain: Vec<usize> = Vec::new();
+    if let Some(scope_id) = file.scope_at(point) {
+        let mut cur = Some(scope_id);
+        while let Some(id) = cur {
+            chain.push(id);
+            cur = file.scopes.get(id).and_then(|s| s.parent);
+        }
+    }
+    // 没有任何作用域命中（光标在顶层空白）：退回整个文件（top_scope）。
+    if chain.is_empty() {
+        if let Some(sc) = file.scopes.get(file.top_scope) {
+            return json!({ "range": scope_range(sc, &lines) });
+        }
+        return Value::Null;
+    }
+    // 由外到内构建，使内层的 parent 指向上一层。
+    let mut node: Value = Value::Null;
+    for &sid in chain.iter().rev() {
+        let sc = &file.scopes[sid];
+        node = json!({ "range": scope_range(sc, &lines), "parent": node });
+    }
+    node
+}
+
+/// 从诊断文案里抽取「找不到的包名」：`找不到已安装的包 '<name>'`。
+fn extract_missing_pkg(msg: &str) -> Option<String> {
+    let marker = "找不到已安装的包 '";
+    if let Some(pos) = msg.find(marker) {
+        let rest = &msg[pos + marker.len()..];
+        if let Some(end) = rest.find('\'') {
+            let name = &rest[..end];
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 代码动作（安全 quickfix）：对诊断提供「安装缺失包」或「重新构建」命令。
+/// 只发 Command（不擅自改代码），避免误伤；契合计划里「安全项」的约束。
+fn code_action(_uri: &str, _range: &Value, diagnostics: &[Value]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for d in diagnostics {
+        let msg = d.get("message").and_then(|m| m.as_str()).unwrap_or("");
+        if let Some(pkg) = extract_missing_pkg(msg) {
+            out.push(json!({
+                "title": format!("安装包 '{}'（dialc install）", pkg),
+                "kind": "quickfix",
+                "command": {
+                    "title": format!("dialc install {}", pkg),
+                    "command": "dialc.install",
+                    "arguments": [pkg]
+                }
+            }));
+        } else {
+            out.push(json!({
+                "title": "在终端运行 dialc build 查看完整错误",
+                "kind": "quickfix",
+                "command": {
+                    "title": "dialc build",
+                    "command": "dialc.build",
+                    "arguments": []
+                }
+            }));
+        }
+    }
+    out
+}
+
+/// 把包名解析为其 `.diali` 接口文件的 file:// 路径（供 documentLink 跳转）。
+fn resolve_pkg_iface(name: &str) -> Option<String> {
+    if let Some((dir, manifest)) = package::find_installed(name).ok().flatten() {
+        if let Ok(p) = package::verify_iface(&dir, &manifest) {
+            return Some(format!("file://{}", p.display()));
+        }
+    }
+    None
+}
+
+/// 文档链接：`import "pkg";` 语句的字符串字面量指向该包的 `.diali` 接口文件。
+fn document_links(ws: &mut WorkspaceIndex, docs: &Docs, uri: &str) -> Vec<Value> {
+    let text = match docs.get(uri) {
+        Some(t) => t.clone(),
+        None => return Vec::new(),
+    };
+    let tokens = match crate::lexer::lex(&text) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out = Vec::new();
+    let n = tokens.len();
+    let mut i = 0;
+    while i < n {
+        if matches!(tokens[i].kind, TokenKind::Import) && i + 1 < n {
+            if let TokenKind::StringLit(inner) = &tokens[i + 1].kind {
+                let pkg = inner.clone();
+                let lt = &tokens[i + 1];
+                let start_char = char_col_to_utf16(
+                    lines.get(lt.line.saturating_sub(1)).copied().unwrap_or(""),
+                    lt.col,
+                ) as u32;
+                let end_char = start_char + utf16_len(inner) as u32 + 2; // 含两侧引号
+                // 顺手确保包已载入索引（不影响链接生成）
+                let _ = index::ensure_package(ws, &pkg);
+                if let Some(target) = resolve_pkg_iface(&pkg) {
+                    out.push(json!({
+                        "range": {
+                            "start": { "line": (lt.line as u32).saturating_sub(1), "character": start_char },
+                            "end": { "line": (lt.line as u32).saturating_sub(1), "character": end_char }
+                        },
+                        "target": target,
+                        "tooltip": format!("跳到包 {} 的接口签名 (.diali)", pkg)
+                    }));
+                }
+            }
+            i += 2; // 跳过 import 与字符串字面量
+            continue;
+        }
+        i += 1;
+    }
+    out
 }

@@ -200,6 +200,10 @@ def main():
                 "signatureHelp": {"signatureInformation": {"parameterInformation": {"labelOffsetSupport": True}}},
                 "formatting": {},
                 "inlayHint": {"dynamicRegistration": False},
+                "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix"]}}},
+                "foldingRange": {},
+                "selectionRange": {},
+                "documentLink": {},
             },
             "workspace": {"symbol": {"dynamicRegistration": False}},
         }
@@ -224,6 +228,10 @@ def main():
             "signatureHelpProvider",
             "documentFormattingProvider",
             "inlayHintProvider",
+            "codeActionProvider",
+            "foldingRangeProvider",
+            "selectionRangeProvider",
+            "documentLinkProvider",
         ):
             if not srv_caps.get(key):
                 fails.append(f"能力协商缺失: {key}")
@@ -412,6 +420,99 @@ def main():
             fails.append(f"inlayHint 应给出 a:/b: 形参名提示，实际 {labels}")
         else:
             print(f"[smoke] inlayHint 形参提示: {labels}")
+
+        # 15) foldingRange：SAMPLE 含 add / main 两个函数体 → 至少 1 个折叠区间
+        folding = client.request(
+            "textDocument/foldingRange",
+            {"textDocument": {"uri": args.uri}},
+        ) or []
+        if not folding:
+            fails.append("foldingRange 返回空")
+        else:
+            print(f"[smoke] foldingRange 折叠区间: {len(folding)} 个")
+
+        # 16) selectionRange：在函数体内取一个位置，应返回带 range（可能含 parent）的结果
+        sel = client.request(
+            "textDocument/selectionRange",
+            {
+                "textDocument": {"uri": args.uri},
+                "position": {"line": 6, "character": 4},
+            },
+        ) or {}
+        if "range" not in sel:
+            fails.append("selectionRange 未返回 range")
+        else:
+            print(f"[smoke] selectionRange 命中 range: {json.dumps(sel['range'], ensure_ascii=False)}")
+
+        # 17) codeAction：缺失包诊断 → 给出 dialc.install；普通诊断 → 给出 dialc.build
+        ca_pkg = client.request(
+            "textDocument/codeAction",
+            {
+                "textDocument": {"uri": args.uri},
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+                "context": {
+                    "diagnostics": [
+                        {"message": "找不到已安装的包 'demo'（缓存目录: ...）。请先用 dialc install 安装"}
+                    ]
+                },
+            },
+        ) or []
+        if not any(a.get("command", {}).get("command") == "dialc.install" for a in ca_pkg):
+            fails.append("codeAction 缺失包未给出 dialc.install")
+        else:
+            print(f"[smoke] codeAction(缺失包) 动作: {[a['title'] for a in ca_pkg]}")
+
+        # 18) documentLink：打开含 import 的文档，链接应返回数组（不崩溃）
+        link_uri = "file:///with_import.dial"
+        client.notify(
+            "textDocument/didOpen",
+            {
+                "textDocument": {
+                    "uri": link_uri,
+                    "languageId": "dial",
+                    "version": 1,
+                    "text": 'import "demo";\n\nfn main(): int {\n    return 0;\n}\n',
+                }
+            },
+        )
+        links = client.request(
+            "textDocument/documentLink", {"textDocument": {"uri": link_uri}}
+        ) or []
+        if not isinstance(links, list):
+            fails.append("documentLink 未返回数组")
+        else:
+            print(f"[smoke] documentLink 链接数: {len(links)}（包不存在时为 0，不报错）")
+
+        # 19) 回归防线：解析 import 会走「加载包」这条路径（包解析过程**曾经**
+        #     往 stdout 吐裸文本，把协议流打乱，表现为「一开包就卡死」）。
+        #     这里再要一次 documentLink：若协议流被污染，客户端会错位、
+        #     要么拿到错乱的帧、要么直接超时——都必须明确失败，不能静悄悄。
+        links2 = client.request(
+            "textDocument/documentLink", {"textDocument": {"uri": link_uri}}
+        ) or []
+        if not isinstance(links2, list):
+            fails.append("documentLink(二次) 未返回数组")
+        else:
+            print(f"[smoke] documentLink 二次请求仍正常（{len(links2)} 条）")
+
+        # 20) selectionRange 的**规范形式**：LSP 规定用 `positions`（数组，可多选）。
+        #     真实客户端（VS Code）发的就是这个形状，只认单数 position 会直接拿不到结果。
+        sel_multi = client.request(
+            "textDocument/selectionRange",
+            {
+                "textDocument": {"uri": args.uri},
+                "positions": [
+                    {"line": 6, "character": 4},
+                    {"line": 0, "character": 4},
+                ],
+            },
+        )
+        if not isinstance(sel_multi, list) or len(sel_multi) != 2:
+            fails.append(f"selectionRange(positions 数组) 应返回 2 条，实际 {sel_multi!r}")
+        elif "range" not in sel_multi[0]:
+            fails.append("selectionRange(positions 数组) 的元素缺少 range")
+        else:
+            print(f"[smoke] selectionRange 规范形式（positions 数组）返回 {len(sel_multi)} 条")
 
         client.request("shutdown", {})
     finally:
