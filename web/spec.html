@@ -266,6 +266,10 @@
 <li><a href="#2864-刻意仍不做">28.6.4 刻意仍不做</a></li>
 </ul>
 </li>
+<li><a href="#287-编辑器插件安装包v098">28.7 编辑器插件安装包（v0.98）</a><ul>
+<li><a href="#2871-当前-lsp-能力清单">28.7.1 当前 LSP 能力清单</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -4947,6 +4951,115 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 </tr>
 </tbody>
 </table>
+<h3 id="287-编辑器插件安装包v098">28.7 编辑器插件安装包（v0.98）</h3>
+<p><code>dialc lsp</code> 是<strong>唯一的</strong>编辑器后端（stdio JSON-RPC）。v0.98 补齐了三套主流编辑器的接入，
+目录都在 <a href="editors/"><code>editors/</code></a>：</p>
+<table>
+<thead>
+<tr>
+<th>编辑器</th>
+<th>接入方式</th>
+<th>安装包</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>VS Code</strong></td>
+<td>手写 LSP 客户端（无 npm 依赖）</td>
+<td><a href="editors/vscode/"><code>editors/vscode/dial-0.98.0.vsix</code></a>（<code>code --install-extension</code> 侧载）</td>
+<td>免 Node / npm / 联网；能力最全</td>
+</tr>
+<tr>
+<td><strong>Neovim</strong></td>
+<td>内置 LSP 客户端</td>
+<td><a href="editors/neovim/"><code>editors/neovim/</code></a>（拷进 <code>runtimepath</code> 即可）</td>
+<td>零依赖，不需要 nvim-lspconfig</td>
+</tr>
+<tr>
+<td><strong>Emacs</strong></td>
+<td>内置 <code>eglot</code></td>
+<td><a href="editors/emacs/"><code>editors/emacs/README.md</code></a>（init.el 片段）</td>
+<td>不开发插件——eglot 原生连 LSP，加几行配置即可</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>编译型语言的编辑器支持是「必做的苦活」：没有它，再好的语言也没人用。三种主流编辑器之外的
+编辑器（JetBrains / Zed / Sublime 等）只要能启动 <code>dialc lsp</code>，用各自的 LSP 客户端连上即可，
+不再单独维护插件——把精力留给语言本身。</p>
+</blockquote>
+<h4 id="2871-当前-lsp-能力清单">28.7.1 当前 LSP 能力清单</h4>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>状态</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>诊断（保存即报）</td>
+<td>✅ 已实现</td>
+<td>复用编译器前端，红线与 <code>dialc build</code> 同因同位置</td>
+</tr>
+<tr>
+<td>语义高亮</td>
+<td>✅ 已实现</td>
+<td>关键字 / 字符串 / 数字 / 运算符 / 变量 / 类型</td>
+</tr>
+<tr>
+<td>Hover</td>
+<td>✅ 已实现</td>
+<td>类型 + 声明片段；包符号显示 <code>.diali</code> 文档</td>
+</tr>
+<tr>
+<td>跳转定义</td>
+<td>✅ 已实现</td>
+<td>文件内精确跳转；包符号跳到 <code>.diali</code> 声明行</td>
+</tr>
+<tr>
+<td>补全 + 精确替换</td>
+<td>✅ 已实现</td>
+<td>作用域可见符号；<code>textEdit</code> 精确范围、<code>sortText</code> 排序、<code>.</code> 触发</td>
+</tr>
+<tr>
+<td>能力协商</td>
+<td>✅ 已实现</td>
+<td>按客户端 <code>capabilities</code> 动态广播，老客户端不报能力也不报错</td>
+</tr>
+<tr>
+<td>文档符号 / 工作区符号</td>
+<td>🔜 轮 2</td>
+<td>文件大纲、跨文件符号搜索</td>
+</tr>
+<tr>
+<td>引用查找 / 重命名</td>
+<td>🔜 轮 2</td>
+<td>需索引器补「引用边」</td>
+</tr>
+<tr>
+<td>签名帮助</td>
+<td>🔜 轮 2</td>
+<td>函数调用参数提示</td>
+</tr>
+<tr>
+<td>格式化 / inlay hint</td>
+<td>🔜 轮 3</td>
+<td>保守、非破坏性</td>
+</tr>
+<tr>
+<td>codeAction / folding / selection</td>
+<td>🔜 轮 4</td>
+<td>安全 quickfix、基于作用域包围盒的折叠</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>路线：v0.98 完成<strong>轮 1（基础稳健 + 补全增强 + 三编辑器接通）</strong>，能力协商与补全精确替换已落地；
+导航类（大纲 / 引用 / 重命名 / 签名）在轮 2，编写辅助在轮 3，高级能力在轮 4——循序渐进，每轮可独立验证。</p>
+</blockquote>
 <hr /></main></div>
 
 <footer class="site-footer">

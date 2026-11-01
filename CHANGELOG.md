@@ -15,6 +15,36 @@
 
 ---
 
+## [v0.98] — 2026-11-01
+
+本版把 `dialc lsp` 从「骨架 + 基础增强」打磨到**工业级可用**，并补齐三套主流编辑器的接入与安装包。
+
+### Added（新增）
+- **编辑器插件安装包（三主流）**：编译型语言的编辑器支持是必做的苦活，本版落地三套。
+  - `editors/vscode/`：**手写 LSP 客户端**（无 npm 依赖），`build.sh` 打包成 `dial-*.vsix`
+    （`code --install-extension` 侧载；CI 在 `v*` 发版时现构建并附到 Release）。
+  - `editors/neovim/`：零依赖，只用 Neovim 内置 LSP 客户端（`ftdetect/` + `plugin/`，拷进 `runtimepath`）。
+  - `editors/emacs/`：**不开发插件**——用 Emacs 内置 `eglot` 原生连 LSP，仅提供 `init.el` 片段。
+  - 其余编辑器（JetBrains / Zed / Sublime 等）只要能启动 `dialc lsp` 即可接入，不再单独维护插件。
+  - `editors/README.md`：三编辑器总览与能力矩阵。
+
+### Changed（变更）
+- **LSP 能力协商**：`initialize` 读取客户端 `capabilities`，按声明动态广播能力（老客户端不报能力也不报错）；
+  并新增 `window/logMessage` 自诊断通道（不污染协议流、不进 stdout）。
+- **补全增强**：补全项带 `textEdit` 精确替换范围（修正旧实现「名字重复拼在后面」的 bug）+ `sortText`
+  排序（函数/外部函数最前、结构体/不透明类型次之、变量/形参最后）+ `.` 触发字符。
+- **VS Code 插件接通 hover / 跳转定义 / 补全**：原扩展仅接了诊断与语义高亮，现补齐三个 provider 转发到
+  `dialc lsp`；`initialize` 发送真实 `capabilities`；`package.json` 升 `0.98.0`。
+- 文档同步：`README §28.7`（编辑器插件安装包与 LSP 能力清单）、`ARCHITECTURE`、`CHANGELOG` 更新；
+  各编辑器 README 与 `web/` 重新生成。
+
+### 后续轮次（路线）
+- 轮 2：导航（文档符号 / 工作区符号 / 引用查找 / 重命名 / 签名帮助）
+- 轮 3：编写辅助（格式化 / inlay hint / 补全增强）
+- 轮 4：高级（codeAction / folding / selection / documentLink）
+
+---
+
 ## [v0.97] — 2026-10-31
 
 本版把 Dial 从「仅 Linux x86_64」扩展到**三平台原生构建**——各平台均为 CI 在对应宿主上

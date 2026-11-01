@@ -130,27 +130,16 @@ fn handle<W: Write>(
     match method {
         // ---- 生命周期 ----
         "initialize" => {
+            // 能力协商：老客户端不报能力时尽量全开；现代客户端会显式声明它支持什么，
+            // 我们据此决定是否广播——客户端没说支持 hover，我们就别广播 hoverProvider，
+            // 否则客户端收了声明却用不了，体验更糟。
+            let client_caps = msg.pointer("/params/capabilities");
             let result = json!({
-                "capabilities": {
-                    // 1 = Full：每次把整篇文档发过来。极简实现，不做增量同步。
-                    "textDocumentSync": 1,
-                    // 诊断由我们主动 push（didOpen / didSave 时）
-                    "semanticTokensProvider": {
-                        "legend": {
-                            "tokenTypes": SEMANTIC_TOKEN_TYPES,
-                            "tokenModifiers": []
-                        },
-                        "full": { "delta": false },
-                        "range": false
-                    },
-                    // v0.95：悬停 / 跳转定义 / 补全
-                    "hoverProvider": true,
-                    "definitionProvider": true,
-                    "completionProvider": { "triggerCharacters": ["."] }
-                },
+                "capabilities": negotiate_capabilities(client_caps),
                 "serverInfo": { "name": "dialc", "version": env!("CARGO_PKG_VERSION") }
             });
             respond(out, id, result)?;
+            let _ = log_msg(out, 3, &format!("dialc lsp {} 已就绪", env!("CARGO_PKG_VERSION")));
         }
         "initialized" | "$/cancelRequest" => {}
         "shutdown" => respond(out, id, Value::Null)?,
@@ -271,6 +260,54 @@ fn notify<W: Write>(out: &mut W, method: &str, params: Value) -> io::Result<()> 
         out,
         &json!({ "jsonrpc": "2.0", "method": method, "params": params }),
     )
+}
+
+/// 服务端的自诊断日志：经 `window/logMessage` 发给客户端（不污染协议流、不进 stdout）。
+///
+/// `type`：1=Error 2=Warning 3=Info 4=Log（LSP 标准）。
+fn log_msg<W: Write>(out: &mut W, level: u8, message: &str) -> io::Result<()> {
+    notify(
+        out,
+        "window/logMessage",
+        json!({ "type": level, "message": message }),
+    )
+}
+
+/// 能力协商：根据客户端声明的能力，决定本端广播哪些 capability。
+///
+/// - 客户端**完全没发** capabilities（极老客户端）→ 默认全开。
+/// - 客户端**发了** capabilities 但没声明某项 → 那项不广播（避免客户端收了声明却用不了）。
+/// 文档同步与语义高亮是本项目必开项，无条件广播。
+fn negotiate_capabilities(client: Option<&Value>) -> Value {
+    // 客户端显式声明了某能力路径才返回 true；没发 capabilities 时一律 true（全开）。
+    let supports = |path: &str| -> bool {
+        match client {
+            None => true,
+            Some(c) => c.pointer(path).is_some(),
+        }
+    };
+    let mut caps = json!({
+        // 1 = Full：每次把整篇文档发过来。极简实现，不做增量同步。
+        "textDocumentSync": 1,
+        "semanticTokensProvider": {
+            "legend": {
+                "tokenTypes": SEMANTIC_TOKEN_TYPES,
+                "tokenModifiers": []
+            },
+            "full": { "delta": false },
+            "range": false
+        }
+    });
+    if supports("/textDocument/hover") {
+        caps["hoverProvider"] = json!(true);
+    }
+    if supports("/textDocument/definition") {
+        caps["definitionProvider"] = json!(true);
+    }
+    if supports("/textDocument/completion") {
+        caps["completionProvider"] = json!({ "triggerCharacters": ["."] });
+    }
+    caps
 }
 
 // ---------------------------------------------------------------------------
@@ -840,6 +877,15 @@ fn completion(ws: &WorkspaceIndex, docs: &Docs, uri: &str, line: u32, character:
     let line_text = lines.get(line as usize).copied().unwrap_or("");
     let char1 = index::utf16_to_char_col(line_text, character as usize);
     let prefix = partial_identifier(line_text, character);
+    // 精确替换范围：从「已输入前缀的起点」一直到光标，整段替换为补全项。
+    // 这样无论前缀打到一半的哪几个字母，都不会出现「旧实现里把名字重复拼在后面」的 bug。
+    // 没有前缀时范围收缩到光标处，等价于正常插入。
+    let pre_utf16 = utf16_len(&prefix) as u32;
+    let start_char = character.saturating_sub(pre_utf16);
+    let replace_range = json!({
+        "start": { "line": line, "character": start_char },
+        "end": { "line": line, "character": character }
+    });
 
     let indexed = match ws.files.get(uri) {
         Some(i) => i,
@@ -856,11 +902,20 @@ fn completion(ws: &WorkspaceIndex, docs: &Docs, uri: &str, line: u32, character:
         } else {
             json!({ "kind": "markdown", "value": s.doc.join("\n") })
         };
+        // 排序：函数 / 外部函数最前，结构体 / 不透明类型次之，变量 / 形参最后，
+        // 让「最可能被调用」的入口排在最上面。
+        let sort_prefix: &str = match s.kind {
+            SymbolKind::Function | SymbolKind::ExternFn => "0",
+            SymbolKind::Struct | SymbolKind::OpaqueType => "1",
+            SymbolKind::Var | SymbolKind::Param => "2",
+        };
         items.push(json!({
             "label": s.name,
             "kind": s.kind.completion_kind(),
             "detail": symbol_detail(&s),
             "documentation": doc_val,
+            "sortText": format!("{}_{}", sort_prefix, s.name),
+            "textEdit": { "range": replace_range, "newText": s.name },
             "insertText": s.name
         }));
     }

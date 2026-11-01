@@ -1,6 +1,6 @@
 [package]
 name = "dialc"
-version = "0.97.0"
+version = "0.98.0"
 edition = "2021"
 repository = "https://github.com/shichencike/Dial"
 description = "Dial 语言编译器 v0.97：静态强类型、无 GC、C ABI 前端；v0.7 可恢复异常 try/catch/throw，v0.8 move_to 所有权转移与多线程并发（thread/channel），v0.81 通道关闭与 EOF，v0.9 is_null 判空与多消费者安全，v0.91 多路复用 select，v0.92 char 字符类型，v0.93 import 与 .dialpkg 包分发，v0.94 dialc lsp 语言服务器骨架，v0.95 LSP 增强（Hover / 跳转定义 / 补全），v0.96 包 URL 安装与一键安装脚本，v0.97 三平台构建（Linux x86_64 / Windows x64-MinGW / Termux aarch64-musl 全静态）"

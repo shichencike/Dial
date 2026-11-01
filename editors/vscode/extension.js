@@ -72,6 +72,27 @@ function activate(context) {
     )
   );
 
+  // ---- Hover / 跳转定义 / 补全（dialc lsp v0.95+ 已支持，转发到服务端）----
+  context.subscriptions.push(
+    vscode.languages.registerHoverProvider(
+      { language: "dial" },
+      { provideHover: (doc, pos) => client.hover(doc, pos) }
+    )
+  );
+  context.subscriptions.push(
+    vscode.languages.registerDefinitionProvider(
+      { language: "dial" },
+      { provideDefinition: (doc, pos) => client.definition(doc, pos) }
+    )
+  );
+  context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      { language: "dial" },
+      { provideCompletionItems: (doc, pos) => client.completion(doc, pos) },
+      "." // 触发字符：`.` 后主动触发成员补全
+    )
+  );
+
   // 启动时已经打开着的 .dial 文件，补一次 didOpen
   for (const doc of vscode.workspace.textDocuments) {
     if (doc.languageId === "dial") client.didOpen(doc);
@@ -210,10 +231,20 @@ class LspClient {
   }
 
   async initialize() {
+    // 声明本客户端支持的能力，让服务端据此能力协商（dialc lsp 会据此决定是否广播
+    // hoverProvider / definitionProvider / completionProvider）。即使用户侧的 VS Code
+    // 版本较老、不报这些能力，服务端仍会响应请求，故此处的声明是「锦上添花」。
     await this.request("initialize", {
       processId: process.pid,
       rootUri: null,
-      capabilities: {},
+      capabilities: {
+        textDocument: {
+          hover: { dynamicRegistration: false },
+          definition: { dynamicRegistration: false },
+          completion: { completionItem: { snippetSupport: true }, dynamicRegistration: false },
+          synchronization: { dynamicRegistration: false },
+        },
+      },
     });
     this.ready = true;
     this.notify("initialized", {});
@@ -270,6 +301,84 @@ class LspClient {
       builder.push(line, char, data[i + 2], data[i + 3], data[i + 4]);
     }
     return builder.build();
+  }
+
+  // ---- Hover / 跳转定义 / 补全：转发到 dialc lsp ----
+
+  async hover(doc, position) {
+    if (!this.ready) return null;
+    const result = await this.request("textDocument/hover", {
+      textDocument: { uri: doc.uri.toString() },
+      position: { line: position.line, character: position.character },
+    });
+    if (!result || !result.contents) return null;
+    const c = result.contents;
+    const value =
+      c.kind === "markdown" && typeof c.value === "string"
+        ? c.value
+        : typeof c === "string"
+        ? c
+        : JSON.stringify(c);
+    return new vscode.Hover(new vscode.MarkdownString(value));
+  }
+
+  async definition(doc, position) {
+    if (!this.ready) return null;
+    const result = await this.request("textDocument/definition", {
+      textDocument: { uri: doc.uri.toString() },
+      position: { line: position.line, character: position.character },
+    });
+    if (!result) return null;
+    const arr = Array.isArray(result) ? result : [result];
+    return arr.map(
+      (loc) =>
+        new vscode.Location(
+          vscode.Uri.parse(loc.uri),
+          new vscode.Range(
+            loc.range.start.line,
+            loc.range.start.character,
+            loc.range.end.line,
+            loc.range.end.character
+          )
+        )
+    );
+  }
+
+  async completion(doc, position) {
+    if (!this.ready) return null;
+    const result = await this.request("textDocument/completion", {
+      textDocument: { uri: doc.uri.toString() },
+      position: { line: position.line, character: position.character },
+    });
+    if (!result) return null;
+    const items = Array.isArray(result) ? result : result.items || [];
+    return items.map((it) => {
+      const item = new vscode.CompletionItem(
+        it.label,
+        typeof it.kind === "number" ? it.kind : vscode.CompletionItemKind.Text
+      );
+      if (it.detail) item.detail = it.detail;
+      if (it.documentation) {
+        const docVal =
+          it.documentation.kind === "markdown"
+            ? it.documentation.value
+            : it.documentation;
+        item.documentation = new vscode.MarkdownString(docVal);
+      }
+      // 精确替换范围：服务端已算好从「已输入前缀起点」到光标的区间，
+      // 直接套用即可，避免 VS Code 默认把触发字符也算进替换范围。
+      if (it.textEdit) {
+        const r = it.textEdit.range;
+        item.textEdit = new vscode.TextEdit(
+          new vscode.Range(r.start.line, r.start.character, r.end.line, r.end.character),
+          it.textEdit.newText
+        );
+      } else if (it.insertText) {
+        item.insertText = it.insertText;
+      }
+      if (it.sortText) item.sortText = it.sortText;
+      return item;
+    });
   }
 
   dispose() {

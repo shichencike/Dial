@@ -503,10 +503,16 @@ jobs:
       - name: 列出待发布资产
         run: find dist -name 'dialc-v*.zip' -printf '  %p (%s 字节)\n'
 
+      # 编辑器安装包：VS Code 插件 .vsix 在发版时现构建（无需 npm，回退 python 打包）。
+      - name: 构建 VS Code 插件安装包 (.vsix)
+        run: bash editors/vscode/build.sh
+
       - name: 上传到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/dialc-v*.zip
+          files: |
+            dist/**/dialc-v*.zip
+            editors/vscode/dial-*.vsix
           overwrite: true          # 允许重发时覆盖同名资产（重指标签重跑发布用）
           fail_on_unmatched_files: true
           generate_release_notes: true

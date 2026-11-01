@@ -4,6 +4,8 @@
 # 阶段 7：标准库预编译中间产物与最终包
 /dist-stdlib/
 *.dialpkg
+# VS Code 插件安装包（发版时由 CI 现构建并附到 Release，不入库二进制）
+*.vsix
 
 # 编译 Dial 源码时会在同目录产出的目标文件（examples/、tests/ 等）
 *.o
