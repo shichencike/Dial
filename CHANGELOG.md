@@ -72,13 +72,47 @@
 ### Notes（说明）
 - **LLVM 18 必须保留**：Alpine 3.22 恰好只提供 llvm18，升版会断 Termux 路线；故 Windows 走官方
   MSVC 包 + C 接口，而非 MSYS2（其 mingw64-llvm 现已是 23.x，18.x 已下架）。
-- 路线图 7 阶段已完成 1 / 2 / 3 / 4 / 5；阶段 6（**纯 MSVC** 线程后端）在 MinGW 路线下已非阻塞，
-  阶段 7（官方标准库 `.dialpkg` 化）待做。
+- 路线图 7 阶段已完成 1 / 2 / 3 / 4 / 5 / 7；仅剩阶段 6（**纯 MSVC** 线程后端）在 MinGW 路线下已非阻塞。
+  阶段 7（官方标准库 `.dialpkg` 化）随独立 Release **`stdlib-v1.0.0`** 落地，详见下条目。
 - **实跑结果**：`v0.97` 三平台作业全部通过并已发布（run `41253324073`，`release` 作业 success），
   三个资产 `dialc-v0.97-{linux-x86_64,windows-x86_64,termux-aarch64}.zip` 均已上传。
   下载后反向验证：Linux 包编译 `hello.dial` 输出 `Hello, dialc!`（产物仅 `NEEDED libc.so.6`）；
   Termux 包 `readelf` 确认 **AArch64 / 无 `INTERP` / 无 `NEEDED`**（真全静态）；
   Windows 包含 `dialc.exe` + `LLVM-C.dll` + `install-dial.ps1`，CI 冒烟通过。
+
+---
+
+## [stdlib v1.0.0] — 2026-10-31（独立 Release，tag `stdlib-v1.0.0`）
+
+官方标准库（由 `stdlib/` + `runtime/` 编译归档而成的 `libdial_std.a`，被**每一个** Dial 程序静态链入）
+改造为 `.dialpkg` 形态，**独立发版、与 `dialc` 编译器解耦**，走 GitHub Releases 分发。
+
+### Added（新增）
+- **`stdlib.dialpkg` 包**：单包含三平台预编译静态库
+  （`lib/x86_64-linux-gnu/libdial_std.a` · `lib/x86_64-pc-windows-gnu/libdial_std.a` ·
+  `lib/aarch64-unknown-linux-musl/libdial_std.a`），`manifest.txt` 记录
+  `name=stdlib` / `version=1.0.0` / `abi=1` / `license=MIT OR Apache-2.0` 与各平台机器码 SHA256。
+- **`stdlib/stdlib.diali`**：与 `declare_stdlib()` 逐条对齐的接口签名文件，供 `.dialpkg` 自描述与校验。
+- **`tools/build_stdlib.sh`**：统一选 `zig cc`/`clang`/`gcc` + `ar`，把 `runtime/*.c` + `stdlib/*.c`
+  编译归档为单份 `libdial_std.a`（默认 `-DDIAL_SAFETY=1` ReleaseSafe 预编译）。
+- **`tools/make_stdlib_pkg.py`**：收三平台 `.a` 与 `.diali`，算 SHA256、生成 `manifest.txt` 并打包 `stdlib.dialpkg`。
+- **`dialc` 链接期自动链入**：`src/main.rs::link()` 优先 `package::find_installed("stdlib")` 取本平台 `.a`
+  链入，日志打印「使用已安装的标准库包: stdlib v1.0.0（ABI 1，目标 …）」；
+  未安装则回退实时编译 `stdlib/` + `runtime/` 源码（默认 Debug），**任何环境都能编出程序**。
+- **ABI 兜底**：已装包 `manifest.abi ≠ package::STDLIB_ABI`（新增常量，锁定为 `1`）即**当场报错并给出重装方案**
+  （`rm -rf ~/.dial/packages/stdlib` 后重装），绝不静默崩溃。
+- **一键脚本自动安装**：`tools/install-dial.sh` / `install-dial.ps1` 装好 `dialc` 后静默从 Release
+  `stdlib-v1.0.0` 拉取 `stdlib.dialpkg` 并执行 `dialc install`（`STDLIB_RELEASE` 可钉版本，离线/失败仅告警）。
+- **CI 自动发布**：`.github/workflows/ci.yml` 在 `stdlib-v*` 标签触发 `publish-stdlib` 作业，
+  由 `build-linux` / `build-windows` / `build-termux` 各自产出本平台 `.a` 后打包发布。
+
+### Changed（变更）
+- 预编译安全等级统一为 **ReleaseSafe（`-DDIAL_SAFETY=1`）**：C Runtime 层越界/空指针等 UB 由 `ud2`
+  Fail-Fast 拦下，兼顾性能与安全；与用户程序自身 `--release`/`--fast` 等级是两回事（标准库等级发布时已钉死）。
+
+### Docs（文档）
+- ARCHITECTURE.md §8 阶段 7 标 ✅；README §25 新增 §25.10「官方标准库 `stdlib.dialpkg`（独立发布）」；
+  §25 顶部状态注释同步（URL 安装 / 一键脚本 / stdlib 化均已落地）。
 
 ---
 

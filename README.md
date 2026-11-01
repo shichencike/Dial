@@ -1732,9 +1732,9 @@ fn main(): int {
 > **v0.93 已落地**：`import "包名";` 语句、`.dialpkg` 解包（含路径穿越防护）、
 > `manifest.txt` 解析、按 Target Triple 选库、**SHA256 强制校验**、
 > `.diali` 签名解析接入 Sema、链接期自动链入对应平台的机器码。
-> 见 [§25.9](#259-用法import-与-dialc-installv093-已实现v096-支持-url)。
-> **尚未实现**：`dialc install <URL>`（网络下载；本地文件安装已可用）、一键安装脚本、
-> 官方标准库的 `.dialpkg` 化、Windows 线程后端。
+> 见 [§25.9](#259-用法import-与-dialc-installv093-已实现v096-支持-url)、[§25.10](#2510-官方标准库stdlibdialpkg-独立发布)。
+> 截至 v0.96 + 官方标准库 v1.0.0，`dialc install <URL>`、一键安装脚本、`stdlib.dialpkg` 化均已落地；
+> 仅**纯 MSVC 线程后端**仍在规划（MinGW 路线下非阻塞）。
 >
 > 之所以现在就把规范写死：让「不透明指针 + C ABI」这条底层设计（[§14.1](#141-不透明指针契约)、[§15](#15-ffi-契约dial-语法--c-函数)）
 > 从第一天起就为包分发服务，而不是等生态长歪了再回头打补丁。规范先于实现，是防止依赖地狱的唯一低成本时机。
@@ -2177,6 +2177,46 @@ $ dialc build main.dial -o main
 > 自测覆盖：`tests/run_tests.sh` 的 **H 组**会用 `tools/make_sample_pkg.sh`
 > 现场构建一个示例包、安装、`import` 后编译运行并比对输出，
 > 再**故意篡改一个字节**验证 SHA256 确实拦得住。
+
+### 25.10 官方标准库 `stdlib.dialpkg`（独立发布）
+
+官方标准库（`stdlib/` + `runtime/` 编译归档而成的 `libdial_std.a`，被**每一个** Dial 程序静态链入）
+已改造为 `.dialpkg` 形态，**独立发版、与编译器解耦**：
+
+| 项 | 值 |
+| --- | --- |
+| **Release 名称 / Tag** | `stdlib-v1.0.0` |
+| **`abi`** | `1`（编译器 `package::STDLIB_ABI` 同步锁定） |
+| **`version`** | `1.0.0` |
+| **`license`** | `MIT OR Apache-2.0`（强制免传染，见 §25.8） |
+| **包名** | `stdlib`（`dialc` 按此名自动加载，用户无感知） |
+| **三平台机器码** | `lib/x86_64-linux-gnu/libdial_std.a` · `lib/x86_64-pc-windows-gnu/libdial_std.a` · `lib/aarch64-unknown-linux-musl/libdial_std.a` |
+
+**预编译安全等级：官方标准库默认以 `ReleaseSafe`（`-DDIAL_SAFETY=1`）级别预编译，兼顾极致性能与绝对安全。**
+即越界/空指针等 UB 在 C Runtime 层被 `ud2` Fail-Fast 拦下，既不丢性能也不静默损坏内存——
+这与用户程序自身的 `--release` / `--fast` 安全等级是**两件事**（标准库是预编译产物，等级在发布时已钉死）。
+
+**全自动、零配置**：
+
+1. **一键脚本自动拉取**：`install-dial.sh` / `install-dial.ps1` 把 `dialc` 装好后，会**静默**从
+   `https://github.com/shichencike/Dial/releases/download/stdlib-v1.0.0/stdlib.dialpkg`
+   拉取对应版本的 `stdlib.dialpkg` 并执行 `dialc install`（`STDLIB_RELEASE` 环境变量可钉死版本，离线/失败仅告警不阻断）。
+2. **`dialc build` 优先链入预编译包**：链接期先找已安装的 `stdlib` 包，按本机 Target Triple 取对应 `.a`；
+   日志会打印「使用已安装的标准库包: stdlib v1.0.0（ABI 1，目标 …）」。
+3. **缺失回退源码编译**：若未安装该包（离线/脚本跳过），`dialc` 退化为实时编译 `stdlib/` + `runtime/`
+   的 C 源码（默认 Debug 安全等级），保证**任何环境下都能编译出程序**，不会因拿不到包而卡死。
+4. **ABI 不兼容明确报错**：若已安装包的 `manifest.abi ≠ STDLIB_ABI`，`dialc` **当场报错并给出重装方案**
+   （`rm -rf ~/.dial/packages/stdlib` 后重新 `dialc install`），**绝不静默崩溃或链错二进制**。
+
+**CI 自动构建与发布**：`.github/workflows/ci.yml` 在 `stdlib-v*` 标签触发时，
+由 `build-linux` / `build-windows` / `build-termux` 三个作业各自产出本平台 `libdial_std.a`，
+再由 `publish-stdlib` 作业用 `tools/make_stdlib_pkg.py` 打包成 `stdlib.dialpkg` 并发布到同标签 Release。
+构建脚本 `tools/build_stdlib.sh <输出 .a> [安全等级]` 统一选 `zig cc`/`clang`/`gcc` 与 `ar`，
+把 `runtime/*.c` + `stdlib/*.c` 编译归档为单份静态库。
+
+> 标准库走**独立 tag**（`stdlib-v*`）而非编译器版本（`v*`），二者升级互不阻塞：
+> 修标准库 bug 只发 `stdlib-v1.0.1`，无需重新发布编译器；破坏性 ABI 变更时
+> 同步递增 `STDLIB_ABI` 与发布 `abi`，旧用户会收到明确的「ABI 不兼容」报错与重装指引。
 
 ---
 

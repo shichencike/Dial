@@ -473,9 +473,68 @@ fn cc_command() -> (String, Vec<String>) {
     ("cc".to_string(), vec![])
 }
 
-/// 第二步：编译 C 标准库/运行时为静态库 libdial_std.a，再与用户 .o 链接。
-/// `safety` 通过 -DDIAL_SAFETY=N 注入，决定 C 侧的边界/断言检查是否编译进去。
+/// 第二步：把标准库（runtime + stdlib）链入最终可执行文件。
+///
+/// 阶段 7（官方标准库 `.dialpkg` 化）之后，标准库优先使用**已安装**的
+/// `stdlib.dialpkg`（路径 `~/.dial/packages/stdlib/`）里的预编译静态库；
+/// 若未安装或不含当前平台的机器码，则**回退**到实时编译 `stdlib/` + `runtime/`
+/// 源码（向后兼容 / 离线 / 开发构建）。两种方式产出的都是同一份 `libdial_std.a`，
+/// 最终链接步骤完全一致。
+///
+/// `safety` 通过 -DDIAL_SAFETY=N 注入，仅在「回退源码编译」路径下生效
+/// （预编译包已按固定等级烘焙，见 ARCHITECTURE §8 阶段 7：默认 ReleaseSafe=1）。
 fn link(obj: &Path, exe: &Path, safety: SafetyMode, extra_libs: &[PathBuf]) -> Result<(), String> {
+    // 1) 决定标准库静态库：优先已安装包，否则实时编译源码
+    let stdlib_libs = resolve_stdlib_archive(safety)?;
+    // 2) 最终链接：用户 .o + 标准库 .a + import 包 .a + 系统库
+    final_link(obj, exe, extra_libs, &stdlib_libs)
+}
+
+/// 解析标准库静态库。
+///
+/// - 若已安装 `stdlib` 包且 `abi` 匹配：按当前 Target Triple 选出那一份 `.a`
+///   （并强制校验其 SHA256）；
+/// - 若 `abi` 不匹配：明确报错并给出重装方案（绝不静默链入不兼容二进制）；
+/// - 若未安装 / 当前平台不在包支持列表：回退到编译 `stdlib/` + `runtime/` 源码。
+///
+/// 返回的标准库归档列表（通常一份 `libdial_std.a`）交给 `final_link` 链接。
+fn resolve_stdlib_archive(safety: SafetyMode) -> Result<Vec<PathBuf>, String> {
+    if let Some((dir, manifest)) = package::find_installed("stdlib").map_err(|e| e.to_string())? {
+        // ABI 兜底：不兼容即报错 + 重装方案，绝不静默崩溃。
+        if manifest.abi != package::STDLIB_ABI {
+            return Err(format!(
+                "已安装的标准库 'stdlib' ABI 不兼容：包 abi={}，编译器要求 abi={}。\n\
+                 为避免不兼容的二进制悄悄链入程序，已中断链接。\n\
+                 请先卸载旧包再安装匹配版本：\n\
+                   rm -rf ~/.dial/packages/stdlib\n\
+                 然后重新运行安装脚本，或执行：dialc install <对应版本的 stdlib.dialpkg>",
+                manifest.abi, package::STDLIB_ABI
+            ));
+        }
+        // 按当前 Triple 选库（内部校验该份机器码的 SHA256）
+        match package::resolve_lib(&dir, &manifest) {
+            Ok(lib) => {
+                println!(
+                    "ℹ️  使用已安装的标准库包: {} v{}（ABI {}，目标 {}）",
+                    manifest.name,
+                    manifest.version,
+                    manifest.abi,
+                    package::host_triple()
+                );
+                return Ok(vec![lib]);
+            }
+            Err(e) => {
+                // 包存在但当前平台不在其 targets 列表：退化为源码编译，保持兼容。
+                println!(
+                    "⚠️  已安装的标准库包不含当前平台 {} 的机器码，回退源码编译：{}",
+                    package::host_triple(),
+                    e
+                );
+            }
+        }
+    }
+
+    // ---- 回退：实时编译 runtime/ + stdlib/ 源码 → libdial_std.a ----
     let base = find_project_base()
         .ok_or_else(|| "找不到 stdlib/ 与 runtime/ 目录（请用 DIALC_STDLIB_DIR 指定工程根）".to_string())?;
     let runtime_dir = base.join("runtime");
@@ -547,12 +606,25 @@ fn link(obj: &Path, exe: &Path, safety: SafetyMode, extra_libs: &[PathBuf]) -> R
         return Err("归档静态库 libdial_std.a 失败（请确认 ar 可用）".to_string());
     }
 
-    // 链接：用户 .o + libdial_std.a -> 可执行文件（仅依赖 libc）
+    Ok(vec![lib])
+}
+
+/// 最终链接：用户 .o + 标准库 .a（可能多份）+ import 包 .a + 系统库 → 可执行文件。
+///
+/// `safety` 在此不再需要（C 侧检查只在编译期注入，已在上游完成）。
+fn final_link(
+    obj: &Path,
+    exe: &Path,
+    extra_libs: &[PathBuf],
+    stdlib_libs: &[PathBuf],
+) -> Result<(), String> {
+    let (cc, cc_prefix) = cc_command();
     let mut link_cmd = Command::new(&cc);
-    link_cmd
-        .args(&cc_prefix)
-        .arg(obj)
-        .arg(&lib);
+    link_cmd.args(&cc_prefix).arg(obj);
+    // 标准库静态库（已安装包 或 实时编译产物）
+    for l in stdlib_libs {
+        link_cmd.arg(l);
+    }
     // import 引入的包的机器码：**按 Target Triple 选出的那一份**静态库。
     // 交叉编译到 Windows 时这里自动变成包内的 .lib，无需用户干预（§4.3）。
     for pl in extra_libs {

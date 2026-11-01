@@ -34,6 +34,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# 官方标准库独立发布（阶段 7）：tag 形如 stdlib-v<版本>，与编译器（dialc.exe）解耦。
+# 安装脚本在装好编译器后，会自动静默拉取该版本的标准库包并通过 dialc install 安装。
+# 升级标准库时只需改这里的标签（与 Dial Releases 里的 stdlib-v* 对应）。
+$StdlibRelease = if ($env:STDLIB_RELEASE) { $env:STDLIB_RELEASE } else { "stdlib-v1.0.0" }
+
 function Say  { param([string]$m) Write-Host "  $m" }
 function Ok   { param([string]$m) Write-Host "  [OK] $m" }
 function Warn { param([string]$m) Write-Host "  [!]  $m" }
@@ -117,6 +122,37 @@ $cfg = @(
 )
 Set-Content -Path (Join-Path $DialcHome "config.txt") -Value $cfg -Encoding UTF8
 Ok "工具链配置: $DialcHome\config.txt"
+
+# ---------------------------------------------------------------------------
+# 第 2.5 步：自动拉取官方标准库包 stdlib.dialpkg 并安装
+#   官方标准库独立发布（tag stdlib-v*，与编译器解耦）。装完编译器后静默拉取
+#   对应版本并通过 dialc install 安装，使链接期能优先使用预编译的标准库包。
+#   失败（如离线）只告警、不阻断安装——链接时会回退到源码编译 stdlib。
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- 安装官方标准库 stdlib.dialpkg --"
+$StdlibUrl  = "https://github.com/shichencike/Dial/releases/download/$StdlibRelease/stdlib.dialpkg"
+$StdlibTmp  = Join-Path $env:TEMP ("stdlib-" + [guid]::NewGuid().ToString("N") + ".dialpkg")
+$downloaded = $false
+try {
+    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+        curl.exe -fSL --retry 2 --proto "=https" -o $StdlibTmp $StdlibUrl 2>$null
+        if ($LASTEXITCODE -eq 0) { $downloaded = $true }
+    } else {
+        Invoke-WebRequest -Uri $StdlibUrl -OutFile $StdlibTmp -ErrorAction Stop
+        $downloaded = $true
+    }
+} catch {
+    $downloaded = $false
+}
+if ($downloaded -and (Test-Path $StdlibTmp -PathType Leaf) -and ((Get-Item $StdlibTmp).Length -gt 0)) {
+    & (Join-Path $DialcHome "bin\dialc.exe") install $StdlibTmp
+    if ($LASTEXITCODE -eq 0) { Ok "官方标准库已安装（$StdlibRelease）" }
+    else { Warn "dialc install stdlib.dialpkg 失败（不影响编译器本体，可稍后手动安装）" }
+} else {
+    Warn "下载官方标准库失败（可能离线）；链接时将回退到源码编译 stdlib。"
+}
+if (Test-Path $StdlibTmp) { Remove-Item -Force $StdlibTmp -ErrorAction SilentlyContinue }
 
 # ---------------------------------------------------------------------------
 # 第 3 步：重新扫描 .dialpkg 并逐个安装

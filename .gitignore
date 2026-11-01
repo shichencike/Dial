@@ -1,6 +1,9 @@
 # 构建产物
 /target/
 /.dialc_build/
+# 阶段 7：标准库预编译中间产物与最终包
+/dist-stdlib/
+*.dialpkg
 
 # 编译 Dial 源码时会在同目录产出的目标文件（examples/、tests/ 等）
 *.o

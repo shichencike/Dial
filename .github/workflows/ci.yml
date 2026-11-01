@@ -21,7 +21,8 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    # v* ＝ 编译器（dialc）发布；stdlib-v* ＝ 官方标准库独立发布（阶段 7，与编译器解耦）
+    tags: ["v*", "stdlib-v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -89,6 +90,18 @@ jobs:
 
       - name: 编译 dialc（release）
         run: cargo build --release --locked
+
+      # 阶段 7：预编译官方标准库（runtime + stdlib）为单份静态库，供发布 stdlib.dialpkg。
+      - name: 构建标准库静态库（x86_64-linux-gnu）
+        run: bash tools/build_stdlib.sh dist-stdlib/x86_64-linux-gnu/libdial_std.a 1
+
+      - name: 上传标准库静态库（x86_64-linux-gnu）
+        uses: actions/upload-artifact@v4
+        with:
+          name: stdlib-x86_64-linux-gnu
+          path: dist-stdlib/x86_64-linux-gnu/libdial_std.a
+          if-no-files-found: error
+          retention-days: 7
 
       - name: 端到端测试（A~L 共十二组）
         run: bash tests/run_tests.sh
@@ -265,6 +278,25 @@ jobs:
           if [ -n "$IMPORTS" ]; then echo "❌ 用户程序依赖 LLVM"; echo "$IMPORTS"; exit 1; fi
           echo "✅ 用户程序无 LLVM 依赖"
 
+      # 阶段 7：预编译官方标准库（runtime + stdlib）为单份静态库（MinGW gcc 产 .a）。
+      - name: 构建标准库静态库（x86_64-pc-windows-gnu）
+        shell: bash
+        env:
+          PATH: C:\llvm18\bin:$PATH
+        run: |
+          set -euo pipefail
+          export PATH="$MINGW_BIN:$PATH"
+          command -v gcc && gcc --version | head -1
+          bash tools/build_stdlib.sh dist-stdlib/x86_64-pc-windows-gnu/libdial_std.a 1
+
+      - name: 上传标准库静态库（x86_64-pc-windows-gnu）
+        uses: actions/upload-artifact@v4
+        with:
+          name: stdlib-x86_64-pc-windows-gnu
+          path: dist-stdlib/x86_64-pc-windows-gnu/libdial_std.a
+          if-no-files-found: error
+          retention-days: 7
+
       - name: 打包发布 zip（windows-x86_64，含 LLVM-C.dll）
         shell: bash
         env:
@@ -358,6 +390,9 @@ jobs:
             echo "✅ Termux 冒烟通过"
             echo "--- 用户程序依赖（仅供参考，用户侧由 Termux 自带编译器产出 bionic 程序）---"
             readelf -d /tmp/hello 2>/dev/null | grep -c NEEDED | xargs -I{} echo "用户程序动态依赖数: {}"
+            # 阶段 7：预编译官方标准库（runtime + stdlib）为单份 musl 静态库。
+            # 容器内的 gcc 即 musl gcc，产出与 dialc 同目标的 aarch64 musl .a。
+            bash tools/build_stdlib.sh dist-stdlib/aarch64-unknown-linux-musl/libdial_std.a 1
             bash tools/package_release.sh termux-aarch64 "$BIN"
           '
 
@@ -368,6 +403,82 @@ jobs:
           path: dialc-v*-termux-aarch64.zip
           if-no-files-found: error
           retention-days: 7
+
+      - name: 上传标准库静态库（aarch64-unknown-linux-musl）
+        uses: actions/upload-artifact@v4
+        with:
+          name: stdlib-aarch64-unknown-linux-musl
+          path: dist-stdlib/aarch64-unknown-linux-musl/libdial_std.a
+          if-no-files-found: error
+          retention-days: 7
+
+  # ===========================================================================
+  # 阶段 7：发布官方标准库 stdlib.dialpkg（独立 Release，与编译器解耦）
+  #   仅在打 stdlib-v* 标签时触发；收集三平台预编译的 libdial_std.a，组装成
+  #   stdlib.dialpkg 并发布到与该标签同名的独立 GitHub Release。
+  # ===========================================================================
+  publish-stdlib:
+    name: 打包并发布标准库 stdlib.dialpkg
+    needs: [build-linux, build-windows, build-termux]
+    if: startsWith(github.ref, 'refs/tags/stdlib-v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write        # 上传 Release 产物需要
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 取回三平台标准库静态库
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stdlib-*
+          path: stdlib-artifacts
+          merge-multiple: false
+
+      - name: 组装 stdlib.dialpkg
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -R stdlib-artifacts
+          # 版本号取标签去掉 stdlib-v 前缀（stdlib-v1.0.0 -> 1.0.0）
+          PKG_VER="${GITHUB_REF_NAME#stdlib-v}"
+          python3 tools/make_stdlib_pkg.py \
+            --diali stdlib/stdlib.diali \
+            --out dist-stdlib/stdlib.dialpkg \
+            --version "$PKG_VER" --abi 1 \
+            "x86_64-linux-gnu:stdlib-artifacts/stdlib-x86_64-linux-gnu/libdial_std.a" \
+            "x86_64-pc-windows-gnu:stdlib-artifacts/stdlib-x86_64-pc-windows-gnu/libdial_std.a" \
+            "aarch64-unknown-linux-musl:stdlib-artifacts/stdlib-aarch64-unknown-linux-musl/libdial_std.a"
+          echo "--- stdlib.dialpkg 内容 ---"
+          unzip -l dist-stdlib/stdlib.dialpkg
+
+      - name: 上传到 GitHub Release（stdlib 独立发布）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: stdlib v${{ github.ref_name }}
+          files: dist-stdlib/stdlib.dialpkg
+          overwrite: true          # 允许重发时覆盖同名资产（重指标签重跑发布用）
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            ## 官方标准库 `stdlib.dialpkg`（独立发布，与 dialc 解耦）
+
+            三平台预编译（x86_64-linux-gnu / x86_64-pc-windows-gnu / aarch64-unknown-linux-musl），
+            统一以 **ReleaseSafe（`DIAL_SAFETY=1`）** 级别预编译，作为越界/空指针的保底防线。
+
+            ### 安装
+            ```bash
+            dialc install https://github.com/shichencike/Dial/releases/download/stdlib-v<版本>/stdlib.dialpkg
+            ```
+            或把 `stdlib.dialpkg` 放到项目目录后执行 `dialc install stdlib.dialpkg`。
+            dialc 链接时会自动优先使用已安装的标准库包；`abi` 不兼容会明确报错并给出重装方案，
+            绝不静默链入不兼容的二进制。
 
   # ===========================================================================
   # 发布：tag 触发，收集三平台产物上传到 GitHub Release

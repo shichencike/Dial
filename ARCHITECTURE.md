@@ -469,14 +469,16 @@ dialc build main.dial
 | 4 | `manifest.txt` 解析 + Target Triple 索引 + 链接期选库 | 阶段 3 | ✅ **已完成** |
 | 5 | 一键安装脚本（`install-dial.sh` / `install-dial.ps1`） | 阶段 2 | ✅ **已完成**（v0.96）——初始化环境（编译器 + `stdlib/` + `runtime/` + PATH + 配置）→ 自动重新扫描并安装 `.dialpkg` |
 | 6 | Windows 线程后端（C Runtime 抽象层），使 `spawn` / `channel` 在 Windows 可用 | 独立 | 🟡 **MinGW 路线下已非阻塞**（winpthreads 提供 pthread 兼容层，stdlib 线程代码无需改写即可在 Windows 编译运行）；纯 MSVC 工具链所需的 Win32 后端仍待做 |
-| 7 | 官方标准库改造为 `.dialpkg` 形态并走 GitHub Releases 发布 | 阶段 4 | ⬜ 待做 |
+| 7 | 官方标准库改造为 `.dialpkg` 形态并走 GitHub Releases 发布 | 阶段 4 | ✅ **已完成**（v1.0.0 独立 Release：`tag stdlib-v1.0.0`，与编译器解耦；三平台预编译 `libdial_std.a` 打包为 `stdlib.dialpkg`，统一 **ReleaseSafe=1**（`-DDIAL_SAFETY=1`）预编译；`dialc` 链接期**优先自动链入**已安装包、缺失则回退源码、ABI 不兼容明确报错要求重装） |
 
 > 以上为路线记录，**不含实现承诺与时间表**。
-> 截至 v0.97，已完成阶段 1 / 2 / 3 / 4 / 5，并落地了**三平台原生构建**
+> 截至 v0.97 + 官方标准库 v1.0.0，已完成阶段 1 / 2 / 3 / 4 / 5 / 7，并落地了**三平台原生构建**
 > （Linux x86_64 · Windows x64-MinGW · Termux aarch64-musl 全静态，见 [§0.1](#01-平台矩阵与-target-triple)）；
 > 因此 `import` **已可使用**（见 [README §25.9](README.md#259-用法import-与-dialc-installv093-已实现v096-支持-url)），
 > 不再是「不支持」；包的来源既可以是本地文件，也可以是 **URL**。
-> 剩余：阶段 6 的**纯 MSVC 后端**（MinGW 路线下非阻塞）、阶段 7（官方标准库 `.dialpkg` 化）。
+> 官方标准库 `stdlib.dialpkg` 以独立 Release `stdlib-v1.0.0` 发布（见 [README §25.10](#2510-官方标准库stdlibdialpkg-独立发布)），
+> 三平台预编译静态库由 CI 自动构建并打包发布。
+> 剩余：阶段 6 的**纯 MSVC 后端**（MinGW 路线下非阻塞）。
 
 ---
 

@@ -39,6 +39,11 @@ else
 fi
 DIALC_SRC="${DIALC_SRC:-$SCRIPT_DIR}"
 
+# 官方标准库独立发布（阶段 7）：tag 形如 stdlib-v<版本>，与编译器（dialc）解耦。
+# 安装脚本在装好编译器后，会自动静默拉取该版本的标准库包并通过 dialc install 安装。
+# 升级标准库时只需改这里的标签（与 Dial Releases 里的 stdlib-v* 对应）。
+STDLIB_RELEASE="${STDLIB_RELEASE:-stdlib-v1.0.0}"
+
 say()  { printf '  %s\n' "$*"; }
 ok()   { printf '  ✅ %s\n' "$*"; }
 warn() { printf '  ⚠️  %s\n' "$*"; }
@@ -119,6 +124,35 @@ installed_at = $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 uname        = $(uname -srm)
 EOF
 ok "工具链配置: $DIALC_HOME/config.txt"
+
+# ---------------------------------------------------------------------------
+# 第 2.5 步：自动拉取官方标准库包 stdlib.dialpkg 并安装
+#   官方标准库独立发布（tag stdlib-v*，与编译器解耦）。装完编译器后静默拉取
+#   对应版本并通过 dialc install 安装，使链接期能优先使用预编译的标准库包。
+#   失败（如离线）只告警、不阻断安装——链接时会回退到源码编译 stdlib。
+# ---------------------------------------------------------------------------
+echo
+echo "-- 安装官方标准库 stdlib.dialpkg --"
+STDLIB_PKG_URL="https://github.com/shichencike/Dial/releases/download/${STDLIB_RELEASE}/stdlib.dialpkg"
+STDLIB_TMP="$(mktemp -t stdlib.XXXXXX.dialpkg)"
+if command -v curl >/dev/null 2>&1; then
+    if curl -fSL --retry 2 --proto '=https' -o "$STDLIB_TMP" "$STDLIB_PKG_URL" 2>/dev/null; then
+        if [ -s "$STDLIB_TMP" ]; then
+            if "$DST_BIN" install "$STDLIB_TMP"; then
+                ok "官方标准库已安装（${STDLIB_RELEASE}）"
+            else
+                warn "dialc install stdlib.dialpkg 失败（不影响编译器本体，可稍后手动安装）"
+            fi
+        else
+            warn "下载的 stdlib.dialpkg 为空（跳过；链接将回退到源码编译 stdlib）"
+        fi
+    else
+        warn "下载官方标准库失败（可能离线）；链接时将回退到源码编译 stdlib。"
+    fi
+else
+    warn "未找到 curl，跳过自动安装标准库（链接时将回退到源码编译 stdlib）。"
+fi
+rm -f "$STDLIB_TMP" 2>/dev/null
 
 # ---------------------------------------------------------------------------
 # 第 3 步：重新扫描 .dialpkg 并逐个安装

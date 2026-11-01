@@ -1,0 +1,117 @@
+// ===========================================================================
+// stdlib.diali —— Dial 官方标准库接口签名（平台无关，仅供 .dialpkg 校验/自描述）
+//
+// 注意：官方标准库经 dialc 的 declare_stdlib 自动链入（无需 import），
+// 因此本文件主要用于 .dialpkg 的 manifest 校验与自描述，不作为类型检查来源。
+// 类型约定：char*/void* 映射为 string（均为 i8*）；命名句柄声明为 opaque；
+// 无返回值用 void；int64 用 int；double 用 float。
+// ===========================================================================
+
+// ---- 字符串 ----
+type DialString;
+extern fn dial_string_new(lit: string): DialString;
+extern fn dial_string_length(s: DialString): int;
+extern fn dial_string_concat(a: DialString, b: DialString): DialString;
+extern fn dial_string_get(s: DialString, i: int): int;
+extern fn dial_string_eq(a: DialString, b: DialString): int;
+extern fn dial_string_substring(s: DialString, from: int, to: int): DialString;
+extern fn dial_string_clone(s: DialString): DialString;
+extern fn dial_string_retain(s: DialString): void;
+extern fn dial_string_release(s: DialString): void;
+extern fn dial_print_string(s: DialString): void;
+/// DialString -> const char*：把不透明字符串句柄转成真正的 C 字符串（跳过 8 字节头部）。
+extern fn dial_string_cstr(s: DialString): string;
+
+// ---- 数组 ----
+type DialArray;
+extern fn dial_array_new(): DialArray;
+/// 返回（可能更新后的）指针。
+extern fn dial_array_push(a: DialArray, v: int): DialArray;
+extern fn dial_array_get(a: DialArray, i: int): int;
+/// 被共享时内部触发 COW，返回新指针。
+extern fn dial_array_set(a: DialArray, i: int, v: int): DialArray;
+extern fn dial_array_length(a: DialArray): int;
+extern fn dial_array_clone(a: DialArray): DialArray;
+extern fn dial_array_retain(a: DialArray): void;
+extern fn dial_array_release(a: DialArray): void;
+
+// ---- 映射（int -> int，ARC）----
+type DialMap;
+extern fn dial_map_new(): DialMap;
+/// 返回（可能更新后的）指针。
+extern fn dial_map_put(m: DialMap, key: int, val: int): DialMap;
+extern fn dial_map_get(m: DialMap, key: int): int;
+extern fn dial_map_contains(m: DialMap, key: int): int;
+extern fn dial_map_remove(m: DialMap, key: int): int;
+extern fn dial_map_size(m: DialMap): int;
+extern fn dial_map_retain(m: DialMap): void;
+extern fn dial_map_release(m: DialMap): void;
+
+// ---- IO / 打印 ----
+extern fn dial_print_int(v: int): void;
+extern fn dial_print_float(v: float): void;
+extern fn dial_print_bool(b: int): void;
+/// 打印字符本身而非码点数字。
+extern fn dial_print_char(code: int): void;
+extern fn dial_read_line(): DialString;
+
+// ---- 文件（显式 open/close，不受 ARC 管理）----
+type DialFile;
+extern fn dial_file_open(path: DialString, mode: DialString): DialFile;
+/// 读最多 n 字节，失败返回空串。
+extern fn dial_file_read(f: DialFile, n: int): DialString;
+extern fn dial_file_write(f: DialFile, data: DialString): int;
+/// 空指针安全。
+extern fn dial_file_close(f: DialFile): void;
+
+// ---- 可恢复异常（Error：带引用计数的 ARC 类型）----
+type DialError;
+extern fn dial_error_new(msg: DialString): DialError;
+extern fn dial_error_msg(e: DialError): DialString;
+extern fn dial_error_retain(e: DialError): void;
+extern fn dial_error_release(e: DialError): void;
+
+// ---- 异常缓冲区（jmp_buf 容器，IR 侧只暴露 i8*）----
+type DialExBuf;
+extern fn dial_exbuf_new(): DialExBuf;
+extern fn dial_exbuf_env_ptr(b: DialExBuf): string;
+extern fn dial_throw_to(b: DialExBuf, err: string): void;
+extern fn dial_exbuf_err(b: DialExBuf): string;
+extern fn dial_exbuf_take_err(b: DialExBuf): string;
+extern fn dial_exbuf_free(b: DialExBuf): void;
+
+/// 未捕获异常的最后兜底：直接中止进程。
+extern fn dial_panic(msg: DialString): void;
+
+// ---- 多线程并发：线程与通道 ----
+type DialThread;
+/// 线程入口的统一签名 void(*)(void*)。
+type DialThreadFn;
+extern fn dial_thread_argcell(n: int): string;
+extern fn dial_thread_new(fn: DialThreadFn, argcell: string): DialThread;
+extern fn dial_thread_join(t: DialThread): void;
+extern fn dial_thread_detach(t: DialThread): void;
+
+type DialChannel;
+extern fn dial_channel_new(cap: int): DialChannel;
+/// send/recv 只搬运指针（所有权移交）。
+extern fn dial_channel_send(ch: DialChannel, p: string): void;
+extern fn dial_channel_recv(ch: DialChannel): string;
+extern fn dial_channel_retain(ch: DialChannel): void;
+extern fn dial_channel_release(ch: DialChannel): void;
+extern fn dial_channel_try_recv(ch: DialChannel): string;
+extern fn dial_channel_close(ch: DialChannel): void;
+extern fn dial_channel_recv_timeout(ch: DialChannel, timeout_ms: int): string;
+extern fn dial_chan_epoch(): int;
+extern fn dial_chan_wait(since: int): void;
+extern fn dial_channel_closed(ch: DialChannel): int;
+extern fn dial_channel_len(ch: DialChannel): int;
+extern fn dial_channel_done(ch: DialChannel): int;
+
+// ---- 多路复用：全局事件广播 + 选择器对象 ----
+type DialSelector;
+extern fn dial_sel_new(): DialSelector;
+extern fn dial_sel_add(s: DialSelector, ch: DialChannel): void;
+extern fn dial_sel_pick(s: DialSelector): int;
+extern fn dial_sel_recv(s: DialSelector, idx: int): string;
+extern fn dial_sel_free(s: DialSelector): void;
