@@ -362,7 +362,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
     return 0;
 }}</code></pre>
   <p class="muted" style="text-align:center">
-    下载发布包：<a class="ext" href="https://github.com/shichencike/Dial/releases/download/{VERSION}/dialc-{VERSION}-linux-x86_64.zip">dialc-{VERSION}-linux-x86_64.zip</a>
+    下载发布包：<a class="ext" href="https://github.com/shichencike/Dial/releases/download/v{VERSION_FULL}/dialc-v{VERSION_FULL}-linux-x86_64.zip">dialc-v{VERSION_FULL}-linux-x86_64.zip</a>
     （Windows / Termux 见 <a class="ext" href="https://github.com/shichencike/Dial/releases">Releases</a>；或自行 clone 仓库后构建）<br>
     发布包由 <a class="ext" href="https://github.com/shichencike/Dial/actions/workflows/ci.yml" target="_blank" rel="noopener">GitHub Actions</a>
     自动构建：装 LLVM 18 → 编译 → 跑全部十三组端到端测试 → 打包上传 Release。

@@ -77,8 +77,8 @@ def main() -> None:
               f"是 {m.group(1) if m else '未找到'}，应为 {ver}")
         # 首页的下载链接应指向当前版本的三平台分包。
         check("web/index.html 下载链接指向当前版本",
-              f"dialc-{ver}-linux-x86_64.zip" in idx,
-              f"未找到 dialc-{ver}-linux-x86_64.zip")
+              f"dialc-v{ver_full}-linux-x86_64.zip" in idx,
+              f"未找到 dialc-v{ver_full}-linux-x86_64.zip")
         # 首页不该再提供单包名 `dialc-v<版本>.zip`——三平台分包后已无此资产。
         # （**只查首页**：changelog 里的旧包名是**历史发布说明**，那一期确实叫这名字。）
         stale = re.findall(r"dialc-v[0-9.]+\.zip", idx)

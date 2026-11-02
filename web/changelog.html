@@ -25,7 +25,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
 <li><a href="#更新日志--changelog">更新日志 / Changelog</a><ul>
-<li><a href="#v098--2026-11-01">[v0.98] — 2026-11-01</a><ul>
+<li><a href="#v098--2026-11-02">[v0.98] — 2026-11-02</a><ul>
 <li><a href="#changed变更">Changed（变更）</a></li>
 <li><a href="#added新增">Added（新增）</a></li>
 <li><a href="#changed变更_1">Changed（变更）</a></li>
@@ -184,7 +184,7 @@
 <p>详见 <a href="README.md#23-版本号规则">README §23</a>。</p>
 </blockquote>
 <hr />
-<h2 id="v098--2026-11-01">[v0.98] — 2026-11-01</h2>
+<h2 id="v098--2026-11-02">[v0.98] — 2026-11-02</h2>
 <p>本版把 <code>dialc lsp</code> 从「骨架 + 基础增强」打磨到<strong>工业级可用</strong>，并补齐三套主流编辑器的接入与安装包。</p>
 <h3 id="changed变更">Changed（变更）</h3>
 <ul>
@@ -220,7 +220,7 @@
 <li><strong>一键安装脚本自动补齐配套件</strong>：除编译器、<code>stdlib/</code>+<code>runtime/</code>、<code>.dialpkg</code> 外，
   现在还会<strong>自动下载并安装 VS Code 插件</strong>（从 Release 取 <code>dial-&lt;版本&gt;.vsix</code>，
   再用 <code>code --install-extension</code> 装上），不必再自己去 Release 页翻资产、手动侧载。</li>
-<li>版本只从 <code>DIAL_VERSION</code> 一处推导（Release 标签 <code>v0.98</code> 与资产名 <code>dial-0.98.0.vsix</code>
+<li>版本只从 <code>DIAL_VERSION</code> 一处推导（Release 标签 <code>v0.98.1</code> 与资产名 <code>dial-0.98.1.vsix</code>
     都由它算出），不会出现三处各说各话、下次发版又忘了改其中一个。</li>
 <li>没装 VS Code / 离线时<strong>只告警、不阻断</strong>安装（编译器与包安装不受影响）。</li>
 <li><strong>不加 <code>--force</code></strong>：用户若已装了更新版插件，不该在「一键安装」里被悄悄降级。</li>

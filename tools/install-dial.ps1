@@ -32,7 +32,7 @@
       DIALC_BIN       Path to the dialc executable (default: .\dialc.exe next to this script)
       DIALC_HOME      Location of .dial (default: %USERPROFILE%\.dial)
       DIALC_SRC       Root of the Dial release package (default: script directory)
-      DIAL_VERSION    Version of companion components (default: 0.98.0)
+      DIAL_VERSION    Version of companion components (default: 0.98.1)
       STDLIB_URL      Override the stdlib download URL (mirror / self-hosted)
       DIAL_VSIX_URL   Override the VS Code extension download URL
       DIAL_MIRROR_PREFIX  Mirror prefix (default: https://ghproxy.net/); set empty to use official only
@@ -55,8 +55,8 @@ $ErrorActionPreference = 'Stop'
 $StdlibRelease = if ($env:STDLIB_RELEASE) { $env:STDLIB_RELEASE } else { "stdlib-v1.0.0" }
 
 # Companion component (VS Code extension) version: single source of truth.
-$DialVersion = if ($env:DIALC_VERSION) { $env:DIALC_VERSION } else { "0.98.0" }
-$DialTag = "v" + (($DialVersion -split '\.')[0..1] -join '.')
+$DialVersion = if ($env:DIALC_VERSION) { $env:DIALC_VERSION } else { "0.98.1" }
+$DialTag = "v" + $DialVersion
 $VsixFile = "dial-$DialVersion.vsix"
 
 # Domestic mirror prefix. First candidate source; auto-falls back to official.

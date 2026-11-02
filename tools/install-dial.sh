@@ -25,8 +25,8 @@
 #   DIALC_HOME  指定 ~/.dial 的位置（默认：$HOME/.dial）
 #   DIALC_SRC   指定 Dial 发行包的根目录（含 stdlib/ 与 runtime/）
 #                （默认：脚本所在目录）
-#   DIALC_VERSION 指定配套件的版本（默认：0.98.0）。Release 标签（v0.98）与
-#                插件文件名（dial-0.98.0.vsix）都由它推导，只改这一处即可。
+#   DIALC_VERSION 指定配套件的版本（默认：0.98.1）。Release 标签（v0.98.1）与
+#                插件文件名（dial-0.98.1.vsix）都由它推导，只改这一处即可。
 #   STDLIB_URL  覆盖官方标准库的下载地址（镜像 / 自建源），网络不稳时指向国内镜像。
 #
 set -uo pipefail
@@ -36,8 +36,8 @@ DIALC_HOME="${DIALC_HOME:-$HOME/.dial}"
 
 # 配套件版本号：单一来源。bootstrap 下载发布包、以及 VS Code 插件、标准库标签都由它推导。
 # 每个发布包都会随附本脚本（tools/install-dial.sh -> 包内 install-dial.sh），发版时随仓库一起更新。
-DIAL_VERSION="${DIAL_VERSION:-0.98.0}"
-DIAL_TAG="v$(printf '%s' "$DIAL_VERSION" | cut -d. -f1,2)"
+DIAL_VERSION="${DIAL_VERSION:-0.98.1}"
+DIAL_TAG="v${DIAL_VERSION}"
 
 # 编译器本体可能是 dialc（Linux / Termux）或 dialc.exe（Windows / MinGW）。
 if [ -x "$SCRIPT_DIR/dialc.exe" ]; then
@@ -135,7 +135,7 @@ in_local_release() {
 #
 #   关键设计：一键命令的 URL 指向 raw.githubusercontent.com/<分支>/tools/install-dial.sh，
 #   该地址**直接返回文件、不经过 releases/latest 重定向**（正是此前容易在代理后失败的一环）；
-#   下面下载发布包也用精确版本标签 v0.98.0，**同样不经过 latest 重定向**。
+#   下面下载发布包也用精确版本标签 v0.98.1，**同样不经过 latest 重定向**。
 #   安装脚本本身也随每个发布包一起分发（package_release.sh 会把它拷进 Dial/）。
 # ---------------------------------------------------------------------------
 bootstrap_if_needed() {
@@ -274,13 +274,13 @@ rm -f "$STDLIB_TMP" 2>/dev/null
 #   再手动 `code --install-extension`，「一键」就名不副实了。
 #   与标准库同理：失败（离线 / 没装 VS Code / 没装 curl）只告警、不阻断安装。
 #
-#   版本只有一个来源：DIAL_VERSION（形如 0.98.0）。Release 标签由它推导
-#   （v0.98），插件文件名也由它推导（dial-0.98.0.vsix）——三者不会各说各话。
+#   版本只有一个来源：DIAL_VERSION（形如 0.98.1）。Release 标签由它推导
+#   （v0.98.1），插件文件名也由它推导（dial-0.98.1.vsix）——三者不会各说各话。
 # ---------------------------------------------------------------------------
 echo
 echo "-- 安装 VS Code 插件 --"
-DIAL_VERSION="${DIAL_VERSION:-0.98.0}"
-DIAL_TAG="v$(printf '%s' "$DIAL_VERSION" | cut -d. -f1,2)"
+DIAL_VERSION="${DIAL_VERSION:-0.98.1}"
+DIAL_TAG="v${DIAL_VERSION}"
 VSIX_FILE="dial-${DIAL_VERSION}.vsix"
 # URL 可覆盖：某些网络环境访问 GitHub 不稳（或想走自建镜像）时，
 # 用 DIAL_VSIX_URL 指向自己的地址即可，其余逻辑完全不变。

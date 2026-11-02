@@ -529,7 +529,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 <p>直接复制下面一行即可，脚本会自动探测平台、下载对应发布包（镜像优先 + 官方回退 + 断点续传）并完成安装：</p>
 <pre><code class="language-bash"># Linux x86_64 / Termux aarch64
 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
-# 指定版本：DIAL_VERSION=0.98.0 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
+# 指定版本：DIAL_VERSION=0.98.1 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
 </code></pre>
 <pre><code class="language-powershell"># Windows x64（MinGW）：一行式从 main 分支拉取并安装（输出为英文，避免终端代码页乱码）
 irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
@@ -581,7 +581,7 @@ powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 </tr>
 <tr>
 <td><code>DIAL_VERSION</code></td>
-<td>指定配套件版本（默认 <code>0.98.0</code>）</td>
+<td>指定配套件版本（默认 <code>0.98.1</code>）</td>
 </tr>
 </tbody>
 </table>
@@ -5082,7 +5082,7 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 <tr>
 <td><strong>VS Code</strong></td>
 <td>手写 LSP 客户端（无 npm 依赖）</td>
-<td><a href="editors/vscode/"><code>editors/vscode/dial-0.98.0.vsix</code></a>（<code>code --install-extension</code> 侧载）</td>
+<td><a href="editors/vscode/"><code>editors/vscode/dial-0.98.1.vsix</code></a>（<code>code --install-extension</code> 侧载）</td>
 <td>免 Node / npm / 联网；能力最全</td>
 </tr>
 <tr>
@@ -5108,8 +5108,8 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 还会<strong>自动下载并安装 VS Code 插件</strong>（从 Release 取 <code>dial-&lt;版本&gt;.vsix</code>，再用 <code>code --install-extension</code> 装上），
 不必再自己去 Release 页翻资产、手动侧载。</p>
 <ul>
-<li>版本只有一个来源：<code>DIAL_VERSION</code>（默认 <code>0.98.0</code>）——Release 标签（<code>v0.98</code>）与资产文件名
-  （<code>dial-0.98.0.vsix</code>）都由它推导，不会三处各说各话。</li>
+<li>版本只有一个来源：<code>DIAL_VERSION</code>（默认 <code>0.98.1</code>）——Release 标签（<code>v0.98.1</code>）与资产文件名
+  （<code>dial-0.98.1.vsix</code>）都由它推导，不会三处各说各话。</li>
 <li><strong>没装 VS Code / 离线时只告警、不阻断安装</strong>：编译器本体与包安装不受影响。</li>
 <li><strong>不加 <code>--force</code></strong>：用户若已装了更新版本的插件，不该在「一键安装」里被悄悄降级。</li>
 <li>下载地址可用 <code>DIAL_VSIX_URL</code> 覆盖（自建镜像 / 网络受限时用）。</li>

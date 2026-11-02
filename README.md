@@ -203,7 +203,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 ```bash
 # Linux x86_64 / Termux aarch64
 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
-# 指定版本：DIAL_VERSION=0.98.0 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
+# 指定版本：DIAL_VERSION=0.98.1 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
 ```
 
 ```powershell
@@ -251,7 +251,7 @@ powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 | `DIAL_MIRROR_PREFIX` | 镜像前缀（默认 `https://ghproxy.net/`）；置空则只用官方源 |
 | `STDLIB_URL` | 覆盖官方标准库下载地址（镜像 / 自建源） |
 | `DIAL_VSIX_URL` | 覆盖 VS Code 插件下载地址 |
-| `DIAL_VERSION` | 指定配套件版本（默认 `0.98.0`） |
+| `DIAL_VERSION` | 指定配套件版本（默认 `0.98.1`） |
 
 脚本承担两件事（**顺序不能反**）：
 
@@ -3202,7 +3202,7 @@ fn main() {
 
 | 编辑器 | 接入方式 | 安装包 | 说明 |
 | --- | --- | --- | --- |
-| **VS Code** | 手写 LSP 客户端（无 npm 依赖） | [`editors/vscode/dial-0.98.0.vsix`](editors/vscode/)（`code --install-extension` 侧载） | 免 Node / npm / 联网；能力最全 |
+| **VS Code** | 手写 LSP 客户端（无 npm 依赖） | [`editors/vscode/dial-0.98.1.vsix`](editors/vscode/)（`code --install-extension` 侧载） | 免 Node / npm / 联网；能力最全 |
 | **Neovim** | 内置 LSP 客户端 | [`editors/neovim/`](editors/neovim/)（拷进 `runtimepath` 即可） | 零依赖，不需要 nvim-lspconfig |
 | **Emacs** | 内置 `eglot` | [`editors/emacs/README.md`](editors/emacs/)（init.el 片段） | 不开发插件——eglot 原生连 LSP，加几行配置即可 |
 
@@ -3214,8 +3214,8 @@ fn main() {
 还会**自动下载并安装 VS Code 插件**（从 Release 取 `dial-<版本>.vsix`，再用 `code --install-extension` 装上），
 不必再自己去 Release 页翻资产、手动侧载。
 
-- 版本只有一个来源：`DIAL_VERSION`（默认 `0.98.0`）——Release 标签（`v0.98`）与资产文件名
-  （`dial-0.98.0.vsix`）都由它推导，不会三处各说各话。
+- 版本只有一个来源：`DIAL_VERSION`（默认 `0.98.1`）——Release 标签（`v0.98.1`）与资产文件名
+  （`dial-0.98.1.vsix`）都由它推导，不会三处各说各话。
 - **没装 VS Code / 离线时只告警、不阻断安装**：编译器本体与包安装不受影响。
 - **不加 `--force`**：用户若已装了更新版本的插件，不该在「一键安装」里被悄悄降级。
 - 下载地址可用 `DIAL_VSIX_URL` 覆盖（自建镜像 / 网络受限时用）。
