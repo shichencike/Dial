@@ -19,6 +19,22 @@
 
 本版把 `dialc lsp` 从「骨架 + 基础增强」打磨到**工业级可用**，并补齐三套主流编辑器的接入与安装包。
 
+### Changed（变更）
+- **`--fast`（ReleaseFast）不再是「只关检查」**：在关闭运行期检查之外，现在开启三层编译器终极优化，
+  让 `--fast` 真正名副其实（此前它只关掉 Fail-Fast 检查，机器码仍是普通 O2）。
+  - **① 自动向量化 (SIMD) + 循环展开**：LLVM 切到 `OptimizationLevel::Aggressive`（O3），
+    并按宿主实测指令集挑对应的 x86-64 微架构级别（`x86-64-v2/v3/v4` → SSE4.2 / AVX2 / AVX-512，
+    ARM64 显式 `+neon`），一次直接吃 4~8 个 int64；循环展开器同时压低分支预测开销。
+  - **② LTO 链接时优化**：`--fast` 现在把 inkwell 产出的 LLVM bitcode 经 `clang -flto -O3` 编成
+    含 LTO bitcode 的「胖对象」，C 运行时也逐文件以 `-flto` 编译，链接时由 clang 整体重排——
+    `dial_array_get`/`push` 等热函数被直接内联进主程序，热循环零 `call` 开销（反汇编可证）。
+  - **③ PGO 剖析引导优化（新增 `--pgo`）**：先插桩跑一遍训练样本、合并 profile，再据热点重排指令
+    布局（热路径顶到 I-Cache 最前）。`--pgo` 必须配合 `--fast`（需本机 `clang` 支持）。
+  - 三者都需要本机 `clang`；若 `DIAL_C_COMPILER` 指向非 clang，则优雅降级为「仅 O3 + SIMD」，
+    保留 SIMD 收益、放弃跨模块 LTO/PGO。生成的二进制按本机 CPU 调优，仅供本机运行。
+- 新增性能基准示例 [`examples/bench_array.dial`](examples/bench_array.dial)（1000 万次 push + 遍历求和），
+  作为上述三层优化的「标准考题」。
+
 ### Added（新增）
 - **编辑器插件安装包（三主流）**：编译型语言的编辑器支持是必做的苦活，本版落地三套。
   - `editors/vscode/`：**手写 LSP 客户端**（无 npm 依赖），`build.sh` 打包成 `dial-*.vsix`

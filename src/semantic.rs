@@ -289,11 +289,14 @@ pub fn type_of<V>(
             let lt = type_of(left, scopes, funcs, structs)?;
             let rt = type_of(right, scopes, funcs, structs)?;
             match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
-                    // 零隐式转换：两个操作数必须类型完全相同，且同为 int 或同为 float。
-                    // `1 + 2.0` 这类 int/float 混合不在编译期默默提升为 float，而是直接报错，
-                    // 强制用户写 `int_to_float(1) + 2.0`。
-                    if lt == rt && is_numeric(&lt) {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                    // 字符串拼接：仅 + 支持 String + String -> String（CVE-2024-DIAL-006 新增）。
+                    if matches!(op, BinOp::Add) && lt == Type::String && rt == Type::String {
+                        Ok(Type::String)
+                    } else if lt == rt && is_numeric(&lt) {
+                        // 零隐式转换：两个操作数必须类型完全相同，且同为 int 或同为 float。
+                        // `1 + 2.0` 这类 int/float 混合不在编译期默默提升为 float，而是直接报错，
+                        // 强制用户写 `int_to_float(1) + 2.0`。
                         Ok(lt)
                     } else if lt == Type::Char || rt == Type::Char {
                         // char 不参与算术（§5.4）。这里单独给一条诊断：
@@ -301,13 +304,13 @@ pub fn type_of<V>(
                         // 而对 char 来说，`'a' + 1` 的意图根本无法判定——
                         // 想取下一个字母请 char_to_int 后自己算，再把结果 int_to_char 回来。
                         Err(DialcError::new(
-                            "语义错误：char 不参与算术运算（+ - * /）。'a' + 1 的意图无法判定（取下一个字母？还是拿码点做数值计算？）；\
+                            "语义错误：char 不参与算术运算（+ - * / %）。'a' + 1 的意图无法判定（取下一个字母？还是拿码点做数值计算？）；\
                              请先 char_to_int(c) 得到码点，算完再用 int_to_char(x) 转回字符",
                             0, 0,
                         ))
                     } else {
                         Err(DialcError::new(
-                            "语义错误：算术运算(+ - * /)要求两个操作数类型完全相同且均为数值类型（int 或 float）；int 与 float 之间无隐式转换，请用 int_to_float / float_to_int 显式转换",
+                            "语义错误：算术运算(+ - * / %)要求两个操作数类型完全相同且均为数值类型（int 或 float）；int 与 float 之间无隐式转换，请用 int_to_float / float_to_int 显式转换。字符串请用 + 拼接（如 a + b）",
                             0, 0,
                         ))
                     }
@@ -427,6 +430,55 @@ pub fn type_of<V>(
                         ));
                     }
                     return Ok(Type::Char);
+                }
+                // 类型 -> 字符串：让 `print("x=" + str(n))` 这类拼接成为可能（CVE-2024-DIAL-006 新增）。
+                // `str()` 是统一入口，按实参类型分派到 int_to_string / float_to_string / 字符串自身。
+                "int_to_string" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：int_to_string 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：int_to_string 的参数必须是 int",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::String);
+                }
+                "float_to_string" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：float_to_string 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Float {
+                        return Err(DialcError::new(
+                            "语义错误：float_to_string 的参数必须是 float",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::String);
+                }
+                "str" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：str 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if matches!(at, Type::Int | Type::Float | Type::String) {
+                        return Ok(Type::String);
+                    } else {
+                        return Err(DialcError::new(
+                            "语义错误：str 仅支持 int / float / string 参数（char 请先 int_to_char 或用 string 字面量）",
+                            0, 0,
+                        ));
+                    }
                 }
                 "new_map" => {
                     if !args.is_empty() {

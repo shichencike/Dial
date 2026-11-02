@@ -1,0 +1,18 @@
+// CVE-2024-DIAL-007 — channel release 泄漏残留未消费元素
+// 漏洞：dial_channel_release 只释放通道对象本身，未释放环形缓冲中残留的、
+//       尚未被接收的元素，造成内存泄漏（元素为堆指针时尤为严重）。
+// 修复后：dial_channel_release 遍历缓冲，对每个残留元素调用 elem_release。
+// 本 PoC 验证“发送-接收-关闭”主路径正确；残留元素的释放由 cve_check.py
+// 通过编译计数版 elem_release 的 C 用例确定性验证（见 cve_check.py）。
+fn main(): int {
+    let ch: channel<string> = channel(4);
+    var a: string = "hello";
+    move_to(a, ch);
+    var b: string = "world";
+    move_to(b, ch);
+    var r1: string = recv(ch);
+    print(r1);            // 期望 hello
+    close(ch);
+    print("channel done");
+    return 0;
+}

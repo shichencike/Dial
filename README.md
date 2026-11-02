@@ -84,7 +84,8 @@ dialc/
 │   ├── check_lsp_stdout_purity.py  # 校验 LSP 路径上不出现 stdout 裸输出（协议流纯净性）
 │   ├── lsp_smoke.py        # M 组：LSP 全能力往返 + 协议流纯净性断言
 │   ├── package.sh          # 打发布包 dialc-v<版本>-<平台>.zip（含许可与 .git）
-│   ├── install-dial.sh     # 一键安装（Linux / Termux）
+│   ├── install-dial.sh     # 一键安装（Linux / Termux，支持 curl | bash 一键命令）
+│   ├── install-dial.ps1    # 一键安装（Windows / PowerShell，支持 irm | iex 一键命令）
 │   ├── install-dial.ps1    # 一键安装（Windows / PowerShell）
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
 ├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十三组测试 + 打包发布
@@ -195,29 +196,62 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 不想自己编译？每个平台有独立的预编译包 `dialc-v<版本>-<slug>.zip`，内含编译器、标准库、运行时
 与一键安装脚本（ARCHITECTURE.md §3.2 阶段 5）：
 
+#### 一行命令安装（推荐）
+
+直接复制下面一行即可，脚本会自动探测平台、下载对应发布包（镜像优先 + 官方回退 + 断点续传）并完成安装：
+
+```bash
+# Linux x86_64 / Termux aarch64
+curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
+# 指定版本：DIAL_VERSION=0.98.0 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
+```
+
+```powershell
+# Windows x64（MinGW）：一行式从 main 分支拉取并安装（输出为英文，避免终端代码页乱码）
+irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
+```
+
+> **关于 URL 稳定性**：这两条命令取的是 **`main` 分支上 `tools/` 里的安装脚本**（直出文件、**不经过 `releases/latest` 重定向**——正是此前代理环境下容易卡住的环节）；脚本随后按当前平台下载**精确版本标签**的发布包（同样不经过 `latest`）。安装脚本本身也随每个发布包一起分发（`Dial/install-dial.sh` / `Dial/install-dial.ps1`），从根本上杜绝「独立下载链接重定向失败」的问题。
+>
+> 注意用 `bash` 而非 `sh`：`set -o pipefail` 与脚本里的数组语法在 Ubuntu 的 `sh`(dash)、Termux 的 `mksh` 下不被支持。Windows 侧用 `iex` 即可（PowerShell 原生）。
+
+#### 手动解压（三平台通用，可选）
+
+若不想用管道，可先下载再运行：
+
 ```bash
 # Linux x86_64
-curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.98-linux-x86_64.zip
+curl -LO https://github.com/shichencike/Dial/releases/download/v0.98/dialc-v0.98-linux-x86_64.zip
 unzip dialc-v0.98-linux-x86_64.zip && cd Dial
-bash tools/install-dial.sh                 # 扫描当前目录及其子目录
-bash tools/install-dial.sh /path/to/pkgs   # 或扫描指定目录
+bash install-dial.sh                 # 扫描当前目录及其子目录
+bash install-dial.sh /path/to/pkgs   # 或扫描指定目录
 ```
 
 ```bash
 # Termux aarch64（musl 全静态，包名 slug = termux-aarch64）
-curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.98-termux-aarch64.zip
+curl -LO https://github.com/shichencike/Dial/releases/download/v0.98/dialc-v0.98-termux-aarch64.zip
 unzip dialc-v0.98-termux-aarch64.zip && cd Dial
-bash tools/install-dial.sh
+bash install-dial.sh
 ```
 
 ```powershell
-# Windows x64（MinGW）：一行式从最新 Release 拉取并安装
-irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
-
-# 或手动：解压后运行 PowerShell 安装脚本
+# Windows x64（MinGW）：解压后运行 PowerShell 安装脚本
+curl.exe -LO https://github.com/shichencike/Dial/releases/download/v0.98/dialc-v0.98-windows-x86_64.zip
 Expand-Archive dialc-v0.98-windows-x86_64.zip -DestinationPath .
-powershell -ExecutionPolicy Bypass -File tools\install-dial.ps1
+powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 ```
+
+#### 下载源与回退
+
+安装脚本下载标准库 / VS Code 插件时，**默认先走国内镜像 `ghproxy.net` 前缀代理，失败自动回退官方 GitHub**，
+并对大文件支持断点续传（`curl -C -` / `wget -c`），网络不稳也不会「一键卡住」。可用环境变量微调：
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `DIAL_MIRROR_PREFIX` | 镜像前缀（默认 `https://ghproxy.net/`）；置空则只用官方源 |
+| `STDLIB_URL` | 覆盖官方标准库下载地址（镜像 / 自建源） |
+| `DIAL_VSIX_URL` | 覆盖 VS Code 插件下载地址 |
+| `DIAL_VERSION` | 指定配套件版本（默认 `0.98.0`） |
 
 脚本承担两件事（**顺序不能反**）：
 
@@ -265,6 +299,18 @@ dialc run   <源文件.dial> [-o 可执行文件] [--safety debug|safe|fast]
 > 否则请永远不要使用此模式。在 `--fast` 下发生的越界，将退化为 C 语言的未定义行为（UB），
 > 可能导致静默的错误数据甚至灾难性后果。**
 > （详见 [§20.4](#204-性能模式的切换)）
+
+`--fast` 不只是「关掉检查」——它同时开启三层编译器终极优化（均需本机存在 `clang`，
+否则优雅降级为「仅 O3 + SIMD」）。详见示例 [`examples/bench_array.dial`](examples/bench_array.dial)：
+
+| 优化 | 作用 | 验证方式 |
+| --- | --- | --- |
+| **① 自动向量化 (SIMD) + 循环展开** | LLVM 用 `O3` + 宿主 SIMD（x86 的 AVX2/AVX-512、ARM64 的 NEON）一次吃 4~8 个 int64，并展开循环减少分支 | 反汇编可见 `ymm`/`zmm` 向量指令 |
+| **② LTO 链接时优化** | 把 Dial 代码与 C 运行时的 bitcode 整体重排，`dial_array_get`/`push` 等热函数被直接内联进主程序，消灭函数调用开销 | 反汇编中热循环 0 次 `call dial_array_*` |
+| **③ PGO 剖析引导优化**（`--pgo`） | 先插桩跑一遍训练样本记录最热分支，再据热点把热路径顶到 I-Cache 最前、冷错误后置 | 构建日志出现「PGO 优化完成」 |
+
+> 注意：`--fast` 生成的二进制按**本机 CPU 微架构级别**（`x86-64-v3`/`-v4` 或 NEON）调优，
+> 仅供本机运行，请勿跨机型分发（否则可能 `SIGILL`）。
 
 `dialc build` 严格分成两步，这是架构约束而非实现细节：
 
@@ -3240,6 +3286,17 @@ fn main() {
 > 即：**码值由语言服务器自定，规范不设中央码表**（类型是 `integer | string`，我们用
 > `dialc.` 前缀命名空间化，避免与其他服务器的码撞车）；而 `data` 的用途——**在诊断通知与
 > codeAction 请求之间保留结构化数据**——正是我们传包名的做法，一字不差地对上规范。
+>
+> **文档同步用选项形式**：`textDocumentSync` 广告的是 `{openClose, change: 1, save}` 而不是
+> 纯数字 `1`。规范对 `save` 的原文是「*If present save notifications are sent to the server.
+> If omitted the notification should not be sent.*」——纯数字形式里**没有** `save` 这个字段，
+> 客户端据此就不发 `textDocument/didSave`，而诊断正是靠它刷新的。用数字形式的话，
+> 「保存即报」只在自家插件里成立（它无条件发 didSave），在别的客户端上会**静默失效**。
+>
+> **已知边界**：`$/cancelRequest` 被接受但**不打断**正在处理的请求。我们的请求都是微秒级的
+> （没有跨文件全量扫描这类长任务），没有可观测的取消语义；而规范要求的「取消后回
+> `RequestCancelled(-32800)`」需要并发执行模型才做得到。我们保证的是更重要的一条：
+> **每个请求恰好回一次响应**，客户端绝不会挂等。
 >
 > **规范符合性是被自动检查的**：`tools/lsp_smoke.py` 里有一张**返回形状对照表**，
 > 逐个方法核对响应结构与规范一致（`Hover` 要 `contents`、`CompletionList` 要

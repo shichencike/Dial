@@ -62,6 +62,21 @@ impl SafetyMode {
     }
 }
 
+/// 代码生成选项。除 Fail-Fast 等级外，还携带「是否启用终极优化」的信息，
+/// 用以打开 LLVM 的 O3 + SIMD 自动向量化 + 循环展开，以及是否额外导出
+/// LLVM bitcode（供 LTO / PGO 流水线消费）。
+pub struct CgOpts {
+    pub safety: SafetyMode,
+    /// true（仅 --fast 模式）：用 `OptimizationLevel::Aggressive`（等价于 O3）生成机器码，
+    /// 并显式打开宿主 SIMD 特征（x86 的 AVX2 / ARM64 的 NEON），让 LLVM 的循环向量化器
+    /// 与循环展开器全力工作。
+    pub aggressive: bool,
+    /// 若 Some(path)：在写出原生 .o 之外，把 LLVM bitcode 另存到该路径。
+    /// LTO / PGO 需要它——只有 bitcode 里才携带可被链接器重新打散的中间表示，
+    /// 原生 .o 无法被 LTO 跨越。
+    pub bc_out: Option<std::path::PathBuf>,
+}
+
 pub struct CodeGen<'ctx> {
     context: &'ctx Context,
     module: inkwell::module::Module<'ctx>,
@@ -78,11 +93,6 @@ pub struct CodeGen<'ctx> {
     /// 循环跳转目标栈：(continue 目标块, break 目标块)。
     /// for 的 continue 目标是「自增块」而非条件块——否则 continue 会跳过 i++ 造成死循环。
     loop_targets: RefCell<Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>>,
-    /// 异常缓冲区栈：每个元素 = (exbuf 指针 alloca, try 入口时的作用域深度)。
-    /// 第 2 项记录「try 压栈前 scopes.len()」，使 emit_throw 能精确释放「try 作用域及其中嵌套块」的活跃 ARC 局部，
-    /// 而不触碰外层作用域变量（比记录变量名集合更稳健：天然兼容同名校验/遮蔽情况）。
-    /// try 压栈、catch/merge 弹栈；throw 取栈顶，释放 try 作用域内活跃 ARC 局部后 dial_throw_to（零成本：仅真正抛出才释放）。
-    exbuf_stack: RefCell<Vec<(PointerValue<'ctx>, usize)>>,
     /// Fail-Fast 安全等级：决定是否在 IR 里插入边界/除零检查与 trap。
     safety: SafetyMode,
 }
@@ -93,7 +103,7 @@ pub fn compile(
     functions: &HashMap<String, FuncInfo>,
     structs: &StructTable,
     out_path: &Path,
-    safety: SafetyMode,
+    opts: &CgOpts,
     externs: &[(String, FuncInfo)],
 ) -> Result<()> {
     let context = Context::create();
@@ -110,8 +120,7 @@ pub fn compile(
         // 注：HashSet<PointerValue> 无需按函数清空——每条 alloca 的 PointerValue 全局唯一，
         // 不同函数的同名变量不会互串。
         loop_targets: RefCell::new(Vec::new()),
-        exbuf_stack: RefCell::new(Vec::new()),
-        safety,
+        safety: opts.safety,
     };
 
     cg.build_struct_types(program);
@@ -151,7 +160,7 @@ pub fn compile(
     if let Err(e) = cg.module.verify() {
         eprintln!("[dialc] IR 验证失败: {}", e);
     }
-    cg.emit_object(out_path)?;
+    cg.emit_object(out_path, opts)?;
     Ok(())
 }
 
@@ -326,6 +335,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_void("dial_print_bool", &[i64b.into()]);
         // char 打印（v0.92）：打印字符本身而非码点数字。
         self.decl_void("dial_print_char", &[i64b.into()]);
+        // 类型 -> 字符串（CVE-2024-DIAL-006 新增）：支撑 `print("x=" + str(n))` 这类拼接。
+        self.decl_func("dial_int_to_string", i8b, &[i64b.into()]);
+        self.decl_func("dial_float_to_string", i8b, &[f64b.into()]);
         self.decl_func("dial_read_line", i8b, &[]);
         // 文件 IO：file 句柄是不透明的 FILE* 封装，显式 open/close，不受 ARC 管理。
         self.decl_func("dial_file_open", i8b, &[i8b.into(), i8b.into()]);
@@ -344,6 +356,10 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_exbuf_err", i8b, &[i8b.into()]);
         self.decl_func("dial_exbuf_take_err", i8b, &[i8b.into()]);
         self.decl_void("dial_exbuf_free", &[i8b.into()]);
+        // 运行时异常栈（跨函数 unwinding）：try 压栈 / catch·merge 弹栈 / throw 取栈顶。
+        self.decl_void("dial_exc_push", &[i8b.into()]);
+        self.decl_void("dial_exc_pop", &[]);
+        self.decl_func("dial_exc_top", i8b, &[]);
         // DialString -> const char*：把不透明字符串句柄转成真正的 C 字符串（跳过 8 字节头部）。
         // 凡是想把 Dial 的 string 交给**期望 const char* 的 C 函数**（例如 dial_panic），
         // 必须先经过这一步。直接把 DialString 当 char* 传，会把结构体头部字节当成文本打印
@@ -376,11 +392,13 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_void("dial_thread_join", &[i8b.into()]);
         self.decl_void("dial_thread_detach", &[i8b.into()]);
         // 通道：send/recv 只搬运指针（所有权移交），retain/release 走原子引用计数。
-        self.decl_func("dial_channel_new", i8b, &[self.context.i64_type().into()]);
+        self.decl_func("dial_channel_new", i8b, &[self.context.i64_type().into(), i8b.into()]);
         self.decl_void("dial_channel_send", &[i8b.into(), i8b.into()]);
         self.decl_func("dial_channel_recv", i8b, &[i8b.into()]);
         self.decl_void("dial_channel_retain", &[i8b.into()]);
         self.decl_void("dial_channel_release", &[i8b.into()]);
+        // 通用 ARC 释放（供通道元素析构器使用，CVE-2024-DIAL-007）。
+        self.decl_void("dial_rc_release", &[i8b.into()]);
         // v0.81 通道收尾：关闭 / 状态查询 / 非阻塞取出
         self.decl_func("dial_channel_try_recv", i8b, &[i8b.into()]);
         self.decl_void("dial_channel_close", &[i8b.into()]);
@@ -567,37 +585,107 @@ impl<'ctx> CodeGen<'ctx> {
         n
     }
 
+    /// 解析 `/proc/cpuinfo` 的 flags 行（x86 的 feature 列表），返回以空格分隔的标志集合。
+    /// 非 Linux 或读取失败时返回空集，调用方据此退回默认特征。
+    fn read_cpu_flags() -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        if let Ok(text) = std::fs::read_to_string("/proc/cpuinfo") {
+            for line in text.lines() {
+                if line.starts_with("flags") || line.starts_with("Features") {
+                    if let Some(idx) = line.find(':') {
+                        for tok in line[idx + 1..].split_whitespace() {
+                            set.insert(tok.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        set
+    }
+
     /// 当前宿主架构对应的 LLVM CPU 名（原生构建时即目标 CPU）。
     ///
-    /// 曾经写死 `"x86-64"`，会导致在 aarch64 上无法生成机器码。
-    /// 按架构推导：x86_64 → x86-64；aarch64 → generic（LLVM 接受）；
-    /// 其余留空，让 LLVM 选用该 triple 的默认 CPU。
+    /// 为让 --fast 拉满 SIMD，不再写死 `"x86-64"`（那只会给 SSE2），而是按宿主实测的
+    /// 指令集挑对应的 **x86-64 微架构级别**（glibc 2.26+ 起 LLVM/ GCC 都认这组名字）：
+    ///   - avx512f → `x86-64-v4`（AVX-512，一次吃 8 个 int64）
+    ///   - avx2    → `x86-64-v3`（AVX2 + FMA，一次吃 4 个 int64）
+    ///   - sse4.2  → `x86-64-v2`
+    ///   - 其余    → `x86-64`（仅 SSE2）
+    /// 这些级别都已在 cpuinfo 里实测存在，因此生成的二进制在本机必然可跑（不会 SIGILL）。
+    /// aarch64 上 NEON 为标配，用 `generic` 即可；其余架构留空让 LLVM 自选默认 CPU。
     fn host_cpu() -> &'static str {
         match std::env::consts::ARCH {
-            "x86_64" => "x86-64",
+            "x86_64" => {
+                let f = Self::read_cpu_flags();
+                if f.contains("avx512f") {
+                    "x86-64-v4"
+                } else if f.contains("avx2") {
+                    "x86-64-v3"
+                } else if f.contains("sse4_2") {
+                    "x86-64-v2"
+                } else {
+                    "x86-64"
+                }
+            }
             "aarch64" => "generic",
             _ => "",
         }
     }
 
-    fn emit_object(&self, out: &Path) -> Result<()> {
+    fn emit_object(&self, out: &Path, opts: &CgOpts) -> Result<()> {
         Target::initialize_all(&InitializationConfig::default());
         let triple = TargetMachine::get_default_triple();
         let target = Target::from_triple(&triple)
             .map_err(|e| DialcError::new(format!("LLVM 目标平台错误: {:?}", e), 0, 0))?;
+        // --fast 模式：拉满 LLVM 优化。Aggressive 即 O3，会打开循环向量化器与循环展开器；
+        // 再叠加宿主 SIMD 特征（x86 的 AVX2 / ARM64 的 NEON），让纯内存计算（如数组求和）
+        // 一次直接处理 4~8 个整数。其余模式保持 Default（O2），优先编译速度与调试体验。
+        let opt_level = if opts.aggressive {
+            OptimizationLevel::Aggressive
+        } else {
+            OptimizationLevel::Default
+        };
+        let features = if opts.aggressive {
+            Self::host_simd_features()
+        } else {
+            String::new()
+        };
         let tm = target
             .create_target_machine(
                 &triple,
                 Self::host_cpu(),
-                "",
-                OptimizationLevel::Default,
+                &features,
+                opt_level,
                 RelocMode::Default,
                 CodeModel::Default,
             )
             .ok_or_else(|| DialcError::new("创建目标机失败（LLVM 未支持当前平台？）", 0, 0))?;
         tm.write_to_file(&self.module, FileType::Object, out)
             .map_err(|e| DialcError::new(format!("生成目标文件失败: {:?}", e), 0, 0))?;
+        // LTO / PGO 需要 bitcode：原生 .o 不含可被链接器重排的中间表示，必须另存 .bc。
+        if let Some(bc) = &opts.bc_out {
+            if !self.module.write_bitcode_to_path(bc) {
+                return Err(DialcError::new(
+                    format!("导出 LLVM bitcode 失败: {}", bc.display()),
+                    0,
+                    0,
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// 探测宿主 SIMD 特征串（`+feature` 逗号分隔），供 LLVM 目标机附加启用。
+    ///
+    /// 在 x86_64 上，CPU 微架构级别（`host_cpu` 里的 `x86-64-vN`）已经把对应指令集设为基线，
+    /// 这里通常留空即可；仅在 aarch64 上显式补 `+neon` 让向量化器放心使用 Advanced SIMD。
+    /// 非 Linux / 探测失败：返回空（退回默认特征，仍可被 O3 向量化，只是不强制宽向量）。
+    fn host_simd_features() -> String {
+        match std::env::consts::ARCH {
+            "aarch64" => "+neon".to_string(),
+            _ => String::new(),
+        }
     }
 
     // ---- 调用 C 函数 ----
@@ -648,6 +736,21 @@ impl<'ctx> CodeGen<'ctx> {
             _ => return,
         };
         self.call_c_void(name, &[val.into()]);
+    }
+
+    /// 返回「元素析构器」的函数指针（i8*），供 dial_channel_new 在通道销毁时释放残留元素。
+    /// 嵌套通道（channel<channel<...>>）必须用 dial_channel_release（原子 rc），
+    /// 其余元素类型（string/array/map/error）统一走 dial_rc_release。
+    fn elem_release_fn(&self, elem_ty: &Type) -> PointerValue<'ctx> {
+        let name = match elem_ty {
+            Type::Channel(_) => "dial_channel_release",
+            _ => "dial_rc_release",
+        };
+        self.module
+            .get_function(name)
+            .unwrap_or_else(|| panic!("内部错误：缺少 {} 的 LLVM 定义", name))
+            .as_global_value()
+            .as_pointer_value()
     }
 
     /// 按名查找局部变量的栈槽（由内到外）。
@@ -981,41 +1084,55 @@ impl<'ctx> CodeGen<'ctx> {
         scopes: &CgScopes<'ctx>,
         structs: &StructTable,
     ) -> Result<()> {
-        if let Some(top) = self.exbuf_stack.borrow().last().cloned() {
-            let depth = top.1;
-            let moved = self.moved.borrow();
-            for scope in scopes.iter().skip(depth) {
-                for (_name, (ty, (_m, ptr))) in scope.iter() {
-                    if moved.contains(ptr) {
-                        continue;
-                    }
-                    if Self::is_heap_type(ty) {
-                        self.release(ty, *ptr);
-                    } else if matches!(ty, Type::Struct(_)) {
-                        self.release_struct_fields(ty, *ptr, structs);
-                    }
+        // 运行时异常栈栈顶：跨函数 unwinding 的关键。
+        // 包含 try 的函数（调用栈上仍存活，其 setjmp 帧有效）已把自己的 exbuf 压栈，
+        // 因此子函数里抛出的异常也能取到它并 longjmp 回去（CVE-2024-DIAL-004 修复）。
+        // 栈空则说明异常出现在任何 try 之外 -> 未捕获 -> dial_panic。
+        let func = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+        let top = self.call_c("dial_exc_top", &[]).into_pointer_value();
+        let null = self.i8ptr().const_null();
+        let has_buf = self
+            .builder
+            .build_int_compare(IntPredicate::NE, top, null, "exc.hasbuf")
+            .unwrap();
+        let throw_bb = self.context.append_basic_block(func, "exc.throw");
+        let panic_bb = self.context.append_basic_block(func, "exc.panic");
+        self.builder
+            .build_conditional_branch(has_buf, throw_bb, panic_bb)
+            .unwrap();
+
+        // ---- 捕获路径：释放当前函数所有活跃 ARC 局部后 longjmp 回 try ----
+        self.builder.position_at_end(throw_bb);
+        // 跨函数 unwinding 只释放「当前函数（抛异常这一帧）」的活跃局部——
+        // 外层 try 所在帧仍然存活，其局部会在它自己的 catch / 正常收尾中释放，无需我们代劳。
+        // moved 集合保证被 move 出去（含正要抛出的 Error 本身）的槽位不会被重复释放。
+        let moved = self.moved.borrow();
+        for scope in scopes.iter() {
+            for (_name, (ty, (_m, ptr))) in scope.iter() {
+                if moved.contains(ptr) {
+                    continue;
+                }
+                if Self::is_heap_type(ty) {
+                    self.release(ty, *ptr);
+                } else if matches!(ty, Type::Struct(_)) {
+                    self.release_struct_fields(ty, *ptr, structs);
                 }
             }
-            // dial_throw_to(buf, err)：把 err 写入缓冲区（覆盖前由 C 侧释放旧值，re-throw 安全），
-            // 再 longjmp 回 dial_try 调用点。C 侧封装了 setjmp/longjmp 的 returns_twice / noreturn 语义。
-            let buf_alloca = top.0;
-            let buf = self
-                .builder
-                .build_load(self.i8ptr(), buf_alloca, "exbuf.throw")
-                .unwrap();
-            self.call_c_void("dial_throw_to", &[buf.into(), err.into()]);
-        } else {
-            // 未捕获异常：打印错误消息并终止进程（绝不静默继续，避免逻辑雪崩）。
-            //
-            // 注意 **必须**先 dial_string_cstr 再交给 dial_panic：
-            // dial_error_msg 返回的是不透明的 DialString 句柄（[refcount][len][data...]），
-            // 而 dial_panic 的形参是 const char*。少这一步转换，打印出来的就是
-            // 结构体头部的字节而不是错误消息（曾实测只打印出一个 "9"）。
-            let msg = self.call_c("dial_error_msg", &[err.into()]);
-            let cstr = self.call_c("dial_string_cstr", &[msg.into()]);
-            self.call_c_void("dial_panic", &[cstr.into()]);
         }
-        // dial_throw_to（内含 longjmp）与 dial_panic（内含 abort）均不返回，标记当前块不可达。
+        // dial_throw_to(buf, err)：把 err 写入缓冲区（覆盖前由 C 侧释放旧值，re-throw 安全），
+        // 再 longjmp 回 try 调用点。C 侧封装了 setjmp/longjmp 的 returns_twice / noreturn 语义。
+        self.call_c_void("dial_throw_to", &[top.into(), err.into()]);
+        self.builder.build_unreachable().unwrap();
+
+        // ---- 未捕获路径：打印错误消息并终止进程（绝不静默继续） ----
+        self.builder.position_at_end(panic_bb);
+        // 注意 **必须**先 dial_string_cstr 再交给 dial_panic：
+        // dial_error_msg 返回的是不透明的 DialString 句柄（[refcount][len][data...]），
+        // 而 dial_panic 的形参是 const char*。少这一步转换，打印出来的就是
+        // 结构体头部的字节而不是错误消息（曾实测只打印出一个 "9"）。
+        let msg = self.call_c("dial_error_msg", &[err.into()]);
+        let cstr = self.call_c("dial_string_cstr", &[msg.into()]);
+        self.call_c_void("dial_panic", &[cstr.into()]);
         self.builder.build_unreachable().unwrap();
         Ok(())
     }
@@ -1396,8 +1513,10 @@ impl<'ctx> CodeGen<'ctx> {
                 let buf = self.call_c("dial_exbuf_new", &[]);
                 let buf_alloca = self.alloca_in_entry(function, self.i8ptr().into(), "exbuf");
                 self.builder.build_store(buf_alloca, buf).unwrap();
-                let depth = scopes.len();
-                self.exbuf_stack.borrow_mut().push((buf_alloca, depth));
+                // 压入运行时异常栈：包含 try 的函数（其 setjmp 帧此刻已活在调用栈上）把自己的
+                // exbuf 登记上去，使**任何深层子函数**里的 throw 都能取栈顶、longjmp 回此处
+                // （跨函数 unwinding，CVE-2024-DIAL-004 修复）。必须在 setjmp 之前完成。
+                self.call_c_void("dial_exc_push", &[buf.into()]);
                 // setjmp：首次返回 0（进入 try 体），longjmp 回来时返回非 0（进入 catch）。
                 // 必须由本函数亲自调用（jmp_buf 保存的是本帧栈指针，见 declare_stdlib 注释）。
                 let env_ptr = self.call_c("dial_exbuf_env_ptr", &[buf.into()]);
@@ -1435,7 +1554,7 @@ impl<'ctx> CodeGen<'ctx> {
                 // ---- try.catch：捕获点 ----
                 self.builder.position_at_end(catch_bb);
                 // 弹出本层 exbuf（使 catch 体内的 re-throw 路由到外层 try）。
-                let (buf_alloca, _d) = self.exbuf_stack.borrow_mut().pop().unwrap();
+                self.call_c_void("dial_exc_pop", &[]);
                 let buf = self
                     .builder
                     .build_load(self.i8ptr(), buf_alloca, "exbuf.ld")
@@ -1473,16 +1592,15 @@ impl<'ctx> CodeGen<'ctx> {
                 }
                 scopes.pop();
 
-                // ---- try.merge：仅「try 体正常完成」路径到达，free exbuf 并汇入 cont ----
+                // ---- try.merge：仅「try 体正常完成」路径到达，弹栈并 free exbuf 后汇入 cont ----
+                // 与 catch 路径严格二选一：只有一条会执行，故这里无条件弹栈 + 释放（配对 setup 的 push）。
                 self.builder.position_at_end(merge_bb);
-                if let Some((buf_alloca, _d)) = self.exbuf_stack.borrow().last().cloned() {
-                    let buf = self
-                        .builder
-                        .build_load(self.i8ptr(), buf_alloca, "exbuf.ld2")
-                        .unwrap();
-                    self.call_c_void("dial_exbuf_free", &[buf.into()]);
-                    self.exbuf_stack.borrow_mut().pop();
-                }
+                self.call_c_void("dial_exc_pop", &[]);
+                let buf = self
+                    .builder
+                    .build_load(self.i8ptr(), buf_alloca, "exbuf.ld2")
+                    .unwrap();
+                self.call_c_void("dial_exbuf_free", &[buf.into()]);
                 self.builder.build_unconditional_branch(cont_bb).unwrap();
 
                 // ---- try.cont：try/catch 之后的统一续跑点 ----
@@ -1946,6 +2064,15 @@ impl<'ctx> CodeGen<'ctx> {
                     "char_to_int" | "int_to_char" => {
                         self.gen_expr(&args[0], function, scopes, func_values, functions, structs)
                     }
+                    // 类型 -> 字符串（CVE-2024-DIAL-006）：int/float 经 C 侧格式化，string 原样返回。
+                    "int_to_string" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_int_to_string", &[v.into()]))
+                    }
+                    "float_to_string" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_float_to_string", &[v.into()]))
+                    }
                     "float_to_int" => {
                         let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         Ok(self
@@ -2052,7 +2179,14 @@ impl<'ctx> CodeGen<'ctx> {
                             self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?,
                             &Type::Int,
                         );
-                        Ok(self.call_c("dial_channel_new", &[cap.into()]))
+                        // 元素析构器：按通道元素类型分派（CVE-2024-DIAL-007）。
+                        // 嵌套通道走 dial_channel_release（原子 rc），其余走 dial_rc_release。
+                        let inner = match type_of(expr, scopes, functions, structs)? {
+                            Type::Channel(inner) => *inner,
+                            _ => Type::String, // 防御性兜底，正常不会到这
+                        };
+                        let elem_release = self.elem_release_fn(&inner);
+                        Ok(self.call_c("dial_channel_new", &[cap.into(), elem_release.into()]))
                     }
                     // 取出一个元素的所有权：队列里存的就是裸指针，弹出即归接收者所有（不做 retain）。
                     //
@@ -2288,6 +2422,20 @@ impl<'ctx> CodeGen<'ctx> {
                             let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
                             self.emit_print(&ty, val)?;
                             Ok(self.context.i64_type().const_int(0, false).into())
+                        } else if name == "str" {
+                            // 统一入口：按实参类型分派到 int_to_string / float_to_string / 字符串自身。
+                            let arg = &args[0];
+                            let ty = type_of(arg, scopes, functions, structs)?;
+                            let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
+                            match ty {
+                                Type::Int => Ok(self.call_c("dial_int_to_string", &[val.into()])),
+                                Type::Float => Ok(self.call_c("dial_float_to_string", &[val.into()])),
+                                Type::String => Ok(val), // 字符串自身，无需转换
+                                _ => Err(DialcError::new(
+                                    "内部错误：str 收到了非 int/float/string 的实参（语义层应已拦截）",
+                                    0, 0,
+                                )),
+                            }
                         } else {
                             let _info = functions.get(name).ok_or_else(|| {
                                 DialcError::new(format!("调用了未定义的函数 '{}'", name), 0, 0)
@@ -2451,9 +2599,15 @@ impl<'ctx> CodeGen<'ctx> {
                 let res = self.builder.build_load(bool_t, slot, "sc.res").unwrap();
                 Ok(res)
             }
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 let tl = type_of(l, scopes, functions, structs)?;
                 let tr = type_of(r, scopes, functions, structs)?;
+                // 字符串拼接：String + String -> String（仅 + 支持，CVE-2024-DIAL-006）。
+                if op == BinOp::Add && tl == Type::String && tr == Type::String {
+                    let lval = self.gen_expr(l, function, scopes, func_values, functions, structs)?;
+                    let rval = self.gen_expr(r, function, scopes, func_values, functions, structs)?;
+                    return Ok(self.call_c("dial_string_concat", &[lval.into(), rval.into()]));
+                }
                 let lval = self.gen_expr(l, function, scopes, func_values, functions, structs)?;
                 let rval = self.gen_expr(r, function, scopes, func_values, functions, structs)?;
                 let res_ty = if tl == Type::Float || tr == Type::Float {
@@ -2469,14 +2623,15 @@ impl<'ctx> CodeGen<'ctx> {
                         BinOp::Sub => self.builder.build_float_sub(a, b, "sub").unwrap().into(),
                         BinOp::Mul => self.builder.build_float_mul(a, b, "mul").unwrap().into(),
                         BinOp::Div => self.builder.build_float_div(a, b, "div").unwrap().into(),
+                        BinOp::Mod => self.builder.build_float_rem(a, b, "rem").unwrap().into(),
                         _ => unreachable!(),
                     }
                 } else {
                     let a = lval.into_int_value();
                     let b = rval.into_int_value();
-                    // Fail-Fast：sdiv 除数为 0 在 LLVM 中是 UB（poison），
-                    // 优化器可以据此把后续代码整段删掉。必须先检查再除。
-                    if op == BinOp::Div {
+                    // Fail-Fast：sdiv / srem 除数为 0 在 LLVM 中是 UB（poison），
+                    // 优化器可以据此把后续代码整段删掉。必须先检查再除/取模。
+                    if op == BinOp::Div || op == BinOp::Mod {
                         self.emit_div_zero_check(function, b);
                     }
                     match op {
@@ -2484,6 +2639,7 @@ impl<'ctx> CodeGen<'ctx> {
                         BinOp::Sub => self.builder.build_int_sub(a, b, "sub").unwrap().into(),
                         BinOp::Mul => self.builder.build_int_mul(a, b, "mul").unwrap().into(),
                         BinOp::Div => self.builder.build_int_signed_div(a, b, "div").unwrap().into(),
+                        BinOp::Mod => self.builder.build_int_signed_rem(a, b, "rem").unwrap().into(),
                         _ => unreachable!(),
                     }
                 };

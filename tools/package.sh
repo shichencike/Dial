@@ -87,7 +87,12 @@ if [ "${INCLUDE_BIN:-0}" = "1" ]; then
     mkdir -p "$DEST/bin"
     cp target/release/dialc "$DEST/bin/dialc"
     {
-        echo "dialc v${VERSION}（由 GitHub Actions 构建）"
+        if [ -n "${GITHUB_SHA:-}" ]; then
+            BUILD_BY="由 GitHub Actions 构建"
+        else
+            BUILD_BY="本地构建"
+        fi
+        echo "dialc v${VERSION}（${BUILD_BY}）"
         echo
         echo "该二进制编译于 Linux x86_64，链接 libLLVM-18（运行时需要它）。"
         echo "使用前请设置："
@@ -95,7 +100,7 @@ if [ "${INCLUDE_BIN:-0}" = "1" ]; then
         echo "或自行 clone 源码后用 cargo build --release 重新构建。"
         echo
         echo "版本:   ${VERSION}"
-        echo "构建提交: ${GITHUB_SHA:-（本地构建）}"
+        echo "构建提交: ${GITHUB_SHA:-（本地构建，无提交哈希）}"
         echo "构建时间: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     } > "$DEST/bin/BUILD_INFO.txt"
     echo "   ✅ 已把编译好的二进制放入包内 bin/dialc"

@@ -1,0 +1,20 @@
+// CVE-2024-DIAL-004 — 跨函数异常路由失败
+// 漏洞：异常用基于“编译期全局栈”的 setjmp/longjmp 实现，无法跨栈帧展开，
+//       子函数内抛出的异常无法被调用方（main）的 try/catch 捕获，程序直接终止。
+// 修复后：改用 __thread 线程局部异常栈，异常可跨函数正确路由到最近的 catch。
+fn open_and_read(path: string): string {
+    let f: file = open(path, "r");
+    let s: string = read(f, 100);
+    close(f);
+    return s;
+}
+fn main(): int {
+    try {
+        let content: string = open_and_read("nonexistent_file.txt");
+        print(content);
+    } catch {
+        print("caught the error in main!");
+    }
+    print("after try");
+    return 0;
+}

@@ -43,3 +43,27 @@ void dial_panic(const char *msg) {
     fprintf(stderr, "dial: 未捕获的异常（panic）: %s\n", msg ? msg : "(null)");
     abort();
 }
+
+/* ----------------------------------------------------------------------------
+ *  运行时异常栈（跨函数 unwinding）
+ * ----------------------------------------------------------------------------
+ *  线程局部：每个线程独立维护自己的异常栈，互不干扰（异常语义本就按线程隔离）。
+ */
+static __thread DialExBuf *g_exc_stack[DIAL_EXC_STACK_MAX];
+static __thread int       g_exc_depth = 0;
+
+void dial_exc_push(DialExBuf *b) {
+    if (g_exc_depth >= DIAL_EXC_STACK_MAX) {
+        fprintf(stderr, "dial: 异常栈溢出（嵌套 try 超过 %d 层）\n", DIAL_EXC_STACK_MAX);
+        abort();
+    }
+    g_exc_stack[g_exc_depth++] = b;
+}
+
+void dial_exc_pop(void) {
+    if (g_exc_depth > 0) g_exc_depth--;
+}
+
+DialExBuf *dial_exc_top(void) {
+    return g_exc_depth > 0 ? g_exc_stack[g_exc_depth - 1] : NULL;
+}

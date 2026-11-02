@@ -1,0 +1,14 @@
+// CVE-2024-DIAL-003 — RC clone 污染 / 数据竞争（含关联数组 UAF）
+// 漏洞：dial_rc_clone 在 refcount==1 时直接返回同一指针而不 retain，
+//       导致克隆与原对象共享同一份引用计数；任一方的写时复制（COW）会
+//       释放共享计数，造成另一方悬垂（UAF）或相互污染。
+// 修复后：clone 在共享路径上 retain（+1 所有权转移），a 与 b 各自独立，
+//       修改 b 不再污染 a。重复运行以暴露潜在的数据竞争 / 悬垂。
+fn main(): int {
+    var a: int[] = [1, 2, 3];
+    var b: int[] = a.clone();
+    b = b.set(0, 99);
+    print(a.get(0));   // 期望 1（不被 b 的修改污染）
+    print(b.get(0));   // 期望 99
+    return 0;
+}

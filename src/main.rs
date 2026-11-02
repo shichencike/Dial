@@ -143,6 +143,7 @@ fn main() {
     let mut out_path: Option<PathBuf> = None;
     let mut no_link = false;
     let mut safety = SafetyMode::Debug; // 默认：崩溃保护全开
+    let mut pgo = false; // 剖析引导优化（--fast 下的终极杀器）
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -177,6 +178,10 @@ fn main() {
                 safety = SafetyMode::ReleaseFast;
                 i += 1;
             }
+            "--pgo" => {
+                pgo = true;
+                i += 1;
+            }
             "-o" => {
                 if i + 1 < args.len() {
                     out_path = Some(PathBuf::from(args[i + 1].clone()));
@@ -202,6 +207,24 @@ fn main() {
         eprintln!("   在 --fast 下发生的越界，将退化为 C 语言的未定义行为（UB），");
         eprintln!("   可能导致静默的错误数据甚至灾难性后果。");
         eprintln!();
+        eprintln!("   --fast 同时开启三层编译器终极优化：");
+        eprintln!("     ① 自动向量化(SIMD)+循环展开：LLVM 用 O3 + 宿主 SIMD 指令");
+        eprintln!("       （x86 的 AVX2 / ARM64 的 NEON）一次处理多个整数，并展开循环减少分支。");
+        eprintln!("     ② LTO 链接时优化：把你的 Dial 代码与 C 运行时的机器码整体重新打散，");
+        eprintln!("       把 dial_array_get 这类热函数直接内联进主程序，消灭函数调用开销。");
+        if pgo {
+            eprintln!("     ③ PGO 剖析引导优化：先插桩跑一遍训练样本，记录最热分支，");
+            eprintln!("       再据此把热路径排到 I-Cache 最前、冷错误处理后置，分支预测命中率拉满。");
+        } else {
+            eprintln!("     ③ PGO 剖析引导优化：追加 --pgo 可再榨一层（需先跑一遍训练样本）。");
+        }
+        eprintln!();
+    }
+    if pgo && safety != SafetyMode::ReleaseFast {
+        eprintln!("ℹ️  --pgo（剖析引导优化）必须配合 --fast 使用：");
+        eprintln!("   非 fast 模式保留运行期检查，PGO 无收益且不插桩。已自动忽略 --pgo。");
+        eprintln!();
+        pgo = false;
     }
 
     let source = match fs::read_to_string(&src_path) {
@@ -266,8 +289,29 @@ fn main() {
     };
 
     // 4) 代码生成（第一步：emit .o，需在 LLVM 存在时执行）
+    //
+    // --fast 模式（ReleaseFast）：不仅关闭运行期检查，还拉满 LLVM 优化（O3 + 宿主 SIMD），
+    // 并额外导出 LLVM bitcode（.bc），供后续 LTO / PGO 流水线把 Dial 代码与 C 运行时整体重排。
+    let fast = safety == SafetyMode::ReleaseFast;
     let (obj_path, exe_path) = output_paths(&src_path, out_path.as_deref());
-    if let Err(e) = codegen::compile(&program, &functions, &structs, &obj_path, safety, &externs) {
+    let build_dir = find_project_base()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".dialc_build")
+        .join(format!("safety-{}", safety.as_c_macro()));
+    let bc_path = build_dir.join(obj_path.file_stem().unwrap()).with_extension("bc");
+    let cg_opts = codegen::CgOpts {
+        safety,
+        aggressive: fast,
+        bc_out: if fast { Some(bc_path.clone()) } else { None },
+    };
+    if let Err(e) = codegen::compile(
+        &program,
+        &functions,
+        &structs,
+        &obj_path,
+        &cg_opts,
+        &externs,
+    ) {
         eprintln!("{}", e);
         std::process::exit(1);
     }
@@ -279,9 +323,101 @@ fn main() {
 
     // 5) 链接（第二步：用 C 编译器把 C 标准库做成静态库并链接）
     //    同一个安全等级必须同时作用于 LLVM IR 与 C Runtime，否则两侧检查会不一致。
-    if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs) {
-        eprintln!("{}", e);
-        std::process::exit(1);
+    //
+    // LTO / PGO 需要 clang 支持（-flto 与 IR 级 PGO 的 bitcode 格式是 clang 的）。
+    // 若用户强制指定了非 clang 的 C 编译器，则优雅降级：保留 O3/SIMD 的 LLVM 侧收益，
+    // 但放弃跨模块的 LTO 内联与 PGO（这两步依赖 clang 的 bitcode 链路）。
+    let lto_capable = fast && clang_for_lto().is_some();
+    let eff_pgo = pgo && lto_capable;
+    if fast && !lto_capable && pgo {
+        eprintln!("⚠️  当前 C 编译器不支持 LTO/PGO（需要 clang），已降级为「仅 O3 + SIMD」的 --fast。");
+    }
+
+    if lto_capable {
+        if eff_pgo {
+            // —— PGO 两段式 ——
+            // 阶段一（instrument）：用插桩 bitcode 编出训练用二进制，跑一遍收集热点，
+            //   再把 profile 合并成 profdata。
+            // 阶段二（optimize）：用 profdata 重新编译，把热路径排到 I-Cache 最前。
+            let profdir = build_dir.join("pgo");
+            let _ = fs::create_dir_all(&profdir);
+            let gen_exe = build_dir.join("pgo_gen_bin");
+
+            let mut gen = LinkOpts::default();
+            gen.lto = true;
+            gen.pgo_gen = true;
+            if let Err(e) = clang_compile_bc(&bc_path, &obj_path, &gen) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = link(&obj_path, &gen_exe, safety, &pkg_libs, &gen) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+            // 训练运行：把 profile 落到 profdir 下，文件名带 PID 以免多次运行互相覆盖。
+            // 训练输出静默（仅做采样），最终优化后的运行才把真实结果打到终端，避免重复。
+            println!("ℹ️  PGO：运行训练样本以收集热点分支（训练输出已静默）…");
+            let mut run = Command::new(&gen_exe);
+            run.env(
+                "LLVM_PROFILE_FILE",
+                profdir.join("%p.profraw").to_string_lossy().into_owned(),
+            )
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+            let _train_status = run.status();
+            let profdata = profdir.join("pgo.profdata");
+            // 合并 profraw -> profdata（即便训练进程退出码非 0，只要有数据就继续）。
+            let mut merge = Command::new("llvm-profdata");
+            merge.arg("merge").arg("-o").arg(&profdata);
+            if let Ok(rd) = fs::read_dir(&profdir) {
+                for entry in rd.flatten() {
+                    let p = entry.path();
+                    if p.extension().map(|x| x == "profraw").unwrap_or(false) {
+                        merge.arg(&p);
+                    }
+                }
+            }
+            if !run_ok(&mut merge) {
+                eprintln!("❌ PGO：合并 profile 数据失败（程序是否正常运行产出热点？）");
+                std::process::exit(1);
+            }
+            if !profdata.exists() {
+                eprintln!("❌ PGO：未生成任何 profile 数据，请确认程序在训练运行中确实执行了热路径。");
+                std::process::exit(1);
+            }
+
+            // 阶段二：用 profdata 重新编译并链接出最终二进制。
+            let mut useo = LinkOpts::default();
+            useo.lto = true;
+            useo.pgo_use = Some(profdata.clone());
+            if let Err(e) = clang_compile_bc(&bc_path, &obj_path, &useo) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &useo) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+            println!("✅ PGO 优化完成（热路径已据训练样本重排）。");
+        } else {
+            // 单阶段 LTO：把 .bc 经 clang -flto 编成胖对象，再整体链接。
+            let mut o = LinkOpts::default();
+            o.lto = true;
+            if let Err(e) = clang_compile_bc(&bc_path, &obj_path, &o) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &o) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // 非 LTO 模式（debug / safe，或 fast 但无 clang）：直接用 inkwell 写出的原生 .o 链接。
+        if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &LinkOpts::default()) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
     }
 
     match command {
@@ -421,7 +557,16 @@ pub fn resolve_imports(
 /// 根据源文件路径推导目标文件与可执行文件路径（同目录、同名）。
 fn output_paths(src_path: &str, out: Option<&Path>) -> (PathBuf, PathBuf) {
     let src = Path::new(src_path);
-    let parent = src.parent().unwrap_or_else(|| Path::new("."));
+    // parent() 对裸文件名（如 "hello.dial"）返回 Some("") 而非 None，
+    // 直接 join 会得到 "hello"（不含 "./"），Linux 的 execve 会去 PATH 里找 -> "No such file or directory"，
+    // 更糟的是 "test.dial" 会静默执行系统 /bin/test（CVE-2024-DIAL-002 根因）。
+    // 这里把空 parent 归一为 "."，保证 join 出 "./hello" 这种明确相对路径。
+    let parent_raw = src.parent().unwrap_or_else(|| Path::new("."));
+    let parent = if parent_raw.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent_raw
+    };
     let stem = src
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -473,6 +618,19 @@ fn find_project_base() -> Option<PathBuf> {
 ///   代码无需改动即可编译（阶段 6 的 Win32 后端因此可延后）。
 /// - 其它平台：优先 `zig cc`（统一交叉能力），其次 `clang` / `cc` / `gcc`。
 fn cc_command() -> (String, Vec<String>) {
+    // 允许用户用 DIAL_C_COMPILER 强制指定 C 编译器（CVE-2024-DIAL-008 新增）。
+    // Termux / 某些交叉环境下默认的 `zig cc` 会失败，用户可设为 `clang`、`gcc`，
+    // 甚至带参数的 `zig cc --target=...`（空格分隔程序与参数）。
+    if let Ok(val) = env::var("DIAL_C_COMPILER") {
+        let val = val.trim();
+        if !val.is_empty() {
+            let mut parts = val.split_whitespace();
+            if let Some(prog) = parts.next() {
+                let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+                return (prog.to_string(), args);
+            }
+        }
+    }
     let candidates: Vec<(&'static str, Vec<String>)> = if cfg!(windows) {
         vec![
             ("gcc", vec![]),
@@ -507,6 +665,83 @@ fn cc_command() -> (String, Vec<String>) {
     ("cc".to_string(), vec![])
 }
 
+/// 链接阶段的优化选项。
+///
+/// - `lto`：链接时优化。要求用户 .o 为「含 LTO bitcode 的胖对象」（由
+///   `clang_compile_bc` 用 `clang -flto` 编译 `.bc` 得到），且 C 运行时也以 `-flto`
+///   编译成 .o（而非 .a），链接时由 clang 重新打散、跨 Dial+C 整体内联。
+/// - `pgo_gen` / `pgo_use`：剖析引导优化的插桩阶段 / 使用阶段。
+#[derive(Clone, Default)]
+struct LinkOpts {
+    lto: bool,
+    pgo_gen: bool,
+    pgo_use: Option<PathBuf>,
+}
+
+/// 返回可用于 LTO / PGO 的 clang（程序名, 前置参数）。
+///
+/// LTO 的 bitcode 格式是 clang 的，`-flto` 跨语言重排也依赖 clang 驱动；
+/// 若强制指定的 `DIAL_C_COMPILER` 不是 clang，则返回 None（调用方优雅降级为「仅 O3+SIMD」）。
+fn clang_for_lto() -> Option<(String, Vec<String>)> {
+    if let Ok(val) = env::var("DIAL_C_COMPILER") {
+        let val = val.trim();
+        if !val.is_empty() {
+            let mut parts = val.split_whitespace();
+            if let Some(prog) = parts.next() {
+                if !prog.contains("clang") {
+                    return None;
+                }
+                return Some((prog.to_string(), parts.map(|s| s.to_string()).collect()));
+            }
+        }
+    }
+    // 探测系统 clang（含版本参数两种写法）
+    for prog in ["clang", "clang-18", "clang-17", "clang-16"] {
+        let ok = Command::new(prog)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return Some((prog.to_string(), vec![]));
+        }
+    }
+    None
+}
+
+/// 把 inkwell 导出的 LLVM bitcode 经 clang `-flto -O3` 编成「胖对象」。
+///
+/// 这一步是关键：只有 clang 编出的 .o 才内嵌 LTO bitcode，链接器才能据此把 Dial 代码
+/// 与 C 运行时整体重排（内联 `dial_array_get` 等热函数）。PGO 阶段则附带插桩 / 使用标记。
+fn clang_compile_bc(bc: &Path, obj: &Path, opts: &LinkOpts) -> Result<(), String> {
+    let (clang, prefix) = clang_for_lto()
+        .ok_or_else(|| "LTO/PGO 需要 clang，但当前环境未找到 clang".to_string())?;
+    let mut cmd = Command::new(&clang);
+    cmd.args(&prefix)
+        .arg("-flto")
+        .arg("-O3")
+        .arg("-march=native") // 与 inkwell 的 host_cpu() 对齐：让 C 运行时也吃到本机 SIMD
+        .arg("-Wno-override-module") // .bc 的 triple 与 clang 默认目标一致，仅消除噪音告警
+        .arg("-c")
+        .arg(bc)
+        .arg("-o")
+        .arg(obj);
+    if opts.pgo_gen {
+        cmd.arg("-fprofile-generate");
+    }
+    if let Some(pd) = &opts.pgo_use {
+        cmd
+            .arg(format!("-fprofile-use={}", pd.display()))
+            // PGO 数据过期 / 未覆盖的分支只是提示，不应升级成硬错误阻断构建。
+            .arg("-Wno-error=profile-instr-out-of-date")
+            .arg("-Wno-error=profile-instr-unprofiled");
+    }
+    if !run_ok(&mut cmd) {
+        return Err(format!("编译 bitcode 为 LTO 对象失败: {}", bc.display()));
+    }
+    Ok(())
+}
+
 /// 第二步：把标准库（runtime + stdlib）链入最终可执行文件。
 ///
 /// 阶段 7（官方标准库 `.dialpkg` 化）之后，标准库优先使用**已安装**的
@@ -515,13 +750,28 @@ fn cc_command() -> (String, Vec<String>) {
 /// 源码（向后兼容 / 离线 / 开发构建）。两种方式产出的都是同一份 `libdial_std.a`，
 /// 最终链接步骤完全一致。
 ///
+/// LTO 模式（`opts.lto`）下，为让链接器能跨 Dial+C 整体重排，**放弃**预编译包与 .a 归档，
+/// 改为把 C 运行时以 `-flto -O3` 逐文件编成 .o，再与用户胖对象一起交给 clang 链接
+/// （这样 `dial_array_get` 等热函数才能被内联进主程序，彻底消灭调用开销）。
+///
 /// `safety` 通过 -DDIAL_SAFETY=N 注入，仅在「回退源码编译」路径下生效
 /// （预编译包已按固定等级烘焙，见 ARCHITECTURE §8 阶段 7：默认 ReleaseSafe=1）。
-fn link(obj: &Path, exe: &Path, safety: SafetyMode, extra_libs: &[PathBuf]) -> Result<(), String> {
-    // 1) 决定标准库静态库：优先已安装包，否则实时编译源码
-    let stdlib_libs = resolve_stdlib_archive(safety)?;
-    // 2) 最终链接：用户 .o + 标准库 .a + import 包 .a + 系统库
-    final_link(obj, exe, extra_libs, &stdlib_libs)
+fn link(
+    obj: &Path,
+    exe: &Path,
+    safety: SafetyMode,
+    extra_libs: &[PathBuf],
+    opts: &LinkOpts,
+) -> Result<(), String> {
+    if opts.lto {
+        // LTO：C 运行时逐文件编成 LTO .o，与用户胖对象一起整体重排。
+        let runtime_objs = compile_runtime_lto(safety, opts)?;
+        final_link(obj, exe, extra_libs, &[], &runtime_objs, opts)
+    } else {
+        // 非 LTO：优先已安装包，否则实时编译源码归档成 .a。
+        let stdlib_libs = resolve_stdlib_archive(safety)?;
+        final_link(obj, exe, extra_libs, &stdlib_libs, &[], opts)
+    }
 }
 
 /// 解析标准库静态库。
@@ -643,19 +893,33 @@ fn resolve_stdlib_archive(safety: SafetyMode) -> Result<Vec<PathBuf>, String> {
     Ok(vec![lib])
 }
 
-/// 最终链接：用户 .o + 标准库 .a（可能多份）+ import 包 .a + 系统库 → 可执行文件。
+/// 最终链接：用户 .o + 标准库 .a（可能多份）+ C 运行时 .o（LTO 时）+ import 包 .a + 系统库 → 可执行文件。
 ///
-/// `safety` 在此不再需要（C 侧检查只在编译期注入，已在上游完成）。
+/// - 非 LTO：`stdlib_libs` 是归档 `.a`，直接链入。
+/// - LTO：`runtime_objs` 是逐文件编出的 C 运行时 `.o`（内嵌 LTO bitcode），
+///   与用户胖对象一起交给 **clang** 整体重排；此时 `stdlib_libs` 为空。
+/// `opts.lto` / `opts.pgo_*` 决定链接器是否追加 `-flto -O3` 与 PGO 标记。
 fn final_link(
     obj: &Path,
     exe: &Path,
     extra_libs: &[PathBuf],
     stdlib_libs: &[PathBuf],
+    runtime_objs: &[PathBuf],
+    opts: &LinkOpts,
 ) -> Result<(), String> {
-    let (cc, cc_prefix) = cc_command();
+    // LTO/PGO 依赖 clang 的 bitcode 链路，链接驱动也必须用 clang。
+    let (cc, cc_prefix) = if opts.lto {
+        clang_for_lto().ok_or_else(|| "LTO/PGO 需要 clang 作为链接驱动".to_string())?
+    } else {
+        cc_command()
+    };
     let mut link_cmd = Command::new(&cc);
     link_cmd.args(&cc_prefix).arg(obj);
-    // 标准库静态库（已安装包 或 实时编译产物）
+    // C 运行时 .o（仅 LTO 模式存在）：与用户对象一起整体重排。
+    for r in runtime_objs {
+        link_cmd.arg(r);
+    }
+    // 标准库静态库（已安装包 或 实时编译产物归档）
     for l in stdlib_libs {
         link_cmd.arg(l);
     }
@@ -663,6 +927,19 @@ fn final_link(
     // 交叉编译到 Windows 时这里自动变成包内的 .lib，无需用户干预（§4.3）。
     for pl in extra_libs {
         link_cmd.arg(pl);
+    }
+    if opts.lto {
+        // 触发链接期 LTO：clang 读回所有内嵌 bitcode，跨 Dial+C 整体优化后再发机器码。
+        link_cmd.arg("-flto").arg("-O3").arg("-march=native");
+    }
+    if opts.pgo_gen {
+        link_cmd.arg("-fprofile-generate");
+    }
+    if let Some(pd) = &opts.pgo_use {
+        link_cmd
+            .arg(format!("-fprofile-use={}", pd.display()))
+            .arg("-Wno-error=profile-instr-out-of-date")
+            .arg("-Wno-error=profile-instr-unprofiled");
     }
     link_cmd
         // 线程库：
@@ -685,6 +962,73 @@ fn final_link(
     }
 
     Ok(())
+}
+
+/// LTO 模式下把 C 运行时（runtime/ + stdlib/）逐文件编成内嵌 bitcode 的 `.o`。
+///
+/// 不走 .a 归档——直接把这一串 .o 交给 `final_link`，clang 才能跨 Dial+C 整体重排
+/// （归档 .a 会切断 LTO 视线，除非用 llvm-ar/gcc-ar 这类 LTO 感知归档器）。
+/// 同时注入 Fail-Fast 等级与 `-pthread`（并发运行时用到）。
+fn compile_runtime_lto(safety: SafetyMode, opts: &LinkOpts) -> Result<Vec<PathBuf>, String> {
+    let (clang, clang_prefix) = clang_for_lto()
+        .ok_or_else(|| "LTO 需要 clang 编译 C 运行时".to_string())?;
+    let base = find_project_base()
+        .ok_or_else(|| "找不到 stdlib/ 与 runtime/ 目录（请用 DIALC_STDLIB_DIR 指定工程根）".to_string())?;
+    let runtime_dir = base.join("runtime");
+    let stdlib_dir = base.join("stdlib");
+
+    let build_dir = base
+        .join(".dialc_build")
+        .join(format!("safety-{}", safety.as_c_macro()))
+        .join("lto");
+    fs::create_dir_all(&build_dir).map_err(|e| format!("创建 LTO 构建目录失败: {}", e))?;
+
+    let mut entries: Vec<PathBuf> = Vec::new();
+    for dir in [&runtime_dir, &stdlib_dir] {
+        if let Ok(rd) = fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().map(|x| x == "c").unwrap_or(false) {
+                    entries.push(p);
+                }
+            }
+        }
+    }
+
+    let mut obj_files: Vec<PathBuf> = Vec::new();
+    for cfile in &entries {
+        let out_o = build_dir.join(cfile.file_stem().unwrap()).with_extension("o");
+        let mut cmd = Command::new(&clang);
+        cmd.args(&clang_prefix)
+            .arg("-flto")
+            .arg("-O3")
+            .arg("-march=native") // 与 inkwell 的 host_cpu() 对齐：让 C 运行时也吃到本机 SIMD
+            .arg("-Wno-override-module")
+            .arg("-pthread")
+            .arg(format!("-DDIAL_SAFETY={}", safety.as_c_macro()))
+            .arg("-I")
+            .arg(&runtime_dir)
+            .arg("-I")
+            .arg(&stdlib_dir)
+            .arg("-c")
+            .arg(cfile)
+            .arg("-o")
+            .arg(&out_o);
+        if opts.pgo_gen {
+            cmd.arg("-fprofile-generate");
+        }
+        if let Some(pd) = &opts.pgo_use {
+            cmd
+                .arg(format!("-fprofile-use={}", pd.display()))
+                .arg("-Wno-error=profile-instr-out-of-date")
+                .arg("-Wno-error=profile-instr-unprofiled");
+        }
+        if !run_ok(&mut cmd) {
+            return Err(format!("LTO 编译 C 源文件失败: {}", cfile.display()));
+        }
+        obj_files.push(out_o);
+    }
+    Ok(obj_files)
 }
 
 /// 运行命令并返回是否成功退出。

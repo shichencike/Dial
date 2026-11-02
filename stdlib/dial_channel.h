@@ -28,8 +28,10 @@
  */
 typedef void *DialChannel;
 
-/* 创建有界通道（cap 为容量；<1 时按 1 处理）。初始引用计数为 1。 */
-DialChannel dial_channel_new(int64_t cap);
+/* 创建有界通道（cap 为容量；<1 时按 1 处理）。初始引用计数为 1。
+ * elem_release：元素析构器（CVE-2024-DIAL-007）——通道销毁时释放残留的未消费元素。
+ *   嵌套通道传 dial_channel_release，其余元素类型传 dial_rc_release（由 IR 按元素类型自动分派）。 */
+DialChannel dial_channel_new(int64_t cap, void (*elem_release)(void *));
 
 /*
  * 移交一个元素的所有权进通道。

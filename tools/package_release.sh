@@ -87,7 +87,12 @@ fi
 
 # 平台运行环境说明
 {
-  echo "dialc v${VERSION}（由 GitHub Actions 构建，平台 slug=${SLUG}）"
+  if [ -n "${GITHUB_SHA:-}" ]; then
+    BUILD_BY="由 GitHub Actions 构建"
+  else
+    BUILD_BY="本地构建"
+  fi
+  echo "dialc v${VERSION}（${BUILD_BY}，平台 slug=${SLUG}）"
   echo
   case "$SLUG" in
     linux-x86_64)
@@ -103,7 +108,7 @@ fi
   esac
   echo
   echo "版本:       ${VERSION}"
-  echo "构建提交:   ${GITHUB_SHA:-（本地构建）}"
+  echo "构建提交:   ${GITHUB_SHA:-（本地构建，无提交哈希）}"
   echo "构建时间:   $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 } > "$DEST/BUILD_INFO.txt"
 

@@ -15,6 +15,7 @@
       <a href="index.html">首页</a>
       <a href="spec.html" class="active">语言规范</a>
       <a href="changelog.html">更新日志</a>
+      <a href="cve.html">安全公告</a>
       <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
       <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
     </nav>
@@ -37,7 +38,12 @@
 </ul>
 </li>
 <li><a href="#32-从源码构建克隆--进入--编译">3.2 从源码构建：克隆 → 进入 → 编译</a></li>
-<li><a href="#321-一键安装v097-起三平台">3.2.1 一键安装（v0.97 起，三平台）</a></li>
+<li><a href="#321-一键安装v097-起三平台">3.2.1 一键安装（v0.97 起，三平台）</a><ul>
+<li><a href="#一行命令安装推荐">一行命令安装（推荐）</a></li>
+<li><a href="#手动解压三平台通用可选">手动解压（三平台通用，可选）</a></li>
+<li><a href="#下载源与回退">下载源与回退</a></li>
+</ul>
+</li>
 <li><a href="#33-编译-dial-程序">3.3 编译 Dial 程序</a></li>
 <li><a href="#34-产物依赖契约">3.4 产物依赖契约</a><ul>
 <li><a href="#341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</a></li>
@@ -378,7 +384,8 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── check_lsp_stdout_purity.py  # 校验 LSP 路径上不出现 stdout 裸输出（协议流纯净性）
 │   ├── lsp_smoke.py        # M 组：LSP 全能力往返 + 协议流纯净性断言
 │   ├── package.sh          # 打发布包 dialc-v&lt;版本&gt;-&lt;平台&gt;.zip（含许可与 .git）
-│   ├── install-dial.sh     # 一键安装（Linux / Termux）
+│   ├── install-dial.sh     # 一键安装（Linux / Termux，支持 curl | bash 一键命令）
+│   ├── install-dial.ps1    # 一键安装（Windows / PowerShell，支持 irm | iex 一键命令）
 │   ├── install-dial.ps1    # 一键安装（Windows / PowerShell）
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
 ├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十三组测试 + 打包发布
@@ -518,24 +525,66 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 <h3 id="321-一键安装v097-起三平台">3.2.1 一键安装（v0.97 起，三平台）</h3>
 <p>不想自己编译？每个平台有独立的预编译包 <code>dialc-v&lt;版本&gt;-&lt;slug&gt;.zip</code>，内含编译器、标准库、运行时
 与一键安装脚本（ARCHITECTURE.md §3.2 阶段 5）：</p>
+<h4 id="一行命令安装推荐">一行命令安装（推荐）</h4>
+<p>直接复制下面一行即可，脚本会自动探测平台、下载对应发布包（镜像优先 + 官方回退 + 断点续传）并完成安装：</p>
+<pre><code class="language-bash"># Linux x86_64 / Termux aarch64
+curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
+# 指定版本：DIAL_VERSION=0.98.0 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
+</code></pre>
+<pre><code class="language-powershell"># Windows x64（MinGW）：一行式从 main 分支拉取并安装（输出为英文，避免终端代码页乱码）
+irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
+</code></pre>
+<blockquote>
+<p><strong>关于 URL 稳定性</strong>：这两条命令取的是 <strong><code>main</code> 分支上 <code>tools/</code> 里的安装脚本</strong>（直出文件、<strong>不经过 <code>releases/latest</code> 重定向</strong>——正是此前代理环境下容易卡住的环节）；脚本随后按当前平台下载<strong>精确版本标签</strong>的发布包（同样不经过 <code>latest</code>）。安装脚本本身也随每个发布包一起分发（<code>Dial/install-dial.sh</code> / <code>Dial/install-dial.ps1</code>），从根本上杜绝「独立下载链接重定向失败」的问题。</p>
+<p>注意用 <code>bash</code> 而非 <code>sh</code>：<code>set -o pipefail</code> 与脚本里的数组语法在 Ubuntu 的 <code>sh</code>(dash)、Termux 的 <code>mksh</code> 下不被支持。Windows 侧用 <code>iex</code> 即可（PowerShell 原生）。</p>
+</blockquote>
+<h4 id="手动解压三平台通用可选">手动解压（三平台通用，可选）</h4>
+<p>若不想用管道，可先下载再运行：</p>
 <pre><code class="language-bash"># Linux x86_64
-curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.98-linux-x86_64.zip
+curl -LO https://github.com/shichencike/Dial/releases/download/v0.98/dialc-v0.98-linux-x86_64.zip
 unzip dialc-v0.98-linux-x86_64.zip &amp;&amp; cd Dial
-bash tools/install-dial.sh                 # 扫描当前目录及其子目录
-bash tools/install-dial.sh /path/to/pkgs   # 或扫描指定目录
+bash install-dial.sh                 # 扫描当前目录及其子目录
+bash install-dial.sh /path/to/pkgs   # 或扫描指定目录
 </code></pre>
 <pre><code class="language-bash"># Termux aarch64（musl 全静态，包名 slug = termux-aarch64）
-curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v0.98-termux-aarch64.zip
+curl -LO https://github.com/shichencike/Dial/releases/download/v0.98/dialc-v0.98-termux-aarch64.zip
 unzip dialc-v0.98-termux-aarch64.zip &amp;&amp; cd Dial
-bash tools/install-dial.sh
+bash install-dial.sh
 </code></pre>
-<pre><code class="language-powershell"># Windows x64（MinGW）：一行式从最新 Release 拉取并安装
-irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
-
-# 或手动：解压后运行 PowerShell 安装脚本
+<pre><code class="language-powershell"># Windows x64（MinGW）：解压后运行 PowerShell 安装脚本
+curl.exe -LO https://github.com/shichencike/Dial/releases/download/v0.98/dialc-v0.98-windows-x86_64.zip
 Expand-Archive dialc-v0.98-windows-x86_64.zip -DestinationPath .
-powershell -ExecutionPolicy Bypass -File tools\install-dial.ps1
+powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 </code></pre>
+<h4 id="下载源与回退">下载源与回退</h4>
+<p>安装脚本下载标准库 / VS Code 插件时，<strong>默认先走国内镜像 <code>ghproxy.net</code> 前缀代理，失败自动回退官方 GitHub</strong>，
+并对大文件支持断点续传（<code>curl -C -</code> / <code>wget -c</code>），网络不稳也不会「一键卡住」。可用环境变量微调：</p>
+<table>
+<thead>
+<tr>
+<th>环境变量</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DIAL_MIRROR_PREFIX</code></td>
+<td>镜像前缀（默认 <code>https://ghproxy.net/</code>）；置空则只用官方源</td>
+</tr>
+<tr>
+<td><code>STDLIB_URL</code></td>
+<td>覆盖官方标准库下载地址（镜像 / 自建源）</td>
+</tr>
+<tr>
+<td><code>DIAL_VSIX_URL</code></td>
+<td>覆盖 VS Code 插件下载地址</td>
+</tr>
+<tr>
+<td><code>DIAL_VERSION</code></td>
+<td>指定配套件版本（默认 <code>0.98.0</code>）</td>
+</tr>
+</tbody>
+</table>
 <p>脚本承担两件事（<strong>顺序不能反</strong>）：</p>
 <ol>
 <li><strong>初始化 Dial 环境</strong>：建 <code>~/.dial/</code> 目录树（<code>bin</code> / <code>packages</code> / <code>cache/downloads</code>）、
@@ -595,6 +644,38 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
 否则请永远不要使用此模式。在 <code>--fast</code> 下发生的越界，将退化为 C 语言的未定义行为（UB），
 可能导致静默的错误数据甚至灾难性后果。</strong>
 （详见 <a href="#204-性能模式的切换">§20.4</a>）</p>
+</blockquote>
+<p><code>--fast</code> 不只是「关掉检查」——它同时开启三层编译器终极优化（均需本机存在 <code>clang</code>，
+否则优雅降级为「仅 O3 + SIMD」）。详见示例 <a href="examples/bench_array.dial"><code>examples/bench_array.dial</code></a>：</p>
+<table>
+<thead>
+<tr>
+<th>优化</th>
+<th>作用</th>
+<th>验证方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>① 自动向量化 (SIMD) + 循环展开</strong></td>
+<td>LLVM 用 <code>O3</code> + 宿主 SIMD（x86 的 AVX2/AVX-512、ARM64 的 NEON）一次吃 4~8 个 int64，并展开循环减少分支</td>
+<td>反汇编可见 <code>ymm</code>/<code>zmm</code> 向量指令</td>
+</tr>
+<tr>
+<td><strong>② LTO 链接时优化</strong></td>
+<td>把 Dial 代码与 C 运行时的 bitcode 整体重排，<code>dial_array_get</code>/<code>push</code> 等热函数被直接内联进主程序，消灭函数调用开销</td>
+<td>反汇编中热循环 0 次 <code>call dial_array_*</code></td>
+</tr>
+<tr>
+<td><strong>③ PGO 剖析引导优化</strong>（<code>--pgo</code>）</td>
+<td>先插桩跑一遍训练样本记录最热分支，再据热点把热路径顶到 I-Cache 最前、冷错误后置</td>
+<td>构建日志出现「PGO 优化完成」</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>注意：<code>--fast</code> 生成的二进制按<strong>本机 CPU 微架构级别</strong>（<code>x86-64-v3</code>/<code>-v4</code> 或 NEON）调优，
+仅供本机运行，请勿跨机型分发（否则可能 <code>SIGILL</code>）。</p>
 </blockquote>
 <p><code>dialc build</code> 严格分成两步，这是架构约束而非实现细节：</p>
 <table>
@@ -5167,6 +5248,15 @@ data?: LSPAny;                // "A data entry field that is preserved between a
 即：<strong>码值由语言服务器自定，规范不设中央码表</strong>（类型是 <code>integer | string</code>，我们用
 <code>dialc.</code> 前缀命名空间化，避免与其他服务器的码撞车）；而 <code>data</code> 的用途——<strong>在诊断通知与
 codeAction 请求之间保留结构化数据</strong>——正是我们传包名的做法，一字不差地对上规范。</p>
+<p><strong>文档同步用选项形式</strong>：<code>textDocumentSync</code> 广告的是 <code>{openClose, change: 1, save}</code> 而不是
+纯数字 <code>1</code>。规范对 <code>save</code> 的原文是「<em>If present save notifications are sent to the server.
+If omitted the notification should not be sent.</em>」——纯数字形式里<strong>没有</strong> <code>save</code> 这个字段，
+客户端据此就不发 <code>textDocument/didSave</code>，而诊断正是靠它刷新的。用数字形式的话，
+「保存即报」只在自家插件里成立（它无条件发 didSave），在别的客户端上会<strong>静默失效</strong>。</p>
+<p><strong>已知边界</strong>：<code>$/cancelRequest</code> 被接受但<strong>不打断</strong>正在处理的请求。我们的请求都是微秒级的
+（没有跨文件全量扫描这类长任务），没有可观测的取消语义；而规范要求的「取消后回
+<code>RequestCancelled(-32800)</code>」需要并发执行模型才做得到。我们保证的是更重要的一条：
+<strong>每个请求恰好回一次响应</strong>，客户端绝不会挂等。</p>
 <p><strong>规范符合性是被自动检查的</strong>：<code>tools/lsp_smoke.py</code> 里有一张<strong>返回形状对照表</strong>，
 逐个方法核对响应结构与规范一致（<code>Hover</code> 要 <code>contents</code>、<code>CompletionList</code> 要
 <code>isIncomplete</code>+<code>items</code>、<code>formatting</code> 必须是 <strong><code>TextEdit[]</code> 本身</strong>而不是任何包装、

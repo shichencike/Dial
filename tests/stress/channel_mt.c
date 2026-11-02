@@ -94,7 +94,10 @@ int main(void) {
     atomic_init(&g_duplicate, 0);
     atomic_init(&g_out_of_range, 0);
 
-    g_ch = dial_channel_new(CAPACITY);
+    /* 元素为 malloc 出的 int64_t*，由唯一持有者 free。把它作为 elem_release 传入，
+     * 通道释放时会自动析构任何尚未被消费的元素（本压测里消费者取走后自行 free，
+     * 缓冲中只残留未消费元素，不会与消费者的 free 重复）。 */
+    g_ch = dial_channel_new(CAPACITY, free);
 
     pthread_t prod;
     pthread_t cons[N_CONSUMERS];

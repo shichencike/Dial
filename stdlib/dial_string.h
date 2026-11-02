@@ -37,4 +37,8 @@ DialString dial_string_from_bytes(const char *buf, int64_t len);
 /* 打印并换行（对接 Dial 的 print(s)） */
 void dial_print_string(DialString s);
 
+/* 类型 -> 字符串（CVE-2024-DIAL-006 新增）：让 `print("x=" + str(n))` 成为可能。 */
+DialString dial_int_to_string(int64_t v);
+DialString dial_float_to_string(double v);
+
 #endif /* DIAL_STRING_H */

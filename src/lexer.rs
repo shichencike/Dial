@@ -61,6 +61,8 @@ pub enum TokenKind {
     Minus,
     Star,
     Slash,
+    /// 取模运算符 `%`（与 * / 同级，整数/浮点均支持，CVE-2024-DIAL-005 新增）。
+    Mod,
     Eq,       // ==
     Neq,      // !=
     Lt,       // <
@@ -333,6 +335,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
             }
             '/' => {
                 push(TokenKind::Slash, start_line, start_col, &mut tokens);
+                i += 1;
+                col += 1;
+            }
+            '%' => {
+                push(TokenKind::Mod, start_line, start_col, &mut tokens);
                 i += 1;
                 col += 1;
             }

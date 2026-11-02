@@ -1,0 +1,11 @@
+// CVE-2024-DIAL-002 — `dialc run` 相对路径执行失败
+// 漏洞：当源文件路径为空父目录（cwd 下的裸文件名）时，output_paths 把父目录
+//       规约为空串，导致后续找不到文件并报 “No such file or directory”，
+//       却静默去执行 /bin/test。
+// 修复后：空父目录规约为 "."，cwd 下的裸文件名可被正确找到并执行。
+// 本文件由 cve_check.py 复制到临时子目录后，从子目录内以相对路径运行，
+// 期望打印下面的内容（而非报错或执行 /bin/test）。
+fn main(): int {
+    print("run relative path works");
+    return 0;
+}

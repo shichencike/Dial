@@ -1,32 +1,41 @@
 <#
 .SYNOPSIS
-    Dial 一键安装脚本（Windows / PowerShell）——ARCHITECTURE.md §3.2 阶段 5。
+    Dial one-click installer for Windows (PowerShell).
 
 .DESCRIPTION
-    承担三件事（顺序不能反）：
+    Performs three steps, in this exact order:
 
-    1. 初始化 Dial 环境：建 %USERPROFILE%\.dial\ 目录树、把 dialc 挂进 PATH、
-       写工具链配置；
-    2. 自动安装已下载的包：初始化完成后重新扫描找到的 .dialpkg
-       （当前目录及其子目录，或脚本参数指定的目录），逐个执行安装命令；
-    3. 补齐配套件：官方标准库（stdlib.dialpkg）与 VS Code 插件（.vsix）
-       静默下载并安装——都是「装上编译器后自然该有」的东西，不该让用户再手动跑一遍。
+    1. Initialize the Dial environment: create %USERPROFILE%\.dial\ directory tree,
+       put dialc into PATH, and write a toolchain config file.
+    2. Auto-install any downloaded packages: after init, re-scan for .dialpkg files
+       (current directory and its sub-directories, or directories passed as arguments)
+       and install each via `dialc install`.
+    3. Fetch companion components: the official stdlib (stdlib.dialpkg) and the
+       VS Code extension (.vsix) are downloaded and installed silently.
 
-    为什么脚本要「自动重新扫描」而不是让用户逐个点名：一键安装的语义是
-    「我把这个目录交给你，你把该装的都装上」。用户不该需要记住包名、
-    也不该需要为每个包敲一条命令——包就在那里，脚本看得见。
+    All user-facing messages are in English on purpose: the Windows console (cmd /
+    PowerShell) often runs a non-UTF-8 codepage, and Chinese text would render as
+    mojibake. Keeping output ASCII/English guarantees a readable installer.
+
+    Network resilience: every download tries a domestic mirror (ghproxy.net) first
+    and automatically falls back to official GitHub. Downloads resume on failure
+    (curl.exe -C -). If all sources are unreachable the installer only warns and
+    does not abort -- the compiler itself still works (stdlib falls back to building
+    from source at link time).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install-dial.ps1
     powershell -ExecutionPolicy Bypass -File install-dial.ps1 -ScanDirs C:\pkgs
 
-    .NOTES
-    环境变量：
-      DIALC_BIN   指定要挂进 PATH 的 dialc 可执行文件（默认：脚本同目录的 .\dialc.exe）
-      DIALC_HOME  指定 .dial 的位置（默认：%USERPROFILE%\.dial）
-      DIALC_SRC   指定 Dial 发行包的根目录（含 stdlib\ 与 runtime\）（默认：脚本所在目录）
-      DIALC_VERSION 指定配套件的版本（默认：0.98.0）。Release 标签（v0.98）与
-                  插件文件名（dial-0.98.0.vsix）都由它推导，只改这一处即可。
+.NOTES
+    Environment variables:
+      DIALC_BIN       Path to the dialc executable (default: .\dialc.exe next to this script)
+      DIALC_HOME      Location of .dial (default: %USERPROFILE%\.dial)
+      DIALC_SRC       Root of the Dial release package (default: script directory)
+      DIAL_VERSION    Version of companion components (default: 0.98.0)
+      STDLIB_URL      Override the stdlib download URL (mirror / self-hosted)
+      DIAL_VSIX_URL   Override the VS Code extension download URL
+      DIAL_MIRROR_PREFIX  Mirror prefix (default: https://ghproxy.net/); set empty to use official only
 #>
 
 param(
@@ -38,145 +47,215 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# 官方标准库独立发布（阶段 7）：tag 形如 stdlib-v<版本>，与编译器（dialc.exe）解耦。
-# 安装脚本在装好编译器后，会自动静默拉取该版本的标准库包并通过 dialc install 安装。
-# 升级标准库时只需改这里的标签（与 Dial Releases 里的 stdlib-v* 对应）。
+# ---------------------------------------------------------------------------
+# Constants & config
+# ---------------------------------------------------------------------------
+# Official stdlib is published independently (tag stdlib-v*), decoupled from the
+# compiler. Bump this tag to upgrade the stdlib (matches Dial Releases stdlib-v*).
 $StdlibRelease = if ($env:STDLIB_RELEASE) { $env:STDLIB_RELEASE } else { "stdlib-v1.0.0" }
 
-# 配套件（VS Code 插件）版本：只此一个来源。Release 标签（v0.98）与插件文件名
-# （dial-0.98.0.vsix）都由它推导，避免三者各说各话、下次发版又忘了改其中一个。
+# Companion component (VS Code extension) version: single source of truth.
 $DialVersion = if ($env:DIALC_VERSION) { $env:DIALC_VERSION } else { "0.98.0" }
 $DialTag = "v" + (($DialVersion -split '\.')[0..1] -join '.')
 $VsixFile = "dial-$DialVersion.vsix"
+
+# Domestic mirror prefix. First candidate source; auto-falls back to official.
+# Empty it (DIAL_MIRROR_PREFIX="") to use official GitHub only.
+$MirrorPrefix = if ($env:DIAL_MIRROR_PREFIX) { $env:DIAL_MIRROR_PREFIX } else { "https://ghproxy.net/" }
 
 function Say  { param([string]$m) Write-Host "  $m" }
 function Ok   { param([string]$m) Write-Host "  [OK] $m" }
 function Warn { param([string]$m) Write-Host "  [!]  $m" }
 function Die  { param([string]$m) Write-Host "  [X]  $m" -ForegroundColor Red; exit 1 }
 
-Write-Host "== Dial 一键安装 =="
+# ---------------------------------------------------------------------------
+# Download helper: mirror-first, official-fallback, resume.
+#   Returns $true on success (file exists and is non-empty), $false otherwise.
+# ---------------------------------------------------------------------------
+function Invoke-DialDownload {
+    param(
+        [string] $OutFile,
+        [string] $OfficialUrl,
+        [string] $OverrideUrl = ""
+    )
+    $candidates = @()
+    if ($OverrideUrl) {
+        $candidates = @($OverrideUrl)
+    } elseif ($MirrorPrefix) {
+        $candidates = @("${MirrorPrefix}${OfficialUrl}", $OfficialUrl)
+    } else {
+        $candidates = @($OfficialUrl)
+    }
+    foreach ($url in $candidates) {
+        Write-Host "  source: $url"
+        # Prefer curl.exe: supports -C - resume and avoids PowerShell codepage
+        # issues with non-ASCII URLs.
+        if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+            curl.exe -fSL --retry 3 -C - --proto "=https" --connect-timeout 15 --max-time 600 -o $OutFile $url 2>$null
+            if (($LASTEXITCODE -eq 0) -and (Test-Path $OutFile -PathType Leaf) -and ((Get-Item $OutFile).Length -gt 0)) {
+                return $true
+            }
+        } else {
+            try {
+                # Invoke-WebRequest has no resume; attempt a fresh download.
+                Invoke-WebRequest -Uri $url -OutFile $OutFile -ErrorAction Stop
+                if ((Test-Path $OutFile -PathType Leaf) -and ((Get-Item $OutFile).Length -gt 0)) {
+                    return $true
+                }
+            } catch {
+                # try the next candidate
+            }
+        }
+    }
+    return $false
+}
+
+Write-Host "== Dial one-click install =="
 
 # ---------------------------------------------------------------------------
-# 第 1 步：定位 dialc
+# Bootstrap (for `irm ... | iex` one-liner)
+#   When there is no local release to install from, download the Windows release
+#   zip for the current version (mirror-first, official-fallback, resume) and run
+#   the bundled installer inside it.
+#   The one-liner URL points at raw.githubusercontent.com/<branch>/tools/... which
+#   returns the file directly with NO releases/latest redirect; the zip is fetched
+#   by exact version tag, again with no latest indirection.
 # ---------------------------------------------------------------------------
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { "" }
 if (-not $DialcHome) { $DialcHome = Join-Path $env:USERPROFILE ".dial" }
-if (-not $DialcBin)  { $DialcBin  = Join-Path $ScriptDir "dialc.exe" }
+if (-not $DialcBin)  { $DialcBin  = if ($ScriptDir) { Join-Path $ScriptDir "dialc.exe" } else { "dialc.exe" } }
 if (-not $DialcSrc)  { $DialcSrc  = $ScriptDir }
 
+function Invoke-Bootstrap {
+    param([string[]] $BootstrapArgs = @())
+    Write-Host "== Bootstrapping Dial release =="
+    $slug = "windows-x86_64"
+    $zip = "dialc-$DialTag-$slug.zip"
+    $work = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP ("dialboot-" + [guid]::NewGuid().ToString("N")))
+    $target = Join-Path $work.FullName $zip
+    Say "  platform: $slug   version: $DialVersion"
+    $official = "https://github.com/shichencike/Dial/releases/download/$DialTag/$zip"
+    if (-not (Invoke-DialDownload -OutFile $target -OfficialUrl $official)) {
+        Die "Failed to download the Dial release (mirror and official both failed). Download manually: $official then run install-dial.ps1 from inside the zip."
+    }
+    Expand-Archive -Path $target -DestinationPath $work.FullName -Force
+    $inner = Get-ChildItem -Path $work.FullName -Recurse -File -Filter install-dial.ps1 | Select-Object -First 1
+    if (-not $inner) { Die "install-dial.ps1 not found inside the release zip." }
+    & powershell -ExecutionPolicy Bypass -File $inner.FullName @BootstrapArgs
+    exit $LASTEXITCODE
+}
+
+# Bootstrap only if we are NOT already inside a local release.
+$inLocalRelease = $false
+if ($DialcBin -and (Test-Path $DialcBin)) {
+    $inLocalRelease = $true
+} else {
+    $cmd = Get-Command dialc -ErrorAction SilentlyContinue
+    if ($cmd) {
+        $inLocalRelease = $true
+    } elseif ($ScriptDir -and (Test-Path (Join-Path $ScriptDir "dialc.exe"))) {
+        $inLocalRelease = $true
+    } elseif (Test-Path (Join-Path (Get-Location) "dialc.exe")) {
+        $inLocalRelease = $true
+    }
+}
+if (-not $inLocalRelease) { Invoke-Bootstrap @args }
+
+
+# ---------------------------------------------------------------------------
+# Step 1: locate dialc
+# ---------------------------------------------------------------------------
 if (-not (Test-Path $DialcBin)) {
     $cmd = Get-Command dialc -ErrorAction SilentlyContinue
     if ($cmd) {
         $DialcBin = $cmd.Source
     } else {
-        Die "找不到 dialc 可执行文件。`n  请把 dialc.exe 放在本脚本同目录下，或用环境变量指定：`n      `$env:DIALC_BIN = 'C:\path\to\dialc.exe'"
+        Die "Cannot find the dialc executable.`n  Place dialc.exe next to this script, or set it via:`n      `$env:DIALC_BIN = 'C:\path\to\dialc.exe'"
     }
 }
-Ok "编译器: $DialcBin"
+Ok "Compiler: $DialcBin"
 
 # ---------------------------------------------------------------------------
-# 第 2 步：初始化环境（建目录树 + 挂 PATH + 写配置）
+# Step 2: initialize environment (directory tree + PATH + config)
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "-- 初始化环境 --"
+Write-Host "-- Initialize environment --"
 
 foreach ($d in @("bin", "packages", "cache\downloads")) {
     $p = Join-Path $DialcHome $d
     New-Item -ItemType Directory -Force -Path $p | Out-Null
 }
-Ok "目录树: $DialcHome\{bin,packages,cache\downloads}"
+Ok "Directory tree: $DialcHome\{bin,packages,cache\downloads}"
 
 Copy-Item -Force $DialcBin (Join-Path $DialcHome "bin\dialc.exe")
-Ok "编译器已安装到 $DialcHome\bin\dialc.exe"
+Ok "Compiler installed to $DialcHome\bin\dialc.exe"
 
-# LLVM-C.dll 必须和 dialc.exe 同目录，否则运行期加载失败（Windows 走官方 MSVC
-# 构建的 LLVM 18 的 C 接口，纯 C ABI，跨工具链无冲突，但 DLL 必须随行）。
+# LLVM-C.dll must sit next to dialc.exe, or the runtime loader fails (Windows uses
+# the official MSVC-built LLVM 18 C ABI; the DLL must travel with the binary).
 $llvmDll = Join-Path $DialcSrc "LLVM-C.dll"
 if (Test-Path $llvmDll) {
     Copy-Item -Force $llvmDll (Join-Path $DialcHome "bin\LLVM-C.dll")
-    Ok "LLVM-C.dll 已随编译器安装到 $DialcHome\bin\（dialc.exe 运行期依赖）"
+    Ok "LLVM-C.dll installed next to dialc.exe (runtime dependency)"
 } else {
-    Warn "在 $DialcSrc 下没找到 LLVM-C.dll。`n  dialc.exe 运行期需要它（与 dialc.exe 同目录）。`n  请从 LLVM 18 发行包复制 LLVM-C.dll 到 $DialcHome\bin\。"
+    Warn "LLVM-C.dll not found under $DialcSrc.`n  dialc.exe needs it in the same folder at runtime.`n  Copy LLVM-C.dll from the LLVM 18 release into $DialcHome\bin\."
 }
 
-# **标准库与运行时也要装**：编译器按「可执行文件所在位置」向上找 stdlib\ 与 runtime\
-# （find_project_base：<exe_dir>\..\..\ 即工程根）。装到 %USERPROFILE%\.dial\bin\dialc.exe 后，
-# 那个位置正好是 %USERPROFILE%\.dial\ —— 所以把 stdlib\ 与 runtime\ 放这里即可。
-# 少了这一步，用户在自己项目里编译会报「找不到 stdlib/ 与 runtime/ 目录」。
+# stdlib/ and runtime/ must also be installed: the compiler walks up from the
+# executable location to find stdlib\ and runtime\. Installed at %USERPROFILE%\.dial\
+# that location is exactly %USERPROFILE%\.dial\, so place them there.
 if ((Test-Path (Join-Path $DialcSrc "stdlib")) -and (Test-Path (Join-Path $DialcSrc "runtime"))) {
     foreach ($d in @("stdlib", "runtime")) {
         $t = Join-Path $DialcHome $d
         if (Test-Path $t) { Remove-Item -Recurse -Force $t }
         Copy-Item -Recurse -Force (Join-Path $DialcSrc $d) $t
     }
-    Ok "标准库与运行时已安装到 $DialcHome\{stdlib,runtime}"
+    Ok "Standard library and runtime installed to $DialcHome\{stdlib,runtime}"
 } else {
-    Warn "在 $DialcSrc 下没找到 stdlib\ 与 runtime\。`n  请用完整发行包运行本脚本（或用 DIALC_SRC 指定发行包根目录）。`n  否则编译时会报「找不到 stdlib/ 与 runtime/ 目录」。"
+    Warn "stdlib\ and runtime\ not found under $DialcSrc.`n  Run this script from the full release package (or set DIALC_SRC).`n  Otherwise compilation fails with 'cannot find stdlib/ and runtime/ directories'."
 }
 
-# PATH 持久化：写进用户级环境变量
+# Persist PATH at the user level.
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $binDir   = Join-Path $DialcHome "bin"
 if ($userPath -notlike "*$binDir*") {
     [Environment]::SetEnvironmentVariable("Path", "$userPath;$binDir", "User")
-    Ok "PATH 已写入用户环境变量（重开终端后生效）"
+    Ok "PATH written to user environment (restart terminal to take effect)"
 } else {
-    Say "本次会话请先执行： `$env:Path = `"`$env:Path;$binDir`""
+    Say "For this session, run first: `$env:Path = `"`$env:Path;$binDir`""
 }
 
 $cfg = @(
-    "# Dial 环境配置（由 install-dial.ps1 生成）"
+    "# Dial environment config (generated by install-dial.ps1)"
     "dialc_path   = $(Join-Path $DialcHome 'bin\dialc.exe')"
     "installed_at = $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
     "uname        = $env:OS / $([System.Environment]::OSVersion.VersionString)"
 )
 Set-Content -Path (Join-Path $DialcHome "config.txt") -Value $cfg -Encoding UTF8
-Ok "工具链配置: $DialcHome\config.txt"
+Ok "Toolchain config: $DialcHome\config.txt"
 
 # ---------------------------------------------------------------------------
-# 第 2.5 步：自动拉取官方标准库包 stdlib.dialpkg 并安装
-#   官方标准库独立发布（tag stdlib-v*，与编译器解耦）。装完编译器后静默拉取
-#   对应版本并通过 dialc install 安装，使链接期能优先使用预编译的标准库包。
-#   失败（如离线）只告警、不阻断安装——链接时会回退到源码编译 stdlib。
+# Step 2.5: fetch and install the official stdlib package
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "-- 安装官方标准库 stdlib.dialpkg --"
-$StdlibUrl  = "https://github.com/shichencike/Dial/releases/download/$StdlibRelease/stdlib.dialpkg"
+Write-Host "-- Install official stdlib (stdlib.dialpkg) --"
+$StdlibOfficial = "https://github.com/shichencike/Dial/releases/download/$StdlibRelease/stdlib.dialpkg"
 $StdlibTmp  = Join-Path $env:TEMP ("stdlib-" + [guid]::NewGuid().ToString("N") + ".dialpkg")
-$downloaded = $false
-try {
-        if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-            # --connect-timeout / --max-time：**必须有**。否则 GitHub 不可达时 curl 会一直挂着，
-            # 「一键安装」就变成「一键卡住」——用户看到的是脚本不动，而不是一句清晰的失败提示。
-            curl.exe -fSL --retry 2 --proto "=https" --connect-timeout 15 --max-time 180 -o $StdlibTmp $StdlibUrl 2>$null
-            if ($LASTEXITCODE -eq 0) { $downloaded = $true }
-        } else {
-        Invoke-WebRequest -Uri $StdlibUrl -OutFile $StdlibTmp -ErrorAction Stop
-        $downloaded = $true
-    }
-} catch {
-    $downloaded = $false
-}
-if ($downloaded -and (Test-Path $StdlibTmp -PathType Leaf) -and ((Get-Item $StdlibTmp).Length -gt 0)) {
+if (Invoke-DialDownload -OutFile $StdlibTmp -OfficialUrl $StdlibOfficial -OverrideUrl $env:STDLIB_URL) {
     & (Join-Path $DialcHome "bin\dialc.exe") install $StdlibTmp
-    if ($LASTEXITCODE -eq 0) { Ok "官方标准库已安装（$StdlibRelease）" }
-    else { Warn "dialc install stdlib.dialpkg 失败（不影响编译器本体，可稍后手动安装）" }
+    if ($LASTEXITCODE -eq 0) { Ok "Official stdlib installed ($StdlibRelease)" }
+    else { Warn "dialc install stdlib.dialpkg failed (compiler still works; install manually later)" }
 } else {
-    Warn "下载官方标准库失败（可能离线）；链接时将回退到源码编译 stdlib。"
+    Warn "Failed to download the stdlib (offline / all sources unreachable); link will fall back to building stdlib from source."
 }
 if (Test-Path $StdlibTmp) { Remove-Item -Force $StdlibTmp -ErrorAction SilentlyContinue }
 
 # ---------------------------------------------------------------------------
-# 第 2.7 步：自动下载并安装 VS Code 插件（.vsix）
-#   编译器装好了，编辑器插件也得跟上——否则用户还得自己去 Release 页翻 .vsix、
-#   再手动 `code --install-extension`，「一键」就名不副实了。
-#   与标准库同理：失败（离线 / 没装 VS Code）只告警、不阻断安装。
+# Step 2.7: fetch and install the VS Code extension (.vsix)
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "-- 安装 VS Code 插件 --"
-$VsixUrl = if ($env:DIAL_VSIX_URL) { $env:DIAL_VSIX_URL } else { "https://github.com/shichencike/Dial/releases/download/$DialTag/$VsixFile" }
+Write-Host "-- Install VS Code extension --"
+$VsixOfficial = "https://github.com/shichencike/Dial/releases/download/$DialTag/$VsixFile"
 
-# 找 VS Code 的命令行入口：先看 PATH，再看默认安装位置
 $codeCli = $null
 foreach ($c in @("code", "code-insiders", "codium")) {
     $cmd = Get-Command $c -ErrorAction SilentlyContinue
@@ -188,64 +267,53 @@ if (-not $codeCli) {
 }
 
 if (-not $codeCli) {
-    Warn "未找到 VS Code 命令行（code / code-insiders / codium），跳过插件安装。`n  装好 VS Code 后手动执行即可：`n    $VsixUrl`n    code --install-extension <下载到的 .vsix>"
+    $vsixMsg = if ($env:DIAL_VSIX_URL) { $env:DIAL_VSIX_URL } else { $VsixOfficial }
+    Warn "VS Code CLI not found (code / code-insiders / codium); skipping extension install.`n  After installing VS Code, run manually:`n    $vsixMsg`n    code --install-extension <downloaded .vsix>"
 } else {
     $vsixTmp = Join-Path $env:TEMP ("dialplugin-" + [guid]::NewGuid().ToString("N") + ".vsix")
-    $got = $false
-    try {
-        if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-            curl.exe -fSL --retry 2 --proto "=https" --connect-timeout 15 --max-time 60 -o $vsixTmp $VsixUrl 2>$null
-            if ($LASTEXITCODE -eq 0) { $got = $true }
-        } else {
-            Invoke-WebRequest -Uri $VsixUrl -OutFile $vsixTmp -ErrorAction Stop
-            $got = $true
-        }
-    } catch {
-        $got = $false
-    }
-    if ($got -and (Test-Path $vsixTmp -PathType Leaf) -and ((Get-Item $vsixTmp).Length -gt 0)) {
-        # 不加 --force：用户若已装了更新版本，不该在「一键安装」里被悄悄降级
+    if (Invoke-DialDownload -OutFile $vsixTmp -OfficialUrl $VsixOfficial -OverrideUrl $env:DIAL_VSIX_URL) {
+        # No --force: if the user already has a newer version, keep it (don't downgrade).
         & $codeCli --install-extension $vsixTmp
-        if ($LASTEXITCODE -eq 0) { Ok "VS Code 插件已安装（$VsixFile）" }
-        else { Warn "VS Code 插件安装失败，可稍后手动执行：`n    & `"$codeCli`" --install-extension $VsixFile" }
+        if ($LASTEXITCODE -eq 0) { Ok "VS Code extension installed ($VsixFile)" }
+        else { Warn "VS Code extension install failed; run manually later:`n    & `"$codeCli`" --install-extension $VsixFile" }
     } else {
-        Warn "下载 VS Code 插件失败（可能离线）；可稍后手动安装。"
+        Warn "Failed to download the VS Code extension (offline); install manually later."
     }
     if (Test-Path $vsixTmp) { Remove-Item -Force $vsixTmp -ErrorAction SilentlyContinue }
 }
 
 # ---------------------------------------------------------------------------
-# 第 3 步：重新扫描 .dialpkg 并逐个安装
+# Step 3: re-scan .dialpkg and install each
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "-- 扫描 .dialpkg --"
+Write-Host "-- Scan .dialpkg --"
 
 if ($ScanDirs.Count -eq 0) { $ScanDirs = @(".") }
 
 $pkgs = @()
 foreach ($d in $ScanDirs) {
-    if (-not (Test-Path $d)) { Warn "扫描目录不存在: $d"; continue }
+    if (-not (Test-Path $d)) { Warn "Scan directory does not exist: $d"; continue }
     $pkgs += Get-ChildItem -Path $d -Recurse -File -Filter *.dialpkg -ErrorAction SilentlyContinue |
              Sort-Object FullName
 }
 
 if ($pkgs.Count -eq 0) {
-    Say "未找到 .dialpkg（跳过包安装）"
+    Say "No .dialpkg found (skipping package install)"
 } else {
-    Write-Host "  找到 $($pkgs.Count) 个包："
+    Write-Host "  Found $($pkgs.Count) package(s):"
     foreach ($p in $pkgs) { Write-Host "    - $($p.FullName)" }
     Write-Host ""
     $installed = 0; $failed = 0
     foreach ($p in $pkgs) {
-        Write-Host "  -> 安装 $($p.FullName)"
+        Write-Host "  -> install $($p.FullName)"
         & (Join-Path $DialcHome "bin\dialc.exe") install $p.FullName
-        if ($LASTEXITCODE -eq 0) { $installed++ } else { $failed++; Warn "安装失败: $($p.FullName)" }
+        if ($LASTEXITCODE -eq 0) { $installed++ } else { $failed++; Warn "Install failed: $($p.FullName)" }
         Write-Host ""
     }
-    Ok "包安装完成：成功 $installed 个，失败 $failed 个"
+    Ok "Package install done: $installed succeeded, $failed failed"
 }
 
 Write-Host ""
-Write-Host "== 完成 =="
-Say "用法：dialc build 你的程序.dial -o 程序.exe"
-Say "      import ""包名""; 即可调用已安装的包"
+Write-Host "== Done =="
+Say "Usage: dialc build your-program.dial -o program.exe"
+Say "       import ""package-name"";  to use an installed package"

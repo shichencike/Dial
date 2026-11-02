@@ -1,4 +1,5 @@
 #include "dial_channel.h"
+#include "dial_rt_mem.h"
 #include "dial_rt_trap.h"
 
 #include <errno.h>
@@ -76,6 +77,16 @@ typedef struct {
      * 用 atomic 反而会让 done() 的两半读到的不是同一时刻的状态。
      */
     int              closed;
+
+    /*
+     * 元素析构器（CVE-2024-DIAL-007 修复）：通道被释放时，若缓冲区里还残留
+     * 未消费的元素，必须逐个释放，否则这些 ARC 对象永远泄漏。
+     * 元素类型在编译期已知（channel<T>），由 IR 创建通道时按 T 传入：
+     *   - 绝大多数 T（string/array/map/error）：走 dial_rc_release；
+     *   - 嵌套通道（channel<channel<...>>）：走 dial_channel_release（原子引用计数，
+     *     绝不能用 dial_rc_release，否则会把原子 rc 误当普通 8 字节头部去改）。
+     */
+    void           (*elem_release)(void *);
 } DialChannelImpl;
 
 /*
@@ -196,7 +207,7 @@ void dial_sel_free(DialSelector *s) {
     free(s);
 }
 
-DialChannel dial_channel_new(int64_t cap) {
+DialChannel dial_channel_new(int64_t cap, void (*elem_release)(void *)) {
     if (cap < 1) cap = 1;
 
     DialChannelImpl *c = (DialChannelImpl *)calloc(1, sizeof(DialChannelImpl));
@@ -206,6 +217,8 @@ DialChannel dial_channel_new(int64_t cap) {
         free(c);
         return NULL;
     }
+    // 元素析构器：NULL 防御性回退到 dial_rc_release（绝大多数元素类型）。
+    c->elem_release = elem_release ? elem_release : dial_rc_release;
     atomic_init(&c->rc, 1);
     pthread_mutex_init(&c->m, NULL);
     pthread_cond_init(&c->not_empty, NULL);
@@ -384,6 +397,13 @@ void dial_channel_release(DialChannel ch) {
     if (!ch) return;
     DialChannelImpl *c = (DialChannelImpl *)ch;
     if (atomic_fetch_sub(&c->rc, 1) == 1) {
+        // CVE-2024-DIAL-007 修复：销毁前先释放缓冲区里残留的未消费元素。
+        // 这些元素此前已把所有权移交给队列（send 时原槽清零），通道一旦销毁
+        // 便再无人持有，必须逐个 elem_release，否则它们永久泄漏。
+        for (int64_t i = 0; i < c->n; i++) {
+            void *e = c->buf[(c->head + i) % c->cap];
+            if (e) c->elem_release(e);
+        }
         pthread_mutex_destroy(&c->m);
         pthread_cond_destroy(&c->not_empty);
         pthread_cond_destroy(&c->not_full);

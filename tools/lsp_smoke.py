@@ -245,8 +245,16 @@ def main():
         ):
             if not srv_caps.get(key):
                 fails.append(f"能力协商缺失: {key}")
-        if srv_caps.get("textDocumentSync") != 1:
-            fails.append("textDocumentSync 应为 1(Full)")
+        # 规范：textDocumentSync 必须是**选项形式**才表达得了「请发 didSave」——
+        # 纯数字形式里没有 save 字段，客户端就不会发 didSave，诊断便刷不出来。
+        sync = srv_caps.get("textDocumentSync")
+        if not isinstance(sync, dict):
+            fails.append(f"textDocumentSync 应为选项形式（要带 save），实际 {sync!r}")
+        else:
+            if sync.get("change") != 1:
+                fails.append(f"textDocumentSync.change 应为 1(Full)，实际 {sync.get('change')!r}")
+            if not sync.get("save"):
+                fails.append("textDocumentSync.save 应为真——否则客户端不发 didSave，诊断刷不出来")
 
         client.notify("initialized", {})
 

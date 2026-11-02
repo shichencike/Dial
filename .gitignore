@@ -20,3 +20,6 @@ __pycache__/
 token.txt
 examples/hello
 examples/flow
+examples/array_demo
+examples/bench_array
+examples/channel_thread

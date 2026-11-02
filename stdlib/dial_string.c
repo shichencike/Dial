@@ -88,3 +88,20 @@ void dial_print_string(DialString s) {
     fwrite(s_data(s), 1, (size_t)((int64_t *)s)[0], stdout);
     putchar('\n');
 }
+
+/* 类型 -> 字符串（CVE-2024-DIAL-006 新增）：支撑 `print("x=" + str(n))` 这类拼接。 */
+DialString dial_int_to_string(int64_t v) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%lld", (long long)v);
+    if (n < 0) n = 0;
+    if ((int64_t)n > (int64_t)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+    return dial_string_from_bytes(buf, (int64_t)n);
+}
+
+DialString dial_float_to_string(double v) {
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "%.6g", v);
+    if (n < 0) n = 0;
+    if ((int64_t)n > (int64_t)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+    return dial_string_from_bytes(buf, (int64_t)n);
+}

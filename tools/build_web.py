@@ -59,6 +59,7 @@ NAV = """
       <a href="index.html">首页</a>
       <a href="spec.html">语言规范</a>
       <a href="changelog.html">更新日志</a>
+      <a href="cve.html">安全公告</a>
       <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
       <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
     </nav>
@@ -152,6 +153,31 @@ a:hover{text-decoration:underline}
 .site-footer{border-top:1px solid var(--border);padding:22px 0;margin-top:40px}
 .site-footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;color:var(--muted);font-size:13px}
 .muted{color:var(--muted)}
+
+/* CVE 页面：严重程度徽章 + 状态徽章 */
+.badge{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;
+  line-height:1.7;border:1px solid transparent;white-space:nowrap}
+.badge-critical{color:#ff8a8a;background:rgba(255,90,90,.14);border-color:rgba(255,90,90,.4)}
+.badge-high{color:#ffb27a;background:rgba(255,150,80,.14);border-color:rgba(255,150,80,.4)}
+.badge-medium{color:var(--warn);background:rgba(231,197,107,.14);border-color:rgba(231,197,107,.4)}
+.badge-low{color:var(--muted);background:rgba(154,164,178,.12);border-color:rgba(154,164,178,.35)}
+.badge-fixed{color:var(--ok);background:rgba(95,211,138,.14);border-color:rgba(95,211,138,.4)}
+
+.cve-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;
+  margin:24px 0 8px}
+.cve-kpi{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+.cve-kpi b{display:block;font-size:26px;color:var(--accent);margin-bottom:4px}
+.cve-kpi span{color:var(--muted);font-size:13px}
+
+.cve-card{background:var(--panel);border:1px solid var(--border);border-radius:14px;
+  padding:22px 24px;margin:22px 0;scroll-margin-top:80px}
+.cve-card h3{margin:0 0 4px;color:var(--accent);font-size:20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.cve-card .meta{color:var(--muted);font-size:13px;margin:2px 0 14px}
+.cve-card h4{font-size:15px;margin:16px 0 6px;color:#cfe3ff}
+.cve-card .label{display:inline-block;color:var(--accent-2);font-weight:600;font-size:13px;margin-top:10px}
+
+.note{background:var(--panel-2);border:1px solid var(--border);border-left:3px solid var(--accent);
+  border-radius:0 8px 8px 0;padding:10px 16px;margin:14px 0;color:var(--muted);font-size:14px}
 
 @media (max-width:900px){
   .layout{grid-template-columns:1fr}

@@ -1,0 +1,11 @@
+// CVE-2024-DIAL-008 — 缺失 DIAL_C_COMPILER 环境变量 / 安装脚本缺陷
+// 漏洞：编译器硬编码 C 工具链候选列表，用户无法指定自带的 C 编译器；
+//       安装脚本对 stdlib / VSIX 下载不支持断点续传与镜像源，弱网下易失败。
+// 修复后：dialc 优先读取 DIAL_C_COMPILER（空格分隔的“程序 + 参数”），
+//       安装脚本支持 STDLIB_URL 覆盖与 curl -C - 断点续传。
+// 本文件仅作“能被正常编译运行”的占位；DIAL_C_COMPILER 是否被尊重由
+// cve_check.py 通过注入一个记录调用的包装脚本来断言。
+fn main(): int {
+    print("compiler env works");
+    return 0;
+}

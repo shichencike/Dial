@@ -43,4 +43,32 @@ void      *dial_exbuf_take_err(DialExBuf *b);
 /* 未捕获异常（throw 出现在任何 try 之外）：打印消息并终止进程，绝不静默继续。 */
 void       dial_panic(const char *msg);
 
+/* ============================================================================
+ *  运行时异常栈（v0.98.1）：跨函数 unwinding 的关键
+ * ============================================================================
+ *
+ *  旧实现用**编译期**栈（`exbuf_stack`，一个在 codegen 时记录的 Vec）来决定
+ *  throw 路由到哪个 try。这只在「try 与 throw 处于**同一个函数**」时成立——
+ *  因为子函数的 codegen 不会继承外层函数的编译期栈，于是子函数里的 throw
+ *  找不到任何 exbuf，只能 dial_panic（全局 Aborted）。setjmp/longjmp 本身其实
+ *  **能**跨栈帧 unwinding（只要包含 setjmp 的那个帧——即 try 所在函数——仍然
+ *  活在调用栈上，它确实活着），问题纯粹出在「用编译期栈去选目标帧」这一步。
+ *
+ *  修法：改成**运行时线程局部**异常栈。每个进入 try 的函数在 setjmp 之前把自己的
+ *  exbuf 压栈；throw 时取**运行时栈顶**的 exbuf 并 longjmp 回去。这样无论 throw
+ *  发生在第几层调用里，都能跳回那个仍然存活的 try 帧（CVE-2024-DIAL-004 修复）。
+ *
+ *  栈容量固定为 256 层；正常代码不可能嵌套这么深，溢出即 Fail-Fast。
+ */
+#define DIAL_EXC_STACK_MAX 256
+
+/* 把当前 try 的 exbuf 压入运行时异常栈（必须在 setjmp 之前调用）。 */
+void dial_exc_push(DialExBuf *b);
+
+/* 弹出运行时异常栈栈顶（try 正常结束或进入 catch 时调用，与 push 严格配对）。 */
+void dial_exc_pop(void);
+
+/* 返回运行时异常栈栈顶的 exbuf（最内层活跃的 try）；栈空时返回 NULL（未捕获 -> panic）。 */
+DialExBuf *dial_exc_top(void);
+
 #endif /* DIAL_EXC_H */

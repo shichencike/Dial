@@ -484,8 +484,19 @@ fn negotiate_capabilities(client: Option<&Value>) -> Value {
         }
     };
     let mut caps = json!({
-        // 1 = Full：每次把整篇文档发过来。极简实现，不做增量同步。
-        "textDocumentSync": 1,
+        // **必须是选项形式**，不能只写数字 1。
+        // 规范对 `TextDocumentSyncOptions.save` 的原文是：
+        //   "If present save notifications are sent to the server.
+        //    If omitted the notification should not be sent."
+        // 而纯数字形式（TextDocumentSyncKind）里**没有** `save` 这个字段——
+        // 客户端据此就不会发 `textDocument/didSave`，而我们的诊断正是靠它刷新的。
+        // 用数字形式的话，「保存即报诊断」只在自家插件里成立（插件无条件发 didSave），
+        // 在别的客户端（VS Code 官方客户端等）上会**静默失效**。
+        "textDocumentSync": {
+            "openClose": true,      // 要收到 didOpen / didClose
+            "change": 1,            // 1 = Full：每次把整篇文档发过来（不做增量同步）
+            "save": { "includeText": false }  // 要收到 didSave（诊断靠它刷新）
+        },
         "semanticTokensProvider": {
             "legend": {
                 "tokenTypes": SEMANTIC_TOKEN_TYPES,
@@ -806,7 +817,8 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::Dot
         | TokenKind::DotDot
         | TokenKind::LBracket
-        | TokenKind::RBracket => T_OPERATOR,
+        | TokenKind::RBracket
+        | TokenKind::Mod => T_OPERATOR,
         TokenKind::EOF => return (u32::MAX, 0),
     };
 
@@ -897,6 +909,7 @@ fn fixed_text(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::DotDot => "..",
         TokenKind::LBracket => "[",
         TokenKind::RBracket => "]",
+        TokenKind::Mod => "%",
         // 其余（字面量、标识符、EOF）没有固定文本，交给调用方另行处理
         _ => return None,
     };

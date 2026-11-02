@@ -721,6 +721,7 @@ impl Parser {
             let op = match self.peek_kind() {
                 TokenKind::Star => Some(BinOp::Mul),
                 TokenKind::Slash => Some(BinOp::Div),
+                TokenKind::Mod => Some(BinOp::Mod),
                 _ => None,
             };
             if let Some(op) = op {
@@ -805,6 +806,15 @@ impl Parser {
                 Ok(Expr::StringLit(s))
             }
             TokenKind::LBracket => self.parse_array_lit(),
+            // 括号表达式 `(expr)`：分组优先级，Pratt Parser 的「隐式优先级提升」。
+            // 缺失该分支会导致 `let idx = i - (i / 3) * 3;` 这类合法代码在 LParen 处报
+            // 「期望表达式，但遇到 LParen」（CVE-2024-DIAL-001 根因）。
+            TokenKind::LParen => {
+                self.advance();
+                let inner = self.parse_expr()?;
+                self.expect(TokenKind::RParen)?;
+                Ok(inner)
+            }
             TokenKind::Ident(name) => {
                 self.advance();
                 if self.check(&TokenKind::LParen) {

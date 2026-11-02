@@ -15,6 +15,7 @@
       <a href="index.html">首页</a>
       <a href="spec.html">语言规范</a>
       <a href="changelog.html" class="active">更新日志</a>
+      <a href="cve.html">安全公告</a>
       <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
       <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
     </nav>
@@ -25,8 +26,9 @@
 <ul>
 <li><a href="#更新日志--changelog">更新日志 / Changelog</a><ul>
 <li><a href="#v098--2026-11-01">[v0.98] — 2026-11-01</a><ul>
-<li><a href="#added新增">Added（新增）</a></li>
 <li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更_1">Changed（变更）</a></li>
 <li><a href="#轮-2导航已完成">轮 2（导航，已完成）</a></li>
 <li><a href="#轮-3编写辅助已完成">轮 3（编写辅助，已完成）</a></li>
 <li><a href="#轮-4高级已完成">轮 4（高级，已完成）</a></li>
@@ -38,13 +40,13 @@
 </li>
 <li><a href="#v097--2026-10-31">[v0.97] — 2026-10-31</a><ul>
 <li><a href="#added新增_1">Added（新增）</a></li>
-<li><a href="#changed变更_1">Changed（变更）</a></li>
+<li><a href="#changed变更_2">Changed（变更）</a></li>
 <li><a href="#notes说明">Notes（说明）</a></li>
 </ul>
 </li>
 <li><a href="#stdlib-v100--2026-10-31独立-releasetag-stdlib-v100">[stdlib v1.0.0] — 2026-10-31（独立 Release，tag stdlib-v1.0.0）</a><ul>
 <li><a href="#added新增_2">Added（新增）</a></li>
-<li><a href="#changed变更_2">Changed（变更）</a></li>
+<li><a href="#changed变更_3">Changed（变更）</a></li>
 <li><a href="#docs文档">Docs（文档）</a></li>
 </ul>
 </li>
@@ -58,7 +60,7 @@
 </li>
 <li><a href="#v095--2026-10-31">[v0.95] — 2026-10-31</a><ul>
 <li><a href="#added新增_4">Added（新增）</a></li>
-<li><a href="#changed变更_3">Changed（变更）</a></li>
+<li><a href="#changed变更_4">Changed（变更）</a></li>
 <li><a href="#added测试_1">Added（测试）</a></li>
 <li><a href="#刻意未做与-v094-规划一致本版仍不做">刻意未做（与 v0.94 规划一致，本版仍不做）</a></li>
 <li><a href="#docs文档_2">Docs（文档）</a></li>
@@ -70,7 +72,7 @@
 </li>
 <li><a href="#v094--2026-10-31">[v0.94] — 2026-10-31</a><ul>
 <li><a href="#added新增_5">Added（新增）</a></li>
-<li><a href="#changed变更_4">Changed（变更）</a></li>
+<li><a href="#changed变更_5">Changed（变更）</a></li>
 <li><a href="#added测试_2">Added（测试）</a></li>
 <li><a href="#刻意未做">刻意未做</a></li>
 <li><a href="#收尾补丁包安装三条硬规则">收尾补丁（包安装三条硬规则）</a></li>
@@ -79,7 +81,7 @@
 </li>
 <li><a href="#v093--2026-10-31">[v0.93] — 2026-10-31</a><ul>
 <li><a href="#added新增_6">Added（新增）</a></li>
-<li><a href="#changed变更_5">Changed（变更）</a></li>
+<li><a href="#changed变更_6">Changed（变更）</a></li>
 <li><a href="#added测试_3">Added（测试）</a></li>
 <li><a href="#尚未实现本版刻意留白">尚未实现（本版刻意留白）</a></li>
 <li><a href="#验证_2">验证</a></li>
@@ -117,27 +119,27 @@
 </li>
 <li><a href="#v08--2026-10-30">[v0.8] — 2026-10-30</a><ul>
 <li><a href="#added新增_11">Added（新增）</a></li>
-<li><a href="#changed变更_6">Changed（变更）</a></li>
+<li><a href="#changed变更_7">Changed（变更）</a></li>
 <li><a href="#设计约束本版刻意不做">设计约束（本版刻意不做）</a></li>
 <li><a href="#验证_4">验证</a></li>
 </ul>
 </li>
 <li><a href="#v07--2026-10-30">[v0.7] — 2026-10-30</a><ul>
 <li><a href="#added新增_12">Added（新增）</a></li>
-<li><a href="#changed变更_7">Changed（变更）</a></li>
+<li><a href="#changed变更_8">Changed（变更）</a></li>
 <li><a href="#设计约束用户拍板">设计约束（用户拍板）</a></li>
 <li><a href="#推迟不在本版">推迟（不在本版）</a></li>
 </ul>
 </li>
 <li><a href="#v061--2026-10-29">[v0.61] — 2026-10-29</a><ul>
 <li><a href="#added新增_13">Added（新增）</a></li>
-<li><a href="#changed变更_8">Changed（变更）</a></li>
+<li><a href="#changed变更_9">Changed（变更）</a></li>
 <li><a href="#设计约束用户拍板_1">设计约束（用户拍板）</a></li>
 </ul>
 </li>
 <li><a href="#v06--2026-10-29">[v0.6] — 2026-10-29</a><ul>
 <li><a href="#added新增_14">Added（新增）</a></li>
-<li><a href="#changed变更_9">Changed（变更）</a></li>
+<li><a href="#changed变更_10">Changed（变更）</a></li>
 <li><a href="#addedv06-补充">Added（v0.6 补充）</a></li>
 <li><a href="#实测对照同一份越界代码三档行为">实测对照（同一份越界代码，三档行为）</a></li>
 </ul>
@@ -149,14 +151,14 @@
 </li>
 <li><a href="#v04--2026-10-29">[v0.4] — 2026-10-29</a><ul>
 <li><a href="#added新增_16">Added（新增）</a></li>
-<li><a href="#changed变更_10">Changed（变更）</a></li>
+<li><a href="#changed变更_11">Changed（变更）</a></li>
 <li><a href="#fixed修复_5">Fixed（修复）</a></li>
 <li><a href="#docs文档_5">Docs（文档）</a></li>
 </ul>
 </li>
 <li><a href="#v03--2026-10-28">[v0.3] — 2026-10-28</a><ul>
 <li><a href="#added新增_17">Added（新增）</a></li>
-<li><a href="#changed变更_11">Changed（变更）</a></li>
+<li><a href="#changed变更_12">Changed（变更）</a></li>
 <li><a href="#fixed修复_6">Fixed（修复）</a></li>
 <li><a href="#docs文档_6">Docs（文档）</a></li>
 </ul>
@@ -184,6 +186,23 @@
 <hr />
 <h2 id="v098--2026-11-01">[v0.98] — 2026-11-01</h2>
 <p>本版把 <code>dialc lsp</code> 从「骨架 + 基础增强」打磨到<strong>工业级可用</strong>，并补齐三套主流编辑器的接入与安装包。</p>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li><strong><code>--fast</code>（ReleaseFast）不再是「只关检查」</strong>：在关闭运行期检查之外，现在开启三层编译器终极优化，
+  让 <code>--fast</code> 真正名副其实（此前它只关掉 Fail-Fast 检查，机器码仍是普通 O2）。</li>
+<li><strong>① 自动向量化 (SIMD) + 循环展开</strong>：LLVM 切到 <code>OptimizationLevel::Aggressive</code>（O3），
+    并按宿主实测指令集挑对应的 x86-64 微架构级别（<code>x86-64-v2/v3/v4</code> → SSE4.2 / AVX2 / AVX-512，
+    ARM64 显式 <code>+neon</code>），一次直接吃 4~8 个 int64；循环展开器同时压低分支预测开销。</li>
+<li><strong>② LTO 链接时优化</strong>：<code>--fast</code> 现在把 inkwell 产出的 LLVM bitcode 经 <code>clang -flto -O3</code> 编成
+    含 LTO bitcode 的「胖对象」，C 运行时也逐文件以 <code>-flto</code> 编译，链接时由 clang 整体重排——
+    <code>dial_array_get</code>/<code>push</code> 等热函数被直接内联进主程序，热循环零 <code>call</code> 开销（反汇编可证）。</li>
+<li><strong>③ PGO 剖析引导优化（新增 <code>--pgo</code>）</strong>：先插桩跑一遍训练样本、合并 profile，再据热点重排指令
+    布局（热路径顶到 I-Cache 最前）。<code>--pgo</code> 必须配合 <code>--fast</code>（需本机 <code>clang</code> 支持）。</li>
+<li>三者都需要本机 <code>clang</code>；若 <code>DIAL_C_COMPILER</code> 指向非 clang，则优雅降级为「仅 O3 + SIMD」，
+    保留 SIMD 收益、放弃跨模块 LTO/PGO。生成的二进制按本机 CPU 调优，仅供本机运行。</li>
+<li>新增性能基准示例 <a href="examples/bench_array.dial"><code>examples/bench_array.dial</code></a>（1000 万次 push + 遍历求和），
+  作为上述三层优化的「标准考题」。</li>
+</ul>
 <h3 id="added新增">Added（新增）</h3>
 <ul>
 <li><strong>编辑器插件安装包（三主流）</strong>：编译型语言的编辑器支持是必做的苦活，本版落地三套。</li>
@@ -194,7 +213,7 @@
 <li>其余编辑器（JetBrains / Zed / Sublime 等）只要能启动 <code>dialc lsp</code> 即可接入，不再单独维护插件。</li>
 <li><code>editors/README.md</code>：三编辑器总览与能力矩阵。</li>
 </ul>
-<h3 id="changed变更">Changed（变更）</h3>
+<h3 id="changed变更_1">Changed（变更）</h3>
 <ul>
 <li><strong>LSP 能力协商</strong>：<code>initialize</code> 读取客户端 <code>capabilities</code>，按声明动态广播能力（老客户端不报能力也不报错）；
   并新增 <code>window/logMessage</code> 自诊断通道（不污染协议流、不进 stdout）。</li>
@@ -378,7 +397,7 @@
     系统库种类取自 build script <strong>自身</strong>的 <code>cfg!(target_feature="crt-static")</code>（宿主而非目标），
     若不处理会残留 <code>NEEDED libffi.so.8</code>，而 Termux 上没有它 → 执行即 <code>not found</code>。</li>
 </ul>
-<h3 id="changed变更_1">Changed（变更）</h3>
+<h3 id="changed变更_2">Changed（变更）</h3>
 <ul>
 <li><code>src/codegen.rs</code>：<code>emit_object</code> 的 CPU 不再写死 <code>"x86-64"</code>，改为按宿主架构推导
   （x86_64→<code>x86-64</code>、aarch64→<code>generic</code>），aarch64 也能出正确机器码。</li>
@@ -430,7 +449,7 @@
 <li><strong>CI 自动发布</strong>：<code>.github/workflows/ci.yml</code> 在 <code>stdlib-v*</code> 标签触发 <code>publish-stdlib</code> 作业，
   由 <code>build-linux</code> / <code>build-windows</code> / <code>build-termux</code> 各自产出本平台 <code>.a</code> 后打包发布。</li>
 </ul>
-<h3 id="changed变更_2">Changed（变更）</h3>
+<h3 id="changed变更_3">Changed（变更）</h3>
 <ul>
 <li>预编译安全等级统一为 <strong>ReleaseSafe（<code>-DDIAL_SAFETY=1</code>）</strong>：C Runtime 层越界/空指针等 UB 由 <code>ud2</code>
   Fail-Fast 拦下，兼顾性能与安全；与用户程序自身 <code>--release</code>/<code>--fast</code> 等级是两回事（标准库等级发布时已钉死）。</li>
@@ -557,7 +576,7 @@
 <li><strong>AST / 解析器 / 包接口补上位置字段</strong>（稀疏、小改）：<code>VarDecl</code> / <code>For</code> / <code>Catch</code> / <code>SelectArm</code> 的变量名位置，
   <code>Func</code> 的名字与每个形参位置，<code>StructDef</code> 的名字位置；<code>.diali</code> 的 <code>type X;</code> 与 <code>extern fn f</code> 也记下声明行号。</li>
 </ul>
-<h3 id="changed变更_3">Changed（变更）</h3>
+<h3 id="changed变更_4">Changed（变更）</h3>
 <ul>
 <li><code>initialize</code> 能力协商新增 <code>hoverProvider: true</code> / <code>definitionProvider: true</code> /
   <code>completionProvider: { triggerCharacters: ["."] }</code>（v0.94 仅有语义高亮与诊断）。</li>
@@ -683,7 +702,7 @@
 <li><strong>VS Code 扩展</strong> <code>editors/vscode/</code>：<strong>不需要 npm install</strong>（LSP 客户端是手写的 200 行），
   拷进扩展目录即可；另附 Neovim 原生 LSP 的三行配置。</li>
 </ul>
-<h3 id="changed变更_4">Changed（变更）</h3>
+<h3 id="changed变更_5">Changed（变更）</h3>
 <ul>
 <li><strong><code>If</code> / <code>While</code> / <code>For</code> / 表达式语句补上位置</strong>（此前只有 <code>var</code> / <code>return</code> 这类带）：
   所有语句现在都带 <code>line</code> / <code>col</code>，语义诊断因此能落回源码。</li>
@@ -762,7 +781,7 @@
 <li><strong>链接期自动链库</strong>：把选定平台的 <code>.a</code>（或 <code>.lib</code>）加入链接命令，用户不写路径。</li>
 <li><strong>许可可见</strong>（§25.8）：<code>manifest.txt</code> 的 <code>license</code> 为必填字段，构建时回显到日志。</li>
 </ul>
-<h3 id="changed变更_5">Changed（变更）</h3>
+<h3 id="changed变更_6">Changed（变更）</h3>
 <ul>
 <li><strong>两阶段解析</strong>：先解析一遍取 <code>import</code> 列表 → 解析包（拿到不透明类型名）→ 再重新解析，
   使 <code>var h: DemoHandle = ...</code> 这类包类型名在<strong>语法阶段</strong>就被识别为 <code>Opaque</code> 而非结构体。</li>
@@ -1084,7 +1103,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
   <strong>负向用例</strong> 19 个（含 <code>move_use_after</code> / <code>move_twice</code> / <code>spawn_non_void_ret</code> /
   <code>spawn_struct_param</code> / <code>channel_int_elem</code> / <code>fn_named_move_to</code> 等）。</li>
 </ul>
-<h3 id="changed变更_6">Changed（变更）</h3>
+<h3 id="changed变更_7">Changed（变更）</h3>
 <ul>
 <li><strong><code>moved</code> 集合由「变量名」改为「栈槽指针」</strong>：变量名会跨作用域 / 跨函数重名，按名字记账
   会让同名变量互相误伤（该 release 的被跳过 → 泄漏）。改为按 alloca 槽位记账后天然精确。</li>
@@ -1129,7 +1148,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li><strong>示例与负向用例</strong>：<code>examples/try_catch_demo.dial</code>、<code>examples/error_zero_cost.dial</code>；
   <code>tests/bad/{throw_non_error,catch_with_paren,throw_outside_try}.dial</code>。</li>
 </ul>
-<h3 id="changed变更_7">Changed（变更）</h3>
+<h3 id="changed变更_8">Changed（变更）</h3>
 <ul>
 <li><code>dial_file_read</code> 的失败语义由「返回空串」改为<strong>返回 <code>NULL</code></strong>，使「读取失败」与「读到空内容」不再混淆
   （成功读取 0 字节仍返回空串）。</li>
@@ -1158,7 +1177,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li><strong>C 侧实现</strong>：<code>stdlib/dial_io.c</code> 新增 <code>dial_file_open</code> / <code>dial_file_read</code> / <code>dial_file_write</code> / <code>dial_file_close</code>；<code>stdlib/dial_string.c</code> 新增 <code>dial_string_cstr</code> / <code>dial_string_from_bytes</code>（供 <code>read</code> 从字节缓冲区构造字符串）。</li>
 <li><strong>示例与负向用例</strong>：<code>examples/file_demo.dial</code>（写后读回并打印，黄金输出 <code>dialc-file-io</code>）；<code>tests/bad/io_bad_arg.dial</code>（open 参数类型错误须在编译期拒绝）。</li>
 </ul>
-<h3 id="changed变更_8">Changed（变更）</h3>
+<h3 id="changed变更_9">Changed（变更）</h3>
 <ul>
 <li>遵循版本号规则：本版属「小功能 / 新语法」，版本号 <code>v0.6 → v0.61</code>（Cargo <code>version</code> 字段按三段式写作 <code>0.61.0</code>，语义等同 <code>v0.61</code>）。</li>
 <li>README 同步：§4.3 关键字、§5.1 基本类型、§15 FFI 表与 C 导出函数、§17.2（从「未实现」移除文件 IO）、新增 <a href="README.md#24-文件-iofile-句柄">§24 文件 IO</a> 与 <a href="README.md#22-早期版本摘要v03-及以前">§22 早期版本摘要</a>。</li>
@@ -1196,7 +1215,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li><strong>测试组 D / E</strong>：新增 <code>tests/trap/</code>（5 个用例），D 组断言必须当场因信号终止且
   <strong>不得打印哨兵 9999</strong>；E 组用 <code>--fast</code> 作对照组，证明陷阱确由编译器插入而非碰巧崩溃。</li>
 </ul>
-<h3 id="changed变更_9">Changed（变更）</h3>
+<h3 id="changed变更_10">Changed（变更）</h3>
 <ul>
 <li><code>dialc build</code> / <code>run</code> 新增 <code>--safety</code> / <code>--release</code> / <code>--fast</code> 参数。</li>
 <li>C 静态库按安全等级分目录构建（<code>.dialc_build/safety-&lt;N&gt;/</code>），避免不同等级的 <code>.o</code> 互相污染。</li>
@@ -1276,7 +1295,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li>新增示例 <code>examples/map_demo.dial</code>、<code>examples/control_flow.dial</code>；
   新增负向用例 <code>tests/bad/map_let_put.dial</code>、<code>tests/bad/map_bad_arg.dial</code>、<code>tests/bad/for_range_type.dial</code>。</li>
 </ul>
-<h3 id="changed变更_10">Changed（变更）</h3>
+<h3 id="changed变更_11">Changed（变更）</h3>
 <ul>
 <li><code>dial_map.c</code> 由旧版「非 ARC 的 <code>Map*</code> 堆分配（进程退出时由 OS 回收）」重写为与 <code>dial_array.c</code>
   <strong>完全对称</strong>的 inline-entries ARC 实现：指针因扩容 / COW 可能更换，编译器负责把新指针写回接收变量。
@@ -1306,7 +1325,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li>新增示例 <code>examples/short_circuit.dial</code>（证明短路求值）、<code>examples/conversions.dial</code>（证明显式转换）。</li>
 <li>新增负向用例 <code>tests/bad/let_push.dial</code>、<code>tests/bad/implicit_conv.dial</code>、<code>tests/bad/mixed_arith.dial</code>。</li>
 </ul>
-<h3 id="changed变更_11">Changed（变更）</h3>
+<h3 id="changed变更_12">Changed（变更）</h3>
 <ul>
 <li><strong><code>and</code> / <code>or</code> 改为短路求值</strong>，与 C 的 <code>&amp;&amp;</code> / <code>||</code> 一致：先求左操作数，若已能决定结果则不再求值右操作数。
   这保证了"判空后访问"类代码在左操作数为假时不会因右操作数被盲目求值而崩溃。</li>

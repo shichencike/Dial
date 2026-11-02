@@ -1,0 +1,10 @@
+// CVE-2024-DIAL-006 — 缺失类型→字符串转换与字符串连接
+// 漏洞：str() / int_to_string / float_to_string 以及 string 的 '+' 拼接均未实现，
+//       任何需要把数值转成字符串或拼接字符串的代码都无法编译。
+// 修复后：新增 int_to_string / float_to_string 运行库函数、str() 内建分派，
+//       以及 string + string 的 dial_string_concat 拼接。
+fn main(): int {
+    print("Result: " + str(42)); // 期望 "Result: 42"
+    print("Hello" + " World");   // 期望 "Hello World"
+    return 0;
+}

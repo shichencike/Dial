@@ -93,7 +93,9 @@ extern fn dial_thread_join(t: DialThread): void;
 extern fn dial_thread_detach(t: DialThread): void;
 
 type DialChannel;
-extern fn dial_channel_new(cap: int): DialChannel;
+// 第二个参数 elem_release 是元素析构器函数指针（i8*）：通道销毁时释放残留的未消费元素。
+// 嵌套通道传 dial_channel_release，其余元素类型传 dial_rc_release（由 IR 按元素类型自动分派）。
+extern fn dial_channel_new(cap: int, elem_release: string): DialChannel;
 /// send/recv 只搬运指针（所有权移交）。
 extern fn dial_channel_send(ch: DialChannel, p: string): void;
 extern fn dial_channel_recv(ch: DialChannel): string;

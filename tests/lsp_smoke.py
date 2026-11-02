@@ -159,7 +159,13 @@ def main():
     r = srv.request("initialize", {"processId": os.getpid(), "rootUri": None, "capabilities": {}})
     check(r is not None and "result" in r, "initialize 有响应")
     caps = (r or {}).get("result", {}).get("capabilities", {})
-    check(caps.get("textDocumentSync") == 1, "textDocumentSync = 1（全量同步）")
+    # textDocumentSync 必须是**选项形式**才表达得了「请发 didSave」——
+    # 纯数字形式里没有 save 字段，客户端就不会发 didSave，诊断便刷不出来。
+    sync = caps.get("textDocumentSync")
+    check(isinstance(sync, dict), "textDocumentSync 是选项形式（含 save）", f"实际: {sync!r}")
+    if isinstance(sync, dict):
+        check(sync.get("change") == 1, "textDocumentSync.change = 1（全量同步）", f"实际: {sync.get('change')!r}")
+        check(bool(sync.get("save")), "textDocumentSync.save 为真（要收到 didSave）", f"实际: {sync.get('save')!r}")
     legend = caps.get("semanticTokensProvider", {}).get("legend", {}).get("tokenTypes", [])
     check(legend == TOKEN_TYPES, "semanticTokens legend 与实现一致", f"实际: {legend}")
     server_info = (r or {}).get("result", {}).get("serverInfo", {})

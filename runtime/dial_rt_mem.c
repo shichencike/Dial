@@ -29,7 +29,16 @@ void dial_rc_release(void *p) {
 
 void *dial_rc_clone(void *p, int64_t payload_size) {
     if (!p) return NULL;
-    if (((int64_t *)p)[-1] == 1) return p;   /* 唯一持有 -> 无需拷贝（COW 命中） */
+    // COW 命中（唯一持有者）：可以复用同一块内存，但**必须**把引用计数 +1，
+    // 因为「原对象」与「克隆」现在是两个独立的持有者。
+    // 旧实现直接 `return p` 而漏了 +1，导致引用计数少计 -> 后续 dial_array_set 的
+    // COW 守卫 `refcount > 1` 失效：在某线程修改克隆的数组元素时，原数组跟着被改写
+    // （数据竞争），任意一次 release 更会立刻 double-free / use-after-free。
+    // （CVE-2024-DIAL-003 根因）
+    if (((int64_t *)p)[-1] == 1) {
+        ((int64_t *)p)[-1] += 1;
+        return p;
+    }
     void *n = dial_rc_alloc(payload_size);
     memcpy(n, p, (size_t)payload_size);
     return n;
