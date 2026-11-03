@@ -140,6 +140,7 @@ for src in tests/trap/*.dial; do
     bin="${TMP}/fast_${name}"
     if ! "$DIALC" build "$src" -o "$bin" --fast >"${TMP}/fbuild.log" 2>&1; then
         echo "  ❌ $name (--fast) 编译失败"
+        sed 's/^/       /' "${TMP}/fbuild.log"
         fail=1
         continue
     fi
@@ -172,7 +173,7 @@ else
 fi
 if ! "${CC_CMD[@]}" -O2 -g -DDIAL_SAFETY=2 -Iruntime -Istdlib \
         tests/stress/channel_mt.c stdlib/dial_channel.c \
-        runtime/dial_rt_trap.c -o "$mt_bin" -lpthread >"${TMP}/mtbuild.log" 2>&1; then
+        runtime/dial_rt_trap.c runtime/dial_rt_mem.c -o "$mt_bin" -lpthread >"${TMP}/mtbuild.log" 2>&1; then
     echo "  ❌ 并发压测用例编译失败"
     sed 's/^/       /' "${TMP}/mtbuild.log"
     fail=1
