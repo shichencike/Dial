@@ -24,7 +24,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v0981">dialc — Dial 语言编译器 v0.98.1</a><ul>
+<li><a href="#dialc--dial-语言编译器-v099">dialc — Dial 语言编译器 v0.99</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -65,9 +65,9 @@
 <li><a href="#52-类型良构性约束">5.2 类型良构性约束</a></li>
 <li><a href="#53-类型转换">5.3 类型转换</a></li>
 <li><a href="#54-char单字符类型v092">5.4 char：单字符类型（v0.92）</a></li>
-<li><a href="#55-输出三件套连续输出v0982">5.5 输出三件套：连续输出（v0.98.2）</a></li>
-<li><a href="#56-byte单字节无符号值v0982">5.6 byte：单字节无符号值（v0.98.2）</a></li>
-<li><a href="#57-bytes二进制缓冲区v0982">5.7 bytes：二进制缓冲区（v0.98.2）</a></li>
+<li><a href="#55-输出三件套连续输出v099">5.5 输出三件套：连续输出（v0.99）</a></li>
+<li><a href="#56-byte单字节无符号值v099">5.6 byte：单字节无符号值（v0.99）</a></li>
+<li><a href="#57-bytes二进制缓冲区v099">5.7 bytes：二进制缓冲区（v0.99）</a></li>
 </ul>
 </li>
 <li><a href="#6-变量与可变性">6. 变量与可变性</a><ul>
@@ -87,7 +87,7 @@
 <li><a href="#83-范围-for-循环">8.3 范围 for 循环</a></li>
 <li><a href="#84-break--continue">8.4 break / continue</a></li>
 <li><a href="#85-块与作用域">8.5 块与作用域</a></li>
-<li><a href="#86-裸块独立的词法作用域v0982">8.6 裸块：独立的词法作用域（v0.98.2）</a></li>
+<li><a href="#86-裸块独立的词法作用域v099">8.6 裸块：独立的词法作用域（v0.99）</a></li>
 </ul>
 </li>
 <li><a href="#9-函数">9. 函数</a><ul>
@@ -141,7 +141,7 @@
 </ul>
 </li>
 <li><a href="#16-内置-print-与输出三件套">16. 内置 print 与输出三件套</a><ul>
-<li><a href="#161-连续输出print_raw--write_charv0982">16.1 连续输出：print_raw / write_char（v0.98.2）</a></li>
+<li><a href="#161-连续输出print_raw--write_charv099">16.1 连续输出：print_raw / write_char（v0.99）</a></li>
 </ul>
 </li>
 <li><a href="#17-未定义行为与已实现边界">17. 未定义行为与已实现边界</a><ul>
@@ -291,7 +291,7 @@
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v0981">dialc — Dial 语言编译器 v0.98.1</h1>
+<h1 id="dialc--dial-语言编译器-v099">dialc — Dial 语言编译器 v0.99</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -936,7 +936,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 <tr>
 <td><code>byte</code></td>
 <td>LLVM <code>i64</code></td>
-<td><strong>单字节无符号值</strong>（v0.98.2）。<strong>值类型</strong>：与 <code>char</code> 同表示但语义不同——<code>byte</code> 是 0~255 的<strong>数值</strong>，参与算术、比较，经 <code>int_to_byte</code> / <code>byte_to_int</code> 与 <code>int</code> 显式互转；与 <code>char</code>（码点）严格区分，避免「一个字节到底是字符还是数字」的歧义</td>
+<td><strong>单字节无符号值</strong>（v0.99）。<strong>值类型</strong>：与 <code>char</code> 同表示但语义不同——<code>byte</code> 是 0~255 的<strong>数值</strong>，参与算术、比较，经 <code>int_to_byte</code> / <code>byte_to_int</code> 与 <code>int</code> 显式互转；与 <code>char</code>（码点）严格区分，避免「一个字节到底是字符还是数字」的歧义</td>
 </tr>
 <tr>
 <td><code>string</code></td>
@@ -946,7 +946,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 <tr>
 <td><code>bytes</code></td>
 <td>LLVM <code>ptr</code>（不透明）</td>
-<td>不可变二进制缓冲区（v0.98.2），由 C Runtime 管理的引用计数对象，<strong>独立于 <code>string</code></strong>（零隐式转换）。承载任意字节序列（可能非法 UTF-8）。构造/转换见 <a href="#57-bytes二进制缓冲区v0982">§5.7</a></td>
+<td>不可变二进制缓冲区（v0.99），由 C Runtime 管理的引用计数对象，<strong>独立于 <code>string</code></strong>（零隐式转换）。承载任意字节序列（可能非法 UTF-8）。构造/转换见 <a href="#57-bytes二进制缓冲区v099">§5.7</a></td>
 </tr>
 <tr>
 <td><code>int[]</code></td>
@@ -1005,7 +1005,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 </tr>
 <tr>
 <td><code>int[][]</code></td>
-<td>✅ <strong>支持</strong>（v0.98.2）：多维数组 =「元素是数组句柄的数组」，内层 <code>int[]</code> 作为 8 字节句柄统一管理（见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）</td>
+<td>✅ <strong>支持</strong>（v0.99）：多维数组 =「元素是数组句柄的数组」，内层 <code>int[]</code> 作为 8 字节句柄统一管理（见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）</td>
 </tr>
 <tr>
 <td><code>var v: void = ...</code></td>
@@ -1169,13 +1169,13 @@ Dial 的选择是让源码把意图写清楚：要码点就 <code>char_to_int('a
 若码点非法（负数、&gt; <code>0x10FFFF</code>、或落在 UTF-16 代理区 <code>D800~DFFF</code>），
 C Runtime 会在打印时<strong>当场打印诊断并终止</strong>，绝不输出半个坏字符——
 静默产出乱码比当场崩溃更危险，它会在下游变成无法复现的数据损坏（Fail-Fast 铁律 §20）。</p>
-<h3 id="55-输出三件套连续输出v0982">5.5 输出三件套：连续输出（v0.98.2）</h3>
+<h3 id="55-输出三件套连续输出v099">5.5 输出三件套：连续输出（v0.99）</h3>
 <p><code>print(x)</code> <strong>永远在末尾追加一个 <code>\n</code></strong>——它表达的是「打印一行」。
 但很多程序需要的不是「一行」，而是<strong>一段连续的字节流</strong>：拼行的表格、
-进度条、逐字动画、协议帧、日志尾巴。这类程序在 v0.98.2 之前<strong>根本写不出来</strong>：
+进度条、逐字动画、协议帧、日志尾巴。这类程序在 v0.99 之前<strong>根本写不出来</strong>：
 唯一的输出手段 <code>print</code> 每写一次就断一行，想拼出一行就得把内容先拼成一个大字符串
 （<code>"a" + "b" + ...</code>），而这既啰嗦又不适用于「边算边输出」的场景。</p>
-<p>v0.98.2 补齐三个内置，构成输出的最小完备集：</p>
+<p>v0.99 补齐三个内置，构成输出的最小完备集：</p>
 <table>
 <thead>
 <tr>
@@ -1230,7 +1230,7 @@ print(&quot;&quot;);
 </code></pre>
 <p><strong><code>print_raw</code> 的返回值</strong>：无（与 <code>print</code> 一致，都是<strong>语句</strong>而非表达式），
 不能出现在赋值右侧或 <code>return</code> 位置。</p>
-<p><strong><code>str(char)</code></strong>：<code>str()</code> 在 v0.98.2 起接受 <code>char</code> 实参，返回<strong>只含这一个字符</strong>的 UTF-8 字符串
+<p><strong><code>str(char)</code></strong>：<code>str()</code> 在 v0.99 起接受 <code>char</code> 实参，返回<strong>只含这一个字符</strong>的 UTF-8 字符串
 （ASCII 字符为 1 字节，多字节码点如 <code>'中'</code> 为 3 字节）。它让字符能直接参与字符串拼接：</p>
 <pre><code class="language-dial">let s: string = str('A') + &quot;BC&quot;;   // &quot;ABC&quot;
 </code></pre>
@@ -1246,7 +1246,7 @@ Dial 的字符串按 <strong>UTF-8 字节</strong>计量长度（见 <a href="#1
 它不先 <code>str(v)</code> 再输出，因为那样会分配一个带引用计数的堆字符串，
 而它只是中转对象（用完即弃却仍占着引用计数），属于实打实的内存泄漏。</p>
 <hr />
-<h3 id="56-byte单字节无符号值v0982">5.6 <code>byte</code>：单字节无符号值（v0.98.2）</h3>
+<h3 id="56-byte单字节无符号值v099">5.6 <code>byte</code>：单字节无符号值（v0.99）</h3>
 <p><code>byte</code> 是 <strong>0~255 的无符号单字节值类型</strong>，与 <code>char</code> 故意区分：</p>
 <table>
 <thead>
@@ -1290,7 +1290,7 @@ print(c);            // A    —— char 按**字符**打印
 <li><code>byte_to_int(b: byte): int</code>：零成本（同 <code>i64</code> 表示），仅类型重解释。</li>
 <li><code>byte</code> 是<strong>值类型</strong>：无 ARC、无堆分配、无空指针，可参与算术与比较。</li>
 </ul>
-<h3 id="57-bytes二进制缓冲区v0982">5.7 <code>bytes</code>：二进制缓冲区（v0.98.2）</h3>
+<h3 id="57-bytes二进制缓冲区v099">5.7 <code>bytes</code>：二进制缓冲区（v0.99）</h3>
 <p><code>bytes</code> 是不可变的<strong>二进制缓冲区</strong>，由 C Runtime 以引用计数（ARC）管理，<strong>与 <code>string</code> 类型独立</strong>——
 二者零隐式转换。它用来承载「任意字节序列」，包括<strong>非法 UTF-8</strong> 的原始数据（网络报文、加密 blob、图像字节等），
 而 <code>string</code> 语义上始终是合法 UTF-8 文本。</p>
@@ -1569,8 +1569,8 @@ x = 2;                     // 赋值
 p.x = 3;                   // 字段赋值
 a[0] = 4;                  // 下标赋值
 print(e);                  // 打印语句（追加换行）
-print_raw(e);              // 原样打印语句（v0.98.2，不追加换行）
-write_char(c);             // 输出单字符（v0.98.2，不追加换行）
+print_raw(e);              // 原样打印语句（v0.99，不追加换行）
+write_char(c);             // 输出单字符（v0.99，不追加换行）
 f(1, 2);                   // 表达式语句
 if (cond) { ... } else { ... }
 if (cond) { ... } else if (c2) { ... } else { ... }   // else if 语法糖
@@ -1625,9 +1625,9 @@ while (n &lt; 10) {
 </code></pre>
 <h3 id="85-块与作用域">8.5 块与作用域</h3>
 <p><code>{ ... }</code> 既可以作为函数体或 <code>if</code>/<code>while</code>/<code>for</code> 的分支体，<strong>也可以</strong>作为<strong>独立的裸块语句</strong>
-（v0.98.2 起，见 <a href="#86-裸块独立的词法作用域v0982">§8.6</a>）。</p>
+（v0.99 起，见 <a href="#86-裸块独立的词法作用域v099">§8.6</a>）。</p>
 <hr />
-<h3 id="86-裸块独立的词法作用域v0982">8.6 裸块：独立的词法作用域（v0.98.2）</h3>
+<h3 id="86-裸块独立的词法作用域v099">8.6 裸块：独立的词法作用域（v0.99）</h3>
 <p>裸块 <code>{ ... }</code> 是一个<strong>语句</strong>，用来显式划定一段代码的作用域。它的用途有三：</p>
 <ol>
 <li><strong>变量遮蔽</strong>：块内可以声明与外层同名的变量，互不干扰；</li>
@@ -1804,11 +1804,11 @@ print(r.origin.x);     // 支持链式
 <hr />
 <h2 id="11-动态数组-int">11. 动态数组 <code>int[]</code></h2>
 <p><code>int[]</code> 是不透明指针，内存布局 <code>[refcount][kind][len][cap][elems...]</code>（头部 <code>kind</code> 记录元素类别）由 C 侧私有维护。
-<strong>元素类型可为 <code>int</code>，或任意 8 字节句柄</strong>：<code>string</code> / <code>int[]</code>（多维）/ <code>map</code> / <code>error</code> / <code>channel</code> / 不透明指针（v0.98.2 起，见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）。</p>
+<strong>元素类型可为 <code>int</code>，或任意 8 字节句柄</strong>：<code>string</code> / <code>int[]</code>（多维）/ <code>map</code> / <code>error</code> / <code>channel</code> / 不透明指针（v0.99 起，见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）。</p>
 <h3 id="111-构造">11.1 构造</h3>
 <pre><code class="language-dial">var a: int[] = [10, 20, 30];
-var names: string[] = [&quot;alice&quot;, &quot;bob&quot;, &quot;carol&quot;];   // v0.98.2：句柄元素
-var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.98.2：多维（元素是 int[] 句柄）
+var names: string[] = [&quot;alice&quot;, &quot;bob&quot;, &quot;carol&quot;];   // v0.99：句柄元素
+var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.99：多维（元素是 int[] 句柄）
 </code></pre>
 <p>空数组字面量 <code>[]</code> 不支持（无法推断元素类型）。</p>
 <h3 id="112-方法">11.2 方法</h3>
@@ -1854,7 +1854,7 @@ var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.98.2：多维（元素�
 </tr>
 </tbody>
 </table>
-<p>下标语法 <code>a[i]</code> 等价于 <code>a.get(i)</code>；<code>a[i] = v</code> 等价于 <code>a = a.set(i, v)</code>。嵌套下标 <code>a[i][j] = v</code> 同样支持（v0.98.2，见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）。</p>
+<p>下标语法 <code>a[i]</code> 等价于 <code>a.get(i)</code>；<code>a[i] = v</code> 等价于 <code>a = a.set(i, v)</code>。嵌套下标 <code>a[i][j] = v</code> 同样支持（v0.99，见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）。</p>
 <h3 id="113-为什么-push--set-要返回指针">11.3 为什么 <code>push</code> / <code>set</code> 要返回指针</h3>
 <p>这两种操作在需要扩容或存在多个持有者时，会产生<strong>新的</strong>不透明指针。
 编译器强制把返回值写回接收变量，杜绝"旧指针失效"的悬垂问题：</p>
@@ -1908,7 +1908,7 @@ C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并
 由 codegen 插入的检查（§20.2）与 C Runtime 的检查（§20.3）双重保证。
 仅在 <code>--fast</code>（ReleaseFast）下才回落到"无边界检查、越界即 UB"的 C 行为。</p>
 <h3 id="116-多维数组与句柄元素数组">11.6 多维数组与句柄元素数组</h3>
-<p>v0.98.2 起，数组不再「只能装 int」。只要元素类型是 <code>int</code> 或<strong>任意 8 字节句柄</strong>，就能直接存储——
+<p>v0.99 起，数组不再「只能装 int」。只要元素类型是 <code>int</code> 或<strong>任意 8 字节句柄</strong>，就能直接存储——
 因为所有不透明句柄（<code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code> / 不透明指针）共享同一份 <code>dial_rc_*</code> 引用计数，
 <code>channel</code> 则走原子引用计数 <code>dial_channel_*</code>。数组头部用一个 <code>kind</code> 字段记下自己的元素类别，
 <code>push</code> / <code>set</code> / 克隆 / 释放时据此对元素做对应的 retain / release，从而实现<strong>按元素 ARC</strong>。</p>
@@ -2312,15 +2312,15 @@ let/var x = y;  ─────┤
 <td><code>dial_print_int</code> / <code>dial_print_float</code> / <code>dial_print_bool</code> / <code>dial_print_char</code> / <code>dial_print_string</code></td>
 </tr>
 <tr>
-<td><code>print_raw(x)</code>（v0.98.2）</td>
+<td><code>print_raw(x)</code>（v0.99）</td>
 <td><code>dial_print_raw</code> / <code>dial_print_raw_int</code> / <code>dial_print_raw_float</code> / <code>dial_print_raw_bool</code> / <code>dial_write_char</code>（<strong>均不追加换行</strong>）</td>
 </tr>
 <tr>
-<td><code>write_char(c)</code>（v0.98.2）</td>
+<td><code>write_char(c)</code>（v0.99）</td>
 <td><code>call void @dial_write_char(i64 %c)</code>（不追加换行）</td>
 </tr>
 <tr>
-<td><code>str(c)</code>（<code>c</code> 为 <code>char</code>，v0.98.2）</td>
+<td><code>str(c)</code>（<code>c</code> 为 <code>char</code>，v0.99）</td>
 <td><code>call ptr @dial_char_to_string(i64 %c)</code>（编码为 UTF-8，1~4 字节）</td>
 </tr>
 <tr>
@@ -2351,8 +2351,8 @@ DialString dial_string_clone(DialString s);
 void       dial_string_retain(DialString s);
 void       dial_string_release(DialString s);
 void       dial_print_string(DialString s);
-DialString dial_char_to_string(int64_t code);       // v0.98.2：码点 → UTF-8 字符串（1~4 字节）
-int        dial_encode_utf8(int64_t code, char *buf); // v0.98.2：运行时内唯一的码点编码实现
+DialString dial_char_to_string(int64_t code);       // v0.99：码点 → UTF-8 字符串（1~4 字节）
+int        dial_encode_utf8(int64_t code, char *buf); // v0.99：运行时内唯一的码点编码实现
 </code></pre>
 <p><strong><code>stdlib/dial_array.h</code></strong></p>
 <pre><code class="language-c">DialArray dial_array_new(void);
@@ -2372,7 +2372,7 @@ void       dial_print_char(int64_t code);   // 输出码点对应的 UTF-8 字�
 void       dial_print_string(DialString s);
 DialString dial_read_line(void);                  // 已暴露为 read_line()
 
-// 连续输出（v0.98.2）：均**不追加换行**，是「拼行 / 进度条 / 逐字输出」的基本积木。
+// 连续输出（v0.99）：均**不追加换行**，是「拼行 / 进度条 / 逐字输出」的基本积木。
 void       dial_print_raw(DialString s);      // 原样输出字符串（按字节长度，内嵌 '\0' 不截断）
 void       dial_write_char(int64_t code);     // 输出单个字符
 void       dial_print_raw_int(int64_t v);     // 标量版（栈缓冲，零堆分配）
@@ -2386,7 +2386,7 @@ DialString dial_file_read(DialFile f, int64_t n);            // 已暴露为 rea
 int64_t   dial_file_write(DialFile f, DialString content);   // 已暴露为 write(f, c)，返回写入字节数
 void      dial_file_close(DialFile f);                       // 已暴露为 close(f)，空指针安全
 </code></pre>
-<p><strong><code>stdlib/dial_bytes.h</code></strong>（v0.98.2：与 <code>string</code> <strong>共享同一 C 布局</strong> <code>[refcount][len][data...]</code>，但 Dial 侧类型独立、零隐式转换）</p>
+<p><strong><code>stdlib/dial_bytes.h</code></strong>（v0.99：与 <code>string</code> <strong>共享同一 C 布局</strong> <code>[refcount][len][data...]</code>，但 Dial 侧类型独立、零隐式转换）</p>
 <blockquote>
 <p>注意：C 侧 <code>bytes</code> 与 <code>string</code> 是<strong>同一底层表示</strong>，所以这里的 C 签名一律用 <code>DialString</code>
 （而不是另起一个 <code>DialBytes</code> typedef）。<code>dial_bytes_*</code> 与 <code>dial_string_*</code> 共享 ARC 原语
@@ -2469,9 +2469,9 @@ void     dial_map_release(DialMap m);
 </tr>
 </tbody>
 </table>
-<h3 id="161-连续输出print_raw--write_charv0982">16.1 连续输出：<code>print_raw</code> / <code>write_char</code>（v0.98.2）</h3>
-<p><code>print</code> 永远在末尾追加 <code>\n</code>，因此<strong>需要连续输出的程序在 v0.98.2 之前写不出来</strong>
-（拼行表格、进度条、逐字动画、协议帧）。v0.98.2 补齐两个内置：</p>
+<h3 id="161-连续输出print_raw--write_charv099">16.1 连续输出：<code>print_raw</code> / <code>write_char</code>（v0.99）</h3>
+<p><code>print</code> 永远在末尾追加 <code>\n</code>，因此<strong>需要连续输出的程序在 v0.99 之前写不出来</strong>
+（拼行表格、进度条、逐字动画、协议帧）。v0.99 补齐两个内置：</p>
 <table>
 <thead>
 <tr>
@@ -2502,7 +2502,7 @@ write_char('H');
 write_char('i');
 print(&quot;&quot;);        // -&gt; Hi
 </code></pre>
-<p>完整语义、示例与实现细节见 <a href="#55-输出三件套连续输出v0982">§5.5</a>。</p>
+<p>完整语义、示例与实现细节见 <a href="#55-输出三件套连续输出v099">§5.5</a>。</p>
 <hr />
 <h2 id="17-未定义行为与已实现边界">17. 未定义行为与已实现边界</h2>
 <p>诚实列出边界，避免"文档写了、实现没有"的冲突。</p>
@@ -2574,9 +2574,9 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <strong><code>char</code> 类型（v0.92，见 §5.1）</strong>、<strong><code>import</code> 与 <code>.dialpkg</code> 包分发（v0.93，见 §25）</strong>、
 <strong>三平台原生构建（v0.97：Linux x86_64 / Windows x64-MinGW / Termux aarch64-musl 全静态）</strong>、
 <strong><code>dialc lsp</code> 语言服务器（v0.94 骨架 → v0.95 增强 → v0.98 工业化，见 §28）</strong>、
-<strong>连续输出三件套 <code>print_raw</code> / <code>write_char</code> / <code>str(char)</code>（v0.98.2，见 §5.5 与 §16.1）</strong>、
-<strong><code>byte</code> 单字节值类型与 <code>bytes</code> 二进制缓冲区（v0.98.2，见 §5.6 与 §5.7）</strong>、
-<strong>多维数组 <code>int[][]</code> 与句柄元素数组 <code>string[]</code> / <code>map[]</code> / <code>error[]</code> / <code>channel[]</code>（v0.98.2，见 <a href="#116-多维数组与句柄元素数组">§11.6</a> 与 <a href="#52-类型良构性约束">§5.2</a>）：数组元素类型扩展到 int 与 8 字节句柄，按元素 ARC 管理所有权</strong>。
+<strong>连续输出三件套 <code>print_raw</code> / <code>write_char</code> / <code>str(char)</code>（v0.99，见 §5.5 与 §16.1）</strong>、
+<strong><code>byte</code> 单字节值类型与 <code>bytes</code> 二进制缓冲区（v0.99，见 §5.6 与 §5.7）</strong>、
+<strong>多维数组 <code>int[][]</code> 与句柄元素数组 <code>string[]</code> / <code>map[]</code> / <code>error[]</code> / <code>channel[]</code>（v0.99，见 <a href="#116-多维数组与句柄元素数组">§11.6</a> 与 <a href="#52-类型良构性约束">§5.2</a>）：数组元素类型扩展到 int 与 8 字节句柄，按元素 ARC 管理所有权</strong>。
 其余仍按计划未实现：</p>
 </blockquote>
 <table>
@@ -2589,7 +2589,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <tbody>
 <tr>
 <td>裸块 <code>{ ... }</code></td>
-<td><strong>已支持</strong>（v0.98.2）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 <a href="#86-裸块独立的词法作用域v0982">§8.6</a></td>
+<td><strong>已支持</strong>（v0.99）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 <a href="#86-裸块独立的词法作用域v099">§8.6</a></td>
 </tr>
 <tr>
 <td>模块 / 包 / import</td>
@@ -5711,7 +5711,7 @@ If omitted the notification should not be sent.</em>」——纯数字形式里<
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.98.1 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.99 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

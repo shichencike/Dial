@@ -20,6 +20,35 @@
 
 ---
 
+## [v0.99] — 2026-11-03
+
+本版是 **v0.98 线的功能发布（`+0.01`，非补丁）**：数组从「只能装 `int`」扩展到
+「`int` 或任意 8 字节句柄」，并支持多维数组与嵌套下标赋值。所有基于 v0.98 的程序
+**无需改动即可运行**；用到新能力的程序获得了更大的表达力。
+
+> 说明：本版同时正式收纳此前以「v0.98.2（规划）」叙述的连续输出三件套
+>（`print_raw` / `write_char` / `str(char)`）、`byte` 单字节值类型与 `bytes` 二进制缓冲区、
+> 裸块 `{ ... }` 词法作用域——它们随本版一并发布，文档锚点已统一为 v0.99。
+
+### Added（新增）
+- **多维数组 `int[][]`**：内层 `int[]` 作为 8 字节句柄直接存储，支持嵌套读 / 写 / 遍历 / `push`。
+- **句柄元素数组** `string[]` / `map[]` / `error[]` / `channel[]` / 不透明指针 `[]`：
+  数组头部新增 `kind` 字段（`INT` / `RC` / `ATOMIC`），按元素 ARC 复用
+  `dial_rc_*` 与 `dial_channel_*`，正确 `retain` / `release` 元素所有权。
+- **嵌套下标赋值 `a[i][j] = v`**：编译器新增递归左值解析 `gen_assign_lvalue`，
+  逐层 `gen_expr` 取出内层数组句柄 → `dial_array_set` 写入 → 写回可能 COW 更新的外层句柄，
+  直到最外层变量槽。单层 `a[i] = v` 路径不受影响。
+- 新增示例 `examples/multi_dim_demo.dial`、`examples/string_array_demo.dial`、
+  `examples/channel_array.dial` 及对应黄金文件（纳入 A 组回归）。
+- 新增负向用例 `tests/bad/array_bool_elem.dial` / `array_byte_elem.dial` / `array_char_elem.dial`，
+  锁定 `float[]` / `bool[]` / `byte[]` / `char[]` 等标量非 int 元素仍被编译期拒绝。
+
+### Changed（变更）
+- README §5.1/§5.2/§11/§11.6/§17.2 与官网 `spec.html` 同步：数组元素类型扩展到
+  `int` 与 8 字节句柄，多维数组与嵌套下标赋值正式从「未实现」移除。
+
+---
+
 ## [v0.98.1] — 2026-11-02
 
 本版是 **v0.98 的修复发布（补丁位）**：只修缺陷与文档矛盾，**不含任何新特性**，

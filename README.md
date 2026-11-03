@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v0.98.1
+# dialc — Dial 语言编译器 v0.99
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -461,9 +461,9 @@ int  float  bool  char  string  void  file  error  thread  channel
 | `float` | LLVM `double` | 双精度浮点 |
 | `bool` | LLVM `i1` | 布尔 |
 | `char` | LLVM `i64` | **单个 Unicode 码点**（v0.92）。**值类型**：无 ARC、无堆分配、无空指针。与 `int` 同表示但**类型独立**——不参与 `+ - * /`，只可比较，或经 `char_to_int` / `int_to_char` 显式转换。字面量写作 `'a'`、`'\n'`、`'中'` |
-| `byte` | LLVM `i64` | **单字节无符号值**（v0.98.2）。**值类型**：与 `char` 同表示但语义不同——`byte` 是 0~255 的**数值**，参与算术、比较，经 `int_to_byte` / `byte_to_int` 与 `int` 显式互转；与 `char`（码点）严格区分，避免「一个字节到底是字符还是数字」的歧义 |
+| `byte` | LLVM `i64` | **单字节无符号值**（v0.99）。**值类型**：与 `char` 同表示但语义不同——`byte` 是 0~255 的**数值**，参与算术、比较，经 `int_to_byte` / `byte_to_int` 与 `int` 显式互转；与 `char`（码点）严格区分，避免「一个字节到底是字符还是数字」的歧义 |
 | `string` | LLVM `ptr`（不透明） | 由 C Runtime 管理的引用计数字符串 |
-| `bytes` | LLVM `ptr`（不透明） | 不可变二进制缓冲区（v0.98.2），由 C Runtime 管理的引用计数对象，**独立于 `string`**（零隐式转换）。承载任意字节序列（可能非法 UTF-8）。构造/转换见 [§5.7](#57-bytes二进制缓冲区v0982) |
+| `bytes` | LLVM `ptr`（不透明） | 不可变二进制缓冲区（v0.99），由 C Runtime 管理的引用计数对象，**独立于 `string`**（零隐式转换）。承载任意字节序列（可能非法 UTF-8）。构造/转换见 [§5.7](#57-bytes二进制缓冲区v099) |
 | `int[]` | LLVM `ptr`（不透明） | 由 C Runtime 管理的动态数组。**元素类型可为 `int` 或任意 8 字节句柄**（见 [§11](#11-动态数组-int)）：`string[]` / `int[][]` / `map[]` / `error[]` / `channel[]` / 不透明指针数组；`float[]` / `bool[]` / `byte[]` / `char[]` 等标量非 int 元素在编译期拒绝（见 [§5.2](#52-类型良构性约束)） |
 | `file` | LLVM `ptr`（不透明） | 文件句柄，封装 C 的 `FILE*`；显式 `open` / `close`，**不受 ARC 管理**（见 [§24](#24-文件-iofile-句柄)） |
 | `error` | LLVM `ptr`（不透明） | **可恢复异常对象**（v0.7），由 C Runtime 管理的 ARC 类型；由 `Error("msg")` 构造、`throw` 抛出、`catch` 捕获（见 [§26](#26-可恢复异常trycatchthrow)） |
@@ -480,7 +480,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 | --- | --- |
 | `float[]` | ❌ 错误。数组元素只支持 `int` 与 8 字节句柄（string / int[] / map / error / channel / 不透明指针）；`float` 是 double，位模式塞进 int64 槽会失真，必须拒绝（见 [§5.1](#51-基本类型)） |
 | `bool[]` / `byte[]` / `char[]` | ❌ 错误。标量（1/4 字节）无法塞进数组的「8 字节槽位」，编译期拒绝（见 [§5.1](#51-基本类型)） |
-| `int[][]` | ✅ **支持**（v0.98.2）：多维数组 =「元素是数组句柄的数组」，内层 `int[]` 作为 8 字节句柄统一管理（见 [§11.6](#116-多维数组与句柄元素数组)） |
+| `int[][]` | ✅ **支持**（v0.99）：多维数组 =「元素是数组句柄的数组」，内层 `int[]` 作为 8 字节句柄统一管理（见 [§11.6](#116-多维数组与句柄元素数组)） |
 | `var v: void = ...` | ❌ 错误。`void` 不能作为变量类型 |
 
 > 之所以在编译期拒绝 `float[]` / `bool[]` / `byte[]` / `char[]`：C 侧 `dial_array_*` 以 `int64` 存储元素，
@@ -566,15 +566,15 @@ Dial 的选择是让源码把意图写清楚：要码点就 `char_to_int('a') + 
 C Runtime 会在打印时**当场打印诊断并终止**，绝不输出半个坏字符——
 静默产出乱码比当场崩溃更危险，它会在下游变成无法复现的数据损坏（Fail-Fast 铁律 §20）。
 
-### 5.5 输出三件套：连续输出（v0.98.2）
+### 5.5 输出三件套：连续输出（v0.99）
 
 `print(x)` **永远在末尾追加一个 `\n`**——它表达的是「打印一行」。
 但很多程序需要的不是「一行」，而是**一段连续的字节流**：拼行的表格、
-进度条、逐字动画、协议帧、日志尾巴。这类程序在 v0.98.2 之前**根本写不出来**：
+进度条、逐字动画、协议帧、日志尾巴。这类程序在 v0.99 之前**根本写不出来**：
 唯一的输出手段 `print` 每写一次就断一行，想拼出一行就得把内容先拼成一个大字符串
 （`"a" + "b" + ...`），而这既啰嗦又不适用于「边算边输出」的场景。
 
-v0.98.2 补齐三个内置，构成输出的最小完备集：
+v0.99 补齐三个内置，构成输出的最小完备集：
 
 | 内置 | 签名 | 输出 | 追加换行？ |
 | --- | --- | --- | --- |
@@ -611,7 +611,7 @@ print("");
 **`print_raw` 的返回值**：无（与 `print` 一致，都是**语句**而非表达式），
 不能出现在赋值右侧或 `return` 位置。
 
-**`str(char)`**：`str()` 在 v0.98.2 起接受 `char` 实参，返回**只含这一个字符**的 UTF-8 字符串
+**`str(char)`**：`str()` 在 v0.99 起接受 `char` 实参，返回**只含这一个字符**的 UTF-8 字符串
 （ASCII 字符为 1 字节，多字节码点如 `'中'` 为 3 字节）。它让字符能直接参与字符串拼接：
 
 ```dial
@@ -632,7 +632,7 @@ let s: string = str('A') + "BC";   // "ABC"
 
 ---
 
-### 5.6 `byte`：单字节无符号值（v0.98.2）
+### 5.6 `byte`：单字节无符号值（v0.99）
 
 `byte` 是 **0~255 的无符号单字节值类型**，与 `char` 故意区分：
 
@@ -660,7 +660,7 @@ print(c);            // A    —— char 按**字符**打印
 - `byte_to_int(b: byte): int`：零成本（同 `i64` 表示），仅类型重解释。
 - `byte` 是**值类型**：无 ARC、无堆分配、无空指针，可参与算术与比较。
 
-### 5.7 `bytes`：二进制缓冲区（v0.98.2）
+### 5.7 `bytes`：二进制缓冲区（v0.99）
 
 `bytes` 是不可变的**二进制缓冲区**，由 C Runtime 以引用计数（ARC）管理，**与 `string` 类型独立**——
 二者零隐式转换。它用来承载「任意字节序列」，包括**非法 UTF-8** 的原始数据（网络报文、加密 blob、图像字节等），
@@ -797,8 +797,8 @@ x = 2;                     // 赋值
 p.x = 3;                   // 字段赋值
 a[0] = 4;                  // 下标赋值
 print(e);                  // 打印语句（追加换行）
-print_raw(e);              // 原样打印语句（v0.98.2，不追加换行）
-write_char(c);             // 输出单字符（v0.98.2，不追加换行）
+print_raw(e);              // 原样打印语句（v0.99，不追加换行）
+write_char(c);             // 输出单字符（v0.99，不追加换行）
 f(1, 2);                   // 表达式语句
 if (cond) { ... } else { ... }
 if (cond) { ... } else if (c2) { ... } else { ... }   // else if 语法糖
@@ -872,11 +872,11 @@ while (n < 10) {
 ### 8.5 块与作用域
 
 `{ ... }` 既可以作为函数体或 `if`/`while`/`for` 的分支体，**也可以**作为**独立的裸块语句**
-（v0.98.2 起，见 [§8.6](#86-裸块独立的词法作用域v0982)）。
+（v0.99 起，见 [§8.6](#86-裸块独立的词法作用域v099)）。
 
 ---
 
-### 8.6 裸块：独立的词法作用域（v0.98.2）
+### 8.6 裸块：独立的词法作用域（v0.99）
 
 裸块 `{ ... }` 是一个**语句**，用来显式划定一段代码的作用域。它的用途有三：
 
@@ -1022,14 +1022,14 @@ print(r.origin.x);     // 支持链式
 ## 11. 动态数组 `int[]`
 
 `int[]` 是不透明指针，内存布局 `[refcount][kind][len][cap][elems...]`（头部 `kind` 记录元素类别）由 C 侧私有维护。
-**元素类型可为 `int`，或任意 8 字节句柄**：`string` / `int[]`（多维）/ `map` / `error` / `channel` / 不透明指针（v0.98.2 起，见 [§11.6](#116-多维数组与句柄元素数组)）。
+**元素类型可为 `int`，或任意 8 字节句柄**：`string` / `int[]`（多维）/ `map` / `error` / `channel` / 不透明指针（v0.99 起，见 [§11.6](#116-多维数组与句柄元素数组)）。
 
 ### 11.1 构造
 
 ```dial
 var a: int[] = [10, 20, 30];
-var names: string[] = ["alice", "bob", "carol"];   // v0.98.2：句柄元素
-var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.98.2：多维（元素是 int[] 句柄）
+var names: string[] = ["alice", "bob", "carol"];   // v0.99：句柄元素
+var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.99：多维（元素是 int[] 句柄）
 ```
 
 空数组字面量 `[]` 不支持（无法推断元素类型）。
@@ -1044,7 +1044,7 @@ var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.98.2：多维（元素�
 | `a.set(i, v)` | `dial_array_set` | 数组类型 | 按下标写；被共享时内部触发 COW，**返回新指针** |
 | `a.clone()` | `dial_array_clone` | 数组类型 | COW 感知克隆 |
 
-下标语法 `a[i]` 等价于 `a.get(i)`；`a[i] = v` 等价于 `a = a.set(i, v)`。嵌套下标 `a[i][j] = v` 同样支持（v0.98.2，见 [§11.6](#116-多维数组与句柄元素数组)）。
+下标语法 `a[i]` 等价于 `a.get(i)`；`a[i] = v` 等价于 `a = a.set(i, v)`。嵌套下标 `a[i][j] = v` 同样支持（v0.99，见 [§11.6](#116-多维数组与句柄元素数组)）。
 
 ### 11.3 为什么 `push` / `set` 要返回指针
 
@@ -1084,7 +1084,7 @@ a[0] = 99;      // 同理
 
 ### 11.6 多维数组与句柄元素数组
 
-v0.98.2 起，数组不再「只能装 int」。只要元素类型是 `int` 或**任意 8 字节句柄**，就能直接存储——
+v0.99 起，数组不再「只能装 int」。只要元素类型是 `int` 或**任意 8 字节句柄**，就能直接存储——
 因为所有不透明句柄（`string` / `int[]` / `map` / `error` / 不透明指针）共享同一份 `dial_rc_*` 引用计数，
 `channel` 则走原子引用计数 `dial_channel_*`。数组头部用一个 `kind` 字段记下自己的元素类别，
 `push` / `set` / 克隆 / 释放时据此对元素做对应的 retain / release，从而实现**按元素 ARC**。
@@ -1359,9 +1359,9 @@ x = x;   // 先 retain（计数 1→2），再 release（2→1），绝不会先
 | `write(f, c)` | `call i64 @dial_file_write(ptr %f, ptr %c)`（返回写入字节数，失败 -1） |
 | `close(f)` | `call void @dial_file_close(ptr %f)`（空指针安全） |
 | `print(x)` | `dial_print_int` / `dial_print_float` / `dial_print_bool` / `dial_print_char` / `dial_print_string` |
-| `print_raw(x)`（v0.98.2） | `dial_print_raw` / `dial_print_raw_int` / `dial_print_raw_float` / `dial_print_raw_bool` / `dial_write_char`（**均不追加换行**） |
-| `write_char(c)`（v0.98.2） | `call void @dial_write_char(i64 %c)`（不追加换行） |
-| `str(c)`（`c` 为 `char`，v0.98.2） | `call ptr @dial_char_to_string(i64 %c)`（编码为 UTF-8，1~4 字节） |
+| `print_raw(x)`（v0.99） | `dial_print_raw` / `dial_print_raw_int` / `dial_print_raw_float` / `dial_print_raw_bool` / `dial_write_char`（**均不追加换行**） |
+| `write_char(c)`（v0.99） | `call void @dial_write_char(i64 %c)`（不追加换行） |
+| `str(c)`（`c` 为 `char`，v0.99） | `call ptr @dial_char_to_string(i64 %c)`（编码为 UTF-8，1~4 字节） |
 | 变量绑定（共享） | `dial_string_retain` / `dial_array_retain` / `dial_map_retain` |
 | 作用域结束 | `dial_string_release` / `dial_array_release` / `dial_map_release` |
 
@@ -1389,8 +1389,8 @@ DialString dial_string_clone(DialString s);
 void       dial_string_retain(DialString s);
 void       dial_string_release(DialString s);
 void       dial_print_string(DialString s);
-DialString dial_char_to_string(int64_t code);       // v0.98.2：码点 → UTF-8 字符串（1~4 字节）
-int        dial_encode_utf8(int64_t code, char *buf); // v0.98.2：运行时内唯一的码点编码实现
+DialString dial_char_to_string(int64_t code);       // v0.99：码点 → UTF-8 字符串（1~4 字节）
+int        dial_encode_utf8(int64_t code, char *buf); // v0.99：运行时内唯一的码点编码实现
 ```
 
 **`stdlib/dial_array.h`**
@@ -1416,7 +1416,7 @@ void       dial_print_char(int64_t code);   // 输出码点对应的 UTF-8 字�
 void       dial_print_string(DialString s);
 DialString dial_read_line(void);                  // 已暴露为 read_line()
 
-// 连续输出（v0.98.2）：均**不追加换行**，是「拼行 / 进度条 / 逐字输出」的基本积木。
+// 连续输出（v0.99）：均**不追加换行**，是「拼行 / 进度条 / 逐字输出」的基本积木。
 void       dial_print_raw(DialString s);      // 原样输出字符串（按字节长度，内嵌 '\0' 不截断）
 void       dial_write_char(int64_t code);     // 输出单个字符
 void       dial_print_raw_int(int64_t v);     // 标量版（栈缓冲，零堆分配）
@@ -1431,7 +1431,7 @@ int64_t   dial_file_write(DialFile f, DialString content);   // 已暴露为 wri
 void      dial_file_close(DialFile f);                       // 已暴露为 close(f)，空指针安全
 ```
 
-**`stdlib/dial_bytes.h`**（v0.98.2：与 `string` **共享同一 C 布局** `[refcount][len][data...]`，但 Dial 侧类型独立、零隐式转换）
+**`stdlib/dial_bytes.h`**（v0.99：与 `string` **共享同一 C 布局** `[refcount][len][data...]`，但 Dial 侧类型独立、零隐式转换）
 
 > 注意：C 侧 `bytes` 与 `string` 是**同一底层表示**，所以这里的 C 签名一律用 `DialString`
 > （而不是另起一个 `DialBytes` typedef）。`dial_bytes_*` 与 `dial_string_*` 共享 ARC 原语
@@ -1491,10 +1491,10 @@ print(e);
   | `string` | 内容（按字节长度原样写出） | ✅ |
   | `error` | 错误消息字符串 | ✅ |
 
-### 16.1 连续输出：`print_raw` / `write_char`（v0.98.2）
+### 16.1 连续输出：`print_raw` / `write_char`（v0.99）
 
-`print` 永远在末尾追加 `\n`，因此**需要连续输出的程序在 v0.98.2 之前写不出来**
-（拼行表格、进度条、逐字动画、协议帧）。v0.98.2 补齐两个内置：
+`print` 永远在末尾追加 `\n`，因此**需要连续输出的程序在 v0.99 之前写不出来**
+（拼行表格、进度条、逐字动画、协议帧）。v0.99 补齐两个内置：
 
 | 内置 | 签名 | 与 `print` 的差别 |
 | --- | --- | --- |
@@ -1512,7 +1512,7 @@ write_char('i');
 print("");        // -> Hi
 ```
 
-完整语义、示例与实现细节见 [§5.5](#55-输出三件套连续输出v0982)。
+完整语义、示例与实现细节见 [§5.5](#55-输出三件套连续输出v099)。
 
 ---
 
@@ -1549,14 +1549,14 @@ print("");        // -> Hi
 > **`char` 类型（v0.92，见 §5.1）**、**`import` 与 `.dialpkg` 包分发（v0.93，见 §25）**、
 > **三平台原生构建（v0.97：Linux x86_64 / Windows x64-MinGW / Termux aarch64-musl 全静态）**、
 > **`dialc lsp` 语言服务器（v0.94 骨架 → v0.95 增强 → v0.98 工业化，见 §28）**、
-> **连续输出三件套 `print_raw` / `write_char` / `str(char)`（v0.98.2，见 §5.5 与 §16.1）**、
-> **`byte` 单字节值类型与 `bytes` 二进制缓冲区（v0.98.2，见 §5.6 与 §5.7）**、
-> **多维数组 `int[][]` 与句柄元素数组 `string[]` / `map[]` / `error[]` / `channel[]`（v0.98.2，见 [§11.6](#116-多维数组与句柄元素数组) 与 [§5.2](#52-类型良构性约束)）：数组元素类型扩展到 int 与 8 字节句柄，按元素 ARC 管理所有权**。
+> **连续输出三件套 `print_raw` / `write_char` / `str(char)`（v0.99，见 §5.5 与 §16.1）**、
+> **`byte` 单字节值类型与 `bytes` 二进制缓冲区（v0.99，见 §5.6 与 §5.7）**、
+> **多维数组 `int[][]` 与句柄元素数组 `string[]` / `map[]` / `error[]` / `channel[]`（v0.99，见 [§11.6](#116-多维数组与句柄元素数组) 与 [§5.2](#52-类型良构性约束)）：数组元素类型扩展到 int 与 8 字节句柄，按元素 ARC 管理所有权**。
 > 其余仍按计划未实现：
 
 | 能力 | 状态 |
 | --- | --- |
-| 裸块 `{ ... }` | **已支持**（v0.98.2）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 [§8.6](#86-裸块独立的词法作用域v0982) |
+| 裸块 `{ ... }` | **已支持**（v0.99）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 [§8.6](#86-裸块独立的词法作用域v099) |
 | 模块 / 包 / import | **已支持**（v0.93；`dialc install <URL>` 于 v0.96 落地）：`import "包名";` + `dialc install <本地文件\|URL>`，见 [§25](#25-包分发与依赖管理生态规划--最终规范)。**尚未实现**：源码形式的模块拆分（无 `mod`） |
 | 泛型、接口、trait、闭包 | 不支持（`channel<T>` 是内建特化语法，不是用户泛型） |
 | 指针、地址取值、指针算术 | **永不提供**（与不透明指针契约冲突） |
