@@ -74,7 +74,14 @@ DialString dial_string_substring(DialString s, int64_t from, int64_t to) {
 }
 
 DialString dial_string_clone(DialString s) {
-    return dial_rc_clone(s, 8 + ((int64_t *)s)[0] + 1);
+    if (!s) return NULL;
+    /* clone() 必须交出「一份独立副本」：先 retain 让「唯一持有者」判定失效，迫使
+     * dial_rc_clone 走进深拷贝分支，克隆完再抵消掉刚才那次 retain。
+     * （dial_rc_clone 是纯粹的 COW：唯一持有者时原样返回、不改引用计数。） */
+    dial_rc_retain(s);
+    DialString n = dial_rc_clone(s, 8 + ((int64_t *)s)[0] + 1);
+    dial_rc_release(s);
+    return n;
 }
 
 void dial_string_retain(DialString s) { dial_rc_retain(s); }

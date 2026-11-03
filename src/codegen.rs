@@ -327,6 +327,13 @@ impl<'ctx> CodeGen<'ctx> {
             i8b,
             &[i8b.into(), i64b.into(), i64b.into()],
         );
+        // 嵌套下标赋值专用：与 dial_array_set 同签名，但**不消耗** a 的引用
+        // （a 是从外层数组元素槽借来的），改为交出「一份新拥有」的引用。
+        self.decl_func(
+            "dial_array_set_borrowed",
+            i8b,
+            &[i8b.into(), i64b.into(), i64b.into()],
+        );
         self.decl_func("dial_array_length", i64b, &[i8b.into()]);
         self.decl_func("dial_array_clone", i8b, &[i8b.into()]);
         self.decl_void("dial_array_retain", &[i8b.into()]);
@@ -1252,8 +1259,14 @@ impl<'ctx> CodeGen<'ctx> {
                     .rev()
                     .find_map(|s| s.get(name).map(|v| v.clone()))
                     .ok_or_else(|| DialcError::new(format!("未声明的变量 '{}'", name), 0, 0))?;
-                let (_ty, (_m, ptr)) = info;
+                let (vty, (_m, ptr)) = info;
+                // value 是「一份新拥有」的引用（dial_array_set_borrowed 的返回值），
+                // 写回槽位后由槽位持有；槽位原先持有的那一份引用必须释放——
+                // 否则每写一次嵌套下标就漏 1 个引用计数，COW 守卫随之恒真，
+                // 每次嵌套赋值都深拷贝整层数组。
+                let old = self.builder.build_load(self.i8ptr(), ptr, "oldval").unwrap();
                 self.builder.build_store(ptr, value).unwrap();
+                self.release_value(&vty, old);
                 Ok(())
             }
             Expr::Index(container, idx) => {
@@ -1269,12 +1282,24 @@ impl<'ctx> CodeGen<'ctx> {
                     self.emit_bounds_check(function, len.into_int_value(), ii64);
                 }
                 let v = self.to_i64(value, value_ty);
+                // 用 set_borrowed 而非 set：carr 是从外层数组**元素槽借来**的指针，
+                // 它的那一份引用属于外层数组，不能在这里被消耗掉（否则外层元素替换
+                // 时会重复释放同一份引用）。set_borrowed 不消耗它，而是交出
+                // 「一份新拥有」的引用，由本层负责在装回外层后释放。
                 let new_child = self.call_c(
-                    "dial_array_set",
+                    "dial_array_set_borrowed",
                     &[carr.into(), ii64.into(), v.into()],
                 );
                 // 把新容器写回 container 左值（递归处理更外层）
-                self.gen_assign_lvalue(container, new_child, &cty, function, scopes, func_values, functions, structs)
+                self.gen_assign_lvalue(container, new_child, &cty, function, scopes, func_values, functions, structs)?;
+                // 所有权结算：本层是**消费者**——value 的那一份所有权是上一层交给我们的。
+                // 元素替换（dial_array_set_borrowed 内部）对 value 额外 retain 了一份，
+                // 归 container 的元素槽所有；所以我们手里这一份必须释放。
+                //
+                // 对照：Var 分支是「转移」（槽位直接接管 value 的那一份），故它不释放 value，
+                // 只释放槽位原先持有的旧引用。两者不可互换——放错位置就是双重释放或泄漏。
+                self.release_value(value_ty, value);
+                Ok(())
             }
             _ => Err(DialcError::new(
                 "语义错误：索引赋值目标必须是变量或数组下标",

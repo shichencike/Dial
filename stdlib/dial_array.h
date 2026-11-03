@@ -26,6 +26,10 @@ DialArray dial_array_new(int64_t kind);
 DialArray dial_array_push(DialArray a, int64_t v);   /* 返回（可能更新后的）指针 */
 int64_t  dial_array_get(DialArray a, int64_t i);
 DialArray dial_array_set(DialArray a, int64_t i, int64_t v); /* 被共享时内部触发 COW，返回新指针 */
+
+/* 嵌套下标赋值专用：**不消耗** a 的引用（a 是从外层数组元素槽借来的），
+ * 返回一份「新拥有」的引用，由调用方用完后自行 release。 */
+DialArray dial_array_set_borrowed(DialArray a, int64_t i, int64_t v);
 int64_t  dial_array_length(DialArray a);
 
 DialArray dial_array_clone(DialArray a);

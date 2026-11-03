@@ -1,0 +1,46 @@
+// 所有权语义回归用例：clone / COW / 嵌套赋值 / 句柄元素数组。
+//
+// 这些语义正是 v0.99 修掉引用计数泄漏时动过的地方，必须逐条钉死：
+//   1) clone() 必须是**独立副本**（改副本不影响原数组）；
+//   2) 共享（var c = a）时写 a 不得污染 c——COW 必须真的隔离；
+//   3) 字符串 clone 必须独立；
+//   4) 嵌套下标赋值 m[i][j] = v 必须只改目标那一格；
+//   5) 句柄元素数组（string[]）的 clone 必须独立。
+
+fn main(): int {
+    // 1) clone 独立
+    var a: int[] = [1, 2, 3];
+    var b: int[] = a.clone();
+    b[0] = 99;
+    print(a.get(0));     // 1
+    print(b.get(0));     // 99
+
+    // 2) 共享时的 COW 隔离
+    var c: int[] = a;
+    a[1] = 55;
+    print(c.get(1));     // 2
+    print(a.get(1));     // 55
+
+    // 3) 字符串 clone 独立
+    var s: string = "hello";
+    var t: string = s.clone();
+    print(s);            // hello
+    print(t);            // hello
+    print(s == t);       // true
+
+    // 4) 嵌套赋值只改目标格
+    var m: int[][] = [[1, 2], [3, 4, 5]];
+    m[0][0] = 11;
+    m[1][2] = 77;
+    print(m[0][0]);      // 11
+    print(m[1][2]);      // 77
+    print(m[0][1]);      // 2（未被牵连）
+
+    // 5) 句柄元素数组的 clone 独立
+    var names: string[] = ["x", "y"];
+    var n2: string[] = names.clone();
+    n2.set(0, "z");
+    print(names.get(0)); // x
+    print(n2.get(0));    // z
+    return 0;
+}

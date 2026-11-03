@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v0.99
+# dialc — Dial 语言编译器 v0.99.1
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -1042,7 +1042,7 @@ var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.99：多维（元素是
 | `a.get(i)` | `dial_array_get` | 元素类型（`int` 或句柄指针） | 按下标读 |
 | `a.push(v)` | `dial_array_push` | 数组类型（如 `int[]` / `string[]`） | 追加；**返回（可能更新后的）数组指针** |
 | `a.set(i, v)` | `dial_array_set` | 数组类型 | 按下标写；被共享时内部触发 COW，**返回新指针** |
-| `a.clone()` | `dial_array_clone` | 数组类型 | COW 感知克隆 |
+| `a.clone()` | `dial_array_clone` | 数组类型 | **独立副本**（深拷贝，元素引用另行计数） |
 
 下标语法 `a[i]` 等价于 `a.get(i)`；`a[i] = v` 等价于 `a = a.set(i, v)`。嵌套下标 `a[i][j] = v` 同样支持（v0.99，见 [§11.6](#116-多维数组与句柄元素数组)）。
 
@@ -1060,6 +1060,17 @@ a[0] = 99;      // 同理
 > 此处**不**对旧指针做 `release`：`dial_array_push` / `dial_array_set` 已经在
 > C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并释放本调用者的引用）。
 > 若编译器再补一次 `release`，会造成悬垂指针或双重释放。
+
+**「独占」路径必须原样移交所有权，一个引用计数都不能动。** 这是最容易写错的一处：
+
+| 情形 | `refcount` | C 侧该做什么 | 做错的后果 |
+| --- | --- | --- | --- |
+| 独占（`== 1`） | 保持 **1** | 原地写入，**不 retain、不 release** | 多一次 `retain` → 每写一次计数 +1 → COW 守卫 `refcount > 1` 恒真 → **每次赋值都深拷贝整个数组**（O(N²) 内存） |
+| 共享（`> 1`） | 减 **1** | 克隆出新 buffer，并 `release` 旧 buffer | 漏掉 `release` → 旧 buffer 与其元素永久泄漏 |
+
+> v0.99 实测：违反「独占路径不动计数」这条不变量时，`a[i] = v` 循环 100 万次
+> 需要约 **8 TB** 内存（进程被 OOM Killed）；修正后峰值约 **10 MB**。
+> 该不变量现由测试组 N 以「虚拟内存上限」钉死（见 `tests/mem/`）。
 
 ### 11.4 接收者必须是可变变量（`var`）
 
@@ -1214,7 +1225,7 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 | `s.concat(t)` | `dial_string_concat` | `string` | 拼接，产生新对象 |
 | `s.get(i)` | `dial_string_get` | `int` | 取第 `i` 个**字节**的值（`0~255`）。**注意**：这是字节、不是 Unicode 码点——`"中".get(0)` 返回 `228`（`'中'` 的 UTF-8 首字节），而非码点 `20013`。想要 `char` 请显式转换 `int_to_char(s.get(i))`（v0.92 起）；但对多字节字符，只取首字节并不能还原该字符 |
 | `s.substring(from, to)` | `dial_string_substring` | `string` | 半开区间 `[from, to)` |
-| `s.clone()` | `dial_string_clone` | `string` | COW 感知克隆 |
+| `s.clone()` | `dial_string_clone` | `string` | **独立副本**（深拷贝） |
 | `s.eq(t)` | `dial_string_eq` | `bool` | 按内容比较 |
 
 `==` / `!=` 对 `string` 按**内容**比较（编译为 `dial_string_eq`），而非比较指针地址。
@@ -1443,7 +1454,7 @@ DialString dial_bytes_to_string(DialString b);      // 已暴露为 bytes_to_str
 DialString dial_bytes_zero(int64_t len);           // 已暴露为 bytes_new(len)，全零填充
 int64_t    dial_bytes_length(DialString b);        // 已暴露为 bytes_length(b)
 int64_t    dial_bytes_get(DialString b, int64_t i);// 已暴露为 bytes_get(b, i)，越界 Fail-Fast
-DialString dial_bytes_clone(DialString b);         // COW 感知克隆
+DialString dial_bytes_clone(DialString b);         // 独立副本（深拷贝）
 void       dial_bytes_retain(DialString b);
 void       dial_bytes_release(DialString b);
 ```

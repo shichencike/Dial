@@ -32,14 +32,15 @@ void *dial_rc_clone(void *p, int64_t payload_size) {
     // 与 retain/release 对齐：传入已是 freed 的指针（refcount <= 0）时立刻终止，
     // 而非去读 ((int64_t*)p)[-1] 这块已归还给分配器的内存（那是 use-after-free）。
     DIAL_HEAP_ASSERT(((int64_t *)p)[-1] > 0, "clone 了已释放的对象（use-after-free）");
-    // COW 命中（唯一持有者）：可以复用同一块内存，但**必须**把引用计数 +1，
-    // 因为「原对象」与「克隆」现在是两个独立的持有者。
-    // 旧实现直接 `return p` 而漏了 +1，导致引用计数少计 -> 后续 dial_array_set 的
-    // COW 守卫 `refcount > 1` 失效：在某线程修改克隆的数组元素时，原数组跟着被改写
-    // （数据竞争），任意一次 release 更会立刻 double-free / use-after-free。
-    // （CVE-2024-DIAL-003 根因）
+    // 纯粹的 COW 克隆：
+    //   - 唯一持有者（refcount==1）：直接返回同一块内存，**不改动引用计数**；
+    //   - 多个持有者（refcount>1）：深拷贝出一份独立副本（引用计数为 1）。
+    //
+    // 这里刻意**不**再 +1：克隆是「借用者的只读视图」，本身不产生新的所有权。
+    // 真正需要「一份独立副本」的调用方（各类型的 clone() 方法）在自己的 C 实现里
+    // 用「先 retain 再 clone 再 release」强制走进深拷贝分支——那样既拿到独立副本，
+    // 又不会像过去那样给原对象凭空 +1（那会让 COW 守卫 refcount>1 恒真）。
     if (((int64_t *)p)[-1] == 1) {
-        ((int64_t *)p)[-1] += 1;
         return p;
     }
     void *n = dial_rc_alloc(payload_size);

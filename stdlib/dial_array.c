@@ -49,6 +49,21 @@ static void retain_elems(void *a) {
     for (int64_t i = 0; i < len; i++) elem_retain(kind, e[i]);
 }
 
+/* 释放数组 buffer：若是最后一个持有者，先释放它持有的各元素引用，再回收 buffer 本身。
+ * 这是「消耗调用者交来的那一份引用」的统一落点（与 dial_map_put 释放旧 buffer 同款）。 */
+static void release_buffer(void *a) {
+    if (!a) return;
+    if (((int64_t *)a)[-1] == 1) {
+        int64_t kind = a_meta(a)[0];
+        if (kind != DIAL_ELEM_INT) {
+            int64_t len = a_meta(a)[1];
+            int64_t *e = a_elems(a);
+            for (int64_t i = 0; i < len; i++) elem_release(kind, e[i]);
+        }
+    }
+    dial_rc_release(a);
+}
+
 DialArray dial_array_new(int64_t kind) {
     void *p = dial_rc_alloc(a_size(0));
     a_meta(p)[0] = kind;
@@ -61,9 +76,11 @@ static DialArray grow(DialArray a, int64_t need) {
     int64_t len = a_meta(a)[1];
     int64_t cap = a_meta(a)[2];
     if (cap >= need) {
-        // 同指针返回：+1 使其成为「移交所有权」的新值，与赋值语句的「释放旧值」配对，
-        // 避免自赋值 `a = a.push(...)` 的 use-after-free（CVE-2024-DIAL-003 配套修正）。
-        dial_rc_retain(a);
+        // 容量够：原地复用同一块 buffer。
+        // **绝不 retain**——本函数与 dial_map_put 同款契约：「消耗调用者交来的那一份
+        // 引用，返回替换用的新指针」。调用者（codegen）把返回的指针写回槽位后，
+        // 槽位旧指针的那一份引用已经被本函数消耗掉了，调用者**不得**再 release。
+        // 过去这里多做了 retain，于是每 push 一次引用计数就 +1，COW 守卫恒真。
         return a;
     }
     int64_t ncap = cap < 4 ? 4 : cap * 2;
@@ -73,7 +90,8 @@ static DialArray grow(DialArray a, int64_t need) {
     a_meta(p)[1] = len;
     a_meta(p)[2] = ncap;
     memcpy(a_elems(p), a_elems(a), (size_t)len * 8);
-    retain_elems(p);               // 新 buffer 取得各元素所有权；旧 buffer 由调用方释放
+    retain_elems(p);               // 新 buffer 取得各元素所有权
+    release_buffer(a);             // 旧 buffer：最后一个持有者时释放其元素并回收
     return p;
 }
 
@@ -97,24 +115,57 @@ DialArray dial_array_set(DialArray a, int64_t i, int64_t v) {
     DIAL_CHECK_BOUNDS(i, a_meta(a)[1]);
     int64_t kind = a_meta(a)[0];
     /* COW 兜底：若 buffer 被多者共享，原地修改前先克隆，避免污染其他持有者。
-     *   - 共享（refcount>1）：克隆出新 buffer（自带 +1），retain 其元素，旧 buffer 由赋值语句释放；
-     *   - 独占（refcount==1）：原地修改，但返回前 dial_rc_retain 把「同指针」变成
-     *     「移交所有权的新值」，与赋值语句的「释放旧值」配对——否则自赋值
-     *     `a = a.set(...)` 会先释放 a 再把悬垂指针写回（use-after-free）。
-     * （CVE-2024-DIAL-003 修复后的配套修正） */
+     *   - 共享（refcount>1）：克隆出新 buffer（自带引用计数 1），并**消耗掉调用者
+     *     交来的那一份引用**（release 旧 buffer）——与 dial_map_put 完全同款；
+     *   - 独占（refcount==1）：原地写入，**不 retain 不 release**（所有权原样移交，
+     *     引用计数必须保持不变，否则每写一次就 +1）。
+     *
+     * 旧实现两处都错：共享时没 release 旧 buffer（漏一份引用）、独占时多做了 retain
+     * （又凭空 +1）。于是每写一次下标赋值引用计数就涨 1，COW 守卫 `refcount > 1`
+     * 从此**恒真**——每一次 a[i] = v 都深拷贝整个数组，N 次写就是 O(N^2) 内存，
+     * 百万级循环直接 OOM Killed。 */
     if (((int64_t *)a)[-1] > 1) {
         void *n = dial_rc_clone(a, a_size(a_meta(a)[2]));
         retain_elems(n);
+        release_buffer(a);         // 消耗调用者交来的那一份引用
         a = n;
-    } else {
-        dial_rc_retain(a);
     }
-    /* 覆盖槽位：先释放旧元素，再写入新元素并 retain */
+    /* 覆盖槽位：**先 retain 新元素、再 release 旧元素**。
+     * 顺序反了会在「旧元素 == 新元素」（如 a[0] = a[0]）时先把计数打到 0（free），
+     * 紧接着又对已释放内存 retain —— use-after-free。 */
     int64_t old = a_elems(a)[i];
+    elem_retain(kind, v);
     elem_release(kind, old);
     a_elems(a)[i] = v;
-    elem_retain(kind, v);
     return a;
+}
+
+/* 嵌套下标赋值专用的变体：**不消耗** a 的引用。
+ *
+ * 与 dial_array_set 的唯一区别在所有权：
+ *   - dial_array_set 消耗调用者交来的那一份引用（单层 a[i] = v：a 来自变量槽，
+ *     槽位旧的那一份引用确实该由它消耗掉）；
+ *   - 本函数用于嵌套路径（m[i][j] = v）：内层数组是从**外层数组的元素槽借来**的
+ *     指针，它的那一份引用属于外层数组，在这里被消耗掉就会与外层的元素替换
+ *     重复释放同一份引用。
+ * 故本函数不释放 a，而是交出「一份新拥有的引用」：共享时克隆（不释放被借的 a），
+ * 独占时原地写并额外 retain 一份。调用方（codegen）用完后自行 release 这一份。 */
+DialArray dial_array_set_borrowed(DialArray a, int64_t i, int64_t v) {
+    DIAL_CHECK_BOUNDS(i, a_meta(a)[1]);
+    int64_t kind = a_meta(a)[0];
+    DialArray res = a;
+    if (((int64_t *)a)[-1] > 1) {
+        res = dial_rc_clone(a, a_size(a_meta(a)[2]));
+        retain_elems(res);
+        /* 不 release a：它是被借来的，引用属于外层数组的元素槽。 */
+    } else {
+        dial_rc_retain(a);         // 独占：原地写，但交出「一份新拥有」的引用
+    }
+    int64_t old = a_elems(res)[i];
+    elem_retain(kind, v);
+    elem_release(kind, old);
+    a_elems(res)[i] = v;
+    return res;
 }
 
 int64_t dial_array_length(DialArray a) {
@@ -123,8 +174,17 @@ int64_t dial_array_length(DialArray a) {
 }
 
 DialArray dial_array_clone(DialArray a) {
+    if (!a) return NULL;
+    /* clone() 必须交出「一份独立副本」：先 retain 让「唯一持有者」判定失效，
+     * 迫使 dial_rc_clone 走进深拷贝分支，克隆完再抵消掉刚才那次 retain。
+     * （dial_rc_clone 现在是纯粹的 COW：唯一持有者时原样返回、不改引用计数，
+     *   若直接用它，clone() 在独占时只会拿到同一个 buffer 的别名。）
+     * 过去这里对「别名」也调 retain_elems，等于把同一批元素的引用计数凭空 +1，
+     * 数组释放时又只释放一次——元素引用计数净多 1，永久泄漏。 */
+    dial_rc_retain(a);
     void *n = dial_rc_clone(a, a_size(a_meta(a)[2]));
-    retain_elems(n);   // 克隆体取得各元素所有权
+    dial_rc_release(a);
+    if (n != a) retain_elems(n);   // 克隆体取得各元素所有权
     return n;
 }
 
@@ -133,16 +193,5 @@ void dial_array_retain(DialArray a) { dial_rc_retain(a); }
 void dial_array_release(DialArray a) {
     /* 未初始化的数组变量槽位是 NULL，scope 退出时仍会被 ARC 释放——dial_rc_release 已对 NULL 短路，
      * 此处先判空，避免后面读 ((int64_t*)a)[-1] 时解引用空指针。 */
-    if (!a) return;
-    /* 仅当本数组是最后一个持有者（refcount 即将归零）时才释放元素，
-     * 避免共享数组的某一个持有者提前把元素释放，导致其余持有者悬垂（use-after-free）。 */
-    if (((int64_t *)a)[-1] == 1) {
-        int64_t kind = a_meta(a)[0];
-        if (kind != DIAL_ELEM_INT) {
-            int64_t len = a_meta(a)[1];
-            int64_t *e = a_elems(a);
-            for (int64_t i = 0; i < len; i++) elem_release(kind, e[i]);
-        }
-    }
-    dial_rc_release(a);
+    release_buffer(a);
 }

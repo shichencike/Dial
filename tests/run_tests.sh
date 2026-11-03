@@ -20,6 +20,8 @@
 #      坏包（篡改 / 哈希不符 / 404 / 非 https）一律装不进去，且失败后缓存无残骸（v0.96 新增）。
 #   M. LSP 全能力 + 协议流纯净性：轮2~4 的导航/编写/高级能力做一遍黑盒往返，
 #      并静态+动态两路守住「stdout 只有协议字节」这条铁律（v0.98 新增）。
+#   N. 内存上界 + 所有权语义：a[i]=v 不得触发 COW 深拷贝（虚拟内存上限钉死 O(N²) 退化），
+#      并逐条核对 clone 独立 / COW 隔离 / 嵌套赋值 / 句柄元素数组（v0.99 新增）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -393,6 +395,40 @@ if command -v python3 >/dev/null 2>&1; then
     fi
 else
     echo "  ⚠️  跳过（未找到 python3）"
+fi
+
+echo
+echo "== N) 内存上界 + 所有权语义回归（v0.99 修复：COW 误判致 O(N²) 内存） =="
+# 1) 下标赋值的内存上界。
+#    缺陷背景：数组运行时在「独占」路径上多做了 retain、共享路径上没释放旧引用，
+#    于是每写一次 a[i] = v 引用计数就 +1，COW 守卫 `refcount > 1` 恒真——
+#    每次赋值都深拷贝整个数组，100 万次写需要约 8 TB（进程被 OOM Killed）。
+#    这里用虚拟内存上限把那种退化钉死：修复后峰值约 10 MB，一旦复发立刻被上限打爆。
+MEM_CAP_KB=131072
+if ! "$DIALC" build tests/mem/array_cow_bench.dial -o "${TMP}/cow_bench" >"${TMP}/cowbuild.log" 2>&1; then
+    echo "  ❌ 内存上界用例编译失败"; sed 's/^/       /' "${TMP}/cowbuild.log"; fail=1
+else
+    if ( ulimit -v $MEM_CAP_KB 2>/dev/null; "${TMP}/cow_bench" >"${TMP}/cowout.txt" 2>&1 ); then
+        if diff -u tests/mem/array_cow_bench.expected "${TMP}/cowout.txt" >/dev/null 2>&1; then
+            echo "  ✅ 下标赋值在 ${MEM_CAP_KB} KB 虚拟内存上限内跑完且结果正确（未触发 COW 深拷贝）"
+        else
+            echo "  ❌ 内存上界用例输出不一致"; diff -u tests/mem/array_cow_bench.expected "${TMP}/cowout.txt"; fail=1
+        fi
+    else
+        echo "  ❌ 下标赋值用例超出 ${MEM_CAP_KB} KB 虚拟内存上限（COW 误判复发：每次赋值都深拷贝整个数组）"; fail=1
+    fi
+fi
+# 2) 所有权语义：clone 独立 / COW 隔离 / 嵌套赋值 / 句柄元素数组。
+#    这几条正是修引用计数时动过的语义，必须逐条钉死。
+if ! "$DIALC" build tests/mem/array_cow_semantics.dial -o "${TMP}/cow_sem" >"${TMP}/cowsem.log" 2>&1; then
+    echo "  ❌ 所有权语义用例编译失败"; sed 's/^/       /' "${TMP}/cowsem.log"; fail=1
+else
+    "${TMP}/cow_sem" >"${TMP}/cowsemout.txt" 2>&1
+    if diff -u tests/mem/array_cow_semantics.expected "${TMP}/cowsemout.txt" >/dev/null 2>&1; then
+        echo "  ✅ 所有权语义正确（clone 独立 / COW 隔离 / 嵌套赋值 / 句柄元素数组）"
+    else
+        echo "  ❌ 所有权语义不一致"; diff -u tests/mem/array_cow_semantics.expected "${TMP}/cowsemout.txt"; fail=1
+    fi
 fi
 
 echo

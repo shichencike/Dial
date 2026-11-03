@@ -24,7 +24,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v099">dialc — Dial 语言编译器 v0.99</a><ul>
+<li><a href="#dialc--dial-语言编译器-v0991">dialc — Dial 语言编译器 v0.99.1</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -291,7 +291,7 @@
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v099">dialc — Dial 语言编译器 v0.99</h1>
+<h1 id="dialc--dial-语言编译器-v0991">dialc — Dial 语言编译器 v0.99.1</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -1850,7 +1850,7 @@ var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.99：多维（元素是
 <td><code>a.clone()</code></td>
 <td><code>dial_array_clone</code></td>
 <td>数组类型</td>
-<td>COW 感知克隆</td>
+<td><strong>独立副本</strong>（深拷贝，元素引用另行计数）</td>
 </tr>
 </tbody>
 </table>
@@ -1866,6 +1866,36 @@ a[0] = 99;      // 同理
 <p>此处<strong>不</strong>对旧指针做 <code>release</code>：<code>dial_array_push</code> / <code>dial_array_set</code> 已经在
 C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并释放本调用者的引用）。
 若编译器再补一次 <code>release</code>，会造成悬垂指针或双重释放。</p>
+</blockquote>
+<p><strong>「独占」路径必须原样移交所有权，一个引用计数都不能动。</strong> 这是最容易写错的一处：</p>
+<table>
+<thead>
+<tr>
+<th>情形</th>
+<th><code>refcount</code></th>
+<th>C 侧该做什么</th>
+<th>做错的后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>独占（<code>== 1</code>）</td>
+<td>保持 <strong>1</strong></td>
+<td>原地写入，<strong>不 retain、不 release</strong></td>
+<td>多一次 <code>retain</code> → 每写一次计数 +1 → COW 守卫 <code>refcount &gt; 1</code> 恒真 → <strong>每次赋值都深拷贝整个数组</strong>（O(N²) 内存）</td>
+</tr>
+<tr>
+<td>共享（<code>&gt; 1</code>）</td>
+<td>减 <strong>1</strong></td>
+<td>克隆出新 buffer，并 <code>release</code> 旧 buffer</td>
+<td>漏掉 <code>release</code> → 旧 buffer 与其元素永久泄漏</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>v0.99 实测：违反「独占路径不动计数」这条不变量时，<code>a[i] = v</code> 循环 100 万次
+需要约 <strong>8 TB</strong> 内存（进程被 OOM Killed）；修正后峰值约 <strong>10 MB</strong>。
+该不变量现由测试组 N 以「虚拟内存上限」钉死（见 <code>tests/mem/</code>）。</p>
 </blockquote>
 <h3 id="114-接收者必须是可变变量var">11.4 接收者必须是可变变量（<code>var</code>）</h3>
 <p><code>push</code> / <code>set</code> 会修改容器并可能更换指针，因此<strong>接收表达式必须是顶层可变变量</strong>：</p>
@@ -2088,7 +2118,7 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 <td><code>s.clone()</code></td>
 <td><code>dial_string_clone</code></td>
 <td><code>string</code></td>
-<td>COW 感知克隆</td>
+<td><strong>独立副本</strong>（深拷贝）</td>
 </tr>
 <tr>
 <td><code>s.eq(t)</code></td>
@@ -2397,7 +2427,7 @@ DialString dial_bytes_to_string(DialString b);      // 已暴露为 bytes_to_str
 DialString dial_bytes_zero(int64_t len);           // 已暴露为 bytes_new(len)，全零填充
 int64_t    dial_bytes_length(DialString b);        // 已暴露为 bytes_length(b)
 int64_t    dial_bytes_get(DialString b, int64_t i);// 已暴露为 bytes_get(b, i)，越界 Fail-Fast
-DialString dial_bytes_clone(DialString b);         // COW 感知克隆
+DialString dial_bytes_clone(DialString b);         // 独立副本（深拷贝）
 void       dial_bytes_retain(DialString b);
 void       dial_bytes_release(DialString b);
 </code></pre>
@@ -5711,7 +5741,7 @@ If omitted the notification should not be sent.</em>」——纯数字形式里<
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.99 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.99.1 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

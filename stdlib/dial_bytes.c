@@ -54,8 +54,13 @@ void dial_bytes_retain(DialString b) { dial_rc_retain(b); }
 void dial_bytes_release(DialString b) { dial_rc_release(b); }
 
 DialString dial_bytes_clone(DialString b) {
+    if (!b) return NULL;
     int64_t len = ((int64_t *)b)[0];
-    return dial_rc_clone(b, 8 + len + 1);
+    /* 同 dial_string_clone：先 retain 迫使深拷贝，再抵消这次 retain。 */
+    dial_rc_retain(b);
+    DialString n = dial_rc_clone(b, 8 + len + 1);
+    dial_rc_release(b);
+    return n;
 }
 
 /*
