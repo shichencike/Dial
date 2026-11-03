@@ -105,3 +105,63 @@ DialString dial_float_to_string(double v) {
     if ((int64_t)n > (int64_t)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
     return dial_string_from_bytes(buf, (int64_t)n);
 }
+
+/*
+ * 码点 -> UTF-8 字节序列（v0.98.2 起抽成唯一实现）。
+ *
+ * 整个运行时里只有这一个地方知道「怎么把 Unicode 码点编成 UTF-8」：
+ * dial_print_char / dial_write_char / dial_char_to_string 三者共用它。
+ * 三处各写一份编码逻辑的话，任何一处改动都会让另外两处悄悄失配——
+ * 那种 bug 极难察觉（输出看着像乱码，但只在某个码点区间出现）。
+ *
+ * 合法范围：0 ~ 0x10FFFF，且**不含 UTF-16 代理区 D800~DFFF**。
+ * 代理区不是合法标量值——把它编成 3 字节序列会产生无效 UTF-8（WTF-8），
+ * 下游解码时会变成替换字符或直接报错，属于「静默产出乱码」，
+ * 比当场崩溃危险得多，因此一律拒绝。
+ *
+ * 返回写入 buf 的字节数（1~4）；buf 至少要有 5 字节（留 1 字节给 '\0'）。
+ * 码点非法时返回 -1，**不做任何输出**——由调用方决定怎么报告错误。
+ */
+int dial_encode_utf8(int64_t code, char *buf) {
+    if (code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
+        return -1;
+    }
+    int n = 0;
+    if (code < 0x80) {
+        buf[n++] = (char)code;                                    /* 0xxxxxxx            */
+    } else if (code < 0x800) {
+        buf[n++] = (char)(0xC0 | (code >> 6));                    /* 110xxxxx 10xxxxxx   */
+        buf[n++] = (char)(0x80 | (code & 0x3F));
+    } else if (code < 0x10000) {
+        buf[n++] = (char)(0xE0 | (code >> 12));                   /* 1110xxxx 10xxxxxx x2 */
+        buf[n++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        buf[n++] = (char)(0x80 | (code & 0x3F));
+    } else {
+        buf[n++] = (char)(0xF0 | (code >> 18));                   /* 11110xxx 10xxxxxx x3 */
+        buf[n++] = (char)(0x80 | ((code >> 12) & 0x3F));
+        buf[n++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        buf[n++] = (char)(0x80 | (code & 0x3F));
+    }
+    buf[n] = '\0';
+    return n;
+}
+
+/*
+ * char -> 字符串（v0.98.2）：把一个 Unicode 码点编码成 UTF-8 字节序列，
+ * 构造长度为 1~4 字节的字符串。支撑 `str(c)` 与 `str(c) + "suffix"` 这类拼接。
+ *
+ * 码点校验与 dial_print_char / dial_write_char 完全一致（同一个 dial_encode_utf8）：
+ * 负数、> 0x10FFFF、UTF-16 代理区（D800~DFFF）都不是合法标量值，
+ * 一律 Fail-Fast——绝不能把它们编码成「 WTF-8」（代理区会被编码成 3 字节序列），
+ * 那是无效 UTF-8，会在下游变成乱码。
+ */
+DialString dial_char_to_string(int64_t code) {
+    char buf[5];
+    int n = dial_encode_utf8(code, buf);
+    if (n < 0) {
+        fprintf(stderr, "dial: 非法的 char 码点: %lld\n", (long long)code);
+        fflush(stdout);
+        dial_assert_fail("dial_char_to_string: 非法 Unicode 码点（合法范围 0~0x10FFFF，且不含 UTF-16 代理区 D800~DFFF）");
+    }
+    return dial_string_from_bytes(buf, (int64_t)n);
+}

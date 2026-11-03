@@ -1,0 +1,41 @@
+// 输出三件套（v0.98.2）：print_raw / write_char / str(char)
+// 验证点：
+//   1. print_raw 不追加换行（可连续拼行）
+//   2. write_char 不追加换行，输出字符本身（不是码点）
+//   3. str(char) 得到 1 字符字符串，可参与拼接
+//   4. print(char) 追加换行（与 write_char 的唯一差别）
+
+fn main(): int {
+    // 1. 连续拼行：三个字段应出现在同一行
+    print_raw("[");
+    print_raw("alpha");
+    print_raw(",");
+    print_raw("beta");
+    print_raw("]");
+    print("");            // 收尾换行
+
+    // 2. write_char：逐字符输出，末尾无换行
+    write_char('H');
+    write_char('i');
+    write_char('!');
+    print("");            // 收尾换行
+
+    // 3. str(char)：字符转字符串并参与拼接
+    let s: string = str('A') + "BC";
+    print(s);             // ABC
+
+    // 4. print(char) 带换行 —— 输出应独占一行
+    print('X');
+    print("after");       // 下一行
+
+    // 5. str(char) 的结果长度应为 1
+    print(str('Z').length());   // 1
+
+    // 6. print_raw 接受标量，且形态与 print 一致（仅差换行）
+    print_raw(42);
+    print_raw("|");
+    print_raw(true);
+    print("");            // 42|true
+
+    return 0;
+}

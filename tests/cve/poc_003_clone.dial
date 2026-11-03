@@ -7,7 +7,7 @@
 fn main(): int {
     var a: int[] = [1, 2, 3];
     var b: int[] = a.clone();
-    b = b.set(0, 99);
+    b.set(0, 99);     // COW 原地修改由编译器自动写回 b（见 §11.3：严禁手写 b = b.set(...)）
     print(a.get(0));   // 期望 1（不被 b 的修改污染）
     print(b.get(0));   // 期望 99
     return 0;

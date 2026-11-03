@@ -29,6 +29,9 @@ void dial_rc_release(void *p) {
 
 void *dial_rc_clone(void *p, int64_t payload_size) {
     if (!p) return NULL;
+    // 与 retain/release 对齐：传入已是 freed 的指针（refcount <= 0）时立刻终止，
+    // 而非去读 ((int64_t*)p)[-1] 这块已归还给分配器的内存（那是 use-after-free）。
+    DIAL_HEAP_ASSERT(((int64_t *)p)[-1] > 0, "clone 了已释放的对象（use-after-free）");
     // COW 命中（唯一持有者）：可以复用同一块内存，但**必须**把引用计数 +1，
     // 因为「原对象」与「克隆」现在是两个独立的持有者。
     // 旧实现直接 `return p` 而漏了 +1，导致引用计数少计 -> 后续 dial_array_set 的

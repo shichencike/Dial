@@ -5,7 +5,7 @@
 逐轮扩展断言（轮 1 覆盖 initialize 能力协商 / hover / definition / completion）。
 
 用法：
-    python3 tools/lsp_smoke.py [--dialc 路径] [--uri 文件uri]
+    python3 tools/lsp_full_smoke.py [--dialc 路径] [--uri 文件uri]
 
 退出码 0 = 全部通过；非 0 = 有失败。
 """

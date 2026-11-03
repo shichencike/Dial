@@ -23,3 +23,6 @@ examples/flow
 examples/array_demo
 examples/bench_array
 examples/channel_thread
+
+# CVE 检测器编译出的临时二进制（tools/cve_check.py 运行产物）
+tests/cve/poc_*

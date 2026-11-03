@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v0.98
+# dialc — Dial 语言编译器 v0.98.1
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -74,7 +74,7 @@ dialc/
 │   │                       #   K LSP 增强 / L 包安装 / M LSP 全能力 + 协议流纯净性）
 │   ├── bad/                # 必须编译失败的负向用例
 │   ├── trap/               # 必须当场因信号终止的 Fail-Fast 用例
-│   ├── lsp_smoke.py        # I 组：LSP 协议往返（诊断 + 语义高亮）
+│   ├── lsp_smoke.py        # I 组：LSP 协议往返（诊断 + 语义高亮）；与 tools/lsp_full_smoke.py 是两个不同文件
 │   ├── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
 │   └── pkg_install_url.py  # L 组：包 URL 安装 + 一键安装脚本
 ├── tools/
@@ -82,11 +82,10 @@ dialc/
 │   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
 │   ├── check_version.py    # 校验版本号在 README / CHANGELOG / 官网三处一致
 │   ├── check_lsp_stdout_purity.py  # 校验 LSP 路径上不出现 stdout 裸输出（协议流纯净性）
-│   ├── lsp_smoke.py        # M 组：LSP 全能力往返 + 协议流纯净性断言
+│   ├── lsp_full_smoke.py  # M 组：LSP 全能力往返 + 协议流纯净性断言
 │   ├── package.sh          # 打发布包 dialc-v<版本>-<平台>.zip（含许可与 .git）
 │   ├── install-dial.sh     # 一键安装（Linux / Termux，支持 curl | bash 一键命令）
 │   ├── install-dial.ps1    # 一键安装（Windows / PowerShell，支持 irm | iex 一键命令）
-│   ├── install-dial.ps1    # 一键安装（Windows / PowerShell）
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
 ├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十三组测试 + 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
@@ -179,10 +178,10 @@ git clone https://github.com/shichencike/Dial.git
 cd Dial                                  # 进入工程根目录（编译器本体就在这里：Cargo.toml 与 src/ 都在根）
 
 # 2) 编译（编译器本体就位于仓库根，无需再进子目录）
-export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18   # 指向本机 LLVM 18（见 §3.1.2）
+export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18   # 指向本机 LLVM 18（见 §3.1.1）
 cargo build --release                          # 产物：target/release/dialc
 
-# 3) 让编译器本体能找到 libLLVM（见 §3.1.3）
+# 3) 让编译器本体能找到 libLLVM（见 §3.1.5）
 export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 
 # 4) 验证
@@ -276,6 +275,29 @@ powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 export PATH="$PATH:$HOME/.dial/bin"   # 脚本已写入 ~/.profile / ~/.bashrc，重开终端后自动生效
 dialc build main.dial -o main
 ```
+
+### 3.2.2 命令行用法总览
+
+```bash
+dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast]
+dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast]
+dialc install <包.dialpkg | URL> [--sha256 <哈希>]
+dialc version | --version | -V
+dialc lsp
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `build` | 编译并链接出可执行文件。`--no-link` 只产出 `.o` 不链接 |
+| `run` | 编译后**直接运行**（等价于 build + 执行） |
+| `install` | 安装 `.dialpkg` 包；给 URL 时先下载，再做整包哈希与逐文件 SHA256 校验（见 [§25](#25-包分发与依赖管理生态规划--最终规范)） |
+| `version` / `--version` / `-V` | **打印版本号**并退出，例如 `dialc 0.98.1` |
+| `lsp` | 启动语言服务器（走 stdio 的 JSON-RPC；**不由人手敲**，见 [§28](#28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化)） |
+
+> **版本号只有一个出处**：`dialc version` 打印的版本直接取自 `Cargo.toml` 的 `version` 字段
+> （编译期注入），与官网、CHANGELOG、发布包名**同源**——
+> 任何一处手写版本号都必然随发布漂移（这仓库已经因为硬编码漂过三轮）。
+> 校验脚本见 `tools/check_version.py`（CI 强制执行）。
 
 ### 3.3 编译 Dial 程序
 
@@ -439,7 +461,9 @@ int  float  bool  char  string  void  file  error  thread  channel
 | `float` | LLVM `double` | 双精度浮点 |
 | `bool` | LLVM `i1` | 布尔 |
 | `char` | LLVM `i64` | **单个 Unicode 码点**（v0.92）。**值类型**：无 ARC、无堆分配、无空指针。与 `int` 同表示但**类型独立**——不参与 `+ - * /`，只可比较，或经 `char_to_int` / `int_to_char` 显式转换。字面量写作 `'a'`、`'\n'`、`'中'` |
+| `byte` | LLVM `i64` | **单字节无符号值**（v0.98.2）。**值类型**：与 `char` 同表示但语义不同——`byte` 是 0~255 的**数值**，参与算术、比较，经 `int_to_byte` / `byte_to_int` 与 `int` 显式互转；与 `char`（码点）严格区分，避免「一个字节到底是字符还是数字」的歧义 |
 | `string` | LLVM `ptr`（不透明） | 由 C Runtime 管理的引用计数字符串 |
+| `bytes` | LLVM `ptr`（不透明） | 不可变二进制缓冲区（v0.98.2），由 C Runtime 管理的引用计数对象，**独立于 `string`**（零隐式转换）。承载任意字节序列（可能非法 UTF-8）。构造/转换见 [§5.7](#57-bytes二进制缓冲区v0982) |
 | `int[]` | LLVM `ptr`（不透明） | 由 C Runtime 管理的动态数组，**元素类型固定为 `int`** |
 | `file` | LLVM `ptr`（不透明） | 文件句柄，封装 C 的 `FILE*`；显式 `open` / `close`，**不受 ARC 管理**（见 [§24](#24-文件-iofile-句柄)） |
 | `error` | LLVM `ptr`（不透明） | **可恢复异常对象**（v0.7），由 C Runtime 管理的 ARC 类型；由 `Error("msg")` 构造、`throw` 抛出、`catch` 捕获（见 [§26](#26-可恢复异常trycatchthrow)） |
@@ -539,6 +563,132 @@ Dial 的选择是让源码把意图写清楚：要码点就 `char_to_int('a') + 
 若码点非法（负数、> `0x10FFFF`、或落在 UTF-16 代理区 `D800~DFFF`），
 C Runtime 会在打印时**当场打印诊断并终止**，绝不输出半个坏字符——
 静默产出乱码比当场崩溃更危险，它会在下游变成无法复现的数据损坏（Fail-Fast 铁律 §20）。
+
+### 5.5 输出三件套：连续输出（v0.98.2）
+
+`print(x)` **永远在末尾追加一个 `\n`**——它表达的是「打印一行」。
+但很多程序需要的不是「一行」，而是**一段连续的字节流**：拼行的表格、
+进度条、逐字动画、协议帧、日志尾巴。这类程序在 v0.98.2 之前**根本写不出来**：
+唯一的输出手段 `print` 每写一次就断一行，想拼出一行就得把内容先拼成一个大字符串
+（`"a" + "b" + ...`），而这既啰嗦又不适用于「边算边输出」的场景。
+
+v0.98.2 补齐三个内置，构成输出的最小完备集：
+
+| 内置 | 签名 | 输出 | 追加换行？ |
+| --- | --- | --- | --- |
+| `print` | `print(x: int \| float \| bool \| char \| string \| error): void` | 标量或字符串 | **是**（`\n`） |
+| `print_raw` | `print_raw(x: int \| float \| bool \| char \| string \| error): void` | 同上，**原样**输出 | **否** |
+| `write_char` | `write_char(c: char): void` | 单个字符 | **否** |
+
+**`print` 与 `print_raw` 的唯一差别就是结尾那个 `\n`**，其余完全一致：
+接受的类型集合相同、标量的文本形态相同（`print(42)` 与 `print_raw(42)` 都输出 `42`）、
+字符串都按**字节长度**原样写出（不解释、不转义、不因内嵌 `\0` 而截断）。
+
+**`write_char` 与 `print(char)` 的唯一差别也是那个 `\n`**：
+`print('x')` 输出 `x` 并换行；`write_char('x')` 只输出 `x`，光标停在原处。
+
+```dial
+// 拼一行（表格的一格一行）
+print_raw("[");
+print_raw("alpha");
+print_raw(",");
+print_raw("beta");
+print_raw("]");
+// 输出： [alpha,beta]
+
+// 逐字符输出（进度条 / 动画）
+write_char('H');
+write_char('i');
+write_char('!');
+// 输出： Hi!   （无换行）
+
+// 一行结束时自己补换行
+print("");
+```
+
+**`print_raw` 的返回值**：无（与 `print` 一致，都是**语句**而非表达式），
+不能出现在赋值右侧或 `return` 位置。
+
+**`str(char)`**：`str()` 在 v0.98.2 起接受 `char` 实参，返回**只含这一个字符**的 UTF-8 字符串
+（ASCII 字符为 1 字节，多字节码点如 `'中'` 为 3 字节）。它让字符能直接参与字符串拼接：
+
+```dial
+let s: string = str('A') + "BC";   // "ABC"
+```
+
+> **注意 `length()` 是字节长度，不是字符数**：`str('中').length()` 是 `3` 而不是 `1`。
+> Dial 的字符串按 **UTF-8 字节**计量长度（见 [§13.1](#131-方法)），
+> 因此「字符串有几个字符」这个问题在 Dial 里**没有**直接答案——
+> 按码点遍历需要自行解码 UTF-8。
+
+**与文件 IO 的区别**：`print_raw` / `write_char` 写的是 **stdout**，
+不受 `open` 的文件句柄管辖；要写进文件请用 `write(f, content)`（见 [§24](#24-文件-iofile-句柄)）。
+
+**实现细节**：标量版的 `print_raw` 在 C Runtime 侧用**栈上缓冲**格式化，**零堆分配**——
+它不先 `str(v)` 再输出，因为那样会分配一个带引用计数的堆字符串，
+而它只是中转对象（用完即弃却仍占着引用计数），属于实打实的内存泄漏。
+
+---
+
+### 5.6 `byte`：单字节无符号值（v0.98.2）
+
+`byte` 是 **0~255 的无符号单字节值类型**，与 `char` 故意区分：
+
+| 类型 | 语义 | 参与算术 | 与 `int` 互转 |
+| --- | --- | --- | --- |
+| `char` | 一个 **Unicode 码点**（如 `'A'` = 65） | 否（只比较 / 经 `char_to_int` 转 `int`） | `char_to_int` / `int_to_char` |
+| `byte` | 一个 **0~255 的数值**（如 `int_to_byte(65)` = 65） | 是 | `byte_to_int` / `int_to_byte`（带范围校验） |
+
+> 为什么要分两个类型？「一个字节到底是字符还是数字」是 C 里长期的根源歧义。
+> 把 `byte` 与 `char` 设为**类型独立**，就强迫程序员在每个使用点显式声明意图：
+> 想当字符用 `char` + `int_to_char`，想当数值用 `byte` + `int_to_byte`，二者永不静默混用。
+
+**字面量与转换**：
+
+```dial
+let b: byte = int_to_byte(65);   // 数值 65（范围校验：越界 [0,255] 编译期/运行期拒绝）
+let n: int = byte_to_int(b);     // 65
+let c: char = int_to_char(65);  // 'A'（码点语义，与上面的 b 值相同但类型不同）
+
+print(b);            // 65   —— byte 按**数值**打印
+print(c);            // A    —— char 按**字符**打印
+```
+
+- `int_to_byte(v: int): byte`：范围校验 `v ∈ [0,255]`，否则 Fail-Fast（绝不静默截断到 8 位）。
+- `byte_to_int(b: byte): int`：零成本（同 `i64` 表示），仅类型重解释。
+- `byte` 是**值类型**：无 ARC、无堆分配、无空指针，可参与算术与比较。
+
+### 5.7 `bytes`：二进制缓冲区（v0.98.2）
+
+`bytes` 是不可变的**二进制缓冲区**，由 C Runtime 以引用计数（ARC）管理，**与 `string` 类型独立**——
+二者零隐式转换。它用来承载「任意字节序列」，包括**非法 UTF-8** 的原始数据（网络报文、加密 blob、图像字节等），
+而 `string` 语义上始终是合法 UTF-8 文本。
+
+**构造与转换**（全是内置函数）：
+
+| 函数 | 签名 | 说明 |
+| --- | --- | --- |
+| `bytes_from_string` | `(s: string): bytes` | 把 UTF-8 文本原样当作字节序列 |
+| `bytes_to_string` | `(b: bytes): string` | 把字节序列原样当作 UTF-8 文本（可能含非法 UTF-8，下游需自行处理） |
+| `bytes_new` | `(len: int): bytes` | 构造长度 `len`、全零填充的缓冲区 |
+| `bytes_length` | `(b: bytes): int` | 字节长度 |
+| `bytes_get` | `(b: bytes, i: int): byte` | 取第 `i` 个字节（返回 `byte`，越界 Fail-Fast） |
+
+```dial
+let raw: bytes = bytes_from_string("hello");
+print(bytes_length(raw));      // 5
+print(bytes_get(raw, 0));      // 104  —— 'h' 的 ASCII 值（byte 按数值打印）
+let s: string = bytes_to_string(raw);
+print(s);                     // hello
+
+let buf: bytes = bytes_new(4);  // 4 字节全零
+print(bytes_length(buf));       // 4
+```
+
+> **与 `string` 的关系**：`bytes` 与 `string` 在 C 侧布局相同（`[refcount][len][data...]`），
+> 但**类型严格分离**——不能把 `bytes` 直接当 `string` 打印（见 [§16](#16-内置-print-与输出三件套)），
+> 必须先 `bytes_to_string` 显式转换，让「这段二进制该不该被当文本解释」成为一处显式决策。
+> `bytes` 与 `string` 互转是**字节级原样拷贝**，不做任何编码转换。
 
 ---
 
@@ -644,7 +794,9 @@ var x: int = 1;            // 变量声明
 x = 2;                     // 赋值
 p.x = 3;                   // 字段赋值
 a[0] = 4;                  // 下标赋值
-print(e);                  // 打印语句
+print(e);                  // 打印语句（追加换行）
+print_raw(e);              // 原样打印语句（v0.98.2，不追加换行）
+write_char(c);             // 输出单字符（v0.98.2，不追加换行）
 f(1, 2);                   // 表达式语句
 if (cond) { ... } else { ... }
 if (cond) { ... } else if (c2) { ... } else { ... }   // else if 语法糖
@@ -717,7 +869,47 @@ while (n < 10) {
 
 ### 8.5 块与作用域
 
-`{ ... }` 只能作为函数体或 `if`/`while`/`for` 的分支体，**不能**作为独立的裸块语句。
+`{ ... }` 既可以作为函数体或 `if`/`while`/`for` 的分支体，**也可以**作为**独立的裸块语句**
+（v0.98.2 起，见 [§8.6](#86-裸块独立的词法作用域v0982)）。
+
+---
+
+### 8.6 裸块：独立的词法作用域（v0.98.2）
+
+裸块 `{ ... }` 是一个**语句**，用来显式划定一段代码的作用域。它的用途有三：
+
+1. **变量遮蔽**：块内可以声明与外层同名的变量，互不干扰；
+2. **生命周期隔离**：块内声明的堆类型局部变量（`string` / `int[]` / `map` / `error`）在**离开块时即被释放**，
+   不必等到函数结束；
+3. **把一段语句当匿名作用域使用**：无需为此造一个只调用一次的函数。
+
+```dial
+let x: int = 1;
+{
+    let x: int = 2;    // 遮蔽外层的 x
+    print(x);          // 2
+}
+print(x);              // 1 —— 外层 x 从未被改动
+```
+
+**语义规则**：
+
+| 规则 | 说明 |
+| --- | --- |
+| 遮蔽方向 | 块内**可以**遮蔽外层同名变量；块内引用不到外层的同名变量（要到外层请先在外面改名或换名引用） |
+| 生命周期 | 块内声明的局部变量在**离开块时**脱离作用域；此后引用即编译错误 |
+| 堆类型释放 | 块内的 `string` / `int[]` / `map` / `error` 局部变量在离开块时被 ARC 释放（与函数返回时的释放规则一致） |
+| 嵌套 | 裸块可任意嵌套；每层各自成一个作用域 |
+| 跨块引用 | **禁止**把块内变量带到块外使用（编译期拒绝） |
+
+**与 `if` / `while` / `for` 的分支体的区别**：分支体**也**引入作用域，
+但它是**语法的一部分**——`if (c) { ... }` 里的 `{ ... }` 不是独立语句，不能单独出现、也不能被赋值。
+裸块则是**可以单独写出来**的语句。
+
+```dial
+if (x > 0) { let y: int = 1; }   // 分支体：作用域限于该分支
+{ let y: int = 2; }               // 裸块：独立语句，效果同上但可单独书写
+```
 
 ---
 
@@ -981,9 +1173,9 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 
 | 方法 | 等价于 C 调用 | 返回 | 说明 |
 | --- | --- | --- | --- |
-| `s.length()` | `dial_string_length` | `int` | 字节长度 |
+| `s.length()` | `dial_string_length` | `int` | **字节长度**（UTF-8 字节数，**不是字符数**）：`"中文abc".length()` == 9 |
 | `s.concat(t)` | `dial_string_concat` | `string` | 拼接，产生新对象 |
-| `s.get(i)` | `dial_string_get` | `int` | 取第 `i` 个字符的**整数码**；想要 `char` 请显式转换 `int_to_char(s.get(i))`（v0.92 起） |
+| `s.get(i)` | `dial_string_get` | `int` | 取第 `i` 个**字节**的值（`0~255`）。**注意**：这是字节、不是 Unicode 码点——`"中".get(0)` 返回 `228`（`'中'` 的 UTF-8 首字节），而非码点 `20013`。想要 `char` 请显式转换 `int_to_char(s.get(i))`（v0.92 起）；但对多字节字符，只取首字节并不能还原该字符 |
 | `s.substring(from, to)` | `dial_string_substring` | `string` | 半开区间 `[from, to)` |
 | `s.clone()` | `dial_string_clone` | `string` | COW 感知克隆 |
 | `s.eq(t)` | `dial_string_eq` | `bool` | 按内容比较 |
@@ -1129,7 +1321,10 @@ x = x;   // 先 retain（计数 1→2），再 release（2→1），绝不会先
 | `read(f, n)` | `call ptr @dial_file_read(ptr %f, i64 %n)`（读最多 n 字节，失败返回空串） |
 | `write(f, c)` | `call i64 @dial_file_write(ptr %f, ptr %c)`（返回写入字节数，失败 -1） |
 | `close(f)` | `call void @dial_file_close(ptr %f)`（空指针安全） |
-| `print(x)` | `dial_print_int` / `dial_print_float` / `dial_print_bool` / `dial_print_string` |
+| `print(x)` | `dial_print_int` / `dial_print_float` / `dial_print_bool` / `dial_print_char` / `dial_print_string` |
+| `print_raw(x)`（v0.98.2） | `dial_print_raw` / `dial_print_raw_int` / `dial_print_raw_float` / `dial_print_raw_bool` / `dial_write_char`（**均不追加换行**） |
+| `write_char(c)`（v0.98.2） | `call void @dial_write_char(i64 %c)`（不追加换行） |
+| `str(c)`（`c` 为 `char`，v0.98.2） | `call ptr @dial_char_to_string(i64 %c)`（编码为 UTF-8，1~4 字节） |
 | 变量绑定（共享） | `dial_string_retain` / `dial_array_retain` / `dial_map_retain` |
 | 作用域结束 | `dial_string_release` / `dial_array_release` / `dial_map_release` |
 
@@ -1150,13 +1345,15 @@ void *dial_rc_clone(void *p, int64_t payload_size); // 唯一持有时返回自�
 DialString dial_string_new(const char *lit);
 int64_t    dial_string_length(DialString s);
 DialString dial_string_concat(DialString a, DialString b);
-int64_t    dial_string_get(DialString s, int64_t i);          // 返回字符的整数码
+int64_t    dial_string_get(DialString s, int64_t i);          // 返回第 i 个「字节」的值（0~255）
 int64_t    dial_string_eq(DialString a, DialString b);        // 相等返回 1
 DialString dial_string_substring(DialString s, int64_t from, int64_t to);
 DialString dial_string_clone(DialString s);
 void       dial_string_retain(DialString s);
 void       dial_string_release(DialString s);
 void       dial_print_string(DialString s);
+DialString dial_char_to_string(int64_t code);       // v0.98.2：码点 → UTF-8 字符串（1~4 字节）
+int        dial_encode_utf8(int64_t code, char *buf); // v0.98.2：运行时内唯一的码点编码实现
 ```
 
 **`stdlib/dial_array.h`**
@@ -1178,8 +1375,16 @@ void      dial_array_release(DialArray a);
 void       dial_print_int(int64_t v);
 void       dial_print_float(double v);
 void       dial_print_bool(int64_t b);      // 0/1 → false/true
+void       dial_print_char(int64_t code);   // 输出码点对应的 UTF-8 字符 + 换行
 void       dial_print_string(DialString s);
 DialString dial_read_line(void);                  // 已暴露为 read_line()
+
+// 连续输出（v0.98.2）：均**不追加换行**，是「拼行 / 进度条 / 逐字输出」的基本积木。
+void       dial_print_raw(DialString s);      // 原样输出字符串（按字节长度，内嵌 '\0' 不截断）
+void       dial_write_char(int64_t code);     // 输出单个字符
+void       dial_print_raw_int(int64_t v);     // 标量版（栈缓冲，零堆分配）
+void       dial_print_raw_float(double v);
+void       dial_print_raw_bool(int64_t b);
 
 // 文件 IO（v0.61）：文件句柄是不透明的 FILE*（经 void* 传递），显式 open/close，不受 ARC 管理。
 typedef void *DialFile;
@@ -1187,6 +1392,23 @@ DialFile  dial_file_open(DialString path, DialString mode);   // 已暴露为 op
 DialString dial_file_read(DialFile f, int64_t n);            // 已暴露为 read(f, n)，读最多 n 字节
 int64_t   dial_file_write(DialFile f, DialString content);   // 已暴露为 write(f, c)，返回写入字节数
 void      dial_file_close(DialFile f);                       // 已暴露为 close(f)，空指针安全
+```
+
+**`stdlib/dial_bytes.h`**（v0.98.2：与 `string` **共享同一 C 布局** `[refcount][len][data...]`，但 Dial 侧类型独立、零隐式转换）
+
+> 注意：C 侧 `bytes` 与 `string` 是**同一底层表示**，所以这里的 C 签名一律用 `DialString`
+> （而不是另起一个 `DialBytes` typedef）。`dial_bytes_*` 与 `dial_string_*` 共享 ARC 原语
+> （`dial_bytes_retain` / `dial_bytes_release` 内部走同一套引用计数）。
+
+```c
+DialString dial_bytes_from_string(DialString s);   // 已暴露为 bytes_from_string(s)
+DialString dial_bytes_to_string(DialString b);      // 已暴露为 bytes_to_string(b)
+DialString dial_bytes_zero(int64_t len);           // 已暴露为 bytes_new(len)，全零填充
+int64_t    dial_bytes_length(DialString b);        // 已暴露为 bytes_length(b)
+int64_t    dial_bytes_get(DialString b, int64_t i);// 已暴露为 bytes_get(b, i)，越界 Fail-Fast
+DialString dial_bytes_clone(DialString b);         // COW 感知克隆
+void       dial_bytes_retain(DialString b);
+void       dial_bytes_release(DialString b);
 ```
 
 **`stdlib/dial_map.h`**（与 `string` / `int[]` 共用 ARC；已暴露为 `map` 类型）
@@ -1204,7 +1426,7 @@ void     dial_map_release(DialMap m);
 
 ---
 
-## 16. 内置 `print`
+## 16. 内置 `print` 与输出三件套
 
 ```dial
 print(e);
@@ -1217,17 +1439,43 @@ print(e);
   ```
 
 - 恰好接受 1 个参数。
-- 支持的参数类型：`int`、`float`、`bool`、`string`。
-- **不支持** `int[]` 与结构体——必须逐元素 / 逐字段打印。
+- 支持的参数类型：`int`、`float`、`bool`、`char`、`string`、`error`。
+- **不支持** `int[]`、`map`、结构体与各类句柄（`file` / `thread` / `channel` / 包句柄）——
+  必须逐元素 / 逐字段打印，或先转成字符串。
   若放任会把二进制 payload 当字符串吐出乱码，故在编译期直接拒绝。
 - 输出格式：
 
-  | 类型 | 格式 |
-  | --- | --- |
-  | `int` | 十进制整数 + 换行 |
-  | `float` | `%f`（6 位小数）+ 换行 |
-  | `bool` | `true` / `false` + 换行 |
-  | `string` | 内容 + 换行 |
+  | 类型 | 格式 | 换行 |
+  | --- | --- | --- |
+  | `int` | 十进制整数 | ✅ |
+  | `float` | `%f`（6 位小数） | ✅ |
+  | `bool` | `true` / `false` | ✅ |
+  | `char` | 该码点对应的 **UTF-8 字符**（不是码点数字） | ✅ |
+  | `string` | 内容（按字节长度原样写出） | ✅ |
+  | `error` | 错误消息字符串 | ✅ |
+
+### 16.1 连续输出：`print_raw` / `write_char`（v0.98.2）
+
+`print` 永远在末尾追加 `\n`，因此**需要连续输出的程序在 v0.98.2 之前写不出来**
+（拼行表格、进度条、逐字动画、协议帧）。v0.98.2 补齐两个内置：
+
+| 内置 | 签名 | 与 `print` 的差别 |
+| --- | --- | --- |
+| `print_raw` | `print_raw(x: int \| float \| bool \| char \| string \| error): void` | **唯一差别：不追加 `\n`**。接受的类型集合与标量文本形态都完全一致 |
+| `write_char` | `write_char(c: char): void` | 只接受 `char`；**不追加 `\n`**。与 `print(char)` 的差别同样只是那个换行符 |
+
+```dial
+print_raw("[");
+print_raw("alpha");
+print_raw("]");
+print("");        // 自己补换行 -> [alpha]
+
+write_char('H');
+write_char('i');
+print("");        // -> Hi
+```
+
+完整语义、示例与实现细节见 [§5.5](#55-输出三件套连续输出v0982)。
 
 ---
 
@@ -1263,14 +1511,16 @@ print(e);
 > 所有权转移与多线程并发（§27，含 v0.81 的通道关闭与 EOF、v0.9 的判空与多消费者安全）、
 > **`char` 类型（v0.92，见 §5.1）**、**`import` 与 `.dialpkg` 包分发（v0.93，见 §25）**、
 > **三平台原生构建（v0.97：Linux x86_64 / Windows x64-MinGW / Termux aarch64-musl 全静态）**、
-> **`dialc lsp` 语言服务器（v0.94 骨架 → v0.95 增强 → v0.98 工业化，见 §28）**。
+> **`dialc lsp` 语言服务器（v0.94 骨架 → v0.95 增强 → v0.98 工业化，见 §28）**、
+> **连续输出三件套 `print_raw` / `write_char` / `str(char)`（v0.98.2，见 §5.5 与 §16.1）**、
+> **`byte` 单字节值类型与 `bytes` 二进制缓冲区（v0.98.2，见 §5.6 与 §5.7）**。
 > 其余仍按计划未实现：
 
 | 能力 | 状态 |
 | --- | --- |
 | 多维数组 `int[][]` | 编译期拒绝 |
 | 非 `int` 元素数组 | 编译期拒绝 |
-| 裸块 `{ ... }` | 不支持 |
+| 裸块 `{ ... }` | **已支持**（v0.98.2）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 [§8.6](#86-裸块独立的词法作用域v0982) |
 | 模块 / 包 / import | **已支持**（v0.93；`dialc install <URL>` 于 v0.96 落地）：`import "包名";` + `dialc install <本地文件\|URL>`，见 [§25](#25-包分发与依赖管理生态规划--最终规范)。**尚未实现**：源码形式的模块拆分（无 `mod`） |
 | 泛型、接口、trait、闭包 | 不支持（`channel<T>` 是内建特化语法，不是用户泛型） |
 | 指针、地址取值、指针算术 | **永不提供**（与不透明指针契约冲突） |
@@ -1284,7 +1534,7 @@ print(e);
 | `move_to` 到**已启动的**线程 | 编译期不支持——移交只能在 `spawn` 时完成（见 [§27.3](#273-零竞争移交与-o1-论证)） |
 | 通道元素为标量（`int` / `float` / `bool`） | 编译期拒绝（需装箱，见 [§27.2](#272-channelt-与所有权移交)） |
 | 一等函数 / 函数指针 | 不支持——`spawn` 首参只能是顶层具名函数 |
-| LSP 的重命名 / 跨文件引用查找 / 格式化 | **未实现**——悬停、跳转定义、基础补全**已在 v0.95 落地**（见 [§28.6](#286-lsp-增强hover--跳转定义--补全v095)）；剩下的三项需要全工作区引用图或代码风格约定，不是「再写几个请求」的事 |
+| LSP 的重命名 / 跨文件引用查找 / 格式化 | **已实现**（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的**引用边**（`src/index.rs`），格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作。能力清单见 [§28.7.1](#2871-当前-lsp-能力清单)。**尚未实现**：跨工作区的**全量**引用图（当前只覆盖已打开文件与已加载包） |
 
 ---
 
@@ -1310,7 +1560,7 @@ print(e);
 | **J. 包安装三条硬规则**（v0.94 收尾） | `dialc install`：① 同名包 **ABI 相同则覆盖、不同则报错要求先卸载**；② `targets` 的库文件**只允许 `.a` / `.lib` 静态库，拒绝 `.so` / `.dll` 动态库**；③ 卸载即 `rm -rf ~/.dial/packages/<名>/`（缓存是纯派生数据）。三条均被 J 组锁死 |
 | **K. LSP 增强**（v0.95 新增） | Hover / 跳转定义 / 补全：真起 `dialc lsp` 子进程按 LSP 协议往返，验证变量遮蔽的 Hover、跨文件 `.diali` 文档、跳转定义（文件内→本文件、包符号→`.diali`）、可见符号收集与前缀过滤。见 `tests/lsp_features.py` |
 | **L. 包安装**（v0.96 新增） | **URL 安装**：真起一个本机 HTTP 服务器提供 `.dialpkg`，用 `dialc install <URL>` 装——正常装得上，`--sha256` 钉死也能装；坏包（内容篡改 / 哈希不符 / 404 / 非 https）**一律装不进去**，且失败后缓存目录无残骸。**一键脚本**：`install-dial.sh` 初始化环境（编译器 + `stdlib/` + `runtime/`）→ 自动扫描并安装 `.dialpkg` → 在**与源码树无关的独立项目目录**里编译 import 程序并运行。见 `tests/pkg_install_url.py` |
-| **M. LSP 全能力 + 协议流纯净性**（v0.98 新增） | 真起 `dialc lsp` 子进程把轮 2~4 的能力全跑一遍（文档大纲 / 工作区符号 / 引用查找 / 重命名 / 签名帮助 / 格式化 / inlay 提示 / 代码动作 / 折叠 / 选择范围 / 文档链接），并断言 **stdout 上只有协议字节**——混进一行裸文本就会让客户端分帧错位，症状是**编辑器卡死**而非报错；另配一道**静态**守卫：`tools/check_lsp_stdout_purity.py` 扫 LSP 运行时用到的模块与函数，出现 `println!` 即失败。见 `tools/lsp_smoke.py` |
+| **M. LSP 全能力 + 协议流纯净性**（v0.98 新增） | 真起 `dialc lsp` 子进程把轮 2~4 的能力全跑一遍（文档大纲 / 工作区符号 / 引用查找 / 重命名 / 签名帮助 / 格式化 / inlay 提示 / 代码动作 / 折叠 / 选择范围 / 文档链接），并断言 **stdout 上只有协议字节**——混进一行裸文本就会让客户端分帧错位，症状是**编辑器卡死**而非报错；另配一道**静态**守卫：`tools/check_lsp_stdout_purity.py` 扫 LSP 运行时用到的模块与函数，出现 `println!` 即失败。见 `tools/lsp_full_smoke.py` |
 
 #### 持续集成（GitHub Actions）
 
@@ -1320,6 +1570,7 @@ print(e);
 | --- | --- | --- |
 | **编译** | 装 LLVM 18 + Rust → `cargo build --release --locked` | 立即失败，PR 不可合并 |
 | **测试** | `bash tests/run_tests.sh`（A～M 全部十三组） | 立即失败 |
+| **CVE 暴力检测** | `python3 tools/cve_check.py --repeat 10`——8 个已登记漏洞各有专门 PoC，每例重复 10 次跑，确认**修复后确实不再复现** | 立即失败（漏洞回归 = 修复失效，必须当场发现） |
 | **锚点校验** | `python3 tools/check_links.py`——README / CHANGELOG 的内部链接必须全部可解析 | 立即失败（防止再次出现「点不动的链接」） |
 | **协议流纯净性** | `python3 tools/check_lsp_stdout_purity.py`——LSP 运行时用到的模块与被 LSP 调用的函数里不得出现 `println!` | 立即失败（stdout 是协议流，裸输出会让编辑器卡死） |
 | **版本号一致性** | `python3 tools/check_version.py`——README / CHANGELOG / 官网三处产物的版本号必须一致 | 立即失败（防止「代码已发版、文档还停在旧版」） |
@@ -1683,17 +1934,37 @@ Dial 目前处于 v0.x 快速演进阶段。版本号采用**最多两位小数*
 约定与约束（强制）：
 
 1. **最多两位小数**：`v0.1`、`v0.2`、…、`v0.9`、`v0.91`、`v0.92`……
-   不存在 `v0.601` 这类三位小数的版本——补丁不再单独占一个数量级，
+   不存在 `v0.601` 这类**三位连续小数**的版本——补丁不再单独占一个数量级，
    与小功能同按 `+0.01` 推进，避免版本号无意义地膨胀、也避免「补丁」与「小功能」纠缠不清。
+   **唯一例外是第三位的补丁号**（如 `v0.98.1`），它不是「第三位连续小数」，
+   而是「两位小数版本 + 一位修复补丁位」，适用条件见第 6 条。
 2. **标题带 `v`、不写补丁位**：文档与 CHANGELOG 的版本标题一律写作 **`[v0.91]`**，
    **不是** `[0.91.0]`。源码 `Cargo.toml` 的 `version` 字段受 Cargo 三段式限制仍写作 `0.91.0`，
    那只是**存储格式**，对外一律显示为 `v0.91`。
+   **带补丁位的版本例外**：补丁发布写作 `[v0.98.1]`，显示为 `v0.98.1`（补丁位必须显示，
+   否则修复发布与前一版在文档上无法区分——读者无从判断自己装的是不是修复过的版本）。
 3. **不可跳版**：例如不能从 `v0.6` 直接到 `v0.7`；必须按 `v0.61`、`v0.62`……逐档推进，
    除非用户明确要求跳版。
 4. **版本号必须严格按时间递增，绝不许倒流**：后发版本的日期不得早于先前版本。
    CHANGELOG 中一旦出现日期倒流（例如 `v0.4` 的日期晚于 `v0.5`），即视为文档缺陷，必须当场修正。
 5. **每档一次完整交付**：每一个版本号都对应一次完整交付——代码实现 + 端到端测试（A/B/D/E/C 全绿）
    + README/CHANGELOG 文档 + 官网重新生成 + git 提交 + 含 `.git` 目录的发布压缩包。
+6. **补丁位（第三位）的唯一适用场景：修复发布**。
+   当一个已发布的版本存在**必须修复的缺陷**（安全漏洞、构建失败、文档与实现不符），
+   而这些修复**不引入任何新特性、不改变任何既有行为**时，允许发布
+   `<两位小数版本>.<补丁号>`（补丁号从 `1` 起递增，如 `v0.98.1`、`v0.98.2`）。
+   **补丁发布必须满足**：
+   - 只含修复，不含新特性——有新特性就应当走 `+0.01` 开新档；
+   - 补丁号只增不减，且同一两位小数版本内单调递增；
+   - 必须在 CHANGELOG 中**单独列出条目**，写明修了什么、影响哪些版本；
+   - 补丁号**不能**用来「抢」一个尚未发布的新档（例如 `v0.99` 未发布就不许写 `v0.99.1`）。
+
+   > **为什么要有这条例外**：v0.98 之后发现了 CVE #103–#111 等必须修复的安全缺陷。
+   > 若严格禁止第三位，就只能把修复混进 `v0.99`——但那会让 `v0.99` 同时包含
+   > 「已发布的 v0.98 的全部内容」与「修复」，用户无法只取修复、不取新特性；
+   > 更糟的是，等待新版本意味着**缺陷版本仍在用户机器上留存更久**。
+   > 补丁位让「有缺陷的版本」能被精确地、更快地替换掉。
+   > 这正是语义化版本的「修订号」要解决的问题，此处按本项目的 `v0.x` 风格落地。
 
 ---
 
@@ -2543,6 +2814,7 @@ after
 | `Error` 只有 `.msg()` | 不提供错误码、错误链、自定义子类 |
 | `finally` | 不支持（用 try 之后的代码即可，Dial 无异常穿透的清理需求） |
 | 跨函数抛出 | `try` 只捕获**本函数内**（含被调函数）抛出的异常 |
+| `select` 各 `arm` / `try` 体的 moved 分析为独立快照 | `move_to` 只在「流敏感」的单条路径上标记「已转移」。若在某 `select` arm 里 `move_to(x, ch)`，编译器**不会**因它而把另一 `arm` 里的 `x` 误判为「已转移」（各 arm 互斥，互不影响）；同理 `try` 体里 move 的变量，也不会让 `catch` 体误以为它已转移。**已知限制**：相反方向的误报目前不在编译期消除——若你在 `select` 的某 arm 或 `try` 体里先 `move_to(x, ...)`，再在「另一条互斥路径」里引用 `x`，编译器可能因全局 moved 标记而报「已转移」。该用法（在互斥分支间转移同一变量）极其罕见，当前记为已知限制，不阻断编译；后续若需要再做流敏感的 moved 状态回滚 |
 
 ---
 
@@ -3019,7 +3291,7 @@ while (true) {
 
 ---
 
-## 28. 语言服务器 `dialc lsp`（v0.94 骨架 → v0.95 增强）
+## 28. 语言服务器 `dialc lsp`（v0.94 骨架 → v0.95 增强 → v0.98 工业化）
 
 ```bash
 dialc lsp
@@ -3055,7 +3327,7 @@ dialc lsp
 | **悬停（Hover）** | `textDocument/hover` | 显示符号名称、推断类型、声明片段；包符号额外显示 `.diali` 的 `///` 文档并标注「外部函数」 |
 | **跳转定义** | `textDocument/definition` | 文件内符号回本文件精确 `Location`（UTF-16 列换算）；包符号跳进 `.diali` 的声明行 |
 | **基础补全** | `textDocument/completion`（`.` 触发） | 收集光标可见作用域内的全部符号，按已输入前缀过滤；空白光标给全量候选 |
-| 能力协商 | `initialize` | 声明 `textDocumentSync = 1`（全量同步）、语义 token 的 legend，以及 `hoverProvider` / `definitionProvider` / `completionProvider` |
+| 能力协商 | `initialize` | 声明 `textDocumentSync = {openClose: true, change: 1, save: {includeText: false}}`（选项形式：全量同步 + 接收 `didSave`）、语义 token 的 legend，以及 `hoverProvider` / `definitionProvider` / `completionProvider` |
 
 刻意**不**在 `didChange` 时发诊断：打字到一半的代码必然是错的，
 边打边报会让红线在半句话上反复闪。诊断留给保存时——这也是本节标题写「保存时诊断」的原因。
@@ -3093,7 +3365,7 @@ I 组测试因此**同时**放了两行：中文那行证明长度本身没算�
 | 重命名、跨文件引用查找、格式化 | 重命名需要全工作区引用图，当前索引器只建符号、不建引用边；格式化交给编辑器/用户。**v0.98 轮 2（重命名 / 引用）与轮 3（保守格式化）已补上**——重命名靠索引器新增的**引用边**，格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作 |
 | 区分变量名与函数名（高亮上） | 需要符号表。当前标识符一律标 `variable`：**宁可不标，也不标错**（v0.95 的 Hover/补全已能区分种类，但语义高亮的 legend 暂未细分） |
 | 行注释高亮 | 词法器直接丢弃注释、不产 token，语义 token 也就拿不到它。注释高亮交给编辑器的 TextMate 语法（已在扩展里提供），那才是它的主场 |
-| 增量文档同步 | 全量同步（`textDocumentSync = 1`）对当前规模足够了；增量同步省下的那点带宽，换不来它带来的偏移换算复杂度 |
+| 增量文档同步 | 全量同步（`textDocumentSync` 广告的是选项形式 `{openClose, change: 1, save}`，其中 `change: 1` = Full）对当前规模足够了；增量同步省下的那点带宽，换不来它带来的偏移换算复杂度 |
 | 引入 LSP 框架（tower-lsp 等） | 本骨架只需要「读一条 JSON、写一条 JSON」。框架带来的异步运行时与依赖树，远超它省下的那点代码 |
 | 补全时自动补 `import` 语句（`additionalTextEdits`） | 轮 3 规划时留的占位，最终**不做**：插入位置有歧义（文件头？现有 import 之后？），而 Dial 的 `import` 还要求包**已安装**——自动插一行 `import "x";` 却没装包，只会把「缺包」这个真问题推迟到编译期才暴露。更要紧的是 LSP 的 `additionalTextEdits` 会**在用户接受补全时静默改文件**，而用户只请求了「补一个名字」。宁可让用户自己写 import，也不擅自改他没要求改的地方 |
 | 诊断的表达式级精确定位 | 语义错误目前定位到**语句**级（语句带位置，表达式 `Expr` 不带）。要精确到表达式，得给 15 个 `Expr` 变体全部加上位置并贯穿解析器与语义分析器——改动面太大，而收益只是波浪线短几个字符。**先保证「落在正确的语句上」**（旧行为是落在文件开头） |
@@ -3246,7 +3518,7 @@ fn main() {
 | 文档链接 | ✅ 已实现（轮 4） | `import "pkg";` 的字符串字面量指向该包的 `.diali` 接口文件，可点击跳转 |
 
 > 路线：v0.98 完成**轮 1（基础稳健 + 补全增强 + 三编辑器接通）**、**轮 2（导航全家桶）**、**轮 3（编写辅助）**
-> 与 **轮 4（高级能力）**——循序渐进，每轮可独立验证（见 `tools/lsp_smoke.py`）。
+> 与 **轮 4（高级能力）**——循序渐进，每轮可独立验证（见 `tools/lsp_full_smoke.py`）。
 >
 > 实现要点：引用 / 重命名依赖 `src/index.rs` 新增的**引用边**——索引不再只建符号、也记录每个标识符解析到哪个符号
 > （`Ref.symbol_index`），因此**同名遮蔽天然正确**（内层同名变量不会被误并入外层引用）。Dial 单文件编译，
@@ -3255,7 +3527,7 @@ fn main() {
 > **协议流纯净性（铁律）**：LSP 的 stdout 跑的是 `Content-Length` 分帧协议，
 > **任何非协议字节都会让客户端分帧错位**——症状不是报错，而是**编辑器卡死**。
 > 因此 stdout 只允许出现协议字节；日志一律走 stderr（CLI）或 `window/logMessage` 通知（LSP）。
-> 这条纪律由两路自动化守住：`tools/lsp_smoke.py` 的**动态**断言（发现裸字节即失败）
+> 这条纪律由两路自动化守住：`tools/lsp_full_smoke.py` 的**动态**断言（发现裸字节即失败）
 > 与 `tools/check_lsp_stdout_purity.py` 的**静态**守卫（LSP 路径上出现 `println!` 即失败）。
 >
 > **能力协商的判据**：按「客户端有没有**提到这一段**」判断，而不是「有没有逐项点名」——
@@ -3298,7 +3570,7 @@ fn main() {
 > `RequestCancelled(-32800)`」需要并发执行模型才做得到。我们保证的是更重要的一条：
 > **每个请求恰好回一次响应**，客户端绝不会挂等。
 >
-> **规范符合性是被自动检查的**：`tools/lsp_smoke.py` 里有一张**返回形状对照表**，
+> **规范符合性是被自动检查的**：`tools/lsp_full_smoke.py` 里有一张**返回形状对照表**，
 > 逐个方法核对响应结构与规范一致（`Hover` 要 `contents`、`CompletionList` 要
 > `isIncomplete`+`items`、`formatting` 必须是 **`TextEdit[]` 本身**而不是任何包装、
 > `SelectionRange[]` 只能有 `range`/`parent` 两个键……），

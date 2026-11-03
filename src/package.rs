@@ -147,11 +147,10 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
     };
 
     let name = get_str("name")?;
-    let version = v
-        .get("version")
-        .and_then(|x| x.as_str())
-        .unwrap_or("0.0.0")
-        .to_string();
+    // version 与 name / abi / iface / license 一致：**缺失一律报错**，绝不静默补默认值
+    // （见 README §25.2「字段缺失一律报错」铁律）。即便它目前只用于展示，也不能开例外，
+    // 否则「一律」二字就失去意义，且静默默认值会掩盖包作者漏写版本的真实失误。
+    let version = get_str("version")?;
     let abi = v
         .get("abi")
         .and_then(|x| x.as_u64())

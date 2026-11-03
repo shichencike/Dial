@@ -449,6 +449,12 @@ impl Indexer {
                         self.index_stmts(db, d);
                     }
                 }
+                // 裸块（v0.98.next）：引入新作用域并递归索引内部语句。
+                Stmt::Block { body, line, col } => {
+                    self.mark(scope_id, (*line, *col));
+                    let b = self.push_scope(Some(scope_id));
+                    self.index_stmts(body, b);
+                }
                 // 以下语句不引入绑定，仅登记位置以参与 span 推导。
                 Stmt::Expr(_, line, col) => self.mark(scope_id, (*line, *col)),
                 Stmt::Return(_, line, col) => self.mark(scope_id, (*line, *col)),

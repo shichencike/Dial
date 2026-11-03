@@ -1,0 +1,25 @@
+// 回归用例：emit_throw 不得释放 try 体【之外】的外层 ARC 局部（UAF 防护）。
+//
+// 反模式来源：早期 emit_throw 遍历本帧【全部】作用域并释放，导致 try 体内 open 失败抛异常时，
+// catch 体中引用的「try 之前声明」的变量（path）被误释放 -> use-after-free（读到一个已归还的悬垂指针）。
+// 现 emit_throw 跳过受保护的外层槽位，catch 引用安全。
+//
+// 运行预期：三次打印都输出 /tmp/data.txt，且程序退出码 0（无崩溃、无乱码）。
+
+fn main(): int {
+    let path: string = "/tmp/data.txt";
+    try {
+        let f: file = open("no_such_file_xyz.txt", "r"); // 必然失败 -> 抛 Error
+        close(f);
+    } catch e {
+        print("caught, path=".concat(path)); // path 必须仍然存活
+    }
+    print("path_after=".concat(path));
+    var i: int = 0;
+    while (i < 200000) {
+        let junk: string = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"; // 覆盖可能误释放并重用的内存
+        i = i + 1;
+    }
+    print("path_final=".concat(path));
+    return 0;
+}

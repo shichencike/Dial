@@ -61,6 +61,17 @@
   </aside>
 
   <main class="content">
+    <div class="note">
+      <b>关于编号格式（请先读这一段）：</b>下表中的 <code>CVE-2026-DIAL-001</code> ~ <code>008</code>
+      是<b>本项目自建的漏洞跟踪编号</b>，<b>不是</b> MITRE / CNA 分配的正式 CVE 编号。
+      正式 CVE 的格式是 <code>CVE-YYYY-NNNNN</code>（五位数字、由 MITRE 统一分配并公示），
+      而本页的 <code>DIAL-00X</code> 后缀是本仓库内部用于追踪缺陷与修复的编号。
+      之所以仍以 <code>CVE-</code> 开头，是为了让安全公告具备统一的检索前缀；
+      但<b>请勿将它们当作已向 MITRE 登记的正式 CVE 引用</b>。
+      每一项对应的<b>真实缺陷编号</b>（GitHub issue，<code>#103</code> ~ <code>#111</code>）见总表「关联缺陷」列，
+      正式对外引用请以那些编号为准。
+    </div>
+
     <h1 id="summary">概览</h1>
     <p>本批漏洞在 <b>v0.98.0</b>（GA 版本）中被集中发现——既有编译期（解析器、语义）缺陷，
     也有运行时（ARC 内存、异常路由、通道释放）缺陷。所有 8 项均在 <b>v0.98.1</b> 修复。</p>
@@ -86,14 +97,14 @@
         <tr><th>CVE 编号</th><th>标题</th><th>发现版本</th><th>存活周期</th><th>严重程度</th><th>关联缺陷</th><th>修复版本</th><th>状态</th></tr>
       </thead>
       <tbody>
-        <tr><td>CVE-2024-DIAL-001</td><td>括号表达式解析错误</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>#103</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2024-DIAL-002</td><td>dialc run 相对路径执行失败</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>#104</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2024-DIAL-003</td><td>RC clone 污染 / 数据竞争</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-critical">严重</span></td><td>#105</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2024-DIAL-004</td><td>跨函数异常路由失败</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>#106</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2024-DIAL-005</td><td>缺失取模 % 运算符</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>#107</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2024-DIAL-006</td><td>缺失类型→字符串转换与拼接</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>#108</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2024-DIAL-007</td><td>channel release 泄漏残留元素</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>#110</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2024-DIAL-008</td><td>缺失 DIAL_C_COMPILER / 安装脚本缺陷</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-low">低</span></td><td>#109</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-001</td><td>括号表达式解析错误</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>#103</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-002</td><td>dialc run 相对路径执行失败</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>#104</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-003</td><td>RC clone 污染 / 数据竞争</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-critical">严重</span></td><td>#105</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-004</td><td>跨函数异常路由失败</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>#106</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-005</td><td>缺失取模 % 运算符</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>#107</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-006</td><td>缺失类型→字符串转换与拼接</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>#108</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-007</td><td>channel release 泄漏残留元素</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>#110</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-008</td><td>缺失 DIAL_C_COMPILER / 安装脚本缺陷</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-low">低</span></td><td>#109</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
       </tbody>
     </table>
 
@@ -101,7 +112,7 @@
 
     <!-- DIAL-001 -->
     <div class="cve-card" id="cve-001">
-      <h3>CVE-2024-DIAL-001 <span class="badge badge-medium">中</span></h3>
+      <h3>CVE-2026-DIAL-001 <span class="badge badge-medium">中</span></h3>
       <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #103 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p>解析器的 <code>parse_primary</code> 漏掉了 <code>LParen</code> 分支，导致任何以左括号开头的<b>分组表达式</b>
@@ -121,7 +132,7 @@
 
     <!-- DIAL-002 -->
     <div class="cve-card" id="cve-002">
-      <h3>CVE-2024-DIAL-002 <span class="badge badge-high">高</span></h3>
+      <h3>CVE-2026-DIAL-002 <span class="badge badge-high">高</span></h3>
       <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #104 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p><code>dialc run &lt;文件&gt;</code> 在计算输出路径时，若传入<b>裸文件名</b>（无目录部分），
@@ -143,7 +154,7 @@ dialc run poc_002_run.dial     # 修复后输出: run relative path works</code>
 
     <!-- DIAL-003 -->
     <div class="cve-card" id="cve-003">
-      <h3>CVE-2024-DIAL-003 <span class="badge badge-critical">严重</span></h3>
+      <h3>CVE-2026-DIAL-003 <span class="badge badge-critical">严重</span></h3>
       <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #105 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p><code>dial_rc_clone</code> 在引用计数为 1 时直接返回<b>同一个指针</b>却未执行 <code>retain</code>
@@ -173,7 +184,7 @@ dialc run poc_002_run.dial     # 修复后输出: run relative path works</code>
 
     <!-- DIAL-004 -->
     <div class="cve-card" id="cve-004">
-      <h3>CVE-2024-DIAL-004 <span class="badge badge-high">高</span></h3>
+      <h3>CVE-2026-DIAL-004 <span class="badge badge-high">高</span></h3>
       <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #106 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p>异常机制依赖 <code>setjmp/longjmp</code> 实现零成本 <code>try/catch</code>，但跳转目标
@@ -206,7 +217,7 @@ fn main(): int {
 
     <!-- DIAL-005 -->
     <div class="cve-card" id="cve-005">
-      <h3>CVE-2024-DIAL-005 <span class="badge badge-medium">中</span></h3>
+      <h3>CVE-2026-DIAL-005 <span class="badge badge-medium">中</span></h3>
       <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #107 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p>语言缺失<b>取模运算符 <code>%</code></b>：词法分析、语法分析与语义/代码生成三层都未实现。
@@ -228,7 +239,7 @@ fn main(): int {
 
     <!-- DIAL-006 -->
     <div class="cve-card" id="cve-006">
-      <h3>CVE-2024-DIAL-006 <span class="badge badge-medium">中</span></h3>
+      <h3>CVE-2026-DIAL-006 <span class="badge badge-medium">中</span></h3>
       <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #108 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p>缺失<b>基本类型 → 字符串</b>的转换能力：没有 <code>int_to_string</code> / <code>float_to_string</code>，
@@ -252,7 +263,7 @@ fn main(): int {
 
     <!-- DIAL-007 -->
     <div class="cve-card" id="cve-007">
-      <h3>CVE-2024-DIAL-007 <span class="badge badge-high">高</span></h3>
+      <h3>CVE-2026-DIAL-007 <span class="badge badge-high">高</span></h3>
       <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #110 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p><code>dial_channel_release</code> 释放通道时，<b>环形缓冲区里尚未被消费的元素没有逐一析构</b>。
@@ -279,7 +290,7 @@ close(ch);
 
     <!-- DIAL-008 -->
     <div class="cve-card" id="cve-008">
-      <h3>CVE-2024-DIAL-008 <span class="badge badge-low">低</span></h3>
+      <h3>CVE-2026-DIAL-008 <span class="badge badge-low">低</span></h3>
       <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #109 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p>三项工程化缺陷：(1) 编译器未尊重 <code>DIAL_C_COMPILER</code> 环境变量，用户无法指定替代的 C 编译器；

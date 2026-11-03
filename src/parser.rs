@@ -224,6 +224,14 @@ impl Parser {
                 self.advance();
                 Type::Char
             }
+            TokenKind::ByteT => {
+                self.advance();
+                Type::Byte
+            }
+            TokenKind::BytesT => {
+                self.advance();
+                Type::Bytes
+            }
             TokenKind::StringT => {
                 self.advance();
                 Type::String
@@ -307,6 +315,13 @@ impl Parser {
             TokenKind::Try => self.parse_try(),
             TokenKind::Throw => self.parse_throw(),
             TokenKind::Select => self.parse_select(),
+            // 裸块 `{ ... }`：引入一个新的词法作用域（v0.98.next）。
+            // 直接复用 parse_block（它负责消费配对的 { 与 }，并递归 parse_stmt 内部语句，
+            // 因此裸块可任意嵌套）。
+            TokenKind::LBrace => {
+                let block = self.parse_block()?;
+                Ok(Stmt::Block { body: block, line: tok.line, col: tok.col })
+            }
             TokenKind::Break => {
                 self.advance();
                 self.expect(TokenKind::Semicolon)?;
@@ -800,6 +815,10 @@ impl Parser {
             TokenKind::CharLit(c) => {
                 self.advance();
                 Ok(Expr::CharLit(c))
+            }
+            TokenKind::ByteLit(b) => {
+                self.advance();
+                Ok(Expr::ByteLit(b))
             }
             TokenKind::StringLit(s) => {
                 self.advance();

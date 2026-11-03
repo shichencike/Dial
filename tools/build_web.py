@@ -29,16 +29,21 @@ def current_version() -> tuple[str, str]:
     footer 停在 v0.96、首页 KPI 停在 v0.96、下载链接还指着早已不存在的
     `dialc-v0.96.zip`）。**版本号只能有一个出处**，否则每次发版都要手工追一遍。
 
-    返回 `(显示版本 "v0.98", 完整版本 "0.98.0")`。
-    显示版本取「两位小数」是本项目的版本号规则（见 README §23）。
+    返回 `(显示版本, 完整版本)`。显示版本遵循 README §23 规则：
+    常规发布取主.次两位（如 "v0.98"），补丁发布（第三位非零，如 0.98.1）
+    显示完整三位 "v0.98.1"——补丁位必须显式可见。
     """
     cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
     m = re.search(r'^version\s*=\s*"([0-9]+(?:\.[0-9]+)*)"', cargo, re.M)
     if not m:
         raise SystemExit("无法从 Cargo.toml 解析版本号")
     full = m.group(1)
-    major_minor = ".".join(full.split(".")[:2])
-    return f"v{major_minor}", full
+    parts = full.split(".")
+    if len(parts) >= 3 and parts[2] != "0":
+        display = f"v{full}"                       # 补丁发布：显示完整三位
+    else:
+        display = f"v{'.'.join(parts[:2])}"          # 常规发布：只取主.次
+    return display, full
 
 
 VERSION, VERSION_FULL = current_version()

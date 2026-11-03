@@ -29,13 +29,24 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def cargo_version() -> tuple[str, str]:
-    """从 Cargo.toml 取 (显示版本 "v0.98", 完整版本 "0.98.0")。"""
+    """从 Cargo.toml 取 (显示版本, 完整版本)。
+
+    显示版本遵循 README §23 的版本号规则：
+      - 常规发布只取主.次两位，如 "v0.98"；
+      - 补丁发布（第三位非零，如 0.98.1）显示完整三位 "v0.98.1"，
+        因为补丁位必须显式可见（见 §23「唯一例外」）。
+    """
     cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
     m = re.search(r'^version\s*=\s*"([0-9]+(?:\.[0-9]+)*)"', cargo, re.M)
     if not m:
         sys.exit("✗ 无法从 Cargo.toml 解析版本号")
     full = m.group(1)
-    return "v" + ".".join(full.split(".")[:2]), full
+    parts = full.split(".")
+    if len(parts) >= 3 and parts[2] != "0":
+        display = "v" + full            # 补丁发布：显示完整三位
+    else:
+        display = "v" + ".".join(parts[:2])  # 常规发布：只取主.次
+    return display, full
 
 
 def main() -> None:

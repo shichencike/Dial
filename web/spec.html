@@ -24,7 +24,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v098">dialc — Dial 语言编译器 v0.98</a><ul>
+<li><a href="#dialc--dial-语言编译器-v0981">dialc — Dial 语言编译器 v0.98.1</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -44,6 +44,7 @@
 <li><a href="#下载源与回退">下载源与回退</a></li>
 </ul>
 </li>
+<li><a href="#322-命令行用法总览">3.2.2 命令行用法总览</a></li>
 <li><a href="#33-编译-dial-程序">3.3 编译 Dial 程序</a></li>
 <li><a href="#34-产物依赖契约">3.4 产物依赖契约</a><ul>
 <li><a href="#341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</a></li>
@@ -64,6 +65,9 @@
 <li><a href="#52-类型良构性约束">5.2 类型良构性约束</a></li>
 <li><a href="#53-类型转换">5.3 类型转换</a></li>
 <li><a href="#54-char单字符类型v092">5.4 char：单字符类型（v0.92）</a></li>
+<li><a href="#55-输出三件套连续输出v0982">5.5 输出三件套：连续输出（v0.98.2）</a></li>
+<li><a href="#56-byte单字节无符号值v0982">5.6 byte：单字节无符号值（v0.98.2）</a></li>
+<li><a href="#57-bytes二进制缓冲区v0982">5.7 bytes：二进制缓冲区（v0.98.2）</a></li>
 </ul>
 </li>
 <li><a href="#6-变量与可变性">6. 变量与可变性</a><ul>
@@ -83,6 +87,7 @@
 <li><a href="#83-范围-for-循环">8.3 范围 for 循环</a></li>
 <li><a href="#84-break--continue">8.4 break / continue</a></li>
 <li><a href="#85-块与作用域">8.5 块与作用域</a></li>
+<li><a href="#86-裸块独立的词法作用域v0982">8.6 裸块：独立的词法作用域（v0.98.2）</a></li>
 </ul>
 </li>
 <li><a href="#9-函数">9. 函数</a><ul>
@@ -134,7 +139,10 @@
 <li><a href="#c-runtime-导出函数">C Runtime 导出函数</a></li>
 </ul>
 </li>
-<li><a href="#16-内置-print">16. 内置 print</a></li>
+<li><a href="#16-内置-print-与输出三件套">16. 内置 print 与输出三件套</a><ul>
+<li><a href="#161-连续输出print_raw--write_charv0982">16.1 连续输出：print_raw / write_char（v0.98.2）</a></li>
+</ul>
+</li>
 <li><a href="#17-未定义行为与已实现边界">17. 未定义行为与已实现边界</a><ul>
 <li><a href="#171-未定义行为">17.1 未定义行为</a></li>
 <li><a href="#172-尚未实现的能力截至-v098">17.2 尚未实现的能力（截至 v0.98）</a></li>
@@ -259,7 +267,7 @@
 <li><a href="#2710-当前边界">27.10 当前边界</a></li>
 </ul>
 </li>
-<li><a href="#28-语言服务器-dialc-lspv094-骨架--v095-增强">28. 语言服务器 dialc lsp（v0.94 骨架 → v0.95 增强）</a><ul>
+<li><a href="#28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化">28. 语言服务器 dialc lsp（v0.94 骨架 → v0.95 增强 → v0.98 工业化）</a><ul>
 <li><a href="#281-为什么是同一套代码而不是独立的解析器">28.1 为什么是「同一套代码」而不是独立的解析器</a></li>
 <li><a href="#282-已支持">28.2 已支持</a></li>
 <li><a href="#283-两个容易出错已经处理好的细节">28.3 两个容易出错、已经处理好的细节</a></li>
@@ -282,7 +290,7 @@
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v098">dialc — Dial 语言编译器 v0.98</h1>
+<h1 id="dialc--dial-语言编译器-v0981">dialc — Dial 语言编译器 v0.98.1</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -374,7 +382,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   │                       #   K LSP 增强 / L 包安装 / M LSP 全能力 + 协议流纯净性）
 │   ├── bad/                # 必须编译失败的负向用例
 │   ├── trap/               # 必须当场因信号终止的 Fail-Fast 用例
-│   ├── lsp_smoke.py        # I 组：LSP 协议往返（诊断 + 语义高亮）
+│   ├── lsp_smoke.py        # I 组：LSP 协议往返（诊断 + 语义高亮）；与 tools/lsp_full_smoke.py 是两个不同文件
 │   ├── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
 │   └── pkg_install_url.py  # L 组：包 URL 安装 + 一键安装脚本
 ├── tools/
@@ -382,11 +390,10 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
 │   ├── check_version.py    # 校验版本号在 README / CHANGELOG / 官网三处一致
 │   ├── check_lsp_stdout_purity.py  # 校验 LSP 路径上不出现 stdout 裸输出（协议流纯净性）
-│   ├── lsp_smoke.py        # M 组：LSP 全能力往返 + 协议流纯净性断言
+│   ├── lsp_full_smoke.py  # M 组：LSP 全能力往返 + 协议流纯净性断言
 │   ├── package.sh          # 打发布包 dialc-v&lt;版本&gt;-&lt;平台&gt;.zip（含许可与 .git）
 │   ├── install-dial.sh     # 一键安装（Linux / Termux，支持 curl | bash 一键命令）
 │   ├── install-dial.ps1    # 一键安装（Windows / PowerShell，支持 irm | iex 一键命令）
-│   ├── install-dial.ps1    # 一键安装（Windows / PowerShell）
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
 ├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十三组测试 + 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
@@ -512,10 +519,10 @@ git clone https://github.com/shichencike/Dial.git
 cd Dial                                  # 进入工程根目录（编译器本体就在这里：Cargo.toml 与 src/ 都在根）
 
 # 2) 编译（编译器本体就位于仓库根，无需再进子目录）
-export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18   # 指向本机 LLVM 18（见 §3.1.2）
+export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18   # 指向本机 LLVM 18（见 §3.1.1）
 cargo build --release                          # 产物：target/release/dialc
 
-# 3) 让编译器本体能找到 libLLVM（见 §3.1.3）
+# 3) 让编译器本体能找到 libLLVM（见 §3.1.5）
 export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 
 # 4) 验证
@@ -606,6 +613,49 @@ powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 <pre><code class="language-bash">export PATH=&quot;$PATH:$HOME/.dial/bin&quot;   # 脚本已写入 ~/.profile / ~/.bashrc，重开终端后自动生效
 dialc build main.dial -o main
 </code></pre>
+<h3 id="322-命令行用法总览">3.2.2 命令行用法总览</h3>
+<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast]
+dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast]
+dialc install &lt;包.dialpkg | URL&gt; [--sha256 &lt;哈希&gt;]
+dialc version | --version | -V
+dialc lsp
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>build</code></td>
+<td>编译并链接出可执行文件。<code>--no-link</code> 只产出 <code>.o</code> 不链接</td>
+</tr>
+<tr>
+<td><code>run</code></td>
+<td>编译后<strong>直接运行</strong>（等价于 build + 执行）</td>
+</tr>
+<tr>
+<td><code>install</code></td>
+<td>安装 <code>.dialpkg</code> 包；给 URL 时先下载，再做整包哈希与逐文件 SHA256 校验（见 <a href="#25-包分发与依赖管理生态规划--最终规范">§25</a>）</td>
+</tr>
+<tr>
+<td><code>version</code> / <code>--version</code> / <code>-V</code></td>
+<td><strong>打印版本号</strong>并退出，例如 <code>dialc 0.98.1</code></td>
+</tr>
+<tr>
+<td><code>lsp</code></td>
+<td>启动语言服务器（走 stdio 的 JSON-RPC；<strong>不由人手敲</strong>，见 <a href="#28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化">§28</a>）</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>版本号只有一个出处</strong>：<code>dialc version</code> 打印的版本直接取自 <code>Cargo.toml</code> 的 <code>version</code> 字段
+（编译期注入），与官网、CHANGELOG、发布包名<strong>同源</strong>——
+任何一处手写版本号都必然随发布漂移（这仓库已经因为硬编码漂过三轮）。
+校验脚本见 <code>tools/check_version.py</code>（CI 强制执行）。</p>
+</blockquote>
 <h3 id="33-编译-dial-程序">3.3 编译 Dial 程序</h3>
 <pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast]
 dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fast]
@@ -883,9 +933,19 @@ int  float  bool  char  string  void  file  error  thread  channel
 <td><strong>单个 Unicode 码点</strong>（v0.92）。<strong>值类型</strong>：无 ARC、无堆分配、无空指针。与 <code>int</code> 同表示但<strong>类型独立</strong>——不参与 <code>+ - * /</code>，只可比较，或经 <code>char_to_int</code> / <code>int_to_char</code> 显式转换。字面量写作 <code>'a'</code>、<code>'\n'</code>、<code>'中'</code></td>
 </tr>
 <tr>
+<td><code>byte</code></td>
+<td>LLVM <code>i64</code></td>
+<td><strong>单字节无符号值</strong>（v0.98.2）。<strong>值类型</strong>：与 <code>char</code> 同表示但语义不同——<code>byte</code> 是 0~255 的<strong>数值</strong>，参与算术、比较，经 <code>int_to_byte</code> / <code>byte_to_int</code> 与 <code>int</code> 显式互转；与 <code>char</code>（码点）严格区分，避免「一个字节到底是字符还是数字」的歧义</td>
+</tr>
+<tr>
 <td><code>string</code></td>
 <td>LLVM <code>ptr</code>（不透明）</td>
 <td>由 C Runtime 管理的引用计数字符串</td>
+</tr>
+<tr>
+<td><code>bytes</code></td>
+<td>LLVM <code>ptr</code>（不透明）</td>
+<td>不可变二进制缓冲区（v0.98.2），由 C Runtime 管理的引用计数对象，<strong>独立于 <code>string</code></strong>（零隐式转换）。承载任意字节序列（可能非法 UTF-8）。构造/转换见 <a href="#57-bytes二进制缓冲区v0982">§5.7</a></td>
 </tr>
 <tr>
 <td><code>int[]</code></td>
@@ -1103,6 +1163,183 @@ Dial 的选择是让源码把意图写清楚：要码点就 <code>char_to_int('a
 若码点非法（负数、&gt; <code>0x10FFFF</code>、或落在 UTF-16 代理区 <code>D800~DFFF</code>），
 C Runtime 会在打印时<strong>当场打印诊断并终止</strong>，绝不输出半个坏字符——
 静默产出乱码比当场崩溃更危险，它会在下游变成无法复现的数据损坏（Fail-Fast 铁律 §20）。</p>
+<h3 id="55-输出三件套连续输出v0982">5.5 输出三件套：连续输出（v0.98.2）</h3>
+<p><code>print(x)</code> <strong>永远在末尾追加一个 <code>\n</code></strong>——它表达的是「打印一行」。
+但很多程序需要的不是「一行」，而是<strong>一段连续的字节流</strong>：拼行的表格、
+进度条、逐字动画、协议帧、日志尾巴。这类程序在 v0.98.2 之前<strong>根本写不出来</strong>：
+唯一的输出手段 <code>print</code> 每写一次就断一行，想拼出一行就得把内容先拼成一个大字符串
+（<code>"a" + "b" + ...</code>），而这既啰嗦又不适用于「边算边输出」的场景。</p>
+<p>v0.98.2 补齐三个内置，构成输出的最小完备集：</p>
+<table>
+<thead>
+<tr>
+<th>内置</th>
+<th>签名</th>
+<th>输出</th>
+<th>追加换行？</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>print</code></td>
+<td><code>print(x: int \| float \| bool \| char \| string \| error): void</code></td>
+<td>标量或字符串</td>
+<td><strong>是</strong>（<code>\n</code>）</td>
+</tr>
+<tr>
+<td><code>print_raw</code></td>
+<td><code>print_raw(x: int \| float \| bool \| char \| string \| error): void</code></td>
+<td>同上，<strong>原样</strong>输出</td>
+<td><strong>否</strong></td>
+</tr>
+<tr>
+<td><code>write_char</code></td>
+<td><code>write_char(c: char): void</code></td>
+<td>单个字符</td>
+<td><strong>否</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>print</code> 与 <code>print_raw</code> 的唯一差别就是结尾那个 <code>\n</code></strong>，其余完全一致：
+接受的类型集合相同、标量的文本形态相同（<code>print(42)</code> 与 <code>print_raw(42)</code> 都输出 <code>42</code>）、
+字符串都按<strong>字节长度</strong>原样写出（不解释、不转义、不因内嵌 <code>\0</code> 而截断）。</p>
+<p><strong><code>write_char</code> 与 <code>print(char)</code> 的唯一差别也是那个 <code>\n</code></strong>：
+<code>print('x')</code> 输出 <code>x</code> 并换行；<code>write_char('x')</code> 只输出 <code>x</code>，光标停在原处。</p>
+<pre><code class="language-dial">// 拼一行（表格的一格一行）
+print_raw(&quot;[&quot;);
+print_raw(&quot;alpha&quot;);
+print_raw(&quot;,&quot;);
+print_raw(&quot;beta&quot;);
+print_raw(&quot;]&quot;);
+// 输出： [alpha,beta]
+
+// 逐字符输出（进度条 / 动画）
+write_char('H');
+write_char('i');
+write_char('!');
+// 输出： Hi!   （无换行）
+
+// 一行结束时自己补换行
+print(&quot;&quot;);
+</code></pre>
+<p><strong><code>print_raw</code> 的返回值</strong>：无（与 <code>print</code> 一致，都是<strong>语句</strong>而非表达式），
+不能出现在赋值右侧或 <code>return</code> 位置。</p>
+<p><strong><code>str(char)</code></strong>：<code>str()</code> 在 v0.98.2 起接受 <code>char</code> 实参，返回<strong>只含这一个字符</strong>的 UTF-8 字符串
+（ASCII 字符为 1 字节，多字节码点如 <code>'中'</code> 为 3 字节）。它让字符能直接参与字符串拼接：</p>
+<pre><code class="language-dial">let s: string = str('A') + &quot;BC&quot;;   // &quot;ABC&quot;
+</code></pre>
+<blockquote>
+<p><strong>注意 <code>length()</code> 是字节长度，不是字符数</strong>：<code>str('中').length()</code> 是 <code>3</code> 而不是 <code>1</code>。
+Dial 的字符串按 <strong>UTF-8 字节</strong>计量长度（见 <a href="#131-方法">§13.1</a>），
+因此「字符串有几个字符」这个问题在 Dial 里<strong>没有</strong>直接答案——
+按码点遍历需要自行解码 UTF-8。</p>
+</blockquote>
+<p><strong>与文件 IO 的区别</strong>：<code>print_raw</code> / <code>write_char</code> 写的是 <strong>stdout</strong>，
+不受 <code>open</code> 的文件句柄管辖；要写进文件请用 <code>write(f, content)</code>（见 <a href="#24-文件-iofile-句柄">§24</a>）。</p>
+<p><strong>实现细节</strong>：标量版的 <code>print_raw</code> 在 C Runtime 侧用<strong>栈上缓冲</strong>格式化，<strong>零堆分配</strong>——
+它不先 <code>str(v)</code> 再输出，因为那样会分配一个带引用计数的堆字符串，
+而它只是中转对象（用完即弃却仍占着引用计数），属于实打实的内存泄漏。</p>
+<hr />
+<h3 id="56-byte单字节无符号值v0982">5.6 <code>byte</code>：单字节无符号值（v0.98.2）</h3>
+<p><code>byte</code> 是 <strong>0~255 的无符号单字节值类型</strong>，与 <code>char</code> 故意区分：</p>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>语义</th>
+<th>参与算术</th>
+<th>与 <code>int</code> 互转</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>char</code></td>
+<td>一个 <strong>Unicode 码点</strong>（如 <code>'A'</code> = 65）</td>
+<td>否（只比较 / 经 <code>char_to_int</code> 转 <code>int</code>）</td>
+<td><code>char_to_int</code> / <code>int_to_char</code></td>
+</tr>
+<tr>
+<td><code>byte</code></td>
+<td>一个 <strong>0~255 的数值</strong>（如 <code>int_to_byte(65)</code> = 65）</td>
+<td>是</td>
+<td><code>byte_to_int</code> / <code>int_to_byte</code>（带范围校验）</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>为什么要分两个类型？「一个字节到底是字符还是数字」是 C 里长期的根源歧义。
+把 <code>byte</code> 与 <code>char</code> 设为<strong>类型独立</strong>，就强迫程序员在每个使用点显式声明意图：
+想当字符用 <code>char</code> + <code>int_to_char</code>，想当数值用 <code>byte</code> + <code>int_to_byte</code>，二者永不静默混用。</p>
+</blockquote>
+<p><strong>字面量与转换</strong>：</p>
+<pre><code class="language-dial">let b: byte = int_to_byte(65);   // 数值 65（范围校验：越界 [0,255] 编译期/运行期拒绝）
+let n: int = byte_to_int(b);     // 65
+let c: char = int_to_char(65);  // 'A'（码点语义，与上面的 b 值相同但类型不同）
+
+print(b);            // 65   —— byte 按**数值**打印
+print(c);            // A    —— char 按**字符**打印
+</code></pre>
+<ul>
+<li><code>int_to_byte(v: int): byte</code>：范围校验 <code>v ∈ [0,255]</code>，否则 Fail-Fast（绝不静默截断到 8 位）。</li>
+<li><code>byte_to_int(b: byte): int</code>：零成本（同 <code>i64</code> 表示），仅类型重解释。</li>
+<li><code>byte</code> 是<strong>值类型</strong>：无 ARC、无堆分配、无空指针，可参与算术与比较。</li>
+</ul>
+<h3 id="57-bytes二进制缓冲区v0982">5.7 <code>bytes</code>：二进制缓冲区（v0.98.2）</h3>
+<p><code>bytes</code> 是不可变的<strong>二进制缓冲区</strong>，由 C Runtime 以引用计数（ARC）管理，<strong>与 <code>string</code> 类型独立</strong>——
+二者零隐式转换。它用来承载「任意字节序列」，包括<strong>非法 UTF-8</strong> 的原始数据（网络报文、加密 blob、图像字节等），
+而 <code>string</code> 语义上始终是合法 UTF-8 文本。</p>
+<p><strong>构造与转换</strong>（全是内置函数）：</p>
+<table>
+<thead>
+<tr>
+<th>函数</th>
+<th>签名</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bytes_from_string</code></td>
+<td><code>(s: string): bytes</code></td>
+<td>把 UTF-8 文本原样当作字节序列</td>
+</tr>
+<tr>
+<td><code>bytes_to_string</code></td>
+<td><code>(b: bytes): string</code></td>
+<td>把字节序列原样当作 UTF-8 文本（可能含非法 UTF-8，下游需自行处理）</td>
+</tr>
+<tr>
+<td><code>bytes_new</code></td>
+<td><code>(len: int): bytes</code></td>
+<td>构造长度 <code>len</code>、全零填充的缓冲区</td>
+</tr>
+<tr>
+<td><code>bytes_length</code></td>
+<td><code>(b: bytes): int</code></td>
+<td>字节长度</td>
+</tr>
+<tr>
+<td><code>bytes_get</code></td>
+<td><code>(b: bytes, i: int): byte</code></td>
+<td>取第 <code>i</code> 个字节（返回 <code>byte</code>，越界 Fail-Fast）</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-dial">let raw: bytes = bytes_from_string(&quot;hello&quot;);
+print(bytes_length(raw));      // 5
+print(bytes_get(raw, 0));      // 104  —— 'h' 的 ASCII 值（byte 按数值打印）
+let s: string = bytes_to_string(raw);
+print(s);                     // hello
+
+let buf: bytes = bytes_new(4);  // 4 字节全零
+print(bytes_length(buf));       // 4
+</code></pre>
+<blockquote>
+<p><strong>与 <code>string</code> 的关系</strong>：<code>bytes</code> 与 <code>string</code> 在 C 侧布局相同（<code>[refcount][len][data...]</code>），
+但<strong>类型严格分离</strong>——不能把 <code>bytes</code> 直接当 <code>string</code> 打印（见 <a href="#16-内置-print-与输出三件套">§16</a>），
+必须先 <code>bytes_to_string</code> 显式转换，让「这段二进制该不该被当文本解释」成为一处显式决策。
+<code>bytes</code> 与 <code>string</code> 互转是<strong>字节级原样拷贝</strong>，不做任何编码转换。</p>
+</blockquote>
 <hr />
 <h2 id="6-变量与可变性">6. 变量与可变性</h2>
 <h3 id="61-声明">6.1 声明</h3>
@@ -1325,7 +1562,9 @@ let y: int = 20;      // 不可变
 x = 2;                     // 赋值
 p.x = 3;                   // 字段赋值
 a[0] = 4;                  // 下标赋值
-print(e);                  // 打印语句
+print(e);                  // 打印语句（追加换行）
+print_raw(e);              // 原样打印语句（v0.98.2，不追加换行）
+write_char(c);             // 输出单字符（v0.98.2，不追加换行）
 f(1, 2);                   // 表达式语句
 if (cond) { ... } else { ... }
 if (cond) { ... } else if (c2) { ... } else { ... }   // else if 语法糖
@@ -1379,7 +1618,61 @@ while (n &lt; 10) {
 }
 </code></pre>
 <h3 id="85-块与作用域">8.5 块与作用域</h3>
-<p><code>{ ... }</code> 只能作为函数体或 <code>if</code>/<code>while</code>/<code>for</code> 的分支体，<strong>不能</strong>作为独立的裸块语句。</p>
+<p><code>{ ... }</code> 既可以作为函数体或 <code>if</code>/<code>while</code>/<code>for</code> 的分支体，<strong>也可以</strong>作为<strong>独立的裸块语句</strong>
+（v0.98.2 起，见 <a href="#86-裸块独立的词法作用域v0982">§8.6</a>）。</p>
+<hr />
+<h3 id="86-裸块独立的词法作用域v0982">8.6 裸块：独立的词法作用域（v0.98.2）</h3>
+<p>裸块 <code>{ ... }</code> 是一个<strong>语句</strong>，用来显式划定一段代码的作用域。它的用途有三：</p>
+<ol>
+<li><strong>变量遮蔽</strong>：块内可以声明与外层同名的变量，互不干扰；</li>
+<li><strong>生命周期隔离</strong>：块内声明的堆类型局部变量（<code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code>）在<strong>离开块时即被释放</strong>，
+   不必等到函数结束；</li>
+<li><strong>把一段语句当匿名作用域使用</strong>：无需为此造一个只调用一次的函数。</li>
+</ol>
+<pre><code class="language-dial">let x: int = 1;
+{
+    let x: int = 2;    // 遮蔽外层的 x
+    print(x);          // 2
+}
+print(x);              // 1 —— 外层 x 从未被改动
+</code></pre>
+<p><strong>语义规则</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>规则</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>遮蔽方向</td>
+<td>块内<strong>可以</strong>遮蔽外层同名变量；块内引用不到外层的同名变量（要到外层请先在外面改名或换名引用）</td>
+</tr>
+<tr>
+<td>生命周期</td>
+<td>块内声明的局部变量在<strong>离开块时</strong>脱离作用域；此后引用即编译错误</td>
+</tr>
+<tr>
+<td>堆类型释放</td>
+<td>块内的 <code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code> 局部变量在离开块时被 ARC 释放（与函数返回时的释放规则一致）</td>
+</tr>
+<tr>
+<td>嵌套</td>
+<td>裸块可任意嵌套；每层各自成一个作用域</td>
+</tr>
+<tr>
+<td>跨块引用</td>
+<td><strong>禁止</strong>把块内变量带到块外使用（编译期拒绝）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>与 <code>if</code> / <code>while</code> / <code>for</code> 的分支体的区别</strong>：分支体<strong>也</strong>引入作用域，
+但它是<strong>语法的一部分</strong>——<code>if (c) { ... }</code> 里的 <code>{ ... }</code> 不是独立语句，不能单独出现、也不能被赋值。
+裸块则是<strong>可以单独写出来</strong>的语句。</p>
+<pre><code class="language-dial">if (x &gt; 0) { let y: int = 1; }   // 分支体：作用域限于该分支
+{ let y: int = 2; }               // 裸块：独立语句，效果同上但可单独书写
+</code></pre>
 <hr />
 <h2 id="9-函数">9. 函数</h2>
 <h3 id="91-定义">9.1 定义</h3>
@@ -1737,7 +2030,7 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 <td><code>s.length()</code></td>
 <td><code>dial_string_length</code></td>
 <td><code>int</code></td>
-<td>字节长度</td>
+<td><strong>字节长度</strong>（UTF-8 字节数，<strong>不是字符数</strong>）：<code>"中文abc".length()</code> == 9</td>
 </tr>
 <tr>
 <td><code>s.concat(t)</code></td>
@@ -1749,7 +2042,7 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 <td><code>s.get(i)</code></td>
 <td><code>dial_string_get</code></td>
 <td><code>int</code></td>
-<td>取第 <code>i</code> 个字符的<strong>整数码</strong>；想要 <code>char</code> 请显式转换 <code>int_to_char(s.get(i))</code>（v0.92 起）</td>
+<td>取第 <code>i</code> 个<strong>字节</strong>的值（<code>0~255</code>）。<strong>注意</strong>：这是字节、不是 Unicode 码点——<code>"中".get(0)</code> 返回 <code>228</code>（<code>'中'</code> 的 UTF-8 首字节），而非码点 <code>20013</code>。想要 <code>char</code> 请显式转换 <code>int_to_char(s.get(i))</code>（v0.92 起）；但对多字节字符，只取首字节并不能还原该字符</td>
 </tr>
 <tr>
 <td><code>s.substring(from, to)</code></td>
@@ -1982,7 +2275,19 @@ let/var x = y;  ─────┤
 </tr>
 <tr>
 <td><code>print(x)</code></td>
-<td><code>dial_print_int</code> / <code>dial_print_float</code> / <code>dial_print_bool</code> / <code>dial_print_string</code></td>
+<td><code>dial_print_int</code> / <code>dial_print_float</code> / <code>dial_print_bool</code> / <code>dial_print_char</code> / <code>dial_print_string</code></td>
+</tr>
+<tr>
+<td><code>print_raw(x)</code>（v0.98.2）</td>
+<td><code>dial_print_raw</code> / <code>dial_print_raw_int</code> / <code>dial_print_raw_float</code> / <code>dial_print_raw_bool</code> / <code>dial_write_char</code>（<strong>均不追加换行</strong>）</td>
+</tr>
+<tr>
+<td><code>write_char(c)</code>（v0.98.2）</td>
+<td><code>call void @dial_write_char(i64 %c)</code>（不追加换行）</td>
+</tr>
+<tr>
+<td><code>str(c)</code>（<code>c</code> 为 <code>char</code>，v0.98.2）</td>
+<td><code>call ptr @dial_char_to_string(i64 %c)</code>（编码为 UTF-8，1~4 字节）</td>
 </tr>
 <tr>
 <td>变量绑定（共享）</td>
@@ -2005,13 +2310,15 @@ void *dial_rc_clone(void *p, int64_t payload_size); // 唯一持有时返回自�
 <pre><code class="language-c">DialString dial_string_new(const char *lit);
 int64_t    dial_string_length(DialString s);
 DialString dial_string_concat(DialString a, DialString b);
-int64_t    dial_string_get(DialString s, int64_t i);          // 返回字符的整数码
+int64_t    dial_string_get(DialString s, int64_t i);          // 返回第 i 个「字节」的值（0~255）
 int64_t    dial_string_eq(DialString a, DialString b);        // 相等返回 1
 DialString dial_string_substring(DialString s, int64_t from, int64_t to);
 DialString dial_string_clone(DialString s);
 void       dial_string_retain(DialString s);
 void       dial_string_release(DialString s);
 void       dial_print_string(DialString s);
+DialString dial_char_to_string(int64_t code);       // v0.98.2：码点 → UTF-8 字符串（1~4 字节）
+int        dial_encode_utf8(int64_t code, char *buf); // v0.98.2：运行时内唯一的码点编码实现
 </code></pre>
 <p><strong><code>stdlib/dial_array.h</code></strong></p>
 <pre><code class="language-c">DialArray dial_array_new(void);
@@ -2027,8 +2334,16 @@ void      dial_array_release(DialArray a);
 <pre><code class="language-c">void       dial_print_int(int64_t v);
 void       dial_print_float(double v);
 void       dial_print_bool(int64_t b);      // 0/1 → false/true
+void       dial_print_char(int64_t code);   // 输出码点对应的 UTF-8 字符 + 换行
 void       dial_print_string(DialString s);
 DialString dial_read_line(void);                  // 已暴露为 read_line()
+
+// 连续输出（v0.98.2）：均**不追加换行**，是「拼行 / 进度条 / 逐字输出」的基本积木。
+void       dial_print_raw(DialString s);      // 原样输出字符串（按字节长度，内嵌 '\0' 不截断）
+void       dial_write_char(int64_t code);     // 输出单个字符
+void       dial_print_raw_int(int64_t v);     // 标量版（栈缓冲，零堆分配）
+void       dial_print_raw_float(double v);
+void       dial_print_raw_bool(int64_t b);
 
 // 文件 IO（v0.61）：文件句柄是不透明的 FILE*（经 void* 传递），显式 open/close，不受 ARC 管理。
 typedef void *DialFile;
@@ -2036,6 +2351,21 @@ DialFile  dial_file_open(DialString path, DialString mode);   // 已暴露为 op
 DialString dial_file_read(DialFile f, int64_t n);            // 已暴露为 read(f, n)，读最多 n 字节
 int64_t   dial_file_write(DialFile f, DialString content);   // 已暴露为 write(f, c)，返回写入字节数
 void      dial_file_close(DialFile f);                       // 已暴露为 close(f)，空指针安全
+</code></pre>
+<p><strong><code>stdlib/dial_bytes.h</code></strong>（v0.98.2：与 <code>string</code> <strong>共享同一 C 布局</strong> <code>[refcount][len][data...]</code>，但 Dial 侧类型独立、零隐式转换）</p>
+<blockquote>
+<p>注意：C 侧 <code>bytes</code> 与 <code>string</code> 是<strong>同一底层表示</strong>，所以这里的 C 签名一律用 <code>DialString</code>
+（而不是另起一个 <code>DialBytes</code> typedef）。<code>dial_bytes_*</code> 与 <code>dial_string_*</code> 共享 ARC 原语
+（<code>dial_bytes_retain</code> / <code>dial_bytes_release</code> 内部走同一套引用计数）。</p>
+</blockquote>
+<pre><code class="language-c">DialString dial_bytes_from_string(DialString s);   // 已暴露为 bytes_from_string(s)
+DialString dial_bytes_to_string(DialString b);      // 已暴露为 bytes_to_string(b)
+DialString dial_bytes_zero(int64_t len);           // 已暴露为 bytes_new(len)，全零填充
+int64_t    dial_bytes_length(DialString b);        // 已暴露为 bytes_length(b)
+int64_t    dial_bytes_get(DialString b, int64_t i);// 已暴露为 bytes_get(b, i)，越界 Fail-Fast
+DialString dial_bytes_clone(DialString b);         // COW 感知克隆
+void       dial_bytes_retain(DialString b);
+void       dial_bytes_release(DialString b);
 </code></pre>
 <p><strong><code>stdlib/dial_map.h</code></strong>（与 <code>string</code> / <code>int[]</code> 共用 ARC；已暴露为 <code>map</code> 类型）</p>
 <pre><code class="language-c">DialMap  dial_map_new(void);                           // 已暴露为 new_map()
@@ -2048,7 +2378,7 @@ void     dial_map_retain(DialMap m);                  // 与 string/array 对称
 void     dial_map_release(DialMap m);
 </code></pre>
 <hr />
-<h2 id="16-内置-print">16. 内置 <code>print</code></h2>
+<h2 id="16-内置-print-与输出三件套">16. 内置 <code>print</code> 与输出三件套</h2>
 <pre><code class="language-dial">print(e);
 </code></pre>
 <ul>
@@ -2058,8 +2388,9 @@ void     dial_map_release(DialMap m);
   let n: int = print("hi");   // ❌ 编译错误：void 与 int 不兼容</code></p>
 <ul>
 <li>恰好接受 1 个参数。</li>
-<li>支持的参数类型：<code>int</code>、<code>float</code>、<code>bool</code>、<code>string</code>。</li>
-<li><strong>不支持</strong> <code>int[]</code> 与结构体——必须逐元素 / 逐字段打印。
+<li>支持的参数类型：<code>int</code>、<code>float</code>、<code>bool</code>、<code>char</code>、<code>string</code>、<code>error</code>。</li>
+<li><strong>不支持</strong> <code>int[]</code>、<code>map</code>、结构体与各类句柄（<code>file</code> / <code>thread</code> / <code>channel</code> / 包句柄）——
+  必须逐元素 / 逐字段打印，或先转成字符串。
   若放任会把二进制 payload 当字符串吐出乱码，故在编译期直接拒绝。</li>
 <li>输出格式：</li>
 </ul>
@@ -2068,27 +2399,76 @@ void     dial_map_release(DialMap m);
 <tr>
 <th>类型</th>
 <th>格式</th>
+<th>换行</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>int</code></td>
-<td>十进制整数 + 换行</td>
+<td>十进制整数</td>
+<td>✅</td>
 </tr>
 <tr>
 <td><code>float</code></td>
-<td><code>%f</code>（6 位小数）+ 换行</td>
+<td><code>%f</code>（6 位小数）</td>
+<td>✅</td>
 </tr>
 <tr>
 <td><code>bool</code></td>
-<td><code>true</code> / <code>false</code> + 换行</td>
+<td><code>true</code> / <code>false</code></td>
+<td>✅</td>
+</tr>
+<tr>
+<td><code>char</code></td>
+<td>该码点对应的 <strong>UTF-8 字符</strong>（不是码点数字）</td>
+<td>✅</td>
 </tr>
 <tr>
 <td><code>string</code></td>
-<td>内容 + 换行</td>
+<td>内容（按字节长度原样写出）</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><code>error</code></td>
+<td>错误消息字符串</td>
+<td>✅</td>
 </tr>
 </tbody>
 </table>
+<h3 id="161-连续输出print_raw--write_charv0982">16.1 连续输出：<code>print_raw</code> / <code>write_char</code>（v0.98.2）</h3>
+<p><code>print</code> 永远在末尾追加 <code>\n</code>，因此<strong>需要连续输出的程序在 v0.98.2 之前写不出来</strong>
+（拼行表格、进度条、逐字动画、协议帧）。v0.98.2 补齐两个内置：</p>
+<table>
+<thead>
+<tr>
+<th>内置</th>
+<th>签名</th>
+<th>与 <code>print</code> 的差别</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>print_raw</code></td>
+<td><code>print_raw(x: int \| float \| bool \| char \| string \| error): void</code></td>
+<td><strong>唯一差别：不追加 <code>\n</code></strong>。接受的类型集合与标量文本形态都完全一致</td>
+</tr>
+<tr>
+<td><code>write_char</code></td>
+<td><code>write_char(c: char): void</code></td>
+<td>只接受 <code>char</code>；<strong>不追加 <code>\n</code></strong>。与 <code>print(char)</code> 的差别同样只是那个换行符</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-dial">print_raw(&quot;[&quot;);
+print_raw(&quot;alpha&quot;);
+print_raw(&quot;]&quot;);
+print(&quot;&quot;);        // 自己补换行 -&gt; [alpha]
+
+write_char('H');
+write_char('i');
+print(&quot;&quot;);        // -&gt; Hi
+</code></pre>
+<p>完整语义、示例与实现细节见 <a href="#55-输出三件套连续输出v0982">§5.5</a>。</p>
 <hr />
 <h2 id="17-未定义行为与已实现边界">17. 未定义行为与已实现边界</h2>
 <p>诚实列出边界，避免"文档写了、实现没有"的冲突。</p>
@@ -2159,7 +2539,9 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 所有权转移与多线程并发（§27，含 v0.81 的通道关闭与 EOF、v0.9 的判空与多消费者安全）、
 <strong><code>char</code> 类型（v0.92，见 §5.1）</strong>、<strong><code>import</code> 与 <code>.dialpkg</code> 包分发（v0.93，见 §25）</strong>、
 <strong>三平台原生构建（v0.97：Linux x86_64 / Windows x64-MinGW / Termux aarch64-musl 全静态）</strong>、
-<strong><code>dialc lsp</code> 语言服务器（v0.94 骨架 → v0.95 增强 → v0.98 工业化，见 §28）</strong>。
+<strong><code>dialc lsp</code> 语言服务器（v0.94 骨架 → v0.95 增强 → v0.98 工业化，见 §28）</strong>、
+<strong>连续输出三件套 <code>print_raw</code> / <code>write_char</code> / <code>str(char)</code>（v0.98.2，见 §5.5 与 §16.1）</strong>、
+<strong><code>byte</code> 单字节值类型与 <code>bytes</code> 二进制缓冲区（v0.98.2，见 §5.6 与 §5.7）</strong>。
 其余仍按计划未实现：</p>
 </blockquote>
 <table>
@@ -2180,7 +2562,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>裸块 <code>{ ... }</code></td>
-<td>不支持</td>
+<td><strong>已支持</strong>（v0.98.2）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 <a href="#86-裸块独立的词法作用域v0982">§8.6</a></td>
 </tr>
 <tr>
 <td>模块 / 包 / import</td>
@@ -2236,7 +2618,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>LSP 的重命名 / 跨文件引用查找 / 格式化</td>
-<td><strong>未实现</strong>——悬停、跳转定义、基础补全<strong>已在 v0.95 落地</strong>（见 <a href="#286-lsp-增强hover--跳转定义--补全v095">§28.6</a>）；剩下的三项需要全工作区引用图或代码风格约定，不是「再写几个请求」的事</td>
+<td><strong>已实现</strong>（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的<strong>引用边</strong>（<code>src/index.rs</code>），格式化只做「去行尾空白 + 末尾换行」这类<strong>绝不重排</strong>的非破坏性动作。能力清单见 <a href="#2871-当前-lsp-能力清单">§28.7.1</a>。<strong>尚未实现</strong>：跨工作区的<strong>全量</strong>引用图（当前只覆盖已打开文件与已加载包）</td>
 </tr>
 </tbody>
 </table>
@@ -2303,7 +2685,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td><strong>M. LSP 全能力 + 协议流纯净性</strong>（v0.98 新增）</td>
-<td>真起 <code>dialc lsp</code> 子进程把轮 2~4 的能力全跑一遍（文档大纲 / 工作区符号 / 引用查找 / 重命名 / 签名帮助 / 格式化 / inlay 提示 / 代码动作 / 折叠 / 选择范围 / 文档链接），并断言 <strong>stdout 上只有协议字节</strong>——混进一行裸文本就会让客户端分帧错位，症状是<strong>编辑器卡死</strong>而非报错；另配一道<strong>静态</strong>守卫：<code>tools/check_lsp_stdout_purity.py</code> 扫 LSP 运行时用到的模块与函数，出现 <code>println!</code> 即失败。见 <code>tools/lsp_smoke.py</code></td>
+<td>真起 <code>dialc lsp</code> 子进程把轮 2~4 的能力全跑一遍（文档大纲 / 工作区符号 / 引用查找 / 重命名 / 签名帮助 / 格式化 / inlay 提示 / 代码动作 / 折叠 / 选择范围 / 文档链接），并断言 <strong>stdout 上只有协议字节</strong>——混进一行裸文本就会让客户端分帧错位，症状是<strong>编辑器卡死</strong>而非报错；另配一道<strong>静态</strong>守卫：<code>tools/check_lsp_stdout_purity.py</code> 扫 LSP 运行时用到的模块与函数，出现 <code>println!</code> 即失败。见 <code>tools/lsp_full_smoke.py</code></td>
 </tr>
 </tbody>
 </table>
@@ -2327,6 +2709,11 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td><strong>测试</strong></td>
 <td><code>bash tests/run_tests.sh</code>（A～M 全部十三组）</td>
 <td>立即失败</td>
+</tr>
+<tr>
+<td><strong>CVE 暴力检测</strong></td>
+<td><code>python3 tools/cve_check.py --repeat 10</code>——8 个已登记漏洞各有专门 PoC，每例重复 10 次跑，确认<strong>修复后确实不再复现</strong></td>
+<td>立即失败（漏洞回归 = 修复失效，必须当场发现）</td>
 </tr>
 <tr>
 <td><strong>锚点校验</strong></td>
@@ -3012,18 +3399,39 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <p>约定与约束（强制）：</p>
 <ol>
 <li><strong>最多两位小数</strong>：<code>v0.1</code>、<code>v0.2</code>、…、<code>v0.9</code>、<code>v0.91</code>、<code>v0.92</code>……
-   不存在 <code>v0.601</code> 这类三位小数的版本——补丁不再单独占一个数量级，
-   与小功能同按 <code>+0.01</code> 推进，避免版本号无意义地膨胀、也避免「补丁」与「小功能」纠缠不清。</li>
+   不存在 <code>v0.601</code> 这类<strong>三位连续小数</strong>的版本——补丁不再单独占一个数量级，
+   与小功能同按 <code>+0.01</code> 推进，避免版本号无意义地膨胀、也避免「补丁」与「小功能」纠缠不清。
+   <strong>唯一例外是第三位的补丁号</strong>（如 <code>v0.98.1</code>），它不是「第三位连续小数」，
+   而是「两位小数版本 + 一位修复补丁位」，适用条件见第 6 条。</li>
 <li><strong>标题带 <code>v</code>、不写补丁位</strong>：文档与 CHANGELOG 的版本标题一律写作 <strong><code>[v0.91]</code></strong>，
    <strong>不是</strong> <code>[0.91.0]</code>。源码 <code>Cargo.toml</code> 的 <code>version</code> 字段受 Cargo 三段式限制仍写作 <code>0.91.0</code>，
-   那只是<strong>存储格式</strong>，对外一律显示为 <code>v0.91</code>。</li>
+   那只是<strong>存储格式</strong>，对外一律显示为 <code>v0.91</code>。
+   <strong>带补丁位的版本例外</strong>：补丁发布写作 <code>[v0.98.1]</code>，显示为 <code>v0.98.1</code>（补丁位必须显示，
+   否则修复发布与前一版在文档上无法区分——读者无从判断自己装的是不是修复过的版本）。</li>
 <li><strong>不可跳版</strong>：例如不能从 <code>v0.6</code> 直接到 <code>v0.7</code>；必须按 <code>v0.61</code>、<code>v0.62</code>……逐档推进，
    除非用户明确要求跳版。</li>
 <li><strong>版本号必须严格按时间递增，绝不许倒流</strong>：后发版本的日期不得早于先前版本。
    CHANGELOG 中一旦出现日期倒流（例如 <code>v0.4</code> 的日期晚于 <code>v0.5</code>），即视为文档缺陷，必须当场修正。</li>
 <li><strong>每档一次完整交付</strong>：每一个版本号都对应一次完整交付——代码实现 + 端到端测试（A/B/D/E/C 全绿）
    + README/CHANGELOG 文档 + 官网重新生成 + git 提交 + 含 <code>.git</code> 目录的发布压缩包。</li>
+<li><strong>补丁位（第三位）的唯一适用场景：修复发布</strong>。
+   当一个已发布的版本存在<strong>必须修复的缺陷</strong>（安全漏洞、构建失败、文档与实现不符），
+   而这些修复<strong>不引入任何新特性、不改变任何既有行为</strong>时，允许发布
+   <code>&lt;两位小数版本&gt;.&lt;补丁号&gt;</code>（补丁号从 <code>1</code> 起递增，如 <code>v0.98.1</code>、<code>v0.98.2</code>）。
+   <strong>补丁发布必须满足</strong>：
+   - 只含修复，不含新特性——有新特性就应当走 <code>+0.01</code> 开新档；
+   - 补丁号只增不减，且同一两位小数版本内单调递增；
+   - 必须在 CHANGELOG 中<strong>单独列出条目</strong>，写明修了什么、影响哪些版本；
+   - 补丁号<strong>不能</strong>用来「抢」一个尚未发布的新档（例如 <code>v0.99</code> 未发布就不许写 <code>v0.99.1</code>）。</li>
 </ol>
+<blockquote>
+<p><strong>为什么要有这条例外</strong>：v0.98 之后发现了 CVE #103–#111 等必须修复的安全缺陷。
+若严格禁止第三位，就只能把修复混进 <code>v0.99</code>——但那会让 <code>v0.99</code> 同时包含
+「已发布的 v0.98 的全部内容」与「修复」，用户无法只取修复、不取新特性；
+更糟的是，等待新版本意味着<strong>缺陷版本仍在用户机器上留存更久</strong>。
+补丁位让「有缺陷的版本」能被精确地、更快地替换掉。
+这正是语义化版本的「修订号」要解决的问题，此处按本项目的 <code>v0.x</code> 风格落地。</p>
+</blockquote>
 <hr />
 <h2 id="24-文件-iofile-句柄">24. 文件 IO（file 句柄）</h2>
 <p>文件 IO 在 v0.61 落地。设计严守两条底线：<strong>绝不引入全局变量</strong>、<strong>不重写文件逻辑（只封装 C 标准库）</strong>。
@@ -4211,6 +4619,10 @@ after
 <td>跨函数抛出</td>
 <td><code>try</code> 只捕获<strong>本函数内</strong>（含被调函数）抛出的异常</td>
 </tr>
+<tr>
+<td><code>select</code> 各 <code>arm</code> / <code>try</code> 体的 moved 分析为独立快照</td>
+<td><code>move_to</code> 只在「流敏感」的单条路径上标记「已转移」。若在某 <code>select</code> arm 里 <code>move_to(x, ch)</code>，编译器<strong>不会</strong>因它而把另一 <code>arm</code> 里的 <code>x</code> 误判为「已转移」（各 arm 互斥，互不影响）；同理 <code>try</code> 体里 move 的变量，也不会让 <code>catch</code> 体误以为它已转移。<strong>已知限制</strong>：相反方向的误报目前不在编译期消除——若你在 <code>select</code> 的某 arm 或 <code>try</code> 体里先 <code>move_to(x, ...)</code>，再在「另一条互斥路径」里引用 <code>x</code>，编译器可能因全局 moved 标记而报「已转移」。该用法（在互斥分支间转移同一变量）极其罕见，当前记为已知限制，不阻断编译；后续若需要再做流敏感的 moved 状态回滚</td>
+</tr>
 </tbody>
 </table>
 <hr />
@@ -4826,7 +5238,7 @@ while (true) {
 </tbody>
 </table>
 <hr />
-<h2 id="28-语言服务器-dialc-lspv094-骨架--v095-增强">28. 语言服务器 <code>dialc lsp</code>（v0.94 骨架 → v0.95 增强）</h2>
+<h2 id="28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化">28. 语言服务器 <code>dialc lsp</code>（v0.94 骨架 → v0.95 增强 → v0.98 工业化）</h2>
 <pre><code class="language-bash">dialc lsp
 </code></pre>
 <p>它不从终端读命令、也不往终端写报告：<strong>stdin 收 JSON-RPC，stdout 回 JSON-RPC</strong>，
@@ -4886,7 +5298,7 @@ while (true) {
 <tr>
 <td>能力协商</td>
 <td><code>initialize</code></td>
-<td>声明 <code>textDocumentSync = 1</code>（全量同步）、语义 token 的 legend，以及 <code>hoverProvider</code> / <code>definitionProvider</code> / <code>completionProvider</code></td>
+<td>声明 <code>textDocumentSync = {openClose: true, change: 1, save: {includeText: false}}</code>（选项形式：全量同步 + 接收 <code>didSave</code>）、语义 token 的 legend，以及 <code>hoverProvider</code> / <code>definitionProvider</code> / <code>completionProvider</code></td>
 </tr>
 </tbody>
 </table>
@@ -4939,7 +5351,7 @@ while (true) {
 </tr>
 <tr>
 <td>增量文档同步</td>
-<td>全量同步（<code>textDocumentSync = 1</code>）对当前规模足够了；增量同步省下的那点带宽，换不来它带来的偏移换算复杂度</td>
+<td>全量同步（<code>textDocumentSync</code> 广告的是选项形式 <code>{openClose, change: 1, save}</code>，其中 <code>change: 1</code> = Full）对当前规模足够了；增量同步省下的那点带宽，换不来它带来的偏移换算复杂度</td>
 </tr>
 <tr>
 <td>引入 LSP 框架（tower-lsp 等）</td>
@@ -5216,14 +5628,14 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 </table>
 <blockquote>
 <p>路线：v0.98 完成<strong>轮 1（基础稳健 + 补全增强 + 三编辑器接通）</strong>、<strong>轮 2（导航全家桶）</strong>、<strong>轮 3（编写辅助）</strong>
-与 <strong>轮 4（高级能力）</strong>——循序渐进，每轮可独立验证（见 <code>tools/lsp_smoke.py</code>）。</p>
+与 <strong>轮 4（高级能力）</strong>——循序渐进，每轮可独立验证（见 <code>tools/lsp_full_smoke.py</code>）。</p>
 <p>实现要点：引用 / 重命名依赖 <code>src/index.rs</code> 新增的<strong>引用边</strong>——索引不再只建符号、也记录每个标识符解析到哪个符号
 （<code>Ref.symbol_index</code>），因此<strong>同名遮蔽天然正确</strong>（内层同名变量不会被误并入外层引用）。Dial 单文件编译，
 重命名只作用于当前 <code>.dial</code>，包符号（<code>.diali</code>）只读。</p>
 <p><strong>协议流纯净性（铁律）</strong>：LSP 的 stdout 跑的是 <code>Content-Length</code> 分帧协议，
 <strong>任何非协议字节都会让客户端分帧错位</strong>——症状不是报错，而是<strong>编辑器卡死</strong>。
 因此 stdout 只允许出现协议字节；日志一律走 stderr（CLI）或 <code>window/logMessage</code> 通知（LSP）。
-这条纪律由两路自动化守住：<code>tools/lsp_smoke.py</code> 的<strong>动态</strong>断言（发现裸字节即失败）
+这条纪律由两路自动化守住：<code>tools/lsp_full_smoke.py</code> 的<strong>动态</strong>断言（发现裸字节即失败）
 与 <code>tools/check_lsp_stdout_purity.py</code> 的<strong>静态</strong>守卫（LSP 路径上出现 <code>println!</code> 即失败）。</p>
 <p><strong>能力协商的判据</strong>：按「客户端有没有<strong>提到这一段</strong>」判断，而不是「有没有逐项点名」——
 客户端压根没提 <code>textDocument</code> / <code>workspace</code> 段 = 它没表达偏好 → <strong>全开</strong>；
@@ -5257,7 +5669,7 @@ If omitted the notification should not be sent.</em>」——纯数字形式里<
 （没有跨文件全量扫描这类长任务），没有可观测的取消语义；而规范要求的「取消后回
 <code>RequestCancelled(-32800)</code>」需要并发执行模型才做得到。我们保证的是更重要的一条：
 <strong>每个请求恰好回一次响应</strong>，客户端绝不会挂等。</p>
-<p><strong>规范符合性是被自动检查的</strong>：<code>tools/lsp_smoke.py</code> 里有一张<strong>返回形状对照表</strong>，
+<p><strong>规范符合性是被自动检查的</strong>：<code>tools/lsp_full_smoke.py</code> 里有一张<strong>返回形状对照表</strong>，
 逐个方法核对响应结构与规范一致（<code>Hover</code> 要 <code>contents</code>、<code>CompletionList</code> 要
 <code>isIncomplete</code>+<code>items</code>、<code>formatting</code> 必须是 <strong><code>TextEdit[]</code> 本身</strong>而不是任何包装、
 <code>SelectionRange[]</code> 只能有 <code>range</code>/<code>parent</code> 两个键……），
@@ -5272,7 +5684,7 @@ If omitted the notification should not be sent.</em>」——纯数字形式里<
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.98 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v0.98.1 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

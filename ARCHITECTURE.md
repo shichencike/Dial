@@ -566,7 +566,7 @@ between a `textDocument/publishDiagnostics` notification and `textDocument/codeA
 | 文档同步要**选项形式**才能要到 `didSave` | *"If present save notifications are sent to the server. If omitted the notification should not be sent."*（`TextDocumentSyncOptions.save`） | 广告 `{openClose, change: 1, save}`——纯数字形式里没有 `save`，客户端就不发 `didSave`，诊断便刷不出来 |
 | `$/cancelRequest` 的语义 | 取消后应回 `RequestCancelled(-32800)` | 我们**保证每个请求恰好回一次响应**（客户端不会挂等），但不打断正在处理的请求——我们的请求都是微秒级的，没有可取消的长任务；要做「取消即中止」需要并发执行模型 |
 
-这两条都写成了**自动化断言**（`tools/lsp_smoke.py` 的返回形状对照表与能力断言），
+这两条都写成了**自动化断言**（`tools/lsp_full_smoke.py` 的返回形状对照表与能力断言），
 形状一旦跑偏当场失败——而不是等某个客户端连上来才发现不对。
 
 ### 9.5 协议流纯净性（铁律）

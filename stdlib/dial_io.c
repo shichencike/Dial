@@ -15,34 +15,20 @@ void dial_print_bool(int64_t b)  { printf("%s\n", b ? "true" : "false"); }
  * 这与 print(int) 形成明确分工：
  *     print('a')            -> a
  *     print(char_to_int('a')) -> 97
+ *
+ * 换行语义：**追加一个 '\n'**（行式输出）。
+ * 需要不换行的连续输出请用 write_char —— 两者只差这一个字节。
  */
 void dial_print_char(int64_t code) {
     /* Fail-Fast：非法码点绝不静默输出半个坏字符。
-     * 负数、超出 Unicode 上界、以及 UTF-16 代理区（D800~DFFF）都不是合法标量值。 */
-    if (code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
+     * 编码规则（合法范围 / 代理区）由 dial_encode_utf8 统一定义，本层只负责报错。 */
+    char buf[5];
+    int n = dial_encode_utf8(code, buf);
+    if (n < 0) {
         fprintf(stderr, "dial: 非法的 char 码点: %lld\n", (long long)code);
         fflush(stdout);
         dial_assert_fail("dial_print_char: 非法 Unicode 码点（合法范围 0~0x10FFFF，且不含 UTF-16 代理区 D800~DFFF）");
     }
-
-    char buf[5];
-    int n = 0;
-    if (code < 0x80) {
-        buf[n++] = (char)code;                                    /* 0xxxxxxx            */
-    } else if (code < 0x800) {
-        buf[n++] = (char)(0xC0 | (code >> 6));                    /* 110xxxxx 10xxxxxx   */
-        buf[n++] = (char)(0x80 | (code & 0x3F));
-    } else if (code < 0x10000) {
-        buf[n++] = (char)(0xE0 | (code >> 12));                   /* 1110xxxx 10xxxxxx x2 */
-        buf[n++] = (char)(0x80 | ((code >> 6) & 0x3F));
-        buf[n++] = (char)(0x80 | (code & 0x3F));
-    } else {
-        buf[n++] = (char)(0xF0 | (code >> 18));                   /* 11110xxx 10xxxxxx x3 */
-        buf[n++] = (char)(0x80 | ((code >> 12) & 0x3F));
-        buf[n++] = (char)(0x80 | ((code >> 6) & 0x3F));
-        buf[n++] = (char)(0x80 | (code & 0x3F));
-    }
-    buf[n] = '\0';
     printf("%s\n", buf);
 }
 
@@ -52,6 +38,80 @@ DialString dial_read_line(void) {
     size_t n = strlen(buf);
     while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
     return dial_string_new(buf);
+}
+
+/*
+ * 原样输出字符串，不追加换行（v0.98.2）。
+ *
+ * 按**字节长度**写，而不是像 puts 那样依赖 NUL 终止——Dial 的 string 允许
+ * 内嵌 '\0'（它本质是字节缓冲区，payload 头里带着显式长度），
+ * 用 strlen 会在第一个 NUL 处截断，把二进制数据悄悄截短。
+ *
+ * 与 dial_print_string 的分工：
+ *     print("ab")    -> ab\n   （带换行）
+ *     print_raw("ab") -> ab    （不带换行，可连续拼行）
+ *
+ * 写失败被忽略，不抛错（与 dial_print_string 保持同一口径）。
+ */
+void dial_print_raw(DialString s) {
+    /* NULL 字符串：与 dial_print_string 同样的受控 Fail-Fast——
+     * 静默当成空串会掩盖「通道 EOF 后仍在用取回的值」这类真 bug。 */
+    if (s == NULL) {
+        fprintf(stderr, "dial: print_raw 收到了 NULL string\n");
+        fflush(stdout);
+        dial_assert_fail("dial_print_raw: NULL string（多半是通道 EOF 之后仍在用取回的值）");
+    }
+    int64_t len = ((int64_t *)s)[0];
+    if (len <= 0) return;               /* 空串是合法的 no-op */
+    fwrite((const char *)s + 8, 1, (size_t)len, stdout);
+}
+
+/*
+ * 输出单个字符，不追加换行（v0.98.2）。
+ *
+ * 码点校验与 dial_print_char 完全一致：非法码点（负数、> 0x10FFFF、
+ * UTF-16 代理区 D800~DFFF）一律 Fail-Fast，绝不输出半个坏字符——
+ * 半个 UTF-8 序列在下游解码时会变成替换字符或直接报错，
+ * 属于「静默产出乱码」，比当场崩溃危险得多。
+ */
+void dial_write_char(int64_t code) {
+    char buf[5];
+    int n = dial_encode_utf8(code, buf);
+    if (n < 0) {
+        fprintf(stderr, "dial: 非法的 char 码点: %lld\n", (long long)code);
+        fflush(stdout);
+        dial_assert_fail("dial_write_char: 非法 Unicode 码点（合法范围 0~0x10FFFF，且不含 UTF-16 代理区 D800~DFFF）");
+    }
+    fwrite(buf, 1, (size_t)n, stdout);
+}
+
+/*
+ * 标量版本的无换行输出（v0.98.2）。
+ *
+ * 为什么单独提供，而不是在 Dial 侧先 str(v) 再 print_raw：
+ *   str(v) 会**分配一个堆字符串**（带引用计数），而它只是 print_raw 的
+ *   一次性中转——用完即弃却仍占着引用计数，属于实打实的内存泄漏。
+ *   这里直接用栈上缓冲格式化，零堆分配。
+ *
+ * 三者与对应的 dial_print_* 保持**完全一致的文本形态**，
+ * 唯一区别是末尾不补 '\n'：
+ *     print(42)      -> 42\n
+ *     print_raw(42)  -> 42
+ *     print(1.5)     -> 1.500000\n     （%lf，六位小数）
+ *     print_raw(1.5) -> 1.500000
+ *     print(true)    -> true\n
+ *     print_raw(true)-> true
+ */
+void dial_print_raw_int(int64_t v) {
+    printf("%lld", (long long)v);
+}
+
+void dial_print_raw_float(double v) {
+    printf("%lf", v);
+}
+
+void dial_print_raw_bool(int64_t b) {
+    printf("%s", b ? "true" : "false");
 }
 
 /* ---- 文件 IO（v0.61）：FILE* 封装，显式 open/close，不受 ARC 管理 ----

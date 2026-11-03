@@ -22,7 +22,30 @@ pub enum Type {
     /// 而 `int` 允许任何算术。独立成类型后，编译期就能把「字符误当数字用」
     /// 挡在门外（char 不参与 + - * /，只可比较与显式转换）。
     Char,
+    /// 单个**字节**（v0.98.2）：无符号 8 位值，取值范围 `0~255`。
+    ///
+    /// 与 `char` 的分工是**严格**的，二者绝不混淆：
+    ///   - `char` 是**一个 Unicode 码点**（'a' = 97，'中' = 20013），
+    ///     输出时按 UTF-8 编码为 1~4 字节；
+    ///   - `byte` 是**一个字节**（0~255），与编码无关。
+    ///
+    /// IR 层同样是 `i64`（值类型：无 ARC、无堆分配、无空指针），
+    /// 但**取值范围在运行时被强制检查**——超过 255 或为负数时当场 Fail-Fast，
+    /// 而不是像 C 那样静默截断成另一个值（`300u8` 会变成 44，那是数据损坏）。
+    ///
+    /// 字面量写作 `0xFF` / `255`，用 `b'x'` 表示字节字面量。
+    Byte,
     String, // UTF-8 字符串（IR 为 i8*，C 侧引用计数）
+    /// 二进制字节缓冲区（v0.98.2）：不可变、ARC 管理的引用计数对象。
+    ///
+    /// 与 `string` 的分工：`string` 承载**文本**（UTF-8，语义上可打印），
+    /// `bytes` 承载**任意字节**（可含 `\0`、可非 UTF-8）。
+    /// 二者内存布局相同（`[refcount][len][data...]`），但**类型不同**——
+    /// 零隐式转换铁律要求两者之间必须显式转换，
+    /// 否则「把一段文本当二进制写进文件」这类错误会被编译器放过。
+    ///
+    /// 元素类型是 `byte`（0~255），与 `string` 的元素是「字节但语义上是 UTF-8 片段」相区分。
+    Bytes,
     Array(Box<Type>), // 动态数组（v0.2 元素固定为 Int）
     Map,    // 哈希表（int -> int，不透明指针，C 侧引用计数 ARC）
     File,   // 文件句柄（不透明指针，封装 C 的 FILE*；显式 open/close，不受 ARC 管理）
@@ -49,7 +72,9 @@ impl Type {
             Type::Float => "float",
             Type::Bool => "bool",
             Type::Char => "char",
+            Type::Byte => "byte",
             Type::String => "string",
+            Type::Bytes => "bytes",
             Type::Array(_) => "array",
             Type::Map => "map",
             Type::File => "file",
@@ -94,6 +119,9 @@ pub enum Expr {
     BoolLit(bool),
     /// 字符字面量 `'a'`。值为该字符的 **Unicode 码点**（i64），与 `int` 同表示。
     CharLit(i64),
+    /// 字节字面量 `b'a'`（v0.98.2）。值为**单个字节**（0~255）。
+    /// 与 `CharLit` 语义不同：字符是 Unicode 码点，字节是 8 位无符号值。
+    ByteLit(i64),
     StringLit(String),
     Var(String),
     /// 字段访问：<expr>.<field>
@@ -226,6 +254,17 @@ pub enum Stmt {
     /// 带位置是所有语句的**统一要求**（v0.93）：诊断要能落在源码里，
     /// 不能一律报到文件开头。见 `semantic::stmt_pos`。
     Expr(Expr, usize, usize),
+    /// 裸块 `{ ... }`：引入一个新的词法作用域（v0.98.next）。
+    ///
+    /// 用途：局部变量遮蔽、生命周期隔离、把一段语句当匿名作用域使用。
+    /// 内部语句列表与 if/while/for 的 body 完全相同；块内声明的变量在块结束后
+    /// 脱离作用域（引用无效），堆类型局部变量（数组/字符串/映射/错误/通道）会在
+    /// 离开块时被释放（见 `codegen::release_scope_locals`）。
+    Block {
+        body: Vec<Stmt>,
+        line: usize,
+        col: usize,
+    },
 }
 
 /// catch 子句：直接含一个可选的捕获变量名（Identifier）与一个代码块（Block）。

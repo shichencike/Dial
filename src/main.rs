@@ -4,6 +4,7 @@
 //!   dialc build <源文件.dial> [-o 可执行文件] [--no-link]
 //!   dialc run   <源文件.dial> [-o 可执行文件]
 //!   dialc install <包.dialpkg>
+//!   dialc version | --version | -V      （显示版本号）
 //!   dialc lsp              （编辑器用的 Language Server，走 stdio，不由人手敲）
 //!
 //! 编译流水线（两步式）：
@@ -44,8 +45,23 @@ fn main() {
         return;
     }
 
+    // `dialc version` / `dialc --version` / `dialc -V`：显示版本号。
+    //
+    // 版本号取自 Cargo.toml 的 `version` 字段（编译期由 env! 注入）——
+    // **全站唯一真相**。任何地方都不许再手写一份版本字符串：
+    // 手写的版本号必然随发布漂移（这仓库已经因为硬编码漂过三轮）。
+    //
+    // 放在「参数不足就打印用法」的检查之前：版本查询本来就不带文件参数。
+    // 必须在 lsp 分流**之后**：lsp 的 stdout 是协议通道，
+    // 版本信息绝不能混进去（会破坏 JSON-RPC 帧）。
+    if args.len() >= 2 && matches!(args[1].as_str(), "version" | "--version" | "-V") {
+        println!("dialc {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     if args.len() < 3 {
         eprintln!("用法: dialc <build|run|install> <源文件.dial|包.dialpkg|包URL> [-o 输出] [--no-link]");
+        eprintln!("      dialc version | --version | -V   显示版本号");
         eprintln!("      dialc install <URL> [--sha256 <哈希>]   从 URL 安装包（见 README §25.9）");
         std::process::exit(1);
     }
@@ -587,6 +603,13 @@ fn output_paths(src_path: &str, out: Option<&Path>) -> (PathBuf, PathBuf) {
 
 /// 定位工程根目录（包含 stdlib/ 与 runtime/）。依次尝试若干候选基址。
 fn find_project_base() -> Option<PathBuf> {
+    // 1) 显式环境变量优先：支持源码树外自定义布局（例如把 stdlib/ 与 runtime/ 单独部署）。
+    if let Ok(dir) = env::var("DIALC_STDLIB_DIR") {
+        let p = PathBuf::from(dir);
+        if p.join("stdlib/dial_string.c").exists() {
+            return Some(p);
+        }
+    }
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             for candidate in [

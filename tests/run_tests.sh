@@ -380,7 +380,7 @@ echo "== M) LSP 全能力往返 + 协议流纯净性（v0.98 轮2~4） =="
 # 真实事故：`resolve_imports()`（CLI 与 LSP 共用）里有两处 println!，
 # 于是"打开一个 import 了已安装包的文档"就必卡（v0.98 修复）。
 if command -v python3 >/dev/null 2>&1; then
-    if python3 tools/lsp_smoke.py; then
+    if python3 tools/lsp_full_smoke.py; then
         :
     else
         fail=1

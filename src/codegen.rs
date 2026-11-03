@@ -90,6 +90,20 @@ pub struct CodeGen<'ctx> {
     /// 同名变量互相误伤（该 release 的被跳过 -> 泄漏）。槽位指针由 alloca 唯一确定，
     /// 天然精确。`move_to` 是用户日常 API，这一位必须是准的。
     moved: RefCell<std::collections::HashSet<PointerValue<'ctx>>>,
+    /// 受保护的局部槽位：**绝不能被 emit_throw 释放**。
+    ///
+    /// 语义：当异常在 `try` 体内抛出、被本帧的 `catch` 捕获时，`catch` 体可能引用
+    /// `try` **之前**声明的外层变量（例如 `let path = ...; try { open(path) } catch { print(path) }`）。
+    /// 这些外层变量不在 `try` 体的作用域内，但当前帧的 `emit_throw` 会遍历本帧所有活跃作用域——
+    /// 若不排除它们，就会被误释放，待 `catch` 引用时变成悬垂指针（UAF）。
+    ///
+    /// 机制：`try` 入口（尚未 push 其体作用域）时，把**此刻所有外层作用域的槽位**登记进本集合，
+    /// 并在 `try` 正常结束（merge）或被捕获（catch）后从集合中移除。这样：
+    ///   - 同帧抛出：emit_throw 释放 `try` 体作用域的局部，跳过外层（被保护），`catch` 引用安全；
+    ///   - 跨帧抛出（子函数内 throw）：子函数自身的 `protected` 为空，emit_throw 释放子帧全部局部——
+    ///     父帧的 `try` 作用域深度与子帧作用域编号不互通，因此「按子帧自身深度释放全部」才是正确的
+    ///     （子帧整体随 unwinding 销毁），绝不能用父帧记录的作用域深度去索引子帧的 scopes。
+    protected: RefCell<std::collections::HashSet<PointerValue<'ctx>>>,
     /// 循环跳转目标栈：(continue 目标块, break 目标块)。
     /// for 的 continue 目标是「自增块」而非条件块——否则 continue 会跳过 i++ 造成死循环。
     loop_targets: RefCell<Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>>,
@@ -119,6 +133,7 @@ pub fn compile(
         moved: RefCell::new(std::collections::HashSet::new()),
         // 注：HashSet<PointerValue> 无需按函数清空——每条 alloca 的 PointerValue 全局唯一，
         // 不同函数的同名变量不会互串。
+        protected: RefCell::new(std::collections::HashSet::new()),
         loop_targets: RefCell::new(Vec::new()),
         safety: opts.safety,
     };
@@ -333,11 +348,36 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_void("dial_print_int", &[i64b.into()]);
         self.decl_void("dial_print_float", &[f64b.into()]);
         self.decl_void("dial_print_bool", &[i64b.into()]);
-        // char 打印（v0.92）：打印字符本身而非码点数字。
+        // char 打印（v0.92）：打印字符本身而非码点数字，**末尾带换行**。
         self.decl_void("dial_print_char", &[i64b.into()]);
+        // 无换行输出（v0.98.2）：连续输出的基本积木。
+        //   dial_print_raw     原样输出字符串（按字节长度，不补 '\n'）
+        //   dial_write_char    输出单个字符（不补 '\n'）
+        //   dial_print_raw_*   标量版本（栈缓冲，零堆分配）
+        self.decl_void("dial_print_raw", &[i8b.into()]);
+        self.decl_void("dial_write_char", &[i64b.into()]);
+        self.decl_void("dial_print_raw_int", &[i64b.into()]);
+        self.decl_void("dial_print_raw_float", &[f64b.into()]);
+        self.decl_void("dial_print_raw_bool", &[i64b.into()]);
         // 类型 -> 字符串（CVE-2024-DIAL-006 新增）：支撑 `print("x=" + str(n))` 这类拼接。
         self.decl_func("dial_int_to_string", i8b, &[i64b.into()]);
         self.decl_func("dial_float_to_string", i8b, &[f64b.into()]);
+        // char -> 字符串（v0.98.2）：支撑 `str(c)` 与 `str(c) + "suffix"`。
+        self.decl_func("dial_char_to_string", i8b, &[i64b.into()]);
+        // bytes（二进制字节缓冲区，v0.98.2）：布局与 string 相同，但走**自己的**函数族，
+        // 以保证「bytes 与 string 是不同类型」的边界在运行时也被守住。
+        self.decl_func("dial_bytes_new", i8b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_bytes_zero", i8b, &[i64b.into()]);
+        self.decl_func("dial_bytes_length", i64b, &[i8b.into()]);
+        self.decl_func("dial_bytes_get", i64b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_bytes_clone", i8b, &[i8b.into()]);
+        self.decl_func("dial_bytes_from_string", i8b, &[i8b.into()]);
+        self.decl_func("dial_bytes_to_string", i8b, &[i8b.into()]);
+        // int <-> byte（v0.98.2）：byte_to_int 零指令（编译器侧直传），int_to_byte 带范围校验。
+        self.decl_func("dial_int_to_byte", i64b, &[i64b.into()]);
+        self.decl_func("dial_byte_to_string", i8b, &[i64b.into()]);
+        self.decl_void("dial_bytes_retain", &[i8b.into()]);
+        self.decl_void("dial_bytes_release", &[i8b.into()]);
         self.decl_func("dial_read_line", i8b, &[]);
         // 文件 IO：file 句柄是不透明的 FILE* 封装，显式 open/close，不受 ARC 管理。
         self.decl_func("dial_file_open", i8b, &[i8b.into(), i8b.into()]);
@@ -479,7 +519,10 @@ impl<'ctx> CodeGen<'ctx> {
             // char 与 int 同为 i64：它就是一个码点数值，只是**类型**被独立出来
             // 以拦住「把字符当数字做算术」。表示层不付出任何额外代价。
             Type::Char => self.context.i64_type().into(),
+            // byte 同为 i64：一个 8 位无符号值的存储形式（0~255，运行时校验范围）。
+            Type::Byte => self.context.i64_type().into(),
             Type::String
+            | Type::Bytes
             | Type::Array(_)
             | Type::Map
             | Type::File
@@ -540,7 +583,9 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Float => self.context.f64_type().const_float(0.0).into(),
             Type::Bool => self.context.bool_type().const_int(0, false).into(),
             Type::Char => self.context.i64_type().const_int(0, false).into(),
+            Type::Byte => self.context.i64_type().const_int(0, false).into(),
             Type::String
+            | Type::Bytes
             | Type::Array(_)
             | Type::Map
             | Type::File
@@ -708,6 +753,9 @@ impl<'ctx> CodeGen<'ctx> {
     fn retain(&self, ty: &Type, val: BasicValueEnum<'ctx>) {
         let name = match ty {
             Type::String => "dial_string_retain",
+            // bytes 与 string 布局相同，但走**自己的** retain 函数——
+            // 类型边界必须由运行时函数族来守，不能只靠编译器单方面。
+            Type::Bytes => "dial_bytes_retain",
             Type::Array(_) => "dial_array_retain",
             Type::Map => "dial_map_retain",
             Type::Error => "dial_error_retain",
@@ -729,6 +777,7 @@ impl<'ctx> CodeGen<'ctx> {
     fn release_value(&self, ty: &Type, val: BasicValueEnum<'ctx>) {
         let name = match ty {
             Type::String => "dial_string_release",
+            Type::Bytes => "dial_bytes_release",
             Type::Array(_) => "dial_array_release",
             Type::Map => "dial_map_release",
             Type::Error => "dial_error_release",
@@ -879,6 +928,9 @@ impl<'ctx> CodeGen<'ctx> {
         let function = func_values[&f.name];
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
+
+        // 每个函数独立：进入时清空受保护集合（否则上一个函数的登记会串进来）。
+        self.protected.borrow_mut().clear();
 
         let mut scopes: CgScopes = vec![HashMap::new()];
         for (i, (pname, pty)) in f.params.iter().enumerate() {
@@ -1068,10 +1120,17 @@ impl<'ctx> CodeGen<'ctx> {
 
     /// 抛出可恢复异常（v0.7）。
     ///
-    /// 在真正跳转前，**必须**释放当前 try 作用域内所有活跃 ARC 局部（string/int[]/map/error 及含堆字段的结构体），
-    /// 否则异常一抛、这些局部就随栈展开而“丢失”，其引用计数永不清零 -> 内存泄漏。
-    /// 释放范围由 exbuf_stack 栈顶记录的「try 入口作用域深度」精确界定：仅释放 `scopes[depth..]`
-    /// （try 体及其内部嵌套块的局部），绝不触碰外层作用域的变量——比记录变量名集合更稳健（天然兼容遮蔽）。
+    /// 在真正跳转前，**必须**释放当前帧内「本帧 try 体作用域」的所有活跃 ARC 局部
+    /// （string/int[]/map/error 及含堆字段的结构体），否则异常一抛、这些局部就随栈展开而“丢失”，
+    /// 其引用计数永不清零 -> 内存泄漏。
+    ///
+    /// **释放范围由 `protected` 集合精确界定**：`try` 入口会把其体作用域之外的所有外层槽位登记进
+    /// `protected`，emit_throw 释放时一律跳过它们——只释放 try 体（及其内部嵌套块）的局部，
+    /// 绝不触碰外层作用域的变量（README §26.4）。这比记录变量名集合更稳健（天然兼容遮蔽）。
+    ///
+    /// 跨帧抛出（子函数内 throw，CVE-2024-DIAL-004 修复）时，子帧自身的 `protected` 为空，
+    /// 于是释放子帧全部局部——子帧整体随 unwinding 销毁，这才正确；绝不能用父帧 try 记录的作用域
+    /// 深度去索引子帧的 scopes（两套作用域编号不互通）。
     ///
     /// 被抛出的错误对象本身（payload）不会被释放：若它来自某个局部变量，该变量已在 Throw 处被标记 moved 而跳过。
     ///
@@ -1107,9 +1166,10 @@ impl<'ctx> CodeGen<'ctx> {
         // 外层 try 所在帧仍然存活，其局部会在它自己的 catch / 正常收尾中释放，无需我们代劳。
         // moved 集合保证被 move 出去（含正要抛出的 Error 本身）的槽位不会被重复释放。
         let moved = self.moved.borrow();
+        let protected = self.protected.borrow();
         for scope in scopes.iter() {
             for (_name, (ty, (_m, ptr))) in scope.iter() {
-                if moved.contains(ptr) {
+                if moved.contains(ptr) || protected.contains(ptr) {
                     continue;
                 }
                 if Self::is_heap_type(ty) {
@@ -1510,6 +1570,20 @@ impl<'ctx> CodeGen<'ctx> {
 
                 // ---- try.setup：建立异常缓冲区、setjmp（必须在本帧内发起） ----
                 self.builder.position_at_end(setup_bb);
+                // 登记「外层作用域（try 体之前）的所有局部槽位」进 protected：
+                // 这些变量在 try 体抛异常、被本帧 catch 捕获后仍可能被 catch 体引用，
+                // 绝不能随 emit_throw 被释放（否则 catch 引用即 UAF，见 §26.4）。
+                // 在 push try 体作用域之前登记，恰好覆盖「try 之前」的全部外层作用域。
+                let try_protected: Vec<PointerValue<'ctx>> = scopes
+                    .iter()
+                    .flat_map(|s| s.values().map(|(_, (_, ptr))| *ptr))
+                    .collect();
+                {
+                    let mut prot = self.protected.borrow_mut();
+                    for p in &try_protected {
+                        prot.insert(*p);
+                    }
+                }
                 let buf = self.call_c("dial_exbuf_new", &[]);
                 let buf_alloca = self.alloca_in_entry(function, self.i8ptr().into(), "exbuf");
                 self.builder.build_store(buf_alloca, buf).unwrap();
@@ -1588,6 +1662,13 @@ impl<'ctx> CodeGen<'ctx> {
                 let catch_done = !self.is_terminated();
                 if catch_done {
                     self.release_scope_locals(scopes.last().unwrap(), structs);
+                    // try 已彻底结束：解除此前登记的外层槽位保护，避免污染后续作用域。
+                    {
+                        let mut prot = self.protected.borrow_mut();
+                        for p in &try_protected {
+                            prot.remove(p);
+                        }
+                    }
                     self.builder.build_unconditional_branch(cont_bb).unwrap();
                 }
                 scopes.pop();
@@ -1595,6 +1676,13 @@ impl<'ctx> CodeGen<'ctx> {
                 // ---- try.merge：仅「try 体正常完成」路径到达，弹栈并 free exbuf 后汇入 cont ----
                 // 与 catch 路径严格二选一：只有一条会执行，故这里无条件弹栈 + 释放（配对 setup 的 push）。
                 self.builder.position_at_end(merge_bb);
+                // try 已彻底结束：解除此前登记的外层槽位保护。
+                {
+                    let mut prot = self.protected.borrow_mut();
+                    for p in &try_protected {
+                        prot.remove(p);
+                    }
+                }
                 self.call_c_void("dial_exc_pop", &[]);
                 let buf = self
                     .builder
@@ -1822,6 +1910,17 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.position_at_end(end_bb);
                 Ok(())
             }
+            Stmt::Block { body, .. } => {
+                // 裸块：引入新词法作用域，递归发射内部语句；离开作用域时释放块内堆类型局部变量，
+                // 防止数组/字符串/映射/错误/通道等 ARC 对象泄漏（与 if/for 的处理一致）。
+                scopes.push(HashMap::new());
+                for s in body {
+                    self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
+                }
+                self.release_scope_locals(scopes.last().unwrap(), structs);
+                scopes.pop();
+                Ok(())
+            }
             Stmt::Expr(e, ..) => {
                 // 语句级方法调用且返回新容器指针（push/set）-> 把结果写回接收变量
                 if let Expr::Method(obj, method, args) = e {
@@ -1933,6 +2032,9 @@ impl<'ctx> CodeGen<'ctx> {
             // char 字面量就是一个 i64 码点常量，与 IntLit 完全同构——
             // 差异只存在于**类型层面**（Sema 已拦住把它当数字用的写法）。
             Expr::CharLit(c) => Ok(self.context.i64_type().const_int(*c as u64, false).into()),
+            // 字节字面量同样是 i64 常量（0~255，词法阶段已校验范围）——
+            // 与 char 的差异只在**类型层面**。
+            Expr::ByteLit(b) => Ok(self.context.i64_type().const_int(*b as u64, false).into()),
             Expr::FloatLit(f) => Ok(self.context.f64_type().const_float(*f).into()),
             Expr::BoolLit(b) => Ok(self.context.bool_type().const_int(if *b { 1 } else { 0 }, false).into()),
             Expr::StringLit(s) => {
@@ -2063,6 +2165,38 @@ impl<'ctx> CodeGen<'ctx> {
                     // 它不是「隐式转换」，因为源码里必须显式写出 char_to_int / int_to_char。
                     "char_to_int" | "int_to_char" => {
                         self.gen_expr(&args[0], function, scopes, func_values, functions, structs)
+                    }
+                    // byte -> int 是**零指令**的类型视图切换（byte 与 int 同为 i64）。
+                    "byte_to_int" => {
+                        self.gen_expr(&args[0], function, scopes, func_values, functions, structs)
+                    }
+                    // int -> byte 必须**带范围校验**（0~255）：越界时 Fail-Fast，
+                    // 绝不静默截断（那是被伪装成合法值的数据损坏）。
+                    "int_to_byte" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_int_to_byte", &[v.into()]))
+                    }
+                    // bytes（二进制缓冲区，v0.98.2）：与 string 显式互转。
+                    "bytes_from_string" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_bytes_from_string", &[v.into()]))
+                    }
+                    "bytes_to_string" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_bytes_to_string", &[v.into()]))
+                    }
+                    "bytes_new" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_bytes_zero", &[v.into()]))
+                    }
+                    "bytes_length" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_bytes_length", &[v.into()]))
+                    }
+                    "bytes_get" => {
+                        let b = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let i = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_bytes_get", &[b.into(), i.into()]))
                     }
                     // 类型 -> 字符串（CVE-2024-DIAL-006）：int/float 经 C 侧格式化，string 原样返回。
                     "int_to_string" => {
@@ -2423,19 +2557,38 @@ impl<'ctx> CodeGen<'ctx> {
                             self.emit_print(&ty, val)?;
                             Ok(self.context.i64_type().const_int(0, false).into())
                         } else if name == "str" {
-                            // 统一入口：按实参类型分派到 int_to_string / float_to_string / 字符串自身。
+                            // 统一入口：按实参类型分派到 int_to_string / float_to_string /
+                            // char_to_string / 字符串自身。
                             let arg = &args[0];
                             let ty = type_of(arg, scopes, functions, structs)?;
                             let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
                             match ty {
                                 Type::Int => Ok(self.call_c("dial_int_to_string", &[val.into()])),
                                 Type::Float => Ok(self.call_c("dial_float_to_string", &[val.into()])),
+                                // char -> 1~4 字节的 UTF-8 字符串（v0.98.2）。
+                                Type::Char => Ok(self.call_c("dial_char_to_string", &[val.into()])),
                                 Type::String => Ok(val), // 字符串自身，无需转换
                                 _ => Err(DialcError::new(
-                                    "内部错误：str 收到了非 int/float/string 的实参（语义层应已拦截）",
+                                    "内部错误：str 收到了非 int/float/char/string 的实参（语义层应已拦截）",
                                     0, 0,
                                 )),
                             }
+                        } else if name == "print_raw" {
+                            // 原样输出、**不换行**（v0.98.2）。
+                            // 与 print 走同一套类型分派（emit_print），差别只在末尾那个 '\n'：
+                            // print_raw 走 emit_print_raw，末尾不补换行。
+                            let arg = &args[0];
+                            let ty = type_of(arg, scopes, functions, structs)?;
+                            let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
+                            self.emit_print_raw(&ty, val)?;
+                            Ok(self.context.i64_type().const_int(0, false).into())
+                        } else if name == "write_char" {
+                            // 输出单个字符、**不换行**（v0.98.2）。
+                            // 语义层已保证实参是 char，这里不再重复校验类型。
+                            let arg = &args[0];
+                            let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
+                            self.call_c_void("dial_write_char", &[val.into()]);
+                            Ok(self.context.i64_type().const_int(0, false).into())
                         } else {
                             let _info = functions.get(name).ok_or_else(|| {
                                 DialcError::new(format!("调用了未定义的函数 '{}'", name), 0, 0)
@@ -2713,6 +2866,12 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Char => {
                 self.call_c_void("dial_print_char", &[val.into()]);
             }
+            // byte 打印**数值**（0~255），而不是那个字节代表的字符。
+            // 这与 char 相反：byte 是数字，char 是字符。
+            // （想按字符输出请显式 int_to_char(b) 再 print —— 零隐式转换铁律）
+            Type::Byte => {
+                self.call_c_void("dial_print_int", &[val.into()]);
+            }
             Type::String => {
                 self.call_c_void("dial_print_string", &[val.into()]);
             }
@@ -2721,6 +2880,14 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Array(_) => {
                 return Err(DialcError::new(
                     "语义错误：当前版本不支持直接 print 数组，请逐元素打印 print(a.get(i))",
+                    0, 0,
+                ));
+            }
+            // bytes 是二进制数据：绝不能退化成 dial_print_string（那会把原始字节当 UTF-8 吐出乱码）。
+            Type::Bytes => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print bytes（二进制数据）；\
+                     请先显式转换（bytes_to_string）再打印",
                     0, 0,
                 ));
             }
@@ -2774,6 +2941,108 @@ impl<'ctx> CodeGen<'ctx> {
             }
             Type::Void => {
                 return Err(DialcError::new("语义错误：print 的参数不能是 void", 0, 0));
+            }
+        }
+        Ok(())
+    }
+
+    /// print_raw 的类型分派（v0.98.2）：与 `emit_print` **逐类型对应**，
+    /// 唯一区别是末尾不补换行。
+    ///
+    /// 之所以不复用 emit_print 再想办法去掉换行：那需要在 Dial 侧
+    /// 先把标量 str() 成堆字符串（一次性的中转对象却仍占引用计数 = 泄漏），
+    /// 或者让 C 层返回「已输出的字节数」再回退——后者要动 stdout 的文件位置，
+    /// 在管道/重定向下并不可靠。因此这里为标量单独走 C 层的无换行函数。
+    fn emit_print_raw(&self, ty: &Type, val: BasicValueEnum<'ctx>) -> Result<()> {
+        match *ty {
+            Type::Int => {
+                self.call_c_void("dial_print_raw_int", &[val.into()]);
+            }
+            Type::Float => {
+                self.call_c_void("dial_print_raw_float", &[val.into()]);
+            }
+            Type::Bool => {
+                let i = self.to_i64(val, &Type::Bool);
+                self.call_c_void("dial_print_raw_bool", &[i.into()]);
+            }
+            // char 输出字符本身（不换行）；与 print(char) 的差别就是那个 '\n'。
+            Type::Char => {
+                self.call_c_void("dial_write_char", &[val.into()]);
+            }
+            // byte 输出数值（0~255），与 print(byte) 保持同一形态。
+            Type::Byte => {
+                self.call_c_void("dial_print_raw_int", &[val.into()]);
+            }
+            Type::String => {
+                self.call_c_void("dial_print_raw", &[val.into()]);
+            }
+            // 与 emit_print 保持同一口径：数组/结构体/句柄都没有可读形态，
+            // 绝不能退化成 dial_print_raw_string（那会把二进制 payload 当字符串吐出乱码）。
+            Type::Array(_) => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print_raw 数组，请逐元素输出 print_raw(str(a.get(i)))",
+                    0, 0,
+                ));
+            }
+            // bytes 是二进制数据：绝不能退化成 dial_print_raw（那会把原始字节当字符串吐出乱码）。
+            Type::Bytes => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print_raw bytes（二进制数据）；\
+                     请先显式转换（bytes_to_string）再输出",
+                    0, 0,
+                ));
+            }
+            Type::Struct(_) => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print_raw 结构体，请逐字段输出",
+                    0, 0,
+                ));
+            }
+            Type::Map => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print_raw 哈希表，请逐值输出",
+                    0, 0,
+                ));
+            }
+            Type::File => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print_raw 文件句柄（file）；请改用 read 读成 string 后再输出",
+                    0, 0,
+                ));
+            }
+            // 可恢复异常：输出其错误消息字符串（不换行）。
+            Type::Error => {
+                let msg = self.call_c("dial_error_msg", &[val.into()]);
+                self.call_c_void("dial_print_raw", &[msg.into()]);
+            }
+            Type::Thread => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print_raw thread 句柄",
+                    0, 0,
+                ));
+            }
+            Type::Channel(_) => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print_raw channel；请 recv 出元素后再输出",
+                    0, 0,
+                ));
+            }
+            Type::Opaque(ref n) => {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：当前版本不支持直接 print_raw 包句柄 '{}'（不透明指针）；\
+                         请改用该包提供的取值函数",
+                        n
+                    ),
+                    0,
+                    0,
+                ));
+            }
+            Type::Void => {
+                return Err(DialcError::new(
+                    "语义错误：print_raw 的参数不能是 void",
+                    0, 0,
+                ));
             }
         }
         Ok(())

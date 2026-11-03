@@ -34,14 +34,14 @@ SURVIVAL = "1 个发布版本（v0.98.0 GA → v0.98.1 修复）"
 
 # 每个 CVE 的登记信息（id, 标题, 严重程度, 关联 Bug, 期望的固定后行为摘要）
 CVE_REGISTRY = [
-    ("CVE-2024-DIAL-001", "括号表达式解析错误",            "中", "#103", "分组表达式 ( … ) 可正常编译并求值"),
-    ("CVE-2024-DIAL-002", "dialc run 相对路径执行失败",    "高", "#104", "cwd 下的裸文件名可被正确定位执行"),
-    ("CVE-2024-DIAL-003", "RC clone 污染 / 数据竞争",      "严重", "#105", "clone 与原对象独立，互不污染且无悬垂"),
-    ("CVE-2024-DIAL-004", "跨函数异常路由失败",            "高", "#106", "子函数抛出的异常可被调用方 try/catch 捕获"),
-    ("CVE-2024-DIAL-005", "缺失取模 % 运算符",            "中", "#107", "整数/浮点取模均正确求值并做除零检查"),
-    ("CVE-2024-DIAL-006", "缺失类型→字符串转换与字符串连接", "中", "#108", "str()/int_to_string/float_to_string 与 string + 可用"),
-    ("CVE-2024-DIAL-007", "channel release 泄漏残留元素",  "高", "#110", "通道释放时残留未消费元素一并析构"),
-    ("CVE-2024-DIAL-008", "缺失 DIAL_C_COMPILER / 安装脚本缺陷", "低", "#109", "DIAL_C_COMPILER 被尊重；安装脚本支持续传/镜像"),
+    ("CVE-2026-DIAL-001", "括号表达式解析错误",            "中", "#103", "分组表达式 ( … ) 可正常编译并求值"),
+    ("CVE-2026-DIAL-002", "dialc run 相对路径执行失败",    "高", "#104", "cwd 下的裸文件名可被正确定位执行"),
+    ("CVE-2026-DIAL-003", "RC clone 污染 / 数据竞争",      "严重", "#105", "clone 与原对象独立，互不污染且无悬垂"),
+    ("CVE-2026-DIAL-004", "跨函数异常路由失败",            "高", "#106", "子函数抛出的异常可被调用方 try/catch 捕获"),
+    ("CVE-2026-DIAL-005", "缺失取模 % 运算符",            "中", "#107", "整数/浮点取模均正确求值并做除零检查"),
+    ("CVE-2026-DIAL-006", "缺失类型→字符串转换与字符串连接", "中", "#108", "str()/int_to_string/float_to_string 与 string + 可用"),
+    ("CVE-2026-DIAL-007", "channel release 泄漏残留元素",  "高", "#110", "通道释放时残留未消费元素一并析构"),
+    ("CVE-2026-DIAL-008", "缺失 DIAL_C_COMPILER / 安装脚本缺陷", "低", "#109", "DIAL_C_COMPILER 被尊重；安装脚本支持续传/镜像"),
 ]
 
 
@@ -172,10 +172,10 @@ int main(void) {
     dial_channel_close(ch);
     dial_channel_release(ch);
     if (g_released != 3) {
-        fprintf(stderr, "CVE-2024-DIAL-007 STILL VULNERABLE: only %ld/3 released\n", g_released);
+        fprintf(stderr, "CVE-2026-DIAL-007 STILL VULNERABLE: only %ld/3 released\n", g_released);
         return 1;
     }
-    printf("CVE-2024-DIAL-007 FIXED\n");
+    printf("CVE-2026-DIAL-007 FIXED\n");
     return 0;
 }
 """
@@ -246,14 +246,14 @@ def check_109_env(dialc, repeat, quiet):
 
 # CVE -> 检测器 映射
 DETECTORS = {
-    "CVE-2024-DIAL-001": lambda d, r, q: check_poc(d, "CVE-2024-DIAL-001", "poc_001_paren.dial", ["1"], r, q),
-    "CVE-2024-DIAL-002": lambda d, r, q: check_002_run(d, r, q),
-    "CVE-2024-DIAL-003": lambda d, r, q: check_poc(d, "CVE-2024-DIAL-003", "poc_003_clone.dial", ["1", "99"], r, q),
-    "CVE-2024-DIAL-004": lambda d, r, q: check_poc(d, "CVE-2024-DIAL-004", "poc_004_exception.dial", ["caught the error in main!", "after try"], r, q),
-    "CVE-2024-DIAL-005": lambda d, r, q: check_poc(d, "CVE-2024-DIAL-005", "poc_005_mod.dial", ["1", "1.500000"], r, q),
-    "CVE-2024-DIAL-006": lambda d, r, q: check_poc(d, "CVE-2024-DIAL-006", "poc_006_string.dial", ["Result: 42", "Hello World"], r, q),
-    "CVE-2024-DIAL-007": lambda d, r, q: check_110_leak(d, r, q),
-    "CVE-2024-DIAL-008": lambda d, r, q: check_109_env(d, r, q),
+    "CVE-2026-DIAL-001": lambda d, r, q: check_poc(d, "CVE-2026-DIAL-001", "poc_001_paren.dial", ["1"], r, q),
+    "CVE-2026-DIAL-002": lambda d, r, q: check_002_run(d, r, q),
+    "CVE-2026-DIAL-003": lambda d, r, q: check_poc(d, "CVE-2026-DIAL-003", "poc_003_clone.dial", ["1", "99"], r, q),
+    "CVE-2026-DIAL-004": lambda d, r, q: check_poc(d, "CVE-2026-DIAL-004", "poc_004_exception.dial", ["caught the error in main!", "after try"], r, q),
+    "CVE-2026-DIAL-005": lambda d, r, q: check_poc(d, "CVE-2026-DIAL-005", "poc_005_mod.dial", ["1", "1.500000"], r, q),
+    "CVE-2026-DIAL-006": lambda d, r, q: check_poc(d, "CVE-2026-DIAL-006", "poc_006_string.dial", ["Result: 42", "Hello World"], r, q),
+    "CVE-2026-DIAL-007": lambda d, r, q: check_110_leak(d, r, q),
+    "CVE-2026-DIAL-008": lambda d, r, q: check_109_env(d, r, q),
 }
 
 

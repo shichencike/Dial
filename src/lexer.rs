@@ -16,6 +16,8 @@ pub enum TokenKind {
     BoolLit(bool),
     /// 字符字面量 `'a'`（v0.92）。值为该字符的 Unicode 码点。
     CharLit(i64),
+    /// 字节字面量 `b'a'`（v0.98.2）。值为单个字节（0~255），与字符**语义不同**。
+    ByteLit(i64),
     StringLit(String),
     Ident(String),
 
@@ -51,6 +53,8 @@ pub enum TokenKind {
     FloatT,
     BoolT,
     CharT, // char（v0.92）
+    ByteT, // byte（v0.98.2）：单字节无符号值 0~255
+    BytesT, // bytes（v0.98.2）：不可变二进制缓冲区
     StringT,
     VoidT,
     MapT,
@@ -124,6 +128,88 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 i += 1;
                 col += 1;
             }
+            continue;
+        }
+
+        // 字节字面量 b'x'（v0.98.2）：单字节无符号值，取值 0~255。
+        //
+        // 刻意与字符字面量 `'x'` 分开：二者的**语义完全不同**——
+        //   'x'   是 Unicode 码点（'中' 合法，值为 20013）
+        //   b'x'  是**一个字节**（'中' 非法，因为 UTF-8 编码后是 3 个字节）
+        // 用不同的语法形态（b 前缀）让「我写的是字节还是字符」在源码里一眼可辨，
+        // 避免把 20013 塞进一个只装得下 255 的类型里。
+        //
+        // 放在标识符分支**之前**：否则 'b' 会被当成普通标识符的开头，
+        // b'x' 会被拆成标识符 b + 字符字面量 'x'，报出一句莫名其妙的语法错误。
+        if c == 'b' && i + 1 < chars.len() && chars[i + 1] == '\'' {
+            let start_line = line;
+            let start_col = col;
+            i += 2; // 跳过 b 与 '
+            col += 2;
+            if i >= chars.len() {
+                return Err(DialcError::new(
+                    "字节字面量未闭合（缺少结束的单引号 '）",
+                    start_line,
+                    start_col,
+                ));
+            }
+            let val = if chars[i] == '\\' {
+                if i + 1 >= chars.len() {
+                    return Err(DialcError::new(
+                        "字节字面量中的转义序列不完整（反斜杠后缺少字符）",
+                        start_line,
+                        start_col,
+                    ));
+                }
+                let nxt = chars[i + 1];
+                let esc = match nxt {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '0' => '\0',
+                    '\\' => '\\',
+                    '\'' => '\'',
+                    '"' => '"',
+                    _ => {
+                        return Err(DialcError::new(
+                            format!("字节字面量中无法识别的转义序列 '\\{}'", nxt),
+                            start_line,
+                            start_col,
+                        ))
+                    }
+                };
+                i += 2;
+                col += 2;
+                esc as i64
+            } else {
+                let ch = chars[i];
+                i += 1;
+                col += 1;
+                ch as i64
+            };
+            if i >= chars.len() || chars[i] != '\'' {
+                return Err(DialcError::new(
+                    "字节字面量只能包含一个字节，且必须以单引号 ' 结束",
+                    start_line,
+                    start_col,
+                ));
+            }
+            i += 1; // 跳过结束单引号
+            col += 1;
+            // 范围校验在**词法阶段**就做：一个字节装不下大于 255 的值。
+            // 与 char 不同，char 可以是任意 Unicode 码点（到 0x10FFFF）。
+            if val < 0 || val > 255 {
+                return Err(DialcError::new(
+                    format!(
+                        "字节字面量的值超出范围 0~255（实际为 {}）；\
+                         字节是单个 8 位无符号值，多字节字符请用字符字面量 '...'",
+                        val
+                    ),
+                    start_line,
+                    start_col,
+                ));
+            }
+            push(TokenKind::ByteLit(val), start_line, start_col, &mut tokens);
             continue;
         }
 
@@ -303,6 +389,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "float" => TokenKind::FloatT,
                 "bool" => TokenKind::BoolT,
                 "char" => TokenKind::CharT,
+                "byte" => TokenKind::ByteT,
+                "bytes" => TokenKind::BytesT,
                 "string" => TokenKind::StringT,
                 "void" => TokenKind::VoidT,
                 "map" => TokenKind::MapT,

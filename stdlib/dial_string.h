@@ -41,4 +41,19 @@ void dial_print_string(DialString s);
 DialString dial_int_to_string(int64_t v);
 DialString dial_float_to_string(double v);
 
+/*
+ * char -> 字符串（v0.98.2）：把一个 Unicode 码点编码成 UTF-8（1~4 字节），
+ * 构造长度为 1~4 的字符串。支撑 `str(c)` 与 `str(c) + "suffix"`。
+ * 非法码点（负数、> 0x10FFFF、UTF-16 代理区 D800~DFFF）一律 Fail-Fast。
+ */
+DialString dial_char_to_string(int64_t code);
+
+/*
+ * 码点 -> UTF-8 字节序列（v0.98.2）：运行时内**唯一**的编码实现，
+ * 由 dial_print_char / dial_write_char / dial_char_to_string 共用。
+ *
+ * buf 至少 5 字节。返回写入的字节数（1~4）；码点非法时返回 -1 且**不写任何字节**。
+ */
+int dial_encode_utf8(int64_t code, char *buf);
+
 #endif /* DIAL_STRING_H */

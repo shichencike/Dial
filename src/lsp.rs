@@ -787,10 +787,12 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         TokenKind::BoolLit(_) => T_KEYWORD,
         // 类型关键字
         TokenKind::IntT | TokenKind::FloatT | TokenKind::BoolT | TokenKind::CharT
+        | TokenKind::ByteT | TokenKind::BytesT
         | TokenKind::StringT | TokenKind::VoidT | TokenKind::MapT | TokenKind::FileT => T_TYPE,
         // 字面量
         TokenKind::StringLit(_) => T_STRING,
         TokenKind::CharLit(_) => T_STRING, // 字符字面量按字符串配色（同样带引号）
+        TokenKind::ByteLit(_) => T_NUMBER,  // 字节字面量按数字配色（它是数值，不是字符）
         TokenKind::IntLit(_) | TokenKind::FloatLit(_) => T_NUMBER,
         // 标识符：无法在词法层区分变量 / 函数 / 类型名（那需要符号表），
         // 本骨架统一按 variable 处理——高亮够用，不做跨文件符号解析。

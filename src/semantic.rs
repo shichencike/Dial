@@ -91,6 +91,7 @@ pub fn is_nullable_type(t: &Type) -> bool {
             | Type::Channel(_)
             | Type::Thread
             | Type::File
+            | Type::Opaque(_)
     )
 }
 
@@ -132,6 +133,7 @@ pub fn type_of<V>(
         Expr::FloatLit(_) => Ok(Type::Float),
         Expr::BoolLit(_) => Ok(Type::Bool),
         Expr::CharLit(_) => Ok(Type::Char),
+        Expr::ByteLit(_) => Ok(Type::Byte),
         Expr::StringLit(_) => Ok(Type::String),
         Expr::Var(name) => lookup(name).ok_or_else(|| {
             DialcError::new(format!("语义错误：未声明的变量 '{}'", name), 0, 0)
@@ -463,6 +465,40 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::String);
                 }
+                // int <-> byte：byte 是 8 位无符号值（0~255），
+                // 与 int 的 64 位有符号范围不同，因此**需要范围校验**。
+                // 这不是「零指令的类型视图切换」（char <-> int 才是）——
+                // 越界的 int 转成 byte 会静默丢数据，那属于数据损坏。
+                "byte_to_int" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：byte_to_int 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Byte {
+                        return Err(DialcError::new(
+                            "语义错误：byte_to_int 的参数必须是 byte",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Int);
+                }
+                "int_to_byte" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：int_to_byte 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：int_to_byte 的参数必须是 int",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Byte);
+                }
                 "str" => {
                     if args.len() != 1 {
                         return Err(DialcError::new(
@@ -471,11 +507,13 @@ pub fn type_of<V>(
                         ));
                     }
                     let at = type_of(&args[0], scopes, funcs, structs)?;
-                    if matches!(at, Type::Int | Type::Float | Type::String) {
+                    // char 自 v0.98.2 起纳入：编码成 1~4 字节的 UTF-8 字符串。
+                    // 这样 `str(c) + "!"` 能直接拼出字符串，不必绕道 int_to_string。
+                    if matches!(at, Type::Int | Type::Float | Type::String | Type::Char) {
                         return Ok(Type::String);
                     } else {
                         return Err(DialcError::new(
-                            "语义错误：str 仅支持 int / float / string 参数（char 请先 int_to_char 或用 string 字面量）",
+                            "语义错误：str 仅支持 int / float / char / string 参数（bool 请先用 int_to_string 转换）",
                             0, 0,
                         ));
                     }
@@ -488,6 +526,90 @@ pub fn type_of<V>(
                         ));
                     }
                     return Ok(Type::Map);
+                }
+                // bytes（二进制字节缓冲区，v0.98.2）：与 string 布局相同但类型独立，
+                // 因此两者之间的转换必须**显式**走这些内置，编译器才拦得住混用。
+                "bytes_from_string" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_from_string 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::String {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_from_string 的参数必须是 string",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Bytes);
+                }
+                "bytes_to_string" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_to_string 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Bytes {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_to_string 的参数必须是 bytes",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::String);
+                }
+                "bytes_new" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_new 需要恰好 1 个参数（字节长度）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_new 的参数必须是 int（字节长度）",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Bytes);
+                }
+                "bytes_length" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_length 需要恰好 1 个参数",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Bytes {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_length 的参数必须是 bytes",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Int);
+                }
+                "bytes_get" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_get 需要恰好 2 个参数（bytes, 索引）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Bytes {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_get 的第一个参数必须是 bytes",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[1], scopes, funcs, structs)? != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_get 的第二个参数（索引）必须是 int",
+                            0, 0,
+                        ));
+                    }
+                    // 返回 byte 而非 int：取值范围 0~255 由类型本身表达。
+                    return Ok(Type::Byte);
                 }
                 "read_line" => {
                     if !args.is_empty() {
@@ -904,10 +1026,21 @@ pub fn type_of<V>(
                 let pt = type_of(&args[0], scopes, funcs, structs)?;
                 match pt {
                     // char 打印的是字符本身（不是码点数字），与 int 明确区分。
-                    Type::Int | Type::Float | Type::Bool | Type::Char | Type::String => {}
+                    // byte 打印的是**数值**（0~255），也不是字符。
+                    Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String => {}
                     Type::Array(_) => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print 数组，请逐元素打印 print(a.get(i))",
+                            0, 0,
+                        ))
+                    }
+                    // bytes 是**二进制**数据，直接打印会把原始字节当字符吐出乱码——
+                    // 与 print(int[]) 同理，在编译期拒绝。
+                    // 想看内容请显式转换：bytes_to_string(b)（可能是非法 UTF-8，需自行处理）。
+                    Type::Bytes => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print bytes（二进制数据）；\
+                             请先显式转换（bytes_to_string）再打印",
                             0, 0,
                         ))
                     }
@@ -964,6 +1097,100 @@ pub fn type_of<V>(
                 }
                 // print 是**语句**而非表达式：无返回值，因此不能出现在
                 // 赋值右侧、return 或任何需要值的位置。
+                Ok(Type::Void)
+            } else if name == "print_raw" {
+                // 原样输出、**不换行**（v0.98.2）：连续输出的基本积木。
+                // 与 print 的区别只有「结尾那个 '\n'」，参数类型要求则完全一致——
+                // 两者都接受标量与字符串，不接受数组/结构体/句柄（那些没有可读形态）。
+                if args.len() != 1 {
+                    return Err(DialcError::new(
+                        "语义错误：内置函数 print_raw 需要恰好 1 个参数",
+                        0, 0,
+                    ));
+                }
+                let pt = type_of(&args[0], scopes, funcs, structs)?;
+                match pt {
+                    Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String => {}
+                    Type::Array(_) => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print_raw 数组，请逐元素输出 print_raw(str(a.get(i)))",
+                            0, 0,
+                        ))
+                    }
+                    // bytes 是二进制数据，原样输出会吐出乱码——与 print_raw(int[]) 同理拒绝。
+                    Type::Bytes => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print_raw bytes（二进制数据）；\
+                             请先显式转换（bytes_to_string）再输出",
+                            0, 0,
+                        ))
+                    }
+                    Type::Struct(_) => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print_raw 结构体，请逐字段输出",
+                            0, 0,
+                        ))
+                    }
+                    Type::Map => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print_raw 哈希表，请逐值输出",
+                            0, 0,
+                        ))
+                    }
+                    Type::File => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print_raw 文件句柄（file）；请改用 read 读成 string 后再输出",
+                            0, 0,
+                        ))
+                    }
+                    Type::Error => {}
+                    Type::Thread => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print_raw thread 句柄",
+                            0, 0,
+                        ))
+                    }
+                    Type::Channel(_) => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print_raw channel；请 recv 出元素后再输出",
+                            0, 0,
+                        ))
+                    }
+                    Type::Opaque(n) => {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：当前版本不支持直接 print_raw 包句柄 '{}'（不透明指针）；\
+                                 请改用该包提供的取值函数",
+                                n
+                            ),
+                            0,
+                            0,
+                        ))
+                    }
+                    Type::Void => {
+                        return Err(DialcError::new(
+                            "语义错误：print_raw 的参数不能是 void",
+                            0, 0,
+                        ))
+                    }
+                }
+                // 与 print 同为语句：无返回值。
+                Ok(Type::Void)
+            } else if name == "write_char" {
+                // 输出单个字符、**不换行**（v0.98.2）：与 print(char) 的唯一差别就是换行。
+                if args.len() != 1 {
+                    return Err(DialcError::new(
+                        "语义错误：内置函数 write_char 需要恰好 1 个参数",
+                        0, 0,
+                    ));
+                }
+                let pt = type_of(&args[0], scopes, funcs, structs)?;
+                if pt != Type::Char {
+                    return Err(DialcError::new(
+                        "语义错误：write_char 的参数必须是 char（int 请先用 int_to_char 转换）",
+                        0, 0,
+                    ));
+                }
                 Ok(Type::Void)
             } else {
                 let info = funcs.get(name).ok_or_else(|| {
@@ -1628,7 +1855,8 @@ fn stmt_pos(stmt: &Stmt) -> (usize, usize) {
         | Stmt::Throw(_, line, col)
         | Stmt::Break(line, col)
         | Stmt::Continue(line, col)
-        | Stmt::Expr(_, line, col) => (*line, *col),
+        | Stmt::Expr(_, line, col)
+        | Stmt::Block { line, col, .. } => (*line, *col),
     }
 }
 
@@ -1737,7 +1965,7 @@ fn check_stmt(
             // 把结果赋给**另一个**变量是允许的（那是取得新容器，不是就地修改），
             // 所以只在「接收者恰好就是被赋值的这个变量」时才拒绝。
             if let Expr::Method(recv, method, _args) = value {
-                let is_cow_method = matches!(method.as_str(), "push" | "put");
+                let is_cow_method = matches!(method.as_str(), "push" | "set" | "put");
                 let same_receiver = lvalue_root(recv) == Some(name.as_str());
                 if is_cow_method && same_receiver {
                     return Err(DialcError::new(
@@ -2101,6 +2329,15 @@ fn check_stmt(
                 }
                 scopes.pop();
             }
+            Ok(())
+        }
+        Stmt::Block { body, .. } => {
+            // 裸块：引入新词法作用域，递归检查内部语句后弹出作用域。
+            scopes.push(HashMap::new());
+            for s in body {
+                check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth)?;
+            }
+            scopes.pop();
             Ok(())
         }
         Stmt::Expr(e, ..) => {

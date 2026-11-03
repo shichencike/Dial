@@ -21,6 +21,8 @@ extern fn dial_string_release(s: DialString): void;
 extern fn dial_print_string(s: DialString): void;
 /// DialString -> const char*：把不透明字符串句柄转成真正的 C 字符串（跳过 8 字节头部）。
 extern fn dial_string_cstr(s: DialString): string;
+/// char -> 字符串：把一个 Unicode 码点编码成 UTF-8（1~4 字节）。
+extern fn dial_char_to_string(code: int): DialString;
 
 // ---- 数组 ----
 type DialArray;
@@ -51,8 +53,16 @@ extern fn dial_map_release(m: DialMap): void;
 extern fn dial_print_int(v: int): void;
 extern fn dial_print_float(v: float): void;
 extern fn dial_print_bool(b: int): void;
-/// 打印字符本身而非码点数字。
+/// 打印字符本身而非码点数字；**末尾追加换行**。
 extern fn dial_print_char(code: int): void;
+/// 原样输出字符串、**不追加换行**（连续输出的基本积木）。
+extern fn dial_print_raw(s: DialString): void;
+/// 输出单个字符、**不追加换行**。
+extern fn dial_write_char(code: int): void;
+/// 标量版本的无换行输出（栈缓冲，零堆分配）。
+extern fn dial_print_raw_int(v: int): void;
+extern fn dial_print_raw_float(v: float): void;
+extern fn dial_print_raw_bool(b: int): void;
 extern fn dial_read_line(): DialString;
 
 // ---- 文件（显式 open/close，不受 ARC 管理）----

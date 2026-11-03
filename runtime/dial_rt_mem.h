@@ -27,8 +27,12 @@ void dial_rc_release(void *p);
 
 /*
  * 写时复制（COW）感知的克隆：
- *   - 若对象当前唯一持有（refcount == 1），直接返回自身（零拷贝，O(1)）；
- *   - 否则深拷贝 payload_size 字节得到新对象（refcount 1）。
+ *   - 若对象当前唯一持有（refcount == 1），把引用计数 +1 后返回自身——
+ *     它仍是零拷贝（不拷 payload），但“原对象”与“克隆”现在是两个独立持有者，
+ *     所以**必须 +1**：否则 COW 守卫 `refcount > 1` 失效，一方就地修改会污染另一方，
+ *     且任意一方的 release 都会提前把内存归还（double-free / use-after-free）。
+ *     （这正是 CVE-2024-DIAL-003 的根因：旧实现漏了这步 +1。）
+ *   - 若被共享（refcount > 1），深拷贝 payload_size 字节得到新对象（refcount 1）。
  * 这是“COW 兜底”的底层实现——只在静态分析失效（共享 buffer 被原地修改）时触发真实拷贝。
  */
 void *dial_rc_clone(void *p, int64_t payload_size);

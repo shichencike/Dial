@@ -1,0 +1,20 @@
+// 示例：byte（单字节数值）与 bytes（二进制缓冲区），v0.98.2。
+// 演示二者与 char / string 的严格类型区分，以及互转。
+
+fn main(): int {
+    let b: byte = int_to_byte(65);
+    print(byte_to_int(b));            // 65
+    let c: char = int_to_char(65);
+    print(c);                        // A
+    print(int_to_char(byte_to_int(b))); // A  —— byte 经 int 中转成 char
+
+    let raw: bytes = bytes_from_string("hello");
+    print(bytes_length(raw));         // 5
+    print(bytes_get(raw, 0));         // 104 ('h' 的 ASCII)
+    let s: string = bytes_to_string(raw);
+    print(s);                        // hello
+
+    let buf: bytes = bytes_new(4);
+    print(bytes_length(buf));         // 4
+    return 0;
+}
