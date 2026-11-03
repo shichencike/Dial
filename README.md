@@ -464,7 +464,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 | `byte` | LLVM `i64` | **单字节无符号值**（v0.98.2）。**值类型**：与 `char` 同表示但语义不同——`byte` 是 0~255 的**数值**，参与算术、比较，经 `int_to_byte` / `byte_to_int` 与 `int` 显式互转；与 `char`（码点）严格区分，避免「一个字节到底是字符还是数字」的歧义 |
 | `string` | LLVM `ptr`（不透明） | 由 C Runtime 管理的引用计数字符串 |
 | `bytes` | LLVM `ptr`（不透明） | 不可变二进制缓冲区（v0.98.2），由 C Runtime 管理的引用计数对象，**独立于 `string`**（零隐式转换）。承载任意字节序列（可能非法 UTF-8）。构造/转换见 [§5.7](#57-bytes二进制缓冲区v0982) |
-| `int[]` | LLVM `ptr`（不透明） | 由 C Runtime 管理的动态数组，**元素类型固定为 `int`** |
+| `int[]` | LLVM `ptr`（不透明） | 由 C Runtime 管理的动态数组。**元素类型可为 `int` 或任意 8 字节句柄**（见 [§11](#11-动态数组-int)）：`string[]` / `int[][]` / `map[]` / `error[]` / `channel[]` / 不透明指针数组；`float[]` / `bool[]` / `byte[]` / `char[]` 等标量非 int 元素在编译期拒绝（见 [§5.2](#52-类型良构性约束)） |
 | `file` | LLVM `ptr`（不透明） | 文件句柄，封装 C 的 `FILE*`；显式 `open` / `close`，**不受 ARC 管理**（见 [§24](#24-文件-iofile-句柄)） |
 | `error` | LLVM `ptr`（不透明） | **可恢复异常对象**（v0.7），由 C Runtime 管理的 ARC 类型；由 `Error("msg")` 构造、`throw` 抛出、`catch` 捕获（见 [§26](#26-可恢复异常trycatchthrow)） |
 | `thread` | LLVM `ptr`（不透明） | 线程句柄（v0.8）；显式 `join` / `detach`，**不受 ARC 管理**（见 [§27](#27-所有权转移与多线程并发move_to--thread--channel)） |
@@ -478,13 +478,15 @@ int  float  bool  char  string  void  file  error  thread  channel
 
 | 写法 | 结果 |
 | --- | --- |
-| `float[]` | ❌ 错误。v0.2 数组元素只支持 `int` |
-| `int[][]` | ❌ 错误。不支持嵌套数组 |
+| `float[]` | ❌ 错误。数组元素只支持 `int` 与 8 字节句柄（string / int[] / map / error / channel / 不透明指针）；`float` 是 double，位模式塞进 int64 槽会失真，必须拒绝（见 [§5.1](#51-基本类型)） |
+| `bool[]` / `byte[]` / `char[]` | ❌ 错误。标量（1/4 字节）无法塞进数组的「8 字节槽位」，编译期拒绝（见 [§5.1](#51-基本类型)） |
+| `int[][]` | ✅ **支持**（v0.98.2）：多维数组 =「元素是数组句柄的数组」，内层 `int[]` 作为 8 字节句柄统一管理（见 [§11.6](#116-多维数组与句柄元素数组)） |
 | `var v: void = ...` | ❌ 错误。`void` 不能作为变量类型 |
 
-> 之所以在编译期拒绝 `float[]`：C 侧 `dial_array_*` 以 `int64` 存储元素，
-> 若允许 `float[]`，元素会在跨越 FFI 边界时被 `fptosi` **静默截断**。
-> 宁可拒绝，不可静默损坏数据。
+> 之所以在编译期拒绝 `float[]` / `bool[]` / `byte[]` / `char[]`：C 侧 `dial_array_*` 以 `int64` 存储元素，
+> 数组槽位语义是「int 或 8 字节不透明句柄」。标量浮点 / 布尔 / 字节 / 字符无法塞进这一模型：
+> 要么位模式失真（`float`），要么宽度不足（`bool` / `byte` / `char`）。宁可拒绝，不可静默损坏数据。
+> 而 `string[]` / `int[][]` / `map[]` / `error[]` / `channel[]` 等句柄天然是 8 字节指针，直接存储即可（见 [§11.6](#116-多维数组与句柄元素数组)）。
 
 ### 5.3 类型转换
 
@@ -1019,12 +1021,15 @@ print(r.origin.x);     // 支持链式
 
 ## 11. 动态数组 `int[]`
 
-`int[]` 是不透明指针，内存布局 `[refcount][len][cap][elems...]` 由 C 侧私有维护。
+`int[]` 是不透明指针，内存布局 `[refcount][kind][len][cap][elems...]`（头部 `kind` 记录元素类别）由 C 侧私有维护。
+**元素类型可为 `int`，或任意 8 字节句柄**：`string` / `int[]`（多维）/ `map` / `error` / `channel` / 不透明指针（v0.98.2 起，见 [§11.6](#116-多维数组与句柄元素数组)）。
 
 ### 11.1 构造
 
 ```dial
 var a: int[] = [10, 20, 30];
+var names: string[] = ["alice", "bob", "carol"];   // v0.98.2：句柄元素
+var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.98.2：多维（元素是 int[] 句柄）
 ```
 
 空数组字面量 `[]` 不支持（无法推断元素类型）。
@@ -1034,12 +1039,12 @@ var a: int[] = [10, 20, 30];
 | 方法 | 等价于 C 调用 | 返回 | 说明 |
 | --- | --- | --- | --- |
 | `a.length()` | `dial_array_length` | `int` | 元素个数 |
-| `a.get(i)` | `dial_array_get` | `int` | 按下标读 |
-| `a.push(v)` | `dial_array_push` | `int[]` | 追加；**返回（可能更新后的）数组指针** |
-| `a.set(i, v)` | `dial_array_set` | `int[]` | 按下标写；被共享时内部触发 COW，**返回新指针** |
-| `a.clone()` | `dial_array_clone` | `int[]` | COW 感知克隆 |
+| `a.get(i)` | `dial_array_get` | 元素类型（`int` 或句柄指针） | 按下标读 |
+| `a.push(v)` | `dial_array_push` | 数组类型（如 `int[]` / `string[]`） | 追加；**返回（可能更新后的）数组指针** |
+| `a.set(i, v)` | `dial_array_set` | 数组类型 | 按下标写；被共享时内部触发 COW，**返回新指针** |
+| `a.clone()` | `dial_array_clone` | 数组类型 | COW 感知克隆 |
 
-下标语法 `a[i]` 等价于 `a.get(i)`；`a[i] = v` 等价于 `a = a.set(i, v)`。
+下标语法 `a[i]` 等价于 `a.get(i)`；`a[i] = v` 等价于 `a = a.set(i, v)`。嵌套下标 `a[i][j] = v` 同样支持（v0.98.2，见 [§11.6](#116-多维数组与句柄元素数组)）。
 
 ### 11.3 为什么 `push` / `set` 要返回指针
 
@@ -1076,6 +1081,38 @@ a[0] = 99;      // 同理
 默认等级（Debug / ReleaseSafe）下**有边界检查**：越界读写当场触发陷阱终止，
 由 codegen 插入的检查（§20.2）与 C Runtime 的检查（§20.3）双重保证。
 仅在 `--fast`（ReleaseFast）下才回落到"无边界检查、越界即 UB"的 C 行为。
+
+### 11.6 多维数组与句柄元素数组
+
+v0.98.2 起，数组不再「只能装 int」。只要元素类型是 `int` 或**任意 8 字节句柄**，就能直接存储——
+因为所有不透明句柄（`string` / `int[]` / `map` / `error` / 不透明指针）共享同一份 `dial_rc_*` 引用计数，
+`channel` 则走原子引用计数 `dial_channel_*`。数组头部用一个 `kind` 字段记下自己的元素类别，
+`push` / `set` / 克隆 / 释放时据此对元素做对应的 retain / release，从而实现**按元素 ARC**。
+
+```dial
+var names: string[] = ["alice", "bob"];   // 句柄元素：每个 string 都按元素 ARC 管理
+names.push("carol");                      // 自动 retain "carol"
+print(names[0]);                          // "alice"
+
+var m: int[][] = [[1, 2, 3], [4, 5]];     // 多维：内层 int[] 是外层数组的句柄元素
+print(m[2][3]);                           // 嵌套读
+m[0][0] = 11;                            // 嵌套写（编译器递归解包两层下标）
+```
+
+**内存布局**：`[int64 refcount][int64 kind][int64 len][int64 cap][int64 elems...]`（24 字节头，
+前导 refcount 仍由 `dial_rc_*` 管理）。`kind` 取值：`0 = INT`、`1 = RC`（string / int[] / map / error / 不透明指针）、`2 = ATOMIC`（channel）。
+
+**按元素 ARC 的边界**：
+
+- `string[]` / `int[][]` / `map[]` / `error[]` / 不透明指针 `[]` → 走 `dial_rc_retain` / `dial_rc_release`；
+- `channel[]` → 走 `dial_channel_retain` / `dial_channel_release`（原子）；
+- `int[]` → 元素无所有权，读写零开销。
+
+**嵌套下标赋值**（`m[i][j] = v`）：编译器把 `arr[index]` 拼成完整左值表达式，递归解包——
+先 `gen_expr` 取出内层数组句柄，调用 `dial_array_set` 写入值，再把「可能 COW 更新」的句柄写回外层容器，
+直到最外层变量槽。单层下标赋值（`a[i] = v`）仍走原有高效路径，完全不受影响。
+
+**标量非 int 元素仍被拒绝**：`float[]` / `bool[]` / `byte[]` / `char[]` 在编译期即报错（见 [§5.2](#52-类型良构性约束)）。
 
 ---
 
@@ -1513,13 +1550,12 @@ print("");        // -> Hi
 > **三平台原生构建（v0.97：Linux x86_64 / Windows x64-MinGW / Termux aarch64-musl 全静态）**、
 > **`dialc lsp` 语言服务器（v0.94 骨架 → v0.95 增强 → v0.98 工业化，见 §28）**、
 > **连续输出三件套 `print_raw` / `write_char` / `str(char)`（v0.98.2，见 §5.5 与 §16.1）**、
-> **`byte` 单字节值类型与 `bytes` 二进制缓冲区（v0.98.2，见 §5.6 与 §5.7）**。
+> **`byte` 单字节值类型与 `bytes` 二进制缓冲区（v0.98.2，见 §5.6 与 §5.7）**、
+> **多维数组 `int[][]` 与句柄元素数组 `string[]` / `map[]` / `error[]` / `channel[]`（v0.98.2，见 [§11.6](#116-多维数组与句柄元素数组) 与 [§5.2](#52-类型良构性约束)）：数组元素类型扩展到 int 与 8 字节句柄，按元素 ARC 管理所有权**。
 > 其余仍按计划未实现：
 
 | 能力 | 状态 |
 | --- | --- |
-| 多维数组 `int[][]` | 编译期拒绝 |
-| 非 `int` 元素数组 | 编译期拒绝 |
 | 裸块 `{ ... }` | **已支持**（v0.98.2）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 [§8.6](#86-裸块独立的词法作用域v0982) |
 | 模块 / 包 / import | **已支持**（v0.93；`dialc install <URL>` 于 v0.96 落地）：`import "包名";` + `dialc install <本地文件\|URL>`，见 [§25](#25-包分发与依赖管理生态规划--最终规范)。**尚未实现**：源码形式的模块拆分（无 `mod`） |
 | 泛型、接口、trait、闭包 | 不支持（`channel<T>` 是内建特化语法，不是用户泛型） |

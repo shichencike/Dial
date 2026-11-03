@@ -1,0 +1,42 @@
+// v0.98.2 示例：int[][] —— 多维数组（元素是 int[] 句柄，按元素 ARC）
+//
+// 多维数组本质是「元素是数组句柄的数组」：内层 int[] 是普通的不透明指针，
+// 作为外层数组的元素被统一按 handle 管理——push / set / 克隆 / 释放时一律 retain / release。
+fn main(): int {
+    var m: int[][] = [[1, 2, 3], [4, 5], [6, 7, 8, 9]];
+    print("[int[][]] 行数 = 3 ->");
+    print(m.length());
+
+    print("[int[][]] 第 0 行长度 = 3 ->");
+    print(m[0].length());
+    print("[int[][]] m[2][3] = 9 ->");
+    print(m[2][3]);
+
+    // 逐元素（嵌套索引 m[i][j]，每层 get 返回的都是指针或 int）
+    print("[int[][]] 扁平输出 1..9 ->");
+    var i: int = 0;
+    while (i < m.length()) {
+        var row: int[] = m.get(i);
+        var j: int = 0;
+        while (j < row.length()) {
+            print(row.get(j));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    // push 一行（句柄元素必须 retain 内层数组）
+    var inner: int[] = [100, 200];
+    m.push(inner);
+    print("[int[][]] push 后行数 = 4 ->");
+    print(m.length());
+    print("[int[][]] 末行 = [100, 200] ->");
+    print(m[3][0]);
+    print(m[3][1]);
+
+    // 修改内层：m[0][0] = 11（内层 int[] 的 set，外层不受影响）
+    m[0][0] = 11;
+    print("[int[][]] m[0][0] = 11 ->");
+    print(m[0][0]);
+    return 0;
+}

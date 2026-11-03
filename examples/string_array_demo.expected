@@ -1,0 +1,20 @@
+[str[]] 字面量长度 = 3 ->
+3
+[str[]] 逐元素输出 ->
+alice
+bob
+carol
+[str[]] names[0] = alice ->
+alice
+[str[]] push 后长度 = 4 ->
+4
+[str[]] names[3] = dave ->
+dave
+[str[]] names[1] = bOb ->
+bOb
+[str[]] clone 长度 = 4 ->
+4
+[str[]] clone[2] = carol ->
+carol
+[str[]] sum_len = 5+3+5+4 = 17 ->
+17

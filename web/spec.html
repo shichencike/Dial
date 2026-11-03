@@ -110,6 +110,7 @@
 <li><a href="#113-为什么-push--set-要返回指针">11.3 为什么 push / set 要返回指针</a></li>
 <li><a href="#114-接收者必须是可变变量var">11.4 接收者必须是可变变量（var）</a></li>
 <li><a href="#115-越界行为">11.5 越界行为</a></li>
+<li><a href="#116-多维数组与句柄元素数组">11.6 多维数组与句柄元素数组</a></li>
 </ul>
 </li>
 <li><a href="#12-哈希表-mapint--int">12. 哈希表 map（int → int）</a><ul>
@@ -950,7 +951,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 <tr>
 <td><code>int[]</code></td>
 <td>LLVM <code>ptr</code>（不透明）</td>
-<td>由 C Runtime 管理的动态数组，<strong>元素类型固定为 <code>int</code></strong></td>
+<td>由 C Runtime 管理的动态数组。<strong>元素类型可为 <code>int</code> 或任意 8 字节句柄</strong>（见 <a href="#11-动态数组-int">§11</a>）：<code>string[]</code> / <code>int[][]</code> / <code>map[]</code> / <code>error[]</code> / <code>channel[]</code> / 不透明指针数组；<code>float[]</code> / <code>bool[]</code> / <code>byte[]</code> / <code>char[]</code> 等标量非 int 元素在编译期拒绝（见 <a href="#52-类型良构性约束">§5.2</a>）</td>
 </tr>
 <tr>
 <td><code>file</code></td>
@@ -996,11 +997,15 @@ int  float  bool  char  string  void  file  error  thread  channel
 <tbody>
 <tr>
 <td><code>float[]</code></td>
-<td>❌ 错误。v0.2 数组元素只支持 <code>int</code></td>
+<td>❌ 错误。数组元素只支持 <code>int</code> 与 8 字节句柄（string / int[] / map / error / channel / 不透明指针）；<code>float</code> 是 double，位模式塞进 int64 槽会失真，必须拒绝（见 <a href="#51-基本类型">§5.1</a>）</td>
+</tr>
+<tr>
+<td><code>bool[]</code> / <code>byte[]</code> / <code>char[]</code></td>
+<td>❌ 错误。标量（1/4 字节）无法塞进数组的「8 字节槽位」，编译期拒绝（见 <a href="#51-基本类型">§5.1</a>）</td>
 </tr>
 <tr>
 <td><code>int[][]</code></td>
-<td>❌ 错误。不支持嵌套数组</td>
+<td>✅ <strong>支持</strong>（v0.98.2）：多维数组 =「元素是数组句柄的数组」，内层 <code>int[]</code> 作为 8 字节句柄统一管理（见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）</td>
 </tr>
 <tr>
 <td><code>var v: void = ...</code></td>
@@ -1009,9 +1014,10 @@ int  float  bool  char  string  void  file  error  thread  channel
 </tbody>
 </table>
 <blockquote>
-<p>之所以在编译期拒绝 <code>float[]</code>：C 侧 <code>dial_array_*</code> 以 <code>int64</code> 存储元素，
-若允许 <code>float[]</code>，元素会在跨越 FFI 边界时被 <code>fptosi</code> <strong>静默截断</strong>。
-宁可拒绝，不可静默损坏数据。</p>
+<p>之所以在编译期拒绝 <code>float[]</code> / <code>bool[]</code> / <code>byte[]</code> / <code>char[]</code>：C 侧 <code>dial_array_*</code> 以 <code>int64</code> 存储元素，
+数组槽位语义是「int 或 8 字节不透明句柄」。标量浮点 / 布尔 / 字节 / 字符无法塞进这一模型：
+要么位模式失真（<code>float</code>），要么宽度不足（<code>bool</code> / <code>byte</code> / <code>char</code>）。宁可拒绝，不可静默损坏数据。
+而 <code>string[]</code> / <code>int[][]</code> / <code>map[]</code> / <code>error[]</code> / <code>channel[]</code> 等句柄天然是 8 字节指针，直接存储即可（见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）。</p>
 </blockquote>
 <h3 id="53-类型转换">5.3 类型转换</h3>
 <p><strong>零隐式转换铁律。</strong></p>
@@ -1797,9 +1803,12 @@ print(r.origin.x);     // 支持链式
 </ul>
 <hr />
 <h2 id="11-动态数组-int">11. 动态数组 <code>int[]</code></h2>
-<p><code>int[]</code> 是不透明指针，内存布局 <code>[refcount][len][cap][elems...]</code> 由 C 侧私有维护。</p>
+<p><code>int[]</code> 是不透明指针，内存布局 <code>[refcount][kind][len][cap][elems...]</code>（头部 <code>kind</code> 记录元素类别）由 C 侧私有维护。
+<strong>元素类型可为 <code>int</code>，或任意 8 字节句柄</strong>：<code>string</code> / <code>int[]</code>（多维）/ <code>map</code> / <code>error</code> / <code>channel</code> / 不透明指针（v0.98.2 起，见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）。</p>
 <h3 id="111-构造">11.1 构造</h3>
 <pre><code class="language-dial">var a: int[] = [10, 20, 30];
+var names: string[] = [&quot;alice&quot;, &quot;bob&quot;, &quot;carol&quot;];   // v0.98.2：句柄元素
+var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.98.2：多维（元素是 int[] 句柄）
 </code></pre>
 <p>空数组字面量 <code>[]</code> 不支持（无法推断元素类型）。</p>
 <h3 id="112-方法">11.2 方法</h3>
@@ -1822,30 +1831,30 @@ print(r.origin.x);     // 支持链式
 <tr>
 <td><code>a.get(i)</code></td>
 <td><code>dial_array_get</code></td>
-<td><code>int</code></td>
+<td>元素类型（<code>int</code> 或句柄指针）</td>
 <td>按下标读</td>
 </tr>
 <tr>
 <td><code>a.push(v)</code></td>
 <td><code>dial_array_push</code></td>
-<td><code>int[]</code></td>
+<td>数组类型（如 <code>int[]</code> / <code>string[]</code>）</td>
 <td>追加；<strong>返回（可能更新后的）数组指针</strong></td>
 </tr>
 <tr>
 <td><code>a.set(i, v)</code></td>
 <td><code>dial_array_set</code></td>
-<td><code>int[]</code></td>
+<td>数组类型</td>
 <td>按下标写；被共享时内部触发 COW，<strong>返回新指针</strong></td>
 </tr>
 <tr>
 <td><code>a.clone()</code></td>
 <td><code>dial_array_clone</code></td>
-<td><code>int[]</code></td>
+<td>数组类型</td>
 <td>COW 感知克隆</td>
 </tr>
 </tbody>
 </table>
-<p>下标语法 <code>a[i]</code> 等价于 <code>a.get(i)</code>；<code>a[i] = v</code> 等价于 <code>a = a.set(i, v)</code>。</p>
+<p>下标语法 <code>a[i]</code> 等价于 <code>a.get(i)</code>；<code>a[i] = v</code> 等价于 <code>a = a.set(i, v)</code>。嵌套下标 <code>a[i][j] = v</code> 同样支持（v0.98.2，见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）。</p>
 <h3 id="113-为什么-push--set-要返回指针">11.3 为什么 <code>push</code> / <code>set</code> 要返回指针</h3>
 <p>这两种操作在需要扩容或存在多个持有者时，会产生<strong>新的</strong>不透明指针。
 编译器强制把返回值写回接收变量，杜绝"旧指针失效"的悬垂问题：</p>
@@ -1898,6 +1907,31 @@ C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并
 <p>默认等级（Debug / ReleaseSafe）下<strong>有边界检查</strong>：越界读写当场触发陷阱终止，
 由 codegen 插入的检查（§20.2）与 C Runtime 的检查（§20.3）双重保证。
 仅在 <code>--fast</code>（ReleaseFast）下才回落到"无边界检查、越界即 UB"的 C 行为。</p>
+<h3 id="116-多维数组与句柄元素数组">11.6 多维数组与句柄元素数组</h3>
+<p>v0.98.2 起，数组不再「只能装 int」。只要元素类型是 <code>int</code> 或<strong>任意 8 字节句柄</strong>，就能直接存储——
+因为所有不透明句柄（<code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code> / 不透明指针）共享同一份 <code>dial_rc_*</code> 引用计数，
+<code>channel</code> 则走原子引用计数 <code>dial_channel_*</code>。数组头部用一个 <code>kind</code> 字段记下自己的元素类别，
+<code>push</code> / <code>set</code> / 克隆 / 释放时据此对元素做对应的 retain / release，从而实现<strong>按元素 ARC</strong>。</p>
+<pre><code class="language-dial">var names: string[] = [&quot;alice&quot;, &quot;bob&quot;];   // 句柄元素：每个 string 都按元素 ARC 管理
+names.push(&quot;carol&quot;);                      // 自动 retain &quot;carol&quot;
+print(names[0]);                          // &quot;alice&quot;
+
+var m: int[][] = [[1, 2, 3], [4, 5]];     // 多维：内层 int[] 是外层数组的句柄元素
+print(m[2][3]);                           // 嵌套读
+m[0][0] = 11;                            // 嵌套写（编译器递归解包两层下标）
+</code></pre>
+<p><strong>内存布局</strong>：<code>[int64 refcount][int64 kind][int64 len][int64 cap][int64 elems...]</code>（24 字节头，
+前导 refcount 仍由 <code>dial_rc_*</code> 管理）。<code>kind</code> 取值：<code>0 = INT</code>、<code>1 = RC</code>（string / int[] / map / error / 不透明指针）、<code>2 = ATOMIC</code>（channel）。</p>
+<p><strong>按元素 ARC 的边界</strong>：</p>
+<ul>
+<li><code>string[]</code> / <code>int[][]</code> / <code>map[]</code> / <code>error[]</code> / 不透明指针 <code>[]</code> → 走 <code>dial_rc_retain</code> / <code>dial_rc_release</code>；</li>
+<li><code>channel[]</code> → 走 <code>dial_channel_retain</code> / <code>dial_channel_release</code>（原子）；</li>
+<li><code>int[]</code> → 元素无所有权，读写零开销。</li>
+</ul>
+<p><strong>嵌套下标赋值</strong>（<code>m[i][j] = v</code>）：编译器把 <code>arr[index]</code> 拼成完整左值表达式，递归解包——
+先 <code>gen_expr</code> 取出内层数组句柄，调用 <code>dial_array_set</code> 写入值，再把「可能 COW 更新」的句柄写回外层容器，
+直到最外层变量槽。单层下标赋值（<code>a[i] = v</code>）仍走原有高效路径，完全不受影响。</p>
+<p><strong>标量非 int 元素仍被拒绝</strong>：<code>float[]</code> / <code>bool[]</code> / <code>byte[]</code> / <code>char[]</code> 在编译期即报错（见 <a href="#52-类型良构性约束">§5.2</a>）。</p>
 <hr />
 <h2 id="12-哈希表-mapint--int">12. 哈希表 <code>map</code>（int → int）</h2>
 <p><code>map</code> 是 Dial 的哈希表类型，键与值均固定为 <code>int</code>（v0.4）。在 IR 中它同样只是一个 <code>ptr</code>（<code>i8*</code>），
@@ -2541,7 +2575,8 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <strong>三平台原生构建（v0.97：Linux x86_64 / Windows x64-MinGW / Termux aarch64-musl 全静态）</strong>、
 <strong><code>dialc lsp</code> 语言服务器（v0.94 骨架 → v0.95 增强 → v0.98 工业化，见 §28）</strong>、
 <strong>连续输出三件套 <code>print_raw</code> / <code>write_char</code> / <code>str(char)</code>（v0.98.2，见 §5.5 与 §16.1）</strong>、
-<strong><code>byte</code> 单字节值类型与 <code>bytes</code> 二进制缓冲区（v0.98.2，见 §5.6 与 §5.7）</strong>。
+<strong><code>byte</code> 单字节值类型与 <code>bytes</code> 二进制缓冲区（v0.98.2，见 §5.6 与 §5.7）</strong>、
+<strong>多维数组 <code>int[][]</code> 与句柄元素数组 <code>string[]</code> / <code>map[]</code> / <code>error[]</code> / <code>channel[]</code>（v0.98.2，见 <a href="#116-多维数组与句柄元素数组">§11.6</a> 与 <a href="#52-类型良构性约束">§5.2</a>）：数组元素类型扩展到 int 与 8 字节句柄，按元素 ARC 管理所有权</strong>。
 其余仍按计划未实现：</p>
 </blockquote>
 <table>
@@ -2552,14 +2587,6 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 </thead>
 <tbody>
-<tr>
-<td>多维数组 <code>int[][]</code></td>
-<td>编译期拒绝</td>
-</tr>
-<tr>
-<td>非 <code>int</code> 元素数组</td>
-<td>编译期拒绝</td>
-</tr>
 <tr>
 <td>裸块 <code>{ ... }</code></td>
 <td><strong>已支持</strong>（v0.98.2）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 <a href="#86-裸块独立的词法作用域v0982">§8.6</a></td>

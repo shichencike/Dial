@@ -1,0 +1,55 @@
+// v0.98.2 示例：string[] —— 句柄元素数组（按元素 ARC）
+//
+// 数组不再是「只能装 int」的盒子。元素只要是 8 字节指针（string / int[] / map /
+// error / channel / 不透明指针）或 int，就能直接存。运行时按数组头部的元素类别
+// 对元素做 retain / release，因此 string[] 这样的句柄数组不会发生悬垂或泄漏。
+fn main(): int {
+    var names: string[] = ["alice", "bob", "carol"];
+    print("[str[]] 字面量长度 = 3 ->");
+    print(names.length());
+
+    print("[str[]] 逐元素输出 ->");
+    var i: int = 0;
+    while (i < names.length()) {
+        print(names.get(i));
+        i = i + 1;
+    }
+
+    // 下标读取：names[i] 等价于 names.get(i)
+    print("[str[]] names[0] = alice ->");
+    print(names[0]);
+
+    // push 句柄元素：运行时必须 retain 传入的 string
+    names.push("dave");
+    print("[str[]] push 后长度 = 4 ->");
+    print(names.length());
+    print("[str[]] names[3] = dave ->");
+    print(names[3]);
+
+    // 下标写入：旧元素 release、新元素 retain
+    names[1] = "bOb";
+    print("[str[]] names[1] = bOb ->");
+    print(names[1]);
+
+    // 克隆：克隆体必须对所有元素 retain（否则原数组释放后会悬垂）
+    var c: string[] = names.clone();
+    print("[str[]] clone 长度 = 4 ->");
+    print(c.length());
+    print("[str[]] clone[2] = carol ->");
+    print(c[2]);
+
+    // 作为函数参数按不透明指针传递（共享引用，读取语义）
+    print("[str[]] sum_len = 5+3+5+4 = 17 ->");
+    print(sum_len(names));
+    return 0;
+}
+
+fn sum_len(a: string[]): int {
+    var total: int = 0;
+    var i: int = 0;
+    while (i < a.length()) {
+        total = total + a.get(i).length();
+        i = i + 1;
+    }
+    return total;
+}

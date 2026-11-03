@@ -318,8 +318,8 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_void("dial_string_retain", &[i8b.into()]);
         self.decl_void("dial_string_release", &[i8b.into()]);
         self.decl_void("dial_print_string", &[i8b.into()]);
-        // Array<int>
-        self.decl_func("dial_array_new", i8b, &[]);
+        // Array（元素类型由 kind 决定：0=INT 1=RC 2=ATOMIC，见 dial_array.c）
+        self.decl_func("dial_array_new", i8b, &[i64b.into()]);
         self.decl_func("dial_array_push", i8b, &[i8b.into(), i64b.into()]);
         self.decl_func("dial_array_get", i64b, &[i8b.into(), i64b.into()]);
         self.decl_func(
@@ -558,8 +558,35 @@ impl<'ctx> CodeGen<'ctx> {
             self.builder
                 .build_int_z_extend(v.into_int_value(), self.context.i64_type(), "b2i")
                 .unwrap()
+        } else if matches!(
+            *t,
+            Type::String
+                | Type::Bytes
+                | Type::Array(_)
+                | Type::Map
+                | Type::Error
+                | Type::Channel(_)
+                | Type::Opaque(_)
+        ) {
+            // 句柄/指针元素（string / int[] / map / error / channel / 不透明指针）按位转成 i64 存入数组槽
+            self.builder
+                .build_ptr_to_int(v.into_pointer_value(), self.context.i64_type(), "p2i")
+                .unwrap()
         } else {
             v.into_int_value()
+        }
+    }
+
+    /// 数组元素类别 → dial_array_new 的 kind 参数（0=INT 1=RC 2=ATOMIC）。
+    /// 与 runtime/dial_array.c 的 DIAL_ELEM_* 宏保持一致。
+    fn array_elem_kind(&self, t: &Type) -> u64 {
+        match t {
+            Type::Int => 0,
+            Type::Channel(_) => 2,
+            Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::Error | Type::Opaque(_) => {
+                1
+            }
+            _ => 0, // 理论上不可达：check_type_wellformed 已拒绝其它元素类型
         }
     }
 
@@ -1197,6 +1224,66 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
+    /// 递归解析「多维左值」并完成赋值：a[i][j] = v 时，逐层 dial_array_set ，
+    /// 把生成的新容器写回外层容器，直到最外层的变量槽。value 是已求值好的右值；
+    /// value_ty 是其类型（句柄元素按指针处理）。
+    ///
+    /// 实现要点（以 m[i][j] = v 为例）：
+    ///   1. 读出 container = m[i] 当前指向的数组指针；
+    ///   2. new_child = dial_array_set(container, j, to_i64(v))；
+    ///   3. 递归地把 new_child 写回 container 左值本身（即 m[i]），直到根变量。
+    /// 句柄元素在此路径上自动获得正确的 retain / release（由 dial_array_set 按元素类别完成）。
+    #[allow(clippy::too_many_arguments)]
+    fn gen_assign_lvalue(
+        &self,
+        lhs: &Expr,
+        value: BasicValueEnum<'ctx>,
+        value_ty: &Type,
+        function: FunctionValue<'ctx>,
+        scopes: &CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<()> {
+        match lhs {
+            Expr::Var(name) => {
+                let info = scopes
+                    .iter()
+                    .rev()
+                    .find_map(|s| s.get(name).map(|v| v.clone()))
+                    .ok_or_else(|| DialcError::new(format!("未声明的变量 '{}'", name), 0, 0))?;
+                let (_ty, (_m, ptr)) = info;
+                self.builder.build_store(ptr, value).unwrap();
+                Ok(())
+            }
+            Expr::Index(container, idx) => {
+                let carr = self.gen_expr(container, function, scopes, func_values, functions, structs)?;
+                let cty = type_of(container, scopes, functions, structs)?;
+                let ii64 = self.to_i64(
+                    self.gen_expr(idx, function, scopes, func_values, functions, structs)?,
+                    &type_of(idx, scopes, functions, structs)?,
+                );
+                // Fail-Fast：越界写当场 trap（与单层下标赋值一致）
+                if self.checks_enabled() {
+                    let len = self.call_c("dial_array_length", &[carr.into()]);
+                    self.emit_bounds_check(function, len.into_int_value(), ii64);
+                }
+                let v = self.to_i64(value, value_ty);
+                let new_child = self.call_c(
+                    "dial_array_set",
+                    &[carr.into(), ii64.into(), v.into()],
+                );
+                // 把新容器写回 container 左值（递归处理更外层）
+                self.gen_assign_lvalue(container, new_child, &cty, function, scopes, func_values, functions, structs)
+            }
+            _ => Err(DialcError::new(
+                "语义错误：索引赋值目标必须是变量或数组下标",
+                0,
+                0,
+            )),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn gen_stmt(
         &self,
@@ -1324,6 +1411,29 @@ impl<'ctx> CodeGen<'ctx> {
                 line,
                 col,
             } => {
+                // 嵌套下标赋值（a[i][j] = v）：交给递归左值解析，逐层 dial_array_set
+                // 并把新容器写回外层容器，直到最外层变量槽。单层下标赋值（a[i] = v，
+                // a 为变量）仍走下方既有逻辑——保持 int[] 既有测试路径完全不变。
+                if matches!(arr.as_ref(), &Expr::Index(..)) {
+                    // 嵌套下标赋值（a[i][j] = v）：把 arr[index] 拼成完整的左值表达式
+                    // Index(Index(m, 0), 0)，交给递归左值解析。gen_assign_lvalue 会从最外层
+                    // Index 一层层解包：gen_expr(Index(m,0)) 取出内层数组句柄 → dial_array_set
+                    // 写入值 → 再把「可能 COW 更新」的句柄写回外层容器，直到最外层变量槽。
+                    // 单层下标赋值（a[i] = v，a 为变量）走下方既有逻辑——int[] 既有测试路径不变。
+                    let full = Expr::Index(arr.clone(), index.clone());
+                    let vt = type_of(value, scopes, functions, structs)?;
+                    let v = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
+                    return self.gen_assign_lvalue(
+                        &full,
+                        v,
+                        &vt,
+                        function,
+                        scopes,
+                        func_values,
+                        functions,
+                        structs,
+                    );
+                }
                 // arr[i] = v  ->  arr = dial_array_set(arr, i, v)
                 let root = lvalue_root(arr).ok_or_else(|| {
                     DialcError::new("语义错误：数组索引赋值目标必须是变量", *line, *col)
@@ -2086,12 +2196,28 @@ impl<'ctx> CodeGen<'ctx> {
                     self.emit_bounds_check(function, len.into_int_value(), ii64);
                 }
                 let res = self.call_c("dial_array_get", &[aptr.into(), ii64.into()]);
-                // 元素是 int（v0.2）；若将来支持其他元素类型在此分支
-                let _ = elem_t;
-                Ok(res)
+                // int 元素：i64 即值本身；句柄元素：把 i64 位模式还原成 i8*（与 push/set 的 ptr_to_int 对称）
+                if matches!(elem_t, Type::Int) {
+                    Ok(res)
+                } else {
+                    let p = self
+                        .builder
+                        .build_int_to_ptr(res.into_int_value(), self.i8ptr(), "eptr")
+                        .unwrap();
+                    Ok(p.into())
+                }
             }
             Expr::ArrayLit(elems) => {
-                let mut cur = self.call_c("dial_array_new", &[]);
+                let elem_ty = if elems.is_empty() {
+                    Type::Int
+                } else {
+                    type_of(&elems[0], scopes, functions, structs)?
+                };
+                let kind = self.array_elem_kind(&elem_ty);
+                let mut cur = self.call_c(
+                    "dial_array_new",
+                    &[self.context.i64_type().const_int(kind, false).into()],
+                );
                 for el in elems {
                     let ev = self.gen_expr(el, function, scopes, func_values, functions, structs)?;
                     let ei64 = self.to_i64(ev, &type_of(el, scopes, functions, structs)?);
@@ -2664,9 +2790,15 @@ impl<'ctx> CodeGen<'ctx> {
                 let v = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
                 Ok(self.call_c("dial_array_push", &[optr.into(), v.into()]))
             }
-            (Type::Array(_), "get") => {
+            (Type::Array(e), "get") => {
                 let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
-                Ok(self.call_c("dial_array_get", &[optr.into(), i.into()]))
+                let res = self.call_c("dial_array_get", &[optr.into(), i.into()]);
+                if matches!(**e, Type::Int) {
+                    Ok(res)
+                } else {
+                    let p = self.builder.build_int_to_ptr(res.into_int_value(), self.i8ptr(), "eptr").unwrap();
+                    Ok(p.into())
+                }
             }
             (Type::Array(_), "set") => {
                 let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);

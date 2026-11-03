@@ -1,0 +1,6 @@
+// 应当编译失败：bool 是 1 字节标量，无法塞进数组的「8 字节槽位」（int 或句柄指针）。
+// 只在编译期支持 int 与 8 字节句柄，bool[] 必须拒绝。
+fn main(): int {
+    var a: bool[] = [true, false, true];
+    return 0;
+}

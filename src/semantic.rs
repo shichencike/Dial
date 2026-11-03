@@ -175,7 +175,7 @@ pub fn type_of<V>(
             let ot = type_of(obj, scopes, funcs, structs)?;
             match ot {
                 Type::String => string_method_type(method, args, scopes, funcs, structs),
-                Type::Array(_) => array_method_type(method, args, scopes, funcs, structs),
+                Type::Array(elem) => array_method_type(elem.as_ref(), method, args, scopes, funcs, structs),
                 Type::Map => map_method_type(method, args, scopes, funcs, structs),
                 Type::Error => error_method_type(method, args, scopes, funcs, structs),
                 _ => Err(DialcError::new(
@@ -208,21 +208,35 @@ pub fn type_of<V>(
                     0, 0,
                 ));
             }
-            // 元素类型由第一个元素确定，且**只能是 int**（C 侧按 int64 存储，
-            // 若允许 float 会在跨越 FFI 边界时被静默截断，故编译期即拒绝）
-            let mut elem_t = None;
+            // 元素类型由第一个元素确定，必须是「int 或句柄类型」之一（string / int[] / map /
+            // error / channel / 不透明指针）——它们都是 8 字节指针或 int，C 侧按 int64 存储。
+            // 标量非 int（float / bool / byte / char）仍在编译期拒绝：这类元素宽度不足 8 字节，
+            // 塞进 int64 槽会静默截断，故不允许。
+            let mut elem_t: Option<Type> = None;
             for e in elems {
                 let t = type_of(e, scopes, funcs, structs)?;
-                if t != Type::Int {
+                if !is_array_elem_type(&t) {
                     return Err(DialcError::new(
                         format!(
-                            "语义错误：数组字面量元素只支持 int，遇到 {} 元素",
+                            "语义错误：数组字面量元素类型 {} 暂不支持（仅支持 int 与句柄类型 string / int[] / map / error / channel / 不透明指针）",
                             t.name()
                         ),
                         0, 0,
                     ));
                 }
-                elem_t = Some(t);
+                match &elem_t {
+                    Some(et) if *et != t => {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：数组字面量元素类型不一致（{} 与 {}）",
+                                et.name(),
+                                t.name()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    _ => elem_t = Some(t),
+                }
             }
             Ok(Type::Array(Box::new(elem_t.unwrap_or(Type::Int))))
         }
@@ -1321,7 +1335,24 @@ fn error_method_type<V>(
 }
 
 /// 动态数组方法（v0.2 元素为 int）的签名与返回类型。
+/// 可作为动态数组元素的类型：int（标量）或任意 8 字节句柄/指针
+/// （string / int[] / map / error / channel / 不透明指针）。
+/// 标量非 int（float / bool / byte / char）因宽度不足 8 字节、塞进 int64 槽会静默截断，故拒绝。
+fn is_array_elem_type(t: &Type) -> bool {
+    matches!(
+        *t,
+        Type::Int
+            | Type::String
+            | Type::Array(_)
+            | Type::Map
+            | Type::Error
+            | Type::Channel(_)
+            | Type::Opaque(_)
+    )
+}
+
 fn array_method_type<V>(
+    elem: &Type,
     method: &str,
     args: &[Expr],
     scopes: &Scopes<V>,
@@ -1337,13 +1368,16 @@ fn array_method_type<V>(
             Ok(Type::Int)
         }
         "push" => {
-            if args.len() != 1 || arg_t(0)? != Type::Int {
+            if args.len() != 1 || !types_compatible(&arg_t(0)?, elem) {
                 return Err(DialcError::new(
-                    "语义错误：array.push() 需要 1 个 int 参数（元素类型固定为 int）",
+                    format!(
+                        "语义错误：array.push() 需要 1 个 {} 类型参数（元素类型即数组的元素类型）",
+                        elem.name()
+                    ),
                     0, 0,
                 ));
             }
-            Ok(Type::Array(Box::new(Type::Int)))
+            Ok(Type::Array(Box::new(elem.clone())))
         }
         "get" => {
             if args.len() != 1 || arg_t(0)? != Type::Int {
@@ -1352,22 +1386,25 @@ fn array_method_type<V>(
                     0, 0,
                 ));
             }
-            Ok(Type::Int)
+            Ok(elem.clone())
         }
         "set" => {
-            if args.len() != 2 || arg_t(0)? != Type::Int || arg_t(1)? != Type::Int {
+            if args.len() != 2 || arg_t(0)? != Type::Int || !types_compatible(&arg_t(1)?, elem) {
                 return Err(DialcError::new(
-                    "语义错误：array.set(i, v) 需要 int 索引与 int 值 v",
+                    format!(
+                        "语义错误：array.set(i, v) 需要 int 索引与 {} 值 v",
+                        elem.name()
+                    ),
                     0, 0,
                 ));
             }
-            Ok(Type::Array(Box::new(Type::Int)))
+            Ok(Type::Array(Box::new(elem.clone())))
         }
         "clone" => {
             if !args.is_empty() {
                 return Err(DialcError::new("语义错误：array.clone() 不接受参数", 0, 0));
             }
-            Ok(Type::Array(Box::new(Type::Int)))
+            Ok(Type::Array(Box::new(elem.clone())))
         }
         _ => Err(DialcError::new(
             format!("语义错误：array 无方法 '{}'", method),
@@ -1582,12 +1619,12 @@ pub fn analyze(
 fn check_type_wellformed(t: &Type, ctx: &str, line: usize, col: usize) -> Result<()> {
     match t {
         Type::Array(elem) => {
-            if matches!(elem.as_ref(), Type::Int) {
+            if is_array_elem_type(elem) {
                 Ok(())
             } else {
                 Err(DialcError::new(
                     format!(
-                        "语义错误：{} 是 {}[] 类型，但当前版本动态数组元素类型只支持 int",
+                        "语义错误：{} 是 {}[] 类型，但当前版本动态数组元素类型只支持 int 与句柄类型（string / int[] / map / error / channel / 不透明指针）",
                         ctx,
                         elem.as_ref().name()
                     ),
