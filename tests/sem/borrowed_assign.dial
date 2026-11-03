@@ -1,0 +1,20 @@
+// 回归：借来的值（变量 / 数组元素）在赋值给容器时不得被重复释放或泄漏
+// - 嵌套下标写入（m[i][j] = v）内层数组是被外层元素槽借来的指针
+// - 顶层写入的 v 来自变量（borrowed），来源出作用域后不得悬垂
+fn main(): int {
+    var m: int[][] = [[1, 2], [3, 4, 5]];
+    var h: int[] = m[0];            // 共享内层数组（refcount = 2）
+    m[0][0] = 11;
+    print(h.get(0));                // 期望 1：共享者 h 不应被 COW 牵连
+    print(m[0][0]);                 // 期望 11
+
+    // 字符串元素来自变量，写入后变量出作用域
+    var names: string[] = ["a", "b"];
+    {
+        let w: string = "ZZZ";
+        names[0] = w;
+    }
+    print(names.get(0));            // 期望 ZZZ
+    print(names.length());          // 期望 2
+    return 0;
+}

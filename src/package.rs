@@ -352,13 +352,23 @@ fn download_to(url: &str, dest: &Path) -> Result<()> {
         )
     })?;
 
+    let allow_http = http_allowed(url);
+    // 安全约束（与函数文档一致，且堵上「https 被 302 降级到 http」的中间人窗口）：
+    //   - 默认只允许 https；只有本机自测 / 本地镜像（localhost / 127.0.0.1 / ::1）
+    //     才额外放行 http（见 [`http_allowed`]）。
+    //   - `--proto-redir` 限制**重定向**协议：真实主机即便初始是 https，也禁止其
+    //     重定向到 http；本机地址才允许（本地镜像常见 http 重定向）。
+    let proto = if allow_http { "=https,http" } else { "=https" };
+    let proto_redir = if allow_http { "=https,http" } else { "=https" };
     let mut cmd = Command::new(&curl);
     cmd.arg("--fail")
         .arg("--location")
         .arg("--silent")
         .arg("--show-error")
         .arg("--proto")
-        .arg("=https,http")
+        .arg(proto)
+        .arg("--proto-redir")
+        .arg(proto_redir)
         .arg("--tlsv1.2")
         .arg("--connect-timeout")
         .arg("15")

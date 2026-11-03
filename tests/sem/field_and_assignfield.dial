@@ -1,0 +1,20 @@
+// 回归：字段读取（t = p.name）与字段赋值（p.name = s）都必须对堆字段 retain，
+// 否则来源出作用域后字段悬垂（PR bug ③ 的两种变体）
+struct P { name: string }
+
+fn main(): int {
+    var t: string = "";
+    {
+        var p: P = P { name: "x" };
+        t = p.name;
+    }
+    print(t);
+
+    var q: P = P { name: "" };
+    {
+        let s: string = "hello";
+        q.name = s;
+    }
+    print(q.name);
+    return 0;
+}

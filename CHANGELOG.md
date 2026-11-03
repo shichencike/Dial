@@ -58,6 +58,33 @@
   配套地，`dial_string_clone` / `dial_bytes_clone` 改为强制深拷贝产出独立副本
   （否则纯语义下 `b = s.clone()` 会让 `b` 悬垂）。
 
+- **误拒合法程序 + 三处堆悬垂 + `bytes[]` 被拒 + 两处安全缺陷**（本轮一并修复）：
+  - **① `select` 分支里 `move_to` 外层变量被误报「已转移」**：`check_moved_stmt` 的
+    `Stmt::Select` 分支既不做「只查 `arm.chan`」的纪律，反而又对 `arm.body` /
+    `default_body` 递归了一遍 `check_moved_stmt`，与 `check_stmt` 的递归重复——
+    同一条 `move_to` 被检查两次，第二次必然报「变量已转移」。现删掉分支内的递归，
+    只保留对 `arm.chan` 的 `check_moved_expr`（分支体仍由 `check_stmt` 递归各自检查，
+    恰好一次）。
+  - **③ 结构体字面量 / 字段读取 / 字段赋值的堆字段未 `retain`**：`Expr::StructLit`、
+    字段读取（`t = p.name`）、字段赋值（`p.name = s`）在写堆类型字段时只 `store` 不
+    `retain`，字段于是成了来源的**别名**；来源出作用域被 `release` 后字段即悬垂
+    （use-after-free，读到的长度字段可能是垃圾，打印出成片乱码）。现统一引入
+    `retain_if_borrowed`：借来的值（变量 / 字段 / 数组元素 / `get`·`at`）`retain` 一份，
+    自带所有权的值（字面量 / `clone` 等）直接接管。
+  - **③ 的同族泄漏**：`a[i] = <字面量>`、`a.push(<字面量>)`、`a.set(i, <字面量>)`、
+    数组字面量元素在循环里逐次泄漏一份引用（容器 `retain` 了元素，字面量自带的
+    那一份所有权却没移交）。现引入 `settle_fresh_value`：自带所有权的值在容器接管后
+    归还其临时所有权，借来的值则不释放——嵌套下标赋值 `m[i][j] = v` 也按同一规则结算。
+  - **④ `bytes[]` 被 `is_array_elem_type` 拒绝**：语义层漏收 `Type::Bytes`，但 codegen
+    的 `array_elem_kind` 早已把 `Bytes` 归为 kind=1（RC），两层不一致。现补上
+    `Type::Bytes`（`dial_bytes_retain` / `release` 内部即 `dial_rc_*`，完全兼容）。
+  - **⑤ IR 验证失败不中止编译**：`module.verify()` 失败只 `eprintln` 后继续
+    `emit_object`，可能产出无效 IR 或带未定义行为的机器码。现改为直接以易读文字
+    `return Err(...)` 中止。
+  - **⑥ `curl --proto '=https,http'` 与「只允许 https」声明矛盾**：https URL 可被
+    302 重定向到 http，中间人攻击窗口重新打开。现 `--proto` 仅放行 https（本机地址
+    经 `http_allowed` 判定才加 http），并新增 `--proto-redir` 限制重定向协议。
+
 ### Added（新增）
 
 - **测试组 N：内存上界 + 所有权语义回归**（`tests/mem/`）。
@@ -65,6 +92,19 @@
     一旦 COW 误判复发（需 TB 级内存）立刻被上限打爆。
   - `array_cow_semantics.dial`：逐条钉死 `clone` 独立 / COW 隔离 / 嵌套赋值 /
     句柄元素数组四条所有权语义。
+- **测试组 O：所有权 / 语义回归**（`tests/sem/`）：钉死「编译器应接受并正确运行」的合法
+  程序——`select` 里 `move_to` 外层变量（`select_move_to`）、`StructLit` / 字段读取 /
+  字段赋值的堆字段 retain（`structlit_heap_field` / `field_and_assignfield`）、
+  `bytes[]` 不被拒（`bytes_array`）、借来值写入容器不重复释放（`borrowed_assign`）。
+- **一键安装脚本彻底重写**（`tools/install-dial.sh` / `install-dial.ps1`）：
+  - 版本**不再硬编码**：优先从已装好的 `dialc` 读出真实版本号，bootstrap 才回退到内置
+    默认；配套件（标准库 / 插件）一律按该版本推导——**消灭版本不同步**。
+  - VS Code 插件按 **Release 资产清单**解析真实文件名，不再依赖插件自身 semver 与
+    编译器版本号对齐（旧版写死 `dial-0.98.1.vsix`，每次都 404）。
+  - 下载失败**可见真实原因**（旧版 `2>/dev/null` 把 curl 报错吞了）。
+  - `install-dial.sh` 支持 bash / zsh / fish / profile 四种 shell 的 PATH 持久化，并提示
+    当前会话用法；新增 `--help` / `--version` / `--uninstall`，解压前校验压缩包完整性，
+    重跑幂等。
 
 ### Changed（变更）
 

@@ -1343,6 +1343,7 @@ fn is_array_elem_type(t: &Type) -> bool {
         *t,
         Type::Int
             | Type::String
+            | Type::Bytes
             | Type::Array(_)
             | Type::Map
             | Type::Error
@@ -1755,21 +1756,19 @@ fn check_moved_stmt(
         Stmt::Return(Some(e), ..) | Stmt::Throw(e, ..) | Stmt::Expr(e, ..) => {
             check_moved_expr(e, scopes, funcs, structs, line, col)
         }
-        // select（v0.91）：case 里的通道表达式与各分支体都要受所有权约束。
-        // 分支体不在 Stmt 枚举里（是 Vec<Stmt>），因此必须手动递归。
+        // select（v0.91）：case 里的通道表达式要受所有权约束（arm.chan 是表达式，
+        // 需检查它引用的通道是否已被转移）。
+        //
+        // 分支体**不在这里下探**——它们是嵌套语句块，由 check_stmt 的 Select 分支
+        // 递归时各自检查（check_stmt_at -> check_moved_stmt），恰好一次。
+        // 若这里再递归一遍，同一条 move_to 会被检查两次：第一次通过并标记 moved，
+        // 第二次立刻报「变量已转移，无法使用」——一个完全合法的程序被误拒
+        // （例如 select { case recv(ch) as v { move_to(s, ch); } } 只写了一次 move_to）。
         Stmt::Select {
-            arms, default_body, ..
+            arms, ..
         } => {
             for arm in arms {
                 check_moved_expr(&arm.chan, scopes, funcs, structs, line, col)?;
-                for s in &arm.body {
-                    check_moved_stmt(s, scopes, funcs, structs)?;
-                }
-            }
-            if let Some(db) = default_body {
-                for s in db {
-                    check_moved_stmt(s, scopes, funcs, structs)?;
-                }
             }
             Ok(())
         }

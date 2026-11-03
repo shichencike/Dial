@@ -1,0 +1,21 @@
+// 回归：select 分支里的 move_to 外层变量不得被误报「已转移」
+// （check_moved_stmt 的 Select 分支曾重复下探，导致同一 move_to 被检查两次）
+// 同时验证：select 真正能收发并走到 move_to 分支。
+fn sender(ch: channel<string>): void {
+    var m: string = "ping";
+    move_to(m, ch);
+}
+
+fn main(): int {
+    var s: string = "hello";
+    let ch: channel<string> = channel(4);
+    let t: thread = spawn(sender, ch);
+    select {
+        case recv(ch) as v {
+            move_to(s, ch);   // bug ①：曾被误报「已转移」
+        }
+    }
+    join(t);
+    print("ok");
+    return 0;
+}

@@ -173,7 +173,14 @@ pub fn compile(
         eprintln!("{}", cg.module.print_to_string().to_string());
     }
     if let Err(e) = cg.module.verify() {
-        eprintln!("[dialc] IR 验证失败: {}", e);
+        // IR 验证失败意味着 codegen 产出了**无效**的 LLVM IR：继续 emit 要么让 LLVM
+        // 拒绝（报一条更晦涩、更难定位的错），要么干脆 emit 出带未定义行为的机器码。
+        // 与其把问题推到下游，这里直接以易读文字中止编译。
+        return Err(DialcError::new(
+            format!("[dialc] IR 验证失败: {}", e),
+            0,
+            0,
+        ));
     }
     cg.emit_object(out_path, opts)?;
     Ok(())
@@ -861,6 +868,29 @@ impl<'ctx> CodeGen<'ctx> {
         )
     }
 
+    /// 把**借来的**堆值存进更长寿的位置前，先 retain 一份，
+    /// 让目标位置成为该对象的一个持有者。
+    ///
+    /// 少了这一步，存进去的只是一个**别名**：来源（变量 / 结构体 / 数组）一旦被释放，
+    /// 目标位置就悬垂——读出来的是已归还给分配器的内存（use-after-free，
+    /// 且读到的长度字段可能是垃圾，从而打印出成片乱码）。
+    fn retain_if_borrowed(&self, e: &Expr, ty: &Type, val: BasicValueEnum<'ctx>) {
+        if Self::is_heap_type(ty) && yields_borrowed_ref(e) {
+            self.retain(ty, val);
+        }
+    }
+
+    /// runtime 在把元素写进容器时会 retain 一份（容器成为该元素的持有者）。
+    ///
+    /// 若传入的值**自带所有权**（字面量、构造调用等），runtime 的 retain 就多算了一份——
+    /// 那一份本应直接移交容器，故此处归还；否则每写一次就泄漏一个引用
+    /// （`a.push("字面量")` / `a[0] = "字面量"` 在循环里会线性吃内存）。
+    fn settle_fresh_value(&self, e: &Expr, ty: &Type, val: BasicValueEnum<'ctx>) {
+        if Self::is_heap_type(ty) && !yields_borrowed_ref(e) {
+            self.release_value(ty, val);
+        }
+    }
+
     /// 在函数的 **entry 块** 里分配栈槽。
     ///
     /// 这是必须的，而非优化偏好：局部变量声明可能出现在循环体内，
@@ -1246,6 +1276,7 @@ impl<'ctx> CodeGen<'ctx> {
         lhs: &Expr,
         value: BasicValueEnum<'ctx>,
         value_ty: &Type,
+        is_borrowed: bool,
         function: FunctionValue<'ctx>,
         scopes: &CgScopes<'ctx>,
         func_values: &HashMap<String, FunctionValue<'ctx>>,
@@ -1290,15 +1321,21 @@ impl<'ctx> CodeGen<'ctx> {
                     "dial_array_set_borrowed",
                     &[carr.into(), ii64.into(), v.into()],
                 );
-                // 把新容器写回 container 左值（递归处理更外层）
-                self.gen_assign_lvalue(container, new_child, &cty, function, scopes, func_values, functions, structs)?;
+                // 把新容器写回 container 左值（递归处理更外层）。new_child 是运行时
+                // 返回的新对象，恒为自带所有权，故 is_borrowed=false。
+                self.gen_assign_lvalue(container, new_child, &cty, false, function, scopes, func_values, functions, structs)?;
                 // 所有权结算：本层是**消费者**——value 的那一份所有权是上一层交给我们的。
                 // 元素替换（dial_array_set_borrowed 内部）对 value 额外 retain 了一份，
-                // 归 container 的元素槽所有；所以我们手里这一份必须释放。
+                // 归 container 的元素槽所有；所以我们手里这一份必须结算。
                 //
-                // 对照：Var 分支是「转移」（槽位直接接管 value 的那一份），故它不释放 value，
-                // 只释放槽位原先持有的旧引用。两者不可互换——放错位置就是双重释放或泄漏。
-                self.release_value(value_ty, value);
+                // 用与单层赋值一致的规则：借来的值（变量 / 字段 / 数组元素）来源仍持有，
+                // 不得再释放；自带所有权的值（字面量 / clone 等）应把临时所有权移交数组。
+                // （此前这里无条件 release，会把「变量元素」的引用计数多减一份。）
+                // `is_borrowed` 由顶层调用按原始 Expr 判定；本层递归传入的 new_child
+                // 是运行时返回的新对象，恒为自带所有权（borrowed=false）。
+                if !is_borrowed {
+                    self.release_value(value_ty, value);
+                }
                 Ok(())
             }
             _ => Err(DialcError::new(
@@ -1332,11 +1369,12 @@ impl<'ctx> CodeGen<'ctx> {
                 let ptr = self.alloca_in_entry(function, llvm_ty, name);
                 let val = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
                 let stored = self.coerce(val, &type_of(value, scopes, functions, structs)?, ty);
-                // 绑定策略：Var 复制且非移动 -> retain（共享）；其余（构造/方法/call）-> 直接取得所有权
+                // 绑定策略：借用来的值 -> retain（成为新持有者）；自带所有权的值 -> 直接取得所有权。
+                // 移动语义（move_hint）下所有权本就转移，不 retain。
+                if !move_hint {
+                    self.retain_if_borrowed(value, ty, stored);
+                }
                 if let Expr::Var(src) = value {
-                    if Self::is_heap_type(ty) && !move_hint {
-                        self.retain(ty, stored);
-                    }
                     if *move_hint {
                         self.mark_moved(scopes, src);
                     }
@@ -1344,10 +1382,10 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_store(ptr, stored).unwrap();
                 // 结构体：值拷贝已把堆字段的指针复制过来，需要对称地给这些字段 +1，
                 // 否则本变量在作用域结束时的 release 会与源变量互相踩踏。
-                if let Expr::Var(_) = value {
-                    if matches!(ty, Type::Struct(_)) && !move_hint {
-                        self.retain_struct_fields(ty, ptr, structs);
-                    }
+                // 结构体字面量例外：它的字段在构造时就已各自 retain 过
+                // （见 Expr::StructLit），这里再 retain 一遍就多算了一份。
+                if !move_hint && yields_borrowed_ref(value) && matches!(ty, Type::Struct(_)) {
+                    self.retain_struct_fields(ty, ptr, structs);
                 }
                 scopes.last_mut().unwrap().insert(name.clone(), (ty.clone(), (*mutable, ptr)));
                 Ok(())
@@ -1377,19 +1415,15 @@ impl<'ctx> CodeGen<'ctx> {
                     let llvm_ty = self.dialc_type_to_llvm(&vty);
                     let tmp = self.alloca_in_entry(function, llvm_ty, "asgtmp");
                     self.builder.build_store(tmp, stored).unwrap();
-                    if let Expr::Var(_) = value {
-                        if !move_hint {
-                            self.retain_struct_fields(&vty, tmp, structs);
-                        }
+                    if yields_borrowed_ref(value) && !move_hint {
+                        self.retain_struct_fields(&vty, tmp, structs);
                     }
                     self.release_struct_fields(&vty, ptr, structs);
                     let v = self.builder.build_load(llvm_ty, tmp, "asgval").unwrap();
                     self.builder.build_store(ptr, v).unwrap();
                 } else {
-                    if let Expr::Var(_) = value {
-                        if Self::is_heap_type(&vty) && !move_hint {
-                            self.retain(&vty, stored);
-                        }
+                    if !move_hint {
+                        self.retain_if_borrowed(value, &vty, stored);
                     }
                     if Self::is_heap_type(&vty) {
                         self.release(&vty, ptr);
@@ -1426,6 +1460,10 @@ impl<'ctx> CodeGen<'ctx> {
                 }
                 let val = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
                 let stored = self.coerce(val, &type_of(value, scopes, functions, structs)?, &fty);
+                // 字段成为新值的持有者：借来的值必须 retain 一份。
+                // 少了这一步，字段只是来源的别名——来源所在的块一结束，
+                // 字段就悬垂（读出来是已释放内存）。
+                self.retain_if_borrowed(value, &fty, stored);
                 self.builder.build_store(fgep, stored).unwrap();
                 Ok(())
             }
@@ -1452,6 +1490,7 @@ impl<'ctx> CodeGen<'ctx> {
                         &full,
                         v,
                         &vt,
+                        yields_borrowed_ref(value),
                         function,
                         scopes,
                         func_values,
@@ -1473,7 +1512,8 @@ impl<'ctx> CodeGen<'ctx> {
                 let idx = self.gen_expr(index, function, scopes, func_values, functions, structs)?;
                 let idxi64 = self.to_i64(idx, &type_of(index, scopes, functions, structs)?);
                 let val = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
-                let vali64 = self.to_i64(val, &type_of(value, scopes, functions, structs)?);
+                let vty = type_of(value, scopes, functions, structs)?;
+                let vali64 = self.to_i64(val, &vty);
                 // Fail-Fast：越界写是 C 里最阴险的 Bug（悄悄改坏相邻数据），当场 trap。
                 // ReleaseFast 下这段（含这次 length 调用）被整段消除，零开销。
                 if self.checks_enabled() {
@@ -1490,6 +1530,12 @@ impl<'ctx> CodeGen<'ctx> {
                 // 两种情形下调用方都**不得**再对旧指针 release，否则分别造成
                 // 悬垂指针与双重释放。故此处只做写回。
                 self.builder.build_store(arr_ptr, newp).unwrap();
+                // 元素归属结算：set 已为元素 retain 一份（数组成为该元素的持有者）。
+                //   - 借来的值（变量 / 字段 / 数组元素）：来源仍持有，不得再释放；
+                //   - 自带所有权的值（字面量 / clone 等）：本语句的临时所有权应当
+                //     移交给数组，故此处归还——否则每个字面量元素泄漏一份引用
+                //     （`a[i] = "字面量"`、`a.push("字面量")` 在循环里线性吃内存）。
+                self.settle_fresh_value(value, &vty, val);
                 Ok(())
             }
             Stmt::If {
@@ -2245,8 +2291,12 @@ impl<'ctx> CodeGen<'ctx> {
                 );
                 for el in elems {
                     let ev = self.gen_expr(el, function, scopes, func_values, functions, structs)?;
-                    let ei64 = self.to_i64(ev, &type_of(el, scopes, functions, structs)?);
+                    let ety = type_of(el, scopes, functions, structs)?;
+                    let ei64 = self.to_i64(ev, &ety);
                     cur = self.call_c("dial_array_push", &[cur.into(), ei64.into()]);
+                    // push 会为元素 retain 一份（数组成为持有者）。字面量自带的那一份
+                    // 所有权本应直接移交数组，故此处归还——否则每个字面量元素泄漏一份引用。
+                    self.settle_fresh_value(el, &ety, ev);
                 }
                 Ok(cur)
             }
@@ -2275,6 +2325,12 @@ impl<'ctx> CodeGen<'ctx> {
                         .unwrap();
                     let fv = self.gen_expr(fe, function, scopes, func_values, functions, structs)?;
                     let stored = self.coerce(fv, &type_of(fe, scopes, functions, structs)?, &fty);
+                    // 堆类型字段：结构体成为该对象的一个持有者。
+                    // 借来的值（来自变量 / 字段 / 数组元素）必须 retain 一份——
+                    // 否则字段只是来源的别名，来源出作用域被 release 后字段即悬垂
+                    // （use-after-free：读到的长度字段是垃圾，会打印出成片乱码）。
+                    // 自带所有权的值（字面量等）直接接管，不得再 retain。
+                    self.retain_if_borrowed(fe, &fty, stored);
                     self.builder.build_store(gep, stored).unwrap();
                 }
                 Ok(self.builder.build_load(sty, ptr, "sval").unwrap())
@@ -2812,8 +2868,14 @@ impl<'ctx> CodeGen<'ctx> {
             }
             (Type::Array(_), "length") => Ok(self.call_c("dial_array_length", &[optr.into()])),
             (Type::Array(_), "push") => {
-                let v = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
-                Ok(self.call_c("dial_array_push", &[optr.into(), v.into()]))
+                let elem_ty = type_of(&args[0], scopes, functions, structs)?;
+                let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                let v_i64 = self.to_i64(v, &elem_ty);
+                let res = self.call_c("dial_array_push", &[optr.into(), v_i64.into()]);
+                // 元素归属结算：push 已为元素 retain 一份，借来的值不得再释放、
+                // 自带所有权的值（字面量等）应把临时所有权移交给数组。
+                self.settle_fresh_value(&args[0], &elem_ty, v);
+                Ok(res)
             }
             (Type::Array(e), "get") => {
                 let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
@@ -2827,8 +2889,14 @@ impl<'ctx> CodeGen<'ctx> {
             }
             (Type::Array(_), "set") => {
                 let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
-                let v = self.to_i64(self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?, &type_of(&args[1], scopes, functions, structs)?);
-                Ok(self.call_c("dial_array_set", &[optr.into(), i.into(), v.into()]))
+                let elem_ty = type_of(&args[1], scopes, functions, structs)?;
+                let v = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                let v_i64 = self.to_i64(v, &elem_ty);
+                let res = self.call_c("dial_array_set", &[optr.into(), i.into(), v_i64.into()]);
+                // 元素归属结算：set 已为元素 retain 一份，借来的值不得再释放、
+                // 自带所有权的值（字面量等）应把临时所有权移交给数组。
+                self.settle_fresh_value(&args[1], &elem_ty, v);
+                Ok(res)
             }
             (Type::Array(_), "clone") => Ok(self.call_c("dial_array_clone", &[optr.into()])),
             (Type::Map, "put") => {
@@ -3212,6 +3280,22 @@ fn f_ret_is_void(function: FunctionValue) -> bool {
 }
 
 /// 求 lvalue 表达式根部的变量名（用于数组索引赋值等）。
+/// 表达式产出的堆引用是「借来的」还是「自带所有权」的？
+///
+/// - **借来**：所有权在别处——变量槽、结构体字段、数组元素、容器的取值方法
+///   （`get` / `at`）。借用方把它存进别处时**必须 retain 一份**，
+///   否则来源一被释放，目标位置就悬垂（use-after-free）。
+/// - **自带所有权**：字面量、返回新对象的调用（`clone` / `substring` / `concat` /
+///   `new_map` / `channel`）、结构体字面量。借用方**直接接管**即可，
+///   不得再 retain（那会多算一份，导致泄漏）。
+fn yields_borrowed_ref(e: &Expr) -> bool {
+    match e {
+        Expr::Var(_) | Expr::Field(..) | Expr::Index(..) => true,
+        Expr::Method(_, m, _) => matches!(m.as_str(), "get" | "at"),
+        _ => false,
+    }
+}
+
 fn lvalue_root(e: &Expr) -> Option<&str> {
     match e {
         Expr::Var(n) => Some(n),

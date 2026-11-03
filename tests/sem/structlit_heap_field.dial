@@ -1,0 +1,13 @@
+// 回归：结构体字面量的堆字段（来自变量）必须 retain，否则来源出作用域后悬垂
+// （PR bug ③：StructLit 只 store 不 retain）
+struct Person { name: string }
+
+fn main(): int {
+    var p: Person = Person { name: "x" };
+    {
+        let s: string = "hello";
+        p = Person { name: s };
+    }
+    print(p.name);
+    return 0;
+}

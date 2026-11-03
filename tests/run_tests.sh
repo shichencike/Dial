@@ -432,6 +432,32 @@ else
 fi
 
 echo
+echo "== O) 所有权 / 语义回归（v0.99.1 修复：误拒合法程序 + 堆字段悬垂 + bytes[] 拒绝） =="
+# 这批用例钉死「编译器应接受并正确运行」的合法程序，正好覆盖此前被改坏的几条语义：
+#   ① select 分支里 move_to 外层变量被误报「已转移」（重复下探）；
+#   ③ StructLit / 字段读取 / 字段赋值的堆字段未 retain → 来源出作用域后悬垂（use-after-free）；
+#   ④ is_array_elem_type 漏掉 Type::Bytes → bytes[] 被拒绝；
+#   借来的值（变量 / 数组元素）在写入容器时不得被重复释放或泄漏。
+for src in tests/sem/*.dial; do
+    name=$(basename "$src" .dial)
+    exp="tests/sem/${name}.expected"
+    bin="${TMP}/sem_${name}"
+    if ! [ -f "$exp" ]; then echo "  ⚠️  跳过 $name（缺少黄金文件 $exp）"; continue; fi
+    if ! "$DIALC" build "$src" -o "$bin" >"${TMP}/sembuild.log" 2>&1; then
+        echo "  ❌ $name 编译失败"; sed 's/^/       /' "${TMP}/sembuild.log"; fail=1; continue
+    fi
+    # 运行时同样不能崩（堆悬垂会以 segfault / 乱码 / 非零退出码暴露）
+    if ! timeout 30 "$bin" >"${TMP}/semout.txt" 2>&1; then
+        echo "  ❌ $name 运行失败（rc=$?，可能为堆悬垂）"; fail=1; continue
+    fi
+    if diff -u "$exp" "${TMP}/semout.txt" >/dev/null 2>&1; then
+        echo "  ✅ $name 编译 + 运行 + 输出一致"
+    else
+        echo "  ❌ $name 输出不一致"; diff -u "$exp" "${TMP}/semout.txt"; fail=1
+    fi
+done
+
+echo
 if [ $fail -eq 0 ]; then
     echo "== 全部测试通过 ✅ =="
 else

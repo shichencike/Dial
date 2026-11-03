@@ -1,0 +1,8 @@
+// 回归：bytes 应可作为数组元素（is_array_elem_type 曾漏掉 Type::Bytes）
+fn main(): int {
+    var b: bytes[] = [bytes_from_string("ab"), bytes_from_string("cd")];
+    b.push(bytes_from_string("ef"));
+    print(b.length());
+    print(bytes_length(b.get(0)));
+    return 0;
+}
