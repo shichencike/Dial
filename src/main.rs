@@ -315,6 +315,15 @@ fn main() {
         .join(".dialc_build")
         .join(format!("safety-{}", safety.as_c_macro()));
     let bc_path = build_dir.join(obj_path.file_stem().unwrap()).with_extension("bc");
+    // --fast（ReleaseFast）会把 Dial 代码导出为 LLVM bitcode（.bc）供 LTO 重排；
+    // 必须先把父目录建好，否则 write_bitcode_to_path 在全新检出（无残留 .dialc_build/）时
+    // 会因目录不存在而静默失败，进而让所有 --fast 构建在 CI 上崩溃。
+    if fast {
+        if let Err(e) = fs::create_dir_all(&build_dir) {
+            eprintln!("创建 bitcode 构建目录失败: {}", e);
+            std::process::exit(1);
+        }
+    }
     let cg_opts = codegen::CgOpts {
         safety,
         aggressive: fast,
