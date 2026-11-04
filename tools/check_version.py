@@ -45,7 +45,14 @@ def cargo_version() -> tuple[str, str]:
     if len(parts) >= 3 and parts[2] != "0":
         display = "v" + full            # 补丁发布：显示完整三位
     else:
-        display = "v" + ".".join(parts[:2])  # 常规发布：只取主.次
+        # v1.00 里程碑：Cargo 的 semver 不允许前导零（"1.00.0" 非法），故存储为
+        # "1.0.0"、对外按用户指定的里程碑名显示 "v1.00"（次版本补零到两位）。
+        # 主版本仍为 0 时保持原样（v0.98 / v0.99 ...），不补零。
+        major = parts[0]
+        minor = parts[1] if len(parts) >= 2 else "0"
+        if int(major) >= 1:
+            minor = minor.zfill(2)
+        display = "v" + major + "." + minor
     return display, full
 
 

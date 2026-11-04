@@ -25,6 +25,13 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
 <li><a href="#更新日志--changelog">更新日志 / Changelog</a><ul>
+<li><a href="#v100--2026-11-04">[v1.00] — 2026-11-04</a><ul>
+<li><a href="#added五组语言特性">Added（五组语言特性）</a></li>
+<li><a href="#fixed">Fixed</a></li>
+<li><a href="#changed">Changed</a></li>
+<li><a href="#testing">Testing</a></li>
+</ul>
+</li>
 <li><a href="#v0991--2026-11-03">[v0.99.1] — 2026-11-03</a><ul>
 <li><a href="#fixed修复">Fixed（修复）</a></li>
 <li><a href="#added新增">Added（新增）</a></li>
@@ -206,6 +213,69 @@
 <p>详见 <a href="README.md#23-版本号规则">README §23</a>。</p>
 </blockquote>
 <hr />
+<h2 id="v100--2026-11-04">[v1.00] — 2026-11-04</h2>
+<p><strong>里程碑版本</strong>：从 <code>v0.99.1</code> 直接跳到 <code>v1.00</code>（用户明确要求跳版，见 §23 第 3 条）。
+本版是<strong>语言特性补齐</strong>发布：把「正常程序需要、此前只能模拟或绕路」的能力一次性补齐，共五组。
+所有改动都守住项目铁律：<strong>不引入 GC</strong>、不提供裸指针 / 地址取值 / 指针算术、
+不支持运算符重载、不支持一等函数 / 闭包 / 函数指针、ARC 所有权语义不退化、
+<strong>零隐式转换铁律保持</strong>（<code>1 + 2.0</code> 仍编译失败）。</p>
+<h3 id="added五组语言特性">Added（五组语言特性）</h3>
+<p><strong>① 运算符与字面量</strong>
+- 复合赋值 <code>+= -= *= /= %=</code>、自增自减 <code>++</code> / <code>--</code>（编译期脱糖为普通赋值）；
+- 位运算 <code>&amp; | ^ ~ &lt;&lt; &gt;&gt;</code>（仅 <code>int</code>）；
+- 进制字面量 <code>0x</code> / <code>0b</code> / <code>0o</code>、数字分隔符 <code>_</code>；
+- 三元表达式 <code>cond ? a : b</code>（<code>cond</code> 必须是 <code>bool</code>，两分支类型必须相同）。
+- 正向示例：<code>examples/op_demo.dial</code>。</p>
+<p><strong>② 迭代与控制流</strong>
+- <code>for (i in a..b step s)</code> 步长循环（<code>step</code> 必须是 <code>int</code> 且为正）；
+- <code>for (v in arr)</code> 数组遍历、<code>for (k, v in m)</code> 哈希表遍历、<code>for (v in s)</code> 集合遍历
+  （集合遍历编译期自动插入键集快照并纳入函数出口释放）；
+- <code>match</code> 模式匹配（int / bool / char / string 模式，必须有 <code>_</code> 通配分支）；
+- <code>defer</code> 延迟语句（LIFO，覆盖正常落穿 / <code>return</code> / <code>break</code> / <code>continue</code> / <code>throw</code>）；
+- <code>do { ... } while (cond);</code>。
+- 正向示例：<code>examples/control_demo.dial</code>、<code>defer_demo.dial</code>、<code>control_edge_demo.dial</code>。</p>
+<p><strong>③ 函数与内建</strong>
+- 默认参数（带默认值的形参必须连续位于末尾；在调用点补齐，不改变 LLVM 函数签名）；
+- <code>print</code> / <code>print_raw</code> 改为 variadic；
+- 内建 <code>assert</code> / <code>panic</code> / <code>exit</code> / <code>min</code> / <code>max</code> / <code>abs</code> / <code>sqrt</code> / <code>pow</code> /
+  <code>floor</code> / <code>ceil</code> / <code>round</code>（浮点数学函数最终链接加入 <code>-lm</code>）。
+- 正向示例：<code>examples/builtin_demo.dial</code>。</p>
+<p><strong>④ 表达力增强</strong>
+- 字符串插值 <code>"n=${n}"</code>（逐段转字符串 + concat；插值表达式只允许可转字符串的类型）；
+- 文件级常量 <code>const NAME: T = 字面量;</code>（编译期内联，禁止遮蔽与重新赋值）。
+- 正向示例：<code>examples/interp_const_demo.dial</code>。</p>
+<p><strong>⑤ 重型类型与容器</strong>
+- <code>enum</code> int-backed 名义类型（变体 <code>Name.Variant</code> 编译期内联为整数字面量，默认值 0 起递增，可显式指定）；
+- 数组切片 <code>arr[from..to]</code>（半开区间；句柄元素逐个 retain，与原数组 ARC 独立）；
+- <code>set&lt;int&gt;</code> 集合（<code>new_set()</code> / <code>add</code> / <code>contains</code> / <code>remove</code> / <code>size</code> / <code>values</code>）；
+- <strong>泛型 <code>map&lt;K,V&gt;</code></strong>（独立 C 运行时 <code>stdlib/dial_kvmap.c</code>）：
+  - 键支持 <code>int</code> / <code>float</code> / <code>bool</code> / <code>char</code> / <code>byte</code> / <code>string</code>（string 键按条目 ARC 管理）；
+  - 值支持标量 <code>int</code> / <code>float</code> / <code>bool</code> / <code>char</code> / <code>byte</code>（float 以 IEEE754 位模式存储，绝不丢小数）；
+  - 方法 <code>put</code> / <code>get</code> / <code>contains</code> / <code>remove</code> / <code>size</code> / <code>keys</code> / <code>values</code>；
+  - COW 克隆、扩容重哈希、墓碑法删除，全部逐条目 retain / release。
+- 正向示例：<code>examples/container_demo.dial</code>、<code>set_demo.dial</code>、<code>kvmap_demo.dial</code>。</p>
+<p><strong>已知边界</strong>：泛型 map 的 <code>V</code> 暂不开放 <code>string</code>（<code>get</code> 未命中时的默认对象会带来所有权移交歧义）；
+<code>map.values()</code> 当前只支持 <code>V = int</code>。两点计划在后续版本补齐。</p>
+<h3 id="fixed">Fixed</h3>
+<ul>
+<li><strong>开放寻址哈希表删除采用「左移紧凑」导致键不可达</strong>：<code>dial_map_remove</code> 与新
+  <code>dial_kvmap_remove</code> 改为<strong>墓碑标记 + 负载重建</strong>。2 万键压测里删除 1 万个后 <code>size</code>
+  曾只剩 13082（应为 10000），修复后正确；<code>set&lt;int&gt;</code> 与 <code>for (k, v in m)</code> 同时受益。</li>
+<li><code>panic</code> 前 stdout 缓冲内容丢失：<code>dial_panic()</code> 增加 <code>fflush(NULL)</code>。</li>
+</ul>
+<h3 id="changed">Changed</h3>
+<ul>
+<li><code>print</code> 中间参数改为原样输出、最后一个参数补换行；<code>print_raw</code> 全部参数原样输出。</li>
+<li>trap 接口补齐 <code>dial_assert_fail</code> / <code>dial_exit</code> / <code>dial_panic</code>；<code>dial_map_keys()</code> 供迭代使用。</li>
+<li>LSP 语义 token / 固定文本 / 符号索引补齐所有新增关键字、运算符与语句变体。</li>
+</ul>
+<h3 id="testing">Testing</h3>
+<ul>
+<li>新增 8 个正向示例 + 黄金文件、30+ 个负向用例（<code>tests/bad/</code>）锁定语义边界；</li>
+<li><code>bash tests/run_tests.sh</code> A–O 全套通过；</li>
+<li>2 万键 ARC 压测（泛型 map / set）峰值内存约 4.4 MB / 2.4 MB，无泄漏、无 Fail-Fast。</li>
+</ul>
+<hr />
 <h2 id="v0991--2026-11-03">[v0.99.1] — 2026-11-03</h2>
 <p>本版是 <strong>v0.99 的修复发布（补丁位）</strong>：只修缺陷，不含任何新特性，
 所有基于 v0.99 的程序<strong>无需改动即可运行</strong>（行为完全一致）。</p>
@@ -236,11 +306,41 @@
   处理，会与外层的元素替换重复释放同一份引用。现新增 <code>dial_array_set_borrowed</code>
   （不消耗被借的引用，改为交出「一份新拥有」的引用），并在 codegen 中按
   「消费者释放、变量槽转移」的规则结算。</li>
-<li><strong><code>dial_rc_clone</code> 恢复纯粹语义</strong>：唯一持有者时原样返回、<strong>不再 +1</strong>；
+<li>
+<p><strong><code>dial_rc_clone</code> 恢复纯粹语义</strong>：唯一持有者时原样返回、<strong>不再 +1</strong>；
   多持有者时深拷贝。过去那个 <code>+1</code> 让 <code>clone()</code> 只能靠「别名 + 多一个计数」实现，
   是元素引用计数泄漏与 COW 守卫误判的共同源头。
   配套地，<code>dial_string_clone</code> / <code>dial_bytes_clone</code> 改为强制深拷贝产出独立副本
-  （否则纯语义下 <code>b = s.clone()</code> 会让 <code>b</code> 悬垂）。</li>
+  （否则纯语义下 <code>b = s.clone()</code> 会让 <code>b</code> 悬垂）。</p>
+</li>
+<li>
+<p><strong>误拒合法程序 + 三处堆悬垂 + <code>bytes[]</code> 被拒 + 两处安全缺陷</strong>（本轮一并修复）：</p>
+</li>
+<li><strong>① <code>select</code> 分支里 <code>move_to</code> 外层变量被误报「已转移」</strong>：<code>check_moved_stmt</code> 的
+    <code>Stmt::Select</code> 分支既不做「只查 <code>arm.chan</code>」的纪律，反而又对 <code>arm.body</code> /
+    <code>default_body</code> 递归了一遍 <code>check_moved_stmt</code>，与 <code>check_stmt</code> 的递归重复——
+    同一条 <code>move_to</code> 被检查两次，第二次必然报「变量已转移」。现删掉分支内的递归，
+    只保留对 <code>arm.chan</code> 的 <code>check_moved_expr</code>（分支体仍由 <code>check_stmt</code> 递归各自检查，
+    恰好一次）。</li>
+<li><strong>③ 结构体字面量 / 字段读取 / 字段赋值的堆字段未 <code>retain</code></strong>：<code>Expr::StructLit</code>、
+    字段读取（<code>t = p.name</code>）、字段赋值（<code>p.name = s</code>）在写堆类型字段时只 <code>store</code> 不
+    <code>retain</code>，字段于是成了来源的<strong>别名</strong>；来源出作用域被 <code>release</code> 后字段即悬垂
+    （use-after-free，读到的长度字段可能是垃圾，打印出成片乱码）。现统一引入
+    <code>retain_if_borrowed</code>：借来的值（变量 / 字段 / 数组元素 / <code>get</code>·<code>at</code>）<code>retain</code> 一份，
+    自带所有权的值（字面量 / <code>clone</code> 等）直接接管。</li>
+<li><strong>③ 的同族泄漏</strong>：<code>a[i] = &lt;字面量&gt;</code>、<code>a.push(&lt;字面量&gt;)</code>、<code>a.set(i, &lt;字面量&gt;)</code>、
+    数组字面量元素在循环里逐次泄漏一份引用（容器 <code>retain</code> 了元素，字面量自带的
+    那一份所有权却没移交）。现引入 <code>settle_fresh_value</code>：自带所有权的值在容器接管后
+    归还其临时所有权，借来的值则不释放——嵌套下标赋值 <code>m[i][j] = v</code> 也按同一规则结算。</li>
+<li><strong>④ <code>bytes[]</code> 被 <code>is_array_elem_type</code> 拒绝</strong>：语义层漏收 <code>Type::Bytes</code>，但 codegen
+    的 <code>array_elem_kind</code> 早已把 <code>Bytes</code> 归为 kind=1（RC），两层不一致。现补上
+    <code>Type::Bytes</code>（<code>dial_bytes_retain</code> / <code>release</code> 内部即 <code>dial_rc_*</code>，完全兼容）。</li>
+<li><strong>⑤ IR 验证失败不中止编译</strong>：<code>module.verify()</code> 失败只 <code>eprintln</code> 后继续
+    <code>emit_object</code>，可能产出无效 IR 或带未定义行为的机器码。现改为直接以易读文字
+    <code>return Err(...)</code> 中止。</li>
+<li><strong>⑥ <code>curl --proto '=https,http'</code> 与「只允许 https」声明矛盾</strong>：https URL 可被
+    302 重定向到 http，中间人攻击窗口重新打开。现 <code>--proto</code> 仅放行 https（本机地址
+    经 <code>http_allowed</code> 判定才加 http），并新增 <code>--proto-redir</code> 限制重定向协议。</li>
 </ul>
 <h3 id="added新增">Added（新增）</h3>
 <ul>
@@ -249,6 +349,19 @@
     一旦 COW 误判复发（需 TB 级内存）立刻被上限打爆。</li>
 <li><code>array_cow_semantics.dial</code>：逐条钉死 <code>clone</code> 独立 / COW 隔离 / 嵌套赋值 /
     句柄元素数组四条所有权语义。</li>
+<li><strong>测试组 O：所有权 / 语义回归</strong>（<code>tests/sem/</code>）：钉死「编译器应接受并正确运行」的合法
+  程序——<code>select</code> 里 <code>move_to</code> 外层变量（<code>select_move_to</code>）、<code>StructLit</code> / 字段读取 /
+  字段赋值的堆字段 retain（<code>structlit_heap_field</code> / <code>field_and_assignfield</code>）、
+  <code>bytes[]</code> 不被拒（<code>bytes_array</code>）、借来值写入容器不重复释放（<code>borrowed_assign</code>）。</li>
+<li><strong>一键安装脚本彻底重写</strong>（<code>tools/install-dial.sh</code> / <code>install-dial.ps1</code>）：</li>
+<li>版本<strong>不再硬编码</strong>：优先从已装好的 <code>dialc</code> 读出真实版本号，bootstrap 才回退到内置
+    默认；配套件（标准库 / 插件）一律按该版本推导——<strong>消灭版本不同步</strong>。</li>
+<li>VS Code 插件按 <strong>Release 资产清单</strong>解析真实文件名，不再依赖插件自身 semver 与
+    编译器版本号对齐（旧版写死 <code>dial-0.98.1.vsix</code>，每次都 404）。</li>
+<li>下载失败<strong>可见真实原因</strong>（旧版 <code>2&gt;/dev/null</code> 把 curl 报错吞了）。</li>
+<li><code>install-dial.sh</code> 支持 bash / zsh / fish / profile 四种 shell 的 PATH 持久化，并提示
+    当前会话用法；新增 <code>--help</code> / <code>--version</code> / <code>--uninstall</code>，解压前校验压缩包完整性，
+    重跑幂等。</li>
 </ul>
 <h3 id="changed变更">Changed（变更）</h3>
 <ul>
@@ -1527,7 +1640,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.99.1 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.00 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

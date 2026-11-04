@@ -1,0 +1,8 @@
+// 应当编译失败：for (k, v in m) 的 m 必须是 map，不能是数组
+fn main(): int {
+    var a: int[] = [1, 2, 3];
+    for (k, v in a) {
+        print(k);
+    }
+    return 0;
+}

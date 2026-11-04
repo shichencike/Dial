@@ -1,0 +1,47 @@
+// 控制流边界行为演示（v1.00）
+// 覆盖：throw 出口触发 defer、句柄元素数组遍历、
+//       match 的 bool / char / string 模式、step 使用 int 变量表达式。
+
+fn main(): int {
+    // 1) throw 会 longjmp 离开 try 体作用域，延迟语句仍须按 LIFO 触发
+    print("[throw]");
+    try {
+        defer print("try.cleanup");
+        throw Error("boom");
+    } catch e {
+        print("caught");
+    }
+
+    // 2) 句柄元素数组遍历：每轮的 string 元素按元素 ARC 独立 retain / release
+    print("[str[]]");
+    var names: string[] = ["alice", "bob"];
+    for (n in names) {
+        print(n);
+    }
+
+    // 3) match 支持 bool / char / string 字面量模式
+    print("[bool]");
+    match (true) {
+        true => { print("T"); }
+        _ => { print("F"); }
+    }
+    print("[char]");
+    match ('a') {
+        'a' => { print("A"); }
+        _ => { print("other"); }
+    }
+    print("[string]");
+    var word: string = "hi";
+    match (word) {
+        "hi" => { print("HI"); }
+        _ => { print("OTHER"); }
+    }
+
+    // 4) step 允许 int 变量表达式（编译期只校验类型，值在运行期快照一次）
+    print("[stepvar]");
+    var s: int = 4;
+    for (i in 0..9 step s) {
+        print(i);
+    }
+    return 0;
+}

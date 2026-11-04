@@ -7,6 +7,10 @@
 /* payload: [ int64 len ][ char data[] ]；data 指针 = s + 8 */
 static char *s_data(void *s) { return (char *)s + 8; }
 
+DialString dial_bool_to_string(int64_t b) {
+    return dial_string_new(b ? "true" : "false");
+}
+
 DialString dial_string_new(const char *lit) {
     int64_t len = (int64_t)strlen(lit);
     void *p = dial_rc_alloc(8 + len + 1);

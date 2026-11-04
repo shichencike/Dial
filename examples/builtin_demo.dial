@@ -1,0 +1,58 @@
+// 函数与内建补全演示（v1.00）
+// 覆盖：默认参数、variadic print / print_raw、assert、min / max / abs、浮点数学函数。
+
+fn greet(name: string, greeting: string = "hello", times: int = 1): int {
+    var i: int = 0;
+    while (i < times) {
+        print(greeting, " ", name);   // variadic：多个值拼成一行
+        i = i + 1;
+    }
+    return times;
+}
+
+fn add3(a: int, b: int = 10, c: int = 100): int {
+    return a + b + c;
+}
+
+fn main(): int {
+    // 1) 默认参数：三种调用形态（必填 1 个，最多 3 个）
+    print("[default]");
+    print(add3(1));             // 111
+    print(add3(1, 2));          // 103
+    print(add3(1, 2, 3));       // 6
+    greet("alice");             // hello alice
+    greet("bob", "hi");         // hi bob
+    greet("carol", "yo", 2);    // yo carol（两行）
+
+    // 2) variadic print / print_raw
+    print("[variadic]");
+    print("a", 1, 2.5, true, 'Z');
+    print_raw("raw:", 1, "|", 2.5, "\n");
+
+    // 3) assert：条件为真时静默通过
+    print("[assert]");
+    assert(1 + 1 == 2);
+    assert(min(3, 5) == 3, "min 应返回较小值");
+    print("ok");
+
+    // 4) min / max / abs（int 与 float 两族）
+    print("[minmax]");
+    print(min(3, 5));
+    print(max(3, 5));
+    print(abs(0 - 7));
+    print(min(1.5, 2.5));
+    print(max(1.5, 2.5));
+    print(abs(0.0 - 3.5));
+
+    // 5) 浮点数学：sqrt / pow / floor / ceil / round
+    print("[math]");
+    print(sqrt(16.0));
+    print(pow(2.0, 10.0));
+    print(floor(3.7));
+    print(ceil(3.2));
+    print(round(3.5));
+
+    // 6) exit(code)：以给定退出码结束进程（此处 0，等价正常结束）
+    exit(0);
+    return 0;
+}

@@ -782,7 +782,11 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::Import
         | TokenKind::And
         | TokenKind::Or
-        | TokenKind::Not => T_KEYWORD,
+        | TokenKind::Not
+        | TokenKind::Match
+        | TokenKind::Defer
+        | TokenKind::Do
+        | TokenKind::Step | TokenKind::Const | TokenKind::Enum => T_KEYWORD,
         // true / false 虽是字面量，但视觉上按关键字处理更符合直觉
         TokenKind::BoolLit(_) => T_KEYWORD,
         // 类型关键字
@@ -790,7 +794,7 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::ByteT | TokenKind::BytesT
         | TokenKind::StringT | TokenKind::VoidT | TokenKind::MapT | TokenKind::FileT => T_TYPE,
         // 字面量
-        TokenKind::StringLit(_) => T_STRING,
+        TokenKind::StringLit(_) | TokenKind::InterpLit(_) => T_STRING,
         TokenKind::CharLit(_) => T_STRING, // 字符字面量按字符串配色（同样带引号）
         TokenKind::ByteLit(_) => T_NUMBER,  // 字节字面量按数字配色（它是数值，不是字符）
         TokenKind::IntLit(_) | TokenKind::FloatLit(_) => T_NUMBER,
@@ -820,7 +824,11 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::DotDot
         | TokenKind::LBracket
         | TokenKind::RBracket
-        | TokenKind::Mod => T_OPERATOR,
+        | TokenKind::Mod
+        | TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::MulEq | TokenKind::DivEq | TokenKind::ModEq
+        | TokenKind::PlusPlus | TokenKind::MinusMinus
+        | TokenKind::Amp | TokenKind::Pipe | TokenKind::Caret | TokenKind::Tilde
+        | TokenKind::Shl | TokenKind::Shr | TokenKind::Question | TokenKind::Arrow => T_OPERATOR,
         TokenKind::EOF => return (u32::MAX, 0),
     };
 
@@ -836,7 +844,7 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
 ///   而不是用「格式化后的值」去猜长度（`IntLit(7)` 可能是源码里的 `007`，长度完全不同）。
 fn token_len(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> usize {
     match kind {
-        TokenKind::StringLit(_) => scan_quoted_len(lines, line, col, '"'),
+        TokenKind::StringLit(_) | TokenKind::InterpLit(_) => scan_quoted_len(lines, line, col, '"'),
         TokenKind::CharLit(_) => scan_quoted_len(lines, line, col, '\''),
         TokenKind::IntLit(_) | TokenKind::FloatLit(_) => scan_number_len(lines, line, col),
         TokenKind::Ident(s) => utf16_len(s),
@@ -879,6 +887,12 @@ fn fixed_text(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::And => "and",
         TokenKind::Or => "or",
         TokenKind::Not => "not",
+        TokenKind::Match => "match",
+        TokenKind::Defer => "defer",
+        TokenKind::Do => "do",
+        TokenKind::Step => "step",
+        TokenKind::Const => "const",
+        TokenKind::Enum => "enum",
         // ---- 类型关键字 ----
         TokenKind::IntT => "int",
         TokenKind::FloatT => "float",
@@ -912,6 +926,21 @@ fn fixed_text(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::LBracket => "[",
         TokenKind::RBracket => "]",
         TokenKind::Mod => "%",
+        TokenKind::PlusEq => "+=",
+        TokenKind::MinusEq => "-=",
+        TokenKind::MulEq => "*=",
+        TokenKind::DivEq => "/=",
+        TokenKind::ModEq => "%=",
+        TokenKind::PlusPlus => "++",
+        TokenKind::MinusMinus => "--",
+        TokenKind::Amp => "&",
+        TokenKind::Pipe => "|",
+        TokenKind::Caret => "^",
+        TokenKind::Tilde => "~",
+        TokenKind::Shl => "<<",
+        TokenKind::Shr => ">>",
+        TokenKind::Question => "?",
+        TokenKind::Arrow => "=>",
         // 其余（字面量、标识符、EOF）没有固定文本，交给调用方另行处理
         _ => return None,
     };

@@ -1,0 +1,24 @@
+[step] 0..10 step 3
+0
+3
+6
+9
+[foreach] int[]
+5
+6
+7
+[mapiter] sum
+303
+[match] 1 / 2 / 9
+10
+20
+0
+[defer] body
+in.block
+defer.second
+defer.first
+after.block
+[dowhile] 0..2
+0
+1
+2

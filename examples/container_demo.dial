@@ -1,0 +1,36 @@
+// 重型类型与容器演示（v1.00）：int-backed enum + 数组切片
+//
+// enum 变体是编译期内联的整数字面量（默认值 0 起递增，可显式指定）。
+// 数组切片 arr[from..to] 取半开区间，返回同元素类型的新数组；
+// 句柄元素（string[]）逐个 retain，与原数组互不影响。
+
+enum Color { Red, Green, Blue }
+enum Http { Ok = 200, NotFound = 404, ServerError = 500 }
+
+fn main(): int {
+    print("[enum]");
+    print(Color.Red);       // 0
+    print(Color.Green);     // 1
+    print(Color.Blue);      // 2
+    print(Http.Ok);         // 200
+    print(Http.NotFound);   // 404
+    print(Http.ServerError);// 500
+    var c: int = Color.Blue;
+    if (c == Color.Blue) { print("blue"); }
+
+    print("[slice]");
+    var a: int[] = [1, 2, 3, 4, 5];
+    var b: int[] = a[1..4];
+    print(b.length());      // 3
+    print(b[0], b[1], b[2]); // 234（variadic 拼一行）
+
+    var s: string[] = ["alice", "bob", "carol", "dave"];
+    var t: string[] = s[1..3];
+    print(t.length());      // 2
+    print(t[0], t[1]);      // bobcarol
+
+    // 切片不影响原数组
+    print(a[0]);            // 1
+    print(s[0]);            // alice
+    return 0;
+}

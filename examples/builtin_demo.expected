@@ -1,0 +1,26 @@
+[default]
+111
+103
+6
+hello alice
+hi bob
+yo carol
+yo carol
+[variadic]
+a12.500000trueZ
+raw:1|2.500000
+[assert]
+ok
+[minmax]
+3
+5
+7
+1.500000
+2.500000
+3.500000
+[math]
+4.000000
+1024.000000
+3.000000
+4.000000
+4.000000

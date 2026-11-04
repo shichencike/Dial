@@ -1,0 +1,6 @@
+// 负向：map<string,int> 的值必须是 int，不能传 float
+fn main(): int {
+    var m: map<string, int> = new_kv_map();
+    m.put("a", 1.5);
+    return 0;
+}

@@ -24,7 +24,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v0991">dialc — Dial 语言编译器 v0.99.1</a><ul>
+<li><a href="#dialc--dial-语言编译器-v100">dialc — Dial 语言编译器 v1.00</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -287,11 +287,27 @@
 </li>
 </ul>
 </li>
+<li><a href="#29-v100语言特性补齐">29. v1.00：语言特性补齐</a><ul>
+<li><a href="#291-运算符与字面量">29.1 运算符与字面量</a></li>
+<li><a href="#292-迭代与控制流">29.2 迭代与控制流</a></li>
+<li><a href="#293-函数与内建">29.3 函数与内建</a></li>
+<li><a href="#294-表达力增强">29.4 表达力增强</a></li>
+<li><a href="#295-重型类型与容器">29.5 重型类型与容器</a><ul>
+<li><a href="#enum">enum</a></li>
+<li><a href="#数组切片">数组切片</a></li>
+<li><a href="#setint">set&lt;int&gt;</a></li>
+<li><a href="#泛型-mapkv">泛型 map&lt;K,V&gt;</a></li>
+</ul>
+</li>
+<li><a href="#296-实现落点">29.6 实现落点</a></li>
+<li><a href="#297-测试">29.7 测试</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v0991">dialc — Dial 语言编译器 v0.99.1</h1>
+<h1 id="dialc--dial-语言编译器-v100">dialc — Dial 语言编译器 v1.00</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -2607,6 +2623,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <strong>连续输出三件套 <code>print_raw</code> / <code>write_char</code> / <code>str(char)</code>（v0.99，见 §5.5 与 §16.1）</strong>、
 <strong><code>byte</code> 单字节值类型与 <code>bytes</code> 二进制缓冲区（v0.99，见 §5.6 与 §5.7）</strong>、
 <strong>多维数组 <code>int[][]</code> 与句柄元素数组 <code>string[]</code> / <code>map[]</code> / <code>error[]</code> / <code>channel[]</code>（v0.99，见 <a href="#116-多维数组与句柄元素数组">§11.6</a> 与 <a href="#52-类型良构性约束">§5.2</a>）：数组元素类型扩展到 int 与 8 字节句柄，按元素 ARC 管理所有权</strong>。
+<strong>v1.00 五组语言特性补齐</strong>（复合赋值 / 位运算 / 步长与容器迭代 / <code>match</code> / <code>defer</code> / 默认参数 / variadic print / 字符串插值 / <code>const</code> / <code>enum</code> / 数组切片 / <code>set&lt;T&gt;</code> / 泛型 <code>map&lt;K,V&gt;</code>，见 <a href="#29-v100语言特性补齐">§29</a>）。
 其余仍按计划未实现：</p>
 </blockquote>
 <table>
@@ -2627,7 +2644,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>泛型、接口、trait、闭包</td>
-<td>不支持（<code>channel&lt;T&gt;</code> 是内建特化语法，不是用户泛型）</td>
+<td><strong>用户自定义泛型 / 接口 / trait / 闭包仍不支持</strong>；<code>channel&lt;T&gt;</code>、<code>set&lt;T&gt;</code>、<code>map&lt;K,V&gt;</code> 是 <strong>v1.00 已落地的内建特化容器语法</strong>（见 <a href="#29-v100语言特性补齐">§29</a>），不是用户泛型</td>
 </tr>
 <tr>
 <td>指针、地址取值、指针算术</td>
@@ -2672,6 +2689,10 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <tr>
 <td>一等函数 / 函数指针</td>
 <td>不支持——<code>spawn</code> 首参只能是顶层具名函数</td>
+</tr>
+<tr>
+<td><code>map&lt;K,V&gt;</code> 的 <code>string</code> 值、<code>map.values()</code> 对非 <code>int</code> 值</td>
+<td><strong>未实现</strong>（v1.00）：<code>V</code> 只支持标量，<code>values()</code> 只支持 <code>V = int</code>——<code>get</code> 未命中时的默认 string 对象会带来所有权移交歧义，见 <a href="#295-重型类型与容器">§29.5</a></td>
 </tr>
 <tr>
 <td>LSP 的重命名 / 跨文件引用查找 / 格式化</td>
@@ -3466,7 +3487,12 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
    <strong>带补丁位的版本例外</strong>：补丁发布写作 <code>[v0.98.1]</code>，显示为 <code>v0.98.1</code>（补丁位必须显示，
    否则修复发布与前一版在文档上无法区分——读者无从判断自己装的是不是修复过的版本）。</li>
 <li><strong>不可跳版</strong>：例如不能从 <code>v0.6</code> 直接到 <code>v0.7</code>；必须按 <code>v0.61</code>、<code>v0.62</code>……逐档推进，
-   除非用户明确要求跳版。</li>
+   除非用户明确要求跳版。<blockquote>
+<p><strong>v1.00 里程碑</strong>：用户明确要求从 <code>v0.99.1</code> 直接跳到 1.00 里程碑。Cargo 的 semver
+不允许前导零（<code>1.00.0</code> 非法），因此 <code>Cargo.toml</code> 存 <code>1.0.0</code>、对外统一显示 <strong><code>v1.00</code></strong>
+（<code>tools/check_version.py</code> 与 <code>tools/build_web.py</code> 在主版本 ≥ 1 时把次版本补零到两位）。</p>
+</blockquote>
+</li>
 <li><strong>版本号必须严格按时间递增，绝不许倒流</strong>：后发版本的日期不得早于先前版本。
    CHANGELOG 中一旦出现日期倒流（例如 <code>v0.4</code> 的日期晚于 <code>v0.5</code>），即视为文档缺陷，必须当场修正。</li>
 <li><strong>每档一次完整交付</strong>：每一个版本号都对应一次完整交付——代码实现 + 端到端测试（A/B/D/E/C 全绿）
@@ -5736,12 +5762,258 @@ If omitted the notification should not be sent.</em>」——纯数字形式里<
 <code>workspace.workspaceEdit.resourceOperations</code>，那么<strong>只有 <code>changes</code> 里的纯 TextEdit
 是被支持的</strong>」。</p>
 </blockquote>
-<hr /></main></div>
+<hr />
+<hr />
+<h2 id="29-v100语言特性补齐">29. v1.00：语言特性补齐</h2>
+<p>v1.00 是<strong>语言特性补齐</strong>里程碑。用户最初的诉求很直接：语言特性太少，很多正常程序
+需要的能力此前只能「模拟」或「绕路实现」。本版一次性补齐五组特性，覆盖运算符、
+控制流、函数、表达力与容器。</p>
+<p><strong>所有改动共同守住项目铁律</strong>：不引入 GC；不提供裸指针、地址取值、指针算术；
+不支持运算符重载；不支持一等函数 / 闭包 / 函数指针；ARC 所有权语义不退化；
+<strong>零隐式转换铁律保持</strong>——<code>1 + 2.0</code> 仍然编译失败，<code>float</code> 与 <code>int</code> 之间必须显式
+<code>int_to_float</code> / <code>float_to_int</code>。</p>
+<h3 id="291-运算符与字面量">29.1 运算符与字面量</h3>
+<table>
+<thead>
+<tr>
+<th>语法</th>
+<th>语义与约束</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>x += e</code>、<code>-=</code>、<code>*=</code>、<code>/=</code>、<code>%=</code></td>
+<td>编译期脱糖为 <code>x = x op e</code>；<code>string += string</code> 生成新对象（自建临时对象按 ARC 结算）</td>
+</tr>
+<tr>
+<td><code>x++</code>、<code>x--</code></td>
+<td>仅 <code>int</code> 变量，脱糖为赋值</td>
+</tr>
+<tr>
+<td><code>&amp;</code>、<code>\|</code>、<code>^</code>、<code>~</code>、<code>&lt;&lt;</code>、<code>&gt;&gt;</code></td>
+<td>位运算，仅 <code>int</code>；<code>~</code> 为一元按位取反</td>
+</tr>
+<tr>
+<td><code>0xFF</code> / <code>0b1010</code> / <code>0o17</code></td>
+<td>十六进制 / 二进制 / 八进制整数字面量</td>
+</tr>
+<tr>
+<td><code>1_000_000</code></td>
+<td>数字分隔符 <code>_</code>，只影响词法可读性，不进入值</td>
+</tr>
+<tr>
+<td><code>cond ? a : b</code></td>
+<td><code>cond</code> 必须是 <code>bool</code>；<code>a</code> 与 <code>b</code> 类型必须相同</td>
+</tr>
+</tbody>
+</table>
+<p>位运算是 <code>int</code> 专属：<code>1.5 &amp; 1</code> 在编译期被拒绝。编译期脱糖不改变 LLVM 函数签名，
+也不引入任何新的运行时状态。</p>
+<h3 id="292-迭代与控制流">29.2 迭代与控制流</h3>
+<table>
+<thead>
+<tr>
+<th>语法</th>
+<th>语义与约束</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>for (i in a..b)</code> / <code>for (i in a..b step s)</code></td>
+<td>范围 / 步长循环；<code>step</code> 必须是 <code>int</code>，字面量 <code>&lt;= 0</code> 编译期拒绝；<code>continue</code> 跳到 <code>for.inc</code></td>
+</tr>
+<tr>
+<td><code>for (v in arr)</code></td>
+<td>数组遍历；句柄元素每轮 retain / release</td>
+</tr>
+<tr>
+<td><code>for (k, v in m)</code></td>
+<td><code>map</code> 遍历；键集快照登记进函数级作用域，由出口统一释放（循环体内 <code>return</code> 也不泄漏）</td>
+</tr>
+<tr>
+<td><code>for (v in s)</code></td>
+<td>集合遍历；编译期自动插入键集快照</td>
+</tr>
+<tr>
+<td><code>match (x) { 1 =&gt; ...; _ =&gt; ... }</code></td>
+<td>模式匹配；主体限 <code>int</code> / <code>bool</code> / <code>char</code> / <code>string</code>，模式类型必须一致，<strong>必须有 <code>_</code> 通配分支</strong></td>
+</tr>
+<tr>
+<td><code>defer &lt;stmt&gt;;</code></td>
+<td>延迟语句，按 LIFO 触发</td>
+</tr>
+<tr>
+<td><code>do { ... } while (cond);</code></td>
+<td>条件必须是 <code>bool</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>defer</code> 的出口覆盖是最容易出错的一块：正常落穿、<code>return</code>、<code>break</code>、<code>continue</code>、
+<code>throw</code> 都会触发，且各出口<strong>互斥地各执行一次</strong>。实现上 <code>defer_stack</code> / <code>loop_stack</code> /
+<code>try_frames</code> 与 <code>scopes</code> 严格同步；<code>break</code> / <code>continue</code> 不 pop 编译期静态栈（否则同一循环
+的后续跳转会失效），<code>drain_defers_from()</code> 只「额外发射」一份 defer 而不清空编译期帧。
+<code>defer</code> 体内禁止 <code>break</code> / <code>continue</code> / <code>return</code> / <code>throw</code>（延迟执行时跳转目标可能失效）。</p>
+<h3 id="293-函数与内建">29.3 函数与内建</h3>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>语义与约束</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fn f(a: int, b: int = 10): int</code></td>
+<td>默认参数；带默认值的形参必须连续位于<strong>末尾</strong>，调用点补齐实参，LLVM 函数签名不变</td>
+</tr>
+<tr>
+<td><code>print(a, b, c)</code> / <code>print_raw(...)</code></td>
+<td>variadic，至少 1 个参数；<code>print</code> 中间参数原样输出、最后一个补换行，<code>print_raw</code> 全部原样</td>
+</tr>
+<tr>
+<td><code>assert(cond, "msg")</code></td>
+<td>失败调用 <code>dial_assert_fail</code> 后 Fail-Fast 终止</td>
+</tr>
+<tr>
+<td><code>panic(msg)</code> / <code>exit(code)</code></td>
+<td>未捕获 panic / 进程退出；<code>panic</code> 前 <code>fflush(NULL)</code> 保证 stdout 不丢</td>
+</tr>
+<tr>
+<td><code>min</code> / <code>max</code> / <code>abs</code></td>
+<td><code>int</code> 与 <code>float</code> 各有分派；混合类型编译期拒绝</td>
+</tr>
+<tr>
+<td><code>sqrt</code> / <code>pow</code> / <code>floor</code> / <code>ceil</code> / <code>round</code></td>
+<td>仅 <code>float</code> → <code>float</code>；最终链接加入 <code>-lm</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="294-表达力增强">29.4 表达力增强</h3>
+<p><strong>字符串插值</strong> <code>"n=${n}"</code>：词法层按花括号深度扫描 <code>${...}</code>，对内部源码二次 lex +
+parse，因此插值里可以写任意表达式（含函数调用）。只允许 <code>int</code> / <code>float</code> / <code>bool</code> /
+<code>char</code> / <code>string</code>，数组等编译期拒绝。代码生成走 <code>dial_string_new</code> + <code>dial_string_concat</code>
+逐段拼接：自建的临时字符串及时释放，<strong>借来的 <code>string</code> 变量绝不释放</strong>。</p>
+<p><strong>文件级常量</strong> <code>const NAME: T = 字面量;</code>：值只允许五种字面量，标注类型必须与值类型
+完全一致；编译期内联为字面量，因此不占运行时存储。禁止用常量名作变量 / 形参 /
+循环变量名，也禁止对其重新赋值——否则会出现「声明了局部变量却静默拿到常量值」的歧义。</p>
+<h3 id="295-重型类型与容器">29.5 重型类型与容器</h3>
+<h4 id="enum"><code>enum</code></h4>
+<p><code>enum Color { Red, Green, Blue }</code> / <code>enum Http { Ok = 200, NotFound = 404 }</code>。
+int-backed 名义类型，默认值从 0 递增，显式值必须是整数字面量。变体 <code>Color.Blue</code>
+在 parser 内联为 <code>Expr::IntLit</code>，零运行时开销。</p>
+<h4 id="数组切片">数组切片</h4>
+<p><code>var b: int[] = a[1..4];</code> 取半开区间 <code>[from, to)</code>，返回同元素类型的新数组。
+越界在运行时 Fail-Fast。句柄元素（<code>string[]</code> 等）通过 <code>dial_array_push()</code> 逐元素
+retain，切片与原数组<strong>不共享底层 buffer</strong>。</p>
+<h4 id="setint"><code>set&lt;int&gt;</code></h4>
+<p><code>new_set()</code> 创建，<code>add</code> / <code>contains</code> / <code>remove</code> / <code>size</code> / <code>values</code> 操作。
+底层复用 int→int map 的键集（value 恒为 1），因此零 C 改动；<code>add</code> 返回可能更新后的
+容器指针，由语句级代码生成写回接收变量（COW 契约）。<code>for (v in s)</code> 直接迭代。</p>
+<h4 id="泛型-mapkv">泛型 <code>map&lt;K,V&gt;</code></h4>
+<pre><code class="language-dial">var m: map&lt;string, int&gt; = new_kv_map();
+m.put(&quot;alice&quot;, 90);
+print(m.get(&quot;alice&quot;));          // 90
+var ks: string[] = m.keys();    // 键快照
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>支持范围</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>键 <code>K</code></td>
+<td><code>int</code> / <code>float</code> / <code>bool</code> / <code>char</code> / <code>byte</code> / <code>string</code></td>
+</tr>
+<tr>
+<td>值 <code>V</code></td>
+<td><code>int</code> / <code>float</code> / <code>bool</code> / <code>char</code> / <code>byte</code>（标量）</td>
+</tr>
+<tr>
+<td>方法</td>
+<td><code>put(k,v)</code> / <code>get(k)</code> / <code>contains(k)</code> / <code>remove(k)</code> / <code>size()</code> / <code>keys()</code> / <code>values()</code></td>
+</tr>
+<tr>
+<td>未命中</td>
+<td>返回 <code>V</code> 的默认值（<code>int</code> / <code>char</code> / <code>byte</code> → <code>-1</code>，<code>float</code> → <code>-1.0</code>，<code>bool</code> → <code>false</code>）</td>
+</tr>
+</tbody>
+</table>
+<p>设计要点：</p>
+<ul>
+<li><strong>独立运行时</strong>：<code>stdlib/dial_kvmap.c</code> 与老 <code>map</code>（int→int）完全隔离，老路径一个字节不改。
+  <code>new_kv_map()</code> 的 K/V 由变量声明的类型标注决定——parser 在 <code>parse_var_decl()</code> 里把两个
+  kind 常量补进实参，语义层据此还原 <code>Type::KvMap(K,V)</code>；源码永远只写 <code>new_kv_map()</code>。</li>
+<li><strong>零隐式转换</strong>：<code>put</code> 的键 / 值必须<strong>精确</strong>匹配 <code>K</code> / <code>V</code>；<code>map&lt;string,int&gt;.put(1, 2)</code> 编译失败。
+  <code>float</code> 以 IEEE754 <strong>位模式</strong>进出 C 运行时（bitcast，绝不 <code>fptosi</code> 丢小数）。</li>
+<li><strong>ARC</strong>：<code>string</code> 键按条目持有引用；COW 克隆 / 扩容重建时新 buffer 逐条目 retain，
+  最后一个持有者离开时逐条目 release 后回收 buffer。<code>remove</code> 释放被删条目的键引用。</li>
+<li><strong>删除用墓碑</strong>：开放寻址表删除若「左移紧凑」，会把哈希位置靠后的条目挪出探测链，
+  令其永远查不到。2 万键压测中删除 1 万个后 <code>size</code> 曾只剩 13082（应为 10000）；
+  现统一改为墓碑标记 + 负载过高时重建（老 <code>dial_map.c</code> 同步修复，<code>set&lt;T&gt;</code> 与
+  <code>for (k, v in m)</code> 一并受益）。</li>
+<li><strong>已知边界</strong>：<code>V</code> 暂不开放 <code>string</code>（<code>get</code> 未命中时的默认 string 对象会带来所有权
+  移交歧义）；<code>map.values()</code> 当前只支持 <code>V = int</code>；<code>for (k, v in m)</code> 仍限老 <code>map</code>，
+  泛型 map 用 <code>keys()</code> / <code>values()</code> 快照配合 <code>for (v in arr)</code> 迭代。</li>
+</ul>
+<h3 id="296-实现落点">29.6 实现落点</h3>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>改动</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/lexer.rs</code></td>
+<td>新运算符 / 关键字 / <code>Arrow</code> / <code>InterpLit</code>；进制字面量与数字分隔符</td>
+</tr>
+<tr>
+<td><code>src/parser.rs</code></td>
+<td>复合赋值与 <code>++</code> / <code>--</code> 脱糖、<code>ForEach</code> / <code>Match</code> / <code>Defer</code> / <code>DoWhile</code>、<code>const</code> / <code>enum</code> 内联、默认参数、插值二次解析、<code>map&lt;K,V&gt;</code> / <code>set&lt;T&gt;</code> 类型、<code>[from..to]</code> 切片</td>
+</tr>
+<tr>
+<td><code>src/ast.rs</code></td>
+<td><code>BinOp</code> 位运算、<code>UnOp::BitNot</code>、<code>Expr::Ternary</code> / <code>Interp</code> / <code>Slice</code>、<code>Type::Set</code> / <code>Type::KvMap</code>、新 <code>Stmt</code> 变体、<code>Func::defaults</code></td>
+</tr>
+<tr>
+<td><code>src/semantic.rs</code></td>
+<td>类型检查、方法签名、内建 variadic / 数学分派、保留名、<code>defer</code> 跳转约束、<code>const</code> 遮蔽、类型良构性</td>
+</tr>
+<tr>
+<td><code>src/codegen.rs</code></td>
+<td>LLVM IR、ARC retain / release、defer 栈、<code>gen_builtin_v1()</code>、<code>gen_interp()</code>、默认参数补齐、切片 / 集合 / 泛型 map 分派</td>
+</tr>
+<tr>
+<td><code>src/lsp.rs</code> / <code>src/index.rs</code></td>
+<td>新 token 的语义分类、固定文本与符号索引</td>
+</tr>
+<tr>
+<td><code>stdlib/</code> / <code>runtime/</code></td>
+<td><code>dial_array_slice</code>、<code>dial_map_keys</code>、<code>dial_bool_to_string</code>、新 <code>dial_kvmap_*</code>、trap 接口</td>
+</tr>
+<tr>
+<td><code>src/main.rs</code></td>
+<td>外部函数签名补齐、最终链接 <code>-lm</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="297-测试">29.7 测试</h3>
+<ul>
+<li>8 个正向示例 + 同名 <code>.expected</code> 黄金文件（A 组逐字节比对）；</li>
+<li>30+ 个 <code>tests/bad/*.dial</code> 负向用例锁定语义边界（零隐式转换、<code>match</code> 必须有通配、
+  <code>defer</code> 禁止跳转、<code>const</code> 遮蔽、<code>set</code> / <code>map&lt;K,V&gt;</code> 的类型约束等）；</li>
+<li><code>bash tests/run_tests.sh</code> A–O 全套通过，含 LSP 协议流纯净性、内存上界与所有权回归；</li>
+<li>2 万键 ARC 压测：泛型 map 峰值约 4.4 MB、<code>set&lt;int&gt;</code> 约 2.4 MB，无泄漏、无 Fail-Fast。</li>
+</ul></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v0.99.1 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.00 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

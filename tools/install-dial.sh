@@ -48,7 +48,7 @@ DIALC_HOME="${DIALC_HOME:-$HOME/.dial}"
 
 # 内置默认版本：仅在「本地无任何 dialc 可探测」时用于 bootstrap。
 # 正常流程（已装好 dialc）会立刻被真实版本覆盖，所以这里写错也无所谓。
-DEFAULT_VERSION="0.99.1"
+DEFAULT_VERSION="1.0.0"
 DIAL_VERSION="${DIAL_VERSION:-$DEFAULT_VERSION}"
 DIAL_TAG="v${DIAL_VERSION}"
 

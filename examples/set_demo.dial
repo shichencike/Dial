@@ -1,0 +1,60 @@
+// 集合演示（v1.00）：set<int> 底层复用 int→int map 的键集，零 C 改动。
+//
+// 语义要点：
+//   - 成员去重（add 已存在的键只更新 value，不增加 size）；
+//   - contains / remove / size 都是 O(1) 平均复杂度；
+//   - values() 返回成员快照 int[]，与原集合 ARC 独立；
+//   - for (v in s) 直接迭代集合，编译期自动插入键集快照并纳入函数出口释放。
+
+fn sum_values(s: set<int>): int {
+    var total: int = 0;
+    for (v in s) {
+        total += v;
+    }
+    return total;
+}
+
+fn main(): int {
+    print("[set]");
+    var s: set<int> = new_set();
+    s.add(10);
+    s.add(20);
+    s.add(10);              // 重复成员：不增加 size
+    print(s.size());        // 2
+    print(s.contains(10));  // true
+    print(s.contains(99));  // false
+
+    print("[iterate]");
+    for (v in s) {          // 直接迭代集合：10 20
+        print(v);
+    }
+
+    print("[values]");
+    var ks: int[] = s.values();
+    print(ks.length());     // 2
+    print(ks[0], ks[1]);    // 1020（variadic 拼一行）
+
+    print("[param]");
+    print(sum_values(s));   // 30（set 作为函数参数，ARC 正确）
+
+    print("[remove]");
+    print(s.remove(10));    // 1（被删成员的值恒为 1）
+    print(s.remove(99));    // -1（未命中）
+    print(s.contains(10));  // false
+    print(s.size());        // 1
+    for (v in s) {          // 20
+        print(v);
+    }
+
+    print("[regrow]");      // 触发 map 扩容重哈希后仍能正确查询
+    s.add(30);
+    s.add(40);
+    s.add(50);
+    s.add(60);
+    s.add(70);
+    s.add(80);
+    print(s.size());        // 7
+    print(s.contains(80));  // true
+    print(s.contains(10));  // false（前面已删除）
+    return 0;
+}

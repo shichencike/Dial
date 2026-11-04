@@ -1,0 +1,5 @@
+// 负向：new_set 不接受参数
+fn main(): int {
+    var s: set<int> = new_set(1);
+    return 0;
+}

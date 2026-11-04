@@ -48,6 +48,14 @@ pub enum Type {
     Bytes,
     Array(Box<Type>), // 动态数组（v0.2 元素固定为 Int）
     Map,    // 哈希表（int -> int，不透明指针，C 侧引用计数 ARC）
+    /// 泛型哈希表（v1.00）：`map<K, V>`，独立 C 运行时（stdlib/dial_kvmap.c）。
+    /// 键支持 int/float/bool/char/byte/string（string 键按条目 ARC 管理）；
+    /// 值支持标量 int/float/bool/char/byte —— v1.00 刻意不开放 string 值，
+    /// 因为 `get` 未命中时的「空串默认对象」会引入所有权移交歧义（见 §29）。
+    KvMap(Box<Type>, Box<Type>),
+    /// 集合（v1.00）：`set<T>`，底层复用 int→int map（成员键 -> 1）。
+    /// v1.00 的元素类型仅支持 int；不透明指针、ARC 与 map 完全同构。
+    Set(Box<Type>),
     File,   // 文件句柄（不透明指针，封装 C 的 FILE*；显式 open/close，不受 ARC 管理）
     Error,  // 可恢复异常（不透明指针，ARC 管理；由 throw 抛出、catch 捕获，见 §26）
     Thread, // 线程句柄（不透明指针；显式 join / detach，不受 ARC 管理，见 §27）
@@ -77,6 +85,8 @@ impl Type {
             Type::Bytes => "bytes",
             Type::Array(_) => "array",
             Type::Map => "map",
+            Type::KvMap(..) => "map",
+            Type::Set(_) => "set",
             Type::File => "file",
             Type::Error => "error",
             Type::Thread => "thread",
@@ -91,6 +101,7 @@ impl Type {
         match self {
             Type::Struct(n) => format!("struct {}", n),
             Type::Opaque(n) => n.clone(),
+            Type::KvMap(k, v) => format!("map<{}, {}>", k.display(), v.display()),
             other => other.name().to_string(),
         }
     }
@@ -102,6 +113,8 @@ pub enum BinOp {
     Add, Sub, Mul, Div, Mod,
     Eq, Neq, Lt, Gt, Le, Ge,
     And, Or,
+    // 位运算（v1.00，仅 int）：& | ^ 以及移位 << >>
+    BitAnd, BitOr, BitXor, Shl, Shr,
 }
 
 /// 一元运算符。
@@ -109,6 +122,16 @@ pub enum BinOp {
 pub enum UnOp {
     Neg, // 负号 -
     Not, // 逻辑非 not
+    BitNot, // 按位取反 ~（v1.00，仅 int）
+}
+
+/// 字符串插值的一个片段（v1.00）。
+#[derive(Debug, Clone)]
+pub enum InterpPart {
+    /// 普通文本。
+    Text(String),
+    /// `${...}` 内的表达式（由 parser 二次解析得到）。
+    Expr(Box<Expr>),
 }
 
 /// 表达式。
@@ -123,6 +146,9 @@ pub enum Expr {
     /// 与 `CharLit` 语义不同：字符是 Unicode 码点，字节是 8 位无符号值。
     ByteLit(i64),
     StringLit(String),
+    /// 字符串插值（v1.00）：`"x=${v}"` 编译为「逐段转字符串 + concat」。
+    /// 每段要么是文本，要么是任意表达式（其类型必须可转字符串）。
+    Interp(Vec<InterpPart>),
     Var(String),
     /// 字段访问：<expr>.<field>
     Field(Box<Expr>, String),
@@ -130,12 +156,17 @@ pub enum Expr {
     Method(Box<Expr>, String, Vec<Expr>),
     /// 索引访问：<expr>[index]
     Index(Box<Expr>, Box<Expr>),
+    /// 数组切片 `arr[from..to]`（v1.00）：半开区间 [from, to)，返回同元素类型的新数组。
+    /// 区间越界在运行时 Fail-Fast；句柄元素逐个 retain，绝不共享底层 buffer。
+    Slice(Box<Expr>, Box<Expr>, Box<Expr>),
     /// 数组字面量：[e1, e2, ...]
     ArrayLit(Vec<Expr>),
     /// 结构体字面量：TypeName { f1: e1, f2: e2, ... }
     StructLit(String, Vec<(String, Expr)>),
     Binary(Box<Expr>, BinOp, Box<Expr>),
     Unary(UnOp, Box<Expr>),
+    /// 三元表达式 `cond ? a : b`（v1.00）。cond 必须是 bool，`a` 与 `b` 类型必须相同。
+    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
     /// 普通函数调用（print 或用户函数）
     Call(String, Vec<Expr>),
     /// 函数引用：`spawn(worker, ...)` 的首参。Dial 没有一等函数与闭包，
@@ -203,12 +234,14 @@ pub enum Stmt {
     /// `continue;`：跳到下一次迭代。
     /// while 中回到条件判定；for 中先执行 `i = i + 1` 再回到条件判定（否则会死循环）。
     Continue(usize, usize),
-    /// 范围 for 循环：`for (i in start..end) { ... }`
+    /// 范围 for 循环：`for (i in start..end) { ... }` 或 `for (i in 0..10 step 2) { ... }`
     /// 循环变量 `i` 为 int，从 `start` 迭代到 `end - 1`（end 独占），可在循环体内被重新赋值。
+    /// `step` 为可选步长（缺省 1），必须为正整数字面量或常量表达式（编译期求值）。
     For {
         var: String,
         start: Expr,
         end: Expr,
+        step: Option<Expr>,
         body: Vec<Stmt>,
         line: usize,
         col: usize,
@@ -216,6 +249,51 @@ pub enum Stmt {
         var_line: usize,
         var_col: usize,
     },
+    /// 数组遍历：`for (v in arr) { ... }`。循环变量 `v` 的类型为数组元素类型 `T`，
+    /// 顺序取 `arr` 的每个元素（0..len-1）。`arr` 必须为 `Array(T)`。
+    ForEach {
+        value: String,
+        value_line: usize,
+        value_col: usize,
+        coll: Expr,
+        body: Vec<Stmt>,
+        line: usize,
+        col: usize,
+    },
+    /// 映射遍历：`for (k, v in m) { ... }`。`k` 为键、`v` 为值（均为 int，因当前 `map` 为 int→int）。
+    /// `m` 必须为 `map` 类型。底层先快照键集为 `Array(int)`，再逐键取值，迭代期间不修改 `m`。
+    ForEachMap {
+        key: String,
+        key_line: usize,
+        key_col: usize,
+        value: String,
+        value_line: usize,
+        value_col: usize,
+        coll: Expr,
+        body: Vec<Stmt>,
+        line: usize,
+        col: usize,
+    },
+    /// `do { body } while (cond);`：循环体至少执行一次，之后条件为真则继续。
+    DoWhile {
+        body: Vec<Stmt>,
+        cond: Expr,
+        line: usize,
+        col: usize,
+    },
+    /// `match (subject) { pattern => { body } ... }`：多分支选择。
+    /// 要求**必须**有 `_` 通配分支（否则编译期报错，保证不漏分支、不引入未定义行为）。
+    /// 支持字面量模式：`int` / `bool` / `char` / `string` 与 `_` 通配。
+    Match {
+        subject: Expr,
+        arms: Vec<MatchArm>,
+        line: usize,
+        col: usize,
+    },
+    /// `defer <stmt>;`：将一条语句延迟到**离开当前作用域**时按 LIFO 执行（资源清理）。
+    /// 作用域包括：函数体、裸块 `{ }`、循环体。在以下所有出口都会触发：正常落穿、
+    /// `return`、导致离开该块的 `break` / `continue`。
+    Defer(Box<Stmt>, usize, usize),
     Return(Option<Expr>, usize, usize),
     /// `throw <expr>;`：抛出可恢复异常。expr 必须是 Error 类型（编译期强制规范化）。
     Throw(Expr, usize, usize),
@@ -267,6 +345,30 @@ pub enum Stmt {
     },
 }
 
+/// `match` 的一个分支：`pattern => { body }`（v1.00）。
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: MatchPattern,
+    pub body: Vec<Stmt>,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// `match` 的模式（v1.00）。
+///
+/// 仅支持字面量模式与通配符——不做类型守卫、不做绑定变量，保持编译期可判定、
+/// 运行期 O(分支数) 线性比较的极简语义。键类型由 subject 的类型决定：
+/// `int` 对应 `Int`、`bool` 对应 `Bool`、`char` 对应 `Char`、`string` 对应 `Str`。
+#[derive(Debug, Clone)]
+pub enum MatchPattern {
+    Int(i64),
+    Bool(bool),
+    Char(i64),
+    Str(String),
+    /// `_` 通配：匹配任意值，必须存在（否则编译期报错，杜绝漏分支）。
+    Wildcard,
+}
+
 /// catch 子句：直接含一个可选的捕获变量名（Identifier）与一个代码块（Block）。
 /// 变量名省略时，catch 块内无法引用具体错误，仅用于「捕获到即不崩溃」。
 #[derive(Debug, Clone)]
@@ -299,6 +401,9 @@ pub struct SelectArm {
 pub struct Func {
     pub name: String,
     pub params: Vec<(String, Type)>,
+    /// 默认实参（v1.00）：与 `params` 一一对应，`None` 表示必填形参。
+    /// 带默认值的形参必须连续位于参数列表末尾（parser 强制）；调用点按声明顺序补齐。
+    pub defaults: Vec<Option<Expr>>,
     /// 形参**名**的位置（v0.95）：与 `params` 一一对应，供形参 Hover / 跳转定义。
     pub param_pos: Vec<(usize, usize)>,
     pub ret: Type,

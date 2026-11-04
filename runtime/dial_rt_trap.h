@@ -46,6 +46,8 @@ void dial_trap(void);
 void dial_bounds_fail(int64_t idx, int64_t len);
 void dial_null_fail(const char *what);
 void dial_assert_fail(const char *what);
+/* v1.00：exit(code) 内建。先冲净 stdout，再以给定退出码结束进程。 */
+void dial_exit(int64_t code);
 
 /*
  * 检查宏。条件是编译期常量，等级不足时整段被消除（零开销）。

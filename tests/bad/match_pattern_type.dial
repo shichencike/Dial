@@ -1,0 +1,8 @@
+// 应当编译失败：match 模式 string 与主体 int 类型不符
+fn main(): int {
+    match (1) {
+        "one" => { print("x"); }
+        _ => { print("y"); }
+    }
+    return 0;
+}

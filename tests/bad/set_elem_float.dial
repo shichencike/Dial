@@ -1,0 +1,5 @@
+// 负向：当前版本 set 元素类型只支持 int
+fn main(): int {
+    var s: set<float> = new_set();
+    return 0;
+}

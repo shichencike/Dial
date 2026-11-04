@@ -1,0 +1,59 @@
+// 运算符与字面量补全演示（v1.00）
+// 覆盖：复合赋值 += -= *= /= %=、自增自减 ++ --、
+//       位运算 & | ^ ~ << >>、进制字面量 0x/0b/0o 与数字分隔符、三元表达式。
+
+fn main(): int {
+    // 复合赋值：脱糖为 x = x + e，复用原有赋值语义；string 走 concat。
+    var x: int = 10;
+    x += 5;          // 15
+    print(x);
+    x -= 3;          // 12
+    print(x);
+    x *= 2;          // 24
+    print(x);
+    x /= 4;          // 6
+    print(x);
+    x %= 4;          // 2
+    print(x);
+
+    // 自增 / 自减（仅语句位置）
+    var c: int = 0;
+    c++;             // 1
+    print(c);
+    ++c;             // 2
+    print(c);
+    c--;             // 1
+    print(c);
+
+    // 位运算（int 上的按位操作）
+    var a: int = 0b0011;   // 3
+    var b: int = 0b0101;   // 5
+    print(a & b);     // 1
+    print(a | b);     // 7
+    print(a ^ b);     // 6
+    print(a << 2);    // 12
+    print(a >> 1);    // 1
+    print(~a);        // -4（按位取反）
+
+    // 进制字面量 + 数字分隔符
+    print(0xFF);      // 255
+    print(0b1010);    // 10
+    print(0o17);      // 15
+    print(1_000_000); // 1000000
+
+    // 三元表达式：cond ? a : b（两分支类型必须相同）
+    var big: int = (x > 1) ? 100 : 200;
+    print(big);       // 100
+
+    // 位运算与三元组合
+    var mask: int = ((a & b) == 0) ? 0xFF : 0x0F;
+    print(mask);      // 255
+
+    // 字符串也可用 += 拼接
+    var s: string = "hello";
+    s += " ";
+    s += "world";
+    print(s);         // hello world
+
+    return 0;
+}

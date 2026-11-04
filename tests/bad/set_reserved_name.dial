@@ -1,0 +1,7 @@
+// 负向：new_set 是内建保留名，不能被用户函数遮蔽
+fn new_set(): int {
+    return 1;
+}
+fn main(): int {
+    return new_set();
+}

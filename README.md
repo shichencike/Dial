@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v0.99.1
+# dialc — Dial 语言编译器 v1.00
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -1563,13 +1563,14 @@ print("");        // -> Hi
 > **连续输出三件套 `print_raw` / `write_char` / `str(char)`（v0.99，见 §5.5 与 §16.1）**、
 > **`byte` 单字节值类型与 `bytes` 二进制缓冲区（v0.99，见 §5.6 与 §5.7）**、
 > **多维数组 `int[][]` 与句柄元素数组 `string[]` / `map[]` / `error[]` / `channel[]`（v0.99，见 [§11.6](#116-多维数组与句柄元素数组) 与 [§5.2](#52-类型良构性约束)）：数组元素类型扩展到 int 与 8 字节句柄，按元素 ARC 管理所有权**。
+> **v1.00 五组语言特性补齐**（复合赋值 / 位运算 / 步长与容器迭代 / `match` / `defer` / 默认参数 / variadic print / 字符串插值 / `const` / `enum` / 数组切片 / `set<T>` / 泛型 `map<K,V>`，见 [§29](#29-v100语言特性补齐)）。
 > 其余仍按计划未实现：
 
 | 能力 | 状态 |
 | --- | --- |
 | 裸块 `{ ... }` | **已支持**（v0.99）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 [§8.6](#86-裸块独立的词法作用域v099) |
 | 模块 / 包 / import | **已支持**（v0.93；`dialc install <URL>` 于 v0.96 落地）：`import "包名";` + `dialc install <本地文件\|URL>`，见 [§25](#25-包分发与依赖管理生态规划--最终规范)。**尚未实现**：源码形式的模块拆分（无 `mod`） |
-| 泛型、接口、trait、闭包 | 不支持（`channel<T>` 是内建特化语法，不是用户泛型） |
+| 泛型、接口、trait、闭包 | **用户自定义泛型 / 接口 / trait / 闭包仍不支持**；`channel<T>`、`set<T>`、`map<K,V>` 是 **v1.00 已落地的内建特化容器语法**（见 [§29](#29-v100语言特性补齐)），不是用户泛型 |
 | 指针、地址取值、指针算术 | **永不提供**（与不透明指针契约冲突） |
 | 运算符重载 | **永不提供** |
 | 全局变量 | 不支持 |
@@ -1581,6 +1582,7 @@ print("");        // -> Hi
 | `move_to` 到**已启动的**线程 | 编译期不支持——移交只能在 `spawn` 时完成（见 [§27.3](#273-零竞争移交与-o1-论证)） |
 | 通道元素为标量（`int` / `float` / `bool`） | 编译期拒绝（需装箱，见 [§27.2](#272-channelt-与所有权移交)） |
 | 一等函数 / 函数指针 | 不支持——`spawn` 首参只能是顶层具名函数 |
+| `map<K,V>` 的 `string` 值、`map.values()` 对非 `int` 值 | **未实现**（v1.00）：`V` 只支持标量，`values()` 只支持 `V = int`——`get` 未命中时的默认 string 对象会带来所有权移交歧义，见 [§29.5](#295-重型类型与容器) |
 | LSP 的重命名 / 跨文件引用查找 / 格式化 | **已实现**（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的**引用边**（`src/index.rs`），格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作。能力清单见 [§28.7.1](#2871-当前-lsp-能力清单)。**尚未实现**：跨工作区的**全量**引用图（当前只覆盖已打开文件与已加载包） |
 
 ---
@@ -1992,6 +1994,9 @@ Dial 目前处于 v0.x 快速演进阶段。版本号采用**最多两位小数*
    否则修复发布与前一版在文档上无法区分——读者无从判断自己装的是不是修复过的版本）。
 3. **不可跳版**：例如不能从 `v0.6` 直接到 `v0.7`；必须按 `v0.61`、`v0.62`……逐档推进，
    除非用户明确要求跳版。
+   > **v1.00 里程碑**：用户明确要求从 `v0.99.1` 直接跳到 1.00 里程碑。Cargo 的 semver
+   > 不允许前导零（`1.00.0` 非法），因此 `Cargo.toml` 存 `1.0.0`、对外统一显示 **`v1.00`**
+   > （`tools/check_version.py` 与 `tools/build_web.py` 在主版本 ≥ 1 时把次版本补零到两位）。
 4. **版本号必须严格按时间递增，绝不许倒流**：后发版本的日期不得早于先前版本。
    CHANGELOG 中一旦出现日期倒流（例如 `v0.4` 的日期晚于 `v0.5`），即视为文档缺陷，必须当场修正。
 5. **每档一次完整交付**：每一个版本号都对应一次完整交付——代码实现 + 端到端测试（A/B/D/E/C 全绿）
@@ -3628,3 +3633,144 @@ fn main() {
 > 是被支持的**」。
 
 ---
+
+---
+
+## 29. v1.00：语言特性补齐
+
+v1.00 是**语言特性补齐**里程碑。用户最初的诉求很直接：语言特性太少，很多正常程序
+需要的能力此前只能「模拟」或「绕路实现」。本版一次性补齐五组特性，覆盖运算符、
+控制流、函数、表达力与容器。
+
+**所有改动共同守住项目铁律**：不引入 GC；不提供裸指针、地址取值、指针算术；
+不支持运算符重载；不支持一等函数 / 闭包 / 函数指针；ARC 所有权语义不退化；
+**零隐式转换铁律保持**——`1 + 2.0` 仍然编译失败，`float` 与 `int` 之间必须显式
+`int_to_float` / `float_to_int`。
+
+### 29.1 运算符与字面量
+
+| 语法 | 语义与约束 |
+| --- | --- |
+| `x += e`、`-=`、`*=`、`/=`、`%=` | 编译期脱糖为 `x = x op e`；`string += string` 生成新对象（自建临时对象按 ARC 结算） |
+| `x++`、`x--` | 仅 `int` 变量，脱糖为赋值 |
+| `&`、`\|`、`^`、`~`、`<<`、`>>` | 位运算，仅 `int`；`~` 为一元按位取反 |
+| `0xFF` / `0b1010` / `0o17` | 十六进制 / 二进制 / 八进制整数字面量 |
+| `1_000_000` | 数字分隔符 `_`，只影响词法可读性，不进入值 |
+| `cond ? a : b` | `cond` 必须是 `bool`；`a` 与 `b` 类型必须相同 |
+
+位运算是 `int` 专属：`1.5 & 1` 在编译期被拒绝。编译期脱糖不改变 LLVM 函数签名，
+也不引入任何新的运行时状态。
+
+### 29.2 迭代与控制流
+
+| 语法 | 语义与约束 |
+| --- | --- |
+| `for (i in a..b)` / `for (i in a..b step s)` | 范围 / 步长循环；`step` 必须是 `int`，字面量 `<= 0` 编译期拒绝；`continue` 跳到 `for.inc` |
+| `for (v in arr)` | 数组遍历；句柄元素每轮 retain / release |
+| `for (k, v in m)` | `map` 遍历；键集快照登记进函数级作用域，由出口统一释放（循环体内 `return` 也不泄漏） |
+| `for (v in s)` | 集合遍历；编译期自动插入键集快照 |
+| `match (x) { 1 => ...; _ => ... }` | 模式匹配；主体限 `int` / `bool` / `char` / `string`，模式类型必须一致，**必须有 `_` 通配分支** |
+| `defer <stmt>;` | 延迟语句，按 LIFO 触发 |
+| `do { ... } while (cond);` | 条件必须是 `bool` |
+
+`defer` 的出口覆盖是最容易出错的一块：正常落穿、`return`、`break`、`continue`、
+`throw` 都会触发，且各出口**互斥地各执行一次**。实现上 `defer_stack` / `loop_stack` /
+`try_frames` 与 `scopes` 严格同步；`break` / `continue` 不 pop 编译期静态栈（否则同一循环
+的后续跳转会失效），`drain_defers_from()` 只「额外发射」一份 defer 而不清空编译期帧。
+`defer` 体内禁止 `break` / `continue` / `return` / `throw`（延迟执行时跳转目标可能失效）。
+
+### 29.3 函数与内建
+
+| 能力 | 语义与约束 |
+| --- | --- |
+| `fn f(a: int, b: int = 10): int` | 默认参数；带默认值的形参必须连续位于**末尾**，调用点补齐实参，LLVM 函数签名不变 |
+| `print(a, b, c)` / `print_raw(...)` | variadic，至少 1 个参数；`print` 中间参数原样输出、最后一个补换行，`print_raw` 全部原样 |
+| `assert(cond, "msg")` | 失败调用 `dial_assert_fail` 后 Fail-Fast 终止 |
+| `panic(msg)` / `exit(code)` | 未捕获 panic / 进程退出；`panic` 前 `fflush(NULL)` 保证 stdout 不丢 |
+| `min` / `max` / `abs` | `int` 与 `float` 各有分派；混合类型编译期拒绝 |
+| `sqrt` / `pow` / `floor` / `ceil` / `round` | 仅 `float` → `float`；最终链接加入 `-lm` |
+
+### 29.4 表达力增强
+
+**字符串插值** `"n=${n}"`：词法层按花括号深度扫描 `${...}`，对内部源码二次 lex +
+parse，因此插值里可以写任意表达式（含函数调用）。只允许 `int` / `float` / `bool` /
+`char` / `string`，数组等编译期拒绝。代码生成走 `dial_string_new` + `dial_string_concat`
+逐段拼接：自建的临时字符串及时释放，**借来的 `string` 变量绝不释放**。
+
+**文件级常量** `const NAME: T = 字面量;`：值只允许五种字面量，标注类型必须与值类型
+完全一致；编译期内联为字面量，因此不占运行时存储。禁止用常量名作变量 / 形参 /
+循环变量名，也禁止对其重新赋值——否则会出现「声明了局部变量却静默拿到常量值」的歧义。
+
+### 29.5 重型类型与容器
+
+#### `enum`
+
+`enum Color { Red, Green, Blue }` / `enum Http { Ok = 200, NotFound = 404 }`。
+int-backed 名义类型，默认值从 0 递增，显式值必须是整数字面量。变体 `Color.Blue`
+在 parser 内联为 `Expr::IntLit`，零运行时开销。
+
+#### 数组切片
+
+`var b: int[] = a[1..4];` 取半开区间 `[from, to)`，返回同元素类型的新数组。
+越界在运行时 Fail-Fast。句柄元素（`string[]` 等）通过 `dial_array_push()` 逐元素
+retain，切片与原数组**不共享底层 buffer**。
+
+#### `set<int>`
+
+`new_set()` 创建，`add` / `contains` / `remove` / `size` / `values` 操作。
+底层复用 int→int map 的键集（value 恒为 1），因此零 C 改动；`add` 返回可能更新后的
+容器指针，由语句级代码生成写回接收变量（COW 契约）。`for (v in s)` 直接迭代。
+
+#### 泛型 `map<K,V>`
+
+```dial
+var m: map<string, int> = new_kv_map();
+m.put("alice", 90);
+print(m.get("alice"));          // 90
+var ks: string[] = m.keys();    // 键快照
+```
+
+| 维度 | 支持范围 |
+| --- | --- |
+| 键 `K` | `int` / `float` / `bool` / `char` / `byte` / `string` |
+| 值 `V` | `int` / `float` / `bool` / `char` / `byte`（标量） |
+| 方法 | `put(k,v)` / `get(k)` / `contains(k)` / `remove(k)` / `size()` / `keys()` / `values()` |
+| 未命中 | 返回 `V` 的默认值（`int` / `char` / `byte` → `-1`，`float` → `-1.0`，`bool` → `false`） |
+
+设计要点：
+
+- **独立运行时**：`stdlib/dial_kvmap.c` 与老 `map`（int→int）完全隔离，老路径一个字节不改。
+  `new_kv_map()` 的 K/V 由变量声明的类型标注决定——parser 在 `parse_var_decl()` 里把两个
+  kind 常量补进实参，语义层据此还原 `Type::KvMap(K,V)`；源码永远只写 `new_kv_map()`。
+- **零隐式转换**：`put` 的键 / 值必须**精确**匹配 `K` / `V`；`map<string,int>.put(1, 2)` 编译失败。
+  `float` 以 IEEE754 **位模式**进出 C 运行时（bitcast，绝不 `fptosi` 丢小数）。
+- **ARC**：`string` 键按条目持有引用；COW 克隆 / 扩容重建时新 buffer 逐条目 retain，
+  最后一个持有者离开时逐条目 release 后回收 buffer。`remove` 释放被删条目的键引用。
+- **删除用墓碑**：开放寻址表删除若「左移紧凑」，会把哈希位置靠后的条目挪出探测链，
+  令其永远查不到。2 万键压测中删除 1 万个后 `size` 曾只剩 13082（应为 10000）；
+  现统一改为墓碑标记 + 负载过高时重建（老 `dial_map.c` 同步修复，`set<T>` 与
+  `for (k, v in m)` 一并受益）。
+- **已知边界**：`V` 暂不开放 `string`（`get` 未命中时的默认 string 对象会带来所有权
+  移交歧义）；`map.values()` 当前只支持 `V = int`；`for (k, v in m)` 仍限老 `map`，
+  泛型 map 用 `keys()` / `values()` 快照配合 `for (v in arr)` 迭代。
+
+### 29.6 实现落点
+
+| 层 | 改动 |
+| --- | --- |
+| `src/lexer.rs` | 新运算符 / 关键字 / `Arrow` / `InterpLit`；进制字面量与数字分隔符 |
+| `src/parser.rs` | 复合赋值与 `++` / `--` 脱糖、`ForEach` / `Match` / `Defer` / `DoWhile`、`const` / `enum` 内联、默认参数、插值二次解析、`map<K,V>` / `set<T>` 类型、`[from..to]` 切片 |
+| `src/ast.rs` | `BinOp` 位运算、`UnOp::BitNot`、`Expr::Ternary` / `Interp` / `Slice`、`Type::Set` / `Type::KvMap`、新 `Stmt` 变体、`Func::defaults` |
+| `src/semantic.rs` | 类型检查、方法签名、内建 variadic / 数学分派、保留名、`defer` 跳转约束、`const` 遮蔽、类型良构性 |
+| `src/codegen.rs` | LLVM IR、ARC retain / release、defer 栈、`gen_builtin_v1()`、`gen_interp()`、默认参数补齐、切片 / 集合 / 泛型 map 分派 |
+| `src/lsp.rs` / `src/index.rs` | 新 token 的语义分类、固定文本与符号索引 |
+| `stdlib/` / `runtime/` | `dial_array_slice`、`dial_map_keys`、`dial_bool_to_string`、新 `dial_kvmap_*`、trap 接口 |
+| `src/main.rs` | 外部函数签名补齐、最终链接 `-lm` |
+
+### 29.7 测试
+
+- 8 个正向示例 + 同名 `.expected` 黄金文件（A 组逐字节比对）；
+- 30+ 个 `tests/bad/*.dial` 负向用例锁定语义边界（零隐式转换、`match` 必须有通配、
+  `defer` 禁止跳转、`const` 遮蔽、`set` / `map<K,V>` 的类型约束等）；
+- `bash tests/run_tests.sh` A–O 全套通过，含 LSP 协议流纯净性、内存上界与所有权回归；
+- 2 万键 ARC 压测：泛型 map 峰值约 4.4 MB、`set<int>` 约 2.4 MB，无泄漏、无 Fail-Fast。

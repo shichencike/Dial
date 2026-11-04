@@ -1,0 +1,5 @@
+// 应当编译失败：print 至少需要 1 个参数
+fn main(): int {
+    print();
+    return 0;
+}

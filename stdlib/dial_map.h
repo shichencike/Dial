@@ -19,6 +19,11 @@ int64_t  dial_map_contains(DialMap m, int64_t key);         /* 命中返回 1，
 int64_t  dial_map_remove(DialMap m, int64_t key);           /* 移除并返回其值，未命中返回 -1 */
 int64_t  dial_map_size(DialMap m);
 
+/* 快照键集：返回 int 数组（kind=INT），包含当前 map 的全部 key。
+ * 供 `for (k, v in m)` 遍历使用：先快照键集再逐键取值，迭代期间 map 不被修改时安全。
+ * 调用方负责对其调用 dial_array_release（参考 codegen 的 ForEachMap 处理）。 */
+void *dial_map_keys(DialMap m);
+
 void dial_map_retain(DialMap m);
 void dial_map_release(DialMap m);
 

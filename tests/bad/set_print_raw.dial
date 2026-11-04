@@ -1,0 +1,6 @@
+// 负向：集合不能直接 print_raw（与 print 同口径）
+fn main(): int {
+    var s: set<int> = new_set();
+    print_raw(s);
+    return 0;
+}

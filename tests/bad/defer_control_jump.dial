@@ -1,0 +1,8 @@
+// 应当编译失败：defer 体内不得出现 break / continue / return / throw
+fn main(): int {
+    for (i in 0..3) {
+        defer { break; }
+        print(i);
+    }
+    return 0;
+}

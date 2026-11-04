@@ -1,0 +1,6 @@
+// 应当编译失败：const 不可重新赋值
+const N: int = 1;
+fn main(): int {
+    N = 2;
+    return 0;
+}

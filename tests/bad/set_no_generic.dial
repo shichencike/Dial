@@ -1,0 +1,5 @@
+// 负向：set 必须写成 set<T>，不能省略泛型实参
+fn main(): int {
+    var s: set = new_set();
+    return 0;
+}

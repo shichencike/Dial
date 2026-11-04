@@ -1,0 +1,5 @@
+// 负向：map 的键不能是容器类型
+fn main(): int {
+    var m: map<map, int> = new_kv_map();
+    return 0;
+}

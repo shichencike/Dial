@@ -40,6 +40,9 @@ void *dial_exbuf_take_err(DialExBuf *b) {
 }
 
 void dial_panic(const char *msg) {
+    /* 先冲净 stdout：panic 之前 print 出来的内容若还留在 stdio 缓冲区，
+       会随 abort() 一起消失，让人误以为程序在更早的地方就死了。 */
+    fflush(NULL);
     fprintf(stderr, "dial: 未捕获的异常（panic）: %s\n", msg ? msg : "(null)");
     abort();
 }

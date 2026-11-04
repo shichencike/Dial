@@ -1,0 +1,3 @@
+// 应当编译失败：const 标注类型与值类型必须一致（零隐式转换）
+const N: int = 1.5;
+fn main(): int { return N; }

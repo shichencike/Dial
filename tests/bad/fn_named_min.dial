@@ -1,0 +1,3 @@
+// 应当编译失败：min 是 v1.00 内建保留名，不能用作函数名
+fn min(a: int, b: int): int { return a; }
+fn main(): int { return 0; }

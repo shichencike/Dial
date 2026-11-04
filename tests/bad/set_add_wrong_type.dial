@@ -1,0 +1,6 @@
+// 负向：set.add 的实参必须是 int（零隐式转换铁律）
+fn main(): int {
+    var s: set<int> = new_set();
+    s.add("x");
+    return 0;
+}

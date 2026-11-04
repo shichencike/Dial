@@ -42,7 +42,12 @@ def current_version() -> tuple[str, str]:
     if len(parts) >= 3 and parts[2] != "0":
         display = f"v{full}"                       # 补丁发布：显示完整三位
     else:
-        display = f"v{'.'.join(parts[:2])}"          # 常规发布：只取主.次
+        # v1.00 里程碑：Cargo 存 "1.0.0"（semver 不允许前导零），对外显示 "v1.00"。
+        major = parts[0]
+        minor = parts[1] if len(parts) >= 2 else "0"
+        if int(major) >= 1:
+            minor = minor.zfill(2)
+        display = f"v{major}.{minor}"
     return display, full
 
 

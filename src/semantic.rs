@@ -21,6 +21,9 @@ use crate::error::{DialcError, Result};
 pub struct FuncInfo {
     pub params: Vec<Type>,
     pub ret: Type,
+    /// 默认实参（v1.00）：与 `params` 一一对应；外部包函数一律为全 `None`。
+    /// 必填参数个数 = 第一个 `Some` 的下标（默认值必须从末尾连续）。
+    pub defaults: Vec<Option<Expr>>,
 }
 
 /// 结构体表：名字 -> 字段(名字, 类型)。
@@ -86,7 +89,7 @@ pub fn is_nullable_type(t: &Type) -> bool {
         t,
         Type::String
             | Type::Array(_)
-            | Type::Map
+            | Type::Map | Type::Set(_) | Type::KvMap(..)
             | Type::Error
             | Type::Channel(_)
             | Type::Thread
@@ -135,6 +138,43 @@ pub fn type_of<V>(
         Expr::CharLit(_) => Ok(Type::Char),
         Expr::ByteLit(_) => Ok(Type::Byte),
         Expr::StringLit(_) => Ok(Type::String),
+        Expr::Slice(arr, from, to) => {
+            let at = type_of(arr, scopes, funcs, structs)?;
+            let ft = type_of(from, scopes, funcs, structs)?;
+            let tt = type_of(to, scopes, funcs, structs)?;
+            if !matches!(at, Type::Array(_)) {
+                return Err(DialcError::new(
+                    "语义错误：切片 [a..b] 只能用于数组类型", 0, 0,
+                ));
+            }
+            if ft != Type::Int || tt != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：切片 [a..b] 的上下界必须是 int 类型", 0, 0,
+                ));
+            }
+            Ok(at)
+        }
+        Expr::Interp(parts) => {
+            // 插值片段的表达式类型必须可转为字符串（与 str() 的口径一致）。
+            for p in parts {
+                if let InterpPart::Expr(e) = p {
+                    let t = type_of(e, scopes, funcs, structs)?;
+                    match t {
+                        Type::Int | Type::Float | Type::Bool | Type::Char | Type::String => {}
+                        _ => {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：字符串插值 ${{...}} 内的表达式类型 {} 无法转为字符串",
+                                    t.name()
+                                ),
+                                0, 0,
+                            ))
+                        }
+                    }
+                }
+            }
+            Ok(Type::String)
+        }
         Expr::Var(name) => lookup(name).ok_or_else(|| {
             DialcError::new(format!("语义错误：未声明的变量 '{}'", name), 0, 0)
         }),
@@ -177,6 +217,8 @@ pub fn type_of<V>(
                 Type::String => string_method_type(method, args, scopes, funcs, structs),
                 Type::Array(elem) => array_method_type(elem.as_ref(), method, args, scopes, funcs, structs),
                 Type::Map => map_method_type(method, args, scopes, funcs, structs),
+                Type::Set(elem) => set_method_type(elem.as_ref(), method, args, scopes, funcs, structs),
+                Type::KvMap(k, v) => kvmap_method_type(k.as_ref(), v.as_ref(), method, args, scopes, funcs, structs),
                 Type::Error => error_method_type(method, args, scopes, funcs, structs),
                 _ => Err(DialcError::new(
                     format!("语义错误：类型 '{}' 不支持方法调用 '{}'", ot.name(), method),
@@ -290,6 +332,17 @@ pub fn type_of<V>(
                 ))
             }
         }
+        Expr::Unary(UnOp::BitNot, e) => {
+            let t = type_of(e, scopes, funcs, structs)?;
+            if t == Type::Int {
+                Ok(Type::Int)
+            } else {
+                Err(DialcError::new(
+                    "语义错误：按位取反 '~' 只能用于 int 类型",
+                    0, 0,
+                ))
+            }
+        }
         Expr::Unary(UnOp::Not, e) => {
             let t = type_of(e, scopes, funcs, structs)?;
             if t == Type::Bool {
@@ -300,6 +353,27 @@ pub fn type_of<V>(
                     0, 0,
                 ))
             }
+        }
+        Expr::Ternary(cond, then_e, else_e) => {
+            let ct = type_of(cond, scopes, funcs, structs)?;
+            if ct != Type::Bool {
+                return Err(DialcError::new(
+                    "语义错误：三元表达式的条件必须是 bool 类型",
+                    0, 0,
+                ));
+            }
+            let tt = type_of(then_e, scopes, funcs, structs)?;
+            let et = type_of(else_e, scopes, funcs, structs)?;
+            if !types_compatible(&tt, &et) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：三元表达式的两个分支类型必须相同（得到 {} 与 {}）",
+                        tt.name(), et.name()
+                    ),
+                    0, 0,
+                ));
+            }
+            Ok(tt)
         }
         Expr::Binary(left, op, right) => {
             let lt = type_of(left, scopes, funcs, structs)?;
@@ -358,6 +432,17 @@ pub fn type_of<V>(
                     } else {
                         Err(DialcError::new(
                             "语义错误：比较运算(< > <= >=)要求两个操作数类型完全相同且均为数值类型（int 或 float，不可混合）或同为 char",
+                            0, 0,
+                        ))
+                    }
+                }
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                    // 位运算仅对 int 有意义（i64 上做按位操作）。
+                    if lt == Type::Int && rt == Type::Int {
+                        Ok(Type::Int)
+                    } else {
+                        Err(DialcError::new(
+                            "语义错误：位运算(& | ^ ~ << >>)要求两个操作数均为 int 类型",
                             0, 0,
                         ))
                     }
@@ -540,6 +625,39 @@ pub fn type_of<V>(
                         ));
                     }
                     return Ok(Type::Map);
+                }
+                "new_set" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new(
+                            "语义错误：new_set 不接受参数",
+                            0, 0,
+                        ));
+                    }
+                    // v1.00 的 set 元素类型固定为 int（见 check_type_wellformed）。
+                    return Ok(Type::Set(Box::new(Type::Int)));
+                }
+                "new_kv_map" => {
+                    // 两个 kind 实参由 parse_var_decl 从声明标注补齐（源码里永远写 new_kv_map()）。
+                    // 出现在别处（0 参数）时明确拒绝：泛型 map 必须有静态类型标注。
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：new_kv_map() 只能在带 map<K,V> 类型标注的 var 声明中使用",
+                            0, 0,
+                        ));
+                    }
+                    let kk = match &args[0] {
+                        Expr::IntLit(n) => *n,
+                        _ => return Err(DialcError::new(
+                            "内部错误：new_kv_map 的键 kind 不是编译期常量", 0, 0,
+                        )),
+                    };
+                    let vk = match &args[1] {
+                        Expr::IntLit(n) => *n,
+                        _ => return Err(DialcError::new(
+                            "内部错误：new_kv_map 的值 kind 不是编译期常量", 0, 0,
+                        )),
+                    };
+                    return Ok(Type::KvMap(Box::new(kv_type_from_kind(kk)?), Box::new(kv_type_from_kind(vk)?)));
                 }
                 // bytes（二进制字节缓冲区，v0.98.2）：与 string 布局相同但类型独立，
                 // 因此两者之间的转换必须**显式**走这些内置，编译器才拦得住混用。
@@ -1028,16 +1146,111 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::Void);
                 }
+                // ---- v1.00 内建：断言 / 退出 / 数学函数 ----
+                "assert" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(DialcError::new(
+                            "语义错误：assert 需要 1 或 2 个参数（bool 条件 [，string 消息]）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Bool {
+                        return Err(DialcError::new(
+                            "语义错误：assert 的条件必须是 bool", 0, 0,
+                        ));
+                    }
+                    if args.len() == 2
+                        && type_of(&args[1], scopes, funcs, structs)? != Type::String
+                    {
+                        return Err(DialcError::new(
+                            "语义错误：assert 的消息必须是 string", 0, 0,
+                        ));
+                    }
+                    return Ok(Type::Void);
+                }
+                "panic" => {
+                    if args.len() != 1
+                        || type_of(&args[0], scopes, funcs, structs)? != Type::String
+                    {
+                        return Err(DialcError::new(
+                            "语义错误：panic 需要 1 个 string 参数", 0, 0,
+                        ));
+                    }
+                    return Ok(Type::Void);
+                }
+                "exit" => {
+                    if args.len() != 1
+                        || type_of(&args[0], scopes, funcs, structs)? != Type::Int
+                    {
+                        return Err(DialcError::new(
+                            "语义错误：exit 需要 1 个 int 参数（退出码）", 0, 0,
+                        ));
+                    }
+                    return Ok(Type::Void);
+                }
+                "min" | "max" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 2 个参数", name), 0, 0,
+                        ));
+                    }
+                    let a = type_of(&args[0], scopes, funcs, structs)?;
+                    let b = type_of(&args[1], scopes, funcs, structs)?;
+                    if a != b || (a != Type::Int && a != Type::Float) {
+                        return Err(DialcError::new(
+                            "语义错误：min / max 要求两个同类型参数，且只能是 int 或 float",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(a);
+                }
+                "abs" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：abs 需要 1 个参数", 0, 0,
+                        ));
+                    }
+                    let a = type_of(&args[0], scopes, funcs, structs)?;
+                    if a != Type::Int && a != Type::Float {
+                        return Err(DialcError::new(
+                            "语义错误：abs 的参数必须是 int 或 float", 0, 0,
+                        ));
+                    }
+                    return Ok(a);
+                }
+                "pow" => {
+                    if args.len() != 2
+                        || type_of(&args[0], scopes, funcs, structs)? != Type::Float
+                        || type_of(&args[1], scopes, funcs, structs)? != Type::Float
+                    {
+                        return Err(DialcError::new(
+                            "语义错误：pow 需要 2 个 float 参数", 0, 0,
+                        ));
+                    }
+                    return Ok(Type::Float);
+                }
+                "sqrt" | "floor" | "ceil" | "round" => {
+                    if args.len() != 1
+                        || type_of(&args[0], scopes, funcs, structs)? != Type::Float
+                    {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 1 个 float 参数", name), 0, 0,
+                        ));
+                    }
+                    return Ok(Type::Float);
+                }
                 _ => {}
             }
             if name == "print" {
-                if args.len() != 1 {
+                if args.is_empty() {
                     return Err(DialcError::new(
-                        "语义错误：内置函数 print 需要恰好 1 个参数",
+                        "语义错误：内置函数 print 至少需要 1 个参数",
                         0, 0,
                     ));
                 }
-                let pt = type_of(&args[0], scopes, funcs, structs)?;
+                // variadic（v1.00）：逐个校验实参类型，全部可输出才放行。
+                for a in args {
+                let pt = type_of(a, scopes, funcs, structs)?;
                 match pt {
                     // char 打印的是字符本身（不是码点数字），与 int 明确区分。
                     // byte 打印的是**数值**（0~255），也不是字符。
@@ -1067,6 +1280,12 @@ pub fn type_of<V>(
                     Type::Map => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print 哈希表，请逐值打印 print(m.get(k))",
+                            0, 0,
+                        ))
+                    }
+                    Type::Set(_) | Type::KvMap(..) => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print 集合 / 泛型 map，请先用 values() 取快照再逐元素打印",
                             0, 0,
                         ))
                     }
@@ -1109,6 +1328,7 @@ pub fn type_of<V>(
                         ))
                     }
                 }
+                } // for a in args（variadic）
                 // print 是**语句**而非表达式：无返回值，因此不能出现在
                 // 赋值右侧、return 或任何需要值的位置。
                 Ok(Type::Void)
@@ -1116,13 +1336,14 @@ pub fn type_of<V>(
                 // 原样输出、**不换行**（v0.98.2）：连续输出的基本积木。
                 // 与 print 的区别只有「结尾那个 '\n'」，参数类型要求则完全一致——
                 // 两者都接受标量与字符串，不接受数组/结构体/句柄（那些没有可读形态）。
-                if args.len() != 1 {
+                if args.is_empty() {
                     return Err(DialcError::new(
-                        "语义错误：内置函数 print_raw 需要恰好 1 个参数",
+                        "语义错误：内置函数 print_raw 至少需要 1 个参数",
                         0, 0,
                     ));
                 }
-                let pt = type_of(&args[0], scopes, funcs, structs)?;
+                for a in args {
+                let pt = type_of(a, scopes, funcs, structs)?;
                 match pt {
                     Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String => {}
                     Type::Array(_) => {
@@ -1148,6 +1369,12 @@ pub fn type_of<V>(
                     Type::Map => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print_raw 哈希表，请逐值输出",
+                            0, 0,
+                        ))
+                    }
+                    Type::Set(_) | Type::KvMap(..) => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print_raw 集合 / 泛型 map，请先用 values() 取快照再逐元素输出",
                             0, 0,
                         ))
                     }
@@ -1188,6 +1415,7 @@ pub fn type_of<V>(
                         ))
                     }
                 }
+                } // for a in args（variadic）
                 // 与 print 同为语句：无返回值。
                 Ok(Type::Void)
             } else if name == "write_char" {
@@ -1210,13 +1438,18 @@ pub fn type_of<V>(
                 let info = funcs.get(name).ok_or_else(|| {
                     DialcError::new(format!("语义错误：调用了未定义的函数 '{}'", name), 0, 0)
                 })?;
-                if info.params.len() != args.len() {
+                // 默认实参（v1.00）：实参个数允许落在 [必填数, 形参总数] 区间。
+                // 必填数 = 第一个带默认值形参的下标；默认值从末尾连续（parser 已强制）。
+                let required = info
+                    .defaults
+                    .iter()
+                    .position(|d| d.is_some())
+                    .unwrap_or(info.params.len());
+                if args.len() < required || args.len() > info.params.len() {
                     return Err(DialcError::new(
                         format!(
-                            "语义错误：函数 '{}' 需要 {} 个参数，但传入了 {} 个",
-                            name,
-                            info.params.len(),
-                            args.len()
+                            "语义错误：函数 '{}' 需要 {}~{} 个参数，但传入了 {} 个",
+                            name, required, info.params.len(), args.len()
                         ),
                         0, 0,
                     ));
@@ -1345,7 +1578,7 @@ fn is_array_elem_type(t: &Type) -> bool {
             | Type::String
             | Type::Bytes
             | Type::Array(_)
-            | Type::Map
+            | Type::Map | Type::Set(_) | Type::KvMap(..)
             | Type::Error
             | Type::Channel(_)
             | Type::Opaque(_)
@@ -1474,6 +1707,152 @@ fn map_method_type<V>(
     }
 }
 
+/// 集合方法（v1.00，`set<T>`，底层复用 int→int map 的键集）的签名与返回类型。
+///
+/// `add` 与 `map.put` / `array.push` 同构：返回可能更新后的容器指针，由语句级
+/// 代码生成写回接收变量（COW 语义）；`values` 返回成员快照数组，可安全迭代。
+/// `remove` 返回被删成员的值（恒为 1），未命中返回 -1 —— 与 `map.remove` 一致，
+/// 刻意不返回容器指针，避免赋值时产生未 retain 的别名（那会导致 double free）。
+fn set_method_type<V>(
+    elem: &Type,
+    method: &str,
+    args: &[Expr],
+    scopes: &Scopes<V>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<Type> {
+    let expect_int_args = |n: usize| -> Result<()> {
+        if args.len() != n {
+            return Err(DialcError::new(
+                format!("语义错误：set.{}() 需要 {} 个参数", method, n),
+                0, 0,
+            ));
+        }
+        for a in args {
+            if type_of(a, scopes, funcs, structs)? != Type::Int {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：set.{}() 的实参必须是 int（当前版本 set 元素类型只支持 int）",
+                        method
+                    ),
+                    0, 0,
+                ));
+            }
+        }
+        Ok(())
+    };
+    let no_args = || -> Result<()> {
+        if args.is_empty() {
+            Ok(())
+        } else {
+            Err(DialcError::new(
+                format!("语义错误：set.{}() 不接受参数", method),
+                0, 0,
+            ))
+        }
+    };
+    match method {
+        "add" => { expect_int_args(1)?; Ok(Type::Set(Box::new(elem.clone()))) }
+        "contains" => { expect_int_args(1)?; Ok(Type::Bool) }
+        "remove" => { expect_int_args(1)?; Ok(Type::Int) }
+        "size" => { no_args()?; Ok(Type::Int) }
+        "values" => { no_args()?; Ok(Type::Array(Box::new(elem.clone()))) }
+        _ => Err(DialcError::new(
+            format!("语义错误：set 无方法 '{}'", method),
+            0, 0,
+        )),
+    }
+}
+
+/// kind 编码 -> Dial 类型（与 parser::kv_kind_of / dial_kvmap.c 的 KV_* 一致）。
+fn kv_type_from_kind(k: i64) -> Result<Type> {
+    match k {
+        0 => Ok(Type::Int),
+        1 => Ok(Type::Float),
+        2 => Ok(Type::String),
+        3 => Ok(Type::Bool),
+        4 => Ok(Type::Char),
+        5 => Ok(Type::Byte),
+        _ => Err(DialcError::new(
+            "语义错误：map<K,V> 的键/值类型不受支持（kind 越界）", 0, 0,
+        )),
+    }
+}
+
+/// 泛型 map<K,V> 方法（v1.00）的签名与返回类型。
+///
+/// 零隐式转换铁律：`put` 的键/值必须**精确**匹配 K/V（例如 `map<string,int>`
+/// 的 `put(1, 2)` 会被拒绝）。`get` / `remove` 返回 V，`contains` 返回 bool。
+/// `keys()` / `values()` 是迭代 API：返回成员快照数组，交给既有 `for (v in arr)`。
+fn kvmap_method_type<V>(
+    k: &Type,
+    v: &Type,
+    method: &str,
+    args: &[Expr],
+    scopes: &Scopes<V>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<Type> {
+    let arg_t = |i: usize| type_of(&args[i], scopes, funcs, structs);
+    match method {
+        "put" => {
+            if args.len() != 2 || arg_t(0)? != *k || arg_t(1)? != *v {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：map<{}, {}>.put(k, v) 需要 2 个参数，类型分别为 {} 与 {}",
+                        k.name(), v.name(), k.name(), v.name()
+                    ),
+                    0, 0,
+                ));
+            }
+            // 与 map.put / array.push / set.add 同款：返回（可能更新后的）容器指针，
+            // 由语句级代码生成写回接收变量（COW 契约）。
+            Ok(Type::KvMap(Box::new(k.clone()), Box::new(v.clone())))
+        }
+        "get" | "contains" | "remove" => {
+            if args.len() != 1 || arg_t(0)? != *k {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：map<{}, {}>.{}() 需要 1 个 {} 类型的键",
+                        k.name(), v.name(), method, k.name()
+                    ),
+                    0, 0,
+                ));
+            }
+            Ok(if method == "contains" { Type::Bool } else { v.clone() })
+        }
+        "size" => {
+            if !args.is_empty() {
+                return Err(DialcError::new("语义错误：map.size() 不接受参数", 0, 0));
+            }
+            Ok(Type::Int)
+        }
+        "keys" => {
+            if !args.is_empty() {
+                return Err(DialcError::new("语义错误：map.keys() 不接受参数", 0, 0));
+            }
+            // string 键 -> string[]（RC 快照）；其它键 -> int[]（值或位模式）。
+            let elem = if *k == Type::String { Type::String } else { Type::Int };
+            Ok(Type::Array(Box::new(elem)))
+        }
+        "values" => {
+            if !args.is_empty() {
+                return Err(DialcError::new("语义错误：map.values() 不接受参数", 0, 0));
+            }
+            if *v != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：map.values() 当前版本只支持 V = int（其它标量值请用 get 逐键取值）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Array(Box::new(Type::Int)))
+        }
+        _ => Err(DialcError::new(
+            format!("语义错误：map<K,V> 无方法 '{}'", method), 0, 0,
+        )),
+    }
+}
+
 // ===================== 入口 =====================
 
 /// 入口：收集函数签名 + 结构体表，校验 main，逐一检查函数体，最后跑数据流分析写入 move_hint。
@@ -1487,6 +1866,11 @@ const RESERVED_NAMES: &[&str] = &[
     "close", "closed", "len", "done", "try_recv",
     // v0.9：判空与超时接收
     "is_null", "recv_timeout",
+    // v1.00：断言 / 退出 / 数学内建
+    "assert", "panic", "exit", "min", "max", "abs",
+    "sqrt", "pow", "floor", "ceil", "round",
+    // v1.00：集合与泛型 map 构造
+    "new_set", "new_kv_map",
 ];
 
 /// `externs`：由 `import` 引入的**包外部函数**（v0.92，见 package.rs）。
@@ -1561,8 +1945,33 @@ pub fn analyze(
             FuncInfo {
                 params: f.params.iter().map(|(_, t)| t.clone()).collect(),
                 ret: f.ret.clone(),
+                defaults: f.defaults.clone(),
             },
         );
+    }
+
+    // 2.4) 默认实参类型校验（v1.00）：默认值必须是与形参类型兼容的常量表达式。
+    // 用空作用域求值——Dial 没有全局变量，默认值里引用任何变量都应当场拒绝。
+    for f in &program.functions {
+        let empty: Scopes<VarState> = vec![HashMap::new()];
+        for (i, d) in f.defaults.iter().enumerate() {
+            if let Some(e) = d {
+                let dt = type_of(e, &empty, &funcs, &structs)?;
+                let pt = &f.params[i].1;
+                if !types_compatible(&dt, pt) {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：函数 '{}' 第 {} 个形参的默认值类型 {} 与形参类型 {} 不兼容",
+                            f.name,
+                            i + 1,
+                            dt.name(),
+                            pt.name()
+                        ),
+                        f.line, f.col,
+                    ));
+                }
+            }
+        }
     }
 
     // 2.5) 导入的包外部函数。
@@ -1619,6 +2028,40 @@ pub fn analyze(
 /// 编译期就拒绝而非运行期静默降级的地方。
 fn check_type_wellformed(t: &Type, ctx: &str, line: usize, col: usize) -> Result<()> {
     match t {
+        // v1.00 的 set 复用 int→int map 的键集，故元素类型只支持 int。
+        // 放宽到别的元素类型需要 C 侧先支持任意宽度的键，这里在编译期明确拒绝，
+        // 避免「写了 set<float> 却静默按 int 截断」这类数据损坏。
+        Type::KvMap(k, v) => {
+            let ok_k = matches!(k.as_ref(), Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String);
+            // v1.00 值只支持标量：string 值的 get 未命中默认对象会带来所有权移交歧义。
+            let ok_v = matches!(v.as_ref(), Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte);
+            if ok_k && ok_v {
+                Ok(())
+            } else {
+                Err(DialcError::new(
+                    format!(
+                        "语义错误：{} 是 map<{}, {}> 类型；当前版本键支持 int/float/bool/char/byte/string，值只支持标量（暂不支持 string 值）",
+                        ctx, k.name(), v.name()
+                    ),
+                    line, col,
+                ))
+            }
+        }
+        Type::Set(elem) => {
+            if matches!(elem.as_ref(), Type::Int) {
+                Ok(())
+            } else {
+                Err(DialcError::new(
+                    format!(
+                        "语义错误：{} 是 set<{}> 类型，但当前版本 set 的元素类型只支持 int",
+                        ctx,
+                        elem.as_ref().name()
+                    ),
+                    line,
+                    col,
+                ))
+            }
+        }
         Type::Array(elem) => {
             if is_array_elem_type(elem) {
                 Ok(())
@@ -1644,7 +2087,7 @@ fn check_type_wellformed(t: &Type, ctx: &str, line: usize, col: usize) -> Result
                 return Ok(()); // 占位：元素类型未定
             }
             match elem.as_ref() {
-                Type::String | Type::Array(_) | Type::Map | Type::Error | Type::Channel(_) => Ok(()),
+                Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Channel(_) => Ok(()),
                 _ => Err(DialcError::new(
                     format!(
                         "语义错误：{} 是 channel<{}> 类型，但通道元素类型只支持不透明句柄（string / int[] / map / error / channel）",
@@ -1712,6 +2155,43 @@ fn mark_moved(scopes: &mut Scopes<VarState>, name: &str) {
 ///
 /// 只遍历本语句自身的表达式，**不**下探嵌套语句块：嵌套块由 `check_stmt`
 /// 递归时各自检查，重复下探只会造成重复标记。
+/// `defer` 体内是否含控制流跳转语句。
+///
+/// 延迟语句在「离开作用域」时才执行，此时 `break` / `continue` 的跳转目标可能已随循环结束
+/// 失效，`return` / `throw` 则会与触发该出口的那次跳转互相冲突（甚至生成非法 IR）。
+/// 因此编译期一律拒绝，并给出明确诊断，而不是把未定义行为留给运行期。
+fn defer_has_jump(s: &Stmt) -> bool {
+    match s {
+        Stmt::Break(..) | Stmt::Continue(..) | Stmt::Return(..) | Stmt::Throw(..) => true,
+        Stmt::Defer(inner, ..) => defer_has_jump(inner),
+        Stmt::Block { body, .. }
+        | Stmt::While { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::ForEach { body, .. }
+        | Stmt::ForEachMap { body, .. }
+        | Stmt::DoWhile { body, .. } => body.iter().any(defer_has_jump),
+        Stmt::If { then_branch, else_branch, .. } => {
+            then_branch.iter().any(defer_has_jump)
+                || else_branch
+                    .as_ref()
+                    .map(|b| b.iter().any(defer_has_jump))
+                    .unwrap_or(false)
+        }
+        Stmt::Match { arms, .. } => arms.iter().any(|a| a.body.iter().any(defer_has_jump)),
+        Stmt::Try { body, catch, .. } => {
+            body.iter().any(defer_has_jump) || catch.body.iter().any(defer_has_jump)
+        }
+        Stmt::Select { arms, default_body, .. } => {
+            arms.iter().any(|a| a.body.iter().any(defer_has_jump))
+                || default_body
+                    .as_ref()
+                    .map(|b| b.iter().any(defer_has_jump))
+                    .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 fn check_moved_stmt(
     stmt: &Stmt,
     scopes: &mut Scopes<VarState>,
@@ -1752,6 +2232,18 @@ fn check_moved_stmt(
         Stmt::For { start, end, .. } => {
             check_moved_expr(start, scopes, funcs, structs, line, col)?;
             check_moved_expr(end, scopes, funcs, structs, line, col)
+        }
+        Stmt::ForEach { coll, .. } | Stmt::ForEachMap { coll, .. } => {
+            check_moved_expr(coll, scopes, funcs, structs, line, col)
+        }
+        Stmt::DoWhile { cond, .. } => {
+            check_moved_expr(cond, scopes, funcs, structs, line, col)
+        }
+        Stmt::Match { subject, .. } => {
+            check_moved_expr(subject, scopes, funcs, structs, line, col)
+        }
+        Stmt::Defer(inner, ..) => {
+            check_moved_stmt(inner, scopes, funcs, structs)
         }
         Stmt::Return(Some(e), ..) | Stmt::Throw(e, ..) | Stmt::Expr(e, ..) => {
             check_moved_expr(e, scopes, funcs, structs, line, col)
@@ -1850,7 +2342,7 @@ fn check_moved_expr(
                     check_moved_expr(a, scopes, funcs, structs, line, col)?;
                     if let Expr::Var(v) = a {
                         if let Ok(t) = type_of(a, scopes, funcs, structs) {
-                            if matches!(t, Type::String | Type::Array(_) | Type::Map | Type::Error) {
+                            if matches!(t, Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error) {
                                 mark_moved(scopes, v);
                             }
                         }
@@ -1885,12 +2377,17 @@ fn stmt_pos(stmt: &Stmt) -> (usize, usize) {
         | Stmt::If { line, col, .. }
         | Stmt::While { line, col, .. }
         | Stmt::For { line, col, .. }
+        | Stmt::ForEach { line, col, .. }
+        | Stmt::ForEachMap { line, col, .. }
+        | Stmt::DoWhile { line, col, .. }
+        | Stmt::Match { line, col, .. }
         | Stmt::Try { line, col, .. }
         | Stmt::Select { line, col, .. }
         | Stmt::Return(_, line, col)
         | Stmt::Throw(_, line, col)
         | Stmt::Break(line, col)
         | Stmt::Continue(line, col)
+        | Stmt::Defer(_, line, col)
         | Stmt::Expr(_, line, col)
         | Stmt::Block { line, col, .. } => (*line, *col),
     }
@@ -2175,7 +2672,7 @@ fn check_stmt(
             scopes.pop();
             Ok(())
         }
-        Stmt::For { var, start, end, body, .. } => {
+        Stmt::For { var, start, end, step, body, .. } => {
             let st = type_of(start, scopes, funcs, structs)?;
             let et = type_of(end, scopes, funcs, structs)?;
             if st != Type::Int {
@@ -2189,6 +2686,24 @@ fn check_stmt(
                     "语义错误：for 循环上界（end）必须是 int 类型",
                     0, 0,
                 ));
+            }
+            // 步长：可选，必须是编译期可求值的 int 常量且为正数（负步长会改变区间语义，暂不开放）。
+            if let Some(se) = step {
+                let sv = type_of(se, scopes, funcs, structs)?;
+                if sv != Type::Int {
+                    return Err(DialcError::new(
+                        "语义错误：for 循环步长（step）必须是 int 类型",
+                        0, 0,
+                    ));
+                }
+                if let Expr::IntLit(n) = se {
+                    if *n <= 0 {
+                        return Err(DialcError::new(
+                            "语义错误：for 循环步长（step）必须为正整数（当前支持递增区间 [start, end)）",
+                            0, 0,
+                        ));
+                    }
+                }
             }
             if scopes.last().unwrap().contains_key(var) {
                 return Err(DialcError::new(
@@ -2207,6 +2722,165 @@ fn check_stmt(
             }
             scopes.pop();
             Ok(())
+        }
+        Stmt::ForEach { value, coll, body, .. } => {
+            let ct = type_of(coll, scopes, funcs, structs)?;
+            let elem = match &ct {
+                Type::Array(e) => (**e).clone(),
+                // 集合迭代：成员即键，语义层按元素类型绑定迭代变量；
+                // codegen 会先快照成 int[]，再走与数组相同的迭代路径。
+                Type::Set(e) => (**e).clone(),
+                _ => {
+                    return Err(DialcError::new(
+                        "语义错误：for (v in coll) 的 coll 必须是数组 Array(T) 或集合 set<T>",
+                        0, 0,
+                    ))
+                }
+            };
+            if scopes.last().unwrap().contains_key(value) {
+                return Err(DialcError::new(
+                    format!("语义错误：迭代变量 '{}' 与外层变量重名", value),
+                    0, 0,
+                ));
+            }
+            scopes.push(HashMap::new());
+            scopes
+                .last_mut()
+                .unwrap()
+                .insert(value.clone(), (elem.clone(), VarState::new(true)));
+            for s in body {
+                check_stmt_at(s, scopes, funcs, f, structs, true, try_depth)?;
+            }
+            scopes.pop();
+            Ok(())
+        }
+        Stmt::ForEachMap { key, value, coll, body, .. } => {
+            let ct = type_of(coll, scopes, funcs, structs)?;
+            if ct != Type::Map {
+                return Err(DialcError::new(
+                    "语义错误：for (k, v in m) 的 m 必须是 map 类型",
+                    0, 0,
+                ));
+            }
+            if scopes.last().unwrap().contains_key(key) {
+                return Err(DialcError::new(
+                    format!("语义错误：键变量 '{}' 与外层变量重名", key),
+                    0, 0,
+                ));
+            }
+            if scopes.last().unwrap().contains_key(value) {
+                return Err(DialcError::new(
+                    format!("语义错误：值变量 '{}' 与外层变量重名", value),
+                    0, 0,
+                ));
+            }
+            scopes.push(HashMap::new());
+            scopes
+                .last_mut()
+                .unwrap()
+                .insert(key.clone(), (Type::Int, VarState::new(true)));
+            scopes
+                .last_mut()
+                .unwrap()
+                .insert(value.clone(), (Type::Int, VarState::new(true)));
+            for s in body {
+                check_stmt_at(s, scopes, funcs, f, structs, true, try_depth)?;
+            }
+            scopes.pop();
+            Ok(())
+        }
+        Stmt::DoWhile { body, cond, .. } => {
+            let ct = type_of(cond, scopes, funcs, structs)?;
+            if ct != Type::Bool {
+                return Err(DialcError::new(
+                    "语义错误：do-while 条件必须是 bool 类型",
+                    0, 0,
+                ));
+            }
+            scopes.push(HashMap::new());
+            for s in body {
+                check_stmt_at(s, scopes, funcs, f, structs, true, try_depth)?;
+            }
+            scopes.pop();
+            Ok(())
+        }
+        Stmt::Match { subject, arms, .. } => {
+            let st = type_of(subject, scopes, funcs, structs)?;
+            // 主体类型决定允许的模式类型；仅支持字面量可比较的类型
+            match st {
+                Type::Int | Type::Bool | Type::Char | Type::String => {}
+                _ => {
+                    return Err(DialcError::new(
+                        "语义错误：match 主体必须是 int / bool / char / string 类型",
+                        0, 0,
+                    ))
+                }
+            }
+            // 校验每个模式的类型与主体一致，并要求存在 _ 通配分支
+            let mut has_wildcard = false;
+            for arm in arms {
+                match &arm.pattern {
+                    MatchPattern::Wildcard => has_wildcard = true,
+                    MatchPattern::Int(_) => {
+                        if st != Type::Int {
+                            return Err(DialcError::new(
+                                "语义错误：match 模式 int 与主体类型不符",
+                                0, 0,
+                            ));
+                        }
+                    }
+                    MatchPattern::Bool(_) => {
+                        if st != Type::Bool {
+                            return Err(DialcError::new(
+                                "语义错误：match 模式 bool 与主体类型不符",
+                                0, 0,
+                            ));
+                        }
+                    }
+                    MatchPattern::Char(_) => {
+                        if st != Type::Char {
+                            return Err(DialcError::new(
+                                "语义错误：match 模式 char 与主体类型不符",
+                                0, 0,
+                            ));
+                        }
+                    }
+                    MatchPattern::Str(_) => {
+                        if st != Type::String {
+                            return Err(DialcError::new(
+                                "语义错误：match 模式 string 与主体类型不符",
+                                0, 0,
+                            ));
+                        }
+                    }
+                }
+            }
+            if !has_wildcard {
+                return Err(DialcError::new(
+                    "语义错误：match 必须包含 `_` 通配分支（保证不遗漏任何值，杜绝未定义行为）",
+                    0, 0,
+                ));
+            }
+            // 各分支体独立作用域
+            for arm in arms {
+                scopes.push(HashMap::new());
+                for s in &arm.body {
+                    check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth)?;
+                }
+                scopes.pop();
+            }
+            Ok(())
+        }
+        Stmt::Defer(inner, ..) => {
+            // defer 在离开作用域时执行，体内的控制流跳转目标届时可能已失效，编译期拒绝。
+            if defer_has_jump(inner) {
+                return Err(DialcError::new(
+                    "语义错误：defer 体内不得使用 break / continue / return / throw（延迟语句在离开作用域时执行，跳转目标可能已失效）",
+                    0, 0,
+                ));
+            }
+            // defer 内部的语句语义上仍受当前上下文约束（作用域、循环、try 深度一致）
+            check_stmt_at(inner, scopes, funcs, f, structs, in_loop, try_depth)
         }
         Stmt::Break(line, col) => {
             if !in_loop {
@@ -2510,6 +3184,23 @@ fn collect_refs(stmts: &[Stmt], si: &mut usize, loop_d: usize, cond_d: usize, re
                 record_expr_refs(end, *si, unsafe_ctx, refs);
                 collect_refs(body, si, loop_d + 1, cond_d, refs);
             }
+            Stmt::ForEach { coll, body, .. } | Stmt::ForEachMap { coll, body, .. } => {
+                record_expr_refs(coll, *si, unsafe_ctx, refs);
+                collect_refs(body, si, loop_d + 1, cond_d, refs);
+            }
+            Stmt::DoWhile { cond, body, .. } => {
+                record_expr_refs(cond, *si, unsafe_ctx, refs);
+                collect_refs(body, si, loop_d + 1, cond_d, refs);
+            }
+            Stmt::Match { subject, arms, .. } => {
+                record_expr_refs(subject, *si, unsafe_ctx, refs);
+                for arm in arms {
+                    collect_refs(&arm.body, si, loop_d, cond_d + 1, refs);
+                }
+            }
+            Stmt::Defer(inner, ..) => {
+                collect_refs(std::slice::from_ref(inner), si, loop_d, cond_d, refs);
+            }
             Stmt::Return(Some(e), ..) => {
                 record_expr_refs(e, *si, unsafe_ctx, refs);
             }
@@ -2571,6 +3262,20 @@ fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, f
             }
             Stmt::For { body, .. } => {
                 set_moves(body, si, loop_d + 1, cond_d, facts);
+            }
+            Stmt::ForEach { body, .. } | Stmt::ForEachMap { body, .. } => {
+                set_moves(body, si, loop_d + 1, cond_d, facts);
+            }
+            Stmt::DoWhile { body, .. } => {
+                set_moves(body, si, loop_d + 1, cond_d, facts);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms.iter_mut() {
+                    set_moves(&mut arm.body, si, loop_d, cond_d + 1, facts);
+                }
+            }
+            Stmt::Defer(inner, ..) => {
+                set_moves(std::slice::from_mut(inner), si, loop_d, cond_d, facts);
             }
             Stmt::Try { body, catch, .. } => {
                 set_moves(body, si, loop_d, cond_d, facts);

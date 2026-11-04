@@ -1,0 +1,34 @@
+// defer 全出口验证（v1.00）
+// 覆盖：正常落穿、return、continue、break 四种出口都按 LIFO 触发延迟语句。
+
+fn with_return(): int {
+    defer print("fn.exit");
+    return 42;
+}
+
+fn main(): int {
+    print("[return]");
+    print(with_return());      // fn.exit 先执行，然后输出 42
+
+    print("[continue]");
+    for (i in 0..3) {
+        defer print("iter.end");   // 每轮迭代结束（含 continue）都触发一次
+        if (i == 1) {
+            continue;
+        }
+        print(i);
+    }
+
+    print("[break]");
+    {
+        defer print("block.end");
+        for (j in 0..5) {
+            defer print("inner.end");
+            if (j == 1) {
+                break;
+            }
+            print(j);
+        }
+    }
+    return 0;
+}

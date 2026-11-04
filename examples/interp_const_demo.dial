@@ -1,0 +1,30 @@
+// 表达力增强演示（v1.00）：字符串插值 + 文件级常量
+//
+// const 是编译期内联的字面量：不占运行时存储、不可重新赋值、无隐式转换。
+// 字符串插值 "${...}" 内可放任意表达式，逐段转字符串后拼接。
+
+const BASE: int = 100;
+const PI: float = 3.14;
+const APP: string = "dial";
+const FLAG: bool = true;
+const CH: char = 'Z';
+
+fn main(): int {
+    var n: int = 7;
+    var s: string = "world";
+
+    print("[interp]");
+    print("n=${n}, base=${BASE}, sum=${n + BASE}");
+    print("pi=${PI}, flag=${FLAG}, ch=${CH}, app=${APP}");
+    print("str=${s}!");                 // 插值片段是「借来的」string 变量
+    print("nested=${min(n, 3)}");       // 片段里可调用函数
+
+    print("[const]");
+    print(BASE);
+    print(PI);
+    print(APP);
+    print(FLAG);
+    print(CH);
+    print(BASE + 1);
+    return 0;
+}

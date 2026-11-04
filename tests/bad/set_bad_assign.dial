@@ -1,0 +1,5 @@
+// 负向：零隐式转换铁律 —— map 不能赋给 set<int>
+fn main(): int {
+    var s: set<int> = new_map();
+    return 0;
+}

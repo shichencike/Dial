@@ -561,7 +561,11 @@ pub fn resolve_imports(
                 .map_err(|e| e.to_string())?;
             externs.push((
                 f.name.clone(),
-                semantic::FuncInfo { params, ret },
+                semantic::FuncInfo {
+                    defaults: vec![None; params.len()],
+                    params,
+                    ret,
+                },
             ));
         }
 
@@ -988,6 +992,8 @@ fn final_link(
     if cfg!(windows) {
         link_cmd.arg("-lpthread").arg("-Wl,-Bdynamic");
     }
+    // v1.00：浮点数学内建（sqrt / pow / floor / ceil / round / fabs）来自 libm。
+    link_cmd.arg("-lm");
     link_cmd.arg("-o").arg(exe);
     if !run_ok(&mut link_cmd) {
         return Err(format!("链接失败：无法用 {} 生成 {}", cc, exe.display()));

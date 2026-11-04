@@ -1,0 +1,5 @@
+// 负向：v1.00 泛型 map 的值只支持标量，不开放 string 值
+fn main(): int {
+    var m: map<string, string> = new_kv_map();
+    return 0;
+}

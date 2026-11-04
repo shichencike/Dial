@@ -1,6 +1,7 @@
 #include "dial_rt_trap.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 /*
@@ -82,4 +83,9 @@ void dial_assert_fail(const char *what) {
     dial_emit(what);
     dial_emit("\n");
     dial_trap();
+}
+
+void dial_exit(int64_t code) {
+    dial_flush_stdout();
+    exit((int)code);
 }

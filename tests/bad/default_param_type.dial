@@ -1,0 +1,3 @@
+// 应当编译失败：默认值 float 与形参 int 不兼容（零隐式转换）
+fn f(a: int = 1.5): int { return a; }
+fn main(): int { return f(); }

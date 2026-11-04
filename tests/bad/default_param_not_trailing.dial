@@ -1,0 +1,3 @@
+// 应当编译失败：带默认值的形参必须位于参数列表末尾
+fn f(a: int = 1, b: int): int { return a + b; }
+fn main(): int { return f(1, 2); }

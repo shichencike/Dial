@@ -1,0 +1,6 @@
+// 负向：集合没有可读形态，不能直接 print
+fn main(): int {
+    var s: set<int> = new_set();
+    print(s);
+    return 0;
+}

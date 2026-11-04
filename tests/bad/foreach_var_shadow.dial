@@ -1,0 +1,9 @@
+// 应当编译失败：集合 for 的迭代变量不得与外层变量重名
+fn main(): int {
+    var v: int = 0;
+    var a: int[] = [1, 2, 3];
+    for (v in a) {
+        print(v);
+    }
+    return 0;
+}

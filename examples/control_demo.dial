@@ -1,0 +1,63 @@
+// 迭代与控制流补全演示（v1.00）
+// 覆盖：区间 for 步长 step、数组遍历 for (v in arr)、映射遍历 for (k, v in m)、
+//       match 多分支、defer 资源清理（LIFO）、do-while。
+
+fn classify(n: int): int {
+    match (n) {
+        1 => { return 10; }
+        2 => { return 20; }
+        _ => { return 0; }
+    }
+    return 0; // 兜底：_ 已覆盖全部路径，编译器仍要求显式函数终点
+}
+
+fn main(): int {
+    // 1) 区间 for 带步长：0, 3, 6, 9（end 独占）
+    print("[step] 0..10 step 3");
+    for (i in 0..10 step 3) {
+        print(i);
+    }
+
+    // 2) 数组遍历：v 的类型由 int[] 的元素类型推导
+    var a: int[] = [5, 6, 7];
+    print("[foreach] int[]");
+    for (v in a) {
+        print(v);
+    }
+
+    // 3) 映射遍历：键与值求和（1+100+2+200 = 303）
+    var m: map = new_map();
+    m.put(1, 100);
+    m.put(2, 200);
+    var total: int = 0;
+    for (k, v in m) {
+        total = total + k + v;
+    }
+    print("[mapiter] sum");
+    print(total);
+
+    // 4) match 多分支：必须含 _ 通配分支，杜绝漏分支
+    print("[match] 1 / 2 / 9");
+    print(classify(1));
+    print(classify(2));
+    print(classify(9));
+
+    // 5) defer：离开裸块时按 LIFO 逆序执行（second 先、first 后）
+    print("[defer] body");
+    {
+        defer print("defer.first");
+        defer print("defer.second");
+        print("in.block");
+    }
+    print("after.block");
+
+    // 6) do-while：循环体至少执行一次
+    print("[dowhile] 0..2");
+    var j: int = 0;
+    do {
+        print(j);
+        j = j + 1;
+    } while (j < 3);
+
+    return 0;
+}

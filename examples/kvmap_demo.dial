@@ -1,0 +1,74 @@
+// 泛型 map<K,V> 演示（v1.00）
+//
+// 与老 map（int→int）完全独立：new_kv_map() 的 K/V 由声明标注决定，
+// 键/值按静态类型编码为 8 字节位模式交给 C 运行时（stdlib/dial_kvmap.c）。
+// string 键按条目 ARC 管理；扩容 / COW 克隆时逐条目 retain，释放时逐条目 release。
+
+fn add_one(m: map<string, int>): int {
+    m.put("extra", 999);
+    return m.size();
+}
+
+fn main(): int {
+    print("[string keys]");
+    var m: map<string, int> = new_kv_map();
+    m.put("alice", 90);
+    m.put("bob", 85);
+    m.put("alice", 95);        // 命中更新：size 不变
+    print(m.size());           // 2
+    print(m.get("alice"));     // 95
+    print(m.get("nobody"));    // -1（未命中）
+    print(m.contains("bob"));  // true
+    print(m.contains("nobody")); // false
+
+    print("[keys]");
+    var ks: string[] = m.keys();
+    print(ks.length());        // 2
+    for (k in ks) { print(k); }
+
+    print("[values]");
+    var vs: int[] = m.values();
+    print(vs.length());        // 2
+    for (x in vs) { print(x); }
+
+    print("[remove]");
+    print(m.remove("bob"));    // 85
+    print(m.size());           // 1
+
+    print("[cow]");
+    print(add_one(m));         // 2（函数内 put 触发 COW，不影响调用者）
+    print(m.size());           // 1
+    print(m.contains("extra")); // false
+
+    print("[float value]");
+    var f: map<int, float> = new_kv_map();
+    f.put(1, 3.25);
+    f.put(2, -0.5);
+    print(f.get(1));           // 3.25（位模式 bitcast，绝不丢小数）
+    print(f.get(2));           // -0.5
+    print(f.get(99));          // -1（未命中）
+
+    print("[float key]");
+    var fk: map<float, int> = new_kv_map();
+    fk.put(2.5, 7);
+    print(fk.get(2.5));        // 7
+
+    print("[bool value]");
+    var b: map<int, bool> = new_kv_map();
+    b.put(1, true);
+    print(b.get(1));           // true
+    print(b.get(99));          // false（未命中）
+
+    print("[char key]");
+    var c: map<char, int> = new_kv_map();
+    c.put('a', 42);
+    print(c.get('a'));         // 42
+
+    print("[regrow]");
+    var g: map<int, int> = new_kv_map();
+    g.put(1, 1); g.put(2, 2); g.put(3, 3); g.put(4, 4);
+    g.put(5, 5); g.put(6, 6); g.put(7, 7); g.put(8, 8);
+    print(g.size());           // 8（触发扩容重哈希）
+    print(g.get(8));           // 8
+    return 0;
+}

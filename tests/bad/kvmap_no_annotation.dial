@@ -1,0 +1,7 @@
+// 负向：new_kv_map() 只能在带 map<K,V> 标注的 var 声明中使用
+fn use(m: map<string, int>): int {
+    return m.size();
+}
+fn main(): int {
+    return use(new_kv_map());
+}

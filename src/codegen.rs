@@ -107,6 +107,18 @@ pub struct CodeGen<'ctx> {
     /// 循环跳转目标栈：(continue 目标块, break 目标块)。
     /// for 的 continue 目标是「自增块」而非条件块——否则 continue 会跳过 i++ 造成死循环。
     loop_targets: RefCell<Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>>,
+    /// `defer` 延迟语句栈：每一层作用域（函数体 / 裸块 / 循环体 / if 分支 / try-catch）维护一个
+    /// 待执行语句列表；离开该作用域时按 LIFO 逆序发射。`defer_stack` 与 `scopes` **严格同步进出**
+    /// （进入作用域时同时 push、离开时同时 pop），因此其下标与 `scopes` 一致，break/continue 可
+    /// 凭循环体所在下标精准排空「被跳出的若干层作用域」的延迟语句。
+    defer_stack: RefCell<Vec<Vec<Stmt>>>,
+    /// 循环嵌套栈：记录每条进入的循环**体帧在 `defer_stack` 中的下标**。break/continue 发生时，
+    /// 从该下标到栈顶的所有（含循环体本身）延迟语句都要按 LIFO 发射并弹出——即离开该循环所跨越的
+    /// 全部作用域（内层裸块等）的 defer 都一并执行。
+    loop_stack: RefCell<Vec<usize>>,
+    /// `try` 嵌套栈：记录每个 try **体帧在 `defer_stack` 中的下标**。`throw` 会 longjmp 离开
+    /// try 体作用域，必须在跳转前按 LIFO 触发该帧及其内层的 defer，否则资源清理被跳过。
+    try_frames: RefCell<Vec<usize>>,
     /// Fail-Fast 安全等级：决定是否在 IR 里插入边界/除零检查与 trap。
     safety: SafetyMode,
 }
@@ -135,6 +147,9 @@ pub fn compile(
         // 不同函数的同名变量不会互串。
         protected: RefCell::new(std::collections::HashSet::new()),
         loop_targets: RefCell::new(Vec::new()),
+        defer_stack: RefCell::new(Vec::new()),
+        loop_stack: RefCell::new(Vec::new()),
+        try_frames: RefCell::new(Vec::new()),
         safety: opts.safety,
     };
 
@@ -342,6 +357,7 @@ impl<'ctx> CodeGen<'ctx> {
             &[i8b.into(), i64b.into(), i64b.into()],
         );
         self.decl_func("dial_array_length", i64b, &[i8b.into()]);
+        self.decl_func("dial_array_slice", i8b, &[i8b.into(), i64b.into(), i64b.into()]);
         self.decl_func("dial_array_clone", i8b, &[i8b.into()]);
         self.decl_void("dial_array_retain", &[i8b.into()]);
         self.decl_void("dial_array_release", &[i8b.into()]);
@@ -356,6 +372,29 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_map_contains", i64b, &[i8b.into(), i64b.into()]);
         self.decl_func("dial_map_remove", i64b, &[i8b.into(), i64b.into()]);
         self.decl_func("dial_map_size", i64b, &[i8b.into()]);
+        self.decl_func("dial_map_keys", i8b, &[i8b.into()]);
+        // 泛型 map<K,V>（v1.00）：独立 C 运行时 stdlib/dial_kvmap.c。
+        self.decl_func("dial_kvmap_new", i8b, &[i64b.into(), i64b.into()]);
+        self.decl_func("dial_kvmap_put", i8b, &[i8b.into(), i64b.into(), i64b.into()]);
+        self.decl_func("dial_kvmap_get", i64b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_kvmap_contains", i64b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_kvmap_remove", i64b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_kvmap_size", i64b, &[i8b.into()]);
+        self.decl_func("dial_kvmap_keys", i8b, &[i8b.into()]);
+        self.decl_func("dial_kvmap_values", i8b, &[i8b.into()]);
+        self.decl_void("dial_kvmap_retain", &[i8b.into()]);
+        self.decl_void("dial_kvmap_release", &[i8b.into()]);
+        // v1.00：断言 / 退出 / 浮点数学内建
+        self.decl_void("dial_assert_fail", &[i8b.into()]);
+        self.decl_void("dial_exit", &[i64b.into()]);
+        self.decl_func("sqrt", f64b, &[f64b.into()]);
+        self.decl_func("pow", f64b, &[f64b.into(), f64b.into()]);
+        self.decl_func("floor", f64b, &[f64b.into()]);
+        self.decl_func("ceil", f64b, &[f64b.into()]);
+        self.decl_func("round", f64b, &[f64b.into()]);
+        self.decl_func("fabs", f64b, &[f64b.into()]);
+        // v1.00：字符串插值所需的标量 -> 字符串转换
+        self.decl_func("dial_bool_to_string", i8b, &[i64b.into()]);
         self.decl_void("dial_map_retain", &[i8b.into()]);
         self.decl_void("dial_map_release", &[i8b.into()]);
         // IO / 打印
@@ -538,7 +577,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::String
             | Type::Bytes
             | Type::Array(_)
-            | Type::Map
+            | Type::Map | Type::Set(_) | Type::KvMap(..)
             | Type::File
             | Type::Error
             | Type::Thread
@@ -577,7 +616,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::String
                 | Type::Bytes
                 | Type::Array(_)
-                | Type::Map
+                | Type::Map | Type::Set(_) | Type::KvMap(..)
                 | Type::Error
                 | Type::Channel(_)
                 | Type::Opaque(_)
@@ -597,7 +636,7 @@ impl<'ctx> CodeGen<'ctx> {
         match t {
             Type::Int => 0,
             Type::Channel(_) => 2,
-            Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::Error | Type::Opaque(_) => {
+            Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Opaque(_) => {
                 1
             }
             _ => 0, // 理论上不可达：check_type_wellformed 已拒绝其它元素类型
@@ -628,7 +667,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::String
             | Type::Bytes
             | Type::Array(_)
-            | Type::Map
+            | Type::Map | Type::Set(_) | Type::KvMap(..)
             | Type::File
             | Type::Error
             | Type::Thread
@@ -652,6 +691,94 @@ impl<'ctx> CodeGen<'ctx> {
             false
         }
     }
+
+    // ---- `defer` 延迟语句机制（v1.00）-----------------------------------------
+    //
+    // `defer_stack` 与 `scopes` 严格同步进出：每进入一层作用域（函数体 / 裸块 / 循环体 /
+    // if 分支 / try-catch）时同时 push，离开时同时 pop。因此两者下标一一对应，
+    // 可用「循环体帧下标」精准排空被跳出作用域的延迟语句。
+
+    /// 进入一层作用域：压入空的延迟语句列表（与 `scopes.push` 配对）。
+    fn push_defer_frame(&self) {
+        self.defer_stack.borrow_mut().push(Vec::new());
+    }
+
+    /// 登记一条 `defer` 语句到当前最内层作用域。
+    fn add_defer(&self, s: Stmt) {
+        self.defer_stack.borrow_mut().last_mut().unwrap().push(s);
+    }
+
+    /// 正常落穿离开当前作用域时调用：按 LIFO 逆序发射本层延迟语句，并弹出本层帧。
+    /// 必须在 `release_scope_locals` + `scopes.pop` **之前**调用（延迟语句可能引用本层局部）。
+    fn pop_defer_frame_emit(
+        &self,
+        function: FunctionValue<'ctx>,
+        scopes: &mut CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<()> {
+        let frame = self.defer_stack.borrow_mut().pop().unwrap();
+        // 当前块已终止（前一条语句是 return / throw 等）：正常落穿路径不可达，该出口的
+        // defer 已由 drain_defers_from 在跳转前发射过，此处只需丢弃帧、保持栈同步。
+        // 切勿再往已终止的块追加指令——IRBuilder 会把它们插到 terminator 之后，导致
+        // "Terminator found in the middle of a basic block" 的非法 IR。
+        if self.is_terminated() {
+            return Ok(());
+        }
+        for s in frame.into_iter().rev() {
+            self.gen_stmt(&s, function, scopes, func_values, functions, structs)?;
+        }
+        Ok(())
+    }
+
+    /// 从 `from` 下标到栈顶：按 LIFO（内层先、同层逆序）**额外发射**一份延迟语句。
+    /// 用于 `break` / `continue`（离开循环跨越多层作用域）与 `return`（离开整个函数）。
+    ///
+    /// **绝不清空 `defer_stack` 的帧**：它是编译期静态结构，正常落穿路径的代码随后才由
+    /// `pop_defer_frame_emit` 生成，若此时清帧，那条路径会拿到空帧而漏发 defer。
+    /// 运行期「提前出口」与「正常落穿」两条分支互斥，各自执行自己那一份，合计恰好一次。
+    ///
+    /// 注意：LLVM IRBuilder 会把新指令插到当前块 terminator **之前**，因此即使当前块已因
+    /// return/break 终止，被发射的延迟语句仍排在终止指令之前、即「出口处按序执行」，语义正确。
+    fn drain_defers_from(
+        &self,
+        from: usize,
+        function: FunctionValue<'ctx>,
+        scopes: &mut CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<()> {
+        // 先收集（释放 borrow，避免 gen_stmt 时再借冲突），再原地发射；帧内容保持不变。
+        let to_run: Vec<Stmt> = {
+            let ds = self.defer_stack.borrow();
+            let mut v = Vec::new();
+            for i in (from..ds.len()).rev() {
+                for s in ds[i].iter().rev() {
+                    v.push(s.clone());
+                }
+            }
+            v
+        };
+        for s in to_run {
+            self.gen_stmt(&s, function, scopes, func_values, functions, structs)?;
+        }
+        Ok(())
+    }
+
+    /// `return` / 函数末尾：发射全部延迟语句（帧内容保持不变，见 `drain_defers_from`）。
+    fn drain_all_defers(
+        &self,
+        function: FunctionValue<'ctx>,
+        scopes: &mut CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<()> {
+        self.drain_defers_from(0, function, scopes, func_values, functions, structs)
+    }
+
 
     fn global_string(&self, name: &str, value: &str) -> PointerValue<'ctx> {
         let value = format!("{}\0", value);
@@ -798,7 +925,9 @@ impl<'ctx> CodeGen<'ctx> {
             // 类型边界必须由运行时函数族来守，不能只靠编译器单方面。
             Type::Bytes => "dial_bytes_retain",
             Type::Array(_) => "dial_array_retain",
-            Type::Map => "dial_map_retain",
+            Type::Map | Type::Set(_) => "dial_map_retain",
+            // 泛型 map 有独立 C 运行时与自定义析构（遍历条目释放 string 键）。
+            Type::KvMap(..) => "dial_kvmap_retain",
             Type::Error => "dial_error_retain",
             // 通道跨线程共享，因此走**原子**引用计数（与 string/map 的非原子 rc 不同）。
             Type::Channel(_) => "dial_channel_retain",
@@ -820,7 +949,8 @@ impl<'ctx> CodeGen<'ctx> {
             Type::String => "dial_string_release",
             Type::Bytes => "dial_bytes_release",
             Type::Array(_) => "dial_array_release",
-            Type::Map => "dial_map_release",
+            Type::Map | Type::Set(_) => "dial_map_release",
+            Type::KvMap(..) => "dial_kvmap_release",
             Type::Error => "dial_error_release",
             Type::Channel(_) => "dial_channel_release",
             _ => return,
@@ -864,7 +994,7 @@ impl<'ctx> CodeGen<'ctx> {
     fn is_heap_type(t: &Type) -> bool {
         matches!(
             *t,
-            Type::String | Type::Array(_) | Type::Map | Type::Error | Type::Channel(_)
+            Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Channel(_)
         )
     }
 
@@ -940,7 +1070,7 @@ impl<'ctx> CodeGen<'ctx> {
                 .unwrap();
             match fty {
                 // v0.8 补上 Error 与 Channel（此前漏掉，与 release_struct_fields 不对称）。
-                Type::String | Type::Array(_) | Type::Map | Type::Error | Type::Channel(_) => {
+                Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Channel(_) => {
                     let v = self.builder.build_load(self.i8ptr(), gep, "lfr").unwrap();
                     self.retain(fty, v);
                 }
@@ -971,7 +1101,7 @@ impl<'ctx> CodeGen<'ctx> {
                 .build_struct_gep(llvm_sty, ptr, i as u32, "frel")
                 .unwrap();
             match fty {
-                Type::String | Type::Array(_) | Type::Map | Type::Error | Type::Channel(_) => {
+                Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Channel(_) => {
                     self.release(fty, gep)
                 }
                 Type::Struct(_) => self.release_struct_fields(fty, gep, structs),
@@ -995,8 +1125,14 @@ impl<'ctx> CodeGen<'ctx> {
 
         // 每个函数独立：进入时清空受保护集合（否则上一个函数的登记会串进来）。
         self.protected.borrow_mut().clear();
+        // 每个函数独立：清空 defer / 循环栈（与上个函数的状态隔离）。
+        self.defer_stack.borrow_mut().clear();
+        self.loop_stack.borrow_mut().clear();
+        self.try_frames.borrow_mut().clear();
 
         let mut scopes: CgScopes = vec![HashMap::new()];
+        // 函数体作为最外层作用域：压入对应的 defer 帧（下标 0，与 scopes[0] 对应）。
+        self.push_defer_frame();
         for (i, (pname, pty)) in f.params.iter().enumerate() {
             let llvm_ty = self.dialc_type_to_llvm(pty);
             let ptr = self.alloca_in_entry(function, llvm_ty, pname);
@@ -1016,8 +1152,9 @@ impl<'ctx> CodeGen<'ctx> {
         for stmt in &f.body {
             self.gen_stmt(stmt, function, &mut scopes, func_values, functions, structs)?;
         }
-        // 函数末尾未显式 return 时补默认返回
+        // 函数末尾未显式 return 时补默认返回（先排空 defer，再补默认返回）
         if !self.is_terminated() {
+            self.drain_all_defers(function, &mut scopes, func_values, functions, structs)?;
             if f.ret == Type::Void {
                 self.builder.build_return(None).unwrap();
             } else if f.name == "main" && f.ret == Type::Int {
@@ -1104,7 +1241,7 @@ impl<'ctx> CodeGen<'ctx> {
                         .unwrap()
                         .into()
                 }
-                Type::String | Type::Array(_) | Type::Map | Type::Error | Type::Channel(_) => {
+                Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Channel(_) => {
                     let slot = unsafe {
                         self.builder
                             .build_gep(self.i8ptr(), cell, &[idx], "th.slot")
@@ -1554,9 +1691,11 @@ impl<'ctx> CodeGen<'ctx> {
                     .unwrap();
                 self.builder.position_at_end(then_bb);
                 scopes.push(HashMap::new());
+                self.push_defer_frame();
                 for s in then_branch {
                     self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
                 }
+                self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
                 self.release_scope_locals(scopes.last().unwrap(), structs);
                 scopes.pop();
                 if !self.is_terminated() {
@@ -1565,9 +1704,11 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.position_at_end(else_bb);
                 if let Some(eb) = else_branch {
                     scopes.push(HashMap::new());
+                    self.push_defer_frame();
                     for s in eb {
                         self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
                     }
+                    self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
                     self.release_scope_locals(scopes.last().unwrap(), structs);
                     scopes.pop();
                 }
@@ -1591,13 +1732,18 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.position_at_end(body_bb);
                 // while 的 continue 直接回到条件判定
                 self.loop_targets.borrow_mut().push((header_bb, exit_bb));
+                // 记录循环体帧下标（break/continue 据此排空被跳出作用域的 defer）
+                self.loop_stack.borrow_mut().push(self.defer_stack.borrow().len());
                 scopes.push(HashMap::new());
+                self.push_defer_frame();
                 for s in body {
                     self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
                 }
+                self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
                 self.release_scope_locals(scopes.last().unwrap(), structs);
                 scopes.pop();
                 self.loop_targets.borrow_mut().pop();
+                self.loop_stack.borrow_mut().pop();
                 if !self.is_terminated() {
                     self.builder.build_unconditional_branch(header_bb).unwrap();
                 }
@@ -1605,12 +1751,24 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(())
             }
             Stmt::Break(line, col) => {
+                let from = *self
+                    .loop_stack
+                    .borrow()
+                    .last()
+                    .ok_or_else(|| DialcError::new("内部错误：break 不在循环内", *line, *col))?;
+                // 发射被跳出作用域（含循环体本身）的延迟语句（LIFO）；帧保留、仅清空其内容，
+                // 以保持与 `scopes` 下标同步（外层臂的 release/pop 随后照常执行，不会重复发射）。
+                // 注：break 的局部释放沿用既有约定（由外层臂统一处理），此处只保证 defer 正确触发。
+                self.drain_defers_from(from, function, scopes, func_values, functions, structs)?;
                 let target = self
                     .loop_targets
                     .borrow()
                     .last()
                     .map(|t| t.1)
                     .ok_or_else(|| DialcError::new("内部错误：break 不在循环内", *line, *col))?;
+                // 注意：`loop_targets` / `loop_stack` 是**编译期**静态栈，`break` 只是运行期的
+                // 一条分支，绝不能在这里 pop——否则同一循环体中后续的 break/continue 会找不到
+                // 栈帧（错误「break 不在循环内」）。这两个栈由循环臂在生成结束后统一 pop。
                 self.builder.build_unconditional_branch(target).unwrap();
                 // 后续语句（若有）落进新块，避免往已终结的块里继续追加指令
                 let dead = self.context.append_basic_block(function, "after.brk");
@@ -1618,33 +1776,52 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(())
             }
             Stmt::Continue(line, col) => {
+                let from = *self
+                    .loop_stack
+                    .borrow()
+                    .last()
+                    .ok_or_else(|| DialcError::new("内部错误：continue 不在循环内", *line, *col))?;
+                // 与 break 同：离开循环体所跨越的作用域前先按 LIFO 触发 defer（帧保留、内容清空）
+                self.drain_defers_from(from, function, scopes, func_values, functions, structs)?;
                 let target = self
                     .loop_targets
                     .borrow()
                     .last()
                     .map(|t| t.0)
                     .ok_or_else(|| DialcError::new("内部错误：continue 不在循环内", *line, *col))?;
+                // 同 break：编译期静态栈不在此处 pop，由循环臂统一收尾。
                 self.builder.build_unconditional_branch(target).unwrap();
                 let dead = self.context.append_basic_block(function, "after.cont");
                 self.builder.position_at_end(dead);
                 Ok(())
             }
-            Stmt::For { var, start, end, body, .. } => {
+            Stmt::For { var, start, end, step, body, .. } => {
                 let i64t = self.context.i64_type();
                 // 循环变量：在入口块分配，跨迭代存活。
                 let var_ptr = self.alloca_in_entry(function, i64t.into(), var);
                 let start_val = self.gen_expr(start, function, scopes, func_values, functions, structs)?;
                 let start_i64 = self.to_i64(start_val, &type_of(start, scopes, functions, structs)?);
                 self.builder.build_store(var_ptr, start_i64).unwrap();
+                // 步长：缺省 1；否则在循环前一次性求值（与上下界一致，语义等价于快照）。
+                let step_i64: IntValue = match step {
+                    Some(e) => {
+                        let v = self.gen_expr(e, function, scopes, func_values, functions, structs)?;
+                        self.to_i64(v, &type_of(e, scopes, functions, structs)?)
+                    }
+                    None => i64t.const_int(1, false),
+                };
                 // 把循环变量登记进作用域（int 非堆类型，无需 retain/release）。
                 scopes.push(HashMap::new());
+                // 记录循环体帧下标（break/continue 据此排空被跳出作用域的 defer）。
+                let for_frame = self.defer_stack.borrow().len();
+                self.push_defer_frame();
                 scopes
                     .last_mut()
                     .unwrap()
                     .insert(var.clone(), (Type::Int, (true, var_ptr)));
 
                 // 注意：自增必须落在独立的 for.inc 块，continue 跳到这里而非 for.cond，
-                // 否则 continue 会跳过 i = i + 1 造成死循环。
+                // 否则 continue 会跳过 i = i + step 造成死循环。
                 let header_bb = self.context.append_basic_block(function, "for.cond");
                 let body_bb = self.context.append_basic_block(function, "for.body");
                 let inc_bb = self.context.append_basic_block(function, "for.inc");
@@ -1662,27 +1839,318 @@ impl<'ctx> CodeGen<'ctx> {
                     .build_conditional_branch(cond, body_bb, exit_bb)
                     .unwrap();
                 self.builder.position_at_end(body_bb);
-                // for 的 continue 目标是自增块 for.inc（先 i++ 再回到条件判定）
+                // for 的 continue 目标是自增块 for.inc（先 i += step 再回到条件判定）
                 self.loop_targets.borrow_mut().push((inc_bb, exit_bb));
+                self.loop_stack.borrow_mut().push(for_frame);
                 for s in body {
                     self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
                 }
+                self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
                 self.release_scope_locals(scopes.last().unwrap(), structs);
                 self.loop_targets.borrow_mut().pop();
+                self.loop_stack.borrow_mut().pop();
                 if !self.is_terminated() {
                     self.builder.build_unconditional_branch(inc_bb).unwrap();
                 }
                 self.builder.position_at_end(inc_bb);
-                // i = i + 1
+                // i = i + step
                 let cur2 = self.builder.build_load(i64t, var_ptr, "i").unwrap();
                 let next = self
                     .builder
-                    .build_int_add(cur2.into_int_value(), i64t.const_int(1, false), "iinc")
+                    .build_int_add(cur2.into_int_value(), step_i64, "iinc")
                     .unwrap();
                 self.builder.build_store(var_ptr, next).unwrap();
                 self.builder.build_unconditional_branch(header_bb).unwrap();
                 self.builder.position_at_end(exit_bb);
                 scopes.pop();
+                Ok(())
+            }
+            Stmt::ForEach { value, value_line: _, value_col: _, coll, body, line, col } => {
+                let i64t = self.context.i64_type();
+                let coll_t = type_of(coll, scopes, functions, structs)?;
+                let elem_t = match &coll_t {
+                    Type::Array(e) => (**e).clone(),
+                    Type::Set(e) => (**e).clone(),
+                    _ => Type::Int, // 不应到达（语义已校验为 Array / Set）
+                };
+                let coll_val = self.gen_expr(coll, function, scopes, func_values, functions, structs)?;
+                // 集合迭代：成员即 map 的键，先快照为 int[]，再复用数组迭代路径。
+                // 快照登记到函数级作用域帧，由出口统一释放（循环体内 return 也不会泄漏）。
+                let arr_val = if matches!(coll_t, Type::Set(_)) {
+                    let keys = self.call_c("dial_map_keys", &[coll_val.into()]);
+                    let slot = self.alloca_in_entry(function, self.i8ptr().into(), "set.keys");
+                    self.builder.build_store(slot, keys).unwrap();
+                    scopes.first_mut().unwrap().insert(
+                        format!("__setkeys_{}_{}", line, col),
+                        (Type::Array(Box::new(Type::Int)), (true, slot)),
+                    );
+                    keys
+                } else {
+                    coll_val
+                };
+                let len = self.call_c("dial_array_length", &[arr_val.into()]);
+                let v_ptr = self.alloca_in_entry(function, self.dialc_type_to_llvm(&elem_t), value);
+                // 循环变量 i（下标）
+                let i_ptr = self.alloca_in_entry(function, i64t.into(), "fei");
+                self.builder
+                    .build_store(i_ptr, i64t.const_int(0, false))
+                    .unwrap();
+                let header_bb = self.context.append_basic_block(function, "fe.cond");
+                let body_bb = self.context.append_basic_block(function, "fe.body");
+                let inc_bb = self.context.append_basic_block(function, "fe.inc");
+                let exit_bb = self.context.append_basic_block(function, "fe.end");
+                self.builder.build_unconditional_branch(header_bb).unwrap();
+                self.builder.position_at_end(header_bb);
+                let i_val = self.builder.build_load(i64t, i_ptr, "fei").unwrap();
+                let cond = self
+                    .builder
+                    .build_int_compare(IntPredicate::SLT, i_val.into_int_value(), len.into_int_value(), "fecond")
+                    .unwrap();
+                self.builder.build_conditional_branch(cond, body_bb, exit_bb).unwrap();
+                self.builder.position_at_end(body_bb);
+                self.loop_targets.borrow_mut().push((inc_bb, exit_bb));
+                let fe_frame = self.defer_stack.borrow().len();
+                self.push_defer_frame();
+                self.loop_stack.borrow_mut().push(fe_frame);
+                scopes.push(HashMap::new());
+                scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(value.clone(), (elem_t.clone(), (true, v_ptr)));
+                // 取第 i 个元素并绑定到 v（共享所有权：句柄类元素需 retain 一份）
+                let res = self.call_c("dial_array_get", &[arr_val.into(), i_val.into()]);
+                let ev: BasicValueEnum = if matches!(elem_t, Type::Int) {
+                    res
+                } else {
+                    let p = self
+                        .builder
+                        .build_int_to_ptr(res.into_int_value(), self.i8ptr(), "eptr")
+                        .unwrap();
+                    p.into()
+                };
+                if Self::is_heap_type(&elem_t) {
+                    self.retain(&elem_t, ev);
+                }
+                self.builder.build_store(v_ptr, ev).unwrap();
+                for s in body {
+                    self.gen_stmt(&s, function, scopes, func_values, functions, structs)?;
+                }
+                // 每轮迭代结束释放本元素（v 槽被标记 moved，避免循环退出时重复释放）
+                if Self::is_heap_type(&elem_t) {
+                    self.release(&elem_t, v_ptr);
+                }
+                self.moved.borrow_mut().insert(v_ptr);
+                self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
+                self.release_scope_locals(scopes.last().unwrap(), structs);
+                self.loop_targets.borrow_mut().pop();
+                self.loop_stack.borrow_mut().pop();
+                scopes.pop();
+                if !self.is_terminated() {
+                    self.builder.build_unconditional_branch(inc_bb).unwrap();
+                }
+                self.builder.position_at_end(inc_bb);
+                let i2 = self.builder.build_load(i64t, i_ptr, "fei").unwrap();
+                let i3 = self
+                    .builder
+                    .build_int_add(i2.into_int_value(), i64t.const_int(1, false), "feinc")
+                    .unwrap();
+                self.builder.build_store(i_ptr, i3).unwrap();
+                self.builder.build_unconditional_branch(header_bb).unwrap();
+                self.builder.position_at_end(exit_bb);
+                Ok(())
+            }
+            Stmt::ForEachMap {
+                key,
+                key_line: _,
+                key_col: _,
+                value,
+                value_line: _,
+                value_col: _,
+                coll,
+                body,
+                line,
+                col,
+            } => {
+                let i64t = self.context.i64_type();
+                let coll_val = self.gen_expr(coll, function, scopes, func_values, functions, structs)?;
+                // 快照键集登记进函数级作用域帧：由 return / 函数末尾的 release_all 统一释放。
+                // 这样即便循环体内提前 return 也不会泄漏；循环体帧每轮只释放 k/v（均为 int），
+                // 不会误释放快照，正常落穿与提前返回走同一条释放路径。
+                let keys = self.call_c("dial_map_keys", &[coll_val.into()]);
+                let keys_slot = self.alloca_in_entry(function, self.i8ptr().into(), "map.keys");
+                self.builder.build_store(keys_slot, keys).unwrap();
+                scopes.first_mut().unwrap().insert(
+                    format!("__mapkeys_{}_{}", line, col),
+                    (Type::Array(Box::new(Type::Int)), (true, keys_slot)),
+                );
+                let key_len = self.call_c("dial_array_length", &[keys.into()]);
+                let k_ptr = self.alloca_in_entry(function, i64t.into(), key.as_str());
+                let v_ptr = self.alloca_in_entry(function, i64t.into(), value.as_str());
+                let i_ptr = self.alloca_in_entry(function, i64t.into(), "fmi");
+                self.builder.build_store(i_ptr, i64t.const_int(0, false)).unwrap();
+                let header_bb = self.context.append_basic_block(function, "fem.cond");
+                let body_bb = self.context.append_basic_block(function, "fem.body");
+                let inc_bb = self.context.append_basic_block(function, "fem.inc");
+                let exit_bb = self.context.append_basic_block(function, "fem.end");
+                self.builder.build_unconditional_branch(header_bb).unwrap();
+                self.builder.position_at_end(header_bb);
+                let i_val = self.builder.build_load(i64t, i_ptr, "fmi").unwrap();
+                let cond = self
+                    .builder
+                    .build_int_compare(IntPredicate::SLT, i_val.into_int_value(), key_len.into_int_value(), "femcond")
+                    .unwrap();
+                self.builder.build_conditional_branch(cond, body_bb, exit_bb).unwrap();
+                self.builder.position_at_end(body_bb);
+                self.loop_targets.borrow_mut().push((inc_bb, exit_bb));
+                let fem_frame = self.defer_stack.borrow().len();
+                self.push_defer_frame();
+                self.loop_stack.borrow_mut().push(fem_frame);
+                scopes.push(HashMap::new());
+                scopes.last_mut().unwrap().insert(key.clone(), (Type::Int, (true, k_ptr)));
+                scopes.last_mut().unwrap().insert(value.clone(), (Type::Int, (true, v_ptr)));
+                // k = keys[i]; v = map.get(k)
+                let ki = self.call_c("dial_array_get", &[keys.into(), i_val.into()]);
+                let vi = self.call_c("dial_map_get", &[coll_val.into(), ki.into()]);
+                self.builder.build_store(k_ptr, ki).unwrap();
+                self.builder.build_store(v_ptr, vi).unwrap();
+                for s in body {
+                    self.gen_stmt(&s, function, scopes, func_values, functions, structs)?;
+                }
+                self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
+                self.release_scope_locals(scopes.last().unwrap(), structs);
+                self.loop_targets.borrow_mut().pop();
+                self.loop_stack.borrow_mut().pop();
+                scopes.pop();
+                if !self.is_terminated() {
+                    self.builder.build_unconditional_branch(inc_bb).unwrap();
+                }
+                self.builder.position_at_end(inc_bb);
+                let i2 = self.builder.build_load(i64t, i_ptr, "fmi").unwrap();
+                let i3 = self
+                    .builder
+                    .build_int_add(i2.into_int_value(), i64t.const_int(1, false), "feminc")
+                    .unwrap();
+                self.builder.build_store(i_ptr, i3).unwrap();
+                self.builder.build_unconditional_branch(header_bb).unwrap();
+                self.builder.position_at_end(exit_bb);
+                // 快照键集的释放统一交给函数出口（见上方函数级帧登记），此处无需再显式 release。
+                Ok(())
+            }
+            Stmt::DoWhile { body, cond, .. } => {
+                let body_bb = self.context.append_basic_block(function, "dw.body");
+                let cond_bb = self.context.append_basic_block(function, "dw.cond");
+                let exit_bb = self.context.append_basic_block(function, "dw.end");
+                self.builder.build_unconditional_branch(body_bb).unwrap();
+                self.builder.position_at_end(body_bb);
+                // do-while 的 continue 回到条件判定
+                self.loop_targets.borrow_mut().push((cond_bb, exit_bb));
+                let dw_frame = self.defer_stack.borrow().len();
+                self.push_defer_frame();
+                self.loop_stack.borrow_mut().push(dw_frame);
+                scopes.push(HashMap::new());
+                for s in body {
+                    self.gen_stmt(&s, function, scopes, func_values, functions, structs)?;
+                }
+                self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
+                self.release_scope_locals(scopes.last().unwrap(), structs);
+                self.loop_targets.borrow_mut().pop();
+                self.loop_stack.borrow_mut().pop();
+                scopes.pop();
+                if !self.is_terminated() {
+                    self.builder.build_unconditional_branch(cond_bb).unwrap();
+                }
+                self.builder.position_at_end(cond_bb);
+                let cond_val = self.gen_expr(cond, function, scopes, func_values, functions, structs)?;
+                let cond_i1 = cond_val.into_int_value();
+                self.builder
+                    .build_conditional_branch(cond_i1, body_bb, exit_bb)
+                    .unwrap();
+                self.builder.position_at_end(exit_bb);
+                Ok(())
+            }
+            Stmt::Match { subject, arms, .. } => {
+                let i64t = self.context.i64_type();
+                let subj_ty = type_of(subject, scopes, functions, structs)?;
+                let subj_val = self.gen_expr(subject, function, scopes, func_values, functions, structs)?;
+                let end_bb = self.context.append_basic_block(function, "match.end");
+                for (idx, arm) in arms.into_iter().enumerate() {
+                    let arm_bb = self.context.append_basic_block(function, "match.arm");
+                    let next_bb = self.context.append_basic_block(function, "match.next");
+                    match &arm.pattern {
+                        MatchPattern::Wildcard => {
+                            // 通配：直接落入本分支（后续分支成为不可达死代码，合法）
+                            self.builder.build_unconditional_branch(arm_bb).unwrap();
+                        }
+                        _ => {
+                            let mcond = match (&arm.pattern, &subj_ty) {
+                                (MatchPattern::Int(p), Type::Int) => self.builder.build_int_compare(
+                                    IntPredicate::EQ,
+                                    subj_val.clone().into_int_value(),
+                                    i64t.const_int(*p as u64, false),
+                                    "match.cmp",
+                                ),
+                                (MatchPattern::Bool(p), Type::Bool) => self.builder.build_int_compare(
+                                    IntPredicate::EQ,
+                                    subj_val.clone().into_int_value(),
+                                    self.context.bool_type().const_int(if *p { 1 } else { 0 }, false),
+                                    "match.cmp",
+                                ),
+                                (MatchPattern::Char(c), Type::Char) => self.builder.build_int_compare(
+                                    IntPredicate::EQ,
+                                    subj_val.clone().into_int_value(),
+                                    i64t.const_int(*c as u64, false),
+                                    "match.cmp",
+                                ),
+                                (MatchPattern::Str(s), Type::String) => {
+                                    // 模式字面量必须先经 dial_string_new 包成 DialString（带 ARC 头），
+                                    // 不能把裸 C 字符串直接交给 dial_string_eq——那会读错内存布局。
+                                    let sg = self.global_string(&format!("matchstr_{}", idx), s);
+                                    let sobj = self.call_c("dial_string_new", &[sg.into()]);
+                                    let slot = self
+                                        .alloca_in_entry(function, self.i8ptr().into(), "match.str");
+                                    self.builder.build_store(slot, sobj).unwrap();
+                                    let r = self.call_c("dial_string_eq", &[subj_val.clone().into(), sobj.into()]);
+                                    // 临时对象比较完即释放，避免每个分支的模式串泄漏。
+                                    self.release(&Type::String, slot);
+                                    self.builder.build_int_compare(
+                                        IntPredicate::EQ,
+                                        r.into_int_value(),
+                                        i64t.const_int(1, false),
+                                        "match.cmp",
+                                    )
+                                }
+                                _ => {
+                                    return Err(DialcError::new(
+                                        "内部错误：match 模式与主体类型不匹配",
+                                        0, 0,
+                                    ))
+                                }
+                            }
+                            .unwrap();
+                            self.builder.build_conditional_branch(mcond, arm_bb, next_bb).unwrap();
+                        }
+                    }
+                    // 分支体：独立作用域（含 defer 帧）
+                    self.builder.position_at_end(arm_bb);
+                    scopes.push(HashMap::new());
+                    self.push_defer_frame();
+                    for s in &arm.body {
+                        self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
+                    }
+                    self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
+                    self.release_scope_locals(scopes.last().unwrap(), structs);
+                    scopes.pop();
+                    if !self.is_terminated() {
+                        self.builder.build_unconditional_branch(end_bb).unwrap();
+                    }
+                    // 下一个分支的比较落在此处（当前分支未命中时）
+                    self.builder.position_at_end(next_bb);
+                }
+                // 收尾：未命中任何分支（理论上被 _ 覆盖）时安全落到 end
+                if !self.is_terminated() {
+                    self.builder.build_unconditional_branch(end_bb).unwrap();
+                }
+                self.builder.position_at_end(end_bb);
                 Ok(())
             }
             Stmt::Return(e, line, col) => {
@@ -1694,7 +2162,8 @@ impl<'ctx> CodeGen<'ctx> {
                                 *line, *col,
                             ));
                         }
-                        // 无返回值：释放本函数持有的全部堆对象后返回
+                        // 无返回值：先排空 defer，再释放本函数持有的全部堆对象后返回
+                        self.drain_all_defers(function, scopes, func_values, functions, structs)?;
                         self.release_all(scopes, None, structs);
                         self.builder.build_return(None).unwrap();
                     }
@@ -1723,6 +2192,7 @@ impl<'ctx> CodeGen<'ctx> {
                         } else {
                             val
                         };
+                        self.drain_all_defers(function, scopes, func_values, functions, structs)?;
                         self.release_all(scopes, None, structs);
                         self.builder.build_return(Some(&ret_val)).unwrap();
                     }
@@ -1737,6 +2207,10 @@ impl<'ctx> CodeGen<'ctx> {
                 if let Expr::Var(n) = e {
                     self.mark_moved(scopes, n);
                 }
+                // longjmp 离开 try 体作用域前，按 LIFO 触发该帧及其内层的 defer（资源清理不遗漏）。
+                // 无外层 try 时（未捕获异常，程序即将终止）退化为排空全部 defer。
+                let tf = self.try_frames.borrow().last().copied().unwrap_or(0);
+                self.drain_defers_from(tf, function, scopes, func_values, functions, structs)?;
                 self.emit_throw(val, scopes, structs)?;
                 Ok(())
             }
@@ -1791,13 +2265,17 @@ impl<'ctx> CodeGen<'ctx> {
 
                 // ---- try.body ----
                 self.builder.position_at_end(body_bb);
+                self.try_frames.borrow_mut().push(self.defer_stack.borrow().len());
                 scopes.push(HashMap::new());
+                self.push_defer_frame();
                 for s in body {
                     self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
                     if self.is_terminated() {
                         break;
                     }
                 }
+                // 先触发本层 defer（可能引用本层局部），再释放局部；帧与 scopes 同步弹出。
+                self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
                 let body_done = !self.is_terminated();
                 if body_done {
                     // 正常走完：释放 try 体局部后汇入 merge（merge 负责 free exbuf）。
@@ -1818,6 +2296,7 @@ impl<'ctx> CodeGen<'ctx> {
                 let err = self.call_c("dial_exbuf_take_err", &[buf.into()]);
                 self.call_c_void("dial_exbuf_free", &[buf.into()]);
                 scopes.push(HashMap::new());
+                self.push_defer_frame();
                 match &catch.var {
                     // catch e { }：把捕获到的 Error 绑定到 e（e 是独立 alloca，作用域结束时自动 release，零额外开销）。
                     Some(name) => {
@@ -1840,6 +2319,7 @@ impl<'ctx> CodeGen<'ctx> {
                         break;
                     }
                 }
+                self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
                 let catch_done = !self.is_terminated();
                 if catch_done {
                     self.release_scope_locals(scopes.last().unwrap(), structs);
@@ -1873,6 +2353,7 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_unconditional_branch(cont_bb).unwrap();
 
                 // ---- try.cont：try/catch 之后的统一续跑点 ----
+                self.try_frames.borrow_mut().pop();
                 self.builder.position_at_end(cont_bb);
                 Ok(())
             }
@@ -2036,6 +2517,7 @@ impl<'ctx> CodeGen<'ctx> {
                     self.builder.build_store(var_slot, v).unwrap();
                     // 绑定变量的作用域严格限制在本 case 的块内。
                     scopes.push(HashMap::new());
+                    self.push_defer_frame();
                     scopes
                         .last_mut()
                         .unwrap()
@@ -2046,6 +2528,7 @@ impl<'ctx> CodeGen<'ctx> {
                             break;
                         }
                     }
+                    self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
                     let done = !self.is_terminated();
                     if done {
                         // 分支体结束 -> 释放绑定变量（它独占着一个从通道取来的元素）。
@@ -2064,12 +2547,14 @@ impl<'ctx> CodeGen<'ctx> {
                     self.builder.position_at_end(def_bb);
                     self.call_c_void("dial_sel_free", &[sel.into()]);
                     scopes.push(HashMap::new());
+                    self.push_defer_frame();
                     for s in default_body.as_ref().unwrap() {
                         self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
                         if self.is_terminated() {
                             break;
                         }
                     }
+                    self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
                     let done = !self.is_terminated();
                     if done {
                         self.release_scope_locals(scopes.last().unwrap(), structs);
@@ -2092,20 +2577,27 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(())
             }
             Stmt::Block { body, .. } => {
-                // 裸块：引入新词法作用域，递归发射内部语句；离开作用域时释放块内堆类型局部变量，
-                // 防止数组/字符串/映射/错误/通道等 ARC 对象泄漏（与 if/for 的处理一致）。
+                // 裸块：引入新词法作用域，递归发射内部语句；离开作用域时先按 LIFO 触发本块 defer，
+                // 再释放块内堆类型局部变量，防止数组/字符串/映射/错误/通道等 ARC 对象泄漏。
                 scopes.push(HashMap::new());
+                self.push_defer_frame();
                 for s in body {
                     self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
                 }
+                self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
                 self.release_scope_locals(scopes.last().unwrap(), structs);
                 scopes.pop();
+                Ok(())
+            }
+            Stmt::Defer(inner, ..) => {
+                // 不立即执行，登记到当前最内层作用域的延迟队列，待离开该作用域时按 LIFO 触发。
+                self.add_defer((**inner).clone());
                 Ok(())
             }
             Stmt::Expr(e, ..) => {
                 // 语句级方法调用且返回新容器指针（push/set）-> 把结果写回接收变量
                 if let Expr::Method(obj, method, args) = e {
-                    if matches!(method.as_str(), "push" | "set" | "put") {
+                    if matches!(method.as_str(), "push" | "set" | "put" | "add") {
                         if let Expr::Var(name) = obj.as_ref() {
                             let info = scopes
                                 .iter()
@@ -2218,6 +2710,17 @@ impl<'ctx> CodeGen<'ctx> {
             Expr::ByteLit(b) => Ok(self.context.i64_type().const_int(*b as u64, false).into()),
             Expr::FloatLit(f) => Ok(self.context.f64_type().const_float(*f).into()),
             Expr::BoolLit(b) => Ok(self.context.bool_type().const_int(if *b { 1 } else { 0 }, false).into()),
+            Expr::Interp(parts) => {
+                self.gen_interp(parts, function, scopes, func_values, functions, structs)
+            }
+            Expr::Slice(arr, from, to) => {
+                let av = self.gen_expr(arr, function, scopes, func_values, functions, structs)?;
+                let fv = self.gen_expr(from, function, scopes, func_values, functions, structs)?;
+                let tv = self.gen_expr(to, function, scopes, func_values, functions, structs)?;
+                let f = self.to_i64(fv, &type_of(from, scopes, functions, structs)?);
+                let t = self.to_i64(tv, &type_of(to, scopes, functions, structs)?);
+                Ok(self.call_c("dial_array_slice", &[av.into(), f.into(), t.into()]))
+            }
             Expr::StringLit(s) => {
                 let name = format!("dialc.str.{}", self.next_str_id());
                 let g = self.global_string(&name, s);
@@ -2348,10 +2851,61 @@ impl<'ctx> CodeGen<'ctx> {
                     let v = self.gen_expr(e, function, scopes, func_values, functions, structs)?;
                     Ok(self.builder.build_not(v.into_int_value(), "not").unwrap().into())
                 }
+                UnOp::BitNot => {
+                    let v = self.gen_expr(e, function, scopes, func_values, functions, structs)?;
+                    // ~x 即 x 与全 1 异或（等价于按位取反）
+                    let all_ones = self.context.i64_type().const_all_ones();
+                    Ok(self
+                        .builder
+                        .build_xor(v.into_int_value(), all_ones, "bnot")
+                        .unwrap()
+                        .into())
+                }
             },
+            // 三元表达式 `cond ? a : b`（v1.00）：两个分支类型相同（语义层已保证），
+            // 结果写入 entry 块的栈槽，两条分支各自 store，merge 处 load。
+            Expr::Ternary(cond, then_e, else_e) => {
+                let ct = type_of(cond, scopes, functions, structs)?;
+                let vt = type_of(then_e, scopes, functions, structs)?;
+                let cond_val = self.gen_expr(cond, function, scopes, func_values, functions, structs)?;
+                let cond_bit = self.to_i64(cond_val, &ct);
+                let res_ty = self.dialc_type_to_llvm(&vt);
+                let slot = self.alloca_in_entry(function, res_ty, "tern.res");
+                let then_bb = self.context.append_basic_block(function, "tern.then");
+                let else_bb = self.context.append_basic_block(function, "tern.else");
+                let merge_bb = self.context.append_basic_block(function, "tern.merge");
+                let zero = self.context.i64_type().const_int(0, false);
+                let is_true = self
+                    .builder
+                    .build_int_compare(IntPredicate::NE, cond_bit, zero, "tern.cond")
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(is_true, then_bb, else_bb)
+                    .unwrap();
+                self.builder.position_at_end(then_bb);
+                let tv = self.gen_expr(then_e, function, scopes, func_values, functions, structs)?;
+                self.builder.build_store(slot, tv).unwrap();
+                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                self.builder.position_at_end(else_bb);
+                let ev = self.gen_expr(else_e, function, scopes, func_values, functions, structs)?;
+                self.builder.build_store(slot, ev).unwrap();
+                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                self.builder.position_at_end(merge_bb);
+                Ok(self.builder.build_load(res_ty, slot, "tern.val").unwrap())
+            }
             Expr::Method(obj, method, args) => self.gen_method_call(obj, method, args, function, scopes, func_values, functions, structs),
             Expr::Binary(left, op, right) => self.gen_binary(*op, left, right, function, scopes, func_values, functions, structs),
             Expr::Call(name, args) => {
+                // v1.00 内建：断言 / 退出 / 数学函数（独立于下面的类型转换与 print 分派）。
+                if matches!(
+                    name.as_str(),
+                    "assert" | "panic" | "exit" | "min" | "max" | "abs"
+                        | "sqrt" | "pow" | "floor" | "ceil" | "round"
+                ) {
+                    return self.gen_builtin_v1(
+                        name, args, function, scopes, func_values, functions, structs,
+                    );
+                }
                 // 内置类型转换函数：与零隐式转换铁律配合，是 int<->float 的唯一合法通道。
                 // 直接编译为 LLVM 的 sitofp / fptosi，不依赖任何 C 运行时。
                 match name.as_str() {
@@ -2427,6 +2981,14 @@ impl<'ctx> CodeGen<'ctx> {
                             .into())
                     }
                     "new_map" => Ok(self.call_c("dial_map_new", &[])),
+                    // set 与 map 共用同一份 C 运行时：成员即键（value 恒为 1），零 C 改动。
+                    "new_set" => Ok(self.call_c("dial_map_new", &[])),
+                    // args 是 parse_var_decl 补进的两个编译期 kind 常量。
+                    "new_kv_map" => {
+                        let kk = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let vk = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_kvmap_new", &[kk.into(), vk.into()]))
+                    }
                     "read_line" => Ok(self.call_c("dial_read_line", &[])),
                     // 文件 IO（v0.61）：file 句柄 = 不透明 ptr，不做 retain/release，显式 close。
                     // v0.7 起：失败即抛出 Error（业务失败与系统崩溃分离——越界/除零仍走 ud2/Fail-Fast）。
@@ -2721,7 +3283,7 @@ impl<'ctx> CodeGen<'ctx> {
                             };
                             match pty {
                                 // 移动：指针入槽 + 源槽清零 + 源槽标 moved（无 retain / release）
-                                Type::String | Type::Array(_) | Type::Map | Type::Error => {
+                                Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error => {
                                     self.builder.build_store(slot, v).unwrap();
                                     if let Expr::Var(s) = &args[i + 1] {
                                         if let Some(sp) = Self::lookup_slot(scopes, s) {
@@ -2758,10 +3320,18 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                     _ => {
                         if name == "print" {
-                            let arg = &args[0];
-                            let ty = type_of(arg, scopes, functions, structs)?;
-                            let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
-                            self.emit_print(&ty, val)?;
+                            // variadic（v1.00）：中间实参按原样紧接输出（不换行），
+                            // 只有最后一个补 '\n'。单实参时行为与旧版完全一致。
+                            let last = args.len() - 1;
+                            for (i, arg) in args.iter().enumerate() {
+                                let ty = type_of(arg, scopes, functions, structs)?;
+                                let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
+                                if i == last {
+                                    self.emit_print(&ty, val)?;
+                                } else {
+                                    self.emit_print_raw(&ty, val)?;
+                                }
+                            }
                             Ok(self.context.i64_type().const_int(0, false).into())
                         } else if name == "str" {
                             // 统一入口：按实参类型分派到 int_to_string / float_to_string /
@@ -2781,13 +3351,12 @@ impl<'ctx> CodeGen<'ctx> {
                                 )),
                             }
                         } else if name == "print_raw" {
-                            // 原样输出、**不换行**（v0.98.2）。
-                            // 与 print 走同一套类型分派（emit_print），差别只在末尾那个 '\n'：
-                            // print_raw 走 emit_print_raw，末尾不补换行。
-                            let arg = &args[0];
-                            let ty = type_of(arg, scopes, functions, structs)?;
-                            let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
-                            self.emit_print_raw(&ty, val)?;
+                            // 原样输出、**不换行**（v0.98.2）；v1.00 起同样支持 variadic。
+                            for arg in args {
+                                let ty = type_of(arg, scopes, functions, structs)?;
+                                let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
+                                self.emit_print_raw(&ty, val)?;
+                            }
                             Ok(self.context.i64_type().const_int(0, false).into())
                         } else if name == "write_char" {
                             // 输出单个字符、**不换行**（v0.98.2）。
@@ -2797,7 +3366,7 @@ impl<'ctx> CodeGen<'ctx> {
                             self.call_c_void("dial_write_char", &[val.into()]);
                             Ok(self.context.i64_type().const_int(0, false).into())
                         } else {
-                            let _info = functions.get(name).ok_or_else(|| {
+                            let info = functions.get(name).ok_or_else(|| {
                                 DialcError::new(format!("调用了未定义的函数 '{}'", name), 0, 0)
                             })?;
                             let fv = func_values.get(name).ok_or_else(|| {
@@ -2806,6 +3375,17 @@ impl<'ctx> CodeGen<'ctx> {
                             let mut arg_vals = Vec::new();
                             for a in args {
                                 arg_vals.push(self.gen_expr(a, function, scopes, func_values, functions, structs)?);
+                            }
+                            // 默认实参（v1.00）：在调用点按声明顺序补齐缺失的尾部参数，
+                            // 每次调用求值一次（与「默认值是常量表达式」的约束一致）。
+                            for (i, d) in info.defaults.iter().enumerate() {
+                                if i >= arg_vals.len() {
+                                    if let Some(e) = d {
+                                        arg_vals.push(self.gen_expr(
+                                            e, function, scopes, func_values, functions, structs,
+                                        )?);
+                                    }
+                                }
                             }
                             let metadata: Vec<BasicMetadataValueEnum> =
                                 arg_vals.iter().map(|v| (*v).into()).collect();
@@ -2844,6 +3424,14 @@ impl<'ctx> CodeGen<'ctx> {
         let ot = type_of(obj, scopes, functions, structs)?;
         let optr = self.gen_expr(obj, function, scopes, func_values, functions, structs)?;
         let i64t = self.context.i64_type();
+        // 泛型 map<K,V> 走独立分派：键/值需按静态类型转成 8 字节位模式，
+        // 与老 int→int map 的纯 i64 接口不同，故不混进下面的 match。
+        if let Type::KvMap(k, v) = &ot {
+            return self.gen_kvmap_method(
+                optr, k.as_ref(), v.as_ref(), method, args,
+                function, scopes, func_values, functions, structs,
+            );
+        }
         match (&ot, method) {
             (Type::String, "length") => Ok(self.call_c("dial_string_length", &[optr.into()])),
             (Type::String, "concat") => {
@@ -2918,10 +3506,128 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(self.call_c("dial_map_remove", &[optr.into(), k.into()]))
             }
             (Type::Map, "size") => Ok(self.call_c("dial_map_size", &[optr.into()])),
+            // set<int>（v1.00）：成员即 map 的键，value 恒为 1。全部复用 dial_map_* 运行时。
+            (Type::Set(_), "add") => {
+                let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
+                Ok(self.call_c("dial_map_put", &[optr.into(), k.into(), i64t.const_int(1, false).into()]))
+            }
+            (Type::Set(_), "contains") => {
+                let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
+                let r = self.call_c("dial_map_contains", &[optr.into(), k.into()]);
+                Ok(self.builder.build_int_compare(IntPredicate::NE, r.into_int_value(), i64t.const_int(0, false), "scontains").unwrap().into())
+            }
+            (Type::Set(_), "remove") => {
+                let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
+                Ok(self.call_c("dial_map_remove", &[optr.into(), k.into()]))
+            }
+            (Type::Set(_), "size") => Ok(self.call_c("dial_map_size", &[optr.into()])),
+            (Type::Set(_), "values") => Ok(self.call_c("dial_map_keys", &[optr.into()])),
             (Type::Error, "msg") => Ok(self.call_c("dial_error_msg", &[optr.into()])),
             _ => Err(DialcError::new(
                 format!("语义错误：类型 '{}' 无方法 '{}'（应由 Sema 先行拦截）", ot.name(), method),
                 0, 0,
+            )),
+        }
+    }
+
+    /// 把表达式按 K/V 的静态类型转成 C 侧统一使用的 8 字节位模式。
+    /// 同时返回原始值，供调用方做所有权结算（settle_fresh_value）。
+    #[allow(clippy::too_many_arguments)]
+    fn kv_arg(
+        &self,
+        e: &Expr,
+        ty: &Type,
+        function: FunctionValue<'ctx>,
+        scopes: &CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<(BasicValueEnum<'ctx>, IntValue<'ctx>)> {
+        let v = self.gen_expr(e, function, scopes, func_values, functions, structs)?;
+        let bits = match ty {
+            // float 必须是**位模式**（bitcast），绝不能 fptosi —— 后者会丢掉小数，
+            // 那正是零隐式转换铁律要防的静默数据损坏。
+            Type::Float => self.builder
+                .build_bit_cast(v, self.context.i64_type(), "f2bits").unwrap().into_int_value(),
+            Type::String => self.builder
+                .build_ptr_to_int(v.into_pointer_value(), self.context.i64_type(), "p2bits").unwrap(),
+            Type::Bool => self.builder
+                .build_int_z_extend(v.into_int_value(), self.context.i64_type(), "b2bits").unwrap(),
+            // int / char / byte 的 IR 本来就是 i64。
+            _ => v.into_int_value(),
+        };
+        Ok((v, bits))
+    }
+
+    /// C 侧返回的 i64 位模式还原成 Dial 的 V 类型值。
+    fn kv_from_bits(&self, bits: IntValue<'ctx>, ty: &Type) -> BasicValueEnum<'ctx> {
+        match ty {
+            Type::Float => self.builder
+                .build_bit_cast(bits, self.context.f64_type(), "bits2f").unwrap().into(),
+            // bool 用「!= 0」而非 truncate：未命中返回的 -1 也该是 false 之外的值，
+            // 但 C 侧对 KV_BOOL 的默认值已是 0，这里保持与 print(bool) 一致的口径。
+            Type::Bool => self.builder
+                .build_int_compare(
+                    IntPredicate::NE, bits,
+                    self.context.i64_type().const_int(0, false), "bits2b",
+                ).unwrap().into(),
+            Type::String => self.builder
+                .build_int_to_ptr(bits, self.i8ptr(), "bits2p").unwrap().into(),
+            _ => bits.into(),
+        }
+    }
+
+    /// 泛型 map<K,V> 的方法分派（v1.00）。所有元素都以 8 字节位模式进出 C 运行时。
+    #[allow(clippy::too_many_arguments)]
+    fn gen_kvmap_method(
+        &self,
+        optr: BasicValueEnum<'ctx>,
+        k: &Type,
+        v: &Type,
+        method: &str,
+        args: &[Expr],
+        function: FunctionValue<'ctx>,
+        scopes: &CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let i64t = self.context.i64_type();
+        match method {
+            "put" => {
+                let (ka, kb) = self.kv_arg(&args[0], k, function, scopes, func_values, functions, structs)?;
+                let (va, vb) = self.kv_arg(&args[1], v, function, scopes, func_values, functions, structs)?;
+                let res = self.call_c("dial_kvmap_put", &[optr.into(), kb.into(), vb.into()]);
+                // C 侧已对 string 键/值 retain 一份；自带所有权的字面量要抵消这一份，
+                // 借来的变量则保留（与 array.push 同一结算口径）。
+                self.settle_fresh_value(&args[0], k, ka);
+                self.settle_fresh_value(&args[1], v, va);
+                Ok(res)
+            }
+            "get" | "contains" | "remove" => {
+                let (ka, kb) = self.kv_arg(&args[0], k, function, scopes, func_values, functions, structs)?;
+                let cname = match method {
+                    "get" => "dial_kvmap_get",
+                    "contains" => "dial_kvmap_contains",
+                    _ => "dial_kvmap_remove",
+                };
+                let r = self.call_c(cname, &[optr.into(), kb.into()]);
+                // 查找用的键不被表持有：字面量自带的那一份所有权就地归还。
+                self.settle_fresh_value(&args[0], k, ka);
+                if method == "contains" {
+                    Ok(self.builder.build_int_compare(
+                        IntPredicate::NE, r.into_int_value(),
+                        i64t.const_int(0, false), "kvcontains",
+                    ).unwrap().into())
+                } else {
+                    Ok(self.kv_from_bits(r.into_int_value(), v))
+                }
+            }
+            "size" => Ok(self.call_c("dial_kvmap_size", &[optr.into()])),
+            "keys" => Ok(self.call_c("dial_kvmap_keys", &[optr.into()])),
+            "values" => Ok(self.call_c("dial_kvmap_values", &[optr.into()])),
+            _ => Err(DialcError::new(
+                format!("内部错误：未知的 map<K,V> 方法 '{}'", method), 0, 0,
             )),
         }
     }
@@ -3023,6 +3729,24 @@ impl<'ctx> CodeGen<'ctx> {
                 };
                 Ok(result)
             }
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                let lval = self.gen_expr(l, function, scopes, func_values, functions, structs)?;
+                let rval = self.gen_expr(r, function, scopes, func_values, functions, structs)?;
+                let a = lval.into_int_value();
+                let b = rval.into_int_value();
+                let res: BasicValueEnum = match op {
+                    BinOp::BitAnd => self.builder.build_and(a, b, "band").unwrap().into(),
+                    BinOp::BitOr => self.builder.build_or(a, b, "bor").unwrap().into(),
+                    BinOp::BitXor => self.builder.build_xor(a, b, "bxor").unwrap().into(),
+                    BinOp::Shl => self.builder.build_left_shift(a, b, "shl").unwrap().into(),
+                    BinOp::Shr => {
+                        // int 为有符号 i64，>> 用算术右移（保留符号位）
+                        self.builder.build_right_shift(a, b, true, "shr").unwrap().into()
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(res)
+            }
             BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 let tl = type_of(l, scopes, functions, structs)?;
                 let tr = type_of(r, scopes, functions, structs)?;
@@ -3071,6 +3795,190 @@ impl<'ctx> CodeGen<'ctx> {
                 };
                 Ok(result)
             }
+        }
+    }
+
+    /// 字符串插值（v1.00）：逐段转成 DialString，再用 concat 串起来。
+    ///
+    /// 前置插入一个空串片段，保证至少发生一次 concat，最终结果恒为**新建对象**；
+    /// 于是所有自建的中间片段都能安全释放，而借来的 string 变量绝不会被误释放、
+    /// 也不会被当作「新对象的所有权」直接返回。
+    #[allow(clippy::too_many_arguments)]
+    fn gen_interp(
+        &self,
+        parts: &[InterpPart],
+        function: FunctionValue<'ctx>,
+        scopes: &CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let empty_g = self.global_string(
+            &format!("dialc.interp.{}", self.next_str_id()),
+            "",
+        );
+        let empty = self.call_c("dial_string_new", &[empty_g.into()]);
+        // (值, 是否为本次新建、可在拼接后释放)
+        let mut segs: Vec<(BasicValueEnum<'ctx>, bool)> = vec![(empty, true)];
+        for p in parts {
+            match p {
+                InterpPart::Text(t) => {
+                    let g = self.global_string(
+                        &format!("dialc.interp.{}", self.next_str_id()),
+                        t,
+                    );
+                    let v = self.call_c("dial_string_new", &[g.into()]);
+                    segs.push((v, true));
+                }
+                InterpPart::Expr(e) => {
+                    let ty = type_of(e, scopes, functions, structs)?;
+                    let v = self.gen_expr(e, function, scopes, func_values, functions, structs)?;
+                    let borrowed = yields_borrowed_ref(e);
+                    let (sv, owned) = match ty {
+                        Type::Int => (self.call_c("dial_int_to_string", &[v.into()]), true),
+                        Type::Float => (self.call_c("dial_float_to_string", &[v.into()]), true),
+                        Type::Char => (self.call_c("dial_char_to_string", &[v.into()]), true),
+                        Type::Bool => {
+                            let i = self.to_i64(v, &Type::Bool);
+                            (self.call_c("dial_bool_to_string", &[i.into()]), true)
+                        }
+                        Type::String => (v, !borrowed),
+                        _ => {
+                            return Err(DialcError::new(
+                                "内部错误：字符串插值片段类型不可转字符串（语义层应已拦截）",
+                                0, 0,
+                            ))
+                        }
+                    };
+                    segs.push((sv, owned));
+                }
+            }
+        }
+        let mut acc: Option<(BasicValueEnum<'ctx>, bool)> = None;
+        for (v, owned) in segs {
+            match acc {
+                None => acc = Some((v, owned)),
+                Some((a, a_owned)) => {
+                    let next = self.call_c("dial_string_concat", &[a.into(), v.into()]);
+                    // concat 只复制、不消耗输入；输入与中间结果若是自建的，就地释放。
+                    if a_owned {
+                        self.release_value(&Type::String, a);
+                    }
+                    if owned {
+                        self.release_value(&Type::String, v);
+                    }
+                    acc = Some((next, true));
+                }
+            }
+        }
+        Ok(acc.unwrap().0)
+    }
+
+    /// v1.00 内建：assert / panic / exit / min / max / abs / 浮点数学函数。
+    #[allow(clippy::too_many_arguments)]
+    fn gen_builtin_v1(
+        &self,
+        name: &str,
+        args: &[Expr],
+        function: FunctionValue<'ctx>,
+        scopes: &CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let i64t = self.context.i64_type();
+        let zero: BasicValueEnum = i64t.const_int(0, false).into();
+        let gen = |a: &Expr| self.gen_expr(a, function, scopes, func_values, functions, structs);
+        match name {
+            "assert" => {
+                let cond = gen(&args[0])?;
+                let ok_bb = self.context.append_basic_block(function, "assert.ok");
+                let fail_bb = self.context.append_basic_block(function, "assert.fail");
+                self.builder
+                    .build_conditional_branch(cond.into_int_value(), ok_bb, fail_bb)
+                    .unwrap();
+                self.builder.position_at_end(fail_bb);
+                let msg: BasicMetadataValueEnum = if args.len() == 2 {
+                    let m = gen(&args[1])?;
+                    self.call_c("dial_string_cstr", &[m.into()]).into()
+                } else {
+                    self.global_string("assert.default", "assert 失败").into()
+                };
+                self.call_c_void("dial_assert_fail", &[msg]);
+                self.builder.build_unreachable().unwrap();
+                self.builder.position_at_end(ok_bb);
+                Ok(zero)
+            }
+            "panic" => {
+                let m = gen(&args[0])?;
+                let cstr = self.call_c("dial_string_cstr", &[m.into()]);
+                self.call_c_void("dial_panic", &[cstr.into()]);
+                Ok(zero)
+            }
+            "exit" => {
+                let c = gen(&args[0])?;
+                self.call_c_void("dial_exit", &[c.into()]);
+                Ok(zero)
+            }
+            "min" | "max" => {
+                let a = gen(&args[0])?;
+                let b = gen(&args[1])?;
+                let ty = type_of(&args[0], scopes, functions, structs)?;
+                let cmp = if ty == Type::Int {
+                    self.builder
+                        .build_int_compare(
+                            if name == "min" { IntPredicate::SLT } else { IntPredicate::SGT },
+                            a.into_int_value(),
+                            b.into_int_value(),
+                            "minmax.cmp",
+                        )
+                        .unwrap()
+                } else {
+                    self.builder
+                        .build_float_compare(
+                            if name == "min" { FloatPredicate::OLT } else { FloatPredicate::OGT },
+                            a.into_float_value(),
+                            b.into_float_value(),
+                            "minmax.cmp",
+                        )
+                        .unwrap()
+                };
+                Ok(self.builder.build_select(cmp, a, b, "minmax.sel").unwrap())
+            }
+            "abs" => {
+                let a = gen(&args[0])?;
+                let ty = type_of(&args[0], scopes, functions, structs)?;
+                if ty == Type::Int {
+                    let neg: BasicValueEnum = self
+                        .builder
+                        .build_int_neg(a.into_int_value(), "abs.neg")
+                        .unwrap()
+                        .into();
+                    let is_neg = self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::SLT,
+                            a.into_int_value(),
+                            i64t.const_int(0, false),
+                            "abs.cmp",
+                        )
+                        .unwrap();
+                    Ok(self.builder.build_select(is_neg, neg, a, "abs.sel").unwrap())
+                } else {
+                    Ok(self.call_c("fabs", &[a.into()]))
+                }
+            }
+            "sqrt" | "pow" | "floor" | "ceil" | "round" => {
+                let vals: Vec<BasicMetadataValueEnum> = args
+                    .iter()
+                    .map(|a| gen(a).map(|v| v.into()))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(self.call_c(name, &vals))
+            }
+            _ => Err(DialcError::new(
+                format!("内部错误：未知的 v1.00 内建 '{}'", name),
+                0, 0,
+            )),
         }
     }
 
@@ -3125,6 +4033,13 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Map => {
                 return Err(DialcError::new(
                     "语义错误：当前版本不支持直接 print 哈希表，请逐值打印 print(m.get(k))",
+                    0, 0,
+                ));
+            }
+            // 集合 / 泛型 map 与 map 同构：直接 print 没有可读形态，请用 values() 取快照后逐元素打印。
+            Type::Set(_) | Type::KvMap(..) => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print 集合 / 泛型 map，请先用 values() 取快照再逐元素打印",
                     0, 0,
                 ));
             }
@@ -3226,6 +4141,13 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Map => {
                 return Err(DialcError::new(
                     "语义错误：当前版本不支持直接 print_raw 哈希表，请逐值输出",
+                    0, 0,
+                ));
+            }
+            // 与 emit_print 同口径：集合 / 泛型 map 没有可读形态，不能退化成把二进制 payload 当字符串吐出。
+            Type::Set(_) | Type::KvMap(..) => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print_raw 集合 / 泛型 map，请先用 values() 取快照再逐元素输出",
                     0, 0,
                 ));
             }

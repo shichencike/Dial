@@ -1,0 +1,7 @@
+// 应当编译失败：for (v in coll) 的 coll 必须是数组
+fn main(): int {
+    for (v in 42) {
+        print(v);
+    }
+    return 0;
+}

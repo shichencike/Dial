@@ -1,0 +1,2 @@
+// 应当编译失败：sqrt 只接受 float，4 是 int（禁止隐式转换）
+fn main(): int { return sqrt(4); }

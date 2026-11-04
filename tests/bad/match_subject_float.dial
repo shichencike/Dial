@@ -1,0 +1,8 @@
+// 应当编译失败：match 主体是 float，只允许 int / bool / char / string
+fn main(): int {
+    match (1.5) {
+        1 => { print("x"); }
+        _ => { print("y"); }
+    }
+    return 0;
+}

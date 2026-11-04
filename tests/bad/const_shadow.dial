@@ -1,0 +1,7 @@
+// 应当编译失败：局部变量不得与文件级常量同名（否则内联会静默盖掉变量）
+const N: int = 1;
+fn main(): int {
+    var N: int = 5;
+    print(N);
+    return 0;
+}

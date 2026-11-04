@@ -1,0 +1,8 @@
+// 应当编译失败：match 缺少 `_` 通配分支（可能漏掉任何值）
+fn main(): int {
+    match (1) {
+        1 => { print("one"); }
+        2 => { print("two"); }
+    }
+    return 0;
+}

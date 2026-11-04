@@ -1,0 +1,35 @@
+[string keys]
+2
+95
+-1
+true
+false
+[keys]
+2
+bob
+alice
+[values]
+2
+85
+95
+[remove]
+85
+1
+[cow]
+2
+1
+false
+[float value]
+3.250000
+-0.500000
+-1.000000
+[float key]
+7
+[bool value]
+true
+false
+[char key]
+42
+[regrow]
+8
+8

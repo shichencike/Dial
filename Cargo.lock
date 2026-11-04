@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "dialc"
-version = "0.99.1"
+version = "1.0.0"
 dependencies = [
  "inkwell",
  "serde_json",

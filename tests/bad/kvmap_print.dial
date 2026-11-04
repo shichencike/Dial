@@ -1,0 +1,6 @@
+// 负向：泛型 map 没有可读形态，不能直接 print
+fn main(): int {
+    var m: map<string, int> = new_kv_map();
+    print(m);
+    return 0;
+}

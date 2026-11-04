@@ -1,0 +1,14 @@
+[return]
+fn.exit
+42
+[continue]
+0
+iter.end
+iter.end
+2
+iter.end
+[break]
+0
+inner.end
+inner.end
+block.end

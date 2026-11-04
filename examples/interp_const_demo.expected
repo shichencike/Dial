@@ -1,0 +1,12 @@
+[interp]
+n=7, base=100, sum=107
+pi=3.14, flag=true, ch=Z, app=dial
+str=world!
+nested=3
+[const]
+100
+3.140000
+dial
+true
+Z
+101

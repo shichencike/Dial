@@ -95,6 +95,22 @@ static DialArray grow(DialArray a, int64_t need) {
     return p;
 }
 
+DialArray dial_array_slice(DialArray a, int64_t from, int64_t to) {
+    int64_t len = a_meta(a)[1];
+    /* Fail-Fast：越界切片绝不静默读相邻内存，当场 ud2 */
+    if (from < 0 || to < from || to > len) {
+        dial_assert_fail("dial_array_slice: 切片区间越界");
+    }
+    int64_t kind = a_meta(a)[0];
+    DialArray out = dial_array_new(kind);
+    /* dial_array_push 内部会按 kind 对新元素 retain 一份，故新切片独占各元素的所有权，
+       与原数组互不影响（原数组释放时不会带走切片里的句柄）。 */
+    for (int64_t i = from; i < to; i++) {
+        out = dial_array_push(out, a_elems(a)[i]);
+    }
+    return out;
+}
+
 DialArray dial_array_push(DialArray a, int64_t v) {
     a = grow(a, a_meta(a)[1] + 1);
     int64_t len = a_meta(a)[1];

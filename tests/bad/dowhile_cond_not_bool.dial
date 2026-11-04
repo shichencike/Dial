@@ -1,0 +1,8 @@
+// 应当编译失败：do-while 条件必须是 bool，禁止 int 隐式转 bool
+fn main(): int {
+    var i: int = 0;
+    do {
+        i = i + 1;
+    } while (i);
+    return 0;
+}

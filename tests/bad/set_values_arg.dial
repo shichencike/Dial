@@ -1,0 +1,6 @@
+// 负向：set.values() 不接受参数
+fn main(): int {
+    var s: set<int> = new_set();
+    var ks: int[] = s.values(1);
+    return 0;
+}

@@ -20,6 +20,76 @@
 
 ---
 
+## [v1.00] — 2026-11-04
+
+**里程碑版本**：从 `v0.99.1` 直接跳到 `v1.00`（用户明确要求跳版，见 §23 第 3 条）。
+本版是**语言特性补齐**发布：把「正常程序需要、此前只能模拟或绕路」的能力一次性补齐，共五组。
+所有改动都守住项目铁律：**不引入 GC**、不提供裸指针 / 地址取值 / 指针算术、
+不支持运算符重载、不支持一等函数 / 闭包 / 函数指针、ARC 所有权语义不退化、
+**零隐式转换铁律保持**（`1 + 2.0` 仍编译失败）。
+
+### Added（五组语言特性）
+
+**① 运算符与字面量**
+- 复合赋值 `+= -= *= /= %=`、自增自减 `++` / `--`（编译期脱糖为普通赋值）；
+- 位运算 `& | ^ ~ << >>`（仅 `int`）；
+- 进制字面量 `0x` / `0b` / `0o`、数字分隔符 `_`；
+- 三元表达式 `cond ? a : b`（`cond` 必须是 `bool`，两分支类型必须相同）。
+- 正向示例：`examples/op_demo.dial`。
+
+**② 迭代与控制流**
+- `for (i in a..b step s)` 步长循环（`step` 必须是 `int` 且为正）；
+- `for (v in arr)` 数组遍历、`for (k, v in m)` 哈希表遍历、`for (v in s)` 集合遍历
+  （集合遍历编译期自动插入键集快照并纳入函数出口释放）；
+- `match` 模式匹配（int / bool / char / string 模式，必须有 `_` 通配分支）；
+- `defer` 延迟语句（LIFO，覆盖正常落穿 / `return` / `break` / `continue` / `throw`）；
+- `do { ... } while (cond);`。
+- 正向示例：`examples/control_demo.dial`、`defer_demo.dial`、`control_edge_demo.dial`。
+
+**③ 函数与内建**
+- 默认参数（带默认值的形参必须连续位于末尾；在调用点补齐，不改变 LLVM 函数签名）；
+- `print` / `print_raw` 改为 variadic；
+- 内建 `assert` / `panic` / `exit` / `min` / `max` / `abs` / `sqrt` / `pow` /
+  `floor` / `ceil` / `round`（浮点数学函数最终链接加入 `-lm`）。
+- 正向示例：`examples/builtin_demo.dial`。
+
+**④ 表达力增强**
+- 字符串插值 `"n=${n}"`（逐段转字符串 + concat；插值表达式只允许可转字符串的类型）；
+- 文件级常量 `const NAME: T = 字面量;`（编译期内联，禁止遮蔽与重新赋值）。
+- 正向示例：`examples/interp_const_demo.dial`。
+
+**⑤ 重型类型与容器**
+- `enum` int-backed 名义类型（变体 `Name.Variant` 编译期内联为整数字面量，默认值 0 起递增，可显式指定）；
+- 数组切片 `arr[from..to]`（半开区间；句柄元素逐个 retain，与原数组 ARC 独立）；
+- `set<int>` 集合（`new_set()` / `add` / `contains` / `remove` / `size` / `values`）；
+- **泛型 `map<K,V>`**（独立 C 运行时 `stdlib/dial_kvmap.c`）：
+  - 键支持 `int` / `float` / `bool` / `char` / `byte` / `string`（string 键按条目 ARC 管理）；
+  - 值支持标量 `int` / `float` / `bool` / `char` / `byte`（float 以 IEEE754 位模式存储，绝不丢小数）；
+  - 方法 `put` / `get` / `contains` / `remove` / `size` / `keys` / `values`；
+  - COW 克隆、扩容重哈希、墓碑法删除，全部逐条目 retain / release。
+- 正向示例：`examples/container_demo.dial`、`set_demo.dial`、`kvmap_demo.dial`。
+
+**已知边界**：泛型 map 的 `V` 暂不开放 `string`（`get` 未命中时的默认对象会带来所有权移交歧义）；
+`map.values()` 当前只支持 `V = int`。两点计划在后续版本补齐。
+
+### Fixed
+- **开放寻址哈希表删除采用「左移紧凑」导致键不可达**：`dial_map_remove` 与新
+  `dial_kvmap_remove` 改为**墓碑标记 + 负载重建**。2 万键压测里删除 1 万个后 `size`
+  曾只剩 13082（应为 10000），修复后正确；`set<int>` 与 `for (k, v in m)` 同时受益。
+- `panic` 前 stdout 缓冲内容丢失：`dial_panic()` 增加 `fflush(NULL)`。
+
+### Changed
+- `print` 中间参数改为原样输出、最后一个参数补换行；`print_raw` 全部参数原样输出。
+- trap 接口补齐 `dial_assert_fail` / `dial_exit` / `dial_panic`；`dial_map_keys()` 供迭代使用。
+- LSP 语义 token / 固定文本 / 符号索引补齐所有新增关键字、运算符与语句变体。
+
+### Testing
+- 新增 8 个正向示例 + 黄金文件、30+ 个负向用例（`tests/bad/`）锁定语义边界；
+- `bash tests/run_tests.sh` A–O 全套通过；
+- 2 万键 ARC 压测（泛型 map / set）峰值内存约 4.4 MB / 2.4 MB，无泄漏、无 Fail-Fast。
+
+---
+
 ## [v0.99.1] — 2026-11-03
 
 本版是 **v0.99 的修复发布（补丁位）**：只修缺陷，不含任何新特性，

@@ -1,0 +1,7 @@
+// 应当编译失败：区间 for 只支持单个循环变量，不能用 (k, v) 形式
+fn main(): int {
+    for (k, v in 0..3) {
+        print(k);
+    }
+    return 0;
+}

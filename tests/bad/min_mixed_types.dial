@@ -1,0 +1,2 @@
+// 应当编译失败：min 要求两个同类型参数，禁止 int / float 混用
+fn main(): int { return min(1, 2.0); }

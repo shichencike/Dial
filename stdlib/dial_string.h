@@ -13,6 +13,9 @@ typedef void *DialString;
 /* 从 C 字符串字面量构造（Dial 的 "abc" 字面量走这里） */
 DialString dial_string_new(const char *lit);
 
+/* v1.00：布尔值转字符串（true / false），供字符串插值使用 */
+DialString dial_bool_to_string(int64_t b);
+
 int64_t  dial_string_length(DialString s);
 DialString dial_string_concat(DialString a, DialString b);
 int64_t  dial_string_get(DialString s, int64_t i);

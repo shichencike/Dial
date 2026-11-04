@@ -455,6 +455,72 @@ impl Indexer {
                     let b = self.push_scope(Some(scope_id));
                     self.index_stmts(body, b);
                 }
+                Stmt::ForEach { value, value_line, value_col, body, line, col, .. } => {
+                    self.mark(scope_id, (*line, *col));
+                    let fsc = self.push_scope(Some(scope_id));
+                    self.add(
+                        fsc,
+                        Symbol {
+                            kind: SymbolKind::Var,
+                            name: value.clone(),
+                            ty: Type::Int, // 占位：索引阶段无类型信息，元素类型以 Int 近似（不影响跳转/高亮）
+                            span: span_of(*value_line, *value_col, value),
+                            doc: Vec::new(),
+                            scope_id: fsc,
+                            decl_uri: None,
+                        },
+                    );
+                    self.mark(fsc, (*value_line, *value_col));
+                    self.index_stmts(body, fsc);
+                }
+                Stmt::ForEachMap {
+                    key,
+                    key_line,
+                    key_col,
+                    value,
+                    value_line,
+                    value_col,
+                    body,
+                    line,
+                    col,
+                    ..
+                } => {
+                    self.mark(scope_id, (*line, *col));
+                    let fsc = self.push_scope(Some(scope_id));
+                    for (nm, vl, vc) in [(&key, *key_line, *key_col), (&value, *value_line, *value_col)] {
+                        self.add(
+                            fsc,
+                            Symbol {
+                                kind: SymbolKind::Var,
+                                name: nm.to_string(),
+                                ty: Type::Int,
+                                span: span_of(vl, vc, nm),
+                                doc: Vec::new(),
+                                scope_id: fsc,
+                                decl_uri: None,
+                            },
+                        );
+                        self.mark(fsc, (vl, vc));
+                    }
+                    self.index_stmts(body, fsc);
+                }
+                Stmt::DoWhile { body, line, col, .. } => {
+                    self.mark(scope_id, (*line, *col));
+                    let w = self.push_scope(Some(scope_id));
+                    self.index_stmts(body, w);
+                }
+                Stmt::Match { arms, line, col, .. } => {
+                    self.mark(scope_id, (*line, *col));
+                    for arm in arms {
+                        let asc = self.push_scope(Some(scope_id));
+                        self.mark(asc, (arm.line, arm.col));
+                        self.index_stmts(&arm.body, asc);
+                    }
+                }
+                Stmt::Defer(inner, line, col) => {
+                    self.mark(scope_id, (*line, *col));
+                    self.index_stmts(std::slice::from_ref(inner.as_ref()), scope_id);
+                }
                 // 以下语句不引入绑定，仅登记位置以参与 span 推导。
                 Stmt::Expr(_, line, col) => self.mark(scope_id, (*line, *col)),
                 Stmt::Return(_, line, col) => self.mark(scope_id, (*line, *col)),

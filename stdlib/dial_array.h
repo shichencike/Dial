@@ -31,6 +31,8 @@ DialArray dial_array_set(DialArray a, int64_t i, int64_t v); /* 被共享时内�
  * 返回一份「新拥有」的引用，由调用方用完后自行 release。 */
 DialArray dial_array_set_borrowed(DialArray a, int64_t i, int64_t v);
 int64_t  dial_array_length(DialArray a);
+/* v1.00：切片 [from, to)，返回同 kind 的新数组；句柄元素逐个 retain。 */
+DialArray dial_array_slice(DialArray a, int64_t from, int64_t to);
 
 DialArray dial_array_clone(DialArray a);
 void dial_array_retain(DialArray a);

@@ -4,9 +4,20 @@
 //! - 字面量：整数、浮点数、布尔、字符串
 //! - 标识符与关键字：var let fn if else while return and or not true false int float bool string
 //! - 运算符与标点：+ - * / = == != < > <= >= ! ; , ( ) { } :
+//! - v1.00 新增：复合赋值 += -= *= /= %=、自增自减 ++ --、位运算 & | ^ ~ << >>、三元 ? 、
+//!   进制字面量 0x/0b/0o 与数字分隔符 1_000
 //! - 行注释 `//` 到行尾
 
 use crate::error::{DialcError, Result};
+
+/// 字符串插值的一个片段（v1.00）：`"x=${v}"` 拆成 `Text("x=")` + `Expr("v")`。
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpPiece {
+    /// 普通文本（已处理转义）。
+    Text(String),
+    /// `${...}` 内的源码文本，由 parser 做二次 lex/parse 得到真正的 `Expr`。
+    Expr(String),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -19,6 +30,8 @@ pub enum TokenKind {
     /// 字节字面量 `b'a'`（v0.98.2）。值为单个字节（0~255），与字符**语义不同**。
     ByteLit(i64),
     StringLit(String),
+    /// 字符串插值（v1.00）：含至少一个 `${...}` 片段，例如 `"x=${v}"`。
+    InterpLit(Vec<InterpPiece>),
     Ident(String),
 
     // 关键字
@@ -47,6 +60,13 @@ pub enum TokenKind {
     And,
     Or,
     Not,
+    // 控制流增强（v1.00）
+    Match, // match 多分支：match (x) { 1 => {...} 2 => {...} _ => {...} }
+    Defer, // defer 资源清理：defer close(f); 离开作用域时按 LIFO 执行
+    Do,    // do { ... } while (c); 循环体至少执行一次
+    Step,  // for 步长关键字：for (i in 0..10 step 2)
+    Const, // const 文件级常量：const N: int = 10;（编译期内联，不可重新赋值）
+    Enum,  // enum 枚举：enum Color { Red, Green, Blue }（int-backed）
 
     // 类型关键字
     IntT,
@@ -67,6 +87,14 @@ pub enum TokenKind {
     Slash,
     /// 取模运算符 `%`（与 * / 同级，整数/浮点均支持，CVE-2024-DIAL-005 新增）。
     Mod,
+    // 复合赋值运算符（v1.00）：+= -= *= /= %=
+    PlusEq, MinusEq, MulEq, DivEq, ModEq,
+    // 自增 / 自减（v1.00）：x++ ++x x-- --x（仅作语句，作为表达式位置使用时编译期拒绝）
+    PlusPlus, MinusMinus,
+    // 位运算（v1.00，仅 int）：& | ^ ~ 以及移位 << >>
+    Amp, Pipe, Caret, Tilde, Shl, Shr,
+    // 三元表达式（v1.00）：cond ? a : b
+    Question,
     Eq,       // ==
     Neq,      // !=
     Lt,       // <
@@ -74,6 +102,8 @@ pub enum TokenKind {
     Le,       // <=
     Ge,       // >=
     Assign,   // =
+    /// `=>`：match 分支的箭头（v1.00）。必须与 `>=`(Ge) / `==`(Eq) 区分开。
+    Arrow,    // =>
     Semicolon,
     Comma,
     LParen,
@@ -278,14 +308,55 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
             continue;
         }
 
-        // 字符串
+        // 字符串（v1.00 起支持 `${...}` 插值）
         if c == '"' {
             let start_line = line;
             let start_col = col;
             i += 1;
             col += 1;
             let mut s = String::new();
+            let mut pieces: Vec<InterpPiece> = Vec::new();
             while i < chars.len() && chars[i] != '"' {
+                // 插值片段：${ 表达式 }。花括号按嵌套深度配对，允许 `${ f({...}) }` 之类写法。
+                if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                    if !s.is_empty() {
+                        pieces.push(InterpPiece::Text(std::mem::take(&mut s)));
+                    }
+                    i += 2;
+                    col += 2;
+                    let mut depth: i64 = 1;
+                    let mut code = String::new();
+                    while i < chars.len() && depth > 0 {
+                        let ch = chars[i];
+                        if ch == '{' {
+                            depth += 1;
+                            code.push(ch);
+                        } else if ch == '}' {
+                            depth -= 1;
+                            if depth > 0 {
+                                code.push(ch);
+                            }
+                        } else {
+                            code.push(ch);
+                        }
+                        i += 1;
+                        col += 1;
+                    }
+                    if depth != 0 {
+                        return Err(DialcError::new(
+                            "字符串插值 ${...} 未闭合",
+                            start_line, start_col,
+                        ));
+                    }
+                    if code.trim().is_empty() {
+                        return Err(DialcError::new(
+                            "字符串插值 ${...} 内不能为空",
+                            start_line, start_col,
+                        ));
+                    }
+                    pieces.push(InterpPiece::Expr(code));
+                    continue;
+                }
                 let ch = chars[i];
                 if ch == '\\' && i + 1 < chars.len() {
                     let nxt = chars[i + 1];
@@ -312,40 +383,97 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
             }
             i += 1; // 跳过结束引号
             col += 1;
-            push(TokenKind::StringLit(s), start_line, start_col, &mut tokens);
+            if pieces.is_empty() {
+                push(TokenKind::StringLit(s), start_line, start_col, &mut tokens);
+            } else {
+                if !s.is_empty() {
+                    pieces.push(InterpPiece::Text(s));
+                }
+                push(TokenKind::InterpLit(pieces), start_line, start_col, &mut tokens);
+            }
             continue;
         }
 
-        // 数字（整数 / 浮点）
-        if c.is_ascii_digit() {
+        // 数字（整数 / 浮点）。v1.00 起支持：
+        //   - 进制前缀：0x/0X（十六）、0b/0B（二）、0o/0O（八）
+        //   - 数字分隔符 `_`：1_000_000、0xFF_FF 都可（纯可读性，编译期剥离）
+        //   - 浮点仅十进制支持小数点（十六/二/八进制不支持浮点字面量）
+        if c.is_ascii_digit() || (c == '0' && i + 1 < chars.len() && matches!(chars[i + 1], 'x' | 'X' | 'b' | 'B' | 'o' | 'O')) {
             let start_line = line;
             let start_col = col;
+            // 进制判定（默认十进制）
+            let radix: u32 = if c == '0' {
+                match chars[i + 1] {
+                    'x' | 'X' => 16,
+                    'b' | 'B' => 2,
+                    'o' | 'O' => 8,
+                    _ => 10,
+                }
+            } else {
+                10
+            };
             let mut num = String::new();
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                num.push(chars[i]);
-                i += 1;
-                col += 1;
+            if radix != 10 {
+                // 跳过 '0' 与进制字母
+                i += 2;
+                col += 2;
             }
-            // 仅当小数点后紧跟数字才视为浮点（否则 `..` 应被识别为范围运算符）。
-            if i < chars.len() && chars[i] == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() {
+            // 收集数字（跳过下划线分隔符）
+            while i < chars.len() {
+                let d = chars[i];
+                if d == '_' {
+                    i += 1;
+                    col += 1;
+                    continue;
+                }
+                let valid = if radix == 16 {
+                    d.is_ascii_hexdigit()
+                } else {
+                    d.is_ascii_digit()
+                };
+                if valid {
+                    num.push(d);
+                    i += 1;
+                    col += 1;
+                } else {
+                    break;
+                }
+            }
+            // 浮点：仅十进制允许小数点
+            if radix == 10 && i < chars.len() && chars[i] == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() {
                 num.push('.');
                 i += 1;
                 col += 1;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    num.push(chars[i]);
-                    i += 1;
-                    col += 1;
+                while i < chars.len() {
+                    let d = chars[i];
+                    if d == '_' {
+                        i += 1;
+                        col += 1;
+                        continue;
+                    }
+                    if d.is_ascii_digit() {
+                        num.push(d);
+                        i += 1;
+                        col += 1;
+                    } else {
+                        break;
+                    }
                 }
                 let f: f64 = num
                     .parse()
                     .map_err(|_| DialcError::new("非法的浮点数字面量", start_line, start_col))?;
                 push(TokenKind::FloatLit(f), start_line, start_col, &mut tokens);
-            } else {
-                let n: i64 = num
-                    .parse()
-                    .map_err(|_| DialcError::new("非法的整数字面量", start_line, start_col))?;
-                push(TokenKind::IntLit(n), start_line, start_col, &mut tokens);
+                continue;
             }
+            // 整数（十进制 / 十六 / 二 / 八）
+            let n: i64 = if radix == 10 {
+                num.parse()
+                    .map_err(|_| DialcError::new("非法的整数字面量", start_line, start_col))?
+            } else {
+                i64::from_str_radix(&num, radix)
+                    .map_err(|_| DialcError::new("非法的整数字面量（检查进制前缀与字符）", start_line, start_col))?
+            };
+            push(TokenKind::IntLit(n), start_line, start_col, &mut tokens);
             continue;
         }
 
@@ -382,6 +510,12 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "and" => TokenKind::And,
                 "or" => TokenKind::Or,
                 "not" => TokenKind::Not,
+                "match" => TokenKind::Match,
+                "defer" => TokenKind::Defer,
+                "do" => TokenKind::Do,
+                "step" => TokenKind::Step,
+                "const" => TokenKind::Const,
+                "enum" => TokenKind::Enum,
                 "true" => TokenKind::BoolLit(true),
                 "false" => TokenKind::BoolLit(false),
                 "struct" => TokenKind::Struct,
@@ -406,34 +540,84 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
         let start_line = line;
         let start_col = col;
         match c {
-            '+' => {
-                push(TokenKind::Plus, start_line, start_col, &mut tokens);
-                i += 1;
-                col += 1;
-            }
-            '-' => {
-                push(TokenKind::Minus, start_line, start_col, &mut tokens);
-                i += 1;
-                col += 1;
-            }
-            '*' => {
-                push(TokenKind::Star, start_line, start_col, &mut tokens);
-                i += 1;
-                col += 1;
-            }
-            '/' => {
-                push(TokenKind::Slash, start_line, start_col, &mut tokens);
-                i += 1;
-                col += 1;
-            }
-            '%' => {
-                push(TokenKind::Mod, start_line, start_col, &mut tokens);
-                i += 1;
-                col += 1;
-            }
+            '+' => match peek {
+                Some('=') => {
+                    push(TokenKind::PlusEq, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
+                Some('+') => {
+                    push(TokenKind::PlusPlus, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
+                _ => {
+                    push(TokenKind::Plus, start_line, start_col, &mut tokens);
+                    i += 1;
+                    col += 1;
+                }
+            },
+            '-' => match peek {
+                Some('=') => {
+                    push(TokenKind::MinusEq, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
+                Some('-') => {
+                    push(TokenKind::MinusMinus, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
+                _ => {
+                    push(TokenKind::Minus, start_line, start_col, &mut tokens);
+                    i += 1;
+                    col += 1;
+                }
+            },
+            '*' => match peek {
+                Some('=') => {
+                    push(TokenKind::MulEq, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
+                _ => {
+                    push(TokenKind::Star, start_line, start_col, &mut tokens);
+                    i += 1;
+                    col += 1;
+                }
+            },
+            '/' => match peek {
+                Some('=') => {
+                    push(TokenKind::DivEq, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
+                _ => {
+                    push(TokenKind::Slash, start_line, start_col, &mut tokens);
+                    i += 1;
+                    col += 1;
+                }
+            },
+            '%' => match peek {
+                Some('=') => {
+                    push(TokenKind::ModEq, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
+                _ => {
+                    push(TokenKind::Mod, start_line, start_col, &mut tokens);
+                    i += 1;
+                    col += 1;
+                }
+            },
             '=' => match peek {
                 Some('=') => {
                     push(TokenKind::Eq, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
+                Some('>') => {
+                    push(TokenKind::Arrow, start_line, start_col, &mut tokens);
                     i += 2;
                     col += 2;
                 }
@@ -463,6 +647,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                     i += 2;
                     col += 2;
                 }
+                Some('<') => {
+                    push(TokenKind::Shl, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
                 _ => {
                     push(TokenKind::Lt, start_line, start_col, &mut tokens);
                     i += 1;
@@ -475,6 +664,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                     i += 2;
                     col += 2;
                 }
+                Some('>') => {
+                    push(TokenKind::Shr, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
                 _ => {
                     push(TokenKind::Gt, start_line, start_col, &mut tokens);
                     i += 1;
@@ -483,6 +677,31 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
             },
             ';' => {
                 push(TokenKind::Semicolon, start_line, start_col, &mut tokens);
+                i += 1;
+                col += 1;
+            }
+            '&' => {
+                push(TokenKind::Amp, start_line, start_col, &mut tokens);
+                i += 1;
+                col += 1;
+            }
+            '|' => {
+                push(TokenKind::Pipe, start_line, start_col, &mut tokens);
+                i += 1;
+                col += 1;
+            }
+            '^' => {
+                push(TokenKind::Caret, start_line, start_col, &mut tokens);
+                i += 1;
+                col += 1;
+            }
+            '~' => {
+                push(TokenKind::Tilde, start_line, start_col, &mut tokens);
+                i += 1;
+                col += 1;
+            }
+            '?' => {
+                push(TokenKind::Question, start_line, start_col, &mut tokens);
                 i += 1;
                 col += 1;
             }

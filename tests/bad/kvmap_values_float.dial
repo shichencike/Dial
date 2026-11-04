@@ -1,0 +1,6 @@
+// 负向：map.values() 当前版本只支持 V = int
+fn main(): int {
+    var m: map<int, float> = new_kv_map();
+    var vs: int[] = m.values();
+    return 0;
+}
