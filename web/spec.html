@@ -6752,9 +6752,10 @@ raw_free(buf);                                    // 释放（谁申请、谁释
 <code>dial_raw.c</code> 会<strong>自动</strong>进入静态库与官方包，无需手工登记清单。</p>
 <p>配套同步：官方标准库包版本 <code>1.1.0 → 1.2.0</code>，打包默认 <code>--abi 3</code>，CI 发布作业
 <code>--abi 3</code>，一键安装脚本的 <code>STDLIB_RELEASE</code> 默认标签 → <code>stdlib-v1.2.0</code>。
-标准库仍<strong>独立发版</strong>（tag <code>stdlib-v*</code>）；v1.01 ~ v1.03 目前都是<strong>本地提交、
-尚未打标签</strong>，合并发布时以两个标签为准（v1.03 起为 <code>v1.3.0</code> 编译器与
-<code>stdlib-v1.3.0</code> 标准库包，见 <a href="#3251-标准库-abi-递增破坏性变更">§32.5.1</a>）。</p>
+标准库仍<strong>独立发版</strong>（tag <code>stdlib-v*</code>）；v1.01 ~ v1.03 的提交已随 <code>main</code> 推送，
+按版本号的发布标签以两个为准（v1.03 起为 <code>v1.3.0</code> 编译器与
+<code>stdlib-v1.3.0</code> 标准库包，见 <a href="#3251-标准库-abi-递增破坏性变更">§32.5.1</a>），
+本次未打这两个标签，由维护者另行决定。</p>
 <h3 id="316-测试">31.6 测试</h3>
 <ul>
 <li>3 个正向示例 + 同名 <code>.expected</code> 黄金文件：<code>goto_demo</code>、<code>with_demo</code>、<code>rawptr_demo</code>；</li>
@@ -6946,9 +6947,10 @@ print(sum());             // 0（缺省就是空数组）
 </ul>
 <blockquote>
 <p><strong>关于 <code>v1.0</code> 标签</strong>：<code>v1.00</code> ~ <code>v1.03</code> 都是「v1.0 里程碑」达成过程中的分版记录
-（CHANGELOG 里已收拢到该标题下）。里程碑标签 <code>v1.0</code> <strong>要等回调、变参等收尾特性
-全部完成并回归通过之后才打</strong>；本仓库当前不打 <code>v1.0</code> tag，发布仍以两个独立标签
-<code>v1.3.0</code> 与 <code>stdlib-v1.3.0</code> 为准。</p>
+（CHANGELOG 里已收拢到该标题下）。回调、变参等收尾特性在 <code>[v1.03]</code> 全部完成并
+回归通过，<strong>里程碑标签 <code>v1.0</code> 已打在本版本对应的提交上并推送</strong>。它与按版本号的
+发布标签互不替代：一键安装脚本按精确版本下载，用 <code>v1.3.0</code> / <code>stdlib-v1.3.0</code>
+两个标签（本次未打，由维护者另行决定）。</p>
 </blockquote></main></div>
 
 <footer class="site-footer">

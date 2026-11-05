@@ -237,12 +237,11 @@
 <hr />
 <h2 id="v10-里程碑--分版记录v100--v103">[v1.0 里程碑] — 分版记录（v1.00 ~ v1.03）</h2>
 <blockquote>
-<p><strong>里程碑与标签</strong>：<code>v1.00</code> 是从 <code>v0.99.1</code> 跳版而来的语言特性补齐里程碑，但
-「回调 / 可变参数」等收尾特性当时尚未完成。按版本约定，<strong>只有这些收尾特性全部落地
-并回归通过之后，才够格打 <code>v1.0</code> 标签</strong>；因此本仓库不提前打 <code>v1.0</code> tag，
-已有标签里也没有它（现存的是 <code>v0.95</code> ~ <code>v0.98.1</code> 与独立发布标签 <code>stdlib-v1.0.0</code>）。
-下面四个版本条目统一归到本里程碑之下，作为达成过程中的<strong>分版记录</strong>，
-而不是四个各自独立的「正式 v1.0」。</p>
+<p><strong>里程碑与标签</strong>：<code>v1.00</code> 是从 <code>v0.99.1</code> 跳版而来的语言特性补齐里程碑，当时
+「回调 / 可变参数」等收尾特性尚未完成。到 <code>[v1.03]</code> 这些收尾特性已全部落地并
+回归通过（A–O 全绿、330 ✅ / 0 ❌、零编译警告），<strong>里程碑标签 <code>v1.0</code> 已打在
+<code>[v1.03]</code> 对应的提交上并推送</strong>。下面四个版本条目统一归到本里程碑之下，作为
+达成过程中的<strong>分版记录</strong>，而不是四个各自独立的「正式 v1.0」。</p>
 <table>
 <thead>
 <tr>
@@ -269,7 +268,9 @@
 </tr>
 </tbody>
 </table>
-<p>发布仍以两个独立标签为准：<code>v1.3.0</code>（编译器）与 <code>stdlib-v1.3.0</code>（标准库包）。</p>
+<p><strong>两类标签互不替代</strong>：<code>v1.0</code> 标记里程碑达成；按版本号的发布标签
+<code>v1.3.0</code>（编译器）与 <code>stdlib-v1.3.0</code>（标准库包）供一键安装脚本下载精确版本，
+本次<strong>不打</strong>这两个标签，由维护者另行决定何时打。</p>
 </blockquote>
 <hr />
 <h2 id="v103--2026-11-05">[v1.03] — 2026-11-05</h2>
@@ -331,7 +332,7 @@
   14 个负向用例；H 组新增 C 变参 <code>extern fn</code> 的正向与负向回归；</li>
 <li><code>tests/run_tests.sh</code> A–O 全套通过；版本 / 链接 / 官网检查通过；零编译警告。</li>
 <li><strong>版本层级</strong>：<code>[v1.00]</code> ~ <code>[v1.03]</code> 统一归入上方「v1.0 里程碑」大标题下作为分版记录；
-  <code>v1.0</code> 标签须待全部收尾特性完成后才打，本仓库当前不打该 tag，也不 push。</li>
+  收尾特性至此全部落地，<code>v1.0</code> 里程碑标签已打在本次提交上，并随 <code>main</code> 一起推送。</li>
 </ul>
 <hr />
 <h2 id="v102--2026-11-05">[v1.02] — 2026-11-05</h2>
@@ -397,9 +398,9 @@
 <li>配套同步：官方标准库包版本 <code>1.1.0 → 1.2.0</code>，打包默认 <code>--abi 3</code>，
   CI 发布作业 <code>--abi 3</code>，一键安装脚本的 <code>STDLIB_RELEASE</code> 默认标签
   <code>stdlib-v1.1.0 → stdlib-v1.2.0</code>（标准库仍<strong>独立发版</strong>，tag <code>stdlib-v*</code>）。</li>
-<li>发布协同项：v1.01 ~ v1.03 目前都是<strong>本地提交、尚未打标签</strong>；合并发布时以
-  <strong>两个标签</strong>为准（v1.03 起为 <code>v1.3.0</code> 编译器与 <code>stdlib-v1.3.0</code> 标准库包，
-  见上方 v1.03 条目）。<code>v1.0</code> 里程碑标签须待全部收尾特性完成后才打，见文件开头说明。</li>
+<li>发布协同项：v1.01 ~ v1.03 的提交已随 <code>main</code> 一并推送；按版本号的发布标签
+  （v1.03 起为 <code>v1.3.0</code> 编译器与 <code>stdlib-v1.3.0</code> 标准库包，见上方 v1.03 条目）
+  由维护者另行决定何时打；<code>v1.0</code> 里程碑标签已在 <code>[v1.03]</code> 之后打上，见文件开头说明。</li>
 </ul>
 <h3 id="fixed_1">Fixed</h3>
 <ul>
