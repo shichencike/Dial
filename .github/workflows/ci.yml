@@ -456,12 +456,12 @@ jobs:
         run: |
           set -euo pipefail
           ls -R stdlib-artifacts
-          # 版本号取标签去掉 stdlib-v 前缀（stdlib-v1.0.0 -> 1.0.0）
+          # 版本号取标签去掉 stdlib-v 前缀（stdlib-v1.2.0 -> 1.2.0）
           PKG_VER="${GITHUB_REF_NAME#stdlib-v}"
           python3 tools/make_stdlib_pkg.py \
             --diali stdlib/stdlib.diali \
             --out dist-stdlib/stdlib.dialpkg \
-            --version "$PKG_VER" --abi 2 \
+            --version "$PKG_VER" --abi 3 \
             "x86_64-linux-gnu:stdlib-artifacts/stdlib-x86_64-linux-gnu/libdial_std.a" \
             "x86_64-pc-windows-gnu:stdlib-artifacts/stdlib-x86_64-pc-windows-gnu/libdial_std.a" \
             "aarch64-unknown-linux-musl:stdlib-artifacts/stdlib-aarch64-unknown-linux-musl/libdial_std.a"

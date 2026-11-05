@@ -1,0 +1,6 @@
+// 应当编译失败：raw_free 的参数必须是裸指针。
+fn main(): int {
+    var n: int = 5;
+    raw_free(n);
+    return 0;
+}

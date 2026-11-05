@@ -1,0 +1,10 @@
+// 应当编译失败：goto 不得跨越 try 边界（try 依赖 setjmp/longjmp 保存栈帧）。
+fn main(): int {
+    try {
+        goto out;
+    } catch {
+        print("c");
+    }
+    label out:
+    return 0;
+}

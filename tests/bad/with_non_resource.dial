@@ -1,0 +1,7 @@
+// 应当编译失败：with 只能管理 file / thread / 裸指针这类需要显式释放的资源。
+fn main(): int {
+    with s = "hello" {
+        print(s);
+    }
+    return 0;
+}

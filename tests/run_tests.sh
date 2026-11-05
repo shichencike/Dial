@@ -262,6 +262,24 @@ else
             fi
             cp "${TMP}/dlib.bak" "$dlib"   # 还原，避免污染后续用例
         fi
+
+        # 3) drop(不透明句柄) 必须编译期报错并给出「不受 ARC 管理」的指引（v1.02）。
+        #    此前它是静默 no-op，还会把变量误标为「已转移」——容易让人以为资源已归还。
+        cat > "${TMP}/drop_opaque.dial" <<'EOF'
+import "demo";
+fn main(): int {
+    var h: DemoHandle = demo_new(42);
+    drop(h);
+    return 0;
+}
+EOF
+        if "$DIALC" build "${TMP}/drop_opaque.dial" -o "${TMP}/drop_opaque" >"${TMP}/hdrop.log" 2>&1; then
+            echo "  ❌ drop(不透明句柄) 竟通过编译（应报错并指引手动释放）"; fail=1
+        elif ! grep -q "不受 ARC 管理" "${TMP}/hdrop.log"; then
+            echo "  ❌ drop 被拦下，但报错未说明「不受 ARC 管理」："; sed 's/^/       /' "${TMP}/hdrop.log"; fail=1
+        else
+            echo "  ✅ drop(不透明句柄) 被拦下并给出手动释放指引"
+        fi
     fi
 fi
 

@@ -1,0 +1,6 @@
+// 应当编译失败：rawptr<void> 是无类型裸指针，不能做指针算术（须先 ptr_cast）。
+fn main(): int {
+    var p: rawptr<void> = ptr_cast<rawptr<void>>(raw_alloc(8));
+    var q: rawptr<void> = p.offset(1);
+    return 0;
+}

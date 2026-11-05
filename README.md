@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v1.01
+# dialc — Dial 语言编译器 v1.02
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -39,7 +39,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 | **编译期所有权优化** | Sema 阶段做数据流分析，尽可能把引用计数开销静态消除；只有静态分析失效时才由 C Runtime 的 COW 兜底 |
 | **产物零 LLVM 依赖** | 用户编译出的可执行文件只依赖 C Runtime（libc），**绝不**依赖 libLLVM |
 | **比 C 更严格** | 强制初始化、强制不可变性、禁止隐式窄化转换、禁止省略结构体字段——把 C 中大量"未定义行为"变成"编译期错误" |
-| **无 GC 底线（内存宪法）** | 永不引入追踪式 GC；确定性内存管理靠 ARC + 编译期分析 +（未来）显式裸指针，见 §19 |
+| **无 GC 底线（内存宪法）** | 永不引入追踪式 GC；确定性内存管理靠 ARC + 编译期分析 + 显式裸指针（v1.02），见 §19 |
 | **Fail-Fast 底线** | 宁可当场崩溃，绝不产生未定义行为或静默错误数据；越界/除零必须当场终止，见 §20 |
 
 ---
@@ -421,7 +421,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 
 > `char` 是 v0.92 引入的单字符类型：**一个 Unicode 码点**，底层与 `int` 同为 `i64`，
 > 但类型独立——不参与算术，只可比较或经 `char_to_int` / `int_to_char` 显式转换
-> （见 [§5.1](#51-基本类型) 与 [§17.2](#172-尚未实现的能力截至-v098)）。
+> （见 [§5.1](#51-基本类型) 与 [§17.2](#172-尚未实现的能力截至-v102)）。
 
 > `try` / `catch` / `throw` 是 v0.7 引入的可恢复异常关键字（见 [§26](#26-可恢复异常trycatchthrow)）。
 > 注意 **`error` 不是关键字**——它是内建构造函数名（与 `open` / `print` 同类），写作 `Error("...")`。
@@ -1575,7 +1575,7 @@ print("");        // -> Hi
 | --- | --- |
 | 整数溢出 | 按 i64 二进制补码回绕（Debug 等级亦不检查） |
 
-### 17.2 尚未实现的能力（截至 v0.98）
+### 17.2 尚未实现的能力（截至 v1.02）
 
 > 已落地：`Map`（int → int，ARC 管理）、`read_line()`、短路求值、零隐式转换铁律、
 > `let` + 原地修改方法（push/set/put）的接收者约束、`else if` 语法糖、`for` 范围循环、`break` / `continue`、
@@ -1595,7 +1595,7 @@ print("");        // -> Hi
 | 裸块 `{ ... }` | **已支持**（v0.99）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 [§8.6](#86-裸块独立的词法作用域v099) |
 | 模块 / 包 / import | **已支持**（v0.93；`dialc install <URL>` 于 v0.96 落地）：`import "包名";` + `dialc install <本地文件\|URL>`，见 [§25](#25-包分发与依赖管理生态规划--最终规范)。**尚未实现**：源码形式的模块拆分（无 `mod`） |
 | 泛型、接口、trait、闭包 | **用户自定义泛型 / 接口 / trait / 闭包仍不支持**；`channel<T>`、`set<T>`、`map<K,V>` 是 **v1.00 已落地的内建特化容器语法**（见 [§29](#29-v100语言特性补齐)），不是用户泛型 |
-| 指针、地址取值、指针算术 | **永不提供**（与不透明指针契约冲突） |
+| 裸指针、地址取值、指针算术 | **v1.02 已支持裸指针**（`rawptr<T>` + `&x` / `*p` / `p.offset(n)` / `raw_alloc` / `raw_free`），但它**绝对不受 ARC 管理**，必须手动释放，且与 ARC 容器之间没有隐式转换——见 [§31.4](#314-裸指针不受-arc-管束的显式契约)。**用户自定义泛型的指针运算**仍不提供 |
 | 运算符重载 | **永不提供** |
 | 全局变量 | 不支持 |
 | 数组/结构体字面量作为常量表达式 | 不支持（需先赋给变量） |
@@ -1736,11 +1736,14 @@ Dial 依托**不透明指针 + C Runtime 的 ARC（自动引用计数）**，结
 | 值类型数据（结构体、标量） | **不产生环**——结构体按值传递，其字段里的指针仍指向独立对象 |
 | 确实需要「互相引用」的图结构 | 用**不透明句柄**（`file` / `thread` / 包的 `Type::Opaque`）：它们**不受 ARC 管理**，由 `close` / `join` 显式回收，**天然不参与引用环** |
 | 确需共享同一份数据 | 用**只读共享**（多个持有者只读同一 `string` / `int[]`）——只读不构成环 |
-| 未来需要可变共享的图 | 走 [§19.3](#193-显式指针回收未来裸指针的契约) 的 `raw ptr` + 显式 `dial_raw_free`，**而不是**依赖 GC |
+| 未来需要可变共享的图 | 走 [§19.3](#193-显式指针回收裸指针的显式契约) 的 `rawptr<T>` + 显式 `raw_free`，**而不是**依赖 GC |
 
-### 19.3 显式指针回收（未来裸指针的契约）
+### 19.3 显式指针回收（裸指针的显式契约）
 
-未来若引入裸指针（`raw ptr`），Dial 坚持**"谁申请、谁释放"**的显式契约：
+> **v1.02 起已落地**：裸指针（`rawptr<T>`）正式成为语言的一部分，实现与本节契约逐条对齐，
+> 详见 [§31.4](#314-裸指针不受-arc-管束的显式契约)。
+
+Dial 对裸指针坚持**"谁申请、谁释放"**的显式契约：
 
 - 裸指针**绝对不受 ARC 保护**，不会被任何引用计数自动回收；
 - 它的生命周期完全交由开发者显式管理，例如调用底层 `dial_raw_free` 归还；
@@ -1753,7 +1756,7 @@ Dial 依托**不透明指针 + C Runtime 的 ARC（自动引用计数）**，结
 | --- | --- | --- |
 | Java / Go / C# | 追踪式 GC（存在 STW 停顿） | ❌ **永不引入** |
 | C / C++ | 手动 `free` / RAII | 借鉴"确定性"，但用 ARC + 编译期分析消除大部分手写负担 |
-| **Dial** | ARC + 编译期移动/逃逸分析 +（未来）显式裸指针 | ✅ 确定性、零 GC 停顿、可控 |
+| **Dial** | ARC + 编译期移动/逃逸分析 + 显式裸指针（v1.02 起） | ✅ 确定性、零 GC 停顿、可控 |
 
 > 这条底线写进语言本身，而非仅仅写在文档里：任何试图为 Dial 添加追踪式 GC 的提案，都在原则上被否决。
 
@@ -2587,9 +2590,9 @@ $ dialc build main.dial -o main
 
 | 项 | 值 |
 | --- | --- |
-| **Release 名称 / Tag** | `stdlib-v1.0.0` |
-| **`abi`** | `1`（编译器 `package::STDLIB_ABI` 同步锁定） |
-| **`version`** | `1.0.0` |
+| **Release 名称 / Tag** | `stdlib-v1.2.0`（随编译器版本同步，见 [§31.5.1](#3151-标准库-abi-递增破坏性变更)） |
+| **`abi`** | `3`（编译器 `package::STDLIB_ABI` 同步锁定；每次破坏性变更递增，见 [§30.9.1](#3091-标准库-abi-递增破坏性变更) 与 [§31.5.1](#3151-标准库-abi-递增破坏性变更)） |
+| **`version`** | `1.2.0` |
 | **`license`** | `MIT OR Apache-2.0`（强制免传染，见 §25.8） |
 | **包名** | `stdlib`（`dialc` 按此名自动加载，用户无感知） |
 | **三平台机器码** | `lib/x86_64-linux-gnu/libdial_std.a` · `lib/x86_64-pc-windows-gnu/libdial_std.a` · `lib/aarch64-unknown-linux-musl/libdial_std.a` |
@@ -2601,10 +2604,10 @@ $ dialc build main.dial -o main
 **全自动、零配置**：
 
 1. **一键脚本自动拉取**：`install-dial.sh` / `install-dial.ps1` 把 `dialc` 装好后，会**静默**从
-   `https://github.com/shichencike/Dial/releases/download/stdlib-v1.0.0/stdlib.dialpkg`
+   `https://github.com/shichencike/Dial/releases/download/stdlib-v1.2.0/stdlib.dialpkg`
    拉取对应版本的 `stdlib.dialpkg` 并执行 `dialc install`（`STDLIB_RELEASE` 环境变量可钉死版本，离线/失败仅告警不阻断）。
 2. **`dialc build` 优先链入预编译包**：链接期先找已安装的 `stdlib` 包，按本机 Target Triple 取对应 `.a`；
-   日志会打印「使用已安装的标准库包: stdlib v1.0.0（ABI 1，目标 …）」。
+   日志会打印「使用已安装的标准库包: stdlib v1.2.0（ABI 3，目标 …）」。
 3. **缺失回退源码编译**：若未安装该包（离线/脚本跳过），`dialc` 退化为实时编译 `stdlib/` + `runtime/`
    的 C 源码（默认 Debug 安全等级），保证**任何环境下都能编译出程序**，不会因拿不到包而卡死。
 4. **ABI 不兼容明确报错**：若已安装包的 `manifest.abi ≠ STDLIB_ABI`，`dialc` **当场报错并给出重装方案**
@@ -2617,7 +2620,7 @@ $ dialc build main.dial -o main
 把 `runtime/*.c` + `stdlib/*.c` 编译归档为单份静态库。
 
 > 标准库走**独立 tag**（`stdlib-v*`）而非编译器版本（`v*`），二者升级互不阻塞：
-> 修标准库 bug 只发 `stdlib-v1.0.1`，无需重新发布编译器；破坏性 ABI 变更时
+> 修标准库 bug 只发 `stdlib-v1.2.1`，无需重新发布编译器；破坏性 ABI 变更时
 > 同步递增 `STDLIB_ABI` 与发布 `abi`，旧用户会收到明确的「ABI 不兼容」报错与重装指引。
 
 ---
@@ -2626,7 +2629,7 @@ $ dialc build main.dial -o main
 > JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 > **[ARCHITECTURE.md《Dial 标准库与包分发最终规范》](ARCHITECTURE.md)**。
 > 规范一旦在真实包上落地，将同步更新本章、ARCHITECTURE.md 与 [CHANGELOG.md](CHANGELOG.md)；
-> 在此之前，`import` 仍按 [§17.2](#172-尚未实现的能力截至-v098) 视为**不支持**。
+> 在此之前，`import` 仍按 [§17.2](#172-尚未实现的能力截至-v102) 视为**不支持**。
 
 ---
 
@@ -3980,3 +3983,196 @@ ld.lld: error: undefined symbol: dial_env_init
 - 4 个新增负向用例：`array_empty_no_annot`、`array_push_wrong_elem`、
   `drop_use_after_move`、`string_split_bad_arg`、`array_sort_handle_elem`；
 - `bash tests/run_tests.sh` A–O 全套通过。
+
+---
+
+## 31. v1.02：goto / with / 裸指针
+
+本版补三样东西，它们互为因果：
+
+- **`goto` + 标签**：底层清理的利器，但无限制地乱跳会把程序打崩——因此配三条**死锁**（§31.2）；
+- **`with` 资源作用域块**：`goto` 不得跳出 with 块（否则自动释放被绕过），所以先有 with（§31.1）；
+- **裸指针 `rawptr<T>`**：**不受 ARC 管束**，谁申请谁释放（§31.4）；
+  包的不透明句柄（`Type::Opaque`）同属这一类，本版补齐其契约与诊断（§31.4.1）。
+
+三样都守住既有铁律：不引入 GC；ARC 所有权语义不退化；零隐式转换（裸指针与 ARC 容器之间**没有**隐式转换）。
+
+### 31.1 `with` 资源作用域块
+
+```dial
+with open(path, "r") as f {      // 也可写成 with f = open(path, "r") { ... }
+    var content: string = read(f, 100);
+    print(content);
+}                                 // ← 离开块时自动 close(f)
+```
+
+| 资源类型 | 块末自动释放 |
+| --- | --- |
+| `file` | `close` |
+| `thread` | `join` |
+| 裸指针 `rawptr<T>` | `raw_free` |
+
+| 性质 | 说明 |
+| --- | --- |
+| 覆盖全部出口 | 正常落穿 / `return` / `break` / `continue` / `throw` 都会触发，且**互斥地各执行一次**——因为它直接复用既有的 `defer` 机制，而不是另发明一条出口路径 |
+| 不二次释放 | 块内若已显式 `close(f)` / `join(t)` / `raw_free(p)`，块末**跳过**（二次 `fclose` 是 UB） |
+| 适用面 | 只管「需要显式释放」的资源；`string` / `array` / `map` 等 ARC 句柄本就随作用域自动释放，用 `with` 是多余的（编译期直接拒绝） |
+
+### 31.2 `goto` 与标签：三条死锁
+
+```dial
+label done:
+    ...
+goto done;
+```
+
+`goto` 允许**向前**与**向后**跳，但被三条死锁圈住——它们不是「建议」，而是**编译期硬拦**：
+
+| # | 死锁 | 为什么必须有 | 诊断 |
+| --- | --- | --- | --- |
+| ① | **禁止跨过变量初始化**（Zig 式严格：两个方向都禁） | C 允许 `goto` 跳过 `let x = 5;`，之后用到 `x` 就是 UB；向后跳则重复初始化，前一份（ARC 句柄）泄漏 | `goto 不得跨过变量初始化` |
+| ② | **禁止跳出 / 跳进 `with` 块** | with 靠作用域结束自动释放资源，跨界跳转会**绕过**该释放（泄漏）或**重复**它（二次 fclose = UB） | `goto 不得跳出或跳进 with 块` |
+| ③ | **禁止跨越 `try` 边界** | try 靠 `setjmp` / `longjmp` 保存栈帧，跨界跳转会直接毁掉 `jmp_buf`；**不同 try 块之间互跳**同样禁止 | `goto 不得跨越 try 边界` |
+
+另外三条边界一并由编译期拦下：
+
+- 目标标签未定义 → `goto 目标标签 'x' 未定义`；
+- 同一函数内标签重复定义 → `标签 'x' 重复定义`；
+- **跳进嵌套块**（目标标签在一个更深的块里）→ `不在当前作用域内`——那里面的变量尚未初始化。
+
+约束 ① 的判定用**全局深度优先语句序号**，而不是「同一块内的语句下标」。这点很关键：
+「从内层块跳到外层标签」同样会跳过外层块中位于跳转点与标签之间的变量声明——
+实测那种写法会让 `print(x)` 读到未初始化的栈槽（打印出一个随机的栈上垃圾值），
+属于真正的 UB。只比同块下标会漏掉它，因此跨块 / 同块、向前 / 向后统一用全局序号判定。
+
+**跳转的语义**：跳到**外层块**的标签时，被跨越的那几层作用域会**照常清理**——`defer` 按 LIFO 触发、ARC 句柄逐个 release。这正是 `goto` 作为「底层清理利器」的价值所在。
+
+```dial
+while (i < 10) {
+    var j: int = 0;
+    while (j < 10) {
+        if (i * 10 + j == 47) { goto done; }   // 一次跳出两层
+        j += 1;
+    }
+    i += 1;
+}
+label done:
+```
+
+### 31.3 `break` / `continue` 的释放修复（顺带修好的既有缺陷）
+
+实现 `goto` 时发现：**`break` / `continue` 提前离开了循环体，却没有释放循环体的局部**——
+外层臂的 `release_scope_locals` 位于落穿路径上，而 break/continue 恰恰**走不到**那条路径。
+实测 `continue` 循环 20 万轮（每轮一个 `string`）峰值 **13892 KB**，修正后 **1620 KB**。
+
+修法与 `goto` 同源：在跳转前补发一份「被跳出作用域」的释放代码。两条路径互斥，
+各自发一份是安全的（不会重复释放）。这条修复让 `break` / `continue` / `goto` 三者
+的清理语义终于一致。
+
+### 31.4 裸指针：不受 ARC 管束的显式契约
+
+```dial
+var buf: rawptr<byte> = raw_alloc(64);          // 申请（不受 ARC 管）
+var ip: rawptr<int> = ptr_cast<rawptr<int>>(buf); // 显式转换（无隐式转换）
+*ip = 1234;                                       // 解引用写入
+print(*ip);
+var next: rawptr<int> = ip.offset(1);             // 显式带类型的指针算术
+*next = 5678;
+raw_free(buf);                                    // 释放（谁申请、谁释放）
+```
+
+| 规则 | 说明 |
+| --- | --- |
+| **绝对不受 ARC 管理** | 编译器**不**为裸指针 retain / release，作用域结束时**也不**自动释放；`drop(p)` 对裸指针的唯一作用就是 `free` |
+| **无隐式转换** | 裸指针 ↔ ARC 容器、裸指针 ↔ 裸指针都**没有**隐式转换：取 `string` 的字节缓冲区必须显式 `ptr_cast<rawptr<byte>>(s)`，裸指针换视图必须显式 `ptr_cast<rawptr<int>>(p)` |
+| **借用不接管** | `ptr_cast` 从 `string` / `bytes` 取到的是**数据缓冲区**的借用；原对象仍受 ARC 管理，原对象释放后该指针即悬垂——**这是使用者的责任** |
+| **指针算术显式且带类型** | 只有 `p.offset(n)` 一种算术，步长由元素类型决定（`rawptr<int>` → 8 字节 / 元素）。`rawptr<void>` **没有元素大小**，因此**禁止**做算术（须先 `ptr_cast` 成具体类型） |
+| **解引用宽度按元素** | `byte` / `bool` 各 1 字节、`char` 4 字节（UTF-8 码点上限）、`int` / `float` / 句柄 8 字节 |
+| **`&x` 的边界** | 只允许对**可变的栈上值类型**变量取址（`int` / `float` / `bool` / `byte` / `char` / `struct`）。对 `let` 取址会绕过不可变约束 → 拒绝；对堆对象取址拿到的只是槽位地址 → 拒绝 |
+
+`rawptr<void>` 是「无类型裸指针」：只能传递与释放，不能解引用、不能算术。
+
+### 31.4.1 不透明指针（包句柄）：同样不受 ARC 管束
+
+「不受自动管束」的不止裸指针。包在 `.diali` 里声明的**不透明句柄**
+（`type Db;` → 类型 `Type::Opaque`，见 [§25.9](#259-用法import-与-dialc-installv093-已实现v096-支持-url)）
+同样**不受 ARC 管理**。v1.02 沿用这一既有类型（不新增语法、不新增运行时），
+把它的契约与诊断补齐——用户要求的「这两个不受自动管束、需要手动释放、明确说明」，
+另一半就在这里。
+
+| 类别 | 例子 | 谁负责释放 | 编译器是否 retain / release |
+| --- | --- | --- | --- |
+| ARC 句柄 | `string` / `int[]` / `map` / `error` | 编译器（作用域 / COW / move） | ✅ |
+| **包的不透明句柄** | `type Db;` 的 `Db` | **包自己**（如 `db_close(db)`） | ❌ |
+| **裸指针** | `rawptr<T>` | **使用者**（`raw_free(p)` / `drop(p)`） | ❌ |
+
+具体契约：
+
+- **手动释放**：编译器不 retain、不 release，作用域结束也不释放；必须由包提供、
+  由调用方显式调用 `close` / `free` 一类函数（如 §25.10 示例里的 `db_close(db)`）。
+- **`drop(db)` 编译期报错**：此前它是个**静默 no-op**，还会把变量误标为「已转移」，
+  让人误以为资源已经归还。v1.02 起直接拦下并给出指引：
+  ```
+  语义错误：不透明句柄 'Db' 不受 ARC 管理，drop() 不会释放它；
+  请调用该包提供的显式释放函数（如 db_close(db)）手动释放
+  ```
+- **不与 ARC 容器隐式互转**：`Db` 是独立类型，赋给 `string` / `rawptr<T>` 等一律
+  编译失败；取它的内存视图必须走包自己的接口（零隐式转换铁律）。
+- **不可打印**：`print(db)` / `print_raw(db)` 已有专门诊断，提示改用包提供的取值函数。
+- **与裸指针的区别**：不透明句柄是**具名、无布局、无操作**的句柄——不能解引用、
+  不能做指针算术；`rawptr<T>` 是带元素类型的地址，可 `*p` 读写、可 `p.offset(n)`。
+- **放进容器时的责任**：数组 / 通道按 8 字节句柄传递它，并按 RC 元素类别做
+  retain / release（见 [§11.6](#116-多维数组与句柄元素数组)），因此**包作者须保证
+  句柄布局与 `dial_rc_*` 兼容**；不满足时不要把句柄塞进容器，改由包自己管理生命周期。
+
+### 31.5 实现落点
+
+| 层 | 改动 |
+| --- | --- |
+| `src/lexer.rs` | 新关键字 `with` / `goto` / `label` |
+| `src/ast.rs` | `Stmt::With` / `Stmt::Label` / `Stmt::Goto` / `Stmt::AssignDeref`；`Type::RawPtr(Box<Type>)`；`UnOp::Deref` / `UnOp::AddrOf`；`Expr::TypeLit`（类型实参） |
+| `src/parser.rs` | `with` / `goto` / `label` 语法；`rawptr<T>` 类型；`*p` / `&x` 一元运算；`*p = v` 赋值；`ptr_cast<T>(x)` 类型实参；**`>>` 在解析层拆成两个 `>`**（泛型闭合） |
+| `src/semantic.rs` | `analyze_gotos()`：标签 / 跳转点收集 + 三条死锁校验（约束 ① 用全局深度优先序号）；`rawptr` 的类型推导与内建；`&x` 的可变性约束；`with` 的资源类型约束；`drop(不透明句柄)` 的明确诊断 |
+| `src/codegen.rs` | `with` 的资源登记（走 defer 机制）；`goto` 的目标块预分配与跨作用域清理；`drop` / `__with_release` 按类型分派；裸指针的 load / store / gep；`break` / `continue` 的释放补齐 |
+| `stdlib/dial_raw.c` | `dial_raw_alloc`（分配失败 Fail-Fast）/ `dial_raw_free`（NULL 安全） |
+| `stdlib/dial_env.c` | v1.01 已有（`args` / `now` / `sleep` / `random`） |
+| `src/package.rs` | `STDLIB_ABI` 由 2 递增到 **3**（见下方 §31.5.1） |
+| `tools/` / `.github/workflows/ci.yml` | 标准库包版本 `1.1.0 → 1.2.0`、打包 `--abi 3`、一键安装的 `STDLIB_RELEASE` → `stdlib-v1.2.0` |
+
+### 31.5.1 标准库 ABI 递增（破坏性变更）
+
+新增 `stdlib/dial_raw.c` 意味着标准库又多导出了一批符号，编译器在**用户写了裸指针
+程序时**会调用它们。装着 abi=2 旧包的编译器链接这类程序时，会报出难懂的链接错误：
+
+```
+ld.lld: error: undefined symbol: dial_raw_alloc
+```
+
+与 v1.01 的 `dial_env_init` 不同，这两个符号是**条件引用**（只有用到裸指针才产生调用），
+但判据始终是「**编译器是否可能要求旧包没有的符号**」，而不是「是否每个程序都引用」。
+因此把 `STDLIB_ABI` 由 2 递增到 **3**，让旧包在**链接期**就被明确拦下并给出重装指引：
+
+```
+已安装的标准库 'stdlib' ABI 不兼容：包 abi=2，编译器要求 abi=3。
+为避免不兼容的二进制悄悄链入程序，已中断链接。
+请先卸载旧包再安装匹配版本：
+  rm -rf ~/.dial/packages/stdlib
+```
+
+`build_stdlib.sh` 与编译器的 LTO 路径都用 `*.c` / `read_dir` 收集源文件，
+`dial_raw.c` 会**自动**进入静态库与官方包，无需手工登记清单。
+
+配套同步：官方标准库包版本 `1.1.0 → 1.2.0`，打包默认 `--abi 3`，CI 发布作业
+`--abi 3`，一键安装脚本的 `STDLIB_RELEASE` 默认标签 → `stdlib-v1.2.0`。
+标准库仍**独立发版**（tag `stdlib-v*`）；v1.01 与 v1.02 目前都是**本地提交、
+尚未打标签**，合并发布时以两个标签为准：`v1.2.0`（编译器）与
+`stdlib-v1.2.0`（标准库包）。
+
+### 31.6 测试
+
+- 3 个正向示例 + 同名 `.expected` 黄金文件：`goto_demo`、`with_demo`、`rawptr_demo`；
+- 12 个负向用例锁定边界：跨初始化（同块 + **跨块**）/ 跳出 with / 跨 try /
+  跳进嵌套块 / 未定义标签 / 对 `let` 取址 / 解引用非指针 / `rawptr<void>` 算术 /
+  `free` 非指针 / `with` 非资源 / 裸指针隐式转换；
+- `bash tests/run_tests.sh` A–O 全套通过；H 组另加一条回归：`drop(不透明句柄)`
+  必须报错并给出「不受 ARC 管理、请手动释放」的指引。

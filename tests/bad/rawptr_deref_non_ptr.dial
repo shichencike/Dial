@@ -1,0 +1,6 @@
+// 应当编译失败：解引用 '*' 只能用于裸指针。
+fn main(): int {
+    var n: int = 5;
+    var v: int = *n;
+    return 0;
+}

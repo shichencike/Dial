@@ -1,0 +1,8 @@
+// 应当编译失败：goto 不得跨过变量初始化（向前跳会读到未初始化的变量）。
+fn main(): int {
+    goto skip;
+    var x: int = 5;
+    label skip:
+    print(x);
+    return 0;
+}

@@ -1,0 +1,49 @@
+// with 资源作用域块演示（v1.02）。
+//
+// with 把「资源的自动释放」变成**作用域**的一部分：
+//   - 离开块时自动释放：file → close、thread → join、裸指针 → free；
+//   - 块内若已显式 close / join / free，则块末**不再**二次释放（避免二次 fclose 这类 UB）；
+//   - 全部出口都触发（正常落穿 / return / break / continue / throw）——因为它走的是
+//     既有的 defer 机制，而不是另发明一条出口路径；
+//   - goto **不得**跳出 with 块（否则自动释放会被绕过）。
+
+fn worker(): void {
+    var i: int = 0;
+    while (i < 1000) {
+        i += 1;
+    }
+}
+
+fn main(): int {
+    let path: string = "/tmp/dial_with_demo.txt";
+
+    // 1) 写：块末自动 close
+    with open(path, "w") as f {
+        write(f, "dial with demo");
+    }
+
+    // 2) 读：块末自动 close
+    with open(path, "r") as g {
+        var content: string = read(g, 100);
+        print(content);
+    }
+
+    // 3) 块内显式 close：块末不再二次关闭
+    with open(path, "r") as h {
+        close(h);
+    }
+
+    // 4) 线程：块末自动 join
+    with t = spawn(worker) {
+        // 块末自动 join(t)
+    }
+
+    // 5) 裸指针：块末自动 free（详见 rawptr_demo.dial）
+    with p = raw_alloc(32) {
+        var q: rawptr<int> = ptr_cast<rawptr<int>>(p);
+        *q = 4242;
+        print(*q);
+    }
+
+    print(0);
+}

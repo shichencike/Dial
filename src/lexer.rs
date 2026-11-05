@@ -67,6 +67,12 @@ pub enum TokenKind {
     Step,  // for 步长关键字：for (i in 0..10 step 2)
     Const, // const 文件级常量：const N: int = 10;（编译期内联，不可重新赋值）
     Enum,  // enum 枚举：enum Color { Red, Green, Blue }（int-backed）
+    /// `with` 资源作用域块（v1.02）：with 资源 as 名 { ... }
+    With,
+    /// `goto` 无条件跳转（v1.02）：goto 标签;
+    Goto,
+    /// `label` 标签定义（v1.02）：label 名字:
+    Label,
 
     // 类型关键字
     IntT,
@@ -516,6 +522,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "step" => TokenKind::Step,
                 "const" => TokenKind::Const,
                 "enum" => TokenKind::Enum,
+                "with" => TokenKind::With,
+                "goto" => TokenKind::Goto,
+                "label" => TokenKind::Label,
                 "true" => TokenKind::BoolLit(true),
                 "false" => TokenKind::BoolLit(false),
                 "struct" => TokenKind::Struct,

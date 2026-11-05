@@ -12,7 +12,7 @@
 #   python3 tools/make_stdlib_pkg.py \
 #       --diali stdlib/stdlib.diali \
 #       --out  dist-stdlib/stdlib.dialpkg \
-#       --version 1.1.0 --abi 2 \
+#       --version 1.2.0 --abi 3 \
 #       x86_64-linux-gnu:dist-stdlib/x86_64-linux-gnu/libdial_std.a \
 #       x86_64-pc-windows-gnu:dist-stdlib/x86_64-pc-windows-gnu/libdial_std.a \
 #       aarch64-unknown-linux-musl:dist-stdlib/aarch64-unknown-linux-musl/libdial_std.a
@@ -42,8 +42,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="组装 stdlib.dialpkg")
     ap.add_argument("--diali", required=True, help="接口签名文件 .diali")
     ap.add_argument("--out", required=True, help="输出 .dialpkg 路径")
-    ap.add_argument("--version", default="1.1.0", help="包版本号（仅展示/核对）")
-    ap.add_argument("--abi", type=int, default=2, help="ABI 版本号（兼容性判据）")
+    ap.add_argument("--version", default="1.2.0", help="包版本号（仅展示/核对）")
+    ap.add_argument("--abi", type=int, default=3, help="ABI 版本号（兼容性判据）")
     ap.add_argument(
         "libs",
         nargs="+",

@@ -1,0 +1,6 @@
+// 应当编译失败：裸指针之间不允许隐式转换，必须显式 ptr_cast（零隐式转换铁律）。
+fn main(): int {
+    var b: rawptr<byte> = raw_alloc(8);
+    var i: rawptr<int> = b;
+    return 0;
+}

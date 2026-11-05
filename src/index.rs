@@ -455,6 +455,41 @@ impl Indexer {
                     let b = self.push_scope(Some(scope_id));
                     self.index_stmts(body, b);
                 }
+                Stmt::With {
+                    name,
+                    name_line,
+                    name_col,
+                    body,
+                    line,
+                    col,
+                    ..
+                } => {
+                    self.mark(scope_id, (*line, *col));
+                    let wsc = self.push_scope(Some(scope_id));
+                    self.add(
+                        wsc,
+                        Symbol {
+                            kind: SymbolKind::Var,
+                            name: name.clone(),
+                            ty: Type::File, // 占位：索引阶段无类型信息（不影响跳转/高亮）
+                            span: span_of(*name_line, *name_col, name),
+                            doc: Vec::new(),
+                            scope_id: wsc,
+                            decl_uri: None,
+                        },
+                    );
+                    self.mark(wsc, (*name_line, *name_col));
+                    self.index_stmts(body, wsc);
+                }
+                Stmt::AssignDeref { line, col, .. } => {
+                    self.mark(scope_id, (*line, *col));
+                }
+                Stmt::Label(_, line, col) => {
+                    self.mark(scope_id, (*line, *col));
+                }
+                Stmt::Goto(_, line, col) => {
+                    self.mark(scope_id, (*line, *col));
+                }
                 Stmt::ForEach { value, value_line, value_col, body, line, col, .. } => {
                     self.mark(scope_id, (*line, *col));
                     let fsc = self.push_scope(Some(scope_id));

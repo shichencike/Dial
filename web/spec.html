@@ -24,7 +24,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v101">dialc — Dial 语言编译器 v1.01</a><ul>
+<li><a href="#dialc--dial-语言编译器-v102">dialc — Dial 语言编译器 v1.02</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -146,7 +146,7 @@
 </li>
 <li><a href="#17-未定义行为与已实现边界">17. 未定义行为与已实现边界</a><ul>
 <li><a href="#171-未定义行为">17.1 未定义行为</a></li>
-<li><a href="#172-尚未实现的能力截至-v098">17.2 尚未实现的能力（截至 v0.98）</a></li>
+<li><a href="#172-尚未实现的能力截至-v102">17.2 尚未实现的能力（截至 v1.02）</a></li>
 </ul>
 </li>
 <li><a href="#18-测试">18. 测试</a><ul>
@@ -161,7 +161,7 @@
 <li><a href="#arc-不解决循环引用这是它的已知边界不是遗漏">ARC 不解决循环引用——这是它的已知边界，不是遗漏</a></li>
 </ul>
 </li>
-<li><a href="#193-显式指针回收未来裸指针的契约">19.3 显式指针回收（未来裸指针的契约）</a></li>
+<li><a href="#193-显式指针回收裸指针的显式契约">19.3 显式指针回收（裸指针的显式契约）</a></li>
 <li><a href="#194-为什么这是底线">19.4 为什么这是底线</a></li>
 </ul>
 </li>
@@ -317,11 +317,22 @@
 <li><a href="#3010-测试">30.10 测试</a></li>
 </ul>
 </li>
+<li><a href="#31-v102goto--with--裸指针">31. v1.02：goto / with / 裸指针</a><ul>
+<li><a href="#311-with-资源作用域块">31.1 with 资源作用域块</a></li>
+<li><a href="#312-goto-与标签三条死锁">31.2 goto 与标签：三条死锁</a></li>
+<li><a href="#313-break--continue-的释放修复顺带修好的既有缺陷">31.3 break / continue 的释放修复（顺带修好的既有缺陷）</a></li>
+<li><a href="#314-裸指针不受-arc-管束的显式契约">31.4 裸指针：不受 ARC 管束的显式契约</a></li>
+<li><a href="#3141-不透明指针包句柄同样不受-arc-管束">31.4.1 不透明指针（包句柄）：同样不受 ARC 管束</a></li>
+<li><a href="#315-实现落点">31.5 实现落点</a></li>
+<li><a href="#3151-标准库-abi-递增破坏性变更">31.5.1 标准库 ABI 递增（破坏性变更）</a></li>
+<li><a href="#316-测试">31.6 测试</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v101">dialc — Dial 语言编译器 v1.01</h1>
+<h1 id="dialc--dial-语言编译器-v102">dialc — Dial 语言编译器 v1.02</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -376,7 +387,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 </tr>
 <tr>
 <td><strong>无 GC 底线（内存宪法）</strong></td>
-<td>永不引入追踪式 GC；确定性内存管理靠 ARC + 编译期分析 +（未来）显式裸指针，见 §19</td>
+<td>永不引入追踪式 GC；确定性内存管理靠 ARC + 编译期分析 + 显式裸指针（v1.02），见 §19</td>
 </tr>
 <tr>
 <td><strong>Fail-Fast 底线</strong></td>
@@ -884,7 +895,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 <p><strong>以上仅限 <code>.dial</code> 源码的关键字。</strong> 接口签名文件 <code>.diali</code> 另有 <code>type</code> / <code>extern fn</code> 等<strong>专用语法</strong>（见 <a href="#252-包内结构与接口签名供-lsp-与-sema-使用">§25.2</a>），它们<strong>不是</strong> Dial 语言的关键字，由包解析器 <code>src/package.rs</code> 单独处理，不会出现在 <code>.dial</code> 源码里。</p>
 <p><code>char</code> 是 v0.92 引入的单字符类型：<strong>一个 Unicode 码点</strong>，底层与 <code>int</code> 同为 <code>i64</code>，
 但类型独立——不参与算术，只可比较或经 <code>char_to_int</code> / <code>int_to_char</code> 显式转换
-（见 <a href="#51-基本类型">§5.1</a> 与 <a href="#172-尚未实现的能力截至-v098">§17.2</a>）。</p>
+（见 <a href="#51-基本类型">§5.1</a> 与 <a href="#172-尚未实现的能力截至-v102">§17.2</a>）。</p>
 <p><code>try</code> / <code>catch</code> / <code>throw</code> 是 v0.7 引入的可恢复异常关键字（见 <a href="#26-可恢复异常trycatchthrow">§26</a>）。
 注意 <strong><code>error</code> 不是关键字</strong>——它是内建构造函数名（与 <code>open</code> / <code>print</code> 同类），写作 <code>Error("...")</code>。
 同理 <code>catch</code> 后<strong>不跟圆括号</strong>：<code>catch e { }</code>，而非 <code>catch (e) { }</code>。</p>
@@ -2701,7 +2712,7 @@ print(&quot;&quot;);        // -&gt; Hi
 </tr>
 </tbody>
 </table>
-<h3 id="172-尚未实现的能力截至-v098">17.2 尚未实现的能力（截至 v0.98）</h3>
+<h3 id="172-尚未实现的能力截至-v102">17.2 尚未实现的能力（截至 v1.02）</h3>
 <blockquote>
 <p>已落地：<code>Map</code>（int → int，ARC 管理）、<code>read_line()</code>、短路求值、零隐式转换铁律、
 <code>let</code> + 原地修改方法（push/set/put）的接收者约束、<code>else if</code> 语法糖、<code>for</code> 范围循环、<code>break</code> / <code>continue</code>、
@@ -2737,8 +2748,8 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td><strong>用户自定义泛型 / 接口 / trait / 闭包仍不支持</strong>；<code>channel&lt;T&gt;</code>、<code>set&lt;T&gt;</code>、<code>map&lt;K,V&gt;</code> 是 <strong>v1.00 已落地的内建特化容器语法</strong>（见 <a href="#29-v100语言特性补齐">§29</a>），不是用户泛型</td>
 </tr>
 <tr>
-<td>指针、地址取值、指针算术</td>
-<td><strong>永不提供</strong>（与不透明指针契约冲突）</td>
+<td>裸指针、地址取值、指针算术</td>
+<td><strong>v1.02 已支持裸指针</strong>（<code>rawptr&lt;T&gt;</code> + <code>&amp;x</code> / <code>*p</code> / <code>p.offset(n)</code> / <code>raw_alloc</code> / <code>raw_free</code>），但它<strong>绝对不受 ARC 管理</strong>，必须手动释放，且与 ARC 容器之间没有隐式转换——见 <a href="#314-裸指针不受-arc-管束的显式契约">§31.4</a>。<strong>用户自定义泛型的指针运算</strong>仍不提供</td>
 </tr>
 <tr>
 <td>运算符重载</td>
@@ -3109,12 +3120,16 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>未来需要可变共享的图</td>
-<td>走 <a href="#193-显式指针回收未来裸指针的契约">§19.3</a> 的 <code>raw ptr</code> + 显式 <code>dial_raw_free</code>，<strong>而不是</strong>依赖 GC</td>
+<td>走 <a href="#193-显式指针回收裸指针的显式契约">§19.3</a> 的 <code>rawptr&lt;T&gt;</code> + 显式 <code>raw_free</code>，<strong>而不是</strong>依赖 GC</td>
 </tr>
 </tbody>
 </table>
-<h3 id="193-显式指针回收未来裸指针的契约">19.3 显式指针回收（未来裸指针的契约）</h3>
-<p>未来若引入裸指针（<code>raw ptr</code>），Dial 坚持<strong>"谁申请、谁释放"</strong>的显式契约：</p>
+<h3 id="193-显式指针回收裸指针的显式契约">19.3 显式指针回收（裸指针的显式契约）</h3>
+<blockquote>
+<p><strong>v1.02 起已落地</strong>：裸指针（<code>rawptr&lt;T&gt;</code>）正式成为语言的一部分，实现与本节契约逐条对齐，
+详见 <a href="#314-裸指针不受-arc-管束的显式契约">§31.4</a>。</p>
+</blockquote>
+<p>Dial 对裸指针坚持<strong>"谁申请、谁释放"</strong>的显式契约：</p>
 <ul>
 <li>裸指针<strong>绝对不受 ARC 保护</strong>，不会被任何引用计数自动回收；</li>
 <li>它的生命周期完全交由开发者显式管理，例如调用底层 <code>dial_raw_free</code> 归还；</li>
@@ -3143,7 +3158,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td><strong>Dial</strong></td>
-<td>ARC + 编译期移动/逃逸分析 +（未来）显式裸指针</td>
+<td>ARC + 编译期移动/逃逸分析 + 显式裸指针（v1.02 起）</td>
 <td>✅ 确定性、零 GC 停顿、可控</td>
 </tr>
 </tbody>
@@ -4382,15 +4397,15 @@ fn main(): int {
 <tbody>
 <tr>
 <td><strong>Release 名称 / Tag</strong></td>
-<td><code>stdlib-v1.0.0</code></td>
+<td><code>stdlib-v1.2.0</code>（随编译器版本同步，见 <a href="#3151-标准库-abi-递增破坏性变更">§31.5.1</a>）</td>
 </tr>
 <tr>
 <td><strong><code>abi</code></strong></td>
-<td><code>1</code>（编译器 <code>package::STDLIB_ABI</code> 同步锁定）</td>
+<td><code>3</code>（编译器 <code>package::STDLIB_ABI</code> 同步锁定；每次破坏性变更递增，见 <a href="#3091-标准库-abi-递增破坏性变更">§30.9.1</a> 与 <a href="#3151-标准库-abi-递增破坏性变更">§31.5.1</a>）</td>
 </tr>
 <tr>
 <td><strong><code>version</code></strong></td>
-<td><code>1.0.0</code></td>
+<td><code>1.2.0</code></td>
 </tr>
 <tr>
 <td><strong><code>license</code></strong></td>
@@ -4412,10 +4427,10 @@ fn main(): int {
 <p><strong>全自动、零配置</strong>：</p>
 <ol>
 <li><strong>一键脚本自动拉取</strong>：<code>install-dial.sh</code> / <code>install-dial.ps1</code> 把 <code>dialc</code> 装好后，会<strong>静默</strong>从
-   <code>https://github.com/shichencike/Dial/releases/download/stdlib-v1.0.0/stdlib.dialpkg</code>
+   <code>https://github.com/shichencike/Dial/releases/download/stdlib-v1.2.0/stdlib.dialpkg</code>
    拉取对应版本的 <code>stdlib.dialpkg</code> 并执行 <code>dialc install</code>（<code>STDLIB_RELEASE</code> 环境变量可钉死版本，离线/失败仅告警不阻断）。</li>
 <li><strong><code>dialc build</code> 优先链入预编译包</strong>：链接期先找已安装的 <code>stdlib</code> 包，按本机 Target Triple 取对应 <code>.a</code>；
-   日志会打印「使用已安装的标准库包: stdlib v1.0.0（ABI 1，目标 …）」。</li>
+   日志会打印「使用已安装的标准库包: stdlib v1.2.0（ABI 3，目标 …）」。</li>
 <li><strong>缺失回退源码编译</strong>：若未安装该包（离线/脚本跳过），<code>dialc</code> 退化为实时编译 <code>stdlib/</code> + <code>runtime/</code>
    的 C 源码（默认 Debug 安全等级），保证<strong>任何环境下都能编译出程序</strong>，不会因拿不到包而卡死。</li>
 <li><strong>ABI 不兼容明确报错</strong>：若已安装包的 <code>manifest.abi ≠ STDLIB_ABI</code>，<code>dialc</code> <strong>当场报错并给出重装方案</strong>
@@ -4428,7 +4443,7 @@ fn main(): int {
 把 <code>runtime/*.c</code> + <code>stdlib/*.c</code> 编译归档为单份静态库。</p>
 <blockquote>
 <p>标准库走<strong>独立 tag</strong>（<code>stdlib-v*</code>）而非编译器版本（<code>v*</code>），二者升级互不阻塞：
-修标准库 bug 只发 <code>stdlib-v1.0.1</code>，无需重新发布编译器；破坏性 ABI 变更时
+修标准库 bug 只发 <code>stdlib-v1.2.1</code>，无需重新发布编译器；破坏性 ABI 变更时
 同步递增 <code>STDLIB_ABI</code> 与发布 <code>abi</code>，旧用户会收到明确的「ABI 不兼容」报错与重装指引。</p>
 </blockquote>
 <hr />
@@ -4437,7 +4452,7 @@ fn main(): int {
 JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 <strong><a href="ARCHITECTURE.md">ARCHITECTURE.md《Dial 标准库与包分发最终规范》</a></strong>。
 规范一旦在真实包上落地，将同步更新本章、ARCHITECTURE.md 与 <a href="CHANGELOG.md">CHANGELOG.md</a>；
-在此之前，<code>import</code> 仍按 <a href="#172-尚未实现的能力截至-v098">§17.2</a> 视为<strong>不支持</strong>。</p>
+在此之前，<code>import</code> 仍按 <a href="#172-尚未实现的能力截至-v102">§17.2</a> 视为<strong>不支持</strong>。</p>
 </blockquote>
 <hr />
 <h2 id="26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</h2>
@@ -6433,12 +6448,309 @@ a.sort();          // 升序，就地排序
 <li>4 个新增负向用例：<code>array_empty_no_annot</code>、<code>array_push_wrong_elem</code>、
   <code>drop_use_after_move</code>、<code>string_split_bad_arg</code>、<code>array_sort_handle_elem</code>；</li>
 <li><code>bash tests/run_tests.sh</code> A–O 全套通过。</li>
+</ul>
+<hr />
+<h2 id="31-v102goto--with--裸指针">31. v1.02：goto / with / 裸指针</h2>
+<p>本版补三样东西，它们互为因果：</p>
+<ul>
+<li><strong><code>goto</code> + 标签</strong>：底层清理的利器，但无限制地乱跳会把程序打崩——因此配三条<strong>死锁</strong>（§31.2）；</li>
+<li><strong><code>with</code> 资源作用域块</strong>：<code>goto</code> 不得跳出 with 块（否则自动释放被绕过），所以先有 with（§31.1）；</li>
+<li><strong>裸指针 <code>rawptr&lt;T&gt;</code></strong>：<strong>不受 ARC 管束</strong>，谁申请谁释放（§31.4）；
+  包的不透明句柄（<code>Type::Opaque</code>）同属这一类，本版补齐其契约与诊断（§31.4.1）。</li>
+</ul>
+<p>三样都守住既有铁律：不引入 GC；ARC 所有权语义不退化；零隐式转换（裸指针与 ARC 容器之间<strong>没有</strong>隐式转换）。</p>
+<h3 id="311-with-资源作用域块">31.1 <code>with</code> 资源作用域块</h3>
+<pre><code class="language-dial">with open(path, &quot;r&quot;) as f {      // 也可写成 with f = open(path, &quot;r&quot;) { ... }
+    var content: string = read(f, 100);
+    print(content);
+}                                 // ← 离开块时自动 close(f)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>资源类型</th>
+<th>块末自动释放</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>file</code></td>
+<td><code>close</code></td>
+</tr>
+<tr>
+<td><code>thread</code></td>
+<td><code>join</code></td>
+</tr>
+<tr>
+<td>裸指针 <code>rawptr&lt;T&gt;</code></td>
+<td><code>raw_free</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>性质</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>覆盖全部出口</td>
+<td>正常落穿 / <code>return</code> / <code>break</code> / <code>continue</code> / <code>throw</code> 都会触发，且<strong>互斥地各执行一次</strong>——因为它直接复用既有的 <code>defer</code> 机制，而不是另发明一条出口路径</td>
+</tr>
+<tr>
+<td>不二次释放</td>
+<td>块内若已显式 <code>close(f)</code> / <code>join(t)</code> / <code>raw_free(p)</code>，块末<strong>跳过</strong>（二次 <code>fclose</code> 是 UB）</td>
+</tr>
+<tr>
+<td>适用面</td>
+<td>只管「需要显式释放」的资源；<code>string</code> / <code>array</code> / <code>map</code> 等 ARC 句柄本就随作用域自动释放，用 <code>with</code> 是多余的（编译期直接拒绝）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="312-goto-与标签三条死锁">31.2 <code>goto</code> 与标签：三条死锁</h3>
+<pre><code class="language-dial">label done:
+    ...
+goto done;
+</code></pre>
+<p><code>goto</code> 允许<strong>向前</strong>与<strong>向后</strong>跳，但被三条死锁圈住——它们不是「建议」，而是<strong>编译期硬拦</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>死锁</th>
+<th>为什么必须有</th>
+<th>诊断</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>①</td>
+<td><strong>禁止跨过变量初始化</strong>（Zig 式严格：两个方向都禁）</td>
+<td>C 允许 <code>goto</code> 跳过 <code>let x = 5;</code>，之后用到 <code>x</code> 就是 UB；向后跳则重复初始化，前一份（ARC 句柄）泄漏</td>
+<td><code>goto 不得跨过变量初始化</code></td>
+</tr>
+<tr>
+<td>②</td>
+<td><strong>禁止跳出 / 跳进 <code>with</code> 块</strong></td>
+<td>with 靠作用域结束自动释放资源，跨界跳转会<strong>绕过</strong>该释放（泄漏）或<strong>重复</strong>它（二次 fclose = UB）</td>
+<td><code>goto 不得跳出或跳进 with 块</code></td>
+</tr>
+<tr>
+<td>③</td>
+<td><strong>禁止跨越 <code>try</code> 边界</strong></td>
+<td>try 靠 <code>setjmp</code> / <code>longjmp</code> 保存栈帧，跨界跳转会直接毁掉 <code>jmp_buf</code>；<strong>不同 try 块之间互跳</strong>同样禁止</td>
+<td><code>goto 不得跨越 try 边界</code></td>
+</tr>
+</tbody>
+</table>
+<p>另外三条边界一并由编译期拦下：</p>
+<ul>
+<li>目标标签未定义 → <code>goto 目标标签 'x' 未定义</code>；</li>
+<li>同一函数内标签重复定义 → <code>标签 'x' 重复定义</code>；</li>
+<li><strong>跳进嵌套块</strong>（目标标签在一个更深的块里）→ <code>不在当前作用域内</code>——那里面的变量尚未初始化。</li>
+</ul>
+<p>约束 ① 的判定用<strong>全局深度优先语句序号</strong>，而不是「同一块内的语句下标」。这点很关键：
+「从内层块跳到外层标签」同样会跳过外层块中位于跳转点与标签之间的变量声明——
+实测那种写法会让 <code>print(x)</code> 读到未初始化的栈槽（打印出一个随机的栈上垃圾值），
+属于真正的 UB。只比同块下标会漏掉它，因此跨块 / 同块、向前 / 向后统一用全局序号判定。</p>
+<p><strong>跳转的语义</strong>：跳到<strong>外层块</strong>的标签时，被跨越的那几层作用域会<strong>照常清理</strong>——<code>defer</code> 按 LIFO 触发、ARC 句柄逐个 release。这正是 <code>goto</code> 作为「底层清理利器」的价值所在。</p>
+<pre><code class="language-dial">while (i &lt; 10) {
+    var j: int = 0;
+    while (j &lt; 10) {
+        if (i * 10 + j == 47) { goto done; }   // 一次跳出两层
+        j += 1;
+    }
+    i += 1;
+}
+label done:
+</code></pre>
+<h3 id="313-break--continue-的释放修复顺带修好的既有缺陷">31.3 <code>break</code> / <code>continue</code> 的释放修复（顺带修好的既有缺陷）</h3>
+<p>实现 <code>goto</code> 时发现：<strong><code>break</code> / <code>continue</code> 提前离开了循环体，却没有释放循环体的局部</strong>——
+外层臂的 <code>release_scope_locals</code> 位于落穿路径上，而 break/continue 恰恰<strong>走不到</strong>那条路径。
+实测 <code>continue</code> 循环 20 万轮（每轮一个 <code>string</code>）峰值 <strong>13892 KB</strong>，修正后 <strong>1620 KB</strong>。</p>
+<p>修法与 <code>goto</code> 同源：在跳转前补发一份「被跳出作用域」的释放代码。两条路径互斥，
+各自发一份是安全的（不会重复释放）。这条修复让 <code>break</code> / <code>continue</code> / <code>goto</code> 三者
+的清理语义终于一致。</p>
+<h3 id="314-裸指针不受-arc-管束的显式契约">31.4 裸指针：不受 ARC 管束的显式契约</h3>
+<pre><code class="language-dial">var buf: rawptr&lt;byte&gt; = raw_alloc(64);          // 申请（不受 ARC 管）
+var ip: rawptr&lt;int&gt; = ptr_cast&lt;rawptr&lt;int&gt;&gt;(buf); // 显式转换（无隐式转换）
+*ip = 1234;                                       // 解引用写入
+print(*ip);
+var next: rawptr&lt;int&gt; = ip.offset(1);             // 显式带类型的指针算术
+*next = 5678;
+raw_free(buf);                                    // 释放（谁申请、谁释放）
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>规则</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>绝对不受 ARC 管理</strong></td>
+<td>编译器<strong>不</strong>为裸指针 retain / release，作用域结束时<strong>也不</strong>自动释放；<code>drop(p)</code> 对裸指针的唯一作用就是 <code>free</code></td>
+</tr>
+<tr>
+<td><strong>无隐式转换</strong></td>
+<td>裸指针 ↔ ARC 容器、裸指针 ↔ 裸指针都<strong>没有</strong>隐式转换：取 <code>string</code> 的字节缓冲区必须显式 <code>ptr_cast&lt;rawptr&lt;byte&gt;&gt;(s)</code>，裸指针换视图必须显式 <code>ptr_cast&lt;rawptr&lt;int&gt;&gt;(p)</code></td>
+</tr>
+<tr>
+<td><strong>借用不接管</strong></td>
+<td><code>ptr_cast</code> 从 <code>string</code> / <code>bytes</code> 取到的是<strong>数据缓冲区</strong>的借用；原对象仍受 ARC 管理，原对象释放后该指针即悬垂——<strong>这是使用者的责任</strong></td>
+</tr>
+<tr>
+<td><strong>指针算术显式且带类型</strong></td>
+<td>只有 <code>p.offset(n)</code> 一种算术，步长由元素类型决定（<code>rawptr&lt;int&gt;</code> → 8 字节 / 元素）。<code>rawptr&lt;void&gt;</code> <strong>没有元素大小</strong>，因此<strong>禁止</strong>做算术（须先 <code>ptr_cast</code> 成具体类型）</td>
+</tr>
+<tr>
+<td><strong>解引用宽度按元素</strong></td>
+<td><code>byte</code> / <code>bool</code> 各 1 字节、<code>char</code> 4 字节（UTF-8 码点上限）、<code>int</code> / <code>float</code> / 句柄 8 字节</td>
+</tr>
+<tr>
+<td><strong><code>&amp;x</code> 的边界</strong></td>
+<td>只允许对<strong>可变的栈上值类型</strong>变量取址（<code>int</code> / <code>float</code> / <code>bool</code> / <code>byte</code> / <code>char</code> / <code>struct</code>）。对 <code>let</code> 取址会绕过不可变约束 → 拒绝；对堆对象取址拿到的只是槽位地址 → 拒绝</td>
+</tr>
+</tbody>
+</table>
+<p><code>rawptr&lt;void&gt;</code> 是「无类型裸指针」：只能传递与释放，不能解引用、不能算术。</p>
+<h3 id="3141-不透明指针包句柄同样不受-arc-管束">31.4.1 不透明指针（包句柄）：同样不受 ARC 管束</h3>
+<p>「不受自动管束」的不止裸指针。包在 <code>.diali</code> 里声明的<strong>不透明句柄</strong>
+（<code>type Db;</code> → 类型 <code>Type::Opaque</code>，见 <a href="#259-用法import-与-dialc-installv093-已实现v096-支持-url">§25.9</a>）
+同样<strong>不受 ARC 管理</strong>。v1.02 沿用这一既有类型（不新增语法、不新增运行时），
+把它的契约与诊断补齐——用户要求的「这两个不受自动管束、需要手动释放、明确说明」，
+另一半就在这里。</p>
+<table>
+<thead>
+<tr>
+<th>类别</th>
+<th>例子</th>
+<th>谁负责释放</th>
+<th>编译器是否 retain / release</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ARC 句柄</td>
+<td><code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code></td>
+<td>编译器（作用域 / COW / move）</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>包的不透明句柄</strong></td>
+<td><code>type Db;</code> 的 <code>Db</code></td>
+<td><strong>包自己</strong>（如 <code>db_close(db)</code>）</td>
+<td>❌</td>
+</tr>
+<tr>
+<td><strong>裸指针</strong></td>
+<td><code>rawptr&lt;T&gt;</code></td>
+<td><strong>使用者</strong>（<code>raw_free(p)</code> / <code>drop(p)</code>）</td>
+<td>❌</td>
+</tr>
+</tbody>
+</table>
+<p>具体契约：</p>
+<ul>
+<li><strong>手动释放</strong>：编译器不 retain、不 release，作用域结束也不释放；必须由包提供、
+  由调用方显式调用 <code>close</code> / <code>free</code> 一类函数（如 §25.10 示例里的 <code>db_close(db)</code>）。</li>
+<li><strong><code>drop(db)</code> 编译期报错</strong>：此前它是个<strong>静默 no-op</strong>，还会把变量误标为「已转移」，
+  让人误以为资源已经归还。v1.02 起直接拦下并给出指引：
+  <code>语义错误：不透明句柄 'Db' 不受 ARC 管理，drop() 不会释放它；
+  请调用该包提供的显式释放函数（如 db_close(db)）手动释放</code></li>
+<li><strong>不与 ARC 容器隐式互转</strong>：<code>Db</code> 是独立类型，赋给 <code>string</code> / <code>rawptr&lt;T&gt;</code> 等一律
+  编译失败；取它的内存视图必须走包自己的接口（零隐式转换铁律）。</li>
+<li><strong>不可打印</strong>：<code>print(db)</code> / <code>print_raw(db)</code> 已有专门诊断，提示改用包提供的取值函数。</li>
+<li><strong>与裸指针的区别</strong>：不透明句柄是<strong>具名、无布局、无操作</strong>的句柄——不能解引用、
+  不能做指针算术；<code>rawptr&lt;T&gt;</code> 是带元素类型的地址，可 <code>*p</code> 读写、可 <code>p.offset(n)</code>。</li>
+<li><strong>放进容器时的责任</strong>：数组 / 通道按 8 字节句柄传递它，并按 RC 元素类别做
+  retain / release（见 <a href="#116-多维数组与句柄元素数组">§11.6</a>），因此<strong>包作者须保证
+  句柄布局与 <code>dial_rc_*</code> 兼容</strong>；不满足时不要把句柄塞进容器，改由包自己管理生命周期。</li>
+</ul>
+<h3 id="315-实现落点">31.5 实现落点</h3>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>改动</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/lexer.rs</code></td>
+<td>新关键字 <code>with</code> / <code>goto</code> / <code>label</code></td>
+</tr>
+<tr>
+<td><code>src/ast.rs</code></td>
+<td><code>Stmt::With</code> / <code>Stmt::Label</code> / <code>Stmt::Goto</code> / <code>Stmt::AssignDeref</code>；<code>Type::RawPtr(Box&lt;Type&gt;)</code>；<code>UnOp::Deref</code> / <code>UnOp::AddrOf</code>；<code>Expr::TypeLit</code>（类型实参）</td>
+</tr>
+<tr>
+<td><code>src/parser.rs</code></td>
+<td><code>with</code> / <code>goto</code> / <code>label</code> 语法；<code>rawptr&lt;T&gt;</code> 类型；<code>*p</code> / <code>&amp;x</code> 一元运算；<code>*p = v</code> 赋值；<code>ptr_cast&lt;T&gt;(x)</code> 类型实参；<strong><code>&gt;&gt;</code> 在解析层拆成两个 <code>&gt;</code></strong>（泛型闭合）</td>
+</tr>
+<tr>
+<td><code>src/semantic.rs</code></td>
+<td><code>analyze_gotos()</code>：标签 / 跳转点收集 + 三条死锁校验（约束 ① 用全局深度优先序号）；<code>rawptr</code> 的类型推导与内建；<code>&amp;x</code> 的可变性约束；<code>with</code> 的资源类型约束；<code>drop(不透明句柄)</code> 的明确诊断</td>
+</tr>
+<tr>
+<td><code>src/codegen.rs</code></td>
+<td><code>with</code> 的资源登记（走 defer 机制）；<code>goto</code> 的目标块预分配与跨作用域清理；<code>drop</code> / <code>__with_release</code> 按类型分派；裸指针的 load / store / gep；<code>break</code> / <code>continue</code> 的释放补齐</td>
+</tr>
+<tr>
+<td><code>stdlib/dial_raw.c</code></td>
+<td><code>dial_raw_alloc</code>（分配失败 Fail-Fast）/ <code>dial_raw_free</code>（NULL 安全）</td>
+</tr>
+<tr>
+<td><code>stdlib/dial_env.c</code></td>
+<td>v1.01 已有（<code>args</code> / <code>now</code> / <code>sleep</code> / <code>random</code>）</td>
+</tr>
+<tr>
+<td><code>src/package.rs</code></td>
+<td><code>STDLIB_ABI</code> 由 2 递增到 <strong>3</strong>（见下方 §31.5.1）</td>
+</tr>
+<tr>
+<td><code>tools/</code> / <code>.github/workflows/ci.yml</code></td>
+<td>标准库包版本 <code>1.1.0 → 1.2.0</code>、打包 <code>--abi 3</code>、一键安装的 <code>STDLIB_RELEASE</code> → <code>stdlib-v1.2.0</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="3151-标准库-abi-递增破坏性变更">31.5.1 标准库 ABI 递增（破坏性变更）</h3>
+<p>新增 <code>stdlib/dial_raw.c</code> 意味着标准库又多导出了一批符号，编译器在<strong>用户写了裸指针
+程序时</strong>会调用它们。装着 abi=2 旧包的编译器链接这类程序时，会报出难懂的链接错误：</p>
+<pre><code>ld.lld: error: undefined symbol: dial_raw_alloc
+</code></pre>
+<p>与 v1.01 的 <code>dial_env_init</code> 不同，这两个符号是<strong>条件引用</strong>（只有用到裸指针才产生调用），
+但判据始终是「<strong>编译器是否可能要求旧包没有的符号</strong>」，而不是「是否每个程序都引用」。
+因此把 <code>STDLIB_ABI</code> 由 2 递增到 <strong>3</strong>，让旧包在<strong>链接期</strong>就被明确拦下并给出重装指引：</p>
+<pre><code>已安装的标准库 'stdlib' ABI 不兼容：包 abi=2，编译器要求 abi=3。
+为避免不兼容的二进制悄悄链入程序，已中断链接。
+请先卸载旧包再安装匹配版本：
+  rm -rf ~/.dial/packages/stdlib
+</code></pre>
+<p><code>build_stdlib.sh</code> 与编译器的 LTO 路径都用 <code>*.c</code> / <code>read_dir</code> 收集源文件，
+<code>dial_raw.c</code> 会<strong>自动</strong>进入静态库与官方包，无需手工登记清单。</p>
+<p>配套同步：官方标准库包版本 <code>1.1.0 → 1.2.0</code>，打包默认 <code>--abi 3</code>，CI 发布作业
+<code>--abi 3</code>，一键安装脚本的 <code>STDLIB_RELEASE</code> 默认标签 → <code>stdlib-v1.2.0</code>。
+标准库仍<strong>独立发版</strong>（tag <code>stdlib-v*</code>）；v1.01 与 v1.02 目前都是<strong>本地提交、
+尚未打标签</strong>，合并发布时以两个标签为准：<code>v1.2.0</code>（编译器）与
+<code>stdlib-v1.2.0</code>（标准库包）。</p>
+<h3 id="316-测试">31.6 测试</h3>
+<ul>
+<li>3 个正向示例 + 同名 <code>.expected</code> 黄金文件：<code>goto_demo</code>、<code>with_demo</code>、<code>rawptr_demo</code>；</li>
+<li>12 个负向用例锁定边界：跨初始化（同块 + <strong>跨块</strong>）/ 跳出 with / 跨 try /
+  跳进嵌套块 / 未定义标签 / 对 <code>let</code> 取址 / 解引用非指针 / <code>rawptr&lt;void&gt;</code> 算术 /
+  <code>free</code> 非指针 / <code>with</code> 非资源 / 裸指针隐式转换；</li>
+<li><code>bash tests/run_tests.sh</code> A–O 全套通过；H 组另加一条回归：<code>drop(不透明句柄)</code>
+  必须报错并给出「不受 ARC 管理、请手动释放」的指引。</li>
 </ul></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v1.01 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.02 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

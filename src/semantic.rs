@@ -220,6 +220,7 @@ pub fn type_of<V>(
                 Type::Set(elem) => set_method_type(elem.as_ref(), method, args, scopes, funcs, structs),
                 Type::KvMap(k, v) => kvmap_method_type(k.as_ref(), v.as_ref(), method, args, scopes, funcs, structs),
                 Type::Error => error_method_type(method, args, scopes, funcs, structs),
+                Type::RawPtr(elem) => rawptr_method_type(elem.as_ref(), method, args, scopes, funcs, structs),
                 _ => Err(DialcError::new(
                     format!("语义错误：类型 '{}' 不支持方法调用 '{}'", ot.name(), method),
                     0, 0,
@@ -345,6 +346,58 @@ pub fn type_of<V>(
                 ))
             }
         }
+        // 解引用 `*p`（v1.02）：裸指针 → 元素类型。
+        Expr::Unary(UnOp::Deref, e) => {
+            let t = type_of(e, scopes, funcs, structs)?;
+            match t {
+                Type::RawPtr(elem) => {
+                    if *elem == Type::Void {
+                        return Err(DialcError::new(
+                            "语义错误：rawptr<void> 是无类型裸指针，不能解引用（请先 ptr_cast 成具体类型）",
+                            0, 0,
+                        ));
+                    }
+                    Ok(*elem)
+                }
+                other => Err(DialcError::new(
+                    format!(
+                        "语义错误：解引用 '*' 只能用于裸指针，实际为 {}",
+                        other.name()
+                    ),
+                    0, 0,
+                )),
+            }
+        }
+        // 取地址 `&x`（v1.02）：可变变量（栈上值类型）→ 指向它的裸指针。
+        Expr::Unary(UnOp::AddrOf, e) => {
+            if !matches!(&**e, Expr::Var(_)) {
+                return Err(DialcError::new(
+                    "语义错误：取地址 '&' 的对象必须是变量（如 &x），不能对表达式取址",
+                    0, 0,
+                ));
+            }
+            let t = type_of(e, scopes, funcs, structs)?;
+            // 只允许**栈上的值类型**：堆对象（string / array / map ...）的「地址」
+            // 只是槽位地址而非数据地址，取了也没有意义，一律拒绝。
+            if !matches!(
+                t,
+                Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::Struct(_)
+            ) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：不能对 {} 类型取地址（只有栈上的值类型 int/float/bool/byte/char/struct 可以）",
+                        t.name()
+                    ),
+                    0, 0,
+                ));
+            }
+            Ok(Type::RawPtr(Box::new(t)))
+        }
+        // 类型字面量（v1.02）：只允许出现在 ptr_cast<T>(...) 的类型实参位置。
+        Expr::TypeLit(_) => Err(DialcError::new(
+            "语义错误：类型标注只能出现在 ptr_cast<T>(...) 的类型实参位置",
+            0, 0,
+        )),
         Expr::Unary(UnOp::Not, e) => {
             let t = type_of(e, scopes, funcs, structs)?;
             if t == Type::Bool {
@@ -473,6 +526,20 @@ pub fn type_of<V>(
                     if args.len() != 1 {
                         return Err(DialcError::new(
                             "语义错误：drop() 需要恰好 1 个参数（要释放的变量）",
+                            0, 0,
+                        ));
+                    }
+                    // 包提供的不透明句柄（type Db;）**不受 ARC 管理**：编译器既不会
+                    // 为它 retain/release，作用域结束也不会释放它。drop 对它只是
+                    // 静默 no-op，还会把变量误标为「已转移」——让人误以为资源已还。
+                    // 因此编译期直接拦下，指引调用方走包自己的显式释放函数。
+                    if let Type::Opaque(n) = type_of(&args[0], scopes, funcs, structs)? {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：不透明句柄 '{}' 不受 ARC 管理，drop() 不会释放它；\
+                                 请调用该包提供的显式释放函数（如 db_close(db)）手动释放",
+                                n
+                            ),
                             0, 0,
                         ));
                     }
@@ -1209,6 +1276,93 @@ pub fn type_of<V>(
                     return Ok(Type::Void);
                 }
                 // ---- v1.01 内建：环境 / 时间 / 随机 ----
+                // ---- v1.02 裸指针内建 ----
+                // raw_alloc(n)：申请 n 字节的裸内存，返回 rawptr<byte>。
+                // **不受 ARC 管理**：编译器不会为它做任何 retain/release，
+                // 必须由调用方显式 raw_free(p) 或 drop(p) 归还（谁申请、谁释放）。
+                "raw_alloc" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：raw_alloc 需要 1 个 int 参数（字节数）",
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[0], scopes, funcs, structs)? != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：raw_alloc 的参数必须是 int（字节数）",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::RawPtr(Box::new(Type::Byte)));
+                }
+                // raw_free(p)：归还裸指针。参数必须是裸指针。
+                "raw_free" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：raw_free 需要 1 个参数（裸指针）",
+                            0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if !matches!(at, Type::RawPtr(_)) {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：raw_free 的参数必须是裸指针，实际为 {}",
+                                at.name()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Void);
+                }
+                // ptr_cast<T>(x)：显式的、带类型的指针转换。
+                //   - 源是裸指针 → 位模式转换（不改变地址）；
+                //   - 源是 string / bytes → 借用其**数据缓冲区**（handle + 8 字节头部之后）；
+                //   - 源是标量 → 拒绝（不能对临时值取址）。
+                // 裸指针与 ARC 容器之间**没有隐式转换**，必须显式走这里。
+                "ptr_cast" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：ptr_cast 需要类型实参与源表达式，形如 ptr_cast<rawptr<byte>>(x)",
+                            0, 0,
+                        ));
+                    }
+                    let target = match &args[0] {
+                        Expr::TypeLit(ty) => ty.clone(),
+                        _ => {
+                            return Err(DialcError::new(
+                                "语义错误：ptr_cast 的第一个参数必须是类型实参（如 ptr_cast<rawptr<byte>>(x)）",
+                                0, 0,
+                            ))
+                        }
+                    };
+                    let target_elem = match &target {
+                        Type::RawPtr(e) => e.clone(),
+                        other => {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：ptr_cast 的目标类型必须是裸指针，实际为 {}",
+                                    other.name()
+                                ),
+                                0, 0,
+                            ))
+                        }
+                    };
+                    let src = type_of(&args[1], scopes, funcs, structs)?;
+                    match &src {
+                        Type::RawPtr(_) | Type::String | Type::Bytes => {}
+                        other => {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：ptr_cast 的源必须是裸指针或 string / bytes，实际为 {}",
+                                    other.name()
+                                ),
+                                0, 0,
+                            ))
+                        }
+                    }
+                    return Ok(Type::RawPtr(target_elem));
+                }
                 "args" => {
                     if !args.is_empty() {
                         return Err(DialcError::new("语义错误：args() 不接受参数", 0, 0));
@@ -1308,6 +1462,12 @@ pub fn type_of<V>(
                     // char 打印的是字符本身（不是码点数字），与 int 明确区分。
                     // byte 打印的是**数值**（0~255），也不是字符。
                     Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String => {}
+                    Type::RawPtr(_) => {
+                        return Err(DialcError::new(
+                            "语义错误：不能直接 print 裸指针（它只是一个地址，没有可打印的内容）",
+                            0, 0,
+                        ))
+                    }
                     Type::Array(_) => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print 数组，请逐元素打印 print(a.get(i))",
@@ -1399,6 +1559,12 @@ pub fn type_of<V>(
                 let pt = type_of(a, scopes, funcs, structs)?;
                 match pt {
                     Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String => {}
+                    Type::RawPtr(_) => {
+                        return Err(DialcError::new(
+                            "语义错误：不能直接 print_raw 裸指针（它只是一个地址，没有可输出的内容）",
+                            0, 0,
+                        ))
+                    }
                     Type::Array(_) => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print_raw 数组，请逐元素输出 print_raw(str(a.get(i)))",
@@ -1673,6 +1839,43 @@ fn is_array_elem_type(t: &Type) -> bool {
             | Type::Channel(_)
             | Type::Opaque(_)
     )
+}
+
+/// 裸指针的方法（v1.02）：目前只有 `offset(n)`——**显式、带类型**的指针算术。
+///
+/// 绝不允许 C 式「void* + 1」的无类型偏移：元素大小必须由元素类型决定，
+/// 否则同一个偏移在不同类型上含义不同，是悬垂与越界的常见来源。
+fn rawptr_method_type<V>(
+    elem: &Type,
+    method: &str,
+    args: &[Expr],
+    scopes: &Scopes<V>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<Type> {
+    match method {
+        "offset" => {
+            if args.len() != 1 || type_of(&args[0], scopes, funcs, structs)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：裸指针的 offset() 需要 1 个 int 参数（元素个数偏移）",
+                    0,
+                    0,
+                ));
+            }
+            // rawptr<void> 没有元素大小，算不出偏移——强制先 ptr_cast 成具体类型。
+            if *elem == Type::Void {
+                return Err(DialcError::new(
+                    "语义错误：rawptr<void> 是无类型裸指针，不能做指针算术（请先 ptr_cast 成具体类型）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::RawPtr(Box::new(elem.clone())))
+        }
+        _ => Err(DialcError::new(
+            format!("语义错误：裸指针无方法 '{}'", method),
+            0, 0,
+        )),
+    }
 }
 
 fn array_method_type<V>(
@@ -2262,6 +2465,9 @@ fn check_function(
         // 形参一律按可变登记（与既有行为一致：形参可在函数体内被重新赋值）。
         scopes[0].insert(pname.clone(), (pty.clone(), VarState::new(true)));
     }
+    // goto / label 的三条死锁在**函数级**统一校验（需要看到全部标签才能判断
+    // 目标是否存在、是否同块、是否跨越 try / with 边界）。
+    analyze_gotos(&f.body)?;
     for stmt in &f.body {
         check_stmt_at(stmt, &mut scopes, funcs, f, structs, false, 0)?;
     }
@@ -2311,6 +2517,8 @@ fn mark_moved(scopes: &mut Scopes<VarState>, name: &str) {
 fn defer_has_jump(s: &Stmt) -> bool {
     match s {
         Stmt::Break(..) | Stmt::Continue(..) | Stmt::Return(..) | Stmt::Throw(..) => true,
+        // goto 同样不行：延迟执行时目标标签所在的作用域可能已消失。
+        Stmt::Goto(..) => true,
         Stmt::Defer(inner, ..) => defer_has_jump(inner),
         Stmt::Block { body, .. }
         | Stmt::While { body, .. }
@@ -2374,6 +2582,13 @@ fn check_moved_stmt(
             check_moved_expr(arr, scopes, funcs, structs, line, col)?;
             check_moved_expr(index, scopes, funcs, structs, line, col)?;
             check_moved_expr(value, scopes, funcs, structs, line, col)
+        }
+        Stmt::AssignDeref { ptr, value, .. } => {
+            check_moved_expr(ptr, scopes, funcs, structs, line, col)?;
+            check_moved_expr(value, scopes, funcs, structs, line, col)
+        }
+        Stmt::With { resource, .. } => {
+            check_moved_expr(resource, scopes, funcs, structs, line, col)
         }
         Stmt::If { cond, .. } => check_moved_expr(cond, scopes, funcs, structs, line, col),
         Stmt::While { cond, .. } => check_moved_expr(cond, scopes, funcs, structs, line, col),
@@ -2459,6 +2674,30 @@ fn check_moved_expr(
             check_moved_expr(l, scopes, funcs, structs, line, col)?;
             check_moved_expr(r, scopes, funcs, structs, line, col)
         }
+        // 取地址 `&x`（v1.02）：只允许对 **var（可变）** 变量取址。
+        // 对 `let` 取址等于给了一条绕过不可变约束的旁路（拿到指针就能写），
+        // 因此在编译期直接拒绝。
+        Expr::Unary(UnOp::AddrOf, o) => {
+            if let Expr::Var(name) = &**o {
+                let mutable = scopes
+                    .iter()
+                    .rev()
+                    .find_map(|s| s.get(name))
+                    .map(|v| v.1.mutable)
+                    .unwrap_or(false);
+                if !mutable {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：不能对不可变变量 '{}' 取地址（let 声明的变量不可变，取址会绕过该约束）",
+                            name
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+            }
+            check_moved_expr(o, scopes, funcs, structs, line, col)
+        }
         Expr::Unary(_, o) => check_moved_expr(o, scopes, funcs, structs, line, col),
         Expr::ArrayLit(elems, _) => {
             for a in elems {
@@ -2522,6 +2761,7 @@ fn stmt_pos(stmt: &Stmt) -> (usize, usize) {
         | Stmt::Assign { line, col, .. }
         | Stmt::AssignField { line, col, .. }
         | Stmt::AssignIndex { line, col, .. }
+        | Stmt::AssignDeref { line, col, .. }
         | Stmt::If { line, col, .. }
         | Stmt::While { line, col, .. }
         | Stmt::For { line, col, .. }
@@ -2537,6 +2777,9 @@ fn stmt_pos(stmt: &Stmt) -> (usize, usize) {
         | Stmt::Continue(line, col)
         | Stmt::Defer(_, line, col)
         | Stmt::Expr(_, line, col)
+        | Stmt::With { line, col, .. }
+        | Stmt::Label(_, line, col)
+        | Stmt::Goto(_, line, col)
         | Stmt::Block { line, col, .. } => (*line, *col),
     }
 }
@@ -2594,8 +2837,11 @@ fn check_stmt(
                     format!(
                         "语义错误：变量 '{}' 的初始化表达式类型为 {}，与声明类型 {} 不兼容",
                         name,
-                        vt.name(),
-                        ty.name()
+                        // 用 display()（带具体参数，如 rawptr<byte>）而不是 name()
+                        // ——裸指针 / 泛型 map 的元素类型必须显式写出来，否则
+                        // 「rawptr 与 rawptr 不兼容」这种话毫无信息量。
+                        vt.display(),
+                        ty.display()
                     ),
                     *line, *col,
                 ));
@@ -3036,6 +3282,93 @@ fn check_stmt(
             // defer 内部的语句语义上仍受当前上下文约束（作用域、循环、try 深度一致）
             check_stmt_at(inner, scopes, funcs, f, structs, in_loop, try_depth)
         }
+        Stmt::With {
+            resource,
+            name,
+            body,
+            line,
+            col,
+            ..
+        } => {
+            let rt = type_of(resource, scopes, funcs, structs)?;
+            // with 只管理「需要显式释放」的资源类型：file / thread。
+            // （string / array / map 等 ARC 句柄本就随作用域自动释放，无需 with；
+            //   裸指针由 v1.02 的裸指针一节单独纳入。）
+            if !matches!(rt, Type::File | Type::Thread | Type::RawPtr(_)) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：with 只能管理 file / thread / 裸指针资源，实际为 {}（ARC 句柄随作用域自动释放，无需 with）",
+                        rt.name()
+                    ),
+                    *line,
+                    *col,
+                ));
+            }
+            if scopes.last().unwrap().contains_key(name) {
+                return Err(DialcError::new(
+                    format!("语义错误：with 绑定的名字 '{}' 与外层变量重名", name),
+                    *line,
+                    *col,
+                ));
+            }
+            scopes.push(HashMap::new());
+            scopes
+                .last_mut()
+                .unwrap()
+                .insert(name.clone(), (rt.clone(), VarState::new(true)));
+            for s in body {
+                check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth)?;
+            }
+            scopes.pop();
+            Ok(())
+        }
+        Stmt::AssignDeref {
+            ptr,
+            value,
+            line,
+            col,
+        } => {
+            // 裸指针写入的第一道闸门：元素类型必须**具体**（rawptr<void> 不可写），
+            // 且写入值的类型必须与元素类型严格一致（零隐式转换）。
+            let pt = type_of(ptr, scopes, funcs, structs)?;
+            let elem = match &pt {
+                Type::RawPtr(e) => {
+                    if **e == Type::Void {
+                        return Err(DialcError::new(
+                            "语义错误：rawptr<void> 是无类型裸指针，不能写入（请先 ptr_cast 成具体类型）",
+                            *line,
+                            *col,
+                        ));
+                    }
+                    (**e).clone()
+                }
+                other => {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：'*p = v' 的左侧必须是裸指针，实际为 {}",
+                            other.name()
+                        ),
+                        *line,
+                        *col,
+                    ))
+                }
+            };
+            let vt = type_of(value, scopes, funcs, structs)?;
+            if !types_compatible(&vt, &elem) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：写入裸指针的值类型为 {}，与指针元素类型 {} 不匹配",
+                        vt.name(),
+                        elem.name()
+                    ),
+                    *line,
+                    *col,
+                ));
+            }
+            Ok(())
+        }
+        Stmt::Label(_, _, _) => Ok(()),
+        Stmt::Goto(_, _, _) => Ok(()),
         Stmt::Break(line, col) => {
             if !in_loop {
                 return Err(DialcError::new(
@@ -3261,6 +3594,418 @@ fn check_stmt(
             Ok(())
         }
     }
+}
+
+// ===================== goto / label 分析（v1.02） =====================
+//
+// `goto` 是「底层清理」利器，但无限制地乱跳会把程序打崩（未初始化变量、绕过
+// with 的自动释放、破坏 try 的 jmp_buf 栈帧）。因此**三条死锁**在语义层硬拦：
+//
+//   ① 禁止跨过变量初始化（Zig 式严格）：goto 与标签之间若隔着一条变量声明，
+//      无论方向一律拒绝——向前跳会读到未初始化的变量（C 的经典 UB），
+//      向后跳会重复初始化并泄漏前一份（ARC 句柄）。
+//   ② 禁止跳出 / 跳进 with 块：with 的自动释放会被绕过，资源将泄漏或被二次释放。
+//   ③ 禁止跨越 try 边界：try 靠 setjmp/longjmp 保存栈帧，跨边界跳转会直接毁掉
+//      jmp_buf；不同 try 块之间互跳同样禁止。
+//
+// 分析结果同时被 codegen 复用（标签所在的作用域深度 → 跳出去时要释放几层局部）。
+
+/// 标签在函数内的位置信息。
+#[derive(Debug, Clone)]
+pub struct LabelSite {
+    /// 所在块的路径（块 id 序列）。与跳转点的路径比较即可判定「同块 / 祖先块 / 旁支块」。
+    pub path: Vec<usize>,
+    /// 所在处的 try 路径（每个 try 块一个 id）。
+    pub try_path: Vec<usize>,
+    /// 所在处的 with 路径（每个 with 块一个 id）。
+    pub with_path: Vec<usize>,
+    /// 所在处的作用域深度（函数体 = 1，与 codegen 的 `scopes.len()` 同口径）。
+    pub depth: usize,
+    /// 全局深度优先语句序号（跨块比较「是否跨过声明」用）。
+    pub seq: usize,
+}
+
+/// 跳转点信息。
+#[derive(Debug, Clone)]
+pub struct GotoSite {
+    pub target: String,
+    pub path: Vec<usize>,
+    pub try_path: Vec<usize>,
+    pub with_path: Vec<usize>,
+    /// 全局深度优先语句序号（跨块比较「是否跨过声明」用）。
+    pub seq: usize,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// 一次函数级 goto/label 分析的结果。
+#[derive(Debug, Default)]
+pub struct GotoAnalysis {
+    /// 标签名 → 标签位置（函数内唯一）。
+    pub labels: HashMap<String, LabelSite>,
+    /// 全部跳转点。
+    pub gotos: Vec<GotoSite>,
+}
+
+/// 遍历期使用的 id 分配器（块 / try / with 各一路），外加全局语句序号。
+#[derive(Debug, Default)]
+struct GotoIds {
+    next_block: usize,
+    next_try: usize,
+    next_with: usize,
+    /// 全局深度优先语句序号（每条语句前分配一个，单调不重复）。
+    seq: usize,
+    /// 所有变量声明所在语句的全局序号。
+    decl_seqs: Vec<usize>,
+}
+
+/// 判断 `prefix` 是否是 `path` 的前缀（祖先或相同）。
+fn path_is_prefix(prefix: &[usize], path: &[usize]) -> bool {
+    prefix.len() <= path.len() && path[..prefix.len()] == *prefix
+}
+
+/// 收集函数体内的标签与跳转点，并施加三条死锁。
+///
+/// 块的划分与 codegen 的作用域压栈点**一一对应**（If 的两个分支各自成块、
+/// 循环体 / match 分支 / try 体与 catch 体 / select 各分支 / 裸块 / with 块各成一块），
+/// 因此这里的 `depth` 与 codegen 的 `scopes.len()` 口径一致。
+pub fn analyze_gotos(body: &[Stmt]) -> Result<GotoAnalysis> {
+    let mut out = GotoAnalysis::default();
+    let mut ids = GotoIds::default();
+    let mut path: Vec<usize> = Vec::new();
+    let mut try_path: Vec<usize> = Vec::new();
+    let mut with_path: Vec<usize> = Vec::new();
+    walk_gotos(
+        body,
+        1,
+        &mut path,
+        &mut try_path,
+        &mut with_path,
+        &mut out,
+        &mut ids,
+    )?;
+
+    // ---- 三条死锁的校验 ----
+    for g in &out.gotos {
+        let l = out.labels.get(&g.target).ok_or_else(|| {
+            DialcError::new(
+                format!("语义错误：goto 目标标签 '{}' 未定义", g.target),
+                g.line,
+                g.col,
+            )
+        })?;
+
+        // ③ 禁止跨越 try 边界（含「跳进 try」「跳出 try」「两个 try 之间互跳」）
+        if l.try_path != g.try_path {
+            return Err(DialcError::new(
+                format!(
+                    "语义错误：goto 不得跨越 try 边界（目标标签 '{}' 与跳转点不在同一个 try 作用域内；\
+                     try 依赖 setjmp/longjmp 保存栈帧，跨界跳转会毁掉 jmp_buf）",
+                    g.target
+                ),
+                g.line,
+                g.col,
+            ));
+        }
+
+        // ② 禁止跳出 / 跳进 with 块
+        if l.with_path != g.with_path {
+            return Err(DialcError::new(
+                format!(
+                    "语义错误：goto 不得跳出或跳进 with 块（目标标签 '{}'；\
+                     with 块靠作用域结束自动释放资源，跨界跳转会绕过或重复该释放）",
+                    g.target
+                ),
+                g.line,
+                g.col,
+            ));
+        }
+
+        // 只能跳到**同一块或外层块**的标签：跳进嵌套块 = 跳进一个尚未初始化的作用域。
+        if !path_is_prefix(&l.path, &g.path) {
+            return Err(DialcError::new(
+                format!(
+                    "语义错误：goto 目标标签 '{}' 不在当前作用域内（禁止跳进嵌套块：\
+                     那里面的变量尚未初始化）",
+                    g.target
+                ),
+                g.line,
+                g.col,
+            ));
+        }
+
+        // ① 禁止跨过变量初始化（Zig 式严格：两个方向都禁）
+        //
+        // 用**全局深度优先语句序号**而不是「同块内下标」：后者只能拦同块跳转，
+        // 而「从内层块跳到外层标签」同样会跳过外层块中位于跳转点与标签之间的
+        // 变量声明——实测那种写法会读到未初始化的栈槽（UB）。全局序号把跨块、
+        // 同块、向前、向后一并覆盖。
+        let (lo, hi) = if l.seq < g.seq {
+            (l.seq, g.seq)
+        } else {
+            (g.seq, l.seq)
+        };
+        for d in &ids.decl_seqs {
+            if *d > lo && *d < hi {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：goto 不得跨过变量初始化（目标标签 '{}' 与跳转点之间存在变量声明；\
+                         向前跳会读到未初始化的变量，向后跳会重复初始化并泄漏前一份）",
+                        g.target
+                    ),
+                    g.line,
+                    g.col,
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 递归遍历语句，收集标签 / 跳转点，并记录每个块内的变量声明位置。
+#[allow(clippy::too_many_arguments)]
+fn walk_gotos(
+    stmts: &[Stmt],
+    depth: usize,
+    path: &mut Vec<usize>,
+    try_path: &mut Vec<usize>,
+    with_path: &mut Vec<usize>,
+    out: &mut GotoAnalysis,
+    ids: &mut GotoIds,
+) -> Result<()> {
+    for s in stmts.iter() {
+        // 每条语句（含递归进入的子块语句）按深度优先顺序领一个全局序号。
+        let cur_seq = ids.seq;
+        ids.seq += 1;
+        match s {
+            Stmt::VarDecl { .. } => {
+                ids.decl_seqs.push(cur_seq);
+            }
+            Stmt::Label(name, line, col) => {
+                if out.labels.contains_key(name) {
+                    return Err(DialcError::new(
+                        format!("语义错误：标签 '{}' 重复定义（同一函数内标签必须唯一）", name),
+                        *line,
+                        *col,
+                    ));
+                }
+                out.labels.insert(
+                    name.clone(),
+                    LabelSite {
+                        path: path.clone(),
+                        try_path: try_path.clone(),
+                        with_path: with_path.clone(),
+                        depth,
+                        seq: cur_seq,
+                    },
+                );
+            }
+            Stmt::Goto(target, line, col) => {
+                out.gotos.push(GotoSite {
+                    target: target.clone(),
+                    path: path.clone(),
+                    try_path: try_path.clone(),
+                    with_path: with_path.clone(),
+                    seq: cur_seq,
+                    line: *line,
+                    col: *col,
+                });
+            }
+            Stmt::With { body, .. } => {
+                // with 块自成一个块：块内 goto 不得跳出去（由 with_path 判定）
+                let id = ids.next_block;
+                ids.next_block += 1;
+                let wid = ids.next_with;
+                ids.next_with += 1;
+                path.push(id);
+                with_path.push(wid);
+                walk_gotos(
+                    body,
+                    depth + 1,
+                    path,
+                    try_path,
+                    with_path,
+                    out,
+                    ids,
+                )?;
+                with_path.pop();
+                path.pop();
+            }
+            Stmt::Block { body, .. } => {
+                let id = ids.next_block;
+                ids.next_block += 1;
+                path.push(id);
+                walk_gotos(
+                    body,
+                    depth + 1,
+                    path,
+                    try_path,
+                    with_path,
+                    out,
+                    ids,
+                )?;
+                path.pop();
+            }
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let id = ids.next_block;
+                ids.next_block += 1;
+                path.push(id);
+                walk_gotos(
+                    then_branch,
+                    depth + 1,
+                    path,
+                    try_path,
+                    with_path,
+                    out,
+                    ids,
+                )?;
+                path.pop();
+                if let Some(eb) = else_branch {
+                    let id = ids.next_block;
+                    ids.next_block += 1;
+                    path.push(id);
+                    walk_gotos(
+                        eb,
+                        depth + 1,
+                        path,
+                        try_path,
+                        with_path,
+                        out,
+                        ids,
+                    )?;
+                    path.pop();
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::ForEach { body, .. }
+            | Stmt::ForEachMap { body, .. }
+            | Stmt::DoWhile { body, .. } => {
+                let id = ids.next_block;
+                ids.next_block += 1;
+                path.push(id);
+                walk_gotos(
+                    body,
+                    depth + 1,
+                    path,
+                    try_path,
+                    with_path,
+                    out,
+                    ids,
+                )?;
+                path.pop();
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    let id = ids.next_block;
+                    ids.next_block += 1;
+                    path.push(id);
+                    walk_gotos(
+                        &arm.body,
+                        depth + 1,
+                        path,
+                        try_path,
+                        with_path,
+                        out,
+                        ids,
+                    )?;
+                    path.pop();
+                }
+            }
+            Stmt::Try { body, catch, .. } => {
+                // try 体与 catch 体是**两个**块，但同属一个 try 上下文
+                let tid = ids.next_try;
+                ids.next_try += 1;
+                try_path.push(tid);
+                let id = ids.next_block;
+                ids.next_block += 1;
+                path.push(id);
+                walk_gotos(
+                    body,
+                    depth + 1,
+                    path,
+                    try_path,
+                    with_path,
+                    out,
+                    ids,
+                )?;
+                path.pop();
+                let id = ids.next_block;
+                ids.next_block += 1;
+                path.push(id);
+                walk_gotos(
+                    &catch.body,
+                    depth + 1,
+                    path,
+                    try_path,
+                    with_path,
+                    out,
+                    ids,
+                )?;
+                path.pop();
+                try_path.pop();
+            }
+            Stmt::Select {
+                arms,
+                default_body,
+                ..
+            } => {
+                for arm in arms {
+                    let id = ids.next_block;
+                    ids.next_block += 1;
+                    path.push(id);
+                    walk_gotos(
+                        &arm.body,
+                        depth + 1,
+                        path,
+                        try_path,
+                        with_path,
+                        out,
+                        ids,
+                    )?;
+                    path.pop();
+                }
+                if let Some(db) = default_body {
+                    let id = ids.next_block;
+                    ids.next_block += 1;
+                    path.push(id);
+                    walk_gotos(
+                        db,
+                        depth + 1,
+                        path,
+                        try_path,
+                        with_path,
+                        out,
+                        ids,
+                    )?;
+                    path.pop();
+                }
+            }
+            // defer 体内不允许 goto（跳转目标在 defer 执行时可能已失效），
+            // 该限制由 defer_has_jump 统一施加。
+            Stmt::Defer(inner, ..) => {
+                let id = ids.next_block;
+                ids.next_block += 1;
+                path.push(id);
+                walk_gotos(
+                    std::slice::from_ref(&**inner),
+                    depth + 1,
+                    path,
+                    try_path,
+                    with_path,
+                    out,
+                    ids,
+                )?;
+                path.pop();
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 // ===================== 数据流 / 逃逸分析 =====================

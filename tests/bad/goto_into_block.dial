@@ -1,0 +1,10 @@
+// 应当编译失败：goto 不得跳进嵌套块（那里面的变量尚未初始化）。
+fn main(): int {
+    goto inside;
+    while (true) {
+        label inside:
+        print("x");
+        break;
+    }
+    return 0;
+}

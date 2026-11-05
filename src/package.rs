@@ -36,7 +36,14 @@ use crate::error::{DialcError, Result};
 /// （abi=1）链接新编译器必然缺少 `dial_env_init`，报出难懂的
 /// `undefined symbol: dial_env_init`。因此本次变更属于破坏性 ABI 变更，
 /// 递增到 2，让旧包在链接期就被**明确拦下**并给出重装指引。
-pub const STDLIB_ABI: u64 = 2;
+///
+/// v1.02 起为 **3**：标准库新增 `dial_raw.c`（`dial_raw_alloc` / `dial_raw_free`），
+/// 供裸指针 `raw_alloc` / `raw_free` / `drop` / `with` 使用。与 v1.01 不同，这两个
+/// 符号是**条件引用**（只有用户代码用到裸指针时才产生调用），但装 abi=2 的旧包时
+/// 只要写了裸指针程序，仍会撞上难懂的 `undefined symbol: dial_raw_alloc`。
+/// 判据是「编译器是否可能要求旧包没有的符号」，因此同样递增，让旧包在链接期
+/// 就被明确拦下并给出重装指引——ABI 校验这道安全网不能因为引用是条件性的就放过。
+pub const STDLIB_ABI: u64 = 3;
 
 /// 全局包缓存根目录：`~/.dial/packages/`（Windows：`%USERPROFILE%\.dial\packages\`）。
 ///

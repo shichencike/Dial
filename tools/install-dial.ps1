@@ -52,7 +52,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Official stdlib is published independently (tag stdlib-v*), decoupled from the
 # compiler. Bump this tag to upgrade the stdlib (matches Dial Releases stdlib-v*).
-$StdlibRelease = if ($env:STDLIB_RELEASE) { $env:STDLIB_RELEASE } else { "stdlib-v1.1.0" }
+$StdlibRelease = if ($env:STDLIB_RELEASE) { $env:STDLIB_RELEASE } else { "stdlib-v1.2.0" }
 
 # Companion component (VS Code extension) version.
 # Default is only used for bootstrap when no local dialc exists; once we locate a

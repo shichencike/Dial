@@ -1,0 +1,5 @@
+// 应当编译失败：goto 的目标标签必须已定义。
+fn main(): int {
+    goto nowhere;
+    return 0;
+}

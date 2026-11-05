@@ -1,0 +1,6 @@
+// 应当编译失败：不能对不可变变量（let）取地址——取址会绕过不可变约束。
+fn main(): int {
+    let x: int = 5;
+    var p: rawptr<int> = &x;
+    return 0;
+}

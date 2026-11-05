@@ -1,0 +1,46 @@
+// 裸指针演示（v1.02）：**不受 ARC 管理**，谁申请、谁释放。
+//
+// 核心红线（README §19.3 / §31.4）：
+//   - 裸指针绝不受 ARC 保护：编译器不 retain、不在作用域结束时释放；
+//   - 裸指针与 ARC 容器之间**没有隐式转换**（取 string 的字节缓冲区必须显式 ptr_cast）；
+//   - 指针算术必须**显式且带类型**（p.offset(n)），rawptr<void> 不允许做算术；
+//   - &x 只对**可变的栈上值类型**变量取址（let 不可变变量禁止取址）。
+
+fn main(): int {
+    // 1) 申请 64 字节裸内存（返回 rawptr<byte>，内容未初始化）
+    var buf: rawptr<byte> = raw_alloc(64);
+
+    // 2) 显式转成 rawptr<int> 视图才能按 int 读写（裸指针之间也没有隐式转换）
+    var ip: rawptr<int> = ptr_cast<rawptr<int>>(buf);
+    *ip = 1234;
+    print(*ip);                       // 1234
+
+    // 3) 指针算术：offset(1) 按**元素类型**（int = 8 字节）前移一个元素
+    var next: rawptr<int> = ip.offset(1);
+    *next = 5678;
+    print(*ip);                       // 1234（没动）
+    print(*next);                     // 5678
+
+    // 4) 取栈上变量的地址：&x 拿到的就是 x 所在的栈槽
+    var x: int = 7;
+    var xp: rawptr<int> = &x;
+    *xp = 8;
+    print(x);                         // 8（通过指针改到了原变量）
+
+    // 5) 从 string **借用**其字节缓冲区（不接管所有权：原 string 仍受 ARC 管理）
+    var s: string = "Hi";
+    var sp: rawptr<byte> = ptr_cast<rawptr<byte>>(s);
+    print(byte_to_int(*sp));          // 72（'H'）
+
+    // 6) with 管理裸指针：块末自动 free
+    with p = raw_alloc(16) {
+        var q: rawptr<int> = ptr_cast<rawptr<int>>(p);
+        *q = 4242;
+        print(*q);                   // 4242
+    }
+
+    // 7) 手动释放（谁申请、谁释放）
+    raw_free(buf);
+
+    print(0);
+}

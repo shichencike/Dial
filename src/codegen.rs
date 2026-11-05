@@ -27,7 +27,7 @@ use inkwell::OptimizationLevel;
 
 use crate::ast::*;
 use crate::error::{DialcError, Result};
-use crate::semantic::{type_of, FuncInfo, StructTable};
+use crate::semantic::{analyze_gotos, type_of, FuncInfo, GotoAnalysis, StructTable};
 
 type Local<'ctx> = (Type, (bool, PointerValue<'ctx>));
 type CgScopes<'ctx> = Vec<HashMap<String, Local<'ctx>>>;
@@ -119,6 +119,16 @@ pub struct CodeGen<'ctx> {
     /// `try` 嵌套栈：记录每个 try **体帧在 `defer_stack` 中的下标**。`throw` 会 longjmp 离开
     /// try 体作用域，必须在跳转前按 LIFO 触发该帧及其内层的 defer，否则资源清理被跳过。
     try_frames: RefCell<Vec<usize>>,
+    /// `goto` / `label`（v1.02）：标签名 → 预分配的目标基本块。
+    ///
+    /// 前向 goto 要求目标块在**生成跳转时**就已存在，故在函数开头一次性预分配；
+    /// 生成到 `label` 语句时再把执行流接到该块上。
+    label_blocks: RefCell<HashMap<String, BasicBlock<'ctx>>>,
+    /// 标签名 → 该标签所在处的作用域深度（codegen 口径 = `scopes.len()`）。
+    /// goto 跳出作用域时据此计算「要释放几层局部」。
+    label_depth: RefCell<HashMap<String, usize>>,
+    /// 当前函数的 goto/label 分析结果（标签位置、深度、路径），来自 `semantic::analyze_gotos`。
+    goto_analysis: RefCell<GotoAnalysis>,
     /// Fail-Fast 安全等级：决定是否在 IR 里插入边界/除零检查与 trap。
     safety: SafetyMode,
 }
@@ -150,6 +160,9 @@ pub fn compile(
         defer_stack: RefCell::new(Vec::new()),
         loop_stack: RefCell::new(Vec::new()),
         try_frames: RefCell::new(Vec::new()),
+        label_blocks: RefCell::new(HashMap::new()),
+        label_depth: RefCell::new(HashMap::new()),
+        goto_analysis: RefCell::new(GotoAnalysis::default()),
         safety: opts.safety,
     };
 
@@ -410,6 +423,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_random", i64b, &[]);
         self.decl_void("dial_sleep", &[i64b.into()]);
         self.decl_void("dial_env_init", &[i64b.into(), i8b.into()]);
+        // v1.02：裸指针运行时（不受 ARC 管理，谁申请谁释放）
+        self.decl_func("dial_raw_alloc", i8b, &[i64b.into()]);
+        self.decl_void("dial_raw_free", &[i8b.into()]);
         // v1.00：字符串插值所需的标量 -> 字符串转换
         self.decl_func("dial_bool_to_string", i8b, &[i64b.into()]);
         self.decl_void("dial_map_retain", &[i8b.into()]);
@@ -602,7 +618,9 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::Error
             | Type::Thread
             | Type::Channel(_)
-            | Type::Opaque(_) => self.i8ptr().into(),
+            | Type::Opaque(_)
+            // 裸指针（v1.02）：不透明指针（元素类型由调用处的 gep 决定）
+            | Type::RawPtr(_) => self.i8ptr().into(),
             Type::Struct(ref n) => (*self
                 .struct_types
                 .get(n)
@@ -737,7 +755,8 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::Error
             | Type::Thread
             | Type::Channel(_)
-            | Type::Opaque(_) => self.i8ptr().const_null().into(),
+            | Type::Opaque(_)
+            | Type::RawPtr(_) => self.i8ptr().const_null().into(),
             Type::Struct(_) => {
                 // 结构体默认值：对 v0.2 仅用于 main 收尾，构造一个零初始化聚合
                 let bte = self.dialc_type_to_llvm(t);
@@ -1038,6 +1057,19 @@ impl<'ctx> CodeGen<'ctx> {
             .as_pointer_value()
     }
 
+    /// 取（必要时创建）某个标签对应的目标基本块（v1.02）。
+    ///
+    /// 前向 goto 要求目标块在**生成跳转时**就已存在，故第一次取用时就创建，
+    /// 之后取用返回同一个块。生成到 `label` 语句时再把执行流接到该块上。
+    fn label_block(&self, name: &str, function: FunctionValue<'ctx>) -> BasicBlock<'ctx> {
+        if let Some(bb) = self.label_blocks.borrow().get(name) {
+            return *bb;
+        }
+        let bb = self.context.append_basic_block(function, &format!("label.{}", name));
+        self.label_blocks.borrow_mut().insert(name.to_string(), bb);
+        bb
+    }
+
     /// 按名查找局部变量的栈槽（由内到外）。
     fn lookup_slot(scopes: &CgScopes<'ctx>, name: &str) -> Option<PointerValue<'ctx>> {
         scopes
@@ -1061,6 +1093,76 @@ impl<'ctx> CodeGen<'ctx> {
             *t,
             Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Channel(_)
         )
+    }
+
+    /// 裸指针元素的**内存表示类型**（v1.02）：决定 load / store 的宽度与 offset 的步长。
+    ///
+    /// - `byte` / `bool`：各占 1 字节（`rawptr<byte>` 指向原始字节缓冲时的自然宽度）；
+    /// - `char`：码点占 4 字节（UTF-8 码点的上限）；
+    /// - `int` / `float` / 各类句柄：各占 8 字节；
+    /// - `struct`：按其 LLVM 实际大小。
+    fn raw_elem_llvm(&self, t: &Type) -> BasicTypeEnum<'ctx> {
+        match t {
+            Type::Byte | Type::Bool => self.context.i8_type().into(),
+            Type::Char => self.context.i32_type().into(),
+            Type::Int => self.context.i64_type().into(),
+            Type::Float => self.context.f64_type().into(),
+            Type::Struct(_) => self.dialc_type_to_llvm(t),
+            _ => self.i8ptr().into(),
+        }
+    }
+
+    /// 把「从内存读出来的值」还原成 Dial 的值表示（v1.02）。
+    fn raw_from_mem(&self, t: &Type, v: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        match t {
+            // byte：1 字节 → 零扩展成 i64（Dial 的 byte 值是 i64，取值 0~255）
+            Type::Byte => self
+                .builder
+                .build_int_z_extend(v.into_int_value(), self.context.i64_type(), "mem2byte")
+                .unwrap()
+                .into(),
+            // bool：内存里 1 字节 0/1 → i1
+            Type::Bool => self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    v.into_int_value(),
+                    self.context.i8_type().const_int(0, false),
+                    "mem2bool",
+                )
+                .unwrap()
+                .into(),
+            // char：4 字节码点 → 零扩展成 i64
+            Type::Char => self
+                .builder
+                .build_int_z_extend(v.into_int_value(), self.context.i64_type(), "mem2char")
+                .unwrap()
+                .into(),
+            _ => v,
+        }
+    }
+
+    /// 把 Dial 的值转换成「内存表示」，用于写入裸指针（v1.02）。
+    fn raw_to_mem(&self, t: &Type, v: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        match t {
+            Type::Byte => self
+                .builder
+                .build_int_truncate(v.into_int_value(), self.context.i8_type(), "byte2mem")
+                .unwrap()
+                .into(),
+            // bool：i1 → 1 字节 0/1
+            Type::Bool => self
+                .builder
+                .build_int_z_extend(v.into_int_value(), self.context.i8_type(), "bool2mem")
+                .unwrap()
+                .into(),
+            Type::Char => self
+                .builder
+                .build_int_truncate(v.into_int_value(), self.context.i32_type(), "char2mem")
+                .unwrap()
+                .into(),
+            _ => v,
+        }
     }
 
     /// 把**借来的**堆值存进更长寿的位置前，先 retain 一份，
@@ -1194,6 +1296,28 @@ impl<'ctx> CodeGen<'ctx> {
         self.defer_stack.borrow_mut().clear();
         self.loop_stack.borrow_mut().clear();
         self.try_frames.borrow_mut().clear();
+
+        // goto / label（v1.02）：做一次函数级分析，并**预分配**所有标签的目标基本块。
+        // 前向 goto 要求目标块在生成跳转时就已存在，故必须提前建好。
+        let analysis = analyze_gotos(&f.body)?;
+        *self.goto_analysis.borrow_mut() = analysis;
+        self.label_blocks.borrow_mut().clear();
+        self.label_depth.borrow_mut().clear();
+        {
+            let names: Vec<String> = self
+                .goto_analysis
+                .borrow()
+                .labels
+                .keys()
+                .cloned()
+                .collect();
+            for name in names {
+                let bb = self
+                    .context
+                    .append_basic_block(function, &format!("label.{}", name));
+                self.label_blocks.borrow_mut().insert(name, bb);
+            }
+        }
 
         let mut scopes: CgScopes = vec![HashMap::new()];
         // 函数体作为最外层作用域：压入对应的 defer 帧（下标 0，与 scopes[0] 对应）。
@@ -1836,6 +1960,16 @@ impl<'ctx> CodeGen<'ctx> {
                 // 以保持与 `scopes` 下标同步（外层臂的 release/pop 随后照常执行，不会重复发射）。
                 // 注：break 的局部释放沿用既有约定（由外层臂统一处理），此处只保证 defer 正确触发。
                 self.drain_defers_from(from, function, scopes, func_values, functions, structs)?;
+                // 释放被跳出的作用域（含循环体本身）的局部：break 的落穿路径在循环体
+                // 末尾才做这件事，而 break **提前离开了循环体**——那条路径永远走不到，
+                // 于是句柄永远不被 release（实测 continue 20 万轮泄漏 ~12 MB）。
+                // 两条路径互斥（break 分支跳走、落穿路径不跳），故各自发一份释放代码是安全的。
+                {
+                    let cur = scopes.len();
+                    for k in (from..cur).rev() {
+                        self.release_scope_locals(&scopes[k], structs);
+                    }
+                }
                 let target = self
                     .loop_targets
                     .borrow()
@@ -1859,6 +1993,14 @@ impl<'ctx> CodeGen<'ctx> {
                     .ok_or_else(|| DialcError::new("内部错误：continue 不在循环内", *line, *col))?;
                 // 与 break 同：离开循环体所跨越的作用域前先按 LIFO 触发 defer（帧保留、内容清空）
                 self.drain_defers_from(from, function, scopes, func_values, functions, structs)?;
+                // 同 break：continue 同样提前离开了循环体，落穿路径的 release 永远走不到，
+                // 必须在这里补一份，否则每轮迭代泄漏一次。
+                {
+                    let cur = scopes.len();
+                    for k in (from..cur).rev() {
+                        self.release_scope_locals(&scopes[k], structs);
+                    }
+                }
                 let target = self
                     .loop_targets
                     .borrow()
@@ -2694,6 +2836,162 @@ impl<'ctx> CodeGen<'ctx> {
                 self.add_defer((**inner).clone());
                 Ok(())
             }
+            // 裸指针解引用赋值 `*p = v`（v1.02）
+            Stmt::AssignDeref { ptr, value, .. } => {
+                let pt = type_of(ptr, scopes, functions, structs)?;
+                let elem = match pt {
+                    Type::RawPtr(el) => *el,
+                    other => {
+                        return Err(DialcError::new(
+                            format!(
+                                "内部错误：'*p = v' 的左侧收到 {} 类型（应由 Sema 先行拦截）",
+                                other.name()
+                            ),
+                            0,
+                            0,
+                        ))
+                    }
+                };
+                let p = self.gen_expr(ptr, function, scopes, func_values, functions, structs)?;
+                let v = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
+                // 元素类型与写入值的类型由 Sema 核对过；这里把 Dial 值转成内存表示再写。
+                let v = self.raw_to_mem(&elem, v);
+                self.builder
+                    .build_store(p.into_pointer_value(), v)
+                    .unwrap();
+                Ok(())
+            }
+            // ===================== with 资源作用域块（v1.02） =====================
+            Stmt::With {
+                resource,
+                name,
+                body,
+                line,
+                col,
+                ..
+            } => {
+                // 1) 先求值资源表达式（在**外层**作用域里求值，语义与普通表达式一致）。
+                let res_val =
+                    self.gen_expr(resource, function, scopes, func_values, functions, structs)?;
+                let res_ty = type_of(resource, scopes, functions, structs)?;
+                // 2) 进入 with 作用域（新局部作用域 + 新 defer 帧）。
+                scopes.push(HashMap::new());
+                self.push_defer_frame();
+                // 3) 把资源绑定到块内的名字上。
+                let llvm_ty = self.dialc_type_to_llvm(&res_ty);
+                let ptr = self.alloca_in_entry(function, llvm_ty, name.as_str());
+                self.builder.build_store(ptr, res_val).unwrap();
+                scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(name.clone(), (res_ty.clone(), (true, ptr)));
+                // 4) 登记「块末释放资源」。
+                //
+                // 走**既有的 defer 机制**而不是自己发明一条出口路径：defer 覆盖了
+                // 正常落穿 / return / break / continue / throw 全部出口，且各出口互斥地
+                // 各执行一次——这正是 with 的「自动释放」所需要的语义。
+                //
+                // 用内部调用 __with_release 而非直接写 close/join：块内若显式
+                // close(f) 过，__with_release 会看到该变量已被标记 moved 而**跳过**，
+                // 从而不会二次关闭（fclose 二次调用是 UB）。
+                self.add_defer(Stmt::Expr(
+                    Expr::Call(
+                        "__with_release".to_string(),
+                        vec![Expr::Var(name.clone())],
+                    ),
+                    *line,
+                    *col,
+                ));
+                // 5) 生成块体。
+                for s in body {
+                    self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
+                }
+                // 6) 离开 with 作用域：先排空本层 defer（含上面的自动释放），再释放块内局部。
+                self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
+                self.release_scope_locals(scopes.last().unwrap(), structs);
+                scopes.pop();
+                Ok(())
+            }
+            // ===================== goto / label（v1.02） =====================
+            Stmt::Label(name, line, col) => {
+                let bb = self.label_block(name, function);
+                // 把执行流接到标签块：前一条语句若未终结，补一条无条件跳转。
+                if !self.is_terminated() {
+                    self.builder.build_unconditional_branch(bb).unwrap();
+                }
+                self.builder.position_at_end(bb);
+                // 记录该标签所在处的作用域深度（codegen 口径），供 goto 计算释放层数。
+                let d = scopes.len();
+                self.label_depth.borrow_mut().insert(name.clone(), d);
+                // 与语义层的深度核对：两层对「块」的划分必须一致，
+                // 否则 goto 跳出会释放错层的作用域（悬垂 / 二次释放）。不一致即中止编译。
+                let sem_depth = self
+                    .goto_analysis
+                    .borrow()
+                    .labels
+                    .get(name)
+                    .map(|s| s.depth);
+                if let Some(sd) = sem_depth {
+                    if sd != d {
+                        return Err(DialcError::new(
+                            format!(
+                                "内部错误：标签 '{}' 的作用域深度在语义层（{}）与代码生成层（{}）不一致",
+                                name, sd, d
+                            ),
+                            *line,
+                            *col,
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            Stmt::Goto(target, line, col) => {
+                let bb = self.label_block(target, function);
+                // 要释放几层作用域：当前深度 - 标签所在深度。
+                // 标签若还没生成（向前跳），用语义层给出的深度；已生成则用 codegen 记录值
+                // （生成标签时已核对过两者一致）。
+                let target_depth = self
+                    .label_depth
+                    .borrow()
+                    .get(target)
+                    .copied()
+                    .or_else(|| {
+                        self.goto_analysis
+                            .borrow()
+                            .labels
+                            .get(target)
+                            .map(|s| s.depth)
+                    })
+                    .unwrap_or(scopes.len());
+                let cur = scopes.len();
+                if target_depth > cur {
+                    return Err(DialcError::new(
+                        format!("内部错误：goto 目标标签 '{}' 的作用域深度异常", target),
+                        *line,
+                        *col,
+                    ));
+                }
+                // 离开被跨越的作用域：先按 LIFO 触发它们的 defer，再释放它们的局部。
+                // （约束 ② 保证不会跨越 with 块，故 with 的自动释放不会在此被绕过。）
+                if target_depth < cur {
+                    self.drain_defers_from(
+                        target_depth,
+                        function,
+                        scopes,
+                        func_values,
+                        functions,
+                        structs,
+                    )?;
+                    for k in (target_depth..cur).rev() {
+                        self.release_scope_locals(&scopes[k], structs);
+                    }
+                }
+                self.builder.build_unconditional_branch(bb).unwrap();
+                // 后续语句落进新块，避免往已终结的块里继续追加指令。
+                let dead = self.context.append_basic_block(function, "after.goto");
+                self.builder.position_at_end(dead);
+                Ok(())
+            }
             Stmt::Expr(e, ..) => {
                 // 语句级方法调用且返回新容器指针（push/set）-> 把结果写回接收变量
                 if let Expr::Method(obj, method, args) = e {
@@ -2934,6 +3232,12 @@ impl<'ctx> CodeGen<'ctx> {
                 }
                 Ok(self.builder.build_load(sty, ptr, "sval").unwrap())
             }
+            // 类型字面量只出现在 ptr_cast<T>(x) 的实参里，由该内建单独处理。
+            Expr::TypeLit(_) => Err(DialcError::new(
+                "内部错误：类型字面量不应出现在此位置（应由 Sema 先行拦截）",
+                0,
+                0,
+            )),
             Expr::Unary(op, e) => match op {
                 UnOp::Neg => {
                     let v = self.gen_expr(e, function, scopes, func_values, functions, structs)?;
@@ -2956,6 +3260,56 @@ impl<'ctx> CodeGen<'ctx> {
                         .build_xor(v.into_int_value(), all_ones, "bnot")
                         .unwrap()
                         .into())
+                }
+                // 解引用 `*p`（v1.02）：按元素类型从指针指向的地址**加载**一个值。
+                UnOp::Deref => {
+                    let pt = type_of(e, scopes, functions, structs)?;
+                    let elem = match pt {
+                        Type::RawPtr(el) => *el,
+                        other => {
+                            return Err(DialcError::new(
+                                format!("内部错误：解引用收到 {} 类型（应由 Sema 先行拦截）", other.name()),
+                                0,
+                                0,
+                            ))
+                        }
+                    };
+                    let p = self.gen_expr(e, function, scopes, func_values, functions, structs)?;
+                    // 按元素的**内存宽度**加载（byte 是 1 字节、char 是 4 字节……），
+                    // 再还原成 Dial 的值表示。
+                    let llvm_elem = self.raw_elem_llvm(&elem);
+                    let v = self
+                        .builder
+                        .build_load(llvm_elem, p.into_pointer_value(), "deref")
+                        .unwrap();
+                    Ok(self.raw_from_mem(&elem, v))
+                }
+                // 取地址 `&x`（v1.02）：x 是栈上值类型变量，它**本来就在 alloca 槽里**，
+                // 因此「地址」就是那个槽位的指针（无需另做分配）。
+                UnOp::AddrOf => {
+                    let name = match &**e {
+                        Expr::Var(n) => n.clone(),
+                        _ => {
+                            return Err(DialcError::new(
+                                "内部错误：取地址的对象必须是变量（应由 Sema 先行拦截）",
+                                0,
+                                0,
+                            ))
+                        }
+                    };
+                    let slot = Self::lookup_slot(scopes, &name).ok_or_else(|| {
+                        DialcError::new(
+                            format!("内部错误：取地址找不到变量 '{}' 的槽位", name),
+                            0,
+                            0,
+                        )
+                    })?;
+                    // 槽位是「元素类型」的指针，转成通用指针（i8*）对外暴露。
+                    let p = self
+                        .builder
+                        .build_pointer_cast(slot, self.i8ptr(), "addr.of")
+                        .unwrap();
+                    Ok(p.into())
                 }
             },
             // 三元表达式 `cond ? a : b`（v1.00）：两个分支类型相同（语义层已保证），
@@ -3151,7 +3505,15 @@ impl<'ctx> CodeGen<'ctx> {
                     "close" => {
                         let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         match type_of(&args[0], scopes, functions, structs)? {
-                            Type::File => self.call_c_void("dial_file_close", &[v.into()]),
+                            Type::File => {
+                                self.call_c_void("dial_file_close", &[v.into()]);
+                                // 显式关闭即「消费」该句柄：标记 moved，使 with 块末的
+                                // 自动释放跳过它——fclose 二次调用是 UB，绝不能发生。
+                                // （channel 不标：它受 ARC 管理，标记 moved 会跳过其 release 而泄漏。）
+                                if let Expr::Var(n) = &args[0] {
+                                    self.mark_moved(scopes, n);
+                                }
+                            }
                             Type::Channel(_) => self.call_c_void("dial_channel_close", &[v.into()]),
                             other => {
                                 return Err(DialcError::new(
@@ -3163,12 +3525,118 @@ impl<'ctx> CodeGen<'ctx> {
                         }
                         Ok(self.context.i64_type().const_int(0, false).into())
                     }
+                    // __with_release(v)：with 块末的自动释放（**内部调用**，用户代码无法触发）。
+                    //   - 若该变量已在块内被显式 close / join 过（moved），则跳过，避免二次释放；
+                    //   - 否则按类型释放：file → close、thread → join（裸指针见 v1.02 裸指针一节）。
+                    "__with_release" => {
+                        let vname = match &args[0] {
+                            Expr::Var(n) => n.clone(),
+                            _ => {
+                                return Err(DialcError::new(
+                                    "内部错误：__with_release 的参数必须是变量名",
+                                    0,
+                                    0,
+                                ))
+                            }
+                        };
+                        let info = scopes
+                            .iter()
+                            .rev()
+                            .find_map(|s| s.get(&vname).map(|v| v.clone()))
+                            .ok_or_else(|| {
+                                DialcError::new(
+                                    format!("内部错误：__with_release 找不到变量 '{}'", vname),
+                                    0,
+                                    0,
+                                )
+                            })?;
+                        let (ty, (_m, ptr)) = info;
+                        if self.moved.borrow().contains(&ptr) {
+                            return Ok(self.context.i64_type().const_int(0, false).into());
+                        }
+                        let v = self.builder.build_load(self.i8ptr(), ptr, "withrel").unwrap();
+                        match ty {
+                            Type::File => self.call_c_void("dial_file_close", &[v.into()]),
+                            Type::Thread => self.call_c_void("dial_thread_join", &[v.into()]),
+                            // 裸指针：with 块末自动 free（谁申请、谁释放）。
+                            Type::RawPtr(_) => self.call_c_void("dial_raw_free", &[v.into()]),
+                            _ => {}
+                        }
+                        self.moved.borrow_mut().insert(ptr);
+                        Ok(self.context.i64_type().const_int(0, false).into())
+                    }
                     // 可恢复异常（v0.7）：Error("msg") 构造一个带引用计数的错误对象（ARC 类型，见 §26）。
                     // 严禁裸的 int/string —— 该约束由 Sema 在编译期拦截；此处 msg 必为 string。
                     "Error" => {
                         let msg =
                             self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         Ok(self.call_c("dial_error_new", &[msg.into()]))
+                    }
+                    // ---- v1.02 裸指针内建 ----
+                    // raw_alloc(n)：申请 n 字节裸内存。**不受 ARC 管**：编译器不 retain、
+                    // 不在作用域结束时释放——必须由调用方显式 raw_free / drop 归还。
+                    "raw_alloc" => {
+                        let n = self.to_i64(
+                            self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?,
+                            &Type::Int,
+                        );
+                        Ok(self.call_c("dial_raw_alloc", &[n.into()]))
+                    }
+                    // raw_free(p)：归还裸指针（NULL 安全）。
+                    "raw_free" => {
+                        let p = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        self.call_c_void("dial_raw_free", &[p.into()]);
+                        Ok(self.context.i64_type().const_int(0, false).into())
+                    }
+                    // ptr_cast<T>(x)：显式的带类型指针转换。
+                    //   - 源是裸指针 → 位模式转换（地址不变）；
+                    //   - 源是 string / bytes → 借用其**数据缓冲区**（跳过 8 字节头部）。
+                    // 借用得到的指针**不受 ARC 保护**：原对象被释放后它即悬垂，
+                    // 这是使用者的责任（README §19.3）。
+                    "ptr_cast" => {
+                        // 目标类型由语义层校验；codegen 只需确认类型实参确实存在——
+                        // 对外一律是 i8*，目标裸指针类型不改变 IR。
+                        if !matches!(&args[0], Expr::TypeLit(_)) {
+                            return Err(DialcError::new(
+                                "内部错误：ptr_cast 缺少类型实参（应由 Sema 先行拦截）",
+                                0,
+                                0,
+                            ));
+                        }
+                        let src_ty = type_of(&args[1], scopes, functions, structs)?;
+                        let src =
+                            self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                        match src_ty {
+                            Type::RawPtr(_) => {
+                                let p = self
+                                    .builder
+                                    .build_pointer_cast(src.into_pointer_value(), self.i8ptr(), "cast")
+                                    .unwrap();
+                                Ok(p.into())
+                            }
+                            Type::String | Type::Bytes => {
+                                // payload 布局：[ int64 len ][ data... ]，数据从 +8 开始。
+                                let off = self.context.i8_type().const_int(8, false);
+                                let data = unsafe {
+                                    self.builder
+                                        .build_gep(self.context.i8_type(), src.into_pointer_value(), &[off], "payload")
+                                        .unwrap()
+                                };
+                                let p = self
+                                    .builder
+                                    .build_pointer_cast(data, self.i8ptr(), "cast")
+                                    .unwrap();
+                                Ok(p.into())
+                            }
+                            other => Err(DialcError::new(
+                                format!(
+                                    "内部错误：ptr_cast 收到 {} 类型的源（应由 Sema 先行拦截）",
+                                    other.name()
+                                ),
+                                0,
+                                0,
+                            )),
+                        }
                     }
                     // drop(x)：提前释放一个变量的所有权（move 语义）。
                     //   - file 走 dial_file_close（fclose）、thread 走 dial_thread_join；
@@ -3204,6 +3672,13 @@ impl<'ctx> CodeGen<'ctx> {
                                 let v =
                                     self.builder.build_load(self.i8ptr(), ptr, "dropval").unwrap();
                                 self.call_c_void("dial_thread_join", &[v.into()]);
+                            }
+                            // 裸指针：drop 的唯一作用就是 free（它不受 ARC 管理，
+                            // 编译器不会替它做 release——「谁申请、谁释放」）。
+                            Type::RawPtr(_) => {
+                                let v =
+                                    self.builder.build_load(self.i8ptr(), ptr, "dropval").unwrap();
+                                self.call_c_void("dial_raw_free", &[v.into()]);
                             }
                             _ => self.release(&ty, ptr),
                         }
@@ -3357,6 +3832,11 @@ impl<'ctx> CodeGen<'ctx> {
                                 self.builder
                                     .build_store(p, self.i8ptr().const_null())
                                     .unwrap();
+                            }
+                            // join 即「消费」该线程句柄：标记 moved，使 with 块末的
+                            // 自动释放跳过它（二次 join 会二次回收线程栈，绝不能发生）。
+                            if name == "join" {
+                                self.mark_moved(scopes, n);
                             }
                         }
                         Ok(self.context.i64_type().const_int(0, false).into())
@@ -3604,6 +4084,36 @@ impl<'ctx> CodeGen<'ctx> {
             (Type::String, "split") => {
                 let sep = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                 Ok(self.call_c("dial_string_split", &[optr.into(), sep.into()]))
+            }
+            // 裸指针的指针算术（v1.02）：p.offset(n) —— **显式、带类型**。
+            // 绝不允许 C 式「void* + 1」的无类型偏移：元素大小必须由类型决定。
+            // rawptr<void> 无元素大小，语义层已直接拒绝（须先 ptr_cast 成具体类型）。
+            (Type::RawPtr(elem), "offset") => {
+                if args.len() != 1 {
+                    return Err(DialcError::new(
+                        "内部错误：offset 需要 1 个 int 参数（应由 Sema 先行拦截）",
+                        0,
+                        0,
+                    ));
+                }
+                let n = self.to_i64(
+                    self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?,
+                    &Type::Int,
+                );
+                let llvm_elem = self.raw_elem_llvm(elem);
+                // 索引直接用 i64 的 n（LLVM 的 gep 索引可以是 i64）：
+                // 负偏移靠补码自然生效，且支持**运行期**偏移量（不必是常量）。
+                let idx = n;
+                let p = unsafe {
+                    self.builder
+                        .build_gep(llvm_elem, optr.into_pointer_value(), &[idx], "offset")
+                        .unwrap()
+                };
+                let p = self
+                    .builder
+                    .build_pointer_cast(p, self.i8ptr(), "offset")
+                    .unwrap();
+                Ok(p.into())
             }
             (Type::Array(_), "length") => Ok(self.call_c("dial_array_length", &[optr.into()])),
             (Type::Array(_), "push") => {
@@ -4187,6 +4697,14 @@ impl<'ctx> CodeGen<'ctx> {
 
     fn emit_print(&self, ty: &Type, val: BasicValueEnum<'ctx>) -> Result<()> {
         match *ty {
+            // 裸指针不可打印（语义层已拦截；这里仅保证 match 穷尽）。
+            Type::RawPtr(_) => {
+                return Err(DialcError::new(
+                    "内部错误：裸指针不可打印（应由 Sema 先行拦截）",
+                    0,
+                    0,
+                ))
+            }
             Type::Int => {
                 self.call_c_void("dial_print_int", &[val.into()]);
             }
@@ -4298,6 +4816,14 @@ impl<'ctx> CodeGen<'ctx> {
     /// 在管道/重定向下并不可靠。因此这里为标量单独走 C 层的无换行函数。
     fn emit_print_raw(&self, ty: &Type, val: BasicValueEnum<'ctx>) -> Result<()> {
         match *ty {
+            // 裸指针不可输出（语义层已拦截；这里仅保证 match 穷尽）。
+            Type::RawPtr(_) => {
+                return Err(DialcError::new(
+                    "内部错误：裸指针不可输出（应由 Sema 先行拦截）",
+                    0,
+                    0,
+                ))
+            }
             Type::Int => {
                 self.call_c_void("dial_print_raw_int", &[val.into()]);
             }

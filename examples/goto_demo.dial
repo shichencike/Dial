@@ -1,0 +1,35 @@
+// goto 演示（v1.02）：从嵌套循环里跳出来 + 离开作用域时触发 defer。
+//
+// goto 受三条死锁约束（编译期硬拦）：
+//   ① 禁止跨过变量初始化；② 禁止跳出 / 跳进 with 块；③ 禁止跨越 try 边界。
+// 详见 README §31.3。
+
+fn main(): int {
+    // 1) 从**两层**循环里跳出来（break 只能跳一层，goto 不受层数限制）。
+    var i: int = 0;
+    var found: int = -1;
+    while (i < 10) {
+        var j: int = 0;
+        while (j < 10) {
+            if (i * 10 + j == 47) {
+                found = i * 10 + j;
+                goto done;          // 一次跳出两层循环
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    label done:
+    print(found);                     // 47
+
+    // 2) goto 离开作用域时，该作用域的 defer 照常按 LIFO 触发（资源清理不遗漏）。
+    {
+        defer print("cleanup-1");
+        defer print("cleanup-2");
+        goto skip;                    // 离开这个裸块 → 两个 defer 依次触发
+    }
+    label skip:
+    print("after-skip");
+
+    print(0);
+}

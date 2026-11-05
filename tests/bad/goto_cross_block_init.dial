@@ -1,0 +1,14 @@
+// 应当编译失败：从内层块 goto 到外层标签时，不得跳过外层块的变量初始化。
+// 这类跳转会跳过 `var x = 5`，使标签后的 print(x) 读到未初始化的栈槽（UB）。
+// 判定必须用全局语句序号，只比「同块下标」会漏掉它。
+fn main(): int {
+    var i: int = 0;
+    while (i < 1) {
+        i += 1;
+        goto done;
+    }
+    var x: int = 5;
+    label done:
+    print(x);
+    return 0;
+}

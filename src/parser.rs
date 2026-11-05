@@ -90,6 +90,12 @@ impl Parser {
     fn check(&self, k: &TokenKind) -> bool {
         self.peek_kind() == k
     }
+    /// 向前看第 n 个 token（n=0 即当前 token），越界返回 EOF。
+    /// 用于 `with 名 = 资源` 与 `with 资源 as 名` 两种形式的二选一判断。
+    fn peek_at(&self, n: usize) -> &Token {
+        let i = (self.pos + n).min(self.tokens.len().saturating_sub(1));
+        &self.tokens[i]
+    }
     /// 若当前 token 是复合赋值运算符（+= -= *= /= %=），返回对应的二元运算符（v1.00）。
     fn compound_op(&self) -> Option<BinOp> {
         match self.peek_kind() {
@@ -113,6 +119,42 @@ impl Parser {
                 t.col,
             ))
         }
+    }
+    /// 期望一个泛型闭合符 `>`。
+    ///
+    /// 词法层把 `>>` 合并成了一个 `Shr`（右移运算符）——这在 `map<map<int,int>,int>`
+    /// 与 `ptr_cast<rawptr<byte>>(x)` 里都会撞上。做法与 C++ 模板解析一致：
+    /// **在解析层把 `Shr` 拆成两个 `>`**（就地改写 token 流）。
+    fn expect_gt(&mut self) -> Result<()> {
+        if self.check(&TokenKind::Gt) {
+            self.advance();
+            return Ok(());
+        }
+        if self.check(&TokenKind::Shr) {
+            let t = self.peek().clone();
+            // 把 Shr 改成 Gt，并在其后插入第二个 Gt（两个 `>` 各自闭合一层泛型）。
+            self.tokens[self.pos] = Token {
+                kind: TokenKind::Gt,
+                line: t.line,
+                col: t.col,
+            };
+            self.tokens.insert(
+                self.pos + 1,
+                Token {
+                    kind: TokenKind::Gt,
+                    line: t.line,
+                    col: t.col + 1,
+                },
+            );
+            self.advance();
+            return Ok(());
+        }
+        let t = self.peek();
+        Err(DialcError::new(
+            format!("语法错误：期望 Gt，但遇到 {:?}", t.kind),
+            t.line,
+            t.col,
+        ))
     }
     fn expect_ident(&mut self) -> Result<String> {
         Ok(self.expect_ident_pos()?.0)
@@ -427,7 +469,7 @@ impl Parser {
                     let k = self.parse_type()?;
                     self.expect(TokenKind::Comma)?;
                     let v = self.parse_type()?;
-                    self.expect(TokenKind::Gt)?;
+                    self.expect_gt()?;
                     Type::KvMap(Box::new(k), Box::new(v))
                 } else {
                     Type::Map
@@ -447,7 +489,7 @@ impl Parser {
                         if self.check(&TokenKind::Lt) {
                             self.advance();
                             let elem = self.parse_type()?;
-                            self.expect(TokenKind::Gt)?;
+                            self.expect_gt()?;
                             Type::Channel(Box::new(elem))
                         } else {
                             Type::Channel(Box::new(Type::Void))
@@ -471,6 +513,14 @@ impl Parser {
                             ));
                         }
                         Type::Set(Box::new(elem))
+                    }
+                    // rawptr<T>（v1.02）：裸指针，**不受 ARC 管理**，需手动释放。
+                    // 元素类型为 void 时是无类型裸指针（只能传递/释放，不能做指针算术）。
+                    "rawptr" => {
+                        self.expect(TokenKind::Lt)?;
+                        let elem = self.parse_type()?;
+                        self.expect_gt()?;
+                        Type::RawPtr(Box::new(elem))
                     }
                     // thread：线程句柄（不透明指针，不是泛型）
                     "thread" => Type::Thread,
@@ -532,6 +582,9 @@ impl Parser {
             TokenKind::Do => self.parse_do_while(),
             TokenKind::Match => self.parse_match(),
             TokenKind::Defer => self.parse_defer(),
+            TokenKind::With => self.parse_with(),
+            TokenKind::Goto => self.parse_goto(),
+            TokenKind::Label => self.parse_label(),
             TokenKind::Return => self.parse_return(),
             TokenKind::Try => self.parse_try(),
             TokenKind::Throw => self.parse_throw(),
@@ -702,6 +755,18 @@ impl Parser {
                             arr: arr.clone(),
                             index: index.clone(),
                             value,
+                            line: tok.line,
+                            col: tok.col,
+                        })
+                    }
+                    // 裸指针解引用赋值 `*p = v`（v1.02）
+                    Expr::Unary(UnOp::Deref, ptr) if self.check(&TokenKind::Assign) => {
+                        self.advance();
+                        let value = self.parse_expr()?;
+                        self.expect(TokenKind::Semicolon)?;
+                        Ok(Stmt::AssignDeref {
+                            ptr: ptr.clone(),
+                            value: Box::new(value),
                             line: tok.line,
                             col: tok.col,
                         })
@@ -952,6 +1017,63 @@ impl Parser {
         // defer 后跟一条语句（普通语句或裸块）；以该语句自身的终止符（; 或 }）结束
         let inner = self.parse_stmt()?;
         Ok(Stmt::Defer(Box::new(inner), start.line, start.col))
+    }
+
+    /// `with` 资源作用域块（v1.02）。两种等价写法：
+    ///
+    /// ```dial
+    /// with open(path, "r") as f { ... }   // 资源在前
+    /// with f = open(path, "r") { ... }     // 名字在前
+    /// ```
+    ///
+    /// 靠「当前 token 是标识符且**下一个** token 是 `=`」区分第二种写法。
+    fn parse_with(&mut self) -> Result<Stmt> {
+        let start = self.peek().clone();
+        self.expect(TokenKind::With)?;
+        let (resource, name, name_line, name_col) =
+            if matches!(self.peek_kind(), TokenKind::Ident(_))
+                && matches!(self.peek_at(1).kind, TokenKind::Assign)
+            {
+                // with 名 = 资源 { ... }
+                let (n, l, c) = self.expect_ident_pos()?;
+                self.expect(TokenKind::Assign)?;
+                let r = self.parse_expr()?;
+                (r, n, l, c)
+            } else {
+                // with 资源 as 名 { ... }
+                let r = self.parse_expr()?;
+                self.expect(TokenKind::As)?;
+                let (n, l, c) = self.expect_ident_pos()?;
+                (r, n, l, c)
+            };
+        let body = self.parse_block()?;
+        Ok(Stmt::With {
+            resource,
+            name,
+            name_line,
+            name_col,
+            body,
+            line: start.line,
+            col: start.col,
+        })
+    }
+
+    /// `goto 标签;`（v1.02）
+    fn parse_goto(&mut self) -> Result<Stmt> {
+        let start = self.peek().clone();
+        self.expect(TokenKind::Goto)?;
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Semicolon)?;
+        Ok(Stmt::Goto(name, start.line, start.col))
+    }
+
+    /// `label 名字:`（v1.02）
+    fn parse_label(&mut self) -> Result<Stmt> {
+        let start = self.peek().clone();
+        self.expect(TokenKind::Label)?;
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Colon)?;
+        Ok(Stmt::Label(name, start.line, start.col))
     }
 
     fn parse_while(&mut self) -> Result<Stmt> {
@@ -1326,6 +1448,18 @@ impl Parser {
             let e = self.parse_unary()?;
             return Ok(Expr::Unary(UnOp::BitNot, Box::new(e)));
         }
+        // 解引用 `*p`（v1.02）：裸指针求值
+        if self.check(&TokenKind::Star) {
+            self.advance();
+            let e = self.parse_unary()?;
+            return Ok(Expr::Unary(UnOp::Deref, Box::new(e)));
+        }
+        // 取地址 `&x`（v1.02）：取栈上值类型变量的地址
+        if self.check(&TokenKind::Amp) {
+            self.advance();
+            let e = self.parse_unary()?;
+            return Ok(Expr::Unary(UnOp::AddrOf, Box::new(e)));
+        }
         self.parse_postfix()
     }
 
@@ -1449,9 +1583,34 @@ impl Parser {
                     ));
                 }
                 self.advance();
+                // 类型实参（v1.02）：`ptr_cast<rawptr<byte>>(x)`。
+                // 只对 `ptr_cast` 开放——它必须带目标类型，否则「裸指针 ↔ 其它类型」
+                // 就成了隐式转换，与零隐式转换铁律冲突。
+                let mut type_arg: Option<Type> = None;
+                if name == "ptr_cast" && self.check(&TokenKind::Lt) {
+                    let save = self.pos;
+                    self.advance();
+                    match self.parse_type() {
+                        Ok(ty) => {
+                            if self.expect_gt().is_ok() {
+                                type_arg = Some(ty);
+                            } else {
+                                self.pos = save;
+                            }
+                        }
+                        _ => {
+                            self.pos = save;
+                        }
+                    }
+                }
                 if self.check(&TokenKind::LParen) {
                     self.advance();
                     let mut args = Vec::new();
+                    // 类型实参作为**第一个实参**传入（Expr::TypeLit），
+                    // 语义层据此还原目标裸指针类型。
+                    if let Some(ty) = type_arg {
+                        args.push(Expr::TypeLit(ty));
+                    }
                     // spawn 的首参是「函数引用」，不是表达式：Dial 没有一等函数与闭包，
                     // 线程入口只能是一个顶层具名函数，因此这里直接消费标识符。
                     if name == "spawn" && !self.check(&TokenKind::RParen) {

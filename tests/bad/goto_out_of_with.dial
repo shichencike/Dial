@@ -1,0 +1,8 @@
+// 应当编译失败：goto 不得跳出 with 块（否则 with 的自动释放会被绕过）。
+fn main(): int {
+    with open("/tmp/x.txt", "w") as f {
+        goto out;
+    }
+    label out:
+    return 0;
+}

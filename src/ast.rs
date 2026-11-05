@@ -56,6 +56,16 @@ pub enum Type {
     /// 集合（v1.00）：`set<T>`，底层复用 int→int map（成员键 -> 1）。
     /// v1.00 的元素类型仅支持 int；不透明指针、ARC 与 map 完全同构。
     Set(Box<Type>),
+    /// 裸指针（v1.02）：`rawptr<T>`，指向一个 T 值。
+    ///
+    /// **核心红线：裸指针绝对不受 ARC 管理**——编译器不会为它 retain/release，
+    /// 作用域结束时也不会自动释放；它的生命周期完全由开发者显式管理
+    /// （`raw_free(p)` 或 `drop(p)`）。这条红线让「谁申请、谁释放」的契约成立，
+    /// 也让裸指针与 ARC 容器之间不存在隐式转换（见 README §19.3）。
+    ///
+    /// 元素类型为 `Void` 时是「无类型裸指针」（`rawptr<void>`）：只能传递与释放，
+    /// **不能做指针算术**（没有元素大小可依），必须先 `ptr_cast` 成具体类型。
+    RawPtr(Box<Type>),
     File,   // 文件句柄（不透明指针，封装 C 的 FILE*；显式 open/close，不受 ARC 管理）
     Error,  // 可恢复异常（不透明指针，ARC 管理；由 throw 抛出、catch 捕获，见 §26）
     Thread, // 线程句柄（不透明指针；显式 join / detach，不受 ARC 管理，见 §27）
@@ -93,6 +103,7 @@ impl Type {
             Type::Channel(_) => "channel",
             Type::Struct(_) => "struct",
             Type::Opaque(_) => "opaque",
+            Type::RawPtr(_) => "rawptr",
         }
     }
 
@@ -102,6 +113,7 @@ impl Type {
             Type::Struct(n) => format!("struct {}", n),
             Type::Opaque(n) => n.clone(),
             Type::KvMap(k, v) => format!("map<{}, {}>", k.display(), v.display()),
+            Type::RawPtr(e) => format!("rawptr<{}>", e.display()),
             other => other.name().to_string(),
         }
     }
@@ -123,6 +135,13 @@ pub enum UnOp {
     Neg, // 负号 -
     Not, // 逻辑非 not
     BitNot, // 按位取反 ~（v1.00，仅 int）
+    /// 解引用裸指针 `*p`（v1.02）：读出指针所指的**值**。
+    Deref,
+    /// 取地址 `&x`（v1.02）：取栈上值类型变量的地址。
+    ///
+    /// 只允许对 **var（可变）** 的**值类型**变量使用——对 `let` 取址会绕过不可变约束，
+    /// 对堆对象取址拿到的也只是槽位地址而非数据地址，两者都一律拒绝。
+    AddrOf,
 }
 
 /// 字符串插值的一个片段（v1.00）。
@@ -171,6 +190,11 @@ pub enum Expr {
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
     /// 普通函数调用（print 或用户函数）
     Call(String, Vec<Expr>),
+    /// 类型字面量（v1.02）：只出现在 `ptr_cast<T>(x)` 的**类型实参**位置。
+    ///
+    /// 它不是普通表达式：语义层在别处遇到它一律报错
+    /// （「类型标注只能出现在 ptr_cast<T>(...) 的类型实参位置」）。
+    TypeLit(Type),
     /// 函数引用：`spawn(worker, ...)` 的首参。Dial 没有一等函数与闭包，
     /// 因此线程入口只能是一个顶层具名函数；FuncRef 仅允许出现在 spawn 首参位置。
     FuncRef(String),
@@ -199,6 +223,17 @@ pub enum Stmt {
         name: String,
         value: Expr,
         move_hint: bool,
+        line: usize,
+        col: usize,
+    },
+    /// 裸指针解引用赋值：`*p = value`（v1.02）。
+    ///
+    /// 裸指针是**唯一**能写到「别人家的内存」里的手段，因此这条语句是
+    /// 内存安全的第一道闸门：只有 `rawptr<T>` 类型（T 为**具体**类型，
+    /// `rawptr<void>` 不行）的指针才能被解引用写入。
+    AssignDeref {
+        ptr: Box<Expr>,
+        value: Box<Expr>,
         line: usize,
         col: usize,
     },
@@ -296,6 +331,25 @@ pub enum Stmt {
     /// 作用域包括：函数体、裸块 `{ }`、循环体。在以下所有出口都会触发：正常落穿、
     /// `return`、导致离开该块的 `break` / `continue`。
     Defer(Box<Stmt>, usize, usize),
+    /// `with <资源> as <名> { ... }`（v1.02）：**资源作用域块**。
+    ///
+    /// 资源表达式求值后绑定给块内的名字，离开块时**自动释放**
+    /// （file → close、thread → join、裸指针 → free）。
+    /// 块内 `goto` 不得跳出（否则自动释放会被绕过）——见 §31.2 约束 2。
+    With {
+        resource: Expr,
+        name: String,
+        name_line: usize,
+        name_col: usize,
+        body: Vec<Stmt>,
+        line: usize,
+        col: usize,
+    },
+    /// `label <名字>:`（v1.02）：跳转目标标签。函数内唯一。
+    Label(String, usize, usize),
+    /// `goto <名字>;`（v1.02）：无条件跳到同函数内的某个标签。
+    /// 受三条死锁约束（禁止跨过变量初始化 / 禁止跳出 with 块 / 禁止跨越 try 边界）。
+    Goto(String, usize, usize),
     Return(Option<Expr>, usize, usize),
     /// `throw <expr>;`：抛出可恢复异常。expr 必须是 Error 类型（编译期强制规范化）。
     Throw(Expr, usize, usize),
