@@ -26,6 +26,12 @@
 <ul>
 <li><a href="#更新日志--changelog">更新日志 / Changelog</a><ul>
 <li><a href="#v10-里程碑--分版记录v100--v103">[v1.0 里程碑] — 分版记录（v1.00 ~ v1.03）</a></li>
+<li><a href="#安装与发布流程调整--2026-11-06">[安装与发布流程调整] — 2026-11-06</a><ul>
+<li><a href="#安装脚本零硬编码">安装脚本（零硬编码）</a></li>
+<li><a href="#发布流程同一页面">发布流程（同一页面）</a></li>
+<li><a href="#验证">验证</a></li>
+</ul>
+</li>
 <li><a href="#v103--2026-11-05">[v1.03] — 2026-11-05</a><ul>
 <li><a href="#added">Added</a></li>
 <li><a href="#fixed">Fixed</a></li>
@@ -101,7 +107,7 @@
 <li><a href="#fixed修复_3">Fixed（修复）</a></li>
 <li><a href="#added测试">Added（测试）</a></li>
 <li><a href="#docs文档_1">Docs（文档）</a></li>
-<li><a href="#验证">验证</a></li>
+<li><a href="#验证_1">验证</a></li>
 </ul>
 </li>
 <li><a href="#v095--2026-10-31">[v0.95] — 2026-10-31</a><ul>
@@ -110,7 +116,7 @@
 <li><a href="#added测试_1">Added（测试）</a></li>
 <li><a href="#刻意未做与-v094-规划一致本版仍不做">刻意未做（与 v0.94 规划一致，本版仍不做）</a></li>
 <li><a href="#docs文档_2">Docs（文档）</a></li>
-<li><a href="#验证_1">验证</a><ul>
+<li><a href="#验证_2">验证</a><ul>
 <li><a href="#流水线实跑记录github-actions-已验证">流水线实跑记录（GitHub Actions 已验证）</a></li>
 </ul>
 </li>
@@ -130,14 +136,14 @@
 <li><a href="#changed变更_9">Changed（变更）</a></li>
 <li><a href="#added测试_3">Added（测试）</a></li>
 <li><a href="#尚未实现本版刻意留白">尚未实现（本版刻意留白）</a></li>
-<li><a href="#验证_2">验证</a></li>
+<li><a href="#验证_3">验证</a></li>
 </ul>
 </li>
 <li><a href="#v092--2026-10-31">[v0.92] — 2026-10-31</a><ul>
 <li><a href="#added新增_10">Added（新增）</a></li>
 <li><a href="#changed语义与规则变更">Changed（语义与规则变更）</a></li>
 <li><a href="#fixed修复_4">Fixed（修复）</a></li>
-<li><a href="#验证_3">验证</a></li>
+<li><a href="#验证_4">验证</a></li>
 </ul>
 </li>
 <li><a href="#v091--2026-10-30">[v0.91] — 2026-10-30</a><ul>
@@ -167,7 +173,7 @@
 <li><a href="#added新增_14">Added（新增）</a></li>
 <li><a href="#changed变更_10">Changed（变更）</a></li>
 <li><a href="#设计约束本版刻意不做">设计约束（本版刻意不做）</a></li>
-<li><a href="#验证_4">验证</a></li>
+<li><a href="#验证_5">验证</a></li>
 </ul>
 </li>
 <li><a href="#v07--2026-10-30">[v0.7] — 2026-10-30</a><ul>
@@ -268,9 +274,58 @@
 </tr>
 </tbody>
 </table>
-<p><strong>两类标签互不替代</strong>：<code>v1.0</code> 标记里程碑达成；按版本号的发布标签
-<code>v1.3.0</code>（编译器）与 <code>stdlib-v1.3.0</code>（标准库包）供一键安装脚本下载精确版本，
-本次<strong>不打</strong>这两个标签，由维护者另行决定何时打。</p>
+<p><strong>两类标签互不替代</strong>：<code>v1.0</code> 标记里程碑达成；按版本号的发布标签（<code>v*</code>）用于
+触发 CI 产出带全部资产的 Release。一键安装脚本<strong>不依赖精确版本标签</strong>——它通过
+GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/download/</code>，
+因此发新版时无需改脚本、也无需补打配套标签，详见下方「安装与发布流程调整」。</p>
+</blockquote>
+<hr />
+<h2 id="安装与发布流程调整--2026-11-06">[安装与发布流程调整] — 2026-11-06</h2>
+<p><strong>目标</strong>：安装脚本不再硬编码任何版本 / 标签，下载地址改为能重定向到最新 Release；
+标准库包与其他资产同处一个 Release 页面，方便重定向、也方便被找到。</p>
+<h3 id="安装脚本零硬编码">安装脚本（零硬编码）</h3>
+<ul>
+<li><code>tools/install-dial.sh</code> 删除 <code>DEFAULT_VERSION="1.3.0"</code>、<code>STDLIB_RELEASE</code> 默认
+  <code>stdlib-v1.3.0</code>；<code>tools/install-dial.ps1</code> 删除 <code>$DialVersion = "0.99.1"</code>（旧残留）
+  与 <code>$StdlibRelease</code> 默认值。版本 / 标签 / 资产名全部运行时解析；</li>
+<li>新增资产解析：调 <code>api.github.com/repos/&lt;repo&gt;/releases/latest</code>（钉版本时改调
+  <code>releases/tags/&lt;tag&gt;</code>）拿到 <code>tag_name</code> 与 <code>assets[].name</code>，按平台 slug 选 zip、
+  按扩展名选 <code>.vsix</code>，<code>stdlib.dialpkg</code> 名字固定；</li>
+<li>下载地址统一为 <code>releases/latest/download/&lt;资产名&gt;</code>，钉版本时退化为
+  <code>releases/download/&lt;tag&gt;/&lt;资产名&gt;</code>。GitHub 的 latest 下载<strong>要求精确资产名</strong>，
+  而本项目资产名带版本号，故必须由清单解析而非推导——顺带修掉
+  <code>dialc-v1.3-linux-x86_64.zip</code>（CI 实际命名）与旧脚本推导的
+  <code>dialc-v1.3.0-…</code> 不一致造成的 404；</li>
+<li><code>DIAL_VERSION</code> / <code>STDLIB_RELEASE</code> 降级为<strong>可选钉版本</strong>覆盖；<code>STDLIB_URL</code> /
+  <code>DIAL_VSIX_URL</code> 覆盖、镜像优先 + 官方回退、断点续传、失败可见原因、卸载与
+  <code>.dialpkg</code> 扫描均不变。API 不可达时给出明确指引，不静默猜资产名。</li>
+</ul>
+<h3 id="发布流程同一页面">发布流程（同一页面）</h3>
+<ul>
+<li><code>.github/workflows/ci.yml</code> 的 <code>release</code> 作业新增「组装 stdlib.dialpkg」步骤，
+  并把 <code>dist-stdlib/stdlib.dialpkg</code> 加入上传资产列表：每个 <code>v*</code> Release 现在同时含
+  三平台 zip、<code>.vsix</code> 与 <code>stdlib.dialpkg</code>，<strong>即使 stdlib 源码一行未改也照常重新组装</strong>
+  （ABI 与编译器版本绑定）；Release 说明里的安装命令也改为零版本号的一键脚本；</li>
+<li>旧 <code>publish-stdlib</code> 独立通道仅作向后兼容保留，并标记 <code>prerelease: true</code>，
+  避免它抢走 <code>releases/latest</code> 的指向；历史 <code>stdlib-v1.0.0</code> Release 及旧链接仍可用；</li>
+<li>README 的安装说明、§25.10、§32.5.1、§32.6 同步。历史分版条目里「独立发版 /
+  两个标签」的描述系当时做法，不再代表当前约定。</li>
+</ul>
+<h3 id="验证">验证</h3>
+<ul>
+<li><code>bash -n</code> 语法通过；<code>--help</code> / <code>--version</code> 输出正常；</li>
+<li>实测 GitHub API 解析出当前 latest 的 <code>tag_name</code> 与 4 个资产名，
+  <code>releases/latest/download/&lt;zip&gt;</code> 与 <code>&lt;vsix&gt;</code> 均返回 <strong>200</strong> 并正确重定向到真实资产；</li>
+<li><code>stdlib.dialpkg</code> 在当前 latest（<code>v0.98</code>，旧 Release 未附带该资产）返回 404，
+  脚本会给出「该版本发布时未附带 stdlib.dialpkg」的明确告警，符合预期。</li>
+</ul>
+<blockquote>
+<p><strong>已知前置</strong>：当前 CI 的两个测试作业仍为红色——Windows 侧 <code>stdlib/dial_env.c</code>
+用了 MinGW 不提供的 <code>srandom</code> / <code>random</code>；Linux 侧 <code>tools/cve_check.py</code> 的
+CVE-007 用例链接清单漏了 <code>dial_array.c</code>（<code>dial_string_split</code> → undefined
+reference to <code>dial_array_new</code>）。因此 <code>v1.0</code> 标签未产出新 Release，
+<code>releases/latest</code> 仍指向 <code>v0.98</code>。这两处修复后，下一个 <code>v*</code> 标签才会产出带
+<code>stdlib.dialpkg</code> 的新页面，latest 重定向即可指向它。本次未改动运行时与安全检测代码。</p>
 </blockquote>
 <hr />
 <h2 id="v103--2026-11-05">[v1.03] — 2026-11-05</h2>
@@ -1096,7 +1151,7 @@
   已由 v0.95 的跨文件符号表兑现；文首「仍待实现」清单同步收窄。</li>
 <li>官网重新生成，新增「包 URL 安装 + 一键安装」特性卡。</li>
 </ul>
-<h3 id="验证">验证</h3>
+<h3 id="验证_1">验证</h3>
 <ul>
 <li><strong>A～L 十二组测试全绿</strong>（新增 L 组 26 项断言）；
   端到端实测：URL 安装 → <code>import "demo"</code> → 编译 → 运行输出正确；
@@ -1200,7 +1255,7 @@
   同时清理编译遗留物（<code>examples/*.o</code>、<code>examples/hello</code>、<code>examples/flow</code>、<code>.dialc_build/</code>、<code>TEST_RUN_*.log</code>）。
   <code>.gitignore</code> 补上 <code>REPORT_*.md</code>，避免这类一次性报告再次堆回仓库。</li>
 </ul>
-<h3 id="验证_1">验证</h3>
+<h3 id="验证_2">验证</h3>
 <ul>
 <li><strong>A/B/C/D/E/F/G/H/I/J 十组原有测试全绿</strong>（J 组「包安装三条硬规则」于 v0.94 收尾时锁死，v0.95 未改动其用例，只随套件一并执行），
   新增 <strong>K 组 25 项断言全通过</strong>；
@@ -1369,7 +1424,7 @@
 <li>一键安装脚本（<code>install-dial.sh</code> / <code>.ps1</code>）、Windows 线程后端、官方标准库的 <code>.dialpkg</code> 化。</li>
 <li><code>.diali</code> 接入 LSP（补全 / 悬停）——待 LSP 骨架落地。</li>
 </ul>
-<h3 id="验证_2">验证</h3>
+<h3 id="验证_3">验证</h3>
 <ul>
 <li>A/B/D/E/C/F/G <strong>七组原有测试全绿</strong>，新增 H 组通过；端到端实测
   <code>demo_add</code>→7、<code>demo_version</code>→42、不透明句柄 <code>demo_new</code>+<code>demo_get</code>→99、void <code>demo_free</code> 正常。</li>
@@ -1423,7 +1478,7 @@
 <li><strong>首页示例使用 <code>+</code> 拼接字符串</strong>：Dial 的字符串没有 <code>+</code> 运算符，已改为 <code>print("hello, ".concat(name))</code>
   （同步修正生成器 <code>tools/build_web.py</code> 与产物 <code>web/index.html</code>，避免重新生成时复发）。</li>
 </ul>
-<h3 id="验证_3">验证</h3>
+<h3 id="验证_4">验证</h3>
 <ul>
 <li>A/B/D/E/C/F <strong>六组原有测试全绿</strong>，新增 G 组（未捕获异常契约）通过。</li>
 <li>新增 5 个 char 负向用例 + 2 个写回规则负向用例 + 2 个 select 安全退出正例，均纳入自测。</li>
@@ -1682,7 +1737,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li><strong>不支持 <code>close(ch)</code> / <code>try_recv</code> / <code>select</code> / 线程池 / 原子类型</strong>。</li>
 <li><strong>线程入口必须返回 <code>void</code>、禁止 <code>struct</code> 形参</strong>；<code>spawn</code> 首参只能是顶层具名函数（Dial 无一等函数）。</li>
 </ul>
-<h3 id="验证_4">验证</h3>
+<h3 id="验证_5">验证</h3>
 <ul>
 <li>A/B/D/E/C 五组全绿（新增 5 正向 + 19 负向），C 组产物仍<strong>仅依赖 libc</strong>（无 LLVM、无额外 .so）。</li>
 <li><strong>零隐式负担</strong>：<code>hello.dial</code> 产物中不含任何 <code>pthread</code> / <code>dial_channel</code> / <code>dial_thread</code> 符号。</li>

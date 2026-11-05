@@ -11,10 +11,14 @@
 #      子目录，或脚本参数指定的目录），逐个执行安装命令；
 #   4. 收尾：给出清晰的「做了什么 / 还需要你做什么」总结。
 #
-# 与旧版相比的关键改进（v0.99.1 重写）：
-#   - 版本**不再硬编码**：优先从已安装的 dialc 读出真实版本号，bootstrap 才回退到
-#     内置默认版本；配套件（标准库 / 插件）一律按这个版本推导，**彻底消灭版本不同步**
-#     （旧版写死 0.98.1，插件名却是 dial-0.98.0.vsix，每次都 404）；
+# 与旧版相比的关键改进：
+#   - **零硬编码版本**：不再内置 DEFAULT_VERSION / STDLIB_RELEASE。运行时调用
+#     GitHub API 读取「最新 Release」的真实资产清单，下载地址统一走
+#     `releases/latest/download/<资产名>`——新版发布后脚本无需改动即可自动跟上。
+#     zip / vsix 的真实文件名（含版本号）由资产清单解析，消灭「推导名 ≠ 实际名」
+#     造成的 404（例如 dialc-v1.3-… 与 dialc-v1.3.0-…）。
+#   - stdlib.dialpkg 与普通资产一样挂在同一个 v* Release 页面，因此也能被
+#     `releases/latest/download/stdlib.dialpkg` 重定向到。
 #   - VS Code 插件按「Release 资产清单」解析真实文件名，不依赖插件自身 semver 与
 #     编译器版本号对齐——命名再怎么漂移也不会找不到；
 #   - 下载失败**可见原因**（旧版 2>/dev/null 把 curl 报错吞了，用户只看到「失败」二字）；
@@ -29,16 +33,18 @@
 #
 # 选项：
 #   -h, --help      显示帮助
-#   -v, --version   显示本脚本将使用的 Dial 版本后退出
+#   -v, --version   显示本脚本将跟随的 Dial 版本后退出
 #   --uninstall     卸载（删除 ~/.dial 与 PATH 写入）
 #
-# 环境变量（一般无需设置，网络不稳 / 走镜像时才有用）：
-#   DIAL_VERSION     覆盖配套件版本（默认：从 dialc 读出，否则内置默认）
+# 环境变量（一般无需设置；钉版本 / 离线 / 走镜像时才有用）：
+#   DIAL_VERSION     可选「钉版本」（如 1.3.0）。设置后改按该精确标签下载，
+#                    不再跟随最新；默认留空 = 跟随 GitHub 最新 Release
+#   STDLIB_RELEASE   可选「钉标准库标签」（兼容旧 stdlib-v* 独立通道）；
+#                    默认留空 = 取最新 Release 页面里的 stdlib.dialpkg
 #   DIALC_BIN       指定要挂进 PATH 的 dialc（默认：脚本同目录的 ./dialc）
 #   DIALC_HOME      指定 ~/.dial 的位置（默认：$HOME/.dial）
 #   DIALC_SRC       指定 Dial 发行包根目录（含 stdlib/ 与 runtime/；默认：脚本所在目录）
 #   DIAL_MIRROR_PREFIX  国内镜像前缀（默认 https://ghproxy.net/；置空则只用官方源）
-#   STDLIB_RELEASE  标准库独立发布标签（默认 stdlib-v1.3.0，与编译器解耦）
 #   STDLIB_URL / DIAL_VSIX_URL  覆盖对应下载地址（镜像 / 自建源）
 #
 set -uo pipefail
@@ -46,11 +52,14 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 DIALC_HOME="${DIALC_HOME:-$HOME/.dial}"
 
-# 内置默认版本：仅在「本地无任何 dialc 可探测」时用于 bootstrap。
-# 正常流程（已装好 dialc）会立刻被真实版本覆盖，所以这里写错也无所谓。
-DEFAULT_VERSION="1.3.0"
-DIAL_VERSION="${DIAL_VERSION:-$DEFAULT_VERSION}"
-DIAL_TAG="v${DIAL_VERSION}"
+# 版本 / 标签一律不再硬编码：默认跟随 GitHub「最新 Release」。
+# 下面两个变量只作为可选的「钉版本」覆盖，用于离线、复现旧环境或临时回退；
+# 不设置时，下载地址走 releases/latest/download/，每次运行都解析当前最新。
+DIAL_VERSION="${DIAL_VERSION:-}"       # 展示用 + 可选钉版本（如 1.3.0）
+STDLIB_RELEASE="${STDLIB_RELEASE:-}"   # 可选钉标准库标签（兼容 stdlib-v* 通道）
+DIAL_TAG=""
+PINNED=0
+if [ -n "$DIAL_VERSION" ]; then DIAL_TAG="v${DIAL_VERSION}"; PINNED=1; fi
 
 # 编译器本体文件名
 if [ -x "$SCRIPT_DIR/dialc.exe" ]; then
@@ -62,10 +71,9 @@ else
 fi
 DIALC_SRC="${DIALC_SRC:-$SCRIPT_DIR}"
 
-# 标准库独立发布标签（与编译器解耦）
-STDLIB_RELEASE="${STDLIB_RELEASE:-stdlib-v1.3.0}"
-
 REPO="shichencike/Dial"
+RELEASE_LATEST="https://github.com/${REPO}/releases/latest/download"
+RELEASE_TAGGED="https://github.com/${REPO}/releases/download"
 
 # ---------------------------------------------------------------------------
 # 输出助手
@@ -120,16 +128,66 @@ download() {
     return 1
 }
 
-# 用 GitHub API 列出某 tag 的 Release 资产名（用于按真实文件名解析插件等）。
-# 成功时输出资产名（一个），失败输出空。优先直连 GitHub，失败再走镜像。
-list_release_assets() {
-    local tag="$1"
-    local api="https://api.github.com/repos/${REPO}/releases/tags/${tag}"
-    local json; json="$(curl -fSL --connect-timeout 15 --max-time 60 \
-        -H "Accept: application/vnd.github+json" "$api" 2>/dev/null)"
-    if [ -n "$json" ]; then
-        printf '%s' "$json" | grep -oE '"name":[[:space:]]*"[^"]+\.(vsix|zip)"' \
-            | sed -E 's/.*"name":[[:space:]]*"([^"]+)".*/\1/'
+# ---------------------------------------------------------------------------
+# 最新 Release 资产解析（零硬编码的核心）
+#   GitHub 的 releases/latest/download/<资产名> 要求资产名精确，而本项目资产名
+#   带版本号（dialc-v1.3-linux-x86_64.zip / dial-1.3.0.vsix）。所以运行时用
+#   GitHub API 读取「最新 Release」的 assets[].name，再拼下载地址：
+#     - 未钉版本 -> /releases/latest/download/<资产名>（自动重定向到最新）
+#     - 钉版本   -> /releases/download/<tag>/<资产名>（精确复现该版本）
+#   API 不可达时不猜资产名，给出明确指引（或用 DIAL_VERSION 钉版本）。
+# ---------------------------------------------------------------------------
+ASSETS_CACHE=""
+LATEST_TAG=""
+
+fetch_release_assets() {
+    local api
+    if [ -n "$DIAL_TAG" ]; then
+        api="https://api.github.com/repos/${REPO}/releases/tags/${DIAL_TAG}"
+    else
+        api="https://api.github.com/repos/${REPO}/releases/latest"
+    fi
+    local json=""
+    if [ "$HAVE_CURL" = "1" ]; then
+        json="$(curl -fSL --connect-timeout 15 --max-time 60 \
+            -H 'Accept: application/vnd.github+json' "$api" 2>/dev/null || true)"
+    elif [ "$HAVE_WGET" = "1" ]; then
+        json="$(wget -qO- --timeout=60 "$api" 2>/dev/null || true)"
+    fi
+    [ -n "$json" ] || return 1
+    local tag
+    tag="$(printf '%s' "$json" | grep -oE '"tag_name":[[:space:]]*"[^"]+"' \
+        | head -1 | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/' || true)"
+    # 第一行输出 tag，其后每行一个资产名。不能在这里给全局变量赋值——
+    # 本函数被命令替换调用时会开子 shell，赋值传不回父 shell；由 load_assets
+    # 在父 shell 里拆分输出并设置 LATEST_TAG / ASSETS_CACHE。
+    printf '%s\n' "$tag"
+    printf '%s' "$json" | grep -oE '"name":[[:space:]]*"[^"]+\.(zip|vsix|dialpkg)"' \
+        | sed -E 's/.*"name":[[:space:]]*"([^"]+)".*/\1/'
+}
+
+load_assets() {
+    [ -n "$ASSETS_CACHE" ] && return 0
+    local fetched
+    fetched="$(fetch_release_assets)" || return 1
+    LATEST_TAG="$(printf '%s\n' "$fetched" | head -1)"
+    ASSETS_CACHE="$(printf '%s\n' "$fetched" | tail -n +2)"
+    [ -n "$ASSETS_CACHE" ] || return 1
+    return 0
+}
+
+# pick_asset <正则>：从缓存里选第一个匹配的资产名
+pick_asset() {
+    [ -n "$ASSETS_CACHE" ] || return 1
+    printf '%s\n' "$ASSETS_CACHE" | grep -E -- "$1" | head -1
+}
+
+# asset_url <资产名>：拼出能重定向到最新的下载地址
+asset_url() {
+    if [ -n "$DIAL_TAG" ]; then
+        printf '%s/%s/%s' "$RELEASE_TAGGED" "$DIAL_TAG" "$1"
+    else
+        printf '%s/%s' "$RELEASE_LATEST" "$1"
     fi
 }
 
@@ -155,15 +213,15 @@ detect_platform() {
     esac
 }
 
-# 从已安装的 dialc 读出真实版本号，覆盖内置默认（消灭版本不同步）。
+# 从已安装的 dialc 读出真实版本号，仅用于展示 / 写 config.txt。
+# 下载地址不依赖它——一律由「最新 Release 资产清单」决定。
 detect_compiler_version() {
     local bin="$1" out
-    out="$($bin --version 2>/dev/null || $bin version 2>/dev/null)"
-    # 形如 "dialc 0.99.1" / "dialc 0.99.1 (debug)" —— 取第一个 X.Y.Z
+    [ -n "$bin" ] && [ -x "$bin" ] || return 0
+    out="$($bin --version 2>/dev/null || $bin version 2>/dev/null)" || true
     local ver; ver="$(printf '%s' "$out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-    if [ -n "$ver" ]; then
+    if [ "$PINNED" = "0" ] && [ -n "$ver" ]; then
         DIAL_VERSION="$ver"
-        DIAL_TAG="v${ver}"
     fi
 }
 
@@ -180,12 +238,21 @@ bootstrap_if_needed() {
     fi
     echo "== 引导下载 Dial 发布包 =="
     detect_platform
-    local zip="dialc-${DIAL_TAG}-${PLAT_SLUG}.zip"
+    if ! load_assets; then
+        die "无法读取 GitHub 最新 Release 的资产清单（API 不可达）。
+   请检查网络后重试；或用 DIAL_VERSION=1.3.0 钉版本重试；也可从
+   https://github.com/${REPO}/releases/latest 手动下载对应平台的 zip，
+   解压后运行包内 install-dial.sh。"
+    fi
+    local zip
+    zip="$(pick_asset "-${PLAT_SLUG}\.zip$" || true)"
+    [ -n "$zip" ] || die "最新 Release（${LATEST_TAG:-未知}）里找不到 ${PLAT_SLUG} 平台的发布包。
+   资产清单：$(printf '%s' "$ASSETS_CACHE" | tr '\n' ' ')"
     local work target official inner
     work="$(mktemp -d)" || die "无法创建临时目录"
     target="$work/$zip"
-    say "  平台: $PLAT_SLUG   版本: $DIAL_VERSION"
-    official="https://github.com/${REPO}/releases/download/${DIAL_TAG}/$zip"
+    say "  平台: $PLAT_SLUG   跟随: ${LATEST_TAG:-最新 Release}   包: $zip"
+    official="$(asset_url "$zip")"
     if ! download "$target" "$official"; then
         die "无法下载 Dial 发布包（镜像与官方源均失败）。请手动下载后运行：
    $official
@@ -243,11 +310,15 @@ do_uninstall() {
 for arg in "$@"; do
     case "$arg" in
       -h|--help)
-        sed -n '3,60p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '3,62p' "$0" | sed 's/^# \{0,1\}//'
         exit 0 ;;
       -v|--version)
         detect_compiler_version "${DIALC_BIN:-}" 2>/dev/null || true
-        echo "Dial 版本：$DIAL_VERSION  标签：$DIAL_TAG"
+        if [ "$PINNED" = "1" ]; then
+            echo "Dial 版本：$DIAL_VERSION（已钉版本，标签 $DIAL_TAG，不跟随最新）"
+        else
+            echo "Dial 版本：${DIAL_VERSION:-跟随最新 Release}（默认跟随 GitHub 最新 Release）"
+        fi
         exit 0 ;;
       --uninstall) DO_UNINSTALL=1 ;;
     esac
@@ -257,7 +328,7 @@ done
 echo "== Dial 一键安装 =="
 bootstrap_if_needed "$@"
 
-# 第 1 步：定位 dialc（并把真实版本号读出来）
+# 第 1 步：定位 dialc（并把真实版本号读出来，仅用于展示）
 if [ ! -x "$DIALC_BIN" ]; then
     bin="$(command -v dialc 2>/dev/null || true)"
     if [ -n "$bin" ]; then DIALC_BIN="$bin"; else
@@ -266,8 +337,13 @@ if [ ! -x "$DIALC_BIN" ]; then
       DIALC_BIN=/path/to/dialc bash $(basename "$0")"
     fi
 fi
-detect_compiler_version "$DIALC_BIN"   # 用真实版本覆盖默认/环境变量
-ok "编译器: $DIALC_BIN  (Dial $DIAL_VERSION)"
+detect_compiler_version "$DIALC_BIN"
+ok "编译器: $DIALC_BIN  (Dial ${DIAL_VERSION:-${LATEST_TAG:-最新 Release}})"
+
+# 预取一次最新 Release 资产清单；失败不阻断主流程（配套件各自降级告警）。
+if ! load_assets; then
+    warn "无法读取 GitHub 最新 Release 资产清单（API 不可达）；标准库与插件的自动安装可能跳过。"
+fi
 
 # 第 2 步：初始化环境
 echo
@@ -332,7 +408,7 @@ fi
 cat > "$DIALC_HOME/config.txt" <<EOF
 # Dial 环境配置（由 install-dial.sh 生成）
 dialc_path   = $DST_BIN
-version      = $DIAL_VERSION
+version      = ${DIAL_VERSION:-${LATEST_TAG:-latest}}
 installed_at = $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 uname        = $(uname -srm)
 EOF
@@ -341,12 +417,22 @@ ok "工具链配置: $DIALC_HOME/config.txt"
 # 第 2.5 步：官方标准库包（失败只告警、不阻断）
 echo
 echo "-- 安装官方标准库 stdlib.dialpkg --"
-STDLIB_OFFICIAL="https://github.com/${REPO}/releases/download/${STDLIB_RELEASE}/stdlib.dialpkg"
+if [ -n "$STDLIB_RELEASE" ]; then
+    STDLIB_OFFICIAL="${RELEASE_TAGGED}/${STDLIB_RELEASE}/stdlib.dialpkg"
+    STDLIB_LABEL="${STDLIB_RELEASE}（已钉标签）"
+else
+    STDLIB_OFFICIAL="${RELEASE_LATEST}/stdlib.dialpkg"
+    STDLIB_LABEL="跟随最新 Release"
+fi
+if [ -n "$ASSETS_CACHE" ] && ! printf '%s\n' "$ASSETS_CACHE" | grep -qx 'stdlib.dialpkg'; then
+    warn "最新 Release（${LATEST_TAG:-未知}）页面里未见 stdlib.dialpkg（该版本发布时未附带）。
+  可设 STDLIB_RELEASE=stdlib-v1.0.0 从兼容通道安装，或升级到含该资产的新 Release。"
+fi
 STDLIB_TMP="$(mktemp -t stdlib.XXXXXX.dialpkg)"
 if [ "$HAVE_CURL" = "1" ] || [ "$HAVE_WGET" = "1" ]; then
     if download "$STDLIB_TMP" "$STDLIB_OFFICIAL" "${STDLIB_URL:-}"; then
         if "$DST_BIN" install "$STDLIB_TMP" 2>/dev/null; then
-            ok "官方标准库已安装（${STDLIB_RELEASE}，镜像优先 + 官方回退）"
+            ok "官方标准库已安装（${STDLIB_LABEL}，镜像优先 + 官方回退）"
         else
             warn "dialc install stdlib.dialpkg 失败（不影响编译器本体，可稍后手动安装）"
         fi
@@ -358,7 +444,7 @@ else
 fi
 rm -f "$STDLIB_TMP" 2>/dev/null
 
-# 第 2.7 步：VS Code 插件（按真实文件名解析，消灭版本不同步导致的 404）
+# 第 2.7 步：VS Code 插件（按真实资产名解析，消灭版本不同步导致的 404）
 echo
 echo "-- 安装 VS Code 插件 --"
 CODE_CLI=""
@@ -371,25 +457,29 @@ if [ -z "$CODE_CLI" ]; then
 elif [ "$HAVE_CURL" != "1" ] && [ "$HAVE_WGET" != "1" ]; then
     warn "未找到 curl / wget，跳过 VS Code 插件安装（编译器本体不受影响）。"
 else
-    # 先按真实 Release 资产名解析，再回退到版本推导名
-    VSIX_NAME="$(list_release_assets "$DIAL_TAG" | grep -m1 '\.vsix$' || true)"
-    if [ -z "$VSIX_NAME" ]; then
+    VSIX_NAME="$(pick_asset '\.vsix$' || true)"
+    if [ -z "$VSIX_NAME" ] && [ "$PINNED" = "1" ]; then
         VSIX_NAME="dial-${DIAL_VERSION}.vsix"
-        say "  （无法从 Release 资产清单解析插件名，回退到版本推导名：$VSIX_NAME）"
+        say "  （资产清单不可用，钉版本回退到推导名：$VSIX_NAME）"
     fi
-    VSIX_OFFICIAL="https://github.com/${REPO}/releases/download/${DIAL_TAG}/${VSIX_NAME}"
-    VSIX_TMP="$(mktemp -t dialplugin.XXXXXX.vsix)"
-    if download "$VSIX_TMP" "$VSIX_OFFICIAL" "${DIAL_VSIX_URL:-}" && [ -s "$VSIX_TMP" ]; then
-        if "$CODE_CLI" --install-extension "$VSIX_TMP"; then
-            ok "VS Code 插件已安装（$VSIX_NAME）"
-        else
-            warn "VS Code 插件安装失败，可稍后手动执行：
-    $CODE_CLI --install-extension $VSIX_NAME"
-        fi
+    if [ -z "$VSIX_NAME" ]; then
+        warn "无法解析 VS Code 插件资产名（GitHub API 不可达），跳过自动安装。
+  可从 https://github.com/${REPO}/releases/latest 手动下载 .vsix，或用 DIAL_VSIX_URL 指定地址。"
     else
-        warn "下载 VS Code 插件失败（可能离线 / 镜像与官方均不可达）；可稍后手动安装。"
+        VSIX_OFFICIAL="$(asset_url "$VSIX_NAME")"
+        VSIX_TMP="$(mktemp -t dialplugin.XXXXXX.vsix)"
+        if download "$VSIX_TMP" "$VSIX_OFFICIAL" "${DIAL_VSIX_URL:-}" && [ -s "$VSIX_TMP" ]; then
+            if "$CODE_CLI" --install-extension "$VSIX_TMP"; then
+                ok "VS Code 插件已安装（$VSIX_NAME）"
+            else
+                warn "VS Code 插件安装失败，可稍后手动执行：
+    $CODE_CLI --install-extension $VSIX_NAME"
+            fi
+        else
+            warn "下载 VS Code 插件失败（可能离线 / 镜像与官方均不可达）；可稍后手动安装。"
+        fi
+        rm -f "$VSIX_TMP" 2>/dev/null
     fi
-    rm -f "$VSIX_TMP" 2>/dev/null
 fi
 
 # 第 3 步：重新扫描 .dialpkg 并逐个安装
@@ -422,7 +512,7 @@ fi
 # 收尾总结
 echo
 echo "== 完成 =="
-ok "Dial $DIAL_VERSION 已安装到 $DIALC_HOME"
+ok "Dial ${DIAL_VERSION:-${LATEST_TAG:-最新 Release}} 已安装到 $DIALC_HOME"
 if [ "$SHELL_RC_TOUCHED" = "1" ]; then
     say "请**重开终端**（或执行 export PATH=\"\$PATH:$DIALC_HOME/bin\"）让 dialc 全局可用。"
 else

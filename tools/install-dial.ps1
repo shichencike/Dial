@@ -17,11 +17,18 @@
     PowerShell) often runs a non-UTF-8 codepage, and Chinese text would render as
     mojibake. Keeping output ASCII/English guarantees a readable installer.
 
+    Zero hardcoded versions: at runtime the installer queries the GitHub API for the
+    latest Release's real asset list, then downloads via
+    releases/latest/download/<asset-name>. The asset names carry version numbers
+    (dialc-v1.3-windows-x86_64.zip / dial-1.3.0.vsix), so they must be resolved
+    from the asset list rather than guessed. stdlib.dialpkg is published on the
+    same v* Release page as the zips and the extension, so it is reachable through
+    the same latest redirect.
+
     Network resilience: every download tries a domestic mirror (ghproxy.net) first
     and automatically falls back to official GitHub. Downloads resume on failure
     (curl.exe -C -). If all sources are unreachable the installer only warns and
-    does not abort -- the compiler itself still works (stdlib falls back to building
-    from source at link time).
+    does not abort -- the compiler itself still works.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install-dial.ps1
@@ -29,10 +36,14 @@
 
 .NOTES
     Environment variables:
+      DIAL_VERSION    Optional version pin (e.g. 1.3.0). When set, the installer
+                      downloads that exact tag instead of following the latest
+                      Release. Leave unset (default) to always follow latest.
+      STDLIB_RELEASE  Optional stdlib tag pin (legacy stdlib-v* channel); when set,
+                      stdlib.dialpkg is fetched from that tag instead of latest.
       DIALC_BIN       Path to the dialc executable (default: .\dialc.exe next to this script)
       DIALC_HOME      Location of .dial (default: %USERPROFILE%\.dial)
       DIALC_SRC       Root of the Dial release package (default: script directory)
-      DIAL_VERSION    Version of companion components (default: 0.98.1)
       STDLIB_URL      Override the stdlib download URL (mirror / self-hosted)
       DIAL_VSIX_URL   Override the VS Code extension download URL
       DIAL_MIRROR_PREFIX  Mirror prefix (default: https://ghproxy.net/); set empty to use official only
@@ -46,59 +57,92 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 defaults to TLS 1.0; api.github.com requires TLS 1.2+.
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 
 # ---------------------------------------------------------------------------
-# Constants & config
+# Constants & config (no hardcoded versions / tags)
 # ---------------------------------------------------------------------------
-# Official stdlib is published independently (tag stdlib-v*), decoupled from the
-# compiler. Bump this tag to upgrade the stdlib (matches Dial Releases stdlib-v*).
-$StdlibRelease = if ($env:STDLIB_RELEASE) { $env:STDLIB_RELEASE } else { "stdlib-v1.3.0" }
+# Optional "pin" overrides. When both are empty, every download follows the
+# latest Release through releases/latest/download/.
+$PinnedVersion = if ($env:DIAL_VERSION) { $env:DIAL_VERSION } elseif ($env:DIALC_VERSION) { $env:DIALC_VERSION } else { "" }
+$StdlibRelease = if ($env:STDLIB_RELEASE) { $env:STDLIB_RELEASE } else { "" }
+$DialVersion = $PinnedVersion     # display only; no longer drives download URLs
+$DialTag = ""
+$Pinned = $false
+if ($PinnedVersion) { $DialTag = "v" + $PinnedVersion; $Pinned = $true }
 
-# Companion component (VS Code extension) version.
-# Default is only used for bootstrap when no local dialc exists; once we locate a
-# real dialc we read its actual version so the companion components always match
-# the compiler (kills the version mismatch that made the extension 404 every time).
-$DialVersion = if ($env:DIALC_VERSION) { $env:DIALC_VERSION } else { "0.99.1" }
-$DialTag = "v" + $DialVersion
-$VsixFile = "dial-$DialVersion.vsix"
+$Repo = "shichencike/Dial"
+$ReleaseLatest = "https://github.com/$Repo/releases/latest/download"
+$ReleaseTagged = "https://github.com/$Repo/releases/download"
 
-# Recompute the tag / vsix-file variables after $DialVersion changes.
-function Update-VersionVars {
-    $script:DialTag  = "v" + $script:DialVersion
-    $script:VsixFile = "dial-" + $script:DialVersion + ".vsix"
+$script:Assets = @()
+$script:LatestTag = ""
+$script:AssetsLoaded = $false
+
+# ---------------------------------------------------------------------------
+# Latest Release asset resolution (the core of "zero hardcoded versions")
+#   GitHub's releases/latest/download/<name> needs the exact asset name, and our
+#   names embed versions. Resolve them from the API at runtime; never guess.
+# ---------------------------------------------------------------------------
+function Get-ReleaseAssets {
+    if ($script:AssetsLoaded) { return $true }
+    $api = if ($DialTag) {
+        "https://api.github.com/repos/$Repo/releases/tags/$DialTag"
+    } else {
+        "https://api.github.com/repos/$Repo/releases/latest"
+    }
+    $rel = $null
+    try {
+        $rel = Invoke-RestMethod -Uri $api `
+            -Headers @{ "Accept" = "application/vnd.github+json"; "User-Agent" = "dial-installer" } `
+            -TimeoutSec 60 -ErrorAction Stop
+    } catch {
+        # Fall back to curl.exe (some environments have different TLS/proxy setup).
+        try {
+            $raw = curl.exe -fSL --connect-timeout 15 --max-time 60 `
+                -H "Accept: application/vnd.github+json" $api 2>$null
+            if ($raw) { $rel = ($raw -join "`n") | ConvertFrom-Json }
+        } catch { }
+    }
+    if (-not $rel) { return $false }
+    $script:LatestTag = [string]$rel.tag_name
+    $script:Assets = @($rel.assets | ForEach-Object { [string]$_.name })
+    $script:AssetsLoaded = $true
+    return $true
 }
 
-# Read the real version from an installed dialc and override the default/env value.
+# Select-Asset <regex>: first matching asset name from the cached list.
+function Select-Asset {
+    param([string] $Pattern)
+    return ($script:Assets | Where-Object { $_ -match $Pattern } | Select-Object -First 1)
+}
+
+# Get-AssetUrl <name>: build a URL that redirects to the latest Release (or the
+# exact tag when a version is pinned).
+function Get-AssetUrl {
+    param([string] $Name)
+    if ($DialTag) { return "$ReleaseTagged/$DialTag/$Name" }
+    return "$ReleaseLatest/$Name"
+}
+
+# Read the real version from an installed dialc for display / config.txt only.
+# Download URLs never depend on it -- they come from the latest Release assets.
 function Resolve-DialVersion {
     param([string] $Bin)
+    if ($Pinned) { return }
     if (-not (Test-Path $Bin)) { return }
     try {
         $out = & $Bin --version 2>$null
         if (-not $out) { $out = & $Bin version 2>$null }
         if ($out) {
-            $m = [regex]::Match($out, '\d+\.\d+\.\d+')
-            if ($m.Success) { $script:DialVersion = $m.Value; Update-VersionVars }
+            $m = [regex]::Match(($out -join " "), '\d+\.\d+\.\d+')
+            if ($m.Success) { $script:DialVersion = $m.Value }
         }
     } catch { }
-}
-
-# Resolve the VS Code extension asset name from the release's asset list, so it
-# works even when the extension's own semver doesn't match the compiler version.
-function Resolve-VsixAsset {
-    param([string] $Tag)
-    try {
-        $api  = "https://api.github.com/repos/shichencike/Dial/releases/tags/$Tag"
-        $json = curl.exe -fSL --connect-timeout 15 --max-time 60 -H "Accept: application/vnd.github+json" $api 2>$null
-        if ($json) {
-            $m = [regex]::Match($json, '"name":\s*"([^"]+\.vsix)"')
-            if ($m.Success) { return $m.Groups[1].Value }
-        }
-    } catch { }
-    return ""
 }
 
 # Domestic mirror prefix. First candidate source; auto-falls back to official.
-# Empty it (DIAL_MIRROR_PREFIX="") to use official GitHub only.
 $MirrorPrefix = if ($env:DIAL_MIRROR_PREFIX) { $env:DIAL_MIRROR_PREFIX } else { "https://ghproxy.net/" }
 
 function Say  { param([string]$m) Write-Host "  $m" }
@@ -108,7 +152,6 @@ function Die  { param([string]$m) Write-Host "  [X]  $m" -ForegroundColor Red; e
 
 # ---------------------------------------------------------------------------
 # Download helper: mirror-first, official-fallback, resume.
-#   Returns $true on success (file exists and is non-empty), $false otherwise.
 # ---------------------------------------------------------------------------
 function Invoke-DialDownload {
     param(
@@ -126,8 +169,6 @@ function Invoke-DialDownload {
     }
     foreach ($url in $candidates) {
         Write-Host "  source: $url"
-        # Prefer curl.exe: supports -C - resume and avoids PowerShell codepage
-        # issues with non-ASCII URLs.
         if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
             $errFile = Join-Path $env:TEMP ("dialdl-" + [guid]::NewGuid().ToString("N"))
             curl.exe -fSL --retry 3 -C - --proto "=https" --connect-timeout 15 --max-time 600 -o $OutFile $url 2>$errFile
@@ -140,14 +181,11 @@ function Invoke-DialDownload {
             if ($lastErr) { Write-Host "    last error: $lastErr" }
         } else {
             try {
-                # Invoke-WebRequest has no resume; attempt a fresh download.
                 Invoke-WebRequest -Uri $url -OutFile $OutFile -ErrorAction Stop
                 if ((Test-Path $OutFile -PathType Leaf) -and ((Get-Item $OutFile).Length -gt 0)) {
                     return $true
                 }
-            } catch {
-                # try the next candidate
-            }
+            } catch { }
         }
     }
     return $false
@@ -157,12 +195,9 @@ Write-Host "== Dial one-click install =="
 
 # ---------------------------------------------------------------------------
 # Bootstrap (for `irm ... | iex` one-liner)
-#   When there is no local release to install from, download the Windows release
-#   zip for the current version (mirror-first, official-fallback, resume) and run
-#   the bundled installer inside it.
 #   The one-liner URL points at raw.githubusercontent.com/<branch>/tools/... which
-#   returns the file directly with NO releases/latest redirect; the zip is fetched
-#   by exact version tag, again with no latest indirection.
+#   returns the file directly. The release zip is then fetched through
+#   releases/latest/download/<resolved-asset> so it follows the newest Release.
 # ---------------------------------------------------------------------------
 $ScriptDir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { "" }
 if (-not $DialcHome) { $DialcHome = Join-Path $env:USERPROFILE ".dial" }
@@ -173,11 +208,15 @@ function Invoke-Bootstrap {
     param([string[]] $BootstrapArgs = @())
     Write-Host "== Bootstrapping Dial release =="
     $slug = "windows-x86_64"
-    $zip = "dialc-$DialTag-$slug.zip"
+    if (-not (Get-ReleaseAssets)) {
+        Die "Cannot query the latest GitHub Release assets (API unreachable). Check your network, or set DIAL_VERSION=1.3.0 to pin a version."
+    }
+    $zip = Select-Asset -Pattern ("-" + [regex]::Escape($slug) + "\.zip$")
+    if (-not $zip) { Die "No $slug release zip found in the latest Release ($($script:LatestTag)). Assets: $($script:Assets -join ', ')" }
+    Say "  platform: $slug   following: $($script:LatestTag)   package: $zip"
     $work = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP ("dialboot-" + [guid]::NewGuid().ToString("N")))
     $target = Join-Path $work.FullName $zip
-    Say "  platform: $slug   version: $DialVersion"
-    $official = "https://github.com/shichencike/Dial/releases/download/$DialTag/$zip"
+    $official = Get-AssetUrl -Name $zip
     if (-not (Invoke-DialDownload -OutFile $target -OfficialUrl $official)) {
         Die "Failed to download the Dial release (mirror and official both failed). Download manually: $official then run install-dial.ps1 from inside the zip."
     }
@@ -188,7 +227,6 @@ function Invoke-Bootstrap {
     exit $LASTEXITCODE
 }
 
-# Bootstrap only if we are NOT already inside a local release.
 $inLocalRelease = $false
 if ($DialcBin -and (Test-Path $DialcBin)) {
     $inLocalRelease = $true
@@ -204,7 +242,6 @@ if ($DialcBin -and (Test-Path $DialcBin)) {
 }
 if (-not $inLocalRelease) { Invoke-Bootstrap @args }
 
-
 # ---------------------------------------------------------------------------
 # Step 1: locate dialc
 # ---------------------------------------------------------------------------
@@ -217,9 +254,15 @@ if (-not (Test-Path $DialcBin)) {
     }
 }
 Ok "Compiler: $DialcBin"
-# Override the companion-component version with the real compiler version.
 Resolve-DialVersion -Bin $DialcBin
-Ok "Dial version: $DialVersion ($DialTag)"
+$shownVersion = if ($DialVersion) { $DialVersion } elseif ($script:LatestTag) { $script:LatestTag } else { "follow latest Release" }
+Ok "Dial version: $shownVersion"
+
+# Pre-fetch the latest Release asset list once; failure only warns (companion
+# components degrade gracefully).
+if (-not (Get-ReleaseAssets)) {
+    Warn "Cannot query the latest GitHub Release assets (API unreachable); stdlib and VS Code extension auto-install may be skipped."
+}
 
 # ---------------------------------------------------------------------------
 # Step 2: initialize environment (directory tree + PATH + config)
@@ -236,8 +279,7 @@ Ok "Directory tree: $DialcHome\{bin,packages,cache\downloads}"
 Copy-Item -Force $DialcBin (Join-Path $DialcHome "bin\dialc.exe")
 Ok "Compiler installed to $DialcHome\bin\dialc.exe"
 
-# LLVM-C.dll must sit next to dialc.exe, or the runtime loader fails (Windows uses
-# the official MSVC-built LLVM 18 C ABI; the DLL must travel with the binary).
+# LLVM-C.dll must sit next to dialc.exe, or the runtime loader fails.
 $llvmDll = Join-Path $DialcSrc "LLVM-C.dll"
 if (Test-Path $llvmDll) {
     Copy-Item -Force $llvmDll (Join-Path $DialcHome "bin\LLVM-C.dll")
@@ -246,9 +288,6 @@ if (Test-Path $llvmDll) {
     Warn "LLVM-C.dll not found under $DialcSrc.`n  dialc.exe needs it in the same folder at runtime.`n  Copy LLVM-C.dll from the LLVM 18 release into $DialcHome\bin\."
 }
 
-# stdlib/ and runtime/ must also be installed: the compiler walks up from the
-# executable location to find stdlib\ and runtime\. Installed at %USERPROFILE%\.dial\
-# that location is exactly %USERPROFILE%\.dial\, so place them there.
 if ((Test-Path (Join-Path $DialcSrc "stdlib")) -and (Test-Path (Join-Path $DialcSrc "runtime"))) {
     foreach ($d in @("stdlib", "runtime")) {
         $t = Join-Path $DialcHome $d
@@ -260,7 +299,6 @@ if ((Test-Path (Join-Path $DialcSrc "stdlib")) -and (Test-Path (Join-Path $Dialc
     Warn "stdlib\ and runtime\ not found under $DialcSrc.`n  Run this script from the full release package (or set DIALC_SRC).`n  Otherwise compilation fails with 'cannot find stdlib/ and runtime/ directories'."
 }
 
-# Persist PATH at the user level.
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $binDir   = Join-Path $DialcHome "bin"
 if ($userPath -notlike "*$binDir*") {
@@ -270,10 +308,11 @@ if ($userPath -notlike "*$binDir*") {
     Say "For this session, run first: `$env:Path = `"`$env:Path;$binDir`""
 }
 
+$cfgVersion = if ($DialVersion) { $DialVersion } elseif ($script:LatestTag) { $script:LatestTag } else { "latest" }
 $cfg = @(
     "# Dial environment config (generated by install-dial.ps1)"
     "dialc_path   = $(Join-Path $DialcHome 'bin\dialc.exe')"
-    "version      = $DialVersion"
+    "version      = $cfgVersion"
     "installed_at = $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
     "uname        = $env:OS / $([System.Environment]::OSVersion.VersionString)"
 )
@@ -285,11 +324,20 @@ Ok "Toolchain config: $DialcHome\config.txt"
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "-- Install official stdlib (stdlib.dialpkg) --"
-$StdlibOfficial = "https://github.com/shichencike/Dial/releases/download/$StdlibRelease/stdlib.dialpkg"
-$StdlibTmp  = Join-Path $env:TEMP ("stdlib-" + [guid]::NewGuid().ToString("N") + ".dialpkg")
+if ($StdlibRelease) {
+    $StdlibOfficial = "$ReleaseTagged/$StdlibRelease/stdlib.dialpkg"
+    $StdlibLabel = "$StdlibRelease (pinned)"
+} else {
+    $StdlibOfficial = "$ReleaseLatest/stdlib.dialpkg"
+    $StdlibLabel = "following latest Release"
+}
+if ($script:AssetsLoaded -and -not ($script:Assets -contains "stdlib.dialpkg")) {
+    Warn "The latest Release ($($script:LatestTag)) has no stdlib.dialpkg attached (older release). Set STDLIB_RELEASE=stdlib-v1.0.0 for the legacy channel, or upgrade to a newer Release."
+}
+$StdlibTmp = Join-Path $env:TEMP ("stdlib-" + [guid]::NewGuid().ToString("N") + ".dialpkg")
 if (Invoke-DialDownload -OutFile $StdlibTmp -OfficialUrl $StdlibOfficial -OverrideUrl $env:STDLIB_URL) {
     & (Join-Path $DialcHome "bin\dialc.exe") install $StdlibTmp
-    if ($LASTEXITCODE -eq 0) { Ok "Official stdlib installed ($StdlibRelease)" }
+    if ($LASTEXITCODE -eq 0) { Ok "Official stdlib installed ($StdlibLabel)" }
     else { Warn "dialc install stdlib.dialpkg failed (compiler still works; install manually later)" }
 } else {
     Warn "Failed to download the stdlib (offline / all sources unreachable); link will fall back to building stdlib from source."
@@ -301,14 +349,8 @@ if (Test-Path $StdlibTmp) { Remove-Item -Force $StdlibTmp -ErrorAction SilentlyC
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "-- Install VS Code extension --"
-# Resolve the actual asset name from the release (so a version mismatch in the
-# extension's own semver doesn't cause a 404). Fall back to the version-derived
-# name if the API is unreachable.
-$resolved = Resolve-VsixAsset -Tag $DialTag
-if ($resolved) { $VsixFile = $resolved } else {
-    Write-Host "    (could not list release assets; falling back to version-derived name: $VsixFile)"
-}
-$VsixOfficial = "https://github.com/shichencike/Dial/releases/download/$DialTag/$VsixFile"
+$VsixFile = Select-Asset -Pattern '\.vsix$'
+if (-not $VsixFile -and $Pinned) { $VsixFile = "dial-$DialVersion.vsix" }
 
 $codeCli = $null
 foreach ($c in @("code", "code-insiders", "codium")) {
@@ -320,13 +362,15 @@ if (-not $codeCli) {
     if (Test-Path $defaultCli -PathType Leaf) { $codeCli = $defaultCli }
 }
 
-if (-not $codeCli) {
-    $vsixMsg = if ($env:DIAL_VSIX_URL) { $env:DIAL_VSIX_URL } else { $VsixOfficial }
+if (-not $VsixFile) {
+    Warn "Cannot resolve the VS Code extension asset name (GitHub API unreachable); skipping.`n  Download the .vsix manually from https://github.com/$Repo/releases/latest or set DIAL_VSIX_URL."
+} elseif (-not $codeCli) {
+    $vsixMsg = if ($env:DIAL_VSIX_URL) { $env:DIAL_VSIX_URL } else { (Get-AssetUrl -Name $VsixFile) }
     Warn "VS Code CLI not found (code / code-insiders / codium); skipping extension install.`n  After installing VS Code, run manually:`n    $vsixMsg`n    code --install-extension <downloaded .vsix>"
 } else {
+    $VsixOfficial = Get-AssetUrl -Name $VsixFile
     $vsixTmp = Join-Path $env:TEMP ("dialplugin-" + [guid]::NewGuid().ToString("N") + ".vsix")
     if (Invoke-DialDownload -OutFile $vsixTmp -OfficialUrl $VsixOfficial -OverrideUrl $env:DIAL_VSIX_URL) {
-        # No --force: if the user already has a newer version, keep it (don't downgrade).
         & $codeCli --install-extension $vsixTmp
         if ($LASTEXITCODE -eq 0) { Ok "VS Code extension installed ($VsixFile)" }
         else { Warn "VS Code extension install failed; run manually later:`n    & `"$codeCli`" --install-extension $VsixFile" }

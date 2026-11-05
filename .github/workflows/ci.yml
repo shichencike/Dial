@@ -468,7 +468,7 @@ jobs:
           echo "--- stdlib.dialpkg 内容 ---"
           unzip -l dist-stdlib/stdlib.dialpkg
 
-      - name: 上传到 GitHub Release（stdlib 独立发布）
+      - name: 上传到 GitHub Release（stdlib 兼容通道，标记为预发布）
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -477,8 +477,16 @@ jobs:
           overwrite: true          # 允许重发时覆盖同名资产（重指标签重跑发布用）
           fail_on_unmatched_files: true
           generate_release_notes: true
+          # 主发布通道已改为 v* Release（同一页面含 zip / vsix / stdlib.dialpkg）。
+          # 这个独立通道仅为兼容旧链接保留；标为 prerelease，避免它抢走
+          # releases/latest，使安装脚本的 latest 重定向始终指向编译器 Release。
+          prerelease: true
           body: |
-            ## 官方标准库 `stdlib.dialpkg`（独立发布，与 dialc 解耦）
+            ## 官方标准库 `stdlib.dialpkg`（兼容通道）
+
+            > 标准库包现已随每个 `v*` 编译器 Release 一同发布，与 zip / vsix 同处一个页面；
+            > 请优先使用 `releases/latest/download/stdlib.dialpkg`。本 `stdlib-v*` 通道
+            > 仅为兼容旧链接保留，并标记为预发布，以免影响 `releases/latest` 的指向。
 
             三平台预编译（x86_64-linux-gnu / x86_64-pc-windows-gnu / aarch64-unknown-linux-musl），
             统一以 **ReleaseSafe（`DIAL_SAFETY=1`）** 级别预编译，作为越界/空指针的保底防线。
@@ -526,12 +534,31 @@ jobs:
       - name: 构建 VS Code 插件安装包 (.vsix)
         run: bash editors/vscode/build.sh
 
+      # 官方标准库包与普通资产一样挂在同一个 v* Release 页面：即使本次 stdlib
+      # 源码一行未改，也照样重新组装一份（ABI 与编译器版本绑定）。这样
+      # releases/latest/download/stdlib.dialpkg 与 zip / vsix 走同一个重定向入口，
+      # 用户在同一页面就能看到并拿到全部资产。
+      - name: 组装 stdlib.dialpkg（随编译器 Release 一同发布）
+        run: |
+          set -euo pipefail
+          PKG_VER="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          python3 tools/make_stdlib_pkg.py \
+            --diali stdlib/stdlib.diali \
+            --out dist-stdlib/stdlib.dialpkg \
+            --version "$PKG_VER" --abi 4 \
+            "x86_64-linux-gnu:dist/stdlib-x86_64-linux-gnu/libdial_std.a" \
+            "x86_64-pc-windows-gnu:dist/stdlib-x86_64-pc-windows-gnu/libdial_std.a" \
+            "aarch64-unknown-linux-musl:dist/stdlib-aarch64-unknown-linux-musl/libdial_std.a"
+          echo "--- stdlib.dialpkg 内容 ---"
+          unzip -l dist-stdlib/stdlib.dialpkg
+
       - name: 上传到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/**/dialc-v*.zip
             editors/vscode/dial-*.vsix
+            dist-stdlib/stdlib.dialpkg
           overwrite: true          # 允许重发时覆盖同名资产（重指标签重跑发布用）
           fail_on_unmatched_files: true
           generate_release_notes: true
@@ -548,13 +575,24 @@ jobs:
 
             ### 安装
 
+            一键安装脚本会**自动解析本 Release 的真实资产名**，版本不再写死，
+            所以下面两条命令不需要任何版本号：
+
             ```bash
-            # Linux / Termux
-            curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v<版本>-linux-x86_64.zip
-            unzip dialc-v<版本>-linux-x86_64.zip && cd Dial && sudo bash install-dial.sh
+            # Linux / Termux / macOS
+            curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
 
             # Windows（PowerShell）
             irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
             ```
+
+            本页同时提供 **`stdlib.dialpkg`**（官方标准库包），与其他资产一样随每次
+            发布一同更新，可直接安装：
+
+            ```bash
+            dialc install https://github.com/shichencike/Dial/releases/latest/download/stdlib.dialpkg
+            ```
+
+            所有资产都能通过 `releases/latest/download/<资产名>` 重定向到最新版本。
 
             每个包内含 `dialc`(`dialc.exe`)、`stdlib/`、`runtime/`、四份许可文件、对应安装脚本，以及编译发布流程 `.github/workflows/ci.yml`。

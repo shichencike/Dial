@@ -586,15 +586,19 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 与一键安装脚本（ARCHITECTURE.md §3.2 阶段 5）：</p>
 <h4 id="一行命令安装推荐">一行命令安装（推荐）</h4>
 <p>直接复制下面一行即可，脚本会自动探测平台、下载对应发布包（镜像优先 + 官方回退 + 断点续传）并完成安装：</p>
-<pre><code class="language-bash"># Linux x86_64 / Termux aarch64
+<pre><code class="language-bash"># Linux x86_64 / Termux aarch64（默认始终跟随最新 Release）
 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
-# 指定版本：DIAL_VERSION=0.98.1 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
+# 需要钉到某个版本时才设置 DIAL_VERSION：
+# DIAL_VERSION=1.3.0 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
 </code></pre>
 <pre><code class="language-powershell"># Windows x64（MinGW）：一行式从 main 分支拉取并安装（输出为英文，避免终端代码页乱码）
 irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
 </code></pre>
 <blockquote>
-<p><strong>关于 URL 稳定性</strong>：这两条命令取的是 <strong><code>main</code> 分支上 <code>tools/</code> 里的安装脚本</strong>（直出文件、<strong>不经过 <code>releases/latest</code> 重定向</strong>——正是此前代理环境下容易卡住的环节）；脚本随后按当前平台下载<strong>精确版本标签</strong>的发布包（同样不经过 <code>latest</code>）。安装脚本本身也随每个发布包一起分发（<code>Dial/install-dial.sh</code> / <code>Dial/install-dial.ps1</code>），从根本上杜绝「独立下载链接重定向失败」的问题。</p>
+<p><strong>关于 URL 稳定性与「零硬编码」</strong>：这两条命令取的是 <strong><code>main</code> 分支上 <code>tools/</code> 里的安装脚本</strong>（直出文件，脚本本身不走任何重定向）。脚本运行时通过 GitHub API 读取<strong>最新 Release 的真实资产清单</strong>，再用
+<code>https://github.com/shichencike/Dial/releases/latest/download/&lt;资产名&gt;</code> 下载——版本、标签、资产名<strong>都不写死在脚本里</strong>，发新版后无需改脚本即可自动跟上。</p>
+<p>之所以仍需解析资产名：GitHub 的 <code>latest/download/</code> 要求<strong>精确文件名</strong>，而本项目的 zip / vsix 名字带版本号（<code>dialc-v1.3-linux-x86_64.zip</code>、<code>dial-1.3.0.vsix</code>），靠重定向本身推不出来；脚本按平台 slug 与扩展名从清单里挑，<code>stdlib.dialpkg</code> 名字固定、且现在与 zip / vsix 挂在<strong>同一个 <code>v*</code> Release 页面</strong>，因此同样能被 latest 找到。</p>
+<p>需要复现旧环境或离线时，用 <code>DIAL_VERSION</code>（钉编译器版本）、<code>STDLIB_RELEASE</code>（钉旧 <code>stdlib-v*</code> 通道）、<code>STDLIB_URL</code> / <code>DIAL_VSIX_URL</code>（完全覆盖地址）即可；镜像优先 + 官方回退 + 失败原因可见的行为不变。安装脚本本身也随每个发布包一起分发。</p>
 <p>注意用 <code>bash</code> 而非 <code>sh</code>：<code>set -o pipefail</code> 与脚本里的数组语法在 Ubuntu 的 <code>sh</code>(dash)、Termux 的 <code>mksh</code> 下不被支持。Windows 侧用 <code>iex</code> 即可（PowerShell 原生）。</p>
 </blockquote>
 <h4 id="手动解压三平台通用可选">手动解压（三平台通用，可选）</h4>
@@ -4395,8 +4399,14 @@ fn main(): int {
 再<strong>故意篡改一个字节</strong>验证 SHA256 确实拦得住。</p>
 </blockquote>
 <h3 id="2510-官方标准库-stdlibdialpkg独立发布">25.10 官方标准库 <code>stdlib.dialpkg</code>（独立发布）</h3>
+<blockquote>
+<p><strong>发布方式已调整（本节标题沿用早期架构名）</strong>：<code>stdlib.dialpkg</code> 不再单独开 <code>stdlib-v*</code>
+页面，而是与三平台 zip、<code>.vsix</code> 一样挂在<strong>同一个 <code>v*</code> 编译器 Release</strong> 上；每次发版都
+重新组装一份（哪怕 stdlib 源码一行未改），因此 <code>releases/latest/download/stdlib.dialpkg</code>
+与其他资产走同一个重定向入口，用户在 Release 页面里也能直接看到、直接拿到。</p>
+</blockquote>
 <p>官方标准库（<code>stdlib/</code> + <code>runtime/</code> 编译归档而成的 <code>libdial_std.a</code>，被<strong>每一个</strong> Dial 程序静态链入）
-已改造为 <code>.dialpkg</code> 形态，<strong>独立发版、与编译器解耦</strong>：</p>
+以 <code>.dialpkg</code> 形态分发：</p>
 <table>
 <thead>
 <tr>
@@ -4406,8 +4416,8 @@ fn main(): int {
 </thead>
 <tbody>
 <tr>
-<td><strong>Release 名称 / Tag</strong></td>
-<td><code>stdlib-v1.3.0</code>（随编译器版本同步，见 <a href="#3251-标准库-abi-递增破坏性变更">§32.5.1</a>）</td>
+<td><strong>所在 Release</strong></td>
+<td>每个 <code>v*</code> 编译器 Release（资产名固定 <code>stdlib.dialpkg</code>）</td>
 </tr>
 <tr>
 <td><strong><code>abi</code></strong></td>
@@ -4437,8 +4447,9 @@ fn main(): int {
 <p><strong>全自动、零配置</strong>：</p>
 <ol>
 <li><strong>一键脚本自动拉取</strong>：<code>install-dial.sh</code> / <code>install-dial.ps1</code> 把 <code>dialc</code> 装好后，会<strong>静默</strong>从
-   <code>https://github.com/shichencike/Dial/releases/download/stdlib-v1.3.0/stdlib.dialpkg</code>
-   拉取对应版本的 <code>stdlib.dialpkg</code> 并执行 <code>dialc install</code>（<code>STDLIB_RELEASE</code> 环境变量可钉死版本，离线/失败仅告警不阻断）。</li>
+   <code>https://github.com/shichencike/Dial/releases/latest/download/stdlib.dialpkg</code>
+   拉取并安装（默认跟随最新，版本不写死；<code>STDLIB_RELEASE</code> 可钉旧 <code>stdlib-v*</code> 通道，
+   <code>STDLIB_URL</code> 可完全覆盖地址，离线/失败仅告警不阻断）。</li>
 <li><strong><code>dialc build</code> 优先链入预编译包</strong>：链接期先找已安装的 <code>stdlib</code> 包，按本机 Target Triple 取对应 <code>.a</code>；
    日志会打印「使用已安装的标准库包: stdlib v1.3.0（ABI 4，目标 …）」。</li>
 <li><strong>缺失回退源码编译</strong>：若未安装该包（离线/脚本跳过），<code>dialc</code> 退化为实时编译 <code>stdlib/</code> + <code>runtime/</code>
@@ -4446,15 +4457,15 @@ fn main(): int {
 <li><strong>ABI 不兼容明确报错</strong>：若已安装包的 <code>manifest.abi ≠ STDLIB_ABI</code>，<code>dialc</code> <strong>当场报错并给出重装方案</strong>
    （<code>rm -rf ~/.dial/packages/stdlib</code> 后重新 <code>dialc install</code>），<strong>绝不静默崩溃或链错二进制</strong>。</li>
 </ol>
-<p><strong>CI 自动构建与发布</strong>：<code>.github/workflows/ci.yml</code> 在 <code>stdlib-v*</code> 标签触发时，
-由 <code>build-linux</code> / <code>build-windows</code> / <code>build-termux</code> 三个作业各自产出本平台 <code>libdial_std.a</code>，
-再由 <code>publish-stdlib</code> 作业用 <code>tools/make_stdlib_pkg.py</code> 打包成 <code>stdlib.dialpkg</code> 并发布到同标签 Release。
+<p><strong>CI 自动构建与发布</strong>：<code>.github/workflows/ci.yml</code> 的三个 build 作业各自产出本平台 <code>libdial_std.a</code>；
+<code>v*</code> 标签触发的 <code>release</code> 作业用 <code>tools/make_stdlib_pkg.py --abi 4</code> 组装 <code>stdlib.dialpkg</code>，
+与 zip / .vsix 一起上传到<strong>同一个 Release</strong>。
 构建脚本 <code>tools/build_stdlib.sh &lt;输出 .a&gt; [安全等级]</code> 统一选 <code>zig cc</code>/<code>clang</code>/<code>gcc</code> 与 <code>ar</code>，
 把 <code>runtime/*.c</code> + <code>stdlib/*.c</code> 编译归档为单份静态库。</p>
 <blockquote>
-<p>标准库走<strong>独立 tag</strong>（<code>stdlib-v*</code>）而非编译器版本（<code>v*</code>），二者升级互不阻塞：
-修标准库 bug 只发 <code>stdlib-v1.2.1</code>，无需重新发布编译器；破坏性 ABI 变更时
-同步递增 <code>STDLIB_ABI</code> 与发布 <code>abi</code>，旧用户会收到明确的「ABI 不兼容」报错与重装指引。</p>
+<p>旧的 <code>stdlib-v*</code> 独立通道（<code>publish-stdlib</code> 作业）<strong>仅作向后兼容保留</strong>，并标记为预发布，
+以免它抢走 <code>releases/latest</code> 的指向；历史 <code>stdlib-v1.0.0</code> Release 及其链接仍然可用。
+破坏性 ABI 变更时同步递增 <code>STDLIB_ABI</code> 与包 <code>abi</code>，旧用户会收到明确的「ABI 不兼容」报错与重装指引。</p>
 </blockquote>
 <hr />
 <blockquote>
@@ -6456,8 +6467,12 @@ a.sort();          // 升序，就地排序
   rm -rf ~/.dial/packages/stdlib
 </code></pre>
 <p>配套同步：官方标准库包版本 <code>1.0.0 → 1.1.0</code>，一键安装脚本的 <code>STDLIB_RELEASE</code>
-默认标签 <code>stdlib-v1.0.0 → stdlib-v1.1.0</code>。标准库仍<strong>独立发版</strong>（tag <code>stdlib-v*</code>），
+默认标签 <code>stdlib-v1.0.0 → stdlib-v1.1.0</code>。标准库当时<strong>独立发版</strong>（tag <code>stdlib-v*</code>），
 因此本次发布需要<strong>两个标签</strong>：<code>v1.1.0</code>（编译器）与 <code>stdlib-v1.1.0</code>（标准库包）。</p>
+<blockquote>
+<p>该协同方式后续已调整：标准库包现随每个 <code>v*</code> Release 同页发布，安装脚本跟随 <code>latest</code>，
+见 <a href="#2510-官方标准库-stdlibdialpkg独立发布">§25.10</a>。</p>
+</blockquote>
 <h3 id="3010-测试">30.10 测试</h3>
 <ul>
 <li>6 个新增正向示例 + 同名 <code>.expected</code> 黄金文件：<code>array_demo</code>（元素类型 / 空数组 /
@@ -6751,11 +6766,14 @@ raw_free(buf);                                    // 释放（谁申请、谁释
 <p><code>build_stdlib.sh</code> 与编译器的 LTO 路径都用 <code>*.c</code> / <code>read_dir</code> 收集源文件，
 <code>dial_raw.c</code> 会<strong>自动</strong>进入静态库与官方包，无需手工登记清单。</p>
 <p>配套同步：官方标准库包版本 <code>1.1.0 → 1.2.0</code>，打包默认 <code>--abi 3</code>，CI 发布作业
-<code>--abi 3</code>，一键安装脚本的 <code>STDLIB_RELEASE</code> 默认标签 → <code>stdlib-v1.2.0</code>。
-标准库仍<strong>独立发版</strong>（tag <code>stdlib-v*</code>）；v1.01 ~ v1.03 的提交已随 <code>main</code> 推送，
-按版本号的发布标签以两个为准（v1.03 起为 <code>v1.3.0</code> 编译器与
-<code>stdlib-v1.3.0</code> 标准库包，见 <a href="#3251-标准库-abi-递增破坏性变更">§32.5.1</a>），
-本次未打这两个标签，由维护者另行决定。</p>
+<code>--abi 3</code>，一键安装脚本当时把 <code>STDLIB_RELEASE</code> 默认标签改为 <code>stdlib-v1.2.0</code>。
+v1.01 ~ v1.03 的提交已随 <code>main</code> 推送；按版本号的发布标签曾以两个为准
+（<code>v1.3.0</code> 编译器与 <code>stdlib-v1.3.0</code> 标准库包，见 <a href="#3251-标准库-abi-递增破坏性变更">§32.5.1</a>）。</p>
+<blockquote>
+<p><strong>发布方式后续已调整</strong>：标准库包现与 zip / vsix 同处一个 <code>v*</code> Release 页面，
+安装脚本默认跟随 <code>releases/latest</code>，不再需要上述两个标签；
+详见 <a href="#2510-官方标准库-stdlibdialpkg独立发布">§25.10</a>。</p>
+</blockquote>
 <h3 id="316-测试">31.6 测试</h3>
 <ul>
 <li>3 个正向示例 + 同名 <code>.expected</code> 黄金文件：<code>goto_demo</code>、<code>with_demo</code>、<code>rawptr_demo</code>；</li>
@@ -6934,8 +6952,9 @@ print(sum());             // 0（缺省就是空数组）
 证明调用方那一份临时数组确实被编译器释放了；若漏掉 release，这一项会线性吃内存。</p>
 <h3 id="3251-标准库-abi-递增破坏性变更">32.5.1 标准库 ABI 递增（破坏性变更）</h3>
 <p><code>stdlib/dial_array.c</code> 新增 <code>dial_array_hof</code>，因此 <code>STDLIB_ABI</code> <strong>3 → 4</strong>，
-官方包版本 <code>1.2.0 → 1.3.0</code>，<code>make_stdlib_pkg.py</code> 默认 <code>--abi 4</code>、CI <code>--abi 4</code>、
-一键安装脚本默认标签 <code>stdlib-v1.3.0</code>。旧包（abi=3）会被编译器当场拒绝并给出重装指引。</p>
+官方包版本 <code>1.2.0 → 1.3.0</code>，<code>make_stdlib_pkg.py</code> 默认 <code>--abi 4</code>、CI <code>--abi 4</code>；
+<code>stdlib.dialpkg</code> 随每个 <code>v*</code> Release 一同发布，安装脚本默认跟随 <code>releases/latest</code>
+（版本不写死）。旧包（abi=3）会被编译器当场拒绝并给出重装指引。</p>
 <h3 id="326-测试与发布协同">32.6 测试与发布协同</h3>
 <ul>
 <li>4 个正向示例：<code>fnptr_demo</code>、<code>varargs_demo</code>、<code>callback_state_demo</code>、<code>hof_demo</code>；</li>
@@ -6948,9 +6967,13 @@ print(sum());             // 0（缺省就是空数组）
 <blockquote>
 <p><strong>关于 <code>v1.0</code> 标签</strong>：<code>v1.00</code> ~ <code>v1.03</code> 都是「v1.0 里程碑」达成过程中的分版记录
 （CHANGELOG 里已收拢到该标题下）。回调、变参等收尾特性在 <code>[v1.03]</code> 全部完成并
-回归通过，<strong>里程碑标签 <code>v1.0</code> 已打在本版本对应的提交上并推送</strong>。它与按版本号的
-发布标签互不替代：一键安装脚本按精确版本下载，用 <code>v1.3.0</code> / <code>stdlib-v1.3.0</code>
-两个标签（本次未打，由维护者另行决定）。</p>
+回归通过，<strong>里程碑标签 <code>v1.0</code> 已打在本版本对应的提交上并推送</strong>。</p>
+<p><strong>发布与安装已与版本号解耦</strong>：一键安装脚本不再按 <code>v1.3.0</code> / <code>stdlib-v1.3.0</code>
+这类精确标签下载，而是通过 GitHub API 解析最新 Release 的真实资产名，统一走
+<code>releases/latest/download/&lt;资产名&gt;</code>；<code>stdlib.dialpkg</code> 也随每个 <code>v*</code> Release
+一同发布（见 <a href="#2510-官方标准库-stdlibdialpkg独立发布">§25.10</a>）。因此发新版时
+<strong>不需要改脚本、也不需要补打配套标签</strong>，<code>DIAL_VERSION</code> / <code>STDLIB_RELEASE</code>
+只作为可选的「钉版本」覆盖保留。</p>
 </blockquote></main></div>
 
 <footer class="site-footer">

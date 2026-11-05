@@ -200,9 +200,10 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 直接复制下面一行即可，脚本会自动探测平台、下载对应发布包（镜像优先 + 官方回退 + 断点续传）并完成安装：
 
 ```bash
-# Linux x86_64 / Termux aarch64
+# Linux x86_64 / Termux aarch64（默认始终跟随最新 Release）
 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
-# 指定版本：DIAL_VERSION=0.98.1 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
+# 需要钉到某个版本时才设置 DIAL_VERSION：
+# DIAL_VERSION=1.3.0 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
 ```
 
 ```powershell
@@ -210,7 +211,12 @@ curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install
 irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.ps1 | iex
 ```
 
-> **关于 URL 稳定性**：这两条命令取的是 **`main` 分支上 `tools/` 里的安装脚本**（直出文件、**不经过 `releases/latest` 重定向**——正是此前代理环境下容易卡住的环节）；脚本随后按当前平台下载**精确版本标签**的发布包（同样不经过 `latest`）。安装脚本本身也随每个发布包一起分发（`Dial/install-dial.sh` / `Dial/install-dial.ps1`），从根本上杜绝「独立下载链接重定向失败」的问题。
+> **关于 URL 稳定性与「零硬编码」**：这两条命令取的是 **`main` 分支上 `tools/` 里的安装脚本**（直出文件，脚本本身不走任何重定向）。脚本运行时通过 GitHub API 读取**最新 Release 的真实资产清单**，再用
+> `https://github.com/shichencike/Dial/releases/latest/download/<资产名>` 下载——版本、标签、资产名**都不写死在脚本里**，发新版后无需改脚本即可自动跟上。
+>
+> 之所以仍需解析资产名：GitHub 的 `latest/download/` 要求**精确文件名**，而本项目的 zip / vsix 名字带版本号（`dialc-v1.3-linux-x86_64.zip`、`dial-1.3.0.vsix`），靠重定向本身推不出来；脚本按平台 slug 与扩展名从清单里挑，`stdlib.dialpkg` 名字固定、且现在与 zip / vsix 挂在**同一个 `v*` Release 页面**，因此同样能被 latest 找到。
+>
+> 需要复现旧环境或离线时，用 `DIAL_VERSION`（钉编译器版本）、`STDLIB_RELEASE`（钉旧 `stdlib-v*` 通道）、`STDLIB_URL` / `DIAL_VSIX_URL`（完全覆盖地址）即可；镜像优先 + 官方回退 + 失败原因可见的行为不变。安装脚本本身也随每个发布包一起分发。
 >
 > 注意用 `bash` 而非 `sh`：`set -o pipefail` 与脚本里的数组语法在 Ubuntu 的 `sh`(dash)、Termux 的 `mksh` 下不被支持。Windows 侧用 `iex` 即可（PowerShell 原生）。
 
@@ -2585,12 +2591,17 @@ $ dialc build main.dial -o main
 
 ### 25.10 官方标准库 `stdlib.dialpkg`（独立发布）
 
+> **发布方式已调整（本节标题沿用早期架构名）**：`stdlib.dialpkg` 不再单独开 `stdlib-v*`
+> 页面，而是与三平台 zip、`.vsix` 一样挂在**同一个 `v*` 编译器 Release** 上；每次发版都
+> 重新组装一份（哪怕 stdlib 源码一行未改），因此 `releases/latest/download/stdlib.dialpkg`
+> 与其他资产走同一个重定向入口，用户在 Release 页面里也能直接看到、直接拿到。
+
 官方标准库（`stdlib/` + `runtime/` 编译归档而成的 `libdial_std.a`，被**每一个** Dial 程序静态链入）
-已改造为 `.dialpkg` 形态，**独立发版、与编译器解耦**：
+以 `.dialpkg` 形态分发：
 
 | 项 | 值 |
 | --- | --- |
-| **Release 名称 / Tag** | `stdlib-v1.3.0`（随编译器版本同步，见 [§32.5.1](#3251-标准库-abi-递增破坏性变更)） |
+| **所在 Release** | 每个 `v*` 编译器 Release（资产名固定 `stdlib.dialpkg`） |
 | **`abi`** | `4`（编译器 `package::STDLIB_ABI` 同步锁定；每次破坏性变更递增，见 [§31.5.1](#3151-标准库-abi-递增破坏性变更) 与 [§32.5.1](#3251-标准库-abi-递增破坏性变更)） |
 | **`version`** | `1.3.0` |
 | **`license`** | `MIT OR Apache-2.0`（强制免传染，见 §25.8） |
@@ -2604,8 +2615,9 @@ $ dialc build main.dial -o main
 **全自动、零配置**：
 
 1. **一键脚本自动拉取**：`install-dial.sh` / `install-dial.ps1` 把 `dialc` 装好后，会**静默**从
-   `https://github.com/shichencike/Dial/releases/download/stdlib-v1.3.0/stdlib.dialpkg`
-   拉取对应版本的 `stdlib.dialpkg` 并执行 `dialc install`（`STDLIB_RELEASE` 环境变量可钉死版本，离线/失败仅告警不阻断）。
+   `https://github.com/shichencike/Dial/releases/latest/download/stdlib.dialpkg`
+   拉取并安装（默认跟随最新，版本不写死；`STDLIB_RELEASE` 可钉旧 `stdlib-v*` 通道，
+   `STDLIB_URL` 可完全覆盖地址，离线/失败仅告警不阻断）。
 2. **`dialc build` 优先链入预编译包**：链接期先找已安装的 `stdlib` 包，按本机 Target Triple 取对应 `.a`；
    日志会打印「使用已安装的标准库包: stdlib v1.3.0（ABI 4，目标 …）」。
 3. **缺失回退源码编译**：若未安装该包（离线/脚本跳过），`dialc` 退化为实时编译 `stdlib/` + `runtime/`
@@ -2613,15 +2625,15 @@ $ dialc build main.dial -o main
 4. **ABI 不兼容明确报错**：若已安装包的 `manifest.abi ≠ STDLIB_ABI`，`dialc` **当场报错并给出重装方案**
    （`rm -rf ~/.dial/packages/stdlib` 后重新 `dialc install`），**绝不静默崩溃或链错二进制**。
 
-**CI 自动构建与发布**：`.github/workflows/ci.yml` 在 `stdlib-v*` 标签触发时，
-由 `build-linux` / `build-windows` / `build-termux` 三个作业各自产出本平台 `libdial_std.a`，
-再由 `publish-stdlib` 作业用 `tools/make_stdlib_pkg.py` 打包成 `stdlib.dialpkg` 并发布到同标签 Release。
+**CI 自动构建与发布**：`.github/workflows/ci.yml` 的三个 build 作业各自产出本平台 `libdial_std.a`；
+`v*` 标签触发的 `release` 作业用 `tools/make_stdlib_pkg.py --abi 4` 组装 `stdlib.dialpkg`，
+与 zip / .vsix 一起上传到**同一个 Release**。
 构建脚本 `tools/build_stdlib.sh <输出 .a> [安全等级]` 统一选 `zig cc`/`clang`/`gcc` 与 `ar`，
 把 `runtime/*.c` + `stdlib/*.c` 编译归档为单份静态库。
 
-> 标准库走**独立 tag**（`stdlib-v*`）而非编译器版本（`v*`），二者升级互不阻塞：
-> 修标准库 bug 只发 `stdlib-v1.2.1`，无需重新发布编译器；破坏性 ABI 变更时
-> 同步递增 `STDLIB_ABI` 与发布 `abi`，旧用户会收到明确的「ABI 不兼容」报错与重装指引。
+> 旧的 `stdlib-v*` 独立通道（`publish-stdlib` 作业）**仅作向后兼容保留**，并标记为预发布，
+> 以免它抢走 `releases/latest` 的指向；历史 `stdlib-v1.0.0` Release 及其链接仍然可用。
+> 破坏性 ABI 变更时同步递增 `STDLIB_ABI` 与包 `abi`，旧用户会收到明确的「ABI 不兼容」报错与重装指引。
 
 ---
 
@@ -3978,8 +3990,11 @@ ld.lld: error: undefined symbol: dial_env_init
 ```
 
 配套同步：官方标准库包版本 `1.0.0 → 1.1.0`，一键安装脚本的 `STDLIB_RELEASE`
-默认标签 `stdlib-v1.0.0 → stdlib-v1.1.0`。标准库仍**独立发版**（tag `stdlib-v*`），
+默认标签 `stdlib-v1.0.0 → stdlib-v1.1.0`。标准库当时**独立发版**（tag `stdlib-v*`），
 因此本次发布需要**两个标签**：`v1.1.0`（编译器）与 `stdlib-v1.1.0`（标准库包）。
+
+> 该协同方式后续已调整：标准库包现随每个 `v*` Release 同页发布，安装脚本跟随 `latest`，
+> 见 [§25.10](#2510-官方标准库-stdlibdialpkg独立发布)。
 
 ### 30.10 测试
 
@@ -4169,11 +4184,13 @@ ld.lld: error: undefined symbol: dial_raw_alloc
 `dial_raw.c` 会**自动**进入静态库与官方包，无需手工登记清单。
 
 配套同步：官方标准库包版本 `1.1.0 → 1.2.0`，打包默认 `--abi 3`，CI 发布作业
-`--abi 3`，一键安装脚本的 `STDLIB_RELEASE` 默认标签 → `stdlib-v1.2.0`。
-标准库仍**独立发版**（tag `stdlib-v*`）；v1.01 ~ v1.03 的提交已随 `main` 推送，
-按版本号的发布标签以两个为准（v1.03 起为 `v1.3.0` 编译器与
-`stdlib-v1.3.0` 标准库包，见 [§32.5.1](#3251-标准库-abi-递增破坏性变更)），
-本次未打这两个标签，由维护者另行决定。
+`--abi 3`，一键安装脚本当时把 `STDLIB_RELEASE` 默认标签改为 `stdlib-v1.2.0`。
+v1.01 ~ v1.03 的提交已随 `main` 推送；按版本号的发布标签曾以两个为准
+（`v1.3.0` 编译器与 `stdlib-v1.3.0` 标准库包，见 [§32.5.1](#3251-标准库-abi-递增破坏性变更)）。
+
+> **发布方式后续已调整**：标准库包现与 zip / vsix 同处一个 `v*` Release 页面，
+> 安装脚本默认跟随 `releases/latest`，不再需要上述两个标签；
+> 详见 [§25.10](#2510-官方标准库-stdlibdialpkg独立发布)。
 
 ### 31.6 测试
 
@@ -4292,8 +4309,9 @@ H 组回归同时锁定正向（int64 / double / bool 混传输出 `i=42 f=3.5 b
 ### 32.5.1 标准库 ABI 递增（破坏性变更）
 
 `stdlib/dial_array.c` 新增 `dial_array_hof`，因此 `STDLIB_ABI` **3 → 4**，
-官方包版本 `1.2.0 → 1.3.0`，`make_stdlib_pkg.py` 默认 `--abi 4`、CI `--abi 4`、
-一键安装脚本默认标签 `stdlib-v1.3.0`。旧包（abi=3）会被编译器当场拒绝并给出重装指引。
+官方包版本 `1.2.0 → 1.3.0`，`make_stdlib_pkg.py` 默认 `--abi 4`、CI `--abi 4`；
+`stdlib.dialpkg` 随每个 `v*` Release 一同发布，安装脚本默认跟随 `releases/latest`
+（版本不写死）。旧包（abi=3）会被编译器当场拒绝并给出重装指引。
 
 ### 32.6 测试与发布协同
 
@@ -4306,6 +4324,11 @@ H 组回归同时锁定正向（int64 / double / bool 混传输出 `i=42 f=3.5 b
 
 > **关于 `v1.0` 标签**：`v1.00` ~ `v1.03` 都是「v1.0 里程碑」达成过程中的分版记录
 > （CHANGELOG 里已收拢到该标题下）。回调、变参等收尾特性在 `[v1.03]` 全部完成并
-> 回归通过，**里程碑标签 `v1.0` 已打在本版本对应的提交上并推送**。它与按版本号的
-> 发布标签互不替代：一键安装脚本按精确版本下载，用 `v1.3.0` / `stdlib-v1.3.0`
-> 两个标签（本次未打，由维护者另行决定）。
+> 回归通过，**里程碑标签 `v1.0` 已打在本版本对应的提交上并推送**。
+>
+> **发布与安装已与版本号解耦**：一键安装脚本不再按 `v1.3.0` / `stdlib-v1.3.0`
+> 这类精确标签下载，而是通过 GitHub API 解析最新 Release 的真实资产名，统一走
+> `releases/latest/download/<资产名>`；`stdlib.dialpkg` 也随每个 `v*` Release
+> 一同发布（见 [§25.10](#2510-官方标准库-stdlibdialpkg独立发布)）。因此发新版时
+> **不需要改脚本、也不需要补打配套标签**，`DIAL_VERSION` / `STDLIB_RELEASE`
+> 只作为可选的「钉版本」覆盖保留。
