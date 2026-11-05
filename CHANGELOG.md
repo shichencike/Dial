@@ -20,6 +20,103 @@
 
 ---
 
+## [v1.01] — 2026-11-05
+
+**盘点驱动版本**：v1.00 补齐语言特性后，没有继续「凭想象加特性」，而是**照着程序员
+写真实程序的方式实测编译器**：写 30 多个真实小程序，逐个看哪些能直接写、哪些要绕道、
+哪些只能模拟、哪些根本写不出来。盘出的缺口在这一版一次性补齐。
+
+本版继续守住项目铁律：不引入 GC；不提供裸指针 / 地址取值 / 指针算术；
+不支持运算符重载；不支持一等函数 / 闭包；ARC 所有权语义不退化；
+**零隐式转换铁律保持**（`1 + 2.0` 仍编译失败）。
+
+### Added
+
+**数组元素类型扩展**
+- `float[]` / `byte[]` / `bool[]` / `char[]` 现在都是合法的动态数组元素；
+- 底层沿用 `int64` 槽位：`float` 存 **IEEE754 位模式**（bitcast，绝不 `fptosi`
+  截断小数——否则 `3.25` 会被写成 `3`）、`bool` 走 `i1 ↔ i64`、
+  `byte` / `char` 与 `int` 同为 `i64`；句柄元素仍按元素 ARC 管理；
+- 零隐式转换不松动：`float[]` 里 `push(3)`（int 字面量）仍然编译失败。
+
+**空数组字面量 `[]`**
+- `var a: int[] = [];` 合法：元素类型由变量标注提供；
+- 裸写 `var a = [];` 仍编译失败——编译器不替你猜。
+
+**数组删除元素**
+- `a.remove(i)`：删除下标处元素并返回它；越界当场 Fail-Fast；
+- `a.pop()`：弹出末元素并返回它；空数组当场 Fail-Fast；
+- 数组自身的变化（COW 可能更换指针）由编译器写回接收变量。
+
+**`drop()`：显式提前释放**
+- 句柄类（`string` / `bytes` / `array` / `map` / `map<K,V>` / `set` / `error` /
+  `channel`）立即调用对应 `*_release`；`file` 走 `dial_file_close`；
+  `thread` 走 `dial_thread_join`；标量与结构体是 **no-op**（值类型无所有权）；
+- 句柄被 `drop` 后进入「已转移」状态：此后任何使用都在**编译期**被 use-after-move
+  诊断拦下，杜绝 use-after-free；标量 drop **不**标记 moved（值类型，drop 后仍可用）。
+
+**字符串方法**
+- `s.split(sep) -> string[]`：按分隔符切分（空分隔符整串为唯一元素）；
+- `s.replace(from, to) -> string`：替换全部出现，返回新串（原串不变）；
+- `s.trim() -> string`：去首尾空白；
+- `s.index_of(sub) -> int`：首次出现的字节偏移，未找到返回 `-1`。
+
+**环境 / 时间 / 随机内建**
+- `args() -> string[]`：命令行参数（`argv[1..]`），每次调用返回独立副本；
+- `now() -> float`：Unix 纪元起的秒数（含小数）；
+- `sleep(ms)`：休眠毫秒；`random() -> int`：`[0, 2^63)` 伪随机整数；
+- 为拿到 `argv`，编译器生成的 `main` 入口改为 `int main(int, char**)` 并在入口
+  调用 `dial_env_init(argc, argv)`——对用户代码完全透明。
+
+**泛型 `map<K,V>` 支持 `for (k, v in m)`**
+- v1.00 时泛型 map 只能 `keys()` / `values()` 拿快照再绕路迭代；
+- 现在直接可写，且**键 / 值按真实类型绑定**（`map<string,int>` 的 `k` 是 `string`）；
+- 所有权口径：循环里的 `k` / `v` 均为**借来**的（键借自键快照、值借自表本身，
+  都未 `retain`），故循环末尾与函数出口**不释放**它们，避免重复释放表内元素。
+
+**数组排序 `sort()`**
+- `a.sort()`：原地升序排序，遵守 COW 契约（被共享时先克隆，不影响其他持有者）；
+- 只支持可比较的标量元素（`int` / `float` / `byte` / `char` / `bool`），
+  `string[]` 等句柄元素编译期拒绝；
+- `float` 按 **IEEE754 数值序**比较（负数正确排在最前），绝非位模式比较。
+
+### Changed
+
+- `main` 的 LLVM 签名由 `i32 main()` 改为 `i32 main(i64, i8*)`（接收 `argc` / `argv`）。
+  这是 C ABI 层面透明的变化，既有程序行为不变。
+
+### ⚠ 破坏性变更（标准库 ABI 递增）
+
+- **`stdlib` 包 ABI 由 1 递增到 2**（`STDLIB_ABI`）。原因：标准库新增
+  `dial_env.c`（`dial_env_init` / `dial_args` / `dial_now` / `dial_random` /
+  `dial_sleep`）与 `dial_array_sort` 等导出符号，且编译器生成的 `main` 入口会
+  **调用** `dial_env_init`——旧标准库包（abi=1）链接新编译器必然报出难懂的
+  `undefined symbol: dial_env_init`。递增 ABI 后，旧包在**链接期**就被明确拦下，
+  并给出「卸载旧包 → 重装匹配版本」的重装指引，而不是让用户去追一个符号错误。
+- 配套同步：官方标准库包版本 `1.0.0 → 1.1.0`，一键安装脚本的
+  `STDLIB_RELEASE` 默认标签 `stdlib-v1.0.0 → stdlib-v1.1.0`
+  （标准库仍**独立发版**，tag `stdlib-v*`）。
+- 发布协同项：本次发布需要**两个标签**——`v1.1.0`（编译器）与
+  `stdlib-v1.1.0`（标准库包）。
+
+### 测试
+
+- 6 个新增正向示例 + 同名 `.expected` 黄金文件：`array_demo`、`drop_demo`、
+  `string_methods_demo`、`env_demo`、`kvmap_foreach_demo`、`sort_demo`；
+- 5 个新增负向用例：`array_empty_no_annot`、`array_push_wrong_elem`、
+  `drop_use_after_move`、`string_split_bad_arg`、`array_sort_handle_elem`；
+- 移除 2 个已过时的负向用例（`array_bool_elem` / `array_char_elem`：这两种元素类型
+  在本版变为合法，原用例的前提已不成立）；
+- `bash tests/run_tests.sh` A–O 全套通过。
+
+### 盘点数据
+
+- 提前释放大数组（三阶段、每阶段 200 万元素）：同一作用域全存活时峰值
+  **57160 KB**；改用 `drop()` 显式释放后峰值 **33344 KB（-41.7%）**，
+  与「嵌套块绕道」的 33460 KB 持平，却不必再套块、也不影响阶段间传数据。
+
+---
+
 ## [v1.00] — 2026-11-04
 
 **里程碑版本**：从 `v0.99.1` 直接跳到 `v1.00`（用户明确要求跳版，见 §23 第 3 条）。

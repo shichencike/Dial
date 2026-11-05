@@ -1,0 +1,6 @@
+// 应当编译失败：float[] 只能 push float，零隐式转换铁律下 push int 必须拒绝。
+fn main(): int {
+    var f: float[] = [];
+    f.push(3);
+    return 0;
+}

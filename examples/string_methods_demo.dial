@@ -1,0 +1,26 @@
+// 字符串方法扩展（v1.01）：split / replace / trim / index_of。
+// split 返回 string[]，可直接 for 遍历；其余返回新字符串或 int。
+
+fn main(): int {
+    var s: string = "  Hello, Dial!  ";
+    print(s.trim());                 // "Hello, Dial!"
+
+    var csv: string = "apple,banana,cherry";
+    var parts: string[] = csv.split(",");
+    print(parts.length());           // 3
+    for (p in parts) { print(p); }   // apple / banana / cherry
+
+    var t: string = "a-b-c-d";
+    print(t.replace("-", "/"));      // a/b/c/d
+
+    var txt: string = "dial_lang_v1";
+    print(txt.index_of("lang"));     // 5
+    print(txt.index_of("xyz"));      // -1
+
+    // 找不到分隔符时 split 返回单元素数组
+    var single: string[] = "hello".split("|");
+    print(single.length());          // 1
+    print(single[0]);                // hello
+
+    print(0);
+}

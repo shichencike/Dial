@@ -1,0 +1,19 @@
+// 环境 / 时间 / 随机内建（v1.01）：args() / now() / sleep() / random()。
+// 本示例只打印「确定性」结果，便于黄金比对：
+//   - args() 在无额外参数时为空数组（length 0）；
+//   - now() 在 sleep 后必然严格增大；
+//   - random() 按构造恒为非负整数。
+
+fn main(): int {
+    print(args().length());           // 0（无额外参数）
+    for (a in args()) { print(a); }   // 无参数：不打印任何东西
+
+    var t0: float = now();
+    sleep(10);                        // 休眠 10ms，验证不崩溃、能继续
+    var t1: float = now();
+    print(t1 > t0);                   // true（时间单调增）
+
+    print(random() >= 0);            // true（伪随机恒非负）
+
+    print(0);
+}

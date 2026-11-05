@@ -29,7 +29,14 @@ use crate::error::{DialcError, Result};
 /// 绝不静默链入不兼容的二进制（见 `main.rs::link`）。
 ///
 /// 约定：标准库发生破坏性 ABI 变更时，本常量与对应发布的 `abi` 同步递增。
-pub const STDLIB_ABI: u64 = 1;
+///
+/// v1.01 起为 **2**：标准库新增了 `dial_env.c`（`dial_env_init` / `dial_args` /
+/// `dial_now` / `dial_random` / `dial_sleep`）与 `dial_array_sort` 等导出符号，
+/// 且编译器生成的 `main` 入口会**调用** `dial_env_init`——这意味着旧版标准库包
+/// （abi=1）链接新编译器必然缺少 `dial_env_init`，报出难懂的
+/// `undefined symbol: dial_env_init`。因此本次变更属于破坏性 ABI 变更，
+/// 递增到 2，让旧包在链接期就被**明确拦下**并给出重装指引。
+pub const STDLIB_ABI: u64 = 2;
 
 /// 全局包缓存根目录：`~/.dial/packages/`（Windows：`%USERPROFILE%\.dial\packages\`）。
 ///

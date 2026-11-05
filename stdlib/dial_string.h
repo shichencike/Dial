@@ -2,6 +2,7 @@
 #define DIAL_STRING_H
 
 #include <stdint.h>
+#include "dial_array.h"
 
 /*
  * String 是不透明引用计数对象。Dial 侧只持有 i8*，绝不能直接读内存。
@@ -24,6 +25,18 @@ int64_t  dial_string_get(DialString s, int64_t i);
 int64_t  dial_string_eq(DialString a, DialString b);
 
 DialString dial_string_substring(DialString s, int64_t from, int64_t to);
+
+/* 查找子串首次出现位置（返回字节偏移），未找到返回 -1。 */
+int64_t dial_string_index_of(DialString s, DialString sub);
+
+/* 把所有 from 子串替换为 to（返回新字符串，原串不变）。 */
+DialString dial_string_replace(DialString s, DialString from, DialString to);
+
+/* 去除首尾空白（空格 / 制表 / 换行 / 回车），返回新字符串。 */
+DialString dial_string_trim(DialString s);
+
+/* 按分隔符 sep 切分，返回 string[]（kind=1 RC 的数组，每个元素是 retain 过的子串）。 */
+DialArray dial_string_split(DialString s, DialString sep);
 
 /* COW 感知克隆：唯一持有返回自身，否则深拷贝 */
 DialString dial_string_clone(DialString s);

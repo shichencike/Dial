@@ -211,3 +211,71 @@ void dial_array_release(DialArray a) {
      * 此处先判空，避免后面读 ((int64_t*)a)[-1] 时解引用空指针。 */
     release_buffer(a);
 }
+
+DialArray dial_array_remove(DialArray a, int64_t i) {
+    int64_t len = a_meta(a)[1];
+    if (i < 0 || i >= len) {
+        dial_assert_fail("dial_array_remove: 索引越界");
+    }
+    int64_t kind = a_meta(a)[0];
+    int64_t cap = a_meta(a)[2];
+    void *p;
+    if (((int64_t *)a)[-1] > 1) {
+        // 共享：克隆出新 buffer（自带引用 1），消耗调用者交来的那一份旧引用，
+        // 然后在新 buffer 上做左移紧凑——与 dial_array_set 的 COW 分支同款契约。
+        p = dial_rc_clone(a, a_size(cap));
+        a_meta(p)[1] = len - 1;
+        memmove(a_elems(p), a_elems(a), (size_t)i * 8);
+        memmove(a_elems(p) + i, a_elems(a) + i + 1, (size_t)(len - 1 - i) * 8);
+        retain_elems(p);
+        release_buffer(a);
+    } else {
+        // 独占：原地左移紧凑（其余元素引用计数不变），返回同一指针。
+        memmove(a_elems(a) + i, a_elems(a) + i + 1, (size_t)(len - 1 - i) * 8);
+        a_meta(a)[1] = len - 1;
+        p = a;
+    }
+    (void)kind;
+    return p;
+}
+
+DialArray dial_array_pop(DialArray a) {
+    int64_t len = a_meta(a)[1];
+    if (len <= 0) {
+        dial_assert_fail("dial_array_pop: 空数组不可 pop");
+    }
+    return dial_array_remove(a, len - 1);
+}
+
+/* 升序排序（v1.01）。被多者共享时先 COW 克隆，再原地排序，返回（可能更新后的）指针。 */
+static int cmp_int64(const void *pa, const void *pb) {
+    int64_t a = *(const int64_t *)pa, b = *(const int64_t *)pb;
+    return (a > b) - (a < b);
+}
+/* float 元素：把 8 字节槽位按 IEEE754 数值比较（负数排序正确，绝非位模式比较）。 */
+static int cmp_float64(const void *pa, const void *pb) {
+    double a = *(const double *)pa, b = *(const double *)pb;
+    return (a > b) - (a < b);
+}
+
+DialArray dial_array_sort(DialArray a) {
+    if (!a) return NULL;
+    int64_t kind = a_meta(a)[0];
+    /* COW：共享时克隆出新 buffer（自带引用计数 1），消耗调用者交来的那一份引用。 */
+    if (((int64_t *)a)[-1] > 1) {
+        void *n = dial_rc_clone(a, a_size(a_meta(a)[2]));
+        retain_elems(n);
+        release_buffer(a);
+        a = n;
+    }
+    int64_t len = a_meta(a)[1];
+    int64_t *e = a_elems(a);
+    /* kind 3 是 float（编译器侧约定的元素类别码），其余标量（int/byte/char/bool）按整数序。
+     * 句柄元素（string 等）排序语义未定义，编译器侧已拒绝调用 sort，不会到这。 */
+    if (kind == 3) {
+        qsort(e, (size_t)len, sizeof(int64_t), cmp_float64);
+    } else {
+        qsort(e, (size_t)len, sizeof(int64_t), cmp_int64);
+    }
+    return a;
+}

@@ -1,4 +1,5 @@
 #include "dial_string.h"
+#include "dial_array.h"
 #include "dial_rt_mem.h"
 #include "dial_rt_trap.h"
 #include <string.h>
@@ -91,6 +92,105 @@ DialString dial_string_clone(DialString s) {
 void dial_string_retain(DialString s) { dial_rc_retain(s); }
 void dial_string_release(DialString s) { dial_rc_release(s); }
 
+/* 查找子串首次出现位置（字节偏移）；未找到返回 -1。 */
+int64_t dial_string_index_of(DialString s, DialString sub) {
+    if (!s || !sub) return -1;
+    int64_t slen = ((int64_t *)s)[0];
+    int64_t sublen = ((int64_t *)sub)[0];
+    if (sublen == 0) return 0;            /* 空分隔符匹配开头 */
+    if (sublen > slen) return -1;
+    const char *d = s_data(s);
+    const char *needle = (const char *)sub + 8;
+    for (int64_t i = 0; i + sublen <= slen; i++) {
+        if (memcmp(d + i, needle, (size_t)sublen) == 0) return i;
+    }
+    return -1;
+}
+
+/* 把 from 的所有出现替换为 to，返回新字符串（原串不变）。 */
+DialString dial_string_replace(DialString s, DialString from, DialString to) {
+    int64_t slen = ((int64_t *)s)[0];
+    int64_t flen = ((int64_t *)from)[0];
+    int64_t tlen = ((int64_t *)to)[0];
+    const char *d = s_data(s);
+    const char *fl = (const char *)from + 8;
+    const char *tl = (const char *)to + 8;
+
+    if (flen == 0) return dial_string_clone(s);  /* 空 from 无匹配 */
+
+    /* 先数出匹配段数，算出结果长度 */
+    int64_t matches = 0;
+    for (int64_t i = 0; i + flen <= slen; ) {
+        if (memcmp(d + i, fl, (size_t)flen) == 0) { matches++; i += flen; }
+        else i++;
+    }
+    int64_t outlen = slen + matches * (tlen - flen);
+    if (outlen < 0) outlen = 0;
+
+    void *p = dial_rc_alloc(8 + outlen + 1);
+    ((int64_t *)p)[0] = outlen;
+    char *o = s_data(p);
+    int64_t w = 0;
+    int64_t i = 0;
+    for (; i + flen <= slen; ) {
+        if (memcmp(d + i, fl, (size_t)flen) == 0) {
+            memcpy(o + w, tl, (size_t)tlen); w += tlen; i += flen;
+        } else {
+            o[w++] = d[i++];
+        }
+    }
+    while (i < slen) o[w++] = d[i++];
+    o[outlen] = '\0';
+    return p;
+}
+
+/* 去除首尾空白（空格 / 制表 / 换行 / 回车），返回新字符串。 */
+DialString dial_string_trim(DialString s) {
+    int64_t slen = ((int64_t *)s)[0];
+    const char *d = s_data(s);
+    int64_t start = 0, end = slen;
+    while (start < end) {
+        char c = d[start];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') start++;
+        else break;
+    }
+    while (end > start) {
+        char c = d[end - 1];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') end--;
+        else break;
+    }
+    return dial_string_substring(s, start, end);
+}
+
+/* 按分隔符 sep 切分，返回 string[]（kind=1 RC 数组，每元素是 retain 过的子串）。 */
+DialArray dial_string_split(DialString s, DialString sep) {
+    int64_t slen = ((int64_t *)s)[0];
+    int64_t seplen = ((int64_t *)sep)[0];
+    const char *d = s_data(s);
+    const char *sepdat = (const char *)sep + 8;
+
+    DialArray arr = dial_array_new(1 /* RC */);
+    if (seplen == 0) {                      /* 空分隔符：整串作为一个元素 */
+        DialString whole = dial_string_substring(s, 0, slen);
+        arr = dial_array_push(arr, (int64_t)whole);
+        dial_rc_release(whole);
+        return arr;
+    }
+    if (slen == 0) return arr;              /* 空串：返回空数组 */
+
+    int64_t i = 0;
+    while (i <= slen) {
+        int64_t j = i;
+        /* 找下一个分隔符位置 */
+        while (j + seplen <= slen && memcmp(d + j, sepdat, (size_t)seplen) != 0) j++;
+        DialString piece = dial_string_substring(s, i, j);
+        arr = dial_array_push(arr, (int64_t)piece);
+        dial_rc_release(piece);             /* push 已 retain，本地引用可释放 */
+        if (j + seplen > slen) break;       /* 末尾之后无更多分隔符 */
+        i = j + seplen;
+    }
+    return arr;
+}
 void dial_print_string(DialString s) {
     /* v0.81：recv / try_recv 在 EOF 时返回 NULL。若用户没用 done(ch) 守住就直接使用，
      * 这里必须当场受控 Fail-Fast（打印原因 + ud2），而不是解引用 NULL 变成一次

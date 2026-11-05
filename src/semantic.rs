@@ -243,44 +243,46 @@ pub fn type_of<V>(
                 )),
             }
         }
-        Expr::ArrayLit(elems) => {
-            if elems.is_empty() {
+        Expr::ArrayLit(elems, expect) => {
+            // 期望元素类型优先（空数组由声明标注补入）；否则从首个元素推断，并要求全部一致。
+            // 元素类型需满足 is_array_elem_type 白名单（int/float/bool/byte/char + 句柄/指针）。
+            let elem_t: Type = if let Some(et) = expect {
+                (**et).clone()
+            } else if elems.is_empty() {
                 return Err(DialcError::new(
-                    "语义错误：空数组字面量无法推断元素类型（当前版本暂不支持）",
+                    "语义错误：空数组字面量 [] 无法推断元素类型；请为变量标注数组类型，例如 var a: int[] = [];",
                     0, 0,
                 ));
-            }
-            // 元素类型由第一个元素确定，必须是「int 或句柄类型」之一（string / int[] / map /
-            // error / channel / 不透明指针）——它们都是 8 字节指针或 int，C 侧按 int64 存储。
-            // 标量非 int（float / bool / byte / char）仍在编译期拒绝：这类元素宽度不足 8 字节，
-            // 塞进 int64 槽会静默截断，故不允许。
-            let mut elem_t: Option<Type> = None;
-            for e in elems {
-                let t = type_of(e, scopes, funcs, structs)?;
-                if !is_array_elem_type(&t) {
-                    return Err(DialcError::new(
-                        format!(
-                            "语义错误：数组字面量元素类型 {} 暂不支持（仅支持 int 与句柄类型 string / int[] / map / error / channel / 不透明指针）",
-                            t.name()
-                        ),
-                        0, 0,
-                    ));
-                }
-                match &elem_t {
-                    Some(et) if *et != t => {
+            } else {
+                let mut et: Option<Type> = None;
+                for e in elems {
+                    let t = type_of(e, scopes, funcs, structs)?;
+                    if !is_array_elem_type(&t) {
                         return Err(DialcError::new(
                             format!(
-                                "语义错误：数组字面量元素类型不一致（{} 与 {}）",
-                                et.name(),
+                                "语义错误：数组字面量元素类型 {} 暂不支持（数组元素支持 int/float/bool/byte/char 与句柄类型 string / int[] / map / error / channel / 不透明指针）",
                                 t.name()
                             ),
                             0, 0,
                         ));
                     }
-                    _ => elem_t = Some(t),
+                    match &et {
+                        Some(x) if *x != t => {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：数组字面量元素类型不一致（{} 与 {}）",
+                                    x.name(),
+                                    t.name()
+                                ),
+                                0, 0,
+                            ));
+                        }
+                        _ => et = Some(t),
+                    }
                 }
-            }
-            Ok(Type::Array(Box::new(elem_t.unwrap_or(Type::Int))))
+                et.unwrap()
+            };
+            Ok(Type::Array(Box::new(elem_t)))
         }
         Expr::StructLit(name, fields) => {
             let sdef = structs
@@ -464,6 +466,24 @@ pub fn type_of<V>(
             // 它们是显式的、命名清晰的转换入口，编译为 LLVM 的 sitofp / fptosi，
             // 不依赖任何 C 运行时函数。
             match name.as_str() {
+                // drop(x)：提前释放一个变量的所有权（move 语义）。参数的「消费后禁用」
+                // 在 check_stmt 的 Expr 分支做（需要副作用 mark_moved，不在这里）。
+                // 这里只做类型层面：drop 返回 Void，且参数必须是变量名。
+                "drop" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：drop() 需要恰好 1 个参数（要释放的变量）",
+                            0, 0,
+                        ));
+                    }
+                    return match &args[0] {
+                        Expr::Var(_) => Ok(Type::Void),
+                        _ => Err(DialcError::new(
+                            "语义错误：drop() 的参数必须是变量名，例如 drop(buf)",
+                            0, 0,
+                        )),
+                    };
+                }
                 "int_to_float" => {
                     if args.len() != 1 {
                         return Err(DialcError::new(
@@ -1188,6 +1208,39 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::Void);
                 }
+                // ---- v1.01 内建：环境 / 时间 / 随机 ----
+                "args" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new("语义错误：args() 不接受参数", 0, 0));
+                    }
+                    // 返回 string[]：命令行参数列表（argv[1..]）。
+                    return Ok(Type::Array(Box::new(Type::String)));
+                }
+                "now" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new("语义错误：now() 不接受参数", 0, 0));
+                    }
+                    // 返回 float：自 Unix 纪元起的秒数（含小数部分）。
+                    return Ok(Type::Float);
+                }
+                "random" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new("语义错误：random() 不接受参数", 0, 0));
+                    }
+                    // 返回 int：[0, 2^63) 的伪随机整数。
+                    return Ok(Type::Int);
+                }
+                "sleep" => {
+                    if args.len() != 1
+                        || type_of(&args[0], scopes, funcs, structs)? != Type::Int
+                    {
+                        return Err(DialcError::new(
+                            "语义错误：sleep 需要 1 个 int 参数（毫秒）",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Void);
+                }
                 "min" | "max" => {
                     if args.len() != 2 {
                         return Err(DialcError::new(
@@ -1533,6 +1586,39 @@ fn string_method_type<V>(
             }
             Ok(Type::Bool)
         }
+        "index_of" => {
+            if args.len() != 1 || arg_t(0)? != Type::String {
+                return Err(DialcError::new(
+                    "语义错误：string.index_of(sub) 需要 1 个 string 参数，未找到返回 -1",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Int)
+        }
+        "replace" => {
+            if args.len() != 2 || arg_t(0)? != Type::String || arg_t(1)? != Type::String {
+                return Err(DialcError::new(
+                    "语义错误：string.replace(from, to) 需要 2 个 string 参数，返回新字符串",
+                    0, 0,
+                ));
+            }
+            Ok(Type::String)
+        }
+        "trim" => {
+            if !args.is_empty() {
+                return Err(DialcError::new("语义错误：string.trim() 不接受参数", 0, 0));
+            }
+            Ok(Type::String)
+        }
+        "split" => {
+            if args.len() != 1 || arg_t(0)? != Type::String {
+                return Err(DialcError::new(
+                    "语义错误：string.split(sep) 需要 1 个 string 参数，返回 string[]",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Array(Box::new(Type::String)))
+        }
         _ => Err(DialcError::new(
             format!("语义错误：string 无方法 '{}'", method),
             0, 0,
@@ -1571,10 +1657,14 @@ fn error_method_type<V>(
 /// 可作为动态数组元素的类型：int（标量）或任意 8 字节句柄/指针
 /// （string / int[] / map / error / channel / 不透明指针）。
 /// 标量非 int（float / bool / byte / char）因宽度不足 8 字节、塞进 int64 槽会静默截断，故拒绝。
+/// 可作为动态数组元素的类型。标量 int/float/bool/byte/char 与任意 8 字节句柄/指针。
+/// 数组在 C 侧以 int64 槽存储元素：float 用 IEEE754 位模式（bitcast，绝不 fptosi 截小数），
+/// bool 用 i1↔i64 位模式，byte/char 与 int 同为 i64；句柄类型按位存指针。
+/// 因此「元素类型白名单」就是「能装进 8 字节槽且能无歧义还原」的类型集合。
 fn is_array_elem_type(t: &Type) -> bool {
     matches!(
         *t,
-        Type::Int
+        Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char
             | Type::String
             | Type::Bytes
             | Type::Array(_)
@@ -1634,16 +1724,56 @@ fn array_method_type<V>(
             }
             Ok(Type::Array(Box::new(elem.clone())))
         }
-        "clone" => {
-            if !args.is_empty() {
-                return Err(DialcError::new("语义错误：array.clone() 不接受参数", 0, 0));
+            "clone" => {
+                if !args.is_empty() {
+                    return Err(DialcError::new("语义错误：array.clone() 不接受参数", 0, 0));
+                }
+                Ok(Type::Array(Box::new(elem.clone())))
             }
-            Ok(Type::Array(Box::new(elem.clone())))
-        }
-        _ => Err(DialcError::new(
-            format!("语义错误：array 无方法 '{}'", method),
-            0, 0,
-        )),
+            // remove(i) / pop()：返回被删（弹出）的元素，而非数组本身。
+            // 数组自身的更新（COW 可能替换指针）由 codegen 在接收变量处写回，不影响返回类型。
+            "remove" => {
+                if args.len() != 1 || arg_t(0)? != Type::Int {
+                    return Err(DialcError::new("语义错误：array.remove() 需要 1 个 int 参数（下标）", 0, 0));
+                }
+                Ok(elem.clone())
+            }
+            "pop" => {
+                if !args.is_empty() {
+                    return Err(DialcError::new("语义错误：array.pop() 不接受参数", 0, 0));
+                }
+                Ok(elem.clone())
+            }
+            "sort" => {
+                if !args.is_empty() {
+                    return Err(DialcError::new("语义错误：array.sort() 不接受参数", 0, 0));
+                }
+                // 排序只对可比较的标量元素有意义（int / float / byte / char / bool）。
+                // 句柄元素（string / array / map ...）无自然序，拒绝。
+                if matches!(
+                    elem,
+                    Type::String
+                        | Type::Bytes
+                        | Type::Array(_)
+                        | Type::Map
+                        | Type::Set(_)
+                        | Type::KvMap(..)
+                        | Type::Error
+                        | Type::Channel(_)
+                        | Type::Opaque(_)
+                ) {
+                    return Err(DialcError::new(
+                        "语义错误：array.sort() 只支持标量元素类型（int/float/byte/char/bool）",
+                        0, 0,
+                    ));
+                }
+                // 返回（可能经 COW 克隆的）新数组指针，由 codegen 写回接收变量。
+                Ok(Type::Array(Box::new(elem.clone())))
+            }
+            _ => Err(DialcError::new(
+                format!("语义错误：array 无方法 '{}'", method),
+                0, 0,
+            )),
     }
 }
 
@@ -1871,6 +2001,8 @@ const RESERVED_NAMES: &[&str] = &[
     "sqrt", "pow", "floor", "ceil", "round",
     // v1.00：集合与泛型 map 构造
     "new_set", "new_kv_map",
+    // v1.01：提前释放（move 语义）——drop(x) 之后禁止再使用 x，杜绝 use-after-free
+    "drop",
 ];
 
 /// `externs`：由 `import` 引入的**包外部函数**（v0.92，见 package.rs）。
@@ -2138,6 +2270,22 @@ fn check_function(
 
 /// 把变量标记为「已转移」。向外找到**声明它的那个作用域**再置位，
 /// 而不是只写 `last()`：这样「if 分支里 move 之后，主流程再用」也会被保守拦下。
+/// 值类型（Copy）判定：drop 对它们无意义（无所有权），故 drop 后仍能继续使用。
+/// 标量 int/float/bool/char/byte 与用户结构体（值语义、无 ARC）均属于此类。
+/// 其余（string/bytes/array/map/kvmap/set/error/channel/file/thread/opaque）
+/// 都是带所有权的句柄，drop 会真正释放并随后禁用该变量。
+fn is_copy_type(t: &Type) -> bool {
+    matches!(
+        t,
+        Type::Int
+            | Type::Float
+            | Type::Bool
+            | Type::Char
+            | Type::Byte
+            | Type::Struct(_)
+    )
+}
+
 fn mark_moved(scopes: &mut Scopes<VarState>, name: &str) {
     for scope in scopes.iter_mut().rev() {
         if let Some((_, st)) = scope.get_mut(name) {
@@ -2312,7 +2460,7 @@ fn check_moved_expr(
             check_moved_expr(r, scopes, funcs, structs, line, col)
         }
         Expr::Unary(_, o) => check_moved_expr(o, scopes, funcs, structs, line, col),
-        Expr::ArrayLit(elems) => {
+        Expr::ArrayLit(elems, _) => {
             for a in elems {
                 check_moved_expr(a, scopes, funcs, structs, line, col)?;
             }
@@ -2756,12 +2904,18 @@ fn check_stmt(
         }
         Stmt::ForEachMap { key, value, coll, body, .. } => {
             let ct = type_of(coll, scopes, funcs, structs)?;
-            if ct != Type::Map {
-                return Err(DialcError::new(
-                    "语义错误：for (k, v in m) 的 m 必须是 map 类型",
-                    0, 0,
-                ));
-            }
+            // 支持 int->int 的 `map` 与泛型 `map<K,V>`（v1.01 起）。
+            // 键/值变量类型随容器具体类型走：map -> (int, int)；map<K,V> -> (K, V)。
+            let (k_ty, v_ty) = match &ct {
+                Type::Map => (Type::Int, Type::Int),
+                Type::KvMap(k, v) => ((**k).clone(), (**v).clone()),
+                _ => {
+                    return Err(DialcError::new(
+                        "语义错误：for (k, v in m) 的 m 必须是 map 或 map<K,V> 类型",
+                        0, 0,
+                    ))
+                }
+            };
             if scopes.last().unwrap().contains_key(key) {
                 return Err(DialcError::new(
                     format!("语义错误：键变量 '{}' 与外层变量重名", key),
@@ -2778,11 +2932,11 @@ fn check_stmt(
             scopes
                 .last_mut()
                 .unwrap()
-                .insert(key.clone(), (Type::Int, VarState::new(true)));
+                .insert(key.clone(), (k_ty, VarState::new(true)));
             scopes
                 .last_mut()
                 .unwrap()
-                .insert(value.clone(), (Type::Int, VarState::new(true)));
+                .insert(value.clone(), (v_ty, VarState::new(true)));
             for s in body {
                 check_stmt_at(s, scopes, funcs, f, structs, true, try_depth)?;
             }
@@ -3089,6 +3243,21 @@ fn check_stmt(
                 }
             }
             type_of(e, scopes, funcs, structs)?;
+            // drop(x)：类型校验通过后，把 x 标记为「已转移」——后续对 x 的任何使用
+            // 都会触发 use-after-move 诊断（"变量 'x' 已转移，无法使用"），杜绝 use-after-free。
+            if let Expr::Call(name, args) = e {
+                if name.as_str() == "drop" {
+                    if let Expr::Var(vname) = &args[0] {
+                        // 仅句柄类型（非 Copy）drop 后才禁用：标量/结构体是值类型，
+                        // drop 是 no-op，标 moved 反而会误伤后续的合法使用。
+                        if let Some(t) = lookup_type(scopes, vname) {
+                            if !is_copy_type(&t) {
+                                mark_moved(scopes, vname);
+                            }
+                        }
+                    }
+                }
+            }
             Ok(())
         }
     }
@@ -3124,7 +3293,7 @@ fn record_expr_refs(e: &Expr, si: usize, unsafe_ctx: bool, refs: &mut HashMap<St
                 record_expr_refs(a, si, unsafe_ctx, refs);
             }
         }
-        Expr::ArrayLit(elems) => {
+        Expr::ArrayLit(elems, _) => {
             for el in elems {
                 record_expr_refs(el, si, unsafe_ctx, refs);
             }

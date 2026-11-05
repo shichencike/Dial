@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v1.00
+# dialc — Dial 语言编译器 v1.01
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -1022,7 +1022,13 @@ print(r.origin.x);     // 支持链式
 ## 11. 动态数组 `int[]`
 
 `int[]` 是不透明指针，内存布局 `[refcount][kind][len][cap][elems...]`（头部 `kind` 记录元素类别）由 C 侧私有维护。
-**元素类型可为 `int`，或任意 8 字节句柄**：`string` / `int[]`（多维）/ `map` / `error` / `channel` / 不透明指针（v0.99 起，见 [§11.6](#116-多维数组与句柄元素数组)）。
+**元素类型可为任意标量，或任意 8 字节句柄**：
+
+| 类别 | 元素类型 | 起始版本 |
+| --- | --- | --- |
+| 标量 | `int` | 最初 |
+| 标量 | `float` / `byte` / `bool` / `char` | **v1.01**（见 [§30.1](#301-数组元素类型扩展)） |
+| 句柄 | `string` / `int[]`（多维）/ `map` / `error` / `channel` / 不透明指针 | v0.99（见 [§11.6](#116-多维数组与句柄元素数组)） |
 
 ### 11.1 构造
 
@@ -1030,9 +1036,11 @@ print(r.origin.x);     // 支持链式
 var a: int[] = [10, 20, 30];
 var names: string[] = ["alice", "bob", "carol"];   // v0.99：句柄元素
 var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.99：多维（元素是 int[] 句柄）
+var f: float[] = [1.5, 2.5];                       // v1.01：浮点元素
 ```
 
-空数组字面量 `[]` 不支持（无法推断元素类型）。
+空数组字面量 `[]` **需要类型标注**（`var e: int[] = [];`）——元素类型由标注提供；
+裸写 `var e = [];` 仍编译失败（编译器不替你猜）。见 [§30.2](#302-空数组字面量-)。
 
 ### 11.2 方法
 
@@ -1043,8 +1051,13 @@ var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.99：多维（元素是
 | `a.push(v)` | `dial_array_push` | 数组类型（如 `int[]` / `string[]`） | 追加；**返回（可能更新后的）数组指针** |
 | `a.set(i, v)` | `dial_array_set` | 数组类型 | 按下标写；被共享时内部触发 COW，**返回新指针** |
 | `a.clone()` | `dial_array_clone` | 数组类型 | **独立副本**（深拷贝，元素引用另行计数） |
+| `a.remove(i)` | `dial_array_remove` | 元素类型 | 删除下标 `i` 处的元素并**返回它**；越界当场 Fail-Fast（v1.01） |
+| `a.pop()` | `dial_array_pop` | 元素类型 | 弹出末元素并**返回它**；空数组当场 Fail-Fast（v1.01） |
+| `a.sort()` | `dial_array_sort` | 数组类型 | 原地**升序排序**；仅标量元素可用（v1.01） |
 
 下标语法 `a[i]` 等价于 `a.get(i)`；`a[i] = v` 等价于 `a = a.set(i, v)`。嵌套下标 `a[i][j] = v` 同样支持（v0.99，见 [§11.6](#116-多维数组与句柄元素数组)）。
+
+v1.01 新增的 `remove` / `pop` / `sort` 见 [§30.3](#303-数组删除元素-removei--pop) 与 [§30.8](#308-数组排序-sort)。
 
 ### 11.3 为什么 `push` / `set` 要返回指针
 
@@ -1099,6 +1112,11 @@ v0.99 起，数组不再「只能装 int」。只要元素类型是 `int` 或**�
 因为所有不透明句柄（`string` / `int[]` / `map` / `error` / 不透明指针）共享同一份 `dial_rc_*` 引用计数，
 `channel` 则走原子引用计数 `dial_channel_*`。数组头部用一个 `kind` 字段记下自己的元素类别，
 `push` / `set` / 克隆 / 释放时据此对元素做对应的 retain / release，从而实现**按元素 ARC**。
+
+v1.01 起，**标量元素也不止 `int`**：`float` / `byte` / `bool` / `char` 都能直接存——
+它们与 `int` 同为 8 字节值类型（无 ARC、无堆分配），只是 `float` 在槽位里存
+IEEE754 **位模式**（绝不 `fptosi` 截断小数），`bool` 存 `i1` 扩展后的 0/1。
+详见 [§30.1](#301-数组元素类型扩展)。
 
 ```dial
 var names: string[] = ["alice", "bob"];   // 句柄元素：每个 string 都按元素 ARC 管理
@@ -1227,8 +1245,14 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 | `s.substring(from, to)` | `dial_string_substring` | `string` | 半开区间 `[from, to)` |
 | `s.clone()` | `dial_string_clone` | `string` | **独立副本**（深拷贝） |
 | `s.eq(t)` | `dial_string_eq` | `bool` | 按内容比较 |
+| `s.index_of(sub)` | `dial_string_index_of` | `int` | 首次出现的**字节偏移**；未找到返回 `-1`（v1.01） |
+| `s.replace(from, to)` | `dial_string_replace` | `string` | 替换全部出现，返回**新**字符串（原串不变）（v1.01） |
+| `s.trim()` | `dial_string_trim` | `string` | 去首尾空白（空格 / 制表 / 换行 / 回车），返回新串（v1.01） |
+| `s.split(sep)` | `dial_string_split` | `string[]` | 按分隔符切分；可直接 `for` 遍历（v1.01） |
 
 `==` / `!=` 对 `string` 按**内容**比较（编译为 `dial_string_eq`），而非比较指针地址。
+
+v1.01 新增的四个方法见 [§30.5](#305-字符串方法补齐)。
 
 ### 13.2 不可变语义
 
@@ -3751,8 +3775,8 @@ var ks: string[] = m.keys();    // 键快照
   现统一改为墓碑标记 + 负载过高时重建（老 `dial_map.c` 同步修复，`set<T>` 与
   `for (k, v in m)` 一并受益）。
 - **已知边界**：`V` 暂不开放 `string`（`get` 未命中时的默认 string 对象会带来所有权
-  移交歧义）；`map.values()` 当前只支持 `V = int`；`for (k, v in m)` 仍限老 `map`，
-  泛型 map 用 `keys()` / `values()` 快照配合 `for (v in arr)` 迭代。
+  移交歧义）；`map.values()` 当前只支持 `V = int`。
+  （`for (k, v in m)` 对泛型 map 的限制已在 **v1.01 解除**，见 [§30.7](#307-泛型-mapkv-支持-for-k-v-in-m)。）
 
 ### 29.6 实现落点
 
@@ -3774,3 +3798,185 @@ var ks: string[] = m.keys();    // 键快照
   `defer` 禁止跳转、`const` 遮蔽、`set` / `map<K,V>` 的类型约束等）；
 - `bash tests/run_tests.sh` A–O 全套通过，含 LSP 协议流纯净性、内存上界与所有权回归；
 - 2 万键 ARC 压测：泛型 map 峰值约 4.4 MB、`set<int>` 约 2.4 MB，无泄漏、无 Fail-Fast。
+
+---
+
+## 30. v1.01：按「真实程序」盘点后的缺口补齐
+
+v1.00 补齐了五组语言特性之后，下一步不是继续「凭想象加特性」，而是**照着程序员写
+真实程序的方式，把编译器拿出来跑**：先写 30 多个真实小程序，逐个看哪些能直接写、
+哪些要绕道、哪些只能模拟、哪些根本写不出来。盘点的结论集中在一张表里：
+
+| 缺口 | 此前状态 | v1.01 落点 |
+| --- | --- | --- |
+| 数组只能装 `int` | `float[]` / `byte[]` / `bool[]` / `char[]` 全部写不出来 | §30.1 |
+| 空数组写不出来 | `var a = []` 无法推断元素类型 | §30.2 |
+| 数组删元素只能绕道 | 只能重建整个数组 | §30.3 |
+| 提前释放资源要绕道 | 只能靠嵌套块缩小作用域 | §30.4 |
+| 字符串只能取子串 | `split` / `replace` / `trim` / `index_of` 全缺 | §30.5 |
+| 拿不到命令行参数 / 时间 / 随机数 | 完全没有对应内建 | §30.6 |
+| 泛型 map 只能拿 `keys()` 再循环 | `for (k, v in m)` 对 `map<K,V>` 不可用 | §30.7 |
+| 数组排序要手写 | 只能自己写 O(n²) 冒泡 | §30.8 |
+
+盘点中最刺眼的一条是**资源释放**：此前想提前释放一个大数组，只能把它塞进一层
+嵌套块里靠作用域结束触发释放——实测峰值内存 **57160 KB**；改成 `drop()` 显式
+释放后，同样的三阶段程序峰值降到 **33344 KB（-41.7%）**，与嵌套块绕道
+（33460 KB）持平，却不必再套一层块、也不影响阶段间传数据。
+
+本节所有改动继续守住项目铁律：不引入 GC；不提供裸指针 / 地址取值 / 指针算术；
+不支持运算符重载；不支持一等函数 / 闭包；ARC 所有权语义不退化；
+**零隐式转换铁律保持**（`1 + 2.0` 仍然编译失败）。
+
+### 30.1 数组元素类型扩展
+
+数组元素类型白名单从「只有 `int`」放宽到**全部标量 + 句柄**：
+
+| 元素类型 | 声明 | C 侧存储 |
+| --- | --- | --- |
+| `int` | `int[]` | `int64` 槽（原有） |
+| `float` | `float[]` | `int64` 槽，存 **IEEE754 位模式** |
+| `byte` | `byte[]` | `int64` 槽（0~255，语义同 `byte`） |
+| `char` | `char[]` | `int64` 槽（码点，语义同 `char`） |
+| `bool` | `bool[]` | `int64` 槽，存 `i1` 扩展后的 0/1 |
+| `string` 等句柄 | `string[]` | `int64` 槽存指针，按元素 ARC |
+
+**float 必须存位模式，不能 fptosi**：这是本节最容易踩的坑。C 侧数组槽统一是
+`int64`，若把 `3.25` 用 `fptosi` 转过去，小数部分会被截断成 `3`——写进去的是
+另一个数。编译器侧因此统一走 `to_elem_bits` / `from_elem_bits` 这一对转换：
+`float` 走 LLVM `bitcast` 保留 IEEE754 位模式，`bool` 走 `i1 ↔ i64`，句柄走
+`ptr_to_int` / `int_to_ptr`，`int` / `byte` / `char` 本就是 `i64`。
+
+零隐式转换铁律**不因元素类型放宽而松动**：`float[]` 里 `push(3)`（`int` 字面量）
+依然编译失败，必须写 `push(3.0)`。
+
+### 30.2 空数组字面量 `[]`
+
+`var a: int[] = [];` 现在合法。此前 `[]` 无法推断元素类型，只能报错；现在元素类型
+由**变量的类型标注**提供。裸写 `var a = [];` 仍然编译失败——编译器不会替你猜。
+
+### 30.3 数组删除元素 `remove(i)` / `pop()`
+
+| 方法 | 返回 | 说明 |
+| --- | --- | --- |
+| `a.remove(i)` | 被删元素（元素类型） | 删除下标 `i` 处的元素；越界当场 Fail-Fast |
+| `a.pop()` | 被弹出的末元素 | 空数组 `pop` 当场 Fail-Fast |
+
+数组自身的变化（COW 可能更换指针）由编译器在接收变量处**写回**；被删元素的
+所有权随返回值移交给调用者，句柄类元素会额外 `retain` 一份。
+
+### 30.4 `drop()`：显式提前释放
+
+```dial
+var buf: int[] = [1, 2, 3];
+drop(buf);          // 立刻释放，不必等到作用域结束
+print(buf.length()); // 编译期报错：变量 'buf' 已转移，无法使用
+```
+
+| 被 drop 的类型 | 行为 |
+| --- | --- |
+| `string` / `bytes` / `array` / `map` / `map<K,V>` / `set` / `error` / `channel` | 调用对应 `*_release`；引用计数归零则当场回收 |
+| `file` | `dial_file_close`（`fclose`） |
+| `thread` | `dial_thread_join` |
+| `int` / `float` / `bool` / `byte` / `char` / 结构体 | **no-op**（值类型没有所有权），drop 后变量仍可继续使用 |
+
+句柄类变量被 `drop` 后进入「已转移」状态：此后任何使用都在**编译期**被
+use-after-move 诊断拦下（「变量 'x' 已转移，无法使用」），杜绝 use-after-free。
+标量是值类型，drop 不改变所有权，因此**不**标记 moved——否则会误伤后续的合法使用。
+
+### 30.5 字符串方法补齐
+
+| 方法 | 返回 | 说明 |
+| --- | --- | --- |
+| `s.split(sep)` | `string[]` | 按分隔符切分；`sep` 为空串时整串作为唯一元素；找不到分隔符时返回单元素数组 |
+| `s.replace(from, to)` | `string` | 替换全部出现，返回**新**字符串（原串不变） |
+| `s.trim()` | `string` | 去掉首尾空白（空格 / 制表 / 换行 / 回车） |
+| `s.index_of(sub)` | `int` | 首次出现的字节偏移；未找到返回 `-1` |
+
+### 30.6 环境 / 时间 / 随机内建
+
+| 内建 | 返回 | 说明 |
+| --- | --- | --- |
+| `args()` | `string[]` | 命令行参数（`argv[1..]`）；每次调用返回一份独立副本 |
+| `now()` | `float` | 自 Unix 纪元起的秒数（含小数） |
+| `sleep(ms)` | void | 休眠毫秒数 |
+| `random()` | `int` | `[0, 2^63)` 的伪随机整数 |
+
+`args()` 需要拿到 OS 传进来的 `argv`，因此编译器生成的 `main` 入口改为接收
+`argc` / `argv`（C ABI 的 `int main(int, char**)`），并在入口处调用
+`dial_env_init(argc, argv)` 把参数捕获进运行时——对用户代码完全透明，
+既有程序不受影响。
+
+### 30.7 泛型 `map<K,V>` 支持 `for (k, v in m)`
+
+v1.00 的泛型 map 只能 `keys()` / `values()` 拿快照再配 `for (v in arr)` 迭代，
+绕了一圈。现在 `for (k, v in m)` 对 `map<K,V>` 直接可用，且**键 / 值按真实类型
+绑定**：
+
+```dial
+var m: map<string, int> = new_kv_map();
+m.put("a", 10);
+for (k, v in m) { print(k); print(v); }   // k 是 string，v 是 int
+```
+
+所有权口径：循环里的 `k` / `v` 都是**借来**的（键借自键快照数组、值借自表本身，
+均未 `retain`），因此循环末尾与函数出口**不释放**它们——否则会重复释放表内元素。
+
+### 30.8 数组排序 `sort()`
+
+```dial
+var a: int[] = [5, 3, 9, 1, 7];
+a.sort();          // 升序，就地排序
+```
+
+- 只支持**可比较的标量元素**：`int` / `float` / `byte` / `char` / `bool`；
+  `string[]` 等句柄元素无自然序，编译期拒绝；
+- `float` 按 **IEEE754 数值序**比较（负数正确排在最前），绝非位模式比较；
+- 遵守 COW 契约：数组被多者共享时先克隆再排序，**不影响其他持有者**；
+  排序后的指针写回接收变量。
+
+### 30.9 实现落点
+
+| 层 | 改动 |
+| --- | --- |
+| `src/ast.rs` | `ArrayLit` 增加「期望元素类型」参数（供空数组推断） |
+| `src/parser.rs` | `parse_var_decl` 在已知数组类型时把期望元素类型注入 `[]` |
+| `src/semantic.rs` | 元素类型白名单扩容；`string_method_type` / `array_method_type` 新方法；`args` / `now` / `sleep` / `random` 内建类型；`drop` 保留名与消费后禁用；`is_copy_type` 判定值类型 |
+| `src/codegen.rs` | `to_elem_bits` / `from_elem_bits` 位模式转换；`dial_array_sort` / `dial_string_split` 等分派；`drop` 按类型分派；`main` 入口追加 `dial_env_init`；泛型 map 的 `for (k,v in m)` 双形态分派 |
+| `stdlib/dial_array.c` | `dial_array_remove` / `dial_array_pop` / `dial_array_sort`（COW 感知） |
+| `stdlib/dial_string.c` | `dial_string_split` / `dial_string_replace` / `dial_string_trim` / `dial_string_index_of` |
+| `stdlib/dial_env.c` | 新增：`dial_env_init` / `dial_args` / `dial_now` / `dial_random` / `dial_sleep` |
+| `src/package.rs` | `STDLIB_ABI` 由 1 递增到 **2**（见下方「标准库 ABI 递增」） |
+| `tools/` / `.github/workflows/ci.yml` | 标准库包版本 `1.0.0 → 1.1.0`、打包 `--abi 2`、一键安装的 `STDLIB_RELEASE` → `stdlib-v1.1.0` |
+
+### 30.9.1 标准库 ABI 递增（破坏性变更）
+
+新增 `dial_env.c` 意味着标准库**多导出**了一批符号，而编译器生成的 `main` 入口
+会**主动调用** `dial_env_init`。于是旧标准库包（`abi=1`）链接新编译器时，必然报出
+难懂的链接错误：
+
+```
+ld.lld: error: undefined symbol: dial_env_init
+```
+
+这属于**破坏性 ABI 变更**，因此把 `STDLIB_ABI` 由 1 递增到 **2**。递增后，旧包在
+**链接期**就被明确拦下，并给出重装指引（而不是让用户去追一个符号错误）：
+
+```
+已安装的标准库 'stdlib' ABI 不兼容：包 abi=1，编译器要求 abi=2。
+为避免不兼容的二进制悄悄链入程序，已中断链接。
+请先卸载旧包再安装匹配版本：
+  rm -rf ~/.dial/packages/stdlib
+```
+
+配套同步：官方标准库包版本 `1.0.0 → 1.1.0`，一键安装脚本的 `STDLIB_RELEASE`
+默认标签 `stdlib-v1.0.0 → stdlib-v1.1.0`。标准库仍**独立发版**（tag `stdlib-v*`），
+因此本次发布需要**两个标签**：`v1.1.0`（编译器）与 `stdlib-v1.1.0`（标准库包）。
+
+### 30.10 测试
+
+- 6 个新增正向示例 + 同名 `.expected` 黄金文件：`array_demo`（元素类型 / 空数组 /
+  `remove` / `pop`）、`drop_demo`、`string_methods_demo`、`env_demo`、
+  `kvmap_foreach_demo`、`sort_demo`；
+- 4 个新增负向用例：`array_empty_no_annot`、`array_push_wrong_elem`、
+  `drop_use_after_move`、`string_split_bad_arg`、`array_sort_handle_elem`；
+- `bash tests/run_tests.sh` A–O 全套通过。

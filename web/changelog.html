@@ -25,10 +25,18 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
 <li><a href="#更新日志--changelog">更新日志 / Changelog</a><ul>
+<li><a href="#v101--2026-11-05">[v1.01] — 2026-11-05</a><ul>
+<li><a href="#added">Added</a></li>
+<li><a href="#changed">Changed</a></li>
+<li><a href="#-破坏性变更标准库-abi-递增">⚠ 破坏性变更（标准库 ABI 递增）</a></li>
+<li><a href="#测试">测试</a></li>
+<li><a href="#盘点数据">盘点数据</a></li>
+</ul>
+</li>
 <li><a href="#v100--2026-11-04">[v1.00] — 2026-11-04</a><ul>
 <li><a href="#added五组语言特性">Added（五组语言特性）</a></li>
 <li><a href="#fixed">Fixed</a></li>
-<li><a href="#changed">Changed</a></li>
+<li><a href="#changed_1">Changed</a></li>
 <li><a href="#testing">Testing</a></li>
 </ul>
 </li>
@@ -138,7 +146,7 @@
 <li><a href="#added新增_13">Added（新增）</a></li>
 <li><a href="#changed语义变更">Changed（语义变更）</a></li>
 <li><a href="#修正的设计回退">修正的设计回退</a></li>
-<li><a href="#测试">测试</a></li>
+<li><a href="#测试_1">测试</a></li>
 </ul>
 </li>
 <li><a href="#v08--2026-10-30">[v0.8] — 2026-10-30</a><ul>
@@ -213,6 +221,90 @@
 <p>详见 <a href="README.md#23-版本号规则">README §23</a>。</p>
 </blockquote>
 <hr />
+<h2 id="v101--2026-11-05">[v1.01] — 2026-11-05</h2>
+<p><strong>盘点驱动版本</strong>：v1.00 补齐语言特性后，没有继续「凭想象加特性」，而是<strong>照着程序员
+写真实程序的方式实测编译器</strong>：写 30 多个真实小程序，逐个看哪些能直接写、哪些要绕道、
+哪些只能模拟、哪些根本写不出来。盘出的缺口在这一版一次性补齐。</p>
+<p>本版继续守住项目铁律：不引入 GC；不提供裸指针 / 地址取值 / 指针算术；
+不支持运算符重载；不支持一等函数 / 闭包；ARC 所有权语义不退化；
+<strong>零隐式转换铁律保持</strong>（<code>1 + 2.0</code> 仍编译失败）。</p>
+<h3 id="added">Added</h3>
+<p><strong>数组元素类型扩展</strong>
+- <code>float[]</code> / <code>byte[]</code> / <code>bool[]</code> / <code>char[]</code> 现在都是合法的动态数组元素；
+- 底层沿用 <code>int64</code> 槽位：<code>float</code> 存 <strong>IEEE754 位模式</strong>（bitcast，绝不 <code>fptosi</code>
+  截断小数——否则 <code>3.25</code> 会被写成 <code>3</code>）、<code>bool</code> 走 <code>i1 ↔ i64</code>、
+  <code>byte</code> / <code>char</code> 与 <code>int</code> 同为 <code>i64</code>；句柄元素仍按元素 ARC 管理；
+- 零隐式转换不松动：<code>float[]</code> 里 <code>push(3)</code>（int 字面量）仍然编译失败。</p>
+<p><strong>空数组字面量 <code>[]</code></strong>
+- <code>var a: int[] = [];</code> 合法：元素类型由变量标注提供；
+- 裸写 <code>var a = [];</code> 仍编译失败——编译器不替你猜。</p>
+<p><strong>数组删除元素</strong>
+- <code>a.remove(i)</code>：删除下标处元素并返回它；越界当场 Fail-Fast；
+- <code>a.pop()</code>：弹出末元素并返回它；空数组当场 Fail-Fast；
+- 数组自身的变化（COW 可能更换指针）由编译器写回接收变量。</p>
+<p><strong><code>drop()</code>：显式提前释放</strong>
+- 句柄类（<code>string</code> / <code>bytes</code> / <code>array</code> / <code>map</code> / <code>map&lt;K,V&gt;</code> / <code>set</code> / <code>error</code> /
+  <code>channel</code>）立即调用对应 <code>*_release</code>；<code>file</code> 走 <code>dial_file_close</code>；
+  <code>thread</code> 走 <code>dial_thread_join</code>；标量与结构体是 <strong>no-op</strong>（值类型无所有权）；
+- 句柄被 <code>drop</code> 后进入「已转移」状态：此后任何使用都在<strong>编译期</strong>被 use-after-move
+  诊断拦下，杜绝 use-after-free；标量 drop <strong>不</strong>标记 moved（值类型，drop 后仍可用）。</p>
+<p><strong>字符串方法</strong>
+- <code>s.split(sep) -&gt; string[]</code>：按分隔符切分（空分隔符整串为唯一元素）；
+- <code>s.replace(from, to) -&gt; string</code>：替换全部出现，返回新串（原串不变）；
+- <code>s.trim() -&gt; string</code>：去首尾空白；
+- <code>s.index_of(sub) -&gt; int</code>：首次出现的字节偏移，未找到返回 <code>-1</code>。</p>
+<p><strong>环境 / 时间 / 随机内建</strong>
+- <code>args() -&gt; string[]</code>：命令行参数（<code>argv[1..]</code>），每次调用返回独立副本；
+- <code>now() -&gt; float</code>：Unix 纪元起的秒数（含小数）；
+- <code>sleep(ms)</code>：休眠毫秒；<code>random() -&gt; int</code>：<code>[0, 2^63)</code> 伪随机整数；
+- 为拿到 <code>argv</code>，编译器生成的 <code>main</code> 入口改为 <code>int main(int, char**)</code> 并在入口
+  调用 <code>dial_env_init(argc, argv)</code>——对用户代码完全透明。</p>
+<p><strong>泛型 <code>map&lt;K,V&gt;</code> 支持 <code>for (k, v in m)</code></strong>
+- v1.00 时泛型 map 只能 <code>keys()</code> / <code>values()</code> 拿快照再绕路迭代；
+- 现在直接可写，且<strong>键 / 值按真实类型绑定</strong>（<code>map&lt;string,int&gt;</code> 的 <code>k</code> 是 <code>string</code>）；
+- 所有权口径：循环里的 <code>k</code> / <code>v</code> 均为<strong>借来</strong>的（键借自键快照、值借自表本身，
+  都未 <code>retain</code>），故循环末尾与函数出口<strong>不释放</strong>它们，避免重复释放表内元素。</p>
+<p><strong>数组排序 <code>sort()</code></strong>
+- <code>a.sort()</code>：原地升序排序，遵守 COW 契约（被共享时先克隆，不影响其他持有者）；
+- 只支持可比较的标量元素（<code>int</code> / <code>float</code> / <code>byte</code> / <code>char</code> / <code>bool</code>），
+  <code>string[]</code> 等句柄元素编译期拒绝；
+- <code>float</code> 按 <strong>IEEE754 数值序</strong>比较（负数正确排在最前），绝非位模式比较。</p>
+<h3 id="changed">Changed</h3>
+<ul>
+<li><code>main</code> 的 LLVM 签名由 <code>i32 main()</code> 改为 <code>i32 main(i64, i8*)</code>（接收 <code>argc</code> / <code>argv</code>）。
+  这是 C ABI 层面透明的变化，既有程序行为不变。</li>
+</ul>
+<h3 id="-破坏性变更标准库-abi-递增">⚠ 破坏性变更（标准库 ABI 递增）</h3>
+<ul>
+<li><strong><code>stdlib</code> 包 ABI 由 1 递增到 2</strong>（<code>STDLIB_ABI</code>）。原因：标准库新增
+  <code>dial_env.c</code>（<code>dial_env_init</code> / <code>dial_args</code> / <code>dial_now</code> / <code>dial_random</code> /
+  <code>dial_sleep</code>）与 <code>dial_array_sort</code> 等导出符号，且编译器生成的 <code>main</code> 入口会
+  <strong>调用</strong> <code>dial_env_init</code>——旧标准库包（abi=1）链接新编译器必然报出难懂的
+  <code>undefined symbol: dial_env_init</code>。递增 ABI 后，旧包在<strong>链接期</strong>就被明确拦下，
+  并给出「卸载旧包 → 重装匹配版本」的重装指引，而不是让用户去追一个符号错误。</li>
+<li>配套同步：官方标准库包版本 <code>1.0.0 → 1.1.0</code>，一键安装脚本的
+  <code>STDLIB_RELEASE</code> 默认标签 <code>stdlib-v1.0.0 → stdlib-v1.1.0</code>
+  （标准库仍<strong>独立发版</strong>，tag <code>stdlib-v*</code>）。</li>
+<li>发布协同项：本次发布需要<strong>两个标签</strong>——<code>v1.1.0</code>（编译器）与
+  <code>stdlib-v1.1.0</code>（标准库包）。</li>
+</ul>
+<h3 id="测试">测试</h3>
+<ul>
+<li>6 个新增正向示例 + 同名 <code>.expected</code> 黄金文件：<code>array_demo</code>、<code>drop_demo</code>、
+  <code>string_methods_demo</code>、<code>env_demo</code>、<code>kvmap_foreach_demo</code>、<code>sort_demo</code>；</li>
+<li>5 个新增负向用例：<code>array_empty_no_annot</code>、<code>array_push_wrong_elem</code>、
+  <code>drop_use_after_move</code>、<code>string_split_bad_arg</code>、<code>array_sort_handle_elem</code>；</li>
+<li>移除 2 个已过时的负向用例（<code>array_bool_elem</code> / <code>array_char_elem</code>：这两种元素类型
+  在本版变为合法，原用例的前提已不成立）；</li>
+<li><code>bash tests/run_tests.sh</code> A–O 全套通过。</li>
+</ul>
+<h3 id="盘点数据">盘点数据</h3>
+<ul>
+<li>提前释放大数组（三阶段、每阶段 200 万元素）：同一作用域全存活时峰值
+  <strong>57160 KB</strong>；改用 <code>drop()</code> 显式释放后峰值 <strong>33344 KB（-41.7%）</strong>，
+  与「嵌套块绕道」的 33460 KB 持平，却不必再套块、也不影响阶段间传数据。</li>
+</ul>
+<hr />
 <h2 id="v100--2026-11-04">[v1.00] — 2026-11-04</h2>
 <p><strong>里程碑版本</strong>：从 <code>v0.99.1</code> 直接跳到 <code>v1.00</code>（用户明确要求跳版，见 §23 第 3 条）。
 本版是<strong>语言特性补齐</strong>发布：把「正常程序需要、此前只能模拟或绕路」的能力一次性补齐，共五组。
@@ -263,7 +355,7 @@
   曾只剩 13082（应为 10000），修复后正确；<code>set&lt;int&gt;</code> 与 <code>for (k, v in m)</code> 同时受益。</li>
 <li><code>panic</code> 前 stdout 缓冲内容丢失：<code>dial_panic()</code> 增加 <code>fflush(NULL)</code>。</li>
 </ul>
-<h3 id="changed">Changed</h3>
+<h3 id="changed_1">Changed</h3>
 <ul>
 <li><code>print</code> 中间参数改为原样输出、最后一个参数补换行；<code>print_raw</code> 全部参数原样输出。</li>
 <li>trap 接口补齐 <code>dial_assert_fail</code> / <code>dial_exit</code> / <code>dial_panic</code>；<code>dial_map_keys()</code> 供迭代使用。</li>
@@ -1333,7 +1425,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
   <code>release</code> 一次」造成二次释放。复核后确认该担心<strong>不成立</strong>：<code>close</code> 只置标志 + 广播，
   既不释放通道对象也不动引用计数；对象销毁仍<strong>只由原子 ARC 归零触发一次</strong>。二者职责不重叠。</li>
 </ul>
-<h3 id="测试">测试</h3>
+<h3 id="测试_1">测试</h3>
 <ul>
 <li>A 组新增 <code>examples/channel_close.dial</code>（生产者 <code>close</code> → 消费者 <code>done</code> 收尾）与
   <code>examples/channel_try_recv.dial</code>（<code>len</code> / <code>try_recv</code> / <code>closed</code> / <code>done</code> 状态机），
@@ -1640,7 +1732,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v1.00 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.01 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

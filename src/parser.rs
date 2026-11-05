@@ -739,6 +739,15 @@ impl Parser {
                 }
             }
         }
+        // 空数组 `[]` 无法推断元素类型：若声明类型是 Array(et)，在此补上期望元素类型，
+        // 使 `var a: float[] = [];` 合法；若没有类型标注，语义层会给出明确诊断。
+        if let Type::Array(ref et) = ty {
+            if let Expr::ArrayLit(es, None) = &value {
+                if es.is_empty() {
+                    value = Expr::ArrayLit(vec![], Some(Box::new((**et).clone())));
+                }
+            }
+        }
         Ok(Stmt::VarDecl {
             name,
             ty,
@@ -1494,7 +1503,9 @@ impl Parser {
             }
         }
         self.expect(TokenKind::RBracket)?;
-        Ok(Expr::ArrayLit(elems))
+        // 期望元素类型：非空数组由语义层从首个元素推断（None）；空数组 `[]` 在
+        // parse_var_decl 已知声明类型时再补（见下方 KvMap 注入之后那段）。
+        Ok(Expr::ArrayLit(elems, None))
     }
 
     fn parse_struct_lit(&mut self, name: String) -> Result<Expr> {

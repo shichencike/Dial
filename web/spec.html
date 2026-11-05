@@ -24,7 +24,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v100">dialc — Dial 语言编译器 v1.00</a><ul>
+<li><a href="#dialc--dial-语言编译器-v101">dialc — Dial 语言编译器 v1.01</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -303,11 +303,25 @@
 <li><a href="#297-测试">29.7 测试</a></li>
 </ul>
 </li>
+<li><a href="#30-v101按真实程序盘点后的缺口补齐">30. v1.01：按「真实程序」盘点后的缺口补齐</a><ul>
+<li><a href="#301-数组元素类型扩展">30.1 数组元素类型扩展</a></li>
+<li><a href="#302-空数组字面量-">30.2 空数组字面量 []</a></li>
+<li><a href="#303-数组删除元素-removei--pop">30.3 数组删除元素 remove(i) / pop()</a></li>
+<li><a href="#304-drop显式提前释放">30.4 drop()：显式提前释放</a></li>
+<li><a href="#305-字符串方法补齐">30.5 字符串方法补齐</a></li>
+<li><a href="#306-环境--时间--随机内建">30.6 环境 / 时间 / 随机内建</a></li>
+<li><a href="#307-泛型-mapkv-支持-for-k-v-in-m">30.7 泛型 map&lt;K,V&gt; 支持 for (k, v in m)</a></li>
+<li><a href="#308-数组排序-sort">30.8 数组排序 sort()</a></li>
+<li><a href="#309-实现落点">30.9 实现落点</a></li>
+<li><a href="#3091-标准库-abi-递增破坏性变更">30.9.1 标准库 ABI 递增（破坏性变更）</a></li>
+<li><a href="#3010-测试">30.10 测试</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v100">dialc — Dial 语言编译器 v1.00</h1>
+<h1 id="dialc--dial-语言编译器-v101">dialc — Dial 语言编译器 v1.01</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -1820,13 +1834,41 @@ print(r.origin.x);     // 支持链式
 <hr />
 <h2 id="11-动态数组-int">11. 动态数组 <code>int[]</code></h2>
 <p><code>int[]</code> 是不透明指针，内存布局 <code>[refcount][kind][len][cap][elems...]</code>（头部 <code>kind</code> 记录元素类别）由 C 侧私有维护。
-<strong>元素类型可为 <code>int</code>，或任意 8 字节句柄</strong>：<code>string</code> / <code>int[]</code>（多维）/ <code>map</code> / <code>error</code> / <code>channel</code> / 不透明指针（v0.99 起，见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）。</p>
+<strong>元素类型可为任意标量，或任意 8 字节句柄</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>类别</th>
+<th>元素类型</th>
+<th>起始版本</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>标量</td>
+<td><code>int</code></td>
+<td>最初</td>
+</tr>
+<tr>
+<td>标量</td>
+<td><code>float</code> / <code>byte</code> / <code>bool</code> / <code>char</code></td>
+<td><strong>v1.01</strong>（见 <a href="#301-数组元素类型扩展">§30.1</a>）</td>
+</tr>
+<tr>
+<td>句柄</td>
+<td><code>string</code> / <code>int[]</code>（多维）/ <code>map</code> / <code>error</code> / <code>channel</code> / 不透明指针</td>
+<td>v0.99（见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）</td>
+</tr>
+</tbody>
+</table>
 <h3 id="111-构造">11.1 构造</h3>
 <pre><code class="language-dial">var a: int[] = [10, 20, 30];
 var names: string[] = [&quot;alice&quot;, &quot;bob&quot;, &quot;carol&quot;];   // v0.99：句柄元素
 var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.99：多维（元素是 int[] 句柄）
+var f: float[] = [1.5, 2.5];                       // v1.01：浮点元素
 </code></pre>
-<p>空数组字面量 <code>[]</code> 不支持（无法推断元素类型）。</p>
+<p>空数组字面量 <code>[]</code> <strong>需要类型标注</strong>（<code>var e: int[] = [];</code>）——元素类型由标注提供；
+裸写 <code>var e = [];</code> 仍编译失败（编译器不替你猜）。见 <a href="#302-空数组字面量-">§30.2</a>。</p>
 <h3 id="112-方法">11.2 方法</h3>
 <table>
 <thead>
@@ -1868,9 +1910,28 @@ var m: int[][] = [[1, 2], [3, 4, 5]];              // v0.99：多维（元素是
 <td>数组类型</td>
 <td><strong>独立副本</strong>（深拷贝，元素引用另行计数）</td>
 </tr>
+<tr>
+<td><code>a.remove(i)</code></td>
+<td><code>dial_array_remove</code></td>
+<td>元素类型</td>
+<td>删除下标 <code>i</code> 处的元素并<strong>返回它</strong>；越界当场 Fail-Fast（v1.01）</td>
+</tr>
+<tr>
+<td><code>a.pop()</code></td>
+<td><code>dial_array_pop</code></td>
+<td>元素类型</td>
+<td>弹出末元素并<strong>返回它</strong>；空数组当场 Fail-Fast（v1.01）</td>
+</tr>
+<tr>
+<td><code>a.sort()</code></td>
+<td><code>dial_array_sort</code></td>
+<td>数组类型</td>
+<td>原地<strong>升序排序</strong>；仅标量元素可用（v1.01）</td>
+</tr>
 </tbody>
 </table>
 <p>下标语法 <code>a[i]</code> 等价于 <code>a.get(i)</code>；<code>a[i] = v</code> 等价于 <code>a = a.set(i, v)</code>。嵌套下标 <code>a[i][j] = v</code> 同样支持（v0.99，见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）。</p>
+<p>v1.01 新增的 <code>remove</code> / <code>pop</code> / <code>sort</code> 见 <a href="#303-数组删除元素-removei--pop">§30.3</a> 与 <a href="#308-数组排序-sort">§30.8</a>。</p>
 <h3 id="113-为什么-push--set-要返回指针">11.3 为什么 <code>push</code> / <code>set</code> 要返回指针</h3>
 <p>这两种操作在需要扩容或存在多个持有者时，会产生<strong>新的</strong>不透明指针。
 编译器强制把返回值写回接收变量，杜绝"旧指针失效"的悬垂问题：</p>
@@ -1958,6 +2019,10 @@ C 侧完成了所有权交接（独占时返回同一指针、共享时克隆并
 因为所有不透明句柄（<code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code> / 不透明指针）共享同一份 <code>dial_rc_*</code> 引用计数，
 <code>channel</code> 则走原子引用计数 <code>dial_channel_*</code>。数组头部用一个 <code>kind</code> 字段记下自己的元素类别，
 <code>push</code> / <code>set</code> / 克隆 / 释放时据此对元素做对应的 retain / release，从而实现<strong>按元素 ARC</strong>。</p>
+<p>v1.01 起，<strong>标量元素也不止 <code>int</code></strong>：<code>float</code> / <code>byte</code> / <code>bool</code> / <code>char</code> 都能直接存——
+它们与 <code>int</code> 同为 8 字节值类型（无 ARC、无堆分配），只是 <code>float</code> 在槽位里存
+IEEE754 <strong>位模式</strong>（绝不 <code>fptosi</code> 截断小数），<code>bool</code> 存 <code>i1</code> 扩展后的 0/1。
+详见 <a href="#301-数组元素类型扩展">§30.1</a>。</p>
 <pre><code class="language-dial">var names: string[] = [&quot;alice&quot;, &quot;bob&quot;];   // 句柄元素：每个 string 都按元素 ARC 管理
 names.push(&quot;carol&quot;);                      // 自动 retain &quot;carol&quot;
 print(names[0]);                          // &quot;alice&quot;
@@ -2142,9 +2207,34 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 <td><code>bool</code></td>
 <td>按内容比较</td>
 </tr>
+<tr>
+<td><code>s.index_of(sub)</code></td>
+<td><code>dial_string_index_of</code></td>
+<td><code>int</code></td>
+<td>首次出现的<strong>字节偏移</strong>；未找到返回 <code>-1</code>（v1.01）</td>
+</tr>
+<tr>
+<td><code>s.replace(from, to)</code></td>
+<td><code>dial_string_replace</code></td>
+<td><code>string</code></td>
+<td>替换全部出现，返回<strong>新</strong>字符串（原串不变）（v1.01）</td>
+</tr>
+<tr>
+<td><code>s.trim()</code></td>
+<td><code>dial_string_trim</code></td>
+<td><code>string</code></td>
+<td>去首尾空白（空格 / 制表 / 换行 / 回车），返回新串（v1.01）</td>
+</tr>
+<tr>
+<td><code>s.split(sep)</code></td>
+<td><code>dial_string_split</code></td>
+<td><code>string[]</code></td>
+<td>按分隔符切分；可直接 <code>for</code> 遍历（v1.01）</td>
+</tr>
 </tbody>
 </table>
 <p><code>==</code> / <code>!=</code> 对 <code>string</code> 按<strong>内容</strong>比较（编译为 <code>dial_string_eq</code>），而非比较指针地址。</p>
+<p>v1.01 新增的四个方法见 <a href="#305-字符串方法补齐">§30.5</a>。</p>
 <h3 id="132-不可变语义">13.2 不可变语义</h3>
 <p>v0.2 未提供任何原地修改字符串的接口：所有操作（<code>concat</code>、<code>substring</code>）都产生新对象。
 字符串因此天生满足"只读推断"，跨函数共享永远是 O(1)。</p>
@@ -5955,8 +6045,8 @@ var ks: string[] = m.keys();    // 键快照
   现统一改为墓碑标记 + 负载过高时重建（老 <code>dial_map.c</code> 同步修复，<code>set&lt;T&gt;</code> 与
   <code>for (k, v in m)</code> 一并受益）。</li>
 <li><strong>已知边界</strong>：<code>V</code> 暂不开放 <code>string</code>（<code>get</code> 未命中时的默认 string 对象会带来所有权
-  移交歧义）；<code>map.values()</code> 当前只支持 <code>V = int</code>；<code>for (k, v in m)</code> 仍限老 <code>map</code>，
-  泛型 map 用 <code>keys()</code> / <code>values()</code> 快照配合 <code>for (v in arr)</code> 迭代。</li>
+  移交歧义）；<code>map.values()</code> 当前只支持 <code>V = int</code>。
+  （<code>for (k, v in m)</code> 对泛型 map 的限制已在 <strong>v1.01 解除</strong>，见 <a href="#307-泛型-mapkv-支持-for-k-v-in-m">§30.7</a>。）</li>
 </ul>
 <h3 id="296-实现落点">29.6 实现落点</h3>
 <table>
@@ -6008,12 +6098,347 @@ var ks: string[] = m.keys();    // 键快照
   <code>defer</code> 禁止跳转、<code>const</code> 遮蔽、<code>set</code> / <code>map&lt;K,V&gt;</code> 的类型约束等）；</li>
 <li><code>bash tests/run_tests.sh</code> A–O 全套通过，含 LSP 协议流纯净性、内存上界与所有权回归；</li>
 <li>2 万键 ARC 压测：泛型 map 峰值约 4.4 MB、<code>set&lt;int&gt;</code> 约 2.4 MB，无泄漏、无 Fail-Fast。</li>
+</ul>
+<hr />
+<h2 id="30-v101按真实程序盘点后的缺口补齐">30. v1.01：按「真实程序」盘点后的缺口补齐</h2>
+<p>v1.00 补齐了五组语言特性之后，下一步不是继续「凭想象加特性」，而是<strong>照着程序员写
+真实程序的方式，把编译器拿出来跑</strong>：先写 30 多个真实小程序，逐个看哪些能直接写、
+哪些要绕道、哪些只能模拟、哪些根本写不出来。盘点的结论集中在一张表里：</p>
+<table>
+<thead>
+<tr>
+<th>缺口</th>
+<th>此前状态</th>
+<th>v1.01 落点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数组只能装 <code>int</code></td>
+<td><code>float[]</code> / <code>byte[]</code> / <code>bool[]</code> / <code>char[]</code> 全部写不出来</td>
+<td>§30.1</td>
+</tr>
+<tr>
+<td>空数组写不出来</td>
+<td><code>var a = []</code> 无法推断元素类型</td>
+<td>§30.2</td>
+</tr>
+<tr>
+<td>数组删元素只能绕道</td>
+<td>只能重建整个数组</td>
+<td>§30.3</td>
+</tr>
+<tr>
+<td>提前释放资源要绕道</td>
+<td>只能靠嵌套块缩小作用域</td>
+<td>§30.4</td>
+</tr>
+<tr>
+<td>字符串只能取子串</td>
+<td><code>split</code> / <code>replace</code> / <code>trim</code> / <code>index_of</code> 全缺</td>
+<td>§30.5</td>
+</tr>
+<tr>
+<td>拿不到命令行参数 / 时间 / 随机数</td>
+<td>完全没有对应内建</td>
+<td>§30.6</td>
+</tr>
+<tr>
+<td>泛型 map 只能拿 <code>keys()</code> 再循环</td>
+<td><code>for (k, v in m)</code> 对 <code>map&lt;K,V&gt;</code> 不可用</td>
+<td>§30.7</td>
+</tr>
+<tr>
+<td>数组排序要手写</td>
+<td>只能自己写 O(n²) 冒泡</td>
+<td>§30.8</td>
+</tr>
+</tbody>
+</table>
+<p>盘点中最刺眼的一条是<strong>资源释放</strong>：此前想提前释放一个大数组，只能把它塞进一层
+嵌套块里靠作用域结束触发释放——实测峰值内存 <strong>57160 KB</strong>；改成 <code>drop()</code> 显式
+释放后，同样的三阶段程序峰值降到 <strong>33344 KB（-41.7%）</strong>，与嵌套块绕道
+（33460 KB）持平，却不必再套一层块、也不影响阶段间传数据。</p>
+<p>本节所有改动继续守住项目铁律：不引入 GC；不提供裸指针 / 地址取值 / 指针算术；
+不支持运算符重载；不支持一等函数 / 闭包；ARC 所有权语义不退化；
+<strong>零隐式转换铁律保持</strong>（<code>1 + 2.0</code> 仍然编译失败）。</p>
+<h3 id="301-数组元素类型扩展">30.1 数组元素类型扩展</h3>
+<p>数组元素类型白名单从「只有 <code>int</code>」放宽到<strong>全部标量 + 句柄</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>元素类型</th>
+<th>声明</th>
+<th>C 侧存储</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int</code></td>
+<td><code>int[]</code></td>
+<td><code>int64</code> 槽（原有）</td>
+</tr>
+<tr>
+<td><code>float</code></td>
+<td><code>float[]</code></td>
+<td><code>int64</code> 槽，存 <strong>IEEE754 位模式</strong></td>
+</tr>
+<tr>
+<td><code>byte</code></td>
+<td><code>byte[]</code></td>
+<td><code>int64</code> 槽（0~255，语义同 <code>byte</code>）</td>
+</tr>
+<tr>
+<td><code>char</code></td>
+<td><code>char[]</code></td>
+<td><code>int64</code> 槽（码点，语义同 <code>char</code>）</td>
+</tr>
+<tr>
+<td><code>bool</code></td>
+<td><code>bool[]</code></td>
+<td><code>int64</code> 槽，存 <code>i1</code> 扩展后的 0/1</td>
+</tr>
+<tr>
+<td><code>string</code> 等句柄</td>
+<td><code>string[]</code></td>
+<td><code>int64</code> 槽存指针，按元素 ARC</td>
+</tr>
+</tbody>
+</table>
+<p><strong>float 必须存位模式，不能 fptosi</strong>：这是本节最容易踩的坑。C 侧数组槽统一是
+<code>int64</code>，若把 <code>3.25</code> 用 <code>fptosi</code> 转过去，小数部分会被截断成 <code>3</code>——写进去的是
+另一个数。编译器侧因此统一走 <code>to_elem_bits</code> / <code>from_elem_bits</code> 这一对转换：
+<code>float</code> 走 LLVM <code>bitcast</code> 保留 IEEE754 位模式，<code>bool</code> 走 <code>i1 ↔ i64</code>，句柄走
+<code>ptr_to_int</code> / <code>int_to_ptr</code>，<code>int</code> / <code>byte</code> / <code>char</code> 本就是 <code>i64</code>。</p>
+<p>零隐式转换铁律<strong>不因元素类型放宽而松动</strong>：<code>float[]</code> 里 <code>push(3)</code>（<code>int</code> 字面量）
+依然编译失败，必须写 <code>push(3.0)</code>。</p>
+<h3 id="302-空数组字面量-">30.2 空数组字面量 <code>[]</code></h3>
+<p><code>var a: int[] = [];</code> 现在合法。此前 <code>[]</code> 无法推断元素类型，只能报错；现在元素类型
+由<strong>变量的类型标注</strong>提供。裸写 <code>var a = [];</code> 仍然编译失败——编译器不会替你猜。</p>
+<h3 id="303-数组删除元素-removei--pop">30.3 数组删除元素 <code>remove(i)</code> / <code>pop()</code></h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>a.remove(i)</code></td>
+<td>被删元素（元素类型）</td>
+<td>删除下标 <code>i</code> 处的元素；越界当场 Fail-Fast</td>
+</tr>
+<tr>
+<td><code>a.pop()</code></td>
+<td>被弹出的末元素</td>
+<td>空数组 <code>pop</code> 当场 Fail-Fast</td>
+</tr>
+</tbody>
+</table>
+<p>数组自身的变化（COW 可能更换指针）由编译器在接收变量处<strong>写回</strong>；被删元素的
+所有权随返回值移交给调用者，句柄类元素会额外 <code>retain</code> 一份。</p>
+<h3 id="304-drop显式提前释放">30.4 <code>drop()</code>：显式提前释放</h3>
+<pre><code class="language-dial">var buf: int[] = [1, 2, 3];
+drop(buf);          // 立刻释放，不必等到作用域结束
+print(buf.length()); // 编译期报错：变量 'buf' 已转移，无法使用
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>被 drop 的类型</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>string</code> / <code>bytes</code> / <code>array</code> / <code>map</code> / <code>map&lt;K,V&gt;</code> / <code>set</code> / <code>error</code> / <code>channel</code></td>
+<td>调用对应 <code>*_release</code>；引用计数归零则当场回收</td>
+</tr>
+<tr>
+<td><code>file</code></td>
+<td><code>dial_file_close</code>（<code>fclose</code>）</td>
+</tr>
+<tr>
+<td><code>thread</code></td>
+<td><code>dial_thread_join</code></td>
+</tr>
+<tr>
+<td><code>int</code> / <code>float</code> / <code>bool</code> / <code>byte</code> / <code>char</code> / 结构体</td>
+<td><strong>no-op</strong>（值类型没有所有权），drop 后变量仍可继续使用</td>
+</tr>
+</tbody>
+</table>
+<p>句柄类变量被 <code>drop</code> 后进入「已转移」状态：此后任何使用都在<strong>编译期</strong>被
+use-after-move 诊断拦下（「变量 'x' 已转移，无法使用」），杜绝 use-after-free。
+标量是值类型，drop 不改变所有权，因此<strong>不</strong>标记 moved——否则会误伤后续的合法使用。</p>
+<h3 id="305-字符串方法补齐">30.5 字符串方法补齐</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>s.split(sep)</code></td>
+<td><code>string[]</code></td>
+<td>按分隔符切分；<code>sep</code> 为空串时整串作为唯一元素；找不到分隔符时返回单元素数组</td>
+</tr>
+<tr>
+<td><code>s.replace(from, to)</code></td>
+<td><code>string</code></td>
+<td>替换全部出现，返回<strong>新</strong>字符串（原串不变）</td>
+</tr>
+<tr>
+<td><code>s.trim()</code></td>
+<td><code>string</code></td>
+<td>去掉首尾空白（空格 / 制表 / 换行 / 回车）</td>
+</tr>
+<tr>
+<td><code>s.index_of(sub)</code></td>
+<td><code>int</code></td>
+<td>首次出现的字节偏移；未找到返回 <code>-1</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="306-环境--时间--随机内建">30.6 环境 / 时间 / 随机内建</h3>
+<table>
+<thead>
+<tr>
+<th>内建</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>args()</code></td>
+<td><code>string[]</code></td>
+<td>命令行参数（<code>argv[1..]</code>）；每次调用返回一份独立副本</td>
+</tr>
+<tr>
+<td><code>now()</code></td>
+<td><code>float</code></td>
+<td>自 Unix 纪元起的秒数（含小数）</td>
+</tr>
+<tr>
+<td><code>sleep(ms)</code></td>
+<td>void</td>
+<td>休眠毫秒数</td>
+</tr>
+<tr>
+<td><code>random()</code></td>
+<td><code>int</code></td>
+<td><code>[0, 2^63)</code> 的伪随机整数</td>
+</tr>
+</tbody>
+</table>
+<p><code>args()</code> 需要拿到 OS 传进来的 <code>argv</code>，因此编译器生成的 <code>main</code> 入口改为接收
+<code>argc</code> / <code>argv</code>（C ABI 的 <code>int main(int, char**)</code>），并在入口处调用
+<code>dial_env_init(argc, argv)</code> 把参数捕获进运行时——对用户代码完全透明，
+既有程序不受影响。</p>
+<h3 id="307-泛型-mapkv-支持-for-k-v-in-m">30.7 泛型 <code>map&lt;K,V&gt;</code> 支持 <code>for (k, v in m)</code></h3>
+<p>v1.00 的泛型 map 只能 <code>keys()</code> / <code>values()</code> 拿快照再配 <code>for (v in arr)</code> 迭代，
+绕了一圈。现在 <code>for (k, v in m)</code> 对 <code>map&lt;K,V&gt;</code> 直接可用，且<strong>键 / 值按真实类型
+绑定</strong>：</p>
+<pre><code class="language-dial">var m: map&lt;string, int&gt; = new_kv_map();
+m.put(&quot;a&quot;, 10);
+for (k, v in m) { print(k); print(v); }   // k 是 string，v 是 int
+</code></pre>
+<p>所有权口径：循环里的 <code>k</code> / <code>v</code> 都是<strong>借来</strong>的（键借自键快照数组、值借自表本身，
+均未 <code>retain</code>），因此循环末尾与函数出口<strong>不释放</strong>它们——否则会重复释放表内元素。</p>
+<h3 id="308-数组排序-sort">30.8 数组排序 <code>sort()</code></h3>
+<pre><code class="language-dial">var a: int[] = [5, 3, 9, 1, 7];
+a.sort();          // 升序，就地排序
+</code></pre>
+<ul>
+<li>只支持<strong>可比较的标量元素</strong>：<code>int</code> / <code>float</code> / <code>byte</code> / <code>char</code> / <code>bool</code>；
+  <code>string[]</code> 等句柄元素无自然序，编译期拒绝；</li>
+<li><code>float</code> 按 <strong>IEEE754 数值序</strong>比较（负数正确排在最前），绝非位模式比较；</li>
+<li>遵守 COW 契约：数组被多者共享时先克隆再排序，<strong>不影响其他持有者</strong>；
+  排序后的指针写回接收变量。</li>
+</ul>
+<h3 id="309-实现落点">30.9 实现落点</h3>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>改动</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/ast.rs</code></td>
+<td><code>ArrayLit</code> 增加「期望元素类型」参数（供空数组推断）</td>
+</tr>
+<tr>
+<td><code>src/parser.rs</code></td>
+<td><code>parse_var_decl</code> 在已知数组类型时把期望元素类型注入 <code>[]</code></td>
+</tr>
+<tr>
+<td><code>src/semantic.rs</code></td>
+<td>元素类型白名单扩容；<code>string_method_type</code> / <code>array_method_type</code> 新方法；<code>args</code> / <code>now</code> / <code>sleep</code> / <code>random</code> 内建类型；<code>drop</code> 保留名与消费后禁用；<code>is_copy_type</code> 判定值类型</td>
+</tr>
+<tr>
+<td><code>src/codegen.rs</code></td>
+<td><code>to_elem_bits</code> / <code>from_elem_bits</code> 位模式转换；<code>dial_array_sort</code> / <code>dial_string_split</code> 等分派；<code>drop</code> 按类型分派；<code>main</code> 入口追加 <code>dial_env_init</code>；泛型 map 的 <code>for (k,v in m)</code> 双形态分派</td>
+</tr>
+<tr>
+<td><code>stdlib/dial_array.c</code></td>
+<td><code>dial_array_remove</code> / <code>dial_array_pop</code> / <code>dial_array_sort</code>（COW 感知）</td>
+</tr>
+<tr>
+<td><code>stdlib/dial_string.c</code></td>
+<td><code>dial_string_split</code> / <code>dial_string_replace</code> / <code>dial_string_trim</code> / <code>dial_string_index_of</code></td>
+</tr>
+<tr>
+<td><code>stdlib/dial_env.c</code></td>
+<td>新增：<code>dial_env_init</code> / <code>dial_args</code> / <code>dial_now</code> / <code>dial_random</code> / <code>dial_sleep</code></td>
+</tr>
+<tr>
+<td><code>src/package.rs</code></td>
+<td><code>STDLIB_ABI</code> 由 1 递增到 <strong>2</strong>（见下方「标准库 ABI 递增」）</td>
+</tr>
+<tr>
+<td><code>tools/</code> / <code>.github/workflows/ci.yml</code></td>
+<td>标准库包版本 <code>1.0.0 → 1.1.0</code>、打包 <code>--abi 2</code>、一键安装的 <code>STDLIB_RELEASE</code> → <code>stdlib-v1.1.0</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="3091-标准库-abi-递增破坏性变更">30.9.1 标准库 ABI 递增（破坏性变更）</h3>
+<p>新增 <code>dial_env.c</code> 意味着标准库<strong>多导出</strong>了一批符号，而编译器生成的 <code>main</code> 入口
+会<strong>主动调用</strong> <code>dial_env_init</code>。于是旧标准库包（<code>abi=1</code>）链接新编译器时，必然报出
+难懂的链接错误：</p>
+<pre><code>ld.lld: error: undefined symbol: dial_env_init
+</code></pre>
+<p>这属于<strong>破坏性 ABI 变更</strong>，因此把 <code>STDLIB_ABI</code> 由 1 递增到 <strong>2</strong>。递增后，旧包在
+<strong>链接期</strong>就被明确拦下，并给出重装指引（而不是让用户去追一个符号错误）：</p>
+<pre><code>已安装的标准库 'stdlib' ABI 不兼容：包 abi=1，编译器要求 abi=2。
+为避免不兼容的二进制悄悄链入程序，已中断链接。
+请先卸载旧包再安装匹配版本：
+  rm -rf ~/.dial/packages/stdlib
+</code></pre>
+<p>配套同步：官方标准库包版本 <code>1.0.0 → 1.1.0</code>，一键安装脚本的 <code>STDLIB_RELEASE</code>
+默认标签 <code>stdlib-v1.0.0 → stdlib-v1.1.0</code>。标准库仍<strong>独立发版</strong>（tag <code>stdlib-v*</code>），
+因此本次发布需要<strong>两个标签</strong>：<code>v1.1.0</code>（编译器）与 <code>stdlib-v1.1.0</code>（标准库包）。</p>
+<h3 id="3010-测试">30.10 测试</h3>
+<ul>
+<li>6 个新增正向示例 + 同名 <code>.expected</code> 黄金文件：<code>array_demo</code>（元素类型 / 空数组 /
+  <code>remove</code> / <code>pop</code>）、<code>drop_demo</code>、<code>string_methods_demo</code>、<code>env_demo</code>、
+  <code>kvmap_foreach_demo</code>、<code>sort_demo</code>；</li>
+<li>4 个新增负向用例：<code>array_empty_no_annot</code>、<code>array_push_wrong_elem</code>、
+  <code>drop_use_after_move</code>、<code>string_split_bad_arg</code>、<code>array_sort_handle_elem</code>；</li>
+<li><code>bash tests/run_tests.sh</code> A–O 全套通过。</li>
 </ul></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v1.00 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.01 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

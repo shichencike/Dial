@@ -33,6 +33,16 @@ DialArray dial_array_set_borrowed(DialArray a, int64_t i, int64_t v);
 int64_t  dial_array_length(DialArray a);
 /* v1.00：切片 [from, to)，返回同 kind 的新数组；句柄元素逐个 retain。 */
 DialArray dial_array_slice(DialArray a, int64_t from, int64_t to);
+/* 移除下标 i 的元素 / 弹出末尾元素：返回「可能更新后的」数组指针（共享时 COW 克隆后移位）。
+ * 被删元素的所有权移交给调用方（调用方应先 get 取出并 retain），本函数不返回它、也不释放它。
+ * 越界 / 空数组 pop 当场 Fail-Fast（dial_assert_fail）。 */
+DialArray dial_array_remove(DialArray a, int64_t i);
+DialArray dial_array_pop(DialArray a);
+
+/* 升序排序（v1.01）：被多者共享时先 COW 克隆再原地排序，返回（可能更新后的）指针。
+ * 仅对标量元素有意义：int/float/byte/char/bool 按数值升序；float 按 IEEE754 数值序
+ * （而非位模式，负数排序正确）。句柄元素（string 等）排序语义未定义，调用前已被编译器拒绝。 */
+DialArray dial_array_sort(DialArray a);
 
 DialArray dial_array_clone(DialArray a);
 void dial_array_retain(DialArray a);

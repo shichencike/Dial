@@ -1,0 +1,32 @@
+// 数组排序 sort()（v1.01）：原地升序排序（COW 语义，被共享时先克隆再排序）。
+// 仅支持可比较的标量元素：int / float / byte / char / bool。
+
+fn main(): int {
+    // int[]：升序
+    var a: int[] = [5, 3, 9, 1, 7];
+    a.sort();
+    for (x in a) { print(x); }
+
+    // float[]：按数值升序（负数排在最前，绝非位模式比较）
+    var f: float[] = [2.5, -3.25, 10.0, 0.5];
+    f.sort();
+    for (x in f) { print(x); }
+
+    // byte[] / char[]：同样可排
+    var b: byte[] = [int_to_byte(9), int_to_byte(2), int_to_byte(5)];
+    b.sort();
+    for (x in b) { print(byte_to_int(x)); }
+
+    var c: char[] = ['z', 'a', 'm'];
+    c.sort();
+    for (x in c) { print(x); }
+
+    // COW 隔离：b2 与 a2 共享同一 buffer，排序 a2 不影响 b2
+    var a2: int[] = [3, 1, 2];
+    var b2: int[] = a2;
+    a2.sort();
+    print(a2[0]);     // 1
+    print(b2[0]);     // 3
+
+    print(0);
+}

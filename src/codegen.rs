@@ -337,6 +337,14 @@ impl<'ctx> CodeGen<'ctx> {
             &[i8b.into(), i64b.into(), i64b.into()],
         );
         self.decl_func("dial_string_clone", i8b, &[i8b.into()]);
+        self.decl_func("dial_string_index_of", i64b, &[i8b.into(), i8b.into()]);
+        self.decl_func(
+            "dial_string_replace",
+            i8b,
+            &[i8b.into(), i8b.into(), i8b.into()],
+        );
+        self.decl_func("dial_string_trim", i8b, &[i8b.into()]);
+        self.decl_func("dial_string_split", i8b, &[i8b.into(), i8b.into()]);
         self.decl_void("dial_string_retain", &[i8b.into()]);
         self.decl_void("dial_string_release", &[i8b.into()]);
         self.decl_void("dial_print_string", &[i8b.into()]);
@@ -359,6 +367,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_array_length", i64b, &[i8b.into()]);
         self.decl_func("dial_array_slice", i8b, &[i8b.into(), i64b.into(), i64b.into()]);
         self.decl_func("dial_array_clone", i8b, &[i8b.into()]);
+        self.decl_func("dial_array_remove", i8b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_array_pop", i8b, &[i8b.into()]);
+        self.decl_func("dial_array_sort", i8b, &[i8b.into()]);
         self.decl_void("dial_array_retain", &[i8b.into()]);
         self.decl_void("dial_array_release", &[i8b.into()]);
         // Map (int -> int, ARC)
@@ -393,6 +404,12 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("ceil", f64b, &[f64b.into()]);
         self.decl_func("round", f64b, &[f64b.into()]);
         self.decl_func("fabs", f64b, &[f64b.into()]);
+        // v1.01：环境 / 时间 / 随机内建
+        self.decl_func("dial_args", i8b, &[]);
+        self.decl_func("dial_now", f64b, &[]);
+        self.decl_func("dial_random", i64b, &[]);
+        self.decl_void("dial_sleep", &[i64b.into()]);
+        self.decl_void("dial_env_init", &[i64b.into(), i8b.into()]);
         // v1.00：字符串插值所需的标量 -> 字符串转换
         self.decl_func("dial_bool_to_string", i8b, &[i64b.into()]);
         self.decl_void("dial_map_retain", &[i8b.into()]);
@@ -554,8 +571,11 @@ impl<'ctx> CodeGen<'ctx> {
         let ft = if f.ret == Type::Void {
             self.context.void_type().fn_type(&param_tys, false)
         } else if f.name == "main" && f.ret == Type::Int {
-            // main 走 C ABI：返回 int (i32)
-            self.context.i32_type().fn_type(&param_tys, false)
+            // main 走 C ABI：返回 int (i32)，且额外接收 argc/argv 供 args() 使用。
+            // argc 用 i64（与 dial_env_init 的 int64_t 形参一致），argv 为 i8*。
+            self.context
+                .i32_type()
+                .fn_type(&[self.context.i64_type().into(), self.i8ptr().into()], false)
         } else {
             self.dialc_type_to_llvm(&f.ret).fn_type(&param_tys, false)
         };
@@ -632,14 +652,59 @@ impl<'ctx> CodeGen<'ctx> {
 
     /// 数组元素类别 → dial_array_new 的 kind 参数（0=INT 1=RC 2=ATOMIC）。
     /// 与 runtime/dial_array.c 的 DIAL_ELEM_* 宏保持一致。
+    /// 数组元素类别 → dial_array_new 的 kind 参数。
+    /// 与 runtime/dial_array.c 的 DIAL_ELEM_* 宏保持一致：
+    /// 0=INT 1=RC 2=ATOMIC 3=FLOAT 4=BOOL 5=BYTE 6=CHAR。
+    /// 3~6 都是无所有权的标量：C 侧 elem_retain/elem_release 对它们本就是 no-op，
+    /// 故无需改 C 逻辑，只要编译器侧 kind 数字一致即可。
     fn array_elem_kind(&self, t: &Type) -> u64 {
         match t {
             Type::Int => 0,
+            Type::Float => 3,
+            Type::Bool => 4,
+            Type::Byte => 5,
+            Type::Char => 6,
             Type::Channel(_) => 2,
             Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Opaque(_) => {
                 1
             }
             _ => 0, // 理论上不可达：check_type_wellformed 已拒绝其它元素类型
+        }
+    }
+
+    /// 把 Dial 值按元素类型转成 C 侧数组槽统一的 i64 位模式（与 kv_arg 同思路）：
+    /// float 走 bitcast（保留 IEEE754 位模式，绝不 fptosi 丢小数）、bool 走 zext、
+    /// 句柄走 ptr_to_int、int/byte/char 本就是 i64。
+    fn to_elem_bits(&self, v: BasicValueEnum<'ctx>, t: &Type) -> IntValue<'ctx> {
+        if *t == Type::Float {
+            self.builder
+                .build_bit_cast(v, self.context.i64_type(), "f2bits")
+                .unwrap()
+                .into_int_value()
+        } else {
+            self.to_i64(v, t)
+        }
+    }
+
+    /// 把 C 侧返回的 i64 槽位模式还原成 Dial 的 LLVM 值（与 kv_from_bits 同思路）。
+    fn from_elem_bits(&self, t: &Type, v: IntValue<'ctx>) -> BasicValueEnum<'ctx> {
+        match t {
+            Type::Float => self.builder
+                .build_bit_cast(v, self.context.f64_type(), "bits2f")
+                .unwrap().into(),
+            Type::Bool => self.builder
+                .build_int_compare(
+                    IntPredicate::NE, v,
+                    self.context.i64_type().const_int(0, false), "bits2b",
+                )
+                .unwrap().into(),
+            Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::Set(_)
+                | Type::KvMap(..) | Type::Error | Type::Channel(_) | Type::Opaque(_) => {
+                self.builder
+                    .build_int_to_ptr(v, self.i8ptr(), "bits2p")
+                    .unwrap().into()
+            }
+            _ => v.into(), // Int / Byte / Char 都是 i64
         }
     }
 
@@ -1133,6 +1198,17 @@ impl<'ctx> CodeGen<'ctx> {
         let mut scopes: CgScopes = vec![HashMap::new()];
         // 函数体作为最外层作用域：压入对应的 defer 帧（下标 0，与 scopes[0] 对应）。
         self.push_defer_frame();
+
+        // main 入口：把 OS 传来的 argc/argv 交给运行时，供 args() 内建取用。
+        // （其余函数的参数仍按 Dial 签名正常处理，不受影响。）
+        if f.name == "main" {
+            let argc = function.get_nth_param(0).unwrap();
+            let argv = function.get_nth_param(1).unwrap();
+            self.call_c_void(
+                "dial_env_init",
+                &[argc.into(), argv.into()],
+            );
+        }
         for (i, (pname, pty)) in f.params.iter().enumerate() {
             let llvm_ty = self.dialc_type_to_llvm(pty);
             let ptr = self.alloca_in_entry(function, llvm_ty, pname);
@@ -1650,7 +1726,7 @@ impl<'ctx> CodeGen<'ctx> {
                 let idxi64 = self.to_i64(idx, &type_of(index, scopes, functions, structs)?);
                 let val = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
                 let vty = type_of(value, scopes, functions, structs)?;
-                let vali64 = self.to_i64(val, &vty);
+                let vali64 = self.to_elem_bits(val, &vty);
                 // Fail-Fast：越界写是 C 里最阴险的 Bug（悄悄改坏相邻数据），当场 trap。
                 // ReleaseFast 下这段（含这次 length 调用）被整段消除，零开销。
                 if self.checks_enabled() {
@@ -1917,17 +1993,9 @@ impl<'ctx> CodeGen<'ctx> {
                     .last_mut()
                     .unwrap()
                     .insert(value.clone(), (elem_t.clone(), (true, v_ptr)));
-                // 取第 i 个元素并绑定到 v（共享所有权：句柄类元素需 retain 一份）
+                // 取第 i 个元素并绑定到 v（按元素类型还原位模式；句柄类元素需 retain 一份）
                 let res = self.call_c("dial_array_get", &[arr_val.into(), i_val.into()]);
-                let ev: BasicValueEnum = if matches!(elem_t, Type::Int) {
-                    res
-                } else {
-                    let p = self
-                        .builder
-                        .build_int_to_ptr(res.into_int_value(), self.i8ptr(), "eptr")
-                        .unwrap();
-                    p.into()
-                };
+                let ev = self.from_elem_bits(&elem_t, res.into_int_value());
                 if Self::is_heap_type(&elem_t) {
                     self.retain(&elem_t, ev);
                 }
@@ -1972,20 +2040,37 @@ impl<'ctx> CodeGen<'ctx> {
                 col,
             } => {
                 let i64t = self.context.i64_type();
+                // 判定容器类型：map（int->int）走 dial_map_*；map<K,V> 走 dial_kvmap_*。
+                // v1.01 起两者都支持 for (k, v in m)。
+                let ct = type_of(coll, scopes, functions, structs)?;
+                let is_kv = matches!(ct, Type::KvMap(..));
+                let (k_ty, v_ty): (Type, Type) = match &ct {
+                    Type::KvMap(k, v) => ((**k).clone(), (**v).clone()),
+                    _ => (Type::Int, Type::Int),
+                };
                 let coll_val = self.gen_expr(coll, function, scopes, func_values, functions, structs)?;
                 // 快照键集登记进函数级作用域帧：由 return / 函数末尾的 release_all 统一释放。
-                // 这样即便循环体内提前 return 也不会泄漏；循环体帧每轮只释放 k/v（均为 int），
+                // 这样即便循环体内提前 return 也不会泄漏；循环体帧每轮只释放 k/v，
                 // 不会误释放快照，正常落穿与提前返回走同一条释放路径。
-                let keys = self.call_c("dial_map_keys", &[coll_val.into()]);
+                // KvMap 的键数组元素类别与 K 一致（string 键为 RC 数组，元素已 retain），
+                // 释放数组时一并释放其元素。
+                let keys = if is_kv {
+                    self.call_c("dial_kvmap_keys", &[coll_val.into()])
+                } else {
+                    self.call_c("dial_map_keys", &[coll_val.into()])
+                };
                 let keys_slot = self.alloca_in_entry(function, self.i8ptr().into(), "map.keys");
                 self.builder.build_store(keys_slot, keys).unwrap();
                 scopes.first_mut().unwrap().insert(
                     format!("__mapkeys_{}_{}", line, col),
-                    (Type::Array(Box::new(Type::Int)), (true, keys_slot)),
+                    (Type::Array(Box::new(k_ty.clone())), (true, keys_slot)),
                 );
                 let key_len = self.call_c("dial_array_length", &[keys.into()]);
-                let k_ptr = self.alloca_in_entry(function, i64t.into(), key.as_str());
-                let v_ptr = self.alloca_in_entry(function, i64t.into(), value.as_str());
+                // map 的键/值恒为 int（i64 槽）；map<K,V> 的键/值按真实类型分配槽位。
+                let k_llvm: BasicTypeEnum = if is_kv { self.dialc_type_to_llvm(&k_ty) } else { i64t.into() };
+                let v_llvm: BasicTypeEnum = if is_kv { self.dialc_type_to_llvm(&v_ty) } else { i64t.into() };
+                let k_ptr = self.alloca_in_entry(function, k_llvm, key.as_str());
+                let v_ptr = self.alloca_in_entry(function, v_llvm, value.as_str());
                 let i_ptr = self.alloca_in_entry(function, i64t.into(), "fmi");
                 self.builder.build_store(i_ptr, i64t.const_int(0, false)).unwrap();
                 let header_bb = self.context.append_basic_block(function, "fem.cond");
@@ -2006,13 +2091,28 @@ impl<'ctx> CodeGen<'ctx> {
                 self.push_defer_frame();
                 self.loop_stack.borrow_mut().push(fem_frame);
                 scopes.push(HashMap::new());
-                scopes.last_mut().unwrap().insert(key.clone(), (Type::Int, (true, k_ptr)));
-                scopes.last_mut().unwrap().insert(value.clone(), (Type::Int, (true, v_ptr)));
-                // k = keys[i]; v = map.get(k)
+                scopes.last_mut().unwrap().insert(key.clone(), (k_ty.clone(), (true, k_ptr)));
+                scopes.last_mut().unwrap().insert(value.clone(), (v_ty.clone(), (true, v_ptr)));
+                // k = keys[i]（位模式），按 K 类型还原；v = m.get(k)。
                 let ki = self.call_c("dial_array_get", &[keys.into(), i_val.into()]);
-                let vi = self.call_c("dial_map_get", &[coll_val.into(), ki.into()]);
-                self.builder.build_store(k_ptr, ki).unwrap();
-                self.builder.build_store(v_ptr, vi).unwrap();
+                let kval = self.from_elem_bits(&k_ty, ki.into_int_value());
+                let vi = if is_kv {
+                    // map<K,V>：键以位模式交给 dial_kvmap_get，返回值再以 V 类型还原。
+                    // get 返回的是「借用」自表内的值（未 retain），因此循环末尾不得释放 v。
+                    let kb = self.to_elem_bits(kval, &k_ty);
+                    self.call_c("dial_kvmap_get", &[coll_val.into(), kb.into()])
+                } else {
+                    self.call_c("dial_map_get", &[coll_val.into(), ki.into()])
+                };
+                let vval = self.from_elem_bits(&v_ty, vi.into_int_value());
+                self.builder.build_store(k_ptr, kval).unwrap();
+                self.builder.build_store(v_ptr, vval).unwrap();
+                // map<K,V> 的 k/v 均借自键快照数组 / 表本身（未转移所有权），
+                // 标记 moved 使循环末尾与函数出口的释放跳过它们，避免重复释放 / 误释放。
+                if is_kv {
+                    self.moved.borrow_mut().insert(k_ptr);
+                    self.moved.borrow_mut().insert(v_ptr);
+                }
                 for s in body {
                     self.gen_stmt(&s, function, scopes, func_values, functions, structs)?;
                 }
@@ -2770,22 +2870,18 @@ impl<'ctx> CodeGen<'ctx> {
                     self.emit_bounds_check(function, len.into_int_value(), ii64);
                 }
                 let res = self.call_c("dial_array_get", &[aptr.into(), ii64.into()]);
-                // int 元素：i64 即值本身；句柄元素：把 i64 位模式还原成 i8*（与 push/set 的 ptr_to_int 对称）
-                if matches!(elem_t, Type::Int) {
-                    Ok(res)
-                } else {
-                    let p = self
-                        .builder
-                        .build_int_to_ptr(res.into_int_value(), self.i8ptr(), "eptr")
-                        .unwrap();
-                    Ok(p.into())
-                }
+                // 按元素类型把 i64 槽位模式还原：int/byte/char 原样，float bitcast，
+                // bool i1↔i64，句柄 int_to_ptr（与 push/set 的 ptr_to_int 对称）。
+                Ok(self.from_elem_bits(&elem_t, res.into_int_value()))
             }
-            Expr::ArrayLit(elems) => {
-                let elem_ty = if elems.is_empty() {
-                    Type::Int
-                } else {
-                    type_of(&elems[0], scopes, functions, structs)?
+            Expr::ArrayLit(elems, expect) => {
+                let elem_ty = match expect {
+                    Some(et) => (**et).clone(),
+                    None => if elems.is_empty() {
+                        Type::Int
+                    } else {
+                        type_of(&elems[0], scopes, functions, structs)?
+                    },
                 };
                 let kind = self.array_elem_kind(&elem_ty);
                 let mut cur = self.call_c(
@@ -2795,7 +2891,7 @@ impl<'ctx> CodeGen<'ctx> {
                 for el in elems {
                     let ev = self.gen_expr(el, function, scopes, func_values, functions, structs)?;
                     let ety = type_of(el, scopes, functions, structs)?;
-                    let ei64 = self.to_i64(ev, &ety);
+                    let ei64 = self.to_elem_bits(ev, &ety);
                     cur = self.call_c("dial_array_push", &[cur.into(), ei64.into()]);
                     // push 会为元素 retain 一份（数组成为持有者）。字面量自带的那一份
                     // 所有权本应直接移交数组，故此处归还——否则每个字面量元素泄漏一份引用。
@@ -2901,6 +2997,7 @@ impl<'ctx> CodeGen<'ctx> {
                     name.as_str(),
                     "assert" | "panic" | "exit" | "min" | "max" | "abs"
                         | "sqrt" | "pow" | "floor" | "ceil" | "round"
+                        | "args" | "now" | "random" | "sleep"
                 ) {
                     return self.gen_builtin_v1(
                         name, args, function, scopes, func_values, functions, structs,
@@ -3072,6 +3169,46 @@ impl<'ctx> CodeGen<'ctx> {
                         let msg =
                             self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         Ok(self.call_c("dial_error_new", &[msg.into()]))
+                    }
+                    // drop(x)：提前释放一个变量的所有权（move 语义）。
+                    //   - file 走 dial_file_close（fclose）、thread 走 dial_thread_join；
+                    //   - 其余 ARC 句柄（string / array / map / set / kvmap / error / channel）
+                    //     统一走 self.release（按类型分派 *_release）；
+                    //   - 标量（int / float / bool / byte / char）无所有权，no-op。
+                    // 释放后该槽位标记 moved（codegen 层），防止后续重复释放或 use-after-free。
+                    "drop" => {
+                        let vname = match &args[0] {
+                            Expr::Var(n) => n.clone(),
+                            _ => {
+                                return Err(DialcError::new(
+                                    "语义错误：drop() 的参数必须是变量名",
+                                    0, 0,
+                                ))
+                            }
+                        };
+                        let info = scopes
+                            .iter()
+                            .rev()
+                            .find_map(|s| s.get(&vname).map(|v| v.clone()))
+                            .ok_or_else(|| {
+                                DialcError::new(format!("未声明的变量 '{}'", vname), 0, 0)
+                            })?;
+                        let (ty, (_m, ptr)) = info;
+                        match ty {
+                            Type::File => {
+                                let v =
+                                    self.builder.build_load(self.i8ptr(), ptr, "dropval").unwrap();
+                                self.call_c_void("dial_file_close", &[v.into()]);
+                            }
+                            Type::Thread => {
+                                let v =
+                                    self.builder.build_load(self.i8ptr(), ptr, "dropval").unwrap();
+                                self.call_c_void("dial_thread_join", &[v.into()]);
+                            }
+                            _ => self.release(&ty, ptr),
+                        }
+                        self.moved.borrow_mut().insert(ptr);
+                        Ok(self.context.i64_type().const_int(0, false).into()) // Void 占位
                     }
 
                     // ==================================================================
@@ -3454,11 +3591,26 @@ impl<'ctx> CodeGen<'ctx> {
                 let zero = i64t.const_int(0, false);
                 Ok(self.builder.build_int_compare(IntPredicate::NE, r.into_int_value(), zero, "eq").unwrap().into())
             }
+            (Type::String, "index_of") => {
+                let sub = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                Ok(self.call_c("dial_string_index_of", &[optr.into(), sub.into()]))
+            }
+            (Type::String, "replace") => {
+                let from = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                let to = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                Ok(self.call_c("dial_string_replace", &[optr.into(), from.into(), to.into()]))
+            }
+            (Type::String, "trim") => Ok(self.call_c("dial_string_trim", &[optr.into()])),
+            (Type::String, "split") => {
+                let sep = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                Ok(self.call_c("dial_string_split", &[optr.into(), sep.into()]))
+            }
             (Type::Array(_), "length") => Ok(self.call_c("dial_array_length", &[optr.into()])),
             (Type::Array(_), "push") => {
                 let elem_ty = type_of(&args[0], scopes, functions, structs)?;
                 let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
-                let v_i64 = self.to_i64(v, &elem_ty);
+                // 用 to_elem_bits：float 走 bitcast 保留 IEEE754 位模式，绝不 fptosi 截断小数。
+                let v_i64 = self.to_elem_bits(v, &elem_ty);
                 let res = self.call_c("dial_array_push", &[optr.into(), v_i64.into()]);
                 // 元素归属结算：push 已为元素 retain 一份，借来的值不得再释放、
                 // 自带所有权的值（字面量等）应把临时所有权移交给数组。
@@ -3466,20 +3618,16 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(res)
             }
             (Type::Array(e), "get") => {
-                let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
+                let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &Type::Int);
                 let res = self.call_c("dial_array_get", &[optr.into(), i.into()]);
-                if matches!(**e, Type::Int) {
-                    Ok(res)
-                } else {
-                    let p = self.builder.build_int_to_ptr(res.into_int_value(), self.i8ptr(), "eptr").unwrap();
-                    Ok(p.into())
-                }
+                // 按元素类型还原 i64 槽位模式（float bitcast、bool i1↔i64、句柄 int_to_ptr）。
+                Ok(self.from_elem_bits(e.as_ref(), res.into_int_value()))
             }
             (Type::Array(_), "set") => {
-                let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
+                let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &Type::Int);
                 let elem_ty = type_of(&args[1], scopes, functions, structs)?;
                 let v = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
-                let v_i64 = self.to_i64(v, &elem_ty);
+                let v_i64 = self.to_elem_bits(v, &elem_ty);
                 let res = self.call_c("dial_array_set", &[optr.into(), i.into(), v_i64.into()]);
                 // 元素归属结算：set 已为元素 retain 一份，借来的值不得再释放、
                 // 自带所有权的值（字面量等）应把临时所有权移交给数组。
@@ -3487,6 +3635,53 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(res)
             }
             (Type::Array(_), "clone") => Ok(self.call_c("dial_array_clone", &[optr.into()])),
+            // remove / pop：返回被删元素（已还原为元素类型），并就地写回数组
+            // （COW 可能更新指针）。先 get 取出被删元素，句柄类额外 retain 一份，
+            // 因为 remove/pop 会从数组释放它；随后把数组新指针写回接收变量（仅接收者为变量时）。
+            (Type::Array(e), "remove") => {
+                let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &Type::Int);
+                let got = self.call_c("dial_array_get", &[optr.into(), i.into()]);
+                let removed = self.from_elem_bits(e.as_ref(), got.into_int_value());
+                if Self::is_heap_type(e.as_ref()) { self.retain(e.as_ref(), removed); }
+                let newp = self.call_c("dial_array_remove", &[optr.into(), i.into()]);
+                if let Expr::Var(name) = obj {
+                    if let Some((_, (_m, ptr))) =
+                        scopes.iter().rev().find_map(|s| s.get(name).map(|v| v.clone()))
+                    {
+                        self.builder.build_store(ptr, newp).unwrap();
+                    }
+                }
+                Ok(removed)
+            }
+            (Type::Array(e), "pop") => {
+                let len = self.call_c("dial_array_length", &[optr.into()]);
+                let last = self.builder.build_int_sub(len.into_int_value(), i64t.const_int(1, false), "last").unwrap();
+                let got = self.call_c("dial_array_get", &[optr.into(), last.into()]);
+                let removed = self.from_elem_bits(e.as_ref(), got.into_int_value());
+                if Self::is_heap_type(e.as_ref()) { self.retain(e.as_ref(), removed); }
+                let newp = self.call_c("dial_array_pop", &[optr.into()]);
+                if let Expr::Var(name) = obj {
+                    if let Some((_, (_m, ptr))) =
+                        scopes.iter().rev().find_map(|s| s.get(name).map(|v| v.clone()))
+                    {
+                        self.builder.build_store(ptr, newp).unwrap();
+                    }
+                }
+                Ok(removed)
+            }
+            // sort()：将数组排序（COW 若被共享则先克隆，再原地排序），返回
+            // （可能更新后的）数组指针，并写回接收变量（仅接收者为变量时）。
+            (Type::Array(_), "sort") => {
+                let newp = self.call_c("dial_array_sort", &[optr.into()]);
+                if let Expr::Var(name) = obj {
+                    if let Some((_, (_m, ptr))) =
+                        scopes.iter().rev().find_map(|s| s.get(name).map(|v| v.clone()))
+                    {
+                        self.builder.build_store(ptr, newp).unwrap();
+                    }
+                }
+                Ok(newp)
+            }
             (Type::Map, "put") => {
                 let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
                 let v = self.to_i64(self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?, &type_of(&args[1], scopes, functions, structs)?);
@@ -3918,6 +4113,14 @@ impl<'ctx> CodeGen<'ctx> {
             "exit" => {
                 let c = gen(&args[0])?;
                 self.call_c_void("dial_exit", &[c.into()]);
+                Ok(zero)
+            }
+            "args" => Ok(self.call_c("dial_args", &[])),
+            "now" => Ok(self.call_c("dial_now", &[])),
+            "random" => Ok(self.call_c("dial_random", &[])),
+            "sleep" => {
+                let ms = gen(&args[0])?;
+                self.call_c_void("dial_sleep", &[ms.into()]);
                 Ok(zero)
             }
             "min" | "max" => {

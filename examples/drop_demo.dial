@@ -1,0 +1,33 @@
+// drop() 内建（v1.01）：显式提前释放一个变量的所有权。
+//   - ARC 句柄（string / array / map / set / kvmap / error / channel）：立即调用对应 *_release，
+//     把引用计数减到 0 的话当场释放；释放后该变量被标记为「已转移」，再次使用触发 use-after-move 诊断。
+//   - 标量（int / float / bool / byte / char）：无所有权，drop 是 no-op。
+//   - file / thread：走各自 close / join（本示例不覆盖文件/线程，见 channel/文件示例）。
+
+fn main(): int {
+    // 1) 数组句柄：drop 立即释放（引用计数归零则当场 free）。
+    var a: int[] = [1, 2, 3];
+    print(a.length());
+    drop(a);                 // 立即释放，等价于作用域结束时的隐式释放
+    print(1);                // drop 之后无法再使用 a（use-after-move，编译期拒绝）
+
+    // 2) 字符串句柄：同样可 drop。
+    var s: string = "hello";
+    print(s);
+    drop(s);
+    print(2);
+
+    // 3) 标量无所有权，drop 是 no-op（编译通过、运行无副作用）。
+    var n: int = 42;
+    drop(n);
+    print(n);                // 标量 drop 后仍能读（它没有所有权，不会 moved）
+
+    // 4) map / set 句柄也能 drop。
+    var m: map = new_map();
+    m.put(1, 100);
+    print(m.contains(1));
+    drop(m);
+    print(3);
+
+    print(0);                // 退出码
+}

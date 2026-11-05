@@ -1,0 +1,6 @@
+// 应当编译失败：array.sort() 只支持标量元素类型，string 元素无自然序，必须拒绝。
+fn main(): int {
+    var a: string[] = ["pear", "apple"];
+    a.sort();
+    return 0;
+}

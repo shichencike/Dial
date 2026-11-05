@@ -38,7 +38,7 @@
 #   DIALC_HOME      指定 ~/.dial 的位置（默认：$HOME/.dial）
 #   DIALC_SRC       指定 Dial 发行包根目录（含 stdlib/ 与 runtime/；默认：脚本所在目录）
 #   DIAL_MIRROR_PREFIX  国内镜像前缀（默认 https://ghproxy.net/；置空则只用官方源）
-#   STDLIB_RELEASE  标准库独立发布标签（默认 stdlib-v1.0.0，与编译器解耦）
+#   STDLIB_RELEASE  标准库独立发布标签（默认 stdlib-v1.1.0，与编译器解耦）
 #   STDLIB_URL / DIAL_VSIX_URL  覆盖对应下载地址（镜像 / 自建源）
 #
 set -uo pipefail
@@ -48,7 +48,7 @@ DIALC_HOME="${DIALC_HOME:-$HOME/.dial}"
 
 # 内置默认版本：仅在「本地无任何 dialc 可探测」时用于 bootstrap。
 # 正常流程（已装好 dialc）会立刻被真实版本覆盖，所以这里写错也无所谓。
-DEFAULT_VERSION="1.0.0"
+DEFAULT_VERSION="1.1.0"
 DIAL_VERSION="${DIAL_VERSION:-$DEFAULT_VERSION}"
 DIAL_TAG="v${DIAL_VERSION}"
 
@@ -63,7 +63,7 @@ fi
 DIALC_SRC="${DIALC_SRC:-$SCRIPT_DIR}"
 
 # 标准库独立发布标签（与编译器解耦）
-STDLIB_RELEASE="${STDLIB_RELEASE:-stdlib-v1.0.0}"
+STDLIB_RELEASE="${STDLIB_RELEASE:-stdlib-v1.1.0}"
 
 REPO="shichencike/Dial"
 

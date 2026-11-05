@@ -1,64 +1,46 @@
-// dialc v0.2 示例：动态数组 —— 不透明指针 + C 标准库 FFI 契约
-//
-// `int[]` 在 IR 中同样只是一个 `ptr`（i8*）。其内存布局
-// `[int64 refcount][int64 len][int64 cap][int64 elems[]]` 由 C 侧私有维护。
-// 元素类型在编译期由类型系统固定：v0.2 仅支持 int 元素。
-//
-// 关键：push / set 可能触发写时复制（COW），因此它们**返回**数组指针，
-// 编译期强制把返回值写回接收变量，杜绝“旧指针失效”这类悬垂问题。
-
-fn sum_all(a: int[]): int {
-    var total: int = 0;
-    var i: int = 0;
-    while (i < a.length()) {
-        total = total + a.get(i);
-        i = i + 1;
-    }
-    return total;
-}
+// 数组元素类型扩展（v1.01）：float / byte / bool / char 现在都是合法的动态数组元素。
+// 底层沿用 int64 槽位 —— float 以 IEEE754 位模式存储（绝不 fptosi 截断小数）、
+// bool 以 i1<->i64 位模式、byte/char 与 int 同为 i64；句柄元素仍按元素 ARC 管理。
+// 另含：空数组字面量 `[]` 带类型标注、数组删除方法 remove(i) / pop()。
 
 fn main(): int {
-    // 数组字面量：依次 dial_array_new + 若干 dial_array_push
-    var a: int[] = [10, 20, 30];
+    // float[]：温度平均值（此前只能定点数模拟）
+    var temps: float[] = [36.5, 37.1, 38.2];
+    var sum: float = 0.0;
+    for (t in temps) { sum += t; }
+    print(sum / 3.0);
 
-    print("[array] 字面量 [10, 20, 30]");
-    print("[array] length = 3 ->");
-    print(a.length());
+    // byte[]：字节序列（此前只能改用 bytes 类型）
+    var buf: byte[] = [int_to_byte(1), int_to_byte(255)];
+    print(byte_to_int(buf[1]));
 
-    print("[array] 逐元素输出 ->");
-    var i: int = 0;
-    while (i < a.length()) {
-        print(a.get(i));
-        i = i + 1;
-    }
+    // char[]：字符序列（此前只能改用 string）
+    var cs: char[] = ['a', 'b', 'c'];
+    print(cs.length());
 
-    // push：返回（可能新的）指针，编译器自动写回 a
-    a.push(40);
-    print("[array] push(40) 后 length = 4 ->");
-    print(a.length());
-    print("[array] a.get(3) = 40 ->");
-    print(a.get(3));
+    // bool[]：布尔标志（此前只能改用 int 0/1）
+    var flags: bool[] = [true, false, true];
+    print(flags[0]);
+    print(flags[1]);
 
-    // 下标读取：a[i] 等价于 a.get(i)
-    print("[array] a[0] 等价于 a.get(0) = 10 ->");
-    print(a[0]);
+    // 空数组字面量 `[]`：必须带类型标注才能推断元素类型
+    var empty: int[] = [];
+    print(empty.length());
 
-    // 下标写入：a[i] = v 编译为 dial_array_set，并写回返回指针
-    a[0] = 99;
-    print("[array] a[0] = 99 后 ->");
-    print(a[0]);
-    print("[array] 其余元素不受影响 ->");
-    print(a[1]);
-    print(a[2]);
-    print(a[3]);
+    // remove(i)：删除下标处元素并返回它（数组自身由 COW 写回更新）
+    var a: int[] = [10, 20, 30, 40];
+    print(a.remove(1));   // 删除 20
+    print(a.length());    // 3
 
-    // 数组作为函数参数：按不透明指针传递，C 侧保证 COW 隔离
-    print("[array] sum_all(a) = 99+20+30+40 = 189 ->");
-    print(sum_all(a));
+    // pop()：弹出末尾元素并返回它
+    var b: int[] = [1, 2, 3];
+    print(b.pop());       // 3
+    print(b.length());    // 2
 
-    // 数组内部状态未被 callee 修改（读取语义）
-    print("[array] 调用后 length 仍为 4 ->");
-    print(a.length());
+    // 句柄元素数组也能删除：被删句柄的所有权随返回移交，数组不再持有
+    var names: string[] = ["a", "b", "c"];
+    print(names.remove(0));   // "a"
+    print(names.length());    // 2
 
     return 0;
 }

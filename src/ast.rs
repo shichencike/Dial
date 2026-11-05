@@ -160,7 +160,9 @@ pub enum Expr {
     /// 区间越界在运行时 Fail-Fast；句柄元素逐个 retain，绝不共享底层 buffer。
     Slice(Box<Expr>, Box<Expr>, Box<Expr>),
     /// 数组字面量：[e1, e2, ...]
-    ArrayLit(Vec<Expr>),
+    /// 第二个参数是「期望元素类型」：非空数组由第一个元素推断（None）；
+    /// 空数组 `[]` 无法推断，由 parse_var_decl 在已知声明类型时填入（如 `var a: int[] = [];`）。
+    ArrayLit(Vec<Expr>, Option<Box<Type>>),
     /// 结构体字面量：TypeName { f1: e1, f2: e2, ... }
     StructLit(String, Vec<(String, Expr)>),
     Binary(Box<Expr>, BinOp, Box<Expr>),

@@ -1,0 +1,7 @@
+// 应当编译失败：drop(a) 之后 a 的所有权已释放，再次使用必须触发 use-after-move 诊断。
+fn main(): int {
+    var a: int[] = [1, 2, 3];
+    drop(a);
+    print(a.length());
+    return 0;
+}

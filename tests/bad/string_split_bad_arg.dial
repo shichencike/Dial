@@ -1,0 +1,6 @@
+// 应当编译失败：string.split() 的参数必须是 string，int 不允许（零隐式转换铁律）。
+fn main(): int {
+    var s: string = "a,b,c";
+    var parts: string[] = s.split(1);
+    return 0;
+}

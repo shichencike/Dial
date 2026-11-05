@@ -1,6 +1,0 @@
-// 应当编译失败：char 是 4 字节标量（UTF-8 codepoint），但数组槽位语义是「int 或 8 字节句柄」，
-// char 既非 int 也非句柄，混入会导致 FFI 边界的位宽歧义，必须编译期拒绝。
-fn main(): int {
-    var a: char[] = ['a', 'b', 'c'];
-    return 0;
-}
