@@ -6967,7 +6967,8 @@ print(sum());             // 0（缺省就是空数组）
 <blockquote>
 <p><strong>关于 <code>v1.0</code> 标签</strong>：<code>v1.00</code> ~ <code>v1.03</code> 都是「v1.0 里程碑」达成过程中的分版记录
 （CHANGELOG 里已收拢到该标题下）。回调、变参等收尾特性在 <code>[v1.03]</code> 全部完成并
-回归通过，<strong>里程碑标签 <code>v1.0</code> 已打在本版本对应的提交上并推送</strong>。</p>
+回归通过，<strong>里程碑标签 <code>v1.0</code> 已打并推送；CI 修复完成后又删除同名标签、
+重新指向里程碑收尾的最新提交并重推</strong>（用于触发带 <code>stdlib.dialpkg</code> 的新 Release）。</p>
 <p><strong>发布与安装已与版本号解耦</strong>：一键安装脚本不再按 <code>v1.3.0</code> / <code>stdlib-v1.3.0</code>
 这类精确标签下载，而是通过 GitHub API 解析最新 Release 的真实资产名，统一走
 <code>releases/latest/download/&lt;资产名&gt;</code>；<code>stdlib.dialpkg</code> 也随每个 <code>v*</code> Release

@@ -188,6 +188,10 @@ int main(void) {
                             os.path.join(rt, "dial_rt_mem.c"),
                             os.path.join(rt, "dial_rt_trap.c"),
                             os.path.join(sl, "dial_string.c"),
+                            # dial_string_split() 会调用 dial_array_new/push；链接清单
+                            # 必须带上 dial_array.c，否则链接器报 undefined reference，
+                            # 会被误判成「CVE 仍可利用」而阻断发布。
+                            os.path.join(sl, "dial_array.c"),
                             os.path.join(sl, "dial_channel.c"),
                             "-lpthread", "-o", exe]
         rc, out, err = run_capture(cmd)

@@ -26,22 +26,28 @@
 <ul>
 <li><a href="#更新日志--changelog">更新日志 / Changelog</a><ul>
 <li><a href="#v10-里程碑--分版记录v100--v103">[v1.0 里程碑] — 分版记录（v1.00 ~ v1.03）</a></li>
+<li><a href="#ci-修复与-v10-标签重打--2026-11-06">[CI 修复与 v1.0 标签重打] — 2026-11-06</a><ul>
+<li><a href="#fixed">Fixed</a></li>
+<li><a href="#验证">验证</a></li>
+<li><a href="#发布">发布</a></li>
+</ul>
+</li>
 <li><a href="#安装与发布流程调整--2026-11-06">[安装与发布流程调整] — 2026-11-06</a><ul>
 <li><a href="#安装脚本零硬编码">安装脚本（零硬编码）</a></li>
 <li><a href="#发布流程同一页面">发布流程（同一页面）</a></li>
-<li><a href="#验证">验证</a></li>
+<li><a href="#验证_1">验证</a></li>
 </ul>
 </li>
 <li><a href="#v103--2026-11-05">[v1.03] — 2026-11-05</a><ul>
 <li><a href="#added">Added</a></li>
-<li><a href="#fixed">Fixed</a></li>
+<li><a href="#fixed_1">Fixed</a></li>
 <li><a href="#changed--发布协同">Changed / 发布协同</a></li>
 </ul>
 </li>
 <li><a href="#v102--2026-11-05">[v1.02] — 2026-11-05</a><ul>
 <li><a href="#added_1">Added</a></li>
 <li><a href="#-破坏性变更标准库-abi-递增">⚠ 破坏性变更（标准库 ABI 递增）</a></li>
-<li><a href="#fixed_1">Fixed</a></li>
+<li><a href="#fixed_2">Fixed</a></li>
 <li><a href="#测试">测试</a></li>
 </ul>
 </li>
@@ -55,7 +61,7 @@
 </li>
 <li><a href="#v100--2026-11-04">[v1.00] — 2026-11-04</a><ul>
 <li><a href="#added五组语言特性">Added（五组语言特性）</a></li>
-<li><a href="#fixed_2">Fixed</a></li>
+<li><a href="#fixed_3">Fixed</a></li>
 <li><a href="#changed_1">Changed</a></li>
 <li><a href="#testing">Testing</a></li>
 </ul>
@@ -107,7 +113,7 @@
 <li><a href="#fixed修复_3">Fixed（修复）</a></li>
 <li><a href="#added测试">Added（测试）</a></li>
 <li><a href="#docs文档_1">Docs（文档）</a></li>
-<li><a href="#验证_1">验证</a></li>
+<li><a href="#验证_2">验证</a></li>
 </ul>
 </li>
 <li><a href="#v095--2026-10-31">[v0.95] — 2026-10-31</a><ul>
@@ -116,7 +122,7 @@
 <li><a href="#added测试_1">Added（测试）</a></li>
 <li><a href="#刻意未做与-v094-规划一致本版仍不做">刻意未做（与 v0.94 规划一致，本版仍不做）</a></li>
 <li><a href="#docs文档_2">Docs（文档）</a></li>
-<li><a href="#验证_2">验证</a><ul>
+<li><a href="#验证_3">验证</a><ul>
 <li><a href="#流水线实跑记录github-actions-已验证">流水线实跑记录（GitHub Actions 已验证）</a></li>
 </ul>
 </li>
@@ -136,14 +142,14 @@
 <li><a href="#changed变更_9">Changed（变更）</a></li>
 <li><a href="#added测试_3">Added（测试）</a></li>
 <li><a href="#尚未实现本版刻意留白">尚未实现（本版刻意留白）</a></li>
-<li><a href="#验证_3">验证</a></li>
+<li><a href="#验证_4">验证</a></li>
 </ul>
 </li>
 <li><a href="#v092--2026-10-31">[v0.92] — 2026-10-31</a><ul>
 <li><a href="#added新增_10">Added（新增）</a></li>
 <li><a href="#changed语义与规则变更">Changed（语义与规则变更）</a></li>
 <li><a href="#fixed修复_4">Fixed（修复）</a></li>
-<li><a href="#验证_4">验证</a></li>
+<li><a href="#验证_5">验证</a></li>
 </ul>
 </li>
 <li><a href="#v091--2026-10-30">[v0.91] — 2026-10-30</a><ul>
@@ -173,7 +179,7 @@
 <li><a href="#added新增_14">Added（新增）</a></li>
 <li><a href="#changed变更_10">Changed（变更）</a></li>
 <li><a href="#设计约束本版刻意不做">设计约束（本版刻意不做）</a></li>
-<li><a href="#验证_5">验证</a></li>
+<li><a href="#验证_6">验证</a></li>
 </ul>
 </li>
 <li><a href="#v07--2026-10-30">[v0.7] — 2026-10-30</a><ul>
@@ -245,9 +251,10 @@
 <blockquote>
 <p><strong>里程碑与标签</strong>：<code>v1.00</code> 是从 <code>v0.99.1</code> 跳版而来的语言特性补齐里程碑，当时
 「回调 / 可变参数」等收尾特性尚未完成。到 <code>[v1.03]</code> 这些收尾特性已全部落地并
-回归通过（A–O 全绿、330 ✅ / 0 ❌、零编译警告），<strong>里程碑标签 <code>v1.0</code> 已打在
-<code>[v1.03]</code> 对应的提交上并推送</strong>。下面四个版本条目统一归到本里程碑之下，作为
-达成过程中的<strong>分版记录</strong>，而不是四个各自独立的「正式 v1.0」。</p>
+回归通过（A–O 全绿、330 ✅ / 0 ❌、零编译警告），<strong>里程碑标签 <code>v1.0</code> 已打并推送；
+在后续 CI 修复完成后，该标签被删除并重新指向里程碑收尾的最新提交</strong>（见
+上方「CI 修复与 v1.0 标签重打」章节）。下面四个版本条目统一归到本里程碑之下，
+作为达成过程中的<strong>分版记录</strong>，而不是四个各自独立的「正式 v1.0」。</p>
 <table>
 <thead>
 <tr>
@@ -280,6 +287,47 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
 因此发新版时无需改脚本、也无需补打配套标签，详见下方「安装与发布流程调整」。</p>
 </blockquote>
 <hr />
+<h2 id="ci-修复与-v10-标签重打--2026-11-06">[CI 修复与 v1.0 标签重打] — 2026-11-06</h2>
+<p><strong>目标</strong>：修掉上一节留下的两个红色测试作业，让 <code>release</code> 作业能真正产出带
+<code>stdlib.dialpkg</code> 的 <code>v*</code> Release；随后删除并重打 <code>v1.0</code> 标签触发新发布，
+使 <code>releases/latest</code> 指向这个新页面。纯修复，<strong>编译器版本 <code>1.3.0</code> 与
+<code>STDLIB_ABI 4</code> 均不变</strong>。</p>
+<h3 id="fixed">Fixed</h3>
+<ul>
+<li><strong>Windows 核心冒烟</strong>：<code>stdlib/dial_env.c</code> 原先依赖 POSIX 的
+  <code>srandom()</code> / <code>random()</code> / <code>clock_gettime()</code> / <code>nanosleep()</code>；MinGW-w64 只提供
+  <code>rand</code>（<code>RAND_MAX</code> 仅 32767），<code>clock_gettime</code> / <code>nanosleep</code> 则靠 winpthreads
+  才勉强可用，属于脆弱依赖。现改为：</li>
+<li>自实现 <code>xorshift64*</code> PRNG（纯 64 位整数运算），一次产出 64 位、掩掉符号位
+    得到 <code>[0, 2^63)</code> 的非负随机数；三平台行为一致，不再依赖任何 libc 随机函数；</li>
+<li><code>dial_now()</code> / <code>dial_sleep()</code> 在 <code>_WIN32</code> 下改用 Win32 原生
+    <code>GetSystemTimeAsFileTime</code>（FILETIME → Unix 纪元秒）与 <code>Sleep</code>，非 Windows
+    仍走 <code>clock_gettime</code> / <code>nanosleep</code>。</li>
+<li><strong>Linux 全量测试</strong>：<code>tools/cve_check.py</code> 的 <code>check_110_leak</code>（CVE-2026-DIAL-007）
+  编译清单漏了 <code>stdlib/dial_array.c</code>，导致 <code>dial_string_split()</code> →
+  <code>undefined reference to dial_array_new</code>，而检测器把「编译 / 链接失败」误判成
+  「❌ 仍可利用」并阻断发布。补全清单后该用例输出 <code>FIXED</code>（3/3 残留元素已释放），
+  全套 <strong>8/8 个 CVE 已确认修复</strong>。</li>
+</ul>
+<h3 id="验证">验证</h3>
+<ul>
+<li><code>zig cc -target x86_64-windows-gnu</code> 编译 <code>dial_env.c</code> 通过，<code>_WIN32</code> /
+  <code>__MINGW32__</code> 宏确认定义，预处理确认选中 <code>GetSystemTimeAsFileTime</code> + <code>Sleep</code>
+  分支；<code>-target aarch64-linux-musl</code> 与 <code>x86_64-linux-gnu</code> 全量编译链接通过
+  （zig 裸 windows 目标缺 <code>pthread.h</code> 是验证环境限制，CI 已安装 winpthreads）；</li>
+<li><code>bash tools/build_stdlib.sh</code> 全量归档通过；<code>examples/env_demo.dial</code> 端到端输出一致；
+  C 级验证：PRNG 连续 8 次取值互异且非负、<code>now()</code> 在 <code>sleep(12)</code> 后严格增大；</li>
+<li><code>python3 tools/cve_check.py --repeat 1</code> 8/8 通过；<code>bash tests/run_tests.sh</code> A–O 全绿。</li>
+</ul>
+<h3 id="发布">发布</h3>
+<ul>
+<li>删除本地与远程 <code>refs/tags/v1.0</code>（该标签此前<strong>没有</strong>关联任何 Release，
+  CI 的 <code>release</code> 作业因测试作业失败被 skip，删除是安全的）；</li>
+<li>在本节修复后的最新提交上重新创建 <code>v1.0</code> 附注标签并推送，触发新的 <code>v*</code> CI：
+  三平台构建 → <code>release</code> 作业上传 zip / <code>.vsix</code> / <code>stdlib.dialpkg</code> →
+  <code>releases/latest</code> 指向该页面。安装脚本零改动即可生效。</li>
+</ul>
+<hr />
 <h2 id="安装与发布流程调整--2026-11-06">[安装与发布流程调整] — 2026-11-06</h2>
 <p><strong>目标</strong>：安装脚本不再硬编码任何版本 / 标签，下载地址改为能重定向到最新 Release；
 标准库包与其他资产同处一个 Release 页面，方便重定向、也方便被找到。</p>
@@ -311,7 +359,7 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
 <li>README 的安装说明、§25.10、§32.5.1、§32.6 同步。历史分版条目里「独立发版 /
   两个标签」的描述系当时做法，不再代表当前约定。</li>
 </ul>
-<h3 id="验证">验证</h3>
+<h3 id="验证_1">验证</h3>
 <ul>
 <li><code>bash -n</code> 语法通过；<code>--help</code> / <code>--version</code> 输出正常；</li>
 <li>实测 GitHub API 解析出当前 latest 的 <code>tag_name</code> 与 4 个资产名，
@@ -320,12 +368,10 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
   脚本会给出「该版本发布时未附带 stdlib.dialpkg」的明确告警，符合预期。</li>
 </ul>
 <blockquote>
-<p><strong>已知前置</strong>：当前 CI 的两个测试作业仍为红色——Windows 侧 <code>stdlib/dial_env.c</code>
-用了 MinGW 不提供的 <code>srandom</code> / <code>random</code>；Linux 侧 <code>tools/cve_check.py</code> 的
-CVE-007 用例链接清单漏了 <code>dial_array.c</code>（<code>dial_string_split</code> → undefined
-reference to <code>dial_array_new</code>）。因此 <code>v1.0</code> 标签未产出新 Release，
-<code>releases/latest</code> 仍指向 <code>v0.98</code>。这两处修复后，下一个 <code>v*</code> 标签才会产出带
-<code>stdlib.dialpkg</code> 的新页面，latest 重定向即可指向它。本次未改动运行时与安全检测代码。</p>
+<p><strong>后续修复（同日）</strong>：上述两个测试作业已由上方「CI 修复与 v1.0 标签重打」
+章节修好；<code>v1.0</code> 标签删除后重打并推送，新的 <code>v*</code> Release 已附带
+<code>stdlib.dialpkg</code>，<code>releases/latest</code> 随之指向该页面，安装脚本无需再改动。
+本节记录的是修复前的发布流程设计与当时的已知前置。</p>
 </blockquote>
 <hr />
 <h2 id="v103--2026-11-05">[v1.03] — 2026-11-05</h2>
@@ -373,7 +419,7 @@ reference to <code>dial_array_new</code>）。因此 <code>v1.0</code> 标签未
   <strong>精确签名 thunk</strong> 间接调用（8 字节位模式 ↔ 类型值适配），C 完全不知道回调类型；
 - 仅支持标量元素（int / float / bool / byte / char）；<code>sort_by</code> 用插入排序而非
   <code>qsort</code>，因为后者的比较器拿不到 <code>fn_raw</code> / <code>state</code>，无法透传状态。</p>
-<h3 id="fixed">Fixed</h3>
+<h3 id="fixed_1">Fixed</h3>
 <ul>
 <li>修正 <code>len</code> 内建的错误提示：数组 / 字符串长度应写 <code>.length()</code>，此前误写 <code>.len()</code>；</li>
 <li><code>ArrayLit</code> 带期望元素类型时原本跳过元素一致性校验（旧行为对声明标注的空数组无害），
@@ -457,7 +503,7 @@ reference to <code>dial_array_new</code>）。因此 <code>v1.0</code> 标签未
   （v1.03 起为 <code>v1.3.0</code> 编译器与 <code>stdlib-v1.3.0</code> 标准库包，见上方 v1.03 条目）
   由维护者另行决定何时打；<code>v1.0</code> 里程碑标签已在 <code>[v1.03]</code> 之后打上，见文件开头说明。</li>
 </ul>
-<h3 id="fixed_1">Fixed</h3>
+<h3 id="fixed_2">Fixed</h3>
 <ul>
 <li><strong><code>break</code> / <code>continue</code> 未释放被跳出的作用域</strong>（既有缺陷）：外层臂的 <code>release_scope_locals</code>
   位于落穿路径上，而 break/continue 恰恰走不到那条路径——循环体的局部因此永远不释放。
@@ -607,7 +653,7 @@ reference to <code>dial_array_new</code>）。因此 <code>v1.0</code> 标签未
 - 正向示例：<code>examples/container_demo.dial</code>、<code>set_demo.dial</code>、<code>kvmap_demo.dial</code>。</p>
 <p><strong>已知边界</strong>：泛型 map 的 <code>V</code> 暂不开放 <code>string</code>（<code>get</code> 未命中时的默认对象会带来所有权移交歧义）；
 <code>map.values()</code> 当前只支持 <code>V = int</code>。两点计划在后续版本补齐。</p>
-<h3 id="fixed_2">Fixed</h3>
+<h3 id="fixed_3">Fixed</h3>
 <ul>
 <li><strong>开放寻址哈希表删除采用「左移紧凑」导致键不可达</strong>：<code>dial_map_remove</code> 与新
   <code>dial_kvmap_remove</code> 改为<strong>墓碑标记 + 负载重建</strong>。2 万键压测里删除 1 万个后 <code>size</code>
@@ -1151,7 +1197,7 @@ reference to <code>dial_array_new</code>）。因此 <code>v1.0</code> 标签未
   已由 v0.95 的跨文件符号表兑现；文首「仍待实现」清单同步收窄。</li>
 <li>官网重新生成，新增「包 URL 安装 + 一键安装」特性卡。</li>
 </ul>
-<h3 id="验证_1">验证</h3>
+<h3 id="验证_2">验证</h3>
 <ul>
 <li><strong>A～L 十二组测试全绿</strong>（新增 L 组 26 项断言）；
   端到端实测：URL 安装 → <code>import "demo"</code> → 编译 → 运行输出正确；
@@ -1255,7 +1301,7 @@ reference to <code>dial_array_new</code>）。因此 <code>v1.0</code> 标签未
   同时清理编译遗留物（<code>examples/*.o</code>、<code>examples/hello</code>、<code>examples/flow</code>、<code>.dialc_build/</code>、<code>TEST_RUN_*.log</code>）。
   <code>.gitignore</code> 补上 <code>REPORT_*.md</code>，避免这类一次性报告再次堆回仓库。</li>
 </ul>
-<h3 id="验证_2">验证</h3>
+<h3 id="验证_3">验证</h3>
 <ul>
 <li><strong>A/B/C/D/E/F/G/H/I/J 十组原有测试全绿</strong>（J 组「包安装三条硬规则」于 v0.94 收尾时锁死，v0.95 未改动其用例，只随套件一并执行），
   新增 <strong>K 组 25 项断言全通过</strong>；
@@ -1424,7 +1470,7 @@ reference to <code>dial_array_new</code>）。因此 <code>v1.0</code> 标签未
 <li>一键安装脚本（<code>install-dial.sh</code> / <code>.ps1</code>）、Windows 线程后端、官方标准库的 <code>.dialpkg</code> 化。</li>
 <li><code>.diali</code> 接入 LSP（补全 / 悬停）——待 LSP 骨架落地。</li>
 </ul>
-<h3 id="验证_3">验证</h3>
+<h3 id="验证_4">验证</h3>
 <ul>
 <li>A/B/D/E/C/F/G <strong>七组原有测试全绿</strong>，新增 H 组通过；端到端实测
   <code>demo_add</code>→7、<code>demo_version</code>→42、不透明句柄 <code>demo_new</code>+<code>demo_get</code>→99、void <code>demo_free</code> 正常。</li>
@@ -1478,7 +1524,7 @@ reference to <code>dial_array_new</code>）。因此 <code>v1.0</code> 标签未
 <li><strong>首页示例使用 <code>+</code> 拼接字符串</strong>：Dial 的字符串没有 <code>+</code> 运算符，已改为 <code>print("hello, ".concat(name))</code>
   （同步修正生成器 <code>tools/build_web.py</code> 与产物 <code>web/index.html</code>，避免重新生成时复发）。</li>
 </ul>
-<h3 id="验证_4">验证</h3>
+<h3 id="验证_5">验证</h3>
 <ul>
 <li>A/B/D/E/C/F <strong>六组原有测试全绿</strong>，新增 G 组（未捕获异常契约）通过。</li>
 <li>新增 5 个 char 负向用例 + 2 个写回规则负向用例 + 2 个 select 安全退出正例，均纳入自测。</li>
@@ -1737,7 +1783,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <li><strong>不支持 <code>close(ch)</code> / <code>try_recv</code> / <code>select</code> / 线程池 / 原子类型</strong>。</li>
 <li><strong>线程入口必须返回 <code>void</code>、禁止 <code>struct</code> 形参</strong>；<code>spawn</code> 首参只能是顶层具名函数（Dial 无一等函数）。</li>
 </ul>
-<h3 id="验证_5">验证</h3>
+<h3 id="验证_6">验证</h3>
 <ul>
 <li>A/B/D/E/C 五组全绿（新增 5 正向 + 19 负向），C 组产物仍<strong>仅依赖 libc</strong>（无 LLVM、无额外 .so）。</li>
 <li><strong>零隐式负担</strong>：<code>hello.dial</code> 产物中不含任何 <code>pthread</code> / <code>dial_channel</code> / <code>dial_thread</code> 符号。</li>

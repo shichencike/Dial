@@ -24,9 +24,10 @@
 
 > **里程碑与标签**：`v1.00` 是从 `v0.99.1` 跳版而来的语言特性补齐里程碑，当时
 > 「回调 / 可变参数」等收尾特性尚未完成。到 `[v1.03]` 这些收尾特性已全部落地并
-> 回归通过（A–O 全绿、330 ✅ / 0 ❌、零编译警告），**里程碑标签 `v1.0` 已打在
-> `[v1.03]` 对应的提交上并推送**。下面四个版本条目统一归到本里程碑之下，作为
-> 达成过程中的**分版记录**，而不是四个各自独立的「正式 v1.0」。
+> 回归通过（A–O 全绿、330 ✅ / 0 ❌、零编译警告），**里程碑标签 `v1.0` 已打并推送；
+> 在后续 CI 修复完成后，该标签被删除并重新指向里程碑收尾的最新提交**（见
+> 上方「CI 修复与 v1.0 标签重打」章节）。下面四个版本条目统一归到本里程碑之下，
+> 作为达成过程中的**分版记录**，而不是四个各自独立的「正式 v1.0」。
 >
 > | 分版 | 主题 |
 > | --- | --- |
@@ -39,6 +40,50 @@
 > 触发 CI 产出带全部资产的 Release。一键安装脚本**不依赖精确版本标签**——它通过
 > GitHub API 解析最新 Release 的真实资产名并走 `releases/latest/download/`，
 > 因此发新版时无需改脚本、也无需补打配套标签，详见下方「安装与发布流程调整」。
+
+---
+
+## [CI 修复与 v1.0 标签重打] — 2026-11-06
+
+**目标**：修掉上一节留下的两个红色测试作业，让 `release` 作业能真正产出带
+`stdlib.dialpkg` 的 `v*` Release；随后删除并重打 `v1.0` 标签触发新发布，
+使 `releases/latest` 指向这个新页面。纯修复，**编译器版本 `1.3.0` 与
+`STDLIB_ABI 4` 均不变**。
+
+### Fixed
+
+- **Windows 核心冒烟**：`stdlib/dial_env.c` 原先依赖 POSIX 的
+  `srandom()` / `random()` / `clock_gettime()` / `nanosleep()`；MinGW-w64 只提供
+  `rand`（`RAND_MAX` 仅 32767），`clock_gettime` / `nanosleep` 则靠 winpthreads
+  才勉强可用，属于脆弱依赖。现改为：
+  - 自实现 `xorshift64*` PRNG（纯 64 位整数运算），一次产出 64 位、掩掉符号位
+    得到 `[0, 2^63)` 的非负随机数；三平台行为一致，不再依赖任何 libc 随机函数；
+  - `dial_now()` / `dial_sleep()` 在 `_WIN32` 下改用 Win32 原生
+    `GetSystemTimeAsFileTime`（FILETIME → Unix 纪元秒）与 `Sleep`，非 Windows
+    仍走 `clock_gettime` / `nanosleep`。
+- **Linux 全量测试**：`tools/cve_check.py` 的 `check_110_leak`（CVE-2026-DIAL-007）
+  编译清单漏了 `stdlib/dial_array.c`，导致 `dial_string_split()` →
+  `undefined reference to dial_array_new`，而检测器把「编译 / 链接失败」误判成
+  「❌ 仍可利用」并阻断发布。补全清单后该用例输出 `FIXED`（3/3 残留元素已释放），
+  全套 **8/8 个 CVE 已确认修复**。
+
+### 验证
+
+- `zig cc -target x86_64-windows-gnu` 编译 `dial_env.c` 通过，`_WIN32` /
+  `__MINGW32__` 宏确认定义，预处理确认选中 `GetSystemTimeAsFileTime` + `Sleep`
+  分支；`-target aarch64-linux-musl` 与 `x86_64-linux-gnu` 全量编译链接通过
+  （zig 裸 windows 目标缺 `pthread.h` 是验证环境限制，CI 已安装 winpthreads）；
+- `bash tools/build_stdlib.sh` 全量归档通过；`examples/env_demo.dial` 端到端输出一致；
+  C 级验证：PRNG 连续 8 次取值互异且非负、`now()` 在 `sleep(12)` 后严格增大；
+- `python3 tools/cve_check.py --repeat 1` 8/8 通过；`bash tests/run_tests.sh` A–O 全绿。
+
+### 发布
+
+- 删除本地与远程 `refs/tags/v1.0`（该标签此前**没有**关联任何 Release，
+  CI 的 `release` 作业因测试作业失败被 skip，删除是安全的）；
+- 在本节修复后的最新提交上重新创建 `v1.0` 附注标签并推送，触发新的 `v*` CI：
+  三平台构建 → `release` 作业上传 zip / `.vsix` / `stdlib.dialpkg` →
+  `releases/latest` 指向该页面。安装脚本零改动即可生效。
 
 ---
 
@@ -83,12 +128,10 @@
 - `stdlib.dialpkg` 在当前 latest（`v0.98`，旧 Release 未附带该资产）返回 404，
   脚本会给出「该版本发布时未附带 stdlib.dialpkg」的明确告警，符合预期。
 
-> **已知前置**：当前 CI 的两个测试作业仍为红色——Windows 侧 `stdlib/dial_env.c`
-> 用了 MinGW 不提供的 `srandom` / `random`；Linux 侧 `tools/cve_check.py` 的
-> CVE-007 用例链接清单漏了 `dial_array.c`（`dial_string_split` → undefined
-> reference to `dial_array_new`）。因此 `v1.0` 标签未产出新 Release，
-> `releases/latest` 仍指向 `v0.98`。这两处修复后，下一个 `v*` 标签才会产出带
-> `stdlib.dialpkg` 的新页面，latest 重定向即可指向它。本次未改动运行时与安全检测代码。
+> **后续修复（同日）**：上述两个测试作业已由上方「CI 修复与 v1.0 标签重打」
+> 章节修好；`v1.0` 标签删除后重打并推送，新的 `v*` Release 已附带
+> `stdlib.dialpkg`，`releases/latest` 随之指向该页面，安装脚本无需再改动。
+> 本节记录的是修复前的发布流程设计与当时的已知前置。
 
 ---
 
