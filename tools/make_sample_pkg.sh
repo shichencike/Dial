@@ -22,6 +22,9 @@ cd "$OUT"
 #   int f(H)            以不透明句柄为参数
 #   void f(H)           释放（void —— 语句位置调用）
 cat > demo.c <<'EOF'
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 typedef struct { int v; } Demo;
 
@@ -30,6 +33,19 @@ int  demo_version(void)          { return 42; }
 void *demo_new(int v)            { Demo *d = (Demo *)malloc(sizeof(Demo)); d->v = v; return d; }
 int  demo_get(void *h)           { return ((Demo *)h)->v; }
 void demo_free(void *h)          { free(h); }
+
+/* v1.03：C 风格异构变参（FFI 特例）。fmt 是 Dial 的 string 句柄，
+ * payload 布局为 [int64 len][UTF-8 data\0]，故 C 字符串在 +8 处
+ * （与 stdlib/dial_string.c 的 dial_string_cstr 完全一致）。
+ * 尾部实参按 C varargs ABI 直传：i64 用 %ld、double 用 %f、bool 已提升为 i64。 */
+int64_t demo_vprintf(void *fmt, ...) {
+    const char *c = (const char *)fmt + 8;
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vprintf(c, ap);
+    va_end(ap);
+    return r;
+}
 EOF
 
 # ---- 2) 编译为静态库（目标 triple 与 dialc 的 host_triple() 保持一致）----
@@ -71,6 +87,10 @@ extern fn demo_get(h: DemoHandle): int;
 
 /// 释放句柄；空句柄上安全无操作
 extern fn demo_free(h: DemoHandle): void;
+
+/// C 风格异构变参（v1.03，FFI 特例）：固定参数严格检查，尾部参数按 C varargs ABI 直传。
+/// Dial 自身定义的函数不允许这样写（它们用同类型 ...xs: T 脱糖成 T[]）。
+extern fn demo_vprintf(fmt: string, ...): int;
 EOF
 
 # ---- 4) manifest.txt（JSON）+ 逐文件 SHA256 ----

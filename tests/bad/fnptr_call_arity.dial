@@ -1,0 +1,7 @@
+// 间接调用同样要校验参数个数与类型。
+fn inc(x: int): int { return x + 1; }
+fn main(): int {
+    var cb: fn(int): int = inc;
+    print(cb(1, 2));
+    return 0;
+}

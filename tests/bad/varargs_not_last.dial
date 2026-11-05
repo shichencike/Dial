@@ -1,0 +1,6 @@
+// ...xs 必须是参数列表的最后一项。
+fn f(...xs: int, y: int): int { return y; }
+fn main(): int {
+    print(f(1, 2));
+    return 0;
+}

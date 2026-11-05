@@ -25,15 +25,22 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
 <li><a href="#更新日志--changelog">更新日志 / Changelog</a><ul>
-<li><a href="#v102--2026-11-05">[v1.02] — 2026-11-05</a><ul>
+<li><a href="#v10-里程碑--分版记录v100--v103">[v1.0 里程碑] — 分版记录（v1.00 ~ v1.03）</a></li>
+<li><a href="#v103--2026-11-05">[v1.03] — 2026-11-05</a><ul>
 <li><a href="#added">Added</a></li>
-<li><a href="#-破坏性变更标准库-abi-递增">⚠ 破坏性变更（标准库 ABI 递增）</a></li>
 <li><a href="#fixed">Fixed</a></li>
+<li><a href="#changed--发布协同">Changed / 发布协同</a></li>
+</ul>
+</li>
+<li><a href="#v102--2026-11-05">[v1.02] — 2026-11-05</a><ul>
+<li><a href="#added_1">Added</a></li>
+<li><a href="#-破坏性变更标准库-abi-递增">⚠ 破坏性变更（标准库 ABI 递增）</a></li>
+<li><a href="#fixed_1">Fixed</a></li>
 <li><a href="#测试">测试</a></li>
 </ul>
 </li>
 <li><a href="#v101--2026-11-05">[v1.01] — 2026-11-05</a><ul>
-<li><a href="#added_1">Added</a></li>
+<li><a href="#added_2">Added</a></li>
 <li><a href="#changed">Changed</a></li>
 <li><a href="#-破坏性变更标准库-abi-递增_1">⚠ 破坏性变更（标准库 ABI 递增）</a></li>
 <li><a href="#测试_1">测试</a></li>
@@ -42,7 +49,7 @@
 </li>
 <li><a href="#v100--2026-11-04">[v1.00] — 2026-11-04</a><ul>
 <li><a href="#added五组语言特性">Added（五组语言特性）</a></li>
-<li><a href="#fixed_1">Fixed</a></li>
+<li><a href="#fixed_2">Fixed</a></li>
 <li><a href="#changed_1">Changed</a></li>
 <li><a href="#testing">Testing</a></li>
 </ul>
@@ -228,6 +235,105 @@
 <p>详见 <a href="README.md#23-版本号规则">README §23</a>。</p>
 </blockquote>
 <hr />
+<h2 id="v10-里程碑--分版记录v100--v103">[v1.0 里程碑] — 分版记录（v1.00 ~ v1.03）</h2>
+<blockquote>
+<p><strong>里程碑与标签</strong>：<code>v1.00</code> 是从 <code>v0.99.1</code> 跳版而来的语言特性补齐里程碑，但
+「回调 / 可变参数」等收尾特性当时尚未完成。按版本约定，<strong>只有这些收尾特性全部落地
+并回归通过之后，才够格打 <code>v1.0</code> 标签</strong>；因此本仓库不提前打 <code>v1.0</code> tag，
+已有标签里也没有它（现存的是 <code>v0.95</code> ~ <code>v0.98.1</code> 与独立发布标签 <code>stdlib-v1.0.0</code>）。
+下面四个版本条目统一归到本里程碑之下，作为达成过程中的<strong>分版记录</strong>，
+而不是四个各自独立的「正式 v1.0」。</p>
+<table>
+<thead>
+<tr>
+<th>分版</th>
+<th>主题</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[v1.00]</code></td>
+<td>语言特性补齐（五组）+ 泛型容器</td>
+</tr>
+<tr>
+<td><code>[v1.01]</code></td>
+<td>按「真实程序」盘点后的缺口补齐</td>
+</tr>
+<tr>
+<td><code>[v1.02]</code></td>
+<td><code>goto</code> / <code>with</code> / 裸指针，并补齐不透明句柄契约</td>
+</tr>
+<tr>
+<td><code>[v1.03]</code></td>
+<td>回调（函数指针）与可变参数</td>
+</tr>
+</tbody>
+</table>
+<p>发布仍以两个独立标签为准：<code>v1.3.0</code>（编译器）与 <code>stdlib-v1.3.0</code>（标准库包）。</p>
+</blockquote>
+<hr />
+<h2 id="v103--2026-11-05">[v1.03] — 2026-11-05</h2>
+<p><strong>回调与可变参数</strong>：一等函数指针 <code>fn(A, B): R</code>、同类型变参 <code>...xs: T</code>、
+<code>extern fn</code> 的 C 风格异构变参（FFI 特例），以及接受回调的 stdlib 高阶数组方法
+<code>map</code> / <code>filter</code> / <code>sort_by</code>。</p>
+<p>三件事互为因果：回调要用函数地址，于是先有函数指针；变参要接住「一批同类型实参」，
+于是脱糖成数组；而高阶方法正好是「回调 + 一批元素」的组合，用来验证前两者在真实
+调用链里不会引入隐藏开销。</p>
+<p>本版继续守住项目铁律：<strong>不引入 GC</strong>；<strong>不引入闭包</strong>（绝不隐式捕获环境）；
+<strong>零隐式转换</strong>（函数签名严格匹配、变参元素类型严格一致）；
+<strong>零隐藏开销</strong>（变参脱糖成普通 <code>T[]</code>，没有类型标签 / 装箱 / 运行期分派）。</p>
+<h3 id="added">Added</h3>
+<p><strong>一等函数指针 <code>fn(A, B): R</code></strong>
+- <code>Type::FnPtr</code> 底层就是 LLVM <code>ptr</code>（纯代码地址）：函数名可直接作右值、可赋值 /
+  传参 / 返回 / 存变量；<code>cb(x)</code> 走<strong>精确签名</strong>的间接调用（LLVM 18 的
+  <code>build_indirect_call</code>），参数个数与类型编译期校验；
+- <strong>没有闭包</strong>：无环境对象、无 <code>Fn</code> / <code>FnMut</code> / <code>FnOnce</code> 分类、无匿名函数语法；
+  回调要带状态必须显式传 <code>rawptr&lt;void&gt;</code>，裸指针生命周期由用户自己负责；
+- 不受 ARC 管理、无堆分配、<strong>无需释放</strong>：<code>drop(cb)</code>、<code>print(cb)</code>、
+  <code>with cb as p { }</code> 都在编译期拦下并给出明确指引；
+- <code>spawn</code> 首参仍要求顶层具名函数（线程 thunk 需按目标函数静态生成），但函数指针
+  可以作为普通回调参数传递；相关诊断与注释里「Dial 没有一等函数」的旧表述已同步。</p>
+<p><strong>同类型变参 <code>...xs: T</code></strong>
+- 在 <code>semantic.rs</code> 的 <code>analyze</code> 开头<strong>做 AST 脱糖</strong>：形参变成 <code>xs: T[]</code>，调用点尾部
+  实参打包成带元素类型标注的数组字面量；之后的类型检查 / LSP / codegen 只看得见
+  一个普通数组；
+- <strong>严禁隐藏类型标签 / 装箱 / 运行期分派</strong>；<code>...xs</code> 必须是参数列表最后一项，
+  不能与默认实参共存，元素类型须能作为数组元素；
+- <strong>拒绝异构</strong>：<code>sum(1, "a")</code> 编译期报「元素类型不一致」并引导「显式定义结构体或
+  自定义类型包」；
+- 变参数组是<strong>普通 ARC 数组</strong>：函数形参进入时 retain、退出时 release；调用点的临时
+  数组由编译器在调用结束后插入 release（20 万次调用峰值 RSS <strong>1348 KB</strong>，无泄漏）。
+  <strong>绝不能</strong>把裸指针的「手动释放」规则套到变参数组上。</p>
+<p><strong><code>extern fn</code> 的 C 风格异构变参（FFI 特例）</strong>
+- <code>.diali</code> 声明支持末尾 <code>...</code>：<code>extern fn demo_vprintf(fmt: string, ...): int;</code>，
+  LLVM 侧声明为 varargs 函数；
+- 固定参数仍做严格类型检查，尾部参数按 C ABI 直传（<code>bool</code> 的 i1 会 zext 成 i64，
+  <code>int</code> / <code>char</code> / <code>byte</code> 本就是 i64、<code>float</code> 本就是 f64）；
+- 只属于包 FFI，Dial 自身函数永远走同类型脱糖；无隐藏类型标签 / 装箱。</p>
+<p><strong>stdlib 高阶数组方法（接受回调）</strong>
+- <code>arr.map(f[, state])</code> / <code>arr.filter(f[, state])</code> / <code>arr.sort_by(cmp[, state])</code>；
+- 回调签名固定带 <code>rawptr&lt;void&gt;</code> 状态参数，状态由 C 运行时透传回回调（无闭包）；
+- C 侧新增 <code>dial_array_hof</code>，只做遍历 / 建数组 / 插入排序；回调经编译器生成的
+  <strong>精确签名 thunk</strong> 间接调用（8 字节位模式 ↔ 类型值适配），C 完全不知道回调类型；
+- 仅支持标量元素（int / float / bool / byte / char）；<code>sort_by</code> 用插入排序而非
+  <code>qsort</code>，因为后者的比较器拿不到 <code>fn_raw</code> / <code>state</code>，无法透传状态。</p>
+<h3 id="fixed">Fixed</h3>
+<ul>
+<li>修正 <code>len</code> 内建的错误提示：数组 / 字符串长度应写 <code>.length()</code>，此前误写 <code>.len()</code>；</li>
+<li><code>ArrayLit</code> 带期望元素类型时原本跳过元素一致性校验（旧行为对声明标注的空数组无害），
+  会让异构变参实参静默塞进数组——改为<strong>无条件逐元素校验</strong>，这是「严禁异构变参」的落点。</li>
+</ul>
+<h3 id="changed--发布协同">Changed / 发布协同</h3>
+<ul>
+<li><code>STDLIB_ABI</code> <strong>3 → 4</strong>（新增 <code>dial_array_hof</code>），官方标准库包版本 <code>1.2.0 → 1.3.0</code>；
+  <code>make_stdlib_pkg.py</code>、CI、一键安装脚本（sh / ps1）同步；</li>
+<li>4 个正向示例（<code>fnptr_demo</code> / <code>varargs_demo</code> / <code>callback_state_demo</code> / <code>hof_demo</code>）、
+  14 个负向用例；H 组新增 C 变参 <code>extern fn</code> 的正向与负向回归；</li>
+<li><code>tests/run_tests.sh</code> A–O 全套通过；版本 / 链接 / 官网检查通过；零编译警告。</li>
+<li><strong>版本层级</strong>：<code>[v1.00]</code> ~ <code>[v1.03]</code> 统一归入上方「v1.0 里程碑」大标题下作为分版记录；
+  <code>v1.0</code> 标签须待全部收尾特性完成后才打，本仓库当前不打该 tag，也不 push。</li>
+</ul>
+<hr />
 <h2 id="v102--2026-11-05">[v1.02] — 2026-11-05</h2>
 <p><strong>底层控制三件套</strong>：<code>goto</code> + 标签、<code>with</code> 资源作用域块、裸指针 <code>rawptr&lt;T&gt;</code>。</p>
 <p>三样互为因果：<code>goto</code> 是底层清理的利器，但无限制乱跳会把程序打崩，因此配三条<strong>死锁</strong>；
@@ -235,7 +341,7 @@
 于是裸指针必须先落地。</p>
 <p>本版继续守住项目铁律：<strong>不引入 GC</strong>；ARC 所有权语义不退化；<strong>零隐式转换</strong>
 （裸指针与 ARC 容器之间、裸指针与裸指针之间都<strong>没有</strong>隐式转换）。</p>
-<h3 id="added">Added</h3>
+<h3 id="added_1">Added</h3>
 <p><strong><code>with</code> 资源作用域块</strong>
 - 两种等价写法：<code>with 资源 as 名 { ... }</code> 与 <code>with 名 = 资源 { ... }</code>；
 - 块末自动释放：<code>file</code> → close、<code>thread</code> → join、裸指针 → raw_free；
@@ -291,10 +397,11 @@
 <li>配套同步：官方标准库包版本 <code>1.1.0 → 1.2.0</code>，打包默认 <code>--abi 3</code>，
   CI 发布作业 <code>--abi 3</code>，一键安装脚本的 <code>STDLIB_RELEASE</code> 默认标签
   <code>stdlib-v1.1.0 → stdlib-v1.2.0</code>（标准库仍<strong>独立发版</strong>，tag <code>stdlib-v*</code>）。</li>
-<li>发布协同项：v1.01 与 v1.02 目前都是<strong>本地提交、尚未打标签</strong>；合并发布时以
-  <strong>两个标签</strong>为准：<code>v1.2.0</code>（编译器）与 <code>stdlib-v1.2.0</code>（标准库包）。</li>
+<li>发布协同项：v1.01 ~ v1.03 目前都是<strong>本地提交、尚未打标签</strong>；合并发布时以
+  <strong>两个标签</strong>为准（v1.03 起为 <code>v1.3.0</code> 编译器与 <code>stdlib-v1.3.0</code> 标准库包，
+  见上方 v1.03 条目）。<code>v1.0</code> 里程碑标签须待全部收尾特性完成后才打，见文件开头说明。</li>
 </ul>
-<h3 id="fixed">Fixed</h3>
+<h3 id="fixed_1">Fixed</h3>
 <ul>
 <li><strong><code>break</code> / <code>continue</code> 未释放被跳出的作用域</strong>（既有缺陷）：外层臂的 <code>release_scope_locals</code>
   位于落穿路径上，而 break/continue 恰恰走不到那条路径——循环体的局部因此永远不释放。
@@ -318,8 +425,9 @@
 <p>本版继续守住项目铁律：不引入 GC；不提供裸指针 / 地址取值 / 指针算术；
 不支持运算符重载；不支持一等函数 / 闭包；ARC 所有权语义不退化；
 <strong>零隐式转换铁律保持</strong>（<code>1 + 2.0</code> 仍编译失败）。
-（其中「不提供裸指针」这一边界已在 <strong>v1.02</strong> 解除，见上方 v1.02 条目。）</p>
-<h3 id="added_1">Added</h3>
+（后续边界变更：「不提供裸指针」已在 <strong>v1.02</strong> 解除，「不支持一等函数」中的
+<strong>函数指针</strong>已在 <strong>v1.03</strong> 解除；<strong>闭包至今仍不提供</strong>，见文件开头里程碑说明。）</p>
+<h3 id="added_2">Added</h3>
 <p><strong>数组元素类型扩展</strong>
 - <code>float[]</code> / <code>byte[]</code> / <code>bool[]</code> / <code>char[]</code> 现在都是合法的动态数组元素；
 - 底层沿用 <code>int64</code> 槽位：<code>float</code> 存 <strong>IEEE754 位模式</strong>（bitcast，绝不 <code>fptosi</code>
@@ -399,9 +507,13 @@
 <h2 id="v100--2026-11-04">[v1.00] — 2026-11-04</h2>
 <p><strong>里程碑版本</strong>：从 <code>v0.99.1</code> 直接跳到 <code>v1.00</code>（用户明确要求跳版，见 §23 第 3 条）。
 本版是<strong>语言特性补齐</strong>发布：把「正常程序需要、此前只能模拟或绕路」的能力一次性补齐，共五组。
-所有改动都守住项目铁律：<strong>不引入 GC</strong>、不提供裸指针 / 地址取值 / 指针算术、
+所有改动都守住项目铁律（v1.00 当时）：<strong>不引入 GC</strong>、不提供裸指针 / 地址取值 / 指针算术、
 不支持运算符重载、不支持一等函数 / 闭包 / 函数指针、ARC 所有权语义不退化、
 <strong>零隐式转换铁律保持</strong>（<code>1 + 2.0</code> 仍编译失败）。</p>
+<blockquote>
+<p>后续边界变更：「不提供裸指针」已在 <strong>v1.02</strong> 解除，「不支持函数指针」已在
+<strong>v1.03</strong> 解除；<strong>闭包至今仍不提供</strong>。见文件开头「v1.0 里程碑」说明。</p>
+</blockquote>
 <h3 id="added五组语言特性">Added（五组语言特性）</h3>
 <p><strong>① 运算符与字面量</strong>
 - 复合赋值 <code>+= -= *= /= %=</code>、自增自减 <code>++</code> / <code>--</code>（编译期脱糖为普通赋值）；
@@ -439,7 +551,7 @@
 - 正向示例：<code>examples/container_demo.dial</code>、<code>set_demo.dial</code>、<code>kvmap_demo.dial</code>。</p>
 <p><strong>已知边界</strong>：泛型 map 的 <code>V</code> 暂不开放 <code>string</code>（<code>get</code> 未命中时的默认对象会带来所有权移交歧义）；
 <code>map.values()</code> 当前只支持 <code>V = int</code>。两点计划在后续版本补齐。</p>
-<h3 id="fixed_1">Fixed</h3>
+<h3 id="fixed_2">Fixed</h3>
 <ul>
 <li><strong>开放寻址哈希表删除采用「左移紧凑」导致键不可达</strong>：<code>dial_map_remove</code> 与新
   <code>dial_kvmap_remove</code> 改为<strong>墓碑标记 + 负载重建</strong>。2 万键压测里删除 1 万个后 <code>size</code>
@@ -1823,7 +1935,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v1.02 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.03 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

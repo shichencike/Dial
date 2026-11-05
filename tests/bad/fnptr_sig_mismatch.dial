@@ -1,0 +1,6 @@
+// 函数指针签名严格匹配（零隐式转换铁律），参数个数不同也不行。
+fn add(a: int, b: int): int { return a + b; }
+fn main(): int {
+    var cb: fn(int): int = add;
+    return 0;
+}

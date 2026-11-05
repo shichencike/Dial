@@ -1,0 +1,50 @@
+// 同类型变参（v1.03）：`...xs: T` 在 semantic 层脱糖为 `xs: T[]`。
+//
+// 编译后没有类型标签、没有装箱、没有运行期分派：变参数组就是一个普通 ARC 数组，
+// 进入函数时 retain、函数返回时由编译器自动插入 release。
+// Dial 自身函数**不允许异构变参**——`sum(1, "a")` 会在编译期被拦下，
+// 需要异构参数时请显式定义结构体或自定义类型包。
+
+fn sum(...xs: int): int {
+    var total: int = 0;
+    var i: int = 0;
+    while (i < xs.length()) {
+        total += xs.get(i);
+        i += 1;
+    }
+    return total;
+}
+
+fn join_all(sep: string, ...parts: string): string {
+    var out: string = "";
+    var i: int = 0;
+    while (i < parts.length()) {
+        if (i > 0) {
+            out = out.concat(sep);
+        }
+        out = out.concat(parts.get(i));
+        i += 1;
+    }
+    return out;
+}
+
+// 变参可以与普通形参共存；变参永远是最后一个形参。
+fn sum_scaled(factor: int, ...xs: int): int {
+    var total: int = 0;
+    var i: int = 0;
+    while (i < xs.length()) {
+        total += xs.get(i);
+        i += 1;
+    }
+    return total * factor;
+}
+
+fn main(): int {
+    print(sum(1, 2, 3, 4));            // 10
+    print(sum());                       // 0：缺省就是空数组
+    print(sum(7));                      // 7
+    print(sum_scaled(3, 1, 2));        // 9
+    print(join_all(", ", "a", "b"));   // a, b
+    print(join_all("-"));              // （空数组）输出空行
+    return 0;
+}

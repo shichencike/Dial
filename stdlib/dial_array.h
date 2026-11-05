@@ -44,6 +44,20 @@ DialArray dial_array_pop(DialArray a);
  * （而非位模式，负数排序正确）。句柄元素（string 等）排序语义未定义，调用前已被编译器拒绝。 */
 DialArray dial_array_sort(DialArray a);
 
+/* v1.03：接受回调的高阶数组操作（map / filter / sort_by）统一入口。
+ *
+ * op: 0=map（用回调返回值构造新数组）1=filter（回调返回非 0 才保留）2=sort_by（原地排序）。
+ * out_kind: map 结果数组的元素类别码（filter / sort_by 忽略）。
+ * fn_raw: Dial 函数指针（纯地址）；state: 用户显式传入的 rawptr<void> 状态。
+ * thunk: 由编译器按**精确回调签名**生成的适配函数，C 侧只透传位模式与两个指针，
+ *        完全不知道回调的参数/返回类型 —— 没有隐藏类型标签、没有装箱、没有运行期分派。
+ *
+ * 仅支持标量元素（int/float/bool/byte/char）：新数组元素不需要 ARC 所有权结算；
+ * 句柄元素由编译器在语义层直接拒绝。 */
+DialArray dial_array_hof(DialArray a, int64_t op, int64_t out_kind,
+                         void *fn_raw, void *state,
+                         int64_t (*thunk)(int64_t, int64_t, void *, void *));
+
 DialArray dial_array_clone(DialArray a);
 void dial_array_retain(DialArray a);
 void dial_array_release(DialArray a);

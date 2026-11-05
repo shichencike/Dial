@@ -1,0 +1,5 @@
+// 变参元素必须是可作为数组元素的类型，函数指针不行。
+fn f(...xs: fn(int): int): int { return xs.length(); }
+fn main(): int {
+    return 0;
+}

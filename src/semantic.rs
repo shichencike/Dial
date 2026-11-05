@@ -24,6 +24,10 @@ pub struct FuncInfo {
     /// 默认实参（v1.00）：与 `params` 一一对应；外部包函数一律为全 `None`。
     /// 必填参数个数 = 第一个 `Some` 的下标（默认值必须从末尾连续）。
     pub defaults: Vec<Option<Expr>>,
+    /// C 风格异构变参（v1.03）：**只有 `.diali` 里的 `extern fn` 允许为 true**。
+    /// 这是 FFI 特例：固定参数照常类型检查，尾部参数不检查类型、按 C varargs ABI 直传。
+    /// Dial 自己定义的函数永远为 false —— 它的 `...xs: T` 已在 analyze 开头脱糖成 `T[]`。
+    pub variadic: bool,
 }
 
 /// 结构体表：名字 -> 字段(名字, 类型)。
@@ -175,13 +179,38 @@ pub fn type_of<V>(
             }
             Ok(Type::String)
         }
-        Expr::Var(name) => lookup(name).ok_or_else(|| {
-            DialcError::new(format!("语义错误：未声明的变量 '{}'", name), 0, 0)
-        }),
+        Expr::Var(name) => {
+            if let Some(t) = lookup(name) {
+                return Ok(t);
+            }
+            // v1.03：具名函数在右值位置求值为**纯函数地址**（Type::FnPtr）。
+            // 不分配任何环境对象、不做捕获、不走 ARC —— 只有一个代码地址。
+            if let Some(info) = funcs.get(name) {
+                if info.variadic {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：C 变参外部函数 '{}' 的签名在编译期不闭合，不能取函数指针",
+                            name
+                        ),
+                        0, 0,
+                    ));
+                }
+                return Ok(Type::FnPtr(
+                    info.params.clone(),
+                    Box::new(info.ret.clone()),
+                ));
+            }
+            Err(DialcError::new(
+                format!("语义错误：未声明的变量 '{}'", name),
+                0, 0,
+            ))
+        }
         // 函数引用只在 spawn 首参位置有意义；出现在别处一律是误用。
+        // v1.03 起「把函数当值传递」走的是普通标识符表达式（Expr::Var 求值为函数指针），
+        // 不需要 FuncRef 这个内部节点。
         Expr::FuncRef(name) => Err(DialcError::new(
             format!(
-                "语义错误：函数引用 '{}' 只能作为 spawn 的第一个参数（Dial 没有一等函数，函数不能当值传递）",
+                "语义错误：函数引用 '{}' 只能作为 spawn 的第一个参数（要把函数当值传递，直接写函数名即可，它会求值为 fn(...) 函数指针）",
                 name
             ),
             0,
@@ -245,8 +274,11 @@ pub fn type_of<V>(
             }
         }
         Expr::ArrayLit(elems, expect) => {
-            // 期望元素类型优先（空数组由声明标注补入）；否则从首个元素推断，并要求全部一致。
-            // 元素类型需满足 is_array_elem_type 白名单（int/float/bool/byte/char + 句柄/指针）。
+            // 期望元素类型优先（声明标注 / 变参脱糖）；否则从首元素推断。
+            // **无论有没有期望类型，都逐元素校验一致性**：变参脱糖生成的数组一定带
+            // expect=Some(T)，若沿用「有期望类型就跳过校验」的旧逻辑，
+            // `sum(1, "a")` 会把字符串指针的位模式静默塞进 int[]（数据损坏）。
+            // 这条校验正是「Dial 严禁异构变参」的落点。
             let elem_t: Type = if let Some(et) = expect {
                 (**et).clone()
             } else if elems.is_empty() {
@@ -255,34 +287,44 @@ pub fn type_of<V>(
                     0, 0,
                 ));
             } else {
-                let mut et: Option<Type> = None;
-                for e in elems {
-                    let t = type_of(e, scopes, funcs, structs)?;
-                    if !is_array_elem_type(&t) {
-                        return Err(DialcError::new(
-                            format!(
-                                "语义错误：数组字面量元素类型 {} 暂不支持（数组元素支持 int/float/bool/byte/char 与句柄类型 string / int[] / map / error / channel / 不透明指针）",
-                                t.name()
-                            ),
-                            0, 0,
-                        ));
-                    }
-                    match &et {
-                        Some(x) if *x != t => {
-                            return Err(DialcError::new(
-                                format!(
-                                    "语义错误：数组字面量元素类型不一致（{} 与 {}）",
-                                    x.name(),
-                                    t.name()
-                                ),
-                                0, 0,
-                            ));
-                        }
-                        _ => et = Some(t),
-                    }
-                }
-                et.unwrap()
+                type_of(&elems[0], scopes, funcs, structs)?
             };
+            if !is_array_elem_type(&elem_t) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：数组元素类型 {} 暂不支持（支持 int/float/bool/byte/char 与句柄类型 string / int[] / map / error / channel / 不透明指针）",
+                        elem_t.display()
+                    ),
+                    0, 0,
+                ));
+            }
+            for e in elems {
+                let t = type_of(e, scopes, funcs, structs)?;
+                if !is_array_elem_type(&t) {
+                    return Err(DialcError::new(
+                        format!("语义错误：数组字面量元素类型 {} 暂不支持", t.display()),
+                        0, 0,
+                    ));
+                }
+                if !types_compatible(&t, &elem_t) {
+                    // expect=Some 是变参脱糖生成的数组（源码手写字面量为 None）：
+                    // 给出「显式结构体」的引导，而不是让用户去找隐式转换。
+                    let hint = if expect.is_some() {
+                        "；变参只接受同类型实参，若需异构参数请显式定义结构体或自定义类型包"
+                    } else {
+                        ""
+                    };
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：数组字面量元素类型不一致（{} 与 {}）{}",
+                            elem_t.display(),
+                            t.display(),
+                            hint
+                        ),
+                        0, 0,
+                    ));
+                }
+            }
             Ok(Type::Array(Box::new(elem_t)))
         }
         Expr::StructLit(name, fields) => {
@@ -533,13 +575,21 @@ pub fn type_of<V>(
                     // 为它 retain/release，作用域结束也不会释放它。drop 对它只是
                     // 静默 no-op，还会把变量误标为「已转移」——让人误以为资源已还。
                     // 因此编译期直接拦下，指引调用方走包自己的显式释放函数。
-                    if let Type::Opaque(n) = type_of(&args[0], scopes, funcs, structs)? {
+                    let dt = type_of(&args[0], scopes, funcs, structs)?;
+                    if let Type::Opaque(n) = &dt {
                         return Err(DialcError::new(
                             format!(
                                 "语义错误：不透明句柄 '{}' 不受 ARC 管理，drop() 不会释放它；\
                                  请调用该包提供的显式释放函数（如 db_close(db)）手动释放",
                                 n
                             ),
+                            0, 0,
+                        ));
+                    }
+                    // 函数指针是纯代码地址：没有所有权、没有堆对象，drop 对它无意义。
+                    if matches!(dt, Type::FnPtr(..)) {
+                        return Err(DialcError::new(
+                            "语义错误：函数指针只是代码地址，不受 ARC 管理，drop() 对它无意义",
                             0, 0,
                         ));
                     }
@@ -962,7 +1012,7 @@ pub fn type_of<V>(
                         Expr::FuncRef(n) => n.clone(),
                         _ => {
                             return Err(DialcError::new(
-                                "语义错误：spawn 的第一个参数必须是函数名（Dial 没有一等函数与闭包，线程入口只能是顶层具名函数）",
+                                "语义错误：spawn 的第一个参数必须是顶层具名函数（Dial 有函数指针但没有闭包，线程入口 thunk 需按目标函数静态生成；回调请用函数指针参数）",
                                 0, 0,
                             ))
                         }
@@ -1184,7 +1234,7 @@ pub fn type_of<V>(
                     }
                     if !matches!(type_of(&args[0], scopes, funcs, structs)?, Type::Channel(_)) {
                         return Err(DialcError::new(
-                            "语义错误：len 的参数必须是 channel（数组/字符串长度请用 .len() 方法）",
+                            "语义错误：len 的参数必须是 channel（数组/字符串长度请用 .length() 方法）",
                             0, 0,
                         ));
                     }
@@ -1468,6 +1518,13 @@ pub fn type_of<V>(
                             0, 0,
                         ))
                     }
+                    // 函数指针同样是纯地址：打印它只会输出一个无意义的代码地址。
+                    Type::FnPtr(..) => {
+                        return Err(DialcError::new(
+                            "语义错误：不能直接 print 函数指针（它只是代码地址，没有可打印的内容）",
+                            0, 0,
+                        ))
+                    }
                     Type::Array(_) => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print 数组，请逐元素打印 print(a.get(i))",
@@ -1565,6 +1622,12 @@ pub fn type_of<V>(
                             0, 0,
                         ))
                     }
+                    Type::FnPtr(..) => {
+                        return Err(DialcError::new(
+                            "语义错误：不能直接 print_raw 函数指针（它只是代码地址，没有可输出的内容）",
+                            0, 0,
+                        ))
+                    }
                     Type::Array(_) => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print_raw 数组，请逐元素输出 print_raw(str(a.get(i)))",
@@ -1654,9 +1717,86 @@ pub fn type_of<V>(
                 }
                 Ok(Type::Void)
             } else {
-                let info = funcs.get(name).ok_or_else(|| {
-                    DialcError::new(format!("语义错误：调用了未定义的函数 '{}'", name), 0, 0)
-                })?;
+                let info = match funcs.get(name) {
+                    Some(i) => i,
+                    None => {
+                        // v1.03：名字不是函数，但可能是一个持有函数指针的变量 —— 间接调用。
+                        // 签名严格匹配（零隐式转换铁律），不检查任何「捕获环境」。
+                        if let Some(Type::FnPtr(ps, ret)) = lookup(name) {
+                            if args.len() != ps.len() {
+                                return Err(DialcError::new(
+                                    format!(
+                                        "语义错误：函数指针 '{}' 需要 {} 个参数，但传入了 {} 个",
+                                        name,
+                                        ps.len(),
+                                        args.len()
+                                    ),
+                                    0, 0,
+                                ));
+                            }
+                            for (i, (a, pt)) in args.iter().zip(ps.iter()).enumerate() {
+                                let at = type_of(a, scopes, funcs, structs)?;
+                                if !types_compatible(&at, pt) {
+                                    return Err(DialcError::new(
+                                        format!(
+                                            "语义错误：函数指针 '{}' 第 {} 个参数类型不匹配（实参 {}，形参 {}）",
+                                            name,
+                                            i + 1,
+                                            at.display(),
+                                            pt.display()
+                                        ),
+                                        0, 0,
+                                    ));
+                                }
+                            }
+                            return Ok(*ret);
+                        }
+                        return Err(DialcError::new(
+                            format!("语义错误：调用了未定义的函数 '{}'", name),
+                            0, 0,
+                        ));
+                    }
+                };
+                // C 风格异构变参（v1.03）：**仅 `.diali` 的 extern fn** 走这里。
+                // 固定参数照常严格检查；尾部参数不做类型检查（FFI 契约由调用方负责），
+                // 但仍必须是合法表达式——void / 语句不能被塞进 varargs。
+                if info.variadic {
+                    if args.len() < info.params.len() {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：C 变参外部函数 '{}' 至少需要 {} 个固定参数，但传入了 {} 个",
+                                name,
+                                info.params.len(),
+                                args.len()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    for (a, pt) in args.iter().zip(info.params.iter()) {
+                        let at = type_of(a, scopes, funcs, structs)?;
+                        if !types_compatible(&at, pt) {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：C 变参外部函数 '{}' 第 1 个固定参数类型不匹配（实参 {}，形参 {}）",
+                                    name,
+                                    at.display(),
+                                    pt.display()
+                                ),
+                                0, 0,
+                            ));
+                        }
+                    }
+                    for a in args.iter().skip(info.params.len()) {
+                        let at = type_of(a, scopes, funcs, structs)?;
+                        if at == Type::Void || matches!(at, Type::FnPtr(..)) {
+                            return Err(DialcError::new(
+                                "语义错误：C 变参的尾部实参不能是 void 表达式或函数指针（请显式转换成值）",
+                                0, 0,
+                            ));
+                        }
+                    }
+                    return Ok(info.ret.clone());
+                }
                 // 默认实参（v1.00）：实参个数允许落在 [必填数, 形参总数] 区间。
                 // 必填数 = 第一个带默认值形参的下标；默认值从末尾连续（parser 已强制）。
                 let required = info
@@ -1973,6 +2113,101 @@ fn array_method_type<V>(
                 // 返回（可能经 COW 克隆的）新数组指针，由 codegen 写回接收变量。
                 Ok(Type::Array(Box::new(elem.clone())))
             }
+            // v1.03：接受函数指针的高阶数组方法。
+            // 回调签名固定带一个 `rawptr<void>` 状态参数——Dial 没有闭包，
+            // 状态只能由调用方显式穿过 C 运行时再交回回调，绝不是隐式捕获。
+            "map" | "filter" | "sort_by" => {
+                if !matches!(
+                    elem,
+                    Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char
+                ) {
+                    return Err(DialcError::new(
+                        "语义错误：map/filter/sort_by 只支持标量元素数组（int/float/bool/byte/char）；句柄元素请自行写循环",
+                        0, 0,
+                    ));
+                }
+                if args.is_empty() || args.len() > 2 {
+                    return Err(DialcError::new(
+                        "语义错误：map/filter/sort_by 需要 1 个回调参数，外加可选的 1 个 rawptr<void> 状态参数",
+                        0, 0,
+                    ));
+                }
+                let state_ty = Type::RawPtr(Box::new(Type::Void));
+                let (ps, ret) = match arg_t(0)? {
+                    Type::FnPtr(ps, r) => (ps, r),
+                    _ => {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：array.{}() 的第一个参数必须是函数指针（Dial 没有闭包，具名函数可直接当值用）",
+                                method
+                            ),
+                            0, 0,
+                        ))
+                    }
+                };
+                let expect_ps: Vec<Type> = if method == "sort_by" {
+                    vec![elem.clone(), elem.clone(), state_ty.clone()]
+                } else {
+                    vec![elem.clone(), state_ty.clone()]
+                };
+                if ps != expect_ps {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：array.{}() 的回调签名不匹配：期望 fn({}): ...，实际 {}（状态须用 rawptr<void> 显式传递）",
+                            method,
+                            expect_ps
+                                .iter()
+                                .map(|t| t.display())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            Type::FnPtr(ps.clone(), ret.clone()).display()
+                        ),
+                        0, 0,
+                    ));
+                }
+                if args.len() == 2 && arg_t(1)? != state_ty {
+                    return Err(DialcError::new(
+                        "语义错误：高阶方法的状态参数必须是 rawptr<void>（裸指针生命周期由用户负责）",
+                        0, 0,
+                    ));
+                }
+                match method {
+                    "filter" => {
+                        if *ret != Type::Bool {
+                            Err(DialcError::new(
+                                "语义错误：array.filter() 的回调必须返回 bool",
+                                0, 0,
+                            ))
+                        } else {
+                            Ok(Type::Array(Box::new(elem.clone())))
+                        }
+                    }
+                    "sort_by" => {
+                        if *ret != Type::Int {
+                            Err(DialcError::new(
+                                "语义错误：array.sort_by() 的回调必须返回 int（比较器语义：正数表示左值更大）",
+                                0, 0,
+                            ))
+                        } else {
+                            Ok(Type::Array(Box::new(elem.clone())))
+                        }
+                    }
+                    _ => {
+                        // map：回调返回值决定新数组元素类型，必须是标量
+                        // （C 侧新建数组时不做 ARC 所有权结算）。
+                        if !matches!(
+                            ret.as_ref(),
+                            Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char
+                        ) {
+                            return Err(DialcError::new(
+                                "语义错误：array.map() 的回调必须返回标量类型（int/float/bool/byte/char）",
+                                0, 0,
+                            ));
+                        }
+                        Ok(Type::Array(Box::new(*ret)))
+                    }
+                }
+            }
             _ => Err(DialcError::new(
                 format!("语义错误：array 无方法 '{}'", method),
                 0, 0,
@@ -2188,6 +2423,192 @@ fn kvmap_method_type<V>(
 
 // ===================== 入口 =====================
 
+/// 同类型变参脱糖（v1.03）：`...xs: T` → 一个普通的 `xs: T[]` 形参；
+/// 调用点 `f(a, 1, 2, 3)` → `f(a, [1, 2, 3])`。
+///
+/// **这是纯 AST 结构改写，不是运行期机制**：编译后没有类型标签、没有装箱、
+/// 没有额外的分派，变参数组就是一个正常的 `T[]`——它随 ARC 走，
+/// 进入函数时 retain、函数返回时由编译器插入 release（见 codegen 的临时数组结算）。
+/// Dial 自己定义的函数**不允许异构变参**：数组字面量的元素类型一致性检查会拦下
+/// `f(1, "a")` 这类调用，并在诊断里引导用户显式使用结构体。
+fn desugar_varargs(program: &mut Program) -> Result<()> {
+    let mut map: HashMap<String, (usize, Type)> = HashMap::new();
+    for f in program.functions.iter_mut() {
+        if let Some((name, elem, line, col)) = f.variadic.take() {
+            if !is_array_elem_type(&elem) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：变参元素类型 {} 不受支持（变参只接受同类型 T[]，需要异构参数请显式定义结构体）",
+                        elem.display()
+                    ),
+                    line,
+                    col,
+                ));
+            }
+            let fixed = f.params.len();
+            f.params.push((name, Type::Array(Box::new(elem.clone()))));
+            f.defaults.push(None);
+            f.param_pos.push((line, col));
+            map.insert(f.name.clone(), (fixed, elem));
+        }
+    }
+    if map.is_empty() {
+        return Ok(());
+    }
+    for f in program.functions.iter_mut() {
+        for d in f.defaults.iter_mut() {
+            if let Some(e) = d {
+                desugar_expr(e, &map);
+            }
+        }
+        desugar_stmts(&mut f.body, &map);
+    }
+    Ok(())
+}
+
+/// 表达式层：先递归改写子表达式，再把变参调用点的尾部实参打包成数组字面量。
+/// `expect = Some(T)` 同时是 codegen 识别「脱糖生成的临时数组」的标记
+/// （源码手写的 `[1, 2]` 是 `None`），调用结束后据此插入一次 release。
+fn desugar_expr(e: &mut Expr, map: &HashMap<String, (usize, Type)>) {
+    match e {
+        Expr::Call(name, args) => {
+            for a in args.iter_mut() {
+                desugar_expr(a, map);
+            }
+            if let Some((fixed, elem)) = map.get(name) {
+                if args.len() >= *fixed {
+                    let rest: Vec<Expr> = args.drain(*fixed..).collect();
+                    args.push(Expr::ArrayLit(rest, Some(Box::new(elem.clone()))));
+                }
+                // 实参不足 fixed 的情形保持原样，交给常规参数个数检查报错。
+            }
+        }
+        Expr::ArrayLit(elems, _) => {
+            for x in elems.iter_mut() {
+                desugar_expr(x, map);
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, x) in fields.iter_mut() {
+                desugar_expr(x, map);
+            }
+        }
+        Expr::Interp(parts) => {
+            for p in parts.iter_mut() {
+                if let InterpPart::Expr(x) = p {
+                    desugar_expr(x.as_mut(), map);
+                }
+            }
+        }
+        Expr::Field(o, _) | Expr::Unary(_, o) => desugar_expr(o, map),
+        Expr::Method(o, _, args) => {
+            desugar_expr(o, map);
+            for a in args.iter_mut() {
+                desugar_expr(a, map);
+            }
+        }
+        Expr::Index(o, i) => {
+            desugar_expr(o, map);
+            desugar_expr(i, map);
+        }
+        Expr::Slice(a, f, t) => {
+            desugar_expr(a, map);
+            desugar_expr(f, map);
+            desugar_expr(t, map);
+        }
+        Expr::Binary(l, _, r) => {
+            desugar_expr(l, map);
+            desugar_expr(r, map);
+        }
+        Expr::Ternary(c, a, b) => {
+            desugar_expr(c, map);
+            desugar_expr(a, map);
+            desugar_expr(b, map);
+        }
+        _ => {}
+    }
+}
+
+/// 语句层：覆盖所有含表达式 / 含子语句块的变体（结构参照 collect_refs）。
+fn desugar_stmts(stmts: &mut [Stmt], map: &HashMap<String, (usize, Type)>) {
+    for s in stmts.iter_mut() {
+        match s {
+            Stmt::VarDecl { value, .. } | Stmt::Assign { value, .. } => {
+                desugar_expr(value, map)
+            }
+            Stmt::AssignDeref { ptr, value, .. } => {
+                desugar_expr(ptr, map);
+                desugar_expr(value, map);
+            }
+            Stmt::AssignField { obj, value, .. } => {
+                desugar_expr(obj, map);
+                desugar_expr(value, map);
+            }
+            Stmt::AssignIndex { arr, index, value, .. } => {
+                desugar_expr(arr, map);
+                desugar_expr(index, map);
+                desugar_expr(value, map);
+            }
+            Stmt::If { cond, then_branch, else_branch, .. } => {
+                desugar_expr(cond, map);
+                desugar_stmts(then_branch, map);
+                if let Some(eb) = else_branch {
+                    desugar_stmts(eb, map);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                desugar_expr(cond, map);
+                desugar_stmts(body, map);
+            }
+            Stmt::For { start, end, step, body, .. } => {
+                desugar_expr(start, map);
+                desugar_expr(end, map);
+                if let Some(st) = step {
+                    desugar_expr(st, map);
+                }
+                desugar_stmts(body, map);
+            }
+            Stmt::ForEach { coll, body, .. } | Stmt::ForEachMap { coll, body, .. } => {
+                desugar_expr(coll, map);
+                desugar_stmts(body, map);
+            }
+            Stmt::DoWhile { body, cond, .. } => {
+                desugar_stmts(body, map);
+                desugar_expr(cond, map);
+            }
+            Stmt::Match { subject, arms, .. } => {
+                desugar_expr(subject, map);
+                for arm in arms.iter_mut() {
+                    desugar_stmts(&mut arm.body, map);
+                }
+            }
+            Stmt::Defer(inner, ..) => desugar_stmts(std::slice::from_mut(inner.as_mut()), map),
+            Stmt::With { resource, body, .. } => {
+                desugar_expr(resource, map);
+                desugar_stmts(body, map);
+            }
+            Stmt::Return(Some(e), ..) | Stmt::Throw(e, ..) | Stmt::Expr(e, ..) => {
+                desugar_expr(e, map)
+            }
+            Stmt::Try { body, catch, .. } => {
+                desugar_stmts(body, map);
+                desugar_stmts(&mut catch.body, map);
+            }
+            Stmt::Select { arms, default_body, .. } => {
+                for arm in arms.iter_mut() {
+                    desugar_expr(&mut arm.chan, map);
+                    desugar_stmts(&mut arm.body, map);
+                }
+                if let Some(db) = default_body {
+                    desugar_stmts(db, map);
+                }
+            }
+            Stmt::Block { body, .. } => desugar_stmts(body, map),
+            _ => {}
+        }
+    }
+}
+
 /// 入口：收集函数签名 + 结构体表，校验 main，逐一检查函数体，最后跑数据流分析写入 move_hint。
 /// 保留名：这些标识符在 `type_of` 里按**名字**匹配为内建函数/类型，
 /// 与用户函数的查找是两条路。若允许用户定义同名函数，`Expr::Call` 的
@@ -2215,6 +2636,10 @@ pub fn analyze(
     program: &mut Program,
     externs: &[(String, FuncInfo)],
 ) -> Result<(HashMap<String, FuncInfo>, StructTable)> {
+    // v1.03：同类型变参先做 AST 脱糖。之后的类型检查 / LSP / codegen 都只看得见
+    // 一个普通的 T[] 形参 —— 编译产物里没有任何变参专用的运行期机制。
+    desugar_varargs(program)?;
+
     // 0) 保留名校验（函数名与结构体名都不能撞内建）
     for f in &program.functions {
         if RESERVED_NAMES.contains(&f.name.as_str()) {
@@ -2281,6 +2706,8 @@ pub fn analyze(
                 params: f.params.iter().map(|(_, t)| t.clone()).collect(),
                 ret: f.ret.clone(),
                 defaults: f.defaults.clone(),
+                // Dial 自身函数的 `...xs: T` 已脱糖成 T[]；只有包 extern 才可能是 C 变参。
+                variadic: false,
             },
         );
     }
@@ -2489,6 +2916,8 @@ fn is_copy_type(t: &Type) -> bool {
             | Type::Char
             | Type::Byte
             | Type::Struct(_)
+            // 函数指针是纯地址值类型：没有所有权，drop 对它无意义。
+            | Type::FnPtr(..)
     )
 }
 

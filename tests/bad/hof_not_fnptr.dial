@@ -1,0 +1,6 @@
+// 高阶方法的首参必须是函数指针，普通值不行。
+fn main(): int {
+    var a: int[] = [1, 2, 3];
+    var m: int[] = a.map(7);
+    return 0;
+}

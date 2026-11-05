@@ -66,6 +66,15 @@ pub enum Type {
     /// 元素类型为 `Void` 时是「无类型裸指针」（`rawptr<void>`）：只能传递与释放，
     /// **不能做指针算术**（没有元素大小可依），必须先 `ptr_cast` 成具体类型。
     RawPtr(Box<Type>),
+    /// 函数指针（v1.03）：写作 `fn(A, B): R`，IR 层就是一个 `ptr`（纯函数地址）。
+    ///
+    /// **核心红线：绝不捕获环境**——Dial 没有闭包，函数指针里只有代码地址，
+    /// 没有隐藏的上下文堆对象、没有 Fn/FnMut/FnOnce 分类、也没有隐式的 retain/release。
+    /// 回调需要携带状态时，由调用方显式把 `rawptr<void>` 作为参数传进去，
+    /// 裸指针的生命周期完全由用户自己负责（见 README §32）。
+    ///
+    /// 签名严格匹配（零隐式转换铁律）：`fn(int): int` 与 `fn(float): int` 是不同类型。
+    FnPtr(Vec<Type>, Box<Type>),
     File,   // 文件句柄（不透明指针，封装 C 的 FILE*；显式 open/close，不受 ARC 管理）
     Error,  // 可恢复异常（不透明指针，ARC 管理；由 throw 抛出、catch 捕获，见 §26）
     Thread, // 线程句柄（不透明指针；显式 join / detach，不受 ARC 管理，见 §27）
@@ -104,6 +113,7 @@ impl Type {
             Type::Struct(_) => "struct",
             Type::Opaque(_) => "opaque",
             Type::RawPtr(_) => "rawptr",
+            Type::FnPtr(..) => "fn",
         }
     }
 
@@ -114,6 +124,14 @@ impl Type {
             Type::Opaque(n) => n.clone(),
             Type::KvMap(k, v) => format!("map<{}, {}>", k.display(), v.display()),
             Type::RawPtr(e) => format!("rawptr<{}>", e.display()),
+            Type::FnPtr(ps, r) => format!(
+                "fn({}): {}",
+                ps.iter()
+                    .map(|t| t.display())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                r.display()
+            ),
             other => other.name().to_string(),
         }
     }
@@ -195,8 +213,11 @@ pub enum Expr {
     /// 它不是普通表达式：语义层在别处遇到它一律报错
     /// （「类型标注只能出现在 ptr_cast<T>(...) 的类型实参位置」）。
     TypeLit(Type),
-    /// 函数引用：`spawn(worker, ...)` 的首参。Dial 没有一等函数与闭包，
-    /// 因此线程入口只能是一个顶层具名函数；FuncRef 仅允许出现在 spawn 首参位置。
+    /// 线程入口的具名函数引用：`spawn(worker, ...)` 的首参。
+    ///
+    /// v1.03 起 Dial 已有一等**函数指针**（`Expr::Var` 指向函数名时求值为
+    /// `Type::FnPtr`），但 `spawn` 需要按目标函数静态生成 pthread thunk，
+    /// 因此它的首参仍必须写成顶层具名函数字面量；函数指针变量请用回调传参。
     FuncRef(String),
 }
 
@@ -460,6 +481,11 @@ pub struct Func {
     /// 默认实参（v1.00）：与 `params` 一一对应，`None` 表示必填形参。
     /// 带默认值的形参必须连续位于参数列表末尾（parser 强制）；调用点按声明顺序补齐。
     pub defaults: Vec<Option<Expr>>,
+    /// 同类型变参声明（v1.03）：`...name: T`，只允许出现在参数列表末尾。
+    /// parser 只负责把这个标记留在这里；**语义层在 analyze 开头把它脱糖成
+    /// 一个普通的 `name: T[]` 形参**——编译后没有任何运行期类型标签或装箱，
+    /// 变参数组就是一个正常的 ARC 数组。脱糖完成后该字段被清空。
+    pub variadic: Option<(String, Type, usize, usize)>, // (名字, 元素类型, 行, 列)
     /// 形参**名**的位置（v0.95）：与 `params` 一一对应，供形参 Hover / 跳转定义。
     pub param_pos: Vec<(usize, usize)>,
     pub ret: Type,

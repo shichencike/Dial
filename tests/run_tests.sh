@@ -280,6 +280,39 @@ EOF
         else
             echo "  ✅ drop(不透明句柄) 被拦下并给出手动释放指引"
         fi
+
+        # 4) C 风格异构变参 extern fn（v1.03）：这是 FFI 特例，固定参数严格检查，
+        #    尾部参数按 C varargs ABI 直传（i64 / double / bool 混传）。
+        cat > "${TMP}/ffi_varargs.dial" <<'EOF'
+import "demo";
+fn main(): int {
+    demo_vprintf("i=%ld f=%.1f b=%ld\n", 42, 3.5, true);
+    return 0;
+}
+EOF
+        if "$DIALC" build "${TMP}/ffi_varargs.dial" -o "${TMP}/ffi_varargs" >"${TMP}/hffi.log" 2>&1; then
+            if ! diff -u <(printf 'i=42 f=3.5 b=1\n') <("${TMP}/ffi_varargs" 2>&1) >"${TMP}/hffidiff.txt" 2>&1; then
+                echo "  ❌ C 变参 extern fn 输出不一致"; sed 's/^/       /' "${TMP}/hffidiff.txt"; fail=1
+            else
+                echo "  ✅ C 变参 extern fn 可用（int64 / double / bool 混传）"
+            fi
+        else
+            echo "  ❌ C 变参 extern fn 编译失败"; sed 's/^/       /' "${TMP}/hffi.log"; fail=1
+        fi
+
+        # 5) FFI 特例不等于放弃类型检查：固定参数类型不匹配仍要当场拦下。
+        cat > "${TMP}/ffi_varargs_bad.dial" <<'EOF'
+import "demo";
+fn main(): int {
+    demo_vprintf(123, 42);
+    return 0;
+}
+EOF
+        if "$DIALC" build "${TMP}/ffi_varargs_bad.dial" -o "${TMP}/ffi_varargs_bad" >"${TMP}/hffibad.log" 2>&1; then
+            echo "  ❌ C 变参的固定参数类型错误竟通过编译"; fail=1
+        else
+            echo "  ✅ C 变参固定参数仍做严格类型检查"
+        fi
     fi
 fi
 

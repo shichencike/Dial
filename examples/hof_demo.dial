@@ -1,0 +1,46 @@
+// 高阶数组方法（v1.03）：map / filter / sort_by 接受函数指针。
+//
+// 回调签名固定带一个 rawptr<void> 状态参数 —— Dial 没有闭包，状态必须显式传：
+//   arr.map(f)         状态传空指针
+//   arr.map(f, state)  state 原样穿过 C 运行时交回回调
+// 函数指针是纯代码地址；裸指针状态不受 ARC 管理，用完要自己 raw_free。
+
+fn scale(x: int, state: rawptr<void>): int {
+    var k: rawptr<int> = ptr_cast<rawptr<int>>(state);
+    return x * *k;
+}
+
+fn is_even(x: int, state: rawptr<void>): bool {
+    return x % 2 == 0;
+}
+
+fn desc(a: int, b: int, state: rawptr<void>): int {
+    return b - a; // 正数表示左值应排在后面 → 降序
+}
+
+fn main(): int {
+    var a: int[] = [1, 2, 3, 4, 5, 6];
+
+    var kp: rawptr<byte> = raw_alloc(8);
+    var kv: rawptr<int> = ptr_cast<rawptr<int>>(kp);
+    *kv = 10;
+    var st: rawptr<void> = ptr_cast<rawptr<void>>(kp);
+
+    // map：新数组元素类型由回调返回类型决定；状态显式传入。
+    var m: int[] = a.map(scale, st); // [10, 20, 30, 40, 50, 60]
+    print(m.get(0));                 // 10
+    print(m.get(5));                 // 60
+
+    // filter：不需要状态时省略第二个参数（回调收到空 rawptr<void>）。
+    var e: int[] = a.filter(is_even); // [2, 4, 6]
+    print(e.length());                 // 3
+    print(e.get(2));                   // 6
+
+    // sort_by：原地排序（共享时 COW 克隆），比较器决定顺序。
+    a.sort_by(desc);                   // [6, 5, 4, 3, 2, 1]
+    print(a.get(0));                   // 6
+    print(a.get(5));                   // 1
+
+    raw_free(kp);                      // 手动释放状态指针
+    return 0;
+}

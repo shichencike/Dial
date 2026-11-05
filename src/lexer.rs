@@ -119,6 +119,9 @@ pub enum TokenKind {
     Colon,
     Dot,
     DotDot, // ..
+    /// `...`（v1.03）：同类型变参声明 `...xs: T` 与 `.diali` 的 C 变参声明。
+    /// 必须在 `..` 之前识别，否则会被切成 `DotDot` + `Dot`。
+    Ellipsis,
     LBracket,
     RBracket,
 
@@ -744,18 +747,22 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 i += 1;
                 col += 1;
             }
-            '.' => match peek {
-                Some('.') => {
+            '.' => {
+                if peek == Some('.') && chars.get(i + 2).copied() == Some('.') {
+                    // 三点优先于两点：`...xs: T` 不能被切成 `..` + `.`。
+                    push(TokenKind::Ellipsis, start_line, start_col, &mut tokens);
+                    i += 3;
+                    col += 3;
+                } else if peek == Some('.') {
                     push(TokenKind::DotDot, start_line, start_col, &mut tokens);
                     i += 2;
                     col += 2;
-                }
-                _ => {
+                } else {
                     push(TokenKind::Dot, start_line, start_col, &mut tokens);
                     i += 1;
                     col += 1;
                 }
-            },
+            }
             '[' => {
                 push(TokenKind::LBracket, start_line, start_col, &mut tokens);
                 i += 1;

@@ -1,0 +1,7 @@
+// 函数指针不受 ARC 管理，drop() 对它无意义。
+fn inc(x: int): int { return x + 1; }
+fn main(): int {
+    var cb: fn(int): int = inc;
+    drop(cb);
+    return 0;
+}

@@ -43,7 +43,7 @@ use crate::error::{DialcError, Result};
 /// 只要写了裸指针程序，仍会撞上难懂的 `undefined symbol: dial_raw_alloc`。
 /// 判据是「编译器是否可能要求旧包没有的符号」，因此同样递增，让旧包在链接期
 /// 就被明确拦下并给出重装指引——ABI 校验这道安全网不能因为引用是条件性的就放过。
-pub const STDLIB_ABI: u64 = 3;
+pub const STDLIB_ABI: u64 = 4;
 
 /// 全局包缓存根目录：`~/.dial/packages/`（Windows：`%USERPROFILE%\.dial\packages\`）。
 ///
@@ -729,6 +729,10 @@ pub struct ExternFn {
     pub params: Vec<(String, String)>,
     /// 返回类型名
     pub ret: String,
+    /// C 风格异构变参（v1.03）：形参表末尾写了 `...`。
+    /// 这是 FFI 特例，只表示「按 C varargs ABI 直传尾部参数」，
+    /// **不**引入任何类型标签或装箱；Dial 自身函数不允许这样写。
+    pub variadic: bool,
     /// `///` 文档注释（供 LSP 悬停提示）
     pub doc: Vec<String>,
     /// 声明所在行（1 起）——供 LSP 跳转定义跳进 `.diali`（v0.95）。
@@ -791,11 +795,12 @@ pub fn parse_diali(text: &str) -> Result<DialIface> {
             continue;
         }
         if line.starts_with("extern") {
-            let (fname, params, ret, fline) = parse_extern_fn(line, lnum)?;
+            let (fname, params, ret, variadic, fline) = parse_extern_fn(line, lnum)?;
             fns.push(ExternFn {
                 name: fname,
                 params,
                 ret,
+                variadic,
                 doc: std::mem::take(&mut doc),
                 line: fline,
             });
@@ -867,7 +872,10 @@ pub fn resolve_type_name(name: &str, opaque: &[String]) -> Result<crate::ast::Ty
 }
 
 /// 解析 `extern fn name(a: T, b: U): R;`，并回传声明行号（v0.95：跳转定义用）。
-fn parse_extern_fn(line: &str, lnum: usize) -> Result<(String, Vec<(String, String)>, String, usize)> {
+fn parse_extern_fn(
+    line: &str,
+    lnum: usize,
+) -> Result<(String, Vec<(String, String)>, String, bool, usize)> {
     let body = line
         .strip_prefix("extern")
         .unwrap()
@@ -913,11 +921,24 @@ fn parse_extern_fn(line: &str, lnum: usize) -> Result<(String, Vec<(String, Stri
     }
 
     let mut params = Vec::new();
+    let mut variadic = false;
     if !params_src.is_empty() {
         for p in params_src.split(',') {
             let p = p.trim();
             if p.is_empty() {
                 continue;
+            }
+            // `...` 是 C varargs 标记，必须写在形参表最后（v1.03）。
+            if p == "..." {
+                variadic = true;
+                continue;
+            }
+            if variadic {
+                return Err(DialcError::new(
+                    format!(".diali 第 {} 行: C 变参标记 `...` 必须是最后一个形参", lnum),
+                    0,
+                    0,
+                ));
             }
             let (pn, pt) = p.split_once(':').ok_or_else(|| {
                 DialcError::new(
@@ -930,5 +951,5 @@ fn parse_extern_fn(line: &str, lnum: usize) -> Result<(String, Vec<(String, Stri
         }
     }
 
-    Ok((fname, params, ret, lnum))
+    Ok((fname, params, ret, variadic, lnum))
 }

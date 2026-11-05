@@ -1,0 +1,7 @@
+// 句柄元素数组不支持 map/filter/sort_by（C 侧不做 ARC 所有权结算）。
+fn ident(s: string, state: rawptr<void>): string { return s; }
+fn main(): int {
+    var a: string[] = ["a", "b"];
+    var m: string[] = a.map(ident);
+    return 0;
+}

@@ -1,0 +1,7 @@
+// 函数指针是纯代码地址，没有可打印的内容。
+fn inc(x: int): int { return x + 1; }
+fn main(): int {
+    var cb: fn(int): int = inc;
+    print(cb);
+    return 0;
+}

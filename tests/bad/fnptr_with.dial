@@ -1,0 +1,9 @@
+// with 只管理需要显式释放的资源（file / thread / 裸指针），函数指针不是资源。
+// 用「资源在前」写法，避免 `with 名 = 标识符 {` 与结构体字面量的语法歧义。
+fn inc(x: int): int { return x + 1; }
+fn main(): int {
+    var cb: fn(int): int = inc;
+    with cb as p {
+    }
+    return 0;
+}

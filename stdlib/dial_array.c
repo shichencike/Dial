@@ -279,3 +279,55 @@ DialArray dial_array_sort(DialArray a) {
     }
     return a;
 }
+
+/* v1.03：高阶数组操作。C 侧只做遍历 / 建新数组 / 排序，回调一律经编译器生成的
+ * 精确签名 thunk 间接调用；fn_raw 与 state 原样透传，thunk 不捕获任何东西。
+ *
+ * 为什么 thunk 必须是编译器生成的：C 无法按 Dial 的任意回调签名调用
+ * （float 走 SSE 寄存器、bool 是 i1、返回类型各异），硬套一个统一签名就是 UB。
+ * 编译器知道静态签名，于是生成一份位模式 ↔ 精确类型值的适配代码。 */
+DialArray dial_array_hof(DialArray a, int64_t op, int64_t out_kind,
+                         void *fn_raw, void *state,
+                         int64_t (*thunk)(int64_t, int64_t, void *, void *)) {
+    if (!a) return NULL;
+    int64_t len = a_meta(a)[1];
+    int64_t kind = a_meta(a)[0];
+
+    if (op == 2) {
+        /* sort_by：与 dial_array_sort 同款 COW —— 共享时先克隆，再原地插入排序。
+         * 插入排序而非 qsort：qsort 的比较器拿不到 fn_raw / state，无法透传状态。 */
+        if (((int64_t *)a)[-1] > 1) {
+            void *n = dial_rc_clone(a, a_size(a_meta(a)[2]));
+            retain_elems(n);
+            release_buffer(a);
+            a = n;
+        }
+        int64_t *e = a_elems(a);
+        for (int64_t i = 1; i < len; i++) {
+            int64_t key = e[i];
+            int64_t j = i - 1;
+            /* cmp(左, 右) > 0 表示左应排在右之后（与 Dial 的 a-b 比较器一致）。 */
+            while (j >= 0 && thunk(e[j], key, fn_raw, state) > 0) {
+                e[j + 1] = e[j];
+                j--;
+            }
+            e[j + 1] = key;
+        }
+        return a;
+    }
+
+    /* map / filter：新建结果数组。标量 kind 下 dial_array_push 不做 retain，
+     * 因此没有「新元素自带所有权」的重复计数问题。 */
+    DialArray out = dial_array_new(op == 0 ? out_kind : kind);
+    int64_t *e = a_elems(a);
+    for (int64_t i = 0; i < len; i++) {
+        if (op == 0) {
+            int64_t r = thunk(e[i], 0, fn_raw, state);
+            out = dial_array_push(out, r);
+        } else {
+            int64_t keep = thunk(e[i], 0, fn_raw, state);
+            if (keep) out = dial_array_push(out, e[i]);
+        }
+    }
+    return out;
+}

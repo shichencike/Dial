@@ -1,0 +1,6 @@
+// 变参与默认实参都要占参数列表末尾，二者不可共存。
+fn f(base: int = 1, ...xs: int): int { return base; }
+fn main(): int {
+    print(f());
+    return 0;
+}

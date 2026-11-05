@@ -1,0 +1,35 @@
+// 回调携带状态（v1.03）：Dial 没有闭包，状态必须由调用方显式传递。
+//
+// 约定：回调签名里带一个 `rawptr<void>`（无类型裸指针），由用户自己
+// 用 ptr_cast 还原成具体指针；裸指针**不受 ARC 管理**，生命周期完全由用户负责
+// ——这里最后显式调用 raw_free(p)，也可以改用 `with p = raw_alloc(8) { ... }`。
+// 编译器不会为函数指针或状态指针插入任何 retain / release。
+
+fn accumulate(state: rawptr<void>, v: int): int {
+    var slot: rawptr<int> = ptr_cast<rawptr<int>>(state);
+    *slot = *slot + v;
+    return *slot;
+}
+
+fn feed(cb: fn(rawptr<void>, int): int, state: rawptr<void>, ...vals: int): int {
+    var last: int = 0;
+    var i: int = 0;
+    while (i < vals.length()) {
+        last = cb(state, vals.get(i));
+        i += 1;
+    }
+    return last;
+}
+
+fn main(): int {
+    var p: rawptr<byte> = raw_alloc(8);
+    var slot: rawptr<int> = ptr_cast<rawptr<int>>(p);
+    *slot = 0;
+    var state: rawptr<void> = ptr_cast<rawptr<void>>(p);
+
+    print(feed(accumulate, state, 1, 2, 3, 4)); // 10：函数指针 + 变参 + 显式状态
+    print(*slot);                               // 10：回调确实写回了调用方的内存
+
+    raw_free(p);                                // 手动释放，编译器不会代劳
+    return 0;
+}

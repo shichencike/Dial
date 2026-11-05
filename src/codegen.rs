@@ -15,7 +15,7 @@ use inkwell::context::Context;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::basic_block::BasicBlock;
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
@@ -383,6 +383,20 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_array_remove", i8b, &[i8b.into(), i64b.into()]);
         self.decl_func("dial_array_pop", i8b, &[i8b.into()]);
         self.decl_func("dial_array_sort", i8b, &[i8b.into()]);
+        // v1.03：高阶数组操作（map / filter / sort_by）统一入口。
+        // thunk 是函数指针，在 LLVM 18 的不透明指针模式下同样是 ptr，故用 i8b 声明。
+        self.decl_func(
+            "dial_array_hof",
+            i8b,
+            &[
+                i8b.into(),   // DialArray a
+                i64b.into(),  // op: 0=map 1=filter 2=sort_by
+                i64b.into(),  // out_kind: map 结果的元素类别码
+                i8b.into(),   // fn_raw: Dial 函数指针
+                i8b.into(),   // state: rawptr<void>
+                i8b.into(),   // thunk
+            ],
+        );
         self.decl_void("dial_array_retain", &[i8b.into()]);
         self.decl_void("dial_array_release", &[i8b.into()]);
         // Map (int -> int, ARC)
@@ -565,12 +579,103 @@ impl<'ctx> CodeGen<'ctx> {
             .iter()
             .map(|t| self.dialc_type_to_llvm(t).into())
             .collect();
+        // C 风格异构变参（v1.03）：`.diali` 的 `extern fn f(a: T, ...): R` 声明为
+        // LLVM varargs 函数；固定参数照常检查，尾部参数按 C ABI 直传。
         let ft = if info.ret == Type::Void {
-            self.context.void_type().fn_type(&param_tys, false)
+            self.context.void_type().fn_type(&param_tys, info.variadic)
         } else {
-            self.dialc_type_to_llvm(&info.ret).fn_type(&param_tys, false)
+            self.dialc_type_to_llvm(&info.ret).fn_type(&param_tys, info.variadic)
         };
         self.module.add_function(name, ft, None)
+    }
+
+    /// 从 Dial 签名构造**精确**的 LLVM 函数类型。
+    ///
+    /// 函数指针的间接调用必须给出精确签名（LLVM 18 的 `build_indirect_call` 要求），
+    /// 绝不能像 C 侧那样猜一个通用 `void* (*)(void*)`——那正是 UB 的温床。
+    fn llvm_fn_type(&self, params: &[Type], ret: &Type) -> FunctionType<'ctx> {
+        let param_tys: Vec<BasicMetadataTypeEnum> = params
+            .iter()
+            .map(|t| self.dialc_type_to_llvm(t).into())
+            .collect();
+        if *ret == Type::Void {
+            self.context.void_type().fn_type(&param_tys, false)
+        } else {
+            self.dialc_type_to_llvm(ret).fn_type(&param_tys, false)
+        }
+    }
+
+    /// 为高阶数组操作生成一个**精确回调签名**的适配 thunk（v1.03）。
+    ///
+    /// C 侧只认统一签名 `i64 (i64 a_bits, i64 b_bits, ptr fn_raw, ptr state)`；
+    /// thunk 把位模式还原成 Dial 的 T、把 `fn_raw` 当作精确函数指针间接调用，
+    /// 再把返回值转回位模式。`fn_raw` / `state` 由 C 透传，**thunk 不捕获任何东西**，
+    /// 因此同一个 (元素类型, 返回类型, 参数个数) 组合只生成一次、可跨调用点复用。
+    ///
+    /// 这是「无闭包」设计的直接结果：状态不藏在函数值里，而是显式穿过 C 再交回回调。
+    fn gen_hof_thunk(
+        &self,
+        elem: &Type,
+        ret: &Type,
+        arity: usize,
+    ) -> Result<FunctionValue<'ctx>> {
+        let code = |t: &Type| match t {
+            Type::Int => "i",
+            Type::Float => "f",
+            Type::Bool => "b",
+            Type::Byte => "y",
+            Type::Char => "c",
+            _ => "x",
+        };
+        let name = format!("__dial_hof_{}_{}_{}", arity, code(elem), code(ret));
+        if let Some(existing) = self.module.get_function(&name) {
+            return Ok(existing);
+        }
+        // 生成 thunk 会移动 builder 的插入点，先存下来再还原（与 spawn thunk 同款）。
+        let saved = self.builder.get_insert_block();
+        let i64t = self.context.i64_type();
+        let ft = i64t.fn_type(
+            &[i64t.into(), i64t.into(), self.i8ptr().into(), self.i8ptr().into()],
+            false,
+        );
+        let thunk = self.module.add_function(&name, ft, None);
+        let entry = self.context.append_basic_block(thunk, "entry");
+        self.builder.position_at_end(entry);
+
+        let a_bits = thunk.get_nth_param(0).unwrap().into_int_value();
+        let b_bits = thunk.get_nth_param(1).unwrap().into_int_value();
+        let fn_raw = thunk.get_nth_param(2).unwrap().into_pointer_value();
+        let state = thunk.get_nth_param(3).unwrap();
+
+        // Dial 回调签名：fn(T, rawptr<void>): R 或 fn(T, T, rawptr<void>): R。
+        let mut params: Vec<Type> = vec![elem.clone()];
+        if arity == 2 {
+            params.push(elem.clone());
+        }
+        params.push(Type::RawPtr(Box::new(Type::Void)));
+        let call_ft = self.llvm_fn_type(&params, ret);
+
+        let mut call_args: Vec<BasicMetadataValueEnum> = Vec::new();
+        call_args.push(self.from_elem_bits(elem, a_bits).into());
+        if arity == 2 {
+            call_args.push(self.from_elem_bits(elem, b_bits).into());
+        }
+        call_args.push(state.into());
+        let call = self
+            .builder
+            .build_indirect_call(call_ft, fn_raw, &call_args, "hof.call")
+            .unwrap();
+        let rv = call
+            .try_as_basic_value()
+            .basic()
+            .expect("高阶回调返回值不应为 void（语义层已拦截）");
+        let bits = self.to_elem_bits(rv, ret);
+        self.builder.build_return(Some(&bits)).unwrap();
+
+        if let Some(bb) = saved {
+            self.builder.position_at_end(bb);
+        }
+        Ok(thunk)
     }
 
     fn declare_dial_function(
@@ -620,7 +725,9 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::Channel(_)
             | Type::Opaque(_)
             // 裸指针（v1.02）：不透明指针（元素类型由调用处的 gep 决定）
-            | Type::RawPtr(_) => self.i8ptr().into(),
+            | Type::RawPtr(_)
+            // 函数指针（v1.03）：纯代码地址，IR 层同样是不透明 ptr。
+            | Type::FnPtr(..) => self.i8ptr().into(),
             Type::Struct(ref n) => (*self
                 .struct_types
                 .get(n)
@@ -756,7 +863,8 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::Thread
             | Type::Channel(_)
             | Type::Opaque(_)
-            | Type::RawPtr(_) => self.i8ptr().const_null().into(),
+            | Type::RawPtr(_)
+            | Type::FnPtr(..) => self.i8ptr().const_null().into(),
             Type::Struct(_) => {
                 // 结构体默认值：对 v0.2 仅用于 main 收尾，构造一个零初始化聚合
                 let bte = self.dialc_type_to_llvm(t);
@@ -3125,14 +3233,24 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(self.call_c("dial_string_new", &[g.into()]))
             }
             Expr::Var(name) => {
-                let info = scopes
+                let found = scopes
                     .iter()
                     .rev()
-                    .find_map(|s| s.get(name).map(|v| v.clone()))
-                    .ok_or_else(|| DialcError::new(format!("未声明的变量 '{}'", name), 0, 0))?;
-                let (ty, (_m, ptr)) = info;
-                let llvm_ty = self.dialc_type_to_llvm(&ty);
-                Ok(self.builder.build_load(llvm_ty, ptr, name).unwrap())
+                    .find_map(|s| s.get(name).map(|v| v.clone()));
+                match found {
+                    Some((ty, (_m, ptr))) => {
+                        let llvm_ty = self.dialc_type_to_llvm(&ty);
+                        Ok(self.builder.build_load(llvm_ty, ptr, name).unwrap())
+                    }
+                    None => {
+                        // v1.03：具名函数在右值位置求值为**纯函数地址**。
+                        // 没有环境对象、没有分配、没有 ARC，只是把函数符号的地址取出来。
+                        let fv = func_values.get(name).ok_or_else(|| {
+                            DialcError::new(format!("未声明的变量 '{}'", name), 0, 0)
+                        })?;
+                        Ok(fv.as_global_value().as_pointer_value().into())
+                    }
+                }
             }
             // 函数引用只在 spawn 首参位置出现；那里由 Call("spawn") 分支直接消费名字，
             // 不会走到这里。落到此处说明它被用在了别的位置——语义阶段已拒绝，此处为防御。
@@ -3983,37 +4101,126 @@ impl<'ctx> CodeGen<'ctx> {
                             self.call_c_void("dial_write_char", &[val.into()]);
                             Ok(self.context.i64_type().const_int(0, false).into())
                         } else {
-                            let info = functions.get(name).ok_or_else(|| {
-                                DialcError::new(format!("调用了未定义的函数 '{}'", name), 0, 0)
-                            })?;
-                            let fv = func_values.get(name).ok_or_else(|| {
-                                DialcError::new(format!("缺少函数 '{}' 的 LLVM 定义", name), 0, 0)
-                            })?;
-                            let mut arg_vals = Vec::new();
-                            for a in args {
-                                arg_vals.push(self.gen_expr(a, function, scopes, func_values, functions, structs)?);
+                            // v1.03：两条调用路径
+                            //   A. 具名函数（含 C 变参 extern）→ 直接调用；
+                            //   B. 函数指针变量 → 精确签名的间接调用（无捕获、无 thunk）。
+                            let info = functions.get(name);
+                            let (sig_params, sig_ret, is_c_varargs): (Vec<Type>, Type, bool);
+                            let direct_fv: Option<FunctionValue<'ctx>>;
+                            let indirect_ptr: Option<PointerValue<'ctx>>;
+                            if let Some(inf) = info {
+                                sig_params = inf.params.clone();
+                                sig_ret = inf.ret.clone();
+                                is_c_varargs = inf.variadic;
+                                direct_fv = Some(*func_values.get(name).ok_or_else(|| {
+                                    DialcError::new(
+                                        format!("缺少函数 '{}' 的 LLVM 定义", name),
+                                        0, 0,
+                                    )
+                                })?);
+                                indirect_ptr = None;
+                            } else {
+                                let (ty, (_m, ptr)) = scopes
+                                    .iter()
+                                    .rev()
+                                    .find_map(|s| s.get(name).map(|v| v.clone()))
+                                    .ok_or_else(|| {
+                                        DialcError::new(
+                                            format!("调用了未定义的函数 '{}'", name),
+                                            0, 0,
+                                        )
+                                    })?;
+                                match ty {
+                                    Type::FnPtr(ps, ret) => {
+                                        sig_params = ps;
+                                        sig_ret = *ret;
+                                    }
+                                    _ => {
+                                        return Err(DialcError::new(
+                                            format!("'{}' 不是函数或函数指针，不能调用", name),
+                                            0, 0,
+                                        ))
+                                    }
+                                }
+                                is_c_varargs = false;
+                                direct_fv = None;
+                                indirect_ptr = Some(
+                                    self.builder
+                                        .build_load(self.i8ptr(), ptr, "fnptr")
+                                        .unwrap()
+                                        .into_pointer_value(),
+                                );
+                            }
+                            let mut arg_vals: Vec<BasicValueEnum<'ctx>> = Vec::new();
+                            // 变参脱糖生成的临时数组：调用结束后要归还调用方那一份所有权。
+                            let mut temp_arrays: Vec<(BasicValueEnum<'ctx>, Type)> = Vec::new();
+                            for (i, a) in args.iter().enumerate() {
+                                let mut v = self.gen_expr(
+                                    a, function, scopes, func_values, functions, structs,
+                                )?;
+                                if is_c_varargs && i >= sig_params.len() {
+                                    // C 默认实参提升：bool 的 IR 是 i1，必须扩成 i64 再进
+                                    // varargs（否则 C 侧读到的是未定义的高位）；char/byte/int
+                                    // 本来就是 i64，float 本来就是 f64(== double)，指针原样传。
+                                    if type_of(a, scopes, functions, structs)? == Type::Bool {
+                                        v = self
+                                            .builder
+                                            .build_int_z_extend(
+                                                v.into_int_value(),
+                                                self.context.i64_type(),
+                                                "va.zext",
+                                            )
+                                            .unwrap()
+                                            .into();
+                                    }
+                                }
+                                if let Expr::ArrayLit(_, Some(et)) = a {
+                                    // `expect=Some` 是脱糖标记的临时数组（源码手写为 None）。
+                                    temp_arrays.push((v, Type::Array(Box::new((**et).clone()))));
+                                }
+                                arg_vals.push(v);
                             }
                             // 默认实参（v1.00）：在调用点按声明顺序补齐缺失的尾部参数，
                             // 每次调用求值一次（与「默认值是常量表达式」的约束一致）。
-                            for (i, d) in info.defaults.iter().enumerate() {
-                                if i >= arg_vals.len() {
-                                    if let Some(e) = d {
-                                        arg_vals.push(self.gen_expr(
-                                            e, function, scopes, func_values, functions, structs,
-                                        )?);
+                            if let Some(inf) = info {
+                                if !inf.variadic {
+                                    for (i, d) in inf.defaults.iter().enumerate() {
+                                        if i >= arg_vals.len() {
+                                            if let Some(e) = d {
+                                                arg_vals.push(self.gen_expr(
+                                                    e, function, scopes, func_values, functions,
+                                                    structs,
+                                                )?);
+                                            }
+                                        }
                                     }
                                 }
                             }
                             let metadata: Vec<BasicMetadataValueEnum> =
                                 arg_vals.iter().map(|v| (*v).into()).collect();
-                            let call = self.builder.build_call(*fv, &metadata, name).unwrap();
+                            let call = if let Some(fv) = direct_fv {
+                                self.builder.build_call(fv, &metadata, name).unwrap()
+                            } else {
+                                let ft = self.llvm_fn_type(&sig_params, &sig_ret);
+                                self.builder
+                                    .build_indirect_call(
+                                        ft,
+                                        indirect_ptr.unwrap(),
+                                        &metadata,
+                                        name,
+                                    )
+                                    .unwrap()
+                            };
+                            // 变参数组是普通 ARC 数组：函数形参进入时已 retain 自己那一份，
+                            // 这里释放的是**调用方**那一份临时数组的所有权——
+                            // 两侧对称，既不双重释放也不泄漏（用户明确要求自动插入 release）。
+                            for (v, ty) in temp_arrays {
+                                self.release_value(&ty, v);
+                            }
                             // void 调用（v0.92）：`close(f);` / `demo_free(h);` 这类
                             // 「只做事、不给值」的调用是包生态里最常见的形态。
                             // 这里发射调用后返回一个占位值——**它只可能出现在语句位置**，
-                            // 因为「把 void 当值用」（赋值给变量、参与运算、作为实参）
-                            // 已由 **语义层** 用 types_compatible 挡住（void 与任何类型都不兼容）。
-                            // 于是「返回 void 却仍能写成一个语句」与「void 不能被当值」
-                            // 两条规则各司其职，不必在 codegen 里重复判定。
+                            // 因为「把 void 当值用」已由语义层用 types_compatible 挡住。
                             let rv = match call.try_as_basic_value().basic() {
                                 Some(v) => v,
                                 None => self.context.i64_type().const_int(0, false).into(),
@@ -4188,6 +4395,75 @@ impl<'ctx> CodeGen<'ctx> {
                         scopes.iter().rev().find_map(|s| s.get(name).map(|v| v.clone()))
                     {
                         self.builder.build_store(ptr, newp).unwrap();
+                    }
+                }
+                Ok(newp)
+            }
+            // v1.03：接受函数指针的高阶数组方法。回调签名精确、状态显式透传，
+            // 没有闭包、没有环境对象、没有隐藏类型标签。
+            (Type::Array(elem), "map" | "filter" | "sort_by") => {
+                let op: u64 = match method {
+                    "map" => 0,
+                    "filter" => 1,
+                    _ => 2,
+                };
+                let arity = if method == "sort_by" { 2 } else { 1 };
+                let ret_ty = if method == "map" {
+                    match type_of(&args[0], scopes, functions, structs)? {
+                        Type::FnPtr(_, r) => *r,
+                        _ => {
+                            return Err(DialcError::new(
+                                "内部错误：map 的首参应是函数指针（语义层已拦截）",
+                                0, 0,
+                            ))
+                        }
+                    }
+                } else if method == "filter" {
+                    Type::Bool
+                } else {
+                    Type::Int
+                };
+                let thunk = self.gen_hof_thunk(elem.as_ref(), &ret_ty, arity)?;
+                // fn_raw 是运行期值：既可以是具名函数（求值为地址），
+                // 也可以是函数指针变量（load 出来的地址）。
+                let fn_raw = self.gen_expr(
+                    &args[0], function, scopes, func_values, functions, structs,
+                )?;
+                let state: BasicValueEnum<'ctx> = if args.len() > 1 {
+                    self.gen_expr(
+                        &args[1], function, scopes, func_values, functions, structs,
+                    )?
+                } else {
+                    // 不传状态时给一个空 rawptr<void>；回调若解引用它后果由用户负责。
+                    self.i8ptr().const_null().into()
+                };
+                let out_kind = if method == "map" {
+                    self.array_elem_kind(&ret_ty)
+                } else {
+                    self.array_elem_kind(elem.as_ref())
+                };
+                let newp = self.call_c(
+                    "dial_array_hof",
+                    &[
+                        optr.into(),
+                        i64t.const_int(op, false).into(),
+                        i64t.const_int(out_kind, false).into(),
+                        fn_raw.into(),
+                        state.into(),
+                        thunk.as_global_value().as_pointer_value().into(),
+                    ],
+                );
+                // sort_by 原地排序（COW 后可能换 buffer），把新指针写回变量槽，
+                // 与 dial_array_sort 的处理保持一致。
+                if method == "sort_by" {
+                    if let Expr::Var(name) = obj {
+                        if let Some((_, (_m, ptr))) = scopes
+                            .iter()
+                            .rev()
+                            .find_map(|s| s.get(name).map(|v| v.clone()))
+                        {
+                            self.builder.build_store(ptr, newp).unwrap();
+                        }
                     }
                 }
                 Ok(newp)
@@ -4705,6 +4981,14 @@ impl<'ctx> CodeGen<'ctx> {
                     0,
                 ))
             }
+            // 函数指针同样是纯地址，语义层已拦下（这里只保证 match 穷尽）。
+            Type::FnPtr(..) => {
+                return Err(DialcError::new(
+                    "内部错误：函数指针不可打印（应由 Sema 先行拦截）",
+                    0,
+                    0,
+                ))
+            }
             Type::Int => {
                 self.call_c_void("dial_print_int", &[val.into()]);
             }
@@ -4820,6 +5104,13 @@ impl<'ctx> CodeGen<'ctx> {
             Type::RawPtr(_) => {
                 return Err(DialcError::new(
                     "内部错误：裸指针不可输出（应由 Sema 先行拦截）",
+                    0,
+                    0,
+                ))
+            }
+            Type::FnPtr(..) => {
+                return Err(DialcError::new(
+                    "内部错误：函数指针不可输出（应由 Sema 先行拦截）",
                     0,
                     0,
                 ))

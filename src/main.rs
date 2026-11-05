@@ -133,7 +133,12 @@ fn main() {
                                     .map(|(n, t)| format!("{}: {}", n, t))
                                     .collect::<Vec<_>>()
                                     .join(", ");
-                                println!("     extern fn {}({}): {}", f.name, params, f.ret);
+                                let va = if f.variadic {
+                                    if params.is_empty() { "..." } else { ", ..." }
+                                } else {
+                                    ""
+                                };
+                                println!("     extern fn {}({}{}): {}", f.name, params, va, f.ret);
                                 for d in &f.doc {
                                     println!("       /// {}", d);
                                 }
@@ -565,6 +570,8 @@ pub fn resolve_imports(
                     defaults: vec![None; params.len()],
                     params,
                     ret,
+                    // C 风格异构变参是 `.diali` 的 FFI 特例；Dial 自身函数永远为 false。
+                    variadic: f.variadic,
                 },
             ));
         }

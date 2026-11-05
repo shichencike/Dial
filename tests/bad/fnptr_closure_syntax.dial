@@ -1,0 +1,5 @@
+// Dial 没有闭包 / lambda：匿名函数语法必须被语法层拒绝。
+fn main(): int {
+    var f: fn(int): int = |x| x + 1;
+    return 0;
+}

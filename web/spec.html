@@ -24,7 +24,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v102">dialc — Dial 语言编译器 v1.02</a><ul>
+<li><a href="#dialc--dial-语言编译器-v103">dialc — Dial 语言编译器 v1.03</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -328,11 +328,21 @@
 <li><a href="#316-测试">31.6 测试</a></li>
 </ul>
 </li>
+<li><a href="#32-v103回调函数指针与可变参数">32. v1.03：回调（函数指针）与可变参数</a><ul>
+<li><a href="#321-函数指针-fna-b-r">32.1 函数指针 fn(A, B): R</a></li>
+<li><a href="#322-同类型变参-xs-t">32.2 同类型变参 ...xs: T</a></li>
+<li><a href="#323-c-风格异构变参仅-extern-fnffi-特例">32.3 C 风格异构变参（仅 extern fn，FFI 特例）</a></li>
+<li><a href="#324-高阶数组方法-map--filter--sort_by">32.4 高阶数组方法 map / filter / sort_by</a></li>
+<li><a href="#325-释放契约谁自动谁手动不要混淆">32.5 释放契约：谁自动、谁手动（不要混淆）</a></li>
+<li><a href="#3251-标准库-abi-递增破坏性变更">32.5.1 标准库 ABI 递增（破坏性变更）</a></li>
+<li><a href="#326-测试与发布协同">32.6 测试与发布协同</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v102">dialc — Dial 语言编译器 v1.02</h1>
+<h1 id="dialc--dial-语言编译器-v103">dialc — Dial 语言编译器 v1.03</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -4397,15 +4407,15 @@ fn main(): int {
 <tbody>
 <tr>
 <td><strong>Release 名称 / Tag</strong></td>
-<td><code>stdlib-v1.2.0</code>（随编译器版本同步，见 <a href="#3151-标准库-abi-递增破坏性变更">§31.5.1</a>）</td>
+<td><code>stdlib-v1.3.0</code>（随编译器版本同步，见 <a href="#3251-标准库-abi-递增破坏性变更">§32.5.1</a>）</td>
 </tr>
 <tr>
 <td><strong><code>abi</code></strong></td>
-<td><code>3</code>（编译器 <code>package::STDLIB_ABI</code> 同步锁定；每次破坏性变更递增，见 <a href="#3091-标准库-abi-递增破坏性变更">§30.9.1</a> 与 <a href="#3151-标准库-abi-递增破坏性变更">§31.5.1</a>）</td>
+<td><code>4</code>（编译器 <code>package::STDLIB_ABI</code> 同步锁定；每次破坏性变更递增，见 <a href="#3151-标准库-abi-递增破坏性变更">§31.5.1</a> 与 <a href="#3251-标准库-abi-递增破坏性变更">§32.5.1</a>）</td>
 </tr>
 <tr>
 <td><strong><code>version</code></strong></td>
-<td><code>1.2.0</code></td>
+<td><code>1.3.0</code></td>
 </tr>
 <tr>
 <td><strong><code>license</code></strong></td>
@@ -4427,10 +4437,10 @@ fn main(): int {
 <p><strong>全自动、零配置</strong>：</p>
 <ol>
 <li><strong>一键脚本自动拉取</strong>：<code>install-dial.sh</code> / <code>install-dial.ps1</code> 把 <code>dialc</code> 装好后，会<strong>静默</strong>从
-   <code>https://github.com/shichencike/Dial/releases/download/stdlib-v1.2.0/stdlib.dialpkg</code>
+   <code>https://github.com/shichencike/Dial/releases/download/stdlib-v1.3.0/stdlib.dialpkg</code>
    拉取对应版本的 <code>stdlib.dialpkg</code> 并执行 <code>dialc install</code>（<code>STDLIB_RELEASE</code> 环境变量可钉死版本，离线/失败仅告警不阻断）。</li>
 <li><strong><code>dialc build</code> 优先链入预编译包</strong>：链接期先找已安装的 <code>stdlib</code> 包，按本机 Target Triple 取对应 <code>.a</code>；
-   日志会打印「使用已安装的标准库包: stdlib v1.2.0（ABI 3，目标 …）」。</li>
+   日志会打印「使用已安装的标准库包: stdlib v1.3.0（ABI 4，目标 …）」。</li>
 <li><strong>缺失回退源码编译</strong>：若未安装该包（离线/脚本跳过），<code>dialc</code> 退化为实时编译 <code>stdlib/</code> + <code>runtime/</code>
    的 C 源码（默认 Debug 安全等级），保证<strong>任何环境下都能编译出程序</strong>，不会因拿不到包而卡死。</li>
 <li><strong>ABI 不兼容明确报错</strong>：若已安装包的 <code>manifest.abi ≠ STDLIB_ABI</code>，<code>dialc</code> <strong>当场报错并给出重装方案</strong>
@@ -5380,8 +5390,8 @@ while (true) {
 <td>值语义聚合体塞不进 8 字节实参槽</td>
 </tr>
 <tr>
-<td>无一等函数</td>
-<td><code>spawn</code> 首参只能是顶层具名函数（<code>spawn(worker, ...)</code>），不能传闭包或函数值</td>
+<td><code>spawn</code> 首参仍是具名函数</td>
+<td>v1.03 起已有函数指针 <code>fn(A): R</code>，但线程入口 thunk 需按目标函数静态生成，故 <code>spawn</code> 仍要求顶层具名函数字面量；回调请用函数指针参数（见 §32）。<strong>闭包仍不提供</strong></td>
 </tr>
 <tr>
 <td>关闭不可逆</td>
@@ -5873,10 +5883,14 @@ If omitted the notification should not be sent.</em>」——纯数字形式里<
 <p>v1.00 是<strong>语言特性补齐</strong>里程碑。用户最初的诉求很直接：语言特性太少，很多正常程序
 需要的能力此前只能「模拟」或「绕路实现」。本版一次性补齐五组特性，覆盖运算符、
 控制流、函数、表达力与容器。</p>
-<p><strong>所有改动共同守住项目铁律</strong>：不引入 GC；不提供裸指针、地址取值、指针算术；
+<p><strong>所有改动共同守住项目铁律（v1.00 当时）</strong>：不引入 GC；不提供裸指针、地址取值、指针算术；
 不支持运算符重载；不支持一等函数 / 闭包 / 函数指针；ARC 所有权语义不退化；
 <strong>零隐式转换铁律保持</strong>——<code>1 + 2.0</code> 仍然编译失败，<code>float</code> 与 <code>int</code> 之间必须显式
 <code>int_to_float</code> / <code>float_to_int</code>。</p>
+<blockquote>
+<p>后续边界变更：「不提供裸指针」已在 <strong>v1.02</strong> 解除（§31），「不支持函数指针」已在
+<strong>v1.03</strong> 解除（§32）；<strong>闭包至今仍不提供</strong>，回调状态一律显式传 <code>rawptr&lt;void&gt;</code>。</p>
+</blockquote>
 <h3 id="291-运算符与字面量">29.1 运算符与字面量</h3>
 <table>
 <thead>
@@ -6174,9 +6188,13 @@ var ks: string[] = m.keys();    // 键快照
 嵌套块里靠作用域结束触发释放——实测峰值内存 <strong>57160 KB</strong>；改成 <code>drop()</code> 显式
 释放后，同样的三阶段程序峰值降到 <strong>33344 KB（-41.7%）</strong>，与嵌套块绕道
 （33460 KB）持平，却不必再套一层块、也不影响阶段间传数据。</p>
-<p>本节所有改动继续守住项目铁律：不引入 GC；不提供裸指针 / 地址取值 / 指针算术；
+<p>本节所有改动继续守住项目铁律（v1.01 当时）：不引入 GC；不提供裸指针 / 地址取值 / 指针算术；
 不支持运算符重载；不支持一等函数 / 闭包；ARC 所有权语义不退化；
 <strong>零隐式转换铁律保持</strong>（<code>1 + 2.0</code> 仍然编译失败）。</p>
+<blockquote>
+<p>其中「不提供裸指针」已在 v1.02 解除（§31），「不支持一等函数」中的<strong>函数指针</strong>
+已在 v1.03 解除（§32）；闭包仍不提供。</p>
+</blockquote>
 <h3 id="301-数组元素类型扩展">30.1 数组元素类型扩展</h3>
 <p>数组元素类型白名单从「只有 <code>int</code>」放宽到<strong>全部标量 + 句柄</strong>：</p>
 <table>
@@ -6734,9 +6752,9 @@ raw_free(buf);                                    // 释放（谁申请、谁释
 <code>dial_raw.c</code> 会<strong>自动</strong>进入静态库与官方包，无需手工登记清单。</p>
 <p>配套同步：官方标准库包版本 <code>1.1.0 → 1.2.0</code>，打包默认 <code>--abi 3</code>，CI 发布作业
 <code>--abi 3</code>，一键安装脚本的 <code>STDLIB_RELEASE</code> 默认标签 → <code>stdlib-v1.2.0</code>。
-标准库仍<strong>独立发版</strong>（tag <code>stdlib-v*</code>）；v1.01 与 v1.02 目前都是<strong>本地提交、
-尚未打标签</strong>，合并发布时以两个标签为准：<code>v1.2.0</code>（编译器）与
-<code>stdlib-v1.2.0</code>（标准库包）。</p>
+标准库仍<strong>独立发版</strong>（tag <code>stdlib-v*</code>）；v1.01 ~ v1.03 目前都是<strong>本地提交、
+尚未打标签</strong>，合并发布时以两个标签为准（v1.03 起为 <code>v1.3.0</code> 编译器与
+<code>stdlib-v1.3.0</code> 标准库包，见 <a href="#3251-标准库-abi-递增破坏性变更">§32.5.1</a>）。</p>
 <h3 id="316-测试">31.6 测试</h3>
 <ul>
 <li>3 个正向示例 + 同名 <code>.expected</code> 黄金文件：<code>goto_demo</code>、<code>with_demo</code>、<code>rawptr_demo</code>；</li>
@@ -6745,12 +6763,198 @@ raw_free(buf);                                    // 释放（谁申请、谁释
   <code>free</code> 非指针 / <code>with</code> 非资源 / 裸指针隐式转换；</li>
 <li><code>bash tests/run_tests.sh</code> A–O 全套通过；H 组另加一条回归：<code>drop(不透明句柄)</code>
   必须报错并给出「不受 ARC 管理、请手动释放」的指引。</li>
-</ul></main></div>
+</ul>
+<hr />
+<h2 id="32-v103回调函数指针与可变参数">32. v1.03：回调（函数指针）与可变参数</h2>
+<p>v1.03 补齐两个「正常程序绕不过去」的能力：<strong>把函数当值传递</strong>、<strong>写同类型变参函数</strong>。
+两者都按 Dial 的既有铁律落地，没有引入任何运行期魔法：</p>
+<ul>
+<li><strong>不引入 GC</strong>；ARC 所有权语义不退化；</li>
+<li><strong>不引入闭包</strong>：函数指针里只有一个代码地址，绝不隐式捕获环境；</li>
+<li><strong>零隐式转换</strong>：函数签名与变参元素类型都严格匹配（<code>1 + 2.0</code> 仍编译失败）；</li>
+<li><strong>零隐藏开销</strong>：变参脱糖成普通 <code>T[]</code>，没有类型标签、没有装箱、没有运行期分派。</li>
+</ul>
+<h3 id="321-函数指针-fna-b-r">32.1 函数指针 <code>fn(A, B): R</code></h3>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>契约</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>类型写法</td>
+<td><code>fn(int, int): int</code>、<code>: void</code>、<code>fn(int, rawptr&lt;void&gt;): int</code></td>
+</tr>
+<tr>
+<td>底层表示</td>
+<td>LLVM <code>ptr</code>（纯函数地址），与 <code>rawptr&lt;T&gt;</code> 一样是不透明指针</td>
+</tr>
+<tr>
+<td>求值</td>
+<td>具名函数出现在右值位置即求值为函数地址：<code>var cb: fn(int): int = double;</code></td>
+</tr>
+<tr>
+<td>调用</td>
+<td><code>cb(21)</code> 走<strong>精确签名的间接调用</strong>，参数个数 / 类型编译期校验</td>
+</tr>
+<tr>
+<td>捕获</td>
+<td><strong>绝对没有</strong>。没有环境对象、没有 <code>Fn</code> / <code>FnMut</code> / <code>FnOnce</code> 分类、没有匿名函数语法</td>
+</tr>
+<tr>
+<td>所有权</td>
+<td>不受 ARC 管理、无堆分配、<strong>无需释放</strong>；<code>drop(cb)</code>、<code>with cb as p</code> 都是编译期错误</td>
+</tr>
+<tr>
+<td>状态传递</td>
+<td>显式把 <code>rawptr&lt;void&gt;</code> 作为回调形参，由调用方传进去，生命周期用户自负</td>
+</tr>
+</tbody>
+</table>
+<p><code>fnptr_demo.dial</code> 覆盖声明 / 赋值 / 传参 / 返回 / 间接调用；<code>callback_state_demo.dial</code>
+演示「回调写回调用方内存」：函数指针 + 变参 + 显式 <code>rawptr&lt;void&gt;</code> 状态 + 最后手动 <code>raw_free</code>。</p>
+<blockquote>
+<p><strong>为什么不做闭包</strong>：闭包需要分配捕获环境并决定它的生命周期，那会与 ARC、<code>with</code>、
+<code>goto</code> 的作用域清理全面纠缠。Dial 选择把状态的所有权明明白白交给调用方——
+与 C 的 <code>void*</code> 上下文参数同款，也和 v1.02 的裸指针契约一脉相承。</p>
+</blockquote>
+<h3 id="322-同类型变参-xs-t">32.2 同类型变参 <code>...xs: T</code></h3>
+<pre><code class="language-dial">fn sum(...xs: int): int {
+    var t: int = 0;
+    var i: int = 0;
+    while (i &lt; xs.length()) { t += xs.get(i); i += 1; }
+    return t;
+}
+print(sum(1, 2, 3, 4));  // 10
+print(sum());             // 0（缺省就是空数组）
+</code></pre>
+<p><code>...xs: T</code> <strong>在 <code>semantic.rs</code> 的 <code>analyze</code> 开头被脱糖</strong>：</p>
+<ol>
+<li>形参变成普通的 <code>xs: T[]</code>；</li>
+<li>调用点的尾部实参打包成带元素类型标注的 <code>T[]</code> 数组字面量；</li>
+<li>之后的类型检查、LSP、codegen 只看得见一个普通数组。</li>
+</ol>
+<p>因此编译产物里<strong>没有</strong>变参专用的运行期机制：没有类型标签、没有装箱、没有分派表。
+<code>...xs</code> 必须是参数列表最后一项，不能与默认实参共存，元素类型必须能作为数组元素。</p>
+<p><strong>异构变参在语言层被拒</strong>：<code>sum(1, "a")</code> 会在编译期报「数组元素类型不一致」并明确
+提示「若需异构参数请显式定义结构体或自定义类型包」。这与零隐式转换铁律一致，
+也避免为了方便引入 <code>any</code> 之类的动态类型后门。</p>
+<h3 id="323-c-风格异构变参仅-extern-fnffi-特例">32.3 C 风格异构变参（仅 <code>extern fn</code>，FFI 特例）</h3>
+<p><code>.diali</code> 的接口声明允许写 <code>...</code>，表示按 <strong>C varargs ABI</strong> 直传尾部参数：</p>
+<pre><code class="language-text">extern fn demo_vprintf(fmt: string, ...): int;
+</code></pre>
+<ul>
+<li>固定参数照常做严格类型检查（传 <code>int</code> 给 <code>fmt: string</code> 仍编译失败）；</li>
+<li>尾部参数<strong>不检查类型</strong>，按 C ABI 原样传递：<code>i64</code> 对应 <code>%ld</code>、<code>f64</code> 对应 <code>%f</code>、
+  <code>bool</code> 会被 zext 成 <code>i64</code>（不能让 <code>i1</code> 直接进 varargs）；</li>
+<li>这是<strong>包 FFI 特例</strong>，Dial 自己定义的函数永远不能这样写（它们走 §32.2 的同类型脱糖）；</li>
+<li>不引入任何隐藏类型标签或装箱。</li>
+</ul>
+<p>H 组回归同时锁定正向（int64 / double / bool 混传输出 <code>i=42 f=3.5 b=1</code>）与负向
+（固定参数类型错误仍被拦下）。</p>
+<h3 id="324-高阶数组方法-map--filter--sort_by">32.4 高阶数组方法 <code>map</code> / <code>filter</code> / <code>sort_by</code></h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>回调签名</th>
+<th>返回</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>arr.map(f[, state])</code></td>
+<td><code>fn(T, rawptr&lt;void&gt;): U</code></td>
+<td><code>U[]</code>（新数组）</td>
+</tr>
+<tr>
+<td><code>arr.filter(f[, state])</code></td>
+<td><code>fn(T, rawptr&lt;void&gt;): bool</code></td>
+<td><code>T[]</code>（新数组）</td>
+</tr>
+<tr>
+<td><code>arr.sort_by(cmp[, state])</code></td>
+<td><code>fn(T, T, rawptr&lt;void&gt;): int</code></td>
+<td><code>T[]</code>（原地排序，COW 安全）</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>回调签名<strong>固定带一个 <code>rawptr&lt;void&gt;</code> 状态参数</strong>——没有闭包，状态必须显式穿过 C 运行时
+  再交回回调；省略 <code>state</code> 时回调收到空指针。</li>
+<li>C 侧 <code>dial_array_hof</code> 只做遍历 / 建数组 / 插入排序，回调经编译器生成的<strong>精确签名
+  thunk</strong> 间接调用：thunk 把 8 字节位模式还原成 T、把函数地址按真实签名调用、再把结果
+  转回位模式。C 完全不知道回调类型，因此没有运行期类型标签。</li>
+<li>仅支持标量元素（<code>int</code> / <code>float</code> / <code>bool</code> / <code>byte</code> / <code>char</code>）：句柄元素数组请自己写循环
+  （C 侧新建数组时不做 ARC 所有权结算）。</li>
+<li><code>sort_by</code> 用插入排序而非 <code>qsort</code>：<code>qsort</code> 的比较器拿不到 <code>fn_raw</code> / <code>state</code>，无法透传状态。</li>
+</ul>
+<h3 id="325-释放契约谁自动谁手动不要混淆">32.5 释放契约：谁自动、谁手动（<strong>不要混淆</strong>）</h3>
+<p>最容易搞错的一点：<strong>「不受自动管束」不等于「都需要手动释放」</strong>。</p>
+<table>
+<thead>
+<tr>
+<th>对象</th>
+<th>是否受 ARC 管理</th>
+<th>是否需要手动释放</th>
+<th>依据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>变参数组 <code>T[]</code> 及其元素</td>
+<td><strong>是</strong></td>
+<td><strong>否</strong></td>
+<td>脱糖生成的是普通 ARC 数组：函数形参进入时 retain、退出时 release；调用点的临时数组由编译器在调用结束后插入 release</td>
+</tr>
+<tr>
+<td>函数指针 <code>fn(...)</code></td>
+<td>否（纯地址值）</td>
+<td><strong>否</strong></td>
+<td>没有堆对象、没有所有权，<code>drop()</code> 对它无意义，编译期直接拒绝</td>
+</tr>
+<tr>
+<td>裸指针 <code>rawptr&lt;T&gt;</code></td>
+<td><strong>否</strong></td>
+<td><strong>是</strong></td>
+<td><code>raw_free(p)</code> / <code>drop(p)</code> / <code>with</code> 自动释放，见 §31</td>
+</tr>
+<tr>
+<td><code>file</code> / <code>thread</code> / 不透明句柄</td>
+<td>否</td>
+<td><strong>是</strong></td>
+<td><code>close</code> / <code>join</code> / 包自己的 <code>xxx_free</code></td>
+</tr>
+</tbody>
+</table>
+<p>实测：20 万次变参调用（每次生成 5 元素临时数组）峰值 RSS <strong>1348 KB</strong>，
+证明调用方那一份临时数组确实被编译器释放了；若漏掉 release，这一项会线性吃内存。</p>
+<h3 id="3251-标准库-abi-递增破坏性变更">32.5.1 标准库 ABI 递增（破坏性变更）</h3>
+<p><code>stdlib/dial_array.c</code> 新增 <code>dial_array_hof</code>，因此 <code>STDLIB_ABI</code> <strong>3 → 4</strong>，
+官方包版本 <code>1.2.0 → 1.3.0</code>，<code>make_stdlib_pkg.py</code> 默认 <code>--abi 4</code>、CI <code>--abi 4</code>、
+一键安装脚本默认标签 <code>stdlib-v1.3.0</code>。旧包（abi=3）会被编译器当场拒绝并给出重装指引。</p>
+<h3 id="326-测试与发布协同">32.6 测试与发布协同</h3>
+<ul>
+<li>4 个正向示例：<code>fnptr_demo</code>、<code>varargs_demo</code>、<code>callback_state_demo</code>、<code>hof_demo</code>；</li>
+<li>14 个负向用例：签名不匹配 / 间接调用参数个数 / print / drop / with / 闭包语法 /
+  异构变参 / 变参不在末尾 / 变参与默认值共存 / 变参元素类型 / 高阶回调签名 /
+  句柄元素 / 非函数指针 / 状态参数类型；</li>
+<li>H 组新增 C 变参 <code>extern fn</code> 的正向与负向回归；</li>
+<li><code>bash tests/run_tests.sh</code> A–O 全套通过。</li>
+</ul>
+<blockquote>
+<p><strong>关于 <code>v1.0</code> 标签</strong>：<code>v1.00</code> ~ <code>v1.03</code> 都是「v1.0 里程碑」达成过程中的分版记录
+（CHANGELOG 里已收拢到该标题下）。里程碑标签 <code>v1.0</code> <strong>要等回调、变参等收尾特性
+全部完成并回归通过之后才打</strong>；本仓库当前不打 <code>v1.0</code> tag，发布仍以两个独立标签
+<code>v1.3.0</code> 与 <code>stdlib-v1.3.0</code> 为准。</p>
+</blockquote></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v1.02 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.03 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

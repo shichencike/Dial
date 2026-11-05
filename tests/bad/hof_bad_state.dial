@@ -1,0 +1,7 @@
+// 状态参数必须是 rawptr<void>，不能是别的类型。
+fn twice(x: int, state: rawptr<void>): int { return x * 2; }
+fn main(): int {
+    var a: int[] = [1, 2, 3];
+    var m: int[] = a.map(twice, 42);
+    return 0;
+}

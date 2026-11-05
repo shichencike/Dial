@@ -1,0 +1,7 @@
+// 高阶方法的回调签名必须带显式的 rawptr<void> 状态参数（没有闭包）。
+fn twice(x: int): int { return x * 2; }
+fn main(): int {
+    var a: int[] = [1, 2, 3];
+    var m: int[] = a.map(twice);
+    return 0;
+}

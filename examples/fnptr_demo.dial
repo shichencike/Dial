@@ -1,0 +1,45 @@
+// 函数指针（v1.03）：一等函数地址，绝不捕获环境。
+//
+// `fn(A, B): R` 在 IR 层就是一个 ptr（纯代码地址）：
+//   - 没有闭包、没有环境堆对象、没有 Fn/FnMut/FnOnce 分类；
+//   - 不受 ARC 管理（没有所有权，也无需释放，drop() 对它无意义）；
+//   - 签名严格匹配，零隐式转换。
+// 回调需要携带状态时，显式传一个 rawptr<void>，生命周期由调用方自己负责
+// （见 callback_state_demo.dial）。
+
+fn double(x: int): int {
+    return x * 2;
+}
+
+fn inc(x: int): int {
+    return x + 1;
+}
+
+fn add(a: int, b: int): int {
+    return a + b;
+}
+
+// 函数指针作为参数：调用点用精确签名做间接调用。
+fn apply(f: fn(int): int, v: int): int {
+    return f(v);
+}
+
+// 函数指针也可以作为返回值。
+fn pick(flag: bool): fn(int): int {
+    if (flag) {
+        return double;
+    }
+    return inc;
+}
+
+fn main(): int {
+    var cb: fn(int): int = double;
+    print(cb(21));                 // 42：间接调用
+    print(apply(inc, 9));          // 10：具名函数直接当实参（求值为函数地址）
+    var g: fn(int): int = pick(true);
+    print(g(5));                   // 10
+    var h: fn(int): int = pick(false);
+    print(h(5));                   // 6
+    print(add(1, 2));              // 3：普通调用不受影响
+    return 0;
+}

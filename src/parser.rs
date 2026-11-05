@@ -364,8 +364,38 @@ impl Parser {
         let mut param_pos = Vec::new();
         let mut defaults: Vec<Option<Expr>> = Vec::new();
         let mut seen_default = false;
+        // 同类型变参 `...xs: T`（v1.03）：只记录标记，脱糖由 semantic 负责。
+        let mut variadic: Option<(String, Type, usize, usize)> = None;
         if !self.check(&TokenKind::RParen) {
             loop {
+                if self.check(&TokenKind::Ellipsis) {
+                    let vt = self.peek().clone();
+                    self.advance();
+                    let (pname, pline, pcol) = self.expect_ident_pos()?;
+                    self.reject_const_shadow(&pname, pline, pcol)?;
+                    self.expect(TokenKind::Colon)?;
+                    let elem = self.parse_type()?;
+                    if seen_default {
+                        return Err(DialcError::new(
+                            "语法错误：变参函数不允许同时使用默认实参（两者都要求占据参数列表末尾）",
+                            vt.line, vt.col,
+                        ));
+                    }
+                    if self.check(&TokenKind::Assign) {
+                        return Err(DialcError::new(
+                            "语法错误：变参形参不能有默认值（缺省时它就是空数组）",
+                            vt.line, vt.col,
+                        ));
+                    }
+                    if self.check(&TokenKind::Comma) {
+                        return Err(DialcError::new(
+                            "语法错误：变参形参 ...xs 必须是参数列表的最后一项",
+                            vt.line, vt.col,
+                        ));
+                    }
+                    variadic = Some((pname, elem, pline, pcol));
+                    break;
+                }
                 let (pname, pline, pcol) = self.expect_ident_pos()?;
                 self.reject_const_shadow(&pname, pline, pcol)?;
                 self.expect(TokenKind::Colon)?;
@@ -405,6 +435,7 @@ impl Parser {
             params,
             defaults,
             param_pos,
+            variadic,
             ret,
             body,
             line: nline,
@@ -460,6 +491,28 @@ impl Parser {
             TokenKind::VoidT => {
                 self.advance();
                 Type::Void
+            }
+            // 函数指针类型 `fn(A, B): R`（v1.03）。
+            // 与函数声明 `fn name(a: A): R` 同形，只是省掉名字；类型位置遇上
+            // `fn` 关键字时不会与任何语句开头混淆（parse_type 只在类型上下文被调用）。
+            TokenKind::Fn => {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                let mut ps = Vec::new();
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        ps.push(self.parse_type()?);
+                        if self.check(&TokenKind::Comma) {
+                            self.advance();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                self.expect(TokenKind::Colon)?;
+                let ret = self.parse_type()?;
+                Type::FnPtr(ps, Box::new(ret))
             }
             TokenKind::MapT => {
                 self.advance();
@@ -1463,13 +1516,24 @@ impl Parser {
         self.parse_postfix()
     }
 
+    /// `.` 后面的成员名（v1.03）：`map` 在词法层是类型关键字 `MapT`，
+    /// 但 `arr.map(f)` 的方法名同样是 `map`，这里单独放行，避免为了一个
+    /// 高阶方法去改动全局关键字表（那会连带影响类型解析）。
+    fn expect_member_name(&mut self) -> Result<String> {
+        if self.check(&TokenKind::MapT) {
+            self.advance();
+            return Ok("map".to_string());
+        }
+        self.expect_ident()
+    }
+
     /// 后缀：处理 `.field` / `.method(args)` / `[index]`，可链式。
     fn parse_postfix(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary()?;
         loop {
             if self.check(&TokenKind::Dot) {
                 self.advance();
-                let name = self.expect_ident()?;
+                let name = self.expect_member_name()?;
                 if self.check(&TokenKind::LParen) {
                     self.advance();
                     let mut args = Vec::new();
@@ -1611,8 +1675,9 @@ impl Parser {
                     if let Some(ty) = type_arg {
                         args.push(Expr::TypeLit(ty));
                     }
-                    // spawn 的首参是「函数引用」，不是表达式：Dial 没有一等函数与闭包，
-                    // 线程入口只能是一个顶层具名函数，因此这里直接消费标识符。
+                    // spawn 的首参是「函数引用」，不是表达式：线程入口 thunk 要按目标
+                    // 函数静态生成，因此这里直接消费一个顶层具名函数字面量。
+                    // （v1.03 起 Dial 已有函数指针，但那走普通标识符表达式 Expr::Var。）
                     if name == "spawn" && !self.check(&TokenKind::RParen) {
                         args.push(Expr::FuncRef(self.expect_ident()?));
                         if self.check(&TokenKind::Comma) {
