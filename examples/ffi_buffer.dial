@@ -1,0 +1,25 @@
+// v1.04 FFI：rawptr<byte> 与 C 的缓冲区函数直接互通（memcpy / memcmp / strlen）。
+// 裸指针不受 ARC 管束：raw_alloc 申请的内存必须显式 raw_free 归还。
+
+extern fn memcpy(dst: rawptr<byte>, src: rawptr<byte>, n: int): rawptr<byte>;
+extern fn memcmp(a: rawptr<byte>, b: rawptr<byte>, n: int): int;
+extern fn strlen(s: rawptr<byte>): int;
+
+fn main(): int {
+    var src: bytes = bytes_from_string("dial bytes");
+    var p: rawptr<byte> = src.as_ptr();   // bytes 版 as_c_str：同样跳过 8 字节头
+
+    print(bytes_length(src));
+    print(strlen(p));
+
+    var dst: rawptr<byte> = raw_alloc(16);
+    memcpy(dst, p, 10);                   // 裸指针直接作为 C 的 void* 使用
+    print(memcmp(dst, p, 10) == 0);
+
+    // C 缓冲区 -> Dial bytes：长度必须显式给出（C 缓冲区可含 '\0'，不能靠 strlen 猜）。
+    var copy: bytes = bytes_from_ptr(dst, 10);
+    print(bytes_to_string(copy));
+
+    raw_free(dst);
+    return 0;
+}

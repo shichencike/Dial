@@ -1,0 +1,30 @@
+// v1.04 FFI：语言层 extern fn 直连系统库，不必造包 / install / import。
+//
+// 系统库（libc / libm）由 C 编译器按平台默认动态解析，不需要、也不允许用 link 声明。
+// 用户自己的 C 扩展库才需要显式 link，且只接受 .a / .lib 静态归档（J 组铁律）。
+//
+// FFI 标量映射：int <-> int64_t / size_t，float <-> double，byte <-> uint8_t，
+// bool <-> int（C 默认整型提升），rawptr<T> / fn(A):R <-> void* / 函数指针。
+
+extern fn puts(s: rawptr<byte>): int;
+extern fn strlen(s: rawptr<byte>): int;
+extern fn printf(fmt: rawptr<byte>, ...): int;
+
+fn main(): int {
+    var s: string = "hello, C";
+
+    // as_c_str() 由编译器 / C Runtime 跳过 8 字节长度头，用户不写 +8 offset hack。
+    // 返回的是**借用**指针：不受 ARC 管理，生命周期绑定原 string。
+    var p: rawptr<byte> = s.as_c_str();
+
+    puts(p);                  // Dial 字符串直接喂给 libc
+    print(strlen(p));         // size_t 是 64 位，与 Dial int 精确对应
+
+    var fmt: string = "printf: %s / %ld\n";
+    printf(fmt.as_c_str(), p, 42);   // extern C 变参（v1.03）在语言层同样可用
+
+    // 反向数据总线：从 C 字符串**复制**出一份新的、受 ARC 管理的 Dial string。
+    var t: string = string_from_cstr(p);
+    print(t);
+    return 0;
+}

@@ -1,0 +1,3 @@
+// extern struct 字段必须是具确定 C ABI 布局的类型；string 是 ARC 句柄，拒绝。
+extern struct S { s: string }
+fn main(): int { return 0; }

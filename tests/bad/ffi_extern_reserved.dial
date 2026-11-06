@@ -1,0 +1,3 @@
+// 内建保留名不能被 extern fn 占用（否则内建分支会被静默绕过或反过来遮蔽）。
+extern fn drop(x: int): int;
+fn main(): int { return 0; }

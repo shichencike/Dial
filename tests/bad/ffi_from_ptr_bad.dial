@@ -1,0 +1,7 @@
+// bytes_from_ptr 需要 2 个参数（缓冲区指针 + 显式字节数）。
+fn main(): int {
+    var p: rawptr<byte> = raw_alloc(8);
+    var b: bytes = bytes_from_ptr(p);
+    raw_free(p);
+    return 0;
+}

@@ -25,6 +25,7 @@ mod semantic;
 
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -282,7 +283,7 @@ fn main() {
 
     // 2.5) 解析 import：定位包 -> 校验哈希 -> 读 .diali 签名 -> 选出本平台机器码
     //      编译器在这里替用户做完**全部**决策：不写路径、不写平台、不写版本。
-    let (externs, pkg_libs, opaque_types) = match resolve_imports(&probe.imports, &mut |m| {
+    let (mut externs, mut pkg_libs, opaque_types) = match resolve_imports(&probe.imports, &mut |m| {
         println!("{}", m)
     }) {
         Ok(r) => r,
@@ -299,6 +300,41 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // 2.6) v1.04 FFI：把语言层 `extern fn` 并入外部函数表。
+    //      之后语义检查与 codegen 对「包函数」和「语言层 extern」一视同仁——
+    //      调用方写的都是普通函数调用，函数体在链接期由 .a 或系统库提供。
+    for e in &program.externs {
+        if externs.iter().any(|(n, _)| n == &e.name) {
+            eprintln!(
+                "[dialc 错误] 语义错误：外部函数 '{}' 重复声明（包 .diali 与源码 extern fn 撞名）",
+                e.name
+            );
+            std::process::exit(1);
+        }
+        externs.push((
+            e.name.clone(),
+            semantic::FuncInfo {
+                params: e.params.iter().map(|(_, t)| t.clone()).collect(),
+                ret: e.ret.clone(),
+                defaults: vec![None; e.params.len()],
+                variadic: e.variadic,
+            },
+        ));
+    }
+
+    // 2.7) v1.04 FFI：校验并收集 `link "xxx.a";` 声明的静态库。
+    //      系统库（libc/libm）由 C 编译器默认动态解析，不走这里，也不进 LTO 链路；
+    //      用户 C 扩展库一律强制 .a / .lib 静态归档，保证产物零第三方动态依赖。
+    for l in &program.links {
+        match resolve_ffi_link(&l.path, Path::new(&src_path)) {
+            Ok(p) => pkg_libs.push(p),
+            Err(msg) => {
+                eprintln!("[dialc 错误] 语义错误（第 {} 行 第 {} 列）：{}", l.line, l.col, msg);
+                std::process::exit(1);
+            }
+        }
+    }
 
     // 3) 语义 + 数据流/逃逸分析
     let (functions, structs) = match analyze(&mut program, &externs) {
@@ -511,6 +547,75 @@ pub fn first_missing_package(imports: &[String]) -> Option<String> {
 /// 的分帧解析错位（实测表现为「一打开 import 了包的文档就卡死」）。
 /// CLI 构建传 stdout（构建日志），LSP 传 `window/logMessage` 通知——由调用方决定，
 /// 函数本身无权替调用方选往哪儿写。
+/// v1.04 FFI：校验并解析 `link "libfoo.a";` 声明的静态库路径。
+///
+/// 三条硬约束（与 J 组包安装铁律同源）：
+///  1. **只接受 `.a` / `.lib`**；`.so` / `.dll` / `.dylib`（含 `libx.so.1`）编译期拒绝。
+///  2. 相对路径以**源文件所在目录**为基准解析，并校验文件确实存在。
+///  3. 校验 ar 归档魔数 `!<arch>\n`——后缀对了但内容不是静态归档也当场拒绝。
+///
+/// 系统库（libc / libm / pthread）刻意**不在这里**：它们由 C 编译器按平台默认
+/// 动态解析（Linux 的 libc.so、Windows 的 CRT），既保持系统兼容性，又不会把
+/// 庞大系统库塞进 LTO 编译链路导致耗时爆炸。
+fn resolve_ffi_link(spec: &str, src_path: &Path) -> Result<PathBuf, String> {
+    let file_part = Path::new(spec)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(spec);
+    let lower = file_part.to_ascii_lowercase();
+    if lower.ends_with(".so")
+        || lower.contains(".so.")
+        || lower.ends_with(".dll")
+        || lower.ends_with(".dylib")
+    {
+        return Err(format!(
+            "FFI 链接只接受静态库 .a / .lib，拒绝动态库 '{}'（J 组铁律：产物不得引入第三方动态依赖）",
+            spec
+        ));
+    }
+    if !(lower.ends_with(".a") || lower.ends_with(".lib")) {
+        return Err(format!(
+            "link 的路径必须以 .a 或 .lib 结尾（静态归档），遇到 '{}'；\
+             系统库（libc / libm）由 C 编译器默认链接，不需要也不允许用 link 声明",
+            spec
+        ));
+    }
+    let raw = Path::new(spec);
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        let base = src_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        base.join(raw)
+    };
+    let canonical = candidate.canonicalize().map_err(|e| {
+        format!(
+            "link 声明的静态库 '{}' 无法读取（解析为 {}）：{}",
+            spec,
+            candidate.display(),
+            e
+        )
+    })?;
+    let mut f = fs::File::open(&canonical)
+        .map_err(|e| format!("无法打开静态库 '{}'：{}", canonical.display(), e))?;
+    let mut magic = [0u8; 8];
+    f.read_exact(&mut magic).map_err(|_| {
+        format!(
+            "静态库 '{}' 内容不完整（不足 8 字节），不是合法的 ar 归档",
+            canonical.display()
+        )
+    })?;
+    if &magic != b"!<arch>\n" {
+        return Err(format!(
+            "静态库 '{}' 缺少 ar 归档魔数 `!<arch>\\n`，不是真正的静态库",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
 pub fn resolve_imports(
     imports: &[String],
     log: &mut dyn FnMut(&str),

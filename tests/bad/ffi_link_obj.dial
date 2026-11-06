@@ -1,0 +1,3 @@
+// 不是 .a / .lib 后缀，一律拒绝；系统库由 C 编译器默认解析，不能用 link 声明。
+link "foo.o";
+fn main(): int { return 0; }

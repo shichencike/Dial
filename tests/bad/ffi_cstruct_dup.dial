@@ -1,0 +1,4 @@
+// 普通 struct 与 extern struct 撞名，必须在编译期拒绝。
+struct P { x: int }
+extern struct P { y: int }
+fn main(): int { return 0; }

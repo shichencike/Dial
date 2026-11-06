@@ -1,0 +1,6 @@
+// as_ptr() 只属于 bytes；string 用 as_c_str()。
+fn main(): int {
+    var s: string = "x";
+    var p: rawptr<byte> = s.as_ptr();
+    return 0;
+}

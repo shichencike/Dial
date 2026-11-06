@@ -787,7 +787,8 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::Defer
         | TokenKind::Do
         | TokenKind::Step | TokenKind::Const | TokenKind::Enum
-        | TokenKind::With | TokenKind::Goto | TokenKind::Label => T_KEYWORD,
+        | TokenKind::With | TokenKind::Goto | TokenKind::Label
+        | TokenKind::Extern | TokenKind::Link => T_KEYWORD,
         // true / false 虽是字面量，但视觉上按关键字处理更符合直觉
         TokenKind::BoolLit(_) => T_KEYWORD,
         // 类型关键字
@@ -898,6 +899,8 @@ fn fixed_text(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::With => "with",
         TokenKind::Goto => "goto",
         TokenKind::Label => "label",
+        TokenKind::Extern => "extern",
+        TokenKind::Link => "link",
         // ---- 类型关键字 ----
         TokenKind::IntT => "int",
         TokenKind::FloatT => "float",

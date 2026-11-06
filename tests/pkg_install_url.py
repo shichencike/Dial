@@ -19,7 +19,9 @@
 """
 
 import http.server
+import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -225,6 +227,26 @@ def main():
         # 没装 VS Code 时它只告警不阻断——所以这里只查「步骤在、且没让脚本失败」。
         check("安装 VS Code 插件" in p.stdout,
               "一键脚本包含 VS Code 插件安装步骤", p.stdout[-600:])
+
+        # 本轮按交付约定「只本地提交、不推送、不发 Release」，本地编译器的
+        # STDLIB_ABI 可能**领先于**线上 releases/latest 里的 stdlib.dialpkg。
+        # 一键脚本会把那个旧 ABI 包一并装上，于是下面这条「独立项目能编译」的
+        # 断言会被线上资产版本绑架——而它与 URL 安装链路本身无关。
+        # 若检测到不一致就卸载旧包，让编译器按设计回退到
+        # ~/.dial/stdlib + runtime 的 C 源码编译（resolve_stdlib_archive 第三条路径）。
+        # 「ABI 不匹配必须报错」这条铁律由 J 组用本地包单独锁定，此处不重复。
+        stdlib_pkg = os.path.join(dial_home, "packages", "stdlib")
+        manifest_path = os.path.join(stdlib_pkg, "manifest.txt")
+        if os.path.isfile(manifest_path):
+            with open(manifest_path, encoding="utf-8") as mf:
+                installed_abi = json.load(mf).get("abi")
+            with open(os.path.join(ROOT, "src", "package.rs"), encoding="utf-8") as pf:
+                m = re.search(r"STDLIB_ABI:\s*u64\s*=\s*(\d+)", pf.read())
+            required_abi = int(m.group(1)) if m else None
+            if required_abi is not None and installed_abi != required_abi:
+                shutil.rmtree(stdlib_pkg)
+                print(f"  ℹ️  线上 stdlib 包 abi={installed_abi} 落后于编译器 abi={required_abi}，"
+                      "已卸载旧包并回退源码编译（本轮不推送 Release）")
 
         # ---- 11) 装好后，在**用户自己的项目目录**里能编译 import 程序 ----
         # 这一条是「一键安装」的意义所在：编译器、stdlib、runtime、包，四者齐备，

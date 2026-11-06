@@ -1,0 +1,3 @@
+// ARC 容器没有 C 布局，不能按值嵌进 extern struct。
+extern struct S { m: map }
+fn main(): int { return 0; }

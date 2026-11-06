@@ -1,0 +1,4 @@
+// 同名 extern fn 重复声明，必须在编译期拒绝。
+extern fn foo(a: int): int;
+extern fn foo(b: int): int;
+fn main(): int { return 0; }

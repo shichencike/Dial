@@ -1,0 +1,21 @@
+// v1.04 FFI：Dial 具名函数可以安全地作为 C 回调。
+//
+// 所有 Dial 函数的 LLVM 签名都统一为 C ABI 宽度（bool -> i32、byte -> i8），
+// 并显式固定 C calling convention，因此 C 侧可以直接调用 Dial 函数地址；
+// 函数体内部仍是 i1 / i64，边界由编译器做对称转换。
+//
+// 这里用 libc 的 atexit 验证：进程退出时由 C 反过来调用 Dial 函数。
+// 跨回调的状态用 rawptr<void> 显式透传，没有闭包、没有隐藏环境对象
+// （见 tests/ffi/ffi_link_demo.dial 的 ffi_call_cb）。
+
+extern fn atexit(cb: fn(): void): int;
+
+fn on_exit(): void {
+    print("C called a Dial function");
+}
+
+fn main(): int {
+    atexit(on_exit);
+    print("main done");
+    return 0;
+}

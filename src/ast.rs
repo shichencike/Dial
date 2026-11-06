@@ -507,7 +507,48 @@ pub struct StructDef {
     pub name_col: usize,
 }
 
-/// 整个程序 = `import` 列表 + 顶层结构体集合 + 顶层函数集合。
+/// 语言层外部函数声明（v1.04 FFI）：`extern fn puts(s: rawptr<byte>): int;`
+///
+/// 与 `.diali` 的区别：它**直接写在 `.dial` 源码里**，不必造包、不必 install/import。
+/// 解析成 AST 后由 `main.rs` 转成 `FuncInfo` 并入外部函数表，
+/// 语义检查与代码生成对它与包函数一视同仁。
+#[derive(Debug, Clone)]
+pub struct ExternFnDecl {
+    pub name: String,
+    pub params: Vec<(String, Type)>,
+    pub ret: Type,
+    /// C 风格异构变参（`...`），必须是最后一个形参。
+    pub variadic: bool,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// 静态库链接声明（v1.04 FFI）：`link "lib/libfoo.a";`
+///
+/// **铁律**：只接受 `.a` / `.lib` 静态归档；`.so` / `.dll` / `.dylib` 一律在编译期拒绝。
+/// 系统库（libc / libm 等）由 C 编译器默认动态解析，不需要、也不允许用 `link` 指定，
+/// 这样既保持系统兼容性，又不让庞大系统库进入 LTO 编译链路。
+#[derive(Debug, Clone)]
+pub struct LinkDecl {
+    pub path: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// C ABI 布局结构体（v1.04 FFI）：`extern struct Point { x: int, y: int }`
+///
+/// 字段顺序、对齐、padding、大小与 C 完全一致（LLVM 非 packed struct + C ABI 字段宽度）。
+/// 它**只能经 `rawptr<T>` 访问**（代表 C 侧内存），不能按值传给 Dial 函数，
+/// 也不能用 `StructLit` 构造——避免把 C 布局误当 Dial 值语义结构体。
+#[derive(Debug, Clone)]
+pub struct CStructDef {
+    pub name: String,
+    pub fields: Vec<(String, Type)>,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// 整个程序 = `import` 列表 + 顶层结构体集合 + 顶层函数集合 + FFI 声明（v1.04）。
 ///
 /// `imports` 是**包名**列表（v0.92）。包名只是名字——它引用的是
 /// `~/.dial/packages/<name>/` 下已安装的包，编译器自行完成解压、选库与链接，
@@ -517,4 +558,10 @@ pub struct Program {
     pub imports: Vec<String>,
     pub structs: Vec<StructDef>,
     pub functions: Vec<Func>,
+    /// 语言层 `extern fn` 声明（v1.04）。
+    pub externs: Vec<ExternFnDecl>,
+    /// 语言层 `link` 静态库声明（v1.04）。
+    pub links: Vec<LinkDecl>,
+    /// `extern struct` C ABI 结构体定义（v1.04）。
+    pub cstructs: Vec<CStructDef>,
 }

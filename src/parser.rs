@@ -32,6 +32,9 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
     let mut imports = Vec::new();
     let mut structs = Vec::new();
     let mut functions = Vec::new();
+    let mut externs = Vec::new();
+    let mut links = Vec::new();
+    let mut cstructs = Vec::new();
     while !p.at_end() {
         if p.check(&TokenKind::Import) {
             imports.push(p.parse_import()?);
@@ -43,6 +46,26 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
         } else if p.check(&TokenKind::Enum) {
             // enum 同样内联：变体是 int-backed 的编译期常量。
             p.parse_enum()?;
+        } else if p.check(&TokenKind::Link) {
+            // v1.04 FFI：link "lib/libfoo.a";
+            links.push(p.parse_link()?);
+        } else if p.check(&TokenKind::Extern) {
+            // v1.04 FFI：extern fn ...; / extern struct ... { ... }
+            let next = p.peek_at(1).kind.clone();
+            match next {
+                TokenKind::Fn => externs.push(p.parse_extern_fn()?),
+                TokenKind::Struct => cstructs.push(p.parse_extern_struct()?),
+                other => {
+                    return Err(DialcError::new(
+                        format!(
+                            "语法错误：`extern` 后必须是 `fn`（外部函数）或 `struct`（C ABI 结构体），但遇到 {:?}",
+                            other
+                        ),
+                        p.peek().line,
+                        p.peek().col,
+                    ))
+                }
+            }
         } else {
             functions.push(p.parse_function()?);
         }
@@ -51,6 +74,9 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
         imports,
         structs,
         functions,
+        externs,
+        links,
+        cstructs,
     })
 }
 
@@ -207,6 +233,119 @@ impl Parser {
         }
         self.expect(TokenKind::Semicolon)?;
         Ok(name)
+    }
+
+    /// v1.04 FFI：`extern fn name(a: T, b: U): R;`（也支持尾部 `...` C 变参）。
+    ///
+    /// 参数表与 `fn` 定义同形，只是**没有函数体**、以分号结尾。类型走 `parse_type`，
+    /// 因此 `rawptr<T>` / `fn(A):R` / `bytes` / `byte` 等底层类型全部天然放行。
+    fn parse_extern_fn(&mut self) -> Result<ExternFnDecl> {
+        let start = self.advance(); // extern
+        self.expect(TokenKind::Fn)?;
+        let (name, _, _) = self.expect_ident_pos()?;
+        self.expect(TokenKind::LParen)?;
+        let mut params: Vec<(String, Type)> = Vec::new();
+        let mut variadic = false;
+        if !self.check(&TokenKind::RParen) {
+            loop {
+                if self.check(&TokenKind::Ellipsis) {
+                    self.advance();
+                    variadic = true;
+                    if self.check(&TokenKind::Comma) {
+                        let t = self.peek();
+                        return Err(DialcError::new(
+                            "语法错误：C 变参标记 `...` 必须是最后一个形参",
+                            t.line,
+                            t.col,
+                        ));
+                    }
+                    break;
+                }
+                let (pn, _, _) = self.expect_ident_pos()?;
+                self.expect(TokenKind::Colon)?;
+                let pt = self.parse_type()?;
+                params.push((pn, pt));
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::Colon)?;
+        let ret = self.parse_type()?;
+        self.expect(TokenKind::Semicolon)?;
+        Ok(ExternFnDecl {
+            name,
+            params,
+            ret,
+            variadic,
+            line: start.line,
+            col: start.col,
+        })
+    }
+
+    /// v1.04 FFI：`extern struct Point { x: int, y: int }`（C ABI 布局）。
+    /// 字段类型白名单由语义层校验（只允许 C 兼容标量 / rawptr / 嵌套 extern struct）。
+    fn parse_extern_struct(&mut self) -> Result<CStructDef> {
+        let start = self.advance(); // extern
+        self.expect(TokenKind::Struct)?;
+        let (name, _, _) = self.expect_ident_pos()?;
+        self.expect(TokenKind::LBrace)?;
+        let mut fields = Vec::new();
+        while !self.check(&TokenKind::RBrace) && !self.at_end() {
+            let fname = self.expect_ident()?;
+            self.expect(TokenKind::Colon)?;
+            let fty = self.parse_type()?;
+            fields.push((fname, fty));
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(CStructDef {
+            name,
+            fields,
+            line: start.line,
+            col: start.col,
+        })
+    }
+
+    /// v1.04 FFI：`link "lib/libfoo.a";`
+    /// 只记录字符串——扩展名合法性、路径解析、文件存在性都在 `main.rs` 的编译流程里校验。
+    fn parse_link(&mut self) -> Result<LinkDecl> {
+        let start = self.advance(); // link
+        let t = self.peek().clone();
+        let path = match &t.kind {
+            TokenKind::StringLit(s) => {
+                self.advance();
+                s.clone()
+            }
+            other => {
+                return Err(DialcError::new(
+                    format!(
+                        "语法错误：link 后必须是静态库路径的字符串字面量，例如 link \"lib/libfoo.a\"; 但遇到 {:?}",
+                        other
+                    ),
+                    t.line,
+                    t.col,
+                ))
+            }
+        };
+        if path.trim().is_empty() {
+            return Err(DialcError::new(
+                "语法错误：link 的静态库路径不能为空",
+                start.line,
+                start.col,
+            ));
+        }
+        self.expect(TokenKind::Semicolon)?;
+        Ok(LinkDecl {
+            path,
+            line: start.line,
+            col: start.col,
+        })
     }
 
     fn parse_struct_def(&mut self) -> Result<StructDef> {

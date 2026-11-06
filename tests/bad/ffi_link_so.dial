@@ -1,0 +1,3 @@
+// FFI link 只接受静态库 .a / .lib，动态库一律编译期拒绝（J 组铁律）。
+link "libfoo.so";
+fn main(): int { return 0; }

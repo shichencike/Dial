@@ -1,0 +1,3 @@
+// macOS 动态库同样拒绝（含 libx.so.1 这类带版本号的变体）。
+link "libfoo.dylib";
+fn main(): int { return 0; }

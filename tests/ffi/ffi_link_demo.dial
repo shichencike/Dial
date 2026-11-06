@@ -1,0 +1,62 @@
+// v1.04 FFI 专项：语言层 extern fn + link 静态库 + extern struct（C ABI） + C 回调。
+//
+// 系统库（libc/libm）由 C 编译器按平台默认动态解析，不需要、也不允许用 link 声明；
+// 用户自己的 C 扩展库一律显式 link，且只接受 .a / .lib 静态归档（J 组铁律）。
+// link 的相对路径以**本文件所在目录**为基准解析。
+
+link "libffi_demo.a";
+
+// 字段顺序 / 对齐 / padding / sizeof 与 C 的 struct 完全一致（LLVM 非 packed struct）。
+extern struct Point { x: int, y: byte, flag: bool }
+
+extern fn ffi_add(a: int, b: int): int;
+extern fn ffi_point_size(): int;
+extern fn ffi_point_offset_x(): int;
+extern fn ffi_point_offset_y(): int;
+extern fn ffi_point_offset_flag(): int;
+extern fn ffi_point_read_x(p: rawptr<Point>): int;
+extern fn ffi_point_read_y(p: rawptr<Point>): int;
+extern fn ffi_point_read_flag(p: rawptr<Point>): int;
+extern fn ffi_point_fill(p: rawptr<Point>, x: int, y: byte, flag: bool): void;
+
+// C 回调签名：C 侧是 int64_t (*)(int64_t, void*)。
+// 状态经 rawptr<void> 显式透传，没有闭包、没有隐藏环境对象。
+extern fn ffi_call_cb(cb: fn(int, rawptr<void>): int, arg: int, state: rawptr<void>): int;
+
+fn scale(v: int, state: rawptr<void>): int {
+    return v * 3;
+}
+
+fn main(): int {
+    print(ffi_add(20, 22));
+
+    // 布局比对：Dial 的 extern struct 与 C 的 struct 必须逐字节一致。
+    print(ffi_point_size());
+    print(ffi_point_offset_x());
+    print(ffi_point_offset_y());
+    print(ffi_point_offset_flag());
+
+    var raw: rawptr<byte> = raw_alloc(16);
+    var p: rawptr<Point> = ptr_cast<rawptr<Point>>(raw);
+
+    // Dial 经裸指针写 C 侧内存，再由 C 侧函数读回。
+    p.x = 123;
+    p.y = int_to_byte(9);
+    p.flag = true;
+    print(ffi_point_read_x(p));
+    print(ffi_point_read_y(p));
+    print(ffi_point_read_flag(p));
+
+    // 反向：C 侧写，Dial 经裸指针读回（bool 是 C 的 _Bool，1 字节，不做整型提升）。
+    ffi_point_fill(p, 77, int_to_byte(4), false);
+    print(p.x);
+    print(byte_to_int(p.y));
+    print(p.flag);
+
+    // C 侧调用 Dial 具名函数：标准 C calling convention，状态指针原样透传。
+    // rawptr<Point> -> rawptr<void> 必须显式 ptr_cast（零隐式转换铁律）。
+    print(ffi_call_cb(scale, 14, ptr_cast<rawptr<void>>(p)));
+
+    raw_free(raw);
+    return 0;
+}

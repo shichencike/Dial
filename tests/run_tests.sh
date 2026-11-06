@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 十三组检查，全部通过才算绿（顺序即 A→M，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 十六组检查，全部通过才算绿（顺序为 A→P，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -22,6 +22,9 @@
 #      并静态+动态两路守住「stdout 只有协议字节」这条铁律（v0.98 新增）。
 #   N. 内存上界 + 所有权语义：a[i]=v 不得触发 COW 深拷贝（虚拟内存上限钉死 O(N²) 退化），
 #      并逐条核对 clone 独立 / COW 隔离 / 嵌套赋值 / 句柄元素数组（v0.99 新增）。
+#   O. 所有权 / 语义回归：误拒合法程序、堆字段悬垂、bytes[] 被拒（v0.99.1 修复）。
+#   P. FFI：语言层 extern fn + link 静态库 + extern struct（C ABI sizeof/offsetof 与 C 比对）
+#      + Dial↔C 双向字段读写 + C 回调状态透传 + 动态库/伪静态库拒绝（v1.04 新增）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -507,6 +510,59 @@ for src in tests/sem/*.dial; do
         echo "  ❌ $name 输出不一致"; diff -u "$exp" "${TMP}/semout.txt"; fail=1
     fi
 done
+
+echo
+echo "== P) FFI：语言层 extern / link 静态库 / C ABI 结构体 / C 回调（v1.04） =="
+FFI_DIR="$PWD/tests/ffi"
+# 1) 把 C 侧专项库编成静态归档。用户 C 扩展库的铁律：只认 .a / .lib，
+#    系统库（libc / libm）由 C 编译器默认动态解析，不进这条链路。
+if ! ( cd "$FFI_DIR" && cc -O2 -c ffi_demo.c -o ffi_demo.o && ar rcs libffi_demo.a ffi_demo.o ) >"${TMP}/ffibuild.log" 2>&1; then
+    echo "  ❌ FFI 专项静态库编译失败"; sed 's/^/       /' "${TMP}/ffibuild.log"; fail=1
+else
+    # 2) 端到端：link + extern struct 的 sizeof/offsetof 与 C 逐项比对、
+    #    Dial↔C 双向字段读写、C 回调（含 rawptr<void> 状态透传）。
+    if ! "$DIALC" build "$FFI_DIR/ffi_link_demo.dial" -o "${TMP}/ffi_link_demo" >"${TMP}/ffibuild2.log" 2>&1; then
+        echo "  ❌ FFI 专项程序编译失败"; sed 's/^/       /' "${TMP}/ffibuild2.log"; fail=1
+    elif ! timeout 30 "${TMP}/ffi_link_demo" >"${TMP}/ffiout.txt" 2>&1; then
+        echo "  ❌ FFI 专项程序运行失败"; fail=1
+    elif ! diff -u "$FFI_DIR/ffi_link_demo.expected" "${TMP}/ffiout.txt" >"${TMP}/ffidiff.txt" 2>&1; then
+        echo "  ❌ FFI 专项程序输出不一致"; sed 's/^/       /' "${TMP}/ffidiff.txt"; fail=1
+    else
+        echo "  ✅ sizeof/offsetof 与 C 一致，Dial↔C 双向字段读写、C 回调均正确"
+    fi
+fi
+
+# 3) J 组铁律：真实存在的动态库也必须被 link 拒绝（不能靠「文件不存在」蒙混过关）。
+printf 'not a real shared object' > "${TMP}/libfake.so"
+cat > "${TMP}/ffi_link_fake.dial" <<EOF
+link "${TMP}/libfake.so";
+fn main(): int { return 0; }
+EOF
+if "$DIALC" build "${TMP}/ffi_link_fake.dial" -o "${TMP}/ffi_fake" >"${TMP}/ffifake.log" 2>&1; then
+    echo "  ❌ link 竟然接受了真实存在的 .so"; fail=1
+elif ! grep -q "拒绝动态库" "${TMP}/ffifake.log"; then
+    echo "  ❌ 动态库拒绝的诊断信息缺失"; fail=1
+else
+    echo "  ✅ 真实存在的 .so 被编译期拒绝（J 组铁律）"
+fi
+
+# 4) ar 归档魔数：后缀对但内容不是静态库，也当场拒绝。
+printf 'this is not an ar archive at all' > "${TMP}/fake.a"
+cat > "${TMP}/ffi_link_fakea.dial" <<EOF
+link "${TMP}/fake.a";
+fn main(): int { return 0; }
+EOF
+if "$DIALC" build "${TMP}/ffi_link_fakea.dial" -o "${TMP}/ffi_fakea" >"${TMP}/ffifakea.log" 2>&1; then
+    echo "  ❌ link 竟然接受了伪装的 .a"; fail=1
+elif ! grep -q "ar 归档魔数" "${TMP}/ffifakea.log"; then
+    echo "  ❌ 伪静态库拒绝的诊断信息缺失"; fail=1
+else
+    echo "  ✅ 伪装的 .a（缺 ar 魔数）被编译期拒绝"
+fi
+
+# 5) 清理构建产物，保持工作树干净（*.o 已被 .gitignore 忽略，但物理文件不该堆积）。
+#    dialc build 默认也会在源码同目录留下一份 .o，一并清掉。
+rm -f "$FFI_DIR/libffi_demo.a" "$FFI_DIR"/*.o
 
 echo
 if [ $fail -eq 0 ]; then

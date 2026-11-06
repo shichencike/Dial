@@ -1,0 +1,23 @@
+// v1.04 FFI：extern struct 是 repr(C) 布局，字段顺序 / 对齐 / padding / sizeof 与 C 一致。
+// 它只能经 rawptr<T> 访问（代表 C 侧内存），不能按值传给 Dial 函数，也不能用 StructLit 构造。
+//
+// Point = int(8) + byte(1) + bool(_Bool, 1) + 6 字节 padding = 16 字节。
+// tests/ffi/ 的 P 组会用 C 侧 sizeof/offsetof 逐项比对，并做双向字段读写。
+
+extern struct Point { x: int, y: byte, flag: bool }
+
+fn main(): int {
+    var raw: rawptr<byte> = raw_alloc(16);
+    var p: rawptr<Point> = ptr_cast<rawptr<Point>>(raw);
+
+    p.x = 123;
+    p.y = int_to_byte(7);
+    p.flag = true;
+
+    print(p.x);
+    print(byte_to_int(p.y));
+    print(p.flag);
+
+    raw_free(raw);
+    return 0;
+}

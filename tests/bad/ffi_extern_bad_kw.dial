@@ -1,0 +1,3 @@
+// extern 后必须是 fn 或 struct。
+extern var x: int;
+fn main(): int { return 0; }

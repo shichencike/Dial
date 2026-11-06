@@ -1,0 +1,6 @@
+// as_c_str() 不接受参数。
+fn main(): int {
+    var s: string = "x";
+    var p: rawptr<byte> = s.as_c_str(1);
+    return 0;
+}

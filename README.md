@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v1.03
+# dialc — Dial 语言编译器 v1.04
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -4333,3 +4333,180 @@ H 组回归同时锁定正向（int64 / double / bool 混传输出 `i=42 f=3.5 b
 > 一同发布（见 [§25.10](#2510-官方标准库-stdlibdialpkg独立发布)）。因此发新版时
 > **不需要改脚本、也不需要补打配套标签**，`DIAL_VERSION` / `STDLIB_RELEASE`
 > 只作为可选的「钉版本」覆盖保留。
+
+---
+
+## 33. v1.04：FFI（外部函数接口）
+
+> 本章讲的是**用户侧 FFI**：在 `.dial` 源码里直接调用 C 函数、读写 C 结构体、
+> 把 Dial 函数交给 C 回调。§15 讲的是「编译器如何把 Dial 语法降级成 C runtime 调用」，
+> 两者不是一回事；§25.6 与 J 组是包分发的静态库铁律，本章的 `link` 完全沿用。
+
+### 33.1 定位与两条铁律
+
+在 v1.04 之前，想调一个 C 函数（哪怕只是 `puts`）必须先写 `.diali` 接口、编 `.a`、
+打 `.dialpkg`、`dialc install`、`import`——FFI 被包机制绑架。v1.04 把 C FFI 变成语言一等公民：
+
+| 路径 | 谁提供函数体 | 怎么链接 |
+| --- | --- | --- |
+| 系统库（libc / libm / CRT） | 平台自带 | C 编译器**默认动态解析**，不写 `link`、不进 LTO 链路 |
+| 用户 C 扩展库 | 自己编的 `.a` / `.lib` | 源码里显式 `link "xxx.a";`，**只接受静态归档** |
+| `.dialpkg` 包 | 包内机器码 | `import`，仍强制 `.a` / `.lib`（J 组铁律一字未动） |
+
+两条硬规则：
+
+1. **`link` 只认 `.a` / `.lib`**：`.so` / `.dll` / `.dylib`（含 `libx.so.1`）编译期直接拒绝；
+   后缀对了还要校验 ar 归档魔数 `!<arch>\n`，伪装成 `.a` 的文本文件同样当场拒绝。
+2. **系统库不允许用 `link` 声明**：它们本就是动态的，塞进 LTO 链路只会让编译耗时爆炸；
+   直接写 `extern fn` 即可，链接器自己会找到。
+
+### 33.2 语法：`extern fn` / `link` / `extern struct`
+
+```dial
+// 直接写在 .dial 源码里，没有函数体，以分号结尾；`...` 表示 C 变参，必须是最后一个形参。
+extern fn puts(s: rawptr<byte>): int;
+extern fn strlen(s: rawptr<byte>): int;
+extern fn printf(fmt: rawptr<byte>, ...): int;
+
+// 显式链入用户 C 扩展库；相对路径以**本文件所在目录**为基准解析。
+link "lib/libffi_demo.a";
+
+// repr(C) 结构体：只能经 rawptr<T> 访问，代表 C 侧内存。
+extern struct Point { x: int, y: byte, flag: bool }
+```
+
+`.diali` 的类型白名单同步打穿：`byte` / `bytes` / `rawptr<T>` / `fn(A, B): R` 全部放行；
+形参表改为按**顶层逗号**切分，`fn(int, int): int` 这类自带逗号的类型不会被切坏。
+语言层 `extern fn` 与包 `.diali` 撞名、占用内建保留名、与本地函数重名，一律编译期拒绝。
+
+### 33.3 FFI 类型映射
+
+| Dial | LLVM IR（函数边界） | C 侧对应 |
+| --- | --- | --- |
+| `int` | `i64` | `int64_t` / `ssize_t` / `size_t` |
+| `float` | `f64` | `double` |
+| `bool` | `i32` | `int`（0/1，C 默认整型提升） |
+| `byte` | `i8` | `uint8_t` / `unsigned char` |
+| `rawptr<T>` | `ptr` | `void*` / `T*` |
+| `fn(A, B): R` | `ptr` | 函数指针 |
+| `extern struct`（字段） | 非 packed struct | `struct`（`bool` 字段是 1 字节 `_Bool`，**不**做整型提升） |
+| `string` / `bytes` | `ptr`（句柄） | **不要直接传**：用 `as_c_str()` / `as_ptr()` 取数据区 |
+
+> **C 的 32 位 `int` 返回值**：Dial 的 `int` 是 64 位。声明 `extern fn puts(...): int;`
+> 时 LLVM 按 `i64` 读取返回值；在主流 64 位 ABI 上，C 的 `i32` 返回值写入 `eax`
+> 会零扩展，因此读成 `i64` 是安全的（本仓库示例即如此）。但**不要依赖 32 位有符号
+> 语义**——例如 `strcmp` 返回 `-1` 会被读成 `4294967295`。需要精确 32 位语义时，
+> 请用自定义静态库把 C 函数封装成 `int64_t` 签名。
+
+### 33.4 C ABI 宽度与 calling convention
+
+用户要求「C 侧可以安全地调用 Dial 函数」，而 Dial 函数体内部 `bool` 是 `i1`、
+`byte` 是 `i64`——直接把函数地址交给 C 就是 UB。因此 v1.04 把**所有 Dial 函数的
+LLVM 签名统一为 C ABI 宽度**（`bool → i32`、`byte → i8`），并显式固定 C calling
+convention（LLVM 0，由 target triple 决定 SysV AMD64 / Windows x64 / AArch64 AAPCS）。
+
+函数体内部仍是 `i1` / `i64`，逻辑零改动；边界由 `abi_adapt` 在**五处**做对称转换：
+
+| 位置 | 方向 |
+| --- | --- |
+| 函数入口（形参） | C ABI 宽度 → 内部宽度 |
+| `return` / 默认返回值 | 内部宽度 → C ABI 宽度 |
+| 调用点实参 | 内部宽度 → C ABI 宽度 |
+| 调用点返回值 | C ABI 宽度 → 内部宽度 |
+| HOF thunk / spawn thunk | 双向（内部 ↔ C ABI） |
+
+`bool` 无条件 `zext` 到 `i32`（**绝不**把 `i1` 直接丢给 C），`byte` 无条件 `trunc`
+到 `i8`（**绝不**传 `i64`）。C 变参尾部仍按 C 默认实参提升单独处理，不二次转换。
+
+### 33.5 string / bytes ↔ C 数据总线
+
+Dial 的 `string` / `bytes` 对象布局是 `[ int64 len ][ char data[] ]`，对外句柄指向 `len`。
+过去 C 侧要读内容得手写 `+8` 跳过长度头（`demo_vprintf` 就是这么干的），属于 hack。
+v1.04 把这一步收进 C Runtime，用户只写方法名：
+
+| 内建 | 方向 | 语义 |
+| --- | --- | --- |
+| `s.as_c_str(): rawptr<byte>` | Dial → C | **借用**，跳过 8 字节长度头；NUL 结尾，可直接给 `puts` / `printf` |
+| `b.as_ptr(): rawptr<byte>` | Dial → C | **借用** bytes 数据区，同上 |
+| `string_from_cstr(p): string` | C → Dial | **复制**出新的受 ARC 管理对象；按 NUL 求长度，NULL 视为空串 |
+| `bytes_from_ptr(p, n): bytes` | C → Dial | **复制** n 字节；长度必须显式给出（C 缓冲区可含 `'\0'`，不能靠 `strlen` 猜） |
+
+**所有权必须分清**：`as_c_str()` / `as_ptr()` 返回的是不受 ARC 管理的裸指针，
+生命周期完全绑定原对象——原对象一释放，指针立即悬垂；`*_from_*` 返回的是新对象，
+按普通 Dial 值使用即可。裸指针可直接喂给 `memcpy` / `read` / `write` / `memcmp`。
+
+### 33.6 `extern struct`：C 布局与字段读写
+
+`extern struct` 用 LLVM **非 packed** struct 生成，字段类型按 C 内存宽度
+（`bool` / `byte` 均为 `i8`），LLVM 依 target DataLayout 自动插入与 C 一致的对齐 padding。
+字段类型白名单只允许 `int` / `float` / `bool` / `byte` / `rawptr<T>` / 嵌套 `extern struct`；
+`string` / `bytes` / 数组 / `map` 等 ARC 容器与 `char`（码点 i64 与 C char 宽度歧义）
+一律编译期拒绝——避免出现「编译器算的 padding 与 C 不一致」的静默内存损坏。
+
+它**只能经 `rawptr<T>` 访问**（代表 C 侧内存），不能按值传给 Dial 函数、也不能用
+`StructLit` 构造。字段读写由编译器按 C 宽度 `load` / `store`，再转回 Dial 内部宽度：
+
+```dial
+var raw: rawptr<byte> = raw_alloc(16);   // sizeof(Point) = 8 + 1 + 1 + 6 padding
+var p: rawptr<Point> = ptr_cast<rawptr<Point>>(raw);
+p.x = 123; p.y = int_to_byte(7); p.flag = true;
+print(p.x); print(byte_to_int(p.y)); print(p.flag);
+raw_free(raw);
+```
+
+`tests/ffi/` 的 P 组用 C 侧 `sizeof` / `offsetof` 逐项比对（`16 / 0 / 8 / 9`），
+并做 Dial↔C 双向字段读写，确保布局真的与 C 一致而不是两套 padding。
+
+### 33.7 Dial 函数作 C 回调
+
+`fn(A, B): R` 在 `.diali` 与语言层 `extern fn` 里都能写。具名函数在右值位置求值为
+纯代码地址，直接传给 C 的回调参数即可；状态经 `rawptr<void>` 显式透传，
+**没有闭包、没有环境对象、没有隐藏类型标签**（延续 v1.03 的设计）：
+
+```dial
+extern fn atexit(cb: fn(): void): int;
+fn on_exit(): void { print("C called a Dial function"); }
+fn main(): int { atexit(on_exit); return 0; }
+```
+
+P 组用 `int64_t (*)(int64_t, void*)` 的 C 函数回调 Dial 具名函数并透传 `rawptr<void>`
+状态，验证标准 C calling convention 下 C 侧能安全调用 Dial 函数。
+
+### 33.8 `link` 的三条校验
+
+`link "xxx.a";` 在编译流程里做三件事：① 后缀必须是 `.a` / `.lib`，动态库一律拒绝；
+② 相对路径以**源文件所在目录**为基准解析并要求文件确实存在；
+③ 读前 8 字节校验 ar 归档魔数 `!<arch>\n`。通过后才把该 `.a` 追加进链接器输入。
+P 组用「真实存在的 `.so`」与「伪装成 `.a` 的文本」验证拒绝不是靠文件不存在蒙混过关。
+
+### 33.9 实现落点
+
+| 层 | 文件 | 改动 |
+| --- | --- | --- |
+| 词法 / LSP | `lexer.rs` / `lsp.rs` | 新增 `extern` / `link` 关键字与语义 token |
+| AST / 解析 | `ast.rs` / `parser.rs` | `ExternFnDecl` / `LinkDecl` / `CStructDef`，顶层声明解析 |
+| 包接口 | `package.rs` | `.diali` 白名单打穿 + 顶层逗号切分；`STDLIB_ABI 4 → 5` |
+| 编译流程 | `main.rs` | 语言层 extern 并入外部函数表；`link` 校验静态库 |
+| 语义 | `semantic.rs` | `rawptr<CStruct>` 字段访问、数据总线内建、保留名与 C 布局白名单 |
+| 代码生成 | `codegen.rs` | C ABI 宽度映射、`abi_adapt` 五处对称转换、C 布局字段读写、FFI 内建分派 |
+| C Runtime | `stdlib/dial_ffi.c` | 四个数据总线函数（跳过长度头 / 复制构造） |
+
+### 33.10 标准库 ABI 递增（破坏性变更）
+
+`stdlib/dial_ffi.c` 新增四个导出函数，因此 `STDLIB_ABI` **4 → 5**，
+编译器版本 `1.3.0 → 1.4.0`，`make_stdlib_pkg.py` 默认 `--abi 5`、CI `--abi 5`。
+旧包（abi=4）会被编译器当场拒绝并给出重装指引。安装脚本仍走 `releases/latest`
+动态解析，不写死版本号。
+
+### 33.11 测试与交付
+
+- 4 个正向示例：`ffi_hello`、`ffi_buffer`、`ffi_struct`、`ffi_callback`；
+- 18 个负向用例：动态库 / 非归档后缀、C 布局字段白名单、保留名与撞名、
+  C 变参位置、`rawptr<byte>` 字段访问、数据总线参数、`extern` 后跟错关键字等；
+- 新增 **P 组**：C 侧静态库 + `sizeof`/`offsetof` 比对 + 双向字段读写 + C 回调 +
+  真实 `.so` / 伪 `.a` 拒绝；
+- `bash tests/run_tests.sh` **A–P 全套通过（355 ✅ / 0 ❌）**，
+  `tools/cve_check.py` 8/8、三平台 `zig cc` 编译通过。
+
+> **本轮交付范围**：按约定只做**本地提交**，不推送 GitHub、不打 tag、不发 Release。
+> `v1.0` 里程碑标签已在 `[v1.03]` 之后打并推送，本版不影响它。

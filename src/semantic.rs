@@ -218,30 +218,60 @@ pub fn type_of<V>(
         )),
         Expr::Field(obj, field) => {
             let ot = type_of(obj, scopes, funcs, structs)?;
-            match ot {
-                Type::Struct(sname) => {
-                    let fields = structs
-                        .get(&sname)
-                        .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", sname), 0, 0))?;
-                    fields
-                        .iter()
-                        .find(|(f, _)| f == field)
-                        .map(|(_, t)| t.clone())
-                        .ok_or_else(|| {
-                            DialcError::new(
-                                format!("语义错误：结构体 '{}' 没有字段 '{}'", sname, field),
-                                0, 0,
-                            )
-                        })
+            // v1.04 FFI：`rawptr<CStruct>` 也支持 `.field`——经裸指针读写 C 结构体字段。
+            // 值语义 struct 与 C ABI struct 共用同一张字段表，差别只在 codegen 的寻址方式。
+            let sname = match &ot {
+                Type::Struct(n) => n.clone(),
+                Type::RawPtr(inner) => match &**inner {
+                    Type::Struct(n) => n.clone(),
+                    _ => {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：类型 '{}' 没有字段 '{}'（裸指针字段访问需要 rawptr<结构体名>）",
+                                ot.name(),
+                                field
+                            ),
+                            0, 0,
+                        ))
+                    }
+                },
+                _ => {
+                    return Err(DialcError::new(
+                        format!("语义错误：类型 '{}' 没有字段 '{}'", ot.name(), field),
+                        0, 0,
+                    ))
                 }
-                _ => Err(DialcError::new(
-                    format!("语义错误：类型 '{}' 没有字段 '{}'", ot.name(), field),
-                    0, 0,
-                )),
-            }
+            };
+            let fields = structs
+                .get(&sname)
+                .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", sname), 0, 0))?;
+            fields
+                .iter()
+                .find(|(f, _)| f == field)
+                .map(|(_, t)| t.clone())
+                .ok_or_else(|| {
+                    DialcError::new(
+                        format!("语义错误：结构体 '{}' 没有字段 '{}'", sname, field),
+                        0, 0,
+                    )
+                })
         }
         Expr::Method(obj, method, args) => {
             let ot = type_of(obj, scopes, funcs, structs)?;
+            // v1.04 FFI：string.as_c_str() / bytes.as_ptr() → rawptr<byte>。
+            // 由编译器跳过 8 字节长度头，**绝不**让用户在 C/Dial 侧手写 +8 offset hack。
+            // 返回的裸指针只是借用：不受 ARC 管理，生命周期绑定原对象（见 README §33）。
+            if (ot == Type::String && method == "as_c_str")
+                || (ot == Type::Bytes && method == "as_ptr")
+            {
+                if !args.is_empty() {
+                    return Err(DialcError::new(
+                        format!("语义错误：{}() 不接受参数", method),
+                        0, 0,
+                    ));
+                }
+                return Ok(Type::RawPtr(Box::new(Type::Byte)));
+            }
             match ot {
                 Type::String => string_method_type(method, args, scopes, funcs, structs),
                 Type::Array(elem) => array_method_type(elem.as_ref(), method, args, scopes, funcs, structs),
@@ -827,6 +857,49 @@ pub fn type_of<V>(
                         ));
                     }
                     return Ok(Type::String);
+                }
+                // ---- v1.04 FFI：C 侧缓冲区 → Dial 对象（反向数据总线）----
+                // string_from_cstr(p)：从 NUL 结尾的 C 字符串**复制**出一份新的 Dial string。
+                // 与 as_c_str() 的「借用」相反：这里产生的是受 ARC 管理的新对象。
+                "string_from_cstr" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：string_from_cstr 需要恰好 1 个参数（rawptr<byte>）",
+                            0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if !matches!(at, Type::RawPtr(_)) {
+                        return Err(DialcError::new(
+                            format!("语义错误：string_from_cstr 的参数必须是裸指针（C 字符串地址），实际为 {}", at.name()),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::String);
+                }
+                // bytes_from_ptr(p, n)：从 C 侧缓冲区复制 n 字节构造新的 Dial bytes。
+                // 长度必须显式给出（C 缓冲区可以含 \0，不能靠 strlen 猜）。
+                "bytes_from_ptr" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_from_ptr 需要 2 个参数（rawptr<byte> 缓冲区, int 字节数）",
+                            0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if !matches!(at, Type::RawPtr(_)) {
+                        return Err(DialcError::new(
+                            format!("语义错误：bytes_from_ptr 的第一个参数必须是裸指针，实际为 {}", at.name()),
+                            0, 0,
+                        ));
+                    }
+                    if type_of(&args[1], scopes, funcs, structs)? != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：bytes_from_ptr 的第二个参数必须是 int（字节数）",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Bytes);
                 }
                 "bytes_new" => {
                     if args.len() != 1 {
@@ -1813,16 +1886,16 @@ pub fn type_of<V>(
                         0, 0,
                     ));
                 }
-                for (a, pt) in args.iter().zip(info.params.iter()) {
+                for (i, (a, pt)) in args.iter().zip(info.params.iter()).enumerate() {
                     let at = type_of(a, scopes, funcs, structs)?;
                     if !types_compatible(&at, pt) {
                         return Err(DialcError::new(
                             format!(
                                 "语义错误：函数 '{}' 第 {} 个参数类型不匹配（实参 {}，形参 {}）",
                                 name,
-                                pt.name(),
-                                at.name(),
-                                pt.name()
+                                i + 1,
+                                at.display(),
+                                pt.display()
                             ),
                             0, 0,
                         ));
@@ -2613,6 +2686,18 @@ fn desugar_stmts(stmts: &mut [Stmt], map: &HashMap<String, (usize, Type)>) {
 /// 保留名：这些标识符在 `type_of` 里按**名字**匹配为内建函数/类型，
 /// 与用户函数的查找是两条路。若允许用户定义同名函数，`Expr::Call` 的
 /// 内建分支会被静默绕过（或反之）——因此必须在编译期直接拒绝。
+/// v1.04 FFI：`extern struct` 字段是否具确定的 C ABI 布局。
+///
+/// 只放行「C 侧有明确对应宽度」的类型；嵌套结构体必须是另一个 `extern struct`
+/// （按值嵌入，LLVM 非 packed struct 与 C 的对齐/padding 规则一致）。
+fn is_c_abi_field(t: &Type, cstruct_names: &[String]) -> bool {
+    match t {
+        Type::Int | Type::Float | Type::Bool | Type::Byte | Type::RawPtr(_) => true,
+        Type::Struct(n) => cstruct_names.iter().any(|x| x == n),
+        _ => false,
+    }
+}
+
 const RESERVED_NAMES: &[&str] = &[
     "spawn", "join", "detach", "channel", "recv", "move_to", "thread",
     // v0.81 通道收尾：close 早已是 file 的内建（本就在按名字匹配，只是此前未列入此表），
@@ -2627,6 +2712,8 @@ const RESERVED_NAMES: &[&str] = &[
     "new_set", "new_kv_map",
     // v1.01：提前释放（move 语义）——drop(x) 之后禁止再使用 x，杜绝 use-after-free
     "drop",
+    // v1.04：FFI 反向数据总线（C 缓冲区 → Dial 对象）
+    "string_from_cstr", "bytes_from_ptr",
 ];
 
 /// `externs`：由 `import` 引入的**包外部函数**（v0.92，见 package.rs）。
@@ -2687,6 +2774,50 @@ pub fn analyze(
                     ));
                 }
             }
+        }
+    }
+
+    // 1.5) v1.04 FFI：C ABI 结构体（`extern struct`）。
+    //      字段表并入 `structs` 供字段访问统一查表；布局合法性由 is_c_abi_field 兜住——
+    //      ARC 容器、`string` / `bytes` 句柄、`char`（码点 i64 与 C char 宽度歧义）
+    //      一律拒绝，避免出现「编译器算出的 padding 与 C 不一致」的静默内存损坏。
+    let cstruct_names: Vec<String> = program.cstructs.iter().map(|c| c.name.clone()).collect();
+    for cs in &program.cstructs {
+        if structs.contains_key(&cs.name) {
+            return Err(DialcError::new(
+                format!("语义错误：结构体 '{}' 重复定义（普通 struct 与 extern struct 撞名）", cs.name),
+                cs.line, cs.col,
+            ));
+        }
+        for (fname, ft) in &cs.fields {
+            if !is_c_abi_field(ft, &cstruct_names) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：extern struct '{}' 的字段 '{}' 类型 {} 不具确定的 C ABI 布局；\
+                         只允许 int(int64_t) / float(double) / bool(_Bool) / byte(uint8_t) / rawptr<T>(void*) / 嵌套 extern struct。\
+                         char 请改用 byte 或 int，string / bytes / 数组 / map 请用 rawptr<T> 传递",
+                        cs.name, fname, ft.display()
+                    ),
+                    cs.line, cs.col,
+                ));
+            }
+        }
+        structs.insert(cs.name.clone(), cs.fields.clone());
+    }
+
+    // 1.6) v1.04 FFI：语言层 extern fn 的保留名 / 与本地函数撞名校验。
+    for e in &program.externs {
+        if RESERVED_NAMES.contains(&e.name.as_str()) {
+            return Err(DialcError::new(
+                format!("语义错误：'{}' 是内建函数的保留名，不能用作 extern fn 名", e.name),
+                e.line, e.col,
+            ));
+        }
+        if program.functions.iter().any(|f| f.name == e.name) {
+            return Err(DialcError::new(
+                format!("语义错误：extern fn '{}' 与本地函数定义撞名", e.name),
+                e.line, e.col,
+            ));
         }
     }
 
@@ -3356,51 +3487,67 @@ fn check_stmt(
             col,
         } => {
             let ot = type_of(obj, scopes, funcs, structs)?;
-            match ot {
-                Type::Struct(sname) => {
-                    let fields = structs
-                        .get(&sname)
-                        .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", sname), *line, *col))?;
-                    let expected = fields
-                        .iter()
-                        .find(|(fld, _)| fld == field)
-                        .map(|(_, t)| t.clone())
-                        .ok_or_else(|| {
-                            DialcError::new(
-                                format!("语义错误：结构体 '{}' 没有字段 '{}'", sname, field),
-                                *line, *col,
-                            )
-                        })?;
-                    let vt = type_of(value, scopes, funcs, structs)?;
-                    if !types_compatible(&vt, &expected) {
+            // v1.04 FFI：`rawptr<CStruct>` 的字段写入。经裸指针写 C 侧内存不改变
+            // 指针变量本身的值，因此不套用「目标必须是可变变量」的约束。
+            let (sname, via_rawptr) = match &ot {
+                Type::Struct(n) => (n.clone(), false),
+                Type::RawPtr(inner) => match &**inner {
+                    Type::Struct(n) => (n.clone(), true),
+                    _ => {
                         return Err(DialcError::new(
                             format!(
-                                "语义错误：对字段 '{}' 的赋值类型不兼容（实参 {}，字段 {}）",
-                                field, vt.name(), expected.name()
+                                "语义错误：类型 '{}' 没有字段 '{}'（裸指针字段访问需要 rawptr<结构体名>）",
+                                ot.name(),
+                                field
                             ),
                             *line, *col,
-                        ));
+                        ))
                     }
-                    // 写入目标必须是可变变量
-                    if let Some(root) = lvalue_root(obj) {
-                        let mutable = scopes
-                            .iter()
-                            .rev()
-                            .find_map(|s| s.get(root).map(|v| v.1.mutable))
-                            .unwrap_or(false);
-                        if !mutable {
-                            return Err(DialcError::new(
-                                format!("语义错误：字段赋值目标 '{}' 不是可变变量", root),
-                                *line, *col,
-                            ));
-                        }
-                    }
-                }
+                },
                 _ => {
                     return Err(DialcError::new(
                         format!("语义错误：类型 '{}' 没有字段 '{}'", ot.name(), field),
                         *line, *col,
                     ))
+                }
+            };
+            let fields = structs
+                .get(&sname)
+                .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", sname), *line, *col))?;
+            let expected = fields
+                .iter()
+                .find(|(fld, _)| fld == field)
+                .map(|(_, t)| t.clone())
+                .ok_or_else(|| {
+                    DialcError::new(
+                        format!("语义错误：结构体 '{}' 没有字段 '{}'", sname, field),
+                        *line, *col,
+                    )
+                })?;
+            let vt = type_of(value, scopes, funcs, structs)?;
+            if !types_compatible(&vt, &expected) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：对字段 '{}' 的赋值类型不兼容（实参 {}，字段 {}）",
+                        field, vt.name(), expected.name()
+                    ),
+                    *line, *col,
+                ));
+            }
+            // 写入目标必须是可变变量（裸指针写 C 内存除外）
+            if !via_rawptr {
+                if let Some(root) = lvalue_root(obj) {
+                    let mutable = scopes
+                        .iter()
+                        .rev()
+                        .find_map(|s| s.get(root).map(|v| v.1.mutable))
+                        .unwrap_or(false);
+                    if !mutable {
+                        return Err(DialcError::new(
+                            format!("语义错误：字段赋值目标 '{}' 不是可变变量", root),
+                            *line, *col,
+                        ));
+                    }
                 }
             }
             Ok(())

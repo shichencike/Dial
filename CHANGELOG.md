@@ -20,6 +20,62 @@
 
 ---
 
+## [v1.04] — 2026-11-06
+
+**主题：FFI 成为语言一等公民。** 详见 [README §33](README.md#33-v104-ffi外部函数接口)。
+
+> **版本定位**：`v1.0` 里程碑已在 `[v1.03]` 达成、标签 `v1.0` 已打并推送；
+> `[v1.00]` ~ `[v1.03]` 是「达成 v1.0」过程中的分版记录（见下方里程碑大标题）。
+> `[v1.04]` 是**里程碑达成之后的第一个增量分版**，不归入上面那批分版记录。
+> 按本轮交付约定：**只做本地提交，不推送 GitHub、不打 tag**。
+
+### Added
+
+- **语言层 `extern fn`**：直接写在 `.dial` 源码里，编译期生成 LLVM 外部声明、
+  链接期由 C 编译器解析，不再强制绕 `.diali` → `.a` → `.dialpkg` → `install` → `import`。
+  现有包机制完整保留、行为不变（见 [README §15](README.md#15-ffi-契约)）。
+- **语言层 `link "xxx.a";`**：显式链入用户 C 扩展库。相对路径以源文件所在目录为基准解析。
+- **`extern struct`（C ABI / `repr(C)`）**：字段顺序、对齐、padding、sizeof 与 C 完全一致；
+  只经 `rawptr<Struct>` 读写字段，不按值传递、不能用 `StructLit` 构造。
+- **`.diali` 类型白名单打穿**：`byte` / `bytes` / `rawptr<T>` / `fn(A, B): R` 全部放行；
+  形参表改为按**顶层逗号**切分，嵌套泛型/函数类型签名不会被切坏。
+- **完整数据总线**：`string.as_c_str()` / `bytes.as_ptr()` 返回**借用**的 `rawptr<byte>`
+  （由 C Runtime 跳过 8 字节长度头，用户不写 `+8` offset hack）；
+  `string_from_cstr(p)` / `bytes_from_ptr(p, n)` 从 C 缓冲区**复制**出受 ARC 管理的新对象。
+- **C 回调**：`Type::FnPtr` 生成标准 C calling convention，C 侧可安全调用 Dial 具名函数；
+  跨回调状态经 `rawptr<void>` 显式透传，无闭包、无隐藏环境对象。
+
+### Changed
+
+- **所有 Dial 函数的 LLVM 签名统一为 C ABI 宽度**：`bool` 内部 i1 → 边界 i32（C 默认整型提升），
+  `byte` 内部 i64 → 边界 i8（C 的 `uint8_t`）；函数体内部仍是 i1 / i64，逻辑零改动。
+  函数入口 / 出口 / 调用点 / HOF thunk / spawn thunk 五处做**对称** `abi_adapt` 转换，
+  靠 A–P 全量回归兜底。这是「C 能安全调用任意 Dial 函数」的前提。
+- `STDLIB_ABI` **4 → 5**（新增 `stdlib/dial_ffi.c` 四个数据总线函数），
+  编译器版本 `1.3.0 → 1.4.0`；`make_stdlib_pkg.py` 默认 `--abi 5`、CI `--abi 5`。
+- 系统库（libc / libm）继续由 C 编译器**默认动态解析**，不进 `link`、不进 LTO 链路；
+  用户显式指定的 C 扩展库与所有 `.dialpkg` 仍**强制 `.a` / `.lib` 静态归档**，
+  并校验 ar 魔数 `!<arch>\n`，J 组三条硬规则一字未动。
+
+### Fixed
+
+- 函数实参类型不匹配的诊断：参数序号此前被误填成形参类型名（显示「第 rawptr 个参数」），
+  且泛型类型只显示 `rawptr` 而非完整签名；现改为正确序号 + `Type::display()` 完整类型。
+
+### 测试
+
+- 4 个正向示例：`ffi_hello`（语言层 extern + 系统库 + C 变参 + 双向字符串）、
+  `ffi_buffer`（rawptr 喂 `memcpy` / `memcmp`）、`ffi_struct`（C ABI 字段读写）、
+  `ffi_callback`（libc `atexit` 反调 Dial 函数）。
+- 18 个负向用例：`.so` / `.dll` / `.dylib` / 非归档后缀、`extern struct` 的
+  string/char/map 字段、保留名与撞名、C 变参不在末尾、`rawptr<byte>` 字段访问、
+  `as_c_str` 带参、方法用错类型、数据总线参数个数/类型、struct 撞名、`extern` 后跟错关键字。
+- 新增 **P 组**：把 C 侧专项库编成 `.a`，逐项比对 `sizeof` / `offsetof` 与 C 完全一致，
+  验证 Dial↔C 双向字段读写、C 回调状态透传，并用真实存在的 `.so` 与伪装的 `.a`
+  验证编译期拒绝（不是靠「文件不存在」蒙混过关）。
+
+---
+
 ## [v1.0 里程碑] — 分版记录（v1.00 ~ v1.03）
 
 > **里程碑与标签**：`v1.00` 是从 `v0.99.1` 跳版而来的语言特性补齐里程碑，当时

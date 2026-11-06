@@ -73,6 +73,11 @@ pub enum TokenKind {
     Goto,
     /// `label` 标签定义（v1.02）：label 名字:
     Label,
+    /// `extern`（v1.04 FFI）：`.dial` 源码里的外部函数 / C 结构体声明。
+    /// 注意：此前 `extern` 只存在于 `.diali`（包解析器单独处理），v1.04 起正式成为语言关键字。
+    Extern,
+    /// `link`（v1.04 FFI）：`link "libfoo.a";` 声明要静态链入的 C 扩展库。
+    Link,
 
     // 类型关键字
     IntT,
@@ -528,6 +533,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "with" => TokenKind::With,
                 "goto" => TokenKind::Goto,
                 "label" => TokenKind::Label,
+                "extern" => TokenKind::Extern,
+                "link" => TokenKind::Link,
                 "true" => TokenKind::BoolLit(true),
                 "false" => TokenKind::BoolLit(false),
                 "struct" => TokenKind::Struct,

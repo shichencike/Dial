@@ -25,9 +25,16 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
 <li><a href="#更新日志--changelog">更新日志 / Changelog</a><ul>
+<li><a href="#v104--2026-11-06">[v1.04] — 2026-11-06</a><ul>
+<li><a href="#added">Added</a></li>
+<li><a href="#changed">Changed</a></li>
+<li><a href="#fixed">Fixed</a></li>
+<li><a href="#测试">测试</a></li>
+</ul>
+</li>
 <li><a href="#v10-里程碑--分版记录v100--v103">[v1.0 里程碑] — 分版记录（v1.00 ~ v1.03）</a></li>
 <li><a href="#ci-修复与-v10-标签重打--2026-11-06">[CI 修复与 v1.0 标签重打] — 2026-11-06</a><ul>
-<li><a href="#fixed">Fixed</a></li>
+<li><a href="#fixed_1">Fixed</a></li>
 <li><a href="#验证">验证</a></li>
 <li><a href="#发布">发布</a></li>
 </ul>
@@ -39,30 +46,30 @@
 </ul>
 </li>
 <li><a href="#v103--2026-11-05">[v1.03] — 2026-11-05</a><ul>
-<li><a href="#added">Added</a></li>
-<li><a href="#fixed_1">Fixed</a></li>
+<li><a href="#added_1">Added</a></li>
+<li><a href="#fixed_2">Fixed</a></li>
 <li><a href="#changed--发布协同">Changed / 发布协同</a></li>
 </ul>
 </li>
 <li><a href="#v102--2026-11-05">[v1.02] — 2026-11-05</a><ul>
-<li><a href="#added_1">Added</a></li>
+<li><a href="#added_2">Added</a></li>
 <li><a href="#-破坏性变更标准库-abi-递增">⚠ 破坏性变更（标准库 ABI 递增）</a></li>
-<li><a href="#fixed_2">Fixed</a></li>
-<li><a href="#测试">测试</a></li>
+<li><a href="#fixed_3">Fixed</a></li>
+<li><a href="#测试_1">测试</a></li>
 </ul>
 </li>
 <li><a href="#v101--2026-11-05">[v1.01] — 2026-11-05</a><ul>
-<li><a href="#added_2">Added</a></li>
-<li><a href="#changed">Changed</a></li>
+<li><a href="#added_3">Added</a></li>
+<li><a href="#changed_1">Changed</a></li>
 <li><a href="#-破坏性变更标准库-abi-递增_1">⚠ 破坏性变更（标准库 ABI 递增）</a></li>
-<li><a href="#测试_1">测试</a></li>
+<li><a href="#测试_2">测试</a></li>
 <li><a href="#盘点数据">盘点数据</a></li>
 </ul>
 </li>
 <li><a href="#v100--2026-11-04">[v1.00] — 2026-11-04</a><ul>
 <li><a href="#added五组语言特性">Added（五组语言特性）</a></li>
-<li><a href="#fixed_3">Fixed</a></li>
-<li><a href="#changed_1">Changed</a></li>
+<li><a href="#fixed_4">Fixed</a></li>
+<li><a href="#changed_2">Changed</a></li>
 <li><a href="#testing">Testing</a></li>
 </ul>
 </li>
@@ -172,7 +179,7 @@
 <li><a href="#added新增_13">Added（新增）</a></li>
 <li><a href="#changed语义变更">Changed（语义变更）</a></li>
 <li><a href="#修正的设计回退">修正的设计回退</a></li>
-<li><a href="#测试_2">测试</a></li>
+<li><a href="#测试_3">测试</a></li>
 </ul>
 </li>
 <li><a href="#v08--2026-10-30">[v0.8] — 2026-10-30</a><ul>
@@ -247,6 +254,60 @@
 <p>详见 <a href="README.md#23-版本号规则">README §23</a>。</p>
 </blockquote>
 <hr />
+<h2 id="v104--2026-11-06">[v1.04] — 2026-11-06</h2>
+<p><strong>主题：FFI 成为语言一等公民。</strong> 详见 <a href="README.md#33-v104-ffi外部函数接口">README §33</a>。</p>
+<blockquote>
+<p><strong>版本定位</strong>：<code>v1.0</code> 里程碑已在 <code>[v1.03]</code> 达成、标签 <code>v1.0</code> 已打并推送；
+<code>[v1.00]</code> ~ <code>[v1.03]</code> 是「达成 v1.0」过程中的分版记录（见下方里程碑大标题）。
+<code>[v1.04]</code> 是<strong>里程碑达成之后的第一个增量分版</strong>，不归入上面那批分版记录。
+按本轮交付约定：<strong>只做本地提交，不推送 GitHub、不打 tag</strong>。</p>
+</blockquote>
+<h3 id="added">Added</h3>
+<ul>
+<li><strong>语言层 <code>extern fn</code></strong>：直接写在 <code>.dial</code> 源码里，编译期生成 LLVM 外部声明、
+  链接期由 C 编译器解析，不再强制绕 <code>.diali</code> → <code>.a</code> → <code>.dialpkg</code> → <code>install</code> → <code>import</code>。
+  现有包机制完整保留、行为不变（见 <a href="README.md#15-ffi-契约">README §15</a>）。</li>
+<li><strong>语言层 <code>link "xxx.a";</code></strong>：显式链入用户 C 扩展库。相对路径以源文件所在目录为基准解析。</li>
+<li><strong><code>extern struct</code>（C ABI / <code>repr(C)</code>）</strong>：字段顺序、对齐、padding、sizeof 与 C 完全一致；
+  只经 <code>rawptr&lt;Struct&gt;</code> 读写字段，不按值传递、不能用 <code>StructLit</code> 构造。</li>
+<li><strong><code>.diali</code> 类型白名单打穿</strong>：<code>byte</code> / <code>bytes</code> / <code>rawptr&lt;T&gt;</code> / <code>fn(A, B): R</code> 全部放行；
+  形参表改为按<strong>顶层逗号</strong>切分，嵌套泛型/函数类型签名不会被切坏。</li>
+<li><strong>完整数据总线</strong>：<code>string.as_c_str()</code> / <code>bytes.as_ptr()</code> 返回<strong>借用</strong>的 <code>rawptr&lt;byte&gt;</code>
+  （由 C Runtime 跳过 8 字节长度头，用户不写 <code>+8</code> offset hack）；
+  <code>string_from_cstr(p)</code> / <code>bytes_from_ptr(p, n)</code> 从 C 缓冲区<strong>复制</strong>出受 ARC 管理的新对象。</li>
+<li><strong>C 回调</strong>：<code>Type::FnPtr</code> 生成标准 C calling convention，C 侧可安全调用 Dial 具名函数；
+  跨回调状态经 <code>rawptr&lt;void&gt;</code> 显式透传，无闭包、无隐藏环境对象。</li>
+</ul>
+<h3 id="changed">Changed</h3>
+<ul>
+<li><strong>所有 Dial 函数的 LLVM 签名统一为 C ABI 宽度</strong>：<code>bool</code> 内部 i1 → 边界 i32（C 默认整型提升），
+  <code>byte</code> 内部 i64 → 边界 i8（C 的 <code>uint8_t</code>）；函数体内部仍是 i1 / i64，逻辑零改动。
+  函数入口 / 出口 / 调用点 / HOF thunk / spawn thunk 五处做<strong>对称</strong> <code>abi_adapt</code> 转换，
+  靠 A–P 全量回归兜底。这是「C 能安全调用任意 Dial 函数」的前提。</li>
+<li><code>STDLIB_ABI</code> <strong>4 → 5</strong>（新增 <code>stdlib/dial_ffi.c</code> 四个数据总线函数），
+  编译器版本 <code>1.3.0 → 1.4.0</code>；<code>make_stdlib_pkg.py</code> 默认 <code>--abi 5</code>、CI <code>--abi 5</code>。</li>
+<li>系统库（libc / libm）继续由 C 编译器<strong>默认动态解析</strong>，不进 <code>link</code>、不进 LTO 链路；
+  用户显式指定的 C 扩展库与所有 <code>.dialpkg</code> 仍<strong>强制 <code>.a</code> / <code>.lib</code> 静态归档</strong>，
+  并校验 ar 魔数 <code>!&lt;arch&gt;\n</code>，J 组三条硬规则一字未动。</li>
+</ul>
+<h3 id="fixed">Fixed</h3>
+<ul>
+<li>函数实参类型不匹配的诊断：参数序号此前被误填成形参类型名（显示「第 rawptr 个参数」），
+  且泛型类型只显示 <code>rawptr</code> 而非完整签名；现改为正确序号 + <code>Type::display()</code> 完整类型。</li>
+</ul>
+<h3 id="测试">测试</h3>
+<ul>
+<li>4 个正向示例：<code>ffi_hello</code>（语言层 extern + 系统库 + C 变参 + 双向字符串）、
+  <code>ffi_buffer</code>（rawptr 喂 <code>memcpy</code> / <code>memcmp</code>）、<code>ffi_struct</code>（C ABI 字段读写）、
+  <code>ffi_callback</code>（libc <code>atexit</code> 反调 Dial 函数）。</li>
+<li>18 个负向用例：<code>.so</code> / <code>.dll</code> / <code>.dylib</code> / 非归档后缀、<code>extern struct</code> 的
+  string/char/map 字段、保留名与撞名、C 变参不在末尾、<code>rawptr&lt;byte&gt;</code> 字段访问、
+  <code>as_c_str</code> 带参、方法用错类型、数据总线参数个数/类型、struct 撞名、<code>extern</code> 后跟错关键字。</li>
+<li>新增 <strong>P 组</strong>：把 C 侧专项库编成 <code>.a</code>，逐项比对 <code>sizeof</code> / <code>offsetof</code> 与 C 完全一致，
+  验证 Dial↔C 双向字段读写、C 回调状态透传，并用真实存在的 <code>.so</code> 与伪装的 <code>.a</code>
+  验证编译期拒绝（不是靠「文件不存在」蒙混过关）。</li>
+</ul>
+<hr />
 <h2 id="v10-里程碑--分版记录v100--v103">[v1.0 里程碑] — 分版记录（v1.00 ~ v1.03）</h2>
 <blockquote>
 <p><strong>里程碑与标签</strong>：<code>v1.00</code> 是从 <code>v0.99.1</code> 跳版而来的语言特性补齐里程碑，当时
@@ -292,7 +353,7 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
 <code>stdlib.dialpkg</code> 的 <code>v*</code> Release；随后删除并重打 <code>v1.0</code> 标签触发新发布，
 使 <code>releases/latest</code> 指向这个新页面。纯修复，<strong>编译器版本 <code>1.3.0</code> 与
 <code>STDLIB_ABI 4</code> 均不变</strong>。</p>
-<h3 id="fixed">Fixed</h3>
+<h3 id="fixed_1">Fixed</h3>
 <ul>
 <li><strong>Windows 核心冒烟</strong>：<code>stdlib/dial_env.c</code> 原先依赖 POSIX 的
   <code>srandom()</code> / <code>random()</code> / <code>clock_gettime()</code> / <code>nanosleep()</code>；MinGW-w64 只提供
@@ -384,7 +445,7 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
 <p>本版继续守住项目铁律：<strong>不引入 GC</strong>；<strong>不引入闭包</strong>（绝不隐式捕获环境）；
 <strong>零隐式转换</strong>（函数签名严格匹配、变参元素类型严格一致）；
 <strong>零隐藏开销</strong>（变参脱糖成普通 <code>T[]</code>，没有类型标签 / 装箱 / 运行期分派）。</p>
-<h3 id="added">Added</h3>
+<h3 id="added_1">Added</h3>
 <p><strong>一等函数指针 <code>fn(A, B): R</code></strong>
 - <code>Type::FnPtr</code> 底层就是 LLVM <code>ptr</code>（纯代码地址）：函数名可直接作右值、可赋值 /
   传参 / 返回 / 存变量；<code>cb(x)</code> 走<strong>精确签名</strong>的间接调用（LLVM 18 的
@@ -419,7 +480,7 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
   <strong>精确签名 thunk</strong> 间接调用（8 字节位模式 ↔ 类型值适配），C 完全不知道回调类型；
 - 仅支持标量元素（int / float / bool / byte / char）；<code>sort_by</code> 用插入排序而非
   <code>qsort</code>，因为后者的比较器拿不到 <code>fn_raw</code> / <code>state</code>，无法透传状态。</p>
-<h3 id="fixed_1">Fixed</h3>
+<h3 id="fixed_2">Fixed</h3>
 <ul>
 <li>修正 <code>len</code> 内建的错误提示：数组 / 字符串长度应写 <code>.length()</code>，此前误写 <code>.len()</code>；</li>
 <li><code>ArrayLit</code> 带期望元素类型时原本跳过元素一致性校验（旧行为对声明标注的空数组无害），
@@ -443,7 +504,7 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
 于是裸指针必须先落地。</p>
 <p>本版继续守住项目铁律：<strong>不引入 GC</strong>；ARC 所有权语义不退化；<strong>零隐式转换</strong>
 （裸指针与 ARC 容器之间、裸指针与裸指针之间都<strong>没有</strong>隐式转换）。</p>
-<h3 id="added_1">Added</h3>
+<h3 id="added_2">Added</h3>
 <p><strong><code>with</code> 资源作用域块</strong>
 - 两种等价写法：<code>with 资源 as 名 { ... }</code> 与 <code>with 名 = 资源 { ... }</code>；
 - 块末自动释放：<code>file</code> → close、<code>thread</code> → join、裸指针 → raw_free；
@@ -503,14 +564,14 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
   （v1.03 起为 <code>v1.3.0</code> 编译器与 <code>stdlib-v1.3.0</code> 标准库包，见上方 v1.03 条目）
   由维护者另行决定何时打；<code>v1.0</code> 里程碑标签已在 <code>[v1.03]</code> 之后打上，见文件开头说明。</li>
 </ul>
-<h3 id="fixed_2">Fixed</h3>
+<h3 id="fixed_3">Fixed</h3>
 <ul>
 <li><strong><code>break</code> / <code>continue</code> 未释放被跳出的作用域</strong>（既有缺陷）：外层臂的 <code>release_scope_locals</code>
   位于落穿路径上，而 break/continue 恰恰走不到那条路径——循环体的局部因此永远不释放。
   实测 <code>continue</code> 循环 20 万轮（每轮一个 <code>string</code>）峰值 <strong>13892 KB</strong>，修正后 <strong>1620 KB</strong>。
   修法与 goto 同源：跳转前补发一份「被跳出作用域」的释放代码（两条路径互斥，安全）。</li>
 </ul>
-<h3 id="测试">测试</h3>
+<h3 id="测试_1">测试</h3>
 <ul>
 <li>3 个新增正向示例 + 同名 <code>.expected</code> 黄金文件：<code>goto_demo</code>、<code>with_demo</code>、<code>rawptr_demo</code>；</li>
 <li>12 个新增负向用例：跨初始化（同块 + 跨块）/ 跳出 with / 跨 try / 跳进嵌套块 /
@@ -529,7 +590,7 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
 <strong>零隐式转换铁律保持</strong>（<code>1 + 2.0</code> 仍编译失败）。
 （后续边界变更：「不提供裸指针」已在 <strong>v1.02</strong> 解除，「不支持一等函数」中的
 <strong>函数指针</strong>已在 <strong>v1.03</strong> 解除；<strong>闭包至今仍不提供</strong>，见文件开头里程碑说明。）</p>
-<h3 id="added_2">Added</h3>
+<h3 id="added_3">Added</h3>
 <p><strong>数组元素类型扩展</strong>
 - <code>float[]</code> / <code>byte[]</code> / <code>bool[]</code> / <code>char[]</code> 现在都是合法的动态数组元素；
 - 底层沿用 <code>int64</code> 槽位：<code>float</code> 存 <strong>IEEE754 位模式</strong>（bitcast，绝不 <code>fptosi</code>
@@ -570,7 +631,7 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
 - 只支持可比较的标量元素（<code>int</code> / <code>float</code> / <code>byte</code> / <code>char</code> / <code>bool</code>），
   <code>string[]</code> 等句柄元素编译期拒绝；
 - <code>float</code> 按 <strong>IEEE754 数值序</strong>比较（负数正确排在最前），绝非位模式比较。</p>
-<h3 id="changed">Changed</h3>
+<h3 id="changed_1">Changed</h3>
 <ul>
 <li><code>main</code> 的 LLVM 签名由 <code>i32 main()</code> 改为 <code>i32 main(i64, i8*)</code>（接收 <code>argc</code> / <code>argv</code>）。
   这是 C ABI 层面透明的变化，既有程序行为不变。</li>
@@ -589,7 +650,7 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
 <li>发布协同项：本次发布需要<strong>两个标签</strong>——<code>v1.1.0</code>（编译器）与
   <code>stdlib-v1.1.0</code>（标准库包）。</li>
 </ul>
-<h3 id="测试_1">测试</h3>
+<h3 id="测试_2">测试</h3>
 <ul>
 <li>6 个新增正向示例 + 同名 <code>.expected</code> 黄金文件：<code>array_demo</code>、<code>drop_demo</code>、
   <code>string_methods_demo</code>、<code>env_demo</code>、<code>kvmap_foreach_demo</code>、<code>sort_demo</code>；</li>
@@ -653,14 +714,14 @@ GitHub API 解析最新 Release 的真实资产名并走 <code>releases/latest/d
 - 正向示例：<code>examples/container_demo.dial</code>、<code>set_demo.dial</code>、<code>kvmap_demo.dial</code>。</p>
 <p><strong>已知边界</strong>：泛型 map 的 <code>V</code> 暂不开放 <code>string</code>（<code>get</code> 未命中时的默认对象会带来所有权移交歧义）；
 <code>map.values()</code> 当前只支持 <code>V = int</code>。两点计划在后续版本补齐。</p>
-<h3 id="fixed_3">Fixed</h3>
+<h3 id="fixed_4">Fixed</h3>
 <ul>
 <li><strong>开放寻址哈希表删除采用「左移紧凑」导致键不可达</strong>：<code>dial_map_remove</code> 与新
   <code>dial_kvmap_remove</code> 改为<strong>墓碑标记 + 负载重建</strong>。2 万键压测里删除 1 万个后 <code>size</code>
   曾只剩 13082（应为 10000），修复后正确；<code>set&lt;int&gt;</code> 与 <code>for (k, v in m)</code> 同时受益。</li>
 <li><code>panic</code> 前 stdout 缓冲内容丢失：<code>dial_panic()</code> 增加 <code>fflush(NULL)</code>。</li>
 </ul>
-<h3 id="changed_1">Changed</h3>
+<h3 id="changed_2">Changed</h3>
 <ul>
 <li><code>print</code> 中间参数改为原样输出、最后一个参数补换行；<code>print_raw</code> 全部参数原样输出。</li>
 <li>trap 接口补齐 <code>dial_assert_fail</code> / <code>dial_exit</code> / <code>dial_panic</code>；<code>dial_map_keys()</code> 供迭代使用。</li>
@@ -1730,7 +1791,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
   <code>release</code> 一次」造成二次释放。复核后确认该担心<strong>不成立</strong>：<code>close</code> 只置标志 + 广播，
   既不释放通道对象也不动引用计数；对象销毁仍<strong>只由原子 ARC 归零触发一次</strong>。二者职责不重叠。</li>
 </ul>
-<h3 id="测试_2">测试</h3>
+<h3 id="测试_3">测试</h3>
 <ul>
 <li>A 组新增 <code>examples/channel_close.dial</code>（生产者 <code>close</code> → 消费者 <code>done</code> 收尾）与
   <code>examples/channel_try_recv.dial</code>（<code>len</code> / <code>try_recv</code> / <code>closed</code> / <code>done</code> 状态机），
@@ -2037,7 +2098,7 @@ v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v1.03 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

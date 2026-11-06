@@ -1,0 +1,7 @@
+// 只有 rawptr<结构体名> 才能做字段访问；rawptr<byte> 没有字段。
+fn main(): int {
+    var p: rawptr<byte> = raw_alloc(8);
+    print(p.x);
+    raw_free(p);
+    return 0;
+}

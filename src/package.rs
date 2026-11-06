@@ -43,7 +43,7 @@ use crate::error::{DialcError, Result};
 /// 只要写了裸指针程序，仍会撞上难懂的 `undefined symbol: dial_raw_alloc`。
 /// 判据是「编译器是否可能要求旧包没有的符号」，因此同样递增，让旧包在链接期
 /// 就被明确拦下并给出重装指引——ABI 校验这道安全网不能因为引用是条件性的就放过。
-pub const STDLIB_ABI: u64 = 4;
+pub const STDLIB_ABI: u64 = 5;
 
 /// 全局包缓存根目录：`~/.dial/packages/`（Windows：`%USERPROFILE%\.dial\packages\`）。
 ///
@@ -830,8 +830,32 @@ pub fn parse_diali(text: &str) -> Result<DialIface> {
 ///
 /// 未声明且非内建的类型名**一律报错**：让它悄悄退化成某个默认类型，
 /// 等于把「签名不匹配」这个能在编译期抓住的错误推迟成运行期的内存损坏。
+/// 按**顶层**逗号切分（`<...>` / `(...)` 内的逗号不切）。
+///
+/// v1.04：`.diali` 的形参表与 `fn(A, B): R` 的参数表都可能有嵌套泛型/函数类型，
+/// 朴素的 `split(',')` 会把 `fn(int, int): int` 切成两段，签名解析当场失真。
+fn split_top_level(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth: i32 = 0;
+    let mut last = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(s[last..i].trim().to_string());
+                last = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(s[last..].trim().to_string());
+    parts.into_iter().filter(|p| !p.is_empty()).collect()
+}
+
 pub fn resolve_type_name(name: &str, opaque: &[String]) -> Result<crate::ast::Type> {
     use crate::ast::Type;
+    let name = name.trim();
     // channel<T>：规范允许包接口暴露通道（极少见，但签名语法一致）
     if let Some(inner) = name.strip_prefix("channel<").and_then(|s| s.strip_suffix('>')) {
         let elem = resolve_type_name(inner.trim(), opaque)?;
@@ -841,11 +865,58 @@ pub fn resolve_type_name(name: &str, opaque: &[String]) -> Result<crate::ast::Ty
         let elem = resolve_type_name(inner.trim(), opaque)?;
         return Ok(Type::Array(Box::new(elem)));
     }
+    // v1.04 FFI：rawptr<T> 裸指针（可嵌套，如 rawptr<rawptr<byte>>）
+    if let Some(inner) = name.strip_prefix("rawptr<").and_then(|s| s.strip_suffix('>')) {
+        let elem = resolve_type_name(inner.trim(), opaque)?;
+        return Ok(Type::RawPtr(Box::new(elem)));
+    }
+    // v1.04 FFI：fn(A, B): R 函数指针（C 回调签名）。
+    // 必须找**配对**的 ')'，不能 rsplit_once —— 返回类型或参数里可能还嵌套着括号。
+    if let Some(rest) = name.strip_prefix("fn(") {
+        let mut depth: i32 = 1;
+        let mut close = None;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close.ok_or_else(|| {
+            DialcError::new(
+                format!(".diali 函数指针类型 '{}' 缺少配对的 ')'", name),
+                0, 0,
+            )
+        })?;
+        let params_src = &rest[..close];
+        let after = rest[close + 1..].trim();
+        let ret_src = after.strip_prefix(':').ok_or_else(|| {
+            DialcError::new(
+                format!(".diali 函数指针类型 '{}' 缺少 ': R' 返回标注", name),
+                0, 0,
+            )
+        })?;
+        let mut ps = Vec::new();
+        for p in split_top_level(params_src) {
+            ps.push(resolve_type_name(&p, opaque)?);
+        }
+        let ret = resolve_type_name(ret_src.trim(), opaque)?;
+        return Ok(Type::FnPtr(ps, Box::new(ret)));
+    }
     let t = match name {
         "int" => Type::Int,
         "float" => Type::Float,
         "bool" => Type::Bool,
         "char" => Type::Char,
+        // v1.04 FFI：byte / bytes 放行（此前白名单只认 string / void 等）
+        "byte" => Type::Byte,
+        "bytes" => Type::Bytes,
         "string" => Type::String,
         "void" => Type::Void,
         "map" => Type::Map,
@@ -923,7 +994,9 @@ fn parse_extern_fn(
     let mut params = Vec::new();
     let mut variadic = false;
     if !params_src.is_empty() {
-        for p in params_src.split(',') {
+        // v1.04：必须按顶层逗号切——形参类型可能是 fn(int, int): int 这类
+        // 自带逗号的函数指针签名，朴素 split(',') 会把它切坏。
+        for p in split_top_level(&params_src) {
             let p = p.trim();
             if p.is_empty() {
                 continue;

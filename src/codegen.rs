@@ -131,6 +131,10 @@ pub struct CodeGen<'ctx> {
     goto_analysis: RefCell<GotoAnalysis>,
     /// Fail-Fast 安全等级：决定是否在 IR 里插入边界/除零检查与 trap。
     safety: SafetyMode,
+    /// v1.04 FFI：`extern struct` 的名字集合。
+    /// 用于区分「C ABI 布局结构体」（字段 bool/byte 为 1 字节）与
+    /// 「Dial 值语义结构体」（字段按内部宽度），以便裸指针字段读写时做正确的宽度转换。
+    cstruct_names: std::collections::HashSet<String>,
 }
 
 /// 编译入口：接收校验后的 AST、函数签名表、结构体表，生成并写出目标文件 `.o`。
@@ -164,6 +168,7 @@ pub fn compile(
         label_depth: RefCell::new(HashMap::new()),
         goto_analysis: RefCell::new(GotoAnalysis::default()),
         safety: opts.safety,
+        cstruct_names: program.cstructs.iter().map(|c| c.name.clone()).collect(),
     };
 
     cg.build_struct_types(program);
@@ -303,6 +308,11 @@ impl<'ctx> CodeGen<'ctx> {
             self.struct_types
                 .insert(sd.name.clone(), self.context.opaque_struct_type(&sd.name));
         }
+        // v1.04 FFI：extern struct 也注册进同一张表（先建 opaque 以支持互相嵌套）。
+        for cs in &program.cstructs {
+            self.struct_types
+                .insert(cs.name.clone(), self.context.opaque_struct_type(&cs.name));
+        }
         for sd in &program.structs {
             let fields: Vec<BasicTypeEnum> = sd
                 .fields
@@ -310,6 +320,16 @@ impl<'ctx> CodeGen<'ctx> {
                 .map(|(_, t)| self.dialc_type_to_llvm(t))
                 .collect();
             self.struct_types[&sd.name].set_body(&fields, false);
+        }
+        // v1.04 FFI：C ABI 结构体用 C 字段宽度，**非 packed**：
+        // LLVM 按 target DataLayout 自动插入与 C 一致的对齐 padding。
+        for cs in &program.cstructs {
+            let fields: Vec<BasicTypeEnum> = cs
+                .fields
+                .iter()
+                .map(|(_, t)| self.cstruct_field_llvm(t))
+                .collect();
+            self.struct_types[&cs.name].set_body(&fields, false);
         }
     }
 
@@ -440,6 +460,12 @@ impl<'ctx> CodeGen<'ctx> {
         // v1.02：裸指针运行时（不受 ARC 管理，谁申请谁释放）
         self.decl_func("dial_raw_alloc", i8b, &[i64b.into()]);
         self.decl_void("dial_raw_free", &[i8b.into()]);
+        // v1.04 FFI：string / bytes <-> C 缓冲区的数据总线（stdlib/dial_ffi.c）。
+        // 前两个是借用指针（跳过 8 字节长度头），后两个是从 C 缓冲区复制出新对象。
+        self.decl_func("dial_ffi_string_cstr", i8b, &[i8b.into()]);
+        self.decl_func("dial_ffi_bytes_data", i8b, &[i8b.into()]);
+        self.decl_func("dial_ffi_string_from_cstr", i8b, &[i8b.into()]);
+        self.decl_func("dial_ffi_bytes_from_ptr", i8b, &[i8b.into(), i64b.into()]);
         // v1.00：字符串插值所需的标量 -> 字符串转换
         self.decl_func("dial_bool_to_string", i8b, &[i64b.into()]);
         self.decl_void("dial_map_retain", &[i8b.into()]);
@@ -574,19 +600,24 @@ impl<'ctx> CodeGen<'ctx> {
     /// 与 C 侧 FFI 函数（declare_stdlib）用的是同一套机制：LLVM 的
     /// **外部链接声明**——模块里只出现 `declare`，定义由链接器从 `.a` 中解析。
     fn declare_extern_function(&self, name: &str, info: &FuncInfo) -> FunctionValue<'ctx> {
+        // v1.04：FFI 边界一律用 C ABI 宽度（bool→i32 / byte→i8）。
         let param_tys: Vec<BasicMetadataTypeEnum> = info
             .params
             .iter()
-            .map(|t| self.dialc_type_to_llvm(t).into())
+            .map(|t| self.ffi_type_to_llvm(t).into())
             .collect();
         // C 风格异构变参（v1.03）：`.diali` 的 `extern fn f(a: T, ...): R` 声明为
         // LLVM varargs 函数；固定参数照常检查，尾部参数按 C ABI 直传。
         let ft = if info.ret == Type::Void {
             self.context.void_type().fn_type(&param_tys, info.variadic)
         } else {
-            self.dialc_type_to_llvm(&info.ret).fn_type(&param_tys, info.variadic)
+            self.ffi_type_to_llvm(&info.ret).fn_type(&param_tys, info.variadic)
         };
-        self.module.add_function(name, ft, None)
+        let fv = self.module.add_function(name, ft, None);
+        // 显式固定 C calling convention（LLVM 编号 0）：由 target triple 决定
+        // 具体的 SysV AMD64 / Windows x64 / AArch64 AAPCS 参数传递细节。
+        fv.set_call_conventions(0);
+        fv
     }
 
     /// 从 Dial 签名构造**精确**的 LLVM 函数类型。
@@ -594,14 +625,15 @@ impl<'ctx> CodeGen<'ctx> {
     /// 函数指针的间接调用必须给出精确签名（LLVM 18 的 `build_indirect_call` 要求），
     /// 绝不能像 C 侧那样猜一个通用 `void* (*)(void*)`——那正是 UB 的温床。
     fn llvm_fn_type(&self, params: &[Type], ret: &Type) -> FunctionType<'ctx> {
+        // v1.04：函数指针签名也统一走 C ABI 宽度，确保 C 侧能安全地调用 Dial 函数。
         let param_tys: Vec<BasicMetadataTypeEnum> = params
             .iter()
-            .map(|t| self.dialc_type_to_llvm(t).into())
+            .map(|t| self.ffi_type_to_llvm(t).into())
             .collect();
         if *ret == Type::Void {
             self.context.void_type().fn_type(&param_tys, false)
         } else {
-            self.dialc_type_to_llvm(ret).fn_type(&param_tys, false)
+            self.ffi_type_to_llvm(ret).fn_type(&param_tys, false)
         }
     }
 
@@ -655,10 +687,20 @@ impl<'ctx> CodeGen<'ctx> {
         params.push(Type::RawPtr(Box::new(Type::Void)));
         let call_ft = self.llvm_fn_type(&params, ret);
 
+        // v1.04 FFI：回调签名已统一为 C ABI 宽度。从 C 侧 i64 槽位还原出的
+        // 只是 Dial 内部宽度（bool=i1 / byte=i64），传给回调前必须再做一次 abi_adapt。
         let mut call_args: Vec<BasicMetadataValueEnum> = Vec::new();
-        call_args.push(self.from_elem_bits(elem, a_bits).into());
+        let a = self.from_elem_bits(elem, a_bits);
+        call_args.push(
+            self.abi_adapt(a, a.get_type(), self.ffi_type_to_llvm(elem))
+                .into(),
+        );
         if arity == 2 {
-            call_args.push(self.from_elem_bits(elem, b_bits).into());
+            let b = self.from_elem_bits(elem, b_bits);
+            call_args.push(
+                self.abi_adapt(b, b.get_type(), self.ffi_type_to_llvm(elem))
+                    .into(),
+            );
         }
         call_args.push(state.into());
         let call = self
@@ -669,7 +711,9 @@ impl<'ctx> CodeGen<'ctx> {
             .try_as_basic_value()
             .basic()
             .expect("高阶回调返回值不应为 void（语义层已拦截）");
-        let bits = self.to_elem_bits(rv, ret);
+        // 反向：C ABI 返回宽度 → Dial 内部宽度，再压回 C 运行时的 i64 槽位。
+        let rv_internal = self.abi_adapt(rv, rv.get_type(), self.dialc_type_to_llvm(ret));
+        let bits = self.to_elem_bits(rv_internal, ret);
         self.builder.build_return(Some(&bits)).unwrap();
 
         if let Some(bb) = saved {
@@ -684,10 +728,12 @@ impl<'ctx> CodeGen<'ctx> {
         functions: &HashMap<String, FuncInfo>,
     ) -> FunctionValue<'ctx> {
         let info = &functions[&f.name];
+        // v1.04：**所有 Dial 函数**都用 C ABI 签名——这是「C 能安全调用 Dial 函数」
+        // 的前提。函数体内仍是内部宽度（bool=i1 / byte=i64），边界由 abi_adapt 对称转换。
         let param_tys: Vec<BasicMetadataTypeEnum> = f
             .params
             .iter()
-            .map(|(_, t)| self.dialc_type_to_llvm(t).into())
+            .map(|(_, t)| self.ffi_type_to_llvm(t).into())
             .collect();
         let ft = if f.ret == Type::Void {
             self.context.void_type().fn_type(&param_tys, false)
@@ -698,10 +744,13 @@ impl<'ctx> CodeGen<'ctx> {
                 .i32_type()
                 .fn_type(&[self.context.i64_type().into(), self.i8ptr().into()], false)
         } else {
-            self.dialc_type_to_llvm(&f.ret).fn_type(&param_tys, false)
+            self.ffi_type_to_llvm(&f.ret).fn_type(&param_tys, false)
         };
         let _ = info;
-        self.module.add_function(&f.name, ft, None)
+        let fv = self.module.add_function(&f.name, ft, None);
+        // 显式固定 C calling convention（LLVM 0）→ 平台标准的 SysV / Win64 / AAPCS。
+        fv.set_call_conventions(0);
+        fv
     }
 
     fn dialc_type_to_llvm(&self, t: &Type) -> BasicTypeEnum<'ctx> {
@@ -734,6 +783,62 @@ impl<'ctx> CodeGen<'ctx> {
                 .expect("结构体类型应在 build_struct_types 中已注册"))
             .into(),
         }
+    }
+
+    /// v1.04 FFI：Dial 类型 → **C ABI 函数签名**宽度。
+    ///
+    /// 差异只有两个：
+    ///   - `bool`：内部 i1 → C 的 `int`(i32)（C 默认整型提升，绝不把 i1 直接丢给 C）；
+    ///   - `byte`：内部 i64 → C 的 `uint8_t`(i8)（绝不是 i64）。
+    /// 其余类型（int=i64 / float=f64 / 各类句柄与裸指针 / 函数指针 = ptr）本就与 C ABI 一致。
+    /// **结构体字段**另用 `cstruct_field_llvm`——那里 bool 是 1 字节 `_Bool`，不做整型提升。
+    fn ffi_type_to_llvm(&self, t: &Type) -> BasicTypeEnum<'ctx> {
+        match t {
+            Type::Bool => self.context.i32_type().into(),
+            Type::Byte => self.context.i8_type().into(),
+            other => self.dialc_type_to_llvm(other),
+        }
+    }
+
+    /// v1.04 FFI：`extern struct` 字段的 LLVM 类型（C 内存布局宽度）。
+    /// LLVM 的**非 packed** struct 会按 target DataLayout 自动插入 padding，
+    /// 与 C 编译器（SysV / Windows x64 ABI）的字段顺序、对齐、sizeof 完全一致。
+    fn cstruct_field_llvm(&self, t: &Type) -> BasicTypeEnum<'ctx> {
+        match t {
+            Type::Bool => self.context.i8_type().into(), // C _Bool（1 字节）
+            Type::Byte => self.context.i8_type().into(), // C uint8_t
+            other => self.dialc_type_to_llvm(other),
+        }
+    }
+
+    /// FFI ↔ Dial 边界的整数宽度适配（zext / trunc），其余类型原样返回。
+    ///
+    /// 按**实际 IR 宽度**判断，不依赖调用方传 Dial 类型——函数入口、return、
+    /// 调用实参、调用返回值、thunk 转发都复用这一份逻辑，不会漏掉某条路径。
+    fn abi_adapt(
+        &self,
+        v: BasicValueEnum<'ctx>,
+        from: BasicTypeEnum<'ctx>,
+        to: BasicTypeEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        if let (BasicTypeEnum::IntType(ft), BasicTypeEnum::IntType(tt)) = (from, to) {
+            let fw = ft.get_bit_width();
+            let tw = tt.get_bit_width();
+            if fw < tw {
+                return self
+                    .builder
+                    .build_int_z_extend(v.into_int_value(), tt, "abi.zext")
+                    .unwrap()
+                    .into();
+            } else if fw > tw {
+                return self
+                    .builder
+                    .build_int_truncate(v.into_int_value(), tt, "abi.trunc")
+                    .unwrap()
+                    .into();
+            }
+        }
+        v
     }
 
     fn to_float(&self, v: BasicValueEnum<'ctx>) -> FloatValue<'ctx> {
@@ -1444,7 +1549,10 @@ impl<'ctx> CodeGen<'ctx> {
         for (i, (pname, pty)) in f.params.iter().enumerate() {
             let llvm_ty = self.dialc_type_to_llvm(pty);
             let ptr = self.alloca_in_entry(function, llvm_ty, pname);
-            let param_val = function.get_nth_param(i as u32).unwrap();
+            // v1.04：入口把 C ABI 宽度（bool=i32 / byte=i8）转回 Dial 内部宽度
+            // （bool=i1 / byte=i64）再存进局部变量。函数体逻辑完全不用改。
+            let raw_param = function.get_nth_param(i as u32).unwrap();
+            let param_val = self.abi_adapt(raw_param, self.ffi_type_to_llvm(pty), llvm_ty);
             self.builder.build_store(ptr, param_val).unwrap();
             scopes[0].insert(pname.clone(), (pty.clone(), (true, ptr)));
             // 形参取得共享所有权（进入时对称 +1，退出时 -1）：
@@ -1473,6 +1581,12 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_return(Some(&zero)).unwrap();
             } else {
                 let dv = self.default_value(&f.ret);
+                // v1.04：默认返回值也要从内部宽度适配到 C ABI 函数返回宽度。
+                let to = function
+                    .get_type()
+                    .get_return_type()
+                    .unwrap_or_else(|| self.ffi_type_to_llvm(&f.ret));
+                let dv = self.abi_adapt(dv, dv.get_type(), to);
                 self.builder.build_return(Some(&dv)).unwrap();
             }
         }
@@ -1568,8 +1682,11 @@ impl<'ctx> CodeGen<'ctx> {
                         .unwrap()
                 }
             };
+            // v1.04 FFI：被 spawn 的用户函数签名同样是 C ABI 宽度，传入前对称适配。
+            // arg_vals 保留内部宽度值，供函数结束时的 release_value 使用。
+            let call_v = self.abi_adapt(v, v.get_type(), self.ffi_type_to_llvm(pty));
             arg_vals.push(v);
-            meta.push(v.into());
+            meta.push(call_v.into());
         }
 
         self.builder.build_call(fv, &meta, "th.call").unwrap();
@@ -1890,21 +2007,33 @@ impl<'ctx> CodeGen<'ctx> {
                 line,
                 col,
             } => {
-                let lptr = self.gen_lvalue_ptr(obj, function, scopes, func_values, functions, structs)?;
-                // 找到字段索引与类型
                 let ot = type_of(obj, scopes, functions, structs)?;
+                let base = self.field_base_ptr(obj, &ot, function, scopes, func_values, functions, structs)?;
+                // 找到字段索引与类型
                 let sty = self.get_struct_type(&ot)?;
                 let (fidx, fty) = self.field_info(&ot, field, structs, *line, *col)?;
                 let fgep = self
                     .builder
-                    .build_struct_gep(sty, lptr, fidx, "fgep")
+                    .build_struct_gep(sty, base, fidx, "fgep")
                     .unwrap();
+                let val = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
+                let stored = self.coerce(val, &type_of(value, scopes, functions, structs)?, &fty);
+                if self.field_is_c_abi(&ot) {
+                    // v1.04 FFI：C 侧内存字段**不受 ARC 管理**（is_c_abi_field 已排除
+                    // 所有堆类型），既不 release 旧值也不 retain 新值。只需把 Dial 内部
+                    // 宽度写成 C 字段宽度（bool/byte → i8），否则会破坏 struct 布局。
+                    let cval = self.abi_adapt(
+                        stored,
+                        stored.get_type(),
+                        self.cstruct_field_llvm(&fty),
+                    );
+                    self.builder.build_store(fgep, cval).unwrap();
+                    return Ok(());
+                }
                 // 覆盖前 release 旧字段值（堆类型）
                 if Self::is_heap_type(&fty) {
                     self.release(&fty, fgep);
                 }
-                let val = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
-                let stored = self.coerce(val, &type_of(value, scopes, functions, structs)?, &fty);
                 // 字段成为新值的持有者：借来的值必须 retain 一份。
                 // 少了这一步，字段只是来源的别名——来源所在的块一结束，
                 // 字段就悬垂（读出来是已释放内存）。
@@ -2527,20 +2656,17 @@ impl<'ctx> CodeGen<'ctx> {
                         if let Expr::Var(n) = expr {
                             self.mark_moved(scopes, n);
                         }
-                        // 处理 main 返回 i32（C ABI）
-                        let ret_bte = function.get_type().get_return_type();
-                        let is_main_i32 = matches!(
-                            ret_bte,
-                            Some(BasicTypeEnum::IntType(it)) if it.get_bit_width() == 32
-                        );
-                        let ret_val: BasicValueEnum = if is_main_i32 {
-                            let i = self.to_i64(val, &type_of(expr, scopes, functions, structs)?);
-                            self.builder
-                                .build_int_truncate(i, self.context.i32_type(), "i32")
-                                .unwrap()
-                                .into()
-                        } else {
-                            val
+                        // v1.04：统一按「实际值宽度 → 函数 LLVM 返回宽度」做 C ABI 适配。
+                        // 一条同时覆盖 main 的 int(i64)→i32、bool(i1)→i32、byte(i64)→i8，
+                        // 也保证函数指针指向的真实签名与 FnPtr 声明精确一致（C 侧可安全调用）。
+                        let ret_val: BasicValueEnum = match function.get_type().get_return_type() {
+                            Some(to) => self.abi_adapt(val, val.get_type(), to),
+                            None => {
+                                return Err(DialcError::new(
+                                    "内部错误：非 void 函数不应返回 void",
+                                    *line, *col,
+                                ))
+                            }
                         };
                         self.drain_all_defers(function, scopes, func_values, functions, structs)?;
                         self.release_all(scopes, None, structs);
@@ -3124,6 +3250,26 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
+    /// v1.04 FFI：取出「可做字段访问」的结构体名。
+    /// 值语义 `struct` 直接返回名字；`rawptr<CStruct>` 则解一层裸指针。
+    fn struct_name_of(t: &Type) -> Option<&str> {
+        match t {
+            Type::Struct(n) => Some(n.as_str()),
+            Type::RawPtr(inner) => match &**inner {
+                Type::Struct(n) => Some(n.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// v1.04 FFI：该字段访问是否落在 `extern struct`（C ABI 布局）上。
+    fn field_is_c_abi(&self, ot: &Type) -> bool {
+        Self::struct_name_of(ot)
+            .map(|n| self.cstruct_names.contains(n))
+            .unwrap_or(false)
+    }
+
     /// 求结构体字段的 (索引, 类型)。
     fn field_info(
         &self,
@@ -3133,7 +3279,7 @@ impl<'ctx> CodeGen<'ctx> {
         line: usize,
         col: usize,
     ) -> Result<(u32, Type)> {
-        if let Type::Struct(sname) = ot {
+        if let Some(sname) = Self::struct_name_of(ot) {
             let fields = structs
                 .get(sname)
                 .ok_or_else(|| DialcError::new(format!("未知结构体 '{}'", sname), line, col))?;
@@ -3151,15 +3297,38 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    /// 由类型取得其 LLVM 结构体类型（仅对 struct 有效）。
+    /// 由类型取得其 LLVM 结构体类型（struct 与 rawptr<CStruct> 均有效）。
     fn get_struct_type(&self, ot: &Type) -> Result<StructType<'ctx>> {
-        match ot {
-            Type::Struct(name) => Ok(self.struct_types[name]),
-            other => Err(DialcError::new(
-                format!("语义错误：类型 '{}' 不是结构体，无法做字段访问", other.name()),
+        match Self::struct_name_of(ot) {
+            Some(name) => Ok(self.struct_types[name]),
+            None => Err(DialcError::new(
+                format!("语义错误：类型 '{}' 不是结构体，无法做字段访问", ot.name()),
                 0,
                 0,
             )),
+        }
+    }
+
+    /// v1.04 FFI：求字段访问的基址指针。
+    ///
+    /// - `rawptr<CStruct>`：对象本身就求值为 C 侧内存地址，直接当基址；
+    /// - 值语义 `struct`：对象是栈上（或父结构体内）的值，需取 lvalue 指针。
+    fn field_base_ptr(
+        &self,
+        obj: &Expr,
+        ot: &Type,
+        function: FunctionValue<'ctx>,
+        scopes: &CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<PointerValue<'ctx>> {
+        if matches!(ot, Type::RawPtr(_)) {
+            Ok(self
+                .gen_expr(obj, function, scopes, func_values, functions, structs)?
+                .into_pointer_value())
+        } else {
+            self.gen_lvalue_ptr(obj, function, scopes, func_values, functions, structs)
         }
     }
 
@@ -3183,8 +3352,8 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(info.1 .1)
             }
             Expr::Field(obj, field) => {
-                let base = self.gen_lvalue_ptr(obj, function, scopes, func_values, functions, structs)?;
                 let ot = type_of(obj, scopes, functions, structs)?;
+                let base = self.field_base_ptr(obj, &ot, function, scopes, func_values, functions, structs)?;
                 let sty = self.get_struct_type(&ot)?;
                 let (fidx, _fty) = self.field_info(&ot, field, structs, 0, 0)?;
                 Ok(self.builder.build_struct_gep(sty, base, fidx, "fgep").unwrap())
@@ -3263,12 +3432,20 @@ impl<'ctx> CodeGen<'ctx> {
                 0,
             )),
             Expr::Field(obj, field) => {
-                let lptr = self.gen_lvalue_ptr(obj, function, scopes, func_values, functions, structs)?;
                 let ot = type_of(obj, scopes, functions, structs)?;
+                let base = self.field_base_ptr(obj, &ot, function, scopes, func_values, functions, structs)?;
                 let sty = self.get_struct_type(&ot)?;
                 let (fidx, fty) = self.field_info(&ot, field, structs, 0, 0)?;
-                let fgep = self.builder.build_struct_gep(sty, lptr, fidx, "fgep").unwrap();
-                Ok(self.builder.build_load(self.dialc_type_to_llvm(&fty), fgep, "fld").unwrap())
+                let fgep = self.builder.build_struct_gep(sty, base, fidx, "fgep").unwrap();
+                // v1.04 FFI：extern struct 字段按 C 内存宽度读取（bool/byte 均为 i8），
+                // 再转回 Dial 内部宽度；值语义 struct 仍按内部宽度读取。
+                let load_ty = if self.field_is_c_abi(&ot) {
+                    self.cstruct_field_llvm(&fty)
+                } else {
+                    self.dialc_type_to_llvm(&fty)
+                };
+                let raw = self.builder.build_load(load_ty, fgep, "fld").unwrap();
+                Ok(self.abi_adapt(raw, load_ty, self.dialc_type_to_llvm(&fty)))
             }
             Expr::Index(arr, idx) => {
                 let at = type_of(arr, scopes, functions, structs)?;
@@ -3505,6 +3682,20 @@ impl<'ctx> CodeGen<'ctx> {
                     "int_to_byte" => {
                         let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         Ok(self.call_c("dial_int_to_byte", &[v.into()]))
+                    }
+                    // v1.04 FFI：C 侧缓冲区 → Dial 对象（复制出新对象，受 ARC 管理）。
+                    // 与 as_c_str() / as_ptr() 的「借用」正好反向，构成完整数据总线。
+                    "string_from_cstr" => {
+                        let p = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_ffi_string_from_cstr", &[p.into()]))
+                    }
+                    "bytes_from_ptr" => {
+                        let p = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let n = self.to_i64(
+                            self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?,
+                            &type_of(&args[1], scopes, functions, structs)?,
+                        );
+                        Ok(self.call_c("dial_ffi_bytes_from_ptr", &[p.into(), n.into()]))
                     }
                     // bytes（二进制缓冲区，v0.98.2）：与 string 显式互转。
                     "bytes_from_string" => {
@@ -4196,8 +4387,30 @@ impl<'ctx> CodeGen<'ctx> {
                                     }
                                 }
                             }
+                            // v1.04 FFI：所有**固定形参**都从 Dial 内部宽度适配到
+                            // C ABI 函数签名宽度（bool i1→i32、byte i64→i8）。
+                            // 函数声明、函数指针签名、Dial 函数定义三处都已统一为 ffi 宽度，
+                            // 调用点必须做对称转换，否则 IR 类型不符且 bool/byte 会静默错位。
+                            // C 变参尾部已在上面按「C 默认实参提升」处理，此处不再二次转换。
+                            let adapted: Vec<BasicValueEnum<'ctx>> = arg_vals
+                                .iter()
+                                .enumerate()
+                                .map(|(i, v)| {
+                                    if is_c_varargs && i >= sig_params.len() {
+                                        return *v;
+                                    }
+                                    match sig_params.get(i) {
+                                        Some(pt) => self.abi_adapt(
+                                            *v,
+                                            v.get_type(),
+                                            self.ffi_type_to_llvm(pt),
+                                        ),
+                                        None => *v,
+                                    }
+                                })
+                                .collect();
                             let metadata: Vec<BasicMetadataValueEnum> =
-                                arg_vals.iter().map(|v| (*v).into()).collect();
+                                adapted.iter().map(|v| (*v).into()).collect();
                             let call = if let Some(fv) = direct_fv {
                                 self.builder.build_call(fv, &metadata, name).unwrap()
                             } else {
@@ -4222,6 +4435,12 @@ impl<'ctx> CodeGen<'ctx> {
                             // 这里发射调用后返回一个占位值——**它只可能出现在语句位置**，
                             // 因为「把 void 当值用」已由语义层用 types_compatible 挡住。
                             let rv = match call.try_as_basic_value().basic() {
+                                // v1.04 FFI：C ABI 返回宽度 → Dial 内部宽度（i32→i1 / i8→i64）。
+                                Some(v) if sig_ret != Type::Void => self.abi_adapt(
+                                    v,
+                                    v.get_type(),
+                                    self.dialc_type_to_llvm(&sig_ret),
+                                ),
                                 Some(v) => v,
                                 None => self.context.i64_type().const_int(0, false).into(),
                             };
@@ -4257,6 +4476,11 @@ impl<'ctx> CodeGen<'ctx> {
             );
         }
         match (&ot, method) {
+            // v1.04 FFI：借用 C 侧数据区指针。跳过 8 字节长度头由 C Runtime 代劳，
+            // 编译器不在 IR 里硬编码布局，用户更不需要手写 +8 offset hack。
+            // 返回的是 rawptr<byte> 借用：不受 ARC 管理，生命周期绑定原对象。
+            (Type::String, "as_c_str") => Ok(self.call_c("dial_ffi_string_cstr", &[optr.into()])),
+            (Type::Bytes, "as_ptr") => Ok(self.call_c("dial_ffi_bytes_data", &[optr.into()])),
             (Type::String, "length") => Ok(self.call_c("dial_string_length", &[optr.into()])),
             (Type::String, "concat") => {
                 let b = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;

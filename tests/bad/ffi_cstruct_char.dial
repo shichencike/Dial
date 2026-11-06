@@ -1,0 +1,3 @@
+// char 是 i64 码点，与 C char 宽度有歧义；请改用 byte 或 int。
+extern struct S { c: char }
+fn main(): int { return 0; }
