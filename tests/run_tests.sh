@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 十八组检查，全部通过才算绿（顺序为 A→R，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 十九组检查，全部通过才算绿（顺序为 A→S，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -30,6 +30,9 @@
 #      new→pack→install→import→uninstall 闭环、A3 Fail-Fast、A7 位置诊断（v1.04 增补）。
 #   R. DWARF 调试信息：-g 生成 CompileUnit / 函数 / 行号 / 变量名，GDB 按源码行
 #      断点并 print 变量名，无 -g 时不产 Dial 调试符号（v1.04 增补）。
+#   S. 性能基准套件：4 语言（C/Go/Python/Dial）28 项校验和一致（抽验）、
+#      bench/data.json 数据完整性、web/bench.html 与数据配套及六维雷达图（v1.04 增补）。
+#      完整计时采集由 CI 独立步骤负责，本组只做秒级快速正确性校验。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -927,6 +930,83 @@ else
     rbad "-g 与 --fast 同用异常"; sed 's/^/       /' "${RDIR}/fast.log" | tail -12
 fi
 
+
+# ===========================================================================
+# S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
+#    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
+#    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。
+# ===========================================================================
+echo
+echo "== S) 性能基准：4 语言 × 28 维校验和与交付数据（v1.04 增补） =="
+spass() { echo "  ✅ $1"; }
+sbad()  { echo "  ❌ $1"; fail=1; }
+sskip() { echo "  ⏭️  $1"; }
+
+BDIR="bench"
+SDIR="${TMP}/sbench"
+mkdir -p "$SDIR"
+
+# 1) 交付数据完整性 + 网页/数据同步（纯 Python，无外部工具依赖）
+if python3 tools/check_bench_data.py \
+     --data "${BDIR}/data.json" --html web/bench.html >"${SDIR}/check.log" 2>&1; then
+    spass "data.json 28×4 / 6 维 / 6 雷达轴 / 校验和齐全，且网页与数据同步"
+else
+    sbad "交付数据或网页校验失败"; sed 's/^/       /' "${SDIR}/check.log"
+fi
+
+# 2) 网页含六维雷达图（SVG）、4 语言多边形、C=1.00 基准
+if grep -q '<svg' web/bench.html \
+   && [ "$(grep -c '<polygon' web/bench.html)" -ge 8 ] \
+   && grep -q 'C = 1.00' web/bench.html \
+   && grep -q '六维工程能力雷达图' web/bench.html; then
+    spass "网页含六维 SVG 雷达图（4 语言多边形 + 归一化基准）"
+else
+    sbad "网页缺六维雷达图或比值基准"
+fi
+
+# 3) 4 语言基准程序编译 + 代表性任务校验和一致（抽 6 项覆盖五类）
+if command -v gcc >/dev/null 2>&1 && command -v go >/dev/null 2>&1; then
+    C_OK=1
+    gcc -O2 -o "${SDIR}/bench_c" "${BDIR}/bench.c" 2>"${SDIR}/c.log" || C_OK=0
+    (cd "$BDIR" && GO111MODULE=off GOCACHE="${SDIR}/gocache" \
+        go build -o "${SDIR}/bench_go" bench.go) 2>"${SDIR}/go.log" || C_OK=0
+    "$DIALC" build "${BDIR}/bench.dial" --fast -o "${SDIR}/bench_dial" \
+        >"${SDIR}/dial.log" 2>&1 || C_OK=0
+    if [ "$C_OK" -eq 1 ]; then
+        spass "C / Go / Dial 三份基准源码编译成功（含 Dial --fast）"
+        # 抽验 b01/b09/b14/b19/b24/b28 六项（算术/递归/数组/字符串/位运算/综合）
+        mismatch=0
+        for t in b01 b09 b14 b19 b24 b28; do
+            vc=$("${SDIR}/bench_c" "$t" 2>/dev/null | tail -1)
+            vg=$("${SDIR}/bench_go" "$t" 2>/dev/null | tail -1)
+            vd=$("${SDIR}/bench_dial" "$t" 2>/dev/null | tail -1)
+            vp=$(python3 "${BDIR}/bench.py" "$t" 2>/dev/null | tail -1)
+            if [ "$vc" != "$vg" ] || [ "$vc" != "$vd" ] || [ "$vc" != "$vp" ] \
+               || [ -z "$vc" ]; then
+                echo "       $t: C=$vc Go=$vg Dial=$vd Py=$vp"
+                mismatch=$((mismatch+1))
+            fi
+        done
+        if [ "$mismatch" -eq 0 ]; then
+            spass "抽验 6 项 × 4 语言校验和完全一致（等价计算锚点）"
+        else
+            sbad "校验和不一致（$mismatch 项）"
+        fi
+        # repeat 自校准入口：rep=3 校验和不变（纯函数式任务）
+        vr_c=$("${SDIR}/bench_c" b14 3 2>/dev/null | tail -1)
+        vr_d=$("${SDIR}/bench_dial" b14 3 2>/dev/null | tail -1)
+        v1_c=$("${SDIR}/bench_c" b14 2>/dev/null | tail -1)
+        if [ "$vr_c" = "$v1_c" ] && [ "$vr_d" = "$v1_c" ]; then
+            spass "repeat 自校准入口可用且校验和不漂移"
+        else
+            sbad "repeat 参数破坏校验和一致性"
+        fi
+    else
+        sbad "基准源码编译失败"; tail -6 "${SDIR}/c.log" "${SDIR}/go.log" "${SDIR}/dial.log"
+    fi
+else
+    sskip "4 语言编译抽验（环境缺 gcc 或 go）"
+fi
 
 echo
 if [ $fail -eq 0 ]; then

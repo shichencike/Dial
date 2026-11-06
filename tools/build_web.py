@@ -70,6 +70,7 @@ NAV = """
       <a href="spec.html">语言规范</a>
       <a href="changelog.html">更新日志</a>
       <a href="cve.html">安全公告</a>
+      <a href="bench.html">性能基准</a>
       <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
       <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
     </nav>
@@ -235,6 +236,7 @@ def render(title: str, body: str, active: str, landing: bool = False) -> str:
         "index": 'href="index.html"',
         "spec": 'href="spec.html"',
         "changelog": 'href="changelog.html"',
+        "bench": 'href="bench.html"',
     }
     nav_html = NAV
     if active in nav_links:
@@ -325,6 +327,7 @@ def render_index() -> str:
     <div class="cta">
       <a class="btn-primary" href="spec.html">阅读语言规范</a>
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
+      <a class="btn-ghost" href="bench.html">性能基准（4 语言 × 28 维）</a>
     </div>
     <div class="kpis">
       <span><b>{VERSION}</b> 当前版本</span>

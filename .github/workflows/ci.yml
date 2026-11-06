@@ -91,6 +91,54 @@ jobs:
       - name: 编译 dialc（release）
         run: cargo build --release --locked
 
+      # -------------------------------------------------------------------
+      # 性能基准：4 语言（C / Go / Python / Dial）× 28 项微基准。
+      # 采集器在单次进程内自校准重复、外部统一墙钟计时、逐项校验 4 语言校验和
+      # 一致性（112/112），并汇总 6 大工程维度 + 六维雷达图所需数据。
+      #
+      # 产物一律写到 /tmp 再上传 artifact，**绝不写回仓库内的 web/bench.html**：
+      # 那样会让下一步「官网产物同步校验」的 git diff --exit-code -- web/
+      # 因为 CI 机器测得的数据与提交的快照不同而误报失败。仓库里提交的
+      # web/bench.html + bench/data.json 是本地校准后的权威快照，此步只验证
+      # 二者配套且完整，CI 自己的实测数据作为独立 artifact 供查阅/对照。
+      # -------------------------------------------------------------------
+      - name: 安装 Go（性能基准对比语言）
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: false
+
+      - name: 性能基准采集（C / Go / Python / Dial × 28 项）
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          echo "--- 工具链 ---"
+          gcc --version | head -1
+          go version
+          python3 --version
+          ./target/release/dialc --version
+          python3 tools/bench_harness.py \
+            --dialc target/release/dialc \
+            --out /tmp/bench_ci.json
+          python3 tools/build_bench_web.py \
+            --data /tmp/bench_ci.json --out /tmp/bench_ci.html
+          echo "--- 校验 CI 实测产物 ---"
+          python3 tools/check_bench_data.py \
+            --data /tmp/bench_ci.json --html /tmp/bench_ci.html
+          echo "--- 校验仓库内交付快照（数据 + 网页配套）---"
+          python3 tools/check_bench_data.py \
+            --data bench/data.json --html web/bench.html
+
+      - name: 上传性能基准产物（数据 + 网页快照）
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-4lang-28dim
+          path: |
+            /tmp/bench_ci.json
+            /tmp/bench_ci.html
+          if-no-files-found: error
+          retention-days: 14
+
       # 阶段 7：预编译官方标准库（runtime + stdlib）为单份静态库，供发布 stdlib.dialpkg。
       - name: 构建标准库静态库（x86_64-linux-gnu）
         run: bash tools/build_stdlib.sh dist-stdlib/x86_64-linux-gnu/libdial_std.a 1

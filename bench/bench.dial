@@ -1,0 +1,354 @@
+// Dial 性能基准 —— Dial (dialc build --fast) 实现。
+//
+// 28 个跨语言等价的纯整数微基准。第一个命令行参数指定任务名，程序只在
+// stdout 打印一行十进制校验和；计时由外部采集器负责。
+// 一致性铁律见 bench.py 顶部注释。Dial 的 int 是 i64，全程保持非负取模/相除。
+// 编译：dialc build bench.dial --fast -o bench_dial
+
+fn gcdI(a: int, b: int): int {
+    var x: int = a;
+    var y: int = b;
+    while (y > 0) {
+        var t: int = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
+
+fn fibR(n: int): int {
+    if (n < 2) { return n; }
+    return fibR(n - 1) + fibR(n - 2);
+}
+
+fn rsumR(n: int): int {
+    if (n == 0) { return 0; }
+    return (n + rsumR(n - 1)) % 1000000007;
+}
+
+fn treeR(n: int): int {
+    if (n < 2) { return 1; }
+    return (treeR(n - 1) + treeR(n - 2) + 1) % 1000000007;
+}
+
+fn evR(n: int): int {
+    if (n == 0) { return 1; }
+    return odR(n - 1);
+}
+fn odR(n: int): int {
+    if (n == 0) { return 0; }
+    return evR(n - 1);
+}
+
+fn b01(): int {
+    var s: int = 0;
+    for (i in 0..1000000) { s = (s + i) % 1000000007; }
+    return s;
+}
+fn b02(): int {
+    var s: int = 1;
+    for (i in 0..100000) { s = (s * 31 + i) % 1000000007; }
+    return s;
+}
+fn b03(): int {
+    var s: int = 0;
+    for (i in 1..100000) { s = (s + (i * 1103515245) / 7 + i % 97) % 1000000007; }
+    return s;
+}
+fn b04(): int {
+    var s: int = 0;
+    for (i in 0..1000000) { s = (s * 3 + 7) % 1000000007; }
+    return s;
+}
+fn b05(): int {
+    var s: int = 0;
+    for (a in 0..20000) {
+        var base: int = a % 1000003 + 1;
+        var r: int = 1;
+        for (j in 0..8) { r = (r * base) % 1000000007; }
+        s = (s + r) % 1000000007;
+    }
+    return s;
+}
+fn b06(): int {
+    var s: int = 0;
+    for (i in 1..30000) { s = (s + gcdI(i * 7 + 1, i * 13 + 3)) % 1000000007; }
+    return s;
+}
+fn b07(): int {
+    var a: int = 0;
+    var b: int = 1;
+    for (i in 0..1000000) {
+        var t: int = (a + b) % 1000000007;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+fn b08(): int {
+    var s: int = 0;
+    for (n in 1..20000) {
+        var x: int = n;
+        var st: int = 0;
+        while (x > 1) {
+            if (x % 2 == 0) { x = x / 2; } else { x = 3 * x + 1; }
+            st = st + 1;
+        }
+        s = (s + st) % 1000000007;
+    }
+    return s;
+}
+fn b09(): int {
+    var s: int = 0;
+    for (k in 0..3) { s = (s + fibR(23)) % 1000000007; }
+    return s;
+}
+fn b10(): int {
+    var s: int = 0;
+    for (k in 0..50000) { s = (s + rsumR(25)) % 1000000007; }
+    return s;
+}
+fn b11(): int {
+    var s: int = 0;
+    for (k in 0..200) { s = (s + treeR(18)) % 1000000007; }
+    return s;
+}
+fn b12(): int {
+    var s: int = 0;
+    for (k in 0..20000) { s = (s + evR(k % 60 + 1)) % 1000000007; }
+    return s;
+}
+fn b13(): int {
+    var a: int[] = [];
+    for (i in 0..2048) { a.push((i * 31 + 7) % 1000003); }
+    var s: int = 0;
+    for (j in 0..a.length()) { s = (s + a[j]) % 1000000007; }
+    return s;
+}
+fn b14(): int {
+    var a: int[] = [];
+    for (i in 0..2048) { a.push((i * 17) % 1000003); }
+    var idx: int = 0;
+    var s: int = 0;
+    for (i in 0..1000000) {
+        idx = (idx * 1103515245 + 12345) & 2047;
+        s = (s + a[idx]) % 1000000007;
+        a[idx] = (a[idx] + 1) % 1000003;
+    }
+    return s;
+}
+fn b15(): int {
+    var a: int[] = [];
+    for (i in 0..512) { a.push(512 - i); }
+    var s: int = 0;
+    for (i in 0..512) {
+        for (j in 0..(512 - 1 - i)) {
+            if (a[j] > a[j + 1]) {
+                var t: int = a[j];
+                a[j] = a[j + 1];
+                a[j + 1] = t;
+            }
+        }
+        s = (s + a[i]) % 1000000007;
+    }
+    return s;
+}
+fn b16(): int {
+    var a: int[] = [];
+    for (i in 0..2048) { a.push((i * 13 + 5) % 1000003); }
+    var s: int = 0;
+    for (r in 0..100) {
+        for (i in 0..1024) {
+            var t: int = a[i];
+            a[i] = a[2047 - i];
+            a[2047 - i] = t;
+        }
+        for (j in 0..2048) { s = (s + a[j]) % 1000000007; }
+    }
+    return s;
+}
+fn b17(): int {
+    var A: int[] = [];
+    var B: int[] = [];
+    var C: int[] = [];
+    for (i in 0..4096) {
+        A.push((i * 7 + 3) % 1000003);
+        B.push((i * 11 + 5) % 1000003);
+        C.push(0);
+    }
+    for (i in 0..64) {
+        for (k in 0..64) {
+            var aik: int = A[i * 64 + k];
+            for (j in 0..64) {
+                var pos: int = i * 64 + j;
+                C[pos] = C[pos] + aik * B[k * 64 + j];
+            }
+        }
+    }
+    var s: int = 0;
+    for (v in 0..4096) { s = (s + C[v]) % 1000000007; }
+    return s;
+}
+fn b18(): int {
+    var a: int[] = [];
+    for (i in 0..2048) { a.push(0); }
+    var s: int = 0;
+    for (r in 0..200) {
+        for (i in 0..2048) { a[i] = (i * 13 + 5) % 1000003; }
+        for (i in 1..2048) { a[i] = (a[i] + a[i - 1]) % 1000000007; }
+        for (j in 0..2048) { s = (s + a[j]) % 1000000007; }
+    }
+    return s;
+}
+fn b19(): int {
+    var S: string = "abcdefghijklmnopqrstuvwxyz0123456789";
+    var s: int = 0;
+    for (r in 0..20000) {
+        for (c in 0..36) { s = (s + S.get(c)) % 1000000007; }
+    }
+    return s;
+}
+fn b20(): int {
+    var x: string = "x";
+    for (i in 0..4000) { x = x + "y"; }
+    var last: int = x.length() - 1;
+    return (x.length() * 31 + x.get(0) + x.get(last)) % 1000000007;
+}
+fn b21(): int {
+    var S: string = "abcdefghijklmnopqrstuvwxyz0123456789";
+    var subs: string[] = ["mnop", "0123", "xyz", "abcd"];
+    var s: int = 0;
+    for (k in 0..20000) {
+        s = (s + S.index_of(subs[k % 4])) % 1000000007;
+    }
+    return s;
+}
+fn b22(): int {
+    var S: string = "abcdefghijklmnopqrstuvwxyz0123456789";
+    var base: string = S + "-" + S;
+    var s: int = 0;
+    for (k in 0..10000) {
+        var f: int = k % 20;
+        var t: string = base.substring(f, f + 10);
+        for (c in 0..t.length()) { s = (s + t.get(c)) % 1000000007; }
+    }
+    return s;
+}
+fn b23(): int {
+    var s: int = 0;
+    for (i in 0..100000) {
+        var x: int = i;
+        var c: int = 0;
+        while (x > 0) {
+            c = c + (x & 1);
+            x = x >> 1;
+        }
+        s = (s + c) % 1000000007;
+    }
+    return s;
+}
+fn b24(): int {
+    var x: int = 1;
+    var s: int = 0;
+    for (i in 0..1000000) {
+        x = x ^ ((x << 13) & 0xFFFFFFFF);
+        x = x ^ (x >> 7);
+        x = x ^ ((x << 17) & 0xFFFFFFFF);
+        x = x & 0xFFFFFFFF;
+        s = (s + x % 1000003) % 1000000007;
+    }
+    return s;
+}
+fn b25(): int {
+    var s: int = 0;
+    for (i in 0..1000000) {
+        var r: int = i % 3;
+        if (r == 0) { s = (s + i) % 1000000007; }
+        else { if (r == 1) { s = (s + i * 2) % 1000000007; } else { s = (s + i * 3) % 1000000007; } }
+    }
+    return s;
+}
+fn b26(): int {
+    var s: int = 0;
+    for (i in 0..1000) {
+        for (j in 0..1000) { s = (s + (i ^ j)) % 1000000007; }
+    }
+    return s;
+}
+fn b27(): int {
+    var s: int = 0;
+    for (i in 0..1000000) {
+        if (((i % 7 == 0) and (i % 3 != 0)) or ((i & 1) == 1)) {
+            s = (s + 1) % 1000000007;
+        } else {
+            s = (s + 2) % 1000000007;
+        }
+    }
+    return s;
+}
+fn b28(): int {
+    var a: int[] = [];
+    for (i in 0..2048) { a.push((i * 29 + 11) % 1000003); }
+    var s: int = 0;
+    for (i in 0..100000) {
+        var p: int = i & 2047;
+        a[p] = (a[p] + i) % 1000003;
+        s = (s * 31 + a[p] + (i & 255)) % 1000000007;
+    }
+    return s;
+}
+
+fn parseRep(s: string): int {
+    // Dial 无 parse_int：逐字符用码点减 '0'(48) 拼出十进制整数。
+    var n: int = 0;
+    for (i in 0..s.length()) { n = n * 10 + (s.get(i) - 48); }
+    return n;
+}
+
+fn run(name: string): int {
+    if (name == "b01") { return b01(); }
+    else if (name == "b02") { return b02(); }
+    else if (name == "b03") { return b03(); }
+    else if (name == "b04") { return b04(); }
+    else if (name == "b05") { return b05(); }
+    else if (name == "b06") { return b06(); }
+    else if (name == "b07") { return b07(); }
+    else if (name == "b08") { return b08(); }
+    else if (name == "b09") { return b09(); }
+    else if (name == "b10") { return b10(); }
+    else if (name == "b11") { return b11(); }
+    else if (name == "b12") { return b12(); }
+    else if (name == "b13") { return b13(); }
+    else if (name == "b14") { return b14(); }
+    else if (name == "b15") { return b15(); }
+    else if (name == "b16") { return b16(); }
+    else if (name == "b17") { return b17(); }
+    else if (name == "b18") { return b18(); }
+    else if (name == "b19") { return b19(); }
+    else if (name == "b20") { return b20(); }
+    else if (name == "b21") { return b21(); }
+    else if (name == "b22") { return b22(); }
+    else if (name == "b23") { return b23(); }
+    else if (name == "b24") { return b24(); }
+    else if (name == "b25") { return b25(); }
+    else if (name == "b26") { return b26(); }
+    else if (name == "b27") { return b27(); }
+    else if (name == "b28") { return b28(); }
+    else { return 0; }
+}
+
+fn main(): int {
+    // 用法：bench_dial <任务名> [重复次数]
+    // 采集器用「单次进程内重复 N 次」自校准，摊薄进程启动开销；
+    // 重复调用的是纯函数式任务，校验和恒定（用于跨语言一致性校验）。
+    var av: string[] = args();
+    var name: string = "noop";
+    if (av.length() > 0) { name = av[0]; }
+    var rep: int = 1;
+    if (av.length() > 1) { rep = parseRep(av[1]); }
+
+    var result: int = 0;
+    for (q in 0..rep) { result = run(name); }
+    print(result);
+    return 0;
+}

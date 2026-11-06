@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dial 性能基准 · C / Python / Go / Dial 对比</title>
+<link rel="stylesheet" href="assets/style.css">
+
+<style>
+.hero .tag b{color:var(--fg)}
+.bkpis{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;margin:22px 0 4px}
+.kpi{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+     padding:14px 22px;min-width:150px;text-align:center}
+.kpi b{display:block;font-size:24px;color:var(--accent);margin-bottom:3px}
+.kpi span{color:var(--muted);font-size:13px}
+.bsec{max-width:1200px;margin:0 auto;padding:0 20px}
+.bsec h2{font-size:22px;margin:40px 0 12px;padding-top:12px;border-top:1px solid var(--border)}
+.bsec h2 small{color:var(--muted);font-size:13px;font-weight:400;margin-left:10px}
+.bsec p.bd{color:var(--muted);font-size:14px;line-height:1.75;max-width:980px}
+.bt{width:100%;border-collapse:collapse;margin:14px 0 8px;font-size:13.5px}
+.bt th,.bt td{border:1px solid var(--border);padding:7px 10px;text-align:right;white-space:nowrap}
+.bt th:first-child,.bt td:first-child,.bt th:nth-child(2),.bt td:nth-child(2),
+.bt th:nth-child(3),.bt td:nth-child(3){text-align:left}
+.bt thead th{background:var(--panel-2);position:sticky;top:0;z-index:2}
+.bt tbody tr:nth-child(even){background:rgba(255,255,255,.018)}
+.bt tbody tr:hover{background:rgba(124,162,247,.08)}
+.bt td.muted,.bt th.muted{color:var(--muted)}
+.tw{overflow-x:auto;border-radius:10px}
+.tabs{display:flex;gap:8px;margin:16px 0 4px}
+.tab{cursor:pointer;background:var(--panel);border:1px solid var(--border);color:var(--muted);
+     padding:7px 16px;border-radius:8px;font-size:14px;user-select:none}
+.tab.on{background:var(--accent);color:#06201f;border-color:var(--accent);font-weight:700}
+.env2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:820px){.env2{grid-template-columns:1fr}}
+.note{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--accent);
+      border-radius:0 10px 10px 0;padding:12px 18px;color:var(--muted);font-size:13.5px;line-height:1.75;margin:14px 0}
+.radar-box{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;margin:14px 0}
+.site-footer a{color:var(--accent)}
+</style>
+<script>
+function showTab(which){
+  document.getElementById('tbl-abs').style.display   = which==='abs'?'':'none';
+  document.getElementById('tbl-ratio').style.display= which==='ratio'?'':'none';
+  document.getElementById('tab-abs').className   = 'tab'+(which==='abs'?' on':'');
+  document.getElementById('tab-ratio').className= 'tab'+(which==='ratio'?' on':'');
+}
+window.addEventListener('DOMContentLoaded',function(){showTab('abs');});
+</script>
+
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="index.html">首页</a>
+      <a href="spec.html">语言规范</a>
+      <a href="changelog.html">更新日志</a>
+      <a href="cve.html">安全公告</a>
+      <a class="active" href="bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+
+<section class="hero">
+  <div class="wrap">
+    <h1>Dial 性能基准</h1>
+    <p class="tag">同一台机器、同一套 <b>28 个微基准</b>，
+    对比 <b>C / Python / Go / Dial</b> 四种语言。每项在 4 语言算出
+    <b>完全相同的校验和</b>才计入对比，保证比的是等价计算。
+    表格给出<b>绝对值</b>（单次纯计算耗时，毫秒）与<b>绝对比值</b>
+    （以 C = 1.00× 为基准，大于 1 表示比 C 慢相应倍数）。
+    页面底部叠加一张<b>六维工程能力雷达图</b> </p>
+    <div class="bkpis"><div class="kpi"><b>28</b><span>对比维度</span></div><div class="kpi"><b>4</b><span>对比语言</span></div><div class="kpi"><b>112/112</b><span>校验和一致</span></div><div class="kpi"><b>C = 1.00×</b><span>比值基准</span></div></div>
+    <p class="tag" style="font-size:13px;margin-top:16px">
+      采集时间 2026-11-06T22:47:49+08:00 · Linux 6.6.117-45.11.6.tl4.x86_64 (x86_64) · AMD EPYC 9K84 96-Core Processor</p>
+  </div>
+</section>
+
+<div class="bsec">
+
+  <h2>1. 测量口径 <small>为什么这套数字可比</small></h2>
+  <p class="bd">外部统一墙钟计时；单次进程内重复 N 次自校准以摊薄启动开销；扣除 noop 启动基线后除以 N 得单次纯计算耗时；极快项或被编译器常量折叠成空操作的项统一钳到 5µs 计时下限（如 C 的 b20 字符串拼接可能被 -O2 折叠）；28 项 × 4 语言校验和逐项一致作为正确性锚点；雷达图 6 轴按各维最优语言归一化到 100（越小越好 → 越靠外越优）。</p>
+  <div class="note">
+    <b>基准说明：</b>C = 1.00×（绝对比值 = 该语言耗时 / C 耗时）。所有维度均「越小越好」；
+    表格中 <span style="color:var(--accent);font-weight:700">★ 标记</span> 标出该项最优语言。
+    「产物体积」对编译型语言为可执行文件字节、对解释型 Python 为源码字节；
+    「编译耗时」对 Python 记为 <code>py_compile</code> 生成字节码的耗时 —— 这两列的口径差异已在下表注明。
+    <br><span style="color:#f7768e;font-weight:700">† 标记</span>：该项耗时触及
+    0.005ms 计时下限（或被编译器常量折叠成空操作，如 C 的 <code>-O2</code> 对 b20 字符串拼接），
+    此时绝对值是下限而非实测、对应比值会偏大，仅作定性参考，不参与严谨横向比较。
+  </div>
+  <div class="env2">
+    <div>
+      <h4 style="color:var(--muted)">运行环境</h4>
+      <table class="bt"><tbody><tr><td>os</td><td><code>Linux 6.6.117-45.11.6.tl4.x86_64 (x86_64)</code></td></tr><tr><td>cpu</td><td><code>AMD EPYC 9K84 96-Core Processor</code></td></tr><tr><td>python</td><td><code>Python 3.11.1</code></td></tr><tr><td>gcc</td><td><code>gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0</code></td></tr><tr><td>go</td><td><code>go version go1.21.4 linux/amd64</code></td></tr><tr><td>dialc</td><td><code>dialc 1.4.0</code></td></tr></tbody></table>
+    </div>
+    <div>
+      <h4 style="color:var(--muted)">各语言编译 / 运行档位</h4>
+      <table class="bt"><tbody><tr><td style="color:#7aa2f7;font-weight:600">C</td><td><code>gcc -O2</code></td></tr><tr><td style="color:#7dcfff;font-weight:600">Go</td><td><code>go build（默认优化）</code></td></tr><tr><td style="color:#f7768e;font-weight:600">Dial</td><td><code>dialc build --fast（O3 + LTO + 向量化）</code></td></tr><tr><td style="color:#e0af68;font-weight:600">Python</td><td><code>CPython 解释执行（py_compile 记为编译耗时）</code></td></tr></tbody></table>
+    </div>
+  </div>
+
+  <h2>2. 六大工程维度 <small>绝对值，越小越好</small></h2>
+  <p class="bd">把 28 项微基准与工具链特性汇总为 6 个工程维度的<b>绝对数值</b>：
+  速度（28 项单次耗时之和）、峰值内存、编译耗时、启动耗时、产物体积、源码行数。
+  这是底部雷达图的 6 个轴的<b>原始值</b>；雷达图会按各维最优语言归一化后再叠加。</p>
+  <div class="tw"><table class="bt"><thead><tr><th>工程维度</th><th>单位 / 口径</th><th style="color:#7aa2f7;border-bottom:2px solid #7aa2f7">C</th><th style="color:#7dcfff;border-bottom:2px solid #7dcfff">Go</th><th style="color:#f7768e;border-bottom:2px solid #f7768e">Dial</th><th style="color:#e0af68;border-bottom:2px solid #e0af68">Python</th><th>说明</th></tr></thead><tbody><tr><td><b>速度</b></td><td class="muted" style="font-size:12.5px">ms（28 项单次耗时之和）</td><td style="">42.63</td><td style="">50.88</td><td style="color:var(--accent);font-weight:700">41.37 ★</td><td style="">1405.1</td><td class="muted" style="font-size:12.5px">越小越快；28 项纯计算耗时之和</td></tr><tr><td><b>峰值内存</b></td><td class="muted" style="font-size:12.5px">KB</td><td style="color:var(--accent);font-weight:700">1648.0 ★</td><td style="">1928.0</td><td style="">1900.0</td><td style="">10832.0</td><td class="muted" style="font-size:12.5px">b17 负载的峰值 RSS，含语言运行时基线</td></tr><tr><td><b>编译耗时</b></td><td class="muted" style="font-size:12.5px">ms</td><td style="">215.1</td><td style="">75.20</td><td style="">1692.7</td><td style="color:var(--accent);font-weight:700">28.60 ★</td><td class="muted" style="font-size:12.5px">Python 为 py_compile 生成字节码耗时</td></tr><tr><td><b>启动耗时</b></td><td class="muted" style="font-size:12.5px">ms</td><td style="">0.627</td><td style="">1.11</td><td style="color:var(--accent);font-weight:700">0.611 ★</td><td style="">13.65</td><td class="muted" style="font-size:12.5px">noop 进程墙钟（含解释器/运行时初始化）</td></tr><tr><td><b>产物体积</b></td><td class="muted" style="font-size:12.5px">KB</td><td style="">24.76</td><td style="">1941.7</td><td style="">78.03</td><td style="color:var(--accent);font-weight:700">7.91 ★</td><td class="muted" style="font-size:12.5px">编译型为可执行文件字节，Python 为源码字节（解释型无二进制）</td></tr><tr><td><b>源码行数</b></td><td class="muted" style="font-size:12.5px">行</td><td style="color:var(--accent);font-weight:700">266.0 ★</td><td style="">375.0</td><td style="">334.0</td><td style="">270.0</td><td class="muted" style="font-size:12.5px">实现 28 项的有效代码行（去空行与整行注释）</td></tr></tbody></table></div>
+
+  <h2>3. 28 维明细 <small>绝对值 与 绝对比值</small></h2>
+  <div class="tabs">
+    <span class="tab on" id="tab-abs" onclick="showTab('abs')">绝对值（ms）</span>
+    <span class="tab" id="tab-ratio" onclick="showTab('ratio')">绝对比值（C = 1.00×）</span>
+  </div>
+  <p class="bd">切换查看两套数据。<b>绝对值</b>是每种语言在每一项上的实测耗时（毫秒）；
+  <b>绝对比值</b>以 C 为 1.00×，数值 = 该语言耗时 ÷ C 耗时。校验和一列是 4 语言共同算出的结果，
+  用于证明各语言执行的是等价计算。</p>
+  <div class="tw"><table class="bt" id="tbl-abs"><thead><tr><th>#</th><th>维度</th><th>分类</th><th style="color:#7aa2f7;border-bottom:2px solid #7aa2f7">C</th><th style="color:#7dcfff;border-bottom:2px solid #7dcfff">Go</th><th style="color:#f7768e;border-bottom:2px solid #f7768e">Dial</th><th style="color:#e0af68;border-bottom:2px solid #e0af68">Python</th><th>校验和</th></tr></thead><tbody><tr><td><code>b01</code></td><td>整数累加依赖链</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="color:var(--accent);font-weight:700">3.28 ★</td><td style="">3.30</td><td style="">3.70</td><td style="">47.36</td><td class="muted" style="font-size:12px">999496507</td></tr><tr><td><code>b02</code></td><td>乘加取模</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="color:var(--accent);font-weight:700">0.383 ★</td><td style="">0.384</td><td style="">0.419</td><td style="">6.74</td><td class="muted" style="font-size:12px">139598823</td></tr><tr><td><code>b03</code></td><td>除法与取模混合</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="color:var(--accent);font-weight:700">0.356 ★</td><td style="">0.357</td><td style="">0.391</td><td style="">12.14</td><td class="muted" style="font-size:12px">235528676</td></tr><tr><td><code>b04</code></td><td>FMA 乘加链</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="">3.55</td><td style="">4.11</td><td style="color:var(--accent);font-weight:700">2.74 ★</td><td style="">67.29</td><td class="muted" style="font-size:12px">727273949</td></tr><tr><td><code>b05</code></td><td>连乘幂内核</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="">0.321</td><td style="">0.347</td><td style="color:var(--accent);font-weight:700">0.200 ★</td><td style="">9.33</td><td class="muted" style="font-size:12px">53802088</td></tr><tr><td><code>b06</code></td><td>批量欧几里得 gcd</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="">0.387</td><td style="">0.392</td><td style="color:var(--accent);font-weight:700">0.348 ★</td><td style="">8.49</td><td class="muted" style="font-size:12px">74999</td></tr><tr><td><code>b07</code></td><td>迭代斐波那契</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="">3.28</td><td style="">3.29</td><td style="color:var(--accent);font-weight:700">2.47 ★</td><td style="">54.20</td><td class="muted" style="font-size:12px">918091266</td></tr><tr><td><code>b08</code></td><td>3n+1 总步数</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="">2.02</td><td style="">2.51</td><td style="color:var(--accent);font-weight:700">1.65 ★</td><td style="">97.31</td><td class="muted" style="font-size:12px">1834604</td></tr><tr><td><code>b09</code></td><td>二叉递归斐波那契</td><td class="muted" style="font-size:12.5px">递归调用</td><td style="">0.149</td><td style="">0.429</td><td style="color:var(--accent);font-weight:700">0.076 ★</td><td style="">9.75</td><td class="muted" style="font-size:12px">85971</td></tr><tr><td><code>b10</code></td><td>浅递归重复调用</td><td class="muted" style="font-size:12.5px">递归调用</td><td style="">3.46</td><td style="">4.85</td><td style="color:var(--accent);font-weight:700">0.165 ★</td><td style="">67.98</td><td class="muted" style="font-size:12px">16250000</td></tr><tr><td><code>b11</code></td><td>二叉递归树</td><td class="muted" style="font-size:12.5px">递归调用</td><td style="">0.063</td><td style="">2.84</td><td style="color:var(--accent);font-weight:700">0.013 ★</td><td style="">76.46</td><td class="muted" style="font-size:12px">1672200</td></tr><tr><td><code>b12</code></td><td>互递归奇偶判定</td><td class="muted" style="font-size:12.5px">递归调用</td><td style="color:var(--accent);font-weight:700">0.126 ★</td><td style="">0.460</td><td style="">0.141</td><td style="">21.54</td><td class="muted" style="font-size:12px">10000</td></tr><tr><td><code>b13</code></td><td>数组构建与顺序求和</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="color:var(--accent);font-weight:700">0.007 ★</td><td style="">0.010</td><td style="">0.014</td><td style="">0.215</td><td class="muted" style="font-size:12px">64994304</td></tr><tr><td><code>b14</code></td><td>伪随机索引读写</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="color:var(--accent);font-weight:700">3.30 ★</td><td style="">3.30</td><td style="">3.61</td><td style="">178.0</td><td class="muted" style="font-size:12px">643017769</td></tr><tr><td><code>b15</code></td><td>冒泡排序</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="">0.935</td><td style="color:var(--accent);font-weight:700">0.112 ★</td><td style="">0.652</td><td style="">8.25</td><td class="muted" style="font-size:12px">163968</td></tr><tr><td><code>b16</code></td><td>原地反转与归约</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="color:var(--accent);font-weight:700">0.701 ★</td><td style="">0.744</td><td style="">1.20</td><td style="">18.10</td><td class="muted" style="font-size:12px">725990386</td></tr><tr><td><code>b17</code></td><td>矩阵乘法</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="color:var(--accent);font-weight:700">0.146 ★</td><td style="">0.243</td><td style="">0.739</td><td style="">26.80</td><td class="muted" style="font-size:12px">405292314</td></tr><tr><td><code>b18</code></td><td>前缀和与归约</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="color:var(--accent);font-weight:700">2.76 ★</td><td style="">3.26</td><td style="">3.85</td><td style="">68.66</td><td class="muted" style="font-size:12px">402252332</td></tr><tr><td><code>b19</code></td><td>字符串逐字符扫描</td><td class="muted" style="font-size:12.5px">字符串</td><td style="color:var(--accent);font-weight:700">2.36 ★</td><td style="">2.37</td><td style="">2.41</td><td style="">45.62</td><td class="muted" style="font-size:12px">67440000</td></tr><tr><td><code>b20</code></td><td>字符串循环拼接</td><td class="muted" style="font-size:12.5px">字符串</td><td style="color:var(--accent);font-weight:700">0.005 ★<sup style="color:#f7768e;font-size:10px">†</sup></td><td style="">1.35</td><td style="">0.159</td><td style="">0.141</td><td class="muted" style="font-size:12px">124272</td></tr><tr><td><code>b21</code></td><td>子串查找 index_of</td><td class="muted" style="font-size:12.5px">字符串</td><td style="">0.333</td><td style="color:var(--accent);font-weight:700">0.133 ★</td><td style="">0.940</td><td style="">2.26</td><td class="muted" style="font-size:12px">305000</td></tr><tr><td><code>b22</code></td><td>拼接与定长子串</td><td class="muted" style="font-size:12.5px">字符串</td><td style="color:var(--accent);font-weight:700">0.329 ★</td><td style="">0.332</td><td style="">0.342</td><td style="">7.58</td><td class="muted" style="font-size:12px">10875000</td></tr><tr><td><code>b23</code></td><td>位计数 popcount</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="color:var(--accent);font-weight:700">0.576 ★</td><td style="">0.950</td><td style="">0.671</td><td style="">65.71</td><td class="muted" style="font-size:12px">815024</td></tr><tr><td><code>b24</code></td><td>xorshift32 累加</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="color:var(--accent);font-weight:700">3.29 ★</td><td style="">3.85</td><td style="">3.39</td><td style="">269.9</td><td class="muted" style="font-size:12px">292287901</td></tr><tr><td><code>b25</code></td><td>三路分支</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="">3.45</td><td style="">3.36</td><td style="color:var(--accent);font-weight:700">3.35 ★</td><td style="">80.94</td><td class="muted" style="font-size:12px">998659674</td></tr><tr><td><code>b26</code></td><td>嵌套循环异或</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="color:var(--accent);font-weight:700">3.29 ★</td><td style="">3.29</td><td style="">3.42</td><td style="">58.37</td><td class="muted" style="font-size:12px">511213536</td></tr><tr><td><code>b27</code></td><td>短路布尔求值</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="color:var(--accent);font-weight:700">3.35 ★</td><td style="">3.89</td><td style="">3.89</td><td style="">80.07</td><td class="muted" style="font-size:12px">1452381</td></tr><tr><td><code>b28</code></td><td>综合混合负载</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="color:var(--accent);font-weight:700">0.412 ★</td><td style="">0.416</td><td style="">0.423</td><td style="">15.87</td><td class="muted" style="font-size:12px">39361297</td></tr></tbody></table></div>
+  <div class="tw"><table class="bt" id="tbl-ratio"><thead><tr><th>#</th><th>维度</th><th>分类</th><th style="color:#7aa2f7;border-bottom:2px solid #7aa2f7">C</th><th style="color:#7dcfff;border-bottom:2px solid #7dcfff">Go</th><th style="color:#f7768e;border-bottom:2px solid #f7768e">Dial</th><th style="color:#e0af68;border-bottom:2px solid #e0af68">Python</th></tr></thead><tbody><tr><td><code>b01</code></td><td>整数累加依赖链</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.00×</td><td style="">1.13×</td><td style="">14.42×</td></tr><tr><td><code>b02</code></td><td>乘加取模</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.00×</td><td style="">1.10×</td><td style="">17.61×</td></tr><tr><td><code>b03</code></td><td>除法与取模混合</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.00×</td><td style="">1.10×</td><td style="">34.12×</td></tr><tr><td><code>b04</code></td><td>FMA 乘加链</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="">1.00×</td><td style="">1.16×</td><td style="color:var(--accent);font-weight:700">0.77× ★</td><td style="">18.93×</td></tr><tr><td><code>b05</code></td><td>连乘幂内核</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="">1.00×</td><td style="">1.08×</td><td style="color:var(--accent);font-weight:700">0.62× ★</td><td style="">29.03×</td></tr><tr><td><code>b06</code></td><td>批量欧几里得 gcd</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="">1.00×</td><td style="">1.01×</td><td style="color:var(--accent);font-weight:700">0.90× ★</td><td style="">21.92×</td></tr><tr><td><code>b07</code></td><td>迭代斐波那契</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="">1.00×</td><td style="">1.00×</td><td style="color:var(--accent);font-weight:700">0.75× ★</td><td style="">16.52×</td></tr><tr><td><code>b08</code></td><td>3n+1 总步数</td><td class="muted" style="font-size:12.5px">算术循环</td><td style="">1.00×</td><td style="">1.24×</td><td style="color:var(--accent);font-weight:700">0.81× ★</td><td style="">48.10×</td></tr><tr><td><code>b09</code></td><td>二叉递归斐波那契</td><td class="muted" style="font-size:12.5px">递归调用</td><td style="">1.00×</td><td style="">2.88×</td><td style="color:var(--accent);font-weight:700">0.51× ★</td><td style="">65.44×</td></tr><tr><td><code>b10</code></td><td>浅递归重复调用</td><td class="muted" style="font-size:12.5px">递归调用</td><td style="">1.00×</td><td style="">1.40×</td><td style="color:var(--accent);font-weight:700">0.05× ★</td><td style="">19.65×</td></tr><tr><td><code>b11</code></td><td>二叉递归树</td><td class="muted" style="font-size:12.5px">递归调用</td><td style="">1.00×</td><td style="">45.17×</td><td style="color:var(--accent);font-weight:700">0.20× ★</td><td style="">1215.58×</td></tr><tr><td><code>b12</code></td><td>互递归奇偶判定</td><td class="muted" style="font-size:12.5px">递归调用</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">3.66×</td><td style="">1.12×</td><td style="">171.63×</td></tr><tr><td><code>b13</code></td><td>数组构建与顺序求和</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.38×</td><td style="">1.91×</td><td style="">30.43×</td></tr><tr><td><code>b14</code></td><td>伪随机索引读写</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.00×</td><td style="">1.09×</td><td style="">54.02×</td></tr><tr><td><code>b15</code></td><td>冒泡排序</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="">1.00×</td><td style="color:var(--accent);font-weight:700">0.12× ★</td><td style="">0.70×</td><td style="">8.82×</td></tr><tr><td><code>b16</code></td><td>原地反转与归约</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.06×</td><td style="">1.72×</td><td style="">25.83×</td></tr><tr><td><code>b17</code></td><td>矩阵乘法</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.66×</td><td style="">5.05×</td><td style="">183.20×</td></tr><tr><td><code>b18</code></td><td>前缀和与归约</td><td class="muted" style="font-size:12.5px">数组内存</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.18×</td><td style="">1.39×</td><td style="">24.83×</td></tr><tr><td><code>b19</code></td><td>字符串逐字符扫描</td><td class="muted" style="font-size:12.5px">字符串</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.00×</td><td style="">1.02×</td><td style="">19.31×</td></tr><tr><td><code>b20</code></td><td>字符串循环拼接</td><td class="muted" style="font-size:12.5px">字符串</td><td style="color:var(--accent);font-weight:700">1.00× ★<sup style="color:#f7768e;font-size:10px">†</sup></td><td style="">270.42×</td><td style="">31.79×</td><td style="">28.17×</td></tr><tr><td><code>b21</code></td><td>子串查找 index_of</td><td class="muted" style="font-size:12.5px">字符串</td><td style="">1.00×</td><td style="color:var(--accent);font-weight:700">0.40× ★</td><td style="">2.83×</td><td style="">6.80×</td></tr><tr><td><code>b22</code></td><td>拼接与定长子串</td><td class="muted" style="font-size:12.5px">字符串</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.01×</td><td style="">1.04×</td><td style="">23.07×</td></tr><tr><td><code>b23</code></td><td>位计数 popcount</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.65×</td><td style="">1.16×</td><td style="">114.00×</td></tr><tr><td><code>b24</code></td><td>xorshift32 累加</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.17×</td><td style="">1.03×</td><td style="">82.01×</td></tr><tr><td><code>b25</code></td><td>三路分支</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="">1.00×</td><td style="">0.97×</td><td style="color:var(--accent);font-weight:700">0.97× ★</td><td style="">23.45×</td></tr><tr><td><code>b26</code></td><td>嵌套循环异或</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.00×</td><td style="">1.04×</td><td style="">17.77×</td></tr><tr><td><code>b27</code></td><td>短路布尔求值</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.16×</td><td style="">1.16×</td><td style="">23.90×</td></tr><tr><td><code>b28</code></td><td>综合混合负载</td><td class="muted" style="font-size:12.5px">位与控制流</td><td style="color:var(--accent);font-weight:700">1.00× ★</td><td style="">1.01×</td><td style="">1.03×</td><td style="">38.52×</td></tr></tbody></table></div>
+
+  <h2>4. 六维工程能力雷达图 <small>4 语言叠加，越靠外越优</small></h2>
+  <p class="bd">6 个轴的量纲不同，无法直接画在一起，因此先做<b>归一化</b>：
+  每个维度取 4 语言中的最优（最小）值为满分 100，其余语言得分 = 最优值 ÷ 自身值 × 100。
+  于是「越靠外 = 该维度越接近最优」。速度、内存、编译、启动、体积、源码行数六个方向
+  各自独立评分，Dial 的轮廓以加粗描边突出。</p>
+  <div class="radar-box">
+    <svg viewBox="0 0 640 600" width="100%" style="max-width:640px;height:auto;display:block;margin:0 auto" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="C / Python / Go / Dial 六维工程能力雷达图">
+<defs><style>.rg{stroke:#3a4152;stroke-width:1;fill:none}.rax{stroke:#3a4152;stroke-width:1}.rlb{fill:#c6cede;font-size:15px;font-weight:600}.rlv{fill:#7d8798;font-size:11px}.rpl{fill-opacity:0.10;stroke-width:2.2;stroke-linejoin:round}</style></defs>
+<rect x="0" y="0" width="640" height="600" fill="transparent"/>
+<polygon class="rg" points="320.0,247.5 365.5,273.8 365.5,326.2 320.0,352.5 274.5,326.2 274.5,273.8"/>
+<text class="rlv" x="324.0" y="245.5">25</text>
+<polygon class="rg" points="320.0,195.0 410.9,247.5 410.9,352.5 320.0,405.0 229.1,352.5 229.1,247.5"/>
+<text class="rlv" x="324.0" y="193.0">50</text>
+<polygon class="rg" points="320.0,142.5 456.4,221.2 456.4,378.8 320.0,457.5 183.6,378.8 183.6,221.2"/>
+<text class="rlv" x="324.0" y="140.5">75</text>
+<polygon class="rg" points="320.0,90.0 501.9,195.0 501.9,405.0 320.0,510.0 138.1,405.0 138.1,195.0"/>
+<text class="rlv" x="324.0" y="88.0">100</text>
+<line class="rax" x1="320" y1="300" x2="320.0" y2="90.0"/>
+<text class="rlb" x="320.0" y="61.4" text-anchor="middle">速度</text>
+<line class="rax" x1="320" y1="300" x2="501.9" y2="195.0"/>
+<text class="rlb" x="531.0" y="178.2" text-anchor="start">峰值内存</text>
+<line class="rax" x1="320" y1="300" x2="501.9" y2="405.0"/>
+<text class="rlb" x="531.0" y="421.8" text-anchor="start">编译耗时</text>
+<line class="rax" x1="320" y1="300" x2="320.0" y2="510.0"/>
+<text class="rlb" x="320.0" y="548.6" text-anchor="middle">启动耗时</text>
+<line class="rax" x1="320" y1="300" x2="138.1" y2="405.0"/>
+<text class="rlb" x="109.0" y="421.8" text-anchor="end">产物体积</text>
+<line class="rax" x1="320" y1="300" x2="138.1" y2="195.0"/>
+<text class="rlb" x="109.0" y="178.2" text-anchor="end">源码行数</text>
+<polygon class="rpl" points="320.0,96.2 501.9,195.0 344.2,314.0 320.0,504.4 261.9,333.5 138.1,195.0" fill="#7aa2f7" stroke="#7aa2f7" stroke-width="2.2"/>
+<circle cx="320.0" cy="96.2" r="3" fill="#7aa2f7" stroke="#0f1117" stroke-width="1"/>
+<circle cx="501.9" cy="195.0" r="3" fill="#7aa2f7" stroke="#0f1117" stroke-width="1"/>
+<circle cx="344.2" cy="314.0" r="3" fill="#7aa2f7" stroke="#0f1117" stroke-width="1"/>
+<circle cx="320.0" cy="504.4" r="3" fill="#7aa2f7" stroke="#0f1117" stroke-width="1"/>
+<circle cx="261.9" cy="333.5" r="3" fill="#7aa2f7" stroke="#0f1117" stroke-width="1"/>
+<circle cx="138.1" cy="195.0" r="3" fill="#7aa2f7" stroke="#0f1117" stroke-width="1"/>
+<polygon class="rpl" points="320.0,129.2 475.5,210.2 389.2,339.9 320.0,415.7 318.2,301.1 191.0,225.5" fill="#7dcfff" stroke="#7dcfff" stroke-width="2.2"/>
+<circle cx="320.0" cy="129.2" r="3" fill="#7dcfff" stroke="#0f1117" stroke-width="1"/>
+<circle cx="475.5" cy="210.2" r="3" fill="#7dcfff" stroke="#0f1117" stroke-width="1"/>
+<circle cx="389.2" cy="339.9" r="3" fill="#7dcfff" stroke="#0f1117" stroke-width="1"/>
+<circle cx="320.0" cy="415.7" r="3" fill="#7dcfff" stroke="#0f1117" stroke-width="1"/>
+<circle cx="318.2" cy="301.1" r="3" fill="#7dcfff" stroke="#0f1117" stroke-width="1"/>
+<circle cx="191.0" cy="225.5" r="3" fill="#7dcfff" stroke="#0f1117" stroke-width="1"/>
+<polygon class="rpl" points="320.0,293.8 347.7,284.0 501.9,405.0 320.0,309.4 138.1,405.0 140.8,196.6" fill="#e0af68" stroke="#e0af68" stroke-width="2.2"/>
+<circle cx="320.0" cy="293.8" r="3" fill="#e0af68" stroke="#0f1117" stroke-width="1"/>
+<circle cx="347.7" cy="284.0" r="3" fill="#e0af68" stroke="#0f1117" stroke-width="1"/>
+<circle cx="501.9" cy="405.0" r="3" fill="#e0af68" stroke="#0f1117" stroke-width="1"/>
+<circle cx="320.0" cy="309.4" r="3" fill="#e0af68" stroke="#0f1117" stroke-width="1"/>
+<circle cx="138.1" cy="405.0" r="3" fill="#e0af68" stroke="#0f1117" stroke-width="1"/>
+<circle cx="140.8" cy="196.6" r="3" fill="#e0af68" stroke="#0f1117" stroke-width="1"/>
+<polygon class="rpl" points="320.0,90.0 477.7,208.9 323.1,301.8 320.0,510.0 301.6,310.6 175.2,216.4" fill="#f7768e" stroke="#f7768e" stroke-width="3.0"/>
+<circle cx="320.0" cy="90.0" r="4" fill="#f7768e" stroke="#0f1117" stroke-width="1"/>
+<circle cx="477.7" cy="208.9" r="4" fill="#f7768e" stroke="#0f1117" stroke-width="1"/>
+<circle cx="323.1" cy="301.8" r="4" fill="#f7768e" stroke="#0f1117" stroke-width="1"/>
+<circle cx="320.0" cy="510.0" r="4" fill="#f7768e" stroke="#0f1117" stroke-width="1"/>
+<circle cx="301.6" cy="310.6" r="4" fill="#f7768e" stroke="#0f1117" stroke-width="1"/>
+<circle cx="175.2" cy="216.4" r="4" fill="#f7768e" stroke="#0f1117" stroke-width="1"/>
+</svg>
+    <div style="display:flex;flex-wrap:wrap;justify-content:center;margin:6px 0 0"><span style="display:inline-flex;align-items:center;gap:7px;margin:4px 16px 4px 0"><span style="width:16px;height:16px;border-radius:4px;background:#7aa2f7;border:1px solid #7aa2f7;display:inline-block"></span><b style="color:var(--fg)">C</b></span><span style="display:inline-flex;align-items:center;gap:7px;margin:4px 16px 4px 0"><span style="width:16px;height:16px;border-radius:4px;background:#7dcfff;border:1px solid #7dcfff;display:inline-block"></span><b style="color:var(--fg)">Go</b></span><span style="display:inline-flex;align-items:center;gap:7px;margin:4px 16px 4px 0"><span style="width:16px;height:16px;border-radius:4px;background:#f7768e;border:1px solid #f7768e;display:inline-block"></span><b style="color:var(--fg)">Dial</b></span><span style="display:inline-flex;align-items:center;gap:7px;margin:4px 16px 4px 0"><span style="width:16px;height:16px;border-radius:4px;background:#e0af68;border:1px solid #e0af68;display:inline-block"></span><b style="color:var(--fg)">Python</b></span></div>
+  </div>
+  <div class="tw"><table class="bt"><thead><tr><th>语言 / 轴</th><th>速度</th><th>峰值内存</th><th>编译耗时</th><th>启动耗时</th><th>产物体积</th><th>源码行数</th></tr></thead><tbody><tr><td style="color:#7aa2f7;font-weight:700">C</td><td style="color:#7aa2f7;font-weight:600">97</td><td style="color:#7aa2f7;font-weight:600">100</td><td style="color:#7aa2f7;font-weight:600">13</td><td style="color:#7aa2f7;font-weight:600">97</td><td style="color:#7aa2f7;font-weight:600">32</td><td style="color:#7aa2f7;font-weight:600">100</td></tr><tr><td style="color:#7dcfff;font-weight:700">Go</td><td style="color:#7dcfff;font-weight:600">81</td><td style="color:#7dcfff;font-weight:600">85</td><td style="color:#7dcfff;font-weight:600">38</td><td style="color:#7dcfff;font-weight:600">55</td><td style="color:#7dcfff;font-weight:600">0</td><td style="color:#7dcfff;font-weight:600">71</td></tr><tr><td style="color:#f7768e;font-weight:700">Dial</td><td style="color:#f7768e;font-weight:600">100</td><td style="color:#f7768e;font-weight:600">87</td><td style="color:#f7768e;font-weight:600">2</td><td style="color:#f7768e;font-weight:600">100</td><td style="color:#f7768e;font-weight:600">10</td><td style="color:#f7768e;font-weight:600">80</td></tr><tr><td style="color:#e0af68;font-weight:700">Python</td><td style="color:#e0af68;font-weight:600">3</td><td style="color:#e0af68;font-weight:600">15</td><td style="color:#e0af68;font-weight:600">100</td><td style="color:#e0af68;font-weight:600">4</td><td style="color:#e0af68;font-weight:600">100</td><td style="color:#e0af68;font-weight:600">99</td></tr></tbody></table></div>
+  <div class="note">
+    <b>读图提示：</b>得分是「相对本组 4 语言最优者的百分比」，不是绝对性能分；
+    例如编译耗时轴上 C 的编译远比 Dial 的 LLVM + LTO 快，Dial 在该轴得分就低，
+    但速度轴上 Dial 与 C 接近原生。六边形<b>面积</b>可作综合直觉，但各轴权重相等、
+    不代表任何特定场景下的真实取舍，请结合第 2 节的绝对值一起看。
+  </div>
+
+  <h2>5. 复现 <small>本地一条命令</small></h2>
+  <div class="note" style="border-left-color:var(--accent-2);font-family:ui-monospace,monospace">
+    # 编译 dialc 后采集（gcc / go / python3 需可用）<br>
+    python3 tools/bench_harness.py --dialc target/release/dialc<br>
+    # 由 bench/data.json 生成本页<br>
+    python3 tools/build_bench_web.py<br>
+    <br>
+    # CI 每次 push 也会跑采集器并把最新 bench/data.json 与网页作为 artifact 上传
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>Dial 性能基准 · 数据由 <code>tools/bench_harness.py</code> 实测生成，
+      页面由 <code>tools/build_bench_web.py</code> 生成</span>
+    <span><a href="index.html">首页</a> ·
+      <a href="spec.html">语言规范</a> ·
+      <a href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

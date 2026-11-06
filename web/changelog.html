@@ -16,6 +16,7 @@
       <a href="spec.html">语言规范</a>
       <a href="changelog.html" class="active">更新日志</a>
       <a href="cve.html">安全公告</a>
+      <a href="bench.html">性能基准</a>
       <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
       <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
     </nav>
@@ -261,8 +262,9 @@
 <code>[v1.00]</code> ~ <code>[v1.03]</code> 是「达成 v1.0」过程中的分版记录（见下方里程碑大标题）。
 <code>[v1.04]</code> 是<strong>里程碑达成之后的第一个增量分版</strong>，不归入上面那批分版记录。
 按本轮交付约定：<strong>只做本地提交，不推送 GitHub、不打 tag</strong>。
-本版后续还并入了「语言层动态链接」「工程工具链增补」与「DWARF 调试信息（-g）」
-（见 <a href="README.md#34-v104-增补工程工具链并入-v104版本不变">README §34</a> 与 README §35），
+本版后续还并入了「语言层动态链接」「工程工具链增补」「DWARF 调试信息（-g）」
+与「性能基准（4 语言 × 28 维）」
+（见 <a href="README.md#34-v104-增补工程工具链并入-v104版本不变">README §34</a>、§35、§36），
 均不新增分版记录，编译器版本 <code>1.4.0</code> 与 <code>STDLIB_ABI 5</code> 保持不变。</p>
 </blockquote>
 <h3 id="added">Added</h3>
@@ -303,6 +305,21 @@
   标量（<code>int</code> / <code>float</code> / <code>bool</code> / <code>char</code> / <code>byte</code>）给出精确 DWARF 宽度与编码；复合类型
   在 IR 里本就是不透明 <code>i8*</code>，如实映射为指向 <code>dial_object</code> 的指针，不伪装布局。
   不带 <code>-g</code> 时完全不创建 DIBuilder，零开销。</li>
+<li><strong>性能基准（4 语言 × 28 维，见 README §36）</strong>：<code>bench/</code> 下新增 C / Go / Python / Dial
+  四份等价实现，28 个纯整数微基准（算术/递归/数组/字符串/位与控制流五类），
+  每语言每项产出<strong>完全相同的校验和</strong>（112/112）作为等价计算的正确性锚点。</li>
+<li><code>tools/bench_harness.py</code>：外部统一墙钟计时 + 单次进程内 <code>repeat</code> 自校准
+    （摊薄启动开销）+ 扣除 <code>noop</code> 基线，给出<strong>绝对值</strong>（单次纯耗时 ms）与
+    <strong>绝对比值</strong>（C = 1.00× 基准），并采集 6 大工程维度（速度 / 峰值内存 /
+    编译耗时 / 启动耗时 / 产物体积 / 源码行数），产出 <code>bench/data.json</code>。</li>
+<li><code>tools/build_bench_web.py</code>：由数据生成独立静态页 <code>web/bench.html</code>——
+    绝对值表 + 比值表 + 六维表 + 底部<strong>六维雷达图</strong>（手写 SVG，4 语言叠加，
+    按各维最优语言归一化，越靠外越优），无外部 CDN / JS 依赖、离线可看。
+    触及计时下限（或被编译器常量折叠）的项以 <code>†</code> 诚实标注。</li>
+<li><code>tools/check_bench_data.py</code>：校验 28×4 数据完整、校验和与真值一致、
+    比值基准、6 维 6 轴，及网页与数据同步（CI 与本地共用）。</li>
+<li>官网导航 / 首页 CTA / 安全公告页均加入口；<code>build_web.py</code> 不生成 <code>bench.html</code>，
+    不影响官网产物同步校验。</li>
 </ul>
 <h3 id="changed">Changed</h3>
 <ul>
@@ -364,6 +381,12 @@
   <code>bt</code> 显示源码行；无 <code>-g</code> 不产 Dial 调试符号的负向断言、<code>-g --fast</code> 兼容断言。
   环境缺 <code>gdb</code> / <code>llvm-dwarfdump</code> 时对应子项明确跳过（⏭️）而非误报失败，
   保证 CI 不被工具缺失阻断。回归脚本由 <strong>A–Q 扩为 A–R</strong>。</li>
+<li><strong>性能基准与 CI 集成（v1.04 增补）</strong>：<code>build-linux</code> 作业新增 Go 安装与
+  「性能基准采集」步骤，实跑 4 语言编译 + 28 项计时 + 112 校验和一致性，
+  生成 CI 机器上的数据/网页并经 <code>check_bench_data.py</code> 校验，同时验证仓库内
+  交付快照（<code>bench/data.json</code> + <code>web/bench.html</code>）配套；产物上传为
+  <code>bench-4lang-28dim</code> artifact。CI 只写 <code>/tmp</code> 再上传，绝不回写 <code>web/bench.html</code>，
+  避免机器相关的实测数据让官网同步校验误报。</li>
 </ul>
 <hr />
 <h2 id="v10-里程碑--分版记录v100--v103">[v1.0 里程碑] — 分版记录（v1.00 ~ v1.03）</h2>

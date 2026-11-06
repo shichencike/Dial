@@ -1,0 +1,860 @@
+{
+  "meta": {
+    "generated": "2026-11-06T22:47:49+08:00",
+    "title": "Dial 性能基准：C / Python / Go / Dial 对比",
+    "task_count": 28,
+    "langs": [
+      "C",
+      "Go",
+      "Dial",
+      "Python"
+    ],
+    "colors": {
+      "C": "#7aa2f7",
+      "Go": "#7dcfff",
+      "Dial": "#f7768e",
+      "Python": "#e0af68"
+    },
+    "host": {
+      "os": "Linux 6.6.117-45.11.6.tl4.x86_64 (x86_64)",
+      "cpu": "AMD EPYC 9K84 96-Core Processor",
+      "python": "Python 3.11.1",
+      "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0",
+      "go": "go version go1.21.4 linux/amd64",
+      "dialc": "dialc 1.4.0"
+    },
+    "flags": {
+      "C": "gcc -O2",
+      "Go": "go build（默认优化）",
+      "Dial": "dialc build --fast（O3 + LTO + 向量化）",
+      "Python": "CPython 解释执行（py_compile 记为编译耗时）"
+    },
+    "target_ms": 120.0,
+    "quick": false,
+    "baseline": "C = 1.00×（绝对比值 = 该语言耗时 / C 耗时）",
+    "method": "外部统一墙钟计时；单次进程内重复 N 次自校准以摊薄启动开销；扣除 noop 启动基线后除以 N 得单次纯计算耗时；极快项或被编译器常量折叠成空操作的项统一钳到 5µs 计时下限（如 C 的 b20 字符串拼接可能被 -O2 折叠）；28 项 × 4 语言校验和逐项一致作为正确性锚点；雷达图 6 轴按各维最优语言归一化到 100（越小越好 → 越靠外越优）。",
+    "floor_ms": 0.005
+  },
+  "benchmarks": [
+    {
+      "id": "b01",
+      "name": "整数累加依赖链",
+      "category": "算术循环",
+      "description": "100 万次 (s+i) mod M，串行依赖链",
+      "checksum": 999496507,
+      "abs_ms": {
+        "C": 3.284068,
+        "Go": 3.295501,
+        "Dial": 3.701701,
+        "Python": 47.356354
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0035,
+        "Dial": 1.1272,
+        "Python": 14.42
+      },
+      "reps": {
+        "C": 36,
+        "Go": 36,
+        "Dial": 32,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b02",
+      "name": "乘加取模",
+      "category": "算术循环",
+      "description": "10 万次 (s*31+i) mod M",
+      "checksum": 139598823,
+      "abs_ms": {
+        "C": 0.382953,
+        "Go": 0.384345,
+        "Dial": 0.419358,
+        "Python": 6.74457
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0036,
+        "Dial": 1.0951,
+        "Python": 17.612
+      },
+      "reps": {
+        "C": 310,
+        "Go": 308,
+        "Dial": 284,
+        "Python": 14
+      }
+    },
+    {
+      "id": "b03",
+      "name": "除法与取模混合",
+      "category": "算术循环",
+      "description": "10 万次整除 + 取模累加",
+      "checksum": 235528676,
+      "abs_ms": {
+        "C": 0.355912,
+        "Go": 0.357177,
+        "Dial": 0.39069,
+        "Python": 12.141976
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0036,
+        "Dial": 1.0977,
+        "Python": 34.1151
+      },
+      "reps": {
+        "C": 334,
+        "Go": 333,
+        "Dial": 301,
+        "Python": 8
+      }
+    },
+    {
+      "id": "b04",
+      "name": "FMA 乘加链",
+      "category": "算术循环",
+      "description": "100 万次 (s*3+7) mod M",
+      "checksum": 727273949,
+      "abs_ms": {
+        "C": 3.554157,
+        "Go": 4.111076,
+        "Dial": 2.737112,
+        "Python": 67.294451
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.1567,
+        "Dial": 0.7701,
+        "Python": 18.934
+      },
+      "reps": {
+        "C": 33,
+        "Go": 28,
+        "Dial": 43,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b05",
+      "name": "连乘幂内核",
+      "category": "算术循环",
+      "description": "2 万组 × 8 次模乘",
+      "checksum": 53802088,
+      "abs_ms": {
+        "C": 0.321236,
+        "Go": 0.34733,
+        "Dial": 0.200434,
+        "Python": 9.32606
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0812,
+        "Dial": 0.6239,
+        "Python": 29.0318
+      },
+      "reps": {
+        "C": 368,
+        "Go": 341,
+        "Dial": 579,
+        "Python": 10
+      }
+    },
+    {
+      "id": "b06",
+      "name": "批量欧几里得 gcd",
+      "category": "算术循环",
+      "description": "3 万组 gcd 累加",
+      "checksum": 74999,
+      "abs_ms": {
+        "C": 0.387342,
+        "Go": 0.391586,
+        "Dial": 0.347801,
+        "Python": 8.490195
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.011,
+        "Dial": 0.8979,
+        "Python": 21.9191
+      },
+      "reps": {
+        "C": 305,
+        "Go": 302,
+        "Dial": 338,
+        "Python": 11
+      }
+    },
+    {
+      "id": "b07",
+      "name": "迭代斐波那契",
+      "category": "算术循环",
+      "description": "100 万次迭代 fib mod M",
+      "checksum": 918091266,
+      "abs_ms": {
+        "C": 3.280014,
+        "Go": 3.285395,
+        "Dial": 2.470501,
+        "Python": 54.201153
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0016,
+        "Dial": 0.7532,
+        "Python": 16.5247
+      },
+      "reps": {
+        "C": 36,
+        "Go": 36,
+        "Dial": 48,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b08",
+      "name": "3n+1 总步数",
+      "category": "算术循环",
+      "description": "1..20000 的 Collatz 步数和",
+      "checksum": 1834604,
+      "abs_ms": {
+        "C": 2.022997,
+        "Go": 2.512926,
+        "Dial": 1.647791,
+        "Python": 97.312425
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.2422,
+        "Dial": 0.8145,
+        "Python": 48.1031
+      },
+      "reps": {
+        "C": 58,
+        "Go": 46,
+        "Dial": 72,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b09",
+      "name": "二叉递归斐波那契",
+      "category": "递归调用",
+      "description": "fib(23) 递归树 × 3",
+      "checksum": 85971,
+      "abs_ms": {
+        "C": 0.148972,
+        "Go": 0.428905,
+        "Dial": 0.076341,
+        "Python": 9.749374
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 2.8791,
+        "Dial": 0.5125,
+        "Python": 65.4443
+      },
+      "reps": {
+        "C": 772,
+        "Go": 274,
+        "Dial": 1539,
+        "Python": 9
+      }
+    },
+    {
+      "id": "b10",
+      "name": "浅递归重复调用",
+      "category": "递归调用",
+      "description": "深度 25 递归求和 × 5 万",
+      "checksum": 16250000,
+      "abs_ms": {
+        "C": 3.459449,
+        "Go": 4.852544,
+        "Dial": 0.165148,
+        "Python": 67.981897
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.4027,
+        "Dial": 0.0477,
+        "Python": 19.6511
+      },
+      "reps": {
+        "C": 34,
+        "Go": 23,
+        "Dial": 720,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b11",
+      "name": "二叉递归树",
+      "category": "递归调用",
+      "description": "tree(18) 二叉递归 × 200",
+      "checksum": 1672200,
+      "abs_ms": {
+        "C": 0.062899,
+        "Go": 2.84121,
+        "Dial": 0.012713,
+        "Python": 76.458597
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 45.171,
+        "Dial": 0.2021,
+        "Python": 1215.5773
+      },
+      "reps": {
+        "C": 1750,
+        "Go": 38,
+        "Dial": 9364,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b12",
+      "name": "互递归奇偶判定",
+      "category": "递归调用",
+      "description": "even/odd 互递归 × 2 万",
+      "checksum": 10000,
+      "abs_ms": {
+        "C": 0.125531,
+        "Go": 0.459694,
+        "Dial": 0.14083,
+        "Python": 21.544941
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 3.662,
+        "Dial": 1.1219,
+        "Python": 171.6304
+      },
+      "reps": {
+        "C": 953,
+        "Go": 256,
+        "Dial": 844,
+        "Python": 4
+      }
+    },
+    {
+      "id": "b13",
+      "name": "数组构建与顺序求和",
+      "category": "数组内存",
+      "description": "2048 元素 push + 顺序归约",
+      "checksum": 64994304,
+      "abs_ms": {
+        "C": 0.007077,
+        "Go": 0.009755,
+        "Dial": 0.013532,
+        "Python": 0.215374
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.3784,
+        "Dial": 1.9121,
+        "Python": 30.433
+      },
+      "reps": {
+        "C": 16827,
+        "Go": 12097,
+        "Dial": 8722,
+        "Python": 518
+      }
+    },
+    {
+      "id": "b14",
+      "name": "伪随机索引读写",
+      "category": "数组内存",
+      "description": "100 万次 LCG 索引读写",
+      "checksum": 643017769,
+      "abs_ms": {
+        "C": 3.2953,
+        "Go": 3.298777,
+        "Dial": 3.606039,
+        "Python": 178.009249
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0011,
+        "Dial": 1.0943,
+        "Python": 54.0191
+      },
+      "reps": {
+        "C": 36,
+        "Go": 35,
+        "Dial": 32,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b15",
+      "name": "冒泡排序",
+      "category": "数组内存",
+      "description": "512 元素 O(n²) 排序",
+      "checksum": 163968,
+      "abs_ms": {
+        "C": 0.934685,
+        "Go": 0.111826,
+        "Dial": 0.65249,
+        "Python": 8.245992
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 0.1196,
+        "Dial": 0.6981,
+        "Python": 8.8222
+      },
+      "reps": {
+        "C": 127,
+        "Go": 1066,
+        "Dial": 182,
+        "Python": 12
+      }
+    },
+    {
+      "id": "b16",
+      "name": "原地反转与归约",
+      "category": "数组内存",
+      "description": "2048 元素反转 × 100 轮",
+      "checksum": 725990386,
+      "abs_ms": {
+        "C": 0.700528,
+        "Go": 0.743562,
+        "Dial": 1.201626,
+        "Python": 18.097575
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0614,
+        "Dial": 1.7153,
+        "Python": 25.8342
+      },
+      "reps": {
+        "C": 169,
+        "Go": 161,
+        "Dial": 98,
+        "Python": 5
+      }
+    },
+    {
+      "id": "b17",
+      "name": "矩阵乘法",
+      "category": "数组内存",
+      "description": "64×64 三重循环乘加",
+      "checksum": 405292314,
+      "abs_ms": {
+        "C": 0.146296,
+        "Go": 0.243343,
+        "Dial": 0.739034,
+        "Python": 26.801509
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.6634,
+        "Dial": 5.0516,
+        "Python": 183.2006
+      },
+      "reps": {
+        "C": 815,
+        "Go": 488,
+        "Dial": 160,
+        "Python": 3
+      }
+    },
+    {
+      "id": "b18",
+      "name": "前缀和与归约",
+      "category": "数组内存",
+      "description": "2048 元素前缀和 × 200 轮",
+      "checksum": 402252332,
+      "abs_ms": {
+        "C": 2.764929,
+        "Go": 3.260809,
+        "Dial": 3.849036,
+        "Python": 68.657805
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.1793,
+        "Dial": 1.3921,
+        "Python": 24.8317
+      },
+      "reps": {
+        "C": 42,
+        "Go": 36,
+        "Dial": 30,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b19",
+      "name": "字符串逐字符扫描",
+      "category": "字符串",
+      "description": "36 字符串 × 2 万轮码点累加",
+      "checksum": 67440000,
+      "abs_ms": {
+        "C": 2.362994,
+        "Go": 2.365882,
+        "Dial": 2.407046,
+        "Python": 45.619276
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0012,
+        "Dial": 1.0186,
+        "Python": 19.3057
+      },
+      "reps": {
+        "C": 50,
+        "Go": 50,
+        "Dial": 49,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b20",
+      "name": "字符串循环拼接",
+      "category": "字符串",
+      "description": "4000 次 + 拼接",
+      "checksum": 124272,
+      "abs_ms": {
+        "C": 0.005,
+        "Go": 1.352116,
+        "Dial": 0.158948,
+        "Python": 0.140861
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 270.4232,
+        "Dial": 31.7896,
+        "Python": 28.1722
+      },
+      "reps": {
+        "C": 2000000,
+        "Go": 75,
+        "Dial": 746,
+        "Python": 742
+      }
+    },
+    {
+      "id": "b21",
+      "name": "子串查找 index_of",
+      "category": "字符串",
+      "description": "4 个子串 × 2 万轮查找",
+      "checksum": 305000,
+      "abs_ms": {
+        "C": 0.332545,
+        "Go": 0.132522,
+        "Dial": 0.940253,
+        "Python": 2.261799
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 0.3985,
+        "Dial": 2.8274,
+        "Python": 6.8015
+      },
+      "reps": {
+        "C": 355,
+        "Go": 881,
+        "Dial": 116,
+        "Python": 45
+      }
+    },
+    {
+      "id": "b22",
+      "name": "拼接与定长子串",
+      "category": "字符串",
+      "description": "substring + get × 1 万轮",
+      "checksum": 10875000,
+      "abs_ms": {
+        "C": 0.328545,
+        "Go": 0.331688,
+        "Dial": 0.341998,
+        "Python": 7.578106
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0096,
+        "Dial": 1.0409,
+        "Python": 23.0657
+      },
+      "reps": {
+        "C": 362,
+        "Go": 357,
+        "Dial": 342,
+        "Python": 13
+      }
+    },
+    {
+      "id": "b23",
+      "name": "位计数 popcount",
+      "category": "位与控制流",
+      "description": "10 万个数逐位计数",
+      "checksum": 815024,
+      "abs_ms": {
+        "C": 0.576421,
+        "Go": 0.950095,
+        "Dial": 0.670699,
+        "Python": 65.710178
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.6483,
+        "Dial": 1.1636,
+        "Python": 113.9968
+      },
+      "reps": {
+        "C": 207,
+        "Go": 124,
+        "Dial": 176,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b24",
+      "name": "xorshift32 累加",
+      "category": "位与控制流",
+      "description": "100 万次 xorshift 与异或",
+      "checksum": 292287901,
+      "abs_ms": {
+        "C": 3.291153,
+        "Go": 3.84802,
+        "Dial": 3.392147,
+        "Python": 269.898274
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.1692,
+        "Dial": 1.0307,
+        "Python": 82.0072
+      },
+      "reps": {
+        "C": 35,
+        "Go": 30,
+        "Dial": 35,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b25",
+      "name": "三路分支",
+      "category": "位与控制流",
+      "description": "100 万次 if/elif/else",
+      "checksum": 998659674,
+      "abs_ms": {
+        "C": 3.451234,
+        "Go": 3.359688,
+        "Dial": 3.353705,
+        "Python": 80.943067
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 0.9735,
+        "Dial": 0.9717,
+        "Python": 23.4534
+      },
+      "reps": {
+        "C": 34,
+        "Go": 35,
+        "Dial": 35,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b26",
+      "name": "嵌套循环异或",
+      "category": "位与控制流",
+      "description": "1000×1000 异或累加",
+      "checksum": 511213536,
+      "abs_ms": {
+        "C": 3.285105,
+        "Go": 3.293274,
+        "Dial": 3.416717,
+        "Python": 58.368288
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0025,
+        "Dial": 1.0401,
+        "Python": 17.7676
+      },
+      "reps": {
+        "C": 36,
+        "Go": 35,
+        "Dial": 34,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b27",
+      "name": "短路布尔求值",
+      "category": "位与控制流",
+      "description": "100 万次 and/or 短路",
+      "checksum": 1452381,
+      "abs_ms": {
+        "C": 3.350412,
+        "Go": 3.894812,
+        "Dial": 3.893137,
+        "Python": 80.068232
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.1625,
+        "Dial": 1.162,
+        "Python": 23.898
+      },
+      "reps": {
+        "C": 35,
+        "Go": 30,
+        "Dial": 30,
+        "Python": 1
+      }
+    },
+    {
+      "id": "b28",
+      "name": "综合混合负载",
+      "category": "位与控制流",
+      "description": "数组读写 + 算术 + 位运算",
+      "checksum": 39361297,
+      "abs_ms": {
+        "C": 0.411967,
+        "Go": 0.416159,
+        "Dial": 0.423285,
+        "Python": 15.86991
+      },
+      "ratio": {
+        "C": 1.0,
+        "Go": 1.0102,
+        "Dial": 1.0275,
+        "Python": 38.5223
+      },
+      "reps": {
+        "C": 287,
+        "Go": 284,
+        "Dial": 257,
+        "Python": 6
+      }
+    }
+  ],
+  "dimensions": {
+    "speed": {
+      "label": "速度",
+      "unit": "ms（28 项单次耗时之和）",
+      "abs": {
+        "C": 42.6297,
+        "Go": 50.88,
+        "Dial": 41.3701,
+        "Python": 1405.0875
+      },
+      "note": "越小越快；28 项纯计算耗时之和"
+    },
+    "memory": {
+      "label": "峰值内存",
+      "unit": "KB",
+      "abs": {
+        "C": 1648,
+        "Go": 1928,
+        "Dial": 1900,
+        "Python": 10832
+      },
+      "note": "b17 负载的峰值 RSS，含语言运行时基线"
+    },
+    "compile": {
+      "label": "编译耗时",
+      "unit": "ms",
+      "abs": {
+        "C": 215.13,
+        "Go": 75.202,
+        "Dial": 1692.672,
+        "Python": 28.603
+      },
+      "note": "Python 为 py_compile 生成字节码耗时"
+    },
+    "startup": {
+      "label": "启动耗时",
+      "unit": "ms",
+      "abs": {
+        "C": 0.6274,
+        "Go": 1.1089,
+        "Dial": 0.6108,
+        "Python": 13.6513
+      },
+      "note": "noop 进程墙钟（含解释器/运行时初始化）"
+    },
+    "binary": {
+      "label": "产物体积",
+      "unit": "KB",
+      "abs": {
+        "C": 24.76,
+        "Go": 1941.72,
+        "Dial": 78.03,
+        "Python": 7.91
+      },
+      "note": "编译型为可执行文件字节，Python 为源码字节（解释型无二进制）"
+    },
+    "loc": {
+      "label": "源码行数",
+      "unit": "行",
+      "abs": {
+        "C": 266,
+        "Go": 375,
+        "Dial": 334,
+        "Python": 270
+      },
+      "note": "实现 28 项的有效代码行（去空行与整行注释）"
+    }
+  },
+  "radar": {
+    "axes": [
+      "速度",
+      "峰值内存",
+      "编译耗时",
+      "启动耗时",
+      "产物体积",
+      "源码行数"
+    ],
+    "keys": [
+      "speed",
+      "memory",
+      "compile",
+      "startup",
+      "binary",
+      "loc"
+    ],
+    "score": {
+      "C": [
+        97.05,
+        100.0,
+        13.3,
+        97.35,
+        31.95,
+        100.0
+      ],
+      "Go": [
+        81.31,
+        85.48,
+        38.03,
+        55.08,
+        0.41,
+        70.93
+      ],
+      "Dial": [
+        100.0,
+        86.74,
+        1.69,
+        100.0,
+        10.14,
+        79.64
+      ],
+      "Python": [
+        2.94,
+        15.21,
+        100.0,
+        4.47,
+        100.0,
+        98.52
+      ]
+    }
+  }
+}
