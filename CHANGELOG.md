@@ -28,7 +28,8 @@
 > `[v1.00]` ~ `[v1.03]` 是「达成 v1.0」过程中的分版记录（见下方里程碑大标题）。
 > `[v1.04]` 是**里程碑达成之后的第一个增量分版**，不归入上面那批分版记录。
 > 按本轮交付约定：**只做本地提交，不推送 GitHub、不打 tag**。
-> 本版后续还并入了「语言层动态链接」与「工程工具链增补」（见 [README §34](README.md#34-v104-增补工程工具链并入-v104版本不变)），
+> 本版后续还并入了「语言层动态链接」「工程工具链增补」与「DWARF 调试信息（-g）」
+> （见 [README §34](README.md#34-v104-增补工程工具链并入-v104版本不变) 与 README §35），
 > 均不新增分版记录，编译器版本 `1.4.0` 与 `STDLIB_ABI 5` 保持不变。
 
 ### Added
@@ -60,6 +61,15 @@
   - **`dialc pack` + `dial.toml`**：通用产包命令，校验 `.diali` 与静态库 ar 魔数、
     生成 `manifest.txt` 与逐文件 SHA256、打包后就地自检；`dialc new` 生成项目骨架，
     `list` / `uninstall` 补齐包管理。`tools/make_stdlib_pkg.py` 保留给 CI 的三平台 stdlib 包。
+- **DWARF 调试信息（`-g` / `--debug-info`，见 README §35）**：`dialc build / run` 加 `-g`
+  即为 Dial 代码生成标准 DWARF——`DW_TAG_compile_unit` / `DW_TAG_subprogram`（每个 Dial 函数）/
+  `DW_TAG_formal_parameter`（形参）/ `DW_TAG_variable` + `llvm.dbg.declare`（`Stmt::VarDecl`
+  局部变量）/ `.debug_line` 行表（`gen_stmt` 的语句行列）。GDB / LLDB 因此能按 `.dial`
+  源码行下断点、`print counter` 读标量值、`info args` 看形参、`bt` / `list` 直接指向
+  Dial 源码，不需要调试器插件。`DIFile` 用绝对路径，`finalize()` 在 `module.verify()` 前调用。
+  标量（`int` / `float` / `bool` / `char` / `byte`）给出精确 DWARF 宽度与编码；复合类型
+  在 IR 里本就是不透明 `i8*`，如实映射为指向 `dial_object` 的指针，不伪装布局。
+  不带 `-g` 时完全不创建 DIBuilder，零开销。
 
 ### Changed
 
@@ -81,6 +91,10 @@
 - **Fail-Fast 收紧（A3）**：旧版 `dialc build a.dial b.dial` 打印「未知参数」后
   **仍以 `rc=0` 产出 a 的可执行文件**（多余输入被静默吞掉）；现在任何未知参数一律
   非零退出，多出来的是 `.dial` 时附带 §34.2 本地模块写法的指引。同一规则推广到全部新子命令。
+- **`-g` 隐含 O0**：`emit_object()` 在 `debug_info` 且非 `--fast` 时用
+  `OptimizationLevel::None`，避免默认 O2 把栈槽变量优化成 `<optimized out>` 而让
+  `print var_name` 失效；`-g --fast` 仍走用户明确要求的 O3 + SIMD/LTO，并打印兼容提示。
+  安全等级、运行期检查、C Runtime 注入与 `.dialpkg` 契约均不变。
 
 ### Fixed
 
@@ -110,7 +124,13 @@
 - 新增 **Q 组（工程工具链专项）**：全部新子命令、A3 非零退出且不产物、`fmt` 幂等与
   token 流不变、`test` 通过 / 失败 / 过滤、多文件 import 合并与循环 / 冲突 / 缺失诊断、
   `new → pack → install → import → uninstall` 全链路闭环、`pack` 拒绝动态库与缺字段、
-  A7 运行时位置断言。回归脚本由 **A–P 扩为 A–Q**。
+  A7 运行时位置断言。回归脚本由 **A–P 扩为 A–Q**（后续由 R 组扩为 A–R，见下）。
+- 新增 **R 组（DWARF 调试信息专项）**：`llvm-dwarfdump` 核对 `.debug_info` / `.debug_line`
+  段与 `add` / `main` / `a` / `b` / `sum` / `counter` / `note` 七个 Dial 名字、行表含
+  `.dial` 源文件；真实 `gdb -batch` 在 `.dial:9` 断点断言 `print counter = 42`、
+  `bt` 显示源码行；无 `-g` 不产 Dial 调试符号的负向断言、`-g --fast` 兼容断言。
+  环境缺 `gdb` / `llvm-dwarfdump` 时对应子项明确跳过（⏭️）而非误报失败，
+  保证 CI 不被工具缺失阻断。回归脚本由 **A–Q 扩为 A–R**。
 
 ---
 

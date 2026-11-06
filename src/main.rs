@@ -1,8 +1,8 @@
 //! dialc 编译器入口（v0.3）。
 //!
 //! 用法：
-//!   dialc build <源文件.dial> [-o 可执行文件] [--no-link]
-//!   dialc run   <源文件.dial> [-o 可执行文件]
+//!   dialc build <源文件.dial> [-o 可执行文件] [-g] [--no-link]
+//!   dialc run   <源文件.dial> [-o 可执行文件] [-g]
 //!   dialc install <包.dialpkg>
 //!   dialc version | --version | -V      （显示版本号）
 //!   dialc lsp              （编辑器用的 Language Server，走 stdio，不由人手敲）
@@ -192,6 +192,7 @@ fn main() {
     let mut no_link = false;
     let mut safety = SafetyMode::Debug; // 默认：崩溃保护全开
     let mut pgo = false; // 剖析引导优化（--fast 下的终极杀器）
+    let mut debug_info = false; // -g：生成标准 DWARF 调试信息
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -228,6 +229,11 @@ fn main() {
             }
             "--pgo" => {
                 pgo = true;
+                i += 1;
+            }
+            // -g：标准 DWARF（GDB/LLDB 可按源码行断点、按 Dial 变量名 print）
+            "-g" | "--debug-info" => {
+                debug_info = true;
                 i += 1;
             }
             "-o" => {
@@ -327,11 +333,15 @@ fn main() {
             std::process::exit(1);
         }
     }
+    if debug_info && fast {
+        eprintln!("ℹ️  -g 与 --fast 同用：LLVM 仍为 O3，部分变量可能显示 <optimized out>；纯调试建议去掉 --fast。");
+    }
     let cg_opts = codegen::CgOpts {
         safety,
         aggressive: fast,
         bc_out: if fast { Some(bc_path.clone()) } else { None },
         src_file: fe.src_file.clone(),
+        debug_info,
     };
     if let Err(e) = codegen::compile(
         &fe.program,
@@ -451,7 +461,14 @@ fn main() {
 
     match command {
         "build" => {
-            println!("✅ 已生成可执行文件: {}", exe_path.display());
+            if debug_info {
+                println!(
+                    "✅ 已生成可执行文件（含 DWARF 调试信息，可用 gdb/lldb 调试）: {}",
+                    exe_path.display()
+                );
+            } else {
+                println!("✅ 已生成可执行文件: {}", exe_path.display());
+            }
         }
         "run" => match Command::new(&exe_path).status() {
             Ok(status) => {
@@ -1232,8 +1249,9 @@ fn print_usage() {
     eprintln!("用法: dialc <命令> [参数]");
     eprintln!();
     eprintln!("编译与运行");
-    eprintln!("  build <文件.dial> [-o 输出] [--no-link] [--safety debug|safe|fast] [--pgo]");
+    eprintln!("  build <文件.dial> [-o 输出] [-g] [--no-link] [--safety debug|safe|fast] [--pgo]");
     eprintln!("  run   <文件.dial> [同上]");
+    eprintln!("  -g / --debug-info          生成标准 DWARF（GDB/LLDB 源码行断点 + print 变量名）");
     eprintln!("  check <文件.dial>                只做词法/语法/语义检查，不产出文件");
     eprintln!("  test  <文件.dial> [--filter 名]  运行顶层 test \"名\" {{ ... }} 块");
     eprintln!();
@@ -1921,6 +1939,7 @@ fn cmd_test(args: &[String]) {
             aggressive: false,
             bc_out: None,
             src_file: src.clone(),
+            debug_info: false, // dialc test 只跑断言，不需要调试符号
         };
         if let Err(e) = codegen::compile(&prog, &functions, &structs, &obj, &cg, &fe.externs) {
             eprintln!("  ❌ {} 代码生成失败：{}", t.name, e);

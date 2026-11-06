@@ -659,6 +659,70 @@ C ABI 宽度、string / bytes 数据总线、`repr(C)` 结构体、C 回调等�
 一律非零退出，绝不静默吞掉多余输入（A3）；`fmt` 还会校验格式化前后 token 序列
 完全一致且结果幂等，保证格式化不改变语义。
 
+## 12. DWARF 调试信息与 `-g`（v1.04 增补）
+
+### 12.1 定位
+
+§11 的 A7 让**运行时诊断**带「文件:行:列」——它是编译期写进机器码的字符串常量，
+给崩溃日志看的。本章补的是另一条线：让**调试器**理解 Dial 源码，属于元数据而非运行时逻辑。
+两者共用 `semantic::stmt_pos()` 取语句位置，但产物完全不同，互不依赖。
+
+`int3` / `ud2`（§20）解决「停在哪里」，DWARF 解决「停下之后看到什么」：
+没有它，GDB 只能显示寄存器与地址；有了它，`break app.dial:9` / `print var_name` /
+`bt` 的源码行 / `info args` 全部按 Dial 的 AST 名字工作。
+
+### 12.2 生成链路
+
+```
+-g → CgOpts.debug_info
+   → compile(): "Debug Info Version" 模块标志 + DebugInfoBuilder / DICompileUnit / DIFile
+   → gen_function(): DISubprogram（挂到 FunctionValue.set_subprogram）
+   → gen_stmt(): DILocation（语句行列）→ builder.set_current_debug_location
+   → VarDecl / 形参: DILocalVariable + llvm.dbg.declare（绑定栈槽）
+   → compile() 收尾: finalize() → module.verify() → emit_object()
+```
+
+- `DIFile` 用**绝对路径**：GDB 依赖行表里的文件名去打开源码；相对路径在多目录工程里
+  会找不到文件，`list` / `break f:N` 直接失效。
+- `DWARFSourceLanguage::C`：DWARF 没有 Dial 的语言码，用 C 是调试器兼容度最高的选择；
+  调试器不会因此把 Dial 代码当 C 解析，它只按 DWARF 的结构读符号与行表。
+- `finalize()` 必须在 `module.verify()` 之前（inkwell / LLVM 的约束），否则 deferred
+  metadata 未收束，verifier 可能拒绝模块。
+
+### 12.3 行号精确性与 RAII 守卫
+
+`gen_stmt` 在入口把 builder 的当前 `DILocation` 切到本语句行列。嵌套语句（if / 循环 /
+try / with）会递归调用 `gen_stmt`，若不在返回时恢复，外层后续指令就会沿用内层行号，
+行表出现「跳行 / 串行」。`DebugLocGuard` 在 `gen_stmt` 入口保存旧位置、返回时由 `Drop`
+恢复，覆盖所有 `return Err(...)` 早退分支——这是零人工维护成本的正确性保证。
+
+### 12.4 类型映射边界
+
+标量按 IR 真实宽度给出 `DIBasicType`（`int` / `char` 64 位 signed、`float` 64 位 float、
+`bool` 1 位 boolean、`byte` 64 位 unsigned），所以 `print` 直接读到值。
+其余类型（string / bytes / 数组 / map / set / struct / file / error / thread / channel /
+opaque / rawptr / fnptr）在 IR 里一律是不透明 `ptr`（见 §1、§10），C Runtime 的内部布局
+不对外承诺；因此 DWARF 里统一为指向 `dial_object` 的 pointer type，只保证「变量名 +
+类型名可见」，不伪装成可展开的结构体。这与 §10「包分发 / 句柄不透明」是同一条边界。
+
+### 12.5 与优化级别、各安全等级的关系
+
+默认 O2 会把栈槽变量优化进寄存器或整个消除，调试器只能显示 `<optimized out>`。
+故 `-g` 且非 `--fast` 时把 `OptimizationLevel` 降为 `None`（O0）；`-g --fast` 保留
+用户明确要求的 O3 + SIMD + LTO/PGO，并在编译期提示变量可能被优化。
+这条只影响 LLVM 优化级别：Fail-Fast 陷阱（§20）、`--safety` 三档、C Runtime 的
+`-DDIAL_SAFETY=N`、`.dialpkg` 静态归档铁律（§5）全部不变。
+
+`dialc test` 恒以 `debug_info = false` 编译测试块：测试只跑断言，不需要符号，
+也避免逐块链接时重复生成调试元数据。
+
+### 12.6 验证
+
+R 组双路验证：静态用 `llvm-dwarfdump` 核对段、七个 Dial 名字与 `.dial` 行表；
+动态用真实 `gdb -batch` 在 `.dial:9` 下断点断言 `print counter = 42` 与 `bt` 源码行。
+另有无 `-g` 零调试符号、`-g --fast` 兼容两组断言。CI 若缺 `gdb` / `llvm-dwarfdump`，
+对应子项明确跳过而非判失败。
+
 ---
 
 > 本文件为**架构规划**，不含任何实现承诺与时间表。规范一旦在真实包上落地，

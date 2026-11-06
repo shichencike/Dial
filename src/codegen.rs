@@ -7,11 +7,17 @@
 //! - 数据流分析（Sema 阶段写入的 move_hint）在此决定：移动语义（跳过 retain）还是共享（retain）。
 //! - `.o` 由 inkwell 在内存中构建 IR 后 `write_to_file` 直接 emit，不导出 .ll 文本。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use inkwell::builder::Builder;
 use inkwell::context::Context;
+use inkwell::debug_info::{
+    AsDIScope, DebugInfoBuilder, DICompileUnit, DIFlags, DIFlagsConstants, DIFile,
+    DILocation, DIScope, DIType, DWARFEmissionKind, DWARFSourceLanguage,
+};
+use inkwell::module::FlagBehavior;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
@@ -31,6 +37,52 @@ use crate::semantic::{analyze_gotos, type_of, FuncInfo, GotoAnalysis, StructTabl
 
 type Local<'ctx> = (Type, (bool, PointerValue<'ctx>));
 type CgScopes<'ctx> = Vec<HashMap<String, Local<'ctx>>>;
+
+/// -g 模式下持有的 DWARF 生成器状态。None 表示普通构建，完全不碰调试 API。
+struct DebugInfo<'ctx> {
+    builder: DebugInfoBuilder<'ctx>,
+    cu: DICompileUnit<'ctx>,
+    file: DIFile<'ctx>,
+}
+
+/// gen_stmt 的「调试位置」RAII 守卫：进入语句时把 builder 的当前 DILocation
+/// 切到该语句的 行:列，语句（含所有早退分支）返回时自动恢复外层位置。
+/// 不用它的话，嵌套语句返回后外层后续指令会错误地沿用内层行号。
+struct DebugLocGuard<'a, 'ctx> {
+    builder: &'a Builder<'ctx>,
+    prev: Option<DILocation<'ctx>>,
+}
+
+impl Drop for DebugLocGuard<'_, '_> {
+    fn drop(&mut self) {
+        match self.prev {
+            Some(loc) => self.builder.set_current_debug_location(loc),
+            None => self.builder.unset_current_debug_location(),
+        }
+    }
+}
+
+/// Dial 类型 → DWARF 里显示的类型名。复合类型在 IR 里本就是不透明 i8*，
+/// 这里只负责给出一个可读名字，不假装知道 C Runtime 的内部布局。
+fn dial_type_name(t: &Type) -> String {
+    match t {
+        Type::Void => "void".into(),
+        Type::Int => "int".into(),
+        Type::Float => "float".into(),
+        Type::Bool => "bool".into(),
+        Type::Char => "char".into(),
+        Type::Byte => "byte".into(),
+        Type::String => "string".into(),
+        Type::Bytes => "bytes".into(),
+        Type::Array(e) => format!("{}[]", dial_type_name(e)),
+        Type::Map => "map".into(),
+        Type::Struct(n) => n.clone(),
+        Type::RawPtr(e) => format!("rawptr<{}>", dial_type_name(e)),
+        Type::Channel(e) => format!("channel<{}>", dial_type_name(e)),
+        Type::FnPtr(..) => "fnptr".into(),
+        _ => "dial_object".into(),
+    }
+}
 
 /*
  * ============================================================================
@@ -71,6 +123,9 @@ pub struct CgOpts {
     /// 的运行时诊断会把「文件:行:列」一起打出来，便于稍有规模的程序定位。
     /// 多文件 `import` 合并编译时取**主源文件**路径（各块的行列仍按各自文件准确）。
     pub src_file: String,
+    /// -g：生成标准 DWARF 调试信息（CompileUnit / 函数 / 行号 / 局部变量名）。
+    /// 关闭时完全不创建 DIBuilder，零额外开销。
+    pub debug_info: bool,
     /// true（仅 --fast 模式）：用 `OptimizationLevel::Aggressive`（等价于 O3）生成机器码，
     /// 并显式打开宿主 SIMD 特征（x86 的 AVX2 / ARM64 的 NEON），让 LLVM 的循环向量化器
     /// 与循环展开器全力工作。
@@ -144,6 +199,10 @@ pub struct CodeGen<'ctx> {
     /// A7：当前正在生成的语句位置（1 起行列）。由 `gen_stmt` 入口写入；
     /// `Expr` 不带位置，panic/assert/throw 这些「发生在某条语句里」的失败据此定位。
     cur_pos: std::cell::Cell<(usize, usize)>,
+    /// -g：DWARF 生成器（None = 普通构建）。
+    debug: Option<DebugInfo<'ctx>>,
+    /// -g：当前函数的 DIScope，作为局部变量与语句行号的父作用域。
+    cur_scope: Cell<Option<DIScope<'ctx>>>,
 }
 
 /// 编译入口：接收校验后的 AST、函数签名表、结构体表，生成并写出目标文件 `.o`。
@@ -157,6 +216,46 @@ pub fn compile(
 ) -> Result<()> {
     let context = Context::create();
     let module = context.create_module("dialc");
+
+    // -g：先建 CompileUnit。"Debug Info Version" 模块标志必须早于任何 debug metadata，
+    // 否则 LLVM 会以「Debug info version mismatch」告警并可能丢弃调试信息。
+    // DIFile 用绝对路径：GDB 才能按行表里的文件名直接打开源码，`list` / `break f:N` 才生效。
+    let debug = if opts.debug_info {
+        let ver = context.i32_type().const_int(3, false);
+        module.add_basic_value_flag("Debug Info Version", FlagBehavior::Warning, ver);
+        let abs = std::fs::canonicalize(&opts.src_file)
+            .unwrap_or_else(|_| PathBuf::from(&opts.src_file));
+        let filename = abs.to_string_lossy().into_owned();
+        let directory = abs
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let producer = format!("dialc {}", env!("CARGO_PKG_VERSION"));
+        let (builder, cu) = module.create_debug_info_builder(
+            true,
+            DWARFSourceLanguage::C,
+            &filename,
+            &directory,
+            &producer,
+            false,
+            "",
+            0,
+            "",
+            DWARFEmissionKind::Full,
+            0,
+            false,
+            false,
+            "",
+            "",
+        );
+        Some(DebugInfo {
+            builder,
+            cu,
+            file: cu.get_file(),
+        })
+    } else {
+        None
+    };
 
     let mut cg = CodeGen {
         context: &context,
@@ -180,6 +279,8 @@ pub fn compile(
         cstruct_names: program.cstructs.iter().map(|c| c.name.clone()).collect(),
         src_file: opts.src_file.clone(),
         cur_pos: std::cell::Cell::new((0, 0)),
+        debug,
+        cur_scope: Cell::new(None),
     };
 
     cg.build_struct_types(program);
@@ -205,6 +306,12 @@ pub fn compile(
     // 2) 生成函数体
     for f in &program.functions {
         cg.gen_function(f, &func_values, functions, structs)?;
+    }
+
+    // -g：所有 DISubprogram / DILocalVariable 已建完，收束 deferred metadata。
+    // inkwell 要求 finalize 在 module.verify() 与任何 codegen 之前调用。
+    if let Some(d) = &cg.debug {
+        d.builder.finalize();
     }
 
     // 3) 写出目标文件
@@ -1188,6 +1295,146 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
+    // ------------------------------------------------------------------
+    //  -g：标准 DWARF 调试信息（CompileUnit / 函数 / 行号 / 变量名）
+    // ------------------------------------------------------------------
+
+    /// Dial 类型 → DIType。标量给出精确宽度与编码，因此 GDB 里 `print n` 显示 42
+    /// 而不是十六进制地址；string / array / map / struct / 句柄在 IR 里本就是
+    /// 不透明 i8*，如实呈现为指向 `dial_object` 的指针（能按名字 print，不伪装布局）。
+    fn di_type(&self, t: &Type) -> DIType<'ctx> {
+        let d = self.debug.as_ref().expect("di_type 仅在 -g 下调用");
+        let (name, bits, enc): (&str, u64, u32) = match t {
+            Type::Int => ("int", 64, 0x05),     // DW_ATE_signed
+            Type::Float => ("float", 64, 0x04), // DW_ATE_float
+            Type::Bool => ("bool", 1, 0x02),    // DW_ATE_boolean（IR 为 i1）
+            Type::Char => ("char", 64, 0x05),   // Unicode 码点，IR 为 i64
+            Type::Byte => ("byte", 64, 0x07),   // DW_ATE_unsigned（IR 为 i64）
+            Type::Void => ("void", 64, 0x05),
+            _ => {
+                let opaque = d
+                    .builder
+                    .create_basic_type("dial_object", 8, 0x07, DIFlags::PUBLIC)
+                    .unwrap()
+                    .as_type();
+                return d
+                    .builder
+                    .create_pointer_type(
+                        &dial_type_name(t),
+                        opaque,
+                        64,
+                        64,
+                        AddressSpace::default(),
+                    )
+                    .as_type();
+            }
+        };
+        d.builder
+            .create_basic_type(name, bits, enc, DIFlags::PUBLIC)
+            .unwrap()
+            .as_type()
+    }
+
+    /// 进入函数：建 DISubprogram 并挂到 LLVM 函数上，作为本函数行号与局部变量的父作用域。
+    fn begin_debug_function(&self, f: &Func, function: FunctionValue<'ctx>) {
+        let d = match self.debug.as_ref() {
+            Some(d) => d,
+            None => return,
+        };
+        let params: Vec<DIType<'ctx>> = f.params.iter().map(|(_, t)| self.di_type(t)).collect();
+        let ret = self.di_type(&f.ret);
+        let sub_ty = d
+            .builder
+            .create_subroutine_type(d.file, Some(ret), &params, DIFlags::PUBLIC);
+        let sub = d.builder.create_function(
+            d.cu.as_debug_info_scope(),
+            &f.name,
+            None,
+            d.file,
+            f.line as u32,
+            sub_ty,
+            false,
+            true,
+            f.line as u32,
+            DIFlags::PUBLIC,
+            false,
+        );
+        function.set_subprogram(sub);
+        let scope = sub.as_debug_info_scope();
+        self.cur_scope.set(Some(scope));
+        let loc = d.builder.create_debug_location(
+            self.context,
+            f.line as u32,
+            f.col as u32,
+            scope,
+            None,
+        );
+        self.builder.set_current_debug_location(loc);
+    }
+
+    /// 把一条语句的 行:列 设为当前 IR 插入位置，返回退出时自动恢复的守卫。
+    fn stmt_debug_loc(&self, stmt: &Stmt) -> Option<DebugLocGuard<'_, 'ctx>> {
+        let d = self.debug.as_ref()?;
+        let scope = self.cur_scope.get()?;
+        let (line, col) = crate::semantic::stmt_pos(stmt);
+        let prev = self.builder.get_current_debug_location();
+        let loc = d.builder.create_debug_location(
+            self.context,
+            line as u32,
+            col as u32,
+            scope,
+            None,
+        );
+        self.builder.set_current_debug_location(loc);
+        Some(DebugLocGuard {
+            builder: &self.builder,
+            prev,
+        })
+    }
+
+    /// 为一个栈槽发射 `llvm.dbg.declare`，把 Dial 变量名写进 DWARF。
+    /// `arg_no = Some(n)` 表示形参（DWARF 参数序号从 1 起），None 表示局部变量。
+    fn debug_declare(
+        &self,
+        name: &str,
+        ty: &Type,
+        line: usize,
+        col: usize,
+        storage: PointerValue<'ctx>,
+        arg_no: Option<u32>,
+    ) {
+        let d = match self.debug.as_ref() {
+            Some(d) => d,
+            None => return,
+        };
+        let scope = match self.cur_scope.get() {
+            Some(s) => s,
+            None => return,
+        };
+        let di_ty = self.di_type(ty);
+        let var = match arg_no {
+            Some(n) => d.builder.create_parameter_variable(
+                scope, name, n, d.file, line as u32, di_ty, true, DIFlags::PUBLIC,
+            ),
+            None => d.builder.create_auto_variable(
+                scope, name, d.file, line as u32, di_ty, true, DIFlags::PUBLIC, 64,
+            ),
+        };
+        let loc = d.builder.create_debug_location(
+            self.context,
+            line as u32,
+            col as u32,
+            scope,
+            None,
+        );
+        let bb = match self.builder.get_insert_block() {
+            Some(b) => b,
+            None => return,
+        };
+        d.builder
+            .insert_declare_at_end(storage, Some(var), None, loc, bb);
+    }
+
     fn emit_object(&self, out: &Path, opts: &CgOpts) -> Result<()> {
         Target::initialize_all(&InitializationConfig::default());
         let triple = TargetMachine::get_default_triple();
@@ -1196,8 +1443,13 @@ impl<'ctx> CodeGen<'ctx> {
         // --fast 模式：拉满 LLVM 优化。Aggressive 即 O3，会打开循环向量化器与循环展开器；
         // 再叠加宿主 SIMD 特征（x86 的 AVX2 / ARM64 的 NEON），让纯内存计算（如数组求和）
         // 一次直接处理 4~8 个整数。其余模式保持 Default（O2），优先编译速度与调试体验。
+        // -g 隐含 O0：默认 O2 会把栈槽变量优化进寄存器甚至整个消掉，GDB 里只剩
+        // `<optimized out>`，那就失去了「按变量名 print」的意义。--fast 是用户
+        // 明确的性能契约，仍保留 O3，但文档里说明变量可能被优化掉。
         let opt_level = if opts.aggressive {
             OptimizationLevel::Aggressive
+        } else if opts.debug_info {
+            OptimizationLevel::None
         } else {
             OptimizationLevel::Default
         };
@@ -1547,6 +1799,8 @@ impl<'ctx> CodeGen<'ctx> {
         let function = func_values[&f.name];
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
+        // -g：必须在生成任何指令之前挂上 DISubprogram 并设好函数行号位置。
+        self.begin_debug_function(f, function);
 
         // 每个函数独立：进入时清空受保护集合（否则上一个函数的登记会串进来）。
         self.protected.borrow_mut().clear();
@@ -1600,6 +1854,8 @@ impl<'ctx> CodeGen<'ctx> {
             let param_val = self.abi_adapt(raw_param, self.ffi_type_to_llvm(pty), llvm_ty);
             self.builder.build_store(ptr, param_val).unwrap();
             scopes[0].insert(pname.clone(), (pty.clone(), (true, ptr)));
+            // -g：形参也写进 DWARF，GDB 的 `info args` / `print a` 才有名字。
+            self.debug_declare(pname, pty, f.line, f.col, ptr, Some(i as u32 + 1));
             // 形参取得共享所有权（进入时对称 +1，退出时 -1）：
             //   - 字符串/数组形参：直接 retain 指针；
             //   - 结构体形参：值拷贝本身不带所有权，需递归 retain 其中的堆字段。
@@ -1967,6 +2223,9 @@ impl<'ctx> CodeGen<'ctx> {
         // A7：先记下当前语句位置，供 panic / assert / 未捕获异常写进运行时诊断。
         // 嵌套语句递归调用 gen_stmt 时会覆盖为更精确的内层位置，正是我们要的。
         self.cur_pos.set(crate::semantic::stmt_pos(stmt));
+        // -g：把后续所有 IR 指令标到本语句的 行:列；_loc 在函数返回（含早退）
+        // 时自动恢复外层位置，嵌套语句不会污染外层的行号表。
+        let _loc = self.stmt_debug_loc(stmt);
         match stmt {
             Stmt::VarDecl {
                 name,
@@ -1974,10 +2233,14 @@ impl<'ctx> CodeGen<'ctx> {
                 mutable,
                 value,
                 move_hint,
+                line,
+                col,
                 ..
             } => {
                 let llvm_ty = self.dialc_type_to_llvm(ty);
                 let ptr = self.alloca_in_entry(function, llvm_ty, name);
+                // -g：把 Dial 源码里的变量名绑到这个栈槽，GDB 才能 `print name`。
+                self.debug_declare(name, ty, *line, *col, ptr, None);
                 let val = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
                 let stored = self.coerce(val, &type_of(value, scopes, functions, structs)?, ty);
                 // 绑定策略：借用来的值 -> retain（成为新持有者）；自带所有权的值 -> 直接取得所有权。

@@ -364,6 +364,15 @@
 <li><a href="#349-测试与交付">34.9 测试与交付</a></li>
 </ul>
 </li>
+<li><a href="#35-v104-增补dwarf-调试信息与--g并入-v104版本不变">35. v1.04 增补：DWARF 调试信息与 -g（并入 [v1.04]，版本不变）</a><ul>
+<li><a href="#351-用法">35.1 用法</a></li>
+<li><a href="#352-gdb-会话实录">35.2 GDB 会话实录</a></li>
+<li><a href="#353-生成了什么">35.3 生成了什么</a></li>
+<li><a href="#354-类型映射诚实边界">35.4 类型映射（诚实边界）</a></li>
+<li><a href="#355--g-隐含-o0以及与---fast-的关系">35.5 -g 隐含 O0，以及与 --fast 的关系</a></li>
+<li><a href="#356-实现落点与回归">35.6 实现落点与回归</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -7666,6 +7675,190 @@ dial: 未捕获的异常（panic）: something broke
 <li><code>bash tests/run_tests.sh</code> <strong>A–Q 全量回归 0 ❌</strong>；<code>check_version</code> / <code>check_links</code> /
   <code>cve_check</code> 全通过；<code>cargo check</code> 零警告；新增 C 入口经 <code>zig cc</code> 三目标编译通过。</li>
 </ul>
+<blockquote>
+<p><strong>本轮交付范围</strong>：并入 <code>[v1.04]</code>、版本号与 <code>STDLIB_ABI</code> 均不变；只做<strong>本地提交</strong>，
+不推送 GitHub、不打 tag、不发 Release。<code>v1.0</code> 标签不受影响。</p>
+</blockquote>
+<hr />
+<h2 id="35-v104-增补dwarf-调试信息与--g并入-v104版本不变">35. v1.04 增补：DWARF 调试信息与 <code>-g</code>（并入 <code>[v1.04]</code>，版本不变）</h2>
+<blockquote>
+<p>§20 的 <code>int3</code> / <code>ud2</code> 让崩溃能被调试器<strong>精确停住</strong>，但停下之后看到的仍是
+<code>rdi</code> / <code>rsi</code> 和一堆十六进制地址。本章补上最后一公里：把 LLVM 裸 IR 与
+Dial 源码的 AST 名字对上，让 GDB / LLDB 能按<strong>源码行</strong>下断点、按<strong>源码变量名</strong>
+<code>print</code>，<code>bt</code> 里直接显示 <code>main () at app.dial:9</code>。</p>
+<p><strong>交付约定</strong>：并入 <code>[v1.04]</code>，<code>Cargo.toml</code> 保持 <code>1.4.0</code>、<code>STDLIB_ABI</code> 保持 <code>5</code>，
+不新增 <code>[v1.05]</code>；只做本地提交，不推送、不打 tag、不发 Release。</p>
+</blockquote>
+<h3 id="351-用法">35.1 用法</h3>
+<pre><code class="language-bash">dialc build app.dial -g -o app     # -g / --debug-info 等价；build / run 都支持
+gdb -q ./app
+</code></pre>
+<p><code>-g</code> 是<strong>编译期开关</strong>，不改变语言语义；<code>dialc run app.dial -g</code> 同样可用。
+不带 <code>-g</code> 时完全不创建 DIBuilder，产物里没有 Dial 的调试符号，体积与编译速度不变。</p>
+<h3 id="352-gdb-会话实录">35.2 GDB 会话实录</h3>
+<p>以下面这个最小程序为例：</p>
+<pre><code class="language-dial">fn add(a: int, b: int): int {
+    let sum: int = a + b;
+    return sum;
+}
+
+fn main(): int {
+    let counter: int = 42;
+    let note: string = &quot;dial&quot;;
+    print(add(counter, 1));
+    return 0;
+}
+</code></pre>
+<pre><code class="language-text">$ gdb -q -batch -ex 'break app.dial:9' -ex run -ex 'print counter' -ex bt ./app
+Breakpoint 1 at 0x...: file app.dial, line 9.
+Breakpoint 1, main () at app.dial:9
+9       print(add(counter, 1));
+$1 = 42                                  # ← 不是 rdi，是 Dial 源码里的变量名
+#0  main () at app.dial:9                # ← backtrace 直接指向 .dial 行
+</code></pre>
+<p><code>info args</code> 在 <code>add</code> 里显示 <code>a = 42</code> / <code>b = 1</code>，<code>print sum</code> 显示 <code>43</code>，
+<code>list</code> 直接列出 <code>.dial</code> 源码——行表、函数名、形参名、局部变量名全部来自标准 DWARF，
+不需要调试器插件，也不需要 Dial 专属的 pretty-printer。</p>
+<h3 id="353-生成了什么">35.3 生成了什么</h3>
+<table>
+<thead>
+<tr>
+<th>DWARF 结构</th>
+<th>来源</th>
+<th>效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DW_TAG_compile_unit</code></td>
+<td><code>module.create_debug_info_builder</code>（<code>DWARFSourceLanguage::C</code>、<code>DWARFEmissionKind::Full</code>、producer <code>dialc 1.4.0</code>）</td>
+<td>GDB 识别为一份标准编译单元</td>
+</tr>
+<tr>
+<td><code>DW_TAG_subprogram</code></td>
+<td>每个 <code>Func</code>，行号取 <code>Func.line</code></td>
+<td><code>break main</code>、<code>bt</code> 显示函数名</td>
+</tr>
+<tr>
+<td><code>DW_TAG_formal_parameter</code></td>
+<td>函数形参，序号从 1 起</td>
+<td><code>info args</code> / <code>print a</code></td>
+</tr>
+<tr>
+<td><code>DW_TAG_variable</code> + <code>llvm.dbg.declare</code></td>
+<td><code>Stmt::VarDecl</code> 的栈槽</td>
+<td><code>print counter</code></td>
+</tr>
+<tr>
+<td><code>.debug_line</code> 行表</td>
+<td><code>gen_stmt</code> 入口的 <code>stmt_pos(stmt)</code> → <code>DILocation</code></td>
+<td><code>break app.dial:9</code>、<code>list</code>、<code>bt</code> 带行列</td>
+</tr>
+</tbody>
+</table>
+<p>行号必须精确：嵌套语句（if / 循环 / try）递归调用 <code>gen_stmt</code> 会把当前位置切到内层，
+若不在返回时恢复，外层后续指令就会被打上内层行号。实现用 <code>DebugLocGuard</code>
+（RAII，在 <code>gen_stmt</code> 返回时自动把 builder 的 <code>DILocation</code> 恢复到外层），
+包括所有 <code>return Err(...)</code> 早退分支。</p>
+<h3 id="354-类型映射诚实边界">35.4 类型映射（诚实边界）</h3>
+<table>
+<thead>
+<tr>
+<th>Dial 类型</th>
+<th>DWARF 类型</th>
+<th><code>print</code> 效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int</code> / <code>byte</code> / <code>char</code></td>
+<td>64 位 <code>DW_ATE_signed</code> / <code>unsigned</code></td>
+<td>十进制数值</td>
+</tr>
+<tr>
+<td><code>float</code></td>
+<td>64 位 <code>DW_ATE_float</code></td>
+<td>浮点数值</td>
+</tr>
+<tr>
+<td><code>bool</code></td>
+<td>1 位 <code>DW_ATE_boolean</code></td>
+<td><code>true</code> / <code>false</code></td>
+</tr>
+<tr>
+<td><code>string</code> / <code>bytes</code> / <code>int[]</code> / <code>map</code> / <code>struct</code> / 句柄 / 函数指针 / 裸指针</td>
+<td>指向 <code>dial_object</code> 的不透明指针</td>
+<td>变量名与类型可见，值为对象地址</td>
+</tr>
+</tbody>
+</table>
+<p>标量能直接读到值——这是「<code>print var_name</code> 而不是十六进制地址」的核心。
+复合类型在 IR 里本就是不透明 <code>i8*</code>（见 §1「不透明指针」、§19 内存宪法），
+C Runtime 的内部布局不对外暴露，所以 DWARF 也<strong>如实</strong>呈现为不透明指针，
+不伪装成结构体、不承诺字段展开。想看内容仍走 Dial 自己的 <code>print</code> / <code>str</code>。</p>
+<h3 id="355--g-隐含-o0以及与---fast-的关系">35.5 <code>-g</code> 隐含 O0，以及与 <code>--fast</code> 的关系</h3>
+<p>默认构建是 O2；若只加调试信息而不降优化，LLVM 会把栈槽变量优化进寄存器甚至整个消掉，
+GDB 里只剩 <code>&lt;optimized out&gt;</code>，<code>print counter</code> 依然打不出值。因此：</p>
+<ul>
+<li><code>-g</code> 且非 <code>--fast</code>：<code>OptimizationLevel::None</code>（O0），变量稳定留在栈槽；</li>
+<li><code>-g --fast</code>：仍按用户明确的性能契约走 O3 + SIMD（+ LTO/PGO），
+  编译期打印一行提示「部分变量可能显示 <code>&lt;optimized out&gt;</code>」，构建不阻断；</li>
+<li>纯调试场景建议只用 <code>-g</code>，不要叠 <code>--fast</code>。</li>
+</ul>
+<p><code>-g</code> 只影响 LLVM 侧优化级别，<strong>不改变</strong> Fail-Fast 运行期检查（§20）、
+<code>--safety</code> 等级、C Runtime 的 <code>-DDIAL_SAFETY=N</code> 注入，也不改变 <code>.dialpkg</code> 契约。</p>
+<h3 id="356-实现落点与回归">35.6 实现落点与回归</h3>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>文件</th>
+<th>改动</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CLI</td>
+<td><code>src/main.rs</code></td>
+<td>解析 <code>-g</code> / <code>--debug-info</code> → <code>CgOpts.debug_info</code>；<code>help</code> 与构建提示同步；<code>dialc test</code> 恒为 <code>false</code></td>
+</tr>
+<tr>
+<td>选项</td>
+<td><code>src/codegen.rs::CgOpts</code></td>
+<td>新增 <code>debug_info</code></td>
+</tr>
+<tr>
+<td>编译单元</td>
+<td><code>codegen::compile()</code></td>
+<td><code>Debug Info Version</code> 模块标志、<code>DebugInfoBuilder</code> / <code>DICompileUnit</code> / <code>DIFile</code>（绝对路径）、<code>finalize()</code> 在 <code>verify()</code> 前</td>
+</tr>
+<tr>
+<td>函数 / 语句</td>
+<td><code>begin_debug_function()</code> / <code>stmt_debug_loc()</code> / <code>DebugLocGuard</code></td>
+<td>DISubprogram、语句级 DILocation 及嵌套恢复</td>
+</tr>
+<tr>
+<td>变量</td>
+<td><code>debug_declare()</code> / <code>di_type()</code></td>
+<td><code>dbg.declare</code>、Dial 类型 → DIType</td>
+</tr>
+<tr>
+<td>优化级别</td>
+<td><code>emit_object()</code></td>
+<td><code>-g</code> 非 <code>--fast</code> 时 O0</td>
+</tr>
+<tr>
+<td>回归</td>
+<td><code>tests/run_tests.sh</code></td>
+<td>新增 <strong>R 组</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>R 组</strong>用 <code>llvm-dwarfdump</code> 静态核对 <code>.debug_info</code> / <code>.debug_line</code> 段、
+<code>add</code> / <code>main</code> / 形参 <code>a</code> <code>b</code> / 局部 <code>sum</code> <code>counter</code> <code>note</code> 七个名字与 Dial 源文件行表，
+再用真实 <code>gdb -batch</code> 在 <code>.dial:9</code> 下断点断言 <code>print counter = 42</code> 与 <code>bt</code> 源码行；
+另有无 <code>-g</code> 零调试符号的负向断言、<code>-g --fast</code> 兼容断言。环境缺 <code>gdb</code> / <code>llvm-dwarfdump</code>
+时该子项明确跳过（⏭️）而非误报失败，保证 CI 不被工具缺失阻断。</p>
 <blockquote>
 <p><strong>本轮交付范围</strong>：并入 <code>[v1.04]</code>、版本号与 <code>STDLIB_ABI</code> 均不变；只做<strong>本地提交</strong>，
 不推送 GitHub、不打 tag、不发 Release。<code>v1.0</code> 标签不受影响。</p>

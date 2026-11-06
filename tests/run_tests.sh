@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 十七组检查，全部通过才算绿（顺序为 A→Q，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 十八组检查，全部通过才算绿（顺序为 A→R，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -28,6 +28,8 @@
 #      + 按魔数拒绝伪装的 .a / .so / .dll / .dylib（v1.04 新增）。
 #   Q. 工程工具链：新增 CLI 子命令、本地源码模块合并、test / fmt / check、
 #      new→pack→install→import→uninstall 闭环、A3 Fail-Fast、A7 位置诊断（v1.04 增补）。
+#   R. DWARF 调试信息：-g 生成 CompileUnit / 函数 / 行号 / 变量名，GDB 按源码行
+#      断点并 print 变量名，无 -g 时不产 Dial 调试符号（v1.04 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -818,6 +820,113 @@ if qrun build "${TMP}/q_panic.dial" -o "${TMP}/q_panic" >/dev/null 2>&1; then
         qpass "panic 诊断含 文件:行:列"
     else qbad "panic 诊断缺位置"; sed 's/^/       /' "${TMP}/q_panic.err"; fi
 else qbad "panic 用例编译失败"; fi
+
+
+# =====================================================================
+echo
+echo "== R) DWARF 调试信息：-g / GDB 源码行断点 / print 变量名（v1.04 增补） =="
+
+RDIR="${TMP}/rdwarf"
+mkdir -p "$RDIR"
+cat > "${RDIR}/dbg.dial" <<'EOF'
+fn add(a: int, b: int): int {
+    let sum: int = a + b;
+    return sum;
+}
+
+fn main(): int {
+    let counter: int = 42;
+    let note: string = "dial";
+    print(add(counter, 1));
+    return 0;
+}
+EOF
+rpass() { echo "  ✅ $1"; }
+rbad()  { echo "  ❌ $1"; fail=1; }
+rskip() { echo "  ⏭️  $1"; }
+
+# 探测 dwarfdump：不同环境的 LLVM 工具带不同版本后缀，缺工具时明确跳过而非误报失败。
+DDUMP=""
+for cand in llvm-dwarfdump-18 llvm-dwarfdump llvm-dwarfdump-17 llvm-dwarfdump-16; do
+    if command -v "$cand" >/dev/null 2>&1; then DDUMP="$cand"; break; fi
+done
+
+# 1) -g 编译 + 运行输出不变（不依赖任何调试工具，必测）
+if "$DIALC" build "${RDIR}/dbg.dial" -g -o "${RDIR}/dbg" >"${RDIR}/build.log" 2>&1 \
+   && [ "$("${RDIR}/dbg")" = "43" ]; then
+    rpass "-g 编译且运行输出不变（43）"
+else
+    rbad "-g 编译或运行失败"; sed 's/^/       /' "${RDIR}/build.log"
+fi
+if "$DIALC" help 2>&1 | grep -q -- '-g / --debug-info'; then
+    rpass "help 列出 -g 选项"
+else rbad "help 缺 -g 选项"; fi
+
+if [ -n "$DDUMP" ]; then
+    # 2) DWARF 段
+    if readelf -S "${RDIR}/dbg" 2>/dev/null | grep -q '\.debug_info' \
+       && readelf -S "${RDIR}/dbg" 2>/dev/null | grep -q '\.debug_line'; then
+        rpass "产物带 .debug_info / .debug_line 段"
+    else rbad "产物缺 DWARF 段"; fi
+
+    # 3) Dial 函数名 / 形参名 / 局部变量名都写进了 DWARF
+    "$DDUMP" --debug-info "${RDIR}/dbg" > "${RDIR}/di.log" 2>&1
+    dmiss=""
+    for sym in add main a b sum counter note; do
+        grep -q "DW_AT_name.*\"${sym}\"" "${RDIR}/di.log" || dmiss="${dmiss} ${sym}"
+    done
+    if [ -z "$dmiss" ]; then rpass "DWARF 含 Dial 函数名 / 形参名 / 局部变量名"
+    else rbad "DWARF 缺 Dial 符号:${dmiss}"; fi
+
+    # 4) 行表里有 Dial 源文件（gdb break file:N 的前提）
+    if "$DDUMP" --debug-line "${RDIR}/dbg" 2>/dev/null | grep -q 'dbg.dial'; then
+        rpass "DWARF 行表含 Dial 源文件"
+    else rbad "DWARF 行表缺 Dial 源文件"; fi
+
+    # 6) 负向：不带 -g 时不产 Dial 调试符号。
+    #    注：C Runtime 由 zig cc 编译，本身就带 .debug_* 段，所以不能拿「有无段」
+    #    当判据，只能精确看有没有 Dial 的源码名 / 变量名。
+    if "$DIALC" build "${RDIR}/dbg.dial" -o "${RDIR}/plain" >/dev/null 2>&1; then
+        "$DDUMP" --debug-info "${RDIR}/plain" > "${RDIR}/plain.di" 2>&1
+        if grep -q 'DW_AT_name.*"counter"' "${RDIR}/plain.di" \
+           || "$DDUMP" --debug-line "${RDIR}/plain" 2>/dev/null | grep -q 'dbg.dial'; then
+            rbad "无 -g 也混入了 Dial 调试符号"
+        else
+            rpass "无 -g 时不产 Dial 调试符号（零开销）"
+        fi
+    else rbad "无 -g 基线编译失败"; fi
+else
+    rskip "静态 DWARF 检查（环境无 llvm-dwarfdump）"
+fi
+
+if command -v gdb >/dev/null 2>&1; then
+    # 5) GDB 按 Dial 源码行断点，并用 Dial 变量名 print（本组核心）
+    gdb -q -batch -ex "set pagination off" \
+        -ex "break ${RDIR}/dbg.dial:9" -ex "run" \
+        -ex "print counter" -ex "bt" \
+        "${RDIR}/dbg" > "${RDIR}/gdb.log" 2>&1
+    if grep -qF '$1 = 42' "${RDIR}/gdb.log" \
+       && grep -qF 'Breakpoint 1, main () at' "${RDIR}/gdb.log"; then
+        rpass "GDB 按源码行断点命中且 print counter = 42"
+    else
+        rbad "GDB 断点/print 失败"; sed 's/^/       /' "${RDIR}/gdb.log" | tail -20
+    fi
+    if grep -q 'dbg.dial:9' "${RDIR}/gdb.log"; then
+        rpass "GDB backtrace 显示 Dial 源码行"
+    else rbad "GDB backtrace 缺源码行"; fi
+else
+    rskip "GDB 交互检查（环境无 gdb）"
+fi
+
+# 7) -g 与 --fast 同用不应阻断构建，且要提示 O3 下变量可能被优化掉
+if "$DIALC" build "${RDIR}/dbg.dial" -g --fast -o "${RDIR}/fastg" >"${RDIR}/fast.log" 2>&1 \
+   && [ "$("${RDIR}/fastg")" = "43" ] \
+   && grep -q '<optimized out>' "${RDIR}/fast.log"; then
+    rpass "-g 与 --fast 同用可构建且给出 O3 提示"
+else
+    rbad "-g 与 --fast 同用异常"; sed 's/^/       /' "${RDIR}/fast.log" | tail -12
+fi
+
 
 echo
 if [ $fail -eq 0 ]; then

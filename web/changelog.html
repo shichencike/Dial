@@ -261,7 +261,8 @@
 <code>[v1.00]</code> ~ <code>[v1.03]</code> 是「达成 v1.0」过程中的分版记录（见下方里程碑大标题）。
 <code>[v1.04]</code> 是<strong>里程碑达成之后的第一个增量分版</strong>，不归入上面那批分版记录。
 按本轮交付约定：<strong>只做本地提交，不推送 GitHub、不打 tag</strong>。
-本版后续还并入了「语言层动态链接」与「工程工具链增补」（见 <a href="README.md#34-v104-增补工程工具链并入-v104版本不变">README §34</a>），
+本版后续还并入了「语言层动态链接」「工程工具链增补」与「DWARF 调试信息（-g）」
+（见 <a href="README.md#34-v104-增补工程工具链并入-v104版本不变">README §34</a> 与 README §35），
 均不新增分版记录，编译器版本 <code>1.4.0</code> 与 <code>STDLIB_ABI 5</code> 保持不变。</p>
 </blockquote>
 <h3 id="added">Added</h3>
@@ -293,6 +294,15 @@
 <li><strong><code>dialc pack</code> + <code>dial.toml</code></strong>：通用产包命令，校验 <code>.diali</code> 与静态库 ar 魔数、
     生成 <code>manifest.txt</code> 与逐文件 SHA256、打包后就地自检；<code>dialc new</code> 生成项目骨架，
     <code>list</code> / <code>uninstall</code> 补齐包管理。<code>tools/make_stdlib_pkg.py</code> 保留给 CI 的三平台 stdlib 包。</li>
+<li><strong>DWARF 调试信息（<code>-g</code> / <code>--debug-info</code>，见 README §35）</strong>：<code>dialc build / run</code> 加 <code>-g</code>
+  即为 Dial 代码生成标准 DWARF——<code>DW_TAG_compile_unit</code> / <code>DW_TAG_subprogram</code>（每个 Dial 函数）/
+  <code>DW_TAG_formal_parameter</code>（形参）/ <code>DW_TAG_variable</code> + <code>llvm.dbg.declare</code>（<code>Stmt::VarDecl</code>
+  局部变量）/ <code>.debug_line</code> 行表（<code>gen_stmt</code> 的语句行列）。GDB / LLDB 因此能按 <code>.dial</code>
+  源码行下断点、<code>print counter</code> 读标量值、<code>info args</code> 看形参、<code>bt</code> / <code>list</code> 直接指向
+  Dial 源码，不需要调试器插件。<code>DIFile</code> 用绝对路径，<code>finalize()</code> 在 <code>module.verify()</code> 前调用。
+  标量（<code>int</code> / <code>float</code> / <code>bool</code> / <code>char</code> / <code>byte</code>）给出精确 DWARF 宽度与编码；复合类型
+  在 IR 里本就是不透明 <code>i8*</code>，如实映射为指向 <code>dial_object</code> 的指针，不伪装布局。
+  不带 <code>-g</code> 时完全不创建 DIBuilder，零开销。</li>
 </ul>
 <h3 id="changed">Changed</h3>
 <ul>
@@ -314,6 +324,10 @@
 <li><strong>Fail-Fast 收紧（A3）</strong>：旧版 <code>dialc build a.dial b.dial</code> 打印「未知参数」后
   <strong>仍以 <code>rc=0</code> 产出 a 的可执行文件</strong>（多余输入被静默吞掉）；现在任何未知参数一律
   非零退出，多出来的是 <code>.dial</code> 时附带 §34.2 本地模块写法的指引。同一规则推广到全部新子命令。</li>
+<li><strong><code>-g</code> 隐含 O0</strong>：<code>emit_object()</code> 在 <code>debug_info</code> 且非 <code>--fast</code> 时用
+  <code>OptimizationLevel::None</code>，避免默认 O2 把栈槽变量优化成 <code>&lt;optimized out&gt;</code> 而让
+  <code>print var_name</code> 失效；<code>-g --fast</code> 仍走用户明确要求的 O3 + SIMD/LTO，并打印兼容提示。
+  安全等级、运行期检查、C Runtime 注入与 <code>.dialpkg</code> 契约均不变。</li>
 </ul>
 <h3 id="fixed">Fixed</h3>
 <ul>
@@ -343,7 +357,13 @@
 <li>新增 <strong>Q 组（工程工具链专项）</strong>：全部新子命令、A3 非零退出且不产物、<code>fmt</code> 幂等与
   token 流不变、<code>test</code> 通过 / 失败 / 过滤、多文件 import 合并与循环 / 冲突 / 缺失诊断、
   <code>new → pack → install → import → uninstall</code> 全链路闭环、<code>pack</code> 拒绝动态库与缺字段、
-  A7 运行时位置断言。回归脚本由 <strong>A–P 扩为 A–Q</strong>。</li>
+  A7 运行时位置断言。回归脚本由 <strong>A–P 扩为 A–Q</strong>（后续由 R 组扩为 A–R，见下）。</li>
+<li>新增 <strong>R 组（DWARF 调试信息专项）</strong>：<code>llvm-dwarfdump</code> 核对 <code>.debug_info</code> / <code>.debug_line</code>
+  段与 <code>add</code> / <code>main</code> / <code>a</code> / <code>b</code> / <code>sum</code> / <code>counter</code> / <code>note</code> 七个 Dial 名字、行表含
+  <code>.dial</code> 源文件；真实 <code>gdb -batch</code> 在 <code>.dial:9</code> 断点断言 <code>print counter = 42</code>、
+  <code>bt</code> 显示源码行；无 <code>-g</code> 不产 Dial 调试符号的负向断言、<code>-g --fast</code> 兼容断言。
+  环境缺 <code>gdb</code> / <code>llvm-dwarfdump</code> 时对应子项明确跳过（⏭️）而非误报失败，
+  保证 CI 不被工具缺失阻断。回归脚本由 <strong>A–Q 扩为 A–R</strong>。</li>
 </ul>
 <hr />
 <h2 id="v10-里程碑--分版记录v100--v103">[v1.0 里程碑] — 分版记录（v1.00 ~ v1.03）</h2>

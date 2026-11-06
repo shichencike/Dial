@@ -4773,3 +4773,119 @@ dial: 未捕获的异常（panic）: something broke
 
 > **本轮交付范围**：并入 `[v1.04]`、版本号与 `STDLIB_ABI` 均不变；只做**本地提交**，
 > 不推送 GitHub、不打 tag、不发 Release。`v1.0` 标签不受影响。
+
+---
+
+## 35. v1.04 增补：DWARF 调试信息与 `-g`（并入 `[v1.04]`，版本不变）
+
+> §20 的 `int3` / `ud2` 让崩溃能被调试器**精确停住**，但停下之后看到的仍是
+> `rdi` / `rsi` 和一堆十六进制地址。本章补上最后一公里：把 LLVM 裸 IR 与
+> Dial 源码的 AST 名字对上，让 GDB / LLDB 能按**源码行**下断点、按**源码变量名**
+> `print`，`bt` 里直接显示 `main () at app.dial:9`。
+>
+> **交付约定**：并入 `[v1.04]`，`Cargo.toml` 保持 `1.4.0`、`STDLIB_ABI` 保持 `5`，
+> 不新增 `[v1.05]`；只做本地提交，不推送、不打 tag、不发 Release。
+
+### 35.1 用法
+
+```bash
+dialc build app.dial -g -o app     # -g / --debug-info 等价；build / run 都支持
+gdb -q ./app
+```
+
+`-g` 是**编译期开关**，不改变语言语义；`dialc run app.dial -g` 同样可用。
+不带 `-g` 时完全不创建 DIBuilder，产物里没有 Dial 的调试符号，体积与编译速度不变。
+
+### 35.2 GDB 会话实录
+
+以下面这个最小程序为例：
+
+```dial
+fn add(a: int, b: int): int {
+    let sum: int = a + b;
+    return sum;
+}
+
+fn main(): int {
+    let counter: int = 42;
+    let note: string = "dial";
+    print(add(counter, 1));
+    return 0;
+}
+```
+
+```text
+$ gdb -q -batch -ex 'break app.dial:9' -ex run -ex 'print counter' -ex bt ./app
+Breakpoint 1 at 0x...: file app.dial, line 9.
+Breakpoint 1, main () at app.dial:9
+9       print(add(counter, 1));
+$1 = 42                                  # ← 不是 rdi，是 Dial 源码里的变量名
+#0  main () at app.dial:9                # ← backtrace 直接指向 .dial 行
+```
+
+`info args` 在 `add` 里显示 `a = 42` / `b = 1`，`print sum` 显示 `43`，
+`list` 直接列出 `.dial` 源码——行表、函数名、形参名、局部变量名全部来自标准 DWARF，
+不需要调试器插件，也不需要 Dial 专属的 pretty-printer。
+
+### 35.3 生成了什么
+
+| DWARF 结构 | 来源 | 效果 |
+| --- | --- | --- |
+| `DW_TAG_compile_unit` | `module.create_debug_info_builder`（`DWARFSourceLanguage::C`、`DWARFEmissionKind::Full`、producer `dialc 1.4.0`） | GDB 识别为一份标准编译单元 |
+| `DW_TAG_subprogram` | 每个 `Func`，行号取 `Func.line` | `break main`、`bt` 显示函数名 |
+| `DW_TAG_formal_parameter` | 函数形参，序号从 1 起 | `info args` / `print a` |
+| `DW_TAG_variable` + `llvm.dbg.declare` | `Stmt::VarDecl` 的栈槽 | `print counter` |
+| `.debug_line` 行表 | `gen_stmt` 入口的 `stmt_pos(stmt)` → `DILocation` | `break app.dial:9`、`list`、`bt` 带行列 |
+
+行号必须精确：嵌套语句（if / 循环 / try）递归调用 `gen_stmt` 会把当前位置切到内层，
+若不在返回时恢复，外层后续指令就会被打上内层行号。实现用 `DebugLocGuard`
+（RAII，在 `gen_stmt` 返回时自动把 builder 的 `DILocation` 恢复到外层），
+包括所有 `return Err(...)` 早退分支。
+
+### 35.4 类型映射（诚实边界）
+
+| Dial 类型 | DWARF 类型 | `print` 效果 |
+| --- | --- | --- |
+| `int` / `byte` / `char` | 64 位 `DW_ATE_signed` / `unsigned` | 十进制数值 |
+| `float` | 64 位 `DW_ATE_float` | 浮点数值 |
+| `bool` | 1 位 `DW_ATE_boolean` | `true` / `false` |
+| `string` / `bytes` / `int[]` / `map` / `struct` / 句柄 / 函数指针 / 裸指针 | 指向 `dial_object` 的不透明指针 | 变量名与类型可见，值为对象地址 |
+
+标量能直接读到值——这是「`print var_name` 而不是十六进制地址」的核心。
+复合类型在 IR 里本就是不透明 `i8*`（见 §1「不透明指针」、§19 内存宪法），
+C Runtime 的内部布局不对外暴露，所以 DWARF 也**如实**呈现为不透明指针，
+不伪装成结构体、不承诺字段展开。想看内容仍走 Dial 自己的 `print` / `str`。
+
+### 35.5 `-g` 隐含 O0，以及与 `--fast` 的关系
+
+默认构建是 O2；若只加调试信息而不降优化，LLVM 会把栈槽变量优化进寄存器甚至整个消掉，
+GDB 里只剩 `<optimized out>`，`print counter` 依然打不出值。因此：
+
+- `-g` 且非 `--fast`：`OptimizationLevel::None`（O0），变量稳定留在栈槽；
+- `-g --fast`：仍按用户明确的性能契约走 O3 + SIMD（+ LTO/PGO），
+  编译期打印一行提示「部分变量可能显示 `<optimized out>`」，构建不阻断；
+- 纯调试场景建议只用 `-g`，不要叠 `--fast`。
+
+`-g` 只影响 LLVM 侧优化级别，**不改变** Fail-Fast 运行期检查（§20）、
+`--safety` 等级、C Runtime 的 `-DDIAL_SAFETY=N` 注入，也不改变 `.dialpkg` 契约。
+
+### 35.6 实现落点与回归
+
+| 层 | 文件 | 改动 |
+| --- | --- | --- |
+| CLI | `src/main.rs` | 解析 `-g` / `--debug-info` → `CgOpts.debug_info`；`help` 与构建提示同步；`dialc test` 恒为 `false` |
+| 选项 | `src/codegen.rs::CgOpts` | 新增 `debug_info` |
+| 编译单元 | `codegen::compile()` | `Debug Info Version` 模块标志、`DebugInfoBuilder` / `DICompileUnit` / `DIFile`（绝对路径）、`finalize()` 在 `verify()` 前 |
+| 函数 / 语句 | `begin_debug_function()` / `stmt_debug_loc()` / `DebugLocGuard` | DISubprogram、语句级 DILocation 及嵌套恢复 |
+| 变量 | `debug_declare()` / `di_type()` | `dbg.declare`、Dial 类型 → DIType |
+| 优化级别 | `emit_object()` | `-g` 非 `--fast` 时 O0 |
+| 回归 | `tests/run_tests.sh` | 新增 **R 组** |
+
+**R 组**用 `llvm-dwarfdump` 静态核对 `.debug_info` / `.debug_line` 段、
+`add` / `main` / 形参 `a` `b` / 局部 `sum` `counter` `note` 七个名字与 Dial 源文件行表，
+再用真实 `gdb -batch` 在 `.dial:9` 下断点断言 `print counter = 42` 与 `bt` 源码行；
+另有无 `-g` 零调试符号的负向断言、`-g --fast` 兼容断言。环境缺 `gdb` / `llvm-dwarfdump`
+时该子项明确跳过（⏭️）而非误报失败，保证 CI 不被工具缺失阻断。
+
+> **本轮交付范围**：并入 `[v1.04]`、版本号与 `STDLIB_ABI` 均不变；只做**本地提交**，
+> 不推送 GitHub、不打 tag、不发 Release。`v1.0` 标签不受影响。
