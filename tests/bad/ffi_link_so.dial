@@ -1,3 +1,5 @@
-// FFI link 只接受静态库 .a / .lib，动态库一律编译期拒绝（J 组铁律）。
-link "libfoo.so";
+// 动态库后缀合法（.so），但内容必须是真正的 ELF 共享对象。
+// 这里指向一份真实的纯文本 fixture：应按魔数被编译期拒绝，
+// 而不是靠「文件不存在」蒙混过关，也不是把伪装文件丢给 ld。
+link "fixtures/fake.so";
 fn main(): int { return 0; }

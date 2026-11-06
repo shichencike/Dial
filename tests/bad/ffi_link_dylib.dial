@@ -1,3 +1,3 @@
-// macOS 动态库同样拒绝（含 libx.so.1 这类带版本号的变体）。
-link "libfoo.dylib";
+// macOS 动态库后缀合法，但内容必须是 Mach-O（32/64 位或 fat magic）。
+link "fixtures/fake.dylib";
 fn main(): int { return 0; }

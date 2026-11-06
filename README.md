@@ -369,6 +369,10 @@ $ ldd examples/hello
 （Linux / Windows / Termux）的 CI 里都做了断言：Windows 用 `llvm-readobj --coff-imports` 检查
 用户程序不导入 `LLVM-C.dll`，Termux 用 `readelf -d` 检查产物无动态依赖，Linux 用 `ldd` 检查无 libLLVM。
 
+> **显式动态链接的例外（v1.04）**：源码里写 `link "xxx.so";` 会主动引入第三方
+> 动态依赖（§33.8）。这是源码作者的显式选择，不属于**默认产物**契约；C 组检查的
+> 是 `examples/hello.dial` 这类不带 `link` 的程序，仍严格只链 libc。
+
 #### 3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）
 
 上表的 `libc` 之外还有一个**被静态链入**用户产物的组件：**`libdial_std.a`**
@@ -2417,6 +2421,11 @@ dialc build main.dial
 一旦允许 `.so` / `.dll` 混进来，用户程序就会多出一份运行期必须随附的动态依赖，
 既违背「零运行时依赖」的承诺，也会让 `ldd` 契约检查（测试 C 组）失效。
 
+> **与语言层 `link` 的边界**：本节只约束**包分发**（别人打好的 `.dialpkg`）。
+> 源码作者在 `.dial` 里自己写 `link "xxx.so";` 属于显式选择，不受此限，
+> 代价是产物运行期必须随附那份动态库——见 §33.8。J 组的「拒绝动态库」断言
+> 打在 `dialc install` 路径上，与语言层是两条互不相干的链路。
+
 **② 重复安装——ABI 相同覆盖，ABI 不同报错。**
 缓存目录 `~/.dial/packages/<name>/` 下已存在同名包时，`dialc install` 会先读出旧 `manifest.txt` 比对 `abi`：
 
@@ -4340,9 +4349,10 @@ H 组回归同时锁定正向（int64 / double / bool 混传输出 `i=42 f=3.5 b
 
 > 本章讲的是**用户侧 FFI**：在 `.dial` 源码里直接调用 C 函数、读写 C 结构体、
 > 把 Dial 函数交给 C 回调。§15 讲的是「编译器如何把 Dial 语法降级成 C runtime 调用」，
-> 两者不是一回事；§25.6 与 J 组是包分发的静态库铁律，本章的 `link` 完全沿用。
+> 两者不是一回事。§25.6 与 J 组是**包分发**的静态库铁律，一字未动；语言层 `link`
+> 除此之外还允许源码作者显式声明动态库（见 §33.8）。
 
-### 33.1 定位与两条铁律
+### 33.1 定位与三条硬规则
 
 在 v1.04 之前，想调一个 C 函数（哪怕只是 `puts`）必须先写 `.diali` 接口、编 `.a`、
 打 `.dialpkg`、`dialc install`、`import`——FFI 被包机制绑架。v1.04 把 C FFI 变成语言一等公民：
@@ -4350,15 +4360,21 @@ H 组回归同时锁定正向（int64 / double / bool 混传输出 `i=42 f=3.5 b
 | 路径 | 谁提供函数体 | 怎么链接 |
 | --- | --- | --- |
 | 系统库（libc / libm / CRT） | 平台自带 | C 编译器**默认动态解析**，不写 `link`、不进 LTO 链路 |
-| 用户 C 扩展库 | 自己编的 `.a` / `.lib` | 源码里显式 `link "xxx.a";`，**只接受静态归档** |
+| 用户 C 静态库 | 自己编的 `.a` / `.lib` | `link "xxx.a";`，静态链入产物，零第三方动态依赖 |
+| 用户 C 动态库 | 自己编的 `.so` / `.dll` / `.dylib` | `link "xxx.so";`，链接期记录依赖、运行期由系统加载器解析（§33.8） |
 | `.dialpkg` 包 | 包内机器码 | `import`，仍强制 `.a` / `.lib`（J 组铁律一字未动） |
 
-两条硬规则：
+三条硬规则：
 
-1. **`link` 只认 `.a` / `.lib`**：`.so` / `.dll` / `.dylib`（含 `libx.so.1`）编译期直接拒绝；
-   后缀对了还要校验 ar 归档魔数 `!<arch>\n`，伪装成 `.a` 的文本文件同样当场拒绝。
-2. **系统库不允许用 `link` 声明**：它们本就是动态的，塞进 LTO 链路只会让编译耗时爆炸；
-   直接写 `extern fn` 即可，链接器自己会找到。
+1. **`link` 只认五类后缀**：`.a` / `.lib` / `.so`（含 `libx.so.1` 带版本号变体）/
+   `.dll` / `.dylib`，其它一律编译期拒绝；系统库本就由 C 编译器默认动态解析，
+   它们本就是动态的，塞进 LTO 链路只会让编译耗时爆炸，直接写 `extern fn` 即可。
+2. **内容魔数必验**：静态库须有 ar 归档魔数 `!<arch>\n`；动态库按**扩展名**验
+   ELF `\x7fELF` / PE `MZ` / Mach-O 32、64 位或 fat magic。后缀对但内容是文本
+   也当场拒绝（Fail-Fast，绝不把伪装文件丢给链接器换一句莫名其妙的 ld 报错）。
+3. **包分发与语言层彻底分开**：`.dialpkg` 的 `targets` 仍只认静态归档（J 组锁死）。
+   语言层 `link` 一个动态库是**源码作者显式选择**，由其自行承担运行期依赖；
+   不写 `link` 动态库的程序仍满足「只链 libc」的产物契约（§3.4、测试 C 组）。
 
 ### 33.2 语法：`extern fn` / `link` / `extern struct`
 
@@ -4368,8 +4384,10 @@ extern fn puts(s: rawptr<byte>): int;
 extern fn strlen(s: rawptr<byte>): int;
 extern fn printf(fmt: rawptr<byte>, ...): int;
 
-// 显式链入用户 C 扩展库；相对路径以**本文件所在目录**为基准解析。
-link "lib/libffi_demo.a";
+// 显式链入用户 C 扩展库；静态归档与动态库二选一，
+// 相对路径以**本文件所在目录**为基准解析。
+link "lib/libffi_demo.a";        // 静态：产物零第三方动态依赖
+// link "lib/libffi_demo.so";    // 动态：见 §33.8，运行期需能找到该库
 
 // repr(C) 结构体：只能经 rawptr<T> 访问，代表 C 侧内存。
 extern struct Point { x: int, y: byte, flag: bool }
@@ -4472,12 +4490,33 @@ fn main(): int { atexit(on_exit); return 0; }
 P 组用 `int64_t (*)(int64_t, void*)` 的 C 函数回调 Dial 具名函数并透传 `rawptr<void>`
 状态，验证标准 C calling convention 下 C 侧能安全调用 Dial 函数。
 
-### 33.8 `link` 的三条校验
+### 33.8 `link` 的校验与动态链接
 
-`link "xxx.a";` 在编译流程里做三件事：① 后缀必须是 `.a` / `.lib`，动态库一律拒绝；
-② 相对路径以**源文件所在目录**为基准解析并要求文件确实存在；
-③ 读前 8 字节校验 ar 归档魔数 `!<arch>\n`。通过后才把该 `.a` 追加进链接器输入。
-P 组用「真实存在的 `.so`」与「伪装成 `.a` 的文本」验证拒绝不是靠文件不存在蒙混过关。
+`link "...";` 在编译流程里做四件事：① 后缀白名单（`.a` / `.lib` / `.so` / `.dll` /
+`.dylib`，含 `libx.so.1` 这类带版本号的变体）；② 相对路径以**源文件所在目录**
+为基准解析并要求文件确实存在；③ 读前 8 字节按后缀验内容魔数；④ 静态库直接追加进
+链接器输入，动态库额外把所在目录写进产物的运行期查找路径。
+
+| 后缀 | 种类 | 校验魔数 | 运行期查找 |
+| --- | --- | --- | --- |
+| `.a` / `.lib` | 静态归档 | `!<arch>\n` | 无（已链入产物） |
+| `.so` / `.so.N` | ELF 共享对象 | `\x7fELF` | `-Wl,-rpath,<库目录>` → `RUNPATH` |
+| `.dll` | PE 动态库 | `MZ` | 需把 `.dll` 放到 exe 同目录或 `PATH`（PE 无 rpath） |
+| `.dylib` | Mach-O 动态库 | 32/64 位或 fat magic | `-Wl,-rpath,<库目录>` |
+
+动态库按**扩展名**判定格式而非宿主平台，因此交叉编译链接他平台库时校验同样成立。
+ELF / Mach-O 下编译器自动注入 `-Wl,-rpath,<库所在绝对目录>`，产物不设
+`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` 也能直接跑；P 组用 `readelf -d` 断言
+`RUNPATH` 已写入——而不是碰巧因为 `DT_NEEDED` 里带了绝对路径才成功。
+
+**动态链接是显式选择，代价要认**：链了 `.so` / `.dll` / `.dylib` 之后，产物不再是
+「零第三方动态依赖」的单文件，运行期必须能找到那份库（库被移动或删除即加载失败）。
+不写 `link` 动态库的程序仍是 §3.4 那套契约，C 组 `ldd` 检查照常生效。Windows 上
+PE 没有 rpath，请把 `.dll` 复制到 exe 同目录或加入 `PATH`；需要随产物分发时也可
+改用导入库 `.lib`（ar 格式）配 `.dll`。
+
+P 组用真实共享库做端到端（显式 `link` + `extern fn`，比对 `42 / 45`），再用三种
+后缀的纯文本伪装库与伪装的 `.a` 验证魔数拒绝不是靠「文件不存在」蒙混过关。
 
 ### 33.9 实现落点
 
@@ -4486,7 +4525,7 @@ P 组用「真实存在的 `.so`」与「伪装成 `.a` 的文本」验证拒绝
 | 词法 / LSP | `lexer.rs` / `lsp.rs` | 新增 `extern` / `link` 关键字与语义 token |
 | AST / 解析 | `ast.rs` / `parser.rs` | `ExternFnDecl` / `LinkDecl` / `CStructDef`，顶层声明解析 |
 | 包接口 | `package.rs` | `.diali` 白名单打穿 + 顶层逗号切分；`STDLIB_ABI 4 → 5` |
-| 编译流程 | `main.rs` | 语言层 extern 并入外部函数表；`link` 校验静态库 |
+| 编译流程 | `main.rs` | 语言层 extern 并入外部函数表；`link` 五类后缀 + 魔数校验、动态库目录注入 `-Wl,-rpath` |
 | 语义 | `semantic.rs` | `rawptr<CStruct>` 字段访问、数据总线内建、保留名与 C 布局白名单 |
 | 代码生成 | `codegen.rs` | C ABI 宽度映射、`abi_adapt` 五处对称转换、C 布局字段读写、FFI 内建分派 |
 | C Runtime | `stdlib/dial_ffi.c` | 四个数据总线函数（跳过长度头 / 复制构造） |
@@ -4501,11 +4540,13 @@ P 组用「真实存在的 `.so`」与「伪装成 `.a` 的文本」验证拒绝
 ### 33.11 测试与交付
 
 - 4 个正向示例：`ffi_hello`、`ffi_buffer`、`ffi_struct`、`ffi_callback`；
-- 18 个负向用例：动态库 / 非归档后缀、C 布局字段白名单、保留名与撞名、
-  C 变参位置、`rawptr<byte>` 字段访问、数据总线参数、`extern` 后跟错关键字等；
-- 新增 **P 组**：C 侧静态库 + `sizeof`/`offsetof` 比对 + 双向字段读写 + C 回调 +
-  真实 `.so` / 伪 `.a` 拒绝；
-- `bash tests/run_tests.sh` **A–P 全套通过（355 ✅ / 0 ❌）**，
+- 19 个负向用例：伪装动态库 / 动态库缺失 / 非归档后缀、C 布局字段白名单、
+  保留名与撞名、C 变参位置、`rawptr<byte>` 字段访问、数据总线参数、
+  `extern` 后跟错关键字等；
+- 新增 **P 组**：C 侧静态库 + `sizeof`/`offsetof` 比对 + 双向字段读写 + C 回调；
+  另编真实共享库做动态链接端到端并断言 ELF `RUNPATH`，再用伪装的
+  `.a` / `.so` / `.dll` / `.dylib` 验证魔数拒绝；
+- `bash tests/run_tests.sh` **A–P 全套通过（360 ✅ / 0 ❌）**，
   `tools/cve_check.py` 8/8、三平台 `zig cc` 编译通过。
 
 > **本轮交付范围**：按约定只做**本地提交**，不推送 GitHub、不打 tag、不发 Release。

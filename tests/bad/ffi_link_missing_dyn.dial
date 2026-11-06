@@ -1,0 +1,4 @@
+// 动态库后缀合法，但文件不存在 —— Fail-Fast 当场拒绝，
+// 不静默降级成「让链接器自己去系统路径找」。
+link "no_such_lib.so";
+fn main(): int { return 0; }

@@ -23,8 +23,9 @@
 #   N. 内存上界 + 所有权语义：a[i]=v 不得触发 COW 深拷贝（虚拟内存上限钉死 O(N²) 退化），
 #      并逐条核对 clone 独立 / COW 隔离 / 嵌套赋值 / 句柄元素数组（v0.99 新增）。
 #   O. 所有权 / 语义回归：误拒合法程序、堆字段悬垂、bytes[] 被拒（v0.99.1 修复）。
-#   P. FFI：语言层 extern fn + link 静态库 + extern struct（C ABI sizeof/offsetof 与 C 比对）
-#      + Dial↔C 双向字段读写 + C 回调状态透传 + 动态库/伪静态库拒绝（v1.04 新增）。
+#   P. FFI：语言层 extern fn + link 静态/动态库 + extern struct（C ABI sizeof/offsetof 与 C 比对）
+#      + Dial↔C 双向字段读写 + C 回调状态透传 + 动态链接 RUNPATH 端到端
+#      + 按魔数拒绝伪装的 .a / .so / .dll / .dylib（v1.04 新增）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -512,10 +513,11 @@ for src in tests/sem/*.dial; do
 done
 
 echo
-echo "== P) FFI：语言层 extern / link 静态库 / C ABI 结构体 / C 回调（v1.04） =="
+echo "== P) FFI：语言层 extern / link 静态+动态库 / C ABI 结构体 / C 回调 / 魔数校验（v1.04） =="
 FFI_DIR="$PWD/tests/ffi"
-# 1) 把 C 侧专项库编成静态归档。用户 C 扩展库的铁律：只认 .a / .lib，
-#    系统库（libc / libm）由 C 编译器默认动态解析，不进这条链路。
+# 1) 把 C 侧专项库编成静态归档（仍验 ar 魔数）。
+#    系统库（libc / libm）由 C 编译器默认动态解析，不进这条链路；
+#    .dialpkg 包分发仍强制静态（J 组铁律），与下面的语言层动态 link 是两条路。
 if ! ( cd "$FFI_DIR" && cc -O2 -c ffi_demo.c -o ffi_demo.o && ar rcs libffi_demo.a ffi_demo.o ) >"${TMP}/ffibuild.log" 2>&1; then
     echo "  ❌ FFI 专项静态库编译失败"; sed 's/^/       /' "${TMP}/ffibuild.log"; fail=1
 else
@@ -532,19 +534,63 @@ else
     fi
 fi
 
-# 3) J 组铁律：真实存在的动态库也必须被 link 拒绝（不能靠「文件不存在」蒙混过关）。
-printf 'not a real shared object' > "${TMP}/libfake.so"
-cat > "${TMP}/ffi_link_fake.dial" <<EOF
-link "${TMP}/libfake.so";
+# 3) 动态链接（v1.04 增补）：真实共享库必须能显式 link + 运行，且产物自带查找路径。
+#    按平台选后缀与编译参数；PE（Windows）没有 rpath 概念，只验链接与运行。
+case "$(uname -s)" in
+    Linux*)  DYN_EXT=so;    DYN_FLAGS="-shared -fPIC" ;;
+    Darwin*) DYN_EXT=dylib; DYN_FLAGS="-dynamiclib" ;;
+    MINGW*|MSYS*|CYGWIN*) DYN_EXT=dll; DYN_FLAGS="-shared -Wl,--export-all-symbols" ;;
+    *)       DYN_EXT=so;    DYN_FLAGS="-shared -fPIC" ;;
+esac
+DYN_LIB="${TMP}/libffi_dyn.${DYN_EXT}"
+if ! cc -O2 $DYN_FLAGS "$FFI_DIR/ffi_dyn_demo.c" -o "$DYN_LIB" >"${TMP}/ffidynbuild.log" 2>&1; then
+    echo "  ❌ FFI 动态库编译失败"; sed 's/^/       /' "${TMP}/ffidynbuild.log"; fail=1
+else
+    # link 用绝对路径（库编在 TMP 里）；extern fn 与静态库路径是同一套声明。
+    cat > "${TMP}/ffi_dyn_demo.dial" <<EOF
+extern fn dyn_add(a: int, b: int): int;
+extern fn dyn_scale_five(v: int): int;
+link "${DYN_LIB}";
+fn main(): int {
+    print(dyn_add(20, 22));
+    print(dyn_scale_five(9));
+    return 0;
+}
+EOF
+    if ! "$DIALC" build "${TMP}/ffi_dyn_demo.dial" -o "${TMP}/ffi_dyn_demo" >"${TMP}/ffidyn.log" 2>&1; then
+        echo "  ❌ 动态库 link 编译失败"; sed 's/^/       /' "${TMP}/ffidyn.log"; fail=1
+    elif ! timeout 30 env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH "${TMP}/ffi_dyn_demo" >"${TMP}/ffidynout.txt" 2>&1; then
+        echo "  ❌ 动态库程序运行失败（多半是 rpath 未生效）"; sed 's/^/       /' "${TMP}/ffidynout.txt"; fail=1
+    elif ! diff -u "$FFI_DIR/ffi_dyn_demo.expected" "${TMP}/ffidynout.txt" >"${TMP}/ffidyndiff.txt" 2>&1; then
+        echo "  ❌ 动态库程序输出不一致"; sed 's/^/       /' "${TMP}/ffidyndiff.txt"; fail=1
+    else
+        echo "  ✅ .${DYN_EXT} 动态链接端到端通过（explicit link + extern fn，无需 LD_LIBRARY_PATH）"
+    fi
+    # ELF：断言 RUNPATH 真的写进产物，而不是碰巧靠 DT_NEEDED 里的绝对路径跑起来。
+    if [ "$(uname -s)" = "Linux" ] && command -v readelf >/dev/null 2>&1; then
+        if readelf -d "${TMP}/ffi_dyn_demo" 2>/dev/null | grep -q "RUNPATH"; then
+            echo "  ✅ ELF RUNPATH 已注入（显式动态库目录随产物走）"
+        else
+            echo "  ❌ ELF 产物缺少 RUNPATH，动态库查找路径未被写入"; fail=1
+        fi
+    fi
+fi
+
+# 3b) 伪装动态库：三种平台后缀各一份，一律按魔数拒绝（不是靠文件不存在蒙混过关）。
+for ext in so dll dylib; do
+    printf 'not a real shared object at all' > "${TMP}/libfake_${ext}.${ext}"
+    cat > "${TMP}/ffi_link_fake_${ext}.dial" <<EOF
+link "${TMP}/libfake_${ext}.${ext}";
 fn main(): int { return 0; }
 EOF
-if "$DIALC" build "${TMP}/ffi_link_fake.dial" -o "${TMP}/ffi_fake" >"${TMP}/ffifake.log" 2>&1; then
-    echo "  ❌ link 竟然接受了真实存在的 .so"; fail=1
-elif ! grep -q "拒绝动态库" "${TMP}/ffifake.log"; then
-    echo "  ❌ 动态库拒绝的诊断信息缺失"; fail=1
-else
-    echo "  ✅ 真实存在的 .so 被编译期拒绝（J 组铁律）"
-fi
+    if "$DIALC" build "${TMP}/ffi_link_fake_${ext}.dial" -o "${TMP}/ffi_fake_${ext}" >"${TMP}/ffifake_${ext}.log" 2>&1; then
+        echo "  ❌ 伪装的 .${ext} 竟然被接受"; fail=1
+    elif ! grep -q "魔数" "${TMP}/ffifake_${ext}.log"; then
+        echo "  ❌ 伪装的 .${ext} 被拒绝，但诊断未说明魔数校验"; sed 's/^/       /' "${TMP}/ffifake_${ext}.log"; fail=1
+    else
+        echo "  ✅ 伪装的 .${ext} 按魔数拒绝"
+    fi
+done
 
 # 4) ar 归档魔数：后缀对但内容不是静态库，也当场拒绝。
 printf 'this is not an ar archive at all' > "${TMP}/fake.a"

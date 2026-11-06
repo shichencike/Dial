@@ -34,7 +34,11 @@
 - **语言层 `extern fn`**：直接写在 `.dial` 源码里，编译期生成 LLVM 外部声明、
   链接期由 C 编译器解析，不再强制绕 `.diali` → `.a` → `.dialpkg` → `install` → `import`。
   现有包机制完整保留、行为不变（见 [README §15](README.md#15-ffi-契约)）。
-- **语言层 `link "xxx.a";`**：显式链入用户 C 扩展库。相对路径以源文件所在目录为基准解析。
+- **语言层 `link "...";`**：显式链入用户 C 扩展库。相对路径以源文件所在目录为基准解析。
+- **语言层动态链接**：`link` 除静态归档外也接受 `.so` / `.dll` / `.dylib`
+  （含 `libx.so.1` 带版本号变体），按**扩展名**校验 ELF `\x7fELF` / PE `MZ` /
+  Mach-O 32、64 位或 fat magic；ELF / Mach-O 自动注入 `-Wl,-rpath,<库目录>`，
+  产物无需手工设 `LD_LIBRARY_PATH`。PE 无 rpath，`.dll` 需放 exe 同目录或 `PATH`。
 - **`extern struct`（C ABI / `repr(C)`）**：字段顺序、对齐、padding、sizeof 与 C 完全一致；
   只经 `rawptr<Struct>` 读写字段，不按值传递、不能用 `StructLit` 构造。
 - **`.diali` 类型白名单打穿**：`byte` / `bytes` / `rawptr<T>` / `fn(A, B): R` 全部放行；
@@ -54,8 +58,10 @@
 - `STDLIB_ABI` **4 → 5**（新增 `stdlib/dial_ffi.c` 四个数据总线函数），
   编译器版本 `1.3.0 → 1.4.0`；`make_stdlib_pkg.py` 默认 `--abi 5`、CI `--abi 5`。
 - 系统库（libc / libm）继续由 C 编译器**默认动态解析**，不进 `link`、不进 LTO 链路；
-  用户显式指定的 C 扩展库与所有 `.dialpkg` 仍**强制 `.a` / `.lib` 静态归档**，
-  并校验 ar 魔数 `!<arch>\n`，J 组三条硬规则一字未动。
+  所有 `.dialpkg` 仍**强制 `.a` / `.lib` 静态归档**并校验 ar 魔数 `!<arch>\n`，
+  J 组三条硬规则一字未动。语言层 `link` 则**静态 / 动态并存**：动态库按扩展名验
+  ELF / PE / Mach-O 魔数并注入 rpath，由源码作者显式承担运行期依赖；不写 `link`
+  动态库的程序仍满足「只链 libc」的默认产物契约（测试 C 组照常断言）。
 
 ### Fixed
 
@@ -67,12 +73,14 @@
 - 4 个正向示例：`ffi_hello`（语言层 extern + 系统库 + C 变参 + 双向字符串）、
   `ffi_buffer`（rawptr 喂 `memcpy` / `memcmp`）、`ffi_struct`（C ABI 字段读写）、
   `ffi_callback`（libc `atexit` 反调 Dial 函数）。
-- 18 个负向用例：`.so` / `.dll` / `.dylib` / 非归档后缀、`extern struct` 的
-  string/char/map 字段、保留名与撞名、C 变参不在末尾、`rawptr<byte>` 字段访问、
-  `as_c_str` 带参、方法用错类型、数据总线参数个数/类型、struct 撞名、`extern` 后跟错关键字。
+- 19 个负向用例：伪装的 `.so` / `.dll` / `.dylib`、动态库缺失、非归档后缀、
+  `extern struct` 的 string/char/map 字段、保留名与撞名、C 变参不在末尾、
+  `rawptr<byte>` 字段访问、`as_c_str` 带参、方法用错类型、数据总线参数个数/类型、
+  struct 撞名、`extern` 后跟错关键字。
 - 新增 **P 组**：把 C 侧专项库编成 `.a`，逐项比对 `sizeof` / `offsetof` 与 C 完全一致，
-  验证 Dial↔C 双向字段读写、C 回调状态透传，并用真实存在的 `.so` 与伪装的 `.a`
-  验证编译期拒绝（不是靠「文件不存在」蒙混过关）。
+  验证 Dial↔C 双向字段读写、C 回调状态透传；另编真实共享库做动态链接端到端
+  （显式 `link` + `extern fn`，并用 `readelf -d` 断言 `RUNPATH` 已注入），再用伪装的
+  `.a` / `.so` / `.dll` / `.dylib` 验证魔数拒绝不是靠「文件不存在」蒙混过关。
 
 ---
 

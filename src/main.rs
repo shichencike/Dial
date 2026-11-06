@@ -323,12 +323,24 @@ fn main() {
         ));
     }
 
-    // 2.7) v1.04 FFI：校验并收集 `link "xxx.a";` 声明的静态库。
-    //      系统库（libc/libm）由 C 编译器默认动态解析，不走这里，也不进 LTO 链路；
-    //      用户 C 扩展库一律强制 .a / .lib 静态归档，保证产物零第三方动态依赖。
+    // 2.7) v1.04 FFI：校验并收集 `link "...";` 声明的库。
+    //      静态 .a / .lib 与动态 .so / .dll / .dylib 都按后缀验内容魔数；
+    //      动态库额外收集所在目录，final_link 会注入 -Wl,-rpath 供运行期查找。
+    //      系统库（libc/libm）由 C 编译器默认动态解析，不走这里、也不进 LTO 链路。
+    //      .dialpkg 包分发仍强制静态（J 组铁律一字未动）。
+    let mut ffi_rpaths: Vec<PathBuf> = Vec::new();
     for l in &program.links {
         match resolve_ffi_link(&l.path, Path::new(&src_path)) {
-            Ok(p) => pkg_libs.push(p),
+            Ok(lib) => {
+                if lib.kind == FfiLibKind::Dynamic {
+                    if let Some(dir) = lib.path.parent() {
+                        if !ffi_rpaths.iter().any(|d| d.as_path() == dir) {
+                            ffi_rpaths.push(dir.to_path_buf());
+                        }
+                    }
+                }
+                pkg_libs.push(lib.path);
+            }
             Err(msg) => {
                 eprintln!("[dialc 错误] 语义错误（第 {} 行 第 {} 列）：{}", l.line, l.col, msg);
                 std::process::exit(1);
@@ -416,7 +428,7 @@ fn main() {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
-            if let Err(e) = link(&obj_path, &gen_exe, safety, &pkg_libs, &gen) {
+            if let Err(e) = link(&obj_path, &gen_exe, safety, &pkg_libs, &ffi_rpaths, &gen) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
@@ -460,7 +472,7 @@ fn main() {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
-            if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &useo) {
+            if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &ffi_rpaths, &useo) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
@@ -473,14 +485,14 @@ fn main() {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
-            if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &o) {
+            if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &ffi_rpaths, &o) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
         }
     } else {
         // 非 LTO 模式（debug / safe，或 fast 但无 clang）：直接用 inkwell 写出的原生 .o 链接。
-        if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &LinkOpts::default()) {
+        if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &ffi_rpaths, &LinkOpts::default()) {
             eprintln!("{}", e);
             std::process::exit(1);
         }
@@ -547,39 +559,59 @@ pub fn first_missing_package(imports: &[String]) -> Option<String> {
 /// 的分帧解析错位（实测表现为「一打开 import 了包的文档就卡死」）。
 /// CLI 构建传 stdout（构建日志），LSP 传 `window/logMessage` 通知——由调用方决定，
 /// 函数本身无权替调用方选往哪儿写。
-/// v1.04 FFI：校验并解析 `link "libfoo.a";` 声明的静态库路径。
+/// v1.04 FFI：`link "...";` 声明的库种类。
 ///
-/// 三条硬约束（与 J 组包安装铁律同源）：
-///  1. **只接受 `.a` / `.lib`**；`.so` / `.dll` / `.dylib`（含 `libx.so.1`）编译期拒绝。
-///  2. 相对路径以**源文件所在目录**为基准解析，并校验文件确实存在。
-///  3. 校验 ar 归档魔数 `!<arch>\n`——后缀对了但内容不是静态归档也当场拒绝。
+/// 静态归档直接进链接器输入；动态共享库除了进输入，还要额外注入运行期查找路径
+/// （见 `final_link` 的 `-Wl,-rpath`）。`.dialpkg` 包分发走另一条链路
+/// （`package.rs` + J 组），仍强制静态，不受这里影响。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FfiLibKind {
+    Static,
+    Dynamic,
+}
+
+struct FfiLib {
+    path: PathBuf,
+    kind: FfiLibKind,
+}
+
+/// v1.04 FFI：校验并解析 `link "...";` 声明的库路径。
 ///
-/// 系统库（libc / libm / pthread）刻意**不在这里**：它们由 C 编译器按平台默认
-/// 动态解析（Linux 的 libc.so、Windows 的 CRT），既保持系统兼容性，又不会把
-/// 庞大系统库塞进 LTO 编译链路导致耗时爆炸。
-fn resolve_ffi_link(spec: &str, src_path: &Path) -> Result<PathBuf, String> {
+/// 五条硬约束：
+///  1. **后缀白名单**：静态 `.a` / `.lib`；动态 `.so`（含 `libx.so.1`）、`.dll`、`.dylib`。
+///     其余后缀一律拒绝——系统库（libc / libm / pthread）由 C 编译器按平台默认动态解析，
+///     不写 `link`，避免把庞大系统库塞进 LTO 链路。
+///  2. 相对路径以**源文件所在目录**为基准解析，并要求文件确实存在（Fail-Fast，
+///     绝不静默降级成「链接器自己去找」）。
+///  3. 按后缀校验**内容魔数**：静态 `!<arch>\n`；ELF `.so` 为 `\x7fELF`；PE `.dll`
+///     为 `MZ`；Mach-O `.dylib` 为 32/64 位或 fat 的 magic。后缀对但内容是文本
+///     一律当场拒绝——伪装库混进链接器只会换来一句莫名其妙的 ld 报错。
+///  4. 动态库按**扩展名**判定格式（而非宿主平台），交叉编译链接他平台库时同样成立。
+///  5. **包分发铁律不动**：`.dialpkg` 的 `targets` 仍只认 `.a` / `.lib`（J 组锁死）。
+///     语言层 `link` 动态库是源码作者显式选择，由其自行承担运行期依赖。
+fn resolve_ffi_link(spec: &str, src_path: &Path) -> Result<FfiLib, String> {
     let file_part = Path::new(spec)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(spec);
     let lower = file_part.to_ascii_lowercase();
-    if lower.ends_with(".so")
-        || lower.contains(".so.")
-        || lower.ends_with(".dll")
-        || lower.ends_with(".dylib")
-    {
+
+    let (kind, expected) = if lower.ends_with(".a") || lower.ends_with(".lib") {
+        (FfiLibKind::Static, "ar 归档")
+    } else if lower.ends_with(".so") || lower.contains(".so.") {
+        (FfiLibKind::Dynamic, "ELF 共享对象")
+    } else if lower.ends_with(".dll") {
+        (FfiLibKind::Dynamic, "PE 动态库")
+    } else if lower.ends_with(".dylib") {
+        (FfiLibKind::Dynamic, "Mach-O 动态库")
+    } else {
         return Err(format!(
-            "FFI 链接只接受静态库 .a / .lib，拒绝动态库 '{}'（J 组铁律：产物不得引入第三方动态依赖）",
-            spec
-        ));
-    }
-    if !(lower.ends_with(".a") || lower.ends_with(".lib")) {
-        return Err(format!(
-            "link 的路径必须以 .a 或 .lib 结尾（静态归档），遇到 '{}'；\
+            "link 的路径必须是静态归档 .a / .lib 或动态库 .so / .dll / .dylib，遇到 '{}'；\
              系统库（libc / libm）由 C 编译器默认链接，不需要也不允许用 link 声明",
             spec
         ));
-    }
+    };
+
     let raw = Path::new(spec);
     let candidate = if raw.is_absolute() {
         raw.to_path_buf()
@@ -592,28 +624,54 @@ fn resolve_ffi_link(spec: &str, src_path: &Path) -> Result<PathBuf, String> {
     };
     let canonical = candidate.canonicalize().map_err(|e| {
         format!(
-            "link 声明的静态库 '{}' 无法读取（解析为 {}）：{}",
+            "link 声明的库 '{}' 无法读取（解析为 {}）：{}",
             spec,
             candidate.display(),
             e
         )
     })?;
+
     let mut f = fs::File::open(&canonical)
-        .map_err(|e| format!("无法打开静态库 '{}'：{}", canonical.display(), e))?;
+        .map_err(|e| format!("无法打开库 '{}'：{}", canonical.display(), e))?;
     let mut magic = [0u8; 8];
     f.read_exact(&mut magic).map_err(|_| {
         format!(
-            "静态库 '{}' 内容不完整（不足 8 字节），不是合法的 ar 归档",
-            canonical.display()
+            "库 '{}' 内容不完整（不足 8 字节），不是合法的 {}",
+            canonical.display(),
+            expected
         )
     })?;
-    if &magic != b"!<arch>\n" {
+
+    let m4 = &magic[..4];
+    let ok = match kind {
+        FfiLibKind::Static => &magic == b"!<arch>\n",
+        FfiLibKind::Dynamic => {
+            if lower.ends_with(".so") || lower.contains(".so.") {
+                m4 == &b"\x7fELF"[..]
+            } else if lower.ends_with(".dll") {
+                &magic[..2] == &b"MZ"[..]
+            } else {
+                // Mach-O：32/64 位薄二进制与 fat 二进制的大小端变体。
+                const MACHO: [[u8; 4]; 8] = [
+                    [0xfe, 0xed, 0xfa, 0xce], [0xce, 0xfa, 0xed, 0xfe],
+                    [0xfe, 0xed, 0xfa, 0xcf], [0xcf, 0xfa, 0xed, 0xfe],
+                    [0xca, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca],
+                    [0xca, 0xfe, 0xba, 0xbf], [0xbf, 0xba, 0xfe, 0xca],
+                ];
+                MACHO.iter().any(|m| m4 == &m[..])
+            }
+        }
+    };
+    if !ok {
         return Err(format!(
-            "静态库 '{}' 缺少 ar 归档魔数 `!<arch>\\n`，不是真正的静态库",
-            canonical.display()
+            "{} '{}' 缺少合法的{}魔数，后缀对了但内容不是真正的库（拒绝伪装文件）",
+            if kind == FfiLibKind::Static { "静态库" } else { "动态库" },
+            canonical.display(),
+            expected
         ));
     }
-    Ok(canonical)
+
+    Ok(FfiLib { path: canonical, kind })
 }
 
 pub fn resolve_imports(
@@ -909,16 +967,17 @@ fn link(
     exe: &Path,
     safety: SafetyMode,
     extra_libs: &[PathBuf],
+    ffi_rpaths: &[PathBuf],
     opts: &LinkOpts,
 ) -> Result<(), String> {
     if opts.lto {
         // LTO：C 运行时逐文件编成 LTO .o，与用户胖对象一起整体重排。
         let runtime_objs = compile_runtime_lto(safety, opts)?;
-        final_link(obj, exe, extra_libs, &[], &runtime_objs, opts)
+        final_link(obj, exe, extra_libs, &[], &runtime_objs, ffi_rpaths, opts)
     } else {
         // 非 LTO：优先已安装包，否则实时编译源码归档成 .a。
         let stdlib_libs = resolve_stdlib_archive(safety)?;
-        final_link(obj, exe, extra_libs, &stdlib_libs, &[], opts)
+        final_link(obj, exe, extra_libs, &stdlib_libs, &[], ffi_rpaths, opts)
     }
 }
 
@@ -1053,6 +1112,7 @@ fn final_link(
     extra_libs: &[PathBuf],
     stdlib_libs: &[PathBuf],
     runtime_objs: &[PathBuf],
+    ffi_rpaths: &[PathBuf],
     opts: &LinkOpts,
 ) -> Result<(), String> {
     // LTO/PGO 依赖 clang 的 bitcode 链路，链接驱动也必须用 clang。
@@ -1106,6 +1166,15 @@ fn final_link(
     }
     // v1.00：浮点数学内建（sqrt / pow / floor / ceil / round / fabs）来自 libm。
     link_cmd.arg("-lm");
+    // v1.04：语言层 `link` 声明的动态库需要运行期查找路径。
+    // ELF / Mach-O 用 -Wl,-rpath 把库所在目录写进 RUNPATH，产物直接可跑，
+    // 不必手工设 LD_LIBRARY_PATH / DYLD_LIBRARY_PATH；PE（Windows）没有 rpath
+    // 概念，需把 .dll 放到 exe 同目录或 PATH（见 README §33.8）。
+    if !cfg!(windows) {
+        for dir in ffi_rpaths {
+            link_cmd.arg(format!("-Wl,-rpath,{}", dir.display()));
+        }
+    }
     link_cmd.arg("-o").arg(exe);
     if !run_ok(&mut link_cmd) {
         return Err(format!("链接失败：无法用 {} 生成 {}", cc, exe.display()));
