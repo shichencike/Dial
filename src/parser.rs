@@ -35,9 +35,14 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
     let mut externs = Vec::new();
     let mut links = Vec::new();
     let mut cstructs = Vec::new();
+    let mut tests = Vec::new();
     while !p.at_end() {
         if p.check(&TokenKind::Import) {
             imports.push(p.parse_import()?);
+        } else if p.at_test_def() {
+            // v1.04 工具链：顶层 `test "名字" { ... }`。用「Ident + 字符串」识别而非
+            // 新增关键字，`test` 作普通标识符/函数名依然合法。
+            tests.push(p.parse_test_def()?);
         } else if p.check(&TokenKind::Struct) {
             structs.push(p.parse_struct_def()?);
         } else if p.check(&TokenKind::Const) {
@@ -77,6 +82,7 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
         externs,
         links,
         cstructs,
+        tests,
     })
 }
 
@@ -233,6 +239,61 @@ impl Parser {
         }
         self.expect(TokenKind::Semicolon)?;
         Ok(name)
+    }
+
+    /// 顶层是否是一个 `test "名字" { ... }` 块。
+    ///
+    /// 刻意把 `test` 当成普通标识符来认（后面必须紧跟字符串字面量），
+    /// 这样 `var test: int = 1;` / `fn test(): int` 都不受影响，
+    /// 不需要为一次工具链增补而往语言里塞一个会破坏现有程序的关键字。
+    fn at_test_def(&self) -> bool {
+        match self.peek_kind() {
+            TokenKind::Ident(s) if s == "test" => {
+                matches!(&self.peek_at(1).kind, TokenKind::StringLit(_))
+            }
+            _ => false,
+        }
+    }
+
+    /// `test "名字" { 语句... }`：块内就是普通语句（可直接用 `assert`）。
+    /// 名字允许重复——`dialc test` 会按出现顺序逐个运行，重名时诊断里带上序号。
+    fn parse_test_def(&mut self) -> Result<TestDef> {
+        let start = self.advance(); // Ident("test")
+        let name_tok = self.peek().clone();
+        let name = match &name_tok.kind {
+            TokenKind::StringLit(s) => {
+                self.advance();
+                s.clone()
+            }
+            other => {
+                return Err(DialcError::new(
+                    format!(
+                        "语法错误：test 后必须是测试名的字符串字面量，例如 test \"addition\" {{ ... }}，但遇到 {:?}",
+                        other
+                    ),
+                    name_tok.line,
+                    name_tok.col,
+                ))
+            }
+        };
+        if name.trim().is_empty() {
+            return Err(DialcError::new(
+                "语法错误：test 的名字不能为空",
+                start.line,
+                start.col,
+            ));
+        }
+        let body = self.parse_block()?;
+        // 块后允许一个可选分号（`test "x" {...};`），写了就吃掉，不写也合法。
+        if self.check(&TokenKind::Semicolon) {
+            self.advance();
+        }
+        Ok(TestDef {
+            name,
+            body,
+            line: start.line,
+            col: start.col,
+        })
     }
 
     /// v1.04 FFI：`extern fn name(a: T, b: U): R;`（也支持尾部 `...` C 变参）。

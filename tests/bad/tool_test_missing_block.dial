@@ -1,0 +1,3 @@
+// v1.04 工具链：test "名" 后必须跟语句块 { ... }，缺块应语法报错。
+test "no block"
+fn main(): int { return 0; }

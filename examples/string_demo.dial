@@ -59,8 +59,9 @@ fn main(): int {
     print("[string] s.clone() 内容 ->");
     print(c);
 
-    // 说明：`+` 运算符**不**对 string 重载。Dial 不做隐式运算符重载，
-    // 字符串拼接必须显式调用 concat()，语义唯一、无歧义。
+    // 说明：`+` 对 string 已重载为拼接（v1.00 起）：`"a" + "b"` → `ab`，
+    // `s += "b"` 同样可用。`concat()` 与之等价，按可读性选用即可；
+    // 这里保留 concat() 只是为了演示该方法本身。
     let w: string = s.concat(" World");
     print("[string] s.concat(\" World\") ->");
     print(w);

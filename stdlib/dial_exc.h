@@ -2,6 +2,7 @@
 #define DIAL_EXC_H
 
 #include <setjmp.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 /*
@@ -42,6 +43,8 @@ void      *dial_exbuf_take_err(DialExBuf *b);
 
 /* 未捕获异常（throw 出现在任何 try 之外）：打印消息并终止进程，绝不静默继续。 */
 void       dial_panic(const char *msg);
+/* v1.04 工具链（A7）：同上，但额外打印抛出点的 文件:行:列（编译期常量传入）。 */
+void       dial_panic_loc(const char *msg, const char *file, int64_t line, int64_t col);
 
 /* ============================================================================
  *  运行时异常栈（v0.98.1）：跨函数 unwinding 的关键

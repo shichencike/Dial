@@ -67,6 +67,10 @@ impl SafetyMode {
 /// LLVM bitcode（供 LTO / PGO 流水线消费）。
 pub struct CgOpts {
     pub safety: SafetyMode,
+    /// 当前编译单元的源文件名（v1.04 工具链 / A7）：panic、断言失败、未捕获异常
+    /// 的运行时诊断会把「文件:行:列」一起打出来，便于稍有规模的程序定位。
+    /// 多文件 `import` 合并编译时取**主源文件**路径（各块的行列仍按各自文件准确）。
+    pub src_file: String,
     /// true（仅 --fast 模式）：用 `OptimizationLevel::Aggressive`（等价于 O3）生成机器码，
     /// 并显式打开宿主 SIMD 特征（x86 的 AVX2 / ARM64 的 NEON），让 LLVM 的循环向量化器
     /// 与循环展开器全力工作。
@@ -135,6 +139,11 @@ pub struct CodeGen<'ctx> {
     /// 用于区分「C ABI 布局结构体」（字段 bool/byte 为 1 字节）与
     /// 「Dial 值语义结构体」（字段按内部宽度），以便裸指针字段读写时做正确的宽度转换。
     cstruct_names: std::collections::HashSet<String>,
+    /// A7：当前编译单元源文件名，随运行时诊断一起输出。
+    src_file: String,
+    /// A7：当前正在生成的语句位置（1 起行列）。由 `gen_stmt` 入口写入；
+    /// `Expr` 不带位置，panic/assert/throw 这些「发生在某条语句里」的失败据此定位。
+    cur_pos: std::cell::Cell<(usize, usize)>,
 }
 
 /// 编译入口：接收校验后的 AST、函数签名表、结构体表，生成并写出目标文件 `.o`。
@@ -169,6 +178,8 @@ pub fn compile(
         goto_analysis: RefCell::new(GotoAnalysis::default()),
         safety: opts.safety,
         cstruct_names: program.cstructs.iter().map(|c| c.name.clone()).collect(),
+        src_file: opts.src_file.clone(),
+        cur_pos: std::cell::Cell::new((0, 0)),
     };
 
     cg.build_struct_types(program);
@@ -444,6 +455,11 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_void("dial_kvmap_release", &[i8b.into()]);
         // v1.00：断言 / 退出 / 浮点数学内建
         self.decl_void("dial_assert_fail", &[i8b.into()]);
+        // v1.04 工具链（A7）：带源码位置的失败诊断，签名统一 (msg, file, line, col)。
+        self.decl_void(
+            "dial_assert_fail_loc",
+            &[i8b.into(), i8b.into(), i64b.into(), i64b.into()],
+        );
         self.decl_void("dial_exit", &[i64b.into()]);
         self.decl_func("sqrt", f64b, &[f64b.into()]);
         self.decl_func("pow", f64b, &[f64b.into(), f64b.into()]);
@@ -532,6 +548,10 @@ impl<'ctx> CodeGen<'ctx> {
         // （未捕获异常曾因此只打印出一个数字，而不是错误消息）。
         self.decl_func("dial_string_cstr", i8b, &[i8b.into()]);
         self.decl_void("dial_panic", &[i8b.into()]);
+        self.decl_void(
+            "dial_panic_loc",
+            &[i8b.into(), i8b.into(), i64b.into(), i64b.into()],
+        );
 
         // setjmp **必须**由「包含 try 的那个函数」亲自调用（IR 侧直接发起）：
         // jmp_buf 里存的是调用点的栈指针，若包在 C 助手函数里、助手一返回，
@@ -1093,6 +1113,31 @@ impl<'ctx> CodeGen<'ctx> {
         let n = self.str_id.get();
         self.str_id.set(n + 1);
         n
+    }
+
+    /// A7：发射一条**带源码位置**的失败诊断。
+    ///
+    /// `dial_panic_loc` / `dial_assert_fail_loc` 的 C ABI 签名统一为
+    /// `(const char *msg, const char *file, int64_t line, int64_t col)`。
+    /// 位置取 `gen_stmt` 入口记下的当前语句行列——`Expr` 本身不带位置，
+    /// 但「panic 发生在哪一条语句」这个信息在语句层是齐全的。
+    /// 文件名是编译期常量串，行列是编译期常量整数，运行期零额外开销。
+    fn emit_fail_loc(&self, callee: &str, msg: BasicMetadataValueEnum<'ctx>) {
+        let (line, col) = self.cur_pos.get();
+        let file = self.global_string(
+            &format!("loc.file.{}", self.next_str_id()),
+            &self.src_file,
+        );
+        let i64t = self.context.i64_type();
+        self.call_c_void(
+            callee,
+            &[
+                msg,
+                file.into(),
+                i64t.const_int(line as u64, false).into(),
+                i64t.const_int(col as u64, false).into(),
+            ],
+        );
     }
 
     /// 解析 `/proc/cpuinfo` 的 flags 行（x86 的 feature 列表），返回以空格分隔的标志集合。
@@ -1818,7 +1863,8 @@ impl<'ctx> CodeGen<'ctx> {
         // 结构体头部的字节而不是错误消息（曾实测只打印出一个 "9"）。
         let msg = self.call_c("dial_error_msg", &[err.into()]);
         let cstr = self.call_c("dial_string_cstr", &[msg.into()]);
-        self.call_c_void("dial_panic", &[cstr.into()]);
+        // A7：未捕获异常同样带上抛出点的「文件:行:列」。
+        self.emit_fail_loc("dial_panic_loc", cstr.into());
         self.builder.build_unreachable().unwrap();
         Ok(())
     }
@@ -1918,6 +1964,9 @@ impl<'ctx> CodeGen<'ctx> {
         functions: &HashMap<String, FuncInfo>,
         structs: &StructTable,
     ) -> Result<()> {
+        // A7：先记下当前语句位置，供 panic / assert / 未捕获异常写进运行时诊断。
+        // 嵌套语句递归调用 gen_stmt 时会覆盖为更精确的内层位置，正是我们要的。
+        self.cur_pos.set(crate::semantic::stmt_pos(stmt));
         match stmt {
             Stmt::VarDecl {
                 name,
@@ -5109,7 +5158,8 @@ impl<'ctx> CodeGen<'ctx> {
                 } else {
                     self.global_string("assert.default", "assert 失败").into()
                 };
-                self.call_c_void("dial_assert_fail", &[msg]);
+                // A7：断言失败带「文件:行:列」，不再是只有一句「assert 失败」。
+                self.emit_fail_loc("dial_assert_fail_loc", msg);
                 self.builder.build_unreachable().unwrap();
                 self.builder.position_at_end(ok_bb);
                 Ok(zero)
@@ -5117,7 +5167,7 @@ impl<'ctx> CodeGen<'ctx> {
             "panic" => {
                 let m = gen(&args[0])?;
                 let cstr = self.call_c("dial_string_cstr", &[m.into()]);
-                self.call_c_void("dial_panic", &[cstr.into()]);
+                self.emit_fail_loc("dial_panic_loc", cstr.into());
                 Ok(zero)
             }
             "exit" => {

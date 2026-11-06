@@ -2961,7 +2961,10 @@ fn check_type_wellformed(t: &Type, ctx: &str, line: usize, col: usize) -> Result
             } else {
                 Err(DialcError::new(
                     format!(
-                        "语义错误：{} 是 {}[] 类型，但当前版本动态数组元素类型只支持 int 与句柄类型（string / int[] / map / error / channel / 不透明指针）",
+                        "语义错误：{} 是 {}[] 类型，但动态数组元素类型只支持标量\n\
+                         （int / float / bool / char / byte）与句柄类型\n\
+                         （string / bytes / 数组 / map / set / kvmap / error / channel / 不透明句柄）；\n\
+                         结构体与 C ABI 结构体不能作数组元素",
                         ctx,
                         elem.as_ref().name()
                     ),
@@ -3315,7 +3318,9 @@ fn check_moved_expr(
 /// 因此一条 `let c: char = 'a' + 1;` 报出来的错误天然是「不知道在哪」。
 /// 有了语句位置，`check_stmt_at` 就能把它盖到出错的那条语句上——
 /// 否则编辑器里看到的是「第一行一个红点，真正的错误你自己找」。
-fn stmt_pos(stmt: &Stmt) -> (usize, usize) {
+/// 求一条语句的 (行, 列)。codegen 也用它把运行时失败（panic / assert）定位到源码行，
+/// 故暴露为 crate 内可见——语义层与代码生成层必须共用同一套位置口径。
+pub(crate) fn stmt_pos(stmt: &Stmt) -> (usize, usize) {
     match stmt {
         Stmt::VarDecl { line, col, .. }
         | Stmt::Assign { line, col, .. }

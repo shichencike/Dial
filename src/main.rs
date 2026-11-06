@@ -21,8 +21,10 @@ mod lexer;
 mod lsp;
 mod package;
 mod parser;
+mod pkgbuild;
 mod semantic;
 
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -60,13 +62,37 @@ fn main() {
         return;
     }
 
-    if args.len() < 3 {
-        eprintln!("用法: dialc <build|run|install> <源文件.dial|包.dialpkg|包URL> [-o 输出] [--no-link]");
-        eprintln!("      dialc version | --version | -V   显示版本号");
-        eprintln!("      dialc install <URL> [--sha256 <哈希>]   从 URL 安装包（见 README §25.9）");
+    if args.len() < 2 {
+        print_usage();
         std::process::exit(1);
     }
     let command = args[1].as_str();
+
+    // v1.04 工具链：不需要位置参数的命令先分流（list 无参、help 只打印用法），
+    // 其余命令各自在内部校验参数——避免「dialc list」被 args[2] 索引直接 panic。
+    match command {
+        "help" | "--help" | "-h" => {
+            print_usage();
+            return;
+        }
+        "list" => {
+            ensure_no_extra(&args, 2);
+            cmd_list();
+            return;
+        }
+        "check" | "fmt" | "test" | "new" | "uninstall" | "pack" => {
+            dispatch_tool(command, &args);
+            return;
+        }
+        _ => {}
+    }
+
+    // build / run / install 都需要恰好一个位置参数。
+    if args.len() < 3 {
+        eprintln!("命令 '{}' 缺少参数。", command);
+        print_usage();
+        std::process::exit(1);
+    }
     let src_path = args[2].clone();
 
     // `dialc install <包.dialpkg | URL>`：解压到全局缓存，项目目录零侵入（§25.1）。
@@ -157,7 +183,7 @@ fn main() {
     }
 
     if !matches!(command, "build" | "run") {
-        eprintln!("未知命令 '{}'，仅支持 build / run / install", command);
+        eprintln!("未知命令 '{}'。可用命令见 `dialc help`。", command);
         std::process::exit(1);
     }
 
@@ -214,8 +240,19 @@ fn main() {
                 }
             }
             other => {
-                eprintln!("未知参数 '{}'", other);
-                i += 1;
+                // A3：旧实现只打印一行「未知参数」就继续编译，甚至以 rc=0 产出可执行文件，
+                // 让人误以为 `dialc build a.dial b.dial` 把两个文件都编进去了。
+                // Fail-Fast 铁律要求：任何不认识的输入一律当场失败，绝不静默吞掉。
+                if other.ends_with(".dial") || other.ends_with(".diali") {
+                    eprintln!(
+                        "未知参数 '{}'：dialc 一次只编译一个源文件。\n\
+                         多个 .dial 请改用本地源码模块：`import \"./xxx.dial\";`（见 README §34）。",
+                        other
+                    );
+                } else {
+                    eprintln!("未知参数 '{}'（可用选项见 `dialc help`）", other);
+                }
+                std::process::exit(1);
             }
         }
     }
@@ -249,113 +286,26 @@ fn main() {
         pgo = false;
     }
 
-    let source = match fs::read_to_string(&src_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("无法读取源文件 {}: {}", src_path, e);
-            std::process::exit(1);
-        }
-    };
-
-    // 1) 词法
-    let tokens = match lexer::lex(&source) {
-        Ok(t) => t,
+    // 1~3) 词法 / 语法 / 语义（含本地源码模块合并、包解析、FFI 声明校验）
+    //      统一交给 frontend()，让 build / run / check / test 共用同一条前端流水线——
+    //      否则「检查通过」和「实际编译」可能因为两套解析逻辑而给出不同结论。
+    let fe = match frontend(&src_path, &mut |m| println!("{}", m)) {
+        Ok(f) => f,
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(1);
         }
     };
 
-    // 2) 语法（**两阶段**解析）
-    //
-    //    阶段一：先解析一遍，只为拿到 `import` 列表；
-    //    阶段二：解析完这些包（从而知道它们声明了哪些不透明类型名）之后再重新解析，
-    //            这样 `var h: DemoHandle = demo_new(1);` 里的包类型名
-    //            在**语法阶段**就能被识别为 Type::Opaque，而不是被误当成结构体。
-    //    多解析一遍的成本可以忽略；换来的是类型名从一开始就正确。
-    let probe = match parser::parse(tokens.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // 2.5) 解析 import：定位包 -> 校验哈希 -> 读 .diali 签名 -> 选出本平台机器码
-    //      编译器在这里替用户做完**全部**决策：不写路径、不写平台、不写版本。
-    let (mut externs, mut pkg_libs, opaque_types) = match resolve_imports(&probe.imports, &mut |m| {
-        println!("{}", m)
-    }) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let mut program = match parser::parse_with(tokens, &opaque_types) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // 2.6) v1.04 FFI：把语言层 `extern fn` 并入外部函数表。
-    //      之后语义检查与 codegen 对「包函数」和「语言层 extern」一视同仁——
-    //      调用方写的都是普通函数调用，函数体在链接期由 .a 或系统库提供。
-    for e in &program.externs {
-        if externs.iter().any(|(n, _)| n == &e.name) {
-            eprintln!(
-                "[dialc 错误] 语义错误：外部函数 '{}' 重复声明（包 .diali 与源码 extern fn 撞名）",
-                e.name
-            );
-            std::process::exit(1);
-        }
-        externs.push((
-            e.name.clone(),
-            semantic::FuncInfo {
-                params: e.params.iter().map(|(_, t)| t.clone()).collect(),
-                ret: e.ret.clone(),
-                defaults: vec![None; e.params.len()],
-                variadic: e.variadic,
-            },
-        ));
+    // test 块是「只在 dialc test 下编译」的测试代码，不进正式产物。
+    // 明确告知一声，避免写了 test 却误以为 build 已经跑过它们。
+    if !fe.program.tests.is_empty() {
+        eprintln!(
+            "ℹ️  发现 {} 个 test 块，普通 build/run 不编译它们；用 `dialc test {}` 运行。",
+            fe.program.tests.len(),
+            src_path
+        );
     }
-
-    // 2.7) v1.04 FFI：校验并收集 `link "...";` 声明的库。
-    //      静态 .a / .lib 与动态 .so / .dll / .dylib 都按后缀验内容魔数；
-    //      动态库额外收集所在目录，final_link 会注入 -Wl,-rpath 供运行期查找。
-    //      系统库（libc/libm）由 C 编译器默认动态解析，不走这里、也不进 LTO 链路。
-    //      .dialpkg 包分发仍强制静态（J 组铁律一字未动）。
-    let mut ffi_rpaths: Vec<PathBuf> = Vec::new();
-    for l in &program.links {
-        match resolve_ffi_link(&l.path, Path::new(&src_path)) {
-            Ok(lib) => {
-                if lib.kind == FfiLibKind::Dynamic {
-                    if let Some(dir) = lib.path.parent() {
-                        if !ffi_rpaths.iter().any(|d| d.as_path() == dir) {
-                            ffi_rpaths.push(dir.to_path_buf());
-                        }
-                    }
-                }
-                pkg_libs.push(lib.path);
-            }
-            Err(msg) => {
-                eprintln!("[dialc 错误] 语义错误（第 {} 行 第 {} 列）：{}", l.line, l.col, msg);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // 3) 语义 + 数据流/逃逸分析
-    let (functions, structs) = match analyze(&mut program, &externs) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
-    };
 
     // 4) 代码生成（第一步：emit .o，需在 LLVM 存在时执行）
     //
@@ -381,14 +331,15 @@ fn main() {
         safety,
         aggressive: fast,
         bc_out: if fast { Some(bc_path.clone()) } else { None },
+        src_file: fe.src_file.clone(),
     };
     if let Err(e) = codegen::compile(
-        &program,
-        &functions,
-        &structs,
+        &fe.program,
+        &fe.functions,
+        &fe.structs,
         &obj_path,
         &cg_opts,
-        &externs,
+        &fe.externs,
     ) {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -428,7 +379,7 @@ fn main() {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
-            if let Err(e) = link(&obj_path, &gen_exe, safety, &pkg_libs, &ffi_rpaths, &gen) {
+            if let Err(e) = link(&obj_path, &gen_exe, safety, &fe.pkg_libs, &fe.ffi_rpaths, &gen) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
@@ -472,7 +423,7 @@ fn main() {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
-            if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &ffi_rpaths, &useo) {
+            if let Err(e) = link(&obj_path, &exe_path, safety, &fe.pkg_libs, &fe.ffi_rpaths, &useo) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
@@ -485,14 +436,14 @@ fn main() {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
-            if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &ffi_rpaths, &o) {
+            if let Err(e) = link(&obj_path, &exe_path, safety, &fe.pkg_libs, &fe.ffi_rpaths, &o) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
         }
     } else {
         // 非 LTO 模式（debug / safe，或 fast 但无 clang）：直接用 inkwell 写出的原生 .o 链接。
-        if let Err(e) = link(&obj_path, &exe_path, safety, &pkg_libs, &ffi_rpaths, &LinkOpts::default()) {
+        if let Err(e) = link(&obj_path, &exe_path, safety, &fe.pkg_libs, &fe.ffi_rpaths, &LinkOpts::default()) {
             eprintln!("{}", e);
             std::process::exit(1);
         }
@@ -882,6 +833,9 @@ struct LinkOpts {
     lto: bool,
     pgo_gen: bool,
     pgo_use: Option<PathBuf>,
+    /// `dialc test` 会为每个 test 块单独链接一次；逐块打印 stdlib 编译日志
+    /// 会把测试结果淹掉，故允许调用方静默这些 ℹ️ 行（不影响错误与警告）。
+    quiet: bool,
 }
 
 /// 返回可用于 LTO / PGO 的 clang（程序名, 前置参数）。
@@ -976,7 +930,7 @@ fn link(
         final_link(obj, exe, extra_libs, &[], &runtime_objs, ffi_rpaths, opts)
     } else {
         // 非 LTO：优先已安装包，否则实时编译源码归档成 .a。
-        let stdlib_libs = resolve_stdlib_archive(safety)?;
+        let stdlib_libs = resolve_stdlib_archive(safety, opts.quiet)?;
         final_link(obj, exe, extra_libs, &stdlib_libs, &[], ffi_rpaths, opts)
     }
 }
@@ -989,7 +943,7 @@ fn link(
 /// - 若未安装 / 当前平台不在包支持列表：回退到编译 `stdlib/` + `runtime/` 源码。
 ///
 /// 返回的标准库归档列表（通常一份 `libdial_std.a`）交给 `final_link` 链接。
-fn resolve_stdlib_archive(safety: SafetyMode) -> Result<Vec<PathBuf>, String> {
+fn resolve_stdlib_archive(safety: SafetyMode, quiet: bool) -> Result<Vec<PathBuf>, String> {
     if let Some((dir, manifest)) = package::find_installed("stdlib").map_err(|e| e.to_string())? {
         // ABI 兜底：不兼容即报错 + 重装方案，绝不静默崩溃。
         if manifest.abi != package::STDLIB_ABI {
@@ -1005,22 +959,26 @@ fn resolve_stdlib_archive(safety: SafetyMode) -> Result<Vec<PathBuf>, String> {
         // 按当前 Triple 选库（内部校验该份机器码的 SHA256）
         match package::resolve_lib(&dir, &manifest) {
             Ok(lib) => {
-                println!(
-                    "ℹ️  使用已安装的标准库包: {} v{}（ABI {}，目标 {}）",
-                    manifest.name,
-                    manifest.version,
-                    manifest.abi,
-                    package::host_triple()
-                );
+                if !quiet {
+                    println!(
+                        "ℹ️  使用已安装的标准库包: {} v{}（ABI {}，目标 {}）",
+                        manifest.name,
+                        manifest.version,
+                        manifest.abi,
+                        package::host_triple()
+                    );
+                }
                 return Ok(vec![lib]);
             }
             Err(e) => {
                 // 包存在但当前平台不在其 targets 列表：退化为源码编译，保持兼容。
-                println!(
-                    "⚠️  已安装的标准库包不含当前平台 {} 的机器码，回退源码编译：{}",
-                    package::host_triple(),
-                    e
-                );
+                if !quiet {
+                    println!(
+                        "⚠️  已安装的标准库包不含当前平台 {} 的机器码，回退源码编译：{}",
+                        package::host_triple(),
+                        e
+                    );
+                }
             }
         }
     }
@@ -1038,16 +996,18 @@ fn resolve_stdlib_archive(safety: SafetyMode) -> Result<Vec<PathBuf>, String> {
     fs::create_dir_all(&build_dir).map_err(|e| format!("创建构建目录失败: {}", e))?;
 
     let (cc, cc_prefix) = cc_command();
-    println!(
-        "ℹ️  C 编译器: {} {}（编译 stdlib/ 与 runtime/ 为 libdial_std.a）",
-        cc,
-        cc_prefix.join(" ")
-    );
-    println!(
-        "ℹ️  安全等级: {:?}（-DDIAL_SAFETY={}）",
-        safety,
-        safety.as_c_macro()
-    );
+    if !quiet {
+        println!(
+            "ℹ️  C 编译器: {} {}（编译 stdlib/ 与 runtime/ 为 libdial_std.a）",
+            cc,
+            cc_prefix.join(" ")
+        );
+        println!(
+            "ℹ️  安全等级: {:?}（-DDIAL_SAFETY={}）",
+            safety,
+            safety.as_c_macro()
+        );
+    }
 
     // 编译所有 C 源文件 -> .o
     let mut obj_files: Vec<PathBuf> = Vec::new();
@@ -1253,4 +1213,761 @@ fn compile_runtime_lto(safety: SafetyMode, opts: &LinkOpts) -> Result<Vec<PathBu
 /// 运行命令并返回是否成功退出。
 fn run_ok(cmd: &mut Command) -> bool {
     cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
+
+// ===========================================================================
+//  v1.04 工具链：统一前端流水线 / 本地源码模块 / CLI 子命令
+// ===========================================================================
+//
+//  背景（REPORT_v1.04_gaps.md 的 A 组）：此前 CLI 只有 build/run/install/version，
+//  多文件源码无法互相引用，且 `dialc build a.dial b.dial` 会把多余输入静默吞掉。
+//  这里把「词法 → 语法 → 包解析 → 语义」抽成 frontend()，供 build/run/check/test
+//  共用；并在同一次前端里递归展开 `import "./xxx.dial";` 到本地源码模块。
+
+/// 完整用法。`help` 与参数缺失共用同一份，避免两处文案漂移。
+fn print_usage() {
+    eprintln!("dialc — Dial 语言编译器 v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!();
+    eprintln!("用法: dialc <命令> [参数]");
+    eprintln!();
+    eprintln!("编译与运行");
+    eprintln!("  build <文件.dial> [-o 输出] [--no-link] [--safety debug|safe|fast] [--pgo]");
+    eprintln!("  run   <文件.dial> [同上]");
+    eprintln!("  check <文件.dial>                只做词法/语法/语义检查，不产出文件");
+    eprintln!("  test  <文件.dial> [--filter 名]  运行顶层 test \"名\" {{ ... }} 块");
+    eprintln!();
+    eprintln!("工程与源码组织");
+    eprintln!("  fmt   <文件.dial>... [--check] 保守格式化（只规整缩进/空白）");
+    eprintln!("  new   <目录> [包名]            生成可打包的项目骨架（dial.toml）");
+    eprintln!("  pack  <目录> [-o 包.dialpkg]   把 dial.toml 描述的项目打成 .dialpkg");
+    eprintln!("  import \"./util.dial\";         源码内引用同目录模块（见 README §34）");
+    eprintln!();
+    eprintln!("包管理");
+    eprintln!("  install   <包.dialpkg|URL> [--sha256 哈希]");
+    eprintln!("  list                           列出已安装包");
+    eprintln!("  uninstall <包名>               卸载已安装包");
+    eprintln!();
+    eprintln!("其他");
+    eprintln!("  version | --version | -V       显示版本号");
+    eprintln!("  lsp                            编辑器语言服务器（stdio 协议）");
+    eprintln!("  help | --help | -h             显示本帮助");
+}
+
+/// 拒绝多余位置参数（A3 的推广：所有子命令都不许静默吞输入）。
+fn ensure_no_extra(args: &[String], from: usize) {
+    if args.len() > from {
+        eprintln!("未知参数 '{}'（见 `dialc help`）", args[from]);
+        std::process::exit(1);
+    }
+}
+
+/// 取唯一位置参数，缺失即报错。
+fn one_arg(args: &[String], cmd: &str) -> String {
+    if args.len() < 3 {
+        eprintln!("命令 '{}' 缺少参数。", cmd);
+        print_usage();
+        std::process::exit(1);
+    }
+    args[2].clone()
+}
+
+fn dispatch_tool(command: &str, args: &[String]) {
+    match command {
+        "check" => cmd_check(args),
+        "fmt" => cmd_fmt(args),
+        "test" => cmd_test(args),
+        "new" => cmd_new(args),
+        "uninstall" => cmd_uninstall(args),
+        "pack" => cmd_pack(args),
+        _ => unreachable!("dispatch_tool 只接收已分流的工具命令"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  统一前端：本地源码模块收集 + 包解析 + 语义分析
+// ---------------------------------------------------------------------------
+
+struct SourceUnit {
+    path: PathBuf,
+    tokens: Vec<lexer::Token>,
+}
+
+struct SourceSet {
+    /// 深度优先收集到的所有源码文件，units[0] 恒为主源文件。
+    units: Vec<SourceUnit>,
+    /// 汇总后的**包名** import（本地源码项不在这里），已去重。
+    imports: Vec<String>,
+}
+
+struct Frontend {
+    program: ast::Program,
+    /// `analyze` 之前的 AST 副本。`dialc test` 要为每块测试重新 analyze，
+    /// 不能拿已经 desugar 过的 program 反复跑（语义层会就地改写 AST）。
+    raw_program: ast::Program,
+    functions: HashMap<String, semantic::FuncInfo>,
+    structs: semantic::StructTable,
+    externs: Vec<(String, semantic::FuncInfo)>,
+    pkg_libs: Vec<PathBuf>,
+    ffi_rpaths: Vec<PathBuf>,
+    src_file: String,
+}
+
+/// 只从 token 流里抽 `import "..."` 的字符串，不做完整语法解析。
+///
+/// 之所以用「扫 token」而不是 `parser::parse`：两阶段解析的本意就是先拿 import
+/// 列表、解析包（从而知道不透明类型名）后再正式解析；此时若强行完整 parse，
+/// 源码里用到包句柄类型的地方会在第一遍就失败。扫 token 天然免疫这个问题。
+fn import_specs(tokens: &[lexer::Token]) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 0..tokens.len() {
+        if matches!(&tokens[i].kind, lexer::TokenKind::Import) {
+            if let Some(n) = tokens.get(i + 1) {
+                if let lexer::TokenKind::StringLit(s) = &n.kind {
+                    out.push(s.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 判断一条 import 是否指向**本地源码模块**。
+///
+/// 两种写法都算本地：
+///   - 显式相对路径：`import "./util.dial";` / `"../common/util"` / 任意 `.dial` 后缀；
+///   - 裸名且同目录确有 `<name>.dial`：`import "util";` 直接可用——这也是
+///     「普通程序员写日常程序」最直觉的写法（清单 A1 的原样复现）。
+///
+/// 其它裸名仍按**包名**处理（`~/.dial/packages/<name>/`），与 v0.93 以来的
+/// 包语义完全兼容。两类都不匹配时 resolve_imports 会给出「找不到已安装的包」。
+fn is_local_import(spec: &str, base: &Path) -> bool {
+    if spec.ends_with(".dial")
+        || spec.starts_with("./")
+        || spec.starts_with("../")
+        || spec.starts_with(".\\")
+        || spec.starts_with("..\\")
+    {
+        return true;
+    }
+    if !spec.contains('/') && !spec.contains('\\') {
+        return base.join(format!("{}.dial", spec)).is_file();
+    }
+    false
+}
+
+fn local_module_path(spec: &str, base: &Path) -> PathBuf {
+    let mut rel = PathBuf::from(spec);
+    if rel.extension().and_then(|e| e.to_str()) != Some("dial") {
+        rel.set_extension("dial");
+    }
+    if rel.is_absolute() {
+        rel
+    } else {
+        base.join(rel)
+    }
+}
+
+/// 递归收集本地源码模块。
+///
+/// `stack` 用于循环引用检测，`visited` 保证同一文件被多个模块 import 时只展开一次
+/// （否则会重复定义函数）。错误一律带**文件路径**，多文件项目才排得清障。
+fn collect_sources(
+    root: &Path,
+    visited: &mut HashSet<PathBuf>,
+    stack: &mut Vec<PathBuf>,
+    set: &mut SourceSet,
+) -> Result<(), String> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|e| format!("无法读取源文件 {}: {}", root.display(), e))?;
+    if stack.contains(&canonical) {
+        let chain: Vec<String> = stack
+            .iter()
+            .chain(std::iter::once(&canonical))
+            .map(|p| p.display().to_string())
+            .collect();
+        return Err(format!("本地源码 import 出现循环引用：{}", chain.join(" -> ")));
+    }
+    if visited.contains(&canonical) {
+        return Ok(());
+    }
+    visited.insert(canonical.clone());
+    stack.push(canonical.clone());
+
+    let source = fs::read_to_string(&canonical)
+        .map_err(|e| format!("无法读取 {}: {}", canonical.display(), e))?;
+    let tokens = lexer::lex(&source)
+        .map_err(|e| format!("{}：{}", canonical.display(), e))?;
+    let specs = import_specs(&tokens);
+    set.units.push(SourceUnit {
+        path: canonical.clone(),
+        tokens,
+    });
+
+    let base = canonical.parent().unwrap_or_else(|| Path::new("."));
+    for spec in specs {
+        if is_local_import(&spec, base) {
+            let child = local_module_path(&spec, base);
+            if !child.is_file() {
+                return Err(format!(
+                    "{}：本地源码 import '{}' 指向的文件不存在（解析为 {}）。\n\
+                     本地模块请写相对路径（如 import \"./util.dial\";）；\n\
+                     已安装的包请写裸包名（如 import \"sqlite\";），不要带路径。",
+                    canonical.display(),
+                    spec,
+                    child.display()
+                ));
+            }
+            collect_sources(&child, visited, stack, set)?;
+        } else if !set.imports.contains(&spec) {
+            set.imports.push(spec);
+        }
+    }
+    stack.pop();
+    Ok(())
+}
+
+/// build / run / check / test 共用的编译前端。
+///
+/// 顺序：递归收集源码 → 解析包（拿不透明类型）→ 逐个源码文件正式 parse →
+/// 合并 AST（含冲突检测）→ 语言层 extern/link 并入 → 语义分析。
+/// 合并时把每个文件 `link` 的相对路径按**该文件所在目录**绝对化，避免子模块
+/// 里的库被误当成相对主文件目录解析。
+fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, String> {
+    let mut set = SourceSet {
+        units: Vec::new(),
+        imports: Vec::new(),
+    };
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut stack: Vec<PathBuf> = Vec::new();
+    collect_sources(Path::new(src_path), &mut visited, &mut stack, &mut set)?;
+
+    let (mut externs, mut pkg_libs, opaque_types) = resolve_imports(&set.imports, log).map_err(|e| {
+        // D6：旧诊断只说 dialc install，不解释「本地源码模块」这条路。
+        // 只在「找不到已安装的包」这一句上追加指引，ABI / 哈希等其它错误原样透出。
+        if e.contains("找不到已安装的包") {
+            format!(
+                "{}\n（提示：若要引用同目录的 .dial 源码，写 import \"./xxx.dial\"; 或裸名 import \"xxx\";，编译器会自动合并编译；裸包名且同目录无同名 .dial 时才按已安装包解析。见 README §34）",
+                e
+            )
+        } else {
+            e
+        }
+    })?;
+
+    let mut program = ast::Program {
+        imports: set.imports.clone(),
+        structs: Vec::new(),
+        functions: Vec::new(),
+        externs: Vec::new(),
+        links: Vec::new(),
+        cstructs: Vec::new(),
+        tests: Vec::new(),
+    };
+    let mut fn_origin: HashMap<String, String> = HashMap::new();
+    let mut struct_origin: HashMap<String, String> = HashMap::new();
+
+    for unit in &set.units {
+        let mut p = parser::parse_with(unit.tokens.clone(), &opaque_types)
+            .map_err(|e| format!("{}：{}", unit.path.display(), e))?;
+        let origin = unit.path.display().to_string();
+        for f in &p.functions {
+            if let Some(prev) = fn_origin.get(&f.name) {
+                return Err(format!(
+                    "函数 '{}' 重复定义：{} 与 {}（本地源码模块合并后不允许同名函数）",
+                    f.name, prev, origin
+                ));
+            }
+            fn_origin.insert(f.name.clone(), origin.clone());
+        }
+        for st in &p.structs {
+            if let Some(prev) = struct_origin.get(&st.name) {
+                return Err(format!(
+                    "结构体 '{}' 重复定义：{} 与 {}",
+                    st.name, prev, origin
+                ));
+            }
+            struct_origin.insert(st.name.clone(), origin.clone());
+        }
+        let base = unit.path.parent().unwrap_or_else(|| Path::new("."));
+        for l in &mut p.links {
+            let raw = Path::new(&l.path);
+            if !raw.is_absolute() {
+                l.path = base.join(raw).to_string_lossy().into_owned();
+            }
+        }
+        program.structs.append(&mut p.structs);
+        program.functions.append(&mut p.functions);
+        program.externs.append(&mut p.externs);
+        program.links.append(&mut p.links);
+        program.cstructs.append(&mut p.cstructs);
+        program.tests.append(&mut p.tests);
+    }
+
+    // v1.04 FFI：语言层 extern fn 并入外部函数表（与包 .diali 一视同仁）。
+    for e in &program.externs {
+        if externs.iter().any(|(n, _)| n == &e.name) {
+            return Err(format!(
+                "外部函数 '{}' 重复声明（包 .diali 与源码 extern fn 撞名）",
+                e.name
+            ));
+        }
+        externs.push((
+            e.name.clone(),
+            semantic::FuncInfo {
+                params: e.params.iter().map(|(_, t)| t.clone()).collect(),
+                ret: e.ret.clone(),
+                defaults: vec![None; e.params.len()],
+                variadic: e.variadic,
+            },
+        ));
+    }
+
+    // v1.04 FFI：link 声明的库按后缀验魔数，动态库额外收集 rpath。
+    let mut ffi_rpaths: Vec<PathBuf> = Vec::new();
+    for l in &program.links {
+        match resolve_ffi_link(&l.path, Path::new(src_path)) {
+            Ok(lib) => {
+                if lib.kind == FfiLibKind::Dynamic {
+                    if let Some(dir) = lib.path.parent() {
+                        if !ffi_rpaths.iter().any(|d| d.as_path() == dir) {
+                            ffi_rpaths.push(dir.to_path_buf());
+                        }
+                    }
+                }
+                pkg_libs.push(lib.path);
+            }
+            Err(msg) => {
+                return Err(format!("第 {} 行 第 {} 列：{}", l.line, l.col, msg));
+            }
+        }
+    }
+
+    let raw_program = program.clone();
+    let (functions, structs) = analyze(&mut program, &externs)
+        .map_err(|e| format!("{}：{}", src_path, e))?;
+
+    Ok(Frontend {
+        program,
+        raw_program,
+        functions,
+        structs,
+        externs,
+        pkg_libs,
+        ffi_rpaths,
+        src_file: src_path.to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+//  子命令实现
+// ---------------------------------------------------------------------------
+
+fn cmd_list() {
+    match pkgbuild::list_installed() {
+        Ok(rows) if rows.is_empty() => {
+            println!("尚未安装任何包。用 `dialc install <包.dialpkg>` 安装，或 `dialc pack` 先打一个。");
+        }
+        Ok(rows) => {
+            println!("已安装包 {} 个：", rows.len());
+            for (name, ver, abi, dir) in rows {
+                println!("  {:<18} v{:<10} ABI {:<3} {}", name, ver, abi, dir.display());
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_check(args: &[String]) {
+    ensure_no_extra(args, 3);
+    let src = one_arg(args, "check");
+    match frontend(&src, &mut |m| println!("{}", m)) {
+        Ok(fe) => println!(
+            "✅ 类型检查通过：{}（{} 个函数、{} 个 test 块）",
+            src,
+            fe.program.functions.len(),
+            fe.program.tests.len()
+        ),
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_uninstall(args: &[String]) {
+    ensure_no_extra(args, 3);
+    let name = one_arg(args, "uninstall");
+    match pkgbuild::uninstall(&name) {
+        Ok(dir) => println!("✅ 已卸载包 '{}'（删除 {}）", name, dir.display()),
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_new(args: &[String]) {
+    if args.len() < 3 || args.len() > 4 {
+        eprintln!("用法: dialc new <目录> [包名]");
+        std::process::exit(1);
+    }
+    let dir = Path::new(&args[2]);
+    let name = args.get(3).map(|s| s.as_str());
+    match pkgbuild::new_project(dir, name) {
+        Ok(p) => {
+            println!("✅ 项目骨架已生成: {}", p.display());
+            println!("   dial.toml / main.dial / {}.diali / lib/", args.get(3).map(|s| s.as_str()).unwrap_or_else(|| dir.file_name().and_then(|x| x.to_str()).unwrap_or("mylib")));
+            println!("   下一步：把编译好的 .a 放进 dial.toml [targets] 登记的路径，再执行 `dialc pack {}`。", p.display());
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_pack(args: &[String]) {
+    let mut out: Option<PathBuf> = None;
+    let mut dirs: Vec<String> = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => out = Some(PathBuf::from(v)),
+                    None => {
+                        eprintln!("选项 -o 缺少输出路径");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            a if a.starts_with('-') => {
+                eprintln!("pack: 未知参数 '{}'（可用: -o <输出.dialpkg>）", a);
+                std::process::exit(1);
+            }
+            _ => dirs.push(args[i].clone()),
+        }
+        i += 1;
+    }
+    if dirs.len() != 1 {
+        eprintln!("用法: dialc pack <项目目录> [-o 输出.dialpkg]");
+        std::process::exit(1);
+    }
+    match pkgbuild::pack(Path::new(&dirs[0]), out.as_deref()) {
+        Ok(pkg) => {
+            println!("✅ 已生成包: {}", pkg.display());
+            println!("   manifest / 逐文件 SHA256 已自检通过，可直接 `dialc install {}`", pkg.display());
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// 统计一行里**字符串/字符字面量与行注释之外**的花括号净变化。
+fn brace_delta(line: &str) -> i32 {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0usize;
+    let mut delta = 0i32;
+    let mut in_str = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_char {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '\'' {
+                in_char = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            break;
+        }
+        if c == '"' {
+            in_str = true;
+        } else if c == '\'' {
+            in_char = true;
+        } else if c == '{' {
+            delta += 1;
+        } else if c == '}' {
+            delta -= 1;
+        }
+        i += 1;
+    }
+    delta
+}
+
+/// 保守格式化：**只**重排每行前导缩进、去掉行尾空白、统一文件末尾换行。
+///
+/// 刻意不重排语句、不增删 token——格式化前后 `lexer::lex` 的 token 序列必须
+/// 完全一致（cmd_fmt 里会当场校验，不一致就拒绝写入）。这样 fmt 永远不会
+/// 改变程序语义，且天然幂等。代价是它不合并/拆分行，属于「敢放心用」的格式化器。
+fn format_source(src: &str) -> String {
+    if src.trim().is_empty() {
+        return "\n".to_string();
+    }
+    let mut depth: i32 = 0;
+    let mut out = String::new();
+    for raw in src.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        // `}` / `)` 开头的行与上一层的 `{` 对齐，而不是与块内语句对齐。
+        let leading_close = trimmed.starts_with('}') || trimmed.starts_with(')');
+        let eff = (depth - if leading_close { 1 } else { 0 }).max(0) as usize;
+        for _ in 0..eff {
+            out.push_str("    ");
+        }
+        out.push_str(trimmed.trim_end());
+        out.push('\n');
+        depth = (depth + brace_delta(raw)).max(0);
+    }
+    out
+}
+
+fn cmd_fmt(args: &[String]) {
+    let mut check_only = false;
+    let mut files: Vec<String> = Vec::new();
+    for a in &args[2..] {
+        if a == "--check" {
+            check_only = true;
+        } else if a.starts_with('-') {
+            eprintln!("fmt: 未知参数 '{}'（可用: --check）", a);
+            std::process::exit(1);
+        } else {
+            files.push(a.clone());
+        }
+    }
+    if files.is_empty() {
+        eprintln!("用法: dialc fmt <文件.dial>... [--check]");
+        std::process::exit(1);
+    }
+    let mut need_fmt = false;
+    for f in &files {
+        let src = match fs::read_to_string(f) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("fmt: 无法读取 {}: {}", f, e);
+                std::process::exit(1);
+            }
+        };
+        let before = match lexer::lex(&src) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("fmt: {} 存在词法错误，拒绝格式化：{}", f, e);
+                std::process::exit(1);
+            }
+        };
+        let formatted = format_source(&src);
+        // 幂等自检
+        if format_source(&formatted) != formatted {
+            eprintln!("fmt: 内部错误——格式化结果不幂等，已拒绝写入 {}", f);
+            std::process::exit(1);
+        }
+        let after = match lexer::lex(&formatted) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("fmt: 格式化后 {} 无法重新词法分析，已拒绝写入：{}", f, e);
+                std::process::exit(1);
+            }
+        };
+        let same_tokens = before.len() == after.len()
+            && before.iter().zip(after.iter()).all(|(x, y)| x.kind == y.kind);
+        if !same_tokens {
+            eprintln!("fmt: 格式化改变了 token 流，已拒绝写入 {}（保守格式化不该动语义）", f);
+            std::process::exit(1);
+        }
+        if formatted == src {
+            if !check_only {
+                println!("  无需改动: {}", f);
+            }
+            continue;
+        }
+        need_fmt = true;
+        if check_only {
+            println!("  需要格式化: {}", f);
+        } else {
+            if let Err(e) = fs::write(f, &formatted) {
+                eprintln!("fmt: 写入 {} 失败: {}", f, e);
+                std::process::exit(1);
+            }
+            println!("✅ 已格式化: {}", f);
+        }
+    }
+    if check_only {
+        if need_fmt {
+            eprintln!("有文件未格式化（--check 模式不写入）。");
+            std::process::exit(1);
+        }
+        println!("✅ 所有文件已符合格式");
+    }
+}
+
+/// `dialc test`：把每个顶层 `test "名" { ... }` 块**单独**编成一个可执行文件运行。
+///
+/// 为什么每块一个进程：assert 失败按 Fail-Fast 铁律会立刻发非法指令终止进程，
+/// 若把所有测试塞进同一个二进制，第一块失败就跑不到后面的块了。独立进程
+/// 让「通过 / 失败」逐块可见，也互不污染（全局状态、ARC 运行时都是干净的）。
+fn cmd_test(args: &[String]) {
+    let mut files: Vec<String> = Vec::new();
+    let mut filter: Option<String> = None;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--filter" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => filter = Some(v.clone()),
+                    None => {
+                        eprintln!("--filter 后面缺少名字");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            a if a.starts_with('-') => {
+                eprintln!("test: 未知参数 '{}'（可用: --filter <名字>）", a);
+                std::process::exit(1);
+            }
+            _ => files.push(args[i].clone()),
+        }
+        i += 1;
+    }
+    if files.len() != 1 {
+        eprintln!("用法: dialc test <文件.dial> [--filter <名字>]");
+        std::process::exit(1);
+    }
+    let src = files.remove(0);
+    let fe = match frontend(&src, &mut |_| {}) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+    let tests = fe.raw_program.tests.clone();
+    let selected: Vec<_> = tests
+        .iter()
+        .filter(|t| filter.as_ref().map(|f| t.name.contains(f)).unwrap_or(true))
+        .collect();
+    if selected.is_empty() {
+        println!("没有匹配的 test 块（文件 {} 共 {} 块）。", src, tests.len());
+        return;
+    }
+
+    let tmp = env::temp_dir().join(format!("dialc-test-{}", std::process::id()));
+    if let Err(e) = fs::create_dir_all(&tmp) {
+        eprintln!("创建测试临时目录失败: {}", e);
+        std::process::exit(1);
+    }
+
+    println!("== dialc test: {}（{} 块）==", src, selected.len());
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    for (idx, t) in selected.iter().enumerate() {
+        // 每块都用「analyze 之前」的原始 AST 副本，避免重复 desugar。
+        let mut prog = fe.raw_program.clone();
+        prog.tests.clear();
+        prog.functions.retain(|f| f.name != "main");
+        let mut body = t.body.clone();
+        body.push(ast::Stmt::Return(Some(ast::Expr::IntLit(0)), t.line, t.col));
+        prog.functions.push(ast::Func {
+            name: "main".to_string(),
+            params: Vec::new(),
+            defaults: Vec::new(),
+            variadic: None,
+            param_pos: Vec::new(),
+            ret: ast::Type::Int,
+            body,
+            line: t.line,
+            col: t.col,
+        });
+        let (functions, structs) = match analyze(&mut prog, &fe.externs) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  ❌ {} 语义检查失败：{}", t.name, e);
+                failed += 1;
+                continue;
+            }
+        };
+        let obj = tmp.join(format!("t{}.o", idx));
+        let exe = tmp.join(format!("t{}", idx));
+        let cg = codegen::CgOpts {
+            safety: SafetyMode::Debug,
+            aggressive: false,
+            bc_out: None,
+            src_file: src.clone(),
+        };
+        if let Err(e) = codegen::compile(&prog, &functions, &structs, &obj, &cg, &fe.externs) {
+            eprintln!("  ❌ {} 代码生成失败：{}", t.name, e);
+            failed += 1;
+            continue;
+        }
+        if let Err(e) = link(
+            &obj,
+            &exe,
+            SafetyMode::Debug,
+            &fe.pkg_libs,
+            &fe.ffi_rpaths,
+            &LinkOpts {
+                quiet: true,
+                ..LinkOpts::default()
+            },
+        ) {
+            eprintln!("  ❌ {} 链接失败：{}", t.name, e);
+            failed += 1;
+            continue;
+        }
+        match Command::new(&exe).output() {
+            Ok(o) if o.status.success() => {
+                println!("  ✅ {}", t.name);
+                passed += 1;
+            }
+            Ok(o) => {
+                println!("  ❌ {}", t.name);
+                let err = String::from_utf8_lossy(&o.stderr);
+                for line in err.lines().take(3) {
+                    println!("       {}", line);
+                }
+                let out = String::from_utf8_lossy(&o.stdout);
+                for line in out.lines().take(3) {
+                    println!("       | {}", line);
+                }
+                failed += 1;
+            }
+            Err(e) => {
+                println!("  ❌ {} 无法运行：{}", t.name, e);
+                failed += 1;
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(&tmp);
+    println!("---- 通过 {} / 失败 {} ----", passed, failed);
+    if failed > 0 {
+        std::process::exit(1);
+    }
 }

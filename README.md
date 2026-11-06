@@ -431,7 +431,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 
 > `char` 是 v0.92 引入的单字符类型：**一个 Unicode 码点**，底层与 `int` 同为 `i64`，
 > 但类型独立——不参与算术，只可比较或经 `char_to_int` / `int_to_char` 显式转换
-> （见 [§5.1](#51-基本类型) 与 [§17.2](#172-尚未实现的能力截至-v102)）。
+> （见 [§5.1](#51-基本类型) 与 [§17.2](#172-尚未实现的能力截至-v104)）。
 
 > `try` / `catch` / `throw` 是 v0.7 引入的可恢复异常关键字（见 [§26](#26-可恢复异常trycatchthrow)）。
 > 注意 **`error` 不是关键字**——它是内建构造函数名（与 `open` / `print` 同类），写作 `Error("...")`。
@@ -621,7 +621,7 @@ print("");
 **`print_raw` 的返回值**：无（与 `print` 一致，都是**语句**而非表达式），
 不能出现在赋值右侧或 `return` 位置。
 
-**`str(char)`**：`str()` 在 v0.99 起接受 `char` 实参，返回**只含这一个字符**的 UTF-8 字符串
+**`str(x)` 的类型分派**：`str()` 在 v0.99 起接受 `char` 实参，返回**只含这一个字符**的 UTF-8 字符串
 （ASCII 字符为 1 字节，多字节码点如 `'中'` 为 3 字节）。它让字符能直接参与字符串拼接：
 
 ```dial
@@ -632,6 +632,11 @@ let s: string = str('A') + "BC";   // "ABC"
 > Dial 的字符串按 **UTF-8 字节**计量长度（见 [§13.1](#131-方法)），
 > 因此「字符串有几个字符」这个问题在 Dial 里**没有**直接答案——
 > 按码点遍历需要自行解码 UTF-8。
+
+> **v1.04 实测校正**：`str()` 除 `char` 外还接受 `int`（十进制）与 `float`（十进制小数），
+> `str(42)` / `str(3.14)` / `str('A')` 都可用；`bool` 编译期拒绝，
+> 需先 `int_to_string(...)` 之类的显式转换。早期文档只写了 `str(char)` 这一行，
+> 那是**实现细节的一例**，不是全部重载。
 
 **与文件 IO 的区别**：`print_raw` / `write_char` 写的是 **stdout**，
 不受 `open` 的文件句柄管辖；要写进文件请用 `write(f, content)`（见 [§24](#24-文件-iofile-句柄)）。
@@ -1406,7 +1411,7 @@ x = x;   // 先 retain（计数 1→2），再 release（2→1），绝不会先
 | `print(x)` | `dial_print_int` / `dial_print_float` / `dial_print_bool` / `dial_print_char` / `dial_print_string` |
 | `print_raw(x)`（v0.99） | `dial_print_raw` / `dial_print_raw_int` / `dial_print_raw_float` / `dial_print_raw_bool` / `dial_write_char`（**均不追加换行**） |
 | `write_char(c)`（v0.99） | `call void @dial_write_char(i64 %c)`（不追加换行） |
-| `str(c)`（`c` 为 `char`，v0.99） | `call ptr @dial_char_to_string(i64 %c)`（编码为 UTF-8，1~4 字节） |
+| `str(x)`（v0.99；`x` 可为 `char` / `int` / `float`） | `char` → `dial_char_to_string`（UTF-8，1~4 字节）；`int` / `float` → 对应格式化调用；`bool` 编译期拒绝（见 §5.5） |
 | 变量绑定（共享） | `dial_string_retain` / `dial_array_retain` / `dial_map_retain` |
 | 作用域结束 | `dial_string_release` / `dial_array_release` / `dial_map_release` |
 
@@ -1520,7 +1525,8 @@ print(e);
   let n: int = print("hi");   // ❌ 编译错误：void 与 int 不兼容
   ```
 
-- 恰好接受 1 个参数。
+- **可变参数**（v1.00 起）：接受 1 个或任意多个参数，按声明顺序连续输出、末尾只追加一个换行；
+  `print("a=", 1, " b=", 2.5)` 输出 `a=1 b=2.500000`。单参数仍是最常见形式。
 - 支持的参数类型：`int`、`float`、`bool`、`char`、`string`、`error`。
 - **不支持** `int[]`、`map`、结构体与各类句柄（`file` / `thread` / `channel` / 包句柄）——
   必须逐元素 / 逐字段打印，或先转成字符串。
@@ -1585,7 +1591,7 @@ print("");        // -> Hi
 | --- | --- |
 | 整数溢出 | 按 i64 二进制补码回绕（Debug 等级亦不检查） |
 
-### 17.2 尚未实现的能力（截至 v1.02）
+### 17.2 尚未实现的能力（截至 v1.04）
 
 > 已落地：`Map`（int → int，ARC 管理）、`read_line()`、短路求值、零隐式转换铁律、
 > `let` + 原地修改方法（push/set/put）的接收者约束、`else if` 语法糖、`for` 范围循环、`break` / `continue`、
@@ -1603,7 +1609,7 @@ print("");        // -> Hi
 | 能力 | 状态 |
 | --- | --- |
 | 裸块 `{ ... }` | **已支持**（v0.99）：裸块是引入新词法作用域的独立语句，支持变量遮蔽与堆类型局部变量的块内释放，见 [§8.6](#86-裸块独立的词法作用域v099) |
-| 模块 / 包 / import | **已支持**（v0.93；`dialc install <URL>` 于 v0.96 落地）：`import "包名";` + `dialc install <本地文件\|URL>`，见 [§25](#25-包分发与依赖管理生态规划--最终规范)。**尚未实现**：源码形式的模块拆分（无 `mod`） |
+| 模块 / 包 / import | **已支持**（v1.04）：`import "包名";` + `dialc install <本地文件\|URL>`（v0.93 / v0.96，见 §25）；**源码形式的模块拆分**也已落地（`import "./util.dial";` 合并编译，无需 `mod` 关键字，见 §34）。**尚未实现**：跨工作区的全量模块图 |
 | 泛型、接口、trait、闭包 | **用户自定义泛型 / 接口 / trait / 闭包仍不支持**；`channel<T>`、`set<T>`、`map<K,V>` 是 **v1.00 已落地的内建特化容器语法**（见 [§29](#29-v100语言特性补齐)），不是用户泛型 |
 | 裸指针、地址取值、指针算术 | **v1.02 已支持裸指针**（`rawptr<T>` + `&x` / `*p` / `p.offset(n)` / `raw_alloc` / `raw_free`），但它**绝对不受 ARC 管理**，必须手动释放，且与 ARC 容器之间没有隐式转换——见 [§31.4](#314-裸指针不受-arc-管束的显式契约)。**用户自定义泛型的指针运算**仍不提供 |
 | 运算符重载 | **永不提供** |
@@ -1615,9 +1621,9 @@ print("");        // -> Hi
 | 原子类型、无锁数据结构 | 未实现 |
 | `move_to` 到**已启动的**线程 | 编译期不支持——移交只能在 `spawn` 时完成（见 [§27.3](#273-零竞争移交与-o1-论证)） |
 | 通道元素为标量（`int` / `float` / `bool`） | 编译期拒绝（需装箱，见 [§27.2](#272-channelt-与所有权移交)） |
-| 一等函数 / 函数指针 | 不支持——`spawn` 首参只能是顶层具名函数 |
+| 一等函数 / 函数指针 | **已支持**（v1.03）：`fn(A, B): R` 一等函数指针、函数名作右值、高阶数组方法与 C 回调（见 §32）。**闭包仍不支持**：跨回调状态须显式经 `rawptr<void>` 透传 |
 | `map<K,V>` 的 `string` 值、`map.values()` 对非 `int` 值 | **未实现**（v1.00）：`V` 只支持标量，`values()` 只支持 `V = int`——`get` 未命中时的默认 string 对象会带来所有权移交歧义，见 [§29.5](#295-重型类型与容器) |
-| LSP 的重命名 / 跨文件引用查找 / 格式化 | **已实现**（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的**引用边**（`src/index.rs`），格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作。能力清单见 [§28.7.1](#2871-当前-lsp-能力清单)。**尚未实现**：跨工作区的**全量**引用图（当前只覆盖已打开文件与已加载包） |
+| LSP 的重命名 / 跨文件引用查找 / 格式化 | **已实现**（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的**引用边**（`src/index.rs`），格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作。能力清单见 [§28.7.1](#2871-当前-lsp-能力清单)。另见 v1.04 新增的 `dialc fmt` 命令行格式化（§34）。**尚未实现**：跨工作区的**全量**引用图（当前只覆盖已打开文件与已加载包） |
 
 ---
 
@@ -2650,7 +2656,7 @@ $ dialc build main.dial -o main
 > JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 > **[ARCHITECTURE.md《Dial 标准库与包分发最终规范》](ARCHITECTURE.md)**。
 > 规范一旦在真实包上落地，将同步更新本章、ARCHITECTURE.md 与 [CHANGELOG.md](CHANGELOG.md)；
-> 在此之前，`import` 仍按 [§17.2](#172-尚未实现的能力截至-v102) 视为**不支持**。
+> 在此之前，`import` 仍按 [§17.2](#172-尚未实现的能力截至-v104) 视为**不支持**。
 
 ---
 
@@ -4551,3 +4557,219 @@ P 组用真实共享库做端到端（显式 `link` + `extern fn`，比对 `42 /
 
 > **本轮交付范围**：按约定只做**本地提交**，不推送 GitHub、不打 tag、不发 Release。
 > `v1.0` 里程碑标签已在 `[v1.03]` 之后打并推送，本版不影响它。
+
+
+---
+
+## 34. v1.04 增补：工程工具链（并入 `[v1.04]`，版本不变）
+
+> 上一轮 `REPORT_v1.04_gaps.md` 按「普通程序员写日常程序」实测了 54 个小程序 + 27 个探针，
+> 结论是 **15 个能直接写、39 个编译期就写不出来**，其中最挡真实项目的是 **A 组工程化/工具链**：
+> 本地几个 `.dial` 之间无法互相引用、CLI 只有 4 个命令、多余输入被静默吞掉、出错没有位置信息。
+> 本章把这一组补齐，并顺带修掉 D 组「文档 / 诊断与实现不一致」。
+>
+> **交付约定**：按用户要求**并入 `[v1.04]`**——`Cargo.toml` 保持 `1.4.0`、
+> `STDLIB_ABI` 保持 `5`、CHANGELOG 不新增 `[v1.05]`；只做本地提交，不推送、不打 tag、不发 Release。
+> 清单里的 **B / C 组**（用户泛型、ADT/Option、字符串 / 数组标准库 API）本轮**不动**，仍是待办；
+> 这一轮专注「让已有能力在工程里用得顺」。
+
+### 34.1 CLI 全景
+
+`dialc help`（或 `--help` / `-h`）打印完整用法。全部命令：
+
+| 命令 | 作用 | 产物 / 退出码 |
+| --- | --- | --- |
+| `dialc build <文件.dial> [-o 输出] [--no-link] [--safety debug\|safe\|fast] [--pgo]` | 编译链接 | 可执行文件；`--no-link` 只出 `.o` |
+| `dialc run <文件.dial> [同上]` | 编译并运行 | 透传被运行程序的退出码 |
+| `dialc check <文件.dial>` | **只做词法 / 语法 / 语义检查**，不生成 `.o`、不链接 | 通过打印摘要，失败非零退出 |
+| `dialc test <文件.dial> [--filter 名字]` | 运行顶层 `test "名" { ... }` 块 | 逐块 ✅/❌，有失败即非零退出 |
+| `dialc fmt <文件.dial>... [--check]` | 保守格式化 | `--check` 只报告不改，`-` 参数一律拒绝 |
+| `dialc new <目录> [包名]` | 生成可打包的项目骨架 | `dial.toml` / `main.dial` / `<包名>.diali` / `lib/` |
+| `dialc pack <目录> [-o 包.dialpkg]` | 把 `dial.toml` 描述的项目打成 `.dialpkg` | 产物可直接 `dialc install` |
+| `dialc install <包.dialpkg\|URL> [--sha256 哈希]` | 安装包（v0.93 / v0.96） | 行为不变 |
+| `dialc list` | 列出已安装包（名字 / 版本 / ABI / 路径） | 无包时给提示 |
+| `dialc uninstall <包名>` | 删除缓存目录里的包 | 未安装则报错 |
+| `dialc version \| --version \| -V` | 版本号 | 取自 `Cargo.toml`，全站唯一真相 |
+| `dialc lsp` | 编辑器语言服务器 | stdio 协议，stdout 绝不混入人读文本 |
+
+`build / run / check / test` **共用同一条前端流水线**（`main.rs` 的 `frontend()`）：
+本地源码收集 → 包解析 → 逐个文件正式 parse → AST 合并 → 语言层 FFI 声明 → 语义分析。
+共用一条前端是硬要求——否则「`check` 说通过」和「`build` 真编译」可能给出不同结论。
+
+### 34.2 本地源码模块（`import "./util.dial";`，A1）
+
+此前 `import` 只认 `~/.dial/packages/<name>/` 下的已安装包，想把工具函数拆到另一个
+`.dial` 只能先打 `.dialpkg` + `install`。v1.04 起源码模块是一等公民：
+
+```dial
+// main.dial
+import "./util.dial";        // 显式相对路径
+import "helper";             // 裸名：同目录存在 helper.dial 即视为本地模块
+fn main(): int { print(helper() + inner()); return 0; }
+```
+
+判定规则（按顺序）：
+
+1. 以 `.dial` 结尾，或以 `./` / `../` 开头 → **本地源码**；未写后缀时自动补 `.dial`。
+2. 裸名且**同目录存在 `<name>.dial`** → **本地源码**（清单 A1 里 `import "util";` 的原样写法）。
+3. 其余裸名 → **已安装包**（v0.93 以来的语义完全不变）。
+
+编译器递归展开本地模块、合并 AST 后统一编译：
+
+- **循环引用**当场报错并列出完整链路（`a.dial -> b.dial -> a.dial`）；
+- **同名函数 / 结构体**报错并给出两个文件的路径；
+- 同一文件被多个模块 import 时**只展开一次**（不会重复定义）；
+- 子模块里的 `link "...";` 相对路径按**该子模块所在目录**解析，不是按主文件目录；
+- `const` / `enum` 是 parser 内联的编译期常量，**各文件各自持有**，不跨文件共享；
+- 诊断的「文件:行:列」在多文件项目里以**主源文件**为编译单元名，各语句的行列仍按各自文件准确。
+
+源码作者显式 `link` 动态库是自己的选择，与包分发铁律（§25.6、J 组）是两条互不相干的链路。
+
+### 34.3 `dialc check` 与 `dialc fmt`
+
+`check` 跑完整前端但不产出任何文件，适合接进编辑器保存钩子 / CI 的静态检查步骤：
+`dialc check src/main.dial` → `✅ 类型检查通过：...（N 个函数、M 个 test 块）`。
+
+`fmt` 是**保守格式化**：只重排每行前导缩进（4 空格 / 层）、去掉行尾空白、统一末尾换行，
+**不重排语句、不增删 token**。这不是能力取舍而是安全契约：
+
+- 格式化前后 `lexer::lex` 的 **token 序列必须完全一致**，命令会当场校验，不一致就拒绝写入；
+- 结果**幂等**（命令会自检 `fmt(fmt(x)) == fmt(x)`）；
+- 因此格式化永远不会改变程序语义，`fmt` 后可直接编译运行。
+
+`dialc fmt --check <文件...>` 不写文件，只报告哪些需要格式化并以非零码退出，适合 CI。
+它**不**合并 / 拆分行、不调整运算符空格——这是「敢放心用」的取舍，LSP 的格式化（§28.7.1）同属非破坏性动作。
+
+### 34.4 `dialc test`（顶层测试块，A4）
+
+```dial
+fn add(a: int, b: int): int { return a + b; }
+
+test "addition" {
+    assert(add(1, 2) == 3, "add should work");
+}
+
+test "string length" {
+    var s: string = "abc";
+    assert(s.length() == 3, "len");
+}
+
+fn main(): int { return 0; }
+```
+
+`test "名字" { ... }` 是**顶层块**（不是函数、不是表达式）。刻意不新增 `test` 关键字：
+parser 用「`Ident("test")` 后跟字符串字面量」识别，因此 `test` 依然可作变量名 / 函数名，
+不破坏任何已有程序。
+
+- `dialc build` / `run` **忽略**测试块（与 Rust `#[cfg(test)]` 同理，测试代码不进正式产物），
+  但会打印一行提示，避免「写了 test 却以为 build 跑过了」；
+- `dialc test` 把**每一块单独**编成一个可执行文件并运行。之所以一进程一块：`assert` 失败
+  按 Fail-Fast 铁律立刻发非法指令终止进程，塞进同一个二进制会让第一块失败就跑不到后面；
+- `--filter <名字>` 按子串筛选；逐块输出 `✅ 名字` / `❌ 名字` 并附上 stderr 前几行
+  （含 §34.7 的文件:行:列），最后汇总，有失败即非零退出；
+- 测试块内不要写显式 `return`（合成入口要求 `int` 返回值）；块里可直接调用同文件的其它函数。
+
+### 34.5 `dialc pack` 与 `dial.toml`（打包闭环）
+
+此前「包」只有消费端：`dialc install` 能装、`import` 能用，但仓库里没有**通用产包路径**——
+`tools/make_stdlib_pkg.py` 写死 `stdlib`、`tools/make_sample_pkg.sh` 写死 `demo`，
+作者想发自己的 C 库只能复制脚本或手工拼 zip + manifest + SHA256（错包要到安装期才暴露）。
+v1.04 把产包做成编译器一等公民：
+
+```toml
+# dial.toml —— 放在项目根目录，dialc pack <目录> 读取
+name = "mylib"
+version = "1.0.0"
+abi = 5
+iface = "mylib.diali"
+license = "MIT OR Apache-2.0"
+
+[targets]
+# 值既是磁盘上相对项目根的路径，也是 .dialpkg 内的路径
+x86_64-linux-gnu = "lib/x86_64-linux-gnu/libmylib.a"
+```
+
+`dial.toml` 只支持 `key = "字符串"` / `key = 整数` 与 `[targets]` 一个段的 **TOML 子集**：
+未知字段、重复字段、点分键、缺字段一律**显式报错**，绝不悄悄忽略配置项。
+清单是本地作者文件、字段固定，故不引入新的 TOML 依赖（三个 target 的静态构建也少一份供应链负担）；
+读外部不可信输入的 `manifest.txt` 仍用 `serde_json`（§25.2）。
+
+`pack` 的校验与打包：
+
+1. 校验 `iface` 存在且以 `.diali` 结尾；每个 target 的库存在、后缀为 `.a` / `.lib`、
+   且带 ar 归档魔数 `!<arch>\n`——**包分发只认静态归档，J 组铁律一字未动**；
+2. 生成 `manifest.txt`（字段与 `package::parse_manifest` 完全对齐：`name / version / abi /
+   iface / license / targets / sha256`），逐文件算 SHA256；
+3. 压成 `.dialpkg`（zip 容器，路径用正斜杠、顺序确定）；
+4. **打包后就地自检**：用 `parse_manifest` 解析刚生成的 manifest、再用 `verify_archive`
+   逐文件复核哈希——产物一定过得了 `dialc install` 的两道校验，不把问题留到安装期。
+
+完整闭环（`dialc new` 生成的骨架可直接走完）：
+
+```bash
+dialc new ./mylib mylib            # 生成 dial.toml / main.dial / mylib.diali / lib/
+# 把编译好的 .a 放到 dial.toml [targets] 登记的路径
+dialc pack ./mylib -o mylib.dialpkg
+dialc install mylib.dialpkg
+dialc list
+# 源码里：import "mylib"; 然后调用 .diali 里声明的 extern fn
+dialc uninstall mylib
+```
+
+`tools/make_stdlib_pkg.py` **保留**：CI 生成官方三平台 `stdlib.dialpkg` 仍走它
+（它一次收三份 `.a`、包名固定 `stdlib`），与 `dialc pack` 的「单项目通用打包」分工明确。
+
+### 34.6 诊断带位置（A7）与 Fail-Fast 收紧（A3）
+
+**A7**：`panic("...")`、`assert(...)` 失败、未捕获异常现在都带**源码位置**：
+
+```
+dial: 运行时断言失败（Fail-Fast 终止）: x should be 2 (at /path/main.dial:3:5)
+dial: 未捕获的异常（panic）: something broke
+       位置: /path/main.dial:2:5
+```
+
+文件名、行列是**编译期常量**（`CgOpts.src_file` + `gen_stmt` 记下的语句位置），
+运行期零额外开销；首行保持与旧版完全一致，既有脚本与 G 组回归不受影响。
+未捕获异常的新入口叫 `dial_panic_loc` / `dial_assert_fail_loc`，旧符号保留给其它 C 调用点。
+
+**A3**：旧版 `dialc build a.dial b.dial` 只打印一行「未知参数 'b.dial'」、
+**却仍以 `rc=0` 产出 a 的可执行文件**，让人误以为两个文件都编进去了。现在任何不认识的
+参数一律**当场非零退出**；若多出来的是 `.dial`，错误信息直接指向 §34.2 的本地模块写法：
+「dialc 一次只编译一个源文件；多个 .dial 请用 `import "./xxx.dial";`」。
+同一条规则推广到所有新子命令（`ensure_no_extra`）。
+
+### 34.7 D 组文档 / 诊断漂移修复
+
+| 编号 | 修正 |
+| --- | --- |
+| D1 | `examples/string_demo.dial` 注释曾写「`+` 不对 string 重载」，实测 `+` / `+=` 早已可用，改为正确说明（`concat()` 仍保留） |
+| D2 | §16 曾写「`print` 恰好接受 1 个参数」，改为 variadic（v1.00 起）并给示例 |
+| D3 | §5.5 / §15 只写了 `str(char)`，补上实测分派：`int` / `float` / `char` 可用，`bool` 编译期拒绝 |
+| D4 | §17.2 标题「截至 v1.02」→「截至 v1.04」，表格里「函数指针不支持」改为「v1.03 已支持（闭包仍无）」、「源码模块拆分尚未实现」改为「v1.04 已支持」，并同步三处锚点引用 |
+| D5 | `Point[]` 的报错曾声称「元素类型只支持 int 与句柄」，改为列出真实的标量 + 句柄白名单 |
+| D6 | 「找不到已安装的包」现在附带「本地源码模块写 `import "./xxx.dial";`」的指引；LSP 的稳定错误码与文案前缀不变 |
+
+### 34.8 实现落点
+
+| 层 | 文件 | 改动 |
+| --- | --- | --- |
+| CLI / 前端 | `main.rs` | 命令分派表；`frontend()` 共用流水线；`collect_sources()` 递归合并本地模块；`check / fmt / test / new / list / uninstall / pack` |
+| 打包 | `src/pkgbuild.rs`（新） | `dial.toml` TOML 子集解析、`pack` 生成 manifest + SHA256 + zip 并自检、`new` 骨架、`list` / `uninstall` |
+| AST / 解析 | `ast.rs` / `parser.rs` | `TestDef` / `Program.tests`；顶层 `test "名" { ... }` 用「Ident + 字符串」识别，零新增关键字 |
+| 语义 | `semantic.rs` | `stmt_pos` 提升为 crate 内可见；D5 诊断文本校正 |
+| 代码生成 | `codegen.rs` | `CgOpts.src_file` / `cur_pos`；`emit_fail_loc()` 给 panic / assert / 未捕获异常注入位置 |
+| C Runtime | `runtime/dial_rt_trap.c` / `stdlib/dial_exc.c` | `dial_assert_fail_loc` / `dial_panic_loc` 两个带位置入口 |
+| 回归 | `tests/run_tests.sh` | 新增 **Q 组**（工具链专项） |
+
+### 34.9 测试与交付
+
+- 新增 **Q 组**：`help / version / list / check`、A3 非零退出且不产物、`fmt` 幂等与
+  token 流不变、`test` 通过/失败/过滤、多文件 import 合并与循环/冲突/缺失诊断、
+  `new → pack → install → import → uninstall` 全链路闭环、`pack` 拒绝动态库 / 缺字段，
+  以及 A7 位置信息断言；
+- `bash tests/run_tests.sh` **A–Q 全量回归 0 ❌**；`check_version` / `check_links` /
+  `cve_check` 全通过；`cargo check` 零警告；新增 C 入口经 `zig cc` 三目标编译通过。
+
+> **本轮交付范围**：并入 `[v1.04]`、版本号与 `STDLIB_ABI` 均不变；只做**本地提交**，
+> 不推送 GitHub、不打 tag、不发 Release。`v1.0` 标签不受影响。

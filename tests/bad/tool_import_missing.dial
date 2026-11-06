@@ -1,0 +1,3 @@
+// v1.04 工具链：显式相对路径的本地源码模块必须真实存在（不能靠文件不存在蒙混过关）。
+import "./this_module_does_not_exist.dial";
+fn main(): int { return 0; }

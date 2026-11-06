@@ -615,5 +615,51 @@ C ABI 宽度、string / bytes 数据总线、`repr(C)` 结构体、C 回调等�
 
 ---
 
+## 11. 工程工具链与产包（v1.04 增补）
+
+> 本节是**已落地实现**的记录，不是规划。完整用法见 [README §34](README.md)。
+
+### 11.1 前端共用
+
+`build / run / check / test` 共用 `main.rs::frontend()`：递归收集本地源码模块 →
+解析包（拿不透明类型名）→ 逐个文件正式 parse → AST 合并 → 语言层 FFI 声明校验 →
+语义分析。`check` 到此为止；`build / run` 继续 codegen + link；`test` 为每个测试块
+构造一个只含该块的合成入口再走同一后端。共用一条前端是硬约束——「检查通过」与
+「实际编译」不允许因为两套解析逻辑给出不同结论。
+
+### 11.2 本地源码模块与包模块的分工
+
+| 维度 | 本地源码模块（v1.04） | `.dialpkg` 包（v0.93 起） |
+| --- | --- | --- |
+| 声明 | `import "./util.dial";` / 裸名 `import "util";` | `import "包名";` |
+| 来源 | 项目内 `.dial` 源码，编译期合并 AST | `~/.dial/packages/<name>/` 已安装 |
+| 函数体 | 与调用方一起编译 | 预编译 `.a`，链接期缝入 |
+| 校验 | 循环引用 / 同名声明 / 文件存在 | manifest / SHA256 / ABI / Triple |
+| 产包 | 不适用 | `dialc pack` + `dial.toml`（v1.04） |
+
+裸名优先本地：同目录存在 `<name>.dial` 即按源码模块处理，否则回退包解析。
+这个优先级让本地模块可覆盖同名包，同时不动 v0.93 以来的包语义。子模块的
+`link` 相对路径按**该子模块所在目录**解析，不是主文件目录。
+
+### 11.3 产包闭环
+
+`dialc pack` 读 `dial.toml`（一个显式的 TOML 子集：未知 / 重复 / 缺字段一律报错），
+校验 `.diali` 与各平台静态库的 ar 魔数，生成 `manifest.txt` + 逐文件 SHA256，
+压成 `.dialpkg` 后**就地**用 `parse_manifest` + `verify_archive` 自检。产包与安装
+共用同一套校验实现（`src/package.rs`），不存在「自己打的包自己装不上」。
+
+**包分发铁律（§5、J 组）一字未动**：`targets` 只认 `.a` / `.lib`，动态库一律拒绝。
+`tools/make_stdlib_pkg.py` 保留给 CI 生成官方三平台 `stdlib.dialpkg`（一次收三份 `.a`），
+与 `dialc pack` 的「单项目通用打包」分工明确。
+
+### 11.4 诊断与 Fail-Fast
+
+`CgOpts.src_file` + `gen_stmt` 记下的语句位置，在 `panic` / `assert` / 未捕获异常处
+注入「文件:行:列」（编译期常量，运行期零额外开销）。所有 CLI 子命令对未知参数
+一律非零退出，绝不静默吞掉多余输入（A3）；`fmt` 还会校验格式化前后 token 序列
+完全一致且结果幂等，保证格式化不改变语义。
+
+---
+
 > 本文件为**架构规划**，不含任何实现承诺与时间表。规范一旦在真实包上落地，
 > 将同步更新本文件、README §25 与 [CHANGELOG.md](CHANGELOG.md)。

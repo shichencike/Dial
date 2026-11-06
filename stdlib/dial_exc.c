@@ -47,6 +47,16 @@ void dial_panic(const char *msg) {
     abort();
 }
 
+/* A7：首行保持与 dial_panic 完全一致（回归测试按「真实错误消息」匹配这一行），
+   位置单独占第二行，既有程序/脚本不受影响，又让人一眼看到是哪一行抛的。 */
+void dial_panic_loc(const char *msg, const char *file, int64_t line, int64_t col) {
+    fflush(NULL);
+    fprintf(stderr, "dial: 未捕获的异常（panic）: %s\n", msg ? msg : "(null)");
+    fprintf(stderr, "       位置: %s:%lld:%lld\n",
+            file ? file : "<unknown>", (long long)line, (long long)col);
+    abort();
+}
+
 /* ----------------------------------------------------------------------------
  *  运行时异常栈（跨函数 unwinding）
  * ----------------------------------------------------------------------------

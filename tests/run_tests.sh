@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 十六组检查，全部通过才算绿（顺序为 A→P，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 十七组检查，全部通过才算绿（顺序为 A→Q，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -26,6 +26,8 @@
 #   P. FFI：语言层 extern fn + link 静态/动态库 + extern struct（C ABI sizeof/offsetof 与 C 比对）
 #      + Dial↔C 双向字段读写 + C 回调状态透传 + 动态链接 RUNPATH 端到端
 #      + 按魔数拒绝伪装的 .a / .so / .dll / .dylib（v1.04 新增）。
+#   Q. 工程工具链：新增 CLI 子命令、本地源码模块合并、test / fmt / check、
+#      new→pack→install→import→uninstall 闭环、A3 Fail-Fast、A7 位置诊断（v1.04 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -609,6 +611,213 @@ fi
 # 5) 清理构建产物，保持工作树干净（*.o 已被 .gitignore 忽略，但物理文件不该堆积）。
 #    dialc build 默认也会在源码同目录留下一份 .o，一并清掉。
 rm -f "$FFI_DIR/libffi_demo.a" "$FFI_DIR"/*.o
+
+
+# =====================================================================
+echo
+echo "== Q) 工程工具链：CLI / 本地模块 / test / fmt / pack 闭环（v1.04 增补） =="
+
+QDIR="${TMP}/qtool"
+QHOME="${TMP}/qhome"
+mkdir -p "$QDIR" "$QHOME"
+# 包管理相关一律用隔离 HOME，绝不污染开发者真实的 ~/.dial/packages。
+qrun() { env HOME="$QHOME" "$DIALC" "$@"; }
+qpass() { echo "  ✅ $1"; }
+qbad()  { echo "  ❌ $1"; fail=1; }
+CV=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+
+# 1) help / version / list / 未知命令
+#    逐项核对每个子命令都在帮助里出现（用子命令名做词边界匹配，
+#    不要依赖 "dialc pack" 这类并未出现在帮助文案里的字面串）。
+qhelp=$(qrun help 2>&1)
+qmissing=""
+for sub in build run check test fmt new pack install list uninstall version lsp help; do
+    echo "$qhelp" | grep -qE "(^|[[:space:]])${sub}([[:space:]]|$)" || qmissing="${qmissing} ${sub}"
+done
+if [ -z "$qmissing" ]; then qpass "help 列出全部子命令"; else qbad "help 缺子命令:${qmissing}"; fi
+if [ "$(qrun --version 2>&1)" = "dialc $CV" ]; then qpass "version 取自 Cargo.toml（$CV）"; else qbad "version 与 Cargo.toml 不一致"; fi
+if qrun list >/dev/null 2>&1; then qpass "list 在空缓存下正常返回"; else qbad "list 失败"; fi
+if qrun frobnicate >/dev/null 2>&1; then qbad "未知命令竟然成功"; else qpass "未知命令非零退出"; fi
+
+# 2) check：只做前端，不产出可执行文件
+qout=$(qrun check examples/hello.dial 2>&1)
+if echo "$qout" | grep -q "类型检查通过" && ! echo "$qout" | grep -q "已生成可执行文件"; then
+    qpass "check 通过且不产出文件"
+else qbad "check 输出异常"; fi
+badone=$(ls tests/bad/*.dial | head -1)
+if qrun check "$badone" >/dev/null 2>&1; then qbad "check 竟然接受了负向用例"; else qpass "check 拒绝负向用例"; fi
+if qrun check examples/hello.dial --bogus >/dev/null 2>&1; then qbad "check 静默吞掉未知参数"; else qpass "check 拒绝未知参数"; fi
+
+# 3) A3：多文件输入必须非零退出且绝不产出可执行文件
+rm -f "${TMP}/q_a3"
+if qrun build examples/hello.dial examples/flow.dial -o "${TMP}/q_a3" >"${TMP}/q_a3.log" 2>&1; then
+    qbad "A3：多余 .dial 输入竟然编译通过"
+elif [ -x "${TMP}/q_a3" ]; then
+    qbad "A3：失败后仍产出可执行文件"
+elif ! grep -q 'import "./xxx.dial"' "${TMP}/q_a3.log"; then
+    qbad "A3：诊断缺本地模块指引"
+else
+    qpass "A3：多文件输入非零退出、不产物、附 import 指引"
+fi
+
+# 4) fmt：--check / 幂等 / 格式化后编译运行一致
+cat > "${TMP}/q_messy.dial" <<'EOF'
+fn main(): int {
+var x: int = 1;
+if (x > 0) {
+print("yes");   
+}
+return 0;
+}
+EOF
+if qrun fmt --check "${TMP}/q_messy.dial" >/dev/null 2>&1; then
+    qbad "fmt --check 未识别未格式化文件"
+else qpass "fmt --check 报告未格式化并非零退出"; fi
+if qrun fmt "${TMP}/q_messy.dial" >/dev/null 2>&1 \
+   && qrun fmt --check "${TMP}/q_messy.dial" >/dev/null 2>&1; then
+    qpass "fmt 写入后幂等"
+else qbad "fmt 写入或幂等自检失败"; fi
+if qrun build "${TMP}/q_messy.dial" -o "${TMP}/q_messy" >/dev/null 2>&1 \
+   && [ "$("${TMP}/q_messy" 2>/dev/null)" = "yes" ]; then
+    qpass "fmt 后仍能编译运行且输出一致"
+else qbad "fmt 改变了程序语义"; fi
+
+# 5) test：通过 / 失败 / 过滤 / 失败带位置
+cat > "${TMP}/q_tests.dial" <<'EOF'
+fn qadd(a: int, b: int): int { return a + b; }
+test "addition" { assert(qadd(1, 2) == 3, "add"); }
+test "failure" { assert(1 == 2, "must fail"); }
+fn main(): int { return 0; }
+EOF
+qrun test "${TMP}/q_tests.dial" > "${TMP}/q_test.out" 2>&1; qtrc=$?
+if [ "$qtrc" -ne 0 ] && grep -q "✅ addition" "${TMP}/q_test.out" \
+   && grep -q "❌ failure" "${TMP}/q_test.out" \
+   && grep -Eq "q_tests\.dial:[0-9]+:[0-9]+" "${TMP}/q_test.out"; then
+    qpass "test 逐块隔离、失败非零退出且带文件:行:列"
+else qbad "test 汇总/隔离/位置诊断异常"; sed 's/^/       /' "${TMP}/q_test.out" | head -12; fi
+if qrun test "${TMP}/q_tests.dial" --filter addition > "${TMP}/q_filter.out" 2>&1 \
+   && grep -q "通过 1 / 失败 0" "${TMP}/q_filter.out"; then
+    qpass "test --filter 只跑匹配的块"
+else qbad "test --filter 异常"; fi
+
+# 6) 本地源码模块：裸名 + 显式路径 + 嵌套依赖
+cat > "${TMP}/q_util.dial" <<'EOF'
+fn qhelper(): int { return 7; }
+EOF
+cat > "${TMP}/q_inner.dial" <<'EOF'
+fn qinner(): int { return qhelper() * 2; }
+EOF
+cat > "${TMP}/q_main.dial" <<'EOF'
+import "q_util";
+import "./q_inner.dial";
+fn main(): int { print(qinner()); return 0; }
+EOF
+if qrun build "${TMP}/q_main.dial" -o "${TMP}/q_main" >"${TMP}/q_main.log" 2>&1 \
+   && [ "$("${TMP}/q_main" 2>/dev/null)" = "14" ]; then
+    qpass "本地源码模块合并编译（裸名 + 显式路径 + 跨模块调用）"
+else qbad "本地源码模块合并失败"; sed 's/^/       /' "${TMP}/q_main.log" | tail -6; fi
+cat > "${TMP}/q_cyc_a.dial" <<'EOF'
+import "./q_cyc_b.dial";
+fn main(): int { return 0; }
+EOF
+cat > "${TMP}/q_cyc_b.dial" <<'EOF'
+import "./q_cyc_a.dial";
+fn qb(): int { return 0; }
+EOF
+if qrun check "${TMP}/q_cyc_a.dial" 2>&1 | grep -q "循环引用"; then qpass "循环引用被拒绝"; else qbad "循环引用未检出"; fi
+cat > "${TMP}/q_dup.dial" <<'EOF'
+fn qhelper(): int { return 1; }
+EOF
+cat > "${TMP}/q_main_dup.dial" <<'EOF'
+import "./q_util.dial";
+import "./q_dup.dial";
+fn main(): int { return 0; }
+EOF
+if qrun check "${TMP}/q_main_dup.dial" 2>&1 | grep -q "重复定义"; then qpass "同名函数冲突被拒绝"; else qbad "同名函数冲突未检出"; fi
+cat > "${TMP}/q_miss.dial" <<'EOF'
+import "./nope.dial";
+fn main(): int { return 0; }
+EOF
+if qrun check "${TMP}/q_miss.dial" 2>&1 | grep -q "指向的文件不存在"; then qpass "本地模块缺失给出明确诊断"; else qbad "缺失诊断不明确"; fi
+
+# 7) new → pack → install → import → uninstall 全链路闭环
+QPROJ="${TMP}/qproj"
+if ! qrun new "$QPROJ" qdemo >"${TMP}/q_new.log" 2>&1; then
+    qbad "new 生成骨架失败"; sed 's/^/       /' "${TMP}/q_new.log"
+else
+    qpass "new 生成 dial.toml / main.dial / .diali / lib/ 骨架"
+fi
+QTRIPLE=$(sed -n '/\[targets\]/,$p' "$QPROJ/dial.toml" 2>/dev/null | grep -E '^[A-Za-z0-9_-]+ = ' | head -1 | cut -d' ' -f1)
+if [ -z "$QTRIPLE" ]; then qbad "dial.toml 未解析出 target triple"; fi
+cat > "$QPROJ/qdemo.c" <<'EOF'
+#include <stdint.h>
+int64_t qdemo_add(int64_t a, int64_t b) { return a + b; }
+EOF
+mkdir -p "$QPROJ/lib/$QTRIPLE"
+cc -O2 -c "$QPROJ/qdemo.c" -o "$QPROJ/qdemo.o" >/dev/null 2>&1 \
+  && ar rcs "$QPROJ/lib/$QTRIPLE/libqdemo.a" "$QPROJ/qdemo.o"
+if qrun pack "$QPROJ" -o "${TMP}/qdemo.dialpkg" >"${TMP}/q_pack.log" 2>&1 \
+   && python3 -c 'import json,sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); m=json.loads(z.read("manifest.txt")); assert m["name"]=="qdemo" and m["abi"]==5; assert m["sha256"]; assert set(z.namelist())=={"manifest.txt","qdemo.diali"}|set(m["sha256"].keys())' "${TMP}/qdemo.dialpkg" >/dev/null 2>&1; then
+    qpass "pack 生成合规 manifest + 逐文件 SHA256（自检通过）"
+else qbad "pack 失败或产物不合规"; sed 's/^/       /' "${TMP}/q_pack.log" | tail -8; fi
+if qrun install "${TMP}/qdemo.dialpkg" >/dev/null 2>&1; then qpass "install 吃下 pack 产物"; else qbad "install 拒绝了自己打的包"; fi
+if qrun list 2>&1 | grep -q "qdemo"; then qpass "list 显示新装包"; else qbad "list 未显示新装包"; fi
+cat > "${TMP}/q_use.dial" <<'EOF'
+import "qdemo";
+fn main(): int { print(qdemo_add(20, 22)); return 0; }
+EOF
+if qrun build "${TMP}/q_use.dial" -o "${TMP}/q_use" >"${TMP}/q_use.log" 2>&1 \
+   && [ "$("${TMP}/q_use" 2>/dev/null)" = "42" ]; then
+    qpass "import 调用包函数端到端（42）"
+else qbad "import 闭环失败"; sed 's/^/       /' "${TMP}/q_use.log" | tail -8; fi
+if qrun uninstall qdemo >/dev/null 2>&1 && ! qrun list 2>&1 | grep -q "qdemo"; then
+    qpass "uninstall 删除包且 list 不再显示"
+else qbad "uninstall 异常"; fi
+
+# 8) pack 的 Fail-Fast：动态库 / 缺字段一律拒绝
+QBAD="${TMP}/qbad"; mkdir -p "$QBAD/lib"
+cp "$QPROJ/qdemo.diali" "$QBAD/" 2>/dev/null || true
+printf 'not a shared object' > "$QBAD/lib/libfake.so"
+cat > "$QBAD/dial.toml" <<EOF
+name = "qbad"
+version = "1.0.0"
+abi = 5
+iface = "qdemo.diali"
+license = "MIT"
+[targets]
+$QTRIPLE = "lib/libfake.so"
+EOF
+if qrun pack "$QBAD" -o "${TMP}/qbad.dialpkg" >"${TMP}/qbad.log" 2>&1; then
+    qbad "pack 竟然接受了动态库"
+elif grep -q "静态" "${TMP}/qbad.log"; then
+    qpass "pack 拒绝动态库（J 组铁律）"
+else qbad "pack 拒绝动态库但诊断不明确"; fi
+QMISS="${TMP}/qmiss"; mkdir -p "$QMISS"
+cat > "$QMISS/dial.toml" <<'EOF'
+name = "qmiss"
+EOF
+if qrun pack "$QMISS" >"${TMP}/qmiss.log" 2>&1; then
+    qbad "pack 竟然接受了缺字段清单"
+elif grep -q "缺少必填字段" "${TMP}/qmiss.log"; then
+    qpass "pack 对缺字段清单显式报错"
+else qbad "pack 缺字段诊断不明确"; fi
+
+# 9) A7：panic 运行时诊断带文件:行:列
+cat > "${TMP}/q_panic.dial" <<'EOF'
+fn main(): int {
+    panic("boom");
+    return 0;
+}
+EOF
+if qrun build "${TMP}/q_panic.dial" -o "${TMP}/q_panic" >/dev/null 2>&1; then
+    # 交给 sh 间接执行并让 sh 正常退出：bash 只有在直接等待被信号终止的
+    # 子进程时才会打印 "Aborted" 作业提示；程序 stderr 仍完整写入 q_panic.err。
+    sh -c '"$1" >/dev/null 2>"$2"; exit 0' _ "${TMP}/q_panic" "${TMP}/q_panic.err" || true
+    if grep -q "位置:" "${TMP}/q_panic.err" \
+       && grep -Eq "q_panic\.dial:[0-9]+:[0-9]+" "${TMP}/q_panic.err"; then
+        qpass "panic 诊断含 文件:行:列"
+    else qbad "panic 诊断缺位置"; sed 's/^/       /' "${TMP}/q_panic.err"; fi
+else qbad "panic 用例编译失败"; fi
 
 echo
 if [ $fail -eq 0 ]; then

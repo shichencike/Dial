@@ -85,6 +85,22 @@ void dial_assert_fail(const char *what) {
     dial_trap();
 }
 
+/* A7：与 dial_assert_fail 相同的 Fail-Fast 语义，只是把「文件:行:列」一起写出来。
+ * 位置是编译期常量，运行期只是多写几个字节，不改变任何检查与终止行为。 */
+void dial_assert_fail_loc(const char *what, const char *file, int64_t line, int64_t col) {
+    dial_flush_stdout();
+    dial_emit("dial: 运行时断言失败（Fail-Fast 终止）: ");
+    dial_emit(what ? what : "(null)");
+    dial_emit(" (at ");
+    dial_emit(file ? file : "<unknown>");
+    dial_emit(":");
+    dial_emit_i64(line);
+    dial_emit(":");
+    dial_emit_i64(col);
+    dial_emit(")\n");
+    dial_trap();
+}
+
 void dial_exit(int64_t code) {
     dial_flush_stdout();
     exit((int)code);

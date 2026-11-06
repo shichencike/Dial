@@ -548,11 +548,30 @@ pub struct CStructDef {
     pub col: usize,
 }
 
-/// 整个程序 = `import` 列表 + 顶层结构体集合 + 顶层函数集合 + FFI 声明（v1.04）。
+/// 顶层测试块（v1.04 工具链）：`test "名字" { ... }`。
+///
+/// 刻意**不新增 `test` 关键字**——parser 在顶层用「Ident("test") 后跟字符串字面量」
+/// 识别它，因此 `test` 依然可以作变量名/函数名，不破坏已有程序。
+///
+/// 语义：`dialc build` / `run` 会**忽略**测试块（与 Rust `#[cfg(test)]` 同理，
+/// 测试代码不进正式产物）；只有 `dialc test` 才把每块单独编译成可执行文件并运行。
+/// 每块独立一个进程，任何一块的 assert 失败（Fail-Fast 立即终止）都不会影响其余块。
+#[derive(Debug, Clone)]
+pub struct TestDef {
+    pub name: String,
+    pub body: Vec<Stmt>,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// 整个程序 = `import` 列表 + 顶层结构体集合 + 顶层函数集合 + FFI 声明（v1.04）
+/// + 顶层测试块（v1.04 工具链）。
 ///
 /// `imports` 是**包名**列表（v0.92）。包名只是名字——它引用的是
 /// `~/.dial/packages/<name>/` 下已安装的包，编译器自行完成解压、选库与链接，
 /// 用户不写路径、不写平台、不写版本（见 ARCHITECTURE.md §4.3「无缝」的确切含义）。
+/// v1.04 起 `import "./util.dial";` 也可指向本地源码模块，由 `main.rs` 的
+/// 源码收集器展开合并（这类项不会留在最终的 `imports` 里）。
 #[derive(Debug, Clone)]
 pub struct Program {
     pub imports: Vec<String>,
@@ -564,4 +583,6 @@ pub struct Program {
     pub links: Vec<LinkDecl>,
     /// `extern struct` C ABI 结构体定义（v1.04）。
     pub cstructs: Vec<CStructDef>,
+    /// 顶层 `test` 块（v1.04 工具链）：只在 `dialc test` 下编译运行。
+    pub tests: Vec<TestDef>,
 }

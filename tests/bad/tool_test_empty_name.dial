@@ -1,0 +1,5 @@
+// v1.04 工具链：test 块的名字不能为空（parser 层 Fail-Fast）。
+test "" {
+    assert(1 == 1, "ok");
+}
+fn main(): int { return 0; }

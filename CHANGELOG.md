@@ -28,6 +28,8 @@
 > `[v1.00]` ~ `[v1.03]` 是「达成 v1.0」过程中的分版记录（见下方里程碑大标题）。
 > `[v1.04]` 是**里程碑达成之后的第一个增量分版**，不归入上面那批分版记录。
 > 按本轮交付约定：**只做本地提交，不推送 GitHub、不打 tag**。
+> 本版后续还并入了「语言层动态链接」与「工程工具链增补」（见 [README §34](README.md#34-v104-增补工程工具链并入-v104版本不变)），
+> 均不新增分版记录，编译器版本 `1.4.0` 与 `STDLIB_ABI 5` 保持不变。
 
 ### Added
 
@@ -48,6 +50,16 @@
   `string_from_cstr(p)` / `bytes_from_ptr(p, n)` 从 C 缓冲区**复制**出受 ARC 管理的新对象。
 - **C 回调**：`Type::FnPtr` 生成标准 C calling convention，C 侧可安全调用 Dial 具名函数；
   跨回调状态经 `rawptr<void>` 显式透传，无闭包、无隐藏环境对象。
+- **工程工具链（并入 `[v1.04]` 的增补，见 [README §34](README.md#34-v104-增补工程工具链并入-v104版本不变)）**：
+  - 新增 `dialc check / fmt / test / new / list / uninstall / pack / help` 八个子命令；
+    `build / run / check / test` **共用同一条前端流水线**（`main.rs::frontend()`）；
+  - **本地源码模块**：`import "./util.dial";` 或裸名 `import "util";`（同目录存在
+    `util.dial` 即视为本地模块），递归合并编译，带循环引用 / 同名函数 / 缺失文件诊断；
+  - **顶层 `test "名" { ... }` 块**：`dialc test` 逐块独立进程运行、`--filter` 筛选，
+    测试代码不进 `build` 产物（刻意不新增 `test` 关键字，避免破坏已有标识符）；
+  - **`dialc pack` + `dial.toml`**：通用产包命令，校验 `.diali` 与静态库 ar 魔数、
+    生成 `manifest.txt` 与逐文件 SHA256、打包后就地自检；`dialc new` 生成项目骨架，
+    `list` / `uninstall` 补齐包管理。`tools/make_stdlib_pkg.py` 保留给 CI 的三平台 stdlib 包。
 
 ### Changed
 
@@ -62,11 +74,25 @@
   J 组三条硬规则一字未动。语言层 `link` 则**静态 / 动态并存**：动态库按扩展名验
   ELF / PE / Mach-O 魔数并注入 rpath，由源码作者显式承担运行期依赖；不写 `link`
   动态库的程序仍满足「只链 libc」的默认产物契约（测试 C 组照常断言）。
+- **运行时诊断带位置（A7）**：`panic` / `assert` 失败 / 未捕获异常现在输出
+  `文件:行:列`（文件名与行列是编译期常量，运行期零额外开销）；新增
+  `dial_panic_loc` / `dial_assert_fail_loc` 两个 C 入口，旧符号保留给其它调用点。
+  首行文案与旧版完全一致，G 组回归不受影响。
+- **Fail-Fast 收紧（A3）**：旧版 `dialc build a.dial b.dial` 打印「未知参数」后
+  **仍以 `rc=0` 产出 a 的可执行文件**（多余输入被静默吞掉）；现在任何未知参数一律
+  非零退出，多出来的是 `.dial` 时附带 §34.2 本地模块写法的指引。同一规则推广到全部新子命令。
 
 ### Fixed
 
 - 函数实参类型不匹配的诊断：参数序号此前被误填成形参类型名（显示「第 rawptr 个参数」），
   且泛型类型只显示 `rawptr` 而非完整签名；现改为正确序号 + `Type::display()` 完整类型。
+- **D 组文档 / 诊断漂移**（按 `REPORT_v1.04_gaps.md` 实测校正）：
+  `examples/string_demo.dial` 的「`+` 不对 string 重载」注释、README §16「print 恰好 1 参」、
+  §5.5 / §15「只有 `str(char)`」、§17.2「截至 v1.02 / 函数指针不支持 / 源码模块未实现」、
+  `Point[]` 报错里「元素类型只支持 int 与句柄」全部改为与实现一致；
+  「找不到已安装的包」补上本地源码模块指引（LSP 稳定错误码与文案前缀不变）。
+- `dialc test` 逐块链接时的 stdlib 编译日志改为静默（`LinkOpts.quiet`），
+  避免把测试结果淹没在重复的 ℹ️ 行里。
 
 ### 测试
 
@@ -81,6 +107,10 @@
   验证 Dial↔C 双向字段读写、C 回调状态透传；另编真实共享库做动态链接端到端
   （显式 `link` + `extern fn`，并用 `readelf -d` 断言 `RUNPATH` 已注入），再用伪装的
   `.a` / `.so` / `.dll` / `.dylib` 验证魔数拒绝不是靠「文件不存在」蒙混过关。
+- 新增 **Q 组（工程工具链专项）**：全部新子命令、A3 非零退出且不产物、`fmt` 幂等与
+  token 流不变、`test` 通过 / 失败 / 过滤、多文件 import 合并与循环 / 冲突 / 缺失诊断、
+  `new → pack → install → import → uninstall` 全链路闭环、`pack` 拒绝动态库与缺字段、
+  A7 运行时位置断言。回归脚本由 **A–P 扩为 A–Q**。
 
 ---
 

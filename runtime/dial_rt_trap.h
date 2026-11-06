@@ -46,6 +46,8 @@ void dial_trap(void);
 void dial_bounds_fail(int64_t idx, int64_t len);
 void dial_null_fail(const char *what);
 void dial_assert_fail(const char *what);
+/* v1.04 工具链（A7）：带源码位置的断言失败诊断（file/line/col 由编译期常量传入）。 */
+void dial_assert_fail_loc(const char *what, const char *file, int64_t line, int64_t col);
 /* v1.00：exit(code) 内建。先冲净 stdout，再以给定退出码结束进程。 */
 void dial_exit(int64_t code);
 
