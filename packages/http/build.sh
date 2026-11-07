@@ -3,9 +3,12 @@
 # 构建 http.dialpkg 的三平台静态库。
 #
 # 产物：packages/http/lib/<triple>/libhttp.a
-#   - dial_http.o   自研 HTTP/1.1 层（协议解析 / Header 拼装 / Socket 读写）
+#   - dial_http.o   自研 HTTP/1.1 层（协议解析 / Header 拼装 / Socket 读写 / keep-alive 池）
+#   - dial_tls.o    mbedTLS 会话封装（TLS 1.3，证书校验 fail-closed）
+#   - dial_http2.o  HTTP/2 帧层 + 会话/stream 状态机（TLS h2 + 明文 h2c）
+#   - dial_hpack.o  自研 HPACK（静态表 + Huffman 解码 + 动态表）
 #   - z_*.o         zlib 核心（gzip / deflate 解压）
-#   - mt_*.o        mbedTLS 全量（TLS 本轮暂未向 Dial 暴露，先把静态库备好）
+#   - mt_*.o        mbedTLS 全量
 #
 # 全部用 zig cc 交叉编译，保证三个平台的机器码出自同一套工具链。
 # 依赖源码在 third_party/（已 vendor，构建完全离线可复现）。
@@ -51,6 +54,19 @@ for pair in "${TARGETS[@]}"; do
         -I "$PKG/src" -I "$TP/mbedtls/include" -I "$TP/mbedtls/3rdparty/everest/include" \
         -I "$TP/mbedtls/3rdparty/p256-m" \
         "${CFLAGS_COMMON[@]}" -o "$work/dial_tls.o"
+
+    # HTTP/2 层：帧/会话（dial_http2.o）+ 自研 HPACK（dial_hpack.o）。
+    # dial_http2.c 需要 stdlib 的 dial_string.h 与 dial_tls.h；平台线程原语
+    # （POSIX pthread / Win32 CRITICAL_SECTION+CONDITION_VARIABLE）由目标工具链
+    # 自带，静态归档无需额外链接参数。
+    zig cc -target "$t" -c "$PKG/src/dial_http2.c" \
+        -I "$PKG/src" -I "$ROOT/stdlib" -I "$ROOT/runtime" \
+        -I "$TP/mbedtls/include" -I "$TP/mbedtls/3rdparty/everest/include" \
+        -I "$TP/mbedtls/3rdparty/p256-m" \
+        "${CFLAGS_COMMON[@]}" -o "$work/dial_http2.o"
+    zig cc -target "$t" -c "$PKG/src/dial_hpack.c" \
+        -I "$PKG/src" \
+        "${CFLAGS_COMMON[@]}" -o "$work/dial_hpack.o"
 
     # 2) zlib 核心
     for f in "${ZLIB_SRCS[@]}"; do

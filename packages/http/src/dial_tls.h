@@ -17,8 +17,9 @@
  *     路径（内网 / 私有 CA 场景）。
  *   - 复用调用方的 TCP 套接字：通过 mbedTLS 的自定义 BIO（f_send/f_recv）
  *     直接在我们已建立的 socket 上收发，不引入 mbedTLS 自己的联网层。
- *   - SNI 严格等于对端主机名；ALPN 由调用方决定（本阶段 http 包只 offer
- *     http/1.1，避免协商出一个我们尚不会说的协议）。
+ *   - SNI 严格等于对端主机名；ALPN 由调用方决定（HTTP/1.1 层 offer
+ *     `http/1.1`，HTTP/2 层 offer `h2`），协商结果由各层自行校验，
+ *     绝不静默降级为不会说的协议。
  *
  * 注意：本层只负责「在已连上的 TCP 之上做 TLS」；TCP 连接本身由 dial_http.c
  * 负责。Dial 侧拿到的还是不透明句柄 + 收发函数，看不到任何 mbedTLS 符号。

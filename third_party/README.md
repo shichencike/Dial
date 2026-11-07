@@ -6,7 +6,7 @@
 
 | 目录 | 上游 | 版本 | 许可 | 为什么进仓 |
 | --- | --- | --- | --- | --- |
-| `mbedtls/` | https://github.com/Mbed-TLS/mbedtls | 3.6.2 | Apache-2.0 OR GPL-2.0-or-later（取 Apache-2.0） | TLS 传输层。**本轮只编入静态库、暂不向 Dial 暴露 TLS API**，为的是把「TLS 能力已在包里」这件事一次性做完 |
+| `mbedtls/` | https://github.com/Mbed-TLS/mbedtls | 3.6.2 | Apache-2.0 OR GPL-2.0-or-later（取 Apache-2.0） | TLS 传输层。**已接线上层**：`https://` 走 TLS 1.3、证书校验 fail-closed；HTTP/2 的 `h2` 也复用它做 ALPN 协商 |
 | `zlib/` | https://github.com/madler/zlib | 1.3.1 | zlib License | HTTP `Content-Encoding: gzip / deflate` 的**解压**（inflate） |
 
 ## 铁律：绝不手搓密码学底层
@@ -16,8 +16,10 @@ TLS 与摘要类密码学**一律不自己实现**。自己写密码学是安全
 需要密码学时用 `mbedtls`，需要压缩时用 `zlib`。
 
 自研的部分只限**协议编解码与传输**：HTTP/1.1 报文解析、Header 拼装、
-Socket 读写——这些不含密码学，且必须由我们自己掌控（线级细节可控，
-才能为后续的连接指纹定制留出空间）。
+Socket 读写、HTTP/2 分帧与 HPACK 头压缩——这些不含密码学，且必须由我们自己
+掌控（线级细节可控，才能为后续的连接指纹定制留出空间）。HPACK 的静态表与
+Huffman 码表由 `tools/gen_hpack_tables.py` 从 Python `hpack` 库常量生成，
+不是手写的密码学或压缩算法实现。
 
 ## 许可与再分发
 

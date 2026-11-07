@@ -79,6 +79,10 @@ static int bio_recv_timeout(void *ctx, unsigned char *buf, size_t len, uint32_t 
 
 /* ---- 系统根证书库 ---- */
 
+/* 各平台实现只在自己对应的分支里被 load_system_ca() 引用。用与调用方一致的
+ * 条件编译守卫，避免在 Windows / macOS 目标下产生「未使用的静态函数」告警
+ * （-Wall -Wextra 下 zig cc 会报）。 */
+#if !defined(_WIN32) && !defined(__APPLE__)
 static int load_linux_ca(mbedtls_x509_crt *ca) {
     /* Debian/Ubuntu 等：散列目录 + 合并包 */
     static const char *paths[] = {
@@ -93,6 +97,7 @@ static int load_linux_ca(mbedtls_x509_crt *ca) {
     }
     return ok;
 }
+#endif
 
 #ifdef __APPLE__
 static int load_macos_ca(mbedtls_x509_crt *ca) {
@@ -274,6 +279,12 @@ int64_t dial_tls_recv(DialTls *t, void *buf, int64_t len) {
     if (!t || len < 0) return -1;
     int r = mbedtls_ssl_read(&t->ssl, (unsigned char *)buf, (size_t)len);
     if (r == 0) return 0;          /* EOF */
+    /* HTTP/2 的单 I/O 线程用短 SO_RCVTIMEO 轮询读：底层 BIO 在超时时返回
+     * WANT_READ/WANT_WRITE，这不是错误而是「此刻无数据」。返回 -2 让上层区分：
+     *   >0 字节数 / 0 EOF / -2 暂无数据(可重试) / -1 真错误(连接中断)。
+     * HTTP/1.1 的 dh_recv_some 把所有 <0 一律当 IO 错误，行为不变（同步请求下
+     * 读超时本就该失败），故这个细分对既有路径零影响。 */
+    if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) return -2;
     if (r < 0) return -1;
     return (int64_t)r;
 }

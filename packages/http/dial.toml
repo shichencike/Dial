@@ -1,5 +1,7 @@
 name = "http"
-version = "1.1.0"
+version = "1.2.0"
+# abi 是「编译此包所依据的标准库 ABI」（STDLIB_ABI=6），不是 http 包自己的
+# 版本号；http.diali 契约变更由 .diali 的 SHA256 校验保证，故 abi 保持 6。
 abi = 6
 iface = "http.diali"
 license = "MIT OR Apache-2.0"

@@ -1,0 +1,107 @@
+// HTTP/2 端到端测试：真·并发多路复用。
+//
+// 6 个 spawn worker 共享同一个 Http2Session（不透明句柄按值共享、不进 ARC），
+// 各自 dial_http2_request 提交一个 stream。服务器故意让响应乱序完成，
+// 客户端必须按 stream id 把响应分发回**对应的** worker——用 X-Stream 头
+// （回显各请求 path）断言「没有串行、没有串台」。
+//
+// worker 通过 channel<string> 把结果摘要交回主线程汇总（channel 元素白名单
+// 只有 string/int[]/map/error/channel，句柄不能进通道，故用字符串摘要）。
+// 断言由 tests/run_tests.sh 对输出做 grep 比对（与 W 组既有风格一致）。
+import "http";
+
+fn worker(sess: Http2Session, path: string, ch: channel<string>): void {
+    var r: HttpResponse = dial_http2_request(sess, "GET", path, "", "");
+    var summary: string = "";
+    if (is_null(r)) {
+        summary = path + "|ERR|" + str(dial_http_last_error()) + "||";
+    } else {
+        var st: int = dial_http_resp_status(r);
+        var bl: int = dial_http_resp_body_len(r);
+        var xs: string = dial_http_resp_header(r, "X-Stream");
+        var xt: string = dial_http_resp_header(r, "X-Test");
+        // 摘要：path|status|x-stream|x-test|bodylen
+        summary = path + "|" + str(st) + "|" + xs + "|" + xt + "|" + str(bl);
+        dial_http_resp_free(r);
+    }
+    move_to(summary, ch);
+}
+
+fn main(): int {
+    var base_h2c: string = getenv("DIAL_HTTP2_H2C_BASE");
+    var base_h2: string = getenv("DIAL_HTTP2_H2_BASE");
+    var ca: string = getenv("DIAL_HTTP2_CA");
+
+    // ---- Part A: 明文 h2c prior-knowledge + 6 worker 并发 ----
+    var s: Http2Session = dial_http2_connect(base_h2c);
+    if (is_null(s)) {
+        print("h2c connected = false");
+        print("h2c err = ", dial_http_last_error_msg());
+        return 1;
+    }
+    print("h2c connected = true");
+    print("h2c protocol = ", dial_http2_last_protocol());
+
+    var ch: channel<string> = channel(8);
+    // /slow0 最慢、/slow3 次之、/fast0 与 /ok 最快 -> 服务端反序回
+    let t0: thread = spawn(worker, s, "/slow0", ch);
+    let t1: thread = spawn(worker, s, "/slow1", ch);
+    let t2: thread = spawn(worker, s, "/slow2", ch);
+    let t3: thread = spawn(worker, s, "/slow3", ch);
+    let t4: thread = spawn(worker, s, "/fast0", ch);
+    let t5: thread = spawn(worker, s, "/ok", ch);
+
+    // 汇总 6 条摘要并原样打印（shell 侧 grep 断言每条 path==x-stream）
+    var i: int = 0;
+    while (i < 6) {
+        var line: string = recv(ch);
+        print("h2c resp = ", line);
+        i = i + 1;
+    }
+    print("h2c conns = ", dial_http2_conn_count());
+    print("h2c streams = ", dial_http2_stream_count());  // 单连接上 6 个 stream
+
+    join(t0); join(t1); join(t2); join(t3); join(t4); join(t5);
+    dial_http2_session_free(s);
+
+    // ---- Part B: 404 / 500 状态可见 ----
+    var s2: Http2Session = dial_http2_connect(base_h2c);
+    var r404: HttpResponse = dial_http2_request(s2, "GET", "/status404", "", "");
+    print("h2 404 status = ", dial_http_resp_status(r404));
+    dial_http_resp_free(r404);
+    var r500: HttpResponse = dial_http2_request(s2, "GET", "/status500", "", "");
+    print("h2 500 status = ", dial_http_resp_status(r500));
+    dial_http_resp_free(r500);
+    dial_http2_session_free(s2);
+
+    // ---- Part C: TLS h2（ALPN 协商）+ fail-closed ----
+    if (base_h2 != "") {
+        dial_http_set_ca_path(ca);
+        var st: Http2Session = dial_http2_connect(base_h2);
+        if (is_null(st)) {
+            print("h2 tls connected = false");
+            print("h2 tls err = ", dial_http_last_error_msg());
+        } else {
+            print("h2 tls connected = true");
+            print("h2 tls protocol = ", dial_http2_last_protocol());
+            print("h2 tls alpn = ", dial_http2_alpn());
+            var rt: HttpResponse = dial_http2_request(st, "GET", "/ok", "", "");
+            print("h2 tls status = ", dial_http_resp_status(rt));
+            print("h2 tls body_len = ", dial_http_resp_body_len(rt));
+            print("h2 tls x-test = ", dial_http_resp_header(rt, "X-Test"));
+            dial_http_resp_free(rt);
+            dial_http2_session_free(st);
+        }
+        // fail-closed：清掉自定义 CA -> 自签证书必须被拒
+        dial_http_set_ca_path("");
+        var bad: Http2Session = dial_http2_connect(base_h2);
+        if (is_null(bad)) {
+            print("h2 no-ca rejected = true");
+        } else {
+            print("h2 no-ca rejected = false (BUG)");
+            dial_http2_session_free(bad);
+        }
+    }
+
+    return 0;
+}

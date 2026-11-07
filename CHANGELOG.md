@@ -211,6 +211,32 @@
     **TLS 1.3 子组**（同组第 7 步）：openssl 自签 CA + 本地 TLS 服务器，验证 TLS 1.3
     协商（`TLSv1.3`）、证书校验 fail-closed（清空自定义 CA 后系统根拒签自签）、
     keep-alive 连接池复用（`pool hits > 0`）、404 / 500 全绿。
+- **HTTP/2.0 客户端（并入 `[v1.04]` 的后续增补，`http` 包 `1.1.0 → 1.2.0`，
+  编译器版本 `1.4.0` / `STDLIB_ABI 6` 均不变）**：在既有 HTTP/1.1 + TLS 1.3 之上，
+  落地 `packages/http/src/dial_http2.c` / `dial_hpack.c` / `dial_hpack_tables.h`：
+  - **两条传输**：`https://` 走 TLS 1.3 + ALPN 协商 `h2`（未协商出 h2 则
+    **fail-closed 拒绝降级**为 HTTP/1.1）；`http://` 走明文 **h2c prior-knowledge**
+    （RFC 7540 §3.4，直发 client preface）。
+  - **自研 HPACK（RFC 7541）**：请求侧统一用 literal-without-indexing / new name
+    最简编码（不维护动态表）；响应侧完整实现静态表（61 项）、Huffman 解码（257 项）、
+    动态表、整数前缀编码与动态表大小更新。静态表与 Huffman 码表由
+    `tools/gen_hpack_tables.py` 从 Python `hpack` 库常量生成，避免手敲出错。
+  - **真·并发多路复用**：新增会话式 API（`dial_http2_connect` /
+    `dial_http2_request` / `dial_http2_session_free`）。一个 `Http2Session` = 一条连接，
+    多个 `spawn` worker 可共享同一句柄并发提交 stream（客户端 stream id 取奇数），
+    帧在单连接上按 `stream_id` 交错分发。因 mbedTLS 的 `ssl_context` 不能多线程
+    并发读写，会话启动时创建**唯一 I/O 线程**独占 socket/TLS：worker 只入队帧、
+    在自己的 condition variable 上等待，由 I/O 线程读帧分发后唤醒；
+    `DialHttpResponse` 在 worker 自己线程里组装，reader 线程绝不构造 Dial ARC 对象。
+  - **并发与跨平台**：POSIX 用 `pthread_mutex_t` / `pthread_cond_t` / `pthread_t`，
+    Windows 用 `CRITICAL_SECTION` / `CONDITION_VARIABLE` / `CreateThread`；
+    三平台静态库零警告零错误。为此修正了编译器 `spawn` thunk 对 `Type::Opaque`
+    形参的槽宽：`Opaque` 已 lowering 成 `i8ptr`，thunk 必须按 ptr 槽读出，
+    否则 load 出 `i64` 传给期望 ptr 的形参会被 LLVM verifier 拒绝。
+  - **W 组回归新增 HTTP/2 子组**（同组第 9 步）：Python `h2/hpack/hyperframe`
+    起本地服务器并**故意乱序响应**，6 个 worker 共享单连接、逐条断言
+    `path == X-Stream`（不串台）、`conns = 1` / `streams = 6`、
+    `h2` ALPN 协商成功、`no-ca rejected = true`、404 / 500 全绿。
 - **宪法裁决入文档（§37）**：`STDLIB_ABI 5 → 6`（`make_stdlib_pkg.py` 默认、
   CI 两处、`dialc new` 骨架同步，后者改为引用 `package::STDLIB_ABI` 消除硬编码）；
   术语统一为「绝不引入可变全局状态」；「函数名重载」「闭包」写入**永久否决**；

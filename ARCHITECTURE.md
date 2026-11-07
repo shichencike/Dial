@@ -865,7 +865,7 @@ UTF-8 码点）、`dial_array_insert` / `index_of` / `reverse` / `reduce` /
 | 第 1 批 | B9 块注释 / B10 `!` / B11 `.slice()` / C6 `get_or` / C8 `eprint` | **已落地**（T 组锁定） |
 | 第 2 批 | C1–C5 / C7 / C9 / C10 标准库 API | **已落地**（U 组锁定：8 组端到端、C2 解析 Fail-Fast、C4 越界 Fail-Fast、`string[].index_of` 拒、C3 零隐式转换、第 2 批内建进保留名） |
 | 第 3 批 | B7 文件级只读 `const` / B8 结构体字段默认值 / B6 结构体进容器 | **已落地**（V 组锁定，见 §14.6） |
-| 收尾 | C11 独立包（如 `http.dialpkg`）、全量回归、文档官网同步、本地提交 | 待落地 |
+| 收尾 | C11 独立包（如 `http.dialpkg`）、全量回归、文档官网同步、本地提交 | **已落地**（W 组锁定，见 §14.7） |
 
 第 3 批的**范围裁决**（用户明确划定）：B7 / B8 / B6 落地；
 B1（`impl` 方法）暂用 `fn` 替代、B2（用户泛型）死守单态化底线、B3（枚举 ADT）
@@ -908,7 +908,7 @@ ABI / SHA256，语言层 FFI（§10）已提供接 C 库的能力。
 ### 14.7 C11 独立包架构：`http.dialpkg` 的分层与 FFI 约定
 
 §37.5 定下「常用库走独立 `.dialpkg`、不进标准库包」，并按领域拆包。
-本轮落地第一个包 `http`（自研 HTTP/1.1 + gzip 解压）。
+本轮落地第一个包 `http`（HTTP/1.1 + TLS 1.3 + keep-alive + HTTP/2 真并发多路复用）。
 
 **分层**（每层职责单一，不互相越界）：
 
@@ -918,6 +918,8 @@ ABI / SHA256，语言层 FFI（§10）已提供接 C 库的能力。
 | 清单 | `packages/http/dial.toml` | 包名 / 版本 / ABI / 接口文件名 / 许可 / 三平台静态库路径 |
 | 机器码 | `packages/http/src/dial_http.c` | 协议实现：URL 解析、请求行与 Header 拼装、响应解析（`Content-Length` / `chunked` / 读到关闭）、Socket 读写、gzip 解压；`dial_http.c` 还管 keep-alive 连接池与客户端画像 |
 | TLS 封装 | `packages/http/src/dial_tls.c` | mbedTLS 客户端封装：自定义 BIO（复用调用方 socket）、SNI=host、ALPN 由调用方定、系统根 / 自定义 CA 双信任链、证书校验 fail-closed |
+| HTTP/2 帧层 | `packages/http/src/dial_http2.c` | 帧头解析 / 8 类帧、会话与 stream 状态机、单 I/O 线程独占 socket/TLS、按 `stream_id` 分发并唤醒 worker；`https` 走 ALPN `h2`、`http` 走 h2c prior-knowledge |
+| HPACK | `packages/http/src/dial_hpack.c` + `dial_hpack_tables.h` | 自研 RFC 7541：请求侧最简编码，响应侧静态表 61 项 / Huffman 解码 257 项 / 动态表 / 整数前缀编码；码表由 `tools/gen_hpack_tables.py` 从 Python `hpack` 常量生成 |
 | 第三方 | `third_party/` | mbedTLS（TLS 1.3，已接线上层）+ zlib（gzip 解压）。**vendor 进仓库**，构建离线可复现 |
 
 **协议层自研、密码学不手搓**：HTTP 的报文与线级细节自己写（可控，才能为后续的
@@ -946,15 +948,27 @@ ABI / SHA256，语言层 FFI（§10）已提供接 C 库的能力。
 `dial_string_new` / `dial_bytes_new`，因此包的归档**必须排在标准库归档之前**
 （`obj → runtime → packages → stdlib`）。标准库从不反向引用包符号，故该次序安全。
 
-**现役能力（如实标注）**：`http` 包已落地 **明文 HTTP/1.1 + TLS 1.3（https）+ keep-alive 连接池**：
+**现役能力（如实标注）**：`http` 包已落地 **明文 HTTP/1.1 + TLS 1.3（https）+
+keep-alive 连接池 + HTTP/2（h2c 明文 / h2 ALPN，自研 HPACK，真·并发多路复用）**：
 `https://` 走 mbedTLS，证书校验 **fail-closed**（系统根与自定义 CA 两条信任链，
 自签名不可冒用）；同一主机连续请求复用已建连接（`dial_http_pool_hits` 可见命中）；
 客户端画像只做兼容性配置（头序 / UA / ALPN），**不做以规避识别为目标的绕检测逻辑**。
 进程级 keep-alive 池为全局数组（host:port:scheme 为键）+ 可移植互斥锁，
 服务器发 `Connection: close` 或连接 EOF 时移出池。
 
-**尚未落地（后续独立包 / 批次，不许当已支持）**：HTTP/2.0 分帧 + HPACK + 多路复用、
-HTTP/3.0（QUIC，独立 `http3.dialpkg` + vendor ngtcp2/nghttp3）。
+**HTTP/2 并发模型**：一个 `Http2Session` = 一条连接 + 一个**专用 I/O 线程**。
+mbedTLS 的 `ssl_context` 不能被多线程并发读写（未开 `MBEDTLS_THREADING_C`），
+因此该线程独占 socket / TLS，负责把各 worker 提交的帧原子写出、读帧、按
+`stream_id` 分发到对应 stream 并 `cond_broadcast` 唤醒等待者；Dial 侧多个
+`spawn` worker 只入队帧并在自己的 condition variable 上等待，醒来后**在 worker
+自己线程里**组装 `DialHttpResponse`（reader 线程绝不构造 Dial ARC 对象）。
+`Http2Session` 是不透明裸指针、不进 ARC，多 worker 按值共享、由
+`dial_http2_session_free` 显式释放。POSIX 用 pthread 互斥/条件变量，Windows 用
+`CRITICAL_SECTION` / `CONDITION_VARIABLE` / `CreateThread`。ALPN 未协商出 `h2`
+时 fail-closed 拒绝降级为 HTTP/1.1。
+
+**尚未落地（后续独立包 / 批次，不许当已支持）**：HTTP/3.0（QUIC，独立
+`http3.dialpkg` + vendor ngtcp2/nghttp3）。
 
 ---
 

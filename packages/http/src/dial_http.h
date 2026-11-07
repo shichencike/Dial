@@ -11,8 +11,9 @@
  * 1. **协议层自研**：HTTP/1.1 的报文解析、Header 拼装、Socket 读写全部自己实现。
  *    线级细节（请求行格式、头序、User-Agent、连接复用策略）必须留在自己手里，
  *    否则「想改一点握手行为」就得去改第三方库。
- * 2. **密码学绝不手搓**：TLS 不在本文件里——它由 mbedtls 提供（本轮只编入静态库、
- *    暂不向 Dial 暴露 TLS API），本文件只做明文 HTTP/1.1。
+ * 2. **密码学绝不手搓**：TLS 1.3 由 dial_tls.c 的 mbedTLS 封装提供，已接线上层：
+ *    `https://` 走 TLS（证书校验 fail-closed，系统根 + 自定义 CA 双信任链）。
+ *    本文件负责 HTTP/1.1 的明文与 https 调度；HTTP/2 见 dial_http2.c。
  * 3. **压缩用成熟实现**：gzip / deflate 解压走 zlib（inflate），不自己写 DEFLATE。
  * 4. **错误走返回码 + 最近错误槽**，不抛 Dial 异常——包不应假定宿主程序装了
  *    异常处理栈；调用方用 `dial_http_last_error()` / `dial_http_last_error_msg()`
@@ -42,7 +43,7 @@ enum {
     DIAL_HTTP_ERR_IO = -4,           /* 读写失败 / 连接中断 */
     DIAL_HTTP_ERR_PROTOCOL = -5,     /* 响应不是合法 HTTP/1.x */
     DIAL_HTTP_ERR_NOMEM = -6,        /* 内存不足 */
-    DIAL_HTTP_ERR_UNSUPPORTED = -7,  /* 例如明文客户端遇到 https:// */
+    DIAL_HTTP_ERR_UNSUPPORTED = -7,  /* 不支持的 scheme / TLS 握手失败 / ALPN 未协商出 h2 */
     DIAL_HTTP_ERR_STATE = -8         /* 句柄状态不对（如对已关闭的连接读写） */
 };
 
@@ -53,10 +54,11 @@ DialString dial_http_last_error_msg(void);
 /* ---- 底层：流式（连接级）---- */
 
 /*
- * 解析 URL 并建立 TCP 连接。
- * URL 形如 `http://host[:port]/path[?query]`；省略 scheme 时按 `http://` 处理，
- * 省略端口时按 80。`https://` 明确返回 NULL 并把错误置为
- * DIAL_HTTP_ERR_UNSUPPORTED（本轮只做明文；TLS 走 mbedtls，后续再接线）。
+ * 解析 URL 并建立连接（HTTP/1.1）。
+ * URL 形如 `http://host[:port]/path[?query]` 或 `https://...`；省略 scheme 时按
+ * `http://` 处理，省略端口时按 80（https 按 443）。`https://` 在 TCP 之上再做
+ * TLS 1.3 握手（mbedTLS，证书校验 fail-closed），握手失败返回 NULL 并把错误置为
+ * DIAL_HTTP_ERR_UNSUPPORTED。只认 http / https 两种 scheme。
  * 失败返回 NULL，错误原因见 `dial_http_last_error_msg()`。
  */
 DialHttpConn *dial_http_connect(DialString url);

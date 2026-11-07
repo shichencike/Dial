@@ -2,8 +2,10 @@
  * dial_http —— HTTP/1.1 客户端实现（http.dialpkg 的机器码部分）。
  *
  * 协议层全部自研：URL 解析、请求行与 Header 拼装、响应报文解析、
- * chunked 解码、Socket 读写。压缩解压走 zlib（inflate），TLS 不在本文件
- * （由 mbedtls 提供，本轮只编入静态库、暂不向 Dial 暴露）。
+ * chunked 解码、Socket 读写、keep-alive 连接池、客户端画像。压缩解压走
+ * zlib（inflate）；TLS 1.3 由 dial_tls.c 的 mbedTLS 封装提供并已接线上层
+ * （https:// 走 TLS，证书校验 fail-closed）。HTTP/2 在 dial_http2.c 单独实现，
+ * 本文件只负责 HTTP/1.1（含 https 调度）。
  *
  * 跨平台：Windows 用 winsock2，其余用 POSIX socket。句柄释放是显式的
  * （dial_http_close / dial_http_resp_free），不透明句柄不进 ARC。
@@ -710,7 +712,7 @@ static DialHttpConn *dh_connect_raw(const char *url) {
 
     /* https：在已连上的 TCP 上做 TLS 1.3 握手（mbedTLS 负责，证书校验 fail-closed）。 */
     if (u.is_https) {
-        const char *alpn[] = { "http/1.1", NULL };  /* 本阶段只 offer http/1.1 */
+        const char *alpn[] = { "http/1.1", NULL };  /* HTTP/1.1 层只 offer http/1.1；HTTP/2 层另 offer h2 */
         uint32_t verify = (uint32_t)-1;
         char tls_err[256];
         DialTls *t = dial_tls_connect((int)fd, u.host, alpn,
@@ -1324,4 +1326,40 @@ int64_t dial_http_resp_free(DialHttpResponse *r) {
     dh_buf_free(&r->body);
     free(r);
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 包内共享工厂（供 dial_http2.c 复用；见 dial_http_internal.h）        */
+/* ------------------------------------------------------------------ */
+/* 这些函数只是把「构造响应」的能力借给 HTTP/2 层，布局知识仍留在本文件。 */
+
+DialHttpResponse *dial_http_resp_new(int64_t status) {
+    DialHttpResponse *r = (DialHttpResponse *)calloc(1, sizeof(DialHttpResponse));
+    if (!r) return NULL;
+    r->status = status;
+    return r;
+}
+
+int dial_http_resp_add(DialHttpResponse *r, const char *name, const char *value) {
+    if (!r || !name || !value) return 0;
+    char *n = dh_strdup(name);
+    char *v = dh_strdup(value);
+    if (!n || !v) { free(n); free(v); return 0; }
+    if (!dh_resp_add_header(r, n, v)) { free(n); free(v); return 0; }
+    return 1;
+}
+
+int dial_http_resp_set_body(DialHttpResponse *r, const char *data, int64_t len) {
+    if (!r || len < 0) return 0;
+    if (len == 0) return 1;
+    if (!data) return 0;
+    return dh_buf_append(&r->body, data, len);
+}
+
+void dial_http_internal_set_error(int64_t code, const char *msg) {
+    dh_set_error(code, msg);
+}
+
+const char *dial_http_internal_ca_path(void) {
+    return g_ca_path[0] ? g_ca_path : NULL;
 }

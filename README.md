@@ -5151,7 +5151,7 @@ B2（用户泛型——死守单态化底线，不做）、B3（枚举 ADT——
 保持类型系统极简）、C11（`http.dialpkg` 独立包，下一批）。
 B5（函数名重载）与 B4（闭包）维持**永久否决**。
 
-### 37.10 C11 第一包已落地：`http.dialpkg`（自研 HTTP/1.1 + gzip 解压）
+### 37.10 C11 第一包已落地：`http.dialpkg`（HTTP/1.1 + TLS 1.3 + HTTP/2）
 
 §37.5 定了「常用库走独立包、不进标准库包」，并按领域拆包：**本轮只落地 `http` 包**。
 正则 / JSON / 摘要 / Base64 各自成包（`text` / `json` / `crypto`），后续批次逐个补。
@@ -5161,8 +5161,9 @@ B5（函数名重载）与 B4（闭包）维持**永久否决**。
 | **协议层自研** | `packages/http/src/dial_http.c`：URL 解析、请求行与 Header 拼装、响应报文解析（状态行 / 头部 / `Content-Length` / `chunked` / 读到关闭）、Socket 读写，全部自己实现。线级细节留在自己手里，才能为后续的连接指纹定制留出空间 |
 | **密码学绝不手搓** | TLS 由 **mbedTLS** 提供并已接线上层：`https://` 走 mbedTLS，证书校验 **fail-closed**（系统根 + 自定义 CA 两条信任链，自签名不可冒用）；gzip / deflate 解压由 **zlib** 提供。协议层自己写，密码学与压缩算法一律用成熟实现 |
 | **两层 API** | 底层「流式」：`connect` / `write` / `write_line` / `read_line` / `read_all` —— 调用方自己拼报文；高层「一次请求」：`get` / `post` + `HttpResponse` 访问器（状态码 / 响应体 / 响应头 / 按序号遍历） |
+| **HTTP/2 自研分帧 + HPACK** | `packages/http/src/dial_http2.c` / `dial_hpack.c`：9 字节帧头与 8 类帧、HPACK（请求侧最简编码，响应侧静态表 61 项 + Huffman 解码 257 项 + 动态表）、会话式真·并发多路复用。`https://` 走 ALPN 协商 `h2`（未协商出 h2 **拒绝降级**），`http://` 走明文 **h2c** prior-knowledge |
 | **错误走返回码** | 不抛 Dial 异常（包不假定宿主装了异常栈）：失败返回空句柄（`is_null` 可判），原因取 `dial_http_last_error()` / `dial_http_last_error_msg()`（**线程局部**错误槽，多线程各看各的） |
-| **句柄不进 ARC** | `HttpConn` / `HttpResponse` 是不透明句柄，释放必须显式（`dial_http_close` / `dial_http_resp_free`）——与 stdlib 的文件句柄同一口径 |
+| **句柄不进 ARC** | `HttpConn` / `HttpResponse` / `Http2Session` 是不透明句柄，释放必须显式（`dial_http_close` / `dial_http_resp_free` / `dial_http2_session_free`）——与 stdlib 的文件句柄同一口径 |
 | **离线可复现** | mbedTLS 3.6.2 与 zlib 1.3.1 **vendor 进仓库**（`third_party/`），保留上游 LICENSE 与版权声明；构建不依赖外网，上游变动也不会悄悄改掉产物 |
 
 **为让包能引用标准库 API 而修的链接顺序**：静态归档由链接器**从左到右**扫描，
@@ -5192,12 +5193,15 @@ SHA256 自检）、`import "http"` 编译运行、本地 HTTP 服务器端到端
 明文三条错误路径（https 连不上 / URL 缺主机名 / 连接失败）必须**明确失败**；
 **TLS 1.3 子组**（同组第 7 步）：自签 CA + 本地 TLS 服务器，验证 TLS 1.3 协商、
 证书校验 fail-closed（清空自定义 CA 后系统根拒签自签）、keep-alive 连接池复用
-（`pool hits > 0`）、404 / 500 错误路径。
+（`pool hits > 0`）、404 / 500 错误路径；
+**HTTP/2 子组**（同组第 9 步）：Python `h2` 本地服务器（h2c 明文 + h2 TLS/ALPN）
+**故意乱序响应**，6 个 `spawn` worker 共享**单条连接**并发提交 6 个 stream，
+逐条断言 `path == X-Stream`（不串台）、`conns = 1` / `streams = 6`、
+`h2` ALPN 协商成功、fail-closed 拒签自签 CA、404 / 500 全绿。
 
 **客户端画像（兼容性，非规避引擎）**：`dial_http_set_profile("default" | "chrome")`
 只控制请求头序与 User-Agent 这类兼容参数（与只认浏览器客户端的 API 互通），
 **不做以「绕过服务器限制 / 欺骗识别」为目标的绕检测逻辑**——这是有意的领域边界。
 
-**后续（尚未落地，不许当已支持）**：HTTP/2.0 分帧 + HPACK + 多路复用、
-HTTP/3.0（QUIC，独立 `http3.dialpkg` + vendor ngtcp2/nghttp3）、
-其余三个包（`text` 正则 / `json` / `crypto` 摘要）。
+**后续（尚未落地，不许当已支持）**：HTTP/3.0（QUIC，独立 `http3.dialpkg` +
+vendor ngtcp2/nghttp3）、其余三个包（`text` 正则 / `json` / `crypto` 摘要）。

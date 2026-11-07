@@ -392,7 +392,7 @@
 <li><a href="#377-第一批已落地本轮交付">37.7 第一批已落地（本轮交付）</a></li>
 <li><a href="#378-第二批已落地c-组标准库-api-全量">37.8 第二批已落地（C 组标准库 API 全量）</a></li>
 <li><a href="#379-第三批已落地语言机制b7--b8--b6">37.9 第三批已落地（语言机制：B7 / B8 / B6）</a></li>
-<li><a href="#3710-c11-第一包已落地httpdialpkg自研-http11--gzip-解压">37.10 C11 第一包已落地：http.dialpkg（自研 HTTP/1.1 + gzip 解压）</a></li>
+<li><a href="#3710-c11-第一包已落地httpdialpkghttp11--tls-13--http2">37.10 C11 第一包已落地：http.dialpkg（HTTP/1.1 + TLS 1.3 + HTTP/2）</a></li>
 </ul>
 </li>
 </ul>
@@ -8318,7 +8318,7 @@ B6 内存专项：3M 次 <code>Point[]</code> 建放、1M 次 <code>map&lt;strin
 B2（用户泛型——死守单态化底线，不做）、B3（枚举 ADT——不引入 Tagged Union，
 保持类型系统极简）、C11（<code>http.dialpkg</code> 独立包，下一批）。
 B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。</p>
-<h3 id="3710-c11-第一包已落地httpdialpkg自研-http11--gzip-解压">37.10 C11 第一包已落地：<code>http.dialpkg</code>（自研 HTTP/1.1 + gzip 解压）</h3>
+<h3 id="3710-c11-第一包已落地httpdialpkghttp11--tls-13--http2">37.10 C11 第一包已落地：<code>http.dialpkg</code>（HTTP/1.1 + TLS 1.3 + HTTP/2）</h3>
 <p>§37.5 定了「常用库走独立包、不进标准库包」，并按领域拆包：<strong>本轮只落地 <code>http</code> 包</strong>。
 正则 / JSON / 摘要 / Base64 各自成包（<code>text</code> / <code>json</code> / <code>crypto</code>），后续批次逐个补。</p>
 <table>
@@ -8335,11 +8335,15 @@ B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。<
 </tr>
 <tr>
 <td><strong>密码学绝不手搓</strong></td>
-<td>TLS 由 <strong>mbedTLS</strong> 提供（本轮只编入静态库、暂不向 Dial 暴露 TLS API）；gzip / deflate 解压由 <strong>zlib</strong> 提供。协议层自己写，密码学与压缩算法一律用成熟实现</td>
+<td>TLS 由 <strong>mbedTLS</strong> 提供并已接线上层：<code>https://</code> 走 mbedTLS，证书校验 <strong>fail-closed</strong>（系统根 + 自定义 CA 两条信任链，自签名不可冒用）；gzip / deflate 解压由 <strong>zlib</strong> 提供。协议层自己写，密码学与压缩算法一律用成熟实现</td>
 </tr>
 <tr>
 <td><strong>两层 API</strong></td>
 <td>底层「流式」：<code>connect</code> / <code>write</code> / <code>write_line</code> / <code>read_line</code> / <code>read_all</code> —— 调用方自己拼报文；高层「一次请求」：<code>get</code> / <code>post</code> + <code>HttpResponse</code> 访问器（状态码 / 响应体 / 响应头 / 按序号遍历）</td>
+</tr>
+<tr>
+<td><strong>HTTP/2 自研分帧 + HPACK</strong></td>
+<td><code>packages/http/src/dial_http2.c</code> / <code>dial_hpack.c</code>：9 字节帧头与 8 类帧、HPACK（请求侧最简编码，响应侧静态表 61 项 + Huffman 解码 257 项 + 动态表）、会话式真·并发多路复用。<code>https://</code> 走 ALPN 协商 <code>h2</code>（未协商出 h2 <strong>拒绝降级</strong>），<code>http://</code> 走明文 <strong>h2c</strong> prior-knowledge</td>
 </tr>
 <tr>
 <td><strong>错误走返回码</strong></td>
@@ -8347,7 +8351,7 @@ B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。<
 </tr>
 <tr>
 <td><strong>句柄不进 ARC</strong></td>
-<td><code>HttpConn</code> / <code>HttpResponse</code> 是不透明句柄，释放必须显式（<code>dial_http_close</code> / <code>dial_http_resp_free</code>）——与 stdlib 的文件句柄同一口径</td>
+<td><code>HttpConn</code> / <code>HttpResponse</code> / <code>Http2Session</code> 是不透明句柄，释放必须显式（<code>dial_http_close</code> / <code>dial_http_resp_free</code> / <code>dial_http2_session_free</code>）——与 stdlib 的文件句柄同一口径</td>
 </tr>
 <tr>
 <td><strong>离线可复现</strong></td>
@@ -8377,9 +8381,19 @@ B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。<
 <p><strong>W 组回归</strong>（新增第 23 组）：三平台静态库构建、打包 + 安装（manifest / 逐文件
 SHA256 自检）、<code>import "http"</code> 编译运行、本地 HTTP 服务器端到端
 （200 / 404 / POST 回显 / chunked / gzip 解压 / 多响应头含同名多值 / 低层流式）、
-三条错误路径（<code>https://</code> 本轮未接线 / URL 缺主机名 / 连接失败）必须<strong>明确失败</strong>。</p>
-<p><strong>后续（尚未落地，不许当已支持）</strong>：TLS 接线（mbedTLS 已在包里，只需握手与证书校验）、
-连接复用（keep-alive）、其余三个包（<code>text</code> 正则 / <code>json</code> / <code>crypto</code> 摘要）。</p></main></div>
+明文三条错误路径（https 连不上 / URL 缺主机名 / 连接失败）必须<strong>明确失败</strong>；
+<strong>TLS 1.3 子组</strong>（同组第 7 步）：自签 CA + 本地 TLS 服务器，验证 TLS 1.3 协商、
+证书校验 fail-closed（清空自定义 CA 后系统根拒签自签）、keep-alive 连接池复用
+（<code>pool hits &gt; 0</code>）、404 / 500 错误路径；
+<strong>HTTP/2 子组</strong>（同组第 9 步）：Python <code>h2</code> 本地服务器（h2c 明文 + h2 TLS/ALPN）
+<strong>故意乱序响应</strong>，6 个 <code>spawn</code> worker 共享<strong>单条连接</strong>并发提交 6 个 stream，
+逐条断言 <code>path == X-Stream</code>（不串台）、<code>conns = 1</code> / <code>streams = 6</code>、
+<code>h2</code> ALPN 协商成功、fail-closed 拒签自签 CA、404 / 500 全绿。</p>
+<p><strong>客户端画像（兼容性，非规避引擎）</strong>：<code>dial_http_set_profile("default" | "chrome")</code>
+只控制请求头序与 User-Agent 这类兼容参数（与只认浏览器客户端的 API 互通），
+<strong>不做以「绕过服务器限制 / 欺骗识别」为目标的绕检测逻辑</strong>——这是有意的领域边界。</p>
+<p><strong>后续（尚未落地，不许当已支持）</strong>：HTTP/3.0（QUIC，独立 <code>http3.dialpkg</code> +
+vendor ngtcp2/nghttp3）、其余三个包（<code>text</code> 正则 / <code>json</code> / <code>crypto</code> 摘要）。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

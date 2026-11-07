@@ -2085,7 +2085,14 @@ impl<'ctx> CodeGen<'ctx> {
                         .unwrap()
                         .into()
                 }
-                Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Channel(_) => {
+                // 句柄类一律按 ptr 槽读：dialc_type_to_llvm 把这些类型都 lowering 成
+                // i8ptr，spawn 写端也用 i8ptr 槽 store（两者槽宽同为 8 字节，位模式一致）。
+                // Opaque（包句柄）必须显式列在这里：若落到下面 `_` 的 i64 槽，会 load 出
+                // i64 再传给期望 ptr 的形参，abi_adapt 只做整数间 zext/trunc、不做
+                // inttoptr，最终被 LLVM verifier 判「参数类型与函数签名不符」。
+                // Opaque 不进 ARC（retain/release_value 均为 no-op），因此多个 worker
+                // 可按值安全共享同一个会话句柄，由包侧显式释放。
+                Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Channel(_) | Type::Opaque(_) => {
                     let slot = unsafe {
                         self.builder
                             .build_gep(self.i8ptr(), cell, &[idx], "th.slot")

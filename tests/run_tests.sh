@@ -40,7 +40,9 @@
 #   V. B/C 组缺口第三批：语言机制——B7 文件级只读 const（禁止可变全局状态）、
 #      B8 结构体字段编译期常量默认值、B6 结构体进容器（Point[] / map<string,Struct>）（v1.04 增补）。
 #   W. C11 独立包：http.dialpkg 端到端——三平台构建 / 打包安装 / import 编译运行 /
-#      两层 API（高层 get-post + 低层流式）/ gzip 解压 / chunked / 错误路径（v1.04 增补）。
+#      两层 API（高层 get-post + 低层流式）/ gzip 解压 / chunked / 错误路径 /
+#      TLS 1.3（证书校验 fail-closed + keep-alive 连接池）/
+#      HTTP/2（h2c 明文 + h2 ALPN、自研 HPACK、单连接真·并发多路复用）（v1.04 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -1302,9 +1304,10 @@ elif grep -q "map<" "${TMP}/v_hf2.log"; then
 else vbad "B6：map 值被拒但诊断未说明原因"; fi
 
 echo
-echo "== W) C11 独立包：http.dialpkg 端到端（自研 HTTP/1.1 + TLS 1.3 + keep-alive 连接池，v1.04 增补） =="
+echo "== W) C11 独立包：http.dialpkg 端到端（HTTP/1.1 + TLS 1.3 + keep-alive + HTTP/2 h2c/h2 真并发多路复用，v1.04 增补） =="
 wpass() { echo "  ✅ $1"; }
 wbad()  { echo "  ❌ $1"; fail=1; }
+wskip() { echo "  ⚠️  $1"; }
 
 # 1) 构建三平台静态库（自研 HTTP 层 + zlib 核心 + mbedTLS）。
 if bash packages/http/build.sh >"${TMP}/w_build.log" 2>&1; then
@@ -1432,6 +1435,100 @@ fi
 if [ -n "${TLS_PID:-}" ]; then kill "$TLS_PID" >/dev/null 2>&1 || true; fi
 "$DIALC" uninstall http >/dev/null 2>&1 || true
 wpass "TLS 子组清理完成（TLS 服务器已停、http 包已卸载）"
+
+# 9) HTTP/2 子组：明文 h2c prior-knowledge 单连接 6 stream 真并发多路复用 +
+#    https 的 h2（TLS 1.3 + ALPN 协商）+ fail-closed，自研 HPACK 响应解码。
+#    依赖 Python h2/hpack/hyperframe 起本地 HTTP/2 服务器；TLS 部分复用步骤 7 的自签 CA。
+#    步骤 8 已卸包，这里须重新安装（包内已含 dial_http2.o / dial_hpack.o）。
+if [ -f "${TMP}/http.dialpkg" ] \
+   && "$DIALC" install "${TMP}/http.dialpkg" >"${TMP}/w_install_h2.log" 2>&1; then
+    wpass "HTTP/2 子组复用 http 包重新安装成功"
+else wbad "HTTP/2 子组 http 包重新安装失败"; tail -8 "${TMP}/w_install_h2.log"; fi
+
+H2_DEPS=0
+if python3 -c "import h2, hpack, hyperframe" >/dev/null 2>&1; then H2_DEPS=1; fi
+H2C_PID=""
+H2_PID=""
+H2_BASE=""
+if [ "$H2_DEPS" -eq 1 ]; then
+    # 9a) 明文 h2c 服务器（PORT=0 由 OS 分配，实际端口写入端口文件）。
+    rm -f "${TMP}/w_h2cport"
+    python3 tests/pkg/http2_test_server.py h2c 0 "${TMP}/w_h2cport" \
+        >"${TMP}/w_h2csrv.log" 2>&1 &
+    H2C_PID=$!
+    H2C_PORT=""
+    for _ in $(seq 1 50); do
+        if [ -s "${TMP}/w_h2cport" ]; then H2C_PORT="$(cat "${TMP}/w_h2cport")"; break; fi
+        sleep 0.1
+    done
+    if [ -n "$H2C_PORT" ]; then
+        wpass "本地 h2c 明文服务器就绪（端口 $H2C_PORT）"
+    else
+        wbad "本地 h2c 明文服务器未就绪"; tail -8 "${TMP}/w_h2csrv.log"
+    fi
+
+    # 9b) TLS h2 服务器（ALPN 固定 h2，复用步骤 7 的 IP SAN 证书）。证书缺失则只跑 h2c。
+    if [ -f "${TLSDIR}/ca.crt" ] && [ -f "${TLSDIR}/srv.crt" ] && [ -f "${TLSDIR}/srv.key" ]; then
+        rm -f "${TMP}/w_h2port"
+        DIAL_TLS_CERT="${TLSDIR}/srv.crt" DIAL_TLS_KEY="${TLSDIR}/srv.key" \
+            python3 tests/pkg/http2_test_server.py h2 0 "${TMP}/w_h2port" \
+            >"${TMP}/w_h2srv.log" 2>&1 &
+        H2_PID=$!
+        H2_PORT=""
+        for _ in $(seq 1 50); do
+            if [ -s "${TMP}/w_h2port" ]; then H2_PORT="$(cat "${TMP}/w_h2port")"; break; fi
+            sleep 0.1
+        done
+        if [ -n "$H2_PORT" ]; then
+            H2_BASE="https://127.0.0.1:$H2_PORT"
+            wpass "本地 h2 TLS 服务器就绪（端口 $H2_PORT，ALPN=h2）"
+        else
+            wbad "本地 h2 TLS 服务器未就绪"; tail -8 "${TMP}/w_h2srv.log"
+        fi
+    else
+        wskip "HTTP/2 TLS h2 子步跳过（步骤 7 未生成自签证书）"
+    fi
+
+    # 9c) 编译运行 use_http2.dial：6 个 spawn worker 共享一个 Http2Session，
+    #     服务端故意乱序响应，逐条断言 path == X-Stream（不串台）。
+    if [ -n "$H2C_PORT" ] \
+       && "$DIALC" build tests/pkg/use_http2.dial -o "${TMP}/use_http2" >"${TMP}/w_h2comp.log" 2>&1; then
+        out=$(DIAL_HTTP2_H2C_BASE="http://127.0.0.1:$H2C_PORT" \
+              DIAL_HTTP2_H2_BASE="$H2_BASE" \
+              DIAL_HTTP2_CA="${TLSDIR}/ca.crt" \
+              timeout 60 "${TMP}/use_http2" 2>&1)
+        ok=1
+        printf '%s\n' "$out" | grep -qF 'h2c connected = true' || ok=0
+        printf '%s\n' "$out" | grep -qF 'h2c protocol = h2c' || ok=0
+        for p in /slow0 /slow1 /slow2 /slow3 /fast0 /ok; do
+            printf '%s\n' "$out" | grep -qF "h2c resp = ${p}|200|${p}|dialh2|" || ok=0
+        done
+        [ "$(printf '%s\n' "$out" | grep -c '^h2c resp = ')" -eq 6 ] || ok=0
+        printf '%s\n' "$out" | grep -qF 'h2c conns = 1' || ok=0
+        printf '%s\n' "$out" | grep -qF 'h2c streams = 6' || ok=0
+        printf '%s\n' "$out" | grep -qF 'h2 404 status = 404' || ok=0
+        printf '%s\n' "$out" | grep -qF 'h2 500 status = 500' || ok=0
+        if [ -n "$H2_BASE" ]; then
+            printf '%s\n' "$out" | grep -qF 'h2 tls connected = true' || ok=0
+            printf '%s\n' "$out" | grep -qF 'h2 tls protocol = h2' || ok=0
+            printf '%s\n' "$out" | grep -qF 'h2 tls alpn = h2' || ok=0
+            printf '%s\n' "$out" | grep -qF 'h2 tls status = 200' || ok=0
+            printf '%s\n' "$out" | grep -qF 'h2 tls x-test = dialh2' || ok=0
+            printf '%s\n' "$out" | grep -qF 'h2 no-ca rejected = true' || ok=0
+        fi
+        if [ "$ok" -eq 1 ]; then
+            wpass "HTTP/2：h2c 真并发多路复用（单连接 6 stream 不串台）+ h2 ALPN + 404/500 + fail-closed 全通过"
+        else wbad "W 组：use_http2 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
+    else wbad "use_http2（import \"http\" HTTP/2）编译失败"; tail -8 "${TMP}/w_h2comp.log"; fi
+else
+    wskip "HTTP/2 子组跳过（环境缺 python h2/hpack/hyperframe）"
+fi
+
+# 10) 清理：停两台 HTTP/2 服务器、卸包（不污染后续测试与用户环境）。
+if [ -n "${H2C_PID:-}" ]; then kill "$H2C_PID" >/dev/null 2>&1 || true; fi
+if [ -n "${H2_PID:-}" ]; then kill "$H2_PID" >/dev/null 2>&1 || true; fi
+"$DIALC" uninstall http >/dev/null 2>&1 || true
+wpass "HTTP/2 子组清理完成（服务器已停、http 包已卸载）"
 
 echo
 if [ $fail -eq 0 ]; then

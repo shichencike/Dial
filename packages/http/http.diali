@@ -1,4 +1,4 @@
-// http.dialpkg —— HTTP/1.1 客户端（Dial 语言接口签名）
+// http.dialpkg —— HTTP/1.1 + HTTP/2 客户端（Dial 语言接口签名）
 //
 // 本文件是**唯一**的对外契约：包内机器码的实现可以变，但这里的签名一变，
 // 依赖它的程序就得重编。签名文件带 SHA256 校验，被篡改会在链接期被拦下。
@@ -7,6 +7,8 @@
 //   - 协议层自研：报文解析、Header 拼装、Socket 读写都在我们手里；
 //   - 密码学绝不手搓：TLS 1.3 由 vendor 的 mbedtls 提供（证书校验 fail-closed）；
 //   - 压缩用成熟实现：gzip / deflate 解压走 zlib；
+//   - HTTP/2 分帧 + HPACK 自研（静态表 + Huffman 解码 + 动态表），
+//     https 走 ALPN 协商 h2、明文走 h2c prior-knowledge；
 //   - 两层 API：底层「流式」可自由拼报文，高层「一次请求」省心；
 //   - 错误走返回码 + 最近错误槽，不抛 Dial 异常（包不假定宿主装了异常栈）。
 //   - 客户端画像只做兼容性配置（头序 / UA / ALPN），**不做以规避识别为目标的
@@ -17,6 +19,11 @@ type HttpConn;
 
 /// HTTP 响应句柄（不透明）。用完必须显式 dial_http_resp_free 释放。
 type HttpResponse;
+
+/// HTTP/2 会话句柄（不透明，一条连接 = 多个并发 stream）。
+/// 不进 ARC：多个 spawn worker 可按值共享同一句柄，用完由
+/// dial_http2_session_free 显式释放（须在所有 worker join 之后）。
+type Http2Session;
 
 // ---- 底层：流式（连接级）------------------------------------------
 
@@ -98,6 +105,32 @@ extern fn dial_http_pool_total(): int;
 
 /// 清空连接池（释放所有空闲连接）。
 extern fn dial_http_pool_clear(): void;
+
+// ---- HTTP/2：会话式多路复用（RFC 7540，v1.05 增补）------------------
+
+/// 建立 HTTP/2 会话：https:// 走 TLS 1.3 + ALPN 协商 h2；http:// 走明文 h2c
+/// prior-knowledge。ALPN 未协商出 h2 时 fail-closed 报错（绝不静默降级 http/1.1）。
+/// 失败返回空句柄（is_null 判断），原因见 dial_http_last_error_msg。
+extern fn dial_http2_connect(url: string): Http2Session;
+
+/// 在会话上发一个请求并阻塞到该 stream 的响应收齐。多线程可并发调用同一会话，
+/// 帧在单条连接上按 stream id 交错分发。method 如 "GET"/"POST"，path 如 "/ok"，
+/// headers 为每行一个 "Name: value" 的额外请求头（可空串），body 可空串。
+/// 返回 HttpResponse（复用上面全部访问器）；失败/被 GOAWAY 返回空句柄。
+extern fn dial_http2_request(sess: Http2Session, method: string, path: string, headers: string, body: string): HttpResponse;
+
+/// 关闭会话：停 I/O 线程、关连接、释放资源。返回 0 成功。
+extern fn dial_http2_session_free(sess: Http2Session): int;
+
+/// 最近一次 connect 协商出的协议："h2" / "h2c" / "none"（线程局部，供测试断言）。
+extern fn dial_http2_last_protocol(): string;
+
+/// TLS 协商出的 ALPN："h2" / "none"（线程局部）。
+extern fn dial_http2_alpn(): string;
+
+/// 进程级累计：成功建立的会话数 / 累计发出的 stream 数（证明单连接多路分流）。
+extern fn dial_http2_conn_count(): int;
+extern fn dial_http2_stream_count(): int;
 
 // ---- 最近一次请求的 TLS 协商信息（线程局部）-------------------------
 
