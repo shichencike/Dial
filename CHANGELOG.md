@@ -180,8 +180,10 @@
   - **协议层自研**：`packages/http/src/dial_http.c` 实现 URL 解析、请求行与 Header
     拼装、响应报文解析（状态行 / 头部 / `Content-Length` / `chunked` / 读到关闭）、
     Socket 读写——线级细节留在自己手里，为后续的连接指纹定制留出空间。
-  - **密码学绝不手搓**：TLS 由 **mbedTLS 3.6.2** 提供（本轮只编入静态库、
-    暂不向 Dial 暴露 TLS API），gzip / deflate 解压由 **zlib 1.3.1** 提供；
+  - **密码学绝不手搓**：TLS 由 **mbedTLS 3.6.2** 提供并**已接线上层**
+    （`https://` 走 mbedTLS，证书校验 fail-closed：系统根 + 自定义 CA 双信任链，
+    `mbedtls_ssl_get_verify_result()` 非 0 即拒绝），gzip / deflate 解压由
+    **zlib 1.3.1** 提供；
     两者 **vendor 进仓库**（`third_party/`，保留上游 LICENSE 与版权声明），
     构建离线可复现；zlib 裁掉 `gz*.c`（gzip **文件** API，依赖 POSIX `lseek`，
     与 HTTP 内存解压无关且编不过 Windows / musl 目标）。
@@ -205,7 +207,10 @@
   - **W 组回归**（新增第 23 组）：三平台静态库构建、打包 + 安装（manifest /
     逐文件 SHA256 自检）、`import "http"` 编译运行、本地 HTTP 服务器端到端
     （200 / 404 / POST 回显 / chunked / gzip 解压 / 多响应头含同名多值 / 低层流式）、
-    三条错误路径（`https://` 未接线 / URL 缺主机名 / 连接失败）必须明确失败。
+    明文三条错误路径（https 连不可达主机 / URL 缺主机名 / 连接失败）必须明确失败；
+    **TLS 1.3 子组**（同组第 7 步）：openssl 自签 CA + 本地 TLS 服务器，验证 TLS 1.3
+    协商（`TLSv1.3`）、证书校验 fail-closed（清空自定义 CA 后系统根拒签自签）、
+    keep-alive 连接池复用（`pool hits > 0`）、404 / 500 全绿。
 - **宪法裁决入文档（§37）**：`STDLIB_ABI 5 → 6`（`make_stdlib_pkg.py` 默认、
   CI 两处、`dialc new` 骨架同步，后者改为引用 `package::STDLIB_ABI` 消除硬编码）；
   术语统一为「绝不引入可变全局状态」；「函数名重载」「闭包」写入**永久否决**；

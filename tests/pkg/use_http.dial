@@ -82,10 +82,10 @@ fn main(): int {
     print("bad_is_null = ", is_null(bad));
     print("bad_err = ", dial_http_last_error_msg());
 
-    // ---- 错误路径：https 本轮不支持（明文客户端）----
-    var tls: HttpResponse = dial_http_get("https://example.com/", "");
-    print("tls_is_null = ", is_null(tls));
-    print("tls_err = ", dial_http_last_error_msg());
+    // ---- 错误路径：https 到不可达主机必须明确失败（TLS 已接入，但连不上仍报错）----
+    var tls: HttpResponse = dial_http_get("https://127.0.0.1:1/", "");
+    print("tls_bad_is_null = ", is_null(tls));
+    print("tls_bad_err = ", dial_http_last_error_msg());
 
     // ---- 错误路径：URL 缺主机名 ----
     var nourl: HttpResponse = dial_http_get("http://", "");

@@ -19,6 +19,8 @@
 #include "dial_string.h"
 #include "dial_bytes.h"
 #include "zlib.h"
+#include "dial_tls.h"
+#include <stdint.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -44,12 +46,29 @@ typedef socklen_t dh_socklen;
 #define DH_IS_WOULDBLOCK(e) ((e) == EWOULDBLOCK || (e) == EAGAIN)
 #endif
 
+/* 网络客户端标准做法：忽略 SIGPIPE。否则向已被对端关闭的 socket send 时，
+ * 内核会发 SIGPIPE 默认杀掉进程（表现为 141 退出码）。Windows 无 SIGPIPE。 */
+#if !defined(_WIN32)
+#include <signal.h>
+static void dh_ignore_sigpipe(void) {
+    static int done = 0;
+    if (!done) { signal(SIGPIPE, SIG_IGN); done = 1; }
+}
+#else
+static void dh_ignore_sigpipe(void) { /* Windows 不会因断连 socket 发 SIGPIPE */ }
+#endif
+
 /* ------------------------------------------------------------------ */
 /* 错误槽（线程局部）                                                  */
 /* ------------------------------------------------------------------ */
 
 static _Thread_local int64_t g_err = DIAL_HTTP_OK;
 static _Thread_local char g_err_msg[256] = {0};
+
+/* 最近一次请求的 TLS 信息（线程局部，供测试/诊断读取） */
+static _Thread_local char g_tls_version[32] = {0};
+static _Thread_local uint32_t g_tls_verify = 0;
+static _Thread_local char g_tls_alpn[32] = {0};
 
 /* 自己的 strdup：Windows 的严格 C 模式未必暴露 POSIX 的 strdup。 */
 static char *dh_strdup(const char *s) {
@@ -70,6 +89,174 @@ int64_t dial_http_last_error(void) { return g_err; }
 
 DialString dial_http_last_error_msg(void) {
     return dial_string_new(g_err_msg[0] ? g_err_msg : "无错误");
+}
+
+/* 最近一次请求的 TLS 协商信息（线程局部）。返回 DialString（与 .diali 的 `string`
+ * 一致）：裸 const char* 会被 Dial 的 FFI 当成带 8 字节长度前缀的 DialString 句柄，
+ * 读出越界垃圾。统一走 dial_string_new 包裹。 */
+DialString dial_http_last_tls_version(void) {
+    return dial_string_new(g_tls_version[0] ? g_tls_version : "none");
+}
+uint32_t  dial_http_last_tls_verify(void)  { return g_tls_verify; }
+DialString dial_http_last_tls_alpn(void) {
+    return dial_string_new(g_tls_alpn[0] ? g_tls_alpn : "none");
+}
+
+/* ------------------------------------------------------------------ */
+/* 客户端画像（兼容性配置，非规避引擎）                                */
+/* ------------------------------------------------------------------ */
+/*
+ * 通用客户端画像：只控制「请求头排序」与「TLS ALPN/UA」这类兼容参数，
+ * 用途是让某些只认浏览器客户端的 API 能正常互通——**不做任何以“绕过
+ * 服务器限制 / 欺骗识别”为目标的绕检测逻辑**。QUIC 的 Connection ID 迁移
+ * 等协议能力后续按 RFC 实现为正常能力，不固化为规避工具。
+ */
+typedef struct {
+    const char *name;
+    const char *ua;
+    const char *const *order;   /* 内建头按此顺序发射；Host 始终最前 */
+    int         norder;
+} dh_profile;
+
+/* 默认画像：贴近现代浏览器的头序与 UA（兼容性，不是“伪装成某浏览器”）。 */
+static const char *k_default_order[] = {
+    "Host", "User-Agent", "Accept", "Accept-Language",
+    "Accept-Encoding", "Connection", NULL
+};
+static const dh_profile k_default_profile = {
+    "default", "dial-http/1.1", k_default_order, 6
+};
+/* chrome 风格：仅作为可切换的兼容画像之一。 */
+static const char *k_chrome_order[] = {
+    "Host", "User-Agent", "Accept", "Accept-Language",
+    "Accept-Encoding", "Connection", NULL
+};
+static const dh_profile k_chrome_profile = {
+    "chrome",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    k_chrome_order, 6
+};
+static const dh_profile *g_profile = &k_default_profile;
+
+/* name 是 DialString 句柄（Dial `string` 参数跨 FFI 传的是句柄，不是文本指针），
+ * 须 dial_string_cstr 取文本。 */
+void dial_http_set_profile(DialString name) {
+    if (!name) { g_profile = &k_default_profile; return; }
+    const char *s = dial_string_cstr(name);
+    if (s && strcmp(s, "chrome") == 0) g_profile = &k_chrome_profile;
+    else g_profile = &k_default_profile;
+}
+
+/* 受信 CA 路径（自定义）：设为非空时优先用它（内网 / 私有 CA 场景）。
+ * 为空时加载系统根证书库。绝不静默跳过校验。
+ * path 同上是 DialString 句柄，须 dial_string_cstr 取文本。 */
+static char g_ca_path[1024] = {0};
+void dial_http_set_ca_path(DialString path) {
+    if (!path) { g_ca_path[0] = '\0'; return; }
+    const char *s = dial_string_cstr(path);
+    if (!s || !*s) { g_ca_path[0] = '\0'; return; }
+    strncpy(g_ca_path, s, sizeof(g_ca_path) - 1);
+    g_ca_path[sizeof(g_ca_path) - 1] = '\0';
+}
+/* Keep-Alive 连接池（host:port:scheme 为键）                          */
+/* ------------------------------------------------------------------ */
+/*
+ * 高层 get/post 优先复用空闲连接；复用后同一 fd + TLS 上下文继续使用。
+ * 服务器发 Connection: close 或连接已 EOF 时移出池并释放。
+ * 池用可移植互斥锁保护（Linux/macOS 用 pthread，Windows 用 CRITICAL_SECTION）。
+ */
+
+#ifdef _WIN32
+static CRITICAL_SECTION g_pool_mtx;
+static volatile LONG g_pool_inited = 0;
+static void dh_pool_lock(void) {
+    if (InterlockedCompareExchange(&g_pool_inited, 1, 0) == 0)
+        InitializeCriticalSection(&g_pool_mtx);
+    EnterCriticalSection(&g_pool_mtx);
+}
+static void dh_pool_unlock(void) { LeaveCriticalSection(&g_pool_mtx); }
+#else
+#include <pthread.h>
+static pthread_mutex_t g_pool_mtx = PTHREAD_MUTEX_INITIALIZER;
+static void dh_pool_lock(void) { pthread_mutex_lock(&g_pool_mtx); }
+static void dh_pool_unlock(void) { pthread_mutex_unlock(&g_pool_mtx); }
+#endif
+
+#define DH_POOL_MAX 32
+typedef struct {
+    char         *key;     /* scheme://host:port */
+    DialHttpConn *conn;
+} dh_pool_slot;
+static dh_pool_slot g_pool[DH_POOL_MAX];
+static int g_pool_hits = 0;     /* 命中池（复用）次数 */
+static int g_pool_total = 0;    /* 取连接总次数（含新建） */
+
+static void dh_pool_put(const char *key, DialHttpConn *c) {
+    if (!key || !c) return;
+    dh_pool_lock();
+    /* 同键已有旧连接：先释放旧的 */
+    for (int i = 0; i < DH_POOL_MAX; i++) {
+        if (g_pool[i].key && strcmp(g_pool[i].key, key) == 0) {
+            if (g_pool[i].conn) dial_http_close(g_pool[i].conn);
+            free(g_pool[i].key);
+            g_pool[i].key = NULL;
+            g_pool[i].conn = NULL;
+            break;
+        }
+    }
+    /* 找空位或淘汰最旧 */
+    int slot = -1;
+    for (int i = 0; i < DH_POOL_MAX; i++) {
+        if (g_pool[i].key == NULL) { slot = i; break; }
+    }
+    if (slot < 0) {
+        /* 池满：踢掉 0 号（最简单策略），释放其连接 */
+        if (g_pool[0].conn) dial_http_close(g_pool[0].conn);
+        free(g_pool[0].key);
+        slot = 0;
+    }
+    g_pool[slot].key = dh_strdup(key);
+    g_pool[slot].conn = c;
+    dh_pool_unlock();
+}
+
+static DialHttpConn *dh_pool_get(const char *key) {
+    if (!key) return NULL;
+    dh_pool_lock();
+    DialHttpConn *c = NULL;
+    for (int i = 0; i < DH_POOL_MAX; i++) {
+        if (g_pool[i].key && strcmp(g_pool[i].key, key) == 0) {
+            c = g_pool[i].conn;
+            free(g_pool[i].key);
+            g_pool[i].key = NULL;
+            g_pool[i].conn = NULL;
+            g_pool_hits++;
+            break;
+        }
+    }
+    g_pool_total++;
+    dh_pool_unlock();
+    return c;
+}
+
+void dial_http_pool_stats(int *hits, int *total) {
+    if (hits) *hits = g_pool_hits;
+    if (total) *total = g_pool_total;
+}
+
+int dial_http_pool_hits(void)  { return g_pool_hits; }
+int dial_http_pool_total(void) { return g_pool_total; }
+
+void dial_http_pool_clear(void) {
+    dh_pool_lock();
+    for (int i = 0; i < DH_POOL_MAX; i++) {
+        if (g_pool[i].conn) dial_http_close(g_pool[i].conn);
+        free(g_pool[i].key);
+        g_pool[i].key = NULL;
+        g_pool[i].conn = NULL;
+    }
+    dh_pool_unlock();
 }
 
 /* ------------------------------------------------------------------ */
@@ -130,6 +317,8 @@ struct DialHttpConn {
     int64_t timeout_sec;
     dh_buf  in;      /* 读缓冲 */
     int64_t in_pos;  /* 读缓冲已消费位置 */
+    DialTls *tls;    /* 非 NULL 表示这是一条 TLS 连接 */
+    char    *pool_key; /* scheme://host:port，用于连接池复用 */
 };
 
 struct DialHttpResponse {
@@ -193,6 +382,7 @@ typedef struct {
     int     port;
     char   *path;    /* 含 query，形如 "/a/b?x=1" */
     char   *hostport;/* Host 头用的值：host[:port]（省略默认端口） */
+    int     is_https;
 } dh_url;
 
 static void dh_url_free(dh_url *u) {
@@ -205,8 +395,8 @@ static void dh_url_free(dh_url *u) {
 /*
  * 解析 URL：
  *   [scheme://]host[:port][/path][?query]
- * 省略 scheme 按 http 处理；省略端口按 80；省略 path 按 "/"。
- * 只认 http/https——https 返回 DIAL_HTTP_ERR_UNSUPPORTED（本轮只做明文）。
+ * 省略 scheme 按 http 处理；省略端口按 80（https 按 443）；省略 path 按 "/"。
+ * 只认 http/https。
  */
 static int dh_url_parse(const char *url, dh_url *out) {
     memset(out, 0, sizeof(*out));
@@ -236,11 +426,7 @@ static int dh_url_parse(const char *url, dh_url *out) {
         }
         p = scheme_end + 3;
     }
-    if (is_https) {
-        dh_set_error(DIAL_HTTP_ERR_UNSUPPORTED,
-                     "本轮只提供明文 HTTP/1.1：https:// 需要 TLS（由 mbedtls 提供，尚未接线）");
-        return 0;
-    }
+    out->is_https = is_https;
 
     /* host[:port] 到 '/' 或 '?' 或结尾 */
     const char *hstart = p;
@@ -280,7 +466,7 @@ static int dh_url_parse(const char *url, dh_url *out) {
     } else {
         memcpy(out->host, hstart, hlen);
         out->host[hlen] = '\0';
-        out->port = 80;
+        out->port = is_https ? 443 : 80;
     }
 
     /* path（含 query）；缺省 "/" */
@@ -337,6 +523,13 @@ static void dh_set_socket_timeout(dh_socket fd, int64_t sec) {
  */
 static int64_t dh_recv_some(DialHttpConn *c, char *buf, int64_t n) {
     if (n <= 0) return 0;
+    if (c->tls) {
+        int64_t r = dial_tls_recv(c->tls, buf, n);
+        if (r > 0) return r;
+        if (r == 0) return 0;          /* EOF */
+        dh_set_error(DIAL_HTTP_ERR_IO, "TLS 读取失败（连接中断或校验失败）");
+        return -1;
+    }
     int chunk = (int)(n > 65536 ? 65536 : n);
 #ifdef _WIN32
     int r = recv(c->fd, buf, chunk, 0);
@@ -465,6 +658,7 @@ static int dh_read_exact(DialHttpConn *c, char *buf, int64_t n) {
 static DialHttpConn *dh_connect_raw(const char *url) {
     dh_set_error(DIAL_HTTP_OK, "");
     dh_net_init();
+    dh_ignore_sigpipe();
 
     dh_url u;
     if (!dh_url_parse(url, &u)) return NULL;
@@ -513,6 +707,39 @@ static DialHttpConn *dh_connect_raw(const char *url) {
     c->fd = fd;
     c->timeout_sec = 30;   /* 默认 30 秒收发超时：宁可超时失败，也不无限期挂死 */
     dh_set_socket_timeout(fd, c->timeout_sec);
+
+    /* https：在已连上的 TCP 上做 TLS 1.3 握手（mbedTLS 负责，证书校验 fail-closed）。 */
+    if (u.is_https) {
+        const char *alpn[] = { "http/1.1", NULL };  /* 本阶段只 offer http/1.1 */
+        uint32_t verify = (uint32_t)-1;
+        char tls_err[256];
+        DialTls *t = dial_tls_connect((int)fd, u.host, alpn,
+                                      g_ca_path[0] ? g_ca_path : NULL,
+                                      &verify, tls_err, sizeof(tls_err));
+        if (!t) {
+            DH_CLOSE(fd);
+            c->fd = DH_INVALID_SOCKET;
+            free(c);
+            dh_set_error(DIAL_HTTP_ERR_UNSUPPORTED, tls_err[0] ? tls_err : "TLS 握手失败");
+            dh_url_free(&u);
+            return NULL;
+        }
+        c->tls = t;
+        const char *ver = dial_tls_version(t);
+        strncpy(g_tls_version, ver ? ver : "?", sizeof(g_tls_version) - 1);
+        g_tls_version[sizeof(g_tls_version) - 1] = '\0';
+        g_tls_verify = verify;
+        const char *alpn_neg = dial_tls_alpn(t);
+        strncpy(g_tls_alpn, alpn_neg ? alpn_neg : "", sizeof(g_tls_alpn) - 1);
+        g_tls_alpn[sizeof(g_tls_alpn) - 1] = '\0';
+    }
+
+    /* 连接池 key：scheme://host:port */
+    size_t klen = strlen(u.hostport) + 16;
+    c->pool_key = (char *)malloc(klen);
+    if (c->pool_key) {
+        snprintf(c->pool_key, klen, "%s://%s", u.is_https ? "https" : "http", u.hostport);
+    }
     dh_url_free(&u);
     return c;
 }
@@ -526,6 +753,14 @@ DialHttpConn *dial_http_connect(DialString url) {
 }
 
 static int64_t dh_write_raw(DialHttpConn *c, const char *p, int64_t len) {
+    if (c->tls) {
+        int64_t wrote = dial_tls_send(c->tls, p, len);
+        if (wrote < 0) {
+            dh_set_error(DIAL_HTTP_ERR_IO, "TLS 发送失败（连接中断或校验失败）");
+            return -1;
+        }
+        return wrote;
+    }
     int64_t total = 0;
     while (total < len) {
         int chunk = (int)((len - total) > 65536 ? 65536 : (len - total));
@@ -628,11 +863,16 @@ DialString dial_http_read_all(DialHttpConn *c) {
 
 int64_t dial_http_close(DialHttpConn *c) {
     if (!c) return 0;
+    if (c->tls) {
+        dial_tls_free(c->tls);
+        c->tls = NULL;
+    }
     if (c->fd != DH_INVALID_SOCKET) {
         DH_CLOSE(c->fd);
         c->fd = DH_INVALID_SOCKET;
     }
     dh_buf_free(&c->in);
+    free(c->pool_key);
     free(c);
     return 0;
 }
@@ -902,7 +1142,7 @@ static int dh_read_response(DialHttpConn *c, DialHttpResponse *out) {
 /* ------------------------------------------------------------------ */
 
 /*
- * 拼装并发送请求，然后读完响应。
+ * 拼装并发送请求，然后读完响应。支持 keep-alive 连接复用与客户端画像头序。
  * method 为 "GET" / "POST"；extra_headers 可为 NULL；body 可为 NULL。
  */
 static DialHttpResponse *dh_request(const char *method, const char *url,
@@ -914,9 +1154,31 @@ static DialHttpResponse *dh_request(const char *method, const char *url,
     dh_url u;
     if (!dh_url_parse(url, &u)) return NULL;
 
-    DialHttpConn *c = dh_connect_raw(url);
-    if (!c) { dh_url_free(&u); return NULL; }
+    /* 连接池 key：scheme://host:port（同一主机的多次请求复用同一条连接） */
+    char pkey[256];
+    snprintf(pkey, sizeof(pkey), "%s://%s", u.is_https ? "https" : "http", u.hostport);
+
+    DialHttpConn *c = dh_pool_get(pkey);
+    if (!c) {
+        c = dh_connect_raw(url);
+        if (!c) { dh_url_free(&u); return NULL; }
+    }
     if (timeout_sec > 0) dial_http_set_timeout(c, timeout_sec);
+
+    /* 记录本次连接的 TLS 信息（供 dial_http_last_tls_* 读取；明文连接则清零） */
+    if (c->tls) {
+        const char *ver = dial_tls_version(c->tls);
+        strncpy(g_tls_version, ver ? ver : "?", sizeof(g_tls_version) - 1);
+        g_tls_version[sizeof(g_tls_version) - 1] = '\0';
+        const char *alpn = dial_tls_alpn(c->tls);
+        strncpy(g_tls_alpn, alpn ? alpn : "", sizeof(g_tls_alpn) - 1);
+        g_tls_alpn[sizeof(g_tls_alpn) - 1] = '\0';
+        g_tls_verify = 0;
+    } else {
+        g_tls_version[0] = '\0';
+        g_tls_alpn[0] = '\0';
+        g_tls_verify = 0;
+    }
 
     dh_buf req;
     memset(&req, 0, sizeof(req));
@@ -924,13 +1186,29 @@ static DialHttpResponse *dh_request(const char *method, const char *url,
     dh_buf_puts(&req, " ");
     dh_buf_puts(&req, u.path);
     dh_buf_puts(&req, " HTTP/1.1\r\n");
+    /* Host 始终最前（必填，且必须精确等于 URL 主机） */
     dh_buf_puts(&req, "Host: ");
     dh_buf_puts(&req, u.hostport);
     dh_buf_puts(&req, "\r\n");
-    dh_buf_puts(&req, "User-Agent: dial-http/1.0\r\n");
-    /* 用 Connection: close 简化取体：读完即止，不做连接复用（keep-alive 留后续） */
-    dh_buf_puts(&req, "Connection: close\r\n");
-    dh_buf_puts(&req, "Accept: */*\r\n");
+    /* 按当前画像的头序发射内建头（Host 已发，跳过） */
+    for (int i = 0; i < g_profile->norder; i++) {
+        const char *h = g_profile->order[i];
+        if (strcmp(h, "Host") == 0) continue;
+        if (strcmp(h, "User-Agent") == 0) {
+            dh_buf_puts(&req, "User-Agent: ");
+            dh_buf_puts(&req, g_profile->ua);
+            dh_buf_puts(&req, "\r\n");
+        } else if (strcmp(h, "Accept") == 0) {
+            dh_buf_puts(&req, "Accept: */*\r\n");
+        } else if (strcmp(h, "Accept-Language") == 0) {
+            dh_buf_puts(&req, "Accept-Language: en-US,en;q=0.9\r\n");
+        } else if (strcmp(h, "Accept-Encoding") == 0) {
+            dh_buf_puts(&req, "Accept-Encoding: gzip, deflate\r\n");
+        } else if (strcmp(h, "Connection") == 0) {
+            /* keep-alive：长连接复用（见末尾 dh_pool_put），不再发 close */
+            dh_buf_puts(&req, "Connection: keep-alive\r\n");
+        }
+    }
     if (content_type && *content_type) {
         dh_buf_puts(&req, "Content-Type: ");
         dh_buf_puts(&req, content_type);
@@ -968,7 +1246,17 @@ static DialHttpResponse *dh_request(const char *method, const char *url,
         dial_http_resp_free(resp);
         return NULL;
     }
-    dial_http_close(c);
+
+    /* 是否复用连接：服务器主动关闭、或声明 Connection: close 则不入池 */
+    int keep = 1;
+    const char *conn = dh_resp_find_header(resp, "Connection");
+    if (conn && dh_eq_ci(conn, "close")) keep = 0;
+    if (c->fd == DH_INVALID_SOCKET) keep = 0;   /* 已被对端关闭 */
+    if (keep && c->pool_key) {
+        dh_pool_put(c->pool_key, c);
+    } else {
+        dial_http_close(c);
+    }
     return resp;
 }
 

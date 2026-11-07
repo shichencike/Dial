@@ -1302,7 +1302,7 @@ elif grep -q "map<" "${TMP}/v_hf2.log"; then
 else vbad "B6：map 值被拒但诊断未说明原因"; fi
 
 echo
-echo "== W) C11 独立包：http.dialpkg 端到端（自研 HTTP/1.1 + gzip 解压，v1.04 增补） =="
+echo "== W) C11 独立包：http.dialpkg 端到端（自研 HTTP/1.1 + TLS 1.3 + keep-alive 连接池，v1.04 增补） =="
 wpass() { echo "  ✅ $1"; }
 wbad()  { echo "  ❌ $1"; fail=1; }
 
@@ -1354,10 +1354,10 @@ else wbad "use_http（import \"http\"）编译失败"; tail -8 "${TMP}/w_comp.lo
 # 5) 错误路径：https 未接线 / URL 缺主机名 / 连不上 —— 都必须**明确失败**而非静默成功。
 if [ -n "$PORT" ]; then
     out=$(DIAL_HTTP_TEST_BASE="http://127.0.0.1:$PORT" "${TMP}/use_http" 2>&1)
-    if printf '%s\n' "$out" | grep -q 'tls_is_null = true' \
+    if printf '%s\n' "$out" | grep -q 'tls_bad_is_null = true' \
        && printf '%s\n' "$out" | grep -q 'nourl_is_null = true' \
        && printf '%s\n' "$out" | grep -q 'bad_is_null = true' ; then
-        wpass "错误路径明确失败（https 未接线 / URL 非法 / 连接失败）"
+        wpass "错误路径明确失败（https 连不上 / URL 非法 / 连接失败）"
     else wbad "W 组：错误路径未按预期失败"; printf '%s\n' "$out" | head -20; fi
 fi
 
@@ -1365,6 +1365,73 @@ fi
 if [ -n "${SRV_PID:-}" ]; then kill "$SRV_PID" >/dev/null 2>&1 || true; fi
 "$DIALC" uninstall http >/dev/null 2>&1 || true
 wpass "清理完成（服务器已停、http 包已卸载）"
+
+# 7) TLS 1.3 子组：自签 CA + 本地 TLS 服务器，验证 TLS 1.3 协商 / 证书校验 fail-closed /
+#    keep-alive 连接池复用 / 404-500 错误路径 / 自定义 CA 与系统根两条信任链。
+#    复用步骤 2 已打包安装好的 http 包（含 mbedTLS 与 SIGPIPE 防护）。
+#    注意：步骤 6 已把明文子组安装的 http 包卸载，这里须重新安装后再编译 use_https.dial。
+if [ -f "${TMP}/http.dialpkg" ] \
+   && "$DIALC" install "${TMP}/http.dialpkg" >"${TMP}/w_install_tls.log" 2>&1; then
+    wpass "TLS 子组复用 http 包重新安装成功"
+else wbad "TLS 子组 http 包重新安装失败"; tail -8 "${TMP}/w_install_tls.log"; fi
+
+TLSDIR="${TMP}/tlstest"
+mkdir -p "$TLSDIR"
+if command -v openssl >/dev/null 2>&1; then
+    # 生成自签 CA + 带 IP SAN(127.0.0.1) 的服务器证书（内网 / 私有 CA 场景的缩影）
+    openssl genrsa -out "${TLSDIR}/ca.key" 2048 2>/dev/null
+    openssl req -x509 -new -nodes -key "${TLSDIR}/ca.key" -sha256 -days 3650 \
+        -subj "/CN=dial-test-ca" -out "${TLSDIR}/ca.crt" 2>/dev/null
+    openssl genrsa -out "${TLSDIR}/srv.key" 2048 2>/dev/null
+    openssl req -new -key "${TLSDIR}/srv.key" -subj "/CN=127.0.0.1" \
+        -out "${TLSDIR}/srv.csr" 2>/dev/null
+    printf "subjectAltName=IP:127.0.0.1\n" > "${TLSDIR}/san.ext"
+    openssl x509 -req -in "${TLSDIR}/srv.csr" -CA "${TLSDIR}/ca.crt" \
+        -CAkey "${TLSDIR}/ca.key" -CAcreateserial -out "${TLSDIR}/srv.crt" \
+        -days 3650 -sha256 -extfile "${TLSDIR}/san.ext" 2>/dev/null
+    rm -f "${TMP}/w_tlsport"
+    # 强制 TLS1.3 的本地服务器（同一 TLS 连接上 keep-alive 复用多个请求）。
+    # 端口号用随机高端口，端口文件路径作为第二参数传入（脚本 argv: PORT PORTFILE）。
+    TLS_PORT_NUM=$(shuf -i 40000-49999 -n1)
+    DIAL_TLS_CERT="${TLSDIR}/srv.crt" DIAL_TLS_KEY="${TLSDIR}/srv.key" \
+        python3 tests/pkg/tls_test_server.py "$TLS_PORT_NUM" "${TMP}/w_tlsport" >"${TMP}/w_tlssrv.log" 2>&1 &
+    TLS_PID=$!
+    TLS_PORT=""
+    for _ in $(seq 1 50); do
+        if [ -s "${TMP}/w_tlsport" ]; then TLS_PORT="$(cat "${TMP}/w_tlsport")"; break; fi
+        sleep 0.1
+    done
+    if [ -n "$TLS_PORT" ]; then
+        wpass "本地 TLS 1.3 服务器就绪（端口 $TLS_PORT）"
+    else
+        wbad "本地 TLS 1.3 服务器未就绪"; tail -8 "${TMP}/w_tlssrv.log"
+    fi
+    if [ -n "$TLS_PORT" ] \
+       && DIAL_HTTPS_TEST_BASE="https://127.0.0.1:$TLS_PORT" \
+          DIAL_HTTPS_TEST_CA="${TLSDIR}/ca.crt" \
+          "$DIALC" build tests/pkg/use_https.dial -o "${TMP}/use_https" >"${TMP}/w_tlscomp.log" 2>&1; then
+        out=$(DIAL_HTTPS_TEST_BASE="https://127.0.0.1:$TLS_PORT" \
+              DIAL_HTTPS_TEST_CA="${TLSDIR}/ca.crt" "${TMP}/use_https" 2>&1)
+        if printf '%s\n' "$out" | grep -q 'TLS status = 200' \
+           && printf '%s\n' "$out" | grep -q 'TLS version = TLSv1.3' \
+           && printf '%s\n' "$out" | grep -q 'TLS verify = 0' \
+           && printf '%s\n' "$out" | grep -q 'TLS x-test = dialtls' \
+           && printf '%s\n' "$out" | grep -Eq 'pool hits = [1-9]' \
+           && printf '%s\n' "$out" | grep -q '404 status = 404' \
+           && printf '%s\n' "$out" | grep -q '500 status = 500' \
+           && printf '%s\n' "$out" | grep -q 'no-ca rejected = true' ; then
+            wpass "TLS 1.3：协商 + 证书校验 + keep-alive 复用 + 404/500 + fail-closed 全通过"
+        else wbad "W 组：use_https 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
+    else wbad "use_https（import \"http\" TLS）编译失败"; tail -8 "${TMP}/w_tlscomp.log"; fi
+    if [ -n "${TLS_PID:-}" ]; then kill "$TLS_PID" >/dev/null 2>&1 || true; fi
+else
+    wskip "TLS 1.3 子组跳过（环境无 openssl）"
+fi
+
+# 8) 清理：停 TLS 服务器、卸包（不污染后续测试与用户环境）。
+if [ -n "${TLS_PID:-}" ]; then kill "$TLS_PID" >/dev/null 2>&1 || true; fi
+"$DIALC" uninstall http >/dev/null 2>&1 || true
+wpass "TLS 子组清理完成（TLS 服务器已停、http 包已卸载）"
 
 echo
 if [ $fail -eq 0 ]; then

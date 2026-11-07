@@ -916,8 +916,9 @@ ABI / SHA256，语言层 FFI（§10）已提供接 C 库的能力。
 | --- | --- | --- |
 | 接口契约 | `packages/http/http.diali` | **唯一**对外签名：`type HttpConn;` / `type HttpResponse;` + `extern fn`。带 SHA256 校验，被篡改在链接期被拦下 |
 | 清单 | `packages/http/dial.toml` | 包名 / 版本 / ABI / 接口文件名 / 许可 / 三平台静态库路径 |
-| 机器码 | `packages/http/src/dial_http.c` | 协议实现：URL 解析、请求行与 Header 拼装、响应解析（`Content-Length` / `chunked` / 读到关闭）、Socket 读写、gzip 解压 |
-| 第三方 | `third_party/` | mbedTLS（TLS，本轮只编入静态库）+ zlib（gzip 解压）。**vendor 进仓库**，构建离线可复现 |
+| 机器码 | `packages/http/src/dial_http.c` | 协议实现：URL 解析、请求行与 Header 拼装、响应解析（`Content-Length` / `chunked` / 读到关闭）、Socket 读写、gzip 解压；`dial_http.c` 还管 keep-alive 连接池与客户端画像 |
+| TLS 封装 | `packages/http/src/dial_tls.c` | mbedTLS 客户端封装：自定义 BIO（复用调用方 socket）、SNI=host、ALPN 由调用方定、系统根 / 自定义 CA 双信任链、证书校验 fail-closed |
+| 第三方 | `third_party/` | mbedTLS（TLS 1.3，已接线上层）+ zlib（gzip 解压）。**vendor 进仓库**，构建离线可复现 |
 
 **协议层自研、密码学不手搓**：HTTP 的报文与线级细节自己写（可控，才能为后续的
 连接指纹定制留空间）；TLS 与压缩算法一律用成熟实现——自己写密码学是安全事故的
@@ -945,9 +946,15 @@ ABI / SHA256，语言层 FFI（§10）已提供接 C 库的能力。
 `dial_string_new` / `dial_bytes_new`，因此包的归档**必须排在标准库归档之前**
 （`obj → runtime → packages → stdlib`）。标准库从不反向引用包符号，故该次序安全。
 
-**现役边界（如实标注）**：本轮只做**明文 HTTP/1.1**。`https://` 明确报错
-（`DIAL_HTTP_ERR_UNSUPPORTED`）而不是假装能用——mbedTLS 已在包里，接线是后续工作。
-连接复用（keep-alive）亦未落地，当前请求一律 `Connection: close`。
+**现役能力（如实标注）**：`http` 包已落地 **明文 HTTP/1.1 + TLS 1.3（https）+ keep-alive 连接池**：
+`https://` 走 mbedTLS，证书校验 **fail-closed**（系统根与自定义 CA 两条信任链，
+自签名不可冒用）；同一主机连续请求复用已建连接（`dial_http_pool_hits` 可见命中）；
+客户端画像只做兼容性配置（头序 / UA / ALPN），**不做以规避识别为目标的绕检测逻辑**。
+进程级 keep-alive 池为全局数组（host:port:scheme 为键）+ 可移植互斥锁，
+服务器发 `Connection: close` 或连接 EOF 时移出池。
+
+**尚未落地（后续独立包 / 批次，不许当已支持）**：HTTP/2.0 分帧 + HPACK + 多路复用、
+HTTP/3.0（QUIC，独立 `http3.dialpkg` + vendor ngtcp2/nghttp3）。
 
 ---
 

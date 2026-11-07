@@ -118,4 +118,26 @@ DialString dial_http_resp_header_value(DialHttpResponse *r, int64_t i);
 /* 释放响应句柄。返回 0 成功。 */
 int64_t dial_http_resp_free(DialHttpResponse *r);
 
+/* ---- 客户端画像（兼容性配置，非规避引擎）---- */
+
+/* 切换客户端画像：目前支持 "default"（默认）与 "chrome"。
+ * 画像只控制请求头排序与 User-Agent 这类兼容参数，用于与只认浏览器客户端的
+ * API 互通；不以“绕过服务器限制 / 欺骗识别”为目标。 */
+void dial_http_set_profile(DialString name);
+
+/* 设置自定义受信 CA（文件或目录，PEM）。传空串恢复为系统根证书库。
+ * 用于内网 / 私有 CA 场景；设置后证书校验依旧 fail-closed（不允许自签名冒用）。 */
+void dial_http_set_ca_path(DialString path);
+
+/* ---- 连接池统计（供测试/诊断）---- */
+void dial_http_pool_stats(int *hits, int *total);
+int  dial_http_pool_hits(void);
+int  dial_http_pool_total(void);
+void dial_http_pool_clear(void);
+
+/* ---- 最近一次请求的 TLS 协商信息（线程局部）---- */
+DialString  dial_http_last_tls_version(void);
+uint32_t    dial_http_last_tls_verify(void);
+DialString  dial_http_last_tls_alpn(void);
+
 #endif /* DIAL_HTTP_H */

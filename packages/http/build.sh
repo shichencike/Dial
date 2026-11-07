@@ -40,10 +40,17 @@ for pair in "${TARGETS[@]}"; do
     work="$(mktemp -d)"
     trap 'rm -rf "$work"' EXIT
 
-    # 1) 自研 HTTP 层（需要 stdlib 的 dial_string.h / dial_bytes.h）
+    # 1) 自研 HTTP 层 + TLS 封装（需要 stdlib 的 dial_string.h / dial_bytes.h，
+#    以及 mbedTLS 头）
     zig cc -target "$t" -c "$PKG/src/dial_http.c" \
         -I "$PKG/src" -I "$ROOT/stdlib" -I "$ROOT/runtime" -I "$TP/zlib" \
+        -I "$TP/mbedtls/include" -I "$TP/mbedtls/3rdparty/everest/include" \
+        -I "$TP/mbedtls/3rdparty/p256-m" \
         "${CFLAGS_COMMON[@]}" -o "$work/dial_http.o"
+    zig cc -target "$t" -c "$PKG/src/dial_tls.c" \
+        -I "$PKG/src" -I "$TP/mbedtls/include" -I "$TP/mbedtls/3rdparty/everest/include" \
+        -I "$TP/mbedtls/3rdparty/p256-m" \
+        "${CFLAGS_COMMON[@]}" -o "$work/dial_tls.o"
 
     # 2) zlib 核心
     for f in "${ZLIB_SRCS[@]}"; do

@@ -1,0 +1,53 @@
+import "http";
+
+fn main(): int {
+    var base: string = getenv("DIAL_HTTPS_TEST_BASE");
+    var ca: string = getenv("DIAL_HTTPS_TEST_CA");
+
+    // 1) 设自定义 CA（自签 CA，内网/私有 CA 场景）
+    dial_http_set_ca_path(ca);
+
+    // 2) TLS 成功路径：协商 TLS1.3 + 200 + 解压 + 头遍历
+    var r: HttpResponse = dial_http_get(base + "/ok", "");
+    print("TLS status = ", dial_http_resp_status(r));
+    print("TLS body_len = ", dial_http_resp_body_len(r));
+    print("TLS version = ", dial_http_last_tls_version());
+    print("TLS verify = ", dial_http_last_tls_verify());
+    print("TLS alpn = ", dial_http_last_tls_alpn());
+    print("TLS x-test = ", dial_http_resp_header(r, "X-Test"));
+    dial_http_resp_free(r);
+
+    // 3) keep-alive 复用：同一主机连发 5 次，连接池应命中 > 0
+    dial_http_pool_clear();
+    var i: int = 0;
+    while (i < 5) {
+        var rr: HttpResponse = dial_http_get(base + "/ok", "");
+        dial_http_resp_free(rr);
+        i = i + 1;
+    }
+    print("pool hits = ", dial_http_pool_hits());
+    print("pool total = ", dial_http_pool_total());
+
+    // 4) 错误路径：404 / 500 仍正常返回响应（状态可见），不崩溃
+    var r404: HttpResponse = dial_http_get(base + "/status404", "");
+    print("404 status = ", dial_http_resp_status(r404));
+    dial_http_resp_free(r404);
+    var r500: HttpResponse = dial_http_get(base + "/status500", "");
+    print("500 status = ", dial_http_resp_status(r500));
+    dial_http_resp_free(r500);
+
+    // 5) fail-closed：清掉自定义 CA，改用系统根证书库 → 自签证书必须被拒
+    dial_http_set_ca_path("");
+    dial_http_pool_clear();
+    var bad: HttpResponse = dial_http_get(base + "/ok", "");
+    print("no-ca err = ", dial_http_last_error());
+    print("no-ca msg = ", dial_http_last_error_msg());
+    if (is_null(bad)) {
+        print("no-ca rejected = true");
+    } else {
+        print("no-ca rejected = false (BUG)");
+        dial_http_resp_free(bad);
+    }
+
+    return 0;
+}
