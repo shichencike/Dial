@@ -1,0 +1,96 @@
+// http.dialpkg 端到端用例：两层 API（流式底层 + 高层便捷）+ 各协议要点。
+//
+// 服务器地址从环境变量 DIAL_HTTP_TEST_BASE 取（测试脚本起本地 HTTP 服务器后写入），
+// 取不到时回落到默认端口，便于手工运行。
+import "http";
+
+fn main(): int {
+    var base: string = getenv("DIAL_HTTP_TEST_BASE");
+    if (base == "") {
+        base = "http://127.0.0.1:18080";
+    }
+
+    // ---- 高层：GET 200 + 响应体 + 自定义头 ----
+    var r: HttpResponse = dial_http_get(base + "/ok", "");
+    print("status = ", dial_http_resp_status(r));
+    print("body = ", bytes_to_string(dial_http_resp_body(r)));
+    print("body_len = ", dial_http_resp_body_len(r));
+    print("x_dial_test = ", dial_http_resp_header(r, "X-Dial-Test"));
+    print("ctype = ", dial_http_resp_header(r, "content-type"));   // 大小写不敏感
+    print("missing_header = [", dial_http_resp_header(r, "X-Nope"), "]");
+    dial_http_resp_free(r);
+
+    // ---- 高层：404 ----
+    var nf: HttpResponse = dial_http_get(base + "/notfound", "");
+    print("nf_status = ", dial_http_resp_status(nf));
+    dial_http_resp_free(nf);
+
+    // ---- 高层：POST 请求体回显 ----
+    var pr: HttpResponse = dial_http_post(base + "/echo", "X-Custom: v1", "dial-body-123", "text/plain");
+    print("post_status = ", dial_http_resp_status(pr));
+    print("post_body = ", bytes_to_string(dial_http_resp_body(pr)));
+    print("post_echo_len = ", dial_http_resp_header(pr, "X-Echo-Len"));
+    dial_http_resp_free(pr);
+
+    // ---- 高层：chunked（无 Content-Length，靠分块边界）----
+    var cr: HttpResponse = dial_http_get(base + "/chunked", "");
+    print("chunked_status = ", dial_http_resp_status(cr));
+    print("chunked_body = ", bytes_to_string(dial_http_resp_body(cr)));
+    dial_http_resp_free(cr);
+
+    // ---- 高层：gzip（Content-Encoding 解压）----
+    var gz: HttpResponse = dial_http_get(base + "/gzip", "");
+    print("gzip_status = ", dial_http_resp_status(gz));
+    print("gzip_body = ", bytes_to_string(dial_http_resp_body(gz)));
+    dial_http_resp_free(gz);
+
+    // ---- 高层：多个响应头（含同名多值）----
+    var mr: HttpResponse = dial_http_get(base + "/multi", "");
+    print("multi_count = ", dial_http_resp_header_count(mr));
+    print("multi_x_one_first = ", dial_http_resp_header(mr, "X-One"));
+    var i: int = 0;
+    while (i < dial_http_resp_header_count(mr)) {
+        print("multi_h = ", dial_http_resp_header_name(mr, i), " = ", dial_http_resp_header_value(mr, i));
+        i = i + 1;
+    }
+    dial_http_resp_free(mr);
+
+    // ---- 底层：流式（自己拼请求行与头）----
+    var conn: HttpConn = dial_http_connect(base + "/ok");
+    if (is_null(conn)) {
+        print("connect_failed = ", dial_http_last_error_msg());
+        return 1;
+    }
+    dial_http_set_timeout(conn, 10);
+    dial_http_write_line(conn, "GET /ok HTTP/1.1");
+    dial_http_write_line(conn, "Host: 127.0.0.1");
+    dial_http_write_line(conn, "Connection: close");
+    dial_http_write_line(conn, "");      // 空行 = 头部结束
+    print("raw_status_line = ", dial_http_read_line(conn));
+    var hcount: int = 0;
+    while (hcount < 4) {
+        var h: string = dial_http_read_line(conn);
+        if (h == "") { hcount = hcount + 1; }
+        print("raw_header = ", h);
+        hcount = hcount + 1;
+    }
+    print("raw_body = ", bytes_to_string(dial_http_read_all(conn)));
+    dial_http_close(conn);
+
+    // ---- 错误路径：连不上（端口没人听）----
+    var bad: HttpResponse = dial_http_get("http://127.0.0.1:1/none", "");
+    print("bad_is_null = ", is_null(bad));
+    print("bad_err = ", dial_http_last_error_msg());
+
+    // ---- 错误路径：https 本轮不支持（明文客户端）----
+    var tls: HttpResponse = dial_http_get("https://example.com/", "");
+    print("tls_is_null = ", is_null(tls));
+    print("tls_err = ", dial_http_last_error_msg());
+
+    // ---- 错误路径：URL 缺主机名 ----
+    var nourl: HttpResponse = dial_http_get("http://", "");
+    print("nourl_is_null = ", is_null(nourl));
+    print("nourl_err = ", dial_http_last_error_msg());
+
+    return 0;
+}

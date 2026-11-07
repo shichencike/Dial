@@ -1,0 +1,10 @@
+name = "http"
+version = "1.0.0"
+abi = 6
+iface = "http.diali"
+license = "MIT OR Apache-2.0"
+
+[targets]
+x86_64-linux-gnu = "lib/x86_64-linux-gnu/libhttp.a"
+aarch64-linux-musl = "lib/aarch64-linux-musl/libhttp.a"
+x86_64-windows-gnu = "lib/x86_64-windows-gnu/libhttp.a"

@@ -29,3 +29,6 @@ examples/string_array_demo
 
 # CVE 检测器编译出的临时二进制（tools/cve_check.py 运行产物）
 tests/cve/poc_*
+
+# http.dialpkg 的中间产物（静态库）：由 packages/http/build.sh 现编，不入库
+packages/http/lib/

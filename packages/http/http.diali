@@ -1,0 +1,84 @@
+// http.dialpkg —— HTTP/1.1 客户端（Dial 语言接口签名）
+//
+// 本文件是**唯一**的对外契约：包内机器码的实现可以变，但这里的签名一变，
+// 依赖它的程序就得重编。签名文件带 SHA256 校验，被篡改会在链接期被拦下。
+//
+// 设计立场（详见 packages/http/src/dial_http.h 的注释）：
+//   - 协议层自研：报文解析、Header 拼装、Socket 读写都在我们手里；
+//   - 密码学绝不手搓：TLS 由 mbedtls 提供（本轮只编入静态库，暂未接线）；
+//   - 压缩用成熟实现：gzip / deflate 解压走 zlib；
+//   - 两层 API：底层「流式」可自由拼报文，高层「一次请求」省心；
+//   - 错误走返回码 + 最近错误槽，不抛 Dial 异常（包不假定宿主装了异常栈）。
+
+/// HTTP 连接句柄（不透明）。用完必须显式 dial_http_close 释放——不透明句柄不进 ARC。
+type HttpConn;
+
+/// HTTP 响应句柄（不透明）。用完必须显式 dial_http_resp_free 释放。
+type HttpResponse;
+
+// ---- 底层：流式（连接级）------------------------------------------
+
+/// 解析 URL 并建立 TCP 连接（**不**发送任何请求）。
+/// URL 形如 http://host[:port]/path[?query]；省略 scheme 按 http 处理，省略端口按 80。
+/// 失败返回空句柄（用 is_null 判断），原因见 dial_http_last_error_msg。
+extern fn dial_http_connect(url: string): HttpConn;
+
+/// 往连接里写入一段文本（请求行 / 头 / 体都靠它）。返回写入字节数，失败返回 -1。
+extern fn dial_http_write(conn: HttpConn, data: string): int;
+
+/// 按「行」写：写完自动补 CRLF（HTTP 的行结束符）。
+/// Dial 字符串字面量只支持 \n \t \\ \" 四种转义、**不支持 \r**，
+/// 所以行结束符由包负责——调用方按行写，不必自己拼转义。
+extern fn dial_http_write_line(conn: HttpConn, line: string): int;
+
+/// 读一行（到换行为止，不含换行符）。失败返回空句柄。
+extern fn dial_http_read_line(conn: HttpConn): string;
+
+/// 读到连接关闭为止，返回全部字节。失败返回空句柄。
+extern fn dial_http_read_all(conn: HttpConn): bytes;
+
+/// 关闭连接并释放句柄。返回 0 成功。
+extern fn dial_http_close(conn: HttpConn): int;
+
+/// 设置收发超时（秒）；传 0 表示不限时。必须在 connect 之前调用才生效。
+extern fn dial_http_set_timeout(conn: HttpConn, seconds: int): int;
+
+// ---- 高层：一次请求一个响应----------------------------------------
+
+/// 发 GET 请求并读完响应。
+/// headers 是额外请求头，每行一个 "Name: value"（不含末尾换行）；传空串表示不加。
+/// 失败返回空句柄（用 is_null 判断）。
+extern fn dial_http_get(url: string, headers: string): HttpResponse;
+
+/// 发 POST 请求并读完响应。body 为请求体（可传空串），content_type 可传空串表示不发该头。
+extern fn dial_http_post(url: string, headers: string, body: string, content_type: string): HttpResponse;
+
+/// 响应状态码（200 / 404 / 500 …）。句柄为空时返回 -1。
+extern fn dial_http_resp_status(resp: HttpResponse): int;
+
+/// 响应体（bytes；已按 Content-Encoding 解压过）。句柄为空时返回空句柄。
+extern fn dial_http_resp_body(resp: HttpResponse): bytes;
+
+/// 响应体字节长度。
+extern fn dial_http_resp_body_len(resp: HttpResponse): int;
+
+/// 按名字取响应头（大小写不敏感）。缺失返回空串。
+extern fn dial_http_resp_header(resp: HttpResponse, name: string): string;
+
+/// 响应头个数（便于遍历）。
+extern fn dial_http_resp_header_count(resp: HttpResponse): int;
+
+/// 按序号取响应头名 / 头值。越界返回空串。
+extern fn dial_http_resp_header_name(resp: HttpResponse, index: int): string;
+extern fn dial_http_resp_header_value(resp: HttpResponse, index: int): string;
+
+/// 释放响应句柄。返回 0 成功。
+extern fn dial_http_resp_free(resp: HttpResponse): int;
+
+// ---- 错误诊断-------------------------------------------------------
+
+/// 最近一次错误的码（0 表示无错误；负值见 README 的错误码表）。
+extern fn dial_http_last_error(): int;
+
+/// 最近一次错误的人话描述（中文）。
+extern fn dial_http_last_error_msg(): string;
