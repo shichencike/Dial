@@ -380,6 +380,36 @@
 <li><strong>U 组回归</strong>：8 组 API 端到端输出断言、C2 解析失败 Fail-Fast、C4 <code>char_at</code> 越界
     Fail-Fast、<code>string[].index_of</code> 编译期拒绝、C3 <code>format_float(int,..)</code> 零隐式转换拒绝、
     第 2 批内建同名定义被拒；A–T 扩为 A–U。</li>
+<li><strong>B/C 组缺口补齐 第 3 批：语言机制（B7 / B8 / B6）</strong>，落在 <code>src/parser.rs</code> +
+  <code>src/semantic.rs</code> + <code>src/codegen.rs</code> + <code>runtime/dial_rt_mem.c</code> + <code>stdlib/dial_kvmap.c</code>：</li>
+<li><strong>B7 文件级只读 <code>const</code></strong>：支持标量 / 字符串 / 数组 / 嵌套数组 / 字符串数组 /
+    结构体字面量，以及字面量上的常量表达式（可常量折叠）；const 可引用其他 const
+    （解析期内联展开）；<strong>顶层 <code>var</code> 全局变量编译期拒绝</strong>（禁止可变全局状态红线）；
+    const 重赋值 / 非编译期常量值 / 类型不匹配 / 局部变量遮蔽 const 均被拒。</li>
+<li><strong>B8 结构体字段默认值</strong>：<code>struct Point { x: int = 0, y: int = 0 }</code>；默认值必须是
+    编译期常量；省略有默认值的字段取默认值、省略<strong>无默认值</strong>的字段编译期报错
+    （不静默零初始化）；默认值类型不匹配按零隐式转换铁律拒绝。</li>
+<li><strong>B6 结构体进容器</strong>：<code>Point[]</code> 与 <code>map&lt;string, Struct&gt;</code>。值类型结构体装不进 8 字节
+    数组 / map 值槽，故<strong>装箱</strong>为引用计数对象（<code>dial_struct_box</code>，布局
+    <code>[int64 refcount][payload]</code>，与既有 Dial 堆对象同构）后入槽，读出时<strong>解箱按值</strong>拷贝；
+    <code>put</code> / <code>get</code> / <code>contains</code> / <code>remove</code> / <code>get_or</code> / <code>values()</code> 全通路打通；
+    map 侧新增 <code>KV_STRUCT(6)</code> 值种类（与 <code>KV_STRING</code> 同走 retain/release），
+    未命中返回空指针并由编译器还原零值结构体（绝不解引用空指针）。</li>
+<li><strong>边界（如实标注）</strong>：B6 本批只放开「<strong>字段全为标量</strong>」的结构体；含句柄字段的
+    结构体进容器需要字段级 ARC（装箱 / 释放时逐字段 retain/release），该能力尚未
+    落地，故语义层<strong>明确拒绝</strong>而非让它「看起来能用」却在释放时泄漏或悬垂。</li>
+<li><strong>顺带修好的通用缺陷</strong>：字段访问此前只支持「变量 / 字段链」作基对象，
+    <code>Pt{}.x</code> / <code>make().y</code> / <code>arr[i].f</code> 一律报「仅支持对变量/字段进行赋值」；现让
+    <code>gen_expr</code> 字段分支把非 lvalue 基物化到栈上临时槽再取字段指针
+    （<code>gen_lvalue_ptr</code> 保持只服务数组元素写，避免破坏 <code>a[i] = v</code> 的写回语义）。
+    B7 的 const 结构体内联后「取字段」成为常态路径，此修复是其必要前提。</li>
+<li><strong>V 组回归</strong>（新增第 22 组）：B8 / B7 / B6 正向端到端、顶层 <code>var</code> 被拒、
+    省略无默认值字段被拒、默认值类型不匹配被拒、含句柄字段结构体作数组元素 /
+    map 值被拒；A–U 扩为 A–V。内存专项：3M 次 <code>Point[]</code> 建放、1M 次
+    <code>map&lt;string,Point&gt;</code> 读写循环均在虚拟内存上限内通过（装箱对象随容器释放，无泄漏）。</li>
+<li><strong>本批明确不碰（按裁决划清界限）</strong>：B1（<code>impl</code> 方法，暂用 <code>fn</code> 替代）、
+    B2（用户泛型，死守单态化底线）、B3（枚举 ADT，不引入 Tagged Union）；
+    B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。C11（<code>http.dialpkg</code> 独立包）待落地。</li>
 <li><strong>宪法裁决入文档（§37）</strong>：<code>STDLIB_ABI 5 → 6</code>（<code>make_stdlib_pkg.py</code> 默认、
   CI 两处、<code>dialc new</code> 骨架同步，后者改为引用 <code>package::STDLIB_ABI</code> 消除硬编码）；
   术语统一为「绝不引入可变全局状态」；「函数名重载」「闭包」写入<strong>永久否决</strong>；

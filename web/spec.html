@@ -391,6 +391,7 @@
 <li><a href="#376-标准库-abi-递增5--6">37.6 标准库 ABI 递增：5 → 6</a></li>
 <li><a href="#377-第一批已落地本轮交付">37.7 第一批已落地（本轮交付）</a></li>
 <li><a href="#378-第二批已落地c-组标准库-api-全量">37.8 第二批已落地（C 组标准库 API 全量）</a></li>
+<li><a href="#379-第三批已落地语言机制b7--b8--b6">37.9 第三批已落地（语言机制：B7 / B8 / B6）</a></li>
 </ul>
 </li>
 </ul>
@@ -8261,7 +8262,61 @@ CI 两处 <code>--abi 6</code> 同步；<code>dialc new</code> 骨架的 <code>a
 只做<strong>本地提交</strong>，不推送 GitHub、不打 tag、不发 Release。
 B1/B2/B3/B6/B7/B8 与 C11 按 §37.3–37.5 的裁决在后续批次落地，
 届时同步更新本章「已落地」表——<strong>规范先于实现写清，但绝不把未实现项标成已支持</strong>。</p>
-</blockquote></main></div>
+</blockquote>
+<h3 id="379-第三批已落地语言机制b7--b8--b6">37.9 第三批已落地（语言机制：B7 / B8 / B6）</h3>
+<p>本批落地 §37.3–37.4 的 B7 / B8 与 B6（结构体进容器）。实现分布在
+<code>src/parser.rs</code>（语法与 const 降维）、<code>src/semantic.rs</code>（类型与白名单）、
+<code>src/codegen.rs</code>（装箱 / 解箱与保留名）、<code>runtime/dial_rt_mem.c</code>（装箱分配）、
+<code>stdlib/dial_kvmap.c</code>（map 值种类）五层。</p>
+<table>
+<thead>
+<tr>
+<th>编号</th>
+<th>能力</th>
+<th>实现要点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B7</td>
+<td>文件级只读 <code>const</code></td>
+<td>标量 / 字符串 / 数组 / 嵌套数组 / 字符串数组 / 结构体字面量，以及字面量上的常量表达式（可常量折叠）；const 可引用其他 const（解析期内联展开）；<strong>顶层 <code>var</code> 全局变量编译期拒绝</strong>（§37.1 红线：禁止可变全局状态）；const 重赋值 / 非编译期常量值 / 类型不匹配 / 局部变量遮蔽 const 均被拒</td>
+</tr>
+<tr>
+<td>B8</td>
+<td>结构体字段默认值</td>
+<td><code>struct Point { x: int = 0, y: int = 0 }</code>；默认值必须是<strong>编译期常量</strong>；省略有默认值的字段取默认值、省略无默认值的字段<strong>编译期报错</strong>（不静默零初始化）；默认值类型不匹配按零隐式转换铁律拒绝</td>
+</tr>
+<tr>
+<td>B6</td>
+<td>结构体进容器</td>
+<td><code>Point[]</code> 与 <code>map&lt;string, Struct&gt;</code>：值类型结构体装不进 8 字节数组槽，故<strong>装箱</strong>为引用计数对象（<code>[int64 refcount][payload]</code>）后入槽，读出时<strong>解箱按值</strong>拷贝；<code>put</code> / <code>get</code> / <code>contains</code> / <code>remove</code> / <code>get_or</code> / <code>values()</code> 全通路打通</td>
+</tr>
+</tbody>
+</table>
+<p><strong>B6 的现役边界（如实标注，不夸大）</strong>：本批只放开「<strong>字段全为标量</strong>」的结构体。
+含句柄字段（<code>string</code> / 数组 / map 等）的结构体进容器，需要装箱与释放时<strong>逐字段</strong>
+retain/release（字段级 ARC），该能力尚未落地，故语义层<strong>明确拒绝</strong>并给出可读诊断——
+而不是让它「看起来能用」却在释放时泄漏或悬垂。这条边界同时写进了 <code>README</code>、
+<code>ARCHITECTURE §14.6</code> 与 V 组回归用例（<code>tests/bad/struct_array_handle_field.dial</code> /
+<code>tests/bad/struct_map_handle_field.dial</code>）。</p>
+<p><strong>B6 顺带修好的通用缺陷</strong>：字段访问此前只支持「变量 / 字段链」作为基对象，
+<code>Pt{}.x</code> / <code>make().y</code> / <code>arr[i].f</code> 一律报「仅支持对变量/字段进行赋值」。
+本批让 <code>gen_expr</code> 的字段分支把非 lvalue 基<strong>物化到栈上临时槽</strong>再取字段指针
+（<code>gen_lvalue_ptr</code> 保持只服务数组元素写，避免破坏 <code>a[i] = v</code> 的写回语义）。
+B7 的 const 结构体内联后「取字段」成为常态路径，这条修复因此是 B7/B6 的必要前提。</p>
+<p><strong>B7 顺带修好的通用缺陷</strong>：<code>const</code> 的值在解析期内联为字面量，因此
+<code>const ORIGIN: Point = Pt{};</code> 之后 <code>ORIGIN.x</code> 的基对象是结构体字面量——
+正是上面那条字段访问修复的用武之地。</p>
+<p><strong>V 组回归</strong>（新增第 22 组）：B8 正向、B7 正向、B6 正向（<code>Point[]</code> 与
+<code>map&lt;string, Point&gt;</code> 端到端）、顶层 <code>var</code> 被拒、省略无默认值字段被拒、
+默认值类型不匹配被拒、含句柄字段结构体作数组元素 / map 值被拒。
+B6 内存专项：3M 次 <code>Point[]</code> 建放、1M 次 <code>map&lt;string,Point&gt;</code> 读写循环，
+均在虚拟内存上限内通过（装箱对象随容器释放，无泄漏、无重复释放）。</p>
+<p><strong>本批明确不碰（按裁决划清界限）</strong>：B1（<code>impl</code> 方法——暂用 <code>fn</code> 替代）、
+B2（用户泛型——死守单态化底线，不做）、B3（枚举 ADT——不引入 Tagged Union，
+保持类型系统极简）、C11（<code>http.dialpkg</code> 独立包，下一批）。
+B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
