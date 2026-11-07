@@ -865,7 +865,7 @@ UTF-8 码点）、`dial_array_insert` / `index_of` / `reverse` / `reduce` /
 | 第 1 批 | B9 块注释 / B10 `!` / B11 `.slice()` / C6 `get_or` / C8 `eprint` | **已落地**（T 组锁定） |
 | 第 2 批 | C1–C5 / C7 / C9 / C10 标准库 API | **已落地**（U 组锁定：8 组端到端、C2 解析 Fail-Fast、C4 越界 Fail-Fast、`string[].index_of` 拒、C3 零隐式转换、第 2 批内建进保留名） |
 | 第 3 批 | B7 文件级只读 `const` / B8 结构体字段默认值 / B6 结构体进容器 | **已落地**（V 组锁定，见 §14.6） |
-| 收尾 | C11 独立包（如 `http.dialpkg`）、全量回归、文档官网同步、本地提交 | **已落地**（W 组锁定，见 §14.7） |
+| 收尾 | C11 独立包（`http` / `text` / `json` / `crypto`）、全量回归、文档官网同步、本地提交 | **已落地**（W / X / Y / Z 组锁定，见 §14.7） |
 
 第 3 批的**范围裁决**（用户明确划定）：B7 / B8 / B6 落地；
 B1（`impl` 方法）暂用 `fn` 替代、B2（用户泛型）死守单态化底线、B3（枚举 ADT）
@@ -905,10 +905,12 @@ ABI / SHA256，语言层 FFI（§10）已提供接 C 库的能力。
 > 规范先于实现写清，但**绝不把未实现项标成已支持**——每批落地后同步更新
 > README §37 的「已落地」表。
 
-### 14.7 C11 独立包架构：`http.dialpkg` 的分层与 FFI 约定
+### 14.7 C11 独立包架构：四个包的分层与 FFI 约定
 
 §37.5 定下「常用库走独立 `.dialpkg`、不进标准库包」，并按领域拆包。
-本轮落地第一个包 `http`（HTTP/1.1 + TLS 1.3 + keep-alive + HTTP/2 真并发多路复用）。
+本轮四个包全部落地：`http`（HTTP/1.1 + TLS 1.3 + keep-alive + HTTP/2）、
+`text`（正则）、`json`（解析 / 序列化）、`crypto`（摘要 / Base64 / HMAC）。
+下表以 `http` 为例给出完整分层；其余三包的分层同构，差异见本节末尾。
 
 **分层**（每层职责单一，不互相越界）：
 
@@ -966,6 +968,18 @@ mbedTLS 的 `ssl_context` 不能被多线程并发读写（未开 `MBEDTLS_THREA
 `dial_http2_session_free` 显式释放。POSIX 用 pthread 互斥/条件变量，Windows 用
 `CRITICAL_SECTION` / `CONDITION_VARIABLE` / `CreateThread`。ALPN 未协商出 `h2`
 时 fail-closed 拒绝降级为 HTTP/1.1。
+
+**其余三个包（同批补齐，分层同构）**：
+
+| 包 | 契约 | 实现 | 关键架构决策 |
+| --- | --- | --- | --- |
+| `text` | `text.diali`（`type Regex;`） | `dial_regex.c`（Thompson NFA 编译 + Pike VM）+ `dial_text.c`（FFI / 替换 / 错误槽） | 线性时间正则，零第三方依赖；不透明句柄不进 ARC；能力子集与已知语义边界写进契约 |
+| `json` | `json.diali`（`type Json;`） | `dial_json_codec.c`（递归下降解析 + 紧凑序列化 + 深拷贝）+ `dial_json.c`（FFI / 访问器 / 构造器） | 值树封在单一不透明句柄里（`.diali` 无泛型容器）；所有权只有「返回即独立拥有、一律 free」一条规则；整数走 `int64_t` 避免 >2^53 丢精度 |
+| `crypto` | `crypto.diali`（无状态，无句柄） | `dial_crypto.c`（FFI 包装）+ vendor mbedTLS 全量 | 摘要 / HMAC / Base64 全部走 mbedTLS，**不实现任何密码学原语**；`string` / `bytes` 双入口；失败返回空值 + 线程局部错误码，`bytes` 类返回长度 0 的空缓冲（Dial 的 `is_null` 不含 `Type::Bytes`） |
+
+三包与 `http` 共用同一套 FFI 约定（`DialString` 句柄、长度优先于 NUL、
+返回值必须构造句柄、`.diali` 单行声明、错误走返回码），故链接顺序同样是
+`obj → runtime → packages → stdlib`。回归分别由 X / Y / Z 组锁定。
 
 **尚未落地（后续独立包 / 批次，不许当已支持）**：HTTP/3.0（QUIC，独立
 `http3.dialpkg` + vendor ngtcp2/nghttp3）。

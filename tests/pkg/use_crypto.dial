@@ -1,0 +1,115 @@
+// crypto.dialpkg 端到端用例：五种摘要标准向量 / string 与 bytes 双入口 /
+// 含 NUL 的二进制数据 / 原始摘要字节 / Base64 编解码 / HMAC / 严格错误路径。
+//
+// 输出全部是结构化 `name = ok`（失败为 `= bad ...`），断言交给 run_tests.sh 的 grep。
+// 注意：Dial 的 is_null 不适用于 bytes，故 bytes 结果一律用 bytes_length /
+// 错误码判别——这也是 crypto.diali 里约定「失败返回长度 0 的空缓冲」的原因。
+import "crypto";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) {
+        print(name + " = ok");
+    } else {
+        print(name + " = bad");
+    }
+}
+
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) {
+        print(name + " = ok");
+    } else {
+        print(name + " = bad " + str(actual));
+    }
+}
+
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) {
+        print(name + " = ok");
+    } else {
+        print(name + " = bad [" + actual + "]");
+    }
+}
+
+fn main(): int {
+    // ---- 1) 五种摘要：NIST / RFC 标准向量 ----
+    expect_str(dial_crypto_md5("abc"),
+               "900150983cd24fb0d6963f7d28e17f72", "md5_abc");
+    expect_str(dial_crypto_sha1("abc"),
+               "a9993e364706816aba3e25717850c26c9cd0d89d", "sha1_abc");
+    expect_str(dial_crypto_sha256("abc"),
+               "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+               "sha256_abc");
+    expect_str(dial_crypto_sha512("abc"),
+               "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a" +
+               "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+               "sha512_abc");
+    expect_str(dial_crypto_sha3_256("abc"),
+               "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+               "sha3_256_abc");
+    expect_str(dial_crypto_md5(""),
+               "d41d8cd98f00b204e9800998ecf8427e", "md5_empty");
+    // 多字节 UTF-8 字面量按字节摘要
+    expect_str(dial_crypto_sha256("中文"),
+               "72726d8818f693066ceb69afa364218b692e62ea92b385782363780f47529c21",
+               "sha256_utf8_cn");
+
+    // ---- 2) string / bytes 双入口在同一字节流上必须一致 ----
+    var abc: bytes = bytes_from_string("abc");
+    expect_str(dial_crypto_sha256_bytes(abc), dial_crypto_sha256("abc"),
+               "bytes_string_agree");
+    expect_str(dial_crypto_md5_bytes(abc), dial_crypto_md5("abc"),
+               "md5_bytes_agree");
+
+    // ---- 3) 二进制数据：Base64 解出含内嵌 NUL 与 0xff 的三字节 ----
+    var raw: bytes = dial_crypto_base64_decode("AAH/");
+    expect_int(bytes_length(raw), 3, "b64_decode_bin");
+    expect_int(byte_to_int(bytes_get(raw, 0)), 0, "b64_bin_b0");
+    expect_int(byte_to_int(bytes_get(raw, 2)), 255, "b64_bin_b2");
+    expect_str(dial_crypto_base64_encode_bytes(raw), "AAH/", "b64_bin_roundtrip");
+    expect_str(dial_crypto_md5_bytes(raw),
+               "ffbb8cd5a232b7d906904533e9609f48", "md5_bytes_bin");
+    expect_str(dial_crypto_sha256_bytes(raw),
+               "26a66b061e8f48f39927c312f25293959729eee95978e2892d49d3512a5cc092",
+               "sha256_bytes_bin");
+
+    // ---- 4) Base64 文本编解码 ----
+    expect_str(dial_crypto_base64_encode("hello"), "aGVsbG8=", "b64_hello");
+    expect_str(dial_crypto_base64_encode("dial"), "ZGlhbA==", "b64_dial");
+    expect_str(dial_crypto_base64_encode(""), "", "b64_empty");
+    expect_str(bytes_to_string(dial_crypto_base64_decode("aGVsbG8=")),
+               "hello", "b64_decode_hello");
+
+    // ---- 5) 按算法名取原始摘要字节 ----
+    var d: bytes = dial_crypto_digest("sha256", abc);
+    expect_int(bytes_length(d), 32, "digest_sha256_len");
+    var dm: bytes = dial_crypto_digest("md5", abc);
+    expect_int(bytes_length(dm), 16, "digest_md5_len");
+
+    // ---- 6) HMAC-SHA256 ----
+    expect_str(dial_crypto_hmac_sha256(
+                   "key", "The quick brown fox jumps over the lazy dog"),
+               "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+               "hmac_fox");
+    expect_str(dial_crypto_hmac_sha256_bytes(
+                   bytes_from_string("key"),
+                   bytes_from_string("The quick brown fox jumps over the lazy dog")),
+               "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+               "hmac_bytes_agree");
+
+    // ---- 7) 严格错误路径：坏输入一律拒绝并置错误码 ----
+    var badb: bytes = dial_crypto_base64_decode("aGVs*bG8=");
+    expect_int(bytes_length(badb), 0, "b64_bad_rejected");
+    expect_int(dial_crypto_last_error(), -3, "b64_bad_err");
+    expect(dial_crypto_last_error_msg() != "", "b64_bad_msg");
+
+    var bada: bytes = dial_crypto_digest("nope", abc);
+    expect_int(bytes_length(bada), 0, "unknown_algo_rejected");
+    expect_int(dial_crypto_last_error(), -1, "unknown_algo_err");
+
+    // 成功后错误码必须清零
+    dial_crypto_sha256("abc");
+    expect_int(dial_crypto_last_error(), 0, "ok_clears_error");
+
+    print("crypto_done = true");
+    return 0;
+}

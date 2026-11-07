@@ -1,0 +1,91 @@
+// json.dialpkg —— JSON 解析与序列化（Dial 语言接口签名）
+//
+// 本文件是**唯一**的对外契约：包内机器码的实现可以变，但这里的签名一变，
+// 依赖它的程序就得重编。签名文件带 SHA256 校验，被篡改会在链接期被拦下。
+//
+// 为什么用不透明句柄：.diali 的类型白名单里只有裸 map（int→int），没有
+// 泛型容器，Dial 侧拿不到 string→任意值的字典。因此整棵 JSON 值树封在
+// `type Json;` 里，与 http 包的 HttpResponse 是同一口径。
+//
+// 所有权（**务必遵守**，这是本包唯一容易用错的地方）：
+//   所有返回 Json 的函数都返回**独立拥有**的句柄，调用方一律 dial_json_free。
+//   dial_json_array_push / dial_json_object_set 对 child 做**深拷贝**，所以
+//   传进去的 child 仍需由调用方释放，且之后改动 child 不影响父树。
+//   不存在「借用句柄」，也就没有双重释放的灰色地带。
+//
+// 协议层自研：递归下降解析 + 紧凑序列化，纯 C 零依赖。严格模式：尾随逗号、
+// 多余根值、未转义控制字符、非法 \u 转义、孤立代理项一律报错并给出字节偏移，
+// 绝不静默吞下坏数据（Fail-Fast 铁律）。嵌套深度上限 64 层。
+// 不支持 \u0000（会编码成内嵌 NUL，被 C 字符串静默截断）——明确报错而非假装成功。
+// 数字分两路：整数存 int64（>2^53 不丢精度），浮点存 double。
+
+/// 一棵 JSON 值树（不透明）。用完必须显式 dial_json_free 释放——不透明句柄不进 ARC。
+type Json;
+
+// ---- 解析 / 释放 / 序列化 ------------------------------------------
+
+/// 解析 JSON 文本。失败返回空句柄（is_null 判断），原因见 dial_json_last_error_msg（含字节偏移）。
+extern fn dial_json_parse(text: string): Json;
+
+/// 释放一棵值树。返回 0 成功。
+extern fn dial_json_free(v: Json): int;
+
+/// 序列化为紧凑 JSON 文本（UTF-8 原样输出，不做 \u 转义）。
+extern fn dial_json_stringify(v: Json): string;
+
+// ---- 类型查询 ------------------------------------------------------
+
+/// 返回类型名："null" / "bool" / "number" / "string" / "array" / "object"。
+extern fn dial_json_type(v: Json): string;
+extern fn dial_json_is_null(v: Json): bool;
+extern fn dial_json_is_bool(v: Json): bool;
+extern fn dial_json_is_number(v: Json): bool;
+extern fn dial_json_is_string(v: Json): bool;
+extern fn dial_json_is_array(v: Json): bool;
+extern fn dial_json_is_object(v: Json): bool;
+
+// ---- 标量访问（类型不符返回默认值并置错误码 -2）--------------------
+
+extern fn dial_json_bool(v: Json): bool;
+extern fn dial_json_int(v: Json): int;
+extern fn dial_json_float(v: Json): float;
+extern fn dial_json_string(v: Json): string;
+
+// ---- 容器访问 ------------------------------------------------------
+
+/// 数组长度 / 对象键数；非容器返回 -1 并置错误码 -2。
+extern fn dial_json_len(v: Json): int;
+
+/// 数组第 index 个元素（返回**独立拥有**的句柄，需自行 free）。越界返回空句柄 + 错误码 -3。
+extern fn dial_json_item(v: Json, index: int): Json;
+
+/// 按键取对象值（返回**独立拥有**的句柄，需自行 free）。键不存在返回空句柄 + 错误码 -3。
+extern fn dial_json_get(v: Json, key: string): Json;
+
+/// 对象第 index 个键名。越界返回空串 + 错误码 -3。
+extern fn dial_json_key(v: Json, index: int): string;
+
+// ---- 构造（返回的句柄一律需 dial_json_free）------------------------
+
+extern fn dial_json_new_null(): Json;
+extern fn dial_json_new_bool(b: bool): Json;
+extern fn dial_json_new_int(n: int): Json;
+extern fn dial_json_new_float(x: float): Json;
+extern fn dial_json_new_string(s: string): Json;
+extern fn dial_json_new_array(): Json;
+extern fn dial_json_new_object(): Json;
+
+/// 往数组追加 child 的**深拷贝**；child 仍归调用方所有，需自行 free。返回 0 成功。
+extern fn dial_json_array_push(arr: Json, child: Json): int;
+
+/// 往对象写入 key → child 的**深拷贝**（重复键覆盖）；child 仍需自行 free。返回 0 成功。
+extern fn dial_json_object_set(obj: Json, key: string, child: Json): int;
+
+// ---- 错误诊断 ------------------------------------------------------
+
+/// 最近一次错误的码（0 无错误）：
+///   -1 解析失败 / -2 空句柄或类型不符 / -3 下标越界或键不存在 / -4 内存不足。
+extern fn dial_json_last_error(): int;
+
+/// 最近一次错误的人话描述（中文，线程局部；解析错误带字节偏移）。
+extern fn dial_json_last_error_msg(): string;

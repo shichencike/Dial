@@ -393,6 +393,7 @@
 <li><a href="#378-第二批已落地c-组标准库-api-全量">37.8 第二批已落地（C 组标准库 API 全量）</a></li>
 <li><a href="#379-第三批已落地语言机制b7--b8--b6">37.9 第三批已落地（语言机制：B7 / B8 / B6）</a></li>
 <li><a href="#3710-c11-第一包已落地httpdialpkghttp11--tls-13--http2">37.10 C11 第一包已落地：http.dialpkg（HTTP/1.1 + TLS 1.3 + HTTP/2）</a></li>
+<li><a href="#3711-c11-其余三包已落地text--json--crypto">37.11 C11 其余三包已落地：text / json / crypto</a></li>
 </ul>
 </li>
 </ul>
@@ -8321,8 +8322,9 @@ B2（用户泛型——死守单态化底线，不做）、B3（枚举 ADT——
 保持类型系统极简）、C11（<code>http.dialpkg</code> 独立包，下一批）。
 B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。</p>
 <h3 id="3710-c11-第一包已落地httpdialpkghttp11--tls-13--http2">37.10 C11 第一包已落地：<code>http.dialpkg</code>（HTTP/1.1 + TLS 1.3 + HTTP/2）</h3>
-<p>§37.5 定了「常用库走独立包、不进标准库包」，并按领域拆包：<strong>本轮只落地 <code>http</code> 包</strong>。
-正则 / JSON / 摘要 / Base64 各自成包（<code>text</code> / <code>json</code> / <code>crypto</code>），后续批次逐个补。</p>
+<p>§37.5 定了「常用库走独立包、不进标准库包」，并按领域拆包。本节记录<strong>第一个包</strong>
+<code>http</code> 的完整决策；同批补齐的 <code>text</code> / <code>json</code> / <code>crypto</code> 三包见 §37.11。
+四包共用同一套 FFI 约定、三平台构建口径与 <code>.dialpkg</code> 分发方式。</p>
 <table>
 <thead>
 <tr>
@@ -8395,7 +8397,58 @@ SHA256 自检）、<code>import "http"</code> 编译运行、本地 HTTP 服务�
 只控制请求头序与 User-Agent 这类兼容参数（与只认浏览器客户端的 API 互通），
 <strong>不做以「绕过服务器限制 / 欺骗识别」为目标的绕检测逻辑</strong>——这是有意的领域边界。</p>
 <p><strong>后续（尚未落地，不许当已支持）</strong>：HTTP/3.0（QUIC，独立 <code>http3.dialpkg</code> +
-vendor ngtcp2/nghttp3）、其余三个包（<code>text</code> 正则 / <code>json</code> / <code>crypto</code> 摘要）。</p></main></div>
+vendor ngtcp2/nghttp3）。<code>text</code> / <code>json</code> / <code>crypto</code> 三包已落地，见 §37.11。</p>
+<h3 id="3711-c11-其余三包已落地text--json--crypto">37.11 C11 其余三包已落地：<code>text</code> / <code>json</code> / <code>crypto</code></h3>
+<p>§37.5 把正则 / JSON / 摘要 / Base64 拆成独立包，<code>http</code> 之外这三包同批补齐。
+三包都是 <code>version = 1.0.0</code> / <code>abi = 6</code>，三平台静态库由 <code>zig cc</code> 交叉编译、
+零警告零错误；CI 阶段 8 与 <code>stdlib.dialpkg</code> 同一口径，把包版本跟随编译器版本。
+回归分别是 <strong>X / Y / Z 组</strong>（全量 A→Z 二十六组 <code>EXIT=0</code>）。</p>
+<table>
+<thead>
+<tr>
+<th>包</th>
+<th>实现路线</th>
+<th>关键决策与边界</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>text.dialpkg</code></td>
+<td><strong>自研 Thompson NFA + Pike VM</strong>（<code>packages/text/src/dial_regex.c</code>），零第三方依赖</td>
+<td>线性时间，从根上避开回溯爆炸。支持字面量 / <code>.</code> / 字符类 / <code>\d \w \s</code> 等 / <code>* + ?</code> / 分支 <code>\|</code> / 捕获组 / <code>^ $ \b</code>；<strong>不做</strong>后向引用、lookaround、懒惰量词、<code>{m,n}</code>、Unicode 属性类。按字节匹配，捕获组最多 9 个。<code>Regex</code> 句柄缓存最近一次匹配结果，<strong>不要跨线程共享</strong>同一句柄的 <code>find/is_match</code> 与 <code>group</code>。已知语义差异 <code>(a*)*b</code> 组 1 取 <code>"aaa"</code>（见 <code>text.diali</code>）</td>
+</tr>
+<tr>
+<td><code>json.dialpkg</code></td>
+<td><strong>自研递归下降解析 + 紧凑序列化</strong>（<code>packages/json/src/dial_json_codec.c</code>），零第三方依赖</td>
+<td><code>.diali</code> 无泛型容器，值树封在 <code>type Json;</code>。<strong>所有权唯一规则</strong>：返回 <code>Json</code> 的函数都给独立拥有的句柄，一律 <code>dial_json_free</code>；<code>array_push</code> / <code>object_set</code> 深拷贝 <code>child</code>。严格模式拒尾随逗号 / 多余根值 / 非法 <code>\u</code> / 孤立代理项并给字节偏移，深度上限 64，拒绝 <code>\u0000</code>；整数走 <code>int64_t</code>（&gt;2^53 不丢精度），浮点走 <code>double</code></td>
+</tr>
+<tr>
+<td><code>crypto.dialpkg</code></td>
+<td><strong>复用 vendor mbedTLS 3.6.2</strong>，只做 FFI 包装</td>
+<td>五种摘要走 <code>mbedtls_md()</code>、HMAC-SHA256 走 <code>mbedtls_md_hmac()</code>、Base64 走 <code>mbedtls_base64_*()</code>——<strong>密码学绝不手搓</strong>。MD5 / SHA-1 明确标注仅用于校验与兼容。<code>string</code> / <code>bytes</code> 双入口，<code>dial_crypto_digest</code> 返回原始摘要字节。失败返回空值 + 线程局部错误码；<code>bytes</code> 类返回长度 0 的空缓冲而非 NULL（<code>is_null</code> 不适用于 <code>Type::Bytes</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>三包共同的 FFI 约定</strong>（与 <code>http</code> 包一致，写进各包 <code>src/*.h</code> 注释）：</p>
+<ol>
+<li><code>string</code> / <code>bytes</code> 跨到 C 都是 <strong><code>DialString</code> 句柄</strong>（内存布局相同：
+   <code>[int64 len][data...]</code>），取数据用 <code>dial_string_cstr()</code> + <code>dial_string_length()</code>，
+   <strong>长度优先于 NUL</strong>——<code>bytes</code> 允许内嵌 <code>\0</code>；把句柄当 <code>const char *</code> 会读到
+   前导长度字段。</li>
+<li>返回 <code>string</code> 必须构造 <code>dial_string_new()</code> / <code>dial_string_from_bytes()</code>，
+   返回 <code>bytes</code> 必须构造 <code>dial_bytes_new()</code>，<strong>绝不返回裸 <code>const char *</code></strong>。</li>
+<li><code>.diali</code> 的 <code>extern fn</code> 必须<strong>单行写完整</strong>：解析器 <code>parse_diali</code> 逐行解析，
+   跨行声明会让末尾逗号被 <code>rsplit_once(':')</code> 误认成返回类型（HTTP/2 阶段踩过）。</li>
+<li>不透明句柄（<code>Regex</code> / <code>Json</code>）<strong>不进 ARC</strong>，必须显式 free；包不抛 Dial 异常，
+   错误走返回码 + 线程局部错误槽。</li>
+</ol>
+<p><strong>为什么 <code>crypto</code> 把 mbedTLS 全量归档</strong>：本仓库 <code>mbedtls_config.h</code> 打开了
+<code>MBEDTLS_PSA_CRYPTO_C</code> 与 <code>MBEDTLS_RIPEMD160_C</code>，<code>md.c</code> 会引用 <code>psa_*</code> /
+<code>ripemd160</code> 符号，只编摘要子集会在链接期缺符号。静态库由链接器<strong>按需抽取</strong>，
+全量归档只让 <code>.dialpkg</code> 体积略增（约 6 MB），不会让用户可执行文件变大。</p>
+<p><strong>能力边界（不许当已支持）</strong>：<code>text</code> 的正则子集、<code>json</code> 的 <code>\u0000</code> 拒绝、
+<code>crypto</code> 只提供摘要 / Base64 / HMAC（<strong>没有对称加密、非对称加密、签名、
+密钥派生、随机数</strong>）——都在各自 <code>.diali</code> 里逐条写明。HTTP/3.0 / QUIC 仍未落地。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

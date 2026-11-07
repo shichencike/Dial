@@ -1,0 +1,66 @@
+// text.dialpkg —— 正则表达式（Dial 语言接口签名）
+//
+// 本文件是**唯一**的对外契约：包内机器码的实现可以变，但这里的签名一变，
+// 依赖它的程序就得重编。签名文件带 SHA256 校验，被篡改会在链接期被拦下。
+//
+// 设计立场（详见 packages/text/src/dial_regex.h 的注释）：
+//   - 自研 Thompson NFA：三平台都要能跑，POSIX regex 在 Windows MinGW 不存在，
+//     vendor PCRE2 又会拖进「不引入无用依赖」与离线可复现；Pike VM 线性时间，
+//     不会在 (a+)+b 这类输入上指数爆炸。
+//   - 按**字节**匹配（与 Dial 的 UTF-8 字节串一致），不做 Unicode 归一化；
+//     中文等多字节字面量逐字节比较，行为可预期。
+//   - 错误走返回码 + 线程局部错误槽，不抛 Dial 异常（包不假定宿主装了异常栈）。
+//
+// 语法子集：字面量、. 、[abc] [a-z] [^...]、\d \D \w \W \s \S、元字符转义、
+//   量词 * + ?（贪婪）、分支 |、分组 (...) / (?:...)、锚 ^ $ 与 \b 词边界。
+//   捕获组最多 9 个（组 0 为整体匹配）。
+// **明确不做**：后向引用、lookaround、懒惰量词 *?、{m,n} 区间量词、
+//   Unicode 属性 / 码点类。这些是 Thompson NFA 的能力边界，不是「待实现」。
+//
+// 已知语义边界（如实标注，不与 PCRE 假装一致）：
+//   1. 嵌套量词如 (a*)*b：PCRE/Python 会再做一次空迭代把组 1 覆盖成空串，
+//      本引擎的线程去重不允许空迭代重入同一状态，取最后一次**非空**迭代。
+//   2. 搜索从每个候选起点重跑一次 VM，最坏 O(n²·m)；对配置 / 日志行这类
+//      短文本足够，长文本（MB 级）不建议用它做全文扫描。
+//   3. Regex 句柄缓存「最近一次匹配结果」：find/is_match 与 group/match_end
+//      不是原子序列；多线程请各自编译自己的句柄，不要共享同一个 Regex。
+
+/// 已编译的正则句柄（不透明）。用完必须显式 dial_text_regex_free 释放——不透明句柄不进 ARC。
+type Regex;
+
+/// 编译正则。语法非法返回空句柄（用 is_null 判断），原因见 dial_text_last_error_msg。
+extern fn dial_text_regex_compile(pattern: string): Regex;
+
+/// 释放句柄。返回 0 成功。
+extern fn dial_text_regex_free(r: Regex): int;
+
+/// text 中是否存在匹配（并缓存最近一次匹配结果）。
+extern fn dial_text_regex_is_match(r: Regex, text: string): bool;
+
+/// 返回最左匹配的起始**字节偏移**；未命中返回 -1（不是错误）。
+extern fn dial_text_regex_find(r: Regex, text: string): int;
+
+/// 最近一次匹配的结束字节偏移（不含）；无匹配返回 -1。
+extern fn dial_text_regex_match_end(r: Regex): int;
+
+/// 捕获组个数（不含组 0）。
+extern fn dial_text_regex_group_count(r: Regex): int;
+
+/// 取第 index 个捕获组的文本：0 = 整体匹配，1..N = 各分组。
+/// 需传入与 find/is_match 相同的 text（句柄只存偏移，不复制文本）。
+/// 越界或未参与匹配返回空串。
+extern fn dial_text_regex_group(r: Regex, text: string, index: int): string;
+
+/// 全局替换所有匹配。replacement 中 $0..$9 展开为对应捕获组、$$ 为字面 '$'。
+/// 零宽匹配会自动前进一个字节，不会死循环。返回新字符串，原串不变。
+extern fn dial_text_regex_replace_all(r: Regex, text: string, replacement: string): string;
+
+/// 只判断正则语法是否合法（不返回句柄）。非法时错误槽会带上原因。
+extern fn dial_text_regex_is_valid(pattern: string): bool;
+
+/// 最近一次错误的码（0 表示无错误）。
+///   -1 编译失败 / -2 空句柄或尚无匹配 / -3 序号越界 / -4 内存不足。
+extern fn dial_text_last_error(): int;
+
+/// 最近一次错误的人话描述（中文，线程局部）。
+extern fn dial_text_last_error_msg(): string;

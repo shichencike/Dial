@@ -1,0 +1,15 @@
+name = "crypto"
+version = "1.0.0"
+# abi 是「编译此包所依据的标准库 ABI」（STDLIB_ABI=6），不是 crypto 包自己的
+# 版本号；crypto.diali 契约变更由 .diali 的 SHA256 校验保证，故 abi 保持 6。
+abi = 6
+iface = "crypto.diali"
+license = "MIT OR Apache-2.0"
+
+# 键名必须与编译器 package::host_triple() 的取值**逐字一致**
+# （x86_64-linux-gnu / aarch64-unknown-linux-musl / x86_64-pc-windows-gnu），
+# 否则用户装上包后，编译器按 host_triple() 选不到机器码。
+[targets]
+x86_64-linux-gnu = "lib/x86_64-linux-gnu/libcrypto.a"
+aarch64-unknown-linux-musl = "lib/aarch64-unknown-linux-musl/libcrypto.a"
+x86_64-pc-windows-gnu = "lib/x86_64-pc-windows-gnu/libcrypto.a"

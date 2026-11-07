@@ -243,6 +243,69 @@
   B7（文件级 `const` 只读常量、禁 `var` 全局）与 B8（结构体显式默认值、
   未声明默认值仍报错）的精确语义先于实现写清；C11 常用库确立为**独立 `.dialpkg`**。
 
+- **C11 独立包补齐余下三包（`[v1.04]` 后续增补；编译器版本 `1.4.0` /
+  `STDLIB_ABI 6` 均不变，三包各自 `version = 1.0.0`、`abi = 6`）**：
+  §37.5 裁决「正则 / JSON / 摘要 / Base64 不进标准库、各自成包」后 `http` 包
+  先落地；本批把 `text` / `json` / `crypto` 一次性补齐，并接入 X / Y / Z 三组
+  回归。四包共用同一套 FFI 约定（`string` / `bytes` 跨到 C 都是 `DialString`
+  句柄，须用 `dial_string_cstr()` / `dial_string_length()` 取数据，返回用
+  `dial_string_new()` / `dial_bytes_new()` 构造句柄），三平台静态库均由
+  `zig cc` 交叉编译、零警告零错误。包内机器码的契约边界由各自 `.diali` 的
+  SHA256 校验保证；`abi = 6` 表示「编译此包所依据的标准库 ABI」，不是包版本。
+  - **`text.dialpkg`（自研 Thompson NFA 正则，零第三方依赖）**：
+    `packages/text/src/dial_regex.c` 把正则编译成 NFA 指令、由 Pike VM 执行，
+    **线性时间**，从根上避开 `(a+)+b` 这类回溯爆炸。支持字面量 / `.` /
+    字符类（含取反与区间）/ `\d \D \w \W \s \S` / 贪婪 `* + ?` / 分支 `|` /
+    捕获组与非捕获组 / `^ $ \b`；**明确不做**后向引用、lookaround、懒惰量词、
+    `{m,n}`、Unicode 属性类——能力边界写进 `text.diali`，不许当已支持。
+    按字节匹配，与 Dial UTF-8 字节串一致；捕获组最多 9 个，指令 / 线程上限
+    各 2048。两处已知语义边界同样写进契约：`(a*)*b` 上本引擎取最后一次
+    非空迭代 `"aaa"`（PCRE / Python 会再跑一次空迭代把组 1 覆盖成空串，
+    本引擎 `seen` 去重不允许空迭代重入同状态）；搜索从每个候选起点重跑 VM，
+    最坏 `O(n²·m)`，定位为短文本 / 配置 / 日志行，不建议 MB 级全文扫描。
+    独立 C harness 25 例全绿、线性时间用例 0.0033s；X 组 41 项断言零 `= bad`。
+  - **`json.dialpkg`（自研递归下降解析 + 紧凑序列化，零第三方依赖）**：
+    `.diali` 类型白名单只有裸 `map`（int→int），没有泛型容器，故整棵值树封在
+    `type Json;` 不透明句柄里。**所有权只有一条规则**：所有返回 `Json` 的函数
+    都返回独立拥有的句柄，调用方一律 `dial_json_free`；`array_push` /
+    `object_set` 对 `child` 深拷贝，不存在借用句柄 / 双重释放的灰色地带。
+    严格模式把尾随逗号、多余根值、未转义控制字符、非法 `\u`、孤立代理项
+    一律报错并给字节偏移；嵌套深度上限 64；**明确拒绝 `\u0000`**（会编码成
+    内嵌 NUL，被 C 字符串静默截断，Fail-Fast 不假装成功）。数字分两路：
+    整数走 `int64_t` 单独保存，`9007199254740993`（2^53+1）不丢精度；
+    浮点走 `double`。独立 C harness 35 例 + 2 专项（70 层嵌套拒绝、
+    `js_clone()` 独立性）全绿；Y 组 45 项断言零 `= bad`。
+  - **`crypto.dialpkg`（复用 vendor mbedTLS 3.6.2，密码学绝不手搓）**：
+    `packages/crypto/src/dial_crypto.c` 只做 FFI 包装——五种摘要
+    （MD5 / SHA-1 / SHA-256 / SHA-512 / SHA3-256）走 `mbedtls_md()`、
+    HMAC-SHA256 走 `mbedtls_md_hmac()`、Base64 走
+    `mbedtls_base64_encode/decode()`，**不自己拼 ipad/opad，不自己实现摘要**。
+    每个算法给 `string` 与 `bytes` 两套入口（后者可含内嵌 NUL / 非法 UTF-8），
+    另有按算法名返回原始摘要字节的 `dial_crypto_digest`。MD5 / SHA-1 在契约里
+    **明确标注仅用于校验与兼容、不可用于新的安全设计**。失败一律返回空值
+    并置线程局部错误码：`string` 类返回空串，`bytes` 类返回长度 0 的空缓冲
+    ——因为 Dial 的 `is_null` 准入名单不含 `Type::Bytes`，返回 NULL 句柄会让
+    语言层无法判别且 NULL 进入 ARC 有隐患。`build.sh` 把 mbedTLS **全量归档**
+    （`md.c` 因 `MBEDTLS_PSA_CRYPTO_C` / `MBEDTLS_RIPEMD160_C` 已启用会引用
+    psa / ripemd160 符号，只编摘要子集会在链接期缺符号）；静态库按需抽取，
+    最终可执行文件不因此变大。独立 C harness 35 例（NIST / RFC 标准向量、
+    含内嵌 NUL 的二进制、1 MiB 长输入）全绿，并顺带验证归档的链接符号闭包；
+    Z 组 29 项断言零 `= bad`。
+  - **实测**：全量回归 A→Z 二十六组 `EXIT=0`；三包三平台静态库
+    （linux-gnu / musl / windows-gnu）均零警告零错误；CI 阶段 8 改为四包统一
+    构建 / 打包，Release 资产新增三包。
+
+- **官网更新日志改为「版本索引 + 每版本分页」（`[v1.04]` 后续增补，
+  `CHANGELOG.md` 原文一字不改）**：`changelog.html` 单文件已达 213 KB，移动端
+  首屏渲染与旧版本定位成本高，且重复锚点靠 `_1` 后缀区分、版本一多更难维护。
+  改的是生成器 `tools/build_web.py`，**不是手拆产物**：`web/changelog.html`
+  只放 31 行版本索引（213 KB → 6.1 KB），`web/changelog/` 下每版本一页存
+  对应条目的原文渲染，另出 `overview.html`（版本规则）/ `index.json`（搜索与
+  newer / older 导航）。生成器内置两道自检：分段拼接结果与 `CHANGELOG.md`
+  逐字节相等、生成页数 == 段数 + 1；二次生成逐字节一致（满足 CI 的
+  `git diff --exit-code -- web/`）。正文纯文本旧 / 新逐字符相等（75,397 字符），
+  重复锚点后缀 73 → 1。**记录粒度不变，只改变组织方式**。
+
 ### Changed
 
 - **所有 Dial 函数的 LLVM 签名统一为 C ABI 宽度**：`bool` 内部 i1 → 边界 i32（C 默认整型提升），

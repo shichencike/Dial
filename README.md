@@ -5155,8 +5155,9 @@ B5（函数名重载）与 B4（闭包）维持**永久否决**。
 
 ### 37.10 C11 第一包已落地：`http.dialpkg`（HTTP/1.1 + TLS 1.3 + HTTP/2）
 
-§37.5 定了「常用库走独立包、不进标准库包」，并按领域拆包：**本轮只落地 `http` 包**。
-正则 / JSON / 摘要 / Base64 各自成包（`text` / `json` / `crypto`），后续批次逐个补。
+§37.5 定了「常用库走独立包、不进标准库包」，并按领域拆包。本节记录**第一个包**
+`http` 的完整决策；同批补齐的 `text` / `json` / `crypto` 三包见 §37.11。
+四包共用同一套 FFI 约定、三平台构建口径与 `.dialpkg` 分发方式。
 
 | 决策 | 落地方式 |
 | --- | --- |
@@ -5206,4 +5207,39 @@ SHA256 自检）、`import "http"` 编译运行、本地 HTTP 服务器端到端
 **不做以「绕过服务器限制 / 欺骗识别」为目标的绕检测逻辑**——这是有意的领域边界。
 
 **后续（尚未落地，不许当已支持）**：HTTP/3.0（QUIC，独立 `http3.dialpkg` +
-vendor ngtcp2/nghttp3）、其余三个包（`text` 正则 / `json` / `crypto` 摘要）。
+vendor ngtcp2/nghttp3）。`text` / `json` / `crypto` 三包已落地，见 §37.11。
+
+### 37.11 C11 其余三包已落地：`text` / `json` / `crypto`
+
+§37.5 把正则 / JSON / 摘要 / Base64 拆成独立包，`http` 之外这三包同批补齐。
+三包都是 `version = 1.0.0` / `abi = 6`，三平台静态库由 `zig cc` 交叉编译、
+零警告零错误；CI 阶段 8 与 `stdlib.dialpkg` 同一口径，把包版本跟随编译器版本。
+回归分别是 **X / Y / Z 组**（全量 A→Z 二十六组 `EXIT=0`）。
+
+| 包 | 实现路线 | 关键决策与边界 |
+| --- | --- | --- |
+| `text.dialpkg` | **自研 Thompson NFA + Pike VM**（`packages/text/src/dial_regex.c`），零第三方依赖 | 线性时间，从根上避开回溯爆炸。支持字面量 / `.` / 字符类 / `\d \w \s` 等 / `* + ?` / 分支 `\|` / 捕获组 / `^ $ \b`；**不做**后向引用、lookaround、懒惰量词、`{m,n}`、Unicode 属性类。按字节匹配，捕获组最多 9 个。`Regex` 句柄缓存最近一次匹配结果，**不要跨线程共享**同一句柄的 `find/is_match` 与 `group`。已知语义差异 `(a*)*b` 组 1 取 `"aaa"`（见 `text.diali`） |
+| `json.dialpkg` | **自研递归下降解析 + 紧凑序列化**（`packages/json/src/dial_json_codec.c`），零第三方依赖 | `.diali` 无泛型容器，值树封在 `type Json;`。**所有权唯一规则**：返回 `Json` 的函数都给独立拥有的句柄，一律 `dial_json_free`；`array_push` / `object_set` 深拷贝 `child`。严格模式拒尾随逗号 / 多余根值 / 非法 `\u` / 孤立代理项并给字节偏移，深度上限 64，拒绝 `\u0000`；整数走 `int64_t`（>2^53 不丢精度），浮点走 `double` |
+| `crypto.dialpkg` | **复用 vendor mbedTLS 3.6.2**，只做 FFI 包装 | 五种摘要走 `mbedtls_md()`、HMAC-SHA256 走 `mbedtls_md_hmac()`、Base64 走 `mbedtls_base64_*()`——**密码学绝不手搓**。MD5 / SHA-1 明确标注仅用于校验与兼容。`string` / `bytes` 双入口，`dial_crypto_digest` 返回原始摘要字节。失败返回空值 + 线程局部错误码；`bytes` 类返回长度 0 的空缓冲而非 NULL（`is_null` 不适用于 `Type::Bytes`） |
+
+**三包共同的 FFI 约定**（与 `http` 包一致，写进各包 `src/*.h` 注释）：
+
+1. `string` / `bytes` 跨到 C 都是 **`DialString` 句柄**（内存布局相同：
+   `[int64 len][data...]`），取数据用 `dial_string_cstr()` + `dial_string_length()`，
+   **长度优先于 NUL**——`bytes` 允许内嵌 `\0`；把句柄当 `const char *` 会读到
+   前导长度字段。
+2. 返回 `string` 必须构造 `dial_string_new()` / `dial_string_from_bytes()`，
+   返回 `bytes` 必须构造 `dial_bytes_new()`，**绝不返回裸 `const char *`**。
+3. `.diali` 的 `extern fn` 必须**单行写完整**：解析器 `parse_diali` 逐行解析，
+   跨行声明会让末尾逗号被 `rsplit_once(':')` 误认成返回类型（HTTP/2 阶段踩过）。
+4. 不透明句柄（`Regex` / `Json`）**不进 ARC**，必须显式 free；包不抛 Dial 异常，
+   错误走返回码 + 线程局部错误槽。
+
+**为什么 `crypto` 把 mbedTLS 全量归档**：本仓库 `mbedtls_config.h` 打开了
+`MBEDTLS_PSA_CRYPTO_C` 与 `MBEDTLS_RIPEMD160_C`，`md.c` 会引用 `psa_*` /
+`ripemd160` 符号，只编摘要子集会在链接期缺符号。静态库由链接器**按需抽取**，
+全量归档只让 `.dialpkg` 体积略增（约 6 MB），不会让用户可执行文件变大。
+
+**能力边界（不许当已支持）**：`text` 的正则子集、`json` 的 `\u0000` 拒绝、
+`crypto` 只提供摘要 / Base64 / HMAC（**没有对称加密、非对称加密、签名、
+密钥派生、随机数**）——都在各自 `.diali` 里逐条写明。HTTP/3.0 / QUIC 仍未落地。

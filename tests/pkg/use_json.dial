@@ -1,0 +1,145 @@
+// json.dialpkg 端到端用例：解析 / 类型与访问 / 构造与深拷贝 / 大整数精度 / 严格错误路径。
+//
+// 输出全部是结构化 `name = ok`（失败为 `= bad ...`），断言交给 run_tests.sh 的 grep。
+// 注意 Dial 字符串对未知转义**原样保留**，所以 "\u4e2d" 传给 C 就是 JSON 的 \u4e2d，
+// 不需要写成 "\\u4e2d"；JSON 文本里的双引号用 \" 转义即可。
+import "json";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) {
+        print(name + " = ok");
+    } else {
+        print(name + " = bad");
+    }
+}
+
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) {
+        print(name + " = ok");
+    } else {
+        print(name + " = bad " + str(actual));
+    }
+}
+
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) {
+        print(name + " = ok");
+    } else {
+        print(name + " = bad [" + actual + "]");
+    }
+}
+
+fn main(): int {
+    // ---- 1) 解析 + 类型查询 + 容器访问 ----
+    var src: string = "{\"name\":\"dial\",\"n\":42,\"ok\":true,\"arr\":[1,2,3]}";
+    var root: Json = dial_json_parse(src);
+    expect(!is_null(root), "parse_ok");
+    expect_str(dial_json_type(root), "object", "root_type");
+    expect(dial_json_is_object(root), "root_is_object");
+    expect_int(dial_json_len(root), 4, "root_len");
+    expect_str(dial_json_key(root, 0), "name", "key0");
+
+    var name: Json = dial_json_get(root, "name");
+    expect(!is_null(name), "get_name");
+    expect_str(dial_json_type(name), "string", "name_type");
+    expect_str(dial_json_string(name), "dial", "name_value");
+    dial_json_free(name);
+
+    var n: Json = dial_json_get(root, "n");
+    expect(dial_json_is_number(n), "n_is_number");
+    expect_int(dial_json_int(n), 42, "n_value");
+    dial_json_free(n);
+
+    var ok: Json = dial_json_get(root, "ok");
+    expect(dial_json_is_bool(ok), "ok_is_bool");
+    if (dial_json_bool(ok)) { print("ok_value = ok"); } else { print("ok_value = bad"); }
+    dial_json_free(ok);
+
+    var arr: Json = dial_json_get(root, "arr");
+    expect(dial_json_is_array(arr), "arr_is_array");
+    expect_int(dial_json_len(arr), 3, "arr_len");
+    var a1: Json = dial_json_item(arr, 1);
+    expect_int(dial_json_int(a1), 2, "arr_item1");
+    dial_json_free(a1);
+    dial_json_free(arr);
+
+    expect_str(dial_json_stringify(root), src, "stringify_root");
+    dial_json_free(root);
+
+    // ---- 2) 构造：object_set / array_push 深拷贝 ----
+    var obj: Json = dial_json_new_object();
+    var k1: Json = dial_json_new_int(7);
+    expect_int(dial_json_object_set(obj, "x", k1), 0, "obj_set");
+    dial_json_free(k1);
+
+    var ar: Json = dial_json_new_array();
+    var e1: Json = dial_json_new_string("a");
+    var e2: Json = dial_json_new_bool(true);
+    expect_int(dial_json_array_push(ar, e1), 0, "arr_push1");
+    expect_int(dial_json_array_push(ar, e2), 0, "arr_push2");
+    dial_json_free(e1);
+    dial_json_free(e2);
+    expect_int(dial_json_object_set(obj, "list", ar), 0, "obj_set_arr");
+    dial_json_free(ar);
+    expect_str(dial_json_stringify(obj), "{\"x\":7,\"list\":[\"a\",true]}", "build_stringify");
+    dial_json_free(obj);
+
+    // 深拷贝生效：child 先释放，父树仍完整
+    var cv: Json = dial_json_new_int(99);
+    var holder: Json = dial_json_new_object();
+    dial_json_object_set(holder, "v", cv);
+    dial_json_free(cv);
+    var hv: Json = dial_json_get(holder, "v");
+    expect_int(dial_json_int(hv), 99, "deepcopy_survives");
+    dial_json_free(hv);
+    dial_json_free(holder);
+
+    // ---- 3) 数字精度 / Unicode 转义 / 代理对 emoji ----
+    var big: Json = dial_json_parse("9007199254740993");
+    expect_int(dial_json_int(big), 9007199254740993, "big_int");
+    expect_str(dial_json_stringify(big), "9007199254740993", "big_roundtrip");
+    dial_json_free(big);
+
+    var f: Json = dial_json_parse("1.5");
+    expect(dial_json_is_number(f), "float_is_number");
+    expect_str(dial_json_stringify(f), "1.5", "float_roundtrip");
+    dial_json_free(f);
+
+    var uni: Json = dial_json_parse("\"\u4e2d\u6587\"");
+    expect(!is_null(uni), "unicode_parse");
+    expect_str(dial_json_string(uni), "中文", "unicode_value");
+    expect_str(dial_json_stringify(uni), "\"中文\"", "unicode_roundtrip");
+    dial_json_free(uni);
+
+    var emo: Json = dial_json_parse("\"\ud83d\ude00\"");
+    expect(!is_null(emo), "emoji_parse");
+    expect_str(dial_json_stringify(emo), "\"😀\"", "emoji_roundtrip");
+    dial_json_free(emo);
+
+    // ---- 4) 严格模式：坏数据一律拒绝（Fail-Fast）----
+    expect(is_null(dial_json_parse("[1,]")), "trailing_comma_rejected");
+    expect_int(dial_json_last_error(), -1, "trailing_err");
+    expect(dial_json_last_error_msg() != "", "trailing_msg");
+
+    expect(is_null(dial_json_parse("1 2")), "extra_root_rejected");
+    expect(is_null(dial_json_parse("\"\u0000\"")), "nul_escape_rejected");
+    expect(is_null(dial_json_parse("\"\\uZZZZ\"")), "bad_hex_rejected");
+    expect(is_null(dial_json_parse("{\"a\":1,}")), "obj_trailing_rejected");
+
+    // ---- 5) 访问错误：键不存在 / 下标越界 / 类型不符 ----
+    var r2: Json = dial_json_parse("{\"a\":1}");
+    expect(is_null(dial_json_get(r2, "zzz")), "get_miss");
+    expect_int(dial_json_last_error(), -3, "get_miss_err");
+    expect(is_null(dial_json_item(r2, 0)), "item_not_array");
+    expect_int(dial_json_last_error(), -3, "item_not_array_err");
+
+    var sv: Json = dial_json_new_string("x");
+    expect_int(dial_json_int(sv), 0, "type_mismatch_val");
+    expect_int(dial_json_last_error(), -2, "type_mismatch_err");
+    expect_int(dial_json_len(sv), -1, "len_on_scalar");
+    dial_json_free(sv);
+    dial_json_free(r2);
+
+    print("json_done = true");
+    return 0;
+}

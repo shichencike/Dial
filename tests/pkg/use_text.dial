@@ -1,0 +1,124 @@
+// text.dialpkg 端到端用例：自研 Thompson NFA 的语法子集 / 捕获组 / 替换 / 错误路径。
+//
+// 输出全部是结构化 `name = value`，断言交给 run_tests.sh 的 grep（与 W 组同风格）。
+// 注意：Dial 字符串对未知转义**原样保留**，所以 "\d+" 传给 C 就是正则的 \d+，
+// 不需要写成 "\\d+"；只有 \n \t \\ \" 四种会被真正转义。
+import "text";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) {
+        print(name + " = ok");
+    } else {
+        print(name + " = bad");
+    }
+}
+
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) {
+        print(name + " = ok");
+    } else {
+        print(name + " = bad " + str(actual));
+    }
+}
+
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) {
+        print(name + " = ok");
+    } else {
+        print(name + " = bad [" + actual + "]");
+    }
+}
+
+fn main(): int {
+    // ---- 1) 字面量 / 最左匹配 / 整体区间 ----
+    var r: Regex = dial_text_regex_compile("abc");
+    expect(!is_null(r), "compile_ok");
+    expect(dial_text_regex_is_match(r, "xxabcyy"), "abc_hit");
+    expect(!dial_text_regex_is_match(r, "xxabyy"), "abc_nohit");
+    expect_int(dial_text_regex_find(r, "xxabcyy"), 2, "abc_find");
+    expect_int(dial_text_regex_match_end(r), 5, "abc_end");
+    expect_str(dial_text_regex_group(r, "xxabcyy", 0), "abc", "abc_group0");
+    expect_int(dial_text_regex_group_count(r), 0, "abc_groupcount");
+    expect_int(dial_text_regex_free(r), 0, "abc_free");
+
+    // ---- 2) 捕获组 ----
+    var g: Regex = dial_text_regex_compile("(ab)(cd)");
+    expect(!is_null(g), "group_compile_ok");
+    expect(dial_text_regex_is_match(g, "xxabcd"), "group_hit");
+    expect_int(dial_text_regex_group_count(g), 2, "group_count");
+    expect_str(dial_text_regex_group(g, "xxabcd", 0), "abcd", "group0");
+    expect_str(dial_text_regex_group(g, "xxabcd", 1), "ab", "group1");
+    expect_str(dial_text_regex_group(g, "xxabcd", 2), "cd", "group2");
+    dial_text_regex_free(g);
+
+    // ---- 3) 预定义类 / 贪婪量词 ----
+    var d: Regex = dial_text_regex_compile("\d+");
+    expect_int(dial_text_regex_find(d, "a123b"), 1, "digit_find");
+    expect_str(dial_text_regex_group(d, "a123b", 0), "123", "digit_group0");
+    dial_text_regex_free(d);
+
+    var p: Regex = dial_text_regex_compile("a+");
+    expect_int(dial_text_regex_find(p, "caaab"), 1, "plus_find");
+    expect_int(dial_text_regex_match_end(p), 4, "plus_end");
+    expect_str(dial_text_regex_group(p, "caaab", 0), "aaa", "plus_group0");
+    dial_text_regex_free(p);
+
+    // ---- 4) 可选 / 取反类 / 锚 / 词边界 / 非捕获组 ----
+    var o: Regex = dial_text_regex_compile("colou?r");
+    expect(dial_text_regex_is_match(o, "color"), "optional_color");
+    expect(dial_text_regex_is_match(o, "colour"), "optional_colour");
+    dial_text_regex_free(o);
+
+    var n: Regex = dial_text_regex_compile("[^0-9]+");
+    expect(dial_text_regex_is_match(n, "12ab34"), "negclass_hit");
+    expect_str(dial_text_regex_group(n, "12ab34", 0), "ab", "negclass_group0");
+    dial_text_regex_free(n);
+
+    var a: Regex = dial_text_regex_compile("^abc$");
+    expect(!dial_text_regex_is_match(a, "xabc"), "anchor_nohit");
+    expect(dial_text_regex_is_match(a, "abc"), "anchor_hit");
+    dial_text_regex_free(a);
+
+    var w: Regex = dial_text_regex_compile("\bword\b");
+    expect(dial_text_regex_is_match(w, "a word b"), "word_hit");
+    expect(!dial_text_regex_is_match(w, "sword"), "word_nohit");
+    dial_text_regex_free(w);
+
+    var nc: Regex = dial_text_regex_compile("(?:ab)+");
+    expect(dial_text_regex_is_match(nc, "ababx"), "noncapture_hit");
+    expect_str(dial_text_regex_group(nc, "ababx", 0), "abab", "noncapture_group0");
+    dial_text_regex_free(nc);
+
+    // ---- 5) 全局替换（$1 / $2 展开）----
+    var rp: Regex = dial_text_regex_compile("(\w+)@(\w+)");
+    expect_str(dial_text_regex_replace_all(rp, "ab@cd ef@gh", "$2:$1"),
+               "cd:ab gh:ef", "replace_all");
+    dial_text_regex_free(rp);
+
+    // ---- 6) 中文按字节匹配 / 空串锚 ----
+    var cn: Regex = dial_text_regex_compile("中文");
+    expect(dial_text_regex_is_match(cn, "这是中文测试"), "cn_hit");
+    expect_str(dial_text_regex_group(cn, "这是中文测试", 0), "中文", "cn_group0");
+    dial_text_regex_free(cn);
+
+    var e: Regex = dial_text_regex_compile("^$");
+    expect(dial_text_regex_is_match(e, ""), "empty_hit");
+    dial_text_regex_free(e);
+
+    // ---- 7) 错误路径：语法非法 / 空句柄 / 组序号越界 ----
+    expect(!dial_text_regex_is_valid("("), "invalid_paren");
+    var bad: Regex = dial_text_regex_compile("(");
+    expect(is_null(bad), "bad_compile_null");
+    expect_int(dial_text_last_error(), -1, "bad_err_code");
+    expect(dial_text_last_error_msg() != "", "bad_err_msg");
+    expect(dial_text_regex_is_valid("a+"), "valid_aplus");
+
+    var q: Regex = dial_text_regex_compile("(x)");
+    expect(dial_text_regex_is_match(q, "axb"), "oob_hit");
+    expect_str(dial_text_regex_group(q, "axb", 9), "", "oob_empty");
+    expect_int(dial_text_last_error(), -3, "oob_err_code");
+    dial_text_regex_free(q);
+
+    print("text_done = true");
+    return 0;
+}

@@ -1,0 +1,70 @@
+// crypto.dialpkg —— 摘要 / Base64 / HMAC（Dial 语言接口签名）
+//
+// 本文件是**唯一**的对外契约：包内机器码的实现可以变，但这里的签名一变，
+// 依赖它的程序就得重编。签名文件带 SHA256 校验，被篡改会在链接期被拦下。
+//
+// 密码学绝不手搓：所有算法直接复用仓库内 vendor 的 mbedTLS 3.6.2
+// （md.c / md5.c / sha1.c / sha256.c / sha512.c / sha3.c / base64.c）。
+// 本包只负责 FFI 边界：DialString/bytes 句柄 ↔ 裸字节缓冲、错误码与诊断。
+// 不实现任何加密原语，HMAC 也直接用 mbedtls_md_hmac，不自己拼填充块。
+//
+// 为什么同时给 string 和 bytes 两套入口：string 语义上是 UTF-8 文本，且
+// 以 C 字符串 NUL 为边界；bytes 可含任意字节（内嵌 \0、非法 UTF-8）。
+// 摘要与 Base64 的处理对象本质是字节流，二进制数据请用 *_bytes 版本。
+//
+// 摘要输出统一为**小写十六进制文本**；需要原始字节时用 dial_crypto_digest。
+// 失败一律返回**空值并置错误码**：string 类返回空串；bytes 类返回长度 0 的
+// 空缓冲（Dial 的 is_null 不适用于 bytes，故不返回 NULL 句柄，也避免 NULL
+// 进入 ARC）。用 dial_crypto_last_error() 区分「合法的空结果」与「失败」。
+// 绝不返回「看起来像成功」的半截结果（Fail-Fast 铁律）。
+
+// ---- 摘要：string 输入（按 UTF-8 字节计算）--------------------------------
+
+/// MD5 → 32 位小写 hex。仅用于校验与旧协议兼容，**不可用于安全场景**（已不抗碰撞）。
+extern fn dial_crypto_md5(s: string): string;
+/// SHA-1 → 40 位小写 hex。同样仅用于校验/兼容，不建议用于新的安全设计。
+extern fn dial_crypto_sha1(s: string): string;
+/// SHA-256 → 64 位小写 hex。
+extern fn dial_crypto_sha256(s: string): string;
+/// SHA-512 → 128 位小写 hex。
+extern fn dial_crypto_sha512(s: string): string;
+/// SHA3-256（Keccak，非 SHA-2 系）→ 64 位小写 hex。
+extern fn dial_crypto_sha3_256(s: string): string;
+
+// ---- 摘要：bytes 输入（任意二进制，可含 NUL）------------------------------
+
+extern fn dial_crypto_md5_bytes(b: bytes): string;
+extern fn dial_crypto_sha1_bytes(b: bytes): string;
+extern fn dial_crypto_sha256_bytes(b: bytes): string;
+extern fn dial_crypto_sha512_bytes(b: bytes): string;
+extern fn dial_crypto_sha3_256_bytes(b: bytes): string;
+
+// ---- 按算法名取原始摘要字节 ------------------------------------------------
+
+/// algo 取 "md5" / "sha1" / "sha256" / "sha512" / "sha3_256"。
+/// 返回**原始摘要字节**（如 sha256 为 32 字节），不是 hex 文本。
+/// 未知算法返回长度 0 的空 bytes 并置错误码 -1。
+extern fn dial_crypto_digest(algo: string, data: bytes): bytes;
+
+// ---- Base64（RFC 4648 标准字母表，带 = 补齐）------------------------------
+
+extern fn dial_crypto_base64_encode(s: string): string;
+extern fn dial_crypto_base64_encode_bytes(b: bytes): string;
+/// 解码结果按 bytes 返回（可能不是合法 UTF-8）。
+/// 输入含非法字符 / 多余 = 时返回长度 0 的空 bytes 并置错误码 -3。
+extern fn dial_crypto_base64_decode(s: string): bytes;
+
+// ---- HMAC-SHA256（小写 hex）-----------------------------------------------
+
+extern fn dial_crypto_hmac_sha256(key: string, msg: string): string;
+extern fn dial_crypto_hmac_sha256_bytes(key: bytes, msg: bytes): string;
+
+// ---- 错误诊断 --------------------------------------------------------------
+
+/// 最近一次错误的码（0 无错误）：
+///   -1 未知算法 / -2 空句柄 / -3 Base64 解码失败 / -4 内存不足 /
+///   -5 mbedTLS 内部错误。
+extern fn dial_crypto_last_error(): int;
+
+/// 最近一次错误的人话描述（中文，线程局部）。
+extern fn dial_crypto_last_error_msg(): string;

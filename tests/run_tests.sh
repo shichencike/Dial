@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 二十三组检查，全部通过才算绿（顺序为 A→W，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 二十六组检查，全部通过才算绿（顺序为 A→Z，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -43,6 +43,15 @@
 #      两层 API（高层 get-post + 低层流式）/ gzip 解压 / chunked / 错误路径 /
 #      TLS 1.3（证书校验 fail-closed + keep-alive 连接池）/
 #      HTTP/2（h2c 明文 + h2 ALPN、自研 HPACK、单连接真·并发多路复用）（v1.04 增补）。
+#   X. C11 独立包：text.dialpkg 端到端——自研 Thompson NFA 正则（语法子集 /
+#      捕获组 / $n 替换 / 错误路径），三平台零警告构建（v1.04 增补）。
+#   Y. C11 独立包：json.dialpkg 端到端——自研递归下降解析 + 紧凑序列化（严格模式 /
+#      独立拥有句柄 / 深拷贝构造 / 大整数精度 / \u 与代理对 / 错误码），三平台零警告构建
+#      （v1.04 增补）。
+#   Z. C11 独立包：crypto.dialpkg 端到端——复用 vendor mbedTLS 的五种摘要
+#      （MD5/SHA-1/SHA-256/SHA-512/SHA3-256，标准向量核对）+ Base64 编解码 +
+#      HMAC-SHA256，string 与 bytes 双入口、含内嵌 NUL 的二进制数据、严格错误路径，
+#      三平台零警告构建（v1.04 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -1529,6 +1538,163 @@ if [ -n "${H2C_PID:-}" ]; then kill "$H2C_PID" >/dev/null 2>&1 || true; fi
 if [ -n "${H2_PID:-}" ]; then kill "$H2_PID" >/dev/null 2>&1 || true; fi
 "$DIALC" uninstall http >/dev/null 2>&1 || true
 wpass "HTTP/2 子组清理完成（服务器已停、http 包已卸载）"
+
+# ---------------------------------------------------------------------------
+# X) C11 独立包：text.dialpkg（自研 Thompson NFA 正则，零第三方依赖）
+# ---------------------------------------------------------------------------
+echo "== X) C11 独立包：text.dialpkg 端到端（自研 Thompson NFA 正则，v1.04 增补） =="
+xpass() { echo "  ✅ $1"; }
+xbad()  { echo "  ❌ $1"; fail=1; }
+
+# 1) 构建三平台静态库（纯 C，无 vendor 依赖）。
+if bash packages/text/build.sh >"${TMP}/x_build.log" 2>&1; then
+    xpass "text 包三平台静态库构建完成（linux-gnu / musl / windows-gnu）"
+else xbad "text 包静态库构建失败"; tail -8 "${TMP}/x_build.log"; fi
+
+# 2) 零警告硬约束（与 http 包同口径）。
+if grep -qiE 'warning:|error:' "${TMP}/x_build.log"; then
+    xbad "text 包构建存在 warning / error"
+    grep -iE 'warning:|error:' "${TMP}/x_build.log" | head -8
+else xpass "text 包三平台构建零警告零错误"; fi
+
+# 3) 打包 + 安装（manifest / 逐文件 SHA256 自检）。
+"$DIALC" uninstall text >/dev/null 2>&1 || true
+if "$DIALC" pack packages/text -o "${TMP}/text.dialpkg" >"${TMP}/x_pack.log" 2>&1 \
+   && "$DIALC" install "${TMP}/text.dialpkg" >"${TMP}/x_install.log" 2>&1; then
+    xpass "text.dialpkg 打包 + 安装成功（manifest / SHA256 自检通过）"
+else xbad "text.dialpkg 打包或安装失败"; tail -8 "${TMP}/x_pack.log" "${TMP}/x_install.log"; fi
+
+# 4) 编译运行：42 项断言覆盖语法子集 / 捕获组 / 替换 / 错误路径。
+if "$DIALC" build tests/pkg/use_text.dial -o "${TMP}/use_text" >"${TMP}/x_comp.log" 2>&1; then
+    xpass "use_text.dial（import \"text\"）编译成功"
+    xout="$("${TMP}/use_text" 2>&1)"
+    xok=1
+    printf '%s\n' "$xout" | grep -qF 'text_done = true' || xok=0
+    for key in compile_ok group1 group2 digit_group0 plus_group0 optional_colour \
+               anchor_hit word_nohit noncapture_group0 replace_all cn_group0 \
+               bad_err_code oob_err_code; do
+        printf '%s\n' "$xout" | grep -qF "$key = ok" || xok=0
+    done
+    nbad="$(printf '%s\n' "$xout" | grep -c ' = bad' || true)"
+    nok="$(printf '%s\n' "$xout" | grep -c ' = ok$' || true)"
+    if [ "$xok" -eq 1 ] && [ "$nbad" -eq 0 ] && [ "$nok" -ge 40 ]; then
+        xpass "text 包端到端全通过（${nok} 项断言，零 = bad）"
+    else
+        xbad "text 包端到端断言失败（ok=${nok} bad=${nbad}）"
+        printf '%s\n' "$xout" | head -50
+    fi
+else xbad "use_text.dial 编译失败"; tail -8 "${TMP}/x_comp.log"; fi
+
+# 5) 清理：卸包（不污染后续测试与用户环境）。
+"$DIALC" uninstall text >/dev/null 2>&1 || true
+xpass "text 包已卸载"
+
+# ---------------------------------------------------------------------------
+# Y) C11 独立包：json.dialpkg（自研递归下降解析 + 紧凑序列化，零第三方依赖）
+# ---------------------------------------------------------------------------
+echo "== Y) C11 独立包：json.dialpkg 端到端（自研 JSON 解析/序列化，v1.04 增补） =="
+ypass() { echo "  ✅ $1"; }
+ybad()  { echo "  ❌ $1"; fail=1; }
+
+# 1) 构建三平台静态库（纯 C，无 vendor 依赖）。
+if bash packages/json/build.sh >"${TMP}/y_build.log" 2>&1; then
+    ypass "json 包三平台静态库构建完成（linux-gnu / musl / windows-gnu）"
+else ybad "json 包静态库构建失败"; tail -8 "${TMP}/y_build.log"; fi
+
+# 2) 零警告硬约束（与 text / http 包同口径）。
+if grep -qiE 'warning:|error:' "${TMP}/y_build.log"; then
+    ybad "json 包构建存在 warning / error"
+    grep -iE 'warning:|error:' "${TMP}/y_build.log" | head -8
+else ypass "json 包三平台构建零警告零错误"; fi
+
+# 3) 打包 + 安装（manifest / 逐文件 SHA256 自检）。
+"$DIALC" uninstall json >/dev/null 2>&1 || true
+if "$DIALC" pack packages/json -o "${TMP}/json.dialpkg" >"${TMP}/y_pack.log" 2>&1 \
+   && "$DIALC" install "${TMP}/json.dialpkg" >"${TMP}/y_install.log" 2>&1; then
+    ypass "json.dialpkg 打包 + 安装成功（manifest / SHA256 自检通过）"
+else ybad "json.dialpkg 打包或安装失败"; tail -8 "${TMP}/y_pack.log" "${TMP}/y_install.log"; fi
+
+# 4) 编译运行：45 项断言覆盖解析 / 类型与访问 / 构造与深拷贝 /
+#    大整数精度 / Unicode 与代理对 / 严格错误路径 / 错误码。
+if "$DIALC" build tests/pkg/use_json.dial -o "${TMP}/use_json" >"${TMP}/y_comp.log" 2>&1; then
+    ypass "use_json.dial（import \"json\"）编译成功"
+    yout="$("${TMP}/use_json" 2>&1)"
+    yok=1
+    printf '%s\n' "$yout" | grep -qF 'json_done = true' || yok=0
+    for key in parse_ok root_type root_len key0 name_value n_value ok_value arr_item1 \
+               stringify_root build_stringify deepcopy_survives big_int big_roundtrip \
+               unicode_value emoji_roundtrip trailing_comma_rejected nul_escape_rejected \
+               obj_trailing_rejected get_miss_err item_not_array_err type_mismatch_err \
+               len_on_scalar; do
+        printf '%s\n' "$yout" | grep -qF "$key = ok" || yok=0
+    done
+    ynbad="$(printf '%s\n' "$yout" | grep -c ' = bad' || true)"
+    ynok="$(printf '%s\n' "$yout" | grep -c ' = ok$' || true)"
+    if [ "$yok" -eq 1 ] && [ "$ynbad" -eq 0 ] && [ "$ynok" -ge 40 ]; then
+        ypass "json 包端到端全通过（${ynok} 项断言，零 = bad）"
+    else
+        ybad "json 包端到端断言失败（ok=${ynok} bad=${ynbad}）"
+        printf '%s\n' "$yout" | head -50
+    fi
+else ybad "use_json.dial 编译失败"; tail -8 "${TMP}/y_comp.log"; fi
+
+# 5) 清理：卸包（不污染后续测试与用户环境）。
+"$DIALC" uninstall json >/dev/null 2>&1 || true
+ypass "json 包已卸载"
+
+# ---------------------------------------------------------------------------
+# Z) C11 独立包：crypto.dialpkg（mbedTLS 摘要 / Base64 / HMAC，密码学绝不手搓）
+# ---------------------------------------------------------------------------
+echo "== Z) C11 独立包：crypto.dialpkg 端到端（mbedTLS 摘要 + Base64 + HMAC，v1.04 增补） =="
+zpass() { echo "  ✅ $1"; }
+zbad()  { echo "  ❌ $1"; fail=1; }
+
+# 1) 构建三平台静态库（dial_crypto.o + mbedTLS 全量，链接期按需抽取）。
+if bash packages/crypto/build.sh >"${TMP}/z_build.log" 2>&1; then
+    zpass "crypto 包三平台静态库构建完成（linux-gnu / musl / windows-gnu）"
+else zbad "crypto 包静态库构建失败"; tail -8 "${TMP}/z_build.log"; fi
+
+# 2) 零警告硬约束（与 text / json / http 包同口径）。
+if grep -qiE 'warning:|error:' "${TMP}/z_build.log"; then
+    zbad "crypto 包构建存在 warning / error"
+    grep -iE 'warning:|error:' "${TMP}/z_build.log" | head -8
+else zpass "crypto 包三平台构建零警告零错误"; fi
+
+# 3) 打包 + 安装（manifest / 逐文件 SHA256 自检）。
+"$DIALC" uninstall crypto >/dev/null 2>&1 || true
+if "$DIALC" pack packages/crypto -o "${TMP}/crypto.dialpkg" >"${TMP}/z_pack.log" 2>&1 \
+   && "$DIALC" install "${TMP}/crypto.dialpkg" >"${TMP}/z_install.log" 2>&1; then
+    zpass "crypto.dialpkg 打包 + 安装成功（manifest / SHA256 自检通过）"
+else zbad "crypto.dialpkg 打包或安装失败"; tail -8 "${TMP}/z_pack.log" "${TMP}/z_install.log"; fi
+
+# 4) 编译运行：29 项断言覆盖五种摘要标准向量 / string-bytes 双入口 /
+#    含 NUL 的二进制 / 原始摘要字节 / Base64 往返 / HMAC / 严格错误路径。
+if "$DIALC" build tests/pkg/use_crypto.dial -o "${TMP}/use_crypto" >"${TMP}/z_comp.log" 2>&1; then
+    zpass "use_crypto.dial（import \"crypto\"）编译成功"
+    zout="$("${TMP}/use_crypto" 2>&1)"
+    zok=1
+    printf '%s\n' "$zout" | grep -qF 'crypto_done = true' || zok=0
+    for key in md5_abc sha1_abc sha256_abc sha512_abc sha3_256_abc md5_empty \
+               sha256_utf8_cn bytes_string_agree md5_bytes_agree b64_decode_bin \
+               b64_bin_b0 b64_bin_b2 b64_bin_roundtrip md5_bytes_bin sha256_bytes_bin \
+               b64_hello b64_dial b64_empty b64_decode_hello digest_sha256_len \
+               digest_md5_len hmac_fox hmac_bytes_agree b64_bad_rejected b64_bad_err \
+               b64_bad_msg unknown_algo_rejected unknown_algo_err ok_clears_error; do
+        printf '%s\n' "$zout" | grep -qF "$key = ok" || zok=0
+    done
+    znbad="$(printf '%s\n' "$zout" | grep -c ' = bad' || true)"
+    znok="$(printf '%s\n' "$zout" | grep -c ' = ok$' || true)"
+    if [ "$zok" -eq 1 ] && [ "$znbad" -eq 0 ] && [ "$znok" -ge 25 ]; then
+        zpass "crypto 包端到端全通过（${znok} 项断言，零 = bad）"
+    else
+        zbad "crypto 包端到端断言失败（ok=${znok} bad=${znbad}）"
+        printf '%s\n' "$zout" | head -50
+    fi
+else zbad "use_crypto.dial 编译失败"; tail -8 "${TMP}/z_comp.log"; fi
+
+# 5) 清理：卸包（不污染后续测试与用户环境）。
+"$DIALC" uninstall crypto >/dev/null 2>&1 || true
+zpass "crypto 包已卸载"
 
 echo
 if [ $fail -eq 0 ]; then
