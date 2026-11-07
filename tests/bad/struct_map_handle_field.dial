@@ -1,0 +1,12 @@
+// 应当编译失败：含句柄字段（string）的结构体暂不能作 map 值。
+// 装箱只拷贝位模式，句柄字段需要字段级 ARC（装箱 / 释放时逐字段 retain/release），
+// 该能力尚未落地，故语义层明确拒绝，而不是让它「看起来能用」并在释放时泄漏或悬垂。
+struct Rec {
+    id: int = 0,
+    name: string = "x",
+}
+
+fn main(): int {
+    var m: map<string, Rec> = new_kv_map();
+    return 0;
+}

@@ -24,7 +24,8 @@ use inkwell::targets::{
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::basic_block::BasicBlock;
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue,
+    PointerValue,
 };
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
@@ -5403,6 +5404,19 @@ impl<'ctx> CodeGen<'ctx> {
                 .build_ptr_to_int(v.into_pointer_value(), self.context.i64_type(), "p2bits").unwrap(),
             Type::Bool => self.builder
                 .build_int_z_extend(v.into_int_value(), self.context.i64_type(), "b2bits").unwrap(),
+            // v1.04 B6：结构体值装箱为 RC 对象后存指针位模式（与数组元素同一套机制）。
+            Type::Struct(name) => {
+                let sty = self.struct_types[name];
+                let size = sty.size_of().expect("结构体应有确定尺寸");
+                let tmp = self.alloca_in_entry(function, sty.into(), "sbox_src");
+                self.builder.build_store(tmp, v).unwrap();
+                let boxp = self
+                    .call_c("dial_struct_box", &[tmp.into(), size.into()])
+                    .into_pointer_value();
+                self.builder
+                    .build_ptr_to_int(boxp, self.context.i64_type(), "box2bits")
+                    .unwrap()
+            }
             // int / char / byte 的 IR 本来就是 i64。
             _ => v.into_int_value(),
         };
@@ -5410,7 +5424,12 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     /// C 侧返回的 i64 位模式还原成 Dial 的 V 类型值。
-    fn kv_from_bits(&self, bits: IntValue<'ctx>, ty: &Type) -> BasicValueEnum<'ctx> {
+    fn kv_from_bits(
+        &self,
+        function: FunctionValue<'ctx>,
+        bits: IntValue<'ctx>,
+        ty: &Type,
+    ) -> BasicValueEnum<'ctx> {
         match ty {
             Type::Float => self.builder
                 .build_bit_cast(bits, self.context.f64_type(), "bits2f").unwrap().into(),
@@ -5423,6 +5442,45 @@ impl<'ctx> CodeGen<'ctx> {
                 ).unwrap().into(),
             Type::String => self.builder
                 .build_int_to_ptr(bits, self.i8ptr(), "bits2p").unwrap().into(),
+            // v1.04 B6：结构体值——map 未命中时 C 侧返回空指针（0），此时还原为零值结构体。
+            // 用**分支**而非 select：select 两侧都会求值，空指针解引用就是 use-after-free。
+            Type::Struct(name) => {
+                let sty = self.struct_types[name];
+                let i64t = self.context.i64_type();
+                let is_null = self.builder
+                    .build_int_compare(
+                        IntPredicate::EQ, bits, i64t.const_int(0, false), "isnull",
+                    )
+                    .unwrap();
+                let null_bb = self.context.append_basic_block(function, "unbox.null");
+                let box_bb = self.context.append_basic_block(function, "unbox.box");
+                let cont_bb = self.context.append_basic_block(function, "unbox.cont");
+                self.builder.build_conditional_branch(is_null, null_bb, box_bb).unwrap();
+                // 未命中：零值结构体
+                self.builder.position_at_end(null_bb);
+                let zero = sty.const_zero();
+                self.builder.build_unconditional_branch(cont_bb).unwrap();
+                // 命中：解箱，按值拷出
+                self.builder.position_at_end(box_bb);
+                let boxp = self.builder.build_int_to_ptr(bits, self.i8ptr(), "bits2box").unwrap();
+                let sp = self.builder
+                    .build_pointer_cast(boxp, self.context.ptr_type(AddressSpace::default()), "box2s")
+                    .unwrap();
+                let loaded = self.builder.build_load(sty, sp, "unbox").unwrap();
+                self.builder.build_unconditional_branch(cont_bb).unwrap();
+                // 合流
+                self.builder.position_at_end(cont_bb);
+                let phi = self.builder.build_phi(sty, "unboxphi").unwrap();
+                let zb: &dyn BasicValue = &zero;
+                // build_load 返回 BasicValueEnum；phi 需要具体类型，取其中的 StructValue 分支。
+                let lb: &dyn BasicValue = match &loaded {
+                    BasicValueEnum::StructValue(sv) => sv,
+                    _ => unreachable!("结构体 load 的结果必为 StructValue"),
+                };
+                phi.add_incoming(&[(zb, null_bb)]);
+                phi.add_incoming(&[(lb, box_bb)]);
+                phi.as_basic_value().into()
+            }
             _ => bits.into(),
         }
     }
@@ -5450,8 +5508,9 @@ impl<'ctx> CodeGen<'ctx> {
                 let res = self.call_c("dial_kvmap_put", &[optr.into(), kb.into(), vb.into()]);
                 // C 侧已对 string 键/值 retain 一份；自带所有权的字面量要抵消这一份，
                 // 借来的变量则保留（与 array.push 同一结算口径）。
+                // 结构体值：put 已把装箱对象 retain 进表里，本地那份须归还（表独占）。
                 self.settle_fresh_value(&args[0], k, ka);
-                self.settle_fresh_value(&args[1], v, va);
+                self.sink_elem_after_retain(&args[1], v, va, vb);
                 Ok(res)
             }
             "get" | "contains" | "remove" => {
@@ -5470,7 +5529,16 @@ impl<'ctx> CodeGen<'ctx> {
                         i64t.const_int(0, false), "kvcontains",
                     ).unwrap().into())
                 } else {
-                    Ok(self.kv_from_bits(r.into_int_value(), v))
+                    let out = self.kv_from_bits(function, r.into_int_value(), v);
+                    // remove：被删条目的值所有权随返回值移交调用方
+                    // （结构体值即那个装箱对象）——拷出副本后释放它。
+                    if method == "remove" && matches!(v, Type::Struct(_)) {
+                        let boxp = self.builder
+                            .build_int_to_ptr(r.into_int_value(), self.i8ptr(), "boxp")
+                            .unwrap();
+                        self.call_c_void("dial_rc_release", &[boxp.into()]);
+                    }
+                    Ok(out)
                 }
             }
             // v1.04 C6：泛型 map 的 get_or(k, default)。键与默认值都按静态类型
@@ -5481,7 +5549,14 @@ impl<'ctx> CodeGen<'ctx> {
                 let (_da, db) = self.kv_arg(&args[1], v, function, scopes, func_values, functions, structs)?;
                 let r = self.call_c("dial_kvmap_get_or", &[optr.into(), kb.into(), db.into()]);
                 self.settle_fresh_value(&args[0], k, ka);
-                Ok(self.kv_from_bits(r.into_int_value(), v))
+                let out = self.kv_from_bits(function, r.into_int_value(), v);
+                // 结构体默认值：先按值拷出（未命中时返回值就是本地这份装箱），
+                // 再归还本地那份装箱——副本已是纯标量位，释放不影响已拷出的值。
+                if matches!(v, Type::Struct(_)) {
+                    let boxp = self.builder.build_int_to_ptr(db, self.i8ptr(), "boxp").unwrap();
+                    self.call_c_void("dial_rc_release", &[boxp.into()]);
+                }
+                Ok(out)
             }
             "size" => Ok(self.call_c("dial_kvmap_size", &[optr.into()])),
             "keys" => Ok(self.call_c("dial_kvmap_keys", &[optr.into()])),

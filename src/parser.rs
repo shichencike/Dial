@@ -745,6 +745,8 @@ impl Parser {
             Type::Bool => 3,
             Type::Char => 4,
             Type::Byte => 5,
+            // v1.04 B6：结构体值（装箱为 RC 对象后存指针位模式，与 dial_kvmap.c 的 KV_STRUCT 一致）
+            Type::Struct(_) => 6,
             _ => -1, // 非法类型交由 check_type_wellformed 给出明确诊断
         }
     }
@@ -1142,10 +1144,14 @@ impl Parser {
         if let Type::KvMap(ref k, ref v) = ty {
             if let Expr::Call(ref nm, ref a) = value {
                 if nm == "new_kv_map" && a.is_empty() {
-                    value = Expr::Call(
-                        "new_kv_map".to_string(),
-                        vec![Expr::IntLit(Self::kv_kind_of(k)), Expr::IntLit(Self::kv_kind_of(v))],
-                    );
+                    // v1.04 B6：值为结构体时，kind 编码（KV_STRUCT）无法携带结构体名，
+                    // 故补第三个实参（结构体名）——语义层据此还原 Type::KvMap(K, Struct(name))。
+                    // 源码永远只写 new_kv_map()，这些实参全部由编译器补齐。
+                    let mut args = vec![Expr::IntLit(Self::kv_kind_of(k)), Expr::IntLit(Self::kv_kind_of(v))];
+                    if let Type::Struct(ref sname) = **v {
+                        args.push(Expr::StringLit(sname.clone()));
+                    }
+                    value = Expr::Call("new_kv_map".to_string(), args);
                 }
             }
         }

@@ -836,8 +836,9 @@ pub fn type_of<V>(
                 }
                 "new_kv_map" => {
                     // 两个 kind 实参由 parse_var_decl 从声明标注补齐（源码里永远写 new_kv_map()）。
+                    // 值为结构体时（v1.04 B6）补第三个实参（结构体名）——kind 编码带不出名字。
                     // 出现在别处（0 参数）时明确拒绝：泛型 map 必须有静态类型标注。
-                    if args.len() != 2 {
+                    if args.len() != 2 && args.len() != 3 {
                         return Err(DialcError::new(
                             "语义错误：new_kv_map() 只能在带 map<K,V> 类型标注的 var 声明中使用",
                             0, 0,
@@ -855,7 +856,41 @@ pub fn type_of<V>(
                             "内部错误：new_kv_map 的值 kind 不是编译期常量", 0, 0,
                         )),
                     };
-                    return Ok(Type::KvMap(Box::new(kv_type_from_kind(kk)?), Box::new(kv_type_from_kind(vk)?)));
+                    let kt = kv_type_from_kind(kk)?;
+                    let vt = if args.len() == 3 {
+                        match &args[2] {
+                            Expr::StringLit(sn) => Type::Struct(sn.clone()),
+                            _ => return Err(DialcError::new(
+                                "内部错误：new_kv_map 的结构体名实参不是字符串字面量", 0, 0,
+                            )),
+                        }
+                    } else {
+                        kv_type_from_kind(vk)?
+                    };
+                    // 结构体值：kind 必须是 KV_STRUCT(6)，且结构体须已定义、字段全为标量。
+                    if let Type::Struct(ref sn) = vt {
+                        if vk != 6 {
+                            return Err(DialcError::new(
+                                "内部错误：new_kv_map 的结构体值 kind 与 KV_STRUCT 不符", 0, 0,
+                            ));
+                        }
+                        if !structs.contains_key(sn) {
+                            return Err(DialcError::new(
+                                format!("语义错误：map 的值类型结构体 '{}' 未定义", sn),
+                                0, 0,
+                            ));
+                        }
+                        if !struct_has_only_scalar_fields(sn, structs) {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：结构体 '{}' 含句柄字段，暂不能作 map 值（装箱需字段级 ARC）",
+                                    sn
+                                ),
+                                0, 0,
+                            ));
+                        }
+                    }
+                    return Ok(Type::KvMap(Box::new(kt), Box::new(vt)));
                 }
                 // bytes（二进制字节缓冲区，v0.98.2）：与 string 布局相同但类型独立，
                 // 因此两者之间的转换必须**显式**走这些内置，编译器才拦得住混用。
@@ -2812,12 +2847,19 @@ fn kvmap_method_type<V>(
         // 刻意只放行**标量 V**：标量按值存储，默认值位模式没有 ARC 所有权问题；
         // 若放行 string 这类句柄 V，「未命中时返回的默认字符串该由谁 retain」会
         // 产生歧义，与 §19「宁可泄漏，不可悬垂」相悖。那种场景请用 contains + get。
+        // v1.04 B6：额外放行**标量字段结构体 V**——结构体值按值拷出（装箱对象只是
+        // 容器内的存储），默认值与命中值都不产生所有权歧义。
         "get_or" => {
             let scalar_v = matches!(v, Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char);
-            if !scalar_v {
+            let struct_v = match v {
+                Type::Struct(name) => struct_has_only_scalar_fields(name, structs),
+                _ => false,
+            };
+            if !scalar_v && !struct_v {
                 return Err(DialcError::new(
                     format!(
-                        "语义错误：map<{}, {}>.get_or() 只支持标量值类型（int/float/bool/byte/char）；\
+                        "语义错误：map<{}, {}>.get_or() 只支持标量值类型（int/float/bool/byte/char）\
+                         或字段全为标量的结构体；\n\
                          句柄值请用 contains(k) + get(k) 显式处理（避免默认值的所有权歧义）",
                         k.name(), v.name()
                     ),
@@ -2853,13 +2895,16 @@ fn kvmap_method_type<V>(
             if !args.is_empty() {
                 return Err(DialcError::new("语义错误：map.values() 不接受参数", 0, 0));
             }
-            if *v != Type::Int {
-                return Err(DialcError::new(
-                    "语义错误：map.values() 当前版本只支持 V = int（其它标量值请用 get 逐键取值）",
+            // V = int：返回 int[]（位模式快照）。
+            // v1.04 B6：V = 结构体时返回对应结构体数组（装箱对象快照，读出即按值拷贝）。
+            match v {
+                Type::Int => Ok(Type::Array(Box::new(Type::Int))),
+                Type::Struct(_) => Ok(Type::Array(Box::new(v.clone()))),
+                _ => Err(DialcError::new(
+                    "语义错误：map.values() 当前版本只支持 V = int 或结构体（其它标量值请用 get 逐键取值）",
                     0, 0,
-                ));
+                )),
             }
-            Ok(Type::Array(Box::new(Type::Int)))
         }
         _ => Err(DialcError::new(
             format!("语义错误：map<K,V> 无方法 '{}'", method), 0, 0,
@@ -3340,13 +3385,19 @@ fn check_type_wellformed(
         Type::KvMap(k, v) => {
             let ok_k = matches!(k.as_ref(), Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String);
             // v1.00 值只支持标量：string 值的 get 未命中默认对象会带来所有权移交歧义。
-            let ok_v = matches!(v.as_ref(), Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte);
+            // v1.04 B6：值额外放开「字段全为标量」的结构体——装箱为 RC 对象后存指针位模式，
+            // 未命中返回空指针，由编译器还原为零值结构体（不存在所有权移交歧义）。
+            let ok_v = matches!(v.as_ref(), Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte)
+                || match v.as_ref() {
+                    Type::Struct(name) => struct_has_only_scalar_fields(name, structs),
+                    _ => false,
+                };
             if ok_k && ok_v {
                 Ok(())
             } else {
                 Err(DialcError::new(
                     format!(
-                        "语义错误：{} 是 map<{}, {}> 类型；当前版本键支持 int/float/bool/char/byte/string，值只支持标量（暂不支持 string 值）",
+                        "语义错误：{} 是 map<{}, {}> 类型；当前版本键支持 int/float/bool/char/byte/string，值支持标量（暂不支持 string 值）与字段全为标量的结构体",
                         ctx, k.name(), v.name()
                     ),
                     line, col,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 二十一组检查，全部通过才算绿（顺序为 A→U，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 二十二组检查，全部通过才算绿（顺序为 A→V，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -37,6 +37,8 @@
 #      get_or C6 / eprint C8，含宪法否决项（函数重载 B5）的负向锁定（v1.04 增补）。
 #   U. B/C 组缺口第二批：字符串/Unicode C1/C4、数值解析与格式化 C2/C3、
 #      数组 API C5、文件/环境/时间 C7/C9/C10 的标准库全量（v1.04 增补）。
+#   V. B/C 组缺口第三批：语言机制——B7 文件级只读 const（禁止可变全局状态）、
+#      B8 结构体字段编译期常量默认值、B6 结构体进容器（Point[] / map<string,Struct>）（v1.04 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -1213,6 +1215,89 @@ if "$DIALC" build "${TMP}/u_shadow.dial" -o "${TMP}/u_shadow" >"${TMP}/u_shadow.
 elif grep -q "保留名" "${TMP}/u_shadow.log"; then
     upass "U：第 2 批内建进入保留名清单（同名定义编译期拒绝）"
 else ubad "U：同名定义被拒但诊断未提到保留名"; fi
+
+echo
+echo "== V) B/C 组缺口第三批：语言机制（B7 文件级 const / B8 结构体默认值 / B6 结构体进容器，v1.04 增补） =="
+vpass() { echo "  ✅ $1"; }
+vbad()  { echo "  ❌ $1"; fail=1; }
+
+# 1) B8 正向：结构体字段默认值（省略用默认值 / 显式覆盖 / 常量表达式默认值）。
+if "$DIALC" build tests/batch3_b8_smoke.dial -o "${TMP}/v_b8" >"${TMP}/v_b8.log" 2>&1; then
+    out=$("${TMP}/v_b8" 2>/dev/null)
+    if printf '%s\n' "$out" | grep -q 'B8 p0.x = 0' \
+       && printf '%s\n' "$out" | grep -q 'B8 p1.x = 7' \
+       && printf '%s\n' "$out" | grep -q 'B8 p1.y = 0' \
+       && printf '%s\n' "$out" | grep -q 'B8 r0.h = 2' \
+       && printf '%s\n' "$out" | grep -q 'B8 r0.tag = box' \
+       && printf '%s\n' "$out" | grep -q 'B8 r1.w = 4' ; then
+        vpass "B8：结构体字段编译期常量默认值（省略取默认 / 显式覆盖 / 常量表达式）"
+    else vbad "V 组：batch3_b8_smoke 输出缺失关键断言"; printf '%s\n' "$out" | head -30; fi
+else vbad "V 组：batch3_b8_smoke 编译失败"; tail -8 "${TMP}/v_b8.log"; fi
+
+# 2) B7 正向：文件级只读 const（标量 / 字符串 / 数组 / 嵌套数组 / 结构体 / 常量表达式）。
+if "$DIALC" build tests/batch3_b7_smoke.dial -o "${TMP}/v_b7" >"${TMP}/v_b7.log" 2>&1; then
+    out=$("${TMP}/v_b7" 2>/dev/null)
+    if printf '%s\n' "$out" | grep -q 'B7 N = 100' \
+       && printf '%s\n' "$out" | grep -q 'B7 FLAGS\[3\] = 100' \
+       && printf '%s\n' "$out" | grep -q 'B7 MAT\[1\]\[0\] = 3' \
+       && printf '%s\n' "$out" | grep -q 'B7 TAGS\[2\] = c' \
+       && printf '%s\n' "$out" | grep -q 'B7 ORIGIN.x = 0' \
+       && printf '%s\n' "$out" | grep -q 'B7 UNIT.y = 1' \
+       && printf '%s\n' "$out" | grep -q 'B7 STEP = 15' \
+       && printf '%s\n' "$out" | grep -q 'B7 SCALE = 6.000000' ; then
+        vpass "B7：文件级只读 const（标量/字符串/数组/结构体/常量表达式）内联正确"
+    else vbad "V 组：batch3_b7_smoke 输出缺失关键断言"; printf '%s\n' "$out" | head -30; fi
+else vbad "V 组：batch3_b7_smoke 编译失败"; tail -8 "${TMP}/v_b7.log"; fi
+
+# 3) B6 正向：结构体进容器（Point[] 与 map<string, Point>）。
+if "$DIALC" build tests/batch3_b6_smoke.dial -o "${TMP}/v_b6" >"${TMP}/v_b6.log" 2>&1; then
+    out=$("${TMP}/v_b6" 2>/dev/null)
+    if printf '%s\n' "$out" | grep -q 'B6 len = 2' \
+       && printf '%s\n' "$out" | grep -q 'B6 p0.x = 1' \
+       && printf '%s\n' "$out" | grep -q 'B6 after write p0.x = 9' \
+       && printf '%s\n' "$out" | grep -q 'B6 pts2\[0\].x = 7' \
+       && printf '%s\n' "$out" | grep -q 'B6 map size = 2' \
+       && printf '%s\n' "$out" | grep -q 'B6 map hit.x = 1' \
+       && printf '%s\n' "$out" | grep -q 'B6 map miss.x = 0' \
+       && printf '%s\n' "$out" | grep -q 'B6 map get_or default.x = 9' \
+       && printf '%s\n' "$out" | grep -q 'B6 map removed.x = 1' ; then
+        vpass "B6：结构体进容器（Point[] / map<string,Point>）端到端通过"
+    else vbad "V 组：batch3_b6_smoke 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
+else vbad "V 组：batch3_b6_smoke 编译失败"; tail -8 "${TMP}/v_b6.log"; fi
+
+# 4) B7 负向：顶层 var 全局变量必须被拒（红线：禁止可变全局状态）。
+if "$DIALC" build tests/bad/const_top_level_var.dial -o "${TMP}/v_var" >"${TMP}/v_var.log" 2>&1; then
+    vbad "B7：顶层 var 全局变量竟被接受（违反禁止可变全局状态红线）"
+elif grep -q "禁止可变全局状态" "${TMP}/v_var.log"; then
+    vpass "B7：顶层 var 全局变量编译期拒绝（禁止可变全局状态红线）"
+else vbad "B7：顶层 var 被拒但诊断未提到可变全局状态"; fi
+
+# 5) B8 负向：省略无默认值的字段必须被拒（不得静默零初始化）。
+if "$DIALC" build tests/bad/struct_default_missing.dial -o "${TMP}/v_defmiss" >"${TMP}/v_defmiss.log" 2>&1; then
+    vbad "B8：省略无默认值字段竟被接受（静默零初始化）"
+elif grep -q "没有默认值" "${TMP}/v_defmiss.log"; then
+    vpass "B8：省略无默认值字段编译期拒绝（不得静默零初始化）"
+else vbad "B8：字段缺失被拒但诊断未说明原因"; fi
+
+# 6) B8 负向：默认值类型不匹配必须被拒（零隐式转换铁律）。
+if "$DIALC" build tests/bad/struct_default_type_mismatch.dial -o "${TMP}/v_defmm" >"${TMP}/v_defmm.log" 2>&1; then
+    vbad "B8：默认值类型不匹配竟被接受（违反零隐式转换）"
+elif grep -q "不匹配" "${TMP}/v_defmm.log"; then
+    vpass "B8：默认值类型不匹配编译期拒绝（零隐式转换铁律）"
+else vbad "B8：类型不匹配被拒但诊断未说明原因"; fi
+
+# 7) B6 负向：含句柄字段的结构体不得进容器（装箱的字段级 ARC 未落地，宁可拒绝）。
+if "$DIALC" build tests/bad/struct_array_handle_field.dial -o "${TMP}/v_hf1" >"${TMP}/v_hf1.log" 2>&1; then
+    vbad "B6：含句柄字段的结构体竟可作数组元素（字段级 ARC 未落地）"
+elif grep -q "数组元素" "${TMP}/v_hf1.log"; then
+    vpass "B6：含句柄字段的结构体作数组元素编译期拒绝"
+else vbad "B6：数组元素被拒但诊断未说明原因"; fi
+
+if "$DIALC" build tests/bad/struct_map_handle_field.dial -o "${TMP}/v_hf2" >"${TMP}/v_hf2.log" 2>&1; then
+    vbad "B6：含句柄字段的结构体竟可作 map 值（字段级 ARC 未落地）"
+elif grep -q "map<" "${TMP}/v_hf2.log"; then
+    vpass "B6：含句柄字段的结构体作 map 值编译期拒绝"
+else vbad "B6：map 值被拒但诊断未说明原因"; fi
 
 echo
 if [ $fail -eq 0 ]; then

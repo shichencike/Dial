@@ -33,5 +33,26 @@ fn main(): int {
     pts2.push(Point{x: 7, y: 8});
     print("B6 pts2 len = ", pts2.length());
     print("B6 pts2[0].x = ", pts2[0].x);
+
+    // B6b：map<string, Struct>——结构体作 map 值
+    var m: map<string, Point> = new_kv_map();
+    m.put("a", Point{x: 1, y: 2});
+    m.put("b", Point{x: 3, y: 4});
+    print("B6 map size = ", m.size());
+    var hit: Point = m.get("a");
+    print("B6 map hit.x = ", hit.x);
+    print("B6 map hit.y = ", hit.y);
+    var miss: Point = m.get("zzz");
+    print("B6 map miss.x = ", miss.x);          // 未命中 → 零值结构体
+    print("B6 map contains = ", m.contains("b"));
+    var vals: Point[] = m.values();
+    print("B6 map values len = ", vals.length());
+    var def: Point = m.get_or("zzz", Point{x: 9, y: 9});
+    print("B6 map get_or default.x = ", def.x);
+    var def2: Point = m.get_or("b", Point{x: 9, y: 9});
+    print("B6 map get_or hit.x = ", def2.x);
+    var rm: Point = m.remove("a");
+    print("B6 map removed.x = ", rm.x);
+    print("B6 map size after remove = ", m.size());
     return 0;
 }
