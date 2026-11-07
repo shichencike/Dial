@@ -1,0 +1,37 @@
+// v1.04 第 3 批 B6：结构体进容器（Point[] / map<string, Struct>）
+// B6a（数组）：值类型结构体按值装不进 8 字节槽，故装箱为 RC 对象后入槽。
+// 测试点：
+//   1) 结构体数组字面量 + length
+//   2) 下标读出字段（解箱按值）
+//   3) 绑定到变量后读字段
+//   4) push / set 下标写（重新装箱）
+//   5) 元素类型白名单：含句柄字段的结构体被明确拒绝（负向见 tests/bad）
+
+struct Point {
+    x: int = 0,
+    y: int = 0,
+}
+
+fn main(): int {
+    var pts: Point[] = [Point{x: 1, y: 2}, Point{x: 3, y: 4}];
+    print("B6 len = ", pts.length());
+    print("B6 p0.x = ", pts[0].x);
+    print("B6 p0.y = ", pts[0].y);
+    print("B6 p1.x = ", pts[1].x);
+
+    var q: Point = pts[1];
+    print("B6 q.x = ", q.x);
+    print("B6 q.y = ", q.y);
+
+    pts[0] = Point{x: 9, y: 9};
+    print("B6 after write p0.x = ", pts[0].x);
+
+    pts.set(1, Point{x: 5, y: 6});
+    print("B6 after set p1.x = ", pts[1].x);
+
+    var pts2: Point[] = [];
+    pts2.push(Point{x: 7, y: 8});
+    print("B6 pts2 len = ", pts2.length());
+    print("B6 pts2[0].x = ", pts2[0].x);
+    return 0;
+}

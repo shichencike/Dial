@@ -320,10 +320,10 @@ pub fn type_of<V>(
             } else {
                 type_of(&elems[0], scopes, funcs, structs)?
             };
-            if !is_array_elem_type(&elem_t) {
+            if !is_array_elem_type(&elem_t, structs) {
                 return Err(DialcError::new(
                     format!(
-                        "语义错误：数组元素类型 {} 暂不支持（支持 int/float/bool/byte/char 与句柄类型 string / int[] / map / error / channel / 不透明指针）",
+                        "语义错误：数组元素类型 {} 暂不支持（支持 int/float/bool/byte/char 与句柄类型 string / int[] / map / error / channel / 不透明指针，以及字段全为标量的结构体）",
                         elem_t.display()
                     ),
                     0, 0,
@@ -331,7 +331,7 @@ pub fn type_of<V>(
             }
             for e in elems {
                 let t = type_of(e, scopes, funcs, structs)?;
-                if !is_array_elem_type(&t) {
+                if !is_array_elem_type(&t, structs) {
                     return Err(DialcError::new(
                         format!("语义错误：数组字面量元素类型 {} 暂不支持", t.display()),
                         0, 0,
@@ -2232,16 +2232,13 @@ fn is_ct_const(e: &Expr) -> bool {
     }
 }
 
-/// 可作为动态数组元素的类型：int（标量）或任意 8 字节句柄/指针
-/// （string / int[] / map / error / channel / 不透明指针）。
-/// 标量非 int（float / bool / byte / char）因宽度不足 8 字节、塞进 int64 槽会静默截断，故拒绝。
-/// 可作为动态数组元素的类型。标量 int/float/bool/byte/char 与任意 8 字节句柄/指针。
-/// 数组在 C 侧以 int64 槽存储元素：float 用 IEEE754 位模式（bitcast，绝不 fptosi 截小数），
-/// bool 用 i1↔i64 位模式，byte/char 与 int 同为 i64；句柄类型按位存指针。
-/// 因此「元素类型白名单」就是「能装进 8 字节槽且能无歧义还原」的类型集合。
-fn is_array_elem_type(t: &Type) -> bool {
-    matches!(
-        *t,
+/// 可作为动态数组元素的类型：标量（int/float/bool/byte/char）或任意 8 字节句柄/指针，
+/// 外加 v1.04 B6 引入的**结构体**（值类型）。
+/// 结构体按值装不进 8 字节槽，故先装箱为 RC 对象（指针）后入槽；
+/// 本期只放开「字段全为标量」的结构体——含句柄字段的结构体装箱还需要字段级 ARC
+/// （装箱 / 释放时逐字段 retain/release），尚未落地，故在语义层明确拒绝而非静默出错。
+fn is_array_elem_type(t: &Type, structs: &StructTable) -> bool {
+    match t {
         Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char
             | Type::String
             | Type::Bytes
@@ -2249,8 +2246,25 @@ fn is_array_elem_type(t: &Type) -> bool {
             | Type::Map | Type::Set(_) | Type::KvMap(..)
             | Type::Error
             | Type::Channel(_)
-            | Type::Opaque(_)
-    )
+            | Type::Opaque(_) => true,
+        Type::Struct(name) => struct_has_only_scalar_fields(name, structs),
+        _ => false,
+    }
+}
+
+/// 结构体字段是否全为标量（不含句柄）。
+///
+/// 这是 B6「结构体进容器」的现役边界：装箱只拷贝位模式，标量字段无需额外 retain/release；
+/// 一旦含句柄字段，容器释放装箱对象时必须逐字段释放，否则会泄漏或悬垂——
+/// 那需要字段级 ARC（本期未落地），故宁可拒绝，也不让它「看起来能用」。
+fn struct_has_only_scalar_fields(name: &str, structs: &StructTable) -> bool {
+    match structs.get(name) {
+        Some((fields, _)) => fields
+            .iter()
+            .all(|(_, ft)| matches!(ft, Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char)),
+        // 未知结构体：不算通过（保守拒绝，由后续查表给出更具体的诊断）
+        None => false,
+    }
 }
 
 /// 裸指针的方法（v1.02）：目前只有 `offset(n)`——**显式、带类型**的指针算术。
@@ -2864,10 +2878,16 @@ fn kvmap_method_type<V>(
 /// Dial 自己定义的函数**不允许异构变参**：数组字面量的元素类型一致性检查会拦下
 /// `f(1, "a")` 这类调用，并在诊断里引导用户显式使用结构体。
 fn desugar_varargs(program: &mut Program) -> Result<()> {
+    // 结构体表（供变参元素类型校验：结构体作变参元素本期只放开标量字段结构体）
+    let struct_table: StructTable = program
+        .structs
+        .iter()
+        .map(|s| (s.name.clone(), (s.fields.clone(), s.field_defaults.clone())))
+        .collect();
     let mut map: HashMap<String, (usize, Type)> = HashMap::new();
     for f in program.functions.iter_mut() {
         if let Some((name, elem, line, col)) = f.variadic.take() {
-            if !is_array_elem_type(&elem) {
+            if !is_array_elem_type(&elem, &struct_table) {
                 return Err(DialcError::new(
                     format!(
                         "语义错误：变参元素类型 {} 不受支持（变参只接受同类型 T[]，需要异构参数请显式定义结构体）",
@@ -3306,7 +3326,13 @@ pub fn analyze(
 /// 动态数组的 C 实现（dial_array_*）以 int64 存储元素，因此元素类型**只允许 int**。
 /// 若放任 `float[]`，元素会在传入 C 时被 fptosi 静默截断——这正是必须在
 /// 编译期就拒绝而非运行期静默降级的地方。
-fn check_type_wellformed(t: &Type, ctx: &str, line: usize, col: usize) -> Result<()> {
+fn check_type_wellformed(
+    t: &Type,
+    ctx: &str,
+    line: usize,
+    col: usize,
+    structs: &StructTable,
+) -> Result<()> {
     match t {
         // v1.00 的 set 复用 int→int map 的键集，故元素类型只支持 int。
         // 放宽到别的元素类型需要 C 侧先支持任意宽度的键，这里在编译期明确拒绝，
@@ -3343,15 +3369,16 @@ fn check_type_wellformed(t: &Type, ctx: &str, line: usize, col: usize) -> Result
             }
         }
         Type::Array(elem) => {
-            if is_array_elem_type(elem) {
+            if is_array_elem_type(elem, structs) {
                 Ok(())
             } else {
                 Err(DialcError::new(
                     format!(
                         "语义错误：{} 是 {}[] 类型，但动态数组元素类型只支持标量\n\
                          （int / float / bool / char / byte）与句柄类型\n\
-                         （string / bytes / 数组 / map / set / kvmap / error / channel / 不透明句柄）；\n\
-                         结构体与 C ABI 结构体不能作数组元素",
+                         （string / bytes / 数组 / map / set / kvmap / error / channel / 不透明句柄），\n\
+                         以及字段全为标量的结构体；\n\
+                         含句柄字段的结构体与 C ABI 结构体暂不能作数组元素",
                         ctx,
                         elem.as_ref().name()
                     ),
@@ -3398,6 +3425,7 @@ fn check_function(
             &format!("函数 '{}' 的形参 '{}'", f.name, pname),
             f.line,
             f.col,
+            structs,
         )?;
     }
     // 返回类型良构性
@@ -3406,6 +3434,7 @@ fn check_function(
         &format!("函数 '{}' 的返回类型", f.name),
         f.line,
         f.col,
+        structs,
     )?;
 
     let mut scopes: Scopes<VarState> = vec![HashMap::new()];
@@ -3782,7 +3811,7 @@ fn check_stmt(
             ..
         } => {
             // 声明类型必须先良构，再谈兼容
-            check_type_wellformed(ty, &format!("变量 '{}'", name), *line, *col)?;
+            check_type_wellformed(ty, &format!("变量 '{}'", name), *line, *col, structs)?;
             let vt = type_of(value, scopes, funcs, structs)?;
             if !types_compatible(&vt, ty) && !channel_placeholder_compat(&vt, ty) {
                 return Err(DialcError::new(

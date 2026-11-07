@@ -37,4 +37,8 @@ void dial_rc_release(void *p);
  */
 void *dial_rc_clone(void *p, int64_t payload_size);
 
+/* v1.04 B6：把值类型结构体装箱为引用计数对象（[int64 refcount][payload]），
+ * 用于放进容器。仅拷贝标量位模式；含句柄字段的结构体须由调用处额外 retain。 */
+void *dial_struct_box(const void *src, int64_t size);
+
 #endif /* DIAL_RT_MEM_H */

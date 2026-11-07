@@ -707,6 +707,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_void("dial_channel_release", &[i8b.into()]);
         // 通用 ARC 释放（供通道元素析构器使用，CVE-2024-DIAL-007）。
         self.decl_void("dial_rc_release", &[i8b.into()]);
+        // v1.04 B6：把值类型结构体装箱为引用计数对象（[int64 refcount][payload]），
+        // 用于把结构体放进容器（数组 / map 值）。返回 payload 指针（同 Dial 堆对象布局）。
+        self.decl_func("dial_struct_box", i8b, &[i8b.into(), i64b.into()]);
         // v0.81 通道收尾：关闭 / 状态查询 / 非阻塞取出
         self.decl_func("dial_channel_try_recv", i8b, &[i8b.into()]);
         self.decl_void("dial_channel_close", &[i8b.into()]);
@@ -905,7 +908,7 @@ impl<'ctx> CodeGen<'ctx> {
             .expect("高阶回调返回值不应为 void（语义层已拦截）");
         // 反向：C ABI 返回宽度 → Dial 内部宽度，再压回 C 运行时的 i64 槽位。
         let rv_internal = self.abi_adapt(rv, rv.get_type(), self.dialc_type_to_llvm(ret));
-        let bits = self.to_elem_bits(rv_internal, ret);
+        let bits = self.to_elem_bits(thunk, rv_internal, ret);
         self.builder.build_return(Some(&bits)).unwrap();
 
         if let Some(bb) = saved {
@@ -1090,6 +1093,8 @@ impl<'ctx> CodeGen<'ctx> {
             Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Opaque(_) => {
                 1
             }
+            // 结构体装箱为 RC 句柄（指针），与 string/array 等同走 kind=1 的 retain/release。
+            Type::Struct(_) => 1,
             _ => 0, // 理论上不可达：check_type_wellformed 已拒绝其它元素类型
         }
     }
@@ -1097,12 +1102,32 @@ impl<'ctx> CodeGen<'ctx> {
     /// 把 Dial 值按元素类型转成 C 侧数组槽统一的 i64 位模式（与 kv_arg 同思路）：
     /// float 走 bitcast（保留 IEEE754 位模式，绝不 fptosi 丢小数）、bool 走 zext、
     /// 句柄走 ptr_to_int、int/byte/char 本就是 i64。
-    fn to_elem_bits(&self, v: BasicValueEnum<'ctx>, t: &Type) -> IntValue<'ctx> {
+    /// 结构体（v1.04 B6）：值类型不能直接塞进 8 字节槽，先装箱为 RC 对象
+    /// （[int64 refcount][payload]），槽内存其 payload 指针的位模式；调用方在容器
+    /// retain 之后须用 `int_to_ptr(bits)` 取回指针并 `dial_rc_release` 归还本地那份。
+    fn to_elem_bits(
+        &self,
+        function: FunctionValue<'ctx>,
+        v: BasicValueEnum<'ctx>,
+        t: &Type,
+    ) -> IntValue<'ctx> {
         if *t == Type::Float {
             self.builder
                 .build_bit_cast(v, self.context.i64_type(), "f2bits")
                 .unwrap()
                 .into_int_value()
+        } else if let Type::Struct(name) = t {
+            // 装箱：把结构体值拷进堆上 RC 对象，返回 payload 指针（i8*）。
+            let sty = self.struct_types[name];
+            let size = sty.size_of().expect("结构体应有确定尺寸");
+            let tmp = self.alloca_in_entry(function, sty.into(), "sbox_src");
+            self.builder.build_store(tmp, v).unwrap();
+            let boxp = self
+                .call_c("dial_struct_box", &[tmp.into(), size.into()])
+                .into_pointer_value();
+            self.builder
+                .build_ptr_to_int(boxp, self.context.i64_type(), "box2bits")
+                .unwrap()
         } else {
             self.to_i64(v, t)
         }
@@ -1125,6 +1150,17 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder
                     .build_int_to_ptr(v, self.i8ptr(), "bits2p")
                     .unwrap().into()
+            }
+            Type::Struct(name) => {
+                // 解箱：槽位存的是装箱 payload 指针，按结构体布局 load 出**值**（拷贝），
+                // 容器仍独占那一份装箱对象；读出的副本随作用域结束被 release（标量字段无副作用）。
+                let boxp = self.builder.build_int_to_ptr(v, self.i8ptr(), "bits2box").unwrap();
+                let sty = self.struct_types[name];
+                let sp = self
+                    .builder
+                    .build_pointer_cast(boxp, self.context.ptr_type(AddressSpace::default()), "box2s")
+                    .unwrap();
+                self.builder.build_load(sty, sp, "unbox").unwrap().into()
             }
             _ => v.into(), // Int / Byte / Char 都是 i64
         }
@@ -1760,6 +1796,25 @@ impl<'ctx> CodeGen<'ctx> {
     fn settle_fresh_value(&self, e: &Expr, ty: &Type, val: BasicValueEnum<'ctx>) {
         if Self::is_heap_type(ty) && !yields_borrowed_ref(e) {
             self.release_value(ty, val);
+        }
+    }
+
+    /// 把元素写进容器（push/set/insert）后，归还「本地所有权」：
+    /// - 结构体（v1.04 B6）：to_elem_bits 已把它装箱为 RC 对象（refcount 1），
+    ///   容器 retain 后 refcount=2，此处用槽位位模式取回指针并 release，使其回到 1（容器独占）；
+    /// - 其它类型沿用既有的 settle_fresh_value（句柄 release 本地那份，标量无操作）。
+    fn sink_elem_after_retain(
+        &self,
+        e: &Expr,
+        ty: &Type,
+        val: BasicValueEnum<'ctx>,
+        bits: IntValue<'ctx>,
+    ) {
+        if let Type::Struct(_) = ty {
+            let boxp = self.builder.build_int_to_ptr(bits, self.i8ptr(), "boxp").unwrap();
+            self.call_c_void("dial_rc_release", &[boxp.into()]);
+        } else {
+            self.settle_fresh_value(e, ty, val);
         }
     }
 
@@ -2464,7 +2519,7 @@ impl<'ctx> CodeGen<'ctx> {
                 let idxi64 = self.to_i64(idx, &type_of(index, scopes, functions, structs)?);
                 let val = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
                 let vty = type_of(value, scopes, functions, structs)?;
-                let vali64 = self.to_elem_bits(val, &vty);
+                let vali64 = self.to_elem_bits(function, val, &vty);
                 // Fail-Fast：越界写是 C 里最阴险的 Bug（悄悄改坏相邻数据），当场 trap。
                 // ReleaseFast 下这段（含这次 length 调用）被整段消除，零开销。
                 if self.checks_enabled() {
@@ -2486,7 +2541,7 @@ impl<'ctx> CodeGen<'ctx> {
                 //   - 自带所有权的值（字面量 / clone 等）：本语句的临时所有权应当
                 //     移交给数组，故此处归还——否则每个字面量元素泄漏一份引用
                 //     （`a[i] = "字面量"`、`a.push("字面量")` 在循环里线性吃内存）。
-                self.settle_fresh_value(value, &vty, val);
+                self.sink_elem_after_retain(value, &vty, val, vali64);
                 Ok(())
             }
             Stmt::If {
@@ -2855,7 +2910,7 @@ impl<'ctx> CodeGen<'ctx> {
                 let vi = if is_kv {
                     // map<K,V>：键以位模式交给 dial_kvmap_get，返回值再以 V 类型还原。
                     // get 返回的是「借用」自表内的值（未 retain），因此循环末尾不得释放 v。
-                    let kb = self.to_elem_bits(kval, &k_ty);
+                    let kb = self.to_elem_bits(function, kval, &k_ty);
                     self.call_c("dial_kvmap_get", &[coll_val.into(), kb.into()])
                 } else {
                     self.call_c("dial_map_get", &[coll_val.into(), ki.into()])
@@ -3876,11 +3931,11 @@ impl<'ctx> CodeGen<'ctx> {
                 for el in elems {
                     let ev = self.gen_expr(el, function, scopes, func_values, functions, structs)?;
                     let ety = type_of(el, scopes, functions, structs)?;
-                    let ei64 = self.to_elem_bits(ev, &ety);
+                    let ei64 = self.to_elem_bits(function, ev, &ety);
                     cur = self.call_c("dial_array_push", &[cur.into(), ei64.into()]);
                     // push 会为元素 retain 一份（数组成为持有者）。字面量自带的那一份
                     // 所有权本应直接移交数组，故此处归还——否则每个字面量元素泄漏一份引用。
-                    self.settle_fresh_value(el, &ety, ev);
+                    self.sink_elem_after_retain(el, &ety, ev, ei64);
                 }
                 Ok(cur)
             }
@@ -5058,11 +5113,11 @@ impl<'ctx> CodeGen<'ctx> {
                 let elem_ty = type_of(&args[0], scopes, functions, structs)?;
                 let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                 // 用 to_elem_bits：float 走 bitcast 保留 IEEE754 位模式，绝不 fptosi 截断小数。
-                let v_i64 = self.to_elem_bits(v, &elem_ty);
+                let v_i64 = self.to_elem_bits(function, v, &elem_ty);
                 let res = self.call_c("dial_array_push", &[optr.into(), v_i64.into()]);
                 // 元素归属结算：push 已为元素 retain 一份，借来的值不得再释放、
                 // 自带所有权的值（字面量等）应把临时所有权移交给数组。
-                self.settle_fresh_value(&args[0], &elem_ty, v);
+                self.sink_elem_after_retain(&args[0], &elem_ty, v, v_i64);
                 Ok(res)
             }
             (Type::Array(e), "get") => {
@@ -5075,11 +5130,11 @@ impl<'ctx> CodeGen<'ctx> {
                 let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &Type::Int);
                 let elem_ty = type_of(&args[1], scopes, functions, structs)?;
                 let v = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
-                let v_i64 = self.to_elem_bits(v, &elem_ty);
+                let v_i64 = self.to_elem_bits(function, v, &elem_ty);
                 let res = self.call_c("dial_array_set", &[optr.into(), i.into(), v_i64.into()]);
                 // 元素归属结算：set 已为元素 retain 一份，借来的值不得再释放、
                 // 自带所有权的值（字面量等）应把临时所有权移交给数组。
-                self.settle_fresh_value(&args[1], &elem_ty, v);
+                self.sink_elem_after_retain(&args[1], &elem_ty, v, v_i64);
                 Ok(res)
             }
             (Type::Array(_), "clone") => Ok(self.call_c("dial_array_clone", &[optr.into()])),
@@ -5151,10 +5206,10 @@ impl<'ctx> CodeGen<'ctx> {
                 let elem_ty = type_of(&args[1], scopes, functions, structs)?;
                 let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &Type::Int);
                 let v = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
-                let v_i64 = self.to_elem_bits(v, &elem_ty);
+                let v_i64 = self.to_elem_bits(function, v, &elem_ty);
                 let newp = self.call_c("dial_array_insert", &[optr.into(), i.into(), v_i64.into()]);
                 // C 侧 insert 已 elem_retain 新元素，与 push 同款做一次归属结算。
-                self.settle_fresh_value(&args[1], &elem_ty, v);
+                self.sink_elem_after_retain(&args[1], &elem_ty, v, v_i64);
                 if let Expr::Var(name) = obj {
                     if let Some((_, (_m, ptr))) = scopes.iter().rev().find_map(|s| s.get(name).map(|v| v.clone())) {
                         self.builder.build_store(ptr, newp).unwrap();
@@ -5175,7 +5230,7 @@ impl<'ctx> CodeGen<'ctx> {
             (Type::Array(_), "index_of") => {
                 let elem_ty = type_of(&args[0], scopes, functions, structs)?;
                 let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
-                let v_i64 = self.to_elem_bits(v, &elem_ty);
+                let v_i64 = self.to_elem_bits(function, v, &elem_ty);
                 Ok(self.call_c("dial_array_index_of", &[optr.into(), v_i64.into()]))
             }
             (Type::Array(_), "join") => {
@@ -5189,7 +5244,7 @@ impl<'ctx> CodeGen<'ctx> {
                 let fn_raw = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                 let init_ty = type_of(&args[1], scopes, functions, structs)?;
                 let init_v = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
-                let init_bits = self.to_elem_bits(init_v, &init_ty);
+                let init_bits = self.to_elem_bits(function, init_v, &init_ty);
                 let state: BasicValueEnum<'ctx> = if args.len() > 2 {
                     self.gen_expr(&args[2], function, scopes, func_values, functions, structs)?
                 } else {

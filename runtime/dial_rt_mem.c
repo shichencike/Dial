@@ -27,6 +27,16 @@ void dial_rc_release(void *p) {
     if (--((int64_t *)p)[-1] == 0) free((char *)p - 8);
 }
 
+// v1.04 B6：把「值类型结构体」装箱为引用计数对象，用于放进容器（数组 / map 值）。
+// 布局与 Dial 堆对象一致：[int64 refcount][payload...]，payload 起始处即对外指针。
+// 仅拷贝标量位模式；若结构体含句柄字段，调用处须额外 retain 各句柄字段
+// （本期仅放开「字段全为标量」的结构体，含句柄字段的结构体在语义层拒绝）。
+void *dial_struct_box(const void *src, int64_t size) {
+    void *p = dial_rc_alloc(size);
+    memcpy(p, src, (size_t)size);
+    return p;
+}
+
 void *dial_rc_clone(void *p, int64_t payload_size) {
     if (!p) return NULL;
     // 与 retain/release 对齐：传入已是 freed 的指针（refcount <= 0）时立刻终止，
