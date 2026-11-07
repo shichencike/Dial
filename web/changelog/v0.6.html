@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.6 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v06--2026-10-29">[v0.6] — 2026-10-29</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#addedv06-补充">Added（v0.6 补充）</a></li>
+<li><a href="#实测对照同一份越界代码三档行为">实测对照（同一份越界代码，三档行为）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v06--2026-10-29">[v0.6] — 2026-10-29</h2>
+<p>本版把 Zig 式 <strong>Fail-Fast</strong> 确立为与内存宪法并列的语言底线（见 README §20）：
+<strong>宁可当场崩溃，绝不产生未定义行为或静默错误数据。</strong></p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong>Fail-Fast 陷阱基础设施</strong>：新增 <code>runtime/dial_rt_trap.h</code> / <code>.c</code>，提供 <code>dial_trap()</code>（<code>__builtin_trap</code>，
+  x86 生成 <code>ud2</code>）、<code>dial_bounds_fail</code> / <code>dial_null_fail</code> / <code>dial_assert_fail</code>（先打印诊断再 trap）。
+  诊断走 <code>write(2)</code> 直写 stderr，并在陷阱前冲刷 stdout 缓冲，保证崩溃上下文完整。</li>
+<li><strong>LLVM Codegen 硬插入检查</strong>：</li>
+<li>数组下标读（<code>Expr::Index</code>）与写（<code>a[i] = v</code>）前插入边界检查，用一次<strong>无符号比较</strong>
+    同时判定 <code>idx &lt; 0</code> 与 <code>idx &gt;= len</code>（负数的位模式必然 &gt;= len）。</li>
+<li>整数除法前插入除零检查——LLVM 的 <code>sdiv</code> 除数为 0 时结果是 poison（UB），
+    优化器可据此把后续代码整段删掉，比崩溃危险得多。</li>
+<li>失败分支发射 <code>llvm.debugtrap</code>（Debug → x86 <code>int3</code>，可被调试器当断点捕获）
+    或 <code>llvm.trap</code>（ReleaseSafe → x86 <code>ud2</code>，指令更短），随后 <code>unreachable</code>。</li>
+<li><strong>C Runtime 边界检查</strong>：<code>dial_array_get</code> / <code>dial_array_set</code> / <code>dial_string_get</code> /
+  <code>dial_string_substring</code> 全部加入边界检查，越界调用 <code>dial_bounds_fail</code>。
+  另新增：OOM 不再返回 NULL（<code>dial_assert_fail</code>）、引用计数下溢检测（重复释放 /
+  use-after-free 当场终止）、<code>dial_array_length</code> / <code>dial_map_size</code> 的内部一致性断言。</li>
+<li><strong>三档安全等级</strong>：<code>--safety debug|safe|fast</code>，简写 <code>--release</code>（safe）、<code>--fast</code>（fast）。
+  等级<strong>同时</strong>作用于 LLVM IR 与 C Runtime（<code>-DDIAL_SAFETY=N</code>），是编译期常量，
+  ReleaseFast 下检查代码被编译器完全消除。默认永远是 Debug——安全是默认值。</li>
+<li><strong>测试组 D / E</strong>：新增 <code>tests/trap/</code>（5 个用例），D 组断言必须当场因信号终止且
+  <strong>不得打印哨兵 9999</strong>；E 组用 <code>--fast</code> 作对照组，证明陷阱确由编译器插入而非碰巧崩溃。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li><code>dialc build</code> / <code>run</code> 新增 <code>--safety</code> / <code>--release</code> / <code>--fast</code> 参数。</li>
+<li>C 静态库按安全等级分目录构建（<code>.dialc_build/safety-&lt;N&gt;/</code>），避免不同等级的 <code>.o</code> 互相污染。</li>
+<li>README §17.1「未定义行为」重写：越界 / 除零在默认等级下<strong>不再是 UB</strong>，而是确定性崩溃。</li>
+<li>README §11.5 越界行为：由「无边界检查」改为「默认有边界检查，仅 <code>--fast</code> 回落到 UB」。</li>
+</ul>
+<h3 id="addedv06-补充">Added（v0.6 补充）</h3>
+<ul>
+<li><strong><code>--fast</code> 危险警告</strong>：编译器在使用 <code>--fast</code>（ReleaseFast）时<strong>当场打印醒目警告</strong>，
+  说明该模式会关闭所有边界检查、除零检查和空指针保护，越界将退化为 C 的 UB。
+  文档侧同步写入 README §3.2 与 §20.4，并出现在官网首页卡片。
+  安全性是默认值，选择放弃它的人必须当场被告知代价。</li>
+</ul>
+<h3 id="实测对照同一份越界代码三档行为">实测对照（同一份越界代码，三档行为）</h3>
+<table>
+<thead>
+<tr>
+<th>等级</th>
+<th><code>a[99]</code>（长度 3）</th>
+<th><code>100 / 0</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Debug（默认）</td>
+<td>SIGTRAP(5)，<code>int3</code> 当场终止</td>
+<td>SIGTRAP(5) 当场终止</td>
+</tr>
+<tr>
+<td>ReleaseSafe</td>
+<td>SIGILL(4)，<code>ud2</code> 当场终止</td>
+<td>SIGILL(4) 当场终止</td>
+</tr>
+<tr>
+<td>ReleaseFast</td>
+<td>读出 <code>0</code> 并继续执行，打印哨兵</td>
+<td>打印 <code>0</code> 并继续执行（<strong>静默错误结果</strong>）</td>
+</tr>
+</tbody>
+</table>
+<hr /><p class="note">← 更早：<a href="v0.5.html">v0.5</a> · 更新：<a href="v0.61.html">v0.61</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

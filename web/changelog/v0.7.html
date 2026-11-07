@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.7 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v07--2026-10-30">[v0.7] — 2026-10-30</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#设计约束用户拍板">设计约束（用户拍板）</a></li>
+<li><a href="#推迟不在本版">推迟（不在本版）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v07--2026-10-30">[v0.7] — 2026-10-30</h2>
+<p>本版落地<strong>可恢复异常（try / catch / throw）</strong>（见 README <a href="README.md#26-可恢复异常trycatchthrow">§26</a>），
+补齐了 v0.6 只有 <code>ud2</code>（不可恢复崩溃）的那一半；同时正式声明<strong>三重开源许可</strong>。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong>可恢复异常语法</strong>：<code>throw Error("msg");</code> 抛出；<code>try { } catch e { }</code> 捕获（<strong>catch 后无圆括号</strong>，
+  <code>e</code> 类型自动推导为 <code>error</code>）；<code>try { } catch { }</code> 省略变量名表示忽略具体错误。</li>
+<li><strong>内建 <code>Error</code> 类型</strong>：<code>error</code>，底层 <code>ptr</code>（不透明），<strong>受 ARC 管理</strong>；构造 <code>Error("msg")</code>，
+  方法 <code>.msg()</code> 取消息字符串；<code>print(e)</code> 等价于打印 <code>e.msg()</code>。</li>
+<li><strong>C Runtime</strong>：新增 <code>stdlib/dial_error.{h,c}</code>（引用计数错误对象）与
+  <code>stdlib/dial_exc.{h,c}</code>（<code>jmp_buf</code> 容器 <code>DialExBuf</code> + <code>dial_throw_to</code> / <code>dial_exbuf_take_err</code> / <code>dial_panic</code>）。</li>
+<li><strong>失败与业务分离</strong>：<code>open</code> / <code>read</code> / <code>write</code> 失败由「返回错误标志」改为<strong>抛出 Error</strong>
+  （判据在 C 侧、抛出在 Dial 侧）；越界 / 除零<strong>仍走</strong> <code>ud2</code> / Fail-Fast，绝不混入异常。</li>
+<li><strong>三重开源许可</strong>：<code>GPL-3.0 OR MIT OR Apache-2.0</code>（任选其一）。三份协议原文
+  <code>LICENSE-GPLv3</code> / <code>LICENSE-MIT</code> / <code>LICENSE-APACHE</code> 与说明文档 <code>LICENSE</code> 随源码及发布包分发。</li>
+<li><strong>打包脚本</strong> <code>tools/package.sh</code>：发布压缩包<strong>强制校验</strong>四份许可文件与 <code>.git</code> 均在包内，缺一即拒绝打包。</li>
+<li><strong>生态规划草案</strong>：README 新增 <a href="README.md#25-包分发与依赖管理生态规划--最终规范">§25 包分发与依赖管理</a>
+  （<code>.dialpkg</code> 专属格式、自动解压到 <code>~/.dial/packages/</code>、接口签名文件 <code>.diali</code>、SHA256 强制校验、零版本冲突）。</li>
+<li><strong>示例与负向用例</strong>：<code>examples/try_catch_demo.dial</code>、<code>examples/error_zero_cost.dial</code>；
+  <code>tests/bad/{throw_non_error,catch_with_paren,throw_outside_try}.dial</code>。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li><code>dial_file_read</code> 的失败语义由「返回空串」改为<strong>返回 <code>NULL</code></strong>，使「读取失败」与「读到空内容」不再混淆
+  （成功读取 0 字节仍返回空串）。</li>
+<li><code>readme</code> 同步：顶部三重许可说明、§4.3 关键字（补 <code>try</code>/<code>catch</code>/<code>throw</code>）、§5.1 类型表（补 <code>error</code>）、
+  §17.2（补回 <code>move_to</code> / 并发为「规划中」）、§24.2（文件 IO 现抛 Error）、新增 §25 与 §26。</li>
+</ul>
+<h3 id="设计约束用户拍板">设计约束（用户拍板）</h3>
+<ul>
+<li><strong>极简语法</strong>：只 <code>throw Error(...)</code> 与 <code>try/catch</code>；<strong>严禁抛出非 <code>Error</code> 类型</strong>（裸 int/string 编译期拒绝）。</li>
+<li><strong>catch 后不得有圆括号</strong>：括号在 C 骨架里属于函数或条件专属，用在 <code>catch</code> 后属视觉污染。</li>
+<li><strong>底层防漏</strong>：跳转前<strong>必须</strong>自动为 try 作用域内所有活跃 ARC 局部插入 <code>release</code>，绝不泄漏。</li>
+<li><strong>失败与业务分离</strong>：系统崩溃走 <code>ud2</code>（Fail-Fast），业务失败走 <code>throw</code>（可恢复）。</li>
+<li><strong>零隐式负担</strong>：无异常的代码运行时开销为零；已用 <code>nm</code> 实测验证（见 §26.6）。</li>
+</ul>
+<h3 id="推迟不在本版">推迟（不在本版）</h3>
+<ul>
+<li><code>move_to</code> 所有权转移与多线程并发（thread / channel）——需先有并发原语，留待后续专属版本。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.61.html">v0.61</a> · 更新：<a href="v0.8.html">v0.8</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

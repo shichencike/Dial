@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.2 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v02--基线版本本仓库首个规范化基线">[v0.2] — 基线版本（本仓库首个规范化基线）</a></li>
+</ul>
+</div>
+<h2 id="v02--基线版本本仓库首个规范化基线">[v0.2] — 基线版本（本仓库首个规范化基线）</h2>
+<blockquote>
+<p>注：本仓库的历史从 v0.3 的源码状态起记。<code>v0.2</code> 及以下版本的特性以下列条目作为基线描述，
+具体提交不在本仓库历史中。</p>
+</blockquote>
+<ul>
+<li>编译器前端（Rust + inkwell）把 Dial AST 翻译为 LLVM IR；IR 全程在内存中构建并直接 <code>write_to_file</code> 写出 <code>.o</code>。</li>
+<li>两步构建：<code>zig cc</code> 把 <code>stdlib/</code> 与 <code>runtime/</code> 编译归档为 <code>libdial_std.a</code>，再与用户 <code>.o</code> 链接。</li>
+<li>不透明指针契约：<code>string</code> / <code>int[]</code> 在 IR 中只是 <code>ptr</code>，用户代码无法触碰其内存布局。</li>
+<li>引用计数 + COW 所有权模型，Sema 阶段做数据流/逃逸分析以静态消除运行时开销。</li>
+<li>基本类型 <code>int</code> / <code>float</code> / <code>bool</code> / <code>string</code> / <code>int[]</code> / 结构体（值类型）。</li>
+<li><code>and</code> / <code>or</code> 在 v0.2 中为<strong>非短路</strong>（旧行为，v0.3 已改为短路）；<code>int→float</code> 在 v0.2 中存在隐式提升（v0.3 已废除）。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="unreleased.html">未实现 / 尚未落地</a> · 更新：<a href="v0.3.html">v0.3</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

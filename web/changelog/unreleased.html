@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 未实现 / 尚未落地 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#未实现-unreleased-v02v03-语言层均未暴露v04-起部分已落地">未实现（-Unreleased-，v0.2/v0.3 语言层均未暴露，v0.4 起部分已落地）</a></li>
+</ul>
+</div>
+<h2 id="未实现-unreleased-v02v03-语言层均未暴露v04-起部分已落地">未实现（-Unreleased-，v0.2/v0.3 语言层均未暴露，v0.4 起部分已落地）</h2>
+<ul>
+<li>多维数组、非 <code>int</code> 元素数组、<code>char</code> 类型。</li>
+<li>裸块 <code>{ ... }</code>。</li>
+<li>模块 / 包 / import、泛型、接口、trait、闭包。</li>
+<li>指针、地址取值、指针算术（永不提供）；运算符重载（永不提供）；可变全局状态（<code>var</code> 全局变量，v1.04 §37.1 统一措辞）。</li>
+</ul><p class="note">更新：<a href="v0.2.html">v0.2</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

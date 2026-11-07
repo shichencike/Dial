@@ -85,7 +85,7 @@ dialc/
 │   ├── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
 │   └── pkg_install_url.py  # L 组：包 URL 安装 + 一键安装脚本
 ├── tools/
-│   ├── build_web.py        # 生成官网 web/（规范 / 更新日志 / 首页）
+│   ├── build_web.py        # 生成官网 web/（规范 / 更新日志索引 + 每版本分页 / 首页）
 │   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
 │   ├── check_version.py    # 校验版本号在 README / CHANGELOG / 官网三处一致
 │   ├── check_lsp_stdout_purity.py  # 校验 LSP 路径上不出现 stdout 裸输出（协议流纯净性）
@@ -96,7 +96,7 @@ dialc/
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
 ├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十三组测试 + 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
-├── web/                    # 官网产物（由 tools/build_web.py 生成）
+├── web/                    # 官网产物（由 tools/build_web.py 生成；更新日志分页在 web/changelog/）
 └── README.md               # 本文件
 ```
 
@@ -1942,7 +1942,9 @@ Rust 前端与 C Runtime 的代码**尽量只依赖标准库**。任何新引入
 
 > 本节仅保留 **v0.3 及以前** 的相对变更摘要（早期历史）。
 > **v0.4 及之后** 的每个版本相对变更、跨文件符号表（v0.95）等**完整记录见 [CHANGELOG.md](CHANGELOG.md)**，
-> 官网同步渲染为 [changelog.html](web/changelog.html)；最新版本号与能力矩阵见 [首页 index.html](web/index.html)。
+> 官网渲染为[版本索引 changelog.html](web/changelog.html)与 `web/changelog/` 下**每版本一页的详情**
+> （正文与 CHANGELOG.md 对应条目逐字一致；索引 + 分页是为避免单文件 200 KB 的长滚动与移动端加载成本，
+> 并消除跨版本重复小节标题的锚点撞名）；最新版本号与能力矩阵见 [首页 index.html](web/index.html)。
 
 ### 22.0 v0.61（相对 v0.6）
 

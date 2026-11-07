@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 安装与发布流程调整 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#安装与发布流程调整--2026-11-06">[安装与发布流程调整] — 2026-11-06</a><ul>
+<li><a href="#安装脚本零硬编码">安装脚本（零硬编码）</a></li>
+<li><a href="#发布流程同一页面">发布流程（同一页面）</a></li>
+<li><a href="#验证">验证</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="安装与发布流程调整--2026-11-06">[安装与发布流程调整] — 2026-11-06</h2>
+<p><strong>目标</strong>：安装脚本不再硬编码任何版本 / 标签，下载地址改为能重定向到最新 Release；
+标准库包与其他资产同处一个 Release 页面，方便重定向、也方便被找到。</p>
+<h3 id="安装脚本零硬编码">安装脚本（零硬编码）</h3>
+<ul>
+<li><code>tools/install-dial.sh</code> 删除 <code>DEFAULT_VERSION="1.3.0"</code>、<code>STDLIB_RELEASE</code> 默认
+  <code>stdlib-v1.3.0</code>；<code>tools/install-dial.ps1</code> 删除 <code>$DialVersion = "0.99.1"</code>（旧残留）
+  与 <code>$StdlibRelease</code> 默认值。版本 / 标签 / 资产名全部运行时解析；</li>
+<li>新增资产解析：调 <code>api.github.com/repos/&lt;repo&gt;/releases/latest</code>（钉版本时改调
+  <code>releases/tags/&lt;tag&gt;</code>）拿到 <code>tag_name</code> 与 <code>assets[].name</code>，按平台 slug 选 zip、
+  按扩展名选 <code>.vsix</code>，<code>stdlib.dialpkg</code> 名字固定；</li>
+<li>下载地址统一为 <code>releases/latest/download/&lt;资产名&gt;</code>，钉版本时退化为
+  <code>releases/download/&lt;tag&gt;/&lt;资产名&gt;</code>。GitHub 的 latest 下载<strong>要求精确资产名</strong>，
+  而本项目资产名带版本号，故必须由清单解析而非推导——顺带修掉
+  <code>dialc-v1.3-linux-x86_64.zip</code>（CI 实际命名）与旧脚本推导的
+  <code>dialc-v1.3.0-…</code> 不一致造成的 404；</li>
+<li><code>DIAL_VERSION</code> / <code>STDLIB_RELEASE</code> 降级为<strong>可选钉版本</strong>覆盖；<code>STDLIB_URL</code> /
+  <code>DIAL_VSIX_URL</code> 覆盖、镜像优先 + 官方回退、断点续传、失败可见原因、卸载与
+  <code>.dialpkg</code> 扫描均不变。API 不可达时给出明确指引，不静默猜资产名。</li>
+</ul>
+<h3 id="发布流程同一页面">发布流程（同一页面）</h3>
+<ul>
+<li><code>.github/workflows/ci.yml</code> 的 <code>release</code> 作业新增「组装 stdlib.dialpkg」步骤，
+  并把 <code>dist-stdlib/stdlib.dialpkg</code> 加入上传资产列表：每个 <code>v*</code> Release 现在同时含
+  三平台 zip、<code>.vsix</code> 与 <code>stdlib.dialpkg</code>，<strong>即使 stdlib 源码一行未改也照常重新组装</strong>
+  （ABI 与编译器版本绑定）；Release 说明里的安装命令也改为零版本号的一键脚本；</li>
+<li>旧 <code>publish-stdlib</code> 独立通道仅作向后兼容保留，并标记 <code>prerelease: true</code>，
+  避免它抢走 <code>releases/latest</code> 的指向；历史 <code>stdlib-v1.0.0</code> Release 及旧链接仍可用；</li>
+<li>README 的安装说明、§25.10、§32.5.1、§32.6 同步。历史分版条目里「独立发版 /
+  两个标签」的描述系当时做法，不再代表当前约定。</li>
+</ul>
+<h3 id="验证">验证</h3>
+<ul>
+<li><code>bash -n</code> 语法通过；<code>--help</code> / <code>--version</code> 输出正常；</li>
+<li>实测 GitHub API 解析出当前 latest 的 <code>tag_name</code> 与 4 个资产名，
+  <code>releases/latest/download/&lt;zip&gt;</code> 与 <code>&lt;vsix&gt;</code> 均返回 <strong>200</strong> 并正确重定向到真实资产；</li>
+<li><code>stdlib.dialpkg</code> 在当前 latest（<code>v0.98</code>，旧 Release 未附带该资产）返回 404，
+  脚本会给出「该版本发布时未附带 stdlib.dialpkg」的明确告警，符合预期。</li>
+</ul>
+<blockquote>
+<p><strong>后续修复（同日）</strong>：上述两个测试作业已由上方「CI 修复与 v1.0 标签重打」
+章节修好；<code>v1.0</code> 标签删除后重打并推送，新的 <code>v*</code> Release 已附带
+<code>stdlib.dialpkg</code>，<code>releases/latest</code> 随之指向该页面，安装脚本无需再改动。
+本节记录的是修复前的发布流程设计与当时的已知前置。</p>
+</blockquote>
+<hr /><p class="note">← 更早：<a href="v1.03.html">v1.03</a> · 更新：<a href="ci-fix-v1-0-retag.html">CI 修复与 v1.0 标签重打</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.61 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v061--2026-10-29">[v0.61] — 2026-10-29</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#设计约束用户拍板">设计约束（用户拍板）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v061--2026-10-29">[v0.61] — 2026-10-29</h2>
+<p>本版落地<strong>文件 IO（file 句柄）</strong>（见 README <a href="README.md#24-文件-iofile-句柄">§24</a>），并正式确立<strong>版本号规则</strong>（最多两位小数、禁止跳版、严格按时间递增，见 README <a href="README.md#23-版本号规则">§23</a>）。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong><code>file</code> 不透明指针类型</strong>：新增 <code>file</code> 类型，IR 中为 <code>ptr</code>，封装 C 的 <code>FILE*</code>，<strong>不受 ARC 管理</strong>；用户必须显式 <code>open</code> / <code>close</code>（与内存宪法显式指针回收契约一致）。</li>
+<li><strong><code>open</code> / <code>read</code> / <code>write</code> / <code>close</code></strong>：仅封装 C 标准库 <code>fopen</code> / <code>fread</code> / <code>fwrite</code> / <code>fclose</code>，Rust 前端不重写任何文件逻辑；只提供最基础的 C 风格 API，无链式流、无额外语法糖。</li>
+<li><strong>C 侧实现</strong>：<code>stdlib/dial_io.c</code> 新增 <code>dial_file_open</code> / <code>dial_file_read</code> / <code>dial_file_write</code> / <code>dial_file_close</code>；<code>stdlib/dial_string.c</code> 新增 <code>dial_string_cstr</code> / <code>dial_string_from_bytes</code>（供 <code>read</code> 从字节缓冲区构造字符串）。</li>
+<li><strong>示例与负向用例</strong>：<code>examples/file_demo.dial</code>（写后读回并打印，黄金输出 <code>dialc-file-io</code>）；<code>tests/bad/io_bad_arg.dial</code>（open 参数类型错误须在编译期拒绝）。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li>遵循版本号规则：本版属「小功能 / 新语法」，版本号 <code>v0.6 → v0.61</code>（Cargo <code>version</code> 字段按三段式写作 <code>0.61.0</code>，语义等同 <code>v0.61</code>）。</li>
+<li>README 同步：§4.3 关键字、§5.1 基本类型、§15 FFI 表与 C 导出函数、§17.2（从「未实现」移除文件 IO）、新增 <a href="README.md#24-文件-iofile-句柄">§24 文件 IO</a> 与 <a href="README.md#22-早期版本摘要v03-及以前">§22 早期版本摘要</a>。</li>
+</ul>
+<h3 id="设计约束用户拍板">设计约束（用户拍板）</h3>
+<ul>
+<li><strong>绝不引入可变全局状态</strong>：文件句柄显式传递（v1.04 §37.1 统一措辞，原写作「绝不引入全局变量」）。</li>
+<li><strong>底层走 C 标准库</strong>：直接封装 <code>FILE*</code>，不在 Rust 前端重写文件系统逻辑。</li>
+<li><strong>错误处理（无异常）</strong>：打开失败返回空指针、读失败返回空串、写失败返回 <code>-1</code>；不引入 <code>Result</code> 封装。</li>
+<li><strong>不搞花哨语法</strong>：只做 <code>open</code> / <code>read</code> / <code>write</code> / <code>close</code> 基础 API，无链式文件读取流。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.6.html">v0.6</a> · 更新：<a href="v0.7.html">v0.7</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,317 @@
+{
+  "source": "CHANGELOG.md",
+  "index": "../changelog.html",
+  "count": 31,
+  "versions": [
+    {
+      "id": "v1.04",
+      "label": "v1.04",
+      "date": "2026-11-06",
+      "note": "2026-11-06",
+      "topic": "FFI 成为语言一等公民",
+      "file": "v1.04.html",
+      "newer": null,
+      "older": "v1-0-milestone"
+    },
+    {
+      "id": "v1-0-milestone",
+      "label": "v1.0 里程碑",
+      "date": "",
+      "note": "分版记录（v1.00 ~ v1.03）",
+      "topic": "v1.0 里程碑达成的分版记录（v1.00 ~ v1.03）",
+      "file": "v1-0-milestone.html",
+      "newer": "v1.04",
+      "older": "ci-fix-v1-0-retag"
+    },
+    {
+      "id": "ci-fix-v1-0-retag",
+      "label": "CI 修复与 v1.0 标签重打",
+      "date": "2026-11-06",
+      "note": "2026-11-06",
+      "topic": "修复红色 CI 作业并重打 v1.0 标签",
+      "file": "ci-fix-v1-0-retag.html",
+      "newer": "v1-0-milestone",
+      "older": "install-release-flow"
+    },
+    {
+      "id": "install-release-flow",
+      "label": "安装与发布流程调整",
+      "date": "2026-11-06",
+      "note": "2026-11-06",
+      "topic": "安装脚本零硬编码，标准库与其他资产同处一个 Release",
+      "file": "install-release-flow.html",
+      "newer": "ci-fix-v1-0-retag",
+      "older": "v1.03"
+    },
+    {
+      "id": "v1.03",
+      "label": "v1.03",
+      "date": "2026-11-05",
+      "note": "2026-11-05",
+      "topic": "回调（函数指针）与可变参数",
+      "file": "v1.03.html",
+      "newer": "install-release-flow",
+      "older": "v1.02"
+    },
+    {
+      "id": "v1.02",
+      "label": "v1.02",
+      "date": "2026-11-05",
+      "note": "2026-11-05",
+      "topic": "goto / with / 裸指针，补齐不透明句柄契约",
+      "file": "v1.02.html",
+      "newer": "v1.03",
+      "older": "v1.01"
+    },
+    {
+      "id": "v1.01",
+      "label": "v1.01",
+      "date": "2026-11-05",
+      "note": "2026-11-05",
+      "topic": "按「真实程序」盘点后的缺口补齐",
+      "file": "v1.01.html",
+      "newer": "v1.02",
+      "older": "v1.00"
+    },
+    {
+      "id": "v1.00",
+      "label": "v1.00",
+      "date": "2026-11-04",
+      "note": "2026-11-04",
+      "topic": "语言特性补齐（五组）+ 泛型容器",
+      "file": "v1.00.html",
+      "newer": "v1.01",
+      "older": "v0.99.1"
+    },
+    {
+      "id": "v0.99.1",
+      "label": "v0.99.1",
+      "date": "2026-11-03",
+      "note": "2026-11-03",
+      "topic": "v0.99 修复发布（补丁位），行为完全一致",
+      "file": "v0.99.1.html",
+      "newer": "v1.00",
+      "older": "v0.99"
+    },
+    {
+      "id": "v0.99",
+      "label": "v0.99",
+      "date": "2026-11-03",
+      "note": "2026-11-03",
+      "topic": "数组元素扩展到任意 8 字节句柄，支持多维数组",
+      "file": "v0.99.html",
+      "newer": "v0.99.1",
+      "older": "v0.98.1"
+    },
+    {
+      "id": "v0.98.1",
+      "label": "v0.98.1",
+      "date": "2026-11-02",
+      "note": "2026-11-02",
+      "topic": "v0.98 修复发布（补丁位），行为完全一致",
+      "file": "v0.98.1.html",
+      "newer": "v0.99",
+      "older": "v0.98"
+    },
+    {
+      "id": "v0.98",
+      "label": "v0.98",
+      "date": "2026-11-02",
+      "note": "2026-11-02",
+      "topic": "dialc lsp 打磨到工业级 + 三套编辑器接入",
+      "file": "v0.98.html",
+      "newer": "v0.98.1",
+      "older": "v0.97"
+    },
+    {
+      "id": "v0.97",
+      "label": "v0.97",
+      "date": "2026-10-31",
+      "note": "2026-10-31",
+      "topic": "三平台原生构建（Linux / Windows / Termux）",
+      "file": "v0.97.html",
+      "newer": "v0.98",
+      "older": "stdlib-v1.0.0"
+    },
+    {
+      "id": "stdlib-v1.0.0",
+      "label": "stdlib v1.0.0",
+      "date": "2026-10-31",
+      "note": "2026-10-31（独立 Release，tag `stdlib-v1.0.0`）",
+      "topic": "标准库改造为 .dialpkg，独立发版、与编译器解耦",
+      "file": "stdlib-v1.0.0.html",
+      "newer": "v0.97",
+      "older": "v0.96"
+    },
+    {
+      "id": "v0.96",
+      "label": "v0.96",
+      "date": "2026-10-31",
+      "note": "2026-10-31",
+      "topic": "包 URL 安装 + 一键安装脚本",
+      "file": "v0.96.html",
+      "newer": "stdlib-v1.0.0",
+      "older": "v0.95"
+    },
+    {
+      "id": "v0.95",
+      "label": "v0.95",
+      "date": "2026-10-31",
+      "note": "2026-10-31",
+      "topic": "LSP 首次增强：Hover / 跳转定义 / 补全",
+      "file": "v0.95.html",
+      "newer": "v0.96",
+      "older": "v0.94"
+    },
+    {
+      "id": "v0.94",
+      "label": "v0.94",
+      "date": "2026-10-31",
+      "note": "2026-10-31",
+      "topic": "dialc lsp 语言服务器骨架",
+      "file": "v0.94.html",
+      "newer": "v0.95",
+      "older": "v0.93"
+    },
+    {
+      "id": "v0.93",
+      "label": "v0.93",
+      "date": "2026-10-31",
+      "note": "2026-10-31",
+      "topic": "import 与 .dialpkg 包分发落地",
+      "file": "v0.93.html",
+      "newer": "v0.94",
+      "older": "v0.92"
+    },
+    {
+      "id": "v0.92",
+      "label": "v0.92",
+      "date": "2026-10-31",
+      "note": "2026-10-31",
+      "topic": "char 单字符类型 + 修复宪法级文档矛盾",
+      "file": "v0.92.html",
+      "newer": "v0.93",
+      "older": "v0.91"
+    },
+    {
+      "id": "v0.91",
+      "label": "v0.91",
+      "date": "2026-10-30",
+      "note": "2026-10-30",
+      "topic": "多路复用 select",
+      "file": "v0.91.html",
+      "newer": "v0.92",
+      "older": "v0.9"
+    },
+    {
+      "id": "v0.9",
+      "label": "v0.9",
+      "date": "2026-10-30",
+      "note": "2026-10-30",
+      "topic": "并发底座安全加固：判空 / 多消费者安全 / 超时",
+      "file": "v0.9.html",
+      "newer": "v0.91",
+      "older": "v0.81"
+    },
+    {
+      "id": "v0.81",
+      "label": "v0.81",
+      "date": "2026-10-30",
+      "note": "2026-10-30",
+      "topic": "通道关闭与 EOF",
+      "file": "v0.81.html",
+      "newer": "v0.9",
+      "older": "v0.8"
+    },
+    {
+      "id": "v0.8",
+      "label": "v0.8",
+      "date": "2026-10-30",
+      "note": "2026-10-30",
+      "topic": "所有权转移 move_to 与多线程并发",
+      "file": "v0.8.html",
+      "newer": "v0.81",
+      "older": "v0.7"
+    },
+    {
+      "id": "v0.7",
+      "label": "v0.7",
+      "date": "2026-10-30",
+      "note": "2026-10-30",
+      "topic": "可恢复异常 try / catch / throw + 三重许可",
+      "file": "v0.7.html",
+      "newer": "v0.8",
+      "older": "v0.61"
+    },
+    {
+      "id": "v0.61",
+      "label": "v0.61",
+      "date": "2026-10-29",
+      "note": "2026-10-29",
+      "topic": "文件 IO（file 句柄）+ 版本号规则",
+      "file": "v0.61.html",
+      "newer": "v0.7",
+      "older": "v0.6"
+    },
+    {
+      "id": "v0.6",
+      "label": "v0.6",
+      "date": "2026-10-29",
+      "note": "2026-10-29",
+      "topic": "Fail-Fast 确立为语言底线",
+      "file": "v0.6.html",
+      "newer": "v0.61",
+      "older": "v0.5"
+    },
+    {
+      "id": "v0.5",
+      "label": "v0.5",
+      "date": "2026-10-29",
+      "note": "2026-10-29",
+      "topic": "循环控制流 + 代码编写纪律",
+      "file": "v0.5.html",
+      "newer": "v0.6",
+      "older": "v0.4"
+    },
+    {
+      "id": "v0.4",
+      "label": "v0.4",
+      "date": "2026-10-29",
+      "note": "2026-10-29",
+      "topic": "部分标准库 + 控制流语法糖 + 内存宪法",
+      "file": "v0.4.html",
+      "newer": "v0.5",
+      "older": "v0.3"
+    },
+    {
+      "id": "v0.3",
+      "label": "v0.3",
+      "date": "2026-10-28",
+      "note": "2026-10-28",
+      "topic": "只改语义与诊断，不动架构契约",
+      "file": "v0.3.html",
+      "newer": "v0.4",
+      "older": "v0.2"
+    },
+    {
+      "id": "v0.2",
+      "label": "v0.2",
+      "date": "",
+      "note": "基线版本（本仓库首个规范化基线）",
+      "topic": "本仓库首个规范化基线",
+      "file": "v0.2.html",
+      "newer": "v0.3",
+      "older": "unreleased"
+    },
+    {
+      "id": "unreleased",
+      "label": "未实现 / 尚未落地",
+      "date": "",
+      "note": "",
+      "topic": "早期语言层未实现 / 尚未落地清单",
+      "file": "unreleased.html",
+      "newer": "v0.2",
+      "older": null
+    }
+  ]
+}

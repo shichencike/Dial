@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.98 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v098--2026-11-02">[v0.98] — 2026-11-02</a><ul>
+<li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更_1">Changed（变更）</a></li>
+<li><a href="#轮-2导航已完成">轮 2（导航，已完成）</a></li>
+<li><a href="#轮-3编写辅助已完成">轮 3（编写辅助，已完成）</a></li>
+<li><a href="#轮-4高级已完成">轮 4（高级，已完成）</a></li>
+<li><a href="#lsp-规范符合性只用标准形状不自定义扩展">LSP 规范符合性：只用标准形状，不自定义扩展</a></li>
+<li><a href="#诊断错误码--定位--缺包不再静默">诊断：错误码 + 定位 + 缺包不再静默</a></li>
+<li><a href="#fixed修复">Fixed（修复）</a></li>
+<li><a href="#后续轮次路线">后续轮次（路线）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v098--2026-11-02">[v0.98] — 2026-11-02</h2>
+<p>本版把 <code>dialc lsp</code> 从「骨架 + 基础增强」打磨到<strong>工业级可用</strong>，并补齐三套主流编辑器的接入与安装包。</p>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li><strong><code>--fast</code>（ReleaseFast）不再是「只关检查」</strong>：在关闭运行期检查之外，现在开启三层编译器终极优化，
+  让 <code>--fast</code> 真正名副其实（此前它只关掉 Fail-Fast 检查，机器码仍是普通 O2）。</li>
+<li><strong>① 自动向量化 (SIMD) + 循环展开</strong>：LLVM 切到 <code>OptimizationLevel::Aggressive</code>（O3），
+    并按宿主实测指令集挑对应的 x86-64 微架构级别（<code>x86-64-v2/v3/v4</code> → SSE4.2 / AVX2 / AVX-512，
+    ARM64 显式 <code>+neon</code>），一次直接吃 4~8 个 int64；循环展开器同时压低分支预测开销。</li>
+<li><strong>② LTO 链接时优化</strong>：<code>--fast</code> 现在把 inkwell 产出的 LLVM bitcode 经 <code>clang -flto -O3</code> 编成
+    含 LTO bitcode 的「胖对象」，C 运行时也逐文件以 <code>-flto</code> 编译，链接时由 clang 整体重排——
+    <code>dial_array_get</code>/<code>push</code> 等热函数被直接内联进主程序，热循环零 <code>call</code> 开销（反汇编可证）。</li>
+<li><strong>③ PGO 剖析引导优化（新增 <code>--pgo</code>）</strong>：先插桩跑一遍训练样本、合并 profile，再据热点重排指令
+    布局（热路径顶到 I-Cache 最前）。<code>--pgo</code> 必须配合 <code>--fast</code>（需本机 <code>clang</code> 支持）。</li>
+<li>三者都需要本机 <code>clang</code>；若 <code>DIAL_C_COMPILER</code> 指向非 clang，则优雅降级为「仅 O3 + SIMD」，
+    保留 SIMD 收益、放弃跨模块 LTO/PGO。生成的二进制按本机 CPU 调优，仅供本机运行。</li>
+<li>新增性能基准示例 <a href="examples/bench_array.dial"><code>examples/bench_array.dial</code></a>（1000 万次 push + 遍历求和），
+  作为上述三层优化的「标准考题」。</li>
+</ul>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong>编辑器插件安装包（三主流）</strong>：编译型语言的编辑器支持是必做的苦活，本版落地三套。</li>
+<li><code>editors/vscode/</code>：<strong>手写 LSP 客户端</strong>（无 npm 依赖），<code>build.sh</code> 打包成 <code>dial-*.vsix</code>
+    （<code>code --install-extension</code> 侧载；CI 在 <code>v*</code> 发版时现构建并附到 Release）。</li>
+<li><code>editors/neovim/</code>：零依赖，只用 Neovim 内置 LSP 客户端（<code>ftdetect/</code> + <code>plugin/</code>，拷进 <code>runtimepath</code>）。</li>
+<li><code>editors/emacs/</code>：<strong>不开发插件</strong>——用 Emacs 内置 <code>eglot</code> 原生连 LSP，仅提供 <code>init.el</code> 片段。</li>
+<li>其余编辑器（JetBrains / Zed / Sublime 等）只要能启动 <code>dialc lsp</code> 即可接入，不再单独维护插件。</li>
+<li><code>editors/README.md</code>：三编辑器总览与能力矩阵。</li>
+</ul>
+<h3 id="changed变更_1">Changed（变更）</h3>
+<ul>
+<li><strong>LSP 能力协商</strong>：<code>initialize</code> 读取客户端 <code>capabilities</code>，按声明动态广播能力（老客户端不报能力也不报错）；
+  并新增 <code>window/logMessage</code> 自诊断通道（不污染协议流、不进 stdout）。</li>
+<li><strong>一键安装脚本自动补齐配套件</strong>：除编译器、<code>stdlib/</code>+<code>runtime/</code>、<code>.dialpkg</code> 外，
+  现在还会<strong>自动下载并安装 VS Code 插件</strong>（从 Release 取 <code>dial-&lt;版本&gt;.vsix</code>，
+  再用 <code>code --install-extension</code> 装上），不必再自己去 Release 页翻资产、手动侧载。</li>
+<li>版本只从 <code>DIAL_VERSION</code> 一处推导（Release 标签 <code>v0.98.1</code> 与资产名 <code>dial-0.98.1.vsix</code>
+    都由它算出），不会出现三处各说各话、下次发版又忘了改其中一个。</li>
+<li>没装 VS Code / 离线时<strong>只告警、不阻断</strong>安装（编译器与包安装不受影响）。</li>
+<li><strong>不加 <code>--force</code></strong>：用户若已装了更新版插件，不该在「一键安装」里被悄悄降级。</li>
+<li>下载 URL 可用 <code>DIAL_VSIX_URL</code> 覆盖（自建镜像 / 网络受限时用）。</li>
+<li>Neovim / Emacs 侧无需安装动作（零依赖配置），故不动。</li>
+<li><strong>一键安装脚本不再「一键卡住」</strong>：下载标准库与插件的 curl 补上
+  <code>--connect-timeout 15 --max-time</code>。此前没有超时——GitHub 不可达时 curl 会一直挂着，
+  用户看到的是脚本<strong>不动</strong>，而不是一句清晰的失败提示。一键安装卡死比装不上更让人手足无措。</li>
+<li><strong>VS Code 插件接通轮 2~4 的全部能力</strong>：文档大纲、引用查找、重命名（含 prepareRename）、签名帮助、
+  保守格式化、参数 inlay 提示、代码动作、折叠范围、选择范围、文档链接——插件不再只转发三个 provider。</li>
+<li><strong>Neovim 插件补上新能力的键位</strong>：<code>&lt;leader&gt;f</code> 格式化、<code>&lt;leader&gt;a</code> 代码动作、<code>&lt;leader&gt;ds</code> 文档大纲，
+  并启用 Neovim 0.10+ 的 <code>foldingRange</code> 客户端（0.9 用 <code>pcall</code> 兜住）。</li>
+<li><strong>补全增强</strong>：补全项带 <code>textEdit</code> 精确替换范围（修正旧实现「名字重复拼在后面」的 bug）+ <code>sortText</code>
+  排序（函数/外部函数最前、结构体/不透明类型次之、变量/形参最后）+ <code>.</code> 触发字符。</li>
+<li><strong>VS Code 插件接通 hover / 跳转定义 / 补全</strong>：原扩展仅接了诊断与语义高亮，现补齐三个 provider 转发到
+  <code>dialc lsp</code>；<code>initialize</code> 发送真实 <code>capabilities</code>；<code>package.json</code> 升 <code>0.98.0</code>。</li>
+<li>文档同步：<code>README §28.7</code>（编辑器插件安装包与 LSP 能力清单）、<code>ARCHITECTURE</code>、<code>CHANGELOG</code> 更新；
+  各编辑器 README 与 <code>web/</code> 重新生成。</li>
+</ul>
+<h3 id="轮-2导航已完成">轮 2（导航，已完成）</h3>
+<ul>
+<li><strong>LSP 导航全家桶</strong>：<code>src/index.rs</code> 新增<strong>引用边</strong>（<code>Ref</code>），<code>dialc lsp</code> 落地文档符号大纲、工作区符号、引用查找、重命名（含 <code>prepareRename</code>）、签名帮助。</li>
+<li>文档符号：顶层 fn/struct 为根，函数体形参与局部变量递归为子节点（<code>DocumentSymbol</code>）。</li>
+<li>工作区符号：跨所有已打开文件 + 已加载包，按名字子串模糊搜索。</li>
+<li>引用 / 重命名：基于引用边，同名遮蔽天然正确（内层同名变量不会被误并入外层引用）；包符号（<code>.diali</code>）只读不重命名。</li>
+<li>签名帮助：<code>(</code> / <code>,</code> 触发，解析光标前函数名返回完整签名与各参数标签、活动参数序号。</li>
+<li>冒烟测试 <code>tools/lsp_full_smoke.py</code> 扩展到轮 2 全部能力断言（能力协商 / 大纲 / 工作区符号 / 引用 / 重命名 / 签名）。</li>
+</ul>
+<h3 id="轮-3编写辅助已完成">轮 3（编写辅助，已完成）</h3>
+<ul>
+<li><strong>保守格式化</strong>（<code>textDocument/formatting</code>）：只做两件事——去除每行行尾空白、确保文件末尾恰有一行换行；
+  <strong>绝不</strong>做重排/换行的激进格式化（避免误伤对齐敏感代码，且 Dial 无官定代码风格）。返回覆盖全文的单个 <code>TextEdit</code>。</li>
+<li><strong>参数 inlay 提示</strong>（<code>textDocument/inlayHint</code>）：在函数调用实参前标注形参名（如 <code>a:</code> / <code>b:</code>）。
+  按括号深度配对调用、记录实参起始位置，再按已索引的签名给出形参名；<code>fn name(</code> 的声明参数列表不误判为调用。
+  索引独立于语义、半成品代码拿不到类型，故只做形参名、不做类型 inlay。</li>
+<li>冒烟测试 <code>tools/lsp_full_smoke.py</code> 扩展到轮 3（格式化 / inlay 断言均已通过）。</li>
+</ul>
+<h3 id="轮-4高级已完成">轮 4（高级，已完成）</h3>
+<ul>
+<li><strong>代码动作</strong>（<code>textDocument/codeAction</code>）：按诊断给出<strong>安全的 quickfix</strong>——缺失包 → 「安装包 'x'（dialc install）」，
+  其余诊断 → 「在终端运行 dialc build 查看完整错误」。只发 <code>Command</code>、<strong>不擅自改代码</strong>，避免误伤用户代码。</li>
+<li><strong>折叠范围</strong>（<code>textDocument/foldingRange</code>）：按作用域包围盒给出可折叠区间（顶层作用域与单行区间不报）。</li>
+<li><strong>选择范围</strong>（<code>textDocument/selectionRange</code>）：从光标处逐级向外构造嵌套 <code>SelectionRange</code>（表达式 → 语句 → 块 → 函数）。</li>
+<li><strong>文档链接</strong>（<code>textDocument/documentLink</code>）：<code>import "pkg";</code> 的字符串字面量指向该包的 <code>.diali</code> 接口文件，可点击跳转。</li>
+<li>冒烟测试 <code>tools/lsp_full_smoke.py</code> 扩展到轮 4（折叠 / 选择 / 代码动作 / 文档链接断言均已通过），并在
+  <code>tests/run_tests.sh</code> 新增 <strong>M 组</strong>（LSP 全能力往返 + 协议流纯净性）。</li>
+</ul>
+<h3 id="lsp-规范符合性只用标准形状不自定义扩展">LSP 规范符合性：只用标准形状，不自定义扩展</h3>
+<p>按 LSP 3.17 规范逐条核对实现，<strong>查出并修掉两处形状偏离</strong>（此前它们是「按自己的理解」写的）：
+- <strong><code>textDocument/formatting</code> 的结果</strong>：规范规定是 <strong><code>TextEdit[]</code> 本身</strong>，此前返回的是
+  <code>{ "edits": [...] }</code> —— 那是私自定义包装，客户端按规范解析会拿到对象而不是数组。现改回数组。
+- <strong><code>WorkspaceEdit</code> 的形状</strong>：规范原文「若客户端既不支持 <code>documentChanges</code> 也不支持
+  <code>workspace.workspaceEdit.resourceOperations</code>，那么<strong>只有 <code>changes</code> 里的纯 TextEdit 是被
+  支持的</strong>」——所以用哪个形状<strong>由客户端能力决定</strong>，不能我们单方面决定。
+  现按 <code>workspace.workspaceEdit.documentChanges</code> 能力<strong>二选一</strong>：声明了就发 <code>documentChanges</code>
+  （并如实填客户端给的文档版本号，未打开的文件按规范填 <code>null</code>），没声明就回退 <code>changes</code>。</p>
+<p><strong>诊断错误码不是「私自扩展」</strong>：规范对 <code>Diagnostic.code</code> 的定义是 <code>integer | string</code>，
+注释为 <em>"The diagnostic's code, which usually appear in the user interface."</em>——
+<strong>码值由语言服务器自定，规范不设中央码表</strong>（故 <code>dialc.</code> 前缀命名空间化即可）；
+<code>Diagnostic.data</code> 的定义更是直接点名用途：<em>"A data entry field that is preserved between a
+<code>textDocument/publishDiagnostics</code> notification and <code>textDocument/codeAction</code> request."</em>——
+我们用 <code>data.package</code> 把包名从诊断带到 quickfix，正是这个字段的设计用途。</p>
+<p><strong>符合性从此是自动检查的</strong>：冒烟测试新增一张<strong>返回形状对照表</strong>，逐个方法核对响应结构与
+规范一致（<code>Hover</code> 要 <code>contents</code>、<code>CompletionList</code> 要 <code>isIncomplete</code>+<code>items</code>、<code>formatting</code>
+必须是 <code>TextEdit[]</code>、<code>SelectionRange[]</code> 只能有 <code>range</code>/<code>parent</code> 两个键……），
+并额外验证「客户端没声明 <code>documentChanges</code> 能力时正确回退到 <code>changes</code>」。
+已做负向验证：把 formatting 改回违规形状，三处断言同时报错。</p>
+<p>另修正文档残留：README §18 的「十二组 / A→L」「十一组 / A～K」全部更正为
+「十三组 / A～M」并补上 M 组与两道新检查；§2 目录结构同步。</p>
+<h3 id="诊断错误码--定位--缺包不再静默">诊断：错误码 + 定位 + 缺包不再静默</h3>
+<ul>
+<li><strong>诊断带稳定错误码</strong>（LSP 的 <code>code</code> 字段）：<code>dialc.lex</code> / <code>dialc.parse</code> / <code>dialc.sema</code> /
+  <code>dialc.package.missing</code>。<strong>消息是给人看的、码是给工具看的</strong>——工具按码处理，
+  不必去匹配消息文本（措辞会随版本调整，改一次就废掉一个工具）。</li>
+<li><strong>缺包的诊断终于报出来了</strong>（此前被<strong>静默吞掉</strong>）：<code>import</code> 了一个未安装的包，
+  编辑器里<strong>毫无任何提示</strong>——用户只能去命令行才知道少了什么。现在会明确报出
+  <code>dialc.package.missing</code>，定位到那句 <code>import</code>，并附带<strong>结构化</strong>的 <code>data.package</code>。
+  连带好处：轮 4 的「安装这个包」quickfix 终于<strong>真的会触发</strong>（此前它只在冒烟测试里
+  被合成诊断触发过，真实场景下从不出现）。</li>
+<li><strong>语义错误的定位落到出错的那条语句上</strong>（旧行为是落在文件开头）。表达式 <code>Expr</code>
+  目前不带位置，故精确度到语句级；但「哪条语句错了」这个信息我们本来就有，
+  不该浪费。顺带统一了两个位置助手（原先所有权检查那条路径漏了
+  <code>if</code>/<code>while</code>/<code>for</code> 等语句变体，会退回文件开头）。</li>
+<li><strong>代码动作改按错误码匹配</strong>（不再靠匹配消息文本），并优先从 <code>data.package</code>
+  取包名——结构化数据不必再从自然语言里抠。</li>
+</ul>
+<h3 id="fixed修复">Fixed（修复）</h3>
+<ul>
+<li><strong>能力协商把「没声明」误判成「不支持」</strong>（轮 1 引入，本版才被自家测试抓到）：
+  <code>negotiate_capabilities</code> 原按「客户端有没有<strong>逐项点名</strong>」判断能力，于是发 <code>capabilities: {}</code> 的
+  客户端（不少最小客户端都这么发）会<strong>一个能力都拿不到</strong>——仓库自带的 <code>tests/lsp_features.py</code>（K 组）当场失败。
+  现改为按「客户端有没有<strong>提到这一段</strong>」判断：压根没提 <code>textDocument</code> / <code>workspace</code> 段 = 没表达偏好 → 全开；
+  提到了该段却漏掉某项 = 明确不支持 → 不广播。
+  （多广播一个用不上的能力零代价；少广播则让功能<strong>静悄悄消失</strong>，用户查不出原因。）</li>
+<li><strong>selectionRange 不认规范形状</strong>：LSP 规定 <code>textDocument/selectionRange</code> 用 <code>positions</code>（<strong>数组</strong>，可多选），
+  真实客户端（VS Code）发的就是这个形状；旧实现只认单数 <code>position</code>，于是真实客户端<strong>根本拿不到结果</strong>。
+  现按规范收数组、返数组，同时保留单数形式（老客户端不至于拿到数组而崩）。</li>
+<li><strong>LSP 协议流被裸文本污染 → 编辑器卡死</strong>（本版最严重的一个）：
+  <code>resolve_imports()</code> 是 CLI 构建与 LSP 诊断<strong>共用</strong>的函数，其中两处 <code>println!</code>
+  （「包 'x' v…」「链接 x -&gt; …」）会把纯文本写进 <strong>stdout</strong>——而 stdout 跑的正是 LSP 的
+  <code>Content-Length</code> 分帧协议。客户端一旦读到裸字节，分帧立刻错位：症状<strong>不是报错，而是卡死</strong>
+  （编辑器在等一条永远对不上的消息）。触发条件却极常见：打开一个 <code>import</code> 了<strong>已安装</strong>包的文档。</li>
+<li><strong>修复</strong>：<code>resolve_imports()</code> 改为<strong>日志出口由调用方注入</strong>（<code>log: &amp;mut dyn FnMut(&amp;str)</code>），
+    函数本身不再有资格写 stdout；CLI 构建传 stdout，LSP 传 <code>window/logMessage</code> 通知（编辑器可见、协议合法）。</li>
+<li><strong>加固一（动态）</strong>：冒烟测试新增<strong>协议流纯净性</strong>断言——stdout 上出现任何非协议字节即判失败；
+    并给每次请求加<strong>超时看门狗</strong>，服务器卡死会<strong>快速失败并指名道姓</strong>，而不是把 CI 挂死。</li>
+<li><strong>加固二（静态）</strong>：新增 <code>tools/check_lsp_stdout_purity.py</code>——LSP 用到的库模块与被 LSP 调用的函数里
+    出现 <code>println!</code> 即失败（CI 独立步骤 + <code>tests/run_tests.sh</code> M 组双重把关）。</li>
+</ul>
+<h3 id="后续轮次路线">后续轮次（路线）</h3>
+<ul>
+<li>轮 5（待定）：语义化重构（rename 时区分局部/全局）、诊断码（diagnostic code）、工作区符号的模糊匹配排序优化。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.97.html">v0.97</a> · 更新：<a href="v0.98.1.html">v0.98.1</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

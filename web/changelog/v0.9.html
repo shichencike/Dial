@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.9 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v09--2026-10-30">[v0.9] — 2026-10-30</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#fixed修复">Fixed（修复）</a></li>
+<li><a href="#added测试与示例">Added（测试与示例）</a></li>
+<li><a href="#changed文档">Changed（文档）</a></li>
+<li><a href="#验证数据">验证数据</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v09--2026-10-30">[v0.9] — 2026-10-30</h2>
+<p>本版做的是<strong>并发底座的安全加固</strong>：判空、多消费者安全、超时接收
+（见 README <a href="README.md#278-判空多消费者安全与超时v09">§27.8</a>）。</p>
+<blockquote>
+<p><strong>最重要的不是新语法，而是修掉了一个真实存在的死锁。</strong>
+v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒一个等待者）。
+单消费者看不出问题；多消费者下，「队列非空」是众多消费者共享的状态——
+唤醒一个之后若队列仍非空，其余消费者会带着已经失效的等待条件继续睡死。
+对照实验（8 消费者 / 100 万元素 / 队列深 64）：<code>signal</code> 版本 <strong>25 秒后超时挂死</strong>，
+<code>broadcast</code> 版本 <strong>4.25 秒跑完</strong>，总数恰好 100 万、零重复、零丢失。</p>
+</blockquote>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong>内建 <code>is_null(x)</code></strong>：句柄判空。准入名单 <code>string</code> / <code>int[]</code> / <code>map</code> / <code>error</code> /
+  <code>channel&lt;T&gt;</code> / <code>thread</code> / <code>file</code>；<code>int</code> / <code>float</code> / <code>bool</code> 是值类型、永远非空，
+  编译期直接拒绝（而不是让它变成恒为 false 的死代码）。
+  IR 层只是一次指针比较（<code>ptrtoint</code> + <code>icmp eq 0</code>，优化器折叠回 <code>icmp eq ptr %p, null</code>），
+  <strong>零函数调用、零引用计数操作</strong>。</li>
+<li><strong>内建 <code>recv_timeout(ch, ms)</code></strong>：带超时的接收。超时或已关闭且已空时返回空指针
+  （用 <code>is_null</code> 判别），<strong>绝不无限期阻塞</strong>。
+  所有权规则与 <code>recv</code> 完全一致。底层就是 <code>pthread_cond_timedwait</code> + 一个绝对时刻，
+  <strong>没有引入任何状态机</strong>。</li>
+<li><strong>测试组 F</strong>：绕开编译器直压 <code>stdlib/dial_channel.c</code> 的并发压测
+  （<code>tests/stress/channel_mt.c</code>）：8 个消费者抢同一个通道、100 万元素、队列深 64。
+  用「位图 + 原子 <code>fetch_or</code>」逐个记录领取情况，重复领取即判失败；总数必须守恒。</li>
+</ul>
+<h3 id="fixed修复">Fixed（修复）</h3>
+<ul>
+<li><strong>多消费者丢唤醒（死锁）</strong>：通道的所有状态变化通知由 <code>pthread_cond_signal</code>
+  改为 <code>pthread_cond_broadcast</code>。单消费者下无差别，多消费者下前者会让某个消费者
+  永久阻塞。正确性优先于惊群开销。</li>
+<li><strong>超时不会吞掉元素</strong>：<code>pthread_cond_timedwait</code> 返回 <code>ETIMEDOUT</code> 后回到 <code>while</code> 条件
+  重新判定，若此刻队列非空则正常取走——「元素恰好在超时这一刻到达」也能被拿到。</li>
+<li><strong>超时基准钟从 <code>CLOCK_REALTIME</code> 切回 <code>CLOCK_MONOTONIC</code></strong>：底层超时取用的绝对时刻
+  原先取自 <code>CLOCK_REALTIME</code>，会被 NTP 校时跳变干扰（校时回拨可能让等待被提前唤醒、
+  前拨则拖长等待）。现已切回单调钟 <code>CLOCK_MONOTONIC</code>，借助 Linux vDSO 直接在用户态读取、
+  无需系统调用，时间读取更快，且彻底不受 NTP 校时影响；因彻底放弃 macOS，
+  无需为 <code>pthread_condattr_setclock</code> 的兼容性做任何妥协。</li>
+</ul>
+<h3 id="added测试与示例">Added（测试与示例）</h3>
+<ul>
+<li><code>examples/is_null_demo.dial</code>：EOF / 超时 / 真实值三种情形下 <code>is_null</code> 的判定。</li>
+<li><code>examples/recv_timeout.dial</code>：超时返回空值；超时与到达同时发生时以「有元素」为准。</li>
+<li><code>examples/channel_multiconsumer.dial</code>：<strong>两个消费者抢同一个通道</strong>。
+  每个消费者把收到的元素转发到自己的报告通道，主线程分别取数后相加——
+  各消费者分到多少不确定，但<strong>总数恒为 100</strong>（每个元素只被弹出一次）。
+  注意多消费者必须用 <code>recv</code> + <code>is_null</code> 判结束，<strong>不能用 <code>try_recv</code></strong>：
+  后者在「队列暂时空」时也返回空指针，那不是 EOF，会漏收元素。</li>
+<li>负向用例新增 8 个（<code>is_null</code> 作用于标量 / 参数个数 / <code>recv_timeout</code> 的四种错用 /
+  两个新名字撞保留名）。</li>
+</ul>
+<h3 id="changed文档">Changed（文档）</h3>
+<ul>
+<li>README §27.8 新增「判空、多消费者安全与超时」，§27.9 边界表同步；
+  §18 测试章节补 F 组与新示例清单；§17.2 未实现清单同步。</li>
+</ul>
+<h3 id="验证数据">验证数据</h3>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>C 层并发压测（8 消费者 / 100 万元素）</td>
+<td>4.25 s，<code>received=1000000 duplicate=0 out_of_range=0</code>，RSS 2.0 MB</td>
+</tr>
+<tr>
+<td>同上，<code>signal</code> 版本对照</td>
+<td><strong>25 s 超时挂死</strong>（exit 124）——坐实丢唤醒</td>
+</tr>
+<tr>
+<td>Dial 层百万次移交（1 生产者 / 3 消费者）</td>
+<td>1.11 s，RSS 1972 KB <strong>稳定不增长</strong>，无崩溃无挂起</td>
+</tr>
+<tr>
+<td>三个新示例</td>
+<td>各连跑 10 次输出逐字节一致</td>
+</tr>
+</tbody>
+</table>
+<hr /><p class="note">← 更早：<a href="v0.81.html">v0.81</a> · 更新：<a href="v0.91.html">v0.91</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

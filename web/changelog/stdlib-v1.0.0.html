@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 stdlib v1.0.0 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#stdlib-v100--2026-10-31独立-releasetag-stdlib-v100">[stdlib v1.0.0] — 2026-10-31（独立 Release，tag stdlib-v1.0.0）</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#docs文档">Docs（文档）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="stdlib-v100--2026-10-31独立-releasetag-stdlib-v100">[stdlib v1.0.0] — 2026-10-31（独立 Release，tag <code>stdlib-v1.0.0</code>）</h2>
+<p>官方标准库（由 <code>stdlib/</code> + <code>runtime/</code> 编译归档而成的 <code>libdial_std.a</code>，被<strong>每一个</strong> Dial 程序静态链入）
+改造为 <code>.dialpkg</code> 形态，<strong>独立发版、与 <code>dialc</code> 编译器解耦</strong>，走 GitHub Releases 分发。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong><code>stdlib.dialpkg</code> 包</strong>：单包含三平台预编译静态库
+  （<code>lib/x86_64-linux-gnu/libdial_std.a</code> · <code>lib/x86_64-pc-windows-gnu/libdial_std.a</code> ·
+  <code>lib/aarch64-unknown-linux-musl/libdial_std.a</code>），<code>manifest.txt</code> 记录
+  <code>name=stdlib</code> / <code>version=1.0.0</code> / <code>abi=1</code> / <code>license=MIT OR Apache-2.0</code> 与各平台机器码 SHA256。</li>
+<li><strong><code>stdlib/stdlib.diali</code></strong>：与 <code>declare_stdlib()</code> 逐条对齐的接口签名文件，供 <code>.dialpkg</code> 自描述与校验。</li>
+<li><strong><code>tools/build_stdlib.sh</code></strong>：统一选 <code>zig cc</code>/<code>clang</code>/<code>gcc</code> + <code>ar</code>，把 <code>runtime/*.c</code> + <code>stdlib/*.c</code>
+  编译归档为单份 <code>libdial_std.a</code>（默认 <code>-DDIAL_SAFETY=1</code> ReleaseSafe 预编译）。</li>
+<li><strong><code>tools/make_stdlib_pkg.py</code></strong>：收三平台 <code>.a</code> 与 <code>.diali</code>，算 SHA256、生成 <code>manifest.txt</code> 并打包 <code>stdlib.dialpkg</code>。</li>
+<li><strong><code>dialc</code> 链接期自动链入</strong>：<code>src/main.rs::link()</code> 优先 <code>package::find_installed("stdlib")</code> 取本平台 <code>.a</code>
+  链入，日志打印「使用已安装的标准库包: stdlib v1.0.0（ABI 1，目标 …）」；
+  未安装则回退实时编译 <code>stdlib/</code> + <code>runtime/</code> 源码（默认 Debug），<strong>任何环境都能编出程序</strong>。</li>
+<li><strong>ABI 兜底</strong>：已装包 <code>manifest.abi ≠ package::STDLIB_ABI</code>（新增常量，锁定为 <code>1</code>）即<strong>当场报错并给出重装方案</strong>
+  （<code>rm -rf ~/.dial/packages/stdlib</code> 后重装），绝不静默崩溃。</li>
+<li><strong>一键脚本自动安装</strong>：<code>tools/install-dial.sh</code> / <code>install-dial.ps1</code> 装好 <code>dialc</code> 后静默从 Release
+  <code>stdlib-v1.0.0</code> 拉取 <code>stdlib.dialpkg</code> 并执行 <code>dialc install</code>（<code>STDLIB_RELEASE</code> 可钉版本，离线/失败仅告警）。</li>
+<li><strong>CI 自动发布</strong>：<code>.github/workflows/ci.yml</code> 在 <code>stdlib-v*</code> 标签触发 <code>publish-stdlib</code> 作业，
+  由 <code>build-linux</code> / <code>build-windows</code> / <code>build-termux</code> 各自产出本平台 <code>.a</code> 后打包发布。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li>预编译安全等级统一为 <strong>ReleaseSafe（<code>-DDIAL_SAFETY=1</code>）</strong>：C Runtime 层越界/空指针等 UB 由 <code>ud2</code>
+  Fail-Fast 拦下，兼顾性能与安全；与用户程序自身 <code>--release</code>/<code>--fast</code> 等级是两回事（标准库等级发布时已钉死）。</li>
+</ul>
+<h3 id="docs文档">Docs（文档）</h3>
+<ul>
+<li>ARCHITECTURE.md §8 阶段 7 标 ✅；README §25 新增 §25.10「官方标准库 <code>stdlib.dialpkg</code>（独立发布）」；
+  §25 顶部状态注释同步（URL 安装 / 一键脚本 / stdlib 化均已落地）。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.96.html">v0.96</a> · 更新：<a href="v0.97.html">v0.97</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

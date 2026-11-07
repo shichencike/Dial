@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.3 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v03--2026-10-28">[v0.3] — 2026-10-28</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#fixed修复">Fixed（修复）</a></li>
+<li><a href="#docs文档">Docs（文档）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v03--2026-10-28">[v0.3] — 2026-10-28</h2>
+<p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li>内置类型转换函数 <code>int_to_float(int): float</code>，编译为 LLVM <code>sitofp</code>（x86-64：<code>cvtsi2sd</code>）。</li>
+<li>内置类型转换函数 <code>float_to_int(float): int</code>，编译为 LLVM <code>fptosi</code>（x86-64：<code>cvttsd2si</code>，向零截断，与 C 的 <code>(int)</code> 一致）。</li>
+<li>两者均为<strong>纯编译期内联</strong>，不经过任何 C 运行时函数，因此不引入额外依赖。</li>
+<li>新增示例 <code>examples/short_circuit.dial</code>（证明短路求值）、<code>examples/conversions.dial</code>（证明显式转换）。</li>
+<li>新增负向用例 <code>tests/bad/let_push.dial</code>、<code>tests/bad/implicit_conv.dial</code>、<code>tests/bad/mixed_arith.dial</code>。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li><strong><code>and</code> / <code>or</code> 改为短路求值</strong>，与 C 的 <code>&amp;&amp;</code> / <code>||</code> 一致：先求左操作数，若已能决定结果则不再求值右操作数。
+  这保证了"判空后访问"类代码在左操作数为假时不会因右操作数被盲目求值而崩溃。</li>
+<li><strong>严格执行"零隐式转换铁律"</strong>：算术、相等、比较运算均要求两个操作数类型<strong>完全相同</strong>；<code>int</code> 与 <code>float</code>
+  之间不再有隐式提升或窄化，混用一律编译错误，必须显式调用 <code>int_to_float</code> / <code>float_to_int</code>。</li>
+<li><code>let</code> 变量调用 <code>push</code> / <code>set</code> 等"原地修改且可能更换指针"的方法现在会在语义阶段被<strong>明确拒绝</strong>；
+  此类方法的接收者必须是顶层 <code>var</code> 变量（详见 README §6.2、§11.3–§11.4）。</li>
+</ul>
+<h3 id="fixed修复">Fixed（修复）</h3>
+<ul>
+<li>修复了此前 <code>and</code> / <code>or</code> 不短路可能导致的判空崩溃隐患（如 <code>p != null and p.x &gt; 0</code> 在 <code>p</code> 为空时仍会求值右操作数）。</li>
+<li>修复了 <code>int → float</code> 隐式转换可能造成的静默精度丢失（如 <code>1 + 2.0</code> 曾默默将 <code>int</code> 提升为 <code>double</code>）。</li>
+<li>修复了 <code>let</code> 变量调用 <code>push</code> 时"容器被原地修改但接收者无法接收新指针"的悬垂风险，将其提前到编译期拒绝。</li>
+</ul>
+<h3 id="docs文档">Docs（文档）</h3>
+<ul>
+<li>README 同步更新：§5.3 零隐式转换铁律、§6.2 可变性判定（含 <code>push</code>/<code>set</code>）、§7.2 类型规则、
+  §7.3 语义细则表（修正 <code>and</code>/<code>or</code> 与混合算术两行）、§11.3–§11.4 接收者须为 <code>var</code>、§18 v0.3 变更摘要。</li>
+<li>新增 <code>REPORT_v0.3.md</code>：基于 <code>objdump -d</code> 真实反汇编的短路求值与 <code>int_to_float</code>/<code>float_to_int</code> 落地证据，
+  以及端到端自测结果与产物零 LLVM 依赖契约校验。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.2.html">v0.2</a> · 更新：<a href="v0.4.html">v0.4</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

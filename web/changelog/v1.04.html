@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v1.04 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v104--2026-11-06">[v1.04] — 2026-11-06</a><ul>
+<li><a href="#added">Added</a></li>
+<li><a href="#changed">Changed</a></li>
+<li><a href="#fixed">Fixed</a></li>
+<li><a href="#测试">测试</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v104--2026-11-06">[v1.04] — 2026-11-06</h2>
+<p><strong>主题：FFI 成为语言一等公民。</strong> 详见 <a href="README.md#33-v104-ffi外部函数接口">README §33</a>。</p>
+<blockquote>
+<p><strong>版本定位</strong>：<code>v1.0</code> 里程碑已在 <code>[v1.03]</code> 达成、标签 <code>v1.0</code> 已打并推送；
+<code>[v1.00]</code> ~ <code>[v1.03]</code> 是「达成 v1.0」过程中的分版记录（见下方里程碑大标题）。
+<code>[v1.04]</code> 是<strong>里程碑达成之后的第一个增量分版</strong>，不归入上面那批分版记录。
+按本轮交付约定：<strong>只做本地提交，不推送 GitHub、不打 tag</strong>。
+本版后续还并入了「语言层动态链接」「工程工具链增补」「DWARF 调试信息（-g）」
+「性能基准（4 语言 × 28 维）」与「真实程序缺口补齐（B/C 组，第一批）」
+（见 <a href="README.md#34-v104-增补工程工具链并入-v104版本不变">README §34</a>、§35、§36、§37），
+均不新增分版记录，编译器版本 <code>1.4.0</code> 保持不变。
+<strong>最后一批起 <code>STDLIB_ABI 5 → 6</code></strong>（新增 <code>dial_eprint_*</code> / <code>get_or</code> 等导出符号，
+按既有判据递增，见 §37.6）；术语「绝不引入全局变量」统一为
+「绝不引入可变全局状态」，并把「函数名重载」「闭包」写入永久否决（§37.1–37.2）。</p>
+</blockquote>
+<h3 id="added">Added</h3>
+<ul>
+<li><strong>语言层 <code>extern fn</code></strong>：直接写在 <code>.dial</code> 源码里，编译期生成 LLVM 外部声明、
+  链接期由 C 编译器解析，不再强制绕 <code>.diali</code> → <code>.a</code> → <code>.dialpkg</code> → <code>install</code> → <code>import</code>。
+  现有包机制完整保留、行为不变（见 <a href="README.md#15-ffi-契约">README §15</a>）。</li>
+<li><strong>语言层 <code>link "...";</code></strong>：显式链入用户 C 扩展库。相对路径以源文件所在目录为基准解析。</li>
+<li><strong>语言层动态链接</strong>：<code>link</code> 除静态归档外也接受 <code>.so</code> / <code>.dll</code> / <code>.dylib</code>
+  （含 <code>libx.so.1</code> 带版本号变体），按<strong>扩展名</strong>校验 ELF <code>\x7fELF</code> / PE <code>MZ</code> /
+  Mach-O 32、64 位或 fat magic；ELF / Mach-O 自动注入 <code>-Wl,-rpath,&lt;库目录&gt;</code>，
+  产物无需手工设 <code>LD_LIBRARY_PATH</code>。PE 无 rpath，<code>.dll</code> 需放 exe 同目录或 <code>PATH</code>。</li>
+<li><strong><code>extern struct</code>（C ABI / <code>repr(C)</code>）</strong>：字段顺序、对齐、padding、sizeof 与 C 完全一致；
+  只经 <code>rawptr&lt;Struct&gt;</code> 读写字段，不按值传递、不能用 <code>StructLit</code> 构造。</li>
+<li><strong><code>.diali</code> 类型白名单打穿</strong>：<code>byte</code> / <code>bytes</code> / <code>rawptr&lt;T&gt;</code> / <code>fn(A, B): R</code> 全部放行；
+  形参表改为按<strong>顶层逗号</strong>切分，嵌套泛型/函数类型签名不会被切坏。</li>
+<li><strong>完整数据总线</strong>：<code>string.as_c_str()</code> / <code>bytes.as_ptr()</code> 返回<strong>借用</strong>的 <code>rawptr&lt;byte&gt;</code>
+  （由 C Runtime 跳过 8 字节长度头，用户不写 <code>+8</code> offset hack）；
+  <code>string_from_cstr(p)</code> / <code>bytes_from_ptr(p, n)</code> 从 C 缓冲区<strong>复制</strong>出受 ARC 管理的新对象。</li>
+<li><strong>C 回调</strong>：<code>Type::FnPtr</code> 生成标准 C calling convention，C 侧可安全调用 Dial 具名函数；
+  跨回调状态经 <code>rawptr&lt;void&gt;</code> 显式透传，无闭包、无隐藏环境对象。</li>
+<li><strong>工程工具链（并入 <code>[v1.04]</code> 的增补，见 <a href="README.md#34-v104-增补工程工具链并入-v104版本不变">README §34</a>）</strong>：</li>
+<li>新增 <code>dialc check / fmt / test / new / list / uninstall / pack / help</code> 八个子命令；
+    <code>build / run / check / test</code> <strong>共用同一条前端流水线</strong>（<code>main.rs::frontend()</code>）；</li>
+<li><strong>本地源码模块</strong>：<code>import "./util.dial";</code> 或裸名 <code>import "util";</code>（同目录存在
+    <code>util.dial</code> 即视为本地模块），递归合并编译，带循环引用 / 同名函数 / 缺失文件诊断；</li>
+<li><strong>顶层 <code>test "名" { ... }</code> 块</strong>：<code>dialc test</code> 逐块独立进程运行、<code>--filter</code> 筛选，
+    测试代码不进 <code>build</code> 产物（刻意不新增 <code>test</code> 关键字，避免破坏已有标识符）；</li>
+<li><strong><code>dialc pack</code> + <code>dial.toml</code></strong>：通用产包命令，校验 <code>.diali</code> 与静态库 ar 魔数、
+    生成 <code>manifest.txt</code> 与逐文件 SHA256、打包后就地自检；<code>dialc new</code> 生成项目骨架，
+    <code>list</code> / <code>uninstall</code> 补齐包管理。<code>tools/make_stdlib_pkg.py</code> 保留给 CI 的三平台 stdlib 包。</li>
+<li><strong>DWARF 调试信息（<code>-g</code> / <code>--debug-info</code>，见 README §35）</strong>：<code>dialc build / run</code> 加 <code>-g</code>
+  即为 Dial 代码生成标准 DWARF——<code>DW_TAG_compile_unit</code> / <code>DW_TAG_subprogram</code>（每个 Dial 函数）/
+  <code>DW_TAG_formal_parameter</code>（形参）/ <code>DW_TAG_variable</code> + <code>llvm.dbg.declare</code>（<code>Stmt::VarDecl</code>
+  局部变量）/ <code>.debug_line</code> 行表（<code>gen_stmt</code> 的语句行列）。GDB / LLDB 因此能按 <code>.dial</code>
+  源码行下断点、<code>print counter</code> 读标量值、<code>info args</code> 看形参、<code>bt</code> / <code>list</code> 直接指向
+  Dial 源码，不需要调试器插件。<code>DIFile</code> 用绝对路径，<code>finalize()</code> 在 <code>module.verify()</code> 前调用。
+  标量（<code>int</code> / <code>float</code> / <code>bool</code> / <code>char</code> / <code>byte</code>）给出精确 DWARF 宽度与编码；复合类型
+  在 IR 里本就是不透明 <code>i8*</code>，如实映射为指向 <code>dial_object</code> 的指针，不伪装布局。
+  不带 <code>-g</code> 时完全不创建 DIBuilder，零开销。</li>
+<li><strong>性能基准（4 语言 × 28 维，见 README §36）</strong>：<code>bench/</code> 下新增 C / Go / Python / Dial
+  四份等价实现，28 个纯整数微基准（算术/递归/数组/字符串/位与控制流五类），
+  每语言每项产出<strong>完全相同的校验和</strong>（112/112）作为等价计算的正确性锚点。</li>
+<li><code>tools/bench_harness.py</code>：外部统一墙钟计时 + 单次进程内 <code>repeat</code> 自校准
+    （摊薄启动开销）+ 扣除 <code>noop</code> 基线，给出<strong>绝对值</strong>（单次纯耗时 ms）与
+    <strong>绝对比值</strong>（C = 1.00× 基准），并采集 6 大工程维度（速度 / 峰值内存 /
+    编译耗时 / 启动耗时 / 产物体积 / 源码行数），产出 <code>bench/data.json</code>。</li>
+<li><code>tools/build_bench_web.py</code>：由数据生成独立静态页 <code>web/bench.html</code>——
+    绝对值表 + 比值表 + 六维表 + 底部<strong>六维雷达图</strong>（手写 SVG，4 语言叠加，
+    按各维最优语言归一化，越靠外越优），无外部 CDN / JS 依赖、离线可看。
+    触及计时下限（或被编译器常量折叠）的项以 <code>†</code> 诚实标注。</li>
+<li><code>tools/check_bench_data.py</code>：校验 28×4 数据完整、校验和与真值一致、
+    比值基准、6 维 6 轴，及网页与数据同步（CI 与本地共用）。</li>
+<li>
+<p>官网导航 / 首页 CTA / 安全公告页均加入口；<code>build_web.py</code> 不生成 <code>bench.html</code>，
+    不影响官网产物同步校验。</p>
+</li>
+<li>
+<p><strong>真实程序缺口补齐（B/C 组，第一批）</strong>：按 <code>REPORT_v1.04_gaps.md</code> 的裁决落地 5 项，
+  规范见 <a href="README.md#37-v104-增补真实程序缺口补齐与宪法裁决并入-v104分-3-批">README §37</a>。</p>
+</li>
+<li><strong>B9 块注释 <code>/* ... */</code></strong>：lexer 层跳过、跨行同步行号；<strong>未闭合直接 Fail-Fast 报错</strong>，
+    绝不静默吞掉余下源码。</li>
+<li><strong>B10 <code>!</code> 一元逻辑非</strong>：词法层复用 <code>TokenKind::Not</code>（<code>parse_not</code> / 语义 / IR
+    全链路零改动），<code>!=</code> 分支优先匹配不受影响；不是新运算符语义，只是同一语法的另一种拼写。</li>
+<li><strong>B11 <code>a.slice(from, to)</code></strong>：与切片语法 <code>a[from..to]</code> 共用 <code>dial_array_slice</code>，
+    返回新数组、不改接收者；补齐「能力在但方法名不直觉」的绕路。</li>
+<li><strong>C6 <code>get_or(k, default)</code></strong>：普通 map 与泛型 map（标量 V）一次探测，把「未命中」
+    与「真实值恰等于默认值」彻底分开。<code>dial_map_get_or</code> / <code>dial_kvmap_get_or</code>
+    两个新 C 导出；句柄 V 由容器类型系统更早拦截，方法层的拒绝分支是纵深防御。</li>
+<li><strong>C8 <code>eprint</code> / <code>eprint_raw</code></strong>：stderr 输出族（<code>dial_eprint_*</code>），与 <code>print</code>
+    逐类型对称、variadic 规则一致；<strong>不引入可变全局状态</strong>（没有「当前输出流」开关、
+    没有全局 <code>FILE*</code>），四个分派函数各自独立实现以守 §21.1。</li>
+<li><strong>C8 配套 Fail-Fast 加固</strong>：输出族内建（<code>print</code> / <code>print_raw</code> / <code>write_char</code> /
+    <code>eprint</code> / <code>eprint_raw</code>）按名字硬编码分派，此前未列入 <code>RESERVED_NAMES</code>——
+    用户写 <code>fn eprint(...)</code> 能编译却在调用点被内建分支<strong>静默绕过</strong>，违反 §20。
+    本轮把这 5 个名字补进保留名清单，同名定义编译期直接拒绝；既有 <code>print</code> 调用
+    行为不变。<code>.diali</code> 自描述补齐 <code>dial_array_slice</code> / <code>dial_map_get_or</code> /
+    <code>dial_kvmap_get_or</code> 与 <code>type DialKvMap;</code>（新增导出符号不漏登记）。</li>
+<li><strong>T 组回归</strong>：stdout/stderr 严格分流、未闭合块注释 Fail-Fast、<code>get_or</code>
+    类型严格校验、函数重载（B5 永久否决）与输出族保留名负向锁定；A–S 扩为 A–T。</li>
+<li><strong>架构记录</strong>：<code>ARCHITECTURE.md</code> 追加 §14（宪法裁决与 B/C 组补齐的分层约束、
+    ABI 递增判据、3 批落地纪律），明确「规范先于实现，但绝不把未实现项标成已支持」。</li>
+<li><strong>真实程序缺口补齐（B/C 组，第二批）</strong>：按 §37.5「C11 走独立包」的裁决，本批
+  只做<strong>标准库内建</strong>（不进 <code>stdlib.dialpkg</code>），全部落在 <code>stdlib/*.c</code> +
+  <code>src/semantic.rs</code> + <code>src/codegen.rs</code> + <code>stdlib/stdlib.diali</code> 四层。</li>
+<li><strong>C1 字符串大小写 / 子串</strong>：<code>to_upper</code> / <code>to_lower</code> / <code>contains</code> / <code>starts_with</code> /
+    <code>ends_with</code>（<code>dial_string_*</code>）逐类型安全、UTF-8 字节级。</li>
+<li><strong>C4 Unicode 码点</strong>：<code>char_count</code> / <code>chars()</code> / <code>char_at(i)</code> / <code>char_slice(from,to)</code>
+    按 <strong>UTF-8 码点</strong>而非字节；<code>length()</code> 保持字节语义不动，避免破坏既有 416 项回归。</li>
+<li><strong>C2 数值严格解析</strong>：<code>parse_int</code> / <code>parse_float</code> 非法输入 <strong>Fail-Fast</strong>（绝不静默
+    返回 0），<code>dial_parse_int</code> / <code>dial_parse_float</code> 在 C 侧 <code>dial_assert_fail</code> 抛 Error；
+    <code>is_int</code> / <code>is_float</code> 提供显式探测。</li>
+<li><strong>C3 类型安全格式化</strong>：<code>format_float(v: float, digits: int)</code> 拒绝 printf 式运行期
+    格式串（§5.3 零隐式转换），<code>int</code> 参数编译期被拒；对应 <code>dial_array_new(1)</code> + <code>snprintf</code>。</li>
+<li><strong>C5 数组 API 扩充</strong>：<code>insert</code> / <code>index_of</code>（标量元素；<code>string[]</code> 因位模式歧义被拒）/
+    <code>reverse</code> / <code>reduce</code>（复用 v1.03 函数指针 + <code>rawptr&lt;void&gt;</code> thunk，无闭包）/
+    <code>join</code> / <code>sort</code> 放宽到 <code>string[]</code>（字典序）/ <code>clear</code>，新增 <code>dial_array_*</code> C 导出。</li>
+<li><strong>C7 文件 IO</strong>：<code>file_exists</code> / <code>file_size</code>（打不开 <code>-1</code>）/ <code>file_remove</code> /
+    <code>file_read_all</code>（FNF→抛 Error）/ <code>file_read_line(f)</code>（逐行）/ <code>eof(f)</code>；
+    刻意用 <code>file_read_line</code> 而非 <code>read_line(f)</code>，避免与 stdin 版 <code>read_line()</code> 撞名
+    （B5 否决重载），所有文件操作为不透明句柄、显式 <code>close</code>、不进 ARC。</li>
+<li><strong>C9 环境</strong>：<code>has_env</code> / <code>getenv</code>（缺失返回空串）/ <code>program_name</code>（argv[0] 只读
+    快照，非 <code>var</code> 全局）/ <code>cwd</code>，无 <code>setenv</code>（进程级可变全局状态，否决）。</li>
+<li><strong>C10 时间</strong>：<code>local_parts()</code>（int[8]，自取分量）/ <code>date_string()</code>（固定
+    <code>YYYY-MM-DD HH:MM:SS</code>）/ <code>monotonic_ms()</code>，拒绝 printf 式格式串，组件由调用方
+    显式拼（§5.3）；新增 <code>dial_local_parts</code> / <code>dial_date_string</code> / <code>dial_monotonic_ms</code>。</li>
+<li><strong>Fail-Fast 加固</strong>：第 2 批 18 个内建名补进 <code>RESERVED_NAMES</code>（延续第 1 批 <code>eprint</code>
+    族加固），同名定义编译期拒绝，杜绝内建分支静默绕过（§20）。</li>
+<li><strong>U 组回归</strong>：8 组 API 端到端输出断言、C2 解析失败 Fail-Fast、C4 <code>char_at</code> 越界
+    Fail-Fast、<code>string[].index_of</code> 编译期拒绝、C3 <code>format_float(int,..)</code> 零隐式转换拒绝、
+    第 2 批内建同名定义被拒；A–T 扩为 A–U。</li>
+<li><strong>B/C 组缺口补齐 第 3 批：语言机制（B7 / B8 / B6）</strong>，落在 <code>src/parser.rs</code> +
+  <code>src/semantic.rs</code> + <code>src/codegen.rs</code> + <code>runtime/dial_rt_mem.c</code> + <code>stdlib/dial_kvmap.c</code>：</li>
+<li><strong>B7 文件级只读 <code>const</code></strong>：支持标量 / 字符串 / 数组 / 嵌套数组 / 字符串数组 /
+    结构体字面量，以及字面量上的常量表达式（可常量折叠）；const 可引用其他 const
+    （解析期内联展开）；<strong>顶层 <code>var</code> 全局变量编译期拒绝</strong>（禁止可变全局状态红线）；
+    const 重赋值 / 非编译期常量值 / 类型不匹配 / 局部变量遮蔽 const 均被拒。</li>
+<li><strong>B8 结构体字段默认值</strong>：<code>struct Point { x: int = 0, y: int = 0 }</code>；默认值必须是
+    编译期常量；省略有默认值的字段取默认值、省略<strong>无默认值</strong>的字段编译期报错
+    （不静默零初始化）；默认值类型不匹配按零隐式转换铁律拒绝。</li>
+<li><strong>B6 结构体进容器</strong>：<code>Point[]</code> 与 <code>map&lt;string, Struct&gt;</code>。值类型结构体装不进 8 字节
+    数组 / map 值槽，故<strong>装箱</strong>为引用计数对象（<code>dial_struct_box</code>，布局
+    <code>[int64 refcount][payload]</code>，与既有 Dial 堆对象同构）后入槽，读出时<strong>解箱按值</strong>拷贝；
+    <code>put</code> / <code>get</code> / <code>contains</code> / <code>remove</code> / <code>get_or</code> / <code>values()</code> 全通路打通；
+    map 侧新增 <code>KV_STRUCT(6)</code> 值种类（与 <code>KV_STRING</code> 同走 retain/release），
+    未命中返回空指针并由编译器还原零值结构体（绝不解引用空指针）。</li>
+<li><strong>边界（如实标注）</strong>：B6 本批只放开「<strong>字段全为标量</strong>」的结构体；含句柄字段的
+    结构体进容器需要字段级 ARC（装箱 / 释放时逐字段 retain/release），该能力尚未
+    落地，故语义层<strong>明确拒绝</strong>而非让它「看起来能用」却在释放时泄漏或悬垂。</li>
+<li><strong>顺带修好的通用缺陷</strong>：字段访问此前只支持「变量 / 字段链」作基对象，
+    <code>Pt{}.x</code> / <code>make().y</code> / <code>arr[i].f</code> 一律报「仅支持对变量/字段进行赋值」；现让
+    <code>gen_expr</code> 字段分支把非 lvalue 基物化到栈上临时槽再取字段指针
+    （<code>gen_lvalue_ptr</code> 保持只服务数组元素写，避免破坏 <code>a[i] = v</code> 的写回语义）。
+    B7 的 const 结构体内联后「取字段」成为常态路径，此修复是其必要前提。</li>
+<li><strong>V 组回归</strong>（新增第 22 组）：B8 / B7 / B6 正向端到端、顶层 <code>var</code> 被拒、
+    省略无默认值字段被拒、默认值类型不匹配被拒、含句柄字段结构体作数组元素 /
+    map 值被拒；A–U 扩为 A–V。内存专项：3M 次 <code>Point[]</code> 建放、1M 次
+    <code>map&lt;string,Point&gt;</code> 读写循环均在虚拟内存上限内通过（装箱对象随容器释放，无泄漏）。</li>
+<li><strong>本批明确不碰（按裁决划清界限）</strong>：B1（<code>impl</code> 方法，暂用 <code>fn</code> 替代）、
+    B2（用户泛型，死守单态化底线）、B3（枚举 ADT，不引入 Tagged Union）；
+    B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。C11（<code>http.dialpkg</code> 独立包）待落地。</li>
+<li><strong>C11 独立包第一包：<code>http.dialpkg</code></strong>（§37.5「常用库走独立包」的落地），
+  落在 <code>packages/http/</code> + <code>third_party/</code>：</li>
+<li><strong>按领域拆包，本轮只落地 <code>http</code></strong>：正则 / JSON / 摘要 / Base64 各自成包
+    （<code>text</code> / <code>json</code> / <code>crypto</code>），后续批次逐个补。</li>
+<li><strong>协议层自研</strong>：<code>packages/http/src/dial_http.c</code> 实现 URL 解析、请求行与 Header
+    拼装、响应报文解析（状态行 / 头部 / <code>Content-Length</code> / <code>chunked</code> / 读到关闭）、
+    Socket 读写——线级细节留在自己手里，为后续的连接指纹定制留出空间。</li>
+<li><strong>密码学绝不手搓</strong>：TLS 由 <strong>mbedTLS 3.6.2</strong> 提供并<strong>已接线上层</strong>
+    （<code>https://</code> 走 mbedTLS，证书校验 fail-closed：系统根 + 自定义 CA 双信任链，
+    <code>mbedtls_ssl_get_verify_result()</code> 非 0 即拒绝），gzip / deflate 解压由
+    <strong>zlib 1.3.1</strong> 提供；
+    两者 <strong>vendor 进仓库</strong>（<code>third_party/</code>，保留上游 LICENSE 与版权声明），
+    构建离线可复现；zlib 裁掉 <code>gz*.c</code>（gzip <strong>文件</strong> API，依赖 POSIX <code>lseek</code>，
+    与 HTTP 内存解压无关且编不过 Windows / musl 目标）。</li>
+<li><strong>两层 API</strong>：底层「流式」（<code>connect</code> / <code>write</code> / <code>write_line</code> / <code>read_line</code> /
+    <code>read_all</code>，调用方自己拼报文）+ 高层「一次请求」（<code>get</code> / <code>post</code> +
+    <code>HttpResponse</code> 访问器：状态码 / 响应体 / 按名取头 / 按序号遍历）。</li>
+<li><strong>错误与所有权口径</strong>：包不抛 Dial 异常（不假定宿主装了异常栈），失败返回空句柄
+    （<code>is_null</code> 可判），原因取自<strong>线程局部</strong>最近错误槽；不透明句柄<strong>不进 ARC</strong>，
+    释放必须显式（<code>dial_http_close</code> / <code>dial_http_resp_free</code>）。</li>
+<li><strong>链接顺序修正</strong>（编译器侧）：静态归档由链接器从左到右扫描，符号只有在其归档
+    被扫描时仍处于「未定义」状态才会被拉入。包要向 Dial 返回 <code>string</code> / <code>bytes</code>
+    就必须引用标准库的 <code>dial_string_new</code> / <code>dial_bytes_new</code>，故顺序由
+    <code>obj → runtime → stdlib → packages</code> 改为 <code>obj → runtime → packages → stdlib</code>。</li>
+<li><strong>两条写包必备的 FFI 约定</strong>（已写进包内注释）：Dial 的 <code>string</code> 跨到 C 传的是
+    <strong>载荷指针</strong>（<code>[int64 len][bytes...]</code>），须用 <code>dial_string_cstr()</code> 取文本；
+    带缓冲的读取器必须先取缓冲再读 socket，否则会漏掉已吞进缓冲的响应体并误报
+    「连接提前关闭」。</li>
+<li><strong>一处刻意不动语言</strong>：Dial 字符串字面量只支持 <code>\n \t \\ \"</code>、<strong>不支持 <code>\r</code></strong>，
+    而 HTTP 行结束符是 CRLF——因此包提供 <code>dial_http_write_line</code> 负责补 CRLF，
+    不为发一个 HTTP 包顺带改语言。</li>
+<li><strong>W 组回归</strong>（新增第 23 组）：三平台静态库构建、打包 + 安装（manifest /
+    逐文件 SHA256 自检）、<code>import "http"</code> 编译运行、本地 HTTP 服务器端到端
+    （200 / 404 / POST 回显 / chunked / gzip 解压 / 多响应头含同名多值 / 低层流式）、
+    明文三条错误路径（https 连不可达主机 / URL 缺主机名 / 连接失败）必须明确失败；
+    <strong>TLS 1.3 子组</strong>（同组第 7 步）：openssl 自签 CA + 本地 TLS 服务器，验证 TLS 1.3
+    协商（<code>TLSv1.3</code>）、证书校验 fail-closed（清空自定义 CA 后系统根拒签自签）、
+    keep-alive 连接池复用（<code>pool hits &gt; 0</code>）、404 / 500 全绿。</li>
+<li><strong>HTTP/2.0 客户端（并入 <code>[v1.04]</code> 的后续增补，<code>http</code> 包 <code>1.1.0 → 1.2.0</code>，
+  编译器版本 <code>1.4.0</code> / <code>STDLIB_ABI 6</code> 均不变）</strong>：在既有 HTTP/1.1 + TLS 1.3 之上，
+  落地 <code>packages/http/src/dial_http2.c</code> / <code>dial_hpack.c</code> / <code>dial_hpack_tables.h</code>：</li>
+<li><strong>两条传输</strong>：<code>https://</code> 走 TLS 1.3 + ALPN 协商 <code>h2</code>（未协商出 h2 则
+    <strong>fail-closed 拒绝降级</strong>为 HTTP/1.1）；<code>http://</code> 走明文 <strong>h2c prior-knowledge</strong>
+    （RFC 7540 §3.4，直发 client preface）。</li>
+<li><strong>自研 HPACK（RFC 7541）</strong>：请求侧统一用 literal-without-indexing / new name
+    最简编码（不维护动态表）；响应侧完整实现静态表（61 项）、Huffman 解码（257 项）、
+    动态表、整数前缀编码与动态表大小更新。静态表与 Huffman 码表由
+    <code>tools/gen_hpack_tables.py</code> 从 Python <code>hpack</code> 库常量生成，避免手敲出错。</li>
+<li><strong>真·并发多路复用</strong>：新增会话式 API（<code>dial_http2_connect</code> /
+    <code>dial_http2_request</code> / <code>dial_http2_session_free</code>）。一个 <code>Http2Session</code> = 一条连接，
+    多个 <code>spawn</code> worker 可共享同一句柄并发提交 stream（客户端 stream id 取奇数），
+    帧在单连接上按 <code>stream_id</code> 交错分发。因 mbedTLS 的 <code>ssl_context</code> 不能多线程
+    并发读写，会话启动时创建<strong>唯一 I/O 线程</strong>独占 socket/TLS：worker 只入队帧、
+    在自己的 condition variable 上等待，由 I/O 线程读帧分发后唤醒；
+    <code>DialHttpResponse</code> 在 worker 自己线程里组装，reader 线程绝不构造 Dial ARC 对象。</li>
+<li><strong>并发与跨平台</strong>：POSIX 用 <code>pthread_mutex_t</code> / <code>pthread_cond_t</code> / <code>pthread_t</code>，
+    Windows 用 <code>CRITICAL_SECTION</code> / <code>CONDITION_VARIABLE</code> / <code>CreateThread</code>；
+    三平台静态库零警告零错误。为此修正了编译器 <code>spawn</code> thunk 对 <code>Type::Opaque</code>
+    形参的槽宽：<code>Opaque</code> 已 lowering 成 <code>i8ptr</code>，thunk 必须按 ptr 槽读出，
+    否则 load 出 <code>i64</code> 传给期望 ptr 的形参会被 LLVM verifier 拒绝。</li>
+<li><strong>W 组回归新增 HTTP/2 子组</strong>（同组第 9 步）：Python <code>h2/hpack/hyperframe</code>
+    起本地服务器并<strong>故意乱序响应</strong>，6 个 worker 共享单连接、逐条断言
+    <code>path == X-Stream</code>（不串台）、<code>conns = 1</code> / <code>streams = 6</code>、
+    <code>h2</code> ALPN 协商成功、<code>no-ca rejected = true</code>、404 / 500 全绿。</li>
+<li><strong>宪法裁决入文档（§37）</strong>：<code>STDLIB_ABI 5 → 6</code>（<code>make_stdlib_pkg.py</code> 默认、
+  CI 两处、<code>dialc new</code> 骨架同步，后者改为引用 <code>package::STDLIB_ABI</code> 消除硬编码）；
+  术语统一为「绝不引入可变全局状态」；「函数名重载」「闭包」写入<strong>永久否决</strong>；
+  B7（文件级 <code>const</code> 只读常量、禁 <code>var</code> 全局）与 B8（结构体显式默认值、
+  未声明默认值仍报错）的精确语义先于实现写清；C11 常用库确立为<strong>独立 <code>.dialpkg</code></strong>。</li>
+</ul>
+<h3 id="changed">Changed</h3>
+<ul>
+<li><strong>所有 Dial 函数的 LLVM 签名统一为 C ABI 宽度</strong>：<code>bool</code> 内部 i1 → 边界 i32（C 默认整型提升），
+  <code>byte</code> 内部 i64 → 边界 i8（C 的 <code>uint8_t</code>）；函数体内部仍是 i1 / i64，逻辑零改动。
+  函数入口 / 出口 / 调用点 / HOF thunk / spawn thunk 五处做<strong>对称</strong> <code>abi_adapt</code> 转换，
+  靠 A–P 全量回归兜底。这是「C 能安全调用任意 Dial 函数」的前提。</li>
+<li><code>STDLIB_ABI</code> <strong>4 → 5</strong>（新增 <code>stdlib/dial_ffi.c</code> 四个数据总线函数），
+  编译器版本 <code>1.3.0 → 1.4.0</code>；<code>make_stdlib_pkg.py</code> 默认 <code>--abi 5</code>、CI <code>--abi 5</code>。</li>
+<li>系统库（libc / libm）继续由 C 编译器<strong>默认动态解析</strong>，不进 <code>link</code>、不进 LTO 链路；
+  所有 <code>.dialpkg</code> 仍<strong>强制 <code>.a</code> / <code>.lib</code> 静态归档</strong>并校验 ar 魔数 <code>!&lt;arch&gt;\n</code>，
+  J 组三条硬规则一字未动。语言层 <code>link</code> 则<strong>静态 / 动态并存</strong>：动态库按扩展名验
+  ELF / PE / Mach-O 魔数并注入 rpath，由源码作者显式承担运行期依赖；不写 <code>link</code>
+  动态库的程序仍满足「只链 libc」的默认产物契约（测试 C 组照常断言）。</li>
+<li><strong>运行时诊断带位置（A7）</strong>：<code>panic</code> / <code>assert</code> 失败 / 未捕获异常现在输出
+  <code>文件:行:列</code>（文件名与行列是编译期常量，运行期零额外开销）；新增
+  <code>dial_panic_loc</code> / <code>dial_assert_fail_loc</code> 两个 C 入口，旧符号保留给其它调用点。
+  首行文案与旧版完全一致，G 组回归不受影响。</li>
+<li><strong>Fail-Fast 收紧（A3）</strong>：旧版 <code>dialc build a.dial b.dial</code> 打印「未知参数」后
+  <strong>仍以 <code>rc=0</code> 产出 a 的可执行文件</strong>（多余输入被静默吞掉）；现在任何未知参数一律
+  非零退出，多出来的是 <code>.dial</code> 时附带 §34.2 本地模块写法的指引。同一规则推广到全部新子命令。</li>
+<li><strong><code>-g</code> 隐含 O0</strong>：<code>emit_object()</code> 在 <code>debug_info</code> 且非 <code>--fast</code> 时用
+  <code>OptimizationLevel::None</code>，避免默认 O2 把栈槽变量优化成 <code>&lt;optimized out&gt;</code> 而让
+  <code>print var_name</code> 失效；<code>-g --fast</code> 仍走用户明确要求的 O3 + SIMD/LTO，并打印兼容提示。
+  安全等级、运行期检查、C Runtime 注入与 <code>.dialpkg</code> 契约均不变。</li>
+</ul>
+<h3 id="fixed">Fixed</h3>
+<ul>
+<li>函数实参类型不匹配的诊断：参数序号此前被误填成形参类型名（显示「第 rawptr 个参数」），
+  且泛型类型只显示 <code>rawptr</code> 而非完整签名；现改为正确序号 + <code>Type::display()</code> 完整类型。</li>
+<li><strong>D 组文档 / 诊断漂移</strong>（按 <code>REPORT_v1.04_gaps.md</code> 实测校正）：
+  <code>examples/string_demo.dial</code> 的「<code>+</code> 不对 string 重载」注释、README §16「print 恰好 1 参」、
+  §5.5 / §15「只有 <code>str(char)</code>」、§17.2「截至 v1.02 / 函数指针不支持 / 源码模块未实现」、
+  <code>Point[]</code> 报错里「元素类型只支持 int 与句柄」全部改为与实现一致；
+  「找不到已安装的包」补上本地源码模块指引（LSP 稳定错误码与文案前缀不变）。</li>
+<li><code>dialc test</code> 逐块链接时的 stdlib 编译日志改为静默（<code>LinkOpts.quiet</code>），
+  避免把测试结果淹没在重复的 ℹ️ 行里。</li>
+</ul>
+<h3 id="测试">测试</h3>
+<ul>
+<li>4 个正向示例：<code>ffi_hello</code>（语言层 extern + 系统库 + C 变参 + 双向字符串）、
+  <code>ffi_buffer</code>（rawptr 喂 <code>memcpy</code> / <code>memcmp</code>）、<code>ffi_struct</code>（C ABI 字段读写）、
+  <code>ffi_callback</code>（libc <code>atexit</code> 反调 Dial 函数）。</li>
+<li>19 个负向用例：伪装的 <code>.so</code> / <code>.dll</code> / <code>.dylib</code>、动态库缺失、非归档后缀、
+  <code>extern struct</code> 的 string/char/map 字段、保留名与撞名、C 变参不在末尾、
+  <code>rawptr&lt;byte&gt;</code> 字段访问、<code>as_c_str</code> 带参、方法用错类型、数据总线参数个数/类型、
+  struct 撞名、<code>extern</code> 后跟错关键字。</li>
+<li>新增 <strong>P 组</strong>：把 C 侧专项库编成 <code>.a</code>，逐项比对 <code>sizeof</code> / <code>offsetof</code> 与 C 完全一致，
+  验证 Dial↔C 双向字段读写、C 回调状态透传；另编真实共享库做动态链接端到端
+  （显式 <code>link</code> + <code>extern fn</code>，并用 <code>readelf -d</code> 断言 <code>RUNPATH</code> 已注入），再用伪装的
+  <code>.a</code> / <code>.so</code> / <code>.dll</code> / <code>.dylib</code> 验证魔数拒绝不是靠「文件不存在」蒙混过关。</li>
+<li>新增 <strong>Q 组（工程工具链专项）</strong>：全部新子命令、A3 非零退出且不产物、<code>fmt</code> 幂等与
+  token 流不变、<code>test</code> 通过 / 失败 / 过滤、多文件 import 合并与循环 / 冲突 / 缺失诊断、
+  <code>new → pack → install → import → uninstall</code> 全链路闭环、<code>pack</code> 拒绝动态库与缺字段、
+  A7 运行时位置断言。回归脚本由 <strong>A–P 扩为 A–Q</strong>（后续由 R 组扩为 A–R，见下）。</li>
+<li>新增 <strong>R 组（DWARF 调试信息专项）</strong>：<code>llvm-dwarfdump</code> 核对 <code>.debug_info</code> / <code>.debug_line</code>
+  段与 <code>add</code> / <code>main</code> / <code>a</code> / <code>b</code> / <code>sum</code> / <code>counter</code> / <code>note</code> 七个 Dial 名字、行表含
+  <code>.dial</code> 源文件；真实 <code>gdb -batch</code> 在 <code>.dial:9</code> 断点断言 <code>print counter = 42</code>、
+  <code>bt</code> 显示源码行；无 <code>-g</code> 不产 Dial 调试符号的负向断言、<code>-g --fast</code> 兼容断言。
+  环境缺 <code>gdb</code> / <code>llvm-dwarfdump</code> 时对应子项明确跳过（⏭️）而非误报失败，
+  保证 CI 不被工具缺失阻断。回归脚本由 <strong>A–Q 扩为 A–R</strong>。</li>
+<li><strong>性能基准与 CI 集成（v1.04 增补）</strong>：<code>build-linux</code> 作业新增 Go 安装与
+  「性能基准采集」步骤，实跑 4 语言编译 + 28 项计时 + 112 校验和一致性，
+  生成 CI 机器上的数据/网页并经 <code>check_bench_data.py</code> 校验，同时验证仓库内
+  交付快照（<code>bench/data.json</code> + <code>web/bench.html</code>）配套；产物上传为
+  <code>bench-4lang-28dim</code> artifact。CI 只写 <code>/tmp</code> 再上传，绝不回写 <code>web/bench.html</code>，
+  避免机器相关的实测数据让官网同步校验误报。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v1-0-milestone.html">v1.0 里程碑</a> · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

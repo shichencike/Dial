@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.96 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v096--2026-10-31">[v0.96] — 2026-10-31</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#fixed修复">Fixed（修复）</a></li>
+<li><a href="#added测试">Added（测试）</a></li>
+<li><a href="#docs文档">Docs（文档）</a></li>
+<li><a href="#验证">验证</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v096--2026-10-31">[v0.96] — 2026-10-31</h2>
+<p>本版补齐 <strong>ARCHITECTURE.md §8 实现路线</strong> 的<strong>阶段 2 剩余部分</strong>与<strong>阶段 5</strong>：
+包的来源不再只能是本地文件，<strong>也可以是 URL</strong>；并新增<strong>一键安装脚本</strong>，
+把「装好 Dial 环境 + 把该装的包装上」变成一条命令。</p>
+<p>至此路线图 7 个阶段已完成 <strong>1 / 2 / 3 / 4 / 5</strong>，
+剩余阶段 6（Windows 线程后端）与阶段 7（官方标准库 <code>.dialpkg</code> 化）。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong><code>dialc install &lt;URL&gt;</code></strong>（阶段 2）：包可以直接从 URL 装，<strong>不用先手动下载</strong>。</li>
+<li><strong>只允许 <code>https://</code></strong>（本机 <code>localhost</code> / <code>127.0.0.1</code> / <code>::1</code> 例外，供本地镜像与自测）。
+    明文 http 能被中间人改写，而 SHA256 挡不住「换了内容还带着正确哈希」的伪造，
+    因此非本机地址一律拒绝——<strong>宁可装不上，也不降级到明文</strong>。</li>
+<li><strong><code>--sha256 &lt;哈希&gt;</code></strong>：钉死<strong>整个下载物</strong>的哈希，用来证明「这就是我要的那一份包」。
+    比对发生在<strong>解压之前</strong>，不符即失败；下载物随即删除。</li>
+<li><strong>没给 <code>--sha256</code> 也能装</strong>，但会明确提示这次只验了「包内文件与 manifest 是否一致」
+    （能发现残缺与篡改），<strong>没验整包来源</strong>——不静默降级。</li>
+<li><strong>下载用外部 <code>curl</code> 而非引入 Rust 的 HTTP 库</strong>：编译器<strong>本来就依赖外部工具链</strong>
+    （<code>zig cc</code> / <code>clang</code> / <code>ar</code>），下载器属同一类依赖，不新增「运行期还要装个东西」的负担；
+    引入 TLS 栈（rustls 等）会显著拉长编译时间与依赖树，与 §21「不引入无用依赖」相悖。
+    <strong>TLS 绝不手写</strong>——证书校验、主机名校验、重定向全部交给 curl 背后的成熟实现。</li>
+<li>临时文件<strong>成功失败都删</strong>，<code>~/.dial/packages/</code> 里不留残骸。</li>
+<li><strong>解压前整包校验</strong>（阶段 2 的安全底座，<code>src/package.rs::verify_archive</code>）：
+  按包内 <code>manifest.txt</code> 登记的 SHA256，把包里<strong>每个文件</strong>验一遍，
+  <strong>一个字节都还没落到磁盘</strong>——这是 ARCHITECTURE.md §5.1「校验先于一切 / 每个文件都要校验」
+  的字面实现。此前 <code>dialc install</code>（本地文件）<strong>完全不做校验</strong>，
+  哈希只在<strong>编译时</strong>对用到的那两个文件验；现在安装这一步就拦下了。
+  <strong>未在 <code>manifest.txt</code> 登记哈希的文件一律拒绝</strong>——无法校验的文件不允许进入缓存。</li>
+<li><strong>一键安装脚本</strong>（阶段 5）：<code>tools/install-dial.sh</code>（Linux / Termux）与
+  <code>tools/install-dial.ps1</code>（Windows / PowerShell）。按 §3.2 承担两件事（顺序不能反）：
+  1. <strong>初始化 Dial 环境</strong>：建 <code>~/.dial/</code> 目录树（<code>bin</code> / <code>packages</code> / <code>cache/downloads</code>）、
+     把 <code>dialc</code> 装进 <code>~/.dial/bin/</code> 并挂进 <code>PATH</code>、<strong>把 <code>stdlib/</code> 与 <code>runtime/</code> 一并装到
+     <code>~/.dial/</code></strong>、写一份 <code>~/.dial/config.txt</code> 工具链配置；
+  2. <strong>自动安装已下载的包</strong>：初始化完成后<strong>重新扫描</strong>找到的 <code>.dialpkg</code>
+     （当前目录及其子目录，或参数指定的目录），逐个执行 <code>dialc install</code>。<blockquote>
+<p><strong>为什么脚本要「自动重新扫描」而不是让用户逐个点名</strong>：一键安装的语义是
+「我把这个目录交给你，你把该装的都装上」。用户不该需要记住包名、也不该需要
+为每个包敲一条命令——包就在那里，脚本看得见。</p>
+</blockquote>
+</li>
+</ul>
+<h3 id="fixed修复">Fixed（修复）</h3>
+<ul>
+<li><strong>一键安装后编译器找不到 <code>stdlib/</code> 与 <code>runtime/</code></strong>：编译器按<strong>可执行文件所在位置</strong>
+  向上找这两个目录（<code>target/release/dialc</code> → 工程根）。装到 <code>~/.dial/bin/dialc</code> 后，
+  那个位置正好是 <code>~/.dial/</code>——所以它们必须<strong>跟着一起装</strong>。
+  少了这一步，用户在自己项目里编译会报「找不到 stdlib/ 与 runtime/ 目录」，
+  一键安装等于没装。脚本现已一并安装这两个目录。</li>
+<li><strong><code>install</code> 时的 <code>manifest.txt</code> 校验时机</strong>：此前 <code>install()</code> 先解压再校验（且当时压根没校验），
+  现在<strong>先校验后解压</strong>。</li>
+</ul>
+<h3 id="added测试">Added（测试）</h3>
+<ul>
+<li>测试组 <strong>L</strong>（<code>tests/pkg_install_url.py</code>，26 项断言）：真起一个<strong>本机 HTTP 服务器</strong>
+  真实提供 <code>.dialpkg</code>，用真正的 <code>dialc install &lt;URL&gt;</code> 去装，验证：</li>
+<li>正常安装成功；<code>--sha256</code> 与实际一致时也成功；未钉死哈希时给出明确提示；</li>
+<li><strong>坏包一律装不进去</strong>：内容被篡改（改 <code>.diali</code> 但保留原哈希）、
+    <code>--sha256</code> 不符、404、非本机的明文 http——四种情形全部失败；</li>
+<li><strong>失败后 <code>~/.dial/packages/</code> 无残骸</strong>（半截的包绝不能留在缓存里）；</li>
+<li>装完能 <code>import</code> 并编译运行，输出正确；</li>
+<li>一键脚本：初始化出编译器 + <code>stdlib/</code> + <code>runtime/</code> + 配置，
+    自动扫描并装上 <code>.dialpkg</code>，最后在<strong>与 Dial 源码树无关的独立项目目录</strong>里
+    用装好的编译器编译 import 程序并运行——这是「一键安装」的意义所在。
+  全部用例在<strong>隔离的 HOME</strong> 下运行，不碰用户真实缓存。</li>
+</ul>
+<h3 id="docs文档">Docs（文档）</h3>
+<ul>
+<li>README §25.9 补 URL 安装用法（https 强制、<code>--sha256</code>、三步流程）与一键脚本；
+  新增 §3.2.1「一键安装」；§2 目录结构补两个脚本与 L 组测试；§17.2 更新 import 行状态；
+  §18 新增 L 组（测试组数 十一 → 十二）。</li>
+<li>ARCHITECTURE.md §8 路线表更新：阶段 2 / 5 标记完成，阶段 3 的「LSP 侧待落地」补注
+  已由 v0.95 的跨文件符号表兑现；文首「仍待实现」清单同步收窄。</li>
+<li>官网重新生成，新增「包 URL 安装 + 一键安装」特性卡。</li>
+</ul>
+<h3 id="验证">验证</h3>
+<ul>
+<li><strong>A～L 十二组测试全绿</strong>（新增 L 组 26 项断言）；
+  端到端实测：URL 安装 → <code>import "demo"</code> → 编译 → 运行输出正确；
+  篡改包 / 哈希不符 / 404 / 明文 http 四种坏包全部装不进去且不留残骸；
+  一键脚本装完后，在独立项目目录里编译 <code>import</code> 程序成功（输出 3 = <code>demo_add(1,2)</code>）。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.95.html">v0.95</a> · 更新：<a href="stdlib-v1.0.0.html">stdlib v1.0.0</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

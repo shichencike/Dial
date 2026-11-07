@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.95 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v095--2026-10-31">[v0.95] — 2026-10-31</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#added测试">Added（测试）</a></li>
+<li><a href="#刻意未做与-v094-规划一致本版仍不做">刻意未做（与 v0.94 规划一致，本版仍不做）</a></li>
+<li><a href="#docs文档">Docs（文档）</a></li>
+<li><a href="#验证">验证</a><ul>
+<li><a href="#流水线实跑记录github-actions-已验证">流水线实跑记录（GitHub Actions 已验证）</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v095--2026-10-31">[v0.95] — 2026-10-31</h2>
+<p>本版是 <strong><code>dialc lsp</code> 的第一次增强</strong>（见 README <a href="README.md#286-lsp-增强hover--跳转定义--补全v095">§28.6</a>）：
+把 v0.94 骨架里「刻意没做」的三件符号表能力——<strong>悬停（Hover）/ 跳转定义（Go to Definition）/ 基础补全（Completion）</strong>
+——一次性补齐。底层是一座<strong>与类型检查解耦、可容错的跨文件符号表</strong>（<code>src/index.rs</code>），
+它复用 <code>parse_diali</code> / <code>resolve_type_name</code>，但<strong>不调用 <code>semantic::analyze</code></strong>，
+所以半句没写完的代码也照样能索引、照样能给 Hover 与补全。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong>GitHub Actions 流水线</strong> <code>.github/workflows/ci.yml</code>（<strong>编译 + 发布流程</strong>）：</li>
+<li><code>build</code> 作业（每次 push / PR）：装 LLVM 18 + Rust → <code>cargo build --release --locked</code>
+    → 跑<strong>全部十一组</strong>端到端测试（A～K）→ 校验内部锚点 → 校验 <code>web/</code> 与文档同步；
+    四道关卡任何一道不过，PR 即不可合并。</li>
+<li><code>release</code> 作业（打 <code>v*</code> 标签时）：复用 build 的二进制，
+    打成 <code>dialc-v&lt;版本&gt;.zip</code>（源码 + <code>.git</code> + 四份许可文件 + <code>web/</code> + VS Code 扩展 + <code>bin/dialc</code>），
+    上传为 <strong>GitHub Release</strong> 产物——即官网首页的下载链接。</li>
+<li>环境与 README §3.1 一致：Ubuntu 24.04 LTS（近两年内发布的发行版）、Linux x86_64 · 动态 glibc。</li>
+<li><strong>新增模块 <code>src/index.rs</code></strong>：作用域树（Scope，parent 链）+ 符号表（Symbol），独立于类型检查。</li>
+<li><strong>作用域链「由内向外」查找</strong>，与 <code>semantic::lookup_type</code> 语义一致，因此 <code>if</code> 块里 <code>let x: int</code> 遮蔽外层
+    <code>let x: string</code> 在 Hover / 定义 / 补全三处都查的是<strong>内层那个 <code>x</code></strong>。</li>
+<li><strong>跨文件符号</strong>：通过 <code>import</code> 自动扫描 <code>~/.dial/packages/&lt;name&gt;/</code>，复用现有
+    <code>find_installed</code> / <code>verify_iface</code> / <code>parse_diali</code> 拿到包的导出（不透明类型 + <code>extern fn</code>），
+    并记下来自 <code>.diali</code> 的<strong>声明行号</strong>与 <code>///</code> 文档——这两样是「跳进 <code>.diali</code>」与「Hover 显示包文档」的素材。</li>
+<li><strong>Hover</strong>（<code>textDocument/hover</code>）：</li>
+<li>文件内符号（函数 / 结构体 / 局部变量 / 形参）显示名称、<strong>推断类型</strong>与声明处片段；</li>
+<li>包符号显示函数签名 + <code>.diali</code> 里的 <code>///</code> 文档，并标注 <strong>「外部函数」</strong>。</li>
+<li><strong>跳转定义</strong>（<code>textDocument/definition</code>）：</li>
+<li>文件内符号 → 返回<strong>本文件</strong>的精确 <code>Location</code>（UTF-16 列换算，精确到标识符起止）；</li>
+<li>包符号 → 返回 <code>.diali</code> 文件的 <code>Location</code>，落点正是该 <code>extern fn</code> 的<strong>声明行</strong>。</li>
+<li><strong>基础补全</strong>（<code>textDocument/completion</code>，触发字符 <code>.</code>）：</li>
+<li>收集光标<strong>可见作用域</strong>内的全部符号（本文件局部 + 全局函数/结构体 + 已 import 的包符号）；</li>
+<li>按光标处<strong>已输入前缀</strong>过滤（<code>demo_</code> 前缀只留 <code>demo_add</code>，不会把 <code>total</code> / <code>DemoHandle</code> 混进来）；</li>
+<li>即使光标落在空白（前缀为空）也返回当前可见的全部候选。</li>
+<li><strong>AST / 解析器 / 包接口补上位置字段</strong>（稀疏、小改）：<code>VarDecl</code> / <code>For</code> / <code>Catch</code> / <code>SelectArm</code> 的变量名位置，
+  <code>Func</code> 的名字与每个形参位置，<code>StructDef</code> 的名字位置；<code>.diali</code> 的 <code>type X;</code> 与 <code>extern fn f</code> 也记下声明行号。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li><code>initialize</code> 能力协商新增 <code>hoverProvider: true</code> / <code>definitionProvider: true</code> /
+  <code>completionProvider: { triggerCharacters: ["."] }</code>（v0.94 仅有语义高亮与诊断）。</li>
+<li><code>didOpen</code> / <code>didChange</code> / <code>didSave</code> 在发诊断之外，额外把文件喂给符号表索引；
+  <code>didClose</code> 时从工作区索引里移除该文件，避免残留。</li>
+</ul>
+<h3 id="added测试">Added（测试）</h3>
+<ul>
+<li>测试组 <strong>K</strong>（<code>tests/lsp_features.py</code>）：真起 <code>dialc lsp</code> 子进程按 LSP 协议往返，覆盖：
+  1. Hover 区分同名变量遮蔽（内层 <code>x: int</code> ≠ 外层 <code>x: string</code>）；
+  2. Hover 包函数的 <code>.diali</code> <code>///</code> 文档与「外部函数」标注（跨文件符号）；
+  3. 跳转定义对文件内符号回本文件、对包符号跳进 <code>.diali</code>；
+  4. 补全收集可见符号 + 前缀过滤（含空白光标全量）。</li>
+</ul>
+<h3 id="刻意未做与-v094-规划一致本版仍不做">刻意未做（与 v0.94 规划一致，本版仍不做）</h3>
+<ul>
+<li><strong>重命名（rename）</strong> 与 <strong>跨文件引用查找</strong>：需要全工作区重索引 + 引用图，当前索引器只建符号、不建引用边。</li>
+<li><strong>格式化</strong>：Dial 没有官定代码风格，格式化交给编辑器/用户。</li>
+<li><strong>诊断下放到 <code>didChange</code></strong>：打字到一半的代码必然有错，边打边报只会让红线在半句话上闪；诊断仍留给保存时。</li>
+<li><strong>LSP 框架（tower-lsp 等）</strong>：本服务仍是手写的「读 JSON / 写 JSON」，框架的异步运行时与依赖树不划算。</li>
+</ul>
+<h3 id="docs文档">Docs（文档）</h3>
+<p>本版一并修掉此前遗留的<strong>文档自相矛盾</strong>（均为「文档说的」与「实际做的」对不上，读者会被误导）：</p>
+<ul>
+<li><strong>标题版本号与内容对不上</strong>：README 首行标题与官网 <code>spec.html</code> 的 <code>&lt;h1&gt;</code> 仍写 <code>v0.94</code>，
+  而正文已含 §28.6（v0.95）。现已统一为 <strong>v0.95</strong>，§17.2 标题「截至 v0.94」同步改为「截至 v0.95」，
+  并修正了三处指向 §17.2 的<strong>失效锚点</strong>（原先分别写作 <code>v091</code> / <code>v092</code>，与标题都对不上）。</li>
+<li><strong><code>import</code> / <code>.dialpkg</code> 的版本号写错</strong>：§25 状态、§25.9 标题、§17.2 表格均写 <code>v0.92</code>，
+  但 CHANGELOG 里 <strong>v0.92 是 <code>char</code> 类型、<code>import</code> / <code>.dialpkg</code> 是 v0.93</strong> 才落地。三处已改为 <strong>v0.93</strong>。</li>
+<li><strong><code>.diali</code> 的 <code>type</code> / <code>extern fn</code> / <code>///</code> 在语言层没有定义</strong>：§4.3 关键字表与 §9 函数定义里都没有它们，
+  而 §25.2 却在用这套语法写示例。现已在 §25.2 明确标注<strong>这是包分发层的接口文件专用语法，不属于 Dial 语言</strong>，
+  并在 §4.1（<code>///</code> 仅存在于 <code>.diali</code>）、§4.3、§9.1 三处各加一句交叉指引。</li>
+<li><strong>§22「版本变更摘要」名不副实</strong>：内容停在 v0.3（v0.4~v0.95 一条没有），已改名为
+  <strong>「早期版本摘要（v0.3 及以前）」</strong>并指向 CHANGELOG（v0.4 及之后的完整记录在那里）。</li>
+<li><strong>§12.3 交叉引用错误</strong>：写「见 §13.5」，但 §13 没有 13.5（实为 <strong>§14.5</strong>）。链接锚点本就指向 14.5，
+  只有显示文字写错，已改正。</li>
+<li><strong>测试组顺序混乱</strong>：长期是 <code>A/B/D/E/C/F/G/H/I/J</code>——C（产物契约）夹在 E 与 F 之间，既非字母序也非逻辑序。
+  现已统一为 <strong>A→K</strong>（C 移到 B 之后），<code>tests/run_tests.sh</code> 的执行顺序与 README §18 的表格同步调整；
+  并修正了脚本里「I 组是 v0.93 新增」的错误标注（实为 v0.94）。</li>
+<li><strong>P2 遗留项补齐</strong>：① §19.2 补上 <strong>ARC 不解决循环引用</strong>的讨论（泄漏 vs 悬垂的取舍，及四条处置办法）；
+  ② §17.2 的 <code>select</code> 超时行改写，明确「未实现的是 select 语句级超时，<code>recv_timeout</code> 早已实现」，
+  消除误读；③ §24.4 的文件 IO 示例<strong>补上 <code>try</code></strong>（§24.2 规定 <code>open</code>/<code>read</code>/<code>write</code> 失败即抛 <code>Error</code>，
+  原示例不包 try 属于错误示范）；④ §27.10 补上 <strong><code>--fast</code> 下 select 的行为</strong>——
+  三档安全等级完全一致（协议语义），唯一随等级变化的是「向已关闭通道 send」的 Fail-Fast 断言。</li>
+<li><strong>§28.4 表格时空错乱</strong>：该节标题是「v0.94 刻意没做的部分」，表格首行却写「已在 v0.95 落地」。
+  已在节首加说明：本节记录的是 v0.94 当时的决策，前三项已在 v0.95 推翻（并链接 §28.6）。</li>
+<li><strong>锚点体系统一（顺带修掉一批「点不动的链接」）</strong>：README.md 的手写锚点一直是按 GitHub 的规则写的，
+  而官网生成器 <code>tools/build_web.py</code> 的 <code>dial_slugify</code> 与之<strong>不一致</strong>（多保留反引号、把连续空格折叠成一个连字符），
+  于是同一份链接「在 GitHub 上能跳、在官网上跳不动」。
+  现已让 <code>dial_slugify</code> <strong>严格复刻 GitHub（github-slugger）语义</strong>，两者同源；
+  并新增 <code>tools/check_links.py</code> 做<strong>锚点一致性校验</strong>（可 <code>--fix</code> 自动修正）。
+  实测：README 的 6 处失效锚点、CHANGELOG 的 25 处失效锚点全部归零，
+  生成后的 <code>web/spec.html</code>（232 条内部链接）与 <code>web/changelog.html</code>（77 条）<strong>零失效</strong>。
+  另修掉 CHANGELOG 里 25 处 <code>](#…)</code> 跨文件链接——它们在 CHANGELOG 内部<strong>根本解析不到</strong>，
+  已改写为 <code>](README.md#…)</code>（链接文字里的 §20→§21、§22 旧标题等一并更正）。</li>
+<li><strong>清理过时产物</strong>：删除 10 份逐版本报告（<code>REPORT_v0.3.md</code> … <code>REPORT_v0.91.md</code>）——
+  它们的内容早已被 CHANGELOG + README + 官网取代，且从未被链接（只在 CHANGELOG 正文里作为历史叙述被提及）。
+  同时清理编译遗留物（<code>examples/*.o</code>、<code>examples/hello</code>、<code>examples/flow</code>、<code>.dialc_build/</code>、<code>TEST_RUN_*.log</code>）。
+  <code>.gitignore</code> 补上 <code>REPORT_*.md</code>，避免这类一次性报告再次堆回仓库。</li>
+</ul>
+<h3 id="验证">验证</h3>
+<ul>
+<li><strong>A/B/C/D/E/F/G/H/I/J 十组原有测试全绿</strong>（J 组「包安装三条硬规则」于 v0.94 收尾时锁死，v0.95 未改动其用例，只随套件一并执行），
+  新增 <strong>K 组 25 项断言全通过</strong>；
+  端到端实测：Hover 内层 <code>x</code> → <code>int</code>、Hover <code>demo_add</code> → 显示 <code>/// 两数相加</code>；
+  定义内层 <code>x</code> → 本文件 line=6、定义 <code>demo_add</code> → <code>.diali</code>；补全前缀 <code>demo_</code> 只留 <code>demo_add</code>。</li>
+</ul>
+<h4 id="流水线实跑记录github-actions-已验证">流水线实跑记录（GitHub Actions 已验证）</h4>
+<p>本版的 CI 不是「写完就交」——<strong>已实跑并全绿</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>运行</th>
+<th>提交</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>首次 CI</td>
+<td><code>02cf561</code></td>
+<td>❌ 官网同步校验失败——runner 缺 python-markdown（<code>ModuleNotFoundError</code>）。<strong>编译与十一组测试当时已通过</strong>，只有这一步挂。已修：CI 改用 venv 装 <code>markdown==3.10.1</code>（版本必须钉死，否则逐字节 diff 会误报）</td>
+</tr>
+<tr>
+<td>修复后 CI</td>
+<td><code>348f916</code></td>
+<td>✅ <strong>全绿</strong>：编译 → 十一组测试 → 锚点校验 → 官网同步校验 → 上传二进制，五步全过</td>
+</tr>
+<tr>
+<td>发布流程</td>
+<td>tag <code>v0.95</code></td>
+<td>✅ <code>build</code> + <code>release</code> 两个作业全过，自动产出 <a href="https://github.com/shichencike/Dial/releases/tag/v0.95">GitHub Release v0.95</a>，资产 <code>dialc-v0.95.zip</code>（1.7 MB）</td>
+</tr>
+</tbody>
+</table>
+<p>发布包已做<strong>反向验证</strong>（不是只看它上传成功）：下载 → <code>unzip -t</code> 完整性通过 → 解压 →
+本地重新 <code>cargo build --release</code> 成功 → 在解压出来的源码树上再跑一遍<strong>十一组测试，全绿</strong>；
+并抽查包内 <code>bin/dialc</code>（CI 构建的二进制，ELF x86-64）、<code>BUILD_INFO.txt</code>（记录构建提交与时间）、
+四份许可文件、<code>.git/</code>、<code>web/</code>、<code>editors/vscode/</code> 齐备，而<strong>已废弃的 <code>REPORT_v0.x.md</code>、
+<code>TEST_RUN_*.log</code>、<code>target/</code> 确实不在包里</strong>。</p>
+<blockquote>
+<p>一处环境差异记录在案：CI 产出的二进制链接的是 apt.llvm.org 的 <code>libLLVM-18.so.18.1</code>，
+与本机自带的 <code>libLLVM.so.18.1rc</code> <strong>符号版本不同</strong>（<code>LLVM_18.1</code> vs <code>LLVM_18.1rc</code>），
+因此不能直接拿本机的 libLLVM 跑它——这正是 <code>BUILD_INFO.txt</code> 里写明
+「需 <code>LD_LIBRARY_PATH=/usr/lib/llvm-18/lib</code>」的原因。<strong>发布包里的源码不受影响</strong>：
+它在本机重新构建后一切正常（上面的反向验证即是如此）。</p>
+</blockquote>
+<hr /><p class="note">← 更早：<a href="v0.94.html">v0.94</a> · 更新：<a href="v0.96.html">v0.96</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

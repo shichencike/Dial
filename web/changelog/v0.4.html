@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.4 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v04--2026-10-29">[v0.4] — 2026-10-29</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#fixed修复">Fixed（修复）</a></li>
+<li><a href="#docs文档">Docs（文档）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v04--2026-10-29">[v0.4] — 2026-10-29</h2>
+<p>本版落地<strong>部分标准库</strong>与<strong>控制流语法糖</strong>，并正式写入<a href="README.md#19-内存宪法防-gc-铁律">内存宪法</a>（见 README §19）。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong><code>map</code> 类型（int → int）</strong>：新增哈希表类型，内存布局 <code>[int64 cap][int64 count][entries...]</code>，
+  与 <code>string</code> / <code>int[]</code> 共用同一套 <strong>ARC 引用计数</strong>（<code>dial_map_retain</code> / <code>dial_map_release</code>）。
+  采用线性探测开放寻址，删除用左移紧凑；负载因子超过 3/4 自动扩容并重新哈希。</li>
+<li><strong><code>map</code> 方法</strong>：<code>put(k,v)</code>（返回可能更新的指针，编译器写回接收变量）、<code>get(k)</code>（未命中 -1）、
+  <code>contains(k)</code>（bool）、<code>remove(k)</code>（返回其值，未命中 -1）、<code>size()</code>。</li>
+<li><strong><code>new_map()</code></strong>：无参内置函数，构造空表。</li>
+<li><strong><code>read_line()</code></strong>：无参内置函数，从标准输入读一行；EOF 返回空串（绝不崩溃）。</li>
+<li><strong><code>else if</code> 语法糖</strong>：<code>else if (c) {..}</code> 编译期展开为嵌套 <code>if</code>，不引入新 AST 节点（见 README §8.2）。</li>
+<li><strong>范围 <code>for</code> 循环</strong>：<code>for (i in start..end)</code> 循环变量 <code>i</code> 为 int，半开区间 <code>[start, end)</code>，
+  可在循环体内重新赋值（见 README §8.3）。</li>
+<li>新增示例 <code>examples/map_demo.dial</code>、<code>examples/control_flow.dial</code>；
+  新增负向用例 <code>tests/bad/map_let_put.dial</code>、<code>tests/bad/map_bad_arg.dial</code>、<code>tests/bad/for_range_type.dial</code>。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li><code>dial_map.c</code> 由旧版「非 ARC 的 <code>Map*</code> 堆分配（进程退出时由 OS 回收）」重写为与 <code>dial_array.c</code>
+  <strong>完全对称</strong>的 inline-entries ARC 实现：指针因扩容 / COW 可能更换，编译器负责把新指针写回接收变量。
+  这消除了旧实现与<a href="README.md#19-内存宪法防-gc-铁律">内存宪法</a>（防 GC 铁律）的矛盾。</li>
+<li>Map 与 <code>read_line</code> 从「未实现」清单移除（v0.4 已暴露）。</li>
+</ul>
+<h3 id="fixed修复">Fixed（修复）</h3>
+<ul>
+<li>修正 <code>0..5</code> 这类范围字面量此前被数字词法器误识别为浮点 <code>0.5</code> 的问题：仅当小数点后紧跟数字才视为浮点，
+  <code>..</code> 现被正确识别为范围运算符。</li>
+</ul>
+<h3 id="docs文档">Docs（文档）</h3>
+<ul>
+<li>README 新增 <a href="README.md#12-哈希表-mapint--int">§12 哈希表 <code>map</code></a>、<a href="README.md#82-if--else-if--while">§8.2 <code>else if</code></a>、<a href="README.md#83-范围-for-循环">§8.3 范围 <code>for</code></a>、
+  <a href="README.md#19-内存宪法防-gc-铁律">§19 内存宪法</a>；并将 FFI 表与 C 导出函数清单补齐 <code>dial_map_*</code> / <code>dial_read_line</code>。</li>
+<li>官网文档（<code>web/</code>）随 README / CHANGELOG 重新生成。</li>
+<li>版本号升级至 <code>v0.4</code>。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.3.html">v0.3</a> · 更新：<a href="v0.5.html">v0.5</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

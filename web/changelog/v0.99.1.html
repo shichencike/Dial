@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.99.1 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v0991--2026-11-03">[v0.99.1] — 2026-11-03</a><ul>
+<li><a href="#fixed修复">Fixed（修复）</a></li>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v0991--2026-11-03">[v0.99.1] — 2026-11-03</h2>
+<p>本版是 <strong>v0.99 的修复发布（补丁位）</strong>：只修缺陷，不含任何新特性，
+所有基于 v0.99 的程序<strong>无需改动即可运行</strong>（行为完全一致）。</p>
+<h3 id="fixed修复">Fixed（修复）</h3>
+<ul>
+<li><strong><code>a[i] = v</code> 下标赋值在 COW 守卫上误判，导致每次赋值都深拷贝整个数组</strong>：
+  数组运行时在「独占」路径（<code>refcount == 1</code>）上<strong>多做了 <code>retain</code></strong>，又在「共享」路径
+  （<code>refcount &gt; 1</code>）上<strong>漏掉了对旧 buffer 的 <code>release</code></strong>——与 <code>dial_map_put</code> 已有的
+  正确写法（独占时原样移交所有权、共享时克隆并释放旧引用）相悖。
+  于是每写一次下标赋值引用计数就 +1，COW 守卫 <code>refcount &gt; 1</code> 从此<strong>恒真</strong>：
+  <strong>每一次 <code>a[i] = v</code> 都深拷贝整个数组</strong>。</li>
+<li>后果：<code>a[i] = v</code> 循环 N 次即需 <strong>O(N²)</strong> 内存。实测 100 万次写需约 <strong>8 TB</strong>，
+    进程被 <strong>OOM Killed</strong>（<code>sys</code> 时间高达 3 秒）；同一程序修复后峰值约 <strong>10 MB</strong>、
+    耗时 0.01 秒。</li>
+<li>根因定位手段：在 <code>dial_array_set</code> 入口用 gdb 读 <code>((int64_t*)a)[-1]</code>，
+    可见引用计数在 <code>2 → 1 → 2 → 1 → 2</code> 之间震荡（数组明明由槽位独占持有）。</li>
+<li>修复：<code>dial_array_set</code> 与 <code>grow</code>（<code>push</code> 路径）改为与 <code>dial_map_put</code> 完全同款的
+    所有权交接——独占时原样返回、<strong>不 retain 不 release</strong>；共享时克隆并 <code>release</code> 旧 buffer。</li>
+<li>附带修复：覆盖槽位时改为<strong>先 <code>retain</code> 新元素、再 <code>release</code> 旧元素</strong>。
+    原顺序在「旧元素 == 新元素」（如 <code>a[0] = a[0]</code>）时会把计数打到 0（<code>free</code>），
+    紧接着又对已释放内存 <code>retain</code> —— use-after-free。</li>
+<li><strong><code>dial_array_clone</code> 在独占数组上泄漏元素的引用计数</strong>：旧实现对「与原数组同一块
+  buffer 的别名」也调用 <code>retain_elems</code>，等于把同一批元素的引用计数凭空 +1，
+  而数组释放时只释放一次——元素引用计数净多 1，永久泄漏。
+  现 <code>clone()</code> 一律产出<strong>独立副本</strong>（先 <code>retain</code> 迫使深拷贝，再抵消该次 <code>retain</code>）。</li>
+<li><strong>嵌套下标赋值 <code>m[i][j] = v</code> 的所有权结算错位</strong>：内层数组是从外层数组元素槽
+  <strong>借来</strong>的指针，其那一份引用属于外层数组；若内层 <code>set</code> 按「消耗引用」的语义
+  处理，会与外层的元素替换重复释放同一份引用。现新增 <code>dial_array_set_borrowed</code>
+  （不消耗被借的引用，改为交出「一份新拥有」的引用），并在 codegen 中按
+  「消费者释放、变量槽转移」的规则结算。</li>
+<li>
+<p><strong><code>dial_rc_clone</code> 恢复纯粹语义</strong>：唯一持有者时原样返回、<strong>不再 +1</strong>；
+  多持有者时深拷贝。过去那个 <code>+1</code> 让 <code>clone()</code> 只能靠「别名 + 多一个计数」实现，
+  是元素引用计数泄漏与 COW 守卫误判的共同源头。
+  配套地，<code>dial_string_clone</code> / <code>dial_bytes_clone</code> 改为强制深拷贝产出独立副本
+  （否则纯语义下 <code>b = s.clone()</code> 会让 <code>b</code> 悬垂）。</p>
+</li>
+<li>
+<p><strong>误拒合法程序 + 三处堆悬垂 + <code>bytes[]</code> 被拒 + 两处安全缺陷</strong>（本轮一并修复）：</p>
+</li>
+<li><strong>① <code>select</code> 分支里 <code>move_to</code> 外层变量被误报「已转移」</strong>：<code>check_moved_stmt</code> 的
+    <code>Stmt::Select</code> 分支既不做「只查 <code>arm.chan</code>」的纪律，反而又对 <code>arm.body</code> /
+    <code>default_body</code> 递归了一遍 <code>check_moved_stmt</code>，与 <code>check_stmt</code> 的递归重复——
+    同一条 <code>move_to</code> 被检查两次，第二次必然报「变量已转移」。现删掉分支内的递归，
+    只保留对 <code>arm.chan</code> 的 <code>check_moved_expr</code>（分支体仍由 <code>check_stmt</code> 递归各自检查，
+    恰好一次）。</li>
+<li><strong>③ 结构体字面量 / 字段读取 / 字段赋值的堆字段未 <code>retain</code></strong>：<code>Expr::StructLit</code>、
+    字段读取（<code>t = p.name</code>）、字段赋值（<code>p.name = s</code>）在写堆类型字段时只 <code>store</code> 不
+    <code>retain</code>，字段于是成了来源的<strong>别名</strong>；来源出作用域被 <code>release</code> 后字段即悬垂
+    （use-after-free，读到的长度字段可能是垃圾，打印出成片乱码）。现统一引入
+    <code>retain_if_borrowed</code>：借来的值（变量 / 字段 / 数组元素 / <code>get</code>·<code>at</code>）<code>retain</code> 一份，
+    自带所有权的值（字面量 / <code>clone</code> 等）直接接管。</li>
+<li><strong>③ 的同族泄漏</strong>：<code>a[i] = &lt;字面量&gt;</code>、<code>a.push(&lt;字面量&gt;)</code>、<code>a.set(i, &lt;字面量&gt;)</code>、
+    数组字面量元素在循环里逐次泄漏一份引用（容器 <code>retain</code> 了元素，字面量自带的
+    那一份所有权却没移交）。现引入 <code>settle_fresh_value</code>：自带所有权的值在容器接管后
+    归还其临时所有权，借来的值则不释放——嵌套下标赋值 <code>m[i][j] = v</code> 也按同一规则结算。</li>
+<li><strong>④ <code>bytes[]</code> 被 <code>is_array_elem_type</code> 拒绝</strong>：语义层漏收 <code>Type::Bytes</code>，但 codegen
+    的 <code>array_elem_kind</code> 早已把 <code>Bytes</code> 归为 kind=1（RC），两层不一致。现补上
+    <code>Type::Bytes</code>（<code>dial_bytes_retain</code> / <code>release</code> 内部即 <code>dial_rc_*</code>，完全兼容）。</li>
+<li><strong>⑤ IR 验证失败不中止编译</strong>：<code>module.verify()</code> 失败只 <code>eprintln</code> 后继续
+    <code>emit_object</code>，可能产出无效 IR 或带未定义行为的机器码。现改为直接以易读文字
+    <code>return Err(...)</code> 中止。</li>
+<li><strong>⑥ <code>curl --proto '=https,http'</code> 与「只允许 https」声明矛盾</strong>：https URL 可被
+    302 重定向到 http，中间人攻击窗口重新打开。现 <code>--proto</code> 仅放行 https（本机地址
+    经 <code>http_allowed</code> 判定才加 http），并新增 <code>--proto-redir</code> 限制重定向协议。</li>
+</ul>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong>测试组 N：内存上界 + 所有权语义回归</strong>（<code>tests/mem/</code>）。</li>
+<li><code>array_cow_bench.dial</code>：100 万次下标赋值的基准，在 <strong>128 MB 虚拟内存上限</strong>下运行——
+    一旦 COW 误判复发（需 TB 级内存）立刻被上限打爆。</li>
+<li><code>array_cow_semantics.dial</code>：逐条钉死 <code>clone</code> 独立 / COW 隔离 / 嵌套赋值 /
+    句柄元素数组四条所有权语义。</li>
+<li><strong>测试组 O：所有权 / 语义回归</strong>（<code>tests/sem/</code>）：钉死「编译器应接受并正确运行」的合法
+  程序——<code>select</code> 里 <code>move_to</code> 外层变量（<code>select_move_to</code>）、<code>StructLit</code> / 字段读取 /
+  字段赋值的堆字段 retain（<code>structlit_heap_field</code> / <code>field_and_assignfield</code>）、
+  <code>bytes[]</code> 不被拒（<code>bytes_array</code>）、借来值写入容器不重复释放（<code>borrowed_assign</code>）。</li>
+<li><strong>一键安装脚本彻底重写</strong>（<code>tools/install-dial.sh</code> / <code>install-dial.ps1</code>）：</li>
+<li>版本<strong>不再硬编码</strong>：优先从已装好的 <code>dialc</code> 读出真实版本号，bootstrap 才回退到内置
+    默认；配套件（标准库 / 插件）一律按该版本推导——<strong>消灭版本不同步</strong>。</li>
+<li>VS Code 插件按 <strong>Release 资产清单</strong>解析真实文件名，不再依赖插件自身 semver 与
+    编译器版本号对齐（旧版写死 <code>dial-0.98.1.vsix</code>，每次都 404）。</li>
+<li>下载失败<strong>可见真实原因</strong>（旧版 <code>2&gt;/dev/null</code> 把 curl 报错吞了）。</li>
+<li><code>install-dial.sh</code> 支持 bash / zsh / fish / profile 四种 shell 的 PATH 持久化，并提示
+    当前会话用法；新增 <code>--help</code> / <code>--version</code> / <code>--uninstall</code>，解压前校验压缩包完整性，
+    重跑幂等。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li>README §11.2 / §11.3：补齐「独占路径必须原样移交所有权、一个引用计数都不能动」
+  这条不变量（含做错的后果对照表），并把 <code>clone()</code> 的描述从「COW 感知克隆」
+  更正为「独立副本（深拷贝）」。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.99.html">v0.99</a> · 更新：<a href="v1.00.html">v1.00</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

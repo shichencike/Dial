@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v1.00 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v100--2026-11-04">[v1.00] — 2026-11-04</a><ul>
+<li><a href="#added五组语言特性">Added（五组语言特性）</a></li>
+<li><a href="#fixed">Fixed</a></li>
+<li><a href="#changed">Changed</a></li>
+<li><a href="#testing">Testing</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v100--2026-11-04">[v1.00] — 2026-11-04</h2>
+<p><strong>里程碑版本</strong>：从 <code>v0.99.1</code> 直接跳到 <code>v1.00</code>（用户明确要求跳版，见 §23 第 3 条）。
+本版是<strong>语言特性补齐</strong>发布：把「正常程序需要、此前只能模拟或绕路」的能力一次性补齐，共五组。
+所有改动都守住项目铁律（v1.00 当时）：<strong>不引入 GC</strong>、不提供裸指针 / 地址取值 / 指针算术、
+不支持运算符重载、不支持一等函数 / 闭包 / 函数指针、ARC 所有权语义不退化、
+<strong>零隐式转换铁律保持</strong>（<code>1 + 2.0</code> 仍编译失败）。</p>
+<blockquote>
+<p>后续边界变更：「不提供裸指针」已在 <strong>v1.02</strong> 解除，「不支持函数指针」已在
+<strong>v1.03</strong> 解除；<strong>闭包至今仍不提供</strong>。见文件开头「v1.0 里程碑」说明。</p>
+</blockquote>
+<h3 id="added五组语言特性">Added（五组语言特性）</h3>
+<p><strong>① 运算符与字面量</strong>
+- 复合赋值 <code>+= -= *= /= %=</code>、自增自减 <code>++</code> / <code>--</code>（编译期脱糖为普通赋值）；
+- 位运算 <code>&amp; | ^ ~ &lt;&lt; &gt;&gt;</code>（仅 <code>int</code>）；
+- 进制字面量 <code>0x</code> / <code>0b</code> / <code>0o</code>、数字分隔符 <code>_</code>；
+- 三元表达式 <code>cond ? a : b</code>（<code>cond</code> 必须是 <code>bool</code>，两分支类型必须相同）。
+- 正向示例：<code>examples/op_demo.dial</code>。</p>
+<p><strong>② 迭代与控制流</strong>
+- <code>for (i in a..b step s)</code> 步长循环（<code>step</code> 必须是 <code>int</code> 且为正）；
+- <code>for (v in arr)</code> 数组遍历、<code>for (k, v in m)</code> 哈希表遍历、<code>for (v in s)</code> 集合遍历
+  （集合遍历编译期自动插入键集快照并纳入函数出口释放）；
+- <code>match</code> 模式匹配（int / bool / char / string 模式，必须有 <code>_</code> 通配分支）；
+- <code>defer</code> 延迟语句（LIFO，覆盖正常落穿 / <code>return</code> / <code>break</code> / <code>continue</code> / <code>throw</code>）；
+- <code>do { ... } while (cond);</code>。
+- 正向示例：<code>examples/control_demo.dial</code>、<code>defer_demo.dial</code>、<code>control_edge_demo.dial</code>。</p>
+<p><strong>③ 函数与内建</strong>
+- 默认参数（带默认值的形参必须连续位于末尾；在调用点补齐，不改变 LLVM 函数签名）；
+- <code>print</code> / <code>print_raw</code> 改为 variadic；
+- 内建 <code>assert</code> / <code>panic</code> / <code>exit</code> / <code>min</code> / <code>max</code> / <code>abs</code> / <code>sqrt</code> / <code>pow</code> /
+  <code>floor</code> / <code>ceil</code> / <code>round</code>（浮点数学函数最终链接加入 <code>-lm</code>）。
+- 正向示例：<code>examples/builtin_demo.dial</code>。</p>
+<p><strong>④ 表达力增强</strong>
+- 字符串插值 <code>"n=${n}"</code>（逐段转字符串 + concat；插值表达式只允许可转字符串的类型）；
+- 文件级常量 <code>const NAME: T = 字面量;</code>（编译期内联，禁止遮蔽与重新赋值）。
+- 正向示例：<code>examples/interp_const_demo.dial</code>。</p>
+<p><strong>⑤ 重型类型与容器</strong>
+- <code>enum</code> int-backed 名义类型（变体 <code>Name.Variant</code> 编译期内联为整数字面量，默认值 0 起递增，可显式指定）；
+- 数组切片 <code>arr[from..to]</code>（半开区间；句柄元素逐个 retain，与原数组 ARC 独立）；
+- <code>set&lt;int&gt;</code> 集合（<code>new_set()</code> / <code>add</code> / <code>contains</code> / <code>remove</code> / <code>size</code> / <code>values</code>）；
+- <strong>泛型 <code>map&lt;K,V&gt;</code></strong>（独立 C 运行时 <code>stdlib/dial_kvmap.c</code>）：
+  - 键支持 <code>int</code> / <code>float</code> / <code>bool</code> / <code>char</code> / <code>byte</code> / <code>string</code>（string 键按条目 ARC 管理）；
+  - 值支持标量 <code>int</code> / <code>float</code> / <code>bool</code> / <code>char</code> / <code>byte</code>（float 以 IEEE754 位模式存储，绝不丢小数）；
+  - 方法 <code>put</code> / <code>get</code> / <code>contains</code> / <code>remove</code> / <code>size</code> / <code>keys</code> / <code>values</code>；
+  - COW 克隆、扩容重哈希、墓碑法删除，全部逐条目 retain / release。
+- 正向示例：<code>examples/container_demo.dial</code>、<code>set_demo.dial</code>、<code>kvmap_demo.dial</code>。</p>
+<p><strong>已知边界</strong>：泛型 map 的 <code>V</code> 暂不开放 <code>string</code>（<code>get</code> 未命中时的默认对象会带来所有权移交歧义）；
+<code>map.values()</code> 当前只支持 <code>V = int</code>。两点计划在后续版本补齐。</p>
+<h3 id="fixed">Fixed</h3>
+<ul>
+<li><strong>开放寻址哈希表删除采用「左移紧凑」导致键不可达</strong>：<code>dial_map_remove</code> 与新
+  <code>dial_kvmap_remove</code> 改为<strong>墓碑标记 + 负载重建</strong>。2 万键压测里删除 1 万个后 <code>size</code>
+  曾只剩 13082（应为 10000），修复后正确；<code>set&lt;int&gt;</code> 与 <code>for (k, v in m)</code> 同时受益。</li>
+<li><code>panic</code> 前 stdout 缓冲内容丢失：<code>dial_panic()</code> 增加 <code>fflush(NULL)</code>。</li>
+</ul>
+<h3 id="changed">Changed</h3>
+<ul>
+<li><code>print</code> 中间参数改为原样输出、最后一个参数补换行；<code>print_raw</code> 全部参数原样输出。</li>
+<li>trap 接口补齐 <code>dial_assert_fail</code> / <code>dial_exit</code> / <code>dial_panic</code>；<code>dial_map_keys()</code> 供迭代使用。</li>
+<li>LSP 语义 token / 固定文本 / 符号索引补齐所有新增关键字、运算符与语句变体。</li>
+</ul>
+<h3 id="testing">Testing</h3>
+<ul>
+<li>新增 8 个正向示例 + 黄金文件、30+ 个负向用例（<code>tests/bad/</code>）锁定语义边界；</li>
+<li><code>bash tests/run_tests.sh</code> A–O 全套通过；</li>
+<li>2 万键 ARC 压测（泛型 map / set）峰值内存约 4.4 MB / 2.4 MB，无泄漏、无 Fail-Fast。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.99.1.html">v0.99.1</a> · 更新：<a href="v1.01.html">v1.01</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

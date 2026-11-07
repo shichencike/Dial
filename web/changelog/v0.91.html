@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.91 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v091--2026-10-30">[v0.91] — 2026-10-30</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#added测试与示例">Added（测试与示例）</a></li>
+<li><a href="#fixed修复">Fixed（修复）</a></li>
+<li><a href="#性能数据">性能数据</a></li>
+<li><a href="#已知限制与未来方向">已知限制与未来方向</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v091--2026-10-30">[v0.91] — 2026-10-30</h2>
+<p>本版落地<strong>多路复用 <code>select</code></strong>（见 README <a href="README.md#279-多路复用-selectv091">§27.9</a>）——
+同时监听多个通道，任一就绪即执行对应分支。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong>新语法</strong>（4 个关键字）：
+  <code>dial
+  select {
+      case recv(chA) as a { ... }
+      case recv(chB) as b { ... }
+      default { ... }
+  }</code>
+  <strong>刻意不照搬 Go</strong>：接收永远是<strong>函数调用</strong> <code>recv(ch)</code>（没有 <code>&lt;-</code> 运算符），
+  绑定变量用 <strong><code>as</code></strong> 关键字（不是 <code>:=</code>）。<code>select</code> 是<strong>语句</strong>不是表达式——
+  各 case 的绑定变量类型可以互不相同，不存在统一返回类型，编译期拒绝 <code>let x = select {...}</code>。</li>
+<li><strong>内建语义三条</strong>：
+  1. <strong>case 只拿真实值</strong>：分支体内绝不会拿到空指针（底层非阻塞取，元素被抢走会自动重挑）；
+  2. <strong>全体 EOF → select 直接结束</strong>：所有通道都「已关闭且已空」时，select 语句结束，
+     <strong>一个分支都不执行</strong>（包括 <code>default</code>）；
+  3. <strong><code>default</code> 使 select 非阻塞</strong>：没有任何通道就绪时立刻执行 default，绝不等待。</li>
+<li><strong>事件驱动的等待原语</strong>（C Runtime）：全局事件纪元 <code>epoch</code> + 全局条件变量广播。</li>
+<li><strong>不丢唤醒</strong>：先读 epoch → 再查就绪 → 再睡到 epoch 变化，过期的等待假设永不成立；</li>
+<li><strong>不死锁</strong>：notify 一律在<strong>释放通道本地锁之后</strong>调用，
+    「持通道锁 → 取全局锁」与「持全局锁 → 取通道锁」两种嵌套<strong>都不存在</strong>。</li>
+<li><strong>随机选取就绪通道（防饿死）</strong>：多通道同时有数据时随机挑一个，
+  起点用<strong>原子递增</strong>计数器取模（不用 <code>rand()</code>——它不是线程安全的）。</li>
+<li><strong>C Runtime</strong>：<code>dial_chan_epoch</code> / <code>dial_chan_wait</code> / <code>dial_channel_pick_ready</code>，
+  以及 selector 对象（<code>dial_sel_new</code> / <code>add</code> / <code>pick</code> / <code>recv</code> / <code>free</code>）。</li>
+</ul>
+<h3 id="added测试与示例">Added（测试与示例）</h3>
+<ul>
+<li><code>examples/select_two_channels.dial</code>：<strong>双通道并发</strong>——两个生产者往不同通道发数据，
+  一个消费者同时监听；顺带校验「收到的确实是本通道的元素」（防串通道）。</li>
+<li><code>examples/select_default.dial</code>：<code>default</code> 的非阻塞语义。</li>
+<li><code>examples/select_eof.dial</code>：全体 EOF 时 select 直接结束。</li>
+<li><code>examples/select_fairness.dial</code>：随机选取的防饿死断言（两个通道都必须被处理过）。</li>
+<li>负向用例新增 9 个（case 非 channel / 元素类型未定 / 缺 <code>as</code> / 绑定变量作用域外使用 /
+  case 不是 recv 调用 / select 为空 / 两个 default / select 当表达式 / case 用 try_recv）。</li>
+</ul>
+<h3 id="fixed修复">Fixed（修复）</h3>
+<ul>
+<li><strong>IR 生成缺一条跳转导致编译器段错误</strong>：select 的 setup 块原先没有接上调用方当前块，
+  使 <code>while</code> 的 body 块变成无终结指令的空块，LLVM 在分支概率分析时段错误。
+  已补上「当前块 → setup」的跳转。</li>
+</ul>
+<h3 id="性能数据">性能数据</h3>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>50 万次 send + select（阻塞式，事件驱动）</td>
+<td><strong>wall 0.19 s</strong>，CPU 0.36 s</td>
+</tr>
+<tr>
+<td>同等工作量改用 <code>default</code>（非阻塞轮询）</td>
+<td>空转 0.38 s 后<strong>卡死在 join</strong>（队列塞满、生产者永久阻塞），120 s 超时</td>
+</tr>
+<tr>
+<td>8 消费者 / 100 万元素并发压测（F 组）</td>
+<td>回归不变：<code>received=1000000 duplicate=0</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="已知限制与未来方向">已知限制与未来方向</h3>
+<ul>
+<li><strong>惊群</strong>：全局广播会唤醒所有 select 等待者，多数醒来后发现「不是我」。
+  基线实现选择「逻辑正确 + 低延迟」优先于惊群开销（惊群只造成少量无谓唤醒，
+  轮询方案则持续 CPU 空转 + 毫秒级延迟）。
+  Linux 上可用 <strong>epoll + eventfd</strong> 消除惊群——v0.92 之后的优化方向，不影响本版语义。</li>
+<li><code>select</code> <strong>不带超时</strong>：要「等一会儿再看」请用 <code>recv_timeout</code> 单独接收。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.9.html">v0.9</a> · 更新：<a href="v0.92.html">v0.92</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

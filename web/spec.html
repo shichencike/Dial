@@ -512,7 +512,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
 │   └── pkg_install_url.py  # L 组：包 URL 安装 + 一键安装脚本
 ├── tools/
-│   ├── build_web.py        # 生成官网 web/（规范 / 更新日志 / 首页）
+│   ├── build_web.py        # 生成官网 web/（规范 / 更新日志索引 + 每版本分页 / 首页）
 │   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
 │   ├── check_version.py    # 校验版本号在 README / CHANGELOG / 官网三处一致
 │   ├── check_lsp_stdout_purity.py  # 校验 LSP 路径上不出现 stdout 裸输出（协议流纯净性）
@@ -523,7 +523,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
 ├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十三组测试 + 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
-├── web/                    # 官网产物（由 tools/build_web.py 生成）
+├── web/                    # 官网产物（由 tools/build_web.py 生成；更新日志分页在 web/changelog/）
 └── README.md               # 本文件
 </code></pre>
 <hr />
@@ -3467,7 +3467,9 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <blockquote>
 <p>本节仅保留 <strong>v0.3 及以前</strong> 的相对变更摘要（早期历史）。
 <strong>v0.4 及之后</strong> 的每个版本相对变更、跨文件符号表（v0.95）等<strong>完整记录见 <a href="CHANGELOG.md">CHANGELOG.md</a></strong>，
-官网同步渲染为 <a href="web/changelog.html">changelog.html</a>；最新版本号与能力矩阵见 <a href="web/index.html">首页 index.html</a>。</p>
+官网渲染为<a href="changelog.html">版本索引 changelog.html</a>与 <code>web/changelog/</code> 下<strong>每版本一页的详情</strong>
+（正文与 CHANGELOG.md 对应条目逐字一致；索引 + 分页是为避免单文件 200 KB 的长滚动与移动端加载成本，
+并消除跨版本重复小节标题的锚点撞名）；最新版本号与能力矩阵见 <a href="index.html">首页 index.html</a>。</p>
 </blockquote>
 <h3 id="220-v061相对-v06">22.0 v0.61（相对 v0.6）</h3>
 <p>本版落地<strong>文件 IO（file 句柄）</strong>，并正式确立<a href="#23-版本号规则">版本号规则</a>（最多两位小数、禁止跳版、严格按时间递增）：</p>
@@ -7910,7 +7912,7 @@ GDB 里只剩 <code>&lt;optimized out&gt;</code>，<code>print counter</code> �
 <hr />
 <h2 id="36-v104-增补性能基准4-语言--28-维并入-v104版本不变">36. v1.04 增补：性能基准（4 语言 × 28 维，并入 <code>[v1.04]</code>，版本不变）</h2>
 <p>一套<strong>可复现、跨语言等价</strong>的性能基准：同一台机器、同一套 <strong>28 个微基准</strong>，对比
-<strong>C / Python / Go / Dial</strong> 四种语言；独立网页 <a href="web/bench.html"><code>web/bench.html</code></a>
+<strong>C / Python / Go / Dial</strong> 四种语言；独立网页 <a href="bench.html"><code>web/bench.html</code></a>
 存放全部数据，底部叠加<strong>六维工程能力雷达图</strong>。</p>
 <h3 id="361-28-个维度">36.1 28 个维度</h3>
 <p>28 个纯整数微基准按五类组织，全部产出<strong>十进制校验和</strong>：</p>
@@ -8022,7 +8024,7 @@ GDB 里只剩 <code>&lt;optimized out&gt;</code>，<code>print counter</code> �
 再叠加 4 语言多边形（<strong>越靠外越优</strong>）。归一化得分与原始绝对值都在网页列出，
 避免只看雷达面积导致的误读。</p>
 <h3 id="364-网页与复现">36.4 网页与复现</h3>
-<p>独立网页 <a href="web/bench.html"><code>web/bench.html</code></a> 为<strong>纯静态 HTML</strong>（自带表格与手写 SVG
+<p>独立网页 <a href="bench.html"><code>web/bench.html</code></a> 为<strong>纯静态 HTML</strong>（自带表格与手写 SVG
 雷达图，无外部 CDN、无 JS 依赖，离线双击可看）。它不由 <code>tools/build_web.py</code> 生成，
 因此不影响「官网产物同步校验」；官网导航、首页 CTA 与安全公告页均已加入口。</p>
 <pre><code class="language-bash"># 采集成 JSON（自动编译 4 语言、校验 112 校验和、采 6 维）

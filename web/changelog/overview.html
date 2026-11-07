@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 · 版本规则 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><h1 id="更新日志--changelog">更新日志 / Changelog</h1>
+<p>本文件记录 Dial 语言编译器 <code>dialc</code> 的每个发布版本的相对变更。</p>
+<blockquote>
+<p><strong>版本号规则（强制）</strong></p>
+<ol>
+<li><strong>最多两位小数</strong>的单一十进制数：<code>v0.1</code>、<code>v0.2</code>、…、<code>v0.9</code>、<code>v0.91</code>、<code>v0.92</code>……
+   不再使用语义化版本的「主.次.修订」三段式。
+   <strong>唯一例外是第三位的补丁号</strong>（如 <code>v0.98.1</code>）：它是「两位小数版本 + 一位修复补丁位」，
+   而非「第三位连续小数」；仅用于<strong>修复发布</strong>（只修缺陷、不加新特性），
+   适用条件见 <a href="README.md#23-版本号规则">README §23</a> 第 6 条。</li>
+<li><strong>版本标题一律带 <code>v</code> 前缀、不写补丁位</strong>：写作 <code>[v0.91]</code>，<strong>不是</strong> <code>[0.91.0]</code>。
+   （源码 <code>Cargo.toml</code> 的 <code>version</code> 字段受 Cargo 限制仍写作 <code>0.91.0</code>，那是存储格式，
+   文档与官网一律显示为 <code>v0.91</code>。）
+   <strong>带补丁位的版本例外</strong>：补丁发布写作 <code>[v0.98.1]</code>，补丁位必须显示——
+   否则读者无从判断自己装的是不是修复过的版本。</li>
+<li><strong>版本号必须严格按时间递增，绝不许倒流</strong>：后发版本的日期不得早于先前版本。</li>
+</ol>
+<p>详见 <a href="README.md#23-版本号规则">README §23</a>。</p>
+</blockquote>
+<hr /></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

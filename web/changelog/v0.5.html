@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.5 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v05--2026-10-29">[v0.5] — 2026-10-29</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#docs文档">Docs（文档）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v05--2026-10-29">[v0.5] — 2026-10-29</h2>
+<p>本版补齐循环控制流，并把<strong>代码编写纪律</strong>正式写入规范（见 README §20）。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong><code>break</code></strong>：跳出最内层循环；仅允许出现在 <code>while</code> / <code>for</code> 循环体内，写在别处是编译错误（见 README §8.4）。</li>
+<li><strong><code>continue</code></strong>：进入下一次迭代。关键语义——<code>for</code> 的 <code>continue</code> <strong>先执行 <code>i = i + 1</code> 再回到条件判定</strong>：
+  实现上把自增放在独立的 <code>for.inc</code> 块，<code>continue</code> 跳到该块而非条件块；若跳到条件块就会跳过自增造成死循环。</li>
+<li>新增示例 <code>examples/loop_control.dial</code>（覆盖 for+continue、for+break、while+continue/break 三种组合）。</li>
+<li>新增负向用例 <code>tests/bad/break_outside_loop.dial</code>、<code>tests/bad/continue_outside_loop.dial</code>。</li>
+</ul>
+<h3 id="docs文档">Docs（文档）</h3>
+<ul>
+<li>README 新增 <a href="README.md#21-代码编写纪律防臃肿与允许冗余原则">§21 代码编写纪律（防臃肿与允许冗余原则）</a>：
+  ① 绝对拒绝过度抽象（宁可 WET，绝不 DRY 过头）② 不引入无用依赖 ③ 允许安全与性能的冗余
+  ④ 保持代码直白（能用一个循环和一个 if 解决的，绝不套设计模式）。</li>
+<li>README §8.1 语句一览、§8.4 <code>break</code> / <code>continue</code>、§17.2 未实现清单（移除已落地的 break/continue）同步更新。</li>
+<li>新增 <code>REPORT_v0.5.md</code>（<code>objdump</code> 真实反汇编证据）与 <code>TEST_RUN_v0.5.log</code>。</li>
+<li>官网 <code>web/</code> 重新生成，首页版本同步 v0.5。</li>
+<li>版本号升级至 <code>v0.5</code>。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.4.html">v0.4</a> · 更新：<a href="v0.6.html">v0.6</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

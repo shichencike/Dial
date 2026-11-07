@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.98.1 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v0981--2026-11-02">[v0.98.1] — 2026-11-02</a><ul>
+<li><a href="#fixed修复">Fixed（修复）</a></li>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v0981--2026-11-02">[v0.98.1] — 2026-11-02</h2>
+<p>本版是 <strong>v0.98 的修复发布（补丁位）</strong>：只修缺陷与文档矛盾，<strong>不含任何新特性</strong>，
+因此所有基于 v0.98 的程序<strong>无需改动即可运行</strong>（行为完全一致）。</p>
+<h3 id="fixed修复">Fixed（修复）</h3>
+<ul>
+<li><strong>裸块作用域 <code>{ ... }</code> 从「语法能过、语义/索引崩溃」修到完整可用</strong>：
+  <code>Stmt::Block</code> 的 AST 变体在定义与模式匹配两侧不一致（元组 vs 具名结构体），
+  导致<strong>整个编译器无法编译</strong>。现已统一为具名变体 <code>{ body, line, col }</code>，
+  词法/语法/语义/索引/代码生成五处同步打通，裸块可正常引入词法作用域。</li>
+<li><strong>README §17.2 与 §28 对 LSP 能力的结论自相矛盾</strong>：§17.2 仍写「重命名 / 引用查找 / 格式化
+  <strong>未实现</strong>」，而 §28 记载这三项已在 v0.98 轮 2 / 轮 3 落地。现按实现统一口径，
+  §17.2 改为「已实现」并指向 §28 对应小节。</li>
+<li><strong>README §3.2 的交叉引用指错节</strong>：注释里的「见 §3.1.2 / §3.1.3」实际指向
+  Windows x64 与 Termux aarch64，而 Linux 的 LLVM 依赖在 <strong>§3.1.1</strong>、
+  动态库要求（<code>LD_LIBRARY_PATH</code>）在 <strong>§3.1.5</strong>。现改为正确节号。</li>
+<li><strong>README §2 与官网 spec.html §2 的目录结构里 <code>install-dial.ps1</code> 重复两行</strong>
+  （第二行还少了「支持 irm | iex 一键命令」的说明）。现删去重复行。</li>
+<li><strong>README §28 标题停在 v0.95</strong>：正文已含 v0.98 的四轮工业化与三编辑器接入，标题与内容脱节。
+  现改为覆盖到 v0.98。</li>
+<li><strong>spec.html §28.2 与 §28.7.1 对 <code>textDocumentSync</code> 的说法直接冲突</strong>：
+  一处写「声明 <code>textDocumentSync = 1</code>（全量同步）」，另一处写「必须用选项形式
+  <code>{openClose, change: 1, save}</code>，不能用纯数字 1」。后者才是对的
+  （纯数字形式没有 <code>save</code> 字段，客户端不会发 <code>didSave</code>，诊断刷新会静默失效）。
+  现按后者统一。</li>
+<li><strong>CHANGELOG 缺 v0.98.1 条目</strong>：v0.98.1 已实际发布（tag <code>v0.98.1</code>），
+  但本文件顶部仍是 <code>[v0.98]</code>。现补上本条目。</li>
+<li><strong>README §23 的版本号规则与 v0.98.1 冲突</strong>：原规则写死「最多两位小数、
+  不存在三位小数的版本」，而 v0.98.1 是既成事实。现补充第 6 条，
+  明确补丁位<strong>仅</strong>用于修复发布（只修缺陷、不加新特性），并规定其边界条件。</li>
+<li><strong><code>cve.html</code> 的 CVE 编号年份穿越</strong>：项目日期是 2026，编号却写成 <code>CVE-2024-DIAL-001</code>。
+  现统一为 2026 年，并说明这是<strong>项目自建的跟踪编号</strong>（非 MITRE 分配的正式 CVE 编号）。</li>
+<li><strong>README §18 的 CI 关卡表缺 <code>cve_check</code> 一关</strong>，而 <code>cve.html</code> 声称
+  「已在 CI 工作流中接入，作为发布前的强制门禁」。现已核对 CI 工作流确实包含该步骤，
+  §18 的表格补上这一行——文档与实际流水线对齐。</li>
+</ul>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong><code>print_raw(s)</code></strong>：原样输出字符串、<strong>不追加换行</strong>。此前 <code>print(s)</code> 永远在末尾补 <code>\n</code>，
+  导致<strong>任何需要连续输出的程序都写不出来</strong>（拼行表格、进度条、逐字动画、协议帧）。</li>
+<li><strong><code>write_char(c)</code></strong>：输出单个字符、<strong>不追加换行</strong>。与 <code>print(char)</code> 的唯一差别就是这个换行符。</li>
+<li><strong><code>str(char)</code></strong>：<code>char</code> 纳入 <code>str()</code> 的支持类型，得到 1 字符的 UTF-8 字符串，
+  可直接参与拼接（<code>str(c) + "!"</code>）。</li>
+<li><strong><code>dialc version</code> / <code>dialc --version</code> / <code>dialc -V</code></strong>：显示版本号。
+  版本取自 <code>Cargo.toml</code>（编译期注入），与全站唯一真相一致。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li><strong><code>print(char)</code> 的换行语义被写进文档</strong>：明确 <code>print(char)</code> <strong>输出字符本身并追加一个 <code>\n</code></strong>
+  （行式输出），而 <code>write_char(char)</code> 不追加。此前二者的差别只存在于实现里、没写进文档，
+  读者无法确定该用哪个。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.98.html">v0.98</a> · 更新：<a href="v0.99.html">v0.99</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.93 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v093--2026-10-31">[v0.93] — 2026-10-31</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#added测试">Added（测试）</a></li>
+<li><a href="#尚未实现本版刻意留白">尚未实现（本版刻意留白）</a></li>
+<li><a href="#验证">验证</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v093--2026-10-31">[v0.93] — 2026-10-31</h2>
+<p>本版落地 <strong><code>import</code> 与 <code>.dialpkg</code> 包分发</strong>（见 README <a href="README.md#259-用法import-与-dialc-installv093-已实现v096-支持-url">§25.9</a>），
+完成了 ARCHITECTURE.md 实现路线的<strong>阶段 1 / 3 / 4</strong> 与阶段 2 的本地安装部分。
+这是让「标准库能跑起来」的第一块地基。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong><code>import "包名";</code> 语句</strong>（词法 / 语法 / 两阶段解析）。包名是字符串字面量而非标识符——
+  刻意避开为命名空间再引入一套 <code>.</code> / <code>::</code> 解析规则。</li>
+<li><strong>新增模块 <code>src/package.rs</code></strong>：<code>.dialpkg</code> 解包、缓存管理、manifest 解析、<code>.diali</code> 解析。</li>
+<li><strong><code>dialc install &lt;包.dialpkg&gt;</code></strong>：解压到 <code>~/.dial/packages/&lt;name&gt;/</code>，<strong>项目目录零侵入</strong>；
+  缓存是可重建的派生数据。</li>
+<li><strong><code>.dialpkg</code> 解包</strong>：zip 容器 + <strong>路径穿越防护</strong>（拒绝绝对路径、<code>..</code> 逃逸、Windows 盘符）。</li>
+<li><strong><code>manifest.txt</code> 解析</strong>（JSON）：<code>name</code> / <code>version</code> / <code>abi</code> / <code>iface</code> / <code>license</code> /
+  <code>targets</code>（Triple 映射字典）/ <code>sha256</code>（逐文件哈希）。字段缺失一律报错，绝不静默补默认值。</li>
+<li><strong>按 Target Triple 选库</strong>：编译器按自己的 triple 索引 <code>targets</code>，
+  查不到就报错并<strong>列出本包支持哪些 triple</strong>；交叉编译到 Windows 时自动链 <code>.lib</code>。</li>
+<li><strong>SHA256 强制校验</strong>：<code>.diali</code> 与<strong>本次实际要用的那份</strong>机器码各自校验（§5.1）。
+  残缺或被篡改的二进制<strong>绝不进入链接器</strong>。</li>
+<li><strong><code>.diali</code> 解析</strong>：<code>type X;</code>（不透明句柄）与 <code>extern fn f(a: T): R;</code>，
+  签名接入 Sema 做类型检查；未声明又非内建的类型名一律报错。</li>
+<li><strong>新类型 <code>Type::Opaque(name)</code></strong>：包提供的不透明句柄，IR 为 <code>ptr</code>、<strong>不受 ARC 管理</strong>
+  （生命周期由包自己的 open/close 掌管），与 <code>file</code> / <code>thread</code> 同一阵营。</li>
+<li><strong>链接期自动链库</strong>：把选定平台的 <code>.a</code>（或 <code>.lib</code>）加入链接命令，用户不写路径。</li>
+<li><strong>许可可见</strong>（§25.8）：<code>manifest.txt</code> 的 <code>license</code> 为必填字段，构建时回显到日志。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li><strong>两阶段解析</strong>：先解析一遍取 <code>import</code> 列表 → 解析包（拿到不透明类型名）→ 再重新解析，
+  使 <code>var h: DemoHandle = ...</code> 这类包类型名在<strong>语法阶段</strong>就被识别为 <code>Opaque</code> 而非结构体。</li>
+<li><strong><code>analyze</code> 与 <code>compile</code> 接受外部函数表</strong>：包函数对调用方与本地函数别无二致，
+  区别仅是「函数体在别人的 <code>.a</code> 里」。名字冲突当场报错。</li>
+<li><strong>void 函数调用可作语句</strong>：<code>close(f);</code> / <code>demo_free(h);</code> 这类「只做事、不给值」的调用
+  此前在 codegen 被拒（「返回 void，暂不支持用作表达式」），现已放行。
+  「把 void 当值用」仍由<strong>语义层</strong>挡住——两条规则各司其职。</li>
+<li><strong>首次引入第三方依赖</strong> <code>zip</code> / <code>serde_json</code> / <code>sha2</code>：都只服务于「读外部数据」这一处；
+  哈希与容器解析不手写（手写出 bug 的代价是「恶意包被判为可信」）。</li>
+</ul>
+<h3 id="added测试">Added（测试）</h3>
+<ul>
+<li>测试组 <strong>H</strong>：用 <code>tools/make_sample_pkg.sh</code> 现场构建示例包 → 安装 → <code>import</code> 后编译运行并比对输出
+  → <strong>故意篡改一个字节</strong>验证 SHA256 确实拦得住。</li>
+<li><code>tests/pkg/use_demo.dial</code> 覆盖四种签名形态：纯数值、无参、返回不透明句柄、
+  以不透明句柄为参数，以及 void 释放函数。</li>
+</ul>
+<h3 id="尚未实现本版刻意留白">尚未实现（本版刻意留白）</h3>
+<ul>
+<li><code>dialc install &lt;URL&gt;</code>（网络下载；本地文件安装已可用）。</li>
+<li>一键安装脚本（<code>install-dial.sh</code> / <code>.ps1</code>）、Windows 线程后端、官方标准库的 <code>.dialpkg</code> 化。</li>
+<li><code>.diali</code> 接入 LSP（补全 / 悬停）——待 LSP 骨架落地。</li>
+</ul>
+<h3 id="验证">验证</h3>
+<ul>
+<li>A/B/D/E/C/F/G <strong>七组原有测试全绿</strong>，新增 H 组通过；端到端实测
+  <code>demo_add</code>→7、<code>demo_version</code>→42、不透明句柄 <code>demo_new</code>+<code>demo_get</code>→99、void <code>demo_free</code> 正常。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.92.html">v0.92</a> · 更新：<a href="v0.94.html">v0.94</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

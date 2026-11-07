@@ -2,23 +2,38 @@
 """Generate the dialc official documentation website from README.md / CHANGELOG.md.
 
 Outputs a static site into web/:
-  web/index.html       landing page
-  web/spec.html        full language reference (README)
-  web/changelog.html   changelog
-  web/assets/style.css shared stylesheet
-  web/assets/site.js    minimal nav behavior
+  web/index.html                  landing page
+  web/spec.html                   full language reference (README)
+  web/changelog.html              version index (one row per release)
+  web/changelog/overview.html      CHANGELOG preamble (versioning rules), verbatim
+  web/changelog/<version>.html     one page per `## ` section, verbatim text
+  web/changelog/index.json         machine-readable index (search + newer/older nav)
+  web/assets/style.css             shared stylesheet
 
-The spec/changelog pages are produced with Python-Markdown (extra + toc), so they
-stay in sync with the source docs. Run: python3 tools/build_web.py
+Why the changelog is split (v1.04 tooling): one flat HTML had grown past 200 KB.
+The evidence-chain style of writing — what changed / why / measured data / where
+the boundaries are — is preserved **verbatim**; only the *organisation* changes:
+a small index plus one page per version. This fixes three concrete problems:
+  1. finding an old version no longer means scrolling through 200 KB;
+  2. a mobile / Termux browser only downloads the page it opens;
+  3. each page builds its own TOC, so cross-version anchor collisions
+     (`..._1` suffixes) disappear.
+
+CHANGELOG.md remains the single source of truth; this script never edits it.
+CI runs `git diff --exit-code -- web/`, so generation must be deterministic and
+every output file must be committed. Run: python3 tools/build_web.py
 """
 from __future__ import annotations
 
+import html
+import json
 import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
 ASSETS = WEB / "assets"
+CHANGELOG_DIR = WEB / "changelog"
 
 
 def current_version() -> tuple[str, str]:
@@ -221,34 +236,51 @@ def dial_slugify(value: str, separator: str) -> str:
     return v.replace(" ", separator)
 
 
-def md_body(text: str, with_toc: bool) -> str:
+def md_body(text: str, with_toc: bool, strip_web_prefix: bool = False) -> str:
     exts = ["extra", "toc", "fenced_code", "sane_lists"]
     md = markdown.Markdown(
         extensions=exts,
         extension_configs={"toc": {"slugify": dial_slugify, "permalink": False}},
     )
     src = ("[TOC]\n\n" + text) if with_toc else text
-    return md.convert(src)
+    out = md.convert(src)
+    if strip_web_prefix:
+        # README 里的 `](web/xxx.html)` 是相对**仓库根**的路径（GitHub 上有效）；
+        # 官网把 spec.html 与这些页面放在同一目录，须去掉 web/ 前缀才点得动。
+        # 只改 href，不动任何正文文字；CHANGELOG 无此类链接，分页页不受影响。
+        out = out.replace('href="web/', 'href="')
+    return out
 
 
-def render(title: str, body: str, active: str, landing: bool = False) -> str:
+def render(title: str, body: str, active: str, landing: bool = False,
+           base: str = "") -> str:
+    """渲染站点页。
+
+    `base` 是站内相对链接前缀：根级页面为 ""，`web/changelog/` 下的分页为
+    "../"（样式表与顶部导航都要跟着回退一级）。只重写站内 `.html` 链接，
+    NAV 里的 GitHub / LLVM 绝对外链不受影响。
+    """
+    nav_html = re.sub(
+        r'href="(index|spec|changelog|cve|bench)\.html"',
+        lambda m: f'href="{base}{m.group(1)}.html"',
+        NAV,
+    )
     nav_links = {
-        "index": 'href="index.html"',
-        "spec": 'href="spec.html"',
-        "changelog": 'href="changelog.html"',
-        "bench": 'href="bench.html"',
+        "index":     f'href="{base}index.html"',
+        "spec":      f'href="{base}spec.html"',
+        "changelog": f'href="{base}changelog.html"',
+        "bench":     f'href="{base}bench.html"',
     }
-    nav_html = NAV
     if active in nav_links:
-        nav_html = nav_html.replace(nav_links[active], nav_links[active] + ' class="active"')
-    content_class = "content" if not landing else "landing"
+        nav_html = nav_html.replace(
+            nav_links[active], nav_links[active] + ' class="active"')
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title} · Dial 语言</title>
-<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="{base}assets/style.css">
 </head>
 <body>
 {nav_html}
@@ -257,6 +289,220 @@ def render(title: str, body: str, active: str, landing: bool = False) -> str:
 </body>
 </html>
 """
+
+
+# ---------------------------------------------------------------------------
+# 更新日志分页
+#
+# 索引页的「一句话主题」不是新写的事实：每条都从 CHANGELOG.md 对应版本段的
+# 首段概括而来（v1.00~v1.03 直接取自里程碑段里那张现成的主题表）。
+# 详情页正文则是该段 markdown 的原样渲染，绝不改写。未登记的版本会自动
+# 派生主题并告警，避免以后新增版本时索引页出现空白行。
+# ---------------------------------------------------------------------------
+
+TOPICS = {
+    "v1.04": "FFI 成为语言一等公民",
+    "v1-0-milestone": "v1.0 里程碑达成的分版记录（v1.00 ~ v1.03）",
+    "ci-fix-v1-0-retag": "修复红色 CI 作业并重打 v1.0 标签",
+    "install-release-flow": "安装脚本零硬编码，标准库与其他资产同处一个 Release",
+    "v1.03": "回调（函数指针）与可变参数",
+    "v1.02": "goto / with / 裸指针，补齐不透明句柄契约",
+    "v1.01": "按「真实程序」盘点后的缺口补齐",
+    "v1.00": "语言特性补齐（五组）+ 泛型容器",
+    "v0.99.1": "v0.99 修复发布（补丁位），行为完全一致",
+    "v0.99": "数组元素扩展到任意 8 字节句柄，支持多维数组",
+    "v0.98.1": "v0.98 修复发布（补丁位），行为完全一致",
+    "v0.98": "dialc lsp 打磨到工业级 + 三套编辑器接入",
+    "v0.97": "三平台原生构建（Linux / Windows / Termux）",
+    "stdlib-v1.0.0": "标准库改造为 .dialpkg，独立发版、与编译器解耦",
+    "v0.96": "包 URL 安装 + 一键安装脚本",
+    "v0.95": "LSP 首次增强：Hover / 跳转定义 / 补全",
+    "v0.94": "dialc lsp 语言服务器骨架",
+    "v0.93": "import 与 .dialpkg 包分发落地",
+    "v0.92": "char 单字符类型 + 修复宪法级文档矛盾",
+    "v0.91": "多路复用 select",
+    "v0.9": "并发底座安全加固：判空 / 多消费者安全 / 超时",
+    "v0.81": "通道关闭与 EOF",
+    "v0.8": "所有权转移 move_to 与多线程并发",
+    "v0.7": "可恢复异常 try / catch / throw + 三重许可",
+    "v0.61": "文件 IO（file 句柄）+ 版本号规则",
+    "v0.6": "Fail-Fast 确立为语言底线",
+    "v0.5": "循环控制流 + 代码编写纪律",
+    "v0.4": "部分标准库 + 控制流语法糖 + 内存宪法",
+    "v0.3": "只改语义与诊断，不动架构契约",
+    "v0.2": "本仓库首个规范化基线",
+    "unreleased": "早期语言层未实现 / 尚未落地清单",
+}
+
+# `## ` 标题里方括号内容不是纯版本号时，给出稳定的英文文件名。
+SLUG_OVERRIDES = {
+    "v1.0 里程碑": "v1-0-milestone",
+    "CI 修复与 v1.0 标签重打": "ci-fix-v1-0-retag",
+    "安装与发布流程调整": "install-release-flow",
+    "stdlib v1.0.0": "stdlib-v1.0.0",
+}
+
+HEAD_RE = re.compile(r"^##\s+\[([^\]]+)\]\s*—\s*(.*)$")
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def parse_head(line: str) -> tuple[str, str, str]:
+    """从 `## [vN] — 日期/说明` 取 (版本标签, 日期, 标题后缀原文)。"""
+    line = line.strip()
+    m = HEAD_RE.match(line)
+    if m:
+        label, tail = m.group(1).strip(), m.group(2).strip()
+    else:
+        label, tail = re.sub(r"^##\s+", "", line).strip(), ""
+    dm = DATE_RE.search(tail)
+    return label, (dm.group(0) if dm else ""), tail
+
+
+def seg_slug(label: str) -> str:
+    if label.startswith("未实现"):
+        return "unreleased"
+    if label in SLUG_OVERRIDES:
+        return SLUG_OVERRIDES[label]
+    if re.fullmatch(r"v[0-9][0-9.]*", label):
+        return label
+    # 兜底：保留原文 slug（可能含中文），并显式告警，提醒补登记。
+    print(f"  ⚠ 未登记文件名，已自动派生：{label}")
+    return dial_slugify(label, "-")
+
+
+def auto_topic(segment: str) -> str:
+    """未登记主题时的兜底：取该段首个正文句，去掉 markdown 噪音。
+
+    只用于索引元数据，不参与详情页正文（正文永远是原文渲染）。
+    """
+    buf = ""
+    for line in segment.splitlines()[1:]:
+        t = line.strip()
+        if not t or t.startswith((">", "#", "---", "|", "- ")):
+            if buf:
+                break
+            continue
+        t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)   # 链接只留文字
+        t = re.sub(r"[*`]", "", t)
+        buf += t + " "
+        m = re.search(r"[。！？]", buf)
+        if m:
+            buf = buf[:m.end()]
+            break
+    buf = " ".join(buf.split())
+    return (buf[:70] + "…") if len(buf) > 70 else (buf or "（见详情页）")
+
+
+def build_changelog(changelog_text: str) -> None:
+    """把 CHANGELOG.md 拆成「索引 + 前言 + 每版本一页 + index.json」。"""
+    lines = changelog_text.splitlines(keepends=True)
+    starts = [i for i, l in enumerate(lines) if l.startswith("## ")]
+    if not starts:
+        raise SystemExit("CHANGELOG.md 里找不到 `## ` 版本标题，拒绝生成")
+
+    preamble = "".join(lines[:starts[0]])
+    segments = ["".join(lines[s:e])
+                for s, e in zip(starts, starts[1:] + [len(lines)])]
+
+    # 自检①：切分必须无损——拼回去与原文逐字节相等，才谈得上「一字不改」。
+    if preamble + "".join(segments) != changelog_text:
+        raise SystemExit("CHANGELOG.md 分段自检失败：拼接结果与原文不一致")
+
+    metas = []
+    for seg in segments:
+        label, date, note = parse_head(seg.splitlines()[0])
+        slug = seg_slug(label)
+        topic = TOPICS.get(slug) or auto_topic(seg)
+        if slug not in TOPICS:
+            print(f"  ⚠ 未登记主题，已自动派生：{slug} -> {topic}")
+        display_label = "未实现 / 尚未落地" if slug == "unreleased" else label
+        metas.append({
+            "id": slug,
+            "label": display_label,
+            "date": date,
+            "note": note,
+            "topic": topic,
+            "file": f"{slug}.html",
+        })
+
+    # newer / older：数组按 CHANGELOG 顺序（新→旧），前一项更新、后一项更早。
+    for i, m in enumerate(metas):
+        m["newer"] = metas[i - 1]["id"] if i > 0 else None
+        m["older"] = metas[i + 1]["id"] if i + 1 < len(metas) else None
+
+    CHANGELOG_DIR.mkdir(exist_ok=True)
+    # 清掉上一次生成的产物，避免 slug 变动后留下陈旧页（只删本生成器产物）。
+    for stale in list(CHANGELOG_DIR.glob("*.html")) + [CHANGELOG_DIR / "index.json"]:
+        if stale.exists():
+            stale.unlink()
+
+    # 1) 前言（版本号规则等），原文渲染，不带 TOC。
+    (CHANGELOG_DIR / "overview.html").write_text(
+        render("更新日志 · 版本规则", md_body(preamble, False),
+               "changelog", base="../"), encoding="utf-8")
+
+    # 2) 每个版本一页：正文 = 该段 markdown 的原样渲染 + 前后导航条。
+    for i, m in enumerate(metas):
+        older = metas[i + 1] if m["older"] else None
+        newer = metas[i - 1] if m["newer"] else None
+        back = ('<p class="note"><a href="../changelog.html">← 版本索引</a>'
+                ' · <a href="overview.html">版本规则</a></p>')
+        nav = ['<p class="note">']
+        if older:
+            nav.append(f'← 更早：<a href="{older["file"]}">{html.escape(older["label"])}</a>')
+        if older and newer:
+            nav.append(" · ")
+        if newer:
+            nav.append(f'更新：<a href="{newer["file"]}">{html.escape(newer["label"])}</a> →')
+        if older or newer:
+            nav.append(' · <a href="../changelog.html">版本索引</a>')
+        nav.append("</p>")
+        page = back + md_body(segments[i], True) + "".join(nav)
+        (CHANGELOG_DIR / m["file"]).write_text(
+            render(f"更新日志 {m['label']}", page, "changelog", base="../"),
+            encoding="utf-8")
+
+    # 3) 索引页：只放版本表格，保持轻量。
+    intro = (
+        "<p>本页是<strong>版本索引</strong>。Dial 的更新日志按「证据链」记录："
+        "每个版本不只写改了什么，还写为什么改、实测数据与边界在哪。"
+        "为便于检索与移动端加载，完整记录按版本拆成独立页，"
+        "<strong>各页正文与 CHANGELOG.md 对应条目逐字一致</strong>。"
+        "点击版本号查看详情；<a href=\"changelog/overview.html\">版本规则与前言</a>单列一页。</p>"
+    )
+    rows = []
+    for m in metas:
+        stamp = m["date"] or (m["note"][:48] + "…" if len(m["note"]) > 48
+                              else m["note"]) or "—"
+        rows.append(
+            f'<tr><td><a href="changelog/{m["file"]}">{html.escape(m["label"])}</a></td>'
+            f'<td>{html.escape(stamp)}</td>'
+            f'<td>{html.escape(m["topic"])}</td></tr>'
+        )
+    table = ("<table><thead><tr><th>版本</th><th>日期 / 说明</th><th>主题</th>"
+             "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
+    (WEB / "changelog.html").write_text(
+        render("更新日志 · 版本索引", intro + table, "changelog"),
+        encoding="utf-8")
+
+    # 4) 机器可读索引：给搜索与「上一版 / 下一版」导航用。
+    payload = {
+        "source": "CHANGELOG.md",
+        "index": "../changelog.html",
+        "count": len(metas),
+        "versions": metas,
+    }
+    (CHANGELOG_DIR / "index.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8")
+
+    # 自检②：页数必须与段数 + 前言页严格对应。
+    produced = list(CHANGELOG_DIR.glob("*.html"))
+    if len(produced) != len(metas) + 1:
+        raise SystemExit(
+            f"更新日志分页自检失败：生成 {len(produced)} 页，"
+            f"预期 {len(metas) + 1} 页")
+    print(f"  changelog: {len(metas)} 个版本 + 1 个前言页 + index.json")
 
 
 def main() -> None:
@@ -268,9 +514,9 @@ def main() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     (WEB / "spec.html").write_text(
-        render("语言规范", md_body(readme, True), "spec"), encoding="utf-8")
-    (WEB / "changelog.html").write_text(
-        render("更新日志", md_body(changelog, True), "changelog"), encoding="utf-8")
+        render("语言规范", md_body(readme, True, strip_web_prefix=True), "spec"),
+        encoding="utf-8")
+    build_changelog(changelog)
 
     (WEB / "index.html").write_text(render_index(), encoding="utf-8")
 

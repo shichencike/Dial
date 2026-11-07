@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.92 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v092--2026-10-31">[v0.92] — 2026-10-31</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed语义与规则变更">Changed（语义与规则变更）</a></li>
+<li><a href="#fixed修复">Fixed（修复）</a></li>
+<li><a href="#验证">验证</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v092--2026-10-31">[v0.92] — 2026-10-31</h2>
+<p>本版落地 <strong><code>char</code> 单字符类型</strong>（见 README <a href="README.md#54-char单字符类型v092">§5.4</a>），
+并集中修复了一批<strong>宪法级文档自相矛盾</strong>与一个真实的运行时缺陷。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong><code>char</code> 类型</strong>：一个 Unicode 码点。值类型、无 ARC、无堆分配、无空指针，
+  IR 层与 <code>int</code> 同为 <code>i64</code>，但<strong>类型独立</strong>。</li>
+<li><strong>字符字面量</strong> <code>'a'</code> / <code>'中'</code> / <code>'\n'</code>，支持 <code>\n</code> <code>\t</code> <code>\r</code> <code>\0</code> <code>\\</code> <code>\'</code> <code>\"</code> 转义；
+  空 <code>''</code> 与多字符 <code>'ab'</code> 在<strong>词法阶段</strong>即被拒绝（它们根本不是一个字符）。</li>
+<li><strong>比较运算</strong>：<code>==</code> <code>!=</code> <code>&lt;</code> <code>&gt;</code> <code>&lt;=</code> <code>&gt;=</code> 按码点序比较（<code>'a' &lt; 'b'</code> 为真）。</li>
+<li><strong>零成本显式转换</strong> <code>char_to_int(c): int</code> 与 <code>int_to_char(n): char</code>：
+  二者<strong>不产生任何 LLVM 指令</strong>（char 与 int 同表示），纯粹是编译期的类型视图切换。</li>
+<li><strong>C Runtime</strong> <code>dial_print_char</code>：按 UTF-8 编码输出 1~4 字节。
+  非法码点（负数、&gt; <code>0x10FFFF</code>、UTF-16 代理区 <code>D800~DFFF</code>）当场打印诊断并终止。</li>
+<li>正向示例 <code>examples/char_demo.dial</code>（含多字节 UTF-8 <code>中</code> / <code>é</code>）；
+  负向用例 5 个（char 算术 / char 与 int 混用 / <code>char_to_int</code> 传 int / <code>int_to_char</code> 传 char / int 赋给 char 变量）。</li>
+</ul>
+<h3 id="changed语义与规则变更">Changed（语义与规则变更）</h3>
+<ul>
+<li><strong>统一容器写回规则</strong>：废除 <code>m = m.put(1, 1)</code> 这类手写赋值，与数组 <code>push</code> 统一——
+  <strong>所有原地修改并触发 COW 的方法（<code>push</code> / <code>put</code>），编译器自动写回，严禁用户手写赋值</strong>。
+  现在 <code>a = a.push(...)</code> / <code>m = m.put(...)</code> 会在<strong>编译期被拒绝</strong>
+  （把结果赋给<strong>另一个</strong>变量仍然允许，那是取新容器而非就地修改）。</li>
+<li><strong>版本号规则重写</strong>：废弃此前的「十进制递增 / 三段式」表述，改为
+  <strong>最多两位小数</strong>（<code>v0.1</code>…<code>v0.9</code>、<code>v0.91</code>、<code>v0.92</code>），版本标题统一为 <strong><code>[v0.92]</code></strong> 而非 <code>[0.92.0]</code>，
+  且<strong>版本号必须严格按时间递增、绝不倒流</strong>。</li>
+<li><strong>许可隔离声明</strong>（README §3.3.1 / §25.8 / LICENSE）：明确<strong>按组件划分</strong>——
+  编译器前端为三重许可，但被静态链入用户程序的 <code>libdial_std.a</code>
+  <strong>强制锁定为 MIT / Apache-2.0，绝不允许以 GPL 条款链接进闭源程序</strong>。</li>
+</ul>
+<h3 id="fixed修复">Fixed（修复）</h3>
+<ul>
+<li><strong>未捕获异常打印出乱码</strong>（真实缺陷）：<code>dial_error_msg</code> 返回的是不透明 <code>DialString</code> 句柄，
+  却被直接当作 <code>const char*</code> 传给 <code>dial_panic</code>，导致 panic 只打印出一个数字（实测 <code>9</code>）而非错误消息。
+  已补上 <code>dial_string_cstr</code> 转换，现在正确输出
+  <code>dial: 未捕获的异常（panic）: 无法打开文件（路径不存在或无访问权限）</code>。
+  新增测试组 <strong>G</strong> 锁定该契约。</li>
+<li><strong>§27.9.5 的 select 空转教程自相矛盾</strong>：原文称「<code>while (true) { select { ... } }」本身安全，
+  实则全体 EOF 时 select 只是**直接结束**、不会跳出循环，于是每轮立刻结束又立刻重入，
+  构成 **100% CPU 空转死循环**（实测 5 秒超时、</code>exit 124<code>）。
+  已改为演示两种安全退出写法，并各配一个可运行正例（连跑 10 次输出稳定）：</code>examples/select_exit_condition.dial<code>（</code>while (not done(ch))<code>）与</code>examples/select_exit_break.dial<code>（case 内</code>break`）。</li>
+<li><strong>§26.1 异常语法漏洞</strong>：原文笼统断言「throw 必须出现在 try 块内」，混淆了两种情形。
+  现明确区分（§26.1.1）：<strong>显式 <code>throw Error(...)</code></strong> 不在 try 内 → <strong>编译期报错</strong>；
+  <strong>内建函数的隐式抛出</strong>（<code>open</code> / <code>read</code> / <code>write</code> 失败）允许写在任何地方 → <strong>编译通过</strong>，
+  运行到该处若无捕获则触发未捕获异常 panic 终止。</li>
+<li><strong>首页示例使用 <code>+</code> 拼接字符串</strong>：Dial 的字符串没有 <code>+</code> 运算符，已改为 <code>print("hello, ".concat(name))</code>
+  （同步修正生成器 <code>tools/build_web.py</code> 与产物 <code>web/index.html</code>，避免重新生成时复发）。</li>
+</ul>
+<h3 id="验证">验证</h3>
+<ul>
+<li>A/B/D/E/C/F <strong>六组原有测试全绿</strong>，新增 G 组（未捕获异常契约）通过。</li>
+<li>新增 5 个 char 负向用例 + 2 个写回规则负向用例 + 2 个 select 安全退出正例，均纳入自测。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v0.91.html">v0.91</a> · 更新：<a href="v0.93.html">v0.93</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

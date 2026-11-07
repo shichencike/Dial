@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v0.94 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v094--2026-10-31">[v0.94] — 2026-10-31</a><ul>
+<li><a href="#added新增">Added（新增）</a></li>
+<li><a href="#changed变更">Changed（变更）</a></li>
+<li><a href="#added测试">Added（测试）</a></li>
+<li><a href="#刻意未做">刻意未做</a></li>
+<li><a href="#收尾补丁包安装三条硬规则">收尾补丁（包安装三条硬规则）</a></li>
+<li><a href="#docs文档">Docs（文档）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v094--2026-10-31">[v0.94] — 2026-10-31</h2>
+<p>本版落地 <strong><code>dialc lsp</code> 语言服务器骨架</strong>（见 README <a href="README.md#28-语言服务器-dialc-lspv094-骨架--v095-增强">§28</a>），
+把「写代码」这件事的最后一环补上：编辑器里能看到红线、能看到高亮，
+而且<strong>红线与 <code>dialc build</code> 的报错是同一条错误、同一个位置、同一句文案</strong>。</p>
+<p>至此用户指定的「开发闭环」三项（char 类型 → import 机制 → LSP 骨架）全部打通。</p>
+<h3 id="added新增">Added（新增）</h3>
+<ul>
+<li><strong><code>dialc lsp</code> 子命令</strong>：stdio 上的 JSON-RPC 服务（<code>Content-Length</code> 分帧）。
+  不引入 LSP 框架——骨架只需要「读一条 JSON、写一条 JSON」，
+  异步运行时与依赖树的代价远超收益。</li>
+<li><strong>诊断</strong>：<code>didOpen</code> / <code>didSave</code> 时发布；词法 / 语法 / 语义三阶段任一失败即停，
+  只报第一个错误（与 <code>dialc build</code> 行为一致）。改正保存后自动清空，关文件后不留残留红线。</li>
+<li><strong>语义高亮</strong>：<code>textDocument/semanticTokens/full</code>，token 由<strong>编译器自己的词法器</strong>产出
+  （不另写一套高亮扫描器——一旦有两份词法，高亮与编译必然慢慢分道扬镳）。</li>
+<li><strong>VS Code 扩展</strong> <code>editors/vscode/</code>：<strong>不需要 npm install</strong>（LSP 客户端是手写的 200 行），
+  拷进扩展目录即可；另附 Neovim 原生 LSP 的三行配置。</li>
+</ul>
+<h3 id="changed变更">Changed（变更）</h3>
+<ul>
+<li><strong><code>If</code> / <code>While</code> / <code>For</code> / 表达式语句补上位置</strong>（此前只有 <code>var</code> / <code>return</code> 这类带）：
+  所有语句现在都带 <code>line</code> / <code>col</code>，语义诊断因此能落回源码。</li>
+<li><strong>语义错误的语句级位置兜底</strong>：<code>check_stmt_at</code> 把内部产生的「无位置」错误
+  盖到出错那一条语句上（只补缺失的，已精确定位的原样放行）。
+  修掉的是一个真实缺陷：表达式错误原先一律报「第 0 行第 0 列」，
+  在编辑器里就是<strong>第一行一个红点</strong>，等于没定位。
+  B 组负向用例的输出也因此全部带上了「第 N 行第 M 列」。</li>
+<li><strong><code>char</code> 参与算术的专门诊断</strong>：此前落到通用的「要求两个操作数类型完全相同」那条，
+  会让人以为补个转换就能做算术。现在单独说明：
+  <code>'a' + 1</code> 的意图无法判定，请先 <code>char_to_int</code> 再 <code>int_to_char</code>。</li>
+<li><strong><code>dialc install</code> 回显包导出函数</strong>：装完直接列出 <code>extern fn</code> 签名与其 <code>///</code> 文档，
+  不必再去翻 <code>.diali</code> 文件。</li>
+</ul>
+<h3 id="added测试">Added（测试）</h3>
+<ul>
+<li>测试组 <strong>I</strong>（<code>tests/lsp_smoke.py</code>）：真起一个 <code>dialc lsp</code> 子进程按协议往返，
+  覆盖初始化能力协商、诊断定位到出错那一行、语义 token 的<strong>差分解码 + 源码子串反查</strong>、
+  <code>shutdown</code> 后干净退出、以及 stderr 不污染协议流。</li>
+<li>其中 UTF-16 换算一条<strong>特意用 emoji 而非中文</strong>做用例：
+  中文在 BMP 内（1 char = 1 码元）<strong>测不出</strong>换算错误，只有 emoji（1 char = 2 码元）能。
+  已反向验证过：删掉换算代码重跑，确实只有 emoji 那条变红。</li>
+</ul>
+<h3 id="刻意未做">刻意未做</h3>
+<p>补全 / 跳转定义 / 悬停 / 重命名 / 格式化——这些都建立在<strong>跨文件符号表</strong>之上，
+而 Dial 目前一次编译一个文件，没有符号表可查。硬做只能做出「猜」的结果，比不做更糟。</p>
+<h3 id="收尾补丁包安装三条硬规则">收尾补丁（包安装三条硬规则）</h3>
+<p>进入 v0.95（LSP 增强）前的收尾，全部落在 <code>src/package.rs</code> 与 <a href="README.md#2561-三条硬规则已落地">§25.6.1</a>，
+并由新增的 <strong>J 组</strong>测试锁死：</p>
+<ol>
+<li><strong>重复安装</strong>：<code>~/.dial/packages/&lt;name&gt;/</code> 下已存在同名包时，先读旧 <code>manifest.txt</code> 比对 <code>abi</code>。
+   - <strong>ABI 相同</strong> → 整目录删除后重新解压（覆盖，避免残留旧机器码 / 旧 <code>.diali</code>）；
+   - <strong>ABI 不同</strong> → <strong>报错并拒绝</strong>，提示先 <code>rm -rf ~/.dial/packages/&lt;name&gt;/</code> 再装，
+     防止不兼容二进制悄悄链入。拒绝「同名不同 ABI 共存」——<code>import</code> 只凭名字引用，共存会重新打开版本冲突的口子。</li>
+<li><strong>强制静态库</strong>：<code>targets</code> 映射的库文件后缀<strong>必须为 <code>.a</code>（Linux/Termux）或 <code>.lib</code>（Windows）</strong>，
+   形如 <code>.so</code> / <code>.dll</code> 的动态库在解析 <code>manifest.txt</code> 时<strong>当场拒绝</strong>。
+   理由：Dial 产物契约是「只链 libc，绝不引入运行时动态依赖」（<a href="README.md#34-产物依赖契约">§3.4 产物依赖契约</a>），
+   动态库会破坏这条契约并让 <code>ldd</code> 检查（C 组）失效。</li>
+<li><strong>卸载</strong>：缓存是纯派生数据，没有 <code>dialc uninstall</code> 命令——直接 <code>rm -rf ~/.dial/packages/&lt;name&gt;/</code> 即可，
+   随时可重装。这条与「ABI 冲突报错提示」自洽。</li>
+</ol>
+<h3 id="docs文档">Docs（文档）</h3>
+<ul>
+<li><strong><a href="README.md#31-运行环境要求linux--动态-glibc">§3.1 运行环境要求</a></strong>：明确 Dial <strong>只支持 Linux（x86_64 · 动态 glibc）</strong>，
+  并只在<strong>近两年内发布的发行版</strong>上验证（Ubuntu 24.04 LTS / Fedora 42 / Debian 13 等）；
+  <strong>明确排除 musl 系统（Alpine 等）</strong>——编译器本体与产物都依赖 glibc，跨 ABI 用不了。
+  列出工具链版本（Rust ≥ 1.80、LLVM 18 开发库、<code>zig cc</code> 或 <code>clang</code>）与运行 <code>dialc</code> 本体所需的
+  <code>LD_LIBRARY_PATH</code>（仅影响编译器，不影响产物）。</li>
+<li><strong><a href="README.md#32-从源码构建克隆--进入--编译">§3.2 从源码构建</a></strong>：把流程钉死为
+  <strong>克隆 → 进入（<code>cd Dial</code>，仓库根即编译器本体）→ 编译（<code>cargo build --release</code>）</strong>，
+  并说明仓库根就是 <code>Cargo.toml</code> 与 <code>src/</code> 所在之处（没有嵌套的 <code>dialc/</code> 子目录），避免读者多进一层目录。</li>
+<li>官网「快速开始」同步加了 Linux/glibc 提示、<code>LD_LIBRARY_PATH</code> 步骤与十组自测命令。</li>
+</ul><p class="note">← 更早：<a href="v0.93.html">v0.93</a> · 更新：<a href="v0.95.html">v0.95</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.04 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
