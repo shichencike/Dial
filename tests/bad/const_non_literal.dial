@@ -1,3 +1,11 @@
-// 应当编译失败：const 的值必须是字面量常量
-const N: int = 1 + 2;
-fn main(): int { return N; }
+// 应当编译失败：const 的值必须是编译期常量，不得引用运行期函数调用
+// （字面量与常量表达式 1+2 现已允许，这里用函数调用锁定「非编译期常量」边界）。
+fn f(): int {
+    return 1;
+}
+
+const N: int = f();
+
+fn main(): int {
+    return N;
+}

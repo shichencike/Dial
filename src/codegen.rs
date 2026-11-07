@@ -3811,7 +3811,21 @@ impl<'ctx> CodeGen<'ctx> {
             )),
             Expr::Field(obj, field) => {
                 let ot = type_of(obj, scopes, functions, structs)?;
-                let base = self.field_base_ptr(obj, &ot, function, scopes, func_values, functions, structs)?;
+                // 基对象若是 lvalue（变量 / 字段链），直接取字段指针；
+                // 否则（结构体字面量 / 函数返回的结构体 / 数组元素）先物化到栈上临时槽再取字段，
+                // 支持 `Pt{}.x`、`make().y`、`arr[i].f` 而无需先绑到变量
+                // （B7 内联 const 后，const 结构体取字段成为常态路径）。
+                let base = match obj.as_ref() {
+                    Expr::Var(_) | Expr::Field(..) => {
+                        self.field_base_ptr(obj, &ot, function, scopes, func_values, functions, structs)?
+                    }
+                    _ => {
+                        let v = self.gen_expr(obj, function, scopes, func_values, functions, structs)?;
+                        let ptr = self.alloca_in_entry(function, v.get_type(), "fldtmp");
+                        self.builder.build_store(ptr, v).unwrap();
+                        ptr
+                    }
+                };
                 let sty = self.get_struct_type(&ot)?;
                 let (fidx, fty) = self.field_info(&ot, field, structs, 0, 0)?;
                 let fgep = self.builder.build_struct_gep(sty, base, fidx, "fgep").unwrap();

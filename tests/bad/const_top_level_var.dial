@@ -1,0 +1,6 @@
+// 应当编译失败：顶层禁止可变全局状态，不允许 var 全局变量，只读数据须用 const。
+var GLOBAL: int = 5;
+
+fn main(): int {
+    return 0;
+}

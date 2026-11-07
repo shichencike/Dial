@@ -72,6 +72,14 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
                     ))
                 }
             }
+        } else if p.check(&TokenKind::Var) {
+            // B7 红线：绝对禁止可变全局状态。顶层不允许 var 全局变量，
+            // 只读数据请用 const 声明（编译期内联 / .rodata，不可重新赋值）。
+            return Err(DialcError::new(
+                "语法错误：顶层禁止可变全局状态——不允许 var 全局变量，请用 const 声明只读常量",
+                p.peek().line,
+                p.peek().col,
+            ));
         } else {
             functions.push(p.parse_function()?);
         }
@@ -468,6 +476,59 @@ impl Parser {
     /// `const NAME: T = 字面量;`（v1.00）：文件级常量，编译期内联替换，不可重新赋值。
     /// 只允许字面量值（可引用此前已定义的 const —— 那会在解析时先被内联成字面量），
     /// 且标注类型必须与值类型完全一致（零隐式转换铁律）。
+    /// 表达式是否为「编译期常量」：字面量、字面量数组、字面量结构体，
+    /// 以及作用在编译期常量上的算术/逻辑/位运算（可常量折叠）。
+    /// 用于 const 值（含数组元素 / 结构体字段）的常量性校验。
+    fn is_const_expr(&self, e: &Expr) -> bool {
+        match e {
+            Expr::IntLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::CharLit(_)
+            | Expr::ByteLit(_)
+            | Expr::StringLit(_) => true,
+            Expr::ArrayLit(es, _) => es.iter().all(|x| self.is_const_expr(x)),
+            Expr::StructLit(_, fields) => fields.iter().all(|(_, x)| self.is_const_expr(x)),
+            Expr::Unary(_, inner) => self.is_const_expr(inner),
+            Expr::Binary(a, _, b) => self.is_const_expr(a) && self.is_const_expr(b),
+            _ => false,
+        }
+    }
+
+    /// 推断「编译期常量表达式」的类型（仅对 `is_const_expr` 为真的表达式调用，
+    /// 故操作数必为字面量或常量算术）。供 const 的零隐式转换校验使用。
+    fn const_expr_type(&self, e: &Expr) -> Type {
+        match e {
+            Expr::IntLit(_) => Type::Int,
+            Expr::FloatLit(_) => Type::Float,
+            Expr::BoolLit(_) => Type::Bool,
+            Expr::CharLit(_) => Type::Char,
+            Expr::ByteLit(_) => Type::Byte,
+            Expr::StringLit(_) => Type::String,
+            Expr::Unary(op, inner) => match op {
+                // `not` 恒为布尔；其余（-/~）类型与操作数一致。
+                UnOp::Not => Type::Bool,
+                _ => self.const_expr_type(inner),
+            },
+            Expr::Binary(a, op, b) => match op {
+                BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
+                | BinOp::And | BinOp::Or => Type::Bool,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                    let ta = self.const_expr_type(a);
+                    let tb = self.const_expr_type(b);
+                    if ta == Type::Float || tb == Type::Float {
+                        Type::Float
+                    } else {
+                        Type::Int
+                    }
+                }
+                // 位运算仅 int。
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => Type::Int,
+            },
+            _ => Type::Int,
+        }
+    }
+
     fn parse_const(&mut self) -> Result<()> {
         self.expect(TokenKind::Const)?;
         let (name, nline, ncol) = self.expect_ident_pos()?;
@@ -476,15 +537,21 @@ impl Parser {
         self.expect(TokenKind::Assign)?;
         let value = self.parse_expr()?;
         self.expect(TokenKind::Semicolon)?;
+        // 值的推断类型：标量/字符串由字面量本身决定；数组/结构体直接采用显式标注类型
+        // （数组可能为空、结构体须与定义对齐，二者都没有可靠的「从字面量反推类型」路径）。
         let vt = match &value {
             Expr::IntLit(_) => Type::Int,
             Expr::FloatLit(_) => Type::Float,
             Expr::BoolLit(_) => Type::Bool,
             Expr::CharLit(_) => Type::Char,
+            Expr::ByteLit(_) => Type::Byte,
             Expr::StringLit(_) => Type::String,
+            Expr::ArrayLit(..) => ty.clone(),
+            Expr::StructLit(n, _) => Type::Struct(n.clone()),
+            Expr::Unary(..) | Expr::Binary(..) => self.const_expr_type(&value),
             _ => {
                 return Err(DialcError::new(
-                    "语法错误：const 的值必须是字面量常量（先定义后使用，可引用已定义的 const）",
+                    "语法错误：const 的值必须是编译期常量（字面量 / 字面量数组 / 字面量结构体 / 常量表达式）",
                     nline, ncol,
                 ))
             }
@@ -494,6 +561,16 @@ impl Parser {
                 format!(
                     "语义错误：const '{}' 的标注类型 {} 与值类型 {} 不符（零隐式转换）",
                     name, ty.name(), vt.name()
+                ),
+                nline, ncol,
+            ));
+        }
+        // 聚合常量（数组 / 结构体）的元素 / 字段必须也都是编译期常量。
+        if !self.is_const_expr(&value) {
+            return Err(DialcError::new(
+                format!(
+                    "语义错误：const '{}' 的元素 / 字段必须是编译期常量（字面量或常量表达式）",
+                    name
                 ),
                 nline, ncol,
             ));

@@ -1,0 +1,44 @@
+// v1.04 第 3 批 B7：文件级只读 const（编译期内联，禁止可变全局状态）
+// 测试点：
+//   1) 标量 / 字符串 const 内联为只读值
+//   2) 数组 / 嵌套数组 const
+//   3) 字符串数组 const
+//   4) 结构体 const（含字段默认值 / 显式字段）
+//   5) const 引用其他 const（解析期内联）
+//   6) const 常量表达式（可常量折叠）
+//   7) 结构体 const 取字段（内联后字段基为非 lvalue，须物化）
+
+const N: int = 100;
+const PI: float = 3.14;
+const GREET: string = "hello";
+const FLAGS: int[] = [1, 2, 3, N];
+const MAT: int[][] = [[1, 2], [3, 4]];
+const TAGS: string[] = ["a", "b", "c"];
+
+struct Pt {
+    x: int = 0,
+    y: int = 0,
+}
+
+const ORIGIN: Pt = Pt{};
+const UNIT: Pt = Pt{x: 1, y: 1};
+
+const BASE: int = 10;
+const STEP: int = BASE + 5;          // 常量表达式
+const SCALE: float = 2.0 * 3.0;      // 浮点常量表达式
+
+fn main(): int {
+    print("B7 N = ", N);
+    print("B7 PI = ", PI);
+    print("B7 GREET = ", GREET);
+    var f: int[] = FLAGS;
+    print("B7 FLAGS[0] = ", f[0]);
+    print("B7 FLAGS[3] = ", f[3]);
+    print("B7 MAT[1][0] = ", MAT[1][0]);
+    print("B7 TAGS[2] = ", TAGS[2]);
+    print("B7 ORIGIN.x = ", ORIGIN.x);
+    print("B7 UNIT.y = ", UNIT.y);
+    print("B7 STEP = ", STEP);
+    print("B7 SCALE = ", SCALE);
+    return 0;
+}
