@@ -35,7 +35,7 @@
 </ul>
 </div>
 <h2 id="v04--2026-10-29">[v0.4] — 2026-10-29</h2>
-<p>本版落地<strong>部分标准库</strong>与<strong>控制流语法糖</strong>，并正式写入<a href="README.md#19-内存宪法防-gc-铁律">内存宪法</a>（见 README §19）。</p>
+<p>本版落地<strong>部分标准库</strong>与<strong>控制流语法糖</strong>，并正式写入<a href="../spec.html#19-内存宪法防-gc-铁律">内存宪法</a>（见 README §19）。</p>
 <h3 id="added新增">Added（新增）</h3>
 <ul>
 <li><strong><code>map</code> 类型（int → int）</strong>：新增哈希表类型，内存布局 <code>[int64 cap][int64 count][entries...]</code>，
@@ -55,7 +55,7 @@
 <ul>
 <li><code>dial_map.c</code> 由旧版「非 ARC 的 <code>Map*</code> 堆分配（进程退出时由 OS 回收）」重写为与 <code>dial_array.c</code>
   <strong>完全对称</strong>的 inline-entries ARC 实现：指针因扩容 / COW 可能更换，编译器负责把新指针写回接收变量。
-  这消除了旧实现与<a href="README.md#19-内存宪法防-gc-铁律">内存宪法</a>（防 GC 铁律）的矛盾。</li>
+  这消除了旧实现与<a href="../spec.html#19-内存宪法防-gc-铁律">内存宪法</a>（防 GC 铁律）的矛盾。</li>
 <li>Map 与 <code>read_line</code> 从「未实现」清单移除（v0.4 已暴露）。</li>
 </ul>
 <h3 id="fixed修复">Fixed（修复）</h3>
@@ -65,8 +65,8 @@
 </ul>
 <h3 id="docs文档">Docs（文档）</h3>
 <ul>
-<li>README 新增 <a href="README.md#12-哈希表-mapint--int">§12 哈希表 <code>map</code></a>、<a href="README.md#82-if--else-if--while">§8.2 <code>else if</code></a>、<a href="README.md#83-范围-for-循环">§8.3 范围 <code>for</code></a>、
-  <a href="README.md#19-内存宪法防-gc-铁律">§19 内存宪法</a>；并将 FFI 表与 C 导出函数清单补齐 <code>dial_map_*</code> / <code>dial_read_line</code>。</li>
+<li>README 新增 <a href="../spec.html#12-哈希表-mapint--int">§12 哈希表 <code>map</code></a>、<a href="../spec.html#82-if--else-if--while">§8.2 <code>else if</code></a>、<a href="../spec.html#83-范围-for-循环">§8.3 范围 <code>for</code></a>、
+  <a href="../spec.html#19-内存宪法防-gc-铁律">§19 内存宪法</a>；并将 FFI 表与 C 导出函数清单补齐 <code>dial_map_*</code> / <code>dial_read_line</code>。</li>
 <li>官网文档（<code>web/</code>）随 README / CHANGELOG 重新生成。</li>
 <li>版本号升级至 <code>v0.4</code>。</li>
 </ul>

@@ -37,7 +37,7 @@
 </ul>
 </div>
 <h2 id="v094--2026-10-31">[v0.94] — 2026-10-31</h2>
-<p>本版落地 <strong><code>dialc lsp</code> 语言服务器骨架</strong>（见 README <a href="README.md#28-语言服务器-dialc-lspv094-骨架--v095-增强">§28</a>），
+<p>本版落地 <strong><code>dialc lsp</code> 语言服务器骨架</strong>（见 README <a href="../spec.html#28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化">§28</a>），
 把「写代码」这件事的最后一环补上：编辑器里能看到红线、能看到高亮，
 而且<strong>红线与 <code>dialc build</code> 的报错是同一条错误、同一个位置、同一句文案</strong>。</p>
 <p>至此用户指定的「开发闭环」三项（char 类型 → import 机制 → LSP 骨架）全部打通。</p>
@@ -81,7 +81,7 @@
 <p>补全 / 跳转定义 / 悬停 / 重命名 / 格式化——这些都建立在<strong>跨文件符号表</strong>之上，
 而 Dial 目前一次编译一个文件，没有符号表可查。硬做只能做出「猜」的结果，比不做更糟。</p>
 <h3 id="收尾补丁包安装三条硬规则">收尾补丁（包安装三条硬规则）</h3>
-<p>进入 v0.95（LSP 增强）前的收尾，全部落在 <code>src/package.rs</code> 与 <a href="README.md#2561-三条硬规则已落地">§25.6.1</a>，
+<p>进入 v0.95（LSP 增强）前的收尾，全部落在 <code>src/package.rs</code> 与 <a href="../spec.html#2561-三条硬规则已落地">§25.6.1</a>，
 并由新增的 <strong>J 组</strong>测试锁死：</p>
 <ol>
 <li><strong>重复安装</strong>：<code>~/.dial/packages/&lt;name&gt;/</code> 下已存在同名包时，先读旧 <code>manifest.txt</code> 比对 <code>abi</code>。
@@ -90,19 +90,19 @@
      防止不兼容二进制悄悄链入。拒绝「同名不同 ABI 共存」——<code>import</code> 只凭名字引用，共存会重新打开版本冲突的口子。</li>
 <li><strong>强制静态库</strong>：<code>targets</code> 映射的库文件后缀<strong>必须为 <code>.a</code>（Linux/Termux）或 <code>.lib</code>（Windows）</strong>，
    形如 <code>.so</code> / <code>.dll</code> 的动态库在解析 <code>manifest.txt</code> 时<strong>当场拒绝</strong>。
-   理由：Dial 产物契约是「只链 libc，绝不引入运行时动态依赖」（<a href="README.md#34-产物依赖契约">§3.4 产物依赖契约</a>），
+   理由：Dial 产物契约是「只链 libc，绝不引入运行时动态依赖」（<a href="../spec.html#34-产物依赖契约">§3.4 产物依赖契约</a>），
    动态库会破坏这条契约并让 <code>ldd</code> 检查（C 组）失效。</li>
 <li><strong>卸载</strong>：缓存是纯派生数据，没有 <code>dialc uninstall</code> 命令——直接 <code>rm -rf ~/.dial/packages/&lt;name&gt;/</code> 即可，
    随时可重装。这条与「ABI 冲突报错提示」自洽。</li>
 </ol>
 <h3 id="docs文档">Docs（文档）</h3>
 <ul>
-<li><strong><a href="README.md#31-运行环境要求linux--动态-glibc">§3.1 运行环境要求</a></strong>：明确 Dial <strong>只支持 Linux（x86_64 · 动态 glibc）</strong>，
+<li><strong><a href="../spec.html#31-运行环境要求三平台">§3.1 运行环境要求</a></strong>：明确 Dial <strong>只支持 Linux（x86_64 · 动态 glibc）</strong>，
   并只在<strong>近两年内发布的发行版</strong>上验证（Ubuntu 24.04 LTS / Fedora 42 / Debian 13 等）；
   <strong>明确排除 musl 系统（Alpine 等）</strong>——编译器本体与产物都依赖 glibc，跨 ABI 用不了。
   列出工具链版本（Rust ≥ 1.80、LLVM 18 开发库、<code>zig cc</code> 或 <code>clang</code>）与运行 <code>dialc</code> 本体所需的
   <code>LD_LIBRARY_PATH</code>（仅影响编译器，不影响产物）。</li>
-<li><strong><a href="README.md#32-从源码构建克隆--进入--编译">§3.2 从源码构建</a></strong>：把流程钉死为
+<li><strong><a href="../spec.html#32-从源码构建克隆--进入--编译">§3.2 从源码构建</a></strong>：把流程钉死为
   <strong>克隆 → 进入（<code>cd Dial</code>，仓库根即编译器本体）→ 编译（<code>cargo build --release</code>）</strong>，
   并说明仓库根就是 <code>Cargo.toml</code> 与 <code>src/</code> 所在之处（没有嵌套的 <code>dialc/</code> 子目录），避免读者多进一层目录。</li>
 <li>官网「快速开始」同步加了 Linux/glibc 提示、<code>LD_LIBRARY_PATH</code> 步骤与十组自测命令。</li>

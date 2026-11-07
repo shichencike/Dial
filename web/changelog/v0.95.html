@@ -40,7 +40,7 @@
 </ul>
 </div>
 <h2 id="v095--2026-10-31">[v0.95] — 2026-10-31</h2>
-<p>本版是 <strong><code>dialc lsp</code> 的第一次增强</strong>（见 README <a href="README.md#286-lsp-增强hover--跳转定义--补全v095">§28.6</a>）：
+<p>本版是 <strong><code>dialc lsp</code> 的第一次增强</strong>（见 README <a href="../spec.html#286-lsp-增强hover--跳转定义--补全v095">§28.6</a>）：
 把 v0.94 骨架里「刻意没做」的三件符号表能力——<strong>悬停（Hover）/ 跳转定义（Go to Definition）/ 基础补全（Completion）</strong>
 ——一次性补齐。底层是一座<strong>与类型检查解耦、可容错的跨文件符号表</strong>（<code>src/index.rs</code>），
 它复用 <code>parse_diali</code> / <code>resolve_type_name</code>，但<strong>不调用 <code>semantic::analyze</code></strong>，

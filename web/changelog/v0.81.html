@@ -36,7 +36,7 @@
 </div>
 <h2 id="v081--2026-10-30">[v0.81] — 2026-10-30</h2>
 <p>本版补上 v0.8 并发模型<strong>唯一的功能缺口：通道的关闭与 EOF</strong>
-（见 README <a href="README.md#277-通道关闭与-eofv081">§27.7</a>）。</p>
+（见 README <a href="../spec.html#277-通道关闭与-eofv081">§27.7</a>）。</p>
 <blockquote>
 <p><strong>缺口本身</strong>：v0.8 的通道没有 EOF。生产者一旦退出，消费者就永远卡在 <code>recv</code> 上——
 程序不是跑错，而是<strong>死锁</strong>。也就是说「生产者结束 → 消费者收尾」这个最常见的并发范式

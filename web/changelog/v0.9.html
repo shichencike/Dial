@@ -37,7 +37,7 @@
 </div>
 <h2 id="v09--2026-10-30">[v0.9] — 2026-10-30</h2>
 <p>本版做的是<strong>并发底座的安全加固</strong>：判空、多消费者安全、超时接收
-（见 README <a href="README.md#278-判空多消费者安全与超时v09">§27.8</a>）。</p>
+（见 README <a href="../spec.html#278-判空多消费者安全与超时v09">§27.8</a>）。</p>
 <blockquote>
 <p><strong>最重要的不是新语法，而是修掉了一个真实存在的死锁。</strong>
 v0.8/v0.81 的通道通知用的是 <code>pthread_cond_signal</code>（只唤醒一个等待者）。

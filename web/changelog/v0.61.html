@@ -34,7 +34,7 @@
 </ul>
 </div>
 <h2 id="v061--2026-10-29">[v0.61] — 2026-10-29</h2>
-<p>本版落地<strong>文件 IO（file 句柄）</strong>（见 README <a href="README.md#24-文件-iofile-句柄">§24</a>），并正式确立<strong>版本号规则</strong>（最多两位小数、禁止跳版、严格按时间递增，见 README <a href="README.md#23-版本号规则">§23</a>）。</p>
+<p>本版落地<strong>文件 IO（file 句柄）</strong>（见 README <a href="../spec.html#24-文件-iofile-句柄">§24</a>），并正式确立<strong>版本号规则</strong>（最多两位小数、禁止跳版、严格按时间递增，见 README <a href="../spec.html#23-版本号规则">§23</a>）。</p>
 <h3 id="added新增">Added（新增）</h3>
 <ul>
 <li><strong><code>file</code> 不透明指针类型</strong>：新增 <code>file</code> 类型，IR 中为 <code>ptr</code>，封装 C 的 <code>FILE*</code>，<strong>不受 ARC 管理</strong>；用户必须显式 <code>open</code> / <code>close</code>（与内存宪法显式指针回收契约一致）。</li>
@@ -45,7 +45,7 @@
 <h3 id="changed变更">Changed（变更）</h3>
 <ul>
 <li>遵循版本号规则：本版属「小功能 / 新语法」，版本号 <code>v0.6 → v0.61</code>（Cargo <code>version</code> 字段按三段式写作 <code>0.61.0</code>，语义等同 <code>v0.61</code>）。</li>
-<li>README 同步：§4.3 关键字、§5.1 基本类型、§15 FFI 表与 C 导出函数、§17.2（从「未实现」移除文件 IO）、新增 <a href="README.md#24-文件-iofile-句柄">§24 文件 IO</a> 与 <a href="README.md#22-早期版本摘要v03-及以前">§22 早期版本摘要</a>。</li>
+<li>README 同步：§4.3 关键字、§5.1 基本类型、§15 FFI 表与 C 导出函数、§17.2（从「未实现」移除文件 IO）、新增 <a href="../spec.html#24-文件-iofile-句柄">§24 文件 IO</a> 与 <a href="../spec.html#22-早期版本摘要v03-及以前">§22 早期版本摘要</a>。</li>
 </ul>
 <h3 id="设计约束用户拍板">设计约束（用户拍板）</h3>
 <ul>

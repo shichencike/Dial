@@ -35,7 +35,7 @@
 </ul>
 </div>
 <h2 id="v104--2026-11-06">[v1.04] — 2026-11-06</h2>
-<p><strong>主题：FFI 成为语言一等公民。</strong> 详见 <a href="README.md#33-v104-ffi外部函数接口">README §33</a>。</p>
+<p><strong>主题：FFI 成为语言一等公民。</strong> 详见 <a href="../spec.html#33-v104ffi外部函数接口">README §33</a>。</p>
 <blockquote>
 <p><strong>版本定位</strong>：<code>v1.0</code> 里程碑已在 <code>[v1.03]</code> 达成、标签 <code>v1.0</code> 已打并推送；
 <code>[v1.00]</code> ~ <code>[v1.03]</code> 是「达成 v1.0」过程中的分版记录（见下方里程碑大标题）。
@@ -43,7 +43,7 @@
 按本轮交付约定：<strong>只做本地提交，不推送 GitHub、不打 tag</strong>。
 本版后续还并入了「语言层动态链接」「工程工具链增补」「DWARF 调试信息（-g）」
 「性能基准（4 语言 × 28 维）」与「真实程序缺口补齐（B/C 组，第一批）」
-（见 <a href="README.md#34-v104-增补工程工具链并入-v104版本不变">README §34</a>、§35、§36、§37），
+（见 <a href="../spec.html#34-v104-增补工程工具链并入-v104版本不变">README §34</a>、§35、§36、§37），
 均不新增分版记录，编译器版本 <code>1.4.0</code> 保持不变。
 <strong>最后一批起 <code>STDLIB_ABI 5 → 6</code></strong>（新增 <code>dial_eprint_*</code> / <code>get_or</code> 等导出符号，
 按既有判据递增，见 §37.6）；术语「绝不引入全局变量」统一为
@@ -53,7 +53,7 @@
 <ul>
 <li><strong>语言层 <code>extern fn</code></strong>：直接写在 <code>.dial</code> 源码里，编译期生成 LLVM 外部声明、
   链接期由 C 编译器解析，不再强制绕 <code>.diali</code> → <code>.a</code> → <code>.dialpkg</code> → <code>install</code> → <code>import</code>。
-  现有包机制完整保留、行为不变（见 <a href="README.md#15-ffi-契约">README §15</a>）。</li>
+  现有包机制完整保留、行为不变（见 <a href="../spec.html#15-ffi-契约dial-语法--c-函数">README §15</a>）。</li>
 <li><strong>语言层 <code>link "...";</code></strong>：显式链入用户 C 扩展库。相对路径以源文件所在目录为基准解析。</li>
 <li><strong>语言层动态链接</strong>：<code>link</code> 除静态归档外也接受 <code>.so</code> / <code>.dll</code> / <code>.dylib</code>
   （含 <code>libx.so.1</code> 带版本号变体），按<strong>扩展名</strong>校验 ELF <code>\x7fELF</code> / PE <code>MZ</code> /
@@ -68,7 +68,7 @@
   <code>string_from_cstr(p)</code> / <code>bytes_from_ptr(p, n)</code> 从 C 缓冲区<strong>复制</strong>出受 ARC 管理的新对象。</li>
 <li><strong>C 回调</strong>：<code>Type::FnPtr</code> 生成标准 C calling convention，C 侧可安全调用 Dial 具名函数；
   跨回调状态经 <code>rawptr&lt;void&gt;</code> 显式透传，无闭包、无隐藏环境对象。</li>
-<li><strong>工程工具链（并入 <code>[v1.04]</code> 的增补，见 <a href="README.md#34-v104-增补工程工具链并入-v104版本不变">README §34</a>）</strong>：</li>
+<li><strong>工程工具链（并入 <code>[v1.04]</code> 的增补，见 <a href="../spec.html#34-v104-增补工程工具链并入-v104版本不变">README §34</a>）</strong>：</li>
 <li>新增 <code>dialc check / fmt / test / new / list / uninstall / pack / help</code> 八个子命令；
     <code>build / run / check / test</code> <strong>共用同一条前端流水线</strong>（<code>main.rs::frontend()</code>）；</li>
 <li><strong>本地源码模块</strong>：<code>import "./util.dial";</code> 或裸名 <code>import "util";</code>（同目录存在
@@ -106,7 +106,7 @@
 </li>
 <li>
 <p><strong>真实程序缺口补齐（B/C 组，第一批）</strong>：按 <code>REPORT_v1.04_gaps.md</code> 的裁决落地 5 项，
-  规范见 <a href="README.md#37-v104-增补真实程序缺口补齐与宪法裁决并入-v104分-3-批">README §37</a>。</p>
+  规范见 <a href="../spec.html#37-v104-增补真实程序缺口补齐与宪法裁决并入-v104分-3-批">README §37</a>。</p>
 </li>
 <li><strong>B9 块注释 <code>/* ... */</code></strong>：lexer 层跳过、跨行同步行号；<strong>未闭合直接 Fail-Fast 报错</strong>，
     绝不静默吞掉余下源码。</li>

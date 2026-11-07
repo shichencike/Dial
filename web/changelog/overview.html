@@ -32,7 +32,7 @@
    不再使用语义化版本的「主.次.修订」三段式。
    <strong>唯一例外是第三位的补丁号</strong>（如 <code>v0.98.1</code>）：它是「两位小数版本 + 一位修复补丁位」，
    而非「第三位连续小数」；仅用于<strong>修复发布</strong>（只修缺陷、不加新特性），
-   适用条件见 <a href="README.md#23-版本号规则">README §23</a> 第 6 条。</li>
+   适用条件见 <a href="../spec.html#23-版本号规则">README §23</a> 第 6 条。</li>
 <li><strong>版本标题一律带 <code>v</code> 前缀、不写补丁位</strong>：写作 <code>[v0.91]</code>，<strong>不是</strong> <code>[0.91.0]</code>。
    （源码 <code>Cargo.toml</code> 的 <code>version</code> 字段受 Cargo 限制仍写作 <code>0.91.0</code>，那是存储格式，
    文档与官网一律显示为 <code>v0.91</code>。）
@@ -40,7 +40,7 @@
    否则读者无从判断自己装的是不是修复过的版本。</li>
 <li><strong>版本号必须严格按时间递增，绝不许倒流</strong>：后发版本的日期不得早于先前版本。</li>
 </ol>
-<p>详见 <a href="README.md#23-版本号规则">README §23</a>。</p>
+<p>详见 <a href="../spec.html#23-版本号规则">README §23</a>。</p>
 </blockquote>
 <hr /></main></div>
 

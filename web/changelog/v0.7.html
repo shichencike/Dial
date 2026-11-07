@@ -35,7 +35,7 @@
 </ul>
 </div>
 <h2 id="v07--2026-10-30">[v0.7] — 2026-10-30</h2>
-<p>本版落地<strong>可恢复异常（try / catch / throw）</strong>（见 README <a href="README.md#26-可恢复异常trycatchthrow">§26</a>），
+<p>本版落地<strong>可恢复异常（try / catch / throw）</strong>（见 README <a href="../spec.html#26-可恢复异常trycatchthrow">§26</a>），
 补齐了 v0.6 只有 <code>ud2</code>（不可恢复崩溃）的那一半；同时正式声明<strong>三重开源许可</strong>。</p>
 <h3 id="added新增">Added（新增）</h3>
 <ul>
@@ -50,7 +50,7 @@
 <li><strong>三重开源许可</strong>：<code>GPL-3.0 OR MIT OR Apache-2.0</code>（任选其一）。三份协议原文
   <code>LICENSE-GPLv3</code> / <code>LICENSE-MIT</code> / <code>LICENSE-APACHE</code> 与说明文档 <code>LICENSE</code> 随源码及发布包分发。</li>
 <li><strong>打包脚本</strong> <code>tools/package.sh</code>：发布压缩包<strong>强制校验</strong>四份许可文件与 <code>.git</code> 均在包内，缺一即拒绝打包。</li>
-<li><strong>生态规划草案</strong>：README 新增 <a href="README.md#25-包分发与依赖管理生态规划--最终规范">§25 包分发与依赖管理</a>
+<li><strong>生态规划草案</strong>：README 新增 <a href="../spec.html#25-包分发与依赖管理生态规划--最终规范">§25 包分发与依赖管理</a>
   （<code>.dialpkg</code> 专属格式、自动解压到 <code>~/.dial/packages/</code>、接口签名文件 <code>.diali</code>、SHA256 强制校验、零版本冲突）。</li>
 <li><strong>示例与负向用例</strong>：<code>examples/try_catch_demo.dial</code>、<code>examples/error_zero_cost.dial</code>；
   <code>tests/bad/{throw_non_error,catch_with_paren,throw_outside_try}.dial</code>。</li>

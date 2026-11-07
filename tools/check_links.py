@@ -194,6 +194,62 @@ def main() -> int:
                 path.write_text(buf, encoding="utf-8")
             print(f"   🔧 已自动修正 {len(edits)} 处"
                   + (f"，{len(unresolved)} 处需人工处理" if unresolved else ""))
+    # ---- 跨文件锚点：](README.md#x) 必须能在 README.md 的标题里解析 ----------
+    # CHANGELOG.md 大量引用 README 章节。手写锚点一旦与标题脱节，GitHub 与官网
+    # 会同时点不动（两处 slug 同源，见 gh_slug / build_web.dial_slugify）。
+    # 本段只检查、不自动改写：跨文件目标应人工确认，避免把链接悄悄指错章节。
+    for path in (readme, changelog):
+        text = path.read_text(encoding="utf-8")
+        scan = strip_code(text)
+        broken = []
+        for m in re.finditer(r"\]\(README\.md#([^)]+)\)", scan):
+            a = m.group(1)
+            if a not in readme_valid:
+                broken.append((text[: m.start()].count("\n") + 1, a,
+                               readme_alias.get(loose(a))))
+        label = f"== {path.name}：跨文件 README.md# 锚点"
+        if not broken:
+            print(f"{label} ✅ 全部可解析")
+            continue
+        print(f"{label} ❌ 失效 {len(broken)} 处")
+        for line, a, fixed in broken:
+            hint = f"  -> 应为 {fixed}" if fixed else "  -> 无法自动对应，需人工处理"
+            print(f"      行 {line}: #{a}{hint}")
+        rc = 1
+
+    # ---- 官网产物：href 重写是否彻底 ----------------------------------------
+    # build_web.py 会把指向仓库根 .md / 目录的相对 href 重写为站内页或 GitHub
+    # 绝对链接。这里守住两件事：不得有残留；站内 spec.html# 锚点必须真实存在。
+    web = ROOT / "web"
+    spec_html = web / "spec.html"
+    if spec_html.exists():
+        spec_ids = set(re.findall(r'id="([^"]+)"',
+                                  spec_html.read_text(encoding="utf-8")))
+        repo_prefixes = (
+            "README.md", "CHANGELOG.md", "ARCHITECTURE.md", "LICENSE",
+            "Cargo.toml", "examples/", "editors/", "third_party/",
+            "tools/", "tests/", "stdlib/", "runtime/", "packages/",
+        )
+        site_problems = []
+        for p in sorted(list(web.glob("*.html")) + list(web.glob("changelog/*.html"))):
+            t = p.read_text(encoding="utf-8")
+            for href in re.findall(r'href="([^"]+)"', t):
+                if any(href.startswith(pre) for pre in repo_prefixes):
+                    site_problems.append((p.relative_to(ROOT),
+                                          f"残留仓库根相对链接 {href}"))
+                if href.startswith("spec.html#") or href.startswith("../spec.html#"):
+                    a = href.split("#", 1)[1]
+                    if a not in spec_ids:
+                        site_problems.append((p.relative_to(ROOT),
+                                              f"spec.html 锚点不存在 #{a}"))
+        print("== web/：官网 href 重写检查")
+        if site_problems:
+            print(f"   ❌ {len(site_problems)} 处问题")
+            for p, msg in site_problems[:20]:
+                print(f"      {p}: {msg}")
+            rc = 1
+        else:
+            print("   ✅ 无残留仓库根相对链接，站内 spec.html# 锚点全部可解析")
     return rc
 
 

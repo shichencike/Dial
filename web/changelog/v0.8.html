@@ -36,7 +36,7 @@
 </div>
 <h2 id="v08--2026-10-30">[v0.8] — 2026-10-30</h2>
 <p>本版落地<strong>所有权转移 <code>move_to</code> 与多线程并发（<code>thread</code> / <code>channel</code>）</strong>
-（见 README <a href="README.md#27-所有权转移与多线程并发move_to--thread--channel">§27</a>）。
+（见 README <a href="../spec.html#27-所有权转移与多线程并发move_to--thread--channel">§27</a>）。
 核心主张：<strong>用「转移所有权」取代「共享内存 + 锁」</strong>——数据不共享、只移交，
 队列里流动的指针永远只有一个持有者，因此不存在数据竞争，也就不需要任何互斥锁。</p>
 <h3 id="added新增">Added（新增）</h3>

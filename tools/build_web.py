@@ -236,7 +236,44 @@ def dial_slugify(value: str, separator: str) -> str:
     return v.replace(" ", separator)
 
 
-def md_body(text: str, with_toc: bool, strip_web_prefix: bool = False) -> str:
+# 官网里没有「仓库根文件」这类页面：源 markdown 中指向 README.md / CHANGELOG.md /
+# ARCHITECTURE.md / LICENSE* / examples/ / editors/ 的相对链接，在 GitHub 上有效，
+# 但落到 web/ 目录就成了死链。渲染时统一重写 href（**只改属性，不动正文文字**）：
+#   README.md     -> 站内 spec.html（官网就是 README 的渲染版）
+#   CHANGELOG.md  -> 站内 changelog.html（版本索引）
+#   其余仓库文件/目录 -> GitHub 仓库绝对 URL（官网没有对应页面）
+# 分页在 web/changelog/ 下，站内链接要补 "../"；base 由调用方传入。
+GITHUB_BLOB = "https://github.com/shichencike/Dial/blob/main/"
+GITHUB_TREE = "https://github.com/shichencike/Dial/tree/main/"
+
+REPO_PATH_PREFIXES = (
+    "ARCHITECTURE.md",
+    "LICENSE-GPLv3", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE",
+    "Cargo.toml", "Cargo.lock",
+    "examples/", "editors/", "third_party/", "tools/", "tests/",
+    "stdlib/", "runtime/", "packages/",
+)
+
+
+def rewrite_repo_links(out: str, base: str) -> str:
+    """把源 markdown 的仓库根相对 href 重写成官网可用链接（只动 href 属性）。"""
+    def repl(m):
+        href = m.group(1)
+        if href == "README.md" or href.startswith("README.md#"):
+            return f'href="{base}spec.html{href[len("README.md"):]}"'
+        if href == "CHANGELOG.md" or href.startswith("CHANGELOG.md#"):
+            return f'href="{base}changelog.html{href[len("CHANGELOG.md"):]}"'
+        head = href.split("#", 1)[0]
+        for p in REPO_PATH_PREFIXES:
+            if head == p or head.startswith(p):
+                url = GITHUB_TREE if head.endswith("/") else GITHUB_BLOB
+                return f'href="{url}{href}"'
+        return m.group(0)
+    return re.sub(r'href="([^"]+)"', repl, out)
+
+
+def md_body(text: str, with_toc: bool, strip_web_prefix: bool = False,
+            base: str = "") -> str:
     exts = ["extra", "toc", "fenced_code", "sane_lists"]
     md = markdown.Markdown(
         extensions=exts,
@@ -249,7 +286,8 @@ def md_body(text: str, with_toc: bool, strip_web_prefix: bool = False) -> str:
         # 官网把 spec.html 与这些页面放在同一目录，须去掉 web/ 前缀才点得动。
         # 只改 href，不动任何正文文字；CHANGELOG 无此类链接，分页页不受影响。
         out = out.replace('href="web/', 'href="')
-    return out
+    # 其余指向仓库根 .md / 目录的 href 同理：改成站内页或 GitHub 绝对链接。
+    return rewrite_repo_links(out, base)
 
 
 def render(title: str, body: str, active: str, landing: bool = False,
@@ -438,7 +476,7 @@ def build_changelog(changelog_text: str) -> None:
 
     # 1) 前言（版本号规则等），原文渲染，不带 TOC。
     (CHANGELOG_DIR / "overview.html").write_text(
-        render("更新日志 · 版本规则", md_body(preamble, False),
+        render("更新日志 · 版本规则", md_body(preamble, False, base="../"),
                "changelog", base="../"), encoding="utf-8")
 
     # 2) 每个版本一页：正文 = 该段 markdown 的原样渲染 + 前后导航条。
@@ -457,7 +495,7 @@ def build_changelog(changelog_text: str) -> None:
         if older or newer:
             nav.append(' · <a href="../changelog.html">版本索引</a>')
         nav.append("</p>")
-        page = back + md_body(segments[i], True) + "".join(nav)
+        page = back + md_body(segments[i], True, base="../") + "".join(nav)
         (CHANGELOG_DIR / m["file"]).write_text(
             render(f"更新日志 {m['label']}", page, "changelog", base="../"),
             encoding="utf-8")
