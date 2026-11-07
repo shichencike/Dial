@@ -1,0 +1,48 @@
+// v1.04 第 3 批 B8：结构体字段默认值端到端冒烟
+// 测试点：
+//   1) 省略有默认值的字段 -> 用默认值（编译期常量）
+//   2) 显式提供字段 -> 覆盖默认值
+//   3) 默认值表达式可参与字面量（如 1+1）
+//   4) B8 仅允许编译期常量默认值（由语义层校验）
+
+struct Point {
+    x: int = 0,
+    y: int = 0,
+}
+
+struct Rect {
+    w: int = 10,
+    h: int = 1 + 1,        // 默认值允许编译期表达式
+    tag: string = "box",   // 句柄类型也可有默认值（不可变常量）
+}
+
+fn main(): int {
+    // 全省略：x=0, y=0
+    var p0: Point = Point{};
+    print("B8 p0.x = ", p0.x);
+    print("B8 p0.y = ", p0.y);
+
+    // 部分提供：x=7 覆盖 0，y 用默认 0
+    var p1: Point = Point{x: 7};
+    print("B8 p1.x = ", p1.x);
+    print("B8 p1.y = ", p1.y);
+
+    // 全提供：覆盖全部默认
+    var p2: Point = Point{x: 3, y: 9};
+    print("B8 p2.x = ", p2.x);
+    print("B8 p2.y = ", p2.y);
+
+    // 编译期表达式默认值：w=10, h=2
+    var r0: Rect = Rect{};
+    print("B8 r0.w = ", r0.w);
+    print("B8 r0.h = ", r0.h);
+    print("B8 r0.tag = ", r0.tag);
+
+    // 句柄默认值 + 覆盖数值字段
+    var r1: Rect = Rect{w: 4};
+    print("B8 r1.w = ", r1.w);
+    print("B8 r1.h = ", r1.h);
+    print("B8 r1.tag = ", r1.tag);
+
+    return 0;
+}

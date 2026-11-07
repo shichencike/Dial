@@ -1802,7 +1802,7 @@ impl<'ctx> CodeGen<'ctx> {
             _ => return,
         };
         let (fields, llvm_sty) = match (structs.get(name), self.struct_types.get(name)) {
-            (Some(f), Some(t)) => (f.clone(), *t),
+            (Some(f), Some(t)) => (f.0.clone(), *t),
             _ => return,
         };
         for (i, (_fname, fty)) in fields.iter().enumerate() {
@@ -1834,7 +1834,7 @@ impl<'ctx> CodeGen<'ctx> {
             _ => return,
         };
         let (fields, llvm_sty) = match (structs.get(name), self.struct_types.get(name)) {
-            (Some(f), Some(t)) => (f.clone(), *t),
+            (Some(f), Some(t)) => (f.0.clone(), *t),
             _ => return,
         };
         for (i, (_fname, fty)) in fields.iter().enumerate() {
@@ -3657,9 +3657,10 @@ impl<'ctx> CodeGen<'ctx> {
         col: usize,
     ) -> Result<(u32, Type)> {
         if let Some(sname) = Self::struct_name_of(ot) {
-            let fields = structs
+            let fields = &structs
                 .get(sname)
-                .ok_or_else(|| DialcError::new(format!("未知结构体 '{}'", sname), line, col))?;
+                .ok_or_else(|| DialcError::new(format!("未知结构体 '{}'", sname), line, col))?
+                .0;
             fields
                 .iter()
                 .enumerate()
@@ -3871,35 +3872,38 @@ impl<'ctx> CodeGen<'ctx> {
             }
             Expr::StructLit(name, fields) => {
                 let sty = self.struct_types[name];
-                let sdef = structs[name].clone();
+                let sdef = structs[name].0.clone();
+                let defaults = &structs[name].1;
                 let ptr = self.alloca_in_entry(function, sty.into(), "slit");
-                // 零初始化：结构体字面量允许省略字段，省略者取其类型的零值（确定性语义，杜绝未初始化内存）
+                // 零初始化：所有字段先取零值（确定性语义，杜绝未初始化内存）
                 let zero = sty.const_zero();
                 self.builder.build_store(ptr, zero).unwrap();
-                // 按字段名定位下标，而非字面量书写顺序（顺序无关，杜绝错位）
-                for (fname, fe) in fields.iter() {
-                    let fidx = sdef
-                        .iter()
-                        .position(|(n, _)| n == fname)
-                        .ok_or_else(|| {
-                            DialcError::new(
-                                format!("语义错误：结构体 '{}' 不存在字段 '{}'", name, fname),
-                                0, 0,
-                            )
-                        })?;
-                    let fty = sdef[fidx].1.clone();
+                // 按结构体定义顺序处理每个字段：字面量提供的用提供值，省略且有默认值的用默认值。
+                // 语义层已保证「省略且无默认值的字段」被拒绝，故这里不会出现未初始化字段。
+                let provided: std::collections::HashMap<&str, &Expr> =
+                    fields.iter().map(|(f, e)| (f.as_str(), e)).collect();
+                for (fidx, (fname, fty)) in sdef.iter().enumerate() {
+                    let fe: &Expr = match provided.get(fname.as_str()) {
+                        Some(e) => *e,
+                        None => match defaults.get(fname) {
+                            Some(d) => d,
+                            // 防御：语义层应已拒绝；仍零初始化避免未初始化
+                            None => continue,
+                        },
+                    };
+                    let fidx_gep = fidx as u32;
                     let gep = self
                         .builder
-                        .build_struct_gep(sty, ptr, fidx as u32, "fgep")
+                        .build_struct_gep(sty, ptr, fidx_gep, "fgep")
                         .unwrap();
                     let fv = self.gen_expr(fe, function, scopes, func_values, functions, structs)?;
-                    let stored = self.coerce(fv, &type_of(fe, scopes, functions, structs)?, &fty);
+                    let stored = self.coerce(fv, &type_of(fe, scopes, functions, structs)?, fty);
                     // 堆类型字段：结构体成为该对象的一个持有者。
                     // 借来的值（来自变量 / 字段 / 数组元素）必须 retain 一份——
                     // 否则字段只是来源的别名，来源出作用域被 release 后字段即悬垂
                     // （use-after-free：读到的长度字段是垃圾，会打印出成片乱码）。
                     // 自带所有权的值（字面量等）直接接管，不得再 retain。
-                    self.retain_if_borrowed(fe, &fty, stored);
+                    self.retain_if_borrowed(fe, fty, stored);
                     self.builder.build_store(gep, stored).unwrap();
                 }
                 Ok(self.builder.build_load(sty, ptr, "sval").unwrap())

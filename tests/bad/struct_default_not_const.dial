@@ -1,0 +1,10 @@
+// 应当编译失败：默认值必须是编译期常量，不得引用运行时变量（即使变量是只读）。
+struct Box {
+    sz: int = n,
+}
+
+fn main(): int {
+    var n: int = 42;
+    var b: Box = Box{};
+    return 0;
+}

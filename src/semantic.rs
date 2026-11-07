@@ -31,7 +31,7 @@ pub struct FuncInfo {
 }
 
 /// 结构体表：名字 -> 字段(名字, 类型)。
-pub type StructTable = HashMap<String, Vec<(String, Type)>>;
+pub type StructTable = HashMap<String, (Vec<(String, Type)>, HashMap<String, Expr>)>;
 
 /// 作用域栈：外层 Vec 是作用域层级，内层 HashMap 存「名字 -> (类型, 附加信息)」。
 /// 附加信息 V 在语义阶段是 `VarState`，在代码生成阶段是「(是否可变, 指针)」。
@@ -242,9 +242,10 @@ pub fn type_of<V>(
                     ))
                 }
             };
-            let fields = structs
+            let fields = &structs
                 .get(&sname)
-                .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", sname), 0, 0))?;
+                .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", sname), 0, 0))?
+                .0;
             fields
                 .iter()
                 .find(|(f, _)| f == field)
@@ -361,19 +362,49 @@ pub fn type_of<V>(
             let sdef = structs
                 .get(name)
                 .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", name), 0, 0))?;
-            if fields.len() != sdef.len() {
-                return Err(DialcError::new(
-                    format!(
-                        "语义错误：结构体 '{}' 需要 {} 个字段，但提供了 {}",
-                        name,
-                        sdef.len(),
-                        fields.len()
-                    ),
-                    0, 0,
-                ));
+            let field_defs = &sdef.0;
+            let defaults = &sdef.1;
+            // 字面量内重复字段名检测
+            let mut seen = std::collections::HashSet::new();
+            for (fname, _) in fields {
+                if !seen.insert(fname.clone()) {
+                    return Err(DialcError::new(
+                        format!("语义错误：结构体 '{}' 字面量字段 '{}' 重复", name, fname),
+                        0, 0,
+                    ));
+                }
             }
+            // B8：每个结构体字段要么在字面量中提供，要么有显式编译期常量默认值；
+            // 两者皆无则保留强类型底线，编译期报错（杜绝隐式未初始化内存）。
+            for (fname, fty) in field_defs {
+                let provided = fields.iter().any(|(f, _)| f == fname);
+                if provided {
+                    continue;
+                }
+                if let Some(de) = defaults.get(fname) {
+                    let dt = type_of(de, scopes, funcs, structs)?;
+                    if !types_compatible(&dt, fty) {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：结构体 '{}' 字段 '{}' 的默认值类型不匹配（默认值 {}，期望 {}）",
+                                name, fname, dt.name(), fty.name()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                } else {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：结构体 '{}' 的字段 '{}' 没有默认值，必须显式提供",
+                            name, fname
+                        ),
+                        0, 0,
+                    ));
+                }
+            }
+            // 逐个检查已提供字段的类型
             for (fname, fe) in fields {
-                let expected = sdef
+                let expected = field_defs
                     .iter()
                     .find(|(f, _)| f == fname)
                     .map(|(_, t)| t.clone())
@@ -2183,6 +2214,24 @@ fn error_method_type<V>(
 }
 
 /// 动态数组方法（v0.2 元素为 int）的签名与返回类型。
+/// B8：编译期常量判定——结构体字段默认值必须是字面量（含字面量数组），
+/// 不得引用变量 / 函数调用等运行时值（宪法：禁止隐式未初始化内存，默认值亦须确定）。
+fn is_ct_const(e: &Expr) -> bool {
+    match e {
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::CharLit(_)
+        | Expr::ByteLit(_)
+        | Expr::StringLit(_) => true,
+        Expr::ArrayLit(es, _) => es.iter().all(is_ct_const),
+        // 编译期常量表达式：字面量上的算术/逻辑/位运算仍可常量折叠。
+        Expr::Unary(_, inner) => is_ct_const(inner),
+        Expr::Binary(a, _, b) => is_ct_const(a) && is_ct_const(b),
+        _ => false,
+    }
+}
+
 /// 可作为动态数组元素的类型：int（标量）或任意 8 字节句柄/指针
 /// （string / int[] / map / error / channel / 不透明指针）。
 /// 标量非 int（float / bool / byte / char）因宽度不足 8 字节、塞进 int64 槽会静默截断，故拒绝。
@@ -3085,7 +3134,21 @@ pub fn analyze(
                 s.line, s.col,
             ));
         }
-        structs.insert(s.name.clone(), s.fields.clone());
+        structs.insert(s.name.clone(), (s.fields.clone(), s.field_defaults.clone()));
+    }
+    // B8：字段默认值必须是编译期常量（字面量 / 字面量数组），不得引用运行时值。
+    for s in &program.structs {
+        for (fname, de) in &s.field_defaults {
+            if !is_ct_const(de) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：结构体 '{}' 字段 '{}' 的默认值必须是编译期常量（字面量）",
+                        s.name, fname
+                    ),
+                    s.line, s.col,
+                ));
+            }
+        }
     }
     // 校验字段类型引用的结构体确实存在
     for s in &program.structs {
@@ -3126,7 +3189,7 @@ pub fn analyze(
                 ));
             }
         }
-        structs.insert(cs.name.clone(), cs.fields.clone());
+        structs.insert(cs.name.clone(), (cs.fields.clone(), HashMap::new()));
     }
 
     // 1.6) v1.04 FFI：语言层 extern fn 的保留名 / 与本地函数撞名校验。
@@ -3840,9 +3903,10 @@ fn check_stmt(
                     ))
                 }
             };
-            let fields = structs
+            let fields = &structs
                 .get(&sname)
-                .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", sname), *line, *col))?;
+                .ok_or_else(|| DialcError::new(format!("语义错误：未知结构体 '{}'", sname), *line, *col))?
+                .0;
             let expected = fields
                 .iter()
                 .find(|(fld, _)| fld == field)

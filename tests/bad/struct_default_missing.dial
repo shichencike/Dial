@@ -1,0 +1,10 @@
+// 应当编译失败：字段 name 没有默认值，且字面量省略了它，必须显式提供。
+struct Person {
+    id: int = 0,
+    name: string,
+}
+
+fn main(): int {
+    var p: Person = Person{id: 5};
+    return 0;
+}

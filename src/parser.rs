@@ -13,6 +13,7 @@
 use crate::ast::*;
 use crate::error::{DialcError, Result};
 use crate::lexer::{InterpPiece, Token, TokenKind};
+use std::collections::HashMap;
 
 /// 解析入口。`opaque_types` 是**已导入包**用 `type X;` 声明的不透明句柄名——
 /// 它们在源码里直接当类型名用（如 `var h: DemoHandle = demo_new(1);`），
@@ -414,10 +415,23 @@ impl Parser {
         let (name, nline, ncol) = self.expect_ident_pos()?;
         self.expect(TokenKind::LBrace)?;
         let mut fields = Vec::new();
+        let mut defaults = HashMap::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
             let fname = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
             let fty = self.parse_type()?;
+            // B8：字段显式编译期常量默认值 `x: int = 0`。
+            // 只有显式声明默认值的字段，在结构体字面量中才可省略。
+            if self.check(&TokenKind::Assign) {
+                self.advance();
+                let d = self.parse_expr()?;
+                if defaults.insert(fname.clone(), d).is_some() {
+                    return Err(DialcError::new(
+                        format!("语法错误：结构体 '{}' 的字段 '{}' 重复指定默认值", name, fname),
+                        nline, ncol,
+                    ));
+                }
+            }
             fields.push((fname, fty));
             if self.check(&TokenKind::Comma) {
                 self.advance();
@@ -427,6 +441,7 @@ impl Parser {
         Ok(StructDef {
             name,
             fields,
+            field_defaults: defaults,
             line: start.line,
             col: start.col,
             name_line: nline,

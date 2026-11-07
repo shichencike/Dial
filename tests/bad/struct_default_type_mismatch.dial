@@ -1,0 +1,9 @@
+// 应当编译失败：默认值类型与字段类型不兼容（默认值是字符串，字段是 int）。
+struct Conf {
+    level: int = "high",
+}
+
+fn main(): int {
+    var c: Conf = Conf{};
+    return 0;
+}

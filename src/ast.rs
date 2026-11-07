@@ -5,6 +5,8 @@
 //! - 引入 `void` 返回类型（支持无返回值函数）。
 //! - `String` / `Array` 在 IR 层仅以“不透明指针”(i8*) 出现，底层由 C Runtime 管理。
 
+use std::collections::HashMap;
+
 /// dialc 类型。v0.2 已实现：Void/Int/Float/Bool/String/Array<T>/Struct(name)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
@@ -500,6 +502,9 @@ pub struct Func {
 pub struct StructDef {
     pub name: String,
     pub fields: Vec<(String, Type)>,
+    /// 字段显式编译期常量默认值（v1.04 B8）：`x: int = 0`。
+    /// 只有显式声明默认值的字段，在结构体字面量中才可省略；其余字段省略仍报错。
+    pub field_defaults: HashMap<String, Expr>,
     pub line: usize,
     pub col: usize,
     /// 结构体名位置（v0.95）。
