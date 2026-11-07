@@ -62,6 +62,36 @@ type DialKvMap;
 /// 句柄值 V 刻意不走这里，避免默认字符串 retain 的所有权歧义。
 extern fn dial_kvmap_get_or(m: DialKvMap, key: int, def: int): int;
 
+// ---- v1.04 第 2 批 C1：字符串查询 / 规范化（只变换 ASCII，UTF-8 安全）----
+extern fn dial_string_to_upper(s: DialString): DialString;
+extern fn dial_string_to_lower(s: DialString): DialString;
+extern fn dial_string_contains(s: DialString, sub: DialString): int;
+extern fn dial_string_starts_with(s: DialString, prefix: DialString): int;
+extern fn dial_string_ends_with(s: DialString, suffix: DialString): int;
+
+// ---- v1.04 第 2 批 C4：UTF-8 码点视图（length/get 的字节语义不变）----
+extern fn dial_string_char_count(s: DialString): int;
+extern fn dial_string_chars(s: DialString): DialArray;
+extern fn dial_string_char_at(s: DialString, i: int): int;
+extern fn dial_string_char_slice(s: DialString, from: int, to: int): DialString;
+
+// ---- v1.04 第 2 批 C2/C3：严格解析与定点格式化（拒绝 printf 式变参格式串）----
+extern fn dial_parse_int(s: DialString): int;
+extern fn dial_parse_float(s: DialString): float;
+extern fn dial_is_int(s: DialString): int;
+extern fn dial_is_float(s: DialString): int;
+extern fn dial_format_float(v: float, digits: int): DialString;
+
+// ---- v1.04 第 2 批 C5：数组 API 扩充 ----
+extern fn dial_array_insert(a: DialArray, i: int, v: int): DialArray;
+extern fn dial_array_reverse(a: DialArray): DialArray;
+extern fn dial_array_clear(a: DialArray): DialArray;
+extern fn dial_array_index_of(a: DialArray, v: int): int;
+extern fn dial_array_join(a: DialArray, sep: DialString): DialString;
+extern fn dial_array_sort_string(a: DialArray): DialArray;
+/// 第 3~5 个形参依次为：回调地址 / rawptr<void> 状态 / 编译器生成的精确签名 thunk。
+extern fn dial_array_reduce(a: DialArray, init: int, fn_raw: string, state: string, thunk: string): int;
+
 // ---- IO / 打印 ----
 extern fn dial_print_int(v: int): void;
 extern fn dial_print_float(v: float): void;
@@ -97,6 +127,24 @@ extern fn dial_file_read(f: DialFile, n: int): DialString;
 extern fn dial_file_write(f: DialFile, data: DialString): int;
 /// 空指针安全。
 extern fn dial_file_close(f: DialFile): void;
+// ---- v1.04 第 2 批 C7：文件 API（命名避开同名重载）----
+extern fn dial_file_eof(f: DialFile): int;
+extern fn dial_file_read_line(f: DialFile): DialString;
+extern fn dial_file_read_all(f: DialFile): DialString;
+extern fn dial_file_exists(path: DialString): int;
+extern fn dial_file_size(path: DialString): int;
+extern fn dial_file_remove(path: DialString): int;
+
+// ---- v1.04 第 2 批 C9：环境只读查询（不提供 setenv：绝不引入可变全局状态）----
+extern fn dial_getenv(name: DialString): DialString;
+extern fn dial_has_env(name: DialString): int;
+extern fn dial_program_name(): DialString;
+extern fn dial_cwd(): DialString;
+
+// ---- v1.04 第 2 批 C10：本地时间 / 日期 / 单调计时 ----
+extern fn dial_local_parts(): DialArray;
+extern fn dial_date_string(): DialString;
+extern fn dial_monotonic_ms(): int;
 
 // ---- 可恢复异常（Error：带引用计数的 ARC 类型）----
 type DialError;

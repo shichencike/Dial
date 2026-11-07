@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 二十组检查，全部通过才算绿（顺序为 A→T，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 二十一组检查，全部通过才算绿（顺序为 A→U，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -35,6 +35,8 @@
 #      完整计时采集由 CI 独立步骤负责，本组只做秒级快速正确性校验。
 #   T. B/C 组缺口第一批：块注释 B9 / ! 逻辑非 B10 / .slice() B11 /
 #      get_or C6 / eprint C8，含宪法否决项（函数重载 B5）的负向锁定（v1.04 增补）。
+#   U. B/C 组缺口第二批：字符串/Unicode C1/C4、数值解析与格式化 C2/C3、
+#      数组 API C5、文件/环境/时间 C7/C9/C10 的标准库全量（v1.04 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -1136,6 +1138,81 @@ if "$DIALC" build "${TDIR}/no_shadow.dial" -o "${TDIR}/no_shadow" >"${TDIR}/no_s
 elif grep -q "保留名" "${TDIR}/no_shadow.log"; then
     tpass "C8：输出族内建进入保留名清单（同名定义编译期拒绝）"
 else tbad "C8：同名定义被拒但诊断未提到保留名"; fi
+
+echo
+echo "== U) B/C 组缺口第二批：标准库 API 全量（C1/C4/C2/C3/C5/C7/C9/C10，v1.04 增补） =="
+upass() { echo "  ✅ $1"; }
+ubad()  { echo "  ❌ $1"; fail=1; }
+
+# 1) 正向：复用 batch2_smoke.dial，断言代表性输出（覆盖 8 组 API 的关键语义）。
+if "$DIALC" build tests/batch2_smoke.dial -o "${TMP}/u_smoke" >"${TMP}/u_smoke.log" 2>&1; then
+    out=$("${TMP}/u_smoke" 2>/dev/null)
+    # 关键断言：UTF-8 码点语义 / 类型安全解析 / 数组 COW 写回 / 文件抛出路径 / 环境快照
+    if printf '%s\n' "$out" | grep -q 'C1 upper = HELLO WORLD' \
+       && printf '%s\n' "$out" | grep -q 'C4 char_count = 3' \
+       && printf '%s\n' "$out" | grep -q 'C4 char_at(1) = 20013' \
+       && printf '%s\n' "$out" | grep -q 'C4 char_slice(1,2) = 中' \
+       && printf '%s\n' "$out" | grep -q 'C2 parse_int = -12345' \
+       && printf '%s\n' "$out" | grep -q 'C2 is_float(nan) = false' \
+       && printf '%s\n' "$out" | grep -q 'C3 fmt2 = 3.14' \
+       && printf '%s\n' "$out" | grep -q 'C5 reduce = 75' \
+       && printf '%s\n' "$out" | grep -q 'C5 join = apple,banana,cherry' \
+       && printf '%s\n' "$out" | grep -q 'C7 exists = true' \
+       && printf '%s\n' "$out" | grep -q 'C9 has_env(PATH) = true' \
+       && printf '%s\n' "$out" | grep -q 'C10 parts len = 8' ; then
+        upass "C1/C4/C2/C3/C5/C7/C9/C10：8 组标准库 API 端到端通过"
+    else ubad "U 组：batch2_smoke 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
+else ubad "U 组：batch2_smoke 编译失败"; tail -8 "${TMP}/u_smoke.log"; fi
+
+# 2) 负向：parse_int 非法输入必须 Fail-Fast（绝不静默返回 0），进程非 0 退出。
+cat > "${TMP}/u_parse_bad.dial" <<'EOF'
+fn main(): int { print(parse_int("abc")); return 0; }
+EOF
+if "$DIALC" build "${TMP}/u_parse_bad.dial" -o "${TMP}/u_parse_bad" >/dev/null 2>&1 \
+   && ! sh -c "${TMP}/u_parse_bad" >/dev/null 2>&1; then
+    upass "C2：parse_int 非法输入 Fail-Fast（进程非 0，无静默 0）"
+else ubad "C2：parse_int 非法输入未 Fail-Fast"; fi
+
+# 3) 负向：char_at 越界必须 Fail-Fast（绝不返回哨兵/截断）。
+cat > "${TMP}/u_charat_bad.dial" <<'EOF'
+fn main(): int { print("abc".char_at(9)); return 0; }
+EOF
+if "$DIALC" build "${TMP}/u_charat_bad.dial" -o "${TMP}/u_charat_bad" >/dev/null 2>&1 \
+   && ! sh -c "${TMP}/u_charat_bad" >/dev/null 2>&1; then
+    upass "C4：char_at 越界 Fail-Fast"
+else ubad "C4：char_at 越界未 Fail-Fast"; fi
+
+# 4) 负向：string[] 不得有 index_of（按位模式比较句柄会错），编译期拒绝。
+cat > "${TMP}/u_idx_bad.dial" <<'EOF'
+fn main(): int { var a: string[] = ["a"]; print(a.index_of("a")); return 0; }
+EOF
+if "$DIALC" build "${TMP}/u_idx_bad.dial" -o "${TMP}/u_idx_bad" >"${TMP}/u_idx_bad.log" 2>&1; then
+    ubad "C5：string[].index_of 竟被接受（位模式歧义）"
+elif grep -q "index_of\|无方法" "${TMP}/u_idx_bad.log"; then
+    upass "C5：string[].index_of 编译期拒绝（位模式歧义）"
+else ubad "C5：string[].index_of 被拒但诊断未提及"; fi
+
+# 5) 负向：format_float 第一个参数必须是 float（零隐式转换铁律），int 被拒。
+cat > "${TMP}/u_fmt_bad.dial" <<'EOF'
+fn main(): int { print(format_float(3, 2)); return 0; }
+EOF
+if "$DIALC" build "${TMP}/u_fmt_bad.dial" -o "${TMP}/u_fmt_bad" >"${TMP}/u_fmt_bad.log" 2>&1; then
+    ubad "C3：format_float(int,..) 竟被接受（违反零隐式转换）"
+elif grep -q "format_float" "${TMP}/u_fmt_bad.log"; then
+    upass "C3：format_float 严格 float 参数（零隐式转换铁律）"
+else ubad "C3：format_float 类型报错但诊断未提及"; fi
+
+# 6) 名称铁律：第 2 批新增内建（read_all/file_read_line/getenv/has_env/...）进入保留名清单，
+#    用户不得定义同名函数（延续第 1 批 Fail-Fast 加固，杜绝内建分支静默绕过）。
+cat > "${TMP}/u_shadow.dial" <<'EOF'
+fn getenv(x: int): int { return x; }
+fn main(): int { return 0; }
+EOF
+if "$DIALC" build "${TMP}/u_shadow.dial" -o "${TMP}/u_shadow" >"${TMP}/u_shadow.log" 2>&1; then
+    ubad "U：第 2 批内建可被同名函数定义静默绕过（违反 Fail-Fast）"
+elif grep -q "保留名" "${TMP}/u_shadow.log"; then
+    upass "U：第 2 批内建进入保留名清单（同名定义编译期拒绝）"
+else ubad "U：同名定义被拒但诊断未提到保留名"; fi
 
 echo
 if [ $fail -eq 0 ]; then

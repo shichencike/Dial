@@ -4,6 +4,8 @@
 #include "dial_rt_trap.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>   /* v1.04 第 2 批：strtoll / strtod（严格数值解析） */
+#include <errno.h>    /* v1.04 第 2 批：ERANGE（溢出） */
 
 /* payload: [ int64 len ][ char data[] ]；data 指针 = s + 8 */
 static char *s_data(void *s) { return (char *)s + 8; }
@@ -273,6 +275,246 @@ DialString dial_char_to_string(int64_t code) {
         fprintf(stderr, "dial: 非法的 char 码点: %lld\n", (long long)code);
         fflush(stdout);
         dial_assert_fail("dial_char_to_string: 非法 Unicode 码点（合法范围 0~0x10FFFF，且不含 UTF-16 代理区 D800~DFFF）");
+    }
+    return dial_string_from_bytes(buf, (int64_t)n);
+}
+
+/* ==========================================================================
+ * v1.04 第 2 批：C1 字符串查询 / 规范化、C4 UTF-8 码点视图、C2/C3 解析格式化
+ *
+ * 宪法要点：
+ *  - to_upper/to_lower 只碰 ASCII，UTF-8 多字节序列逐字节 >= 0x80 不会被改写；
+ *  - 码点解码遇到非法序列（overlong / 代理区 / 截断 / >U+10FFFF）当场 Fail-Fast，
+ *    绝不静默跳过坏字节或产出 U+FFFD（§20：静默乱码比崩溃危险）；
+ *  - length()/get()/substring() 字节语义原样不动，Unicode 全走新增 char_* 方法。
+ * ========================================================================== */
+
+DialString dial_string_to_upper(DialString s) {
+    int64_t len = ((int64_t *)s)[0];
+    void *p = dial_rc_alloc(8 + len + 1);
+    ((int64_t *)p)[0] = len;
+    const unsigned char *src = (const unsigned char *)s_data(s);
+    char *dst = s_data(p);
+    for (int64_t i = 0; i < len; i++) {
+        unsigned char c = src[i];
+        dst[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : (char)c;
+    }
+    dst[len] = '\0';
+    return p;
+}
+
+DialString dial_string_to_lower(DialString s) {
+    int64_t len = ((int64_t *)s)[0];
+    void *p = dial_rc_alloc(8 + len + 1);
+    ((int64_t *)p)[0] = len;
+    const unsigned char *src = (const unsigned char *)s_data(s);
+    char *dst = s_data(p);
+    for (int64_t i = 0; i < len; i++) {
+        unsigned char c = src[i];
+        dst[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
+    }
+    dst[len] = '\0';
+    return p;
+}
+
+int64_t dial_string_contains(DialString s, DialString sub) {
+    return dial_string_index_of(s, sub) >= 0 ? 1 : 0;
+}
+
+int64_t dial_string_starts_with(DialString s, DialString prefix) {
+    int64_t sl = ((int64_t *)s)[0], pl = ((int64_t *)prefix)[0];
+    if (pl > sl) return 0;
+    return memcmp(s_data(s), s_data(prefix), (size_t)pl) == 0 ? 1 : 0;
+}
+
+int64_t dial_string_ends_with(DialString s, DialString suffix) {
+    int64_t sl = ((int64_t *)s)[0], ul = ((int64_t *)suffix)[0];
+    if (ul > sl) return 0;
+    return memcmp(s_data(s) + (sl - ul), s_data(suffix), (size_t)ul) == 0 ? 1 : 0;
+}
+
+/*
+ * 严格 UTF-8 解码：从 d[off] 解出一个码点写入 *cp，返回消耗字节数（1~4）。
+ * 返回 0 表示已到串尾；返回 -1 表示**非法序列**（调用方必须 Fail-Fast）。
+ *
+ * 与 dial_encode_utf8 对称：那里是「码点 -> 字节」的唯一实现，这里是「字节 -> 码点」
+ * 的唯一实现。四处 char_* 方法共用它，避免各自写一遍解码规则后悄悄失配。
+ * 拒绝：0x80~0xC1 作首字节、0xF5~0xFF、overlong、UTF-16 代理区、>U+10FFFF、
+ *       续字节不是 10xxxxxx、序列被长度截断。
+ */
+static int dial_utf8_decode(const unsigned char *d, int64_t len, int64_t off, int64_t *cp) {
+    if (off >= len) return 0;
+    unsigned char b0 = d[off];
+    if (b0 < 0x80) { *cp = b0; return 1; }
+    int n;
+    int64_t v, min_cp;
+    if (b0 >= 0xC2 && b0 <= 0xDF)      { n = 2; v = b0 & 0x1F; min_cp = 0x80; }
+    else if (b0 >= 0xE0 && b0 <= 0xEF) { n = 3; v = b0 & 0x0F; min_cp = 0x800; }
+    else if (b0 >= 0xF0 && b0 <= 0xF4) { n = 4; v = b0 & 0x07; min_cp = 0x10000; }
+    else return -1;
+    if (off + n > len) return -1;                 /* 截断 */
+    for (int k = 1; k < n; k++) {
+        unsigned char bk = d[off + k];
+        if ((bk & 0xC0) != 0x80) return -1;      /* 非法续字节 */
+        v = (v << 6) | (bk & 0x3F);
+    }
+    if (v < min_cp) return -1;                    /* overlong */
+    if (v > 0x10FFFF) return -1;                  /* 超出 Unicode */
+    if (v >= 0xD800 && v <= 0xDFFF) return -1;    /* UTF-16 代理区 */
+    *cp = v;
+    return n;
+}
+
+int64_t dial_string_char_count(DialString s) {
+    int64_t slen = ((int64_t *)s)[0];
+    const unsigned char *d = (const unsigned char *)s_data(s);
+    int64_t off = 0, cnt = 0;
+    while (off < slen) {
+        int64_t cp;
+        int n = dial_utf8_decode(d, slen, off, &cp);
+        if (n < 0) dial_assert_fail("char_count: 字符串含非法 UTF-8 序列（Fail-Fast，绝不静默跳过坏字节）");
+        off += n; cnt++;
+    }
+    return cnt;
+}
+
+DialArray dial_string_chars(DialString s) {
+    int64_t slen = ((int64_t *)s)[0];
+    const unsigned char *d = (const unsigned char *)s_data(s);
+    DialArray arr = dial_array_new(0 /* INT：码点是标量整数 */);
+    int64_t off = 0;
+    while (off < slen) {
+        int64_t cp;
+        int n = dial_utf8_decode(d, slen, off, &cp);
+        if (n < 0) dial_assert_fail("chars: 字符串含非法 UTF-8 序列（Fail-Fast，绝不静默跳过坏字节）");
+        arr = dial_array_push(arr, cp);
+        off += n;
+    }
+    return arr;
+}
+
+int64_t dial_string_char_at(DialString s, int64_t idx) {
+    int64_t slen = ((int64_t *)s)[0];
+    const unsigned char *d = (const unsigned char *)s_data(s);
+    int64_t off = 0, cur = 0;
+    while (off < slen) {
+        int64_t cp;
+        int n = dial_utf8_decode(d, slen, off, &cp);
+        if (n < 0) dial_assert_fail("char_at: 字符串含非法 UTF-8 序列（Fail-Fast，绝不静默跳过坏字节）");
+        if (cur == idx) return cp;
+        off += n; cur++;
+    }
+    dial_bounds_fail(idx, cur);   /* 越界：当场终止，绝不返回 0 伪装成 U+0000 */
+    return 0;
+}
+
+DialString dial_string_char_slice(DialString s, int64_t from, int64_t to) {
+    int64_t slen = ((int64_t *)s)[0];
+    const unsigned char *d = (const unsigned char *)s_data(s);
+    if (from < 0 || to < from) {
+        dial_assert_fail("char_slice: 半开区间非法（from < 0 或 to < from）");
+    }
+    /* 一次扫描同时定位 from / to 对应的字节偏移；边界等于码点总数时落在 slen。 */
+    int64_t off = 0, idx = 0, byte_from = -1, byte_to = -1;
+    while (off < slen) {
+        if (idx == from) byte_from = off;
+        if (idx == to) byte_to = off;
+        int64_t cp;
+        int n = dial_utf8_decode(d, slen, off, &cp);
+        if (n < 0) dial_assert_fail("char_slice: 字符串含非法 UTF-8 序列（Fail-Fast，绝不静默跳过坏字节）");
+        off += n; idx++;
+    }
+    if (from == idx) byte_from = slen;
+    if (to == idx) byte_to = slen;
+    if (byte_from < 0 || byte_to < 0) dial_bounds_fail(byte_from < 0 ? from : to, idx);
+    return dial_string_substring(s, byte_from, byte_to);
+}
+
+/*
+ * 严格十进制整数语法：[+-]?[0-9]+，无空白、无尾随字符。
+ * parse_int 与 is_int 共用这一份判定——「探测」和「解析」若各写一套规则，
+ * 迟早会出现 is_int 放行而 parse_int 崩溃的漂移（§21：唯一真相优于两份近似）。
+ * data 区以 '\0' 结尾，strtoll 可安全承接溢出检查（ERANGE）。
+ */
+static int dial_try_parse_int(const char *d, int64_t len, int64_t *out) {
+    if (len <= 0) return 0;
+    int64_t i = (d[0] == '+' || d[0] == '-') ? 1 : 0;
+    if (i >= len) return 0;
+    for (int64_t k = i; k < len; k++) {
+        if (d[k] < '0' || d[k] > '9') return 0;
+    }
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(d, &end, 10);
+    if (errno == ERANGE || end != d + len) return 0;
+    *out = (int64_t)v;
+    return 1;
+}
+
+/* 严格浮点语法：[+-]?(dig+ | dig* '.' dig*)([eE][+-]?dig+)?，至少一位数字。
+ * 显式拒绝 nan / inf / 0x 十六进制 / 前后空白——strtod 会悄悄接受它们，
+ * 那是「解析成功却拿到特殊值」的静默损坏。 */
+static int dial_try_parse_float(const char *d, int64_t len, double *out) {
+    if (len <= 0) return 0;
+    int64_t i = (d[0] == '+' || d[0] == '-') ? 1 : 0;
+    int64_t digits = 0;
+    while (i < len && d[i] >= '0' && d[i] <= '9') { i++; digits++; }
+    if (i < len && d[i] == '.') {
+        i++;
+        while (i < len && d[i] >= '0' && d[i] <= '9') { i++; digits++; }
+    }
+    if (digits == 0) return 0;
+    if (i < len && (d[i] == 'e' || d[i] == 'E')) {
+        i++;
+        if (i < len && (d[i] == '+' || d[i] == '-')) i++;
+        int64_t ed = 0;
+        while (i < len && d[i] >= '0' && d[i] <= '9') { i++; ed++; }
+        if (ed == 0) return 0;
+    }
+    if (i != len) return 0;
+    errno = 0;
+    char *end = NULL;
+    double v = strtod(d, &end);
+    /* ERANGE 上溢到 inf 属静默损坏，下溢到 0.0 也一并拒绝（更简单、更严格）。 */
+    if (errno == ERANGE || end != d + len) return 0;
+    *out = v;
+    return 1;
+}
+
+int64_t dial_parse_int(DialString s) {
+    int64_t out = 0;
+    if (!dial_try_parse_int(s_data(s), ((int64_t *)s)[0], &out)) {
+        dial_assert_fail("parse_int: 非法整数字符串（要求 [+-]?[0-9]+ 全串、无空白、无溢出）；请先用 is_int(s) 探测");
+    }
+    return out;
+}
+
+double dial_parse_float(DialString s) {
+    double out = 0.0;
+    if (!dial_try_parse_float(s_data(s), ((int64_t *)s)[0], &out)) {
+        dial_assert_fail("parse_float: 非法浮点字符串（要求十进制全串、无空白、无 nan/inf、无溢出）；请先用 is_float(s) 探测");
+    }
+    return out;
+}
+
+int64_t dial_is_int(DialString s) {
+    int64_t out = 0;
+    return dial_try_parse_int(s_data(s), ((int64_t *)s)[0], &out) ? 1 : 0;
+}
+
+int64_t dial_is_float(DialString s) {
+    double out = 0.0;
+    return dial_try_parse_float(s_data(s), ((int64_t *)s)[0], &out) ? 1 : 0;
+}
+
+DialString dial_format_float(double v, int64_t digits) {
+    if (digits < 0 || digits > 9) {
+        dial_assert_fail("format_float: 小数位数必须是 0~9 的 int（拒绝 printf 式任意格式串）");
+    }
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf), "%.*f", (int)digits, v);
+    if (n < 0 || (int64_t)n >= (int64_t)sizeof(buf)) {
+        dial_assert_fail("format_float: 格式化结果超出缓冲区");
     }
     return dial_string_from_bytes(buf, (int64_t)n);
 }

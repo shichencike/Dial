@@ -91,4 +91,20 @@ void dial_eprint_raw_int(int64_t v);
 void dial_eprint_raw_float(double v);
 void dial_eprint_raw_bool(int64_t b);
 
+/* ---- v1.04 第 2 批 C7：文件 API 补齐 ----
+ * 命名裁决（宪法 §37.2「明确否决：函数名重载」）：既有 Dial 内建 read_line() 是
+ * **零参、读 stdin** 的版本。清单想要的「按行读文件」绝不能也叫 read_line(f)
+ * ——同名不同签名就是重载，会让 C++ 式名字改编把 ABI 拖进隐式漂移。
+ * 因此文件版一律加 file_ 前缀：file_read_line / file_exists / file_size /
+ * file_remove；read_all / eof 则不与任何既有内建撞名。
+ *
+ * 全部走 C 标准库（fopen/fread/fseek/remove），不引入目录遍历 / mkdir 这类
+ * 平台差异大的能力——它们经 v1.04 FFI 自接 C 库更合适（§21.2 不引入无用依赖）。 */
+int64_t   dial_file_eof(DialFile f);               /* feof：到文件尾返回 1 */
+DialString dial_file_read_line(DialFile f);        /* 读一行去掉 '\n'，EOF 返回空串 */
+DialString dial_file_read_all(DialFile f);         /* 一次读完整个文件，不猜上界 */
+int64_t   dial_file_exists(DialString path);      /* 可打开读返回 1，否则 0 */
+int64_t   dial_file_size(DialString path);        /* 字节数；打不开返回 -1 */
+int64_t   dial_file_remove(DialString path);      /* 删除成功返回 1，否则 0 */
+
 #endif /* DIAL_IO_H */

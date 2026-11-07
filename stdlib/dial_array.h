@@ -58,6 +58,26 @@ DialArray dial_array_hof(DialArray a, int64_t op, int64_t out_kind,
                          void *fn_raw, void *state,
                          int64_t (*thunk)(int64_t, int64_t, void *, void *));
 
+/* ---- v1.04 第 2 批 C5：数组 API 扩充 ----
+ * insert / reverse / clear / sort_string 都**消耗调用者交来的那一份引用**，返回
+ * （可能因 COW 而更新的）数组指针，调用方（codegen）必须写回接收变量——与
+ * push / set / remove / sort 完全同款契约。 */
+DialArray dial_array_insert(DialArray a, int64_t i, int64_t v);
+DialArray dial_array_reverse(DialArray a);
+DialArray dial_array_clear(DialArray a);
+/* 只对**标量**元素开放：直接比较 8 字节槽位（float 是 IEEE754 位模式，同 eq）。
+ * string 等句柄元素的「按内容查找」由语义层拒绝，避免指针位模式比较这个静默坑。 */
+int64_t  dial_array_index_of(DialArray a, int64_t v);
+/* string[] 专用：按 UTF-8 字节字典序拼接 / 排序。二者都不改接收者之外的内容。
+ * 这里用 void * 而非 DialString：dial_string.h 已 #include 本文件，反向引用会成环；
+ * DialString 本就是 void *，签名 ABI 完全一致。 */
+void *   dial_array_join(DialArray a, void *sep);
+DialArray dial_array_sort_string(DialArray a);
+/* reduce：回调签名 fn(acc: T, x: T, state: rawptr<void>): T，复用 v1.03 的 thunk。
+ * 无闭包、无隐藏环境对象；状态由调用方显式经 rawptr<void> 透传。 */
+int64_t  dial_array_reduce(DialArray a, int64_t init, void *fn_raw, void *state,
+                           int64_t (*thunk)(int64_t, int64_t, void *, void *));
+
 DialArray dial_array_clone(DialArray a);
 void dial_array_retain(DialArray a);
 void dial_array_release(DialArray a);

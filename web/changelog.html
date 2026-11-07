@@ -351,6 +351,35 @@
     类型严格校验、函数重载（B5 永久否决）与输出族保留名负向锁定；A–S 扩为 A–T。</li>
 <li><strong>架构记录</strong>：<code>ARCHITECTURE.md</code> 追加 §14（宪法裁决与 B/C 组补齐的分层约束、
     ABI 递增判据、3 批落地纪律），明确「规范先于实现，但绝不把未实现项标成已支持」。</li>
+<li><strong>真实程序缺口补齐（B/C 组，第二批）</strong>：按 §37.5「C11 走独立包」的裁决，本批
+  只做<strong>标准库内建</strong>（不进 <code>stdlib.dialpkg</code>），全部落在 <code>stdlib/*.c</code> +
+  <code>src/semantic.rs</code> + <code>src/codegen.rs</code> + <code>stdlib/stdlib.diali</code> 四层。</li>
+<li><strong>C1 字符串大小写 / 子串</strong>：<code>to_upper</code> / <code>to_lower</code> / <code>contains</code> / <code>starts_with</code> /
+    <code>ends_with</code>（<code>dial_string_*</code>）逐类型安全、UTF-8 字节级。</li>
+<li><strong>C4 Unicode 码点</strong>：<code>char_count</code> / <code>chars()</code> / <code>char_at(i)</code> / <code>char_slice(from,to)</code>
+    按 <strong>UTF-8 码点</strong>而非字节；<code>length()</code> 保持字节语义不动，避免破坏既有 416 项回归。</li>
+<li><strong>C2 数值严格解析</strong>：<code>parse_int</code> / <code>parse_float</code> 非法输入 <strong>Fail-Fast</strong>（绝不静默
+    返回 0），<code>dial_parse_int</code> / <code>dial_parse_float</code> 在 C 侧 <code>dial_assert_fail</code> 抛 Error；
+    <code>is_int</code> / <code>is_float</code> 提供显式探测。</li>
+<li><strong>C3 类型安全格式化</strong>：<code>format_float(v: float, digits: int)</code> 拒绝 printf 式运行期
+    格式串（§5.3 零隐式转换），<code>int</code> 参数编译期被拒；对应 <code>dial_array_new(1)</code> + <code>snprintf</code>。</li>
+<li><strong>C5 数组 API 扩充</strong>：<code>insert</code> / <code>index_of</code>（标量元素；<code>string[]</code> 因位模式歧义被拒）/
+    <code>reverse</code> / <code>reduce</code>（复用 v1.03 函数指针 + <code>rawptr&lt;void&gt;</code> thunk，无闭包）/
+    <code>join</code> / <code>sort</code> 放宽到 <code>string[]</code>（字典序）/ <code>clear</code>，新增 <code>dial_array_*</code> C 导出。</li>
+<li><strong>C7 文件 IO</strong>：<code>file_exists</code> / <code>file_size</code>（打不开 <code>-1</code>）/ <code>file_remove</code> /
+    <code>file_read_all</code>（FNF→抛 Error）/ <code>file_read_line(f)</code>（逐行）/ <code>eof(f)</code>；
+    刻意用 <code>file_read_line</code> 而非 <code>read_line(f)</code>，避免与 stdin 版 <code>read_line()</code> 撞名
+    （B5 否决重载），所有文件操作为不透明句柄、显式 <code>close</code>、不进 ARC。</li>
+<li><strong>C9 环境</strong>：<code>has_env</code> / <code>getenv</code>（缺失返回空串）/ <code>program_name</code>（argv[0] 只读
+    快照，非 <code>var</code> 全局）/ <code>cwd</code>，无 <code>setenv</code>（进程级可变全局状态，否决）。</li>
+<li><strong>C10 时间</strong>：<code>local_parts()</code>（int[8]，自取分量）/ <code>date_string()</code>（固定
+    <code>YYYY-MM-DD HH:MM:SS</code>）/ <code>monotonic_ms()</code>，拒绝 printf 式格式串，组件由调用方
+    显式拼（§5.3）；新增 <code>dial_local_parts</code> / <code>dial_date_string</code> / <code>dial_monotonic_ms</code>。</li>
+<li><strong>Fail-Fast 加固</strong>：第 2 批 18 个内建名补进 <code>RESERVED_NAMES</code>（延续第 1 批 <code>eprint</code>
+    族加固），同名定义编译期拒绝，杜绝内建分支静默绕过（§20）。</li>
+<li><strong>U 组回归</strong>：8 组 API 端到端输出断言、C2 解析失败 Fail-Fast、C4 <code>char_at</code> 越界
+    Fail-Fast、<code>string[].index_of</code> 编译期拒绝、C3 <code>format_float(int,..)</code> 零隐式转换拒绝、
+    第 2 批内建同名定义被拒；A–T 扩为 A–U。</li>
 <li><strong>宪法裁决入文档（§37）</strong>：<code>STDLIB_ABI 5 → 6</code>（<code>make_stdlib_pkg.py</code> 默认、
   CI 两处、<code>dialc new</code> 骨架同步，后者改为引用 <code>package::STDLIB_ABI</code> 消除硬编码）；
   术语统一为「绝不引入可变全局状态」；「函数名重载」「闭包」写入<strong>永久否决</strong>；

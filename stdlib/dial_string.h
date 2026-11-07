@@ -72,4 +72,38 @@ DialString dial_char_to_string(int64_t code);
  */
 int dial_encode_utf8(int64_t code, char *buf);
 
+/* ---- v1.04 第 2 批 C1：字符串查询 / ASCII 规范化（方法）----
+ * to_upper / to_lower 只变换 ASCII 的 A-Z / a-z：UTF-8 多字节序列的每个字节
+ * 都 >= 0x80，不会被触碰，因此中文 / emoji 原样保留（不是「不支持」，是「不破坏」）。
+ * 三个查询返回 1/0（Dial 的 bool），按**字节**比较，与 index_of 语义一致。 */
+DialString dial_string_to_upper(DialString s);
+DialString dial_string_to_lower(DialString s);
+int64_t    dial_string_contains(DialString s, DialString sub);
+int64_t    dial_string_starts_with(DialString s, DialString prefix);
+int64_t    dial_string_ends_with(DialString s, DialString suffix);
+
+/* ---- v1.04 第 2 批 C4：UTF-8 码点视图（方法）----
+ * 关键裁决：length() / get(i) / substring(from,to) **保持字节语义不变**——
+ * 它们被 416 项既有回归与所有索引/切片程序依赖，改成码点语义是静默破坏。
+ * Unicode 能力一律走新增方法，索引单位明确写进方法名（char_*）。
+ * 非法 UTF-8 序列（overlong / 代理区 / 截断 / >U+10FFFF）一律 Fail-Fast，
+ * 绝不静默产出 U+FFFD 或跳字节（§20：静默乱码比当场崩溃危险）。 */
+int64_t    dial_string_char_count(DialString s);          /* 码点个数 */
+DialArray  dial_string_chars(DialString s);               /* int[]，每个码点一个 int */
+int64_t    dial_string_char_at(DialString s, int64_t i);  /* 第 i 个码点（码点索引） */
+DialString dial_string_char_slice(DialString s, int64_t from, int64_t to); /* 码点半开区间 */
+
+/* ---- v1.04 第 2 批 C2/C3：严格数值解析与定点格式化（内建）----
+ * Dial 没有 Option / Result（B3 属第 3 批），返回值只能是 int / float，
+ * 任何「失败哨兵值」都会与合法值混淆——正是宪法禁止的静默损坏。
+ * 因此 parse_* 对非法输入**当场 Fail-Fast**；is_* 提供显式、无副作用的事前探测，
+ * 让调用方自己决定「不合法时怎么办」（零隐式转换 + 显式优于隐式）。 */
+int64_t    dial_parse_int(DialString s);
+double     dial_parse_float(DialString s);
+int64_t    dial_is_int(DialString s);
+int64_t    dial_is_float(DialString s);
+/* 类型安全的定点格式化：digits 显式 int，编译期类型确定，不做 printf 式变参。
+ * 拒绝运行期格式串（零隐式转换 + 静态强类型 + C 变参无类型检查三重理由）。 */
+DialString dial_format_float(double v, int64_t digits);
+
 #endif /* DIAL_STRING_H */

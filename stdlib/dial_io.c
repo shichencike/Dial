@@ -206,3 +206,88 @@ void dial_eprint_write_char(int64_t code) {
 void dial_eprint_raw_int(int64_t v)   { fprintf(stderr, "%lld", (long long)v); }
 void dial_eprint_raw_float(double v)  { fprintf(stderr, "%lf", v); }
 void dial_eprint_raw_bool(int64_t b)  { fprintf(stderr, "%s", b ? "true" : "false"); }
+
+/* ==========================================================================
+ * v1.04 第 2 批 C7：文件 API 补齐
+ *
+ * 全部走 C 标准库，零新依赖。read_all 用「分块 fread + 动态增长」读到 EOF，
+ * 不再要求调用方猜一个上界（清单里 read(f, 1048576) 那种写法）。
+ * 失败（句柄无效 / 分配失败）返回 NULL，由 codegen 转成 throw Error，
+ * 与既有 open/read/write 的「业务失败抛 Error、系统损坏才 ud2」分层一致。
+ * ========================================================================== */
+
+int64_t dial_file_eof(DialFile f) {
+    if (!f) return 1;                  /* 空句柄视作已在文件尾，不静默读脏数据 */
+    return feof((FILE *)f) ? 1 : 0;
+}
+
+DialString dial_file_read_line(DialFile f) {
+    if (!f) return NULL;
+    /* 逐字符累加（fgets 需要固定的缓冲区上界，getc 更贴合「不猜长度」的底线）。 */
+    int64_t cap = 128, len = 0;
+    char *buf = (char *)malloc((size_t)cap);
+    if (!buf) return NULL;
+    int c;
+    while ((c = fgetc((FILE *)f)) != EOF) {
+        if (c == '\n') break;
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char *nb = (char *)realloc(buf, (size_t)cap);
+            if (!nb) { free(buf); return NULL; }
+            buf = nb;
+        }
+        buf[len++] = (char)c;
+    }
+    if (c == EOF && len == 0 && ferror((FILE *)f)) { free(buf); return NULL; }
+    buf[len] = '\0';
+    DialString out = dial_string_from_bytes(buf, len);
+    free(buf);
+    return out;
+}
+
+DialString dial_file_read_all(DialFile f) {
+    if (!f) return NULL;
+    int64_t cap = 4096, len = 0;
+    char *buf = (char *)malloc((size_t)cap);
+    if (!buf) return NULL;
+    for (;;) {
+        if (len == cap) {
+            cap *= 2;
+            char *nb = (char *)realloc(buf, (size_t)cap);
+            if (!nb) { free(buf); return NULL; }
+            buf = nb;
+        }
+        size_t got = fread(buf + len, 1, (size_t)(cap - len), (FILE *)f);
+        len += (int64_t)got;
+        if (got == 0) {
+            if (ferror((FILE *)f)) { free(buf); return NULL; }
+            break;                 /* EOF */
+        }
+    }
+    DialString out = dial_string_from_bytes(buf, len);
+    free(buf);
+    return out;
+}
+
+int64_t dial_file_exists(DialString path) {
+    if (!path) return 0;
+    FILE *fp = fopen(dial_string_cstr(path), "rb");
+    if (!fp) return 0;
+    fclose(fp);
+    return 1;
+}
+
+int64_t dial_file_size(DialString path) {
+    if (!path) return -1;
+    FILE *fp = fopen(dial_string_cstr(path), "rb");
+    if (!fp) return -1;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return -1; }
+    long n = ftell(fp);
+    fclose(fp);
+    return n < 0 ? -1 : (int64_t)n;
+}
+
+int64_t dial_file_remove(DialString path) {
+    if (!path) return 0;
+    return remove(dial_string_cstr(path)) == 0 ? 1 : 0;
+}

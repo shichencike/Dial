@@ -5078,7 +5078,34 @@ C8 配套的 Fail-Fast 加固：输出族内建（`print` / `print_raw` / `write
 T 组回归锁定：stdout/stderr 严格分流、块注释未闭合 Fail-Fast、
 `get_or` 类型严格校验、函数重载（B5）仍被拒绝、输出族内建同名定义被拒。
 
+### 37.8 第二批已落地（C 组标准库 API 全量）
+
+按 §37.5「C11 走独立包」的裁决，本批只做**标准库内建**——语言层 FFI（§33）已能接 C 库，
+正则 / JSON / 摘要 / Base64 / HTTP 留给 C11 独立包，不进 `stdlib.dialpkg`。
+全部落在 `stdlib/*.c`（C Runtime）+ `src/semantic.rs`（方法 / 内建签名）
++ `src/codegen.rs`（`declare_stdlib` / `call_c` 分派）+ `stdlib/stdlib.diali`（自描述）四层。
+
+| 编号 | 能力 | 实现要点 |
+| --- | --- | --- |
+| C1 | 字符串大小写 / 子串 | `to_upper` / `to_lower` / `contains` / `starts_with` / `ends_with`（逐类型安全，UTF-8 字节级） |
+| C4 | Unicode 码点 | `char_count` / `chars()` / `char_at(i)` / `char_slice(from,to)` —— **按 UTF-8 码点**，不是字节；`length()` 保持字节语义不动，避免破坏既有 416 项回归 |
+| C2 | 数值严格解析 | `parse_int` / `parse_float` 非法输入 **Fail-Fast**（绝不静默返回 0）；`is_int` / `is_float` 显式探测 |
+| C3 | 类型安全格式化 | `format_float(v: float, digits: int)` —— 拒绝 printf 式运行期格式串（§5.3 零隐式转换），`int` 参数编译期被拒 |
+| C5 | 数组 API 扩充 | `insert` / `index_of`（标量元素；`string[]` 因位模式歧义被拒）/ `reverse` / `reduce`（复用 v1.03 函数指针 + `rawptr<void>`，无闭包）/ `join` / `sort` 放宽到 `string[]` 字典序 / `clear` |
+| C7 | 文件 IO | `file_exists` / `file_size`（打不开 `-1`）/ `file_remove` / `file_read_all`（FNF→抛 Error）/ `file_read_line(f)`（逐行）/ `eof(f)`；刻意用 `file_read_line` 而非 `read_line(f)`，避免与 stdin 版 `read_line()` 撞名（B5 否决重载） |
+| C9 | 环境 | `has_env` / `getenv`（缺失返回空串）/ `program_name`（argv[0] 只读快照，非 `var` 全局）/ `cwd` |
+| C10 | 时间 | `local_parts()`（int[8]，自取分量）/ `date_string()`（固定 `YYYY-MM-DD HH:MM:SS`）/ `monotonic_ms()` —— 拒绝 printf 式格式串，组件由调用方显式拼（§5.3） |
+
+C2/C7 配套 Fail-Fast 加固：第 2 批 18 个内建名（`parse_int` / `parse_float` / `is_int` /
+`is_float` / `format_float` / `read_all` / `eof` / `file_read_line` / `file_exists` /
+`file_size` / `file_remove` / `getenv` / `has_env` / `program_name` / `cwd` /
+`local_parts` / `date_string` / `monotonic_ms`）全部补进 `RESERVED_NAMES`，
+同名定义编译期拒绝（延续第 1 批 `eprint` 族加固，杜绝内建分支静默绕过 §20）。
+
+U 组回归锁定：8 组 API 端到端输出断言、C2 解析失败 Fail-Fast、C4 `char_at` 越界 Fail-Fast、
+`string[].index_of` 编译期拒绝、C3 `format_float(int,..)` 零隐式转换拒绝、第 2 批内建同名定义被拒。
+
 > **本轮交付范围**：并入 `[v1.04]`；编译器版本 `1.4.0` 不变，`STDLIB_ABI 5 → 6`；
 > 只做**本地提交**，不推送 GitHub、不打 tag、不发 Release。
-> B1/B2/B3/B6/B7/B8 与 C1–C5/C7/C9/C10/C11 按 §37.3–37.5 的裁决在后续批次落地，
+> B1/B2/B3/B6/B7/B8 与 C11 按 §37.3–37.5 的裁决在后续批次落地，
 > 届时同步更新本章「已落地」表——**规范先于实现写清，但绝不把未实现项标成已支持**。

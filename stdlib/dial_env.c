@@ -5,15 +5,19 @@
 #include "dial_rt_trap.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>    /* v1.04 第 2 批：snprintf（date_string） */
 #include <time.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <direct.h>   /* v1.04 第 2 批：_getcwd（MinGW 下声明在此） */
 #else
 #include <unistd.h>
 #endif
 
-/* 捕获的命令行参数（argv[1..]），建好后是只读的全局常量。 */
+/* 捕获的命令行参数（argv[1..]），建好后是只读的全局常量。
+ * v1.04 C9：argv[0] 同样在 init 时复制成只读快照，供 program_name() 取用。 */
 static void *g_args = NULL;   /* DialArray，kind=1 (RC) */
+static void *g_prog = NULL;   /* DialString，argv[0] 的只读副本 */
 
 /*
  * 跨平台 PRNG：xorshift64*，纯 64 位整数运算。
@@ -51,6 +55,8 @@ void dial_env_init(int64_t argc, char **argv) {
         dial_rc_release(s);    /* push 已 retain，本地引用可释放 */
     }
     g_args = arr;
+    /* argv[0]：程序名/路径，同样是只读快照（不是可变全局状态）。 */
+    g_prog = dial_string_new(argc > 0 && argv[0] ? argv[0] : "");
 }
 
 void *dial_args(void) {
@@ -89,5 +95,91 @@ void dial_sleep(int64_t ms) {
     req.tv_sec = (time_t)(ms / 1000);
     req.tv_nsec = (long)((ms % 1000) * 1000000);
     nanosleep(&req, NULL);
+#endif
+}
+
+/* ==========================================================================
+ * v1.04 第 2 批 C9：进程环境只读查询
+ *
+ * 宪法 §1「绝不引入可变全局状态」：本组全是**读**，不写任何进程状态，
+ * 也不提供 setenv。g_prog / g_args 是 init 时的一次性只读快照。
+ * getenv 不存在时返回空串，用 has_env 显式区分「不存在」与「存在但为空」。
+ * ========================================================================== */
+
+void *dial_getenv(void *name) {
+    if (!name) return dial_string_new("");
+    const char *v = getenv(dial_string_cstr(name));
+    return dial_string_new(v ? v : "");
+}
+
+int64_t dial_has_env(void *name) {
+    if (!name) return 0;
+    return getenv(dial_string_cstr(name)) != NULL ? 1 : 0;
+}
+
+void *dial_program_name(void) {
+    if (!g_prog) return dial_string_new("");
+    dial_rc_retain(g_prog);       /* 交出一份新拥有的引用给调用方 */
+    return g_prog;
+}
+
+void *dial_cwd(void) {
+#ifdef _WIN32
+    char buf[4096];
+    if (!_getcwd(buf, (int)sizeof(buf))) return dial_string_new("");
+#else
+    char buf[4096];
+    if (!getcwd(buf, sizeof(buf))) return dial_string_new("");
+#endif
+    return dial_string_new(buf);
+}
+
+/* ==========================================================================
+ * v1.04 第 2 批 C10：本地时间 / 日期 / 单调计时
+ * ========================================================================== */
+
+/* 把当前本地时间拆成 struct tm；跨平台避开 localtime 的静态缓冲（线程不安全）。 */
+static int dial_local_tm(struct tm *out) {
+    time_t t = time(NULL);
+    if (t == (time_t)-1) return 0;
+#ifdef _WIN32
+    return localtime_s(out, &t) == 0;
+#else
+    return localtime_r(&t, out) != NULL;
+#endif
+}
+
+void *dial_local_parts(void) {
+    struct tm tm;
+    if (!dial_local_tm(&tm)) dial_assert_fail("local_parts: 无法取得本地时间");
+    DialArray a = dial_array_new(0 /* INT */);
+    int64_t parts[8] = {
+        (int64_t)tm.tm_year + 1900, (int64_t)tm.tm_mon + 1, (int64_t)tm.tm_mday,
+        (int64_t)tm.tm_hour, (int64_t)tm.tm_min, (int64_t)tm.tm_sec,
+        (int64_t)tm.tm_wday, (int64_t)tm.tm_yday,
+    };
+    for (int i = 0; i < 8; i++) a = dial_array_push(a, parts[i]);
+    return a;
+}
+
+void *dial_date_string(void) {
+    struct tm tm;
+    if (!dial_local_tm(&tm)) dial_assert_fail("date_string: 无法取得本地时间");
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+                     tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                     tm.tm_hour, tm.tm_min, tm.tm_sec);
+    if (n < 0) n = 0;
+    return dial_string_from_bytes(buf, (int64_t)n);
+}
+
+int64_t dial_monotonic_ms(void) {
+#ifdef _WIN32
+    /* GetTickCount64：系统启动以来的毫秒，单调、不受系统时间调整影响。 */
+    return (int64_t)GetTickCount64();
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;
 #endif
 }

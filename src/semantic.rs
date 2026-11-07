@@ -1518,6 +1518,95 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::Void);
                 }
+                // ---- v1.04 第 2 批 C2：严格数值解析 / 显式探测 ----
+                // 无 Option/Result，非法输入由 C 侧 Fail-Fast；is_* 是显式、无副作用的探测。
+                "parse_int" | "is_int" | "parse_float" | "is_float" => {
+                    if args.len() != 1 || type_of(&args[0], scopes, funcs, structs)? != Type::String {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 1 个 string 参数", name),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(match name.as_str() {
+                        "parse_int" => Type::Int,
+                        "parse_float" => Type::Float,
+                        _ => Type::Bool,   // is_int / is_float
+                    });
+                }
+                // ---- v1.04 第 2 批 C3：类型安全的定点格式化 ----
+                // 刻意不提供 printf 式变参/运行期格式串（静态强类型 + 零隐式转换）。
+                "format_float" => {
+                    if args.len() != 2
+                        || type_of(&args[0], scopes, funcs, structs)? != Type::Float
+                        || type_of(&args[1], scopes, funcs, structs)? != Type::Int
+                    {
+                        return Err(DialcError::new(
+                            "语义错误：format_float(v, digits) 需要 1 个 float 与 1 个 int（小数位数 0~9）",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::String);
+                }
+                // ---- v1.04 第 2 批 C7：文件 API（命名避开同名重载）----
+                "read_all" | "eof" | "file_read_line" => {
+                    if args.len() != 1 || type_of(&args[0], scopes, funcs, structs)? != Type::File {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 1 个 file 参数", name),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(if name == "eof" { Type::Bool } else { Type::String });
+                }
+                "file_exists" | "file_size" | "file_remove" => {
+                    if args.len() != 1 || type_of(&args[0], scopes, funcs, structs)? != Type::String {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 1 个 string 路径参数", name),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(match name.as_str() {
+                        "file_exists" | "file_remove" => Type::Bool,
+                        _ => Type::Int,   // file_size（打不开返回 -1）
+                    });
+                }
+                // ---- v1.04 第 2 批 C9：环境只读查询（无 setenv）----
+                "getenv" | "has_env" => {
+                    if args.len() != 1 || type_of(&args[0], scopes, funcs, structs)? != Type::String {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 1 个 string 变量名参数", name),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(if name == "has_env" { Type::Bool } else { Type::String });
+                }
+                "program_name" | "cwd" | "date_string" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new(
+                            format!("语义错误：{}() 不接受参数", name),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::String);
+                }
+                // ---- v1.04 第 2 批 C10：本地时间 / 单调计时 ----
+                "local_parts" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new(
+                            "语义错误：local_parts() 不接受参数（返回 8 个分量的 int[]）",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Array(Box::new(Type::Int)));
+                }
+                "monotonic_ms" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new(
+                            "语义错误：monotonic_ms() 不接受参数（返回单调毫秒 int）",
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Int);
+                }
                 "min" | "max" => {
                     if args.len() != 2 {
                         return Err(DialcError::new(
@@ -2001,6 +2090,64 @@ fn string_method_type<V>(
             }
             Ok(Type::Array(Box::new(Type::String)))
         }
+        // ---- v1.04 第 2 批 C1：字符串查询 / 规范化 ----
+        // to_upper/to_lower 只变换 ASCII，UTF-8 多字节序列原样保留（见 dial_string.c）。
+        "to_upper" | "to_lower" => {
+            if !args.is_empty() {
+                return Err(DialcError::new(
+                    format!("语义错误：string.{}() 不接受参数", method),
+                    0, 0,
+                ));
+            }
+            Ok(Type::String)
+        }
+        "contains" | "starts_with" | "ends_with" => {
+            if args.len() != 1 || arg_t(0)? != Type::String {
+                return Err(DialcError::new(
+                    format!("语义错误：string.{}(s) 需要 1 个 string 参数，返回 bool", method),
+                    0, 0,
+                ));
+            }
+            Ok(Type::Bool)
+        }
+        // ---- v1.04 第 2 批 C4：UTF-8 码点视图 ----
+        // 索引单位是**码点**而非字节；length()/get()/substring() 的字节语义保持不变。
+        "char_count" => {
+            if !args.is_empty() {
+                return Err(DialcError::new(
+                    "语义错误：string.char_count() 不接受参数（返回 UTF-8 码点数）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Int)
+        }
+        "chars" => {
+            if !args.is_empty() {
+                return Err(DialcError::new(
+                    "语义错误：string.chars() 不接受参数（返回码点 int[]）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Array(Box::new(Type::Int)))
+        }
+        "char_at" => {
+            if args.len() != 1 || arg_t(0)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：string.char_at(i) 需要 1 个 int 参数（码点索引，返回码点）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Int)
+        }
+        "char_slice" => {
+            if args.len() != 2 || arg_t(0)? != Type::Int || arg_t(1)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：string.char_slice(from, to) 需要 2 个 int 参数（码点半开区间）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::String)
+        }
         _ => Err(DialcError::new(
             format!("语义错误：string 无方法 '{}'", method),
             0, 0,
@@ -2161,6 +2308,116 @@ fn array_method_type<V>(
             }
             Ok(Type::Array(Box::new(elem.clone())))
         }
+        // ---- v1.04 第 2 批 C5：数组 API 扩充 ----
+        // insert/reverse/clear 返回（可能经 COW 克隆的）新数组指针，由 codegen 写回接收变量。
+        "insert" => {
+            if args.len() != 2 || arg_t(0)? != Type::Int || !types_compatible(&arg_t(1)?, elem) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：array.insert(i, v) 需要 int 索引与 {} 值 v（允许 i == length 追加）",
+                        elem.name()
+                    ),
+                    0, 0,
+                ));
+            }
+            Ok(Type::Array(Box::new(elem.clone())))
+        }
+        "reverse" | "clear" => {
+            if !args.is_empty() {
+                return Err(DialcError::new(
+                    format!("语义错误：array.{}() 不接受参数", method),
+                    0, 0,
+                ));
+            }
+            Ok(Type::Array(Box::new(elem.clone())))
+        }
+        // index_of 只对标量开放：string 等句柄元素直接比 8 字节指针位模式是静默坑，
+        // 请改用循环 + eq()（零隐式转换，语义明确）。
+        "index_of" => {
+            if args.len() != 1 || !types_compatible(&arg_t(0)?, elem) {
+                return Err(DialcError::new(
+                    format!("语义错误：array.index_of(v) 需要 1 个 {} 参数（返回下标，未找到 -1）", elem.name()),
+                    0, 0,
+                ));
+            }
+            if !matches!(elem, Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：array<{}>.index_of() 只支持标量元素（避免比较句柄指针位模式）；请写循环用 eq() 逐个比较",
+                        elem.name()
+                    ),
+                    0, 0,
+                ));
+            }
+            Ok(Type::Int)
+        }
+        // join 只对 string[] 开放：按 sep 拼接成新 string。
+        "join" => {
+            if *elem != Type::String {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：array<{}>.join() 只支持 string[]；标量数组请先逐元素 str() 再拼接",
+                        elem.name()
+                    ),
+                    0, 0,
+                ));
+            }
+            if args.len() != 1 || arg_t(0)? != Type::String {
+                return Err(DialcError::new(
+                    "语义错误：string[].join(sep) 需要 1 个 string 分隔符参数",
+                    0, 0,
+                ));
+            }
+            Ok(Type::String)
+        }
+        // reduce：回调 fn(acc: T, x: T, state: rawptr<void>): T，初值与返回值都是标量 T。
+        // 复用 v1.03 高阶方法的函数指针机制——无闭包，状态显式经 rawptr<void> 透传。
+        "reduce" => {
+            if !matches!(elem, Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char) {
+                return Err(DialcError::new(
+                    "语义错误：array.reduce() 只支持标量元素数组（int/float/bool/byte/char）",
+                    0, 0,
+                ));
+            }
+            if args.len() < 2 || args.len() > 3 {
+                return Err(DialcError::new(
+                    "语义错误：array.reduce(fn, init) 需要 1 个回调与 1 个初值，外加可选的 1 个 rawptr<void> 状态参数",
+                    0, 0,
+                ));
+            }
+            let state_ty = Type::RawPtr(Box::new(Type::Void));
+            let (ps, ret) = match arg_t(0)? {
+                Type::FnPtr(ps, r) => (ps, r),
+                _ => return Err(DialcError::new(
+                    "语义错误：array.reduce() 的第一个参数必须是函数指针（Dial 没有闭包，具名函数可直接当值用）",
+                    0, 0,
+                )),
+            };
+            let expect_ps = vec![elem.clone(), elem.clone(), state_ty.clone()];
+            if ps != expect_ps || *ret != *elem {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：array.reduce() 回调签名不匹配：期望 fn({}, {}, rawptr<void>): {}，实际 {}",
+                        elem.name(), elem.name(), elem.name(),
+                        Type::FnPtr(ps.clone(), ret.clone()).display()
+                    ),
+                    0, 0,
+                ));
+            }
+            if !types_compatible(&arg_t(1)?, elem) {
+                return Err(DialcError::new(
+                    format!("语义错误：array.reduce() 的初值必须是 {} 类型", elem.name()),
+                    0, 0,
+                ));
+            }
+            if args.len() == 3 && arg_t(2)? != state_ty {
+                return Err(DialcError::new(
+                    "语义错误：array.reduce() 的状态参数必须是 rawptr<void>（裸指针生命周期由用户负责）",
+                    0, 0,
+                ));
+            }
+            Ok(elem.clone())
+        }
         // remove(i) / pop()：返回被删（弹出）的元素，而非数组本身。
             // 数组自身的更新（COW 可能替换指针）由 codegen 在接收变量处写回，不影响返回类型。
             "remove" => {
@@ -2179,12 +2436,12 @@ fn array_method_type<V>(
                 if !args.is_empty() {
                     return Err(DialcError::new("语义错误：array.sort() 不接受参数", 0, 0));
                 }
-                // 排序只对可比较的标量元素有意义（int / float / byte / char / bool）。
-                // 句柄元素（string / array / map ...）无自然序，拒绝。
-                if matches!(
+                // v1.04 第 2 批 C5：string[] 也放行——按 UTF-8 字节字典序排序
+                // （走 dial_array_sort_string，比较的是内容而非指针位模式）。
+                // 其余句柄元素仍无自然序，拒绝。
+                if *elem != Type::String && matches!(
                     elem,
-                    Type::String
-                        | Type::Bytes
+                    Type::Bytes
                         | Type::Array(_)
                         | Type::Map
                         | Type::Set(_)
@@ -2194,7 +2451,7 @@ fn array_method_type<V>(
                         | Type::Opaque(_)
                 ) {
                     return Err(DialcError::new(
-                        "语义错误：array.sort() 只支持标量元素类型（int/float/byte/char/bool）",
+                        "语义错误：array.sort() 只支持标量元素类型（int/float/byte/char/bool）或 string（字典序）",
                         0, 0,
                     ));
                 }
@@ -2775,6 +3032,12 @@ const RESERVED_NAMES: &[&str] = &[
     // 注：其余按名字分派的历史内建（read_line / args / now / sleep 等）的保留名覆盖
     // 属独立的历史加固议题，本轮不扩大范围，见 ARCHITECTURE §14.5 的批次纪律。
     "print", "print_raw", "write_char", "eprint", "eprint_raw",
+    // v1.04 第 2 批：C 组新增内建函数（同样按名字硬编码分派，必须设防）。
+    // 漏列会让用户定义同名函数却在调用点被内建分支静默绕过（§20 Fail-Fast）。
+    "parse_int", "parse_float", "is_int", "is_float", "format_float",
+    "read_all", "eof", "file_read_line", "file_exists", "file_size", "file_remove",
+    "getenv", "has_env", "program_name", "cwd",
+    "local_parts", "date_string", "monotonic_ms",
 ];
 
 /// `externs`：由 `import` 引入的**包外部函数**（v0.92，见 package.rs）。

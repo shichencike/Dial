@@ -735,6 +735,56 @@ impl<'ctx> CodeGen<'ctx> {
         );
         self.decl_func("dial_channel_len", self.context.i64_type().into(), &[i8b.into()]);
         self.decl_func("dial_channel_done", self.context.i64_type().into(), &[i8b.into()]);
+
+        // ---- v1.04 第 2 批：C 组标准库 API（C1–C5 / C7 / C9 / C10）----
+        // 所有符号由 stdlib/*.c 导出；不透明句柄一律 i8*，标量按 C ABI 宽度。
+        // 详见 README §37 的第 2 批小节与 stdlib/stdlib.diali 自描述。
+        // C1 字符串查询 / 规范化
+        self.decl_func("dial_string_to_upper", i8b, &[i8b.into()]);
+        self.decl_func("dial_string_to_lower", i8b, &[i8b.into()]);
+        self.decl_func("dial_string_contains", i64b, &[i8b.into(), i8b.into()]);
+        self.decl_func("dial_string_starts_with", i64b, &[i8b.into(), i8b.into()]);
+        self.decl_func("dial_string_ends_with", i64b, &[i8b.into(), i8b.into()]);
+        // C4 UTF-8 码点视图（length/get/substring 字节语义一字未动）
+        self.decl_func("dial_string_char_count", i64b, &[i8b.into()]);
+        self.decl_func("dial_string_chars", i8b, &[i8b.into()]);
+        self.decl_func("dial_string_char_at", i64b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_string_char_slice", i8b, &[i8b.into(), i64b.into(), i64b.into()]);
+        // C2 严格数值解析 / C3 定点格式化（拒绝 printf 式变参格式串）
+        self.decl_func("dial_parse_int", i64b, &[i8b.into()]);
+        self.decl_func("dial_parse_float", f64b, &[i8b.into()]);
+        self.decl_func("dial_is_int", i64b, &[i8b.into()]);
+        self.decl_func("dial_is_float", i64b, &[i8b.into()]);
+        self.decl_func("dial_format_float", i8b, &[f64b.into(), i64b.into()]);
+        // C5 数组 API 扩充（arr 一律 i8*；返回新数组/标量位模式）
+        self.decl_func("dial_array_insert", i8b, &[i8b.into(), i64b.into(), i64b.into()]);
+        self.decl_func("dial_array_reverse", i8b, &[i8b.into()]);
+        self.decl_func("dial_array_clear", i8b, &[i8b.into()]);
+        self.decl_func("dial_array_index_of", i64b, &[i8b.into(), i64b.into()]);
+        self.decl_func("dial_array_join", i8b, &[i8b.into(), i8b.into()]);
+        self.decl_func("dial_array_sort_string", i8b, &[i8b.into()]);
+        // reduce：fn_raw / state / thunk 三个指针 + init 位模式（复用 v1.03 thunk 机制）
+        self.decl_func(
+            "dial_array_reduce",
+            i64b,
+            &[i8b.into(), i64b.into(), i8b.into(), i8b.into(), i8b.into()],
+        );
+        // C7 文件 API（命名刻意避开与零参 read_line() 撞名 = 重载否决）
+        self.decl_func("dial_file_eof", i64b, &[i8b.into()]);
+        self.decl_func("dial_file_read_line", i8b, &[i8b.into()]);
+        self.decl_func("dial_file_read_all", i8b, &[i8b.into()]);
+        self.decl_func("dial_file_exists", i64b, &[i8b.into()]);
+        self.decl_func("dial_file_size", i64b, &[i8b.into()]);
+        self.decl_func("dial_file_remove", i64b, &[i8b.into()]);
+        // C9 环境只读查询（无 setenv：绝不引入可变全局状态）
+        self.decl_func("dial_getenv", i8b, &[i8b.into()]);
+        self.decl_func("dial_has_env", i64b, &[i8b.into()]);
+        self.decl_func("dial_program_name", i8b, &[]);
+        self.decl_func("dial_cwd", i8b, &[]);
+        // C10 本地时间 / 日期 / 单调计时
+        self.decl_func("dial_local_parts", i8b, &[]);
+        self.decl_func("dial_date_string", i8b, &[]);
+        self.decl_func("dial_monotonic_ms", i64b, &[]);
     }
 
     /// 声明一个由 `import` 引入的包外部函数（只有签名，无函数体）。
@@ -4077,6 +4127,81 @@ impl<'ctx> CodeGen<'ctx> {
                         Ok(self.call_c("dial_kvmap_new", &[kk.into(), vk.into()]))
                     }
                     "read_line" => Ok(self.call_c("dial_read_line", &[])),
+                    // ---- v1.04 第 2 批 C2：严格数值解析 / 显式探测 ----
+                    "parse_int" | "is_int" | "parse_float" | "is_float" => {
+                        let s = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let cname = match name.as_str() {
+                            "parse_int" => "dial_parse_int",
+                            "is_int" => "dial_is_int",
+                            "parse_float" => "dial_parse_float",
+                            _ => "dial_is_float",
+                        };
+                        let r = self.call_c(cname, &[s.into()]);
+                        // is_* / has_* 等返回 C 的 0/1，需压成 Dial 内部 i1（bool）。
+                        if matches!(name.as_str(), "is_int" | "is_float") {
+                            let zero = self.context.i64_type().const_int(0, false);
+                            Ok(self.builder.build_int_compare(IntPredicate::NE, r.into_int_value(), zero, "isbool").unwrap().into())
+                        } else {
+                            Ok(r)
+                        }
+                    }
+                    // ---- v1.04 第 2 批 C3：类型安全定点格式化 ----
+                    "format_float" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let d = self.to_i64(self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?, &Type::Int);
+                        Ok(self.call_c("dial_format_float", &[v.into(), d.into()]))
+                    }
+                    // ---- v1.04 第 2 批 C7：文件 API ----
+                    // read_all / file_read_line 返回 NULL = 业务失败，抛 Error（与既有 read 同款）。
+                    "read_all" | "file_read_line" => {
+                        let f = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let cname = if name == "read_all" { "dial_file_read_all" } else { "dial_file_read_line" };
+                        let s = self.call_c(cname, &[f.into()]);
+                        let s_int = self.builder.build_ptr_to_int(s.into_pointer_value(), self.context.i64_type(), "sint").unwrap();
+                        let is_null = self.builder.build_int_compare(IntPredicate::EQ, s_int, self.context.i64_type().const_int(0, false), "filenull").unwrap();
+                        let ok_bb = self.context.append_basic_block(function, "fileread.ok");
+                        let fail_bb = self.context.append_basic_block(function, "fileread.fail");
+                        self.builder.build_conditional_branch(is_null, fail_bb, ok_bb).unwrap();
+                        self.builder.position_at_end(fail_bb);
+                        let g = self.global_string("dialc.err.fileread", "读取文件失败（句柄无效或内存不足）");
+                        let msg = self.call_c("dial_string_new", &[g.into()]);
+                        let err = self.call_c("dial_error_new", &[msg.into()]);
+                        self.emit_throw(err, scopes, structs)?;
+                        self.builder.position_at_end(ok_bb);
+                        Ok(s)
+                    }
+                    "eof" => {
+                        let f = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let r = self.call_c("dial_file_eof", &[f.into()]);
+                        let zero = self.context.i64_type().const_int(0, false);
+                        Ok(self.builder.build_int_compare(IntPredicate::NE, r.into_int_value(), zero, "eofbool").unwrap().into())
+                    }
+                    "file_exists" | "file_remove" | "file_size" | "has_env" => {
+                        let a = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        let cname = match name.as_str() {
+                            "file_exists" => "dial_file_exists",
+                            "file_remove" => "dial_file_remove",
+                            "file_size" => "dial_file_size",
+                            _ => "dial_has_env",
+                        };
+                        let r = self.call_c(cname, &[a.into()]);
+                        if matches!(name.as_str(), "file_exists" | "file_remove" | "has_env") {
+                            let zero = self.context.i64_type().const_int(0, false);
+                            Ok(self.builder.build_int_compare(IntPredicate::NE, r.into_int_value(), zero, "predbool").unwrap().into())
+                        } else {
+                            Ok(r)
+                        }
+                    }
+                    // ---- v1.04 第 2 批 C9/C10：环境 / 时间（无可变全局状态）----
+                    "getenv" => {
+                        let a = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_getenv", &[a.into()]))
+                    }
+                    "program_name" => Ok(self.call_c("dial_program_name", &[])),
+                    "cwd" => Ok(self.call_c("dial_cwd", &[])),
+                    "date_string" => Ok(self.call_c("dial_date_string", &[])),
+                    "local_parts" => Ok(self.call_c("dial_local_parts", &[])),
+                    "monotonic_ms" => Ok(self.call_c("dial_monotonic_ms", &[])),
                     // 文件 IO（v0.61）：file 句柄 = 不透明 ptr，不做 retain/release，显式 close。
                     // v0.7 起：失败即抛出 Error（业务失败与系统崩溃分离——越界/除零仍走 ud2/Fail-Fast）。
                     "open" => {
@@ -4854,6 +4979,32 @@ impl<'ctx> CodeGen<'ctx> {
                 let sep = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                 Ok(self.call_c("dial_string_split", &[optr.into(), sep.into()]))
             }
+            // ---- v1.04 第 2 批 C1：字符串查询 / 规范化 ----
+            (Type::String, "to_upper") => Ok(self.call_c("dial_string_to_upper", &[optr.into()])),
+            (Type::String, "to_lower") => Ok(self.call_c("dial_string_to_lower", &[optr.into()])),
+            (Type::String, "contains" | "starts_with" | "ends_with") => {
+                let a = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                let cname = match method {
+                    "contains" => "dial_string_contains",
+                    "starts_with" => "dial_string_starts_with",
+                    _ => "dial_string_ends_with",
+                };
+                let r = self.call_c(cname, &[optr.into(), a.into()]);
+                let zero = i64t.const_int(0, false);
+                Ok(self.builder.build_int_compare(IntPredicate::NE, r.into_int_value(), zero, "strpred").unwrap().into())
+            }
+            // ---- v1.04 第 2 批 C4：UTF-8 码点视图（字节语义方法一字未动）----
+            (Type::String, "char_count") => Ok(self.call_c("dial_string_char_count", &[optr.into()])),
+            (Type::String, "chars") => Ok(self.call_c("dial_string_chars", &[optr.into()])),
+            (Type::String, "char_at") => {
+                let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &Type::Int);
+                Ok(self.call_c("dial_string_char_at", &[optr.into(), i.into()]))
+            }
+            (Type::String, "char_slice") => {
+                let from = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &Type::Int);
+                let to = self.to_i64(self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?, &Type::Int);
+                Ok(self.call_c("dial_string_char_slice", &[optr.into(), from.into(), to.into()]))
+            }
             // 裸指针的指针算术（v1.02）：p.offset(n) —— **显式、带类型**。
             // 绝不允许 C 式「void* + 1」的无类型偏移：元素大小必须由类型决定。
             // rawptr<void> 无元素大小，语义层已直接拒绝（须先 ptr_cast 成具体类型）。
@@ -4957,8 +5108,15 @@ impl<'ctx> CodeGen<'ctx> {
             }
             // sort()：将数组排序（COW 若被共享则先克隆，再原地排序），返回
             // （可能更新后的）数组指针，并写回接收变量（仅接收者为变量时）。
-            (Type::Array(_), "sort") => {
-                let newp = self.call_c("dial_array_sort", &[optr.into()]);
+            (Type::Array(elem), "sort") => {
+                // v1.04 第 2 批 C5：string[] 按字节字典序（比较内容而非指针），
+                // 标量数组仍走原 dial_array_sort。两者都 COW 后返回可能更新的指针。
+                let cname = if *elem.as_ref() == Type::String {
+                    "dial_array_sort_string"
+                } else {
+                    "dial_array_sort"
+                };
+                let newp = self.call_c(cname, &[optr.into()]);
                 if let Expr::Var(name) = obj {
                     if let Some((_, (_m, ptr))) =
                         scopes.iter().rev().find_map(|s| s.get(name).map(|v| v.clone()))
@@ -4967,6 +5125,69 @@ impl<'ctx> CodeGen<'ctx> {
                     }
                 }
                 Ok(newp)
+            }
+            // ---- v1.04 第 2 批 C5：数组 API 扩充 ----
+            // insert/reverse/clear 与 sort/remove 同款：返回（可能 COW 更新的）指针，
+            // 写回接收变量。用一个小闭包统一「写回」逻辑，避免三处复制粘贴。
+            (Type::Array(_), "insert") => {
+                let elem_ty = type_of(&args[1], scopes, functions, structs)?;
+                let i = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &Type::Int);
+                let v = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                let v_i64 = self.to_elem_bits(v, &elem_ty);
+                let newp = self.call_c("dial_array_insert", &[optr.into(), i.into(), v_i64.into()]);
+                // C 侧 insert 已 elem_retain 新元素，与 push 同款做一次归属结算。
+                self.settle_fresh_value(&args[1], &elem_ty, v);
+                if let Expr::Var(name) = obj {
+                    if let Some((_, (_m, ptr))) = scopes.iter().rev().find_map(|s| s.get(name).map(|v| v.clone())) {
+                        self.builder.build_store(ptr, newp).unwrap();
+                    }
+                }
+                Ok(newp)
+            }
+            (Type::Array(_), "reverse" | "clear") => {
+                let cname = if method == "reverse" { "dial_array_reverse" } else { "dial_array_clear" };
+                let newp = self.call_c(cname, &[optr.into()]);
+                if let Expr::Var(name) = obj {
+                    if let Some((_, (_m, ptr))) = scopes.iter().rev().find_map(|s| s.get(name).map(|v| v.clone())) {
+                        self.builder.build_store(ptr, newp).unwrap();
+                    }
+                }
+                Ok(newp)
+            }
+            (Type::Array(_), "index_of") => {
+                let elem_ty = type_of(&args[0], scopes, functions, structs)?;
+                let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                let v_i64 = self.to_elem_bits(v, &elem_ty);
+                Ok(self.call_c("dial_array_index_of", &[optr.into(), v_i64.into()]))
+            }
+            (Type::Array(_), "join") => {
+                let sep = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                Ok(self.call_c("dial_array_join", &[optr.into(), sep.into()]))
+            }
+            // reduce：复用 v1.03 的 arity=2 thunk（fn(T,T,rawptr<void>):T），无闭包。
+            // init / 返回值都是标量位模式，用 to_elem_bits / from_elem_bits 对称转换。
+            (Type::Array(elem), "reduce") => {
+                let thunk = self.gen_hof_thunk(elem.as_ref(), elem.as_ref(), 2)?;
+                let fn_raw = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                let init_ty = type_of(&args[1], scopes, functions, structs)?;
+                let init_v = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                let init_bits = self.to_elem_bits(init_v, &init_ty);
+                let state: BasicValueEnum<'ctx> = if args.len() > 2 {
+                    self.gen_expr(&args[2], function, scopes, func_values, functions, structs)?
+                } else {
+                    self.i8ptr().const_null().into()
+                };
+                let r = self.call_c(
+                    "dial_array_reduce",
+                    &[
+                        optr.into(),
+                        init_bits.into(),
+                        fn_raw.into(),
+                        state.into(),
+                        thunk.as_global_value().as_pointer_value().into(),
+                    ],
+                );
+                Ok(self.from_elem_bits(elem.as_ref(), r.into_int_value()))
             }
             // v1.03：接受函数指针的高阶数组方法。回调签名精确、状态显式透传，
             // 没有闭包、没有环境对象、没有隐藏类型标签。

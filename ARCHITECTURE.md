@@ -842,9 +842,13 @@ C 组增量全部落在 `stdlib/*.c` + `stdlib/*.h`（C Runtime）、
 
 `STDLIB_ABI 5 → 6` 沿用既有判据：**编译器可能要求旧包没有的符号**即递增。
 本轮新增 `dial_eprint_*` stderr 输出族、`dial_map_get_or` /
-`dial_kvmap_get_or`，以及后续批次 C 组的 `dial_*` 导出。装 abi=5 旧包的用户
-一旦写 `eprint(...)` 就会撞上 `undefined symbol`，递增到 6 让旧包在链接期
-被明确拦下。`make_stdlib_pkg.py` 默认 `--abi 6`、CI 两处 `--abi 6` 同步；
+`dial_kvmap_get_or`，以及第 2 批 C 组的 `dial_string_*`（大小写 / 子串 /
+UTF-8 码点）、`dial_array_insert` / `index_of` / `reverse` / `reduce` /
+`join` / `sort_string` / `clear`、`dial_file_*` / `dial_getenv` /
+`dial_local_parts` / `dial_date_string` / `dial_monotonic_ms` 等导出。
+装 abi=5 旧包的用户一旦写 `eprint(...)` 或第 2 批 API 就会撞上
+`undefined symbol`，递增到 6 让旧包在链接期被明确拦下。`make_stdlib_pkg.py`
+默认 `--abi 6`、CI 两处 `--abi 6` 同步；
 `dialc new` 骨架改为引用 `package::STDLIB_ABI`，消除硬编码漂移；Q 组断言
 改为从 `src/package.rs` 动态读取，避免下次递增时测试自己先过期。
 
@@ -854,12 +858,12 @@ C 组增量全部落在 `stdlib/*.c` + `stdlib/*.h`（C Runtime）、
 
 ### 14.5 分批落地与回归纪律
 
-按风险从低到高分 3 批，每批独立跑 A–T 全量回归，不破既有 403 ✅：
+按风险从低到高分 3 批，每批独立跑 A–U 全量回归，不破既有 403 ✅：
 
 | 批次 | 范围 | 状态 |
 | --- | --- | --- |
-| 第 1 批 | B9 块注释 / B10 `!` / B11 `.slice()` / C6 `get_or` / C8 `eprint` | **已落地**（T 组锁定：stdout/stderr 严格分流、未闭合块注释 Fail-Fast、`get_or` 类型严格校验、B5 重载仍被拒绝） |
-| 第 2 批 | C1–C5 / C7 / C9 / C10 标准库 API | 待落地 |
+| 第 1 批 | B9 块注释 / B10 `!` / B11 `.slice()` / C6 `get_or` / C8 `eprint` | **已落地**（T 组锁定） |
+| 第 2 批 | C1–C5 / C7 / C9 / C10 标准库 API | **已落地**（U 组锁定：8 组端到端、C2 解析 Fail-Fast、C4 越界 Fail-Fast、`string[].index_of` 拒、C3 零隐式转换、第 2 批内建进保留名） |
 | 第 3 批 | B1 / B2 / B3 / B6 / B7 / B8 语言机制 | 待落地，须按 §14.1–14.3 的裁决修宪法后再动语义层 |
 | 收尾 | C11 独立包（如 `http.dialpkg`）、全量回归、文档官网同步、本地提交 | 待落地 |
 

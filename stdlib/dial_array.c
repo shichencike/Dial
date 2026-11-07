@@ -1,4 +1,5 @@
 #include "dial_array.h"
+#include "dial_string.h"   /* v1.04 第 2 批：join 复用 dial_string_from_bytes（头文件有 guard，不成环） */
 #include "dial_rt_mem.h"
 #include "dial_rt_trap.h"
 #include <string.h>
@@ -330,4 +331,126 @@ DialArray dial_array_hof(DialArray a, int64_t op, int64_t out_kind,
         }
     }
     return out;
+}
+
+/* ==========================================================================
+ * v1.04 第 2 批 C5：数组 API 扩充
+ *
+ * 所有权契约与 push / set / remove / sort 完全同款：insert / reverse / clear /
+ * sort_string 都消耗调用者交来的那一份引用，返回（可能因 COW 更新的）指针，
+ * 调用方（codegen）必须写回接收变量。
+ *
+ * 宪法要点：index_of 只对标量开放（语义层拒绝句柄元素），因为对 string 直接比较
+ * 8 字节指针位模式是「看起来能用、其实在比地址」的静默坑；sort_string / join
+ * 则按字节内容处理，语义明确。reduce 复用 v1.03 的精确签名 thunk，无闭包。
+ * ========================================================================== */
+
+/* 共享时先 COW 克隆（消耗调用者那份引用），返回可安全原地修改的独占 buffer。 */
+static DialArray dial_array_cow(DialArray a) {
+    if (((int64_t *)a)[-1] > 1) {
+        void *n = dial_rc_clone(a, a_size(a_meta(a)[2]));
+        retain_elems(n);
+        release_buffer(a);
+        return n;
+    }
+    return a;
+}
+
+DialArray dial_array_insert(DialArray a, int64_t i, int64_t v) {
+    int64_t len = a_meta(a)[1];
+    /* 插入允许 i == len（追加到末尾），但绝不允许负下标或越过末尾。 */
+    if (i < 0 || i > len) dial_assert_fail("dial_array_insert: 插入位置越界");
+    int64_t kind = a_meta(a)[0];
+    a = dial_array_cow(a);
+    a = grow(a, len + 1);           /* grow 自身也遵守「消耗引用 / 返回新指针」契约 */
+    int64_t *e = a_elems(a);
+    memmove(e + i + 1, e + i, (size_t)(len - i) * 8);
+    e[i] = v;
+    a_meta(a)[1] = len + 1;
+    elem_retain(kind, v);           /* 新元素被本数组持有 */
+    return a;
+}
+
+DialArray dial_array_reverse(DialArray a) {
+    a = dial_array_cow(a);
+    int64_t len = a_meta(a)[1];
+    int64_t *e = a_elems(a);
+    for (int64_t i = 0, j = len - 1; i < j; i++, j--) {
+        int64_t t = e[i]; e[i] = e[j]; e[j] = t;
+    }
+    return a;
+}
+
+DialArray dial_array_clear(DialArray a) {
+    int64_t kind = a_meta(a)[0];
+    /* 释放整份旧 buffer（共享时只是减引用，其他持有者不受影响），返回新的空数组。 */
+    release_buffer(a);
+    return dial_array_new(kind);
+}
+
+int64_t dial_array_index_of(DialArray a, int64_t v) {
+    int64_t len = a_meta(a)[1];
+    int64_t *e = a_elems(a);
+    for (int64_t i = 0; i < len; i++) {
+        if (e[i] == v) return i;
+    }
+    return -1;
+}
+
+/* string 元素按 UTF-8 字节内容比较（短者优先，前缀相同时长串更大）。 */
+static int cmp_string_bytes(const void *pa, const void *pb) {
+    int64_t va = *(const int64_t *)pa, vb = *(const int64_t *)pb;
+    const void *sa = (const void *)(uintptr_t)va, *sb = (const void *)(uintptr_t)vb;
+    int64_t la = ((const int64_t *)sa)[0], lb = ((const int64_t *)sb)[0];
+    int64_t n = la < lb ? la : lb;
+    int c = memcmp((const char *)sa + 8, (const char *)sb + 8, (size_t)n);
+    if (c != 0) return c;
+    return (la > lb) - (la < lb);
+}
+
+DialArray dial_array_sort_string(DialArray a) {
+    if (!a) return NULL;
+    a = dial_array_cow(a);
+    int64_t len = a_meta(a)[1];
+    qsort(a_elems(a), (size_t)len, sizeof(int64_t), cmp_string_bytes);
+    return a;
+}
+
+void *dial_array_join(DialArray a, void *sep) {
+    int64_t len = a_meta(a)[1];
+    int64_t *e = a_elems(a);
+    int64_t seplen = ((int64_t *)sep)[0];
+    const char *sepdat = (const char *)sep + 8;
+    /* 两遍：先算总字节数（无隐式上界猜测），再一次分配、逐段 memcpy。 */
+    int64_t total = 0;
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) total += seplen;
+        total += ((int64_t *)(uintptr_t)e[i])[0];
+    }
+    char *buf = (char *)malloc((size_t)total + 1);
+    if (!buf) dial_assert_fail("dial_array_join: 内存不足");
+    int64_t off = 0;
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) { memcpy(buf + off, sepdat, (size_t)seplen); off += seplen; }
+        const char *d = (const char *)(uintptr_t)e[i] + 8;
+        int64_t l = ((int64_t *)(uintptr_t)e[i])[0];
+        memcpy(buf + off, d, (size_t)l);
+        off += l;
+    }
+    buf[off] = '\0';
+    DialString out = dial_string_from_bytes(buf, off);
+    free(buf);
+    return out;
+}
+
+int64_t dial_array_reduce(DialArray a, int64_t init, void *fn_raw, void *state,
+                          int64_t (*thunk)(int64_t, int64_t, void *, void *)) {
+    if (!a) return init;
+    int64_t len = a_meta(a)[1];
+    int64_t *e = a_elems(a);
+    int64_t acc = init;
+    for (int64_t i = 0; i < len; i++) {
+        acc = thunk(acc, e[i], fn_raw, state);   /* 无闭包：fn_raw / state 显式透传 */
+    }
+    return acc;
 }

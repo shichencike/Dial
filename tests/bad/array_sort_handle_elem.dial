@@ -1,6 +1,7 @@
-// 应当编译失败：array.sort() 只支持标量元素类型，string 元素无自然序，必须拒绝。
+// 应当编译失败：array.sort() 只支持标量元素类型与 string 元素（string 走 UTF-8 字典序）；
+// 嵌套数组（array 元素）无自然序，必须拒绝。
 fn main(): int {
-    var a: string[] = ["pear", "apple"];
+    var a: int[][] = [[3, 1], [2, 4]];
     a.sort();
     return 0;
 }

@@ -114,6 +114,35 @@
     类型严格校验、函数重载（B5 永久否决）与输出族保留名负向锁定；A–S 扩为 A–T。
   - **架构记录**：`ARCHITECTURE.md` 追加 §14（宪法裁决与 B/C 组补齐的分层约束、
     ABI 递增判据、3 批落地纪律），明确「规范先于实现，但绝不把未实现项标成已支持」。
+- **真实程序缺口补齐（B/C 组，第二批）**：按 §37.5「C11 走独立包」的裁决，本批
+  只做**标准库内建**（不进 `stdlib.dialpkg`），全部落在 `stdlib/*.c` +
+  `src/semantic.rs` + `src/codegen.rs` + `stdlib/stdlib.diali` 四层。
+  - **C1 字符串大小写 / 子串**：`to_upper` / `to_lower` / `contains` / `starts_with` /
+    `ends_with`（`dial_string_*`）逐类型安全、UTF-8 字节级。
+  - **C4 Unicode 码点**：`char_count` / `chars()` / `char_at(i)` / `char_slice(from,to)`
+    按 **UTF-8 码点**而非字节；`length()` 保持字节语义不动，避免破坏既有 416 项回归。
+  - **C2 数值严格解析**：`parse_int` / `parse_float` 非法输入 **Fail-Fast**（绝不静默
+    返回 0），`dial_parse_int` / `dial_parse_float` 在 C 侧 `dial_assert_fail` 抛 Error；
+    `is_int` / `is_float` 提供显式探测。
+  - **C3 类型安全格式化**：`format_float(v: float, digits: int)` 拒绝 printf 式运行期
+    格式串（§5.3 零隐式转换），`int` 参数编译期被拒；对应 `dial_array_new(1)` + `snprintf`。
+  - **C5 数组 API 扩充**：`insert` / `index_of`（标量元素；`string[]` 因位模式歧义被拒）/
+    `reverse` / `reduce`（复用 v1.03 函数指针 + `rawptr<void>` thunk，无闭包）/
+    `join` / `sort` 放宽到 `string[]`（字典序）/ `clear`，新增 `dial_array_*` C 导出。
+  - **C7 文件 IO**：`file_exists` / `file_size`（打不开 `-1`）/ `file_remove` /
+    `file_read_all`（FNF→抛 Error）/ `file_read_line(f)`（逐行）/ `eof(f)`；
+    刻意用 `file_read_line` 而非 `read_line(f)`，避免与 stdin 版 `read_line()` 撞名
+    （B5 否决重载），所有文件操作为不透明句柄、显式 `close`、不进 ARC。
+  - **C9 环境**：`has_env` / `getenv`（缺失返回空串）/ `program_name`（argv[0] 只读
+    快照，非 `var` 全局）/ `cwd`，无 `setenv`（进程级可变全局状态，否决）。
+  - **C10 时间**：`local_parts()`（int[8]，自取分量）/ `date_string()`（固定
+    `YYYY-MM-DD HH:MM:SS`）/ `monotonic_ms()`，拒绝 printf 式格式串，组件由调用方
+    显式拼（§5.3）；新增 `dial_local_parts` / `dial_date_string` / `dial_monotonic_ms`。
+  - **Fail-Fast 加固**：第 2 批 18 个内建名补进 `RESERVED_NAMES`（延续第 1 批 `eprint`
+    族加固），同名定义编译期拒绝，杜绝内建分支静默绕过（§20）。
+  - **U 组回归**：8 组 API 端到端输出断言、C2 解析失败 Fail-Fast、C4 `char_at` 越界
+    Fail-Fast、`string[].index_of` 编译期拒绝、C3 `format_float(int,..)` 零隐式转换拒绝、
+    第 2 批内建同名定义被拒；A–T 扩为 A–U。
 - **宪法裁决入文档（§37）**：`STDLIB_ABI 5 → 6`（`make_stdlib_pkg.py` 默认、
   CI 两处、`dialc new` 骨架同步，后者改为引用 `package::STDLIB_ABI` 消除硬编码）；
   术语统一为「绝不引入可变全局状态」；「函数名重载」「闭包」写入**永久否决**；

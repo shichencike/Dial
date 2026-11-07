@@ -1,0 +1,86 @@
+// v1.04 第 2 批：C 组标准库 API 端到端冒烟（C1–C5 / C7 / C9 / C10）
+// 每项输出都带固定前缀，供 U 组逐行核对。
+
+// reduce 回调：fn(acc: int, x: int, state: rawptr<void>): int（无闭包，状态显式透传）
+fn add(acc: int, x: int, state: rawptr<void>): int {
+    return acc + x;
+}
+
+fn main(): int {
+    // ---- C1：字符串查询 / 规范化 ----
+    var s: string = "Hello World";
+    print("C1 upper = ", s.to_upper());
+    print("C1 lower = ", s.to_lower());
+    print("C1 contains = ", s.contains("World"));
+    print("C1 starts = ", s.starts_with("Hell"));
+    print("C1 ends = ", s.ends_with("orld"));
+
+    // ---- C2：严格数值解析 / 显式探测 ----
+    print("C2 parse_int = ", parse_int("-12345"));
+    print("C2 parse_float = ", parse_float("3.5"));
+    print("C2 is_int(42) = ", is_int("42"));
+    print("C2 is_int(no) = ", is_int("4x2"));
+    print("C2 is_float(2.5) = ", is_float("2.5"));
+    print("C2 is_float(nan) = ", is_float("nan"));
+
+    // ---- C3：定点格式化 ----
+    print("C3 fmt2 = ", format_float(3.14159, 2));
+    print("C3 fmt0 = ", format_float(2.6, 0));
+
+    // ---- C4：UTF-8 码点视图（length 仍是字节）----
+    var u: string = "A中B";   // A=1字节, 中=3字节, B=1字节 => 5 字节 / 3 码点
+    print("C4 length(bytes) = ", u.length());
+    print("C4 char_count = ", u.char_count());
+    print("C4 char_at(1) = ", u.char_at(1));        // 中 = U+4E2D = 20013
+    var cps: int[] = u.chars();
+    print("C4 chars len = ", cps.length());
+    print("C4 char_slice(1,2) = ", u.char_slice(1, 2));  // "中"
+
+    // ---- C5：数组 API ----
+    var a: int[] = [10, 20, 30];
+    a.insert(1, 15);
+    print("C5 insert = ", a.get(1), ",", a.length());   // 15, 4
+    print("C5 index_of = ", a.index_of(30));            // 3
+    a.reverse();
+    print("C5 reverse = ", a.get(0));                   // 30
+    print("C5 reduce = ", a.reduce(add, 0));            // 10+15+20+30 = 75
+    var names: string[] = ["banana", "apple", "cherry"];
+    names.sort();
+    print("C5 sort_string = ", names.get(0));           // apple
+    print("C5 join = ", names.join(","));               // apple,banana,cherry
+    a.clear();
+    print("C5 clear len = ", a.length());               // 0
+
+    // ---- C7：文件 API（命名避开同名重载）----
+    var path: string = "/tmp/dial_batch2_io.txt";
+    var f: file = open(path, "w");
+    write(f, "line1\nline2\nline3");
+    close(f);
+    print("C7 exists = ", file_exists(path));
+    print("C7 size = ", file_size(path));
+    var rf: file = open(path, "r");
+    print("C7 read_all = ", read_all(rf));
+    close(rf);
+    var lf: file = open(path, "r");
+    print("C7 line1 = ", file_read_line(lf));
+    print("C7 line2 = ", file_read_line(lf));
+    print("C7 eof = ", eof(lf));
+    close(lf);
+    print("C7 remove = ", file_remove(path));
+    print("C7 exists_after = ", file_exists(path));
+
+    // ---- C9：环境只读查询 ----
+    print("C9 has_env(PATH) = ", has_env("PATH"));
+    print("C9 getenv(missing) len = ", getenv("DIAL_NO_SUCH_VAR_9F3").length());
+    print("C9 program_name len>0 = ", program_name().length() > 0);
+    print("C9 cwd len>0 = ", cwd().length() > 0);
+
+    // ---- C10：时间 / 单调计时 ----
+    var parts: int[] = local_parts();
+    print("C10 parts len = ", parts.length());          // 8
+    print("C10 date len = ", date_string().length());  // 19
+    var t0: int = monotonic_ms();
+    print("C10 mono nonneg = ", monotonic_ms() - t0 >= 0);
+
+    return 0;
+}
