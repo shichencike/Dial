@@ -1104,14 +1104,21 @@ fn final_link(
     for r in runtime_objs {
         link_cmd.arg(r);
     }
+    // import 引入的包的机器码：**按 Target Triple 选出的那一份**静态库。
+    // 交叉编译到 Windows 时这里自动变成包内的 .lib，无需用户干预（§4.3）。
+    //
+    // **顺序要紧**：静态归档由链接器**从左到右**扫描，某个符号只有在其归档被扫描时
+    // 仍处于「未定义」状态，对应成员才会被拉进来。包会引用标准库符号
+    // （典型如 `dial_string_new`——包要向 Dial 返回 string/bytes 就必须构造带
+    // 引用计数头的堆对象），所以**包必须排在标准库归档之前**；否则链接器扫完
+    // 标准库归档后那些符号仍未定义，包再引用它们就是「undefined symbol」。
+    // 标准库从不反向引用包符号，故这个次序是安全的。
+    for pl in extra_libs {
+        link_cmd.arg(pl);
+    }
     // 标准库静态库（已安装包 或 实时编译产物归档）
     for l in stdlib_libs {
         link_cmd.arg(l);
-    }
-    // import 引入的包的机器码：**按 Target Triple 选出的那一份**静态库。
-    // 交叉编译到 Windows 时这里自动变成包内的 .lib，无需用户干预（§4.3）。
-    for pl in extra_libs {
-        link_cmd.arg(pl);
     }
     if opts.lto {
         // 触发链接期 LTO：clang 读回所有内嵌 bitcode，跨 Dial+C 整体优化后再发机器码。
