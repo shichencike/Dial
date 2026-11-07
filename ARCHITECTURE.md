@@ -905,6 +905,50 @@ ABI / SHA256，语言层 FFI（§10）已提供接 C 库的能力。
 > 规范先于实现写清，但**绝不把未实现项标成已支持**——每批落地后同步更新
 > README §37 的「已落地」表。
 
+### 14.7 C11 独立包架构：`http.dialpkg` 的分层与 FFI 约定
+
+§37.5 定下「常用库走独立 `.dialpkg`、不进标准库包」，并按领域拆包。
+本轮落地第一个包 `http`（自研 HTTP/1.1 + gzip 解压）。
+
+**分层**（每层职责单一，不互相越界）：
+
+| 层 | 位置 | 职责 |
+| --- | --- | --- |
+| 接口契约 | `packages/http/http.diali` | **唯一**对外签名：`type HttpConn;` / `type HttpResponse;` + `extern fn`。带 SHA256 校验，被篡改在链接期被拦下 |
+| 清单 | `packages/http/dial.toml` | 包名 / 版本 / ABI / 接口文件名 / 许可 / 三平台静态库路径 |
+| 机器码 | `packages/http/src/dial_http.c` | 协议实现：URL 解析、请求行与 Header 拼装、响应解析（`Content-Length` / `chunked` / 读到关闭）、Socket 读写、gzip 解压 |
+| 第三方 | `third_party/` | mbedTLS（TLS，本轮只编入静态库）+ zlib（gzip 解压）。**vendor 进仓库**，构建离线可复现 |
+
+**协议层自研、密码学不手搓**：HTTP 的报文与线级细节自己写（可控，才能为后续的
+连接指纹定制留空间）；TLS 与压缩算法一律用成熟实现——自己写密码学是安全事故的
+经典入口（侧信道、padding oracle、随机数质量、边界条件）。
+
+**所有权口径**：包对外暴露的不透明句柄**不进 ARC**，释放必须显式
+（`dial_http_close` / `dial_http_resp_free`），与 stdlib 的文件句柄同一口径——
+「谁分配谁释放」在 FFI 边界上必须看得见。返回给 Dial 的 `string` / `bytes`
+则走 Dial 自己的引用计数堆对象，由 Dial 侧 ARC 负责。
+
+**错误口径**：包**不抛 Dial 异常**——包不应假定宿主程序装了异常处理栈。
+失败返回空句柄（`is_null` 可判），原因取自**线程局部**的最近错误槽
+（`dial_http_last_error` / `dial_http_last_error_msg`）。
+
+**两条必须写进包注释的 FFI 约定**（写包时踩到，且都不是 Dial 特有的）：
+
+1. Dial 的 `string` 跨到 C 时传的是**载荷指针**（`[int64 len][bytes...]`），
+   不是字节首地址——标准库因此才用 `dial_string_cstr()` 取文本（载荷 + 8）。
+   把收到的字符串直接当 `const char *` 用，内容会带上前导的长度字段。
+2. 带缓冲的读取器必须**先取缓冲再读 socket**：行读取可能已把整份响应吞进缓冲，
+   直接读 socket 会漏掉缓冲里的部分，并对已关闭的连接误报「连接提前关闭」。
+
+**链接顺序**：静态归档由链接器从左到右扫描，符号只有在其归档被扫描时仍处于
+「未定义」状态才会被拉入。包要向 Dial 返回 `string` / `bytes`，就必须引用标准库的
+`dial_string_new` / `dial_bytes_new`，因此包的归档**必须排在标准库归档之前**
+（`obj → runtime → packages → stdlib`）。标准库从不反向引用包符号，故该次序安全。
+
+**现役边界（如实标注）**：本轮只做**明文 HTTP/1.1**。`https://` 明确报错
+（`DIAL_HTTP_ERR_UNSUPPORTED`）而不是假装能用——mbedTLS 已在包里，接线是后续工作。
+连接复用（keep-alive）亦未落地，当前请求一律 `Connection: close`。
+
 ---
 
 > 本文件为**架构规划**，不含任何实现承诺与时间表。规范一旦在真实包上落地，

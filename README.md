@@ -5150,3 +5150,46 @@ B6 内存专项：3M 次 `Point[]` 建放、1M 次 `map<string,Point>` 读写循
 B2（用户泛型——死守单态化底线，不做）、B3（枚举 ADT——不引入 Tagged Union，
 保持类型系统极简）、C11（`http.dialpkg` 独立包，下一批）。
 B5（函数名重载）与 B4（闭包）维持**永久否决**。
+
+### 37.10 C11 第一包已落地：`http.dialpkg`（自研 HTTP/1.1 + gzip 解压）
+
+§37.5 定了「常用库走独立包、不进标准库包」，并按领域拆包：**本轮只落地 `http` 包**。
+正则 / JSON / 摘要 / Base64 各自成包（`text` / `json` / `crypto`），后续批次逐个补。
+
+| 决策 | 落地方式 |
+| --- | --- |
+| **协议层自研** | `packages/http/src/dial_http.c`：URL 解析、请求行与 Header 拼装、响应报文解析（状态行 / 头部 / `Content-Length` / `chunked` / 读到关闭）、Socket 读写，全部自己实现。线级细节留在自己手里，才能为后续的连接指纹定制留出空间 |
+| **密码学绝不手搓** | TLS 由 **mbedTLS** 提供（本轮只编入静态库、暂不向 Dial 暴露 TLS API）；gzip / deflate 解压由 **zlib** 提供。协议层自己写，密码学与压缩算法一律用成熟实现 |
+| **两层 API** | 底层「流式」：`connect` / `write` / `write_line` / `read_line` / `read_all` —— 调用方自己拼报文；高层「一次请求」：`get` / `post` + `HttpResponse` 访问器（状态码 / 响应体 / 响应头 / 按序号遍历） |
+| **错误走返回码** | 不抛 Dial 异常（包不假定宿主装了异常栈）：失败返回空句柄（`is_null` 可判），原因取 `dial_http_last_error()` / `dial_http_last_error_msg()`（**线程局部**错误槽，多线程各看各的） |
+| **句柄不进 ARC** | `HttpConn` / `HttpResponse` 是不透明句柄，释放必须显式（`dial_http_close` / `dial_http_resp_free`）——与 stdlib 的文件句柄同一口径 |
+| **离线可复现** | mbedTLS 3.6.2 与 zlib 1.3.1 **vendor 进仓库**（`third_party/`），保留上游 LICENSE 与版权声明；构建不依赖外网，上游变动也不会悄悄改掉产物 |
+
+**为让包能引用标准库 API 而修的链接顺序**：静态归档由链接器**从左到右**扫描，
+符号只有在其归档被扫描时仍处于「未定义」状态，对应成员才会被拉进来。原顺序是
+`obj → runtime → stdlib → packages`，于是包**无法**引用标准库符号——而包要向 Dial
+返回 `string` / `bytes`，就必须构造带引用计数头的堆对象（`dial_string_new` /
+`dial_bytes_new`），必然要引用标准库。改为 `obj → runtime → packages → stdlib`：
+包先于标准库被扫描，标准库从不反向引用包符号，次序安全。
+
+**写包时踩到的两个 FFI 约定坑（已写进包内注释，供后续包作者参考）**：
+
+1. Dial 的 `string` 跨到 C 时传的是**载荷指针**（布局 `[int64 len][bytes...]`），
+   **不是字节首地址**——标准库因此才用 `dial_string_cstr()` 取文本（载荷 + 8）。
+   把收到的字符串直接当 `const char *` 用，host 就会带上前导的长度字段。
+2. 读响应体必须**先取连接的读缓冲**再读 socket：行读取可能已经把整份响应吞进缓冲
+   （服务器发完就关闭时，一次 `recv` 就把响应全读了进来），若直接去 socket 读，
+   缓冲里的 body 会被漏掉，而 socket 那边已关闭 → 误报「连接提前关闭」。
+
+**一处刻意不动语言的地方**：Dial 的字符串字面量只支持 `\n \t \\ \"` 四种转义，
+**不支持 `\r`**（README §字面量表），而 HTTP 的行结束符恰恰是 CRLF。为发一个 HTTP 包
+就顺带改语言不合适——因此包里提供 `dial_http_write_line`，由它补 CRLF：
+既贴合 HTTP 语义，又不动语言。
+
+**W 组回归**（新增第 23 组）：三平台静态库构建、打包 + 安装（manifest / 逐文件
+SHA256 自检）、`import "http"` 编译运行、本地 HTTP 服务器端到端
+（200 / 404 / POST 回显 / chunked / gzip 解压 / 多响应头含同名多值 / 低层流式）、
+三条错误路径（`https://` 本轮未接线 / URL 缺主机名 / 连接失败）必须**明确失败**。
+
+**后续（尚未落地，不许当已支持）**：TLS 接线（mbedTLS 已在包里，只需握手与证书校验）、
+连接复用（keep-alive）、其余三个包（`text` 正则 / `json` / `crypto` 摘要）。

@@ -173,6 +173,39 @@
   - **本批明确不碰（按裁决划清界限）**：B1（`impl` 方法，暂用 `fn` 替代）、
     B2（用户泛型，死守单态化底线）、B3（枚举 ADT，不引入 Tagged Union）；
     B5（函数名重载）与 B4（闭包）维持**永久否决**。C11（`http.dialpkg` 独立包）待落地。
+- **C11 独立包第一包：`http.dialpkg`**（§37.5「常用库走独立包」的落地），
+  落在 `packages/http/` + `third_party/`：
+  - **按领域拆包，本轮只落地 `http`**：正则 / JSON / 摘要 / Base64 各自成包
+    （`text` / `json` / `crypto`），后续批次逐个补。
+  - **协议层自研**：`packages/http/src/dial_http.c` 实现 URL 解析、请求行与 Header
+    拼装、响应报文解析（状态行 / 头部 / `Content-Length` / `chunked` / 读到关闭）、
+    Socket 读写——线级细节留在自己手里，为后续的连接指纹定制留出空间。
+  - **密码学绝不手搓**：TLS 由 **mbedTLS 3.6.2** 提供（本轮只编入静态库、
+    暂不向 Dial 暴露 TLS API），gzip / deflate 解压由 **zlib 1.3.1** 提供；
+    两者 **vendor 进仓库**（`third_party/`，保留上游 LICENSE 与版权声明），
+    构建离线可复现；zlib 裁掉 `gz*.c`（gzip **文件** API，依赖 POSIX `lseek`，
+    与 HTTP 内存解压无关且编不过 Windows / musl 目标）。
+  - **两层 API**：底层「流式」（`connect` / `write` / `write_line` / `read_line` /
+    `read_all`，调用方自己拼报文）+ 高层「一次请求」（`get` / `post` +
+    `HttpResponse` 访问器：状态码 / 响应体 / 按名取头 / 按序号遍历）。
+  - **错误与所有权口径**：包不抛 Dial 异常（不假定宿主装了异常栈），失败返回空句柄
+    （`is_null` 可判），原因取自**线程局部**最近错误槽；不透明句柄**不进 ARC**，
+    释放必须显式（`dial_http_close` / `dial_http_resp_free`）。
+  - **链接顺序修正**（编译器侧）：静态归档由链接器从左到右扫描，符号只有在其归档
+    被扫描时仍处于「未定义」状态才会被拉入。包要向 Dial 返回 `string` / `bytes`
+    就必须引用标准库的 `dial_string_new` / `dial_bytes_new`，故顺序由
+    `obj → runtime → stdlib → packages` 改为 `obj → runtime → packages → stdlib`。
+  - **两条写包必备的 FFI 约定**（已写进包内注释）：Dial 的 `string` 跨到 C 传的是
+    **载荷指针**（`[int64 len][bytes...]`），须用 `dial_string_cstr()` 取文本；
+    带缓冲的读取器必须先取缓冲再读 socket，否则会漏掉已吞进缓冲的响应体并误报
+    「连接提前关闭」。
+  - **一处刻意不动语言**：Dial 字符串字面量只支持 `\n \t \\ \"`、**不支持 `\r`**，
+    而 HTTP 行结束符是 CRLF——因此包提供 `dial_http_write_line` 负责补 CRLF，
+    不为发一个 HTTP 包顺带改语言。
+  - **W 组回归**（新增第 23 组）：三平台静态库构建、打包 + 安装（manifest /
+    逐文件 SHA256 自检）、`import "http"` 编译运行、本地 HTTP 服务器端到端
+    （200 / 404 / POST 回显 / chunked / gzip 解压 / 多响应头含同名多值 / 低层流式）、
+    三条错误路径（`https://` 未接线 / URL 缺主机名 / 连接失败）必须明确失败。
 - **宪法裁决入文档（§37）**：`STDLIB_ABI 5 → 6`（`make_stdlib_pkg.py` 默认、
   CI 两处、`dialc new` 骨架同步，后者改为引用 `package::STDLIB_ABI` 消除硬编码）；
   术语统一为「绝不引入可变全局状态」；「函数名重载」「闭包」写入**永久否决**；

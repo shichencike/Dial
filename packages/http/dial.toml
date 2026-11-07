@@ -4,7 +4,10 @@ abi = 6
 iface = "http.diali"
 license = "MIT OR Apache-2.0"
 
+# 键名必须与编译器 package::host_triple() 的取值**逐字一致**
+# （x86_64-linux-gnu / aarch64-unknown-linux-musl / x86_64-pc-windows-gnu），
+# 否则用户装上包后，编译器按 host_triple() 选不到机器码。
 [targets]
 x86_64-linux-gnu = "lib/x86_64-linux-gnu/libhttp.a"
-aarch64-linux-musl = "lib/aarch64-linux-musl/libhttp.a"
-x86_64-windows-gnu = "lib/x86_64-windows-gnu/libhttp.a"
+aarch64-unknown-linux-musl = "lib/aarch64-unknown-linux-musl/libhttp.a"
+x86_64-pc-windows-gnu = "lib/x86_64-pc-windows-gnu/libhttp.a"

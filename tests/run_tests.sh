@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 二十二组检查，全部通过才算绿（顺序为 A→V，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 二十三组检查，全部通过才算绿（顺序为 A→W，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -39,6 +39,8 @@
 #      数组 API C5、文件/环境/时间 C7/C9/C10 的标准库全量（v1.04 增补）。
 #   V. B/C 组缺口第三批：语言机制——B7 文件级只读 const（禁止可变全局状态）、
 #      B8 结构体字段编译期常量默认值、B6 结构体进容器（Point[] / map<string,Struct>）（v1.04 增补）。
+#   W. C11 独立包：http.dialpkg 端到端——三平台构建 / 打包安装 / import 编译运行 /
+#      两层 API（高层 get-post + 低层流式）/ gzip 解压 / chunked / 错误路径（v1.04 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -1298,6 +1300,71 @@ if "$DIALC" build tests/bad/struct_map_handle_field.dial -o "${TMP}/v_hf2" >"${T
 elif grep -q "map<" "${TMP}/v_hf2.log"; then
     vpass "B6：含句柄字段的结构体作 map 值编译期拒绝"
 else vbad "B6：map 值被拒但诊断未说明原因"; fi
+
+echo
+echo "== W) C11 独立包：http.dialpkg 端到端（自研 HTTP/1.1 + gzip 解压，v1.04 增补） =="
+wpass() { echo "  ✅ $1"; }
+wbad()  { echo "  ❌ $1"; fail=1; }
+
+# 1) 构建三平台静态库（自研 HTTP 层 + zlib 核心 + mbedTLS）。
+if bash packages/http/build.sh >"${TMP}/w_build.log" 2>&1; then
+    wpass "http 包三平台静态库构建完成（linux-gnu / musl / windows-gnu）"
+else wbad "http 包静态库构建失败"; tail -8 "${TMP}/w_build.log"; fi
+
+# 2) 打包 + 安装（走 §25 包分发链路：manifest / 逐文件 SHA256 自检）。
+if "$DIALC" pack packages/http -o "${TMP}/http.dialpkg" >"${TMP}/w_pack.log" 2>&1 \
+   && "$DIALC" install "${TMP}/http.dialpkg" >"${TMP}/w_install.log" 2>&1; then
+    wpass "http.dialpkg 打包 + 安装成功（manifest / SHA256 自检通过）"
+else wbad "http.dialpkg 打包或安装失败"; tail -8 "${TMP}/w_pack.log" "${TMP}/w_install.log"; fi
+
+# 3) 起本地 HTTP 服务器（覆盖 200 / 404 / POST 回显 / chunked / gzip / 多响应头）。
+rm -f "${TMP}/w_port"
+python3 tests/pkg/http_test_server.py "${TMP}/w_port" >"${TMP}/w_srv.log" 2>&1 &
+SRV_PID=$!
+PORT=""
+for _ in $(seq 1 50); do
+    if [ -s "${TMP}/w_port" ]; then PORT="$(cat "${TMP}/w_port")"; break; fi
+    sleep 0.1
+done
+if [ -n "$PORT" ]; then
+    wpass "本地 HTTP 服务器就绪（端口 $PORT）"
+else
+    wbad "本地 HTTP 服务器未就绪"
+fi
+
+# 4) import \"http\" 编译 + 运行：两层 API 与各协议要点。
+if [ -n "$PORT" ] \
+   && DIAL_HTTP_TEST_BASE="http://127.0.0.1:$PORT" \
+      "$DIALC" build tests/pkg/use_http.dial -o "${TMP}/use_http" >"${TMP}/w_comp.log" 2>&1; then
+    out=$(DIAL_HTTP_TEST_BASE="http://127.0.0.1:$PORT" "${TMP}/use_http" 2>&1)
+    if printf '%s\n' "$out" | grep -q 'status = 200' \
+       && printf '%s\n' "$out" | grep -q 'body = hello dial http' \
+       && printf '%s\n' "$out" | grep -q 'x_dial_test = hello' \
+       && printf '%s\n' "$out" | grep -q 'ctype = text/plain' \
+       && printf '%s\n' "$out" | grep -q 'nf_status = 404' \
+       && printf '%s\n' "$out" | grep -q 'post_body = dial-body-123' \
+       && printf '%s\n' "$out" | grep -q 'chunked_body = chunk-one|chunk-two|chunk-three' \
+       && printf '%s\n' "$out" | grep -q 'gzip_body = gzip-compressed-payload-gzip-compressed-payload-' \
+       && printf '%s\n' "$out" | grep -q 'multi_count = 7' \
+       && printf '%s\n' "$out" | grep -q 'raw_status_line = HTTP/1.1 200 OK' ; then
+        wpass "高层 API（GET/POST/响应头/404）+ gzip 解压 + chunked + 低层流式 端到端通过"
+    else wbad "W 组：use_http 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
+else wbad "use_http（import \"http\"）编译失败"; tail -8 "${TMP}/w_comp.log"; fi
+
+# 5) 错误路径：https 未接线 / URL 缺主机名 / 连不上 —— 都必须**明确失败**而非静默成功。
+if [ -n "$PORT" ]; then
+    out=$(DIAL_HTTP_TEST_BASE="http://127.0.0.1:$PORT" "${TMP}/use_http" 2>&1)
+    if printf '%s\n' "$out" | grep -q 'tls_is_null = true' \
+       && printf '%s\n' "$out" | grep -q 'nourl_is_null = true' \
+       && printf '%s\n' "$out" | grep -q 'bad_is_null = true' ; then
+        wpass "错误路径明确失败（https 未接线 / URL 非法 / 连接失败）"
+    else wbad "W 组：错误路径未按预期失败"; printf '%s\n' "$out" | head -20; fi
+fi
+
+# 6) 清理：停服务器、卸包（不污染后续测试与用户环境）。
+if [ -n "${SRV_PID:-}" ]; then kill "$SRV_PID" >/dev/null 2>&1 || true; fi
+"$DIALC" uninstall http >/dev/null 2>&1 || true
+wpass "清理完成（服务器已停、http 包已卸载）"
 
 echo
 if [ $fail -eq 0 ]; then

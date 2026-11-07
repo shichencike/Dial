@@ -392,6 +392,7 @@
 <li><a href="#377-第一批已落地本轮交付">37.7 第一批已落地（本轮交付）</a></li>
 <li><a href="#378-第二批已落地c-组标准库-api-全量">37.8 第二批已落地（C 组标准库 API 全量）</a></li>
 <li><a href="#379-第三批已落地语言机制b7--b8--b6">37.9 第三批已落地（语言机制：B7 / B8 / B6）</a></li>
+<li><a href="#3710-c11-第一包已落地httpdialpkg自研-http11--gzip-解压">37.10 C11 第一包已落地：http.dialpkg（自研 HTTP/1.1 + gzip 解压）</a></li>
 </ul>
 </li>
 </ul>
@@ -8316,7 +8317,69 @@ B6 内存专项：3M 次 <code>Point[]</code> 建放、1M 次 <code>map&lt;strin
 <p><strong>本批明确不碰（按裁决划清界限）</strong>：B1（<code>impl</code> 方法——暂用 <code>fn</code> 替代）、
 B2（用户泛型——死守单态化底线，不做）、B3（枚举 ADT——不引入 Tagged Union，
 保持类型系统极简）、C11（<code>http.dialpkg</code> 独立包，下一批）。
-B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。</p></main></div>
+B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。</p>
+<h3 id="3710-c11-第一包已落地httpdialpkg自研-http11--gzip-解压">37.10 C11 第一包已落地：<code>http.dialpkg</code>（自研 HTTP/1.1 + gzip 解压）</h3>
+<p>§37.5 定了「常用库走独立包、不进标准库包」，并按领域拆包：<strong>本轮只落地 <code>http</code> 包</strong>。
+正则 / JSON / 摘要 / Base64 各自成包（<code>text</code> / <code>json</code> / <code>crypto</code>），后续批次逐个补。</p>
+<table>
+<thead>
+<tr>
+<th>决策</th>
+<th>落地方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>协议层自研</strong></td>
+<td><code>packages/http/src/dial_http.c</code>：URL 解析、请求行与 Header 拼装、响应报文解析（状态行 / 头部 / <code>Content-Length</code> / <code>chunked</code> / 读到关闭）、Socket 读写，全部自己实现。线级细节留在自己手里，才能为后续的连接指纹定制留出空间</td>
+</tr>
+<tr>
+<td><strong>密码学绝不手搓</strong></td>
+<td>TLS 由 <strong>mbedTLS</strong> 提供（本轮只编入静态库、暂不向 Dial 暴露 TLS API）；gzip / deflate 解压由 <strong>zlib</strong> 提供。协议层自己写，密码学与压缩算法一律用成熟实现</td>
+</tr>
+<tr>
+<td><strong>两层 API</strong></td>
+<td>底层「流式」：<code>connect</code> / <code>write</code> / <code>write_line</code> / <code>read_line</code> / <code>read_all</code> —— 调用方自己拼报文；高层「一次请求」：<code>get</code> / <code>post</code> + <code>HttpResponse</code> 访问器（状态码 / 响应体 / 响应头 / 按序号遍历）</td>
+</tr>
+<tr>
+<td><strong>错误走返回码</strong></td>
+<td>不抛 Dial 异常（包不假定宿主装了异常栈）：失败返回空句柄（<code>is_null</code> 可判），原因取 <code>dial_http_last_error()</code> / <code>dial_http_last_error_msg()</code>（<strong>线程局部</strong>错误槽，多线程各看各的）</td>
+</tr>
+<tr>
+<td><strong>句柄不进 ARC</strong></td>
+<td><code>HttpConn</code> / <code>HttpResponse</code> 是不透明句柄，释放必须显式（<code>dial_http_close</code> / <code>dial_http_resp_free</code>）——与 stdlib 的文件句柄同一口径</td>
+</tr>
+<tr>
+<td><strong>离线可复现</strong></td>
+<td>mbedTLS 3.6.2 与 zlib 1.3.1 <strong>vendor 进仓库</strong>（<code>third_party/</code>），保留上游 LICENSE 与版权声明；构建不依赖外网，上游变动也不会悄悄改掉产物</td>
+</tr>
+</tbody>
+</table>
+<p><strong>为让包能引用标准库 API 而修的链接顺序</strong>：静态归档由链接器<strong>从左到右</strong>扫描，
+符号只有在其归档被扫描时仍处于「未定义」状态，对应成员才会被拉进来。原顺序是
+<code>obj → runtime → stdlib → packages</code>，于是包<strong>无法</strong>引用标准库符号——而包要向 Dial
+返回 <code>string</code> / <code>bytes</code>，就必须构造带引用计数头的堆对象（<code>dial_string_new</code> /
+<code>dial_bytes_new</code>），必然要引用标准库。改为 <code>obj → runtime → packages → stdlib</code>：
+包先于标准库被扫描，标准库从不反向引用包符号，次序安全。</p>
+<p><strong>写包时踩到的两个 FFI 约定坑（已写进包内注释，供后续包作者参考）</strong>：</p>
+<ol>
+<li>Dial 的 <code>string</code> 跨到 C 时传的是<strong>载荷指针</strong>（布局 <code>[int64 len][bytes...]</code>），
+   <strong>不是字节首地址</strong>——标准库因此才用 <code>dial_string_cstr()</code> 取文本（载荷 + 8）。
+   把收到的字符串直接当 <code>const char *</code> 用，host 就会带上前导的长度字段。</li>
+<li>读响应体必须<strong>先取连接的读缓冲</strong>再读 socket：行读取可能已经把整份响应吞进缓冲
+   （服务器发完就关闭时，一次 <code>recv</code> 就把响应全读了进来），若直接去 socket 读，
+   缓冲里的 body 会被漏掉，而 socket 那边已关闭 → 误报「连接提前关闭」。</li>
+</ol>
+<p><strong>一处刻意不动语言的地方</strong>：Dial 的字符串字面量只支持 <code>\n \t \\ \"</code> 四种转义，
+<strong>不支持 <code>\r</code></strong>（README §字面量表），而 HTTP 的行结束符恰恰是 CRLF。为发一个 HTTP 包
+就顺带改语言不合适——因此包里提供 <code>dial_http_write_line</code>，由它补 CRLF：
+既贴合 HTTP 语义，又不动语言。</p>
+<p><strong>W 组回归</strong>（新增第 23 组）：三平台静态库构建、打包 + 安装（manifest / 逐文件
+SHA256 自检）、<code>import "http"</code> 编译运行、本地 HTTP 服务器端到端
+（200 / 404 / POST 回显 / chunked / gzip 解压 / 多响应头含同名多值 / 低层流式）、
+三条错误路径（<code>https://</code> 本轮未接线 / URL 缺主机名 / 连接失败）必须<strong>明确失败</strong>。</p>
+<p><strong>后续（尚未落地，不许当已支持）</strong>：TLS 接线（mbedTLS 已在包里，只需握手与证书校验）、
+连接复用（keep-alive）、其余三个包（<code>text</code> 正则 / <code>json</code> / <code>crypto</code> 摘要）。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

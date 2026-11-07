@@ -410,6 +410,39 @@
 <li><strong>本批明确不碰（按裁决划清界限）</strong>：B1（<code>impl</code> 方法，暂用 <code>fn</code> 替代）、
     B2（用户泛型，死守单态化底线）、B3（枚举 ADT，不引入 Tagged Union）；
     B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。C11（<code>http.dialpkg</code> 独立包）待落地。</li>
+<li><strong>C11 独立包第一包：<code>http.dialpkg</code></strong>（§37.5「常用库走独立包」的落地），
+  落在 <code>packages/http/</code> + <code>third_party/</code>：</li>
+<li><strong>按领域拆包，本轮只落地 <code>http</code></strong>：正则 / JSON / 摘要 / Base64 各自成包
+    （<code>text</code> / <code>json</code> / <code>crypto</code>），后续批次逐个补。</li>
+<li><strong>协议层自研</strong>：<code>packages/http/src/dial_http.c</code> 实现 URL 解析、请求行与 Header
+    拼装、响应报文解析（状态行 / 头部 / <code>Content-Length</code> / <code>chunked</code> / 读到关闭）、
+    Socket 读写——线级细节留在自己手里，为后续的连接指纹定制留出空间。</li>
+<li><strong>密码学绝不手搓</strong>：TLS 由 <strong>mbedTLS 3.6.2</strong> 提供（本轮只编入静态库、
+    暂不向 Dial 暴露 TLS API），gzip / deflate 解压由 <strong>zlib 1.3.1</strong> 提供；
+    两者 <strong>vendor 进仓库</strong>（<code>third_party/</code>，保留上游 LICENSE 与版权声明），
+    构建离线可复现；zlib 裁掉 <code>gz*.c</code>（gzip <strong>文件</strong> API，依赖 POSIX <code>lseek</code>，
+    与 HTTP 内存解压无关且编不过 Windows / musl 目标）。</li>
+<li><strong>两层 API</strong>：底层「流式」（<code>connect</code> / <code>write</code> / <code>write_line</code> / <code>read_line</code> /
+    <code>read_all</code>，调用方自己拼报文）+ 高层「一次请求」（<code>get</code> / <code>post</code> +
+    <code>HttpResponse</code> 访问器：状态码 / 响应体 / 按名取头 / 按序号遍历）。</li>
+<li><strong>错误与所有权口径</strong>：包不抛 Dial 异常（不假定宿主装了异常栈），失败返回空句柄
+    （<code>is_null</code> 可判），原因取自<strong>线程局部</strong>最近错误槽；不透明句柄<strong>不进 ARC</strong>，
+    释放必须显式（<code>dial_http_close</code> / <code>dial_http_resp_free</code>）。</li>
+<li><strong>链接顺序修正</strong>（编译器侧）：静态归档由链接器从左到右扫描，符号只有在其归档
+    被扫描时仍处于「未定义」状态才会被拉入。包要向 Dial 返回 <code>string</code> / <code>bytes</code>
+    就必须引用标准库的 <code>dial_string_new</code> / <code>dial_bytes_new</code>，故顺序由
+    <code>obj → runtime → stdlib → packages</code> 改为 <code>obj → runtime → packages → stdlib</code>。</li>
+<li><strong>两条写包必备的 FFI 约定</strong>（已写进包内注释）：Dial 的 <code>string</code> 跨到 C 传的是
+    <strong>载荷指针</strong>（<code>[int64 len][bytes...]</code>），须用 <code>dial_string_cstr()</code> 取文本；
+    带缓冲的读取器必须先取缓冲再读 socket，否则会漏掉已吞进缓冲的响应体并误报
+    「连接提前关闭」。</li>
+<li><strong>一处刻意不动语言</strong>：Dial 字符串字面量只支持 <code>\n \t \\ \"</code>、<strong>不支持 <code>\r</code></strong>，
+    而 HTTP 行结束符是 CRLF——因此包提供 <code>dial_http_write_line</code> 负责补 CRLF，
+    不为发一个 HTTP 包顺带改语言。</li>
+<li><strong>W 组回归</strong>（新增第 23 组）：三平台静态库构建、打包 + 安装（manifest /
+    逐文件 SHA256 自检）、<code>import "http"</code> 编译运行、本地 HTTP 服务器端到端
+    （200 / 404 / POST 回显 / chunked / gzip 解压 / 多响应头含同名多值 / 低层流式）、
+    三条错误路径（<code>https://</code> 未接线 / URL 缺主机名 / 连接失败）必须明确失败。</li>
 <li><strong>宪法裁决入文档（§37）</strong>：<code>STDLIB_ABI 5 → 6</code>（<code>make_stdlib_pkg.py</code> 默认、
   CI 两处、<code>dialc new</code> 骨架同步，后者改为引用 <code>package::STDLIB_ABI</code> 消除硬编码）；
   术语统一为「绝不引入可变全局状态」；「函数名重载」「闭包」写入<strong>永久否决</strong>；

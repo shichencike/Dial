@@ -151,7 +151,35 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: 端到端测试（A~M 共十三组）
+      # 阶段 8：C11 独立包 http.dialpkg（自研 HTTP/1.1 + gzip 解压）。
+      # 三平台机器码由 zig cc 一次交叉编译；mbedTLS / zlib 已 vendor 进仓库，
+      # 构建不依赖外网（§37.5 的「离线可复现」）。
+      # **必须排在「端到端测试」之前**：W 组回归要自己构建这个包。
+      - name: 安装 zig（http 包三平台交叉编译）
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: 构建 http.dialpkg（三平台）
+        run: |
+          set -euo pipefail
+          bash packages/http/build.sh
+          PKG_VER="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          # 包版本跟随编译器版本（与 stdlib.dialpkg 同一口径）
+          sed -i "s/^version = .*/version = \"$PKG_VER\"/" packages/http/dial.toml
+          ./target/release/dialc pack packages/http -o dist-http/http.dialpkg
+          echo "--- http.dialpkg 内容 ---"
+          unzip -l dist-http/http.dialpkg
+
+      - name: 上传 http.dialpkg
+        uses: actions/upload-artifact@v4
+        with:
+          name: http-dialpkg
+          path: dist-http/http.dialpkg
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 端到端测试（A~W 共二十三组）
         run: bash tests/run_tests.sh
 
       # CVE 暴力检测器：为每个已登记漏洞构造触发用例（PoC），用 dialc 编译/运行，
@@ -607,6 +635,7 @@ jobs:
             dist/**/dialc-v*.zip
             editors/vscode/dial-*.vsix
             dist-stdlib/stdlib.dialpkg
+            dist/http-dialpkg/http.dialpkg
           overwrite: true          # 允许重发时覆盖同名资产（重指标签重跑发布用）
           fail_on_unmatched_files: true
           generate_release_notes: true
