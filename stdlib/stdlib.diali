@@ -38,6 +38,9 @@ extern fn dial_array_length(a: DialArray): int;
 extern fn dial_array_clone(a: DialArray): DialArray;
 extern fn dial_array_retain(a: DialArray): void;
 extern fn dial_array_release(a: DialArray): void;
+/// v1.04 B11：半开区间 [from, to) 切片，返回**新数组**，不改变接收者。
+/// 与切片语法 a[from..to]、方法 a.slice(from, to) 共用同一份 C 实现。
+extern fn dial_array_slice(a: DialArray, from: int, to: int): DialArray;
 
 // ---- 映射（int -> int，ARC）----
 type DialMap;
@@ -50,6 +53,14 @@ extern fn dial_map_remove(m: DialMap, key: int): int;
 extern fn dial_map_size(m: DialMap): int;
 extern fn dial_map_retain(m: DialMap): void;
 extern fn dial_map_release(m: DialMap): void;
+/// v1.04 C6：一次探测把「未命中」与「真实值恰好等于 def」彻底分开。
+extern fn dial_map_get_or(m: DialMap, key: int, def: int): int;
+
+// ---- 泛型映射 map<K,V>（键/值按位模式压成 int64，仅标量 V 支持 get_or）----
+type DialKvMap;
+/// v1.04 C6：与 dial_map_get_or 同款「一次探测」；def 为 V 的位模式（标量）。
+/// 句柄值 V 刻意不走这里，避免默认字符串 retain 的所有权歧义。
+extern fn dial_kvmap_get_or(m: DialKvMap, key: int, def: int): int;
 
 // ---- IO / 打印 ----
 extern fn dial_print_int(v: int): void;
@@ -65,6 +76,17 @@ extern fn dial_write_char(code: int): void;
 extern fn dial_print_raw_int(v: int): void;
 extern fn dial_print_raw_float(v: float): void;
 extern fn dial_print_raw_bool(b: int): void;
+/// v1.04 C8：stderr 输出族，与 stdout 族逐一对应（只换输出流，不引入可变全局状态）。
+extern fn dial_eprint_int(v: int): void;
+extern fn dial_eprint_float(v: float): void;
+extern fn dial_eprint_bool(b: int): void;
+extern fn dial_eprint_char(code: int): void;
+extern fn dial_eprint_string(s: DialString): void;
+extern fn dial_eprint_raw(s: DialString): void;
+extern fn dial_eprint_write_char(code: int): void;
+extern fn dial_eprint_raw_int(v: int): void;
+extern fn dial_eprint_raw_float(v: float): void;
+extern fn dial_eprint_raw_bool(b: int): void;
 extern fn dial_read_line(): DialString;
 
 // ---- 文件（显式 open/close，不受 ARC 管理）----

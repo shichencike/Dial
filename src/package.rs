@@ -43,7 +43,14 @@ use crate::error::{DialcError, Result};
 /// 只要写了裸指针程序，仍会撞上难懂的 `undefined symbol: dial_raw_alloc`。
 /// 判据是「编译器是否可能要求旧包没有的符号」，因此同样递增，让旧包在链接期
 /// 就被明确拦下并给出重装指引——ABI 校验这道安全网不能因为引用是条件性的就放过。
-pub const STDLIB_ABI: u64 = 5;
+///
+/// v1.04 增补（B/C 组缺口）起为 **6**：新增 `dial_eprint_*` stderr 输出族、
+/// `dial_map_get_or` / `dial_kvmap_get_or`，以及后续 C 组标准库 API 的一批
+/// `dial_*` 导出符号。这些全是**条件引用**（只有用到 eprint / get_or / 新 API
+/// 的程序才产生调用），但判据不变：装 abi=5 旧包的用户一旦写了 `eprint(...)`，
+/// 就会撞上 `undefined symbol: dial_eprint_int`。因此递增到 6，让旧包在链接期
+/// 被明确拦下并给出重装指引，而不是把 ABI 不匹配藏成一句难懂的链接错误。
+pub const STDLIB_ABI: u64 = 6;
 
 /// 全局包缓存根目录：`~/.dial/packages/`（Windows：`%USERPROFILE%\.dial\packages\`）。
 ///

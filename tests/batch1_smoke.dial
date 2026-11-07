@@ -1,0 +1,44 @@
+// 第一批（B9/B10/B11/C6/C8）端到端冒烟测试。
+// 覆盖：块注释、C 风格 ! 逻辑非、数组 .slice()、map.get_or / kvmap.get_or、eprint。
+
+/* 这是 B9 块注释，
+   可以跨多行。
+   里面甚至可以有 // 和 * / 之外的东西（此处刻意不写结束符以免嵌套）。 */
+fn main(): int {
+    // B10：! 作为一元逻辑非，与 not 等价；!= 仍是不等号。
+    var ok: bool = !false;
+    var also: bool = not false;
+    print("B10 !false = ", ok, " / not false = ", also);
+    print("B10 !true = ", !true, " / 3 != 4 = ", 3 != 4);
+
+    // B11：.slice(from, to) 与 a[from..to] 等价，半开区间。
+    var a: int[] = [10, 20, 30, 40, 50];
+    var s: int[] = a.slice(1, 4);
+    var t: int[] = a[1..4];
+    print("B11 slice len = ", s.length(), " / bracket len = ", t.length());
+    print("B11 slice = ", s.get(0), ",", s.get(1), ",", s.get(2));
+
+    // C6：普通 map 的 get_or —— 区分「没找到」与「真实值 == -1」。
+    var m: map = new_map();
+    m.put(1, 100);
+    m.put(2, -1);
+    print("C6 map hit = ", m.get_or(1, 999));
+    print("C6 map real -1 = ", m.get_or(2, 999));
+    print("C6 map miss = ", m.get_or(7, 999));
+
+    // C6：泛型 map<string,int> 的 get_or。
+    var kv: map<string, int> = new_kv_map();
+    kv.put("a", 7);
+    print("C6 kv hit = ", kv.get_or("a", 0));
+    print("C6 kv miss = ", kv.get_or("missing", 0));
+
+    // C8：eprint / eprint_raw 写 stderr；stdout 与 stderr 分流。
+    eprint("C8 eprint line");
+    eprint("C8 ", 42, " ", 3.5, " ", true);
+    eprint_raw("C8 raw ");
+    eprint_raw("joined");
+    eprint_raw("\n");
+    print("C8 stdout still clean");
+
+    return 0;
+}

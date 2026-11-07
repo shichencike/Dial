@@ -30,6 +30,11 @@ DialKvMap dial_kvmap_put(DialKvMap m, int64_t key_bits, int64_t val_bits);
 
 /* 返回值的位模式；未命中返回 V 的默认值（-1 / -1.0 / 0）。 */
 int64_t dial_kvmap_get(DialKvMap m, int64_t key_bits);
+/* v1.04 C6：命中返回真实值的位模式，未命中返回调用方给的默认值位模式。
+ * 仅用于标量 V（int/float/bool/char/byte）：这些值的位模式无 ARC 所有权，
+ * 默认值可以安全地按值返回。句柄 V（string）刻意不走这里，避免「返回的默认
+ * 字符串该由谁 retain」的歧义——那种情况请用 contains + get 显式处理。 */
+int64_t dial_kvmap_get_or(DialKvMap m, int64_t key_bits, int64_t def_bits);
 int64_t dial_kvmap_contains(DialKvMap m, int64_t key_bits);
 int64_t dial_kvmap_remove(DialKvMap m, int64_t key_bits);
 int64_t dial_kvmap_size(DialKvMap m);

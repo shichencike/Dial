@@ -75,4 +75,20 @@ DialString dial_file_read(DialFile f, int64_t n);   /* 读最多 n 字节，失�
 int64_t   dial_file_write(DialFile f, DialString content); /* 返回写入字节数，失败返回 -1 */
 void      dial_file_close(DialFile f);              /* 空指针安全 */
 
+/* ---- stderr 输出（v1.04 C8）：与 dial_print_* 一一对称，只换输出流 ----
+ * 目的：让日志 / 诊断与正常输出分流。刻意**不引入可变全局状态**（宪法 §1
+ * 「绝不引入可变全局状态」）：没有「当前输出流」开关、没有全局 FILE*，
+ * 每个函数直接写 stderr，纯函数式、线程安全、可推理。
+ * 文本形态（含是否补 '\n'）与 stdout 版本完全一致。 */
+void dial_eprint_int(int64_t v);
+void dial_eprint_float(double v);
+void dial_eprint_bool(int64_t b);
+void dial_eprint_char(int64_t code);
+void dial_eprint_string(DialString s);
+void dial_eprint_raw(DialString s);
+void dial_eprint_write_char(int64_t code);
+void dial_eprint_raw_int(int64_t v);
+void dial_eprint_raw_float(double v);
+void dial_eprint_raw_bool(int64_t b);
+
 #endif /* DIAL_IO_H */

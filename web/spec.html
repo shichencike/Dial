@@ -382,6 +382,16 @@
 <li><a href="#365-实现落点">36.5 实现落点</a></li>
 </ul>
 </li>
+<li><a href="#37-v104-增补真实程序缺口补齐与宪法裁决并入-v104分-3-批">37. v1.04 增补：真实程序缺口补齐与宪法裁决（并入 [v1.04]，分 3 批）</a><ul>
+<li><a href="#371-术语统一绝不引入可变全局状态">37.1 术语统一：绝不引入可变全局状态</a></li>
+<li><a href="#372-两条永久否决写进宪法不是尚未实现">37.2 两条永久否决（写进宪法，不是"尚未实现"）</a></li>
+<li><a href="#373-b7文件级-const-的精确语义第-3-批落地">37.3 B7：文件级 const 的精确语义（第 3 批落地）</a></li>
+<li><a href="#374-b8结构体字段默认值的精确语义第-3-批落地">37.4 B8：结构体字段默认值的精确语义（第 3 批落地）</a></li>
+<li><a href="#375-c11常用库走独立包不进标准库包">37.5 C11：常用库走独立包，不进标准库包</a></li>
+<li><a href="#376-标准库-abi-递增5--6">37.6 标准库 ABI 递增：5 → 6</a></li>
+<li><a href="#377-第一批已落地本轮交付">37.7 第一批已落地（本轮交付）</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -447,9 +457,26 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 <td><strong>Fail-Fast 底线</strong></td>
 <td>宁可当场崩溃，绝不产生未定义行为或静默错误数据；越界/除零必须当场终止，见 §20</td>
 </tr>
+<tr>
+<td><strong>绝不引入可变全局状态</strong></td>
+<td><strong>禁止任何 <code>var</code> 声明的全局变量</strong>（严防数据竞争）；只允许<strong>文件级 <code>const</code> 只读常量</strong>（含标量字面量与数组字面量），编译期降维到 LLVM <code>.rodata</code> 段或按需内联，不参与运行期可变状态管理，见 §37。术语澄清：v1.04 之前的文档写作「绝不引入全局变量」，本轮统一改为本条更精确的表述——被禁止的是<strong>可变共享状态</strong>，而非只读常量数据</td>
+</tr>
+<tr>
+<td><strong>明确否决：函数名重载</strong></td>
+<td><strong>永不提供</strong>用户可见的同名函数重载。理由：C++ 式名字改编会让 ABI 随签名集合隐式漂移，与 Dial 的「显式整数版本号 + 链接期 ABI 拦截」契约相悖，见 §37.2</td>
+</tr>
+<tr>
+<td><strong>明确否决：闭包</strong></td>
+<td><strong>永不提供</strong>闭包 / 隐式环境捕获。回调状态必须显式经 <code>rawptr&lt;void&gt;</code> 透传（v1.03 起），见 §32</td>
+</tr>
 </tbody>
 </table>
 <hr />
+<blockquote>
+<p><strong>术语统一说明（v1.04 增补）</strong>：README 与官网规范中凡出现「绝不引入全局变量」的旧措辞，
+一律统一为「<strong>绝不引入可变全局状态</strong>」。该表述在 v0.61 等历史语境下同样成立
+（当时本就没有任何全局状态），因此历史条目也一并替换、不失真；沿革见 §37.1。</p>
+</blockquote>
 <h2 id="2-目录结构">2. 目录结构</h2>
 <pre><code>dialc/
 ├── src/                    # 编译器前端（Rust + inkwell）
@@ -2824,12 +2851,12 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td><strong>永不提供</strong></td>
 </tr>
 <tr>
-<td>全局变量</td>
-<td>不支持</td>
+<td>可变全局状态（<code>var</code> 全局变量）</td>
+<td><strong>永不提供</strong>（严防数据竞争）。宪法允许的是文件级 <code>const</code> <strong>只读</strong>常量（含数组字面量），编译期降维到 <code>.rodata</code> 或内联，不参与运行期可变状态；精确语义与落地批次见 §37.1</td>
 </tr>
 <tr>
 <td>数组/结构体字面量作为常量表达式</td>
-<td>不支持（需先赋给变量）</td>
+<td>文件级 <code>const</code> 的数组字面量按 §37.1 的宪法裁决纳入只读常量；具体落地状态见 §37.4 批次表</td>
 </tr>
 <tr>
 <td><code>select</code> 语句级超时（<code>select</code> 块本身没有超时参数）</td>
@@ -3462,8 +3489,8 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <td>严格遵循「无异常」原则：打开失败返回<strong>空指针</strong>、读失败返回<strong>空串</strong>、写失败返回 <strong>-1</strong>；不为其引入 Result 封装或自动抛错</td>
 </tr>
 <tr>
-<td><strong>无全局变量</strong></td>
-<td>文件句柄必须显式传递，绝不引入全局文件状态</td>
+<td><strong>绝不引入可变全局状态</strong></td>
+<td>文件句柄必须显式传递，绝不引入全局文件状态（v1.04 §37.1 统一措辞，原写作「无全局变量」）</td>
 </tr>
 <tr>
 <td>示例与负向用例</td>
@@ -3690,7 +3717,7 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 </blockquote>
 <hr />
 <h2 id="24-文件-iofile-句柄">24. 文件 IO（file 句柄）</h2>
-<p>文件 IO 在 v0.61 落地。设计严守两条底线：<strong>绝不引入全局变量</strong>、<strong>不重写文件逻辑（只封装 C 标准库）</strong>。
+<p>文件 IO 在 v0.61 落地。设计严守两条底线：<strong>绝不引入可变全局状态</strong>（v1.04 §37.1 统一措辞，原写作「绝不引入全局变量」）、<strong>不重写文件逻辑（只封装 C 标准库）</strong>。
 文件句柄是显式传递的不透明指针（<code>file</code> 类型，IR 中为 <code>ptr</code>），封装 C 的 <code>FILE*</code>，<strong>不受 ARC 管理</strong>——
 用户必须自己 <code>open</code> 后 <code>close</code>，这与<a href="#19-内存宪法防-gc-铁律">内存宪法 §19</a>的「显式指针回收」契约一致。</p>
 <h3 id="241-api">24.1 API</h3>
@@ -7546,7 +7573,7 @@ v1.04 把产包做成编译器一等公民：</p>
 <pre><code class="language-toml"># dial.toml —— 放在项目根目录，dialc pack &lt;目录&gt; 读取
 name = &quot;mylib&quot;
 version = &quot;1.0.0&quot;
-abi = 5
+abi = 6
 iface = &quot;mylib.diali&quot;
 license = &quot;MIT OR Apache-2.0&quot;
 
@@ -7554,6 +7581,11 @@ license = &quot;MIT OR Apache-2.0&quot;
 # 值既是磁盘上相对项目根的路径，也是 .dialpkg 内的路径
 x86_64-linux-gnu = &quot;lib/x86_64-linux-gnu/libmylib.a&quot;
 </code></pre>
+<blockquote>
+<p><code>abi</code> 必须与编译器 <code>package::STDLIB_ABI</code> 一致，否则 <code>dialc install</code> 会在<strong>链接期前</strong>
+明确拦截并给重装指引（§37.6 起为 <code>6</code>）。<code>dialc new</code> 生成的骨架已改为直接引用
+<code>package::STDLIB_ABI</code>，不会写死数字；这里手写示例时按当前 ABI 填，别照抄旧值。</p>
+</blockquote>
 <p><code>dial.toml</code> 只支持 <code>key = "字符串"</code> / <code>key = 整数</code> 与 <code>[targets]</code> 一个段的 <strong>TOML 子集</strong>：
 未知字段、重复字段、点分键、缺字段一律<strong>显式报错</strong>，绝不悄悄忽略配置项。
 清单是本地作者文件、字段固定，故不引入新的 TOML 依赖（三个 target 的静态构建也少一份供应链负担）；
@@ -8048,6 +8080,123 @@ CI 产物只写 <code>/tmp</code> 再上传，<strong>绝不回写</strong> <cod
 <p><strong>本轮交付范围</strong>：并入 <code>[v1.04]</code>，编译器版本 <code>1.4.0</code> 与 <code>STDLIB_ABI 5</code> 均不变；
 只做<strong>本地提交</strong>，不推送 GitHub、不打 tag、不发 Release。性能数据随机器与负载浮动，
 网页是<strong>某次实测快照</strong>而非固定承诺值；复现以 <code>tools/bench_harness.py</code> 为准。</p>
+</blockquote>
+<hr />
+<h2 id="37-v104-增补真实程序缺口补齐与宪法裁决并入-v104分-3-批">37. v1.04 增补：真实程序缺口补齐与宪法裁决（并入 <code>[v1.04]</code>，分 3 批）</h2>
+<blockquote>
+<p>来源：<code>REPORT_v1.04_gaps.md</code>——按「普通程序员写日常程序」的思路写 54 个小程序 +
+27 个探针后整理的 B/C 组缺口清单。本章是<strong>规范与裁决</strong>，实现按批次落地，
+每批独立跑 A–T 全量回归，不破既有 403 ✅。</p>
+</blockquote>
+<h3 id="371-术语统一绝不引入可变全局状态">37.1 术语统一：绝不引入可变全局状态</h3>
+<p>v1.04 之前的文档写「绝不引入全局变量」。本轮按裁决把 README 与官网规范中的
+该措辞<strong>统一替换为</strong>「<strong>绝不引入可变全局状态</strong>」——被禁止的是<strong>可变共享状态</strong>
+（数据竞争的根源），而非只读常量数据。新表述在 v0.61 等历史语境下同样成立
+（当时本就没有任何全局状态），因此历史条目一并替换、不改写史实；§24 保留
+「原写作…」的沿革注记，便于读者对照。</p>
+<h3 id="372-两条永久否决写进宪法不是尚未实现">37.2 两条永久否决（写进宪法，不是"尚未实现"）</h3>
+<table>
+<thead>
+<tr>
+<th>否决项</th>
+<th>理由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>函数名重载（B5）</strong></td>
+<td>C++ 式名字改编让 ABI 随签名集合<strong>隐式漂移</strong>；Dial 的契约是 <code>STDLIB_ABI</code> <strong>显式整数版本号 + 链接期拦截</strong>，二者不可调和。同名函数继续按「重复定义」编译期拒绝</td>
+</tr>
+<tr>
+<td><strong>闭包 / 隐式环境捕获（B4）</strong></td>
+<td>与「零隐藏开销」「确定性内存」相悖；回调状态必须显式经 <code>rawptr&lt;void&gt;</code> 透传（v1.03 既有铁律，本轮正式入宪）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>与泛型单态化的边界</strong>：B2 泛型若采用单态化，编译器<strong>内部</strong>会为每个实例生成带后缀的符号，
+但那是 IR 私有符号，<strong>不导出到 <code>.diali</code> 契约、不改变用户可见的函数名、不影响包 ABI</strong>。
+它与被否决的「用户可见同名函数重载」是两件事，不构成对 B5 的破例。</p>
+<h3 id="373-b7文件级-const-的精确语义第-3-批落地">37.3 B7：文件级 <code>const</code> 的精确语义（第 3 批落地）</h3>
+<p>按裁决，<strong>绝对禁止任何 <code>var</code> 声明的全局变量</strong>（严防数据竞争）；只允许文件级 <code>const</code>：</p>
+<ul>
+<li>值必须是<strong>编译期常量</strong>（标量字面量、数组字面量、已定义的 const 引用）；</li>
+<li>它是<strong>不可变的只读数据</strong>，编译期降维到 LLVM <code>.rodata</code> 段或按需内联；</li>
+<li><strong>不参与运行期可变状态管理</strong>，不需要 ARC，不引入后台线程或全局构造顺序问题；</li>
+<li>与 §19 内存宪法完全兼容：只读常量不是「共享可变状态」，无环、无悬垂、无停顿。</li>
+</ul>
+<h3 id="374-b8结构体字段默认值的精确语义第-3-批落地">37.4 B8：结构体字段默认值的精确语义（第 3 批落地）</h3>
+<p>按裁决，允许在 <code>struct</code> 定义中为字段指定<strong>编译期常量默认值</strong>（如 <code>x: int = 0</code>）：</p>
+<ul>
+<li>语义上<strong>依然禁止隐式未初始化内存</strong>：用户没填某字段且该字段<strong>没有显式默认值</strong>，
+  仍然编译期报错（保留 §1「比 C 更严格」的强类型与确定性底线）；</li>
+<li>默认值必须显式写在定义里，调用方一眼可见——这与 C 的「剩余字段静默零初始化」有本质区别；</li>
+<li>§1 中「禁止省略结构体字段」的措辞随之修订为「禁止省略<strong>无默认值</strong>的字段」。</li>
+</ul>
+<h3 id="375-c11常用库走独立包不进标准库包">37.5 C11：常用库走独立包，不进标准库包</h3>
+<p>正则 / JSON / 摘要 / Base64 / HTTP 等<strong>不做标准库内建</strong>，改为独立 <code>.dialpkg</code>
+（如 <code>http.dialpkg</code>），通过 <code>import "http";</code> 使用。理由：</p>
+<ul>
+<li>与 §21.2「不引入无用依赖」一致：这些能力各自带平台差异与第三方实现，
+  塞进 <code>stdlib.dialpkg</code> 会让每个 Dial 程序都背上它们；</li>
+<li>与 §25 包分发铁律一致：包独立发版、独立校验 ABI / SHA256；</li>
+<li>语言层 FFI（§33）已提供接 C 库的能力，官方封装只是「打包好的便利」，不是语言特性。</li>
+</ul>
+<h3 id="376-标准库-abi-递增5--6">37.6 标准库 ABI 递增：5 → 6</h3>
+<p><code>STDLIB_ABI 5 → 6</code>（<code>src/package.rs</code>）。判据沿用既有约定：编译器<strong>可能要求旧包没有的符号</strong>
+即递增。本轮新增 <code>dial_eprint_*</code> stderr 输出族、<code>dial_map_get_or</code> /
+<code>dial_kvmap_get_or</code>，以及后续批次的 C 组 <code>dial_*</code> 导出。装 abi=5 旧包的用户一旦写
+<code>eprint(...)</code> 就会撞上 <code>undefined symbol: dial_eprint_int</code>，因此递增到 6，
+让旧包在链接期被<strong>明确拦下并给出重装指引</strong>。<code>make_stdlib_pkg.py</code> 默认 <code>--abi 6</code>、
+CI 两处 <code>--abi 6</code> 同步；<code>dialc new</code> 骨架的 <code>abi</code> 改为引用 <code>package::STDLIB_ABI</code>
+（消除硬编码，避免以后递增时再次漂移）。</p>
+<h3 id="377-第一批已落地本轮交付">37.7 第一批已落地（本轮交付）</h3>
+<table>
+<thead>
+<tr>
+<th>编号</th>
+<th>能力</th>
+<th>实现要点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B9</td>
+<td>块注释 <code>/* ... */</code></td>
+<td>lexer 跳过，跨行同步行号；<strong>未闭合直接 Fail-Fast 报错</strong>，绝不静默吞源码</td>
+</tr>
+<tr>
+<td>B10</td>
+<td><code>!</code> 一元逻辑非</td>
+<td>词法层复用 <code>TokenKind::Not</code>，<code>parse_not</code> / 语义 / IR 全链路零改动；<code>!=</code> 分支优先匹配不受影响</td>
+</tr>
+<tr>
+<td>B11</td>
+<td><code>a.slice(from, to)</code></td>
+<td>与切片语法 <code>a[from..to]</code> 共用 <code>dial_array_slice</code>，返回新数组，不改接收者</td>
+</tr>
+<tr>
+<td>C6</td>
+<td><code>get_or(k, default)</code></td>
+<td>普通 map 与泛型 map（标量 V）一次探测，把「未命中」与「真实值 == 默认值」彻底分开；句柄 V 由容器类型系统更早拦截，<code>get_or</code> 的拒绝分支是纵深防御</td>
+</tr>
+<tr>
+<td>C8</td>
+<td><code>eprint</code> / <code>eprint_raw</code></td>
+<td>stderr 输出族，与 <code>print</code> 逐类型对称；<strong>不引入可变全局状态</strong>（无「当前输出流」开关、无全局 <code>FILE*</code>），四个分派函数各自独立（§21.1 宁可 WET）</td>
+</tr>
+</tbody>
+</table>
+<p>C8 配套的 Fail-Fast 加固：输出族内建（<code>print</code> / <code>print_raw</code> / <code>write_char</code> /
+<code>eprint</code> / <code>eprint_raw</code>）在语义层按<strong>名字</strong>硬编码分派，此前未进入 <code>RESERVED_NAMES</code>，
+用户若定义 <code>fn eprint(...)</code> 会编译通过却在调用点被内建分支<strong>静默绕过</strong>（§20 严禁的
+静默损坏）。本轮把这 5 个名字补进保留名清单，同名定义编译期直接拒绝；既有调用不变。</p>
+<p>T 组回归锁定：stdout/stderr 严格分流、块注释未闭合 Fail-Fast、
+<code>get_or</code> 类型严格校验、函数重载（B5）仍被拒绝、输出族内建同名定义被拒。</p>
+<blockquote>
+<p><strong>本轮交付范围</strong>：并入 <code>[v1.04]</code>；编译器版本 <code>1.4.0</code> 不变，<code>STDLIB_ABI 5 → 6</code>；
+只做<strong>本地提交</strong>，不推送 GitHub、不打 tag、不发 Release。
+B1/B2/B3/B6/B7/B8 与 C1–C5/C7/C9/C10/C11 按 §37.3–37.5 的裁决在后续批次落地，
+届时同步更新本章「已落地」表——<strong>规范先于实现写清，但绝不把未实现项标成已支持</strong>。</p>
 </blockquote></main></div>
 
 <footer class="site-footer">

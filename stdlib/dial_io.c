@@ -149,3 +149,60 @@ void dial_file_close(DialFile f) {
     if (!f) return;
     fclose((FILE *)f);
 }
+
+/* ==========================================================================
+ * stderr 输出族（v1.04 C8）：eprint / eprint_raw 的 C 侧落地。
+ *
+ * 与 stdout 族逐函数对称，唯一差别是 fprintf / fwrite 的目标是 stderr。
+ * 刻意保持「一份函数一个名字」的直白形态，不抽公共宏、不引入全局流指针：
+ * 这既符合 §21.1「绝对拒绝过度抽象」，也守住宪法 §1「绝不引入可变全局状态」。
+ * char 的 UTF-8 编码与非法码点 Fail-Fast 规则同 dial_print_char / dial_write_char。
+ * ========================================================================== */
+void dial_eprint_int(int64_t v)   { fprintf(stderr, "%lld\n", (long long)v); }
+void dial_eprint_float(double v)  { fprintf(stderr, "%lf\n", v); }
+void dial_eprint_bool(int64_t b)  { fprintf(stderr, "%s\n", b ? "true" : "false"); }
+
+void dial_eprint_char(int64_t code) {
+    char buf[5];
+    int n = dial_encode_utf8(code, buf);
+    if (n < 0) {
+        fprintf(stderr, "dial: 非法的 char 码点: %lld\n", (long long)code);
+        dial_assert_fail("dial_eprint_char: 非法 Unicode 码点（合法范围 0~0x10FFFF，且不含 UTF-16 代理区 D800~DFFF）");
+    }
+    fwrite(buf, 1, (size_t)n, stderr);
+    fputc('\n', stderr);
+}
+
+void dial_eprint_string(DialString s) {
+    if (s == NULL) {
+        fprintf(stderr, "dial: eprint 收到了 NULL string\n");
+        dial_assert_fail("dial_eprint_string: NULL string（多半是通道 EOF 之后仍在用取回的值）");
+    }
+    int64_t len = ((int64_t *)s)[0];
+    fwrite((const char *)s + 8, 1, (size_t)len, stderr);
+    fputc('\n', stderr);
+}
+
+void dial_eprint_raw(DialString s) {
+    if (s == NULL) {
+        fprintf(stderr, "dial: eprint_raw 收到了 NULL string\n");
+        dial_assert_fail("dial_eprint_raw: NULL string（多半是通道 EOF 之后仍在用取回的值）");
+    }
+    int64_t len = ((int64_t *)s)[0];
+    if (len <= 0) return;
+    fwrite((const char *)s + 8, 1, (size_t)len, stderr);
+}
+
+void dial_eprint_write_char(int64_t code) {
+    char buf[5];
+    int n = dial_encode_utf8(code, buf);
+    if (n < 0) {
+        fprintf(stderr, "dial: 非法的 char 码点: %lld\n", (long long)code);
+        dial_assert_fail("dial_eprint_write_char: 非法 Unicode 码点（合法范围 0~0x10FFFF，且不含 UTF-16 代理区 D800~DFFF）");
+    }
+    fwrite(buf, 1, (size_t)n, stderr);
+}
+
+void dial_eprint_raw_int(int64_t v)   { fprintf(stderr, "%lld", (long long)v); }
+void dial_eprint_raw_float(double v)  { fprintf(stderr, "%lf", v); }
+void dial_eprint_raw_bool(int64_t b)  { fprintf(stderr, "%s", b ? "true" : "false"); }

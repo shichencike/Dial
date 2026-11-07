@@ -19,7 +19,7 @@
 //! ```toml
 //! name = "mylib"
 //! version = "1.0.0"
-//! abi = 5
+//! abi = 6
 //! iface = "mylib.diali"
 //! license = "MIT OR Apache-2.0"
 //!
@@ -473,7 +473,7 @@ pub fn new_project(dir: &Path, name: Option<&str>) -> Result<PathBuf, String> {
          # 字段缺失 / 未知字段 / 非静态库一律打包期报错，不会悄悄忽略。\n\
          name = \"{name}\"\n\
          version = \"1.0.0\"\n\
-         abi = 5\n\
+         abi = {abi}\n\
          iface = \"{name}.diali\"\n\
          license = \"MIT OR Apache-2.0\"\n\
          \n\
@@ -482,6 +482,7 @@ pub fn new_project(dir: &Path, name: Option<&str>) -> Result<PathBuf, String> {
          # 把编译好的静态归档放到该位置后执行 `dialc pack {dir}`。\n\
          {triple} = \"{lib}\"\n",
         name = pkg_name,
+        abi = package::STDLIB_ABI,
         triple = triple,
         lib = lib_rel,
         dir = dir.display(),

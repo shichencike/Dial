@@ -243,6 +243,15 @@ int64_t dial_kvmap_get(DialKvMap mh, int64_t key) {
     return k_ents(m)[i].val;
 }
 
+/* v1.04 C6：命中返回真实值的位模式，未命中返回调用方给的默认值位模式。
+ * 与 dial_map_get_or 同款「一次探测」，把「没找到」与「找到了默认值」分开。
+ * 只服务标量 V；句柄 V 由语义层拦下，不进入这里（见头文件注释）。 */
+int64_t dial_kvmap_get_or(DialKvMap mh, int64_t key, int64_t def_bits) {
+    void *m = (void *)mh;
+    int64_t i = kv_find(m, key);
+    return i < 0 ? def_bits : k_ents(m)[i].val;
+}
+
 int64_t dial_kvmap_contains(DialKvMap mh, int64_t key) {
     return kv_find((void *)mh, key) >= 0 ? 1 : 0;
 }

@@ -15,6 +15,9 @@ typedef void *DialMap;
 DialMap  dial_map_new(void);
 DialMap  dial_map_put(DialMap m, int64_t key, int64_t val); /* 返回（可能更新后的）指针 */
 int64_t  dial_map_get(DialMap m, int64_t key);              /* 未命中返回 -1 */
+/* v1.04 C6：命中返回真实值、未命中返回调用方给的默认值。
+ * 解决 `get` 未命中返回 -1 与「真实值恰为 -1」无法区分的语义坑。 */
+int64_t  dial_map_get_or(DialMap m, int64_t key, int64_t def);
 int64_t  dial_map_contains(DialMap m, int64_t key);         /* 命中返回 1，否则 0 */
 int64_t  dial_map_remove(DialMap m, int64_t key);           /* 移除并返回其值，未命中返回 -1 */
 int64_t  dial_map_size(DialMap m);

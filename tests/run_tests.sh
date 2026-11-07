@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 十九组检查，全部通过才算绿（顺序为 A→S，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 二十组检查，全部通过才算绿（顺序为 A→T，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -33,6 +33,8 @@
 #   S. 性能基准套件：4 语言（C/Go/Python/Dial）28 项校验和一致（抽验）、
 #      bench/data.json 数据完整性、web/bench.html 与数据配套及六维雷达图（v1.04 增补）。
 #      完整计时采集由 CI 独立步骤负责，本组只做秒级快速正确性校验。
+#   T. B/C 组缺口第一批：块注释 B9 / ! 逻辑非 B10 / .slice() B11 /
+#      get_or C6 / eprint C8，含宪法否决项（函数重载 B5）的负向锁定（v1.04 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -754,6 +756,9 @@ else
 fi
 QTRIPLE=$(sed -n '/\[targets\]/,$p' "$QPROJ/dial.toml" 2>/dev/null | grep -E '^[A-Za-z0-9_-]+ = ' | head -1 | cut -d' ' -f1)
 if [ -z "$QTRIPLE" ]; then qbad "dial.toml 未解析出 target triple"; fi
+# abi 期望值从唯一真相 src/package.rs 动态读取，避免 ABI 递增时测试漂移。
+QABI=$(sed -n 's/.*STDLIB_ABI: u64 = \([0-9]*\);.*/\1/p' src/package.rs | head -1)
+if [ -z "$QABI" ]; then qbad "未能从 package.rs 读出 STDLIB_ABI"; fi
 cat > "$QPROJ/qdemo.c" <<'EOF'
 #include <stdint.h>
 int64_t qdemo_add(int64_t a, int64_t b) { return a + b; }
@@ -762,7 +767,7 @@ mkdir -p "$QPROJ/lib/$QTRIPLE"
 cc -O2 -c "$QPROJ/qdemo.c" -o "$QPROJ/qdemo.o" >/dev/null 2>&1 \
   && ar rcs "$QPROJ/lib/$QTRIPLE/libqdemo.a" "$QPROJ/qdemo.o"
 if qrun pack "$QPROJ" -o "${TMP}/qdemo.dialpkg" >"${TMP}/q_pack.log" 2>&1 \
-   && python3 -c 'import json,sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); m=json.loads(z.read("manifest.txt")); assert m["name"]=="qdemo" and m["abi"]==5; assert m["sha256"]; assert set(z.namelist())=={"manifest.txt","qdemo.diali"}|set(m["sha256"].keys())' "${TMP}/qdemo.dialpkg" >/dev/null 2>&1; then
+   && python3 -c 'import json,sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); m=json.loads(z.read("manifest.txt")); assert m["name"]=="qdemo" and m["abi"]==int(sys.argv[2]), "abi=%r 期望 %s"%(m["abi"],sys.argv[2]); assert m["sha256"]; assert set(z.namelist())=={"manifest.txt","qdemo.diali"}|set(m["sha256"].keys())' "${TMP}/qdemo.dialpkg" "$QABI" >/dev/null 2>&1; then
     qpass "pack 生成合规 manifest + 逐文件 SHA256（自检通过）"
 else qbad "pack 失败或产物不合规"; sed 's/^/       /' "${TMP}/q_pack.log" | tail -8; fi
 if qrun install "${TMP}/qdemo.dialpkg" >/dev/null 2>&1; then qpass "install 吃下 pack 产物"; else qbad "install 拒绝了自己打的包"; fi
@@ -786,7 +791,7 @@ printf 'not a shared object' > "$QBAD/lib/libfake.so"
 cat > "$QBAD/dial.toml" <<EOF
 name = "qbad"
 version = "1.0.0"
-abi = 5
+abi = ${QABI}
 iface = "qdemo.diali"
 license = "MIT"
 [targets]
@@ -1007,6 +1012,130 @@ if command -v gcc >/dev/null 2>&1 && command -v go >/dev/null 2>&1; then
 else
     sskip "4 语言编译抽验（环境缺 gcc 或 go）"
 fi
+
+echo "== T) B/C 组缺口第一批：块注释 / ! / .slice() / get_or / eprint（v1.04 增补） =="
+tpass() { echo "  ✅ $1"; }
+tbad()  { echo "  ❌ $1"; fail=1; }
+TDIR="${TMP}/tbatch1"
+mkdir -p "$TDIR"
+
+# 1) 冒烟：5 项一次性编译 + 运行（stdout / stderr 分流核对）
+cp tests/batch1_smoke.dial "${TDIR}/smoke.dial"
+if "$DIALC" build "${TDIR}/smoke.dial" -o "${TDIR}/smoke" >"${TDIR}/build.log" 2>&1 \
+   && "${TDIR}/smoke" >"${TDIR}/out" 2>"${TDIR}/err"; then
+    tpass "第一批冒烟程序编译运行成功"
+else
+    tbad "第一批冒烟程序编译或运行失败"; tail -8 "${TDIR}/build.log"
+fi
+if grep -q "^B10 !false = true / not false = true$" "${TDIR}/out" \
+   && grep -q "^B10 !true = false / 3 != 4 = true$" "${TDIR}/out"; then
+    tpass "B10：! 作一元逻辑非，!= 仍是不等号（零语义改动）"
+else tbad "B10 输出不符"; fi
+if grep -q "^B11 slice len = 3 / bracket len = 3$" "${TDIR}/out" \
+   && grep -q "^B11 slice = 20,30,40$" "${TDIR}/out"; then
+    tpass "B11：.slice(1,4) 与 a[1..4] 等价"
+else tbad "B11 .slice 结果不符"; fi
+if grep -q "^C6 map hit = 100$" "${TDIR}/out" \
+   && grep -q "^C6 map real -1 = -1$" "${TDIR}/out" \
+   && grep -q "^C6 map miss = 999$" "${TDIR}/out"; then
+    tpass "C6：map.get_or 区分「未命中」与「真实值 == -1」"
+else tbad "C6 map.get_or 结果不符"; fi
+if grep -q "^C6 kv hit = 7$" "${TDIR}/out" \
+   && grep -q "^C6 kv miss = 0$" "${TDIR}/out"; then
+    tpass "C6：泛型 map<string,int>.get_or 命中/未命中正确"
+else tbad "C6 kvmap.get_or 结果不符"; fi
+if grep -q "^C8 stdout still clean$" "${TDIR}/out" \
+   && grep -q "^C8 eprint line$" "${TDIR}/err" \
+   && grep -q "^C8 42 3.500000 true$" "${TDIR}/err" \
+   && grep -q "^C8 raw joined$" "${TDIR}/err"; then
+    tpass "C8：eprint/eprint_raw 全部写 stderr，stdout 保持干净"
+else tbad "C8 stdout/stderr 分流不符"; fi
+# stdout 绝不能混入 stderr 内容（分流铁律）
+if grep -q "eprint line\|raw joined" "${TDIR}/out"; then
+    tbad "C8：stderr 内容泄漏到 stdout"
+else tpass "C8：stderr 内容零泄漏到 stdout"; fi
+
+# 2) B9 负向：未闭合块注释必须 Fail-Fast 报错，绝不静默吞掉源码
+cat > "${TDIR}/unclosed.dial" <<'EOF'
+/* 这个块注释故意不闭合
+fn main(): int { print("should not compile"); return 0; }
+EOF
+if "$DIALC" build "${TDIR}/unclosed.dial" -o "${TDIR}/unclosed" >"${TDIR}/unclosed.log" 2>&1; then
+    tbad "B9：未闭合块注释竟被接受（静默吞源码）"
+elif grep -q "未闭合" "${TDIR}/unclosed.log"; then
+    tpass "B9：未闭合块注释 Fail-Fast 报错且不产可执行文件"
+else tbad "B9：未闭合块注释报错但诊断不含「未闭合」"; fi
+
+# 3) B9：块注释内有 `*/` 边界，正常闭合且不影响整除/乘法
+cat > "${TDIR}/block.dial" <<'EOF'
+/* 块注释内含 // 与 * 号，均不产生 token */
+fn main(): int {
+    var a: int = 6 / 2 * 3;   /* 9 */
+    print(a);
+    return 0;
+}
+EOF
+if "$DIALC" build "${TDIR}/block.dial" -o "${TDIR}/block" >"${TDIR}/block.log" 2>&1 \
+   && [ "$("${TDIR}/block" 2>/dev/null)" = "9" ]; then
+    tpass "B9：块注释跨行且不影响 / 与 * 运算符"
+else tbad "B9：块注释程序结果不符"; tail -6 "${TDIR}/block.log"; fi
+
+# 4) C6 负向：泛型 map 的 get_or 参数类型必须严格匹配（零隐式转换铁律）
+cat > "${TDIR}/getor_bad.dial" <<'EOF'
+fn main(): int {
+    var kv: map<string, int> = new_kv_map();
+    kv.put("a", 7);
+    print(kv.get_or(3, 0));
+    return 0;
+}
+EOF
+if "$DIALC" build "${TDIR}/getor_bad.dial" -o "${TDIR}/getor_bad" >"${TDIR}/getor_bad.log" 2>&1; then
+    tbad "C6：get_or 键类型不匹配竟被接受（违反零隐式转换）"
+elif grep -q "get_or" "${TDIR}/getor_bad.log"; then
+    tpass "C6：get_or 键类型严格校验"
+else tbad "C6：get_or 类型报错但诊断未提到 get_or"; fi
+
+# 5) C6 负向：get_or 的默认值类型必须与 V 完全一致（零隐式转换铁律）。
+#    注：句柄值 V（map<string,string>）本就被 §29.5 的容器类型系统拒绝（B6 缺口），
+#    因此 get_or 的「只支持标量 V」分支是**不可达的防御代码**——这里改测真正会
+#    触发的边界：默认值传错类型。
+cat > "${TDIR}/getor_deftype.dial" <<'EOF'
+fn main(): int {
+    var kv: map<string, int> = new_kv_map();
+    kv.put("a", 7);
+    print(kv.get_or("a", "wrong"));
+    return 0;
+}
+EOF
+if "$DIALC" build "${TDIR}/getor_deftype.dial" -o "${TDIR}/getor_deftype" >"${TDIR}/getor_deftype.log" 2>&1; then
+    tbad "C6：get_or 默认值类型不匹配竟被接受（违反零隐式转换）"
+elif grep -q "get_or" "${TDIR}/getor_deftype.log"; then
+    tpass "C6：get_or 默认值类型严格校验（零隐式转换铁律）"
+else tbad "C6：get_or 默认值类型报错但诊断未提到 get_or"; fi
+
+# 6) B4/B5 宪法否决：闭包与函数重载仍不可用（永久否决项不入语言）
+cat > "${TDIR}/no_overload.dial" <<'EOF'
+fn f(x: int): int { return x; }
+fn f(x: string): string { return x; }
+fn main(): int { return 0; }
+EOF
+if "$DIALC" build "${TDIR}/no_overload.dial" -o "${TDIR}/no_overload" >"${TDIR}/no_overload.log" 2>&1; then
+    tbad "宪法：函数名重载竟被接受（B5 永久否决）"
+elif grep -q "重复定义\|重复" "${TDIR}/no_overload.log"; then
+    tpass "宪法：函数重载仍被拒绝（B5 永久否决，ABI 稳定）"
+else tbad "宪法：函数重载报错文本异常"; fi
+
+# 7) C8 配套铁律：输出族内建按名字硬编码分派，用户不得定义同名函数。
+#    否则 `fn eprint(...)` 能编译却在调用点被内建分支静默绕过（§20 Fail-Fast）。
+cat > "${TDIR}/no_shadow.dial" <<'EOF'
+fn eprint(x: int): int { return x; }
+fn main(): int { print(eprint(3)); return 0; }
+EOF
+if "$DIALC" build "${TDIR}/no_shadow.dial" -o "${TDIR}/no_shadow" >"${TDIR}/no_shadow.log" 2>&1; then
+    tbad "C8：输出族内建可被同名函数定义静默绕过（违反 Fail-Fast）"
+elif grep -q "保留名" "${TDIR}/no_shadow.log"; then
+    tpass "C8：输出族内建进入保留名清单（同名定义编译期拒绝）"
+else tbad "C8：同名定义被拒但诊断未提到保留名"; fi
 
 echo
 if [ $fail -eq 0 ]; then

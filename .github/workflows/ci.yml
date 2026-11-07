@@ -509,7 +509,7 @@ jobs:
           python3 tools/make_stdlib_pkg.py \
             --diali stdlib/stdlib.diali \
             --out dist-stdlib/stdlib.dialpkg \
-            --version "$PKG_VER" --abi 5 \
+            --version "$PKG_VER" --abi 6 \
             "x86_64-linux-gnu:stdlib-artifacts/stdlib-x86_64-linux-gnu/libdial_std.a" \
             "x86_64-pc-windows-gnu:stdlib-artifacts/stdlib-x86_64-pc-windows-gnu/libdial_std.a" \
             "aarch64-unknown-linux-musl:stdlib-artifacts/stdlib-aarch64-unknown-linux-musl/libdial_std.a"
@@ -593,7 +593,7 @@ jobs:
           python3 tools/make_stdlib_pkg.py \
             --diali stdlib/stdlib.diali \
             --out dist-stdlib/stdlib.dialpkg \
-            --version "$PKG_VER" --abi 5 \
+            --version "$PKG_VER" --abi 6 \
             "x86_64-linux-gnu:dist/stdlib-x86_64-linux-gnu/libdial_std.a" \
             "x86_64-pc-windows-gnu:dist/stdlib-x86_64-pc-windows-gnu/libdial_std.a" \
             "aarch64-unknown-linux-musl:dist/stdlib-aarch64-unknown-linux-musl/libdial_std.a"

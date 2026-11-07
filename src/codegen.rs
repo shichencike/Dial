@@ -545,6 +545,8 @@ impl<'ctx> CodeGen<'ctx> {
             &[i8b.into(), i64b.into(), i64b.into()],
         );
         self.decl_func("dial_map_get", i64b, &[i8b.into(), i64b.into()]);
+        // v1.04 C6：get_or(m, k, default)，一次探测区分「没找到」与「真实值 == 默认值」。
+        self.decl_func("dial_map_get_or", i64b, &[i8b.into(), i64b.into(), i64b.into()]);
         self.decl_func("dial_map_contains", i64b, &[i8b.into(), i64b.into()]);
         self.decl_func("dial_map_remove", i64b, &[i8b.into(), i64b.into()]);
         self.decl_func("dial_map_size", i64b, &[i8b.into()]);
@@ -553,6 +555,8 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_kvmap_new", i8b, &[i64b.into(), i64b.into()]);
         self.decl_func("dial_kvmap_put", i8b, &[i8b.into(), i64b.into(), i64b.into()]);
         self.decl_func("dial_kvmap_get", i64b, &[i8b.into(), i64b.into()]);
+        // v1.04 C6：泛型 map 的 get_or（位模式默认值，仅标量 V 可达）。
+        self.decl_func("dial_kvmap_get_or", i64b, &[i8b.into(), i64b.into(), i64b.into()]);
         self.decl_func("dial_kvmap_contains", i64b, &[i8b.into(), i64b.into()]);
         self.decl_func("dial_kvmap_remove", i64b, &[i8b.into(), i64b.into()]);
         self.decl_func("dial_kvmap_size", i64b, &[i8b.into()]);
@@ -608,6 +612,17 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_void("dial_print_raw_int", &[i64b.into()]);
         self.decl_void("dial_print_raw_float", &[f64b.into()]);
         self.decl_void("dial_print_raw_bool", &[i64b.into()]);
+        // v1.04 C8：stderr 输出族，与上面 stdout 族逐一对应（仅换输出流）。
+        self.decl_void("dial_eprint_int", &[i64b.into()]);
+        self.decl_void("dial_eprint_float", &[f64b.into()]);
+        self.decl_void("dial_eprint_bool", &[i64b.into()]);
+        self.decl_void("dial_eprint_char", &[i64b.into()]);
+        self.decl_void("dial_eprint_string", &[i8b.into()]);
+        self.decl_void("dial_eprint_raw", &[i8b.into()]);
+        self.decl_void("dial_eprint_write_char", &[i64b.into()]);
+        self.decl_void("dial_eprint_raw_int", &[i64b.into()]);
+        self.decl_void("dial_eprint_raw_float", &[f64b.into()]);
+        self.decl_void("dial_eprint_raw_bool", &[i64b.into()]);
         // 类型 -> 字符串（CVE-2024-DIAL-006 新增）：支撑 `print("x=" + str(n))` 这类拼接。
         self.decl_func("dial_int_to_string", i8b, &[i64b.into()]);
         self.decl_func("dial_float_to_string", i8b, &[f64b.into()]);
@@ -4557,17 +4572,22 @@ impl<'ctx> CodeGen<'ctx> {
                         Ok(self.call_c("dial_thread_new", &[thunk_ptr.into(), cell.into()]))
                     }
                     _ => {
-                        if name == "print" {
+                        if name == "print" || name == "eprint" {
                             // variadic（v1.00）：中间实参按原样紧接输出（不换行），
                             // 只有最后一个补 '\n'。单实参时行为与旧版完全一致。
+                            // v1.04 C8：eprint 走独立的 emit_eprint / emit_eprint_raw，
+                            // 与 stdout 版各自直白实现（§21.1 宁可 WET，绝不合并成带标志的通用函数）。
+                            let to_stderr = name == "eprint";
                             let last = args.len() - 1;
                             for (i, arg) in args.iter().enumerate() {
                                 let ty = type_of(arg, scopes, functions, structs)?;
                                 let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
-                                if i == last {
-                                    self.emit_print(&ty, val)?;
-                                } else {
-                                    self.emit_print_raw(&ty, val)?;
+                                let newline = i == last;
+                                match (to_stderr, newline) {
+                                    (false, true) => self.emit_print(&ty, val)?,
+                                    (false, false) => self.emit_print_raw(&ty, val)?,
+                                    (true, true) => self.emit_eprint(&ty, val)?,
+                                    (true, false) => self.emit_eprint_raw(&ty, val)?,
                                 }
                             }
                             Ok(self.context.i64_type().const_int(0, false).into())
@@ -4588,12 +4608,18 @@ impl<'ctx> CodeGen<'ctx> {
                                     0, 0,
                                 )),
                             }
-                        } else if name == "print_raw" {
+                        } else if name == "print_raw" || name == "eprint_raw" {
                             // 原样输出、**不换行**（v0.98.2）；v1.00 起同样支持 variadic。
+                            // v1.04 C8：eprint_raw 是 stderr 版本，走独立分派函数。
+                            let to_stderr = name == "eprint_raw";
                             for arg in args {
                                 let ty = type_of(arg, scopes, functions, structs)?;
                                 let val = self.gen_expr(arg, function, scopes, func_values, functions, structs)?;
-                                self.emit_print_raw(&ty, val)?;
+                                if to_stderr {
+                                    self.emit_eprint_raw(&ty, val)?;
+                                } else {
+                                    self.emit_print_raw(&ty, val)?;
+                                }
                             }
                             Ok(self.context.i64_type().const_int(0, false).into())
                         } else if name == "write_char" {
@@ -4888,6 +4914,13 @@ impl<'ctx> CodeGen<'ctx> {
                 Ok(res)
             }
             (Type::Array(_), "clone") => Ok(self.call_c("dial_array_clone", &[optr.into()])),
+            // v1.04 B11：`a.slice(from, to)` 与切片语法 `a[from..to]` 共用同一个
+            // C 运行时函数 dial_array_slice；返回新数组，不改变接收者，无需写回变量槽。
+            (Type::Array(_), "slice") => {
+                let from = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &Type::Int);
+                let to = self.to_i64(self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?, &Type::Int);
+                Ok(self.call_c("dial_array_slice", &[optr.into(), from.into(), to.into()]))
+            }
             // remove / pop：返回被删元素（已还原为元素类型），并就地写回数组
             // （COW 可能更新指针）。先 get 取出被删元素，句柄类额外 retain 一份，
             // 因为 remove/pop 会从数组释放它；随后把数组新指针写回接收变量（仅接收者为变量时）。
@@ -5012,6 +5045,12 @@ impl<'ctx> CodeGen<'ctx> {
             (Type::Map, "get") => {
                 let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
                 Ok(self.call_c("dial_map_get", &[optr.into(), k.into()]))
+            }
+            // v1.04 C6：命中返回真实值，未命中返回调用方给的默认值（一次探测）。
+            (Type::Map, "get_or") => {
+                let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &Type::Int);
+                let d = self.to_i64(self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?, &Type::Int);
+                Ok(self.call_c("dial_map_get_or", &[optr.into(), k.into(), d.into()]))
             }
             (Type::Map, "contains") => {
                 let k = self.to_i64(self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?, &type_of(&args[0], scopes, functions, structs)?);
@@ -5139,6 +5178,16 @@ impl<'ctx> CodeGen<'ctx> {
                 } else {
                     Ok(self.kv_from_bits(r.into_int_value(), v))
                 }
+            }
+            // v1.04 C6：泛型 map 的 get_or(k, default)。键与默认值都按静态类型
+            // 转成 8 字节位模式；C 侧命中返回真实值、未命中返回默认值位模式。
+            // 语义层已把 V 限定为标量，故这里不存在句柄所有权结算问题。
+            "get_or" => {
+                let (ka, kb) = self.kv_arg(&args[0], k, function, scopes, func_values, functions, structs)?;
+                let (_da, db) = self.kv_arg(&args[1], v, function, scopes, func_values, functions, structs)?;
+                let r = self.call_c("dial_kvmap_get_or", &[optr.into(), kb.into(), db.into()]);
+                self.settle_fresh_value(&args[0], k, ka);
+                Ok(self.kv_from_bits(r.into_int_value(), v))
             }
             "size" => Ok(self.call_c("dial_kvmap_size", &[optr.into()])),
             "keys" => Ok(self.call_c("dial_kvmap_keys", &[optr.into()])),
@@ -5747,6 +5796,78 @@ impl<'ctx> CodeGen<'ctx> {
                     "语义错误：print_raw 的参数不能是 void",
                     0, 0,
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// eprint 的 stderr 类型分派（v1.04 C8，末尾补 '\n'）。
+    /// 刻意与 emit_print **各自独立**复制一份：§21.1 拒绝「为省几行合并成带标志的
+    /// 通用函数」，四个输出函数读起来各自直白，调试时可以一眼定位到具体那条 C 调用。
+    /// 语义层已保证实参只能是下列可输出类型，其余分支仅作穷尽性兜底。
+    fn emit_eprint(&self, ty: &Type, val: BasicValueEnum<'ctx>) -> Result<()> {
+        match *ty {
+            Type::Int | Type::Byte => {
+                self.call_c_void("dial_eprint_int", &[val.into()]);
+            }
+            Type::Float => {
+                self.call_c_void("dial_eprint_float", &[val.into()]);
+            }
+            Type::Bool => {
+                let i = self.to_i64(val, &Type::Bool);
+                self.call_c_void("dial_eprint_bool", &[i.into()]);
+            }
+            // char 输出的是码点对应的 UTF-8 字符，不是码点数字（与 print 一致）。
+            Type::Char => {
+                self.call_c_void("dial_eprint_char", &[val.into()]);
+            }
+            Type::String => {
+                self.call_c_void("dial_eprint_string", &[val.into()]);
+            }
+            // 可恢复异常：stderr 打印其错误消息字符串（带换行）。
+            Type::Error => {
+                let msg = self.call_c("dial_error_msg", &[val.into()]);
+                self.call_c_void("dial_eprint_string", &[msg.into()]);
+            }
+            _ => {
+                return Err(DialcError::new(
+                    "内部错误：eprint 收到了不可输出的类型（应由 Sema 先行拦截）",
+                    0, 0,
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    /// eprint_raw 的 stderr 类型分派（v1.04 C8，**不补 '\n'**）。
+    /// 与 emit_print_raw 逐类型对应；char 走 dial_eprint_write_char，标量走栈缓冲版本。
+    fn emit_eprint_raw(&self, ty: &Type, val: BasicValueEnum<'ctx>) -> Result<()> {
+        match *ty {
+            Type::Int | Type::Byte => {
+                self.call_c_void("dial_eprint_raw_int", &[val.into()]);
+            }
+            Type::Float => {
+                self.call_c_void("dial_eprint_raw_float", &[val.into()]);
+            }
+            Type::Bool => {
+                let i = self.to_i64(val, &Type::Bool);
+                self.call_c_void("dial_eprint_raw_bool", &[i.into()]);
+            }
+            Type::Char => {
+                self.call_c_void("dial_eprint_write_char", &[val.into()]);
+            }
+            Type::String => {
+                self.call_c_void("dial_eprint_raw", &[val.into()]);
+            }
+            Type::Error => {
+                let msg = self.call_c("dial_error_msg", &[val.into()]);
+                self.call_c_void("dial_eprint_raw", &[msg.into()]);
+            }
+            _ => {
+                return Err(DialcError::new(
+                    "内部错误：eprint_raw 收到了不可输出的类型（应由 Sema 先行拦截）",
+                    0, 0,
+                ))
             }
         }
         Ok(())

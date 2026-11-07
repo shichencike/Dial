@@ -152,6 +152,14 @@ int64_t dial_map_get(DialMap mh, int64_t k) {
     return i < 0 ? -1 : m_entries((void *)mh)[i].val;
 }
 
+/* v1.04 C6：命中返回真实值，未命中返回调用方显式给出的默认值。
+ * 与 contains+get 的两次查找不同，这里只做一次探测，且语义上把「没找到」
+ * 和「找到了 -1」彻底分开。默认值由调用方在源码里写死，不引入任何隐式哨兵。 */
+int64_t dial_map_get_or(DialMap mh, int64_t k, int64_t def) {
+    int64_t i = m_find((void *)mh, k);
+    return i < 0 ? def : m_entries((void *)mh)[i].val;
+}
+
 int64_t dial_map_contains(DialMap mh, int64_t k) {
     return m_find((void *)mh, k) >= 0 ? 1 : 0;
 }

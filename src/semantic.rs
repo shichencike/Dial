@@ -1571,10 +1571,12 @@ pub fn type_of<V>(
                 }
                 _ => {}
             }
-            if name == "print" {
+            // v1.04 C8：eprint 与 print 参数规则完全一致（连诊断文案都复用），
+            // 唯一差别是输出目标 stderr。这里按名字并列识别，不新增一套校验逻辑。
+            if name == "print" || name == "eprint" {
                 if args.is_empty() {
                     return Err(DialcError::new(
-                        "语义错误：内置函数 print 至少需要 1 个参数",
+                        format!("语义错误：内置函数 {} 至少需要 1 个参数", name),
                         0, 0,
                     ));
                 }
@@ -1675,13 +1677,14 @@ pub fn type_of<V>(
                 // print 是**语句**而非表达式：无返回值，因此不能出现在
                 // 赋值右侧、return 或任何需要值的位置。
                 Ok(Type::Void)
-            } else if name == "print_raw" {
+            } else if name == "print_raw" || name == "eprint_raw" {
                 // 原样输出、**不换行**（v0.98.2）：连续输出的基本积木。
                 // 与 print 的区别只有「结尾那个 '\n'」，参数类型要求则完全一致——
                 // 两者都接受标量与字符串，不接受数组/结构体/句柄（那些没有可读形态）。
+                // v1.04 C8：eprint_raw 是 stderr 版本，规则完全复用。
                 if args.is_empty() {
                     return Err(DialcError::new(
-                        "语义错误：内置函数 print_raw 至少需要 1 个参数",
+                        format!("语义错误：内置函数 {} 至少需要 1 个参数", name),
                         0, 0,
                     ));
                 }
@@ -2140,13 +2143,25 @@ fn array_method_type<V>(
             }
             Ok(Type::Array(Box::new(elem.clone())))
         }
-            "clone" => {
-                if !args.is_empty() {
-                    return Err(DialcError::new("语义错误：array.clone() 不接受参数", 0, 0));
-                }
-                Ok(Type::Array(Box::new(elem.clone())))
+        "clone" => {
+            if !args.is_empty() {
+                return Err(DialcError::new("语义错误：array.clone() 不接受参数", 0, 0));
             }
-            // remove(i) / pop()：返回被删（弹出）的元素，而非数组本身。
+            Ok(Type::Array(Box::new(elem.clone())))
+        }
+        // v1.04 B11：`a.slice(from, to)` 与切片语法 `a[from..to]` 完全等价，
+        // 只是补上一个更符合直觉的方法名（此前能力在、方法名不成立，属「要绕路」）。
+        // 半开区间 [from, to)，返回**新数组**，不改变接收者，因此无需写回变量槽。
+        "slice" => {
+            if args.len() != 2 || arg_t(0)? != Type::Int || arg_t(1)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：array.slice(from, to) 需要 2 个 int 参数（半开区间）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Array(Box::new(elem.clone())))
+        }
+        // remove(i) / pop()：返回被删（弹出）的元素，而非数组本身。
             // 数组自身的更新（COW 可能替换指针）由 codegen 在接收变量处写回，不影响返回类型。
             "remove" => {
                 if args.len() != 1 || arg_t(0)? != Type::Int {
@@ -2317,6 +2332,17 @@ fn map_method_type<V>(
             }
             Ok(Type::Int)
         }
+        // v1.04 C6：`get` 未命中返回 -1，与「真实值恰为 -1」无法区分。
+        // get_or(k, def) 让调用方显式给出默认值，一次探测就把两种情况分开。
+        "get_or" => {
+            if args.len() != 2 || arg_t(0)? != Type::Int || arg_t(1)? != Type::Int {
+                return Err(DialcError::new(
+                    "语义错误：map.get_or(k, default) 需要 2 个 int 参数（键与默认值）",
+                    0, 0,
+                ));
+            }
+            Ok(Type::Int)
+        }
         "contains" => {
             if args.len() != 1 || arg_t(0)? != Type::Int {
                 return Err(DialcError::new(
@@ -2461,6 +2487,33 @@ fn kvmap_method_type<V>(
                 ));
             }
             Ok(if method == "contains" { Type::Bool } else { v.clone() })
+        }
+        // v1.04 C6：泛型 map 的 get_or(k, default)。
+        // 刻意只放行**标量 V**：标量按值存储，默认值位模式没有 ARC 所有权问题；
+        // 若放行 string 这类句柄 V，「未命中时返回的默认字符串该由谁 retain」会
+        // 产生歧义，与 §19「宁可泄漏，不可悬垂」相悖。那种场景请用 contains + get。
+        "get_or" => {
+            let scalar_v = matches!(v, Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char);
+            if !scalar_v {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：map<{}, {}>.get_or() 只支持标量值类型（int/float/bool/byte/char）；\
+                         句柄值请用 contains(k) + get(k) 显式处理（避免默认值的所有权歧义）",
+                        k.name(), v.name()
+                    ),
+                    0, 0,
+                ));
+            }
+            if args.len() != 2 || arg_t(0)? != *k || arg_t(1)? != *v {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：map<{}, {}>.get_or(k, default) 需要 2 个参数，类型分别为 {} 与 {}",
+                        k.name(), v.name(), k.name(), v.name()
+                    ),
+                    0, 0,
+                ));
+            }
+            Ok(v.clone())
         }
         "size" => {
             if !args.is_empty() {
@@ -2714,6 +2767,14 @@ const RESERVED_NAMES: &[&str] = &[
     "drop",
     // v1.04：FFI 反向数据总线（C 缓冲区 → Dial 对象）
     "string_from_cstr", "bytes_from_ptr",
+    // v1.04 C8：输出族内建按**名字**硬编码分派（type_of 的 Expr::Call 分支），
+    // 与用户函数表是两条路。若不设防，用户写 `fn eprint(...)` 会编译通过却在调用点
+    // 被内建分支静默绕过——直接违反 §20 Fail-Fast「绝不静默损坏」。
+    // print / print_raw / write_char 是同族的既有内建，此前也漏列，一并补齐以消除不对称；
+    // eprint / eprint_raw 为本轮新增，必须随新内建同步设防。
+    // 注：其余按名字分派的历史内建（read_line / args / now / sleep 等）的保留名覆盖
+    // 属独立的历史加固议题，本轮不扩大范围，见 ARCHITECTURE §14.5 的批次纪律。
+    "print", "print_raw", "write_char", "eprint", "eprint_raw",
 ];
 
 /// `externs`：由 `import` 引入的**包外部函数**（v0.92，见 package.rs）。

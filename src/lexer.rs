@@ -175,6 +175,41 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
             continue;
         }
 
+        // 块注释 /* ... */（v1.04 B9）：不嵌套、不产生任何 token，跨行时同步推进行号。
+        // 放在行注释之后、其它分支之前：除法 `/` 与解引用 `*` 的运算符分支在下方 match，
+        // 这里 continue 后不会误落到那里。未闭合直接报错（Fail-Fast 铁律），
+        // 绝不静默吞掉余下源码 —— 那会让用户的代码凭空消失却报一句无关的语法错。
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            let bl = line;
+            let bc = col;
+            i += 2;
+            col += 2;
+            let mut closed = false;
+            while i < chars.len() {
+                if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '/' {
+                    i += 2;
+                    col += 2;
+                    closed = true;
+                    break;
+                }
+                if chars[i] == '\n' {
+                    line += 1;
+                    col = 1;
+                } else {
+                    col += 1;
+                }
+                i += 1;
+            }
+            if !closed {
+                return Err(DialcError::new(
+                    "词法错误：块注释 /* 未闭合（缺少配对的 */）",
+                    bl,
+                    bc,
+                ));
+            }
+            continue;
+        }
+
         // 字节字面量 b'x'（v0.98.2）：单字节无符号值，取值 0~255。
         //
         // 刻意与字符字面量 `'x'` 分开：二者的**语义完全不同**——
@@ -653,11 +688,13 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                     col += 2;
                 }
                 _ => {
-                    return Err(DialcError::new(
-                        "意外的 '!'，请使用关键字 not 表示逻辑非",
-                        start_line,
-                        start_col,
-                    ))
+                    // v1.04 B10：C 风格一元逻辑非 `!expr` 作为 `not expr` 的**词法别名**。
+                    // 二者共用同一个 TokenKind::Not，parse_not / 语义 / IR 全链路零改动：
+                    // 不是新的运算符语义，只是同一语法的另一种拼写（零隐式转换铁律不受影响）。
+                    // 注意 `!=` 分支优先匹配，不等号行为不变。
+                    push(TokenKind::Not, start_line, start_col, &mut tokens);
+                    i += 1;
+                    col += 1;
                 }
             },
             '<' => match peek {
