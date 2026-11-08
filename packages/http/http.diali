@@ -89,7 +89,12 @@ extern fn dial_http_resp_free(resp: HttpResponse): int;
 /// 切换客户端画像：目前 "default"（默认）与 "chrome"。
 /// 画像只控制请求头排序与 User-Agent 这类兼容参数（与只认浏览器客户端的
 /// API 互通），**不以“绕过服务器限制 / 欺骗识别”为目标**。
+/// 画像为**线程局部**：每条线程独立持有，多线程各自发不同画像的请求互不干扰。
 extern fn dial_http_set_profile(name: string): void;
+
+/// 回读当前线程生效的画像名（"default" / "chrome"），供诊断与测试断言。
+/// 画像线程局部，故多线程各读各的。
+extern fn dial_http_profile(): string;
 
 /// 设置自定义受信 CA（文件或目录，PEM）；传空串恢复系统根证书库。
 /// 用于内网 / 私有 CA 场景；证书校验依旧 fail-closed（自签名不可冒用）。

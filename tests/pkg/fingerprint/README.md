@@ -14,6 +14,7 @@
 | `emit_clienthello.c` | 候选 ClientHello 发射器：直接调 `dial_tls_connect` 让 http 包真实发一个 CH（连接 127.0.0.1、SNI 用域名、ALPN 双 offer），供 `--listen` 录制 |
 | `emit_http.c` | 候选 HTTP 行为发射器（期 2）：`--h1` 调 `dial_http_get()`、`--h2` 调 `dial_http2_connect()+request()`，两者都先切 `chrome` 画像 |
 | `check_hpack.c` | HPACK / Huffman 编码侧往返自校验（期 2）：用包内既有解码器验证静态表索引与 Huffman 编码正确，含全 256 字节覆盖 |
+| `check_profile_thread.c` | 期 3 自校：主线程设 `chrome`、子线程不设，断言两线程各读到 `chrome` / `default`，证明画像为线程局部、互不干扰 |
 | `record_http.py` | 候选 HTTP 行为录制器：`--h1` 录头序、`--h2` 录 H2 帧序与 SETTINGS。**期 2 起 H2 段真实解析 HPACK**（从 `dial_hpack_tables.h` 读 Huffman 码表 + 内置静态表），伪头顺序 / static_index / huffman 均由解码结果得出，不再是占位常量 |
 | `compare_fp.py` | 逐字段比对，输出 `name = pass` / `MISMATCH` / `exemption ... declared` |
 | `check_fingerprint_online.py` | 可选在线校验，**默认不跑、不进 CI**，只打印供人工核对 |
@@ -112,7 +113,19 @@ python3 tests/pkg/fingerprint/compare_fp.py \
 
 # 5) 可选在线校验（默认跳过）
 python3 check_fingerprint_online.py            # -> online_check = skipped
+
+# 6) 期 3：画像线程局部 + 诊断 getter（以下在仓库根执行）
+zig cc -target x86_64-linux-gnu tests/pkg/fingerprint/check_profile_thread.c \
+    -I packages/http/src -I stdlib -I runtime \
+    packages/http/lib/x86_64-linux-gnu/libhttp.a -o /tmp/check_profile_thread -lpthread
+/tmp/check_profile_thread                       # profile_thread_local = pass
+#   设 chrome 后回读：/tmp/emit_http --h1 <port> 的 stderr 打印
+#   dial_http_profile() = chrome
 ```
+
+> 注：指纹录制 / 比对 / HPACK 自校 / 线程局部自校是**离线回放**工具链，不进
+> `tests/run_tests.sh` 的 A→Z 主线（主线由 W 组 http 端到端覆盖）；改动后手动
+> 跑本目录脚本即可，结论写入各期「实测结果」小节。
 
 ## 期 1 实测结果（TLS 段）
 
@@ -186,6 +199,27 @@ Appendix C 官方样例（`www.example.com` / `no-cache`）验证。
 `default` 画像上限仍是 4096（兼容既有行为）；`chrome` 画像落地后才能在真实
 Python `h2` 服务端完成完整握手（回归用 default 画像所以未触发）。验证：
 `/tmp/emit_http --h2 <port> chrome` 对真实 h2c 服务端返回 `h2_status = 200`。
+
+## 期 3：profile 一等公民（线程局部 + `.diali` 诊断 getter）
+
+期 2 画像是**进程级全局** `g_current`，多线程各自发不同画像的请求会互相踩。
+期 3 把画像升级为**线程局部**（`_Thread_local`），并补一个回读 getter：
+
+- `dial_profile.c`：`static _Thread_local const dh_profile *g_current`，
+  每线程以 `&k_default_profile` 静态初始化，未调用 `dh_profile_set` 的线程
+  天然落在 default。
+- `dial_http.c`：新增 `DialString dial_http_profile(void)`，回读当前线程生效的
+  画像名（`"default"` / `"chrome"`），供诊断与测试断言。
+- `http.diali`：补 `extern fn dial_http_profile(): string`，契约里注明画像为
+  线程局部、多线程各自独立。
+- `check_profile_thread.c`（新增）：主线程设 `chrome`、子线程不设，断言两线程
+  各读到 `chrome` / `default`——若画像仍是全局，子线程会被污染成 `chrome` 而失败。
+
+画像作为「连接行为的一等配置」由此成立：每条线程独立持有自己的画像，既不影响
+既有单线程用例，也贴合 Dial 程序用 `spawn` 起多线程各发不同画像请求的场景
+（`dial_http_set_profile` 在 connect/request 之前调用即对该线程后续连接生效）。
+
+`emit_http.c` 同步加 getter 回读：设 `chrome` 后 `dial_http_profile()` 即回 `chrome`。
 
 ## 做不到 / 不做（基准 `exemptions` 逐项声明，不许含糊）
 

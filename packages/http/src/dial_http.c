@@ -124,6 +124,14 @@ void dial_http_set_profile(DialString name) {
     dh_profile_set(name ? dial_string_cstr(name) : NULL);
 }
 
+/* 诊断 getter（期 3）：回读当前线程生效的画像名（"default" / "chrome"）。
+ * 画像为线程局部，故多线程各读各的，不会互相干扰。返回 DialString 句柄，
+ * 由调用方 ARC 管理。用法：println(dial_http_profile())。 */
+DialString dial_http_profile(void) {
+    const dh_profile *p = dh_profile_current();
+    return dial_string_new(p ? p->name : "default");
+}
+
 /* 受信 CA 路径（自定义）：设为非空时优先用它（内网 / 私有 CA 场景）。
  * 为空时加载系统根证书库。绝不静默跳过校验。
  * path 同上是 DialString 句柄，须 dial_string_cstr 取文本。 */

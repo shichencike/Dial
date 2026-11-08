@@ -72,7 +72,12 @@ static const dh_profile k_chrome_profile = {
     15663105u   /* 基准 h2.connection_window_update_increment */
 };
 
-static const dh_profile *g_current = &k_default_profile;
+/* 当前画像：**线程局部**（期 3 升级，原为进程级全局）。
+ * 进程级全局意味着多线程各自发不同画像的请求会互相踩；改成线程局部后，
+ * 每条线程独立持有自己的画像，既贴合「画像作为连接行为的一等配置」定位，
+ * 也不影响既有单线程用例。每个线程的副本以 &k_default_profile 静态初始化，
+ * 故未调用过 dh_profile_set 的线程天然落在 default。 */
+static _Thread_local const dh_profile *g_current = &k_default_profile;
 
 const dh_profile *dh_profile_current(void) { return g_current; }
 

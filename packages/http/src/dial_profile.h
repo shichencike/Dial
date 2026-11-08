@@ -46,7 +46,7 @@ typedef struct {
     uint32_t window_update_increment;  /* 0 = 不发连接级 WINDOW_UPDATE */
 } dh_profile;
 
-/* 当前画像（进程级；期 3 将改为线程局部并补 .diali getter）。 */
+/* 当前画像（线程局部；期 3 起改为 _Thread_local，每条线程独立生效）。 */
 const dh_profile *dh_profile_current(void);
 
 /* 按名字切换；未知名字一律回退 default（不静默保留一个半吊子状态）。 */

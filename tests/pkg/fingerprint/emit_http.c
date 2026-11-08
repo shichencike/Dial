@@ -85,7 +85,10 @@ int main(int argc, char **argv) {
     const char *profile = (argc > 3 && argv[3][0]) ? argv[3] : "chrome";
     DialString prof = dial_string_new(profile);
     dial_http_set_profile(prof);
+    /* 期 3 诊断 getter：回读当前线程生效的画像名，验证 setter/getter 一致。 */
+    DialString got = dial_http_profile();
     fprintf(stderr, "profile = %s\n", profile);
+    fprintf(stderr, "dial_http_profile() = %s\n", dial_string_cstr(got));
 
     if (strcmp(argv[1], "--h1") == 0) {
         DialString u = dial_string_new(url);

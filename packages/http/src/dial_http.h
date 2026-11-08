@@ -124,8 +124,13 @@ int64_t dial_http_resp_free(DialHttpResponse *r);
 
 /* 切换客户端画像：目前支持 "default"（默认）与 "chrome"。
  * 画像只控制请求头排序与 User-Agent 这类兼容参数，用于与只认浏览器客户端的
- * API 互通；不以“绕过服务器限制 / 欺骗识别”为目标。 */
+ * API 互通；不以“绕过服务器限制 / 欺骗识别”为目标。
+ * 画像为线程局部：每条线程独立持有，多线程各自发不同画像的请求互不干扰。 */
 void dial_http_set_profile(DialString name);
+
+/* 回读当前线程生效的画像名（"default" / "chrome"），供诊断与测试断言。
+ * 返回 DialString 句柄，由调用方管理其生命周期。 */
+DialString dial_http_profile(void);
 
 /* 设置自定义受信 CA（文件或目录，PEM）。传空串恢复为系统根证书库。
  * 用于内网 / 私有 CA 场景；设置后证书校验依旧 fail-closed（不允许自签名冒用）。 */
