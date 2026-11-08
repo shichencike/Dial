@@ -72,6 +72,62 @@ fn is_numeric(t: &Type) -> bool {
     matches!(*t, Type::Int | Type::Float)
 }
 
+/// 原生向量逐元素二元运算的结果类型（v1.04 底层原语）。
+///
+/// 与标量规则刻意分开：向量没有短路逻辑、没有字符串拼接，位运算也不再只限
+/// int 标量。两个操作数必须**完全相同的** `simd<T, N>`——零隐式转换铁律同样
+/// 适用，`simd<int,4> + simd<float,4>` 直接拒绝，绝不自动提升。
+fn simd_binary_type(lt: &Type, rt: &Type, op: BinOp) -> Result<Type> {
+    if lt != rt || !matches!(lt, Type::Simd(..)) {
+        return Err(DialcError::new(
+            format!(
+                "语义错误：向量运算要求两个操作数同为完全相同的 simd<T, N>（元素类型与长度都一致），实际为 {} 与 {}",
+                lt.display(), rt.display()
+            ),
+            0, 0,
+        ));
+    }
+    let (elem, n) = match lt {
+        Type::Simd(e, n) => ((**e).clone(), *n),
+        _ => unreachable!(),
+    };
+    match op {
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+            if matches!(elem, Type::Bool | Type::Char) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：simd<{}, {}> 不支持算术运算（{} 向量只可比较 / 位运算）；\
+                         需要算术请改用 int / float / byte 向量",
+                        elem.display(), n, elem.display()
+                    ),
+                    0, 0,
+                ));
+            }
+            Ok(Type::Simd(Box::new(elem), n))
+        }
+        // LLVM 的向量比较直接返回 `<N x i1>`，正是 simd<bool, N> 的内存表示。
+        BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+            Ok(Type::Simd(Box::new(Type::Bool), n))
+        }
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+            if !matches!(elem, Type::Int | Type::Byte) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：向量位运算(& | ^ << >>)只支持整数元素（int / byte），实际为 simd<{}, {}>",
+                        elem.display(), n
+                    ),
+                    0, 0,
+                ));
+            }
+            Ok(lt.clone())
+        }
+        BinOp::And | BinOp::Or => Err(DialcError::new(
+            "语义错误：逻辑 and/or 依赖短路求值，向量没有短路语义；逐元素请用位运算 & | ^",
+            0, 0,
+        )),
+    }
+}
+
 /// 类型兼容性：**零隐式转换铁律**。
 ///
 /// 两条类型只有在“完全相同”时才兼容——不存在 int→float 之类的隐式提升，
@@ -302,6 +358,8 @@ pub fn type_of<V>(
             }
             match at {
                 Type::Array(elem) => Ok(*elem),
+                // 向量索引 v[i] 取出一个 lane，结果是元素标量类型。
+                Type::Simd(elem, _) => Ok(*elem),
                 _ => Err(DialcError::new(
                     format!("语义错误：类型 '{}' 不能被索引", at.name()),
                     0, 0,
@@ -435,9 +493,22 @@ pub fn type_of<V>(
             let t = type_of(e, scopes, funcs, structs)?;
             if t == Type::Int || t == Type::Float {
                 Ok(t)
+            } else if let Type::Simd(elem, n) = &t {
+                // 逐元素取负：整数用 0 - v，浮点用 fneg，bool / char 无意义。
+                if matches!(**elem, Type::Int | Type::Float | Type::Byte) {
+                    Ok(t)
+                } else {
+                    Err(DialcError::new(
+                        format!(
+                            "语义错误：simd<{}, {}> 不支持一元负号（只支持 int / float / byte 向量）",
+                            elem.display(), n
+                        ),
+                        0, 0,
+                    ))
+                }
             } else {
                 Err(DialcError::new(
-                    "语义错误：一元负号 '-' 只能用于数值类型（int/float）",
+                    "语义错误：一元负号 '-' 只能用于数值类型（int/float）或数值向量",
                     0, 0,
                 ))
             }
@@ -446,9 +517,21 @@ pub fn type_of<V>(
             let t = type_of(e, scopes, funcs, structs)?;
             if t == Type::Int {
                 Ok(Type::Int)
+            } else if let Type::Simd(elem, _) = &t {
+                if matches!(**elem, Type::Int | Type::Byte) {
+                    Ok(t)
+                } else {
+                    Err(DialcError::new(
+                        format!(
+                            "语义错误：按位取反 '~' 只支持 int / byte 向量，实际为 {}",
+                            t.display()
+                        ),
+                        0, 0,
+                    ))
+                }
             } else {
                 Err(DialcError::new(
-                    "语义错误：按位取反 '~' 只能用于 int 类型",
+                    "语义错误：按位取反 '~' 只能用于 int 类型或 int / byte 向量",
                     0, 0,
                 ))
             }
@@ -540,6 +623,11 @@ pub fn type_of<V>(
         Expr::Binary(left, op, right) => {
             let lt = type_of(left, scopes, funcs, structs)?;
             let rt = type_of(right, scopes, funcs, structs)?;
+            // 原生向量：只要有一侧是 simd 就走独立规则，不落进下面的标量分支
+            // （标量分支的诊断与结果类型都假设了标量，混进去会给出误导性错误）。
+            if matches!(lt, Type::Simd(..)) || matches!(rt, Type::Simd(..)) {
+                return simd_binary_type(&lt, &rt, *op);
+            }
             match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                     // 字符串拼接：仅 + 支持 String + String -> String（CVE-2024-DIAL-006 新增）。
@@ -626,6 +714,143 @@ pub fn type_of<V>(
             // 它们是显式的、命名清晰的转换入口，编译为 LLVM 的 sitofp / fptosi，
             // 不依赖任何 C 运行时函数。
             match name.as_str() {
+                // @asm<T>("模板", "约束", 输入...)（v1.04 底层原语）：LLVM inline asm。
+                // 模板与约束必须是**字符串字面量**——LLVM 在编译期就要把约束解析成
+                // 操作数映射，运行时字符串没有意义，也不能让用户输入任意模板。
+                "asm" | "asm_intel" => {
+                    if args.len() < 3 {
+                        return Err(DialcError::new(
+                            "语义错误：@asm 形如 @asm<T>(\"模板\", \"约束\", 输入...)，\
+                             至少需要类型实参、汇编模板与约束字符串",
+                            0, 0,
+                        ));
+                    }
+                    let ret = match &args[0] {
+                        Expr::TypeLit(ty) => ty.clone(),
+                        _ => {
+                            return Err(DialcError::new(
+                                "语义错误：@asm 必须带返回类型实参，形如 @asm<int>(...)",
+                                0, 0,
+                            ))
+                        }
+                    };
+                    // inline asm 的结果是**一个寄存器里的值**：ARC 容器 / 数组 /
+                    // 结构体 / 向量都不可能由单条 asm 返回结果构造出来。
+                    if !matches!(
+                        ret,
+                        Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char
+                            | Type::RawPtr(_) | Type::VolatilePtr(_)
+                    ) {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：@asm 的返回类型必须是标量或裸指针，实际为 {}；\
+                                 如需其它类型请先取得标量再显式转换",
+                                ret.display()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    for (i, a) in args.iter().enumerate().skip(1).take(2) {
+                        if !matches!(a, Expr::StringLit(_)) {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：@asm 的第 {} 个参数必须是字符串字面量（{}），不能是运行时表达式",
+                                    i + 1,
+                                    if i == 1 { "汇编模板" } else { "约束字符串" }
+                                ),
+                                0, 0,
+                            ));
+                        }
+                    }
+                    // 约束首项必须是输出约束（`=r` / `=&r` / `+r`），否则 LLVM
+                    // 会把结果当未定义；verifier 的原生报错远不如这里直观。
+                    let cons = match &args[2] {
+                        Expr::StringLit(s) => s.clone(),
+                        _ => unreachable!(),
+                    };
+                    let first = cons.split(',').next().unwrap_or("").trim();
+                    if !(first.starts_with('=') || first.starts_with('+')) {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：@asm 约束字符串必须以输出约束开头（如 \"=r,r\"），实际首项为 '{}'",
+                                first
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    // 输入操作数同样只能是标量 / 裸指针：它们要直接进寄存器。
+                    for a in args.iter().skip(3) {
+                        let t = type_of(a, scopes, funcs, structs)?;
+                        if !matches!(
+                            t,
+                            Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char
+                                | Type::RawPtr(_) | Type::VolatilePtr(_)
+                        ) {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：@asm 的输入操作数必须是标量或裸指针，实际为 {}（ARC 容器 / 数组 / 结构体不能直接进寄存器）",
+                                    t.display()
+                                ),
+                                0, 0,
+                            ));
+                        }
+                    }
+                    return Ok(ret);
+                }
+                // simd<T, N>(...)：向量构造。首参是 TypeLit(Simd(T,N))，
+                // 1 个实参 = 广播到全部 lane，N 个实参 = 逐 lane 指定。
+                "simd" => {
+                    let ty = match args.first() {
+                        Some(Expr::TypeLit(t)) => t.clone(),
+                        _ => {
+                            return Err(DialcError::new(
+                                "语义错误：simd 构造必须带类型实参，形如 simd<int, 4>(...)",
+                                0, 0,
+                            ))
+                        }
+                    };
+                    let (elem, n) = match &ty {
+                        Type::Simd(e, n) => ((**e).clone(), *n),
+                        other => {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：simd 构造的类型实参必须是 simd<T, N>，实际为 {}",
+                                    other.display()
+                                ),
+                                0, 0,
+                            ))
+                        }
+                    };
+                    let vals = &args[1..];
+                    if vals.is_empty() {
+                        return Err(DialcError::new(
+                            "语义错误：simd 构造需要 1 个标量（广播到全部 lane）或恰好 N 个标量（逐 lane）",
+                            0, 0,
+                        ));
+                    }
+                    if vals.len() != 1 && vals.len() != n as usize {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：simd<{}, {}> 构造需要 1 个或 {} 个实参，实际 {} 个",
+                                elem.display(), n, n, vals.len()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    for v in vals {
+                        let t = type_of(v, scopes, funcs, structs)?;
+                        if t != elem {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：simd<{}, {}> 的元素必须是 {} 类型，实际为 {}（无隐式转换）",
+                                    elem.display(), n, elem.display(), t.display()
+                                ),
+                                0, 0,
+                            ));
+                        }
+                    }
+                    return Ok(ty);
+                }
                 // drop(x)：提前释放一个变量的所有权（move 语义）。参数的「消费后禁用」
                 // 在 check_stmt 的 Expr 分支做（需要副作用 mark_moved，不在这里）。
                 // 这里只做类型层面：drop 返回 Void，且参数必须是变量名。
@@ -1886,6 +2111,17 @@ pub fn type_of<V>(
                             0, 0,
                         ))
                     }
+                    // 向量是寄存器里的多值聚合，没有标量打印通道。
+                    Type::Simd(elem, n) => {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：simd<{}, {}> 不能直接 print（多个 lane 没有单一可读形态）；\
+                                 请用 v[i] 取出单个元素再打印",
+                                elem.display(), n
+                            ),
+                            0, 0,
+                        ))
+                    }
                     Type::Array(_) => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print 数组，请逐元素打印 print(a.get(i))",
@@ -1987,6 +2223,15 @@ pub fn type_of<V>(
                     Type::FnPtr(..) => {
                         return Err(DialcError::new(
                             "语义错误：不能直接 print_raw 函数指针（它只是代码地址，没有可输出的内容）",
+                            0, 0,
+                        ))
+                    }
+                    Type::Simd(elem, n) => {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：simd<{}, {}> 不能直接 print_raw；请用 v[i] 取出单个元素再输出",
+                                elem.display(), n
+                            ),
                             0, 0,
                         ))
                     }
@@ -3283,6 +3528,9 @@ const RESERVED_NAMES: &[&str] = &[
     "read_all", "eof", "file_read_line", "file_exists", "file_size", "file_remove",
     "getenv", "has_env", "program_name", "cwd",
     "local_parts", "date_string", "monotonic_ms",
+    // v1.04 底层原语：@asm / simd 构造都是按名字硬编码分派的内建，
+    // 不设防则用户定义同名函数会被静默绕过（与 §20 Fail-Fast 冲突）。
+    "asm", "asm_intel", "simd",
 ];
 
 /// `externs`：由 `import` 引入的**包外部函数**（v0.92，见 package.rs）。
@@ -4223,6 +4471,19 @@ fn check_stmt(
                             ));
                         }
                     }
+                }
+                // 向量是 SSA 值类型，没有「原地改某个 lane」的地址语义。
+                // 要换 lane 请重新构造一个向量整体赋值给 var 变量——优化器会把
+                // 一串 insertelement 合并成单条指令，并不会真的逐 lane 跑。
+                Type::Simd(elem, n) => {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：simd<{}, {}> 是值类型，不能原地改写单个 lane；\
+                             请用 simd<{}, {}>(...) 重新构造后整体赋值给 var 变量",
+                            elem.display(), n, elem.display(), n
+                        ),
+                        *line, *col,
+                    ))
                 }
                 _ => {
                     return Err(DialcError::new(

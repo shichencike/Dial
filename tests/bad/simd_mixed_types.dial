@@ -1,0 +1,6 @@
+fn main(): int {
+    var a: simd<int, 4> = simd<int, 4>(1);
+    var b: simd<float, 4> = simd<float, 4>(1.0);
+    var c: simd<int, 4> = a + b;
+    return 0;
+}

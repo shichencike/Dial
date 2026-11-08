@@ -4632,7 +4632,88 @@ var back: rawptr<byte> = bitcast<rawptr<byte>>(addr);  // 整数 -> 指针
 - 目标类型是**类型实参**（`bitcast<T>(x)`），与 `ptr_cast<T>(x)` /
   `sizeof<T>()` 同一套约定。
 
-### 33.13 实现落点
+### 33.13 `@asm<T>(...)`：内嵌汇编
+
+把一段汇编**原样**交给 LLVM，编译产物里就是一条 `call ... asm sideeffect ...`。
+这是写系统调用、读时间戳计数器、操作特殊寄存器的最后一道口子。
+
+```dial
+fn asm_add7(x: int): int {
+    // "=r,0"：输出约束 + 输入绑定到输出 0；$$7 是 AT&T 立即数 $7 的转义
+    return @asm<int>("addq $$7, $0", "=r,0", x);
+}
+fn asm_intel_id(x: int): int {
+    return @asm_intel<int>("mov $0, $1", "=r,r", x);
+}
+```
+
+- **占位符是 `$0` / `$1`（LLVM IR inline asm 语法），不是 GCC C `__asm__` 的 `%0` / `%1`**。
+  AT&T 方言里 `%` 是寄存器前缀，写成 `%0` 会得到 `invalid register name`；
+  `$$` 表示一个字面的 `$`（AT&T 立即数）。
+- `@asm` 用 AT&T 方言（LLVM 默认），`@asm_intel` 用 Intel 方言，其余规则完全相同。
+- **返回类型必须显式写成 `<T>`**，且只能是标量（`int` / `float` / `bool` / `byte` /
+  `char`）或裸指针——asm 的结果是一个寄存器里的值，ARC 容器 / 数组 / 结构体 /
+  向量都不可能由它构造。约束字符串首项必须是**输出约束**（`=r` / `=&r` / `+r`），
+  否则编译期拒绝。
+- 模板与约束都必须是**字符串字面量**（编译期常量），运行时字符串没有意义，
+  也杜绝了把任意模板拼进 IR 的可能。
+- 输入 / 输出按 **C ABI 宽度**进出（`bool`→`i32`、`byte`→`i8`），复用 §33.4
+  那套 `abi_adapt` 对称转换；因此 `@asm<byte>` 不会把 Dial 内部的 `i64` 直接塞给
+  8 位寄存器。
+- `sideeffects = true`：编译器不得把这段汇编当纯函数删掉、合并或重排。
+- **平台相关**：模板、约束、寄存器名都是目标机的事，编译器不做可移植性保证。
+  这是「信任开发者」的底层原语——它本身就是显式的，与零隐式转换铁律不冲突。
+
+### 33.14 `simd<T, N>`：原生向量类型
+
+```dial
+var a: simd<int, 4> = simd<int, 4>(1, 2, 3, 4);   // 逐 lane
+var b: simd<int, 4> = simd<int, 4>(10);             // 广播（splat）
+var c: simd<int, 4> = a + b;                        // 一条 add <4 x i64>
+print(c[0]);                                        // 一条 extractelement
+```
+
+**它是寄存器里的值，不是堆上的容器**：`T[]` 是 ARC 管理的动态数组（越界检查、
+retain/release、元素按 i64 槽位存储）；`simd<T, N>` 是编译期定长的 LLVM 向量，
+无堆分配、无 ARC，逐元素算术直接落到一条向量指令，由后端决定生成
+SSE / AVX / NEON。
+
+元素在 IR 里用**原生机器宽度**，而不是 Dial 标量统一的 i64 内部表示——
+这正是「原生」二字的含义：
+
+| `T` | LLVM 元素 | 说明 |
+| --- | --- | --- |
+| `int` | `i64` | Dial 的 int |
+| `float` | `f64` | Dial 的 float 是 double |
+| `bool` | `i1` | 正是 LLVM 向量比较的原生结果 |
+| `byte` | `i8` | 0~255；比较用**无符号**谓词 |
+| `char` | `i32` | Unicode 码点 |
+
+所以 `sizeof<simd<byte, 16>>()` 是 **16**（`<16 x i8>`，一条 SSE 寄存器就装得下），
+而不是 128（`<16 x i64>`）。`sizeof<T>()` / `alignof<T>()` 按 target DataLayout
+编译期现算，与 C 的 `vector_size` 扩展一致。
+
+- `T` 只允许上表五种标量，**不允许嵌套 simd**、不能放 string / 数组 / 结构体 /
+  裸指针；`N` 必须是编译期整数字面量，范围 `2~64`（1 个 lane 没有向量意义，
+  过大的向量后端无法合法化）。2 的幂更容易映射到硬件指令，但不是硬要求。
+- 构造：`simd<T,N>(v)` 把单个标量广播到全部 lane；`simd<T,N>(v0, v1, ..., vN-1)`
+  逐 lane 指定。**零隐式转换**同样适用——`simd<byte,4>(200)` 会被拒绝（200 是 int），
+  需写 `int_to_byte(200)`。
+- 运算：`+ - * / %`（逐元素）、`== != < > <= >=`（返回 `simd<bool, N>`）、
+  `& | ^ << >>`（仅整数元素）、一元 `-` 与 `~`。**没有** `and` / `or`——
+  短路逻辑对向量没有意义，逐元素请用位运算。
+- 索引 `v[i]` 取回一个标量（越界 Fail-Fast）；向量是 SSA 值类型，
+  **不能原地改单个 lane**，要换 lane 请重新构造后整体赋值给 `var` 变量
+  （优化器会把一串 `insertelement` 合并掉）。向量本身不能直接 `print`，
+  请用 `v[i]` 取 lane。
+- 边界：`simd` 不能作为数组元素、`extern struct` 字段或 `@export` / `extern fn`
+  签名的一部分——C 侧向量 ABI 需要专门的 vector extension 声明，
+  编译器不替用户猜测，直接编译期拒绝。
+- 向量除法**不做逐 lane 除零检查**：与 C SIMD intrinsic / LLVM 向量除法一致，
+  含零除数的 lane 结果为 poison，由调用方保证（标量路径的 Fail-Fast 检查
+  无法逐 lane 套用，强行插入会毁掉向量化）。
+
+### 33.15 实现落点
 
 | 层 | 文件 | 改动 |
 | --- | --- | --- |
@@ -4654,14 +4735,24 @@ var back: rawptr<byte> = bitcast<rawptr<byte>>(addr);  // 整数 -> 指针
 | 语义 | `semantic.rs` | `FuncInfo.exported` + C 兼容签名校验、`bitcast` 类型推导与目标校验、`VolatilePtr` 全量并入裸指针分支 |
 | 代码生成 | `codegen.rs` | `External` / `Private` linkage 切换、`set_body(&fields, packed)`、`load/store volatile`（`set_volatile`）、`bitcast` + `ptrtoint`/`inttoptr` |
 
-### 33.14 标准库 ABI 递增（破坏性变更）
+**底层原语的落点**（§33.13 – §33.14）：
+
+| 层 | 文件 | 改动 |
+| --- | --- | --- |
+| 词法 / LSP | `lexer.rs` / `lsp.rs` | 新增 `asm` / `simd` 关键字与语义 token |
+| AST | `ast.rs` | `Type::Simd(Box<Type>, u32)` + `name()` / `display()` |
+| 解析 | `parser.rs` | `simd<T,N>` 类型与构造共用 `parse_simd_tail` 校验；`At` 分支识别 `@asm` / `@asm_intel` |
+| 语义 | `semantic.rs` | `simd_binary_type` 逐元素推导、构造 / 索引 / 一元校验、print 与 C ABI 白名单拒绝向量、`RESERVED_NAMES` 设防 |
+| 代码生成 | `codegen.rs` | `simd_elem_llvm` 原生宽度映射、构造 / `extractelement` / 向量算术与比较、`create_inline_asm` + `build_indirect_call`、`abi_adapt` 边界适配 |
+
+### 33.16 标准库 ABI 递增（破坏性变更）
 
 `stdlib/dial_ffi.c` 新增四个导出函数，因此 `STDLIB_ABI` **4 → 5**，
 编译器版本 `1.3.0 → 1.4.0`，`make_stdlib_pkg.py` 默认 `--abi 5`、CI `--abi 5`。
 旧包（abi=4）会被编译器当场拒绝并给出重装指引。安装脚本仍走 `releases/latest`
 动态解析，不写死版本号。
 
-### 33.15 测试与交付
+### 33.17 测试与交付
 
 - 4 个正向示例：`ffi_hello`、`ffi_buffer`、`ffi_struct`、`ffi_callback`；
 - 19 个负向用例：伪装动态库 / 动态库缺失 / 非归档后缀、C 布局字段白名单、
@@ -4679,13 +4770,24 @@ var back: rawptr<byte> = bitcast<rawptr<byte>>(addr);  // 整数 -> 指针
   - `volatile`：运行期往返值 + **`DIALC_DUMP_IR=1` 断言 IR 里确实是
     `load volatile` / `store volatile`**（这才是「每次访问都落总线」的真正保证）；
   - `bitcast`：地址 ↔ 整数往返值 + 位宽不一致必须编译期拒绝；
-- **5 个新增负向用例**：`@export` 签名含 `string`、`volatile` 修饰非指针、
-  `bitcast` 位宽不一致、`bitcast` 指针 ↔ 聚合类型、`packed` 后跟错关键字；
-- `bash tests/run_tests.sh` **A–Z 二十六组全套通过（480 ✅ / 0 ❌）**，
+- **底层原语专测**（P 组 2d，`tests/ffi/ffi_lowlevel_demo.dial`）：
+  `@asm` 四种形态（AT&T 恒等 / 匹配约束 `=r,0` 加法 / Intel 方言 / `byte` 的
+  C ABI 宽度适配）、`simd` 构造与广播、逐元素算术与比较、无符号 byte 比较、
+  索引与 `sizeof` / `alignof` 原生宽度；另用 `DIALC_DUMP_IR=1` 断言 IR 里确实是
+  `asm sideeffect` / `inteldialect` / `add <4 x i64>` / `<4 x i8>` / `<2 x double>`
+  ——**运行期值只证明结果对，IR 形态才证明没有被降级成标量模拟**；
+- **22 个新增负向用例**：导出四件套 5 个（`@export` 签名含 `string`、
+  `volatile` 修饰非指针、`bitcast` 位宽不一致 / 指针 ↔ 聚合、`packed` 后跟错关键字）
+  + 底层原语 17 个（asm 模板非字面量 / 返回类型非法 / 缺输出约束 / 参数不足；
+  simd 元素非标量 / 嵌套 / N 非法 / N 非常量 / 构造参数个数 / 混合类型运算 /
+  短路逻辑 / 直接 print / 改 lane / `@export` 签名 / `extern struct` 字段；
+  以及 `asm` / `simd` 保留名设防）；
+- `bash tests/run_tests.sh` **A–Z 二十六组全套通过（499 ✅ / 0 ❌）**，
   `tools/cve_check.py` 8/8、三平台 `zig cc` 编译通过。
 
-> **本轮交付范围**：按约定只做**本地提交**，不推送 GitHub、不打 tag、不发 Release。
-> `v1.0` 里程碑标签已在 `[v1.03]` 之后打并推送，本版不影响它。
+> **本轮交付范围**：FFI 导出四件套等 v1.04 主体已同步至 `origin/main`（2026-11-08），
+> **未打 tag、未发 Release**；`@asm` / `simd<T, N>` 两项增补按约定只做**本地提交**，
+> 待后续同步。`v1.0` 里程碑标签已在 `[v1.03]` 之后打并推送，本版不影响它。
 
 
 ---

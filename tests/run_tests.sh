@@ -656,6 +656,53 @@ else
     fi
 fi
 
+# 2d) 底层原语（v1.04 增补）：@asm 内嵌汇编 与 simd<T, N> 原生向量。
+#     运行期逐值断言只证明「结果对」；IR 形态断言才证明「真的是 LLVM inline asm
+#     与原生向量指令」，而不是被编译器降级成标量模拟。两者缺一不可。
+LOW_EXPECTED=$(cat <<'EOF'
+42
+42
+77
+200
+11
+14
+32
+16
+16
+5.000000
+true
+200
+true
+false
+EOF
+)
+if ! "$DIALC" build "$FFI_DIR/ffi_lowlevel_demo.dial" -o "${TMP}/ffi_lowlevel_demo" >"${TMP}/ffilow.log" 2>&1; then
+    echo "  ❌ 底层原语专项编译失败"; sed 's/^/       /' "${TMP}/ffilow.log"; fail=1
+elif ! "${TMP}/ffi_lowlevel_demo" >"${TMP}/ffilowout.txt" 2>&1; then
+    echo "  ❌ 底层原语程序运行失败"; sed 's/^/       /' "${TMP}/ffilowout.txt"; fail=1
+elif ! printf '%s\n' "$LOW_EXPECTED" | diff -u - "${TMP}/ffilowout.txt" >"${TMP}/ffilowdiff.txt" 2>&1; then
+    echo "  ❌ 底层原语输出不一致"; sed 's/^/       /' "${TMP}/ffilowdiff.txt"; fail=1
+else
+    echo "  ✅ @asm（AT&T / 匹配约束 / Intel 方言 / C ABI 宽度）与 simd 运算逐值正确"
+fi
+
+# IR 形态：必须是真正的 asm 调用 + 向量类型/指令。
+if DIALC_DUMP_IR=1 "$DIALC" build "$FFI_DIR/ffi_lowlevel_demo.dial" -o "${TMP}/ffi_lowlevel_demo2" >"${TMP}/ffilow_ir.txt" 2>&1; then
+    IR_OK=1
+    grep -q "asm sideeffect"        "${TMP}/ffilow_ir.txt" || IR_OK=0
+    grep -q "inteldialect"          "${TMP}/ffilow_ir.txt" || IR_OK=0
+    grep -qE "add <4 x i64>"        "${TMP}/ffilow_ir.txt" || IR_OK=0
+    grep -q "<4 x i8>"              "${TMP}/ffilow_ir.txt" || IR_OK=0
+    grep -q "<2 x double>"          "${TMP}/ffilow_ir.txt" || IR_OK=0
+    if [ "$IR_OK" -eq 1 ]; then
+        echo "  ✅ IR 里是真正的 inline asm + 原生向量指令（非标量模拟）"
+    else
+        echo "  ❌ IR 形态不对（缺 asm / 向量指令）"; fail=1
+    fi
+else
+    echo "  ❌ 底层原语 IR 检查用编译失败"; sed 's/^/       /' "${TMP}/ffilow_ir.txt"; fail=1
+fi
+
 # 3) 动态链接（v1.04 增补）：真实共享库必须能显式 link + 运行，且产物自带查找路径。
 #    按平台选后缀与编译参数；PE（Windows）没有 rpath 概念，只验链接与运行。
 case "$(uname -s)" in

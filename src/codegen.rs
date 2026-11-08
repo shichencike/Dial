@@ -30,6 +30,7 @@ use inkwell::values::{
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
+use inkwell::InlineAsmDialect;
 use inkwell::OptimizationLevel;
 
 use crate::ast::*;
@@ -1012,6 +1013,91 @@ impl<'ctx> CodeGen<'ctx> {
                 .get(n)
                 .expect("结构体类型应在 build_struct_types 中已注册"))
             .into(),
+            // 原生向量 `<N x elem>`（v1.04）：元素走**机器原生宽度**，
+            // 见 simd_elem_llvm —— 不是 Dial 标量统一的 i64 表示。
+            Type::Simd(ref elem, n) => match self.simd_elem_llvm(elem) {
+                BasicTypeEnum::IntType(it) => it.vec_type(n).into(),
+                BasicTypeEnum::FloatType(ft) => ft.vec_type(n).into(),
+                _ => unreachable!("simd 元素只能是整数或浮点"),
+            },
+        }
+    }
+
+    /// `simd<T, N>` 元素的**原生机器宽度**（v1.04 底层原语）。
+    ///
+    /// 刻意不复用 `dialc_type_to_llvm`：Dial 标量在寄存器里统一用 i64 存
+    /// （byte / char / bool 都是值类型，不按 C 宽度截断），但向量元素必须是
+    /// 真实机器宽度——否则 `simd<byte,16>` 会变成 `<16 x i64>`（1024 位），
+    /// 而不是一条 SSE 寄存器就装得下的 `<16 x i8>`。bool 用 i1（正是 LLVM
+    /// 向量比较的原生结果），char 用 i32（Unicode 码点）。
+    fn simd_elem_llvm(&self, t: &Type) -> BasicTypeEnum<'ctx> {
+        match t {
+            Type::Int => self.context.i64_type().into(),
+            Type::Float => self.context.f64_type().into(),
+            Type::Bool => self.context.bool_type().into(),
+            Type::Byte => self.context.i8_type().into(),
+            Type::Char => self.context.i32_type().into(),
+            _ => unreachable!("simd 元素只能是标量（parser / sema 已保证）"),
+        }
+    }
+
+    /// Dial 标量值 → 向量元素值（构造 / insertelement 时用）。
+    /// Dial 标量：int/byte/char = i64，float = f64，bool = i1；
+    /// 向量元素：i64 / f64 / i1 / i8(byte) / i32(char)。
+    fn simd_scalar_to_elem(
+        &self,
+        v: BasicValueEnum<'ctx>,
+        elem: &Type,
+    ) -> BasicValueEnum<'ctx> {
+        if let (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(dt)) =
+            (v, self.simd_elem_llvm(elem))
+        {
+            let sw = iv.get_type().get_bit_width();
+            let dw = dt.get_bit_width();
+            if sw == dw {
+                iv.into()
+            } else if sw > dw {
+                self.builder
+                    .build_int_truncate(iv, dt, "simd.trunc")
+                    .unwrap()
+                    .into()
+            } else {
+                self.builder
+                    .build_int_z_extend(iv, dt, "simd.zext")
+                    .unwrap()
+                    .into()
+            }
+        } else {
+            v
+        }
+    }
+
+    /// 向量元素值 → Dial 标量值（extractelement 后用）。
+    fn simd_elem_to_scalar(
+        &self,
+        v: BasicValueEnum<'ctx>,
+        elem: &Type,
+    ) -> BasicValueEnum<'ctx> {
+        if let (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(dt)) =
+            (v, self.dialc_type_to_llvm(elem))
+        {
+            let sw = iv.get_type().get_bit_width();
+            let dw = dt.get_bit_width();
+            if sw == dw {
+                iv.into()
+            } else if sw < dw {
+                self.builder
+                    .build_int_z_extend(iv, dt, "simd.zext")
+                    .unwrap()
+                    .into()
+            } else {
+                self.builder
+                    .build_int_truncate(iv, dt, "simd.trunc")
+                    .unwrap()
+                    .into()
+            }
+        } else {
+            v
         }
     }
 
@@ -1264,6 +1350,11 @@ impl<'ctx> CodeGen<'ctx> {
                 self.context.i64_type().const_int(0, false).into()
             }
             Type::Void => self.context.i64_type().const_int(0, false).into(),
+            // 向量的零值是全 lane 零：VectorType::const_zero 直接给出零初始化聚合。
+            Type::Simd(..) => match self.dialc_type_to_llvm(t) {
+                BasicTypeEnum::VectorType(vt) => vt.const_zero().into(),
+                _ => unreachable!(),
+            },
         }
     }
 
@@ -3974,6 +4065,27 @@ impl<'ctx> CodeGen<'ctx> {
             }
             Expr::Index(arr, idx) => {
                 let at = type_of(arr, scopes, functions, structs)?;
+                // 原生向量 v[i]：一条 extractelement，结果转回 Dial 标量宽度。
+                // 越界 lane 在 LLVM 里是 poison，故沿用 Fail-Fast 边界检查。
+                if let Type::Simd(elem, n) = &at {
+                    let vec = self.gen_expr(arr, function, scopes, func_values, functions, structs)?;
+                    let iv = self.gen_expr(idx, function, scopes, func_values, functions, structs)?;
+                    let it = type_of(idx, scopes, functions, structs)?;
+                    let ii64 = self.to_i64(iv, &it);
+                    if self.checks_enabled() {
+                        let lanes = self.context.i64_type().const_int(*n as u64, false);
+                        self.emit_bounds_check(function, lanes, ii64);
+                    }
+                    let lane_idx = self
+                        .builder
+                        .build_int_truncate(ii64, self.context.i32_type(), "simd.idx")
+                        .unwrap();
+                    let lane = self
+                        .builder
+                        .build_extract_element(vec.into_vector_value(), lane_idx, "simd.lane")
+                        .unwrap();
+                    return Ok(self.simd_elem_to_scalar(lane, elem));
+                }
                 let aptr = self.gen_expr(arr, function, scopes, func_values, functions, structs)?;
                 let ival = self.gen_expr(idx, function, scopes, func_values, functions, structs)?;
                 let ii64 = self.to_i64(ival, &type_of(idx, scopes, functions, structs)?);
@@ -4063,7 +4175,17 @@ impl<'ctx> CodeGen<'ctx> {
             )),
             Expr::Unary(op, e) => match op {
                 UnOp::Neg => {
+                    let t = type_of(e, scopes, functions, structs)?;
                     let v = self.gen_expr(e, function, scopes, func_values, functions, structs)?;
+                    // 向量：逐 lane 取负（一条整数 neg / 浮点 fneg 向量指令）。
+                    if let Type::Simd(elem, _) = &t {
+                        let vv = v.into_vector_value();
+                        return Ok(if **elem == Type::Float {
+                            self.builder.build_float_neg(vv, "simd.neg").unwrap().into()
+                        } else {
+                            self.builder.build_int_neg(vv, "simd.neg").unwrap().into()
+                        });
+                    }
                     if v.is_float_value() {
                         Ok(self.builder.build_float_neg(v.into_float_value(), "neg").unwrap().into())
                     } else {
@@ -4075,7 +4197,16 @@ impl<'ctx> CodeGen<'ctx> {
                     Ok(self.builder.build_not(v.into_int_value(), "not").unwrap().into())
                 }
                 UnOp::BitNot => {
+                    let t = type_of(e, scopes, functions, structs)?;
                     let v = self.gen_expr(e, function, scopes, func_values, functions, structs)?;
+                    // 向量：一条 build_not 就是逐 lane 按位取反，无需拼全 1 掩码。
+                    if matches!(t, Type::Simd(..)) {
+                        return Ok(self
+                            .builder
+                            .build_not(v.into_vector_value(), "simd.bnot")
+                            .unwrap()
+                            .into());
+                    }
                     // ~x 即 x 与全 1 异或（等价于按位取反）
                     let all_ones = self.context.i64_type().const_all_ones();
                     Ok(self
@@ -4257,8 +4388,28 @@ impl<'ctx> CodeGen<'ctx> {
                 // 内置类型转换函数：与零隐式转换铁律配合，是 int<->float 的唯一合法通道。
                 // 直接编译为 LLVM 的 sitofp / fptosi，不依赖任何 C 运行时。
                 match name.as_str() {
-                    "int_to_float" => {
-                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                // v1.04 底层原语：@asm inline asm / simd<T, N> 构造。
+                "asm" | "asm_intel" => {
+                    return self.gen_inline_asm(
+                        name, args, function, scopes, func_values, functions, structs,
+                    );
+                }
+                "simd" => {
+                    let ty = match &args[0] {
+                        Expr::TypeLit(t) => t.clone(),
+                        _ => {
+                            return Err(DialcError::new(
+                                "内部错误：simd 构造缺少类型实参（应由 Sema 先行拦截）",
+                                0, 0,
+                            ))
+                        }
+                    };
+                    return self.gen_simd_construct(
+                        &ty, &args[1..], function, scopes, func_values, functions, structs,
+                    );
+                }
+                "int_to_float" => {
+                    let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         Ok(self
                             .builder
                             .build_signed_int_to_float(
@@ -5810,6 +5961,236 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// 构造 `simd<T, N>`：1 个实参广播到所有 lane，N 个实参逐 lane 指定。
+    ///
+    /// 从零初始化向量开始，逐 lane `insertelement`。N 是编译期常量且上限 64，
+    /// 因此这里展开成至多 64 条 IR 指令；优化器会把广播合并成
+    /// `insertelement + shufflevector`，不会留下 64 条运行时操作。
+    fn gen_simd_construct(
+        &self,
+        ty: &Type,
+        vals: &[Expr],
+        function: FunctionValue<'ctx>,
+        scopes: &CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let (elem, n) = match ty {
+            Type::Simd(e, n) => ((**e).clone(), *n),
+            _ => unreachable!(),
+        };
+        let vec_ty = match self.dialc_type_to_llvm(ty) {
+            BasicTypeEnum::VectorType(vt) => vt,
+            _ => unreachable!(),
+        };
+        let mut vec = vec_ty.const_zero();
+        if vals.len() == 1 {
+            let v = self.gen_expr(&vals[0], function, scopes, func_values, functions, structs)?;
+            let ev = self.simd_scalar_to_elem(v, &elem);
+            for i in 0..n {
+                let idx = self.context.i32_type().const_int(i as u64, false);
+                vec = self
+                    .builder
+                    .build_insert_element(vec, ev, idx, "simd.lane")
+                    .unwrap();
+            }
+        } else {
+            for (i, a) in vals.iter().enumerate() {
+                let v = self.gen_expr(a, function, scopes, func_values, functions, structs)?;
+                let ev = self.simd_scalar_to_elem(v, &elem);
+                let idx = self.context.i32_type().const_int(i as u64, false);
+                vec = self
+                    .builder
+                    .build_insert_element(vec, ev, idx, "simd.lane")
+                    .unwrap();
+            }
+        }
+        Ok(vec.into())
+    }
+
+    /// `@asm<T>("模板", "约束", 输入...)`：LLVM inline asm 调用。
+    ///
+    /// 模板 / 约束是编译期字符串；函数签名按 **C ABI 宽度**构造（bool→i32、
+    /// byte→i8），输入输出用既有的 `abi_adapt` 对称转换，因此 `@asm<byte>`
+    /// 不会把 Dial 的 i64 内部表示直接塞给汇编。`sideeffects=true` 保证编译器
+    /// 不把这段汇编当纯函数删掉或合并——这是底层原语该有的保守默认值。
+    fn gen_inline_asm(
+        &self,
+        name: &str,
+        args: &[Expr],
+        function: FunctionValue<'ctx>,
+        scopes: &CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let ret = match &args[0] {
+            Expr::TypeLit(t) => t.clone(),
+            _ => unreachable!(),
+        };
+        let template = match &args[1] {
+            Expr::StringLit(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        let constraints = match &args[2] {
+            Expr::StringLit(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        let ret_llvm = self.ffi_type_to_llvm(&ret);
+        let mut arg_tys: Vec<BasicMetadataTypeEnum> = Vec::new();
+        let mut vals: Vec<BasicMetadataValueEnum> = Vec::new();
+        for a in args.iter().skip(3) {
+            let t = type_of(a, scopes, functions, structs)?;
+            let v = self.gen_expr(a, function, scopes, func_values, functions, structs)?;
+            let target = self.ffi_type_to_llvm(&t);
+            let adapted = self.abi_adapt(v, v.get_type(), target);
+            arg_tys.push(target.into());
+            vals.push(adapted.into());
+        }
+        let fn_ty = ret_llvm.fn_type(&arg_tys, false);
+        let dialect = if name == "asm_intel" {
+            InlineAsmDialect::Intel
+        } else {
+            InlineAsmDialect::ATT
+        };
+        let asm_val = self.context.create_inline_asm(
+            fn_ty,
+            template,
+            constraints,
+            true,  // sideeffects：不得优化掉
+            false, // alignstack
+            Some(dialect),
+            false, // can_throw
+        );
+        let call = self
+            .builder
+            .build_indirect_call(fn_ty, asm_val, &vals, "asm")
+            .unwrap();
+        let raw = match call.try_as_basic_value() {
+            inkwell::values::ValueKind::Basic(v) => v,
+            inkwell::values::ValueKind::Instruction(_) => {
+                return Err(DialcError::new(
+                    "内部错误：@asm 未产生返回值（约束字符串里应有一个输出操作数）",
+                    0, 0,
+                ))
+            }
+        };
+        Ok(self.abi_adapt(raw, ret_llvm, self.dialc_type_to_llvm(&ret)))
+    }
+
+    /// 原生向量的逐元素二元运算（v1.04 底层原语）。
+    ///
+    /// LLVM 的向量算术与标量共用同一组 builder API（泛型 `IntMathValue` /
+    /// `FloatMathValue` 都实现了 `VectorValue`），所以这里没有逐 lane 循环——
+    /// 一条 `add <4 x i64>` 就是四条 lane 同时算完，由后端决定是否落到
+    /// SSE / AVX / NEON 指令。比较返回 `<N x i1>`，正是 `simd<bool, N>` 的表示。
+    fn gen_simd_binary(
+        &self,
+        op: BinOp,
+        lt: &Type,
+        l: &Expr,
+        r: &Expr,
+        function: FunctionValue<'ctx>,
+        scopes: &CgScopes<'ctx>,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+        functions: &HashMap<String, FuncInfo>,
+        structs: &StructTable,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let elem = match lt {
+            Type::Simd(e, _) => (**e).clone(),
+            _ => unreachable!(),
+        };
+        let lv = self.gen_expr(l, function, scopes, func_values, functions, structs)?;
+        let rv = self.gen_expr(r, function, scopes, func_values, functions, structs)?;
+        let a = lv.into_vector_value();
+        let b = rv.into_vector_value();
+        let is_float = elem == Type::Float;
+        // byte 语义是 0~255 无符号：`<N x i8>` 若用有符号谓词，200 > 100 会判反。
+        let is_unsigned = elem == Type::Byte;
+        let arithmetic_shift = elem == Type::Int;
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                if is_float {
+                    let v = match op {
+                        BinOp::Add => self.builder.build_float_add(a, b, "simd.add").unwrap(),
+                        BinOp::Sub => self.builder.build_float_sub(a, b, "simd.sub").unwrap(),
+                        BinOp::Mul => self.builder.build_float_mul(a, b, "simd.mul").unwrap(),
+                        BinOp::Div => self.builder.build_float_div(a, b, "simd.div").unwrap(),
+                        BinOp::Mod => self.builder.build_float_rem(a, b, "simd.rem").unwrap(),
+                        _ => unreachable!(),
+                    };
+                    Ok(v.into())
+                } else {
+                    // 向量的逐 lane 除零不在此做检查：LLVM 向量除法与 C SIMD
+                    // intrinsic 一致，含零除数的 lane 结果为 poison，由调用方保证。
+                    // （标量路径的 emit_div_zero_check 无法逐 lane 套用。）
+                    let v = match op {
+                        BinOp::Add => self.builder.build_int_add(a, b, "simd.add").unwrap(),
+                        BinOp::Sub => self.builder.build_int_sub(a, b, "simd.sub").unwrap(),
+                        BinOp::Mul => self.builder.build_int_mul(a, b, "simd.mul").unwrap(),
+                        BinOp::Div => self.builder.build_int_signed_div(a, b, "simd.div").unwrap(),
+                        BinOp::Mod => self.builder.build_int_signed_rem(a, b, "simd.rem").unwrap(),
+                        _ => unreachable!(),
+                    };
+                    Ok(v.into())
+                }
+            }
+            BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                if is_float {
+                    let p = match op {
+                        BinOp::Eq => FloatPredicate::OEQ,
+                        BinOp::Neq => FloatPredicate::ONE,
+                        BinOp::Lt => FloatPredicate::OLT,
+                        BinOp::Gt => FloatPredicate::OGT,
+                        BinOp::Le => FloatPredicate::OLE,
+                        _ => FloatPredicate::OGE,
+                    };
+                    Ok(self
+                        .builder
+                        .build_float_compare(p, a, b, "simd.cmp")
+                        .unwrap()
+                        .into())
+                } else {
+                    let p = match (op, is_unsigned) {
+                        (BinOp::Eq, _) => IntPredicate::EQ,
+                        (BinOp::Neq, _) => IntPredicate::NE,
+                        (BinOp::Lt, true) => IntPredicate::ULT,
+                        (BinOp::Lt, false) => IntPredicate::SLT,
+                        (BinOp::Gt, true) => IntPredicate::UGT,
+                        (BinOp::Gt, false) => IntPredicate::SGT,
+                        (BinOp::Le, true) => IntPredicate::ULE,
+                        (BinOp::Le, false) => IntPredicate::SLE,
+                        (BinOp::Ge, true) => IntPredicate::UGE,
+                        _ => IntPredicate::SGE,
+                    };
+                    Ok(self
+                        .builder
+                        .build_int_compare(p, a, b, "simd.cmp")
+                        .unwrap()
+                        .into())
+                }
+            }
+            BinOp::BitAnd => Ok(self.builder.build_and(a, b, "simd.band").unwrap().into()),
+            BinOp::BitOr => Ok(self.builder.build_or(a, b, "simd.bor").unwrap().into()),
+            BinOp::BitXor => Ok(self.builder.build_xor(a, b, "simd.bxor").unwrap().into()),
+            BinOp::Shl => Ok(self
+                .builder
+                .build_left_shift(a, b, "simd.shl")
+                .unwrap()
+                .into()),
+            BinOp::Shr => Ok(self
+                .builder
+                .build_right_shift(a, b, arithmetic_shift, "simd.shr")
+                .unwrap()
+                .into()),
+            BinOp::And | BinOp::Or => Err(DialcError::new(
+                "内部错误：向量不支持 and/or（应由 Sema 先行拦截）",
+                0, 0,
+            )),
+        }
+    }
+
     fn gen_binary(
         &self,
         op: BinOp,
@@ -5821,6 +6202,17 @@ impl<'ctx> CodeGen<'ctx> {
         functions: &HashMap<String, FuncInfo>,
         structs: &StructTable,
     ) -> Result<BasicValueEnum<'ctx>> {
+        // 原生向量走独立分支：标量路径里的 into_int_value() 会在 VectorValue 上
+        // panic，标量侧的诊断与除零检查也不适用于向量。
+        {
+            let tl = type_of(l, scopes, functions, structs)?;
+            let tr = type_of(r, scopes, functions, structs)?;
+            if matches!(tl, Type::Simd(..)) || matches!(tr, Type::Simd(..)) {
+                return self.gen_simd_binary(
+                    op, &tl, l, r, function, scopes, func_values, functions, structs,
+                );
+            }
+        }
         match op {
             BinOp::And | BinOp::Or => {
                 // 短路求值（与 C 的 && / || 一致，这是现代语言的常识）：
@@ -6186,6 +6578,13 @@ impl<'ctx> CodeGen<'ctx> {
                     0,
                 ))
             }
+            // 向量是寄存器里的多值聚合，没有标量打印通道；请 v[i] 取 lane。
+            Type::Simd(..) => {
+                return Err(DialcError::new(
+                    "内部错误：向量不可直接打印，请用 v[i] 取出单个 lane（应由 Sema 先行拦截）",
+                    0, 0,
+                ))
+            }
             Type::Int => {
                 self.call_c_void("dial_print_int", &[val.into()]);
             }
@@ -6310,6 +6709,12 @@ impl<'ctx> CodeGen<'ctx> {
                     "内部错误：函数指针不可输出（应由 Sema 先行拦截）",
                     0,
                     0,
+                ))
+            }
+            Type::Simd(..) => {
+                return Err(DialcError::new(
+                    "内部错误：向量不可直接输出，请用 v[i] 取出单个 lane（应由 Sema 先行拦截）",
+                    0, 0,
                 ))
             }
             Type::Int => {

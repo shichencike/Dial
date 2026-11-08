@@ -1,0 +1,4 @@
+fn main(): int {
+    let r: int = @asm<int>("nop", "r,r", 1);
+    print(r); return 0;
+}

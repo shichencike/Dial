@@ -1,0 +1,2 @@
+fn asm(x: int): int { return x; }
+fn main(): int { return asm(1); }

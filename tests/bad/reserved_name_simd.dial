@@ -1,0 +1,2 @@
+fn simd(x: int): int { return x; }
+fn main(): int { return simd(1); }

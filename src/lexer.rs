@@ -82,6 +82,10 @@ pub enum TokenKind {
     Export,
     Packed,
     Volatile,
+    /// `@asm` 内嵌汇编（v1.04 底层原语）：只在 `@` 之后出现，不能作普通标识符。
+    Asm,
+    /// `simd<T, N>` 原生向量类型（v1.04 底层原语）。
+    Simd,
 
     // 类型关键字
     IntT,
@@ -578,6 +582,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "export" => TokenKind::Export,
                 "packed" => TokenKind::Packed,
                 "volatile" => TokenKind::Volatile,
+                "asm" => TokenKind::Asm,
+                "simd" => TokenKind::Simd,
                 "true" => TokenKind::BoolLit(true),
                 "false" => TokenKind::BoolLit(false),
                 "struct" => TokenKind::Struct,

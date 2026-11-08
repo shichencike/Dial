@@ -75,6 +75,18 @@ pub enum Type {
     /// 这是内存映射 IO / 硬件寄存器 / 与异步硬件共享的内存区域的刚需
     /// （C 的 `volatile T*` 语义）。Dial 侧仍以普通指针方式使用，差异只在该指针的「易失性」。
     VolatilePtr(Box<Type>),
+    /// 原生 SIMD 向量（v1.04 底层原语）：`simd<T, N>`，编译期定长的 LLVM `<N x T>`。
+    ///
+    /// **与 `T[]` 的根本区别**：数组是堆上的 ARC 容器（越界检查、retain/release、
+    /// 元素按 i64 槽位存储）；向量是**寄存器里的值**，无堆分配、无 ARC、无隐式
+    /// 转换，逐元素算术直接落到 LLVM 向量指令（由后端决定生成 SSE/AVX/NEON）。
+    ///
+    /// 元素 `T` 只允许标量（int/float/bool/byte/char）——不能嵌套 simd、不能放
+    /// string/数组/结构体/裸指针。`N` 必须是编译期整数字面量。
+    /// 元素在 IR 里用**原生机器宽度**（byte→i8、char→i32、bool→i1、int→i64、
+    /// float→f64），而非 Dial 标量内部的 i64 统一表示——`simd<byte,16>` 因此是
+    /// 128 位的 `<16 x i8>`，能被后端放进一个 SSE 寄存器，而不是 1024 位的怪物。
+    Simd(Box<Type>, u32),
     /// 函数指针（v1.03）：写作 `fn(A, B): R`，IR 层就是一个 `ptr`（纯函数地址）。
     ///
     /// **核心红线：绝不捕获环境**——Dial 没有闭包，函数指针里只有代码地址，
@@ -123,6 +135,7 @@ impl Type {
             Type::Opaque(_) => "opaque",
             Type::RawPtr(_) => "rawptr",
             Type::VolatilePtr(_) => "volatile rawptr",
+            Type::Simd(..) => "simd",
             Type::FnPtr(..) => "fn",
         }
     }
@@ -135,6 +148,7 @@ impl Type {
             Type::KvMap(k, v) => format!("map<{}, {}>", k.display(), v.display()),
             Type::RawPtr(e) => format!("rawptr<{}>", e.display()),
             Type::VolatilePtr(e) => format!("volatile rawptr<{}>", e.display()),
+            Type::Simd(e, n) => format!("simd<{}, {}>", e.display(), n),
             Type::FnPtr(ps, r) => format!(
                 "fn({}): {}",
                 ps.iter()

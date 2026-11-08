@@ -352,9 +352,11 @@
 <li><a href="#3310-packed-struct网络协议的逐字节对齐">33.10 packed struct：网络协议的逐字节对齐</a></li>
 <li><a href="#3311-volatile-rawptrt内存映射-io-的易失访问">33.11 volatile rawptr&lt;T&gt;：内存映射 IO 的易失访问</a></li>
 <li><a href="#3312-bitcasttx底层内存强转">33.12 bitcast&lt;T&gt;(x)：底层内存强转</a></li>
-<li><a href="#3313-实现落点">33.13 实现落点</a></li>
-<li><a href="#3314-标准库-abi-递增破坏性变更">33.14 标准库 ABI 递增（破坏性变更）</a></li>
-<li><a href="#3315-测试与交付">33.15 测试与交付</a></li>
+<li><a href="#3313-asmt内嵌汇编">33.13 @asm&lt;T&gt;(...)：内嵌汇编</a></li>
+<li><a href="#3314-simdt-n原生向量类型">33.14 simd&lt;T, N&gt;：原生向量类型</a></li>
+<li><a href="#3315-实现落点">33.15 实现落点</a></li>
+<li><a href="#3316-标准库-abi-递增破坏性变更">33.16 标准库 ABI 递增（破坏性变更）</a></li>
+<li><a href="#3317-测试与交付">33.17 测试与交付</a></li>
 </ul>
 </li>
 <li><a href="#34-v104-增补工程工具链并入-v104版本不变">34. v1.04 增补：工程工具链（并入 [v1.04]，版本不变）</a><ul>
@@ -7437,7 +7439,108 @@ var back: rawptr&lt;byte&gt; = bitcast&lt;rawptr&lt;byte&gt;&gt;(addr);  // 整�
 <li>目标类型是<strong>类型实参</strong>（<code>bitcast&lt;T&gt;(x)</code>），与 <code>ptr_cast&lt;T&gt;(x)</code> /
   <code>sizeof&lt;T&gt;()</code> 同一套约定。</li>
 </ul>
-<h3 id="3313-实现落点">33.13 实现落点</h3>
+<h3 id="3313-asmt内嵌汇编">33.13 <code>@asm&lt;T&gt;(...)</code>：内嵌汇编</h3>
+<p>把一段汇编<strong>原样</strong>交给 LLVM，编译产物里就是一条 <code>call ... asm sideeffect ...</code>。
+这是写系统调用、读时间戳计数器、操作特殊寄存器的最后一道口子。</p>
+<pre><code class="language-dial">fn asm_add7(x: int): int {
+    // &quot;=r,0&quot;：输出约束 + 输入绑定到输出 0；$$7 是 AT&amp;T 立即数 $7 的转义
+    return @asm&lt;int&gt;(&quot;addq $$7, $0&quot;, &quot;=r,0&quot;, x);
+}
+fn asm_intel_id(x: int): int {
+    return @asm_intel&lt;int&gt;(&quot;mov $0, $1&quot;, &quot;=r,r&quot;, x);
+}
+</code></pre>
+<ul>
+<li><strong>占位符是 <code>$0</code> / <code>$1</code>（LLVM IR inline asm 语法），不是 GCC C <code>__asm__</code> 的 <code>%0</code> / <code>%1</code></strong>。
+  AT&amp;T 方言里 <code>%</code> 是寄存器前缀，写成 <code>%0</code> 会得到 <code>invalid register name</code>；
+  <code>$$</code> 表示一个字面的 <code>$</code>（AT&amp;T 立即数）。</li>
+<li><code>@asm</code> 用 AT&amp;T 方言（LLVM 默认），<code>@asm_intel</code> 用 Intel 方言，其余规则完全相同。</li>
+<li><strong>返回类型必须显式写成 <code>&lt;T&gt;</code></strong>，且只能是标量（<code>int</code> / <code>float</code> / <code>bool</code> / <code>byte</code> /
+  <code>char</code>）或裸指针——asm 的结果是一个寄存器里的值，ARC 容器 / 数组 / 结构体 /
+  向量都不可能由它构造。约束字符串首项必须是<strong>输出约束</strong>（<code>=r</code> / <code>=&amp;r</code> / <code>+r</code>），
+  否则编译期拒绝。</li>
+<li>模板与约束都必须是<strong>字符串字面量</strong>（编译期常量），运行时字符串没有意义，
+  也杜绝了把任意模板拼进 IR 的可能。</li>
+<li>输入 / 输出按 <strong>C ABI 宽度</strong>进出（<code>bool</code>→<code>i32</code>、<code>byte</code>→<code>i8</code>），复用 §33.4
+  那套 <code>abi_adapt</code> 对称转换；因此 <code>@asm&lt;byte&gt;</code> 不会把 Dial 内部的 <code>i64</code> 直接塞给
+  8 位寄存器。</li>
+<li><code>sideeffects = true</code>：编译器不得把这段汇编当纯函数删掉、合并或重排。</li>
+<li><strong>平台相关</strong>：模板、约束、寄存器名都是目标机的事，编译器不做可移植性保证。
+  这是「信任开发者」的底层原语——它本身就是显式的，与零隐式转换铁律不冲突。</li>
+</ul>
+<h3 id="3314-simdt-n原生向量类型">33.14 <code>simd&lt;T, N&gt;</code>：原生向量类型</h3>
+<pre><code class="language-dial">var a: simd&lt;int, 4&gt; = simd&lt;int, 4&gt;(1, 2, 3, 4);   // 逐 lane
+var b: simd&lt;int, 4&gt; = simd&lt;int, 4&gt;(10);             // 广播（splat）
+var c: simd&lt;int, 4&gt; = a + b;                        // 一条 add &lt;4 x i64&gt;
+print(c[0]);                                        // 一条 extractelement
+</code></pre>
+<p><strong>它是寄存器里的值，不是堆上的容器</strong>：<code>T[]</code> 是 ARC 管理的动态数组（越界检查、
+retain/release、元素按 i64 槽位存储）；<code>simd&lt;T, N&gt;</code> 是编译期定长的 LLVM 向量，
+无堆分配、无 ARC，逐元素算术直接落到一条向量指令，由后端决定生成
+SSE / AVX / NEON。</p>
+<p>元素在 IR 里用<strong>原生机器宽度</strong>，而不是 Dial 标量统一的 i64 内部表示——
+这正是「原生」二字的含义：</p>
+<table>
+<thead>
+<tr>
+<th><code>T</code></th>
+<th>LLVM 元素</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int</code></td>
+<td><code>i64</code></td>
+<td>Dial 的 int</td>
+</tr>
+<tr>
+<td><code>float</code></td>
+<td><code>f64</code></td>
+<td>Dial 的 float 是 double</td>
+</tr>
+<tr>
+<td><code>bool</code></td>
+<td><code>i1</code></td>
+<td>正是 LLVM 向量比较的原生结果</td>
+</tr>
+<tr>
+<td><code>byte</code></td>
+<td><code>i8</code></td>
+<td>0~255；比较用<strong>无符号</strong>谓词</td>
+</tr>
+<tr>
+<td><code>char</code></td>
+<td><code>i32</code></td>
+<td>Unicode 码点</td>
+</tr>
+</tbody>
+</table>
+<p>所以 <code>sizeof&lt;simd&lt;byte, 16&gt;&gt;()</code> 是 <strong>16</strong>（<code>&lt;16 x i8&gt;</code>，一条 SSE 寄存器就装得下），
+而不是 128（<code>&lt;16 x i64&gt;</code>）。<code>sizeof&lt;T&gt;()</code> / <code>alignof&lt;T&gt;()</code> 按 target DataLayout
+编译期现算，与 C 的 <code>vector_size</code> 扩展一致。</p>
+<ul>
+<li><code>T</code> 只允许上表五种标量，<strong>不允许嵌套 simd</strong>、不能放 string / 数组 / 结构体 /
+  裸指针；<code>N</code> 必须是编译期整数字面量，范围 <code>2~64</code>（1 个 lane 没有向量意义，
+  过大的向量后端无法合法化）。2 的幂更容易映射到硬件指令，但不是硬要求。</li>
+<li>构造：<code>simd&lt;T,N&gt;(v)</code> 把单个标量广播到全部 lane；<code>simd&lt;T,N&gt;(v0, v1, ..., vN-1)</code>
+  逐 lane 指定。<strong>零隐式转换</strong>同样适用——<code>simd&lt;byte,4&gt;(200)</code> 会被拒绝（200 是 int），
+  需写 <code>int_to_byte(200)</code>。</li>
+<li>运算：<code>+ - * / %</code>（逐元素）、<code>== != &lt; &gt; &lt;= &gt;=</code>（返回 <code>simd&lt;bool, N&gt;</code>）、
+  <code>&amp; | ^ &lt;&lt; &gt;&gt;</code>（仅整数元素）、一元 <code>-</code> 与 <code>~</code>。<strong>没有</strong> <code>and</code> / <code>or</code>——
+  短路逻辑对向量没有意义，逐元素请用位运算。</li>
+<li>索引 <code>v[i]</code> 取回一个标量（越界 Fail-Fast）；向量是 SSA 值类型，
+  <strong>不能原地改单个 lane</strong>，要换 lane 请重新构造后整体赋值给 <code>var</code> 变量
+  （优化器会把一串 <code>insertelement</code> 合并掉）。向量本身不能直接 <code>print</code>，
+  请用 <code>v[i]</code> 取 lane。</li>
+<li>边界：<code>simd</code> 不能作为数组元素、<code>extern struct</code> 字段或 <code>@export</code> / <code>extern fn</code>
+  签名的一部分——C 侧向量 ABI 需要专门的 vector extension 声明，
+  编译器不替用户猜测，直接编译期拒绝。</li>
+<li>向量除法<strong>不做逐 lane 除零检查</strong>：与 C SIMD intrinsic / LLVM 向量除法一致，
+  含零除数的 lane 结果为 poison，由调用方保证（标量路径的 Fail-Fast 检查
+  无法逐 lane 套用，强行插入会毁掉向量化）。</li>
+</ul>
+<h3 id="3315-实现落点">33.15 实现落点</h3>
 <table>
 <thead>
 <tr>
@@ -7521,12 +7624,49 @@ var back: rawptr&lt;byte&gt; = bitcast&lt;rawptr&lt;byte&gt;&gt;(addr);  // 整�
 </tr>
 </tbody>
 </table>
-<h3 id="3314-标准库-abi-递增破坏性变更">33.14 标准库 ABI 递增（破坏性变更）</h3>
+<p><strong>底层原语的落点</strong>（§33.13 – §33.14）：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>文件</th>
+<th>改动</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>词法 / LSP</td>
+<td><code>lexer.rs</code> / <code>lsp.rs</code></td>
+<td>新增 <code>asm</code> / <code>simd</code> 关键字与语义 token</td>
+</tr>
+<tr>
+<td>AST</td>
+<td><code>ast.rs</code></td>
+<td><code>Type::Simd(Box&lt;Type&gt;, u32)</code> + <code>name()</code> / <code>display()</code></td>
+</tr>
+<tr>
+<td>解析</td>
+<td><code>parser.rs</code></td>
+<td><code>simd&lt;T,N&gt;</code> 类型与构造共用 <code>parse_simd_tail</code> 校验；<code>At</code> 分支识别 <code>@asm</code> / <code>@asm_intel</code></td>
+</tr>
+<tr>
+<td>语义</td>
+<td><code>semantic.rs</code></td>
+<td><code>simd_binary_type</code> 逐元素推导、构造 / 索引 / 一元校验、print 与 C ABI 白名单拒绝向量、<code>RESERVED_NAMES</code> 设防</td>
+</tr>
+<tr>
+<td>代码生成</td>
+<td><code>codegen.rs</code></td>
+<td><code>simd_elem_llvm</code> 原生宽度映射、构造 / <code>extractelement</code> / 向量算术与比较、<code>create_inline_asm</code> + <code>build_indirect_call</code>、<code>abi_adapt</code> 边界适配</td>
+</tr>
+</tbody>
+</table>
+<h3 id="3316-标准库-abi-递增破坏性变更">33.16 标准库 ABI 递增（破坏性变更）</h3>
 <p><code>stdlib/dial_ffi.c</code> 新增四个导出函数，因此 <code>STDLIB_ABI</code> <strong>4 → 5</strong>，
 编译器版本 <code>1.3.0 → 1.4.0</code>，<code>make_stdlib_pkg.py</code> 默认 <code>--abi 5</code>、CI <code>--abi 5</code>。
 旧包（abi=4）会被编译器当场拒绝并给出重装指引。安装脚本仍走 <code>releases/latest</code>
 动态解析，不写死版本号。</p>
-<h3 id="3315-测试与交付">33.15 测试与交付</h3>
+<h3 id="3317-测试与交付">33.17 测试与交付</h3>
 <ul>
 <li>4 个正向示例：<code>ffi_hello</code>、<code>ffi_buffer</code>、<code>ffi_struct</code>、<code>ffi_callback</code>；</li>
 <li>19 个负向用例：伪装动态库 / 动态库缺失 / 非归档后缀、C 布局字段白名单、
@@ -7544,14 +7684,25 @@ var back: rawptr&lt;byte&gt; = bitcast&lt;rawptr&lt;byte&gt;&gt;(addr);  // 整�
 <li><code>volatile</code>：运行期往返值 + <strong><code>DIALC_DUMP_IR=1</code> 断言 IR 里确实是
     <code>load volatile</code> / <code>store volatile</code></strong>（这才是「每次访问都落总线」的真正保证）；</li>
 <li><code>bitcast</code>：地址 ↔ 整数往返值 + 位宽不一致必须编译期拒绝；</li>
-<li><strong>5 个新增负向用例</strong>：<code>@export</code> 签名含 <code>string</code>、<code>volatile</code> 修饰非指针、
-  <code>bitcast</code> 位宽不一致、<code>bitcast</code> 指针 ↔ 聚合类型、<code>packed</code> 后跟错关键字；</li>
-<li><code>bash tests/run_tests.sh</code> <strong>A–Z 二十六组全套通过（480 ✅ / 0 ❌）</strong>，
+<li><strong>底层原语专测</strong>（P 组 2d，<code>tests/ffi/ffi_lowlevel_demo.dial</code>）：
+  <code>@asm</code> 四种形态（AT&amp;T 恒等 / 匹配约束 <code>=r,0</code> 加法 / Intel 方言 / <code>byte</code> 的
+  C ABI 宽度适配）、<code>simd</code> 构造与广播、逐元素算术与比较、无符号 byte 比较、
+  索引与 <code>sizeof</code> / <code>alignof</code> 原生宽度；另用 <code>DIALC_DUMP_IR=1</code> 断言 IR 里确实是
+  <code>asm sideeffect</code> / <code>inteldialect</code> / <code>add &lt;4 x i64&gt;</code> / <code>&lt;4 x i8&gt;</code> / <code>&lt;2 x double&gt;</code>
+  ——<strong>运行期值只证明结果对，IR 形态才证明没有被降级成标量模拟</strong>；</li>
+<li><strong>22 个新增负向用例</strong>：导出四件套 5 个（<code>@export</code> 签名含 <code>string</code>、
+  <code>volatile</code> 修饰非指针、<code>bitcast</code> 位宽不一致 / 指针 ↔ 聚合、<code>packed</code> 后跟错关键字）</li>
+<li>底层原语 17 个（asm 模板非字面量 / 返回类型非法 / 缺输出约束 / 参数不足；
+  simd 元素非标量 / 嵌套 / N 非法 / N 非常量 / 构造参数个数 / 混合类型运算 /
+  短路逻辑 / 直接 print / 改 lane / <code>@export</code> 签名 / <code>extern struct</code> 字段；
+  以及 <code>asm</code> / <code>simd</code> 保留名设防）；</li>
+<li><code>bash tests/run_tests.sh</code> <strong>A–Z 二十六组全套通过（499 ✅ / 0 ❌）</strong>，
   <code>tools/cve_check.py</code> 8/8、三平台 <code>zig cc</code> 编译通过。</li>
 </ul>
 <blockquote>
-<p><strong>本轮交付范围</strong>：按约定只做<strong>本地提交</strong>，不推送 GitHub、不打 tag、不发 Release。
-<code>v1.0</code> 里程碑标签已在 <code>[v1.03]</code> 之后打并推送，本版不影响它。</p>
+<p><strong>本轮交付范围</strong>：FFI 导出四件套等 v1.04 主体已同步至 <code>origin/main</code>（2026-11-08），
+<strong>未打 tag、未发 Release</strong>；<code>@asm</code> / <code>simd&lt;T, N&gt;</code> 两项增补按约定只做<strong>本地提交</strong>，
+待后续同步。<code>v1.0</code> 里程碑标签已在 <code>[v1.03]</code> 之后打并推送，本版不影响它。</p>
 </blockquote>
 <hr />
 <h2 id="34-v104-增补工程工具链并入-v104版本不变">34. v1.04 增补：工程工具链（并入 <code>[v1.04]</code>，版本不变）</h2>

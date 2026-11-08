@@ -1,0 +1,4 @@
+@export fn f(v: simd<int, 4>): int {
+    return 1;
+}
+fn main(): int { return 0; }

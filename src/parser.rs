@@ -847,6 +847,13 @@ impl Parser {
                 self.expect_gt()?;
                 Type::VolatilePtr(Box::new(elem))
             }
+            // 原生向量类型 `simd<T, N>`（v1.04 底层原语）。
+            // 长度 N 是 LLVM 类型的一部分，必须是编译期常量；类型标注与构造调用
+            // 共用 parse_simd_tail，规则只写一份。
+            TokenKind::Simd => {
+                self.advance();
+                self.parse_simd_tail(t.line, t.col)?
+            }
             // 函数指针类型 `fn(A, B): R`（v1.03）。
             // 与函数声明 `fn name(a: A): R` 同形，只是省掉名字；类型位置遇上
             // `fn` 关键字时不会与任何语句开头混淆（parse_type 只在类型上下文被调用）。
@@ -958,6 +965,61 @@ impl Parser {
             ty = Type::Array(Box::new(ty));
         }
         Ok(ty)
+    }
+
+    /// 解析 `simd<T, N>` 的 `<T, N>` 部分（`simd` 关键字已消费）。
+    ///
+    /// `parse_type`（类型标注）与 `parse_primary`（构造调用）共用这一份校验，
+    /// 避免「声明处放行、构造处拒绝」这类规则漂移。元素只允许标量且不允许
+    /// 嵌套 simd —— LLVM 向量元素只能是整数 / 浮点 / 指针，Dial 的 ARC 容器、
+    /// 结构体、裸指针都不该出现在寄存器向量里。N 限定 2~64：1 个 lane 没有
+    /// 向量意义，超过 64 会生成后端无法合法化的巨型类型。
+    fn parse_simd_tail(&mut self, line: usize, col: usize) -> Result<Type> {
+        self.expect(TokenKind::Lt)?;
+        let elem = self.parse_type()?;
+        if !matches!(
+            elem,
+            Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char
+        ) {
+            return Err(DialcError::new(
+                format!(
+                    "语法错误：simd 的元素类型必须是标量（int/float/bool/byte/char），实际为 {}；\
+                     simd 不允许嵌套，也不能放容器 / 指针 / 结构体",
+                    elem.display()
+                ),
+                line,
+                col,
+            ));
+        }
+        self.expect(TokenKind::Comma)?;
+        let n = match self.peek().kind.clone() {
+            TokenKind::IntLit(v) => {
+                self.advance();
+                v
+            }
+            other => {
+                return Err(DialcError::new(
+                    format!(
+                        "语法错误：simd 的长度 N 必须是编译期整数字面量，遇到 {:?}",
+                        other
+                    ),
+                    self.peek().line,
+                    self.peek().col,
+                ));
+            }
+        };
+        if !(2..=64).contains(&n) {
+            return Err(DialcError::new(
+                format!(
+                    "语法错误：simd 的长度 N 必须在 2~64 之间，实际为 {}",
+                    n
+                ),
+                line,
+                col,
+            ));
+        }
+        self.expect_gt()?;
+        Ok(Type::Simd(Box::new(elem), n as u32))
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>> {
@@ -1971,6 +2033,66 @@ impl Parser {
                     }
                 }
                 Ok(Expr::Interp(parts))
+            }
+            // `@asm<T>("template", "constraints", args...)`（v1.04 底层原语）。
+            // `At` 与顶层 `@export fn` 共用一个 token：`@export` 只在顶层声明出现，
+            // 表达式位置遇 `@` 只能是内嵌汇编。`@asm_intel` 是 Intel 方言入口
+            // （词法上是普通标识符，由这里按名字识别）。
+            TokenKind::At => {
+                self.advance();
+                let name = if self.check(&TokenKind::Asm) {
+                    self.advance();
+                    "asm".to_string()
+                } else if matches!(&self.peek().kind, TokenKind::Ident(n) if n == "asm_intel") {
+                    self.advance();
+                    "asm_intel".to_string()
+                } else {
+                    return Err(DialcError::new(
+                        "语法错误：`@` 之后只能是 `asm` / `asm_intel`（表达式位置）\
+                         或顶层的 `export`（函数声明）",
+                        tok.line,
+                        tok.col,
+                    ));
+                };
+                // 结果类型无法从约束字符串推断，必须由用户显式写出（类型实参约定
+                // 与 bitcast<T>(x) / sizeof<T>() 同一套），否则等于隐式转换。
+                self.expect(TokenKind::Lt)?;
+                let ret = self.parse_type()?;
+                self.expect_gt()?;
+                self.expect(TokenKind::LParen)?;
+                let mut args = vec![Expr::TypeLit(ret)];
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        if self.check(&TokenKind::Comma) {
+                            self.advance();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                Ok(Expr::Call(name, args))
+            }
+            // `simd<T, N>(...)`：向量构造。`<T, N>` 作为类型实参塞进第一个参数，
+            // 走与 ptr_cast<T>(x) 相同的内建分派；1 个实参 = 广播，N 个 = 逐 lane。
+            TokenKind::Simd => {
+                self.advance();
+                let ty = self.parse_simd_tail(tok.line, tok.col)?;
+                self.expect(TokenKind::LParen)?;
+                let mut args = vec![Expr::TypeLit(ty)];
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        if self.check(&TokenKind::Comma) {
+                            self.advance();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                Ok(Expr::Call("simd".to_string(), args))
             }
             TokenKind::LBracket => self.parse_array_lit(),
             // 括号表达式 `(expr)`：分组优先级，Pratt Parser 的「隐式优先级提升」。

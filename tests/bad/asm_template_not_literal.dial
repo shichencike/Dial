@@ -1,0 +1,5 @@
+fn main(): int {
+    let t: string = "nop";
+    let r: int = @asm<int>(t, "=r", 1);
+    print(r); return 0;
+}

@@ -789,7 +789,7 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::Step | TokenKind::Const | TokenKind::Enum
         | TokenKind::With | TokenKind::Goto | TokenKind::Label
         | TokenKind::Extern | TokenKind::Link | TokenKind::Export | TokenKind::Packed
-        | TokenKind::Volatile => T_KEYWORD,
+        | TokenKind::Volatile | TokenKind::Asm | TokenKind::Simd => T_KEYWORD,
         // true / false 虽是字面量，但视觉上按关键字处理更符合直觉
         TokenKind::BoolLit(_) => T_KEYWORD,
         // 类型关键字

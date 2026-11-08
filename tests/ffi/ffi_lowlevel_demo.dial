@@ -1,0 +1,55 @@
+// v1.04 底层原语专项：@asm 内嵌汇编 与 simd<T, N> 原生向量。
+// 由 P 组 2d 编译运行，逐行比对期望输出；DIALC_DUMP_IR 另断言 IR 形态
+// （必须是真正的 inline asm 与 LLVM 向量指令，而不是标量模拟）。
+
+// ---- @asm：LLVM IR inline asm，占位符是 $0/$1（不是 GCC 的 %0/%1）----
+fn asm_identity(x: int): int {
+    return @asm<int>("movq $1, $0", "=r,r", x);
+}
+fn asm_add7(x: int): int {
+    // "=r,0"：输入绑定到输出操作数 0；$$7 是 AT&T 立即数 $7 的转义。
+    return @asm<int>("addq $$7, $0", "=r,0", x);
+}
+fn asm_intel_id(x: int): int {
+    return @asm_intel<int>("mov $0, $1", "=r,r", x);
+}
+// 返回值按 C ABI 宽度（i8）进出，再适配回 Dial 的 i64 内部表示。
+fn asm_byte(x: int): int {
+    return byte_to_int(@asm<byte>("movb $1, $0", "=r,r", int_to_byte(x)));
+}
+
+fn main(): int {
+    // 1) asm 四种形态
+    print(asm_identity(42));   // 42
+    print(asm_add7(35));       // 42
+    print(asm_intel_id(77));   // 77  Intel 方言
+    print(asm_byte(200));      // 200 C ABI 宽度适配
+
+    // 2) simd<int, 4>：逐 lane 构造 + 广播 + 单条向量加法
+    var a: simd<int, 4> = simd<int, 4>(1, 2, 3, 4);
+    var b: simd<int, 4> = simd<int, 4>(10);
+    var c: simd<int, 4> = a + b;
+    print(c[0]);               // 11
+    print(c[3]);               // 14
+
+    // 3) 原生宽度：byte 元素是 i8（16 字节），绝非 Dial 内部 i64（128 字节）
+    print(sizeof<simd<int, 4>>());     // 32
+    print(sizeof<simd<byte, 16>>());   // 16
+    print(alignof<simd<byte, 16>>());  // 16
+
+    // 4) simd<float, 2>：逐元素乘法 + 向量比较 -> simd<bool, 2>
+    var f: simd<float, 2> = simd<float, 2>(1.5, 2.5);
+    var g: simd<float, 2> = f * simd<float, 2>(2.0);
+    print(g[1]);               // 5.000000
+    var m: simd<bool, 2> = f < g;
+    print(m[0]);               // true
+
+    // 5) byte 向量：比较必须用无符号谓词（200 > 100 为真，1 > 100 为假）
+    var by: simd<byte, 4> = simd<byte, 4>(
+        int_to_byte(200), int_to_byte(1), int_to_byte(2), int_to_byte(3));
+    print(byte_to_int(by[0])); // 200
+    var cmp: simd<bool, 4> = by > simd<byte, 4>(int_to_byte(100));
+    print(cmp[0]);             // true
+    print(cmp[1]);             // false
+    return 0;
+}

@@ -88,6 +88,24 @@
   那时 `bitcast<int>(ptr)` 就该被拒）。指针 ↔ 整数走 `ptrtoint` / `inttoptr`
   （LLVM 的 `bitcast` 本身不允许跨类转），整数 ↔ 整数、浮点 ↔ 整数同位宽互转走
   真正的 `bitcast`。
+- **`@asm<T>(...)`：内嵌汇编**（见 [README §33.13](README.md#3313-asmt内嵌汇编)）。
+  把汇编模板与 LLVM 约束字符串在编译期写进 IR，产物里就是一条
+  `call ... asm sideeffect ...`。占位符用 LLVM IR 的 `$0` / `$1`（不是 GCC C
+  `__asm__` 的 `%0` / `%1`），`$$` 转义 AT&T 立即数；`@asm` 走 AT&T 方言，
+  `@asm_intel` 走 Intel 方言。返回类型必须显式写成 `<T>` 且只能是标量 / 裸指针；
+  模板与约束必须是**字符串字面量**，约束首项必须是输出约束（`=r` / `=&r` / `+r`），
+  否则编译期拒绝。输入输出按 C ABI 宽度（`bool`→`i32`、`byte`→`i8`）走
+  `abi_adapt` 对称适配，`sideeffects=true` 防止被优化掉。平台相关，不做可移植性保证。
+- **`simd<T, N>`：原生向量类型**（见 [README §33.14](README.md#3314-simdt-n原生向量类型)）。
+  编译期定长的 LLVM `<N x T>`，是**寄存器里的值**（无堆分配 / 无 ARC），逐元素算术
+  落成单条向量指令。元素用**原生机器宽度**（`int`→`i64`、`float`→`f64`、
+  `bool`→`i1`、`byte`→`i8`、`char`→`i32`）——`sizeof<simd<byte,16>>()` 是 **16**
+  而不是 128。支持广播 / 逐 lane 构造、逐元素算术与比较（返回 `simd<bool,N>`，
+  `byte` 用无符号谓词）、位运算、索引读（越界 Fail-Fast）；`N` 是 2~64 的编译期
+  字面量，元素仅标量且不可嵌套。刻意不开放：原地改 lane、`and`/`or` 短路逻辑、
+  直接 `print`、作为数组元素 / `extern struct` 字段 / `@export` 签名（C 侧向量 ABI
+  需专门声明，编译器不替用户猜测）。向量除法不做逐 lane 除零检查，与 C SIMD
+  intrinsic / LLVM 向量除法一致（含零 lane 为 poison，由调用方保证）。
 - **`.diali` 类型白名单打穿**：`byte` / `bytes` / `rawptr<T>` / `fn(A, B): R` 全部放行；
   形参表改为按**顶层逗号**切分，嵌套泛型/函数类型签名不会被切坏。
 - **完整数据总线**：`string.as_c_str()` / `bytes.as_ptr()` 返回**借用**的 `rawptr<byte>`

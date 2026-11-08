@@ -1,0 +1,4 @@
+extern struct Bad {
+    v: simd<int, 4>
+}
+fn main(): int { return 0; }

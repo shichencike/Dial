@@ -101,6 +101,24 @@
   那时 <code>bitcast&lt;int&gt;(ptr)</code> 就该被拒）。指针 ↔ 整数走 <code>ptrtoint</code> / <code>inttoptr</code>
   （LLVM 的 <code>bitcast</code> 本身不允许跨类转），整数 ↔ 整数、浮点 ↔ 整数同位宽互转走
   真正的 <code>bitcast</code>。</li>
+<li><strong><code>@asm&lt;T&gt;(...)</code>：内嵌汇编</strong>（见 <a href="../spec.html#3313-asmt内嵌汇编">README §33.13</a>）。
+  把汇编模板与 LLVM 约束字符串在编译期写进 IR，产物里就是一条
+  <code>call ... asm sideeffect ...</code>。占位符用 LLVM IR 的 <code>$0</code> / <code>$1</code>（不是 GCC C
+  <code>__asm__</code> 的 <code>%0</code> / <code>%1</code>），<code>$$</code> 转义 AT&amp;T 立即数；<code>@asm</code> 走 AT&amp;T 方言，
+  <code>@asm_intel</code> 走 Intel 方言。返回类型必须显式写成 <code>&lt;T&gt;</code> 且只能是标量 / 裸指针；
+  模板与约束必须是<strong>字符串字面量</strong>，约束首项必须是输出约束（<code>=r</code> / <code>=&amp;r</code> / <code>+r</code>），
+  否则编译期拒绝。输入输出按 C ABI 宽度（<code>bool</code>→<code>i32</code>、<code>byte</code>→<code>i8</code>）走
+  <code>abi_adapt</code> 对称适配，<code>sideeffects=true</code> 防止被优化掉。平台相关，不做可移植性保证。</li>
+<li><strong><code>simd&lt;T, N&gt;</code>：原生向量类型</strong>（见 <a href="../spec.html#3314-simdt-n原生向量类型">README §33.14</a>）。
+  编译期定长的 LLVM <code>&lt;N x T&gt;</code>，是<strong>寄存器里的值</strong>（无堆分配 / 无 ARC），逐元素算术
+  落成单条向量指令。元素用<strong>原生机器宽度</strong>（<code>int</code>→<code>i64</code>、<code>float</code>→<code>f64</code>、
+  <code>bool</code>→<code>i1</code>、<code>byte</code>→<code>i8</code>、<code>char</code>→<code>i32</code>）——<code>sizeof&lt;simd&lt;byte,16&gt;&gt;()</code> 是 <strong>16</strong>
+  而不是 128。支持广播 / 逐 lane 构造、逐元素算术与比较（返回 <code>simd&lt;bool,N&gt;</code>，
+  <code>byte</code> 用无符号谓词）、位运算、索引读（越界 Fail-Fast）；<code>N</code> 是 2~64 的编译期
+  字面量，元素仅标量且不可嵌套。刻意不开放：原地改 lane、<code>and</code>/<code>or</code> 短路逻辑、
+  直接 <code>print</code>、作为数组元素 / <code>extern struct</code> 字段 / <code>@export</code> 签名（C 侧向量 ABI
+  需专门声明，编译器不替用户猜测）。向量除法不做逐 lane 除零检查，与 C SIMD
+  intrinsic / LLVM 向量除法一致（含零 lane 为 poison，由调用方保证）。</li>
 <li><strong><code>.diali</code> 类型白名单打穿</strong>：<code>byte</code> / <code>bytes</code> / <code>rawptr&lt;T&gt;</code> / <code>fn(A, B): R</code> 全部放行；
   形参表改为按<strong>顶层逗号</strong>切分，嵌套泛型/函数类型签名不会被切坏。</li>
 <li><strong>完整数据总线</strong>：<code>string.as_c_str()</code> / <code>bytes.as_ptr()</code> 返回<strong>借用</strong>的 <code>rawptr&lt;byte&gt;</code>

@@ -1,0 +1,5 @@
+fn main(): int {
+    var a: simd<bool, 4> = simd<bool, 4>(true);
+    var b: simd<bool, 4> = a and a;
+    return 0;
+}

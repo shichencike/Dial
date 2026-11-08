@@ -1,0 +1,4 @@
+fn main(): int {
+    var v: simd<string, 4> = simd<string, 4>("a");
+    return 0;
+}
