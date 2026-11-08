@@ -28,6 +28,10 @@ pub struct FuncInfo {
     /// 这是 FFI 特例：固定参数照常类型检查，尾部参数不检查类型、按 C varargs ABI 直传。
     /// Dial 自己定义的函数永远为 false —— 它的 `...xs: T` 已在 analyze 开头脱糖成 `T[]`。
     pub variadic: bool,
+    /// FFI 导出（v1.04）：`exported` 为 true 表示该函数用 C 链接符号名（无 mangling）
+    /// 与 C 调用约定对外暴露，可被 C 侧直接调用。语义层强制其签名仅含 C 兼容类型
+    /// （标量 / rawptr / fnptr / extern struct 值），否则编译期拒绝。
+    pub exported: bool,
 }
 
 /// 结构体表：名字 -> 字段(名字, 类型)。
@@ -222,7 +226,7 @@ pub fn type_of<V>(
             // 值语义 struct 与 C ABI struct 共用同一张字段表，差别只在 codegen 的寻址方式。
             let sname = match &ot {
                 Type::Struct(n) => n.clone(),
-                Type::RawPtr(inner) => match &**inner {
+                Type::RawPtr(inner) | Type::VolatilePtr(inner) => match &**inner {
                     Type::Struct(n) => n.clone(),
                     _ => {
                         return Err(DialcError::new(
@@ -280,7 +284,7 @@ pub fn type_of<V>(
                 Type::Set(elem) => set_method_type(elem.as_ref(), method, args, scopes, funcs, structs),
                 Type::KvMap(k, v) => kvmap_method_type(k.as_ref(), v.as_ref(), method, args, scopes, funcs, structs),
                 Type::Error => error_method_type(method, args, scopes, funcs, structs),
-                Type::RawPtr(elem) => rawptr_method_type(elem.as_ref(), method, args, scopes, funcs, structs),
+                Type::RawPtr(elem) | Type::VolatilePtr(elem) => rawptr_method_type(elem.as_ref(), method, args, scopes, funcs, structs),
                 _ => Err(DialcError::new(
                     format!("语义错误：类型 '{}' 不支持方法调用 '{}'", ot.name(), method),
                     0, 0,
@@ -453,7 +457,7 @@ pub fn type_of<V>(
         Expr::Unary(UnOp::Deref, e) => {
             let t = type_of(e, scopes, funcs, structs)?;
             match t {
-                Type::RawPtr(elem) => {
+                Type::RawPtr(elem) | Type::VolatilePtr(elem) => {
                     if *elem == Type::Void {
                         return Err(DialcError::new(
                             "语义错误：rawptr<void> 是无类型裸指针，不能解引用（请先 ptr_cast 成具体类型）",
@@ -935,7 +939,7 @@ pub fn type_of<V>(
                         ));
                     }
                     let at = type_of(&args[0], scopes, funcs, structs)?;
-                    if !matches!(at, Type::RawPtr(_)) {
+                    if !matches!(at, Type::RawPtr(_) | Type::VolatilePtr(_)) {
                         return Err(DialcError::new(
                             format!("语义错误：string_from_cstr 的参数必须是裸指针（C 字符串地址），实际为 {}", at.name()),
                             0, 0,
@@ -953,7 +957,7 @@ pub fn type_of<V>(
                         ));
                     }
                     let at = type_of(&args[0], scopes, funcs, structs)?;
-                    if !matches!(at, Type::RawPtr(_)) {
+                    if !matches!(at, Type::RawPtr(_) | Type::VolatilePtr(_)) {
                         return Err(DialcError::new(
                             format!("语义错误：bytes_from_ptr 的第一个参数必须是裸指针，实际为 {}", at.name()),
                             0, 0,
@@ -1493,7 +1497,7 @@ pub fn type_of<V>(
                         ));
                     }
                     let at = type_of(&args[0], scopes, funcs, structs)?;
-                    if !matches!(at, Type::RawPtr(_)) {
+                    if !matches!(at, Type::RawPtr(_) | Type::VolatilePtr(_)) {
                         return Err(DialcError::new(
                             format!(
                                 "语义错误：raw_free 的参数必须是裸指针，实际为 {}",
@@ -1526,7 +1530,7 @@ pub fn type_of<V>(
                         }
                     };
                     let target_elem = match &target {
-                        Type::RawPtr(e) => e.clone(),
+                        Type::RawPtr(e) | Type::VolatilePtr(e) => e.clone(),
                         other => {
                             return Err(DialcError::new(
                                 format!(
@@ -1537,9 +1541,18 @@ pub fn type_of<V>(
                             ))
                         }
                     };
+                    // v1.04：目标若是易失裸指针，结果**保持易失性**——
+                    // 「转成 volatile 指针」正是把一段普通内存切进硬件语义的那一步，
+                    // 若在此处抹掉 volatile，用户写的 volatile 意图就被编译器悄悄丢了。
+                    let result_ptr = match &target {
+                        Type::VolatilePtr(e) => Type::VolatilePtr(e.clone()),
+                        _ => Type::RawPtr(target_elem.clone()),
+                    };
                     let src = type_of(&args[1], scopes, funcs, structs)?;
                     match &src {
-                        Type::RawPtr(_) | Type::String | Type::Bytes => {}
+                        // 易失裸指针也可作为源（转成普通裸指针是用户显式选择——
+                        // 抹掉易失性是允许的，只是他自担后果）。
+                        Type::RawPtr(_) | Type::VolatilePtr(_) | Type::String | Type::Bytes => {}
                         other => {
                             return Err(DialcError::new(
                                 format!(
@@ -1550,7 +1563,44 @@ pub fn type_of<V>(
                             ))
                         }
                     }
-                    return Ok(Type::RawPtr(target_elem));
+                    return Ok(result_ptr);
+                }
+                // bitcast<T>(x)：底层内存强转（v1.04 FFI）。把值 `x` 的**位模式**按目标类型
+                // `T` 重新解释——不做任何转换、不读不改内存，纯粹是 LLVM `bitcast`
+                // （C 的 `*(T*)&x` reinterpret_cast）。典型用途：整数地址强转成裸指针、
+                // 裸指针强转成整数、把一块内存按另一种同尺寸布局解读。
+                // 大小约束（源与目标必须同位宽）在 codegen 处用 target DataLayout 核对，
+                // 这里只做类型层面的可行性放行。
+                "bitcast" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：bitcast 需要类型实参与源表达式，形如 bitcast<int>(x)",
+                            0, 0,
+                        ));
+                    }
+                    let target = match &args[0] {
+                        Expr::TypeLit(ty) => ty.clone(),
+                        _ => {
+                            return Err(DialcError::new(
+                                "语义错误：bitcast 的第一个参数必须是类型实参（如 bitcast<rawptr<byte>>(x)）",
+                                0, 0,
+                            ))
+                        }
+                    };
+                    if matches!(target, Type::Void | Type::Error) {
+                        return Err(DialcError::new(
+                            format!("语义错误：bitcast 的目标类型不能是 {}（无意义）", target.name()),
+                            0, 0,
+                        ));
+                    }
+                    let src = type_of(&args[1], scopes, funcs, structs)?;
+                    if matches!(src, Type::Void | Type::Error) {
+                        return Err(DialcError::new(
+                            format!("语义错误：bitcast 的源不能是 {} 类型", src.name()),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(target);
                 }
                 // ---- v1.04 FFI：编译期类型内建（sizeof / alignof / offsetof）----
                 // 全部返回 int，具体数值由 codegen 按 target DataLayout 在编译期算出，
@@ -1823,7 +1873,7 @@ pub fn type_of<V>(
                     // char 打印的是字符本身（不是码点数字），与 int 明确区分。
                     // byte 打印的是**数值**（0~255），也不是字符。
                     Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String => {}
-                    Type::RawPtr(_) => {
+                    Type::RawPtr(_) | Type::VolatilePtr(_) => {
                         return Err(DialcError::new(
                             "语义错误：不能直接 print 裸指针（它只是一个地址，没有可打印的内容）",
                             0, 0,
@@ -1928,7 +1978,7 @@ pub fn type_of<V>(
                 let pt = type_of(a, scopes, funcs, structs)?;
                 match pt {
                     Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String => {}
-                    Type::RawPtr(_) => {
+                    Type::RawPtr(_) | Type::VolatilePtr(_) => {
                         return Err(DialcError::new(
                             "语义错误：不能直接 print_raw 裸指针（它只是一个地址，没有可输出的内容）",
                             0, 0,
@@ -3197,7 +3247,7 @@ fn desugar_stmts(stmts: &mut [Stmt], map: &HashMap<String, (usize, Type)>) {
 /// （按值嵌入，LLVM 非 packed struct 与 C 的对齐/padding 规则一致）。
 fn is_c_abi_field(t: &Type, cstruct_names: &[String]) -> bool {
     match t {
-        Type::Int | Type::Float | Type::Bool | Type::Byte | Type::RawPtr(_) => true,
+        Type::Int | Type::Float | Type::Bool | Type::Byte | Type::RawPtr(_) | Type::VolatilePtr(_) => true,
         Type::Struct(n) => cstruct_names.iter().any(|x| x == n),
         _ => false,
     }
@@ -3356,6 +3406,8 @@ pub fn analyze(
 
     // 2) 函数签名
     let mut funcs: HashMap<String, FuncInfo> = HashMap::new();
+    // v1.04 FFI 导出校验：extern struct 名集合（按值嵌入 C 结构的字段才走 C ABI）。
+    let cstruct_names: Vec<String> = program.cstructs.iter().map(|c| c.name.clone()).collect();
     for f in &program.functions {
         if funcs.contains_key(&f.name) {
             return Err(DialcError::new(
@@ -3363,6 +3415,32 @@ pub fn analyze(
                 f.line,
                 f.col,
             ));
+        }
+        // v1.04 FFI 导出：导出给 C 的符号，签名必须仅含 C 兼容类型，
+        // 否则 C 侧无法按 C ABI 正确传参/收值（mangling / 内存布局会错位）。
+        if f.exported {
+            for (pi, (pname, pt)) in f.params.iter().enumerate() {
+                if !is_c_abi_field(pt, &cstruct_names) {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：导出的函数 '{}' 第 {} 个形参 '{}' 的类型 '{}' 不是 C 兼容类型；\
+                             @export 函数的签名只能含标量 / rawptr / fnptr / extern struct（值）",
+                            f.name, pi + 1, pname, pt.name()
+                        ),
+                        f.line, f.col,
+                    ));
+                }
+            }
+            if !matches!(f.ret, Type::Void) && !is_c_abi_field(&f.ret, &cstruct_names) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：导出的函数 '{}' 的返回类型 '{}' 不是 C 兼容类型；\
+                         @export 函数的返回类型只能是 void / 标量 / rawptr / fnptr / extern struct（值）",
+                        f.name, f.ret.name()
+                    ),
+                    f.line, f.col,
+                ));
+            }
         }
         funcs.insert(
             f.name.clone(),
@@ -3372,6 +3450,7 @@ pub fn analyze(
                 defaults: f.defaults.clone(),
                 // Dial 自身函数的 `...xs: T` 已脱糖成 T[]；只有包 extern 才可能是 C 变参。
                 variadic: false,
+                exported: f.exported,
             },
         );
     }
@@ -4044,7 +4123,7 @@ fn check_stmt(
             // 指针变量本身的值，因此不套用「目标必须是可变变量」的约束。
             let (sname, via_rawptr) = match &ot {
                 Type::Struct(n) => (n.clone(), false),
-                Type::RawPtr(inner) => match &**inner {
+                Type::RawPtr(inner) | Type::VolatilePtr(inner) => match &**inner {
                     Type::Struct(n) => (n.clone(), true),
                     _ => {
                         return Err(DialcError::new(
@@ -4424,7 +4503,7 @@ fn check_stmt(
             // with 只管理「需要显式释放」的资源类型：file / thread。
             // （string / array / map 等 ARC 句柄本就随作用域自动释放，无需 with；
             //   裸指针由 v1.02 的裸指针一节单独纳入。）
-            if !matches!(rt, Type::File | Type::Thread | Type::RawPtr(_)) {
+            if !matches!(rt, Type::File | Type::Thread | Type::RawPtr(_) | Type::VolatilePtr(_)) {
                 return Err(DialcError::new(
                     format!(
                         "语义错误：with 只能管理 file / thread / 裸指针资源，实际为 {}（ARC 句柄随作用域自动释放，无需 with）",
@@ -4462,7 +4541,7 @@ fn check_stmt(
             // 且写入值的类型必须与元素类型严格一致（零隐式转换）。
             let pt = type_of(ptr, scopes, funcs, structs)?;
             let elem = match &pt {
-                Type::RawPtr(e) => {
+                Type::RawPtr(e) | Type::VolatilePtr(e) => {
                     if **e == Type::Void {
                         return Err(DialcError::new(
                             "语义错误：rawptr<void> 是无类型裸指针，不能写入（请先 ptr_cast 成具体类型）",

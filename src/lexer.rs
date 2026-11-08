@@ -78,6 +78,10 @@ pub enum TokenKind {
     Extern,
     /// `link`（v1.04 FFI）：`link "libfoo.a";` 声明要静态链入的 C 扩展库。
     Link,
+    // v1.04 FFI 导出 / 布局 / 易失：@export fn / packed struct / volatile rawptr<T>
+    Export,
+    Packed,
+    Volatile,
 
     // 类型关键字
     IntT,
@@ -124,6 +128,7 @@ pub enum TokenKind {
     Colon,
     Dot,
     DotDot, // ..
+    At,     // @ 注解前缀（v1.04 FFI 导出：@export fn）
     /// `...`（v1.03）：同类型变参声明 `...xs: T` 与 `.diali` 的 C 变参声明。
     /// 必须在 `..` 之前识别，否则会被切成 `DotDot` + `Dot`。
     Ellipsis,
@@ -570,6 +575,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "label" => TokenKind::Label,
                 "extern" => TokenKind::Extern,
                 "link" => TokenKind::Link,
+                "export" => TokenKind::Export,
+                "packed" => TokenKind::Packed,
+                "volatile" => TokenKind::Volatile,
                 "true" => TokenKind::BoolLit(true),
                 "false" => TokenKind::BoolLit(false),
                 "struct" => TokenKind::Struct,
@@ -814,6 +822,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
             }
             ']' => {
                 push(TokenKind::RBracket, start_line, start_col, &mut tokens);
+                i += 1;
+                col += 1;
+            }
+            '@' => {
+                push(TokenKind::At, start_line, start_col, &mut tokens);
                 i += 1;
                 col += 1;
             }

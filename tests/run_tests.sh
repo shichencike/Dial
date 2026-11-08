@@ -590,6 +590,72 @@ EOF
     fi
 fi
 
+# 2c) FFI 导出四件套（v1.04 增补）：@export 导出 / packed struct / volatile 指针 / bitcast。
+#     这四项同属「把 Dial 接到系统底层」这一件事：
+#       @export       —— Dial 函数以裸 C 符号名导出，C 侧能反过来调它；
+#       packed struct —— 网络协议头的逐字节对齐（无 padding），与 C 的
+#                       __attribute__((packed)) 完全一致；
+#       volatile     —— 内存映射 IO / 硬件寄存器：每次读写必须真实落总线；
+#       bitcast       —— 地址 ↔ 整数的位模式强转（底层内存强转）。
+if ! ( cd "$FFI_DIR" && cc -O2 -c ffi_export_bridge.c -o ffi_export_bridge.o && \
+        ar rcs libffi_export_bridge.a ffi_export_bridge.o ) >"${TMP}/ffiexpbuild.log" 2>&1; then
+    echo "  ❌ FFI 导出专项 C 桥编译失败"; sed 's/^/       /' "${TMP}/ffiexpbuild.log"; fail=1
+else
+    if ! "$DIALC" build "$FFI_DIR/ffi_export_demo.dial" -o "${TMP}/ffi_export_demo" >"${TMP}/ffiexp.log" 2>&1; then
+        echo "  ❌ FFI 导出专项程序编译失败"; sed 's/^/       /' "${TMP}/ffiexp.log"; fail=1
+    elif ! timeout 30 "${TMP}/ffi_export_demo" >"${TMP}/ffiexpout.txt" 2>&1; then
+        echo "  ❌ FFI 导出专项程序运行失败"; sed 's/^/       /' "${TMP}/ffiexpout.txt"; fail=1
+    else
+        # 布局等值性：前 16 行是 8 组「Dial 侧 / C 侧」对照，必须逐项相等。
+        # 这里**刻意不写死期望值**——布局随平台变，「两边相等」才是真正要锁住的东西；
+        # 若有人把 packed 悄悄改成不 packed，packed 组与普通组的数字会立刻分叉。
+        if ! head -16 "${TMP}/ffiexpout.txt" | awk 'NR % 2 == 1 { dial = $1; next }
+                 { if ($1 != dial) { printf "第 %d 行布局不一致: Dial=%s C=%s\n", NR-1, dial, $1; bad = 1 } }
+                 END { exit bad }' >"${TMP}/ffiexpawk.txt" 2>&1; then
+            echo "  ❌ packed struct / extern struct 布局与 C 不一致"; sed 's/^/       /' "${TMP}/ffiexpawk.txt"; fail=1
+        else
+            echo "  ✅ packed struct / extern struct 布局与 C 逐项一致（sizeof/alignof/offsetof）"
+        fi
+        # 后 4 行：@export 双向调用（C→Dial）+ volatile 往返 + bitcast 往返。
+        if [ "$(tail -4 "${TMP}/ffiexpout.txt" | tr '\n' ' ')" = "42 42 42 9 " ]; then
+            echo "  ✅ @export 双向调用（C→Dial）、volatile 往返、bitcast 往返全部正确"
+        else
+            echo "  ❌ @export / volatile / bitcast 的往返值不正确（期望 42 42 42 9）"
+            sed 's/^/       /' "${TMP}/ffiexpout.txt"; fail=1
+        fi
+    fi
+
+    # 2c-1) 符号可见性：@export 的函数必须是**全局**符号（能被 C 侧链接到），
+    #        未标注 @export 的内部函数必须**不导出**（不得污染 C 侧的符号空间）。
+    #        注：--no-link 的目标文件固定落在源文件同目录（-o 只作用于可执行文件）。
+    if command -v nm >/dev/null 2>&1; then
+        if ! "$DIALC" build "$FFI_DIR/ffi_export_demo.dial" --no-link >"${TMP}/ffiexpobj.log" 2>&1; then
+            echo "  ❌ FFI 导出专项 --no-link 失败"; sed 's/^/       /' "${TMP}/ffiexpobj.log"; fail=1
+        else
+            EXPORTED=$(nm -g "$FFI_DIR/ffi_export_demo.o" 2>/dev/null | grep -c " T dial_add$")
+            INTERNAL=$(nm "$FFI_DIR/ffi_export_demo.o" 2>/dev/null | grep -c "dial_internal_only")
+            if [ "$EXPORTED" -ge 1 ] && [ "$INTERNAL" -eq 0 ]; then
+                echo "  ✅ @export 函数以全局 C 符号暴露，未标注的内部函数不导出"
+            else
+                echo "  ❌ @export 符号可见性不对（dial_add 全局数=$EXPORTED，内部函数出现数=$INTERNAL）"; fail=1
+            fi
+        fi
+    fi
+
+    # 2c-2) volatile 的 IR 形态：易失访问必须真的是 volatile load/store。
+    #        运行期看不出来（编译器没开优化），但 IR 里必须带 volatile 标记——
+    #        这才是「每次访问都落总线」的真正保证。
+    if DIALC_DUMP_IR=1 "$DIALC" build "$FFI_DIR/ffi_export_demo.dial" -o "${TMP}/ffi_export_demo2" >"${TMP}/ffiexpout2.log" 2>"${TMP}/ffiexp_ir.txt"; then
+        if grep -q "load volatile" "${TMP}/ffiexp_ir.txt" && grep -q "store volatile" "${TMP}/ffiexp_ir.txt"; then
+            echo "  ✅ volatile 指针的读写在 IR 里确实是 volatile load/store"
+        else
+            echo "  ❌ volatile 指针未生成 volatile load/store"; fail=1
+        fi
+    else
+        echo "  ❌ volatile IR 检查用的编译失败"; sed 's/^/       /' "${TMP}/ffiexpout2.log"; fail=1
+    fi
+fi
+
 # 3) 动态链接（v1.04 增补）：真实共享库必须能显式 link + 运行，且产物自带查找路径。
 #    按平台选后缀与编译参数；PE（Windows）没有 rpath 概念，只验链接与运行。
 case "$(uname -s)" in
@@ -664,7 +730,7 @@ fi
 
 # 5) 清理构建产物，保持工作树干净（*.o 已被 .gitignore 忽略，但物理文件不该堆积）。
 #    dialc build 默认也会在源码同目录留下一份 .o，一并清掉。
-rm -f "$FFI_DIR/libffi_demo.a" "$FFI_DIR"/*.o
+rm -f "$FFI_DIR/libffi_demo.a" "$FFI_DIR/libffi_export_bridge.a" "$FFI_DIR"/*.o
 
 
 # =====================================================================

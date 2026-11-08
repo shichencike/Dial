@@ -58,6 +58,36 @@
   修复点：模块创建时把宿主目标机的 `DataLayout`/`triple` 显式写到 `module` 上——
   否则 `module` 默认 `DataLayout` 会把 `i64` 对齐写成 4（而非 x86-64 SysV 的 8），
   导致上述内建与 `extern struct` 字段偏移与 C 不一致。
+- **`@export`：把 Dial 函数导出给 C 调用**（见 [README §33.9](README.md#339-export把-dial-函数导出给-c-调用)）。
+  `extern fn` 是「Dial 调 C」，`@export` 是「C 调 Dial」——被标注的函数以**裸 C 符号名**
+  （无 mangling）与 C 调用约定对外暴露，C 侧可直接链接 / `dlsym` 调用。两条硬规则：
+  ① 签名必须全是 C 兼容类型（标量 / `rawptr<T>` / `fn(A):R` / `extern struct` 值），
+  含 `string` / `bytes` / 数组 / map 一律**编译期拒绝**（C 侧无法按 C ABI 正确接收，
+  放行等于埋 UB）；② **只有标了 `@export` 的函数才是全局符号**，其余 Dial 函数收成
+  LLVM `Private` linkage——模块内照常递归、照常取函数指针，但不导出，既不污染 C 侧
+  符号空间、也不会与别的目标文件里的同名符号撞车。`main` 例外，恒为外部可见。
+  `export fn`（不带 `@`）是等价写法。
+- **`packed struct`：网络协议的逐字节对齐**（见 [README §33.10](README.md#3310-packed-struct网络协议的逐字节对齐)）。
+  `packed extern struct` 走 **C ABI 紧凑布局**（`bool` / `byte` → `i8`），与 C 的
+  `__attribute__((packed))` / `#pragma pack(1)` 逐字节一致——网络协议头的字段偏移是
+  协议硬约定，一个 padding 字节就让整包解析错位；`packed struct` 则是 Dial 自己
+  值语义结构体的紧凑布局。布局用 `sizeof<T>()` / `alignof<T>()` / `offsetof<T>(field)`
+  编译期核对（零运行时开销），P 组 2c 把 Dial 侧的三个数与 C 侧
+  `sizeof` / `_Alignof` / `offsetof` **逐项比对**（刻意不写死期望值——布局随平台变，
+  「两边相等」才是要锁住的东西）。
+- **`volatile rawptr<T>`：内存映射 IO 的易失访问**（见 [README §33.11](README.md#3311-volatile-rawptrt内存映射-io-的易失访问)）。
+  语义与 `rawptr<T>` 完全一致（同样不受 ARC 管、同样要显式 `raw_free`），差别只在
+  代码生成：经它读写的内存发射 `load volatile` / `store volatile`，LLVM 不再对其做
+  任何优化——每次访问都真实落总线。`volatile` **只能修饰裸指针**（`volatile int`
+  编译期拒绝）；`ptr_cast<volatile rawptr<T>>(p)` 把普通内存切进易失视图时
+  **易失性会保留**，不在转换处被悄悄抹掉。
+- **`bitcast<T>(x)`：底层内存强转**（见 [README §33.12](README.md#3312-bitcasttx底层内存强转)）。
+  把值的**位模式**按目标类型重新解释——不读、不改内存。类型实参约定与
+  `ptr_cast<T>(x)` / `sizeof<T>()` 同一套。**位宽必须相同**，不一致一律编译期拒绝
+  并报出两边实际位宽（位宽按 target DataLayout 现算——32 位平台上指针是 32 位，
+  那时 `bitcast<int>(ptr)` 就该被拒）。指针 ↔ 整数走 `ptrtoint` / `inttoptr`
+  （LLVM 的 `bitcast` 本身不允许跨类转），整数 ↔ 整数、浮点 ↔ 整数同位宽互转走
+  真正的 `bitcast`。
 - **`.diali` 类型白名单打穿**：`byte` / `bytes` / `rawptr<T>` / `fn(A, B): R` 全部放行；
   形参表改为按**顶层逗号**切分，嵌套泛型/函数类型签名不会被切坏。
 - **完整数据总线**：`string.as_c_str()` / `bytes.as_ptr()` 返回**借用**的 `rawptr<byte>`
@@ -352,6 +382,13 @@
 
 ### Changed
 
+- **Dial 函数的链接可见性按 `@export` 收口**：v1.04 之前**所有** Dial 函数都是 LLVM
+  默认的 `External` linkage，等于每个 Dial 程序都在往全局符号空间里倒函数名——
+  既会与别的目标文件里的同名符号撞车，也让「哪些是给 C 用的」无从表达。现在
+  **只有 `@export` 标注的函数与 `main` 是全局符号**，其余收成 `Private` linkage：
+  模块内照常递归、照常取函数指针（传给 C 回调也照常工作），但**不导出**、不被
+  死代码消除误删。依赖「Dial 函数能被 C 按名字链接」的代码请补 `@export`
+  （见 [README §33.9](README.md#339-export把-dial-函数导出给-c-调用)）。
 - **所有 Dial 函数的 LLVM 签名统一为 C ABI 宽度**：`bool` 内部 i1 → 边界 i32（C 默认整型提升），
   `byte` 内部 i64 → 边界 i8（C 的 `uint8_t`）；函数体内部仍是 i1 / i64，逻辑零改动。
   函数入口 / 出口 / 调用点 / HOF thunk / spawn thunk 五处做**对称** `abi_adapt` 转换，

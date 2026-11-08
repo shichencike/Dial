@@ -1,0 +1,7 @@
+// 负向：volatile 只能修饰裸指针。
+// 「每次访问必须落总线」是内存映射 IO 的语义，普通值类型没有这个概念。
+fn main(): int {
+    var x: volatile int = 1;
+    print(x);
+    return 0;
+}

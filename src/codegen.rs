@@ -17,7 +17,7 @@ use inkwell::debug_info::{
     AsDIScope, DebugInfoBuilder, DICompileUnit, DIFlags, DIFlagsConstants, DIFile,
     DILocation, DIScope, DIType, DWARFEmissionKind, DWARFSourceLanguage,
 };
-use inkwell::module::FlagBehavior;
+use inkwell::module::{FlagBehavior, Linkage};
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetData,
 };
@@ -460,17 +460,20 @@ impl<'ctx> CodeGen<'ctx> {
                 .iter()
                 .map(|(_, t)| self.dialc_type_to_llvm(t))
                 .collect();
-            self.struct_types[&sd.name].set_body(&fields, false);
+            // v1.04 紧凑布局：`packed struct` 第二参传 true —— 不插对齐 padding，
+            // 字段紧密排列，与 C 的 `__attribute__((packed))` / `#pragma pack` 逐字节一致
+            // （网络协议头、硬件寄存器映射等「按偏移强约定」的场景刚需）。
+            self.struct_types[&sd.name].set_body(&fields, sd.packed);
         }
-        // v1.04 FFI：C ABI 结构体用 C 字段宽度，**非 packed**：
-        // LLVM 按 target DataLayout 自动插入与 C 一致的对齐 padding。
+        // v1.04 FFI：C ABI 结构体用 C 字段宽度；`packed extern struct` 同样不插 padding，
+        // 与 C 的 `__attribute__((packed))` 一致——网络协议结构体（如 TCP 头）逐字节对齐。
         for cs in &program.cstructs {
             let fields: Vec<BasicTypeEnum> = cs
                 .fields
                 .iter()
                 .map(|(_, t)| self.cstruct_field_llvm(t))
                 .collect();
-            self.struct_types[&cs.name].set_body(&fields, false);
+            self.struct_types[&cs.name].set_body(&fields, cs.packed);
         }
     }
 
@@ -966,6 +969,15 @@ impl<'ctx> CodeGen<'ctx> {
         };
         let _ = info;
         let fv = self.module.add_function(&f.name, ft, None);
+        // v1.04 FFI 导出：`@export fn` 与 `main` 对外暴露为 C 链接符号（无 mangling、
+        // C calling convention），可被 C 侧 dlsym / 直接链接调用；其余内部函数收为
+        // Private linkage——模块内仍可递归/取函数指针，但链接器不会导出、也不会与
+        // 其它目标文件里的同名符号冲突，且未被引用的会被死代码消除掉。
+        if f.exported || f.name == "main" {
+            fv.set_linkage(Linkage::External);
+        } else {
+            fv.set_linkage(Linkage::Private);
+        }
         // 显式固定 C calling convention（LLVM 0）→ 平台标准的 SysV / Win64 / AAPCS。
         fv.set_call_conventions(0);
         fv
@@ -992,7 +1004,7 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::Channel(_)
             | Type::Opaque(_)
             // 裸指针（v1.02）：不透明指针（元素类型由调用处的 gep 决定）
-            | Type::RawPtr(_)
+            | Type::RawPtr(_) | Type::VolatilePtr(_)
             // 函数指针（v1.03）：纯代码地址，IR 层同样是不透明 ptr。
             | Type::FnPtr(..) => self.i8ptr().into(),
             Type::Struct(ref n) => (*self
@@ -1026,6 +1038,29 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Bool => self.context.i8_type().into(), // C _Bool（1 字节）
             Type::Byte => self.context.i8_type().into(), // C uint8_t
             other => self.dialc_type_to_llvm(other),
+        }
+    }
+
+    /// v1.04 FFI：某个 LLVM 类型的**位宽**（bitcast 要求源与目标同位宽）。
+    ///
+    /// 用 target DataLayout 而不是硬编码 64：32 位平台上指针是 32 位，
+    /// 那时 `bitcast<int>(ptr)` 就是错的（位宽不等）。
+    /// 聚合类型（结构体 / 数组）用 ABI 字节数 × 8 近似——它的真实位宽含 padding，
+    /// 精确值交给 LLVM 校验器兜底。
+    fn llvm_bit_width(&self, t: &BasicTypeEnum) -> u64 {
+        match t {
+            BasicTypeEnum::IntType(i) => i.get_bit_width() as u64,
+            BasicTypeEnum::FloatType(f) => f.get_bit_width() as u64,
+            BasicTypeEnum::PointerType(_) => {
+                let dl = self.module.get_data_layout();
+                let td = TargetData::create(dl.as_str().to_str().unwrap_or(""));
+                td.get_pointer_byte_size(None) as u64 * 8
+            }
+            other => {
+                let dl = self.module.get_data_layout();
+                let td = TargetData::create(dl.as_str().to_str().unwrap_or(""));
+                td.get_abi_size(other) * 8
+            }
         }
     }
 
@@ -1219,7 +1254,7 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::Thread
             | Type::Channel(_)
             | Type::Opaque(_)
-            | Type::RawPtr(_)
+            | Type::RawPtr(_) | Type::VolatilePtr(_)
             | Type::FnPtr(..) => self.i8ptr().const_null().into(),
             Type::Struct(_) => {
                 // 结构体默认值：对 v0.2 仅用于 main 收尾，构造一个零初始化聚合
@@ -2470,6 +2505,8 @@ impl<'ctx> CodeGen<'ctx> {
                 col,
             } => {
                 let ot = type_of(obj, scopes, functions, structs)?;
+                // v1.04 FFI：易失指针字段写入走 volatile 存储。
+                let vol = matches!(ot, Type::VolatilePtr(_));
                 let base = self.field_base_ptr(obj, &ot, function, scopes, func_values, functions, structs)?;
                 // 找到字段索引与类型
                 let sty = self.get_struct_type(&ot)?;
@@ -2489,7 +2526,9 @@ impl<'ctx> CodeGen<'ctx> {
                         stored.get_type(),
                         self.cstruct_field_llvm(&fty),
                     );
-                    self.builder.build_store(fgep, cval).unwrap();
+                    // v1.04 FFI：易失指针字段写入走 volatile 存储——每次写入必须真实落到总线。
+                    let inst = self.builder.build_store(fgep, cval).unwrap();
+                    if vol { inst.set_volatile(true).unwrap(); }
                     return Ok(());
                 }
                 // 覆盖前 release 旧字段值（堆类型）
@@ -2500,7 +2539,9 @@ impl<'ctx> CodeGen<'ctx> {
                 // 少了这一步，字段只是来源的别名——来源所在的块一结束，
                 // 字段就悬垂（读出来是已释放内存）。
                 self.retain_if_borrowed(value, &fty, stored);
-                self.builder.build_store(fgep, stored).unwrap();
+                // v1.04 FFI：易失指针字段写入走 volatile 存储。
+                let inst = self.builder.build_store(fgep, stored).unwrap();
+                if vol { inst.set_volatile(true).unwrap(); }
                 Ok(())
             }
             Stmt::AssignIndex {
@@ -3535,8 +3576,9 @@ impl<'ctx> CodeGen<'ctx> {
             // 裸指针解引用赋值 `*p = v`（v1.02）
             Stmt::AssignDeref { ptr, value, .. } => {
                 let pt = type_of(ptr, scopes, functions, structs)?;
-                let elem = match pt {
-                    Type::RawPtr(el) => *el,
+                let (elem, vol) = match pt {
+                    Type::RawPtr(el) => (*el, false),
+                    Type::VolatilePtr(el) => (*el, true),
                     other => {
                         return Err(DialcError::new(
                             format!(
@@ -3552,9 +3594,9 @@ impl<'ctx> CodeGen<'ctx> {
                 let v = self.gen_expr(value, function, scopes, func_values, functions, structs)?;
                 // 元素类型与写入值的类型由 Sema 核对过；这里把 Dial 值转成内存表示再写。
                 let v = self.raw_to_mem(&elem, v);
-                self.builder
-                    .build_store(p.into_pointer_value(), v)
-                    .unwrap();
+                // v1.04 FFI：易失指针经 volatile 存储——每次写入必须真实落到总线。
+                let inst = self.builder.build_store(p.into_pointer_value(), v).unwrap();
+                if vol { inst.set_volatile(true).unwrap(); }
                 Ok(())
             }
             // ===================== with 资源作用域块（v1.02） =====================
@@ -3717,7 +3759,7 @@ impl<'ctx> CodeGen<'ctx> {
     fn struct_name_of(t: &Type) -> Option<&str> {
         match t {
             Type::Struct(n) => Some(n.as_str()),
-            Type::RawPtr(inner) => match &**inner {
+            Type::RawPtr(inner) | Type::VolatilePtr(inner) => match &**inner {
                 Type::Struct(n) => Some(n.as_str()),
                 _ => None,
             },
@@ -3786,7 +3828,7 @@ impl<'ctx> CodeGen<'ctx> {
         functions: &HashMap<String, FuncInfo>,
         structs: &StructTable,
     ) -> Result<PointerValue<'ctx>> {
-        if matches!(ot, Type::RawPtr(_)) {
+        if matches!(ot, Type::RawPtr(_) | Type::VolatilePtr(_)) {
             Ok(self
                 .gen_expr(obj, function, scopes, func_values, functions, structs)?
                 .into_pointer_value())
@@ -3896,6 +3938,8 @@ impl<'ctx> CodeGen<'ctx> {
             )),
             Expr::Field(obj, field) => {
                 let ot = type_of(obj, scopes, functions, structs)?;
+                // v1.04 FFI：易失指针字段访问走 volatile 加载。
+                let vol = matches!(ot, Type::VolatilePtr(_));
                 // 基对象若是 lvalue（变量 / 字段链），直接取字段指针；
                 // 否则（结构体字面量 / 函数返回的结构体 / 数组元素）先物化到栈上临时槽再取字段，
                 // 支持 `Pt{}.x`、`make().y`、`arr[i].f` 而无需先绑到变量
@@ -3921,7 +3965,11 @@ impl<'ctx> CodeGen<'ctx> {
                 } else {
                     self.dialc_type_to_llvm(&fty)
                 };
+                // v1.04 FFI：易失指针字段访问走 volatile 加载——编译器不得优化掉这次访问。
                 let raw = self.builder.build_load(load_ty, fgep, "fld").unwrap();
+                if vol {
+                    raw.as_instruction_value().unwrap().set_volatile(true).unwrap();
+                }
                 Ok(self.abi_adapt(raw, load_ty, self.dialc_type_to_llvm(&fty)))
             }
             Expr::Index(arr, idx) => {
@@ -4039,8 +4087,9 @@ impl<'ctx> CodeGen<'ctx> {
                 // 解引用 `*p`（v1.02）：按元素类型从指针指向的地址**加载**一个值。
                 UnOp::Deref => {
                     let pt = type_of(e, scopes, functions, structs)?;
-                    let elem = match pt {
-                        Type::RawPtr(el) => *el,
+                    let (elem, vol) = match pt {
+                        Type::RawPtr(el) => (*el, false),
+                        Type::VolatilePtr(el) => (*el, true),
                         other => {
                             return Err(DialcError::new(
                                 format!("内部错误：解引用收到 {} 类型（应由 Sema 先行拦截）", other.name()),
@@ -4053,10 +4102,15 @@ impl<'ctx> CodeGen<'ctx> {
                     // 按元素的**内存宽度**加载（byte 是 1 字节、char 是 4 字节……），
                     // 再还原成 Dial 的值表示。
                     let llvm_elem = self.raw_elem_llvm(&elem);
+                    // v1.04 FFI：易失指针经 volatile 加载——编译器不得优化掉这次访问。
+                    // v1.04 FFI：易失指针经 volatile 加载——编译器不得优化掉这次访问。
                     let v = self
                         .builder
                         .build_load(llvm_elem, p.into_pointer_value(), "deref")
                         .unwrap();
+                    if vol {
+                        v.as_instruction_value().unwrap().set_volatile(true).unwrap();
+                    }
                     Ok(self.raw_from_mem(&elem, v))
                 }
                 // 取地址 `&x`（v1.02）：x 是栈上值类型变量，它**本来就在 alloca 槽里**，
@@ -4491,7 +4545,7 @@ impl<'ctx> CodeGen<'ctx> {
                             Type::File => self.call_c_void("dial_file_close", &[v.into()]),
                             Type::Thread => self.call_c_void("dial_thread_join", &[v.into()]),
                             // 裸指针：with 块末自动 free（谁申请、谁释放）。
-                            Type::RawPtr(_) => self.call_c_void("dial_raw_free", &[v.into()]),
+                            Type::RawPtr(_) | Type::VolatilePtr(_) => self.call_c_void("dial_raw_free", &[v.into()]),
                             _ => {}
                         }
                         self.moved.borrow_mut().insert(ptr);
@@ -4539,7 +4593,7 @@ impl<'ctx> CodeGen<'ctx> {
                         let src =
                             self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
                         match src_ty {
-                            Type::RawPtr(_) => {
+                            Type::RawPtr(_) | Type::VolatilePtr(_) => {
                                 let p = self
                                     .builder
                                     .build_pointer_cast(src.into_pointer_value(), self.i8ptr(), "cast")
@@ -4569,6 +4623,97 @@ impl<'ctx> CodeGen<'ctx> {
                                 0,
                             )),
                         }
+                    }
+                    // bitcast<T>(x)：底层内存强转（v1.04 FFI）。把 `x` 的位模式按目标类型
+                    // `T` 重解释——LLVM `bitcast`，不读不改内存。源与目标必须同位宽，
+                    // 否则是 zext/trunc/inttoptr 的活，这里用 target DataLayout 钉死。
+                    "bitcast" => {
+                        let target = match &args[0] {
+                            Expr::TypeLit(ty) => ty.clone(),
+                            _ => {
+                                return Err(DialcError::new(
+                                    "内部错误：bitcast 缺少类型实参（应由 Sema 先行拦截）",
+                                    0, 0,
+                                ))
+                            }
+                        };
+                        let src = self.gen_expr(
+                            &args[1], function, scopes, func_values, functions, structs,
+                        )?;
+                        let src_dial_ty = type_of(&args[1], scopes, functions, structs)?;
+                        let src_ty_name = src_dial_ty.name();
+                        let src_ty = src.get_type();
+                        let dst_ty = self.dialc_type_to_llvm(&target);
+                        // 同位宽校验：bitcast 不改变位宽（C 的 reinterpret_cast 同理）。
+                        let src_bits = self.llvm_bit_width(&src_ty);
+                        let dst_bits = self.llvm_bit_width(&dst_ty);
+                        if src_bits != dst_bits {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：bitcast 源（{} 位）与目标 '{}'（{} 位）位宽不一致，\
+                                     无法做位模式重解释——请改用显式转换或调整类型宽度",
+                                    src_bits, target.name(), dst_bits
+                                ),
+                                0, 0,
+                            ));
+                        }
+                        // 同类型重解释 = 恒等（LLVM 的 bitcast 不允许同类型自转）。
+                        if src_ty == dst_ty {
+                            return Ok(src);
+                        }
+                        // 指针 ↔ 整数在 LLVM 里**不是** bitcast（bitcast 只能同「指针类」或
+                        // 同「数值类」之间转），必须走 ptrtoint / inttoptr。
+                        // 这正是「把地址当整数」「把整数当地址」这层内存强转的正解。
+                        let src_is_ptr = matches!(src_ty, BasicTypeEnum::PointerType(_));
+                        let src_is_int = matches!(src_ty, BasicTypeEnum::IntType(_));
+                        let dst_is_ptr = matches!(dst_ty, BasicTypeEnum::PointerType(_));
+                        let dst_is_int = matches!(dst_ty, BasicTypeEnum::IntType(_));
+                        // 指针与非指针之间不能 bitcast（LLVM 的硬规则）。
+                        // 聚合类型（结构体 / 数组）只能与同尺寸的聚合类型互转。
+                        let src_is_agg = !src_is_ptr && !src_is_int && !matches!(src_ty, BasicTypeEnum::FloatType(_));
+                        let dst_is_agg = !dst_is_ptr && !dst_is_int && !matches!(dst_ty, BasicTypeEnum::FloatType(_));
+                        if (src_is_ptr && dst_is_agg) || (src_is_agg && dst_is_ptr) {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：bitcast 不能在指针与聚合类型之间转换（源 {} → 目标 '{}'）；\
+                                     请先用 rawptr 指向那块内存，再按字段读取",
+                                    src_ty_name, target.name()
+                                ),
+                                0, 0,
+                            ));
+                        }
+                        if (src_is_int && dst_is_agg) || (src_is_agg && dst_is_int) {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：bitcast 不能在整数与聚合类型之间转换（源 {} → 目标 '{}'）；\
+                                     请先用 rawptr 指向那块内存，再按字段读取",
+                                    src_ty_name, target.name()
+                                ),
+                                0, 0,
+                            ));
+                        }
+                        let v = if src_is_ptr && dst_is_int {
+                            let it = match dst_ty {
+                                BasicTypeEnum::IntType(t) => t,
+                                _ => unreachable!(),
+                            };
+                            self.builder
+                                .build_ptr_to_int(src.into_pointer_value(), it, "bitcast")
+                                .unwrap()
+                                .into()
+                        } else if src_is_int && dst_is_ptr {
+                            let pt = match dst_ty {
+                                BasicTypeEnum::PointerType(t) => t,
+                                _ => unreachable!(),
+                            };
+                            self.builder
+                                .build_int_to_ptr(src.into_int_value(), pt, "bitcast")
+                                .unwrap()
+                                .into()
+                        } else {
+                            self.builder.build_bit_cast(src, dst_ty, "bitcast").unwrap()
+                        };
+                        Ok(v)
                     }
                     // drop(x)：提前释放一个变量的所有权（move 语义）。
                     //   - file 走 dial_file_close（fclose）、thread 走 dial_thread_join；
@@ -4607,7 +4752,7 @@ impl<'ctx> CodeGen<'ctx> {
                             }
                             // 裸指针：drop 的唯一作用就是 free（它不受 ARC 管理，
                             // 编译器不会替它做 release——「谁申请、谁释放」）。
-                            Type::RawPtr(_) => {
+                            Type::RawPtr(_) | Type::VolatilePtr(_) => {
                                 let v =
                                     self.builder.build_load(self.i8ptr(), ptr, "dropval").unwrap();
                                 self.call_c_void("dial_raw_free", &[v.into()]);
@@ -6026,7 +6171,7 @@ impl<'ctx> CodeGen<'ctx> {
     fn emit_print(&self, ty: &Type, val: BasicValueEnum<'ctx>) -> Result<()> {
         match *ty {
             // 裸指针不可打印（语义层已拦截；这里仅保证 match 穷尽）。
-            Type::RawPtr(_) => {
+            Type::RawPtr(_) | Type::VolatilePtr(_) => {
                 return Err(DialcError::new(
                     "内部错误：裸指针不可打印（应由 Sema 先行拦截）",
                     0,
@@ -6153,7 +6298,7 @@ impl<'ctx> CodeGen<'ctx> {
     fn emit_print_raw(&self, ty: &Type, val: BasicValueEnum<'ctx>) -> Result<()> {
         match *ty {
             // 裸指针不可输出（语义层已拦截；这里仅保证 match 穷尽）。
-            Type::RawPtr(_) => {
+            Type::RawPtr(_) | Type::VolatilePtr(_) => {
                 return Err(DialcError::new(
                     "内部错误：裸指针不可输出（应由 Sema 先行拦截）",
                     0,

@@ -1,0 +1,8 @@
+// 负向：bitcast 要求源与目标同位宽。
+// bool 内部是 1 位、int 是 64 位——位模式无法直接重解释，必须编译期拒绝。
+fn main(): int {
+    let x: int = 5;
+    let b: bool = bitcast<bool>(x);
+    print(b);
+    return 0;
+}

@@ -4533,7 +4533,106 @@ PE 没有 rpath，请把 `.dll` 复制到 exe 同目录或加入 `PATH`；需要
 P 组用真实共享库做端到端（显式 `link` + `extern fn`，比对 `42 / 45`），再用三种
 后缀的纯文本伪装库与伪装的 `.a` 验证魔数拒绝不是靠「文件不存在」蒙混过关。
 
-### 33.9 实现落点
+### 33.9 `@export`：把 Dial 函数导出给 C 调用
+
+`extern fn` 是**Dial 调 C**；`@export` 是**C 调 Dial**——把 Dial 函数以**裸 C 符号名**
+（无 mangling）与 C 调用约定对外暴露，C 侧可直接链接 / `dlsym` 调用。
+
+```dial
+@export fn dial_add(a: int, b: int): int {
+    return a + b;
+}
+```
+
+```c
+extern int64_t dial_add(int64_t a, int64_t b);   /* 裸符号名，无 mangling */
+int main(void) { printf("%lld\n", dial_add(20, 22)); }   /* → 42 */
+```
+
+两条硬规则：
+
+1. **签名必须全是 C 兼容类型**（标量 / `rawptr<T>` / `fn(A):R` / `extern struct` 值）。
+   `string` / `bytes` / 数组 / map 这类 ARC 句柄或聚合类型**编译期拒绝**——
+   C 侧无法按 C ABI 正确接收它们，放行等于埋 UB。
+2. **只有标了 `@export` 的函数才是全局符号**。其余 Dial 函数收成 LLVM `Private`
+   linkage：模块内照常递归、照常取函数指针，但**不导出**——既不污染 C 侧的符号
+   空间，也不会与别的目标文件里的同名符号撞车；未被引用的还会被死代码消除。
+   `main` 例外，恒为外部可见（进程入口）。
+
+`export fn`（不带 `@`）是等价写法。参数与返回值按 §33.4 的 C ABI 宽度传递
+（Dial 的 `int` ↔ C 的 `int64_t`）。
+
+**怎么用**：`dialc build x.dial --no-link` 产出目标文件，再由 C 侧链接；或把目标文件
+打成共享库（`cc -shared x.o -o libx.so`）后 C 侧 `-l` 链接 / `dlsym` 取符号。
+
+### 33.10 `packed struct`：网络协议的逐字节对齐
+
+普通 `extern struct` 按 C 的自然对齐插 padding（`seq: int` 之后 `flags: byte`
+会被推到下一个 8 字节边界）。但**网络协议头**的字段偏移是协议**硬约定**，
+一个 padding 字节就让整个包解析错位。因此需要紧凑布局：
+
+```dial
+packed extern struct PktHdr {     // 与 C 的 __attribute__((packed)) 逐字节一致
+    seq: int,
+    flags: byte,
+    len: byte
+}
+packed struct ValHdr { ... }       // Dial 自己的值语义结构体，同样不插 padding
+```
+
+两种写法都合法：
+
+- `packed extern struct` —— **C ABI 紧凑布局**。字段宽度走 C 宽度
+  （`bool` / `byte` → `i8`），与 C 的 `__attribute__((packed))` / `#pragma pack(1)`
+  逐字节一致。这是与 C / 网络协议对口的写法。
+- `packed struct` —— **Dial 值语义结构体**的紧凑布局（字段走 Dial 内部宽度）。
+
+布局用 §33.3 那套编译期内建核对：`sizeof<T>()` / `alignof<T>()` / `offsetof<T>(field)`
+在编译期按 target DataLayout 算出，零运行时开销。P 组把 Dial 侧的三个数与 C 侧
+`sizeof` / `_Alignof` / `offsetof` **逐项比对**（且刻意不写死期望值——布局随平台变，
+「两边相等」才是要锁住的东西）。
+
+### 33.11 `volatile rawptr<T>`：内存映射 IO 的易失访问
+
+内存映射寄存器、硬件 FIFO、MMIO 区域有个硬要求：**每次读写都必须真实落到总线**，
+编译器不得把它优化掉、重排或合并。`volatile rawptr<T>` 就是这个语义：
+
+```dial
+var buf: rawptr<byte> = raw_alloc(8);
+var vp: volatile rawptr<byte> = ptr_cast<volatile rawptr<byte>>(buf);
+*vp = int_to_byte(42);        // 写入必须落总线
+let v: int = byte_to_int(*vp); // 读取必须落总线
+```
+
+- 语义与 `rawptr<T>` **完全一致**（同样不受 ARC 管、同样要显式 `raw_free`），
+  差别只在**代码生成**：经它读写的内存发射 `load volatile` / `store volatile`，
+  LLVM 不再对其做任何优化。
+- `volatile` **只能修饰裸指针**。普通值类型没有「每次访问必须落总线」的语义，
+  写 `volatile int` 一律编译期拒绝。
+- `ptr_cast<volatile rawptr<T>>(p)` 把一段普通内存切进易失视图——**易失性会保留**，
+  不会在转换处被悄悄抹掉。
+
+### 33.12 `bitcast<T>(x)`：底层内存强转
+
+`bitcast` 把值 `x` 的**位模式**按目标类型 `T` 重新解释——不读、不改内存，
+纯粹是 LLVM `bitcast`（C 的 `reinterpret_cast`）。
+
+```dial
+var buf: rawptr<byte> = raw_alloc(8);
+let addr: int = bitcast<int>(buf);                    // 指针 -> 整数
+var back: rawptr<byte> = bitcast<rawptr<byte>>(addr);  // 整数 -> 指针
+```
+
+- **位宽必须相同**。源与目标位宽不一致一律**编译期拒绝**并报出两边的实际位宽
+  （`bitcast` 源（64 位）与目标 'bool'（1 位）位宽不一致……）。
+  位宽按 target DataLayout 现算——32 位平台上指针是 32 位，
+  那时 `bitcast<int>(ptr)` 就该被拒。
+- 指针 ↔ 整数走 `ptrtoint` / `inttoptr`（LLVM 的 `bitcast` 本身不允许跨类转），
+  整数 ↔ 整数、浮点 ↔ 整数同位宽互转走真正的 `bitcast`。
+- 目标类型是**类型实参**（`bitcast<T>(x)`），与 `ptr_cast<T>(x)` /
+  `sizeof<T>()` 同一套约定。
+
+### 33.13 实现落点
 
 | 层 | 文件 | 改动 |
 | --- | --- | --- |
@@ -4545,14 +4644,24 @@ P 组用真实共享库做端到端（显式 `link` + `extern fn`，比对 `42 /
 | 代码生成 | `codegen.rs` | C ABI 宽度映射、`abi_adapt` 五处对称转换、C 布局字段读写、FFI 内建分派 |
 | C Runtime | `stdlib/dial_ffi.c` | 四个数据总线函数（跳过长度头 / 复制构造） |
 
-### 33.10 标准库 ABI 递增（破坏性变更）
+**导出四件套的落点**（§33.9 – §33.12）：
+
+| 层 | 文件 | 改动 |
+| --- | --- | --- |
+| 词法 / LSP | `lexer.rs` / `lsp.rs` | 新增 `export` / `packed` / `volatile` 关键字与 `@` 注解前缀 |
+| AST | `ast.rs` | `Func.exported`、`StructDef.packed` / `CStructDef.packed`、`Type::VolatilePtr` |
+| 解析 | `parser.rs` | `@export fn` 前缀、`packed struct` / `packed extern struct`、`volatile rawptr<T>`、`bitcast<T>` 类型实参 |
+| 语义 | `semantic.rs` | `FuncInfo.exported` + C 兼容签名校验、`bitcast` 类型推导与目标校验、`VolatilePtr` 全量并入裸指针分支 |
+| 代码生成 | `codegen.rs` | `External` / `Private` linkage 切换、`set_body(&fields, packed)`、`load/store volatile`（`set_volatile`）、`bitcast` + `ptrtoint`/`inttoptr` |
+
+### 33.14 标准库 ABI 递增（破坏性变更）
 
 `stdlib/dial_ffi.c` 新增四个导出函数，因此 `STDLIB_ABI` **4 → 5**，
 编译器版本 `1.3.0 → 1.4.0`，`make_stdlib_pkg.py` 默认 `--abi 5`、CI `--abi 5`。
 旧包（abi=4）会被编译器当场拒绝并给出重装指引。安装脚本仍走 `releases/latest`
 动态解析，不写死版本号。
 
-### 33.11 测试与交付
+### 33.15 测试与交付
 
 - 4 个正向示例：`ffi_hello`、`ffi_buffer`、`ffi_struct`、`ffi_callback`；
 - 19 个负向用例：伪装动态库 / 动态库缺失 / 非归档后缀、C 布局字段白名单、
@@ -4561,6 +4670,17 @@ P 组用真实共享库做端到端（显式 `link` + `extern fn`，比对 `42 /
 - 新增 **P 组**：C 侧静态库 + `sizeof`/`offsetof` 比对 + 双向字段读写 + C 回调；
   另编真实共享库做动态链接端到端并断言 ELF `RUNPATH`，再用伪装的
   `.a` / `.so` / `.dll` / `.dylib` 验证魔数拒绝；
+- **导出四件套专测**（P 组 2c，`tests/ffi/ffi_export_demo.dial` +
+  `tests/ffi/ffi_export_bridge.c`）：
+  - `@export` 双向：C 侧回调 Dial 导出的符号（值 `42`）；
+  - 符号可见性：`nm` 断言 `dial_add` 是**全局**符号、未标注的内部函数**不导出**；
+  - `packed struct`：Dial 侧的 `sizeof` / `alignof` / `offsetof` 与 C 侧
+    `sizeof` / `_Alignof` / `offsetof` **逐项相等**（刻意不写死期望值）；
+  - `volatile`：运行期往返值 + **`DIALC_DUMP_IR=1` 断言 IR 里确实是
+    `load volatile` / `store volatile`**（这才是「每次访问都落总线」的真正保证）；
+  - `bitcast`：地址 ↔ 整数往返值 + 位宽不一致必须编译期拒绝；
+- **5 个新增负向用例**：`@export` 签名含 `string`、`volatile` 修饰非指针、
+  `bitcast` 位宽不一致、`bitcast` 指针 ↔ 聚合类型、`packed` 后跟错关键字；
 - `bash tests/run_tests.sh` **A–P 全套通过（360 ✅ / 0 ❌）**，
   `tools/cve_check.py` 8/8、三平台 `zig cc` 编译通过。
 

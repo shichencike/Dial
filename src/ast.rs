@@ -68,6 +68,13 @@ pub enum Type {
     /// 元素类型为 `Void` 时是「无类型裸指针」（`rawptr<void>`）：只能传递与释放，
     /// **不能做指针算术**（没有元素大小可依），必须先 `ptr_cast` 成具体类型。
     RawPtr(Box<Type>),
+    /// 易失裸指针（v1.04 FFI）：`volatile rawptr<T>`，语义上与 `rawptr<T>` 完全等价
+    /// （不受 ARC、可显式释放、无元素大小算术），**唯一区别在代码生成**：
+    /// 经它读写内存时发射 `volatile` 加载/存储——编译器不得把这次访问优化掉、
+    /// 不得重排、不得合并，每次都必须真实地落到总线上。
+    /// 这是内存映射 IO / 硬件寄存器 / 与异步硬件共享的内存区域的刚需
+    /// （C 的 `volatile T*` 语义）。Dial 侧仍以普通指针方式使用，差异只在该指针的「易失性」。
+    VolatilePtr(Box<Type>),
     /// 函数指针（v1.03）：写作 `fn(A, B): R`，IR 层就是一个 `ptr`（纯函数地址）。
     ///
     /// **核心红线：绝不捕获环境**——Dial 没有闭包，函数指针里只有代码地址，
@@ -115,6 +122,7 @@ impl Type {
             Type::Struct(_) => "struct",
             Type::Opaque(_) => "opaque",
             Type::RawPtr(_) => "rawptr",
+            Type::VolatilePtr(_) => "volatile rawptr",
             Type::FnPtr(..) => "fn",
         }
     }
@@ -126,6 +134,7 @@ impl Type {
             Type::Opaque(n) => n.clone(),
             Type::KvMap(k, v) => format!("map<{}, {}>", k.display(), v.display()),
             Type::RawPtr(e) => format!("rawptr<{}>", e.display()),
+            Type::VolatilePtr(e) => format!("volatile rawptr<{}>", e.display()),
             Type::FnPtr(ps, r) => format!(
                 "fn({}): {}",
                 ps.iter()
@@ -495,6 +504,10 @@ pub struct Func {
     /// 函数名位置（v0.95）：跳转定义指向这里。
     pub line: usize,
     pub col: usize,
+    /// FFI 导出（v1.04）：`@export fn` / `export fn` 标记的函数用 C 链接符号名（无 mangling）
+    /// 与 C 调用约定对外暴露，可被 C 侧直接调用（详见 README §33.x）。
+    /// 语义层强制其签名仅含 C 兼容类型（标量 / rawptr / fnptr），否则编译期拒绝。
+    pub exported: bool,
 }
 
 /// 结构体定义。
@@ -510,6 +523,9 @@ pub struct StructDef {
     /// 结构体名位置（v0.95）。
     pub name_line: usize,
     pub name_col: usize,
+    /// 紧凑布局（v1.04）：`packed struct` 不插入对齐 padding，字段紧密排列，
+    /// 与 C 的 `__attribute__((packed))` / `#pragma pack` 逐字节一致（网络协议对齐刚需）。
+    pub packed: bool,
 }
 
 /// 语言层外部函数声明（v1.04 FFI）：`extern fn puts(s: rawptr<byte>): int;`
@@ -551,6 +567,9 @@ pub struct CStructDef {
     pub fields: Vec<(String, Type)>,
     pub line: usize,
     pub col: usize,
+    /// 紧凑布局（v1.04）：`packed extern struct` 与 C 的 `__attribute__((packed))` 一致，
+    /// 网络协议结构体（如 TCP 头）逐字节无 padding 对齐。
+    pub packed: bool,
 }
 
 /// 顶层测试块（v1.04 工具链）：`test "名字" { ... }`。

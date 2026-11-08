@@ -1,0 +1,12 @@
+// 负向：bitcast 不能在指针与聚合类型（结构体）之间转换。
+// 位宽相同也不行——LLVM 的 bitcast 跨不了「指针 / 非指针」这道类界限。
+// 想按另一种布局解读一块内存，正确做法是 rawptr 指过去再按字段读。
+struct OneInt { a: int }
+
+fn main(): int {
+    var buf: rawptr<byte> = raw_alloc(8);
+    let p: OneInt = bitcast<OneInt>(buf);
+    print(p.a);
+    raw_free(buf);
+    return 0;
+}

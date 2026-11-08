@@ -1,0 +1,9 @@
+// 负向：`packed` 后面必须跟 struct / extern struct。
+// packed 是布局限定符，不是可以修饰任意声明的关键字。
+packed fn bad_packed_fn(): int {
+    return 1;
+}
+
+fn main(): int {
+    return 0;
+}

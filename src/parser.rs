@@ -72,6 +72,28 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
                     ))
                 }
             }
+        } else if p.check(&TokenKind::At) || p.check(&TokenKind::Export) {
+            // v1.04 FFI 导出：`@export fn` 或 `export fn`。前缀由 parse_function 消费并置 exported。
+            functions.push(p.parse_function()?);
+        } else if p.check(&TokenKind::Packed) {
+            // v1.04 紧凑布局：`packed struct` / `packed extern struct`。
+            // `packed` 在此消费，struct / extern struct 解析函数内部不再看 packed 前缀。
+            p.advance();
+            if p.check(&TokenKind::Struct) {
+                let mut sd = p.parse_struct_def()?;
+                sd.packed = true;
+                structs.push(sd);
+            } else if p.check(&TokenKind::Extern) {
+                let mut cs = p.parse_extern_struct()?;
+                cs.packed = true;
+                cstructs.push(cs);
+            } else {
+                return Err(DialcError::new(
+                    "语法错误：`packed` 后必须是 `struct` 或 `extern struct`",
+                    p.peek().line,
+                    p.peek().col,
+                ));
+            }
         } else if p.check(&TokenKind::Var) {
             // B7 红线：绝对禁止可变全局状态。顶层不允许 var 全局变量，
             // 只读数据请用 const 声明（编译期内联 / .rodata，不可重新赋值）。
@@ -360,6 +382,8 @@ impl Parser {
     /// 字段类型白名单由语义层校验（只允许 C 兼容标量 / rawptr / 嵌套 extern struct）。
     fn parse_extern_struct(&mut self) -> Result<CStructDef> {
         let start = self.advance(); // extern
+        // v1.04 紧凑布局：`packed` 前缀由顶层 dispatch 消费并置此标志。
+        let packed = false;
         self.expect(TokenKind::Struct)?;
         let (name, _, _) = self.expect_ident_pos()?;
         self.expect(TokenKind::LBrace)?;
@@ -379,6 +403,7 @@ impl Parser {
             fields,
             line: start.line,
             col: start.col,
+            packed,
         })
     }
 
@@ -420,6 +445,9 @@ impl Parser {
 
     fn parse_struct_def(&mut self) -> Result<StructDef> {
         let start = self.advance(); // struct
+        // v1.04 紧凑布局：`packed` 前缀由顶层 dispatch 消费并置此标志，
+        // 此处内部永远从 false 起（不会重复消费）。
+        let packed = false;
         let (name, nline, ncol) = self.expect_ident_pos()?;
         self.expect(TokenKind::LBrace)?;
         let mut fields = Vec::new();
@@ -454,6 +482,7 @@ impl Parser {
             col: start.col,
             name_line: nline,
             name_col: ncol,
+            packed,
         })
     }
 
@@ -649,6 +678,17 @@ impl Parser {
     }
 
     fn parse_function(&mut self) -> Result<Func> {
+        // v1.04 FFI 导出：`@export fn` 或 `export fn` 前缀标记该函数对外暴露为 C 符号。
+        let exported = if self.check(&TokenKind::At) {
+            self.advance();
+            self.expect(TokenKind::Export)?;
+            true
+        } else if self.check(&TokenKind::Export) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         self.expect(TokenKind::Fn)?;
         let (name, nline, ncol) = self.expect_ident_pos()?;
         self.expect(TokenKind::LParen)?;
@@ -732,6 +772,7 @@ impl Parser {
             body,
             line: nline,
             col: ncol,
+            exported,
         })
     }
 
@@ -785,6 +826,26 @@ impl Parser {
             TokenKind::VoidT => {
                 self.advance();
                 Type::Void
+            }
+            // 易失裸指针（v1.04 FFI）：`volatile rawptr<T>`。
+            // 易失限定符只能修饰裸指针——其它类型（含 ARC 容器）没有「每次访问必须落总线」的语义。
+            TokenKind::Volatile => {
+                self.advance();
+                let name = self.expect_ident()?;
+                if name != "rawptr" {
+                    return Err(DialcError::new(
+                        format!(
+                            "语法错误：volatile 只能修饰裸指针（volatile rawptr<T>），但遇到 '{}'",
+                            name
+                        ),
+                        t.line,
+                        t.col,
+                    ));
+                }
+                self.expect(TokenKind::Lt)?;
+                let elem = self.parse_type()?;
+                self.expect_gt()?;
+                Type::VolatilePtr(Box::new(elem))
             }
             // 函数指针类型 `fn(A, B): R`（v1.03）。
             // 与函数声明 `fn name(a: A): R` 同形，只是省掉名字；类型位置遇上
@@ -1952,7 +2013,7 @@ impl Parser {
                 // 编译期类型内建（v1.04 FFI 刚需）：`sizeof<T>()` / `alignof<T>()` /
                 // `offsetof<T>(field)` 与 `ptr_cast<T>(x)` 共用「类型实参在 <> 里」的约定。
                 if (name == "ptr_cast" || name == "sizeof" || name == "alignof"
-                    || name == "offsetof")
+                    || name == "offsetof" || name == "bitcast")
                     && self.check(&TokenKind::Lt)
                 {
                     let save = self.pos;

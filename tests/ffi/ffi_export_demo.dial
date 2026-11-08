@@ -1,0 +1,123 @@
+// v1.04 FFI 导出专项：@export 导出 + packed struct 紧凑布局 + volatile 易失指针 + bitcast 位模式强转。
+//
+// 四个能力同属「把 Dial 接到系统底层」这一件事，故放在一份程序里对照验证：
+//   @export        —— 把 Dial 函数以裸 C 符号名导出，让 C 侧能反过来调它；
+//   packed struct  —— 网络协议头的逐字节对齐（无 padding），与 C 的
+//                     __attribute__((packed)) 完全一致；
+//   volatile 指针  —— 内存映射 IO / 硬件寄存器：每次读写都必须真实落到总线，
+//                     编译器不得把它优化掉、重排或合并；
+//   bitcast        —— 底层内存强转：把地址当整数、把整数当地址。
+//
+// link 的相对路径以**本文件所在目录**为基准解析（与既有 FFI 专项一致）。
+
+link "libffi_export_bridge.a";
+
+// ---- C 侧的桥（C -> Dial：回调我们导出的符号）----
+extern fn ffi_bridge_add(a: int, b: int): int;
+extern fn ffi_bridge_scale(v: int, k: int): int;
+
+// ---- C 侧的布局读数（Dial -> C：拿 C 的真实布局来对照）----
+extern fn ffi_c_pkt_size(): int;
+extern fn ffi_c_pkt_align(): int;
+extern fn ffi_c_pkt_off_flags(): int;
+extern fn ffi_c_pkt_off_len(): int;
+extern fn ffi_c_reg_size(): int;
+extern fn ffi_c_reg_align(): int;
+extern fn ffi_c_reg_off_flags(): int;
+extern fn ffi_c_reg_off_len(): int;
+
+// =====================================================================
+// 1) @export：以下两个函数以**裸 C 符号名**对外暴露，C 侧直接调用。
+//    参数与返回值按 C ABI 传递（Dial 的 int == C 的 int64_t）。
+// =====================================================================
+@export fn dial_add(a: int, b: int): int {
+    return a + b;
+}
+
+@export fn dial_scale(v: int, k: int): int {
+    return v * k;
+}
+
+// 未导出的内部函数：它**不该**出现在导出符号表里（编译器应当把它收成私有链接）。
+fn dial_internal_only(x: int): int {
+    return x + 1;
+}
+
+// =====================================================================
+// 2) packed struct：网络协议头的紧凑布局。
+//    PktHdr 不插对齐 padding（与 C 的 __attribute__((packed)) 一致）；
+//    RegHdr 同样的字段，但按 C 的自然对齐补 padding——两者必须不同，
+//    否则「packed 生效与否」根本测不出来。
+// =====================================================================
+packed extern struct PktHdr {
+    seq: int,
+    flags: byte,
+    len: byte
+}
+
+extern struct RegHdr {
+    seq: int,
+    flags: byte,
+    len: byte
+}
+
+// =====================================================================
+// 3) volatile 易失指针：经它读写内存时，编译器不得优化掉这次访问。
+//    语义与 rawptr 完全一致，差别只在「每次都必须真实落总线」。
+// =====================================================================
+fn vol_probe(): int {
+    var buf: rawptr<byte> = raw_alloc(8);
+    // 把普通内存切进易失视图：ptr_cast 到 volatile 裸指针。
+    var vp: volatile rawptr<byte> = ptr_cast<volatile rawptr<byte>>(buf);
+    *vp = int_to_byte(42);
+    let v: int = byte_to_int(*vp);
+    raw_free(buf);
+    return v;
+}
+
+// =====================================================================
+// 4) bitcast 位模式强转：地址 ↔ 整数。位宽必须相同，否则编译期拒绝。
+// =====================================================================
+fn cast_probe(): int {
+    var buf: rawptr<byte> = raw_alloc(8);
+    let addr: int = bitcast<int>(buf);                       // 指针 -> 整数
+    var back: rawptr<byte> = bitcast<rawptr<byte>>(addr);     // 整数 -> 指针
+    *back = int_to_byte(9);
+    let v: int = byte_to_int(*back);
+    raw_free(buf);
+    return v;
+}
+
+fn main(): int {
+    // ---- 布局对照：每两行一对（Dial 侧 / C 侧），必须逐项相等 ----
+    // packed struct
+    print(sizeof<PktHdr>());
+    print(ffi_c_pkt_size());
+    print(alignof<PktHdr>());
+    print(ffi_c_pkt_align());
+    print(offsetof<PktHdr>(flags));
+    print(ffi_c_pkt_off_flags());
+    print(offsetof<PktHdr>(len));
+    print(ffi_c_pkt_off_len());
+    // 普通 extern struct（自然对齐）
+    print(sizeof<RegHdr>());
+    print(ffi_c_reg_size());
+    print(alignof<RegHdr>());
+    print(ffi_c_reg_align());
+    print(offsetof<RegHdr>(flags));
+    print(ffi_c_reg_off_flags());
+    print(offsetof<RegHdr>(len));
+    print(ffi_c_reg_off_len());
+
+    // ---- @export 双向：C 回调 Dial 导出的符号 ----
+    print(ffi_bridge_add(20, 22));
+    print(ffi_bridge_scale(6, 7));
+
+    // ---- volatile 指针：写进去能读回来 ----
+    print(vol_probe());
+
+    // ---- bitcast：地址 -> 整数 -> 指针，写进去能读回来 ----
+    print(cast_probe());
+
+    return 0;
+}

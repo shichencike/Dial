@@ -703,6 +703,8 @@ pub fn resolve_imports(
                     ret,
                     // C 风格异构变参是 `.diali` 的 FFI 特例；Dial 自身函数永远为 false。
                     variadic: f.variadic,
+                    // 包外部函数由 C 侧提供，链接名就是它的符号名——等价于「已导出」。
+                    exported: true,
                 },
             ));
         }
@@ -1545,6 +1547,8 @@ fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, Strin
                 ret: e.ret.clone(),
                 defaults: vec![None; e.params.len()],
                 variadic: e.variadic,
+                // 外部声明的函数体在 C 侧，符号名即链接名——等价于「已导出」。
+                exported: true,
             },
         ));
     }
@@ -1930,6 +1934,7 @@ fn cmd_test(args: &[String]) {
             body,
             line: t.line,
             col: t.col,
+            exported: false,
         });
         let (functions, structs) = match analyze(&mut prog, &fe.externs) {
             Ok(r) => r,

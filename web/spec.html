@@ -348,9 +348,13 @@
 <li><a href="#336-extern-structc-布局与字段读写">33.6 extern struct：C 布局与字段读写</a></li>
 <li><a href="#337-dial-函数作-c-回调">33.7 Dial 函数作 C 回调</a></li>
 <li><a href="#338-link-的校验与动态链接">33.8 link 的校验与动态链接</a></li>
-<li><a href="#339-实现落点">33.9 实现落点</a></li>
-<li><a href="#3310-标准库-abi-递增破坏性变更">33.10 标准库 ABI 递增（破坏性变更）</a></li>
-<li><a href="#3311-测试与交付">33.11 测试与交付</a></li>
+<li><a href="#339-export把-dial-函数导出给-c-调用">33.9 @export：把 Dial 函数导出给 C 调用</a></li>
+<li><a href="#3310-packed-struct网络协议的逐字节对齐">33.10 packed struct：网络协议的逐字节对齐</a></li>
+<li><a href="#3311-volatile-rawptrt内存映射-io-的易失访问">33.11 volatile rawptr&lt;T&gt;：内存映射 IO 的易失访问</a></li>
+<li><a href="#3312-bitcasttx底层内存强转">33.12 bitcast&lt;T&gt;(x)：底层内存强转</a></li>
+<li><a href="#3313-实现落点">33.13 实现落点</a></li>
+<li><a href="#3314-标准库-abi-递增破坏性变更">33.14 标准库 ABI 递增（破坏性变更）</a></li>
+<li><a href="#3315-测试与交付">33.15 测试与交付</a></li>
 </ul>
 </li>
 <li><a href="#34-v104-增补工程工具链并入-v104版本不变">34. v1.04 增补：工程工具链（并入 [v1.04]，版本不变）</a><ul>
@@ -7353,7 +7357,87 @@ PE 没有 rpath，请把 <code>.dll</code> 复制到 exe 同目录或加入 <cod
 改用导入库 <code>.lib</code>（ar 格式）配 <code>.dll</code>。</p>
 <p>P 组用真实共享库做端到端（显式 <code>link</code> + <code>extern fn</code>，比对 <code>42 / 45</code>），再用三种
 后缀的纯文本伪装库与伪装的 <code>.a</code> 验证魔数拒绝不是靠「文件不存在」蒙混过关。</p>
-<h3 id="339-实现落点">33.9 实现落点</h3>
+<h3 id="339-export把-dial-函数导出给-c-调用">33.9 <code>@export</code>：把 Dial 函数导出给 C 调用</h3>
+<p><code>extern fn</code> 是<strong>Dial 调 C</strong>；<code>@export</code> 是<strong>C 调 Dial</strong>——把 Dial 函数以<strong>裸 C 符号名</strong>
+（无 mangling）与 C 调用约定对外暴露，C 侧可直接链接 / <code>dlsym</code> 调用。</p>
+<pre><code class="language-dial">@export fn dial_add(a: int, b: int): int {
+    return a + b;
+}
+</code></pre>
+<pre><code class="language-c">extern int64_t dial_add(int64_t a, int64_t b);   /* 裸符号名，无 mangling */
+int main(void) { printf(&quot;%lld\n&quot;, dial_add(20, 22)); }   /* → 42 */
+</code></pre>
+<p>两条硬规则：</p>
+<ol>
+<li><strong>签名必须全是 C 兼容类型</strong>（标量 / <code>rawptr&lt;T&gt;</code> / <code>fn(A):R</code> / <code>extern struct</code> 值）。
+   <code>string</code> / <code>bytes</code> / 数组 / map 这类 ARC 句柄或聚合类型<strong>编译期拒绝</strong>——
+   C 侧无法按 C ABI 正确接收它们，放行等于埋 UB。</li>
+<li><strong>只有标了 <code>@export</code> 的函数才是全局符号</strong>。其余 Dial 函数收成 LLVM <code>Private</code>
+   linkage：模块内照常递归、照常取函数指针，但<strong>不导出</strong>——既不污染 C 侧的符号
+   空间，也不会与别的目标文件里的同名符号撞车；未被引用的还会被死代码消除。
+   <code>main</code> 例外，恒为外部可见（进程入口）。</li>
+</ol>
+<p><code>export fn</code>（不带 <code>@</code>）是等价写法。参数与返回值按 §33.4 的 C ABI 宽度传递
+（Dial 的 <code>int</code> ↔ C 的 <code>int64_t</code>）。</p>
+<p><strong>怎么用</strong>：<code>dialc build x.dial --no-link</code> 产出目标文件，再由 C 侧链接；或把目标文件
+打成共享库（<code>cc -shared x.o -o libx.so</code>）后 C 侧 <code>-l</code> 链接 / <code>dlsym</code> 取符号。</p>
+<h3 id="3310-packed-struct网络协议的逐字节对齐">33.10 <code>packed struct</code>：网络协议的逐字节对齐</h3>
+<p>普通 <code>extern struct</code> 按 C 的自然对齐插 padding（<code>seq: int</code> 之后 <code>flags: byte</code>
+会被推到下一个 8 字节边界）。但<strong>网络协议头</strong>的字段偏移是协议<strong>硬约定</strong>，
+一个 padding 字节就让整个包解析错位。因此需要紧凑布局：</p>
+<pre><code class="language-dial">packed extern struct PktHdr {     // 与 C 的 __attribute__((packed)) 逐字节一致
+    seq: int,
+    flags: byte,
+    len: byte
+}
+packed struct ValHdr { ... }       // Dial 自己的值语义结构体，同样不插 padding
+</code></pre>
+<p>两种写法都合法：</p>
+<ul>
+<li><code>packed extern struct</code> —— <strong>C ABI 紧凑布局</strong>。字段宽度走 C 宽度
+  （<code>bool</code> / <code>byte</code> → <code>i8</code>），与 C 的 <code>__attribute__((packed))</code> / <code>#pragma pack(1)</code>
+  逐字节一致。这是与 C / 网络协议对口的写法。</li>
+<li><code>packed struct</code> —— <strong>Dial 值语义结构体</strong>的紧凑布局（字段走 Dial 内部宽度）。</li>
+</ul>
+<p>布局用 §33.3 那套编译期内建核对：<code>sizeof&lt;T&gt;()</code> / <code>alignof&lt;T&gt;()</code> / <code>offsetof&lt;T&gt;(field)</code>
+在编译期按 target DataLayout 算出，零运行时开销。P 组把 Dial 侧的三个数与 C 侧
+<code>sizeof</code> / <code>_Alignof</code> / <code>offsetof</code> <strong>逐项比对</strong>（且刻意不写死期望值——布局随平台变，
+「两边相等」才是要锁住的东西）。</p>
+<h3 id="3311-volatile-rawptrt内存映射-io-的易失访问">33.11 <code>volatile rawptr&lt;T&gt;</code>：内存映射 IO 的易失访问</h3>
+<p>内存映射寄存器、硬件 FIFO、MMIO 区域有个硬要求：<strong>每次读写都必须真实落到总线</strong>，
+编译器不得把它优化掉、重排或合并。<code>volatile rawptr&lt;T&gt;</code> 就是这个语义：</p>
+<pre><code class="language-dial">var buf: rawptr&lt;byte&gt; = raw_alloc(8);
+var vp: volatile rawptr&lt;byte&gt; = ptr_cast&lt;volatile rawptr&lt;byte&gt;&gt;(buf);
+*vp = int_to_byte(42);        // 写入必须落总线
+let v: int = byte_to_int(*vp); // 读取必须落总线
+</code></pre>
+<ul>
+<li>语义与 <code>rawptr&lt;T&gt;</code> <strong>完全一致</strong>（同样不受 ARC 管、同样要显式 <code>raw_free</code>），
+  差别只在<strong>代码生成</strong>：经它读写的内存发射 <code>load volatile</code> / <code>store volatile</code>，
+  LLVM 不再对其做任何优化。</li>
+<li><code>volatile</code> <strong>只能修饰裸指针</strong>。普通值类型没有「每次访问必须落总线」的语义，
+  写 <code>volatile int</code> 一律编译期拒绝。</li>
+<li><code>ptr_cast&lt;volatile rawptr&lt;T&gt;&gt;(p)</code> 把一段普通内存切进易失视图——<strong>易失性会保留</strong>，
+  不会在转换处被悄悄抹掉。</li>
+</ul>
+<h3 id="3312-bitcasttx底层内存强转">33.12 <code>bitcast&lt;T&gt;(x)</code>：底层内存强转</h3>
+<p><code>bitcast</code> 把值 <code>x</code> 的<strong>位模式</strong>按目标类型 <code>T</code> 重新解释——不读、不改内存，
+纯粹是 LLVM <code>bitcast</code>（C 的 <code>reinterpret_cast</code>）。</p>
+<pre><code class="language-dial">var buf: rawptr&lt;byte&gt; = raw_alloc(8);
+let addr: int = bitcast&lt;int&gt;(buf);                    // 指针 -&gt; 整数
+var back: rawptr&lt;byte&gt; = bitcast&lt;rawptr&lt;byte&gt;&gt;(addr);  // 整数 -&gt; 指针
+</code></pre>
+<ul>
+<li><strong>位宽必须相同</strong>。源与目标位宽不一致一律<strong>编译期拒绝</strong>并报出两边的实际位宽
+  （<code>bitcast</code> 源（64 位）与目标 'bool'（1 位）位宽不一致……）。
+  位宽按 target DataLayout 现算——32 位平台上指针是 32 位，
+  那时 <code>bitcast&lt;int&gt;(ptr)</code> 就该被拒。</li>
+<li>指针 ↔ 整数走 <code>ptrtoint</code> / <code>inttoptr</code>（LLVM 的 <code>bitcast</code> 本身不允许跨类转），
+  整数 ↔ 整数、浮点 ↔ 整数同位宽互转走真正的 <code>bitcast</code>。</li>
+<li>目标类型是<strong>类型实参</strong>（<code>bitcast&lt;T&gt;(x)</code>），与 <code>ptr_cast&lt;T&gt;(x)</code> /
+  <code>sizeof&lt;T&gt;()</code> 同一套约定。</li>
+</ul>
+<h3 id="3313-实现落点">33.13 实现落点</h3>
 <table>
 <thead>
 <tr>
@@ -7400,12 +7484,49 @@ PE 没有 rpath，请把 <code>.dll</code> 复制到 exe 同目录或加入 <cod
 </tr>
 </tbody>
 </table>
-<h3 id="3310-标准库-abi-递增破坏性变更">33.10 标准库 ABI 递增（破坏性变更）</h3>
+<p><strong>导出四件套的落点</strong>（§33.9 – §33.12）：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>文件</th>
+<th>改动</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>词法 / LSP</td>
+<td><code>lexer.rs</code> / <code>lsp.rs</code></td>
+<td>新增 <code>export</code> / <code>packed</code> / <code>volatile</code> 关键字与 <code>@</code> 注解前缀</td>
+</tr>
+<tr>
+<td>AST</td>
+<td><code>ast.rs</code></td>
+<td><code>Func.exported</code>、<code>StructDef.packed</code> / <code>CStructDef.packed</code>、<code>Type::VolatilePtr</code></td>
+</tr>
+<tr>
+<td>解析</td>
+<td><code>parser.rs</code></td>
+<td><code>@export fn</code> 前缀、<code>packed struct</code> / <code>packed extern struct</code>、<code>volatile rawptr&lt;T&gt;</code>、<code>bitcast&lt;T&gt;</code> 类型实参</td>
+</tr>
+<tr>
+<td>语义</td>
+<td><code>semantic.rs</code></td>
+<td><code>FuncInfo.exported</code> + C 兼容签名校验、<code>bitcast</code> 类型推导与目标校验、<code>VolatilePtr</code> 全量并入裸指针分支</td>
+</tr>
+<tr>
+<td>代码生成</td>
+<td><code>codegen.rs</code></td>
+<td><code>External</code> / <code>Private</code> linkage 切换、<code>set_body(&amp;fields, packed)</code>、<code>load/store volatile</code>（<code>set_volatile</code>）、<code>bitcast</code> + <code>ptrtoint</code>/<code>inttoptr</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="3314-标准库-abi-递增破坏性变更">33.14 标准库 ABI 递增（破坏性变更）</h3>
 <p><code>stdlib/dial_ffi.c</code> 新增四个导出函数，因此 <code>STDLIB_ABI</code> <strong>4 → 5</strong>，
 编译器版本 <code>1.3.0 → 1.4.0</code>，<code>make_stdlib_pkg.py</code> 默认 <code>--abi 5</code>、CI <code>--abi 5</code>。
 旧包（abi=4）会被编译器当场拒绝并给出重装指引。安装脚本仍走 <code>releases/latest</code>
 动态解析，不写死版本号。</p>
-<h3 id="3311-测试与交付">33.11 测试与交付</h3>
+<h3 id="3315-测试与交付">33.15 测试与交付</h3>
 <ul>
 <li>4 个正向示例：<code>ffi_hello</code>、<code>ffi_buffer</code>、<code>ffi_struct</code>、<code>ffi_callback</code>；</li>
 <li>19 个负向用例：伪装动态库 / 动态库缺失 / 非归档后缀、C 布局字段白名单、
@@ -7414,6 +7535,17 @@ PE 没有 rpath，请把 <code>.dll</code> 复制到 exe 同目录或加入 <cod
 <li>新增 <strong>P 组</strong>：C 侧静态库 + <code>sizeof</code>/<code>offsetof</code> 比对 + 双向字段读写 + C 回调；
   另编真实共享库做动态链接端到端并断言 ELF <code>RUNPATH</code>，再用伪装的
   <code>.a</code> / <code>.so</code> / <code>.dll</code> / <code>.dylib</code> 验证魔数拒绝；</li>
+<li><strong>导出四件套专测</strong>（P 组 2c，<code>tests/ffi/ffi_export_demo.dial</code> +
+  <code>tests/ffi/ffi_export_bridge.c</code>）：</li>
+<li><code>@export</code> 双向：C 侧回调 Dial 导出的符号（值 <code>42</code>）；</li>
+<li>符号可见性：<code>nm</code> 断言 <code>dial_add</code> 是<strong>全局</strong>符号、未标注的内部函数<strong>不导出</strong>；</li>
+<li><code>packed struct</code>：Dial 侧的 <code>sizeof</code> / <code>alignof</code> / <code>offsetof</code> 与 C 侧
+    <code>sizeof</code> / <code>_Alignof</code> / <code>offsetof</code> <strong>逐项相等</strong>（刻意不写死期望值）；</li>
+<li><code>volatile</code>：运行期往返值 + <strong><code>DIALC_DUMP_IR=1</code> 断言 IR 里确实是
+    <code>load volatile</code> / <code>store volatile</code></strong>（这才是「每次访问都落总线」的真正保证）；</li>
+<li><code>bitcast</code>：地址 ↔ 整数往返值 + 位宽不一致必须编译期拒绝；</li>
+<li><strong>5 个新增负向用例</strong>：<code>@export</code> 签名含 <code>string</code>、<code>volatile</code> 修饰非指针、
+  <code>bitcast</code> 位宽不一致、<code>bitcast</code> 指针 ↔ 聚合类型、<code>packed</code> 后跟错关键字；</li>
 <li><code>bash tests/run_tests.sh</code> <strong>A–P 全套通过（360 ✅ / 0 ❌）</strong>，
   <code>tools/cve_check.py</code> 8/8、三平台 <code>zig cc</code> 编译通过。</li>
 </ul>

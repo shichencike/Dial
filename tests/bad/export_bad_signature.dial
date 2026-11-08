@@ -1,0 +1,10 @@
+// 负向：@export 函数的签名只允许含 C 兼容类型。
+// string 是 ARC 句柄，C 侧无法按 C ABI 正确接收——编译期必须当场拒绝，
+// 而不是等到链接期或运行期才炸。
+@export fn bad_export(s: string): int {
+    return 1;
+}
+
+fn main(): int {
+    return 0;
+}

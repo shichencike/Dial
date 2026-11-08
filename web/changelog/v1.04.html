@@ -71,6 +71,36 @@
   修复点：模块创建时把宿主目标机的 <code>DataLayout</code>/<code>triple</code> 显式写到 <code>module</code> 上——
   否则 <code>module</code> 默认 <code>DataLayout</code> 会把 <code>i64</code> 对齐写成 4（而非 x86-64 SysV 的 8），
   导致上述内建与 <code>extern struct</code> 字段偏移与 C 不一致。</li>
+<li><strong><code>@export</code>：把 Dial 函数导出给 C 调用</strong>（见 <a href="../spec.html#339-export把-dial-函数导出给-c-调用">README §33.9</a>）。
+  <code>extern fn</code> 是「Dial 调 C」，<code>@export</code> 是「C 调 Dial」——被标注的函数以<strong>裸 C 符号名</strong>
+  （无 mangling）与 C 调用约定对外暴露，C 侧可直接链接 / <code>dlsym</code> 调用。两条硬规则：
+  ① 签名必须全是 C 兼容类型（标量 / <code>rawptr&lt;T&gt;</code> / <code>fn(A):R</code> / <code>extern struct</code> 值），
+  含 <code>string</code> / <code>bytes</code> / 数组 / map 一律<strong>编译期拒绝</strong>（C 侧无法按 C ABI 正确接收，
+  放行等于埋 UB）；② <strong>只有标了 <code>@export</code> 的函数才是全局符号</strong>，其余 Dial 函数收成
+  LLVM <code>Private</code> linkage——模块内照常递归、照常取函数指针，但不导出，既不污染 C 侧
+  符号空间、也不会与别的目标文件里的同名符号撞车。<code>main</code> 例外，恒为外部可见。
+  <code>export fn</code>（不带 <code>@</code>）是等价写法。</li>
+<li><strong><code>packed struct</code>：网络协议的逐字节对齐</strong>（见 <a href="../spec.html#3310-packed-struct网络协议的逐字节对齐">README §33.10</a>）。
+  <code>packed extern struct</code> 走 <strong>C ABI 紧凑布局</strong>（<code>bool</code> / <code>byte</code> → <code>i8</code>），与 C 的
+  <code>__attribute__((packed))</code> / <code>#pragma pack(1)</code> 逐字节一致——网络协议头的字段偏移是
+  协议硬约定，一个 padding 字节就让整包解析错位；<code>packed struct</code> 则是 Dial 自己
+  值语义结构体的紧凑布局。布局用 <code>sizeof&lt;T&gt;()</code> / <code>alignof&lt;T&gt;()</code> / <code>offsetof&lt;T&gt;(field)</code>
+  编译期核对（零运行时开销），P 组 2c 把 Dial 侧的三个数与 C 侧
+  <code>sizeof</code> / <code>_Alignof</code> / <code>offsetof</code> <strong>逐项比对</strong>（刻意不写死期望值——布局随平台变，
+  「两边相等」才是要锁住的东西）。</li>
+<li><strong><code>volatile rawptr&lt;T&gt;</code>：内存映射 IO 的易失访问</strong>（见 <a href="../spec.html#3311-volatile-rawptrt内存映射-io-的易失访问">README §33.11</a>）。
+  语义与 <code>rawptr&lt;T&gt;</code> 完全一致（同样不受 ARC 管、同样要显式 <code>raw_free</code>），差别只在
+  代码生成：经它读写的内存发射 <code>load volatile</code> / <code>store volatile</code>，LLVM 不再对其做
+  任何优化——每次访问都真实落总线。<code>volatile</code> <strong>只能修饰裸指针</strong>（<code>volatile int</code>
+  编译期拒绝）；<code>ptr_cast&lt;volatile rawptr&lt;T&gt;&gt;(p)</code> 把普通内存切进易失视图时
+  <strong>易失性会保留</strong>，不在转换处被悄悄抹掉。</li>
+<li><strong><code>bitcast&lt;T&gt;(x)</code>：底层内存强转</strong>（见 <a href="../spec.html#3312-bitcasttx底层内存强转">README §33.12</a>）。
+  把值的<strong>位模式</strong>按目标类型重新解释——不读、不改内存。类型实参约定与
+  <code>ptr_cast&lt;T&gt;(x)</code> / <code>sizeof&lt;T&gt;()</code> 同一套。<strong>位宽必须相同</strong>，不一致一律编译期拒绝
+  并报出两边实际位宽（位宽按 target DataLayout 现算——32 位平台上指针是 32 位，
+  那时 <code>bitcast&lt;int&gt;(ptr)</code> 就该被拒）。指针 ↔ 整数走 <code>ptrtoint</code> / <code>inttoptr</code>
+  （LLVM 的 <code>bitcast</code> 本身不允许跨类转），整数 ↔ 整数、浮点 ↔ 整数同位宽互转走
+  真正的 <code>bitcast</code>。</li>
 <li><strong><code>.diali</code> 类型白名单打穿</strong>：<code>byte</code> / <code>bytes</code> / <code>rawptr&lt;T&gt;</code> / <code>fn(A, B): R</code> 全部放行；
   形参表改为按<strong>顶层逗号</strong>切分，嵌套泛型/函数类型签名不会被切坏。</li>
 <li><strong>完整数据总线</strong>：<code>string.as_c_str()</code> / <code>bytes.as_ptr()</code> 返回<strong>借用</strong>的 <code>rawptr&lt;byte&gt;</code>
@@ -374,6 +404,13 @@
 </ul>
 <h3 id="changed">Changed</h3>
 <ul>
+<li><strong>Dial 函数的链接可见性按 <code>@export</code> 收口</strong>：v1.04 之前<strong>所有</strong> Dial 函数都是 LLVM
+  默认的 <code>External</code> linkage，等于每个 Dial 程序都在往全局符号空间里倒函数名——
+  既会与别的目标文件里的同名符号撞车，也让「哪些是给 C 用的」无从表达。现在
+  <strong>只有 <code>@export</code> 标注的函数与 <code>main</code> 是全局符号</strong>，其余收成 <code>Private</code> linkage：
+  模块内照常递归、照常取函数指针（传给 C 回调也照常工作），但<strong>不导出</strong>、不被
+  死代码消除误删。依赖「Dial 函数能被 C 按名字链接」的代码请补 <code>@export</code>
+  （见 <a href="../spec.html#339-export把-dial-函数导出给-c-调用">README §33.9</a>）。</li>
 <li><strong>所有 Dial 函数的 LLVM 签名统一为 C ABI 宽度</strong>：<code>bool</code> 内部 i1 → 边界 i32（C 默认整型提升），
   <code>byte</code> 内部 i64 → 边界 i8（C 的 <code>uint8_t</code>）；函数体内部仍是 i1 / i64，逻辑零改动。
   函数入口 / 出口 / 调用点 / HOF thunk / spawn thunk 五处做<strong>对称</strong> <code>abi_adapt</code> 转换，

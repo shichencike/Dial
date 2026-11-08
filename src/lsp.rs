@@ -788,7 +788,8 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::Do
         | TokenKind::Step | TokenKind::Const | TokenKind::Enum
         | TokenKind::With | TokenKind::Goto | TokenKind::Label
-        | TokenKind::Extern | TokenKind::Link => T_KEYWORD,
+        | TokenKind::Extern | TokenKind::Link | TokenKind::Export | TokenKind::Packed
+        | TokenKind::Volatile => T_KEYWORD,
         // true / false 虽是字面量，但视觉上按关键字处理更符合直觉
         TokenKind::BoolLit(_) => T_KEYWORD,
         // 类型关键字
@@ -831,7 +832,8 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::MulEq | TokenKind::DivEq | TokenKind::ModEq
         | TokenKind::PlusPlus | TokenKind::MinusMinus
         | TokenKind::Amp | TokenKind::Pipe | TokenKind::Caret | TokenKind::Tilde
-        | TokenKind::Shl | TokenKind::Shr | TokenKind::Question | TokenKind::Arrow => T_OPERATOR,
+        | TokenKind::Shl | TokenKind::Shr | TokenKind::Question | TokenKind::Arrow
+        | TokenKind::At => T_OPERATOR,
         TokenKind::EOF => return (u32::MAX, 0),
     };
 
