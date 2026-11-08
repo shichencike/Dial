@@ -61,6 +61,16 @@
   产物无需手工设 <code>LD_LIBRARY_PATH</code>。PE 无 rpath，<code>.dll</code> 需放 exe 同目录或 <code>PATH</code>。</li>
 <li><strong><code>extern struct</code>（C ABI / <code>repr(C)</code>）</strong>：字段顺序、对齐、padding、sizeof 与 C 完全一致；
   只经 <code>rawptr&lt;Struct&gt;</code> 读写字段，不按值传递、不能用 <code>StructLit</code> 构造。</li>
+<li><strong>编译期类型内建 <code>sizeof&lt;T&gt;()</code> / <code>alignof&lt;T&gt;()</code> / <code>offsetof&lt;T&gt;(field)</code></strong>：手写 C 库绑定
+  核对内存布局的刚需。语法与 <code>ptr_cast&lt;T&gt;(x)</code> 共用「类型实参在 <code>&lt;&gt;</code> 里」的约定
+  （<code>offsetof</code> 的字段名是裸标识符，如 <code>offsetof&lt;Point&gt;(y)</code>）；数值按<strong>宿主 target
+  DataLayout</strong> 在编译期算出、发射为 <code>i64</code> 常量，<strong>零运行时开销</strong>；全部返回 <code>int</code>。
+  三种内建都直接吃 <code>extern struct</code>，与字段读写路径、与 C 的 <code>offsetof</code> 逐字节一致
+  （已加 P 组 <code>2b</code> 子测试锁死）。<code>void</code> 被显式禁止（<code>sizeof</code> 在 C 里未定义）；
+  <code>offsetof</code> 要求真实存在且类型实参确为结构体（含 <code>extern struct</code>），否则编译期报错。
+  修复点：模块创建时把宿主目标机的 <code>DataLayout</code>/<code>triple</code> 显式写到 <code>module</code> 上——
+  否则 <code>module</code> 默认 <code>DataLayout</code> 会把 <code>i64</code> 对齐写成 4（而非 x86-64 SysV 的 8），
+  导致上述内建与 <code>extern struct</code> 字段偏移与 C 不一致。</li>
 <li><strong><code>.diali</code> 类型白名单打穿</strong>：<code>byte</code> / <code>bytes</code> / <code>rawptr&lt;T&gt;</code> / <code>fn(A, B): R</code> 全部放行；
   形参表改为按<strong>顶层逗号</strong>切分，嵌套泛型/函数类型签名不会被切坏。</li>
 <li><strong>完整数据总线</strong>：<code>string.as_c_str()</code> / <code>bytes.as_ptr()</code> 返回<strong>借用</strong>的 <code>rawptr&lt;byte&gt;</code>

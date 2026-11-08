@@ -19,7 +19,7 @@ use inkwell::debug_info::{
 };
 use inkwell::module::FlagBehavior;
 use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetData,
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::basic_block::BasicBlock;
@@ -217,6 +217,28 @@ pub fn compile(
 ) -> Result<()> {
     let context = Context::create();
     let module = context.create_module("dialc");
+
+    // v1.04: 把宿主目标机的 DataLayout 写到模块上。否则 module 默认 DataLayout 会把
+    // i64 的对齐写成 4（而非 x86-64 SysV 的 8），导致 sizeof/alignof/offsetof 以及
+    // extern struct 的字段偏移与 C 编译器（zig cc 同 ABI）不一致，破坏 FFI 布局。
+    {
+        Target::initialize_all(&InitializationConfig::default());
+        let triple = TargetMachine::get_default_triple();
+        if let Some(tm) = Target::from_triple(&triple).ok().and_then(|t| {
+            t.create_target_machine(
+                &triple,
+                "",
+                "",
+                OptimizationLevel::None,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+        }) {
+            let dl = tm.get_target_data().get_data_layout();
+            module.set_data_layout(&dl);
+            module.set_triple(&triple);
+        }
+    }
 
     // -g：先建 CompileUnit。"Debug Info Version" 模块标志必须早于任何 debug metadata，
     // 否则 LLVM 会以「Debug info version mismatch」告警并可能丢弃调试信息。
@@ -4099,6 +4121,74 @@ impl<'ctx> CodeGen<'ctx> {
             Expr::Method(obj, method, args) => self.gen_method_call(obj, method, args, function, scopes, func_values, functions, structs),
             Expr::Binary(left, op, right) => self.gen_binary(*op, left, right, function, scopes, func_values, functions, structs),
             Expr::Call(name, args) => {
+                // v1.04 FFI：编译期类型内建 sizeof / alignof / offsetof。
+                // 数值按 target DataLayout 在编译期算出，发射为 i64 常量（零运行时开销）。
+                if matches!(name.as_str(), "sizeof" | "alignof" | "offsetof") {
+                    let ty = match &args[0] {
+                        Expr::TypeLit(t) => t.clone(),
+                        _ => {
+                            return Err(DialcError::new(
+                                "语义错误：sizeof/alignof/offsetof 的第一个参数必须是类型实参",
+                                0, 0,
+                            ))
+                        }
+                    };
+                    let dl = self.module.get_data_layout();
+                    let td = TargetData::create(
+                        dl.as_str().to_str().unwrap_or(""),
+                    );
+                    let lt = self.dialc_type_to_llvm(&ty);
+                    let val: u64 = match name.as_str() {
+                        "sizeof" => td.get_abi_size(&lt),
+                        "alignof" => td.get_abi_alignment(&lt) as u64,
+                        "offsetof" => {
+                            let field = match &args[1] {
+                                Expr::StringLit(f) => f.clone(),
+                                _ => {
+                                    return Err(DialcError::new(
+                                        "语义错误：offsetof 的第二个参数必须是字段名",
+                                        0, 0,
+                                    ))
+                                }
+                            };
+                            let sname = match &ty {
+                                Type::Struct(n) => n.clone(),
+                                _ => {
+                                    return Err(DialcError::new(
+                                        "语义错误：offsetof 的第一个参数必须是结构体类型",
+                                        0, 0,
+                                    ))
+                                }
+                            };
+                            let idx = match structs.get(&sname) {
+                                Some((fields, _)) => {
+                                    fields.iter().position(|(fnm, _)| fnm == &field)
+                                }
+                                None => None,
+                            };
+                            let idx = match idx {
+                                Some(i) => i as u32,
+                                None => {
+                                    return Err(DialcError::new(
+                                        format!(
+                                            "语义错误：offsetof 的结构体 '{}' 没有字段 '{}'",
+                                            sname, field
+                                        ),
+                                        0, 0,
+                                    ))
+                                }
+                            };
+                            let sty = self
+                                .struct_types
+                                .get(&sname)
+                                .expect("offsetof 的结构体应在 build_struct_types 中注册");
+                            td.offset_of_element(sty, idx)
+                                .expect("offsetof 的字段索引应在结构体字段范围内")
+                        }
+                        _ => unreachable!(),
+                    };
+                    return Ok(self.context.i64_type().const_int(val, false).into());
+                }
                 // v1.00 内建：断言 / 退出 / 数学函数（独立于下面的类型转换与 print 分派）。
                 if matches!(
                     name.as_str(),

@@ -48,6 +48,16 @@
   产物无需手工设 `LD_LIBRARY_PATH`。PE 无 rpath，`.dll` 需放 exe 同目录或 `PATH`。
 - **`extern struct`（C ABI / `repr(C)`）**：字段顺序、对齐、padding、sizeof 与 C 完全一致；
   只经 `rawptr<Struct>` 读写字段，不按值传递、不能用 `StructLit` 构造。
+- **编译期类型内建 `sizeof<T>()` / `alignof<T>()` / `offsetof<T>(field)`**：手写 C 库绑定
+  核对内存布局的刚需。语法与 `ptr_cast<T>(x)` 共用「类型实参在 `<>` 里」的约定
+  （`offsetof` 的字段名是裸标识符，如 `offsetof<Point>(y)`）；数值按**宿主 target
+  DataLayout** 在编译期算出、发射为 `i64` 常量，**零运行时开销**；全部返回 `int`。
+  三种内建都直接吃 `extern struct`，与字段读写路径、与 C 的 `offsetof` 逐字节一致
+  （已加 P 组 `2b` 子测试锁死）。`void` 被显式禁止（`sizeof` 在 C 里未定义）；
+  `offsetof` 要求真实存在且类型实参确为结构体（含 `extern struct`），否则编译期报错。
+  修复点：模块创建时把宿主目标机的 `DataLayout`/`triple` 显式写到 `module` 上——
+  否则 `module` 默认 `DataLayout` 会把 `i64` 对齐写成 4（而非 x86-64 SysV 的 8），
+  导致上述内建与 `extern struct` 字段偏移与 C 不一致。
 - **`.diali` 类型白名单打穿**：`byte` / `bytes` / `rawptr<T>` / `fn(A, B): R` 全部放行；
   形参表改为按**顶层逗号**切分，嵌套泛型/函数类型签名不会被切坏。
 - **完整数据总线**：`string.as_c_str()` / `bytes.as_ptr()` 返回**借用**的 `rawptr<byte>`

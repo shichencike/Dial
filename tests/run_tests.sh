@@ -558,6 +558,36 @@ else
     else
         echo "  ✅ sizeof/offsetof 与 C 一致，Dial↔C 双向字段读写、C 回调均正确"
     fi
+
+    # 2b) 编译期类型内建（v1.04 增补）：sizeof<T>() / alignof<T>() / offsetof<T>(field)
+    #     直接吐编译期常量，与同结构体的字段读写路径、与 C 的 offsetof 必须逐字节一致。
+    #     这一步专门锁住「新内建」不被 layout 漂移带偏（FFI 绑定核对内存布局的刚需）。
+    cat > "${TMP}/ffi_layout_builtins.dial" <<'EOF'
+extern struct Point { x: int, y: byte, flag: bool }
+fn main(): int {
+    print(sizeof<Point>());
+    print(alignof<Point>());
+    print(offsetof<Point>(x));
+    print(offsetof<Point>(y));
+    print(offsetof<Point>(flag));
+    print(sizeof<int>());
+    print(alignof<int>());
+    print(sizeof<byte>());
+    print(sizeof<bool>());
+    print(sizeof<float>());
+    print(sizeof<string>());
+    print(sizeof<rawptr<byte>>());
+    return 0;
+}
+EOF
+    if ! "$DIALC" build "${TMP}/ffi_layout_builtins.dial" -o "${TMP}/ffi_layout_builtins" >"${TMP}/ffilb.log" 2>&1; then
+        echo "  ❌ 编译期类型内建编译失败"; sed 's/^/       /' "${TMP}/ffilb.log"; fail=1
+    elif ! diff -u <(printf '16\n8\n0\n8\n9\n8\n8\n8\n1\n8\n8\n8\n') \
+                      <("${TMP}/ffi_layout_builtins" 2>&1) >"${TMP}/ffilbdiff.txt" 2>&1; then
+        echo "  ❌ 编译期类型内建与 C 布局不一致"; sed 's/^/       /' "${TMP}/ffilbdiff.txt"; fail=1
+    else
+        echo "  ✅ sizeof/alignof/offsetof 编译期内建与 C ABI 逐字节一致"
+    fi
 fi
 
 # 3) 动态链接（v1.04 增补）：真实共享库必须能显式 link + 运行，且产物自带查找路径。

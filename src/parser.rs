@@ -1949,7 +1949,12 @@ impl Parser {
                 // 只对 `ptr_cast` 开放——它必须带目标类型，否则「裸指针 ↔ 其它类型」
                 // 就成了隐式转换，与零隐式转换铁律冲突。
                 let mut type_arg: Option<Type> = None;
-                if name == "ptr_cast" && self.check(&TokenKind::Lt) {
+                // 编译期类型内建（v1.04 FFI 刚需）：`sizeof<T>()` / `alignof<T>()` /
+                // `offsetof<T>(field)` 与 `ptr_cast<T>(x)` 共用「类型实参在 <> 里」的约定。
+                if (name == "ptr_cast" || name == "sizeof" || name == "alignof"
+                    || name == "offsetof")
+                    && self.check(&TokenKind::Lt)
+                {
                     let save = self.pos;
                     self.advance();
                     match self.parse_type() {
@@ -1972,6 +1977,12 @@ impl Parser {
                     // 语义层据此还原目标裸指针类型。
                     if let Some(ty) = type_arg {
                         args.push(Expr::TypeLit(ty));
+                    }
+                    // offsetof<T>(field)：第二个实参是成员名（裸标识符），
+                    // 作为字符串字面量传入，语义层据此取该字段在结构体里的字节偏移。
+                    if name == "offsetof" {
+                        let field = self.expect_ident()?;
+                        args.push(Expr::StringLit(field));
                     }
                     // spawn 的首参是「函数引用」，不是表达式：线程入口 thunk 要按目标
                     // 函数静态生成，因此这里直接消费一个顶层具名函数字面量。

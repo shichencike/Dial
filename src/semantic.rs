@@ -1552,6 +1552,87 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::RawPtr(target_elem));
                 }
+                // ---- v1.04 FFI：编译期类型内建（sizeof / alignof / offsetof）----
+                // 全部返回 int，具体数值由 codegen 按 target DataLayout 在编译期算出，
+                // 不发射任何运行时指令（零开销）。主要用于手写 C 库绑定时核对内存布局。
+                "sizeof" | "alignof" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：{} 需要 1 个类型实参，形如 {}(T)",
+                                name, name
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    let ty = match &args[0] {
+                        Expr::TypeLit(t) => t.clone(),
+                        _ => {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：{} 的参数必须是类型实参，形如 {}(int)",
+                                    name, name
+                                ),
+                                0, 0,
+                            ))
+                        }
+                    };
+                    // void 在 C 里 sizeof 未定义；Dial 的 Void 内部是 i64，但明确地禁止，
+                    // 避免用户写出依赖实现细节的脆弱代码。
+                    if matches!(ty, Type::Void) {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 的参数不能是 void", name),
+                            0, 0,
+                        ));
+                    }
+                    return Ok(Type::Int);
+                }
+                "offsetof" => {
+                    if args.len() != 2 {
+                        return Err(DialcError::new(
+                            "语义错误：offsetof 需要 2 个参数（类型实参, 字段名），形如 offsetof<Point>(x)",
+                            0, 0,
+                        ));
+                    }
+                    let (ty, field) = match (&args[0], &args[1]) {
+                        (Expr::TypeLit(t), Expr::StringLit(f)) => (t.clone(), f.clone()),
+                        _ => {
+                            return Err(DialcError::new(
+                                "语义错误：offsetof 的参数必须是（类型实参, 字段名），形如 offsetof<Point>(x)",
+                                0, 0,
+                            ))
+                        }
+                    };
+                    let sname = match &ty {
+                        Type::Struct(n) => n.clone(),
+                        _ => {
+                            return Err(DialcError::new(
+                                "语义错误：offsetof 的第一个参数必须是结构体类型（含 extern struct）",
+                                0, 0,
+                            ))
+                        }
+                    };
+                    match structs.get(&sname) {
+                        Some((fields, _)) => {
+                            if !fields.iter().any(|(fnm, _)| fnm == &field) {
+                                return Err(DialcError::new(
+                                    format!(
+                                        "语义错误：结构体 '{}' 没有字段 '{}'",
+                                        sname, field
+                                    ),
+                                    0, 0,
+                                ));
+                            }
+                        }
+                        None => {
+                            return Err(DialcError::new(
+                                format!("语义错误：offsetof 的结构体 '{}' 未定义", sname),
+                                0, 0,
+                            ))
+                        }
+                    }
+                    return Ok(Type::Int);
+                }
                 "args" => {
                     if !args.is_empty() {
                         return Err(DialcError::new("语义错误：args() 不接受参数", 0, 0));
