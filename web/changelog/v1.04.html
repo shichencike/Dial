@@ -253,6 +253,40 @@
     起本地服务器并<strong>故意乱序响应</strong>，6 个 worker 共享单连接、逐条断言
     <code>path == X-Stream</code>（不串台）、<code>conns = 1</code> / <code>streams = 6</code>、
     <code>h2</code> ALPN 协商成功、<code>no-ca rejected = true</code>、404 / 500 全绿。</li>
+<li><strong>浏览器一致性画像（协议层，期 1–4；并入 <code>[v1.04]</code>，编译器版本 <code>1.4.0</code> /
+  <code>STDLIB_ABI 6</code> 均不变）</strong>：让 <code>http</code> 包的 TLS 与 HTTP 行为可对照 Chrome 稳定版
+  Windows/x64 基准逐项对齐，<strong>只做协议层行为一致性，不伪造凭据、不绕验证码、
+  不做批量自动化</strong>。基准与离线比对工具在 <code>tests/pkg/fingerprint/</code>
+  （<code>chrome_windows_x64.json</code> 为仓库内唯一基准，含 ClientHello 解析、内嵌原始
+  record hex、HTTP 行为段与 9 项 <code>exemptions</code> 显式清单）。</li>
+<li><strong>期 1（TLS 指纹）</strong>：mbedTLS 以<strong>外置 patch</strong>（<code>patches/mbedtls-3.6.2-clienthello.patch</code>）
+    重排 ClientHello 字节序 + 包内集中式 <code>dial_clienthello_fp.c</code> 配置；
+    GREASE 用固定常量表（不调 RNG）、cipher / 扩展 / groups / sig_algs / ALPN
+    按 Chrome 144 实测序发射，SNI 双路径（域名走 <code>d</code>，IP 走 <code>i</code>）。<code>ja3</code> / <code>ja4</code>
+    （<code>ja4_a</code> 含 <code>h2</code> 与 ALPN 首项，故 ALPN 双 offer 归期 1 而非期 2）全字段对齐
+    基准。<strong>24 项 pass、0 MISMATCH</strong>，9 项豁免声明（ECH HPKE 加密、证书压缩、
+    <code>br/zstd</code>、ALPS、逐字节一致等，均不做）。</li>
+<li><strong>期 2（HTTP 行为）</strong>：画像数据抽成 H1/H2 共用的<strong>单一数据源</strong>
+    <code>dial_profile.{c,h}</code>（头序 / 头值 / UA / Sec-CH-UA / H2 SETTINGS 六参数 /
+    WINDOW_UPDATE 只写一次），<code>default</code> 保守、<code>chrome</code> 完整。<code>dial_hpack.c</code> 请求侧
+    升级静态表索引 + Huffman（RFC 7541 合规）；<code>dial_http2.c</code> 连接前导补齐
+    <code>preface → SETTINGS → WINDOW_UPDATE → HEADERS</code>。录制器 <code>record_http.py</code> 真实
+    解析 HPACK（从 <code>dial_hpack_tables.h</code> 读码表 + 内置静态表），伪头序 / static_index
+    / huffman 全由解码得出。<strong>修复</strong>：chrome 声明 <code>HEADER_TABLE_SIZE=65536</code> 时服务端
+    发 dynamic table size update，原解码上限写死 4096 误判超限 → 按 RFC 7541 §4.2
+    改为等于本端声明值。<code>compare_fp.py --behavior</code>：<strong>TLS + HTTP 行为 34 项全 pass、
+    0 MISMATCH、0 skip</strong>，9 项豁免声明。</li>
+<li><strong>期 3（profile 一等公民）</strong>：当前画像由进程级全局改为 <strong><code>_Thread_local</code></strong>
+    （每线程独立持有，多线程各自发不同画像请求互不干扰）；新增 <code>.diali</code> 诊断
+    getter <code>dial_http_profile(): string</code> 回读当前线程生效的画像名。<code>check_profile_thread.c</code>
+    断言主线程设 <code>chrome</code>、子线程不设各读到 <code>chrome</code> / <code>default</code>，证明线程局部。</li>
+<li><strong>期 4（W 组步骤 11）</strong>：<code>tests/pkg/use_http_profile.dial</code> 接入 W 组主回归
+    （同组第 11 步，复用既有服务器与已安装包），校验 <code>set_profile</code> + <code>dial_http_profile</code>
+    回读一致，且 chrome 画像真实发出的 <code>User-Agent</code>（含 <code>Chrome/144.0.0.0</code>）、
+    <code>Sec-CH-UA</code> / <code>Sec-Fetch-*</code> 被服务端收到；切回 <code>default</code> 后 UA 回落
+    <code>dial-http/1.1</code> 且不再发 Sec-CH-UA——把「画像确实在主回归里生效」锁进 CI。
+    离线指纹比对（逐字段对齐基准）仍按 <code>tests/pkg/fingerprint/README.md</code> 手动跑，
+    不进 CI（需录制真实 Chrome，且含随机字节，无法离线复现逐字节一致）。</li>
 <li>
 <p><strong>宪法裁决入文档（§37）</strong>：<code>STDLIB_ABI 5 → 6</code>（<code>make_stdlib_pkg.py</code> 默认、
   CI 两处、<code>dialc new</code> 骨架同步，后者改为引用 <code>package::STDLIB_ABI</code> 消除硬编码）；

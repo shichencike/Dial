@@ -3,14 +3,16 @@
 
 只实现 W 组回归需要的那几条路径，每条都对应一个**协议要点**：
 
-| 路径        | 考察点 |
-| ----------- | ------ |
-| /ok         | 200 + 响应体 + 自定义响应头 + Content-Type |
-| /echo       | POST 请求体回显（验证 Content-Length 与请求体拼装） |
-| /notfound   | 404 状态码 |
-| /chunked    | `Transfer-Encoding: chunked` 分块响应（无 Content-Length） |
-| /gzip       | `Content-Encoding: gzip` 压缩响应（验证 zlib 解压） |
-| /multi      | 多个同名/异名响应头（验证按名取值与按序号遍历） |
+| 路径          | 考察点 |
+| ------------- | ------ |
+| /ok           | 200 + 响应体 + 自定义响应头 + Content-Type |
+| /echo         | POST 请求体回显（验证 Content-Length 与请求体拼装） |
+| /notfound     | 404 状态码 |
+| /chunked      | `Transfer-Encoding: chunked` 分块响应（无 Content-Length） |
+| /gzip         | `Content-Encoding: gzip` 压缩响应（验证 zlib 解压） |
+| /multi        | 多个同名/异名响应头（验证按名取值与按序号遍历） |
+| /echo-headers | 把**收到的请求头**原样回显为 JSON，验证客户端画像真实发出的头
+|               | （如 chrome 画像的 User-Agent 含 Chrome、含 sec-ch-ua / sec-fetch-*） |
 
 用法：python3 tests/pkg/http_test_server.py <端口文件>
   监听 127.0.0.1 的随机空闲端口，把端口号写进 <端口文件> 后打印 READY。
@@ -18,6 +20,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import socket
 import sys
 import threading
@@ -71,6 +74,13 @@ class Handler(BaseHTTPRequestHandler):
                 ("X-Two", "2"),
                 ("X-One", "3"),      # 同名头多值：按序号遍历时都要看得到
             ])
+        elif path == "/echo-headers":
+            # 把收到的请求头原样回显为 JSON（键为服务端小写化后的头名），
+            # 用于验证客户端画像真实发出的请求头（chrome 画像的 UA 含 Chrome、
+            # 含 sec-ch-ua / sec-fetch-* 等）。键序不保证，调用方按子串/字段核对。
+            hdrs = {k: v for k, v in self.headers.items()}
+            self._send(200, json.dumps(hdrs).encode("utf-8"),
+                       ctype="application/json")
         else:
             self._send(404, b"unknown path\n")
 

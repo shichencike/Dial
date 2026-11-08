@@ -1,0 +1,48 @@
+// http.dialpkg 端到端用例：浏览器一致性画像（set_profile + 诊断 getter +
+// 真实请求头上 wire）。服务器地址从 DIAL_HTTP_TEST_BASE 取；取不到回落默认端口。
+//
+// 本用例是「浏览器一致性画像」在 W 组主回归里的落点：不光验证 API 契约
+// （set 后 getter 回读一致），更验证 chrome 画像真实发出的请求头能被服务端
+// 收到——UA 含 Chrome、含 sec-ch-ua / sec-fetch-*；切回 default 后 UA 回落
+// dial-http/1.1 且不再发 Sec-CH-UA。离线指纹比对（tests/pkg/fingerprint）负责
+// 逐字段对齐基准，本用例负责「画像确实在主回归里生效」这一底线。
+import "http";
+
+fn echo_headers(base: string): string {
+    var r: HttpResponse = dial_http_get(base + "/echo-headers", "");
+    var body: string = bytes_to_string(dial_http_resp_body(r));
+    dial_http_resp_free(r);
+    return body;
+}
+
+fn main(): int {
+    var base: string = getenv("DIAL_HTTP_TEST_BASE");
+    if (base == "") {
+        base = "http://127.0.0.1:18080";
+    }
+
+    // ---- chrome 画像：getter 回读 + 真实请求头 ----
+    dial_http_set_profile("chrome");
+    print("profile_chrome = ", dial_http_profile());
+
+    var b1: string = echo_headers(base);
+    // 调试用：把回显原文打出来，CI 失败时一眼看到发了什么。
+    print("chrome_echo = ", b1);
+    print("chrome_ua_has_chrome = ", b1.index_of("Chrome/144.0.0.0") >= 0);
+    // 服务端回显保留客户端原始头名大小写（Sec-CH-UA / Sec-Fetch-Site），
+    // 故按原样核对——这也顺带证明 chrome 画像发的就是这些头名。
+    print("chrome_has_sec_ch_ua = ", b1.index_of("Sec-CH-UA") >= 0);
+    print("chrome_has_sec_fetch = ", b1.index_of("Sec-Fetch-Site") >= 0);
+
+    // ---- default 画像：getter 回读 + 真实请求头回落 ----
+    dial_http_set_profile("default");
+    print("profile_default = ", dial_http_profile());
+
+    var b2: string = echo_headers(base);
+    print("default_echo = ", b2);
+    print("default_ua_is_dialhttp = ", b2.index_of("dial-http/1.1") >= 0);
+    // default 画像不发 Sec-CH-UA 系列头。
+    print("default_no_sec_ch_ua = ", b2.index_of("sec-ch-ua") < 0);
+
+    return 0;
+}

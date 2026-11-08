@@ -124,8 +124,12 @@ zig cc -target x86_64-linux-gnu tests/pkg/fingerprint/check_profile_thread.c \
 ```
 
 > 注：指纹录制 / 比对 / HPACK 自校 / 线程局部自校是**离线回放**工具链，不进
-> `tests/run_tests.sh` 的 A→Z 主线（主线由 W 组 http 端到端覆盖）；改动后手动
-> 跑本目录脚本即可，结论写入各期「实测结果」小节。
+> `tests/run_tests.sh` 的 A→Z 主线（需录制真实 Chrome、且含随机字节，无法离线
+> 复现逐字节一致）。但**画像的生效底线**已通过期 4 接入主线：W 组**步骤 11**
+> 跑 `tests/pkg/use_http_profile.dial`，校验 `set_profile` + `dial_http_profile`
+> 回读一致，且 chrome 画像真实发出的 UA（含 `Chrome/144.0.0.0`）/ `Sec-CH-UA` /
+> `Sec-Fetch-*` 被服务端收到、切回 `default` 后回落 `dial-http/1.1`。离线逐字段
+> 比对仍手动跑本目录脚本，结论写入各期「实测结果」小节。
 
 ## 期 1 实测结果（TLS 段）
 

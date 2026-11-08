@@ -237,6 +237,40 @@
     起本地服务器并**故意乱序响应**，6 个 worker 共享单连接、逐条断言
     `path == X-Stream`（不串台）、`conns = 1` / `streams = 6`、
     `h2` ALPN 协商成功、`no-ca rejected = true`、404 / 500 全绿。
+- **浏览器一致性画像（协议层，期 1–4；并入 `[v1.04]`，编译器版本 `1.4.0` /
+  `STDLIB_ABI 6` 均不变）**：让 `http` 包的 TLS 与 HTTP 行为可对照 Chrome 稳定版
+  Windows/x64 基准逐项对齐，**只做协议层行为一致性，不伪造凭据、不绕验证码、
+  不做批量自动化**。基准与离线比对工具在 `tests/pkg/fingerprint/`
+  （`chrome_windows_x64.json` 为仓库内唯一基准，含 ClientHello 解析、内嵌原始
+  record hex、HTTP 行为段与 9 项 `exemptions` 显式清单）。
+  - **期 1（TLS 指纹）**：mbedTLS 以**外置 patch**（`patches/mbedtls-3.6.2-clienthello.patch`）
+    重排 ClientHello 字节序 + 包内集中式 `dial_clienthello_fp.c` 配置；
+    GREASE 用固定常量表（不调 RNG）、cipher / 扩展 / groups / sig_algs / ALPN
+    按 Chrome 144 实测序发射，SNI 双路径（域名走 `d`，IP 走 `i`）。`ja3` / `ja4`
+    （`ja4_a` 含 `h2` 与 ALPN 首项，故 ALPN 双 offer 归期 1 而非期 2）全字段对齐
+    基准。**24 项 pass、0 MISMATCH**，9 项豁免声明（ECH HPKE 加密、证书压缩、
+    `br/zstd`、ALPS、逐字节一致等，均不做）。
+  - **期 2（HTTP 行为）**：画像数据抽成 H1/H2 共用的**单一数据源**
+    `dial_profile.{c,h}`（头序 / 头值 / UA / Sec-CH-UA / H2 SETTINGS 六参数 /
+    WINDOW_UPDATE 只写一次），`default` 保守、`chrome` 完整。`dial_hpack.c` 请求侧
+    升级静态表索引 + Huffman（RFC 7541 合规）；`dial_http2.c` 连接前导补齐
+    `preface → SETTINGS → WINDOW_UPDATE → HEADERS`。录制器 `record_http.py` 真实
+    解析 HPACK（从 `dial_hpack_tables.h` 读码表 + 内置静态表），伪头序 / static_index
+    / huffman 全由解码得出。**修复**：chrome 声明 `HEADER_TABLE_SIZE=65536` 时服务端
+    发 dynamic table size update，原解码上限写死 4096 误判超限 → 按 RFC 7541 §4.2
+    改为等于本端声明值。`compare_fp.py --behavior`：**TLS + HTTP 行为 34 项全 pass、
+    0 MISMATCH、0 skip**，9 项豁免声明。
+  - **期 3（profile 一等公民）**：当前画像由进程级全局改为 **`_Thread_local`**
+    （每线程独立持有，多线程各自发不同画像请求互不干扰）；新增 `.diali` 诊断
+    getter `dial_http_profile(): string` 回读当前线程生效的画像名。`check_profile_thread.c`
+    断言主线程设 `chrome`、子线程不设各读到 `chrome` / `default`，证明线程局部。
+  - **期 4（W 组步骤 11）**：`tests/pkg/use_http_profile.dial` 接入 W 组主回归
+    （同组第 11 步，复用既有服务器与已安装包），校验 `set_profile` + `dial_http_profile`
+    回读一致，且 chrome 画像真实发出的 `User-Agent`（含 `Chrome/144.0.0.0`）、
+    `Sec-CH-UA` / `Sec-Fetch-*` 被服务端收到；切回 `default` 后 UA 回落
+    `dial-http/1.1` 且不再发 Sec-CH-UA——把「画像确实在主回归里生效」锁进 CI。
+    离线指纹比对（逐字段对齐基准）仍按 `tests/pkg/fingerprint/README.md` 手动跑，
+    不进 CI（需录制真实 Chrome，且含随机字节，无法离线复现逐字节一致）。
 - **宪法裁决入文档（§37）**：`STDLIB_ABI 5 → 6`（`make_stdlib_pkg.py` 默认、
   CI 两处、`dialc new` 骨架同步，后者改为引用 `package::STDLIB_ABI` 消除硬编码）；
   术语统一为「绝不引入可变全局状态」；「函数名重载」「闭包」写入**永久否决**；

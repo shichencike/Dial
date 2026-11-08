@@ -1373,6 +1373,28 @@ if [ -n "$PORT" ]; then
     else wbad "W 组：错误路径未按预期失败"; printf '%s\n' "$out" | head -20; fi
 fi
 
+# 11) 浏览器一致性画像：set_profile + 诊断 getter 回读一致，且 chrome 画像真实发出的
+#     请求头被服务端收到（UA 含 Chrome、含 sec-ch-ua / sec-fetch-*）；切回 default 后
+#     UA 回落 dial-http/1.1 且不再发 Sec-CH-UA。复用步骤 3 的服务器与已安装包。
+#     （离线指纹比对 tests/pkg/fingerprint 负责逐字段对齐基准；本步骤锁「画像在主回归里
+#      生效」这一底线，让它随 CI 一起跑。）
+if [ -n "$PORT" ] \
+   && DIAL_HTTP_TEST_BASE="http://127.0.0.1:$PORT" \
+      "$DIALC" build tests/pkg/use_http_profile.dial -o "${TMP}/use_http_profile" >"${TMP}/w_prof.log" 2>&1; then
+    out=$(DIAL_HTTP_TEST_BASE="http://127.0.0.1:$PORT" "${TMP}/use_http_profile" 2>&1)
+    ok=1
+    printf '%s\n' "$out" | grep -qF 'profile_chrome = chrome'       || ok=0
+    printf '%s\n' "$out" | grep -qF 'profile_default = default'     || ok=0
+    printf '%s\n' "$out" | grep -qF 'chrome_ua_has_chrome = true'   || ok=0
+    printf '%s\n' "$out" | grep -qF 'chrome_has_sec_ch_ua = true'   || ok=0
+    printf '%s\n' "$out" | grep -qF 'chrome_has_sec_fetch = true'   || ok=0
+    printf '%s\n' "$out" | grep -qF 'default_ua_is_dialhttp = true' || ok=0
+    printf '%s\n' "$out" | grep -qF 'default_no_sec_ch_ua = true'   || ok=0
+    if [ "$ok" -eq 1 ]; then
+        wpass "浏览器一致性画像：set/getter 回读一致 + chrome UA/Sec-CH-UA 真实上 wire + default 回落"
+    else wbad "W 组：use_http_profile 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
+else wbad "use_http_profile（import \"http\" 画像）编译失败"; tail -8 "${TMP}/w_prof.log"; fi
+
 # 6) 清理：停服务器、卸包（不污染后续测试与用户环境）。
 if [ -n "${SRV_PID:-}" ]; then kill "$SRV_PID" >/dev/null 2>&1 || true; fi
 "$DIALC" uninstall http >/dev/null 2>&1 || true
