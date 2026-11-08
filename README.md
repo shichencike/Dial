@@ -24,7 +24,7 @@ Dial 是一门**静态强类型、显式标注、无 GC** 的编译型语言。�
 只负责把 Dial 源码翻译成 LLVM IR；**所有容器与运行时能力都由 C 语言实现**，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。
 
-本文件是 v0.98 的**规范性文档**：描述的语言行为与 `src/` 中的实现逐条对应，
+本文件是 v1.04 的**规范性文档**：描述的语言行为与 `src/` 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。
 
 ---
@@ -210,7 +210,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 # Linux x86_64 / Termux aarch64（默认始终跟随最新 Release）
 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
 # 需要钉到某个版本时才设置 DIAL_VERSION：
-# DIAL_VERSION=1.3.0 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
+# DIAL_VERSION=1.4.0 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
 ```
 
 ```powershell
@@ -233,23 +233,23 @@ irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.p
 
 ```bash
 # Linux x86_64
-curl -LO https://github.com/shichencike/Dial/releases/download/v0.98/dialc-v0.98-linux-x86_64.zip
-unzip dialc-v0.98-linux-x86_64.zip && cd Dial
+curl -LO https://github.com/shichencike/Dial/releases/download/v1.04/dialc-v1.04-linux-x86_64.zip
+unzip dialc-v1.04-linux-x86_64.zip && cd Dial
 bash install-dial.sh                 # 扫描当前目录及其子目录
 bash install-dial.sh /path/to/pkgs   # 或扫描指定目录
 ```
 
 ```bash
 # Termux aarch64（musl 全静态，包名 slug = termux-aarch64）
-curl -LO https://github.com/shichencike/Dial/releases/download/v0.98/dialc-v0.98-termux-aarch64.zip
-unzip dialc-v0.98-termux-aarch64.zip && cd Dial
+curl -LO https://github.com/shichencike/Dial/releases/download/v1.04/dialc-v1.04-termux-aarch64.zip
+unzip dialc-v1.04-termux-aarch64.zip && cd Dial
 bash install-dial.sh
 ```
 
 ```powershell
 # Windows x64（MinGW）：解压后运行 PowerShell 安装脚本
-curl.exe -LO https://github.com/shichencike/Dial/releases/download/v0.98/dialc-v0.98-windows-x86_64.zip
-Expand-Archive dialc-v0.98-windows-x86_64.zip -DestinationPath .
+curl.exe -LO https://github.com/shichencike/Dial/releases/download/v1.04/dialc-v1.04-windows-x86_64.zip
+Expand-Archive dialc-v1.04-windows-x86_64.zip -DestinationPath .
 powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 ```
 
@@ -263,7 +263,7 @@ powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 | `DIAL_MIRROR_PREFIX` | 镜像前缀（默认 `https://ghproxy.net/`）；置空则只用官方源 |
 | `STDLIB_URL` | 覆盖官方标准库下载地址（镜像 / 自建源） |
 | `DIAL_VSIX_URL` | 覆盖 VS Code 插件下载地址 |
-| `DIAL_VERSION` | 指定配套件版本（默认 `0.98.1`） |
+| `DIAL_VERSION` | 指定配套件版本（默认**空**：跟随最新 Release；钉版本写法如 `DIAL_VERSION=1.4.0`） |
 
 脚本承担两件事（**顺序不能反**）：
 
@@ -304,7 +304,7 @@ dialc lsp
 | `build` | 编译并链接出可执行文件。`--no-link` 只产出 `.o` 不链接 |
 | `run` | 编译后**直接运行**（等价于 build + 执行） |
 | `install` | 安装 `.dialpkg` 包；给 URL 时先下载，再做整包哈希与逐文件 SHA256 校验（见 [§25](#25-包分发与依赖管理生态规划--最终规范)） |
-| `version` / `--version` / `-V` | **打印版本号**并退出，例如 `dialc 0.98.1` |
+| `version` / `--version` / `-V` | **打印版本号**并退出，例如 `dialc 1.4.0` |
 | `lsp` | 启动语言服务器（走 stdio 的 JSON-RPC；**不由人手敲**，见 [§28](#28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化)） |
 
 > **版本号只有一个出处**：`dialc version` 打印的版本直接取自 `Cargo.toml` 的 `version` 字段
@@ -3589,7 +3589,7 @@ fn main() {
 
 | 编辑器 | 接入方式 | 安装包 | 说明 |
 | --- | --- | --- | --- |
-| **VS Code** | 手写 LSP 客户端（无 npm 依赖） | [`editors/vscode/dial-0.98.1.vsix`](editors/vscode/)（`code --install-extension` 侧载） | 免 Node / npm / 联网；能力最全 |
+| **VS Code** | 手写 LSP 客户端（无 npm 依赖） | [`editors/vscode/dial-1.4.0.vsix`](editors/vscode/)（`code --install-extension` 侧载） | 免 Node / npm / 联网；能力最全 |
 | **Neovim** | 内置 LSP 客户端 | [`editors/neovim/`](editors/neovim/)（拷进 `runtimepath` 即可） | 零依赖，不需要 nvim-lspconfig |
 | **Emacs** | 内置 `eglot` | [`editors/emacs/README.md`](editors/emacs/)（init.el 片段） | 不开发插件——eglot 原生连 LSP，加几行配置即可 |
 
@@ -3601,8 +3601,8 @@ fn main() {
 还会**自动下载并安装 VS Code 插件**（从 Release 取 `dial-<版本>.vsix`，再用 `code --install-extension` 装上），
 不必再自己去 Release 页翻资产、手动侧载。
 
-- 版本只有一个来源：`DIAL_VERSION`（默认 `0.98.1`）——Release 标签（`v0.98.1`）与资产文件名
-  （`dial-0.98.1.vsix`）都由它推导，不会三处各说各话。
+- 版本只有一个来源：`DIAL_VERSION`（默认**空**：跟随最新 Release；钉版本写法如 `DIAL_VERSION=1.4.0`）——Release 标签（`v1.04`）与资产文件名
+  （`dial-1.4.0.vsix`）都由它推导，不会三处各说各话。
 - **没装 VS Code / 离线时只告警、不阻断安装**：编译器本体与包安装不受影响。
 - **不加 `--force`**：用户若已装了更新版本的插件，不该在「一键安装」里被悄悄降级。
 - 下载地址可用 `DIAL_VSIX_URL` 覆盖（自建镜像 / 网络受限时用）。
