@@ -12,7 +12,7 @@
 #   python3 tools/make_stdlib_pkg.py \
 #       --diali stdlib/stdlib.diali \
 #       --out  dist-stdlib/stdlib.dialpkg \
-#       --version 1.4.0 --abi 6 \
+#       --version 1.10.0 --abi 6 \   # --version 可省略：默认从 Cargo.toml 读取
 #       x86_64-linux-gnu:dist-stdlib/x86_64-linux-gnu/libdial_std.a \
 #       x86_64-pc-windows-gnu:dist-stdlib/x86_64-pc-windows-gnu/libdial_std.a \
 #       aarch64-unknown-linux-musl:dist-stdlib/aarch64-unknown-linux-musl/libdial_std.a
@@ -21,9 +21,26 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def cargo_version() -> str:
+    """包版本跟随 Cargo.toml（全仓唯一真相），避免每次发版手工改默认值。"""
+    m = re.search(
+        r'^version\s*=\s*"([0-9]+(?:\.[0-9]+)*)"',
+        (ROOT / "Cargo.toml").read_text(encoding="utf-8"),
+        re.M,
+    )
+    if not m:
+        raise SystemExit("无法从 Cargo.toml 解析版本号")
+    return m.group(1)
+
 
 PKG_NAME = "stdlib"
 IFACE_NAME = "stdlib.diali"
@@ -42,7 +59,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="组装 stdlib.dialpkg")
     ap.add_argument("--diali", required=True, help="接口签名文件 .diali")
     ap.add_argument("--out", required=True, help="输出 .dialpkg 路径")
-    ap.add_argument("--version", default="1.4.0", help="包版本号（仅展示/核对）")
+    ap.add_argument("--version", default=cargo_version(), help="包版本号（默认取 Cargo.toml）")
     ap.add_argument("--abi", type=int, default=6, help="ABI 版本号（兼容性判据）")
     ap.add_argument(
         "libs",

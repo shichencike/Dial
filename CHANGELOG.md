@@ -20,6 +20,59 @@
 
 ---
 
+## [v1.10] — 2026-11-08
+
+**主题：底层原语补齐，首个带发布标签的正式分版。** 详见
+[README §33](README.md#33-v104ffi外部函数接口)、§33.13 / §33.14。
+
+> **版本与发布标签映射（防漂移，务必先读）**：本次发布打的 **Git 标签是 `v1.1`**
+> （用户指定的简短里程碑名），它对应的**文档版本号是 `v1.10`**、`Cargo.toml` 存储
+> `1.10.0`、`dialc --version` 输出 `dialc 1.10.0`。按 [README §23](README.md#23-版本号规则)
+> 规则，主版本 ≥ 1 时次版本补零到两位，`1.10.0` 因此显示为 `v1.10`——**`v1.1` 只是标签名，
+> 不是版本号**，资产文件名一律以版本号为准（`dialc-v1.10-*.zip` / `dial-1.10.0.vsix`），
+> 下载地址走 `releases/latest/download/` 重定向，不硬编码标签。钉版本安装时
+> `DIAL_VERSION` 填标签去掉 `v` 的部分，即 `1.1`。
+>
+> 从 `[v1.04]`（`1.4.0`）跳到 `[v1.10]`（`1.10.0`）系**用户明确要求跳版**，符合 §23 第 3 条
+> 「除非用户明确要求跳版」的例外；数值 `1.10 > 1.04`，不违反第 4 条「严格递增、绝不倒流」。
+> `[v1.04]` 及其后续各轮增补（§33–§37）均随本次 `v1.1` 标签一并推送 `origin/main` 并发布；
+> 历史章节里「本轮只做本地提交」是**当时**的交付约定记录，不代表最终状态。
+>
+> **交付状态**：已推送 `origin/main`、已打并推送标签 `v1.1`、由 `v*` CI 规则触发 Release；
+> `v1.0` 里程碑标签不动。`STDLIB_ABI` 保持 `6`（本版不新增标准库导出符号）。
+
+### Added
+
+- **`@asm<T>(...)` / `@asm_intel<T>(...)`：内嵌汇编**（见
+  [README §33.13](README.md#3313-asmt内嵌汇编)）：ATT / Intel 双方言、`sideeffects=true`
+  防优化、C ABI 标量宽度适配，模板与约束必须字符串字面量且首项为输出约束。
+- **`simd<T, N>`：原生向量类型**（见
+  [README §33.14](README.md#3314-simdt-n原生向量类型)）：编译期定长 LLVM `<N x T>`，
+  广播 / 逐 lane 构造、逐元素算术比较位运算、无符号 `byte` 比较、越界 Fail-Fast。
+- `@export` / `packed struct` / `volatile rawptr<T>` / `bitcast<T>(x)` /
+  `sizeof<T>()` / `alignof<T>()` / `offsetof<T>(field)` 等 FFI 导出四件套与编译期类型内建
+  （并入 `[v1.04]` 的增补，随本版一并发布）。
+
+### Changed
+
+- 编译器版本 `1.4.0 → 1.10.0`（显示 `v1.04 → v1.10`）；`Cargo.lock`、
+  VS Code 扩展 `package.json`、`dial-<版本>.vsix` 命名、`make_stdlib_pkg.py` 默认版本
+  （改为跟随 `Cargo.toml`，不再硬编码）、`ARCHITECTURE.md` 配套件说明全部同步。
+- **修正官网下载链接漂移**：首页与 README 手动解压示例此前写
+  `releases/download/v1.4.0/dialc-v1.4.0-*.zip`，既用错标签又用错资产名
+  （`package_release.sh` 实际产出 `dialc-v1.4-*.zip`），指向不存在的资产；现统一改为
+  `releases/latest/download/dialc-v1.10-*.zip`，并让 `check_version.py` 按同一
+  「PATCH=0 取主.次」短式校验，杜绝再次漂移。
+
+### 测试与交付
+
+- `bash tests/run_tests.sh` **A–Z 二十六组全套通过（499 ✅ / 0 ❌）**，含 P 组 2d
+  底层原语 IR 形态断言（`asm sideeffect` / `inteldialect` / `add <4 x i64>`）；
+  `tools/cve_check.py` 8/8；语言能力审计 `TOTAL=38 PASS=38 FAIL=0`；
+  `check_version` / `check_links` 全通过；`cargo check` 零警告。
+
+---
+
 ## [v1.04] — 2026-11-06
 
 **主题：FFI 成为语言一等公民。** 详见 [README §33](README.md#33-v104ffi外部函数接口)。

@@ -1,8 +1,18 @@
 {
   "source": "CHANGELOG.md",
   "index": "../changelog.html",
-  "count": 31,
+  "count": 32,
   "versions": [
+    {
+      "id": "v1.10",
+      "label": "v1.10",
+      "date": "2026-11-08",
+      "note": "2026-11-08",
+      "topic": "底层原语补齐（@asm / simd）+ 首个发布标签 v1.1",
+      "file": "v1.10.html",
+      "newer": null,
+      "older": "v1.04"
+    },
     {
       "id": "v1.04",
       "label": "v1.04",
@@ -10,7 +20,7 @@
       "note": "2026-11-06",
       "topic": "FFI 成为语言一等公民",
       "file": "v1.04.html",
-      "newer": null,
+      "newer": "v1.10",
       "older": "v1-0-milestone"
     },
     {

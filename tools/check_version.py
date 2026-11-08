@@ -59,6 +59,11 @@ def cargo_version() -> tuple[str, str]:
 
 def main() -> None:
     ver, ver_full = cargo_version()
+    # 发布包资产名用短版本，与 tools/package_release.sh / build_web.py 完全同规则：
+    # PATCH == 0 时取 MAJOR.MINOR（1.10.0 -> 1.10），补丁发布保留完整三段。
+    parts = ver_full.split(".")
+    ver_short = (ver_full if len(parts) >= 3 and parts[2] != "0"
+                 else f"{parts[0]}.{parts[1]}" if len(parts) >= 2 else ver_full)
     problems: list[str] = []
 
     def check(label: str, ok: bool, detail: str = "") -> None:
@@ -94,10 +99,11 @@ def main() -> None:
         m = re.search(r"<span><b>(v[0-9.]+)</b> 当前版本</span>", idx)
         check("web/index.html KPI 的版本号", bool(m) and m.group(1) == ver,
               f"是 {m.group(1) if m else '未找到'}，应为 {ver}")
-        # 首页的下载链接应指向当前版本的三平台分包。
-        check("web/index.html 下载链接指向当前版本",
-              f"dialc-v{ver_full}-linux-x86_64.zip" in idx,
-              f"未找到 dialc-v{ver_full}-linux-x86_64.zip")
+        # 首页的下载链接应指向当前版本的三平台分包，资产名按短版本推导，
+        # 且走 releases/latest/download/ 重定向（不硬编码 tag）。
+        want_zip = f"dialc-v{ver_short}-linux-x86_64.zip"
+        check("web/index.html 下载链接指向当前版本", want_zip in idx,
+              f"未找到 {want_zip}")
         # 首页不该再提供单包名 `dialc-v<版本>.zip`——三平台分包后已无此资产。
         # （**只查首页**：changelog 里的旧包名是**历史发布说明**，那一期确实叫这名字。）
         stale = re.findall(r"dialc-v[0-9.]+\.zip", idx)

@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v1.04
+# dialc — Dial 语言编译器 v1.10
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -24,7 +24,7 @@ Dial 是一门**静态强类型、显式标注、无 GC** 的编译型语言。�
 只负责把 Dial 源码翻译成 LLVM IR；**所有容器与运行时能力都由 C 语言实现**，
 Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用。
 
-本文件是 v1.04 的**规范性文档**：描述的语言行为与 `src/` 中的实现逐条对应，
+本文件是 v1.10 的**规范性文档**：描述的语言行为与 `src/` 中的实现逐条对应，
 不描述任何尚未实现的特性。凡文档中未出现的写法，即为不支持。
 
 ---
@@ -210,7 +210,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 # Linux x86_64 / Termux aarch64（默认始终跟随最新 Release）
 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
 # 需要钉到某个版本时才设置 DIAL_VERSION：
-# DIAL_VERSION=1.4.0 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
+# DIAL_VERSION=1.1 curl -fsSL https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.sh | bash
 ```
 
 ```powershell
@@ -221,7 +221,7 @@ irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.p
 > **关于 URL 稳定性与「零硬编码」**：这两条命令取的是 **`main` 分支上 `tools/` 里的安装脚本**（直出文件，脚本本身不走任何重定向）。脚本运行时通过 GitHub API 读取**最新 Release 的真实资产清单**，再用
 > `https://github.com/shichencike/Dial/releases/latest/download/<资产名>` 下载——版本、标签、资产名**都不写死在脚本里**，发新版后无需改脚本即可自动跟上。
 >
-> 之所以仍需解析资产名：GitHub 的 `latest/download/` 要求**精确文件名**，而本项目的 zip / vsix 名字带版本号（`dialc-v1.3-linux-x86_64.zip`、`dial-1.3.0.vsix`），靠重定向本身推不出来；脚本按平台 slug 与扩展名从清单里挑，`stdlib.dialpkg` 名字固定、且现在与 zip / vsix 挂在**同一个 `v*` Release 页面**，因此同样能被 latest 找到。
+> 之所以仍需解析资产名：GitHub 的 `latest/download/` 要求**精确文件名**，而本项目的 zip / vsix 名字带版本号（`dialc-v1.10-linux-x86_64.zip`、`dial-1.10.0.vsix`），靠重定向本身推不出来；脚本按平台 slug 与扩展名从清单里挑，`stdlib.dialpkg` 名字固定、且现在与 zip / vsix 挂在**同一个 `v*` Release 页面**，因此同样能被 latest 找到。
 >
 > 需要复现旧环境或离线时，用 `DIAL_VERSION`（钉编译器版本）、`STDLIB_RELEASE`（钉旧 `stdlib-v*` 通道）、`STDLIB_URL` / `DIAL_VSIX_URL`（完全覆盖地址）即可；镜像优先 + 官方回退 + 失败原因可见的行为不变。安装脚本本身也随每个发布包一起分发。
 >
@@ -233,23 +233,23 @@ irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.p
 
 ```bash
 # Linux x86_64
-curl -LO https://github.com/shichencike/Dial/releases/download/v1.04/dialc-v1.04-linux-x86_64.zip
-unzip dialc-v1.04-linux-x86_64.zip && cd Dial
+curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v1.10-linux-x86_64.zip
+unzip dialc-v1.10-linux-x86_64.zip && cd Dial
 bash install-dial.sh                 # 扫描当前目录及其子目录
 bash install-dial.sh /path/to/pkgs   # 或扫描指定目录
 ```
 
 ```bash
 # Termux aarch64（musl 全静态，包名 slug = termux-aarch64）
-curl -LO https://github.com/shichencike/Dial/releases/download/v1.04/dialc-v1.04-termux-aarch64.zip
-unzip dialc-v1.04-termux-aarch64.zip && cd Dial
+curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v1.10-termux-aarch64.zip
+unzip dialc-v1.10-termux-aarch64.zip && cd Dial
 bash install-dial.sh
 ```
 
 ```powershell
 # Windows x64（MinGW）：解压后运行 PowerShell 安装脚本
-curl.exe -LO https://github.com/shichencike/Dial/releases/download/v1.04/dialc-v1.04-windows-x86_64.zip
-Expand-Archive dialc-v1.04-windows-x86_64.zip -DestinationPath .
+curl.exe -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v1.10-windows-x86_64.zip
+Expand-Archive dialc-v1.10-windows-x86_64.zip -DestinationPath .
 powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 ```
 
@@ -263,7 +263,7 @@ powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 | `DIAL_MIRROR_PREFIX` | 镜像前缀（默认 `https://ghproxy.net/`）；置空则只用官方源 |
 | `STDLIB_URL` | 覆盖官方标准库下载地址（镜像 / 自建源） |
 | `DIAL_VSIX_URL` | 覆盖 VS Code 插件下载地址 |
-| `DIAL_VERSION` | 指定配套件版本（默认**空**：跟随最新 Release；钉版本写法如 `DIAL_VERSION=1.4.0`） |
+| `DIAL_VERSION` | 指定配套件版本（默认**空**：跟随最新 Release；钉版本写法如 `DIAL_VERSION=1.1`，对应发布标签 `v1.1`） |
 
 脚本承担两件事（**顺序不能反**）：
 
@@ -304,7 +304,7 @@ dialc lsp
 | `build` | 编译并链接出可执行文件。`--no-link` 只产出 `.o` 不链接 |
 | `run` | 编译后**直接运行**（等价于 build + 执行） |
 | `install` | 安装 `.dialpkg` 包；给 URL 时先下载，再做整包哈希与逐文件 SHA256 校验（见 [§25](#25-包分发与依赖管理生态规划--最终规范)） |
-| `version` / `--version` / `-V` | **打印版本号**并退出，例如 `dialc 1.4.0` |
+| `version` / `--version` / `-V` | **打印版本号**并退出，例如 `dialc 1.10.0` |
 | `lsp` | 启动语言服务器（走 stdio 的 JSON-RPC；**不由人手敲**，见 [§28](#28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化)） |
 
 > **版本号只有一个出处**：`dialc version` 打印的版本直接取自 `Cargo.toml` 的 `version` 字段
@@ -438,7 +438,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 
 > `char` 是 v0.92 引入的单字符类型：**一个 Unicode 码点**，底层与 `int` 同为 `i64`，
 > 但类型独立——不参与算术，只可比较或经 `char_to_int` / `int_to_char` 显式转换
-> （见 [§5.1](#51-基本类型) 与 [§17.2](#172-尚未实现的能力截至-v104)）。
+> （见 [§5.1](#51-基本类型) 与 [§17.2](#172-尚未实现的能力截至-v110)）。
 
 > `try` / `catch` / `throw` 是 v0.7 引入的可恢复异常关键字（见 [§26](#26-可恢复异常trycatchthrow)）。
 > 注意 **`error` 不是关键字**——它是内建构造函数名（与 `open` / `print` 同类），写作 `Error("...")`。
@@ -1598,7 +1598,7 @@ print("");        // -> Hi
 | --- | --- |
 | 整数溢出 | 按 i64 二进制补码回绕（Debug 等级亦不检查） |
 
-### 17.2 尚未实现的能力（截至 v1.04）
+### 17.2 尚未实现的能力（截至 v1.10）
 
 > 已落地：`Map`（int → int，ARC 管理）、`read_line()`、短路求值、零隐式转换铁律、
 > `let` + 原地修改方法（push/set/put）的接收者约束、`else if` 语法糖、`for` 范围循环、`break` / `continue`、
@@ -2049,6 +2049,13 @@ Dial 目前处于 v0.x 快速演进阶段。版本号采用**最多两位小数*
    > **v1.00 里程碑**：用户明确要求从 `v0.99.1` 直接跳到 1.00 里程碑。Cargo 的 semver
    > 不允许前导零（`1.00.0` 非法），因此 `Cargo.toml` 存 `1.0.0`、对外统一显示 **`v1.00`**
    > （`tools/check_version.py` 与 `tools/build_web.py` 在主版本 ≥ 1 时把次版本补零到两位）。
+   >
+   > **v1.10 跳版与发布标签**：用户明确要求以 `v1.1` 作为发布标签，其对应版本号是
+   > **`v1.10`**（`Cargo.toml` 存 `1.10.0`）。`v1.1` 只是**标签名**、不是版本号；
+   > 资产名一律按版本号推导（`dialc-v1.10-*.zip` / `dial-1.10.0.vsix`），下载地址走
+   > `releases/latest/download/` 重定向，不硬编码标签。从 `v1.04` 跳到 `v1.10`
+   > 属本条「用户明确要求跳版」的例外，数值 `1.10 > 1.04` 不倒流；完整映射与交付清单
+   > 见 CHANGELOG 的 `[v1.10]` 段。
 4. **版本号必须严格按时间递增，绝不许倒流**：后发版本的日期不得早于先前版本。
    CHANGELOG 中一旦出现日期倒流（例如 `v0.4` 的日期晚于 `v0.5`），即视为文档缺陷，必须当场修正。
 5. **每档一次完整交付**：每一个版本号都对应一次完整交付——代码实现 + 端到端测试（A/B/D/E/C 全绿）
@@ -2665,7 +2672,7 @@ $ dialc build main.dial -o main
 > JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 > **[ARCHITECTURE.md《Dial 标准库与包分发最终规范》](ARCHITECTURE.md)**。
 > 规范一旦在真实包上落地，将同步更新本章、ARCHITECTURE.md 与 [CHANGELOG.md](CHANGELOG.md)；
-> 在此之前，`import` 仍按 [§17.2](#172-尚未实现的能力截至-v104) 视为**不支持**。
+> 在此之前，`import` 仍按 [§17.2](#172-尚未实现的能力截至-v110) 视为**不支持**。
 
 ---
 
@@ -3589,7 +3596,7 @@ fn main() {
 
 | 编辑器 | 接入方式 | 安装包 | 说明 |
 | --- | --- | --- | --- |
-| **VS Code** | 手写 LSP 客户端（无 npm 依赖） | [`editors/vscode/dial-1.4.0.vsix`](editors/vscode/)（`code --install-extension` 侧载） | 免 Node / npm / 联网；能力最全 |
+| **VS Code** | 手写 LSP 客户端（无 npm 依赖） | [`editors/vscode/dial-1.10.0.vsix`](editors/vscode/)（`code --install-extension` 侧载） | 免 Node / npm / 联网；能力最全 |
 | **Neovim** | 内置 LSP 客户端 | [`editors/neovim/`](editors/neovim/)（拷进 `runtimepath` 即可） | 零依赖，不需要 nvim-lspconfig |
 | **Emacs** | 内置 `eglot` | [`editors/emacs/README.md`](editors/emacs/)（init.el 片段） | 不开发插件——eglot 原生连 LSP，加几行配置即可 |
 
@@ -3601,8 +3608,8 @@ fn main() {
 还会**自动下载并安装 VS Code 插件**（从 Release 取 `dial-<版本>.vsix`，再用 `code --install-extension` 装上），
 不必再自己去 Release 页翻资产、手动侧载。
 
-- 版本只有一个来源：`DIAL_VERSION`（默认**空**：跟随最新 Release；钉版本写法如 `DIAL_VERSION=1.4.0`）——Release 标签（`v1.04`）与资产文件名
-  （`dial-1.4.0.vsix`）都由它推导，不会三处各说各话。
+- 版本只有一个来源：`DIAL_VERSION`（默认**空**：跟随最新 Release；钉版本写法如 `DIAL_VERSION=1.1`，对应发布标签 `v1.1`）——Release 标签（`v1.1`）与资产文件名
+  （`dial-1.10.0.vsix`）都由它推导，不会三处各说各话。
 - **没装 VS Code / 离线时只告警、不阻断安装**：编译器本体与包安装不受影响。
 - **不加 `--force`**：用户若已装了更新版本的插件，不该在「一键安装」里被悄悄降级。
 - 下载地址可用 `DIAL_VSIX_URL` 覆盖（自建镜像 / 网络受限时用）。
@@ -4785,9 +4792,10 @@ SSE / AVX / NEON。
 - `bash tests/run_tests.sh` **A–Z 二十六组全套通过（499 ✅ / 0 ❌）**，
   `tools/cve_check.py` 8/8、三平台 `zig cc` 编译通过。
 
-> **本轮交付范围**：FFI 导出四件套等 v1.04 主体已同步至 `origin/main`（2026-11-08），
-> **未打 tag、未发 Release**；`@asm` / `simd<T, N>` 两项增补按约定只做**本地提交**，
-> 待后续同步。`v1.0` 里程碑标签已在 `[v1.03]` 之后打并推送，本版不影响它。
+> **本轮交付范围**：代码已推送 `origin/main`，并打**发布标签 `v1.1`**（对应版本号
+> `v1.10` / `Cargo.toml 1.10.0`，映射见 §23 与 CHANGELOG `[v1.10]` 段），由 `v*` CI 规则
+> 触发三平台 Release；**`v1.0` 里程碑标签不受影响**。`[v1.04]` 及其后续增补
+> （含 `@asm` / `simd<T, N>`）均随本次发布一并交付。
 
 
 ---
@@ -5066,7 +5074,7 @@ $1 = 42                                  # ← 不是 rdi，是 Dial 源码里�
 
 | DWARF 结构 | 来源 | 效果 |
 | --- | --- | --- |
-| `DW_TAG_compile_unit` | `module.create_debug_info_builder`（`DWARFSourceLanguage::C`、`DWARFEmissionKind::Full`、producer `dialc 1.4.0`） | GDB 识别为一份标准编译单元 |
+| `DW_TAG_compile_unit` | `module.create_debug_info_builder`（`DWARFSourceLanguage::C`、`DWARFEmissionKind::Full`、producer `dialc <版本>`，取自 `CARGO_PKG_VERSION` 随发版自动更新） | GDB 识别为一份标准编译单元 |
 | `DW_TAG_subprogram` | 每个 `Func`，行号取 `Func.line` | `break main`、`bt` 显示函数名 |
 | `DW_TAG_formal_parameter` | 函数形参，序号从 1 起 | `info args` / `print a` |
 | `DW_TAG_variable` + `llvm.dbg.declare` | `Stmt::VarDecl` 的栈槽 | `print counter` |

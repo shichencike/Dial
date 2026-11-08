@@ -68,6 +68,22 @@ def current_version() -> tuple[str, str]:
 
 VERSION, VERSION_FULL = current_version()
 
+
+def short_version(full: str) -> str:
+    """发布包资产名里的短版本，与 tools/package_release.sh 完全同规则。
+
+    PATCH == 0 时取 MAJOR.MINOR（如 1.10.0 -> 1.10），补丁发布保留完整三段。
+    CI 产出的 zip 就是 dialc-v<SHORT>-<slug>.zip，官网下载链接必须与它对齐，
+    否则会指向不存在的资产（v1.04 就漂过：官网写 dialc-v1.4.0-*，实际是 dialc-v1.4-*）。
+    """
+    parts = full.split(".")
+    if len(parts) >= 3 and parts[2] != "0":
+        return full
+    return f"{parts[0]}.{parts[1]}" if len(parts) >= 2 else full
+
+
+VERSION_SHORT = short_version(VERSION_FULL)
+
 try:
     import markdown  # noqa: E402
 except ImportError:  # pragma: no cover
@@ -339,6 +355,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
 # ---------------------------------------------------------------------------
 
 TOPICS = {
+    "v1.10": "底层原语补齐（@asm / simd）+ 首个发布标签 v1.1",
     "v1.04": "FFI 成为语言一等公民",
     "v1-0-milestone": "v1.0 里程碑达成的分版记录（v1.00 ~ v1.03）",
     "ci-fix-v1-0-retag": "修复红色 CI 作业并重打 v1.0 标签",
@@ -650,7 +667,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 # 编译并运行一个 Dial 程序
 ./target/release/dialc run examples/hello.dial
 
-# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装等十三组）
+# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装等A–Z 二十六组）
 ./tests/run_tests.sh</code></pre>
   <h2>最小示例</h2>
   <pre><code>fn main(): int {{
@@ -659,10 +676,10 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
     return 0;
 }}</code></pre>
   <p class="muted" style="text-align:center">
-    下载发布包：<a class="ext" href="https://github.com/shichencike/Dial/releases/download/v{VERSION_FULL}/dialc-v{VERSION_FULL}-linux-x86_64.zip">dialc-v{VERSION_FULL}-linux-x86_64.zip</a>
+    下载发布包：<a class="ext" href="https://github.com/shichencike/Dial/releases/latest/download/dialc-v{VERSION_SHORT}-linux-x86_64.zip">dialc-v{VERSION_SHORT}-linux-x86_64.zip</a>
     （Windows / Termux 见 <a class="ext" href="https://github.com/shichencike/Dial/releases">Releases</a>；或自行 clone 仓库后构建）<br>
     发布包由 <a class="ext" href="https://github.com/shichencike/Dial/actions/workflows/ci.yml" target="_blank" rel="noopener">GitHub Actions</a>
-    自动构建：装 LLVM 18 → 编译 → 跑全部十三组端到端测试 → 打包上传 Release。
+    自动构建：装 LLVM 18 → 编译 → 跑全部A–Z 二十六组端到端测试 → 打包上传 Release。
   </p>
 </section>
 {FOOTER}
