@@ -117,6 +117,11 @@ for pair in "${TARGETS[@]}"; do
         -I "$PKG/src" \
         "${CFLAGS_COMMON[@]}" "${FP_PREFIX[@]}" -o "$work/dial_clienthello_fp.o"
 
+    # 浏览器一致性画像单一数据源（H1/H2 共用；纯常量表，无外部依赖）。
+    zig cc -target "$t" -c "$PKG/src/dial_profile.c" \
+        -I "$PKG/src" \
+        "${CFLAGS_COMMON[@]}" "${FP_PREFIX[@]}" -o "$work/dial_profile.o"
+
     # 2) zlib 核心（未打补丁，仍从 third_party/ 直接编译）
     for f in "${ZLIB_SRCS[@]}"; do
         zig cc -target "$t" -c "$TP/zlib/$f" -I "$TP/zlib" \

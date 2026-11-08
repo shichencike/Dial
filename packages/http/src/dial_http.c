@@ -22,6 +22,7 @@
 #include "dial_bytes.h"
 #include "zlib.h"
 #include "dial_tls.h"
+#include "dial_profile.h"
 #include <stdint.h>
 
 #ifdef _WIN32
@@ -105,49 +106,22 @@ DialString dial_http_last_tls_alpn(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 客户端画像（兼容性配置，非规避引擎）                                */
+/* 客户端画像（协议层行为一致性，非规避引擎）                          */
 /* ------------------------------------------------------------------ */
 /*
- * 通用客户端画像：只控制「请求头排序」与「TLS ALPN/UA」这类兼容参数，
- * 用途是让某些只认浏览器客户端的 API 能正常互通——**不做任何以“绕过
- * 服务器限制 / 欺骗识别”为目标的绕检测逻辑**。QUIC 的 Connection ID 迁移
- * 等协议能力后续按 RFC 实现为正常能力，不固化为规避工具。
+ * 画像数据已抽到 dial_profile.c 作为 H1/H2 共用的单一数据源：头序、头值、
+ * UA、Sec-CH-UA、H2 SETTINGS / WINDOW_UPDATE 只写一次。本文件只负责按表
+ * 把 HTTP/1.1 请求头原样拼出去。
+ *
+ * 用途是让协议层行为与浏览器一致（头序 / 头值 / ALPN / TLS 指纹），
+ * **不做任何以“绕过服务器限制 / 欺骗识别”为目标的绕检测逻辑**，
+ * 不伪造凭据、不绕验证码、不做批量自动化。
+ *
+ * name 是 DialString 句柄（Dial `string` 参数跨 FFI 传的是句柄，不是文本
+ * 指针），须 dial_string_cstr 取文本。
  */
-typedef struct {
-    const char *name;
-    const char *ua;
-    const char *const *order;   /* 内建头按此顺序发射；Host 始终最前 */
-    int         norder;
-} dh_profile;
-
-/* 默认画像：贴近现代浏览器的头序与 UA（兼容性，不是“伪装成某浏览器”）。 */
-static const char *k_default_order[] = {
-    "Host", "User-Agent", "Accept", "Accept-Language",
-    "Accept-Encoding", "Connection", NULL
-};
-static const dh_profile k_default_profile = {
-    "default", "dial-http/1.1", k_default_order, 6
-};
-/* chrome 风格：仅作为可切换的兼容画像之一。 */
-static const char *k_chrome_order[] = {
-    "Host", "User-Agent", "Accept", "Accept-Language",
-    "Accept-Encoding", "Connection", NULL
-};
-static const dh_profile k_chrome_profile = {
-    "chrome",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    k_chrome_order, 6
-};
-static const dh_profile *g_profile = &k_default_profile;
-
-/* name 是 DialString 句柄（Dial `string` 参数跨 FFI 传的是句柄，不是文本指针），
- * 须 dial_string_cstr 取文本。 */
 void dial_http_set_profile(DialString name) {
-    if (!name) { g_profile = &k_default_profile; return; }
-    const char *s = dial_string_cstr(name);
-    if (s && strcmp(s, "chrome") == 0) g_profile = &k_chrome_profile;
-    else g_profile = &k_default_profile;
+    dh_profile_set(name ? dial_string_cstr(name) : NULL);
 }
 
 /* 受信 CA 路径（自定义）：设为非空时优先用它（内网 / 私有 CA 场景）。
@@ -1202,28 +1176,20 @@ static DialHttpResponse *dh_request(const char *method, const char *url,
     dh_buf_puts(&req, " ");
     dh_buf_puts(&req, u.path);
     dh_buf_puts(&req, " HTTP/1.1\r\n");
-    /* Host 始终最前（必填，且必须精确等于 URL 主机） */
-    dh_buf_puts(&req, "Host: ");
-    dh_buf_puts(&req, u.hostport);
-    dh_buf_puts(&req, "\r\n");
-    /* 按当前画像的头序发射内建头（Host 已发，跳过） */
-    for (int i = 0; i < g_profile->norder; i++) {
-        const char *h = g_profile->order[i];
-        if (strcmp(h, "Host") == 0) continue;
-        if (strcmp(h, "User-Agent") == 0) {
-            dh_buf_puts(&req, "User-Agent: ");
-            dh_buf_puts(&req, g_profile->ua);
-            dh_buf_puts(&req, "\r\n");
-        } else if (strcmp(h, "Accept") == 0) {
-            dh_buf_puts(&req, "Accept: */*\r\n");
-        } else if (strcmp(h, "Accept-Language") == 0) {
-            dh_buf_puts(&req, "Accept-Language: en-US,en;q=0.9\r\n");
-        } else if (strcmp(h, "Accept-Encoding") == 0) {
-            dh_buf_puts(&req, "Accept-Encoding: gzip, deflate\r\n");
-        } else if (strcmp(h, "Connection") == 0) {
-            /* keep-alive：长连接复用（见末尾 dh_pool_put），不再发 close */
-            dh_buf_puts(&req, "Connection: keep-alive\r\n");
-        }
+    /* 按当前画像的头表原样发射内建头。表即头序：Chrome 画像下逐字对齐基准
+     * header_order（14 项），Host 作为第一项取 URL 的 host[:port]；default
+     * 画像沿用原有 6 头。H1 头名大小写敏感，绝不在此处做规范化。 */
+    const dh_profile *prof = dh_profile_current();
+    for (int i = 0; i < prof->nheaders; i++) {
+        const dh_profile_header *h = &prof->headers[i];
+        if (!h->h1_name) continue;
+        const char *v = h->value ? h->value
+                                : dh_profile_dynamic(prof, h->dyn_kind, u.hostport);
+        if (!v || !*v) continue;
+        dh_buf_puts(&req, h->h1_name);
+        dh_buf_puts(&req, ": ");
+        dh_buf_puts(&req, v);
+        dh_buf_puts(&req, "\r\n");
     }
     if (content_type && *content_type) {
         dh_buf_puts(&req, "Content-Type: ");

@@ -16,6 +16,7 @@
 #include "dial_hpack.h"
 #include "dial_tls.h"
 #include "dial_string.h"
+#include "dial_profile.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -477,8 +478,12 @@ static void h2_dispatch(DialH2Session *s, uint8_t type, uint8_t flags,
                 uint16_t id = (uint16_t)((pl[off] << 8) | pl[off + 1]);
                 uint32_t val = ((uint32_t)pl[off + 2] << 24) | ((uint32_t)pl[off + 3] << 16) |
                                ((uint32_t)pl[off + 4] << 8) | (uint32_t)pl[off + 5];
-                if (id == 0x1) s->hpack.max_table_size = val;       /* HEADER_TABLE_SIZE */
-                else if (id == 0x4) s->send_window = (int64_t)val;  /* INITIAL_WINDOW_SIZE */
+                /* 服务端 SETTINGS_HEADER_TABLE_SIZE(id=1) 约束的是**本端编码**侧
+                 * 动态表，而本端请求编码一律 without indexing、不使用动态表，
+                 * 故不覆盖 s->hpack.max_table_size（那是解码上限，只由本端自己
+                 * 在 connect 时按声明值设定）。INITIAL_WINDOW_SIZE/MAX_FRAME_SIZE
+                 * 才影响本端发送行为。 */
+                if (id == 0x4) s->send_window = (int64_t)val;       /* INITIAL_WINDOW_SIZE */
                 else if (id == 0x5 && val >= 16384 && val <= 16777215) s->max_frame_size = val;
             }
             h2_enqueue(s, H2_FT_SETTINGS, H2_FLAG_ACK, 0, NULL, 0);
@@ -671,16 +676,61 @@ DialH2Session *dial_http2_connect(DialString url) {
     s->next_stream_id = 1;
     s->max_frame_size = H2_DEFAULT_MAX_FRAME;
     s->send_window = H2_DEFAULT_WINDOW;
-    dh_hpack_ctx_init(&s->hpack, 4096);
+
+    /* 客户端 HPACK 解码表上限 = **本端自己在 SETTINGS_HEADER_TABLE_SIZE 声明的值**。
+     * RFC 7541 §4.2：该值由接收方声明，编码方据此发 dynamic table size update。
+     * chrome 画像声明 65536，服务端就会在响应 HPACK 里发 65536 的 update；
+     * 若这里仍写死 4096，解码会误判「动态表大小超过上限」导致整条 stream 失败
+     * （期 2 实测踩到：default 画像 4096 正常、chrome 画像 65536 全挂）。
+     * 取 profile 里 id==1 的 settings 值，default 无 settings 时退回 4096。 */
+    const dh_profile *prof = dh_profile_current();
+    int64_t hpack_max = 4096;
+    for (int i = 0; i < prof->nsettings; i++) {
+        if (prof->settings_id[i] == 0x1) {
+            hpack_max = (int64_t) prof->settings_val[i];
+            break;
+        }
+    }
+    dh_hpack_ctx_init(&s->hpack, hpack_max);
     H2_MTX_INIT(&s->mtx);
     H2_COND_INIT(&s->done_cv);
 
-    /* client connection preface + 空 SETTINGS，握手阶段同步发出（此时还没有
-     * I/O 线程，独占 socket 无竞争）。 */
-    unsigned char settings[9];
-    h2_frame_header(settings, 0, H2_FT_SETTINGS, 0, 0);
+    /* client connection preface + SETTINGS + 连接级 WINDOW_UPDATE。
+     * 全部在握手阶段同步发出（此时还没有 I/O 线程，独占 socket 无竞争），
+     * 保证客户端连接前导的帧序严格是 preface → SETTINGS → WINDOW_UPDATE →
+     * HEADERS，与 Chrome 基准一致。
+     * default 画像 nsettings=0 / increment=0，退回原有的「preface + 空 SETTINGS」，
+     * 既有回归零影响。 */
+    unsigned char settings[9 + 6 * 6];   /* 帧头 9 + 最多 6 组 × 6 字节 */
+    int settings_len = 0;
+    for (int i = 0; i < prof->nsettings && i < 6; i++) {
+        uint16_t id  = prof->settings_id[i];
+        uint32_t val = prof->settings_val[i];
+        unsigned char *q = settings + 9 + settings_len;
+        q[0] = (unsigned char)(id >> 8);
+        q[1] = (unsigned char)(id & 0xff);
+        q[2] = (unsigned char)(val >> 24);
+        q[3] = (unsigned char)(val >> 16);
+        q[4] = (unsigned char)(val >> 8);
+        q[5] = (unsigned char)val;
+        settings_len += 6;
+    }
+    h2_frame_header(settings, (uint32_t)settings_len, H2_FT_SETTINGS, 0, 0);
+
+    unsigned char wu[13];   /* 帧头 9 + 4 字节 increment（连接级 stream 0） */
+    size_t wu_len = 0;
+    if (prof->window_update_increment) {
+        uint32_t inc = prof->window_update_increment;
+        wu[9]  = (unsigned char)(inc >> 24);
+        wu[10] = (unsigned char)(inc >> 16);
+        wu[11] = (unsigned char)(inc >> 8);
+        wu[12] = (unsigned char)inc;
+        h2_frame_header(wu, 4, H2_FT_WINDOW_UPDATE, 0, 0);
+        wu_len = 13;
+    }
     if (!h2_write_all(s, k_preface, sizeof(k_preface) - 1) ||
-        !h2_write_all(s, settings, 9)) {
+        !h2_write_all(s, settings, (size_t)(9 + settings_len)) ||
+        (wu_len && !h2_write_all(s, wu, wu_len))) {
         h2_set_error(DIAL_HTTP_ERR_IO, "发送 HTTP/2 preface/SETTINGS 失败");
         if (tls) dial_tls_free(tls);
         H2_CLOSE(fd);
@@ -732,7 +782,19 @@ static int h2_submit(DialH2Session *s, h2_stream *st, const char *method,
     dh_hlist_add(&req, ":authority", 10, s->hostport, (int)strlen(s->hostport));
     const char *p = (path && *path) ? path : "/";
     dh_hlist_add(&req, ":path", 5, p, (int)strlen(p));
-    dh_hlist_add(&req, "user-agent", 10, "dial-http2/1.0", 14);
+
+    /* 普通头：与 HTTP/1.1 共用同一张 profile 表（小写头名，HPACK 要求）。
+     * h2_name=NULL 的项 H2 不发：Host 由 :authority 取代；Connection 属
+     * RFC 7540 §8.1.2.2 明令禁止的 hop-by-hop 头，发了对端会判协议错。 */
+    const dh_profile *prof = dh_profile_current();
+    for (int i = 0; i < prof->nheaders; i++) {
+        const dh_profile_header *h = &prof->headers[i];
+        if (!h->h2_name) continue;
+        const char *v = h->value ? h->value
+                                : dh_profile_dynamic(prof, h->dyn_kind, s->hostport);
+        if (!v || !*v) continue;
+        dh_hlist_add(&req, h->h2_name, (int)strlen(h->h2_name), v, (int)strlen(v));
+    }
 
     /* 额外头：每行 "Name: value" */
     if (extra_headers && *extra_headers) {

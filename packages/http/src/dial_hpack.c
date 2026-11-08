@@ -194,10 +194,41 @@ static int decode_int(const unsigned char *block, int64_t len, int64_t *p,
 
 /* ---------------- 字符串编码 / 解码（§5.2） ---------------- */
 
-/* 编码：不带 Huffman（H=0），长度用 7 位整数前缀。 */
-static int encode_string_raw(dh_bytes *out, const char *s, int n) {
-    if (!encode_int(out, 7, 0x00, n)) return 0;
-    return dh_bytes_append(out, s, n);
+/* Huffman 编码一段明文到 out（不含长度前缀）。返回 0 成功、-1 内存不足。
+ * RFC 7541 Appendix B：k_huff_code[sym] 是右对齐码字，k_huff_len[sym] 是比特数。
+ * 末尾不足一字节时用 EOS 码的前缀（全 1）补齐，最多 7 位。 */
+int dh_huffman_encode(const char *s, int n, dh_bytes *out) {
+    if (n < 0) return -1;
+    uint64_t acc = 0;
+    int nbits = 0;
+    for (int i = 0; i < n; i++) {
+        unsigned char sym = (unsigned char)s[i];
+        uint32_t code = k_huff_code[sym];
+        int len = k_huff_len[sym];
+        acc = (acc << len) | code;
+        nbits += len;
+        while (nbits >= 8) {
+            nbits -= 8;
+            if (!dh_bytes_putc(out, (unsigned char)(acc >> nbits))) return -1;
+        }
+        acc = nbits ? (acc & (((uint64_t) 1 << nbits) - 1)) : 0;
+    }
+    if (nbits > 0) {
+        int pad = 8 - nbits;
+        unsigned char last = (unsigned char)((acc << pad) | ((1U << pad) - 1U));
+        if (!dh_bytes_putc(out, last)) return -1;
+    }
+    return 0;
+}
+
+/* 编码一个 HPACK 字符串：H=1（Huffman），长度用 7 位整数前缀。 */
+static int encode_string(dh_bytes *out, const char *s, int n) {
+    dh_bytes tmp = {0};
+    if (dh_huffman_encode(s, n, &tmp) != 0) { dh_bytes_free(&tmp); return 0; }
+    int ok = encode_int(out, 7, 0x80, tmp.len);
+    if (ok) ok = dh_bytes_append(out, tmp.p, tmp.len);
+    dh_bytes_free(&tmp);
+    return ok;
 }
 
 /* Huffman 解码一段比特流到 out。线性查表（257 项）逐位匹配，简单且对头部尺寸足够快。 */
@@ -255,13 +286,52 @@ static int decode_string(const unsigned char *block, int64_t len, int64_t *p,
 
 /* ---------------- 编码：请求头块 ---------------- */
 
+/* 在静态表里找 (name, value) 完全匹配项，返回 1..61；0 = 未命中。 */
+static int static_find_exact(const char *name, int nl,
+                             const char *value, int vl) {
+    for (int i = 1; i <= DH_HPACK_STATIC_COUNT; i++) {
+        const dh_hpack_static_entry *e = &k_hpack_static[i];
+        if (e->name_len == nl && e->value_len == vl &&
+            (nl == 0 || memcmp(e->name, name, (size_t) nl) == 0) &&
+            (vl == 0 || memcmp(e->value, value, (size_t) vl) == 0)) return i;
+    }
+    return 0;
+}
+
+/* 在静态表里找 name 匹配项（value 不必匹配），返回 1..61；0 = 未命中。 */
+static int static_find_name(const char *name, int nl) {
+    for (int i = 1; i <= DH_HPACK_STATIC_COUNT; i++) {
+        const dh_hpack_static_entry *e = &k_hpack_static[i];
+        if (e->name_len == nl &&
+            (nl == 0 || memcmp(e->name, name, (size_t) nl) == 0)) return i;
+    }
+    return 0;
+}
+
+/* 请求侧编码：与浏览器一致地用静态表索引 + Huffman。
+ *   - (name,value) 完全命中静态表 → indexed header field（0x80，7 位索引）；
+ *   - 只 name 命中 → literal without indexing / indexed name（0000 + 4 位索引）
+ *     + Huffman value；
+ *   - 都未命中 → literal without indexing / new name（0x00）+ 两个 Huffman 串。
+ * 一律 without indexing：客户端不维护发送侧动态表，跨请求无状态，最简单也最稳。 */
 int dh_hpack_encode(dh_bytes *out, const dh_header_list *req) {
     for (int i = 0; i < req->n; i++) {
         const dh_header *h = &req->v[i];
-        /* literal header field without indexing / new name：0x00，name index=0 */
-        if (!dh_bytes_putc(out, 0x00)) return -1;
-        if (!encode_string_raw(out, h->name, h->name_len)) return -1;
-        if (!encode_string_raw(out, h->value, h->value_len)) return -1;
+        int idx = static_find_exact(h->name, h->name_len,
+                                    h->value, h->value_len);
+        if (idx > 0) {
+            if (!encode_int(out, 7, 0x80, idx)) return -1;
+            continue;
+        }
+        int nidx = static_find_name(h->name, h->name_len);
+        if (nidx > 0) {
+            if (!encode_int(out, 4, 0x00, nidx)) return -1;
+            if (!encode_string(out, h->value, h->value_len)) return -1;
+        } else {
+            if (!dh_bytes_putc(out, 0x00)) return -1;
+            if (!encode_string(out, h->name, h->name_len)) return -1;
+            if (!encode_string(out, h->value, h->value_len)) return -1;
+        }
     }
     return 0;
 }
@@ -294,8 +364,11 @@ int dh_hpack_decode(dh_hpack_ctx *ctx, const unsigned char *block, int64_t len,
             /* dynamic table size update（001xxxxx） */
             int64_t new_size = 0;
             if (!decode_int(block, len, &p, 5, &new_size, &err)) goto proto_err;
+            /* max_table_size 是**本端**在 SETTINGS_HEADER_TABLE_SIZE 里声明的
+             * 解码表上限（见 dial_http2.c 的 connect 初始化）；服务端发的 update
+             * 不得超过它。chrome 画像声明 65536，服务端据此发 65536，合法。 */
             if (new_size > ctx->max_table_size) {
-                err = "HPACK 动态表大小超过对端声明上限"; goto proto_err;
+                err = "HPACK 动态表大小超过本端声明上限"; goto proto_err;
             }
             dyn_evict_to(ctx, new_size);
         } else {

@@ -12,7 +12,9 @@
 | `clienthello.py` | 纯 Python TLS ClientHello 解析（无第三方依赖），输出结构化字段与指纹 |
 | `capture_ch.py` | 录制器：`--chrome` 录 Chrome 基准，`--listen` 录 dialc 候选 |
 | `emit_clienthello.c` | 候选 ClientHello 发射器：直接调 `dial_tls_connect` 让 http 包真实发一个 CH（连接 127.0.0.1、SNI 用域名、ALPN 双 offer），供 `--listen` 录制 |
-| `record_http.py` | 候选 HTTP 行为录制器：`--h1` 录头序、`--h2` 录 H2 帧序与 SETTINGS |
+| `emit_http.c` | 候选 HTTP 行为发射器（期 2）：`--h1` 调 `dial_http_get()`、`--h2` 调 `dial_http2_connect()+request()`，两者都先切 `chrome` 画像 |
+| `check_hpack.c` | HPACK / Huffman 编码侧往返自校验（期 2）：用包内既有解码器验证静态表索引与 Huffman 编码正确，含全 256 字节覆盖 |
+| `record_http.py` | 候选 HTTP 行为录制器：`--h1` 录头序、`--h2` 录 H2 帧序与 SETTINGS。**期 2 起 H2 段真实解析 HPACK**（从 `dial_hpack_tables.h` 读 Huffman 码表 + 内置静态表），伪头顺序 / static_index / huffman 均由解码结果得出，不再是占位常量 |
 | `compare_fp.py` | 逐字段比对，输出 `name = pass` / `MISMATCH` / `exemption ... declared` |
 | `check_fingerprint_online.py` | 可选在线校验，**默认不跑、不进 CI**，只打印供人工核对 |
 
@@ -75,7 +77,7 @@ python3 fp_norm.py && python3 clienthello.py --self-check
 # 2) 基准自比：离线重放内嵌 record hex，全部字段与指纹逐字符一致
 python3 compare_fp.py --baseline chrome_windows_x64.json --self     # 34 项 pass，EXIT=0
 
-# 3) 候选 vs 基准（期 1 起；前两行在仓库根执行，后两行在本目录执行）
+# 3) 候选 vs 基准（期 1 TLS 段；前两行在仓库根执行，后两行在本目录执行）
 #    3a) 编译发射器，链接刚构建的 libhttp.a
 zig cc -target x86_64-linux-gnu tests/pkg/fingerprint/emit_clienthello.c \
     -I packages/http/src packages/http/lib/x86_64-linux-gnu/libhttp.a -o /tmp/emit_ch
@@ -84,10 +86,31 @@ python3 capture_ch.py --listen --port 0 --port-file /tmp/fp_port \
     --out /tmp/cand.bin --json /tmp/cand.json &
 #    3c) 端口文件就绪后让 http 包发一个 CH（SNI=localhost，录制端不完成握手）
 /tmp/emit_ch "$(cat /tmp/fp_port)" localhost
-#    3d) 逐字段比对；期 2 起再补 --behavior /tmp/behavior.json
-python3 compare_fp.py --baseline chrome_windows_x64.json --candidate /tmp/cand.json
 
-# 4) 可选在线校验（默认跳过）
+# 4) 期 2：HPACK 自校验 + HTTP 行为录制（以下在仓库根执行）
+zig cc -target x86_64-linux-gnu tests/pkg/fingerprint/check_hpack.c \
+    -I packages/http/src packages/http/lib/x86_64-linux-gnu/libhttp.a -o /tmp/check_hpack
+/tmp/check_hpack                                  # hpack_selfcheck = pass
+zig cc -target x86_64-linux-gnu tests/pkg/fingerprint/emit_http.c \
+    -I packages/http/src -I stdlib -I runtime \
+    packages/http/lib/x86_64-linux-gnu/libhttp.a -o /tmp/emit_http
+#    4a) H1：录制器起服务，发射器发一个真实 GET（chrome 画像）
+python3 tests/pkg/fingerprint/record_http.py --h1 --port 0 \
+    --port-file /tmp/fp_h1port --out /tmp/behavior_h1.json &
+# 等端口文件就绪后：/tmp/emit_http --h1 "$(cat /tmp/fp_h1port)"
+#    4b) H2：录制器起服务，发射器发一个真实 h2c 请求
+python3 tests/pkg/fingerprint/record_http.py --h2 --port 0 \
+    --port-file /tmp/fp_h2port --out /tmp/behavior_h2.json &
+# 等端口文件就绪后：/tmp/emit_http --h2 "$(cat /tmp/fp_h2port)"
+#    4c) 合并 h1/h2 两段 → behavior.json
+python3 -c "import json; a=json.load(open('/tmp/behavior_h1.json')); \
+    a.update(json.load(open('/tmp/behavior_h2.json'))); \
+    json.dump(a, open('/tmp/behavior.json','w'), ensure_ascii=False, indent=2)"
+python3 tests/pkg/fingerprint/compare_fp.py \
+    --baseline tests/pkg/fingerprint/chrome_windows_x64.json \
+    --candidate /tmp/cand.json --behavior /tmp/behavior.json
+
+# 5) 可选在线校验（默认跳过）
 python3 check_fingerprint_online.py            # -> online_check = skipped
 ```
 
@@ -106,12 +129,63 @@ python3 check_fingerprint_online.py            # -> online_check = skipped
 | ALPN | `h2`, `http/1.1`（双 offer，首项 h2） |
 | `has_sni` | true |
 
-`compare_fp.py`：TLS 段 **24 项 pass、0 MISMATCH**；HTTP 行为段 2 项
-`skip = ... = not_provided`（期 2 补齐）；9 项 `exemption ... declared`。
+`compare_fp.py`（期 1 当时）：TLS 段 **24 项 pass、0 MISMATCH**；HTTP 行为段 2 项
+`skip = ... = not_provided`（期 2 已全部转 pass，见下）；9 项 `exemption ... declared`。
 
 ALPN 双 offer 归期 1 而非期 2：`ja4_a` 的 `h2` 与 `alpn` 字段都是硬断言，
 单 offer 必然留下 MISMATCH。同步在 `dial_http.c` 加了 fail-closed——服务端若
 真协商出 `h2`，HTTP/1.1 层明确报错，绝不拿 H1 解析层去读 H2 帧。
+
+## 期 2 实测结果（HTTP 行为段，H1/H2 全量对齐）
+
+`dial_profile.c` 抽成 H1/H2 共用的单一数据源（头序/头值/UA/Sec-CH-UA/
+SETTINGS/WINDOW_UPDATE 只写一次），`dial_hpack.c` 请求侧升级为静态表索引 +
+Huffman，`dial_http2.c` 连接前导补齐六参数 SETTINGS + 连接级 WINDOW_UPDATE 后：
+
+| 项 | 实测值 |
+| --- | --- |
+| H1 头序 | 14 项，逐项等于基准 `header_order`（Host 起、Accept-Language 止） |
+| H1 头值 / UA / Sec-CH-UA | 10 组头值、Win/x64 UA、`Chromium/Google Chrome/Not_A Brand` 串全部逐字一致 |
+| H2 帧序 | `preface → SETTINGS → WINDOW_UPDATE → HEADERS`，与基准一致 |
+| H2 SETTINGS | 六参数 `1:65536 2:0 3:1000 4:6291456 5:16384 6:262144` 全中 |
+| H2 WINDOW_UPDATE | 连接级 increment `15663105` |
+| H2 伪头序 / HPACK | `:method→:scheme→:authority→:path`；`static_index=true`、`huffman=true`（录制器真解 HPACK 得出，非占位） |
+
+`compare_fp.py --behavior`：TLS + HTTP 行为 **34 项全 pass、0 MISMATCH、0 skip**，
+9 项豁免显式声明。`check_hpack.c` 自校验 23 项全绿：13 个 Huffman 往返样例 +
+全 256 字节覆盖 + HPACK 编解码往返（indexed / indexed-name / new-name 三路径）
++ 首字节 indexed 与 H 位判据。`record_http.py` 的 Huffman 解码器用 RFC 7541
+Appendix C 官方样例（`www.example.com` / `no-cache`）验证。
+
+三个技术裁决：
+
+1. **profile 单一数据源**：`dial_http.c` / `dial_http2.c` 都读 `dial_profile.c`，
+   避免两层各硬编码一份导致头值漂移。H1 用原文头名（大小写敏感），H2 用小写头名；
+   `Host` 由 H2 的 `:authority` 取代、`Connection` 按 RFC 7540 §8.1.2.2 在 H2 不发
+   （hop-by-hop 头，发了对端判协议错）。
+2. **default 保守 / chrome 完整**：`default` 画像仍发原有的空 SETTINGS / 无
+   WINDOW_UPDATE / 6 头，`chrome` 画像才发全套。既有 W 组回归零影响，浏览器画像
+   由 `dial_http_set_profile("chrome")` 显式开启。
+3. **HPACK 编码全局升级**（不分画像）：请求侧一律静态表索引 / indexed-name /
+   new-name + Huffman。这是 RFC 7541 合规编码，客户端不维护发送侧动态表。
+   W 组 h2 用例（Python `h2`/`hpack` 服务端真实握手）负责验证互操作性不受损。
+
+## 期 2 修复：HPACK 解码上限须等于本端声明的 `HEADER_TABLE_SIZE`
+
+`chrome` 画像声明 `SETTINGS HEADER_TABLE_SIZE=65536`，对端据此在响应首块发
+动态表大小更新（`3f e1 ff 03` = 65536）。原解码上下文上限写死 `4096`，会报
+「动态表大小超过上限」→ stream 失败。按 RFC 7541 §4.2，**解码上限应等于本端自己
+声明的值**（服务端 SETTINGS 里的 `HEADER_TABLE_SIZE` 约束的是本端**编码侧**，
+不该覆盖解码上下文）。修复点：
+
+- `dial_http2.c`：`dh_hpack_ctx_init(&s->hpack, prof->header_table_size)` 用
+  画像值初始化解码上限；删掉 SETTINGS 处理里 `if (id==0x1) s->hpack.max_table_size
+  = val` 那行（它把解码上限按对端值打回 4096）。
+- `dial_hpack.c`：错误文案与注释同步改为「超过本端声明上限」。
+
+`default` 画像上限仍是 4096（兼容既有行为）；`chrome` 画像落地后才能在真实
+Python `h2` 服务端完成完整握手（回归用 default 画像所以未触发）。验证：
+`/tmp/emit_http --h2 <port> chrome` 对真实 h2c 服务端返回 `h2_status = 200`。
 
 ## 做不到 / 不做（基准 `exemptions` 逐项声明，不许含糊）
 

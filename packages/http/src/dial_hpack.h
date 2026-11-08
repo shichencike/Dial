@@ -10,10 +10,13 @@
  * 立场：协议层自研，不引第三方 HPACK 库。表数据（静态表 61 项 + Huffman 码表）
  * 由 tools/gen_hpack_tables.py 从 RFC 常量导出到 dial_hpack_tables.h，避免手敲出错。
  *
- * 客户端编码：一律发「literal header field without indexing / new name」（0x00），
- *   value 不 Huffman 编码。**这是 RFC 明确允许的**——客户端没有义务用最省字节的
- *   表示法；这样编码侧不必维护动态表、不必实现 Huffman 编码器，几百行即可，
- *   且互操作性由「解码侧完整实现」保证。
+ * 客户端编码：静态表索引 + Huffman（浏览器一致性画像）。
+ *   (name,value) 完全命中静态表就发 indexed（0x80）；只 name 命中就发
+ *   literal-with-indexed-name（4 位索引）+ Huffman value；都不命中才发
+ *   literal-new-name（0x00）+ 两个 Huffman 串。一律 without indexing，
+ *   客户端不维护发送侧动态表，跨请求无状态。
+ *   编码正确性由 tests/pkg/fingerprint/check_hpack.c 的往返自校验保证，
+ *   互操作性由 W 组 h2 测试（Python h2/hpack 服务端）保证。
  *
  * 响应解码：完整实现——indexed（0x80）/ 字面量增量索引（0x40）/ 不带索引（0x00）/
  *   never indexed（0x10）/ 动态表大小更新（0x20）、Huffman 解码、动态表的增删与
@@ -58,7 +61,8 @@ void dh_hpack_ctx_init(dh_hpack_ctx *ctx, int64_t max_table_size);
 void dh_hpack_ctx_free(dh_hpack_ctx *ctx);
 
 /*
- * 编码：把 req 里的每条头编成 literal-without-indexing(new name)，追加到 out。
+ * 编码：把 req 里的每条头编成静态表索引 / indexed-name / new-name 三种
+ * literal-without-indexing 之一，字符串一律 Huffman，追加到 out。
  * 返回 0 成功；-1 内存不足。out 由调用方 init/free，可连续追加多个头块。
  */
 int dh_hpack_encode(dh_bytes *out, const dh_header_list *req);
@@ -71,6 +75,10 @@ int dh_hpack_encode(dh_bytes *out, const dh_header_list *req);
  */
 int dh_hpack_decode(dh_hpack_ctx *ctx, const unsigned char *block, int64_t len,
                     dh_header_list *out, char *errbuf, size_t errlen);
+
+/* Huffman 编码（单段字符串）：s 明文、n 字节数，out 追加码流（不含长度前缀）。
+ * 末尾不足一字节用 EOS 前缀（全 1）补齐。返回 0 成功；-1 内存不足 / 参数非法。 */
+int dh_huffman_encode(const char *s, int n, dh_bytes *out);
 
 /* Huffman 解码（单段字符串）：in 是 Huffman 比特流，out 追加明文字节。
  * 返回 0 成功；-1 非法（EOS 出现在数据里 / 补齐位不是全 1 / 长度越界）。 */
