@@ -1,4 +1,4 @@
-# Dial for VS Code（v0.98）
+# Dial for VS Code（v1.04）
 
 给 `.dial` 文件提供：
 
@@ -9,7 +9,7 @@
 3. **导航与编写辅助**——大纲、引用查找、重命名、签名帮助、保守格式化、参数 inlay 提示。
 4. **高级交互**——代码动作（缺包时直接给「安装这个包」）、折叠、选择范围、文档链接（`import` 可跳转）。
 
-> 安装包：`dial-0.98.0.vsix`（见各版本 GitHub Release，或本地 `bash editors/vscode/build.sh` 现构建）。
+> 安装包：`dial-1.4.0.vsix`（见各版本 GitHub Release，或本地 `bash editors/vscode/build.sh` 现构建）。
 > 跑一键安装脚本（`install-dial.sh` / `install-dial.ps1`）时也会**自动下载并装上**这个插件。
 
 ## 能力清单
@@ -42,11 +42,11 @@
 
 ```bash
 # 方式一：侧载 .vsix（推荐，来自 Release 或本地构建）
-code --install-extension dial-0.98.0.vsix
+code --install-extension dial-1.4.0.vsix
 
 # 方式二：直接拷进扩展目录（改完源码可立刻生效）
-mkdir -p ~/.vscode/extensions/dial-lang.dial-0.98.0
-cp -r /path/to/dialc/editors/vscode/* ~/.vscode/extensions/dial-lang.dial-0.98.0/
+mkdir -p ~/.vscode/extensions/dial-lang.dial-1.4.0
+cp -r /path/to/dialc/editors/vscode/* ~/.vscode/extensions/dial-lang.dial-1.4.0/
 # 重启 VS Code
 
 # 方式三：开发模式——VS Code 里打开本目录，按 F5 启动「扩展开发宿主」

@@ -21,6 +21,7 @@ v0.97 → v0.98 这一轮发布时，代码、测试、CHANGELOG 都是新的，
 
 退出码 0 = 一致；非 0 = 有不一致（逐条列出）。
 """
+import json
 import pathlib
 import re
 import sys
@@ -102,6 +103,34 @@ def main() -> None:
         stale = re.findall(r"dialc-v[0-9.]+\.zip", idx)
         check("web/index.html 不引用已废弃的单包名", not stale,
               f"仍有 {sorted(set(stale))}（三平台分包后无此资产）")
+
+    # 4) VS Code 扩展的版本号：扩展是随编译器走的 LSP 客户端，版本必须跟上。
+    #    漂了的后果很具体：README 与安装脚本里的 `dial-<版本>.vsix` 推导名
+    #    会与实际产物对不上（v1.04 就出现过：扩展还停在 0.98.0，
+    #    README 却写 `dial-1.4.0.vsix`——指向一个不存在的文件）。
+    pkg_path = ROOT / "editors" / "vscode" / "package.json"
+    if pkg_path.exists():
+        ext_ver = json.loads(pkg_path.read_text(encoding="utf-8")).get("version", "")
+        check("editors/vscode/package.json 的版本号", ext_ver == ver_full,
+              f"是 {ext_ver}，应为 {ver_full}")
+        want = f"dial-{ext_ver}.vsix"
+
+        # 4a) README 的编辑器支持表那一行必须指向当前版本的 .vsix。
+        #     （只查那一行：README 别处出现的 `dial-1.3.0.vsix` 是讲资产命名规则的**举例**，
+        #       那是历史事实，不该被版本检查当成漂移。）
+        row = [ln for ln in readme.split("\n")
+               if "VS Code" in ln and ".vsix" in ln]
+        got = sorted({m for ln in row for m in re.findall(r"dial-[0-9.]+\.vsix", ln)})
+        check("README 编辑器支持表的 .vsix 文件名", got == [want],
+              f"是 {got}，应为 [{want}]")
+
+        # 4b) 扩展自己的 README 里出现的 .vsix 名必须全部是当前版本。
+        ext_readme = ROOT / "editors" / "vscode" / "README.md"
+        if ext_readme.exists():
+            got2 = sorted(set(re.findall(r"dial-[0-9.]+\.vsix",
+                                         ext_readme.read_text(encoding="utf-8"))))
+            check("editors/vscode/README.md 的 .vsix 文件名", got2 == [want],
+                  f"是 {got2}，应为 [{want}]")
 
     if problems:
         print(f"✗ 版本号一致性检查未通过（当前版本 {ver}）：")

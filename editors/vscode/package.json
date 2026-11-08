@@ -2,7 +2,7 @@
   "name": "dial",
   "displayName": "Dial",
   "description": "Dial 语言支持：诊断、语义高亮、Hover、跳转定义与补全，由 dialc lsp 提供",
-  "version": "0.98.0",
+  "version": "1.4.0",
   "publisher": "dial-lang",
   "license": "MIT",
   "engines": {
