@@ -1,0 +1,330 @@
+{
+  "schema": 1,
+  "meta": {
+    "purpose": "Dial http.dialpkg 浏览器一致性画像的唯一比对基准",
+    "baseline_browser": "Google Chrome 144.0.7559.132",
+    "target_profile": "Chrome 稳定版 Windows/x64",
+    "capture_os": "Linux (headless)",
+    "capture_note": "TLS 栈 BoringSSL 跨平台同源：ClientHello 的 cipher/扩展/GREASE/groups/sig_algs/ALPN 在 Linux 与 Windows 上一致，故 TLS 段可直接复用为 Win/x64 基准。仅 HTTP 层的 Sec-CH-UA-Platform / UA 串按 Win/x64 写死（见 http_behavior.source）。",
+    "capture_tool": "tests/pkg/fingerprint/capture_ch.py --chrome",
+    "capture_flags": [
+      "--headless=new",
+      "--disable-quic",
+      "--no-proxy-server",
+      "--ignore-certificate-errors",
+      "--host-resolver-rules=MAP fp.local 127.0.0.1",
+      "--virtual-time-budget=2500"
+    ],
+    "ech": "present_as_grease",
+    "ech_note": "实测 Chrome 144 在所有 --disable-features=EncryptedClientHello 组合下仍发 fe0d（ECH GREASE 占位，非真实 HPKE 加密）。故基准保留 fe0d 扩展 id；dialc 侧用哑扩展占位对齐扩展集合，不实现 ECH 加密。",
+    "randomization_note": "Chrome 110+ 每次连接随机置换扩展顺序、GREASE 值随机、random/key_share 每次不同。故：JA4（排序后哈希）为跨连接稳定主判据；JA3（顺序敏感）只与本基准录制那一次对齐；GREASE 值归一化、点位单独断言；不承诺逐字节一致。",
+    "ja4_crosscheck": "b/c 段 8daaf6152771_d8a2da3f94cd 与业界公开的 Chrome JA4 值逐字符一致，证明归一化口径正确。"
+  },
+  "clienthello": {
+    "record_len": 1745,
+    "legacy_version": "0303",
+    "session_id_len": 32,
+    "compression_methods": [
+      "00"
+    ],
+    "cipher_suites": [
+      "9a9a",
+      "1301",
+      "1302",
+      "1303",
+      "c02b",
+      "c02f",
+      "c02c",
+      "c030",
+      "cca9",
+      "cca8",
+      "c013",
+      "c014",
+      "009c",
+      "009d",
+      "002f",
+      "0035"
+    ],
+    "cipher_suites_norm": [
+      "GREASE",
+      "1301",
+      "1302",
+      "1303",
+      "c02b",
+      "c02f",
+      "c02c",
+      "c030",
+      "cca9",
+      "cca8",
+      "c013",
+      "c014",
+      "009c",
+      "009d",
+      "002f",
+      "0035"
+    ],
+    "cipher_grease_positions": [
+      0
+    ],
+    "extension_ids": [
+      "6a6a",
+      "0017",
+      "000b",
+      "0005",
+      "0033",
+      "002b",
+      "001b",
+      "fe0d",
+      "002d",
+      "44cd",
+      "0012",
+      "000a",
+      "000d",
+      "ff01",
+      "0010",
+      "0023",
+      "0000",
+      "4a4a"
+    ],
+    "extension_names": [
+      "GREASE",
+      "extended_master_secret",
+      "ec_point_formats",
+      "status_request",
+      "key_share",
+      "supported_versions",
+      "compress_certificate",
+      "encrypted_client_hello",
+      "psk_key_exchange_modes",
+      "application_settings(ALPS)",
+      "signed_certificate_timestamp",
+      "supported_groups",
+      "signature_algorithms",
+      "renegotiation_info",
+      "application_layer_protocol_negotiation",
+      "session_ticket",
+      "server_name",
+      "GREASE"
+    ],
+    "extension_ids_norm": [
+      "GREASE",
+      "0017",
+      "000b",
+      "0005",
+      "0033",
+      "002b",
+      "001b",
+      "fe0d",
+      "002d",
+      "44cd",
+      "0012",
+      "000a",
+      "000d",
+      "ff01",
+      "0010",
+      "0023",
+      "0000",
+      "GREASE"
+    ],
+    "extension_grease_positions": [
+      0,
+      17
+    ],
+    "extension_count": 18,
+    "extension_bodies_hex": {
+      "6a6a": "",
+      "0017": "",
+      "000b": "0100",
+      "0005": "0100000000",
+      "0033": "04ed1a1a00010011ec04c052e65fc65b5dad4c1214c69db3f1b4ada9a83cd3455818c2b924bef5753814fb6c4a587a1f70ca4a935c5d90c81ae91d8ee94e74500e35e702368861233404df44938bb3129ef8c960d32ba46c897481485c406c11b10b83f02fedfb68d4f11fbbb5c298995a5078cd253b65cbd1b0f201aba845132b1c268562a9d60368d341271136a96822996052ac63e862fa93685751c32be80e78d06a2fb332e8949469fb6926a90acbd4c6e9861191e7cc86f5541bb464bd6c80e0591feff48d877a97446a1f6b573a13d540bd16523d21bc97b53cf8e84d96f9ce2c66888a2810eb0871eeac1e88b0826470a8eff12d77b5600873acd091a35a762514ec5d0ebb4b1733064abb700db48e55c040ee9c626539c6f98b5dcd6168382252f1284ec44c6e13b9294f04ba605a2375b107efab89c5fabc49c738efe4bcc90469ead5b7ce8019b97a1984c1227341b4d4131569bc7c0ab58370a73823ca1737a94e3f75b778e837a0788d565726e4464172b31b8970b55c148ef3f01dc4d58cf057480d8a501aa435ef052de6b61db3d92505fa7b5a3ca6ed5b0d1db1cf17c27a7fe6c3b1d384fa967ca9aa1a2b413306e92c09379933a763adfa7b09b54e17a261b3c3a1d2132cd010292ca73664802fe1ba1bf593bc150189f2c210ab463a5df220a5c682d40baa55a4710b8b64981b3f9d2b8ec86505fda6c4dbb2187731303ca96d4c0b32e724106887b2f6c101d793748660af000a032f3976fbb18e4e1aadedea25b9a3537179936f4307601290293944f9d246bd30946bd14dfd5c3726466fca456d9ba2580b3b20be531332b14303e318a0eb11be91c63e585443876080054df885a9c4b00349868537b4c576756772674042a75ea05b3081e2cad0a07325196536c7803c6870d9a557f5436bda3aa35d87ccbe31248cb06c38a207a22b51c278362b10513a35c2e7c151c0a4364cab48b924b1e6c524a8d32d82d13fe6dba450d0339d538b20cc024a838776979db970bffd64a68c4185d8d209fe7a4409a79cfefcc7f227542ada735b693e80c6884b979b78b42f21bca0e7f712a5997b8d63ccc35b482b84bc12716a14635976866c96d6309b048b871b618a587c3526bc403271c667b1f79516067522d30819c18009abc34308b66b4aeba05b5c5ca82578aad34812d18f33c38a3d735a53f14c80aba70cd7b012b321729a32d618878f568baf91a359c9718cf31b7460729cb354ba1412b33c53bef7c2b2636d11c1b4e1619af047a0770b6d61695899d75e0d9a506046b714215d594c6655361ef80c893154a25fa9836bf8b2148a003cc99717147ef8c87f7979bbe10c1fd595697bec4202eb258199384333574943727e9a8dabc44959f55ccc232720136a8a3759bb20208d237f20862c7c6829dc61b8c59c741701b326729af76b969143c7a9f57c45f18417825e3eac3b3a97b4d4e5ce5d03bbb477b67b95bebc9536206765195452b165bcd3f352b4f6cfee4abb9a41324133568e30884d807a27588bc8272570377f2a9b9bbaf775919907a0113420012faeb64fa222c84d3a16d341939b0023926919ed03b818d675830073e5600acdfb133699c9b091044dd89dab35447d579ac5b78a1bea59c76064a0237e2daea4f4d7267fa5e74e9e3dcb8c00ca4a865eb2827322d962d8a1185fd0b013a7318361d217500886741de92429d22ef444a250001d0020fefce197895d83304099ee5d65b46df0173eeeff8616ab59d21451bd81a8a178",
+      "002b": "069a9a03040303",
+      "001b": "020002",
+      "fe0d": "000001000159002044c80ee6c6d662998eed080a6cf822c90a9b63ab391bd106116ef423d4f2bb7300b0fc2f27c36586bb4d9e7a2da63e22f3c00112cad95e8621e72aac98c6beaf59eab59300f5becc3967b25164cd09f93d112799a5c0ba81b1b008d5ddab75a2a5118ae804191f9e7f6510b2239d2073ac99fa75fdee15eace490e507a3117ac321d026cca59fcd9ffdaf34036ce0b715edbb2f0d5588c0dc09a85a20794fcb7e4b3ab69de5bdb8788d584577c5fbc9b9544542821f4be7bdf5945de82a3ac9edb50a920ebcf6d6fd9e3cfec138e6a49b253",
+      "002d": "0101",
+      "44cd": "0003026832",
+      "0012": "",
+      "000a": "000a1a1a11ec001d00170018",
+      "000d": "001004030804040105030805050108060601",
+      "ff01": "00",
+      "0010": "000c02683208687474702f312e31",
+      "0023": "",
+      "0000": "000b00000866702e6c6f63616c",
+      "4a4a": "00"
+    },
+    "supported_groups": [
+      "1a1a",
+      "11ec",
+      "001d",
+      "0017",
+      "0018"
+    ],
+    "supported_groups_norm": [
+      "GREASE",
+      "11ec",
+      "001d",
+      "0017",
+      "0018"
+    ],
+    "signature_algorithms": [
+      "0403",
+      "0804",
+      "0401",
+      "0503",
+      "0805",
+      "0501",
+      "0806",
+      "0601"
+    ],
+    "signature_algorithms_norm": [
+      "0403",
+      "0804",
+      "0401",
+      "0503",
+      "0805",
+      "0501",
+      "0806",
+      "0601"
+    ],
+    "supported_versions": [
+      "9a9a",
+      "0304",
+      "0303"
+    ],
+    "supported_versions_norm": [
+      "GREASE",
+      "0304",
+      "0303"
+    ],
+    "key_share_groups": [
+      {
+        "group": "1a1a",
+        "key_len": 1
+      },
+      {
+        "group": "11ec",
+        "key_len": 1216
+      },
+      {
+        "group": "001d",
+        "key_len": 32
+      }
+    ],
+    "alpn": [
+      "h2",
+      "http/1.1"
+    ],
+    "ec_point_formats": [
+      "00"
+    ],
+    "has_sni": true,
+    "fingerprints": {
+      "ja3_full": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,23-11-5-51-43-27-65037-45-17613-18-10-13-65281-16-35-0,4588-29-23-24,0",
+      "ja3_md5": "0bb7b38b4e71c92b23a4f3dbed3b0489",
+      "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
+      "ja4_a": "t13d1516h2",
+      "ja4_r": "t13d1516h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601",
+      "ja4_o": "t13d1516h2_1301,1302,1303,c02b,c02f,c02c,c030,cca9,cca8,c013,c014,009c,009d,002f,0035_0017,000b,0005,0033,002b,001b,fe0d,002d,44cd,0012,000a,000d,ff01,0010,0023,0000_0403,0804,0401,0503,0805,0501,0806,0601"
+    }
+  },
+  "http_behavior": {
+    "source": "Chrome 稳定版 Windows/x64 导航 GET 的已知常量；TLS 段为实测，HTTP 平台字段为写死",
+    "h1": {
+      "header_order": [
+        "Host",
+        "Connection",
+        "Upgrade-Insecure-Requests",
+        "User-Agent",
+        "Accept",
+        "Sec-Fetch-Site",
+        "Sec-Fetch-Mode",
+        "Sec-Fetch-User",
+        "Sec-Fetch-Dest",
+        "Sec-CH-UA",
+        "Sec-CH-UA-Mobile",
+        "Sec-CH-UA-Platform",
+        "Accept-Encoding",
+        "Accept-Language"
+      ],
+      "header_values": {
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": "\"Windows\"",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+      "sec_ch_ua": "\"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\", \"Not_A Brand\";v=\"24\""
+    },
+    "h2": {
+      "frame_order": [
+        "preface",
+        "SETTINGS",
+        "WINDOW_UPDATE",
+        "HEADERS"
+      ],
+      "settings": {
+        "1": 65536,
+        "2": 0,
+        "3": 1000,
+        "4": 6291456,
+        "5": 16384,
+        "6": 262144
+      },
+      "connection_window_update_increment": 15663105,
+      "pseudo_header_order": [
+        ":method",
+        ":scheme",
+        ":authority",
+        ":path"
+      ],
+      "hpack": {
+        "static_index": true,
+        "huffman": true
+      }
+    }
+  },
+  "exemptions": [
+    {
+      "name": "ech_hpke",
+      "detail": "ECH 扩展只发哑占位，不实现 HPKE 加密；JA4 只看扩展 id，集合已对齐。"
+    },
+    {
+      "name": "certificate_compression",
+      "detail": "001b 只发哑占位，不实现 brotli 解压；发而不能解压会破坏握手，故不发真实支持列表。"
+    },
+    {
+      "name": "multi_key_share",
+      "detail": "真·多组 key_share 不做；仅 X25519 一组 + GREASE 哑条目（纯字节编排）。PQC 组 11ec 只在 supported_groups 里占位。"
+    },
+    {
+      "name": "br_zstd",
+      "detail": "vendor 仅 mbedTLS+zlib，Accept-Encoding 保持 gzip, deflate；Chrome 原值 gzip, deflate, br, zstd 记为已声明降级豁免。"
+    },
+    {
+      "name": "alps_payload",
+      "detail": "ALPS(44cd) 只发哑占位，不实现应用层设置协商。"
+    },
+    {
+      "name": "session_state",
+      "detail": "session_ticket / PSK 复用 / OCSP / SCT 真实校验不发状态逻辑，仅占位。"
+    },
+    {
+      "name": "cookie_redirect_cache",
+      "detail": "cookie jar / 重定向 / 缓存条件请求 / Referer-Origin 派生属浏览器会话层，不在协议层一致性范围。"
+    },
+    {
+      "name": "h2_priority",
+      "detail": "HTTP/2 PRIORITY / 依赖树 Chrome 已弃用（转 RFC 9218），不做。"
+    },
+    {
+      "name": "byte_identical",
+      "detail": "ClientHello 含 random / key_share 临时公钥 / GREASE / ECH 密文，两次真 Chrome 亦不同；明确不追求逐字节一致。"
+    }
+  ],
+  "clienthello_record_hex": "16030106d1010006cd03039a5194543b6055fa57944be617348a5eeb6b5f9d0e21e36e3d55e64d97d4e70f200e068f99f9973665558d9b16c57f739c2f279e9b15bab47bd218305e70d9c20400209a9a130113021303c02bc02fc02cc030cca9cca8c013c014009c009d002f0035010006646a6a000000170000000b00020100000500050100000000003304ef04ed1a1a00010011ec04c052e65fc65b5dad4c1214c69db3f1b4ada9a83cd3455818c2b924bef5753814fb6c4a587a1f70ca4a935c5d90c81ae91d8ee94e74500e35e702368861233404df44938bb3129ef8c960d32ba46c897481485c406c11b10b83f02fedfb68d4f11fbbb5c298995a5078cd253b65cbd1b0f201aba845132b1c268562a9d60368d341271136a96822996052ac63e862fa93685751c32be80e78d06a2fb332e8949469fb6926a90acbd4c6e9861191e7cc86f5541bb464bd6c80e0591feff48d877a97446a1f6b573a13d540bd16523d21bc97b53cf8e84d96f9ce2c66888a2810eb0871eeac1e88b0826470a8eff12d77b5600873acd091a35a762514ec5d0ebb4b1733064abb700db48e55c040ee9c626539c6f98b5dcd6168382252f1284ec44c6e13b9294f04ba605a2375b107efab89c5fabc49c738efe4bcc90469ead5b7ce8019b97a1984c1227341b4d4131569bc7c0ab58370a73823ca1737a94e3f75b778e837a0788d565726e4464172b31b8970b55c148ef3f01dc4d58cf057480d8a501aa435ef052de6b61db3d92505fa7b5a3ca6ed5b0d1db1cf17c27a7fe6c3b1d384fa967ca9aa1a2b413306e92c09379933a763adfa7b09b54e17a261b3c3a1d2132cd010292ca73664802fe1ba1bf593bc150189f2c210ab463a5df220a5c682d40baa55a4710b8b64981b3f9d2b8ec86505fda6c4dbb2187731303ca96d4c0b32e724106887b2f6c101d793748660af000a032f3976fbb18e4e1aadedea25b9a3537179936f4307601290293944f9d246bd30946bd14dfd5c3726466fca456d9ba2580b3b20be531332b14303e318a0eb11be91c63e585443876080054df885a9c4b00349868537b4c576756772674042a75ea05b3081e2cad0a07325196536c7803c6870d9a557f5436bda3aa35d87ccbe31248cb06c38a207a22b51c278362b10513a35c2e7c151c0a4364cab48b924b1e6c524a8d32d82d13fe6dba450d0339d538b20cc024a838776979db970bffd64a68c4185d8d209fe7a4409a79cfefcc7f227542ada735b693e80c6884b979b78b42f21bca0e7f712a5997b8d63ccc35b482b84bc12716a14635976866c96d6309b048b871b618a587c3526bc403271c667b1f79516067522d30819c18009abc34308b66b4aeba05b5c5ca82578aad34812d18f33c38a3d735a53f14c80aba70cd7b012b321729a32d618878f568baf91a359c9718cf31b7460729cb354ba1412b33c53bef7c2b2636d11c1b4e1619af047a0770b6d61695899d75e0d9a506046b714215d594c6655361ef80c893154a25fa9836bf8b2148a003cc99717147ef8c87f7979bbe10c1fd595697bec4202eb258199384333574943727e9a8dabc44959f55ccc232720136a8a3759bb20208d237f20862c7c6829dc61b8c59c741701b326729af76b969143c7a9f57c45f18417825e3eac3b3a97b4d4e5ce5d03bbb477b67b95bebc9536206765195452b165bcd3f352b4f6cfee4abb9a41324133568e30884d807a27588bc8272570377f2a9b9bbaf775919907a0113420012faeb64fa222c84d3a16d341939b0023926919ed03b818d675830073e5600acdfb133699c9b091044dd89dab35447d579ac5b78a1bea59c76064a0237e2daea4f4d7267fa5e74e9e3dcb8c00ca4a865eb2827322d962d8a1185fd0b013a7318361d217500886741de92429d22ef444a250001d0020fefce197895d83304099ee5d65b46df0173eeeff8616ab59d21451bd81a8a178002b0007069a9a03040303001b0003020002fe0d00da000001000159002044c80ee6c6d662998eed080a6cf822c90a9b63ab391bd106116ef423d4f2bb7300b0fc2f27c36586bb4d9e7a2da63e22f3c00112cad95e8621e72aac98c6beaf59eab59300f5becc3967b25164cd09f93d112799a5c0ba81b1b008d5ddab75a2a5118ae804191f9e7f6510b2239d2073ac99fa75fdee15eace490e507a3117ac321d026cca59fcd9ffdaf34036ce0b715edbb2f0d5588c0dc09a85a20794fcb7e4b3ab69de5bdb8788d584577c5fbc9b9544542821f4be7bdf5945de82a3ac9edb50a920ebcf6d6fd9e3cfec138e6a49b253002d0002010144cd0005000302683200120000000a000c000a1a1a11ec001d00170018000d0012001004030804040105030805050108060601ff010001000010000e000c02683208687474702f312e31002300000000000d000b00000866702e6c6f63616c4a4a000100"
+}
