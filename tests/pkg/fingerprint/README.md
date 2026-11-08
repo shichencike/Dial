@@ -11,6 +11,7 @@
 | `fp_norm.py` | GREASE 归一化 + JA3 / JA4 / JA4_r / JA4_o 计算的**唯一口径**（被 Python 工具与 C 侧 `dial_fingerprint.c` 共同遵循） |
 | `clienthello.py` | 纯 Python TLS ClientHello 解析（无第三方依赖），输出结构化字段与指纹 |
 | `capture_ch.py` | 录制器：`--chrome` 录 Chrome 基准，`--listen` 录 dialc 候选 |
+| `emit_clienthello.c` | 候选 ClientHello 发射器：直接调 `dial_tls_connect` 让 http 包真实发一个 CH（连接 127.0.0.1、SNI 用域名、ALPN 双 offer），供 `--listen` 录制 |
 | `record_http.py` | 候选 HTTP 行为录制器：`--h1` 录头序、`--h2` 录 H2 帧序与 SETTINGS |
 | `compare_fp.py` | 逐字段比对，输出 `name = pass` / `MISMATCH` / `exemption ... declared` |
 | `check_fingerprint_online.py` | 可选在线校验，**默认不跑、不进 CI**，只打印供人工核对 |
@@ -74,14 +75,43 @@ python3 fp_norm.py && python3 clienthello.py --self-check
 # 2) 基准自比：离线重放内嵌 record hex，全部字段与指纹逐字符一致
 python3 compare_fp.py --baseline chrome_windows_x64.json --self     # 34 项 pass，EXIT=0
 
-# 3) 候选 vs 基准（期 1 起用 dialc 客户端录到的包）
-python3 capture_ch.py --listen 0 --port-file /tmp/fp_port --out /tmp/cand.bin
-python3 compare_fp.py --baseline chrome_windows_x64.json --candidate /tmp/cand.bin \
-    --behavior /tmp/behavior.json
+# 3) 候选 vs 基准（期 1 起；前两行在仓库根执行，后两行在本目录执行）
+#    3a) 编译发射器，链接刚构建的 libhttp.a
+zig cc -target x86_64-linux-gnu tests/pkg/fingerprint/emit_clienthello.c \
+    -I packages/http/src packages/http/lib/x86_64-linux-gnu/libhttp.a -o /tmp/emit_ch
+#    3b) 起录制器（--listen 是开关，端口用 --port 0 让 OS 分配）
+python3 capture_ch.py --listen --port 0 --port-file /tmp/fp_port \
+    --out /tmp/cand.bin --json /tmp/cand.json &
+#    3c) 端口文件就绪后让 http 包发一个 CH（SNI=localhost，录制端不完成握手）
+/tmp/emit_ch "$(cat /tmp/fp_port)" localhost
+#    3d) 逐字段比对；期 2 起再补 --behavior /tmp/behavior.json
+python3 compare_fp.py --baseline chrome_windows_x64.json --candidate /tmp/cand.json
 
 # 4) 可选在线校验（默认跳过）
 python3 check_fingerprint_online.py            # -> online_check = skipped
 ```
+
+## 期 1 实测结果（TLS 段）
+
+外置 patch（`patches/mbedtls-3.6.2-clienthello.patch`）+ 包内集中式 reshape
+（`packages/http/src/dial_clienthello_fp.c`）落地后，用 `emit_clienthello` 录到
+**307 字节** ClientHello：
+
+| 项 | 实测值 |
+| --- | --- |
+| JA4 | `t13d1516h2_8daaf6152771_d8a2da3f94cd` |
+| JA3 MD5 | `0bb7b38b4e71c92b23a4f3dbed3b0489` |
+| cipher / 扩展数 | 16 / 18（去 GREASE 后 15 / 16） |
+| SCSV(`0x00ff`) | 无（基准也不发；mbedTLS 默认会追加，reshape 已去掉） |
+| ALPN | `h2`, `http/1.1`（双 offer，首项 h2） |
+| `has_sni` | true |
+
+`compare_fp.py`：TLS 段 **24 项 pass、0 MISMATCH**；HTTP 行为段 2 项
+`skip = ... = not_provided`（期 2 补齐）；9 项 `exemption ... declared`。
+
+ALPN 双 offer 归期 1 而非期 2：`ja4_a` 的 `h2` 与 `alpn` 字段都是硬断言，
+单 offer 必然留下 MISMATCH。同步在 `dial_http.c` 加了 fail-closed——服务端若
+真协商出 `h2`，HTTP/1.1 层明确报错，绝不拿 H1 解析层去读 H2 帧。
 
 ## 做不到 / 不做（基准 `exemptions` 逐项声明，不许含糊）
 

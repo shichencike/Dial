@@ -631,7 +631,9 @@ DialH2Session *dial_http2_connect(DialString url) {
     if (u.is_https) {
         /* 短超时必须在握手前设：mbedTLS 的 BIO 靠它把超时表达成 WANT_READ。 */
         h2_set_recv_poll(fd);
-        const char *alpn[] = { "h2", NULL };
+        /* 双 offer 与 Chrome 基准一致（首项 h2）；下面仍 fail-closed 要求
+         * 协商结果必须是 h2，绝不因为多 offer 了 http/1.1 就静默降级。 */
+        const char *alpn[] = { "h2", "http/1.1", NULL };
         uint32_t verify = (uint32_t)-1;
         char errbuf[256];
         tls = dial_tls_connect((int)fd, u.host, alpn,

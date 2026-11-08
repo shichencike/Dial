@@ -712,7 +712,9 @@ static DialHttpConn *dh_connect_raw(const char *url) {
 
     /* https：在已连上的 TCP 上做 TLS 1.3 握手（mbedTLS 负责，证书校验 fail-closed）。 */
     if (u.is_https) {
-        const char *alpn[] = { "http/1.1", NULL };  /* HTTP/1.1 层只 offer http/1.1；HTTP/2 层另 offer h2 */
+        /* 浏览器一致性画像：双 offer，首项必须是 h2（JA4 a 段的 h2 取自首 ALPN）。
+         * 服务端若真选了 h2，下面 fail-closed 拒绝，绝不拿 HTTP/1.1 解析层去读 H2 帧。 */
+        const char *alpn[] = { "h2", "http/1.1", NULL };
         uint32_t verify = (uint32_t)-1;
         char tls_err[256];
         DialTls *t = dial_tls_connect((int)fd, u.host, alpn,
@@ -732,6 +734,18 @@ static DialHttpConn *dh_connect_raw(const char *url) {
         g_tls_version[sizeof(g_tls_version) - 1] = '\0';
         g_tls_verify = verify;
         const char *alpn_neg = dial_tls_alpn(t);
+        if (alpn_neg && alpn_neg[0] && strcmp(alpn_neg, "http/1.1") != 0) {
+            /* ALPN 双 offer 下服务端选了 h2：HTTP/1.1 层不能解析 HTTP/2 帧，
+             * 明确失败（fail-closed），而不是读出一堆乱码或损坏连接状态。 */
+            dial_tls_free(t);
+            DH_CLOSE(fd);
+            c->fd = DH_INVALID_SOCKET;
+            free(c);
+            dh_set_error(DIAL_HTTP_ERR_UNSUPPORTED,
+                         "服务端 ALPN 协商出 h2，HTTP/1.1 层拒绝解析 HTTP/2 帧");
+            dh_url_free(&u);
+            return NULL;
+        }
         strncpy(g_tls_alpn, alpn_neg ? alpn_neg : "", sizeof(g_tls_alpn) - 1);
         g_tls_alpn[sizeof(g_tls_alpn) - 1] = '\0';
     }

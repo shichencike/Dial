@@ -17,8 +17,10 @@
  *     路径（内网 / 私有 CA 场景）。
  *   - 复用调用方的 TCP 套接字：通过 mbedTLS 的自定义 BIO（f_send/f_recv）
  *     直接在我们已建立的 socket 上收发，不引入 mbedTLS 自己的联网层。
- *   - SNI 严格等于对端主机名；ALPN 由调用方决定（HTTP/1.1 层 offer
- *     `http/1.1`，HTTP/2 层 offer `h2`），协商结果由各层自行校验，
+ *   - SNI 严格等于对端主机名；ALPN 由调用方决定。浏览器一致性画像要求
+ *     两层都 offer 双协议 `{"h2", "http/1.1", NULL}`（首项必须是 h2，JA4 a 段
+ *     的 `h2` 取自首 ALPN）；协商结果由各层自行校验：HTTP/2 层只接受 `h2`，
+ *     HTTP/1.1 层只接受 `http/1.1` 或未协商（未协商 ALPN 的老服务器走 H1），
  *     绝不静默降级为不会说的协议。
  *
  * 注意：本层只负责「在已连上的 TCP 之上做 TLS」；TCP 连接本身由 dial_http.c
@@ -30,7 +32,7 @@ typedef struct DialTls DialTls;
 /*
  * 在已连上的 TCP 套接字 fd 之上建立 TLS 客户端会话。
  *   host     —— SNI 与证书校验的主机名（必填）。
- *   alpn     —— 以 NULL 结尾的协议名数组（如 {"http/1.1", NULL}），可为 NULL（不协商 ALPN）。
+ *   alpn     —— 以 NULL 结尾的协议名数组（如 {"h2", "http/1.1", NULL}），可为 NULL（不协商 ALPN）。
  *   ca_path  —— 自定义 CA 文件或目录（PEM）；为 NULL 时加载系统根证书库。
  *   verify_result —— 输出握手后的证书校验结果位掩码（0 = 通过）。
  *   errbuf/errlen —— 失败时的中文原因（至少为 1 字节，会被 '\0' 终止）。

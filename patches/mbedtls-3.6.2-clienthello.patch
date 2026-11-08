@@ -1,0 +1,35 @@
+--- a/library/ssl_client.c
++++ b/library/ssl_client.c
+@@ -21,6 +21,11 @@
+ #include "ssl_tls13_keys.h"
+ #include "ssl_debug_helpers.h"
+ 
++/* Dial browser-fingerprint reshape hook (external patch, see patches/README.md).
++ * This is the ONLY upstream header touched; the hook call itself lives at the
++ * end of ssl_write_client_hello_body(). */
++#include "dial_clienthello_fp.h"
++
+ #if defined(MBEDTLS_SSL_SERVER_NAME_INDICATION)
+ MBEDTLS_CHECK_RETURN_CRITICAL
+ static int ssl_write_hostname_ext(mbedtls_ssl_context *ssl,
+@@ -692,6 +697,20 @@
+     }
+ 
+     *out_len = (size_t) (p - buf);
++
++    /* Dial ClientHello reshape hook. Runs after the body is complete and
++     * before the caller computes the handshake checksum / writes the
++     * handshake header. Fail-safe: on any error dial_fp_reshape_clienthello()
++     * leaves the buffer untouched and mbedTLS native ClientHello goes out. */
++    {
++        size_t fp_len = 0;
++        if (dial_fp_reshape_clienthello(buf, *out_len,
++                                        (size_t) (end - buf),
++                                        &fp_len) == 0) {
++            *out_len = fp_len;
++        }
++    }
++
+     return 0;
+ }
+ 
