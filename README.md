@@ -4681,7 +4681,7 @@ var back: rawptr<byte> = bitcast<rawptr<byte>>(addr);  // 整数 -> 指针
   - `bitcast`：地址 ↔ 整数往返值 + 位宽不一致必须编译期拒绝；
 - **5 个新增负向用例**：`@export` 签名含 `string`、`volatile` 修饰非指针、
   `bitcast` 位宽不一致、`bitcast` 指针 ↔ 聚合类型、`packed` 后跟错关键字；
-- `bash tests/run_tests.sh` **A–P 全套通过（360 ✅ / 0 ❌）**，
+- `bash tests/run_tests.sh` **A–Z 二十六组全套通过（480 ✅ / 0 ❌）**，
   `tools/cve_check.py` 8/8、三平台 `zig cc` 编译通过。
 
 > **本轮交付范围**：按约定只做**本地提交**，不推送 GitHub、不打 tag、不发 Release。

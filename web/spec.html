@@ -7546,7 +7546,7 @@ var back: rawptr&lt;byte&gt; = bitcast&lt;rawptr&lt;byte&gt;&gt;(addr);  // 整�
 <li><code>bitcast</code>：地址 ↔ 整数往返值 + 位宽不一致必须编译期拒绝；</li>
 <li><strong>5 个新增负向用例</strong>：<code>@export</code> 签名含 <code>string</code>、<code>volatile</code> 修饰非指针、
   <code>bitcast</code> 位宽不一致、<code>bitcast</code> 指针 ↔ 聚合类型、<code>packed</code> 后跟错关键字；</li>
-<li><code>bash tests/run_tests.sh</code> <strong>A–P 全套通过（360 ✅ / 0 ❌）</strong>，
+<li><code>bash tests/run_tests.sh</code> <strong>A–Z 二十六组全套通过（480 ✅ / 0 ❌）</strong>，
   <code>tools/cve_check.py</code> 8/8、三平台 <code>zig cc</code> 编译通过。</li>
 </ul>
 <blockquote>

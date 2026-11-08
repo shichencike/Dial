@@ -392,7 +392,7 @@
 - **所有 Dial 函数的 LLVM 签名统一为 C ABI 宽度**：`bool` 内部 i1 → 边界 i32（C 默认整型提升），
   `byte` 内部 i64 → 边界 i8（C 的 `uint8_t`）；函数体内部仍是 i1 / i64，逻辑零改动。
   函数入口 / 出口 / 调用点 / HOF thunk / spawn thunk 五处做**对称** `abi_adapt` 转换，
-  靠 A–P 全量回归兜底。这是「C 能安全调用任意 Dial 函数」的前提。
+  靠 A–Z 全量回归兜底。这是「C 能安全调用任意 Dial 函数」的前提。
 - `STDLIB_ABI` **4 → 5**（新增 `stdlib/dial_ffi.c` 四个数据总线函数），
   编译器版本 `1.3.0 → 1.4.0`；`make_stdlib_pkg.py` 默认 `--abi 5`、CI `--abi 5`。
 - 系统库（libc / libm）继续由 C 编译器**默认动态解析**，不进 `link`、不进 LTO 链路；
