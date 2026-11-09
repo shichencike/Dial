@@ -1,0 +1,205 @@
+// gui.dialpkg 控件框架层端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 与 use_gui.dial 完全独立：**不创建任何 GuiPainter**，因此不会碰
+// crc_offscreen = 4007435570 这个像素级回归基准。
+//
+// 立场上严格遵循「C 管 C 的，ARC 管 ARC 的」：
+//   - 绝不注册回调，事件由 Dial 侧主动 poll/wait 后读 packed 纯值块；
+//   - 块里两个字符串字段是 C 侧借用的 const char*，一律 string_from_cstr
+//     复制成自己的 ARC string，绝不长期持有；
+//   - 控件树是通用 Box：这里只验结构 / 布局 / 命中，不画任何成品外观。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+// 与 C 侧 GuiWidgetEvent（__attribute__((packed))）逐字节一致。
+// 三目标均 64 位：Dial int / rawptr 都是 8 字节，故 11 个纯值 + 2 个借用指针 = 104 字节。
+packed extern struct GuiWidgetEvent {
+    kind: int, x: int, y: int, button: int, key: int, w: int, h: int,
+    local_x: int, local_y: int, tag: int, userdata: int,
+    win_title: rawptr<byte>, widget_id: rawptr<byte>
+}
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    // ---- 0) packed 事件块布局：编译期内建 vs C 侧 _Static_assert 双向锁死 ----
+    expect_int(sizeof<GuiWidgetEvent>(), 104, "event_size_104");
+    expect_int(alignof<GuiWidgetEvent>(), 1, "event_align_packed");
+    expect_int(offsetof<GuiWidgetEvent>(kind), 0, "event_off_kind");
+    expect_int(offsetof<GuiWidgetEvent>(local_x), 56, "event_off_local_x");
+    expect_int(offsetof<GuiWidgetEvent>(win_title), 88, "event_off_win_title");
+    expect_int(offsetof<GuiWidgetEvent>(widget_id), 96, "event_off_widget_id");
+
+    // ---- 1) 独立纯内存树：不连显示服务器，无 DISPLAY 也能完整跑 ----------
+    var root: GuiWidget = dial_gui_widget_tree(200, 100);
+    expect(!is_null(root), "widget_tree_new");
+    expect_int(dial_gui_widget_width(root), 200, "widget_tree_w");
+    expect_int(dial_gui_widget_height(root), 100, "widget_tree_h");
+    expect(is_null(dial_gui_widget_parent(root)), "widget_root_no_parent");
+
+    var a: GuiWidget = dial_gui_widget_add(root);
+    var b: GuiWidget = dial_gui_widget_add(root);
+    var c: GuiWidget = dial_gui_widget_add(root);
+    expect(!is_null(a), "widget_add_a");
+    expect(!is_null(dial_gui_widget_parent(a)), "widget_parent");
+    expect(!is_null(dial_gui_widget_first_child(root)), "widget_first_child");
+    expect(!is_null(dial_gui_widget_next_sibling(a)), "widget_next_sibling");
+    expect(is_null(dial_gui_widget_next_sibling(c)), "widget_last_sibling");
+    expect_int(dial_gui_widget_visible(a), 1, "widget_visible_default");
+
+    // ---- 2) 几何 / 纯值标记 / id 的 ARC 复制 -------------------------------
+    // 刻意用**独立树**：set_rect 会把 req_h 变成固定尺寸，若和下面的 VBOX
+    // 树共用，弹性等分的期望值就被污染了（布局按「固定优先」扣减）。
+    var root0: GuiWidget = dial_gui_widget_tree(100, 100);
+    var q: GuiWidget = dial_gui_widget_add(root0);
+    expect_int(dial_gui_widget_set_rect(q, 7, 9, 20, 30), 0, "widget_set_rect");
+    expect_int(dial_gui_widget_x(q), 7, "widget_x");
+    expect_int(dial_gui_widget_y(q), 9, "widget_y");
+    expect_int(dial_gui_widget_width(q), 20, "widget_width");
+    expect_int(dial_gui_widget_height(q), 30, "widget_height");
+
+    dial_gui_widget_set_tag(q, 1234);
+    expect_int(dial_gui_widget_tag(q), 1234, "widget_tag");
+    dial_gui_widget_set_userdata(q, 99);
+    expect_int(dial_gui_widget_userdata(q), 99, "widget_userdata");
+
+    // id：C 侧 strdup 自有副本；Dial 侧必须 string_from_cstr 复制成 ARC string。
+    expect_int(dial_gui_widget_set_id(q, "btn_ok"), 0, "widget_set_id");
+    var idp: rawptr<byte> = dial_gui_widget_id(q);
+    var ids: string = string_from_cstr(idp);
+    expect_str(ids, "btn_ok", "widget_id_arc_copy");
+    dial_gui_widget_tree_free(root0);
+
+    // ---- 3) 摘除 + 防悬垂 --------------------------------------------------
+    var extra: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_remove(extra), 0, "widget_remove");
+    expect(is_null(dial_gui_widget_next_sibling(c)), "widget_remove_relink");
+    expect_int(dial_gui_widget_set_tag(extra, 1), -1, "widget_dangling_rejected");
+    dial_gui_clear_error();
+
+    // ---- 4) VBOX 布局：padding / gap / 弹性等分 / 幂等 ---------------------
+    expect_int(dial_gui_widget_set_layout(root, 1), 0, "widget_set_layout_vbox");
+    expect_int(dial_gui_widget_set_padding(root, 10), 0, "widget_set_padding");
+    expect_int(dial_gui_widget_set_gap(root, 5), 0, "widget_set_gap");
+    expect_int(dial_gui_widget_layout_apply(root, 200, 100), 0, "widget_layout_apply");
+    // 内容区 80 高，扣 2 个 gap 共 10，剩 70 / 3 = 23（整数除法余量舍去）。
+    expect_int(dial_gui_widget_height(a), 23, "vbox_flex_height");
+    expect_int(dial_gui_widget_y(b), 38, "vbox_gap_position");
+    expect_int(dial_gui_widget_width(a), 180, "vbox_cross_width");
+    // 幂等：从 req_* 重算，不把上一轮弹性尺寸误当固定尺寸。
+    expect_int(dial_gui_widget_layout_apply(root, 200, 100), 0, "widget_layout_apply_twice");
+    expect_int(dial_gui_widget_height(a), 23, "vbox_idempotent");
+    expect_int(dial_gui_widget_set_layout(root, 9), -1, "widget_bad_layout_rejected");
+
+    // 固定尺寸优先扣减：d 固定 30 高，e 独占余下 70。
+    var root2: GuiWidget = dial_gui_widget_tree(100, 100);
+    var d: GuiWidget = dial_gui_widget_add(root2);
+    var e: GuiWidget = dial_gui_widget_add(root2);
+    dial_gui_widget_set_layout(root2, 1);
+    dial_gui_widget_set_rect(d, 0, 0, 0, 30);
+    expect_int(dial_gui_widget_layout_apply(root2, 100, 100), 0, "vbox_fixed_apply");
+    expect_int(dial_gui_widget_height(d), 30, "vbox_fixed_height");
+    expect_int(dial_gui_widget_height(e), 70, "vbox_fixed_flex");
+    dial_gui_widget_tree_free(root2);
+
+    // HBOX：100 宽，gap 10，2 个弹性子各 45。
+    var root3: GuiWidget = dial_gui_widget_tree(100, 40);
+    var f: GuiWidget = dial_gui_widget_add(root3);
+    var g: GuiWidget = dial_gui_widget_add(root3);
+    dial_gui_widget_set_layout(root3, 2);
+    dial_gui_widget_set_gap(root3, 10);
+    expect_int(dial_gui_widget_layout_apply(root3, 100, 40), 0, "hbox_apply");
+    expect_int(dial_gui_widget_width(f), 45, "hbox_flex_width");
+    expect_int(dial_gui_widget_x(g), 55, "hbox_gap_position");
+    dial_gui_widget_tree_free(root3);
+
+    // ---- 5) 命中测试：ABS + 后加子优先 + visible --------------------------
+    var root4: GuiWidget = dial_gui_widget_tree(100, 100);
+    var box1: GuiWidget = dial_gui_widget_add(root4);
+    dial_gui_widget_set_rect(box1, 7, 9, 20, 30);
+    dial_gui_widget_set_tag(box1, 1234);
+    expect_int(dial_gui_widget_layout_apply(root4, 100, 100), 0, "abs_apply");
+    expect_int(dial_gui_widget_tag(dial_gui_widget_hit(root4, 10, 10)), 1234, "hit_box1");
+    expect(is_null(dial_gui_widget_hit(root4, 200, 200)), "hit_outside_null");
+
+    var box2: GuiWidget = dial_gui_widget_add(root4);
+    dial_gui_widget_set_rect(box2, 8, 10, 20, 20);
+    dial_gui_widget_set_tag(box2, 5678);
+    expect_int(dial_gui_widget_layout_apply(root4, 100, 100), 0, "abs_apply_nested");
+    // (10,10) 同时落在 box1 与 box2，后加子优先。
+    expect_int(dial_gui_widget_tag(dial_gui_widget_hit(root4, 10, 10)), 5678, "hit_last_child_first");
+    // (25,35) 只在 box1 内。
+    expect_int(dial_gui_widget_tag(dial_gui_widget_hit(root4, 25, 35)), 1234, "hit_box1_only");
+
+    dial_gui_widget_set_visible(box2, 0);
+    expect_int(dial_gui_widget_visible(box2), 0, "widget_visible_off");
+    // 不可见节点不参与命中，回到 box1。
+    expect_int(dial_gui_widget_tag(dial_gui_widget_hit(root4, 10, 10)), 1234, "hit_invisible_skipped");
+
+    // 独立树释放后再访问必须被防悬垂校验拦下。
+    dial_gui_widget_tree_free(root4);
+    dial_gui_widget_tree_free(root);
+
+    // ---- 6) 真实窗口 + 主动事件分发（需要 DISPLAY / Xvfb）-----------------
+    var app: GuiApp = dial_gui_app_new();
+    if (is_null(app)) {
+        print("widget_window = skipped [" + dial_gui_last_error_msg() + "]");
+        print("widget_done = true");
+        return 0;
+    }
+
+    var win: GuiWindow = dial_gui_window_new(app, "Dial Widget demo", 200, 100);
+    expect(!is_null(win), "widget_window_new");
+    if (is_null(win)) {
+        dial_gui_app_free(app);
+        print("widget_done = true");
+        return 0;
+    }
+
+    var wroot: GuiWidget = dial_gui_widget_tree(200, 100);
+    var btn: GuiWidget = dial_gui_widget_add(wroot);
+    dial_gui_widget_set_rect(btn, 0, 0, 100, 50);
+    dial_gui_widget_set_id(btn, "btn_ok");
+    dial_gui_widget_set_tag(btn, 4321);
+    expect_int(dial_gui_widget_layout_apply(wroot, 200, 100), 0, "widget_layout_window");
+    expect_int(dial_gui_window_set_root(win, wroot), 0, "window_set_root");
+    // 挂窗后树归窗口所有，禁止再 widget_tree_free（防二次释放）。
+    expect_int(dial_gui_widget_tree_free(wroot), -1, "widget_tree_free_attached_rejected");
+    var wid: string = string_from_cstr(dial_gui_widget_id(btn));
+    expect_str(wid, "btn_ok", "widget_id_window_tree");
+
+    // 主动分发：quit → poll 产 QUIT，Dial 侧读 packed 纯值块。
+    dial_gui_app_quit(app);
+    expect_int(dial_gui_app_poll(app), 9, "widget_quit_event");
+
+    var raw: rawptr<byte> = dial_gui_event_data(app);
+    var ev: rawptr<GuiWidgetEvent> = ptr_cast<rawptr<GuiWidgetEvent>>(raw);
+    expect_int(ev.kind, 9, "event_kind_quit");
+    expect_int(ev.tag, 0, "event_tag_no_widget");
+    expect_int(ev.local_x, 0, "event_local_x_no_widget");
+    // QUIT 是窗口级事件：两个借用指针为 NULL，string_from_cstr(NULL) 必须安全返回空串。
+    expect(is_null(dial_gui_event_widget(app)), "event_widget_null_on_quit");
+    expect_str(string_from_cstr(ev.win_title), "", "event_win_title_null_borrow");
+    expect_str(string_from_cstr(ev.widget_id), "", "event_widget_id_null_borrow");
+
+    // 真实鼠标注入依赖 XTest / xdotool，本轮不引入；命中逻辑由上面的
+    // 无头纯 C 树断言（hit_*）完整覆盖，如实标注，不伪装成实窗验证。
+    print("widget_hit_injection = skipped [需要 XTest/xdotool，本轮由无头树断言覆盖]");
+
+    dial_gui_window_close(win);   // 同时释放 wroot
+    dial_gui_app_free(app);
+    print("widget_window = ok");
+    print("widget_done = true");
+    return 0;
+}

@@ -52,9 +52,11 @@
 #      （MD5/SHA-1/SHA-256/SHA-512/SHA3-256，标准向量核对）+ Base64 编解码 +
 #      HMAC-SHA256，string 与 bytes 双入口、含内嵌 NUL 的二进制数据、严格错误路径，
 #      三平台零警告构建（v1.04 增补）。
-#   AA. 手搓 GUI 地基：gui.dialpkg 端到端——三平台真实现（X11+XShm+XRender /
-#      Win32 GDI）/ 零链接期依赖（dlopen / LoadLibraryA）/ 纯内存光栅化器像素级
-#      CRC 回归 / 覆盖面积 AA / 内置点阵与 TrueType 双字体 / Xvfb 实窗上屏与
+#   AA. 手搓 GUI 地基 + 控件框架层：gui.dialpkg 端到端——三平台真实现
+#      （X11+XShm+XRender / Win32 GDI）/ 零链接期依赖（dlopen / LoadLibraryA）/
+#      纯内存光栅化器像素级 CRC 回归 / 覆盖面积 AA / 内置点阵与 TrueType 双字体 /
+#      Widget 树 + 绝对·VBox·HBox 布局 + 命中测试 + packed 事件纯值块
+#      （sizeof/offsetof 双向锁死 / string_from_cstr 复制成 ARC）/ Xvfb 实窗上屏与
 #      事件循环；无显示环境自动降级为「窗口路径明确跳过」并如实标注（v1.10 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
@@ -1866,9 +1868,9 @@ else zbad "use_crypto.dial 编译失败"; tail -8 "${TMP}/z_comp.log"; fi
 zpass "crypto 包已卸载"
 
 # ---------------------------------------------------------------------------
-# AA) 手搓 GUI 地基：gui.dialpkg 端到端（v1.10 增补）
+# AA) 手搓 GUI 地基 + 控件框架层：gui.dialpkg 端到端（v1.10 增补）
 # ---------------------------------------------------------------------------
-echo "== AA) 手搓 GUI 地基：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC 回归，v1.10 增补） =="
+echo "== AA) 手搓 GUI 地基 + 控件框架层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块，v1.10 增补） =="
 aapass() { echo "  ✅ $1"; }
 aabad()  { echo "  ❌ $1"; fail=1; }
 
@@ -1924,6 +1926,28 @@ if "$DIALC" build tests/pkg/use_gui.dial -o "${TMP}/use_gui" >"${TMP}/aa_comp.lo
     fi
 else aabad "use_gui.dial 编译失败"; tail -12 "${TMP}/aa_comp.log"; fi
 
+# 4b) 控件框架层 demo：独立纯内存树不连显示服务器，因此无 DISPLAY 也能把
+#     布局 / 命中 / packed 事件块布局 / string_from_cstr 全部跑完。
+#     刻意不创建 GuiPainter，绝不触碰 use_gui.dial 的 crc_offscreen 基准。
+if "$DIALC" build tests/pkg/use_gui_widget.dial -o "${TMP}/use_gui_widget" >"${TMP}/aa_wcomp.log" 2>&1; then
+    aapass "use_gui_widget.dial（控件框架层）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_widget" >"${TMP}/aa_wnodisplay.log" 2>&1
+    aa_w_no_exit=$?
+    aa_w_bad=$(grep -c ' = bad' "${TMP}/aa_wnodisplay.log" || true)
+    if [ "$aa_w_no_exit" -eq 0 ] && [ "$aa_w_bad" -eq 0 ] \
+       && grep -qF 'event_size_104 = ok' "${TMP}/aa_wnodisplay.log" \
+       && grep -qF 'widget_id_arc_copy = ok' "${TMP}/aa_wnodisplay.log" \
+       && grep -qF 'vbox_idempotent = ok' "${TMP}/aa_wnodisplay.log" \
+       && grep -qF 'hit_last_child_first = ok' "${TMP}/aa_wnodisplay.log" \
+       && grep -qF 'widget_window = skipped [' "${TMP}/aa_wnodisplay.log" \
+       && grep -qF 'widget_done = true' "${TMP}/aa_wnodisplay.log"; then
+        aapass "无 DISPLAY：控件树 / 三种布局 / 命中 / packed 布局双向断言 / ARC 字符串复制全绿"
+    else
+        aabad "控件框架层无 DISPLAY 路径断言失败（exit=$aa_w_no_exit bad=$aa_w_bad）"
+        tail -30 "${TMP}/aa_wnodisplay.log"
+    fi
+else aabad "use_gui_widget.dial 编译失败"; tail -12 "${TMP}/aa_wcomp.log"; fi
+
 # 5) 有 Xvfb 时验证真实窗口（XShm 离屏 + XRender 合成 + 上屏 / 过滤 / 事件循环）；
 #    无 Xvfb 的环境如实打印跳过，绝不把「未验证」写成「通过」。
 if command -v xvfb-run >/dev/null 2>&1; then
@@ -1945,6 +1969,29 @@ if command -v xvfb-run >/dev/null 2>&1; then
     fi
 else
     echo "  ⚠️  本环境无 xvfb-run：真实窗口路径未实机验证（如实标注，不伪装通过）"
+fi
+
+# 5b) 控件框架层实窗：挂树 / QUIT 主动分发 / packed 纯值块 /
+#     string_from_cstr 对 NULL 借用指针安全（返回空串）。
+if command -v xvfb-run >/dev/null 2>&1; then
+    if xvfb-run -a -s "-screen 0 1024x768x24 +extension MIT-SHM +extension RENDER" \
+        "${TMP}/use_gui_widget" >"${TMP}/aa_wxvfb.log" 2>&1; then
+        aa_w_bad2=$(grep -c ' = bad' "${TMP}/aa_wxvfb.log" || true)
+        if [ "$aa_w_bad2" -eq 0 ] \
+           && grep -qF 'widget_window = ok' "${TMP}/aa_wxvfb.log" \
+           && grep -qF 'window_set_root = ok' "${TMP}/aa_wxvfb.log" \
+           && grep -qF 'event_kind_quit = ok' "${TMP}/aa_wxvfb.log" \
+           && grep -qF 'event_win_title_null_borrow = ok' "${TMP}/aa_wxvfb.log" \
+           && grep -qF 'widget_done = true' "${TMP}/aa_wxvfb.log"; then
+            aapass "Xvfb 实窗：window_set_root / QUIT 主动分发 / packed 纯值块 / 借用指针空串全通过"
+        else
+            aabad "控件框架层 Xvfb 实窗断言失败（bad=$aa_w_bad2）"; tail -30 "${TMP}/aa_wxvfb.log"
+        fi
+    else
+        aabad "Xvfb 下 use_gui_widget 运行失败"; tail -20 "${TMP}/aa_wxvfb.log"
+    fi
+else
+    echo "  ⚠️  本环境无 xvfb-run：控件框架层实窗路径未实机验证（如实标注，不伪装通过）"
 fi
 
 # 6) 清理：卸包，避免污染后续测试与用户环境。

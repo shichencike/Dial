@@ -514,7 +514,18 @@ static int pump(GuiAppImpl *app, int blocking, int timeout_ms) {
     gui_w32_event e;
     if (!q_pop(&e)) return GUI_EV_NONE;
     GuiWindowImpl *w = find_win_obj(app, e.hwnd);
-    gui_core_emit(app, e.kind, e.x, e.y, e.button, e.key, e.w, e.h, w);
+    /*
+     * 命中测试刻意留在 pump（Dial 的 poll/wait 调用线程），绝不进 wndproc：
+     * wndproc 是系统回调边界，在那里碰 Dial 侧状态会引入跨线程 ARC 风险。
+     * 这里只调纯 C 的 gui_widget_hit，零平台符号、零 Dial 回调。
+     */
+    GuiWidgetImpl *hit = NULL;
+    if (w && w->root &&
+        (e.kind == GUI_EV_MOUSE_PRESS || e.kind == GUI_EV_MOUSE_RELEASE ||
+         e.kind == GUI_EV_MOUSE_MOVE)) {
+        hit = gui_widget_hit(w->root, e.x, e.y, NULL, NULL);
+    }
+    gui_core_emit(app, e.kind, e.x, e.y, e.button, e.key, e.w, e.h, w, hit);
     return e.kind;
 }
 

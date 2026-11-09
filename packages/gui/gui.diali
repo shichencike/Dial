@@ -1,4 +1,5 @@
-// gui.dialpkg —— 手写 GUI 地基（窗 / 事件循环 / 2D 绘图），Dial 语言接口签名
+// gui.dialpkg —— 手写 GUI 地基 + 控件框架层（窗 / 事件 / 2D 绘图 / Widget 树 /
+// 布局 / 命中测试 / 主动事件分发），Dial 语言接口签名
 //
 // 本文件是**唯一**的对外契约：包内机器码的实现可以变，但这里的签名一变，
 // 依赖它的程序就得重编。签名文件带 SHA256 校验，被篡改会在链接期被拦下。
@@ -29,9 +30,23 @@
 //   8 CLOSE       9 QUIT
 // 取事件字段用下面的 dial_gui_event_* 访问器（每 App 一份最近事件槽）。
 //
-// 本轮范围：地基层（Application / Window / Painter / Event / Font）。
-// 控件树、布局管理器与信号槽是下一轮规划，**不写进本契约**——把未实现的
-// 函数写进 .diali 会让用户 import 后链接失败，那是制造漂移而非预留接口。
+// 已实现范围（两层，全部有真实现，不是预留接口）：
+//   1) 地基层：Application / Window / Painter / Event / Font（55 个函数）；
+//   2) 控件框架层：GuiWidget 树 + 绝对 / VBox / HBox 布局 + 命中测试 +
+//      主动事件分发（下面的 28 个函数）。
+// 控件一律是**通用 Box**，包不提供成品外观（无 Button / Label / Panel 渲染），
+// 由 Dial 侧用 GuiPainter 自绘。
+//
+// 事件分发立场（内存宪法）：**绝不做 C → Dial 反向回调**。Dial 无 GC，
+// 全靠 ARC + 手动释放；C 侧若在平台线程直接调 Dial 函数，跨线程引用计数
+// 管理会失控。因此 C 侧只把事件写成一个 **packed struct 纯值块**，由 Dial
+// 侧主动 poll/wait 后读走：纯值字段直接读，带字符串的字段是 C 侧**借用**
+// 的 const char*，Dial 侧必须用 string_from_cstr 复制成自己的 ARC 对象。
+// C 管 C 的，ARC 管 ARC 的，谁也不越界，零隐式开销。
+//
+// 仍未实现、因此**不写进本契约**：成品控件外观、信号槽、富文本编辑、图片
+// 解码、Direct2D。把未实现的函数写进 .diali 会让用户 import 后链接失败，
+// 那是制造漂移而非预留接口——这条原则两层一律适用。
 
 /// GUI 应用上下文（不透明）。持有显示连接、窗口表、事件循环状态与最近事件槽。
 /// 用完必须 dial_gui_app_free 释放——不透明句柄不进 ARC。
@@ -47,6 +62,11 @@ type GuiPainter;
 /// 字体句柄（不透明）。内置点阵由 dial_gui_font_default 返回，
 /// TrueType 由 dial_gui_font_load 加载；用完一律 dial_gui_font_free。
 type GuiFont;
+
+/// 控件句柄（不透明，通用 Box）。裸指针，不进 ARC：独立树必须
+/// dial_gui_widget_tree_free 显式释放；挂到窗口后由窗口拥有，随
+/// dial_gui_window_close 释放，此后不得再 free（同画布的 ext_pixels 口径）。
+type GuiWidget;
 
 // ---- 应用 / 事件循环 --------------------------------------------------
 
@@ -224,3 +244,101 @@ extern fn dial_gui_clear_error(): int;
 
 /// 当前编译目标的后端名："x11" / "win32"。
 extern fn dial_gui_backend(): string;
+
+// ---- 控件框架层：Widget 树（通用 Box，无成品外观）----------------------
+//
+// 生命周期铁律：GuiWidget 是裸指针，不进 ARC。
+//   - dial_gui_widget_tree 建的是**独立纯内存树**，不连显示服务器，
+//     因此无 DISPLAY 环境也能完整跑布局 / 命中测试；
+//   - 独立树用完必须 dial_gui_widget_tree_free；
+//   - 挂到窗口（dial_gui_window_set_root）后由窗口拥有，随 window_close 释放，
+//     此后再调 widget_tree_free 是二次释放，属于使用者责任。
+// 所有返回 int 的函数：0 成功 / -1 失败（原因见错误槽）；返回句柄的失败返回空句柄。
+
+/// 建一棵独立纯内存控件树，根 Box 的初始尺寸为 w×h。失败返回空句柄。
+extern fn dial_gui_widget_tree(w: int, h: int): GuiWidget;
+
+/// 释放整棵独立树（含根，后序递归）。挂过窗口的树不要调用。返回 0 成功。
+extern fn dial_gui_widget_tree_free(root: GuiWidget): int;
+
+/// 在 parent 下追加一个子 Box 并返回它（新子节点默认可见、无 id、布局 ABS）。
+extern fn dial_gui_widget_add(parent: GuiWidget): GuiWidget;
+
+/// 把 w 从父节点摘除并释放其整个子树。根不可摘除（返回 -1）。
+extern fn dial_gui_widget_remove(w: GuiWidget): int;
+
+/// 父节点（根返回空句柄）。
+extern fn dial_gui_widget_parent(w: GuiWidget): GuiWidget;
+/// 第一个子节点（无子返回空句柄）。
+extern fn dial_gui_widget_first_child(w: GuiWidget): GuiWidget;
+/// 下一个兄弟节点（末尾返回空句柄）。
+extern fn dial_gui_widget_next_sibling(w: GuiWidget): GuiWidget;
+
+// ---- 控件框架层：几何 / 可见 / id / 纯值标记 ---------------------------
+
+/// 设置 Box 相对父节点的矩形。w/h > 0 视为**固定尺寸**，布局时优先保留；
+/// w 或 h <= 0 表示该轴交给父布局弹性分配。
+extern fn dial_gui_widget_set_rect(w: GuiWidget, x: int, y: int, ww: int, hh: int): int;
+extern fn dial_gui_widget_x(w: GuiWidget): int;
+extern fn dial_gui_widget_y(w: GuiWidget): int;
+extern fn dial_gui_widget_width(w: GuiWidget): int;
+extern fn dial_gui_widget_height(w: GuiWidget): int;
+
+/// 可见性：不可见的 Box 不参与布局，也不参与命中测试。
+extern fn dial_gui_widget_set_visible(w: GuiWidget, v: int): int;
+extern fn dial_gui_widget_visible(w: GuiWidget): int;
+
+/// 设置 id（C 侧 strdup 自有副本，输入 Dial string 不被接管）。
+extern fn dial_gui_widget_set_id(w: GuiWidget, id: string): int;
+/// 取 id 的 **C 侧借用指针**（const char*，未设置时为空串）。
+/// 所有权在 C：必须立刻 string_from_cstr 复制成自己的 ARC string，
+/// 绝不长期持有；控件释放后该指针悬垂。
+extern fn dial_gui_widget_id(w: GuiWidget): rawptr<byte>;
+
+/// tag / userdata 一律是 int64 **纯值键**，供 Dial 侧自建 map 映射控件状态。
+/// 包内绝不存 Dial 指针、绝不碰 ARC（零隐式开销边界）。
+extern fn dial_gui_widget_set_tag(w: GuiWidget, t: int): int;
+extern fn dial_gui_widget_tag(w: GuiWidget): int;
+extern fn dial_gui_widget_set_userdata(w: GuiWidget, u: int): int;
+extern fn dial_gui_widget_userdata(w: GuiWidget): int;
+
+// ---- 控件框架层：布局 -------------------------------------------------
+
+/// 布局模式：0 ABS（子节点用自身 x/y/w/h，相对父）/ 1 VBOX（纵向弹性等分）
+/// / 2 HBOX（横向弹性等分）。非法值返回 -1。
+extern fn dial_gui_widget_set_layout(w: GuiWidget, mode: int): int;
+/// 内容区四边内边距（像素，负数按 0）。
+extern fn dial_gui_widget_set_padding(w: GuiWidget, n: int): int;
+/// 相邻子节点间距（像素，负数按 0）。
+extern fn dial_gui_widget_set_gap(w: GuiWidget, n: int): int;
+
+/// 以 w×h 为根尺寸前序重算整棵树：先定父几何，再递归子节点。
+/// 纯整数运算，固定尺寸优先扣减，弹性余量整数除法向下取整；**幂等**，
+/// 重复调用不会叠加 padding / gap。
+extern fn dial_gui_widget_layout_apply(root: GuiWidget, w: int, h: int): int;
+
+// ---- 控件框架层：命中测试 / 挂窗 ---------------------------------------
+
+/// 在树中做点命中：返回包含 (x,y) 的**最深可见** Box，后加子优先
+/// （与 Dial 侧自绘层序一致）；未命中返回空句柄。x/y 为窗口客户区坐标。
+extern fn dial_gui_widget_hit(root: GuiWidget, x: int, y: int): GuiWidget;
+
+/// 把一棵独立树的根挂到窗口（root 必须无父、win 尚未挂树）。
+/// 挂上后窗口拥有该树；不会自动调用 layout_apply，由 Dial 侧显式决定。
+extern fn dial_gui_window_set_root(win: GuiWindow, root: GuiWidget): int;
+
+// ---- 控件框架层：主动事件分发 -----------------------------------------
+
+/// 最近一次 poll/wait 命中的控件句柄（窗口级 / QUIT 事件返回空句柄）。
+/// 与 dial_gui_event_window 一样是 C 侧借用的裸句柄，不进 ARC。
+extern fn dial_gui_event_widget(app: GuiApp): GuiWidget;
+
+/// 返回 C 侧 **packed struct 纯值块**的地址（GuiWidgetEvent，104 字节），
+/// Dial 侧声明同布局 packed extern struct 后 ptr_cast 读取：
+///   int kind, x, y, button, key, w, h, local_x, local_y, tag, userdata  // 11×8 = 88
+///   rawptr<byte> win_title   // @88  C 侧借用（窗口标题）
+///   rawptr<byte> widget_id   // @96  C 侧借用（命中控件 id，未命中为 NULL）
+/// 布局由 C 侧 _Static_assert 与 Dial 侧 sizeof/offsetof 编译期内建双向锁死。
+/// 两个字符串指针由 C 拥有、C 绝不 free，有效期至**下次 poll/wait 或窗口/树释放**；
+/// Dial 侧必须立即 string_from_cstr 复制，绝不长期持有。
+extern fn dial_gui_event_data(app: GuiApp): rawptr<byte>;

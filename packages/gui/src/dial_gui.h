@@ -59,8 +59,35 @@ typedef struct GuiPainterImpl GuiPainterImpl;
 typedef struct GuiWindowImpl  GuiWindowImpl;
 typedef struct GuiAppImpl     GuiAppImpl;
 typedef struct GuiFontImpl    GuiFontImpl;
+typedef struct GuiWidgetImpl  GuiWidgetImpl;
 
 typedef struct GuiBackend GuiBackend;
+
+/*
+ * 控件框架层的事件纯值块（C 侧 owned，Dial 侧只读）。
+ *
+ * 内存宪法：绝不 C → Dial 反向回调。C 侧只写这块 packed struct 纯值数据，
+ * Dial 侧主动 poll/wait 后经 rawptr<byte> + ptr_cast 读走；带字符串的字段
+ * 是 C 侧**借用**的 const char*，Dial 侧必须 string_from_cstr 复制成自己的
+ * ARC 对象。C 管 C 的，ARC 管 ARC 的，谁也不越界，零隐式开销。
+ *
+ * 三目标均 64 位：Dial int = 8 字节、rawptr = 8 字节，故本块恒为 104 字节。
+ * 布局由下面的 _Static_assert 与 Dial demo 的 sizeof/offsetof 编译期内建
+ * 双向锁死：任何字段增删都会两边同时报错，杜绝契约漂移。
+ */
+typedef struct __attribute__((packed)) GuiWidgetEvent {
+    int64_t kind, x, y, button, key, w, h;      /*  0..55  纯值 */
+    int64_t local_x, local_y, tag, userdata;    /* 56..87  纯值 */
+    const char *win_title;                      /* 88  借用：窗口标题 */
+    const char *widget_id;                      /* 96  借用：命中控件 id */
+} GuiWidgetEvent;
+
+_Static_assert(sizeof(int64_t) == 8 && sizeof(void *) == 8,
+               "gui.dialpkg 三目标均为 64 位（Dial int / rawptr 均为 8 字节）");
+_Static_assert(sizeof(GuiWidgetEvent) == 104,
+               "GuiWidgetEvent 必须为 104 字节（Dial 侧 packed extern struct 同布局）");
+_Static_assert(offsetof(GuiWidgetEvent, win_title) == 88, "win_title 偏移须为 88");
+_Static_assert(offsetof(GuiWidgetEvent, widget_id) == 96, "widget_id 偏移须为 96");
 
 struct GuiPainterImpl {
     uint32_t *pixels;      /* ARGB32，行主序，w*h 个；NULL 表示未分配 */
@@ -82,6 +109,7 @@ struct GuiWindowImpl {
     char           title[256];
     void          *native;     /* 后端私有数据（X11 窗口结构 / Win32 HWND 等） */
     char           filter[16]; /* XRender filter：fast/good/best/nearest */
+    GuiWidgetImpl *root;       /* 挂载的控件树（可空；窗口拥有它） */
     GuiWindowImpl *next;       /* App 的窗口链表 */
 };
 
@@ -91,6 +119,9 @@ struct GuiAppImpl {
     /* 最近事件槽（每 App 一份；单线程 GUI 事件循环，无需加锁）*/
     int  ev_kind, ev_x, ev_y, ev_button, ev_key, ev_w, ev_h;
     GuiWindowImpl *ev_win;
+    /* 控件框架层：命中控件 + packed 纯值块（内嵌，非堆分配）*/
+    GuiWidgetImpl *ev_widget;
+    GuiWidgetEvent ev_data;
     int  quit;
     GuiWindowImpl *windows;
     int  window_count;
@@ -101,6 +132,30 @@ struct GuiFontImpl {
     unsigned char *ttf;        /* 字体文件全内容（TTF 时持有） */
     int            ttf_len;
     void          *stb;        /* stbtt_fontinfo*（TTF 时持有） */
+};
+
+/* ---- 控件框架层：Widget 树（纯 C，无任何平台符号）-------------------- */
+#define GUI_LAYOUT_ABS   0
+#define GUI_LAYOUT_VBOX  1
+#define GUI_LAYOUT_HBOX  2
+
+struct GuiWidgetImpl {
+    GuiWidgetImpl *parent;
+    GuiWidgetImpl *first_child;
+    GuiWidgetImpl *next_sibling;
+    GuiWidgetImpl *next_root;   /* 全局根链表（仅根使用）：防悬垂句柄校验 */
+    GuiWindowImpl *win;         /* 挂窗后非 NULL；独立纯内存树为 NULL */
+    int  req_x, req_y, req_w, req_h; /* set_rect 写入的期望几何（相对父）；
+                                      * 布局每次只从这里重算，保证幂等 */
+    int  x, y, w, h;            /* 实际几何（相对父）：getter 与命中测试用 */
+    int  abs_x, abs_y;          /* 绝对坐标（layout_apply / hit 写），供 local_x/y */
+    int  visible;
+    char *id;                   /* C 侧 strdup 自有副本（NULL = 未设置） */
+    int64_t tag;
+    int64_t userdata;
+    int  layout;                /* GUI_LAYOUT_* */
+    int  padding;
+    int  gap;
 };
 
 /*
@@ -158,13 +213,34 @@ int          gui_font_draw(GuiPainterImpl *p, int x, int y, const char *text, in
                            GuiFontImpl *f, int size, gui_color_t c);
 int          gui_font_width(const char *text, int len, GuiFontImpl *f, int size);
 
-/* ---- core 提供给后端/其他 TU 的辅助 ---------------------------------- */
+/* ---- core 提供给后端 / 其他 TU 的辅助 -------------------------------- */
 void gui_core_set_err(int64_t code, const char *msg);
 void gui_core_ok(void);
-/* 把最近事件写进 app 的事件槽（后端调用）。 */
+/*
+ * 把最近事件写进 app 的事件槽（后端 pump 调用）。
+ * hit 为命中控件（窗口级 / QUIT 事件传 NULL）；命中控件的 abs_x/abs_y
+ * 已由 gui_widget_hit 写回，emit 据此算 local_x/local_y。
+ */
 void gui_core_emit(GuiAppImpl *app, int kind, int x, int y, int button, int key,
-                   int w, int h, GuiWindowImpl *win);
+                   int w, int h, GuiWindowImpl *win, GuiWidgetImpl *hit);
 /* 按窗口句柄找 App 内已登记的窗口（防悬垂句柄）。 */
 int gui_core_has_window(GuiAppImpl *app, const GuiWindowImpl *win);
+
+/* ---- 控件框架层：dial_gui_widget.c（纯 C，三平台共用，无平台符号）---- */
+GuiWidgetImpl *gui_widget_tree_new(int w, int h);
+void           gui_widget_dispose_tree(GuiWidgetImpl *root);
+GuiWidgetImpl *gui_widget_add(GuiWidgetImpl *parent);
+int            gui_widget_remove(GuiWidgetImpl *w);
+int            gui_widget_layout_apply(GuiWidgetImpl *root, int w, int h);
+/* 后加子优先、取最深可见节点；命中时把绝对坐标写回 hit->abs_* 并输出。 */
+GuiWidgetImpl *gui_widget_hit(GuiWidgetImpl *root, int x, int y,
+                              int *out_abs_x, int *out_abs_y);
+/* 遍历全局根链表做 DFS 比指针（与 gui_core_has_window 同口径的防悬垂校验）。*/
+int            gui_widget_is_live(const GuiWidgetImpl *w);
+int            gui_widget_attach_window(GuiWidgetImpl *root, GuiWindowImpl *win);
+void           gui_widget_fill_event(GuiWidgetEvent *ev, int kind,
+                                     int x, int y, int button, int key,
+                                     int w, int h, GuiWindowImpl *win,
+                                     GuiWidgetImpl *hit);
 
 #endif /* DIAL_GUI_H */

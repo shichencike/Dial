@@ -618,7 +618,18 @@ static int pump(GuiAppImpl *app, int blocking, int timeout_ms) {
         break;
     }
     if (kind == GUI_EV_NONE) return GUI_EV_NONE;
-    gui_core_emit(app, kind, x, y, button, key, ww, hh, w);
+    /*
+     * 控件命中测试放在 pump 里 —— 这是 Dial 的 poll/wait 调用线程，
+     * 不是 Xlib 回调。gui_widget_hit 是纯 C、零平台符号、零 ARC 交互，
+     * 因此不会把跨线程引用计数问题带进来（内存宪法：绝不 C → Dial 回调）。
+     */
+    GuiWidgetImpl *hit = NULL;
+    if (w && w->root &&
+        (kind == GUI_EV_MOUSE_PRESS || kind == GUI_EV_MOUSE_RELEASE ||
+         kind == GUI_EV_MOUSE_MOVE)) {
+        hit = gui_widget_hit(w->root, x, y, NULL, NULL);
+    }
+    gui_core_emit(app, kind, x, y, button, key, ww, hh, w, hit);
     return kind;
 }
 

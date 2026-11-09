@@ -34,7 +34,7 @@
 </ul>
 </div>
 <h2 id="未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</h2>
-<p><strong>主题：手搓 GUI 地基包 <code>gui.dialpkg</code>。</strong> 详见
+<p><strong>主题：手搓 GUI 地基包 <code>gui.dialpkg</code> + 控件框架层。</strong> 详见
 <a href="../spec.html#38-手搓-gui-地基包guidialpkg">README §38</a>。</p>
 <blockquote>
 <p><strong>版本与交付口径（防漂移，务必先读）</strong>：本段记录的是 <strong><code>[v1.10]</code>（Git 标签 <code>v1.1</code>）
@@ -45,14 +45,17 @@ README 首行与官网 KPI 仍是 <code>v1.10</code>，<strong>不新增 <code>[
 Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，再把本段归并进对应
 版本标题，并在 §23 规则下同步所有载体。</p>
 <p><strong><code>[v1.10]</code> 段的「A–Z 二十六组 / 499 ✅」是 <code>v1.1</code> 标签发布时的验收快照，
-保持原文不改</strong>；本增量把回归扩到 <strong>A–Z + AA 二十七组 / 507 ✅</strong>。两者是不同
-时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
+保持原文不改</strong>；地基层增量把回归扩到 <strong>A–Z + AA 二十七组 / 507 ✅</strong>，本轮
+控件框架层再给 AA 组增 3 条断言到 <strong>510 ✅</strong>。三者是不同时点的真实记录，
+不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>
 <ul>
-<li><strong><code>gui.dialpkg</code>：手搓 GUI 地基包</strong>（README §38）：不用 Qt / GTK / SDL，纯 X11 自绘。
-  第一版范围只做<strong>地基：窗 + 事件 + 绘图</strong>；控件树 / 布局 / 信号槽<strong>暂不进 <code>.diali</code>
-  契约</strong>，避免未实现符号造成漂移。</li>
+<li><strong><code>gui.dialpkg</code>：手搓 GUI 地基包 + 控件框架层</strong>（README §38）：不用 Qt / GTK / SDL，
+  纯 X11 自绘。地基层是<strong>窗 + 事件 + 绘图</strong>；本轮在其上补齐<strong>控件框架层</strong>
+  （Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发）。
+  <strong>成品控件外观 / 信号槽 / C→Dial 回调仍不进 <code>.diali</code> 契约</strong>——把未实现函数写进
+  契约会让用户 <code>import</code> 后链接失败，那是制造漂移而非预留接口。</li>
 <li><strong>自研迷你 2D 光栅化器</strong>：ARGB32 像素缓冲、<code>source-over</code> alpha 混合、
   1/2/4/8 档覆盖面积采样抗锯齿、矩形 / 线 / 圆 / 圆环 / 椭圆 / 梯形 / 位图 /
   裁剪 / 像素读写；<code>dial_gui_painter_crc32()</code> 提供像素级回归断言。</li>
@@ -72,13 +75,42 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
   <code>XOpenDisplay</code> / <code>XShmCreateImage</code> / <code>XRenderComposite</code> / <code>CreateDIBSection</code> /
   <code>CreateWindowExA</code> 等平台 GUI 未定义符号，<code>dialc</code> 最终链接<strong>不需要</strong>新增
   <code>-lX11</code> / <code>-lgdi32</code>。</li>
+<li><strong>控件框架层（28 个新 <code>extern fn</code> + <code>type GuiWidget</code>）</strong>：并入同一个 <code>gui</code> 包
+  （<code>.diali</code> 不透明句柄按包隔离、跨包引用不可行），旧 55 个签名<strong>一字不动</strong>、
+  <code>abi = 6</code> / <code>version = 1.10.0</code> 不变，仅重新 <code>pack</code> + <code>install</code>（同 ABI 覆盖）。
+  新增 <code>dial_gui_widget.c</code> 是纯 C、不碰任何平台 API，三份 <code>.a</code> 仍无 GUI 链接期依赖。</li>
+<li><strong>独立纯内存树根</strong>：<code>dial_gui_widget_tree</code> 不连显示服务器，无 DISPLAY 环境也能
+    完整验收布局 / 命中；挂窗后由窗口拥有，随 <code>window_close</code> 释放。</li>
+<li><strong>布局</strong>：绝对 / VBox / HBox 三种，纯整数、固定尺寸优先扣减、gap/padding，
+    <strong>幂等</strong>（每次从 <code>req_*</code> 重算，不把上轮弹性尺寸误当固定）。</li>
+<li><strong>命中测试</strong>：后加子优先、取最深可见 Box；放在后端 <code>pump</code> 的 Dial 调用线程，
+    <strong>绝不进 <code>wndproc</code> 系统回调</strong>。</li>
+<li><strong>主动事件分发 + 零越界</strong>（内存宪法）：<strong>绝不做 C → Dial 反向回调</strong>。C 侧只写
+    一块 <code>__attribute__((packed))</code> 纯值块 <code>GuiWidgetEvent</code>（104 字节），Dial 侧
+    <code>poll/wait</code> 后经 <code>rawptr&lt;byte&gt;</code> + <code>ptr_cast</code> 读纯值；<code>win_title</code> / <code>widget_id</code>
+    是 C 侧<strong>借用</strong>指针，必须 <code>string_from_cstr</code> 复制成自己的 ARC 对象。
+    C 管 C 的，ARC 管 ARC 的，零隐式开销。</li>
+<li><strong>布局双向锁死</strong>：C 侧 <code>_Static_assert(sizeof==104, offsetof(...))</code> 与 Dial 侧
+    <code>sizeof&lt;T&gt;()</code> / <code>alignof&lt;T&gt;()</code> / <code>offsetof&lt;T&gt;(field)</code> 编译期内建逐项比对，
+    任何字段增删两边同时报错。</li>
 </ul>
 <h3 id="changed">Changed</h3>
 <ul>
 <li><code>tests/run_tests.sh</code> 新增 <strong>AA 组</strong>（<code>gui.dialpkg</code> 端到端）：三平台构建、零警告检查、
   <code>nm -u</code> 符号检查、<code>pack</code> / <code>install</code>、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
   （<code>window = ok</code> / <code>window_backend = x11/xshm/xrender</code> / <code>window_flush = ok</code> /
-  <code>quit_event = ok</code>）、卸载。全量从 A–Z 二十六组扩为 <strong>A–Z + AA 二十七组</strong>。</li>
+  <code>quit_event = ok</code>）、卸载。全量从 A–Z 二十六组扩为 <strong>A–Z + AA 二十七组</strong>。
+  本轮再给 AA 组增 3 条断言（<code>use_gui_widget.dial</code> 编译 / 无 DISPLAY 控件层 /
+  Xvfb 挂树 + packed 事件块），<code>aapass</code> 由 8 条增到 11 条。</li>
+<li>新增 <code>tests/pkg/use_gui_widget.dial</code>：与 <code>use_gui.dial</code> 完全独立、<strong>不创建
+  <code>GuiPainter</code></strong>，因此不触碰 <code>crc_offscreen = 4007435570</code> 像素回归基准；
+  覆盖 <code>packed extern struct</code> 布局 / <code>string_from_cstr</code> 的 ARC 复制 /
+  三种布局与幂等 / 命中（含后加子优先、不可见跳过）/ 防悬垂 / 挂窗生命周期。</li>
+<li><code>packages/gui/</code> 新增 <code>src/dial_gui_widget.c</code>，<code>build.sh</code> 三平台 <code>SRCS</code> 统一追加；
+  <code>gui.diali</code> 追加 28 个单行 <code>extern fn</code> 与 <code>GuiWidget</code> 句柄并改写范围声明，
+  <code>dial_gui.h</code> 增加 104 字节 packed 事件块与 <code>_Static_assert</code>、全局根链表防悬垂，
+  <code>dial_gui_core.c</code> 的 <code>gui_core_emit</code> 扩展命中控件参数（4 处调用同步），
+  两后端 <code>pump</code> 在 Dial 调用线程做命中测试。</li>
 <li><code>.github/workflows/ci.yml</code>：阶段 8 构建循环与 <code>dialc pack</code> 循环加入 <code>gui</code>，
   <code>dist-gui/gui.dialpkg</code> 归集进 <code>dist-c11/</code>，新增无头 X11 环境准备步骤，
   Release 资产列表加入 <code>gui.dialpkg</code>；顺手修正 <code>softprops/action-gh-release@v2</code>
@@ -88,11 +120,16 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
 </ul>
 <h3 id="测试与交付">测试与交付</h3>
 <ul>
-<li><code>bash tests/run_tests.sh</code> <strong>A–Z + AA 二十七组全套通过（507 ✅ / 0 ❌）</strong>；
+<li><code>bash tests/run_tests.sh</code> <strong>A–Z + AA 二十七组全套通过（510 ✅ / 0 ❌）</strong>；
   Xvfb 连续三次实窗 <code>EXIT=0</code>，能力串
   <code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，像素 CRC 稳定 <code>4007435570</code>；
   无 DISPLAY 路径 24 项断言全绿、窗口明确打印 <code>window = skipped [原因]</code>，
-  <strong>绝不把未验证写成通过</strong>。</li>
+  <strong>绝不把未验证写成通过</strong>。控件框架层另由 <code>use_gui_widget.dial</code> 覆盖：
+  <code>sizeof&lt;GuiWidgetEvent&gt;() == 104</code> 与各 <code>offsetof</code> 编译期内建断言、
+  <code>string_from_cstr</code> ARC 复制、VBox/HBox 等分与幂等、命中与防悬垂、
+  Xvfb 下 <code>window_set_root</code> / QUIT 主动分发 / 借用指针 NULL→空串。
+  真实鼠标注入依赖 XTest / xdotool，本轮<strong>未实机验证</strong>，demo 如实打印
+  <code>widget_hit_injection = skipped</code>，命中逻辑由无头纯 C 树断言覆盖。</li>
 <li><code>tools/cve_check.py</code> 8/8；语言能力审计 <code>TOTAL=38 PASS=38 FAIL=0</code>；
   <code>check_version</code> / <code>check_links</code> 全通过；<code>cargo check</code> 零警告；
   官网由 <code>tools/build_web.py</code> 重新生成并与文档同步。</li>

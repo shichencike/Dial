@@ -22,7 +22,7 @@
 
 ## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）
 
-**主题：手搓 GUI 地基包 `gui.dialpkg`。** 详见
+**主题：手搓 GUI 地基包 `gui.dialpkg` + 控件框架层。** 详见
 [README §38](README.md#38-手搓-gui-地基包guidialpkg)。
 
 > **版本与交付口径（防漂移，务必先读）**：本段记录的是 **`[v1.10]`（Git 标签 `v1.1`）
@@ -34,14 +34,17 @@
 > 版本标题，并在 §23 规则下同步所有载体。
 >
 > **`[v1.10]` 段的「A–Z 二十六组 / 499 ✅」是 `v1.1` 标签发布时的验收快照，
-> 保持原文不改**；本增量把回归扩到 **A–Z + AA 二十七组 / 507 ✅**。两者是不同
-> 时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
+> 保持原文不改**；地基层增量把回归扩到 **A–Z + AA 二十七组 / 507 ✅**，本轮
+> 控件框架层再给 AA 组增 3 条断言到 **510 ✅**。三者是不同时点的真实记录，
+> 不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
 
-- **`gui.dialpkg`：手搓 GUI 地基包**（README §38）：不用 Qt / GTK / SDL，纯 X11 自绘。
-  第一版范围只做**地基：窗 + 事件 + 绘图**；控件树 / 布局 / 信号槽**暂不进 `.diali`
-  契约**，避免未实现符号造成漂移。
+- **`gui.dialpkg`：手搓 GUI 地基包 + 控件框架层**（README §38）：不用 Qt / GTK / SDL，
+  纯 X11 自绘。地基层是**窗 + 事件 + 绘图**；本轮在其上补齐**控件框架层**
+  （Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发）。
+  **成品控件外观 / 信号槽 / C→Dial 回调仍不进 `.diali` 契约**——把未实现函数写进
+  契约会让用户 `import` 后链接失败，那是制造漂移而非预留接口。
 - **自研迷你 2D 光栅化器**：ARGB32 像素缓冲、`source-over` alpha 混合、
   1/2/4/8 档覆盖面积采样抗锯齿、矩形 / 线 / 圆 / 圆环 / 椭圆 / 梯形 / 位图 /
   裁剪 / 像素读写；`dial_gui_painter_crc32()` 提供像素级回归断言。
@@ -61,6 +64,24 @@
   `XOpenDisplay` / `XShmCreateImage` / `XRenderComposite` / `CreateDIBSection` /
   `CreateWindowExA` 等平台 GUI 未定义符号，`dialc` 最终链接**不需要**新增
   `-lX11` / `-lgdi32`。
+- **控件框架层（28 个新 `extern fn` + `type GuiWidget`）**：并入同一个 `gui` 包
+  （`.diali` 不透明句柄按包隔离、跨包引用不可行），旧 55 个签名**一字不动**、
+  `abi = 6` / `version = 1.10.0` 不变，仅重新 `pack` + `install`（同 ABI 覆盖）。
+  新增 `dial_gui_widget.c` 是纯 C、不碰任何平台 API，三份 `.a` 仍无 GUI 链接期依赖。
+  - **独立纯内存树根**：`dial_gui_widget_tree` 不连显示服务器，无 DISPLAY 环境也能
+    完整验收布局 / 命中；挂窗后由窗口拥有，随 `window_close` 释放。
+  - **布局**：绝对 / VBox / HBox 三种，纯整数、固定尺寸优先扣减、gap/padding，
+    **幂等**（每次从 `req_*` 重算，不把上轮弹性尺寸误当固定）。
+  - **命中测试**：后加子优先、取最深可见 Box；放在后端 `pump` 的 Dial 调用线程，
+    **绝不进 `wndproc` 系统回调**。
+  - **主动事件分发 + 零越界**（内存宪法）：**绝不做 C → Dial 反向回调**。C 侧只写
+    一块 `__attribute__((packed))` 纯值块 `GuiWidgetEvent`（104 字节），Dial 侧
+    `poll/wait` 后经 `rawptr<byte>` + `ptr_cast` 读纯值；`win_title` / `widget_id`
+    是 C 侧**借用**指针，必须 `string_from_cstr` 复制成自己的 ARC 对象。
+    C 管 C 的，ARC 管 ARC 的，零隐式开销。
+  - **布局双向锁死**：C 侧 `_Static_assert(sizeof==104, offsetof(...))` 与 Dial 侧
+    `sizeof<T>()` / `alignof<T>()` / `offsetof<T>(field)` 编译期内建逐项比对，
+    任何字段增删两边同时报错。
 
 ### Changed
 
@@ -68,6 +89,17 @@
   `nm -u` 符号检查、`pack` / `install`、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
   （`window = ok` / `window_backend = x11/xshm/xrender` / `window_flush = ok` /
   `quit_event = ok`）、卸载。全量从 A–Z 二十六组扩为 **A–Z + AA 二十七组**。
+  本轮再给 AA 组增 3 条断言（`use_gui_widget.dial` 编译 / 无 DISPLAY 控件层 /
+  Xvfb 挂树 + packed 事件块），`aapass` 由 8 条增到 11 条。
+- 新增 `tests/pkg/use_gui_widget.dial`：与 `use_gui.dial` 完全独立、**不创建
+  `GuiPainter`**，因此不触碰 `crc_offscreen = 4007435570` 像素回归基准；
+  覆盖 `packed extern struct` 布局 / `string_from_cstr` 的 ARC 复制 /
+  三种布局与幂等 / 命中（含后加子优先、不可见跳过）/ 防悬垂 / 挂窗生命周期。
+- `packages/gui/` 新增 `src/dial_gui_widget.c`，`build.sh` 三平台 `SRCS` 统一追加；
+  `gui.diali` 追加 28 个单行 `extern fn` 与 `GuiWidget` 句柄并改写范围声明，
+  `dial_gui.h` 增加 104 字节 packed 事件块与 `_Static_assert`、全局根链表防悬垂，
+  `dial_gui_core.c` 的 `gui_core_emit` 扩展命中控件参数（4 处调用同步），
+  两后端 `pump` 在 Dial 调用线程做命中测试。
 - `.github/workflows/ci.yml`：阶段 8 构建循环与 `dialc pack` 循环加入 `gui`，
   `dist-gui/gui.dialpkg` 归集进 `dist-c11/`，新增无头 X11 环境准备步骤，
   Release 资产列表加入 `gui.dialpkg`；顺手修正 `softprops/action-gh-release@v2`
@@ -77,11 +109,16 @@
 
 ### 测试与交付
 
-- `bash tests/run_tests.sh` **A–Z + AA 二十七组全套通过（507 ✅ / 0 ❌）**；
+- `bash tests/run_tests.sh` **A–Z + AA 二十七组全套通过（510 ✅ / 0 ❌）**；
   Xvfb 连续三次实窗 `EXIT=0`，能力串
   `x11/xshm/xrender argb32 filter=best visual_depth=24`，像素 CRC 稳定 `4007435570`；
   无 DISPLAY 路径 24 项断言全绿、窗口明确打印 `window = skipped [原因]`，
-  **绝不把未验证写成通过**。
+  **绝不把未验证写成通过**。控件框架层另由 `use_gui_widget.dial` 覆盖：
+  `sizeof<GuiWidgetEvent>() == 104` 与各 `offsetof` 编译期内建断言、
+  `string_from_cstr` ARC 复制、VBox/HBox 等分与幂等、命中与防悬垂、
+  Xvfb 下 `window_set_root` / QUIT 主动分发 / 借用指针 NULL→空串。
+  真实鼠标注入依赖 XTest / xdotool，本轮**未实机验证**，demo 如实打印
+  `widget_hit_injection = skipped`，命中逻辑由无头纯 C 树断言覆盖。
 - `tools/cve_check.py` 8/8；语言能力审计 `TOTAL=38 PASS=38 FAIL=0`；
   `check_version` / `check_links` 全通过；`cargo check` 零警告；
   官网由 `tools/build_web.py` 重新生成并与文档同步。

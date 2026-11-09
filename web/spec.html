@@ -404,7 +404,11 @@
 </li>
 <li><a href="#38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</a><ul>
 <li><a href="#381-包结构">38.1 包结构</a></li>
-<li><a href="#382-对外契约guidiali">38.2 对外契约：gui.diali</a></li>
+<li><a href="#382-对外契约guidiali">38.2 对外契约：gui.diali</a><ul>
+<li><a href="#控件框架层契约28-个追加-extern-fn">控件框架层契约（28 个追加 extern fn）</a></li>
+<li><a href="#主动事件分发packed-纯值块--arc-边界">主动事件分发：packed 纯值块 + ARC 边界</a></li>
+</ul>
+</li>
 <li><a href="#383-分层架构">38.3 分层架构</a></li>
 <li><a href="#384-自研-2d-光栅化器">38.4 自研 2D 光栅化器</a></li>
 <li><a href="#385-字体层与安全边界">38.5 字体层与安全边界</a></li>
@@ -522,6 +526,8 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── dial_array.h / .c   #   Array&lt;int&gt;
 │   ├── dial_map.h / .c     #   Map（int → int，ARC）
 │   └── dial_io.h / .c      #   打印 / 读行
+├── packages/               # 官方 .dialpkg 包（http / text / json / crypto / gui）
+│   └── gui/                #   手搓 GUI 地基 + 控件框架层（见 §38）
 ├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
 ├── tests/
 │   ├── run_tests.sh        # 端到端测试（A 正向 / B 负向 / C 契约 / D Fail-Fast / E 对照 /
@@ -529,6 +535,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   │                       #   K LSP 增强 / L 包安装 / M LSP 全能力 + 协议流纯净性）
 │   ├── bad/                # 必须编译失败的负向用例
 │   ├── trap/               # 必须当场因信号终止的 Fail-Fast 用例
+│   ├── pkg/                # 包端到端 demo（use_gui.dial / use_gui_widget.dial）
 │   ├── lsp_smoke.py        # I 组：LSP 协议往返（诊断 + 语义高亮）；与 tools/lsp_full_smoke.py 是两个不同文件
 │   ├── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
 │   └── pkg_install_url.py  # L 组：包 URL 安装 + 一键安装脚本
@@ -2918,13 +2925,17 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td>LSP 的重命名 / 跨文件引用查找 / 格式化</td>
 <td><strong>已实现</strong>（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的<strong>引用边</strong>（<code>src/index.rs</code>），格式化只做「去行尾空白 + 末尾换行」这类<strong>绝不重排</strong>的非破坏性动作。能力清单见 <a href="#2871-当前-lsp-能力清单">§28.7.1</a>。另见 v1.04 新增的 <code>dialc fmt</code> 命令行格式化（§34）。<strong>尚未实现</strong>：跨工作区的<strong>全量</strong>引用图（当前只覆盖已打开文件与已加载包）</td>
 </tr>
+<tr>
+<td>GUI 控件树 / 布局 / 信号槽</td>
+<td><strong>控件框架层已落地</strong>（<code>gui.dialpkg</code>，见 <a href="#38-手搓-gui-地基包guidialpkg">§38</a>）：Widget 树 + 绝对 / VBox / HBox 布局 + 命中测试 + 主动事件分发（28 个 <code>extern fn</code>）。控件<strong>一律是通用 Box</strong>：<strong>成品控件外观、信号槽、C → Dial 反向回调仍未实现</strong>；自绘由 Dial 侧用 <code>GuiPainter</code> 完成。Win32 后端<strong>仅交叉编译、未实机验证</strong></td>
+</tr>
 </tbody>
 </table>
 <hr />
 <h2 id="18-测试">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
-<p><code>bash tests/run_tests.sh</code> 的<strong>当前全量回归是 A–Z + AA 共二十七组</strong>（507 ✅ / 0 ❌），
+<p><code>bash tests/run_tests.sh</code> 的<strong>当前全量回归是 A–Z + AA 共二十七组</strong>（510 ✅ / 0 ❌），
 全部通过才算绿。下表逐项详列 <strong>A–M 十三组</strong>——这组逐组说明自 v0.9x 沿用至今、
 内容未变，且每一组至今仍在执行；<strong>N–Z 与 AA 组</strong>分别见 §33–§38 各章与
 <code>tests/run_tests.sh</code>（其中 AA 组是手搓 GUI 地基包 <code>gui.dialpkg</code> 的专项回归，见 §38）：</p>
@@ -7729,8 +7740,9 @@ SSE / AVX / NEON。</p>
 触发三平台 Release；<strong><code>v1.0</code> 里程碑标签不受影响</strong>。<code>[v1.04]</code> 及其后续增补
 （含 <code>@asm</code> / <code>simd&lt;T, N&gt;</code>）均随本次发布一并交付。</p>
 <p><strong>本节上方的「A–Z 二十六组 / 499 ✅」是 <code>v1.1</code> 标签发布时的验收快照，保持原文不改。</strong>
-此后工作树又新增 <code>gui.dialpkg</code> 与 AA 组，全量回归扩到 <strong>A–Z + AA 二十七组 /
-507 ✅</strong>，属 <strong>未发布的开发中增量</strong>，见 §38 与 CHANGELOG <code>[未发布]</code> 段。</p>
+此后工作树又新增 <code>gui.dialpkg</code> 地基层与 AA 组（507 ✅），再补控件框架层
+（AA 组 +3 条断言到 <strong>510 ✅</strong>），全量回归仍为 <strong>A–Z + AA 二十七组</strong>，
+属 <strong>未发布的开发中增量</strong>，见 §38 与 CHANGELOG <code>[未发布]</code> 段。</p>
 </blockquote>
 <hr />
 <h2 id="34-v104-增补工程工具链并入-v104版本不变">34. v1.04 增补：工程工具链（并入 <code>[v1.04]</code>，版本不变）</h2>
@@ -8765,13 +8777,15 @@ A–Z + AA <strong>二十七组</strong>，见 §38）。</p>
 <h2 id="38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</h2>
 <blockquote>
 <p><strong>定位与交付口径</strong>：本章描述 <code>packages/gui/</code> 产出的 <code>gui.dialpkg</code>——一个
-<strong>不用 Qt / GTK / SDL、纯 C 手搓</strong>的 GUI 地基（窗 + 事件 + 绘图）。它是
-<code>[v1.10]</code>（标签 <code>v1.1</code>）发布<strong>之后</strong>的<strong>开发中增量</strong>：编译器版本仍为
-<code>1.10.0</code>，<strong>未升版本号、未打标签、未发 Release</strong>（见 CHANGELOG <code>[未发布]</code> 段）。
-本轮交付深度是<strong>原型 + 完整工程骨架</strong>，第一版范围严格限定在
-<strong>地基：窗 + 事件 + 绘图</strong>。</p>
+<strong>不用 Qt / GTK / SDL、纯 C 手搓</strong>的 GUI 包，覆盖<strong>两层</strong>：
+① <strong>地基层</strong>（窗 + 事件 + 绘图 + 字体，55 个 <code>extern fn</code>）；
+② <strong>控件框架层</strong>（<code>GuiWidget</code> 树 + 布局 + 命中测试 + 主动事件分发，
+28 个 <code>extern fn</code>，见 §38.2 / §38.9）。它是 <code>[v1.10]</code>（标签 <code>v1.1</code>）发布
+<strong>之后</strong>的<strong>开发中增量</strong>：编译器版本仍为 <code>1.10.0</code>，<strong>未升版本号、未打标签、
+未发 Release</strong>（见 CHANGELOG <code>[未发布]</code> 段）。两层都是<strong>真实现</strong>，不是占位接口；
+控件一律是<strong>通用 Box</strong>，包不提供成品外观，由 Dial 侧用 <code>GuiPainter</code> 自绘。</p>
 </blockquote>
-<p><strong>四个架构分叉（用户拍板）</strong>：</p>
+<p><strong>架构分叉（用户拍板）</strong>：</p>
 <table>
 <thead>
 <tr>
@@ -8793,8 +8807,20 @@ A–Z + AA <strong>二十七组</strong>，见 §38）。</p>
 <td><strong>三平台真实现</strong>：<code>x86_64-linux-gnu</code> / <code>aarch64-unknown-linux-musl</code> / <code>x86_64-pc-windows-gnu</code> 都由 <code>zig cc</code> 交叉编译出真实 <code>.a</code>，不是占位 stub</td>
 </tr>
 <tr>
-<td>第一版范围</td>
-<td>只做地基层（<code>GuiApp</code> / <code>GuiWindow</code> / <code>GuiPainter</code> / <code>GuiFont</code> / Event）；控件树 / 布局 / 信号槽<strong>不进契约</strong></td>
+<td>第一版范围（地基轮）</td>
+<td>只做地基层（<code>GuiApp</code> / <code>GuiWindow</code> / <code>GuiPainter</code> / <code>GuiFont</code> / Event）；<strong>当时</strong>控件树 / 布局 / 信号槽不进契约——本轮已补控件框架层，见下两行</td>
+</tr>
+<tr>
+<td>控件层范围（本轮）</td>
+<td><strong>只做框架</strong>：Widget 树 + 绝对 / VBox / HBox 布局 + 命中测试 + 事件分发；统一通用 Box，<strong>无成品控件外观</strong>，Dial 侧用 <code>GuiPainter</code> 自绘</td>
+</tr>
+<tr>
+<td>事件分发</td>
+<td><strong>主动分发，绝不 C → Dial 反向回调</strong>：C 侧写 <code>packed struct</code> 纯值块，Dial 侧 <code>poll/wait</code> 后读；字符串由 <code>string_from_cstr</code> 复制成 ARC 对象。C 管 C 的、ARC 管 ARC 的，零隐式开销</td>
+</tr>
+<tr>
+<td>包契约</td>
+<td><strong>追加函数、ABI 不变</strong>：只加 <code>extern fn</code> + 句柄，旧 55 个签名一字不动，<code>abi = 6</code> / <code>version = 1.10.0</code> 不变，重新 <code>pack</code> + <code>install</code>（同 ABI 覆盖）</td>
 </tr>
 </tbody>
 </table>
@@ -8806,15 +8832,20 @@ A–Z + AA <strong>二十七组</strong>，见 §38）。</p>
 ├── src/dial_gui.h        # 内部公共头：错误码 / 事件码 / 结构体 / 后端 vtable
 ├── src/dial_gui_core.c   # FFI 包装：句柄生命周期 / 错误槽 / 事件槽 / 调 vtable
 ├── src/dial_gui_raster.c # 自研光栅化器 + 内置 8×8 点阵 + stb_truetype 字形
+├── src/dial_gui_widget.c # 控件框架层：纯 C 树 / 布局 / 命中 / packed 事件块（三平台共用）
 ├── src/gui_font8.h       # 内置 ASCII 点阵静态常量表
 ├── src/dial_gui_x11.c    # POSIX 后端（X11 + XShm + XRender，dlopen）
 ├── src/dial_gui_win32.c  # Windows 后端（GDI DIBSection，LoadLibraryA）
 └── lib/&lt;triple&gt;/libgui.a # 三平台产物（被 .gitignore 忽略，构建时生成）
 third_party/stb/          # stb_truetype.h v1.26 + LICENSE（MIT）
 patches/stb-1.26.SHA256SUMS
+tests/pkg/use_gui.dial        # 地基层 demo（像素级 CRC 回归）
+tests/pkg/use_gui_widget.dial # 控件框架层 demo（不创建 GuiPainter，不碰 CRC 基准）
 </code></pre>
+<p><code>dial_gui_widget.c</code> <strong>只 include <code>dial_gui.h</code> + libc</strong>，不碰 X11 / Win32 任何 API，
+因此三份 <code>.a</code> 的 <code>nm -u</code> 不会因控件层新增任何平台符号。</p>
 <h3 id="382-对外契约guidiali">38.2 对外契约：<code>gui.diali</code></h3>
-<p>四个<strong>不透明句柄</strong>（不进 ARC，必须显式 <code>*_free</code>）：</p>
+<p>五个<strong>不透明句柄</strong>（不进 ARC，必须显式 <code>*_free</code>）：</p>
 <table>
 <thead>
 <tr>
@@ -8843,6 +8874,11 @@ patches/stb-1.26.SHA256SUMS
 <td><code>GuiFont</code></td>
 <td>字体</td>
 <td><code>dial_gui_font_default</code> / <code>dial_gui_font_load</code> → <code>dial_gui_font_free</code></td>
+</tr>
+<tr>
+<td><code>GuiWidget</code></td>
+<td>通用 Box 控件（控件框架层）</td>
+<td>独立树 <code>dial_gui_widget_tree</code> → <code>dial_gui_widget_tree_free</code>；挂窗后由窗口拥有，随 <code>window_close</code> 释放，<strong>此后不得再 free</strong></td>
 </tr>
 </tbody>
 </table>
@@ -8893,6 +8929,123 @@ C 侧在 X11 走 ARGB32、在 GDI 走 BGRA，通道转换由包内部负责，Di
 </table>
 <p>事件字段用 <code>dial_gui_event_kind/x/y/button/key/width/height/window</code> 访问
 （每 App 一份最近事件槽，单线程事件循环，无需加锁）。</p>
+<h4 id="控件框架层契约28-个追加-extern-fn">控件框架层契约（28 个追加 <code>extern fn</code>）</h4>
+<p>控件层<strong>必须并入同一个 <code>gui</code> 包</strong>：<code>.diali</code> 的不透明句柄按包隔离解析
+（<code>src/main.rs</code> 的 <code>resolve_imports</code> 每包只用自己的 <code>opaque_types</code>，且全局禁止重名），
+新建 <code>gui_widgets</code> 包根本无法引用 <code>GuiWindow</code> / <code>GuiApp</code>。因此本轮只<strong>追加</strong>
+28 个单行 <code>extern fn</code> + <code>type GuiWidget;</code>，<strong>旧 55 个签名一字不动</strong>，
+<code>dial.toml</code> 的 <code>abi = 6</code> / <code>version = 1.10.0</code> 保持不变，重新 <code>pack</code> + <code>install</code>
+即可（同 ABI 覆盖；<code>.diali</code> 的 SHA256 由 manifest 现算）。</p>
+<table>
+<thead>
+<tr>
+<th>分组</th>
+<th>数量</th>
+<th>代表 API</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>树</td>
+<td>7</td>
+<td><code>widget_tree(w,h)</code> / <code>widget_tree_free</code> / <code>widget_add</code> / <code>widget_remove</code> / <code>widget_parent</code> / <code>widget_first_child</code> / <code>widget_next_sibling</code></td>
+</tr>
+<tr>
+<td>几何</td>
+<td>5</td>
+<td><code>widget_set_rect</code> + <code>widget_x/y/width/height</code></td>
+</tr>
+<tr>
+<td>可见 / id</td>
+<td>4</td>
+<td><code>widget_set_visible</code> / <code>widget_visible</code> / <code>widget_set_id(string)</code> / <code>widget_id(): rawptr&lt;byte&gt;</code></td>
+</tr>
+<tr>
+<td>纯值标记</td>
+<td>4</td>
+<td><code>widget_set_tag</code> / <code>widget_tag</code> / <code>widget_set_userdata</code> / <code>widget_userdata</code>（一律 <code>int64</code>，<strong>绝不存 Dial 指针</strong>）</td>
+</tr>
+<tr>
+<td>布局</td>
+<td>4</td>
+<td><code>widget_set_layout(0 ABS / 1 VBOX / 2 HBOX)</code> / <code>set_padding</code> / <code>set_gap</code> / <code>widget_layout_apply</code></td>
+</tr>
+<tr>
+<td>命中 / 挂窗</td>
+<td>2</td>
+<td><code>widget_hit(root,x,y)</code> / <code>window_set_root(win,root)</code></td>
+</tr>
+<tr>
+<td>事件</td>
+<td>2</td>
+<td><code>event_widget(app)</code> / <code>event_data(app): rawptr&lt;byte&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>独立树根是刻意设计</strong>：<code>dial_gui_app_new()</code> 在无 DISPLAY 时因 <code>XOpenDisplay</code>
+失败返回空句柄，若控件树只能绑窗口，框架层就无法在无头环境验收。
+<code>widget_tree</code> 建的是纯内存树、不连显示服务器，因此 AA 组无 DISPLAY 路径也能
+把布局 / 命中 / packed 布局全跑完；挂窗后树归窗口所有。</p>
+<p>布局是<strong>纯整数、幂等</strong>的：<code>set_rect</code> 写 <code>req_*</code>（期望几何），
+<code>layout_apply</code> 每次只从 <code>req_*</code> 重算，固定尺寸优先扣减、弹性余量整数除法向下取整，
+重复调用不会叠加 padding / gap，也不会把上一轮弹性尺寸误当固定尺寸。
+命中测试取<strong>最深可见</strong> Box、后加子优先（与自绘层序一致）。</p>
+<h4 id="主动事件分发packed-纯值块--arc-边界">主动事件分发：packed 纯值块 + ARC 边界</h4>
+<p><strong>绝不 C → Dial 反向回调</strong>。Dial 无 GC，全靠 ARC + 手动释放；C 侧若在平台线程
+直接调 Dial 函数，跨线程引用计数管理会失控。因此 C 侧只写一块
+<code>__attribute__((packed))</code> 的 <code>GuiWidgetEvent</code>（<strong>104 字节</strong>，三目标均 64 位），
+Dial 侧 <code>poll/wait</code> 后经 <code>rawptr&lt;byte&gt;</code> + <code>ptr_cast</code> 主动读走：</p>
+<table>
+<thead>
+<tr>
+<th>偏移</th>
+<th>字段</th>
+<th>类型</th>
+<th>语义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0..55</td>
+<td><code>kind,x,y,button,key,w,h</code></td>
+<td><code>int</code> ×7</td>
+<td>纯值</td>
+</tr>
+<tr>
+<td>56..87</td>
+<td><code>local_x,local_y,tag,userdata</code></td>
+<td><code>int</code> ×4</td>
+<td>纯值；命中控件时 <code>tag</code>/<code>userdata</code> 取自控件，<code>local_*</code> 相对控件左上角</td>
+</tr>
+<tr>
+<td>88</td>
+<td><code>win_title</code></td>
+<td><code>rawptr&lt;byte&gt;</code></td>
+<td><strong>C 侧借用</strong>（窗口标题 <code>title[256]</code>）</td>
+</tr>
+<tr>
+<td>96</td>
+<td><code>widget_id</code></td>
+<td><code>rawptr&lt;byte&gt;</code></td>
+<td><strong>C 侧借用</strong>（控件 <code>strdup</code> 副本，未命中为 NULL）</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>块内嵌于 <code>GuiAppImpl</code>、<strong>非堆分配</strong>；两个借用指针由 C 拥有、C 绝不 <code>free</code>，
+  有效期至<strong>下次 <code>poll/wait</code> 或窗口 / 树释放</strong>。Dial 侧必须立即
+  <code>string_from_cstr</code> 复制成自己的 ARC <code>string</code>，<strong>绝不长期持有</strong>；
+  NULL 借用指针会得到空串（<code>string_from_cstr(NULL)</code> 已定义为空串）。</li>
+<li><code>dial_gui_event_widget(app)</code> 给命中的 <code>GuiWidget</code> 裸句柄（窗口级 / QUIT 为 NULL）；
+  命中测试放在两后端 <code>pump</code> 的 <strong>Dial 调用线程</strong>，绝不进 <code>wndproc</code> 系统回调。</li>
+<li><strong>布局双向锁死</strong>：C 侧 <code>_Static_assert(sizeof==104, offsetof(win_title)==88,
+  offsetof(widget_id)==96)</code> 与 Dial 侧 <code>sizeof&lt;T&gt;()</code> / <code>alignof&lt;T&gt;()</code> /
+  <code>offsetof&lt;T&gt;(field)</code> 编译期内建逐项比对（复用 §33.17 P 组范式），
+  任何字段增删两边同时报错，杜绝契约漂移。</li>
+<li>QUIT / 窗口级事件没有命中控件，<code>tag</code> / <code>userdata</code> / <code>local_*</code> 为 0、
+  <code>win_title</code> / <code>widget_id</code> 为 NULL。真实鼠标注入依赖 XTest / xdotool，
+  本轮<strong>未实机验证</strong>，命中逻辑由无头纯 C 树断言覆盖。</li>
+</ul>
 <p><strong>键码表（<code>dial_gui_event_key</code>）</strong>：</p>
 <table>
 <thead>
@@ -8929,8 +9082,10 @@ C 侧在 X11 走 ARGB32、在 GDI 走 BGRA，通道转换由包内部负责，Di
 <h3 id="383-分层架构">38.3 分层架构</h3>
 <pre><code>Dial 源码 --import &quot;gui&quot;--&gt; gui.diali 签名（SHA256 锁定）
                                  |
-                         dial_gui_core.c   &lt;- 句柄 / 错误槽 / 事件槽
+                         dial_gui_core.c   &lt;- 句柄 / 错误槽 / 事件槽 / 28 个控件包装
                                  |  GuiBackend vtable
+                                 |  └─ dial_gui_widget.c（纯 C 树 / 布局 / 命中 / packed 块，
+                                 |      三平台共用、零平台符号；不碰像素也不碰平台 API）
               +------------------+------------------+
         dial_gui_x11.c                      dial_gui_win32.c
      (dlopen X11/Xext/Xrender)        (LoadLibraryA user32/gdi32)
@@ -8939,8 +9094,9 @@ C 侧在 X11 走 ARGB32、在 GDI 走 BGRA，通道转换由包内部负责，Di
                          (ARGB32 / AA / 字体)
 </code></pre>
 <p><code>core.c</code> <strong>不 <code>#include</code> 任何 X11 / <code>windows.h</code></strong>，只认 <code>GuiBackend</code> vtable；
-因此交叉编译三平台不需要各平台 GUI SDK 头。平台库<strong>一律运行时动态装载</strong>，
-三份 <code>.a</code> 都不产生链接期未定义符号。</p>
+<code>dial_gui_widget.c</code> 更是只 include <code>dial_gui.h</code> + libc。因此交叉编译三平台
+不需要各平台 GUI SDK 头，控件层也不会给 <code>.a</code> 引入任何平台符号。
+平台库<strong>一律运行时动态装载</strong>，三份 <code>.a</code> 都不产生链接期未定义符号。</p>
 <h3 id="384-自研-2d-光栅化器">38.4 自研 2D 光栅化器</h3>
 <p><code>dial_gui_raster.c</code> 是<strong>唯一碰像素的 TU</strong>，也是唯一展开
 <code>STB_TRUETYPE_IMPLEMENTATION</code> 的地方。CPU 侧一份 <code>ARGB32</code> 行主序像素缓冲，
@@ -9029,7 +9185,10 @@ Win32 后端的实机行为<strong>尚未验证</strong>，绝不写成「已实
 <code>dialc</code> 最终链接<strong>不需要</strong>新增 <code>-lX11</code> / <code>-lXext</code> / <code>-lXrender</code> / <code>-lgdi32</code>；
 缺库在<strong>运行时</strong>由 <code>dlopen</code> / <code>LoadLibraryA</code> 返回明确错误码 + 错误槽，
 绝不静默崩溃。包版本跟随编译器（<code>dial.toml</code> 的 <code>version</code> 由 CI 用
-<code>Cargo.toml</code> 覆盖），<code>abi = 6</code>，与 <code>stdlib.dialpkg</code> 同口径。</p>
+<code>Cargo.toml</code> 覆盖），<code>abi = 6</code>，与 <code>stdlib.dialpkg</code> 同口径。控件框架层新增的
+28 个 <code>extern fn</code> 同样是<strong>纯追加</strong>：旧 55 个签名零改动、<code>abi</code> / <code>version</code> 不变，
+仅 <code>.diali</code> 的 SHA256 随 manifest 重算，用户 <code>uninstall gui</code> 后 <code>install</code> 新包即可
+（同 ABI 覆盖）。</p>
 <h3 id="389-dial-侧用法">38.9 Dial 侧用法</h3>
 <pre><code class="language-dial">import &quot;gui&quot;;
 
@@ -9061,10 +9220,41 @@ while (dial_gui_app_should_quit(app) == 0) {
 dial_gui_window_close(win);
 dial_gui_app_free(app);
 </code></pre>
+<p>控件框架层用法（<code>GuiWidgetEvent</code> 必须在<strong>文件顶层</strong>声明，与 C 侧 packed 布局逐字节一致）：</p>
+<pre><code class="language-dial">packed extern struct GuiWidgetEvent {
+    kind: int, x: int, y: int, button: int, key: int, w: int, h: int,
+    local_x: int, local_y: int, tag: int, userdata: int,
+    win_title: rawptr&lt;byte&gt;, widget_id: rawptr&lt;byte&gt;
+}
+// ... main 里，tree 是独立纯内存树（不开窗也能布局 / 命中）：
+var tree: GuiWidget = dial_gui_widget_tree(200, 100);
+var b1: GuiWidget = dial_gui_widget_add(tree);
+dial_gui_widget_set_id(b1, &quot;btn_ok&quot;);
+dial_gui_widget_set_tag(b1, 1);
+dial_gui_widget_set_layout(tree, 1);        // 1 = VBOX
+dial_gui_widget_set_padding(tree, 10);
+dial_gui_widget_set_gap(tree, 5);
+dial_gui_widget_layout_apply(tree, 200, 100);
+
+// id 是 C 侧借用指针，必须复制成自己的 ARC string
+print(string_from_cstr(dial_gui_widget_id(b1)));        // btn_ok
+print(str(dial_gui_widget_tag(dial_gui_widget_hit(tree, 15, 15))));
+print(str(sizeof&lt;GuiWidgetEvent&gt;()));                   // 104（编译期常量）
+dial_gui_window_set_root(win, tree);                    // 此后树归窗口所有
+
+// 主动分发：poll/wait 后读 packed 纯值块，绝不注册回调
+var ev: rawptr&lt;GuiWidgetEvent&gt; =
+    ptr_cast&lt;rawptr&lt;GuiWidgetEvent&gt;&gt;(dial_gui_event_data(app));
+print(str(ev.kind));                                    // 纯值直接读
+var title: string = string_from_cstr(ev.win_title);     // 借用指针 → ARC 复制
+</code></pre>
 <blockquote>
-<p>完整可运行 demo 见 <code>tests/pkg/use_gui.dial</code>：为可读性那里用 <code>rgba(a,r,g,b)</code>
-辅助函数拼颜色；无 DISPLAY 时窗口路径打印 <code>window = skipped [原因]</code>，
-<strong>不伪装通过</strong>。</p>
+<p>完整可运行 demo 见 <code>tests/pkg/use_gui.dial</code>（地基层，用 <code>rgba(a,r,g,b)</code>
+拼颜色）与 <code>tests/pkg/use_gui_widget.dial</code>（控件框架层，<strong>不创建 <code>GuiPainter</code></strong>，
+因此不触碰 <code>crc_offscreen = 4007435570</code> 像素回归基准）。无 DISPLAY 时窗口路径
+打印 <code>window = skipped [原因]</code> / <code>widget_window = skipped [原因]</code>，<strong>不伪装通过</strong>；
+真实鼠标注入依赖 XTest / xdotool，本轮未实机验证，demo 如实打印
+<code>widget_hit_injection = skipped</code>。</p>
 </blockquote>
 <h3 id="3810-aa-组回归与平台边界">38.10 AA 组回归与平台边界</h3>
 <p><code>tests/run_tests.sh</code> 新增 <strong>AA 组</strong>（全量从 A–Z 二十六组扩为
@@ -9075,20 +9265,31 @@ A–Z + AA <strong>二十七组</strong>），依次验收：</p>
 <li><code>dialc pack</code> / <code>install</code> / <code>import</code> / 编译 / 运行闭环；</li>
 <li><strong>无 DISPLAY 路径</strong>：离屏画布 24 项断言（尺寸 / AA / 各图元 / 裁剪 /
    点阵与 TrueType 字体 / 坏字体路径 / <code>get_pixel</code> / CRC32），窗口明确跳过；</li>
+<li><strong>控件框架层无 DISPLAY 路径</strong>（<code>use_gui_widget.dial</code>，不创建 <code>GuiPainter</code>）：
+   <code>sizeof&lt;GuiWidgetEvent&gt;() == 104</code> 与各 <code>offsetof</code> 编译期内建断言、
+   <code>string_from_cstr</code> 的 ARC 复制、树增删遍历与防悬垂、VBox/HBox 等分与幂等、
+   固定尺寸优先、命中（后加子优先 / 不可见跳过）、窗口明确跳过；</li>
 <li><strong>Xvfb 实窗路径</strong>（<code>+extension MIT-SHM +extension RENDER</code>）：
    严格断言 <code>window = ok</code> / <code>window_backend = x11/xshm/xrender ...</code> /
    <code>window_flush = ok</code> / <code>quit_event = ok</code>；有 <code>xvfb-run</code> 就必须实机验证，
    没有则明确打印「真实窗口路径未实机验证」，绝不把未验证写成通过；</li>
+<li><strong>控件框架层 Xvfb 实窗</strong>：<code>window_set_root</code> / <code>widget_tree_free</code> 挂窗后拒绝、
+   QUIT 主动分发、packed 纯值块字段读取、<code>string_from_cstr</code> 对 NULL 借用指针
+   返回空串；真实鼠标注入如实标注 <code>widget_hit_injection = skipped</code>；</li>
 <li>卸载 <code>gui</code> 包。</li>
 </ol>
-<p>全量实测 <code>EXIT=0</code>，<strong>507 ✅ / 0 ❌</strong>；Xvfb 连续三次实窗能力串
+<p>全量实测 <code>EXIT=0</code>，<strong>510 ✅ / 0 ❌</strong>（AA 组 11 条 <code>aapass</code>：地基层 8 条 +
+控件框架层 3 条）；Xvfb 连续三次实窗能力串
 <code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，像素 CRC 稳定
 <code>4007435570</code>。</p>
 <h3 id="3811-能力边界不许当已支持">38.11 能力边界（不许当已支持）</h3>
 <ul>
-<li><strong>本轮只做地基</strong>：控件树 / 布局管理器 / 信号槽<strong>未实现</strong>，也<strong>不写进
-  <code>gui.diali</code></strong>——把未实现函数写进契约会让用户 <code>import</code> 后链接失败，
-  那是制造漂移而非预留接口；</li>
+<li><strong>两层已实现，控件层只做框架</strong>：地基层（窗 / 事件 / 绘图 / 字体）与
+  <strong>控件框架层</strong>（Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发）
+  都已有真实现并写进 <code>gui.diali</code>。但控件<strong>一律是通用 Box</strong>：<strong>成品控件外观
+  （Button / Label / Panel 渲染）、信号槽、C → Dial 反向回调、富文本编辑、
+  图片解码仍未实现</strong>，也不写进契约——把未实现函数写进契约会让用户 <code>import</code>
+  后链接失败，那是制造漂移而非预留接口。自绘由 Dial 侧用 <code>GuiPainter</code> 完成；</li>
 <li>Windows 后端<strong>未实机验证</strong>（沙箱只能交叉编译），Direct2D <strong>未落地</strong>；</li>
 <li>功能键编码<strong>两平台尚未统一</strong>（§38.2 键码表），只保证可打印字符一致；</li>
 <li>字体只加载<strong>本机可信</strong>文件，绝不接受网络字体；内置点阵仅覆盖 ASCII

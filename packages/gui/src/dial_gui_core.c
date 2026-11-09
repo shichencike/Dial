@@ -62,11 +62,14 @@ static char *str_dup(DialString s) {
 
 /* ---- 事件槽 ------------------------------------------------------------ */
 void gui_core_emit(GuiAppImpl *app, int kind, int x, int y, int button, int key,
-                   int w, int h, GuiWindowImpl *win) {
+                   int w, int h, GuiWindowImpl *win, GuiWidgetImpl *hit) {
     if (!app) return;
     app->ev_kind = kind; app->ev_x = x; app->ev_y = y;
     app->ev_button = button; app->ev_key = key;
     app->ev_w = w; app->ev_h = h; app->ev_win = win;
+    app->ev_widget = hit;
+    /* 只写纯值 + C 侧借用指针；绝不反向调用 Dial 函数。 */
+    gui_widget_fill_event(&app->ev_data, kind, x, y, button, key, w, h, win, hit);
     if (kind == GUI_EV_QUIT) app->quit = 1;
 }
 
@@ -99,6 +102,14 @@ static int painter_ok(GuiPainterImpl *p) {
     }
     return 1;
 }
+/* 控件句柄不进 ARC：靠全局根链表做 DFS 比指针，与 gui_core_has_window 同口径。 */
+static int widget_ok(GuiWidgetImpl *w) {
+    if (!w || !gui_widget_is_live(w)) {
+        gui_core_set_err(GUI_ERR_ARG, "空 / 已释放的 GuiWidget 句柄");
+        return 0;
+    }
+    return 1;
+}
 
 /* ---- 应用 / 事件循环 --------------------------------------------------- */
 
@@ -126,6 +137,8 @@ int64_t dial_gui_app_free(GuiAppImpl *app) {
         if (app->be) app->be->window_destroy(w);
         gui_painter_dispose(w->painter);
         w->painter = NULL;
+        /* 窗口拥有的控件树必须在 free(win) 之前释放，避免悬垂与二次释放。 */
+        if (w->root) gui_widget_dispose_tree(w->root);
         free(w);
         w = next;
     }
@@ -151,7 +164,7 @@ int64_t dial_gui_app_should_quit(GuiAppImpl *app) {
 int64_t dial_gui_app_poll(GuiAppImpl *app) {
     if (!app_ok(app)) return -1;
     if (app->quit) {
-        gui_core_emit(app, GUI_EV_QUIT, 0, 0, 0, 0, 0, 0, NULL);
+        gui_core_emit(app, GUI_EV_QUIT, 0, 0, 0, 0, 0, 0, NULL, NULL);
         gui_core_ok();
         return GUI_EV_QUIT;
     }
@@ -163,7 +176,7 @@ int64_t dial_gui_app_poll(GuiAppImpl *app) {
 int64_t dial_gui_app_wait(GuiAppImpl *app, int64_t timeout_ms) {
     if (!app_ok(app)) return -1;
     if (app->quit) {
-        gui_core_emit(app, GUI_EV_QUIT, 0, 0, 0, 0, 0, 0, NULL);
+        gui_core_emit(app, GUI_EV_QUIT, 0, 0, 0, 0, 0, 0, NULL, NULL);
         gui_core_ok();
         return GUI_EV_QUIT;
     }
@@ -235,6 +248,7 @@ int64_t dial_gui_window_close(GuiWindowImpl *win) {
     app->be->window_destroy(win);
     gui_painter_dispose(win->painter);
     win->painter = NULL;
+    if (win->root) gui_widget_dispose_tree(win->root);
     free(win);
     gui_core_ok();
     return 0;
@@ -495,4 +509,184 @@ DialString dial_gui_backend(void) {
     gui_core_ok();
     const GuiBackend *be = backend();
     return dial_string_new(be->name);
+}
+
+/* ====================================================================== *
+ * 控件框架层（gui.diali 后半段，28 个 extern fn）
+ *
+ * 全部只做：句柄校验 → 调 dial_gui_widget.c 的纯 C 逻辑 → 返回码 / 错误槽。
+ * 不碰像素、不碰平台 API、绝不反向调用 Dial 函数。
+ * ====================================================================== */
+
+/* ---- 树 ---------------------------------------------------------------- */
+
+GuiWidgetImpl *dial_gui_widget_tree(int64_t w, int64_t h) {
+    gui_core_ok();
+    if (w <= 0 || h <= 0 || w > 16384 || h > 16384) {
+        gui_core_set_err(GUI_ERR_ARG, "控件树尺寸非法（须在 1..16384）");
+        return NULL;
+    }
+    GuiWidgetImpl *r = gui_widget_tree_new((int)w, (int)h);
+    if (!r) gui_core_set_err(GUI_ERR_ALLOC, "GuiWidget 内存分配失败");
+    return r;
+}
+
+int64_t dial_gui_widget_tree_free(GuiWidgetImpl *root) {
+    if (!widget_ok(root)) return -1;
+    if (root->parent || root->win) {
+        gui_core_set_err(GUI_ERR_ARG, "已挂到窗口的树由窗口释放，不要调用 widget_tree_free");
+        return -1;
+    }
+    gui_widget_dispose_tree(root);
+    gui_core_ok();
+    return 0;
+}
+
+GuiWidgetImpl *dial_gui_widget_add(GuiWidgetImpl *parent) {
+    gui_core_ok();
+    if (!widget_ok(parent)) return NULL;
+    GuiWidgetImpl *c = gui_widget_add(parent);
+    if (!c) gui_core_set_err(GUI_ERR_ALLOC, "GuiWidget 内存分配失败");
+    return c;
+}
+
+int64_t dial_gui_widget_remove(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    if (!w->parent) {
+        gui_core_set_err(GUI_ERR_ARG, "根节点不可摘除，请用 widget_tree_free");
+        return -1;
+    }
+    if (!gui_widget_remove(w)) {
+        gui_core_set_err(GUI_ERR_ARG, "摘除控件失败（父节点链表不一致）");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+
+GuiWidgetImpl *dial_gui_widget_parent(GuiWidgetImpl *w)        { return widget_ok(w) ? w->parent : NULL; }
+GuiWidgetImpl *dial_gui_widget_first_child(GuiWidgetImpl *w)  { return widget_ok(w) ? w->first_child : NULL; }
+GuiWidgetImpl *dial_gui_widget_next_sibling(GuiWidgetImpl *w) { return widget_ok(w) ? w->next_sibling : NULL; }
+
+/* ---- 几何 -------------------------------------------------------------- */
+
+int64_t dial_gui_widget_set_rect(GuiWidgetImpl *w, int64_t x, int64_t y,
+                                 int64_t ww, int64_t hh) {
+    if (!widget_ok(w)) return -1;
+    if (ww > 16384 || hh > 16384) {
+        gui_core_set_err(GUI_ERR_ARG, "控件尺寸上限 16384；<= 0 表示该轴弹性分配");
+        return -1;
+    }
+    w->req_x = (int)x; w->req_y = (int)y;
+    w->req_w = (int)ww; w->req_h = (int)hh;
+    /* 同步实际几何：即使尚未 layout_apply，getter 与命中测试也正确。 */
+    w->x = (int)x; w->y = (int)y;
+    w->w = ww > 0 ? (int)ww : 0;
+    w->h = hh > 0 ? (int)hh : 0;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_x(GuiWidgetImpl *w)      { return widget_ok(w) ? w->x : -1; }
+int64_t dial_gui_widget_y(GuiWidgetImpl *w)      { return widget_ok(w) ? w->y : -1; }
+int64_t dial_gui_widget_width(GuiWidgetImpl *w)  { return widget_ok(w) ? w->w : -1; }
+int64_t dial_gui_widget_height(GuiWidgetImpl *w) { return widget_ok(w) ? w->h : -1; }
+
+/* ---- 可见 / id / 纯值标记 ---------------------------------------------- */
+
+int64_t dial_gui_widget_set_visible(GuiWidgetImpl *w, int64_t v) {
+    if (!widget_ok(w)) return -1;
+    w->visible = v ? 1 : 0;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_visible(GuiWidgetImpl *w) { return widget_ok(w) ? w->visible : -1; }
+
+int64_t dial_gui_widget_set_id(GuiWidgetImpl *w, DialString id) {
+    if (!widget_ok(w)) return -1;
+    /* C 侧 strdup 自有副本：输入 Dial string 不被接管，ARC 边界不越界。 */
+    char *p = str_dup(id);
+    if (!p) { gui_core_set_err(GUI_ERR_ALLOC, "控件 id 内存分配失败"); return -1; }
+    free(w->id);
+    w->id = p;
+    gui_core_ok();
+    return 0;
+}
+/* 返回 C 侧借用指针；Dial 侧必须 string_from_cstr 复制。 */
+void *dial_gui_widget_id(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return NULL;
+    return (void *)(w->id ? w->id : "");
+}
+
+int64_t dial_gui_widget_set_tag(GuiWidgetImpl *w, int64_t t) {
+    if (!widget_ok(w)) return -1;
+    w->tag = t; gui_core_ok(); return 0;
+}
+int64_t dial_gui_widget_tag(GuiWidgetImpl *w) { return widget_ok(w) ? w->tag : -1; }
+int64_t dial_gui_widget_set_userdata(GuiWidgetImpl *w, int64_t u) {
+    if (!widget_ok(w)) return -1;
+    w->userdata = u; gui_core_ok(); return 0;
+}
+int64_t dial_gui_widget_userdata(GuiWidgetImpl *w) { return widget_ok(w) ? w->userdata : -1; }
+
+/* ---- 布局 -------------------------------------------------------------- */
+
+int64_t dial_gui_widget_set_layout(GuiWidgetImpl *w, int64_t mode) {
+    if (!widget_ok(w)) return -1;
+    if (mode != GUI_LAYOUT_ABS && mode != GUI_LAYOUT_VBOX && mode != GUI_LAYOUT_HBOX) {
+        gui_core_set_err(GUI_ERR_ARG, "布局模式只接受 0 ABS / 1 VBOX / 2 HBOX");
+        return -1;
+    }
+    w->layout = (int)mode;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_set_padding(GuiWidgetImpl *w, int64_t n) {
+    if (!widget_ok(w)) return -1;
+    w->padding = n > 0 ? (int)(n < 16384 ? n : 16384) : 0;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_set_gap(GuiWidgetImpl *w, int64_t n) {
+    if (!widget_ok(w)) return -1;
+    w->gap = n > 0 ? (int)(n < 16384 ? n : 16384) : 0;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_layout_apply(GuiWidgetImpl *root, int64_t w, int64_t h) {
+    if (!widget_ok(root)) return -1;
+    if (!gui_widget_layout_apply(root, (int)w, (int)h)) {
+        gui_core_set_err(GUI_ERR_ARG, "布局尺寸非法（须为正）");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+
+/* ---- 命中 / 挂窗 ------------------------------------------------------- */
+
+GuiWidgetImpl *dial_gui_widget_hit(GuiWidgetImpl *root, int64_t x, int64_t y) {
+    gui_core_ok();
+    if (!widget_ok(root)) return NULL;
+    return gui_widget_hit(root, (int)x, (int)y, NULL, NULL);
+}
+
+int64_t dial_gui_window_set_root(GuiWindowImpl *win, GuiWidgetImpl *root) {
+    if (!win_ok(win) || !widget_ok(root)) return -1;
+    if (!gui_widget_attach_window(root, win)) {
+        gui_core_set_err(GUI_ERR_ARG,
+                         "挂树失败：root 必须无父且未挂窗，且 win 尚未挂树");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+
+/* ---- 主动事件分发 ------------------------------------------------------ */
+
+GuiWidgetImpl *dial_gui_event_widget(GuiAppImpl *app) {
+    return app_ok(app) ? app->ev_widget : NULL;
+}
+/* 返回内嵌 packed 纯值块地址（非堆分配）；Dial 侧 ptr_cast 后只读。 */
+void *dial_gui_event_data(GuiAppImpl *app) {
+    return app_ok(app) ? (void *)&app->ev_data : NULL;
 }

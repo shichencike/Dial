@@ -5,6 +5,7 @@
 # 产物：packages/gui/lib/<triple>/libgui.a
 #   - dial_gui_core.o    FFI 包装层：句柄生命周期 / 错误槽 / 事件槽 / 平台分发
 #   - dial_gui_raster.o  自研 2D 光栅化器 + 内置 8x8 点阵 + stb_truetype 实现
+#   - dial_gui_widget.o  控件框架层：Widget 树 / 布局 / 命中 / packed 事件块（纯 C，三平台共用）
 #   - dial_gui_x11.o     Linux / Termux 后端：X11 + XShm + XRender（仅 POSIX 目标）
 #   - dial_gui_win32.o   Windows 后端：GDI DIBSection + 消息循环（仅 windows 目标）
 #
@@ -55,7 +56,8 @@ for entry in "${TARGETS[@]}"; do
     trap 'rm -rf "$work"' EXIT
 
     INCS=(-I "$PKG/src" -I "$ROOT/stdlib" -I "$ROOT/runtime" -I "$TP/stb")
-    SRCS=("$PKG/src/dial_gui_core.c" "$PKG/src/dial_gui_raster.c")
+    SRCS=("$PKG/src/dial_gui_core.c" "$PKG/src/dial_gui_raster.c" \
+          "$PKG/src/dial_gui_widget.c")
     if [ "$family" = "win32" ]; then
         SRCS+=("$PKG/src/dial_gui_win32.c")
     else
