@@ -27,6 +27,7 @@
 <ul>
 <li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</a><ul>
 <li><a href="#added">Added</a></li>
+<li><a href="#fixed">Fixed</a></li>
 <li><a href="#changed">Changed</a></li>
 <li><a href="#测试与交付">测试与交付</a></li>
 </ul>
@@ -34,8 +35,9 @@
 </ul>
 </div>
 <h2 id="未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</h2>
-<p><strong>主题：手搓 GUI 三层——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层。</strong> 详见
-<a href="../spec.html#38-手搓-gui-地基包guidialpkg">README §38</a>。</p>
+<p><strong>主题：手搓 GUI 三层——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层；
+并修复 <code>http.dialpkg</code> 三处 Fail-Fast / 目标平台可用性缺陷</strong>（见下文 <code>### Fixed</code>）。
+详见 <a href="../spec.html#38-手搓-gui-地基包guidialpkg">README §38</a> 与 README §37.10。</p>
 <blockquote>
 <p><strong>版本与交付口径（防漂移，务必先读）</strong>：本段记录的是 <strong><code>[v1.10]</code>（Git 标签 <code>v1.1</code>）
 发布之后</strong>、仍在工作树里的<strong>开发中增量</strong>——本轮只要求「制作 <code>gui.dialpkg</code>
@@ -47,8 +49,8 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
 <p><strong><code>[v1.10]</code> 段的「A–Z 二十六组 / 499 ✅」是 <code>v1.1</code> 标签发布时的验收快照，
 保持原文不改</strong>；地基层增量把回归扩到 <strong>A–Z + AA 二十七组 / 507 ✅</strong>，
 控件框架层再给 AA 组增 3 条断言到 <strong>510 ✅</strong>，成品控件外观层又增 3 条到
-<strong>513 ✅</strong>。四者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，
-仍为发布快照。</p>
+<strong>513 ✅</strong>，本轮 <code>http.dialpkg</code> 缺陷修复再给 W 组增 4 条断言到 <strong>517 ✅</strong>。
+五者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>
 <ul>
@@ -115,8 +117,42 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
     <code>widget_text(): rawptr&lt;byte&gt;</code> 是借用指针，Dial 侧必须 <code>string_from_cstr</code>
     复制；<code>GuiWidgetImpl.text</code> 由 <code>dispose_subtree</code> 与 <code>id</code> 同口径释放。</li>
 </ul>
+<h3 id="fixed">Fixed</h3>
+<ul>
+<li><strong><code>http.dialpkg</code>：chunked 长度行不再静默损坏（§20 Fail-Fast）</strong>。<code>dial_http.c</code> 的
+  <code>dh_read_chunked</code> 用 <code>strtoll(line, &amp;endp, 16)</code> 解析块长度却<strong>不检查 <code>endp != line</code></strong>：
+  服务器返回 <code>xyz</code> 时 <code>strtoll</code> 返回 0 且 <code>endp == line</code>，畸形响应被当成「结束块」，
+  响应体凭空少一截却报 200。现补四道检查：<code>endp == line</code>（一个十六进制数字都没
+  解析到）、<code>errno == ERANGE</code>（溢出）、负数、以及长度数字后除 <code>;chunk-ext</code> / 行尾空白
+  以外的脏尾随字符；任一命中即 <code>DIAL_HTTP_ERR_PROTOCOL</code> 并把坏行写进错误槽，合法
+  <code>1a;ext=1</code> 扩展照常放行。<code>errno.h</code> 提到文件顶部无条件包含，Windows 分支同样生效。</li>
+<li><strong><code>http.dialpkg</code>：Termux 目标平台能加载系统根证书库</strong>。<code>dial_tls.c</code> 的 <code>load_linux_ca</code>
+  原本只读 <code>/etc/ssl/certs</code> 与 <code>/etc/ssl/cert.pem</code>，而 Termux 的证书在
+  <code>$PREFIX/etc/tls/cert.pem</code>——文档把 Termux 列为目标平台，<code>https</code> 却直接报
+  「无法加载系统根证书库」。现按 <code>getenv("PREFIX")</code> 的实际长度<strong>动态拼</strong>该路径
+  （绝不静默截断），加载成功即计入受信链；失败时的中文提示同步列出 Termux 路径。
+  自定义 CA 优先级与 fail-closed 证书校验一点未动。</li>
+<li><strong><code>http.dialpkg</code>：额外请求头不再被 512 字节静默截断</strong>。<code>dial_http2.c</code> 的 <code>h2_submit</code>
+  原用 <code>char buf[512]</code> 且 <code>llen</code> 超限就截到 511 字节：很长的 <code>Authorization</code> /
+  <code>Cookie</code> 会被悄悄砍掉，请求照样发出却鉴权失败。现按行长 <code>malloc</code> 整行
+  （<code>dh_hlist_add</code> 本就拷贝 name/value，用完即释放），分配或入表失败按 Fail-Fast
+  整条请求失败、不发半截头。HTTP/1.1 侧 <code>dh_request</code> 本就走动态 <code>dh_buf</code>，无此问题。</li>
+<li><strong><code>http.dialpkg</code>：HTTP/2 额外头名统一小写化</strong>（去掉截断后暴露的协议合规坑）。
+  RFC 7540 §8.1.2 要求头名必须小写，用户按 HTTP/1.1 习惯写的
+  <code>Authorization: &lt;超长 token&gt;</code> 会被对端以 <code>ProtocolError</code> 拒绝。现 <code>h2_submit</code> 只把
+  <code>extra_headers</code> 的头名转小写，H1 侧大小写不敏感、保持原样；<code>.diali</code> 对外签名与
+  <code>abi = 6</code> 均不变（仅注释补充，<code>pack</code> 时重算 SHA256、<code>install</code> 同 ABI 覆盖）。</li>
+</ul>
 <h3 id="changed">Changed</h3>
 <ul>
+<li><code>tests/run_tests.sh</code> 的 <strong>W 组</strong>（<code>http.dialpkg</code> 端到端）新增 4 条断言，逐一覆盖
+  本轮修复：<code>/chunked_bad</code> 畸形长度行必须 <code>is_null=true</code> 且错误码 <code>-5</code>（错误消息含
+  坏行）、<code>/chunked_ext</code> 合法 <code>;ext=1</code> 必须解出完整 body；<code>$PREFIX/etc/tls/cert.pem</code>
+  真实 TLS 1.3 握手成功（<code>verify=0</code>）且空 CA 目录仍 fail-closed；HTTP/2 1200 字节
+  超长额外头按实际长度回显 <code>X-Long-Len=1200</code>。配套新增 <code>http_test_server.py</code> 两条
+  端点、<code>http2_test_server.py</code> 的 <code>X-Long-Len</code> 回显头，以及 <code>use_http.dial</code> /
+  <code>use_http2.dial</code> / <code>use_https.dial</code>（Termux 模式）里的断言。全量回归由
+  <strong>513 ✅ 增至 517 ✅</strong>，组数仍为 A–Z + AA 二十七组。</li>
 <li><code>tests/run_tests.sh</code> 的 <strong>AA 组</strong>（<code>gui.dialpkg</code> 端到端）：三平台构建、零警告检查、
   <code>nm -u</code> 符号检查、<code>pack</code> / <code>install</code>、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
   （<code>window = ok</code> / <code>window_backend = x11/xshm/xrender</code> / <code>window_flush = ok</code> /
@@ -149,7 +185,7 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
 </ul>
 <h3 id="测试与交付">测试与交付</h3>
 <ul>
-<li><code>bash tests/run_tests.sh</code> <strong>A–Z + AA 二十七组全套通过（513 ✅ / 0 ❌）</strong>；
+<li><code>bash tests/run_tests.sh</code> <strong>A–Z + AA 二十七组全套通过（517 ✅ / 0 ❌，W 组本轮 +4 条）</strong>；
   Xvfb 连续三次实窗 <code>EXIT=0</code>，能力串
   <code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，地基层像素 CRC 稳定
   <code>4007435570</code>、外观层 <code>look_crc_normal</code> 稳定 <code>3884455222</code>；
@@ -165,6 +201,8 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
   <code>widget_hit_injection = skipped</code>，命中逻辑由无头纯 C 树断言覆盖。</li>
 <li><code>tools/cve_check.py</code> 8/8；语言能力审计 <code>TOTAL=38 PASS=38 FAIL=0</code>；
   <code>check_version</code> / <code>check_links</code> 全通过；<code>cargo check</code> 零警告；
+  <code>http</code> 包三平台静态库 <code>bash packages/http/build.sh</code> 零警告重建，<code>.diali</code> 注释
+  变更经 <code>pack</code> 重算 SHA256 后 <code>install</code> 覆盖成功（<code>abi = 6</code> 不变）；
   官网由 <code>tools/build_web.py</code> 重新生成并与文档同步。</li>
 <li><strong>交付状态</strong>：仅本地提交，未推送、未打标签、未发 Release（遵循本段开头的口径）。</li>
 </ul>

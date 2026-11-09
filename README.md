@@ -1644,7 +1644,7 @@ print("");        // -> Hi
 ./tests/run_tests.sh
 ```
 
-`bash tests/run_tests.sh` 的**当前全量回归是 A–Z + AA 共二十七组**（513 ✅ / 0 ❌），
+`bash tests/run_tests.sh` 的**当前全量回归是 A–Z + AA 共二十七组**（517 ✅ / 0 ❌），
 全部通过才算绿。下表逐项详列 **A–M 十三组**——这组逐组说明自 v0.9x 沿用至今、
 内容未变，且每一组至今仍在执行；**N–Z 与 AA 组**分别见 §33–§38 各章与
 `tests/run_tests.sh`（其中 AA 组是手搓 GUI 地基包 `gui.dialpkg` 的专项回归，见 §38）：
@@ -4808,8 +4808,9 @@ SSE / AVX / NEON。
 > **本节上方的「A–Z 二十六组 / 499 ✅」是 `v1.1` 标签发布时的验收快照，保持原文不改。**
 > 此后工作树又新增 `gui.dialpkg` 地基层与 AA 组（507 ✅），再补控件框架层
 > （AA 组 +3 条断言到 **510 ✅**），又补成品控件外观层（AA 组 +3 条到
-> **513 ✅**），全量回归仍为 **A–Z + AA 二十七组**，属 **未发布的开发中增量**，
-> 见 §38 与 CHANGELOG `[未发布]` 段。
+> **513 ✅**），再修 `http.dialpkg` 三处 Fail-Fast / 可用性缺陷并给 W 组 +4 条
+> 断言到 **517 ✅**，全量回归仍为 **A–Z + AA 二十七组**，属 **未发布的开发中增量**，
+> 见 §38 / §37.10 与 CHANGELOG `[未发布]` 段。
 
 
 ---
@@ -5406,7 +5407,7 @@ B5（函数名重载）与 B4（闭包）维持**永久否决**。
 | 决策 | 落地方式 |
 | --- | --- |
 | **协议层自研** | `packages/http/src/dial_http.c`：URL 解析、请求行与 Header 拼装、响应报文解析（状态行 / 头部 / `Content-Length` / `chunked` / 读到关闭）、Socket 读写，全部自己实现。线级细节留在自己手里，才能为后续的连接指纹定制留出空间 |
-| **密码学绝不手搓** | TLS 由 **mbedTLS** 提供并已接线上层：`https://` 走 mbedTLS，证书校验 **fail-closed**（系统根 + 自定义 CA 两条信任链，自签名不可冒用）；gzip / deflate 解压由 **zlib** 提供。协议层自己写，密码学与压缩算法一律用成熟实现 |
+| **密码学绝不手搓** | TLS 由 **mbedTLS** 提供并已接线上层：`https://` 走 mbedTLS，证书校验 **fail-closed**（系统根 + 自定义 CA 两条信任链，自签名不可冒用；Termux 上系统根另读 `$PREFIX/etc/tls/cert.pem`）；gzip / deflate 解压由 **zlib** 提供。协议层自己写，密码学与压缩算法一律用成熟实现 |
 | **两层 API** | 底层「流式」：`connect` / `write` / `write_line` / `read_line` / `read_all` —— 调用方自己拼报文；高层「一次请求」：`get` / `post` + `HttpResponse` 访问器（状态码 / 响应体 / 响应头 / 按序号遍历） |
 | **HTTP/2 自研分帧 + HPACK** | `packages/http/src/dial_http2.c` / `dial_hpack.c`：9 字节帧头与 8 类帧、HPACK（请求侧最简编码，响应侧静态表 61 项 + Huffman 解码 257 项 + 动态表）、会话式真·并发多路复用。`https://` 走 ALPN 协商 `h2`（未协商出 h2 **拒绝降级**），`http://` 走明文 **h2c** prior-knowledge |
 | **错误走返回码** | 不抛 Dial 异常（包不假定宿主装了异常栈）：失败返回空句柄（`is_null` 可判），原因取 `dial_http_last_error()` / `dial_http_last_error_msg()`（**线程局部**错误槽，多线程各看各的） |
@@ -5445,6 +5446,15 @@ SHA256 自检）、`import "http"` 编译运行、本地 HTTP 服务器端到端
 **故意乱序响应**，6 个 `spawn` worker 共享**单条连接**并发提交 6 个 stream，
 逐条断言 `path == X-Stream`（不串台）、`conns = 1` / `streams = 6`、
 `h2` ALPN 协商成功、fail-closed 拒签自签 CA、404 / 500 全绿。
+
+**Fail-Fast / 可用性回归**（v1.10 开发中增补，同组 +4 条断言）：
+① `/chunked_bad` 长度行 `xyz` 必须明确报 `DIAL_HTTP_ERR_PROTOCOL(-5)` 并把坏行写进
+错误槽，`/chunked_ext` 的 `1a;ext=1` 合法扩展必须解出完整 body；
+② Termux 目标平台：把自签 CA 装成 `$PREFIX/etc/tls/cert.pem` 后，不设自定义 CA
+也能真实握手成功（`verify=0`），空 CA 目录则仍 fail-closed 明确拒绝；
+③ HTTP/2 发 1200 字节超长额外头，服务端按实际长度回显 `X-Long-Len=1200`
+（旧 `char buf[512]` 会静默截到 511 字节）。H2 侧额外头名按 RFC 7540 统一小写化，
+H1 侧大小写不敏感、保持原样。四处修复均**不改 `.diali` 对外签名与 `abi = 6`**。
 
 **客户端画像（兼容性，非规避引擎）**：`dial_http_set_profile("default" | "chrome")`
 只控制请求头序与 User-Agent 这类兼容参数（与只认浏览器客户端的 API 互通），
@@ -5924,8 +5934,8 @@ A–Z + AA **二十七组**），依次验收：
    Xvfb 实窗断言 `window_set_root` 挂树 + 整树绘制 + `flush` 上屏全通过；
 9. 卸载 `gui` 包。
 
-全量实测 `EXIT=0`，**513 ✅ / 0 ❌**（AA 组 14 条 `aapass`：地基层 8 条 +
-控件框架层 3 条 + 外观层 3 条）；Xvfb 连续三次实窗能力串
+全量实测 `EXIT=0`，**517 ✅ / 0 ❌**（AA 组 14 条 `aapass`：地基层 8 条 +
+控件框架层 3 条 + 外观层 3 条；W 组本轮 +4 条 http 缺陷回归）；Xvfb 连续三次实窗能力串
 `x11/xshm/xrender argb32 filter=best visual_depth=24`，地基层像素 CRC 稳定
 `4007435570`、外观层 `look_crc_normal` 稳定 `3884455222`。
 

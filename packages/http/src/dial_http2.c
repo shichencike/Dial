@@ -803,18 +803,40 @@ static int h2_submit(DialH2Session *s, h2_stream *st, const char *method,
             const char *eol = strchr(line, '\n');
             size_t llen = eol ? (size_t)(eol - line) : strlen(line);
             if (llen > 0) {
-                char buf[512];
-                if (llen >= sizeof(buf)) llen = sizeof(buf) - 1;
+                /* §20 Fail-Fast：额外头按实际行长动态分配，绝不再静默截到
+                 * 511 字节（很长的 Authorization / Cookie 会被悄悄砍掉，请求
+                 * 照样发出却鉴权失败，调用方无从察觉）。分配失败即整条请求
+                 * 失败，不发半截头。dh_hlist_add 内部会拷贝 name/value，
+                 * 因此本次迭代结束即可释放 buf。 */
+                char *buf = (char *)malloc(llen + 1);
+                if (!buf) {
+                    dh_hlist_free(&req);
+                    h2_set_error(DIAL_HTTP_ERR_NOMEM, "内存不足");
+                    return 0;
+                }
                 memcpy(buf, line, llen);
                 buf[llen] = '\0';
                 if (buf[llen - 1] == '\r') buf[llen - 1] = '\0';
                 char *colon = strchr(buf, ':');
                 if (colon) {
                     *colon = '\0';
+                    /* RFC 7540 §8.1.2：HTTP/2 头名必须小写，大写会被对端以
+                     * ProtocolError 拒绝。用户按 HTTP/1.1 习惯写的
+                     * "Authorization: <超长 token>" 在此统一规范化；H1 侧
+                     * 大小写不敏感、保持原样，对外契约不变。 */
+                    for (char *q = buf; q < colon; q++) {
+                        if (*q >= 'A' && *q <= 'Z') *q = (char)(*q - 'A' + 'a');
+                    }
                     char *v = colon + 1;
                     while (*v == ' ' || *v == '\t') v++;
-                    dh_hlist_add(&req, buf, (int)strlen(buf), v, (int)strlen(v));
+                    if (!dh_hlist_add(&req, buf, (int)strlen(buf), v, (int)strlen(v))) {
+                        free(buf);
+                        dh_hlist_free(&req);
+                        h2_set_error(DIAL_HTTP_ERR_NOMEM, "内存不足");
+                        return 0;
+                    }
                 }
+                free(buf);
             }
             if (!eol) break;
             line = eol + 1;

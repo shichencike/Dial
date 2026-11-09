@@ -16,6 +16,10 @@
   /status500 -> 500
 每个响应都带 X-Test: dialh2 与 X-Stream: <path>（供 worker 断言拿到自己的响应）。
 
+额外头回归：每个响应还带 X-Long-Len，值是本请求实际收到的
+X-Long-Header 头值字节数（没发则为 0）。W 组用它验证 h2_submit 不再把
+超长额外请求头静默截断到 511 字节（§20 Fail-Fast）。
+
 依赖：pip install h2 hpack hyperframe（仅测试服务器用；构建/运行 http.dialpkg 不需要）。
 """
 import sys
@@ -37,12 +41,13 @@ CERT = os.environ.get("DIAL_TLS_CERT", "/tmp/tlstest/srv.crt")
 KEY = os.environ.get("DIAL_TLS_KEY", "/tmp/tlstest/srv.key")
 
 
-def make_response_headers(path, code):
+def make_response_headers(path, code, long_len=0):
     return [
         (":status", str(code)),
         ("content-type", "text/plain"),
         ("x-test", "dialh2"),
         ("x-stream", path),  # 让客户端校验「拿回的是自己那条 stream 的响应」
+        ("x-long-len", str(long_len)),  # 收到的超长额外头的真实长度（0 = 没发）
     ]
 
 
@@ -72,10 +77,10 @@ def handle_conn(conn, lock, label):
     with lock:
         conn.sendall(h2c.data_to_send())
 
-    pending = {}  # stream_id -> path
+    pending = {}  # stream_id -> (path, long_len)
     closed = set()
 
-    def send_one(stream_id, path):
+    def send_one(stream_id, path, long_len):
         code, body = route(path)
         # 延迟放在独立线程，模拟「服务端并发处理、乱序返回」
         d = delay_for(path)
@@ -84,7 +89,7 @@ def handle_conn(conn, lock, label):
         with lock:
             if stream_id in closed:
                 return
-            h2c.send_headers(stream_id, make_response_headers(path, code))
+            h2c.send_headers(stream_id, make_response_headers(path, code, long_len))
             h2c.send_data(stream_id, body, end_stream=True)
             conn.sendall(h2c.data_to_send())
         closed.add(stream_id)
@@ -103,7 +108,13 @@ def handle_conn(conn, lock, label):
                 if isinstance(ev, RequestReceived):
                     hdrs = dict(ev.headers)
                     path = hdrs.get(":path", "/")
-                    pending[ev.stream_id] = path
+                    # 头名大小写不敏感：HPACK/h2 实现可能保留或小写化。
+                    long_len = 0
+                    for hk, hv in hdrs.items():
+                        if hk.lower() == "x-long-header":
+                            long_len = len(hv)
+                            break
+                    pending[ev.stream_id] = (path, long_len)
                 elif isinstance(ev, DataReceived):
                     # 请求体：回 ACK，保证流控窗口
                     with lock:
@@ -112,8 +123,8 @@ def handle_conn(conn, lock, label):
                         if out:
                             conn.sendall(out)
                 elif isinstance(ev, StreamEnded):
-                    path = pending.pop(ev.stream_id, "/")
-                    threading.Thread(target=send_one, args=(ev.stream_id, path),
+                    path, long_len = pending.pop(ev.stream_id, ("/", 0))
+                    threading.Thread(target=send_one, args=(ev.stream_id, path, long_len),
                                      daemon=True).start()
     except (OSError, ssl.SSLError):
         return

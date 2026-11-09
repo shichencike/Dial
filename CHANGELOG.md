@@ -22,8 +22,9 @@
 
 ## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）
 
-**主题：手搓 GUI 三层——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层。** 详见
-[README §38](README.md#38-手搓-gui-地基包guidialpkg)。
+**主题：手搓 GUI 三层——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层；
+并修复 `http.dialpkg` 三处 Fail-Fast / 目标平台可用性缺陷**（见下文 `### Fixed`）。
+详见 [README §38](README.md#38-手搓-gui-地基包guidialpkg) 与 README §37.10。
 
 > **版本与交付口径（防漂移，务必先读）**：本段记录的是 **`[v1.10]`（Git 标签 `v1.1`）
 > 发布之后**、仍在工作树里的**开发中增量**——本轮只要求「制作 `gui.dialpkg`
@@ -36,8 +37,8 @@
 > **`[v1.10]` 段的「A–Z 二十六组 / 499 ✅」是 `v1.1` 标签发布时的验收快照，
 > 保持原文不改**；地基层增量把回归扩到 **A–Z + AA 二十七组 / 507 ✅**，
 > 控件框架层再给 AA 组增 3 条断言到 **510 ✅**，成品控件外观层又增 3 条到
-> **513 ✅**。四者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，
-> 仍为发布快照。
+> **513 ✅**，本轮 `http.dialpkg` 缺陷修复再给 W 组增 4 条断言到 **517 ✅**。
+> 五者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
 
@@ -104,8 +105,42 @@
     `widget_text(): rawptr<byte>` 是借用指针，Dial 侧必须 `string_from_cstr`
     复制；`GuiWidgetImpl.text` 由 `dispose_subtree` 与 `id` 同口径释放。
 
+### Fixed
+
+- **`http.dialpkg`：chunked 长度行不再静默损坏（§20 Fail-Fast）**。`dial_http.c` 的
+  `dh_read_chunked` 用 `strtoll(line, &endp, 16)` 解析块长度却**不检查 `endp != line`**：
+  服务器返回 `xyz` 时 `strtoll` 返回 0 且 `endp == line`，畸形响应被当成「结束块」，
+  响应体凭空少一截却报 200。现补四道检查：`endp == line`（一个十六进制数字都没
+  解析到）、`errno == ERANGE`（溢出）、负数、以及长度数字后除 `;chunk-ext` / 行尾空白
+  以外的脏尾随字符；任一命中即 `DIAL_HTTP_ERR_PROTOCOL` 并把坏行写进错误槽，合法
+  `1a;ext=1` 扩展照常放行。`errno.h` 提到文件顶部无条件包含，Windows 分支同样生效。
+- **`http.dialpkg`：Termux 目标平台能加载系统根证书库**。`dial_tls.c` 的 `load_linux_ca`
+  原本只读 `/etc/ssl/certs` 与 `/etc/ssl/cert.pem`，而 Termux 的证书在
+  `$PREFIX/etc/tls/cert.pem`——文档把 Termux 列为目标平台，`https` 却直接报
+  「无法加载系统根证书库」。现按 `getenv("PREFIX")` 的实际长度**动态拼**该路径
+  （绝不静默截断），加载成功即计入受信链；失败时的中文提示同步列出 Termux 路径。
+  自定义 CA 优先级与 fail-closed 证书校验一点未动。
+- **`http.dialpkg`：额外请求头不再被 512 字节静默截断**。`dial_http2.c` 的 `h2_submit`
+  原用 `char buf[512]` 且 `llen` 超限就截到 511 字节：很长的 `Authorization` /
+  `Cookie` 会被悄悄砍掉，请求照样发出却鉴权失败。现按行长 `malloc` 整行
+  （`dh_hlist_add` 本就拷贝 name/value，用完即释放），分配或入表失败按 Fail-Fast
+  整条请求失败、不发半截头。HTTP/1.1 侧 `dh_request` 本就走动态 `dh_buf`，无此问题。
+- **`http.dialpkg`：HTTP/2 额外头名统一小写化**（去掉截断后暴露的协议合规坑）。
+  RFC 7540 §8.1.2 要求头名必须小写，用户按 HTTP/1.1 习惯写的
+  `Authorization: <超长 token>` 会被对端以 `ProtocolError` 拒绝。现 `h2_submit` 只把
+  `extra_headers` 的头名转小写，H1 侧大小写不敏感、保持原样；`.diali` 对外签名与
+  `abi = 6` 均不变（仅注释补充，`pack` 时重算 SHA256、`install` 同 ABI 覆盖）。
+
 ### Changed
 
+- `tests/run_tests.sh` 的 **W 组**（`http.dialpkg` 端到端）新增 4 条断言，逐一覆盖
+  本轮修复：`/chunked_bad` 畸形长度行必须 `is_null=true` 且错误码 `-5`（错误消息含
+  坏行）、`/chunked_ext` 合法 `;ext=1` 必须解出完整 body；`$PREFIX/etc/tls/cert.pem`
+  真实 TLS 1.3 握手成功（`verify=0`）且空 CA 目录仍 fail-closed；HTTP/2 1200 字节
+  超长额外头按实际长度回显 `X-Long-Len=1200`。配套新增 `http_test_server.py` 两条
+  端点、`http2_test_server.py` 的 `X-Long-Len` 回显头，以及 `use_http.dial` /
+  `use_http2.dial` / `use_https.dial`（Termux 模式）里的断言。全量回归由
+  **513 ✅ 增至 517 ✅**，组数仍为 A–Z + AA 二十七组。
 - `tests/run_tests.sh` 的 **AA 组**（`gui.dialpkg` 端到端）：三平台构建、零警告检查、
   `nm -u` 符号检查、`pack` / `install`、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
   （`window = ok` / `window_backend = x11/xshm/xrender` / `window_flush = ok` /
@@ -138,7 +173,7 @@
 
 ### 测试与交付
 
-- `bash tests/run_tests.sh` **A–Z + AA 二十七组全套通过（513 ✅ / 0 ❌）**；
+- `bash tests/run_tests.sh` **A–Z + AA 二十七组全套通过（517 ✅ / 0 ❌，W 组本轮 +4 条）**；
   Xvfb 连续三次实窗 `EXIT=0`，能力串
   `x11/xshm/xrender argb32 filter=best visual_depth=24`，地基层像素 CRC 稳定
   `4007435570`、外观层 `look_crc_normal` 稳定 `3884455222`；
@@ -154,6 +189,8 @@
   `widget_hit_injection = skipped`，命中逻辑由无头纯 C 树断言覆盖。
 - `tools/cve_check.py` 8/8；语言能力审计 `TOTAL=38 PASS=38 FAIL=0`；
   `check_version` / `check_links` 全通过；`cargo check` 零警告；
+  `http` 包三平台静态库 `bash packages/http/build.sh` 零警告重建，`.diali` 注释
+  变更经 `pack` 重算 SHA256 后 `install` 覆盖成功（`abi = 6` 不变）；
   官网由 `tools/build_web.py` 重新生成并与文档同步。
 - **交付状态**：仅本地提交，未推送、未打标签、未发 Release（遵循本段开头的口径）。
 

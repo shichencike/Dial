@@ -40,9 +40,11 @@
 #   V. B/C 组缺口第三批：语言机制——B7 文件级只读 const（禁止可变全局状态）、
 #      B8 结构体字段编译期常量默认值、B6 结构体进容器（Point[] / map<string,Struct>）（v1.04 增补）。
 #   W. C11 独立包：http.dialpkg 端到端——三平台构建 / 打包安装 / import 编译运行 /
-#      两层 API（高层 get-post + 低层流式）/ gzip 解压 / chunked / 错误路径 /
-#      TLS 1.3（证书校验 fail-closed + keep-alive 连接池）/
-#      HTTP/2（h2c 明文 + h2 ALPN、自研 HPACK、单连接真·并发多路复用）（v1.04 增补）。
+#      两层 API（高层 get-post + 低层流式）/ gzip 解压 / chunked（含畸形长度行
+#      Fail-Fast 与合法 chunk-ext）/ 错误路径 /
+#      TLS 1.3（证书校验 fail-closed + keep-alive 连接池 + Termux $PREFIX CA 路径）/
+#      HTTP/2（h2c 明文 + h2 ALPN、自研 HPACK、单连接真·并发多路复用、
+#      超长额外头不截断）（v1.04 增补，v1.10 开发中增补回归）。
 #   X. C11 独立包：text.dialpkg 端到端——自研 Thompson NFA 正则（语法子集 /
 #      捕获组 / $n 替换 / 错误路径），三平台零警告构建（v1.04 增补）。
 #   Y. C11 独立包：json.dialpkg 端到端——自研递归下降解析 + 紧凑序列化（严格模式 /
@@ -1514,6 +1516,19 @@ if [ -n "$PORT" ] \
     else wbad "W 组：use_http 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
 else wbad "use_http（import \"http\"）编译失败"; tail -8 "${TMP}/w_comp.log"; fi
 
+# 4b) chunked 长度行 Fail-Fast 回归（§20）：畸形长度行 "xyz" 必须明确报协议错，
+#     绝不静默当成「结束块」；合法 chunk-ext（";ext=1"）必须照常解出完整 body。
+if [ -n "$PORT" ]; then
+    out=$(DIAL_HTTP_TEST_BASE="http://127.0.0.1:$PORT" "${TMP}/use_http" 2>&1)
+    if printf '%s\n' "$out" | grep -qF 'chunked_bad_is_null = true' \
+       && printf '%s\n' "$out" | grep -qF 'chunked_bad_err = -5' \
+       && printf '%s\n' "$out" | grep -q 'chunked_bad_msg = .*chunked' \
+       && printf '%s\n' "$out" | grep -qF 'chunked_ext_status = 200' \
+       && printf '%s\n' "$out" | grep -qF 'chunked_ext_body = ext-one|ext-two|ext-three' ; then
+        wpass "chunked 畸形长度行明确失败（§20）+ 合法 chunk-ext 不误伤"
+    else wbad "W 组：chunked 长度行回归断言失败"; printf '%s\n' "$out" | grep -i 'chunked' | head -20; fi
+else wbad "W 组：chunked 长度行回归跳过（服务器未就绪）"; fi
+
 # 5) 错误路径：https 未接线 / URL 缺主机名 / 连不上 —— 都必须**明确失败**而非静默成功。
 if [ -n "$PORT" ]; then
     out=$(DIAL_HTTP_TEST_BASE="http://127.0.0.1:$PORT" "${TMP}/use_http" 2>&1)
@@ -1608,6 +1623,35 @@ if command -v openssl >/dev/null 2>&1; then
             wpass "TLS 1.3：协商 + 证书校验 + keep-alive 复用 + 404/500 + fail-closed 全通过"
         else wbad "W 组：use_https 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
     else wbad "use_https（import \"http\" TLS）编译失败"; tail -8 "${TMP}/w_tlscomp.log"; fi
+
+    # 7b) Termux 系统根证书库可用性回归：Android/Termux 上没有 /etc/ssl/certs，
+    #     证书在 $PREFIX/etc/tls/cert.pem。这里把步骤 7 的自签 CA 装成该文件，
+    #     不设自定义 CA，只靠 load_linux_ca 的 Termux 分支完成 TLS 1.3 握手；
+    #     PREFIX 指向空目录时必须 fail-closed 明确拒绝自签证书。两组都是真实
+    #     握手（非 mock），复用步骤 7 的服务器与已编译的 use_https 二进制。
+    TERMUX_ROOT="${TMP}/termux-root"
+    TERMUX_EMPTY_ROOT="${TMP}/termux-root-empty"
+    mkdir -p "${TERMUX_ROOT}/etc/tls" "${TERMUX_EMPTY_ROOT}/etc/tls"
+    if [ -n "$TLS_PORT" ] && [ -f "${TLSDIR}/ca.crt" ] && [ -x "${TMP}/use_https" ]; then
+        cp "${TLSDIR}/ca.crt" "${TERMUX_ROOT}/etc/tls/cert.pem"
+        ok_out=$(PREFIX="$TERMUX_ROOT" DIAL_HTTPS_TERMUX_MODE=1 \
+                 DIAL_HTTPS_TEST_BASE="https://127.0.0.1:$TLS_PORT" \
+                 "${TMP}/use_https" 2>&1)
+        if printf '%s\n' "$ok_out" | grep -qF 'termux status = 200' \
+           && printf '%s\n' "$ok_out" | grep -qF 'termux verify = 0' ; then
+            wpass "Termux 系统根库（\$PREFIX/etc/tls/cert.pem）真实握手成功，证书校验通过"
+        else wbad "W 组：Termux 系统根库路径未生效"; printf '%s\n' "$ok_out" | head -20; fi
+
+        bad_out=$(PREFIX="$TERMUX_EMPTY_ROOT" DIAL_HTTPS_TERMUX_MODE=1 \
+                  DIAL_HTTPS_TEST_BASE="https://127.0.0.1:$TLS_PORT" \
+                  "${TMP}/use_https" 2>&1)
+        if printf '%s\n' "$bad_out" | grep -qF 'termux status = -1' ; then
+            wpass "Termux 空 CA 目录仍 fail-closed（自签证书被明确拒绝，无静默降级）"
+        else wbad "W 组：Termux 空 CA 目录未按预期拒绝"; printf '%s\n' "$bad_out" | head -20; fi
+    else
+        wskip "Termux 系统根库回归跳过（TLS 服务器 / 证书 / 二进制未就绪）"
+    fi
+
     if [ -n "${TLS_PID:-}" ]; then kill "$TLS_PID" >/dev/null 2>&1 || true; fi
 else
     wskip "TLS 1.3 子组跳过（环境无 openssl）"
@@ -1701,6 +1745,13 @@ if [ "$H2_DEPS" -eq 1 ]; then
         if [ "$ok" -eq 1 ]; then
             wpass "HTTP/2：h2c 真并发多路复用（单连接 6 stream 不串台）+ h2 ALPN + 404/500 + fail-closed 全通过"
         else wbad "W 组：use_http2 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
+
+        # 9d) 超长额外头不再被 512 字节静默截断：1200 字节的头必须原样送达，
+        #     服务端按实际收到的长度回显 X-Long-Len（§20 Fail-Fast）。
+        if printf '%s\n' "$out" | grep -qF 'h2 long header status = 200' \
+           && printf '%s\n' "$out" | grep -qF 'h2 long header echoed len = 1200' ; then
+            wpass "HTTP/2 超长额外请求头原样送达 1200 字节（不再 512 静默截断）"
+        else wbad "W 组：超长额外头回显长度不符"; printf '%s\n' "$out" | grep -i 'long header' | head -10; fi
     else wbad "use_http2（import \"http\" HTTP/2）编译失败"; tail -8 "${TMP}/w_h2comp.log"; fi
 else
     wskip "HTTP/2 子组跳过（环境缺 python h2/hpack/hyperframe）"

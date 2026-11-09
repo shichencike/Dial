@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <errno.h>    /* strtoll 的 ERANGE：chunked 长度行溢出必须明确失败（§20） */
 
 #include "dial_string.h"
 #include "dial_bytes.h"
@@ -36,7 +37,6 @@ typedef int dh_socklen;
 #define DH_IS_WOULDBLOCK(e) ((e) == WSAEWOULDBLOCK)
 #else
 #include <unistd.h>
-#include <errno.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -979,12 +979,27 @@ static int dh_read_chunked(DialHttpConn *c, dh_buf *out) {
         if (!dh_read_line_raw(c, &line, &len)) return 0;
         /* "1a;ext=1" —— 十六进制长度，可能带扩展参数 */
         char *endp = NULL;
+        errno = 0;
         long long chunk_len = strtoll(line, &endp, 16);
-        free(line);
-        if (chunk_len < 0) {
-            dh_set_error(DIAL_HTTP_ERR_PROTOCOL, "chunked 响应体长度非法");
+        /* §20 Fail-Fast：长度行必须至少含一个十六进制数字。
+         * "xyz" 会让 strtoll 返回 0 且 endp==line——若不检查，畸形响应会被
+         * 静默当成「结束块」，响应体凭空少一截，正是「绝不静默损坏」要拦的。
+         * 溢出（ERANGE）、负数与脏尾随字符同样明确失败；合法 chunk-ext
+         * （';…'）与行尾空白照常放行。 */
+        int bad_len = (endp == line) || (errno == ERANGE) || (chunk_len < 0);
+        if (!bad_len) {
+            const char *q = endp;
+            while (*q == ' ' || *q == '\t' || *q == '\r') q++;
+            if (*q != '\0' && *q != ';') bad_len = 1;
+        }
+        if (bad_len) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "chunked 长度行非法：%.60s", line);
+            free(line);
+            dh_set_error(DIAL_HTTP_ERR_PROTOCOL, msg);
             return 0;
         }
+        free(line);
         if (chunk_len == 0) {
             /* 结束块：可能还有 trailer 头，读到空行为止 */
             for (;;) {

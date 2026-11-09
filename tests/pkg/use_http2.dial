@@ -72,6 +72,20 @@ fn main(): int {
     var r500: HttpResponse = dial_http2_request(s2, "GET", "/status500", "", "");
     print("h2 500 status = ", dial_http_resp_status(r500));
     dial_http_resp_free(r500);
+
+    // ---- 超长额外头：旧实现在 h2_submit 里被 char buf[512] 静默截断，
+    //      很长的 Authorization 会被悄悄砍掉导致鉴权失败（§20）。这里发
+    //      1200 字节的头，服务端按实际收到的长度回显，必须原样送达。----
+    var long_val: string = "";
+    var k: int = 0;
+    while (k < 1200) {
+        long_val = long_val + "A";
+        k = k + 1;
+    }
+    var rlong: HttpResponse = dial_http2_request(s2, "GET", "/ok", "X-Long-Header: " + long_val, "");
+    print("h2 long header status = ", dial_http_resp_status(rlong));
+    print("h2 long header echoed len = ", dial_http_resp_header(rlong, "X-Long-Len"));
+    dial_http_resp_free(rlong);
     dial_http2_session_free(s2);
 
     // ---- Part C: TLS h2（ALPN 协商）+ fail-closed ----

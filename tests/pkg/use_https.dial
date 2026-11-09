@@ -4,6 +4,25 @@ fn main(): int {
     var base: string = getenv("DIAL_HTTPS_TEST_BASE");
     var ca: string = getenv("DIAL_HTTPS_TEST_CA");
 
+    // Termux 系统根库回归模式（W 组单独以 PREFIX=<termux 风格目录> 运行本程序）：
+    // 不调用 dial_http_set_ca_path，只靠 load_linux_ca 的 Termux 分支从
+    // $PREFIX/etc/tls/cert.pem 装载自签 CA。握手成功且校验通过才算绿；
+    // PREFIX 指向空目录时必须 fail-closed 明确失败。
+    var termux_mode: string = getenv("DIAL_HTTPS_TERMUX_MODE");
+    if (termux_mode != "") {
+        var tr: HttpResponse = dial_http_get(base + "/ok", "");
+        if (is_null(tr)) {
+            print("termux status = -1");
+            print("termux err = ", dial_http_last_error());
+            print("termux msg = ", dial_http_last_error_msg());
+        } else {
+            print("termux status = ", dial_http_resp_status(tr));
+            print("termux verify = ", dial_http_last_tls_verify());
+            dial_http_resp_free(tr);
+        }
+        return 0;
+    }
+
     // 1) 设自定义 CA（自签 CA，内网/私有 CA 场景）
     dial_http_set_ca_path(ca);
 

@@ -9,6 +9,8 @@
 | /echo         | POST 请求体回显（验证 Content-Length 与请求体拼装） |
 | /notfound     | 404 状态码 |
 | /chunked      | `Transfer-Encoding: chunked` 分块响应（无 Content-Length） |
+| /chunked_bad  | 畸形 chunked：长度行 `xyz` 非十六进制，客户端必须**明确失败**（§20），不得静默当成结束块 |
+| /chunked_ext  | 合法 chunk-ext：长度行带 `;ext=1`，验证长度行校验没有误伤扩展参数 |
 | /gzip         | `Content-Encoding: gzip` 压缩响应（验证 zlib 解压） |
 | /multi        | 多个同名/异名响应头（验证按名取值与按序号遍历） |
 | /echo-headers | 把**收到的请求头**原样回显为 JSON，验证客户端画像真实发出的头
@@ -59,6 +61,25 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             for part in (b"chunk-one|", b"chunk-two|", b"chunk-three"):
                 self.wfile.write(b"%x\r\n" % len(part) + part + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        elif path == "/chunked_bad":
+            # 畸形 chunked：长度行不是十六进制。修复前 strtoll 返回 0 且
+            # endp==line，被静默当成「结束块」-> 客户端拿到空 body 却报成功。
+            # 修复后必须按 §20 Fail-Fast 明确返回协议错，绝不消费后面的坏数据。
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(b"xyz\r\nthis-payload-must-never-be-consumed\r\n0\r\n\r\n")
+        elif path == "/chunked_ext":
+            # 合法 chunk-ext（RFC 7230 §4.1.1）：长度行带 ";ext=1"。
+            # 用来锁住新增的 endp 检查没有误伤合法的扩展参数。
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for part in (b"ext-one|", b"ext-two|", b"ext-three"):
+                self.wfile.write(b"%x;ext=1\r\n" % len(part) + part + b"\r\n")
             self.wfile.write(b"0\r\n\r\n")
         elif path == "/gzip":
             payload = gzip.compress(GZIP_BODY)

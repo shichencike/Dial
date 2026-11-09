@@ -38,6 +38,18 @@ fn main(): int {
     print("chunked_body = ", bytes_to_string(dial_http_resp_body(cr)));
     dial_http_resp_free(cr);
 
+    // ---- 畸形 chunked 长度行：必须明确失败，绝不静默当成「结束块」（§20）----
+    var cbad: HttpResponse = dial_http_get(base + "/chunked_bad", "");
+    print("chunked_bad_is_null = ", is_null(cbad));
+    print("chunked_bad_err = ", dial_http_last_error());
+    print("chunked_bad_msg = ", dial_http_last_error_msg());
+
+    // ---- 合法 chunk-ext：长度行 "1a;ext=1" 必须照常解出完整 body ----
+    var cext: HttpResponse = dial_http_get(base + "/chunked_ext", "");
+    print("chunked_ext_status = ", dial_http_resp_status(cext));
+    print("chunked_ext_body = ", bytes_to_string(dial_http_resp_body(cext)));
+    dial_http_resp_free(cext);
+
     // ---- 高层：gzip（Content-Encoding 解压）----
     var gz: HttpResponse = dial_http_get(base + "/gzip", "");
     print("gzip_status = ", dial_http_resp_status(gz));

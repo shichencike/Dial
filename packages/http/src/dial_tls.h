@@ -12,9 +12,10 @@
  *   - **证书校验 fail-closed**：默认 VERIFY_REQUIRED，握手后若
  *     mbedtls_ssl_get_verify_result() != 0（过期 / 域名不符 / 不受信根 /
  *     自签名），立刻失败并给出中文原因——**绝不做静默降级**（符合 §20 Fail-Fast）。
- *   - 系统根证书库：Linux 读 /etc/ssl/certs；macOS 读 /etc/ssl/cert.pem 与
- *     系统钥匙串；Windows 读系统 ROOT 存储（wincrypt）。允许传入自定义 CA
- *     路径（内网 / 私有 CA 场景）。
+ *   - 系统根证书库：Linux 读 /etc/ssl/certs，Termux（同走 Linux 分支）另读
+ *     $PREFIX/etc/tls/cert.pem；macOS 读 /etc/ssl/cert.pem 与系统钥匙串；
+ *     Windows 读系统 ROOT 存储（wincrypt）。允许传入自定义 CA 路径
+ *     （内网 / 私有 CA 场景）。
  *   - 复用调用方的 TCP 套接字：通过 mbedTLS 的自定义 BIO（f_send/f_recv）
  *     直接在我们已建立的 socket 上收发，不引入 mbedTLS 自己的联网层。
  *   - SNI 严格等于对端主机名；ALPN 由调用方决定。浏览器一致性画像要求

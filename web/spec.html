@@ -2936,7 +2936,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <h2 id="18-测试">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
-<p><code>bash tests/run_tests.sh</code> 的<strong>当前全量回归是 A–Z + AA 共二十七组</strong>（513 ✅ / 0 ❌），
+<p><code>bash tests/run_tests.sh</code> 的<strong>当前全量回归是 A–Z + AA 共二十七组</strong>（517 ✅ / 0 ❌），
 全部通过才算绿。下表逐项详列 <strong>A–M 十三组</strong>——这组逐组说明自 v0.9x 沿用至今、
 内容未变，且每一组至今仍在执行；<strong>N–Z 与 AA 组</strong>分别见 §33–§38 各章与
 <code>tests/run_tests.sh</code>（其中 AA 组是手搓 GUI 地基包 <code>gui.dialpkg</code> 的专项回归，见 §38）：</p>
@@ -7743,8 +7743,9 @@ SSE / AVX / NEON。</p>
 <p><strong>本节上方的「A–Z 二十六组 / 499 ✅」是 <code>v1.1</code> 标签发布时的验收快照，保持原文不改。</strong>
 此后工作树又新增 <code>gui.dialpkg</code> 地基层与 AA 组（507 ✅），再补控件框架层
 （AA 组 +3 条断言到 <strong>510 ✅</strong>），又补成品控件外观层（AA 组 +3 条到
-<strong>513 ✅</strong>），全量回归仍为 <strong>A–Z + AA 二十七组</strong>，属 <strong>未发布的开发中增量</strong>，
-见 §38 与 CHANGELOG <code>[未发布]</code> 段。</p>
+<strong>513 ✅</strong>），再修 <code>http.dialpkg</code> 三处 Fail-Fast / 可用性缺陷并给 W 组 +4 条
+断言到 <strong>517 ✅</strong>，全量回归仍为 <strong>A–Z + AA 二十七组</strong>，属 <strong>未发布的开发中增量</strong>，
+见 §38 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
 </blockquote>
 <hr />
 <h2 id="34-v104-增补工程工具链并入-v104版本不变">34. v1.04 增补：工程工具链（并入 <code>[v1.04]</code>，版本不变）</h2>
@@ -8664,7 +8665,7 @@ B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。<
 </tr>
 <tr>
 <td><strong>密码学绝不手搓</strong></td>
-<td>TLS 由 <strong>mbedTLS</strong> 提供并已接线上层：<code>https://</code> 走 mbedTLS，证书校验 <strong>fail-closed</strong>（系统根 + 自定义 CA 两条信任链，自签名不可冒用）；gzip / deflate 解压由 <strong>zlib</strong> 提供。协议层自己写，密码学与压缩算法一律用成熟实现</td>
+<td>TLS 由 <strong>mbedTLS</strong> 提供并已接线上层：<code>https://</code> 走 mbedTLS，证书校验 <strong>fail-closed</strong>（系统根 + 自定义 CA 两条信任链，自签名不可冒用；Termux 上系统根另读 <code>$PREFIX/etc/tls/cert.pem</code>）；gzip / deflate 解压由 <strong>zlib</strong> 提供。协议层自己写，密码学与压缩算法一律用成熟实现</td>
 </tr>
 <tr>
 <td><strong>两层 API</strong></td>
@@ -8718,6 +8719,14 @@ SHA256 自检）、<code>import "http"</code> 编译运行、本地 HTTP 服务�
 <strong>故意乱序响应</strong>，6 个 <code>spawn</code> worker 共享<strong>单条连接</strong>并发提交 6 个 stream，
 逐条断言 <code>path == X-Stream</code>（不串台）、<code>conns = 1</code> / <code>streams = 6</code>、
 <code>h2</code> ALPN 协商成功、fail-closed 拒签自签 CA、404 / 500 全绿。</p>
+<p><strong>Fail-Fast / 可用性回归</strong>（v1.10 开发中增补，同组 +4 条断言）：
+① <code>/chunked_bad</code> 长度行 <code>xyz</code> 必须明确报 <code>DIAL_HTTP_ERR_PROTOCOL(-5)</code> 并把坏行写进
+错误槽，<code>/chunked_ext</code> 的 <code>1a;ext=1</code> 合法扩展必须解出完整 body；
+② Termux 目标平台：把自签 CA 装成 <code>$PREFIX/etc/tls/cert.pem</code> 后，不设自定义 CA
+也能真实握手成功（<code>verify=0</code>），空 CA 目录则仍 fail-closed 明确拒绝；
+③ HTTP/2 发 1200 字节超长额外头，服务端按实际长度回显 <code>X-Long-Len=1200</code>
+（旧 <code>char buf[512]</code> 会静默截到 511 字节）。H2 侧额外头名按 RFC 7540 统一小写化，
+H1 侧大小写不敏感、保持原样。四处修复均<strong>不改 <code>.diali</code> 对外签名与 <code>abi = 6</code></strong>。</p>
 <p><strong>客户端画像（兼容性，非规避引擎）</strong>：<code>dial_http_set_profile("default" | "chrome")</code>
 只控制请求头序与 User-Agent 这类兼容参数（与只认浏览器客户端的 API 互通），
 <strong>不做以「绕过服务器限制 / 欺骗识别」为目标的绕检测逻辑</strong>——这是有意的领域边界。</p>
@@ -9422,8 +9431,8 @@ A–Z + AA <strong>二十七组</strong>），依次验收：</p>
    Xvfb 实窗断言 <code>window_set_root</code> 挂树 + 整树绘制 + <code>flush</code> 上屏全通过；</li>
 <li>卸载 <code>gui</code> 包。</li>
 </ol>
-<p>全量实测 <code>EXIT=0</code>，<strong>513 ✅ / 0 ❌</strong>（AA 组 14 条 <code>aapass</code>：地基层 8 条 +
-控件框架层 3 条 + 外观层 3 条）；Xvfb 连续三次实窗能力串
+<p>全量实测 <code>EXIT=0</code>，<strong>517 ✅ / 0 ❌</strong>（AA 组 14 条 <code>aapass</code>：地基层 8 条 +
+控件框架层 3 条 + 外观层 3 条；W 组本轮 +4 条 http 缺陷回归）；Xvfb 连续三次实窗能力串
 <code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，地基层像素 CRC 稳定
 <code>4007435570</code>、外观层 <code>look_crc_normal</code> 稳定 <code>3884455222</code>。</p>
 <h3 id="3811-能力边界不许当已支持">38.11 能力边界（不许当已支持）</h3>

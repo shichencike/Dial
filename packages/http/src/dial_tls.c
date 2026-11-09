@@ -95,6 +95,23 @@ static int load_linux_ca(mbedtls_x509_crt *ca) {
     for (int i = 0; paths[i]; i++) {
         if (mbedtls_x509_crt_parse_file(ca, paths[i]) == 0) ok = 1;
     }
+    /* Termux：Android 上没有 /etc/ssl/certs，证书由 ca-certificates 包装在
+     * $PREFIX/etc/tls/cert.pem。PREFIX 是 Termux 启动时注入的环境变量
+     * （典型值 /data/data/com.termux/files/usr）。文档把 Termux 列为目标平台，
+     * 缺了这条分支，https 会直接报「无法加载系统根证书库」——是可用性问题，
+     * 不是安全苛求。路径按 PREFIX 实际长度动态拼，绝不静默截断（§20）。 */
+    const char *prefix = getenv("PREFIX");
+    if (prefix && *prefix) {
+        static const char suffix[] = "/etc/tls/cert.pem";
+        size_t plen = strlen(prefix);
+        char *termux_ca = (char *)malloc(plen + sizeof(suffix));
+        if (termux_ca) {
+            memcpy(termux_ca, prefix, plen);
+            memcpy(termux_ca + plen, suffix, sizeof(suffix)); /* 含结尾 '\0' */
+            if (mbedtls_x509_crt_parse_file(ca, termux_ca) == 0) ok = 1;
+            free(termux_ca);
+        }
+    }
     return ok;
 }
 #endif
@@ -211,7 +228,8 @@ DialTls *dial_tls_connect(int fd, const char *host, const char *const alpn[],
         ca_ok = load_system_ca(&t->ca);
         if (!ca_ok) {
             set_err(errbuf, errlen,
-                    "无法加载系统根证书库（Linux 需 /etc/ssl/certs，"
+                    "无法加载系统根证书库（Linux 需 /etc/ssl/certs；"
+                    "Termux 需 $PREFIX/etc/tls/cert.pem；"
                     "macOS 需 /etc/ssl/cert.pem）");
             dial_tls_free(t);
             return NULL;
