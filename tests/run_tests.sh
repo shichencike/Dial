@@ -52,12 +52,14 @@
 #      （MD5/SHA-1/SHA-256/SHA-512/SHA3-256，标准向量核对）+ Base64 编解码 +
 #      HMAC-SHA256，string 与 bytes 双入口、含内嵌 NUL 的二进制数据、严格错误路径，
 #      三平台零警告构建（v1.04 增补）。
-#   AA. 手搓 GUI 地基 + 控件框架层：gui.dialpkg 端到端——三平台真实现
-#      （X11+XShm+XRender / Win32 GDI）/ 零链接期依赖（dlopen / LoadLibraryA）/
+#   AA. 手搓 GUI 地基 + 控件框架层 + 成品控件外观层：gui.dialpkg 端到端——三平台
+#      真实现（X11+XShm+XRender / Win32 GDI）/ 零链接期依赖（dlopen / LoadLibraryA）/
 #      纯内存光栅化器像素级 CRC 回归 / 覆盖面积 AA / 内置点阵与 TrueType 双字体 /
 #      Widget 树 + 绝对·VBox·HBox 布局 + 命中测试 + packed 事件纯值块
-#      （sizeof/offsetof 双向锁死 / string_from_cstr 复制成 ARC）/ Xvfb 实窗上屏与
-#      事件循环；无显示环境自动降级为「窗口路径明确跳过」并如实标注（v1.10 增补）。
+#      （sizeof/offsetof 双向锁死 / string_from_cstr 复制成 ARC）/ Label·Button·
+#      CheckBox 默认主题四态绘制 + 纯值事件推进（use_gui_look.dial）/ Xvfb 实窗
+#      上屏与事件循环；无显示环境自动降级为「窗口路径明确跳过」并如实标注
+#      （v1.10 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -1868,9 +1870,9 @@ else zbad "use_crypto.dial 编译失败"; tail -8 "${TMP}/z_comp.log"; fi
 zpass "crypto 包已卸载"
 
 # ---------------------------------------------------------------------------
-# AA) 手搓 GUI 地基 + 控件框架层：gui.dialpkg 端到端（v1.10 增补）
+# AA) 手搓 GUI 地基 + 控件框架层 + 成品控件外观层：gui.dialpkg 端到端（v1.10 增补）
 # ---------------------------------------------------------------------------
-echo "== AA) 手搓 GUI 地基 + 控件框架层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块，v1.10 增补） =="
+echo "== AA) 手搓 GUI 三层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制，v1.10 增补） =="
 aapass() { echo "  ✅ $1"; }
 aabad()  { echo "  ❌ $1"; fail=1; }
 
@@ -1948,6 +1950,34 @@ if "$DIALC" build tests/pkg/use_gui_widget.dial -o "${TMP}/use_gui_widget" >"${T
     fi
 else aabad "use_gui_widget.dial 编译失败"; tail -12 "${TMP}/aa_wcomp.log"; fi
 
+# 4c) 成品控件外观层 demo：独立 offscreen 画布（关 AA）逐像素可断言，四态 /
+#     CheckBox 翻转 / 禁用配色 / 文本 ARC 复制全部在无 DISPLAY 下跑完；同样
+#     绝不触碰 use_gui.dial 的 crc_offscreen 基准。
+if "$DIALC" build tests/pkg/use_gui_look.dial -o "${TMP}/use_gui_look" >"${TMP}/aa_lcomp.log" 2>&1; then
+    aapass "use_gui_look.dial（成品控件外观层）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_look" >"${TMP}/aa_lnodisplay.log" 2>&1
+    aa_l_no_exit=$?
+    aa_l_bad=$(grep -c ' = bad' "${TMP}/aa_lnodisplay.log" || true)
+    if [ "$aa_l_no_exit" -eq 0 ] && [ "$aa_l_bad" -eq 0 ] \
+       && grep -qF 'look_crc_pinned = ok' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_four_states_distinct = ok' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_state_reset_idempotent = ok' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_btn_bg_normal = ok' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_btn_bg_hover = ok' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_btn_bg_pressed = ok' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_btn_bg_disabled = ok' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_checkbox_checked_on = ok' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_checkbox_checked_off = ok' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_text_arc_copy = ok' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_window = skipped [' "${TMP}/aa_lnodisplay.log" \
+       && grep -qF 'look_done = true' "${TMP}/aa_lnodisplay.log"; then
+        aapass "无 DISPLAY：成品控件外观层四态互异 / 复位幂等 / 禁用配色 / CheckBox 翻转 / 文本 ARC 复制全绿"
+    else
+        aabad "成品控件外观层无 DISPLAY 路径断言失败（exit=$aa_l_no_exit bad=$aa_l_bad）"
+        tail -30 "${TMP}/aa_lnodisplay.log"
+    fi
+else aabad "use_gui_look.dial 编译失败"; tail -12 "${TMP}/aa_lcomp.log"; fi
+
 # 5) 有 Xvfb 时验证真实窗口（XShm 离屏 + XRender 合成 + 上屏 / 过滤 / 事件循环）；
 #    无 Xvfb 的环境如实打印跳过，绝不把「未验证」写成「通过」。
 if command -v xvfb-run >/dev/null 2>&1; then
@@ -1992,6 +2022,28 @@ if command -v xvfb-run >/dev/null 2>&1; then
     fi
 else
     echo "  ⚠️  本环境无 xvfb-run：控件框架层实窗路径未实机验证（如实标注，不伪装通过）"
+fi
+
+# 5c) 成品控件外观层实窗：把整棵树挂到窗口、画进窗口画布并 flush 上屏。
+if command -v xvfb-run >/dev/null 2>&1; then
+    if xvfb-run -a -s "-screen 0 1024x768x24 +extension MIT-SHM +extension RENDER" \
+        "${TMP}/use_gui_look" >"${TMP}/aa_lxvfb.log" 2>&1; then
+        aa_l_bad2=$(grep -c ' = bad' "${TMP}/aa_lxvfb.log" || true)
+        if [ "$aa_l_bad2" -eq 0 ] \
+           && grep -qF 'look_window = ok' "${TMP}/aa_lxvfb.log" \
+           && grep -qF 'look_window_set_root = ok' "${TMP}/aa_lxvfb.log" \
+           && grep -qF 'look_window_draw = ok' "${TMP}/aa_lxvfb.log" \
+           && grep -qF 'look_window_flush = ok' "${TMP}/aa_lxvfb.log" \
+           && grep -qF 'look_done = true' "${TMP}/aa_lxvfb.log"; then
+            aapass "Xvfb 实窗：window_set_root 挂树 + 整树绘制 + flush 上屏全通过"
+        else
+            aabad "成品控件外观层 Xvfb 实窗断言失败（bad=$aa_l_bad2）"; tail -30 "${TMP}/aa_lxvfb.log"
+        fi
+    else
+        aabad "Xvfb 下 use_gui_look 运行失败"; tail -20 "${TMP}/aa_lxvfb.log"
+    fi
+else
+    echo "  ⚠️  本环境无 xvfb-run：成品控件外观层实窗路径未实机验证（如实标注，不伪装通过）"
 fi
 
 # 6) 清理：卸包，避免污染后续测试与用户环境。

@@ -1,0 +1,174 @@
+// gui.dialpkg 成品控件外观层端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 与 use_gui.dial / use_gui_widget.dial 完全独立：用**自己的** offscreen
+// GuiPainter，绝不触碰 crc_offscreen = 4007435570 这个地基层像素基准。
+//
+// 立场上严格遵循「C 管 C 的，ARC 管 ARC 的」：
+//   - 绝不注册回调：Dial 侧用 widget_handle(root, kind, x, y, button) 把
+//     **纯值事件**喂进树，C 侧只推进 C 侧纯值四态，从不反向调 Dial；
+//   - 文本是 C 侧 strdup 自有副本，widget_text 给的是借用指针，一律
+//     string_from_cstr 复制成自己的 ARC string；
+//   - widget_draw(root, painter) 把整棵树画进任意画布，逐像素可断言。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn rgba(a: int, r: int, g: int, b: int): int {
+    return (a * 16777216) + (r * 65536) + (g * 256) + b;
+}
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    // ---- 0) 独立纯内存树：无 DISPLAY 也能布局 / 绘制 ----------------------
+    var root: GuiWidget = dial_gui_widget_tree(240, 120);
+    var lbl: GuiWidget = dial_gui_widget_add(root);   // label 是 Dial 关键字，不能作变量名
+    var button: GuiWidget = dial_gui_widget_add(root);
+    var checkbox: GuiWidget = dial_gui_widget_add(root);
+    expect(!is_null(root), "look_tree_new");
+
+    // 三种控件种类 + 非法值拒绝
+    expect_int(dial_gui_widget_set_kind(lbl, 1), 0, "look_set_kind_label");         // LABEL
+    expect_int(dial_gui_widget_set_kind(button, 2), 0, "look_set_kind_button");     // BUTTON
+    expect_int(dial_gui_widget_set_kind(checkbox, 3), 0, "look_set_kind_checkbox"); // CHECKBOX
+    expect_int(dial_gui_widget_kind(button), 2, "look_kind_button");
+    expect_int(dial_gui_widget_set_kind(button, 9), -1, "look_bad_kind_rejected");
+    dial_gui_clear_error();
+
+    // 文本（C 侧 strdup 自有副本）+ 借用指针的 ARC 复制
+    expect_int(dial_gui_widget_set_text(lbl, "Dial GUI"), 0, "look_set_text_label");
+    expect_int(dial_gui_widget_set_text(button, "OK"), 0, "look_set_text_button");
+    expect_int(dial_gui_widget_set_text(checkbox, "Enable AA"), 0, "look_set_text_cb");
+    var tp: rawptr<byte> = dial_gui_widget_text(button);
+    expect_str(string_from_cstr(tp), "OK", "look_text_arc_copy");
+    // 未设文本的控件，借用指针必须是空串（string_from_cstr 安全）
+    var empty_w: GuiWidget = dial_gui_widget_add(root);
+    expect_str(string_from_cstr(dial_gui_widget_text(empty_w)), "", "look_text_empty_borrow");
+    expect_int(dial_gui_widget_remove(empty_w), 0, "look_remove_empty_w");
+
+    // tag 供激活目标识别
+    dial_gui_widget_set_tag(button, 2001);
+    dial_gui_widget_set_tag(checkbox, 2002);
+
+    // VBOX 三等分：240×120，padding/gap 皆 0 → 每个可见子 40 高
+    expect_int(dial_gui_widget_set_layout(root, 1), 0, "look_set_layout_vbox");
+    expect_int(dial_gui_widget_layout_apply(root, 240, 120), 0, "look_layout_apply");
+    expect_int(dial_gui_widget_height(button), 40, "look_vbox_height");
+
+    // 独立 offscreen 画布；关 AA（level=1）让色值 / CRC 完全确定、三平台一致
+    var p: GuiPainter = dial_gui_painter_offscreen(240, 120);
+    expect(!is_null(p), "look_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "look_set_aa_off");
+
+    // ---- 1) 普通态：整树一次绘制 + 逐像素色值断言 ------------------------
+    expect_int(dial_gui_widget_draw(root, p), 0, "look_draw_normal");
+    var crc0: int = dial_gui_painter_crc32(p);
+    print("look_crc_normal = " + str(crc0));
+    // 像素级回归：自研光栅化器纯整数 + 关 AA，三平台逐像素一致，CRC 稳定可钉。
+    // 用字符串比较避开超 2^31 的大整数字面量解析边界。
+    expect_str(str(crc0), "3884455222", "look_crc_pinned");
+    // (20,60) 落在按钮背景区（文本居中在 x≈102..138，取不到这里）
+    expect_int(dial_gui_get_pixel(p, 20, 60),
+               rgba(255, 231, 236, 244), "look_btn_bg_normal");
+    // 面板背景（label 区域不铺背景，显示根 BOX 的浅色）
+    expect_int(dial_gui_get_pixel(p, 200, 10),
+               rgba(255, 244, 246, 249), "look_panel_bg");
+
+    // ---- 2) 四态推进：MOVE 悬停 / PRESS 按下 / RELEASE 激活 --------------
+    expect_int(dial_gui_widget_handle(root, 3, 20, 60, 0), 0, "look_move");
+    expect_int(dial_gui_widget_hovered(button), 1, "look_hovered_on");
+    expect_int(dial_gui_widget_draw(root, p), 0, "look_draw_hover");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_get_pixel(p, 20, 60),
+               rgba(255, 211, 224, 250), "look_btn_bg_hover");
+
+    expect_int(dial_gui_widget_handle(root, 1, 20, 60, 1), 0, "look_press");
+    expect_int(dial_gui_widget_pressed(button), 1, "look_pressed_on");
+    expect_int(dial_gui_widget_draw(root, p), 0, "look_draw_pressed");
+    var crc2: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_get_pixel(p, 20, 60),
+               rgba(255, 178, 200, 242), "look_btn_bg_pressed");
+
+    var act: int = dial_gui_widget_handle(root, 2, 20, 60, 1);   // 2 = MOUSE_RELEASE
+    expect_int(act, 1, "look_button_activated");
+    expect_int(dial_gui_widget_pressed(button), 0, "look_pressed_cleared");
+    // 被激活控件由 Dial 侧用 widget_hit 自行取回，C 侧绝不返回 Dial 对象
+    expect_int(dial_gui_widget_tag(dial_gui_widget_hit(root, 20, 60)),
+               2001, "look_activate_target_tag");
+    expect_int(dial_gui_widget_draw(root, p), 0, "look_draw_release");
+    var crc3: int = dial_gui_painter_crc32(p);
+
+    // 四态背景互异；RELEASE 后 hovered 仍在 → 回到 hover 配色（状态机自洽）
+    expect(crc0 != crc1 and crc1 != crc2, "look_four_states_distinct");
+    expect(crc3 == crc1, "look_state_release_returns_hover");
+
+    // MOVE 到画布外 → 清掉所有 hovered，再绘制应逐像素回到普通态（确定性）
+    expect_int(dial_gui_widget_handle(root, 3, 300, 300, 0), 0, "look_move_outside");
+    expect_int(dial_gui_widget_hovered(button), 0, "look_hovered_cleared");
+    expect_int(dial_gui_widget_draw(root, p), 0, "look_draw_reset");
+    var crc4: int = dial_gui_painter_crc32(p);
+    expect(crc4 == crc0, "look_state_reset_idempotent");
+
+    // ---- 3) 禁用态：不 hover / 不激活 / 走禁用配色 -----------------------
+    expect_int(dial_gui_widget_set_disabled(button, 1), 0, "look_set_disabled");
+    expect_int(dial_gui_widget_disabled(button), 1, "look_disabled");
+    expect_int(dial_gui_widget_handle(root, 3, 20, 60, 0), 0, "look_disabled_move");
+    expect_int(dial_gui_widget_hovered(button), 0, "look_disabled_no_hover");
+    expect_int(dial_gui_widget_handle(root, 2, 20, 60, 1), 0, "look_disabled_no_activate");
+    expect_int(dial_gui_widget_draw(root, p), 0, "look_draw_disabled");
+    expect_int(dial_gui_get_pixel(p, 20, 60),
+               rgba(255, 240, 242, 245), "look_btn_bg_disabled");
+    var crc5: int = dial_gui_painter_crc32(p);
+    expect(crc5 != crc0, "look_disabled_crc_differs");
+    expect_int(dial_gui_widget_set_disabled(button, 0), 0, "look_set_enabled");
+
+    // ---- 4) CheckBox：RELEASE 自动翻转 checked ---------------------------
+    expect_int(dial_gui_widget_checked(checkbox), 0, "look_checkbox_initial");
+    expect_int(dial_gui_widget_handle(root, 2, 20, 100, 1), 1, "look_checkbox_activated");
+    expect_int(dial_gui_widget_checked(checkbox), 1, "look_checkbox_checked_on");
+    expect_int(dial_gui_widget_draw(root, p), 0, "look_draw_checked");
+    var crc6: int = dial_gui_painter_crc32(p);
+    expect(crc6 != crc0, "look_checkbox_crc_differs");
+    expect_int(dial_gui_widget_handle(root, 2, 20, 100, 1), 1, "look_checkbox_activated2");
+    expect_int(dial_gui_widget_checked(checkbox), 0, "look_checkbox_checked_off");
+
+    // ---- 5) 真实窗口上屏（需要 DISPLAY / Xvfb）--------------------------
+    var app: GuiApp = dial_gui_app_new();
+    if (is_null(app)) {
+        print("look_window = skipped [" + dial_gui_last_error_msg() + "]");
+        dial_gui_painter_free(p);
+        dial_gui_widget_tree_free(root);       // 独立树仍归 Dial 显式释放
+        print("look_done = true");
+        return 0;
+    }
+    var win: GuiWindow = dial_gui_window_new(app, "Dial GUI Look", 240, 120);
+    if (is_null(win)) {
+        dial_gui_app_free(app);
+        dial_gui_painter_free(p);
+        dial_gui_widget_tree_free(root);
+        print("look_window = skipped [窗口创建失败]");
+        print("look_done = true");
+        return 0;
+    }
+    var wp: GuiPainter = dial_gui_window_painter(win);
+    expect_int(dial_gui_set_aa(wp, 1), 0, "look_window_aa");
+    expect_int(dial_gui_window_set_root(win, root), 0, "look_window_set_root");
+    expect_int(dial_gui_widget_draw(root, wp), 0, "look_window_draw");
+    expect_int(dial_gui_window_flush(win), 0, "look_window_flush");
+    print("look_backend = " + dial_gui_window_backend(win));
+    dial_gui_window_close(win);                // 同时释放 root（挂窗后树归窗口）
+    dial_gui_app_free(app);
+    dial_gui_painter_free(p);                  // offscreen 画布独立释放
+    print("look_window = ok");
+    print("look_done = true");
+    return 0;
+}

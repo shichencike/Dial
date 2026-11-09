@@ -690,3 +690,97 @@ GuiWidgetImpl *dial_gui_event_widget(GuiAppImpl *app) {
 void *dial_gui_event_data(GuiAppImpl *app) {
     return app_ok(app) ? (void *)&app->ev_data : NULL;
 }
+
+/* ====================================================================== *
+ * 成品控件外观层（gui.diali 末段，12 个追加 extern fn）
+ *
+ * 全部只做：句柄校验 → 读 / 写 GuiWidgetImpl 上的 C 侧纯值 → 或调
+ * dial_gui_look.c 的纯 C 逻辑。不碰像素细节（交给 look.c / raster.c）、
+ * 不碰平台 API、绝不反向调用 Dial 函数。旧 83 个包装零改动。
+ * ====================================================================== */
+
+/* ---- 控件种类 ---------------------------------------------------------- */
+
+int64_t dial_gui_widget_set_kind(GuiWidgetImpl *w, int64_t kind) {
+    if (!widget_ok(w)) return -1;
+    if (kind < GUI_WIDGET_BOX || kind > GUI_WIDGET_CHECKBOX) {
+        gui_core_set_err(GUI_ERR_ARG,
+                         "控件种类只接受 0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX");
+        return -1;
+    }
+    w->kind = (int)kind;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_kind(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->kind : -1;
+}
+
+/* ---- 文本（C 侧 strdup 自有副本）--------------------------------------- */
+
+int64_t dial_gui_widget_set_text(GuiWidgetImpl *w, DialString text) {
+    if (!widget_ok(w)) return -1;
+    char *p = str_dup(text);
+    if (!p) { gui_core_set_err(GUI_ERR_ALLOC, "控件文本内存分配失败"); return -1; }
+    free(w->text);
+    w->text = p;
+    gui_core_ok();
+    return 0;
+}
+/* 返回 C 侧借用指针；Dial 侧必须 string_from_cstr 复制成 ARC string。 */
+void *dial_gui_widget_text(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return NULL;
+    return (void *)(w->text ? w->text : "");
+}
+
+/* ---- 勾选 / 禁用 / 运行时态 -------------------------------------------- */
+
+int64_t dial_gui_widget_set_checked(GuiWidgetImpl *w, int64_t v) {
+    if (!widget_ok(w)) return -1;
+    w->checked = v ? 1 : 0;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_checked(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->checked : -1;
+}
+int64_t dial_gui_widget_set_disabled(GuiWidgetImpl *w, int64_t v) {
+    if (!widget_ok(w)) return -1;
+    w->disabled = v ? 1 : 0;
+    if (w->disabled) { w->hovered = 0; w->pressed = 0; }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_disabled(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->disabled : -1;
+}
+int64_t dial_gui_widget_hovered(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->hovered : -1;
+}
+int64_t dial_gui_widget_pressed(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->pressed : -1;
+}
+
+/* ---- 纯值事件推进 / 整树绘制 ------------------------------------------- */
+
+int64_t dial_gui_widget_handle(GuiWidgetImpl *root, int64_t kind, int64_t x,
+                                int64_t y, int64_t button) {
+    if (!widget_ok(root)) return -1;
+    int r = gui_widget_handle(root, (int)kind, (int)x, (int)y, (int)button);
+    if (r < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "widget_handle 参数非法（负 button / 无效根）");
+        return -1;
+    }
+    gui_core_ok();
+    return (int64_t)r;              /* 1 = 本次激活 / 0 = 无激活 */
+}
+
+int64_t dial_gui_widget_draw(GuiWidgetImpl *root, GuiPainterImpl *p) {
+    if (!widget_ok(root) || !painter_ok(p)) return -1;
+    if (gui_widget_draw(p, root) < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "控件树绘制失败（空画布 / 无效根）");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}

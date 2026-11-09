@@ -30,6 +30,7 @@ static void dispose_subtree(GuiWidgetImpl *n) {
         c = next;
     }
     free(n->id);
+    free(n->text);   /* 外观层文本副本（与 id 同为 C 侧 strdup 自有） */
     free(n);
 }
 

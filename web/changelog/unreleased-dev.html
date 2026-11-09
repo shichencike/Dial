@@ -34,7 +34,7 @@
 </ul>
 </div>
 <h2 id="未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</h2>
-<p><strong>主题：手搓 GUI 地基包 <code>gui.dialpkg</code> + 控件框架层。</strong> 详见
+<p><strong>主题：手搓 GUI 三层——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层。</strong> 详见
 <a href="../spec.html#38-手搓-gui-地基包guidialpkg">README §38</a>。</p>
 <blockquote>
 <p><strong>版本与交付口径（防漂移，务必先读）</strong>：本段记录的是 <strong><code>[v1.10]</code>（Git 标签 <code>v1.1</code>）
@@ -45,17 +45,21 @@ README 首行与官网 KPI 仍是 <code>v1.10</code>，<strong>不新增 <code>[
 Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，再把本段归并进对应
 版本标题，并在 §23 规则下同步所有载体。</p>
 <p><strong><code>[v1.10]</code> 段的「A–Z 二十六组 / 499 ✅」是 <code>v1.1</code> 标签发布时的验收快照，
-保持原文不改</strong>；地基层增量把回归扩到 <strong>A–Z + AA 二十七组 / 507 ✅</strong>，本轮
-控件框架层再给 AA 组增 3 条断言到 <strong>510 ✅</strong>。三者是不同时点的真实记录，
-不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
+保持原文不改</strong>；地基层增量把回归扩到 <strong>A–Z + AA 二十七组 / 507 ✅</strong>，
+控件框架层再给 AA 组增 3 条断言到 <strong>510 ✅</strong>，成品控件外观层又增 3 条到
+<strong>513 ✅</strong>。四者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，
+仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>
 <ul>
-<li><strong><code>gui.dialpkg</code>：手搓 GUI 地基包 + 控件框架层</strong>（README §38）：不用 Qt / GTK / SDL，
-  纯 X11 自绘。地基层是<strong>窗 + 事件 + 绘图</strong>；本轮在其上补齐<strong>控件框架层</strong>
-  （Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发）。
-  <strong>成品控件外观 / 信号槽 / C→Dial 回调仍不进 <code>.diali</code> 契约</strong>——把未实现函数写进
-  契约会让用户 <code>import</code> 后链接失败，那是制造漂移而非预留接口。</li>
+<li><strong><code>gui.dialpkg</code>：手搓 GUI 三层</strong>（README §38）：不用 Qt / GTK / SDL，纯 X11 自绘。
+  ① 地基层（窗 + 事件 + 绘图 + 字体，55 个 <code>extern fn</code>）；
+  ② 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发，
+  28 个）；③ <strong>成品控件外观层</strong>（Label / Button / CheckBox + 内置浅色默认主题 +
+  四态绘制 + 纯值事件推进，12 个）。共 <strong>95 个 <code>extern fn</code></strong>。
+  <strong>可覆写主题色 / TextBox 与焦点链 / 信号槽 / C→Dial 回调 / 富文本 / 图片解码
+  仍不进 <code>.diali</code> 契约</strong>——把未实现函数写进契约会让用户 <code>import</code> 后链接失败，
+  那是制造漂移而非预留接口。</li>
 <li><strong>自研迷你 2D 光栅化器</strong>：ARGB32 像素缓冲、<code>source-over</code> alpha 混合、
   1/2/4/8 档覆盖面积采样抗锯齿、矩形 / 线 / 圆 / 圆环 / 椭圆 / 梯形 / 位图 /
   裁剪 / 像素读写；<code>dial_gui_painter_crc32()</code> 提供像素级回归断言。</li>
@@ -93,24 +97,49 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
 <li><strong>布局双向锁死</strong>：C 侧 <code>_Static_assert(sizeof==104, offsetof(...))</code> 与 Dial 侧
     <code>sizeof&lt;T&gt;()</code> / <code>alignof&lt;T&gt;()</code> / <code>offsetof&lt;T&gt;(field)</code> 编译期内建逐项比对，
     任何字段增删两边同时报错。</li>
+<li><strong>成品控件外观层（12 个新 <code>extern fn</code>）</strong>：同样并入 <code>gui</code> 包、只追加、旧 83 个
+  签名<strong>一字不动</strong>、<code>abi = 6</code> / <code>version = 1.10.0</code> 不变。新增
+  <code>src/dial_gui_look.c</code> 是纯 C（只 include <code>dial_gui.h</code> + libc、零平台符号），
+  三份 <code>.a</code> 仍无 GUI 链接期依赖。</li>
+<li><strong>内置浅色默认主题</strong>：颜色写死在 <code>dial_gui.h</code> 的 <code>GUI_THEME_*</code>，本版不暴露
+    theme setter；字体用静态零分配内置点阵对象（<code>kind=0</code>、字号 16），绘制三平台
+    逐像素一致，可被 <code>painter_crc32</code> 稳定断言。</li>
+<li><strong>四态 + 纯值事件</strong>：<code>widget_handle(root,kind,x,y,button)</code> 只读纯值，复用
+    <code>widget_hit</code> 取最深可见控件，MOVE / PRESS / RELEASE 推进 <code>hovered</code> / <code>pressed</code>
+    并激活（CHECKBOX 翻转 <code>checked</code>、BUTTON 返回 1）；<code>disabled</code> 不参与、走禁用
+    配色。<strong>绝不 C → Dial 反向回调</strong>，被激活控件由 Dial 侧 <code>widget_hit</code> 自取。</li>
+<li><strong>整树一次绘制</strong>：<code>widget_draw(root,painter)</code> 前序递归累加相对几何（不依赖
+    <code>abs_*</code>），父先画后加子在上，BOX 面板 / LABEL 文本 / BUTTON 四态背景+居中文本 /
+    CHECKBOX 方框+勾+文本；只读状态、不推进状态。</li>
+<li><strong>文本 ARC 边界</strong>：<code>widget_set_text(string)</code> 由 C 侧 <code>strdup</code> 自有副本，
+    <code>widget_text(): rawptr&lt;byte&gt;</code> 是借用指针，Dial 侧必须 <code>string_from_cstr</code>
+    复制；<code>GuiWidgetImpl.text</code> 由 <code>dispose_subtree</code> 与 <code>id</code> 同口径释放。</li>
 </ul>
 <h3 id="changed">Changed</h3>
 <ul>
-<li><code>tests/run_tests.sh</code> 新增 <strong>AA 组</strong>（<code>gui.dialpkg</code> 端到端）：三平台构建、零警告检查、
+<li><code>tests/run_tests.sh</code> 的 <strong>AA 组</strong>（<code>gui.dialpkg</code> 端到端）：三平台构建、零警告检查、
   <code>nm -u</code> 符号检查、<code>pack</code> / <code>install</code>、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
   （<code>window = ok</code> / <code>window_backend = x11/xshm/xrender</code> / <code>window_flush = ok</code> /
   <code>quit_event = ok</code>）、卸载。全量从 A–Z 二十六组扩为 <strong>A–Z + AA 二十七组</strong>。
-  本轮再给 AA 组增 3 条断言（<code>use_gui_widget.dial</code> 编译 / 无 DISPLAY 控件层 /
-  Xvfb 挂树 + packed 事件块），<code>aapass</code> 由 8 条增到 11 条。</li>
+  框架层那一轮给 AA 组增 3 条断言（<code>use_gui_widget.dial</code> 编译 / 无 DISPLAY 控件层 /
+  Xvfb 挂树 + packed 事件块），外观层这一轮再增 3 条（<code>use_gui_look.dial</code> 编译 /
+  无 DISPLAY 四态与 CRC / Xvfb 整树上屏），<code>aapass</code> 由 8 → 11 → <strong>14 条</strong>。</li>
 <li>新增 <code>tests/pkg/use_gui_widget.dial</code>：与 <code>use_gui.dial</code> 完全独立、<strong>不创建
   <code>GuiPainter</code></strong>，因此不触碰 <code>crc_offscreen = 4007435570</code> 像素回归基准；
   覆盖 <code>packed extern struct</code> 布局 / <code>string_from_cstr</code> 的 ARC 复制 /
   三种布局与幂等 / 命中（含后加子优先、不可见跳过）/ 防悬垂 / 挂窗生命周期。</li>
-<li><code>packages/gui/</code> 新增 <code>src/dial_gui_widget.c</code>，<code>build.sh</code> 三平台 <code>SRCS</code> 统一追加；
-  <code>gui.diali</code> 追加 28 个单行 <code>extern fn</code> 与 <code>GuiWidget</code> 句柄并改写范围声明，
-  <code>dial_gui.h</code> 增加 104 字节 packed 事件块与 <code>_Static_assert</code>、全局根链表防悬垂，
-  <code>dial_gui_core.c</code> 的 <code>gui_core_emit</code> 扩展命中控件参数（4 处调用同步），
-  两后端 <code>pump</code> 在 Dial 调用线程做命中测试。</li>
+<li>新增 <code>tests/pkg/use_gui_look.dial</code>：用<strong>自己的</strong> offscreen 画布（关 AA），同样不碰
+  <code>crc_offscreen = 4007435570</code>；覆盖三种控件种类 / 非法种类拒绝 / 文本
+  <code>string_from_cstr</code> ARC 复制与空借用指针 / VBOX 三等分 / 四态背景逐像素色值
+  （<code>get_pixel</code>）与 CRC 互异 / 移出画布复位幂等 / 禁用配色 / CheckBox 翻转 /
+  <code>look_crc_normal = 3884455222</code> 硬钉 / Xvfb 下 <code>window_set_root</code> + 整树绘制 + flush。</li>
+<li><code>packages/gui/</code> 新增 <code>src/dial_gui_widget.c</code>（框架层）与 <code>src/dial_gui_look.c</code>
+  （外观层），<code>build.sh</code> 三平台 <code>SRCS</code> 统一追加两者；<code>gui.diali</code> 两轮共追加
+  40 个单行 <code>extern fn</code>（28 + 12）与 <code>GuiWidget</code> 句柄并改写三层范围声明，
+  <code>dial_gui.h</code> 增加 104 字节 packed 事件块与 <code>_Static_assert</code>、全局根链表防悬垂、
+  控件外观层字段与内置主题色常量，<code>dial_gui_core.c</code> 的 <code>gui_core_emit</code> 扩展命中
+  控件参数（4 处调用同步）并追加 12 个 FFI 包装，两后端 <code>pump</code> 在 Dial 调用线程
+  做命中测试。</li>
 <li><code>.github/workflows/ci.yml</code>：阶段 8 构建循环与 <code>dialc pack</code> 循环加入 <code>gui</code>，
   <code>dist-gui/gui.dialpkg</code> 归集进 <code>dist-c11/</code>，新增无头 X11 环境准备步骤，
   Release 资产列表加入 <code>gui.dialpkg</code>；顺手修正 <code>softprops/action-gh-release@v2</code>
@@ -120,14 +149,18 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
 </ul>
 <h3 id="测试与交付">测试与交付</h3>
 <ul>
-<li><code>bash tests/run_tests.sh</code> <strong>A–Z + AA 二十七组全套通过（510 ✅ / 0 ❌）</strong>；
+<li><code>bash tests/run_tests.sh</code> <strong>A–Z + AA 二十七组全套通过（513 ✅ / 0 ❌）</strong>；
   Xvfb 连续三次实窗 <code>EXIT=0</code>，能力串
-  <code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，像素 CRC 稳定 <code>4007435570</code>；
-  无 DISPLAY 路径 24 项断言全绿、窗口明确打印 <code>window = skipped [原因]</code>，
+  <code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，地基层像素 CRC 稳定
+  <code>4007435570</code>、外观层 <code>look_crc_normal</code> 稳定 <code>3884455222</code>；
+  无 DISPLAY 路径窗口明确打印 <code>window = skipped [原因]</code>，
   <strong>绝不把未验证写成通过</strong>。控件框架层另由 <code>use_gui_widget.dial</code> 覆盖：
   <code>sizeof&lt;GuiWidgetEvent&gt;() == 104</code> 与各 <code>offsetof</code> 编译期内建断言、
   <code>string_from_cstr</code> ARC 复制、VBox/HBox 等分与幂等、命中与防悬垂、
   Xvfb 下 <code>window_set_root</code> / QUIT 主动分发 / 借用指针 NULL→空串。
+  成品控件外观层由 <code>use_gui_look.dial</code> 覆盖：三种控件种类 / 四态背景逐像素色值 /
+  CRC 互异与复位幂等 / 禁用配色 / CheckBox 翻转 / 文本 ARC 复制 / CRC 硬钉，
+  Xvfb 下 <code>window_set_root</code> + 整树绘制 + <code>flush</code> 上屏。
   真实鼠标注入依赖 XTest / xdotool，本轮<strong>未实机验证</strong>，demo 如实打印
   <code>widget_hit_injection = skipped</code>，命中逻辑由无头纯 C 树断言覆盖。</li>
 <li><code>tools/cve_check.py</code> 8/8；语言能力审计 <code>TOTAL=38 PASS=38 FAIL=0</code>；

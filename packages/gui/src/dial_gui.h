@@ -4,6 +4,8 @@
  * 分层：
  *   dial_gui_core.c    FFI 包装：句柄生命周期 / 错误槽 / 事件槽 / 调后端 vtable
  *   dial_gui_raster.c  自研 2D 光栅化器 + 内置点阵 + stb_truetype 字形
+ *   dial_gui_widget.c  控件框架层：Widget 树 / 布局 / 命中 / packed 事件块（纯 C）
+ *   dial_gui_look.c    成品控件外观层：默认主题 / 四态绘制 / 纯值事件推进（纯 C）
  *   dial_gui_x11.c     POSIX 后端（X11 + XShm + XRender，dlopen 动态装载）
  *   dial_gui_win32.c   Windows 后端（GDI DIBSection，LoadLibraryA 动态装载）
  *
@@ -139,6 +141,28 @@ struct GuiFontImpl {
 #define GUI_LAYOUT_VBOX  1
 #define GUI_LAYOUT_HBOX  2
 
+/* ---- 成品控件外观层：种类 + 内置浅色默认主题 -------------------------- *
+ * 颜色常量写死在 C（gui.diali 里逐条列出色值），本版不暴露 theme setter；
+ * Dial 侧只传控件种类 / 文本 / 状态，绘制配色一律由包内部决定，保证三平台
+ * 逐像素一致、可被 painter_crc32 稳定断言。 */
+#define GUI_WIDGET_BOX      0
+#define GUI_WIDGET_LABEL    1
+#define GUI_WIDGET_BUTTON   2
+#define GUI_WIDGET_CHECKBOX 3
+
+#define GUI_LOOK_FONT_SIZE  16   /* 内置 8×8 点阵，sc = size/8 = 2，每字符 18×16 */
+
+#define GUI_THEME_BG        ((gui_color_t)0xFFF4F6F9u)  /* 面板 / BOX 背景 */
+#define GUI_THEME_BORDER    ((gui_color_t)0xFFC7CEDAu)  /* 细边框 */
+#define GUI_THEME_TEXT      ((gui_color_t)0xFF202733u)  /* 文本 */
+#define GUI_THEME_TEXT_DIS  ((gui_color_t)0xFFA9B0BDu)  /* 禁用态文本 */
+#define GUI_THEME_BTN       ((gui_color_t)0xFFE7ECF4u)  /* 按钮 普通 */
+#define GUI_THEME_BTN_HOVER ((gui_color_t)0xFFD3E0FAu)  /* 按钮 悬停 */
+#define GUI_THEME_BTN_DOWN  ((gui_color_t)0xFFB2C8F2u)  /* 按钮 按下 */
+#define GUI_THEME_BTN_DIS   ((gui_color_t)0xFFF0F2F5u)  /* 按钮 禁用 */
+#define GUI_THEME_CHECK_BG  ((gui_color_t)0xFFFFFFFFu)  /* 勾选框底 */
+#define GUI_THEME_MARK      ((gui_color_t)0xFF2F6FE0u)  /* 勾 / 高亮 */
+
 struct GuiWidgetImpl {
     GuiWidgetImpl *parent;
     GuiWidgetImpl *first_child;
@@ -156,6 +180,14 @@ struct GuiWidgetImpl {
     int  layout;                /* GUI_LAYOUT_* */
     int  padding;
     int  gap;
+    /* ---- 成品控件外观层（dial_gui_look.c）------------------------------ */
+    int  kind;                  /* GUI_WIDGET_*，默认 0 BOX */
+    char *text;                 /* C 侧 strdup 自有副本（NULL = 无文本）；
+                                 * dispose_subtree 负责 free，与 id 同口径 */
+    int  checked;               /* CHECKBOX 勾选态 */
+    int  disabled;              /* 禁用态：不 hover / press / 激活，走禁用配色 */
+    int  hovered;               /* 运行时：悬停（gui_widget_handle 推进） */
+    int  pressed;               /* 运行时：按下（gui_widget_handle 推进） */
 };
 
 /*
@@ -242,5 +274,14 @@ void           gui_widget_fill_event(GuiWidgetEvent *ev, int kind,
                                      int x, int y, int button, int key,
                                      int w, int h, GuiWindowImpl *win,
                                      GuiWidgetImpl *hit);
+
+/* ---- 成品控件外观层：dial_gui_look.c（纯 C，三平台共用，无平台符号）---- *
+ * 与框架层同一条硬边界：只 include dial_gui.h + libc，绝不碰 X11 / Win32，
+ * 绝不保存函数指针、绝不 C → Dial 反向回调。 */
+/* 把一条纯值事件喂进树推进四态；返回 1=本次激活 / 0=无 / 负值=参数错误。 */
+int            gui_widget_handle(GuiWidgetImpl *root, int kind,
+                                 int x, int y, int button);
+/* 按默认主题 + 当前四态把整棵树画到 GuiPainter；返回绘制节点数（>=0）/ <0 失败。 */
+int            gui_widget_draw(GuiPainterImpl *p, GuiWidgetImpl *root);
 
 #endif /* DIAL_GUI_H */

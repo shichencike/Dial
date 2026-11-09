@@ -1,5 +1,5 @@
-// gui.dialpkg —— 手写 GUI 地基 + 控件框架层（窗 / 事件 / 2D 绘图 / Widget 树 /
-// 布局 / 命中测试 / 主动事件分发），Dial 语言接口签名
+// gui.dialpkg —— 手写 GUI（窗 / 事件 / 2D 绘图 / Widget 树 / 布局 / 命中测试 /
+// 主动事件分发 / 成品控件外观），Dial 语言接口签名
 //
 // 本文件是**唯一**的对外契约：包内机器码的实现可以变，但这里的签名一变，
 // 依赖它的程序就得重编。签名文件带 SHA256 校验，被篡改会在链接期被拦下。
@@ -30,12 +30,17 @@
 //   8 CLOSE       9 QUIT
 // 取事件字段用下面的 dial_gui_event_* 访问器（每 App 一份最近事件槽）。
 //
-// 已实现范围（两层，全部有真实现，不是预留接口）：
+// 已实现范围（三层，全部有真实现，不是预留接口）：
 //   1) 地基层：Application / Window / Painter / Event / Font（55 个函数）；
 //   2) 控件框架层：GuiWidget 树 + 绝对 / VBox / HBox 布局 + 命中测试 +
-//      主动事件分发（下面的 28 个函数）。
-// 控件一律是**通用 Box**，包不提供成品外观（无 Button / Label / Panel 渲染），
-// 由 Dial 侧用 GuiPainter 自绘。
+//      主动事件分发（28 个函数）；
+//   3) 成品控件外观层：Label / Button / CheckBox 三种控件 + C 侧内置浅色
+//      默认主题 + 四态（普通 / 悬停 / 按下 / 禁用）绘制 + 纯值事件推进 +
+//      整树一次绘制（下面的 12 个函数）。
+// 三层一律只追加 extern fn：旧签名一字不动，abi = 6 / version = 1.10.0 不变。
+// 外观层仍是**纯 C、零平台符号、零反向回调**：控件种类 / 文本 / 状态全是
+// C 侧纯值或自有副本，Dial 侧用 widget_draw(root, painter) 把整棵树画到任意
+// GuiPainter（离屏画布或窗口画布），不需要也不允许 C 去调 Dial 函数。
 //
 // 事件分发立场（内存宪法）：**绝不做 C → Dial 反向回调**。Dial 无 GC，
 // 全靠 ARC + 手动释放；C 侧若在平台线程直接调 Dial 函数，跨线程引用计数
@@ -44,9 +49,11 @@
 // 的 const char*，Dial 侧必须用 string_from_cstr 复制成自己的 ARC 对象。
 // C 管 C 的，ARC 管 ARC 的，谁也不越界，零隐式开销。
 //
-// 仍未实现、因此**不写进本契约**：成品控件外观、信号槽、富文本编辑、图片
-// 解码、Direct2D。把未实现的函数写进 .diali 会让用户 import 后链接失败，
-// 那是制造漂移而非预留接口——这条原则两层一律适用。
+// 仍未实现、因此**不写进本契约**：可覆写主题色、TextBox / 单行编辑与焦点链、
+// 信号槽、富文本编辑、图片解码、Direct2D、C → Dial 反向回调。把未实现的函数
+// 写进 .diali 会让用户 import 后链接失败，那是制造漂移而非预留接口——这条
+// 原则三层一律适用。真实鼠标注入依赖 XTest / xdotool，命中逻辑由无头纯 C
+// 树断言覆盖，外观层的四态由纯值事件推进（widget_handle）驱动。
 
 /// GUI 应用上下文（不透明）。持有显示连接、窗口表、事件循环状态与最近事件槽。
 /// 用完必须 dial_gui_app_free 释放——不透明句柄不进 ARC。
@@ -342,3 +349,61 @@ extern fn dial_gui_event_widget(app: GuiApp): GuiWidget;
 /// 两个字符串指针由 C 拥有、C 绝不 free，有效期至**下次 poll/wait 或窗口/树释放**；
 /// Dial 侧必须立即 string_from_cstr 复制，绝不长期持有。
 extern fn dial_gui_event_data(app: GuiApp): rawptr<byte>;
+
+// ---- 成品控件外观层：种类 / 文本 / 状态 / 主题绘制 ----------------------
+//
+// 立场：C 侧内置**浅色默认主题**（颜色常量写死在 dial_gui_look.c，本版不暴露
+// setter），控件种类与状态全是 C 侧纯值或自有副本。绝不 C → Dial 反向回调：
+// Dial 侧 poll/wait 拿到事件后，用 widget_handle 把纯值事件喂进树推进四态，
+// 再用 widget_draw 把整棵树一次画到任意 GuiPainter（离屏或窗口画布）。
+//
+// 控件种类（widget_set_kind / widget_kind）：
+//   0 BOX      通用容器（浅色面板背景 + 细边框；框架层默认种类）
+//   1 LABEL    只绘制文本（无背景 / 边框）
+//   2 BUTTON   四态背景 + 边框 + 居中文本
+//   3 CHECKBOX 方框 + 勾选标记 + 右侧文本，RELEASE 时自动翻转 checked
+//
+// 默认主题色（0xAARRGGBB，写死在 C，逐像素可断言）：
+//   面板/BOX 背景 FFF4F6F9   边框 FFC7CEDA   文本 FF202733   禁用文本 FFA9B0BD
+//   按钮 普通 FFE7ECF4 / 悬停 FFD3E0FA / 按下 FFB2C8F2 / 禁用 FFF0F2F5
+//   勾选框底 FFFFFFFF       勾/高亮 FF2F6FE0
+// 文本用内置 8×8 ASCII 点阵（零依赖），字号固定 16（每字符 18×16 像素），
+// 点阵不覆盖的码点画 '?'，与地基层的 gui_font_draw 同一套字形。
+//
+// 四态由 widget_handle 推进：hovered / pressed 是运行时态（MOVE / PRESS 写，
+// RELEASE 清），checked 是 CheckBox 勾选态（RELEASE 翻转），disabled 是显式设置的
+// 纯值态（禁用控件不 hover / 不 press / 不激活，绘制走禁用配色）。
+
+/// 设置控件种类（0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX）；非法值返回 -1。
+extern fn dial_gui_widget_set_kind(w: GuiWidget, kind: int): int;
+extern fn dial_gui_widget_kind(w: GuiWidget): int;
+
+/// 设置控件文本（C 侧 strdup 自有副本，按 C 字符串 NUL 结尾；输入 Dial string 不被接管）。
+extern fn dial_gui_widget_set_text(w: GuiWidget, text: string): int;
+/// 取文本的 **C 侧借用指针**（const char*，未设置时为空串）；所有权在 C，
+/// 必须立刻 string_from_cstr 复制成 ARC string，绝不长期持有。
+extern fn dial_gui_widget_text(w: GuiWidget): rawptr<byte>;
+
+/// CheckBox 勾选态：显式设置 / 读取（0 未勾选 / 1 勾选）。
+extern fn dial_gui_widget_set_checked(w: GuiWidget, v: int): int;
+extern fn dial_gui_widget_checked(w: GuiWidget): int;
+/// 禁用态：设置 / 读取（禁用控件不参与 hover / press / 激活，走禁用配色）。
+extern fn dial_gui_widget_set_disabled(w: GuiWidget, v: int): int;
+extern fn dial_gui_widget_disabled(w: GuiWidget): int;
+/// 运行时态只读：当前是否悬停 / 按下（由 widget_handle 推进）。
+extern fn dial_gui_widget_hovered(w: GuiWidget): int;
+extern fn dial_gui_widget_pressed(w: GuiWidget): int;
+
+/// 把一条**纯值事件**喂进控件树，推进四态：kind 用事件码（1 PRESS / 2 RELEASE
+/// / 3 MOUSE_MOVE），x/y 为客户区坐标，button 为鼠标键（1 左键）。
+/// MOVE 清/置 hovered、PRESS 清/置 pressed、RELEASE 清 pressed 并激活：
+/// CHECKBOX 翻转 checked、BUTTON 记一次点击；disabled 控件不参与。
+/// 返回 1 = 本次 RELEASE 激活了可交互控件 / 0 = 无激活 / -1 = 参数错误。
+/// 命中取最深可见节点（复用框架层 widget_hit 口径）。被激活控件由 Dial 侧
+/// 用 widget_hit(root, x, y) 自行取回，C 侧绝不返回或缓存 Dial 对象。
+extern fn dial_gui_widget_handle(root: GuiWidget, kind: int, x: int, y: int, button: int): int;
+
+/// 把整棵树按默认主题 + 当前四态一次画到 GuiPainter（离屏或窗口画布均可）。
+/// 前序递归、父先画后加子在上，只读控件纯值状态，不推进状态、不碰平台 API。
+/// 绘制前应先 widget_layout_apply 定好几何；返回 0 成功 / -1 失败。
+extern fn dial_gui_widget_draw(root: GuiWidget, p: GuiPainter): int;
