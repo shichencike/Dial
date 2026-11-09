@@ -1,8 +1,9 @@
 /*
  * dial_gui_look.c —— gui.dialpkg 成品控件外观层（纯 C，三平台共用）
  *
- * 职责：Label / Button / CheckBox / TextBox 的默认主题绘制 + 四态（普通 / 悬停 /
- * 按下 / 禁用）配色 + 纯值事件推进（hovered / pressed / checked / 点击聚焦）。
+ * 职责：八种控件（BOX / LABEL / BUTTON / CHECKBOX / TEXTBOX / RADIO /
+ * SLIDER / PROGRESS）的主题表驱动绘制 + 四态（普通 / 悬停 / 按下 / 禁用）
+ * 配色 + 纯值事件推进（hovered / pressed / checked / value / 点击聚焦）。
  *
  * 硬边界（与内存宪法一致）：
  *   - 只 include dial_gui.h + libc，绝不碰 X11 / Win32 任何 API；三份 .a 的
@@ -10,8 +11,9 @@
  *   - 绝不 C → Dial 反向回调：不保存函数指针、不认识 Dial 对象、不碰 ARC。
  *     状态全是 GuiWidgetImpl 上的 C 侧纯值；Dial 侧用 widget_handle 喂纯值
  *     事件、用 widget_draw 主动绘制，C 从不主动调 Dial 函数。
- *   - 颜色写死在 dial_gui.h 的 GUI_THEME_*（内置浅色主题，本版不暴露 setter），
- *     字体用静态零分配的内置点阵对象（kind=0），绘制结果三平台逐像素一致。
+ *   - 配色一律走 dial_gui_theme.c 的 gui_theme_color(role)：默认逐字等于
+ *     GUI_THEME_* 宏，可由 theme_set 按角色覆写、theme_reset 逐值复位。
+ *     字体用静态零分配的内置点阵对象（kind=0），三平台逐像素一致。
  *
  * 绘制不依赖 abs_*：前序递归自己累加相对几何得到绝对坐标，与框架层 hit_node
  * 同口径；父先画、后加子在上，保证「后加子优先」的绘制层序与命中层序一致。
@@ -23,6 +25,10 @@
 /* 内置 8×8 点阵字体只读 f->kind，其余字段全零即可；静态对象零分配、
  * 永不释放（GUI 单线程事件循环，无需加锁）。绝不传给 gui_font_free。 */
 static GuiFontImpl g_builtin_font;
+
+/* 简写：所有配色都从主题表取，绝不直接引用 GUI_THEME_* 编译期常量，
+ * 这样 theme_set 一次改色，整树下一次 widget_draw 立即生效。 */
+#define C(role) gui_theme_color(GUI_THEME_ROLE_##role)
 
 /* ---- 纯值事件推进 ------------------------------------------------------ */
 
@@ -54,11 +60,13 @@ int gui_widget_handle(GuiWidgetImpl *root, int kind, int x, int y, int button) {
         }
         return 0;
     }
-    /* RELEASE：清 pressed；左键落在可交互控件上才「激活」一次。 */
+    /* RELEASE：清 pressed；左键落在可交互控件上才「激活」一次。
+     * 命中时顺带取回绝对 x，SLIDER 用它算局部 x，绝不依赖上一轮布局残留。 */
     if (kind == GUI_EV_MOUSE_RELEASE) {
         clear_flags(root, 0, 1);
         if (button != 0 && button != 1) return 0;
-        GuiWidgetImpl *hit = gui_widget_hit(root, x, y, NULL, NULL);
+        int hit_abs_x = 0;
+        GuiWidgetImpl *hit = gui_widget_hit(root, x, y, &hit_abs_x, NULL);
         if (!hit || hit->disabled) return 0;
         if (hit->kind == GUI_WIDGET_TEXTBOX) {
             /* 点击 TextBox 即把焦点移过去（纯 C 树操作，绝不反向回调）。 */
@@ -69,7 +77,18 @@ int gui_widget_handle(GuiWidgetImpl *root, int kind, int x, int y, int button) {
             hit->checked = hit->checked ? 0 : 1;
             return 1;
         }
+        if (hit->kind == GUI_WIDGET_RADIO) {
+            /* 选中本项；group != 0 时清掉同组其它 RADIO（纯 C 树遍历）。 */
+            gui_widget_radio_select(root, hit);
+            return 1;
+        }
+        if (hit->kind == GUI_WIDGET_SLIDER) {
+            /* 按命中点局部 x 比例设值，clamp 进 [vmin, vmax]。 */
+            gui_widget_slider_set_from_x(hit, x - hit_abs_x);
+            return 1;
+        }
         if (hit->kind == GUI_WIDGET_BUTTON) return 1;
+        /* PROGRESS 是只读展示控件，不参与激活。 */
         return 0;
     }
     /* 其它事件码（KEY / RESIZE / EXPOSE / CLOSE / QUIT …）不改变控件四态。 */
@@ -109,9 +128,9 @@ static void draw_text(GuiPainterImpl *p, const char *text,
  */
 static void draw_textbox(GuiPainterImpl *p, GuiWidgetImpl *n,
                          int ax, int ay, int w, int h) {
-    gui_color_t bg = n->disabled ? GUI_THEME_BTN_DIS : GUI_THEME_CHECK_BG;
+    gui_color_t bg = n->disabled ? C(BTN_DIS) : C(CHECK_BG);
     gui_raster_fill_rect(p, ax, ay, w, h, bg);
-    gui_color_t border = n->focused ? GUI_THEME_MARK : GUI_THEME_BORDER;
+    gui_color_t border = n->focused ? C(MARK) : C(BORDER);
     gui_raster_stroke_rect(p, ax, ay, w, h, n->focused ? 2 : 1, border);
 
     int tx = ax + 6, tw = w - 12;
@@ -135,13 +154,13 @@ static void draw_textbox(GuiPainterImpl *p, GuiWidgetImpl *n,
     if (b > a && n->focused) {           /* 选区背景先铺，文字后画，保持可读 */
         int px0 = tx + gui_font_width(s, a, &g_builtin_font, GUI_LOOK_FONT_SIZE);
         int px1 = tx + gui_font_width(s, b, &g_builtin_font, GUI_LOOK_FONT_SIZE);
-        gui_raster_fill_rect(p, px0, ty, px1 - px0, th, GUI_THEME_SEL);
+        gui_raster_fill_rect(p, px0, ty, px1 - px0, th, C(SEL));
     }
-    gui_color_t tc = n->disabled ? GUI_THEME_TEXT_DIS : GUI_THEME_TEXT;
+    gui_color_t tc = n->disabled ? C(TEXT_DIS) : C(TEXT);
     gui_font_draw(p, tx, ty, s, len, &g_builtin_font, GUI_LOOK_FONT_SIZE, tc);
     if (n->focused && !n->disabled) {
         int cx = tx + gui_font_width(s, cursor, &g_builtin_font, GUI_LOOK_FONT_SIZE);
-        gui_raster_fill_rect(p, cx, ty, 2, th, GUI_THEME_MARK);
+        gui_raster_fill_rect(p, cx, ty, 2, th, C(MARK));
     }
 
     p->has_clip = saved_has;
@@ -150,7 +169,7 @@ static void draw_textbox(GuiPainterImpl *p, GuiWidgetImpl *n,
 
 /* CheckBox 的勾：两段折线，纯整数坐标，无浮点。 */
 static void draw_check_mark(GuiPainterImpl *p, int bx, int by, int box) {
-    gui_color_t c = GUI_THEME_MARK;
+    gui_color_t c = C(MARK);
     int x1 = bx + box / 5;
     int y1 = by + box / 2;
     int x2 = bx + box * 2 / 5;
@@ -161,17 +180,29 @@ static void draw_check_mark(GuiPainterImpl *p, int bx, int by, int box) {
     gui_raster_line(p, x2, y2, x3, y3, 2, c);
 }
 
+/* SLIDER / PROGRESS 共用的整数比例：把 value 映射到 [0, width]。
+ * value 先 clamp 进 [vmin, vmax]；值域退化（span <= 0）时返回 0，
+ * 绝不除零、绝不静默溢出。 */
+static int value_fill_width(const GuiWidgetImpl *n, int width) {
+    if (width <= 0) return 0;
+    int span = n->vmax - n->vmin;
+    if (span <= 0) return 0;
+    int v = n->value < n->vmin ? n->vmin :
+            (n->value > n->vmax ? n->vmax : n->value);
+    return (int)(((int64_t)(v - n->vmin) * width) / span);
+}
+
 static void draw_node(GuiPainterImpl *p, GuiWidgetImpl *n,
                       int ax, int ay, int *count) {
     if (!n->visible) return;                   /* 不可见：跳过整个子树 */
     int w = n->w, h = n->h;
 
     if (w > 0 && h > 0) {
-        gui_color_t tc = n->disabled ? GUI_THEME_TEXT_DIS : GUI_THEME_TEXT;
+        gui_color_t tc = n->disabled ? C(TEXT_DIS) : C(TEXT);
         switch (n->kind) {
         case GUI_WIDGET_BOX: {
-            gui_raster_fill_rect(p, ax, ay, w, h, GUI_THEME_BG);
-            gui_raster_stroke_rect(p, ax, ay, w, h, 1, GUI_THEME_BORDER);
+            gui_raster_fill_rect(p, ax, ay, w, h, C(BG));
+            gui_raster_stroke_rect(p, ax, ay, w, h, 1, C(BORDER));
             break;
         }
         case GUI_WIDGET_LABEL: {
@@ -181,12 +212,12 @@ static void draw_node(GuiPainterImpl *p, GuiWidgetImpl *n,
         }
         case GUI_WIDGET_BUTTON: {
             gui_color_t bg;
-            if (n->disabled)     bg = GUI_THEME_BTN_DIS;
-            else if (n->pressed) bg = GUI_THEME_BTN_DOWN;
-            else if (n->hovered) bg = GUI_THEME_BTN_HOVER;
-            else                 bg = GUI_THEME_BTN;
+            if (n->disabled)     bg = C(BTN_DIS);
+            else if (n->pressed) bg = C(BTN_DOWN);
+            else if (n->hovered) bg = C(BTN_HOVER);
+            else                 bg = C(BTN);
             gui_raster_fill_rect(p, ax, ay, w, h, bg);
-            gui_raster_stroke_rect(p, ax, ay, w, h, 1, GUI_THEME_BORDER);
+            gui_raster_stroke_rect(p, ax, ay, w, h, 1, C(BORDER));
             draw_text(p, n->text, ax, ay, w, h, tc, 1);
             break;
         }
@@ -200,8 +231,8 @@ static void draw_node(GuiPainterImpl *p, GuiWidgetImpl *n,
             if (box < 6)  box = 6;
             int bx = ax + 4;
             int by = ay + (h - box) / 2;
-            gui_raster_fill_rect(p, bx, by, box, box, GUI_THEME_CHECK_BG);
-            gui_color_t border = n->disabled ? GUI_THEME_BORDER : GUI_THEME_MARK;
+            gui_raster_fill_rect(p, bx, by, box, box, C(CHECK_BG));
+            gui_color_t border = n->disabled ? C(BORDER) : C(MARK);
             gui_raster_stroke_rect(p, bx, by, box, box, 1, border);
             if (n->checked) draw_check_mark(p, bx, by, box);
             /* 文本区从方框右侧开始，左对齐（剩余宽度可能为负，draw_text 会跳过）。 */
@@ -209,10 +240,57 @@ static void draw_node(GuiPainterImpl *p, GuiWidgetImpl *n,
                       w - (box + 10), h, tc, 0);
             break;
         }
+        case GUI_WIDGET_RADIO: {
+            /* 圆圈 + 选中点 + 右侧文本；checked 复用 CHECKBOX 的语义。 */
+            int r = h / 2 - 4;
+            if (r > 10) r = 10;
+            if (r < 4)  r = 4;
+            int cx = ax + 4 + r;
+            int cy = ay + h / 2;
+            gui_raster_fill_circle(p, cx, cy, r, C(CHECK_BG));
+            gui_raster_stroke_circle(p, cx, cy, r, 1,
+                                     n->disabled ? C(BORDER) : C(MARK));
+            if (n->checked)
+                gui_raster_fill_circle(p, cx, cy, r / 2 + 1,
+                                       n->disabled ? C(TEXT_DIS) : C(MARK));
+            draw_text(p, n->text, ax + 4 + 2 * r + 6, ay,
+                      w - (2 * r + 10), h, tc, 0);
+            break;
+        }
+        case GUI_WIDGET_SLIDER: {
+            int tx = ax + 4, tw = w - 8;
+            if (tw <= 0) break;
+            int th = 6;
+            int ty = ay + (h - th) / 2;
+            gui_raster_fill_rect(p, tx, ty, tw, th, C(TRACK));
+            int fill = value_fill_width(n, tw);
+            gui_raster_fill_rect(p, tx, ty, fill, th,
+                                 n->disabled ? C(BORDER) : C(FILL));
+            int kx = tx + fill;
+            if (kx < tx) kx = tx;
+            if (kx > tx + tw) kx = tx + tw;
+            int kr = 6;
+            gui_raster_fill_circle(p, kx, ty + th / 2, kr,
+                                   n->disabled ? C(BTN_DIS) : C(KNOB));
+            gui_raster_stroke_circle(p, kx, ty + th / 2, kr, 1,
+                                     n->disabled ? C(BORDER) : C(MARK));
+            break;
+        }
+        case GUI_WIDGET_PROGRESS: {
+            /* 只读展示：轨道 + 边框 + 按 value 比例填充，RELEASE 不激活。 */
+            gui_raster_fill_rect(p, ax, ay, w, h, C(TRACK));
+            gui_raster_stroke_rect(p, ax, ay, w, h, 1, C(BORDER));
+            int iw = w - 4, ih = h - 4;
+            if (iw <= 0 || ih <= 0) break;
+            int fill = value_fill_width(n, iw);
+            gui_raster_fill_rect(p, ax + 2, ay + 2, fill, ih,
+                                 n->disabled ? C(BORDER) : C(FILL));
+            break;
+        }
         default: {
             /* set_kind 已挡住非法值；这里只做防御，未知种类按 BOX 兜底。 */
-            gui_raster_fill_rect(p, ax, ay, w, h, GUI_THEME_BG);
-            gui_raster_stroke_rect(p, ax, ay, w, h, 1, GUI_THEME_BORDER);
+            gui_raster_fill_rect(p, ax, ay, w, h, C(BG));
+            gui_raster_stroke_rect(p, ax, ay, w, h, 1, C(BORDER));
             break;
         }
         }

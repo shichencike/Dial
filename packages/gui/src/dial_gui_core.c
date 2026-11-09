@@ -696,7 +696,7 @@ void *dial_gui_event_data(GuiAppImpl *app) {
 }
 
 /* ====================================================================== *
- * 成品控件外观层（gui.diali 末段，12 个追加 extern fn）
+ * 成品控件外观层（追加当轮的 gui.diali 末段，12 个追加 extern fn）
  *
  * 全部只做：句柄校验 → 读 / 写 GuiWidgetImpl 上的 C 侧纯值 → 或调
  * dial_gui_look.c 的纯 C 逻辑。不碰像素细节（交给 look.c / raster.c）、
@@ -707,9 +707,10 @@ void *dial_gui_event_data(GuiAppImpl *app) {
 
 int64_t dial_gui_widget_set_kind(GuiWidgetImpl *w, int64_t kind) {
     if (!widget_ok(w)) return -1;
-    if (kind < GUI_WIDGET_BOX || kind > GUI_WIDGET_TEXTBOX) {
+    if (kind < GUI_WIDGET_BOX || kind > GUI_WIDGET_PROGRESS) {
         gui_core_set_err(GUI_ERR_ARG,
-                         "控件种类只接受 0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX / 4 TEXTBOX");
+                         "控件种类只接受 0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX / "
+                         "4 TEXTBOX / 5 RADIO / 6 SLIDER / 7 PROGRESS");
         return -1;
     }
     w->kind = (int)kind;
@@ -802,7 +803,7 @@ int64_t dial_gui_widget_draw(GuiWidgetImpl *root, GuiPainterImpl *p) {
 }
 
 /* ====================================================================== *
- * 输入层（gui.diali 末段，14 个追加 extern fn：含 dial_gui_event_mods）
+ * 输入层（追加当轮的 gui.diali 末段，14 个追加 extern fn：含 dial_gui_event_mods）
  *
  * 与前三层的硬边界一致：句柄校验 → 调 dial_gui_input.c 的纯 C 逻辑，或
  * 读 / 写 GuiWidgetImpl 上的 C 侧纯值。不碰像素细节、不碰平台 API、
@@ -898,4 +899,105 @@ int64_t dial_gui_widget_key(GuiWidgetImpl *root, int64_t kind, int64_t key,
     }
     gui_core_ok();
     return (int64_t)r;   /* 0 无变化 / 1 文本或光标变化 / 2 焦点变化 / 3 Enter */
+}
+
+/* ====================================================================== *
+ * 第 5 层：主题层 + 控件扩展（gui.diali 末段，11 个追加 extern fn）
+ *
+ * 与前四层硬边界一致：句柄校验 → 调 dial_gui_theme.c 的颜色表 / 读写
+ * GuiWidgetImpl 上的 C 侧纯值。不碰像素细节（交给 look.c / raster.c）、
+ * 不碰平台 API、绝不反向调用 Dial 函数。旧 109 个包装零改动，
+ * abi = 6 / version = 1.10.0 / GuiWidgetEvent 104 字节布局全部不变。
+ *
+ * Fail-Fast（§20）：role 越界 / 颜色高 32 位非 0 / value 越界 / 值域倒置 /
+ * 值域过大一律返回 -1 并写错误槽，绝不静默截断或溢出。
+ * ====================================================================== */
+
+/* ---- 主题颜色表（进程级静态，GUI 单线程事件循环无需加锁）-------------- */
+
+int64_t dial_gui_theme_role_count(void) {
+    gui_core_ok();
+    return (int64_t)gui_theme_role_count();
+}
+int64_t dial_gui_theme_get(int64_t role) {
+    int64_t c = gui_theme_get((int)role);
+    if (c < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "主题角色越界（合法范围 0..13）");
+        return -1;
+    }
+    gui_core_ok();
+    return c;
+}
+int64_t dial_gui_theme_set(int64_t role, int64_t color) {
+    if (role < 0 || role >= GUI_THEME_ROLE_COUNT) {
+        gui_core_set_err(GUI_ERR_ARG, "主题角色越界（合法范围 0..13）");
+        return -1;
+    }
+    if (color < 0 || color > 0xFFFFFFFFLL) {
+        gui_core_set_err(GUI_ERR_ARG,
+                         "主题颜色须为 0..0xFFFFFFFF 的 0xAARRGGBB（高 32 位必须为 0）");
+        return -1;
+    }
+    if (gui_theme_set((int)role, (gui_color_t)color) < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "主题颜色覆写失败");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_theme_reset(void) {
+    gui_theme_reset();
+    gui_core_ok();
+    return 0;
+}
+
+/* ---- 控件值 / 值域 / 单选组（纯值读写）-------------------------------- */
+
+int64_t dial_gui_widget_value(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->value : -1;
+}
+int64_t dial_gui_widget_set_value(GuiWidgetImpl *w, int64_t v) {
+    if (!widget_ok(w)) return -1;
+    if (v < w->vmin || v > w->vmax) {
+        gui_core_set_err(GUI_ERR_ARG,
+                         "控件值越出 [vmin, vmax]，明确拒绝而非静默 clamp");
+        return -1;
+    }
+    w->value = (int)v;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_set_range(GuiWidgetImpl *w, int64_t lo, int64_t hi) {
+    if (!widget_ok(w)) return -1;
+    if (lo > hi) {
+        gui_core_set_err(GUI_ERR_ARG, "值域非法：lo 不得大于 hi");
+        return -1;
+    }
+    /* 值域跨度须能安全装进 int（SLIDER 绘制用整数比例），明确拒绝溢出。 */
+    if (lo < -1000000000LL || hi > 1000000000LL) {
+        gui_core_set_err(GUI_ERR_ARG, "值域绝对值过大（须在 ±1000000000 内）");
+        return -1;
+    }
+    w->vmin = (int)lo;
+    w->vmax = (int)hi;
+    /* 已有 value 按新值域 clamp，getter 立刻可读回（不是不可见损坏）。*/
+    if (w->value < w->vmin) w->value = w->vmin;
+    if (w->value > w->vmax) w->value = w->vmax;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_min(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->vmin : -1;
+}
+int64_t dial_gui_widget_max(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->vmax : -1;
+}
+int64_t dial_gui_widget_set_group(GuiWidgetImpl *w, int64_t g) {
+    if (!widget_ok(w)) return -1;
+    w->group = g;      /* 纯值键，0 = 未分组；任意 int64 都合法 */
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_group(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->group : -1;
 }

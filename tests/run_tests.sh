@@ -54,14 +54,17 @@
 #      （MD5/SHA-1/SHA-256/SHA-512/SHA3-256，标准向量核对）+ Base64 编解码 +
 #      HMAC-SHA256，string 与 bytes 双入口、含内嵌 NUL 的二进制数据、严格错误路径，
 #      三平台零警告构建（v1.04 增补）。
-#   AA. 手搓 GUI 四层：地基 + 控件框架 + 成品控件外观 + 输入层，gui.dialpkg
-#      端到端——三平台真实现（X11+XShm+XRender / Win32 GDI）/ 零链接期依赖
-#      （dlopen / LoadLibraryA）/ 纯内存光栅化器像素级 CRC 回归 / 覆盖面积 AA /
-#      内置点阵与 TrueType 双字体 / Widget 树 + 绝对·VBox·HBox 布局 + 命中测试
-#      + packed 事件纯值块（sizeof/offsetof 双向锁死 / string_from_cstr 复制成 ARC）/
+#   AA. 手搓 GUI 五层：地基 + 控件框架 + 成品控件外观 + 输入层 +
+#      主题层/控件扩展，gui.dialpkg 端到端——三平台真实现
+#      （X11+XShm+XRender / Win32 GDI）/ 零链接期依赖（dlopen / LoadLibraryA）/
+#      纯内存光栅化器像素级 CRC 回归 / 覆盖面积 AA / 内置点阵与 TrueType
+#      双字体 / Widget 树 + 绝对·VBox·HBox 布局 + 命中测试 + packed 事件纯值块
+#      （sizeof/offsetof 双向锁死 / string_from_cstr 复制成 ARC）/
 #      Label·Button·CheckBox 默认主题四态绘制 + 纯值事件推进（use_gui_look.dial）/
 #      TextBox 单行编辑·选区·UTF-8 边界·焦点环·max_len·统一功能键码
-#      （use_gui_input.dial）/ Xvfb 实窗上屏 + **XTest 真实鼠标/键盘注入**
+#      （use_gui_input.dial）/ 14 角色可覆写主题色 set·get·reset 幂等 +
+#      Radio 同组互斥 / Slider 按 x 设值 / ProgressBar 只读 / 值域 Fail-Fast
+#      （use_gui_theme.dial）/ Xvfb 实窗上屏 + **XTest 真实鼠标/键盘注入**
 #      （xtest_inject.sh：点击聚焦 / 落字 / Tab / Shift+Tab / 按钮激活）/ 无显示
 #      环境自动降级为「窗口路径明确跳过」并如实标注（v1.10 增补）。
 set -u
@@ -1923,9 +1926,10 @@ else zbad "use_crypto.dial 编译失败"; tail -8 "${TMP}/z_comp.log"; fi
 zpass "crypto 包已卸载"
 
 # ---------------------------------------------------------------------------
-# AA) 手搓 GUI 地基 + 控件框架层 + 成品控件外观层：gui.dialpkg 端到端（v1.10 增补）
+# AA) 手搓 GUI 五层：地基 + 控件框架 + 成品外观 + 输入层 + 主题层/控件扩展
+#     （gui.dialpkg 端到端，v1.10 增补）
 # ---------------------------------------------------------------------------
-echo "== AA) 手搓 GUI 四层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制 / TextBox 输入与焦点链 / XTest 实窗注入，v1.10 增补） =="
+echo "== AA) 手搓 GUI 五层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制 / TextBox 输入与焦点链 / 主题色可覆写 + Radio·Slider·Progress / XTest 实窗注入，v1.10 增补） =="
 aapass() { echo "  ✅ $1"; }
 aabad()  { echo "  ❌ $1"; fail=1; }
 
@@ -2057,6 +2061,34 @@ if "$DIALC" build tests/pkg/use_gui_input.dial -o "${TMP}/use_gui_input" >"${TMP
     fi
 else aabad "use_gui_input.dial 编译失败"; tail -16 "${TMP}/aa_icomp.log"; fi
 
+# 4e) 第 5 层 demo：14 角色可覆写主题色（set / get / reset 幂等 / 非法值
+#     Fail-Fast）+ 八种控件种类 + Radio 同组互斥 / Slider 按局部 x 设值 /
+#     ProgressBar 只读 / 值域与值 Fail-Fast / 主题改色逐像素生效；独立
+#     offscreen 画布，绝不触碰前四个 demo 的 CRC 基准。
+if "$DIALC" build tests/pkg/use_gui_theme.dial -o "${TMP}/use_gui_theme" >"${TMP}/aa_tcomp.log" 2>&1; then
+    aapass "use_gui_theme.dial（主题层 + 控件扩展）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_theme" >"${TMP}/aa_tnodisplay.log" 2>&1
+    aa_t_no_exit=$?
+    aa_t_bad=$(grep -c ' = bad' "${TMP}/aa_tnodisplay.log" || true)
+    if [ "$aa_t_no_exit" -eq 0 ] && [ "$aa_t_bad" -eq 0 ] \
+       && grep -qF 'theme_role_count = ok' "${TMP}/aa_tnodisplay.log" \
+       && grep -qF 'theme_reset_idempotent = ok' "${TMP}/aa_tnodisplay.log" \
+       && grep -qF 'theme_widgets_crc_stable = ok' "${TMP}/aa_tnodisplay.log" \
+       && grep -qF 'theme_recolor_crc_differs = ok' "${TMP}/aa_tnodisplay.log" \
+       && grep -qF 'theme_radio_group_exclusive = ok' "${TMP}/aa_tnodisplay.log" \
+       && grep -qF 'theme_slider_monotonic = ok' "${TMP}/aa_tnodisplay.log" \
+       && grep -qF 'theme_progress_readonly = ok' "${TMP}/aa_tnodisplay.log" \
+       && grep -qF 'theme_value_clamped_into_new_range = ok' "${TMP}/aa_tnodisplay.log" \
+       && grep -qF 'theme_bad_kind_rejected = ok' "${TMP}/aa_tnodisplay.log" \
+       && grep -qF 'theme_window = skipped [' "${TMP}/aa_tnodisplay.log" \
+       && grep -qF 'theme_done = true' "${TMP}/aa_tnodisplay.log"; then
+        aapass "无 DISPLAY：14 角色主题 set/get/reset 幂等 / 八种控件 / Radio 互斥 / Slider 设值 / Progress 只读 / 值域 Fail-Fast 全绿"
+    else
+        aabad "主题层无 DISPLAY 路径断言失败（exit=$aa_t_no_exit bad=$aa_t_bad）"
+        tail -40 "${TMP}/aa_tnodisplay.log"
+    fi
+else aabad "use_gui_theme.dial 编译失败"; tail -16 "${TMP}/aa_tcomp.log"; fi
+
 # 5) 有 Xvfb 时验证真实窗口（XShm 离屏 + XRender 合成 + 上屏 / 过滤 / 事件循环）；
 #    无 Xvfb 的环境如实打印跳过，绝不把「未验证」写成「通过」。
 if command -v xvfb-run >/dev/null 2>&1; then
@@ -2164,6 +2196,28 @@ if command -v xvfb-run >/dev/null 2>&1 && command -v xdotool >/dev/null 2>&1; th
     fi
 else
     echo "  ⚠️  本环境无 xvfb-run / xdotool：XTest 真实事件注入未实机验证（如实标注，不伪装通过）"
+fi
+
+# 5e) 第 5 层实窗：把含八种控件的树挂到窗口、画进窗口画布并 flush 上屏。
+if command -v xvfb-run >/dev/null 2>&1; then
+    if xvfb-run -a -s "-screen 0 1024x768x24 +extension MIT-SHM +extension RENDER" \
+        "${TMP}/use_gui_theme" >"${TMP}/aa_txvfb.log" 2>&1; then
+        aa_t_bad2=$(grep -c ' = bad' "${TMP}/aa_txvfb.log" || true)
+        if [ "$aa_t_bad2" -eq 0 ] \
+           && grep -qF 'theme_window = ok' "${TMP}/aa_txvfb.log" \
+           && grep -qF 'theme_window_set_root = ok' "${TMP}/aa_txvfb.log" \
+           && grep -qF 'theme_window_draw = ok' "${TMP}/aa_txvfb.log" \
+           && grep -qF 'theme_window_flush = ok' "${TMP}/aa_txvfb.log" \
+           && grep -qF 'theme_done = true' "${TMP}/aa_txvfb.log"; then
+            aapass "Xvfb 实窗：主题层八种控件整树绘制 + flush 上屏全通过"
+        else
+            aabad "主题层 Xvfb 实窗断言失败（bad=$aa_t_bad2）"; tail -30 "${TMP}/aa_txvfb.log"
+        fi
+    else
+        aabad "Xvfb 下 use_gui_theme 运行失败"; tail -20 "${TMP}/aa_txvfb.log"
+    fi
+else
+    echo "  ⚠️  本环境无 xvfb-run：主题层实窗路径未实机验证（如实标注，不伪装通过）"
 fi
 
 # 6) 清理：卸包，避免污染后续测试与用户环境。

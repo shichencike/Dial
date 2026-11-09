@@ -60,6 +60,7 @@ GuiWidgetImpl *gui_widget_tree_new(int w, int h) {
     r->req_x = 0; r->req_y = 0;
     r->req_w = w; r->req_h = h;
     r->x = 0; r->y = 0; r->w = w; r->h = h;
+    r->vmax = 100;          /* SLIDER / PROGRESS 默认值域 0..100 */
     r->next_root = g_roots;
     g_roots = r;
     return r;
@@ -83,11 +84,50 @@ GuiWidgetImpl *gui_widget_add(GuiWidgetImpl *parent) {
     c->visible = 1;
     c->layout = GUI_LAYOUT_ABS;
     c->parent = parent;
+    c->vmax = 100;          /* SLIDER / PROGRESS 默认值域 0..100 */
     /* 追加到末尾：保持用户加入顺序，命中测试后加子优先与绘制层序一致。 */
     GuiWidgetImpl **pp = &parent->first_child;
     while (*pp) pp = &(*pp)->next_sibling;
     *pp = c;
     return c;
+}
+
+/* ---- 主题层配套：RADIO 同组互斥 / SLIDER 按坐标设值（纯 C 树操作）------ *
+ * 两条都由 look.c 的 RELEASE 分支调用，只读写 GuiWidgetImpl 上的 C 侧纯值，
+ * 绝不碰平台 API、绝不 C → Dial 反向回调。 */
+
+static void radio_clear_group(GuiWidgetImpl *n, const GuiWidgetImpl *hit) {
+    if (!n) return;
+    if (n != hit && n->kind == GUI_WIDGET_RADIO && n->group == hit->group)
+        n->checked = 0;
+    for (GuiWidgetImpl *c = n->first_child; c; c = c->next_sibling)
+        radio_clear_group(c, hit);
+}
+
+void gui_widget_radio_select(GuiWidgetImpl *root, GuiWidgetImpl *hit) {
+    if (!root || !hit) return;
+    hit->checked = 1;
+    /* group == 0 表示未分组：各自独立，不清其它 RADIO。 */
+    if (hit->group != 0) radio_clear_group(root, hit);
+}
+
+int gui_widget_slider_set_from_x(GuiWidgetImpl *hit, int local_x) {
+    if (!hit || hit->kind != GUI_WIDGET_SLIDER) return 0;
+    int lo = hit->vmin, hi = hit->vmax;
+    if (hi <= lo) return 0;
+    int track = hit->w - 8;          /* 与 look.c 绘制的轨道内宽一致 */
+    if (track <= 0) return 0;
+    int lx = local_x - 4;            /* 轨道左内边距 4px */
+    if (lx < 0) lx = 0;
+    if (lx > track) lx = track;
+    /* 纯整数比例，四舍五入到最近值；用 int64 中转避免中间乘积溢出。 */
+    int span = hi - lo;
+    int v = lo + (int)(((int64_t)lx * span + track / 2) / track);
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    if (v == hit->value) return 0;
+    hit->value = v;
+    return 1;
 }
 
 int gui_widget_remove(GuiWidgetImpl *w) {

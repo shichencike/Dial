@@ -22,8 +22,9 @@
 
 ## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）
 
-**主题：手搓 GUI 四层——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
-+ 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）；
+**主题：手搓 GUI 五层——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
++ 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
++ 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）；
 并修复 `http.dialpkg` 三处 Fail-Fast / 目标平台可用性缺陷**（见下文 `### Fixed`）。
 详见 [README §38](README.md#38-手搓-gui-地基包guidialpkg) 与 README §37.10。
 
@@ -38,21 +39,23 @@
 > **`[v1.10]` 段的「A–Z 二十六组 / 499 ✅」是 `v1.1` 标签发布时的验收快照，
 > 保持原文不改**；地基层增量把回归扩到 **A–Z + AA 二十七组 / 507 ✅**，
 > 控件框架层再给 AA 组增 3 条断言到 **510 ✅**，成品控件外观层又增 3 条到
-> **513 ✅**，上一轮 `http.dialpkg` 缺陷修复再给 W 组增 4 条断言到 **517 ✅**，
-> 本轮 GUI 输入层又给 AA 组增 3 条断言到 **520 ✅**。
-> 六者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
+> **513 ✅**，再上一轮 `http.dialpkg` 缺陷修复给 W 组增 4 条断言到 **517 ✅**，
+> 上一轮 GUI 输入层给 AA 组增 3 条断言到 **520 ✅**，本轮主题层 / 控件扩展
+> 又给 AA 组增 3 条断言到 **523 ✅**。
+> 七者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
 
-- **`gui.dialpkg`：手搓 GUI 四层**（README §38）：不用 Qt / GTK / SDL，纯 X11 自绘。
+- **`gui.dialpkg`：手搓 GUI 五层**（README §38）：不用 Qt / GTK / SDL，纯 C 自绘。
   ① 地基层（窗 + 事件 + 绘图 + 字体，55 个 `extern fn`）；
   ② 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发，
-  28 个）；③ **成品控件外观层**（Label / Button / CheckBox + 内置浅色默认主题 +
-  四态绘制 + 纯值事件推进，12 个）；④ **输入层**（TextBox 单行编辑 / 光标·选区 /
-  焦点链 / 统一功能键码与修饰键，14 个）。共 **109 个 `extern fn`**。
-  **可覆写主题色 / 信号槽 / C→Dial 回调 / 富文本（多行） / IME / 撤销重做 /
-  图片解码仍不进 `.diali` 契约**——把未实现函数写进契约会让用户 `import` 后
-  链接失败，那是制造漂移而非预留接口。
+  28 个）；③ **成品控件外观层**（Label / Button / CheckBox + 主题表驱动四态 +
+  纯值事件推进，12 个）；④ **输入层**（TextBox 单行编辑 / 光标·选区 /
+  焦点链 / 统一功能键码与修饰键，14 个）；⑤ **主题层 / 控件扩展**（14 个可覆写
+  颜色角色 + Radio / Slider / ProgressBar + value / range / group，11 个）。
+  共 **120 个 `extern fn`**。**信号槽 / C→Dial 回调 / 富文本（多行） / IME /
+  撤销重做 / 每控件主题覆写 / 图片解码仍不进 `.diali` 契约**——把未实现函数
+  写进契约会让用户 `import` 后链接失败，那是制造漂移而非预留接口。
 - **自研迷你 2D 光栅化器**：ARGB32 像素缓冲、`source-over` alpha 混合、
   1/2/4/8 档覆盖面积采样抗锯齿、矩形 / 线 / 圆 / 圆环 / 椭圆 / 梯形 / 位图 /
   裁剪 / 像素读写；`dial_gui_painter_crc32()` 提供像素级回归断言。
@@ -138,6 +141,27 @@
     `widget_handle`，断言落字 / 焦点环 / `mods` / 按钮激活 / `flush` 全通过。
     **`libXtst` 只在测试侧使用，包本体 `.a` 仍零平台链接期依赖**；无 `xdotool`
     环境如实打印 `input_xtest_injection = skipped`，不伪装通过。
+- **主题层 / 控件扩展（11 个新 `extern fn`）**：并入 `gui` 包、只追加、旧 109 个
+  签名**一字不动**，`abi = 6` / `version = 1.10.0` / `GuiWidgetEvent` 104 字节
+  布局全部不变。新增 `src/dial_gui_theme.c`（纯 C，零平台符号）与 3 个新控件种类。
+  - **14 个可覆写颜色角色**：进程级静态颜色表（GUI 单线程事件循环，无需加锁），
+    `theme_set(role,color)` / `theme_get(role)` / `theme_reset()` /
+    `theme_role_count()`；默认色值逐字取自 `dial_gui.h` 的 `GUI_THEME_*` 宏，
+    `look.c` 全部配色改走 `gui_theme_color(role)`，因此 `theme_reset()` 后逐像素
+    CRC 与引入 setter 之前完全一致，`look_crc_normal = 3884455222` **不漂移**。
+    角色编号只准末尾追加，跨时点稳定（新增 `11 TRACK` / `12 FILL` / `13 KNOB`）。
+  - **Radio / Slider / ProgressBar**：`5 RADIO` 圆圈 + 选中点 + 文本，RELEASE
+    选中且 `group != 0` 时同组互斥（`0` = 各自独立），复用 `checked`；
+    `6 SLIDER` 轨道 + 已填充 + 滑块，RELEASE 按命中点局部 `x` 的纯整数比例设
+    `value` 并 clamp 进 `[vmin, vmax]`；`7 PROGRESS` 轨道 + 边框 + 按比例填充，
+    **只读**、RELEASE 不激活。默认值域 `0..100`，全部纯整数几何、三平台逐像素一致。
+  - **Fail-Fast（§20）**：`role` 越界 / 颜色高 32 位非 0 / `value` 越界 /
+    值域倒置 / 值域过大一律返回 `-1` 并写错误槽，绝不静默截断；`set_range`
+    成功后把已有 `value` clamp 进新值域（getter 立刻可读回，非不可见损坏）。
+  - **回归**：新增 `tests/pkg/use_gui_theme.dial`（独立 offscreen 画布、关 AA），
+    逐像素断言改色生效 / `theme_reset` 幂等 / 八种控件绘制确定性 / Radio 互斥 /
+    Slider 单调 / Progress 只读 / 值域 Fail-Fast；AA 组 +3 条 `aapass`，
+    Xvfb 实窗八种控件整树绘制 + `flush` 上屏全通过。
 
 ### Fixed
 
@@ -175,16 +199,18 @@
   端点、`http2_test_server.py` 的 `X-Long-Len` 回显头，以及 `use_http.dial` /
   `use_http2.dial` / `use_https.dial`（Termux 模式）里的断言。全量回归由
   **513 ✅ 增至 517 ✅**（上一轮时点），组数仍为 A–Z + AA 二十七组；
-  **本轮** GUI 输入层再由 **517 ✅ 增至 520 ✅**。
+  上一轮 GUI 输入层由 **517 ✅ 增至 520 ✅**；**本轮**主题层 / 控件扩展再由
+  **520 ✅ 增至 523 ✅**。
 - `tests/run_tests.sh` 的 **AA 组**（`gui.dialpkg` 端到端）：三平台构建、零警告检查、
   `nm -u` 符号检查、`pack` / `install`、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
   （`window = ok` / `window_backend = x11/xshm/xrender` / `window_flush = ok` /
   `quit_event = ok`）、卸载。全量从 A–Z 二十六组扩为 **A–Z + AA 二十七组**。
   框架层那一轮给 AA 组增 3 条断言（`use_gui_widget.dial` 编译 / 无 DISPLAY 控件层 /
   Xvfb 挂树 + packed 事件块），外观层再增 3 条（`use_gui_look.dial` 编译 /
-  无 DISPLAY 四态与 CRC / Xvfb 整树上屏），本轮输入层又增 3 条
+  无 DISPLAY 四态与 CRC / Xvfb 整树上屏），输入层又增 3 条
   （`use_gui_input.dial` 编译 / 无 DISPLAY 编辑·焦点·CRC / Xvfb + XTest 实机注入），
-  `aapass` 由 8 → 11 → 14 → **17 条**。
+  本轮主题层再增 3 条（`use_gui_theme.dial` 编译 / 无 DISPLAY 主题·控件·值域 /
+  Xvfb 八种控件整树上屏），`aapass` 由 8 → 11 → 14 → 17 → **20 条**。
 - 新增 `tests/pkg/use_gui_widget.dial`：与 `use_gui.dial` 完全独立、**不创建
   `GuiPainter`**，因此不触碰 `crc_offscreen = 4007435570` 像素回归基准；
   覆盖 `packed extern struct` 布局 / `string_from_cstr` 的 ARC 复制 /
@@ -202,13 +228,15 @@
   鼠标点击 / 键盘 `hi` / Tab / Shift+Tab，实机断言落字 / 焦点环 / `mods` 含 SHIFT /
   按钮激活 / `flush`。无 `xdotool` 时如实打印 `skipped`，不伪装通过。
 - `packages/gui/` 新增 `src/dial_gui_widget.c`（框架层）、`src/dial_gui_look.c`
-  （外观层）与 `src/dial_gui_input.c`（输入层），`build.sh` 三平台 `SRCS` 统一
-  追加三者；`gui.diali` 三轮共追加 **54 个单行 `extern fn`**（28 + 12 + 14）与
-  `GuiWidget` 句柄并改写四层范围声明（合计 109 个）；`dial_gui.h` 增加 104 字节
-  packed 事件块与 `_Static_assert`、全局根链表防悬垂、控件外观层 / 输入层字段与
-  内置主题色、统一键码常量；`dial_gui_core.c` 追加 14 个 FFI 包装（含
-  `dial_gui_event_mods`）与 `gui_core_emit` 的 QUIT 清零 `ev_mods`；两后端 `pump`
-  把 `X11 KeySym` / `Win32 VK` 映射到同一套键码并写入修饰键状态。
+  （外观层）、`src/dial_gui_input.c`（输入层）与 `src/dial_gui_theme.c`（主题层），
+  `build.sh` 三平台 `SRCS` 统一追加四者；`gui.diali` 四轮共追加 **65 个单行
+  `extern fn`**（28 + 12 + 14 + 11）与 `GuiWidget` 句柄并改写五层范围声明
+  （合计 120 个）；`dial_gui.h` 增加 104 字节 packed 事件块与 `_Static_assert`、
+  全局根链表防悬垂、控件外观层 / 输入层 / 主题层字段（`value` / `vmin` / `vmax` /
+  `group`）、14 个主题角色与默认值宏、统一键码常量；`dial_gui_core.c` 共追加
+  25 个 FFI 包装（14 输入 + 11 主题，含 `dial_gui_event_mods`）与 `gui_core_emit`
+  的 QUIT 清零 `ev_mods`；两后端 `pump` 把 `X11 KeySym` / `Win32 VK` 映射到
+  同一套键码并写入修饰键状态。
 - `.github/workflows/ci.yml`：阶段 8 构建循环与 `dialc pack` 循环加入 `gui`，
   `dist-gui/gui.dialpkg` 归集进 `dist-c11/`，无头 X11 环境准备步骤本轮补装
   `xdotool` / `libxtst6`（XTest 实机注入所需），Release 资产列表加入 `gui.dialpkg`；
@@ -219,7 +247,7 @@
 
 ### 测试与交付
 
-- `bash tests/run_tests.sh` **A–Z + AA 二十七组全套通过（520 ✅ / 0 ❌，AA 组本轮 +3 条）**；
+- `bash tests/run_tests.sh` **A–Z + AA 二十七组全套通过（523 ✅ / 0 ❌，AA 组本轮 +3 条）**；
   Xvfb 实窗 `EXIT=0`，能力串
   `x11/xshm/xrender argb32 filter=best visual_depth=24`，地基层像素 CRC 稳定
   `4007435570`、外观层 `look_crc_normal` 稳定 `3884455222`、输入层
@@ -237,10 +265,18 @@
   在 Xvfb 实窗实机验收**（`xtest_inject.sh`：点击聚焦 / 落字 / Tab·Shift+Tab /
   按钮激活 / `mods` 含 SHIFT 全通过，实测 `keys 2 / focus 2 / mouse 6 / act 2 /
   shift 1`）；无 `xdotool` 环境才如实打印 `input_xtest_injection = skipped`。
+  主题层 / 控件扩展由 `use_gui_theme.dial` 覆盖：14 角色默认值 / 非法 role·颜色
+  Fail-Fast / `set`-`get` 往返 / `theme_reset` 后逐像素 CRC 幂等 / 八种控件
+  绘制确定性 / 改色后 `get_pixel` 生效 / Radio 同组互斥与未分组独立 /
+  Slider 单调且落在值域 / Progress 只读 / 值域与值 Fail-Fast，
+  Xvfb 下八种控件整树绘制 + `flush` 上屏。
 - `tools/cve_check.py` 8/8；语言能力审计 `TOTAL=38 PASS=38 FAIL=0`；
   `check_version` / `check_links` 全通过；`cargo check` 零警告；
-  `http` 包三平台静态库 `bash packages/http/build.sh` 零警告重建，`.diali` 注释
-  变更经 `pack` 重算 SHA256 后 `install` 覆盖成功（`abi = 6` 不变）；
+  `http` 包三平台静态库 `bash packages/http/build.sh` 零警告重建，`gui` 包三平台
+  `bash packages/gui/build.sh` 同样零警告重建（新增 `dial_gui_theme.o`），
+  三份 `.a` 的 `nm -u` 仍无 X11 / XShm / XRender / GDI / XTest 链接期符号；
+  `gui.diali` 追加 11 个 `extern fn`（合计 120）后经 `pack` 重算 SHA256、
+  `install` 同 ABI 覆盖成功（`abi = 6` / `version = 1.10.0` 不变）；
   官网由 `tools/build_web.py` 重新生成并与文档同步。
 - **交付状态**：仅本地提交，未推送、未打标签、未发 Release（遵循本段开头的口径）。
 

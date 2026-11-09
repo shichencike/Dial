@@ -5,7 +5,8 @@
  *   dial_gui_core.c    FFI 包装：句柄生命周期 / 错误槽 / 事件槽 / 调后端 vtable
  *   dial_gui_raster.c  自研 2D 光栅化器 + 内置点阵 + stb_truetype 字形
  *   dial_gui_widget.c  控件框架层：Widget 树 / 布局 / 命中 / packed 事件块（纯 C）
- *   dial_gui_look.c    成品控件外观层：默认主题 / 四态 + TextBox 绘制 / 事件推进（纯 C）
+ *   dial_gui_theme.c   主题层：14 个可覆写颜色角色 / 默认值 / reset（纯 C）
+ *   dial_gui_look.c    成品控件外观层：主题表驱动的四态 + 八种控件绘制 / 事件推进（纯 C）
  *   dial_gui_input.c   输入层：TextBox 编辑 / 光标·选区 / 焦点链 / 键码推进（纯 C）
  *   dial_gui_x11.c     POSIX 后端（X11 + XShm + XRender，dlopen 动态装载）
  *   dial_gui_win32.c   Windows 后端（GDI DIBSection，LoadLibraryA 动态装载）
@@ -175,19 +176,42 @@ struct GuiFontImpl {
 #define GUI_LAYOUT_HBOX  2
 
 /* ---- 成品控件外观层：种类 + 内置浅色默认主题 -------------------------- *
- * 颜色常量写死在 C（gui.diali 里逐条列出色值），本版不暴露 theme setter；
- * Dial 侧只传控件种类 / 文本 / 状态，绘制配色一律由包内部决定，保证三平台
- * 逐像素一致、可被 painter_crc32 稳定断言。 */
-#define GUI_WIDGET_BOX      0
-#define GUI_WIDGET_LABEL    1
-#define GUI_WIDGET_BUTTON   2
-#define GUI_WIDGET_CHECKBOX 3
-#define GUI_WIDGET_TEXTBOX  4   /* 输入层：单行文本编辑（焦点 / 光标 / 选区）*/
+ * 颜色常量是**默认主题色**（g_default[] 的唯一真相源），运行时可由
+ * dial_gui_theme.c 的颜色表按角色覆写；theme_reset() 逐值复位到这些宏。
+ * 默认值与引入 theme setter 之前逐字一致，保证三平台逐像素一致、
+ * painter_crc32 的历史基准（look_crc_normal = 3884455222）不漂移。 */
+#define GUI_WIDGET_BOX       0
+#define GUI_WIDGET_LABEL     1
+#define GUI_WIDGET_BUTTON    2
+#define GUI_WIDGET_CHECKBOX  3
+#define GUI_WIDGET_TEXTBOX   4   /* 输入层：单行文本编辑（焦点 / 光标 / 选区）*/
+#define GUI_WIDGET_RADIO     5   /* 单选按钮：圆圈 + 选中点 + 右侧文本，同组互斥 */
+#define GUI_WIDGET_SLIDER    6   /* 滑块：轨道 + 已填充 + 滑块，RELEASE 按 x 设值 */
+#define GUI_WIDGET_PROGRESS  7   /* 进度条：轨道 + 填充，只读不参与激活 */
 
 /* TextBox 文本按 UTF-8 字节数计上限；0 表示不限（仍受本上限兜底）。*/
 #define GUI_TEXT_MAX_LEN    4096
 
 #define GUI_LOOK_FONT_SIZE  16   /* 内置 8×8 点阵，sc = size/8 = 2，每字符 18×16 */
+
+/* ---- 主题角色（dial_gui_theme_set/get 的 role 取值）-------------------- *
+ * 顺序即 g_default[] 的初始化顺序，新增角色只能追加到末尾，绝不插入中间，
+ * 这样 role 编号跨版本稳定、旧程序读到的色值语义不变。 */
+#define GUI_THEME_ROLE_BG        0
+#define GUI_THEME_ROLE_BORDER    1
+#define GUI_THEME_ROLE_TEXT      2
+#define GUI_THEME_ROLE_TEXT_DIS  3
+#define GUI_THEME_ROLE_BTN       4
+#define GUI_THEME_ROLE_BTN_HOVER 5
+#define GUI_THEME_ROLE_BTN_DOWN  6
+#define GUI_THEME_ROLE_BTN_DIS   7
+#define GUI_THEME_ROLE_CHECK_BG  8
+#define GUI_THEME_ROLE_MARK      9
+#define GUI_THEME_ROLE_SEL      10
+#define GUI_THEME_ROLE_TRACK    11  /* Slider / Progress 轨道底 */
+#define GUI_THEME_ROLE_FILL     12  /* Slider 已填充 / Progress 进度 */
+#define GUI_THEME_ROLE_KNOB     13  /* Slider 滑块 */
+#define GUI_THEME_ROLE_COUNT    14
 
 #define GUI_THEME_BG        ((gui_color_t)0xFFF4F6F9u)  /* 面板 / BOX 背景 */
 #define GUI_THEME_BORDER    ((gui_color_t)0xFFC7CEDAu)  /* 细边框 */
@@ -197,9 +221,12 @@ struct GuiFontImpl {
 #define GUI_THEME_BTN_HOVER ((gui_color_t)0xFFD3E0FAu)  /* 按钮 悬停 */
 #define GUI_THEME_BTN_DOWN  ((gui_color_t)0xFFB2C8F2u)  /* 按钮 按下 */
 #define GUI_THEME_BTN_DIS   ((gui_color_t)0xFFF0F2F5u)  /* 按钮 禁用 */
-#define GUI_THEME_CHECK_BG  ((gui_color_t)0xFFFFFFFFu)  /* 勾选框底 / TextBox 输入底 */
-#define GUI_THEME_MARK      ((gui_color_t)0xFF2F6FE0u)  /* 勾 / 焦点边框 / 光标 / 高亮 */
+#define GUI_THEME_CHECK_BG  ((gui_color_t)0xFFFFFFFFu)  /* 勾选框 / Radio / TextBox 底 */
+#define GUI_THEME_MARK      ((gui_color_t)0xFF2F6FE0u)  /* 勾 / 焦点边框 / 光标 / 高亮 / 选中点 */
 #define GUI_THEME_SEL       ((gui_color_t)0xFFC9DCFBu)  /* TextBox 选区背景 */
+#define GUI_THEME_TRACK     ((gui_color_t)0xFFE2E8F0u)  /* 轨道底（新增角色）*/
+#define GUI_THEME_FILL      ((gui_color_t)0xFF2F6FE0u)  /* 进度填充（与 MARK 同蓝）*/
+#define GUI_THEME_KNOB      ((gui_color_t)0xFFFFFFFFu)  /* 滑块（白底 + MARK 描边）*/
 
 struct GuiWidgetImpl {
     GuiWidgetImpl *parent;
@@ -232,6 +259,11 @@ struct GuiWidgetImpl {
     int  sel_anchor;            /* 选区锚点：与 cursor 相等表示无选区 */
     int  max_len;               /* TextBox 输入上限（字节）；0 = 不限 */
     GuiWidgetImpl *focus;       /* 仅根使用：当前焦点控件（树内裸指针，不进 ARC）*/
+    /* ---- 主题层 / 成品控件扩展（dial_gui_theme.c + look.c）-------------- *
+     * 纯值字段，calloc 已归零；vmax 由 tree_new / add 初始化为 100。 */
+    int  value;                 /* SLIDER / PROGRESS 当前值（默认 0）*/
+    int  vmin, vmax;            /* 值域 [vmin, vmax]（默认 0..100）*/
+    int64_t group;              /* RADIO 组号：非 0 时同组互斥，0 = 各自独立 */
 };
 
 /*
@@ -341,5 +373,22 @@ int            gui_widget_key(GuiWidgetImpl *root, int kind, int key, int mods);
 /* a/b 是 UTF-8 字节偏移，自动 clamp 到字符边界；a==b 表示清选区。*/
 int            gui_widget_select(GuiWidgetImpl *w, int a, int b);
 int            gui_widget_set_cursor(GuiWidgetImpl *w, int pos);
+
+/* ---- 主题层：dial_gui_theme.c（纯 C，三平台共用，无平台符号）---------- *
+ * 进程级静态颜色表，GUI 单线程事件循环无需加锁；默认值逐字取自 GUI_THEME_*，
+ * reset 后逐像素 CRC 与引入 setter 之前一致。role 取 GUI_THEME_ROLE_*。 */
+gui_color_t gui_theme_color(int role);
+int         gui_theme_set(int role, gui_color_t c);
+int64_t     gui_theme_get(int role);
+void        gui_theme_reset(void);
+int         gui_theme_role_count(void);
+
+/* ---- 成品控件扩展：值域 / 值 / 单选组（look.c + core.c）---------------- *
+ * 与前四层的硬边界一致：只读写 GuiWidgetImpl 上的 C 侧纯值，绝不碰平台 API、
+ * 绝不 C → Dial 反向回调。 */
+/* RADIO 同组互斥：选中 hit 时清掉同组其它 RADIO 的 checked。 */
+void gui_widget_radio_select(GuiWidgetImpl *root, GuiWidgetImpl *hit);
+/* SLIDER 按命中点局部 x 比例设值并 clamp 进 [vmin, vmax]；返回 1 有变化。 */
+int  gui_widget_slider_set_from_x(GuiWidgetImpl *hit, int local_x);
 
 #endif /* DIAL_GUI_H */

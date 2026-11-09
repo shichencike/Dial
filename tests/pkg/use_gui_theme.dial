@@ -1,0 +1,194 @@
+// gui.dialpkg 第 5 层：可覆写主题色 + Radio / Slider / ProgressBar 端到端用例
+// （AA 组，v1.10 未发布增补）。
+//
+// 与 use_gui.dial / use_gui_widget.dial / use_gui_look.dial / use_gui_input.dial
+// 完全独立：用**自己的** offscreen GuiPainter，绝不触碰
+// crc_offscreen = 4007435570 与 look_crc_normal = 3884455222 两条像素基准。
+//
+// 主题是进程级静态表，但每个 demo 都是独立进程，天然从默认值起步；
+// 本用例结束前仍显式 theme_reset()，把「不污染」做成可断言的行为。
+//
+// 绝不注册回调：Dial 侧用 widget_handle(root, kind, x, y, button) 喂**纯值
+// 事件**，C 侧只推进 C 侧纯值；C 管 C 的，ARC 管 ARC 的，零反向回调。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn rgba(a: int, r: int, g: int, b: int): int {
+    return (a * 16777216) + (r * 65536) + (g * 256) + b;
+}
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+fn main(): int {
+    // ---- 0) 主题角色表：默认值 / 非法值 Fail-Fast / set-get 往返 --------
+    expect_int(dial_gui_theme_role_count(), 14, "theme_role_count");
+    // 大整数一律用 rgba() 现算，绝不写 > 2^31 的字面量（解析边界）。
+    expect(dial_gui_theme_get(0) == rgba(255, 244, 246, 249), "theme_default_bg");
+    expect(dial_gui_theme_get(1) == rgba(255, 199, 206, 218), "theme_default_border");
+    expect(dial_gui_theme_get(9) == rgba(255, 47, 111, 224), "theme_default_mark");
+    expect(dial_gui_theme_get(11) == rgba(255, 226, 232, 240), "theme_default_track");
+    expect(dial_gui_theme_get(12) == rgba(255, 47, 111, 224), "theme_default_fill");
+    expect(dial_gui_theme_get(13) == rgba(255, 255, 255, 255), "theme_default_knob");
+
+    expect_int(dial_gui_theme_get(-1), -1, "theme_bad_role_neg");
+    expect_int(dial_gui_theme_get(14), -1, "theme_bad_role_14");
+    expect_int(dial_gui_theme_set(14, 0), -1, "theme_set_bad_role");
+    var over32: int = rgba(255, 255, 255, 255) + 1;   // 0x100000000，高 32 位非 0
+    expect_int(dial_gui_theme_set(0, over32), -1, "theme_set_bad_color_overflow");
+    expect_int(dial_gui_theme_set(0, -1), -1, "theme_set_bad_color_neg");
+    dial_gui_clear_error();
+
+    expect_int(dial_gui_theme_set(4, rgba(255, 200, 10, 20)), 0, "theme_set_btn");
+    expect(dial_gui_theme_get(4) == rgba(255, 200, 10, 20), "theme_get_roundtrip");
+    expect_int(dial_gui_theme_reset(), 0, "theme_reset_ok");
+    expect(dial_gui_theme_get(4) == rgba(255, 231, 236, 244), "theme_reset_restores_default");
+
+    // ---- 1) 独立纯内存树 + 独立画布（关 AA，逐像素确定性）----------------
+    var root: GuiWidget = dial_gui_widget_tree(320, 200);
+    expect(!is_null(root), "theme_tree_new");
+    var btn: GuiWidget = dial_gui_widget_add(root);
+    var r1: GuiWidget = dial_gui_widget_add(root);
+    var r2: GuiWidget = dial_gui_widget_add(root);
+    var r3: GuiWidget = dial_gui_widget_add(root);
+    var sl: GuiWidget = dial_gui_widget_add(root);
+    var pr: GuiWidget = dial_gui_widget_add(root);
+
+    // 绝对布局：每个控件几何固定，命中坐标可精确断言
+    dial_gui_widget_set_rect(btn, 20, 20, 120, 40);
+    dial_gui_widget_set_rect(r1, 20, 70, 120, 40);
+    dial_gui_widget_set_rect(r2, 20, 115, 120, 40);
+    dial_gui_widget_set_rect(r3, 160, 70, 120, 40);
+    dial_gui_widget_set_rect(sl, 20, 160, 200, 30);
+    dial_gui_widget_set_rect(pr, 230, 160, 70, 30);
+    expect_int(dial_gui_widget_layout_apply(root, 320, 200), 0, "theme_layout_apply");
+
+    // 八种控件种类（0..7 合法，8 越界明确拒绝）
+    expect_int(dial_gui_widget_set_kind(btn, 2), 0, "theme_kind_button");
+    expect_int(dial_gui_widget_set_kind(r1, 5), 0, "theme_kind_radio");
+    expect_int(dial_gui_widget_set_kind(r2, 5), 0, "theme_kind_radio2");
+    expect_int(dial_gui_widget_set_kind(r3, 5), 0, "theme_kind_radio3");
+    expect_int(dial_gui_widget_set_kind(sl, 6), 0, "theme_kind_slider");
+    expect_int(dial_gui_widget_set_kind(pr, 7), 0, "theme_kind_progress");
+    expect_int(dial_gui_widget_kind(sl), 6, "theme_kind_readback");
+    expect_int(dial_gui_widget_set_kind(pr, 8), -1, "theme_bad_kind_rejected");
+    dial_gui_clear_error();
+
+    var p: GuiPainter = dial_gui_painter_offscreen(320, 200);
+    expect(!is_null(p), "theme_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "theme_set_aa_off");
+
+    // ---- 2) 默认主题绘制：CRC 稳定 + 主题改色真生效 + reset 幂等 --------
+    expect_int(dial_gui_widget_draw(root, p), 0, "theme_draw_normal");
+    var crc0: int = dial_gui_painter_crc32(p);
+    expect(dial_gui_get_pixel(p, 30, 30) == rgba(255, 231, 236, 244),
+           "theme_btn_bg_default");
+    // 画两次 CRC 必须逐像素一致（八种控件全部纯整数绘制）
+    expect_int(dial_gui_widget_draw(root, p), 0, "theme_draw_again");
+    expect(dial_gui_painter_crc32(p) == crc0, "theme_widgets_crc_stable");
+
+    expect_int(dial_gui_theme_set(4, rgba(255, 200, 10, 20)), 0, "theme_recolor_btn");
+    expect_int(dial_gui_widget_draw(root, p), 0, "theme_draw_recolored");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect(crc1 != crc0, "theme_recolor_crc_differs");
+    expect(dial_gui_get_pixel(p, 30, 30) == rgba(255, 200, 10, 20),
+           "theme_btn_bg_recolored");
+    // 换掉轨道色，断言 Slider 轨道像素跟着变（证明 14 个角色全走主题表）
+    expect_int(dial_gui_theme_set(11, rgba(255, 12, 34, 56)), 0, "theme_recolor_track");
+    expect_int(dial_gui_widget_draw(root, p), 0, "theme_draw_track_recolored");
+    expect(dial_gui_get_pixel(p, 100, 173) == rgba(255, 12, 34, 56),
+           "theme_slider_track_recolored");
+
+    expect_int(dial_gui_theme_reset(), 0, "theme_reset_before_crc");
+    expect_int(dial_gui_widget_draw(root, p), 0, "theme_draw_after_reset");
+    var crc2: int = dial_gui_painter_crc32(p);
+    expect(crc2 == crc0, "theme_reset_idempotent");
+    expect(dial_gui_get_pixel(p, 30, 30) == rgba(255, 231, 236, 244),
+           "theme_btn_bg_restored");
+
+    // ---- 3) RADIO 同组互斥 / 未分组独立 ---------------------------------
+    expect_int(dial_gui_widget_set_group(r1, 1), 0, "theme_group_r1");
+    expect_int(dial_gui_widget_set_group(r2, 1), 0, "theme_group_r2");
+    expect_int(dial_gui_widget_set_group(r3, 0), 0, "theme_group_r3_independent");
+    expect_int(dial_gui_widget_group(r1), 1, "theme_group_readback");
+
+    expect_int(dial_gui_widget_handle(root, 2, 30, 90, 1), 1, "theme_radio1_activated");
+    expect_int(dial_gui_widget_checked(r1), 1, "theme_radio1_on");
+    expect_int(dial_gui_widget_checked(r2), 0, "theme_radio2_off");
+    expect_int(dial_gui_widget_handle(root, 2, 30, 135, 1), 1, "theme_radio2_activated");
+    expect_int(dial_gui_widget_checked(r1), 0, "theme_radio_group_exclusive");
+    expect_int(dial_gui_widget_checked(r2), 1, "theme_radio2_on");
+    // group == 0 的 r3 选中后，不应影响 group 1 的 r2
+    expect_int(dial_gui_widget_handle(root, 2, 170, 90, 1), 1, "theme_radio3_activated");
+    expect_int(dial_gui_widget_checked(r3), 1, "theme_radio3_on");
+    expect_int(dial_gui_widget_checked(r2), 1, "theme_radio_independent_group");
+
+    // ---- 4) SLIDER 按局部 x 设值（纯整数比例，clamp 进值域）------------
+    expect_int(dial_gui_widget_min(sl), 0, "theme_slider_default_min");
+    expect_int(dial_gui_widget_max(sl), 100, "theme_slider_default_max");
+    expect_int(dial_gui_widget_handle(root, 2, 30, 175, 1), 1, "theme_slider_left_activated");
+    var v_left: int = dial_gui_widget_value(sl);
+    expect_int(dial_gui_widget_handle(root, 2, 200, 175, 1), 1, "theme_slider_right_activated");
+    var v_right: int = dial_gui_widget_value(sl);
+    expect(v_right > v_left, "theme_slider_monotonic");
+    expect(v_left >= 0 and v_right <= 100, "theme_slider_in_range");
+
+    // ---- 5) 值域 / 值 Fail-Fast（绝不静默截断或溢出）--------------------
+    // 先把第 4 段交互设出的值归零（当前值域 0..100，0 合法），改值域后
+    // 才会真正走到 clamp 分支，断言才有意义。
+    expect_int(dial_gui_widget_set_value(sl, 0), 0, "theme_set_value_zero");
+    expect_int(dial_gui_widget_set_value(sl, 101), -1, "theme_value_over_max_rejected");
+    expect_int(dial_gui_widget_set_value(sl, -1), -1, "theme_value_under_min_rejected");
+    expect_int(dial_gui_widget_set_range(sl, 10, 5), -1, "theme_bad_range_rejected");
+    dial_gui_clear_error();
+    expect_int(dial_gui_widget_set_range(sl, 50, 150), 0, "theme_set_range_ok");
+    expect_int(dial_gui_widget_value(sl), 50, "theme_value_clamped_into_new_range");
+    expect_int(dial_gui_widget_min(sl), 50, "theme_min_updated");
+    expect_int(dial_gui_widget_max(sl), 150, "theme_max_updated");
+    expect_int(dial_gui_widget_set_value(sl, 100), 0, "theme_set_value_in_new_range");
+    expect_int(dial_gui_widget_value(sl), 100, "theme_value_roundtrip");
+
+    // ---- 6) PROGRESS 只读：RELEASE 不激活、value 不变 -------------------
+    expect_int(dial_gui_widget_set_value(pr, 75), 0, "theme_progress_set_value");
+    expect_int(dial_gui_widget_handle(root, 2, 250, 175, 1), 0,
+               "theme_progress_readonly");
+    expect_int(dial_gui_widget_value(pr), 75, "theme_progress_value_unchanged");
+
+    // ---- 7) 真实窗口上屏（需要 DISPLAY / Xvfb）--------------------------
+    var app: GuiApp = dial_gui_app_new();
+    if (is_null(app)) {
+        print("theme_window = skipped [" + dial_gui_last_error_msg() + "]");
+        dial_gui_painter_free(p);
+        dial_gui_widget_tree_free(root);
+        dial_gui_theme_reset();
+        print("theme_done = true");
+        return 0;
+    }
+    var win: GuiWindow = dial_gui_window_new(app, "Dial GUI Theme", 320, 200);
+    if (is_null(win)) {
+        dial_gui_app_free(app);
+        dial_gui_painter_free(p);
+        dial_gui_widget_tree_free(root);
+        dial_gui_theme_reset();
+        print("theme_window = skipped [窗口创建失败]");
+        print("theme_done = true");
+        return 0;
+    }
+    var wp: GuiPainter = dial_gui_window_painter(win);
+    expect_int(dial_gui_set_aa(wp, 1), 0, "theme_window_aa");
+    expect_int(dial_gui_window_set_root(win, root), 0, "theme_window_set_root");
+    expect_int(dial_gui_widget_draw(root, wp), 0, "theme_window_draw");
+    expect_int(dial_gui_window_flush(win), 0, "theme_window_flush");
+    dial_gui_window_close(win);               // 挂窗后树归窗口释放
+    dial_gui_app_free(app);
+    dial_gui_painter_free(p);                 // offscreen 画布独立释放
+    dial_gui_theme_reset();
+    print("theme_window = ok");
+    print("theme_done = true");
+    return 0;
+}

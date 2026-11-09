@@ -1,5 +1,6 @@
 // gui.dialpkg —— 手写 GUI（窗 / 事件 / 2D 绘图 / Widget 树 / 布局 / 命中测试 /
-// 主动事件分发 / 成品控件外观 / TextBox 输入与焦点链），Dial 语言接口签名
+// 主动事件分发 / 成品控件外观 / TextBox 输入与焦点链 / 可覆写主题色 /
+// Radio·Slider·ProgressBar），Dial 语言接口签名
 //
 // 本文件是**唯一**的对外契约：包内机器码的实现可以变，但这里的签名一变，
 // 依赖它的程序就得重编。签名文件带 SHA256 校验，被篡改会在链接期被拦下。
@@ -39,7 +40,7 @@
 // +5 LEFT +6 UP +7 RIGHT +8 DOWN +9 HOME +10 END +11 PAGEUP +12 PAGEDOWN
 // +13 DELETE +14 SHIFT +15 CONTROL +16 ALT +17..+28 F1..F12 +63 UNKNOWN。
 //
-// 已实现范围（四层，全部有真实现，不是预留接口；共 109 个 extern fn）：
+// 已实现范围（五层，全部有真实现，不是预留接口；共 120 个 extern fn）：
 //   1) 地基层：Application / Window / Painter / Event / Font（55 个函数）；
 //   2) 控件框架层：GuiWidget 树 + 绝对 / VBox / HBox 布局 + 命中测试 +
 //      主动事件分发（28 个函数）；
@@ -48,11 +49,16 @@
 //      整树一次绘制（12 个函数）；
 //   4) 输入层：TextBox 单行编辑（字符 / 退格 / 删除 / 光标 / 选区 / 输入上限）
 //      + 焦点链（Tab / Shift+Tab 环形切换 / 点击聚焦）+ 统一功能键码与修饰键
-//      （14 个函数，含 dial_gui_event_mods）。
-// 四层一律只追加 extern fn：旧 95 个签名一字不动，abi = 6 / version = 1.10.0 不变。
-// 外观层与输入层仍是**纯 C、零平台符号、零反向回调**：控件种类 / 文本 / 状态
-// 全是 C 侧纯值或自有副本，Dial 侧用 widget_draw(root, painter) 把整棵树画到
-// 任意 GuiPainter（离屏画布或窗口画布），不需要也不允许 C 去调 Dial 函数。
+//      （14 个函数，含 dial_gui_event_mods）；
+//   5) 主题层 + 控件扩展：14 个可覆写颜色角色（set / get / reset / count）+
+//      Radio / Slider / ProgressBar 三种成品控件 + value / range / group 纯值
+//      访问器（11 个函数，见本文件末段）。
+// 五层一律只追加 extern fn：旧 109 个签名一字不动，
+// abi = 6 / version = 1.10.0 / GuiWidgetEvent 104 字节布局全部不变。
+// 外观层 / 输入层 / 主题层仍是**纯 C、零平台符号、零反向回调**：控件种类 /
+// 文本 / 状态 / 颜色全是 C 侧纯值或自有副本，Dial 侧用
+// widget_draw(root, painter) 把整棵树画到任意 GuiPainter（离屏或窗口画布），
+// 不需要也不允许 C 去调 Dial 函数。
 //
 // 事件分发立场（内存宪法）：**绝不做 C → Dial 反向回调**。Dial 无 GC，
 // 全靠 ARC + 手动释放；C 侧若在平台线程直接调 Dial 函数，跨线程引用计数
@@ -61,11 +67,12 @@
 // 的 const char*，Dial 侧必须用 string_from_cstr 复制成自己的 ARC 对象。
 // C 管 C 的，ARC 管 ARC 的，谁也不越界，零隐式开销。
 //
-// 仍未实现、因此**不写进本契约**：可覆写主题色、信号槽、富文本编辑、
-// 图片解码、Direct2D、C → Dial 反向回调。把未实现的函数写进 .diali 会让用户
-// import 后链接失败，那是制造漂移而非预留接口——这条原则四层一律适用。
-// 真实事件注入由 XTest / xdotool 在 Xvfb 实窗里跑通（AA 组第 10 项），
-// 无头纯 C 树断言覆盖命中 / 四态 / 编辑 / 焦点环的全部逻辑分支。
+// 仍未实现、因此**不写进本契约**：信号槽、多行文本 / 输入法（IME）、
+// 撤销重做栈、富文本编辑、图片解码、Direct2D、C → Dial 反向回调。
+// 把未实现的函数写进 .diali 会让用户 import 后链接失败，那是制造漂移
+// 而非预留接口——这条原则五层一律适用。
+// 真实事件注入由 XTest / xdotool 在 Xvfb 实窗里跑通（AA 组），
+// 无头纯 C 树断言覆盖命中 / 四态 / 编辑 / 焦点环 / 主题 / 值域的全部逻辑分支。
 
 /// GUI 应用上下文（不透明）。持有显示连接、窗口表、事件循环状态与最近事件槽。
 /// 用完必须 dial_gui_app_free 释放——不透明句柄不进 ARC。
@@ -367,10 +374,11 @@ extern fn dial_gui_event_data(app: GuiApp): rawptr<byte>;
 
 // ---- 成品控件外观层：种类 / 文本 / 状态 / 主题绘制 ----------------------
 //
-// 立场：C 侧内置**浅色默认主题**（颜色常量写死在 dial_gui_look.c，本版不暴露
-// setter），控件种类与状态全是 C 侧纯值或自有副本。绝不 C → Dial 反向回调：
-// Dial 侧 poll/wait 拿到事件后，用 widget_handle 把纯值事件喂进树推进四态，
-// 再用 widget_draw 把整棵树一次画到任意 GuiPainter（离屏或窗口画布）。
+// 立场：C 侧内置**浅色默认主题**（默认值逐字等于 GUI_THEME_* 宏），运行时可由
+// 本文件末段的 theme_set 按角色覆写、theme_reset 逐值复位；控件种类与状态
+// 全是 C 侧纯值或自有副本。绝不 C → Dial 反向回调：Dial 侧 poll/wait 拿到
+// 事件后，用 widget_handle 把纯值事件喂进树推进四态，再用 widget_draw 把
+// 整棵树一次画到任意 GuiPainter（离屏或窗口画布）。
 //
 // 控件种类（widget_set_kind / widget_kind）：
 //   0 BOX      通用容器（浅色面板背景 + 细边框；框架层默认种类）
@@ -379,22 +387,29 @@ extern fn dial_gui_event_data(app: GuiApp): rawptr<byte>;
 //   3 CHECKBOX 方框 + 勾选标记 + 右侧文本，RELEASE 时自动翻转 checked
 //   4 TEXTBOX  单行输入：白底 + 边框（焦点时高亮加粗）+ 选区底 + 文本 + 光标竖线；
 //              RELEASE 命中即把焦点移过去（gui_widget_handle 返回 1）
+//   5 RADIO    圆圈 + 选中点 + 右侧文本，RELEASE 选中；group != 0 时同组互斥
+//   6 SLIDER   轨道 + 已填充 + 滑块，RELEASE 按局部 x 比例设 value
+//   7 PROGRESS 轨道 + 边框 + 按 value 比例填充；只读，RELEASE 不激活
 //
-// 默认主题色（0xAARRGGBB，写死在 C，逐像素可断言）：
+// 默认主题色（0xAARRGGBB，theme_reset 逐值复位，逐像素可断言）：
 //   面板/BOX 背景 FFF4F6F9   边框 FFC7CEDA   文本 FF202733   禁用文本 FFA9B0BD
 //   按钮 普通 FFE7ECF4 / 悬停 FFD3E0FA / 按下 FFB2C8F2 / 禁用 FFF0F2F5
-//   勾选框底 / TextBox 输入底 FFFFFFFF    勾 / 焦点边框 / 光标 / 高亮 FF2F6FE0
+//   勾选框 / Radio / TextBox 底 FFFFFFFF  勾 / 焦点边框 / 光标 / 高亮 FF2F6FE0
 //   TextBox 选区底 FFC9DCFB（焦点态才画）
+//   轨道底 FFE2E8F0   进度填充 FF2F6FE0   滑块 FFFFFFFF（MARK 描边）
+// 默认值与引入 theme setter 之前逐字一致，look_crc_normal = 3884455222 不漂移。
 // 文本用内置 8×8 ASCII 点阵（零依赖），字号固定 16（每字符 18×16 像素），
 // 点阵不覆盖的码点画 '?'，与地基层的 gui_font_draw 同一套字形。
 // TextBox 文本区裁剪到 (x+6, y, w-12, h)，光标恒定显示（不闪烁），
 // 保证 get_pixel / painter_crc32 逐像素可断言、三平台一致。
 //
 // 四态由 widget_handle 推进：hovered / pressed 是运行时态（MOVE / PRESS 写，
-// RELEASE 清），checked 是 CheckBox 勾选态（RELEASE 翻转），disabled 是显式设置的
-// 纯值态（禁用控件不 hover / 不 press / 不激活，绘制走禁用配色）。
+// RELEASE 清），checked 是 CheckBox / Radio 勾选态（RELEASE 翻转 / 同组互斥），
+// disabled 是显式设置的纯值态（禁用控件不 hover / 不 press / 不激活，
+// 绘制走禁用配色）。
 
-/// 设置控件种类（0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX）；非法值返回 -1。
+/// 设置控件种类（0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX / 4 TEXTBOX /
+/// 5 RADIO / 6 SLIDER / 7 PROGRESS）；非法值返回 -1。
 extern fn dial_gui_widget_set_kind(w: GuiWidget, kind: int): int;
 extern fn dial_gui_widget_kind(w: GuiWidget): int;
 
@@ -492,3 +507,61 @@ extern fn dial_gui_widget_max_len(w: GuiWidget): int;
 /// mods 取 dial_gui_event_mods。返回 0 无变化 / 1 文本或光标变化 /
 /// 2 焦点变化 / 3 Enter 提交 / -1 参数错误。C 侧绝不返回或缓存 Dial 对象。
 extern fn dial_gui_widget_key(root: GuiWidget, kind: int, key: int, mods: int): int;
+
+// ---- 第 5 层：主题层 + 控件扩展（本段 11 个追加 extern fn）--------------
+//
+// 立场：与前四层宪法完全一致 —— 纯 C、零平台符号、零 C → Dial 反向回调、
+// 只追加 extern fn。主题是**进程级静态颜色表**（GUI 单线程事件循环，无需
+// 加锁），一次设置对之后所有 widget_draw 立即生效；每个 demo 是独立进程，
+// 静态表天然从默认值起步，绝不污染其它用例的 CRC 基准。
+//
+// 主题角色（0..13，编号跨版本稳定，只准末尾追加）：
+//   0 BG        面板 / BOX 背景          1 BORDER    细边框
+//   2 TEXT      文本                     3 TEXT_DIS  禁用态文本
+//   4 BTN       按钮 普通                5 BTN_HOVER 按钮 悬停
+//   6 BTN_DOWN  按钮 按下                7 BTN_DIS   按钮 禁用
+//   8 CHECK_BG  勾选框 / Radio / TextBox 底
+//   9 MARK      勾 / 焦点边框 / 光标 / 高亮 / 选中点
+//  10 SEL       TextBox 选区背景
+//  11 TRACK     Slider / Progress 轨道底
+//  12 FILL      Slider 已填充 / Progress 进度
+//  13 KNOB      Slider 滑块
+//
+// Fail-Fast（§20）：role 越界 / 颜色高 32 位非 0 / value 越界 / 值域倒置
+// 一律返回 -1 并写错误槽，绝不静默截断，绝不把非法值当成合法角色。
+// set_range(lo, hi) 要求 lo <= hi；成功后把已有 value clamp 进新值域
+// （getter 立刻可读回，不是不可见损坏）。默认值域 0..100。
+// 新增三种控件的绘制几何：RADIO 圆圈半径 clamp 到 [4,10]；SLIDER 轨道
+// 内边距 4px、轨道高 6px、滑块半径 6；PROGRESS 内边距 2px。全部纯整数，
+// 与自研光栅化器同一套坐标，三平台逐像素一致。
+
+/// 主题颜色角色数量（当前 14；新增角色只准末尾追加）。
+extern fn dial_gui_theme_role_count(): int;
+
+/// 读取某个角色的当前颜色（0..0xFFFFFFFF）；非法 role 返回 -1。
+extern fn dial_gui_theme_get(role: int): int;
+
+/// 覆写某个角色的颜色（0xAARRGGBB packed 进 int，高 32 位必须为 0）；
+/// 非法 role / 颜色返回 -1 并写错误槽；返回 0 表示成功。
+extern fn dial_gui_theme_set(role: int, color: int): int;
+
+/// 把所有角色逐值复位到内置默认主题（逐像素 CRC 回到历史基准）。返回 0。
+extern fn dial_gui_theme_reset(): int;
+
+/// SLIDER / PROGRESS 当前值（默认 0）；恒落在 [vmin, vmax] 内。
+extern fn dial_gui_widget_value(w: GuiWidget): int;
+
+/// 显式设置当前值；越出 [vmin, vmax] **明确返回 -1**，绝不静默 clamp。
+extern fn dial_gui_widget_set_value(w: GuiWidget, v: int): int;
+
+/// 设置值域 [lo, hi]：要求 lo <= hi，否则返回 -1；成功后把已有 value
+/// clamp 进新值域（可读回）。默认值域 0..100。
+extern fn dial_gui_widget_set_range(w: GuiWidget, lo: int, hi: int): int;
+
+/// 读取值域下界 / 上界。
+extern fn dial_gui_widget_min(w: GuiWidget): int;
+extern fn dial_gui_widget_max(w: GuiWidget): int;
+
+/// RADIO 组号（0 = 未分组 / 各自独立；非 0 时同组 RELEASE 互斥）。
+extern fn dial_gui_widget_set_group(w: GuiWidget, g: int): int;
+extern fn dial_gui_widget_group(w: GuiWidget): int;
