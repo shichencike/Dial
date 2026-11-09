@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 二十六组检查，全部通过才算绿（顺序为 A→Z，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 二十七组检查，全部通过才算绿（顺序为 A→Z 再 AA，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -52,6 +52,10 @@
 #      （MD5/SHA-1/SHA-256/SHA-512/SHA3-256，标准向量核对）+ Base64 编解码 +
 #      HMAC-SHA256，string 与 bytes 双入口、含内嵌 NUL 的二进制数据、严格错误路径，
 #      三平台零警告构建（v1.04 增补）。
+#   AA. 手搓 GUI 地基：gui.dialpkg 端到端——三平台真实现（X11+XShm+XRender /
+#      Win32 GDI）/ 零链接期依赖（dlopen / LoadLibraryA）/ 纯内存光栅化器像素级
+#      CRC 回归 / 覆盖面积 AA / 内置点阵与 TrueType 双字体 / Xvfb 实窗上屏与
+#      事件循环；无显示环境自动降级为「窗口路径明确跳过」并如实标注（v1.10 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -1860,6 +1864,92 @@ else zbad "use_crypto.dial 编译失败"; tail -8 "${TMP}/z_comp.log"; fi
 # 5) 清理：卸包（不污染后续测试与用户环境）。
 "$DIALC" uninstall crypto >/dev/null 2>&1 || true
 zpass "crypto 包已卸载"
+
+# ---------------------------------------------------------------------------
+# AA) 手搓 GUI 地基：gui.dialpkg 端到端（v1.10 增补）
+# ---------------------------------------------------------------------------
+echo "== AA) 手搓 GUI 地基：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC 回归，v1.10 增补） =="
+aapass() { echo "  ✅ $1"; }
+aabad()  { echo "  ❌ $1"; fail=1; }
+
+# 1) 三平台静态库构建：x11 / x11-musl / win32 三份都是真实现，不是 stub。
+if bash packages/gui/build.sh >"${TMP}/aa_build.log" 2>&1; then
+    aapass "gui 包三平台静态库构建完成（x11 / x11-musl / win32 三份真实现）"
+else aabad "gui 包静态库构建失败"; tail -10 "${TMP}/aa_build.log"; fi
+
+if grep -qiE 'warning:|error:' "${TMP}/aa_build.log"; then
+    aabad "gui 包构建存在 warning / error"
+    grep -iE 'warning:|error:' "${TMP}/aa_build.log" | head -8
+else aapass "gui 包三平台构建零警告零错误（含 vendor stb_truetype 基线校验）"; fi
+
+# 2) 零链接期依赖：三份 .a 都不能出现平台 GUI 函数的未定义符号，否则 dlopen
+#    策略就被破坏，dialc 的 final_link 会要求注入 -lX11 / -lgdi32。
+aa_sym=0
+for t in x86_64-linux-gnu aarch64-unknown-linux-musl x86_64-pc-windows-gnu; do
+    lib="packages/gui/lib/$t/libgui.a"
+    if [ ! -f "$lib" ]; then aabad "缺少 $lib"; aa_sym=1; continue; fi
+    if nm -u "$lib" 2>/dev/null | grep -qiE 'XOpenDisplay|XShmCreateImage|XShmPutImage|XRenderComposite|CreateDIBSection|CreateWindowExA'; then
+        aabad "$t 的 .a 出现平台 GUI 未定义符号（dlopen 动态装载策略被破坏）"
+        aa_sym=1
+    fi
+done
+if [ "$aa_sym" -eq 0 ]; then
+    aapass "三份 .a 均无 X11/XShm/XRender/GDI 链接期依赖（POSIX dlopen / Win32 LoadLibraryA 成立）"
+fi
+
+# 3) 打包 + 安装（manifest / 逐文件 SHA256 自检）。
+"$DIALC" uninstall gui >/dev/null 2>&1 || true
+if "$DIALC" pack packages/gui -o "${TMP}/gui.dialpkg" >"${TMP}/aa_pack.log" 2>&1 \
+   && "$DIALC" install "${TMP}/gui.dialpkg" >"${TMP}/aa_install.log" 2>&1; then
+    aapass "gui.dialpkg 打包 + 安装成功（manifest / SHA256 自检通过）"
+else aabad "gui.dialpkg 打包或安装失败"; tail -8 "${TMP}/aa_pack.log" "${TMP}/aa_install.log"; fi
+
+# 4) 编译 + 无 DISPLAY 运行：纯内存光栅化器 / 字体 / 错误槽必须全绿，
+#    窗口路径必须**明确跳过**（Fail-Fast 口径：不静默、不伪装通过）。
+if "$DIALC" build tests/pkg/use_gui.dial -o "${TMP}/use_gui" >"${TMP}/aa_comp.log" 2>&1; then
+    aapass "use_gui.dial（import \"gui\"）编译成功"
+    env -u DISPLAY "${TMP}/use_gui" >"${TMP}/aa_nodisplay.log" 2>&1
+    aa_no_exit=$?
+    aa_bad=$(grep -c ' = bad' "${TMP}/aa_nodisplay.log" || true)
+    if [ "$aa_no_exit" -eq 0 ] && [ "$aa_bad" -eq 0 ] \
+       && grep -qF 'window = skipped [' "${TMP}/aa_nodisplay.log" ] \
+       && grep -qF 'crc_offscreen = 4007435570' "${TMP}/aa_nodisplay.log" \
+       && grep -qF 'trapezoid_aa_partial = ok' "${TMP}/aa_nodisplay.log" \
+       && grep -qF 'bad_font_rejected = ok' "${TMP}/aa_nodisplay.log" \
+       && grep -qF 'gui_done = true' "${TMP}/aa_nodisplay.log"; then
+        aapass "无 DISPLAY：离屏光栅化器 / 覆盖面积 AA / 双字体 / 错误槽全绿，窗口明确跳过，CRC 稳定"
+    else
+        aabad "无 DISPLAY 路径断言失败（exit=$aa_no_exit bad=$aa_bad）"
+        tail -30 "${TMP}/aa_nodisplay.log"
+    fi
+else aabad "use_gui.dial 编译失败"; tail -12 "${TMP}/aa_comp.log"; fi
+
+# 5) 有 Xvfb 时验证真实窗口（XShm 离屏 + XRender 合成 + 上屏 / 过滤 / 事件循环）；
+#    无 Xvfb 的环境如实打印跳过，绝不把「未验证」写成「通过」。
+if command -v xvfb-run >/dev/null 2>&1; then
+    if xvfb-run -a -s "-screen 0 1024x768x24 +extension MIT-SHM +extension RENDER" \
+        "${TMP}/use_gui" >"${TMP}/aa_xvfb.log" 2>&1; then
+        aa_bad2=$(grep -c ' = bad' "${TMP}/aa_xvfb.log" || true)
+        if [ "$aa_bad2" -eq 0 ] \
+           && grep -qF 'window = ok' "${TMP}/aa_xvfb.log" \
+           && grep -qF 'window_backend = x11/xshm/xrender' "${TMP}/aa_xvfb.log" \
+           && grep -qF 'window_flush = ok' "${TMP}/aa_xvfb.log" \
+           && grep -qF 'window_filter = ok' "${TMP}/aa_xvfb.log" \
+           && grep -qF 'quit_event = ok' "${TMP}/aa_xvfb.log"; then
+            aapass "Xvfb 实窗：XShm 离屏 + XRender filter 合成 + 上屏 / 过滤 / 事件循环全通过"
+        else
+            aabad "Xvfb 实窗断言失败（bad=$aa_bad2）"; tail -30 "${TMP}/aa_xvfb.log"
+        fi
+    else
+        aabad "Xvfb 下 use_gui 运行失败"; tail -20 "${TMP}/aa_xvfb.log"
+    fi
+else
+    echo "  ⚠️  本环境无 xvfb-run：真实窗口路径未实机验证（如实标注，不伪装通过）"
+fi
+
+# 6) 清理：卸包，避免污染后续测试与用户环境。
+"$DIALC" uninstall gui >/dev/null 2>&1 || true
+aapass "gui 包已卸载"
 
 echo
 if [ $fail -eq 0 ]; then

@@ -1,7 +1,7 @@
 # dialc —— 三平台编译 / 测试 / 发布流水线（GitHub Actions）
 #
 # 三个构建作业，各平台**原生构建**（CI 用对应宿主 runner / 容器，编译期目标即运行期平台）：
-#   build-linux     Linux x86_64（动态 glibc）—— 全量 A~Z 二十六组端到端测试 + 锚点/官网同步校验
+#   build-linux     Linux x86_64（动态 glibc）—— 全量 A~Z+AA 二十七组端到端测试 + 锚点/官网同步校验
 #   build-windows   Windows x64（MinGW / gnu）—— 核心冒烟（编译+运行+平台契约）
 #   build-termux    Termux aarch64（musl 全静态）—— 核心冒烟
 # 发布作业在打 `v*` 标签时把三个平台的产物上传到 GitHub Release。
@@ -40,7 +40,7 @@ env:
 
 jobs:
   # ===========================================================================
-  # Linux x86_64 —— 全量测试（A~L 十二组）+ 文档/官网同步校验
+  # Linux x86_64 —— 全量测试（A~Z+AA 二十七组）+ 文档/官网同步校验
   # ===========================================================================
   build-linux:
     name: Linux x86_64（全量测试）
@@ -151,35 +151,38 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # 阶段 8：C11 四个独立包（http / text / json / crypto）。
-      # 三平台机器码由 zig cc 一次交叉编译；mbedTLS / zlib 已 vendor 进仓库，
-      # 构建不依赖外网（§37.5 的「离线可复现」）。text / json 零第三方依赖，
+      # 阶段 8：C11 四个独立包（http / text / json / crypto）+ 手搓 GUI 包（gui）。
+      # 三平台机器码由 zig cc 一次交叉编译；mbedTLS / zlib / stb_truetype 已 vendor
+      # 进仓库，构建不依赖外网（§37.5 的「离线可复现」）。text / json 零第三方依赖，
       # crypto 复用 mbedTLS 的摘要 / Base64 / HMAC——密码学绝不手搓。
-      # **必须排在「端到端测试」之前**：W / X / Y / Z 组回归要自己构建这些包。
-      - name: 安装 zig（C11 包三平台交叉编译）
+      # gui 包三份 .a 都是真实现（X11 / Win32），平台库一律 dlopen 动态装载，
+      # 因此交叉编译不需要各平台 GUI SDK 头，也不需要 -lX11 / -lgdi32。
+      # **必须排在「端到端测试」之前**：W / X / Y / Z / AA 组回归要自己构建这些包。
+      - name: 安装 zig（独立包三平台交叉编译）
         uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
 
-      - name: 构建四个 C11 独立包（三平台）
+      - name: 构建五个独立包（C11 四包 + GUI，三平台）
         run: |
           set -euo pipefail
-          for p in http text json crypto; do
+          for p in http text json crypto gui; do
             echo "==> 构建 $p 包三平台静态库"
             bash "packages/$p/build.sh"
           done
           PKG_VER="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
           # 包版本跟随编译器版本（与 stdlib.dialpkg 同一口径）
-          for p in http text json crypto; do
+          for p in http text json crypto gui; do
             sed -i "s/^version = .*/version = \"$PKG_VER\"/" "packages/$p/dial.toml"
             mkdir -p "dist-$p"
             ./target/release/dialc pack "packages/$p" -o "dist-$p/$p.dialpkg"
             echo "--- $p.dialpkg 内容 ---"
             unzip -l "dist-$p/$p.dialpkg"
           done
-          # 归集其余三包到同一目录，便于用单个 artifact 上传（路径与 http 包对齐）
+          # 归集其余四包到同一目录，便于用单个 artifact 上传（路径与 http 包对齐）
           mkdir -p dist-c11
-          cp dist-text/text.dialpkg dist-json/json.dialpkg dist-crypto/crypto.dialpkg dist-c11/
+          cp dist-text/text.dialpkg dist-json/json.dialpkg \
+             dist-crypto/crypto.dialpkg dist-gui/gui.dialpkg dist-c11/
 
       - name: 上传 http.dialpkg
         uses: actions/upload-artifact@v4
@@ -189,7 +192,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: 上传其余三个 C11 包（text / json / crypto）
+      - name: 上传其余四个包（text / json / crypto / gui）
         uses: actions/upload-artifact@v4
         with:
           name: c11-dialpkgs
@@ -197,7 +200,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: 端到端测试（A~Z 共二十六组）
+      # AA 组要在 Xvfb 下真开窗口验收 XShm/XRender。GitHub runner 一般已预装，
+      # 缺了才装；运行时库 libX11/libXext/libXrender 一并补齐，避免只在本地绿。
+      - name: 准备无头 X11 环境（AA 组 GUI 实窗验收）
+        run: |
+          if ! command -v xvfb-run >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq xvfb libx11-6 libxext6 libxrender1
+          fi
+          command -v xvfb-run
+
+      - name: 端到端测试（A~Z+AA 共二十七组）
         run: bash tests/run_tests.sh
 
       # CVE 暴力检测器：为每个已登记漏洞构造触发用例（PoC），用 dialc 编译/运行，
@@ -568,7 +581,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: stdlib v${{ github.ref_name }}
           files: dist-stdlib/stdlib.dialpkg
-          overwrite: true          # 允许重发时覆盖同名资产（重指标签重跑发布用）
+          overwrite_files: true    # 允许重发时覆盖同名资产（正确参数名；overwrite 是无效输入）
           fail_on_unmatched_files: true
           generate_release_notes: true
           # 主发布通道已改为 v* Release（同一页面含 zip / vsix / stdlib.dialpkg）。
@@ -657,7 +670,8 @@ jobs:
             dist/c11-dialpkgs/text.dialpkg
             dist/c11-dialpkgs/json.dialpkg
             dist/c11-dialpkgs/crypto.dialpkg
-          overwrite: true          # 允许重发时覆盖同名资产（重指标签重跑发布用）
+            dist/c11-dialpkgs/gui.dialpkg
+          overwrite_files: true    # 允许重发时覆盖同名资产（正确参数名；overwrite 是无效输入）
           fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
@@ -689,6 +703,15 @@ jobs:
 
             ```bash
             dialc install https://github.com/shichencike/Dial/releases/latest/download/stdlib.dialpkg
+            ```
+
+            本页还提供 **五个独立包**（`http` / `text` / `json` / `crypto` / `gui`），
+            与编译器同版本、随每次发版一同更新。其中 `gui.dialpkg` 是手搓 GUI 地基包
+            （Linux 走 X11 + XShm + XRender，Windows 走 Win32 GDI，详见 README §38），
+            同样可直接安装：
+
+            ```bash
+            dialc install https://github.com/shichencike/Dial/releases/latest/download/gui.dialpkg
             ```
 
             所有资产都能通过 `releases/latest/download/<资产名>` 重定向到最新版本。

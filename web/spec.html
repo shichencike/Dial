@@ -402,6 +402,20 @@
 <li><a href="#3711-c11-其余三包已落地text--json--crypto">37.11 C11 其余三包已落地：text / json / crypto</a></li>
 </ul>
 </li>
+<li><a href="#38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</a><ul>
+<li><a href="#381-包结构">38.1 包结构</a></li>
+<li><a href="#382-对外契约guidiali">38.2 对外契约：gui.diali</a></li>
+<li><a href="#383-分层架构">38.3 分层架构</a></li>
+<li><a href="#384-自研-2d-光栅化器">38.4 自研 2D 光栅化器</a></li>
+<li><a href="#385-字体层与安全边界">38.5 字体层与安全边界</a></li>
+<li><a href="#386-linux--termux-后端x11--xshm--xrender">38.6 Linux / Termux 后端：X11 + XShm + XRender</a></li>
+<li><a href="#387-windows-后端win32-gdi">38.7 Windows 后端：Win32 GDI</a></li>
+<li><a href="#388-零链接期依赖">38.8 零链接期依赖</a></li>
+<li><a href="#389-dial-侧用法">38.9 Dial 侧用法</a></li>
+<li><a href="#3810-aa-组回归与平台边界">38.10 AA 组回归与平台边界</a></li>
+<li><a href="#3811-能力边界不许当已支持">38.11 能力边界（不许当已支持）</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -528,7 +542,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── install-dial.sh     # 一键安装（Linux / Termux，支持 curl | bash 一键命令）
 │   ├── install-dial.ps1    # 一键安装（Windows / PowerShell，支持 irm | iex 一键命令）
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
-├── .github/workflows/ci.yml  # GitHub Actions：编译 + 十三组测试 + 打包发布
+├── .github/workflows/ci.yml  # GitHub Actions：编译 + 二十七组测试（A–Z+AA）+ 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
 ├── web/                    # 官网产物（由 tools/build_web.py 生成；更新日志分页在 web/changelog/）
 └── README.md               # 本文件
@@ -2910,7 +2924,10 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <h2 id="18-测试">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
-<p>十三组检查，全部通过才算绿（顺序即 A→M）：</p>
+<p><code>bash tests/run_tests.sh</code> 的<strong>当前全量回归是 A–Z + AA 共二十七组</strong>（507 ✅ / 0 ❌），
+全部通过才算绿。下表逐项详列 <strong>A–M 十三组</strong>——这组逐组说明自 v0.9x 沿用至今、
+内容未变，且每一组至今仍在执行；<strong>N–Z 与 AA 组</strong>分别见 §33–§38 各章与
+<code>tests/run_tests.sh</code>（其中 AA 组是手搓 GUI 地基包 <code>gui.dialpkg</code> 的专项回归，见 §38）：</p>
 <table>
 <thead>
 <tr>
@@ -2974,7 +2991,8 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tbody>
 </table>
 <h4 id="持续集成github-actions">持续集成（GitHub Actions）</h4>
-<p>十三组检查由 <code>.github/workflows/ci.yml</code> 在<strong>每次 push / PR</strong> 上自动执行：</p>
+<p>二十七组检查由 <code>.github/workflows/ci.yml</code> 在<strong>每次 push / PR</strong> 上自动执行
+（AA 组 GUI 实窗验收在无头 Xvfb 下运行；无显示环境时明确跳过并标注，绝不伪装通过）：</p>
 <table>
 <thead>
 <tr>
@@ -2991,7 +3009,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td><strong>测试</strong></td>
-<td><code>bash tests/run_tests.sh</code>（A～M 全部十三组）</td>
+<td><code>bash tests/run_tests.sh</code>（A–Z+AA 全部二十七组，含 AA 组 Xvfb GUI 实窗验收）</td>
 <td>立即失败</td>
 </tr>
 <tr>
@@ -7710,6 +7728,9 @@ SSE / AVX / NEON。</p>
 <code>v1.10</code> / <code>Cargo.toml 1.10.0</code>，映射见 §23 与 CHANGELOG <code>[v1.10]</code> 段），由 <code>v*</code> CI 规则
 触发三平台 Release；<strong><code>v1.0</code> 里程碑标签不受影响</strong>。<code>[v1.04]</code> 及其后续增补
 （含 <code>@asm</code> / <code>simd&lt;T, N&gt;</code>）均随本次发布一并交付。</p>
+<p><strong>本节上方的「A–Z 二十六组 / 499 ✅」是 <code>v1.1</code> 标签发布时的验收快照，保持原文不改。</strong>
+此后工作树又新增 <code>gui.dialpkg</code> 与 AA 组，全量回归扩到 <strong>A–Z + AA 二十七组 /
+507 ✅</strong>，属 <strong>未发布的开发中增量</strong>，见 §38 与 CHANGELOG <code>[未发布]</code> 段。</p>
 </blockquote>
 <hr />
 <h2 id="34-v104-增补工程工具链并入-v104版本不变">34. v1.04 增补：工程工具链（并入 <code>[v1.04]</code>，版本不变）</h2>
@@ -8692,7 +8713,8 @@ vendor ngtcp2/nghttp3）。<code>text</code> / <code>json</code> / <code>crypto<
 <p>§37.5 把正则 / JSON / 摘要 / Base64 拆成独立包，<code>http</code> 之外这三包同批补齐。
 三包都是 <code>version = 1.0.0</code> / <code>abi = 6</code>，三平台静态库由 <code>zig cc</code> 交叉编译、
 零警告零错误；CI 阶段 8 与 <code>stdlib.dialpkg</code> 同一口径，把包版本跟随编译器版本。
-回归分别是 <strong>X / Y / Z 组</strong>（全量 A→Z 二十六组 <code>EXIT=0</code>）。</p>
+回归分别是 <strong>X / Y / Z 组</strong>（当时全量 A→Z 二十六组 <code>EXIT=0</code>；当前全量已扩为
+A–Z + AA <strong>二十七组</strong>，见 §38）。</p>
 <table>
 <thead>
 <tr>
@@ -8738,7 +8760,343 @@ vendor ngtcp2/nghttp3）。<code>text</code> / <code>json</code> / <code>crypto<
 全量归档只让 <code>.dialpkg</code> 体积略增（约 6 MB），不会让用户可执行文件变大。</p>
 <p><strong>能力边界（不许当已支持）</strong>：<code>text</code> 的正则子集、<code>json</code> 的 <code>\u0000</code> 拒绝、
 <code>crypto</code> 只提供摘要 / Base64 / HMAC（<strong>没有对称加密、非对称加密、签名、
-密钥派生、随机数</strong>）——都在各自 <code>.diali</code> 里逐条写明。HTTP/3.0 / QUIC 仍未落地。</p></main></div>
+密钥派生、随机数</strong>）——都在各自 <code>.diali</code> 里逐条写明。HTTP/3.0 / QUIC 仍未落地。</p>
+<hr />
+<h2 id="38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</h2>
+<blockquote>
+<p><strong>定位与交付口径</strong>：本章描述 <code>packages/gui/</code> 产出的 <code>gui.dialpkg</code>——一个
+<strong>不用 Qt / GTK / SDL、纯 C 手搓</strong>的 GUI 地基（窗 + 事件 + 绘图）。它是
+<code>[v1.10]</code>（标签 <code>v1.1</code>）发布<strong>之后</strong>的<strong>开发中增量</strong>：编译器版本仍为
+<code>1.10.0</code>，<strong>未升版本号、未打标签、未发 Release</strong>（见 CHANGELOG <code>[未发布]</code> 段）。
+本轮交付深度是<strong>原型 + 完整工程骨架</strong>，第一版范围严格限定在
+<strong>地基：窗 + 事件 + 绘图</strong>。</p>
+</blockquote>
+<p><strong>四个架构分叉（用户拍板）</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>分叉</th>
+<th>选择</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>底层边界</td>
+<td>纯 X11 自绘，<strong>强制 XShm 共享内存 + XRender 合成</strong> + 自研迷你 2D 光栅化器 + <code>stb_truetype</code> 字体；不用任何现成 GUI 工具包</td>
+</tr>
+<tr>
+<td>Windows</td>
+<td><strong>复刻同一套逻辑</strong>，底层换成 Win32 GDI（<code>CreateDIBSection</code> + <code>StretchBlt</code>）；消息循环映射成同一套事件码，Dial 侧代码平台无关</td>
+</tr>
+<tr>
+<td>平台策略</td>
+<td><strong>三平台真实现</strong>：<code>x86_64-linux-gnu</code> / <code>aarch64-unknown-linux-musl</code> / <code>x86_64-pc-windows-gnu</code> 都由 <code>zig cc</code> 交叉编译出真实 <code>.a</code>，不是占位 stub</td>
+</tr>
+<tr>
+<td>第一版范围</td>
+<td>只做地基层（<code>GuiApp</code> / <code>GuiWindow</code> / <code>GuiPainter</code> / <code>GuiFont</code> / Event）；控件树 / 布局 / 信号槽<strong>不进契约</strong></td>
+</tr>
+</tbody>
+</table>
+<h3 id="381-包结构">38.1 包结构</h3>
+<pre><code>packages/gui/
+├── dial.toml             # name=gui / version 跟随编译器 / abi=6 / 三平台 .a 路径
+├── gui.diali             # 唯一对外契约（不透明句柄 + extern fn，单行签名）
+├── build.sh              # zig cc 三平台交叉编译 + stb SHA256 自检 + 可复现参数
+├── src/dial_gui.h        # 内部公共头：错误码 / 事件码 / 结构体 / 后端 vtable
+├── src/dial_gui_core.c   # FFI 包装：句柄生命周期 / 错误槽 / 事件槽 / 调 vtable
+├── src/dial_gui_raster.c # 自研光栅化器 + 内置 8×8 点阵 + stb_truetype 字形
+├── src/gui_font8.h       # 内置 ASCII 点阵静态常量表
+├── src/dial_gui_x11.c    # POSIX 后端（X11 + XShm + XRender，dlopen）
+├── src/dial_gui_win32.c  # Windows 后端（GDI DIBSection，LoadLibraryA）
+└── lib/&lt;triple&gt;/libgui.a # 三平台产物（被 .gitignore 忽略，构建时生成）
+third_party/stb/          # stb_truetype.h v1.26 + LICENSE（MIT）
+patches/stb-1.26.SHA256SUMS
+</code></pre>
+<h3 id="382-对外契约guidiali">38.2 对外契约：<code>gui.diali</code></h3>
+<p>四个<strong>不透明句柄</strong>（不进 ARC，必须显式 <code>*_free</code>）：</p>
+<table>
+<thead>
+<tr>
+<th>句柄</th>
+<th>含义</th>
+<th>生命周期</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GuiApp</code></td>
+<td>显示连接 / 窗口表 / 事件循环状态 / 最近事件槽</td>
+<td><code>dial_gui_app_new</code> → <code>dial_gui_app_free</code></td>
+</tr>
+<tr>
+<td><code>GuiWindow</code></td>
+<td>一个窗口</td>
+<td><code>dial_gui_window_new</code> → <code>dial_gui_window_close</code></td>
+</tr>
+<tr>
+<td><code>GuiPainter</code></td>
+<td>离屏像素画布（窗口绑定或纯内存）</td>
+<td>窗口画布随窗口释放；<code>dial_gui_painter_offscreen</code> 的需 <code>dial_gui_painter_free</code></td>
+</tr>
+<tr>
+<td><code>GuiFont</code></td>
+<td>字体</td>
+<td><code>dial_gui_font_default</code> / <code>dial_gui_font_load</code> → <code>dial_gui_font_free</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>颜色</strong>：所有 <code>color</code> 参数一律 <code>0xAARRGGBB</code>（装进 <code>int64</code>，高 32 位为 0）。
+C 侧在 X11 走 ARGB32、在 GDI 走 BGRA，通道转换由包内部负责，Dial 侧无感。</p>
+<p><strong>事件码</strong>（<code>dial_gui_app_poll</code> / <code>dial_gui_app_wait</code> 返回值）：</p>
+<table>
+<thead>
+<tr>
+<th>码</th>
+<th>事件</th>
+<th>码</th>
+<th>事件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>NONE</td>
+<td>5</td>
+<td>KEY_RELEASE</td>
+</tr>
+<tr>
+<td>1</td>
+<td>MOUSE_PRESS</td>
+<td>6</td>
+<td>RESIZE</td>
+</tr>
+<tr>
+<td>2</td>
+<td>MOUSE_RELEASE</td>
+<td>7</td>
+<td>EXPOSE</td>
+</tr>
+<tr>
+<td>3</td>
+<td>MOUSE_MOVE</td>
+<td>8</td>
+<td>CLOSE</td>
+</tr>
+<tr>
+<td>4</td>
+<td>KEY_PRESS</td>
+<td>9</td>
+<td>QUIT</td>
+</tr>
+</tbody>
+</table>
+<p>事件字段用 <code>dial_gui_event_kind/x/y/button/key/width/height/window</code> 访问
+（每 App 一份最近事件槽，单线程事件循环，无需加锁）。</p>
+<p><strong>键码表（<code>dial_gui_event_key</code>）</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>键类别</th>
+<th>X11 后端</th>
+<th>Win32 后端</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>可打印字符</td>
+<td><code>XLookupString</code> 的 UTF-8 首码点</td>
+<td><code>WM_CHAR</code> 的 <code>wParam</code></td>
+</tr>
+<tr>
+<td>功能键</td>
+<td>X11 <strong>KeySym 低 16 位</strong>（<code>sym &amp; 0xFFFF</code>，如 Esc = <code>0xFF1B</code>）</td>
+<td><strong><code>0x10000 + VK</code> 标记</strong>（如 Esc = <code>0x1001B</code>）</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>原型边界</strong>：可打印字符在两平台都是 Unicode 码点、<strong>一致</strong>；功能键编码
+<strong>两平台尚未统一</strong>（X11 KeySym vs Win32 VK 标记），本轮不承诺跨平台同值，
+见 §38.11。</p>
+</blockquote>
+<p><strong>错误码</strong>（<code>dial_gui_last_error</code>）：<code>0</code> 无错误、<code>1</code> 参数非法、<code>2</code> 分配失败、
+<code>3</code> 平台库缺失 / 初始化失败、<code>4</code> 窗口创建 / 上屏失败、<code>5</code> 字体失败、
+<code>6</code> 后端不支持该操作。错误走<strong>返回码 + 线程局部错误槽</strong>，
+<code>dial_gui_last_error_msg()</code> 取人类可读说明，<code>dial_gui_clear_error()</code> 清空；
+<strong>不抛 Dial 异常</strong>。后端 vtable 内部用 <code>1=成功 / 0=失败</code>，core 层由 <code>be_result</code>
+统一转成 Dial 契约的 <code>0=成功 / -1=失败</code>，避免两套返回码漂移。</p>
+<h3 id="383-分层架构">38.3 分层架构</h3>
+<pre><code>Dial 源码 --import &quot;gui&quot;--&gt; gui.diali 签名（SHA256 锁定）
+                                 |
+                         dial_gui_core.c   &lt;- 句柄 / 错误槽 / 事件槽
+                                 |  GuiBackend vtable
+              +------------------+------------------+
+        dial_gui_x11.c                      dial_gui_win32.c
+     (dlopen X11/Xext/Xrender)        (LoadLibraryA user32/gdi32)
+              +------------------+------------------+
+                         dial_gui_raster.c  &lt;- 唯一碰像素的 TU
+                         (ARGB32 / AA / 字体)
+</code></pre>
+<p><code>core.c</code> <strong>不 <code>#include</code> 任何 X11 / <code>windows.h</code></strong>，只认 <code>GuiBackend</code> vtable；
+因此交叉编译三平台不需要各平台 GUI SDK 头。平台库<strong>一律运行时动态装载</strong>，
+三份 <code>.a</code> 都不产生链接期未定义符号。</p>
+<h3 id="384-自研-2d-光栅化器">38.4 自研 2D 光栅化器</h3>
+<p><code>dial_gui_raster.c</code> 是<strong>唯一碰像素的 TU</strong>，也是唯一展开
+<code>STB_TRUETYPE_IMPLEMENTATION</code> 的地方。CPU 侧一份 <code>ARGB32</code> 行主序像素缓冲，
+窗口后端的 XShm 共享内存 / DIBSection <strong>与它共享同一份像素</strong>
+（<code>GuiPainterImpl.ext_pixels</code> 标记外部缓冲，<code>dispose</code> 不 <code>free</code>）。</p>
+<ul>
+<li><code>source-over</code> alpha 混合；覆盖面积子采样 AA，倍率 <code>1 / 2 / 4 / 8</code>
+  （<code>dial_gui_set_aa</code>，默认 4）；</li>
+<li>图元：<code>fill_rect</code> / <code>stroke_rect</code> / <code>draw_line</code>（圆帽）/ <code>fill_circle</code> /
+  <code>stroke_circle</code> / <code>fill_ellipse</code> / <code>fill_trapezoid_aa</code> / <code>blit_pixels</code>；</li>
+<li><code>set_clip</code> / <code>clear_clip</code> 裁剪、<code>get_pixel</code> / <code>set_pixel</code> 像素读写、
+  <code>painter_crc32</code> 整块 CRC32（像素级回归断言）；</li>
+<li><code>dial_gui_fill_trapezoid_aa</code> <strong>一律画进 CPU 离屏缓冲</strong>：XRender 的矢量能力
+  用在 <code>window_flush</code> 的 Picture 合成链，而不是绕过 CPU 缓冲直接画到窗口——
+  否则 <code>get_pixel</code> / <code>painter_crc32</code> 与用户自绘会看到两套状态。</li>
+</ul>
+<h3 id="385-字体层与安全边界">38.5 字体层与安全边界</h3>
+<p>双路径，Dial 侧用同一个 <code>GuiFont</code> 句柄：</p>
+<table>
+<thead>
+<tr>
+<th>路径</th>
+<th>来源</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>内置 8×8 ASCII 点阵</td>
+<td><code>src/gui_font8.h</code> 静态常量表（<code>0x20..0x7E</code>）</td>
+<td>零运行依赖兜底；开发期由本机 TTF 生成静态表，运行时不读文件、不依赖字体库</td>
+</tr>
+<tr>
+<td>TrueType</td>
+<td>vendor <code>stb_truetype.h</code> v1.26（MIT）</td>
+<td><code>stbtt_GetCodepointBitmap</code> 覆盖率混合；UTF-8 解码，非法字节替换成 U+FFFD</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>安全边界（必须遵守）</strong>：<code>stb_truetype.h</code> 上游明确
+<code>NO SECURITY GUARANTEE -- DO NOT USE THIS ON UNTRUSTED FONT FILES</code>。
+<code>dial_gui_font_load(path)</code> <strong>只加载本机可信 TTF/OTF 文件</strong>（≤ 64 MB），
+<strong>绝不解析来自网络的字体数据</strong>；内置点阵路径完全不经过 stb。
+<code>third_party/stb/</code> 基线由 <code>patches/stb-1.26.SHA256SUMS</code> 锁定，
+<code>build.sh</code> 构建前后 <code>sha256sum -c</code> 校验零改动。</p>
+</blockquote>
+<h3 id="386-linux--termux-后端x11--xshm--xrender">38.6 Linux / Termux 后端：X11 + XShm + XRender</h3>
+<p><code>dial_gui_x11.c</code> <strong>不 include X11 头</strong>，按 ABI 复刻 <code>XEvent</code> / <code>XErrorEvent</code> /
+<code>XShmSegmentInfo</code>，<code>dlopen</code> 动态装载 <code>libX11.so</code> / <code>libXext.so</code> / <code>libXrender.so</code>。</p>
+<ul>
+<li><strong>XShm 离屏共享内存</strong>：<code>shmget</code> / <code>shmat</code> / <code>XShmCreateImage</code> / <code>XShmAttach</code>，
+  共享内存段同时映射给 CPU 画布与 XImage，<code>XShmPutImage</code> 上传<strong>零拷贝</strong>
+  （不经过 socket 传像素）；</li>
+<li><strong>XRender 合成</strong>：<code>XRenderFindVisualFormat</code> / <code>XRenderCreatePicture</code> /
+  <code>XRenderSetPictureFilter</code> / <code>XRenderComposite(PictOpSrc)</code>，
+  <code>dial_gui_window_set_filter("fast" / "good" / "best" / "nearest")</code> 控制平滑；</li>
+<li><strong>上屏顺序</strong>：<code>XShmPutImage</code>（共享内存 → 中转 Pixmap）→
+  <code>XRenderComposite</code>（Pixmap Picture → 窗口 Picture）→ <code>XSync</code> → <code>XFlush</code>；</li>
+<li><strong>异步错误不再带走宿主进程</strong>：自定义 <code>XSetErrorHandler</code> 记录错误码与可读说明，
+  <code>XSync</code> 后转成 <code>GUI_ERR_WINDOW</code> + Dial 错误槽。Xlib 默认处理器会直接
+  <code>exit(1)</code>，曾让 <code>BadAccess</code>（<code>XShmAttach</code> 的 <code>seg.shmid</code> 未显式填写）表现为
+  进程静默退出；现在显式 <code>seg.shmid = shmid</code> 并逐处 <code>XSync</code> 检查。</li>
+</ul>
+<h3 id="387-windows-后端win32-gdi">38.7 Windows 后端：Win32 GDI</h3>
+<p><code>dial_gui_win32.c</code> 不 include <code>windows.h</code>，按 Win32 ABI 复刻 <code>MSG</code> /
+<code>WNDCLASSA</code> / <code>BITMAPINFOHEADER</code> / <code>RECT</code>，<code>LoadLibraryA("user32.dll")</code> /
+<code>gdi32.dll</code> + <code>GetProcAddress</code> 动态解析。</p>
+<ul>
+<li><code>CreateDIBSection</code> 32bpp <strong>top-down BGRA</strong>（<code>biHeight = -h</code>），
+  <code>CreateCompatibleDC</code> / <code>SelectObject</code> 绑定；</li>
+<li><code>SetStretchBltMode(HALFTONE)</code> 对应 XRender 的平滑 filter，
+  <code>StretchBlt</code> 上屏（<code>filter=best</code> 时后端能力串含 <code>stretch=halftone</code>）；</li>
+<li>WndProc 把 Win32 消息入队再映射成统一事件码，Dial 侧代码平台无关。</li>
+</ul>
+<blockquote>
+<p><strong>平台边界（如实标注）</strong>：沙箱只做 <code>zig cc</code> 交叉编译 + <code>nm -u</code> 符号检查，
+<strong>无法实机运行 Win32 后端</strong>。X11 后端在 Xvfb 下真开窗口验收；
+Win32 后端的实机行为<strong>尚未验证</strong>，绝不写成「已实测」。Direct2D 亦未落地，
+当前 Windows 走的是 GDI 路径。</p>
+</blockquote>
+<h3 id="388-零链接期依赖">38.8 零链接期依赖</h3>
+<p>三平台 <code>.a</code> 只保留 libc / libm / kernel32 / <code>dial_string_*</code> 等符号，
+<code>nm -u</code> 断言<strong>不含</strong> <code>XOpenDisplay</code> / <code>XShmCreateImage</code> / <code>XRenderComposite</code> /
+<code>CreateDIBSection</code> / <code>CreateWindowExA</code> 等平台 GUI 未定义符号。
+<code>dialc</code> 最终链接<strong>不需要</strong>新增 <code>-lX11</code> / <code>-lXext</code> / <code>-lXrender</code> / <code>-lgdi32</code>；
+缺库在<strong>运行时</strong>由 <code>dlopen</code> / <code>LoadLibraryA</code> 返回明确错误码 + 错误槽，
+绝不静默崩溃。包版本跟随编译器（<code>dial.toml</code> 的 <code>version</code> 由 CI 用
+<code>Cargo.toml</code> 覆盖），<code>abi = 6</code>，与 <code>stdlib.dialpkg</code> 同口径。</p>
+<h3 id="389-dial-侧用法">38.9 Dial 侧用法</h3>
+<pre><code class="language-dial">import &quot;gui&quot;;
+
+// 颜色 0xAARRGGBB（Dial 支持 0x 前缀字面量）
+// 纯内存离屏画布：不开窗、不连显示服务器，像素级可断言
+var p: GuiPainter = dial_gui_painter_offscreen(32, 32);
+dial_gui_set_aa(p, 4);
+dial_gui_clear(p, 0xFFFFFFFF);                 // 不透明白
+dial_gui_set_color(p, 0xFFFF0000);             // 不透明红
+dial_gui_fill_rect(p, 4, 4, 8, 8);
+dial_gui_set_color(p, 0xFF0000FF);
+dial_gui_fill_trapezoid_aa(p, 24, 28, 22.5, 27.5, 22.5, 27.5);
+var edge: int = dial_gui_get_pixel(p, 22, 25); // AA 边缘 != 纯色
+print(&quot;crc = &quot; + str(dial_gui_painter_crc32(p)));
+dial_gui_painter_free(p);
+
+// 真实窗口 + 事件循环（X11 下需 DISPLAY；生产代码须检查 is_null）
+var app: GuiApp = dial_gui_app_new();
+var win: GuiWindow = dial_gui_window_new(app, &quot;hello&quot;, 320, 200);
+var wp: GuiPainter = dial_gui_window_painter(win);
+dial_gui_clear(wp, 0xFFFFFFFF);
+dial_gui_window_set_filter(win, &quot;best&quot;);
+dial_gui_window_flush(win);
+print(dial_gui_window_backend(win));
+while (dial_gui_app_should_quit(app) == 0) {
+    var ev: int = dial_gui_app_wait(app, 16);
+    if (ev == 8) { dial_gui_app_quit(app); }   // 8 = CLOSE
+}
+dial_gui_window_close(win);
+dial_gui_app_free(app);
+</code></pre>
+<blockquote>
+<p>完整可运行 demo 见 <code>tests/pkg/use_gui.dial</code>：为可读性那里用 <code>rgba(a,r,g,b)</code>
+辅助函数拼颜色；无 DISPLAY 时窗口路径打印 <code>window = skipped [原因]</code>，
+<strong>不伪装通过</strong>。</p>
+</blockquote>
+<h3 id="3810-aa-组回归与平台边界">38.10 AA 组回归与平台边界</h3>
+<p><code>tests/run_tests.sh</code> 新增 <strong>AA 组</strong>（全量从 A–Z 二十六组扩为
+A–Z + AA <strong>二十七组</strong>），依次验收：</p>
+<ol>
+<li><code>packages/gui/build.sh</code> 三平台 <code>.a</code> 构建（零警告）+ <code>stb</code> SHA256 自检；</li>
+<li><code>nm -u</code> 检查三份 <code>.a</code> 无平台 GUI 未定义符号；</li>
+<li><code>dialc pack</code> / <code>install</code> / <code>import</code> / 编译 / 运行闭环；</li>
+<li><strong>无 DISPLAY 路径</strong>：离屏画布 24 项断言（尺寸 / AA / 各图元 / 裁剪 /
+   点阵与 TrueType 字体 / 坏字体路径 / <code>get_pixel</code> / CRC32），窗口明确跳过；</li>
+<li><strong>Xvfb 实窗路径</strong>（<code>+extension MIT-SHM +extension RENDER</code>）：
+   严格断言 <code>window = ok</code> / <code>window_backend = x11/xshm/xrender ...</code> /
+   <code>window_flush = ok</code> / <code>quit_event = ok</code>；有 <code>xvfb-run</code> 就必须实机验证，
+   没有则明确打印「真实窗口路径未实机验证」，绝不把未验证写成通过；</li>
+<li>卸载 <code>gui</code> 包。</li>
+</ol>
+<p>全量实测 <code>EXIT=0</code>，<strong>507 ✅ / 0 ❌</strong>；Xvfb 连续三次实窗能力串
+<code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，像素 CRC 稳定
+<code>4007435570</code>。</p>
+<h3 id="3811-能力边界不许当已支持">38.11 能力边界（不许当已支持）</h3>
+<ul>
+<li><strong>本轮只做地基</strong>：控件树 / 布局管理器 / 信号槽<strong>未实现</strong>，也<strong>不写进
+  <code>gui.diali</code></strong>——把未实现函数写进契约会让用户 <code>import</code> 后链接失败，
+  那是制造漂移而非预留接口；</li>
+<li>Windows 后端<strong>未实机验证</strong>（沙箱只能交叉编译），Direct2D <strong>未落地</strong>；</li>
+<li>功能键编码<strong>两平台尚未统一</strong>（§38.2 键码表），只保证可打印字符一致；</li>
+<li>字体只加载<strong>本机可信</strong>文件，绝不接受网络字体；内置点阵仅覆盖 ASCII
+  <code>0x20..0x7E</code>，非 ASCII 走 TrueType 路径；</li>
+<li>事件循环是<strong>单线程</strong>模型，<code>GuiApp</code> 的事件槽每 App 一份，不要多线程共享；</li>
+<li><code>.diali</code> 的 <code>extern fn</code> 必须<strong>单行写完整</strong>（与 http / json / crypto 包同口径），
+  跨行声明会被 <code>parse_diali</code> 误判返回类型。</li>
+</ul></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

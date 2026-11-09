@@ -1,0 +1,226 @@
+// gui.dialpkg —— 手写 GUI 地基（窗 / 事件循环 / 2D 绘图），Dial 语言接口签名
+//
+// 本文件是**唯一**的对外契约：包内机器码的实现可以变，但这里的签名一变，
+// 依赖它的程序就得重编。签名文件带 SHA256 校验，被篡改会在链接期被拦下。
+//
+// 设计立场（详见 packages/gui/src/dial_gui.h 与 README §38）：
+//   - 不用 Qt / GTK / SDL：窗口、事件、光栅化全部自己写 C；
+//   - Linux / Termux：X11 + **XShm** 共享内存离屏像素 + **XRender** Picture
+//     合成（SetPictureFilter 平滑缩放 + 梯形 AA 接口）；
+//   - Windows：Win32 GDI CreateDIBSection 离屏 BGRA + StretchBlt 上屏
+//     （SetStretchBltMode(HALFTONE) 对应 XRender 平滑 filter），
+//     Win32 消息循环映射成同一套事件码，Dial 侧代码平台无关；
+//   - 平台库一律 **dlopen / LoadLibraryA 动态装载**：三平台 .a 自包含，
+//     Dial 侧不需要写 link，也不需要链接期注入 -lX11 / -lgdi32；
+//     缺库返回明确错误码 + 最近错误槽，绝不静默崩溃；
+//   - 2D 光栅化器自研：ARGB32 像素缓冲 + 覆盖面积采样 AA（1/2/4/8 倍），
+//     矩形 / 线 / 圆 / 椭圆 / 梯形 / 位图 / 裁剪 / alpha 混合；
+//   - 字体双路径：内置 8x8 ASCII 点阵（零依赖兜底）+ 可选 TrueType
+//     （stb_truetype.h v1.26，MIT）。**只加载本机可信字体文件**，
+//     绝不解析来自网络的字体（上游明确不做 TTF 偏移量范围检查）；
+//   - 错误走返回码 + 最近错误槽，不抛 Dial 异常；句柄不进 ARC，必须显式 free。
+//
+// 颜色约定：所有 color 参数都是 **0xAARRGGBB**  packed 进 int64（高 32 位为 0）。
+// C 侧在 X11 走 ARGB32、在 GDI 走 BGRA，通道转换由包内部负责，Dial 侧无感。
+//
+// 事件码（dial_gui_app_poll / dial_gui_app_wait 的返回值）：
+//   0 NONE        1 MOUSE_PRESS   2 MOUSE_RELEASE   3 MOUSE_MOVE
+//   4 KEY_PRESS   5 KEY_RELEASE   6 RESIZE          7 EXPOSE
+//   8 CLOSE       9 QUIT
+// 取事件字段用下面的 dial_gui_event_* 访问器（每 App 一份最近事件槽）。
+//
+// 本轮范围：地基层（Application / Window / Painter / Event / Font）。
+// 控件树、布局管理器与信号槽是下一轮规划，**不写进本契约**——把未实现的
+// 函数写进 .diali 会让用户 import 后链接失败，那是制造漂移而非预留接口。
+
+/// GUI 应用上下文（不透明）。持有显示连接、窗口表、事件循环状态与最近事件槽。
+/// 用完必须 dial_gui_app_free 释放——不透明句柄不进 ARC。
+type GuiApp;
+
+/// 窗口句柄（不透明）。一个 App 可持有多个窗口。
+type GuiWindow;
+
+/// 离屏像素画布（不透明）。可绑定窗口（dial_gui_window_painter），也可纯内存
+/// 独立创建（dial_gui_painter_offscreen，不开窗、不依赖显示服务器，供像素级测试）。
+type GuiPainter;
+
+/// 字体句柄（不透明）。内置点阵由 dial_gui_font_default 返回，
+/// TrueType 由 dial_gui_font_load 加载；用完一律 dial_gui_font_free。
+type GuiFont;
+
+// ---- 应用 / 事件循环 --------------------------------------------------
+
+/// 创建应用上下文。失败返回空句柄（is_null 判断），原因见 dial_gui_last_error_msg。
+/// 内部按需 dlopen 平台库：Linux/musl 为 libX11 / libXext / libXrender，
+/// Windows 为 user32 / gdi32（不需要 msimg32；上屏用 gdi32 的 StretchBlt +
+/// SetStretchBltMode）。缺任一必需库即失败并给出库名。
+extern fn dial_gui_app_new(): GuiApp;
+
+/// 释放应用上下文，同时关闭并释放其下所有窗口 / 画布 / 字体。返回 0 成功。
+extern fn dial_gui_app_free(app: GuiApp): int;
+
+/// 非阻塞轮询一个事件，返回事件码（无事件返回 0）。每次调用只泵一次平台事件队列。
+extern fn dial_gui_app_poll(app: GuiApp): int;
+
+/// 阻塞等待一个事件，超时 timeout_ms 毫秒后返回 0。timeout_ms < 0 表示无限等待。
+/// 事件循环典型写法：while (dial_gui_app_wait(app, 16) >= 0) { ... }。
+extern fn dial_gui_app_wait(app: GuiApp, timeout_ms: int): int;
+
+/// 请求退出事件循环（下一轮 poll/wait 返回 9 QUIT）。
+extern fn dial_gui_app_quit(app: GuiApp): int;
+
+/// 是否已收到退出请求。
+extern fn dial_gui_app_should_quit(app: GuiApp): int;
+
+// ---- 事件字段访问器（最近一次 poll/wait 产出的事件）--------------------
+
+/// 最近事件码（与 poll/wait 返回值一致）。
+extern fn dial_gui_event_kind(app: GuiApp): int;
+/// 鼠标 X（窗口客户区坐标，像素）。
+extern fn dial_gui_event_x(app: GuiApp): int;
+/// 鼠标 Y（窗口客户区坐标，像素）。
+extern fn dial_gui_event_y(app: GuiApp): int;
+/// 鼠标按键号：1 左 / 2 中 / 3 右；滚轮用 4 / 5。非鼠标事件为 0。
+extern fn dial_gui_event_button(app: GuiApp): int;
+/// 键码：可打印字符为 Unicode 码点；功能键见 README §38 键码表。非键盘事件为 0。
+extern fn dial_gui_event_key(app: GuiApp): int;
+/// RESIZE 事件的新宽度。
+extern fn dial_gui_event_width(app: GuiApp): int;
+/// RESIZE 事件的新高度。
+extern fn dial_gui_event_height(app: GuiApp): int;
+/// 产生该事件的窗口句柄（可能为窗口级伪事件，用 is_null 判断）。
+extern fn dial_gui_event_window(app: GuiApp): GuiWindow;
+
+// ---- 窗口 ------------------------------------------------------------
+
+/// 创建窗口。title 为 UTF-8 字符串；w/h 为客户区初始尺寸（像素）。
+/// 失败返回空句柄，原因见 dial_gui_last_error_msg。
+extern fn dial_gui_window_new(app: GuiApp, title: string, w: int, h: int): GuiWindow;
+
+/// 关闭并释放窗口（同时释放其绑定的画布）。返回 0 成功。
+extern fn dial_gui_window_close(win: GuiWindow): int;
+
+/// 映射窗口到屏幕（创建后默认已映射，此函数用于重新显示）。
+extern fn dial_gui_window_show(win: GuiWindow): int;
+
+/// 修改窗口标题。
+extern fn dial_gui_window_set_title(win: GuiWindow, title: string): int;
+
+/// 修改客户区尺寸；会重建离屏像素缓冲（XShm 段 / DIBSection）并触发 RESIZE。
+extern fn dial_gui_window_resize(win: GuiWindow, w: int, h: int): int;
+
+/// 取当前客户区宽度。
+extern fn dial_gui_window_width(win: GuiWindow): int;
+/// 取当前客户区高度。
+extern fn dial_gui_window_height(win: GuiWindow): int;
+
+/// 取该窗口绑定的离屏画布（窗口拥有它，不要单独 free）。
+extern fn dial_gui_window_painter(win: GuiWindow): GuiPainter;
+
+/// 把离屏画布送上屏幕：Linux 先 XShmPutImage 零拷贝上传共享内存到中转
+/// Pixmap，再 XRenderComposite（Picture + filter）合成到窗口；Windows 走
+/// SetStretchBltMode(HALFTONE) + StretchBlt。返回 0 成功。
+extern fn dial_gui_window_flush(win: GuiWindow): int;
+
+/// 设置合成过滤器："fast" / "good" / "best" / "nearest"。Linux 走
+/// XRenderSetPictureFilter；Windows 据此选 SetStretchBltMode（good/best →
+/// HALFTONE）并写进后端能力串。非法值返回 -1。用于窗口缩放时的平滑抗锯齿。
+extern fn dial_gui_window_set_filter(win: GuiWindow, filter: string): int;
+
+/// 返回后端能力串，例如 "x11/xshm/xrender argb32 filter=best visual_depth=24"
+/// 或 "win32/gdi/dibsection bgra filter=best stretch=halftone"。
+/// 供测试断言 XShm / XRender 确已绑定。
+extern fn dial_gui_window_backend(win: GuiWindow): string;
+
+// ---- 离屏画布（可脱离显示服务器独立使用）------------------------------
+
+/// 创建纯内存离屏画布（不开窗、不连 X11/GDI）。用于像素级单测与离屏渲染。
+extern fn dial_gui_painter_offscreen(w: int, h: int): GuiPainter;
+
+/// 释放纯内存离屏画布。窗口绑定的画布由 window_close 释放，不要对它调用。
+extern fn dial_gui_painter_free(p: GuiPainter): int;
+
+/// 画布宽度 / 高度。
+extern fn dial_gui_painter_width(p: GuiPainter): int;
+extern fn dial_gui_painter_height(p: GuiPainter): int;
+
+/// 设置抗锯齿倍率：1（关闭）/ 2 / 4 / 8（覆盖面积子采样）。默认 4。
+extern fn dial_gui_set_aa(p: GuiPainter, level: int): int;
+
+/// 设置当前前景色（0xAARRGGBB）。后续绘制调用都用它。
+extern fn dial_gui_set_color(p: GuiPainter, color: int): int;
+
+/// 整块填充为当前前景色（忽略裁剪区外的部分）。
+extern fn dial_gui_clear(p: GuiPainter, color: int): int;
+
+/// 设置裁剪矩形；之后所有绘制只影响该区域。
+extern fn dial_gui_set_clip(p: GuiPainter, x: int, y: int, w: int, h: int): int;
+/// 取消裁剪。
+extern fn dial_gui_clear_clip(p: GuiPainter): int;
+
+/// 实心矩形。
+extern fn dial_gui_fill_rect(p: GuiPainter, x: int, y: int, w: int, h: int): int;
+/// 矩形描边，thickness 为线宽（像素）。
+extern fn dial_gui_stroke_rect(p: GuiPainter, x: int, y: int, w: int, h: int, thickness: int): int;
+/// 线段（两端为圆帽，覆盖面积 AA）。
+extern fn dial_gui_draw_line(p: GuiPainter, x0: int, y0: int, x1: int, y1: int, thickness: int): int;
+/// 实心圆。
+extern fn dial_gui_fill_circle(p: GuiPainter, cx: int, cy: int, r: int): int;
+/// 圆环描边，thickness 为线宽。
+extern fn dial_gui_stroke_circle(p: GuiPainter, cx: int, cy: int, r: int, thickness: int): int;
+/// 实心椭圆（rx/ry 为半轴）。
+extern fn dial_gui_fill_ellipse(p: GuiPainter, cx: int, cy: int, rx: int, ry: int): int;
+
+/// 梯形 AA 填充：上边 y0 从 x_tl 到 x_tr，下边 y1 从 x_bl 到 x_br。
+/// 一律走**自研光栅化器**的覆盖面积子采样，画进 CPU 离屏缓冲，三平台结果逐像素一致，
+/// 保证 get_pixel / painter_crc32 读得到。XRender 的矢量抗锯齿能力用在
+/// dial_gui_window_flush 的 Picture 合成链（见 dial_gui_window_set_filter），
+/// 而非绕过 CPU 缓冲直接画到窗口——否则像素断言与用户自绘会看到两套状态。
+extern fn dial_gui_fill_trapezoid_aa(p: GuiPainter, y0: int, y1: int, x_tl: float, x_tr: float, x_bl: float, x_br: float): int;
+
+/// 直接读写单个像素（0xAARRGGBB）。用于像素级断言与自定义绘制。
+extern fn dial_gui_get_pixel(p: GuiPainter, x: int, y: int): int;
+extern fn dial_gui_set_pixel(p: GuiPainter, x: int, y: int, color: int): int;
+
+/// 从一段 ARGB32 字节缓冲（长度须 >= w*h*4）贴图到 (dx,dy)，按 alpha 混合。
+extern fn dial_gui_blit_pixels(p: GuiPainter, dx: int, dy: int, w: int, h: int, pixels: bytes): int;
+
+/// 整块像素的 CRC32（自研、纯内存），供回归测试断言绘制结果稳定。
+extern fn dial_gui_painter_crc32(p: GuiPainter): int;
+
+// ---- 字体 / 文本 ------------------------------------------------------
+
+/// 内置 8x8 ASCII 点阵字体（零依赖，任何环境都可用；无需 free 外部资源，
+/// 但按统一契约仍要 dial_gui_font_free）。返回空句柄表示分配失败。
+extern fn dial_gui_font_default(): GuiFont;
+
+/// 从本机可信 TTF/OTF 文件加载字体。失败返回空句柄，原因见错误槽。
+/// **绝不接受来自网络的字体数据**：stb_truetype 上游不做偏移量范围检查。
+extern fn dial_gui_font_load(path: string): GuiFont;
+
+/// 字体种类：0 内置点阵 / 1 TrueType。
+extern fn dial_gui_font_kind(font: GuiFont): int;
+
+/// 释放字体句柄。返回 0 成功。
+extern fn dial_gui_font_free(font: GuiFont): int;
+
+/// 在 (x,y) 处绘制 UTF-8 文本，size 为像素高度，颜色取当前前景色。
+/// 返回绘制推进后的 x 坐标（便于连续排版）；失败返回 -1。
+extern fn dial_gui_draw_text(p: GuiPainter, x: int, y: int, text: string, font: GuiFont, size: int): int;
+
+/// 测量文本在给定字号下的像素宽度（不绘制）。
+extern fn dial_gui_text_width(text: string, font: GuiFont, size: int): int;
+
+// ---- 错误槽 ----------------------------------------------------------
+
+/// 最近一次错误码：0 表示无错误。错误码表见 README §38。
+extern fn dial_gui_last_error(): int;
+/// 最近一次错误的人类可读说明（线程局部）。无错误时返回空字符串。
+extern fn dial_gui_last_error_msg(): string;
+/// 清空错误槽（成功路径也应调用，避免读到上一次的陈旧错误）。
+extern fn dial_gui_clear_error(): int;
+
+// ---- 平台信息 --------------------------------------------------------
+
+/// 当前编译目标的后端名："x11" / "win32"。
+extern fn dial_gui_backend(): string;

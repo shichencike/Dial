@@ -1,8 +1,18 @@
 {
   "source": "CHANGELOG.md",
   "index": "../changelog.html",
-  "count": 32,
+  "count": 33,
   "versions": [
+    {
+      "id": "unreleased-dev",
+      "label": "未发布",
+      "date": "",
+      "note": "开发中增量（未升版本号 / 未打标签 / 未发 Release）",
+      "topic": "手搓 GUI 地基包 gui.dialpkg（开发中增量，未升版本号 / 未发布）",
+      "file": "unreleased-dev.html",
+      "newer": null,
+      "older": "v1.10"
+    },
     {
       "id": "v1.10",
       "label": "v1.10",
@@ -10,7 +20,7 @@
       "note": "2026-11-08",
       "topic": "底层原语补齐（@asm / simd）+ 首个发布标签 v1.1",
       "file": "v1.10.html",
-      "newer": null,
+      "newer": "unreleased-dev",
       "older": "v1.04"
     },
     {

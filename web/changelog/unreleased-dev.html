@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 未发布 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</a><ul>
+<li><a href="#added">Added</a></li>
+<li><a href="#changed">Changed</a></li>
+<li><a href="#测试与交付">测试与交付</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</h2>
+<p><strong>主题：手搓 GUI 地基包 <code>gui.dialpkg</code>。</strong> 详见
+<a href="../spec.html#38-手搓-gui-地基包guidialpkg">README §38</a>。</p>
+<blockquote>
+<p><strong>版本与交付口径（防漂移，务必先读）</strong>：本段记录的是 <strong><code>[v1.10]</code>（Git 标签 <code>v1.1</code>）
+发布之后</strong>、仍在工作树里的<strong>开发中增量</strong>——本轮只要求「制作 <code>gui.dialpkg</code>
+原型 + 完整工程骨架」，<strong>没有</strong>要求升版本号、打标签或发 Release。因此
+<code>Cargo.toml</code> 仍为 <code>1.10.0</code>、<code>dialc --version</code> 仍输出 <code>dialc 1.10.0</code>、
+README 首行与官网 KPI 仍是 <code>v1.10</code>，<strong>不新增 <code>[v1.11]</code></strong>：那会让文档版本号与
+Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，再把本段归并进对应
+版本标题，并在 §23 规则下同步所有载体。</p>
+<p><strong><code>[v1.10]</code> 段的「A–Z 二十六组 / 499 ✅」是 <code>v1.1</code> 标签发布时的验收快照，
+保持原文不改</strong>；本增量把回归扩到 <strong>A–Z + AA 二十七组 / 507 ✅</strong>。两者是不同
+时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
+</blockquote>
+<h3 id="added">Added</h3>
+<ul>
+<li><strong><code>gui.dialpkg</code>：手搓 GUI 地基包</strong>（README §38）：不用 Qt / GTK / SDL，纯 X11 自绘。
+  第一版范围只做<strong>地基：窗 + 事件 + 绘图</strong>；控件树 / 布局 / 信号槽<strong>暂不进 <code>.diali</code>
+  契约</strong>，避免未实现符号造成漂移。</li>
+<li><strong>自研迷你 2D 光栅化器</strong>：ARGB32 像素缓冲、<code>source-over</code> alpha 混合、
+  1/2/4/8 档覆盖面积采样抗锯齿、矩形 / 线 / 圆 / 圆环 / 椭圆 / 梯形 / 位图 /
+  裁剪 / 像素读写；<code>dial_gui_painter_crc32()</code> 提供像素级回归断言。</li>
+<li><strong>字体层</strong>：内置 8×8 ASCII 点阵（零运行依赖兜底）+ vendor <code>stb_truetype.h</code> v1.26
+  （MIT）做 TrueType 字形栅格化；只加载本机可信字体文件（≤ 64 MB），
+  <strong>绝不解析不可信 / 网络字体</strong>（上游明确 <code>NO SECURITY GUARANTEE</code>）。</li>
+<li><strong>Linux / Termux 后端（真实现）</strong>：<code>libX11</code> / <code>libXext</code> / <code>libXrender</code> 一律
+  <code>dlopen</code> + <code>dlsym</code> 动态装载；<strong>XShm</strong> 共享内存离屏画布 + <strong>XRender</strong> Picture/Filter
+  合成，自定义 <code>XSetErrorHandler</code> 把异步 X11 错误转成 Dial 返回码 + 错误槽，
+  避免 Xlib 默认处理器 <code>exit(1)</code> 带走宿主进程。</li>
+<li><strong>Windows 后端（真实现）</strong>：<code>LoadLibraryA("user32.dll")</code> / <code>gdi32.dll</code> 动态解析，
+  <code>CreateDIBSection</code> 32bpp top-down BGRA + <code>CreateCompatibleDC</code> / <code>StretchBlt</code>，
+  <code>SetStretchBltMode(HALFTONE)</code> 对应 XRender 平滑 filter；Win32 消息循环映射统一事件码。
+  <strong>沙箱只能交叉编译、不能实机运行</strong>，平台边界如实标注。</li>
+<li><strong>三平台 <code>.a</code> 零链接期依赖</strong>：<code>x86_64-linux-gnu</code> / <code>aarch64-unknown-linux-musl</code> /
+  <code>x86_64-pc-windows-gnu</code> 均由 <code>zig cc</code> 一次交叉编译；<code>nm -u</code> 断言 <code>.a</code> 不含
+  <code>XOpenDisplay</code> / <code>XShmCreateImage</code> / <code>XRenderComposite</code> / <code>CreateDIBSection</code> /
+  <code>CreateWindowExA</code> 等平台 GUI 未定义符号，<code>dialc</code> 最终链接<strong>不需要</strong>新增
+  <code>-lX11</code> / <code>-lgdi32</code>。</li>
+</ul>
+<h3 id="changed">Changed</h3>
+<ul>
+<li><code>tests/run_tests.sh</code> 新增 <strong>AA 组</strong>（<code>gui.dialpkg</code> 端到端）：三平台构建、零警告检查、
+  <code>nm -u</code> 符号检查、<code>pack</code> / <code>install</code>、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
+  （<code>window = ok</code> / <code>window_backend = x11/xshm/xrender</code> / <code>window_flush = ok</code> /
+  <code>quit_event = ok</code>）、卸载。全量从 A–Z 二十六组扩为 <strong>A–Z + AA 二十七组</strong>。</li>
+<li><code>.github/workflows/ci.yml</code>：阶段 8 构建循环与 <code>dialc pack</code> 循环加入 <code>gui</code>，
+  <code>dist-gui/gui.dialpkg</code> 归集进 <code>dist-c11/</code>，新增无头 X11 环境准备步骤，
+  Release 资产列表加入 <code>gui.dialpkg</code>；顺手修正 <code>softprops/action-gh-release@v2</code>
+  的无效输入 <code>overwrite: true</code>（正确为 <code>overwrite_files</code>）。</li>
+<li><code>third_party/README.md</code> 与 <code>patches/stb-1.26.SHA256SUMS</code> 登记 <code>stb/</code> vendor 基线，
+  构建前后 <code>sha256sum -c</code> 校验 <code>third_party/</code> 零改动，保证离线可复现。</li>
+</ul>
+<h3 id="测试与交付">测试与交付</h3>
+<ul>
+<li><code>bash tests/run_tests.sh</code> <strong>A–Z + AA 二十七组全套通过（507 ✅ / 0 ❌）</strong>；
+  Xvfb 连续三次实窗 <code>EXIT=0</code>，能力串
+  <code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，像素 CRC 稳定 <code>4007435570</code>；
+  无 DISPLAY 路径 24 项断言全绿、窗口明确打印 <code>window = skipped [原因]</code>，
+  <strong>绝不把未验证写成通过</strong>。</li>
+<li><code>tools/cve_check.py</code> 8/8；语言能力审计 <code>TOTAL=38 PASS=38 FAIL=0</code>；
+  <code>check_version</code> / <code>check_links</code> 全通过；<code>cargo check</code> 零警告；
+  官网由 <code>tools/build_web.py</code> 重新生成并与文档同步。</li>
+<li><strong>交付状态</strong>：仅本地提交，未推送、未打标签、未发 Release（遵循本段开头的口径）。</li>
+</ul>
+<hr /><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

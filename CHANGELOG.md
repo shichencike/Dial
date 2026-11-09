@@ -20,6 +20,75 @@
 
 ---
 
+## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）
+
+**主题：手搓 GUI 地基包 `gui.dialpkg`。** 详见
+[README §38](README.md#38-手搓-gui-地基包guidialpkg)。
+
+> **版本与交付口径（防漂移，务必先读）**：本段记录的是 **`[v1.10]`（Git 标签 `v1.1`）
+> 发布之后**、仍在工作树里的**开发中增量**——本轮只要求「制作 `gui.dialpkg`
+> 原型 + 完整工程骨架」，**没有**要求升版本号、打标签或发 Release。因此
+> `Cargo.toml` 仍为 `1.10.0`、`dialc --version` 仍输出 `dialc 1.10.0`、
+> README 首行与官网 KPI 仍是 `v1.10`，**不新增 `[v1.11]`**：那会让文档版本号与
+> Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，再把本段归并进对应
+> 版本标题，并在 §23 规则下同步所有载体。
+>
+> **`[v1.10]` 段的「A–Z 二十六组 / 499 ✅」是 `v1.1` 标签发布时的验收快照，
+> 保持原文不改**；本增量把回归扩到 **A–Z + AA 二十七组 / 507 ✅**。两者是不同
+> 时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
+
+### Added
+
+- **`gui.dialpkg`：手搓 GUI 地基包**（README §38）：不用 Qt / GTK / SDL，纯 X11 自绘。
+  第一版范围只做**地基：窗 + 事件 + 绘图**；控件树 / 布局 / 信号槽**暂不进 `.diali`
+  契约**，避免未实现符号造成漂移。
+- **自研迷你 2D 光栅化器**：ARGB32 像素缓冲、`source-over` alpha 混合、
+  1/2/4/8 档覆盖面积采样抗锯齿、矩形 / 线 / 圆 / 圆环 / 椭圆 / 梯形 / 位图 /
+  裁剪 / 像素读写；`dial_gui_painter_crc32()` 提供像素级回归断言。
+- **字体层**：内置 8×8 ASCII 点阵（零运行依赖兜底）+ vendor `stb_truetype.h` v1.26
+  （MIT）做 TrueType 字形栅格化；只加载本机可信字体文件（≤ 64 MB），
+  **绝不解析不可信 / 网络字体**（上游明确 `NO SECURITY GUARANTEE`）。
+- **Linux / Termux 后端（真实现）**：`libX11` / `libXext` / `libXrender` 一律
+  `dlopen` + `dlsym` 动态装载；**XShm** 共享内存离屏画布 + **XRender** Picture/Filter
+  合成，自定义 `XSetErrorHandler` 把异步 X11 错误转成 Dial 返回码 + 错误槽，
+  避免 Xlib 默认处理器 `exit(1)` 带走宿主进程。
+- **Windows 后端（真实现）**：`LoadLibraryA("user32.dll")` / `gdi32.dll` 动态解析，
+  `CreateDIBSection` 32bpp top-down BGRA + `CreateCompatibleDC` / `StretchBlt`，
+  `SetStretchBltMode(HALFTONE)` 对应 XRender 平滑 filter；Win32 消息循环映射统一事件码。
+  **沙箱只能交叉编译、不能实机运行**，平台边界如实标注。
+- **三平台 `.a` 零链接期依赖**：`x86_64-linux-gnu` / `aarch64-unknown-linux-musl` /
+  `x86_64-pc-windows-gnu` 均由 `zig cc` 一次交叉编译；`nm -u` 断言 `.a` 不含
+  `XOpenDisplay` / `XShmCreateImage` / `XRenderComposite` / `CreateDIBSection` /
+  `CreateWindowExA` 等平台 GUI 未定义符号，`dialc` 最终链接**不需要**新增
+  `-lX11` / `-lgdi32`。
+
+### Changed
+
+- `tests/run_tests.sh` 新增 **AA 组**（`gui.dialpkg` 端到端）：三平台构建、零警告检查、
+  `nm -u` 符号检查、`pack` / `install`、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
+  （`window = ok` / `window_backend = x11/xshm/xrender` / `window_flush = ok` /
+  `quit_event = ok`）、卸载。全量从 A–Z 二十六组扩为 **A–Z + AA 二十七组**。
+- `.github/workflows/ci.yml`：阶段 8 构建循环与 `dialc pack` 循环加入 `gui`，
+  `dist-gui/gui.dialpkg` 归集进 `dist-c11/`，新增无头 X11 环境准备步骤，
+  Release 资产列表加入 `gui.dialpkg`；顺手修正 `softprops/action-gh-release@v2`
+  的无效输入 `overwrite: true`（正确为 `overwrite_files`）。
+- `third_party/README.md` 与 `patches/stb-1.26.SHA256SUMS` 登记 `stb/` vendor 基线，
+  构建前后 `sha256sum -c` 校验 `third_party/` 零改动，保证离线可复现。
+
+### 测试与交付
+
+- `bash tests/run_tests.sh` **A–Z + AA 二十七组全套通过（507 ✅ / 0 ❌）**；
+  Xvfb 连续三次实窗 `EXIT=0`，能力串
+  `x11/xshm/xrender argb32 filter=best visual_depth=24`，像素 CRC 稳定 `4007435570`；
+  无 DISPLAY 路径 24 项断言全绿、窗口明确打印 `window = skipped [原因]`，
+  **绝不把未验证写成通过**。
+- `tools/cve_check.py` 8/8；语言能力审计 `TOTAL=38 PASS=38 FAIL=0`；
+  `check_version` / `check_links` 全通过；`cargo check` 零警告；
+  官网由 `tools/build_web.py` 重新生成并与文档同步。
+- **交付状态**：仅本地提交，未推送、未打标签、未发 Release（遵循本段开头的口径）。
+
+---
+
 ## [v1.10] — 2026-11-08
 
 **主题：底层原语补齐，首个带发布标签的正式分版。** 详见

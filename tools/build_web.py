@@ -355,6 +355,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
 # ---------------------------------------------------------------------------
 
 TOPICS = {
+    "unreleased-dev": "手搓 GUI 地基包 gui.dialpkg（开发中增量，未升版本号 / 未发布）",
     "v1.10": "底层原语补齐（@asm / simd）+ 首个发布标签 v1.1",
     "v1.04": "FFI 成为语言一等公民",
     "v1-0-milestone": "v1.0 里程碑达成的分版记录（v1.00 ~ v1.03）",
@@ -395,6 +396,7 @@ SLUG_OVERRIDES = {
     "CI 修复与 v1.0 标签重打": "ci-fix-v1-0-retag",
     "安装与发布流程调整": "install-release-flow",
     "stdlib v1.0.0": "stdlib-v1.0.0",
+    "未发布": "unreleased-dev",   # 开发中增量（未升版本号 / 未打标签 / 未发 Release）
 }
 
 HEAD_RE = re.compile(r"^##\s+\[([^\]]+)\]\s*—\s*(.*)$")
@@ -667,7 +669,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
 # 编译并运行一个 Dial 程序
 ./target/release/dialc run examples/hello.dial
 
-# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装等A–Z 二十六组）
+# 端到端自测（正向 + 负向 + 产物契约 + LSP + 包安装等 A–Z+AA 二十七组）
 ./tests/run_tests.sh</code></pre>
   <h2>最小示例</h2>
   <pre><code>fn main(): int {{
@@ -679,7 +681,7 @@ export LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH
     下载发布包：<a class="ext" href="https://github.com/shichencike/Dial/releases/latest/download/dialc-v{VERSION_SHORT}-linux-x86_64.zip">dialc-v{VERSION_SHORT}-linux-x86_64.zip</a>
     （Windows / Termux 见 <a class="ext" href="https://github.com/shichencike/Dial/releases">Releases</a>；或自行 clone 仓库后构建）<br>
     发布包由 <a class="ext" href="https://github.com/shichencike/Dial/actions/workflows/ci.yml" target="_blank" rel="noopener">GitHub Actions</a>
-    自动构建：装 LLVM 18 → 编译 → 跑全部A–Z 二十六组端到端测试 → 打包上传 Release。
+    自动构建：装 LLVM 18 → 编译 → 跑全部 A–Z+AA 二十七组端到端测试 → 打包上传 Release。
   </p>
 </section>
 {FOOTER}

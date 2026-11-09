@@ -1,0 +1,148 @@
+// gui.dialpkg 端到端用例（AA 组）。分两段：
+//   1) 纯内存离屏画布：不连 X11 / GDI，CI 无显示服务器也能全量跑；
+//   2) 真实窗口：需要 DISPLAY / Xvfb。连不上时打印 "window = skipped [原因]"，
+//      测试脚本按环境选择断言强度（有 Xvfb 就必须 window = ok + backend 含 xshm/xrender）。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep；
+// crc_offscreen 锁死整个光栅化器的像素级回归，任何绘制逻辑改动都会让它变化。
+import "gui";
+
+fn rgba(a: int, r: int, g: int, b: int): int {
+    return a * 16777216 + r * 65536 + g * 256 + b;
+}
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var WHITE: int = rgba(255, 255, 255, 255);
+    var RED:   int = rgba(255, 255, 0, 0);
+    var BLUE:  int = rgba(255, 0, 0, 255);
+    var BLACK: int = rgba(255, 0, 0, 0);
+
+    // ---- 1) 纯内存离屏画布（零显示依赖）--------------------------------
+    var p: GuiPainter = dial_gui_painter_offscreen(32, 32);
+    expect(!is_null(p), "offscreen_new");
+    expect_int(dial_gui_painter_width(p), 32, "offscreen_w");
+    expect_int(dial_gui_painter_height(p), 32, "offscreen_h");
+    expect_int(dial_gui_set_aa(p, 4), 0, "set_aa");
+
+    dial_gui_clear(p, WHITE);
+    dial_gui_set_color(p, RED);
+    dial_gui_fill_rect(p, 4, 4, 8, 8);
+    expect_int(dial_gui_get_pixel(p, 6, 6), RED, "fill_rect_center");
+    expect_int(dial_gui_get_pixel(p, 3, 3), WHITE, "fill_rect_outside");
+
+    // 裁剪：只影响 clip 区内
+    dial_gui_set_clip(p, 0, 0, 6, 32);
+    dial_gui_set_color(p, BLUE);
+    dial_gui_fill_rect(p, 0, 20, 20, 4);
+    expect_int(dial_gui_get_pixel(p, 3, 21), BLUE, "clip_inside");
+    expect_int(dial_gui_get_pixel(p, 10, 21), WHITE, "clip_outside");
+    dial_gui_clear_clip(p);
+
+    // 圆 / 椭圆 / 描边 / 线
+    dial_gui_set_color(p, RED);
+    dial_gui_fill_circle(p, 24, 8, 5);
+    expect_int(dial_gui_get_pixel(p, 24, 8), RED, "circle_center");
+    dial_gui_stroke_circle(p, 24, 8, 7, 1);
+    dial_gui_stroke_rect(p, 1, 1, 30, 30, 1);
+    dial_gui_fill_ellipse(p, 8, 14, 5, 3);
+    expect_int(dial_gui_get_pixel(p, 8, 14), RED, "ellipse_center");
+    dial_gui_draw_line(p, 0, 30, 31, 30, 1);
+
+    // 梯形左边界取 22.5（半像素），强制产生部分覆盖 → 验证覆盖面积 AA 真在工作
+    dial_gui_fill_trapezoid_aa(p, 24, 28, 22.5, 27.5, 22.5, 27.5);
+    var edge: int = dial_gui_get_pixel(p, 22, 25);
+    expect(edge != WHITE and edge != RED, "trapezoid_aa_partial");
+
+    dial_gui_set_pixel(p, 31, 31, BLUE);
+    expect_int(dial_gui_get_pixel(p, 31, 31), BLUE, "set_pixel");
+    print("crc_offscreen = " + str(dial_gui_painter_crc32(p)));
+
+    // ---- 2) 字体（内置点阵 + 可选 TrueType）------------------------------
+    var f: GuiFont = dial_gui_font_default();
+    expect(!is_null(f), "font_default");
+    expect_int(dial_gui_font_kind(f), 0, "font_kind_bitmap");
+    expect(dial_gui_text_width("GUI", f, 16) > 0, "bitmap_text_width");
+    dial_gui_set_color(p, BLUE);
+    expect(dial_gui_draw_text(p, 0, 0, "GUI", f, 16) > 0, "bitmap_draw_text");
+    dial_gui_font_free(f);
+
+    var tf: GuiFont = dial_gui_font_load("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf");
+    if (is_null(tf)) {
+        print("ttf = skipped");
+    } else {
+        expect_int(dial_gui_font_kind(tf), 1, "ttf_kind");
+        expect(dial_gui_text_width("Dial GUI", tf, 20) > 0, "ttf_text_width");
+        dial_gui_set_color(p, BLACK);
+        expect(dial_gui_draw_text(p, 0, 16, "Dial GUI", tf, 20) > 0, "ttf_draw_text");
+        dial_gui_font_free(tf);
+    }
+
+    // 坏字体路径必须 Fail-Fast（返回空句柄 + 明确错误），不静默
+    var badf: GuiFont = dial_gui_font_load("/definitely/not/a/font.ttf");
+    expect(is_null(badf), "bad_font_rejected");
+    expect(dial_gui_last_error() != 0, "bad_font_err_code");
+    expect(dial_gui_last_error_msg() != "", "bad_font_err_msg");
+    dial_gui_clear_error();
+    expect_int(dial_gui_last_error(), 0, "clear_error");
+
+    dial_gui_painter_free(p);
+
+    // ---- 3) 真实窗口（需要 DISPLAY / Xvfb）--------------------------------
+    var app: GuiApp = dial_gui_app_new();
+    if (is_null(app)) {
+        print("window = skipped [" + dial_gui_last_error_msg() + "]");
+        print("gui_done = true");
+        return 0;
+    }
+    expect_str(dial_gui_backend(), "x11", "backend_x11");
+
+    var win: GuiWindow = dial_gui_window_new(app, "Dial GUI demo", 320, 200);
+    expect(!is_null(win), "window_new");
+    if (!is_null(win)) {
+        expect_int(dial_gui_window_width(win), 320, "window_w");
+        expect_int(dial_gui_window_height(win), 200, "window_h");
+
+        var wp: GuiPainter = dial_gui_window_painter(win);
+        expect(!is_null(wp), "window_painter");
+        dial_gui_clear(wp, WHITE);
+        dial_gui_set_color(wp, RED);
+        dial_gui_fill_rect(wp, 20, 20, 120, 60);
+        dial_gui_set_color(wp, BLUE);
+        dial_gui_fill_circle(wp, 240, 100, 40);
+        var f2: GuiFont = dial_gui_font_default();
+        dial_gui_set_color(wp, BLACK);
+        dial_gui_draw_text(wp, 20, 100, "Dial GUI - handmade", f2, 16);
+        dial_gui_font_free(f2);
+
+        expect_int(dial_gui_window_flush(win), 0, "window_flush");
+        expect_int(dial_gui_window_set_filter(win, "best"), 0, "window_filter");
+        expect_int(dial_gui_window_set_filter(win, "bogus"), -1, "bad_filter_rejected");
+        var be: string = dial_gui_window_backend(win);
+        print("window_backend = " + be);
+
+        // 事件循环：短超时不挂、quit 后 poll 必返回 QUIT(9)
+        var ev0: int = dial_gui_app_wait(app, 20);
+        expect(ev0 >= 0, "app_wait_nonblocking");
+        dial_gui_app_quit(app);
+        expect_int(dial_gui_app_should_quit(app), 1, "should_quit");
+        expect_int(dial_gui_app_poll(app), 9, "quit_event");
+
+        dial_gui_window_close(win);
+    }
+    dial_gui_app_free(app);
+    print("window = ok");
+    print("gui_done = true");
+    return 0;
+}
