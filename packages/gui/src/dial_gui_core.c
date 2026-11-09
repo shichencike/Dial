@@ -68,6 +68,8 @@ void gui_core_emit(GuiAppImpl *app, int kind, int x, int y, int button, int key,
     app->ev_button = button; app->ev_key = key;
     app->ev_w = w; app->ev_h = h; app->ev_win = win;
     app->ev_widget = hit;
+    /* QUIT 是 core 自己合成的窗口级事件，绝不带上一轮的陈旧修饰键。 */
+    if (kind == GUI_EV_QUIT) app->ev_mods = 0;
     /* 只写纯值 + C 侧借用指针；绝不反向调用 Dial 函数。 */
     gui_widget_fill_event(&app->ev_data, kind, x, y, button, key, w, h, win, hit);
     if (kind == GUI_EV_QUIT) app->quit = 1;
@@ -191,6 +193,8 @@ int64_t dial_gui_event_x(GuiAppImpl *app)      { return app_ok(app) ? app->ev_x 
 int64_t dial_gui_event_y(GuiAppImpl *app)      { return app_ok(app) ? app->ev_y : -1; }
 int64_t dial_gui_event_button(GuiAppImpl *app) { return app_ok(app) ? app->ev_button : -1; }
 int64_t dial_gui_event_key(GuiAppImpl *app)    { return app_ok(app) ? app->ev_key : -1; }
+/* 修饰键位掩码（GUI_MOD_*）：由后端 pump 写进事件槽，core 不覆盖。 */
+int64_t dial_gui_event_mods(GuiAppImpl *app)   { return app_ok(app) ? app->ev_mods : 0; }
 int64_t dial_gui_event_width(GuiAppImpl *app)  { return app_ok(app) ? app->ev_w : -1; }
 int64_t dial_gui_event_height(GuiAppImpl *app) { return app_ok(app) ? app->ev_h : -1; }
 GuiWindowImpl *dial_gui_event_window(GuiAppImpl *app) {
@@ -703,12 +707,18 @@ void *dial_gui_event_data(GuiAppImpl *app) {
 
 int64_t dial_gui_widget_set_kind(GuiWidgetImpl *w, int64_t kind) {
     if (!widget_ok(w)) return -1;
-    if (kind < GUI_WIDGET_BOX || kind > GUI_WIDGET_CHECKBOX) {
+    if (kind < GUI_WIDGET_BOX || kind > GUI_WIDGET_TEXTBOX) {
         gui_core_set_err(GUI_ERR_ARG,
-                         "控件种类只接受 0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX");
+                         "控件种类只接受 0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX / 4 TEXTBOX");
         return -1;
     }
     w->kind = (int)kind;
+    /* 切成 / 切出 TEXTBOX 时把编辑态归零，绝不留着旧光标越界；若它正持有
+     * 焦点又被切成别的种类，主动让焦点出栈（纯 C 树操作，绝不反向回调）。*/
+    if (w->kind != GUI_WIDGET_TEXTBOX) {
+        w->cursor = 0; w->sel_anchor = 0; w->max_len = 0;
+        if (w->focused) gui_widget_set_focus(w, NULL);
+    }
     gui_core_ok();
     return 0;
 }
@@ -724,6 +734,8 @@ int64_t dial_gui_widget_set_text(GuiWidgetImpl *w, DialString text) {
     if (!p) { gui_core_set_err(GUI_ERR_ALLOC, "控件文本内存分配失败"); return -1; }
     free(w->text);
     w->text = p;
+    /* 显式换文本后旧光标 / 选区一律归零，绝不越界（键盘输入另走 input.c）。*/
+    w->cursor = 0; w->sel_anchor = 0;
     gui_core_ok();
     return 0;
 }
@@ -747,7 +759,11 @@ int64_t dial_gui_widget_checked(GuiWidgetImpl *w) {
 int64_t dial_gui_widget_set_disabled(GuiWidgetImpl *w, int64_t v) {
     if (!widget_ok(w)) return -1;
     w->disabled = v ? 1 : 0;
-    if (w->disabled) { w->hovered = 0; w->pressed = 0; }
+    if (w->disabled) {
+        w->hovered = 0; w->pressed = 0;
+        /* 禁用控件不可聚焦：让焦点出栈，避免焦点停在不可交互控件上。 */
+        if (w->focused) gui_widget_set_focus(w, NULL);
+    }
     gui_core_ok();
     return 0;
 }
@@ -783,4 +799,103 @@ int64_t dial_gui_widget_draw(GuiWidgetImpl *root, GuiPainterImpl *p) {
     }
     gui_core_ok();
     return 0;
+}
+
+/* ====================================================================== *
+ * 输入层（gui.diali 末段，14 个追加 extern fn：含 dial_gui_event_mods）
+ *
+ * 与前三层的硬边界一致：句柄校验 → 调 dial_gui_input.c 的纯 C 逻辑，或
+ * 读 / 写 GuiWidgetImpl 上的 C 侧纯值。不碰像素细节、不碰平台 API、
+ * 绝不反向调用 Dial 函数。旧 95 个包装零改动，abi = 6 不变。
+ * ====================================================================== */
+
+/* ---- 焦点链 ------------------------------------------------------------ */
+
+int64_t dial_gui_widget_set_focus(GuiWidgetImpl *root, GuiWidgetImpl *w) {
+    if (!widget_ok(root)) return -1;
+    if (gui_widget_set_focus(root, w) < 0) {
+        gui_core_set_err(GUI_ERR_ARG,
+                         "设置焦点失败：目标不在该树内，或不是可见 / 未禁用的 TEXTBOX");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+GuiWidgetImpl *dial_gui_widget_focus(GuiWidgetImpl *root) {
+    gui_core_ok();
+    return widget_ok(root) ? gui_widget_focus(root) : NULL;
+}
+int64_t dial_gui_widget_focused(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->focused : -1;
+}
+GuiWidgetImpl *dial_gui_widget_focus_next(GuiWidgetImpl *root) {
+    gui_core_ok();
+    return widget_ok(root) ? gui_widget_focus_next(root, 0) : NULL;
+}
+GuiWidgetImpl *dial_gui_widget_focus_prev(GuiWidgetImpl *root) {
+    gui_core_ok();
+    return widget_ok(root) ? gui_widget_focus_next(root, 1) : NULL;
+}
+
+/* ---- 光标 / 选区（UTF-8 字节偏移）-------------------------------------- */
+
+int64_t dial_gui_widget_cursor(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->cursor : -1;
+}
+int64_t dial_gui_widget_set_cursor(GuiWidgetImpl *w, int64_t pos) {
+    if (!widget_ok(w)) return -1;
+    if (gui_widget_set_cursor(w, (int)pos) < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "移动光标失败：该控件不是 TEXTBOX");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_sel_start(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    return w->sel_anchor < w->cursor ? w->sel_anchor : w->cursor;
+}
+int64_t dial_gui_widget_sel_end(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    return w->sel_anchor < w->cursor ? w->cursor : w->sel_anchor;
+}
+int64_t dial_gui_widget_select(GuiWidgetImpl *w, int64_t a, int64_t b) {
+    if (!widget_ok(w)) return -1;
+    if (gui_widget_select(w, (int)a, (int)b) < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "设置选区失败：该控件不是 TEXTBOX");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+
+/* ---- 输入上限 ---------------------------------------------------------- */
+
+int64_t dial_gui_widget_set_max_len(GuiWidgetImpl *w, int64_t n) {
+    if (!widget_ok(w)) return -1;
+    if (n < 0 || n > GUI_TEXT_MAX_LEN) {
+        gui_core_set_err(GUI_ERR_ARG,
+                         "max_len 须为 0（不限）..4096，越界明确拒绝而非静默截断");
+        return -1;
+    }
+    w->max_len = (int)n;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_max_len(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->max_len : -1;
+}
+
+/* ---- 键盘纯值事件推进 -------------------------------------------------- */
+
+int64_t dial_gui_widget_key(GuiWidgetImpl *root, int64_t kind, int64_t key,
+                            int64_t mods) {
+    if (!widget_ok(root)) return -1;
+    int r = gui_widget_key(root, (int)kind, (int)key, (int)mods);
+    if (r < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "widget_key 参数非法（无效根 / 内存分配失败）");
+        return -1;
+    }
+    gui_core_ok();
+    return (int64_t)r;   /* 0 无变化 / 1 文本或光标变化 / 2 焦点变化 / 3 Enter */
 }

@@ -54,14 +54,16 @@
 #      （MD5/SHA-1/SHA-256/SHA-512/SHA3-256，标准向量核对）+ Base64 编解码 +
 #      HMAC-SHA256，string 与 bytes 双入口、含内嵌 NUL 的二进制数据、严格错误路径，
 #      三平台零警告构建（v1.04 增补）。
-#   AA. 手搓 GUI 地基 + 控件框架层 + 成品控件外观层：gui.dialpkg 端到端——三平台
-#      真实现（X11+XShm+XRender / Win32 GDI）/ 零链接期依赖（dlopen / LoadLibraryA）/
-#      纯内存光栅化器像素级 CRC 回归 / 覆盖面积 AA / 内置点阵与 TrueType 双字体 /
-#      Widget 树 + 绝对·VBox·HBox 布局 + 命中测试 + packed 事件纯值块
-#      （sizeof/offsetof 双向锁死 / string_from_cstr 复制成 ARC）/ Label·Button·
-#      CheckBox 默认主题四态绘制 + 纯值事件推进（use_gui_look.dial）/ Xvfb 实窗
-#      上屏与事件循环；无显示环境自动降级为「窗口路径明确跳过」并如实标注
-#      （v1.10 增补）。
+#   AA. 手搓 GUI 四层：地基 + 控件框架 + 成品控件外观 + 输入层，gui.dialpkg
+#      端到端——三平台真实现（X11+XShm+XRender / Win32 GDI）/ 零链接期依赖
+#      （dlopen / LoadLibraryA）/ 纯内存光栅化器像素级 CRC 回归 / 覆盖面积 AA /
+#      内置点阵与 TrueType 双字体 / Widget 树 + 绝对·VBox·HBox 布局 + 命中测试
+#      + packed 事件纯值块（sizeof/offsetof 双向锁死 / string_from_cstr 复制成 ARC）/
+#      Label·Button·CheckBox 默认主题四态绘制 + 纯值事件推进（use_gui_look.dial）/
+#      TextBox 单行编辑·选区·UTF-8 边界·焦点环·max_len·统一功能键码
+#      （use_gui_input.dial）/ Xvfb 实窗上屏 + **XTest 真实鼠标/键盘注入**
+#      （xtest_inject.sh：点击聚焦 / 落字 / Tab / Shift+Tab / 按钮激活）/ 无显示
+#      环境自动降级为「窗口路径明确跳过」并如实标注（v1.10 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -1923,7 +1925,7 @@ zpass "crypto 包已卸载"
 # ---------------------------------------------------------------------------
 # AA) 手搓 GUI 地基 + 控件框架层 + 成品控件外观层：gui.dialpkg 端到端（v1.10 增补）
 # ---------------------------------------------------------------------------
-echo "== AA) 手搓 GUI 三层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制，v1.10 增补） =="
+echo "== AA) 手搓 GUI 四层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制 / TextBox 输入与焦点链 / XTest 实窗注入，v1.10 增补） =="
 aapass() { echo "  ✅ $1"; }
 aabad()  { echo "  ❌ $1"; fail=1; }
 
@@ -2029,6 +2031,32 @@ if "$DIALC" build tests/pkg/use_gui_look.dial -o "${TMP}/use_gui_look" >"${TMP}/
     fi
 else aabad "use_gui_look.dial 编译失败"; tail -12 "${TMP}/aa_lcomp.log"; fi
 
+# 4d) 输入层 demo：独立纯内存树 + 独立 offscreen 画布，无 DISPLAY 也能把
+#     TextBox 编辑 / 选区 / UTF-8 边界 / 焦点环 / max_len / 统一键码 / 焦点态
+#     绘制逐像素断言跑完；绝不触碰前三个 demo 的 CRC 基准。
+if "$DIALC" build tests/pkg/use_gui_input.dial -o "${TMP}/use_gui_input" >"${TMP}/aa_icomp.log" 2>&1; then
+    aapass "use_gui_input.dial（输入层 TextBox / 焦点链）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_input" >"${TMP}/aa_inodisplay.log" 2>&1
+    aa_i_no_exit=$?
+    aa_i_bad=$(grep -c ' = bad' "${TMP}/aa_inodisplay.log" || true)
+    if [ "$aa_i_no_exit" -eq 0 ] && [ "$aa_i_bad" -eq 0 ] \
+       && grep -qF 'input_kind_textbox = ok' "${TMP}/aa_inodisplay.log" \
+       && grep -qF 'input_text_typed = ok' "${TMP}/aa_inodisplay.log" \
+       && grep -qF 'input_text_after_replace = ok' "${TMP}/aa_inodisplay.log" \
+       && grep -qF 'input_utf8_boundary = ok' "${TMP}/aa_inodisplay.log" \
+       && grep -qF 'input_max_len_reject = ok' "${TMP}/aa_inodisplay.log" \
+       && grep -qF 'input_key_tab_result = ok' "${TMP}/aa_inodisplay.log" \
+       && grep -qF 'input_focus_crc_differs = ok' "${TMP}/aa_inodisplay.log" \
+       && grep -qF 'input_focus_cleared_on_remove = ok' "${TMP}/aa_inodisplay.log" \
+       && grep -qF 'input_window = skipped [' "${TMP}/aa_inodisplay.log" \
+       && grep -qF 'input_done = true' "${TMP}/aa_inodisplay.log"; then
+        aapass "无 DISPLAY：TextBox 编辑 / 选区 / UTF-8 边界 / 焦点环 / max_len / 统一键码 / 焦点态绘制全绿"
+    else
+        aabad "输入层无 DISPLAY 路径断言失败（exit=$aa_i_no_exit bad=$aa_i_bad）"
+        tail -40 "${TMP}/aa_inodisplay.log"
+    fi
+else aabad "use_gui_input.dial 编译失败"; tail -16 "${TMP}/aa_icomp.log"; fi
+
 # 5) 有 Xvfb 时验证真实窗口（XShm 离屏 + XRender 合成 + 上屏 / 过滤 / 事件循环）；
 #    无 Xvfb 的环境如实打印跳过，绝不把「未验证」写成「通过」。
 if command -v xvfb-run >/dev/null 2>&1; then
@@ -2095,6 +2123,47 @@ if command -v xvfb-run >/dev/null 2>&1; then
     fi
 else
     echo "  ⚠️  本环境无 xvfb-run：成品控件外观层实窗路径未实机验证（如实标注，不伪装通过）"
+fi
+
+# 5d) XTest 真实事件注入：在 Xvfb 实窗里用 xdotool 真注入鼠标点击 / 键盘 "hi"
+#     / Tab / Shift+Tab，Dial 侧主动 poll/wait 读走事件再喂进纯 C 逻辑。
+#     libXtst 只在测试侧用，包本体三份 .a 仍零平台链接期依赖（第 2 项已断言）。
+if command -v xvfb-run >/dev/null 2>&1 && command -v xdotool >/dev/null 2>&1; then
+    if xvfb-run -a -s "-screen 0 1024x768x24 +extension MIT-SHM +extension RENDER" \
+        bash tests/pkg/xtest_inject.sh "${TMP}/use_gui_input" "${TMP}/aa_xtest.log" \
+        >"${TMP}/aa_xtest_runner.log" 2>&1; then
+        if grep -qF 'input_xtest_injection = skipped [' "${TMP}/aa_xtest.log"; then
+            echo "  ⚠️  XTest 注入未实机验证：$(grep -F 'input_xtest_injection = skipped [' "${TMP}/aa_xtest.log" | head -1)"
+            echo "      （如实标注，不伪装通过）"
+        else
+            aa_x_bad=$(grep -c ' = bad' "${TMP}/aa_xtest.log" || true)
+            if [ "$aa_x_bad" -eq 0 ] \
+               && grep -qF 'input_xtest_injection = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_window = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_window_flush = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_xtest_keys = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_xtest_tabs = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_xtest_shift_mods = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_xtest_mouse_events = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_xtest_mouse_activation = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_xtest_typed_text = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_xtest_focus_back = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_xtest_flush = ok' "${TMP}/aa_xtest.log" \
+               && grep -qF 'input_done = true' "${TMP}/aa_xtest.log"; then
+                aapass "Xvfb + XTest 实机：真实鼠标点击 / 键盘落字 / Tab·Shift+Tab 焦点环 / 按钮激活 / 统一键码 + mods 全通过"
+            else
+                aabad "XTest 实窗注入断言失败（bad=$aa_x_bad）"
+                tail -45 "${TMP}/aa_xtest.log"
+                tail -15 "${TMP}/aa_xtest_runner.log"
+            fi
+        fi
+    else
+        aabad "Xvfb 下 xtest_inject.sh 运行失败"
+        tail -25 "${TMP}/aa_xtest_runner.log"
+        tail -25 "${TMP}/aa_xtest.log"
+    fi
+else
+    echo "  ⚠️  本环境无 xvfb-run / xdotool：XTest 真实事件注入未实机验证（如实标注，不伪装通过）"
 fi
 
 # 6) 清理：卸包，避免污染后续测试与用户环境。

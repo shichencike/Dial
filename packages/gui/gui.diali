@@ -1,5 +1,5 @@
 // gui.dialpkg —— 手写 GUI（窗 / 事件 / 2D 绘图 / Widget 树 / 布局 / 命中测试 /
-// 主动事件分发 / 成品控件外观），Dial 语言接口签名
+// 主动事件分发 / 成品控件外观 / TextBox 输入与焦点链），Dial 语言接口签名
 //
 // 本文件是**唯一**的对外契约：包内机器码的实现可以变，但这里的签名一变，
 // 依赖它的程序就得重编。签名文件带 SHA256 校验，被篡改会在链接期被拦下。
@@ -30,17 +30,29 @@
 //   8 CLOSE       9 QUIT
 // 取事件字段用下面的 dial_gui_event_* 访问器（每 App 一份最近事件槽）。
 //
-// 已实现范围（三层，全部有真实现，不是预留接口）：
+// 功能键码（dial_gui_event_key）：两平台**统一**，起点 0x110000（十进制 1114112），
+// 大于 Unicode 最大码点 0x10FFFF，绝不与可打印字符的码点冲突。X11 KeySym 与
+// Win32 VK 都先映射进同一张表再进事件槽，表外键收敛为 GUI_KEY_UNKNOWN
+// （0x11003F），绝不把平台私有值漏给 Dial 侧。可打印字符仍是 Unicode 码点。
+// 修饰键位掩码由 dial_gui_event_mods 取（1 SHIFT / 2 CTRL / 4 ALT，按位或）。
+// 统一键码（相对 0x110000 的偏移）：+1 BACKSPACE +2 TAB +3 ENTER +4 ESCAPE
+// +5 LEFT +6 UP +7 RIGHT +8 DOWN +9 HOME +10 END +11 PAGEUP +12 PAGEDOWN
+// +13 DELETE +14 SHIFT +15 CONTROL +16 ALT +17..+28 F1..F12 +63 UNKNOWN。
+//
+// 已实现范围（四层，全部有真实现，不是预留接口；共 109 个 extern fn）：
 //   1) 地基层：Application / Window / Painter / Event / Font（55 个函数）；
 //   2) 控件框架层：GuiWidget 树 + 绝对 / VBox / HBox 布局 + 命中测试 +
 //      主动事件分发（28 个函数）；
 //   3) 成品控件外观层：Label / Button / CheckBox 三种控件 + C 侧内置浅色
 //      默认主题 + 四态（普通 / 悬停 / 按下 / 禁用）绘制 + 纯值事件推进 +
-//      整树一次绘制（下面的 12 个函数）。
-// 三层一律只追加 extern fn：旧签名一字不动，abi = 6 / version = 1.10.0 不变。
-// 外观层仍是**纯 C、零平台符号、零反向回调**：控件种类 / 文本 / 状态全是
-// C 侧纯值或自有副本，Dial 侧用 widget_draw(root, painter) 把整棵树画到任意
-// GuiPainter（离屏画布或窗口画布），不需要也不允许 C 去调 Dial 函数。
+//      整树一次绘制（12 个函数）；
+//   4) 输入层：TextBox 单行编辑（字符 / 退格 / 删除 / 光标 / 选区 / 输入上限）
+//      + 焦点链（Tab / Shift+Tab 环形切换 / 点击聚焦）+ 统一功能键码与修饰键
+//      （14 个函数，含 dial_gui_event_mods）。
+// 四层一律只追加 extern fn：旧 95 个签名一字不动，abi = 6 / version = 1.10.0 不变。
+// 外观层与输入层仍是**纯 C、零平台符号、零反向回调**：控件种类 / 文本 / 状态
+// 全是 C 侧纯值或自有副本，Dial 侧用 widget_draw(root, painter) 把整棵树画到
+// 任意 GuiPainter（离屏画布或窗口画布），不需要也不允许 C 去调 Dial 函数。
 //
 // 事件分发立场（内存宪法）：**绝不做 C → Dial 反向回调**。Dial 无 GC，
 // 全靠 ARC + 手动释放；C 侧若在平台线程直接调 Dial 函数，跨线程引用计数
@@ -49,11 +61,11 @@
 // 的 const char*，Dial 侧必须用 string_from_cstr 复制成自己的 ARC 对象。
 // C 管 C 的，ARC 管 ARC 的，谁也不越界，零隐式开销。
 //
-// 仍未实现、因此**不写进本契约**：可覆写主题色、TextBox / 单行编辑与焦点链、
-// 信号槽、富文本编辑、图片解码、Direct2D、C → Dial 反向回调。把未实现的函数
-// 写进 .diali 会让用户 import 后链接失败，那是制造漂移而非预留接口——这条
-// 原则三层一律适用。真实鼠标注入依赖 XTest / xdotool，命中逻辑由无头纯 C
-// 树断言覆盖，外观层的四态由纯值事件推进（widget_handle）驱动。
+// 仍未实现、因此**不写进本契约**：可覆写主题色、信号槽、富文本编辑、
+// 图片解码、Direct2D、C → Dial 反向回调。把未实现的函数写进 .diali 会让用户
+// import 后链接失败，那是制造漂移而非预留接口——这条原则四层一律适用。
+// 真实事件注入由 XTest / xdotool 在 Xvfb 实窗里跑通（AA 组第 10 项），
+// 无头纯 C 树断言覆盖命中 / 四态 / 编辑 / 焦点环的全部逻辑分支。
 
 /// GUI 应用上下文（不透明）。持有显示连接、窗口表、事件循环状态与最近事件槽。
 /// 用完必须 dial_gui_app_free 释放——不透明句柄不进 ARC。
@@ -109,8 +121,11 @@ extern fn dial_gui_event_x(app: GuiApp): int;
 extern fn dial_gui_event_y(app: GuiApp): int;
 /// 鼠标按键号：1 左 / 2 中 / 3 右；滚轮用 4 / 5。非鼠标事件为 0。
 extern fn dial_gui_event_button(app: GuiApp): int;
-/// 键码：可打印字符为 Unicode 码点；功能键见 README §38 键码表。非键盘事件为 0。
+/// 键码：可打印字符为 Unicode 码点；功能键是**两平台统一**的 0x110000+ 键码
+/// （见文件头键码表与 README §38.2），非键盘事件为 0。
 extern fn dial_gui_event_key(app: GuiApp): int;
+/// 最近事件的修饰键位掩码：1 SHIFT / 2 CTRL / 4 ALT（按位或）；非键盘事件为 0。
+extern fn dial_gui_event_mods(app: GuiApp): int;
 /// RESIZE 事件的新宽度。
 extern fn dial_gui_event_width(app: GuiApp): int;
 /// RESIZE 事件的新高度。
@@ -362,13 +377,18 @@ extern fn dial_gui_event_data(app: GuiApp): rawptr<byte>;
 //   1 LABEL    只绘制文本（无背景 / 边框）
 //   2 BUTTON   四态背景 + 边框 + 居中文本
 //   3 CHECKBOX 方框 + 勾选标记 + 右侧文本，RELEASE 时自动翻转 checked
+//   4 TEXTBOX  单行输入：白底 + 边框（焦点时高亮加粗）+ 选区底 + 文本 + 光标竖线；
+//              RELEASE 命中即把焦点移过去（gui_widget_handle 返回 1）
 //
 // 默认主题色（0xAARRGGBB，写死在 C，逐像素可断言）：
 //   面板/BOX 背景 FFF4F6F9   边框 FFC7CEDA   文本 FF202733   禁用文本 FFA9B0BD
 //   按钮 普通 FFE7ECF4 / 悬停 FFD3E0FA / 按下 FFB2C8F2 / 禁用 FFF0F2F5
-//   勾选框底 FFFFFFFF       勾/高亮 FF2F6FE0
+//   勾选框底 / TextBox 输入底 FFFFFFFF    勾 / 焦点边框 / 光标 / 高亮 FF2F6FE0
+//   TextBox 选区底 FFC9DCFB（焦点态才画）
 // 文本用内置 8×8 ASCII 点阵（零依赖），字号固定 16（每字符 18×16 像素），
 // 点阵不覆盖的码点画 '?'，与地基层的 gui_font_draw 同一套字形。
+// TextBox 文本区裁剪到 (x+6, y, w-12, h)，光标恒定显示（不闪烁），
+// 保证 get_pixel / painter_crc32 逐像素可断言、三平台一致。
 //
 // 四态由 widget_handle 推进：hovered / pressed 是运行时态（MOVE / PRESS 写，
 // RELEASE 清），checked 是 CheckBox 勾选态（RELEASE 翻转），disabled 是显式设置的
@@ -407,3 +427,68 @@ extern fn dial_gui_widget_handle(root: GuiWidget, kind: int, x: int, y: int, but
 /// 前序递归、父先画后加子在上，只读控件纯值状态，不推进状态、不碰平台 API。
 /// 绘制前应先 widget_layout_apply 定好几何；返回 0 成功 / -1 失败。
 extern fn dial_gui_widget_draw(root: GuiWidget, p: GuiPainter): int;
+
+// ---- 输入层：TextBox 单行编辑 / 焦点链（本段 13 个 + 上方事件访问器区
+//      dial_gui_event_mods 1 个 = 本层共 14 个追加 extern fn）----------------
+//
+// 立场与前三层的宪法完全一致：**纯 C、零平台符号、零 C → Dial 反向回调**。
+// 焦点是树根上的一个 C 侧裸指针，文本是控件自己的 strdup 副本，光标 / 选区
+// 是 UTF-8 **字节偏移**（一律按字符边界对齐，绝不切断多字节序列）。
+// Dial 侧典型事件循环（主动读，C 从不回调）：
+//   var k: int = dial_gui_app_wait(app, 16);
+//   if (k == 4) dial_gui_widget_key(root, k, dial_gui_event_key(app),
+//                                  dial_gui_event_mods(app));
+//   if (k == 1 or k == 2 or k == 3)
+//       dial_gui_widget_handle(root, k, dial_gui_event_x(app),
+//                              dial_gui_event_y(app), dial_gui_event_button(app));
+//
+// 可聚焦控件 = 可见 / 未禁用 / kind == 4 TEXTBOX；Tab 按加入顺序环形前进，
+// Shift+Tab 反向。禁用的控件自动让焦点出栈；摘除子树时先清焦点指针，
+// 绝不留下悬垂裸句柄。一棵树内至多一个 focused。
+//
+// 键盘编辑（widget_key 的 key 取值）：
+//   - 可打印字符：插入光标处（有选区先替换），UTF-8 编码，受 max_len 约束；
+//   - GUI_KEY_BACKSPACE / DELETE：删前 / 后一个字符（有选区则删选区）；
+//   - GUI_KEY_LEFT / RIGHT / HOME / END：移动光标；带 SHIFT 时扩选区；
+//   - GUI_KEY_TAB（+ SHIFT）：焦点环切换；GUI_KEY_ENTER：提交信号；
+//   - GUI_KEY_ESCAPE：清选区；其它功能键 / 修饰键本身不编辑文本。
+
+/// 显式把焦点设到 w（须是同一棵树内可见 / 未禁用的 TEXTBOX）；返回 0 / -1。
+extern fn dial_gui_widget_set_focus(root: GuiWidget, w: GuiWidget): int;
+
+/// 当前焦点控件（无焦点返回空句柄，用 is_null 判断）。
+extern fn dial_gui_widget_focus(root: GuiWidget): GuiWidget;
+
+/// 该控件是否持有焦点（1 / 0）。
+extern fn dial_gui_widget_focused(w: GuiWidget): int;
+
+/// Tab：焦点环前进一个可聚焦控件，返回新焦点（无可聚焦控件返回空句柄）。
+extern fn dial_gui_widget_focus_next(root: GuiWidget): GuiWidget;
+
+/// Shift+Tab：焦点环后退一个可聚焦控件，返回新焦点。
+extern fn dial_gui_widget_focus_prev(root: GuiWidget): GuiWidget;
+
+/// TextBox 光标字节偏移（非 TEXTBOX 恒为 0）。
+extern fn dial_gui_widget_cursor(w: GuiWidget): int;
+
+/// 显式移动光标并清选区；pos 自动 clamp 到 [0, len] 的 UTF-8 字符边界。
+extern fn dial_gui_widget_set_cursor(w: GuiWidget, pos: int): int;
+
+/// 选区起点 / 终点（字节偏移，二者相等表示无选区）。
+extern fn dial_gui_widget_sel_start(w: GuiWidget): int;
+extern fn dial_gui_widget_sel_end(w: GuiWidget): int;
+
+/// 设置选区 [a,b]（自动 clamp 到字符边界，a==b 表示清选区）；a>b 时自动交换。
+extern fn dial_gui_widget_select(w: GuiWidget, a: int, b: int): int;
+
+/// 输入上限（UTF-8 字节数）：0 = 不限（仍受 4096 兜底），1..4096 有效；
+/// 越界**明确返回 -1 并写错误槽**，绝不静默截断。只约束键盘输入，
+/// widget_set_text 是显式 API 不受此限（但会把光标 / 选区归零）。
+extern fn dial_gui_widget_set_max_len(w: GuiWidget, n: int): int;
+extern fn dial_gui_widget_max_len(w: GuiWidget): int;
+
+/// 把一条**键盘纯值事件**喂进树，推进编辑态 / 焦点环。kind 用事件码
+/// （4 KEY_PRESS 才生效，5 KEY_RELEASE 忽略），key 取 dial_gui_event_key，
+/// mods 取 dial_gui_event_mods。返回 0 无变化 / 1 文本或光标变化 /
+/// 2 焦点变化 / 3 Enter 提交 / -1 参数错误。C 侧绝不返回或缓存 Dial 对象。
+extern fn dial_gui_widget_key(root: GuiWidget, kind: int, key: int, mods: int): int;

@@ -5,7 +5,8 @@
  *   dial_gui_core.c    FFI 包装：句柄生命周期 / 错误槽 / 事件槽 / 调后端 vtable
  *   dial_gui_raster.c  自研 2D 光栅化器 + 内置点阵 + stb_truetype 字形
  *   dial_gui_widget.c  控件框架层：Widget 树 / 布局 / 命中 / packed 事件块（纯 C）
- *   dial_gui_look.c    成品控件外观层：默认主题 / 四态绘制 / 纯值事件推进（纯 C）
+ *   dial_gui_look.c    成品控件外观层：默认主题 / 四态 + TextBox 绘制 / 事件推进（纯 C）
+ *   dial_gui_input.c   输入层：TextBox 编辑 / 光标·选区 / 焦点链 / 键码推进（纯 C）
  *   dial_gui_x11.c     POSIX 后端（X11 + XShm + XRender，dlopen 动态装载）
  *   dial_gui_win32.c   Windows 后端（GDI DIBSection，LoadLibraryA 动态装载）
  *
@@ -44,6 +45,36 @@
 #define GUI_EV_EXPOSE        7
 #define GUI_EV_CLOSE         8
 #define GUI_EV_QUIT          9
+
+/* ---- 统一功能键码（两平台同值；dial_gui_event_key）-------------------- *
+ * 起点 0x110000 > Unicode 最大码点 0x10FFFF，绝不与可打印字符的码点冲突。
+ * X11 KeySym / Win32 VK 都先映射到这里再进事件槽，Dial 侧代码平台无关。
+ * 表外键统一收敛为 GUI_KEY_UNKNOWN（不承诺逐键同值，但绝不返回平台私有值）。*/
+#define GUI_KEY_BASE       0x110000
+#define GUI_KEY_BACKSPACE  (GUI_KEY_BASE +  1)   /* 0x110001 */
+#define GUI_KEY_TAB        (GUI_KEY_BASE +  2)   /* 0x110002 */
+#define GUI_KEY_ENTER      (GUI_KEY_BASE +  3)   /* 0x110003 */
+#define GUI_KEY_ESCAPE     (GUI_KEY_BASE +  4)   /* 0x110004 */
+#define GUI_KEY_LEFT       (GUI_KEY_BASE +  5)   /* 0x110005 */
+#define GUI_KEY_UP         (GUI_KEY_BASE +  6)   /* 0x110006 */
+#define GUI_KEY_RIGHT      (GUI_KEY_BASE +  7)   /* 0x110007 */
+#define GUI_KEY_DOWN       (GUI_KEY_BASE +  8)   /* 0x110008 */
+#define GUI_KEY_HOME       (GUI_KEY_BASE +  9)   /* 0x110009 */
+#define GUI_KEY_END        (GUI_KEY_BASE + 10)   /* 0x11000A */
+#define GUI_KEY_PAGEUP     (GUI_KEY_BASE + 11)   /* 0x11000B */
+#define GUI_KEY_PAGEDOWN   (GUI_KEY_BASE + 12)   /* 0x11000C */
+#define GUI_KEY_DELETE     (GUI_KEY_BASE + 13)   /* 0x11000D */
+#define GUI_KEY_SHIFT      (GUI_KEY_BASE + 14)   /* 0x11000E */
+#define GUI_KEY_CONTROL    (GUI_KEY_BASE + 15)   /* 0x11000F */
+#define GUI_KEY_ALT        (GUI_KEY_BASE + 16)   /* 0x110010 */
+#define GUI_KEY_F1         (GUI_KEY_BASE + 17)   /* 0x110011 */
+#define GUI_KEY_F12        (GUI_KEY_BASE + 28)   /* 0x11001C */
+#define GUI_KEY_UNKNOWN    (GUI_KEY_BASE + 63)   /* 0x11003F */
+
+/* 修饰键位掩码（dial_gui_event_mods / widget_key 的 mods 参数）。*/
+#define GUI_MOD_SHIFT      1
+#define GUI_MOD_CTRL       2
+#define GUI_MOD_ALT        4
 
 /* 颜色统一为 0xAARRGGBB，装进 uint32_t；Dial 侧用 int64 传（高 32 位为 0）。*/
 typedef uint32_t gui_color_t;
@@ -120,6 +151,8 @@ struct GuiAppImpl {
     void             *native;       /* 后端私有数据 */
     /* 最近事件槽（每 App 一份；单线程 GUI 事件循环，无需加锁）*/
     int  ev_kind, ev_x, ev_y, ev_button, ev_key, ev_w, ev_h;
+    int  ev_mods;              /* 最近事件的修饰键位掩码（GUI_MOD_*）；
+                                * 由后端 pump 在每次事件写入，core 不覆盖 */
     GuiWindowImpl *ev_win;
     /* 控件框架层：命中控件 + packed 纯值块（内嵌，非堆分配）*/
     GuiWidgetImpl *ev_widget;
@@ -149,6 +182,10 @@ struct GuiFontImpl {
 #define GUI_WIDGET_LABEL    1
 #define GUI_WIDGET_BUTTON   2
 #define GUI_WIDGET_CHECKBOX 3
+#define GUI_WIDGET_TEXTBOX  4   /* 输入层：单行文本编辑（焦点 / 光标 / 选区）*/
+
+/* TextBox 文本按 UTF-8 字节数计上限；0 表示不限（仍受本上限兜底）。*/
+#define GUI_TEXT_MAX_LEN    4096
 
 #define GUI_LOOK_FONT_SIZE  16   /* 内置 8×8 点阵，sc = size/8 = 2，每字符 18×16 */
 
@@ -160,8 +197,9 @@ struct GuiFontImpl {
 #define GUI_THEME_BTN_HOVER ((gui_color_t)0xFFD3E0FAu)  /* 按钮 悬停 */
 #define GUI_THEME_BTN_DOWN  ((gui_color_t)0xFFB2C8F2u)  /* 按钮 按下 */
 #define GUI_THEME_BTN_DIS   ((gui_color_t)0xFFF0F2F5u)  /* 按钮 禁用 */
-#define GUI_THEME_CHECK_BG  ((gui_color_t)0xFFFFFFFFu)  /* 勾选框底 */
-#define GUI_THEME_MARK      ((gui_color_t)0xFF2F6FE0u)  /* 勾 / 高亮 */
+#define GUI_THEME_CHECK_BG  ((gui_color_t)0xFFFFFFFFu)  /* 勾选框底 / TextBox 输入底 */
+#define GUI_THEME_MARK      ((gui_color_t)0xFF2F6FE0u)  /* 勾 / 焦点边框 / 光标 / 高亮 */
+#define GUI_THEME_SEL       ((gui_color_t)0xFFC9DCFBu)  /* TextBox 选区背景 */
 
 struct GuiWidgetImpl {
     GuiWidgetImpl *parent;
@@ -188,6 +226,12 @@ struct GuiWidgetImpl {
     int  disabled;              /* 禁用态：不 hover / press / 激活，走禁用配色 */
     int  hovered;               /* 运行时：悬停（gui_widget_handle 推进） */
     int  pressed;               /* 运行时：按下（gui_widget_handle 推进） */
+    /* ---- 输入层（dial_gui_input.c）-------------------------------------- */
+    int  focused;               /* 焦点态：一棵树内至多一个（由 input.c 推进） */
+    int  cursor;                /* TextBox 光标：UTF-8 字节偏移 [0, strlen(text)] */
+    int  sel_anchor;            /* 选区锚点：与 cursor 相等表示无选区 */
+    int  max_len;               /* TextBox 输入上限（字节）；0 = 不限 */
+    GuiWidgetImpl *focus;       /* 仅根使用：当前焦点控件（树内裸指针，不进 ARC）*/
 };
 
 /*
@@ -283,5 +327,19 @@ int            gui_widget_handle(GuiWidgetImpl *root, int kind,
                                  int x, int y, int button);
 /* 按默认主题 + 当前四态把整棵树画到 GuiPainter；返回绘制节点数（>=0）/ <0 失败。 */
 int            gui_widget_draw(GuiPainterImpl *p, GuiWidgetImpl *root);
+
+/* ---- 输入层：dial_gui_input.c（纯 C，三平台共用，无平台符号）---------- *
+ * 与前三层的硬边界一致：只 include dial_gui.h + libc，绝不碰 X11 / Win32，
+ * 绝不保存函数指针、绝不 C → Dial 反向回调。焦点是根上的 C 侧裸指针，
+ * 文本是控件自己的 strdup 副本，键盘一律由 Dial 侧主动喂纯值事件推进。 */
+GuiWidgetImpl *gui_widget_focus(GuiWidgetImpl *root);
+int            gui_widget_set_focus(GuiWidgetImpl *root, GuiWidgetImpl *w);
+/* backward=0 为 Tab，非 0 为 Shift+Tab；返回新焦点（无焦点返回 NULL）。*/
+GuiWidgetImpl *gui_widget_focus_next(GuiWidgetImpl *root, int backward);
+/* 返回 0 无变化 / 1 文本或光标变化 / 2 焦点变化 / 3 Enter 提交 / <0 参数错。*/
+int            gui_widget_key(GuiWidgetImpl *root, int kind, int key, int mods);
+/* a/b 是 UTF-8 字节偏移，自动 clamp 到字符边界；a==b 表示清选区。*/
+int            gui_widget_select(GuiWidgetImpl *w, int a, int b);
+int            gui_widget_set_cursor(GuiWidgetImpl *w, int pos);
 
 #endif /* DIAL_GUI_H */

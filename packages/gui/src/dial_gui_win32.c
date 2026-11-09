@@ -67,6 +67,9 @@ extern void  Sleep(unsigned int);
 #define W32_VK_RETURN 0x0D
 #define W32_VK_TAB    0x09
 #define W32_VK_BACK   0x08
+#define W32_VK_SHIFT  0x10
+#define W32_VK_CONTROL 0x11
+#define W32_VK_MENU   0x12
 #define W32_VK_FIRST_FUNC 0x21   /* PRIOR..DOWN / F1.. 走 VK，不产生 WM_CHAR */
 
 typedef intptr_t  gui_lresult;
@@ -197,13 +200,16 @@ static int load_api(char *err, int errcap) {
 
 /* ---- 事件队列（WndProc 入队，poll/wait 出队）--------------------------- */
 typedef struct {
-    int   kind, x, y, button, key, w, h;
+    int   kind, x, y, button, key, w, h, mods;
     void *hwnd;
 } gui_w32_event;
 
 #define QCAP 256
 static gui_w32_event Q[QCAP];
 static int q_head = 0, q_tail = 0;
+/* 修饰键状态由 wndproc 在 KEYDOWN/KEYUP 维护，入队时快照进事件（GUI_MOD_*）。
+ * 不调用 GetKeyState，避免为它新增一个动态装载的 user32 符号。 */
+static int g_mods = 0;
 
 static void q_push(int kind, int x, int y, int button, int key,
                    int w, int h, void *hwnd) {
@@ -211,7 +217,7 @@ static void q_push(int kind, int x, int y, int button, int key,
     if (next == q_head) return;  /* 满了就丢最旧事件之外的那个，绝不越界 */
     gui_w32_event *e = &Q[q_tail];
     e->kind = kind; e->x = x; e->y = y; e->button = button; e->key = key;
-    e->w = w; e->h = h; e->hwnd = hwnd;
+    e->w = w; e->h = h; e->hwnd = hwnd; e->mods = g_mods;
     q_tail = next;
 }
 static int q_pop(gui_w32_event *out) {
@@ -223,22 +229,58 @@ static int q_pop(gui_w32_event *out) {
 
 static int loword(gui_lparam l)  { return (int)(short)(unsigned short)(l & 0xFFFFu); }
 static int hiword(gui_lparam l)  { return (int)(short)(unsigned short)((l >> 16) & 0xFFFFu); }
-/* 功能键用 0x10000|VK 标记，避免与 Unicode 码点冲突（见 README 键码表）。 */
-static int vk_code(unsigned int vk) { return (int)(0x10000u | vk); }
+/*
+ * Win32 VK → **统一功能键码**（GUI_KEY_*），与 X11 后端同值同表
+ * （见 dial_gui_x11.c 的 x11_key）。表外键收敛为 GUI_KEY_UNKNOWN，
+ * 绝不再把 0x10000|VK 这种平台私有值漏给 Dial 侧。
+ */
+static int w32_key(unsigned int vk) {
+    switch (vk) {
+    case 0x08: return GUI_KEY_BACKSPACE;
+    case 0x09: return GUI_KEY_TAB;
+    case 0x0D: return GUI_KEY_ENTER;
+    case 0x1B: return GUI_KEY_ESCAPE;
+    case 0x24: return GUI_KEY_HOME;
+    case 0x25: return GUI_KEY_LEFT;
+    case 0x26: return GUI_KEY_UP;
+    case 0x27: return GUI_KEY_RIGHT;
+    case 0x28: return GUI_KEY_DOWN;
+    case 0x21: return GUI_KEY_PAGEUP;
+    case 0x22: return GUI_KEY_PAGEDOWN;
+    case 0x23: return GUI_KEY_END;
+    case 0x2E: return GUI_KEY_DELETE;
+    case 0x10: return GUI_KEY_SHIFT;
+    case 0x11: return GUI_KEY_CONTROL;
+    case 0x12: return GUI_KEY_ALT;
+    default: break;
+    }
+    if (vk >= 0x70u && vk <= 0x7Bu)   /* VK_F1..VK_F12 */
+        return GUI_KEY_F1 + (int)(vk - 0x70u);
+    return GUI_KEY_UNKNOWN;
+}
 
 static gui_lresult CALLBACK wndproc(void *hwnd, unsigned int msg,
                                     gui_wparam wp, gui_lparam lp) {
     switch (msg) {
-    case W32_WM_CHAR:
-        q_push(GUI_EV_KEY_PRESS, 0, 0, 0, (int)wp, 0, 0, hwnd);
+    case W32_WM_CHAR: {
+        int k = (int)wp;
+        if (k < 0x20) k = w32_key((unsigned int)wp);  /* 控制字符也统一 */
+        q_push(GUI_EV_KEY_PRESS, 0, 0, 0, k, 0, 0, hwnd);
         return 0;
+    }
     case W32_WM_KEYDOWN:
+        if (wp == W32_VK_SHIFT)   g_mods |= GUI_MOD_SHIFT;
+        if (wp == W32_VK_CONTROL) g_mods |= GUI_MOD_CTRL;
+        if (wp == W32_VK_MENU)    g_mods |= GUI_MOD_ALT;
         if (wp < 0x20u || wp >= 0x70u || wp == W32_VK_ESCAPE ||
             wp == W32_VK_RETURN || wp == W32_VK_TAB || wp == W32_VK_BACK)
-            q_push(GUI_EV_KEY_PRESS, 0, 0, 0, vk_code((unsigned int)wp), 0, 0, hwnd);
+            q_push(GUI_EV_KEY_PRESS, 0, 0, 0, w32_key((unsigned int)wp), 0, 0, hwnd);
         return 0;
     case W32_WM_KEYUP:
-        q_push(GUI_EV_KEY_RELEASE, 0, 0, 0, vk_code((unsigned int)wp), 0, 0, hwnd);
+        if (wp == W32_VK_SHIFT)   g_mods &= ~GUI_MOD_SHIFT;
+        if (wp == W32_VK_CONTROL) g_mods &= ~GUI_MOD_CTRL;
+        if (wp == W32_VK_MENU)    g_mods &= ~GUI_MOD_ALT;
+        q_push(GUI_EV_KEY_RELEASE, 0, 0, 0, w32_key((unsigned int)wp), 0, 0, hwnd);
         return 0;
     case W32_WM_MOUSEMOVE:
         q_push(GUI_EV_MOUSE_MOVE, loword(lp), hiword(lp), 0, 0, 0, 0, hwnd);
@@ -510,9 +552,11 @@ static void dispatch_pending(int blocking, int timeout_ms) {
 }
 
 static int pump(GuiAppImpl *app, int blocking, int timeout_ms) {
+    app->ev_mods = 0;   /* 每次泵先清零，出队后写该事件入队时快照的 mods */
     dispatch_pending(blocking, timeout_ms);
     gui_w32_event e;
     if (!q_pop(&e)) return GUI_EV_NONE;
+    app->ev_mods = e.mods;
     GuiWindowImpl *w = find_win_obj(app, e.hwnd);
     /*
      * 命中测试刻意留在 pump（Dial 的 poll/wait 调用线程），绝不进 wndproc：

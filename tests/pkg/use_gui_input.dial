@@ -1,0 +1,241 @@
+// gui.dialpkg 输入层端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 两段各自独立，绝不触碰 use_gui.dial 的 crc_offscreen / use_gui_look.dial 的
+// look_crc_normal 基准：
+//   A) 无 DISPLAY：纯内存树 + 独立 offscreen 画布，把 TextBox 编辑 / 选区 /
+//      焦点环 / max_len / UTF-8 边界 / 焦点态绘制逐像素断言跑完；
+//   B) Xvfb 实窗：由 run_tests.sh 调 tests/pkg/xtest_inject.sh，用 xdotool
+//      （XTEST 真注入）往窗口送鼠标点击 + 键盘 "hi" + Tab + Shift+Tab，
+//      Dial 侧主动 poll/wait 读走事件、喂进 widget_key / widget_handle，
+//      断言真实事件闭环。C 侧绝不反向回调 Dial。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+// 统一功能键码（0x110000 起，十进制），与 gui.diali 文件头键码表一致。
+fn K_BACKSPACE(): int { return 1114113; }
+fn K_TAB(): int       { return 1114114; }
+fn K_ENTER(): int     { return 1114115; }
+fn K_LEFT(): int      { return 1114117; }
+fn K_HOME(): int      { return 1114121; }
+fn K_END(): int       { return 1114122; }
+fn K_DELETE(): int    { return 1114125; }
+fn K_RIGHT(): int     { return 1114119; }
+
+fn rgba(a: int, r: int, g: int, b: int): int {
+    return (a * 16777216) + (r * 65536) + (g * 256) + b;
+}
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+// 建一棵用于断言的树：tb1 / tb2 两个 TEXTBOX + 一个 BUTTON，ABS 布局。
+fn build_tree(): GuiWidget {
+    var root: GuiWidget = dial_gui_widget_tree(320, 160);
+    var a: GuiWidget = dial_gui_widget_add(root);
+    var b: GuiWidget = dial_gui_widget_add(root);
+    var c: GuiWidget = dial_gui_widget_add(root);
+    dial_gui_widget_set_rect(a, 20, 20, 240, 40);
+    dial_gui_widget_set_rect(b, 20, 80, 240, 40);
+    dial_gui_widget_set_rect(c, 280, 20, 30, 40);
+    dial_gui_widget_set_kind(a, 4);         // TEXTBOX
+    dial_gui_widget_set_kind(b, 4);         // TEXTBOX
+    dial_gui_widget_set_kind(c, 2);         // BUTTON
+    dial_gui_widget_set_tag(a, 4001);
+    dial_gui_widget_set_tag(b, 4002);
+    dial_gui_widget_set_tag(c, 4003);
+    dial_gui_widget_layout_apply(root, 320, 160);
+    return root;
+}
+
+fn main(): int {
+    // ================= A) 无 DISPLAY：纯 C 逻辑全覆盖 =================
+    var root: GuiWidget = build_tree();
+    var tb1: GuiWidget = dial_gui_widget_first_child(root);
+    var tb2: GuiWidget = dial_gui_widget_next_sibling(tb1);
+    var btn: GuiWidget = dial_gui_widget_next_sibling(tb2);
+
+    expect(!is_null(root), "input_tree_new");
+    expect_int(dial_gui_widget_kind(tb1), 4, "input_kind_textbox");
+    expect_int(dial_gui_widget_set_kind(btn, 9), -1, "input_bad_kind_rejected");
+    dial_gui_clear_error();
+
+    // ---- 焦点链：显式设置 / Tab 环 / Shift+Tab / 拒绝非 TEXTBOX ----
+    expect(is_null(dial_gui_widget_focus(root)), "input_focus_initially_null");
+    expect_int(dial_gui_widget_set_focus(root, tb1), 0, "input_set_focus");
+    expect_int(dial_gui_widget_focused(tb1), 1, "input_focused_on");
+    expect_int(dial_gui_widget_tag(dial_gui_widget_focus(root)), 4001, "input_focus_is_tb1");
+    expect_int(dial_gui_widget_set_focus(root, btn), -1, "input_focus_non_textbox_rejected");
+    dial_gui_clear_error();
+    var f2: GuiWidget = dial_gui_widget_focus_next(root);
+    expect_int(dial_gui_widget_tag(f2), 4002, "input_tab_to_tb2");
+    expect_int(dial_gui_widget_focused(tb1), 0, "input_focus_left_tb1");
+    var f1: GuiWidget = dial_gui_widget_focus_next(root);
+    expect_int(dial_gui_widget_tag(f1), 4001, "input_tab_wrap");
+    var fp: GuiWidget = dial_gui_widget_focus_prev(root);
+    expect_int(dial_gui_widget_tag(fp), 4002, "input_shift_tab_back");
+
+    // ---- 键盘输入：可打印字符 / 插入 / 光标 ----
+    expect_int(dial_gui_widget_set_focus(root, tb1), 0, "input_refocus_tb1");
+    expect_int(dial_gui_widget_key(root, 4, 68, 0), 1, "input_key_D");
+    expect_int(dial_gui_widget_key(root, 4, 105, 0), 1, "input_key_i");
+    expect_int(dial_gui_widget_key(root, 4, 97, 0), 1, "input_key_a");
+    expect_int(dial_gui_widget_key(root, 4, 108, 0), 1, "input_key_l");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb1)), "Dial", "input_text_typed");
+    expect_int(dial_gui_widget_cursor(tb1), 4, "input_cursor_after_type");
+    expect_int(dial_gui_widget_key(root, 5, 68, 0), 0, "input_key_release_ignored");
+
+    // ---- 选区：Shift+Right 扩选 / 输入替换选区 ----
+    expect_int(dial_gui_widget_set_cursor(tb1, 1), 0, "input_set_cursor");
+    expect_int(dial_gui_widget_key(root, 4, K_RIGHT(), 1), 1, "input_shift_right");
+    expect_int(dial_gui_widget_sel_start(tb1), 1, "input_sel_start");
+    expect_int(dial_gui_widget_sel_end(tb1), 2, "input_sel_end");
+    expect_int(dial_gui_widget_key(root, 4, 88, 0), 1, "input_replace_sel");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb1)), "DXal", "input_text_after_replace");
+    expect_int(dial_gui_widget_sel_start(tb1), dial_gui_widget_sel_end(tb1),
+               "input_sel_cleared_after_replace");
+
+    // ---- 删除 / Home / End ----
+    expect_int(dial_gui_widget_set_cursor(tb1, 1), 0, "input_cursor_before_delete");
+    expect_int(dial_gui_widget_key(root, 4, K_DELETE(), 0), 1, "input_delete");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb1)), "Dal", "input_text_after_delete");
+    expect_int(dial_gui_widget_key(root, 4, K_BACKSPACE(), 0), 1, "input_backspace");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb1)), "al", "input_text_after_backspace");
+    expect_int(dial_gui_widget_key(root, 4, K_END(), 0), 1, "input_end");
+    expect_int(dial_gui_widget_cursor(tb1), 2, "input_cursor_end");
+    expect_int(dial_gui_widget_key(root, 4, K_HOME(), 0), 1, "input_home");
+    expect_int(dial_gui_widget_cursor(tb1), 0, "input_cursor_home");
+
+    // ---- UTF-8：三字节字符按字符边界移动，绝不切断多字节序列 ----
+    expect_int(dial_gui_widget_set_text(tb1, ""), 0, "input_clear_text");
+    expect_int(dial_gui_widget_key(root, 4, 20013, 0), 1, "input_utf8_insert"); // U+4E2D 中
+    expect_int(dial_gui_widget_cursor(tb1), 3, "input_utf8_cursor_bytes");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb1)), "中", "input_utf8_text");
+    expect_int(dial_gui_widget_key(root, 4, K_LEFT(), 0), 1, "input_utf8_left");
+    expect_int(dial_gui_widget_cursor(tb1), 0, "input_utf8_boundary");
+    expect_int(dial_gui_widget_set_cursor(tb1, 1), 0, "input_utf8_align_set");
+    expect_int(dial_gui_widget_cursor(tb1), 0, "input_utf8_aligned");
+
+    // ---- max_len：Fail-Fast 拒绝越界设置，超限输入明确返回 0 ----
+    expect_int(dial_gui_widget_set_text(tb1, "al"), 0, "input_reset_text");
+    expect_int(dial_gui_widget_set_max_len(tb1, 2), 0, "input_max_len_set");
+    expect_int(dial_gui_widget_max_len(tb1), 2, "input_max_len_get");
+    expect_int(dial_gui_widget_key(root, 4, 90, 0), 0, "input_max_len_reject");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb1)), "al", "input_max_len_no_change");
+    expect_int(dial_gui_widget_set_max_len(tb1, 5000), -1, "input_max_len_bad_rejected");
+    dial_gui_clear_error();
+    expect_int(dial_gui_widget_set_max_len(tb1, 0), 0, "input_max_len_unlimited");
+
+    // ---- Tab / Enter 的返回值语义 ----
+    expect_int(dial_gui_widget_key(root, 4, K_TAB(), 0), 2, "input_key_tab_result");
+    expect_int(dial_gui_widget_key(root, 4, K_ENTER(), 0), 3, "input_key_enter_result");
+
+    // ---- 焦点态绘制：白底 / 焦点高亮边框 / 移焦后 CRC 互异 ----
+    expect_int(dial_gui_widget_set_text(tb1, "Hi"), 0, "input_text_for_draw");
+    expect_int(dial_gui_widget_set_focus(root, tb1), 0, "input_focus_for_draw");
+    var p: GuiPainter = dial_gui_painter_offscreen(320, 160);
+    expect_int(dial_gui_set_aa(p, 1), 0, "input_aa_off");
+    expect_int(dial_gui_widget_draw(root, p), 0, "input_draw_focused");
+    var crc_focus: int = dial_gui_painter_crc32(p);
+    print("input_crc_focused = " + str(crc_focus));
+    expect_int(dial_gui_get_pixel(p, 20, 20),
+               rgba(255, 47, 111, 224), "input_focus_border_pixel");
+    expect_int(dial_gui_get_pixel(p, 30, 25),
+               rgba(255, 255, 255, 255), "input_white_bg_pixel");
+    expect_int(dial_gui_widget_set_focus(root, tb2), 0, "input_focus_move");
+    expect_int(dial_gui_widget_draw(root, p), 0, "input_draw_unfocused");
+    expect_int(dial_gui_get_pixel(p, 20, 20),
+               rgba(255, 199, 206, 218), "input_normal_border_pixel");
+    expect(dial_gui_painter_crc32(p) != crc_focus, "input_focus_crc_differs");
+
+    // ---- 摘除焦点所在子树：焦点指针必须被清掉，绝不悬垂 ----
+    expect_int(dial_gui_widget_set_focus(root, tb1), 0, "input_focus_before_remove");
+    expect_int(dial_gui_widget_remove(tb1), 0, "input_remove_focused");
+    expect(is_null(dial_gui_widget_focus(root)), "input_focus_cleared_on_remove");
+
+    // ================= B) Xvfb 实窗 + XTest 真注入 =================
+    var app: GuiApp = dial_gui_app_new();
+    if (is_null(app)) {
+        print("input_window = skipped [" + dial_gui_last_error_msg() + "]");
+        dial_gui_painter_free(p);
+        dial_gui_widget_tree_free(root);
+        print("input_done = true");
+        return 0;
+    }
+    var win: GuiWindow = dial_gui_window_new(app, "Dial GUI Input", 320, 160);
+    if (is_null(win)) {
+        print("input_window = skipped [窗口创建失败]");
+        dial_gui_app_free(app);
+        dial_gui_painter_free(p);
+        dial_gui_widget_tree_free(root);
+        print("input_done = true");
+        return 0;
+    }
+    var wroot: GuiWidget = build_tree();
+    var wtb1: GuiWidget = dial_gui_widget_first_child(wroot);
+    var wp: GuiPainter = dial_gui_window_painter(win);
+    expect_int(dial_gui_set_aa(wp, 1), 0, "input_window_aa");
+    expect_int(dial_gui_window_set_root(win, wroot), 0, "input_window_set_root");
+    expect_int(dial_gui_widget_layout_apply(wroot, 320, 160), 0, "input_window_layout");
+    expect_int(dial_gui_widget_set_focus(wroot, wtb1), 0, "input_window_focus");
+    expect_int(dial_gui_widget_draw(wroot, wp), 0, "input_window_draw");
+    expect_int(dial_gui_window_flush(win), 0, "input_window_flush");
+
+    // 主动事件循环：C 只把事件写进纯值槽，Dial 主动读走并喂进纯 C 逻辑。
+    var i: int = 0;
+    var key_changes: int = 0;
+    var focus_changes: int = 0;
+    var mouse_events: int = 0;
+    var activations: int = 0;
+    var shift_mods: int = 0;
+    while (i < 100) {
+        var k: int = dial_gui_app_wait(app, 100);
+        if (k == 4) {
+            var mk: int = dial_gui_event_mods(app);
+            var kr: int = dial_gui_widget_key(wroot, k, dial_gui_event_key(app), mk);
+            if (kr == 1) { key_changes = key_changes + 1; }
+            if (kr == 2) {
+                focus_changes = focus_changes + 1;
+                if (mk == 1) { shift_mods = shift_mods + 1; }
+            }
+        }
+        if (k == 1 or k == 2 or k == 3) {
+            mouse_events = mouse_events + 1;
+            var mr: int = dial_gui_widget_handle(wroot, k, dial_gui_event_x(app),
+                                                 dial_gui_event_y(app),
+                                                 dial_gui_event_button(app));
+            if (mr == 1) { activations = activations + 1; }
+        }
+        if (key_changes >= 2 and focus_changes >= 2 and activations >= 2) { i = 100; }
+        i = i + 1;
+    }
+    print("input_xtest_counts = keys " + str(key_changes) + " focus " +
+          str(focus_changes) + " mouse " + str(mouse_events) + " act " +
+          str(activations) + " shift " + str(shift_mods));
+    expect(key_changes >= 2, "input_xtest_keys");
+    expect(focus_changes >= 2, "input_xtest_tabs");
+    expect(shift_mods >= 1, "input_xtest_shift_mods");
+    expect(mouse_events >= 4, "input_xtest_mouse_events");
+    expect(activations >= 2, "input_xtest_mouse_activation");
+    expect_str(string_from_cstr(dial_gui_widget_text(wtb1)), "hi", "input_xtest_typed_text");
+    expect_int(dial_gui_widget_focused(wtb1), 1, "input_xtest_focus_back");
+    expect_int(dial_gui_widget_draw(wroot, wp), 0, "input_xtest_draw");
+    expect_int(dial_gui_window_flush(win), 0, "input_xtest_flush");
+    print("input_backend = " + dial_gui_window_backend(win));
+    print("input_window = ok");
+
+    dial_gui_window_close(win);      // 同时释放 wroot（挂窗后树归窗口）
+    dial_gui_app_free(app);
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("input_done = true");
+    return 0;
+}

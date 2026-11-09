@@ -1,8 +1,8 @@
 /*
  * dial_gui_look.c —— gui.dialpkg 成品控件外观层（纯 C，三平台共用）
  *
- * 职责：Label / Button / CheckBox 的默认主题绘制 + 四态（普通 / 悬停 / 按下 /
- * 禁用）配色 + 纯值事件推进（hovered / pressed / checked）。
+ * 职责：Label / Button / CheckBox / TextBox 的默认主题绘制 + 四态（普通 / 悬停 /
+ * 按下 / 禁用）配色 + 纯值事件推进（hovered / pressed / checked / 点击聚焦）。
  *
  * 硬边界（与内存宪法一致）：
  *   - 只 include dial_gui.h + libc，绝不碰 X11 / Win32 任何 API；三份 .a 的
@@ -60,6 +60,11 @@ int gui_widget_handle(GuiWidgetImpl *root, int kind, int x, int y, int button) {
         if (button != 0 && button != 1) return 0;
         GuiWidgetImpl *hit = gui_widget_hit(root, x, y, NULL, NULL);
         if (!hit || hit->disabled) return 0;
+        if (hit->kind == GUI_WIDGET_TEXTBOX) {
+            /* 点击 TextBox 即把焦点移过去（纯 C 树操作，绝不反向回调）。 */
+            gui_widget_set_focus(root, hit);
+            return 1;
+        }
         if (hit->kind == GUI_WIDGET_CHECKBOX) {
             hit->checked = hit->checked ? 0 : 1;
             return 1;
@@ -94,6 +99,53 @@ static void draw_text(GuiPainterImpl *p, const char *text,
         tx = x + 4;
     }
     gui_font_draw(p, tx, ty, text, len, &g_builtin_font, GUI_LOOK_FONT_SIZE, c);
+}
+
+/*
+ * TextBox：白底 + 边框（焦点态加粗并换成高亮色）+ 选区背景 + 文本 + 光标竖线。
+ * 文本区临时裁剪到 (ax+6, ay, w-12, h)，绝不溢出到相邻控件；绘制完恢复
+ * 调用者原本的裁剪状态，不污染画布。光标恒定显示（不做闪烁），保证
+ * get_pixel / painter_crc32 逐像素可断言、三平台一致。
+ */
+static void draw_textbox(GuiPainterImpl *p, GuiWidgetImpl *n,
+                         int ax, int ay, int w, int h) {
+    gui_color_t bg = n->disabled ? GUI_THEME_BTN_DIS : GUI_THEME_CHECK_BG;
+    gui_raster_fill_rect(p, ax, ay, w, h, bg);
+    gui_color_t border = n->focused ? GUI_THEME_MARK : GUI_THEME_BORDER;
+    gui_raster_stroke_rect(p, ax, ay, w, h, n->focused ? 2 : 1, border);
+
+    int tx = ax + 6, tw = w - 12;
+    if (tw <= 0) return;
+    int th = GUI_LOOK_FONT_SIZE;
+    int ty = ay + (h - th) / 2;
+    if (ty < ay) ty = ay;
+
+    int saved_has = p->has_clip;
+    int sx = p->clip_x, sy = p->clip_y, sw = p->clip_w, sh = p->clip_h;
+    p->has_clip = 1;
+    p->clip_x = tx; p->clip_y = ay; p->clip_w = tw; p->clip_h = h;
+
+    const char *s = n->text ? n->text : "";
+    int len = (int)strlen(s);
+    int cursor = n->cursor < 0 ? 0 : (n->cursor > len ? len : n->cursor);
+    int anchor = n->sel_anchor < 0 ? 0 : (n->sel_anchor > len ? len : n->sel_anchor);
+    int a = anchor < cursor ? anchor : cursor;
+    int b = anchor < cursor ? cursor : anchor;
+
+    if (b > a && n->focused) {           /* 选区背景先铺，文字后画，保持可读 */
+        int px0 = tx + gui_font_width(s, a, &g_builtin_font, GUI_LOOK_FONT_SIZE);
+        int px1 = tx + gui_font_width(s, b, &g_builtin_font, GUI_LOOK_FONT_SIZE);
+        gui_raster_fill_rect(p, px0, ty, px1 - px0, th, GUI_THEME_SEL);
+    }
+    gui_color_t tc = n->disabled ? GUI_THEME_TEXT_DIS : GUI_THEME_TEXT;
+    gui_font_draw(p, tx, ty, s, len, &g_builtin_font, GUI_LOOK_FONT_SIZE, tc);
+    if (n->focused && !n->disabled) {
+        int cx = tx + gui_font_width(s, cursor, &g_builtin_font, GUI_LOOK_FONT_SIZE);
+        gui_raster_fill_rect(p, cx, ty, 2, th, GUI_THEME_MARK);
+    }
+
+    p->has_clip = saved_has;
+    p->clip_x = sx; p->clip_y = sy; p->clip_w = sw; p->clip_h = sh;
 }
 
 /* CheckBox 的勾：两段折线，纯整数坐标，无浮点。 */
@@ -136,6 +188,10 @@ static void draw_node(GuiPainterImpl *p, GuiWidgetImpl *n,
             gui_raster_fill_rect(p, ax, ay, w, h, bg);
             gui_raster_stroke_rect(p, ax, ay, w, h, 1, GUI_THEME_BORDER);
             draw_text(p, n->text, ax, ay, w, h, tc, 1);
+            break;
+        }
+        case GUI_WIDGET_TEXTBOX: {
+            draw_textbox(p, n, ax, ay, w, h);
             break;
         }
         case GUI_WIDGET_CHECKBOX: {

@@ -408,6 +408,7 @@
 <li><a href="#控件框架层契约28-个追加-extern-fn">控件框架层契约（28 个追加 extern fn）</a></li>
 <li><a href="#主动事件分发packed-纯值块--arc-边界">主动事件分发：packed 纯值块 + ARC 边界</a></li>
 <li><a href="#成品控件外观层契约12-个追加-extern-fn">成品控件外观层契约（12 个追加 extern fn）</a></li>
+<li><a href="#输入层契约14-个追加-extern-fn">输入层契约（14 个追加 extern fn）</a></li>
 </ul>
 </li>
 <li><a href="#383-分层架构">38.3 分层架构</a></li>
@@ -528,7 +529,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── dial_map.h / .c     #   Map（int → int，ARC）
 │   └── dial_io.h / .c      #   打印 / 读行
 ├── packages/               # 官方 .dialpkg 包（http / text / json / crypto / gui）
-│   └── gui/                #   手搓 GUI 三层：地基 + 控件框架 + 成品外观（见 §38）
+│   └── gui/                #   手搓 GUI 四层：地基 + 控件框架 + 成品外观 + 输入层（见 §38）
 ├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
 ├── tests/
 │   ├── run_tests.sh        # 端到端测试（A 正向 / B 负向 / C 契约 / D Fail-Fast / E 对照 /
@@ -2928,7 +2929,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>GUI 控件树 / 布局 / 信号槽</td>
-<td><strong>三层已落地</strong>（<code>gui.dialpkg</code>，见 <a href="#38-手搓-gui-地基包guidialpkg">§38</a>）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 内置浅色主题 + 四态绘制 + 纯值事件推进），共 95 个 <code>extern fn</code>。<strong>仍未实现</strong>：可覆写主题色、TextBox / 单行编辑与焦点链、信号槽、C → Dial 反向回调、富文本编辑、图片解码。Win32 后端<strong>仅交叉编译、未实机验证</strong></td>
+<td><strong>四层已落地</strong>（<code>gui.dialpkg</code>，见 <a href="#38-手搓-gui-地基包guidialpkg">§38</a>）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 内置浅色主题 + 四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入），共 <strong>109 个 <code>extern fn</code></strong>。<strong>仍未实现</strong>：可覆写主题色、信号槽、C → Dial 反向回调、富文本编辑、图片解码。Win32 后端<strong>仅交叉编译、未实机验证</strong>（XTest 实机注入仅在 Linux/Xvfb 验收）</td>
 </tr>
 </tbody>
 </table>
@@ -2936,7 +2937,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <h2 id="18-测试">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
-<p><code>bash tests/run_tests.sh</code> 的<strong>当前全量回归是 A–Z + AA 共二十七组</strong>（517 ✅ / 0 ❌），
+<p><code>bash tests/run_tests.sh</code> 的<strong>当前全量回归是 A–Z + AA 共二十七组</strong>（520 ✅ / 0 ❌），
 全部通过才算绿。下表逐项详列 <strong>A–M 十三组</strong>——这组逐组说明自 v0.9x 沿用至今、
 内容未变，且每一组至今仍在执行；<strong>N–Z 与 AA 组</strong>分别见 §33–§38 各章与
 <code>tests/run_tests.sh</code>（其中 AA 组是手搓 GUI 地基包 <code>gui.dialpkg</code> 的专项回归，见 §38）：</p>
@@ -7744,7 +7745,9 @@ SSE / AVX / NEON。</p>
 此后工作树又新增 <code>gui.dialpkg</code> 地基层与 AA 组（507 ✅），再补控件框架层
 （AA 组 +3 条断言到 <strong>510 ✅</strong>），又补成品控件外观层（AA 组 +3 条到
 <strong>513 ✅</strong>），再修 <code>http.dialpkg</code> 三处 Fail-Fast / 可用性缺陷并给 W 组 +4 条
-断言到 <strong>517 ✅</strong>，全量回归仍为 <strong>A–Z + AA 二十七组</strong>，属 <strong>未发布的开发中增量</strong>，
+断言到 <strong>517 ✅</strong>，本轮补 GUI 输入层（TextBox / 焦点链 / 统一键码 / XTest
+实机注入）又给 AA 组 +3 条到 <strong>520 ✅</strong>，全量回归仍为
+<strong>A–Z + AA 二十七组</strong>，属 <strong>未发布的开发中增量</strong>，
 见 §38 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
 </blockquote>
 <hr />
@@ -8788,15 +8791,17 @@ A–Z + AA <strong>二十七组</strong>，见 §38）。</p>
 <h2 id="38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</h2>
 <blockquote>
 <p><strong>定位与交付口径</strong>：本章描述 <code>packages/gui/</code> 产出的 <code>gui.dialpkg</code>——一个
-<strong>不用 Qt / GTK / SDL、纯 C 手搓</strong>的 GUI 包，覆盖<strong>三层、共 95 个 <code>extern fn</code></strong>：
+<strong>不用 Qt / GTK / SDL、纯 C 手搓</strong>的 GUI 包，覆盖<strong>四层、共 109 个 <code>extern fn</code></strong>：
 ① <strong>地基层</strong>（窗 + 事件 + 绘图 + 字体，55 个 <code>extern fn</code>）；
 ② <strong>控件框架层</strong>（<code>GuiWidget</code> 树 + 布局 + 命中测试 + 主动事件分发，
 28 个 <code>extern fn</code>，见 §38.2 / §38.9）；
 ③ <strong>成品控件外观层</strong>（Label / Button / CheckBox + 内置浅色默认主题 +
-四态绘制 + 纯值事件推进，12 个 <code>extern fn</code>，见 §38.2 / §38.9）。
+四态绘制 + 纯值事件推进，12 个 <code>extern fn</code>，见 §38.2 / §38.9）；
+④ <strong>输入层</strong>（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码与修饰键 /
+XTest 实窗事件注入，14 个 <code>extern fn</code>，见 §38.2 / §38.10）。
 它是 <code>[v1.10]</code>（标签 <code>v1.1</code>）发布<strong>之后</strong>的<strong>开发中增量</strong>：编译器版本仍为
 <code>1.10.0</code>，<strong>未升版本号、未打标签、未发 Release</strong>（见 CHANGELOG <code>[未发布]</code> 段）。
-三层都是<strong>真实现</strong>，不是占位接口；三层一律沿用「只追加 <code>extern fn</code>、
+四层都是<strong>真实现</strong>，不是占位接口；四层一律沿用「只追加 <code>extern fn</code>、
 ABI 不变、绝不 C → Dial 反向回调」的宪法。</p>
 </blockquote>
 <p><strong>架构分叉（用户拍板）</strong>：</p>
@@ -8822,23 +8827,27 @@ ABI 不变、绝不 C → Dial 反向回调」的宪法。</p>
 </tr>
 <tr>
 <td>第一版范围（地基轮）</td>
-<td>只做地基层（<code>GuiApp</code> / <code>GuiWindow</code> / <code>GuiPainter</code> / <code>GuiFont</code> / Event）；<strong>当时</strong>控件树 / 布局 / 信号槽不进契约——后续两轮已补框架层与外观层，见下三行</td>
+<td>只做地基层（<code>GuiApp</code> / <code>GuiWindow</code> / <code>GuiPainter</code> / <code>GuiFont</code> / Event）；<strong>当时</strong>控件树 / 布局 / 信号槽不进契约——后续三轮已补框架层、外观层与输入层，见下四行</td>
 </tr>
 <tr>
 <td>控件框架层范围（当时）</td>
-<td>Widget 树 + 绝对 / VBox / HBox 布局 + 命中测试 + 事件分发；<strong>当时</strong>统一通用 Box（28 个 <code>extern fn</code>），本轮外观层已在其上补三种成品控件</td>
+<td>Widget 树 + 绝对 / VBox / HBox 布局 + 命中测试 + 事件分发；<strong>当时</strong>统一通用 Box（28 个 <code>extern fn</code>），后续两轮已在其上补成品控件与 TextBox</td>
 </tr>
 <tr>
-<td>外观层范围（本轮）</td>
+<td>外观层范围（上一轮）</td>
 <td><strong>最小可用集</strong>：Label / Button / CheckBox 三种控件 + C 侧内置浅色默认主题 + 四态（普通 / 悬停 / 按下 / 禁用）绘制 + 纯值事件推进 + 整树一次绘制（12 个 <code>extern fn</code>）；仍不引入 C → Dial 回调、不暴露 theme setter</td>
 </tr>
 <tr>
+<td>输入层范围（本轮）</td>
+<td>TextBox 单行编辑（可打印字符 / 退格 / 删除 / 光标 / 选区 / UTF-8 边界 / <code>max_len</code>）+ 焦点链（Tab / Shift+Tab 环形切换 / 点击聚焦）+ <strong>两平台统一功能键码</strong>（<code>X11 KeySym</code> / <code>Win32 VK</code> → 同表）+ 修饰键位掩码 + Xvfb <strong>XTest 真实鼠标/键盘注入</strong>闭环（14 个 <code>extern fn</code>）；仍不引入 C → Dial 回调、不暴露 theme setter</td>
+</tr>
+<tr>
 <td>事件分发</td>
-<td><strong>主动分发，绝不 C → Dial 反向回调</strong>：C 侧写 <code>packed struct</code> 纯值块 / 纯值四态，Dial 侧 <code>poll/wait</code> 后读；字符串由 <code>string_from_cstr</code> 复制成 ARC 对象。C 管 C 的、ARC 管 ARC 的，零隐式开销</td>
+<td><strong>主动分发，绝不 C → Dial 反向回调</strong>：C 侧写 <code>packed struct</code> 纯值块 / 纯值四态 / 纯值编辑态，Dial 侧 <code>poll/wait</code> 后读；字符串由 <code>string_from_cstr</code> 复制成 ARC 对象。C 管 C 的、ARC 管 ARC 的，零隐式开销</td>
 </tr>
 <tr>
 <td>包契约</td>
-<td><strong>追加函数、ABI 不变</strong>：三层都只加 <code>extern fn</code> + 句柄，旧签名一字不动（框架层追加前 55 个、外观层追加前 83 个），<code>abi = 6</code> / <code>version = 1.10.0</code> 不变，重新 <code>pack</code> + <code>install</code>（同 ABI 覆盖）</td>
+<td><strong>追加函数、ABI 不变</strong>：四层都只加 <code>extern fn</code> + 句柄，旧签名一字不动（框架层追加前 55 个、外观层追加前 83 个、输入层追加前 95 个），<code>abi = 6</code> / <code>version = 1.10.0</code> 不变，重新 <code>pack</code> + <code>install</code>（同 ABI 覆盖）</td>
 </tr>
 </tbody>
 </table>
@@ -8851,7 +8860,8 @@ ABI 不变、绝不 C → Dial 反向回调」的宪法。</p>
 ├── src/dial_gui_core.c   # FFI 包装：句柄生命周期 / 错误槽 / 事件槽 / 调 vtable
 ├── src/dial_gui_raster.c # 自研光栅化器 + 内置 8×8 点阵 + stb_truetype 字形
 ├── src/dial_gui_widget.c # 控件框架层：纯 C 树 / 布局 / 命中 / packed 事件块（三平台共用）
-├── src/dial_gui_look.c   # 成品控件外观层：默认主题 / 四态绘制 / 纯值事件推进（纯 C）
+├── src/dial_gui_look.c   # 成品控件外观层：默认主题 / 四态 + TextBox 绘制 / 事件推进（纯 C）
+├── src/dial_gui_input.c  # 输入层：TextBox 编辑 / 光标·选区 / 焦点链 / 键码推进（纯 C）
 ├── src/gui_font8.h       # 内置 ASCII 点阵静态常量表
 ├── src/dial_gui_x11.c    # POSIX 后端（X11 + XShm + XRender，dlopen）
 ├── src/dial_gui_win32.c  # Windows 后端（GDI DIBSection，LoadLibraryA）
@@ -8861,12 +8871,16 @@ patches/stb-1.26.SHA256SUMS
 tests/pkg/use_gui.dial        # 地基层 demo（像素级 CRC 回归，crc_offscreen 基准）
 tests/pkg/use_gui_widget.dial # 控件框架层 demo（不创建 GuiPainter，不碰 CRC 基准）
 tests/pkg/use_gui_look.dial   # 外观层 demo（独立 offscreen 画布，crc_look 硬钉）
+tests/pkg/use_gui_input.dial  # 输入层 demo（编辑 / 选区 / 焦点 / 键码 / 实窗事件闭环）
+tests/pkg/xtest_inject.sh     # Xvfb 下用 xdotool（XTEST）真注入鼠标/键盘事件
 </code></pre>
-<p><code>dial_gui_widget.c</code> / <code>dial_gui_look.c</code> <strong>都只 include <code>dial_gui.h</code> + libc</strong>，
-不碰 X11 / Win32 任何 API，因此三份 <code>.a</code> 的 <code>nm -u</code> 不会因框架层 / 外观层新增
-任何平台符号。<code>dial_gui_look.c</code> 也<strong>不碰像素细节</strong>：只调 <code>dial_gui_raster.c</code>
-导出的 <code>gui_raster_*</code> / <code>gui_font_*</code>，像素仍由唯一的光栅化器 TU 管理；
-内置点阵字体用一个静态零分配对象（<code>kind=0</code>），无需 <code>gui_font_default</code> 分配。</p>
+<p><code>dial_gui_widget.c</code> / <code>dial_gui_look.c</code> / <code>dial_gui_input.c</code> <strong>都只 include
+<code>dial_gui.h</code> + libc</strong>，不碰 X11 / Win32 任何 API，因此三份 <code>.a</code> 的 <code>nm -u</code> 不会因
+框架层 / 外观层 / 输入层新增任何平台符号。<code>dial_gui_look.c</code> 也<strong>不碰像素细节</strong>：
+只调 <code>dial_gui_raster.c</code> 导出的 <code>gui_raster_*</code> / <code>gui_font_*</code>，像素仍由唯一的
+光栅化器 TU 管理；内置点阵字体用一个静态零分配对象（<code>kind=0</code>），无需
+<code>gui_font_default</code> 分配。XTest（libXtst）<strong>只在测试侧</strong>由 <code>xtest_inject.sh</code> /
+<code>xdotool</code> 使用，包本体 <code>.a</code> 依然零平台链接期依赖。</p>
 <h3 id="382-对外契约guidiali">38.2 对外契约：<code>gui.diali</code></h3>
 <p>五个<strong>不透明句柄</strong>（不进 ARC，必须显式 <code>*_free</code>）：</p>
 <table>
@@ -8900,7 +8914,7 @@ tests/pkg/use_gui_look.dial   # 外观层 demo（独立 offscreen 画布，crc_l
 </tr>
 <tr>
 <td><code>GuiWidget</code></td>
-<td>控件节点（框架层为通用 Box；外观层可设为 LABEL / BUTTON / CHECKBOX）</td>
+<td>控件节点（框架层为通用 Box；外观层可设为 LABEL / BUTTON / CHECKBOX，输入层可设为 TEXTBOX）</td>
 <td>独立树 <code>dial_gui_widget_tree</code> → <code>dial_gui_widget_tree_free</code>；挂窗后由窗口拥有，随 <code>window_close</code> 释放，<strong>此后不得再 free</strong></td>
 </tr>
 </tbody>
@@ -8950,16 +8964,18 @@ C 侧在 X11 走 ARGB32、在 GDI 走 BGRA，通道转换由包内部负责，Di
 </tr>
 </tbody>
 </table>
-<p>事件字段用 <code>dial_gui_event_kind/x/y/button/key/width/height/window</code> 访问
-（每 App 一份最近事件槽，单线程事件循环，无需加锁）。</p>
+<p>事件字段用 <code>dial_gui_event_kind/x/y/button/key/mods/width/height/window</code> 访问
+（每 App 一份最近事件槽，单线程事件循环，无需加锁）；<code>dial_gui_event_mods</code>
+返回修饰键位掩码（<code>1</code> SHIFT / <code>2</code> CTRL / <code>4</code> ALT，按位或），输入层的
+<code>widget_key(root, kind, key, mods)</code> 直接消费它。键码见下方统一键码表。</p>
 <h4 id="控件框架层契约28-个追加-extern-fn">控件框架层契约（28 个追加 <code>extern fn</code>）</h4>
 <p>控件层<strong>必须并入同一个 <code>gui</code> 包</strong>：<code>.diali</code> 的不透明句柄按包隔离解析
 （<code>src/main.rs</code> 的 <code>resolve_imports</code> 每包只用自己的 <code>opaque_types</code>，且全局禁止重名），
 新建 <code>gui_widgets</code> 包根本无法引用 <code>GuiWindow</code> / <code>GuiApp</code>。因此<strong>框架层那一轮</strong>
 只<strong>追加</strong> 28 个单行 <code>extern fn</code> + <code>type GuiWidget;</code>，<strong>旧 55 个签名一字不动</strong>；
-外观层那一轮同理只追加 12 个（见下）。<code>dial.toml</code> 的 <code>abi = 6</code> /
-<code>version = 1.10.0</code> 始终不变，重新 <code>pack</code> + <code>install</code> 即可（同 ABI 覆盖；
-<code>.diali</code> 的 SHA256 由 manifest 现算）。</p>
+外观层那一轮同理只追加 12 个（见下），输入层那一轮只追加 14 个（见下）。
+<code>dial.toml</code> 的 <code>abi = 6</code> / <code>version = 1.10.0</code> 始终不变，重新 <code>pack</code> +
+<code>install</code> 即可（同 ABI 覆盖；<code>.diali</code> 的 SHA256 由 manifest 现算）。</p>
 <table>
 <thead>
 <tr>
@@ -9067,35 +9083,66 @@ Dial 侧 <code>poll/wait</code> 后经 <code>rawptr&lt;byte&gt;</code> + <code>p
   <code>offsetof&lt;T&gt;(field)</code> 编译期内建逐项比对（复用 §33.17 P 组范式），
   任何字段增删两边同时报错，杜绝契约漂移。</li>
 <li>QUIT / 窗口级事件没有命中控件，<code>tag</code> / <code>userdata</code> / <code>local_*</code> 为 0、
-  <code>win_title</code> / <code>widget_id</code> 为 NULL。真实鼠标注入依赖 XTest / xdotool，
-  本轮<strong>未实机验证</strong>，命中逻辑由无头纯 C 树断言覆盖。</li>
+  <code>win_title</code> / <code>widget_id</code> 为 NULL；<code>GuiWidgetEvent</code> 仍是 <strong>104 字节布局不变</strong>
+  （输入层的修饰键另由 <code>dial_gui_event_mods</code> 单独提供，绝不塞进 packed 块改尺寸）。
+  <strong>真实鼠标 / 键盘注入已由 XTest（<code>xtest_inject.sh</code> + <code>xdotool</code>）在 Xvfb 实窗实机
+  验收</strong>（AA 组第 10 项）；无 XTest 环境如实打印跳过，不伪装通过。</li>
 </ul>
-<p><strong>键码表（<code>dial_gui_event_key</code>）</strong>：</p>
+<p><strong>统一键码表（<code>dial_gui_event_key</code>）</strong>：两平台<strong>同值</strong>（本轮收口，见 §38.11）。
+起点 <code>0x110000</code>（十进制 <code>1114112</code>）大于 Unicode 最大码点 <code>0x10FFFF</code>，绝不与可打印
+字符冲突；X11 <code>KeySym</code>（含 <code>XK_ISO_Left_Tab</code>）与 Win32 <code>VK</code> 都先映射进同一张表。</p>
 <table>
 <thead>
 <tr>
 <th>键类别</th>
-<th>X11 后端</th>
-<th>Win32 后端</th>
+<th>键码</th>
+<th>两平台映射来源</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>可打印字符</td>
-<td><code>XLookupString</code> 的 UTF-8 首码点</td>
-<td><code>WM_CHAR</code> 的 <code>wParam</code></td>
+<td>Unicode 码点</td>
+<td>X11 <code>XLookupString</code> 的 UTF-8 首码点 / Win32 <code>WM_CHAR</code> 的 <code>wParam</code></td>
 </tr>
 <tr>
-<td>功能键</td>
-<td>X11 <strong>KeySym 低 16 位</strong>（<code>sym &amp; 0xFFFF</code>，如 Esc = <code>0xFF1B</code>）</td>
-<td><strong><code>0x10000 + VK</code> 标记</strong>（如 Esc = <code>0x1001B</code>）</td>
+<td>BACKSPACE / TAB / ENTER / ESCAPE</td>
+<td><code>0x110001</code> / <code>0x110002</code> / <code>0x110003</code> / <code>0x110004</code></td>
+<td>X11 <code>0xFF08/0xFF09(或 0xFE20 ISO_Left_Tab)/0xFF0D/0xFF1B</code>；Win32 <code>VK 0x08/0x09/0x0D/0x1B</code></td>
+</tr>
+<tr>
+<td>LEFT / UP / RIGHT / DOWN</td>
+<td><code>0x110005</code>..<code>0x110008</code></td>
+<td>X11 <code>0xFF51..0xFF54</code>；Win32 <code>VK 0x25..0x28</code></td>
+</tr>
+<tr>
+<td>HOME / END / PAGEUP / PAGEDOWN</td>
+<td><code>0x110009</code>..<code>0x11000C</code></td>
+<td>X11 <code>0xFF50/0xFF57/0xFF55/0xFF56</code>；Win32 <code>VK 0x24/0x23/0x21/0x22</code></td>
+</tr>
+<tr>
+<td>DELETE / SHIFT / CONTROL / ALT</td>
+<td><code>0x11000D</code>..<code>0x110010</code></td>
+<td>X11 <code>0xFFFF/0xFFE1-2/0xFFE3-4/0xFFE9-A</code>；Win32 <code>VK 0x2E/0x10/0x11/0x12</code></td>
+</tr>
+<tr>
+<td>F1..F12</td>
+<td><code>0x110011</code>..<code>0x11001C</code></td>
+<td>X11 <code>0xFFBE..0xFFC9</code>；Win32 <code>VK 0x70..0x7B</code></td>
+</tr>
+<tr>
+<td>表外键</td>
+<td><code>0x11003F</code>（<code>GUI_KEY_UNKNOWN</code>）</td>
+<td>一律收敛为<strong>单一</strong>未知码，绝不漏出平台私有值</td>
 </tr>
 </tbody>
 </table>
 <blockquote>
-<p><strong>原型边界</strong>：可打印字符在两平台都是 Unicode 码点、<strong>一致</strong>；功能键编码
-<strong>两平台尚未统一</strong>（X11 KeySym vs Win32 VK 标记），本轮不承诺跨平台同值，
-见 §38.11。</p>
+<p>可打印字符在两平台都是 Unicode 码点、<strong>一致</strong>；功能键编码<strong>两平台已统一</strong>到
+上表同一套常量，Dial 侧代码平台无关。<code>mods</code> 位掩码由 <code>dial_gui_event_mods</code> 取
+（X11 取 <code>XKeyEvent.state</code> 的 <code>ShiftMask/ControlMask/Mod1Mask</code>，Win32 由
+<code>wndproc</code> 跟踪 <code>VK_SHIFT/CONTROL/MENU</code> 的按下 / 抬起），<code>Shift+Tab</code> 的焦点回退
+就是靠它判向。Win32 后端仍<strong>仅交叉编译、未实机运行</strong>。</p>
 </blockquote>
 <p><strong>错误码</strong>（<code>dial_gui_last_error</code>）：<code>0</code> 无错误、<code>1</code> 参数非法、<code>2</code> 分配失败、
 <code>3</code> 平台库缺失 / 初始化失败、<code>4</code> 窗口创建 / 上屏失败、<code>5</code> 字体失败、
@@ -9120,7 +9167,7 @@ Dial 侧 <code>poll/wait</code> 后经 <code>rawptr&lt;byte&gt;</code> + <code>p
 <tr>
 <td>种类</td>
 <td>2</td>
-<td><code>widget_set_kind(0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX)</code> / <code>widget_kind</code></td>
+<td><code>widget_set_kind(0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX / 4 TEXTBOX)</code> / <code>widget_kind</code>（TEXTBOX 为输入层新增种类）</td>
 </tr>
 <tr>
 <td>文本</td>
@@ -9180,10 +9227,16 @@ Dial 侧 <code>poll/wait</code> 后经 <code>rawptr&lt;byte&gt;</code> + <code>p
 <td><code>FFF0F2F5</code></td>
 </tr>
 <tr>
-<td>勾 / 高亮</td>
+<td>勾 / 焦点边框 / 光标 / 高亮</td>
 <td><code>FF2F6FE0</code></td>
 <td>文本字号</td>
 <td>16（内置点阵 <code>sc=2</code>，每字符 18×16）</td>
+</tr>
+<tr>
+<td>TextBox 输入底</td>
+<td><code>FFFFFFFF</code></td>
+<td>TextBox 选区底</td>
+<td><code>FFC9DCFB</code>（仅焦点态绘制）</td>
 </tr>
 </tbody>
 </table>
@@ -9196,18 +9249,75 @@ C 侧绝不返回或缓存 Dial 对象。</p>
 <p><strong>绘制确定性</strong>：<code>widget_draw</code> 前序递归自己累加相对几何（不依赖 <code>abs_*</code>），
 父先画、后加子在上（与「后加子优先」的命中层序一致），只读纯值状态、
 不推进状态；BOX 铺面板背景 + 边框，LABEL 只画文本，BUTTON 四态背景 +
-居中文本，CHECKBOX 方框 + 勾 + 右侧文本。<code>use_gui_look.dial</code> 关 AA 后
-硬钉 <code>look_crc_normal = 3884455222</code>，并断言四态 CRC 互异、移出画布后复位
-逐像素回到普通态（幂等）。</p>
+居中文本，CHECKBOX 方框 + 勾 + 右侧文本，TEXTBOX 白底 + 边框（焦点态加粗换成
+高亮色）+ 选区底 + 文本 + 光标竖线（文本区临时裁剪到 <code>x+6 .. w-12</code>，光标恒定
+不闪烁以保证逐像素可断言）。<code>use_gui_look.dial</code> 关 AA 后硬钉
+<code>look_crc_normal = 3884455222</code>，并断言四态 CRC 互异、移出画布后复位逐像素回到
+普通态（幂等）；<code>use_gui_input.dial</code> 另钉 <code>input_crc_focused = 4147329629</code> 并断言
+移走焦点后边框色与 CRC 同时变化。</p>
+<h4 id="输入层契约14-个追加-extern-fn">输入层契约（14 个追加 <code>extern fn</code>）</h4>
+<p>第四层同样<strong>只追加</strong>：旧 95 个签名一字不动、<code>abi = 6</code> / <code>version = 1.10.0</code>
+不变，<code>GuiWidgetEvent</code> 的 104 字节布局<strong>一字不动</strong>（修饰键走独立访问器）。
+控件种类新可接受 <code>4 TEXTBOX</code>；焦点是树根上的一个 C 侧裸指针，文本仍是控件
+自己的 <code>strdup</code> 副本，光标 / 选区是 <strong>UTF-8 字节偏移</strong>（一律按字符边界对齐，
+绝不切断多字节序列）。<code>max_len</code> 按字节计，<code>0</code> = 不限（仍有 <code>4096</code> 兜底），
+越界值<strong>明确报错而非静默截断</strong>；<code>widget_set_text</code> 是显式 API 不受它约束，
+但会把光标 / 选区归零。</p>
+<table>
+<thead>
+<tr>
+<th>分组</th>
+<th>数量</th>
+<th>代表 API</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>事件修饰键</td>
+<td>1</td>
+<td><code>dial_gui_event_mods(app)</code>（在事件访问器区）</td>
+</tr>
+<tr>
+<td>焦点链</td>
+<td>5</td>
+<td><code>widget_set_focus</code> / <code>widget_focus</code> / <code>widget_focused</code> / <code>widget_focus_next</code> / <code>widget_focus_prev</code></td>
+</tr>
+<tr>
+<td>光标 / 选区</td>
+<td>5</td>
+<td><code>widget_cursor</code> / <code>widget_set_cursor</code> / <code>widget_sel_start</code> / <code>widget_sel_end</code> / <code>widget_select</code></td>
+</tr>
+<tr>
+<td>输入上限</td>
+<td>2</td>
+<td><code>widget_set_max_len</code> / <code>widget_max_len</code></td>
+</tr>
+<tr>
+<td>键盘事件推进</td>
+<td>1</td>
+<td><code>widget_key(root,kind,key,mods)</code>：返回 <code>0</code> 无变化 / <code>1</code> 文本或光标变化 / <code>2</code> 焦点变化 / <code>3</code> Enter 提交 / <code>-1</code> 参数错</td>
+</tr>
+</tbody>
+</table>
+<p><strong>可聚焦控件</strong> = 可见 / 未禁用 / <code>kind == 4 TEXTBOX</code>；Tab 按加入顺序环形前进，
+Shift+Tab 反向，禁用的控件自动让焦点出栈，摘除子树时先清焦点裸指针（绝不
+悬垂）。键盘编辑只认 <code>KEY_PRESS</code>（<code>KEY_RELEASE</code> 忽略）：可打印字符插入（有选区
+先替换）、BACKSPACE / DELETE 删前 / 后一个字符、LEFT / RIGHT / HOME / END 移光标
+（带 SHIFT 扩选区）、TAB 切焦点、ENTER 给提交信号、ESCAPE 清选区，其余功能键 /
+修饰键本身不改文本。<strong>绝不 C → Dial 反向回调</strong>：Dial 侧 <code>poll/wait</code> 后把
+<code>event_key</code> / <code>event_mods</code> 主动喂进 <code>widget_key</code>，C 侧从不回调、绝不返回或缓存
+Dial 对象。</p>
 <h3 id="383-分层架构">38.3 分层架构</h3>
 <pre><code>Dial 源码 --import &quot;gui&quot;--&gt; gui.diali 签名（SHA256 锁定）
                                  |
-                         dial_gui_core.c   &lt;- 句柄 / 错误槽 / 事件槽 / 95 个 FFI 包装
+                         dial_gui_core.c   &lt;- 句柄 / 错误槽 / 事件槽 / 109 个 FFI 包装
                                  |  GuiBackend vtable
                                  |  ├─ dial_gui_widget.c（纯 C 树 / 布局 / 命中 / packed 块）
-                                 |  └─ dial_gui_look.c（默认主题 / 四态 / 纯值事件推进）
-                                 |      两 TU 均三平台共用、零平台符号；
-                                 |      look.c 只调 gui_raster_* / gui_font_*，不复制像素逻辑
+                                 |  ├─ dial_gui_look.c（默认主题 / 四态 + TextBox / 事件推进）
+                                 |  └─ dial_gui_input.c（TextBox 编辑 / 焦点链 / 键码推进）
+                                 |      三 TU 均三平台共用、零平台符号；
+                                 |      look.c 只调 gui_raster_* / gui_font_*，不复制像素逻辑；
+                                 |      input.c 只碰 C 树纯值，不碰平台 API / 不碰像素
               +------------------+------------------+
         dial_gui_x11.c                      dial_gui_win32.c
      (dlopen X11/Xext/Xrender)        (LoadLibraryA user32/gdi32)
@@ -9216,10 +9326,11 @@ C 侧绝不返回或缓存 Dial 对象。</p>
                          (ARGB32 / AA / 字体)
 </code></pre>
 <p><code>core.c</code> <strong>不 <code>#include</code> 任何 X11 / <code>windows.h</code></strong>，只认 <code>GuiBackend</code> vtable；
-<code>dial_gui_widget.c</code> / <code>dial_gui_look.c</code> 更是只 include <code>dial_gui.h</code> + libc。
-因此交叉编译三平台不需要各平台 GUI SDK 头，框架层 / 外观层也不会给 <code>.a</code>
-引入任何平台符号。平台库<strong>一律运行时动态装载</strong>，三份 <code>.a</code> 都不产生链接期
-未定义符号。</p>
+<code>dial_gui_widget.c</code> / <code>dial_gui_look.c</code> / <code>dial_gui_input.c</code> 更是只 include
+<code>dial_gui.h</code> + libc。因此交叉编译三平台不需要各平台 GUI SDK 头，框架层 /
+外观层 / 输入层也不会给 <code>.a</code> 引入任何平台符号。平台库<strong>一律运行时动态装载</strong>，
+三份 <code>.a</code> 都不产生链接期未定义符号；XTest（<code>libXtst</code>）只在测试侧使用，
+不进包、不进 <code>.a</code>。</p>
 <h3 id="384-自研-2d-光栅化器">38.4 自研 2D 光栅化器</h3>
 <p><code>dial_gui_raster.c</code> 是<strong>唯一碰像素的 TU</strong>，也是唯一展开
 <code>STB_TRUETYPE_IMPLEMENTATION</code> 的地方。CPU 侧一份 <code>ARGB32</code> 行主序像素缓冲，
@@ -9393,16 +9504,44 @@ var act: int = dial_gui_widget_handle(tree, 2, 20, 60, 1);  // 2 = RELEASE → �
 dial_gui_widget_draw(tree, p);                        // 整树一次画到任意画布
 print(&quot;crc = &quot; + str(dial_gui_painter_crc32(p)));
 </code></pre>
+<p>输入层用法（同样是纯值事件主动喂进树，绝不注册回调）：</p>
+<pre><code class="language-dial">var tree: GuiWidget = dial_gui_widget_tree(320, 160);
+var box1: GuiWidget = dial_gui_widget_add(tree);
+var box2: GuiWidget = dial_gui_widget_add(tree);
+dial_gui_widget_set_kind(box1, 4);          // 4 = TEXTBOX
+dial_gui_widget_set_kind(box2, 4);
+dial_gui_widget_layout_apply(tree, 320, 160);
+dial_gui_widget_set_focus(tree, box1);      // 也可 widget_focus_next / 点击聚焦
+dial_gui_widget_set_max_len(box1, 64);      // 0 = 不限；越界明确报错
+
+// 事件循环里：一条键盘纯值事件 = kind + key + mods，C 侧推进编辑态 / 焦点环
+var ev: int = dial_gui_app_wait(app, 16);
+if (ev == 4) {                              // 4 = KEY_PRESS
+    var r: int = dial_gui_widget_key(tree, ev, dial_gui_event_key(app),
+                                     dial_gui_event_mods(app));
+    // r: 1 文本/光标变化 / 2 焦点变化(Tab) / 3 Enter 提交 / 0 无变化
+}
+if (ev == 1 or ev == 2 or ev == 3) {        // 鼠标：推进四态 / 点击聚焦
+    dial_gui_widget_handle(tree, ev, dial_gui_event_x(app),
+                           dial_gui_event_y(app), dial_gui_event_button(app));
+}
+dial_gui_widget_draw(tree, wp);             // 焦点边框 / 选区 / 光标一起画
+print(string_from_cstr(dial_gui_widget_text(box1)));   // 借用指针 → ARC 复制
+</code></pre>
 <blockquote>
 <p>完整可运行 demo 见 <code>tests/pkg/use_gui.dial</code>（地基层，用 <code>rgba(a,r,g,b)</code>
 拼颜色）、<code>tests/pkg/use_gui_widget.dial</code>（控件框架层，<strong>不创建 <code>GuiPainter</code></strong>，
-因此不触碰 <code>crc_offscreen = 4007435570</code> 像素回归基准）与
+因此不触碰 <code>crc_offscreen = 4007435570</code> 像素回归基准）、
 <code>tests/pkg/use_gui_look.dial</code>（外观层，用自己的 offscreen 画布、关 AA，
-硬钉 <code>look_crc_normal = 3884455222</code>，同样不碰地基层 CRC 基准）。
+硬钉 <code>look_crc_normal = 3884455222</code>）与 <code>tests/pkg/use_gui_input.dial</code>
+（输入层，编辑 / 选区 / UTF-8 边界 / 焦点环 / <code>max_len</code> / 统一键码 / 实窗
+事件闭环，同样用自己的 offscreen 画布，硬钉 <code>input_crc_focused = 4147329629</code>）。
 无 DISPLAY 时窗口路径打印 <code>window = skipped [原因]</code> /
-<code>widget_window = skipped [原因]</code> / <code>look_window = skipped [原因]</code>，<strong>不伪装通过</strong>；
-真实鼠标注入依赖 XTest / xdotool，本轮未实机验证，demo 如实打印
-<code>widget_hit_injection = skipped</code>。</p>
+<code>widget_window = skipped [原因]</code> / <code>look_window = skipped [原因]</code> /
+<code>input_window = skipped [原因]</code>，<strong>不伪装通过</strong>；<strong>真实鼠标 / 键盘注入已由
+<code>tests/pkg/xtest_inject.sh</code>（Xvfb + xdotool/XTEST）实机验收</strong>：点击聚焦 /
+键盘落字 / Tab·Shift+Tab 焦点环 / 按钮激活 / 统一键码 + mods 逐条断言，
+无 XTest 环境才如实打印 <code>input_xtest_injection = skipped</code>。</p>
 </blockquote>
 <h3 id="3810-aa-组回归与平台边界">38.10 AA 组回归与平台边界</h3>
 <p><code>tests/run_tests.sh</code> 新增 <strong>AA 组</strong>（全量从 A–Z 二十六组扩为
@@ -9423,30 +9562,48 @@ A–Z + AA <strong>二十七组</strong>），依次验收：</p>
    没有则明确打印「真实窗口路径未实机验证」，绝不把未验证写成通过；</li>
 <li><strong>控件框架层 Xvfb 实窗</strong>：<code>window_set_root</code> / <code>widget_tree_free</code> 挂窗后拒绝、
    QUIT 主动分发、packed 纯值块字段读取、<code>string_from_cstr</code> 对 NULL 借用指针
-   返回空串；真实鼠标注入如实标注 <code>widget_hit_injection = skipped</code>；</li>
+   返回空串；命中逻辑由无头纯 C 树覆盖，真实鼠标注入由第 10 项统一实机验收；</li>
 <li><strong>成品控件外观层</strong>（<code>use_gui_look.dial</code>，独立 offscreen 画布、关 AA）：
    无 DISPLAY 路径断言三种控件种类 / 非法种类拒绝 / 文本 <code>string_from_cstr</code>
    ARC 复制 / VBOX 三等分 / 四态背景逐像素色值（<code>get_pixel</code>）与 CRC 互异 /
    移出画布复位幂等 / 禁用配色 / CheckBox 勾选翻转 / <code>look_crc_normal</code> 硬钉；
    Xvfb 实窗断言 <code>window_set_root</code> 挂树 + 整树绘制 + <code>flush</code> 上屏全通过；</li>
+<li><strong>输入层无 DISPLAY</strong>（<code>use_gui_input.dial</code>，独立 offscreen 画布、关 AA）：
+   TEXTBOX 种类 / 非法种类拒绝 / 焦点环（set / next / prev / 拒绝非 TEXTBOX /
+   摘除子树清焦点）/ 可打印字符插入 / Shift 选区与替换 / DELETE / BACKSPACE /
+   HOME / END / UTF-8 三字节字符按字符边界移动 / <code>max_len</code> 越界设置明确报错 /
+   Tab·Enter 返回值语义 / 焦点态边框逐像素色值与 <code>input_crc_focused</code> 硬钉；</li>
+<li><strong>XTest 实机注入</strong>（Xvfb + <code>xtest_inject.sh</code> + <code>xdotool</code>，真实 X11 客户端
+   事件）：点击第一个 TextBox 聚焦、键盘真打 <code>hi</code> 落字、Tab 前进焦点、
+   Shift+Tab 反向（断言 <code>mods</code> 含 SHIFT）、点击 BUTTON 真实激活；逐条断言
+   <code>input_xtest_keys</code> / <code>tabs</code> / <code>shift_mods</code> / <code>mouse_events</code> /
+   <code>mouse_activation</code> / <code>typed_text</code> / <code>focus_back</code> / <code>flush</code>。<code>libXtst</code> 只在
+   测试侧，包本体 <code>.a</code> 仍零平台链接期依赖；无 <code>xdotool</code> 时如实打印
+   <code>input_xtest_injection = skipped</code>，不伪装通过；</li>
 <li>卸载 <code>gui</code> 包。</li>
 </ol>
-<p>全量实测 <code>EXIT=0</code>，<strong>517 ✅ / 0 ❌</strong>（AA 组 14 条 <code>aapass</code>：地基层 8 条 +
-控件框架层 3 条 + 外观层 3 条；W 组本轮 +4 条 http 缺陷回归）；Xvfb 连续三次实窗能力串
-<code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，地基层像素 CRC 稳定
-<code>4007435570</code>、外观层 <code>look_crc_normal</code> 稳定 <code>3884455222</code>。</p>
+<p>全量实测 <code>EXIT=0</code>，<strong>520 ✅ / 0 ❌</strong>（AA 组 17 条 <code>aapass</code>：地基层 8 条 +
+控件框架层 3 条 + 外观层 3 条 + 输入层 3 条；W 组上一轮 +4 条 http 缺陷回归）；
+Xvfb 实窗能力串 <code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，
+地基层像素 CRC 稳定 <code>4007435570</code>、外观层 <code>look_crc_normal</code> 稳定
+<code>3884455222</code>、输入层 <code>input_crc_focused</code> 稳定 <code>4147329629</code>；
+XTest 实窗注入实测 <code>keys 2 / focus 2 / mouse 6 / act 2 / shift 1</code> 全绿。</p>
 <h3 id="3811-能力边界不许当已支持">38.11 能力边界（不许当已支持）</h3>
 <ul>
-<li><strong>三层已实现</strong>：地基层（窗 / 事件 / 绘图 / 字体）、<strong>控件框架层</strong>
+<li><strong>四层已实现</strong>：地基层（窗 / 事件 / 绘图 / 字体）、<strong>控件框架层</strong>
   （Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发）、<strong>成品控件
   外观层</strong>（Label / Button / CheckBox + 内置浅色默认主题 + 四态绘制 + 纯值
-  事件推进）都已有真实现并写进 <code>gui.diali</code>（共 95 个 <code>extern fn</code>）。
-  <strong>仍未实现、也不写进契约</strong>：可覆写主题色、TextBox / 单行编辑与焦点链、
-  信号槽、C → Dial 反向回调、富文本编辑、图片解码——把未实现函数写进契约
-  会让用户 <code>import</code> 后链接失败，那是制造漂移而非预留接口。Dial 侧仍可用
-  <code>GuiPainter</code> 在图元层自由自绘；</li>
-<li>Windows 后端<strong>未实机验证</strong>（沙箱只能交叉编译），Direct2D <strong>未落地</strong>；</li>
-<li>功能键编码<strong>两平台尚未统一</strong>（§38.2 键码表），只保证可打印字符一致；</li>
+  事件推进）、<strong>输入层</strong>（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能
+  键码 / 修饰键）都已有真实现并写进 <code>gui.diali</code>（共 <strong>109 个 <code>extern fn</code></strong>）。
+  <strong>仍未实现、也不写进契约</strong>：可覆写主题色、信号槽、C → Dial 反向回调、
+  富文本编辑（TextBox 只做单行）、图片解码、多行文本 / 输入法（IME）、
+  撤销重做栈——把未实现函数写进契约会让用户 <code>import</code> 后链接失败，那是制造
+  漂移而非预留接口。Dial 侧仍可用 <code>GuiPainter</code> 在图元层自由自绘；</li>
+<li>Windows 后端<strong>未实机验证</strong>（沙箱只能交叉编译），Direct2D <strong>未落地</strong>；
+  XTest 真实事件注入<strong>仅在 Linux / Xvfb 实机验收</strong>，Win32 的键码映射与
+  <code>mods</code> 跟踪是同表真实现但<strong>未实机运行</strong>；</li>
+<li>功能键编码<strong>两平台已统一</strong>到 <code>0x110000+</code> 同表（§38.2 键码表），表外键一律
+  收敛为 <code>GUI_KEY_UNKNOWN</code>，不承诺逐键同值但绝不漏出平台私有值；</li>
 <li>字体只加载<strong>本机可信</strong>文件，绝不接受网络字体；内置点阵仅覆盖 ASCII
   <code>0x20..0x7E</code>，非 ASCII 走 TrueType 路径；</li>
 <li>事件循环是<strong>单线程</strong>模型，<code>GuiApp</code> 的事件槽每 App 一份，不要多线程共享；</li>

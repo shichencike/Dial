@@ -563,9 +563,55 @@ static int first_codepoint(const char *b, int n) {
     return (int)v;
 }
 
+/*
+ * X11 KeySym → **统一功能键码**（GUI_KEY_*）。两平台都映射到同一套常量，
+ * Dial 侧不再区分 X11 KeySym 与 Win32 VK；表外键收敛为 GUI_KEY_UNKNOWN，
+ * 绝不把平台私有值漏给 Dial 侧。可打印字符仍返回 XLookupString 的首码点。
+ */
+static int x11_key(unsigned long sym, int uni, int n) {
+    switch (sym) {
+    case 0xFF08u: return GUI_KEY_BACKSPACE;   /* XK_BackSpace */
+    case 0xFF09u: return GUI_KEY_TAB;         /* XK_Tab */
+    case 0xFE20u: return GUI_KEY_TAB;         /* XK_ISO_Left_Tab：Shift+Tab
+                                              * 在多数键盘布局里产生这个 KeySym，
+                                              * 必须与 XK_Tab 同码；方向由
+                                              * ev.key.state 的 ShiftMask 决定 */
+    case 0xFF0Du: return GUI_KEY_ENTER;       /* XK_Return */
+    case 0xFF1Bu: return GUI_KEY_ESCAPE;      /* XK_Escape */
+    case 0xFF50u: return GUI_KEY_HOME;        /* XK_Home */
+    case 0xFF51u: return GUI_KEY_LEFT;        /* XK_Left */
+    case 0xFF52u: return GUI_KEY_UP;          /* XK_Up */
+    case 0xFF53u: return GUI_KEY_RIGHT;       /* XK_Right */
+    case 0xFF54u: return GUI_KEY_DOWN;        /* XK_Down */
+    case 0xFF55u: return GUI_KEY_PAGEUP;      /* XK_Prior */
+    case 0xFF56u: return GUI_KEY_PAGEDOWN;    /* XK_Next */
+    case 0xFF57u: return GUI_KEY_END;         /* XK_End */
+    case 0xFFE1u: case 0xFFE2u: return GUI_KEY_SHIFT;    /* Shift_L/R */
+    case 0xFFE3u: case 0xFFE4u: return GUI_KEY_CONTROL;  /* Control_L/R */
+    case 0xFFE9u: case 0xFFEAu: return GUI_KEY_ALT;      /* Alt_L/R */
+    case 0xFFFFu: return GUI_KEY_DELETE;      /* XK_Delete */
+    default: break;
+    }
+    if (sym >= 0xFFBEu && sym <= 0xFFC9u)     /* XK_F1..XK_F12 */
+        return GUI_KEY_F1 + (int)(sym - 0xFFBEu);
+    if (n > 0 && uni >= 0x20 && uni != 0x7F && uni < (int)GUI_KEY_BASE)
+        return uni;
+    return GUI_KEY_UNKNOWN;
+}
+
+/* XKeyEvent.state → GUI_MOD_*（ShiftMask / ControlMask / Mod1Mask）。*/
+static int x11_mods(unsigned int state) {
+    int m = 0;
+    if (state & (1u << 0)) m |= GUI_MOD_SHIFT;
+    if (state & (1u << 2)) m |= GUI_MOD_CTRL;
+    if (state & (1u << 3)) m |= GUI_MOD_ALT;
+    return m;
+}
+
 static int pump(GuiAppImpl *app, int blocking, int timeout_ms) {
     gui_x11_app *a = (gui_x11_app *)app->native;
     if (!a || !a->dpy) return GUI_EV_NONE;
+    app->ev_mods = 0;   /* 每次泵先清零，键事件再写实际值，绝不残留上一轮 */
     if (blocking && A.XPending(a->dpy) == 0) {
         struct pollfd pfd;
         pfd.fd = A.XConnectionNumber(a->dpy);
@@ -581,11 +627,14 @@ static int pump(GuiAppImpl *app, int blocking, int timeout_ms) {
     GuiWindowImpl *w = find_win_obj(app, ev.any.window);
 
     int kind = GUI_EV_NONE, x = 0, y = 0, button = 0, key = 0, ww = 0, hh = 0;
+    int mods = 0;
     switch (ev.type) {
     case X_KEY_PRESS: case X_KEY_RELEASE: {
         char buf[32]; unsigned long sym = 0;
         int n = A.XLookupString(&ev, buf, (int)sizeof(buf), &sym, NULL);
-        key = n > 0 ? first_codepoint(buf, n) : (int)(sym & 0xFFFFu);
+        int uni = first_codepoint(buf, n);
+        key = x11_key(sym, uni, n);
+        mods = x11_mods(ev.key.state);
         x = ev.key.x; y = ev.key.y;
         kind = ev.type == X_KEY_PRESS ? GUI_EV_KEY_PRESS : GUI_EV_KEY_RELEASE;
         break;
@@ -618,6 +667,7 @@ static int pump(GuiAppImpl *app, int blocking, int timeout_ms) {
         break;
     }
     if (kind == GUI_EV_NONE) return GUI_EV_NONE;
+    app->ev_mods = mods;
     /*
      * 控件命中测试放在 pump 里 —— 这是 Dial 的 poll/wait 调用线程，
      * 不是 Xlib 回调。gui_widget_hit 是纯 C、零平台符号、零 ARC 交互，

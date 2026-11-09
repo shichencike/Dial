@@ -200,15 +200,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # AA 组要在 Xvfb 下真开窗口验收 XShm/XRender。GitHub runner 一般已预装，
-      # 缺了才装；运行时库 libX11/libXext/libXrender 一并补齐，避免只在本地绿。
-      - name: 准备无头 X11 环境（AA 组 GUI 实窗验收）
+      # AA 组要在 Xvfb 下真开窗口验收 XShm/XRender，并用 xdotool（XTEST）
+      # 真实注入鼠标/键盘事件。GitHub runner 一般已预装，缺了才装；
+      # 运行时库 libX11/libXext/libXrender/libXtst 一并补齐，避免只在本地绿。
+      - name: 准备无头 X11 环境（AA 组 GUI 实窗 + XTest 注入验收）
         run: |
-          if ! command -v xvfb-run >/dev/null 2>&1; then
+          if ! command -v xvfb-run >/dev/null 2>&1 || ! command -v xdotool >/dev/null 2>&1; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq xvfb libx11-6 libxext6 libxrender1
+            sudo apt-get install -y -qq xvfb xdotool libx11-6 libxext6 libxrender1 libxtst6
           fi
           command -v xvfb-run
+          command -v xdotool
 
       - name: 端到端测试（A~Z+AA 共二十七组）
         run: bash tests/run_tests.sh

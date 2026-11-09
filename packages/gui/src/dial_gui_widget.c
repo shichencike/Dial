@@ -96,6 +96,10 @@ int gui_widget_remove(GuiWidgetImpl *w) {
     GuiWidgetImpl **pp = &p->first_child;
     while (*pp && *pp != w) pp = &(*pp)->next_sibling;
     if (*pp != w) return 0;
+    /* 摘除前先清掉指向被删子树的焦点指针，绝不留下悬垂裸指针。 */
+    GuiWidgetImpl *r = p;
+    while (r->parent) r = r->parent;
+    if (r->focus && tree_contains(w, r->focus)) r->focus = NULL;
     *pp = w->next_sibling;
     w->parent = NULL;
     w->next_sibling = NULL;
