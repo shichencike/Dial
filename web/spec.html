@@ -402,6 +402,7 @@
 <li><a href="#379-第三批已落地语言机制b7--b8--b6">37.9 第三批已落地（语言机制：B7 / B8 / B6）</a></li>
 <li><a href="#3710-c11-第一包已落地httpdialpkghttp11--tls-13--http2">37.10 C11 第一包已落地：http.dialpkg（HTTP/1.1 + TLS 1.3 + HTTP/2）</a></li>
 <li><a href="#3711-c11-其余三包已落地text--json--crypto">37.11 C11 其余三包已落地：text / json / crypto</a></li>
+<li><a href="#3712-b1impl-方法块v110-开发中增补落地">37.12 B1：impl 方法块（v1.10 开发中增补落地）</a></li>
 </ul>
 </li>
 <li><a href="#38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</a><ul>
@@ -3115,6 +3116,10 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <tr>
 <td>GUI 控件树 / 布局 / 信号槽</td>
 <td><strong>七层已落地</strong>（<code>gui.dialpkg</code>，见 <a href="#38-手搓-gui-地基包guidialpkg">§38</a>）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13），共 <strong>154 个 <code>extern fn</code></strong>。<strong>仍未实现</strong>：多行文本 / IME、撤销重做、C → Dial 反向回调、富文本编辑、图片解码。Win32 后端<strong>仅交叉编译、未实机验证</strong>（XTest 实机注入仅在 Linux/Xvfb 验收）</td>
+</tr>
+<tr>
+<td><code>impl</code> 方法块（B1）</td>
+<td><strong>已支持</strong>（v1.10 开发中增量）：<code>impl T { fn m(self, ...) }</code> 让用户 <code>struct</code> 与包不透明句柄（如 <code>GuiWindow</code> / <code>GuiMenu</code>）挂方法，<code>obj.m(args)</code> 编译期降级为静态调用（self 即首参），<strong>ABI 不变、旧签名一字不动、不新增关键字</strong>（<code>impl</code> 仍可作普通标识符），见 <a href="#3712-b1impl-方法块v110-开发中增补落地">§37.12</a>。<strong>现役边界</strong>：只支持具名类型（<code>Struct</code> / <code>Opaque</code>）；方法内 <code>self.f = ...</code> 因 Dial struct <strong>值语义</strong>只改副本、不回写调用者（与 Rust <code>&amp;mut self</code> 不同）；暂不支持同类型变参 <code>...xs</code>、C ABI 导出、对标量/内建容器挂 impl、关联函数（无 self 的 <code>T::new()</code>）。B2 泛型 / B3 枚举 ADT / B4 闭包 / B5 重载维持原裁决</td>
 </tr>
 </tbody>
 </table>
@@ -7935,9 +7940,12 @@ SSE / AVX / NEON。</p>
 （可覆写主题色 / Radio / Slider / ProgressBar）又给 AA 组 +3 条到 <strong>523 ✅</strong>，
 本轮补信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）再给 AA 组
 +3 条断言到 <strong>526 ✅</strong>，全量回归仍为 <strong>A–Z + AA 二十七组</strong>；
-本轮补 <code>int32</code> / <code>float32</code> 一等类型 + FFI 精确 32 位宽度，新增 AB 组 4 条
-断言与 B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 / 535 ✅</strong>，属
-<strong>未发布的开发中增量</strong>，见 §5.8 / §38 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
+其后补 <code>int32</code> / <code>float32</code> 一等类型 + FFI 精确 32 位宽度，新增 AB 组 4 条
+断言与 B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 / 535 ✅</strong>；
+再补菜单 / 对话框覆盖层（第 7 层）给 AA 组 +3 条到 <strong>538 ✅</strong>，
+本轮补 B1 <code>impl</code> 方法块（语言特性）新增 AC 组 5 条断言，扩为
+<strong>A–Z + AA + AB + AC 二十九组 / 549 ✅</strong>，属
+<strong>未发布的开发中增量</strong>，见 §5.8 / §37.12 / §38 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
 </blockquote>
 <hr />
 <h2 id="34-v104-增补工程工具链并入-v104版本不变">34. v1.04 增补：工程工具链（并入 <code>[v1.04]</code>，版本不变）</h2>
@@ -8839,6 +8847,12 @@ B6 内存专项：3M 次 <code>Point[]</code> 建放、1M 次 <code>map&lt;strin
 B2（用户泛型——死守单态化底线，不做）、B3（枚举 ADT——不引入 Tagged Union，
 保持类型系统极简）、C11（<code>http.dialpkg</code> 独立包，下一批）。
 B5（函数名重载）与 B4（闭包）维持<strong>永久否决</strong>。</p>
+<blockquote>
+<p><strong>沿革注记（v1.10 开发中增补）</strong>：上面「本批明确不碰」是 v1.04 第三批的
+<strong>历史裁决</strong>，如实保留。其中 <strong>B1（<code>impl</code> 方法）已在 <code>[v1.10]</code> 发布之后的
+开发中增量里落地</strong>，见 <a href="#3712-b1impl-方法块v110-开发中增补落地">§37.12</a>；
+B2 / B3 / C11 的裁决不变（C11 independent 包随后按 §37.10–37.11 落地）。</p>
+</blockquote>
 <h3 id="3710-c11-第一包已落地httpdialpkghttp11--tls-13--http2">37.10 C11 第一包已落地：<code>http.dialpkg</code>（HTTP/1.1 + TLS 1.3 + HTTP/2）</h3>
 <p>§37.5 定了「常用库走独立包、不进标准库包」，并按领域拆包。本节记录<strong>第一个包</strong>
 <code>http</code> 的完整决策；同批补齐的 <code>text</code> / <code>json</code> / <code>crypto</code> 三包见 §37.11。
@@ -8976,6 +8990,108 @@ A–Z + AA + AB <strong>二十八组</strong>，见 §38）。</p>
 <p><strong>能力边界（不许当已支持）</strong>：<code>text</code> 的正则子集、<code>json</code> 的 <code>\u0000</code> 拒绝、
 <code>crypto</code> 只提供摘要 / Base64 / HMAC（<strong>没有对称加密、非对称加密、签名、
 密钥派生、随机数</strong>）——都在各自 <code>.diali</code> 里逐条写明。HTTP/3.0 / QUIC 仍未落地。</p>
+<h3 id="3712-b1impl-方法块v110-开发中增补落地">37.12 B1：<code>impl</code> 方法块（v1.10 开发中增补落地）</h3>
+<blockquote>
+<p>v1.04 第三批把 B1 记为「明确不碰——暂用 <code>fn</code> 替代」（见 §37.9 沿革注记）。
+本节记录 <code>[v1.10]</code>（标签 <code>v1.1</code>）发布<strong>之后</strong>的开发中增量把它真正落地：
+编译器版本仍为 <code>1.10.0</code>，<strong>未升版本号、未打标签、未发 Release</strong>
+（见 CHANGELOG <code>[未发布]</code>）。它是<strong>语言层语法糖</strong>，不碰任何 <code>.diali</code> /
+<code>STDLIB_ABI</code> / C Runtime，<strong>ABI 不变、旧签名一字不动</strong>。</p>
+</blockquote>
+<p><strong>语法</strong>（不新增关键字——<code>impl</code> 与 <code>test</code> 块同例，用 <code>Ident("impl")</code> + 类型名 +
+<code>{</code> 识别，旧程序把 <code>impl</code> 当变量名 / 函数名依旧合法）：</p>
+<pre><code class="language-dial">struct Point { x: int, y: int }
+
+impl Point {
+    fn sum(self): int { return self.x + self.y; }
+    fn add(self, k: int = 10): int { return self.sum() + k; }
+    fn scaled(self, k: int): Point {
+        return Point { x: self.x * k, y: self.y * k };
+    }
+}
+
+fn main(): int {
+    var p: Point = Point { x: 3, y: 4 };
+    print(p.sum());            // 7
+    print(p.add());            // 17（默认实参 k=10）
+    print(p.scaled(2).sum());  // 14
+    return 0;
+}
+</code></pre>
+<p><strong>给包不透明句柄挂方法（「继续完善 GUI」的核心诉求）</strong>：<code>GuiWindow</code> / <code>GuiMenu</code>
+等 <code>type X;</code> 句柄也能挂 impl 方法，于是 <code>win.draw()</code> 就是 <code>dial_gui_window_draw(win)</code>
+的面向对象写法——<strong>包契约一个字都不用改</strong>：</p>
+<pre><code class="language-dial">import &quot;gui&quot;;
+impl GuiMenu {
+    fn add(self, id: int, txt: string): int {
+        return dial_gui_menu_add_item(self, id, txt);
+    }
+    fn count(self): int { return dial_gui_menu_count(self); }
+}
+fn main(): int {
+    var m: GuiMenu = dial_gui_menu_new();
+    m.add(100, &quot;File&quot;);       // 等价 dial_gui_menu_add_item(m, 100, &quot;File&quot;)
+    print(m.count());
+    dial_gui_menu_free(m);
+    return 0;
+}
+</code></pre>
+<p><strong>实现（最小侵入、零重复）</strong>：函数签名表是唯一的 <code>HashMap&lt;String, FuncInfo&gt;</code>，
+普通 <code>Expr::Call</code> 链路（签名校验 / 默认实参 / 实参求值 / C ABI 宽度适配 /
+<code>build_call</code> / 返回值）已完整可复用，因此不重写任何一条：</p>
+<table>
+<thead>
+<tr>
+<th>环节</th>
+<th>做法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>parser</td>
+<td><code>impl T { fn m(self, ...) }</code> 就地降级为普通顶层 <code>Func</code>，符号名 mangle 成 <code>__impl_T_m</code>，<code>self</code> 注入为<strong>首参</strong>（类型 = <code>Struct(T)</code> 或 <code>Opaque(T)</code>，由 <code>impl_receiver_name</code> 判定）；<code>self.field</code> 天然是 <code>Expr::Field</code></td>
+</tr>
+<tr>
+<td>语义 <code>type_of</code></td>
+<td><code>obj.m(args)</code> 按 obj 静态类型拼出 <code>__impl_T_m</code>；命中则做<strong>面向用户</strong>的参数个数 / 零隐式转换校验并给出 <code>T.m</code> 视角诊断（不含 mangle 名、不把 self 计入参数）；未命中 Fail-Fast「类型没有该方法」</td>
+</tr>
+<tr>
+<td>代码生成 <code>gen_method_call</code></td>
+<td>用 <code>make_impl_call</code> 把 Method 就地改写为 <code>Expr::Call(__impl_T_m, [obj]+args)</code> 并<strong>递归</strong> <code>gen_expr</code>，复用整条调用生成链；<code>self</code> 由 <code>gen_function</code> 的形参绑定自动落到栈槽</td>
+</tr>
+<tr>
+<td>其他 pass</td>
+<td><strong>保持 Method 形态、不做全局 AST 脱糖</strong>：<code>check_moved_expr</code> / 引用分析 / <code>desugar_expr</code> 对 obj 与 args 的递归遍历天然适用，零改动</td>
+</tr>
+</tbody>
+</table>
+<p>因为 <code>obj.m(args)</code> 与手写的 <code>__impl_T_m(obj, args)</code> 完全同构，<strong>编译产物与 ABI
+逐字节不变</strong>；<code>funcs</code> / <code>func_values</code> 两张表按名字自动登记方法，<code>analyze</code> 的
+重复定义校验会在极端撞名时 Fail-Fast。</p>
+<p><strong>容器特例收窄</strong>：<code>push</code> / <code>set</code> / <code>put</code> / <code>add</code> 同时是内建容器的 COW 原地写回
+协议名。codegen <code>gen_stmt</code> 与 semantic <code>check_stmt</code> 用 <code>is_impl_receiver</code> 把这套
+特例<strong>精确排除具名类型接收者</strong>——否则一个恰好叫 <code>push</code> 的 impl 方法会被误当成
+容器方法、把返回值错误 <code>build_store</code> 回变量槽。内建容器方法行为一字未变。</p>
+<p><strong>现役边界（如实标注，不夸大）</strong>：</p>
+<ul>
+<li>只支持<strong>具名类型</strong>（用户 <code>struct</code> = <code>Type::Struct</code>、包 <code>type X;</code> = <code>Type::Opaque</code>）；
+  标量 / 内建容器 / 裸指针 / <code>extern struct</code> 不挂 impl（它们的方法仍走各自白名单）。</li>
+<li><code>self</code> 是<strong>按值传入的副本</strong>（Dial struct 值语义）：方法内 <code>self.f = ...</code> 只改副本、
+  <strong>不回写调用者</strong>，与 Rust <code>&amp;mut self</code> 不同；要「改原对象」请返回新结构体再赋值。
+  包不透明句柄（<code>Opaque</code>，IR 是不透明指针）天然作用于原对象。</li>
+<li>支持默认实参、普通形参、返回任意类型、方法间调用 <code>self.m()</code>、返回结构体再调方法；
+  <strong>暂不支持</strong>同类型变参 <code>...xs</code>（脱糖阶段无法按 impl 符号名打包尾部实参，
+  parser 直接 Fail-Fast 并提示改用 <code>xs: T[]</code>）、C ABI 导出、关联函数（无 self 的
+  <code>T::new()</code>）、对同一类型重复/空 impl 块（编译期拒绝）。</li>
+<li><code>push</code> / <code>set</code> / <code>put</code> 等名字可与内建容器方法同名，语义由<strong>接收者类型</strong>区分，
+  不会互相污染。</li>
+</ul>
+<p><strong>AC 组回归</strong>（新增第 29 组）：<code>tests/impl/impl_struct.dial</code>（self 字段读写 /
+方法间调用 / 返回结构体 / 表达式位置 / <code>impl</code> 作普通标识符 / 容器 <code>push</code> 隔离 /
+值语义边界）、<code>impl_default.dial</code>（默认实参）、<code>impl_gui_handle.dial</code>（包不透明
+句柄 <code>GuiMenu</code> 方法，无 DISPLAY 纯内存逻辑）、<code>tests/bad/impl_*.dial</code> 六个 Fail-Fast
+负向（未知方法 / 参数类型 / 参数个数 / 缺 self / 重复方法 / 空块）+ 诊断面向用户。
+全量回归 <strong>538 ✅ → 549 ✅ / 0 ❌</strong>，A–Z + AA + AB + AC 二十九组全绿。</p>
 <hr />
 <h2 id="38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</h2>
 <blockquote>

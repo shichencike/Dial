@@ -1,0 +1,7 @@
+// 应当编译失败：impl 方法实参个数不足（self 不计，仍需 1 个 k）
+struct P { x: int }
+impl P { fn add(self, k: int): int { return self.x + k; } }
+fn main(): int {
+    var p: P = P { x: 1 };
+    return p.add();
+}

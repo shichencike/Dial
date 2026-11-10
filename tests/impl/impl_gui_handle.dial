@@ -1,0 +1,39 @@
+// B1「impl 方法块」GUI 场景：给包不透明句柄（type GuiMenu;）加方法。
+//
+// 这是「继续完善 GUI」的核心诉求：win.draw() 等价 dial_gui_window_draw(win)。
+// 验证 self 作为 Opaque 句柄首参，能正确传给包 extern fn，纯编译期脱糖、
+// ABI 不变、旧签名一字不动。全程无 DISPLAY：只用纯内存菜单对象逻辑。
+import "gui";
+
+impl GuiMenu {
+    fn add(self, id: int, txt: string): int {
+        return dial_gui_menu_add_item(self, id, txt);
+    }
+    fn count(self): int {
+        return dial_gui_menu_count(self);
+    }
+    fn item_id(self, idx: int): int {
+        return dial_gui_menu_item_id(self, idx);
+    }
+    fn tagged(self, t: int): int {
+        return dial_gui_menu_set_tag(self, t);
+    }
+}
+
+fn main(): int {
+    var m: GuiMenu = dial_gui_menu_new();
+    m.add(100, "File");
+    m.add(200, "Edit");
+    m.add(300, "Help");
+    print("count = ", m.count());
+    print("first id = ", m.item_id(0));
+    print("last id = ", m.item_id(2));
+    m.tagged(77);
+    print("tag = ", dial_gui_menu_tag(m));
+    if (m.count() != 3) { return 1; }
+    if (m.item_id(0) != 100) { return 2; }
+    if (m.item_id(2) != 300) { return 3; }
+    if (dial_gui_menu_tag(m) != 77) { return 4; }
+    dial_gui_menu_free(m);
+    return 0;
+}

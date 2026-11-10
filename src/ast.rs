@@ -176,6 +176,48 @@ impl Type {
     }
 }
 
+/// B1「impl 方法块」：能挂 impl 方法的**具名类型**取出其类型名。
+///
+/// 只有两类：用户 `struct`（值语义，`Type::Struct`）与包 `type X;` 声明的
+/// 不透明句柄（`Type::Opaque`，如 GUI 的 `GuiWindow`）。其余类型（内建容器 /
+/// 标量 / 裸指针）的方法由各自白名单分派，不进 impl 体系。
+/// 返回的名字用于拼接 impl 方法符号，participants：
+/// parser（生成 Func）/ semantic（type_of 解析）/ codegen（gen_method_call 解析）
+/// 三方共用，绝不各写一份字符串拼接导致漂移。
+pub fn impl_receiver_name(t: &Type) -> Option<&str> {
+    match t {
+        Type::Struct(n) | Type::Opaque(n) => Some(n.as_str()),
+        _ => None,
+    }
+}
+
+/// B1「impl 方法块」：把 `impl T { fn m(...) }` 里的方法 m 编译为普通函数时的
+/// 内部符号名。因为函数表（`HashMap<String, FuncInfo>`）与 LLVM 函数表
+/// （`HashMap<String, FunctionValue>`）都以**单个函数名**为键，impl 方法必须
+/// mangle 成唯一名字才能零改动复用整条 `Expr::Call` 链路（签名校验 / ABI 适配 /
+/// build_call 全部复用，ABI 天然不变）。
+///
+/// `__impl_` 前缀不是合法用户函数名的一部分（`extern fn` / 包函数不会用），
+/// 且 `analyze` 的重复定义校验会在极端撞名时 Fail-Fast 报错。
+pub fn impl_method_symbol(recv: &str, method: &str) -> String {
+    format!("__impl_{}_{}", recv, method)
+}
+
+/// B1「impl 方法块」：把 `obj.m(args)` 就地改写为等价的普通函数调用表达式
+/// `Expr::Call(__impl_<recv>_<m>, [obj] + args)`。
+///
+/// 语义层（`type_of`）与代码生成层（`gen_method_call`）都调用它，然后**递归**
+/// 走各自已有的 `Expr::Call` 分支——于是签名校验、参数个数、默认实参、逐参类型
+/// 兼容、实参求值、C ABI 宽度适配、`build_call`、返回值处理**全部零改动复用**。
+/// 这是 impl 方法「ABI 不变、纯编译期脱糖」的关键：`self` 就是首参，obj 求值一次
+/// 作为首参传入，与手写的普通函数调用完全同构。
+pub fn make_impl_call(obj: &Expr, recv: &str, method: &str, args: &[Expr]) -> Expr {
+    let mut call_args = Vec::with_capacity(args.len() + 1);
+    call_args.push(obj.clone());
+    call_args.extend(args.iter().cloned());
+    Expr::Call(impl_method_symbol(recv, method), call_args)
+}
+
 /// 二元运算符。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {

@@ -1,0 +1,10 @@
+impl-as-ident = 42
+sum = 7
+add = 17
+scaled.sum = 14
+expr-position = 15
+container.push = 3,3
+impl.push = 10
+p-unchanged = 7
+counter.incr = 105
+counter.get = 5

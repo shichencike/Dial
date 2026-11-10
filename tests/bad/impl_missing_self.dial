@@ -1,0 +1,4 @@
+// 应当编译失败：impl 方法首参必须是 self（无类型标注）
+struct P { x: int }
+impl P { fn get(k: int): int { return k; } }
+fn main(): int { return 0; }

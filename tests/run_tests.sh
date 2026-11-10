@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 二十八组检查，全部通过才算绿（顺序为 A→Z 再 AA→AB，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 二十九组检查，全部通过才算绿（顺序为 A→Z 再 AA→AB→AC，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -74,6 +74,13 @@
 #       FFI 精确 32 位宽度（C 侧按 int32_t/float 读参数·返回值·多参数·
 #       extern struct sizeof/offsetof 与双向字段读写）/ 越界 Fail-Fast /
 #       负向锁定零隐式转换（v1.10 增补）。
+#   AC. B1「impl 方法块」语言特性：impl T { fn m(self,...) } 编译期脱糖为普通
+#       函数（不新增关键字、ABI 不变、旧签名一字不动），obj.m(args) 降级为静态
+#       调用——自定义 struct（self 字段读写 / 方法间调用 / 返回结构体 / 表达式位置 /
+#       值语义边界 / impl 作普通标识符）/ 包不透明句柄 GuiMenu（win.draw() 等价
+#       dial_gui_window_draw(win)）/ 默认实参 / 容器 push 同名方法隔离 /
+#       6 个 Fail-Fast 负向 + 诊断面向用户（不暴露 mangle 名、参数不含 self）
+#       （v1.10 开发中增量）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -2415,6 +2422,81 @@ fi
 
 # 5) 清理：探针静态库与 .o 是回归现编的派生数据，不入库（与 P 组同口径）。
 rm -f "$AB_DIR/libscalar32_probe.a" "$AB_DIR/scalar32_probe.o" "$AB_DIR/scalar32_overflow.o"
+
+# ---------------------------------------------------------------------------
+# AC) B1「impl 方法块」语言特性（v1.10 开发中增量）
+#     impl T { fn m(self, ...) } 编译期脱糖为普通函数 __impl_T_m，obj.m(args)
+#     降级为静态调用（self 即首参），ABI 不变、旧签名一字不动、不新增关键字。
+# ---------------------------------------------------------------------------
+echo "== AC) B1 impl 方法块：自定义 struct / 包不透明句柄（GUI）/ 默认实参 / Fail-Fast / 值语义 / 容器方法隔离 =="
+acpass() { echo "  ✅ $1"; }
+acbad()  { echo "  ❌ $1"; fail=1; }
+
+AC_DIR=tests/impl
+
+# 1) 正向：自定义 struct 方法（self 字段读写 / 方法间调用 / 返回结构体再调用 /
+#    表达式位置 / impl 作普通标识符 / 容器 push 隔离 / 值语义边界）。
+if ! "$DIALC" build "$AC_DIR/impl_struct.dial" -o "${TMP}/impl_struct" >"${TMP}/ac_s_build.log" 2>&1; then
+    acbad "impl_struct.dial 编译失败"; tail -20 "${TMP}/ac_s_build.log"
+elif ! "${TMP}/impl_struct" >"${TMP}/ac_s_out.txt" 2>&1; then
+    acbad "impl_struct 运行非零退出"; tail -20 "${TMP}/ac_s_out.txt"
+elif ! diff -u "$AC_DIR/impl_struct.expected" "${TMP}/ac_s_out.txt" >"${TMP}/ac_s_diff.txt" 2>&1; then
+    acbad "impl_struct 输出与黄金文件不一致"; sed 's/^/       /' "${TMP}/ac_s_diff.txt"
+else
+    acpass "自定义 struct impl 全绿：self 字段读写·方法间调用·返回结构体·表达式位置·impl 作标识符·容器 push 隔离·值语义边界"
+fi
+
+# 2) 正向：impl 方法默认实参（脱糖后由 Call 链按 FuncInfo.defaults 补齐）。
+if ! "$DIALC" build "$AC_DIR/impl_default.dial" -o "${TMP}/impl_default" >"${TMP}/ac_d_build.log" 2>&1; then
+    acbad "impl_default.dial 编译失败"; tail -20 "${TMP}/ac_d_build.log"
+elif ! "${TMP}/impl_default" >"${TMP}/ac_d_out.txt" 2>&1; then
+    acbad "impl_default 运行非零退出"; tail -20 "${TMP}/ac_d_out.txt"
+elif ! diff -u "$AC_DIR/impl_default.expected" "${TMP}/ac_d_out.txt" >"${TMP}/ac_d_diff.txt" 2>&1; then
+    acbad "impl_default 输出与黄金文件不一致"; sed 's/^/       /' "${TMP}/ac_d_diff.txt"
+else
+    acpass "impl 默认实参全绿：省略取默认值 / 显式覆盖，self 对用户不可见"
+fi
+
+# 3) 正向：包不透明句柄（type GuiMenu;）impl 方法——GUI 场景核心诉求。
+#    自行 pack+install gui（与 AA 组同口径），全程无 DISPLAY、纯内存菜单逻辑。
+if ! "$DIALC" pack packages/gui -o "${TMP}/ac_gui.dialpkg" >"${TMP}/ac_pack.log" 2>&1 \
+   || ! "$DIALC" install "${TMP}/ac_gui.dialpkg" >"${TMP}/ac_install.log" 2>&1; then
+    acbad "gui.dialpkg 打包或安装失败（AC 组）"; tail -8 "${TMP}/ac_pack.log" "${TMP}/ac_install.log"
+elif ! "$DIALC" build "$AC_DIR/impl_gui_handle.dial" -o "${TMP}/impl_gui" >"${TMP}/ac_g_build.log" 2>&1; then
+    acbad "impl_gui_handle.dial 编译失败"; tail -20 "${TMP}/ac_g_build.log"
+elif ! env -u DISPLAY "${TMP}/impl_gui" >"${TMP}/ac_g_out.txt" 2>&1; then
+    acbad "impl_gui_handle 运行非零退出"; tail -20 "${TMP}/ac_g_out.txt"
+elif ! diff -u "$AC_DIR/impl_gui_handle.expected" "${TMP}/ac_g_out.txt" >"${TMP}/ac_g_diff.txt" 2>&1; then
+    acbad "impl_gui_handle 输出与黄金文件不一致"; sed 's/^/       /' "${TMP}/ac_g_diff.txt"
+else
+    acpass "包不透明句柄 impl 全绿：win.draw() 等价 dial_gui_window_draw(win)，self 作 Opaque 首参传给包 extern fn"
+fi
+
+# 4) 负向：6 个 Fail-Fast 边界（未知方法 / 参数类型 / 参数个数 / 缺 self /
+#    重复方法 / 空块）逐一拒绝，并锁定诊断不暴露内部 mangle 名、不把 self 计入参数个数。
+ac_neg_ok=0
+ac_neg_total=0
+for f in tests/bad/impl_*.dial; do
+    ac_neg_total=$((ac_neg_total + 1))
+    if ! "$DIALC" build "$f" -o "${TMP}/ac_bad" >"${TMP}/ac_neg.log" 2>&1; then
+        ac_neg_ok=$((ac_neg_ok + 1))
+    fi
+done
+if [ "$ac_neg_total" -ge 6 ] && [ "$ac_neg_ok" -eq "$ac_neg_total" ]; then
+    acpass "Fail-Fast 负向 $ac_neg_ok/$ac_neg_total 全被拒绝（未知方法·参数类型·参数个数·缺 self·重复方法·空块）"
+else
+    acbad "Fail-Fast 负向未全部拒绝（$ac_neg_ok/$ac_neg_total）"
+fi
+
+# 诊断面向用户：不含内部符号名 __impl_、参数个数不含 self。
+if "$DIALC" build tests/bad/impl_arg_count.dial -o "${TMP}/ac_bad" >"${TMP}/ac_cnt.log" 2>&1; then
+    acbad "参数个数负向用例竟编译成功"
+elif grep -qF "方法 'P.add' 需要 1~1 个参数，但传入了 0 个" "${TMP}/ac_cnt.log" \
+     && ! grep -qF "__impl_" "${TMP}/ac_cnt.log"; then
+    acpass "诊断面向用户：显示 P.add 且参数个数/序号不含 self、不暴露 mangle 名"
+else
+    acbad "诊断未还原用户视角"; tail -6 "${TMP}/ac_cnt.log"
+fi
 
 echo
 if [ $fail -eq 0 ]; then

@@ -1,0 +1,7 @@
+// 应当编译失败：impl 块内方法重复定义
+struct P { x: int }
+impl P {
+    fn get(self): int { return self.x; }
+    fn get(self): int { return 0; }
+}
+fn main(): int { return 0; }

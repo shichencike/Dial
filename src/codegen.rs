@@ -3860,7 +3860,11 @@ impl<'ctx> CodeGen<'ctx> {
             Stmt::Expr(e, ..) => {
                 // 语句级方法调用且返回新容器指针（push/set）-> 把结果写回接收变量
                 if let Expr::Method(obj, method, args) = e {
-                    if matches!(method.as_str(), "push" | "set" | "put" | "add") {
+                    // B1：具名类型（Struct/Opaque）的 impl 方法即便叫 push/set/put/add，
+                    // 也绝不参与容器 COW 指针写回——否则会把 impl 返回值错误 store 回变量槽。
+                    let container_inplace = matches!(method.as_str(), "push" | "set" | "put" | "add")
+                        && !crate::semantic::is_impl_receiver(obj, scopes, functions, structs);
+                    if container_inplace {
                         if let Expr::Var(name) = obj.as_ref() {
                             let info = scopes
                                 .iter()
@@ -5467,6 +5471,25 @@ impl<'ctx> CodeGen<'ctx> {
         structs: &StructTable,
     ) -> Result<BasicValueEnum<'ctx>> {
         let ot = type_of(obj, scopes, functions, structs)?;
+        // B1 impl 方法块：具名类型（Struct / Opaque）优先查 `__impl_<T>_<m>`。
+        // 命中则把 `obj.m(args)` 就地改写为 `Expr::Call(<symbol>, [obj]+args)`
+        // 并**递归** `gen_expr`——于是实参求值、C ABI 宽度适配、build_call、
+        // 返回值处理全部零改动复用普通函数调用链，ABI 天然不变。
+        // 必须放在下面 `gen_expr(obj)` 之前：否则 obj 会被求值两次。
+        if let Some(recv) = impl_receiver_name(&ot) {
+            let symbol = impl_method_symbol(recv, method);
+            if functions.contains_key(&symbol) {
+                let call = make_impl_call(obj, recv, method, args);
+                return self.gen_expr(&call, function, scopes, func_values, functions, structs);
+            }
+            return Err(DialcError::new(
+                format!(
+                    "语义错误：类型 '{}' 没有方法 '{}'（应由 Sema 先行拦截）",
+                    ot.display(), method
+                ),
+                0, 0,
+            ));
+        }
         let optr = self.gen_expr(obj, function, scopes, func_values, functions, structs)?;
         let i64t = self.context.i64_type();
         // 泛型 map<K,V> 走独立分派：键/值需按静态类型转成 8 字节位模式，

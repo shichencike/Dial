@@ -1,0 +1,16 @@
+// B1「impl 方法块」正向用例：默认实参与显式实参。
+//
+// impl 方法支持默认实参（脱糖为普通函数后，Call 链按 FuncInfo.defaults 补齐），
+// self 依旧是首参、对用户不可见。默认实参只在调用点求值一次（与顶层 fn 同口径）。
+struct P { x: int }
+impl P {
+    fn add(self, k: int = 10): int { return self.x + k; }
+}
+fn main(): int {
+    var p: P = P { x: 5 };
+    print("default = ", p.add());       // 5 + 10 = 15
+    print("explicit = ", p.add(3));     // 5 + 3 = 8
+    if (p.add() != 15) { return 1; }
+    if (p.add(3) != 8) { return 2; }
+    return 0;
+}

@@ -1,0 +1,7 @@
+// 应当编译失败：具名类型没有该方法（Fail-Fast，绝不静默）
+struct P { x: int }
+impl P { fn get(self): int { return self.x; } }
+fn main(): int {
+    var p: P = P { x: 1 };
+    return p.nope();
+}

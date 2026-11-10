@@ -1,0 +1,7 @@
+// 应当编译失败：impl 方法参数零隐式转换铁律（string 不能传 int）
+struct P { x: int }
+impl P { fn add(self, k: int): int { return self.x + k; } }
+fn main(): int {
+    var p: P = P { x: 1 };
+    return p.add("s");
+}

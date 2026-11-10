@@ -28,9 +28,14 @@
 + 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）
 + 菜单 / 对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列）
 + **`int32` / `float32` 一等类型 + FFI 精确 32 位宽度**（C 侧按 `int32_t` / `float`
-  读取不再拿到错位垃圾数据，见 README §5.8）；
+  读取不再拿到错位垃圾数据，见 README §5.8）
++ **`impl` 方法块（B1 语言特性落地，`obj.m()` 编译期脱糖为静态调用）**
+  ——让用户 `struct` 与包不透明句柄（`GuiWindow` / `GuiMenu` 等）挂方法，
+  `win.draw()` 即 `dial_gui_window_draw(win)` 的面向对象写法，包契约一字不改；
+  **不新增关键字、ABI 不变、旧签名一字不动**（见 README §37.12）；
 并修复 `http.dialpkg` 三处 Fail-Fast / 目标平台可用性缺陷**（见下文 `### Fixed`）。
-详见 [README §38](README.md#38-手搓-gui-地基包guidialpkg) 与 README §37.10。
+详见 [README §37.12](README.md#3712-b1impl-方法块v110-开发中增补落地)、
+[README §38](README.md#38-手搓-gui-地基包guidialpkg) 与 README §37.10。
 
 > **版本与交付口径（防漂移，务必先读）**：本段记录的是 **`[v1.10]`（Git 标签 `v1.1`）
 > 发布之后**、仍在工作树里的**开发中增量**——本轮只要求「制作 `gui.dialpkg`
@@ -50,10 +55,44 @@
 > `int32` / `float32` 一等类型 + FFI 精确 32 位宽度，新增 AB 组 4 条断言与
 > B 组 5 条零隐式转换负向，扩为 **A–Z + AA + AB 二十八组 / 535 ✅**；
 > 本轮菜单 / 对话框覆盖层（第 7 层，24 个新 `extern fn`）再给 AA 组增 3 条断言
-> （无 DISPLAY / Xvfb 各一 + 编译成功）到 **538 ✅**。
-> 九者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
+> （无 DISPLAY / Xvfb 各一 + 编译成功）到 **538 ✅**；本轮 `impl` 方法块（B1）
+> 新增 AC 组 5 条断言，扩为 **A–Z + AA + AB + AC 二十九组 / 549 ✅**。
+> 十者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
+
+- **B1「`impl` 方法块」语言特性落地**（README §37.12）：`[v1.10]` 发布后增量，
+  这是 v1.04 第三批曾记为「明确不碰——暂用 `fn` 替代」的能力，本轮真正补上。
+  让用户 `struct` 与包不透明句柄（`Type::Struct` / `Type::Opaque`，如 GUI 的
+  `GuiWindow` / `GuiMenu`）能写 `impl T { fn m(self, ...) { ... } }`，调用
+  `obj.m(args)` 编译期降级为静态函数调用（self 即首参）——`win.draw()` 就是
+  `dial_gui_window_draw(win)` 的面向对象写法，**包 `.diali` 契约一个字都不用改**。
+  - **宪法**：不新增关键字（`impl` 走 `Ident("impl")` + 类型名 + `{` 识别，与
+    `test` 块同例，旧程序把 `impl` 当变量名/函数名仍合法）；`obj.m(args)` 与手写
+    普通函数调用完全同构，**编译产物 / ABI 逐字节不变**，不碰 `STDLIB_ABI`、
+    `.diali`、C Runtime；旧签名一字不动。
+  - **实现（最小侵入、零重复）**：parser 把 impl 方法降级为普通顶层 `Func`
+    （符号名 mangle 成 `__impl_T_m`，`self` 注入首参）；语义 `type_of` 按 obj
+    静态类型做面向用户的参数校验（诊断显示 `T.m`、不含 mangle 名、不把 self
+    计入参数个数，零隐式转换铁律照旧）；codegen `gen_method_call` 用
+    `make_impl_call` 把 Method 就地改写为 `Expr::Call` 并递归复用整条调用生成链
+    （签名校验 / 默认实参 / 实参求值 / C ABI 宽度适配 / `build_call` / 返回值
+    全部零改动复用）。保持 Method 形态、不做全局 AST 脱糖，故 move / 引用分析
+    / `desugar_expr` 等遍历 pass 天然适用、零改动。
+  - **容器特例收窄**：`push` / `set` / `put` / `add` 也是内建容器 COW 原地写回
+    协议名，用 `is_impl_receiver` 精确排除具名类型接收者，避免同名 impl 方法被
+    误当成容器方法把返回值错误 `build_store` 回变量槽；内建容器方法行为一字未变。
+  - **现役边界（如实标注，不夸大）**：只支持具名类型；`self` 按值传入副本，
+    方法内 `self.f = ...` **不回写调用者**（Dial struct 值语义，与 Rust `&mut self`
+    不同）；支持默认实参 / 普通形参 / 返回任意类型 / 方法间调用 / 返回结构体再调
+    方法；**暂不支持**同类型变参 `...xs`（parser Fail-Fast 提示改用 `xs: T[]`）、
+    C ABI 导出、关联函数（无 self 的 `T::new()`）、标量/内建容器/裸指针挂 impl。
+  - **回归**：新增 AC 组（第 29 组）——`tests/impl/impl_struct.dial`（self 字段
+    读写 / 方法间调用 / 返回结构体 / 表达式位置 / `impl` 作标识符 / 容器 `push`
+    同名隔离 / 值语义边界）、`impl_default.dial`（默认实参）、
+    `impl_gui_handle.dial`（包不透明句柄 `GuiMenu` 方法，无 DISPLAY 纯内存逻辑）、
+    `tests/bad/impl_*.dial` 六个 Fail-Fast 负向 + 诊断面向用户断言。
+    全量 **538 ✅ → 549 ✅ / 0 ❌**，A–Z + AA + AB + AC 二十九组全绿。
 
 - **`int32` / `float32` 完整一等类型 + FFI 精确 32 位宽度**（README §5.8）：
   解决「只有 `int`(i64) / `float`(f64)，传给按 `int32_t` / `float` 读取的 C 侧
@@ -296,8 +335,10 @@
   `use_http2.dial` / `use_https.dial`（Termux 模式）里的断言。全量回归由
   **513 ✅ 增至 517 ✅**（上一轮时点），组数仍为 A–Z + AA 二十七组；
   上一轮 GUI 输入层由 **517 ✅ 增至 520 ✅**、主题层 / 控件扩展再由
-  **520 ✅ 增至 523 ✅**；**本轮**信号槽 / 控件事件订阅由 **523 ✅ 增至 526 ✅**，
-  菜单 / 对话框覆盖层（第 7 层）再由 **526 ✅ 增至 538 ✅**（与 `[未发布]` 段口径一致）。
+  **520 ✅ 增至 523 ✅**；信号槽 / 控件事件订阅由 **523 ✅ 增至 526 ✅**，
+  菜单 / 对话框覆盖层（第 7 层）再由 **526 ✅ 增至 538 ✅**，`int32` / `float32`
+  一等类型新增 AB 组到 **535 ✅**；**本轮** B1 `impl` 方法块新增 AC 组
+  （第 29 组）5 条断言，全量扩为 **549 ✅ / 0 ❌**（与 `[未发布]` 段口径一致）。
 - `tests/run_tests.sh` 的 **AA 组**（`gui.dialpkg` 端到端）：三平台构建、零警告检查、
   `nm -u` 符号检查、`pack` / `install`、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
   （`window = ok` / `window_backend = x11/xshm/xrender` / `window_flush = ok` /
@@ -352,7 +393,7 @@
 
 ### 测试与交付
 
-- `bash tests/run_tests.sh` **A–Z + AA + AB 二十八组全套通过（535 ✅ / 0 ❌，AB 组本轮 +4 条 + B 组 5 条负向）**；
+- `bash tests/run_tests.sh` **A–Z + AA + AB + AC 二十九组全套通过（549 ✅ / 0 ❌，AC 组本轮 +5 条：自定义 struct / 默认实参 / 包不透明句柄 3 正向 + 6 负向汇总 + 诊断面向用户）**；
   Xvfb 实窗 `EXIT=0`，能力串
   `x11/xshm/xrender argb32 filter=best visual_depth=24`，地基层像素 CRC 稳定
   `4007435570`、外观层 `look_crc_normal` 稳定 `3884455222`、输入层
@@ -393,7 +434,21 @@
   提取**，包升级后重生成即同步，不硬编码版本号），并生成 `web/packages/<slug>.html`
   六个详情页（叙述 + 示例 + 自动刷新的事实表）。`check_links.py` 放宽 `.html` 目标
   的仓库根相对链接误报；生成确定性已验证（`git diff --exit-code -- web/`）。
+- **AC 组（B1 impl 方法块）测试资产**：`tests/impl/impl_struct.dial` /
+  `impl_default.dial` / `impl_gui_handle.dial` 三个正向用例与同名 `.expected`
+  黄金输出，以及 `tests/bad/impl_*.dial` 六个 Fail-Fast 负向用例；
+  编译器改动落在 `src/ast.rs`（`impl_receiver_name` / `impl_method_symbol` /
+  `make_impl_call` 三个共享 helper）、`src/parser.rs`（`at_impl_def` /
+  `parse_impl_def` / `parse_function_with_self`）、`src/semantic.rs`（`type_of`
+  Method 分派 + `is_impl_receiver`）、`src/codegen.rs`（`gen_method_call` 分派 +
+  `gen_stmt` 容器特例收窄）。**cargo build --release 零警告**；
+  `impl` 方法编译期脱糖、ABI 不变、旧签名一字不动。
 - **交付状态**：仅本地提交，未推送、未打标签、未发 Release（遵循本段开头的口径）。
+  HTTPS `git push` 到 `github.com:443` 连续三次连接超时（curl / gh API 通道可达、
+  TCP 偶发连上但推送失败，属沙箱网络限制）；已改用 **ed25519 SSH 密钥对**
+  （公钥交付用户添加到仓库并授予读写），配置 `deploy` remote 走
+  `git@github.com:shichencike/Dial.git`，待公钥生效后经 SSH 通道保存，
+  **当前不含任何推送动作**。
 
 ---
 

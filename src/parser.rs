@@ -44,6 +44,13 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
             // v1.04 工具链：顶层 `test "名字" { ... }`。用「Ident + 字符串」识别而非
             // 新增关键字，`test` 作普通标识符/函数名依然合法。
             tests.push(p.parse_test_def()?);
+        } else if p.at_impl_def() {
+            // B1 impl 方法块：`impl T { fn m(self, ...) { ... } ... }`。
+            // 与 test 同理，用「Ident("impl") + 类型名 + {」识别，**不新增关键字**：
+            // `impl` 作普通变量名 / 函数名依然合法，旧程序零影响。
+            // parser 阶段即把每个方法降级为普通顶层 Func（符号名 __impl_T_m、self
+            // 注入为首参），后续 analyze / codegen / LSP 全自动识别，ABI 天然不变。
+            functions.extend(p.parse_impl_def()?);
         } else if p.check(&TokenKind::Struct) {
             structs.push(p.parse_struct_def()?);
         } else if p.check(&TokenKind::Const) {
@@ -325,6 +332,118 @@ impl Parser {
             line: start.line,
             col: start.col,
         })
+    }
+
+    /// 顶层是否是一个 `impl 类型名 { ... }` 块（B1 impl 方法块）。
+    ///
+    /// 刻意不把 `impl` 塞进关键字表——用「Ident("impl") + Ident(类型名) + `{`」
+    /// 三连识别，与 `at_test_def` 同一套惯例。这样 `var impl: int = 1;` /
+    /// `fn impl(): int` 等旧程序完全不受影响，是真正的「只追加」。
+    fn at_impl_def(&self) -> bool {
+        match self.peek_kind() {
+            TokenKind::Ident(s) if s == "impl" => {
+                matches!(&self.peek_at(1).kind, TokenKind::Ident(_))
+                    && matches!(&self.peek_at(2).kind, TokenKind::LBrace)
+            }
+            _ => false,
+        }
+    }
+
+    /// B1 impl 方法块：`impl T { fn m(self, p: U): R { ... } ... }`。
+    ///
+    /// 解析结果直接是**一组普通顶层 `Func`**，每个方法：
+    /// - 名字 mangle 为 `__impl_T_m`（`impl_method_symbol`）；
+    /// - 首参固定是 `self`，类型 = 接收者类型 `T`（`Struct(T)` / `Opaque(T)`），
+    ///   由编译器注入——源码里 `self` 不写类型标注；
+    /// - 其余形参、返回类型、函数体原样保留，`self.field` 天然是 `Expr::Field`。
+    ///
+    /// 这样 `program.functions` 里多出的就是普通函数，`analyze` 自动建签名、
+    /// `codegen` 自动声明/定义、LSP 自动可见，**全链路零改动复用**。
+    /// 方法调用 `obj.m(args)` 由语义层与代码生成层按 obj 静态类型拼出同一符号名，
+    /// 递归降级为 `Expr::Call(__impl_T_m, [obj] + args)`。
+    fn parse_impl_def(&mut self) -> Result<Vec<Func>> {
+        let start = self.advance(); // Ident("impl")
+        let (recv, _rline, _rcol) = self.expect_ident_pos()?;
+        // 接收者类型：命中包不透明句柄列表 → Opaque，否则用户结构体 → Struct。
+        // 与 parse_type 的标识符分支判定完全一致（opaque 优先）。
+        let recv_ty = if self.opaque.iter().any(|o| o == &recv) {
+            Type::Opaque(recv.clone())
+        } else {
+            Type::Struct(recv.clone())
+        };
+        self.expect(TokenKind::LBrace)?;
+        let mut methods = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        while !self.check(&TokenKind::RBrace) && !self.at_end() {
+            // 方法允许 `@export fn` / `export fn` 前缀（parse_function 会消费），
+            // 但 impl 方法是私有静态函数，导出 C 符号没有意义——此处要求纯 `fn`。
+            if !self.check(&TokenKind::Fn) {
+                return Err(DialcError::new(
+                    format!(
+                        "语法错误：impl 块内只允许方法定义（fn），但遇到 {:?}",
+                        self.peek().kind
+                    ),
+                    self.peek().line,
+                    self.peek().col,
+                ));
+            }
+            let f = self.parse_function_with_self(Some(recv_ty.clone()))?;
+            // 首参必须是 self，且不写类型标注（源码形如 `fn m(self, x: int)`）。
+            if f.params.first().map(|(n, _)| n.as_str()) != Some("self") {
+                return Err(DialcError::new(
+                    format!(
+                        "语法错误：impl 方法 '{}' 的第一个形参必须是 self（无类型标注）",
+                        f.name
+                    ),
+                    f.line,
+                    f.col,
+                ));
+            }
+            // B1 现役边界（如实标注、不夸大）：impl 方法暂不支持同类型变参
+            // `...xs: T`。变参脱糖 desugar_varargs 基于 `Expr::Call(name, ...)`
+            // 的**函数名**打包尾部实参，而 impl 调用的符号名要到语义层按 obj
+            // 静态类型才拼得出来，脱糖阶段的 Method 分支无从按名字打包——
+            // 放行只会让调用点「看起来能写」却永远参数个数不匹配。
+            // 默认实参 / 普通形参 / 返回任意类型都已完整支持。
+            if f.variadic.is_some() {
+                return Err(DialcError::new(
+                    format!(
+                        "语法错误：impl 方法 '{}' 暂不支持同类型变参 ...xs（请改用普通数组形参 xs: T[] 显式传入）",
+                        f.name
+                    ),
+                    f.line,
+                    f.col,
+                ));
+            }
+            // 把 self 的类型补成接收者类型，并 mangle 方法名。
+            let mut f = f;
+            f.params[0].1 = recv_ty.clone();
+            let raw_name = f.name.clone();
+            f.name = impl_method_symbol(&recv, &raw_name);
+            if !seen.insert(f.name.clone()) {
+                return Err(DialcError::new(
+                    format!(
+                        "语法错误：impl {} 中方法 '{}' 重复定义",
+                        recv, raw_name
+                    ),
+                    f.line,
+                    f.col,
+                ));
+            }
+            methods.push(f);
+        }
+        self.expect(TokenKind::RBrace)?;
+        // 块后允许一个可选分号（`impl T {...};`），写了就吃掉，不写也合法。
+        if self.check(&TokenKind::Semicolon) {
+            self.advance();
+        }
+        if methods.is_empty() {
+            return Err(DialcError::new(
+                format!("语法错误：impl {} 块内至少要有一个方法", recv),
+                start.line, start.col,
+            ));
+        }
+        Ok(methods)
     }
 
     /// v1.04 FFI：`extern fn name(a: T, b: U): R;`（也支持尾部 `...` C 变参）。
@@ -678,6 +797,14 @@ impl Parser {
     }
 
     fn parse_function(&mut self) -> Result<Func> {
+        self.parse_function_with_self(None)
+    }
+
+    /// B1：与 `parse_function` 完全同形，唯一区别是 `self_ty = Some(T)` 时，
+    /// 允许首参写成**不带类型标注**的 `self`，其类型由编译器注入为 T
+    /// （impl 接收者类型）。普通函数解析走 `parse_function()`（传 None），
+    /// 行为一字未变，旧程序零影响。
+    fn parse_function_with_self(&mut self, self_ty: Option<Type>) -> Result<Func> {
         // v1.04 FFI 导出：`@export fn` 或 `export fn` 前缀标记该函数对外暴露为 C 符号。
         let exported = if self.check(&TokenKind::At) {
             self.advance();
@@ -698,6 +825,24 @@ impl Parser {
         let mut seen_default = false;
         // 同类型变参 `...xs: T`（v1.03）：只记录标记，脱糖由 semantic 负责。
         let mut variadic: Option<(String, Type, usize, usize)> = None;
+        // B1 impl 方法：首参 `self` **不写类型标注**，其类型由编译器注入为接收者
+        // 类型 T。只在 self_ty = Some(T) 时启用；普通函数解析（None）完全不走这段，
+        // 旧程序一字未变。若用户显式写了 `self: T`，则由下面的常规循环解析，
+        // parse_impl_def 会把它强制规范为接收者类型。
+        if let Some(ref sty) = self_ty {
+            let self_no_type = matches!(&self.peek().kind, TokenKind::Ident(n) if n == "self")
+                && !matches!(&self.peek_at(1).kind, TokenKind::Colon);
+            if self_no_type {
+                let (pname, pline, pcol) = self.expect_ident_pos()?;
+                params.push((pname, sty.clone()));
+                param_pos.push((pline, pcol));
+                defaults.push(None);
+                if self.check(&TokenKind::Comma) {
+                    self.advance(); // 后面还有形参，交给下面的常规循环
+                }
+                // 若紧接着就是 `)`，下面的 `if !check(RParen)` 会自然跳过循环。
+            }
+        }
         if !self.check(&TokenKind::RParen) {
             loop {
                 if self.check(&TokenKind::Ellipsis) {

@@ -142,6 +142,29 @@ pub fn types_compatible(arg: &Type, target: &Type) -> bool {
     arg == target
 }
 
+/// B1：该 Method 调用的接收者是否为 impl 具名类型（用户 `struct` / 包不透明句柄）。
+///
+/// 用途：`push` / `set` / `put` / `add` 这几个名字同时是**内建容器的原地修改协议**
+/// （COW 可能更换底层指针，codegen 会把返回的新指针 `build_store` 写回接收变量，
+/// semantic 会强制接收者是可变 var）。一个 impl 方法即便恰好叫 `push`，也不该
+/// 参与这套容器协议——否则会把 impl 的返回值（任意类型）错误写回变量槽、
+/// 或对 `let` 声明的具名类型变量误报「不可原地修改」。
+///
+/// codegen `gen_stmt` 与 semantic `check_stmt` 都据此把容器特例**收窄到容器类型**：
+/// 具名接收者一律跳过特例，走普通表达式求值链（进而命中 impl 分派）。
+/// 借用 `type_of` 复用同一份类型推导，绝不新写一份判定导致漂移。
+pub fn is_impl_receiver<V>(
+    obj: &Expr,
+    scopes: &Scopes<V>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> bool {
+    match type_of(obj, scopes, funcs, structs) {
+        Ok(t) => impl_receiver_name(&t).is_some(),
+        Err(_) => false,
+    }
+}
+
 /// 该类型**可能**为空指针吗？（v0.9 的 `is_null` 的准入名单）
 ///
 /// Dial 的句柄类型在 IR 里一律是 `i8*`，其中只有「可能取到空值」的那些才值得判空：
@@ -321,6 +344,58 @@ pub fn type_of<V>(
         }
         Expr::Method(obj, method, args) => {
             let ot = type_of(obj, scopes, funcs, structs)?;
+            // B1 impl 方法块：具名类型（用户 struct / 包不透明句柄）优先查
+            // `__impl_<T>_<m>` 方法。命中则递归复用整条 `Expr::Call` 签名校验链
+            // （参数个数 / 默认实参 / 逐参零隐式转换 / 返回类型），self 即首参。
+            // 未命中不改动原有分派：内建容器方法照旧，未知方法给出明确诊断。
+            if let Some(recv) = impl_receiver_name(&ot) {
+                let symbol = impl_method_symbol(recv, method);
+                if let Some(info) = funcs.get(&symbol) {
+                    // 面向用户独立校验：`self` 是 info.params[0]，用户可见形参是
+                    // params[1..]、默认值是 defaults[1..]。这样诊断里的参数计数与
+                    // 序号都是用户写下的方法签名视角，既不含内部 mangle 名，也不把
+                    // self 混进「需要几个参数」。零隐式转换铁律照旧（types_compatible）。
+                    // 代码生成层另用 make_impl_call 把 Method 递归降级为 Call，复用
+                    // 实参求值 / ABI 适配 / build_call 全链路，ABI 天然不变。
+                    let user_params = &info.params[1..];
+                    let user_defaults = &info.defaults[1..];
+                    let required = user_defaults
+                        .iter()
+                        .position(|d| d.is_some())
+                        .unwrap_or(user_params.len());
+                    if args.len() < required || args.len() > user_params.len() {
+                        return Err(DialcError::new(
+                            format!(
+                                "语义错误：方法 '{}.{}' 需要 {}~{} 个参数，但传入了 {} 个",
+                                recv, method, required, user_params.len(), args.len()
+                            ),
+                            0, 0,
+                        ));
+                    }
+                    for (i, (a, pt)) in args.iter().zip(user_params.iter()).enumerate() {
+                        let at = type_of(a, scopes, funcs, structs)?;
+                        if !types_compatible(&at, pt) {
+                            return Err(DialcError::new(
+                                format!(
+                                    "语义错误：方法 '{}.{}' 第 {} 个参数类型不匹配（实参 {}，形参 {}）",
+                                    recv, method, i + 1, at.display(), pt.display()
+                                ),
+                                0, 0,
+                            ));
+                        }
+                    }
+                    return Ok(info.ret.clone());
+                }
+                // 该具名类型存在，但没有这个方法：Fail-Fast，别让它掉进
+                // 底下笼统的「类型不支持方法调用」里。
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：类型 '{}' 没有方法 '{}'（impl {} 中未定义，也不是内建方法）",
+                        ot.display(), method, recv
+                    ),
+                    0, 0,
+                ));
+            }
             // v1.04 FFI：string.as_c_str() / bytes.as_ptr() → rawptr<byte>。
             // 由编译器跳过 8 字节长度头，**绝不**让用户在 C/Dial 侧手写 +8 offset hack。
             // 返回的裸指针只是借用：不受 ARC 管理，生命周期绑定原对象（见 README §33）。
@@ -5081,7 +5156,11 @@ fn check_stmt(
             //   - 字段 / 下标等表达式作为接收者也无法被可靠地写回，同样报错。
             // 若只需获得新容器而不就地修改，请以表达式形式使用：let b: int[] = a.push(v);
             if let Expr::Method(obj, method, _) = e {
-                if matches!(method.as_str(), "push" | "set" | "put") {
+                // B1：具名类型（Struct/Opaque）的 impl 方法即便叫 push/set/put，
+                // 也不是容器原地修改，跳过下面的 mutable 约束。
+                let container_inplace = matches!(method.as_str(), "push" | "set" | "put")
+                    && !is_impl_receiver(obj, scopes, funcs, structs);
+                if container_inplace {
                     match obj.as_ref() {
                         Expr::Var(name) => {
                             let mutable = scopes

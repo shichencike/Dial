@@ -1,0 +1,4 @@
+// 应当编译失败：impl 块内至少要有一个方法
+struct P { x: int }
+impl P { }
+fn main(): int { return 0; }

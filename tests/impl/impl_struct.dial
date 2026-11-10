@@ -1,0 +1,86 @@
+// B1「impl 方法块」正向用例：自定义 struct 方法（v1.10 开发中增量）。
+//
+// 覆盖：
+//   - impl T { fn m(self, ...) } 语法，不新增关键字（impl 仍可作普通标识符）；
+//   - self 字段读、self 作为首参、方法间调用 self.m()；
+//   - 方法返回结构体后再调用方法（q.sum()）；
+//   - 表达式位置的方法调用（作为二元运算操作数）；
+//   - 具名类型方法名与内建容器方法撞名（push）时，绝不误入容器 COW 写回；
+//   - 内建容器 push 写回协议本身不受影响；
+//   - 值语义边界：self 是按值传入的副本，方法内 self.f = ... 只改副本、
+//     不回写调用者（Dial struct 值语义，与 Rust &mut self 不同，如实标注）。
+//
+// 编译期脱糖：obj.m(args) -> __impl_T_m(obj, args)，ABI 不变、旧签名一字不动。
+fn impl(): int { return 42; }
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+impl Point {
+    fn sum(self): int {
+        return self.x + self.y;
+    }
+    fn add(self, k: int): int {
+        return self.sum() + k;          // 方法间调用：self.sum()
+    }
+    fn scaled(self, k: int): Point {
+        return Point { x: self.x * k, y: self.y * k };
+    }
+    // 与内建容器方法同名：应走 impl 分派，而非容器原地修改写回。
+    fn push(self, k: int): int {
+        return self.x + k;
+    }
+}
+
+struct Counter { v: int }
+
+impl Counter {
+    fn get(self): int { return self.v; }
+    fn incr(self, k: int): int {
+        self.v = self.v + k;            // self 字段赋值（AssignField），改的是副本
+        return self.v;                  // 返回副本修改后的值
+    }
+}
+
+fn main(): int {
+    // 边界：impl 作变量名与函数名仍合法（无新增关键字）。
+    var impl: int = impl();
+    print("impl-as-ident = ", impl);
+
+    var p: Point = Point { x: 3, y: 4 };
+    print("sum = ", p.sum());                        // 7
+    print("add = ", p.add(10));                     // 17
+    var q: Point = p.scaled(2);                     // {6,8}
+    print("scaled.sum = ", q.sum());                // 14
+    print("expr-position = ", p.sum() + p.add(1));  // 7 + 8 = 15
+
+    // 内建容器 push 写回协议：原行为不变。
+    var a: int[] = [1, 2];
+    a.push(3);
+    print("container.push = ", a.length(), ",", a.get(2)); // 3,3
+
+    // impl 方法 push(7) = 3+7 = 10，绝不写回 p 本身；p.sum() 仍是 7。
+    print("impl.push = ", p.push(7));               // 10
+    print("p-unchanged = ", p.sum());               // 7
+
+    // 值语义边界：incr 返回副本修改后的 105，但原 c 不变，get 仍为 5。
+    var c: Counter = Counter { v: 5 };
+    print("counter.incr = ", c.incr(100));          // 105
+    print("counter.get = ", c.get());               // 5（self 副本未回写）
+
+    // 断言（Fail-Fast：不符即非零退出，由 run_tests.sh 判定）。
+    if (impl != 42) { return 1; }
+    if (p.sum() != 7) { return 2; }
+    if (p.add(10) != 17) { return 3; }
+    if (q.sum() != 14) { return 4; }
+    if (p.sum() + p.add(1) != 15) { return 5; }
+    if (a.length() != 3) { return 6; }
+    if (a.get(2) != 3) { return 7; }
+    if (p.push(7) != 10) { return 8; }
+    if (p.sum() != 7) { return 9; }
+    if (c.incr(100) != 105) { return 10; }
+    if (c.get() != 5) { return 11; }
+    return 0;
+}
