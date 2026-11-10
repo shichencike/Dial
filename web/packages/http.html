@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>包 · HTTP 客户端包 http · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../packages.html" class="active">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>http</code></td></tr><tr><td>版本</td><td>1.2.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>35</td></tr><tr><td>来源</td><td><code>packages/http/http.diali</code></td></tr></tbody></table><div class="toc">
+<ul>
+<li><a href="#http-客户端包-http">HTTP 客户端包 http</a></li>
+</ul>
+</div>
+<h2 id="http-客户端包-http">HTTP 客户端包 http</h2>
+<p>自研 <strong>HTTP/1.1 + TLS 1.3 + keep-alive + HTTP/2</strong> 客户端，<strong>零第三方 HTTP 栈</strong>
+（自写报文解析 / Header 拼装 / Socket 读写），TLS 走 vendor 的 mbedTLS。
+覆盖面积从普通 GET/POST 到真实并发多路复用的 h2。</p>
+<ul>
+<li><strong>高层 API</strong>：<code>http_get</code> / <code>http_post</code> 一行到位（响应头 / 404 / gzip 解压 /
+  chunked 全处理）；<code>http_request</code> 暴露超时 / 自定义头 / 代理画像。</li>
+<li><strong>低层流式</strong>：<code>http_stream_*</code> 边读边处理大响应，不把整响应塞进内存。</li>
+<li><strong>HTTP/2</strong>：<code>h2c</code> 明文 + <code>h2</code> ALPN 双路径；自研 HPACK（含 Huffman）、单连接
+  <strong>真·并发多路复用</strong>（reader 线程 + <code>spawn</code> worker），超长额外头不截断。</li>
+<li><strong>TLS 1.3</strong>：证书校验 fail-closed（空 CA 目录也拒绝）、keep-alive 连接池复用。</li>
+<li><strong>Fail-Fast</strong>：chunked 畸形长度行当场失败、合法 <code>chunk-ext</code> 不误伤；错误路径
+  明确返回错误码，绝不静默损坏。</li>
+</ul>
+<pre><code class="language-dial">import &quot;http&quot;;
+
+fn main(): int {
+    let r: HttpResp = http_get(&quot;https://example.com/&quot;);
+    if (not is_null(r)) {
+        print(r.status_code);
+        print(string_from_cstr(r.body));
+    }
+    return 0;
+}
+</code></pre>
+<p>详见 <a href="../changelog/unreleased-dev.html">W 组端到端</a> 与 <a href="../spec.html">§W</a> 相关章节。</p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

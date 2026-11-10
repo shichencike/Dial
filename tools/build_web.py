@@ -100,6 +100,7 @@ NAV = """
       <a href="index.html">首页</a>
       <a href="spec.html">语言规范</a>
       <a href="changelog.html">更新日志</a>
+      <a href="packages.html">包</a>
       <a href="cve.html">安全公告</a>
       <a href="bench.html">性能基准</a>
       <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
@@ -315,7 +316,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
     NAV 里的 GitHub / LLVM 绝对外链不受影响。
     """
     nav_html = re.sub(
-        r'href="(index|spec|changelog|cve|bench)\.html"',
+        r'href="(index|spec|changelog|packages|cve|bench)\.html"',
         lambda m: f'href="{base}{m.group(1)}.html"',
         NAV,
     )
@@ -323,6 +324,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
         "index":     f'href="{base}index.html"',
         "spec":      f'href="{base}spec.html"',
         "changelog": f'href="{base}changelog.html"',
+        "packages":  f'href="{base}packages.html"',
         "bench":     f'href="{base}bench.html"',
     }
     if active in nav_links:
@@ -562,6 +564,271 @@ def build_changelog(changelog_text: str) -> None:
     print(f"  changelog: {len(metas)} 个版本 + 1 个前言页 + index.json")
 
 
+# ---------------------------------------------------------------------------
+# 包介绍页
+#
+# 6 个包：stdlib（随编译器发布、自动链入）+ 5 个独立 .dialpkg（gui / http /
+# text / json / crypto）。机器可读事实（name / version / abi / extern fn 计数）
+# **直接从包源文件提取**，文案只写叙述与示例，绝不硬编码版本号——包一升级，
+# 重生成官网即自动同步，避免漂移。每页正文即 PACKAGE_BLURBS 的 markdown 渲染，
+# 顶部一张事实表随源自动刷新。
+# ---------------------------------------------------------------------------
+
+PACKAGES_DIR = ROOT / "packages"
+STDLIB_DIR = ROOT / "stdlib"
+
+# slug -> 叙述 markdown（事实表由 build_packages 自动拼到顶部，这里不写版本号）。
+PACKAGE_BLURBS = {
+    "stdlib": """\
+## 标准库 stdlib
+
+Dial 的**标准库**，随编译器发布、编译你的程序时**自动链入**，无需 `install`、
+也无需在源码里 `import`（编译器前端直接认得 `Db` / `string` / `int[]` 等内置类型）。
+它把「字符串 / 动态数组 / 哈希表 / IO / 内存管理 / 并发」这些一切容器与运行时
+能力用 C 实现，Dial 侧只负责把调用翻译出去——这正是「C 承担一切容器」的设计。
+
+- **类型系统基石**：`string`（UTF-8 不可变字节序列，ARC 拥有）、`int[]` /
+  `float[]` / `byte[]` / `char[]`（动态数组，put 触发扩容或写时复制后由编译器把
+  新指针写回接收变量）、`map<K,V>`（ARC + COW 哈希表）。
+- **不透明指针契约**：`string` 与数组在 IR 中只是 `ptr`，用户代码永远无法触碰其
+  内部布局，一切经由 C 导出函数——库作者随意重构、调用方零改动。
+- **并发底座**：`thread` / `channel<T>`（原子 ARC 共享，`move_to` 转移所有权取代锁）、
+  `spawn` / `select` / `close` / `done` / `try_recv` / `recv_timeout`。
+- **Fail-Fast 内存宪法**：绝不引入追踪式 GC；确定性内存靠 ARC + 编译期逃逸分析 /
+  移动语义，裸指针坚持「谁申请谁释放」。
+
+> 标准库是 `MIT` / `Apache-2.0` 许可（与编译器本体的 GPL 三选一隔离），因此被
+> 静态链进你程序里的运行时不受 GPL 条款约束——工具可以是 GPL，被链进你程序的
+> 运行时绝不能是。
+
+详见 [语言规范](../spec.html)（README 全文即规范）。""",
+
+    "gui": """\
+## GUI 地基包 gui
+
+不用 Qt / GTK / SDL，**纯 C 手搓**的 GUI 包，覆盖**七层、共 154 个 `extern fn`**：
+地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 + 命中 + 主动分发）/
+成品控件外观层（Label / Button / CheckBox + 主题表驱动四态）/ 输入层（TextBox +
+焦点链 + 统一功能键码 + XTest 实窗注入）/ 主题层与控件扩展（14 个可覆写颜色角色 +
+Radio / Slider / ProgressBar）/ 信号槽（6 类可订阅纯值信号 + 每树环形队列）/
+**菜单·对话框覆盖层**（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列）。
+
+```dial
+import "gui";
+
+fn main(): int {
+    let app: GuiApp = dial_gui_app_new();
+    let win: GuiWindow = dial_gui_window_new(app, "Hello GUI", 400, 300);
+    let root: GuiWidget = dial_gui_widget_tree(400, 300);
+    let btn: GuiWidget = dial_gui_widget_add(root);
+    dial_gui_widget_set_rect(btn, 10, 10, 80, 24);
+    dial_gui_widget_set_kind(btn, 2);            // BUTTON
+    dial_gui_widget_set_text(btn, "Click me");
+    dial_gui_widget_subscribe(btn, 1);           // CLICKED
+    dial_gui_window_set_root(win, root);
+    dial_gui_window_draw(win);
+    dial_gui_window_flush(win);
+    dial_gui_window_close(win);
+    dial_gui_app_free(app);
+    return 0;
+}
+```
+
+- **三平台真实现**：`x86_64-linux-gnu` / `aarch64-unknown-linux-musl` /
+  `x86_64-pc-windows-gnu` 均由 `zig cc` 交叉编译出真实 `.a`，零链接期 GUI 依赖
+  （X11 / Win32 一律 `dlopen` / `LoadLibraryA`），最终链接**不需要** `-lX11` / `-lgdi32`。
+- **绝不 C → Dial 反向回调**：事件 / 信号一律「C 写纯值块，Dial 主动
+  `pending → data → pop` 消费」——符合内存宪法。
+- **ABI 不变**：只追加 `extern fn`，旧签名一字不动；覆盖层不进控件树，控件几何 /
+  绘制 CRC 逐字节不漂移。
+
+详见 [§38 手搓 GUI 地基包](../spec.html#38-手搓-gui-地基包guidialpkg)。""",
+
+    "http": """\
+## HTTP 客户端包 http
+
+自研 **HTTP/1.1 + TLS 1.3 + keep-alive + HTTP/2** 客户端，**零第三方 HTTP 栈**
+（自写报文解析 / Header 拼装 / Socket 读写），TLS 走 vendor 的 mbedTLS。
+覆盖面积从普通 GET/POST 到真实并发多路复用的 h2。
+
+- **高层 API**：`http_get` / `http_post` 一行到位（响应头 / 404 / gzip 解压 /
+  chunked 全处理）；`http_request` 暴露超时 / 自定义头 / 代理画像。
+- **低层流式**：`http_stream_*` 边读边处理大响应，不把整响应塞进内存。
+- **HTTP/2**：`h2c` 明文 + `h2` ALPN 双路径；自研 HPACK（含 Huffman）、单连接
+  **真·并发多路复用**（reader 线程 + `spawn` worker），超长额外头不截断。
+- **TLS 1.3**：证书校验 fail-closed（空 CA 目录也拒绝）、keep-alive 连接池复用。
+- **Fail-Fast**：chunked 畸形长度行当场失败、合法 `chunk-ext` 不误伤；错误路径
+  明确返回错误码，绝不静默损坏。
+
+```dial
+import "http";
+
+fn main(): int {
+    let r: HttpResp = http_get("https://example.com/");
+    if (not is_null(r)) {
+        print(r.status_code);
+        print(string_from_cstr(r.body));
+    }
+    return 0;
+}
+```
+
+详见 [W 组端到端](../changelog/unreleased-dev.html) 与 [§W](../spec.html) 相关章节。""",
+
+    "text": """\
+## 正则包 text
+
+自研 **Thompson NFA** 正则引擎（非回溯、线性时间），零第三方依赖。
+
+- **语法子集**：字符类 `[a-z]` / 锚点 `^` `$` / 分组 `(...)` / 选择 `a|b` /
+  量词 `*` `+` `?` / 转义。
+- **捕获组**：`match` 返回各分组子串；`replace` 支持 `$1` `$2` … `$n` 反向引用替换。
+- **错误路径**：非法 Pattern 编译期 / 运行期明确报错，绝不静默接受。
+
+```dial
+import "text";
+
+fn main(): int {
+    let re: Regex = regex_compile("[0-9]+");
+    let m: RegexMatch = regex_match(re, "order 42 shipped");
+    if (m.matched) {
+        print(string_from_cstr(m.group));   // "42"
+    }
+    return 0;
+}
+```
+
+三平台零警告构建，纯 C 实现。""",
+
+    "json": """\
+## JSON 包 json
+
+自研**递归下降解析 + 紧凑序列化**，零第三方依赖，独立拥有句柄。
+
+- **严格模式**：重复键 / 尾随逗号 / 非法转义一律拒绝（Fail-Fast）。
+- **大整数精度**：数字以字符串保留，不丢精度；`as_int` / `as_float` 按需转换。
+- **`\\u` 与代理对**：正确解码 `\\uXXXX` 与 UTF-16 代理对（emoji 不丢）。
+- **独立拥有 + 深拷贝**：`json_parse` 返回的文档句柄独立拥有其内存；`json_copy`
+  做深拷贝构造，互不串扰。
+- **错误码**：解析失败返回明确错误码与位置，便于定位。
+
+```dial
+import "json";
+
+fn main(): int {
+    let doc: JsonDoc = json_parse("{\"name\":\"dial\",\"n\":42}");
+    let v: JsonValue = json_get(doc, "name");
+    print(string_from_cstr(json_as_string(v)));   // "dial"
+    return 0;
+}
+```
+
+三平台零警告构建，纯 C 实现。""",
+
+    "crypto": """\
+## 密码学包 crypto
+
+复用 vendor 的 **mbedTLS** 实现摘要 / Base64 / HMAC，零自研密码学原语
+（密码学正确性是底线，绝不手搓）。
+
+- **五种摘要**：MD5 / SHA-1 / SHA-256 / SHA-512 / SHA3-256，均用标准测试向量核对。
+- **Base64**：`base64_encode` / `base64_decode`，含内嵌 NUL 的二进制数据安全往返。
+- **HMAC-SHA256**：`hmac_sha256`，密钥 + 消息得 MAC。
+- **双入口**：`string` 与 `bytes` 两种输入，含非 UTF-8 二进制数据（内嵌 NUL）也安全。
+- **严格错误路径**：坏输入明确报错，绝不静默吐错值。
+
+```dial
+import "crypto";
+
+fn main(): int {
+    let h: string = sha256_hex("hello");
+    print(h);   // 2cf24dba... 标准向量
+    return 0;
+}
+```
+
+三平台零警告构建（mbedTLS 随包 vendor 进仓库）。""",
+}
+
+# (slug, 显示名, dial.toml 路径或 None, .diali 路径, version 覆盖, abi 覆盖)
+_PKG_SPECS = [
+    ("stdlib", "标准库 stdlib", None, STDLIB_DIR / "stdlib.diali", "1.0.0", "6 (STDLIB_ABI)"),
+    ("gui", "GUI 地基包 gui", PACKAGES_DIR / "gui" / "dial.toml",
+     PACKAGES_DIR / "gui" / "gui.diali", None, None),
+    ("http", "HTTP 客户端包 http", PACKAGES_DIR / "http" / "dial.toml",
+     PACKAGES_DIR / "http" / "http.diali", None, None),
+    ("text", "正则包 text", PACKAGES_DIR / "text" / "dial.toml",
+     PACKAGES_DIR / "text" / "text.diali", None, None),
+    ("json", "JSON 包 json", PACKAGES_DIR / "json" / "dial.toml",
+     PACKAGES_DIR / "json" / "json.diali", None, None),
+    ("crypto", "密码学包 crypto", PACKAGES_DIR / "crypto" / "dial.toml",
+     PACKAGES_DIR / "crypto" / "crypto.diali", None, None),
+]
+
+
+def _read_dial_toml(path: pathlib.Path) -> tuple[str, str, str]:
+    text = path.read_text(encoding="utf-8")
+    name = re.search(r'^name\s*=\s*"([^"]+)"', text, re.M)
+    ver = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+    abi = re.search(r'^abi\s*=\s*(\d+)', text, re.M)
+    return (name.group(1) if name else "", ver.group(1) if ver else "",
+            abi.group(1) if abi else "")
+
+
+def _count_extern(diali: pathlib.Path) -> int:
+    return sum(1 for l in diali.read_text(encoding="utf-8").splitlines()
+               if l.startswith("extern fn"))
+
+
+def build_packages() -> None:
+    PKG_DIR = WEB / "packages"
+    PKG_DIR.mkdir(exist_ok=True)
+    for stale in PKG_DIR.glob("*.html"):
+        stale.unlink()
+
+    rows = []
+    for slug, display, toml, diali, vover, aover in _PKG_SPECS:
+        if toml and toml.exists():
+            _n, ver, abi = _read_dial_toml(toml)
+        else:
+            _n, ver, abi = "", (vover or ""), (aover or "")
+        name = display.split(" ", 1)[0] if not _n else _n
+        count = _count_extern(diali)
+        blurb = PACKAGE_BLURBS.get(slug, "（简介待补）")
+        facts = (
+            "<table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody>"
+            f"<tr><td>包名</td><td><code>{html.escape(name)}</code></td></tr>"
+            f"<tr><td>版本</td><td>{html.escape(ver)}</td></tr>"
+            f"<tr><td>ABI</td><td>{html.escape(abi)}</td></tr>"
+            f"<tr><td>extern fn 数量</td><td>{count}</td></tr>"
+            f"<tr><td>来源</td><td><code>{html.escape(str(diali.relative_to(ROOT)))}</code></td></tr>"
+            "</tbody></table>"
+        )
+        (PKG_DIR / f"{slug}.html").write_text(
+            render(f"包 · {display}", facts + md_body(blurb, True, base="../"),
+                   "packages", base="../"),
+            encoding="utf-8")
+        rows.append(
+            f'<tr><td><a href="packages/{slug}.html">{html.escape(display)}</a></td>'
+            f'<td><code>{html.escape(name)}</code></td>'
+            f'<td>{html.escape(ver)}</td>'
+            f'<td>{html.escape(abi)}</td>'
+            f'<td>{count}</td></tr>')
+
+    intro = (
+        "<p>Dial 的官方包生态。标准库 <code>stdlib</code> 随编译器发布、编译时自动链入；"
+        "其余均为独立 <code>.dialpkg</code>，用 <code>import \"包名\";</code> 引入、"
+        "<code>dialc install</code> 安装（按 Target Triple 索引本平台静态库，并对契约与"
+        "机器码做 SHA256 强制校验，残缺 / 被篡改绝不进入链接器）。下表事实直接从各包源文件"
+        "提取，包升级后重生成官网即自动同步。</p>"
+    )
+    table = ("<table><thead><tr><th>包</th><th>name</th><th>版本</th><th>ABI</th>"
+             f"<th>extern fn</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
+    (WEB / "packages.html").write_text(
+        render("包 · 索引", intro + table, "packages"), encoding="utf-8")
+    print(f"  packages: {len(_PKG_SPECS)} 个包介绍页 + 1 个索引页")
+
+
 def main() -> None:
     WEB.mkdir(exist_ok=True)
     ASSETS.mkdir(exist_ok=True)
@@ -574,6 +841,7 @@ def main() -> None:
         render("语言规范", md_body(readme, True, strip_web_prefix=True), "spec"),
         encoding="utf-8")
     build_changelog(changelog)
+    build_packages()
 
     (WEB / "index.html").write_text(render_index(), encoding="utf-8")
 
@@ -629,6 +897,7 @@ def render_index() -> str:
     所有容器与运行时能力由 C 实现——比 C 更严格，且彼此融洽严谨。</p>
     <div class="cta">
       <a class="btn-primary" href="spec.html">阅读语言规范</a>
+      <a class="btn-ghost" href="packages.html">浏览官方包</a>
       <a class="btn-ghost" href="changelog.html">查看更新日志</a>
       <a class="btn-ghost" href="bench.html">性能基准（4 语言 × 28 维）</a>
     </div>

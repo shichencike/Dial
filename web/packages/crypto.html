@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>包 · 密码学包 crypto · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../packages.html" class="active">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>crypto</code></td></tr><tr><td>版本</td><td>1.0.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>18</td></tr><tr><td>来源</td><td><code>packages/crypto/crypto.diali</code></td></tr></tbody></table><div class="toc">
+<ul>
+<li><a href="#密码学包-crypto">密码学包 crypto</a></li>
+</ul>
+</div>
+<h2 id="密码学包-crypto">密码学包 crypto</h2>
+<p>复用 vendor 的 <strong>mbedTLS</strong> 实现摘要 / Base64 / HMAC，零自研密码学原语
+（密码学正确性是底线，绝不手搓）。</p>
+<ul>
+<li><strong>五种摘要</strong>：MD5 / SHA-1 / SHA-256 / SHA-512 / SHA3-256，均用标准测试向量核对。</li>
+<li><strong>Base64</strong>：<code>base64_encode</code> / <code>base64_decode</code>，含内嵌 NUL 的二进制数据安全往返。</li>
+<li><strong>HMAC-SHA256</strong>：<code>hmac_sha256</code>，密钥 + 消息得 MAC。</li>
+<li><strong>双入口</strong>：<code>string</code> 与 <code>bytes</code> 两种输入，含非 UTF-8 二进制数据（内嵌 NUL）也安全。</li>
+<li><strong>严格错误路径</strong>：坏输入明确报错，绝不静默吐错值。</li>
+</ul>
+<pre><code class="language-dial">import &quot;crypto&quot;;
+
+fn main(): int {
+    let h: string = sha256_hex(&quot;hello&quot;);
+    print(h);   // 2cf24dba... 标准向量
+    return 0;
+}
+</code></pre>
+<p>三平台零警告构建（mbedTLS 随包 vendor 进仓库）。</p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

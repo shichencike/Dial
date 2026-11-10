@@ -387,6 +387,12 @@
   `gui.diali` 追加 10 个 `extern fn`（合计 130）后经 `pack` 重算 SHA256、
   `install` 同 ABI 覆盖成功（`abi = 6` / `version = 1.10.0` 不变）；
   官网由 `tools/build_web.py` 重新生成并与文档同步。
+- **官网新增 6 个包介绍页 + 包索引页**（`tools/build_web.py` 的 `build_packages()`）：
+  顶部导航加「包」入口，`web/packages.html` 索引列出 stdlib / gui / http / text /
+  json / crypto 六个包（name / version / abi / `extern fn` 计数**直接从各包源文件
+  提取**，包升级后重生成即同步，不硬编码版本号），并生成 `web/packages/<slug>.html`
+  六个详情页（叙述 + 示例 + 自动刷新的事实表）。`check_links.py` 放宽 `.html` 目标
+  的仓库根相对链接误报；生成确定性已验证（`git diff --exit-code -- web/`）。
 - **交付状态**：仅本地提交，未推送、未打标签、未发 Release（遵循本段开头的口径）。
 
 ---

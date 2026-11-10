@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>包 · GUI 地基包 gui · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../packages.html" class="active">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>gui</code></td></tr><tr><td>版本</td><td>1.10.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>154</td></tr><tr><td>来源</td><td><code>packages/gui/gui.diali</code></td></tr></tbody></table><div class="toc">
+<ul>
+<li><a href="#gui-地基包-gui">GUI 地基包 gui</a></li>
+</ul>
+</div>
+<h2 id="gui-地基包-gui">GUI 地基包 gui</h2>
+<p>不用 Qt / GTK / SDL，<strong>纯 C 手搓</strong>的 GUI 包，覆盖<strong>七层、共 154 个 <code>extern fn</code></strong>：
+地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 + 命中 + 主动分发）/
+成品控件外观层（Label / Button / CheckBox + 主题表驱动四态）/ 输入层（TextBox +
+焦点链 + 统一功能键码 + XTest 实窗注入）/ 主题层与控件扩展（14 个可覆写颜色角色 +
+Radio / Slider / ProgressBar）/ 信号槽（6 类可订阅纯值信号 + 每树环形队列）/
+<strong>菜单·对话框覆盖层</strong>（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列）。</p>
+<pre><code class="language-dial">import &quot;gui&quot;;
+
+fn main(): int {
+    let app: GuiApp = dial_gui_app_new();
+    let win: GuiWindow = dial_gui_window_new(app, &quot;Hello GUI&quot;, 400, 300);
+    let root: GuiWidget = dial_gui_widget_tree(400, 300);
+    let btn: GuiWidget = dial_gui_widget_add(root);
+    dial_gui_widget_set_rect(btn, 10, 10, 80, 24);
+    dial_gui_widget_set_kind(btn, 2);            // BUTTON
+    dial_gui_widget_set_text(btn, &quot;Click me&quot;);
+    dial_gui_widget_subscribe(btn, 1);           // CLICKED
+    dial_gui_window_set_root(win, root);
+    dial_gui_window_draw(win);
+    dial_gui_window_flush(win);
+    dial_gui_window_close(win);
+    dial_gui_app_free(app);
+    return 0;
+}
+</code></pre>
+<ul>
+<li><strong>三平台真实现</strong>：<code>x86_64-linux-gnu</code> / <code>aarch64-unknown-linux-musl</code> /
+  <code>x86_64-pc-windows-gnu</code> 均由 <code>zig cc</code> 交叉编译出真实 <code>.a</code>，零链接期 GUI 依赖
+  （X11 / Win32 一律 <code>dlopen</code> / <code>LoadLibraryA</code>），最终链接<strong>不需要</strong> <code>-lX11</code> / <code>-lgdi32</code>。</li>
+<li><strong>绝不 C → Dial 反向回调</strong>：事件 / 信号一律「C 写纯值块，Dial 主动
+  <code>pending → data → pop</code> 消费」——符合内存宪法。</li>
+<li><strong>ABI 不变</strong>：只追加 <code>extern fn</code>，旧签名一字不动；覆盖层不进控件树，控件几何 /
+  绘制 CRC 逐字节不漂移。</li>
+</ul>
+<p>详见 <a href="../spec.html#38-手搓-gui-地基包guidialpkg">§38 手搓 GUI 地基包</a>。</p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -15,6 +15,7 @@
       <a href="../index.html">首页</a>
       <a href="../spec.html">语言规范</a>
       <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../packages.html">包</a>
       <a href="../cve.html">安全公告</a>
       <a href="../bench.html">性能基准</a>
       <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
@@ -410,6 +411,12 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
   <code>gui.diali</code> 追加 10 个 <code>extern fn</code>（合计 130）后经 <code>pack</code> 重算 SHA256、
   <code>install</code> 同 ABI 覆盖成功（<code>abi = 6</code> / <code>version = 1.10.0</code> 不变）；
   官网由 <code>tools/build_web.py</code> 重新生成并与文档同步。</li>
+<li><strong>官网新增 6 个包介绍页 + 包索引页</strong>（<code>tools/build_web.py</code> 的 <code>build_packages()</code>）：
+  顶部导航加「包」入口，<code>web/packages.html</code> 索引列出 stdlib / gui / http / text /
+  json / crypto 六个包（name / version / abi / <code>extern fn</code> 计数<strong>直接从各包源文件
+  提取</strong>，包升级后重生成即同步，不硬编码版本号），并生成 <code>web/packages/&lt;slug&gt;.html</code>
+  六个详情页（叙述 + 示例 + 自动刷新的事实表）。<code>check_links.py</code> 放宽 <code>.html</code> 目标
+  的仓库根相对链接误报；生成确定性已验证（<code>git diff --exit-code -- web/</code>）。</li>
 <li><strong>交付状态</strong>：仅本地提交，未推送、未打标签、未发 Release（遵循本段开头的口径）。</li>
 </ul>
 <hr /><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../changelog.html">版本索引</a></p></main></div>

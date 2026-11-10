@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>包 · 正则包 text · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../packages.html" class="active">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>text</code></td></tr><tr><td>版本</td><td>1.0.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>11</td></tr><tr><td>来源</td><td><code>packages/text/text.diali</code></td></tr></tbody></table><div class="toc">
+<ul>
+<li><a href="#正则包-text">正则包 text</a></li>
+</ul>
+</div>
+<h2 id="正则包-text">正则包 text</h2>
+<p>自研 <strong>Thompson NFA</strong> 正则引擎（非回溯、线性时间），零第三方依赖。</p>
+<ul>
+<li><strong>语法子集</strong>：字符类 <code>[a-z]</code> / 锚点 <code>^</code> <code>$</code> / 分组 <code>(...)</code> / 选择 <code>a|b</code> /
+  量词 <code>*</code> <code>+</code> <code>?</code> / 转义。</li>
+<li><strong>捕获组</strong>：<code>match</code> 返回各分组子串；<code>replace</code> 支持 <code>$1</code> <code>$2</code> … <code>$n</code> 反向引用替换。</li>
+<li><strong>错误路径</strong>：非法 Pattern 编译期 / 运行期明确报错，绝不静默接受。</li>
+</ul>
+<pre><code class="language-dial">import &quot;text&quot;;
+
+fn main(): int {
+    let re: Regex = regex_compile(&quot;[0-9]+&quot;);
+    let m: RegexMatch = regex_match(re, &quot;order 42 shipped&quot;);
+    if (m.matched) {
+        print(string_from_cstr(m.group));   // &quot;42&quot;
+    }
+    return 0;
+}
+</code></pre>
+<p>三平台零警告构建，纯 C 实现。</p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>包 · 标准库 stdlib · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../packages.html" class="active">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>标准库</code></td></tr><tr><td>版本</td><td>1.0.0</td></tr><tr><td>ABI</td><td>6 (STDLIB_ABI)</td></tr><tr><td>extern fn 数量</td><td>122</td></tr><tr><td>来源</td><td><code>stdlib/stdlib.diali</code></td></tr></tbody></table><div class="toc">
+<ul>
+<li><a href="#标准库-stdlib">标准库 stdlib</a></li>
+</ul>
+</div>
+<h2 id="标准库-stdlib">标准库 stdlib</h2>
+<p>Dial 的<strong>标准库</strong>，随编译器发布、编译你的程序时<strong>自动链入</strong>，无需 <code>install</code>、
+也无需在源码里 <code>import</code>（编译器前端直接认得 <code>Db</code> / <code>string</code> / <code>int[]</code> 等内置类型）。
+它把「字符串 / 动态数组 / 哈希表 / IO / 内存管理 / 并发」这些一切容器与运行时
+能力用 C 实现，Dial 侧只负责把调用翻译出去——这正是「C 承担一切容器」的设计。</p>
+<ul>
+<li><strong>类型系统基石</strong>：<code>string</code>（UTF-8 不可变字节序列，ARC 拥有）、<code>int[]</code> /
+  <code>float[]</code> / <code>byte[]</code> / <code>char[]</code>（动态数组，put 触发扩容或写时复制后由编译器把
+  新指针写回接收变量）、<code>map&lt;K,V&gt;</code>（ARC + COW 哈希表）。</li>
+<li><strong>不透明指针契约</strong>：<code>string</code> 与数组在 IR 中只是 <code>ptr</code>，用户代码永远无法触碰其
+  内部布局，一切经由 C 导出函数——库作者随意重构、调用方零改动。</li>
+<li><strong>并发底座</strong>：<code>thread</code> / <code>channel&lt;T&gt;</code>（原子 ARC 共享，<code>move_to</code> 转移所有权取代锁）、
+  <code>spawn</code> / <code>select</code> / <code>close</code> / <code>done</code> / <code>try_recv</code> / <code>recv_timeout</code>。</li>
+<li><strong>Fail-Fast 内存宪法</strong>：绝不引入追踪式 GC；确定性内存靠 ARC + 编译期逃逸分析 /
+  移动语义，裸指针坚持「谁申请谁释放」。</li>
+</ul>
+<blockquote>
+<p>标准库是 <code>MIT</code> / <code>Apache-2.0</code> 许可（与编译器本体的 GPL 三选一隔离），因此被
+静态链进你程序里的运行时不受 GPL 条款约束——工具可以是 GPL，被链进你程序的
+运行时绝不能是。</p>
+</blockquote>
+<p>详见 <a href="../spec.html">语言规范</a>（README 全文即规范）。</p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

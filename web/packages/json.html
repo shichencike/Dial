@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>包 · JSON 包 json · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../packages.html" class="active">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>json</code></td></tr><tr><td>版本</td><td>1.0.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>29</td></tr><tr><td>来源</td><td><code>packages/json/json.diali</code></td></tr></tbody></table><div class="toc">
+<ul>
+<li><a href="#json-包-json">JSON 包 json</a></li>
+</ul>
+</div>
+<h2 id="json-包-json">JSON 包 json</h2>
+<p>自研<strong>递归下降解析 + 紧凑序列化</strong>，零第三方依赖，独立拥有句柄。</p>
+<ul>
+<li><strong>严格模式</strong>：重复键 / 尾随逗号 / 非法转义一律拒绝（Fail-Fast）。</li>
+<li><strong>大整数精度</strong>：数字以字符串保留，不丢精度；<code>as_int</code> / <code>as_float</code> 按需转换。</li>
+<li><strong><code>\u</code> 与代理对</strong>：正确解码 <code>\uXXXX</code> 与 UTF-16 代理对（emoji 不丢）。</li>
+<li><strong>独立拥有 + 深拷贝</strong>：<code>json_parse</code> 返回的文档句柄独立拥有其内存；<code>json_copy</code>
+  做深拷贝构造，互不串扰。</li>
+<li><strong>错误码</strong>：解析失败返回明确错误码与位置，便于定位。</li>
+</ul>
+<pre><code class="language-dial">import &quot;json&quot;;
+
+fn main(): int {
+    let doc: JsonDoc = json_parse(&quot;{&quot;name&quot;:&quot;dial&quot;,&quot;n&quot;:42}&quot;);
+    let v: JsonValue = json_get(doc, &quot;name&quot;);
+    print(string_from_cstr(json_as_string(v)));   // &quot;dial&quot;
+    return 0;
+}
+</code></pre>
+<p>三平台零警告构建，纯 C 实现。</p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

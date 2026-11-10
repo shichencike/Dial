@@ -234,6 +234,10 @@ def main() -> int:
         for p in sorted(list(web.glob("*.html")) + list(web.glob("changelog/*.html"))):
             t = p.read_text(encoding="utf-8")
             for href in re.findall(r'href="([^"]+)"', t):
+                # .html 目标是站内生成页（含包介绍页 web/packages/*.html），
+                # 不可能是仓库源文件，故跳过 repo_prefixes 检查。
+                if href.endswith(".html"):
+                    continue
                 if any(href.startswith(pre) for pre in repo_prefixes):
                     site_problems.append((p.relative_to(ROOT),
                                           f"残留仓库根相对链接 {href}"))

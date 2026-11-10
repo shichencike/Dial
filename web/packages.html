@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>包 · 索引 · Dial 语言</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="index.html">首页</a>
+      <a href="spec.html">语言规范</a>
+      <a href="changelog.html">更新日志</a>
+      <a href="packages.html" class="active">包</a>
+      <a href="cve.html">安全公告</a>
+      <a href="bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p>Dial 的官方包生态。标准库 <code>stdlib</code> 随编译器发布、编译时自动链入；其余均为独立 <code>.dialpkg</code>，用 <code>import "包名";</code> 引入、<code>dialc install</code> 安装（按 Target Triple 索引本平台静态库，并对契约与机器码做 SHA256 强制校验，残缺 / 被篡改绝不进入链接器）。下表事实直接从各包源文件提取，包升级后重生成官网即自动同步。</p><table><thead><tr><th>包</th><th>name</th><th>版本</th><th>ABI</th><th>extern fn</th></tr></thead><tbody><tr><td><a href="packages/stdlib.html">标准库 stdlib</a></td><td><code>标准库</code></td><td>1.0.0</td><td>6 (STDLIB_ABI)</td><td>122</td></tr><tr><td><a href="packages/gui.html">GUI 地基包 gui</a></td><td><code>gui</code></td><td>1.10.0</td><td>6</td><td>154</td></tr><tr><td><a href="packages/http.html">HTTP 客户端包 http</a></td><td><code>http</code></td><td>1.2.0</td><td>6</td><td>35</td></tr><tr><td><a href="packages/text.html">正则包 text</a></td><td><code>text</code></td><td>1.0.0</td><td>6</td><td>11</td></tr><tr><td><a href="packages/json.html">JSON 包 json</a></td><td><code>json</code></td><td>1.0.0</td><td>6</td><td>29</td></tr><tr><td><a href="packages/crypto.html">密码学包 crypto</a></td><td><code>crypto</code></td><td>1.0.0</td><td>6</td><td>18</td></tr></tbody></table></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
