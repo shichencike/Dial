@@ -75,7 +75,7 @@ dialc/
 │   ├── dial_map.h / .c     #   Map（int → int，ARC）
 │   └── dial_io.h / .c      #   打印 / 读行
 ├── packages/               # 官方 .dialpkg 包（http / text / json / crypto / gui）
-│   └── gui/                #   手搓 GUI 六层：地基 + 控件框架 + 成品外观 + 输入层 + 主题层/控件扩展 + 信号槽/控件事件订阅（见 §38）
+│   └── gui/                #   手搓 GUI 七层：地基 + 控件框架 + 成品外观 + 输入层 + 主题层/控件扩展 + 信号槽/控件事件订阅 + 菜单/对话框覆盖层（见 §38）
 ├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
 ├── tests/
 │   ├── run_tests.sh        # 端到端测试（A 正向 / B 负向 / C 契约 / D Fail-Fast / E 对照 /
@@ -1705,7 +1705,7 @@ print("");        // -> Hi
 | 一等函数 / 函数指针 | **已支持**（v1.03）：`fn(A, B): R` 一等函数指针、函数名作右值、高阶数组方法与 C 回调（见 §32）。**闭包仍不支持**：跨回调状态须显式经 `rawptr<void>` 透传 |
 | `map<K,V>` 的 `string` 值、`map.values()` 对非 `int` 值 | **未实现**（v1.00）：`V` 只支持标量，`values()` 只支持 `V = int`——`get` 未命中时的默认 string 对象会带来所有权移交歧义，见 [§29.5](#295-重型类型与容器) |
 | LSP 的重命名 / 跨文件引用查找 / 格式化 | **已实现**（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的**引用边**（`src/index.rs`），格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作。能力清单见 [§28.7.1](#2871-当前-lsp-能力清单)。另见 v1.04 新增的 `dialc fmt` 命令行格式化（§34）。**尚未实现**：跨工作区的**全量**引用图（当前只覆盖已打开文件与已加载包） |
-| GUI 控件树 / 布局 / 信号槽 | **六层已落地**（`gui.dialpkg`，见 [§38](#38-手搓-gui-地基包guidialpkg)）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12），共 **130 个 `extern fn`**。**仍未实现**：多行文本 / IME、撤销重做、C → Dial 反向回调、富文本编辑、图片解码。Win32 后端**仅交叉编译、未实机验证**（XTest 实机注入仅在 Linux/Xvfb 验收） |
+| GUI 控件树 / 布局 / 信号槽 | **七层已落地**（`gui.dialpkg`，见 [§38](#38-手搓-gui-地基包guidialpkg)）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13），共 **154 个 `extern fn`**。**仍未实现**：多行文本 / IME、撤销重做、C → Dial 反向回调、富文本编辑、图片解码。Win32 后端**仅交叉编译、未实机验证**（XTest 实机注入仅在 Linux/Xvfb 验收） |
 
 ---
 
@@ -5581,7 +5581,7 @@ A–Z + AA + AB **二十八组**，见 §38）。
 ## 38. 手搓 GUI 地基包：gui.dialpkg
 
 > **定位与交付口径**：本章描述 `packages/gui/` 产出的 `gui.dialpkg`——一个
-> **不用 Qt / GTK / SDL、纯 C 手搓**的 GUI 包，覆盖**六层、共 130 个 `extern fn`**：
+> **不用 Qt / GTK / SDL、纯 C 手搓**的 GUI 包，覆盖**七层、共 154 个 `extern fn`**：
 > ① **地基层**（窗 + 事件 + 绘图 + 字体，55 个 `extern fn`）；
 > ② **控件框架层**（`GuiWidget` 树 + 布局 + 命中测试 + 主动事件分发，
 > 28 个 `extern fn`，见 §38.2 / §38.9）；
@@ -5592,10 +5592,13 @@ A–Z + AA + AB **二十八组**，见 §38）。
 > ⑤ **主题层 / 控件扩展**（14 个可覆写颜色角色 + Radio / Slider / ProgressBar
 > 三种成品控件 + value / range / group 纯值访问器，11 个 `extern fn`，见 §38.2）；
 > ⑥ **信号槽 / 控件事件订阅**（6 类可订阅纯值信号 + 每树环形队列 +
-> subscribe / pending / data / pop / clear / dropped，10 个 `extern fn`，见 §38.12）。
+> subscribe / pending / data / pop / clear / dropped，10 个 `extern fn`，见 §38.12）；
+> ⑦ **菜单 / 对话框覆盖层**（窗口级顶栏菜单 + 弹出菜单 + 模态对话框，复用第 6 层
+> 纯值信号队列：`SELECTED` / `SUBMITTED` 两类信号 + `dial_gui_menu_*` /
+> `dial_gui_dialog_*` / `dial_gui_window_*` 统一分发，24 个 `extern fn`，见 §38.13）。
 > 它是 `[v1.10]`（标签 `v1.1`）发布**之后**的**开发中增量**：编译器版本仍为
 > `1.10.0`，**未升版本号、未打标签、未发 Release**（见 CHANGELOG `[未发布]` 段）。
-> 六层都是**真实现**，不是占位接口；六层一律沿用「只追加 `extern fn`、
+> 七层都是**真实现**，不是占位接口；七层一律沿用「只追加 `extern fn`、
 > ABI 不变、绝不 C → Dial 反向回调」的宪法。
 
 **架构分叉（用户拍板）**：
@@ -5605,14 +5608,15 @@ A–Z + AA + AB **二十八组**，见 §38）。
 | 底层边界 | 纯 X11 自绘，**强制 XShm 共享内存 + XRender 合成** + 自研迷你 2D 光栅化器 + `stb_truetype` 字体；不用任何现成 GUI 工具包 |
 | Windows | **复刻同一套逻辑**，底层换成 Win32 GDI（`CreateDIBSection` + `StretchBlt`）；消息循环映射成同一套事件码，Dial 侧代码平台无关 |
 | 平台策略 | **三平台真实现**：`x86_64-linux-gnu` / `aarch64-unknown-linux-musl` / `x86_64-pc-windows-gnu` 都由 `zig cc` 交叉编译出真实 `.a`，不是占位 stub |
-| 第一版范围（地基轮） | 只做地基层（`GuiApp` / `GuiWindow` / `GuiPainter` / `GuiFont` / Event）；**当时**控件树 / 布局 / 信号槽不进契约——后续五轮已补框架层、外观层、输入层、主题层与信号槽层，见下六行 |
+| 第一版范围（地基轮） | 只做地基层（`GuiApp` / `GuiWindow` / `GuiPainter` / `GuiFont` / Event）；**当时**控件树 / 布局 / 信号槽不进契约——后续六轮已补框架层、外观层、输入层、主题层、信号槽层与菜单/对话框层，见下七行 |
 | 控件框架层范围（当时） | Widget 树 + 绝对 / VBox / HBox 布局 + 命中测试 + 事件分发；**当时**统一通用 Box（28 个 `extern fn`），后续四轮已在其上补成品控件、TextBox、主题层/控件扩展与信号槽层 |
 | 外观层范围（当时） | **最小可用集**：Label / Button / CheckBox 三种控件 + C 侧内置浅色默认主题 + 四态（普通 / 悬停 / 按下 / 禁用）绘制 + 纯值事件推进 + 整树一次绘制（12 个 `extern fn`）；当时不引入 C → Dial 回调、不暴露 theme setter（本轮已补） |
 | 输入层范围（当时） | TextBox 单行编辑（可打印字符 / 退格 / 删除 / 光标 / 选区 / UTF-8 边界 / `max_len`）+ 焦点链（Tab / Shift+Tab 环形切换 / 点击聚焦）+ **两平台统一功能键码**（`X11 KeySym` / `Win32 VK` → 同表）+ 修饰键位掩码 + Xvfb **XTest 真实鼠标/键盘注入**闭环（14 个 `extern fn`）；当时不暴露 theme setter（本轮已补） |
 | 主题层 / 控件扩展范围（第 5 层） | **14 个可覆写颜色角色**（`theme_set/get/reset/role_count`；默认值逐字不变，故 `look_crc_normal` 不漂移）+ Radio / Slider / ProgressBar 三种成品控件 + `value` / `range` / `group` 纯值访问器（11 个 `extern fn`）；仍只追加、ABI 不变、零反向回调，旧 109 个签名一字不动 |
-| 信号槽 / 控件事件订阅范围（本轮，第 6 层） | **6 类可订阅纯值信号**（点击 / 勾选翻转 / 文本变更 / 值变更 / 焦点变化 / 提交）+ 每树一个**环形队列**（容量 64 / 72 字节纯值信号块 / 零订阅零开销）+ subscribe / pending / data / pop / clear / dropped（10 个 `extern fn`，见 §38.12）；纯 C、零平台符号、**绝不 C → Dial 反向回调**，旧 120 个签名一字不动 |
+| 信号槽 / 控件事件订阅范围（第 6 层） | **6 类可订阅纯值信号**（点击 / 勾选翻转 / 文本变更 / 值变更 / 焦点变化 / 提交）+ 每树一个**环形队列**（容量 64 / 72 字节纯值信号块 / 零订阅零开销）+ subscribe / pending / data / pop / clear / dropped（10 个 `extern fn`，见 §38.12）；纯 C、零平台符号、**绝不 C → Dial 反向回调**，旧 120 个签名一字不动 |
+| 菜单 / 对话框覆盖层范围（第 7 层） | **窗口级覆盖层**：顶栏菜单（`File` / `Edit` / `Help` 横排，22px 高）+ 弹出菜单（锚点定位、分隔符 / 禁用项不可命中）+ 模态对话框（`OK` / `Cancel` / `Yes` / `No` 按钮位，半透明遮罩 + 居中盒）。三者**不进控件树**，几何 / 绘制 CRC 逐字节不漂移；菜单项 / 对话框按钮选中事件**复用第 6 层纯值信号队列**（`SELECTED` a=item id、kind=`MENU`；`SUBMITTED` a=结果码、kind=`DIALOG`），所有权归窗口、关闭时一并释放（24 个 `extern fn`，见 §38.13）；纯 C、零平台符号、**绝不 C → Dial 反向回调**，旧 130 个签名一字不动 |
 | 事件分发 | **主动分发，绝不 C → Dial 反向回调**：C 侧写 `packed struct` 纯值块 / 纯值四态 / 纯值编辑态 / 纯值颜色表 / 纯值信号队列，Dial 侧 `poll/wait` 后读；字符串由 `string_from_cstr` 复制成 ARC 对象。C 管 C 的、ARC 管 ARC 的，零隐式开销 |
-| 包契约 | **追加函数、ABI 不变**：六层都只加 `extern fn` + 句柄，旧签名一字不动（框架层追加前 55 个、外观层追加前 83 个、输入层追加前 95 个、主题层追加前 109 个、信号层追加前 120 个），`abi = 6` / `version = 1.10.0` 不变，重新 `pack` + `install`（同 ABI 覆盖） |
+| 包契约 | **追加函数、ABI 不变**：七层都只加 `extern fn` + 句柄，旧签名一字不动（框架层追加前 55 个、外观层追加前 83 个、输入层追加前 95 个、主题层追加前 109 个、信号层追加前 120 个、菜单/对话框层追加前 130 个），`abi = 6` / `version = 1.10.0` 不变，重新 `pack` + `install`（同 ABI 覆盖） |
 
 ### 38.1 包结构
 
@@ -5629,6 +5633,7 @@ packages/gui/
 ├── src/dial_gui_look.c   # 成品控件外观层：主题表驱动四态 / 八种控件绘制 / 事件推进（纯 C）
 ├── src/dial_gui_input.c  # 输入层：TextBox 编辑 / 光标·选区 / 焦点链 / 键码推进（纯 C）
 ├── src/dial_gui_signal.c # 信号层：可订阅纯值信号块 + 每树环形队列（纯 C，三平台共用）
+├── src/dial_gui_menu.c   # 第 7 层：菜单 / 对话框覆盖层（纯 C，三平台共用，零平台符号）
 ├── src/gui_font8.h       # 内置 ASCII 点阵静态常量表
 ├── src/dial_gui_x11.c    # POSIX 后端（X11 + XShm + XRender，dlopen）
 ├── src/dial_gui_win32.c  # Windows 后端（GDI DIBSection，LoadLibraryA）
@@ -5641,12 +5646,14 @@ tests/pkg/use_gui_look.dial   # 外观层 demo（独立 offscreen 画布，crc_l
 tests/pkg/use_gui_input.dial  # 输入层 demo（编辑 / 选区 / 焦点 / 键码 / 实窗事件闭环）
 tests/pkg/use_gui_theme.dial  # 主题层 demo（14 角色 set/get/reset / 八种控件 / 值域 Fail-Fast）
 tests/pkg/use_gui_signal.dial # 信号层 demo（纯值块布局 / 六类信号 / 零订阅零开销 / 溢出可观测）
+tests/pkg/use_gui_menu.dial  # 第 7 层 demo（菜单对象 / 顶栏·弹窗 SELECTED / 模态对话框 SUBMITTED / 控件树 CLICKED）
 tests/pkg/xtest_inject.sh     # Xvfb 下用 xdotool（XTEST）真注入鼠标/键盘事件
 ```
 
 `dial_gui_widget.c` / `dial_gui_theme.c` / `dial_gui_look.c` / `dial_gui_input.c` /
-`dial_gui_signal.c` **都只 include `dial_gui.h` + libc**，不碰 X11 / Win32 任何 API，
-因此三份 `.a` 的 `nm -u` 不会因框架层 / 外观层 / 输入层 / 主题层 / 信号层新增任何平台符号。
+`dial_gui_signal.c` / `dial_gui_menu.c` **都只 include `dial_gui.h` + libc**，不碰 X11 /
+Win32 任何 API，因此三份 `.a` 的 `nm -u` 不会因框架层 / 外观层 / 输入层 / 主题层 /
+信号层 / 菜单对话框层新增任何平台符号。
 `dial_gui_theme.c` 只是进程级静态颜色表（GUI 单线程事件循环，无需加锁），
 默认色值逐字取自 `dial_gui.h` 的 `GUI_THEME_*` 宏，因此 `theme_reset()` 后逐像素
 CRC 与引入 setter 之前完全一致。`dial_gui_look.c` 也**不碰像素细节**：只调
@@ -6240,14 +6247,15 @@ XTest 实窗注入实测 `keys 2 / focus 2 / mouse 6 / act 2 / shift 1` 全绿�
 
 ### 38.11 能力边界（不许当已支持）
 
-- **六层已实现**：地基层（窗 / 事件 / 绘图 / 字体）、**控件框架层**
+- **七层已实现**：地基层（窗 / 事件 / 绘图 / 字体）、**控件框架层**
   （Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发）、**成品控件
   外观层**（Label / Button / CheckBox + 内置浅色默认主题 + 四态绘制 + 纯值
   事件推进）、**输入层**（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能
   键码 / 修饰键）、**主题层 / 控件扩展**（14 角色可覆写颜色表 + Radio / Slider /
   ProgressBar + value / range / group）、**信号槽 / 控件事件订阅层**（6 类可订阅
-  纯值信号 + 每树环形队列，见 §38.12）都已有真实现并写进 `gui.diali`
-  （共 **130 个 `extern fn`**）。主题色仍是**进程级全局表**、按角色覆写，
+  纯值信号 + 每树环形队列，见 §38.12）、**菜单 / 对话框覆盖层**（顶栏菜单 + 弹出
+  菜单 + 模态对话框，复用第 6 层纯值信号队列，见 §38.13）都已有真实现并写进
+  `gui.diali`（共 **154 个 `extern fn`**）。主题色仍是**进程级全局表**、按角色覆写，
   不支持每控件独立配色；Slider 只支持水平方向、点击设值（拖动未接线）。
   **仍未实现、也不写进契约**：C → Dial 反向回调（信号槽已由第 6 层以纯值信号
   队列落地，**不是**回调）、富文本编辑
@@ -6370,3 +6378,55 @@ X11 / GDI 未定义符号；X11 / Win32 两端无需改动（信号由平台无�
 （含 x/y）读取、`seq` 单调、队列溢出 `dropped` 可观测、取消订阅、纯值块读数不依赖
 控件生命周期；Xvfb 实窗另验挂树 + 订阅 + 纯值信号读取 + 整树绘制 + `flush` 上屏。
 AA 组本层 +3 条 `aapass`，全量回归 **523 ✅ → 526 ✅**。
+
+### 38.13 菜单 / 对话框覆盖层（第 7 层）
+
+> 本节是第 7 层的完整设计说明；契约签名见 `gui.diali` 末段，C 实现见
+> `packages/gui/src/dial_gui_menu.c`，端到端用例见 `tests/pkg/use_gui_menu.dial`。
+
+**为什么是「窗口级覆盖层」而不是控件**。菜单（顶栏 + 弹窗）与对话框是**整窗
+范围的临时 UI**：它们浮在控件树之上、按需出现、不参与控件树布局，因此刻意
+**不进 `GuiWidget` 树**——这样控件几何 / 绘制 CRC 逐字节不漂移（与覆盖层无关的
+旧 demo 像素断言全部保留）。三者所有权归 `GuiWindow`：窗口关闭时 `dial_gui_window_close`
+一并 `gui_menu_free` / `gui_dialog_free`，调用方**不要**对已挂窗的菜单 / 对话框再 free。
+
+**信号复用，不另起炉灶**。菜单项选中、对话框按钮点击**复用第 6 层纯值信号队列**，
+不新增队列、不新增信号种类语义，只是新增两个信号码与一个 kind 标记：
+
+- `GUI_SIG_SELECTED = (1 << 6) = 64`：菜单项被点击选中，`a = item id`，
+  `kind = GUI_WIDGET_MENU (= 8)`；
+- `GUI_SIG_SUBMITTED`（第 6 层按钮 Enter 提交）：对话框按钮点击时 `a = 结果码`
+  （`1 OK` / `2 CANCEL` / `4 YES` / `8 NO`，取点击的那一枚），`kind = GUI_WIDGET_DIALOG (= 9)`；
+- 信号码总数 `GUI_SIG_COUNT` 从 6 升到 **7**，掩码上限同步放开（含 `64` 位合法）。
+
+**关键约定：`set_root` 先挂树**。覆盖层事件要进 `win->root` 的队列，故
+`window_set_root` 必须先调；`window_set_menubar` / `window_popup_menu` / `dialog_show`
+在 `root` 未挂时一律返回 `-1` 并写错误槽（Fail-Fast）。同时，菜单 / 对话框的
+`SELECTED` / `SUBMITTED` 信号走的 anchor 是 `win->root` 本身，因此**必须订阅 root**
+（而非某个按钮）到对应位——零订阅零开销守卫要求 root 自身持 `64` / `32` 位，否则
+信号被丢弃。`gui_signal_emit_ex` 是这套「非控件来源、显式给定 kind/tag/userdata」
+发射的变体。
+
+**统一事件分发的优先级**（`window_handle` 一次调用，返回语义与旧控件层一致）：
+
+1. 对话框（最高优先级，模态）：按钮命中 → 写 `result` + 关闭 `open` + emit `SUBMITTED`
+   + 返回 `3`；对话框外点击忽略（模态）；
+2. 弹出菜单：命中项 → emit `SELECTED` + **选中即释放弹窗** + 返回 `3`；外部点击关闭弹窗、返回 `0`；
+3. 顶栏菜单：命中项 → emit `SELECTED` + 返回 `3`；
+4. 控件树：委派 `widget_handle`，旧行为不变（返回 `1` = 控件激活 / `0` = 无 / `-1` = 参数错）。
+
+菜单项几何：`GUI_MENU_BAR_H = 22` 为顶栏高度，应用自行在控件树顶部留 `22px` 垫片；
+弹出菜单行高 `20px`、分隔符与禁用项不可命中；对话框按钮按下则 `open = 0` 自动消失。
+
+**纯内存对象也能单测（无 DISPLAY 可用）**：`dial_gui_menu_new` / `dial_gui_dialog_new`
+产生的纯内存对象（未挂窗）直接用 `gui_menu_free` / `gui_dialog_free` 释放，无需任何
+显示服务器。`use_gui_menu.dial` 段 A / B 在无 DISPLAY 下完整断言菜单项的头插排序 /
+越界返回 `-1` / 禁用 / `tag` 纯值键、对话框标题 / 消息 / 按钮位 / 结果码；段 C 在
+Xvfb 实窗另验：顶栏点击 → `SELECTED(a=item id, kind=MENU, tag 透传)`、弹窗点击命中
+`Paste`、模态对话框点 `OK` → `SUBMITTED(a=1, kind=DIALOG)` 且对话框自动关闭、控件树
+按钮仍收得到 `CLICKED`。AA 组本层 +2 条 `aapass`（无 DISPLAY / Xvfb 各一段）。
+
+**平台边界 / 回归**：本层是纯 C、零平台符号，三份 `.a` 的 `nm -u` 不新增任何
+X11 / GDI 未定义符号；X11 / Win32 两端无需改动（菜单 / 对话框绘制走平台无关的
+`gui_raster_*` / `gui_font_*`）。七层合计 **154 个 `extern fn`**，`abi = 6` /
+`version = 1.10.0` 不变、旧 130 个签名一字不动。

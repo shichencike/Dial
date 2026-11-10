@@ -1,0 +1,181 @@
+// gui.dialpkg 第 7 层：菜单 / 对话框端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 立场严格遵循「C 管 C 的，ARC 管 ARC 的」：绝不注册回调；菜单项 / 对话框按钮
+// 的选中事件复用第 6 层**纯值信号队列**，Dial 侧主动 pending → data(ptr_cast
+// 读 72 字节块) → pop 消费并自行分派。覆盖层是窗口级、不进控件树，故控件
+// 几何 / 绘制 CRC 逐字节不漂移。
+//
+// 语言宪法 §37.1：禁止文件级 var 全局可变状态。本用例只用局部变量与纯函数。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+// 与 C 侧 GuiWidgetSignal（packed）逐字节一致；9 个纯值字段 × 8 字节 = 72。
+packed extern struct GuiWidgetSignal {
+    seq: int, signal: int, tag: int, userdata: int, kind: int,
+    a: int, b: int, x: int, y: int
+}
+
+// 事件码（widget_handle / window_handle 的 kind）：1 PRESS / 2 RELEASE / 3 MOVE。
+// 信号码（位值）：1 CLICKED / 32 SUBMITTED / 64 SELECTED。
+// 信号 kind 标记：8 MENU（菜单项选中）/ 9 DIALOG（对话框按钮点击）。
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+// 读队首一条信号，逐字段断言 sig / tag / a / b，然后弹出。全部局部变量。
+fn check_signal(root: GuiWidget, sig: int, tag: int, a: int, b: int, name: string): void {
+    var raw: rawptr<byte> = dial_gui_widget_signal_data(root);
+    var s: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(raw);
+    expect_int(s.signal, sig, name + "_sig");
+    expect_int(s.tag, tag, name + "_tag");
+    expect_int(s.a, a, name + "_a");
+    expect_int(s.b, b, name + "_b");
+    expect_int(dial_gui_widget_signal_pop(root), 1, name + "_popped");
+}
+
+fn main(): int {
+    // ============ A) 菜单对象逻辑（纯内存，无 DISPLAY 可跑）============
+    // 事件码 / 信号码常量可用性：GUI_SIG_SELECTED = 64 已是合法位。
+    var m: GuiMenu = dial_gui_menu_new();
+    expect(!is_null(m), "menu_new");
+    expect_int(dial_gui_menu_add_item(m, 10, "Open"), 0, "menu_add_open");
+    expect_int(dial_gui_menu_add_item(m, 20, "Save"), 0, "menu_add_save");
+    expect_int(dial_gui_menu_add_item(m, 30, "Quit"), 0, "menu_add_quit");
+    expect_int(dial_gui_menu_add_sep(m), 0, "menu_add_sep");
+    // 0 = 最先 add 的项（头插：count-1-idx 重排）
+    expect_int(dial_gui_menu_count(m), 4, "menu_count_4");
+    expect_int(dial_gui_menu_item_id(m, 0), 10, "menu_item0_id_open");
+    expect_int(dial_gui_menu_item_id(m, 2), 30, "menu_item2_id_quit");
+    var lbl: string = string_from_cstr(dial_gui_menu_item_label(m, 1));
+    expect(lbl == "Save", "menu_item1_label_save");
+    expect_int(dial_gui_menu_item_id(m, 99), -1, "menu_item_oob_rejected");
+    expect(string_from_cstr(dial_gui_menu_item_label(m, 99)) == "", "menu_item_oob_label_empty");
+    // tag 纯值键 + 禁用项
+    expect_int(dial_gui_menu_set_tag(m, 99), 0, "menu_set_tag");
+    expect_int(dial_gui_menu_tag(m), 99, "menu_tag_readback");
+    expect_int(dial_gui_menu_item_set_enabled(m, 2, 0), 0, "menu_disable_quit");
+    expect_int(dial_gui_menu_item_set_enabled(m, 2, 1), 0, "menu_enable_quit");
+    expect_int(dial_gui_menu_free(m), 0, "menu_free");
+    // 注：释放后该句柄即悬垂，再次 free 属使用者责任（与 widget_tree_free 口径一致），
+    // 不探测、不拒绝；本用例不再二次调用。
+
+    // ============ B) 对话框对象逻辑（纯内存，无 DISPLAY 可跑）============
+    var d: GuiDialog = dial_gui_dialog_new();
+    expect(!is_null(d), "dialog_new");
+    expect_int(dial_gui_dialog_set_title(d, "Confirm"), 0, "dialog_set_title");
+    expect_int(dial_gui_dialog_set_message(d, "Sure?"), 0, "dialog_set_message");
+    expect_int(dial_gui_dialog_set_buttons(d, 1 | 2), 0, "dialog_set_buttons_okcancel");
+    expect_int(dial_gui_dialog_set_buttons(d, 99), -1, "dialog_bad_buttons_rejected");
+    dial_gui_clear_error();
+    expect_int(dial_gui_dialog_result(d), -1, "dialog_result_unclicked");
+    expect_int(dial_gui_dialog_open(d), 0, "dialog_open_false");
+    expect_int(dial_gui_dialog_free(d), 0, "dialog_free");
+    // 同上：释放后句柄悬垂，二次 free 属使用者责任，C 不探测。
+
+    // ============ C) 窗口 + 顶栏 + 弹窗 + 对话框（需要 DISPLAY / Xvfb）====
+    var app: GuiApp = dial_gui_app_new();
+    if (is_null(app)) {
+        print("gui_menu_window = skipped [" + dial_gui_last_error_msg() + "]");
+        print("gui_menu_done = true");
+        return 0;
+    }
+    var win: GuiWindow = dial_gui_window_new(app, "Dial GUI Menu", 400, 300);
+    if (is_null(win)) {
+        dial_gui_app_free(app);
+        print("gui_menu_window = skipped [窗口创建失败]");
+        print("gui_menu_done = true");
+        return 0;
+    }
+    // 控件树：顶部留 22px 垫片避开顶栏，再加一个按钮。
+    var root: GuiWidget = dial_gui_widget_tree(400, 300);
+    var pad: GuiWidget = dial_gui_widget_add(root);
+    dial_gui_widget_set_rect(pad, 0, 0, 400, 22);          // 顶栏垫片
+    var btn: GuiWidget = dial_gui_widget_add(root);
+    dial_gui_widget_set_rect(btn, 10, 30, 80, 24);
+    dial_gui_widget_set_kind(btn, 2);                       // BUTTON
+    dial_gui_widget_set_text(btn, "Go");
+    dial_gui_widget_set_tag(btn, 7);
+    dial_gui_widget_layout_apply(root, 400, 300);
+    // 订阅三类信号：
+    //   - 按钮本体订阅 CLICKED(1)（控件级，走 btn 自己的 sig_mask）；
+    //   - 菜单项 SELECTED(64) 与对话框按钮 SUBMITTED(32) 是**窗口级覆盖层**
+    //     事件，一律进 root 控件树队列，故须订阅 root（发射点 anchor=win->root，
+    //     零订阅零开销守卫要求 root 自身持对应位，否则被丢弃）。
+    dial_gui_widget_subscribe(btn, 1);
+    dial_gui_widget_subscribe(root, 32 | 64);
+    expect_int(dial_gui_window_set_root(win, root), 0, "menu_window_set_root");
+
+    // 顶栏菜单：File / Edit / Help（id 100/200/300）
+    var bar: GuiMenu = dial_gui_menu_new();
+    dial_gui_menu_add_item(bar, 100, "File");
+    dial_gui_menu_add_item(bar, 200, "Edit");
+    dial_gui_menu_add_item(bar, 300, "Help");
+    dial_gui_menu_set_tag(bar, 77);
+    expect_int(dial_gui_window_set_menubar(win, bar), 0, "menu_set_menubar");
+    var wp: GuiPainter = dial_gui_window_painter(win);
+    expect_int(dial_gui_set_aa(wp, 1), 0, "menu_aa");
+    expect_int(dial_gui_window_draw(win), 0, "menu_draw_bar");
+    expect_int(dial_gui_window_flush(win), 0, "menu_flush_bar");
+
+    // 点顶栏第 0 项 "File"（y 居中 22px 条内，x 落进 [0,88)）
+    expect_int(dial_gui_window_handle(win, 2, 10, 11, 1), 3, "menu_bar_click_activates");
+    expect_int(dial_gui_widget_signal_pending(root), 1, "menu_bar_pending_1");
+    var mraw: rawptr<byte> = dial_gui_widget_signal_data(root);
+    var ms: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(mraw);
+    expect_int(ms.signal, 64, "menu_bar_sig_selected");
+    expect_int(ms.a, 100, "menu_bar_item_id");
+    expect_int(ms.kind, 8, "menu_bar_kind_menu");
+    expect_int(ms.tag, 77, "menu_bar_tag");
+    expect_int(dial_gui_widget_signal_pop(root), 1, "menu_bar_popped");
+
+    // 弹出菜单：Copy / 分隔符 / Paste（id 1 / 2），锚点 (50,50)
+    var pop: GuiMenu = dial_gui_menu_new();
+    dial_gui_menu_add_item(pop, 1, "Copy");
+    dial_gui_menu_add_sep(pop);
+    dial_gui_menu_add_item(pop, 2, "Paste");
+    expect_int(dial_gui_window_popup_menu(win, pop, 50, 50), 0, "menu_popup_show");
+    expect_int(dial_gui_window_draw(win), 0, "menu_draw_popup");
+    expect_int(dial_gui_window_flush(win), 0, "menu_flush_popup");
+    // 点第 2 行（Paste，idx=2）：row = (100-50)/20 = 2，x 在 [50,156)
+    expect_int(dial_gui_window_handle(win, 2, 90, 100, 1), 3, "menu_popup_click_activates");
+    expect_int(dial_gui_widget_signal_pending(root), 1, "menu_popup_pending_1");
+    check_signal(root, 64, 0, 2, 0, "menu_popup");      // a=2 Paste
+    expect_int(dial_gui_window_close_popup(win), 0, "menu_popup_close");
+
+    // 对话框：标题 Confirm / 消息 Sure? / 按钮 OK+CANCEL，点 OK
+    var dlg: GuiDialog = dial_gui_dialog_new();
+    dial_gui_dialog_set_title(dlg, "Confirm");
+    dial_gui_dialog_set_message(dlg, "Sure?");
+    dial_gui_dialog_set_buttons(dlg, 1 | 2);             // OK + CANCEL
+    expect_int(dial_gui_dialog_show(win, dlg), 0, "menu_dialog_show");
+    expect_int(dial_gui_dialog_open(dlg), 1, "menu_dialog_open_true");
+    expect_int(dial_gui_window_draw(win), 0, "menu_draw_dialog");
+    expect_int(dial_gui_window_flush(win), 0, "menu_flush_dialog");
+    // OK 按钮中心约 (134,175)；点击 → SUBMITTED a=1，对话框关闭
+    expect_int(dial_gui_window_handle(win, 2, 134, 175, 1), 3, "menu_dialog_click_activates");
+    expect_int(dial_gui_dialog_result(dlg), 1, "menu_dialog_result_ok");
+    expect_int(dial_gui_dialog_open(dlg), 0, "menu_dialog_closed_after_click");
+    expect_int(dial_gui_widget_signal_pending(root), 1, "menu_dialog_pending_1");
+    var draw: rawptr<byte> = dial_gui_widget_signal_data(root);
+    var ds: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(draw);
+    expect_int(ds.signal, 32, "menu_dialog_sig_submitted");
+    expect_int(ds.a, 1, "menu_dialog_result_code");
+    expect_int(ds.kind, 9, "menu_dialog_kind_dialog");
+    expect_int(dial_gui_widget_signal_pop(root), 1, "menu_dialog_popped");
+
+    // 控件树仍可用：点按钮 Go（y=42 在垫片下、顶栏外）→ CLICKED
+    expect_int(dial_gui_window_handle(win, 2, 50, 42, 1), 1, "menu_widget_click_activates");
+    expect_int(dial_gui_widget_signal_pending(root), 1, "menu_widget_pending_1");
+    check_signal(root, 1, 7, 1, 0, "menu_widget");      // CLICKED a=1
+
+    dial_gui_window_close(win);
+    dial_gui_app_free(app);
+    print("gui_menu_window = ok");
+    print("gui_menu_done = true");
+    return 0;
+}

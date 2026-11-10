@@ -141,6 +141,10 @@ int64_t dial_gui_app_free(GuiAppImpl *app) {
         w->painter = NULL;
         /* 窗口拥有的控件树必须在 free(win) 之前释放，避免悬垂与二次释放。 */
         if (w->root) gui_widget_dispose_tree(w->root);
+        /* 第 7 层：窗口拥有的覆盖层一并释放（菜单/对话框所有权已转移给窗口）。*/
+        if (w->menubar) gui_menu_free(w->menubar);
+        if (w->popup)   gui_menu_free(w->popup);
+        if (w->dialog)  gui_dialog_free(w->dialog);
         free(w);
         w = next;
     }
@@ -253,6 +257,10 @@ int64_t dial_gui_window_close(GuiWindowImpl *win) {
     gui_painter_dispose(win->painter);
     win->painter = NULL;
     if (win->root) gui_widget_dispose_tree(win->root);
+    /* 第 7 层：窗口拥有的覆盖层一并释放。*/
+    if (win->menubar) gui_menu_free(win->menubar);
+    if (win->popup)   gui_menu_free(win->popup);
+    if (win->dialog)  gui_dialog_free(win->dialog);
     free(win);
     gui_core_ok();
     return 0;
@@ -1092,4 +1100,224 @@ int64_t dial_gui_widget_signal_clear(GuiWidgetImpl *root) {
 }
 int64_t dial_gui_widget_signal_dropped(GuiWidgetImpl *root) {
     return widget_ok(root) ? gui_signal_dropped(root) : -1;
+}
+
+/* ====================================================================== *
+ * 第 7 层：菜单 / 对话框（gui.diali 末段，24 个追加 extern fn）
+ *
+ * 与前六层硬边界一致：句柄校验 → 调 dial_gui_menu.c 的纯 C 逻辑 / 读写
+ * GuiWindowImpl 上的 C 侧纯值。不碰像素细节（交给 menu.c / raster.c）、
+ * 不碰平台 API、绝不反向调用 Dial 函数。旧 130 个包装零改动，
+ * abi = 6 / version = 1.10.0 / 所有既有纯值块布局全部不变。
+ *
+ * 菜单项 / 对话框按钮的选中事件复用 win->root 控件树信号队列
+ * （GUI_SIG_SELECTED / GUI_SIG_SUBMITTED），因此要求窗口先 set_root；
+ * 未 set_root 调用 set_menubar / popup_menu / dialog_show 一律 Fail-Fast -1。
+ * 所有权：传给这三者的菜单/对话框由窗口在关闭时释放，调用方不要再 free。
+ * ====================================================================== */
+
+/* ---- 菜单（纯内存，无窗口）-------------------------------------------- */
+
+GuiMenu *dial_gui_menu_new(void) {
+    gui_core_ok();
+    GuiMenu *m = gui_menu_new();
+    if (!m) gui_core_set_err(GUI_ERR_ALLOC, "GuiMenu 内存分配失败");
+    return m;
+}
+int64_t dial_gui_menu_free(GuiMenu *m) {
+    if (!m) { gui_core_set_err(GUI_ERR_ARG, "空 GuiMenu 句柄"); return -1; }
+    gui_menu_free(m);
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_menu_add_item(GuiMenu *m, int64_t id, DialString label) {
+    if (!m) { gui_core_set_err(GUI_ERR_ARG, "空 GuiMenu 句柄"); return -1; }
+    int64_t n = 0;
+    const char *t = str_data(label, &n);
+    char *dup = (char *)malloc((size_t)n + 1);
+    if (!dup) { gui_core_set_err(GUI_ERR_ALLOC, "菜单项标签内存分配失败"); return -1; }
+    memcpy(dup, t, (size_t)n); dup[n] = '\0';
+    if (gui_menu_add_item(m, id, dup) < 0) {
+        free(dup);
+        gui_core_set_err(GUI_ERR_ALLOC, "GuiMenuItem 内存分配失败");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_menu_add_sep(GuiMenu *m) {
+    if (!m) { gui_core_set_err(GUI_ERR_ARG, "空 GuiMenu 句柄"); return -1; }
+    if (gui_menu_add_sep(m) < 0) { gui_core_set_err(GUI_ERR_ALLOC, "分隔符分配失败"); return -1; }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_menu_set_tag(GuiMenu *m, int64_t tag) {
+    if (!m) { gui_core_set_err(GUI_ERR_ARG, "空 GuiMenu 句柄"); return -1; }
+    gui_menu_set_tag(m, tag);
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_menu_tag(GuiMenu *m) {
+    return m ? gui_menu_tag(m) : -1;
+}
+int64_t dial_gui_menu_count(GuiMenu *m) {
+    return m ? (int64_t)gui_menu_count(m) : -1;
+}
+int64_t dial_gui_menu_item_id(GuiMenu *m, int64_t idx) {
+    if (!m || idx < 0) { gui_core_set_err(GUI_ERR_ARG, "空 GuiMenu / 越界下标"); return -1; }
+    int64_t r = gui_menu_item_id(m, (int)idx);
+    if (r < 0) gui_core_set_err(GUI_ERR_ARG, "菜单项下标越界");
+    return r;
+}
+/* 返回 C 侧借用指针；Dial 侧必须 string_from_cstr 复制成 ARC string。*/
+void *dial_gui_menu_item_label(GuiMenu *m, int64_t idx) {
+    if (!m || idx < 0) return NULL;
+    return (void *)gui_menu_item_label(m, (int)idx);
+}
+int64_t dial_gui_menu_item_set_enabled(GuiMenu *m, int64_t idx, int64_t v) {
+    if (!m || idx < 0) { gui_core_set_err(GUI_ERR_ARG, "空 GuiMenu / 越界下标"); return -1; }
+    if (gui_menu_item_set_enabled(m, (int)idx, (int)v) < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "菜单项下标越界");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+
+/* ---- 顶栏菜单 / 弹出菜单（窗口级，所有权转移给窗口）------------------- */
+
+int64_t dial_gui_window_set_menubar(GuiWindowImpl *win, GuiMenu *m) {
+    if (!win_ok(win)) return -1;
+    if (!win->root) {
+        gui_core_set_err(GUI_ERR_ARG, "菜单需要窗口先 set_root（选中信号进 root 树队列）");
+        return -1;
+    }
+    if (!m) { gui_core_set_err(GUI_ERR_ARG, "空 GuiMenu 句柄"); return -1; }
+    if (win->menubar && win->menubar != m) gui_menu_free(win->menubar);
+    win->menubar = m;
+    win->menubar_h = GUI_MENU_BAR_H;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_window_popup_menu(GuiWindowImpl *win, GuiMenu *m,
+                                   int64_t x, int64_t y) {
+    if (!win_ok(win)) return -1;
+    if (!win->root) {
+        gui_core_set_err(GUI_ERR_ARG, "弹出菜单需要窗口先 set_root（选中信号进 root 树队列）");
+        return -1;
+    }
+    if (!m) { gui_core_set_err(GUI_ERR_ARG, "空 GuiMenu 句柄"); return -1; }
+    if (x < 0 || y < 0 || x > 16384 || y > 16384) {
+        gui_core_set_err(GUI_ERR_ARG, "弹出菜单锚点越界");
+        return -1;
+    }
+    if (win->popup && win->popup != m) gui_menu_free(win->popup);
+    win->popup = m;
+    win->popup_x = (int)x;
+    win->popup_y = (int)y;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_window_close_popup(GuiWindowImpl *win) {
+    if (!win_ok(win)) return -1;
+    if (win->popup) { gui_menu_free(win->popup); win->popup = NULL; }
+    gui_core_ok();
+    return 0;
+}
+
+/* ---- 对话框（窗口级，show 后所有权转移给窗口）------------------------- */
+
+GuiDialog *dial_gui_dialog_new(void) {
+    gui_core_ok();
+    GuiDialog *d = gui_dialog_new();
+    if (!d) gui_core_set_err(GUI_ERR_ALLOC, "GuiDialog 内存分配失败");
+    return d;
+}
+int64_t dial_gui_dialog_free(GuiDialog *d) {
+    if (!d) { gui_core_set_err(GUI_ERR_ARG, "空 GuiDialog 句柄"); return -1; }
+    /* 仅用于未挂窗的对话框；已 show 的对话框由窗口释放，调用方不要再 free。*/
+    gui_dialog_free(d);
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_dialog_set_title(GuiDialog *d, DialString title) {
+    if (!d) { gui_core_set_err(GUI_ERR_ARG, "空 GuiDialog 句柄"); return -1; }
+    int64_t n = 0;
+    const char *t = str_data(title, &n);
+    char *dup = (char *)malloc((size_t)n + 1);
+    if (!dup) { gui_core_set_err(GUI_ERR_ALLOC, "对话框标题内存分配失败"); return -1; }
+    memcpy(dup, t, (size_t)n); dup[n] = '\0';
+    if (gui_dialog_set_title(d, dup) < 0) { free(dup); return -1; }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_dialog_set_message(GuiDialog *d, DialString msg) {
+    if (!d) { gui_core_set_err(GUI_ERR_ARG, "空 GuiDialog 句柄"); return -1; }
+    int64_t n = 0;
+    const char *t = str_data(msg, &n);
+    char *dup = (char *)malloc((size_t)n + 1);
+    if (!dup) { gui_core_set_err(GUI_ERR_ALLOC, "对话框消息内存分配失败"); return -1; }
+    memcpy(dup, t, (size_t)n); dup[n] = '\0';
+    if (gui_dialog_set_message(d, dup) < 0) { free(dup); return -1; }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_dialog_set_buttons(GuiDialog *d, int64_t mask) {
+    if (!d) { gui_core_set_err(GUI_ERR_ARG, "空 GuiDialog 句柄"); return -1; }
+    if (gui_dialog_set_buttons(d, (int)mask) < 0) {
+        gui_core_set_err(GUI_ERR_ARG,
+                         "按钮掩码只接受 GUI_DLG_OK=1 / CANCEL=2 / YES=4 / NO=8 的组合");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_dialog_show(GuiWindowImpl *win, GuiDialog *d) {
+    if (!win_ok(win)) return -1;
+    if (!win->root) {
+        gui_core_set_err(GUI_ERR_ARG, "对话框需要窗口先 set_root（按钮信号进 root 树队列）");
+        return -1;
+    }
+    if (!d) { gui_core_set_err(GUI_ERR_ARG, "空 GuiDialog 句柄"); return -1; }
+    if (win->dialog && win->dialog != d) gui_dialog_free(win->dialog);
+    win->dialog = d;
+    d->open = 1;
+    d->result = GUI_DLG_RESULT_NONE;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_dialog_hide(GuiWindowImpl *win) {
+    if (!win_ok(win)) return -1;
+    if (win->dialog) win->dialog->open = 0;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_dialog_result(GuiDialog *d) {
+    return d ? (int64_t)gui_dialog_result(d) : (int64_t)GUI_DLG_RESULT_NONE;
+}
+int64_t dial_gui_dialog_open(GuiDialog *d) {
+    return d ? (int64_t)gui_dialog_open(d) : 0;
+}
+
+/* ---- 统一绘制 + 事件分发（菜单/对话框优先，否则委派控件树）------------- */
+
+int64_t dial_gui_window_draw(GuiWindowImpl *win) {
+    if (!win_ok(win)) return -1;
+    if (gui_window_draw(win) < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "窗口绘制失败（空画布）");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_window_handle(GuiWindowImpl *win, int64_t kind, int64_t x,
+                               int64_t y, int64_t button) {
+    if (!win_ok(win)) return -1;
+    int r = gui_window_handle(win, (int)kind, (int)x, (int)y, (int)button);
+    if (r < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "window_handle 参数非法（负 button / 无效窗口）");
+        return -1;
+    }
+    gui_core_ok();
+    return (int64_t)r;   /* 3 = 本次菜单/对话框激活 / 1 = 控件激活 / 0 = 无 */
 }

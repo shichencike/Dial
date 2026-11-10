@@ -2108,10 +2108,10 @@ if "$DIALC" build tests/pkg/use_gui_signal.dial -o "${TMP}/use_gui_signal" >"${T
     aa_s_bad=$(grep -c ' = bad' "${TMP}/aa_snodisplay.log" || true)
     if [ "$aa_s_no_exit" -eq 0 ] && [ "$aa_s_bad" -eq 0 ] \
        && grep -qF 'signal_size_72 = ok' "${TMP}/aa_snodisplay.log" \
-       && grep -qF 'signal_kind_count_6 = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_kind_count_7 = ok' "${TMP}/aa_snodisplay.log" \
        && grep -qF 'signal_zero_pending_empty = ok' "${TMP}/aa_snodisplay.log" \
        && grep -qF 'signal_click_code = ok' "${TMP}/aa_snodisplay.log" \
-       && grep -qF 'signal_subscribe_bit6_rejected = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_subscribe_bit8_rejected = ok' "${TMP}/aa_snodisplay.log" \
        && grep -qF 'signal_toggle_sig = ok' "${TMP}/aa_snodisplay.log" \
        && grep -qF 'signal_setvalue_sig = ok' "${TMP}/aa_snodisplay.log" \
        && grep -qF 'signal_text_sig = ok' "${TMP}/aa_snodisplay.log" \
@@ -2127,6 +2127,38 @@ if "$DIALC" build tests/pkg/use_gui_signal.dial -o "${TMP}/use_gui_signal" >"${T
         tail -45 "${TMP}/aa_snodisplay.log"
     fi
 else aabad "use_gui_signal.dial 编译失败"; tail -20 "${TMP}/aa_scomp.log"; fi
+
+# 4g) 第 7 层 demo：菜单 / 对话框——纯内存对象（菜单项增删/排序/越界/禁用 +
+#     tag 键 + 对话框标题/消息/按钮位/结果码）在无 DISPLAY 也能全跑；需窗口的
+#     顶栏/弹窗/对话框覆盖层路径在 env -u DISPLAY 下**明确跳过**（Fail-Fast 口径）。
+#     独立纯内存 + 独立 offscreen 画布，绝不触碰前六个 demo 的 CRC 基准。给 AA 组 +1 aapass。
+if "$DIALC" build tests/pkg/use_gui_menu.dial -o "${TMP}/use_gui_menu" >"${TMP}/aa_mcomp.log" 2>&1; then
+    aapass "use_gui_menu.dial（第 7 层菜单 / 对话框）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_menu" >"${TMP}/aa_mnodisplay.log" 2>&1
+    aa_m_no_exit=$?
+    aa_m_bad=$(grep -c ' = bad' "${TMP}/aa_mnodisplay.log" || true)
+    if [ "$aa_m_no_exit" -eq 0 ] && [ "$aa_m_bad" -eq 0 ] \
+       && grep -qF 'menu_new = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'menu_count_4 = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'menu_item_oob_rejected = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'menu_set_tag = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'menu_tag_readback = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'menu_disable_quit = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'dialog_new = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'dialog_set_buttons_okcancel = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'dialog_bad_buttons_rejected = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'dialog_result_unclicked = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'dialog_open_false = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'menu_free = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'dialog_free = ok' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'gui_menu_window = skipped [' "${TMP}/aa_mnodisplay.log" \
+       && grep -qF 'gui_menu_done = true' "${TMP}/aa_mnodisplay.log"; then
+        aapass "无 DISPLAY：菜单对象增删/排序/越界/禁用/tag + 对话框按钮位/结果码全绿，覆盖层窗口明确跳过"
+    else
+        aabad "第 7 层无 DISPLAY 路径断言失败（exit=$aa_m_no_exit bad=$aa_m_bad）"
+        tail -40 "${TMP}/aa_mnodisplay.log"
+    fi
+else aabad "use_gui_menu.dial 编译失败"; tail -20 "${TMP}/aa_mcomp.log"; fi
 
 # 5) 有 Xvfb 时验证真实窗口（XShm 离屏 + XRender 合成 + 上屏 / 过滤 / 事件循环）；
 #    无 Xvfb 的环境如实打印跳过，绝不把「未验证」写成「通过」。
@@ -2281,6 +2313,47 @@ if command -v xvfb-run >/dev/null 2>&1; then
     fi
 else
     echo "  ⚠️  本环境无 xvfb-run：信号槽层实窗路径未实机验证（如实标注，不伪装通过）"
+fi
+
+# 5g) 第 7 层实窗：顶栏菜单点击 → SELECTED 信号（kind=MENU，a=item id，tag 透传）/
+#     弹出菜单命中项 → SELECTED（a=Paste）/ 外部点击关闭弹窗 / 模态对话框按钮点击
+#     → SUBMITTED 信号（kind=DIALOG，a=结果码）且对话框自动关闭 / 控件树仍可用
+#     （按钮 CLICKED）。覆盖层不进控件树，故控件几何 / 绘制 CRC 逐字节不漂移。
+#     给 AA 组 +1 条 aapass。
+if command -v xvfb-run >/dev/null 2>&1; then
+    if xvfb-run -a -s "-screen 0 1024x768x24 +extension MIT-SHM +extension RENDER" \
+        "${TMP}/use_gui_menu" >"${TMP}/aa_mxvfb.log" 2>&1; then
+        aa_m_bad2=$(grep -c ' = bad' "${TMP}/aa_mxvfb.log" || true)
+        if [ "$aa_m_bad2" -eq 0 ] \
+           && grep -qF 'gui_menu_window = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_window_set_root = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_set_menubar = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_bar_click_activates = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_bar_sig_selected = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_bar_item_id = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_bar_kind_menu = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_bar_tag = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_popup_click_activates = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_popup_a = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_popup_close = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_dialog_click_activates = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_dialog_result_ok = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_dialog_sig_submitted = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_dialog_kind_dialog = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_dialog_result_code = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_widget_click_activates = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_widget_sig = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'menu_widget_tag = ok' "${TMP}/aa_mxvfb.log" \
+           && grep -qF 'gui_menu_done = true' "${TMP}/aa_mxvfb.log"; then
+            aapass "Xvfb 实窗：顶栏/弹窗 SELECTED(a=item id) + 模态对话框 SUBMITTED(a=结果码) 信号 + 控件树 CLICKED 全通过"
+        else
+            aabad "第 7 层 Xvfb 实窗断言失败（bad=$aa_m_bad2）"; tail -30 "${TMP}/aa_mxvfb.log"
+        fi
+    else
+        aabad "Xvfb 下 use_gui_menu 运行失败"; tail -20 "${TMP}/aa_mxvfb.log"
+    fi
+else
+    echo "  ⚠️  本环境无 xvfb-run：第 7 层实窗路径未实机验证（如实标注，不伪装通过）"
 fi
 
 # 6) 清理：卸包，避免污染后续测试与用户环境。

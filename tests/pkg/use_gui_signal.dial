@@ -57,8 +57,8 @@ fn main(): int {
     expect_int(offsetof<GuiWidgetSignal>(x), 56, "signal_off_x");
     expect_int(offsetof<GuiWidgetSignal>(y), 64, "signal_off_y");
 
-    // ---- 1) 常量：6 类信号 / 队列容量 64 ----------------------------------
-    expect_int(dial_gui_signal_count(), 6, "signal_kind_count_6");
+    // ---- 1) 常量：7 类信号 / 队列容量 64 ----------------------------------
+    expect_int(dial_gui_signal_count(), 7, "signal_kind_count_7");
     expect_int(dial_gui_signal_capacity(), 64, "signal_capacity_64");
 
     // ---- 2) 独立纯内存树 + 控件几何（无 DISPLAY 完整可跑）-------------------
@@ -95,7 +95,7 @@ fn main(): int {
 
     // ---- 4) 订阅校验 Fail-Fast：负数 / 越界 / 未知位明确拒绝 ---------------
     expect_int(dial_gui_widget_subscribe(btn, -1), -1, "signal_subscribe_neg_rejected");
-    expect_int(dial_gui_widget_subscribe(btn, 64), -1, "signal_subscribe_bit6_rejected");
+    expect_int(dial_gui_widget_subscribe(btn, 256), -1, "signal_subscribe_bit8_rejected");
     expect_int(dial_gui_widget_subscribe(btn, 128), -1, "signal_subscribe_high_rejected");
     dial_gui_clear_error();
 

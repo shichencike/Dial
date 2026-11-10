@@ -40,7 +40,7 @@
 // +5 LEFT +6 UP +7 RIGHT +8 DOWN +9 HOME +10 END +11 PAGEUP +12 PAGEDOWN
 // +13 DELETE +14 SHIFT +15 CONTROL +16 ALT +17..+28 F1..F12 +63 UNKNOWN。
 //
-// 已实现范围（六层，全部有真实现，不是预留接口；共 130 个 extern fn）：
+// 已实现范围（七层，全部有真实现，不是预留接口；共 154 个 extern fn）：
 //   1) 地基层：Application / Window / Painter / Event / Font（55 个函数）；
 //   2) 控件框架层：GuiWidget 树 + 绝对 / VBox / HBox 布局 + 命中测试 +
 //      主动事件分发（28 个函数）；
@@ -53,12 +53,16 @@
 //   5) 主题层 + 控件扩展：14 个可覆写颜色角色（set / get / reset / count）+
 //      Radio / Slider / ProgressBar 三种成品控件 + value / range / group 纯值
 //      访问器（11 个函数）；
-//   6) 信号槽 / 控件事件订阅：6 类可订阅纯值信号 + 每树环形队列 +
-//      subscribe / pending / data / pop / clear / dropped（10 个函数，见末段）。
-// 六层一律只追加 extern fn：旧 120 个签名一字不动，
+//   6) 信号槽 / 控件事件订阅：7 类可订阅纯值信号 + 每树环形队列 +
+//      subscribe / pending / data / pop / clear / dropped（10 个函数，见末段）；
+//   7) 菜单 / 对话框：顶栏菜单 + 弹出菜单（菜单对象增删 / 命中 / 绘制）+
+//      模态对话框（标题 / 消息 / 按钮 / 选中结果）+ 窗口级统一绘制与事件分发
+//      （24 个函数，见末段）。菜单项 / 对话框按钮的选中事件复用第 6 层信号
+//      队列（GUI_SIG_SELECTED / GUI_SIG_SUBMITTED），kind 标记 MENU / DIALOG。
+// 七层一律只追加 extern fn：旧 130 个签名一字不动，
 // abi = 6 / version = 1.10.0 / GuiWidgetEvent 104 字节布局 /
 // GuiWidgetSignal 72 字节布局全部不变。
-// 外观层 / 输入层 / 主题层 / 信号层仍是**纯 C、零平台符号、零反向回调**：
+// 外观层 / 输入层 / 主题层 / 信号层 / 菜单对话框层仍是**纯 C、零平台符号、零反向回调**：
 // 控件种类 / 文本 / 状态 / 颜色 / 信号全是 C 侧纯值或自有副本，Dial 侧用
 // widget_draw(root, painter) 把整棵树画到任意 GuiPainter（离屏或窗口画布），
 // 不需要也不允许 C 去调 Dial 函数。
@@ -595,7 +599,10 @@ extern fn dial_gui_widget_group(w: GuiWidget): int;
 //   4  TEXT_CHANGED   TEXTBOX 编辑成功 / widget_set_text a=新字节数 b=旧字节数
 //   8  VALUE_CHANGED  SLIDER 设值 / widget_set_value    a=新值   b=旧值
 //   16 FOCUS_CHANGED  焦点迁移（点击 / Tab / set_focus） a=1获得/0失去 b=0
-//   32 SUBMITTED      TEXTBOX Enter 提交              a=1      b=0
+//   32 SUBMITTED      TEXTBOX Enter 提交 / 对话框按钮点击 a=结果码 b=0
+//   64 SELECTED       菜单项被点击选中（第 7 层）       a=item id b=0
+//                     kind = GUI_WIDGET_MENU(8) / DIALOG(9) 区分来源，
+//                     tag / userdata 为菜单 / 对话框的纯值键
 // 每个信号只由状态**真的变化**的那一次交互 / setter 触发一次；同值 setter、
 // 同组 RADIO 被动清除、set_range 的 clamp 都不另发信号（如实标注边界）。
 //
@@ -607,7 +614,7 @@ extern fn dial_gui_widget_group(w: GuiWidget): int;
 // 按需 calloc。满则覆盖最旧、保留最新，并把根上 sig_dropped +1；Dial 侧用
 // signal_dropped 读「漏了多少条」，绝不静默损坏（§20 Fail-Fast 口径）。
 
-/// 信号种类总数（当前 6；新增信号只准末尾追加新位）。
+/// 信号种类总数（当前 7；新增信号只准末尾追加新位）。
 extern fn dial_gui_signal_count(): int;
 
 /// 每树环形队列容量（当前 64）。用于容量 / 溢出断言。
@@ -644,3 +651,119 @@ extern fn dial_gui_widget_signal_clear(root: GuiWidget): int;
 /// 本树累计「队列溢出 / 分配失败」导致的信号丢弃数。Dial 侧可断言它始终
 /// 为 0 来证明消费及时；非零即明确知道漏了信号，绝不静默损坏。
 extern fn dial_gui_widget_signal_dropped(root: GuiWidget): int;
+
+// ---- 第 7 层：菜单 / 对话框（本段 24 个追加 extern fn）------------------
+//
+// 立场：与前六层宪法完全一致 —— 纯 C、零平台符号、**绝不 C → Dial 反向回调**、
+// 只追加 extern fn。菜单 / 对话框是**窗口级覆盖层**（挂在 GuiWindow 上，不进
+// 控件树），因此控件几何 / 绘制 CRC 逐字节不漂移。
+//
+// 关键事实（防漂移）：
+//   - 顶栏菜单占用窗口顶部 **GUI_MENU_BAR_H = 22** 像素；应用自行在控件树顶部
+//     留白（首个子节点给 22px 垫片），覆盖层不再对它做位移。
+//   - 菜单项 / 对话框按钮的选中事件**复用第 6 层信号队列**：菜单项点击发
+//     GUI_SIG_SELECTED（a = item id，kind = 8 MENU，tag/userdata = 菜单的）；
+//     对话框按钮点击发 GUI_SIG_SUBMITTED（a = 结果码 1/2/4/8，kind = 9 DIALOG）。
+//     两者都进 **win->root 的控件树队列**，故要求窗口先 dial_gui_window_set_root。
+//   - 所有权：传给 set_menubar / popup_menu / dialog_show 的菜单 / 对话框由窗口
+//     在关闭时释放，调用方不要再 free；纯内存对象（未挂窗）用 menu_free /
+//     dialog_free 释放，可在无 DISPLAY 环境单元测试。
+//   - 统一入口：dial_gui_window_draw 一次画 控件树 + 顶栏 + 弹窗 + 对话框；
+//     dial_gui_window_handle 菜单/对话框优先，否则委派 widget_handle（旧行为不变）。
+//
+// 对话框按钮位（dial_gui_dialog_set_buttons 的 mask，按位或）：
+//   1 GUI_DLG_OK=1   2 GUI_DLG_CANCEL=2   4 GUI_DLG_YES=4   8 GUI_DLG_NO=8
+// 点击后 dial_gui_dialog_result 返回被点按钮对应的值（1/2/4/8），未点为 -1。
+
+// ---- 菜单（GuiMenu，纯内存对象，无窗口）-------------------------------
+
+/// 菜单类型（不透明）。一个菜单是若干「项（id + label）/ 分隔符」的序列。
+type GuiMenu;
+
+/// 新建空菜单（不含任何项）。失败返回空句柄。用完若未挂窗须 dial_gui_menu_free。
+extern fn dial_gui_menu_new(): GuiMenu;
+
+/// 释放菜单及其所有项（仅用于未挂窗的纯内存菜单）。已 set_menubar / popup_menu
+/// 的菜单所有权归窗口，由窗口关闭时释放，调用方不要再 free。返回 0 / -1。
+extern fn dial_gui_menu_free(m: GuiMenu): int;
+
+/// 追加一个菜单项：id 是纯值键（SELECTED 信号的 a），label 为显示文本。返回 0 / -1。
+extern fn dial_gui_menu_add_item(m: GuiMenu, id: int, label: string): int;
+
+/// 追加一条分隔符（绘制为横线，不可命中、不产生信号）。返回 0 / -1。
+extern fn dial_gui_menu_add_sep(m: GuiMenu): int;
+
+/// 设置菜单的 tag 纯值键（SELECTED 信号会带出）。返回 0 / -1。
+extern fn dial_gui_menu_set_tag(m: GuiMenu, tag: int): int;
+extern fn dial_gui_menu_tag(m: GuiMenu): int;
+
+/// 菜单项总数（含分隔符）。
+extern fn dial_gui_menu_count(m: GuiMenu): int;
+
+/// 按序（0 = 最先 add_item 的项）读第 idx 项的 id；越界返回 -1 并写错误槽。
+extern fn dial_gui_menu_item_id(m: GuiMenu, idx: int): int;
+/// 按序读第 idx 项的 label 的 **C 侧借用指针**（const char*）；所有权在 C，
+/// 必须立刻 string_from_cstr 复制成 ARC string，绝不长期持有。越界返回空串。
+extern fn dial_gui_menu_item_label(m: GuiMenu, idx: int): rawptr<byte>;
+/// 启用 / 禁用第 idx 项（禁用项不可命中、不产生信号）；越界返回 -1。
+extern fn dial_gui_menu_item_set_enabled(m: GuiMenu, idx: int, v: int): int;
+
+// ---- 顶栏菜单 / 弹出菜单（窗口级，所有权转移给窗口）--------------------
+
+/// 把菜单挂为窗口顶栏（左→右排布，恒展开）。要求窗口先 set_root，否则 -1。
+/// 替换旧顶栏（旧顶栏由窗口释放）；空菜单 / 重复挂同一菜单安全。返回 0 / -1。
+extern fn dial_gui_window_set_menubar(win: GuiWindow, m: GuiMenu): int;
+
+/// 在窗口内 (x,y) 处弹出一个菜单（覆盖层，点击项或外部关闭即消失）。
+/// 要求窗口先 set_root，否则 -1。弹出菜单的所有权归窗口：选中 / 外部点击
+/// 关闭后由窗口释放，调用方不要再 free。返回 0 / -1。
+extern fn dial_gui_window_popup_menu(win: GuiWindow, m: GuiMenu, x: int, y: int): int;
+
+/// 关闭当前弹出菜单（若有）。返回 0 成功。
+extern fn dial_gui_window_close_popup(win: GuiWindow): int;
+
+// ---- 对话框（GuiDialog，纯内存对象，无窗口）---------------------------
+
+/// 对话框类型（不透明）。典型的「标题 + 消息 + 按钮」模态覆盖层。
+type GuiDialog;
+
+/// 新建对话框（result 初值 -1，未展开）。失败返回空句柄。用完若未挂窗须 dialog_free。
+extern fn dial_gui_dialog_new(): GuiDialog;
+/// 释放对话框（仅用于未挂窗的纯内存对话框）。已 dialog_show 的对话框所有权归
+/// 窗口，由窗口关闭时释放，调用方不要再 free。返回 0 / -1。
+extern fn dial_gui_dialog_free(d: GuiDialog): int;
+
+/// 设置对话框标题 / 消息文本（C 侧 strdup 自有副本）。返回 0 / -1。
+extern fn dial_gui_dialog_set_title(d: GuiDialog, title: string): int;
+extern fn dial_gui_dialog_set_message(d: GuiDialog, msg: string): int;
+
+/// 设置按钮掩码（GUI_DLG_OK=1 / CANCEL=2 / YES=4 / NO=8 的按位或）；
+/// 未知位 / 负数返回 -1。至少须有一个按钮，否则 show 无意义。
+extern fn dial_gui_dialog_set_buttons(d: GuiDialog, mask: int): int;
+
+/// 把对话框挂到窗口并显示（模态：点击外部忽略，仅按钮可选）。
+/// 要求窗口先 set_root，否则 -1。所有权归窗口；重复 show 同一对话框安全。
+/// 每次 show 把 result 复位为 -1、open 置 1。返回 0 / -1。
+extern fn dial_gui_dialog_show(win: GuiWindow, d: GuiDialog): int;
+
+/// 隐藏当前对话框（open 置 0，对象仍归窗口保留，可再次 show）。返回 0 成功。
+extern fn dial_gui_dialog_hide(win: GuiWindow): int;
+
+/// 读取对话框最近一次点击的结果码（1 OK / 2 CANCEL / 4 YES / 8 NO）；
+/// 尚未点击任何按钮返回 -1。空句柄返回 -1。
+extern fn dial_gui_dialog_result(d: GuiDialog): int;
+
+/// 对话框当前是否展开显示（1 / 0）。空句柄返回 0。
+extern fn dial_gui_dialog_open(d: GuiDialog): int;
+
+// ---- 窗口级统一绘制 + 事件分发 -----------------------------------------
+
+/// 把窗口一次性画全：先背景铺底，再控件树，最后叠加顶栏菜单 + 弹出菜单 +
+/// 对话框覆盖层。须在 set_root 后使用（覆盖层绘制依赖窗口画布）。返回 0 / -1。
+extern fn dial_gui_window_draw(win: GuiWindow): int;
+
+/// 把一条事件喂给窗口：菜单 / 对话框覆盖层优先处理（命中即发信号并 return 3），
+/// 否则委派 dial_gui_widget_handle 走控件树（旧行为不变）。kind 用事件码
+/// （1 PRESS / 2 RELEASE / 3 MOUSE_MOVE），x/y 客户区坐标，button 鼠标键（1 左键）。
+/// 返回 3 = 本次菜单/对话框激活 / 1 = 控件激活 / 0 = 无激活 / -1 = 参数错误。
+extern fn dial_gui_window_handle(win: GuiWindow, kind: int, x: int, y: int, button: int): int;

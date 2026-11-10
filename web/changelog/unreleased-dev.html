@@ -35,10 +35,11 @@
 </ul>
 </div>
 <h2 id="未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</h2>
-<p><strong>主题：手搓 GUI 六层——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
+<p><strong>主题：手搓 GUI 七层——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
 + 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）
 + 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）
++ 菜单 / 对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列）
 + </strong><code>int32</code> / <code>float32</code> 一等类型 + FFI 精确 32 位宽度<strong>（C 侧按 <code>int32_t</code> / <code>float</code>
   读取不再拿到错位垃圾数据，见 README §5.8）；
 并修复 <code>http.dialpkg</code> 三处 Fail-Fast / 目标平台可用性缺陷</strong>（见下文 <code>### Fixed</code>）。
@@ -59,7 +60,9 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
 又给 AA 组增 3 条断言到 <strong>523 ✅</strong>，上一轮信号槽 / 控件事件订阅（6 类可订阅
 纯值信号 + 每树环形队列）再给 AA 组增 3 条断言到 <strong>526 ✅</strong>；本轮补
 <code>int32</code> / <code>float32</code> 一等类型 + FFI 精确 32 位宽度，新增 AB 组 4 条断言与
-B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 / 535 ✅</strong>。
+B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 / 535 ✅</strong>；
+本轮菜单 / 对话框覆盖层（第 7 层，24 个新 <code>extern fn</code>）再给 AA 组增 3 条断言
+（无 DISPLAY / Xvfb 各一 + 编译成功）到 <strong>538 ✅</strong>。
 九者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>
@@ -89,7 +92,7 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
     <strong>A–Z + AA + AB 二十八组 / 535 ✅ / 0 ❌</strong>。</p>
 </li>
 <li>
-<p><strong><code>gui.dialpkg</code>：手搓 GUI 六层</strong>（README §38）：不用 Qt / GTK / SDL，纯 C 自绘。
+<p><strong><code>gui.dialpkg</code>：手搓 GUI 七层</strong>（README §38）：不用 Qt / GTK / SDL，纯 C 自绘。
   ① 地基层（窗 + 事件 + 绘图 + 字体，55 个 <code>extern fn</code>）；
   ② 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发，
   28 个）；③ <strong>成品控件外观层</strong>（Label / Button / CheckBox + 主题表驱动四态 +
@@ -97,11 +100,14 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
   焦点链 / 统一功能键码与修饰键，14 个）；⑤ <strong>主题层 / 控件扩展</strong>（14 个可覆写
   颜色角色 + Radio / Slider / ProgressBar + value / range / group，11 个）；
   ⑥ <strong>信号槽 / 控件事件订阅</strong>（6 类可订阅纯值信号 + 每树环形队列 +
-  subscribe / pending / data / pop / clear / dropped，10 个，见下）。
-  共 <strong>130 个 <code>extern fn</code></strong>。<strong>多行文本（IME） / 撤销重做 / 每控件主题覆写 /
+  subscribe / pending / data / pop / clear / dropped，10 个，见下）；
+  ⑦ <strong>菜单 / 对话框覆盖层</strong>（窗口级顶栏菜单 + 弹出菜单 + 模态对话框，复用第 6 层
+  纯值信号队列：<code>SELECTED</code> / <code>SUBMITTED</code> 两类信号 + <code>dial_gui_menu_*</code> /
+  <code>dial_gui_dialog_*</code> / <code>dial_gui_window_*</code> 统一分发，24 个，见下）。
+  共 <strong>154 个 <code>extern fn</code></strong>。<strong>多行文本（IME） / 撤销重做 / 每控件主题覆写 /
   图片解码 / C→Dial 反向回调仍不进 <code>.diali</code> 契约</strong>——把未实现函数写进契约会让
-  用户 <code>import</code> 后链接失败，那是制造漂移而非预留接口（信号槽已由第 6 层以<strong>纯值
-  信号队列</strong>落地，<strong>不是</strong> C → Dial 回调）。</p>
+  用户 <code>import</code> 后链接失败，那是制造漂移而非预留接口（菜单 / 对话框覆盖层已由第 7 层
+  以<strong>纯值信号队列</strong>落地，<strong>不是</strong> C → Dial 回调）。</p>
 </li>
 <li><strong>自研迷你 2D 光栅化器</strong>：ARGB32 像素缓冲、<code>source-over</code> alpha 混合、
   1/2/4/8 档覆盖面积采样抗锯齿、矩形 / 线 / 圆 / 圆环 / 椭圆 / 梯形 / 位图 /
@@ -237,11 +243,44 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
     覆盖最旧、保留最新并把 <code>sig_dropped</code> 累计 <code>+1</code>，<code>calloc</code> 失败同样计数，Dial 侧
     <code>signal_dropped</code> 可读「漏了多少条」，<strong>绝不静默损坏</strong>；<code>seq</code> 单调、<code>clear</code> 不
     重置序号；<code>signal_data</code> 返回借用指针，空队列 NULL，Dial 须读完再 <code>pop</code>。</li>
-<li><strong>回归</strong>：新增 <code>tests/pkg/use_gui_signal.dial</code>（独立纯内存树，不碰任何 CRC
+<li>
+<p><strong>回归</strong>：新增 <code>tests/pkg/use_gui_signal.dial</code>（独立纯内存树，不碰任何 CRC
     基准），无 DISPLAY 断言 72 字节布局 / 六类信号逐字段（含 x/y）/ 零订阅零开销 /
     订阅 Fail-Fast / <code>seq</code> 单调 / 溢出 <code>dropped</code> 可观测 / 取消订阅 / 纯值块读数不依赖
     控件生命周期；Xvfb 实窗挂树 + 订阅 + 信号读取 + 整树绘制 + <code>flush</code> 上屏。
-    AA 组 +3 条 <code>aapass</code>，全量 <strong>523 ✅ → 526 ✅</strong>。</li>
+    AA 组 +3 条 <code>aapass</code>，全量 <strong>523 ✅ → 526 ✅</strong>。</p>
+</li>
+<li>
+<p><strong>菜单 / 对话框覆盖层（第 7 层，24 个新 <code>extern fn</code>）</strong>：并入同一个 <code>gui</code> 包、
+  只追加、旧 130 个签名<strong>一字不动</strong>，<code>abi = 6</code> / <code>version = 1.10.0</code> 不变。新增
+  <code>src/dial_gui_menu.c</code>（纯 C，零平台符号）。<strong>绝不 C → Dial 反向回调</strong>：菜单项 /
+  对话框按钮选中事件复用第 6 层纯值信号队列（<code>SELECTED</code> / <code>SUBMITTED</code>），所有权归
+  窗口、关闭时一并释放。</p>
+</li>
+<li><strong>窗口级覆盖层，不进控件树</strong>：顶栏菜单（<code>File</code> / <code>Edit</code> / <code>Help</code> 横排，<code>GUI_MENU_BAR_H = 22</code>、
+    应用自行在控件树顶部留 22px 垫片）+ 弹出菜单（锚点定位、分隔符 / 禁用项不可命中）<ul>
+<li>模态对话框（<code>OK</code>=1 / <code>CANCEL</code>=2 / <code>YES</code>=4 / <code>NO</code>=8 按钮位、半透明遮罩 + 居中盒）。
+三者浮在控件树之上、参与绘制但不进布局，故控件几何 / 绘制 CRC 逐字节不漂移。</li>
+</ul>
+</li>
+<li><strong>信号复用、不另起炉灶</strong>：<code>GUI_SIG_SELECTED = (1&lt;&lt;6) = 64</code>（<code>a = item id</code>、
+    <code>kind = GUI_WIDGET_MENU = 8</code>）+ 第 6 层 <code>GUI_SIG_SUBMITTED</code>（<code>a = 结果码</code>、
+    <code>kind = GUI_WIDGET_DIALOG = 9</code>）；信号码总数 <code>GUI_SIG_COUNT</code> 6 → 7、掩码上限放开。
+    <code>gui_signal_emit_ex</code> 是「非控件来源、显式给定 kind/tag/userdata」的发射变体。</li>
+<li><strong>统一分发优先级</strong>（<code>window_handle</code> 一次调用）：对话框（模态，命中按钮 → emit
+    <code>SUBMITTED</code> 且 <code>open=0</code>、返回 3）→ 弹出菜单（命中项 → emit <code>SELECTED</code> 且选中即释放、
+    返回 3）→ 顶栏菜单（命中项 → emit <code>SELECTED</code>、返回 3）→ 控件树（委派 <code>widget_handle</code>、
+    旧行为不变，返回 1/0/-1）。<code>set_root</code> 未挂树时 <code>window_set_menubar</code> / <code>window_popup_menu</code>
+    / <code>dialog_show</code> 一律返回 <code>-1</code> 写错误槽（Fail-Fast）。<strong>注意</strong>：覆盖层信号走 anchor
+    <code>win-&gt;root</code>，故须订阅 <code>root</code> 到 <code>32|64</code> 位、零订阅零开销守卫才会放行。</li>
+<li><strong>纯内存对象可单测</strong>：未挂窗的 <code>dial_gui_menu_new</code> / <code>dial_gui_dialog_new</code> 直接用
+    <code>gui_menu_free</code> / <code>gui_dialog_free</code> 释放，无 DISPLAY 也能验收；菜单项头插排序 / 越界
+    返回 <code>-1</code> / 禁用 / <code>tag</code> 纯值键、对话框标题 / 消息 / 按钮位 / 结果码全部可断言。</li>
+<li><strong>回归</strong>：新增 <code>tests/pkg/use_gui_menu.dial</code>，段 A/B 无 DISPLAY 断言菜单对象与对话框
+    对象逻辑，段 C 在 Xvfb 实窗验顶栏点击 → <code>SELECTED(a=item id, kind=MENU, tag 透传)</code>、
+    弹窗点击命中 <code>Paste</code>、模态对话框点 <code>OK</code> → <code>SUBMITTED(a=1, kind=DIALOG)</code> 且自动关闭、
+    控件树按钮仍收得到 <code>CLICKED</code>。AA 组 +3 条 <code>aapass</code>（无 DISPLAY / Xvfb 各一 + 编译成功），
+    全量 <strong>535 ✅ → 538 ✅</strong>。</li>
 </ul>
 <h3 id="fixed">Fixed</h3>
 <ul>
@@ -280,7 +319,8 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
   <code>use_http2.dial</code> / <code>use_https.dial</code>（Termux 模式）里的断言。全量回归由
   <strong>513 ✅ 增至 517 ✅</strong>（上一轮时点），组数仍为 A–Z + AA 二十七组；
   上一轮 GUI 输入层由 <strong>517 ✅ 增至 520 ✅</strong>、主题层 / 控件扩展再由
-  <strong>520 ✅ 增至 523 ✅</strong>；<strong>本轮</strong>信号槽 / 控件事件订阅由 <strong>523 ✅ 增至 526 ✅</strong>。</li>
+  <strong>520 ✅ 增至 523 ✅</strong>；<strong>本轮</strong>信号槽 / 控件事件订阅由 <strong>523 ✅ 增至 526 ✅</strong>，
+  菜单 / 对话框覆盖层（第 7 层）再由 <strong>526 ✅ 增至 538 ✅</strong>（与 <code>[未发布]</code> 段口径一致）。</li>
 <li><code>tests/run_tests.sh</code> 的 <strong>AA 组</strong>（<code>gui.dialpkg</code> 端到端）：三平台构建、零警告检查、
   <code>nm -u</code> 符号检查、<code>pack</code> / <code>install</code>、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
   （<code>window = ok</code> / <code>window_backend = x11/xshm/xrender</code> / <code>window_flush = ok</code> /
@@ -290,9 +330,11 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
   无 DISPLAY 四态与 CRC / Xvfb 整树上屏），输入层又增 3 条
   （<code>use_gui_input.dial</code> 编译 / 无 DISPLAY 编辑·焦点·CRC / Xvfb + XTest 实机注入），
   主题层那轮再增 3 条（<code>use_gui_theme.dial</code> 编译 / 无 DISPLAY 主题·控件·值域 /
-  Xvfb 八种控件整树上屏），本轮信号层又增 3 条（<code>use_gui_signal.dial</code> 编译 /
+  Xvfb 八种控件整树上屏），信号层又增 3 条（<code>use_gui_signal.dial</code> 编译 /
   无 DISPLAY 纯值信号·订阅 Fail-Fast·溢出可观测 / Xvfb 挂树 + 信号读取 + 上屏），
-  <code>aapass</code> 由 8 → 11 → 14 → 17 → 20 → <strong>23 条</strong>。</li>
+  第 7 层再增 3 条（<code>use_gui_menu.dial</code> 编译 / 无 DISPLAY 菜单·对话框对象逻辑 /
+  Xvfb 顶栏·弹窗 SELECTED + 模态对话框 SUBMITTED + 控件树 CLICKED），
+  <code>aapass</code> 由 8 → 11 → 14 → 17 → 20 → 23 → <strong>26 条</strong>。</li>
 <li>新增 <code>tests/pkg/use_gui_widget.dial</code>：与 <code>use_gui.dial</code> 完全独立、<strong>不创建
   <code>GuiPainter</code></strong>，因此不触碰 <code>crc_offscreen = 4007435570</code> 像素回归基准；
   覆盖 <code>packed extern struct</code> 布局 / <code>string_from_cstr</code> 的 ARC 复制 /
@@ -310,13 +352,16 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
   鼠标点击 / 键盘 <code>hi</code> / Tab / Shift+Tab，实机断言落字 / 焦点环 / <code>mods</code> 含 SHIFT /
   按钮激活 / <code>flush</code>。无 <code>xdotool</code> 时如实打印 <code>skipped</code>，不伪装通过。</li>
 <li><code>packages/gui/</code> 新增 <code>src/dial_gui_widget.c</code>（框架层）、<code>src/dial_gui_look.c</code>
-  （外观层）、<code>src/dial_gui_input.c</code>（输入层）、<code>src/dial_gui_theme.c</code>（主题层）与
-  <code>src/dial_gui_signal.c</code>（信号层），<code>build.sh</code> 三平台 <code>SRCS</code> 统一追加五者；
-  <code>gui.diali</code> 五轮共追加 <strong>75 个单行 <code>extern fn</code></strong>（28 + 12 + 14 + 11 + 10）与
-  <code>GuiWidget</code> 句柄并改写六层范围声明（合计 130 个）；<code>dial_gui.h</code> 增加 104 字节
+  （外观层）、<code>src/dial_gui_input.c</code>（输入层）、<code>src/dial_gui_theme.c</code>（主题层）、
+  <code>src/dial_gui_signal.c</code>（信号层）与 <code>src/dial_gui_menu.c</code>（第 7 层菜单 / 对话框覆盖层），
+  <code>build.sh</code> 三平台 <code>SRCS</code> 统一追加六者；<code>gui.diali</code> 六轮共追加 <strong>99 个单行 <code>extern fn</code></strong>
+  （28 + 12 + 14 + 11 + 10 + 24）与 <code>GuiWidget</code> / <code>GuiMenu</code> / <code>GuiDialog</code> 句柄并改写
+  七层范围声明（合计 154 个）；<code>dial_gui.h</code> 增加 104 字节
   packed 事件块 / 72 字节 packed 信号块与各自 <code>_Static_assert</code>、全局根链表防悬垂、
   控件外观层 / 输入层 / 主题层 / 信号层字段（<code>value</code> / <code>vmin</code> / <code>vmax</code> / <code>group</code> /
-  <code>sig_mask</code> / <code>sig_dropped</code> / <code>sigq</code>）、14 个主题角色与默认值宏、6 个信号码、
+  <code>sig_mask</code> / <code>sig_dropped</code> / <code>sigq</code>）、14 个主题角色与默认值宏、7 个信号码（第 7 层
+  新增 <code>GUI_SIG_SELECTED = (1&lt;&lt;6)</code>、总数 6 → 7）、菜单 / 对话框覆盖层字段（顶栏 22px、
+  <code>menubar</code> / <code>popup</code> / <code>dialog</code> 所有权归窗口）、统一的 <code>gui_signal_emit_ex</code> 发射变体；
   统一键码常量；<code>dial_gui_core.c</code> 共追加 35 个 FFI 包装（14 输入 + 11 主题 +
   10 信号，含 <code>dial_gui_event_mods</code>）与 <code>gui_core_emit</code> 的 QUIT 清零 <code>ev_mods</code>；
   两后端 <code>pump</code> 把 <code>X11 KeySym</code> / <code>Win32 VK</code> 映射到同一套键码并写入修饰键状态。</li>

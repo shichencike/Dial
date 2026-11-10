@@ -88,6 +88,43 @@ void gui_signal_emit(GuiWidgetImpl *w, int64_t signal, int64_t a, int64_t b,
     q->count++;
 }
 
+/*
+ * 第 7 层扩展：与 gui_signal_emit 同语义，但 kind / tag / userdata 由调用方
+ * 显式给出——用于菜单 / 对话框这类「非控件来源」的选中事件（它们没有
+ * GuiWidgetImpl，只有纯值键 tag / userdata）。anchor 只用于：① 查订阅掩码
+ * （零订阅=零开销，与控件信号同口径）；② 上溯到 root 队列。anchor 一般为
+ * win->root 控件树根。
+ */
+void gui_signal_emit_ex(GuiWidgetImpl *anchor, int64_t signal, int64_t a, int64_t b,
+                        int x, int y, int kind, int64_t tag, int64_t userdata) {
+    if (!anchor) return;
+    if (!(anchor->sig_mask & signal)) return;   /* 零订阅 = 零开销 */
+
+    GuiWidgetImpl *root = sig_root(anchor);
+    GuiSignalQueue *q = sig_queue(root, 1);
+    if (!q) {
+        if (root) root->sig_dropped++;
+        return;
+    }
+    if (q->count == GUI_SIGNAL_CAP) {
+        q->head = (q->head + 1) % GUI_SIGNAL_CAP;
+        q->count--;
+        root->sig_dropped++;
+    }
+    int idx = (q->head + q->count) % GUI_SIGNAL_CAP;
+    GuiWidgetSignal *s = &q->slots[idx];
+    s->seq      = q->seq++;
+    s->signal   = signal;
+    s->tag      = tag;
+    s->userdata = userdata;
+    s->kind     = kind;
+    s->a        = a;
+    s->b        = b;
+    s->x        = x;
+    s->y        = y;
+    q->count++;
+}
+
 int64_t gui_signal_pending(GuiWidgetImpl *root) {
     GuiSignalQueue *q = sig_queue(sig_root(root), 0);
     return q ? (int64_t)q->count : 0;

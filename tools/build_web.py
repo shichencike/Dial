@@ -355,7 +355,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
 # ---------------------------------------------------------------------------
 
 TOPICS = {
-    "unreleased-dev": "手搓 GUI 六层（TextBox 输入层 / 统一键码 / XTest 实机注入 / 可覆写主题色 + Radio·Slider·Progress / 信号槽·控件事件订阅纯值队列）+ int32/float32 一等类型与 FFI 精确 32 位宽度 + http.dialpkg 三处 Fail-Fast/可用性修复（开发中增量，未升版本号 / 未发布）",
+    "unreleased-dev": "手搓 GUI 七层（TextBox 输入层 / 统一键码 / XTest 实机注入 / 可覆写主题色 + Radio·Slider·Progress / 信号槽·控件事件订阅纯值队列 / 菜单·对话框覆盖层复用纯值信号队列）+ int32/float32 一等类型与 FFI 精确 32 位宽度 + http.dialpkg 三处 Fail-Fast/可用性修复（开发中增量，未升版本号 / 未发布）",
     "v1.10": "底层原语补齐（@asm / simd）+ 首个发布标签 v1.1",
     "v1.04": "FFI 成为语言一等公民",
     "v1-0-milestone": "v1.0 里程碑达成的分版记录（v1.00 ~ v1.03）",

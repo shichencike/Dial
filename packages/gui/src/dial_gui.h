@@ -97,6 +97,10 @@ typedef struct GuiFontImpl    GuiFontImpl;
 typedef struct GuiWidgetImpl  GuiWidgetImpl;
 /* 第 6 层：环形队列完整定义私有在 dial_gui_signal.c，头里只留前向声明。 */
 typedef struct GuiSignalQueue GuiSignalQueue;
+/* 第 7 层：菜单 / 对话框覆盖层（纯 C，三平台共用，无平台符号）。 */
+typedef struct GuiMenuItem    GuiMenuItem;
+typedef struct GuiMenu        GuiMenu;
+typedef struct GuiDialog      GuiDialog;
 
 typedef struct GuiBackend GuiBackend;
 
@@ -135,9 +139,10 @@ _Static_assert(offsetof(GuiWidgetEvent, widget_id) == 96, "widget_id 偏移须�
 #define GUI_SIG_TEXT_CHANGED   (1LL << 2)   /* 4   TEXTBOX 文本被编辑 / set_text */
 #define GUI_SIG_VALUE_CHANGED  (1LL << 3)   /* 8   SLIDER 设值 / set_value */
 #define GUI_SIG_FOCUS_CHANGED  (1LL << 4)   /* 16  焦点变化 / 点击聚焦 / Tab */
-#define GUI_SIG_SUBMITTED      (1LL << 5)   /* 32  TEXTBOX Enter 提交 */
-#define GUI_SIG_COUNT          6
-#define GUI_SIG_ALL            ((1LL << GUI_SIG_COUNT) - 1)   /* 63 */
+#define GUI_SIG_SUBMITTED      (1LL << 5)   /* 32  TEXTBOX Enter 提交 / 对话框按钮点击（a=结果码）*/
+#define GUI_SIG_SELECTED       (1LL << 6)   /* 64  菜单项被点击选中（a = item id，tag/userdata = 菜单）*/
+#define GUI_SIG_COUNT          7
+#define GUI_SIG_ALL            ((1LL << GUI_SIG_COUNT) - 1)   /* 127 */
 #define GUI_SIGNAL_CAP         64           /* 每树环形队列容量 */
 
 /*
@@ -197,6 +202,14 @@ struct GuiWindowImpl {
     char           filter[16]; /* XRender filter：fast/good/best/nearest */
     GuiWidgetImpl *root;       /* 挂载的控件树（可空；窗口拥有它） */
     GuiWindowImpl *next;       /* App 的窗口链表 */
+    /* ---- 第 7 层：菜单 / 对话框覆盖层（窗口拥有，free 时一并释放）-------- *
+     * 覆盖层不参与控件树布局，因此控件几何 / painter CRC 逐字节不漂移；
+     * 菜单项 / 对话框按钮的选中事件复用 root 树的信号队列（须先 set_root）。 */
+    GuiMenu      *menubar;     /* 顶栏菜单（左→右排布，恒展开）*/
+    GuiMenu      *popup;       /* 当前展开的弹出菜单（可空；点击外部关闭）*/
+    int           popup_x, popup_y;   /* 弹出菜单锚点（窗口内坐标）*/
+    int           menubar_h;   /* 顶栏高度（固定，默认 22）*/
+    GuiDialog    *dialog;      /* 当前模态对话框覆盖层（可空）*/
 };
 
 struct GuiAppImpl {
@@ -240,6 +253,19 @@ struct GuiFontImpl {
 #define GUI_WIDGET_RADIO     5   /* 单选按钮：圆圈 + 选中点 + 右侧文本，同组互斥 */
 #define GUI_WIDGET_SLIDER    6   /* 滑块：轨道 + 已填充 + 滑块，RELEASE 按 x 设值 */
 #define GUI_WIDGET_PROGRESS  7   /* 进度条：轨道 + 填充，只读不参与激活 */
+/* 第 7 层信号 kind 标记（非真实控件，仅用于 GuiWidgetSignal.kind 区分来源）：
+ * 菜单项选中 = MENU、对话框按钮点击 = DIALOG。set_kind 仍只校验 0..7。 */
+#define GUI_WIDGET_MENU      8
+#define GUI_WIDGET_DIALOG    9
+
+/* ---- 对话框按钮位（dial_gui_dialog_set_buttons 的 mask）--------------- *
+ * 单个对话框可同时挂多个按钮（按位或）；点击后 dial_gui_dialog_result 返回
+ * 被点按钮对应的值（1/2/4/8）。 */
+#define GUI_DLG_OK     1
+#define GUI_DLG_CANCEL 2
+#define GUI_DLG_YES    4
+#define GUI_DLG_NO     8
+#define GUI_DLG_RESULT_NONE  (-1)   /* 尚未点击任何按钮 */
 
 /* TextBox 文本按 UTF-8 字节数计上限；0 表示不限（仍受本上限兜底）。*/
 #define GUI_TEXT_MAX_LEN    4096
@@ -455,10 +481,78 @@ int  gui_widget_slider_set_from_x(GuiWidgetImpl *hit, int local_x);
 /* 埋点：w 产生 signal 变化时调用；未订阅直接返回（零订阅=零开销）。 */
 void           gui_signal_emit(GuiWidgetImpl *w, int64_t signal,
                                int64_t a, int64_t b, int x, int y);
+/* 第 7 层：非控件来源（菜单 / 对话框）的选中事件，kind/tag/userdata 显式给定。*/
+void           gui_signal_emit_ex(GuiWidgetImpl *anchor, int64_t signal,
+                                  int64_t a, int64_t b, int x, int y,
+                                  int kind, int64_t tag, int64_t userdata);
 int64_t        gui_signal_pending(GuiWidgetImpl *root);   /* 待取条数 */
 GuiWidgetSignal *gui_signal_peek(GuiWidgetImpl *root);    /* 队首块地址 / NULL */
 int            gui_signal_pop(GuiWidgetImpl *root);       /* 1 弹出 / 0 空 */
 int            gui_signal_clear(GuiWidgetImpl *root);     /* 清空，seq 不重置 */
 int64_t        gui_signal_dropped(GuiWidgetImpl *root);   /* 累计丢弃数 */
+
+/* ---- 第 7 层：菜单 / 对话框（dial_gui_menu.c，纯 C，三平台共用，无平台符号）*
+ * 硬边界与前六层一致：只 include dial_gui.h + libc，绝不碰 X11 / Win32、
+ * 绝不保存函数指针、绝不 C → Dial 反向回调。菜单项 / 对话框按钮的选中事件
+ * 复用 root 控件树的信号队列（GuiWidgetSignal），kind 标记 MENU / DIALOG。
+ * 覆盖层不参与控件树布局，因此控件几何 / painter CRC 逐字节不漂移。 */
+#define GUI_MENU_BAR_H  22   /* 顶栏 / 弹出菜单行高（像素）*/
+
+struct GuiMenuItem {
+    int64_t id;            /* 菜单项 id（纯值键；SELECTED 信号的 a）*/
+    char *label;          /* C 侧 strdup 自有副本（NULL 表示分隔符）*/
+    int  sep;             /* 1 = 分隔符（绘制横线，不可命中）*/
+    int  disabled;
+    GuiMenuItem *next;
+};
+
+struct GuiMenu {
+    GuiMenuItem *first;
+    int  count;           /* 项数（含分隔符）*/
+    int64_t tag;
+    int64_t userdata;
+    int  hover;           /* 悬停项下标（-1 无，仅绘制用）*/
+};
+
+struct GuiDialog {
+    char *title;
+    char *message;
+    int  buttons;         /* GUI_DLG_* 位掩码 */
+    int  result;          /* 最近结果码；GUI_DLG_RESULT_NONE = 未点 */
+    int  open;            /* 是否展开显示（窗口级覆盖）*/
+    int  w, h;            /* 对话框尺寸（绘制时按文本算，缓存）*/
+    int64_t tag, userdata;
+};
+
+/* 菜单项增删 / 访问（纯内存，无窗口；可在无 DISPLAY 环境单元测试）*/
+GuiMenu  *gui_menu_new(void);
+void      gui_menu_free(GuiMenu *m);
+int       gui_menu_add_item(GuiMenu *m, int64_t id, const char *label);
+int       gui_menu_add_sep(GuiMenu *m);
+int       gui_menu_set_tag(GuiMenu *m, int64_t tag);
+int64_t   gui_menu_tag(GuiMenu *m);
+int       gui_menu_count(GuiMenu *m);
+int64_t   gui_menu_item_id(GuiMenu *m, int idx);
+const char *gui_menu_item_label(GuiMenu *m, int idx);   /* 借用指针 */
+int       gui_menu_item_set_enabled(GuiMenu *m, int idx, int v);
+
+/* 对话框（纯内存，无窗口）*/
+GuiDialog *gui_dialog_new(void);
+void       gui_dialog_free(GuiDialog *d);
+int        gui_dialog_set_title(GuiDialog *d, const char *title);
+int        gui_dialog_set_message(GuiDialog *d, const char *msg);
+int        gui_dialog_set_buttons(GuiDialog *d, int mask);
+int        gui_dialog_result(GuiDialog *d);
+int        gui_dialog_open(GuiDialog *d);
+
+/* 窗口级覆盖层：统一绘制 + 事件分发（菜单 / 对话框优先，否则委派控件树）。
+ * 仅在 win->root 已 set_root 时才产生信号（选中进 root 树队列）。*/
+int  gui_window_draw(GuiWindowImpl *win);
+int  gui_window_handle(GuiWindowImpl *win, int kind, int x, int y, int button);
+
+/* 覆盖层几何 / 命中 / 绘制（dial_gui_menu.c 内部，供 gui_window_* 调用）*/
+void gui_menu_draw_bar(GuiPainterImpl *p, GuiMenu *m, int w);
+void gui_menu_draw_popup(GuiPainterImpl *p, GuiMenu *m, int px, int py);
+void gui_dialog_draw(GuiPainterImpl *p, GuiDialog *d, int win_w, int win_h);
 
 #endif /* DIAL_GUI_H */
