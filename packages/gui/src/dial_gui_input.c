@@ -4,7 +4,7 @@
  * 职责：TextBox 单行编辑（可打印字符 / 退格 / 删除 / 光标 / 选区 / max_len）
  *      + 焦点链（Tab / Shift+Tab 环形切换 / 点击聚焦 / 显式 set_focus）。
  *
- * 硬边界（与内存宪法一致，五层一律适用）：
+ * 硬边界（与内存宪法一致，各层一律适用）：
  *   - **只 include dial_gui.h + libc**，绝不碰 X11 / Win32 任何 API；三份 .a
  *     的 `nm -u` 不会因本层新增任何平台符号。
  *   - **绝不 C → Dial 反向回调**：焦点是根上的 C 侧裸指针、文本是控件自己的
@@ -101,6 +101,19 @@ static int replace_range(GuiWidgetImpl *w, int a, int b,
 
 /* ---- 树与焦点 ---------------------------------------------------------- */
 
+/*
+ * 第 6 层信号槽：焦点变化发纯值信号。对「失去焦点」的旧控件发 a=0、
+ * 对「获得焦点」的新控件发 a=1（b 恒 0）。每个 emit 内部都先查各自控件的
+ * 订阅掩码，未订阅直接返回——零订阅=零开销。摘除子树（widget_remove）时
+ * 的焦点清理不走本函数，不发信号（被摘控件即将释放），如实标注。
+ */
+static void signal_focus_change(GuiWidgetImpl *old, GuiWidgetImpl *nw) {
+    if (old && old != nw)
+        gui_signal_emit(old, GUI_SIG_FOCUS_CHANGED, 0, 0, 0, 0);
+    if (nw && nw != old)
+        gui_signal_emit(nw, GUI_SIG_FOCUS_CHANGED, 1, 0, 0, 0);
+}
+
 static int in_tree(const GuiWidgetImpl *n, const GuiWidgetImpl *w) {
     if (!n) return 0;
     if (n == w) return 1;
@@ -147,9 +160,11 @@ int gui_widget_set_focus(GuiWidgetImpl *root, GuiWidgetImpl *w) {
     GuiWidgetImpl *r = tree_root(root);
     if (!r) return -1;
     if (w && (!in_tree(r, w) || !focusable(w))) return -1;
+    GuiWidgetImpl *old = gui_widget_focus(r);
     clear_focused(r);
     r->focus = w;
     if (w) w->focused = 1;
+    signal_focus_change(old, w);      /* 焦点迁移：旧控件 a=0 / 新控件 a=1 */
     return 1;
 }
 
@@ -159,8 +174,10 @@ GuiWidgetImpl *gui_widget_focus_next(GuiWidgetImpl *root, int backward) {
     if (!r) return NULL;
     int n = count_focusable(r);
     if (n <= 0) {
+        GuiWidgetImpl *old0 = gui_widget_focus(r);
         clear_focused(r);
         r->focus = NULL;
+        signal_focus_change(old0, NULL);
         return NULL;
     }
     GuiWidgetImpl **arr = (GuiWidgetImpl **)malloc((size_t)n * sizeof(*arr));
@@ -168,7 +185,7 @@ GuiWidgetImpl *gui_widget_focus_next(GuiWidgetImpl *root, int backward) {
     int cnt = 0;
     fill_focusable(r, arr, &cnt);
     int idx = -1;
-    GuiWidgetImpl *cur = gui_widget_focus(r);
+    GuiWidgetImpl *cur = gui_widget_focus(r);      /* 旧焦点 */
     for (int i = 0; i < cnt; i++)
         if (arr[i] == cur) { idx = i; break; }
     int next;
@@ -180,6 +197,7 @@ GuiWidgetImpl *gui_widget_focus_next(GuiWidgetImpl *root, int backward) {
     clear_focused(r);
     r->focus = target;
     target->focused = 1;
+    signal_focus_change(cur, target);  /* Tab / Shift+Tab 焦点环切换 */
     return target;
 }
 
@@ -229,7 +247,10 @@ int gui_widget_key(GuiWidgetImpl *root, int kind, int key, int mods) {
     GuiWidgetImpl *w = gui_widget_focus(r);
     if (!w || w->kind != GUI_WIDGET_TEXTBOX || w->disabled) return 0;
 
-    if (key == GUI_KEY_ENTER)  return 3;        /* 提交信号，不改文本 */
+    if (key == GUI_KEY_ENTER) {                 /* 提交信号，不改文本 */
+        gui_signal_emit(w, GUI_SIG_SUBMITTED, 1, 0, 0, 0);
+        return 3;
+    }
     if (key == GUI_KEY_ESCAPE) {                /* 清选区 */
         int c = align_pos(w->text ? w->text : "", text_len(w), w->cursor);
         w->cursor = c; w->sel_anchor = c;
@@ -260,9 +281,12 @@ int gui_widget_key(GuiWidgetImpl *root, int kind, int key, int mods) {
             else                          b = next_pos(s, len, b);
         }
         if (a == b) return 0;
+        int old_len = text_len(w);
         int rc = replace_range(w, a, b, NULL, 0);
         if (rc <= 0) return rc;                 /* 0 被上限拒绝 / -1 分配失败 */
         w->cursor = a; w->sel_anchor = a;
+        /* 删改文本成功：发 TEXT_CHANGED（a=新字节数 / b=旧字节数）。 */
+        gui_signal_emit(w, GUI_SIG_TEXT_CHANGED, text_len(w), old_len, 0, 0);
         return 1;
     }
 
@@ -272,8 +296,11 @@ int gui_widget_key(GuiWidgetImpl *root, int kind, int key, int mods) {
     char buf[4];
     int n = utf8_encode(key, buf);
     if (n <= 0) return 0;
+    int old_len = text_len(w);
     int rc = replace_range(w, a, b, buf, n);
     if (rc <= 0) return rc;
     w->cursor = a + n; w->sel_anchor = w->cursor;   /* 插入替换选区并清选区 */
+    /* 插入文本成功：发 TEXT_CHANGED（a=新字节数 / b=旧字节数）。 */
+    gui_signal_emit(w, GUI_SIG_TEXT_CHANGED, text_len(w), old_len, 0, 0);
     return 1;
 }

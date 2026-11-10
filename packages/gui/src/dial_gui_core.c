@@ -733,10 +733,16 @@ int64_t dial_gui_widget_set_text(GuiWidgetImpl *w, DialString text) {
     if (!widget_ok(w)) return -1;
     char *p = str_dup(text);
     if (!p) { gui_core_set_err(GUI_ERR_ALLOC, "控件文本内存分配失败"); return -1; }
+    const char *old = w->text ? w->text : "";
+    int old_len = (int)strlen(old);
+    int changed = (strcmp(old, p) != 0);
     free(w->text);
     w->text = p;
     /* 显式换文本后旧光标 / 选区一律归零，绝不越界（键盘输入另走 input.c）。*/
     w->cursor = 0; w->sel_anchor = 0;
+    /* 第 6 层：文本真变化才发一次 TEXT_CHANGED（未订阅=零开销）。*/
+    if (changed)
+        gui_signal_emit(w, GUI_SIG_TEXT_CHANGED, (int)strlen(p), old_len, 0, 0);
     gui_core_ok();
     return 0;
 }
@@ -750,7 +756,11 @@ void *dial_gui_widget_text(GuiWidgetImpl *w) {
 
 int64_t dial_gui_widget_set_checked(GuiWidgetImpl *w, int64_t v) {
     if (!widget_ok(w)) return -1;
+    int oldc = w->checked;
     w->checked = v ? 1 : 0;
+    /* 第 6 层：勾选态真变化才发一次 TOGGLED（a=新 / b=旧）。*/
+    if (oldc != w->checked)
+        gui_signal_emit(w, GUI_SIG_TOGGLED, w->checked, oldc, 0, 0);
     gui_core_ok();
     return 0;
 }
@@ -963,7 +973,11 @@ int64_t dial_gui_widget_set_value(GuiWidgetImpl *w, int64_t v) {
                          "控件值越出 [vmin, vmax]，明确拒绝而非静默 clamp");
         return -1;
     }
+    int oldv = w->value;
     w->value = (int)v;
+    /* 第 6 层：值真变化才发一次 VALUE_CHANGED（a=新 / b=旧）。*/
+    if (oldv != w->value)
+        gui_signal_emit(w, GUI_SIG_VALUE_CHANGED, w->value, oldv, 0, 0);
     gui_core_ok();
     return 0;
 }
@@ -1000,4 +1014,82 @@ int64_t dial_gui_widget_set_group(GuiWidgetImpl *w, int64_t g) {
 }
 int64_t dial_gui_widget_group(GuiWidgetImpl *w) {
     return widget_ok(w) ? w->group : -1;
+}
+
+/* ====================================================================== *
+ * 第 6 层：信号槽 / 控件事件订阅（gui.diali 末段，10 个追加 extern fn）
+ *
+ * 与前五层硬边界一致：句柄校验 → 读写 GuiWidgetImpl 上的 C 侧纯值 / 调
+ * dial_gui_signal.c 的纯 C 队列。不碰像素细节、不碰平台 API、绝不反向调用
+ * Dial 函数。旧 120 个包装零改动，abi = 6 / version = 1.10.0 /
+ * GuiWidgetEvent 104 字节布局 / GuiWidgetSignal 72 字节布局全部不变。
+ *
+ * 信号块 100% 纯值、零指针零句柄：控件被摘除 / 树释放后，已入队信号仍是
+ * 自洽整数快照，读数绝不悬垂。订阅掩码 0（默认）= 不订阅 = 零开销，
+ * 因此不调用 subscribe 的旧程序行为与 CRC 逐字节不漂移。
+ * ====================================================================== */
+
+/* ---- 常量 -------------------------------------------------------------- */
+
+int64_t dial_gui_signal_count(void) {
+    gui_core_ok();
+    return (int64_t)GUI_SIG_COUNT;
+}
+int64_t dial_gui_signal_capacity(void) {
+    gui_core_ok();
+    return (int64_t)GUI_SIGNAL_CAP;
+}
+
+/* ---- 订阅掩码（每控件一份 int64 纯值）---------------------------------- */
+
+/* 覆盖式设置订阅掩码；0 = 取消全部订阅；越界 / 未知位明确拒绝（Fail-Fast）。*/
+int64_t dial_gui_widget_subscribe(GuiWidgetImpl *w, int64_t mask) {
+    if (!widget_ok(w)) return -1;
+    if (mask < 0 || (mask & ~GUI_SIG_ALL) != 0) {
+        gui_core_set_err(GUI_ERR_ARG,
+                         "订阅掩码非法：只接受 0 或 GUI_SIG_* 位组合（0..63）");
+        return -1;
+    }
+    w->sig_mask = mask;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_subscribed(GuiWidgetImpl *w) {
+    return widget_ok(w) ? w->sig_mask : -1;
+}
+int64_t dial_gui_widget_unsubscribe(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    w->sig_mask = 0;
+    gui_core_ok();
+    return 0;
+}
+
+/* ---- 每树环形信号队列（Dial 主动 pending → data → pop）------------------ */
+
+int64_t dial_gui_widget_signal_pending(GuiWidgetImpl *root) {
+    return widget_ok(root) ? gui_signal_pending(root) : -1;
+}
+/* 返回队首 72 字节纯值块地址（C 借用）；空队列返回 NULL。Dial 侧须在下次
+ * emit / pop / clear 之前 ptr_cast 读完，绝不长期持有（纯值无悬垂但会脏读）。*/
+void *dial_gui_widget_signal_data(GuiWidgetImpl *root) {
+    if (!widget_ok(root)) return NULL;
+    return (void *)gui_signal_peek(root);
+}
+int64_t dial_gui_widget_signal_pop(GuiWidgetImpl *root) {
+    if (!widget_ok(root)) return -1;
+    int r = gui_signal_pop(root);
+    gui_core_ok();
+    return (int64_t)r;              /* 1 = 弹出一条 / 0 = 队列本空 */
+}
+int64_t dial_gui_widget_signal_clear(GuiWidgetImpl *root) {
+    if (!widget_ok(root)) return -1;
+    if (gui_signal_clear(root) < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "清空信号队列失败（无效根句柄）");
+        return -1;
+    }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_signal_dropped(GuiWidgetImpl *root) {
+    return widget_ok(root) ? gui_signal_dropped(root) : -1;
 }

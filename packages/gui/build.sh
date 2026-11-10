@@ -9,6 +9,7 @@
 #   - dial_gui_theme.o   主题层：14 个可覆写颜色角色 / 默认值 / reset（纯 C，三平台共用）
 #   - dial_gui_look.o    成品控件外观层：主题表驱动四态 / 八种控件绘制 / 纯值事件推进（纯 C，三平台共用）
 #   - dial_gui_input.o   输入层：TextBox 单行编辑 / 焦点链 / 统一键码推进（纯 C，三平台共用）
+#   - dial_gui_signal.o  第 6 层：信号槽 / 可订阅纯值信号块 + 每树环形队列（纯 C，三平台共用）
 #   - dial_gui_x11.o     Linux / Termux 后端：X11 + XShm + XRender（仅 POSIX 目标）
 #   - dial_gui_win32.o   Windows 后端：GDI DIBSection + 消息循环（仅 windows 目标）
 #
@@ -61,7 +62,8 @@ for entry in "${TARGETS[@]}"; do
     INCS=(-I "$PKG/src" -I "$ROOT/stdlib" -I "$ROOT/runtime" -I "$TP/stb")
     SRCS=("$PKG/src/dial_gui_core.c" "$PKG/src/dial_gui_raster.c" \
           "$PKG/src/dial_gui_widget.c" "$PKG/src/dial_gui_theme.c" \
-          "$PKG/src/dial_gui_look.c" "$PKG/src/dial_gui_input.c")
+          "$PKG/src/dial_gui_look.c" "$PKG/src/dial_gui_input.c" \
+          "$PKG/src/dial_gui_signal.c")
     if [ "$family" = "win32" ]; then
         SRCS+=("$PKG/src/dial_gui_win32.c")
     else

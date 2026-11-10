@@ -54,8 +54,8 @@
 #      （MD5/SHA-1/SHA-256/SHA-512/SHA3-256，标准向量核对）+ Base64 编解码 +
 #      HMAC-SHA256，string 与 bytes 双入口、含内嵌 NUL 的二进制数据、严格错误路径，
 #      三平台零警告构建（v1.04 增补）。
-#   AA. 手搓 GUI 五层：地基 + 控件框架 + 成品控件外观 + 输入层 +
-#      主题层/控件扩展，gui.dialpkg 端到端——三平台真实现
+#   AA. 手搓 GUI 六层：地基 + 控件框架 + 成品控件外观 + 输入层 +
+#      主题层/控件扩展 + 信号槽/控件事件订阅，gui.dialpkg 端到端——三平台真实现
 #      （X11+XShm+XRender / Win32 GDI）/ 零链接期依赖（dlopen / LoadLibraryA）/
 #      纯内存光栅化器像素级 CRC 回归 / 覆盖面积 AA / 内置点阵与 TrueType
 #      双字体 / Widget 树 + 绝对·VBox·HBox 布局 + 命中测试 + packed 事件纯值块
@@ -64,7 +64,10 @@
 #      TextBox 单行编辑·选区·UTF-8 边界·焦点环·max_len·统一功能键码
 #      （use_gui_input.dial）/ 14 角色可覆写主题色 set·get·reset 幂等 +
 #      Radio 同组互斥 / Slider 按 x 设值 / ProgressBar 只读 / 值域 Fail-Fast
-#      （use_gui_theme.dial）/ Xvfb 实窗上屏 + **XTest 真实鼠标/键盘注入**
+#      （use_gui_theme.dial）/ 6 类可订阅纯值信号 + 每树环形队列（72 字节纯值块
+#      sizeof/offsetof 双向锁死 / 零订阅零开销 / 订阅掩码 Fail-Fast / 溢出
+#      dropped 可观测 / Dial 主动 pending→data→pop 分派）(use_gui_signal.dial)/
+#      Xvfb 实窗上屏 + **XTest 真实鼠标/键盘注入**
 #      （xtest_inject.sh：点击聚焦 / 落字 / Tab / Shift+Tab / 按钮激活）/ 无显示
 #      环境自动降级为「窗口路径明确跳过」并如实标注（v1.10 增补）。
 set -u
@@ -1926,10 +1929,10 @@ else zbad "use_crypto.dial 编译失败"; tail -8 "${TMP}/z_comp.log"; fi
 zpass "crypto 包已卸载"
 
 # ---------------------------------------------------------------------------
-# AA) 手搓 GUI 五层：地基 + 控件框架 + 成品外观 + 输入层 + 主题层/控件扩展
+# AA) 手搓 GUI 六层：地基 + 控件框架 + 成品外观 + 输入层 + 主题层/控件扩展 + 信号槽
 #     （gui.dialpkg 端到端，v1.10 增补）
 # ---------------------------------------------------------------------------
-echo "== AA) 手搓 GUI 五层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制 / TextBox 输入与焦点链 / 主题色可覆写 + Radio·Slider·Progress / XTest 实窗注入，v1.10 增补） =="
+echo "== AA) 手搓 GUI 六层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制 / TextBox 输入与焦点链 / 主题色可覆写 + Radio·Slider·Progress / 6 类可订阅纯值信号 · 环形队列 / XTest 实窗注入，v1.10 增补） =="
 aapass() { echo "  ✅ $1"; }
 aabad()  { echo "  ❌ $1"; fail=1; }
 
@@ -2089,6 +2092,38 @@ if "$DIALC" build tests/pkg/use_gui_theme.dial -o "${TMP}/use_gui_theme" >"${TMP
     fi
 else aabad "use_gui_theme.dial 编译失败"; tail -16 "${TMP}/aa_tcomp.log"; fi
 
+# 4f) 第 6 层 demo：信号槽 / 控件事件订阅——6 类可订阅纯值信号 + 每树环形
+#     队列（72 字节纯值块 sizeof/offsetof 双向锁死 / 零订阅零开销 / 订阅掩码
+#     Fail-Fast / 点击·勾选·文本·值·焦点·提交六类信号 / Dial 主动
+#     pending→data→pop 分派 / seq 单调 / 溢出 dropped 可观测 / 取消订阅）。
+#     独立纯内存树，绝不触碰前五个 demo 的 CRC 基准。给 AA 组 +3 条 aapass。
+if "$DIALC" build tests/pkg/use_gui_signal.dial -o "${TMP}/use_gui_signal" >"${TMP}/aa_scomp.log" 2>&1; then
+    aapass "use_gui_signal.dial（第 6 层信号槽 / 控件事件订阅）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_signal" >"${TMP}/aa_snodisplay.log" 2>&1
+    aa_s_no_exit=$?
+    aa_s_bad=$(grep -c ' = bad' "${TMP}/aa_snodisplay.log" || true)
+    if [ "$aa_s_no_exit" -eq 0 ] && [ "$aa_s_bad" -eq 0 ] \
+       && grep -qF 'signal_size_72 = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_kind_count_6 = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_zero_pending_empty = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_click_code = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_subscribe_bit6_rejected = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_toggle_sig = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_setvalue_sig = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_text_sig = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_focus_gain_sig = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_submit_sig = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_seq_monotonic = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_overflow_dropped_observable = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_window = skipped [' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'signal_done = true' "${TMP}/aa_snodisplay.log"; then
+        aapass "无 DISPLAY：信号槽纯值块布局 / 零订阅零开销 / 六类信号 / 订阅 Fail-Fast / 溢出可观测 / 主动分派全绿"
+    else
+        aabad "信号槽层无 DISPLAY 路径断言失败（exit=$aa_s_no_exit bad=$aa_s_bad）"
+        tail -45 "${TMP}/aa_snodisplay.log"
+    fi
+else aabad "use_gui_signal.dial 编译失败"; tail -20 "${TMP}/aa_scomp.log"; fi
+
 # 5) 有 Xvfb 时验证真实窗口（XShm 离屏 + XRender 合成 + 上屏 / 过滤 / 事件循环）；
 #    无 Xvfb 的环境如实打印跳过，绝不把「未验证」写成「通过」。
 if command -v xvfb-run >/dev/null 2>&1; then
@@ -2218,6 +2253,30 @@ if command -v xvfb-run >/dev/null 2>&1; then
     fi
 else
     echo "  ⚠️  本环境无 xvfb-run：主题层实窗路径未实机验证（如实标注，不伪装通过）"
+fi
+
+# 5f) 第 6 层实窗：把含按钮的树挂到窗口、订阅 CLICKED、喂纯值事件读信号
+#     队列、整树绘制并 flush 上屏。给 AA 组 +1 条 aapass。
+if command -v xvfb-run >/dev/null 2>&1; then
+    if xvfb-run -a -s "-screen 0 1024x768x24 +extension MIT-SHM +extension RENDER" \
+        "${TMP}/use_gui_signal" >"${TMP}/aa_sxvfb.log" 2>&1; then
+        aa_s_bad2=$(grep -c ' = bad' "${TMP}/aa_sxvfb.log" || true)
+        if [ "$aa_s_bad2" -eq 0 ] \
+           && grep -qF 'signal_window = ok' "${TMP}/aa_sxvfb.log" \
+           && grep -qF 'signal_window_set_root = ok' "${TMP}/aa_sxvfb.log" \
+           && grep -qF 'signal_window_signal_tag = ok' "${TMP}/aa_sxvfb.log" \
+           && grep -qF 'signal_window_draw = ok' "${TMP}/aa_sxvfb.log" \
+           && grep -qF 'signal_window_flush = ok' "${TMP}/aa_sxvfb.log" \
+           && grep -qF 'signal_done = true' "${TMP}/aa_sxvfb.log"; then
+            aapass "Xvfb 实窗：信号槽挂树 / 订阅 CLICKED / 纯值信号读取 / 整树绘制 + flush 上屏全通过"
+        else
+            aabad "信号槽层 Xvfb 实窗断言失败（bad=$aa_s_bad2）"; tail -30 "${TMP}/aa_sxvfb.log"
+        fi
+    else
+        aabad "Xvfb 下 use_gui_signal 运行失败"; tail -20 "${TMP}/aa_sxvfb.log"
+    fi
+else
+    echo "  ⚠️  本环境无 xvfb-run：信号槽层实窗路径未实机验证（如实标注，不伪装通过）"
 fi
 
 # 6) 清理：卸包，避免污染后续测试与用户环境。

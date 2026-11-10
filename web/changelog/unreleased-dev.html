@@ -35,9 +35,10 @@
 </ul>
 </div>
 <h2 id="未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</h2>
-<p><strong>主题：手搓 GUI 五层——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
+<p><strong>主题：手搓 GUI 六层——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
-+ 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）；
++ 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）
++ 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）；
 并修复 <code>http.dialpkg</code> 三处 Fail-Fast / 目标平台可用性缺陷</strong>（见下文 <code>### Fixed</code>）。
 详见 <a href="../spec.html#38-手搓-gui-地基包guidialpkg">README §38</a> 与 README §37.10。</p>
 <blockquote>
@@ -52,22 +53,26 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
 保持原文不改</strong>；地基层增量把回归扩到 <strong>A–Z + AA 二十七组 / 507 ✅</strong>，
 控件框架层再给 AA 组增 3 条断言到 <strong>510 ✅</strong>，成品控件外观层又增 3 条到
 <strong>513 ✅</strong>，再上一轮 <code>http.dialpkg</code> 缺陷修复给 W 组增 4 条断言到 <strong>517 ✅</strong>，
-上一轮 GUI 输入层给 AA 组增 3 条断言到 <strong>520 ✅</strong>，本轮主题层 / 控件扩展
-又给 AA 组增 3 条断言到 <strong>523 ✅</strong>。
-七者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
+上一轮 GUI 输入层给 AA 组增 3 条断言到 <strong>520 ✅</strong>，其后主题层 / 控件扩展
+又给 AA 组增 3 条断言到 <strong>523 ✅</strong>，本轮信号槽 / 控件事件订阅（6 类可订阅
+纯值信号 + 每树环形队列）再给 AA 组增 3 条断言到 <strong>526 ✅</strong>。
+八者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>
 <ul>
-<li><strong><code>gui.dialpkg</code>：手搓 GUI 五层</strong>（README §38）：不用 Qt / GTK / SDL，纯 C 自绘。
+<li><strong><code>gui.dialpkg</code>：手搓 GUI 六层</strong>（README §38）：不用 Qt / GTK / SDL，纯 C 自绘。
   ① 地基层（窗 + 事件 + 绘图 + 字体，55 个 <code>extern fn</code>）；
   ② 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发，
   28 个）；③ <strong>成品控件外观层</strong>（Label / Button / CheckBox + 主题表驱动四态 +
   纯值事件推进，12 个）；④ <strong>输入层</strong>（TextBox 单行编辑 / 光标·选区 /
   焦点链 / 统一功能键码与修饰键，14 个）；⑤ <strong>主题层 / 控件扩展</strong>（14 个可覆写
-  颜色角色 + Radio / Slider / ProgressBar + value / range / group，11 个）。
-  共 <strong>120 个 <code>extern fn</code></strong>。<strong>信号槽 / C→Dial 回调 / 富文本（多行） / IME /
-  撤销重做 / 每控件主题覆写 / 图片解码仍不进 <code>.diali</code> 契约</strong>——把未实现函数
-  写进契约会让用户 <code>import</code> 后链接失败，那是制造漂移而非预留接口。</li>
+  颜色角色 + Radio / Slider / ProgressBar + value / range / group，11 个）；
+  ⑥ <strong>信号槽 / 控件事件订阅</strong>（6 类可订阅纯值信号 + 每树环形队列 +
+  subscribe / pending / data / pop / clear / dropped，10 个，见下）。
+  共 <strong>130 个 <code>extern fn</code></strong>。<strong>多行文本（IME） / 撤销重做 / 每控件主题覆写 /
+  图片解码 / C→Dial 反向回调仍不进 <code>.diali</code> 契约</strong>——把未实现函数写进契约会让
+  用户 <code>import</code> 后链接失败，那是制造漂移而非预留接口（信号槽已由第 6 层以<strong>纯值
+  信号队列</strong>落地，<strong>不是</strong> C → Dial 回调）。</li>
 <li><strong>自研迷你 2D 光栅化器</strong>：ARGB32 像素缓冲、<code>source-over</code> alpha 混合、
   1/2/4/8 档覆盖面积采样抗锯齿、矩形 / 线 / 圆 / 圆环 / 椭圆 / 梯形 / 位图 /
   裁剪 / 像素读写；<code>dial_gui_painter_crc32()</code> 提供像素级回归断言。</li>
@@ -170,10 +175,43 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
 <li><strong>Fail-Fast（§20）</strong>：<code>role</code> 越界 / 颜色高 32 位非 0 / <code>value</code> 越界 /
     值域倒置 / 值域过大一律返回 <code>-1</code> 并写错误槽，绝不静默截断；<code>set_range</code>
     成功后把已有 <code>value</code> clamp 进新值域（getter 立刻可读回，非不可见损坏）。</li>
-<li><strong>回归</strong>：新增 <code>tests/pkg/use_gui_theme.dial</code>（独立 offscreen 画布、关 AA），
+<li>
+<p><strong>回归</strong>：新增 <code>tests/pkg/use_gui_theme.dial</code>（独立 offscreen 画布、关 AA），
     逐像素断言改色生效 / <code>theme_reset</code> 幂等 / 八种控件绘制确定性 / Radio 互斥 /
     Slider 单调 / Progress 只读 / 值域 Fail-Fast；AA 组 +3 条 <code>aapass</code>，
-    Xvfb 实窗八种控件整树绘制 + <code>flush</code> 上屏全通过。</li>
+    Xvfb 实窗八种控件整树绘制 + <code>flush</code> 上屏全通过。</p>
+</li>
+<li>
+<p><strong>信号槽 / 控件事件订阅（第 6 层，10 个新 <code>extern fn</code>）</strong>：并入 <code>gui</code> 包、
+  只追加、旧 120 个签名<strong>一字不动</strong>，<code>abi = 6</code> / <code>version = 1.10.0</code> /
+  <code>GuiWidgetEvent</code> 104 字节布局全部不变。新增 <code>src/dial_gui_signal.c</code>（纯 C，
+  零平台符号）。<strong>绝不 C → Dial 反向回调</strong>：C 只在状态推进处把一条纯值信号压进
+  每树环形队列，Dial 侧主动 <code>pending → data(ptr_cast 读) → pop</code> 消费并分派。</p>
+</li>
+<li><strong>6 类可订阅纯值信号</strong>（位值可组合成每控件 <code>int64</code> 订阅掩码）：<code>CLICKED</code>(1) /
+    <code>TOGGLED</code>(2) / <code>TEXT_CHANGED</code>(4) / <code>VALUE_CHANGED</code>(8) / <code>FOCUS_CHANGED</code>(16) /
+    <code>SUBMITTED</code>(32)。埋点在 <code>widget_handle</code> / <code>widget_key</code> / <code>set_focus</code> /
+    <code>focus_next</code> / <code>set_text</code> / <code>set_checked</code> / <code>set_value</code>，每个信号只由状态真的
+    变化的那一次交互 / setter 触发一次（同值 setter、同组 RADIO 被动清除、
+    <code>set_range</code> 的 clamp 都不另发信号）。</li>
+<li><strong><code>GuiWidgetSignal</code> 72 字节 packed 纯值块</strong>：<code>seq / signal / tag / userdata /
+    kind / a / b / x / y</code>（9 × <code>int64</code>），<strong>100% 纯值、零指针、零句柄</strong>——连控件
+    句柄都不存，只存 <code>tag</code> / <code>userdata</code> 纯值键。控件被摘除 / 文本被覆盖 / 整树被
+    释放后，已入队信号仍是自洽整数快照，<strong>读数绝不悬垂</strong>、无需 <code>string_from_cstr</code>。
+    C 侧 <code>_Static_assert(sizeof==72)</code> 与 Dial 侧 <code>sizeof/offsetof</code> 双向锁死。</li>
+<li><strong>零订阅 = 零开销</strong>：订阅掩码默认 0，<code>emit</code> 首行即查掩码，未订阅直接返回
+    （不找根、不分配、不入队）；旧程序行为 / 绘制 CRC / 返回值逐字节不变，
+    <code>look_crc_normal</code> 等历史基准不漂移。队列只挂根节点、容量 64、首次 emit 才
+    <code>calloc</code>，<code>dispose_subtree</code> 统一 <code>free</code>。</li>
+<li><strong>Fail-Fast（§20）</strong>：订阅掩码负数 / 未知位 / 越界返回 <code>-1</code> 写错误槽；队列满
+    覆盖最旧、保留最新并把 <code>sig_dropped</code> 累计 <code>+1</code>，<code>calloc</code> 失败同样计数，Dial 侧
+    <code>signal_dropped</code> 可读「漏了多少条」，<strong>绝不静默损坏</strong>；<code>seq</code> 单调、<code>clear</code> 不
+    重置序号；<code>signal_data</code> 返回借用指针，空队列 NULL，Dial 须读完再 <code>pop</code>。</li>
+<li><strong>回归</strong>：新增 <code>tests/pkg/use_gui_signal.dial</code>（独立纯内存树，不碰任何 CRC
+    基准），无 DISPLAY 断言 72 字节布局 / 六类信号逐字段（含 x/y）/ 零订阅零开销 /
+    订阅 Fail-Fast / <code>seq</code> 单调 / 溢出 <code>dropped</code> 可观测 / 取消订阅 / 纯值块读数不依赖
+    控件生命周期；Xvfb 实窗挂树 + 订阅 + 信号读取 + 整树绘制 + <code>flush</code> 上屏。
+    AA 组 +3 条 <code>aapass</code>，全量 <strong>523 ✅ → 526 ✅</strong>。</li>
 </ul>
 <h3 id="fixed">Fixed</h3>
 <ul>
@@ -211,8 +249,8 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
   端点、<code>http2_test_server.py</code> 的 <code>X-Long-Len</code> 回显头，以及 <code>use_http.dial</code> /
   <code>use_http2.dial</code> / <code>use_https.dial</code>（Termux 模式）里的断言。全量回归由
   <strong>513 ✅ 增至 517 ✅</strong>（上一轮时点），组数仍为 A–Z + AA 二十七组；
-  上一轮 GUI 输入层由 <strong>517 ✅ 增至 520 ✅</strong>；<strong>本轮</strong>主题层 / 控件扩展再由
-  <strong>520 ✅ 增至 523 ✅</strong>。</li>
+  上一轮 GUI 输入层由 <strong>517 ✅ 增至 520 ✅</strong>、主题层 / 控件扩展再由
+  <strong>520 ✅ 增至 523 ✅</strong>；<strong>本轮</strong>信号槽 / 控件事件订阅由 <strong>523 ✅ 增至 526 ✅</strong>。</li>
 <li><code>tests/run_tests.sh</code> 的 <strong>AA 组</strong>（<code>gui.dialpkg</code> 端到端）：三平台构建、零警告检查、
   <code>nm -u</code> 符号检查、<code>pack</code> / <code>install</code>、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
   （<code>window = ok</code> / <code>window_backend = x11/xshm/xrender</code> / <code>window_flush = ok</code> /
@@ -221,8 +259,10 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
   Xvfb 挂树 + packed 事件块），外观层再增 3 条（<code>use_gui_look.dial</code> 编译 /
   无 DISPLAY 四态与 CRC / Xvfb 整树上屏），输入层又增 3 条
   （<code>use_gui_input.dial</code> 编译 / 无 DISPLAY 编辑·焦点·CRC / Xvfb + XTest 实机注入），
-  本轮主题层再增 3 条（<code>use_gui_theme.dial</code> 编译 / 无 DISPLAY 主题·控件·值域 /
-  Xvfb 八种控件整树上屏），<code>aapass</code> 由 8 → 11 → 14 → 17 → <strong>20 条</strong>。</li>
+  主题层那轮再增 3 条（<code>use_gui_theme.dial</code> 编译 / 无 DISPLAY 主题·控件·值域 /
+  Xvfb 八种控件整树上屏），本轮信号层又增 3 条（<code>use_gui_signal.dial</code> 编译 /
+  无 DISPLAY 纯值信号·订阅 Fail-Fast·溢出可观测 / Xvfb 挂树 + 信号读取 + 上屏），
+  <code>aapass</code> 由 8 → 11 → 14 → 17 → 20 → <strong>23 条</strong>。</li>
 <li>新增 <code>tests/pkg/use_gui_widget.dial</code>：与 <code>use_gui.dial</code> 完全独立、<strong>不创建
   <code>GuiPainter</code></strong>，因此不触碰 <code>crc_offscreen = 4007435570</code> 像素回归基准；
   覆盖 <code>packed extern struct</code> 布局 / <code>string_from_cstr</code> 的 ARC 复制 /
@@ -240,15 +280,16 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
   鼠标点击 / 键盘 <code>hi</code> / Tab / Shift+Tab，实机断言落字 / 焦点环 / <code>mods</code> 含 SHIFT /
   按钮激活 / <code>flush</code>。无 <code>xdotool</code> 时如实打印 <code>skipped</code>，不伪装通过。</li>
 <li><code>packages/gui/</code> 新增 <code>src/dial_gui_widget.c</code>（框架层）、<code>src/dial_gui_look.c</code>
-  （外观层）、<code>src/dial_gui_input.c</code>（输入层）与 <code>src/dial_gui_theme.c</code>（主题层），
-  <code>build.sh</code> 三平台 <code>SRCS</code> 统一追加四者；<code>gui.diali</code> 四轮共追加 <strong>65 个单行
-  <code>extern fn</code></strong>（28 + 12 + 14 + 11）与 <code>GuiWidget</code> 句柄并改写五层范围声明
-  （合计 120 个）；<code>dial_gui.h</code> 增加 104 字节 packed 事件块与 <code>_Static_assert</code>、
-  全局根链表防悬垂、控件外观层 / 输入层 / 主题层字段（<code>value</code> / <code>vmin</code> / <code>vmax</code> /
-  <code>group</code>）、14 个主题角色与默认值宏、统一键码常量；<code>dial_gui_core.c</code> 共追加
-  25 个 FFI 包装（14 输入 + 11 主题，含 <code>dial_gui_event_mods</code>）与 <code>gui_core_emit</code>
-  的 QUIT 清零 <code>ev_mods</code>；两后端 <code>pump</code> 把 <code>X11 KeySym</code> / <code>Win32 VK</code> 映射到
-  同一套键码并写入修饰键状态。</li>
+  （外观层）、<code>src/dial_gui_input.c</code>（输入层）、<code>src/dial_gui_theme.c</code>（主题层）与
+  <code>src/dial_gui_signal.c</code>（信号层），<code>build.sh</code> 三平台 <code>SRCS</code> 统一追加五者；
+  <code>gui.diali</code> 五轮共追加 <strong>75 个单行 <code>extern fn</code></strong>（28 + 12 + 14 + 11 + 10）与
+  <code>GuiWidget</code> 句柄并改写六层范围声明（合计 130 个）；<code>dial_gui.h</code> 增加 104 字节
+  packed 事件块 / 72 字节 packed 信号块与各自 <code>_Static_assert</code>、全局根链表防悬垂、
+  控件外观层 / 输入层 / 主题层 / 信号层字段（<code>value</code> / <code>vmin</code> / <code>vmax</code> / <code>group</code> /
+  <code>sig_mask</code> / <code>sig_dropped</code> / <code>sigq</code>）、14 个主题角色与默认值宏、6 个信号码、
+  统一键码常量；<code>dial_gui_core.c</code> 共追加 35 个 FFI 包装（14 输入 + 11 主题 +
+  10 信号，含 <code>dial_gui_event_mods</code>）与 <code>gui_core_emit</code> 的 QUIT 清零 <code>ev_mods</code>；
+  两后端 <code>pump</code> 把 <code>X11 KeySym</code> / <code>Win32 VK</code> 映射到同一套键码并写入修饰键状态。</li>
 <li><code>.github/workflows/ci.yml</code>：阶段 8 构建循环与 <code>dialc pack</code> 循环加入 <code>gui</code>，
   <code>dist-gui/gui.dialpkg</code> 归集进 <code>dist-c11/</code>，无头 X11 环境准备步骤本轮补装
   <code>xdotool</code> / <code>libxtst6</code>（XTest 实机注入所需），Release 资产列表加入 <code>gui.dialpkg</code>；
@@ -259,7 +300,7 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
 </ul>
 <h3 id="测试与交付">测试与交付</h3>
 <ul>
-<li><code>bash tests/run_tests.sh</code> <strong>A–Z + AA 二十七组全套通过（523 ✅ / 0 ❌，AA 组本轮 +3 条）</strong>；
+<li><code>bash tests/run_tests.sh</code> <strong>A–Z + AA 二十七组全套通过（526 ✅ / 0 ❌，AA 组本轮 +3 条）</strong>；
   Xvfb 实窗 <code>EXIT=0</code>，能力串
   <code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，地基层像素 CRC 稳定
   <code>4007435570</code>、外观层 <code>look_crc_normal</code> 稳定 <code>3884455222</code>、输入层
@@ -281,13 +322,17 @@ Cargo 版本对不上，正是要避免的漂移。待用户决定发版时，�
   Fail-Fast / <code>set</code>-<code>get</code> 往返 / <code>theme_reset</code> 后逐像素 CRC 幂等 / 八种控件
   绘制确定性 / 改色后 <code>get_pixel</code> 生效 / Radio 同组互斥与未分组独立 /
   Slider 单调且落在值域 / Progress 只读 / 值域与值 Fail-Fast，
-  Xvfb 下八种控件整树绘制 + <code>flush</code> 上屏。</li>
+  Xvfb 下八种控件整树绘制 + <code>flush</code> 上屏。
+  信号槽 / 控件事件订阅由 <code>use_gui_signal.dial</code> 覆盖：72 字节纯值块布局双向锁死 /
+  6 类信号 / 订阅容量常量 / 零订阅零开销 / 订阅掩码 Fail-Fast / 六类信号逐字段
+  （含 x/y）读取 / <code>seq</code> 单调 / 队列溢出 <code>dropped</code> 可观测 / 取消订阅 / 纯值块读数
+  不依赖控件生命周期，Xvfb 下挂树 + 订阅 + 信号读取 + 整树绘制 + <code>flush</code> 上屏。</li>
 <li><code>tools/cve_check.py</code> 8/8；语言能力审计 <code>TOTAL=38 PASS=38 FAIL=0</code>；
   <code>check_version</code> / <code>check_links</code> 全通过；<code>cargo check</code> 零警告；
   <code>http</code> 包三平台静态库 <code>bash packages/http/build.sh</code> 零警告重建，<code>gui</code> 包三平台
-  <code>bash packages/gui/build.sh</code> 同样零警告重建（新增 <code>dial_gui_theme.o</code>），
+  <code>bash packages/gui/build.sh</code> 同样零警告重建（新增 <code>dial_gui_signal.o</code>），
   三份 <code>.a</code> 的 <code>nm -u</code> 仍无 X11 / XShm / XRender / GDI / XTest 链接期符号；
-  <code>gui.diali</code> 追加 11 个 <code>extern fn</code>（合计 120）后经 <code>pack</code> 重算 SHA256、
+  <code>gui.diali</code> 追加 10 个 <code>extern fn</code>（合计 130）后经 <code>pack</code> 重算 SHA256、
   <code>install</code> 同 ABI 覆盖成功（<code>abi = 6</code> / <code>version = 1.10.0</code> 不变）；
   官网由 <code>tools/build_web.py</code> 重新生成并与文档同步。</li>
 <li><strong>交付状态</strong>：仅本地提交，未推送、未打标签、未发 Release（遵循本段开头的口径）。</li>

@@ -8,6 +8,7 @@
  *   dial_gui_theme.c   主题层：14 个可覆写颜色角色 / 默认值 / reset（纯 C）
  *   dial_gui_look.c    成品控件外观层：主题表驱动的四态 + 八种控件绘制 / 事件推进（纯 C）
  *   dial_gui_input.c   输入层：TextBox 编辑 / 光标·选区 / 焦点链 / 键码推进（纯 C）
+ *   dial_gui_signal.c  第 6 层：信号槽 / 控件事件订阅——可订阅纯值信号块 + 每树环形队列（纯 C）
  *   dial_gui_x11.c     POSIX 后端（X11 + XShm + XRender，dlopen 动态装载）
  *   dial_gui_win32.c   Windows 后端（GDI DIBSection，LoadLibraryA 动态装载）
  *
@@ -94,6 +95,8 @@ typedef struct GuiWindowImpl  GuiWindowImpl;
 typedef struct GuiAppImpl     GuiAppImpl;
 typedef struct GuiFontImpl    GuiFontImpl;
 typedef struct GuiWidgetImpl  GuiWidgetImpl;
+/* 第 6 层：环形队列完整定义私有在 dial_gui_signal.c，头里只留前向声明。 */
+typedef struct GuiSignalQueue GuiSignalQueue;
 
 typedef struct GuiBackend GuiBackend;
 
@@ -122,6 +125,55 @@ _Static_assert(sizeof(GuiWidgetEvent) == 104,
                "GuiWidgetEvent 必须为 104 字节（Dial 侧 packed extern struct 同布局）");
 _Static_assert(offsetof(GuiWidgetEvent, win_title) == 88, "win_title 偏移须为 88");
 _Static_assert(offsetof(GuiWidgetEvent, widget_id) == 96, "widget_id 偏移须为 96");
+
+/* ---- 第 6 层：信号槽 / 控件事件订阅 ------------------------------------- *
+ * 信号码是**位值**（可组合成订阅掩码），编号跨版本稳定，只准末尾追加新位。
+ * 每个信号只由「语义状态真的发生变化」的那一次交互 / setter 触发一次，
+ * a/b 的含义见 gui.diali 的信号码表与 README §38.12。 */
+#define GUI_SIG_CLICKED        (1LL << 0)   /* 1   BUTTON RELEASE 激活 */
+#define GUI_SIG_TOGGLED        (1LL << 1)   /* 2   CHECKBOX 翻转 / RADIO 选中 / set_checked */
+#define GUI_SIG_TEXT_CHANGED   (1LL << 2)   /* 4   TEXTBOX 文本被编辑 / set_text */
+#define GUI_SIG_VALUE_CHANGED  (1LL << 3)   /* 8   SLIDER 设值 / set_value */
+#define GUI_SIG_FOCUS_CHANGED  (1LL << 4)   /* 16  焦点变化 / 点击聚焦 / Tab */
+#define GUI_SIG_SUBMITTED      (1LL << 5)   /* 32  TEXTBOX Enter 提交 */
+#define GUI_SIG_COUNT          6
+#define GUI_SIG_ALL            ((1LL << GUI_SIG_COUNT) - 1)   /* 63 */
+#define GUI_SIGNAL_CAP         64           /* 每树环形队列容量 */
+
+/*
+ * 第 6 层信号纯值块（C 侧 owned，Dial 侧只读）。
+ *
+ * 与上面 104 字节 GuiWidgetEvent 的**关键区别**：本块 **100% 纯值、零指针、
+ * 零句柄**——连 widget_id / win_title 那样的借用 const char* 都没有，控件句柄
+ * 也不存，只存 tag / userdata 两个 int64 纯值键（Dial 侧自建 map 定位控件）。
+ * 因此控件被摘除、文本被 set_text 覆盖、甚至整棵树被释放之后，已入队的信号
+ * 仍是一块自洽的整数快照，读数绝不悬垂、绝不需要 string_from_cstr 复制。
+ *
+ * 布局：9 × int64 = 72 字节，全部字段按 8 字节紧挨。由下面的 _Static_assert
+ * 与 Dial demo 的 sizeof/offsetof 编译期内建双向锁死。
+ */
+typedef struct __attribute__((packed)) GuiWidgetSignal {
+    int64_t seq;        /*  0  单调递增序号（从 0 起，clear 不重置）*/
+    int64_t signal;     /*  8  GUI_SIG_* 位值（本次只一个位）*/
+    int64_t tag;        /* 16  发出控件的 tag（纯值键）*/
+    int64_t userdata;   /* 24  发出控件的 userdata（纯值键）*/
+    int64_t kind;       /* 32  控件种类 GUI_WIDGET_* */
+    int64_t a;          /* 40  主值：新值 / 1=获得焦点 / 点击恒 1 */
+    int64_t b;          /* 48  副值：旧值 / 0=失去焦点 / 焦点控件 tag */
+    int64_t x;          /* 56  事件坐标 x（键盘类信号为 0）*/
+    int64_t y;          /* 64  事件坐标 y（键盘类信号为 0）*/
+} GuiWidgetSignal;
+
+_Static_assert(sizeof(GuiWidgetSignal) == 72,
+               "GuiWidgetSignal 必须为 72 字节（Dial 侧 packed extern struct 同布局）");
+_Static_assert(offsetof(GuiWidgetSignal, seq) == 0,   "seq 偏移须为 0");
+_Static_assert(offsetof(GuiWidgetSignal, signal) == 8, "signal 偏移须为 8");
+_Static_assert(offsetof(GuiWidgetSignal, tag) == 16,  "tag 偏移须为 16");
+_Static_assert(offsetof(GuiWidgetSignal, kind) == 32, "kind 偏移须为 32");
+_Static_assert(offsetof(GuiWidgetSignal, a) == 40,    "a 偏移须为 40");
+_Static_assert(offsetof(GuiWidgetSignal, b) == 48,    "b 偏移须为 48");
+_Static_assert(offsetof(GuiWidgetSignal, x) == 56,    "x 偏移须为 56");
+_Static_assert(offsetof(GuiWidgetSignal, y) == 64,    "y 偏移须为 64");
 
 struct GuiPainterImpl {
     uint32_t *pixels;      /* ARGB32，行主序，w*h 个；NULL 表示未分配 */
@@ -264,6 +316,12 @@ struct GuiWidgetImpl {
     int  value;                 /* SLIDER / PROGRESS 当前值（默认 0）*/
     int  vmin, vmax;            /* 值域 [vmin, vmax]（默认 0..100）*/
     int64_t group;              /* RADIO 组号：非 0 时同组互斥，0 = 各自独立 */
+    /* ---- 第 6 层：信号槽 / 控件事件订阅（dial_gui_signal.c）-------------- *
+     * sig_mask 每个节点都有（calloc 归零 = 默认不订阅，零开销）；
+     * sigq / sig_dropped 仅**根节点**有意义：队列懒分配、丢信号计数可观测。 */
+    int64_t sig_mask;           /* 订阅位掩码（GUI_SIG_* 按位或）*/
+    int64_t sig_dropped;        /* 本树累计溢出 / 分配失败丢弃数（仅根用）*/
+    GuiSignalQueue *sigq;       /* 环形队列（仅根用，首次 emit 时 calloc）*/
 };
 
 /*
@@ -390,5 +448,17 @@ int         gui_theme_role_count(void);
 void gui_widget_radio_select(GuiWidgetImpl *root, GuiWidgetImpl *hit);
 /* SLIDER 按命中点局部 x 比例设值并 clamp 进 [vmin, vmax]；返回 1 有变化。 */
 int  gui_widget_slider_set_from_x(GuiWidgetImpl *hit, int local_x);
+
+/* ---- 第 6 层：dial_gui_signal.c（纯 C，三平台共用，无平台符号）---------- *
+ * 与前五层硬边界一致：只读写 GuiWidgetImpl / 队列上的 C 侧纯值，绝不碰平台
+ * API、绝不保存函数指针、绝不 C → Dial 反向回调。信号块 100% 纯值零指针。 */
+/* 埋点：w 产生 signal 变化时调用；未订阅直接返回（零订阅=零开销）。 */
+void           gui_signal_emit(GuiWidgetImpl *w, int64_t signal,
+                               int64_t a, int64_t b, int x, int y);
+int64_t        gui_signal_pending(GuiWidgetImpl *root);   /* 待取条数 */
+GuiWidgetSignal *gui_signal_peek(GuiWidgetImpl *root);    /* 队首块地址 / NULL */
+int            gui_signal_pop(GuiWidgetImpl *root);       /* 1 弹出 / 0 空 */
+int            gui_signal_clear(GuiWidgetImpl *root);     /* 清空，seq 不重置 */
+int64_t        gui_signal_dropped(GuiWidgetImpl *root);   /* 累计丢弃数 */
 
 #endif /* DIAL_GUI_H */

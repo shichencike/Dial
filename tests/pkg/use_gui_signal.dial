@@ -1,0 +1,262 @@
+// gui.dialpkg 第 6 层：信号槽 / 控件事件订阅端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 与 use_gui.dial / use_gui_widget.dial / use_gui_look.dial / use_gui_input.dial /
+// use_gui_theme.dial 完全独立：只用**独立纯内存控件树 + 订阅 + 环形信号队列**，
+// 不创建任何 GuiPainter，因此绝不触碰 crc_offscreen = 4007435570、
+// look_crc_normal = 3884455222 这两条像素级回归基准。
+//
+// 立场严格遵循「C 管 C 的，ARC 管 ARC 的」：绝不注册回调；Dial 侧主动
+//   pending → data(ptr_cast 读 72 字节纯值块) → pop 消费并自行分派。
+// 信号块 100% 纯值、零指针零句柄，读数不需要 string_from_cstr，也绝不悬垂。
+//
+// 语言宪法 §37.1：**禁止文件级 var 全局可变状态**。因此本用例只用局部变量
+// 与纯函数，读取信号一律「函数内局部 ptr_cast + 逐字段断言」，无全局回填。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+// 与 C 侧 GuiWidgetSignal（__attribute__((packed))）逐字节一致。
+// 9 个纯值字段 × 8 字节 = 72 字节，全部 int（Dial int = 8 字节），零指针。
+packed extern struct GuiWidgetSignal {
+    seq: int, signal: int, tag: int, userdata: int, kind: int,
+    a: int, b: int, x: int, y: int
+}
+
+// 事件码（widget_handle 的 kind 参数）：1 PRESS / 2 RELEASE / 3 MOVE / 4 KEY。
+// 信号码（位值）：1 CLICKED / 2 TOGGLED / 4 TEXT / 8 VALUE / 16 FOCUS / 32 SUBMIT。
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+// 读队首一条信号，逐字段断言 sig / tag / a / b，然后弹出。全部局部变量，
+// 不引入任何全局状态。调用方应先断言 pending == 1。
+fn check_signal(root: GuiWidget, sig: int, tag: int, a: int, b: int, name: string): void {
+    var raw: rawptr<byte> = dial_gui_widget_signal_data(root);
+    var s: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(raw);
+    expect_int(s.signal, sig, name + "_sig");
+    expect_int(s.tag, tag, name + "_tag");
+    expect_int(s.a, a, name + "_a");
+    expect_int(s.b, b, name + "_b");
+    expect_int(dial_gui_widget_signal_pop(root), 1, name + "_popped");
+}
+
+fn main(): int {
+    // ---- 0) packed 纯值块布局：sizeof/offsetof vs C 侧 _Static_assert 双向锁死 ----
+    expect_int(sizeof<GuiWidgetSignal>(), 72, "signal_size_72");
+    expect_int(alignof<GuiWidgetSignal>(), 1, "signal_align_packed");
+    expect_int(offsetof<GuiWidgetSignal>(seq), 0, "signal_off_seq");
+    expect_int(offsetof<GuiWidgetSignal>(signal), 8, "signal_off_signal");
+    expect_int(offsetof<GuiWidgetSignal>(tag), 16, "signal_off_tag");
+    expect_int(offsetof<GuiWidgetSignal>(kind), 32, "signal_off_kind");
+    expect_int(offsetof<GuiWidgetSignal>(a), 40, "signal_off_a");
+    expect_int(offsetof<GuiWidgetSignal>(b), 48, "signal_off_b");
+    expect_int(offsetof<GuiWidgetSignal>(x), 56, "signal_off_x");
+    expect_int(offsetof<GuiWidgetSignal>(y), 64, "signal_off_y");
+
+    // ---- 1) 常量：6 类信号 / 队列容量 64 ----------------------------------
+    expect_int(dial_gui_signal_count(), 6, "signal_kind_count_6");
+    expect_int(dial_gui_signal_capacity(), 64, "signal_capacity_64");
+
+    // ---- 2) 独立纯内存树 + 控件几何（无 DISPLAY 完整可跑）-------------------
+    var root: GuiWidget = dial_gui_widget_tree(320, 200);
+    expect(!is_null(root), "signal_tree_new");
+    var btn: GuiWidget = dial_gui_widget_add(root);   // BUTTON
+    var chk: GuiWidget = dial_gui_widget_add(root);   // CHECKBOX
+    var sld: GuiWidget = dial_gui_widget_add(root);   // SLIDER
+    var txt: GuiWidget = dial_gui_widget_add(root);   // TEXTBOX
+    dial_gui_widget_set_rect(btn, 20, 20, 120, 40);
+    dial_gui_widget_set_rect(chk, 20, 80, 120, 40);
+    dial_gui_widget_set_rect(sld, 20, 140, 200, 30);
+    dial_gui_widget_set_rect(txt, 20, 180, 200, 20);
+    expect_int(dial_gui_widget_layout_apply(root, 320, 200), 0, "signal_layout_apply");
+    expect_int(dial_gui_widget_set_kind(btn, 2), 0, "signal_kind_button");
+    expect_int(dial_gui_widget_set_kind(chk, 3), 0, "signal_kind_checkbox");
+    expect_int(dial_gui_widget_set_kind(sld, 6), 0, "signal_kind_slider");
+    expect_int(dial_gui_widget_set_kind(txt, 4), 0, "signal_kind_textbox");
+    // 纯值键：每个控件一个 tag，Dial 侧自建 map 据此分派
+    dial_gui_widget_set_tag(btn, 101);
+    dial_gui_widget_set_tag(chk, 202);
+    dial_gui_widget_set_tag(sld, 303);
+    dial_gui_widget_set_tag(txt, 404);
+
+    // ---- 3) 零订阅 = 零开销：所有交互都不入队，历史行为不漂移 --------------
+    // 未调用 subscribe：sig_mask 恒 0，emit 第一行直接返回。
+    expect_int(dial_gui_widget_subscribed(btn), 0, "signal_default_unsubscribed");
+    expect_int(dial_gui_widget_handle(root, 2, 30, 30, 1), 1, "signal_zero_click_activates");
+    expect_int(dial_gui_widget_handle(root, 2, 30, 90, 1), 1, "signal_zero_toggle_activates");
+    expect_int(dial_gui_widget_signal_pending(root), 0, "signal_zero_pending_empty");
+    dial_gui_widget_set_value(sld, 40);   // 显式 setter 未订阅时也不发信号
+    expect_int(dial_gui_widget_signal_pending(root), 0, "signal_zero_setter_empty");
+    dial_gui_clear_error();
+
+    // ---- 4) 订阅校验 Fail-Fast：负数 / 越界 / 未知位明确拒绝 ---------------
+    expect_int(dial_gui_widget_subscribe(btn, -1), -1, "signal_subscribe_neg_rejected");
+    expect_int(dial_gui_widget_subscribe(btn, 64), -1, "signal_subscribe_bit6_rejected");
+    expect_int(dial_gui_widget_subscribe(btn, 128), -1, "signal_subscribe_high_rejected");
+    dial_gui_clear_error();
+
+    // ---- 5) 订阅 CLICKED：点 BUTTON 产生一条纯值信号（含 x/y 坐标）----------
+    dial_gui_widget_set_checked(chk, 0);   // 归零第 3 段零订阅时的翻转
+    expect_int(dial_gui_widget_subscribe(btn, 1), 0, "signal_subscribe_clicked");
+    expect_int(dial_gui_widget_subscribed(btn), 1, "signal_subscribed_readback_1");
+    expect_int(dial_gui_widget_signal_clear(root), 0, "signal_clear_before_click");
+    expect_int(dial_gui_widget_handle(root, 2, 30, 30, 1), 1, "signal_click_activated");
+    expect_int(dial_gui_widget_signal_pending(root), 1, "signal_click_pending_1");
+    // 内联读满 9 字段（含 x/y），再消费
+    var craw: rawptr<byte> = dial_gui_widget_signal_data(root);
+    var cs: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(craw);
+    expect_int(cs.signal, 1, "signal_click_code");
+    expect_int(cs.tag, 101, "signal_click_tag");
+    expect_int(cs.a, 1, "signal_click_a");
+    expect_int(cs.b, 0, "signal_click_b");
+    expect_int(cs.x, 30, "signal_click_x");
+    expect_int(cs.y, 30, "signal_click_y");
+    expect_int(cs.kind, 2, "signal_click_kind");
+    expect_int(dial_gui_widget_signal_pop(root), 1, "signal_click_popped");
+    expect_int(dial_gui_widget_signal_pending(root), 0, "signal_click_drained");
+
+    // ---- 6) 订阅 TOGGLED：勾选翻转 a=新 / b=旧 + 未订阅控件不入队 ---------
+    expect_int(dial_gui_widget_subscribe(chk, 2), 0, "signal_subscribe_toggled");
+    expect_int(dial_gui_widget_signal_clear(root), 0, "signal_clear_before_toggle");
+    expect_int(dial_gui_widget_handle(root, 2, 30, 90, 1), 1, "signal_toggle_activated");
+    expect_int(dial_gui_widget_signal_pending(root), 1, "signal_toggle_pending_1");
+    check_signal(root, 2, 202, 1, 0, "signal_toggle");        // 0 → 1
+    expect_int(dial_gui_widget_handle(root, 2, 30, 90, 1), 1, "signal_toggle_back_activated");
+    check_signal(root, 2, 202, 0, 1, "signal_toggle_back");   // 1 → 0
+
+    // ---- 7) 订阅 VALUE_CHANGED：set_value 与同值/越界 setter ---------------
+    expect_int(dial_gui_widget_subscribe(sld, 8), 0, "signal_subscribe_value");
+    expect_int(dial_gui_widget_signal_clear(root), 0, "signal_clear_before_value");
+    dial_gui_widget_set_value(sld, 55);      // 显式 setter：旧 40 → 新 55
+    expect_int(dial_gui_widget_signal_pending(root), 1, "signal_setvalue_pending_1");
+    check_signal(root, 8, 303, 55, 40, "signal_setvalue");
+    dial_gui_widget_set_value(sld, 55);      // 同值 setter 不发信号
+    expect_int(dial_gui_widget_signal_pending(root), 0, "signal_same_setter_no_signal");
+    expect_int(dial_gui_widget_set_value(sld, 101), -1, "signal_bad_value_rejected");
+    dial_gui_clear_error();
+    expect_int(dial_gui_widget_signal_pending(root), 0, "signal_bad_setter_no_signal");
+
+    // ---- 8) 订阅 TEXT_CHANGED：TextBox 键盘编辑 / set_text ---------------
+    expect_int(dial_gui_widget_subscribe(txt, 4), 0, "signal_subscribe_text");
+    expect_int(dial_gui_widget_signal_clear(root), 0, "signal_clear_before_text");
+    // 点 TextBox 拿焦点（FOCUS 信号 txt 未订阅，故不入队）
+    expect_int(dial_gui_widget_handle(root, 2, 30, 190, 1), 1, "signal_textbox_focus_click");
+    expect_int(dial_gui_widget_signal_pending(root), 0, "signal_focus_not_subscribed_no_entry");
+    expect_int(dial_gui_widget_key(root, 4, 65, 0), 1, "signal_text_key_typed");  // 'A'
+    expect_int(dial_gui_widget_signal_pending(root), 1, "signal_text_pending_1");
+    check_signal(root, 4, 404, 1, 0, "signal_text");          // "" → "A"
+    expect_int(dial_gui_widget_set_text(txt, "hello"), 0, "signal_set_text_ok");
+    expect_int(dial_gui_widget_signal_pending(root), 1, "signal_set_text_pending_1");
+    check_signal(root, 4, 404, 5, 1, "signal_set_text");      // "A" → "hello"
+
+    // ---- 9) 订阅 FOCUS_CHANGED：焦点迁移 a=0失去 / a=1获得 ---------------
+    var txt2: GuiWidget = dial_gui_widget_add(root);
+    dial_gui_widget_set_rect(txt2, 20, 155, 200, 20);
+    expect_int(dial_gui_widget_set_kind(txt2, 4), 0, "signal_kind_textbox2");
+    dial_gui_widget_set_tag(txt2, 505);
+    expect_int(dial_gui_widget_layout_apply(root, 320, 200), 0, "signal_layout_after_txt2");
+    expect_int(dial_gui_widget_subscribe(txt, 20), 0, "signal_subscribe_txt_focus");   // TEXT(4) + FOCUS(16)
+    expect_int(dial_gui_widget_subscribe(txt2, 16), 0, "signal_subscribe_txt2_focus");
+    expect_int(dial_gui_widget_signal_clear(root), 0, "signal_clear_before_focus");
+    expect_int(dial_gui_widget_set_focus(root, txt2), 0, "signal_set_focus_txt2");
+    expect_int(dial_gui_widget_signal_pending(root), 2, "signal_focus_pending_2");
+    check_signal(root, 16, 404, 0, 0, "signal_focus_lost");   // txt 失去
+    check_signal(root, 16, 505, 1, 0, "signal_focus_gain");   // txt2 获得
+    expect_int(dial_gui_widget_signal_pending(root), 0, "signal_focus_drained");
+
+    // ---- 10) 订阅 SUBMITTED：Enter 提交 -----------------------------------
+    expect_int(dial_gui_widget_subscribe(txt2, 32), 0, "signal_subscribe_submitted");
+    expect_int(dial_gui_widget_signal_clear(root), 0, "signal_clear_before_submit");
+    expect_int(dial_gui_widget_key(root, 4, 1114115, 0), 3, "signal_enter_returns_3");  // GUI_KEY_ENTER
+    expect_int(dial_gui_widget_signal_pending(root), 1, "signal_submit_pending_1");
+    check_signal(root, 32, 505, 1, 0, "signal_submit");
+
+    // ---- 11) seq 单调递增：连点两次，第二次序号 = 第一次 + 1 -------------
+    expect_int(dial_gui_widget_subscribe(btn, 1), 0, "signal_resub_click_for_seq");
+    expect_int(dial_gui_widget_signal_clear(root), 0, "signal_clear_before_seq");
+    dial_gui_widget_handle(root, 2, 30, 30, 1);
+    var r1: rawptr<byte> = dial_gui_widget_signal_data(root);
+    var s1: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(r1);
+    var seq1: int = s1.seq;
+    expect_int(dial_gui_widget_signal_pop(root), 1, "signal_seq_first_popped");
+    dial_gui_widget_handle(root, 2, 30, 30, 1);
+    var r2: rawptr<byte> = dial_gui_widget_signal_data(root);
+    var s2: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(r2);
+    var seq2: int = s2.seq;
+    var seq_want: int = seq1 + 1;
+    expect_int(dial_gui_widget_signal_pop(root), 1, "signal_seq_second_popped");
+    expect(seq2 == seq_want, "signal_seq_monotonic");
+
+    // ---- 12) 队列溢出可观测：连点 70 次（>64），dropped > 0、pending = cap ---
+    expect_int(dial_gui_widget_signal_clear(root), 0, "signal_clear_before_overflow");
+    var i: int = 0;
+    while (i < 70) {
+        dial_gui_widget_handle(root, 2, 30, 30, 1);
+        i = i + 1;
+    }
+    var pending: int = dial_gui_widget_signal_pending(root);
+    var dropped: int = dial_gui_widget_signal_dropped(root);
+    expect(pending <= 64, "signal_overflow_pending_capped");
+    expect(pending == 64, "signal_overflow_pending_full");
+    expect(dropped >= 6, "signal_overflow_dropped_observable");
+    expect_int(dial_gui_widget_signal_clear(root), 0, "signal_clear_after_overflow");
+    expect_int(dial_gui_widget_signal_pending(root), 0, "signal_clear_drained");
+
+    // ---- 13) 取消订阅：之后再交互不入队 -----------------------------------
+    expect_int(dial_gui_widget_unsubscribe(btn), 0, "signal_unsubscribe_btn");
+    expect_int(dial_gui_widget_subscribed(btn), 0, "signal_unsubscribed_readback_0");
+    expect_int(dial_gui_widget_handle(root, 2, 30, 30, 1), 1, "signal_after_unsub_activates");
+    expect_int(dial_gui_widget_signal_pending(root), 0, "signal_after_unsub_no_entry");
+
+    // ---- 14) 信号块 100% 纯值零句柄：读数不依赖控件生命周期 ---------------
+    expect_int(dial_gui_widget_subscribe(btn, 1), 0, "signal_resub_before_free");
+    expect_int(dial_gui_widget_signal_clear(root), 0, "signal_clear_before_free");
+    dial_gui_widget_handle(root, 2, 30, 30, 1);
+    expect_int(dial_gui_widget_signal_pending(root), 1, "signal_before_free_pending_1");
+    check_signal(root, 1, 101, 1, 0, "signal_before_free");
+    dial_gui_widget_tree_free(root);
+
+    // ---- 15) 真实窗口上屏（需要 DISPLAY / Xvfb）--------------------------
+    var app: GuiApp = dial_gui_app_new();
+    if (is_null(app)) {
+        print("signal_window = skipped [" + dial_gui_last_error_msg() + "]");
+        print("signal_done = true");
+        return 0;
+    }
+    var win: GuiWindow = dial_gui_window_new(app, "Dial GUI Signal", 320, 200);
+    if (is_null(win)) {
+        dial_gui_app_free(app);
+        print("signal_window = skipped [窗口创建失败]");
+        print("signal_done = true");
+        return 0;
+    }
+    var wroot: GuiWidget = dial_gui_widget_tree(320, 200);
+    var wbtn: GuiWidget = dial_gui_widget_add(wroot);
+    dial_gui_widget_set_rect(wbtn, 20, 20, 120, 40);
+    dial_gui_widget_set_kind(wbtn, 2);
+    dial_gui_widget_set_tag(wbtn, 909);
+    dial_gui_widget_layout_apply(wroot, 320, 200);
+    dial_gui_widget_subscribe(wbtn, 1);
+    expect_int(dial_gui_window_set_root(win, wroot), 0, "signal_window_set_root");
+    // 挂窗树同样能用信号队列：手工喂一条纯值事件推进（无 DISPLAY 时亦走此逻辑）。
+    expect_int(dial_gui_widget_handle(wroot, 2, 30, 30, 1), 1, "signal_window_click");
+    expect_int(dial_gui_widget_signal_pending(wroot), 1, "signal_window_pending_1");
+    var wraw: rawptr<byte> = dial_gui_widget_signal_data(wroot);
+    var ws: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(wraw);
+    expect_int(ws.tag, 909, "signal_window_signal_tag");
+    expect_int(ws.signal, 1, "signal_window_signal_code");
+    expect_int(dial_gui_widget_signal_pop(wroot), 1, "signal_window_popped");
+    var wp: GuiPainter = dial_gui_window_painter(win);
+    expect_int(dial_gui_set_aa(wp, 1), 0, "signal_window_aa");
+    expect_int(dial_gui_widget_draw(wroot, wp), 0, "signal_window_draw");
+    expect_int(dial_gui_window_flush(win), 0, "signal_window_flush");
+    dial_gui_window_close(win);
+    dial_gui_app_free(app);
+    print("signal_window = ok");
+    print("signal_done = true");
+    return 0;
+}

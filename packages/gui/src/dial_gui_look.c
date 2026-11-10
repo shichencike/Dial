@@ -68,26 +68,38 @@ int gui_widget_handle(GuiWidgetImpl *root, int kind, int x, int y, int button) {
         int hit_abs_x = 0;
         GuiWidgetImpl *hit = gui_widget_hit(root, x, y, &hit_abs_x, NULL);
         if (!hit || hit->disabled) return 0;
+        /* 第 6 层信号槽埋点：状态推进后 emit 一条纯值信号。emit 内部先查
+         * w->sig_mask，未订阅直接返回——零订阅=零开销，既有行为/CRC 不漂移。*/
         if (hit->kind == GUI_WIDGET_TEXTBOX) {
-            /* 点击 TextBox 即把焦点移过去（纯 C 树操作，绝不反向回调）。 */
+            /* 点击 TextBox 即把焦点移过去（焦点信号在 set_focus 内埋点）。 */
             gui_widget_set_focus(root, hit);
             return 1;
         }
         if (hit->kind == GUI_WIDGET_CHECKBOX) {
-            hit->checked = hit->checked ? 0 : 1;
+            int oldc = hit->checked;
+            hit->checked = oldc ? 0 : 1;
+            gui_signal_emit(hit, GUI_SIG_TOGGLED, hit->checked, oldc, x, y);
             return 1;
         }
         if (hit->kind == GUI_WIDGET_RADIO) {
-            /* 选中本项；group != 0 时清掉同组其它 RADIO（纯 C 树遍历）。 */
+            /* 选中本项；group != 0 时清掉同组其它 RADIO（纯 C 树遍历）。
+             * 只对被点中的控件发 TOGGLED；同组被动清除不另发信号。 */
+            int oldc = hit->checked;
             gui_widget_radio_select(root, hit);
+            gui_signal_emit(hit, GUI_SIG_TOGGLED, hit->checked, oldc, x, y);
             return 1;
         }
         if (hit->kind == GUI_WIDGET_SLIDER) {
-            /* 按命中点局部 x 比例设值，clamp 进 [vmin, vmax]。 */
-            gui_widget_slider_set_from_x(hit, x - hit_abs_x);
+            /* 按命中点局部 x 比例设值，clamp 进 [vmin, vmax]；仅值真变才发信号。 */
+            int oldv = hit->value;
+            if (gui_widget_slider_set_from_x(hit, x - hit_abs_x))
+                gui_signal_emit(hit, GUI_SIG_VALUE_CHANGED, hit->value, oldv, x, y);
             return 1;
         }
-        if (hit->kind == GUI_WIDGET_BUTTON) return 1;
+        if (hit->kind == GUI_WIDGET_BUTTON) {
+            gui_signal_emit(hit, GUI_SIG_CLICKED, 1, 0, x, y);
+            return 1;
+        }
         /* PROGRESS 是只读展示控件，不参与激活。 */
         return 0;
     }

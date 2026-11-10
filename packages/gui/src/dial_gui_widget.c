@@ -31,6 +31,8 @@ static void dispose_subtree(GuiWidgetImpl *n) {
     }
     free(n->id);
     free(n->text);   /* 外观层文本副本（与 id 同为 C 侧 strdup 自有） */
+    /* 第 6 层：环形队列只挂在根节点（非根节点 sigq 恒 NULL，free(NULL) 安全）。*/
+    free(n->sigq);
     free(n);
 }
 
