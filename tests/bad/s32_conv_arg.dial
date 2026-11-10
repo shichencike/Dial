@@ -1,0 +1,5 @@
+// 负向：int_to_int32 的参数必须是 int，float 直接拒绝。
+fn main(): int {
+    print(int_to_int32(1.5));
+    return 0;
+}

@@ -1,0 +1,5 @@
+// 负向：float 字面量不能隐式收窄成 float32。
+fn main(): int {
+    var f: float32 = 1.5;
+    return 0;
+}

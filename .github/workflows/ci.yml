@@ -1,7 +1,7 @@
 # dialc —— 三平台编译 / 测试 / 发布流水线（GitHub Actions）
 #
 # 三个构建作业，各平台**原生构建**（CI 用对应宿主 runner / 容器，编译期目标即运行期平台）：
-#   build-linux     Linux x86_64（动态 glibc）—— 全量 A~Z+AA 二十七组端到端测试 + 锚点/官网同步校验
+#   build-linux     Linux x86_64（动态 glibc）—— 全量 A~Z+AA+AB 二十八组端到端测试 + 锚点/官网同步校验
 #   build-windows   Windows x64（MinGW / gnu）—— 核心冒烟（编译+运行+平台契约）
 #   build-termux    Termux aarch64（musl 全静态）—— 核心冒烟
 # 发布作业在打 `v*` 标签时把三个平台的产物上传到 GitHub Release。
@@ -40,7 +40,7 @@ env:
 
 jobs:
   # ===========================================================================
-  # Linux x86_64 —— 全量测试（A~Z+AA 二十七组）+ 文档/官网同步校验
+  # Linux x86_64 —— 全量测试（A~Z+AA+AB 二十八组）+ 文档/官网同步校验
   # ===========================================================================
   build-linux:
     name: Linux x86_64（全量测试）
@@ -212,7 +212,7 @@ jobs:
           command -v xvfb-run
           command -v xdotool
 
-      - name: 端到端测试（A~Z+AA 共二十七组）
+      - name: 端到端测试（A~Z+AA+AB 共二十八组）
         run: bash tests/run_tests.sh
 
       # CVE 暴力检测器：为每个已登记漏洞构造触发用例（PoC），用 dialc 编译/运行，

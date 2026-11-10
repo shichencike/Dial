@@ -1,0 +1,72 @@
+// AB 组：int32 / float32 完整一等类型 + FFI 精确 32 位宽度往返。
+//
+// 立场：零隐式转换铁律不变——int32 / float32 与 int / float 之间必须显式
+// int_to_int32 / int32_to_int / float_to_float32 / float32_to_float。
+// 传给 C 侧时签名宽度即真实宽度（i32 / f32），C 侧绝不读到错位垃圾。
+
+link "libscalar32_probe.a";
+
+// 字段顺序 / 对齐 / padding / sizeof 与 C 的 struct S32 逐字节一致。
+extern struct S32 { a: int, b: int32, c: float32, d: int }
+
+extern fn s32_echo(v: int32): int;
+extern fn s32_f32_echo(v: float32): float;
+extern fn s32_ret_i32(v: int32): int32;
+extern fn s32_ret_f32(v: float32): float32;
+extern fn s32_sum4(a: int32, b: int32, c: int32, d: int32): int;
+extern fn s32_fsum2(a: float32, b: float32): float;
+
+extern fn s32_size(): int;
+extern fn s32_off_b(): int;
+extern fn s32_off_c(): int;
+extern fn s32_off_d(): int;
+extern fn s32_read_b(p: rawptr<S32>): int;
+extern fn s32_read_c(p: rawptr<S32>): float;
+extern fn s32_fill(p: rawptr<S32>, b: int32, c: float32): void;
+
+fn main(): int {
+    // ---- 语言层：声明 / 同类算术 / 比较 / 打印 / 显式转换 ----
+    var a: int32 = int_to_int32(42);
+    var b: int32 = int_to_int32(8);
+    print(int32_to_int(a + b));
+    var f: float32 = float_to_float32(1.5);
+    print(float32_to_float(f));
+    print(a);
+    print(f);
+    print(str(a) + "/" + str(f));
+    print(a > b);
+    print(f + float_to_float32(0.25));
+    print(int32_to_int(int_to_int32(2147483647)));
+    print(int32_to_int(int_to_int32(-2147483648)));
+
+    // ---- FFI：C 侧按 int32_t / float 读取参数与返回值 ----
+    print(s32_echo(int_to_int32(123456789)));
+    print(s32_f32_echo(float_to_float32(2.5)));
+    print(int32_to_int(s32_ret_i32(int_to_int32(2147483646))));
+    print(s32_ret_f32(float_to_float32(0.5)));
+    print(s32_sum4(int_to_int32(1), int_to_int32(2), int_to_int32(3), int_to_int32(4)));
+    print(s32_fsum2(float_to_float32(0.25), float_to_float32(1.25)));
+
+    // ---- extern struct：32 位字段的 sizeof / offsetof 与双向读写 ----
+    print(s32_size());
+    print(s32_off_b());
+    print(s32_off_c());
+    print(s32_off_d());
+
+    var raw: rawptr<byte> = raw_alloc(24);
+    var p: rawptr<S32> = ptr_cast<rawptr<S32>>(raw);
+    p.a = 11;
+    p.b = int_to_int32(123);
+    p.c = float_to_float32(2.25);
+    p.d = 13;
+    print(s32_read_b(p));
+    print(s32_read_c(p));
+    print(int32_to_int(p.b));
+    print(p.c);
+
+    s32_fill(p, int_to_int32(-7), float_to_float32(3.5));
+    print(int32_to_int(p.b));
+    print(p.c);
+    raw_free(raw);
+    return 0;
+}

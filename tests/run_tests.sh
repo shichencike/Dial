@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 二十七组检查，全部通过才算绿（顺序为 A→Z 再 AA，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 二十八组检查，全部通过才算绿（顺序为 A→Z 再 AA→AB，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -70,6 +70,10 @@
 #      Xvfb 实窗上屏 + **XTest 真实鼠标/键盘注入**
 #      （xtest_inject.sh：点击聚焦 / 落字 / Tab / Shift+Tab / 按钮激活）/ 无显示
 #      环境自动降级为「窗口路径明确跳过」并如实标注（v1.10 增补）。
+#   AB. int32 / float32 一等类型：零隐式转换 + 显式转换内建 + 同类算术/比较/打印，
+#       FFI 精确 32 位宽度（C 侧按 int32_t/float 读参数·返回值·多参数·
+#       extern struct sizeof/offsetof 与双向字段读写）/ 越界 Fail-Fast /
+#       负向锁定零隐式转换（v1.10 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -2282,6 +2286,62 @@ fi
 # 6) 清理：卸包，避免污染后续测试与用户环境。
 "$DIALC" uninstall gui >/dev/null 2>&1 || true
 aapass "gui 包已卸载"
+
+echo
+echo "== AB) int32 / float32 一等类型 + FFI 精确 32 位宽度 =="
+abpass() { echo "  ✅ $1"; }
+abfail() { echo "  ❌ $1"; fail=1; }
+
+AB_DIR=tests/ffi
+# 1) C 探针：函数参数 / 返回值 / 结构体字段一律用真实 int32_t 与 float。
+#    若 Dial 侧误用 int(i64) / float(f64) 声明，C 按 4 字节读取必得垃圾。
+if ! ( cd "$AB_DIR" && cc -O2 -c scalar32_probe.c -o scalar32_probe.o \
+       && ar rcs libscalar32_probe.a scalar32_probe.o ) >"${TMP}/ab_c.log" 2>&1; then
+    abfail "C 探针静态库构建失败"; tail -20 "${TMP}/ab_c.log"
+else
+    abpass "C 探针编译：参数 / 返回 / 结构体字段全部使用真实 int32_t 与 float"
+fi
+
+# 2) 端到端往返：语言层 + FFI 参数/返回值/多参数 + extern struct 布局与双向读写。
+if ! "$DIALC" build "$AB_DIR/scalar32_probe.dial" -o "${TMP}/s32probe" >"${TMP}/ab_build.log" 2>&1; then
+    abfail "scalar32_probe.dial 编译失败"; tail -30 "${TMP}/ab_build.log"
+elif ! "${TMP}/s32probe" >"${TMP}/ab_out.txt" 2>&1; then
+    abfail "scalar32_probe 运行非零退出"; tail -20 "${TMP}/ab_out.txt"
+elif ! diff -u "$AB_DIR/scalar32_probe.expected" "${TMP}/ab_out.txt" >"${TMP}/ab_diff.txt" 2>&1; then
+    abfail "FFI 32 位往返输出与黄金文件不一致"; sed 's/^/       /' "${TMP}/ab_diff.txt"
+else
+    abpass "FFI 往返全绿：int32/float32 参数·返回值·多参数·extern struct sizeof/offsetof·双向字段读写"
+fi
+
+# 3) int -> int32 越界必须 Fail-Fast，绝不静默截断成另一个「合法」值。
+if ! "$DIALC" build "$AB_DIR/scalar32_overflow.dial" -o "${TMP}/s32ovf" >"${TMP}/ab_ovf_build.log" 2>&1; then
+    abfail "越界用例编译失败"; tail -20 "${TMP}/ab_ovf_build.log"
+elif timeout 30 "${TMP}/s32ovf" >"${TMP}/ab_ovf.log" 2>&1; then
+    abfail "int_to_int32(2147483648) 未 Fail-Fast（正常退出 = 静默截断成垃圾）"
+elif grep -qF 'dial_int_to_int32: 越界' "${TMP}/ab_ovf.log" \
+     && ! grep -qF '9999' "${TMP}/ab_ovf.log"; then
+    abpass "越界 Fail-Fast：int→int32 超出范围当场终止，哨兵 9999 未打印"
+else
+    abfail "越界路径未按预期终止"; tail -20 "${TMP}/ab_ovf.log"
+fi
+
+# 4) 负向：零隐式转换铁律（B 组已逐条拒绝，这里汇总再锁一次）。
+ab_neg_ok=0
+ab_neg_total=0
+for f in tests/bad/s32_*.dial; do
+    ab_neg_total=$((ab_neg_total + 1))
+    if ! "$DIALC" build "$f" -o "${TMP}/ab_bad" >"${TMP}/ab_neg.log" 2>&1; then
+        ab_neg_ok=$((ab_neg_ok + 1))
+    fi
+done
+if [ "$ab_neg_total" -ge 5 ] && [ "$ab_neg_ok" -eq "$ab_neg_total" ]; then
+    abpass "零隐式转换负向 $ab_neg_ok/$ab_neg_total 全被拒绝（int32/float32 不与 int/float 隐式互通）"
+else
+    abfail "零隐式转换负向未全部拒绝（$ab_neg_ok/$ab_neg_total）"
+fi
+
+# 5) 清理：探针静态库与 .o 是回归现编的派生数据，不入库（与 P 组同口径）。
+rm -f "$AB_DIR/libscalar32_probe.a" "$AB_DIR/scalar32_probe.o" "$AB_DIR/scalar32_overflow.o"
 
 echo
 if [ $fail -eq 0 ]; then

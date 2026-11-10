@@ -37,6 +37,18 @@ pub enum Type {
     ///
     /// 字面量写作 `0xFF` / `255`，用 `b'x'` 表示字节字面量。
     Byte,
+    /// 32 位有符号整数（FFI 精确宽度）：IR 为 **i32**，不是 i64。
+    ///
+    /// 存在的理由：C 侧 `int32_t` 在 FFI 边界按 4 字节读取，若用 `int`(i64)
+    /// 声明 `extern fn` 参数，C 侧读到的就是错位的垃圾数据。独立成类型后，
+    /// 「宽度」被写进签名本身，编译期即杜绝静默数据损坏。
+    /// 零隐式转换：与 `int` 之间必须经 `int_to_int32` / `int32_to_int` 显式
+    /// 转换；`int_to_int32` 越出 `[-2^31, 2^31-1]` 当场 Fail-Fast，绝不截断。
+    Int32,
+    /// 32 位浮点（IEEE 754 binary32，IR 为 `float`/f32）。
+    /// 与 `float`(f64) 严格区分，经 `float_to_float32` / `float32_to_float`
+    /// 显式转换；FFI 边界按 C 的 `float` 宽度传递，绝不把 f64 塞给 C。
+    Float32,
     String, // UTF-8 字符串（IR 为 i8*，C 侧引用计数）
     /// 二进制字节缓冲区（v0.98.2）：不可变、ARC 管理的引用计数对象。
     ///
@@ -121,6 +133,8 @@ impl Type {
             Type::Bool => "bool",
             Type::Char => "char",
             Type::Byte => "byte",
+            Type::Int32 => "int32",
+            Type::Float32 => "float32",
             Type::String => "string",
             Type::Bytes => "bytes",
             Type::Array(_) => "array",

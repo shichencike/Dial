@@ -1,0 +1,6 @@
+// 负向：int32 与 int 之间无隐式提升，算术两侧必须完全同型。
+fn main(): int {
+    var x: int32 = int_to_int32(1);
+    print(x + 2);
+    return 0;
+}

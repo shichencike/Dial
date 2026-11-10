@@ -793,7 +793,8 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         // true / false 虽是字面量，但视觉上按关键字处理更符合直觉
         TokenKind::BoolLit(_) => T_KEYWORD,
         // 类型关键字
-        TokenKind::IntT | TokenKind::FloatT | TokenKind::BoolT | TokenKind::CharT
+        TokenKind::IntT | TokenKind::FloatT | TokenKind::Int32T | TokenKind::Float32T
+        | TokenKind::BoolT | TokenKind::CharT
         | TokenKind::ByteT | TokenKind::BytesT
         | TokenKind::StringT | TokenKind::VoidT | TokenKind::MapT | TokenKind::FileT => T_TYPE,
         // 字面量

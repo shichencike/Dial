@@ -92,6 +92,23 @@ int64_t dial_int_to_byte(int64_t v) {
 }
 
 /*
+ * int -> int32：FFI 精确宽度的入口（与 dial_int_to_byte 同族）。
+ * 返回**真实的 int32_t**（LLVM 侧声明为 i32），而不是把 i64 原样递给 C ——
+ * 后者会让按 4 字节读取的 C 侧拿到错位的高半部分垃圾数据。
+ * 越出 int32 范围当场 Fail-Fast，绝不静默截断成另一个值
+ * （C 里 (int32_t)4294967296 会变成 0，那是被伪装成合法值的数据损坏）。
+ */
+int32_t dial_int_to_int32(int64_t v) {
+    if (v < (int64_t)INT32_MIN || v > (int64_t)INT32_MAX) {
+        fprintf(stderr, "dial: int 转 int32 越界: %lld（合法范围 -2147483648~2147483647）\n",
+                (long long)v);
+        fflush(stdout);
+        dial_assert_fail("dial_int_to_int32: 越界（合法范围 -2147483648~2147483647）");
+    }
+    return (int32_t)v;
+}
+
+/*
  * byte -> string：把单个字节的**数值**形式写成十进制文本（如 65 -> "65"）。
  * 这不是「把字节当字符」——后者要显式 int_to_char 转换。
  */

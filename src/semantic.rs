@@ -69,7 +69,9 @@ pub fn lookup_type<V>(scopes: &Scopes<V>, name: &str) -> Option<Type> {
 }
 
 fn is_numeric(t: &Type) -> bool {
-    matches!(*t, Type::Int | Type::Float)
+    // int32 / float32 同为数值类型：同类之间可算术 / 比较，
+    // 但与 int / float 之间仍是零隐式转换（类型不同即拒绝）。
+    matches!(*t, Type::Int | Type::Float | Type::Int32 | Type::Float32)
 }
 
 /// 原生向量逐元素二元运算的结果类型（v1.04 底层原语）。
@@ -224,7 +226,7 @@ pub fn type_of<V>(
                 if let InterpPart::Expr(e) = p {
                     let t = type_of(e, scopes, funcs, structs)?;
                     match t {
-                        Type::Int | Type::Float | Type::Bool | Type::Char | Type::String => {}
+                        Type::Int | Type::Float | Type::Int32 | Type::Float32 | Type::Bool | Type::Char | Type::String => {}
                         _ => {
                             return Err(DialcError::new(
                                 format!(
@@ -738,7 +740,7 @@ pub fn type_of<V>(
                     // 结构体 / 向量都不可能由单条 asm 返回结果构造出来。
                     if !matches!(
                         ret,
-                        Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char
+                        Type::Int | Type::Float | Type::Int32 | Type::Float32 | Type::Bool | Type::Byte | Type::Char
                             | Type::RawPtr(_) | Type::VolatilePtr(_)
                     ) {
                         return Err(DialcError::new(
@@ -783,7 +785,7 @@ pub fn type_of<V>(
                         let t = type_of(a, scopes, funcs, structs)?;
                         if !matches!(
                             t,
-                            Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char
+                            Type::Int | Type::Float | Type::Int32 | Type::Float32 | Type::Bool | Type::Byte | Type::Char
                                 | Type::RawPtr(_) | Type::VolatilePtr(_)
                         ) {
                             return Err(DialcError::new(
@@ -923,6 +925,66 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::Int);
                 }
+                // 32 位精确宽度 ↔ 64 位内部宽度的显式转换（FFI / 位级标量）。
+                // int_to_int32 带范围校验（越界 Fail-Fast，绝不静默截断成垃圾）；
+                // float_to_float32 是 IEEE 定义的精度收窄（binary64 → binary32），
+                // 不是数据损坏，但源码必须显式写出，绝不隐式发生。
+                "int_to_int32" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：int_to_int32 需要恰好 1 个参数", 0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if at != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：int_to_int32 的参数必须是 int", 0, 0,
+                        ));
+                    }
+                    return Ok(Type::Int32);
+                }
+                "int32_to_int" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：int32_to_int 需要恰好 1 个参数", 0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if at != Type::Int32 {
+                        return Err(DialcError::new(
+                            "语义错误：int32_to_int 的参数必须是 int32", 0, 0,
+                        ));
+                    }
+                    return Ok(Type::Int);
+                }
+                "float_to_float32" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：float_to_float32 需要恰好 1 个参数", 0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if at != Type::Float {
+                        return Err(DialcError::new(
+                            "语义错误：float_to_float32 的参数必须是 float", 0, 0,
+                        ));
+                    }
+                    return Ok(Type::Float32);
+                }
+                "float32_to_float" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            "语义错误：float32_to_float 需要恰好 1 个参数", 0, 0,
+                        ));
+                    }
+                    let at = type_of(&args[0], scopes, funcs, structs)?;
+                    if at != Type::Float32 {
+                        return Err(DialcError::new(
+                            "语义错误：float32_to_float 的参数必须是 float32", 0, 0,
+                        ));
+                    }
+                    return Ok(Type::Float);
+                }
                 // char ↔ int 显式转换（v0.92）：与上面同族的「安全阀」。
                 // char 在 IR 层就是 i64 码点，与 int 同表示，因此这两个转换
                 // **不产生任何指令**——纯粹是编译期的类型视图切换（零成本）。
@@ -1035,11 +1097,12 @@ pub fn type_of<V>(
                     let at = type_of(&args[0], scopes, funcs, structs)?;
                     // char 自 v0.98.2 起纳入：编码成 1~4 字节的 UTF-8 字符串。
                     // 这样 `str(c) + "!"` 能直接拼出字符串，不必绕道 int_to_string。
-                    if matches!(at, Type::Int | Type::Float | Type::String | Type::Char) {
+                    if matches!(at, Type::Int | Type::Float | Type::Int32 | Type::Float32
+                                | Type::String | Type::Char) {
                         return Ok(Type::String);
                     } else {
                         return Err(DialcError::new(
-                            "语义错误：str 仅支持 int / float / char / string 参数（bool 请先用 int_to_string 转换）",
+                            "语义错误：str 仅支持 int / int32 / float / float32 / char / string 参数（bool 请先用 int_to_string 转换）",
                             0, 0,
                         ));
                     }
@@ -2097,7 +2160,7 @@ pub fn type_of<V>(
                 match pt {
                     // char 打印的是字符本身（不是码点数字），与 int 明确区分。
                     // byte 打印的是**数值**（0~255），也不是字符。
-                    Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String => {}
+                    Type::Int | Type::Float | Type::Int32 | Type::Float32 | Type::Bool | Type::Char | Type::Byte | Type::String => {}
                     Type::RawPtr(_) | Type::VolatilePtr(_) => {
                         return Err(DialcError::new(
                             "语义错误：不能直接 print 裸指针（它只是一个地址，没有可打印的内容）",
@@ -2213,7 +2276,7 @@ pub fn type_of<V>(
                 for a in args {
                 let pt = type_of(a, scopes, funcs, structs)?;
                 match pt {
-                    Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String => {}
+                    Type::Int | Type::Float | Type::Int32 | Type::Float32 | Type::Bool | Type::Char | Type::Byte | Type::String => {}
                     Type::RawPtr(_) | Type::VolatilePtr(_) => {
                         return Err(DialcError::new(
                             "语义错误：不能直接 print_raw 裸指针（它只是一个地址，没有可输出的内容）",
@@ -3492,7 +3555,10 @@ fn desugar_stmts(stmts: &mut [Stmt], map: &HashMap<String, (usize, Type)>) {
 /// （按值嵌入，LLVM 非 packed struct 与 C 的对齐/padding 规则一致）。
 fn is_c_abi_field(t: &Type, cstruct_names: &[String]) -> bool {
     match t {
-        Type::Int | Type::Float | Type::Bool | Type::Byte | Type::RawPtr(_) | Type::VolatilePtr(_) => true,
+        // int32(int32_t) / float32(float) 是**确定的 C 宽度**，正是 extern struct
+        // 需要精确布局的场景；cstruct_field_llvm 会把它们落成 i32 / f32。
+        Type::Int | Type::Float | Type::Int32 | Type::Float32
+            | Type::Bool | Type::Byte | Type::RawPtr(_) | Type::VolatilePtr(_) => true,
         Type::Struct(n) => cstruct_names.iter().any(|x| x == n),
         _ => false,
     }
@@ -3625,7 +3691,7 @@ pub fn analyze(
                 return Err(DialcError::new(
                     format!(
                         "语义错误：extern struct '{}' 的字段 '{}' 类型 {} 不具确定的 C ABI 布局；\
-                         只允许 int(int64_t) / float(double) / bool(_Bool) / byte(uint8_t) / rawptr<T>(void*) / 嵌套 extern struct。\
+                         只允许 int(int64_t) / int32(int32_t) / float(double) / float32(float) / bool(_Bool) / byte(uint8_t) / rawptr<T>(void*) / 嵌套 extern struct。\
                          char 请改用 byte 或 int，string / bytes / 数组 / map 请用 rawptr<T> 传递",
                         cs.name, fname, ft.display()
                     ),

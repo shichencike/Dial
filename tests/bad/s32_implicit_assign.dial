@@ -1,0 +1,5 @@
+// 负向：零隐式转换铁律——int 字面量不能隐式变成 int32。
+fn main(): int {
+    var x: int32 = 5;
+    return 0;
+}

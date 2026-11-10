@@ -74,6 +74,8 @@ fn dial_type_name(t: &Type) -> String {
         Type::Bool => "bool".into(),
         Type::Char => "char".into(),
         Type::Byte => "byte".into(),
+        Type::Int32 => "int32".into(),
+        Type::Float32 => "float32".into(),
         Type::String => "string".into(),
         Type::Bytes => "bytes".into(),
         Type::Array(e) => format!("{}[]", dial_type_name(e)),
@@ -666,6 +668,8 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_func("dial_bytes_to_string", i8b, &[i8b.into()]);
         // int <-> byte（v0.98.2）：byte_to_int 零指令（编译器侧直传），int_to_byte 带范围校验。
         self.decl_func("dial_int_to_byte", i64b, &[i64b.into()]);
+        // int -> int32 带范围校验，返回**真实 32 位**（i32），绝不静默截断成垃圾。
+        self.decl_func("dial_int_to_int32", self.context.i32_type().into(), &[i64b.into()]);
         self.decl_func("dial_byte_to_string", i8b, &[i64b.into()]);
         self.decl_void("dial_bytes_retain", &[i8b.into()]);
         self.decl_void("dial_bytes_release", &[i8b.into()]);
@@ -995,6 +999,10 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Char => self.context.i64_type().into(),
             // byte 同为 i64：一个 8 位无符号值的存储形式（0~255，运行时校验范围）。
             Type::Byte => self.context.i64_type().into(),
+            // 32 位精确宽度标量：IR 就是 i32 / f32，**绝不**统一抬成 i64 / f64。
+            // 这正是 FFI 边界不再让 C 侧读到垃圾数据的关键：签名宽度即真实宽度。
+            Type::Int32 => self.context.i32_type().into(),
+            Type::Float32 => self.context.f32_type().into(),
             Type::String
             | Type::Bytes
             | Type::Array(_)
@@ -1177,6 +1185,19 @@ impl<'ctx> CodeGen<'ctx> {
                     .into();
             }
         }
+        // FFI 边界若出现 f32 ↔ f64 宽度不一致，显式 fpext / fptrunc，
+        // 绝不把位模式原样递给 C（那正是「读到垃圾数据」的根因）。
+        if let (BasicTypeEnum::FloatType(ft), BasicTypeEnum::FloatType(tt)) = (from, to) {
+            if ft.get_bit_width() < tt.get_bit_width() {
+                return self.builder
+                    .build_float_ext(v.into_float_value(), tt, "abi.fpext")
+                    .unwrap().into();
+            } else if ft.get_bit_width() > tt.get_bit_width() {
+                return self.builder
+                    .build_float_trunc(v.into_float_value(), tt, "abi.fptrunc")
+                    .unwrap().into();
+            }
+        }
         v
     }
 
@@ -1195,6 +1216,17 @@ impl<'ctx> CodeGen<'ctx> {
         if *t == Type::Float {
             self.builder
                 .build_float_to_signed_int(v.into_float_value(), self.context.i64_type(), "ftoi")
+                .unwrap()
+        } else if *t == Type::Float32 {
+            let f = self.builder
+                .build_float_ext(v.into_float_value(), self.context.f64_type(), "f32toi")
+                .unwrap();
+            self.builder
+                .build_float_to_signed_int(f, self.context.i64_type(), "ftoi")
+                .unwrap()
+        } else if *t == Type::Int32 {
+            self.builder
+                .build_int_s_extend(v.into_int_value(), self.context.i64_type(), "i32toi")
                 .unwrap()
         } else if *t == Type::Bool {
             self.builder
@@ -1331,6 +1363,8 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Bool => self.context.bool_type().const_int(0, false).into(),
             Type::Char => self.context.i64_type().const_int(0, false).into(),
             Type::Byte => self.context.i64_type().const_int(0, false).into(),
+            Type::Int32 => self.context.i32_type().const_int(0, false).into(),
+            Type::Float32 => self.context.f32_type().const_float(0.0).into(),
             Type::String
             | Type::Bytes
             | Type::Array(_)
@@ -1557,6 +1591,8 @@ impl<'ctx> CodeGen<'ctx> {
         let (name, bits, enc): (&str, u64, u32) = match t {
             Type::Int => ("int", 64, 0x05),     // DW_ATE_signed
             Type::Float => ("float", 64, 0x04), // DW_ATE_float
+            Type::Int32 => ("int32", 32, 0x05),      // DW_ATE_signed（真实 i32）
+            Type::Float32 => ("float32", 32, 0x04),  // DW_ATE_float（真实 f32）
             Type::Bool => ("bool", 1, 0x02),    // DW_ATE_boolean（IR 为 i1）
             Type::Char => ("char", 64, 0x05),   // Unicode 码点，IR 为 i64
             Type::Byte => ("byte", 64, 0x07),   // DW_ATE_unsigned（IR 为 i64）
@@ -4436,6 +4472,30 @@ impl<'ctx> CodeGen<'ctx> {
                         let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
                         Ok(self.call_c("dial_int_to_byte", &[v.into()]))
                     }
+                    // 32 位精确宽度转换（FFI / 位级标量）：
+                    // int_to_int32 走 C 侧范围校验并直接产出 i32；其余三条是纯 LLVM 宽度指令。
+                    "int_to_int32" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.call_c("dial_int_to_int32", &[v.into()]))
+                    }
+                    "int32_to_int" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.builder
+                            .build_int_s_extend(v.into_int_value(), self.context.i64_type(), "i32toi")
+                            .unwrap().into())
+                    }
+                    "float_to_float32" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.builder
+                            .build_float_trunc(v.into_float_value(), self.context.f32_type(), "f64tof32")
+                            .unwrap().into())
+                    }
+                    "float32_to_float" => {
+                        let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                        Ok(self.builder
+                            .build_float_ext(v.into_float_value(), self.context.f64_type(), "f32tof64")
+                            .unwrap().into())
+                    }
                     // v1.04 FFI：C 侧缓冲区 → Dial 对象（复制出新对象，受 ARC 管理）。
                     // 与 as_c_str() / as_ptr() 的「借用」正好反向，构成完整数据总线。
                     "string_from_cstr" => {
@@ -5192,6 +5252,18 @@ impl<'ctx> CodeGen<'ctx> {
                             match ty {
                                 Type::Int => Ok(self.call_c("dial_int_to_string", &[val.into()])),
                                 Type::Float => Ok(self.call_c("dial_float_to_string", &[val.into()])),
+                                Type::Int32 => {
+                                    let i = self.builder
+                                        .build_int_s_extend(val.into_int_value(), self.context.i64_type(), "str.i32")
+                                        .unwrap();
+                                    Ok(self.call_c("dial_int_to_string", &[i.into()]))
+                                }
+                                Type::Float32 => {
+                                    let f = self.builder
+                                        .build_float_ext(val.into_float_value(), self.context.f64_type(), "str.f32")
+                                        .unwrap();
+                                    Ok(self.call_c("dial_float_to_string", &[f.into()]))
+                                }
                                 // char -> 1~4 字节的 UTF-8 字符串（v0.98.2）。
                                 Type::Char => Ok(self.call_c("dial_char_to_string", &[val.into()])),
                                 Type::String => Ok(val), // 字符串自身，无需转换
@@ -6263,7 +6335,10 @@ impl<'ctx> CodeGen<'ctx> {
                 }
                 let lval = self.gen_expr(l, function, scopes, func_values, functions, structs)?;
                 let rval = self.gen_expr(r, function, scopes, func_values, functions, structs)?;
-                let res_ty = if tl == Type::Float || tr == Type::Float {
+                // float32 与 float 同走浮点指令路径（f32 上的 add/sub 由 LLVM 原生支持），
+                // int32 走整数路径（i32 同理）。这里只判「是否浮点」，不冒充结果类型。
+                let res_ty = if tl == Type::Float || tr == Type::Float
+                    || tl == Type::Float32 || tr == Type::Float32 {
                     Type::Float
                 } else {
                     Type::Int
@@ -6335,7 +6410,8 @@ impl<'ctx> CodeGen<'ctx> {
                     let b = rval.into_int_value();
                     let pred = if op == BinOp::Eq { IntPredicate::EQ } else { IntPredicate::NE };
                     self.builder.build_int_compare(pred, a, b, "cmp").unwrap().into()
-                } else if tl == Type::Float || tr == Type::Float {
+                } else if tl == Type::Float || tr == Type::Float
+                    || tl == Type::Float32 || tr == Type::Float32 {
                     let a = self.to_float(lval);
                     let b = self.to_float(rval);
                     let pred = match op {
@@ -6406,6 +6482,18 @@ impl<'ctx> CodeGen<'ctx> {
                     let (sv, owned) = match ty {
                         Type::Int => (self.call_c("dial_int_to_string", &[v.into()]), true),
                         Type::Float => (self.call_c("dial_float_to_string", &[v.into()]), true),
+                        Type::Int32 => {
+                            let i = self.builder
+                                .build_int_s_extend(v.into_int_value(), self.context.i64_type(), "interp.i32")
+                                .unwrap();
+                            (self.call_c("dial_int_to_string", &[i.into()]), true)
+                        }
+                        Type::Float32 => {
+                            let f = self.builder
+                                .build_float_ext(v.into_float_value(), self.context.f64_type(), "interp.f32")
+                                .unwrap();
+                            (self.call_c("dial_float_to_string", &[f.into()]), true)
+                        }
                         Type::Char => (self.call_c("dial_char_to_string", &[v.into()]), true),
                         Type::Bool => {
                             let i = self.to_i64(v, &Type::Bool);
@@ -6591,6 +6679,19 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Float => {
                 self.call_c_void("dial_print_float", &[val.into()]);
             }
+            // 32 位标量提升到 64 位后复用既有打印通道（sext / fpext 均精确，零信息损失）。
+            Type::Int32 => {
+                let i = self.builder
+                    .build_int_s_extend(val.into_int_value(), self.context.i64_type(), "p.i32")
+                    .unwrap();
+                self.call_c_void("dial_print_int", &[i.into()]);
+            }
+            Type::Float32 => {
+                let f = self.builder
+                    .build_float_ext(val.into_float_value(), self.context.f64_type(), "p.f32")
+                    .unwrap();
+                self.call_c_void("dial_print_float", &[f.into()]);
+            }
             Type::Bool => {
                 let i = self.to_i64(val, &Type::Bool);
                 self.call_c_void("dial_print_bool", &[i.into()]);
@@ -6722,6 +6823,19 @@ impl<'ctx> CodeGen<'ctx> {
             }
             Type::Float => {
                 self.call_c_void("dial_print_raw_float", &[val.into()]);
+            }
+            // 32 位标量提升到 64 位后复用既有输出通道（sext / fpext 均精确）。
+            Type::Int32 => {
+                let i = self.builder
+                    .build_int_s_extend(val.into_int_value(), self.context.i64_type(), "pr.i32")
+                    .unwrap();
+                self.call_c_void("dial_print_raw_int", &[i.into()]);
+            }
+            Type::Float32 => {
+                let f = self.builder
+                    .build_float_ext(val.into_float_value(), self.context.f64_type(), "pr.f32")
+                    .unwrap();
+                self.call_c_void("dial_print_raw_float", &[f.into()]);
             }
             Type::Bool => {
                 let i = self.to_i64(val, &Type::Bool);

@@ -70,6 +70,9 @@ DialString dial_bytes_to_string(DialString b);
  */
 int64_t dial_int_to_byte(int64_t v);
 
+/* int -> int32：返回**真实 32 位**（C ABI 宽度），越界 Fail-Fast，绝不静默截断。 */
+int32_t dial_int_to_int32(int64_t v);
+
 /* byte -> string：把字节的**数值**形式写成十进制文本（65 -> "65"） */
 DialString dial_byte_to_string(int64_t b);
 

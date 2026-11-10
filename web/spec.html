@@ -69,6 +69,7 @@
 <li><a href="#55-输出三件套连续输出v099">5.5 输出三件套：连续输出（v0.99）</a></li>
 <li><a href="#56-byte单字节无符号值v099">5.6 byte：单字节无符号值（v0.99）</a></li>
 <li><a href="#57-bytes二进制缓冲区v099">5.7 bytes：二进制缓冲区（v0.99）</a></li>
+<li><a href="#58-int32--float32ffi-精确-32-位宽度标量v110-开发中增补">5.8 int32 / float32：FFI 精确 32 位宽度标量（v1.10 开发中增补）</a></li>
 </ul>
 </li>
 <li><a href="#6-变量与可变性">6. 变量与可变性</a><ul>
@@ -554,7 +555,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── install-dial.sh     # 一键安装（Linux / Termux，支持 curl | bash 一键命令）
 │   ├── install-dial.ps1    # 一键安装（Windows / PowerShell，支持 irm | iex 一键命令）
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
-├── .github/workflows/ci.yml  # GitHub Actions：编译 + 二十七组测试（A–Z+AA）+ 打包发布
+├── .github/workflows/ci.yml  # GitHub Actions：编译 + 二十八组测试（A–Z+AA+AB）+ 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
 ├── web/                    # 官网产物（由 tools/build_web.py 生成；更新日志分页在 web/changelog/）
 └── README.md               # 本文件
@@ -1106,6 +1107,16 @@ int  float  bool  char  string  void  file  error  thread  channel
 <td><strong>单字节无符号值</strong>（v0.99）。<strong>值类型</strong>：与 <code>char</code> 同表示但语义不同——<code>byte</code> 是 0~255 的<strong>数值</strong>，参与算术、比较，经 <code>int_to_byte</code> / <code>byte_to_int</code> 与 <code>int</code> 显式互转；与 <code>char</code>（码点）严格区分，避免「一个字节到底是字符还是数字」的歧义</td>
 </tr>
 <tr>
+<td><code>int32</code></td>
+<td>LLVM <code>i32</code></td>
+<td><strong>32 位有符号整数</strong>（v1.10 开发中增补）。FFI 精确宽度标量：与 <code>int</code>(i64) 严格区分、零隐式转换，经 <code>int_to_int32</code> / <code>int32_to_int</code> 显式互转；<code>int_to_int32</code> 越出 <code>[-2^31, 2^31-1]</code> 当场 Fail-Fast。用于 C 侧 <code>int32_t</code> 参数 / 返回值 / 结构体字段（见 §5.8）</td>
+</tr>
+<tr>
+<td><code>float32</code></td>
+<td>LLVM <code>float</code>（f32）</td>
+<td><strong>32 位浮点</strong>（IEEE 754 binary32，v1.10 开发中增补）。与 <code>float</code>(f64) 严格区分，经 <code>float_to_float32</code> / <code>float32_to_float</code> 显式互转；FFI 边界按 C 的 <code>float</code> 传递，绝不把 <code>double</code> 的位模式递给 C（见 §5.8）</td>
+</tr>
+<tr>
 <td><code>string</code></td>
 <td>LLVM <code>ptr</code>（不透明）</td>
 <td>由 C Runtime 管理的引用计数字符串</td>
@@ -1171,6 +1182,10 @@ int  float  bool  char  string  void  file  error  thread  channel
 <td>❌ 错误。标量（1/4 字节）无法塞进数组的「8 字节槽位」，编译期拒绝（见 <a href="#51-基本类型">§5.1</a>）</td>
 </tr>
 <tr>
+<td><code>int32[]</code> / <code>float32[]</code></td>
+<td>❌ 错误。32 位标量无法塞进数组的「8 字节槽位」，编译期拒绝（与 <code>float[]</code> / <code>bool[]</code> 同理，见 §5.1）</td>
+</tr>
+<tr>
 <td><code>int[][]</code></td>
 <td>✅ <strong>支持</strong>（v0.99）：多维数组 =「元素是数组句柄的数组」，内层 <code>int[]</code> 作为 8 字节句柄统一管理（见 <a href="#116-多维数组与句柄元素数组">§11.6</a>）</td>
 </tr>
@@ -1226,6 +1241,30 @@ Dial 在编译期即切断。</p>
 <td><code>int_to_char(n: int): char</code></td>
 <td><strong>无指令</strong>（恒等）</td>
 <td>码点 → 字符（v0.92）；非法码点在<strong>打印时</strong>才会被 C Runtime 拦截</td>
+</tr>
+<tr>
+<td><code>int_to_int32</code></td>
+<td><code>int_to_int32(x: int): int32</code></td>
+<td>C 侧 <code>dial_int_to_int32</code></td>
+<td>64→32 位；越出 <code>[-2^31, 2^31-1]</code> <strong>当场 Fail-Fast</strong>，绝不静默截断成另一个「合法」值</td>
+</tr>
+<tr>
+<td><code>int32_to_int</code></td>
+<td><code>int32_to_int(x: int32): int</code></td>
+<td>LLVM <code>sext</code></td>
+<td>32→64 位符号扩展，精确、零信息损失</td>
+</tr>
+<tr>
+<td><code>float_to_float32</code></td>
+<td><code>float_to_float32(x: float): float32</code></td>
+<td>LLVM <code>fptrunc</code></td>
+<td>binary64→binary32（IEEE 定义的精度收窄，必须在源码里显式写出）</td>
+</tr>
+<tr>
+<td><code>float32_to_float</code></td>
+<td><code>float32_to_float(x: float32): float</code></td>
+<td>LLVM <code>fpext</code></td>
+<td>binary32→binary64，精确、零信息损失</td>
 </tr>
 </tbody>
 </table>
@@ -1518,6 +1557,94 @@ print(bytes_length(buf));       // 4
 <code>bytes</code> 与 <code>string</code> 互转是<strong>字节级原样拷贝</strong>，不做任何编码转换。</p>
 </blockquote>
 <hr />
+<h3 id="58-int32--float32ffi-精确-32-位宽度标量v110-开发中增补">5.8 <code>int32</code> / <code>float32</code>：FFI 精确 32 位宽度标量（v1.10 开发中增补）</h3>
+<p><strong>为什么必须新增这两个类型。</strong> 在此之前 Dial 只有 <code>int</code>(LLVM <code>i64</code>) 与
+<code>float</code>(LLVM <code>f64</code>)。用它们声明 <code>extern fn</code> 参数时，生成的 C ABI 签名也是
+<code>i64</code> / <code>f64</code>，而 C 侧常常是 <code>int32_t</code> / <code>float</code>：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>用 <code>int</code> / <code>float</code> 声明的后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>C 侧参数是 <code>float</code></td>
+<td><code>f64</code> 的位模式低 32 位<strong>绝不是</strong>那个 float 值，C 读到的必然是垃圾</td>
+</tr>
+<tr>
+<td>C 侧返回 <code>int32_t</code></td>
+<td>C 只写 <code>eax</code>，Dial 按 <code>i64</code> 读 <code>rax</code>，高 32 位是未定义残留</td>
+</tr>
+<tr>
+<td><code>extern struct</code> 含 32 位字段</td>
+<td>编译器算出的 padding / <code>offsetof</code> 与 C 不一致，字段整体读错位</td>
+</tr>
+<tr>
+<td>多参数连续传递</td>
+<td>宽度错位在后续参数上累积，症状是「偶尔对、偶尔错」的隐蔽数据损坏</td>
+</tr>
+</tbody>
+</table>
+<p>这类错误<strong>不会崩溃</strong>：程序带着一个看起来合法的错误值继续跑，往往到很后面才暴露。
+按 §20 Fail-Fast 的口径，宁可编译期把宽度写进类型本身，也不让静默损坏溜过去。</p>
+<p><strong>落地方式（完整一等类型，不是只加 FFI 标注）。</strong></p>
+<table>
+<thead>
+<tr>
+<th>Dial 类型</th>
+<th>LLVM IR</th>
+<th>C 类型</th>
+<th>与 64 位类型的关系</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int</code></td>
+<td><code>i64</code></td>
+<td><code>int64_t</code></td>
+<td>基准</td>
+</tr>
+<tr>
+<td><code>int32</code></td>
+<td><code>i32</code></td>
+<td><code>int32_t</code></td>
+<td>独立类型，零隐式转换</td>
+</tr>
+<tr>
+<td><code>float</code></td>
+<td><code>double</code></td>
+<td><code>double</code></td>
+<td>基准</td>
+</tr>
+<tr>
+<td><code>float32</code></td>
+<td><code>float</code></td>
+<td><code>float</code></td>
+<td>独立类型，零隐式转换</td>
+</tr>
+</tbody>
+</table>
+<p>两者是<strong>值类型</strong>（无 ARC、无堆分配、无空指针），可声明变量 / 参数 / 返回值，
+可参与<strong>同类</strong>算术与比较（<code>int32 + int32 → int32</code>、<code>float32 * float32 → float32</code>），
+可 <code>print</code> / <code>print_raw</code> / <code>str()</code> / 字符串插值，可进 <code>extern struct</code> 字段、
+<code>@asm</code> 输入 / 输出操作数。与 <code>int</code> / <code>float</code> 之间<strong>一律零隐式转换</strong>：
+<code>var x: int32 = 5</code> 是编译错误，必须写 <code>int_to_int32(5)</code>；<code>int32 + 2</code> 也是编译错误。</p>
+<p><code>int32</code> / <code>float32</code> <strong>不进数组与 ARC 容器</strong>（<code>int32[]</code> / <code>float32[]</code> 编译期拒绝），
+也不是 <code>simd&lt;T, N&gt;</code> 的元素类型——这两处的槽位 / 向量语义另有一套宽度模型，
+混进来只会制造新的静默损坏。位运算仍只限 <code>int</code>。</p>
+<p><strong>Fail-Fast 边界。</strong> <code>int_to_int32(x)</code> 是四条转换里唯一走 C 运行时的一条：
+<code>stdlib/dial_bytes.c</code> 的 <code>dial_int_to_int32</code> 先校验 <code>x</code> 落在 int32 值域内，
+越界当场打印真实数值并 <code>dial_assert_fail</code> 终止，绝不返回被截断的值
+（C 里 <code>(int32_t)2147483648</code> 会变成 <code>-2147483648</code>，那是被伪装成合法值的数据损坏）。
+<code>float_to_float32</code> 的精度收窄是 IEEE 754 定义行为，不是数据损坏，但仍必须显式写出。</p>
+<p><strong>回归（AB 组）。</strong> <code>tests/ffi/scalar32_probe.c</code> 的每个函数都用真实 <code>int32_t</code> /
+<code>float</code>，由 <code>tests/ffi/scalar32_probe.dial</code> 声明为 <code>int32</code> / <code>float32</code> 后往返：
+参数、返回值、四个连续 32 位参数、两个连续 <code>float</code> 参数、
+<code>extern struct</code>（<code>sizeof = 24</code>、<code>offsetof = 8/12/16</code>）与双向字段读写逐项比对黄金输出；
+<code>tests/ffi/scalar32_overflow.dial</code> 锁定越界 Fail-Fast；
+<code>tests/bad/s32_*.dial</code> 五个负向用例锁定零隐式转换铁律。</p>
 <h2 id="6-变量与可变性">6. 变量与可变性</h2>
 <h3 id="61-声明">6.1 声明</h3>
 <pre><code class="language-dial">var x: int = 10;      // 可变
@@ -2610,6 +2737,59 @@ let/var x = y;  ─────┤
 </tr>
 </tbody>
 </table>
+<p><strong><code>extern fn</code> / <code>extern struct</code> 的标量宽度（v1.10 增补）</strong>：函数签名与
+<code>extern struct</code> 字段都按 C ABI <strong>真实宽度</strong>生成，不再把一切标量统一抬成 64 位：</p>
+<table>
+<thead>
+<tr>
+<th>Dial 类型</th>
+<th>C 类型</th>
+<th>LLVM 函数签名</th>
+<th><code>extern struct</code> 字段</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>int</code></td>
+<td><code>int64_t</code></td>
+<td><code>i64</code></td>
+<td><code>i64</code></td>
+</tr>
+<tr>
+<td><code>int32</code></td>
+<td><code>int32_t</code></td>
+<td><code>i32</code></td>
+<td><code>i32</code></td>
+</tr>
+<tr>
+<td><code>float</code></td>
+<td><code>double</code></td>
+<td><code>double</code></td>
+<td><code>double</code></td>
+</tr>
+<tr>
+<td><code>float32</code></td>
+<td><code>float</code></td>
+<td><code>float</code></td>
+<td><code>float</code></td>
+</tr>
+<tr>
+<td><code>bool</code></td>
+<td><code>int</code>（默认整型提升）</td>
+<td><code>i32</code></td>
+<td><code>i8</code>（C <code>_Bool</code>，不做提升）</td>
+</tr>
+<tr>
+<td><code>byte</code></td>
+<td><code>uint8_t</code></td>
+<td><code>i8</code></td>
+<td><code>i8</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>int32</code> / <code>float32</code> 的内部 IR 宽度与 FFI 宽度一致，因此 <code>abi_adapt</code> 无需额外
+收窄；它同时补上了 <code>f32 ↔ f64</code> 的 <code>fpext</code> / <code>fptrunc</code> 分支，保证任何宽度
+不一致的路径都显式转换，绝不把位模式原样递给 C。详见 §5.8。</p>
 <h3 id="c-runtime-导出函数">C Runtime 导出函数</h3>
 <p><strong><code>runtime/dial_rt_mem.h</code></strong>（引用计数原语）</p>
 <pre><code class="language-c">void *dial_rc_alloc(int64_t payload_size);          // refcount 初始为 1
@@ -2940,9 +3120,9 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <h2 id="18-测试">18. 测试</h2>
 <pre><code class="language-bash">./tests/run_tests.sh
 </code></pre>
-<p><code>bash tests/run_tests.sh</code> 的<strong>当前全量回归是 A–Z + AA 共二十七组</strong>（526 ✅ / 0 ❌），
+<p><code>bash tests/run_tests.sh</code> 的<strong>当前全量回归是 A–Z + AA + AB 共二十八组</strong>（535 ✅ / 0 ❌），
 全部通过才算绿。下表逐项详列 <strong>A–M 十三组</strong>——这组逐组说明自 v0.9x 沿用至今、
-内容未变，且每一组至今仍在执行；<strong>N–Z 与 AA 组</strong>分别见 §33–§38 各章与
+内容未变，且每一组至今仍在执行；<strong>N–Z 与 AA、AB 组</strong>分别见 §33–§38 各章与
 <code>tests/run_tests.sh</code>（其中 AA 组是手搓 GUI 地基包 <code>gui.dialpkg</code> 的专项回归，见 §38）：</p>
 <table>
 <thead>
@@ -3007,7 +3187,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tbody>
 </table>
 <h4 id="持续集成github-actions">持续集成（GitHub Actions）</h4>
-<p>二十七组检查由 <code>.github/workflows/ci.yml</code> 在<strong>每次 push / PR</strong> 上自动执行
+<p>二十八组检查由 <code>.github/workflows/ci.yml</code> 在<strong>每次 push / PR</strong> 上自动执行
 （AA 组 GUI 实窗验收在无头 Xvfb 下运行；无显示环境时明确跳过并标注，绝不伪装通过）：</p>
 <table>
 <thead>
@@ -3025,7 +3205,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td><strong>测试</strong></td>
-<td><code>bash tests/run_tests.sh</code>（A–Z+AA 全部二十七组，含 AA 组 Xvfb GUI 实窗验收）</td>
+<td><code>bash tests/run_tests.sh</code>（A–Z+AA+AB 全部二十八组，含 AA 组 Xvfb GUI 实窗验收与 AB 组 FFI 32 位往返）</td>
 <td>立即失败</td>
 </tr>
 <tr>
@@ -7752,8 +7932,10 @@ SSE / AVX / NEON。</p>
 实机注入）给 AA 组 +3 条到 <strong>520 ✅</strong>，其后补主题层 + 控件扩展
 （可覆写主题色 / Radio / Slider / ProgressBar）又给 AA 组 +3 条到 <strong>523 ✅</strong>，
 本轮补信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）再给 AA 组
-+3 条断言到 <strong>526 ✅</strong>，全量回归仍为 <strong>A–Z + AA 二十七组</strong>，属
-<strong>未发布的开发中增量</strong>，见 §38 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
++3 条断言到 <strong>526 ✅</strong>，全量回归仍为 <strong>A–Z + AA 二十七组</strong>；
+本轮补 <code>int32</code> / <code>float32</code> 一等类型 + FFI 精确 32 位宽度，新增 AB 组 4 条
+断言与 B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 / 535 ✅</strong>，属
+<strong>未发布的开发中增量</strong>，见 §5.8 / §38 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
 </blockquote>
 <hr />
 <h2 id="34-v104-增补工程工具链并入-v104版本不变">34. v1.04 增补：工程工具链（并入 <code>[v1.04]</code>，版本不变）</h2>
@@ -8745,7 +8927,7 @@ vendor ngtcp2/nghttp3）。<code>text</code> / <code>json</code> / <code>crypto<
 三包都是 <code>version = 1.0.0</code> / <code>abi = 6</code>，三平台静态库由 <code>zig cc</code> 交叉编译、
 零警告零错误；CI 阶段 8 与 <code>stdlib.dialpkg</code> 同一口径，把包版本跟随编译器版本。
 回归分别是 <strong>X / Y / Z 组</strong>（当时全量 A→Z 二十六组 <code>EXIT=0</code>；当前全量已扩为
-A–Z + AA <strong>二十七组</strong>，见 §38）。</p>
+A–Z + AA + AB <strong>二十八组</strong>，见 §38）。</p>
 <table>
 <thead>
 <tr>
@@ -9767,7 +9949,7 @@ offscreen 画布，结束前显式 <code>theme_reset()</code> 不污染）。主
 </blockquote>
 <h3 id="3810-aa-组回归与平台边界">38.10 AA 组回归与平台边界</h3>
 <p><code>tests/run_tests.sh</code> 新增 <strong>AA 组</strong>（全量从 A–Z 二十六组扩为
-A–Z + AA <strong>二十七组</strong>），依次验收：</p>
+A–Z + AA + AB <strong>二十八组</strong>），依次验收：</p>
 <ol>
 <li><code>packages/gui/build.sh</code> 三平台 <code>.a</code> 构建（零警告）+ <code>stb</code> SHA256 自检；</li>
 <li><code>nm -u</code> 检查三份 <code>.a</code> 无平台 GUI 未定义符号；</li>
@@ -9810,9 +9992,9 @@ A–Z + AA <strong>二十七组</strong>），依次验收：</p>
    Xvfb 实窗断言八种控件整树绘制 + <code>flush</code> 上屏全通过；</li>
 <li>卸载 <code>gui</code> 包。</li>
 </ol>
-<p>全量实测 <code>EXIT=0</code>，<strong>526 ✅ / 0 ❌</strong>（AA 组 23 条 <code>aapass</code>：地基层 8 条 +
+<p>全量实测 <code>EXIT=0</code>，<strong>535 ✅ / 0 ❌</strong>（AA 组 23 条 <code>aapass</code>：地基层 8 条 +
 控件框架层 3 条 + 外观层 3 条 + 输入层 3 条 + 主题层 3 条 + 信号层 3 条；W 组上一轮 +4 条
-http 缺陷回归）；
+http 缺陷回归；本轮新增 AB 组 4 条断言 + B 组 5 条零隐式转换负向）；
 Xvfb 实窗能力串 <code>x11/xshm/xrender argb32 filter=best visual_depth=24</code>，
 地基层像素 CRC 稳定 <code>4007435570</code>、外观层 <code>look_crc_normal</code> 稳定
 <code>3884455222</code>、输入层 <code>input_crc_focused</code> 稳定 <code>4147329629</code>；

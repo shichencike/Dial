@@ -803,6 +803,14 @@ impl Parser {
                 self.advance();
                 Type::Float
             }
+            TokenKind::Int32T => {
+                self.advance();
+                Type::Int32
+            }
+            TokenKind::Float32T => {
+                self.advance();
+                Type::Float32
+            }
             TokenKind::BoolT => {
                 self.advance();
                 Type::Bool

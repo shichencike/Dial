@@ -97,7 +97,7 @@ dialc/
 │   ├── install-dial.sh     # 一键安装（Linux / Termux，支持 curl | bash 一键命令）
 │   ├── install-dial.ps1    # 一键安装（Windows / PowerShell，支持 irm | iex 一键命令）
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
-├── .github/workflows/ci.yml  # GitHub Actions：编译 + 二十七组测试（A–Z+AA）+ 打包发布
+├── .github/workflows/ci.yml  # GitHub Actions：编译 + 二十八组测试（A–Z+AA+AB）+ 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
 ├── web/                    # 官网产物（由 tools/build_web.py 生成；更新日志分页在 web/changelog/）
 └── README.md               # 本文件
@@ -482,6 +482,8 @@ int  float  bool  char  string  void  file  error  thread  channel
 | `bool` | LLVM `i1` | 布尔 |
 | `char` | LLVM `i64` | **单个 Unicode 码点**（v0.92）。**值类型**：无 ARC、无堆分配、无空指针。与 `int` 同表示但**类型独立**——不参与 `+ - * /`，只可比较，或经 `char_to_int` / `int_to_char` 显式转换。字面量写作 `'a'`、`'\n'`、`'中'` |
 | `byte` | LLVM `i64` | **单字节无符号值**（v0.99）。**值类型**：与 `char` 同表示但语义不同——`byte` 是 0~255 的**数值**，参与算术、比较，经 `int_to_byte` / `byte_to_int` 与 `int` 显式互转；与 `char`（码点）严格区分，避免「一个字节到底是字符还是数字」的歧义 |
+| `int32` | LLVM `i32` | **32 位有符号整数**（v1.10 开发中增补）。FFI 精确宽度标量：与 `int`(i64) 严格区分、零隐式转换，经 `int_to_int32` / `int32_to_int` 显式互转；`int_to_int32` 越出 `[-2^31, 2^31-1]` 当场 Fail-Fast。用于 C 侧 `int32_t` 参数 / 返回值 / 结构体字段（见 §5.8） |
+| `float32` | LLVM `float`（f32） | **32 位浮点**（IEEE 754 binary32，v1.10 开发中增补）。与 `float`(f64) 严格区分，经 `float_to_float32` / `float32_to_float` 显式互转；FFI 边界按 C 的 `float` 传递，绝不把 `double` 的位模式递给 C（见 §5.8） |
 | `string` | LLVM `ptr`（不透明） | 由 C Runtime 管理的引用计数字符串 |
 | `bytes` | LLVM `ptr`（不透明） | 不可变二进制缓冲区（v0.99），由 C Runtime 管理的引用计数对象，**独立于 `string`**（零隐式转换）。承载任意字节序列（可能非法 UTF-8）。构造/转换见 [§5.7](#57-bytes二进制缓冲区v099) |
 | `int[]` | LLVM `ptr`（不透明） | 由 C Runtime 管理的动态数组。**元素类型可为 `int` 或任意 8 字节句柄**（见 [§11](#11-动态数组-int)）：`string[]` / `int[][]` / `map[]` / `error[]` / `channel[]` / 不透明指针数组；`float[]` / `bool[]` / `byte[]` / `char[]` 等标量非 int 元素在编译期拒绝（见 [§5.2](#52-类型良构性约束)） |
@@ -500,6 +502,7 @@ int  float  bool  char  string  void  file  error  thread  channel
 | --- | --- |
 | `float[]` | ❌ 错误。数组元素只支持 `int` 与 8 字节句柄（string / int[] / map / error / channel / 不透明指针）；`float` 是 double，位模式塞进 int64 槽会失真，必须拒绝（见 [§5.1](#51-基本类型)） |
 | `bool[]` / `byte[]` / `char[]` | ❌ 错误。标量（1/4 字节）无法塞进数组的「8 字节槽位」，编译期拒绝（见 [§5.1](#51-基本类型)） |
+| `int32[]` / `float32[]` | ❌ 错误。32 位标量无法塞进数组的「8 字节槽位」，编译期拒绝（与 `float[]` / `bool[]` 同理，见 §5.1） |
 | `int[][]` | ✅ **支持**（v0.99）：多维数组 =「元素是数组句柄的数组」，内层 `int[]` 作为 8 字节句柄统一管理（见 [§11.6](#116-多维数组与句柄元素数组)） |
 | `var v: void = ...` | ❌ 错误。`void` 不能作为变量类型 |
 
@@ -525,6 +528,10 @@ Dial 在编译期即切断。
 | `float_to_int` | `float_to_int(x: float): int` | LLVM `fptosi` | 浮点 → 整数（向零截断，与 C 的 `(int)` 一致） |
 | `char_to_int` | `char_to_int(c: char): int` | **无指令**（恒等） | 字符 → 码点（v0.92） |
 | `int_to_char` | `int_to_char(n: int): char` | **无指令**（恒等） | 码点 → 字符（v0.92）；非法码点在**打印时**才会被 C Runtime 拦截 |
+| `int_to_int32` | `int_to_int32(x: int): int32` | C 侧 `dial_int_to_int32` | 64→32 位；越出 `[-2^31, 2^31-1]` **当场 Fail-Fast**，绝不静默截断成另一个「合法」值 |
+| `int32_to_int` | `int32_to_int(x: int32): int` | LLVM `sext` | 32→64 位符号扩展，精确、零信息损失 |
+| `float_to_float32` | `float_to_float32(x: float): float32` | LLVM `fptrunc` | binary64→binary32（IEEE 定义的精度收窄，必须在源码里显式写出） |
+| `float32_to_float` | `float32_to_float(x: float32): float` | LLVM `fpext` | binary32→binary64，精确、零信息损失 |
 
 示例：
 
@@ -718,6 +725,54 @@ print(bytes_length(buf));       // 4
 > `bytes` 与 `string` 互转是**字节级原样拷贝**，不做任何编码转换。
 
 ---
+
+### 5.8 `int32` / `float32`：FFI 精确 32 位宽度标量（v1.10 开发中增补）
+
+**为什么必须新增这两个类型。** 在此之前 Dial 只有 `int`(LLVM `i64`) 与
+`float`(LLVM `f64`)。用它们声明 `extern fn` 参数时，生成的 C ABI 签名也是
+`i64` / `f64`，而 C 侧常常是 `int32_t` / `float`：
+
+| 场景 | 用 `int` / `float` 声明的后果 |
+| --- | --- |
+| C 侧参数是 `float` | `f64` 的位模式低 32 位**绝不是**那个 float 值，C 读到的必然是垃圾 |
+| C 侧返回 `int32_t` | C 只写 `eax`，Dial 按 `i64` 读 `rax`，高 32 位是未定义残留 |
+| `extern struct` 含 32 位字段 | 编译器算出的 padding / `offsetof` 与 C 不一致，字段整体读错位 |
+| 多参数连续传递 | 宽度错位在后续参数上累积，症状是「偶尔对、偶尔错」的隐蔽数据损坏 |
+
+这类错误**不会崩溃**：程序带着一个看起来合法的错误值继续跑，往往到很后面才暴露。
+按 §20 Fail-Fast 的口径，宁可编译期把宽度写进类型本身，也不让静默损坏溜过去。
+
+**落地方式（完整一等类型，不是只加 FFI 标注）。**
+
+| Dial 类型 | LLVM IR | C 类型 | 与 64 位类型的关系 |
+| --- | --- | --- | --- |
+| `int` | `i64` | `int64_t` | 基准 |
+| `int32` | `i32` | `int32_t` | 独立类型，零隐式转换 |
+| `float` | `double` | `double` | 基准 |
+| `float32` | `float` | `float` | 独立类型，零隐式转换 |
+
+两者是**值类型**（无 ARC、无堆分配、无空指针），可声明变量 / 参数 / 返回值，
+可参与**同类**算术与比较（`int32 + int32 → int32`、`float32 * float32 → float32`），
+可 `print` / `print_raw` / `str()` / 字符串插值，可进 `extern struct` 字段、
+`@asm` 输入 / 输出操作数。与 `int` / `float` 之间**一律零隐式转换**：
+`var x: int32 = 5` 是编译错误，必须写 `int_to_int32(5)`；`int32 + 2` 也是编译错误。
+
+`int32` / `float32` **不进数组与 ARC 容器**（`int32[]` / `float32[]` 编译期拒绝），
+也不是 `simd<T, N>` 的元素类型——这两处的槽位 / 向量语义另有一套宽度模型，
+混进来只会制造新的静默损坏。位运算仍只限 `int`。
+
+**Fail-Fast 边界。** `int_to_int32(x)` 是四条转换里唯一走 C 运行时的一条：
+`stdlib/dial_bytes.c` 的 `dial_int_to_int32` 先校验 `x` 落在 int32 值域内，
+越界当场打印真实数值并 `dial_assert_fail` 终止，绝不返回被截断的值
+（C 里 `(int32_t)2147483648` 会变成 `-2147483648`，那是被伪装成合法值的数据损坏）。
+`float_to_float32` 的精度收窄是 IEEE 754 定义行为，不是数据损坏，但仍必须显式写出。
+
+**回归（AB 组）。** `tests/ffi/scalar32_probe.c` 的每个函数都用真实 `int32_t` /
+`float`，由 `tests/ffi/scalar32_probe.dial` 声明为 `int32` / `float32` 后往返：
+参数、返回值、四个连续 32 位参数、两个连续 `float` 参数、
+`extern struct`（`sizeof = 24`、`offsetof = 8/12/16`）与双向字段读写逐项比对黄金输出；
+`tests/ffi/scalar32_overflow.dial` 锁定越界 Fail-Fast；
+`tests/bad/s32_*.dial` 五个负向用例锁定零隐式转换铁律。
 
 ## 6. 变量与可变性
 
@@ -1425,6 +1480,22 @@ x = x;   // 先 retain（计数 1→2），再 release（2→1），绝不会先
 | 变量绑定（共享） | `dial_string_retain` / `dial_array_retain` / `dial_map_retain` |
 | 作用域结束 | `dial_string_release` / `dial_array_release` / `dial_map_release` |
 
+**`extern fn` / `extern struct` 的标量宽度（v1.10 增补）**：函数签名与
+`extern struct` 字段都按 C ABI **真实宽度**生成，不再把一切标量统一抬成 64 位：
+
+| Dial 类型 | C 类型 | LLVM 函数签名 | `extern struct` 字段 |
+| --- | --- | --- | --- |
+| `int` | `int64_t` | `i64` | `i64` |
+| `int32` | `int32_t` | `i32` | `i32` |
+| `float` | `double` | `double` | `double` |
+| `float32` | `float` | `float` | `float` |
+| `bool` | `int`（默认整型提升） | `i32` | `i8`（C `_Bool`，不做提升） |
+| `byte` | `uint8_t` | `i8` | `i8` |
+
+`int32` / `float32` 的内部 IR 宽度与 FFI 宽度一致，因此 `abi_adapt` 无需额外
+收窄；它同时补上了 `f32 ↔ f64` 的 `fpext` / `fptrunc` 分支，保证任何宽度
+不一致的路径都显式转换，绝不把位模式原样递给 C。详见 §5.8。
+
 ### C Runtime 导出函数
 
 **`runtime/dial_rt_mem.h`**（引用计数原语）
@@ -1644,9 +1715,9 @@ print("");        // -> Hi
 ./tests/run_tests.sh
 ```
 
-`bash tests/run_tests.sh` 的**当前全量回归是 A–Z + AA 共二十七组**（526 ✅ / 0 ❌），
+`bash tests/run_tests.sh` 的**当前全量回归是 A–Z + AA + AB 共二十八组**（535 ✅ / 0 ❌），
 全部通过才算绿。下表逐项详列 **A–M 十三组**——这组逐组说明自 v0.9x 沿用至今、
-内容未变，且每一组至今仍在执行；**N–Z 与 AA 组**分别见 §33–§38 各章与
+内容未变，且每一组至今仍在执行；**N–Z 与 AA、AB 组**分别见 §33–§38 各章与
 `tests/run_tests.sh`（其中 AA 组是手搓 GUI 地基包 `gui.dialpkg` 的专项回归，见 §38）：
 
 | 组 | 内容 |
@@ -1667,13 +1738,13 @@ print("");        // -> Hi
 
 #### 持续集成（GitHub Actions）
 
-二十七组检查由 `.github/workflows/ci.yml` 在**每次 push / PR** 上自动执行
+二十八组检查由 `.github/workflows/ci.yml` 在**每次 push / PR** 上自动执行
 （AA 组 GUI 实窗验收在无头 Xvfb 下运行；无显示环境时明确跳过并标注，绝不伪装通过）：
 
 | 阶段 | 做什么 | 不通过的后果 |
 | --- | --- | --- |
 | **编译** | 装 LLVM 18 + Rust → `cargo build --release --locked` | 立即失败，PR 不可合并 |
-| **测试** | `bash tests/run_tests.sh`（A–Z+AA 全部二十七组，含 AA 组 Xvfb GUI 实窗验收） | 立即失败 |
+| **测试** | `bash tests/run_tests.sh`（A–Z+AA+AB 全部二十八组，含 AA 组 Xvfb GUI 实窗验收与 AB 组 FFI 32 位往返） | 立即失败 |
 | **CVE 暴力检测** | `python3 tools/cve_check.py --repeat 10`——8 个已登记漏洞各有专门 PoC，每例重复 10 次跑，确认**修复后确实不再复现** | 立即失败（漏洞回归 = 修复失效，必须当场发现） |
 | **锚点校验** | `python3 tools/check_links.py`——README / CHANGELOG 的内部链接必须全部可解析 | 立即失败（防止再次出现「点不动的链接」） |
 | **协议流纯净性** | `python3 tools/check_lsp_stdout_purity.py`——LSP 运行时用到的模块与被 LSP 调用的函数里不得出现 `println!` | 立即失败（stdout 是协议流，裸输出会让编辑器卡死） |
@@ -4813,8 +4884,10 @@ SSE / AVX / NEON。
 > 实机注入）给 AA 组 +3 条到 **520 ✅**，其后补主题层 + 控件扩展
 > （可覆写主题色 / Radio / Slider / ProgressBar）又给 AA 组 +3 条到 **523 ✅**，
 > 本轮补信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）再给 AA 组
-> +3 条断言到 **526 ✅**，全量回归仍为 **A–Z + AA 二十七组**，属
-> **未发布的开发中增量**，见 §38 / §37.10 与 CHANGELOG `[未发布]` 段。
+> +3 条断言到 **526 ✅**，全量回归仍为 **A–Z + AA 二十七组**；
+> 本轮补 `int32` / `float32` 一等类型 + FFI 精确 32 位宽度，新增 AB 组 4 条
+> 断言与 B 组 5 条零隐式转换负向，扩为 **A–Z + AA + AB 二十八组 / 535 ✅**，属
+> **未发布的开发中增量**，见 §5.8 / §38 / §37.10 与 CHANGELOG `[未发布]` 段。
 
 
 ---
@@ -5473,7 +5546,7 @@ vendor ngtcp2/nghttp3）。`text` / `json` / `crypto` 三包已落地，见 §37
 三包都是 `version = 1.0.0` / `abi = 6`，三平台静态库由 `zig cc` 交叉编译、
 零警告零错误；CI 阶段 8 与 `stdlib.dialpkg` 同一口径，把包版本跟随编译器版本。
 回归分别是 **X / Y / Z 组**（当时全量 A→Z 二十六组 `EXIT=0`；当前全量已扩为
-A–Z + AA **二十七组**，见 §38）。
+A–Z + AA + AB **二十八组**，见 §38）。
 
 | 包 | 实现路线 | 关键决策与边界 |
 | --- | --- | --- |
@@ -6114,7 +6187,7 @@ print(string_from_cstr(dial_gui_widget_text(box1)));   // 借用指针 → ARC �
 ### 38.10 AA 组回归与平台边界
 
 `tests/run_tests.sh` 新增 **AA 组**（全量从 A–Z 二十六组扩为
-A–Z + AA **二十七组**），依次验收：
+A–Z + AA + AB **二十八组**），依次验收：
 
 1. `packages/gui/build.sh` 三平台 `.a` 构建（零警告）+ `stb` SHA256 自检；
 2. `nm -u` 检查三份 `.a` 无平台 GUI 未定义符号；
@@ -6157,9 +6230,9 @@ A–Z + AA **二十七组**），依次验收：
    Xvfb 实窗断言八种控件整树绘制 + `flush` 上屏全通过；
 12. 卸载 `gui` 包。
 
-全量实测 `EXIT=0`，**526 ✅ / 0 ❌**（AA 组 23 条 `aapass`：地基层 8 条 +
+全量实测 `EXIT=0`，**535 ✅ / 0 ❌**（AA 组 23 条 `aapass`：地基层 8 条 +
 控件框架层 3 条 + 外观层 3 条 + 输入层 3 条 + 主题层 3 条 + 信号层 3 条；W 组上一轮 +4 条
-http 缺陷回归）；
+http 缺陷回归；本轮新增 AB 组 4 条断言 + B 组 5 条零隐式转换负向）；
 Xvfb 实窗能力串 `x11/xshm/xrender argb32 filter=best visual_depth=24`，
 地基层像素 CRC 稳定 `4007435570`、外观层 `look_crc_normal` 稳定
 `3884455222`、输入层 `input_crc_focused` 稳定 `4147329629`；

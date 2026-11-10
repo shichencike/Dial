@@ -90,6 +90,8 @@ pub enum TokenKind {
     // 类型关键字
     IntT,
     FloatT,
+    Int32T,   // int32（32 位有符号整数，FFI 精确宽度）
+    Float32T, // float32（IEEE 754 binary32）
     BoolT,
     CharT, // char（v0.92）
     ByteT, // byte（v0.98.2）：单字节无符号值 0~255
@@ -589,6 +591,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "struct" => TokenKind::Struct,
                 "int" => TokenKind::IntT,
                 "float" => TokenKind::FloatT,
+                "int32" => TokenKind::Int32T,
+                "float32" => TokenKind::Float32T,
                 "bool" => TokenKind::BoolT,
                 "char" => TokenKind::CharT,
                 "byte" => TokenKind::ByteT,

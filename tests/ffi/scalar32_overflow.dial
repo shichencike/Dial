@@ -1,0 +1,9 @@
+// Fail-Fast：int -> int32 越界必须当场终止，绝不静默截断成另一个值。
+// 2147483648 = INT32_MAX + 1；C 里 (int32_t)2147483648 会变成 -2147483648，
+// 那是被伪装成合法值的数据损坏，Dial 拒绝这种降级。
+fn main(): int {
+    var x: int32 = int_to_int32(2147483648);
+    print(x);
+    print(9999);
+    return 0;
+}

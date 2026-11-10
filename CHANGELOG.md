@@ -25,7 +25,9 @@
 **主题：手搓 GUI 六层——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
 + 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）
-+ 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）；
++ 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）
++ **`int32` / `float32` 一等类型 + FFI 精确 32 位宽度**（C 侧按 `int32_t` / `float`
+  读取不再拿到错位垃圾数据，见 README §5.8）；
 并修复 `http.dialpkg` 三处 Fail-Fast / 目标平台可用性缺陷**（见下文 `### Fixed`）。
 详见 [README §38](README.md#38-手搓-gui-地基包guidialpkg) 与 README §37.10。
 
@@ -42,11 +44,36 @@
 > 控件框架层再给 AA 组增 3 条断言到 **510 ✅**，成品控件外观层又增 3 条到
 > **513 ✅**，再上一轮 `http.dialpkg` 缺陷修复给 W 组增 4 条断言到 **517 ✅**，
 > 上一轮 GUI 输入层给 AA 组增 3 条断言到 **520 ✅**，其后主题层 / 控件扩展
-> 又给 AA 组增 3 条断言到 **523 ✅**，本轮信号槽 / 控件事件订阅（6 类可订阅
-> 纯值信号 + 每树环形队列）再给 AA 组增 3 条断言到 **526 ✅**。
-> 八者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
+> 又给 AA 组增 3 条断言到 **523 ✅**，上一轮信号槽 / 控件事件订阅（6 类可订阅
+> 纯值信号 + 每树环形队列）再给 AA 组增 3 条断言到 **526 ✅**；本轮补
+> `int32` / `float32` 一等类型 + FFI 精确 32 位宽度，新增 AB 组 4 条断言与
+> B 组 5 条零隐式转换负向，扩为 **A–Z + AA + AB 二十八组 / 535 ✅**。
+> 九者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
+
+- **`int32` / `float32` 完整一等类型 + FFI 精确 32 位宽度**（README §5.8）：
+  解决「只有 `int`(i64) / `float`(f64)，传给按 `int32_t` / `float` 读取的 C 侧
+  时静默读到垃圾数据」这一隐蔽数据损坏。
+  - 词法 / AST / 语义 / codegen 全链路新增 `int32`(LLVM `i32`) 与
+    `float32`(LLVM `f32`)；值类型、无 ARC、可声明变量 / 参数 / 返回值，
+    可参与**同类**算术与比较，可 `print` / `print_raw` / `str()` / 插值。
+  - **零隐式转换铁律不变**：与 `int` / `float` 之间必须显式
+    `int_to_int32` / `int32_to_int` / `float_to_float32` / `float32_to_float`；
+    前一条走 C 侧范围校验，越出 int32 值域当场 Fail-Fast，绝不静默截断。
+  - **FFI 精确宽度**：`ffi_type_to_llvm` / `cstruct_field_llvm` 按真实 i32 / f32
+    生成签名与 `extern struct` 字段；`abi_adapt` 补 `f32 ↔ f64` 的
+    `fpext` / `fptrunc`；`@asm` 输入 / 输出白名单纳入新类型；DWARF 给出 32 位
+    精确宽度与编码；LSP 语义高亮归入类型关键字。
+  - 边界如实标注：`int32[]` / `float32[]` 编译期拒绝（8 字节槽位模型），
+    `simd<T, N>` 元素仍限原有标量，位运算仍只限 `int`。
+  - 回归新增 **AB 组 4 条**：`tests/ffi/scalar32_probe.c` 用真实 `int32_t` /
+    `float` 探针，逐项验证参数 / 返回值 / 多参数 / `extern struct`
+    `sizeof=24` 与 `offsetof=8/12/16` / 双向字段读写与黄金输出逐字节一致；
+    `tests/ffi/scalar32_overflow.dial` 锁定越界 Fail-Fast（哨兵 9999 不打印）；
+    `tests/bad/s32_*.dial` 五个负向用例锁定零隐式转换。
+  - 全量回归由 **A–Z + AA 二十七组 / 526 ✅** 扩为
+    **A–Z + AA + AB 二十八组 / 535 ✅ / 0 ❌**。
 
 - **`gui.dialpkg`：手搓 GUI 六层**（README §38）：不用 Qt / GTK / SDL，纯 C 自绘。
   ① 地基层（窗 + 事件 + 绘图 + 字体，55 个 `extern fn`）；
@@ -285,7 +312,7 @@
 
 ### 测试与交付
 
-- `bash tests/run_tests.sh` **A–Z + AA 二十七组全套通过（526 ✅ / 0 ❌，AA 组本轮 +3 条）**；
+- `bash tests/run_tests.sh` **A–Z + AA + AB 二十八组全套通过（535 ✅ / 0 ❌，AB 组本轮 +4 条 + B 组 5 条负向）**；
   Xvfb 实窗 `EXIT=0`，能力串
   `x11/xshm/xrender argb32 filter=best visual_depth=24`，地基层像素 CRC 稳定
   `4007435570`、外观层 `look_crc_normal` 稳定 `3884455222`、输入层
