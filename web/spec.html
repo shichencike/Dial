@@ -221,6 +221,7 @@
 </ul>
 </li>
 <li><a href="#2510-官方标准库-stdlibdialpkg独立发布">25.10 官方标准库 stdlib.dialpkg（独立发布）</a></li>
+<li><a href="#2511-包内-dial-源码模块srcv110-增补">25.11 包内 Dial 源码模块（src/，v1.10 增补）</a></li>
 </ul>
 </li>
 <li><a href="#26-可恢复异常trycatchthrow">26. 可恢复异常（try/catch/throw）</a><ul>
@@ -4156,7 +4157,8 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <code>dialc</code> 自己认识自己的格式，一步到位。</p>
 </blockquote>
 <h3 id="252-包内结构与接口签名供-lsp-与-sema-使用">25.2 包内结构与接口签名（供 LSP 与 Sema 使用）</h3>
-<p>解压后的包<strong>必须</strong>包含以下三个核心部分：</p>
+<p>解压后的包<strong>必须</strong>包含以下三个核心部分，另可<strong>选带</strong>一个 <code>src/</code> 目录（v1.10 增补，
+见 §25.11）：</p>
 <table>
 <thead>
 <tr>
@@ -4178,14 +4180,21 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 </tr>
 <tr>
 <td><code>manifest.txt</code></td>
-<td><strong>映射字典</strong>：Target Triple → 机器码文件名；另含包名、ABI 版本号、各文件的 sha256</td>
+<td><strong>映射字典</strong>：Target Triple → 机器码文件名；另含包名、ABI 版本号、各文件的 sha256；有 <code>src/</code> 时还含模块名 → 源码路径的 <code>src</code> 映射</td>
 <td>否（纯文本 / JSON）</td>
+</tr>
+<tr>
+<td><code>src/</code> <strong>目录</strong>（可选）</td>
+<td>随包分发的 <strong>Dial 源码模块</strong>（<code>.dial</code>）。由 <code>dial.toml</code> 的 <code>[src]</code> 段显式声明，装包后可直接裸名 <code>import</code>，无需复制到用户项目</td>
+<td>是（Dial 源码，由 dialc 前端合并编译）</td>
 </tr>
 </tbody>
 </table>
 <pre><code>sqlite.dialpkg
 ├── manifest.txt          # 映射字典：Target Triple -&gt; 机器码文件
 ├── sqlite.diali          # 唯一的接口声明（平台无关）
+├── src/                  # 可选：随包分发的 Dial 源码模块（见 §25.11）
+│   └── sqlite_oo.dial    #   [src] 段显式声明；装包后 import &quot;sqlite_oo&quot;; 即用
 └── lib/                  # 全平台预编译静态库
     ├── linux-x86_64.a
     ├── linux-x86_64-musl.a
@@ -4195,7 +4204,10 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
     └── windows-arm64.lib
 </code></pre>
 <p><strong>三件套的职责切分</strong>：<code>manifest.txt</code> 回答「有哪些平台、机器码在哪、可信吗」；
-<code>xxx.diali</code> 回答「这些函数长什么样」；<code>lib/</code> 负责「给我当前平台的那份机器码」。</p>
+<code>xxx.diali</code> 回答「这些函数长什么样」；<code>lib/</code> 负责「给我当前平台的那份机器码」。
+可选的 <code>src/</code> 是第四件套——它只放 <strong>Dial 源码模块</strong>，回答「包作者还想随包附上哪些
+用 Dial 写好的惯用 API / 辅助函数」；这些文件<strong>不产生新的机器码</strong>，由 dialc 前端
+按本地源码模块的方式合并编译（详见 §25.11）。</p>
 <blockquote>
 <p><strong>为什么全量打包而不是一个平台一个包</strong>：机器码是<strong>编译产物</strong>，不是源码——
 它不会被人阅读、不会被手工编辑、不会产生「版本分叉」的困扰；而几十 MB 的下载成本
@@ -4516,8 +4528,8 @@ Dial 目前<strong>没有</strong> <code>dialc uninstall</code> 命令，因为�
 <td>§25.5：全部走 GitHub Releases，零中心化</td>
 </tr>
 <tr>
-<td>源码分发 / 就地编译</td>
-<td>只分发<strong>机器码 + 签名</strong>，用户机器无需装对方的工具链</td>
+<td><strong>C 源码分发 / 用外部工具链就地编译 C 代码</strong></td>
+<td>只分发<strong>机器码 + 签名</strong>（外加可选的 Dial 源码模块，见 §25.11），用户机器无需装对方的 C 工具链。<code>src/</code> 里的 <code>.dial</code> 不是 C 源码：它由 dialc <strong>自己的前端</strong>合并编译，不调用任何外部编译器、不执行构建脚本，包仍是纯数据</td>
 </tr>
 <tr>
 <td>包内执行构建脚本</td>
@@ -4799,6 +4811,110 @@ fn main(): int {
 以免它抢走 <code>releases/latest</code> 的指向；历史 <code>stdlib-v1.0.0</code> Release 及其链接仍然可用。
 破坏性 ABI 变更时同步递增 <code>STDLIB_ABI</code> 与包 <code>abi</code>，旧用户会收到明确的「ABI 不兼容」报错与重装指引。</p>
 </blockquote>
+<h3 id="2511-包内-dial-源码模块srcv110-增补">25.11 包内 Dial 源码模块（<code>src/</code>，v1.10 增补）</h3>
+<blockquote>
+<p><code>.dialpkg</code> 从「机器码 + 签名」扩展为「机器码 + 签名 + <strong>随包 Dial 源码模块</strong>」：
+包作者可以把用 Dial 写好的惯用 API / 辅助函数放进包内 <code>src/</code> 目录，由
+<code>dial.toml</code> 的 <code>[src]</code> 段<strong>显式声明</strong>；用户装包后直接写裸名 <code>import "xxx";</code>
+就能用，<strong>不必再手动复制源码文件到自己的项目</strong>。包仍是<strong>纯数据</strong>——不执行
+构建脚本、不调用外部编译器，<code>src/*.dial</code> 由 dialc 自己的前端合并编译。</p>
+</blockquote>
+<p><strong>动机</strong>：此前包只分发 <code>.diali</code>（声明）与 <code>lib/*.a</code>（机器码），任何用 Dial 写的
+上层封装都只能留在仓库里，用户装了包却拿不到，只能自己 <code>cp</code> 一份到项目目录。
+这既割裂了「装包即用」，也让封装版本与包版本容易对不上。<code>src/</code> 把这类源码变成
+<strong>包的一部分</strong>，与机器码同生共死、同受哈希保护。</p>
+<p><strong>清单声明</strong>（<code>dial.toml</code>，显式声明而非自动扫描——包作者完全掌控哪些源码随包分发）：</p>
+<pre><code class="language-toml">[src]
+mylib_oo = &quot;src/mylib_oo.dial&quot;     # 键 = import 裸名；值 = src/ 下的 .dial
+helpers  = &quot;src/helpers.dial&quot;
+</code></pre>
+<p>键是裸名（不含路径分隔符、不带 <code>.dial</code> 后缀），值必须位于 <code>src/</code> 目录下、以
+<code>.dial</code> 结尾、且文件真实存在。<code>dialc pack</code> 把它们与 <code>.diali</code> / <code>.a</code> 一起收进包，
+并在 <code>manifest.txt</code> 里写一份 <code>src</code> 映射（模块名 → 包内路径）：</p>
+<pre><code class="language-text">mylib.dialpkg
+├── manifest.txt          # 含 &quot;src&quot;: { &quot;mylib_oo&quot;: &quot;src/mylib_oo.dial&quot; }
+├── mylib.diali
+├── src/
+│   └── mylib_oo.dial     # 已在 sha256 字典里登记
+└── lib/&lt;triple&gt;/libmylib.a
+</code></pre>
+<p><strong>三级 import 优先</strong>（<code>main.rs::collect_sources</code>，见 §34.2）：</p>
+<table>
+<thead>
+<tr>
+<th>级别</th>
+<th>命中条件</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>① 本地源码</td>
+<td>相对路径 / <code>.dial</code> 后缀 / 同目录存在 <code>&lt;name&gt;.dial</code></td>
+<td>展开用户项目里的文件（<strong>最高优先</strong>，覆盖包内副本）</td>
+</tr>
+<tr>
+<td>② 包内 <code>src/</code> 模块</td>
+<td>裸名命中某已安装包 <code>manifest.src</code> 的键</td>
+<td>从包缓存 <code>src/</code> 展开该 <code>.dial</code>，与 ① 同一套递归 / 去重 / AST 合并</td>
+</tr>
+<tr>
+<td>③ 包名</td>
+<td>其余裸名</td>
+<td>读 <code>.diali</code> + 按 Target Triple 选 <code>.a</code>（v0.93 以来语义不变）</td>
+</tr>
+</tbody>
+</table>
+<p>② 级模块内部若写 <code>import "mylib";</code>，会照常汇总到 ③ 级，因此模块可以直接调用包里的
+<code>extern fn</code>——「源码模块 + 机器码」是同一个包的两面，不需要用户写第二个 <code>import</code>。
+同名模块被多个包声明时<strong>报错</strong>（不静默任选一份），遵守 Fail-Fast。</p>
+<p><strong>与机器码同级的完整性保护</strong>：<code>src/*.dial</code> 与其它文件一样进 <code>manifest.sha256</code> 字典，
+安装期 <code>verify_archive</code> 逐个校验；此外<strong>每次按 ② 级读取时</strong>还会再校验一次
+（<code>package::find_src_module</code> → <code>verify_sha256</code>），防止安装后源码被悄悄替换——
+源码改动会直接改变程序行为，不能因为「只是文本」就放宽（§25.4「校验先于一切」）。</p>
+<p><strong>向后兼容</strong>：<code>manifest.txt</code> 的 <code>src</code> 是<strong>可选字段</strong>，缺失即空映射；<code>[src]</code> 段也是
+可选的。旧包、旧脚本（<code>tools/make_stdlib_pkg.py</code> / <code>make_sample_pkg.sh</code>）生成的包
+没有任何改动，照常 <code>pack</code> / <code>install</code> / <code>import</code>。<code>abi</code> / <code>version</code> / 既有签名一律不变。</p>
+<p><strong>Fail-Fast</strong>（全部在 <code>dialc pack</code> 打包期就地报错，不拖到安装 / 编译期）：</p>
+<table>
+<thead>
+<tr>
+<th>非法写法</th>
+<th>拒绝原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>foo = "src/foo.txt"</code></td>
+<td>不是 <code>.dial</code></td>
+</tr>
+<tr>
+<td><code>foo = "foo.dial"</code></td>
+<td>不在 <code>src/</code> 目录下（src 目录单独存放 Dial 源码）</td>
+</tr>
+<tr>
+<td><code>bad/name = "src/x.dial"</code></td>
+<td>模块名不是裸名</td>
+</tr>
+<tr>
+<td><code>foo = "src/missing.dial"</code></td>
+<td>声明的文件不存在</td>
+</tr>
+<tr>
+<td><code>[src]</code> 段重复 / 未知段</td>
+<td>TOML 子集只允许 <code>[targets]</code> / <code>[src]</code> 各一次</td>
+</tr>
+</tbody>
+</table>
+<p><strong>与 §25.7 边界的关系</strong>：那条边界禁的是「把 <strong>C 源码</strong>发给用户、让用户在自己机器上
+用外部工具链就地编译」——那会让用户被迫装对方的编译器、引入构建脚本副作用面。
+<code>src/</code> 里的 <code>.dial</code> 是<strong>由 dialc 自己的前端</strong>合并编译的源码模块，两者不是一回事；
+包依旧是纯数据、零钩子、解压即可用。</p>
+<p><strong>回归（Q 组）</strong>：<code>tests/run_tests.sh</code> 的 Q 组第 10) 块用隔离 <code>HOME</code> 走完整链路——
+<code>dialc new</code> 骨架预建空 <code>src/</code>、<code>[src]</code> 段显式声明、<code>pack</code> 产物含 <code>src/*.dial</code> +
+<code>manifest.src</code> 映射 + 逐文件 SHA256、<code>install</code> 落地包缓存、<strong>不复制任何文件</strong>直接
+<code>import "qsrc_oo";</code> 联动包函数输出 <code>42</code>、篡改包内源码被 SHA256 拦截、本地同名
+<code>.dial</code> 优先于包内副本、4 条非法声明 Fail-Fast，10 条断言全绿。</p>
 <hr />
 <blockquote>
 <p>本章为<strong>生态规划</strong>，不含任何实现承诺与时间表。<strong>完整规范</strong>（平台矩阵、包内目录树、
@@ -7954,9 +8070,11 @@ SSE / AVX / NEON。</p>
 封装（<code>gui_oo.dial</code>，纯源码、不进包、零 <code>extern fn</code> 增量）新增 AD 组 6 条断言，
 第 9 层滚动视图 / 第 10 层右键上下文菜单 / 第 11 层悬浮提示 / 第 12 层状态栏 /
 第 13 层通知气泡（均为纯内存对象 + 离屏画布，零 DISPLAY 依赖）各新增 AA 组
-+1 条断言，扩为 <strong>A–Z + AA + AB + AC + AD 三十组 / 560 ✅</strong>，属
-<strong>未发布的开发中增量</strong>，见 §5.8 / §37.12 / §38.14 / §38.15 / §38.16 / §38.17 /
-§38.18 / §38.19 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
++1 条断言，扩为 <strong>A–Z + AA + AB + AC + AD 三十组 / 560 ✅</strong>；随后 dialpkg
+<code>src/</code> 随包 Dial 源码模块（§25.11）给 Q 组新增 10 条断言，扩为
+<strong>三十组 / 570 ✅</strong>，属
+<strong>未发布的开发中增量</strong>，见 §5.8 / §25.11 / §34.2 / §34.5 / §37.12 / §38.14 /
+§38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
 </blockquote>
 <hr />
 <h2 id="34-v104-增补工程工具链并入-v104版本不变">34. v1.04 增补：工程工具链（并入 <code>[v1.04]</code>，版本不变）</h2>
@@ -8054,13 +8172,17 @@ import &quot;./util.dial&quot;;        // 显式相对路径
 import &quot;helper&quot;;             // 裸名：同目录存在 helper.dial 即视为本地模块
 fn main(): int { print(helper() + inner()); return 0; }
 </code></pre>
-<p>判定规则（按顺序）：</p>
+<p>判定规则（按顺序，<strong>三级优先</strong>，v1.10 增补第 3 级）：</p>
 <ol>
-<li>以 <code>.dial</code> 结尾，或以 <code>./</code> / <code>../</code> 开头 → <strong>本地源码</strong>；未写后缀时自动补 <code>.dial</code>。</li>
-<li>裸名且<strong>同目录存在 <code>&lt;name&gt;.dial</code></strong> → <strong>本地源码</strong>（清单 A1 里 <code>import "util";</code> 的原样写法）。</li>
-<li>其余裸名 → <strong>已安装包</strong>（v0.93 以来的语义完全不变）。</li>
+<li>以 <code>.dial</code> 结尾，或以 <code>./</code> / <code>../</code> 开头 → <strong>本地源码</strong>（第一级）；未写后缀时自动补 <code>.dial</code>。</li>
+<li>裸名且<strong>同目录存在 <code>&lt;name&gt;.dial</code></strong> → <strong>本地源码</strong>（第一级，清单 A1 里 <code>import "util";</code> 的原样写法）。</li>
+<li>裸名且<strong>某已安装包的 <code>manifest.src</code> 声明了该模块名</strong> → <strong>包内 <code>src/</code> 的 Dial 源码模块</strong>
+   （第二级，见 §25.11）——直接从 <code>~/.dial/packages/&lt;name&gt;/src/</code> 展开，<strong>无需复制文件</strong>。</li>
+<li>其余裸名 → <strong>已安装包</strong>（第三级，v0.93 以来的语义完全不变，读 <code>.diali</code> + 选 <code>.a</code>）。</li>
 </ol>
-<p>编译器递归展开本地模块、合并 AST 后统一编译：</p>
+<p>本地文件永远优先于包内副本（「改一份源码试试」不必动已安装的包）；包内源码模块
+内部若写了 <code>import "包名";</code>，会照常汇总到第三级，故模块能直接调用包里的 <code>extern fn</code>。</p>
+<p>编译器递归展开第 1 / 2 级模块、合并 AST 后统一编译：</p>
 <ul>
 <li><strong>循环引用</strong>当场报错并列出完整链路（<code>a.dial -&gt; b.dial -&gt; a.dial</code>）；</li>
 <li><strong>同名函数 / 结构体</strong>报错并给出两个文件的路径；</li>
@@ -8123,14 +8245,21 @@ license = &quot;MIT OR Apache-2.0&quot;
 [targets]
 # 值既是磁盘上相对项目根的路径，也是 .dialpkg 内的路径
 x86_64-linux-gnu = &quot;lib/x86_64-linux-gnu/libmylib.a&quot;
+
+[src]
+# 可选：随包分发的 Dial 源码模块（见 §25.11）。键 = import 裸名，值 = src/ 下的 .dial。
+mylib_oo = &quot;src/mylib_oo.dial&quot;
 </code></pre>
 <blockquote>
 <p><code>abi</code> 必须与编译器 <code>package::STDLIB_ABI</code> 一致，否则 <code>dialc install</code> 会在<strong>链接期前</strong>
 明确拦截并给重装指引（§37.6 起为 <code>6</code>）。<code>dialc new</code> 生成的骨架已改为直接引用
 <code>package::STDLIB_ABI</code>，不会写死数字；这里手写示例时按当前 ABI 填，别照抄旧值。</p>
 </blockquote>
-<p><code>dial.toml</code> 只支持 <code>key = "字符串"</code> / <code>key = 整数</code> 与 <code>[targets]</code> 一个段的 <strong>TOML 子集</strong>：
-未知字段、重复字段、点分键、缺字段一律<strong>显式报错</strong>，绝不悄悄忽略配置项。
+<p><code>dial.toml</code> 只支持 <code>key = "字符串"</code> / <code>key = 整数</code> 与 <code>[targets]</code> / <code>[src]</code> 两个段的
+<strong>TOML 子集</strong>：未知字段、重复字段、点分键、缺字段一律<strong>显式报错</strong>，绝不悄悄忽略配置项。
+<code>[src]</code> 段额外收紧：键必须是裸名（不含路径分隔符、不带 <code>.dial</code> 后缀），值必须位于
+<code>src/</code> 目录下且以 <code>.dial</code> 结尾，声明的文件必须真实存在——四条任一不满足都在<strong>打包期</strong>
+Fail-Fast，不拖到安装 / 编译期（见 §25.11）。
 清单是本地作者文件、字段固定，故不引入新的 TOML 依赖（三个 target 的静态构建也少一份供应链负担）；
 读外部不可信输入的 <code>manifest.txt</code> 仍用 <code>serde_json</code>（§25.2）。</p>
 <p><code>pack</code> 的校验与打包：</p>
@@ -8138,18 +8267,21 @@ x86_64-linux-gnu = &quot;lib/x86_64-linux-gnu/libmylib.a&quot;
 <li>校验 <code>iface</code> 存在且以 <code>.diali</code> 结尾；每个 target 的库存在、后缀为 <code>.a</code> / <code>.lib</code>、
    且带 ar 归档魔数 <code>!&lt;arch&gt;\n</code>——<strong>包分发只认静态归档，J 组铁律一字未动</strong>；</li>
 <li>生成 <code>manifest.txt</code>（字段与 <code>package::parse_manifest</code> 完全对齐：<code>name / version / abi /
-   iface / license / targets / sha256</code>），逐文件算 SHA256；</li>
+   iface / license / targets / src / sha256</code>），逐文件算 SHA256（含 <code>src/*.dial</code>）；
+   <code>src</code> 是<strong>可选字段</strong>，旧包没有它照常能装（向后兼容）；</li>
 <li>压成 <code>.dialpkg</code>（zip 容器，路径用正斜杠、顺序确定）；</li>
 <li><strong>打包后就地自检</strong>：用 <code>parse_manifest</code> 解析刚生成的 manifest、再用 <code>verify_archive</code>
    逐文件复核哈希——产物一定过得了 <code>dialc install</code> 的两道校验，不把问题留到安装期。</li>
 </ol>
 <p>完整闭环（<code>dialc new</code> 生成的骨架可直接走完）：</p>
-<pre><code class="language-bash">dialc new ./mylib mylib            # 生成 dial.toml / main.dial / mylib.diali / lib/
-# 把编译好的 .a 放到 dial.toml [targets] 登记的路径
+<pre><code class="language-bash">dialc new ./mylib mylib            # 生成 dial.toml / main.dial / mylib.diali / lib/ / src/
+# 把编译好的 .a 放到 dial.toml [targets] 登记的路径；把 .dial 源码模块放进 src/
+# 并在 [src] 段登记（可选）
 dialc pack ./mylib -o mylib.dialpkg
 dialc install mylib.dialpkg
 dialc list
-# 源码里：import &quot;mylib&quot;; 然后调用 .diali 里声明的 extern fn
+# 源码里：import &quot;mylib&quot;; 调用 .diali 里的 extern fn；
+#        import &quot;mylib_oo&quot;; 直接用包内 src/ 的 Dial 源码模块，无需复制文件
 dialc uninstall mylib
 </code></pre>
 <p><code>tools/make_stdlib_pkg.py</code> <strong>保留</strong>：CI 生成官方三平台 <code>stdlib.dialpkg</code> 仍走它
@@ -9104,7 +9236,7 @@ fn main(): int {
 负向（未知方法 / 参数类型 / 参数个数 / 缺 self / 重复方法 / 空块）+ 诊断面向用户。
 全量回归 <strong>538 ✅ → 549 ✅ / 0 ❌</strong>，A–Z + AA + AB + AC 二十九组全绿。
 （本节记录 B1 落地时的验收快照；其后 GUI 第 8 层 OO 封装新增 AD 组，当前全量
-<strong>560 ✅ / 三十组</strong>，见 §38.14 / §38.15 / §38.16 / §38.17 / §38.18 / §38.19。）</p>
+<strong>570 ✅ / 三十组</strong>，见 §25.11 / §34.2 / §34.5 / §38.14 / §38.15 / §38.16 / §38.17 / §38.18 / §38.19。）</p>
 <hr />
 <h2 id="38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</h2>
 <blockquote>

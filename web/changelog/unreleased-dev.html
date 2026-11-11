@@ -104,17 +104,40 @@ GUI 第 11 层悬浮提示（同样是纯内存对象 + 离屏画布，零 DISPL
 再给 AA 组 +1 条断言到 <strong>558 ✅</strong>；本轮 GUI 第 12 层状态栏（纯内存对象 +
 离屏画布，零 DISPLAY 依赖）再给 AA 组 +1 条断言到 <strong>559 ✅</strong>；本轮 GUI 第 13 层
 通知气泡（纯内存队列对象 + 离屏画布，零 DISPLAY 依赖）再给 AA 组 +1 条断言，
-扩为 <strong>A–Z + AA + AB + AC + AD 三十组 / 560 ✅</strong>。
+扩为 <strong>A–Z + AA + AB + AC + AD 三十组 / 560 ✅</strong>；本轮 dialpkg <code>src/</code> 随包
+Dial 源码模块（README §25.11）给 Q 组新增 10 条断言，扩为 <strong>三十组 / 570 ✅</strong>。
 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>
 <ul>
-<li><strong>B1「<code>impl</code> 方法块」语言特性落地</strong>（README §37.12）：<code>[v1.10]</code> 发布后增量，
+<li><strong><code>dialpkg</code> 新增 <code>src/</code> 目录：随包分发的 Dial 源码模块</strong>（README §25.11）：
+  <code>.dialpkg</code> 从「机器码 + 签名」扩展为「机器码 + 签名 + 随包 Dial 源码模块」。</li>
+<li><strong>清单显式声明</strong>：<code>dial.toml</code> 新增 <code>[src]</code> 段（<code>模块名 = "src/x.dial"</code>），
+    键是 <code>import</code> 裸名、值必须位于 <code>src/</code> 下且以 <code>.dial</code> 结尾、文件必须真实存在；
+    <code>dialc new</code> 骨架预建空 <code>src/</code>。未知段 / 重复段 / 非法路径一律打包期 Fail-Fast。</li>
+<li><strong>装包即用</strong>：<code>manifest.txt</code> 新增<strong>可选</strong> <code>src</code> 映射，前端 <code>collect_sources</code>
+    把 import 解析扩为三级（① 本地源码 → ② 包内 <code>src/</code> 模块 → ③ 包名）；
+    ② 级与本地模块走同一套递归 / 去重 / AST 合并，模块内部 <code>import "包名"</code>
+    照常汇总到 ③ 级，故源码模块能直接调用包里的 <code>extern fn</code>。</li>
+<li><strong>与机器码同级保护</strong>：<code>src/*.dial</code> 进 <code>sha256</code> 字典、安装期逐文件校验，
+    且每次 ② 级读取前再校验一次（<code>find_src_module</code> → <code>verify_sha256</code>），
+    篡改包内源码被当场拦下；同名模块被多个包声明时报错而非静默任选。</li>
+<li><strong>向后兼容</strong>：<code>src</code> 字段缺失即空映射，旧包 / 旧脚本产物零改动照常可用；
+    <code>abi</code> / <code>version</code> / 既有签名一律不变，包仍是纯数据、零构建脚本、零外部编译器。</li>
+<li>
+<p><strong>回归</strong>：Q 组第 10) 块 10 条断言全绿（骨架预建 / 产物含 src + manifest.src +
+    SHA256 / 安装落地 / 不复制文件直接 <code>import "qsrc_oo";</code> 联动包函数 = 42 /
+    篡改拦截 / 本地同名文件优先 / 4 条非法声明 Fail-Fast），
+    全量 <strong>560 ✅ → 570 ✅ / 0 ❌</strong>。</p>
+</li>
+<li>
+<p><strong>B1「<code>impl</code> 方法块」语言特性落地</strong>（README §37.12）：<code>[v1.10]</code> 发布后增量，
   这是 v1.04 第三批曾记为「明确不碰——暂用 <code>fn</code> 替代」的能力，本轮真正补上。
   让用户 <code>struct</code> 与包不透明句柄（<code>Type::Struct</code> / <code>Type::Opaque</code>，如 GUI 的
   <code>GuiWindow</code> / <code>GuiMenu</code>）能写 <code>impl T { fn m(self, ...) { ... } }</code>，调用
   <code>obj.m(args)</code> 编译期降级为静态函数调用（self 即首参）——<code>win.draw()</code> 就是
-  <code>dial_gui_window_draw(win)</code> 的面向对象写法，<strong>包 <code>.diali</code> 契约一个字都不用改</strong>。</li>
+  <code>dial_gui_window_draw(win)</code> 的面向对象写法，<strong>包 <code>.diali</code> 契约一个字都不用改</strong>。</p>
+</li>
 <li><strong>宪法</strong>：不新增关键字（<code>impl</code> 走 <code>Ident("impl")</code> + 类型名 + <code>{</code> 识别，与
     <code>test</code> 块同例，旧程序把 <code>impl</code> 当变量名/函数名仍合法）；<code>obj.m(args)</code> 与手写
     普通函数调用完全同构，<strong>编译产物 / ABI 逐字节不变</strong>，不碰 <code>STDLIB_ABI</code>、
