@@ -75,7 +75,7 @@ dialc/
 │   ├── dial_map.h / .c     #   Map（int → int，ARC）
 │   └── dial_io.h / .c      #   打印 / 读行
 ├── packages/               # 官方 .dialpkg 包（http / text / json / crypto / gui）
-│   └── gui/                #   手搓 GUI 九层：七层 C 契约 + 第 9 层滚动视图（169 个 extern fn）+ 第 8 层 Dial 侧 OO 封装（gui_oo.dial，纯源码、不进包）（见 §38）
+│   └── gui/                #   手搓 GUI 十层：七层 C 契约 + 第 9/10 层（169+15=184 个 extern fn）+ 第 8 层 Dial 侧 OO 封装（gui_oo.dial，纯源码、不进包）（见 §38）
 ├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
 ├── tests/
 │   ├── run_tests.sh        # 端到端测试（A 正向 / B 负向 / C 契约 / D Fail-Fast / E 对照 /
@@ -1705,7 +1705,7 @@ print("");        // -> Hi
 | 一等函数 / 函数指针 | **已支持**（v1.03）：`fn(A, B): R` 一等函数指针、函数名作右值、高阶数组方法与 C 回调（见 §32）。**闭包仍不支持**：跨回调状态须显式经 `rawptr<void>` 透传 |
 | `map<K,V>` 的 `string` 值、`map.values()` 对非 `int` 值 | **未实现**（v1.00）：`V` 只支持标量，`values()` 只支持 `V = int`——`get` 未命中时的默认 string 对象会带来所有权移交歧义，见 [§29.5](#295-重型类型与容器) |
 | LSP 的重命名 / 跨文件引用查找 / 格式化 | **已实现**（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的**引用边**（`src/index.rs`），格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作。能力清单见 [§28.7.1](#2871-当前-lsp-能力清单)。另见 v1.04 新增的 `dialc fmt` 命令行格式化（§34）。**尚未实现**：跨工作区的**全量**引用图（当前只覆盖已打开文件与已加载包） |
-| GUI 控件树 / 布局 / 信号槽 | **九层已落地**（`gui.dialpkg`，见 [§38](#38-手搓-gui-地基包guidialpkg)）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13）+ 滚动视图层（视口裁剪 + 滚动条几何 / 命中 / 绘制 + 偏移推进，零 DISPLAY 依赖，见 §38.15），共 **169 个 `extern fn`**；**第 8 层 Dial 侧 OO 封装**（`gui_oo.dial`，168 个 `impl` 方法，纯源码、不进包、零 `extern fn` 增量，见 §38.14）。**仍未实现**：多行文本 / IME、撤销重做、C → Dial 反向回调、富文本编辑、图片解码。Win32 后端**仅交叉编译、未实机验证**（XTest 实机注入仅在 Linux/Xvfb 验收） |
+| GUI 控件树 / 布局 / 信号槽 | **十层已落地**（`gui.dialpkg`，见 [§38](#38-手搓-gui-地基包guidialpkg)）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13）+ 滚动视图层（视口裁剪 + 滚动条几何 / 命中 / 绘制 + 偏移推进，零 DISPLAY 依赖，见 §38.15）+ 右键上下文菜单层（复用第 7 层菜单 + 锚点 / 命中 / 悬停 / 选中 / 绘制，零 DISPLAY 依赖，见 §38.16），共 **184 个 `extern fn`**；**第 8 层 Dial 侧 OO 封装**（`gui_oo.dial`，183 个 `impl` 方法，纯源码、不进包、零 `extern fn` 增量，见 §38.14）。**仍未实现**：多行文本 / IME、撤销重做、C → Dial 反向回调、富文本编辑、图片解码。Win32 后端**仅交叉编译、未实机验证**（XTest 实机注入仅在 Linux/Xvfb 验收） |
 | `impl` 方法块（B1） | **已支持**（v1.10 开发中增量）：`impl T { fn m(self, ...) }` 让用户 `struct` 与包不透明句柄（如 `GuiWindow` / `GuiMenu`）挂方法，`obj.m(args)` 编译期降级为静态调用（self 即首参），**ABI 不变、旧签名一字不动、不新增关键字**（`impl` 仍可作普通标识符），见 [§37.12](#3712-b1impl-方法块v110-开发中增补落地)。**现役边界**：只支持具名类型（`Struct` / `Opaque`）；方法内 `self.f = ...` 因 Dial struct **值语义**只改副本、不回写调用者（与 Rust `&mut self` 不同）；暂不支持同类型变参 `...xs`、C ABI 导出、对标量/内建容器挂 impl、关联函数（无 self 的 `T::new()`）。B2 泛型 / B3 枚举 ADT / B4 闭包 / B5 重载维持原裁决 |
 
 ---
@@ -4892,9 +4892,9 @@ SSE / AVX / NEON。
 > 补 B1 `impl` 方法块（语言特性）新增 AC 组 5 条断言，扩为
 > **A–Z + AA + AB + AC 二十九组 / 549 ✅**；本轮再补 GUI 第 8 层 Dial 侧 OO
 > 封装（`gui_oo.dial`，纯源码、不进包、零 `extern fn` 增量）新增 AD 组 6 条断言，
-> 第 9 层滚动视图（纯内存对象 + 离屏画布，零 DISPLAY 依赖）新增 AA 组 +1 条断言，
-> 扩为 **A–Z + AA + AB + AC + AD 三十组 / 556 ✅**，属
-> **未发布的开发中增量**，见 §5.8 / §37.12 / §38.14 / §38.15 / §37.10 与 CHANGELOG `[未发布]` 段。
+> 第 9 层滚动视图 / 第 10 层右键上下文菜单（均为纯内存对象 + 离屏画布，零 DISPLAY 依赖）各新增 AA 组 +1 条断言，
+> 扩为 **A–Z + AA + AB + AC + AD 三十组 / 557 ✅**，属
+> **未发布的开发中增量**，见 §5.8 / §37.12 / §38.14 / §38.15 / §38.16 / §37.10 与 CHANGELOG `[未发布]` 段。
 
 
 ---
@@ -5681,16 +5681,16 @@ fn main(): int {
 负向（未知方法 / 参数类型 / 参数个数 / 缺 self / 重复方法 / 空块）+ 诊断面向用户。
 全量回归 **538 ✅ → 549 ✅ / 0 ❌**，A–Z + AA + AB + AC 二十九组全绿。
 （本节记录 B1 落地时的验收快照；其后 GUI 第 8 层 OO 封装新增 AD 组，当前全量
-**556 ✅ / 三十组**，见 §38.14 / §38.15。）
+**557 ✅ / 三十组**，见 §38.14 / §38.15 / §38.16。）
 
 ---
 
 ## 38. 手搓 GUI 地基包：gui.dialpkg
 
 > **定位与交付口径**：本章描述 `packages/gui/` 产出的 `gui.dialpkg`——一个
-> **不用 Qt / GTK / SDL、纯 C 手搓**的 GUI 包，覆盖**七层 C 契约 + 第 9 层滚动视图、
-> 共 169 个 `extern fn`**，其上是**第 8 层 Dial 侧 OO 封装层**（不新增 `extern fn`，
-> 见 §38.14），第 9 层滚动视图同属 C 契约（见 §38.15）：
+> **不用 Qt / GTK / SDL、纯 C 手搓**的 GUI 包，覆盖**七层 C 契约 + 第 9 层滚动视图 +
+> 第 10 层右键上下文菜单、共 184 个 `extern fn`**，其上是**第 8 层 Dial 侧 OO 封装层**
+> （不新增 `extern fn`，见 §38.14），第 9 / 第 10 层同属 C 契约（见 §38.15 / §38.16）：
 > ① **地基层**（窗 + 事件 + 绘图 + 字体，55 个 `extern fn`）；
 > ② **控件框架层**（`GuiWidget` 树 + 布局 + 命中测试 + 主动事件分发，
 > 28 个 `extern fn`，见 §38.2 / §38.9）；
@@ -5705,16 +5705,20 @@ fn main(): int {
 > ⑦ **菜单 / 对话框覆盖层**（窗口级顶栏菜单 + 弹出菜单 + 模态对话框，复用第 6 层
 > 纯值信号队列：`SELECTED` / `SUBMITTED` 两类信号 + `dial_gui_menu_*` /
 > `dial_gui_dialog_*` / `dial_gui_window_*` 统一分发，24 个 `extern fn`，见 §38.13）；
-> ⑧ **Dial 侧 OO 封装层**（`gui_oo.dial` 用 **168 个 `impl` 方法**包住上述 169 个
+> ⑧ **Dial 侧 OO 封装层**（`gui_oo.dial` 用 **183 个 `impl` 方法**包住上述 184 个
 > C 风格函数，`win.draw()` 等价 `dial_gui_window_draw(win)`；**纯 Dial 源码、不进
 > `.dialpkg`、零 `extern fn` 增量**，见 §38.14）。
 > ⑨ **滚动视图层**（`dial_gui_scroll_*`，视口裁剪 + 滚动条几何 / 命中 / 绘制 +
 > 偏移推进 wheel / drag / scroll_to；纯内存对象 + 离屏画布，零 DISPLAY 依赖；
-> 15 个 `extern fn`，见 §38.15）；纯 C、零平台符号、绝不 C → Dial 反向回调，
+> 15 个 `extern fn`，见 §38.15）；
+> ⑩ **右键上下文菜单层**（`dial_gui_context_*`，复用第 7 层 `GuiMenu` + 弹出锚点 +
+> 命中 / 悬停 / 选中 / 绘制；借用语义不转移菜单所有权；纯内存对象 + 离屏画布，
+> 零 DISPLAY 依赖；15 个 `extern fn`，见 §38.16）。
+> 两层同为纯 C、零平台符号、绝不 C → Dial 反向回调，
 > 旧 154 个签名一字不动。
 > 它是 `[v1.10]`（标签 `v1.1`）发布**之后**的**开发中增量**：编译器版本仍为
 > `1.10.0`，**未升版本号、未打标签、未发 Release**（见 CHANGELOG `[未发布]` 段）。
-> 前七层都是**真实现**，不是占位接口；九层一律沿用「只追加 `extern fn`（第 8 层
+> 前七层都是**真实现**，不是占位接口；十层一律沿用「只追加 `extern fn`（第 8 层
 > 连 `extern fn` 都不加）、ABI 不变、绝不 C → Dial 反向回调」的宪法。
 
 **架构分叉（用户拍板）**：
@@ -5731,7 +5735,7 @@ fn main(): int {
 | 主题层 / 控件扩展范围（第 5 层） | **14 个可覆写颜色角色**（`theme_set/get/reset/role_count`；默认值逐字不变，故 `look_crc_normal` 不漂移）+ Radio / Slider / ProgressBar 三种成品控件 + `value` / `range` / `group` 纯值访问器（11 个 `extern fn`）；仍只追加、ABI 不变、零反向回调，旧 109 个签名一字不动 |
 | 信号槽 / 控件事件订阅范围（第 6 层） | **6 类可订阅纯值信号**（点击 / 勾选翻转 / 文本变更 / 值变更 / 焦点变化 / 提交）+ 每树一个**环形队列**（容量 64 / 72 字节纯值信号块 / 零订阅零开销）+ subscribe / pending / data / pop / clear / dropped（10 个 `extern fn`，见 §38.12）；纯 C、零平台符号、**绝不 C → Dial 反向回调**，旧 120 个签名一字不动 |
 | 菜单 / 对话框覆盖层范围（第 7 层） | **窗口级覆盖层**：顶栏菜单（`File` / `Edit` / `Help` 横排，22px 高）+ 弹出菜单（锚点定位、分隔符 / 禁用项不可命中）+ 模态对话框（`OK` / `Cancel` / `Yes` / `No` 按钮位，半透明遮罩 + 居中盒）。三者**不进控件树**，几何 / 绘制 CRC 逐字节不漂移；菜单项 / 对话框按钮选中事件**复用第 6 层纯值信号队列**（`SELECTED` a=item id、kind=`MENU`；`SUBMITTED` a=结果码、kind=`DIALOG`），所有权归窗口、关闭时一并释放（24 个 `extern fn`，见 §38.13）；纯 C、零平台符号、**绝不 C → Dial 反向回调**，旧 130 个签名一字不动 |
-| **Dial 侧 OO 封装层范围（第 8 层）** | `packages/gui/gui_oo.dial`：**168 个 `impl` 方法**覆盖 169 个 C 风格 `extern fn`（入口 `dial_gui_app_new` 无实例可挂，仍用原函数）；按 7 个不透明句柄 `GuiApp/Window/Painter/Font/Widget/Menu/Dialog` 分组，方法名去掉 `dial_gui_` 与类型前缀；进程级全局状态 / 工厂归到 `GuiApp` 命名空间（self 忽略）。**纯 Dial 源码、不进 `.dialpkg`、零 `extern fn` 增量、ABI 不变**；用户 `import "./gui_oo.dial";` 一行即生效（模块内 `import "gui";` 由前端汇总去重），见 §38.14 |
+| **Dial 侧 OO 封装层范围（第 8 层）** | `packages/gui/gui_oo.dial`：**183 个 `impl` 方法**覆盖 184 个 C 风格 `extern fn`（入口 `dial_gui_app_new` 无实例可挂，仍用原函数）；按 7 个不透明句柄 `GuiApp/Window/Painter/Font/Widget/Menu/Dialog` 分组，方法名去掉 `dial_gui_` 与类型前缀；进程级全局状态 / 工厂归到 `GuiApp` 命名空间（self 忽略）。**纯 Dial 源码、不进 `.dialpkg`、零 `extern fn` 增量、ABI 不变**；用户 `import "./gui_oo.dial";` 一行即生效（模块内 `import "gui";` 由前端汇总去重），见 §38.14 |
 | **滚动视图层范围（第 9 层）** | **窗口级辅助覆盖层**：`GuiScroll` 纯内存对象，视口裁剪（调用方按 `off_x/off_y` 平移内容 + `dial_gui_set_clip`）+ 滚动条几何 / 命中（轨道 / 滑块 / 无）/ 绘制（`gui_raster_*` 主题色）+ 偏移推进（`wheel` / `drag` / `scroll_to`，越界自动夹紧 `[0, 内容-视口]`）。15 个 `extern fn`，与旧 154 个同契约；纯 C、零平台符号、**绝不 C → Dial 反向回调**，旧 154 个签名一字不动，见 §38.15 |
 | 事件分发 | **主动分发，绝不 C → Dial 反向回调**：C 侧写 `packed struct` 纯值块 / 纯值四态 / 纯值编辑态 / 纯值颜色表 / 纯值信号队列，Dial 侧 `poll/wait` 后读；字符串由 `string_from_cstr` 复制成 ARC 对象。C 管 C 的、ARC 管 ARC 的，零隐式开销 |
 | 包契约 | **追加函数、ABI 不变**：七层都只加 `extern fn` + 句柄，旧签名一字不动（框架层追加前 55 个、外观层追加前 83 个、输入层追加前 95 个、主题层追加前 109 个、信号层追加前 120 个，菜单/对话框层追加前 130 个），`abi = 6` / `version = 1.10.0` 不变，重新 `pack` + `install`（同 ABI 覆盖）；**第 8 层不在此列**——它是 `.dial` 源码层，不进包、不增签名、无需重新 `pack` / `install` |
@@ -5753,7 +5757,8 @@ packages/gui/
 ├── src/dial_gui_signal.c # 信号层：可订阅纯值信号块 + 每树环形队列（纯 C，三平台共用）
 ├── src/dial_gui_menu.c   # 第 7 层：菜单 / 对话框覆盖层（纯 C，三平台共用，零平台符号）
 ├── src/dial_gui_scroll.c # 第 9 层：滚动视图（视口裁剪 + 滚动条几何/命中/绘制 + 偏移推进，纯 C，三平台共用，零平台符号）
-├── gui_oo.dial           # 第 8 层：Dial 侧 OO 封装（168 个 impl 方法，纯源码、不进 .dialpkg）
+├── src/dial_gui_context.c# 第 10 层：右键上下文菜单（复用第 7 层 GuiMenu，纯 C，三平台共用，零平台符号）
+├── gui_oo.dial           # 第 8 层：Dial 侧 OO 封装（183 个 impl 方法，纯源码、不进 .dialpkg）
 ├── src/gui_font8.h       # 内置 ASCII 点阵静态常量表
 ├── src/dial_gui_x11.c    # POSIX 后端（X11 + XShm + XRender，dlopen）
 ├── src/dial_gui_win32.c  # Windows 后端（GDI DIBSection，LoadLibraryA）
@@ -6368,7 +6373,7 @@ XTest 实窗注入实测 `keys 2 / focus 2 / mouse 6 / act 2 / shift 1` 全绿�
 
 ### 38.11 能力边界（不许当已支持）
 
-- **九层已实现**：地基层（窗 / 事件 / 绘图 / 字体）、**控件框架层**
+- **十层已实现**：地基层（窗 / 事件 / 绘图 / 字体）、**控件框架层**
   （Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发）、**成品控件
   外观层**（Label / Button / CheckBox + 内置浅色默认主题 + 四态绘制 + 纯值
   事件推进）、**输入层**（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能
@@ -6377,8 +6382,9 @@ XTest 实窗注入实测 `keys 2 / focus 2 / mouse 6 / act 2 / shift 1` 全绿�
   纯值信号 + 每树环形队列，见 §38.12）、**菜单 / 对话框覆盖层**（顶栏菜单 + 弹出
   菜单 + 模态对话框，复用第 6 层纯值信号队列，见 §38.13）、**滚动视图层**
   （视口裁剪 + 滚动条几何 / 命中 / 绘制 + 偏移推进，零 DISPLAY 依赖，见 §38.15）
-  都已有真实现并写进 `gui.diali`（共 **169 个 `extern fn`**）；**第 8 层 Dial 侧
-  OO 封装层**（`gui_oo.dial`，168 个 `impl` 方法，纯 Dial 源码、不进包、零
+  + **右键上下文菜单层**（复用第 7 层菜单 + 锚点 / 命中 / 悬停 / 选中 / 绘制，
+  零 DISPLAY 依赖，见 §38.16）都已有真实现并写进 `gui.diali`（共 **184 个
+  `extern fn`**）；**第 8 层 Dial 侧 OO 封装层**（`gui_oo.dial`，183 个 `impl` 方法，纯 Dial 源码、不进包、零
   `extern fn` 增量，见 §38.14）也已落地。主题色仍是**进程级全局表**、按角色覆写，
   不支持每控件独立配色；Slider 只支持水平方向、点击设值（拖动未接线）。
   **仍未实现、也不写进契约**：C → Dial 反向回调（信号槽已由第 6 层以纯值信号
@@ -6559,9 +6565,10 @@ X11 / GDI 未定义符号；X11 / Win32 两端无需改动（菜单 / 对话框�
 
 ### 38.14 Dial 侧 OO 封装层（第 8 层）
 
-> 前七层都是 **C 契约**：`gui.diali` 里 169 个 `extern fn`（前七层 154 + 第 9 层
-> 滚动视图 15，见 §38.15）。第 8 层换一种形态——**不新增任何 `extern fn`**，而是用
-> §37.12 落地的 B1 `impl` 方法块，在 `packages/gui/gui_oo.dial` 里写 **168 个纯
+> 前七层都是 **C 契约**：`gui.diali` 里 184 个 `extern fn`（前七层 154 + 第 9 层
+> 滚动视图 15 + 第 10 层右键上下文菜单 15，见 §38.15 / §38.16）。第 8 层换一种
+> 形态——**不新增任何 `extern fn`**，而是用 §37.12 落地的 B1 `impl` 方法块，在
+> `packages/gui/gui_oo.dial` 里写 **183 个纯
 > Dial 方法**，把 C 风格调用编译期
 > 脱糖成习惯写法。这一层是**纯源码**，不进 `.dialpkg`、不碰三平台 `.a`、
 > `abi = 6` / `version = 1.10.0` 不变、旧 154 个签名一字不动。
@@ -6598,7 +6605,7 @@ win.flush();                     // == dial_gui_window_flush(win)
 | 接收者 | 第一个形参是 7 个句柄之一 → 挂到该类型并降为 `self`；否则归到 `GuiApp` 作命名空间（`self` 被忽略） |
 | 方法名 | 去掉 `dial_gui_` 与接收者类型前缀（`app_` / `window_` / `painter_` / `font_` / `widget_` / `menu_` / `dialog_`） |
 | 保留字改名 | `widget_select` → `select_range`（`select` 是关键字）；`menu_add_item` 形参 `label` → `txt`（`label` 是关键字） |
-| 覆盖 | 169 个 `extern fn` → **168 个方法** + 1 个入口 `dial_gui_app_new`（B1 不支持关联函数，无实例可挂） |
+| 覆盖 | 184 个 `extern fn` → **183 个方法** + 1 个入口 `dial_gui_app_new`（B1 不支持关联函数，无实例可挂） |
 
 8 组接收者分布：`GuiApp` 33（含 16 个进程级全局状态 / 工厂）、`GuiWindow` 18、
 `GuiPainter` 20、`GuiFont` 3、`GuiWidget` 64、`GuiMenu` 9、`GuiDialog` 6、`GuiScroll` 15。
@@ -6620,8 +6627,8 @@ parser 阶段就降级为普通顶层函数、调用点在语义与代码生成�
   在编辑器里可能被误报「找不到已安装的包」；CLI `build` / `run` / `check` /
   `test` 全走 `frontend`，不受影响。
 
-**回归（AD 组，第 30 组）**：契约审计（168 方法恰好覆盖 168 个 `extern fn`、
-`gui.diali` 共 169 个签名、封装层零 `extern fn` 声明）、无 DISPLAY 纯内存路径
+**回归（AD 组，第 30 组）**：契约审计（183 方法恰好覆盖 183 个 `extern fn`、
+`gui.diali` 共 184 个签名、封装层零 `extern fn` 声明）、无 DISPLAY 纯内存路径
 （含 CRC 对照与 Fail-Fast 透传）、Xvfb 实窗路径（顶栏 / 弹窗 / 对话框 / 控件树
 全走方法，信号队列与 AA 组逐项对齐）、3 个负向用例（未知方法 / 零隐式转换 /
 参数个数）+ 诊断面向用户（显示 `GuiMenu.add_item`、参数个数不含 `self`、
@@ -6679,3 +6686,65 @@ parser 阶段就降级为普通顶层函数、调用点在语义与代码生成�
 纯内存对象 + 离屏画布全流程——夹紧（溢出 / 负值 / 中间值）、滚轮推进、命中
 （轨道 / 滑块 / 无）、拖拽夹紧、tag 64 位全宽 round-trip、bar_size Fail-Fast、
 离屏绘制 CRC32 像素级稳定（垂直 / 水平），39 条断言全绿、窗口路径明确标注 `ok`。
+
+### 38.16 右键上下文菜单层（第 10 层）
+
+> 第 10 层给「鼠标右键」提供**上下文菜单**：一份第 7 层菜单 + 一个弹出锚点，
+> 打包成可复用的上下文菜单对象，负责打开 / 关闭 / 命中 / 悬停 / 选中 / 绘制。
+> 它走与第 7 / 第 9 层**完全相同的宪法边界**——**纯 C、零平台符号、绝不
+> C → Dial 反向回调**——15 个 `extern fn`（前缀 `dial_gui_context_*`），挂在
+> `GuiContext` 不透明句柄上，与旧 154 个签名同契约、`abi = 6` /
+> `version = 1.10.0` 不变、旧签名一字不动。
+
+**复用第 7 层菜单，不重复实现**：本层**不新增任何菜单类型**。菜单项的增删 /
+禁用 / tag 全部走既有的 `dial_gui_menu_*` API，`GuiContext` 只**借用**一份
+`GuiMenu`，只管几何与状态。外观也直接复用第 7 层弹出菜单的绘制路径，故上下文
+菜单与弹出菜单**逐像素同款**；行高常量 `GUI_MENU_ROW_H` 是两层共享的**单一
+真相源**。
+
+**所有权（借用语义）**：`set_menu` **不转移所有权**，`context_free` **也不释放
+菜单**——菜单的生死始终归应用侧掌控。上下文菜单自身是纯内存对象，未挂任何
+窗口时用 `context_free` 释放，可在无 DISPLAY 环境单元测试。
+
+**状态推进（纯值，绝不自动捕获鼠标）**：打开 / 命中 / 悬停 / 选中全是纯值，由
+应用主动推进，与第 9 层滚动视图同构——本层**绝不自动捕获鼠标事件**，也绝不
+代替应用判断「该不该弹」。典型用法：应用收到右键（`button = 3`，X11 与 Win32
+两后端取值一致）事件后调 `context_open(x, y)`，绘制时调 `context_draw`，鼠标
+移动调 `context_hover`，左键点击调 `context_select`（命中则返回菜单项 id 并
+**自动收起**）。
+
+**命中行序 = 绘制行序**：本层的 `hit` / `hover` / `select` 与绘制走**同一条菜单
+链表序**（`GuiMenuItem` 头插，故自上而下依次是「最后 `add` 的项」在前），
+杜绝「点到的」与「看到的」不是同一行。分隔符与禁用项统一不可命中（返回 -1）。
+
+**15 个 `extern fn`**（全部纯内存、可在无 DISPLAY 环境单元测试）：
+
+| 函数 | 作用 |
+| --- | --- |
+| `dial_gui_context_new` / `dial_gui_context_free` | 新建 / 释放纯内存上下文菜单（`free` **不释放借用的菜单**，空句柄返回 -1） |
+| `dial_gui_context_set_menu(c, m)` / `dial_gui_context_menu(c)` | 绑定 / 读回菜单（**借用**，不转移所有权；空句柄 Fail-Fast 返回 -1） |
+| `dial_gui_context_set_tag(c, tag)` / `dial_gui_context_tag(c)` | 用户 tag（**64 位全宽**，可 round-trip，与 `GuiScroll.tag` 同宽） |
+| `dial_gui_context_open(c, x, y)` | 在锚点展开（窗口内坐标）；未绑定菜单 Fail-Fast 返回 -1，重复展开重置悬停态 |
+| `dial_gui_context_close(c)` / `dial_gui_context_is_open(c)` | 收起（保留绑定与锚点）/ 读展开态 |
+| `dial_gui_context_anchor_x(c)` / `dial_gui_context_anchor_y(c)` | 读弹出锚点 |
+| `dial_gui_context_hit(c, x, y)` | 命中测试：返回命中**行号**（0 起，与绘制行序一致）；未命中 / 分隔符 / 禁用项统一 -1 |
+| `dial_gui_context_hover(c, x, y)` | 推进悬停态并返回命中行号（绘制时该行高亮） |
+| `dial_gui_context_select(c, x, y)` | 点击选中：命中可选项时返回该菜单项 id 并**自动收起**；未命中返回 -1 且**保持展开** |
+| `dial_gui_context_draw(p, c)` | 绘制（复用第 7 层弹出菜单外观）；未展开不绘制（返回 0），空句柄返回 -1 |
+
+> **返回类型约定（防坑）**：本包所有声明为 `extern fn ...: int` 的函数，C 侧实现
+> **必须返回 `int64_t`**——Dial 的 `int` 是 64 位，若 C 用 32 位 `int` 返回 -1，
+> 会被零扩展成 `4294967295` 而非 `-1`（见 §33.2）。第 9 / 第 10 层全部 `: int`
+> 函数因此一律 `int64_t` 返回。
+
+**OO 封装**：第 8 层 `gui_oo.dial` 的 `impl GuiContext` 用 15 个方法包住上述 15 个
+`extern fn`（`GuiApp` 上挂 `context_new` 工厂）；`select` 是 Dial 关键字，方法名
+改为 `select_item`（同第 8 层 `widget_select → select_range` 的先例）。AD 组
+契约审计因此由 168 / 169 同步为 **183 / 184**。
+
+**回归（AA 组，第 30 组）**：`tests/pkg/use_gui_context.dial` 在无 DISPLAY 环境跑
+纯内存对象 + 离屏画布全流程——未绑定菜单时 `open` Fail-Fast、菜单同一性（以
+对象内 tag 间接验证）、锚点读回、命中（行序 / 分隔符 / 区域外）、悬停推进、
+选中自动收起 / 未命中保持展开、tag 64 位全宽 round-trip、**借用的菜单不随
+`context_free` 释放**、离屏绘制 CRC32 像素级稳定（重绘幂等 + 悬停态改变像素），
+57 条断言全绿、窗口路径明确标注 `ok`。
