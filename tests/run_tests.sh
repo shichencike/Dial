@@ -816,7 +816,7 @@ rm -f "$FFI_DIR/libffi_demo.a" "$FFI_DIR/libffi_export_bridge.a" "$FFI_DIR"/*.o
 
 # =====================================================================
 echo
-echo "== Q) 工程工具链：CLI / 本地模块 / test / fmt / pack 闭环（v1.04 增补） =="
+echo "== Q) 工程工具链：CLI / 本地模块 / test / fmt / pack 闭环 / dialpkg src/ 随包源码模块（v1.04 增补，v1.10 扩展） =="
 
 QDIR="${TMP}/qtool"
 QHOME="${TMP}/qhome"
@@ -1022,6 +1022,103 @@ if qrun build "${TMP}/q_panic.dial" -o "${TMP}/q_panic" >/dev/null 2>&1; then
         qpass "panic 诊断含 文件:行:列"
     else qbad "panic 诊断缺位置"; sed 's/^/       /' "${TMP}/q_panic.err"; fi
 else qbad "panic 用例编译失败"; fi
+
+# 10) dialpkg src/：随包 Dial 源码模块（[src] 段显式声明 + 装包即用）
+#     验证三级 import 的第二级：模块名直接从包缓存命中，无需复制源码到项目目录；
+#     同时验证 src 文件与机器码同级 SHA256 保护、本地同名文件优先、Fail-Fast。
+QSPROJ="${TMP}/qsrcproj"
+if ! qrun new "$QSPROJ" qsrc >"${TMP}/qsrc_new.log" 2>&1; then
+    qbad "new 生成 qsrc 骨架失败"; sed 's/^/       /' "${TMP}/qsrc_new.log" | tail -5
+fi
+if [ -d "$QSPROJ/src" ]; then
+    qpass "dialc new 骨架预建空 src/ 目录"
+else qbad "dialc new 骨架缺 src/ 目录"; fi
+cat > "$QSPROJ/qsrc.c" <<'EOF'
+#include <stdint.h>
+int64_t qsrc_add(int64_t a, int64_t b) { return a + b; }
+EOF
+mkdir -p "$QSPROJ/lib/$QTRIPLE"
+cc -O2 -c "$QSPROJ/qsrc.c" -o "$QSPROJ/qsrc.o" >/dev/null 2>&1 \
+  && ar rcs "$QSPROJ/lib/$QTRIPLE/libqsrc.a" "$QSPROJ/qsrc.o"
+# 显式声明（清单声明方式）：键 = import 裸名，值 = src/ 下的 .dial。
+cat >> "$QSPROJ/dial.toml" <<'EOF'
+
+[src]
+qsrc_oo = "src/qsrc_oo.dial"
+EOF
+cat > "$QSPROJ/src/qsrc_oo.dial" <<'EOF'
+// 随包分发的 Dial 源码模块：内部 import "qsrc" 会被前端汇总到第三级，
+// 于是本模块既能用包里的 extern fn，又不必复制任何文件到用户项目。
+import "qsrc";
+fn qsrc_oo_twice(a: int): int { return qsrc_add(a, a); }
+EOF
+if qrun pack "$QSPROJ" -o "${TMP}/qsrc.dialpkg" >"${TMP}/qsrc_pack.log" 2>&1 \
+   && python3 -c '
+import json,sys,zipfile
+z=zipfile.ZipFile(sys.argv[1]); m=json.loads(z.read("manifest.txt"))
+assert m["src"]["qsrc_oo"]=="src/qsrc_oo.dial", m.get("src")
+assert "src/qsrc_oo.dial" in z.namelist(), z.namelist()
+assert "src/qsrc_oo.dial" in m["sha256"], m["sha256"]
+assert set(z.namelist())=={"manifest.txt","qsrc.diali"}|set(m["sha256"].keys())
+' "${TMP}/qsrc.dialpkg" >/dev/null 2>&1; then
+    qpass "pack 把 [src] 源码写进包 + manifest.src 映射 + 逐文件 SHA256"
+else qbad "pack 的 src/ 产物不合规"; sed 's/^/       /' "${TMP}/qsrc_pack.log" | tail -8; fi
+if qrun install "${TMP}/qsrc.dialpkg" >/dev/null 2>&1 \
+   && [ -f "$QHOME/.dial/packages/qsrc/src/qsrc_oo.dial" ]; then
+    qpass "install 把 src/*.dial 落到包缓存（与 manifest/iface/lib 同级）"
+else qbad "install 未落地 src/*.dial"; fi
+
+mkdir -p "${TMP}/qsrclocal"
+cat > "${TMP}/qsrclocal/main.dial" <<'EOF'
+import "qsrc_oo";
+fn main(): int { print(qsrc_oo_twice(21)); return 0; }
+EOF
+if qrun build "${TMP}/qsrclocal/main.dial" -o "${TMP}/qsrclocal/run" >"${TMP}/qsrc_use.log" 2>&1 \
+   && [ "$("${TMP}/qsrclocal/run" 2>/dev/null)" = "42" ]; then
+    qpass "裸名 import 自动命中包内 src 模块（不复制源码，内部 import 包名联动 = 42）"
+else qbad "包内 src 模块自动 import 失败"; sed 's/^/       /' "${TMP}/qsrc_use.log" | tail -8; fi
+
+# 篡改包内 Dial 源码：与机器码同级，必须被 SHA256 当场拦下。
+QSRC_INSTALLED="$QHOME/.dial/packages/qsrc/src/qsrc_oo.dial"
+cp "$QSRC_INSTALLED" "${TMP}/qsrc_oo.orig"
+printf '\n// tampered\n' >> "$QSRC_INSTALLED"
+if qrun build "${TMP}/qsrclocal/main.dial" -o "${TMP}/qsrclocal/run2" >"${TMP}/qsrc_tamper.log" 2>&1; then
+    qbad "篡改包内 src 源码竟然编译通过"
+elif grep -q "SHA256 校验失败" "${TMP}/qsrc_tamper.log"; then
+    qpass "篡改包内 src 源码被 SHA256 拦截（与机器码同级保护）"
+else qbad "篡改被拦截但诊断未指明 SHA256"; sed 's/^/       /' "${TMP}/qsrc_tamper.log" | tail -5; fi
+cp "${TMP}/qsrc_oo.orig" "$QSRC_INSTALLED"
+
+# 本地同名文件优先于包内副本（第一级 > 第二级）。
+cat > "${TMP}/qsrclocal/qsrc_oo.dial" <<'EOF'
+fn qsrc_oo_twice(a: int): int { return 999; }
+EOF
+if qrun build "${TMP}/qsrclocal/main.dial" -o "${TMP}/qsrclocal/run3" >"${TMP}/qsrc_local.log" 2>&1 \
+   && [ "$("${TMP}/qsrclocal/run3" 2>/dev/null)" = "999" ]; then
+    qpass "本地同名 .dial 优先于包内 src 副本（三级优先不变）"
+else qbad "本地优先失效"; sed 's/^/       /' "${TMP}/qsrc_local.log" | tail -6; fi
+rm -f "${TMP}/qsrclocal/qsrc_oo.dial"
+
+# [src] 段非法声明一律 Fail-Fast（打包期，不拖到安装 / 编译期）。
+qsrc_ff() {
+    qsrc_line="$1"; qsrc_want="$2"
+    qsrc_d="${TMP}/qsrc_ff"
+    rm -rf "$qsrc_d"; cp -r "$QSPROJ" "$qsrc_d"
+    sed -i "s|^qsrc_oo = .*|${qsrc_line}|" "$qsrc_d/dial.toml"
+    if qrun pack "$qsrc_d" -o "${TMP}/qsrc_ff.dialpkg" >"${TMP}/qsrc_ff.log" 2>&1; then
+        qbad "[src] 竟然接受非法声明: ${qsrc_line}"
+    elif grep -q "$qsrc_want" "${TMP}/qsrc_ff.log"; then
+        qpass "[src] Fail-Fast: ${qsrc_want}"
+    else
+        qbad "[src] 拒绝非法声明但诊断不明确: ${qsrc_line}"
+    fi
+}
+qsrc_ff 'qsrc_oo = "qsrc_oo.dial"' '必须位于 src/ 目录下'
+qsrc_ff 'qsrc_oo = "src/qsrc_oo.txt"' '必须以 .dial 结尾'
+qsrc_ff 'qsrc_oo = "src/missing.dial"' '源码文件不存在'
+qsrc_ff 'bad/name = "src/qsrc_oo.dial"' '必须是裸名'
+# 向后兼容：完全没有 [src] 段的清单照常可打包 / 安装（第 7 步的 qdemo 已端到端验证）。
+qrun uninstall qsrc >/dev/null 2>&1 || true
 
 
 # =====================================================================

@@ -25,9 +25,12 @@
 //!
 //! [targets]
 //! x86_64-linux-gnu = "lib/x86_64-linux-gnu/libmylib.a"
+//!
+//! [src]
+//! mylib_oo = "src/mylib_oo.dial"
 //! ```
 //!
-//! 只支持 `key = "字符串"`、`key = 整数` 与 `[targets]` 一个段，其余 TOML 特性
+//! 只支持 `key = "字符串"`、`key = 整数` 与 `[targets]` / `[src]` 两个段，其余 TOML 特性
 //! （数组、内联表、多行字符串、点分键）一律**显式报错**而不是悄悄忽略——
 //! 悄悄忽略配置项是配置类工具最危险的失败模式。路径既是磁盘上相对项目根的源路径，
 //! 也是 `.dialpkg` 内的相对路径，二者一致，不需要额外映射表。
@@ -58,6 +61,13 @@ pub struct PkgSpec {
     pub license: String,
     /// Target Triple -> 包内（同时也是磁盘上）的静态库相对路径。
     pub targets: BTreeMap<String, String>,
+    /// Dial 源码模块名 -> 包内（同时也是磁盘上）的 `.dial` 相对路径（v1.10 增补）。
+    ///
+    /// 键是 `import "模块名";` 用的**裸名**，值一律位于 `src/` 目录下。这些文件
+    /// 与 `.diali` 不同：它们是**真正的 Dial 源码**，会由前端按本地源码模块的方式
+    /// 合并编译（见 `main.rs::collect_sources` 的三级优先）。`.dialpkg` 因此从
+    /// 「机器码 + 签名」扩展为「机器码 + 签名 + 随包 Dial 源码模块」。
+    pub src: BTreeMap<String, String>,
 }
 
 /// 去掉一行中字符串字面量之外的 `#` 注释。
@@ -150,7 +160,10 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
     let mut iface: Option<String> = None;
     let mut license: Option<String> = None;
     let mut targets: BTreeMap<String, String> = BTreeMap::new();
+    let mut src: BTreeMap<String, String> = BTreeMap::new();
     let mut section: Option<String> = None;
+    let mut seen_targets = false;
+    let mut seen_src = false;
 
     for (idx, raw) in text.lines().enumerate() {
         let line_no = idx + 1;
@@ -163,15 +176,21 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
                 return Err(format!("dial.toml 第 {} 行：段头缺少右方括号 ']'", line_no));
             }
             let sec = line[1..line.len() - 1].trim();
-            if sec != "targets" {
+            if sec != "targets" && sec != "src" {
                 return Err(format!(
-                    "dial.toml 第 {} 行：不支持的段 '[{}]'（只支持 [targets]）",
+                    "dial.toml 第 {} 行：不支持的段 '[{}]'（只支持 [targets] 与 [src]）",
                     line_no, sec
                 ));
             }
-            if section.is_some() {
-                return Err(format!("dial.toml 第 {} 行：[targets] 段重复", line_no));
+            let seen = if sec == "targets" {
+                &mut seen_targets
+            } else {
+                &mut seen_src
+            };
+            if *seen {
+                return Err(format!("dial.toml 第 {} 行：[{}] 段重复", line_no, sec));
             }
+            *seen = true;
             section = Some(sec.to_string());
             continue;
         }
@@ -207,6 +226,41 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
             continue;
         }
 
+        if section.as_deref() == Some("src") {
+            // 键是模块名（裸名，`import "模块名";` 用它），值是包内 / 磁盘上的
+            // `.dial` 相对路径。两处约定都在这里收紧，包作者写错当场报错，
+            // 而不是等安装 / 编译期才发现「模块找不到」。
+            if src.contains_key(key) {
+                return Err(format!(
+                    "dial.toml 第 {} 行：[src] 模块名 '{}' 重复",
+                    line_no, key
+                ));
+            }
+            if key.contains('/') || key.contains('\\') || key.ends_with(".dial") {
+                return Err(format!(
+                    "dial.toml 第 {} 行：[src] 模块名 '{}' 必须是裸名（不含路径分隔符、不带 .dial 后缀）",
+                    line_no, key
+                ));
+            }
+            check_component(&format!("[src] 模块名 '{}'", key), key)?;
+            let rel = parse_string(val, line_no)?;
+            check_component(&format!("[src] '{}' 的路径", key), &rel)?;
+            if !rel.starts_with("src/") {
+                return Err(format!(
+                    "dial.toml 第 {} 行：[src] '{}' 的路径 '{}' 必须位于 src/ 目录下（src 目录单独存放 Dial 源码）",
+                    line_no, key, rel
+                ));
+            }
+            if !rel.ends_with(".dial") {
+                return Err(format!(
+                    "dial.toml 第 {} 行：[src] '{}' 的路径 '{}' 必须以 .dial 结尾",
+                    line_no, key, rel
+                ));
+            }
+            src.insert(key.to_string(), rel);
+            continue;
+        }
+
         match key {
             "name" | "version" | "iface" | "license" => {
                 let s = parse_string(val, line_no)?;
@@ -235,7 +289,7 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
             }
             other => {
                 return Err(format!(
-                    "dial.toml 第 {} 行：未知字段 '{}'（支持 name/version/abi/iface/license 与 [targets]）",
+                    "dial.toml 第 {} 行：未知字段 '{}'（支持 name/version/abi/iface/license 与 [targets] / [src] 段）",
                     line_no, other
                 ))
             }
@@ -276,6 +330,7 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
         iface,
         license,
         targets,
+        src,
     })
 }
 
@@ -368,10 +423,39 @@ pub fn pack(project_dir: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
         verify_static_lib(&p)?;
         staged.push((lib.clone(), p));
     }
+    // [src] 段登记的 Dial 源码模块：与 .diali / .a 一样进 staged，
+    // 因而自动获得「逐文件 SHA256 登记 + 安装期逐文件校验」的全套保护。
+    for (module, rel) in &spec.src {
+        let p = project_dir.join(rel);
+        if !p.is_file() {
+            return Err(format!(
+                "[src] 模块 '{}' 的源码文件不存在: {}（dial.toml [src] 登记为 '{}'）",
+                module,
+                p.display(),
+                rel
+            ));
+        }
+        staged.push((rel.clone(), p));
+    }
+    // 包内路径必须唯一：zip 允许重名项，但那会让 install 解压时后者覆盖前者，
+    // 且 verify_archive 会对同一路径校验两次——歧义必须在打包期就地拒绝。
+    let mut seen_paths: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (zip_path, _) in &staged {
+        if !seen_paths.insert(zip_path.as_str()) {
+            return Err(format!(
+                "包内路径 '{}' 重复（iface / [targets] / [src] 不能指向同一个包内路径）",
+                zip_path
+            ));
+        }
+    }
 
     // manifest：字段与 package::parse_manifest 一一对应，一个都不能少。
     let mut targets_obj = serde_json::Map::new();
+    let mut src_obj = serde_json::Map::new();
     let mut sha_obj = serde_json::Map::new();
+    for (module, rel) in &spec.src {
+        src_obj.insert(module.clone(), serde_json::Value::String(rel.clone()));
+    }
     for (triple, lib) in &spec.targets {
         targets_obj.insert(
             triple.clone(),
@@ -391,6 +475,7 @@ pub fn pack(project_dir: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
         "iface": spec.iface,
         "license": spec.license,
         "targets": targets_obj,
+        "src": src_obj,
         "sha256": sha_obj,
     });
     let manifest_text = serde_json::to_string_pretty(&manifest)
@@ -465,6 +550,10 @@ pub fn new_project(dir: &Path, name: Option<&str>) -> Result<PathBuf, String> {
     }
     fs::create_dir_all(dir.join("lib"))
         .map_err(|e| format!("创建项目目录 {} 失败: {}", dir.display(), e))?;
+    // src/ 单独存放随包分发的 Dial 源码模块（[src] 段登记的那些）。骨架里先建空目录，
+    // 作者把 .dial 放进来并在 dial.toml 的 [src] 段登记后即可随包分发。
+    fs::create_dir_all(dir.join("src"))
+        .map_err(|e| format!("创建 src/ 目录 {} 失败: {}", dir.join("src").display(), e))?;
 
     let triple = package::host_triple();
     let lib_rel = format!("lib/{}/lib{}.a", triple, pkg_name);
@@ -480,7 +569,13 @@ pub fn new_project(dir: &Path, name: Option<&str>) -> Result<PathBuf, String> {
          [targets]\n\
          # 值既是磁盘上相对项目根的路径，也是 .dialpkg 内的路径。\n\
          # 把编译好的静态归档放到该位置后执行 `dialc pack {dir}`。\n\
-         {triple} = \"{lib}\"\n",
+         {triple} = \"{lib}\"\n\
+         \n\
+         # [src] 段（可选）：随包分发的 Dial 源码模块，放在 src/ 目录下。\n\
+         # 键 = import 用的裸名，值 = src/ 下、以 .dial 结尾的相对路径；\n\
+         # 装包后可直接写 import \"mylib_oo\";，编译器会自动合并编译，无需复制源码。\n\
+         # [src]\n\
+         # mylib_oo = \"src/mylib_oo.dial\"\n",
         name = pkg_name,
         abi = package::STDLIB_ABI,
         triple = triple,
@@ -518,6 +613,8 @@ pub fn new_project(dir: &Path, name: Option<&str>) -> Result<PathBuf, String> {
 
     fs::write(dir.join("lib").join(".gitkeep"), "")
         .map_err(|e| format!("写入 lib/.gitkeep 失败: {}", e))?;
+    fs::write(dir.join("src").join(".gitkeep"), "")
+        .map_err(|e| format!("写入 src/.gitkeep 失败: {}", e))?;
 
     Ok(dir.to_path_buf())
 }

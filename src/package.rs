@@ -141,6 +141,12 @@ pub struct Manifest {
     pub license: String,
     /// Target Triple -> 包内机器码相对路径。
     pub targets: HashMap<String, String>,
+    /// Dial 源码模块名 -> 包内 `src/*.dial` 相对路径（v1.10 增补，可选）。
+    ///
+    /// 键是 `import "模块名";` 用的裸名。**缺失即空映射**：旧包没有这个字段，
+    /// 必须照常能装（§25 的向后兼容）。这些文件同样在 `sha256` 字典里登记，
+    /// 因此安装期 `verify_archive` 会把它们逐个校验一遍，与其它文件同等保护。
+    pub src: HashMap<String, String>,
     /// 包内相对路径 -> SHA256（十六进制小写）。
     pub sha256: HashMap<String, String>,
 }
@@ -206,6 +212,40 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
         targets.insert(triple.clone(), lib.to_string());
     }
 
+    // src：可选字段。旧 manifest 没有它 → 空映射，包照常可装（向后兼容）。
+    // 但一旦给了，每个值都必须是 src/ 下、无路径穿越的 .dial 相对路径——
+    // manifest 是外部不可信输入，不能让它把模块解析引到任意目录去。
+    let mut src = HashMap::new();
+    if let Some(s) = v.get("src").and_then(|x| x.as_object()) {
+        for (module, val) in s {
+            let rel = val.as_str().ok_or_else(|| {
+                DialcError::new(
+                    format!("manifest.txt 的 src['{}'] 不是字符串", module),
+                    0,
+                    0,
+                )
+            })?;
+            let n = rel.replace('\\', "/");
+            if !n.starts_with("src/")
+                || !n.ends_with(".dial")
+                || n.starts_with('/')
+                || n.contains("..")
+                || (n.len() >= 2 && n.as_bytes()[1] == b':')
+            {
+                return Err(DialcError::new(
+                    format!(
+                        "manifest.txt 的 src['{}'] = '{}' 非法：必须是 src/ 下、\
+                         无路径穿越成分的 .dial 相对路径",
+                        module, rel
+                    ),
+                    0,
+                    0,
+                ));
+            }
+            src.insert(module.clone(), rel.to_string());
+        }
+    }
+
     let mut sha256 = HashMap::new();
     if let Some(s) = v.get("sha256").and_then(|x| x.as_object()) {
         for (file, val) in s {
@@ -222,6 +262,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
         iface,
         license,
         targets,
+        src,
         sha256,
     })
 }
@@ -633,6 +674,64 @@ pub fn find_installed(name: &str) -> Result<Option<(PathBuf, Manifest)>> {
         .map_err(|e| DialcError::new(format!("读取 {} 失败: {}", mf.display(), e), 0, 0))?;
     let manifest = parse_manifest(&text)?;
     Ok(Some((dir, manifest)))
+}
+
+/// 在所有已安装包里查找一个 **Dial 源码模块**（`[src]` 段声明的裸名）。
+///
+/// 命中返回 `(包缓存目录, 包内相对路径)`。这是前端 import 解析的**第二级**：
+/// `import "gui_oo";` 无需把源码复制到项目目录，直接吃包里自带的那一份，
+/// 由 `main.rs::collect_sources` 按本地源码模块的方式合并编译。
+///
+/// 与 `resolve_imports` 的区别：那边按**包名**找整包（读 `.diali` + 选 `.a`），
+/// 这里按**模块名**找单个 `.dial`（只合入源码，不引入任何机器码）。
+///
+/// 同名模块被多个包声明时**报错**而不是任选一份——静默挑一个等于把
+/// 「装了哪个包」变成不可预测的行为，违背 Fail-Fast。坏掉的 manifest 静默跳过
+/// （与 `list_installed` 一致）：它要么是无关的包，要么会在后续真正用到时报错，
+/// 且 LSP 的协议流不允许在这里往 stdout/stderr 打诊断。
+pub fn find_src_module(name: &str) -> Result<Option<(PathBuf, String)>> {
+    let root = cache_root()?;
+    let rd = match fs::read_dir(&root) {
+        Ok(r) => r,
+        Err(_) => return Ok(None), // 缓存目录尚不存在 = 没装过任何包
+    };
+    let mut hits: Vec<(PathBuf, String)> = Vec::new();
+    for entry in rd.flatten() {
+        let dir = entry.path();
+        let mf = dir.join("manifest.txt");
+        if !mf.is_file() {
+            continue;
+        }
+        let text = match fs::read_to_string(&mf) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let m = match parse_manifest(&text) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if let Some(rel) = m.src.get(name) {
+            // 与 `.diali` / `.a` 同级保护：包内 Dial 源码被读取前也过一遍
+            // SHA256。源码改动会直接改变程序行为，不能因为它「只是文本」
+            // 就允许安装后被悄悄替换（§25.4「校验先于一切」）。
+            verify_sha256(&dir.join(rel), rel, &m)?;
+            hits.push((dir, rel.clone()));
+        }
+    }
+    if hits.len() > 1 {
+        let dirs: Vec<String> = hits.iter().map(|(d, _)| d.display().to_string()).collect();
+        return Err(DialcError::new(
+            format!(
+                "Dial 源码模块 '{}' 在多个已安装包里同时声明（{}），无法确定用哪一份；\n\
+                 请卸载冲突的包之一，或改用本地源码模块 `import \"./xxx.dial\";`。",
+                name,
+                dirs.join("、")
+            ),
+            0,
+            0,
+        ));
+    }
+    Ok(hits.pop())
 }
 
 // ---------------------------------------------------------------------------

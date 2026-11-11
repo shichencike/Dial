@@ -1366,8 +1366,9 @@ fn import_specs(tokens: &[lexer::Token]) -> Vec<String> {
 ///   - 裸名且同目录确有 `<name>.dial`：`import "util";` 直接可用——这也是
 ///     「普通程序员写日常程序」最直觉的写法（清单 A1 的原样复现）。
 ///
-/// 其它裸名仍按**包名**处理（`~/.dial/packages/<name>/`），与 v0.93 以来的
-/// 包语义完全兼容。两类都不匹配时 resolve_imports 会给出「找不到已安装的包」。
+/// 其它裸名再依次交给 `collect_sources` 的第二级（已安装包 manifest 的 `src`
+/// 映射里声明的 Dial 源码模块）与第三级（按包名读 `.diali` + 选 `.a`）。
+/// 两类本地写法都不匹配时，resolve_imports 会给出「找不到已安装的包」。
 fn is_local_import(spec: &str, base: &Path) -> bool {
     if spec.ends_with(".dial")
         || spec.starts_with("./")
@@ -1395,8 +1396,15 @@ fn local_module_path(spec: &str, base: &Path) -> PathBuf {
     }
 }
 
-/// 递归收集本地源码模块。
+/// 递归收集源码模块，按**三级优先**解析每条 `import`：
 ///
+/// 1. 本地源码模块（相对路径 / 同目录同名 `.dial`）——用户项目里的文件优先；
+/// 2. 已安装包 `src/` 里的 Dial 源码模块（`[src]` 段声明的裸名）——随包分发，
+///    装包即用，无需复制；
+/// 3. 包名（`~/.dial/packages/<name>/`）——读 `.diali` + 选 `.a`，原有语义。
+///
+/// 第 1、2 级都走同一套递归展开（循环引用检测 / `visited` 去重 / AST 合并），
+/// 只有第 3 级汇总进 `set.imports` 交给 `resolve_imports`。
 /// `stack` 用于循环引用检测，`visited` 保证同一文件被多个模块 import 时只展开一次
 /// （否则会重复定义函数）。错误一律带**文件路径**，多文件项目才排得清障。
 fn collect_sources(
@@ -1435,19 +1443,45 @@ fn collect_sources(
     let base = canonical.parent().unwrap_or_else(|| Path::new("."));
     for spec in specs {
         if is_local_import(&spec, base) {
+            // 第一级：本地源码模块（相对路径 / 同目录同名 `.dial`）。
+            // 保持最高优先——用户项目里自己放的同名文件永远覆盖包内副本，
+            // 这样「改一份源码试试」不需要动已安装的包。
             let child = local_module_path(&spec, base);
             if !child.is_file() {
                 return Err(format!(
                     "{}：本地源码 import '{}' 指向的文件不存在（解析为 {}）。\n\
                      本地模块请写相对路径（如 import \"./util.dial\";）；\n\
-                     已安装的包请写裸包名（如 import \"sqlite\";），不要带路径。",
+                     随包分发的 Dial 源码模块或已安装的包请写裸包名。",
                     canonical.display(),
                     spec,
                     child.display()
                 ));
             }
             collect_sources(&child, visited, stack, set)?;
+        } else if let Some((pkg_dir, rel)) =
+            package::find_src_module(&spec).map_err(|e| e.to_string())?
+        {
+            // 第二级：包内 `src/` 的 Dial 源码模块（manifest 的 `src` 映射里
+            // 以该裸名声明）。与本地模块走**完全相同**的展开路径——同一套循环
+            // 引用检测 / visited 去重 / AST 合并，只是文件来自包缓存。
+            // 它不引入任何机器码，也不新增 extern fn；模块内部的 `import "包";`
+            // 会照常被汇总到第三级，由 resolve_imports 读 .diali + 选 .a。
+            let child = pkg_dir.join(&rel);
+            if !child.is_file() {
+                return Err(format!(
+                    "{}：包缓存 {} 声明了 Dial 源码模块 '{}'（src['{}'] = '{}'），\n\
+                     但文件不存在：{}。包可能已损坏，请重新安装。",
+                    canonical.display(),
+                    pkg_dir.display(),
+                    spec,
+                    spec,
+                    rel,
+                    child.display()
+                ));
+            }
+            collect_sources(&child, visited, stack, set)?;
         } else if !set.imports.contains(&spec) {
+            // 第三级：按包名解析（读 .diali + 选 .a），v0.93 以来的原有语义。
             set.imports.push(spec);
         }
     }
@@ -1475,7 +1509,7 @@ fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, Strin
         // 只在「找不到已安装的包」这一句上追加指引，ABI / 哈希等其它错误原样透出。
         if e.contains("找不到已安装的包") {
             format!(
-                "{}\n（提示：若要引用同目录的 .dial 源码，写 import \"./xxx.dial\"; 或裸名 import \"xxx\";，编译器会自动合并编译；裸包名且同目录无同名 .dial 时才按已安装包解析。见 README §34）",
+                "{}\n（提示：import 按三级解析——① 同目录 .dial 源码（写 import \"./xxx.dial\"; 或裸名 import \"xxx\";）；② 已安装包 src/ 里 [src] 段声明的 Dial 源码模块（裸名，装包即用、无需复制）；③ 包名（读 .diali + 链 .a）。① ② 都会自动合并编译。见 README §34）",
                 e
             )
         } else {
