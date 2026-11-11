@@ -22,7 +22,7 @@
 
 ## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）
 
-**主题：手搓 GUI 七层——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
+**主题：手搓 GUI 八层（七层 C 契约 + 第 8 层 Dial 侧 OO 封装）——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
 + 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）
 + 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）
@@ -33,6 +33,9 @@
   ——让用户 `struct` 与包不透明句柄（`GuiWindow` / `GuiMenu` 等）挂方法，
   `win.draw()` 即 `dial_gui_window_draw(win)` 的面向对象写法，包契约一字不改；
   **不新增关键字、ABI 不变、旧签名一字不动**（见 README §37.12）；
++ **GUI 第 8 层：Dial 侧 OO 封装**（`gui_oo.dial` 用 153 个 `impl` 方法包住 154 个
+  C 风格 `extern fn`，纯 Dial 源码、不进 `.dialpkg`、零 `extern fn` 增量、ABI 不变，
+  见 README §38.14）；
 并修复 `http.dialpkg` 三处 Fail-Fast / 目标平台可用性缺陷**（见下文 `### Fixed`）。
 详见 [README §37.12](README.md#3712-b1impl-方法块v110-开发中增补落地)、
 [README §38](README.md#38-手搓-gui-地基包guidialpkg) 与 README §37.10。
@@ -55,9 +58,11 @@
 > `int32` / `float32` 一等类型 + FFI 精确 32 位宽度，新增 AB 组 4 条断言与
 > B 组 5 条零隐式转换负向，扩为 **A–Z + AA + AB 二十八组 / 535 ✅**；
 > 本轮菜单 / 对话框覆盖层（第 7 层，24 个新 `extern fn`）再给 AA 组增 3 条断言
-> （无 DISPLAY / Xvfb 各一 + 编译成功）到 **538 ✅**；本轮 `impl` 方法块（B1）
-> 新增 AC 组 5 条断言，扩为 **A–Z + AA + AB + AC 二十九组 / 549 ✅**。
-> 十者是不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
+> （无 DISPLAY / Xvfb 各一 + 编译成功）到 **538 ✅**；`impl` 方法块（B1）
+> 新增 AC 组 5 条断言，扩为 **A–Z + AA + AB + AC 二十九组 / 549 ✅**；
+> 本轮 GUI 第 8 层 OO 封装新增 AD 组 6 条断言，扩为
+> **A–Z + AA + AB + AC + AD 三十组 / 555 ✅**。
+> 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
 
@@ -117,7 +122,31 @@
   - 全量回归由 **A–Z + AA 二十七组 / 526 ✅** 扩为
     **A–Z + AA + AB 二十八组 / 535 ✅ / 0 ❌**。
 
-- **`gui.dialpkg`：手搓 GUI 七层**（README §38）：不用 Qt / GTK / SDL，纯 C 自绘。
+- **GUI 第 8 层：Dial 侧 OO 封装层**（README §38.14）：`packages/gui/gui_oo.dial`
+  用 **153 个 `impl` 方法**把前七层的 154 个 C 风格 `extern fn` 包成惯用写法
+  （`win.draw()` 即 `dial_gui_window_draw(win)`），按 `GuiApp` / `GuiWindow` /
+  `GuiPainter` / `GuiFont` / `GuiWidget` / `GuiMenu` / `GuiDialog` 七个不透明句柄
+  分组；**纯 Dial 源码、不进 `.dialpkg`、零 `extern fn` 增量、`abi = 6` /
+  `version = 1.10.0` 不变、旧 154 个签名一字不动**。借 v1.04 本地源码模块机制
+  交付：用户 `import "./gui_oo.dial";` 一行即生效（模块内 `import "gui";` 由前端
+  汇总去重）；`.diali` 只认声明不能放 impl，故不改打包器 / 前端 / LSP、
+  不重发已发布的包。
+  - **产物不漂移**：`use_gui_oo.dial` 让同一绘制序列分别以 C 风格与方法风格在两块
+    离屏画布上执行，`painter_crc32()` **逐字节相等**；因为 impl 在 parser 阶段
+    即降级为普通顶层函数、调用点就地改写为 `Expr::Call` 复用整条调用链。
+  - **现役边界（如实标注）**：B1 不支持关联函数 → app 自身仍用
+    `dial_gui_app_new()`，工厂以 `app.window_new(...)` / `app.menu_new()` 提供
+    （self 仅作命名空间）；`self` 是值语义句柄副本（opaque 本质是指针，操作
+    作用于同一对象）；两处保留字改名（`select` → `select_range`、
+    `label` → `txt`）；LSP 不递归本地源码模块（v1.04 既有局限），
+    CLI `build` / `run` / `check` / `test` 不受影响。
+  - **回归**：新增 AD 组（第 30 组）6 条断言——契约审计（153 方法全覆盖 153 个
+    `extern fn` / `gui.diali` 仍 154 个签名 / 封装层零 `extern` 声明）、无 DISPLAY
+    87 条、Xvfb 实窗 153 条（顶栏 / 弹窗 / 对话框 / 控件树全走方法）、3 个
+    Fail-Fast 负向 + 诊断面向用户；全量 **549 ✅ → 555 ✅ / 0 ❌**。
+
+- **`gui.dialpkg`：手搓 GUI 八层**（README §38）：前七层不用 Qt / GTK / SDL、纯 C 自绘；
+  第 8 层是 Dial 侧 OO 封装（纯源码、不进包、零 `extern fn` 增量）。
   ① 地基层（窗 + 事件 + 绘图 + 字体，55 个 `extern fn`）；
   ② 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发，
   28 个）；③ **成品控件外观层**（Label / Button / CheckBox + 主题表驱动四态 +
@@ -128,8 +157,10 @@
   subscribe / pending / data / pop / clear / dropped，10 个，见下）；
   ⑦ **菜单 / 对话框覆盖层**（窗口级顶栏菜单 + 弹出菜单 + 模态对话框，复用第 6 层
   纯值信号队列：`SELECTED` / `SUBMITTED` 两类信号 + `dial_gui_menu_*` /
-  `dial_gui_dialog_*` / `dial_gui_window_*` 统一分发，24 个，见下）。
-  共 **154 个 `extern fn`**。**多行文本（IME） / 撤销重做 / 每控件主题覆写 /
+  `dial_gui_dialog_*` / `dial_gui_window_*` 统一分发，24 个，见下）；
+  ⑧ **Dial 侧 OO 封装层**（`gui_oo.dial`：153 个 `impl` 方法覆盖上述 154 个函数，
+  纯 Dial 源码、不进 `.dialpkg`、零 `extern fn` 增量，见 README §38.14）。
+  前七层共 **154 个 `extern fn`**；第 8 层不新增任何 `extern fn`。**多行文本（IME） / 撤销重做 / 每控件主题覆写 /
   图片解码 / C→Dial 反向回调仍不进 `.diali` 契约**——把未实现函数写进契约会让
   用户 `import` 后链接失败，那是制造漂移而非预留接口（菜单 / 对话框覆盖层已由第 7 层
   以**纯值信号队列**落地，**不是** C → Dial 回调）。
@@ -337,8 +368,9 @@
   上一轮 GUI 输入层由 **517 ✅ 增至 520 ✅**、主题层 / 控件扩展再由
   **520 ✅ 增至 523 ✅**；信号槽 / 控件事件订阅由 **523 ✅ 增至 526 ✅**，
   菜单 / 对话框覆盖层（第 7 层）再由 **526 ✅ 增至 538 ✅**，`int32` / `float32`
-  一等类型新增 AB 组到 **535 ✅**；**本轮** B1 `impl` 方法块新增 AC 组
-  （第 29 组）5 条断言，全量扩为 **549 ✅ / 0 ❌**（与 `[未发布]` 段口径一致）。
+  一等类型新增 AB 组到 **535 ✅**；B1 `impl` 方法块新增 AC 组
+  （第 29 组）5 条断言到 **549 ✅**；**本轮** GUI 第 8 层 OO 封装新增 AD 组
+  （第 30 组）6 条断言，全量扩为 **555 ✅ / 0 ❌**（与 `[未发布]` 段口径一致）。
 - `tests/run_tests.sh` 的 **AA 组**（`gui.dialpkg` 端到端）：三平台构建、零警告检查、
   `nm -u` 符号检查、`pack` / `install`、无 DISPLAY 优雅跳过、Xvfb 实窗严格断言
   （`window = ok` / `window_backend = x11/xshm/xrender` / `window_flush = ok` /
@@ -380,6 +412,8 @@
   `sig_mask` / `sig_dropped` / `sigq`）、14 个主题角色与默认值宏、7 个信号码（第 7 层
   新增 `GUI_SIG_SELECTED = (1<<6)`、总数 6 → 7）、菜单 / 对话框覆盖层字段（顶栏 22px、
   `menubar` / `popup` / `dialog` 所有权归窗口）、统一的 `gui_signal_emit_ex` 发射变体；
+  **第 8 层不在此列**——新增的 `gui_oo.dial` 是纯 Dial 源码层，`gui.diali` / C 层 /
+  三平台 `.a` / `build.sh` 全部零改动，也不重新 `pack`；
   统一键码常量；`dial_gui_core.c` 共追加 35 个 FFI 包装（14 输入 + 11 主题 +
   10 信号，含 `dial_gui_event_mods`）与 `gui_core_emit` 的 QUIT 清零 `ev_mods`；
   两后端 `pump` 把 `X11 KeySym` / `Win32 VK` 映射到同一套键码并写入修饰键状态。
@@ -393,7 +427,7 @@
 
 ### 测试与交付
 
-- `bash tests/run_tests.sh` **A–Z + AA + AB + AC 二十九组全套通过（549 ✅ / 0 ❌，AC 组本轮 +5 条：自定义 struct / 默认实参 / 包不透明句柄 3 正向 + 6 负向汇总 + 诊断面向用户）**；
+- `bash tests/run_tests.sh` **A–Z + AA + AB + AC + AD 三十组全套通过（555 ✅ / 0 ❌，AD 组本轮 +6 条：契约审计 / 编译 / 无 DISPLAY CRC 对照 / Xvfb 实窗 / 3 负向汇总 / 诊断面向用户）**；
   Xvfb 实窗 `EXIT=0`，能力串
   `x11/xshm/xrender argb32 filter=best visual_depth=24`，地基层像素 CRC 稳定
   `4007435570`、外观层 `look_crc_normal` 稳定 `3884455222`、输入层
@@ -443,12 +477,20 @@
   Method 分派 + `is_impl_receiver`）、`src/codegen.rs`（`gen_method_call` 分派 +
   `gen_stmt` 容器特例收窄）。**cargo build --release 零警告**；
   `impl` 方法编译期脱糖、ABI 不变、旧签名一字不动。
-- **交付状态**：仅本地提交，未推送、未打标签、未发 Release（遵循本段开头的口径）。
-  HTTPS `git push` 到 `github.com:443` 连续三次连接超时（curl / gh API 通道可达、
-  TCP 偶发连上但推送失败，属沙箱网络限制）；已改用 **ed25519 SSH 密钥对**
-  （公钥交付用户添加到仓库并授予读写），配置 `deploy` remote 走
-  `git@github.com:shichencike/Dial.git`，待公钥生效后经 SSH 通道保存，
-  **当前不含任何推送动作**。
+- **AD 组（GUI 第 8 层 OO 封装）测试资产**：`packages/gui/gui_oo.dial`
+  （153 个 `impl` 方法，纯 Dial 源码、不进 `.dialpkg`）、`tests/oo/use_gui_oo.dial`
+  （无 DISPLAY + Xvfb 两段端到端），3 个 Fail-Fast 负向用例由 `run_tests.sh` 在
+  临时目录生成；`run_tests.sh` 新增 AD 组（第 30 组）与头部说明。
+  **GUI 包 / C 层 / 三平台 `.a` / `gui.diali` / ABI 全部零改动**；
+  `gui_oo.dial` 不重新 `pack`、不 `install`。
+- **交付状态**：源码已按用户要求**推送到 GitHub**（`main` 分支）；**未升级版本号、
+  未打标签、未发 Release**（仍遵循本段开头的「开发中增量」口径）。推送通道按用户
+  裁决改为**强制 443**：`~/.ssh/config` 把 `github.com` 解析为
+  `ssh.github.com:443`（ed25519 deploy 公钥），`git config --global` 与仓库级
+  `insteadOf` 把 `https://github.com/` 重写为 SSH，故之后任何 GitHub 推送都自动
+  走 443。此前 HTTPS 直推连续三次连接超时（curl / gh API 可达、属链路丢包抖动），
+  改道后一次成功：`5283e20..f4f2229 main -> main`，11 个积压提交同步完毕；
+  本轮第 8 层提交后同样经 443 推送。
 
 ---
 

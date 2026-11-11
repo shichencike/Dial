@@ -1,0 +1,253 @@
+// GUI 第 8 层：Dial 侧 OO 封装层端到端用例（AD 组，v1.10 未发布增补）。
+//
+// 立场：gui_oo.dial 是**纯 Dial 源码**，借 B1 impl 把 154 个 C 风格 extern fn
+// 编译期脱糖成方法；gui.diali / C 层 / 三平台 .a / ABI 一字不动。本用例验证：
+//   ① 7 个不透明句柄（GuiApp/Window/Painter/Font/Widget/Menu/Dialog）方法全可用；
+//   ② **同一绘制序列分别用 C 风格与 OO 风格执行，画布 CRC32 逐字节相等**
+//      ——直接证明「纯编译期脱糖、产物不漂移」；
+//   ③ 窗口级覆盖层（顶栏 / 弹窗 / 对话框）与纯值信号队列在 OO 风格下行为一致；
+//   ④ Fail-Fast 透传（越界 / 坏按钮 / 空读）仍由 C 侧原样返回错误码。
+//
+// 用法：AD 组把 packages/gui/gui_oo.dial 复制到本文件同目录，裸名 import 生效
+//（gui_oo.dial 内的 import "gui" 由前端汇总、去重后全局生效，无需第二个 import）。
+//
+// 语言宪法 §37.1：禁止文件级 var 全局可变状态。本用例只用局部变量与纯函数。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui_oo";
+
+// 与 C 侧 GuiWidgetSignal（packed）逐字节一致；9 个纯值字段 × 8 字节 = 72。
+packed extern struct GuiWidgetSignal {
+    seq: int, signal: int, tag: int, userdata: int, kind: int,
+    a: int, b: int, x: int, y: int
+}
+
+fn argb(a: int, r: int, g: int, b: int): int {
+    return a * 16777216 + r * 65536 + g * 256 + b;
+}
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+// 读队首一条信号，逐字段断言后弹出。全部局部变量，纯值块读数不依赖控件生命周期。
+// 第 5 参数是信号 kind：第 7 层覆盖层 MENU=8 / DIALOG=9；控件信号则是控件
+// 种类（BUTTON=2），比 AA 组既有 check_signal（只断言 sig/tag/a/b）多锁一个字段。
+fn check_signal(root: GuiWidget, sig: int, tag: int, a: int, kind: int, name: string): void {
+    expect_int(root.signal_pending(), 1, name + "_pending");
+    var raw: rawptr<byte> = root.signal_data();
+    var s: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(raw);
+    expect_int(s.signal, sig, name + "_signal");
+    expect_int(s.tag, tag, name + "_tag");
+    expect_int(s.a, a, name + "_a");
+    expect_int(s.kind, kind, name + "_kind");
+    expect_int(root.signal_pop(), 1, name + "_popped");
+}
+
+fn main(): int {
+    // ===== A) GuiApp 命名空间：全局状态 / 工厂 / 错误槽（纯内存）=====
+    // 无 DISPLAY 时 dial_gui_app_new() 返回空句柄（窗口段据此跳过）。本段所有
+    // app 方法都是进程级全局状态或工厂，self 被忽略（见 gui_oo.dial 头注释），
+    // 不依赖 app 有效性；因此不断言 app 非空、也不对空句柄调 free。
+    var app: GuiApp = dial_gui_app_new();
+    expect_int(app.signal_count(), 7, "oo_signal_count_7");
+    expect_int(app.signal_capacity(), 64, "oo_signal_capacity_64");
+    expect_int(app.theme_role_count(), 14, "oo_theme_role_count_14");
+    var role0: int = app.theme_get(0);
+    var c: int = argb(255, 17, 34, 51);
+    expect_int(app.theme_set(0, c), 0, "oo_theme_set");
+    expect_int(app.theme_get(0), c, "oo_theme_get_override");
+    expect_int(app.theme_reset(), 0, "oo_theme_reset");
+    expect_int(app.theme_get(0), role0, "oo_theme_reset_restores");
+    expect_int(app.clear_error(), 0, "oo_clear_error");
+    expect_int(app.last_error(), 0, "oo_last_error_clean");
+
+    // ===== B) GuiFont + GuiPainter：C 风格 / OO 风格 CRC 逐字节对照 =====
+    var font: GuiFont = app.font_default();
+    expect(!is_null(font), "oo_font_default");
+    expect(font.kind() >= 0, "oo_font_kind");
+    expect(font.text_width("Hi", 12) > 0, "oo_font_text_width");
+
+    var pc: GuiPainter = dial_gui_painter_offscreen(64, 48);   // C 风格基准画布
+    var po: GuiPainter = app.painter_offscreen(64, 48);         // OO 风格对照画布
+    expect(!is_null(pc), "oo_painter_offscreen_c");
+    expect(!is_null(po), "oo_painter_offscreen_oo");
+    expect_int(po.width(), 64, "oo_painter_width");
+    expect_int(po.height(), 48, "oo_painter_height");
+    expect_int(po.get_pixel(0, 0), dial_gui_get_pixel(pc, 0, 0), "oo_pixel_initial_same");
+
+    // 两边执行**完全相同**的绘制序列，参数逐字一致。
+    var c2: int = argb(255, 9, 9, 9);
+    dial_gui_set_aa(pc, 1);              po.set_aa(1);
+    dial_gui_set_color(pc, c);           po.set_color(c);
+    dial_gui_fill_rect(pc, 2, 2, 20, 12);       po.fill_rect(2, 2, 20, 12);
+    dial_gui_draw_line(pc, 0, 0, 30, 30, 1);    po.draw_line(0, 0, 30, 30, 1);
+    dial_gui_fill_circle(pc, 40, 20, 8);        po.fill_circle(40, 20, 8);
+    dial_gui_stroke_rect(pc, 1, 1, 30, 20, 1);  po.stroke_rect(1, 1, 30, 20, 1);
+    dial_gui_set_pixel(pc, 5, 5, c2);           po.set_pixel(5, 5, c2);
+    dial_gui_set_clip(pc, 0, 0, 32, 24);        po.set_clip(0, 0, 32, 24);
+    dial_gui_clear_clip(pc);                    po.clear_clip();
+    expect_int(po.crc32(), dial_gui_painter_crc32(pc), "oo_painter_crc_matches_c");
+    expect_int(po.get_pixel(5, 5), c2, "oo_painter_get_pixel");
+    // draw_text 按契约返回「推进后的 x 坐标」（不是状态码），失败才返回 -1。
+    expect(po.draw_text(1, 30, "Hi", font, 12) > 1, "oo_painter_draw_text");
+    expect_int(po.free(), 0, "oo_painter_free");
+    expect_int(dial_gui_painter_free(pc), 0, "oo_painter_free_baseline");
+    expect_int(font.free(), 0, "oo_font_free");
+
+    // ===== C) GuiMenu：项 / 分隔符 / tag / 越界 Fail-Fast 透传 =====
+    var m: GuiMenu = app.menu_new();
+    expect(!is_null(m), "oo_menu_new");
+    expect_int(m.add_item(100, "File"), 0, "oo_menu_add_item_file");
+    expect_int(m.add_item(200, "Edit"), 0, "oo_menu_add_item_edit");
+    expect_int(m.add_sep(), 0, "oo_menu_add_sep");
+    expect_int(m.count(), 3, "oo_menu_count_3");
+    expect_int(m.item_id(0), 100, "oo_menu_item_id_first");
+    expect(string_from_cstr(m.item_label(0)) == "File", "oo_menu_item_label");
+    expect_int(m.item_id(99), -1, "oo_menu_item_oob_rejected");
+    expect(string_from_cstr(m.item_label(99)) == "", "oo_menu_item_oob_label_empty");
+    expect_int(m.item_set_enabled(0, 0), 0, "oo_menu_item_set_enabled");
+    expect_int(m.set_tag(77), 0, "oo_menu_set_tag");
+    expect_int(m.tag(), 77, "oo_menu_tag_77");
+    expect_int(m.free(), 0, "oo_menu_free");
+
+    // ===== D) GuiDialog：配置 / 坏按钮 Fail-Fast / 未点击结果 =====
+    var d: GuiDialog = app.dialog_new();
+    expect(!is_null(d), "oo_dialog_new");
+    expect_int(d.set_title("Confirm"), 0, "oo_dialog_set_title");
+    expect_int(d.set_message("Sure?"), 0, "oo_dialog_set_message");
+    expect_int(d.set_buttons(1 | 2), 0, "oo_dialog_set_buttons");
+    expect_int(d.set_buttons(99), -1, "oo_dialog_bad_buttons_rejected");
+    expect_int(d.result(), -1, "oo_dialog_result_none");
+    expect_int(d.open(), 0, "oo_dialog_open_false");
+    expect_int(d.free(), 0, "oo_dialog_free");
+
+    // ===== E) GuiWidget：控件树 / 几何 / 外观 / 值域 / 输入 / 信号队列 =====
+    var t: GuiWidget = app.widget_tree(400, 300);
+    expect(!is_null(t), "oo_widget_tree");
+    expect_int(t.set_rect(0, 0, 400, 300), 0, "oo_widget_set_rect");
+    expect_int(t.width(), 400, "oo_widget_width");
+    expect_int(t.height(), 300, "oo_widget_height");
+    var b: GuiWidget = t.add();                 // add 与容器方法撞名，B1 已收窄不写回
+    expect(!is_null(b), "oo_widget_add");
+    expect_int(b.set_kind(2), 0, "oo_widget_set_kind");           // BUTTON
+    expect_int(b.set_text("Go"), 0, "oo_widget_set_text");
+    expect_int(b.set_id("go"), 0, "oo_widget_set_id");
+    expect_int(b.set_tag(7), 0, "oo_widget_set_tag");
+    expect_int(b.set_value(5), 0, "oo_widget_set_value");
+    expect_int(b.set_range(0, 10), 0, "oo_widget_set_range");
+    expect_int(b.set_rect(10, 30, 80, 24), 0, "oo_widget_btn_rect");
+    expect_int(b.kind(), 2, "oo_widget_kind");
+    expect(string_from_cstr(b.text()) == "Go", "oo_widget_text");
+    expect(string_from_cstr(b.id()) == "go", "oo_widget_id");
+    expect_int(b.tag(), 7, "oo_widget_tag");
+    expect_int(b.value(), 5, "oo_widget_value");
+    expect_int(b.min(), 0, "oo_widget_min");
+    expect_int(b.max(), 10, "oo_widget_max");
+    expect_int(b.x(), 10, "oo_widget_x");
+    expect_int(b.y(), 30, "oo_widget_y");
+    expect_int(b.set_visible(1), 0, "oo_widget_set_visible");
+    expect_int(b.visible(), 1, "oo_widget_visible");
+    expect_int(b.subscribe(1), 0, "oo_widget_subscribe");
+    expect_int(b.subscribed(), 1, "oo_widget_subscribed_1");
+    expect_int(b.unsubscribe(), 0, "oo_widget_unsubscribe");
+    expect_int(b.subscribed(), 0, "oo_widget_subscribed_0");
+
+    var tb: GuiWidget = t.add();
+    expect_int(tb.set_kind(4), 0, "oo_widget_tb_kind");          // TEXTBOX
+    expect_int(tb.set_text("Dial"), 0, "oo_widget_tb_text");
+    expect_int(tb.select_range(1, 3), 0, "oo_widget_select_range"); // select 是保留字
+    expect_int(tb.sel_start(), 1, "oo_widget_sel_start");
+    expect_int(tb.sel_end(), 3, "oo_widget_sel_end");
+    expect_int(tb.set_cursor(2), 0, "oo_widget_set_cursor");
+    expect_int(tb.cursor(), 2, "oo_widget_cursor");
+    expect_int(tb.set_max_len(0), 0, "oo_widget_set_max_len");
+    expect_int(tb.max_len(), 0, "oo_widget_max_len");
+    expect_int(t.signal_pending(), 0, "oo_widget_signal_pending_0");
+    expect_int(t.signal_dropped(), 0, "oo_widget_signal_dropped_0");
+    expect_int(t.signal_clear(), 0, "oo_widget_signal_clear");
+    expect_int(t.set_padding(2), 0, "oo_widget_set_padding");
+    expect_int(t.set_gap(3), 0, "oo_widget_set_gap");
+    expect_int(t.layout_apply(400, 300), 0, "oo_widget_layout_apply");
+    expect_int(t.tree_free(), 0, "oo_widget_tree_free");
+
+    // ===== F) 窗口 + 顶栏 + 弹窗 + 对话框（需要 DISPLAY / Xvfb）=====
+    // 与 AA 组 use_gui_menu.dial 段 C 逐项对齐，但全部改走方法，验证
+    // 覆盖层 / 信号队列在 OO 风格下行为逐字节一致。
+    var wapp: GuiApp = dial_gui_app_new();
+    if (is_null(wapp)) {
+        print("oo_window = skipped [" + wapp.last_error_msg() + "]");
+        print("oo_done = true");
+        return 0;
+    }
+    var win: GuiWindow = wapp.window_new("Dial GUI OO", 400, 300);
+    if (is_null(win)) {
+        print("oo_window = skipped [窗口创建失败]");
+        print("oo_done = true");
+        return 0;
+    }
+    expect_int(win.set_title("Dial GUI OO"), 0, "oo_win_set_title");
+    expect_int(win.width(), 400, "oo_win_width");
+    expect_int(win.height(), 300, "oo_win_height");
+    var root: GuiWidget = wapp.widget_tree(400, 300);
+    var pad: GuiWidget = root.add();
+    expect_int(pad.set_rect(0, 0, 400, 22), 0, "oo_win_pad_rect");   // 顶栏垫片
+    var btn: GuiWidget = root.add();
+    expect_int(btn.set_rect(10, 30, 80, 24), 0, "oo_win_btn_rect");
+    expect_int(btn.set_kind(2), 0, "oo_win_btn_kind");
+    expect_int(btn.set_text("Go"), 0, "oo_win_btn_text");
+    expect_int(btn.set_tag(7), 0, "oo_win_btn_tag");
+    expect_int(root.layout_apply(400, 300), 0, "oo_win_layout_apply");
+    expect_int(btn.subscribe(1), 0, "oo_win_btn_subscribe");
+    expect_int(root.subscribe(32 | 64), 0, "oo_win_root_subscribe");
+    expect_int(win.set_root(root), 0, "oo_win_set_root");
+
+    var bar: GuiMenu = wapp.menu_new();
+    expect_int(bar.add_item(100, "File"), 0, "oo_win_bar_file");
+    expect_int(bar.add_item(200, "Edit"), 0, "oo_win_bar_edit");
+    expect_int(bar.add_item(300, "Help"), 0, "oo_win_bar_help");
+    expect_int(bar.set_tag(77), 0, "oo_win_bar_tag");
+    expect_int(win.set_menubar(bar), 0, "oo_win_set_menubar");
+    var wp: GuiPainter = win.painter();
+    expect_int(wp.set_aa(1), 0, "oo_win_aa");
+    expect_int(win.draw(), 0, "oo_win_draw_bar");
+    expect_int(win.flush(), 0, "oo_win_flush_bar");
+
+    expect_int(win.handle(2, 10, 11, 1), 3, "oo_win_bar_click_activates");
+    check_signal(root, 64, 77, 100, 8, "oo_win_bar");
+
+    var pop: GuiMenu = wapp.menu_new();
+    expect_int(pop.add_item(1, "Copy"), 0, "oo_win_pop_copy");
+    expect_int(pop.add_sep(), 0, "oo_win_pop_sep");
+    expect_int(pop.add_item(2, "Paste"), 0, "oo_win_pop_paste");
+    expect_int(win.popup_menu(pop, 50, 50), 0, "oo_win_popup_show");
+    expect_int(win.draw(), 0, "oo_win_draw_popup");
+    expect_int(win.flush(), 0, "oo_win_flush_popup");
+    expect_int(win.handle(2, 90, 100, 1), 3, "oo_win_popup_click_activates");
+    check_signal(root, 64, 0, 2, 8, "oo_win_popup");
+    expect_int(win.close_popup(), 0, "oo_win_popup_close");
+
+    var dlg: GuiDialog = wapp.dialog_new();
+    expect_int(dlg.set_title("Confirm"), 0, "oo_win_dlg_title");
+    expect_int(dlg.set_message("Sure?"), 0, "oo_win_dlg_message");
+    expect_int(dlg.set_buttons(1 | 2), 0, "oo_win_dlg_buttons");
+    expect_int(win.dialog_show(dlg), 0, "oo_win_dialog_show");
+    expect_int(dlg.open(), 1, "oo_win_dialog_open_true");
+    expect_int(win.draw(), 0, "oo_win_draw_dialog");
+    expect_int(win.flush(), 0, "oo_win_flush_dialog");
+    expect_int(win.handle(2, 134, 175, 1), 3, "oo_win_dialog_click_activates");
+    expect_int(dlg.result(), 1, "oo_win_dialog_result_ok");
+    expect_int(dlg.open(), 0, "oo_win_dialog_closed_after_click");
+    check_signal(root, 32, 0, 1, 9, "oo_win_dialog");
+
+    expect_int(win.handle(2, 50, 42, 1), 1, "oo_win_widget_click_activates");
+    check_signal(root, 1, 7, 1, 2, "oo_win_widget");   // CLICKED a=1，kind=BUTTON(2)
+
+    expect_int(win.close(), 0, "oo_win_close");
+    expect_int(wapp.free(), 0, "oo_win_app_free");
+    print("oo_done = true");
+    return 0;
+}

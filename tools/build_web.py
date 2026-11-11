@@ -357,7 +357,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
 # ---------------------------------------------------------------------------
 
 TOPICS = {
-    "unreleased-dev": "手搓 GUI 七层（TextBox 输入层 / 统一键码 / XTest 实机注入 / 可覆写主题色 + Radio·Slider·Progress / 信号槽·控件事件订阅纯值队列 / 菜单·对话框覆盖层复用纯值信号队列）+ int32/float32 一等类型与 FFI 精确 32 位宽度 + B1 impl 方法块（obj.m() 编译期脱糖、不新增关键字、ABI 不变，GUI 句柄 win.draw()）+ 官网 6 个包介绍页 + 包索引页 + http.dialpkg 三处 Fail-Fast/可用性修复（开发中增量，未升版本号 / 未发布）",
+    "unreleased-dev": "手搓 GUI 八层（TextBox 输入层 / 统一键码 / XTest 实机注入 / 可覆写主题色 + Radio·Slider·Progress / 信号槽·控件事件订阅纯值队列 / 菜单·对话框覆盖层复用纯值信号队列 / 第 8 层 Dial 侧 OO 封装 gui_oo.dial：153 个 impl 方法、纯源码不进包、零 extern fn 增量、C 风格与 OO 风格绘制 CRC 逐字节相等）+ int32/float32 一等类型与 FFI 精确 32 位宽度 + B1 impl 方法块（obj.m() 编译期脱糖、不新增关键字、ABI 不变，GUI 句柄 win.draw()）+ 官网 6 个包介绍页 + 包索引页 + http.dialpkg 三处 Fail-Fast/可用性修复（开发中增量，未升版本号 / 未发布）",
     "v1.10": "底层原语补齐（@asm / simd）+ 首个发布标签 v1.1",
     "v1.04": "FFI 成为语言一等公民",
     "v1-0-milestone": "v1.0 里程碑达成的分版记录（v1.00 ~ v1.03）",
@@ -606,12 +606,15 @@ Dial 的**标准库**，随编译器发布、编译你的程序时**自动链入
     "gui": """\
 ## GUI 地基包 gui
 
-不用 Qt / GTK / SDL，**纯 C 手搓**的 GUI 包，覆盖**七层、共 154 个 `extern fn`**：
-地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 + 命中 + 主动分发）/
-成品控件外观层（Label / Button / CheckBox + 主题表驱动四态）/ 输入层（TextBox +
-焦点链 + 统一功能键码 + XTest 实窗注入）/ 主题层与控件扩展（14 个可覆写颜色角色 +
-Radio / Slider / ProgressBar）/ 信号槽（6 类可订阅纯值信号 + 每树环形队列）/
-**菜单·对话框覆盖层**（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列）。
+不用 Qt / GTK / SDL，**纯 C 手搓**的 GUI 包，前七层是 C 契约、**共 154 个
+`extern fn`**：地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 +
+命中 + 主动分发）/ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态）/
+输入层（TextBox + 焦点链 + 统一功能键码 + XTest 实窗注入）/ 主题层与控件扩展
+（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）/ 信号槽（6 类可订阅纯值
+信号 + 每树环形队列）/ **菜单·对话框覆盖层**（顶栏菜单 + 弹出菜单 + 模态对话框，
+复用纯值信号队列）。**第 8 层是 Dial 侧 OO 封装层**（`gui_oo.dial`，153 个 `impl`
+方法把上述 C 风格函数包成 `win.draw()` 这样的惯用写法，纯 Dial 源码、不进
+`.dialpkg`、**零 `extern fn` 增量、ABI 不变**，见 §38.14）。
 
 ```dial
 import "gui";
@@ -634,6 +637,35 @@ fn main(): int {
 }
 ```
 
+**第 8 层：同一套能力也能写成方法**。把 `gui_oo.dial` 放进项目目录，
+`import "./gui_oo.dial";` 一行即生效（模块内已传递 `import "gui";`，前端会汇总去重）：
+
+```dial
+import "./gui_oo.dial";
+
+fn main(): int {
+    let app: GuiApp = dial_gui_app_new();
+    let win: GuiWindow = app.window_new("Hello GUI", 400, 300);
+    let root: GuiWidget = app.widget_tree(400, 300);
+    let btn: GuiWidget = root.add();
+    btn.set_rect(10, 10, 80, 24);
+    btn.set_kind(2);
+    btn.set_text("Click me");
+    btn.subscribe(1);
+    win.set_root(root);
+    win.draw();
+    win.flush();
+    win.close();
+    app.free();
+    return 0;
+}
+```
+
+`impl` 在 parser 阶段就降级为普通函数，`obj.m()` 在语义与代码生成两处就地改写成
+`Expr::Call` 复用整条调用链——同一绘制序列以两种风格执行，`painter_crc32()`
+**逐字节相等**，产物与 ABI 不漂移。B1 现役边界：不支持关联函数，故 app 自身仍用
+`dial_gui_app_new()`；工厂以 `app.window_new(...)` 等形式提供（self 仅作命名空间）。
+
 - **三平台真实现**：`x86_64-linux-gnu` / `aarch64-unknown-linux-musl` /
   `x86_64-pc-windows-gnu` 均由 `zig cc` 交叉编译出真实 `.a`，零链接期 GUI 依赖
   （X11 / Win32 一律 `dlopen` / `LoadLibraryA`），最终链接**不需要** `-lX11` / `-lgdi32`。
@@ -642,7 +674,8 @@ fn main(): int {
 - **ABI 不变**：只追加 `extern fn`，旧签名一字不动；覆盖层不进控件树，控件几何 /
   绘制 CRC 逐字节不漂移。
 
-详见 [§38 手搓 GUI 地基包](../spec.html#38-手搓-gui-地基包guidialpkg)。""",
+详见 [§38 手搓 GUI 地基包](../spec.html#38-手搓-gui-地基包guidialpkg) 与
+[§38.14 Dial 侧 OO 封装层](../spec.html#3814-dial-侧-oo-封装层第-8-层)。""",
 
     "http": """\
 ## HTTP 客户端包 http

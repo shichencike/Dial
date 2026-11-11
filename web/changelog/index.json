@@ -8,7 +8,7 @@
       "label": "未发布",
       "date": "",
       "note": "开发中增量（未升版本号 / 未打标签 / 未发 Release）",
-      "topic": "手搓 GUI 七层（TextBox 输入层 / 统一键码 / XTest 实机注入 / 可覆写主题色 + Radio·Slider·Progress / 信号槽·控件事件订阅纯值队列 / 菜单·对话框覆盖层复用纯值信号队列）+ int32/float32 一等类型与 FFI 精确 32 位宽度 + B1 impl 方法块（obj.m() 编译期脱糖、不新增关键字、ABI 不变，GUI 句柄 win.draw()）+ 官网 6 个包介绍页 + 包索引页 + http.dialpkg 三处 Fail-Fast/可用性修复（开发中增量，未升版本号 / 未发布）",
+      "topic": "手搓 GUI 八层（TextBox 输入层 / 统一键码 / XTest 实机注入 / 可覆写主题色 + Radio·Slider·Progress / 信号槽·控件事件订阅纯值队列 / 菜单·对话框覆盖层复用纯值信号队列 / 第 8 层 Dial 侧 OO 封装 gui_oo.dial：153 个 impl 方法、纯源码不进包、零 extern fn 增量、C 风格与 OO 风格绘制 CRC 逐字节相等）+ int32/float32 一等类型与 FFI 精确 32 位宽度 + B1 impl 方法块（obj.m() 编译期脱糖、不新增关键字、ABI 不变，GUI 句柄 win.draw()）+ 官网 6 个包介绍页 + 包索引页 + http.dialpkg 三处 Fail-Fast/可用性修复（开发中增量，未升版本号 / 未发布）",
       "file": "unreleased-dev.html",
       "newer": null,
       "older": "v1.10"

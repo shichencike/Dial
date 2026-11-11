@@ -1,0 +1,212 @@
+// gui_oo.dial —— 手搓 GUI 第 8 层：Dial 侧惯用 API（OO 封装层）
+//
+// 本文件是**纯 Dial 源码**，不是包、不进 gui.dialpkg：gui.diali / C 层 /
+// 三平台 .a / abi=6 / version=1.10.0 / 旧 154 个签名一律一字不动。
+// 它借 B1「impl 方法块」把 C 风格函数编译期脱糖成方法：
+//     win.draw()  ==  dial_gui_window_draw(win)
+// 纯编译期改写，产物与 C 风格调用逐字节一致，ABI 不变。
+//
+// 用法（v1.04 本地源码模块，README §34）：把本文件放到项目目录，写一行
+//     import "./gui_oo.dial";        // 或裸名 import "gui_oo";
+// 本文件内的 import "gui"; 会由前端汇总、去重后全局生效，故用户**不必**再写
+// 第二个 import；随后 dial_gui_app_new() 建 app，其余一律走方法。
+//
+// 映射规则（便于逐条审计）：方法名 = 去掉 `dial_gui_` 与接收者类型前缀后的
+// 剩余部分；第一个形参是 7 个句柄之一时挂到该类型并降为 self，否则归到
+// GuiApp 作命名空间（self 被忽略，语义仍是进程级全局状态 / 工厂）。
+// 两处为绕开保留字改名：widget_select -> select_range（select 是关键字）、
+// menu_add_item 的形参 label -> txt（label 是关键字）。
+//
+// 现役边界（如实标注，不夸大）：
+//   - B1 不支持关联函数，故 app 自身仍用 dial_gui_app_new()；工厂以
+//     app.window_new(...) / app.menu_new() 等形式提供（self 仅作命名空间）。
+//   - self 是值语义句柄副本；opaque 句柄本质是指针，方法内操作作用于同一对象。
+//   - 本层不定义任何顶层辅助函数 / const（避免与用户源码跨文件撞名），
+//     也不重新声明 extern fn dial_gui_*（会与 .diali 契约撞名被 Fail-Fast 拒绝）。
+//   - LSP 当前不递归本地源码模块（v1.04 既有局限），CLI build/run/check/test 不受影响。
+//
+// 覆盖：154 个 extern fn -> 153 个方法 + 1 个入口 dial_gui_app_new。
+
+import "gui";
+
+
+// ===== GuiApp —— 事件循环 / 事件字段 / 全局状态与工厂（self 仅作命名空间） =====
+impl GuiApp {
+    fn free(self): int { return dial_gui_app_free(self); }
+    fn poll(self): int { return dial_gui_app_poll(self); }
+    fn wait(self, timeout_ms: int): int { return dial_gui_app_wait(self, timeout_ms); }
+    fn quit(self): int { return dial_gui_app_quit(self); }
+    fn should_quit(self): int { return dial_gui_app_should_quit(self); }
+    fn event_kind(self): int { return dial_gui_event_kind(self); }
+    fn event_x(self): int { return dial_gui_event_x(self); }
+    fn event_y(self): int { return dial_gui_event_y(self); }
+    fn event_button(self): int { return dial_gui_event_button(self); }
+    fn event_key(self): int { return dial_gui_event_key(self); }
+    fn event_mods(self): int { return dial_gui_event_mods(self); }
+    fn event_width(self): int { return dial_gui_event_width(self); }
+    fn event_height(self): int { return dial_gui_event_height(self); }
+    fn event_window(self): GuiWindow { return dial_gui_event_window(self); }
+    fn window_new(self, title: string, w: int, h: int): GuiWindow { return dial_gui_window_new(self, title, w, h); }
+    fn painter_offscreen(self, w: int, h: int): GuiPainter { return dial_gui_painter_offscreen(w, h); }
+    fn font_default(self): GuiFont { return dial_gui_font_default(); }
+    fn font_load(self, path: string): GuiFont { return dial_gui_font_load(path); }
+    fn last_error(self): int { return dial_gui_last_error(); }
+    fn last_error_msg(self): string { return dial_gui_last_error_msg(); }
+    fn clear_error(self): int { return dial_gui_clear_error(); }
+    fn backend(self): string { return dial_gui_backend(); }
+    fn widget_tree(self, w: int, h: int): GuiWidget { return dial_gui_widget_tree(w, h); }
+    fn event_widget(self): GuiWidget { return dial_gui_event_widget(self); }
+    fn event_data(self): rawptr<byte> { return dial_gui_event_data(self); }
+    fn theme_role_count(self): int { return dial_gui_theme_role_count(); }
+    fn theme_get(self, role: int): int { return dial_gui_theme_get(role); }
+    fn theme_set(self, role: int, color: int): int { return dial_gui_theme_set(role, color); }
+    fn theme_reset(self): int { return dial_gui_theme_reset(); }
+    fn signal_count(self): int { return dial_gui_signal_count(); }
+    fn signal_capacity(self): int { return dial_gui_signal_capacity(); }
+    fn menu_new(self): GuiMenu { return dial_gui_menu_new(); }
+    fn dialog_new(self): GuiDialog { return dial_gui_dialog_new(); }
+}
+
+// ===== GuiWindow —— 窗口、控件树挂载、菜单与对话框覆盖层、统一分发 =====
+impl GuiWindow {
+    fn close(self): int { return dial_gui_window_close(self); }
+    fn show(self): int { return dial_gui_window_show(self); }
+    fn set_title(self, title: string): int { return dial_gui_window_set_title(self, title); }
+    fn resize(self, w: int, h: int): int { return dial_gui_window_resize(self, w, h); }
+    fn width(self): int { return dial_gui_window_width(self); }
+    fn height(self): int { return dial_gui_window_height(self); }
+    fn painter(self): GuiPainter { return dial_gui_window_painter(self); }
+    fn flush(self): int { return dial_gui_window_flush(self); }
+    fn set_filter(self, filter: string): int { return dial_gui_window_set_filter(self, filter); }
+    fn backend(self): string { return dial_gui_window_backend(self); }
+    fn set_root(self, root: GuiWidget): int { return dial_gui_window_set_root(self, root); }
+    fn set_menubar(self, m: GuiMenu): int { return dial_gui_window_set_menubar(self, m); }
+    fn popup_menu(self, m: GuiMenu, x: int, y: int): int { return dial_gui_window_popup_menu(self, m, x, y); }
+    fn close_popup(self): int { return dial_gui_window_close_popup(self); }
+    fn dialog_show(self, d: GuiDialog): int { return dial_gui_dialog_show(self, d); }
+    fn dialog_hide(self): int { return dial_gui_dialog_hide(self); }
+    fn draw(self): int { return dial_gui_window_draw(self); }
+    fn handle(self, kind: int, x: int, y: int, button: int): int { return dial_gui_window_handle(self, kind, x, y, button); }
+}
+
+// ===== GuiPainter —— 光栅化绘制 / 裁剪 / 像素 / CRC / 文本绘制 =====
+impl GuiPainter {
+    fn free(self): int { return dial_gui_painter_free(self); }
+    fn width(self): int { return dial_gui_painter_width(self); }
+    fn height(self): int { return dial_gui_painter_height(self); }
+    fn set_aa(self, level: int): int { return dial_gui_set_aa(self, level); }
+    fn set_color(self, color: int): int { return dial_gui_set_color(self, color); }
+    fn clear(self, color: int): int { return dial_gui_clear(self, color); }
+    fn set_clip(self, x: int, y: int, w: int, h: int): int { return dial_gui_set_clip(self, x, y, w, h); }
+    fn clear_clip(self): int { return dial_gui_clear_clip(self); }
+    fn fill_rect(self, x: int, y: int, w: int, h: int): int { return dial_gui_fill_rect(self, x, y, w, h); }
+    fn stroke_rect(self, x: int, y: int, w: int, h: int, thickness: int): int { return dial_gui_stroke_rect(self, x, y, w, h, thickness); }
+    fn draw_line(self, x0: int, y0: int, x1: int, y1: int, thickness: int): int { return dial_gui_draw_line(self, x0, y0, x1, y1, thickness); }
+    fn fill_circle(self, cx: int, cy: int, r: int): int { return dial_gui_fill_circle(self, cx, cy, r); }
+    fn stroke_circle(self, cx: int, cy: int, r: int, thickness: int): int { return dial_gui_stroke_circle(self, cx, cy, r, thickness); }
+    fn fill_ellipse(self, cx: int, cy: int, rx: int, ry: int): int { return dial_gui_fill_ellipse(self, cx, cy, rx, ry); }
+    fn fill_trapezoid_aa(self, y0: int, y1: int, x_tl: float, x_tr: float, x_bl: float, x_br: float): int { return dial_gui_fill_trapezoid_aa(self, y0, y1, x_tl, x_tr, x_bl, x_br); }
+    fn get_pixel(self, x: int, y: int): int { return dial_gui_get_pixel(self, x, y); }
+    fn set_pixel(self, x: int, y: int, color: int): int { return dial_gui_set_pixel(self, x, y, color); }
+    fn blit_pixels(self, dx: int, dy: int, w: int, h: int, pixels: bytes): int { return dial_gui_blit_pixels(self, dx, dy, w, h, pixels); }
+    fn crc32(self): int { return dial_gui_painter_crc32(self); }
+    fn draw_text(self, x: int, y: int, text: string, font: GuiFont, size: int): int { return dial_gui_draw_text(self, x, y, text, font, size); }
+}
+
+// ===== GuiFont —— 字体查询与文本度量 =====
+impl GuiFont {
+    fn kind(self): int { return dial_gui_font_kind(self); }
+    fn free(self): int { return dial_gui_font_free(self); }
+    fn text_width(self, text: string, size: int): int { return dial_gui_text_width(text, self, size); }
+}
+
+// ===== GuiWidget —— 控件树 / 几何 / 外观 / 输入 / 值域 / 信号队列 =====
+impl GuiWidget {
+    fn tree_free(self): int { return dial_gui_widget_tree_free(self); }
+    fn add(self): GuiWidget { return dial_gui_widget_add(self); }
+    fn remove(self): int { return dial_gui_widget_remove(self); }
+    fn parent(self): GuiWidget { return dial_gui_widget_parent(self); }
+    fn first_child(self): GuiWidget { return dial_gui_widget_first_child(self); }
+    fn next_sibling(self): GuiWidget { return dial_gui_widget_next_sibling(self); }
+    fn set_rect(self, x: int, y: int, ww: int, hh: int): int { return dial_gui_widget_set_rect(self, x, y, ww, hh); }
+    fn x(self): int { return dial_gui_widget_x(self); }
+    fn y(self): int { return dial_gui_widget_y(self); }
+    fn width(self): int { return dial_gui_widget_width(self); }
+    fn height(self): int { return dial_gui_widget_height(self); }
+    fn set_visible(self, v: int): int { return dial_gui_widget_set_visible(self, v); }
+    fn visible(self): int { return dial_gui_widget_visible(self); }
+    fn set_id(self, id: string): int { return dial_gui_widget_set_id(self, id); }
+    fn id(self): rawptr<byte> { return dial_gui_widget_id(self); }
+    fn set_tag(self, t: int): int { return dial_gui_widget_set_tag(self, t); }
+    fn tag(self): int { return dial_gui_widget_tag(self); }
+    fn set_userdata(self, u: int): int { return dial_gui_widget_set_userdata(self, u); }
+    fn userdata(self): int { return dial_gui_widget_userdata(self); }
+    fn set_layout(self, mode: int): int { return dial_gui_widget_set_layout(self, mode); }
+    fn set_padding(self, n: int): int { return dial_gui_widget_set_padding(self, n); }
+    fn set_gap(self, n: int): int { return dial_gui_widget_set_gap(self, n); }
+    fn layout_apply(self, w: int, h: int): int { return dial_gui_widget_layout_apply(self, w, h); }
+    fn hit(self, x: int, y: int): GuiWidget { return dial_gui_widget_hit(self, x, y); }
+    fn set_kind(self, kind: int): int { return dial_gui_widget_set_kind(self, kind); }
+    fn kind(self): int { return dial_gui_widget_kind(self); }
+    fn set_text(self, text: string): int { return dial_gui_widget_set_text(self, text); }
+    fn text(self): rawptr<byte> { return dial_gui_widget_text(self); }
+    fn set_checked(self, v: int): int { return dial_gui_widget_set_checked(self, v); }
+    fn checked(self): int { return dial_gui_widget_checked(self); }
+    fn set_disabled(self, v: int): int { return dial_gui_widget_set_disabled(self, v); }
+    fn disabled(self): int { return dial_gui_widget_disabled(self); }
+    fn hovered(self): int { return dial_gui_widget_hovered(self); }
+    fn pressed(self): int { return dial_gui_widget_pressed(self); }
+    fn handle(self, kind: int, x: int, y: int, button: int): int { return dial_gui_widget_handle(self, kind, x, y, button); }
+    fn draw(self, p: GuiPainter): int { return dial_gui_widget_draw(self, p); }
+    fn set_focus(self, w: GuiWidget): int { return dial_gui_widget_set_focus(self, w); }
+    fn focus(self): GuiWidget { return dial_gui_widget_focus(self); }
+    fn focused(self): int { return dial_gui_widget_focused(self); }
+    fn focus_next(self): GuiWidget { return dial_gui_widget_focus_next(self); }
+    fn focus_prev(self): GuiWidget { return dial_gui_widget_focus_prev(self); }
+    fn cursor(self): int { return dial_gui_widget_cursor(self); }
+    fn set_cursor(self, pos: int): int { return dial_gui_widget_set_cursor(self, pos); }
+    fn sel_start(self): int { return dial_gui_widget_sel_start(self); }
+    fn sel_end(self): int { return dial_gui_widget_sel_end(self); }
+    fn select_range(self, a: int, b: int): int { return dial_gui_widget_select(self, a, b); }
+    fn set_max_len(self, n: int): int { return dial_gui_widget_set_max_len(self, n); }
+    fn max_len(self): int { return dial_gui_widget_max_len(self); }
+    fn key(self, kind: int, key: int, mods: int): int { return dial_gui_widget_key(self, kind, key, mods); }
+    fn value(self): int { return dial_gui_widget_value(self); }
+    fn set_value(self, v: int): int { return dial_gui_widget_set_value(self, v); }
+    fn set_range(self, lo: int, hi: int): int { return dial_gui_widget_set_range(self, lo, hi); }
+    fn min(self): int { return dial_gui_widget_min(self); }
+    fn max(self): int { return dial_gui_widget_max(self); }
+    fn set_group(self, g: int): int { return dial_gui_widget_set_group(self, g); }
+    fn group(self): int { return dial_gui_widget_group(self); }
+    fn subscribe(self, mask: int): int { return dial_gui_widget_subscribe(self, mask); }
+    fn subscribed(self): int { return dial_gui_widget_subscribed(self); }
+    fn unsubscribe(self): int { return dial_gui_widget_unsubscribe(self); }
+    fn signal_pending(self): int { return dial_gui_widget_signal_pending(self); }
+    fn signal_data(self): rawptr<byte> { return dial_gui_widget_signal_data(self); }
+    fn signal_pop(self): int { return dial_gui_widget_signal_pop(self); }
+    fn signal_clear(self): int { return dial_gui_widget_signal_clear(self); }
+    fn signal_dropped(self): int { return dial_gui_widget_signal_dropped(self); }
+}
+
+// ===== GuiMenu —— 顶栏与弹出菜单项 =====
+impl GuiMenu {
+    fn free(self): int { return dial_gui_menu_free(self); }
+    fn add_item(self, id: int, txt: string): int { return dial_gui_menu_add_item(self, id, txt); }
+    fn add_sep(self): int { return dial_gui_menu_add_sep(self); }
+    fn set_tag(self, tag: int): int { return dial_gui_menu_set_tag(self, tag); }
+    fn tag(self): int { return dial_gui_menu_tag(self); }
+    fn count(self): int { return dial_gui_menu_count(self); }
+    fn item_id(self, idx: int): int { return dial_gui_menu_item_id(self, idx); }
+    fn item_label(self, idx: int): rawptr<byte> { return dial_gui_menu_item_label(self, idx); }
+    fn item_set_enabled(self, idx: int, v: int): int { return dial_gui_menu_item_set_enabled(self, idx, v); }
+}
+
+// ===== GuiDialog —— 模态对话框配置与结果读取 =====
+impl GuiDialog {
+    fn free(self): int { return dial_gui_dialog_free(self); }
+    fn set_title(self, title: string): int { return dial_gui_dialog_set_title(self, title); }
+    fn set_message(self, msg: string): int { return dial_gui_dialog_set_message(self, msg); }
+    fn set_buttons(self, mask: int): int { return dial_gui_dialog_set_buttons(self, mask); }
+    fn result(self): int { return dial_gui_dialog_result(self); }
+    fn open(self): int { return dial_gui_dialog_open(self); }
+}

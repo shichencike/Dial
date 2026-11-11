@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dialc 端到端测试
 #
-# 二十九组检查，全部通过才算绿（顺序为 A→Z 再 AA→AB→AC，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
+# 三十组检查，全部通过才算绿（顺序为 A→Z 再 AA→AB→AC→AD，C 组「产物契约」排在 B 之后、逻辑序而非字母序）：
 #   A. 正向：examples/*.dial 必须编译成功，且运行输出与同名 .expected 黄金文件逐字节一致；
 #   B. 负向：tests/bad/*.dial 必须编译失败（用于锁定语义/语法诊断不被弱化）；
 #   C. 契约：产物可执行文件不得依赖 libLLVM，只允许依赖 C Runtime（libc）；
@@ -81,6 +81,11 @@
 #       dial_gui_window_draw(win)）/ 默认实参 / 容器 push 同名方法隔离 /
 #       6 个 Fail-Fast 负向 + 诊断面向用户（不暴露 mangle 名、参数不含 self）
 #       （v1.10 开发中增量）。
+#   AD. GUI 第 8 层 Dial 侧 OO 封装：packages/gui/gui_oo.dial 用 153 个 impl
+#       方法包住 154 个 C 风格 extern fn（纯 Dial 源码、不进 .dialpkg、ABI 不变）；
+#       契约审计（方法数 / 全覆盖 / 零 extern 声明）、无 DISPLAY 纯内存路径 +
+#       C 风格与 OO 风格绘制 CRC32 逐字节相等、Xvfb 实窗覆盖层与信号队列、
+#       3 个 Fail-Fast 透传负向 + 诊断面向用户（v1.10 开发中增量）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -2496,6 +2501,123 @@ elif grep -qF "方法 'P.add' 需要 1~1 个参数，但传入了 0 个" "${TMP}
     acpass "诊断面向用户：显示 P.add 且参数个数/序号不含 self、不暴露 mangle 名"
 else
     acbad "诊断未还原用户视角"; tail -6 "${TMP}/ac_cnt.log"
+fi
+
+# ===========================================================================
+echo "== AD) GUI 第 8 层 OO 封装：153 个 impl 方法 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
+adpass() { echo "  ✅ $1"; }
+adbad()  { echo "  ❌ $1"; fail=1; }
+
+AD_DIR="${TMP}/ad_oo"
+mkdir -p "$AD_DIR"
+# 模拟用户把 gui_oo.dial 放进自己项目目录：源文件是唯一真相，副本为临时派生数据。
+cp packages/gui/gui_oo.dial "$AD_DIR/"
+cp tests/oo/use_gui_oo.dial "$AD_DIR/"
+"$DIALC" pack packages/gui -o "${TMP}/ad_gui.dialpkg" >"${TMP}/ad_pack.log" 2>&1 \
+    && "$DIALC" install "${TMP}/ad_gui.dialpkg" >"${TMP}/ad_install.log" 2>&1 \
+    || { adbad "gui.dialpkg 打包或安装失败（AD 组）"; tail -6 "${TMP}/ad_pack.log" "${TMP}/ad_install.log"; }
+
+# 1) 契约防漂移审计：153 个方法恰好覆盖 153 个 extern fn（入口 app_new 除外），
+#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 154 个签名。
+ad_diag=$(grep '^extern fn' packages/gui/gui.diali | sed -E 's/^extern fn ([A-Za-z0-9_]+).*/\1/' \
+          | grep -v '^dial_gui_app_new$' | sort -u)
+ad_refs=$(grep '^    fn ' packages/gui/gui_oo.dial | grep -oE 'dial_gui_[A-Za-z0-9_]+' | sort -u)
+ad_methods=$(grep -c '^    fn ' packages/gui/gui_oo.dial)
+ad_diag_n=$(echo "$ad_diag" | wc -l)
+ad_iface_n=$(grep -c '^extern fn' packages/gui/gui.diali)
+ad_oo_decl=$(grep -c '^extern fn' packages/gui/gui_oo.dial || true)
+if [ "$ad_methods" -eq 153 ] && [ "$ad_diag_n" -eq 153 ] && [ "$ad_iface_n" -eq 154 ] \
+   && [ "$ad_oo_decl" -eq 0 ] && [ "$ad_diag" = "$ad_refs" ]; then
+    adpass "契约审计：153 个 impl 方法全覆盖 153 个 extern fn、gui.diali 仍 154 个签名、封装层零 extern 声明（ABI 不变）"
+else
+    adbad "契约审计不通过：methods=$ad_methods diag=$ad_diag_n iface=$ad_iface_n oo_decl=$ad_oo_decl"
+    diff <(echo "$ad_diag") <(echo "$ad_refs") | head -20
+fi
+
+# 2) 正向：编译 + 无 DISPLAY 纯内存路径（含 C 风格 / OO 风格 CRC32 逐字节相等）。
+if ! "$DIALC" build "$AD_DIR/use_gui_oo.dial" -o "${TMP}/ad_oo_run" >"${TMP}/ad_build.log" 2>&1; then
+    adbad "use_gui_oo.dial 编译失败"; tail -20 "${TMP}/ad_build.log"
+else
+    adpass "OO 封装层 + 用例编译成功（153 个 impl 方法签名全部通过）"
+    if ! env -u DISPLAY "${TMP}/ad_oo_run" >"${TMP}/ad_nodisp.out" 2>&1; then
+        adbad "use_gui_oo 无 DISPLAY 运行非零退出"; tail -20 "${TMP}/ad_nodisp.out"
+    elif grep -q '= bad' "${TMP}/ad_nodisp.out" \
+         || ! grep -q '^oo_done = true$' "${TMP}/ad_nodisp.out" \
+         || ! grep -q '^oo_painter_crc_matches_c = ok$' "${TMP}/ad_nodisp.out"; then
+        adbad "无 DISPLAY 路径有 bad / 缺完成标记 / CRC 对照未通过"
+        grep '= bad' "${TMP}/ad_nodisp.out" | head -10
+    else
+        adpass "无 DISPLAY 全绿（$(grep -c '= ok' "${TMP}/ad_nodisp.out") 条）：C 风格与 OO 风格绘制 CRC32 逐字节相等、7 类句柄方法可用、Fail-Fast 透传"
+    fi
+fi
+
+# 3) Xvfb 真实窗口：顶栏 / 弹窗 / 对话框 / 控件树全走方法，信号队列与 AA 组逐项对齐。
+if command -v xvfb-run >/dev/null 2>&1; then
+    if xvfb-run -a -s "-screen 0 1024x768x24 +extension MIT-SHM +extension RENDER" \
+       "${TMP}/ad_oo_run" >"${TMP}/ad_xvfb.out" 2>&1 \
+       && ! grep -q '= bad' "${TMP}/ad_xvfb.out" \
+       && ! grep -q 'skipped' "${TMP}/ad_xvfb.out" \
+       && grep -q '^oo_done = true$' "${TMP}/ad_xvfb.out" \
+       && grep -q '^oo_win_draw_bar = ok$' "${TMP}/ad_xvfb.out" \
+       && grep -q '^oo_win_bar_click_activates = ok$' "${TMP}/ad_xvfb.out" \
+       && grep -q '^oo_win_dialog_result_ok = ok$' "${TMP}/ad_xvfb.out" \
+       && grep -q '^oo_win_widget_click_activates = ok$' "${TMP}/ad_xvfb.out" \
+       && grep -q '^oo_win_app_free = ok$' "${TMP}/ad_xvfb.out"; then
+        adpass "Xvfb 实窗全绿（$(grep -c '= ok' "${TMP}/ad_xvfb.out") 条）：顶栏·弹窗·对话框·控件树走方法，信号队列与 AA 组逐项对齐"
+    else
+        adbad "Xvfb 实窗路径未全绿"; grep '= bad\|skipped' "${TMP}/ad_xvfb.out" | head -10
+    fi
+else
+    echo "  ⚠️  本环境无 xvfb-run：OO 层实窗路径未实机验证（如实标注，不伪装通过）"
+fi
+
+# 4) Fail-Fast 透传负向：未知方法 / 参数类型零隐式转换 / 参数个数不足。
+cat > "$AD_DIR/oo_unknown.dial" <<'EOF'
+import "gui_oo";
+fn main(): int {
+    var app: GuiApp = dial_gui_app_new();
+    var m: GuiMenu = app.menu_new();
+    return m.nope();
+}
+EOF
+cat > "$AD_DIR/oo_arg_type.dial" <<'EOF'
+import "gui_oo";
+fn main(): int {
+    var app: GuiApp = dial_gui_app_new();
+    var m: GuiMenu = app.menu_new();
+    return m.add_item("x", "File");
+}
+EOF
+cat > "$AD_DIR/oo_arg_count.dial" <<'EOF'
+import "gui_oo";
+fn main(): int {
+    var app: GuiApp = dial_gui_app_new();
+    var m: GuiMenu = app.menu_new();
+    return m.add_item(1);
+}
+EOF
+ad_neg_ok=0
+ad_neg_total=0
+for f in "$AD_DIR"/oo_*.dial; do
+    ad_neg_total=$((ad_neg_total + 1))
+    if ! "$DIALC" build "$f" -o "${TMP}/ad_bad" >"${TMP}/ad_neg.log" 2>&1; then
+        ad_neg_ok=$((ad_neg_ok + 1))
+    fi
+done
+if [ "$ad_neg_total" -eq 3 ] && [ "$ad_neg_ok" -eq 3 ]; then
+    adpass "Fail-Fast 透传 3/3 拒绝：未知方法 / 参数类型零隐式转换 / 参数个数不足"
+else
+    adbad "Fail-Fast 透传未全部拒绝（$ad_neg_ok/$ad_neg_total）"
+fi
+
+# 5) 诊断面向用户：显示 GuiMenu.add_item、参数个数不含 self、不暴露 mangle 名。
+if "$DIALC" build "$AD_DIR/oo_arg_count.dial" -o "${TMP}/ad_bad" >"${TMP}/ad_cnt.log" 2>&1; then
+    adbad "参数个数负向用例竟编译成功"
+elif grep -qF "方法 'GuiMenu.add_item' 需要 2~2 个参数，但传入了 1 个" "${TMP}/ad_cnt.log" \
+     && ! grep -qF "__impl_" "${TMP}/ad_cnt.log"; then
+    adpass "诊断面向用户：显示 GuiMenu.add_item、参数个数不含 self、不暴露 mangle 名"
+else
+    adbad "诊断未还原用户视角"; tail -6 "${TMP}/ad_cnt.log"
 fi
 
 echo
