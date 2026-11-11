@@ -543,7 +543,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── dial_map.h / .c     #   Map（int → int，ARC）
 │   └── dial_io.h / .c      #   打印 / 读行
 ├── packages/               # 官方 .dialpkg 包（http / text / json / crypto / gui）
-│   └── gui/                #   手搓 GUI 十三层：七层 C 契约 + 第 9/10/11/12/13 层（223+21=244 个 extern fn）+ 第 8 层 Dial 侧 OO 封装（gui_oo.dial，纯源码、不进包）（见 §38）
+│   └── gui/                #   手搓 GUI 十三层：七层 C 契约 + 第 9/10/11/12/13 层（223+21=244 个 extern fn）+ 第 8 层 Dial 侧 OO 封装（gui_oo.dial，纯源码、随包 src/ 分发）（见 §38）
 ├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
 ├── tests/
 │   ├── run_tests.sh        # 端到端测试（A 正向 / B 负向 / C 契约 / D Fail-Fast / E 对照 /
@@ -3122,7 +3122,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>GUI 控件树 / 布局 / 信号槽</td>
-<td><strong>十三层已落地</strong>（<code>gui.dialpkg</code>，见 <a href="#38-手搓-gui-地基包guidialpkg">§38</a>）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13）+ 滚动视图层（视口裁剪 + 滚动条几何 / 命中 / 绘制 + 偏移推进，零 DISPLAY 依赖，见 §38.15）+ 右键上下文菜单层（复用第 7 层菜单 + 锚点 / 命中 / 悬停 / 选中 / 绘制，零 DISPLAY 依赖，见 §38.16）+ 悬浮提示层（文本 + 位置 + 尺寸 + 悬停计时，延迟由调用方推进、零时钟依赖，见 §38.17）+ 状态栏层（左 / 右文本 + 进度条槽位，进度值越界夹紧、零时钟依赖，见 §38.18）+ 通知气泡层（FIFO 消息队列，生命周期纯值推进、到期自动消隐、零时钟依赖，见 §38.19），共 <strong>246 个 <code>extern fn</code></strong>；<strong>第 8 层 Dial 侧 OO 封装</strong>（<code>gui_oo.dial</code>，245 个 <code>impl</code> 方法，纯源码、不进包、零 <code>extern fn</code> 增量，见 §38.14）。<strong>仍未实现</strong>：多行文本 / IME、撤销重做、C → Dial 反向回调、富文本编辑、图片解码。Win32 后端<strong>仅交叉编译、未实机验证</strong>（XTest 实机注入仅在 Linux/Xvfb 验收）</td>
+<td><strong>十三层已落地</strong>（<code>gui.dialpkg</code>，见 <a href="#38-手搓-gui-地基包guidialpkg">§38</a>）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13）+ 滚动视图层（视口裁剪 + 滚动条几何 / 命中 / 绘制 + 偏移推进，零 DISPLAY 依赖，见 §38.15）+ 右键上下文菜单层（复用第 7 层菜单 + 锚点 / 命中 / 悬停 / 选中 / 绘制，零 DISPLAY 依赖，见 §38.16）+ 悬浮提示层（文本 + 位置 + 尺寸 + 悬停计时，延迟由调用方推进、零时钟依赖，见 §38.17）+ 状态栏层（左 / 右文本 + 进度条槽位，进度值越界夹紧、零时钟依赖，见 §38.18）+ 通知气泡层（FIFO 消息队列，生命周期纯值推进、到期自动消隐、零时钟依赖，见 §38.19），共 <strong>246 个 <code>extern fn</code></strong>；<strong>第 8 层 Dial 侧 OO 封装</strong>（<code>gui_oo.dial</code>，245 个 <code>impl</code> 方法，纯源码、随包 <code>src/</code> 分发（装包即用）、零 <code>extern fn</code> 增量，见 §38.14）。<strong>仍未实现</strong>：多行文本 / IME、撤销重做、C → Dial 反向回调、富文本编辑、图片解码。Win32 后端<strong>仅交叉编译、未实机验证</strong>（XTest 实机注入仅在 Linux/Xvfb 验收）</td>
 </tr>
 <tr>
 <td><code>impl</code> 方法块（B1）</td>
@@ -8067,12 +8067,13 @@ SSE / AVX / NEON。</p>
 再补菜单 / 对话框覆盖层（第 7 层）给 AA 组 +3 条到 <strong>538 ✅</strong>，
 补 B1 <code>impl</code> 方法块（语言特性）新增 AC 组 5 条断言，扩为
 <strong>A–Z + AA + AB + AC 二十九组 / 549 ✅</strong>；本轮再补 GUI 第 8 层 Dial 侧 OO
-封装（<code>gui_oo.dial</code>，纯源码、不进包、零 <code>extern fn</code> 增量）新增 AD 组 6 条断言，
+封装（<code>gui_oo.dial</code>，纯源码、随包 <code>src/</code> 分发、零 <code>extern fn</code> 增量）新增 AD 组 6 条断言，
 第 9 层滚动视图 / 第 10 层右键上下文菜单 / 第 11 层悬浮提示 / 第 12 层状态栏 /
 第 13 层通知气泡（均为纯内存对象 + 离屏画布，零 DISPLAY 依赖）各新增 AA 组
 +1 条断言，扩为 <strong>A–Z + AA + AB + AC + AD 三十组 / 560 ✅</strong>；随后 dialpkg
-<code>src/</code> 随包 Dial 源码模块（§25.11）给 Q 组新增 10 条断言，扩为
-<strong>三十组 / 570 ✅</strong>，属
+<code>src/</code> 随包 Dial 源码模块（§25.11）给 Q 组新增 10 条断言到 <strong>570 ✅</strong>；
+随后把 <code>gui_oo.dial</code> 纳入 gui 包分发、AD 组新增「装包即用」1 条断言，扩为
+<strong>三十组 / 571 ✅</strong>，属
 <strong>未发布的开发中增量</strong>，见 §5.8 / §25.11 / §34.2 / §34.5 / §37.12 / §38.14 /
 §38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
 </blockquote>
@@ -9236,7 +9237,7 @@ fn main(): int {
 负向（未知方法 / 参数类型 / 参数个数 / 缺 self / 重复方法 / 空块）+ 诊断面向用户。
 全量回归 <strong>538 ✅ → 549 ✅ / 0 ❌</strong>，A–Z + AA + AB + AC 二十九组全绿。
 （本节记录 B1 落地时的验收快照；其后 GUI 第 8 层 OO 封装新增 AD 组，当前全量
-<strong>570 ✅ / 三十组</strong>，见 §25.11 / §34.2 / §34.5 / §38.14 / §38.15 / §38.16 / §38.17 / §38.18 / §38.19。）</p>
+<strong>571 ✅ / 三十组</strong>，见 §25.11 / §34.2 / §34.5 / §38.14 / §38.15 / §38.16 / §38.17 / §38.18 / §38.19。）</p>
 <hr />
 <h2 id="38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</h2>
 <blockquote>
@@ -9261,8 +9262,8 @@ subscribe / pending / data / pop / clear / dropped，10 个 <code>extern fn</cod
 纯值信号队列：<code>SELECTED</code> / <code>SUBMITTED</code> 两类信号 + <code>dial_gui_menu_*</code> /
 <code>dial_gui_dialog_*</code> / <code>dial_gui_window_*</code> 统一分发，24 个 <code>extern fn</code>，见 §38.13）；
 ⑧ <strong>Dial 侧 OO 封装层</strong>（<code>gui_oo.dial</code> 用 <strong>245 个 <code>impl</code> 方法</strong>包住上述 246 个
-C 风格函数，<code>win.draw()</code> 等价 <code>dial_gui_window_draw(win)</code>；<strong>纯 Dial 源码、不进
-<code>.dialpkg</code>、零 <code>extern fn</code> 增量</strong>，见 §38.14）。
+C 风格函数，<code>win.draw()</code> 等价 <code>dial_gui_window_draw(win)</code>；<strong>纯 Dial 源码、随包
+<code>src/</code> 分发（装包即用）、零 <code>extern fn</code> 增量</strong>，见 §38.14）。
 ⑨ <strong>滚动视图层</strong>（<code>dial_gui_scroll_*</code>，视口裁剪 + 滚动条几何 / 命中 / 绘制 +
 偏移推进 wheel / drag / scroll_to；纯内存对象 + 离屏画布，零 DISPLAY 依赖；
 15 个 <code>extern fn</code>，见 §38.15）；
@@ -9336,7 +9337,7 @@ C 风格函数，<code>win.draw()</code> 等价 <code>dial_gui_window_draw(win)<
 </tr>
 <tr>
 <td><strong>Dial 侧 OO 封装层范围（第 8 层）</strong></td>
-<td><code>packages/gui/gui_oo.dial</code>：<strong>245 个 <code>impl</code> 方法</strong>覆盖 246 个 C 风格 <code>extern fn</code>（入口 <code>dial_gui_app_new</code> 无实例可挂，仍用原函数）；按 7 个不透明句柄 <code>GuiApp/Window/Painter/Font/Widget/Menu/Dialog</code> 分组，方法名去掉 <code>dial_gui_</code> 与类型前缀；进程级全局状态 / 工厂归到 <code>GuiApp</code> 命名空间（self 忽略）。<strong>纯 Dial 源码、不进 <code>.dialpkg</code>、零 <code>extern fn</code> 增量、ABI 不变</strong>；用户 <code>import "./gui_oo.dial";</code> 一行即生效（模块内 <code>import "gui";</code> 由前端汇总去重），见 §38.14</td>
+<td><code>packages/gui/src/gui_oo.dial</code>：<strong>245 个 <code>impl</code> 方法</strong>覆盖 246 个 C 风格 <code>extern fn</code>（入口 <code>dial_gui_app_new</code> 无实例可挂，仍用原函数）；按各不透明句柄分组，方法名去掉 <code>dial_gui_</code> 与类型前缀；进程级全局状态 / 工厂归到 <code>GuiApp</code> 命名空间（self 忽略）。<strong>纯 Dial 源码、随包 <code>src/</code> 分发（装包即用）、零 <code>extern fn</code> 增量、ABI 不变</strong>；用户装包后 <code>import "gui_oo";</code> 一行即生效（模块内 <code>import "gui";</code> 由前端汇总去重），无需复制源码；项目里同名 <code>.dial</code> 仍可覆盖包内副本，见 §25.11 / §38.14</td>
 </tr>
 <tr>
 <td><strong>滚动视图层范围（第 9 层）</strong></td>
@@ -9348,7 +9349,7 @@ C 风格函数，<code>win.draw()</code> 等价 <code>dial_gui_window_draw(win)<
 </tr>
 <tr>
 <td>包契约</td>
-<td><strong>追加函数、ABI 不变</strong>：七层都只加 <code>extern fn</code> + 句柄，旧签名一字不动（框架层追加前 55 个、外观层追加前 83 个、输入层追加前 95 个、主题层追加前 109 个、信号层追加前 120 个，菜单/对话框层追加前 130 个），<code>abi = 6</code> / <code>version = 1.10.0</code> 不变，重新 <code>pack</code> + <code>install</code>（同 ABI 覆盖）；<strong>第 8 层不在此列</strong>——它是 <code>.dial</code> 源码层，不进包、不增签名、无需重新 <code>pack</code> / <code>install</code></td>
+<td><strong>追加函数、ABI 不变</strong>：七层都只加 <code>extern fn</code> + 句柄，旧签名一字不动（框架层追加前 55 个、外观层追加前 83 个、输入层追加前 95 个、主题层追加前 109 个、信号层追加前 120 个，菜单/对话框层追加前 130 个），<code>abi = 6</code> / <code>version = 1.10.0</code> 不变，重新 <code>pack</code> + <code>install</code>（同 ABI 覆盖）；<strong>第 8 层不增签名</strong>——它是 <code>.dial</code> 源码层，随包 <code>src/</code> 分发（见 §25.11），装包即用、不碰 <code>abi</code> / <code>version</code> / 既有签名；改动它只需随包重新 <code>pack</code> + <code>install</code></td>
 </tr>
 </tbody>
 </table>
@@ -9371,7 +9372,7 @@ C 风格函数，<code>win.draw()</code> 等价 <code>dial_gui_window_draw(win)<
 ├── src/dial_gui_tooltip.c# 第 11 层：悬浮提示（延迟由调用方推进、不读时钟，纯 C，三平台共用，零平台符号）
 ├── src/dial_gui_statusbar.c # 第 12 层：状态栏（左右文本 + 进度条槽位，纯 C，三平台共用，零平台符号）
 ├── src/dial_gui_toast.c  # 第 13 层：通知气泡（FIFO 消息队列 + 生命周期消隐，纯 C，三平台共用，零平台符号）
-├── gui_oo.dial           # 第 8 层：Dial 侧 OO 封装（245 个 impl 方法，纯源码、不进 .dialpkg）
+├── src/gui_oo.dial      # 第 8 层：Dial 侧 OO 封装（245 个 impl 方法，纯 Dial 源码，随包 src/ 分发、装包即用）
 ├── src/gui_font8.h       # 内置 ASCII 点阵静态常量表
 ├── src/dial_gui_x11.c    # POSIX 后端（X11 + XShm + XRender，dlopen）
 ├── src/dial_gui_win32.c  # Windows 后端（GDI DIBSection，LoadLibraryA）
@@ -10328,7 +10329,7 @@ XTest 实窗注入实测 <code>keys 2 / focus 2 / mouse 6 / act 2 / shift 1</cod
   槽位，进度值越界夹紧、零时钟依赖，见 §38.18）+ <strong>通知气泡层</strong>（FIFO 消息队列，
   生命周期纯值推进、到期自动消隐、零时钟依赖，见 §38.19）都已有真实现并写进
   <code>gui.diali</code>（共 <strong>246 个 <code>extern fn</code></strong>）；<strong>第 8 层 Dial 侧 OO 封装层</strong>
-  （<code>gui_oo.dial</code>，245 个 <code>impl</code> 方法，纯 Dial 源码、不进包、零
+  （<code>gui_oo.dial</code>，245 个 <code>impl</code> 方法，纯 Dial 源码、随包 <code>src/</code> 分发、零
   <code>extern fn</code> 增量，见 §38.14）也已落地。主题色仍是<strong>进程级全局表</strong>、按角色覆写，
   不支持每控件独立配色；Slider 只支持水平方向、点击设值（拖动未接线）。
   <strong>仍未实现、也不写进契约</strong>：C → Dial 反向回调（信号槽已由第 6 层以纯值信号
@@ -10566,16 +10567,20 @@ X11 / GDI 未定义符号；X11 / Win32 两端无需改动（菜单 / 对话框�
 滚动视图 15 + 第 10 层右键上下文菜单 15 + 第 11 层悬浮提示 19 +
 第 12 层状态栏 19 + 第 13 层通知气泡 21，见 §38.15 ~ §38.19）。第 8 层换一种
 形态——<strong>不新增任何 <code>extern fn</code></strong>，而是用 §37.12 落地的 B1 <code>impl</code> 方法块，在
-<code>packages/gui/gui_oo.dial</code> 里写 <strong>245 个纯
+<code>packages/gui/src/gui_oo.dial</code> 里写 <strong>245 个纯
 Dial 方法</strong>，把 C 风格调用编译期
-脱糖成习惯写法。这一层是<strong>纯源码</strong>，不进 <code>.dialpkg</code>、不碰三平台 <code>.a</code>、
-<code>abi = 6</code> / <code>version = 1.10.0</code> 不变、旧 154 个签名一字不动。</p>
+脱糖成习惯写法。这一层是<strong>纯源码</strong>，随包 <code>src/</code> 分发（见 §25.11）、
+不碰三平台 <code>.a</code>、<code>abi = 6</code> / <code>version = 1.10.0</code> 不变、旧 154 个签名一字不动。</p>
 </blockquote>
-<p><strong>用法</strong>（v1.04 本地源码模块，见 §34）：把 <code>gui_oo.dial</code> 放进项目目录，写一行</p>
-<pre><code class="language-dial">import &quot;./gui_oo.dial&quot;;          // 或裸名 import &quot;gui_oo&quot;;
+<p><strong>用法</strong>（装包即用，见 §25.11 / §34）：装好 <code>gui.dialpkg</code> 后写一行裸名 import，
+即可从包内 <code>src/gui_oo.dial</code> 自动展开本模块，<strong>无需复制任何文件到项目目录</strong>：</p>
+<pre><code class="language-dial">import &quot;gui_oo&quot;;
 </code></pre>
-<p>文件内的 <code>import "gui";</code> 由前端收集所有模块后<strong>汇总、去重、全局生效</strong>，故用户
-不必再写第二个 import；随后 <code>dial_gui_app_new()</code> 建 app，其余全部走方法：</p>
+<p>若项目目录自己放了一份同名的 <code>gui_oo.dial</code>，则<strong>本地那份优先</strong>（三级优先见
+§34.2），方便临时改源码试验而不必动已安装的包；也可显式写
+<code>import "./gui_oo.dial";</code> 走本地路径。文件内的 <code>import "gui";</code> 由前端收集所有
+模块后<strong>汇总、去重、全局生效</strong>，故用户不必再写第二个 import；随后
+<code>dial_gui_app_new()</code> 建 app，其余全部走方法：</p>
 <pre><code class="language-dial">var app: GuiApp = dial_gui_app_new();
 var win: GuiWindow = app.window_new(&quot;Demo&quot;, 400, 300);
 var root: GuiWidget = app.widget_tree(400, 300);
@@ -10630,9 +10635,9 @@ parser 阶段就降级为普通顶层函数、调用点在语义与代码生成�
 <li><code>self</code> 是值语义句柄副本；opaque 句柄本质是指针，方法内操作作用于同一对象。</li>
 <li>封装层不定义顶层辅助函数 / <code>const</code>（避免与用户源码跨文件撞名），也不重复
   声明 <code>extern fn dial_gui_*</code>（会与 <code>.diali</code> 撞名被 Fail-Fast 拒绝）。</li>
-<li>LSP 当前<strong>不递归本地源码模块</strong>（v1.04 既有局限），故 <code>import "./gui_oo.dial";</code>
-  在编辑器里可能被误报「找不到已安装的包」；CLI <code>build</code> / <code>run</code> / <code>check</code> /
-  <code>test</code> 全走 <code>frontend</code>，不受影响。</li>
+<li>LSP 当前<strong>不递归源码模块</strong>（v1.04 既有局限，包内 <code>src/</code> 模块同理），故
+  <code>import "gui_oo";</code> 在编辑器里可能被误报「找不到已安装的包」；CLI <code>build</code> /
+  <code>run</code> / <code>check</code> / <code>test</code> 全走 <code>frontend</code>，不受影响。</li>
 </ul>
 <p><strong>回归（AD 组，第 30 组）</strong>：契约审计（245 方法恰好覆盖 245 个 <code>extern fn</code>、
 <code>gui.diali</code> 共 246 个签名、封装层零 <code>extern fn</code> 声明）、无 DISPLAY 纯内存路径

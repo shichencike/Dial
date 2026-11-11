@@ -357,7 +357,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
 # ---------------------------------------------------------------------------
 
 TOPICS = {
-    "unreleased-dev": "手搓 GUI 十三层（TextBox 输入层 / 统一键码 / XTest 实机注入 / 可覆写主题色 + Radio·Slider·Progress / 信号槽·控件事件订阅纯值队列 / 菜单·对话框覆盖层复用纯值信号队列 / 第 9 层滚动视图：视口裁剪 + 滚动条几何·命中·绘制 + 偏移推进 wheel·drag·scroll_to、纯 C 零平台符号、零 DISPLAY 依赖 / 第 10 层右键上下文菜单：复用第 7 层 GuiMenu + 弹出锚点 + 命中·悬停·选中·绘制、借用语义不转移菜单所有权、纯 C 零平台符号、零 DISPLAY 依赖 / 第 11 层悬浮提示：文本 + 位置 + 尺寸 + 悬停计时、延迟由调用方推进不读时钟、纯 C 零平台符号、零 DISPLAY 依赖 / 第 12 层状态栏：左·右文本 + 进度条槽位、进度值越界夹紧、纯 C 零平台符号、零 DISPLAY 依赖 / 第 13 层通知气泡：FIFO 消息队列 + 生命周期纯值推进·到期自动消隐、纯 C 零平台符号、零 DISPLAY 依赖 / 第 8 层 Dial 侧 OO 封装 gui_oo.dial：245 个 impl 方法、纯源码不进包、零 extern fn 增量、C 风格与 OO 风格绘制 CRC 逐字节相等）+ int32/float32 一等类型与 FFI 精确 32 位宽度 + B1 impl 方法块（obj.m() 编译期脱糖、不新增关键字、ABI 不变，GUI 句柄 win.draw()）+ 官网 6 个包介绍页 + 包索引页 + http.dialpkg 三处 Fail-Fast/可用性修复 + dialpkg src/ 随包 Dial 源码模块（[src] 段显式声明 + manifest.src 映射 + 三级 import 装包即用 + 逐文件 SHA256 保护 + 向后兼容，见 README §25.11）（开发中增量，未升版本号 / 未发布）",
+    "unreleased-dev": "手搓 GUI 十三层（TextBox 输入层 / 统一键码 / XTest 实机注入 / 可覆写主题色 + Radio·Slider·Progress / 信号槽·控件事件订阅纯值队列 / 菜单·对话框覆盖层复用纯值信号队列 / 第 9 层滚动视图：视口裁剪 + 滚动条几何·命中·绘制 + 偏移推进 wheel·drag·scroll_to、纯 C 零平台符号、零 DISPLAY 依赖 / 第 10 层右键上下文菜单：复用第 7 层 GuiMenu + 弹出锚点 + 命中·悬停·选中·绘制、借用语义不转移菜单所有权、纯 C 零平台符号、零 DISPLAY 依赖 / 第 11 层悬浮提示：文本 + 位置 + 尺寸 + 悬停计时、延迟由调用方推进不读时钟、纯 C 零平台符号、零 DISPLAY 依赖 / 第 12 层状态栏：左·右文本 + 进度条槽位、进度值越界夹紧、纯 C 零平台符号、零 DISPLAY 依赖 / 第 13 层通知气泡：FIFO 消息队列 + 生命周期纯值推进·到期自动消隐、纯 C 零平台符号、零 DISPLAY 依赖 / 第 8 层 Dial 侧 OO 封装 gui_oo.dial：245 个 impl 方法、纯源码随包 src/ 分发（装包即用）、零 extern fn 增量、C 风格与 OO 风格绘制 CRC 逐字节相等）+ int32/float32 一等类型与 FFI 精确 32 位宽度 + B1 impl 方法块（obj.m() 编译期脱糖、不新增关键字、ABI 不变，GUI 句柄 win.draw()）+ 官网 6 个包介绍页 + 包索引页 + http.dialpkg 三处 Fail-Fast/可用性修复 + dialpkg src/ 随包 Dial 源码模块（[src] 段显式声明 + manifest.src 映射 + 三级 import 装包即用 + 逐文件 SHA256 保护 + 向后兼容，见 README §25.11）（开发中增量，未升版本号 / 未发布）",
     "v1.10": "底层原语补齐（@asm / simd）+ 首个发布标签 v1.1",
     "v1.04": "FFI 成为语言一等公民",
     "v1-0-milestone": "v1.0 里程碑达成的分版记录（v1.00 ~ v1.03）",
@@ -622,7 +622,7 @@ Dial 的**标准库**，随编译器发布、编译你的程序时**自动链入
 **通知气泡层**（FIFO 消息队列 + 生命周期纯值推进、到期自动消隐，零 DISPLAY 依赖，见 §38.19）。
 **第 8 层是
 Dial 侧 OO 封装层**（`gui_oo.dial`，245 个 `impl` 方法把上述 C 风格函数包成 `win.draw()`
-这样的惯用写法，纯 Dial 源码、不进 `.dialpkg`、**零 `extern fn` 增量、ABI 不变**，见 §38.14）。
+这样的惯用写法，纯 Dial 源码、随包 `src/` 分发（装包即用）、**零 `extern fn` 增量、ABI 不变**，见 §38.14）。
 
 ```dial
 import "gui";
@@ -645,11 +645,12 @@ fn main(): int {
 }
 ```
 
-**第 8 层：同一套能力也能写成方法**。把 `gui_oo.dial` 放进项目目录，
-`import "./gui_oo.dial";` 一行即生效（模块内已传递 `import "gui";`，前端会汇总去重）：
+**第 8 层：同一套能力也能写成方法**。装好 `gui.dialpkg` 后，包内
+`src/gui_oo.dial` 会随包分发；写一行裸名 import 即用，**无需复制任何文件到项目目录**
+（模块内已传递 `import "gui";`，前端会汇总去重）：
 
 ```dial
-import "./gui_oo.dial";
+import "gui_oo";
 
 fn main(): int {
     let app: GuiApp = dial_gui_app_new();

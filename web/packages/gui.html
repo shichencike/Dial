@@ -46,7 +46,7 @@
 <strong>通知气泡层</strong>（FIFO 消息队列 + 生命周期纯值推进、到期自动消隐，零 DISPLAY 依赖，见 §38.19）。
 <strong>第 8 层是
 Dial 侧 OO 封装层</strong>（<code>gui_oo.dial</code>，245 个 <code>impl</code> 方法把上述 C 风格函数包成 <code>win.draw()</code>
-这样的惯用写法，纯 Dial 源码、不进 <code>.dialpkg</code>、<strong>零 <code>extern fn</code> 增量、ABI 不变</strong>，见 §38.14）。</p>
+这样的惯用写法，纯 Dial 源码、随包 <code>src/</code> 分发（装包即用）、<strong>零 <code>extern fn</code> 增量、ABI 不变</strong>，见 §38.14）。</p>
 <pre><code class="language-dial">import &quot;gui&quot;;
 
 fn main(): int {
@@ -66,9 +66,10 @@ fn main(): int {
     return 0;
 }
 </code></pre>
-<p><strong>第 8 层：同一套能力也能写成方法</strong>。把 <code>gui_oo.dial</code> 放进项目目录，
-<code>import "./gui_oo.dial";</code> 一行即生效（模块内已传递 <code>import "gui";</code>，前端会汇总去重）：</p>
-<pre><code class="language-dial">import &quot;./gui_oo.dial&quot;;
+<p><strong>第 8 层：同一套能力也能写成方法</strong>。装好 <code>gui.dialpkg</code> 后，包内
+<code>src/gui_oo.dial</code> 会随包分发；写一行裸名 import 即用，<strong>无需复制任何文件到项目目录</strong>
+（模块内已传递 <code>import "gui";</code>，前端会汇总去重）：</p>
+<pre><code class="language-dial">import &quot;gui_oo&quot;;
 
 fn main(): int {
     let app: GuiApp = dial_gui_app_new();

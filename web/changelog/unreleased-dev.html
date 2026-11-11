@@ -71,8 +71,8 @@
   回调，与旧 154 个同契约、<code>abi = 6</code> / <code>version = 1.10.0</code> 不变、旧签名一字不动，
   见 README §38.19）；
 + </strong>GUI 第 8 层：Dial 侧 OO 封装<strong>（<code>gui_oo.dial</code> 用 245 个 <code>impl</code> 方法包住 246 个
-  C 风格 <code>extern fn</code>，纯 Dial 源码、不进 <code>.dialpkg</code>、零 <code>extern fn</code> 增量、ABI 不变，
-  见 README §38.14）；
+  C 风格 <code>extern fn</code>，纯 Dial 源码、随包 <code>src/</code> 分发（装包即用）、零 <code>extern fn</code>
+  增量、ABI 不变，见 README §25.11 / §38.14）；
 并修复 <code>http.dialpkg</code> 三处 Fail-Fast / 目标平台可用性缺陷</strong>（见下文 <code>### Fixed</code>）。
 详见 <a href="../spec.html#3712-b1impl-方法块v110-开发中增补落地">README §37.12</a>、
 <a href="../spec.html#38-手搓-gui-地基包guidialpkg">README §38</a> 与 README §37.10。</p>
@@ -105,7 +105,9 @@ GUI 第 11 层悬浮提示（同样是纯内存对象 + 离屏画布，零 DISPL
 离屏画布，零 DISPLAY 依赖）再给 AA 组 +1 条断言到 <strong>559 ✅</strong>；本轮 GUI 第 13 层
 通知气泡（纯内存队列对象 + 离屏画布，零 DISPLAY 依赖）再给 AA 组 +1 条断言，
 扩为 <strong>A–Z + AA + AB + AC + AD 三十组 / 560 ✅</strong>；本轮 dialpkg <code>src/</code> 随包
-Dial 源码模块（README §25.11）给 Q 组新增 10 条断言，扩为 <strong>三十组 / 570 ✅</strong>。
+Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570 ✅</strong>；随后把
+<code>gui_oo.dial</code> 纳入 gui 包分发、AD 组新增「装包即用」1 条断言，扩为
+<strong>三十组 / 571 ✅</strong>。
 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>
@@ -129,6 +131,20 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言，扩为 <stro
     SHA256 / 安装落地 / 不复制文件直接 <code>import "qsrc_oo";</code> 联动包函数 = 42 /
     篡改拦截 / 本地同名文件优先 / 4 条非法声明 Fail-Fast），
     全量 <strong>560 ✅ → 570 ✅ / 0 ❌</strong>。</p>
+</li>
+<li>
+<p><strong><code>gui.dialpkg</code>：第 8 层 OO 封装层纳入包分发</strong>（README §25.11 / §38.14）：</p>
+</li>
+<li><code>gui_oo.dial</code> 从 <code>packages/gui/</code> 移入 <code>packages/gui/src/</code>，<code>dial.toml</code> 新增
+    <code>[src]</code> 段登记 <code>gui_oo = "src/gui_oo.dial"</code>；<code>pack</code> 产物随之多出
+    <code>src/gui_oo.dial</code> + <code>manifest.src</code> 映射 + 逐文件 SHA256。</li>
+<li><strong>装包即用</strong>：装好 <code>gui.dialpkg</code> 后 <code>import "gui_oo";</code> 直接从包缓存 <code>src/</code>
+    展开，不再需要把源码复制到用户项目；项目里同名 <code>.dial</code> 仍按三级优先覆盖包内副本。</li>
+<li><strong>宪法不变</strong>：<code>gui_oo.dial</code> 仍是纯 Dial 源码、零 <code>extern fn</code> 增量、不碰三平台
+    <code>.a</code>、<code>abi = 6</code> / <code>version = 1.10.0</code> / 旧 154 个签名一字不动。</li>
+<li>
+<p><strong>回归</strong>：AD 组保留「本地副本」路径并新增 2.5) 块——不复制任何文件直接编译
+    <code>use_gui_oo.dial</code>，输出与本地副本版<strong>逐字节一致</strong>；全量 <strong>570 ✅ → 571 ✅ / 0 ❌</strong>。</p>
 </li>
 <li>
 <p><strong>B1「<code>impl</code> 方法块」语言特性落地</strong>（README §37.12）：<code>[v1.10]</code> 发布后增量，
@@ -193,7 +209,7 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言，扩为 <stro
     <strong>A–Z + AA + AB 二十八组 / 535 ✅ / 0 ❌</strong>。</p>
 </li>
 <li>
-<p><strong>GUI 第 8 层：Dial 侧 OO 封装层</strong>（README §38.14）：<code>packages/gui/gui_oo.dial</code>
+<p><strong>GUI 第 8 层：Dial 侧 OO 封装层</strong>（README §38.14）：<code>packages/gui/src/gui_oo.dial</code>
   用 <strong>245 个 <code>impl</code> 方法</strong>把前七层 + 第 9/10/11/12/13 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡的 246 个 C 风格 <code>extern fn</code> 包成惯用写法
   （<code>win.draw()</code> 即 <code>dial_gui_window_draw(win)</code>），按 <code>GuiApp</code> / <code>GuiWindow</code> /
   <code>GuiPainter</code> / <code>GuiFont</code> / <code>GuiWidget</code> / <code>GuiMenu</code> / <code>GuiDialog</code> / <code>GuiScroll</code> 八个不透明句柄
@@ -224,7 +240,7 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言，扩为 <stro
 </li>
 <li>
 <p><strong><code>gui.dialpkg</code>：手搓 GUI 十三层</strong>（README §38）：前七层不用 Qt / GTK / SDL、纯 C 自绘；
-  第 8 层是 Dial 侧 OO 封装（纯源码、不进包、零 <code>extern fn</code> 增量）。
+  第 8 层是 Dial 侧 OO 封装（纯源码、随包 <code>src/</code> 分发（装包即用）、零 <code>extern fn</code> 增量）。
   ① 地基层（窗 + 事件 + 绘图 + 字体，55 个 <code>extern fn</code>）；
   ② 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发，
   28 个）；③ <strong>成品控件外观层</strong>（Label / Button / CheckBox + 主题表驱动四态 +
@@ -574,8 +590,8 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言，扩为 <stro
   Method 分派 + <code>is_impl_receiver</code>）、<code>src/codegen.rs</code>（<code>gen_method_call</code> 分派 +
   <code>gen_stmt</code> 容器特例收窄）。<strong>cargo build --release 零警告</strong>；
   <code>impl</code> 方法编译期脱糖、ABI 不变、旧签名一字不动。</li>
-<li><strong>AD 组（GUI 第 8 层 OO 封装）测试资产</strong>：<code>packages/gui/gui_oo.dial</code>
-  （153 个 <code>impl</code> 方法，纯 Dial 源码、不进 <code>.dialpkg</code>）、<code>tests/oo/use_gui_oo.dial</code>
+<li><strong>AD 组（GUI 第 8 层 OO 封装）测试资产</strong>：<code>packages/gui/src/gui_oo.dial</code>
+  （245 个 <code>impl</code> 方法，纯 Dial 源码、随包 <code>src/</code> 分发）、<code>tests/oo/use_gui_oo.dial</code>
   （无 DISPLAY + Xvfb 两段端到端），3 个 Fail-Fast 负向用例由 <code>run_tests.sh</code> 在
   临时目录生成；<code>run_tests.sh</code> 新增 AD 组（第 30 组）与头部说明。
   <strong>GUI 包 / C 层 / 三平台 <code>.a</code> / <code>gui.diali</code> / ABI 全部零改动</strong>；
