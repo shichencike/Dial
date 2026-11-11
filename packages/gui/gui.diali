@@ -976,7 +976,7 @@ extern fn dial_gui_tooltip_tag(t: GuiTooltip): int;
 /// （返回 0）。p 为窗口画布。返回 0 / -1。
 extern fn dial_gui_tooltip_draw(p: GuiPainter, t: GuiTooltip): int;
 
-// ---- 第 12 层：状态栏 StatusBar（本段 19 个追加 extern fn）------------------
+// ---- 第 12 层：状态栏 StatusBar（本段 20 个追加 extern fn）------------------
 //
 // 立场：与前十层完全一致 —— 纯 C、零平台符号、绝不 C → Dial 反向回调、
 // 只追加 extern fn。状态栏是**纯内存对象**（不挂窗），可在无 DISPLAY 环境
@@ -1040,7 +1040,7 @@ extern fn dial_gui_statusbar_tag(sb: GuiStatusBar): int;
 /// 返回 0 / -1（空句柄 / 宽度非正）。
 extern fn dial_gui_statusbar_draw(p: GuiPainter, sb: GuiStatusBar, win_w: int): int;
 
-// ---- 第 13 层：通知气泡 Toast（本段 21 个追加 extern fn）--------------------
+// ---- 第 13 层：通知气泡 Toast（本段 23 个追加 extern fn）--------------------
 //
 // 立场：与前十二层完全一致 —— 纯 C、零平台符号、绝不 C → Dial 反向回调、
 // 只追加 extern fn。通知气泡是**纯内存对象**（不挂窗），可在无 DISPLAY

@@ -9142,10 +9142,10 @@ C 风格函数，<code>win.draw()</code> 等价 <code>dial_gui_window_draw(win)<
 零 DISPLAY 依赖；19 个 <code>extern fn</code>，见 §38.17）；
 ⑫ <strong>状态栏层</strong>（<code>dial_gui_statusbar_*</code>，左 / 右文本 + 进度条槽位；进度值纯值推进、
 越界夹紧、值域收窄同步夹紧；纯内存对象 + 离屏画布，零 DISPLAY 依赖；
-19 个 <code>extern fn</code>，见 §38.18）；
+20 个 <code>extern fn</code>，见 §38.18）；
 ⑬ <strong>通知气泡层</strong>（<code>dial_gui_toast_*</code>，FIFO 消息队列 + 生命周期纯值推进、
 到期自动消隐、<code>life_ms&lt;=0</code> 永不过期；纯内存对象 + 离屏画布，零 DISPLAY 依赖；
-21 个 <code>extern fn</code>，见 §38.19）。
+23 个 <code>extern fn</code>，见 §38.19）。
 五层同为纯 C、零平台符号、绝不 C → Dial 反向回调，
 旧 154 个签名一字不动。
 它是 <code>[v1.10]</code>（标签 <code>v1.1</code>）发布<strong>之后</strong>的<strong>开发中增量</strong>：编译器版本仍为
@@ -10786,7 +10786,7 @@ CRC32 像素级稳定（重绘幂等 + <code>reset</code> 后像素不变），5
 <blockquote>
 <p>第 12 层给窗口底栏提供<strong>状态栏</strong>：左文本 + 右文本 + 可选进度条槽位，打包成
 可复用的状态栏对象。它走与第 7 / 9 / 10 / 11 层<strong>完全相同的宪法边界</strong>——
-<strong>纯 C、零平台符号、绝不 C → Dial 反向回调</strong>——19 个 <code>extern fn</code>（前缀
+<strong>纯 C、零平台符号、绝不 C → Dial 反向回调</strong>——20 个 <code>extern fn</code>（前缀
 <code>dial_gui_statusbar_*</code>），挂在 <code>GuiStatusBar</code> 不透明句柄上，与旧 154 个签名
 同契约、<code>abi = 6</code> / <code>version = 1.10.0</code> 不变、旧签名一字不动。</p>
 </blockquote>
@@ -10801,7 +10801,7 @@ Fail-Fast 返回 -1。</p>
 <p><strong>贴底边绘制</strong>：<code>statusbar_draw(p, sb, win_w)</code> 把状态栏画在画布<strong>底边</strong>
 （<code>y = 画布高 - 高度</code>），左右文本分别贴左 / 右内边距，进度条槽位贴右。调用方
 通常先把裁剪区设到窗口底部那一行再调它，这样状态栏天然不与控件树重叠。</p>
-<p><strong>19 个 <code>extern fn</code></strong>（全部纯内存、可在无 DISPLAY 环境单元测试）：</p>
+<p><strong>20 个 <code>extern fn</code></strong>（全部纯内存、可在无 DISPLAY 环境单元测试）：</p>
 <table>
 <thead>
 <tr>
@@ -10858,8 +10858,8 @@ Fail-Fast 返回 -1。</p>
 会被零扩展成 <code>4294967295</code> 而非 <code>-1</code>（见 §33.2）。第 9 / 10 / 11 / 12 层全部
 <code>: int</code> 函数因此一律 <code>int64_t</code> 返回。</p>
 </blockquote>
-<p><strong>OO 封装</strong>：第 8 层 <code>gui_oo.dial</code> 的 <code>impl GuiStatusBar</code> 用 19 个方法包住上述
-19 个 <code>extern fn</code>（<code>GuiApp</code> 上挂 <code>statusbar_new</code> 工厂）。AD 组契约审计因此由
+<p><strong>OO 封装</strong>：第 8 层 <code>gui_oo.dial</code> 的 <code>impl GuiStatusBar</code> 用 20 个方法包住上述
+20 个 <code>extern fn</code>（<code>GuiApp</code> 上挂 <code>statusbar_new</code> 工厂）。AD 组契约审计因此由
 202 / 203 同步为 <strong>222 / 223</strong>。</p>
 <p><strong>回归（AA 组，第 30 组）</strong>：<code>tests/pkg/use_gui_statusbar.dial</code> 在无 DISPLAY 环境跑
 纯内存对象 + 离屏画布全流程——默认高度 / 值域、左右文本读回、<strong>空串清空该段而
@@ -10871,7 +10871,7 @@ round-trip、离屏绘制 CRC32 像素级稳定（重绘幂等 + 进度槽位 / 
 <blockquote>
 <p>第 13 层给「操作结果反馈」提供<strong>通知气泡</strong>：一组消息按 FIFO 排队，每条自带
 生命周期，到期自动消隐。它走与第 7 / 9 / 10 / 11 / 12 层<strong>完全相同的宪法
-边界</strong>——<strong>纯 C、零平台符号、绝不 C → Dial 反向回调</strong>——21 个 <code>extern fn</code>
+边界</strong>——<strong>纯 C、零平台符号、绝不 C → Dial 反向回调</strong>——23 个 <code>extern fn</code>
 （前缀 <code>dial_gui_toast_*</code>），挂在 <code>GuiToast</code> 不透明句柄上，与旧 154 个签名同
 契约、<code>abi = 6</code> / <code>version = 1.10.0</code> 不变、旧签名一字不动。</p>
 </blockquote>
@@ -10886,7 +10886,7 @@ round-trip、离屏绘制 CRC32 像素级稳定（重绘幂等 + 进度槽位 / 
 <p><strong>三种气泡种类</strong>：<code>push</code> 的 <code>kind</code> 参数取 <code>0</code> = 信息 / <code>1</code> = 警告 / <code>2</code> = 错误，
 分别取不同主题底色（信息=面板底 / 警告=按钮底 / 错误=选区底），越界 Fail-Fast
 返回 -1。消息文本是 C 侧 <code>strdup</code> 自有副本，调用方不保留指针。</p>
-<p><strong>21 个 <code>extern fn</code></strong>（全部纯内存、可在无 DISPLAY 环境单元测试）：</p>
+<p><strong>23 个 <code>extern fn</code></strong>（全部纯内存、可在无 DISPLAY 环境单元测试）：</p>
 <table>
 <thead>
 <tr>
@@ -10951,7 +10951,7 @@ round-trip、离屏绘制 CRC32 像素级稳定（重绘幂等 + 进度槽位 / 
 会被零扩展成 <code>4294967295</code> 而非 <code>-1</code>（见 §33.2）。第 9 ~ 13 层全部 <code>: int</code>
 函数因此一律 <code>int64_t</code> 返回。</p>
 </blockquote>
-<p><strong>OO 封装</strong>：第 8 层 <code>gui_oo.dial</code> 的 <code>impl GuiToast</code> 用 21 个方法包住上述 21 个
+<p><strong>OO 封装</strong>：第 8 层 <code>gui_oo.dial</code> 的 <code>impl GuiToast</code> 用 23 个方法包住上述 23 个
 <code>extern fn</code>（<code>GuiApp</code> 上挂 <code>toast_new</code> 工厂）。AD 组契约审计因此由 222 / 223
 同步为 <strong>245 / 246</strong>。</p>
 <p><strong>回归（AA 组，第 30 组）</strong>：<code>tests/pkg/use_gui_toast.dial</code> 在无 DISPLAY 环境跑
