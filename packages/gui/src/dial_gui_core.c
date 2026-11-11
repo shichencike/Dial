@@ -1186,10 +1186,23 @@ int64_t dial_gui_menu_item_set_enabled(GuiMenu *m, int64_t idx, int64_t v) {
     return 0;
 }
 
+/* ---- 悬浮提示 Tooltip（第 11 层；唯一需要 DialString 的入口走 FFI 包装）---- */
+
+/* 文本入口：Dial 侧 string -> C 字符串副本（C 侧再 strdup 一份自有副本）。*/
+int64_t dial_gui_tooltip_set_text(GuiTooltip *t, DialString text) {
+    if (!t) { gui_core_set_err(GUI_ERR_ARG, "空 GuiTooltip 句柄"); return -1; }
+    char *dup = str_dup(text);
+    if (!dup) { gui_core_set_err(GUI_ERR_ALLOC, "提示文本内存分配失败"); return -1; }
+    int64_t r = gui_tooltip_set_text(t, dup);
+    free(dup);
+    if (r < 0) { gui_core_set_err(GUI_ERR_ALLOC, "提示文本内存分配失败"); return -1; }
+    gui_core_ok();
+    return 0;
+}
+
 /* ---- 顶栏菜单 / 弹出菜单（窗口级，所有权转移给窗口）------------------- */
 
-int64_t dial_gui_window_set_menubar(GuiWindowImpl *win, GuiMenu *m) {
-    if (!win_ok(win)) return -1;
+int64_t dial_gui_window_set_menubar(GuiWindowImpl *win, GuiMenu *m) {    if (!win_ok(win)) return -1;
     if (!win->root) {
         gui_core_set_err(GUI_ERR_ARG, "菜单需要窗口先 set_root（选中信号进 root 树队列）");
         return -1;

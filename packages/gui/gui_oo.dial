@@ -256,3 +256,29 @@ impl GuiContext {
     fn select_item(self, x: int, y: int): int { return dial_gui_context_select(self, x, y); }
     fn draw(self, p: GuiPainter): int { return dial_gui_context_draw(p, self); }
 }
+
+// ===== 第 11 层：悬浮提示 GuiTooltip（工厂在 GuiApp）=====
+impl GuiApp {
+    // 新建空悬浮提示（无文本、延迟 500ms）
+    fn tooltip_new(self): GuiTooltip { return dial_gui_tooltip_new(); }
+}
+impl GuiTooltip {
+    fn free(self): int { return dial_gui_tooltip_free(self); }
+    fn set_text(self, text: string): int { return dial_gui_tooltip_set_text(self, text); }
+    fn text(self): rawptr<byte> { return dial_gui_tooltip_text(self); }
+    fn set_delay(self, ms: int): int { return dial_gui_tooltip_set_delay(self, ms); }
+    fn delay(self): int { return dial_gui_tooltip_delay(self); }
+    fn set_pos(self, x: int, y: int): int { return dial_gui_tooltip_set_pos(self, x, y); }
+    fn pos_x(self): int { return dial_gui_tooltip_pos_x(self); }
+    fn pos_y(self): int { return dial_gui_tooltip_pos_y(self); }
+    fn set_size(self, w: int, h: int): int { return dial_gui_tooltip_set_size(self, w, h); }
+    fn size_w(self): int { return dial_gui_tooltip_size_w(self); }
+    fn size_h(self): int { return dial_gui_tooltip_size_h(self); }
+    fn tick(self, dt_ms: int): int { return dial_gui_tooltip_tick(self, dt_ms); }
+    fn reset(self): int { return dial_gui_tooltip_reset(self); }
+    fn shown(self): int { return dial_gui_tooltip_shown(self); }
+    fn hover_ms(self): int { return dial_gui_tooltip_hover_ms(self); }
+    fn set_tag(self, tag: int): int { return dial_gui_tooltip_set_tag(self, tag); }
+    fn tag(self): int { return dial_gui_tooltip_tag(self); }
+    fn draw(self, p: GuiPainter): int { return dial_gui_tooltip_draw(p, self); }
+}

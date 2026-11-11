@@ -907,3 +907,72 @@ extern fn dial_gui_context_select(c: GuiContext, x: int, y: int): int;
 /// 未展开则不绘制（返回 0）。p 为窗口画布。返回 0 / -1。
 extern fn dial_gui_context_draw(p: GuiPainter, c: GuiContext): int;
 
+// ---- 第 11 层：悬浮提示 Tooltip（本段 19 个追加 extern fn）-----------------
+//
+// 立场：与前十层完全一致 —— 纯 C、零平台符号、绝不 C → Dial 反向回调、
+// 只追加 extern fn。悬浮提示是**纯内存对象**（不挂窗），可在无 DISPLAY
+// 环境单元测试。
+//
+// 关键事实（防漂移）：
+//   - **延迟完全由调用方以毫秒数推进**（tick(dt_ms)），本层**不读时钟**、
+//     不调用任何平台 API，故三平台行为逐字节一致、可确定性单测。
+//   - 文本是 C 侧自有副本（strdup），调用方不保留指针。
+//   - 本层**不捕获鼠标**：应用自行判断「鼠标在哪个控件上」，再决定是否
+//     set_text + tick；鼠标移出时调 reset 归零悬停计时。
+//
+// 典型用法：应用在鼠标移动事件里命中某控件 -> set_text(该控件提示) +
+// tick(本帧毫秒)；未命中 -> reset()。绘制时调 tooltip_draw（未达延迟
+// 不绘制，天然「延迟弹出」）。
+
+/// 悬浮提示类型（不透明）。一个 Tooltip 是一段文本 + 位置 + 尺寸 + 悬停计时。
+type GuiTooltip;
+
+/// 新建空悬浮提示（无文本、延迟 500ms、尺寸取最小值）。失败返回空句柄。
+/// 用完须 dial_gui_tooltip_free。
+extern fn dial_gui_tooltip_new(): GuiTooltip;
+
+/// 释放悬浮提示（含其文本副本）。返回 0 / -1。
+extern fn dial_gui_tooltip_free(t: GuiTooltip): int;
+
+/// 设置提示文本（拷贝一份 C 侧副本；空串等价于清空并归零悬停计时）。
+/// 返回 0 / -1。
+extern fn dial_gui_tooltip_set_text(t: GuiTooltip, text: string): int;
+
+/// 读回提示文本（**借用指针**，空串表示无文本）。空句柄返回空串。
+extern fn dial_gui_tooltip_text(t: GuiTooltip): rawptr<byte>;
+
+/// 设置 / 读取悬停延迟（毫秒，须非负；Fail-Fast 返回 -1）。默认 500。
+extern fn dial_gui_tooltip_set_delay(t: GuiTooltip, ms: int): int;
+extern fn dial_gui_tooltip_delay(t: GuiTooltip): int;
+
+/// 设置提示框左上角位置（窗口内坐标）。返回 0 / -1。
+extern fn dial_gui_tooltip_set_pos(t: GuiTooltip, x: int, y: int): int;
+extern fn dial_gui_tooltip_pos_x(t: GuiTooltip): int;
+extern fn dial_gui_tooltip_pos_y(t: GuiTooltip): int;
+
+/// 显式设置提示框尺寸（须为正；Fail-Fast 返回 -1）。不调用时按文本自动算。
+extern fn dial_gui_tooltip_set_size(t: GuiTooltip, w: int, h: int): int;
+extern fn dial_gui_tooltip_size_w(t: GuiTooltip): int;
+extern fn dial_gui_tooltip_size_h(t: GuiTooltip): int;
+
+/// 推进悬停计时（dt_ms 毫秒，须非负，负值按 0 处理）。累计达到延迟即
+/// 显示。返回 1 = 当前应显示 / 0 = 不显示。无文本时恒为 0。
+extern fn dial_gui_tooltip_tick(t: GuiTooltip, dt_ms: int): int;
+
+/// 归零悬停计时（鼠标移出时调用），并立即取消显示。返回 0 / -1。
+extern fn dial_gui_tooltip_reset(t: GuiTooltip): int;
+
+/// 当前是否应显示。空句柄返回 0。
+extern fn dial_gui_tooltip_shown(t: GuiTooltip): int;
+
+/// 已悬停累计毫秒（纯值，可观测）。空句柄返回 -1。
+extern fn dial_gui_tooltip_hover_ms(t: GuiTooltip): int;
+
+/// 设置 / 读取用户 tag（64 位，可 round-trip，与 GuiScroll.tag 同宽）。
+extern fn dial_gui_tooltip_set_tag(t: GuiTooltip, tag: int): int;
+extern fn dial_gui_tooltip_tag(t: GuiTooltip): int;
+
+/// 绘制提示框（主题底色 + 细边框 + 文本）。未达延迟 / 无文本则不绘制
+/// （返回 0）。p 为窗口画布。返回 0 / -1。
+extern fn dial_gui_tooltip_draw(p: GuiPainter, t: GuiTooltip): int;
+

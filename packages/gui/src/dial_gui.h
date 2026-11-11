@@ -104,6 +104,8 @@ typedef struct GuiScroll       GuiScroll;
 typedef struct GuiDialog      GuiDialog;
 /* 第 10 层：右键上下文菜单（借用第 7 层 GuiMenu，纯内存对象）。*/
 typedef struct GuiContext     GuiContext;
+/* 第 11 层：悬浮提示 Tooltip（纯内存对象）。*/
+typedef struct GuiTooltip     GuiTooltip;
 
 typedef struct GuiBackend GuiBackend;
 
@@ -555,6 +557,24 @@ struct GuiContext {
     int64_t tag;         /* 用户 tag（全宽，可 round-trip）*/
 };
 
+/*
+ * 第 11 层：悬浮提示 Tooltip（GuiTooltip，纯内存对象，无窗口）。
+ *
+ * 文本是 C 侧 strdup 自有副本（与 GuiWidget.text / GuiMenuItem.label 同口径），
+ * 调用方不保留指针。**延迟完全由调用方以毫秒数推进**（hover_delay / tick），
+ * 本层**不读时钟、不依赖平台 API**，故三平台行为逐字节一致、headless 可测。
+ */
+struct GuiTooltip {
+    char *text;          /* C 侧 strdup 自有副本（NULL = 无文本）*/
+    int  x, y;           /* 提示框左上角（窗口内坐标）*/
+    int  w, h;           /* 提示框尺寸（set_size 设；缺省按文本算）*/
+    int  delay_ms;       /* 悬停多久后弹出（默认 500）*/
+    int  hover_ms;       /* 已悬停累计毫秒（纯值，由 tick 推进）*/
+    int  shown;          /* 当前是否显示（hover_ms >= delay_ms 且有文本）*/
+    int  fixed;          /* 1 = 固定位置（不跟随鼠标）*/
+    int64_t tag;         /* 用户 tag（全宽，可 round-trip）*/
+};
+
 /* 菜单项增删 / 访问（纯内存，无窗口；可在无 DISPLAY 环境单元测试）*/
 GuiMenu  *gui_menu_new(void);
 void      gui_menu_free(GuiMenu *m);
@@ -625,5 +645,28 @@ int64_t     dial_gui_context_hit(GuiContext *c, int x, int y);
 int64_t     dial_gui_context_hover(GuiContext *c, int x, int y);
 int64_t     dial_gui_context_select(GuiContext *c, int x, int y);
 int64_t     dial_gui_context_draw(GuiPainterImpl *p, GuiContext *c);
+
+/* 第 11 层：悬浮提示 Tooltip（dial_gui_tooltip.c，纯 C，三平台共用，无平台符号）。
+ * 纯值状态机：悬停毫秒由应用侧 tick(hover_ms) 推进，本层不读时钟、不捕获鼠标，
+ * 绝不反向回调；文本 / 尺寸 / 延迟全部可配。*/
+GuiTooltip *dial_gui_tooltip_new(void);
+int64_t     dial_gui_tooltip_free(GuiTooltip *t);
+/* 内部（C 层，文本已拷成 NUL 结尾）：FFI 包装 dial_gui_tooltip_set_text 在 core.c。*/
+int64_t     gui_tooltip_set_text(GuiTooltip *t, const char *text);
+const char *dial_gui_tooltip_text(GuiTooltip *t);          /* 借用指针 */int64_t     dial_gui_tooltip_set_delay(GuiTooltip *t, int ms);
+int64_t     dial_gui_tooltip_delay(GuiTooltip *t);
+int64_t     dial_gui_tooltip_set_pos(GuiTooltip *t, int x, int y);
+int64_t     dial_gui_tooltip_pos_x(GuiTooltip *t);
+int64_t     dial_gui_tooltip_pos_y(GuiTooltip *t);
+int64_t     dial_gui_tooltip_set_size(GuiTooltip *t, int w, int h);
+int64_t     dial_gui_tooltip_size_w(GuiTooltip *t);
+int64_t     dial_gui_tooltip_size_h(GuiTooltip *t);
+int64_t     dial_gui_tooltip_tick(GuiTooltip *t, int dt_ms);  /* 推进悬停毫秒，返回是否显示 */
+int64_t     dial_gui_tooltip_reset(GuiTooltip *t);            /* 归零悬停毫秒（移出即调用）*/
+int64_t     dial_gui_tooltip_shown(GuiTooltip *t);             /* 当前是否显示 */
+int64_t     dial_gui_tooltip_hover_ms(GuiTooltip *t);          /* 已悬停累计毫秒 */
+int64_t     dial_gui_tooltip_set_tag(GuiTooltip *t, int64_t tag);
+int64_t     dial_gui_tooltip_tag(GuiTooltip *t);
+int64_t     dial_gui_tooltip_draw(GuiPainterImpl *p, GuiTooltip *t);
 
 #endif /* DIAL_GUI_H */

@@ -1,0 +1,116 @@
+// gui.dialpkg 第 11 层：悬浮提示 Tooltip 端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 立场与第 9 / 第 10 层一致：绝不注册回调；悬停毫秒是**纯值**，由 Dial 侧主动
+// tick(dt_ms) 推进，本层不读时钟、不捕获鼠标，故行为完全确定、headless 可跑。
+//
+// 关键事实（防漂移）：延迟由调用方推进（默认 500ms）；文本是 C 侧自有副本；
+// 无文本时 tick 恒返回 0（永不显示）；未达延迟不绘制。
+//
+// 语言宪法 §37.1：禁止文件级 var 全局可变状态。本用例只用局部变量与纯函数。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+fn main(): int {
+    // ============ A) 悬浮提示对象逻辑（纯内存，无 DISPLAY 可跑）===========
+    var t: GuiTooltip = dial_gui_tooltip_new();
+    expect(!is_null(t), "tooltip_new");
+    // 默认延迟 500ms
+    expect_int(dial_gui_tooltip_delay(t), 500, "tooltip_default_delay");
+    // 无文本时 tick 恒不显示（永不凭空弹出）
+    expect_int(dial_gui_tooltip_tick(t, 1000), 0, "tooltip_tick_without_text");
+    expect_int(dial_gui_tooltip_shown(t), 0, "tooltip_not_shown_without_text");
+    expect_int(dial_gui_tooltip_hover_ms(t), 0, "tooltip_hover_ms_without_text");
+    // 设置文本：文本是 C 侧副本，读回一致
+    expect_int(dial_gui_tooltip_set_text(t, "Hello Tooltip"), 0, "tooltip_set_text");
+    expect(string_from_cstr(dial_gui_tooltip_text(t)) == "Hello Tooltip", "tooltip_text_readback");
+    // 延迟未到：不显示，但计时在推进（纯值可观测）
+    expect_int(dial_gui_tooltip_tick(t, 200), 0, "tooltip_tick_below_delay");
+    expect_int(dial_gui_tooltip_hover_ms(t), 200, "tooltip_hover_ms_accumulated");
+    expect_int(dial_gui_tooltip_shown(t), 0, "tooltip_not_shown_below_delay");
+    // 累计达到延迟（200 + 300 = 500）：显示
+    expect_int(dial_gui_tooltip_tick(t, 300), 1, "tooltip_shown_at_delay");
+    expect_int(dial_gui_tooltip_shown(t), 1, "tooltip_shown_flag");
+    expect_int(dial_gui_tooltip_hover_ms(t), 500, "tooltip_hover_ms_full");
+    // 继续推进仍显示，计时只增不减
+    expect_int(dial_gui_tooltip_tick(t, 100), 1, "tooltip_stays_shown");
+    expect_int(dial_gui_tooltip_hover_ms(t), 600, "tooltip_hover_ms_keeps_growing");
+    // reset（鼠标移出）：计时归零且立即取消显示
+    expect_int(dial_gui_tooltip_reset(t), 0, "tooltip_reset");
+    expect_int(dial_gui_tooltip_shown(t), 0, "tooltip_hidden_after_reset");
+    expect_int(dial_gui_tooltip_hover_ms(t), 0, "tooltip_hover_ms_cleared");
+    // 归零后重新累计：再次达到延迟才显示
+    expect_int(dial_gui_tooltip_tick(t, 499), 0, "tooltip_reaccum_below_delay");
+    expect_int(dial_gui_tooltip_tick(t, 1), 1, "tooltip_reaccum_at_delay");
+
+    // 自定义延迟：100ms
+    expect_int(dial_gui_tooltip_set_delay(t, 100), 0, "tooltip_set_delay");
+    expect_int(dial_gui_tooltip_delay(t), 100, "tooltip_delay_readback");
+    // 负延迟 Fail-Fast
+    expect_int(dial_gui_tooltip_set_delay(t, -1), -1, "tooltip_negative_delay_rejected");
+    // 换文本等价于换了目标：悬停计时归零、立即取消显示
+    expect_int(dial_gui_tooltip_set_text(t, "Second"), 0, "tooltip_set_text2");
+    expect_int(dial_gui_tooltip_hover_ms(t), 0, "tooltip_hover_ms_cleared_on_new_text");
+    expect_int(dial_gui_tooltip_shown(t), 0, "tooltip_hidden_on_new_text");
+    expect(string_from_cstr(dial_gui_tooltip_text(t)) == "Second", "tooltip_text_readback2");
+    // 空串等价于清空：永不显示
+    expect_int(dial_gui_tooltip_set_text(t, ""), 0, "tooltip_set_empty_text");
+    expect_int(dial_gui_tooltip_tick(t, 9999), 0, "tooltip_empty_text_never_shown");
+
+    // 位置 / 尺寸
+    expect_int(dial_gui_tooltip_set_pos(t, 30, 40), 0, "tooltip_set_pos");
+    expect_int(dial_gui_tooltip_pos_x(t), 30, "tooltip_pos_x");
+    expect_int(dial_gui_tooltip_pos_y(t), 40, "tooltip_pos_y");
+    expect_int(dial_gui_tooltip_set_size(t, 120, 30), 0, "tooltip_set_size");
+    expect_int(dial_gui_tooltip_size_w(t), 120, "tooltip_size_w");
+    expect_int(dial_gui_tooltip_size_h(t), 30, "tooltip_size_h");
+    // 非法尺寸 Fail-Fast
+    expect_int(dial_gui_tooltip_set_size(t, 0, 30), -1, "tooltip_zero_width_rejected");
+    expect_int(dial_gui_tooltip_set_size(t, 120, -5), -1, "tooltip_negative_height_rejected");
+    // tag 64 位全宽 round-trip（与 GuiScroll.tag 同宽）
+    expect_int(dial_gui_tooltip_set_tag(t, 123456789), 0, "tooltip_set_tag");
+    expect_int(dial_gui_tooltip_tag(t), 123456789, "tooltip_tag_roundtrip");
+    // 释放
+    expect_int(dial_gui_tooltip_free(t), 0, "tooltip_free");
+
+    // ============ B) 离屏画布绘制（零 DISPLAY，靠 CRC32 像素级锁定）===========
+    var t2: GuiTooltip = dial_gui_tooltip_new();
+    dial_gui_tooltip_set_text(t2, "Tip");
+    dial_gui_tooltip_set_delay(t2, 0);
+    dial_gui_tooltip_set_pos(t2, 10, 10);
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 120);
+    expect(!is_null(p), "tooltip_painter");
+    // 未达延迟（延迟 0 且尚未 tick）：不绘制，画布保持空白
+    expect_int(dial_gui_tooltip_draw(p, t2), 0, "tooltip_draw_before_shown");
+    var crc0: int = dial_gui_painter_crc32(p);
+    // tick 后显示并绘制
+    expect_int(dial_gui_tooltip_tick(t2, 1), 1, "tooltip_tick_show");
+    expect_int(dial_gui_tooltip_draw(p, t2), 0, "tooltip_draw");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect(crc1 != 0, "tooltip_crc_nonzero");
+    expect(crc0 != crc1, "tooltip_crc_changed_after_draw");
+    // 重绘幂等：CRC32 必须逐字节稳定
+    expect_int(dial_gui_tooltip_draw(p, t2), 0, "tooltip_draw_again");
+    var crc2: int = dial_gui_painter_crc32(p);
+    expect_int(crc1, crc2, "tooltip_crc_stable");
+    // reset 后不再绘制
+    expect_int(dial_gui_tooltip_reset(t2), 0, "tooltip_reset2");
+    expect_int(dial_gui_tooltip_draw(p, t2), 0, "tooltip_draw_after_reset");
+    var crc3: int = dial_gui_painter_crc32(p);
+    expect_int(crc1, crc3, "tooltip_crc_unchanged_after_reset");
+    // 画布与对象释放
+    expect_int(dial_gui_painter_free(p), 0, "tooltip_painter_free");
+    expect_int(dial_gui_tooltip_free(t2), 0, "tooltip_free2");
+
+    print("tooltip_window = ok");   // 纯内存路径，无 DISPLAY 亦 ok
+    print("tooltip_done = true");
+    return 0;
+}
