@@ -71,12 +71,13 @@ GuiScroll *dial_gui_scroll_new(void) {
     return s;
 }
 
-void dial_gui_scroll_free(GuiScroll *s) {
-    if (!s) return;
+int64_t dial_gui_scroll_free(GuiScroll *s) {
+    if (!s) return -1;
     free(s);
+    return 0;
 }
 
-int dial_gui_scroll_set_viewport(GuiScroll *s, int x, int y, int w, int h) {
+int64_t dial_gui_scroll_set_viewport(GuiScroll *s, int x, int y, int w, int h) {
     if (!s || w <= 0 || h <= 0) {
         gui_core_set_err(GUI_ERR_ARG, "scroll viewport 非法（尺寸须为正）");
         return -1;
@@ -86,7 +87,7 @@ int dial_gui_scroll_set_viewport(GuiScroll *s, int x, int y, int w, int h) {
     return 0;
 }
 
-int dial_gui_scroll_set_content(GuiScroll *s, int w, int h) {
+int64_t dial_gui_scroll_set_content(GuiScroll *s, int w, int h) {
     if (!s || w <= 0 || h <= 0) {
         gui_core_set_err(GUI_ERR_ARG, "scroll content 非法（尺寸须为正）");
         return -1;
@@ -96,7 +97,7 @@ int dial_gui_scroll_set_content(GuiScroll *s, int w, int h) {
     return 0;
 }
 
-int dial_gui_scroll_enable(GuiScroll *s, int which, int on) {
+int64_t dial_gui_scroll_enable(GuiScroll *s, int which, int on) {
     if (!s || which < 0 || which > 2) {
         gui_core_set_err(GUI_ERR_ARG, "scroll enable 越界（which: 0 横 / 1 纵 / 2 两者）");
         return -1;
@@ -109,7 +110,7 @@ int dial_gui_scroll_enable(GuiScroll *s, int which, int on) {
     return 0;
 }
 
-int dial_gui_scroll_set_tag(GuiScroll *s, int64_t tag) {
+int64_t dial_gui_scroll_set_tag(GuiScroll *s, int64_t tag) {
     if (!s) return -1;
     s->tag = tag;
     return 0;
@@ -120,31 +121,31 @@ int64_t dial_gui_scroll_tag(GuiScroll *s) {
     return s->tag;
 }
 
-int dial_gui_scroll_offset_x(GuiScroll *s) {
+int64_t dial_gui_scroll_offset_x(GuiScroll *s) {
     if (!s) return 0;
     return s->off_x;
 }
 
-int dial_gui_scroll_offset_y(GuiScroll *s) {
+int64_t dial_gui_scroll_offset_y(GuiScroll *s) {
     if (!s) return 0;
     return s->off_y;
 }
 
-int dial_gui_scroll_scroll_to(GuiScroll *s, int x, int y) {
+int64_t dial_gui_scroll_scroll_to(GuiScroll *s, int x, int y) {
     if (!s) return -1;
     s->off_x = x; s->off_y = y;
     clamp_off(s);
     return 0;
 }
 
-int dial_gui_scroll_wheel(GuiScroll *s, int dy) {
+int64_t dial_gui_scroll_wheel(GuiScroll *s, int dy) {
     if (!s) return 0;
     s->off_y += dy;
     clamp_off(s);
     return s->off_y;
 }
 
-int dial_gui_scroll_hit(GuiScroll *s, int x, int y, int which) {
+int64_t dial_gui_scroll_hit(GuiScroll *s, int x, int y, int which) {
     if (!s) return 0;
     if (which != 0 && which != 1) return 0;
     if (which == 1 && !(s->y_enabled && s->content_h > s->vp_h)) return 0;
@@ -158,7 +159,7 @@ int dial_gui_scroll_hit(GuiScroll *s, int x, int y, int which) {
     return 0;
 }
 
-int dial_gui_scroll_drag(GuiScroll *s, int x, int y, int which) {
+int64_t dial_gui_scroll_drag(GuiScroll *s, int x, int y, int which) {
     if (!s || (which != 0 && which != 1)) return (which == 1) ? s->off_y : s->off_x;
     int rx, ry, rw, rh, tx, ty, tw, th;
     scroll_bar_geom(s, which, &rx, &ry, &rw, &rh, &tx, &ty, &tw, &th);
@@ -177,7 +178,7 @@ int dial_gui_scroll_drag(GuiScroll *s, int x, int y, int which) {
     return pos;
 }
 
-int dial_gui_scroll_set_bar_size(GuiScroll *s, int sz) {
+int64_t dial_gui_scroll_set_bar_size(GuiScroll *s, int sz) {
     if (!s || sz < SCROLL_BAR_MIN) {
         gui_core_set_err(GUI_ERR_ARG, "scroll bar_size 过小");
         return -1;
@@ -186,7 +187,7 @@ int dial_gui_scroll_set_bar_size(GuiScroll *s, int sz) {
     return 0;
 }
 
-int dial_gui_scroll_draw_bar(GuiPainterImpl *p, GuiScroll *s, int which) {
+int64_t dial_gui_scroll_draw_bar(GuiPainterImpl *p, GuiScroll *s, int which) {
     if (!p || !s) return -1;
     if (which == 1 && !(s->y_enabled && s->content_h > s->vp_h)) return 0;
     if (which == 0 && !(s->x_enabled && s->content_w > s->vp_w)) return 0;

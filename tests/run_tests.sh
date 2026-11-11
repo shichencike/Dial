@@ -2172,6 +2172,36 @@ if "$DIALC" build tests/pkg/use_gui_menu.dial -o "${TMP}/use_gui_menu" >"${TMP}/
     fi
 else aabad "use_gui_menu.dial 编译失败"; tail -20 "${TMP}/aa_mcomp.log"; fi
 
+# 5h) 第 9 层滚动视图：纯内存对象 + 离屏画布（零 DISPLAY 依赖，CRC32 像素级锁定）。
+#     独立纯内存 + 独立 offscreen 画布，绝不触碰前七个 demo 的 CRC 基准。给 AA 组 +1 aapass。
+if "$DIALC" build tests/pkg/use_gui_scroll.dial -o "${TMP}/use_gui_scroll" >"${TMP}/aa_scomp.log" 2>&1; then
+    aapass "use_gui_scroll.dial（第 9 层滚动视图）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_scroll" >"${TMP}/aa_snodisplay.log" 2>&1
+    aa_s_no_exit=$?
+    aa_s_bad=$(grep -c ' = bad' "${TMP}/aa_snodisplay.log" || true)
+    if [ "$aa_s_no_exit" -eq 0 ] && [ "$aa_s_bad" -eq 0 ] \
+       && grep -qF 'scroll_new = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_enable_both = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_clamp_x_max = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_clamp_y_max = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_wheel = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_hit_track = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_hit_thumb = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_hit_none = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_drag_clamped = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_tag_roundtrip = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_bar_size_small_rejected = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_crc_nonzero = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_crc_stable = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_window = ok' "${TMP}/aa_snodisplay.log" \
+       && grep -qF 'scroll_done = true' "${TMP}/aa_snodisplay.log"; then
+        aapass "无 DISPLAY：滚动视图夹紧/滚轮/命中(轨道·滑块·无)/拖拽/tag 全宽 / bar_size Fail-Fast / 离屏绘制 CRC 稳定全绿"
+    else
+        aabad "第 9 层无 DISPLAY 路径断言失败（exit=$aa_s_no_exit bad=$aa_s_bad）"
+        tail -40 "${TMP}/aa_snodisplay.log"
+    fi
+else aabad "use_gui_scroll.dial 编译失败"; tail -20 "${TMP}/aa_scomp.log"; fi
+
 # 5) 有 Xvfb 时验证真实窗口（XShm 离屏 + XRender 合成 + 上屏 / 过滤 / 事件循环）；
 #    无 Xvfb 的环境如实打印跳过，绝不把「未验证」写成「通过」。
 if command -v xvfb-run >/dev/null 2>&1; then
@@ -2526,9 +2556,9 @@ ad_methods=$(grep -c '^    fn ' packages/gui/gui_oo.dial)
 ad_diag_n=$(echo "$ad_diag" | wc -l)
 ad_iface_n=$(grep -c '^extern fn' packages/gui/gui.diali)
 ad_oo_decl=$(grep -c '^extern fn' packages/gui/gui_oo.dial || true)
-if [ "$ad_methods" -eq 153 ] && [ "$ad_diag_n" -eq 153 ] && [ "$ad_iface_n" -eq 154 ] \
+if [ "$ad_methods" -eq 168 ] && [ "$ad_diag_n" -eq 168 ] && [ "$ad_iface_n" -eq 169 ] \
    && [ "$ad_oo_decl" -eq 0 ] && [ "$ad_diag" = "$ad_refs" ]; then
-    adpass "契约审计：153 个 impl 方法全覆盖 153 个 extern fn、gui.diali 仍 154 个签名、封装层零 extern 声明（ABI 不变）"
+    adpass "契约审计：168 个 impl 方法全覆盖 168 个 extern fn、gui.diali 共 169 个签名、封装层零 extern 声明（ABI 不变）"
 else
     adbad "契约审计不通过：methods=$ad_methods diag=$ad_diag_n iface=$ad_iface_n oo_decl=$ad_oo_decl"
     diff <(echo "$ad_diag") <(echo "$ad_refs") | head -20

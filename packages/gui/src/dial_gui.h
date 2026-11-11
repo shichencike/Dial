@@ -565,20 +565,20 @@ int  gui_window_handle(GuiWindowImpl *win, int kind, int x, int y, int button);
  * 纯几何 + 绘制：视口裁剪走 dial_gui_set_clip，滚动条走 gui_raster_*，
  * 零平台符号、绝不反向回调；偏移是纯值，由应用主动 scroll_to / wheel / drag 推进。*/
 GuiScroll *dial_gui_scroll_new(void);
-void       dial_gui_scroll_free(GuiScroll *s);
-int        dial_gui_scroll_set_viewport(GuiScroll *s, int x, int y, int w, int h);
-int        dial_gui_scroll_set_content(GuiScroll *s, int w, int h);
-int        dial_gui_scroll_enable(GuiScroll *s, int which, int on);   /* which: 0 横 / 1 纵 / 2 两者 */
-int        dial_gui_scroll_set_tag(GuiScroll *s, int64_t tag);
+int64_t    dial_gui_scroll_free(GuiScroll *s);
+int64_t    dial_gui_scroll_set_viewport(GuiScroll *s, int x, int y, int w, int h);
+int64_t    dial_gui_scroll_set_content(GuiScroll *s, int w, int h);
+int64_t    dial_gui_scroll_enable(GuiScroll *s, int which, int on);   /* which: 0 横 / 1 纵 / 2 两者 */
+int64_t    dial_gui_scroll_set_tag(GuiScroll *s, int64_t tag);
 int64_t    dial_gui_scroll_tag(GuiScroll *s);
-int        dial_gui_scroll_offset_x(GuiScroll *s);
-int        dial_gui_scroll_offset_y(GuiScroll *s);
-int        dial_gui_scroll_scroll_to(GuiScroll *s, int x, int y);    /* 越界夹紧 */
-int        dial_gui_scroll_wheel(GuiScroll *s, int dy);              /* 滚轮：dy>0 下滚，返回新 off_y */
-int        dial_gui_scroll_hit(GuiScroll *s, int x, int y, int which); /* 0 未命中 / 1 滑块 / 2 轨道 */
-int        dial_gui_scroll_drag(GuiScroll *s, int x, int y, int which); /* 拖拽推进，返回新 off_y */
-int        dial_gui_scroll_set_bar_size(GuiScroll *s, int sz);
-int        dial_gui_scroll_draw_bar(GuiPainterImpl *p, GuiScroll *s, int which);
+int64_t    dial_gui_scroll_offset_x(GuiScroll *s);
+int64_t    dial_gui_scroll_offset_y(GuiScroll *s);
+int64_t    dial_gui_scroll_scroll_to(GuiScroll *s, int x, int y);    /* 越界夹紧 */
+int64_t    dial_gui_scroll_wheel(GuiScroll *s, int dy);              /* 滚轮：dy>0 下滚，返回新 off_y */
+int64_t    dial_gui_scroll_hit(GuiScroll *s, int x, int y, int which); /* 0 未命中 / 1 滑块 / 2 轨道 */
+int64_t    dial_gui_scroll_drag(GuiScroll *s, int x, int y, int which); /* 拖拽推进，返回新 off_y */
+int64_t    dial_gui_scroll_set_bar_size(GuiScroll *s, int sz);
+int64_t    dial_gui_scroll_draw_bar(GuiPainterImpl *p, GuiScroll *s, int which);
 
 /* 覆盖层几何 / 命中 / 绘制（dial_gui_menu.c 内部，供 gui_window_* 调用）*/
 void gui_menu_draw_bar(GuiPainterImpl *p, GuiMenu *m, int w);

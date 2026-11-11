@@ -1,0 +1,89 @@
+// gui.dialpkg 第 9 层：滚动视图端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 立场与第 7 层菜单 / 对话框一致：绝不注册回调；偏移是纯值，由 Dial 侧主动
+// scroll_to / wheel / drag 推进，再用 offset_x / offset_y 读回。滚动视图是
+// 窗口级辅助覆盖层，但本用例只用纯内存对象 + 离屏画布，零 DISPLAY 依赖，
+// 任何环境都可跑（含无显示服务器 / CI）。
+//
+// 语言宪法 §37.1：禁止文件级 var 全局可变状态。本用例只用局部变量与纯函数。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+fn main(): int {
+    // ============ A) 滚动视图对象逻辑（纯内存，无 DISPLAY 可跑）============
+    var s: GuiScroll = dial_gui_scroll_new();
+    expect(!is_null(s), "scroll_new");
+    // 视口 200x100 @(0,0)，内容 600x400，横 + 纵启用（which=2）
+    expect_int(dial_gui_scroll_set_viewport(s, 0, 0, 200, 100), 0, "scroll_set_vp");
+    expect_int(dial_gui_scroll_set_content(s, 600, 400), 0, "scroll_set_content");
+    expect_int(dial_gui_scroll_enable(s, 2, 1), 0, "scroll_enable_both");
+    // 初始偏移夹紧到 0
+    expect_int(dial_gui_scroll_offset_x(s), 0, "scroll_off_x_init");
+    expect_int(dial_gui_scroll_offset_y(s), 0, "scroll_off_y_init");
+    // 越界 scroll_to 夹紧到 x:[0,400] y:[0,300]（内容-视口）
+    expect_int(dial_gui_scroll_scroll_to(s, 9999, 9999), 0, "scroll_to_overflow");
+    expect_int(dial_gui_scroll_offset_x(s), 400, "scroll_clamp_x_max");
+    expect_int(dial_gui_scroll_offset_y(s), 300, "scroll_clamp_y_max");
+    // 负值夹紧到 0
+    expect_int(dial_gui_scroll_scroll_to(s, -50, -50), 0, "scroll_to_neg");
+    expect_int(dial_gui_scroll_offset_x(s), 0, "scroll_clamp_x_min");
+    expect_int(dial_gui_scroll_offset_y(s), 0, "scroll_clamp_y_min");
+    // 中间值精确推进
+    expect_int(dial_gui_scroll_scroll_to(s, 100, 150), 0, "scroll_to_mid");
+    expect_int(dial_gui_scroll_offset_x(s), 100, "scroll_off_x_mid");
+    expect_int(dial_gui_scroll_offset_y(s), 150, "scroll_off_y_mid");
+    // 滚轮推进 off_y（+20），返回新 off_y（夹紧生效）
+    expect_int(dial_gui_scroll_wheel(s, 20), 170, "scroll_wheel");
+    expect_int(dial_gui_scroll_offset_y(s), 170, "scroll_off_y_after_wheel");
+    // 命中测试：off_y=170 时垂直滑块约 y∈[38,60)。
+    //   bar_size 默认 10 → 垂直条 x∈[190,200) y∈[0,90)；水平条 y∈[90,100)。
+    expect_int(dial_gui_scroll_hit(s, 195, 10, 1), 2, "scroll_hit_track");   // 条内、滑块外 -> 轨道(2)
+    expect_int(dial_gui_scroll_hit(s, 195, 50, 1), 1, "scroll_hit_thumb");   // 滑块内 -> 滑块(1)
+    expect_int(dial_gui_scroll_hit(s, 10, 10, 1), 0, "scroll_hit_none");     // 视口内非条 -> 0
+    // 拖拽推进：垂直滑块拖到 y=90 附近，off_y 跟随并夹紧到 300（max）
+    expect_int(dial_gui_scroll_drag(s, 0, 90, 1), 300, "scroll_drag_clamped");
+    expect_int(dial_gui_scroll_offset_y(s), 300, "scroll_off_y_after_drag");
+    // tag 64 位全宽 round-trip（与 GuiMenu.tag 同宽）
+    expect_int(dial_gui_scroll_set_tag(s, 123456789), 0, "scroll_set_tag");
+    expect_int(dial_gui_scroll_tag(s), 123456789, "scroll_tag_roundtrip");
+    // bar_size Fail-Fast：过小返回 -1，正常 >=10 返回 0
+    expect_int(dial_gui_scroll_set_bar_size(s, 5), -1, "scroll_bar_size_small_rejected");
+    expect_int(dial_gui_scroll_set_bar_size(s, 14), 0, "scroll_bar_size_ok");
+    // 释放
+    expect_int(dial_gui_scroll_free(s), 0, "scroll_free");
+
+    // ============ B) 离屏画布绘制（零 DISPLAY，靠 CRC32 像素级锁定）============
+    var s2: GuiScroll = dial_gui_scroll_new();
+    expect(!is_null(s2), "scroll_new2");
+    expect_int(dial_gui_scroll_set_viewport(s2, 0, 0, 200, 100), 0, "scroll_set_vp2");
+    expect_int(dial_gui_scroll_set_content(s2, 600, 400), 0, "scroll_set_content2");
+    expect_int(dial_gui_scroll_enable(s2, 2, 1), 0, "scroll_enable_both2");
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 100);
+    expect(!is_null(p), "scroll_painter");
+    // 垂直滚动条：主题色绘制轨道 + 滑块，返回 0
+    expect_int(dial_gui_scroll_draw_bar(p, s2, 1), 0, "scroll_draw_v");
+    var c1: int = dial_gui_painter_crc32(p);
+    // 重绘幂等：CRC32 必须逐字节稳定
+    expect_int(dial_gui_scroll_draw_bar(p, s2, 1), 0, "scroll_draw_v_again");
+    var c2: int = dial_gui_painter_crc32(p);
+    expect(c1 != 0, "scroll_crc_nonzero");
+    expect_int(c1, c2, "scroll_crc_stable");
+    // 水平滚动条同样可绘制
+    expect_int(dial_gui_scroll_draw_bar(p, s2, 0), 0, "scroll_draw_h");
+    // 画布与对象释放
+    expect_int(dial_gui_painter_free(p), 0, "scroll_painter_free");
+    expect_int(dial_gui_scroll_free(s2), 0, "scroll_free2");
+
+    print("scroll_window = ok");   // 纯内存路径，无 DISPLAY 亦 ok
+    print("scroll_done = true");
+    return 0;
+}
