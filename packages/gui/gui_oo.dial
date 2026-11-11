@@ -309,3 +309,33 @@ impl GuiStatusBar {
     fn tag(self): int { return dial_gui_statusbar_tag(self); }
     fn draw(self, p: GuiPainter, win_w: int): int { return dial_gui_statusbar_draw(p, self, win_w); }
 }
+
+// ===== 第 13 层：通知气泡 GuiToast（工厂在 GuiApp）=====
+impl GuiApp {
+    // 新建空通知气泡队列（容量 16、间距 6）
+    fn toast_new(self): GuiToast { return dial_gui_toast_new(); }
+}
+impl GuiToast {
+    fn free(self): int { return dial_gui_toast_free(self); }
+    fn push(self, text: string, life_ms: int, kind: int): int { return dial_gui_toast_push(self, text, life_ms, kind); }
+    fn count(self): int { return dial_gui_toast_count(self); }
+    fn clear(self): int { return dial_gui_toast_clear(self); }
+    fn tick(self, dt_ms: int): int { return dial_gui_toast_tick(self, dt_ms); }
+    fn item_text(self, idx: int): rawptr<byte> { return dial_gui_toast_item_text(self, idx); }
+    fn item_kind(self, idx: int): int { return dial_gui_toast_item_kind(self, idx); }
+    fn item_elapsed(self, idx: int): int { return dial_gui_toast_item_elapsed(self, idx); }
+    fn item_life(self, idx: int): int { return dial_gui_toast_item_life(self, idx); }
+    fn item_set_tag(self, idx: int, tag: int): int { return dial_gui_toast_item_set_tag(self, idx, tag); }
+    fn item_tag(self, idx: int): int { return dial_gui_toast_item_tag(self, idx); }
+    fn set_pos(self, x: int, y: int): int { return dial_gui_toast_set_pos(self, x, y); }
+    fn pos_x(self): int { return dial_gui_toast_pos_x(self); }
+    fn pos_y(self): int { return dial_gui_toast_pos_y(self); }
+    fn set_size(self, w: int, h: int): int { return dial_gui_toast_set_size(self, w, h); }
+    fn size_w(self): int { return dial_gui_toast_size_w(self); }
+    fn size_h(self): int { return dial_gui_toast_size_h(self); }
+    fn set_spacing(self, sp: int): int { return dial_gui_toast_set_spacing(self, sp); }
+    fn spacing(self): int { return dial_gui_toast_spacing(self); }
+    fn set_tag(self, tag: int): int { return dial_gui_toast_set_tag(self, tag); }
+    fn tag(self): int { return dial_gui_toast_tag(self); }
+    fn draw(self, p: GuiPainter): int { return dial_gui_toast_draw(p, self); }
+}

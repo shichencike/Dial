@@ -1226,6 +1226,20 @@ int64_t dial_gui_statusbar_set_right(GuiStatusBar *sb, DialString text) {
     return 0;
 }
 
+/* ---- 通知气泡 Toast（第 13 层；入队入口走 FFI 包装）-------------------- */
+
+/* 入队入口：Dial 侧 string -> C 字符串副本（C 侧再 strdup 一份自有副本）。*/
+int64_t dial_gui_toast_push(GuiToast *t, DialString text, int64_t life_ms, int64_t kind) {
+    if (!t) { gui_core_set_err(GUI_ERR_ARG, "空 GuiToast 句柄"); return -1; }
+    char *dup = str_dup(text);
+    if (!dup) { gui_core_set_err(GUI_ERR_ALLOC, "通知消息内存分配失败"); return -1; }
+    int64_t r = gui_toast_push(t, dup, (int)life_ms, (int)kind);
+    free(dup);
+    if (r < 0) return -1;   /* 内部已写好错误槽（空文本 / kind 越界 / 分配失败）*/
+    gui_core_ok();
+    return 0;
+}
+
 /* ---- 顶栏菜单 / 弹出菜单（窗口级，所有权转移给窗口）------------------- */
 
 int64_t dial_gui_window_set_menubar(GuiWindowImpl *win, GuiMenu *m) {    if (!win_ok(win)) return -1;

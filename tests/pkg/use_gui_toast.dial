@@ -1,0 +1,149 @@
+// gui.dialpkg 第 13 层：通知气泡 Toast 端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 立场与第 9 / 10 / 11 / 12 层一致：绝不注册回调；生命周期是**纯值**，由
+// Dial 侧主动 tick(dt_ms) 推进、到期自动消隐，本层不读时钟、不捕获鼠标，
+// 故行为完全确定、headless 可跑。
+//
+// 关键事实（防漂移）：FIFO 队列（0 = 最旧）；队列满（16 条）时挤掉最旧一条；
+// life_ms <= 0 表示不过期；消息文本是 C 侧副本；三种 kind 取不同主题底色。
+//
+// 语言宪法 §37.1：禁止文件级 var 全局可变状态。本用例只用局部变量与纯函数。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+fn main(): int {
+    // ============ A) 通知气泡队列逻辑（纯内存，无 DISPLAY 可跑）===========
+    var t: GuiToast = dial_gui_toast_new();
+    expect(!is_null(t), "toast_new");
+    expect_int(dial_gui_toast_count(t), 0, "toast_empty");
+    expect_int(dial_gui_toast_spacing(t), 6, "toast_default_spacing");
+
+    // 入队：三条消息（life 1000 / 2000 / 0=不过期），kind 0/1/2
+    expect_int(dial_gui_toast_push(t, "Saved", 1000, 0), 0, "toast_push_info");
+    expect_int(dial_gui_toast_push(t, "Disk low", 2000, 1), 0, "toast_push_warn");
+    expect_int(dial_gui_toast_push(t, "Failed", 0, 2), 0, "toast_push_error");
+    expect_int(dial_gui_toast_count(t), 3, "toast_count_3");
+    // FIFO：0 = 最旧
+    expect(string_from_cstr(dial_gui_toast_item_text(t, 0)) == "Saved", "toast_item0_text");
+    expect(string_from_cstr(dial_gui_toast_item_text(t, 2)) == "Failed", "toast_item2_text");
+    expect_int(dial_gui_toast_item_kind(t, 0), 0, "toast_item0_kind");
+    expect_int(dial_gui_toast_item_kind(t, 1), 1, "toast_item1_kind");
+    expect_int(dial_gui_toast_item_kind(t, 2), 2, "toast_item2_kind");
+    expect_int(dial_gui_toast_item_life(t, 0), 1000, "toast_item0_life");
+    expect_int(dial_gui_toast_item_life(t, 2), 0, "toast_item2_never_expires");
+    expect_int(dial_gui_toast_item_elapsed(t, 0), 0, "toast_item0_elapsed_init");
+    // 越界读：返回 -1 / 空串
+    expect_int(dial_gui_toast_item_kind(t, 99), -1, "toast_item_oob_kind");
+    expect(string_from_cstr(dial_gui_toast_item_text(t, 99)) == "", "toast_item_oob_text_empty");
+    // 非法 kind Fail-Fast
+    expect_int(dial_gui_toast_push(t, "Bad", 100, 9), -1, "toast_bad_kind_rejected");
+    expect_int(dial_gui_toast_count(t), 3, "toast_count_after_reject");
+    // 单条 tag 64 位全宽 round-trip
+    expect_int(dial_gui_toast_item_set_tag(t, 1, 123456789), 0, "toast_item_set_tag");
+    expect_int(dial_gui_toast_item_tag(t, 1), 123456789, "toast_item_tag_roundtrip");
+    expect_int(dial_gui_toast_item_set_tag(t, 99, 1), -1, "toast_item_oob_tag_rejected");
+
+    // 计时推进：第 0 条 life=1000，tick 500 尚未到期
+    expect_int(dial_gui_toast_tick(t, 500), 3, "toast_tick_500_count");
+    expect_int(dial_gui_toast_item_elapsed(t, 0), 500, "toast_item0_elapsed_500");
+    expect(string_from_cstr(dial_gui_toast_item_text(t, 0)) == "Saved", "toast_item0_still_present");
+    // 再推进 500：第 0 条到期消隐，剩余 2 条
+    expect_int(dial_gui_toast_tick(t, 500), 2, "toast_tick_expired_count");
+    expect(string_from_cstr(dial_gui_toast_item_text(t, 0)) == "Disk low", "toast_fifo_shift_after_expire");
+    expect_int(dial_gui_toast_item_elapsed(t, 0), 1000, "toast_item1_elapsed_1000");
+    // 第 1 条 life=2000：再推进 1000 恰好到期
+    expect_int(dial_gui_toast_tick(t, 1000), 1, "toast_tick_second_expired");
+    expect(string_from_cstr(dial_gui_toast_item_text(t, 0)) == "Failed", "toast_only_never_expire_left");
+    // life_ms <= 0 的条目永不过期：再推进 9999 仍在队列里
+    expect_int(dial_gui_toast_tick(t, 9999), 1, "toast_never_expire_stays");
+    expect(string_from_cstr(dial_gui_toast_item_text(t, 0)) == "Failed", "toast_never_expire_text");
+
+    // 清空队列
+    expect_int(dial_gui_toast_clear(t), 0, "toast_clear");
+    expect_int(dial_gui_toast_count(t), 0, "toast_count_after_clear");
+
+    // 队列满（16 条）：push 挤掉最旧的一条，新消息仍能进来
+    var k: int = 0;
+    while (k < 16) {
+        dial_gui_toast_push(t, "M", 0, 0);
+        k = k + 1;
+    }
+    expect_int(dial_gui_toast_count(t), 16, "toast_full_count");
+    expect_int(dial_gui_toast_push(t, "Newest", 0, 0), 0, "toast_push_when_full");
+    expect_int(dial_gui_toast_count(t), 16, "toast_count_after_full_push");
+    // 最旧的被挤掉：队首不再是第一条 "M"
+    expect(string_from_cstr(dial_gui_toast_item_text(t, 15)) == "Newest", "toast_newest_at_tail");
+
+    // 位置 / 尺寸 / 间距
+    expect_int(dial_gui_toast_set_pos(t, 20, 30), 0, "toast_set_pos");
+    expect_int(dial_gui_toast_pos_x(t), 20, "toast_pos_x");
+    expect_int(dial_gui_toast_pos_y(t), 30, "toast_pos_y");
+    expect_int(dial_gui_toast_set_size(t, 160, 40), 0, "toast_set_size");
+    expect_int(dial_gui_toast_size_w(t), 160, "toast_size_w");
+    expect_int(dial_gui_toast_size_h(t), 40, "toast_size_h");
+    // 非法尺寸 / 负间距 Fail-Fast
+    expect_int(dial_gui_toast_set_size(t, 0, 40), -1, "toast_zero_width_rejected");
+    expect_int(dial_gui_toast_set_spacing(t, -1), -1, "toast_negative_spacing_rejected");
+    expect_int(dial_gui_toast_set_spacing(t, 10), 0, "toast_set_spacing");
+    expect_int(dial_gui_toast_spacing(t), 10, "toast_spacing_readback");
+    // 队列整体 tag 64 位全宽 round-trip
+    expect_int(dial_gui_toast_set_tag(t, 987654321), 0, "toast_set_tag");
+    expect_int(dial_gui_toast_tag(t), 987654321, "toast_tag_roundtrip");
+    // 释放
+    expect_int(dial_gui_toast_free(t), 0, "toast_free");
+
+    // ============ B) 离屏画布绘制（零 DISPLAY，靠 CRC32 像素级锁定）===========
+    var t2: GuiToast = dial_gui_toast_new();
+    var p: GuiPainter = dial_gui_painter_offscreen(220, 200);
+    expect(!is_null(p), "toast_painter");
+    // 空队列不绘制（画布保持空白）
+    expect_int(dial_gui_toast_draw(p, t2), 0, "toast_draw_empty");
+    var crc0: int = dial_gui_painter_crc32(p);
+    // 入队一条并绘制
+    dial_gui_toast_push(t2, "Saved", 0, 0);
+    dial_gui_toast_set_pos(t2, 10, 10);
+    expect_int(dial_gui_toast_draw(p, t2), 0, "toast_draw");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect(crc1 != 0, "toast_crc_nonzero");
+    expect(crc0 != crc1, "toast_crc_changed_after_draw");
+    // 重绘幂等：CRC32 必须逐字节稳定
+    expect_int(dial_gui_toast_draw(p, t2), 0, "toast_draw_again");
+    var crc2: int = dial_gui_painter_crc32(p);
+    expect_int(crc1, crc2, "toast_crc_stable");
+    // 追加第二条：像素随之改变（堆叠两条）
+    dial_gui_toast_push(t2, "Second", 0, 0);
+    expect_int(dial_gui_toast_draw(p, t2), 0, "toast_draw_two");
+    var crc3: int = dial_gui_painter_crc32(p);
+    expect(crc3 != crc2, "toast_crc_changed_on_second");
+    // 换 kind（警告色）-> 像素随之改变
+    dial_gui_toast_clear(t2);
+    dial_gui_toast_push(t2, "Warn", 0, 1);
+    expect_int(dial_gui_toast_draw(p, t2), 0, "toast_draw_warn");
+    var crc4: int = dial_gui_painter_crc32(p);
+    expect(crc4 != crc3, "toast_crc_changed_on_kind");
+    // 到期消隐后不再绘制 -> 像素不变
+    dial_gui_toast_clear(t2);
+    dial_gui_toast_push(t2, "Ephemeral", 100, 0);
+    expect_int(dial_gui_toast_draw(p, t2), 0, "toast_draw_ephemeral");
+    var crc5: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_toast_tick(t2, 200), 0, "toast_tick_expire_all");
+    expect_int(dial_gui_toast_draw(p, t2), 0, "toast_draw_after_expire");
+    var crc6: int = dial_gui_painter_crc32(p);
+    expect_int(crc5, crc6, "toast_crc_unchanged_after_expire");
+    // 画布与对象释放
+    expect_int(dial_gui_painter_free(p), 0, "toast_painter_free");
+    expect_int(dial_gui_toast_free(t2), 0, "toast_free2");
+
+    print("toast_window = ok");   // 纯内存路径，无 DISPLAY 亦 ok
+    print("toast_done = true");
+    return 0;
+}

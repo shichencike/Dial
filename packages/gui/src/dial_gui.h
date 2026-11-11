@@ -108,6 +108,8 @@ typedef struct GuiContext     GuiContext;
 typedef struct GuiTooltip     GuiTooltip;
 /* 第 12 层：状态栏 StatusBar（纯内存对象）。*/
 typedef struct GuiStatusBar   GuiStatusBar;
+/* 第 13 层：通知气泡 Toast（队列覆盖层，纯内存对象）。*/
+typedef struct GuiToast       GuiToast;
 
 typedef struct GuiBackend GuiBackend;
 
@@ -595,6 +597,32 @@ struct GuiStatusBar {
     int64_t tag;         /* 用户 tag（全宽，可 round-trip）*/
 };
 
+/* 第 13 层：通知气泡 Toast —— 队列覆盖层（纯内存对象，无窗口）。
+ *
+ * 一组「消息」按先进先出排队，每条自带生命周期；生命周期由调用方以毫秒数
+ * 推进（tick(dt_ms)），到期自动消隐。本层**不读时钟、不捕获鼠标**，
+ * 故三平台行为逐字节一致、可确定性单测。
+ */
+#define GUI_TOAST_CAP 16   /* 队列容量（满时 push 拒绝最旧的一条）*/
+
+typedef struct GuiToastItem {
+    char *text;          /* C 侧 strdup 自有副本（NULL = 已释放的空槽）*/
+    int  life_ms;        /* 本条总生命周期（毫秒，<= 0 表示不过期）*/
+    int  elapsed_ms;     /* 本条已存活毫秒（由 tick 推进）*/
+    int  kind;           /* 0 = 信息 / 1 = 警告 / 2 = 错误 */
+    int64_t tag;         /* 单条 tag（全宽，可 round-trip）*/
+} GuiToastItem;
+
+struct GuiToast {
+    GuiToastItem items[GUI_TOAST_CAP];   /* FIFO 队列（head = 最旧）*/
+    int  count;                          /* 当前排队条数 */
+    int  x, y;            /* 气泡左上角锚点（窗口内坐标）*/
+    int  w, h;            /* 单条气泡尺寸（缺省按文本算）*/
+    int  spacing;         /* 相邻气泡间距（像素）*/
+    int  fixed_size;      /* 1 = 用固定 w/h，不按文本自适应*/
+    int64_t tag;          /* 用户 tag（全宽，可 round-trip）*/
+};
+
 /* 菜单项增删 / 访问（纯内存，无窗口；可在无 DISPLAY 环境单元测试）*/
 GuiMenu  *gui_menu_new(void);
 void      gui_menu_free(GuiMenu *m);
@@ -712,5 +740,33 @@ int64_t       dial_gui_statusbar_value(GuiStatusBar *sb);
 int64_t       dial_gui_statusbar_set_tag(GuiStatusBar *sb, int64_t tag);
 int64_t       dial_gui_statusbar_tag(GuiStatusBar *sb);
 int64_t       dial_gui_statusbar_draw(GuiPainterImpl *p, GuiStatusBar *sb, int win_w);
+
+/* 第 13 层：通知气泡 Toast（dial_gui_toast.c，纯 C，三平台共用，无平台符号）。
+ * 队列覆盖层：多条消息 FIFO 排队，生命周期由调用方 tick(dt_ms) 推进、到期自动
+ * 消隐；本层不读时钟、不捕获鼠标，绝不反向回调。*/
+GuiToast *dial_gui_toast_new(void);
+int64_t   dial_gui_toast_free(GuiToast *t);
+/* 内部（C 层，文本已拷成 NUL 结尾）：FFI 包装在 core.c。*/
+int64_t   gui_toast_push(GuiToast *t, const char *text, int life_ms, int kind);
+int64_t   dial_gui_toast_count(GuiToast *t);
+int64_t   dial_gui_toast_clear(GuiToast *t);
+int64_t   dial_gui_toast_tick(GuiToast *t, int dt_ms);        /* 推进并消隐到期条目 */
+const char *dial_gui_toast_item_text(GuiToast *t, int idx);   /* 借用指针 */
+int64_t   dial_gui_toast_item_kind(GuiToast *t, int idx);
+int64_t   dial_gui_toast_item_elapsed(GuiToast *t, int idx);
+int64_t   dial_gui_toast_item_life(GuiToast *t, int idx);
+int64_t   dial_gui_toast_item_tag(GuiToast *t, int idx);
+int64_t   dial_gui_toast_item_set_tag(GuiToast *t, int idx, int64_t tag);
+int64_t   dial_gui_toast_set_pos(GuiToast *t, int x, int y);
+int64_t   dial_gui_toast_pos_x(GuiToast *t);
+int64_t   dial_gui_toast_pos_y(GuiToast *t);
+int64_t   dial_gui_toast_set_size(GuiToast *t, int w, int h);
+int64_t   dial_gui_toast_size_w(GuiToast *t);
+int64_t   dial_gui_toast_size_h(GuiToast *t);
+int64_t   dial_gui_toast_set_spacing(GuiToast *t, int sp);
+int64_t   dial_gui_toast_spacing(GuiToast *t);
+int64_t   dial_gui_toast_set_tag(GuiToast *t, int64_t tag);
+int64_t   dial_gui_toast_tag(GuiToast *t);
+int64_t   dial_gui_toast_draw(GuiPainterImpl *p, GuiToast *t);
 
 #endif /* DIAL_GUI_H */

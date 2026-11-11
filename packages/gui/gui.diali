@@ -1040,3 +1040,79 @@ extern fn dial_gui_statusbar_tag(sb: GuiStatusBar): int;
 /// 返回 0 / -1（空句柄 / 宽度非正）。
 extern fn dial_gui_statusbar_draw(p: GuiPainter, sb: GuiStatusBar, win_w: int): int;
 
+// ---- 第 13 层：通知气泡 Toast（本段 21 个追加 extern fn）--------------------
+//
+// 立场：与前十二层完全一致 —— 纯 C、零平台符号、绝不 C → Dial 反向回调、
+// 只追加 extern fn。通知气泡是**纯内存对象**（不挂窗），可在无 DISPLAY
+// 环境单元测试。
+//
+// 关键事实（防漂移）：
+//   - 一组「消息」按 FIFO 排队（0 = 最旧），每条自带生命周期。
+//   - **生命周期完全由调用方以毫秒数推进**（tick(dt_ms)），到期自动消隐；
+//     本层**不读时钟、不调用任何平台 API**，故三平台行为逐字节一致、
+//     可确定性单测。life_ms <= 0 表示该条不过期。
+//   - 队列满（16 条）时 push 挤掉最旧的一条，保证新消息总能进来。
+//   - 消息文本是 C 侧自有副本（strdup），调用方不保留指针。
+//
+// 气泡种类（push 的 kind 参数）：0 = 信息 / 1 = 警告 / 2 = 错误。
+// 不同种类取不同主题底色（信息=面板底 / 警告=按钮底 / 错误=选区底）。
+
+/// 通知气泡类型（不透明）。一个 Toast 是一条 FIFO 消息队列。
+type GuiToast;
+
+/// 新建空通知气泡队列（容量 16、锚点 (0,0)、间距 6）。失败返回空句柄。
+/// 用完须 dial_gui_toast_free。
+extern fn dial_gui_toast_new(): GuiToast;
+
+/// 释放通知气泡队列（含全部消息文本副本）。返回 0 / -1。
+extern fn dial_gui_toast_free(t: GuiToast): int;
+
+/// 追加一条消息（拷贝一份 C 侧副本）。life_ms 为生命周期（<= 0 表示不过期），
+/// kind 为气泡种类（0 信息 / 1 警告 / 2 错误，越界 Fail-Fast 返回 -1）。
+/// 队列满时挤掉最旧的一条。返回 0 / -1。
+extern fn dial_gui_toast_push(t: GuiToast, text: string, life_ms: int, kind: int): int;
+
+/// 当前排队条数。空句柄返回 -1。
+extern fn dial_gui_toast_count(t: GuiToast): int;
+
+/// 清空队列（释放全部消息文本）。返回 0 / -1。
+extern fn dial_gui_toast_clear(t: GuiToast): int;
+
+/// 推进所有消息的存活时间，并消隐到期条目（life_ms > 0 且已存活 >= life）。
+/// dt_ms 为本帧毫秒（负值按 0 处理）。返回消隐后的剩余条数。
+extern fn dial_gui_toast_tick(t: GuiToast, dt_ms: int): int;
+
+/// 读第 idx 条消息（0 = 最旧）的文本（**借用指针**；越界返回空串）。
+extern fn dial_gui_toast_item_text(t: GuiToast, idx: int): rawptr<byte>;
+
+/// 读第 idx 条消息的种类 / 已存活毫秒 / 总生命周期。越界返回 -1。
+extern fn dial_gui_toast_item_kind(t: GuiToast, idx: int): int;
+extern fn dial_gui_toast_item_elapsed(t: GuiToast, idx: int): int;
+extern fn dial_gui_toast_item_life(t: GuiToast, idx: int): int;
+
+/// 设置 / 读取第 idx 条消息的 tag（64 位，可 round-trip）。越界返回 -1。
+extern fn dial_gui_toast_item_set_tag(t: GuiToast, idx: int, tag: int): int;
+extern fn dial_gui_toast_item_tag(t: GuiToast, idx: int): int;
+
+/// 设置气泡堆叠锚点（窗口内坐标，左上角）。返回 0 / -1。
+extern fn dial_gui_toast_set_pos(t: GuiToast, x: int, y: int): int;
+extern fn dial_gui_toast_pos_x(t: GuiToast): int;
+extern fn dial_gui_toast_pos_y(t: GuiToast): int;
+
+/// 显式设置单条气泡尺寸（须为正；Fail-Fast 返回 -1）。设置后不再按文本自适应。
+extern fn dial_gui_toast_set_size(t: GuiToast, w: int, h: int): int;
+extern fn dial_gui_toast_size_w(t: GuiToast): int;
+extern fn dial_gui_toast_size_h(t: GuiToast): int;
+
+/// 设置相邻气泡间距（像素，须非负；Fail-Fast 返回 -1）。默认 6。
+extern fn dial_gui_toast_set_spacing(t: GuiToast, sp: int): int;
+extern fn dial_gui_toast_spacing(t: GuiToast): int;
+
+/// 设置 / 读取用户 tag（64 位，可 round-trip，与 GuiScroll.tag 同宽）。
+extern fn dial_gui_toast_set_tag(t: GuiToast, tag: int): int;
+extern fn dial_gui_toast_tag(t: GuiToast): int;
+
+/// 绘制整个气泡队列（自上而下堆叠，底色按种类取主题色）。
+/// 队列为空则不绘制（返回 0）。p 为窗口画布。返回 0 / -1。
+extern fn dial_gui_toast_draw(p: GuiPainter, t: GuiToast): int;
+
