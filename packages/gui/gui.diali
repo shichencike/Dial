@@ -808,9 +808,9 @@ extern fn dial_gui_scroll_set_content(s: GuiScroll, w: int, h: int): int;
 /// 返回 0 / -1（Fail-Fast 越界）。
 extern fn dial_gui_scroll_enable(s: GuiScroll, which: int, on: int): int;
 
-/// 设置 / 读取用户 tag（8 位，超界截断）。
-extern fn dial_gui_scroll_set_tag(s: GuiScroll, tag: int64): int;
-extern fn dial_gui_scroll_tag(s: GuiScroll): int64;
+/// 设置 / 读取用户 tag（64 位，可 round-trip，与 GuiMenu.tag 同宽）。
+extern fn dial_gui_scroll_set_tag(s: GuiScroll, tag: int): int;
+extern fn dial_gui_scroll_tag(s: GuiScroll): int;
 
 /// 读取当前偏移（已夹紧）。空句柄返回 0。
 extern fn dial_gui_scroll_offset_x(s: GuiScroll): int;

@@ -12,7 +12,7 @@
  *   - 视口裁剪复用 dial_gui_set_clip（调用方在绘制时按 off_x/off_y 平移内容并设裁剪）；
  *     滚动条绘制走 gui_raster_*，几何 / 绘制 CRC 逐字节不漂移。
  *   - 窗口接管 scroll 的所有权，关闭窗口时一并释放（见 dial_gui_core.c）；
- *     未挂窗的纯内存对象用 gui_scroll_free 释放，可在无 DISPLAY 环境单元测试。
+ *     未挂窗的纯内存对象用 dial_gui_scroll_free 释放，可在无 DISPLAY 环境单元测试。
  *
  * which 约定：0 = 水平滚动条，1 = 垂直滚动条（与 enable 的掩码位一致）。
  */
@@ -65,18 +65,18 @@ static void clamp_off(GuiScroll *s) {
     if (s->off_y < 0) s->off_y = 0; if (s->off_y > max_y) s->off_y = max_y;
 }
 
-GuiScroll *gui_scroll_new(void) {
+GuiScroll *dial_gui_scroll_new(void) {
     GuiScroll *s = (GuiScroll *)calloc(1, sizeof(GuiScroll));
     if (s) s->bar_size = SCROLL_BAR_MIN;   /* 失败返回 NULL；其余字段全零 */
     return s;
 }
 
-void gui_scroll_free(GuiScroll *s) {
+void dial_gui_scroll_free(GuiScroll *s) {
     if (!s) return;
     free(s);
 }
 
-int gui_scroll_set_viewport(GuiScroll *s, int x, int y, int w, int h) {
+int dial_gui_scroll_set_viewport(GuiScroll *s, int x, int y, int w, int h) {
     if (!s || w <= 0 || h <= 0) {
         gui_core_set_err(GUI_ERR_ARG, "scroll viewport 非法（尺寸须为正）");
         return -1;
@@ -86,7 +86,7 @@ int gui_scroll_set_viewport(GuiScroll *s, int x, int y, int w, int h) {
     return 0;
 }
 
-int gui_scroll_set_content(GuiScroll *s, int w, int h) {
+int dial_gui_scroll_set_content(GuiScroll *s, int w, int h) {
     if (!s || w <= 0 || h <= 0) {
         gui_core_set_err(GUI_ERR_ARG, "scroll content 非法（尺寸须为正）");
         return -1;
@@ -96,7 +96,7 @@ int gui_scroll_set_content(GuiScroll *s, int w, int h) {
     return 0;
 }
 
-int gui_scroll_enable(GuiScroll *s, int which, int on) {
+int dial_gui_scroll_enable(GuiScroll *s, int which, int on) {
     if (!s || which < 0 || which > 2) {
         gui_core_set_err(GUI_ERR_ARG, "scroll enable 越界（which: 0 横 / 1 纵 / 2 两者）");
         return -1;
@@ -109,42 +109,42 @@ int gui_scroll_enable(GuiScroll *s, int which, int on) {
     return 0;
 }
 
-int gui_scroll_set_tag(GuiScroll *s, int64_t tag) {
+int dial_gui_scroll_set_tag(GuiScroll *s, int64_t tag) {
     if (!s) return -1;
-    s->tag = (int8_t)tag;
+    s->tag = tag;
     return 0;
 }
 
-int64_t gui_scroll_tag(GuiScroll *s) {
+int64_t dial_gui_scroll_tag(GuiScroll *s) {
     if (!s) return -1;
     return s->tag;
 }
 
-int gui_scroll_offset_x(GuiScroll *s) {
+int dial_gui_scroll_offset_x(GuiScroll *s) {
     if (!s) return 0;
     return s->off_x;
 }
 
-int gui_scroll_offset_y(GuiScroll *s) {
+int dial_gui_scroll_offset_y(GuiScroll *s) {
     if (!s) return 0;
     return s->off_y;
 }
 
-int gui_scroll_scroll_to(GuiScroll *s, int x, int y) {
+int dial_gui_scroll_scroll_to(GuiScroll *s, int x, int y) {
     if (!s) return -1;
     s->off_x = x; s->off_y = y;
     clamp_off(s);
     return 0;
 }
 
-int gui_scroll_wheel(GuiScroll *s, int dy) {
+int dial_gui_scroll_wheel(GuiScroll *s, int dy) {
     if (!s) return 0;
     s->off_y += dy;
     clamp_off(s);
     return s->off_y;
 }
 
-int gui_scroll_hit(GuiScroll *s, int x, int y, int which) {
+int dial_gui_scroll_hit(GuiScroll *s, int x, int y, int which) {
     if (!s) return 0;
     if (which != 0 && which != 1) return 0;
     if (which == 1 && !(s->y_enabled && s->content_h > s->vp_h)) return 0;
@@ -158,7 +158,7 @@ int gui_scroll_hit(GuiScroll *s, int x, int y, int which) {
     return 0;
 }
 
-int gui_scroll_drag(GuiScroll *s, int x, int y, int which) {
+int dial_gui_scroll_drag(GuiScroll *s, int x, int y, int which) {
     if (!s || (which != 0 && which != 1)) return (which == 1) ? s->off_y : s->off_x;
     int rx, ry, rw, rh, tx, ty, tw, th;
     scroll_bar_geom(s, which, &rx, &ry, &rw, &rh, &tx, &ty, &tw, &th);
@@ -177,7 +177,7 @@ int gui_scroll_drag(GuiScroll *s, int x, int y, int which) {
     return pos;
 }
 
-int gui_scroll_set_bar_size(GuiScroll *s, int sz) {
+int dial_gui_scroll_set_bar_size(GuiScroll *s, int sz) {
     if (!s || sz < SCROLL_BAR_MIN) {
         gui_core_set_err(GUI_ERR_ARG, "scroll bar_size 过小");
         return -1;
@@ -186,7 +186,7 @@ int gui_scroll_set_bar_size(GuiScroll *s, int sz) {
     return 0;
 }
 
-int gui_scroll_draw_bar(GuiPainterImpl *p, GuiScroll *s, int which) {
+int dial_gui_scroll_draw_bar(GuiPainterImpl *p, GuiScroll *s, int which) {
     if (!p || !s) return -1;
     if (which == 1 && !(s->y_enabled && s->content_h > s->vp_h)) return 0;
     if (which == 0 && !(s->x_enabled && s->content_w > s->vp_w)) return 0;

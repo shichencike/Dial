@@ -145,8 +145,7 @@ int64_t dial_gui_app_free(GuiAppImpl *app) {
     if (w->menubar) gui_menu_free(w->menubar);
     if (w->popup)   gui_menu_free(w->popup);
     if (w->dialog)  gui_dialog_free(w->dialog);
-    if (w->scroll)  gui_scroll_free(w->scroll);
-        if (w->scroll)  gui_scroll_free(w->scroll);
+    if (w->scroll)  dial_gui_scroll_free(w->scroll);
         free(w);
         w = next;
     }
@@ -263,6 +262,7 @@ int64_t dial_gui_window_close(GuiWindowImpl *win) {
     if (win->menubar) gui_menu_free(win->menubar);
     if (win->popup)   gui_menu_free(win->popup);
     if (win->dialog)  gui_dialog_free(win->dialog);
+    if (win->scroll)  dial_gui_scroll_free(win->scroll);
     free(win);
     gui_core_ok();
     return 0;

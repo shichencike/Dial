@@ -210,3 +210,25 @@ impl GuiDialog {
     fn result(self): int { return dial_gui_dialog_result(self); }
     fn open(self): int { return dial_gui_dialog_open(self); }
 }
+
+// ===== 第 9 层：滚动视图 GuiScroll（工厂在 GuiApp）=====
+impl GuiApp {
+    // 新建空滚动视图（视口 / 内容 0，偏移 0，bar_size=10）
+    fn scroll_new(self): GuiScroll { return dial_gui_scroll_new(); }
+}
+impl GuiScroll {
+    fn free(self): int { return dial_gui_scroll_free(self); }
+    fn set_viewport(self, x: int, y: int, w: int, h: int): int { return dial_gui_scroll_set_viewport(self, x, y, w, h); }
+    fn set_content(self, w: int, h: int): int { return dial_gui_scroll_set_content(self, w, h); }
+    fn enable(self, which: int, on: int): int { return dial_gui_scroll_enable(self, which, on); }
+    fn set_tag(self, tag: int): int { return dial_gui_scroll_set_tag(self, tag); }
+    fn tag(self): int { return dial_gui_scroll_tag(self); }
+    fn offset_x(self): int { return dial_gui_scroll_offset_x(self); }
+    fn offset_y(self): int { return dial_gui_scroll_offset_y(self); }
+    fn scroll_to(self, x: int, y: int): int { return dial_gui_scroll_scroll_to(self, x, y); }
+    fn wheel(self, dy: int): int { return dial_gui_scroll_wheel(self, dy); }
+    fn hit(self, x: int, y: int, which: int): int { return dial_gui_scroll_hit(self, x, y, which); }
+    fn drag(self, x: int, y: int, which: int): int { return dial_gui_scroll_drag(self, x, y, which); }
+    fn set_bar_size(self, sz: int): int { return dial_gui_scroll_set_bar_size(self, sz); }
+    fn draw_bar(self, p: GuiPainter, which: int): int { return dial_gui_scroll_draw_bar(p, self, which); }
+}
