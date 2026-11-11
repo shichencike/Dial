@@ -1,13 +1,16 @@
 // gui_oo.dial —— 手搓 GUI 第 8 层：Dial 侧惯用 API（OO 封装层）
 //
-// 本文件是**纯 Dial 源码**，不是包、不进 gui.dialpkg：gui.diali / C 层 /
-// 三平台 .a / abi=6 / version=1.10.0 / 旧 154 个签名一律一字不动。
-// 它借 B1「impl 方法块」把 C 风格函数编译期脱糖成方法：
+// 本文件是**纯 Dial 源码**，随 gui.dialpkg 一起分发（包内 `src/gui_oo.dial`，
+// 由 dial.toml 的 `[src]` 段登记，见 README §25.11）：它**不产生机器码、不新增
+// 任何 `extern fn`**，gui.diali / C 层 / 三平台 .a / abi=6 / version=1.10.0 /
+// 旧 154 个签名一律一字不动。它借 B1「impl 方法块」把 C 风格函数编译期脱糖成方法：
 //     win.draw()  ==  dial_gui_window_draw(win)
 // 纯编译期改写，产物与 C 风格调用逐字节一致，ABI 不变。
 //
-// 用法（v1.04 本地源码模块，README §34）：把本文件放到项目目录，写一行
-//     import "./gui_oo.dial";        // 或裸名 import "gui_oo";
+// 用法（装包即用，README §25.11 / §34）：装好 gui.dialpkg 后写一行
+//     import "gui_oo";
+// 即可从包内 `src/` 自动展开本模块，**无需复制任何文件到项目目录**。若项目目录
+// 自己放了一份同名 .dial，则本地那份优先（三级优先见 §34.2）。
 // 本文件内的 import "gui"; 会由前端汇总、去重后全局生效，故用户**不必**再写
 // 第二个 import；随后 dial_gui_app_new() 建 app，其余一律走方法。
 //

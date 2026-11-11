@@ -1,6 +1,6 @@
 // GUI 第 8 层：Dial 侧 OO 封装层端到端用例（AD 组，v1.10 未发布增补）。
 //
-// 立场：gui_oo.dial 是**纯 Dial 源码**，借 B1 impl 把 154 个 C 风格 extern fn
+// 立场：gui_oo.dial 是**纯 Dial 源码**，借 B1 impl 把全部 C 风格 extern fn
 // 编译期脱糖成方法；gui.diali / C 层 / 三平台 .a / ABI 一字不动。本用例验证：
 //   ① 7 个不透明句柄（GuiApp/Window/Painter/Font/Widget/Menu/Dialog）方法全可用；
 //   ② **同一绘制序列分别用 C 风格与 OO 风格执行，画布 CRC32 逐字节相等**
@@ -8,7 +8,9 @@
 //   ③ 窗口级覆盖层（顶栏 / 弹窗 / 对话框）与纯值信号队列在 OO 风格下行为一致；
 //   ④ Fail-Fast 透传（越界 / 坏按钮 / 空读）仍由 C 侧原样返回错误码。
 //
-// 用法：AD 组把 packages/gui/gui_oo.dial 复制到本文件同目录，裸名 import 生效
+// 用法：AD 组两种路径都测——① 把 packages/gui/src/gui_oo.dial 复制到本文件同目录
+// （本地源码模块，三级优先第 ① 级）；② 不复制，直接从包缓存 src/ 按裸名
+// import "gui_oo"（随包模块，第 ② 级，见 README §25.11）。两路径输出须逐字节一致。
 //（gui_oo.dial 内的 import "gui" 由前端汇总、去重后全局生效，无需第二个 import）。
 //
 // 语言宪法 §37.1：禁止文件级 var 全局可变状态。本用例只用局部变量与纯函数。

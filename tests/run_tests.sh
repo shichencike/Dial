@@ -81,10 +81,11 @@
 #       dial_gui_window_draw(win)）/ 默认实参 / 容器 push 同名方法隔离 /
 #       6 个 Fail-Fast 负向 + 诊断面向用户（不暴露 mangle 名、参数不含 self）
 #       （v1.10 开发中增量）。
-#   AD. GUI 第 8 层 Dial 侧 OO 封装：packages/gui/gui_oo.dial 用 153 个 impl
-#       方法包住 154 个 C 风格 extern fn（纯 Dial 源码、不进 .dialpkg、ABI 不变）；
+#   AD. GUI 第 8 层 Dial 侧 OO 封装：packages/gui/src/gui_oo.dial 用 245 个 impl
+#       方法包住 246 个 C 风格 extern fn（纯 Dial 源码、随包 src/ 分发、ABI 不变）；
 #       契约审计（方法数 / 全覆盖 / 零 extern 声明）、无 DISPLAY 纯内存路径 +
-#       C 风格与 OO 风格绘制 CRC32 逐字节相等、Xvfb 实窗覆盖层与信号队列、
+#       C 风格与 OO 风格绘制 CRC32 逐字节相等、随包 src/ 装包即用（不复制源码，
+#       输出与本地副本逐字节一致）、Xvfb 实窗覆盖层与信号队列、
 #       3 个 Fail-Fast 透传负向 + 诊断面向用户（v1.10 开发中增量）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
@@ -2772,14 +2773,16 @@ else
 fi
 
 # ===========================================================================
-echo "== AD) GUI 第 8 层 OO 封装：245 个 impl 方法 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
+echo "== AD) GUI 第 8 层 OO 封装：245 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
 adpass() { echo "  ✅ $1"; }
 adbad()  { echo "  ❌ $1"; fail=1; }
 
 AD_DIR="${TMP}/ad_oo"
 mkdir -p "$AD_DIR"
-# 模拟用户把 gui_oo.dial 放进自己项目目录：源文件是唯一真相，副本为临时派生数据。
-cp packages/gui/gui_oo.dial "$AD_DIR/"
+# 路径 ①（本地源码模块）：模拟用户把包内 src/gui_oo.dial 复制到自己项目目录；
+# 源文件是唯一真相，副本为临时派生数据。路径 ②（随包模块）见下方 2.5) 块，
+# 那里故意不复制任何文件，验证装包即用。
+cp packages/gui/src/gui_oo.dial "$AD_DIR/"
 cp tests/oo/use_gui_oo.dial "$AD_DIR/"
 "$DIALC" pack packages/gui -o "${TMP}/ad_gui.dialpkg" >"${TMP}/ad_pack.log" 2>&1 \
     && "$DIALC" install "${TMP}/ad_gui.dialpkg" >"${TMP}/ad_install.log" 2>&1 \
@@ -2789,11 +2792,11 @@ cp tests/oo/use_gui_oo.dial "$AD_DIR/"
 #    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 246 个签名。
 ad_diag=$(grep '^extern fn' packages/gui/gui.diali | sed -E 's/^extern fn ([A-Za-z0-9_]+).*/\1/' \
           | grep -v '^dial_gui_app_new$' | sort -u)
-ad_refs=$(grep '^    fn ' packages/gui/gui_oo.dial | grep -oE 'dial_gui_[A-Za-z0-9_]+' | sort -u)
-ad_methods=$(grep -c '^    fn ' packages/gui/gui_oo.dial)
+ad_refs=$(grep '^    fn ' packages/gui/src/gui_oo.dial | grep -oE 'dial_gui_[A-Za-z0-9_]+' | sort -u)
+ad_methods=$(grep -c '^    fn ' packages/gui/src/gui_oo.dial)
 ad_diag_n=$(echo "$ad_diag" | wc -l)
 ad_iface_n=$(grep -c '^extern fn' packages/gui/gui.diali)
-ad_oo_decl=$(grep -c '^extern fn' packages/gui/gui_oo.dial || true)
+ad_oo_decl=$(grep -c '^extern fn' packages/gui/src/gui_oo.dial || true)
 if [ "$ad_methods" -eq 245 ] && [ "$ad_diag_n" -eq 245 ] && [ "$ad_iface_n" -eq 246 ] \
    && [ "$ad_oo_decl" -eq 0 ] && [ "$ad_diag" = "$ad_refs" ]; then
     adpass "契约审计：245 个 impl 方法全覆盖 245 个 extern fn、gui.diali 共 246 个签名、封装层零 extern 声明（ABI 不变）"
@@ -2817,6 +2820,21 @@ else
     else
         adpass "无 DISPLAY 全绿（$(grep -c '= ok' "${TMP}/ad_nodisp.out") 条）：C 风格与 OO 风格绘制 CRC32 逐字节相等、7 类句柄方法可用、Fail-Fast 透传"
     fi
+fi
+
+# 2.5) 随包分发（§25.11 三级优先第 ② 级）：不复制 gui_oo.dial，裸名 import 直接
+#      命中包缓存 src/gui_oo.dial；输出必须与「本地副本版」逐字节一致。
+AD_PKG_DIR="${TMP}/ad_pkg"
+mkdir -p "$AD_PKG_DIR"
+cp tests/oo/use_gui_oo.dial "$AD_PKG_DIR/"
+if ! "$DIALC" build "$AD_PKG_DIR/use_gui_oo.dial" -o "${TMP}/ad_pkg_run" >"${TMP}/ad_pkg_build.log" 2>&1; then
+    adbad "随包 src/ 模块自动 import 编译失败"; tail -14 "${TMP}/ad_pkg_build.log"
+elif ! env -u DISPLAY "${TMP}/ad_pkg_run" >"${TMP}/ad_pkg_nodisp.out" 2>&1; then
+    adbad "随包 src/ 版本无 DISPLAY 运行非零退出"; tail -14 "${TMP}/ad_pkg_nodisp.out"
+elif ! diff -u "${TMP}/ad_nodisp.out" "${TMP}/ad_pkg_nodisp.out" >"${TMP}/ad_pkg_diff.txt" 2>&1; then
+    adbad "随包 src/ 版本与本地副本版输出不一致"; sed 's/^/       /' "${TMP}/ad_pkg_diff.txt" | head -14
+else
+    adpass "装包即用：不复制 gui_oo.dial，裸名 import 命中包内 src/，输出与本地副本逐字节一致（$(grep -c '= ok' "${TMP}/ad_pkg_nodisp.out") 条）"
 fi
 
 # 3) Xvfb 真实窗口：顶栏 / 弹窗 / 对话框 / 控件树全走方法，信号队列与 AA 组逐项对齐。

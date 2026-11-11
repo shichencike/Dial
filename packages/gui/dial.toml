@@ -17,3 +17,10 @@ license = "MIT OR Apache-2.0"
 x86_64-linux-gnu = "lib/x86_64-linux-gnu/libgui.a"
 aarch64-unknown-linux-musl = "lib/aarch64-unknown-linux-musl/libgui.a"
 x86_64-pc-windows-gnu = "lib/x86_64-pc-windows-gnu/libgui.a"
+
+# [src] 段：随包分发的 Dial 源码模块（第 8 层 OO 封装层，见 README §25.11 / §38.14）。
+# 键 = import 裸名；值必须位于 src/ 下且以 .dial 结尾；装包后可直接
+#     import "gui_oo";
+# 无需再把源码复制到用户项目目录。
+[src]
+gui_oo = "src/gui_oo.dial"
