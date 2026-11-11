@@ -29,7 +29,9 @@ static GuiFontImpl g_builtin_font;
 
 /* 菜单项左/右内边距（像素），文本左右各留一半。*/
 #define MENU_PAD   8
-#define POPUP_ROW  20   /* 弹出菜单每行高度 */
+/* 弹出菜单每行高度：复用头文件共享常量 GUI_MENU_ROW_H（第 7 层 popup 与
+ * 第 10 层上下文菜单行高必须逐像素一致，故只留一处真相源）。*/
+#define POPUP_ROW  GUI_MENU_ROW_H
 #define DIALOG_PAD 16   /* 对话框内边距 */
 
 /* ====================================================================== *
@@ -124,8 +126,9 @@ static int menu_bar_item_w(const GuiMenuItem *it) {
     int w = tw + MENU_PAD * 2;
     return w < 24 ? 24 : w;
 }
-/* 弹出菜单宽度：取最长项 + 两侧内边距，下限 120。*/
-static int menu_popup_w(GuiMenu *m) {
+/* 弹出菜单宽度：取最长项 + 两侧内边距，下限 120。
+ * 第 10 层上下文菜单复用本宽度口径，故为非 static（内部 C API，不进 .diali）。*/
+int gui_menu_popup_w(GuiMenu *m) {
     int maxw = 120;
     for (GuiMenuItem *it = m->first; it; it = it->next) {
         if (it->sep) continue;
@@ -153,7 +156,7 @@ static int bar_hit(GuiMenu *m, int win_w, int x, int y) {
 /* 弹出菜单第 idx 项下标命中：竖排，从 (px,py) 起，行高 POPUP_ROW。*/
 static int popup_hit(GuiMenu *m, int px, int py, int x, int y) {
     if (!m) return -1;
-    int w = menu_popup_w(m);
+    int w = gui_menu_popup_w(m);
     int rh = m->count * POPUP_ROW;
     if (x < px || x >= px + w || y < py || y >= py + rh) return -1;
     int row = (y - py) / POPUP_ROW;
@@ -186,7 +189,7 @@ void gui_menu_draw_bar(GuiPainterImpl *p, GuiMenu *m, int w) {
 
 void gui_menu_draw_popup(GuiPainterImpl *p, GuiMenu *m, int px, int py) {
     if (!p || !m) return;
-    int w = menu_popup_w(m);
+    int w = gui_menu_popup_w(m);
     int h = m->count * POPUP_ROW;
     gui_raster_fill_rect(p, px, py, w, h, gui_theme_color(GUI_THEME_ROLE_CHECK_BG));
     int i = 0;

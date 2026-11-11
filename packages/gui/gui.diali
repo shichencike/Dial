@@ -837,3 +837,73 @@ extern fn dial_gui_scroll_set_bar_size(s: GuiScroll, sz: int): int;
 /// 否则返回 0（不绘制）。空句柄返回 -1。p 为窗口画布。
 extern fn dial_gui_scroll_draw_bar(p: GuiPainter, s: GuiScroll, which: int): int;
 
+// ---- 第 10 层：右键上下文菜单（本段 15 个追加 extern fn）-------------------
+//
+// 立场：与前九层完全一致 —— 纯 C、零平台符号、绝不 C → Dial 反向回调、
+// 只追加 extern fn。上下文菜单是**纯内存对象**（不挂窗），可在无 DISPLAY
+// 环境单元测试。
+//
+// 复用第 7 层菜单：本层**不新增菜单类型**，只借用一份 GuiMenu，菜单项的增删 /
+// 禁用 / tag 全部走第 7 层 API（dial_gui_menu_*），零重复实现。
+//
+// 所有权：GuiContext **借用**菜单 —— set_menu 不转移所有权、context_free 也不
+//         释放菜单；菜单的生死仍由应用侧掌控。上下文菜单自身用 context_free
+//         释放。
+//
+// 状态推进：打开 / 命中 / 悬停 / 选中全是纯值，由应用主动推进（与第 9 层滚动
+//         视图同构）：本层**绝不自动捕获鼠标事件**，绝不代替应用判断该不该弹。
+//         典型用法：应用收到右键（button=3）事件后调 context_open(x, y)，
+//         绘制时调 context_draw，鼠标移动调 context_hover，左键点击调
+//         context_select（命中则返回菜单项 id 并自动收起）。
+
+/// 上下文菜单类型（不透明）。一个上下文菜单 = 一份借用菜单 + 一个弹出锚点。
+type GuiContext;
+
+/// 新建空上下文菜单（未绑定菜单、未展开）。失败返回空句柄。
+/// 用完须 dial_gui_context_free。
+extern fn dial_gui_context_new(): GuiContext;
+
+/// 释放上下文菜单（**不释放**它借用的 GuiMenu，菜单仍归调用方）。
+/// 返回 0 / -1。
+extern fn dial_gui_context_free(c: GuiContext): int;
+
+/// 绑定菜单（**借用**，不转移所有权；重复绑定不释放旧菜单）。返回 0 / -1。
+extern fn dial_gui_context_set_menu(c: GuiContext, m: GuiMenu): int;
+
+/// 读回当前绑定的菜单（未绑定返回空句柄）。
+extern fn dial_gui_context_menu(c: GuiContext): GuiMenu;
+
+/// 设置 / 读取用户 tag（64 位，可 round-trip，与 GuiScroll.tag 同宽）。
+extern fn dial_gui_context_set_tag(c: GuiContext, tag: int): int;
+extern fn dial_gui_context_tag(c: GuiContext): int;
+
+/// 在锚点 (x, y) 展开上下文菜单（窗口内坐标）。须已绑定菜单，否则返回 -1
+/// （Fail-Fast）。重复展开会重置悬停态。返回 0 / -1。
+extern fn dial_gui_context_open(c: GuiContext, x: int, y: int): int;
+
+/// 收起上下文菜单（保留绑定与锚点）。返回 0 / -1。
+extern fn dial_gui_context_close(c: GuiContext): int;
+
+/// 是否已展开。空句柄返回 0。
+extern fn dial_gui_context_is_open(c: GuiContext): int;
+
+/// 读取弹出锚点 x / y（未展开也保留上次值）。空句柄返回 -1。
+extern fn dial_gui_context_anchor_x(c: GuiContext): int;
+extern fn dial_gui_context_anchor_y(c: GuiContext): int;
+
+/// 命中测试：返回命中的**行号**（0 起，与绘制行序一致）；未命中 / 分隔符 /
+/// 禁用项统一返回 -1。未展开时恒为 -1。
+extern fn dial_gui_context_hit(c: GuiContext, x: int, y: int): int;
+
+/// 推进悬停态并返回命中行号（同 hit 的返回口径）；未命中时置为无悬停。
+/// 绘制时该行会高亮。返回行号 / -1。
+extern fn dial_gui_context_hover(c: GuiContext, x: int, y: int): int;
+
+/// 点击选中：命中可选项时返回该菜单项的 id 并**自动收起**；未命中返回 -1
+/// 且**保持展开**（由应用决定去留）。
+extern fn dial_gui_context_select(c: GuiContext, x: int, y: int): int;
+
+/// 绘制上下文菜单（复用第 7 层弹出菜单外观：主题底色 + 悬停高亮 + 边框）。
+/// 未展开则不绘制（返回 0）。p 为窗口画布。返回 0 / -1。
+extern fn dial_gui_context_draw(p: GuiPainter, c: GuiContext): int;
+

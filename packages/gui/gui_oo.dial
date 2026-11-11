@@ -15,7 +15,8 @@
 // 剩余部分；第一个形参是 7 个句柄之一时挂到该类型并降为 self，否则归到
 // GuiApp 作命名空间（self 被忽略，语义仍是进程级全局状态 / 工厂）。
 // 两处为绕开保留字改名：widget_select -> select_range（select 是关键字）、
-// menu_add_item 的形参 label -> txt（label 是关键字）。
+// menu_add_item 的形参 label -> txt（label 是关键字）；第 10 层 context 的
+// select -> select_item（select 是关键字）。
 //
 // 现役边界（如实标注，不夸大）：
 //   - B1 不支持关联函数，故 app 自身仍用 dial_gui_app_new()；工厂以
@@ -25,7 +26,8 @@
 //     也不重新声明 extern fn dial_gui_*（会与 .diali 契约撞名被 Fail-Fast 拒绝）。
 //   - LSP 当前不递归本地源码模块（v1.04 既有局限），CLI build/run/check/test 不受影响。
 //
-// 覆盖：154 个 extern fn -> 153 个方法 + 1 个入口 dial_gui_app_new。
+// 覆盖：184 个 extern fn -> 183 个方法 + 1 个入口 dial_gui_app_new。
+// （第 8 层 153 + 第 9 层 15 + 第 10 层 15 = 183 个方法）
 
 import "gui";
 
@@ -231,4 +233,26 @@ impl GuiScroll {
     fn drag(self, x: int, y: int, which: int): int { return dial_gui_scroll_drag(self, x, y, which); }
     fn set_bar_size(self, sz: int): int { return dial_gui_scroll_set_bar_size(self, sz); }
     fn draw_bar(self, p: GuiPainter, which: int): int { return dial_gui_scroll_draw_bar(p, self, which); }
+}
+
+// ===== 第 10 层：右键上下文菜单 GuiContext（工厂在 GuiApp）=====
+impl GuiApp {
+    // 新建空上下文菜单（未绑定菜单、未展开）
+    fn context_new(self): GuiContext { return dial_gui_context_new(); }
+}
+impl GuiContext {
+    fn free(self): int { return dial_gui_context_free(self); }
+    fn set_menu(self, m: GuiMenu): int { return dial_gui_context_set_menu(self, m); }
+    fn menu(self): GuiMenu { return dial_gui_context_menu(self); }
+    fn set_tag(self, tag: int): int { return dial_gui_context_set_tag(self, tag); }
+    fn tag(self): int { return dial_gui_context_tag(self); }
+    fn open(self, x: int, y: int): int { return dial_gui_context_open(self, x, y); }
+    fn close(self): int { return dial_gui_context_close(self); }
+    fn is_open(self): int { return dial_gui_context_is_open(self); }
+    fn anchor_x(self): int { return dial_gui_context_anchor_x(self); }
+    fn anchor_y(self): int { return dial_gui_context_anchor_y(self); }
+    fn hit(self, x: int, y: int): int { return dial_gui_context_hit(self, x, y); }
+    fn hover(self, x: int, y: int): int { return dial_gui_context_hover(self, x, y); }
+    fn select_item(self, x: int, y: int): int { return dial_gui_context_select(self, x, y); }
+    fn draw(self, p: GuiPainter): int { return dial_gui_context_draw(p, self); }
 }

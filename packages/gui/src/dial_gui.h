@@ -102,6 +102,8 @@ typedef struct GuiMenuItem    GuiMenuItem;
 typedef struct GuiMenu        GuiMenu;
 typedef struct GuiScroll       GuiScroll;
 typedef struct GuiDialog      GuiDialog;
+/* 第 10 层：右键上下文菜单（借用第 7 层 GuiMenu，纯内存对象）。*/
+typedef struct GuiContext     GuiContext;
 
 typedef struct GuiBackend GuiBackend;
 
@@ -499,6 +501,9 @@ int64_t        gui_signal_dropped(GuiWidgetImpl *root);   /* 累计丢弃数 */
  * 复用 root 控件树的信号队列（GuiWidgetSignal），kind 标记 MENU / DIALOG。
  * 覆盖层不参与控件树布局，因此控件几何 / painter CRC 逐字节不漂移。 */
 #define GUI_MENU_BAR_H  22   /* 顶栏 / 弹出菜单行高（像素）*/
+/* 弹出菜单 / 上下文菜单的**行高**（像素）：第 7 层 popup 与第 10 层上下文菜单
+ * 共用同一常量，故两者行几何逐像素一致。*/
+#define GUI_MENU_ROW_H  20
 
 struct GuiMenuItem {
     int64_t id;            /* 菜单项 id（纯值键；SELECTED 信号的 a）*/
@@ -533,6 +538,21 @@ struct GuiScroll {
     int  x_enabled, y_enabled;     /* 横 / 纵是否启用 */
     int  bar_size;                 /* 滚动条厚度，默认 10 */
     int64_t tag;                   /* 用户 tag（全宽，可 round-trip）*/
+};
+
+/*
+ * 第 10 层：右键上下文菜单（GuiContext，纯内存对象，无窗口）。
+ *
+ * **借用**一份第 7 层 GuiMenu（set_menu 不转移所有权、free 也不释放菜单），
+ * 菜单项的增删 / 禁用 / tag 全部走第 7 层 API，本层零重复实现。
+ * 本层只管：弹出锚点、展开状态、命中 / 悬停 / 选中、绘制。
+ */
+struct GuiContext {
+    GuiMenu *menu;       /* 借用的第 7 层菜单（不拥有）*/
+    int  x, y;           /* 弹出锚点（窗口内坐标）*/
+    int  open;           /* 是否展开 */
+    int  hover;          /* 悬停行号（-1 无；与绘制行序一致）*/
+    int64_t tag;         /* 用户 tag（全宽，可 round-trip）*/
 };
 
 /* 菜单项增删 / 访问（纯内存，无窗口；可在无 DISPLAY 环境单元测试）*/
@@ -584,5 +604,26 @@ int64_t    dial_gui_scroll_draw_bar(GuiPainterImpl *p, GuiScroll *s, int which);
 void gui_menu_draw_bar(GuiPainterImpl *p, GuiMenu *m, int w);
 void gui_menu_draw_popup(GuiPainterImpl *p, GuiMenu *m, int px, int py);
 void gui_dialog_draw(GuiPainterImpl *p, GuiDialog *d, int win_w, int win_h);
+/* 弹出菜单宽度（第 7 层 popup 与第 10 层上下文菜单共用同一口径）。*/
+int  gui_menu_popup_w(GuiMenu *m);
+
+/* 第 10 层：右键上下文菜单（dial_gui_context.c，纯 C，三平台共用，无平台符号）。
+ * 纯几何 + 纯值状态：借用第 7 层 GuiMenu，锚点 / 展开 / 命中 / 悬停 / 选中
+ * 全部由应用主动推进，绝不自动捕获鼠标事件、绝不反向回调。*/
+GuiContext *dial_gui_context_new(void);
+int64_t     dial_gui_context_free(GuiContext *c);
+int64_t     dial_gui_context_set_menu(GuiContext *c, GuiMenu *m);
+GuiMenu    *dial_gui_context_menu(GuiContext *c);
+int64_t     dial_gui_context_set_tag(GuiContext *c, int64_t tag);
+int64_t     dial_gui_context_tag(GuiContext *c);
+int64_t     dial_gui_context_open(GuiContext *c, int x, int y);
+int64_t     dial_gui_context_close(GuiContext *c);
+int64_t     dial_gui_context_is_open(GuiContext *c);
+int64_t     dial_gui_context_anchor_x(GuiContext *c);
+int64_t     dial_gui_context_anchor_y(GuiContext *c);
+int64_t     dial_gui_context_hit(GuiContext *c, int x, int y);
+int64_t     dial_gui_context_hover(GuiContext *c, int x, int y);
+int64_t     dial_gui_context_select(GuiContext *c, int x, int y);
+int64_t     dial_gui_context_draw(GuiPainterImpl *p, GuiContext *c);
 
 #endif /* DIAL_GUI_H */

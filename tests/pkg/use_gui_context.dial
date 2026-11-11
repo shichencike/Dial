@@ -1,0 +1,134 @@
+// gui.dialpkg 第 10 层：右键上下文菜单端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 立场与第 7 层菜单 / 第 9 层滚动视图一致：绝不注册回调；上下文菜单是纯内存
+// 对象，锚点 / 展开 / 命中 / 悬停 / 选中全是纯值，由 Dial 侧主动推进。本用例
+// 只用纯内存对象 + 离屏画布，零 DISPLAY 依赖，任何环境都可跑（含 CI）。
+//
+// 关键事实（防漂移）：本层**借用**第 7 层 GuiMenu，菜单项增删走第 7 层 API；
+// 命中行序与绘制行序**严格一致**（同为菜单链表序：头插，故自上而下依次是
+// 「最后 add 的项」在前）。context_free 不释放借用的菜单。
+//
+// 语言宪法 §37.1：禁止文件级 var 全局可变状态。本用例只用局部变量与纯函数。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+fn main(): int {
+    // ============ A) 上下文菜单对象逻辑（纯内存，无 DISPLAY 可跑）===========
+    var c: GuiContext = dial_gui_context_new();
+    expect(!is_null(c), "context_new");
+    // 未绑定菜单时 open 必须 Fail-Fast（-1），且不改变展开态
+    expect_int(dial_gui_context_open(c, 10, 20), -1, "context_open_without_menu_rejected");
+    expect_int(dial_gui_context_is_open(c), 0, "context_not_open_after_reject");
+    // 绑定一份第 7 层菜单（借用，不转移所有权）
+    var m: GuiMenu = dial_gui_menu_new();
+    expect(!is_null(m), "context_menu_new");
+    expect_int(dial_gui_menu_add_item(m, 11, "Cut"), 0, "context_add_cut");
+    expect_int(dial_gui_menu_add_item(m, 22, "Copy"), 0, "context_add_copy");
+    expect_int(dial_gui_menu_add_sep(m), 0, "context_add_sep");
+    expect_int(dial_gui_menu_add_item(m, 33, "Paste"), 0, "context_add_paste");
+    expect_int(dial_gui_context_set_menu(c, m), 0, "context_set_menu");
+    // 读回绑定的是同一份菜单：opaque 句柄不支持 == 比较，故以对象内可观测状态
+    // （tag + 项数）间接验证同一性
+    dial_gui_menu_set_tag(m, 4242);
+    var mb: GuiMenu = dial_gui_context_menu(c);
+    expect(!is_null(mb), "context_menu_readback");
+    expect_int(dial_gui_menu_tag(mb), 4242, "context_menu_same_object");
+    expect_int(dial_gui_menu_count(mb), 4, "context_menu_readback_count");
+    // 空句柄 Fail-Fast：未绑定时 menu() 返回空句柄，用它测 set_menu 的空句柄拒绝
+    var cu: GuiContext = dial_gui_context_new();
+    var mn: GuiMenu = dial_gui_context_menu(cu);
+    expect(is_null(mn), "context_menu_unbound_null");
+    expect_int(dial_gui_context_set_menu(c, mn), -1, "context_set_null_menu_rejected");
+    expect_int(dial_gui_context_free(cu), 0, "context_free_unbound");
+
+    // 展开：锚点 (100, 50)
+    expect_int(dial_gui_context_open(c, 100, 50), 0, "context_open");
+    expect_int(dial_gui_context_is_open(c), 1, "context_is_open");
+    expect_int(dial_gui_context_anchor_x(c), 100, "context_anchor_x");
+    expect_int(dial_gui_context_anchor_y(c), 50, "context_anchor_y");
+    // 菜单共 4 行（Cut / Copy / 分隔符 / Paste），行高 20px
+    // 命中行序 = 绘制行序 = 链表序（头插：自上而下为最后 add 的项在前）
+    //   行 0 = Paste(33) / 行 1 = 分隔符 / 行 2 = Copy(22) / 行 3 = Cut(11)
+    expect_int(dial_gui_context_hit(c, 105, 55), 0, "context_hit_row0");
+    expect_int(dial_gui_context_hit(c, 105, 95), 2, "context_hit_row2");
+    expect_int(dial_gui_context_hit(c, 105, 115), 3, "context_hit_row3");
+    // 分隔符行不可命中 -> -1
+    expect_int(dial_gui_context_hit(c, 105, 75), -1, "context_hit_sep_rejected");
+    // 菜单区域外不可命中 -> -1
+    expect_int(dial_gui_context_hit(c, 5, 55), -1, "context_hit_outside");
+    expect_int(dial_gui_context_hit(c, 105, 5), -1, "context_hit_above");
+
+    // 悬停：命中则推进并返回行号；未命中则置无悬停
+    expect_int(dial_gui_context_hover(c, 105, 95), 2, "context_hover_hit");
+    expect_int(dial_gui_context_hover(c, 5, 5), -1, "context_hover_miss");
+
+    // 选中：命中可选行 -> 返回菜单项 id 并自动收起
+    expect_int(dial_gui_context_select(c, 105, 55), 33, "context_select_row0_id");
+    expect_int(dial_gui_context_is_open(c), 0, "context_closed_after_select");
+    // 未命中 -> -1 且保持展开
+    expect_int(dial_gui_context_open(c, 100, 50), 0, "context_reopen");
+    expect_int(dial_gui_context_select(c, 5, 5), -1, "context_select_miss");
+    expect_int(dial_gui_context_is_open(c), 1, "context_stays_open_after_miss");
+    // 分隔符行选中 -> -1 且保持展开
+    expect_int(dial_gui_context_select(c, 105, 75), -1, "context_select_sep_rejected");
+    expect_int(dial_gui_context_is_open(c), 1, "context_stays_open_after_sep");
+    // 显式收起
+    expect_int(dial_gui_context_close(c), 0, "context_close");
+    expect_int(dial_gui_context_is_open(c), 0, "context_not_open_after_close");
+    // 收起态下命中恒为 -1
+    expect_int(dial_gui_context_hit(c, 105, 55), -1, "context_hit_when_closed");
+
+    // tag 64 位全宽 round-trip（与 GuiScroll.tag 同宽）
+    expect_int(dial_gui_context_set_tag(c, 987654321), 0, "context_set_tag");
+    expect_int(dial_gui_context_tag(c), 987654321, "context_tag_roundtrip");
+
+    // 释放上下文菜单（**不释放**借用的菜单，菜单仍归调用方）
+    expect_int(dial_gui_context_free(c), 0, "context_free");
+    // 菜单仍可用（借用语义的关键断言：free 不带走菜单）
+    expect_int(dial_gui_menu_count(m), 4, "context_menu_survives_free");
+    expect_int(dial_gui_menu_free(m), 0, "context_menu_free");
+
+    // ============ B) 离屏画布绘制（零 DISPLAY，靠 CRC32 像素级锁定）===========
+    var c2: GuiContext = dial_gui_context_new();
+    var m2: GuiMenu = dial_gui_menu_new();
+    dial_gui_menu_add_item(m2, 1, "Cut");
+    dial_gui_menu_add_item(m2, 2, "Copy");
+    dial_gui_context_set_menu(c2, m2);
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 120);
+    expect(!is_null(p), "context_painter");
+    // 未展开时不绘制（返回 0），画布保持空白
+    expect_int(dial_gui_context_draw(p, c2), 0, "context_draw_when_closed");
+    var crc0: int = dial_gui_painter_crc32(p);
+    // 展开后绘制：复用第 7 层弹出菜单外观
+    expect_int(dial_gui_context_open(c2, 10, 10), 0, "context_open2");
+    expect_int(dial_gui_context_draw(p, c2), 0, "context_draw");
+    var c3: int = dial_gui_painter_crc32(p);
+    expect(c3 != 0, "context_crc_nonzero");
+    expect(crc0 != c3, "context_crc_changed_after_draw");
+    // 重绘幂等：CRC32 必须逐字节稳定
+    expect_int(dial_gui_context_draw(p, c2), 0, "context_draw_again");
+    var c4: int = dial_gui_painter_crc32(p);
+    expect_int(c3, c4, "context_crc_stable");
+    // 悬停态改变高亮 -> 像素随之改变
+    expect_int(dial_gui_context_hover(c2, 15, 15), 0, "context_hover_draw");
+    expect_int(dial_gui_context_draw(p, c2), 0, "context_draw_hover");
+    var c5: int = dial_gui_painter_crc32(p);
+    expect(c5 != c4, "context_crc_changed_on_hover");
+    // 画布与对象释放
+    expect_int(dial_gui_painter_free(p), 0, "context_painter_free");
+    expect_int(dial_gui_context_free(c2), 0, "context_free2");
+    expect_int(dial_gui_menu_free(m2), 0, "context_menu_free2");
+
+    print("context_window = ok");   // 纯内存路径，无 DISPLAY 亦 ok
+    print("context_done = true");
+    return 0;
+}
