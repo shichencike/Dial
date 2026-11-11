@@ -36,7 +36,7 @@
 </ul>
 </div>
 <h2 id="未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</h2>
-<p><strong>主题：手搓 GUI 八层（七层 C 契约 + 第 8 层 Dial 侧 OO 封装）——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
+<p><strong>主题：手搓 GUI 九层（七层 C 契约 + 第 9 层滚动视图 + 第 8 层 Dial 侧 OO 封装）——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
 + 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）
 + 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）
@@ -47,7 +47,11 @@
   ——让用户 <code>struct</code> 与包不透明句柄（<code>GuiWindow</code> / <code>GuiMenu</code> 等）挂方法，
   <code>win.draw()</code> 即 <code>dial_gui_window_draw(win)</code> 的面向对象写法，包契约一字不改；
   </strong>不新增关键字、ABI 不变、旧签名一字不动<strong>（见 README §37.12）；
-+ </strong>GUI 第 8 层：Dial 侧 OO 封装<strong>（<code>gui_oo.dial</code> 用 153 个 <code>impl</code> 方法包住 154 个
++ </strong>GUI 第 9 层：滚动视图<strong>（<code>dial_gui_scroll_*</code>，15 个 <code>extern fn</code>：视口裁剪 +
+  滚动条几何 / 命中 / 绘制 + 偏移推进 <code>wheel</code> / <code>drag</code> / <code>scroll_to</code>，越界自动夹紧
+  <code>[0, 内容-视口]</code>；纯 C、零平台符号、绝不 C → Dial 反向回调，与旧 154 个同契约、
+  <code>abi = 6</code> / <code>version = 1.10.0</code> 不变、旧签名一字不动，见 README §38.15）；
++ </strong>GUI 第 8 层：Dial 侧 OO 封装<strong>（<code>gui_oo.dial</code> 用 168 个 <code>impl</code> 方法包住 169 个
   C 风格 <code>extern fn</code>，纯 Dial 源码、不进 <code>.dialpkg</code>、零 <code>extern fn</code> 增量、ABI 不变，
   见 README §38.14）；
 并修复 <code>http.dialpkg</code> 三处 Fail-Fast / 目标平台可用性缺陷</strong>（见下文 <code>### Fixed</code>）。
@@ -73,8 +77,9 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
 本轮菜单 / 对话框覆盖层（第 7 层，24 个新 <code>extern fn</code>）再给 AA 组增 3 条断言
 （无 DISPLAY / Xvfb 各一 + 编译成功）到 <strong>538 ✅</strong>；<code>impl</code> 方法块（B1）
 新增 AC 组 5 条断言，扩为 <strong>A–Z + AA + AB + AC 二十九组 / 549 ✅</strong>；
-本轮 GUI 第 8 层 OO 封装新增 AD 组 6 条断言，扩为
-<strong>A–Z + AA + AB + AC + AD 三十组 / 555 ✅</strong>。
+本轮 GUI 第 9 层滚动视图（纯内存对象 + 离屏画布，零 DISPLAY 依赖）新增 AA 组
++1 条断言，GUI 第 8 层 OO 封装新增 AD 组 6 条断言，扩为
+<strong>A–Z + AA + AB + AC + AD 三十组 / 556 ✅</strong>。
 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>
@@ -141,9 +146,9 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
 </li>
 <li>
 <p><strong>GUI 第 8 层：Dial 侧 OO 封装层</strong>（README §38.14）：<code>packages/gui/gui_oo.dial</code>
-  用 <strong>153 个 <code>impl</code> 方法</strong>把前七层的 154 个 C 风格 <code>extern fn</code> 包成惯用写法
+  用 <strong>168 个 <code>impl</code> 方法</strong>把前七层 + 第 9 层滚动视图的 169 个 C 风格 <code>extern fn</code> 包成惯用写法
   （<code>win.draw()</code> 即 <code>dial_gui_window_draw(win)</code>），按 <code>GuiApp</code> / <code>GuiWindow</code> /
-  <code>GuiPainter</code> / <code>GuiFont</code> / <code>GuiWidget</code> / <code>GuiMenu</code> / <code>GuiDialog</code> 七个不透明句柄
+  <code>GuiPainter</code> / <code>GuiFont</code> / <code>GuiWidget</code> / <code>GuiMenu</code> / <code>GuiDialog</code> / <code>GuiScroll</code> 八个不透明句柄
   分组；<strong>纯 Dial 源码、不进 <code>.dialpkg</code>、零 <code>extern fn</code> 增量、<code>abi = 6</code> /
   <code>version = 1.10.0</code> 不变、旧 154 个签名一字不动</strong>。借 v1.04 本地源码模块机制
   交付：用户 <code>import "./gui_oo.dial";</code> 一行即生效（模块内 <code>import "gui";</code> 由前端
@@ -160,13 +165,13 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
     <code>label</code> → <code>txt</code>）；LSP 不递归本地源码模块（v1.04 既有局限），
     CLI <code>build</code> / <code>run</code> / <code>check</code> / <code>test</code> 不受影响。</li>
 <li>
-<p><strong>回归</strong>：新增 AD 组（第 30 组）6 条断言——契约审计（153 方法全覆盖 153 个
-    <code>extern fn</code> / <code>gui.diali</code> 仍 154 个签名 / 封装层零 <code>extern</code> 声明）、无 DISPLAY
+<p><strong>回归</strong>：新增 AD 组（第 30 组）6 条断言——契约审计（168 方法全覆盖 168 个
+    <code>extern fn</code> / <code>gui.diali</code> 共 169 个签名 / 封装层零 <code>extern</code> 声明）、无 DISPLAY
     87 条、Xvfb 实窗 153 条（顶栏 / 弹窗 / 对话框 / 控件树全走方法）、3 个
-    Fail-Fast 负向 + 诊断面向用户；全量 <strong>549 ✅ → 555 ✅ / 0 ❌</strong>。</p>
+    Fail-Fast 负向 + 诊断面向用户；全量 <strong>549 ✅ → 556 ✅ / 0 ❌</strong>（AA 组 +1 来自第 9 层滚动视图离屏回归）。</p>
 </li>
 <li>
-<p><strong><code>gui.dialpkg</code>：手搓 GUI 八层</strong>（README §38）：前七层不用 Qt / GTK / SDL、纯 C 自绘；
+<p><strong><code>gui.dialpkg</code>：手搓 GUI 九层</strong>（README §38）：前七层不用 Qt / GTK / SDL、纯 C 自绘；
   第 8 层是 Dial 侧 OO 封装（纯源码、不进包、零 <code>extern fn</code> 增量）。
   ① 地基层（窗 + 事件 + 绘图 + 字体，55 个 <code>extern fn</code>）；
   ② 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发，
@@ -179,9 +184,11 @@ B 组 5 条零隐式转换负向，扩为 <strong>A–Z + AA + AB 二十八组 /
   ⑦ <strong>菜单 / 对话框覆盖层</strong>（窗口级顶栏菜单 + 弹出菜单 + 模态对话框，复用第 6 层
   纯值信号队列：<code>SELECTED</code> / <code>SUBMITTED</code> 两类信号 + <code>dial_gui_menu_*</code> /
   <code>dial_gui_dialog_*</code> / <code>dial_gui_window_*</code> 统一分发，24 个，见下）；
-  ⑧ <strong>Dial 侧 OO 封装层</strong>（<code>gui_oo.dial</code>：153 个 <code>impl</code> 方法覆盖上述 154 个函数，
+  ⑧ <strong>Dial 侧 OO 封装层</strong>（<code>gui_oo.dial</code>：168 个 <code>impl</code> 方法覆盖上述 169 个函数，
   纯 Dial 源码、不进 <code>.dialpkg</code>、零 <code>extern fn</code> 增量，见 README §38.14）。
-  前七层共 <strong>154 个 <code>extern fn</code></strong>；第 8 层不新增任何 <code>extern fn</code>。<strong>多行文本（IME） / 撤销重做 / 每控件主题覆写 /
+  ⑨ <strong>滚动视图层</strong>（<code>dial_gui_scroll_*</code>：视口裁剪 + 滚动条几何 / 命中 / 绘制 +
+  偏移推进 <code>wheel</code> / <code>drag</code> / <code>scroll_to</code>，15 个 <code>extern fn</code>，见 README §38.15）。
+  九层共 <strong>169 个 <code>extern fn</code></strong>；第 8 层不新增任何 <code>extern fn</code>。<strong>多行文本（IME） / 撤销重做 / 每控件主题覆写 /
   图片解码 / C→Dial 反向回调仍不进 <code>.diali</code> 契约</strong>——把未实现函数写进契约会让
   用户 <code>import</code> 后链接失败，那是制造漂移而非预留接口（菜单 / 对话框覆盖层已由第 7 层
   以<strong>纯值信号队列</strong>落地，<strong>不是</strong> C → Dial 回调）。</p>
