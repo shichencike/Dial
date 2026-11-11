@@ -100,6 +100,7 @@ typedef struct GuiSignalQueue GuiSignalQueue;
 /* 第 7 层：菜单 / 对话框覆盖层（纯 C，三平台共用，无平台符号）。 */
 typedef struct GuiMenuItem    GuiMenuItem;
 typedef struct GuiMenu        GuiMenu;
+typedef struct GuiScroll       GuiScroll;
 typedef struct GuiDialog      GuiDialog;
 
 typedef struct GuiBackend GuiBackend;
@@ -210,6 +211,7 @@ struct GuiWindowImpl {
     int           popup_x, popup_y;   /* 弹出菜单锚点（窗口内坐标）*/
     int           menubar_h;   /* 顶栏高度（固定，默认 22）*/
     GuiDialog    *dialog;      /* 当前模态对话框覆盖层（可空）*/
+    GuiScroll    *scroll;      /* 第 9 层：主滚动视图覆盖层（可空，窗口拥有）*/
 };
 
 struct GuiAppImpl {
@@ -524,6 +526,16 @@ struct GuiDialog {
     int64_t tag, userdata;
 };
 
+struct GuiScroll {
+    int  vp_x, vp_y, vp_w, vp_h;   /* 视口矩形（窗口内坐标，含滚动条占用）*/
+    int  content_w, content_h;     /* 内容总尺寸 */
+    int  off_x, off_y;             /* 当前偏移（已夹紧）*/
+    int  x_enabled, y_enabled;     /* 横 / 纵是否启用 */
+    int  bar_size;                 /* 滚动条厚度，默认 10 */
+    int8_t  tag;
+    int64_t userdata;
+};
+
 /* 菜单项增删 / 访问（纯内存，无窗口；可在无 DISPLAY 环境单元测试）*/
 GuiMenu  *gui_menu_new(void);
 void      gui_menu_free(GuiMenu *m);
@@ -549,6 +561,25 @@ int        gui_dialog_open(GuiDialog *d);
  * 仅在 win->root 已 set_root 时才产生信号（选中进 root 树队列）。*/
 int  gui_window_draw(GuiWindowImpl *win);
 int  gui_window_handle(GuiWindowImpl *win, int kind, int x, int y, int button);
+
+/* 第 9 层：滚动视图（dial_gui_scroll.c，窗口级辅助覆盖层）。
+ * 纯几何 + 绘制：视口裁剪走 dial_gui_set_clip，滚动条走 gui_raster_*，
+ * 零平台符号、绝不反向回调；偏移是纯值，由应用主动 scroll_to / wheel / drag 推进。*/
+GuiScroll *gui_scroll_new(void);
+void       gui_scroll_free(GuiScroll *s);
+int        gui_scroll_set_viewport(GuiScroll *s, int x, int y, int w, int h);
+int        gui_scroll_set_content(GuiScroll *s, int w, int h);
+int        gui_scroll_enable(GuiScroll *s, int which, int on);   /* which: 0 横 / 1 纵 / 2 两者 */
+int        gui_scroll_set_tag(GuiScroll *s, int64_t tag);
+int64_t    gui_scroll_tag(GuiScroll *s);
+int        gui_scroll_offset_x(GuiScroll *s);
+int        gui_scroll_offset_y(GuiScroll *s);
+int        gui_scroll_scroll_to(GuiScroll *s, int x, int y);    /* 越界夹紧 */
+int        gui_scroll_wheel(GuiScroll *s, int dy);              /* 滚轮：dy>0 下滚，返回新 off_y */
+int        gui_scroll_hit(GuiScroll *s, int x, int y, int which); /* 0 未命中 / 1 滑块 / 2 轨道 */
+int        gui_scroll_drag(GuiScroll *s, int x, int y, int which); /* 拖拽推进，返回新 off_y */
+int        gui_scroll_set_bar_size(GuiScroll *s, int sz);
+int        gui_scroll_draw_bar(GuiPainterImpl *p, GuiScroll *s, int which);
 
 /* 覆盖层几何 / 命中 / 绘制（dial_gui_menu.c 内部，供 gui_window_* 调用）*/
 void gui_menu_draw_bar(GuiPainterImpl *p, GuiMenu *m, int w);

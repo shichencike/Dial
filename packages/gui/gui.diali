@@ -40,7 +40,8 @@
 // +5 LEFT +6 UP +7 RIGHT +8 DOWN +9 HOME +10 END +11 PAGEUP +12 PAGEDOWN
 // +13 DELETE +14 SHIFT +15 CONTROL +16 ALT +17..+28 F1..F12 +63 UNKNOWN。
 //
-// 已实现范围（七层，全部有真实现，不是预留接口；共 154 个 extern fn）：
+// 已实现范围（C 侧七层框架 + 第 9 层滚动视图，共 169 个 extern fn；第 8 层是
+//   Dial 侧 OO 封装 gui_oo.dial，纯源码复用下列 extern fn，不在此契约）：
 //   1) 地基层：Application / Window / Painter / Event / Font（55 个函数）；
 //   2) 控件框架层：GuiWidget 树 + 绝对 / VBox / HBox 布局 + 命中测试 +
 //      主动事件分发（28 个函数）；
@@ -767,3 +768,72 @@ extern fn dial_gui_window_draw(win: GuiWindow): int;
 /// （1 PRESS / 2 RELEASE / 3 MOUSE_MOVE），x/y 客户区坐标，button 鼠标键（1 左键）。
 /// 返回 3 = 本次菜单/对话框激活 / 1 = 控件激活 / 0 = 无激活 / -1 = 参数错误。
 extern fn dial_gui_window_handle(win: GuiWindow, kind: int, x: int, y: int, button: int): int;
+
+// ---- 第 9 层：滚动视图（本段 15 个追加 extern fn）-----------------------
+//
+// 立场：与前七层 / 第 7 层菜单对话框完全一致 —— 纯 C、零平台符号、绝不 C → Dial
+// 反向回调、只追加 extern fn。滚动视图是**窗口级辅助覆盖层**（挂在 GuiWindow
+// 上，不进控件树），让内容大于视口的控件树可滚动浏览。
+//
+// 关键事实（防漂移）：
+//   - 视口裁剪由调用方在绘制时按 off_x/off_y 平移内容并 dial_gui_set_clip
+//     （本层不碰 painter）；滚动条绘制走 gui_raster_*，几何 / 绘制 CRC 逐字节不漂移。
+//   - 偏移是纯值：由 Dial 侧主动 scroll_to / wheel / drag 推进，再用
+//     offset_x / offset_y 读回；越界自动夹紧到 [0, 内容-视口]。
+//   - which 约定：0 = 水平滚动条，1 = 垂直滚动条（与 enable 的掩码位一致）。
+//   - 命中（hit）返回 0 未命中 / 1 命中滑块 / 2 命中轨道；应用据返回值管理拖拽
+//     flag，拖拽中每帧调 drag(x, y, which) 让滑块中心跟随鼠标（纯几何换算）。
+//   - 所有权：未挂窗的纯内存对象用 scroll_free 释放，可在无 DISPLAY 环境单元测试；
+//     挂窗对象由窗口关闭时一并释放，调用方不要再 free。
+
+// ---- 滚动视图对象（GuiScroll，纯内存对象，无窗口）----------------------
+
+/// 滚动视图类型（不透明）。一个滚动视图绑定一个视口 + 一块内容，维护偏移。
+type GuiScroll;
+
+/// 新建空滚动视图（视口 / 内容均为 0，偏移 0，bar_size=10）。失败返回空句柄。
+/// 用完若未挂窗须 dial_gui_scroll_free。
+extern fn dial_gui_scroll_new(): GuiScroll;
+
+/// 释放滚动视图（纯内存对象）。已挂窗的对象由窗口关闭时一并释放，不要再 free。
+extern fn dial_gui_scroll_free(s: GuiScroll): int;
+
+/// 设置视口矩形（窗口内坐标 + 尺寸，尺寸须为正）。返回 0 / -1（Fail-Fast）。
+extern fn dial_gui_scroll_set_viewport(s: GuiScroll, x: int, y: int, w: int, h: int): int;
+
+/// 设置内容总尺寸（须为正）。返回 0 / -1（Fail-Fast）。
+extern fn dial_gui_scroll_set_content(s: GuiScroll, w: int, h: int): int;
+
+/// 启用 / 禁用某方向滚动：which 0=水平 / 1=垂直 / 2=两者，on 非 0 即启用。
+/// 返回 0 / -1（Fail-Fast 越界）。
+extern fn dial_gui_scroll_enable(s: GuiScroll, which: int, on: int): int;
+
+/// 设置 / 读取用户 tag（8 位，超界截断）。
+extern fn dial_gui_scroll_set_tag(s: GuiScroll, tag: int64): int;
+extern fn dial_gui_scroll_tag(s: GuiScroll): int64;
+
+/// 读取当前偏移（已夹紧）。空句柄返回 0。
+extern fn dial_gui_scroll_offset_x(s: GuiScroll): int;
+extern fn dial_gui_scroll_offset_y(s: GuiScroll): int;
+
+/// 直接设置偏移（越界夹紧到 [0, 内容-视口]）。返回 0 / -1。
+extern fn dial_gui_scroll_scroll_to(s: GuiScroll, x: int, y: int): int;
+
+/// 滚轮推进（dy>0 向下滚）。返回新的 off_y（已夹紧）。空句柄返回 0。
+extern fn dial_gui_scroll_wheel(s: GuiScroll, dy: int): int;
+
+/// 命中测试：which 0=水平 / 1=垂直。返回 0 未命中 / 1 命中滑块 / 2 命中轨道
+/// （须该方向已启用且内容大于视口，否则直接 0）。
+extern fn dial_gui_scroll_hit(s: GuiScroll, x: int, y: int, which: int): int;
+
+/// 拖拽推进：按 (x, y) 让 which 方向滑块中心跟随鼠标（纯几何换算，越界夹紧）。
+/// 返回新的 off_y（which=1）/ off_x（which=0）。空句柄或 which 越界返回当前值。
+extern fn dial_gui_scroll_drag(s: GuiScroll, x: int, y: int, which: int): int;
+
+/// 设置滚动条厚度（须 >= 10）。返回 0 / -1（Fail-Fast 过小）。
+extern fn dial_gui_scroll_set_bar_size(s: GuiScroll, sz: int): int;
+
+/// 绘制某方向滚动条（轨道 + 滑块，主题色）。须该方向已启用且内容大于视口，
+/// 否则返回 0（不绘制）。空句柄返回 -1。p 为窗口画布。
+extern fn dial_gui_scroll_draw_bar(p: GuiPainter, s: GuiScroll, which: int): int;
+

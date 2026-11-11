@@ -142,9 +142,11 @@ int64_t dial_gui_app_free(GuiAppImpl *app) {
         /* 窗口拥有的控件树必须在 free(win) 之前释放，避免悬垂与二次释放。 */
         if (w->root) gui_widget_dispose_tree(w->root);
         /* 第 7 层：窗口拥有的覆盖层一并释放（菜单/对话框所有权已转移给窗口）。*/
-        if (w->menubar) gui_menu_free(w->menubar);
-        if (w->popup)   gui_menu_free(w->popup);
-        if (w->dialog)  gui_dialog_free(w->dialog);
+    if (w->menubar) gui_menu_free(w->menubar);
+    if (w->popup)   gui_menu_free(w->popup);
+    if (w->dialog)  gui_dialog_free(w->dialog);
+    if (w->scroll)  gui_scroll_free(w->scroll);
+        if (w->scroll)  gui_scroll_free(w->scroll);
         free(w);
         w = next;
     }
