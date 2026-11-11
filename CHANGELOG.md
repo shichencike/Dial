@@ -22,7 +22,7 @@
 
 ## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）
 
-**主题：手搓 GUI 十层（七层 C 契约 + 第 9/10 层滚动视图与右键上下文菜单 + 第 8 层 Dial 侧 OO 封装）——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
+**主题：手搓 GUI 十一层（七层 C 契约 + 第 9/10/11 层滚动视图·右键上下文菜单·悬浮提示 + 第 8 层 Dial 侧 OO 封装）——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
 + 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）
 + 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）
@@ -42,7 +42,12 @@
   菜单所有权、`context_free` 不释放菜单；命中行序与绘制行序严格一致；纯 C、
   零平台符号、绝不 C → Dial 反向回调，与旧 154 个同契约、`abi = 6` /
   `version = 1.10.0` 不变、旧签名一字不动，见 README §38.16）；
-+ **GUI 第 8 层：Dial 侧 OO 封装**（`gui_oo.dial` 用 183 个 `impl` 方法包住 184 个
++ **GUI 第 11 层：悬浮提示**（`dial_gui_tooltip_*`，19 个 `extern fn`：文本（C 侧
+  副本）+ 位置 + 尺寸 + 悬停计时；**延迟完全由调用方 tick(dt_ms) 推进、本层不读
+  时钟**，故三平台行为逐字节一致、可确定性单测；无文本时永不显示；纯 C、
+  零平台符号、绝不 C → Dial 反向回调，与旧 154 个同契约、`abi = 6` /
+  `version = 1.10.0` 不变、旧签名一字不动，见 README §38.17）；
++ **GUI 第 8 层：Dial 侧 OO 封装**（`gui_oo.dial` 用 202 个 `impl` 方法包住 203 个
   C 风格 `extern fn`，纯 Dial 源码、不进 `.dialpkg`、零 `extern fn` 增量、ABI 不变，
   见 README §38.14）；
 并修复 `http.dialpkg` 三处 Fail-Fast / 目标平台可用性缺陷**（见下文 `### Fixed`）。
@@ -71,9 +76,11 @@
 > 新增 AC 组 5 条断言，扩为 **A–Z + AA + AB + AC 二十九组 / 549 ✅**；
 > 上一轮 GUI 第 9 层滚动视图（纯内存对象 + 离屏画布，零 DISPLAY 依赖）给 AA 组
 > +1 条断言，GUI 第 8 层 OO 封装新增 AD 组 6 条断言，扩为
-> **A–Z + AA + AB + AC + AD 三十组 / 556 ✅**；本轮 GUI 第 10 层右键上下文菜单
-> （同为纯内存对象 + 离屏画布，零 DISPLAY 依赖）再给 AA 组 +1 条断言，扩为
-> **A–Z + AA + AB + AC + AD 三十组 / 557 ✅**。
+> **A–Z + AA + AB + AC + AD 三十组 / 556 ✅**；GUI 第 10 层右键上下文菜单
+> （同为纯内存对象 + 离屏画布，零 DISPLAY 依赖）再给 AA 组 +1 条断言到 **557 ✅**；
+> 本轮 GUI 第 11 层悬浮提示（同样是纯内存对象 + 离屏画布，零 DISPLAY 依赖）
+> 再给 AA 组 +1 条断言，扩为
+> **A–Z + AA + AB + AC + AD 三十组 / 558 ✅**。
 > 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
@@ -135,7 +142,7 @@
     **A–Z + AA + AB 二十八组 / 535 ✅ / 0 ❌**。
 
 - **GUI 第 8 层：Dial 侧 OO 封装层**（README §38.14）：`packages/gui/gui_oo.dial`
-  用 **183 个 `impl` 方法**把前七层 + 第 9/10 层滚动视图与右键上下文菜单的 184 个 C 风格 `extern fn` 包成惯用写法
+  用 **202 个 `impl` 方法**把前七层 + 第 9/10/11 层滚动视图·右键上下文菜单·悬浮提示的 203 个 C 风格 `extern fn` 包成惯用写法
   （`win.draw()` 即 `dial_gui_window_draw(win)`），按 `GuiApp` / `GuiWindow` /
   `GuiPainter` / `GuiFont` / `GuiWidget` / `GuiMenu` / `GuiDialog` / `GuiScroll` 八个不透明句柄
   分组；**纯 Dial 源码、不进 `.dialpkg`、零 `extern fn` 增量、`abi = 6` /
@@ -152,13 +159,14 @@
     作用于同一对象）；两处保留字改名（`select` → `select_range`、
     `label` → `txt`）；LSP 不递归本地源码模块（v1.04 既有局限），
     CLI `build` / `run` / `check` / `test` 不受影响。
-  - **回归**：新增 AD 组（第 30 组）6 条断言——契约审计（183 方法全覆盖 183 个
-    `extern fn` / `gui.diali` 共 184 个签名 / 封装层零 `extern` 声明）、无 DISPLAY
+  - **回归**：新增 AD 组（第 30 组）6 条断言——契约审计（202 方法全覆盖 202 个
+    `extern fn` / `gui.diali` 共 203 个签名 / 封装层零 `extern` 声明）、无 DISPLAY
     87 条、Xvfb 实窗 153 条（顶栏 / 弹窗 / 对话框 / 控件树全走方法）、3 个
     Fail-Fast 负向 + 诊断面向用户；全量 **549 ✅ → 556 ✅ / 0 ❌**（AA 组 +1 来自第 9 层滚动视图离屏回归）。
   - **第 10 层回归**：AA 组再 +1 条（第 10 层右键上下文菜单离屏回归，57 条断言全绿），全量 **556 ✅ → 557 ✅ / 0 ❌**。
+  - **第 11 层回归**：AA 组再 +1 条（第 11 层悬浮提示离屏回归，51 条断言全绿），全量 **557 ✅ → 558 ✅ / 0 ❌**。
 
-- **`gui.dialpkg`：手搓 GUI 十层**（README §38）：前七层不用 Qt / GTK / SDL、纯 C 自绘；
+- **`gui.dialpkg`：手搓 GUI 十一层**（README §38）：前七层不用 Qt / GTK / SDL、纯 C 自绘；
   第 8 层是 Dial 侧 OO 封装（纯源码、不进包、零 `extern fn` 增量）。
   ① 地基层（窗 + 事件 + 绘图 + 字体，55 个 `extern fn`）；
   ② 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中测试 / 主动事件分发，
@@ -171,13 +179,15 @@
   ⑦ **菜单 / 对话框覆盖层**（窗口级顶栏菜单 + 弹出菜单 + 模态对话框，复用第 6 层
   纯值信号队列：`SELECTED` / `SUBMITTED` 两类信号 + `dial_gui_menu_*` /
   `dial_gui_dialog_*` / `dial_gui_window_*` 统一分发，24 个，见下）；
-  ⑧ **Dial 侧 OO 封装层**（`gui_oo.dial`：183 个 `impl` 方法覆盖上述 184 个函数，
+  ⑧ **Dial 侧 OO 封装层**（`gui_oo.dial`：202 个 `impl` 方法覆盖上述 203 个函数，
   纯 Dial 源码、不进 `.dialpkg`、零 `extern fn` 增量，见 README §38.14）。
   ⑨ **滚动视图层**（`dial_gui_scroll_*`：视口裁剪 + 滚动条几何 / 命中 / 绘制 +
   偏移推进 `wheel` / `drag` / `scroll_to`，15 个 `extern fn`，见 README §38.15）。
   ⑩ **右键上下文菜单层**（`dial_gui_context_*`：复用第 7 层 `GuiMenu` + 弹出锚点 +
   命中 / 悬停 / 选中 / 绘制，借用语义不转移菜单所有权，见 §38.16）；
-  十层共 **184 个 `extern fn`**；第 8 层不新增任何 `extern fn`。**多行文本（IME） / 撤销重做 / 每控件主题覆写 /
+  ⑪ **悬浮提示层**（`dial_gui_tooltip_*`：文本 + 位置 + 尺寸 + 悬停计时，延迟由
+  调用方推进、不读时钟，见 §38.17）；
+  十一层共 **203 个 `extern fn`**；第 8 层不新增任何 `extern fn`。**多行文本（IME） / 撤销重做 / 每控件主题覆写 /
   图片解码 / C→Dial 反向回调仍不进 `.diali` 契约**——把未实现函数写进契约会让
   用户 `import` 后链接失败，那是制造漂移而非预留接口（菜单 / 对话框覆盖层已由第 7 层
   以**纯值信号队列**落地，**不是** C → Dial 回调）。
