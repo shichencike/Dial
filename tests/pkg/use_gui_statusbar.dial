@@ -1,0 +1,128 @@
+// gui.dialpkg 第 12 层：状态栏 StatusBar 端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 立场与第 9 / 10 / 11 层一致：绝不注册回调；进度值是**纯值**，由 Dial 侧主动
+// set_value 推进、越界自动夹紧，本层不读时钟、不捕获鼠标，故行为完全确定、
+// headless 可跑。
+//
+// 关键事实（防漂移）：左右文本都是 C 侧自有副本；默认高度 22、进度值域 0..100；
+// 收窄值域会同步夹紧当前进度值；状态栏贴画布底边绘制。
+//
+// 语言宪法 §37.1：禁止文件级 var 全局可变状态。本用例只用局部变量与纯函数。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+fn main(): int {
+    // ============ A) 状态栏对象逻辑（纯内存，无 DISPLAY 可跑）============
+    var sb: GuiStatusBar = dial_gui_statusbar_new();
+    expect(!is_null(sb), "statusbar_new");
+    // 默认高度 22、默认进度值域 0..100、默认无进度条槽位
+    expect_int(dial_gui_statusbar_height(sb), 22, "statusbar_default_height");
+    expect_int(dial_gui_statusbar_value_min(sb), 0, "statusbar_default_vmin");
+    expect_int(dial_gui_statusbar_value_max(sb), 100, "statusbar_default_vmax");
+    expect_int(dial_gui_statusbar_has_progress(sb), 0, "statusbar_no_progress_by_default");
+    expect_int(dial_gui_statusbar_sep(sb), 0, "statusbar_no_sep_by_default");
+    expect_int(dial_gui_statusbar_value(sb), 0, "statusbar_default_value");
+
+    // 左 / 右文本：读回一致
+    expect_int(dial_gui_statusbar_set_left(sb, "Ready"), 0, "statusbar_set_left");
+    expect_int(dial_gui_statusbar_set_right(sb, "L1  C1  0:00"), 0, "statusbar_set_right");
+    expect(string_from_cstr(dial_gui_statusbar_left(sb)) == "Ready", "statusbar_left_readback");
+    expect(string_from_cstr(dial_gui_statusbar_right(sb)) == "L1  C1  0:00", "statusbar_right_readback");
+    // 空串等价于清空该段文本
+    expect_int(dial_gui_statusbar_set_left(sb, ""), 0, "statusbar_clear_left");
+    expect(string_from_cstr(dial_gui_statusbar_left(sb)) == "", "statusbar_left_cleared");
+    expect(string_from_cstr(dial_gui_statusbar_right(sb)) == "L1  C1  0:00", "statusbar_right_kept");
+    expect_int(dial_gui_statusbar_set_left(sb, "Ready"), 0, "statusbar_set_left_again");
+
+    // 高度：可设、过小 Fail-Fast
+    expect_int(dial_gui_statusbar_set_height(sb, 30), 0, "statusbar_set_height");
+    expect_int(dial_gui_statusbar_height(sb), 30, "statusbar_height_readback");
+    expect_int(dial_gui_statusbar_set_height(sb, 4), -1, "statusbar_small_height_rejected");
+
+    // 分隔线开关
+    expect_int(dial_gui_statusbar_set_sep(sb, 1), 0, "statusbar_set_sep");
+    expect_int(dial_gui_statusbar_sep(sb), 1, "statusbar_sep_readback");
+    expect_int(dial_gui_statusbar_set_sep(sb, 0), 0, "statusbar_clear_sep");
+    expect_int(dial_gui_statusbar_sep(sb), 0, "statusbar_sep_cleared");
+
+    // 进度条槽位开关
+    expect_int(dial_gui_statusbar_enable_progress(sb, 1), 0, "statusbar_enable_progress");
+    expect_int(dial_gui_statusbar_has_progress(sb), 1, "statusbar_has_progress");
+    expect_int(dial_gui_statusbar_enable_progress(sb, 0), 0, "statusbar_disable_progress");
+    expect_int(dial_gui_statusbar_has_progress(sb), 0, "statusbar_progress_disabled");
+
+    // 进度值：越界自动夹紧
+    expect_int(dial_gui_statusbar_set_value(sb, 40), 0, "statusbar_set_value");
+    expect_int(dial_gui_statusbar_value(sb), 40, "statusbar_value_readback");
+    expect_int(dial_gui_statusbar_set_value(sb, 9999), 0, "statusbar_set_value_over");
+    expect_int(dial_gui_statusbar_value(sb), 100, "statusbar_value_clamped_max");
+    expect_int(dial_gui_statusbar_set_value(sb, -9999), 0, "statusbar_set_value_under");
+    expect_int(dial_gui_statusbar_value(sb), 0, "statusbar_value_clamped_min");
+
+    // 值域：可设；收窄值域同步夹紧当前值
+    expect_int(dial_gui_statusbar_set_range(sb, 10, 50), 0, "statusbar_set_range");
+    expect_int(dial_gui_statusbar_value_min(sb), 10, "statusbar_vmin_readback");
+    expect_int(dial_gui_statusbar_value_max(sb), 50, "statusbar_vmax_readback");
+    expect_int(dial_gui_statusbar_set_value(sb, 30), 0, "statusbar_set_value2");
+    expect_int(dial_gui_statusbar_value(sb), 30, "statusbar_value2_readback");
+    // 收窄到 [0, 20]：当前值 30 被同步夹紧到 20
+    expect_int(dial_gui_statusbar_set_range(sb, 0, 20), 0, "statusbar_narrow_range");
+    expect_int(dial_gui_statusbar_value(sb), 20, "statusbar_value_clamped_on_narrow");
+    // 非法值域（vmax < vmin）Fail-Fast
+    expect_int(dial_gui_statusbar_set_range(sb, 50, 10), -1, "statusbar_bad_range_rejected");
+    expect_int(dial_gui_statusbar_value_min(sb), 0, "statusbar_range_unchanged_after_reject");
+
+    // tag 64 位全宽 round-trip（与 GuiScroll.tag 同宽）
+    expect_int(dial_gui_statusbar_set_tag(sb, 123456789), 0, "statusbar_set_tag");
+    expect_int(dial_gui_statusbar_tag(sb), 123456789, "statusbar_tag_roundtrip");
+    // 释放
+    expect_int(dial_gui_statusbar_free(sb), 0, "statusbar_free");
+
+    // ============ B) 离屏画布绘制（零 DISPLAY，靠 CRC32 像素级锁定）===========
+    var sb2: GuiStatusBar = dial_gui_statusbar_new();
+    dial_gui_statusbar_set_left(sb2, "Ready");
+    dial_gui_statusbar_set_right(sb2, "100%");
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 60);
+    expect(!is_null(p), "statusbar_painter");
+    // 基本状态栏（左 + 右文本 + 分隔线）绘制
+    expect_int(dial_gui_statusbar_set_sep(sb2, 1), 0, "statusbar_set_sep2");
+    expect_int(dial_gui_statusbar_draw(p, sb2, 200), 0, "statusbar_draw");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect(crc1 != 0, "statusbar_crc_nonzero");
+    // 重绘幂等：CRC32 必须逐字节稳定
+    expect_int(dial_gui_statusbar_draw(p, sb2, 200), 0, "statusbar_draw_again");
+    var crc2: int = dial_gui_painter_crc32(p);
+    expect_int(crc1, crc2, "statusbar_crc_stable");
+    // 进度条槽位：像素随之改变
+    expect_int(dial_gui_statusbar_enable_progress(sb2, 1), 0, "statusbar_enable_progress2");
+    expect_int(dial_gui_statusbar_set_value(sb2, 50), 0, "statusbar_set_value3");
+    expect_int(dial_gui_statusbar_draw(p, sb2, 200), 0, "statusbar_draw_progress");
+    var crc3: int = dial_gui_painter_crc32(p);
+    expect(crc3 != crc2, "statusbar_crc_changed_on_progress");
+    // 进度值推进 -> 填充宽度变化 -> 像素随之改变
+    expect_int(dial_gui_statusbar_set_value(sb2, 100), 0, "statusbar_set_value4");
+    expect_int(dial_gui_statusbar_draw(p, sb2, 200), 0, "statusbar_draw_progress_full");
+    var crc4: int = dial_gui_painter_crc32(p);
+    expect(crc4 != crc3, "statusbar_crc_changed_on_value");
+    // 右文本变化 -> 像素随之改变
+    expect_int(dial_gui_statusbar_set_right(sb2, "50%"), 0, "statusbar_set_right2");
+    expect_int(dial_gui_statusbar_draw(p, sb2, 200), 0, "statusbar_draw_right2");
+    var crc5: int = dial_gui_painter_crc32(p);
+    expect(crc5 != crc4, "statusbar_crc_changed_on_right_text");
+    // 画布与对象释放
+    expect_int(dial_gui_painter_free(p), 0, "statusbar_painter_free");
+    expect_int(dial_gui_statusbar_free(sb2), 0, "statusbar_free2");
+
+    print("statusbar_window = ok");   // 纯内存路径，无 DISPLAY 亦 ok
+    print("statusbar_done = true");
+    return 0;
+}

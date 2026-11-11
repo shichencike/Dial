@@ -2270,6 +2270,40 @@ if "$DIALC" build tests/pkg/use_gui_tooltip.dial -o "${TMP}/use_gui_tooltip" >"$
     fi
 else aabad "use_gui_tooltip.dial 编译失败"; tail -20 "${TMP}/aa_tcomp.log"; fi
 
+# 5k) 第 12 层状态栏 StatusBar：纯内存对象 + 离屏画布（零 DISPLAY 依赖，CRC32 像素级锁定）。
+#     独立纯内存 + 独立 offscreen 画布，绝不触碰前十一个 demo 的 CRC 基准。给 AA 组 +1 aapass。
+if "$DIALC" build tests/pkg/use_gui_statusbar.dial -o "${TMP}/use_gui_statusbar" >"${TMP}/aa_bcomp.log" 2>&1; then
+    aapass "use_gui_statusbar.dial（第 12 层状态栏）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_statusbar" >"${TMP}/aa_bnodisplay.log" 2>&1
+    aa_b_no_exit=$?
+    aa_b_bad=$(grep -c ' = bad' "${TMP}/aa_bnodisplay.log" || true)
+    if [ "$aa_b_no_exit" -eq 0 ] && [ "$aa_b_bad" -eq 0 ] \
+       && grep -qF 'statusbar_new = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_default_height = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_default_vmax = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_left_readback = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_right_readback = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_left_cleared = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_small_height_rejected = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_value_clamped_max = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_value_clamped_min = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_value_clamped_on_narrow = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_bad_range_rejected = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_tag_roundtrip = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_crc_nonzero = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_crc_stable = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_crc_changed_on_progress = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_crc_changed_on_value = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_crc_changed_on_right_text = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_window = ok' "${TMP}/aa_bnodisplay.log" \
+       && grep -qF 'statusbar_done = true' "${TMP}/aa_bnodisplay.log"; then
+        aapass "无 DISPLAY：状态栏左右文本/高度·分隔线·进度槽位开关/进度值越界夹紧/值域收窄同步夹紧/非法值域 Fail-Fast / tag 全宽 / 离屏绘制 CRC 稳定全绿"
+    else
+        aabad "第 12 层无 DISPLAY 路径断言失败（exit=$aa_b_no_exit bad=$aa_b_bad）"
+        tail -40 "${TMP}/aa_bnodisplay.log"
+    fi
+else aabad "use_gui_statusbar.dial 编译失败"; tail -20 "${TMP}/aa_bcomp.log"; fi
+
 # 5) 有 Xvfb 时验证真实窗口（XShm 离屏 + XRender 合成 + 上屏 / 过滤 / 事件循环）；
 #    无 Xvfb 的环境如实打印跳过，绝不把「未验证」写成「通过」。
 if command -v xvfb-run >/dev/null 2>&1; then
@@ -2602,7 +2636,7 @@ else
 fi
 
 # ===========================================================================
-echo "== AD) GUI 第 8 层 OO 封装：202 个 impl 方法 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
+echo "== AD) GUI 第 8 层 OO 封装：222 个 impl 方法 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
 adpass() { echo "  ✅ $1"; }
 adbad()  { echo "  ❌ $1"; fail=1; }
 
@@ -2615,8 +2649,8 @@ cp tests/oo/use_gui_oo.dial "$AD_DIR/"
     && "$DIALC" install "${TMP}/ad_gui.dialpkg" >"${TMP}/ad_install.log" 2>&1 \
     || { adbad "gui.dialpkg 打包或安装失败（AD 组）"; tail -6 "${TMP}/ad_pack.log" "${TMP}/ad_install.log"; }
 
-# 1) 契约防漂移审计：202 个方法恰好覆盖 202 个 extern fn（入口 app_new 除外），
-#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 203 个签名。
+# 1) 契约防漂移审计：222 个方法恰好覆盖 222 个 extern fn（入口 app_new 除外），
+#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 223 个签名。
 ad_diag=$(grep '^extern fn' packages/gui/gui.diali | sed -E 's/^extern fn ([A-Za-z0-9_]+).*/\1/' \
           | grep -v '^dial_gui_app_new$' | sort -u)
 ad_refs=$(grep '^    fn ' packages/gui/gui_oo.dial | grep -oE 'dial_gui_[A-Za-z0-9_]+' | sort -u)
@@ -2624,9 +2658,9 @@ ad_methods=$(grep -c '^    fn ' packages/gui/gui_oo.dial)
 ad_diag_n=$(echo "$ad_diag" | wc -l)
 ad_iface_n=$(grep -c '^extern fn' packages/gui/gui.diali)
 ad_oo_decl=$(grep -c '^extern fn' packages/gui/gui_oo.dial || true)
-if [ "$ad_methods" -eq 202 ] && [ "$ad_diag_n" -eq 202 ] && [ "$ad_iface_n" -eq 203 ] \
+if [ "$ad_methods" -eq 222 ] && [ "$ad_diag_n" -eq 222 ] && [ "$ad_iface_n" -eq 223 ] \
    && [ "$ad_oo_decl" -eq 0 ] && [ "$ad_diag" = "$ad_refs" ]; then
-    adpass "契约审计：202 个 impl 方法全覆盖 202 个 extern fn、gui.diali 共 203 个签名、封装层零 extern 声明（ABI 不变）"
+    adpass "契约审计：222 个 impl 方法全覆盖 222 个 extern fn、gui.diali 共 223 个签名、封装层零 extern 声明（ABI 不变）"
 else
     adbad "契约审计不通过：methods=$ad_methods diag=$ad_diag_n iface=$ad_iface_n oo_decl=$ad_oo_decl"
     diff <(echo "$ad_diag") <(echo "$ad_refs") | head -20
@@ -2636,7 +2670,7 @@ fi
 if ! "$DIALC" build "$AD_DIR/use_gui_oo.dial" -o "${TMP}/ad_oo_run" >"${TMP}/ad_build.log" 2>&1; then
     adbad "use_gui_oo.dial 编译失败"; tail -20 "${TMP}/ad_build.log"
 else
-    adpass "OO 封装层 + 用例编译成功（202 个 impl 方法签名全部通过）"
+    adpass "OO 封装层 + 用例编译成功（222 个 impl 方法签名全部通过）"
     if ! env -u DISPLAY "${TMP}/ad_oo_run" >"${TMP}/ad_nodisp.out" 2>&1; then
         adbad "use_gui_oo 无 DISPLAY 运行非零退出"; tail -20 "${TMP}/ad_nodisp.out"
     elif grep -q '= bad' "${TMP}/ad_nodisp.out" \

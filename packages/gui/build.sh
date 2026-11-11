@@ -14,6 +14,7 @@
 #   - dial_gui_scroll.o  第 9 层：滚动视图窗口级辅助覆盖层（纯 C，三平台共用）
 #   - dial_gui_context.o 第 10 层：右键上下文菜单（复用第 7 层 GuiMenu，纯 C，三平台共用）
 #   - dial_gui_tooltip.o 第 11 层：悬浮提示 Tooltip（延迟由调用方推进，不读时钟，纯 C，三平台共用）
+#   - dial_gui_statusbar.o 第 12 层：状态栏 StatusBar（左右文本 + 进度条槽位，纯 C，三平台共用）
 #   - dial_gui_x11.o     Linux / Termux 后端：X11 + XShm + XRender（仅 POSIX 目标）
 #   - dial_gui_win32.o   Windows 后端：GDI DIBSection + 消息循环（仅 windows 目标）
 #
@@ -69,7 +70,8 @@ for entry in "${TARGETS[@]}"; do
           "$PKG/src/dial_gui_look.c" "$PKG/src/dial_gui_input.c" \
           "$PKG/src/dial_gui_signal.c" "$PKG/src/dial_gui_menu.c" \
           "$PKG/src/dial_gui_scroll.c" "$PKG/src/dial_gui_context.c" \
-          "$PKG/src/dial_gui_tooltip.c")
+          "$PKG/src/dial_gui_tooltip.c" \
+          "$PKG/src/dial_gui_statusbar.c")
     if [ "$family" = "win32" ]; then
         SRCS+=("$PKG/src/dial_gui_win32.c")
     else

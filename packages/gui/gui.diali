@@ -976,3 +976,67 @@ extern fn dial_gui_tooltip_tag(t: GuiTooltip): int;
 /// （返回 0）。p 为窗口画布。返回 0 / -1。
 extern fn dial_gui_tooltip_draw(p: GuiPainter, t: GuiTooltip): int;
 
+// ---- 第 12 层：状态栏 StatusBar（本段 19 个追加 extern fn）------------------
+//
+// 立场：与前十层完全一致 —— 纯 C、零平台符号、绝不 C → Dial 反向回调、
+// 只追加 extern fn。状态栏是**纯内存对象**（不挂窗），可在无 DISPLAY 环境
+// 单元测试。
+//
+// 关键事实（防漂移）：
+//   - 左右两段文本都是 C 侧自有副本（strdup），调用方不保留指针。
+//   - 进度值是**纯值**并由调用方 set_value 推进，越界自动夹紧到 [vmin, vmax]；
+//     本层不读时钟、不捕获鼠标，三平台行为逐字节一致。
+//   - 绘制时以「状态栏自身高度」贴**底边**（y = 画布高 - h）；调用方通常
+//     先把裁剪区设到窗口底部那一行，再调 statusbar_draw。
+
+/// 状态栏类型（不透明）。一个状态栏 = 左文本 + 右文本 + 高度 + 进度条槽位。
+type GuiStatusBar;
+
+/// 新建空状态栏（无文本、高度 22、进度值域 0..100、无进度条槽位）。
+/// 失败返回空句柄。用完须 dial_gui_statusbar_free。
+extern fn dial_gui_statusbar_new(): GuiStatusBar;
+
+/// 释放状态栏（含左右两段文本副本）。返回 0 / -1。
+extern fn dial_gui_statusbar_free(sb: GuiStatusBar): int;
+
+/// 设置左 / 右文本（拷贝一份 C 侧副本；空串等价于清空该段）。返回 0 / -1。
+extern fn dial_gui_statusbar_set_left(sb: GuiStatusBar, text: string): int;
+extern fn dial_gui_statusbar_set_right(sb: GuiStatusBar, text: string): int;
+
+/// 读回左 / 右文本（**借用指针**，空串表示无文本）。空句柄返回空串。
+extern fn dial_gui_statusbar_left(sb: GuiStatusBar): rawptr<byte>;
+extern fn dial_gui_statusbar_right(sb: GuiStatusBar): rawptr<byte>;
+
+/// 设置 / 读取状态栏高度（像素，须 >= 8；Fail-Fast 返回 -1）。默认 22。
+extern fn dial_gui_statusbar_set_height(sb: GuiStatusBar, h: int): int;
+extern fn dial_gui_statusbar_height(sb: GuiStatusBar): int;
+
+/// 开关左右文本之间的竖分隔线（on 非 0 即开）。返回 0 / -1。
+extern fn dial_gui_statusbar_set_sep(sb: GuiStatusBar, on: int): int;
+extern fn dial_gui_statusbar_sep(sb: GuiStatusBar): int;
+
+/// 开关进度条槽位（on 非 0 即显示）。返回 0 / -1。
+extern fn dial_gui_statusbar_enable_progress(sb: GuiStatusBar, on: int): int;
+extern fn dial_gui_statusbar_has_progress(sb: GuiStatusBar): int;
+
+/// 设置进度条值域（须 vmax >= vmin；Fail-Fast 返回 -1）。收窄值域会同步
+/// 夹紧当前进度值。默认 0..100。
+extern fn dial_gui_statusbar_set_range(sb: GuiStatusBar, vmin: int, vmax: int): int;
+extern fn dial_gui_statusbar_value_min(sb: GuiStatusBar): int;
+extern fn dial_gui_statusbar_value_max(sb: GuiStatusBar): int;
+
+/// 设置进度值（**越界自动夹紧**到 [vmin, vmax]）。返回 0 / -1。
+extern fn dial_gui_statusbar_set_value(sb: GuiStatusBar, v: int): int;
+
+/// 读回当前进度值（已夹紧）。空句柄返回 -1。
+extern fn dial_gui_statusbar_value(sb: GuiStatusBar): int;
+
+/// 设置 / 读取用户 tag（64 位，可 round-trip，与 GuiScroll.tag 同宽）。
+extern fn dial_gui_statusbar_set_tag(sb: GuiStatusBar, tag: int): int;
+extern fn dial_gui_statusbar_tag(sb: GuiStatusBar): int;
+
+/// 绘制状态栏（底板 + 顶边细线 + 左文本 + 右文本 + 可选分隔线 + 可选进度条，
+/// 全部主题色）。状态栏贴画布**底边**（y = 画布高 - h）；win_w 为画布宽度。
+/// 返回 0 / -1（空句柄 / 宽度非正）。
+extern fn dial_gui_statusbar_draw(p: GuiPainter, sb: GuiStatusBar, win_w: int): int;
+

@@ -1200,6 +1200,32 @@ int64_t dial_gui_tooltip_set_text(GuiTooltip *t, DialString text) {
     return 0;
 }
 
+/* ---- 状态栏 StatusBar（第 12 层；文本入口走 FFI 包装）------------------- */
+
+/* 左文本入口：Dial 侧 string -> C 字符串副本（C 侧再 strdup 一份自有副本）。*/
+int64_t dial_gui_statusbar_set_left(GuiStatusBar *sb, DialString text) {
+    if (!sb) { gui_core_set_err(GUI_ERR_ARG, "空 GuiStatusBar 句柄"); return -1; }
+    char *dup = str_dup(text);
+    if (!dup) { gui_core_set_err(GUI_ERR_ALLOC, "状态栏左文本内存分配失败"); return -1; }
+    int64_t r = gui_statusbar_set_left(sb, dup);
+    free(dup);
+    if (r < 0) { gui_core_set_err(GUI_ERR_ALLOC, "状态栏左文本内存分配失败"); return -1; }
+    gui_core_ok();
+    return 0;
+}
+
+/* 右文本入口：同左文本。*/
+int64_t dial_gui_statusbar_set_right(GuiStatusBar *sb, DialString text) {
+    if (!sb) { gui_core_set_err(GUI_ERR_ARG, "空 GuiStatusBar 句柄"); return -1; }
+    char *dup = str_dup(text);
+    if (!dup) { gui_core_set_err(GUI_ERR_ALLOC, "状态栏右文本内存分配失败"); return -1; }
+    int64_t r = gui_statusbar_set_right(sb, dup);
+    free(dup);
+    if (r < 0) { gui_core_set_err(GUI_ERR_ALLOC, "状态栏右文本内存分配失败"); return -1; }
+    gui_core_ok();
+    return 0;
+}
+
 /* ---- 顶栏菜单 / 弹出菜单（窗口级，所有权转移给窗口）------------------- */
 
 int64_t dial_gui_window_set_menubar(GuiWindowImpl *win, GuiMenu *m) {    if (!win_ok(win)) return -1;

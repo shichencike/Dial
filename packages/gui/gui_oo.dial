@@ -282,3 +282,30 @@ impl GuiTooltip {
     fn tag(self): int { return dial_gui_tooltip_tag(self); }
     fn draw(self, p: GuiPainter): int { return dial_gui_tooltip_draw(p, self); }
 }
+
+// ===== 第 12 层：状态栏 GuiStatusBar（工厂在 GuiApp）=====
+impl GuiApp {
+    // 新建空状态栏（无文本、高度 22、进度值域 0..100）
+    fn statusbar_new(self): GuiStatusBar { return dial_gui_statusbar_new(); }
+}
+impl GuiStatusBar {
+    fn free(self): int { return dial_gui_statusbar_free(self); }
+    fn set_left(self, text: string): int { return dial_gui_statusbar_set_left(self, text); }
+    fn set_right(self, text: string): int { return dial_gui_statusbar_set_right(self, text); }
+    fn left(self): rawptr<byte> { return dial_gui_statusbar_left(self); }
+    fn right(self): rawptr<byte> { return dial_gui_statusbar_right(self); }
+    fn set_height(self, h: int): int { return dial_gui_statusbar_set_height(self, h); }
+    fn height(self): int { return dial_gui_statusbar_height(self); }
+    fn set_sep(self, on: int): int { return dial_gui_statusbar_set_sep(self, on); }
+    fn sep(self): int { return dial_gui_statusbar_sep(self); }
+    fn enable_progress(self, on: int): int { return dial_gui_statusbar_enable_progress(self, on); }
+    fn has_progress(self): int { return dial_gui_statusbar_has_progress(self); }
+    fn set_range(self, vmin: int, vmax: int): int { return dial_gui_statusbar_set_range(self, vmin, vmax); }
+    fn value_min(self): int { return dial_gui_statusbar_value_min(self); }
+    fn value_max(self): int { return dial_gui_statusbar_value_max(self); }
+    fn set_value(self, v: int): int { return dial_gui_statusbar_set_value(self, v); }
+    fn value(self): int { return dial_gui_statusbar_value(self); }
+    fn set_tag(self, tag: int): int { return dial_gui_statusbar_set_tag(self, tag); }
+    fn tag(self): int { return dial_gui_statusbar_tag(self); }
+    fn draw(self, p: GuiPainter, win_w: int): int { return dial_gui_statusbar_draw(p, self, win_w); }
+}

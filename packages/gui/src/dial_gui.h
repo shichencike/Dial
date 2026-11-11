@@ -106,6 +106,8 @@ typedef struct GuiDialog      GuiDialog;
 typedef struct GuiContext     GuiContext;
 /* 第 11 层：悬浮提示 Tooltip（纯内存对象）。*/
 typedef struct GuiTooltip     GuiTooltip;
+/* 第 12 层：状态栏 StatusBar（纯内存对象）。*/
+typedef struct GuiStatusBar   GuiStatusBar;
 
 typedef struct GuiBackend GuiBackend;
 
@@ -575,6 +577,24 @@ struct GuiTooltip {
     int64_t tag;         /* 用户 tag（全宽，可 round-trip）*/
 };
 
+/*
+ * 第 12 层：状态栏 StatusBar（GuiStatusBar，纯内存对象，无窗口）。
+ *
+ * 窗口底栏的纯值模型：左文本区 + 右文本区 + 可选进度条槽。两段文本都是
+ * C 侧 strdup 自有副本（同 GuiTooltip / GuiWidget.text 口径）。
+ * 进度条值域 [vmin, vmax] 由调用方设，set_value 自动夹紧。
+ */
+struct GuiStatusBar {
+    char *left;          /* 左侧文本（C 侧 strdup 自有副本，NULL = 无）*/
+    char *right;         /* 右侧文本（C 侧 strdup 自有副本，NULL = 无）*/
+    int  h;              /* 状态栏高度（像素，默认 22）*/
+    int  has_progress;   /* 是否显示进度条槽位 */
+    int  value;          /* 进度条当前值（已夹紧到 [vmin, vmax]）*/
+    int  vmin, vmax;     /* 进度条值域（默认 0..100）*/
+    int  sep;            /* 1 = 左右文本之间画竖分隔线 */
+    int64_t tag;         /* 用户 tag（全宽，可 round-trip）*/
+};
+
 /* 菜单项增删 / 访问（纯内存，无窗口；可在无 DISPLAY 环境单元测试）*/
 GuiMenu  *gui_menu_new(void);
 void      gui_menu_free(GuiMenu *m);
@@ -668,5 +688,29 @@ int64_t     dial_gui_tooltip_hover_ms(GuiTooltip *t);          /* 已悬停累�
 int64_t     dial_gui_tooltip_set_tag(GuiTooltip *t, int64_t tag);
 int64_t     dial_gui_tooltip_tag(GuiTooltip *t);
 int64_t     dial_gui_tooltip_draw(GuiPainterImpl *p, GuiTooltip *t);
+
+/* 第 12 层：状态栏 StatusBar（dial_gui_statusbar.c，纯 C，三平台共用，无平台符号）。
+ * 纯值模型：左右两段文本 + 进度条槽位；值域由调用方设，set_value 自动夹紧。*/
+GuiStatusBar *dial_gui_statusbar_new(void);
+int64_t       dial_gui_statusbar_free(GuiStatusBar *sb);
+/* 内部（C 层，文本已拷成 NUL 结尾）：FFI 包装在 core.c。*/
+int64_t       gui_statusbar_set_left(GuiStatusBar *sb, const char *text);
+int64_t       gui_statusbar_set_right(GuiStatusBar *sb, const char *text);
+const char   *dial_gui_statusbar_left(GuiStatusBar *sb);      /* 借用指针 */
+const char   *dial_gui_statusbar_right(GuiStatusBar *sb);     /* 借用指针 */
+int64_t       dial_gui_statusbar_set_height(GuiStatusBar *sb, int h);
+int64_t       dial_gui_statusbar_height(GuiStatusBar *sb);
+int64_t       dial_gui_statusbar_set_sep(GuiStatusBar *sb, int on);
+int64_t       dial_gui_statusbar_sep(GuiStatusBar *sb);
+int64_t       dial_gui_statusbar_enable_progress(GuiStatusBar *sb, int on);
+int64_t       dial_gui_statusbar_has_progress(GuiStatusBar *sb);
+int64_t       dial_gui_statusbar_set_range(GuiStatusBar *sb, int vmin, int vmax);
+int64_t       dial_gui_statusbar_value_min(GuiStatusBar *sb);
+int64_t       dial_gui_statusbar_value_max(GuiStatusBar *sb);
+int64_t       dial_gui_statusbar_set_value(GuiStatusBar *sb, int v);   /* 越界自动夹紧 */
+int64_t       dial_gui_statusbar_value(GuiStatusBar *sb);
+int64_t       dial_gui_statusbar_set_tag(GuiStatusBar *sb, int64_t tag);
+int64_t       dial_gui_statusbar_tag(GuiStatusBar *sb);
+int64_t       dial_gui_statusbar_draw(GuiPainterImpl *p, GuiStatusBar *sb, int win_w);
 
 #endif /* DIAL_GUI_H */
