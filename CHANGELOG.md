@@ -71,6 +71,23 @@
   确定；`draw` 先擦固定面板再画前 8 行、空表零像素影响、重绘幂等。纯 C、零平台
   符号、零时钟、零 DISPLAY 依赖、`abi = 6` / `version = 1.10.0` 不变、旧 261 个
   签名一字不动，见 README §38.21）；
++ **GUI 第 16 层：网格布局 + 组合框 / 列表框 + 右键·滚轮交互**（共 23 个 `extern fn`：
+  2 个 GRID `set_grid` / `set_grid_cell`（容器声明 `cols×rows`、子节点声明占格，
+  `set_layout` 接受 mode 3，越界 Fail-Fast 拒绝而非静默截断，弹性均分几何 headless
+  可测）/ 10 个 ComboBox `dial_gui_combo_*`（kind=10、项容量 64 固定、`label` 经
+  DialString 由 C 侧 `malloc`+`memcpy` 造副本、`item_label` 返回借用 `rawptr<byte>`、
+  单选 `select` 收起下拉、`open` / `close` / `is_open`、clear 复位、点击框体切展开、
+  下拉项命中选中并发 `SELECTED`）/ 10 个 ListBox `dial_gui_list_*`（kind=11、与 Combo
+  共用 `items`、单选 `select` + 多选 `select_toggle` 的 64 位位图、`is_selected` /
+  `selected_count` / `selected_first`、点击行选中并发 `SELECTED`）/ 1 个右键态
+  `dial_gui_widget_right_pressed`（与 left pressed 平行，`button==3` 置 1、RELEASE 清，
+  纯值不串扰）。`set_kind` 上界由 7 扩到 11：新增 10 COMBO / 11 LIST 合法，但 8 / 9
+  作为第 7 层信号 kind 标记（MENU / DIALOG）**仍被显式拒绝**，扩上界绝不放行——否则
+  控件被切成未知种类会落进 draw 的 BOX 兜底、静默破坏配色 / 激活；由 use_gui_look /
+  input（9）/ theme（8）/ combo（8+9 且选中态不变）四处断言锁死。纯 C、
+  零平台符号、零时钟、零 DISPLAY 依赖、`abi = 6` / `version = 1.10.0` 不变、不新增
+  `.c` 文件、旧 279 个签名一字不动，AD 组契约审计由 278 / 278 / 279 同步为
+  301 / 301 / 302，见 README §38.22）；
 + **GUI 第 8 层：Dial 侧 OO 封装**（`gui_oo.dial` 用 278 个 `impl` 方法包住 279 个
   C 风格 `extern fn`，纯 Dial 源码、随包 `src/` 分发（装包即用）、零 `extern fn`
   增量、ABI 不变，见 README §25.11 / §38.14）；
@@ -119,6 +136,9 @@
 > （本节起统一以 `tests/run_tests.sh` 实测为准：586 ✅ + 19 = 605 ✅）；随后 LSP
 > 再强化（README §28.7.2）给三个冒烟脚本新增 7 条断言，扩为
 > **三十组 / 612 ✅**（605 ✅ + 7 = 612 ✅）。
+> 随后 GUI 第 16 层（网格布局 GRID + ComboBox + ListBox + 右键·滚轮交互，纯内存对象 +
+> 离屏画布，零 DISPLAY 依赖）给 AA 组新增 8 条断言（4 个 demo 各「编译成功」+「全绿」），
+> 扩为 **三十组 / 620 ✅**（612 ✅ + 8 = 620 ✅）。
 > 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added

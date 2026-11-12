@@ -447,6 +447,15 @@
 <li><a href="#3819-通知气泡层第-13-层">38.19 通知气泡层（第 13 层）</a></li>
 <li><a href="#3820-窗口级覆盖层自动集成第-14-层">38.20 窗口级覆盖层自动集成（第 14 层）</a></li>
 <li><a href="#3821-快捷键--命令系统第-15-层">38.21 快捷键 / 命令系统（第 15 层）</a></li>
+<li><a href="#3822-网格布局--组合框--列表框--右键滚轮交互第-16-层">38.22 网格布局 + 组合框 / 列表框 + 右键·滚轮交互（第 16 层）</a><ul>
+<li><a href="#38221-网格布局-gridset_layout-接受-mode-3">38.22.1 网格布局 GRID（set_layout 接受 mode 3）</a></li>
+<li><a href="#38222-组合框-comboboxkind--10">38.22.2 组合框 ComboBox（kind = 10）</a></li>
+<li><a href="#38223-列表框-listboxkind--11">38.22.3 列表框 ListBox（kind = 11）</a></li>
+<li><a href="#38224-右键按下态--滚轮步进事件推进增强">38.22.4 右键按下态 + 滚轮步进（事件推进增强）</a></li>
+<li><a href="#38225-边界不许当已支持">38.22.5 边界（不许当已支持）</a></li>
+<li><a href="#38226-oo-封装与回归">38.22.6 OO 封装与回归</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -11639,6 +11648,177 @@ C 侧绝不保存函数指针、<strong>绝不 C → Dial 反向回调</strong>�
 命令 id 变化改像素、启用态不影响渲染、<code>unbind</code> 后像素变化。全部 <code>bad = 0</code>。</p>
 <p><strong>宪法</strong>：只追加 18 个 <code>extern fn</code>，旧 261 个签名一字不动；<code>abi = 6</code> /
 <code>version = 1.10.0</code> 不变；新增 <code>dial_gui_hotkey.c</code> 为纯 C，三平台 <code>.a</code> 重建后
+仍是零链接期 GUI 平台符号、零反向回调；未打 tag、未发 Release。</p>
+<h3 id="3822-网格布局--组合框--列表框--右键滚轮交互第-16-层">38.22 网格布局 + 组合框 / 列表框 + 右键·滚轮交互（第 16 层）</h3>
+<blockquote>
+<p>第 16 层把「<strong>容器级网格布局</strong>」「<strong>两个成品选择控件 ComboBox / ListBox</strong>」
+「<strong>右键按下态 + 滚轮步进</strong>」三件基础设施收进 gui 包，与既有七层 + 第 9~15 层
+同一套契约纪律：只追加 <code>extern fn</code>、旧签名一字不动、纯 C、零链接期 GUI 平台符号、
+绝不 C → Dial 反向回调、<code>abi = 6</code> / <code>version = 1.10.0</code> 不变。本轮共追加 <strong>23 个
+<code>extern fn</code></strong>（2 GRID + 10 ComboBox + 10 ListBox + 1 右键态），对外契约由
+<strong>279 → 302</strong>，第 8 层 OO 封装 <code>gui_oo.dial</code> 同步挂 <strong>23 个方法</strong>（278 → 301 个
+方法 + 入口 <code>dial_gui_app_new</code>，精确相等，仍零 <code>extern fn</code> 声明）。AD 组契约审计
+因此由 <strong>278 / 278 / 279</strong> 同步为 <strong>301 / 301 / 302</strong>。</p>
+</blockquote>
+<h4 id="38221-网格布局-gridset_layout-接受-mode-3">38.22.1 网格布局 GRID（<code>set_layout</code> 接受 mode 3）</h4>
+<p>容器用 <code>dial_gui_widget_set_grid(w, cols, rows)</code> 声明列 / 行数，子节点用
+<code>dial_gui_widget_set_grid_cell(w, col, row, cspan, rspan)</code> 声明自己占哪格。
+<code>layout_apply</code> 按弹性均分余量算每个单元格矩形，<strong>纯几何、零 DISPLAY 依赖、headless
+可测</strong>。</p>
+<table>
+<thead>
+<tr>
+<th>API</th>
+<th>语义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>set_grid(w, cols, rows)</code></td>
+<td>声明 <code>cols × rows</code>；<strong>越界 Fail-Fast 拒绝</strong>：<code>&lt; 1</code> 或 <code>&gt; 256</code> 返回 -1（明确拒绝，不静默截断为 1×1）</td>
+</tr>
+<tr>
+<td><code>set_grid_cell(w, col, row, cspan, rspan)</code></td>
+<td>子节点占格；<code>col/row</code> 须 <code>0..255</code>、<code>cspan/rspan</code> 须 <code>1..256</code>，越界一律 -1</td>
+</tr>
+<tr>
+<td><code>set_layout(w, 3)</code></td>
+<td>接受 <code>3 = GRID</code>；非法 mode（如 99）返回 -1</td>
+</tr>
+</tbody>
+</table>
+<p>几何规则（<code>dial_gui_widget.c::layout_node</code>）：单元格宽 <code>cell_w = (cw - gap*(cols-1)) / cols</code>
+（向下取整，<code>&lt; 0</code> 夹 0）；子节点 <code>x = gc*(cell_w+gap)</code>、<code>w = cspan*cell_w + (cspan-1)*gap</code>；
+超界列 / 行夹到 <code>[0, cols-1]</code> / <code>[0, rows-1]</code>、跨度夹到不越界。例如 200×200、2×2、<code>gap=0</code>
+每格 100×100；<code>gap=10</code> 每格 95×95、<code>x</code> 偏移 105；<code>cspan=2</code> 占满整行宽 200。</p>
+<h4 id="38222-组合框-comboboxkind--10">38.22.2 组合框 ComboBox（kind = 10）</h4>
+<p>只读框 + 点击展开下拉，单选取值。<code>set_kind</code> 上界由 7 扩到 <strong>11</strong>：<code>10</code>（COMBO）/
+<code>11</code>（LIST）合法，<code>12</code> 越界被拒；<strong><code>8</code> / <code>9</code> 仍被显式拒绝</strong>——它们是第 7 层信号
+kind 标记 <code>MENU</code> / <code>DIALOG</code>，不是可绘制的真实控件。扩上界时若顺手放行 8 / 9，控件会被
+切成「未知种类」而落进 <code>draw</code> 的 BOX 兜底，<strong>静默破坏配色 / RELEASE 激活</strong>（第 16 层
+曾踩此坑，现由 <code>use_gui_look</code> / <code>use_gui_input</code>（9）/ <code>use_gui_theme</code>（8）/
+<code>use_gui_combo</code>（8+9 且选中态不变）四处断言锁死）。
+项存 <code>items</code>（<strong>容量 64 固定，无动态扩容</strong>）；<code>label</code> 是 Dial <code>string</code>，C 侧
+<code>dial_string_length</code> / <code>dial_string_cstr</code> 取长度与指针、<code>malloc</code>+<code>memcpy</code> 造自有副本
+（与 <code>dial_gui_menu_add_item</code> 同口径）；<code>item_label</code> 返回<strong>借用 <code>rawptr&lt;byte&gt;</code></strong>，Dial 侧
+必须 <code>string_from_cstr</code> 复制成 ARC string，不得长持。</p>
+<table>
+<thead>
+<tr>
+<th>API</th>
+<th>语义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>combo_add_item(w, id, label)</code> / <code>combo_clear(w)</code></td>
+<td>追加项（id 由应用自定）/ 清空：计数归零、<strong>选中与展开态一并复位</strong></td>
+</tr>
+<tr>
+<td><code>combo_count(w)</code> / <code>combo_item_id(w, idx)</code> / <code>combo_item_label(w, idx)</code></td>
+<td>项数 / 第 idx 项 id（越界 -1）/ 借用标签指针（越界 NULL）</td>
+</tr>
+<tr>
+<td><code>combo_select(w, idx)</code></td>
+<td>单选第 idx 项并<strong>收起下拉</strong>；越界 -1 且选中不变</td>
+</tr>
+<tr>
+<td><code>combo_selected(w)</code></td>
+<td>当前选中下标，默认 -1</td>
+</tr>
+<tr>
+<td><code>combo_open(w)</code> / <code>combo_close(w)</code> / <code>combo_is_open(w)</code></td>
+<td>手动展开 / 收起 / 读展开态</td>
+</tr>
+</tbody>
+</table>
+<p><strong>交互</strong>：点击框体（RELEASE）切换展开；展开后下拉项 <code>row = (ry - h) / GUI_MENU_ROW_H</code>
+命中即选中 + 收起 + 发 <code>GUI_SIG_SELECTED</code>（信号 <code>a = item id</code>）。选定语义归应用，C 侧
+零反向回调。</p>
+<h4 id="38223-列表框-listboxkind--11">38.22.3 列表框 ListBox（kind = 11）</h4>
+<p>常显可选项，单击单选或 <code>select_toggle</code> 多选。<code>set_kind</code> 同取上界 11。项存储与 ComboBox
+<strong>共用 <code>GuiWidgetImpl.items</code></strong>（容量 64 固定）。</p>
+<table>
+<thead>
+<tr>
+<th>API</th>
+<th>语义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>list_add_item(w, id, label)</code> / <code>list_clear(w)</code></td>
+<td>追加项 / 清空（选中 64 位位图一并归零）</td>
+</tr>
+<tr>
+<td><code>list_count(w)</code> / <code>list_item_id(w, idx)</code> / <code>list_item_label(w, idx)</code></td>
+<td>项数 / id（越界 -1）/ 借用标签指针（越界 NULL）</td>
+</tr>
+<tr>
+<td><code>list_select(w, idx)</code></td>
+<td>单选：覆盖位图为仅 idx</td>
+</tr>
+<tr>
+<td><code>list_select_toggle(w, idx)</code></td>
+<td>多选 toggle：翻转第 idx 位（64 位位图）</td>
+</tr>
+<tr>
+<td><code>list_is_selected(w, idx)</code></td>
+<td>第 idx 是否选中（1 / 0）</td>
+</tr>
+<tr>
+<td><code>list_selected_count(w)</code> / <code>list_selected_first(w)</code></td>
+<td>选中个数 / 最小选中下标（无选中 -1）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>交互</strong>：点击行 <code>row = (y - abs_y) / GUI_MENU_ROW_H</code> 选中（单击单选、覆盖位图）并发
+<code>GUI_SIG_SELECTED</code>（<code>a = item id</code>）。</p>
+<h4 id="38224-右键按下态--滚轮步进事件推进增强">38.22.4 右键按下态 + 滚轮步进（事件推进增强）</h4>
+<p>在 <code>dial_gui_look.c::gui_widget_handle</code> 的 PRESS 段新增两条分支，与既有四态（hover /
+pressed / checked / disabled）平行、互不串扰：</p>
+<ul>
+<li><strong>右键 <code>button == 3</code></strong>：置 <code>right_pressed = 1</code>（与 left <code>pressed</code> 平行）；
+  RELEASE 段遇 <code>button != 0/1</code> 直接返回、不激活，并一道清除 <code>right_pressed</code>——
+  右键纯值态，<strong>不改 left pressed / hovered 语义</strong>。</li>
+<li><strong>滚轮 <code>button == 4 / 5</code></strong>：命中 <code>SLIDER</code> 时按 <code>step = span / 100</code>（最小 1）增减
+  <code>value</code> 并 clamp 到 <code>[min, max]</code>；未在 <code>SLIDER</code> 上则零影响（不改值、返回 0）。</li>
+</ul>
+<p><code>dial_gui_widget_right_pressed(w)</code> 读回该纯值态，<code>dial_gui_widget_pressed(w)</code> 仍只读
+left pressed，二者独立。</p>
+<h4 id="38225-边界不许当已支持">38.22.5 边界（不许当已支持）</h4>
+<p>不做自动网格换行（仅显式 <code>set_grid_cell</code>）、不做 ComboBox 可编辑输入、不做 ListBox
+虚拟滚动（容量固定 64）、不接管系统级右键菜单（第 10 层上下文菜单是另一条独立路径）、
+不读系统滚动加速（step 由 <code>span/100</code> 纯几何决定、零时钟依赖）。列 / 行 / 跨度越界一律
+Fail-Fast 返回 -1 并写错误槽，绝不静默截断。</p>
+<h4 id="38226-oo-封装与回归">38.22.6 OO 封装与回归</h4>
+<p>第 8 层 <code>gui_oo.dial</code> 在 <code>impl GuiWidget</code> 末尾追加 <strong>23 个方法</strong>（去 <code>dial_gui_</code>/
+<code>dial_gui_widget_</code> 前缀、接收者变 <code>self</code>）：<code>set_grid</code> / <code>set_grid_cell</code>、
+<code>combo_add_item</code> / <code>…clear</code> / <code>…count</code> / <code>…item_id</code> / <code>…item_label</code> / <code>…select</code> /
+<code>…selected</code> / <code>…open</code> / <code>…close</code> / <code>…is_open</code>、<code>list_add_item</code> / <code>…clear</code> / <code>…count</code> /
+<code>…item_id</code> / <code>…item_label</code> / <code>…select</code> / <code>…select_toggle</code> / <code>…is_selected</code> /
+<code>…selected_count</code> / <code>…selected_first</code>、<code>right_pressed</code>。封装层仍<strong>零 <code>extern fn</code>
+声明</strong>。</p>
+<p><strong>回归（AA 组 5p ~ 5s，纯内存对象 + 离屏 CRC 锁定，零 DISPLAY 依赖）</strong>：
+<code>tests/pkg/use_gui_grid.dial</code> / <code>use_gui_combo.dial</code> / <code>use_gui_list.dial</code> /
+<code>use_gui_wheel.dial</code> 各含独立 offscreen 画布，断言经 <code>grep ' = bad'</code> 计失败、
+<code>grep -qF</code> 钉关键输出、CRC 用 <code>expect_str(str(crc), "N", "x_crc_pinned")</code> 钉死像素级
+基准——</p>
+<ul>
+<li><strong>GRID</strong>：<code>set_grid</code> / <code>set_grid_cell</code> 越界 Fail-Fast、<code>set_layout(3)</code> 接受 /
+  <code>set_layout(99)</code> 拒绝、2×2 每格 100×100 / gap10 每格 95×95 / <code>cspan=2</code> 占满整行、
+  离屏 CRC 钉值 <code>4049314674</code>，全绿。</li>
+<li><strong>ComboBox</strong>：<code>kind=10</code> 合法 / 12 拒、项增删 / 容量上界、单选 <code>select</code> / <code>selected</code>、
+  <code>open</code> / <code>close</code> / <code>is_open</code>、clear 复位、点击框体切展开、下拉项命中选中发
+  <code>SELECTED</code>（订阅后验 <code>signal.a == item id</code>）、离屏 CRC 钉值 <code>3235232961</code>，全绿。</li>
+<li><strong>ListBox</strong>：<code>kind=11</code> 合法、单选 / 多选 <code>toggle</code> / <code>is_selected</code> / <code>selected_count</code> /
+  <code>selected_first</code>、点击行选中发 <code>SELECTED</code>、离屏 CRC 钉值 <code>3941106424</code>，全绿。</li>
+<li><strong>右键·滚轮</strong>：SLIDER 滚轮上(4) / 下(5)滚动 <code>step=1</code>、clamp 不越界、右键(3)置
+  <code>right_pressed</code> 且不改 left pressed、RELEASE(3) 清除、滚轮落非 SLIDER 零影响、
+  离屏 CRC 钉值 <code>2509410687</code>，全绿。</li>
+</ul>
+<p><strong>宪法</strong>：只追加 23 个 <code>extern fn</code>，旧 279 个签名一字不动；<code>abi = 6</code> /
+<code>version = 1.10.0</code> 不变；<strong>不新增 <code>.c</code> 文件</strong>，<code>build.sh</code> 源清单不变，三平台 <code>.a</code> 重建后
 仍是零链接期 GUI 平台符号、零反向回调；未打 tag、未发 Release。</p></main></div>
 
 <footer class="site-footer">

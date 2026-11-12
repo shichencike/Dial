@@ -24,14 +24,14 @@
   </div>
 </header>
 
-<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>gui</code></td></tr><tr><td>版本</td><td>1.10.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>279</td></tr><tr><td>来源</td><td><code>packages/gui/gui.diali</code></td></tr></tbody></table><div class="toc">
+<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>gui</code></td></tr><tr><td>版本</td><td>1.10.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>302</td></tr><tr><td>来源</td><td><code>packages/gui/gui.diali</code></td></tr></tbody></table><div class="toc">
 <ul>
 <li><a href="#gui-地基包-gui">GUI 地基包 gui</a></li>
 </ul>
 </div>
 <h2 id="gui-地基包-gui">GUI 地基包 gui</h2>
-<p>不用 Qt / GTK / SDL，<strong>纯 C 手搓</strong>的 GUI 包，前七层 + 第 9/10/11/12/13/14/15 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统是 C 契约、
-<strong>共 279 个 <code>extern fn</code></strong>：地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 +
+<p>不用 Qt / GTK / SDL，<strong>纯 C 手搓</strong>的 GUI 包，前七层 + 第 9/10/11/12/13/14/15/16 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统·网格布局 GRID + 组合框 ComboBox + 列表框 ListBox + 右键·滚轮交互是 C 契约、
+<strong>共 302 个 <code>extern fn</code></strong>：地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 +
 命中 + 主动分发）/ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态）/
 输入层（TextBox + 焦点链 + 统一功能键码 + XTest 实窗注入）/ 主题层与控件扩展
 （14 个可覆写颜色角色 + Radio / Slider / ProgressBar）/ 信号槽（6 类可订阅纯值
@@ -51,8 +51,20 @@
 命令启用态；<code>bind</code> 冲突 Fail-Fast / <code>rebind</code> 覆盖 / <code>unbind</code> 压实 / <code>dispatch</code> 只发启用
 且命中的命令（语义归应用、C 侧零反向回调）；容量 64、命令 id <code>[0, 256)</code>；空表零像素影响、
 重绘幂等，纯 C 零平台符号、零时钟、零 DISPLAY 依赖，见 §38.21）。
+<strong>网格布局 GRID</strong>（<code>set_grid</code> / <code>set_grid_cell</code>：<code>set_layout</code> 接受 mode 3，容器声明
+<code>cols×rows</code>、子节点声明占格，弹性均分几何、越界 Fail-Fast 拒绝而非静默截断，纯几何
+headless 可测，见 §38.22.1）/ <strong>组合框 ComboBox</strong>（<code>dial_gui_combo_*</code>：kind=10、只读框
++ 点击展开下拉、单选取值、项容量 64 固定、<code>label</code> 经 DialString 由 C 侧造副本、
+<code>item_label</code> 返回借用指针、点击框体切展开、下拉项命中选中并发 <code>SELECTED</code>，见 §38.22.2）/
+<strong>列表框 ListBox</strong>（<code>dial_gui_list_*</code>：kind=11、与 Combo 共用 items、单选 <code>select</code> +
+多选 <code>select_toggle</code> 的 64 位位图、<code>is_selected</code> / <code>selected_count</code> / <code>selected_first</code>、
+点击行选中并发 <code>SELECTED</code>，见 §38.22.3）/ <strong>右键·滚轮交互</strong>（<code>button==3</code> 置
+<code>right_pressed</code> 纯值态、RELEASE 清、与 left pressed 平行不串扰；滚轮 <code>button==4/5</code> 命中
+<code>SLIDER</code> 按 <code>step=span/100</code> 增减并 clamp、落非 SLIDER 零影响，<code>set_kind</code> 上界由 7 扩到
+11（8 / 9 信号 kind 标记仍显式拒绝，四处断言锁死），见 §38.22.4）——以上第 16 层共 23 个 <code>extern fn</code>、旧签名一字不动，纯 C 零平台符号、
+零时钟、零 DISPLAY 依赖，见 §38.22）。
 <strong>第 8 层是
-Dial 侧 OO 封装层</strong>（<code>gui_oo.dial</code>，278 个 <code>impl</code> 方法把上述 C 风格函数包成 <code>win.draw()</code>
+Dial 侧 OO 封装层</strong>（<code>gui_oo.dial</code>，301 个 <code>impl</code> 方法把上述 C 风格函数包成 <code>win.draw()</code>
 这样的惯用写法，纯 Dial 源码、随包 <code>src/</code> 分发（装包即用）、<strong>零 <code>extern fn</code> 增量、ABI 不变</strong>，见 §38.14）。</p>
 <pre><code class="language-dial">import &quot;gui&quot;;
 
@@ -116,7 +128,8 @@ fn main(): int {
 <a href="../spec.html#3818-状态栏层第-12-层">§38.18 状态栏层</a>、
 <a href="../spec.html#3819-通知气泡层第-13-层">§38.19 通知气泡层</a>、
 <a href="../spec.html#3820-窗口级覆盖层自动集成第-14-层">§38.20 窗口级覆盖层自动集成</a>、
-<a href="../spec.html#3821-快捷键--命令系统第-15-层">§38.21 快捷键 / 命令系统</a>。</p></main></div>
+<a href="../spec.html#3821-快捷键--命令系统第-15-层">§38.21 快捷键 / 命令系统</a>、
+<a href="../spec.html#3822-网格布局--组合框--列表框--右键滚轮交互第-16-层">§38.22 网格布局 + 组合框 / 列表框 + 右键·滚轮交互</a>。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

@@ -7344,3 +7344,127 @@ C 侧用同一个 `DEFINE_WINDOW_OVERLAY(lname, Type, field)` 宏实例化 5 层
 **宪法**：只追加 18 个 `extern fn`，旧 261 个签名一字不动；`abi = 6` /
 `version = 1.10.0` 不变；新增 `dial_gui_hotkey.c` 为纯 C，三平台 `.a` 重建后
 仍是零链接期 GUI 平台符号、零反向回调；未打 tag、未发 Release。
+
+### 38.22 网格布局 + 组合框 / 列表框 + 右键·滚轮交互（第 16 层）
+
+> 第 16 层把「**容器级网格布局**」「**两个成品选择控件 ComboBox / ListBox**」
+> 「**右键按下态 + 滚轮步进**」三件基础设施收进 gui 包，与既有七层 + 第 9~15 层
+> 同一套契约纪律：只追加 `extern fn`、旧签名一字不动、纯 C、零链接期 GUI 平台符号、
+> 绝不 C → Dial 反向回调、`abi = 6` / `version = 1.10.0` 不变。本轮共追加 **23 个
+> `extern fn`**（2 GRID + 10 ComboBox + 10 ListBox + 1 右键态），对外契约由
+> **279 → 302**，第 8 层 OO 封装 `gui_oo.dial` 同步挂 **23 个方法**（278 → 301 个
+> 方法 + 入口 `dial_gui_app_new`，精确相等，仍零 `extern fn` 声明）。AD 组契约审计
+> 因此由 **278 / 278 / 279** 同步为 **301 / 301 / 302**。
+
+#### 38.22.1 网格布局 GRID（`set_layout` 接受 mode 3）
+
+容器用 `dial_gui_widget_set_grid(w, cols, rows)` 声明列 / 行数，子节点用
+`dial_gui_widget_set_grid_cell(w, col, row, cspan, rspan)` 声明自己占哪格。
+`layout_apply` 按弹性均分余量算每个单元格矩形，**纯几何、零 DISPLAY 依赖、headless
+可测**。
+
+| API | 语义 |
+| --- | --- |
+| `set_grid(w, cols, rows)` | 声明 `cols × rows`；**越界 Fail-Fast 拒绝**：`< 1` 或 `> 256` 返回 -1（明确拒绝，不静默截断为 1×1） |
+| `set_grid_cell(w, col, row, cspan, rspan)` | 子节点占格；`col/row` 须 `0..255`、`cspan/rspan` 须 `1..256`，越界一律 -1 |
+| `set_layout(w, 3)` | 接受 `3 = GRID`；非法 mode（如 99）返回 -1 |
+
+几何规则（`dial_gui_widget.c::layout_node`）：单元格宽 `cell_w = (cw - gap*(cols-1)) / cols`
+（向下取整，`< 0` 夹 0）；子节点 `x = gc*(cell_w+gap)`、`w = cspan*cell_w + (cspan-1)*gap`；
+超界列 / 行夹到 `[0, cols-1]` / `[0, rows-1]`、跨度夹到不越界。例如 200×200、2×2、`gap=0`
+每格 100×100；`gap=10` 每格 95×95、`x` 偏移 105；`cspan=2` 占满整行宽 200。
+
+#### 38.22.2 组合框 ComboBox（kind = 10）
+
+只读框 + 点击展开下拉，单选取值。`set_kind` 上界由 7 扩到 **11**：`10`（COMBO）/
+`11`（LIST）合法，`12` 越界被拒；**`8` / `9` 仍被显式拒绝**——它们是第 7 层信号
+kind 标记 `MENU` / `DIALOG`，不是可绘制的真实控件。扩上界时若顺手放行 8 / 9，控件会被
+切成「未知种类」而落进 `draw` 的 BOX 兜底，**静默破坏配色 / RELEASE 激活**（第 16 层
+曾踩此坑，现由 `use_gui_look` / `use_gui_input`（9）/ `use_gui_theme`（8）/
+`use_gui_combo`（8+9 且选中态不变）四处断言锁死）。
+项存 `items`（**容量 64 固定，无动态扩容**）；`label` 是 Dial `string`，C 侧
+`dial_string_length` / `dial_string_cstr` 取长度与指针、`malloc`+`memcpy` 造自有副本
+（与 `dial_gui_menu_add_item` 同口径）；`item_label` 返回**借用 `rawptr<byte>`**，Dial 侧
+必须 `string_from_cstr` 复制成 ARC string，不得长持。
+
+| API | 语义 |
+| --- | --- |
+| `combo_add_item(w, id, label)` / `combo_clear(w)` | 追加项（id 由应用自定）/ 清空：计数归零、**选中与展开态一并复位** |
+| `combo_count(w)` / `combo_item_id(w, idx)` / `combo_item_label(w, idx)` | 项数 / 第 idx 项 id（越界 -1）/ 借用标签指针（越界 NULL） |
+| `combo_select(w, idx)` | 单选第 idx 项并**收起下拉**；越界 -1 且选中不变 |
+| `combo_selected(w)` | 当前选中下标，默认 -1 |
+| `combo_open(w)` / `combo_close(w)` / `combo_is_open(w)` | 手动展开 / 收起 / 读展开态 |
+
+**交互**：点击框体（RELEASE）切换展开；展开后下拉项 `row = (ry - h) / GUI_MENU_ROW_H`
+命中即选中 + 收起 + 发 `GUI_SIG_SELECTED`（信号 `a = item id`）。选定语义归应用，C 侧
+零反向回调。
+
+#### 38.22.3 列表框 ListBox（kind = 11）
+
+常显可选项，单击单选或 `select_toggle` 多选。`set_kind` 同取上界 11。项存储与 ComboBox
+**共用 `GuiWidgetImpl.items`**（容量 64 固定）。
+
+| API | 语义 |
+| --- | --- |
+| `list_add_item(w, id, label)` / `list_clear(w)` | 追加项 / 清空（选中 64 位位图一并归零） |
+| `list_count(w)` / `list_item_id(w, idx)` / `list_item_label(w, idx)` | 项数 / id（越界 -1）/ 借用标签指针（越界 NULL） |
+| `list_select(w, idx)` | 单选：覆盖位图为仅 idx |
+| `list_select_toggle(w, idx)` | 多选 toggle：翻转第 idx 位（64 位位图） |
+| `list_is_selected(w, idx)` | 第 idx 是否选中（1 / 0） |
+| `list_selected_count(w)` / `list_selected_first(w)` | 选中个数 / 最小选中下标（无选中 -1） |
+
+**交互**：点击行 `row = (y - abs_y) / GUI_MENU_ROW_H` 选中（单击单选、覆盖位图）并发
+`GUI_SIG_SELECTED`（`a = item id`）。
+
+#### 38.22.4 右键按下态 + 滚轮步进（事件推进增强）
+
+在 `dial_gui_look.c::gui_widget_handle` 的 PRESS 段新增两条分支，与既有四态（hover /
+pressed / checked / disabled）平行、互不串扰：
+
+- **右键 `button == 3`**：置 `right_pressed = 1`（与 left `pressed` 平行）；
+  RELEASE 段遇 `button != 0/1` 直接返回、不激活，并一道清除 `right_pressed`——
+  右键纯值态，**不改 left pressed / hovered 语义**。
+- **滚轮 `button == 4 / 5`**：命中 `SLIDER` 时按 `step = span / 100`（最小 1）增减
+  `value` 并 clamp 到 `[min, max]`；未在 `SLIDER` 上则零影响（不改值、返回 0）。
+
+`dial_gui_widget_right_pressed(w)` 读回该纯值态，`dial_gui_widget_pressed(w)` 仍只读
+left pressed，二者独立。
+
+#### 38.22.5 边界（不许当已支持）
+
+不做自动网格换行（仅显式 `set_grid_cell`）、不做 ComboBox 可编辑输入、不做 ListBox
+虚拟滚动（容量固定 64）、不接管系统级右键菜单（第 10 层上下文菜单是另一条独立路径）、
+不读系统滚动加速（step 由 `span/100` 纯几何决定、零时钟依赖）。列 / 行 / 跨度越界一律
+Fail-Fast 返回 -1 并写错误槽，绝不静默截断。
+
+#### 38.22.6 OO 封装与回归
+
+第 8 层 `gui_oo.dial` 在 `impl GuiWidget` 末尾追加 **23 个方法**（去 `dial_gui_`/
+`dial_gui_widget_` 前缀、接收者变 `self`）：`set_grid` / `set_grid_cell`、
+`combo_add_item` / `…clear` / `…count` / `…item_id` / `…item_label` / `…select` /
+`…selected` / `…open` / `…close` / `…is_open`、`list_add_item` / `…clear` / `…count` /
+`…item_id` / `…item_label` / `…select` / `…select_toggle` / `…is_selected` /
+`…selected_count` / `…selected_first`、`right_pressed`。封装层仍**零 `extern fn`
+声明**。
+
+**回归（AA 组 5p ~ 5s，纯内存对象 + 离屏 CRC 锁定，零 DISPLAY 依赖）**：
+`tests/pkg/use_gui_grid.dial` / `use_gui_combo.dial` / `use_gui_list.dial` /
+`use_gui_wheel.dial` 各含独立 offscreen 画布，断言经 `grep ' = bad'` 计失败、
+`grep -qF` 钉关键输出、CRC 用 `expect_str(str(crc), "N", "x_crc_pinned")` 钉死像素级
+基准——
+
+- **GRID**：`set_grid` / `set_grid_cell` 越界 Fail-Fast、`set_layout(3)` 接受 /
+  `set_layout(99)` 拒绝、2×2 每格 100×100 / gap10 每格 95×95 / `cspan=2` 占满整行、
+  离屏 CRC 钉值 `4049314674`，全绿。
+- **ComboBox**：`kind=10` 合法 / 12 拒、项增删 / 容量上界、单选 `select` / `selected`、
+  `open` / `close` / `is_open`、clear 复位、点击框体切展开、下拉项命中选中发
+  `SELECTED`（订阅后验 `signal.a == item id`）、离屏 CRC 钉值 `3235232961`，全绿。
+- **ListBox**：`kind=11` 合法、单选 / 多选 `toggle` / `is_selected` / `selected_count` /
+  `selected_first`、点击行选中发 `SELECTED`、离屏 CRC 钉值 `3941106424`，全绿。
+- **右键·滚轮**：SLIDER 滚轮上(4) / 下(5)滚动 `step=1`、clamp 不越界、右键(3)置
+  `right_pressed` 且不改 left pressed、RELEASE(3) 清除、滚轮落非 SLIDER 零影响、
+  离屏 CRC 钉值 `2509410687`，全绿。
+
+**宪法**：只追加 23 个 `extern fn`，旧 279 个签名一字不动；`abi = 6` /
+`version = 1.10.0` 不变；**不新增 `.c` 文件**，`build.sh` 源清单不变，三平台 `.a` 重建后
+仍是零链接期 GUI 平台符号、零反向回调；未打 tag、未发 Release。
