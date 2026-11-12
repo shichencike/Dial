@@ -22,7 +22,7 @@
 
 ## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）
 
-**主题：手搓 GUI 十五层（七层 C 契约 + 第 9/10/11/12/13/14/15 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统 + 第 8 层 Dial 侧 OO 封装）+ 工具链强化（`dialc fmt` 间距规范化 / `dialc pack` 自动扫描·预览·校验）+ 工具链再强化（`dialc doctor` 环境自检 / `deps` 三级 import 依赖图 / 统一诊断人读·JSON 机读 / `watch`·`clean`·`completion` 开发循环）——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
+**主题：手搓 GUI 十五层（七层 C 契约 + 第 9/10/11/12/13/14/15 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统 + 第 8 层 Dial 侧 OO 封装）+ 工具链强化（`dialc fmt` 间距规范化 / `dialc pack` 自动扫描·预览·校验）+ 工具链再强化（`dialc doctor` 环境自检 / `deps` 三级 import 依赖图 / 统一诊断人读·JSON 机读 / `watch`·`clean`·`completion` 开发循环）+ LSP 再强化（诊断码表 CLI/LSP 同源 / 增量文档同步 / 工作区文件监视 / 文档内高亮）——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
 + 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）
 + 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）
@@ -116,10 +116,30 @@
 > 工具链强化（`dialc fmt` / `dialc pack`，README §34.10）给 Q 组新增 11 条
 > 断言，扩为 **三十组 / 587 ✅**（按组累加口径，回归脚本当时实测 586 ✅）；随后
 > 工具链再强化（README §34.11）给 Q 组新增 19 条断言，扩为 **三十组 / 605 ✅**
-> （本节起统一以 `tests/run_tests.sh` 实测为准：586 ✅ + 19 = 605 ✅）。
+> （本节起统一以 `tests/run_tests.sh` 实测为准：586 ✅ + 19 = 605 ✅）；随后 LSP
+> 再强化（README §28.7.2）给三个冒烟脚本新增 7 条断言，扩为
+> **三十组 / 612 ✅**（605 ✅ + 7 = 612 ✅）。
 > 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
+
+- **LSP 再强化：诊断一体化 / 增量同步 / 文件监视 / 文档内高亮**（README §28.7.2）：
+  - **码表同源**：`src/diagnostic.rs::stable_code(msg, fallback)` 公开，CLI `report()`
+    与 LSP `diagnostic()` 共用；诊断新增 `codeDescription.href`。同一个错误在
+    命令行 stderr 与编辑器红线里是同一个 `code`。
+  - **增量同步**：`textDocumentSync.change` 由 `1` → `2`；`didChange` 逐条应用
+    `contentChanges`，带 `range` 的经 `index::utf16_to_char_col()` 把 UTF-16 列换成
+    字节偏移后打补丁，不带 `range` 的全量 change 仍兼容。
+  - **文件监视**：`workspace/didChangeWatchedFiles` 收到后对全部已打开文档重跑索引与
+    诊断；服务端不擅自注册全局 watcher，不侵入客户端配置。
+  - **文档内高亮**：新增 `textDocument/documentHighlight`（无条件广播能力），
+    光标下标识符经 `identifier_at()` 取名、编译器词法器扫同名 `Ident` token 出 range。
+  - **防漂移**：README §28.4「增量文档同步没做」表格行、§28.7.1 的
+    `{openClose, change: 1, save}`、§28.2 能力协商表三处同步改写；
+    CHANGELOG v0.98.1 历史条目加注 v1.10 变更。
+  - **回归**：三个 LSP 冒烟脚本新增 7 条断言；`lsp_full_smoke.py` 能力清单与
+    CONFORM 表补 `documentHighlight`；全量 **612 ✅ / 0 ❌**；stdout 协议流纯净性
+    静态 / 动态双守卫仍全过。
 
 - **工具链再强化：`doctor` / `deps` / 统一诊断 / `watch` / `clean` / `completion`**（README §34.11）：
   - 新增 `src/toolchain.rs`：五个命令共用 `COMMANDS` 元数据（`help` / `completion` /
@@ -1791,7 +1811,7 @@
   一处写「声明 `textDocumentSync = 1`（全量同步）」，另一处写「必须用选项形式
   `{openClose, change: 1, save}`，不能用纯数字 1」。后者才是对的
   （纯数字形式没有 `save` 字段，客户端不会发 `didSave`，诊断刷新会静默失效）。
-  现按后者统一。
+  现按后者统一。（v1.10 起 `change` 升为 `2` = Incremental，选项形式不变，见 §28.7.2）
 - **CHANGELOG 缺 v0.98.1 条目**：v0.98.1 已实际发布（tag `v0.98.1`），
   但本文件顶部仍是 `[v0.98]`。现补上本条目。
 - **README §23 的版本号规则与 v0.98.1 冲突**：原规则写死「最多两位小数、

@@ -36,7 +36,7 @@
 </ul>
 </div>
 <h2 id="未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</h2>
-<p><strong>主题：手搓 GUI 十五层（七层 C 契约 + 第 9/10/11/12/13/14/15 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统 + 第 8 层 Dial 侧 OO 封装）+ 工具链强化（<code>dialc fmt</code> 间距规范化 / <code>dialc pack</code> 自动扫描·预览·校验）+ 工具链再强化（<code>dialc doctor</code> 环境自检 / <code>deps</code> 三级 import 依赖图 / 统一诊断人读·JSON 机读 / <code>watch</code>·<code>clean</code>·<code>completion</code> 开发循环）——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
+<p><strong>主题：手搓 GUI 十五层（七层 C 契约 + 第 9/10/11/12/13/14/15 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统 + 第 8 层 Dial 侧 OO 封装）+ 工具链强化（<code>dialc fmt</code> 间距规范化 / <code>dialc pack</code> 自动扫描·预览·校验）+ 工具链再强化（<code>dialc doctor</code> 环境自检 / <code>deps</code> 三级 import 依赖图 / 统一诊断人读·JSON 机读 / <code>watch</code>·<code>clean</code>·<code>completion</code> 开发循环）+ LSP 再强化（诊断码表 CLI/LSP 同源 / 增量文档同步 / 工作区文件监视 / 文档内高亮）——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
 + 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）
 + 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）
@@ -129,12 +129,35 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
 工具链强化（<code>dialc fmt</code> / <code>dialc pack</code>，README §34.10）给 Q 组新增 11 条
 断言，扩为 <strong>三十组 / 587 ✅</strong>（按组累加口径，回归脚本当时实测 586 ✅）；随后
 工具链再强化（README §34.11）给 Q 组新增 19 条断言，扩为 <strong>三十组 / 605 ✅</strong>
-（本节起统一以 <code>tests/run_tests.sh</code> 实测为准：586 ✅ + 19 = 605 ✅）。
+（本节起统一以 <code>tests/run_tests.sh</code> 实测为准：586 ✅ + 19 = 605 ✅）；随后 LSP
+再强化（README §28.7.2）给三个冒烟脚本新增 7 条断言，扩为
+<strong>三十组 / 612 ✅</strong>（605 ✅ + 7 = 612 ✅）。
 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>
 <ul>
-<li><strong>工具链再强化：<code>doctor</code> / <code>deps</code> / 统一诊断 / <code>watch</code> / <code>clean</code> / <code>completion</code></strong>（README §34.11）：</li>
+<li><strong>LSP 再强化：诊断一体化 / 增量同步 / 文件监视 / 文档内高亮</strong>（README §28.7.2）：</li>
+<li><strong>码表同源</strong>：<code>src/diagnostic.rs::stable_code(msg, fallback)</code> 公开，CLI <code>report()</code>
+    与 LSP <code>diagnostic()</code> 共用；诊断新增 <code>codeDescription.href</code>。同一个错误在
+    命令行 stderr 与编辑器红线里是同一个 <code>code</code>。</li>
+<li><strong>增量同步</strong>：<code>textDocumentSync.change</code> 由 <code>1</code> → <code>2</code>；<code>didChange</code> 逐条应用
+    <code>contentChanges</code>，带 <code>range</code> 的经 <code>index::utf16_to_char_col()</code> 把 UTF-16 列换成
+    字节偏移后打补丁，不带 <code>range</code> 的全量 change 仍兼容。</li>
+<li><strong>文件监视</strong>：<code>workspace/didChangeWatchedFiles</code> 收到后对全部已打开文档重跑索引与
+    诊断；服务端不擅自注册全局 watcher，不侵入客户端配置。</li>
+<li><strong>文档内高亮</strong>：新增 <code>textDocument/documentHighlight</code>（无条件广播能力），
+    光标下标识符经 <code>identifier_at()</code> 取名、编译器词法器扫同名 <code>Ident</code> token 出 range。</li>
+<li><strong>防漂移</strong>：README §28.4「增量文档同步没做」表格行、§28.7.1 的
+    <code>{openClose, change: 1, save}</code>、§28.2 能力协商表三处同步改写；
+    CHANGELOG v0.98.1 历史条目加注 v1.10 变更。</li>
+<li>
+<p><strong>回归</strong>：三个 LSP 冒烟脚本新增 7 条断言；<code>lsp_full_smoke.py</code> 能力清单与
+    CONFORM 表补 <code>documentHighlight</code>；全量 <strong>612 ✅ / 0 ❌</strong>；stdout 协议流纯净性
+    静态 / 动态双守卫仍全过。</p>
+</li>
+<li>
+<p><strong>工具链再强化：<code>doctor</code> / <code>deps</code> / 统一诊断 / <code>watch</code> / <code>clean</code> / <code>completion</code></strong>（README §34.11）：</p>
+</li>
 <li>新增 <code>src/toolchain.rs</code>：五个命令共用 <code>COMMANDS</code> 元数据（<code>help</code> / <code>completion</code> /
     <code>doctor</code> 三处命令清单的唯一真相）与本地源码递归；<code>doctor</code> 自检编译器版本 /
     C 编译器与 <code>ar</code> / 包缓存 / 已安装包 manifest + 逐文件 SHA256 / <code>dial.toml</code> /

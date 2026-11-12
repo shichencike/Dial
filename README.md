@@ -3613,7 +3613,7 @@ dialc lsp
 | **悬停（Hover）** | `textDocument/hover` | 显示符号名称、推断类型、声明片段；包符号额外显示 `.diali` 的 `///` 文档并标注「外部函数」 |
 | **跳转定义** | `textDocument/definition` | 文件内符号回本文件精确 `Location`（UTF-16 列换算）；包符号跳进 `.diali` 的声明行 |
 | **基础补全** | `textDocument/completion`（`.` 触发） | 收集光标可见作用域内的全部符号，按已输入前缀过滤；空白光标给全量候选 |
-| 能力协商 | `initialize` | 声明 `textDocumentSync = {openClose: true, change: 1, save: {includeText: false}}`（选项形式：全量同步 + 接收 `didSave`）、语义 token 的 legend，以及 `hoverProvider` / `definitionProvider` / `completionProvider` |
+| 能力协商 | `initialize` | 声明 `textDocumentSync = {openClose: true, change: 2, save: {includeText: false}}`（选项形式：v1.10 起增量同步 + 接收 `didSave`，见 §28.7.2）、语义 token 的 legend，以及 `hoverProvider` / `definitionProvider` / `completionProvider` |
 
 刻意**不**在 `didChange` 时发诊断：打字到一半的代码必然是错的，
 边打边报会让红线在半句话上反复闪。诊断留给保存时——这也是本节标题写「保存时诊断」的原因。
@@ -3651,7 +3651,7 @@ I 组测试因此**同时**放了两行：中文那行证明长度本身没算�
 | 重命名、跨文件引用查找、格式化 | 重命名需要全工作区引用图，当前索引器只建符号、不建引用边；格式化交给编辑器/用户。**v0.98 轮 2（重命名 / 引用）与轮 3（保守格式化）已补上**——重命名靠索引器新增的**引用边**，格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作 |
 | 区分变量名与函数名（高亮上） | 需要符号表。当前标识符一律标 `variable`：**宁可不标，也不标错**（v0.95 的 Hover/补全已能区分种类，但语义高亮的 legend 暂未细分） |
 | 行注释高亮 | 词法器直接丢弃注释、不产 token，语义 token 也就拿不到它。注释高亮交给编辑器的 TextMate 语法（已在扩展里提供），那才是它的主场 |
-| 增量文档同步 | 全量同步（`textDocumentSync` 广告的是选项形式 `{openClose, change: 1, save}`，其中 `change: 1` = Full）对当前规模足够了；增量同步省下的那点带宽，换不来它带来的偏移换算复杂度 |
+| 增量文档同步 | **v1.10 已补上**：`textDocumentSync.change` 由 `1`（Full）升为 `2`（Incremental），按 LSP 的 UTF-16 行列把 `contentChanges[].range` 换算成字节补丁；不带 `range` 的整篇 change 仍兼容（老客户端 / 冒烟脚本）。见 §28.7.2 |
 | 引入 LSP 框架（tower-lsp 等） | 本骨架只需要「读一条 JSON、写一条 JSON」。框架带来的异步运行时与依赖树，远超它省下的那点代码 |
 | 补全时自动补 `import` 语句（`additionalTextEdits`） | 轮 3 规划时留的占位，最终**不做**：插入位置有歧义（文件头？现有 import 之后？），而 Dial 的 `import` 还要求包**已安装**——自动插一行 `import "x";` 却没装包，只会把「缺包」这个真问题推迟到编译期才暴露。更要紧的是 LSP 的 `additionalTextEdits` 会**在用户接受补全时静默改文件**，而用户只请求了「补一个名字」。宁可让用户自己写 import，也不擅自改他没要求改的地方 |
 | 诊断的表达式级精确定位 | 语义错误目前定位到**语句**级（语句带位置，表达式 `Expr` 不带）。要精确到表达式，得给 15 个 `Expr` 变体全部加上位置并贯穿解析器与语义分析器——改动面太大，而收益只是波浪线短几个字符。**先保证「落在正确的语句上」**（旧行为是落在文件开头） |
@@ -3802,6 +3802,9 @@ fn main() {
 | 折叠范围 | ✅ 已实现（轮 4） | 基于作用域包围盒；顶层作用域与单行区间不报 |
 | 选择范围 | ✅ 已实现（轮 4） | 从光标处逐级向外构造嵌套 `SelectionRange`（表达式 → 语句 → 块 → 函数） |
 | 文档链接 | ✅ 已实现（轮 4） | `import "pkg";` 的字符串字面量指向该包的 `.diali` 接口文件，可点击跳转 |
+| 文档内高亮 | ✅ 已实现（v1.10） | `textDocument/documentHighlight`：光标下标识符的全部同名 `Ident` token 返回 range（`kind=1`），复用编译器词法器 |
+| 增量同步 | ✅ 已实现（v1.10） | `textDocumentSync.change = 2`；带 `range` 的 change 按 UTF-16 行列打补丁，全量 change 仍兼容 |
+| 工作区文件感知 | ✅ 已实现（v1.10） | `workspace/didChangeWatchedFiles`：磁盘文件变更后对全部已打开文档重跑索引与诊断 |
 
 > 路线：v0.98 完成**轮 1（基础稳健 + 补全增强 + 三编辑器接通）**、**轮 2（导航全家桶）**、**轮 3（编写辅助）**
 > 与 **轮 4（高级能力）**——循序渐进，每轮可独立验证（见 `tools/lsp_full_smoke.py`）。
@@ -3830,6 +3833,9 @@ fn main() {
 > | `dialc.sema` | 语义错误 |
 > | `dialc.package.missing` | `import` 的包未安装（附 `data.package` 结构化包名） |
 >
+> v1.10 起这些码与 CLI 诊断（§34.11）**共用同一张码表**（`src/diagnostic.rs::stable_code`），
+> 且每条诊断带 `codeDescription.href` 指向仓库文档——同一个错误在命令行与编辑器里拿到同一个 `code`。
+>
 > 工具**应按码处理**，不要去匹配消息文本——消息措辞会随版本调整，改一次就废掉一个工具。
 > 缺包诊断会**真的报出来**（旧行为是被静默吞掉，编辑器里毫无提示），
 > 并且带 `data.package`，于是「安装这个包」的 quickfix 靠结构化数据就能给出，不必猜。
@@ -3845,7 +3851,7 @@ fn main() {
 > `dialc.` 前缀命名空间化，避免与其他服务器的码撞车）；而 `data` 的用途——**在诊断通知与
 > codeAction 请求之间保留结构化数据**——正是我们传包名的做法，一字不差地对上规范。
 >
-> **文档同步用选项形式**：`textDocumentSync` 广告的是 `{openClose, change: 1, save}` 而不是
+> **文档同步用选项形式**：`textDocumentSync` 广告的是 `{openClose, change: 2, save}` 而不是
 > 纯数字 `1`。规范对 `save` 的原文是「*If present save notifications are sent to the server.
 > If omitted the notification should not be sent.*」——纯数字形式里**没有** `save` 这个字段，
 > 客户端据此就不发 `textDocument/didSave`，而诊断正是靠它刷新的。用数字形式的话，
@@ -3865,6 +3871,30 @@ fn main() {
 > 没声明就回退到 `changes`——规范原文：「若客户端既不支持 `documentChanges` 也不支持
 > `workspace.workspaceEdit.resourceOperations`，那么**只有 `changes` 里的纯 TextEdit
 > 是被支持的**」。
+
+#### 28.7.2 v1.10：诊断一体化 / 增量同步 / 文件监视 / 文档内高亮
+
+> 这一轮不动语义、不动索引器、不动 ABI，只把「LSP 与 CLI 各说各话」和
+> 「协议面还缺的几块」补齐。四项都只改 `src/lsp.rs` / `src/diagnostic.rs`，
+> 三个冒烟脚本（`tests/lsp_smoke.py`、`tests/lsp_features.py`、
+> `tools/lsp_full_smoke.py`）同步加断言。
+
+| 项 | 做法 | 为什么 |
+| --- | --- | --- |
+| **诊断码表同源** | `src/diagnostic.rs::stable_code(msg, fallback)` 公开；CLI 的 `report()` 与 LSP 的 `diagnostic()` 共用。错误自带具体码优先，否则按消息阶段推断，最后回退到调用方给的阶段码 | 同一个错误在 `dialc check` 的 stderr 与编辑器红线里必须是同一个 `code`；两份手写码表必然漂移 |
+| `codeDescription.href` | 每条 `publishDiagnostics` 带指向仓库 README 的 `href` | LSP 3.16+ 允许给码附文档链接，编辑器「查看错误说明」有落点 |
+| **增量同步** | `textDocumentSync.change` 由 `1` → `2`；`didChange` 逐条应用 `contentChanges`，带 `range` 的用 `index::utf16_to_char_col()` 把 UTF-16 列换回 Rust char 列后按字节打补丁；不带 `range` 的整篇替换 | 大文件只传差异；同时保留对老客户端 / 冒烟脚本发全量文本的兼容 |
+| **文件监视** | `workspace/didChangeWatchedFiles` 收到后，对**全部**已打开文档重跑 `index_document()` + `publish_diagnostics()` | 包 / 本地模块在磁盘上被改动后，编辑器里的红线要跟着刷新（客户端自带 watcher 即可，服务端不擅自注册全局 watcher） |
+| **文档内高亮** | 新增 `textDocument/documentHighlight`（无条件广播能力）：光标下标识符经 `index::identifier_at()` 取名，再扫编译器词法器的全部 `Ident` token 出同名 range（`kind=1`） | 纯本地词法扫描、零跨文件依赖，边界与编译一致；「宁可不标，也不标错」的纪律不变 |
+
+**边界不变**：诊断仍只在 `didOpen` / `didSave` / `didChangeWatchedFiles` 发布（打字过程不刷屏）；
+stdout 协议流纯净性铁律不变（`check_lsp_stdout_purity.py` 静态守卫 +
+`lsp_full_smoke.py` 动态断言）；`$/cancelRequest` 仍是「接受但不打断」（请求都是微秒级）；
+跨工作区**全量**引用图、递归包内 `src/` 模块索引仍属已知边界（§28.7.1 / §38.14）。
+
+**回归**：三个 LSP 冒烟脚本共新增 7 条断言（增量补丁生效与定位、码表同源、
+`codeDescription`、documentHighlight 命中 2 处、文件监视重诊、能力声明），
+全量 `bash tests/run_tests.sh` 实测 **612 ✅ / 0 ❌ / 三十组**。
 
 ---
 
@@ -4989,7 +5019,9 @@ SSE / AVX / NEON。
 > 7 条打包），扩为 **三十组 / 587 ✅**（按组累加口径，脚本当时实测 586 ✅）；随后
 > 工具链再强化（`doctor` / `deps` / 统一诊断 / `watch` / `clean` / `completion`，
 > §34.11）给 Q 组新增 19 条断言，扩为 **三十组 / 605 ✅**（本节起统一以
-> `tests/run_tests.sh` 实测为准：586 ✅ + 19 = 605 ✅），属
+> `tests/run_tests.sh` 实测为准：586 ✅ + 19 = 605 ✅）；随后 LSP 再强化
+> （§28.7.2）给三个冒烟脚本新增 7 条断言，扩为 **三十组 / 612 ✅**
+> （605 ✅ + 7 = 612 ✅），属
 > **未发布的开发中增量**，见 §5.8 / §25.11 / §34.2 / §34.3 / §34.5 / §34.10 /
 > §37.12 / §38.14 / §38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §38.20 /
 > §38.21 / §37.10 与 CHANGELOG `[未发布]` 段。
@@ -5349,7 +5381,7 @@ Q 组新增 **19 条断言**：help 收录新命令、doctor 人读 / `--json`�
 动作白名单、clean dry-run / `--json` / `--apply`、completion 三 shell / 拒绝未知
 shell / 管道截断不 panic。全量 `bash tests/run_tests.sh` 实测
 **605 ✅ / 0 ❌ / 三十组**；本节起计数统一以回归脚本实测为准（§34.10 此前记的
-587 ✅ 为按组累加口径，586 ✅ + 19 = 605 ✅）。实现落点见 §34.8。
+587 ✅ 为按组累加口径，586 ✅ + 19 = 605 ✅；其后 LSP 再强化 +7 到 612 ✅，见 §28.7.2）。实现落点见 §34.8。
 
 ---
 
@@ -5918,8 +5950,9 @@ fn main(): int {
 （本节记录 B1 落地时的验收快照；其后 GUI 第 8 层 OO 封装新增 AD 组、第 14 层
 窗口级覆盖层自动集成新增 AA 组 3 条断言、第 15 层快捷键 / 命令系统新增 AA 组
 2 条断言、`fmt` / `pack` 强化再新增 Q 组 11 条断言，当前全量
-**605 ✅ / 三十组**（`run_tests.sh` 实测；§34.10 记 587 ✅ 为按组累加口径，
-586 ✅ + 19 = 605 ✅），见 §25.11 / §34.2 / §34.3 / §34.5 / §34.10 / §34.11 / §38.14 /
+**612 ✅ / 三十组**（`run_tests.sh` 实测；§34.10 记 587 ✅ 为按组累加口径，
+586 ✅ + 19 = 605 ✅，LSP 再强化 +7 = 612 ✅），见 §25.11 / §28.7.2 / §34.2 /
+§34.3 / §34.5 / §34.10 / §34.11 / §38.14 /
 §38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §38.20 / §38.21。）
 
 ---

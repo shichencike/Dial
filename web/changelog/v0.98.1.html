@@ -57,7 +57,7 @@
   一处写「声明 <code>textDocumentSync = 1</code>（全量同步）」，另一处写「必须用选项形式
   <code>{openClose, change: 1, save}</code>，不能用纯数字 1」。后者才是对的
   （纯数字形式没有 <code>save</code> 字段，客户端不会发 <code>didSave</code>，诊断刷新会静默失效）。
-  现按后者统一。</li>
+  现按后者统一。（v1.10 起 <code>change</code> 升为 <code>2</code> = Incremental，选项形式不变，见 §28.7.2）</li>
 <li><strong>CHANGELOG 缺 v0.98.1 条目</strong>：v0.98.1 已实际发布（tag <code>v0.98.1</code>），
   但本文件顶部仍是 <code>[v0.98]</code>。现补上本条目。</li>
 <li><strong>README §23 的版本号规则与 v0.98.1 冲突</strong>：原规则写死「最多两位小数、
