@@ -24,14 +24,14 @@
   </div>
 </header>
 
-<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>gui</code></td></tr><tr><td>版本</td><td>1.10.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>246</td></tr><tr><td>来源</td><td><code>packages/gui/gui.diali</code></td></tr></tbody></table><div class="toc">
+<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>gui</code></td></tr><tr><td>版本</td><td>1.10.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>261</td></tr><tr><td>来源</td><td><code>packages/gui/gui.diali</code></td></tr></tbody></table><div class="toc">
 <ul>
 <li><a href="#gui-地基包-gui">GUI 地基包 gui</a></li>
 </ul>
 </div>
 <h2 id="gui-地基包-gui">GUI 地基包 gui</h2>
-<p>不用 Qt / GTK / SDL，<strong>纯 C 手搓</strong>的 GUI 包，前七层 + 第 9/10/11/12/13 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡是 C 契约、
-<strong>共 246 个 <code>extern fn</code></strong>：地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 +
+<p>不用 Qt / GTK / SDL，<strong>纯 C 手搓</strong>的 GUI 包，前七层 + 第 9/10/11/12/13/14 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成是 C 契约、
+<strong>共 261 个 <code>extern fn</code></strong>：地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 +
 命中 + 主动分发）/ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态）/
 输入层（TextBox + 焦点链 + 统一功能键码 + XTest 实窗注入）/ 主题层与控件扩展
 （14 个可覆写颜色角色 + Radio / Slider / ProgressBar）/ 信号槽（6 类可订阅纯值
@@ -43,9 +43,12 @@
 <strong>悬浮提示层</strong>（文本 + 位置 + 尺寸 + 悬停计时，延迟由调用方推进、零时钟依赖，
 零 DISPLAY 依赖，见 §38.17）/
 <strong>状态栏层</strong>（左 / 右文本 + 进度条槽位，进度值越界夹紧，零 DISPLAY 依赖，见 §38.18）/
-<strong>通知气泡层</strong>（FIFO 消息队列 + 生命周期纯值推进、到期自动消隐，零 DISPLAY 依赖，见 §38.19）。
+<strong>通知气泡层</strong>（FIFO 消息队列 + 生命周期纯值推进、到期自动消隐，零 DISPLAY 依赖，见 §38.19）/
+<strong>窗口级覆盖层自动集成</strong>（5 类覆盖层挂到窗口槽位，<code>win.draw()</code> 按固定 z-order 自动叠加：
+滚动条 → 上下文菜单 → 悬浮提示 → 状态栏 → 通知气泡；窗口借用对象、只持指针不释放，
+空槽位零像素影响、既有 CRC 逐字节不破，见 §38.20）。
 <strong>第 8 层是
-Dial 侧 OO 封装层</strong>（<code>gui_oo.dial</code>，245 个 <code>impl</code> 方法把上述 C 风格函数包成 <code>win.draw()</code>
+Dial 侧 OO 封装层</strong>（<code>gui_oo.dial</code>，260 个 <code>impl</code> 方法把上述 C 风格函数包成 <code>win.draw()</code>
 这样的惯用写法，纯 Dial 源码、随包 <code>src/</code> 分发（装包即用）、<strong>零 <code>extern fn</code> 增量、ABI 不变</strong>，见 §38.14）。</p>
 <pre><code class="language-dial">import &quot;gui&quot;;
 
@@ -107,7 +110,8 @@ fn main(): int {
 <a href="../spec.html#3816-右键上下文菜单层第-10-层">§38.16 右键上下文菜单层</a>、
 <a href="../spec.html#3817-悬浮提示层第-11-层">§38.17 悬浮提示层</a>、
 <a href="../spec.html#3818-状态栏层第-12-层">§38.18 状态栏层</a>、
-<a href="../spec.html#3819-通知气泡层第-13-层">§38.19 通知气泡层</a>。</p></main></div>
+<a href="../spec.html#3819-通知气泡层第-13-层">§38.19 通知气泡层</a>、
+<a href="../spec.html#3820-窗口级覆盖层自动集成第-14-层">§38.20 窗口级覆盖层自动集成</a>。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
