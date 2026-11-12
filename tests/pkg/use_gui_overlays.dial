@@ -1,0 +1,133 @@
+// gui.dialpkg 第 14 层：窗口级覆盖层自动集成端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 立场：第 9~13 层对象挂到窗口槽位后，win.draw() 按固定 z-order 自动叠加；
+// 窗口**借用**这些对象（只持指针、不释放），对象生死归应用。空槽位零像素影响。
+// 无 DISPLAY 下窗口建不出来：此时验证 15 个新 API 对空窗口的 Fail-Fast 与
+// 5 个对象仍可独立 new/free；Xvfb 下再验证挂载 / 读回 / 卸载 / 自动绘制 CRC。
+//
+// 语言宪法 §37.1：禁止文件级 var 全局可变状态。本用例只用局部变量与纯函数。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+fn main(): int {
+    var app: GuiApp = dial_gui_app_new();
+    // 无 DISPLAY 时 app_new 返回空句柄：如实标注 skipped，绝不把「未创建」写成断言失败。
+    // （与 use_gui_input / use_gui_menu 等既有实窗用例同口径。）
+    if (is_null(app)) { print("overlays_app = skipped [无 DISPLAY，GUI 应用未创建]"); }
+    else { print("overlays_app = ok"); }
+
+    // 5 个覆盖层对象：纯内存，无 DISPLAY 亦可建。
+    var sc: GuiScroll = dial_gui_scroll_new();
+    var cx: GuiContext = dial_gui_context_new();
+    var tp: GuiTooltip = dial_gui_tooltip_new();
+    var sb: GuiStatusBar = dial_gui_statusbar_new();
+    var ts: GuiToast = dial_gui_toast_new();
+    expect(!is_null(sc), "overlays_scroll_new");
+    expect(!is_null(cx), "overlays_context_new");
+    expect(!is_null(tp), "overlays_tooltip_new");
+    expect(!is_null(sb), "overlays_statusbar_new");
+    expect(!is_null(ts), "overlays_toast_new");
+
+    var win: GuiWindow = dial_gui_window_new(app, "Overlays", 320, 200);
+    if (is_null(win)) {
+        // ---- 无 DISPLAY：窗口路径跳过；15 个 API 对空窗口一律 Fail-Fast ----
+        print("overlays_window = skipped [无 DISPLAY，窗口未创建]");
+        expect_int(dial_gui_window_set_scroll(win, sc), -1, "overlays_set_scroll_null");
+        expect_int(dial_gui_window_set_context(win, cx), -1, "overlays_set_context_null");
+        expect_int(dial_gui_window_set_tooltip(win, tp), -1, "overlays_set_tooltip_null");
+        expect_int(dial_gui_window_set_statusbar(win, sb), -1, "overlays_set_statusbar_null");
+        expect_int(dial_gui_window_set_toast(win, ts), -1, "overlays_set_toast_null");
+        expect(is_null(dial_gui_window_scroll(win)), "overlays_scroll_get_null");
+        expect(is_null(dial_gui_window_context(win)), "overlays_context_get_null");
+        expect(is_null(dial_gui_window_tooltip(win)), "overlays_tooltip_get_null");
+        expect(is_null(dial_gui_window_statusbar(win)), "overlays_statusbar_get_null");
+        expect(is_null(dial_gui_window_toast(win)), "overlays_toast_get_null");
+        expect_int(dial_gui_window_clear_scroll(win), -1, "overlays_clear_scroll_null");
+        expect_int(dial_gui_window_clear_context(win), -1, "overlays_clear_context_null");
+        expect_int(dial_gui_window_clear_tooltip(win), -1, "overlays_clear_tooltip_null");
+        expect_int(dial_gui_window_clear_statusbar(win), -1, "overlays_clear_statusbar_null");
+        expect_int(dial_gui_window_clear_toast(win), -1, "overlays_clear_toast_null");
+    } else {
+        print("overlays_window = ok");
+        var p: GuiPainter = dial_gui_window_painter(win);
+        expect(!is_null(p), "overlays_window_painter");
+        // 空槽位基线：两次 draw 幂等（像素逐字节不变 = 既有 CRC 断言不破）
+        expect_int(dial_gui_window_draw(win), 0, "overlays_draw_empty");
+        var c0: int = dial_gui_painter_crc32(p);
+        expect_int(dial_gui_window_draw(win), 0, "overlays_draw_empty_again");
+        expect(dial_gui_painter_crc32(p) == c0, "overlays_empty_crc_stable");
+
+        // 让 5 个对象都进入「可绘制」状态（各层最少调用）
+        expect_int(dial_gui_scroll_set_viewport(sc, 0, 0, 320, 200), 0, "overlays_scroll_vp");
+        expect_int(dial_gui_scroll_set_content(sc, 640, 400), 0, "overlays_scroll_content");
+        expect_int(dial_gui_scroll_enable(sc, 2, 1), 0, "overlays_scroll_enable");
+        var m: GuiMenu = dial_gui_menu_new();
+        expect_int(dial_gui_menu_add_item(m, 1, "Copy"), 0, "overlays_menu_add");
+        expect_int(dial_gui_context_set_menu(cx, m), 0, "overlays_context_menu");
+        expect_int(dial_gui_context_open(cx, 40, 40), 0, "overlays_context_open");
+        expect_int(dial_gui_tooltip_set_text(tp, "hint"), 0, "overlays_tooltip_text");
+        expect_int(dial_gui_tooltip_tick(tp, 500), 1, "overlays_tooltip_shown");
+        expect_int(dial_gui_statusbar_set_left(sb, "ready"), 0, "overlays_statusbar_text");
+        expect_int(dial_gui_toast_push(ts, "saved", 0, 0), 0, "overlays_toast_push");
+
+        // 逐个挂载 + 读回槽位（同一性用 !is_null 验证，opaque 不能用 ==）
+        expect_int(dial_gui_window_set_scroll(win, sc), 0, "overlays_set_scroll");
+        expect_int(dial_gui_window_set_context(win, cx), 0, "overlays_set_context");
+        expect_int(dial_gui_window_set_tooltip(win, tp), 0, "overlays_set_tooltip");
+        expect_int(dial_gui_window_set_statusbar(win, sb), 0, "overlays_set_statusbar");
+        expect_int(dial_gui_window_set_toast(win, ts), 0, "overlays_set_toast");
+        expect(!is_null(dial_gui_window_scroll(win)), "overlays_scroll_readback");
+        expect(!is_null(dial_gui_window_context(win)), "overlays_context_readback");
+        expect(!is_null(dial_gui_window_tooltip(win)), "overlays_tooltip_readback");
+        expect(!is_null(dial_gui_window_statusbar(win)), "overlays_statusbar_readback");
+        expect(!is_null(dial_gui_window_toast(win)), "overlays_toast_readback");
+
+        // 自动绘制：挂了 5 层后 win.draw() 必须改变像素，且重绘幂等
+        expect_int(dial_gui_window_draw(win), 0, "overlays_draw_mounted");
+        var c1: int = dial_gui_painter_crc32(p);
+        expect(c1 != c0, "overlays_mounted_crc_changed");
+        expect_int(dial_gui_window_draw(win), 0, "overlays_draw_mounted_again");
+        expect(dial_gui_painter_crc32(p) == c1, "overlays_mounted_crc_stable");
+
+        // 逐个卸载（只清槽位、不释放对象）+ 卸载后读回空句柄
+        expect_int(dial_gui_window_clear_scroll(win), 0, "overlays_clear_scroll");
+        expect_int(dial_gui_window_clear_context(win), 0, "overlays_clear_context");
+        expect_int(dial_gui_window_clear_tooltip(win), 0, "overlays_clear_tooltip");
+        expect_int(dial_gui_window_clear_statusbar(win), 0, "overlays_clear_statusbar");
+        expect_int(dial_gui_window_clear_toast(win), 0, "overlays_clear_toast");
+        expect(is_null(dial_gui_window_scroll(win)), "overlays_scroll_cleared");
+        expect(is_null(dial_gui_window_context(win)), "overlays_context_cleared");
+        expect(is_null(dial_gui_window_tooltip(win)), "overlays_tooltip_cleared");
+        expect(is_null(dial_gui_window_statusbar(win)), "overlays_statusbar_cleared");
+        expect(is_null(dial_gui_window_toast(win)), "overlays_toast_cleared");
+        // 清空后 draw 必须回到基线（空槽位零像素影响的硬证据）
+        expect_int(dial_gui_window_draw(win), 0, "overlays_draw_cleared");
+        expect(dial_gui_painter_crc32(p) == c0, "overlays_cleared_crc_restored");
+        expect_int(dial_gui_menu_free(m), 0, "overlays_menu_free");
+    }
+
+    // 借用语义硬证据：应用释放（若有）之后，5 个对象仍归应用、可正常 free。
+    // 无 DISPLAY 下 app 未创建，跳过 app_free 并如实标注；窗口从未挂过对象，
+    // 5 个对象自始至终归应用，独立 free 就是借用语义的直接体现。
+    if (is_null(app)) {
+        print("overlays_app_free = skipped [无 DISPLAY，app 未创建]");
+    } else {
+        expect_int(dial_gui_app_free(app), 0, "overlays_app_free");
+    }
+    expect_int(dial_gui_scroll_free(sc), 0, "overlays_scroll_free");
+    expect_int(dial_gui_context_free(cx), 0, "overlays_context_free");
+    expect_int(dial_gui_tooltip_free(tp), 0, "overlays_tooltip_free");
+    expect_int(dial_gui_statusbar_free(sb), 0, "overlays_statusbar_free");
+    expect_int(dial_gui_toast_free(ts), 0, "overlays_toast_free");
+    print("overlays_done = true");
+    return 0;
+}

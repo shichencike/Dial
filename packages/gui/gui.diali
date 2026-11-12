@@ -1116,3 +1116,39 @@ extern fn dial_gui_toast_tag(t: GuiToast): int;
 /// 队列为空则不绘制（返回 0）。p 为窗口画布。返回 0 / -1。
 extern fn dial_gui_toast_draw(p: GuiPainter, t: GuiToast): int;
 
+// ---- 第 14 层：窗口级覆盖层自动集成（本段 15 个追加 extern fn）------------
+// 第 9~13 层的 5 类覆盖层对象可挂到窗口槽位；挂载后 dial_gui_window_draw
+// 会按固定 z-order（滚动条 → 上下文菜单 → 悬浮提示 → 状态栏 → 通知气泡）
+// 自动叠加绘制。空槽位一律跳过，未挂载任何覆盖层时窗口绘制像素逐字节不变。
+//
+// 语义一律为**借用**：窗口只持指针，不转移所有权、不释放对象；clear_*
+// 只清槽位，对象生死仍归应用（应用还要继续 scroll_to / tick / push 推进它）。
+// 每层三件套：set_* 挂载（空窗口 / 空对象返回 -1）、<layer> 读回槽位
+// （未挂载返回空句柄，可用 is_null 判断）、clear_* 卸载（空窗口返回 -1）。
+// 全部纯值、不读时钟、不捕获鼠标、零平台符号、绝不 C → Dial 反向回调。
+
+/// 挂载 / 读回 / 卸载第 9 层滚动视图覆盖层。
+extern fn dial_gui_window_set_scroll(win: GuiWindow, s: GuiScroll): int;
+extern fn dial_gui_window_scroll(win: GuiWindow): GuiScroll;
+extern fn dial_gui_window_clear_scroll(win: GuiWindow): int;
+
+/// 挂载 / 读回 / 卸载第 10 层右键上下文菜单覆盖层。
+extern fn dial_gui_window_set_context(win: GuiWindow, c: GuiContext): int;
+extern fn dial_gui_window_context(win: GuiWindow): GuiContext;
+extern fn dial_gui_window_clear_context(win: GuiWindow): int;
+
+/// 挂载 / 读回 / 卸载第 11 层悬浮提示覆盖层。
+extern fn dial_gui_window_set_tooltip(win: GuiWindow, t: GuiTooltip): int;
+extern fn dial_gui_window_tooltip(win: GuiWindow): GuiTooltip;
+extern fn dial_gui_window_clear_tooltip(win: GuiWindow): int;
+
+/// 挂载 / 读回 / 卸载第 12 层状态栏覆盖层。
+extern fn dial_gui_window_set_statusbar(win: GuiWindow, sb: GuiStatusBar): int;
+extern fn dial_gui_window_statusbar(win: GuiWindow): GuiStatusBar;
+extern fn dial_gui_window_clear_statusbar(win: GuiWindow): int;
+
+/// 挂载 / 读回 / 卸载第 13 层通知气泡覆盖层。
+extern fn dial_gui_window_set_toast(win: GuiWindow, t: GuiToast): int;
+extern fn dial_gui_window_toast(win: GuiWindow): GuiToast;
+extern fn dial_gui_window_clear_toast(win: GuiWindow): int;
+

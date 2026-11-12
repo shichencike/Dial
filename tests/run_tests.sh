@@ -70,6 +70,9 @@
 #      Xvfb 实窗上屏 + **XTest 真实鼠标/键盘注入**
 #      （xtest_inject.sh：点击聚焦 / 落字 / Tab / Shift+Tab / 按钮激活）/ 无显示
 #      环境自动降级为「窗口路径明确跳过」并如实标注（v1.10 增补）。
+#      另含第 9 ~ 14 层覆盖层 demo（5h ~ 5n）：滚动视图 / 右键上下文菜单 /
+#      悬浮提示 / 状态栏 / 通知气泡 / 窗口级自动集成，纯内存对象 + 离屏 CRC
+#      锁定，第 14 层另在 Xvfb 实窗验证固定 z-order 自动绘制与借用语义。
 #   AB. int32 / float32 一等类型：零隐式转换 + 显式转换内建 + 同类算术/比较/打印，
 #       FFI 精确 32 位宽度（C 侧按 int32_t/float 读参数·返回值·多参数·
 #       extern struct sizeof/offsetof 与双向字段读写）/ 越界 Fail-Fast /
@@ -81,8 +84,8 @@
 #       dial_gui_window_draw(win)）/ 默认实参 / 容器 push 同名方法隔离 /
 #       6 个 Fail-Fast 负向 + 诊断面向用户（不暴露 mangle 名、参数不含 self）
 #       （v1.10 开发中增量）。
-#   AD. GUI 第 8 层 Dial 侧 OO 封装：packages/gui/src/gui_oo.dial 用 245 个 impl
-#       方法包住 246 个 C 风格 extern fn（纯 Dial 源码、随包 src/ 分发、ABI 不变）；
+#   AD. GUI 第 8 层 Dial 侧 OO 封装：packages/gui/src/gui_oo.dial 用 260 个 impl
+#       方法包住 261 个 C 风格 extern fn（纯 Dial 源码、随包 src/ 分发、ABI 不变）；
 #       契约审计（方法数 / 全覆盖 / 零 extern 声明）、无 DISPLAY 纯内存路径 +
 #       C 风格与 OO 风格绘制 CRC32 逐字节相等、随包 src/ 装包即用（不复制源码，
 #       输出与本地副本逐字节一致）、Xvfb 实窗覆盖层与信号队列、
@@ -2046,7 +2049,7 @@ zpass "crypto 包已卸载"
 # AA) 手搓 GUI 六层：地基 + 控件框架 + 成品外观 + 输入层 + 主题层/控件扩展 + 信号槽
 #     （gui.dialpkg 端到端，v1.10 增补）
 # ---------------------------------------------------------------------------
-echo "== AA) 手搓 GUI 六层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制 / TextBox 输入与焦点链 / 主题色可覆写 + Radio·Slider·Progress / 6 类可订阅纯值信号 · 环形队列 / XTest 实窗注入，v1.10 增补） =="
+echo "== AA) 手搓 GUI 六层 + 第 9~14 层覆盖层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制 / TextBox 输入与焦点链 / 主题色可覆写 + Radio·Slider·Progress / 6 类可订阅纯值信号 · 环形队列 / XTest 实窗注入 / 覆盖层纯内存离屏 CRC / 窗口级自动集成固定 z-order，v1.10 增补） =="
 aapass() { echo "  ✅ $1"; }
 aabad()  { echo "  ❌ $1"; fail=1; }
 
@@ -2441,6 +2444,39 @@ if "$DIALC" build tests/pkg/use_gui_toast.dial -o "${TMP}/use_gui_toast" >"${TMP
     fi
 else aabad "use_gui_toast.dial 编译失败"; tail -20 "${TMP}/aa_ocomp.log"; fi
 
+# 5m) 第 14 层窗口级覆盖层自动集成：无 DISPLAY 路径——5 类对象纯内存可建，
+#     15 个新 API 对空窗口一律 Fail-Fast，应用未创建时如实 skipped，对象仍可独立 free。
+#     给 AA 组 +2 条 aapass（编译 / 无 DISPLAY 断言）。
+if "$DIALC" build tests/pkg/use_gui_overlays.dial -o "${TMP}/use_gui_overlays" >"${TMP}/aa_vcomp.log" 2>&1; then
+    aapass "use_gui_overlays.dial（第 14 层窗口级覆盖层自动集成）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_overlays" >"${TMP}/aa_vnodisplay.log" 2>&1
+    aa_v_no_exit=$?
+    aa_v_bad=$(grep -c ' = bad' "${TMP}/aa_vnodisplay.log" || true)
+    if [ "$aa_v_no_exit" -eq 0 ] && [ "$aa_v_bad" -eq 0 ] \
+       && grep -qF 'overlays_scroll_new = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_toast_new = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_set_scroll_null = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_set_context_null = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_set_tooltip_null = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_set_statusbar_null = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_set_toast_null = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_scroll_get_null = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_toast_get_null = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_clear_scroll_null = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_clear_toast_null = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_app = skipped' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_window = skipped' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_app_free = skipped' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_scroll_free = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_toast_free = ok' "${TMP}/aa_vnodisplay.log" \
+       && grep -qF 'overlays_done = true' "${TMP}/aa_vnodisplay.log"; then
+        aapass "无 DISPLAY：15 个窗口覆盖层 API 空窗口 Fail-Fast / 5 类对象纯内存可建并独立 free / 应用未创建如实 skipped 全绿"
+    else
+        aabad "第 14 层无 DISPLAY 路径断言失败（exit=$aa_v_no_exit bad=$aa_v_bad）"
+        tail -40 "${TMP}/aa_vnodisplay.log"
+    fi
+else aabad "use_gui_overlays.dial 编译失败"; tail -20 "${TMP}/aa_vcomp.log"; fi
+
 # 5) 有 Xvfb 时验证真实窗口（XShm 离屏 + XRender 合成 + 上屏 / 过滤 / 事件循环）；
 #    无 Xvfb 的环境如实打印跳过，绝不把「未验证」写成「通过」。
 if command -v xvfb-run >/dev/null 2>&1; then
@@ -2637,6 +2673,49 @@ else
     echo "  ⚠️  本环境无 xvfb-run：第 7 层实窗路径未实机验证（如实标注，不伪装通过）"
 fi
 
+# 5n) 第 14 层 Xvfb 实窗：5 类覆盖层挂到窗口槽位后，win.draw() 按固定 z-order
+#     自动叠加；空槽位两次 draw CRC 稳定，挂载后 CRC 改变且重绘幂等，清空后 CRC
+#     回到基线；clear 只清槽位不释放对象，app_free 之后 5 个对象仍可 free（借用语义）。
+#     给 AA 组 +1 条 aapass。
+if command -v xvfb-run >/dev/null 2>&1; then
+    if xvfb-run -a -s "-screen 0 1024x768x24 +extension MIT-SHM +extension RENDER" \
+        "${TMP}/use_gui_overlays" >"${TMP}/aa_vxvfb.log" 2>&1; then
+        aa_v_bad2=$(grep -c ' = bad' "${TMP}/aa_vxvfb.log" || true)
+        if [ "$aa_v_bad2" -eq 0 ] \
+           && grep -qF 'overlays_app = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_window = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_window_painter = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_draw_empty = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_empty_crc_stable = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_set_scroll = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_set_toast = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_scroll_readback = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_toast_readback = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_draw_mounted = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_mounted_crc_changed = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_mounted_crc_stable = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_clear_scroll = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_clear_toast = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_scroll_cleared = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_toast_cleared = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_cleared_crc_restored = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_menu_free = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_app_free = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_scroll_free = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_toast_free = ok' "${TMP}/aa_vxvfb.log" \
+           && grep -qF 'overlays_done = true' "${TMP}/aa_vxvfb.log" \
+           && ! grep -qF 'skipped' "${TMP}/aa_vxvfb.log"; then
+            aapass "Xvfb 实窗：5 类覆盖层自动叠加 / 固定 z-order / 空槽位零像素影响 / 挂载 CRC 改变且重绘幂等 / 清空 CRC 回基线 / 借用语义全通过"
+        else
+            aabad "第 14 层 Xvfb 实窗断言失败（bad=$aa_v_bad2）"; tail -30 "${TMP}/aa_vxvfb.log"
+        fi
+    else
+        aabad "Xvfb 下 use_gui_overlays 运行失败"; tail -20 "${TMP}/aa_vxvfb.log"
+    fi
+else
+    echo "  ⚠️  本环境无 xvfb-run：第 14 层实窗路径未实机验证（如实标注，不伪装通过）"
+fi
+
 # 6) 清理：卸包，避免污染后续测试与用户环境。
 "$DIALC" uninstall gui >/dev/null 2>&1 || true
 aapass "gui 包已卸载"
@@ -2773,7 +2852,7 @@ else
 fi
 
 # ===========================================================================
-echo "== AD) GUI 第 8 层 OO 封装：245 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
+echo "== AD) GUI 第 8 层 OO 封装：260 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
 adpass() { echo "  ✅ $1"; }
 adbad()  { echo "  ❌ $1"; fail=1; }
 
@@ -2788,8 +2867,8 @@ cp tests/oo/use_gui_oo.dial "$AD_DIR/"
     && "$DIALC" install "${TMP}/ad_gui.dialpkg" >"${TMP}/ad_install.log" 2>&1 \
     || { adbad "gui.dialpkg 打包或安装失败（AD 组）"; tail -6 "${TMP}/ad_pack.log" "${TMP}/ad_install.log"; }
 
-# 1) 契约防漂移审计：245 个方法恰好覆盖 245 个 extern fn（入口 app_new 除外），
-#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 246 个签名。
+# 1) 契约防漂移审计：260 个方法恰好覆盖 260 个 extern fn（入口 app_new 除外），
+#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 261 个签名。
 ad_diag=$(grep '^extern fn' packages/gui/gui.diali | sed -E 's/^extern fn ([A-Za-z0-9_]+).*/\1/' \
           | grep -v '^dial_gui_app_new$' | sort -u)
 ad_refs=$(grep '^    fn ' packages/gui/src/gui_oo.dial | grep -oE 'dial_gui_[A-Za-z0-9_]+' | sort -u)
@@ -2797,9 +2876,9 @@ ad_methods=$(grep -c '^    fn ' packages/gui/src/gui_oo.dial)
 ad_diag_n=$(echo "$ad_diag" | wc -l)
 ad_iface_n=$(grep -c '^extern fn' packages/gui/gui.diali)
 ad_oo_decl=$(grep -c '^extern fn' packages/gui/src/gui_oo.dial || true)
-if [ "$ad_methods" -eq 245 ] && [ "$ad_diag_n" -eq 245 ] && [ "$ad_iface_n" -eq 246 ] \
+if [ "$ad_methods" -eq 260 ] && [ "$ad_diag_n" -eq 260 ] && [ "$ad_iface_n" -eq 261 ] \
    && [ "$ad_oo_decl" -eq 0 ] && [ "$ad_diag" = "$ad_refs" ]; then
-    adpass "契约审计：245 个 impl 方法全覆盖 245 个 extern fn、gui.diali 共 246 个签名、封装层零 extern 声明（ABI 不变）"
+    adpass "契约审计：260 个 impl 方法全覆盖 260 个 extern fn、gui.diali 共 261 个签名、封装层零 extern 声明（ABI 不变）"
 else
     adbad "契约审计不通过：methods=$ad_methods diag=$ad_diag_n iface=$ad_iface_n oo_decl=$ad_oo_decl"
     diff <(echo "$ad_diag") <(echo "$ad_refs") | head -20
@@ -2809,7 +2888,7 @@ fi
 if ! "$DIALC" build "$AD_DIR/use_gui_oo.dial" -o "${TMP}/ad_oo_run" >"${TMP}/ad_build.log" 2>&1; then
     adbad "use_gui_oo.dial 编译失败"; tail -20 "${TMP}/ad_build.log"
 else
-    adpass "OO 封装层 + 用例编译成功（245 个 impl 方法签名全部通过）"
+    adpass "OO 封装层 + 用例编译成功（260 个 impl 方法签名全部通过）"
     if ! env -u DISPLAY "${TMP}/ad_oo_run" >"${TMP}/ad_nodisp.out" 2>&1; then
         adbad "use_gui_oo 无 DISPLAY 运行非零退出"; tail -20 "${TMP}/ad_nodisp.out"
     elif grep -q '= bad' "${TMP}/ad_nodisp.out" \

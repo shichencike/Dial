@@ -375,6 +375,19 @@ int gui_window_draw(GuiWindowImpl *win) {
         gui_menu_draw_popup(p, win->popup, win->popup_x, win->popup_y);
     if (win->dialog && win->dialog->open)
         gui_dialog_draw(p, win->dialog, win->w, win->h);
+    /* ---- 第 9~13 层：借用型覆盖层，按固定顺序叠加（空槽位一律跳过）------ *
+     * 顺序即 z-order：滚动条 → 上下文菜单 → 悬浮提示 → 状态栏 → 通知气泡。
+     * 各 draw 自身在未启用 / 未达延迟 / 无文本 / 队列为空时返回 0 且不落笔，
+     * 故「挂了对象但当前不该显示」同样零像素影响；未挂载任何覆盖层时
+     * 本函数逐字节保持原样（既有 CRC 断言不破）。*/
+    if (win->scroll) {
+        dial_gui_scroll_draw_bar(p, win->scroll, 0);   /* 水平滚动条 */
+        dial_gui_scroll_draw_bar(p, win->scroll, 1);   /* 垂直滚动条 */
+    }
+    if (win->context)   dial_gui_context_draw(p, win->context);
+    if (win->tooltip)   dial_gui_tooltip_draw(p, win->tooltip);
+    if (win->statusbar) dial_gui_statusbar_draw(p, win->statusbar, win->w);
+    if (win->toast)     dial_gui_toast_draw(p, win->toast);
     return 0;
 }
 

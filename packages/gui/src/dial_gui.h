@@ -219,7 +219,16 @@ struct GuiWindowImpl {
     int           popup_x, popup_y;   /* 弹出菜单锚点（窗口内坐标）*/
     int           menubar_h;   /* 顶栏高度（固定，默认 22）*/
     GuiDialog    *dialog;      /* 当前模态对话框覆盖层（可空）*/
-    GuiScroll    *scroll;      /* 第 9 层：主滚动视图覆盖层（可空，窗口拥有）*/
+    /* ---- 第 9~13 层：借用型覆盖层（窗口只持指针，不拥有、不释放）-------- *
+     * 与上面第 7 层「窗口拥有」不同：这些对象是应用 `*_new()` 出来的纯内存
+     * 对象，应用还要继续 `scroll_to` / `tick` / `push` 推进它们，故窗口绝不
+     * 接管其生死；`clear_*` 只清槽位。空槽位一律跳过绘制——未挂载任何
+     * 覆盖层时 `gui_window_draw` 的像素逐字节不变（既有 CRC 断言不破）。*/
+    GuiScroll    *scroll;      /* 第 9 层：滚动视图（可空）*/
+    GuiContext   *context;     /* 第 10 层：右键上下文菜单（可空）*/
+    GuiTooltip   *tooltip;     /* 第 11 层：悬浮提示（可空）*/
+    GuiStatusBar *statusbar;   /* 第 12 层：状态栏（可空）*/
+    GuiToast     *toast;       /* 第 13 层：通知气泡（可空）*/
 };
 
 struct GuiAppImpl {
@@ -768,5 +777,26 @@ int64_t   dial_gui_toast_spacing(GuiToast *t);
 int64_t   dial_gui_toast_set_tag(GuiToast *t, int64_t tag);
 int64_t   dial_gui_toast_tag(GuiToast *t);
 int64_t   dial_gui_toast_draw(GuiPainterImpl *p, GuiToast *t);
+
+/* ---- 第 14 层：窗口级覆盖层自动集成（借用语义，15 个追加 extern fn）------
+ * 每层三件套：set_* 挂载（不转移所有权）/ <layer> 读回槽位（未挂载返回空
+ * 句柄）/ clear_* 卸载（只清指针，绝不释放对象）。挂载后 `gui_window_draw`
+ * 会按固定顺序自动叠加这 5 层；空槽位零像素影响。C 侧实现在 dial_gui_core.c。
+ */
+int64_t         dial_gui_window_set_scroll(GuiWindowImpl *win, GuiScroll *s);
+GuiScroll      *dial_gui_window_scroll(GuiWindowImpl *win);
+int64_t         dial_gui_window_clear_scroll(GuiWindowImpl *win);
+int64_t         dial_gui_window_set_context(GuiWindowImpl *win, GuiContext *c);
+GuiContext     *dial_gui_window_context(GuiWindowImpl *win);
+int64_t         dial_gui_window_clear_context(GuiWindowImpl *win);
+int64_t         dial_gui_window_set_tooltip(GuiWindowImpl *win, GuiTooltip *t);
+GuiTooltip     *dial_gui_window_tooltip(GuiWindowImpl *win);
+int64_t         dial_gui_window_clear_tooltip(GuiWindowImpl *win);
+int64_t         dial_gui_window_set_statusbar(GuiWindowImpl *win, GuiStatusBar *sb);
+GuiStatusBar   *dial_gui_window_statusbar(GuiWindowImpl *win);
+int64_t         dial_gui_window_clear_statusbar(GuiWindowImpl *win);
+int64_t         dial_gui_window_set_toast(GuiWindowImpl *win, GuiToast *t);
+GuiToast       *dial_gui_window_toast(GuiWindowImpl *win);
+int64_t         dial_gui_window_clear_toast(GuiWindowImpl *win);
 
 #endif /* DIAL_GUI_H */

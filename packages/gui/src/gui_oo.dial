@@ -15,7 +15,7 @@
 // 第二个 import；随后 dial_gui_app_new() 建 app，其余一律走方法。
 //
 // 映射规则（便于逐条审计）：方法名 = 去掉 `dial_gui_` 与接收者类型前缀后的
-// 剩余部分；第一个形参是 7 个句柄之一时挂到该类型并降为 self，否则归到
+// 剩余部分；第一个形参是 12 个句柄之一时挂到该类型并降为 self，否则归到
 // GuiApp 作命名空间（self 被忽略，语义仍是进程级全局状态 / 工厂）。
 // 两处为绕开保留字改名：widget_select -> select_range（select 是关键字）、
 // menu_add_item 的形参 label -> txt（label 是关键字）；第 10 层 context 的
@@ -29,8 +29,10 @@
 //     也不重新声明 extern fn dial_gui_*（会与 .diali 契约撞名被 Fail-Fast 拒绝）。
 //   - LSP 当前不递归本地源码模块（v1.04 既有局限），CLI build/run/check/test 不受影响。
 //
-// 覆盖：184 个 extern fn -> 183 个方法 + 1 个入口 dial_gui_app_new。
-// （第 8 层 153 + 第 9 层 15 + 第 10 层 15 = 183 个方法）
+// 覆盖：261 个 extern fn -> 260 个方法 + 1 个入口 dial_gui_app_new。
+// （第 8 层 153 + 第 9 层 15 + 第 10 层 15 + 第 11 层 19 + 第 12 层 20 +
+//   第 13 层 23 + 第 14 层 15 = 260 个方法；第 14 层方法挂在第二个
+//   impl GuiWindow 块，见文件末尾。）
 
 import "gui";
 
@@ -341,4 +343,24 @@ impl GuiToast {
     fn set_tag(self, tag: int): int { return dial_gui_toast_set_tag(self, tag); }
     fn tag(self): int { return dial_gui_toast_tag(self); }
     fn draw(self, p: GuiPainter): int { return dial_gui_toast_draw(p, self); }
+}
+
+// ===== GuiWindow —— 第 14 层：窗口级覆盖层自动集成（借用语义，15 个方法）=====
+// 挂上后 win.draw() 会按固定 z-order 自动叠加 5 层；窗口只持指针、不释放对象。
+impl GuiWindow {
+    fn set_scroll(self, s: GuiScroll): int { return dial_gui_window_set_scroll(self, s); }
+    fn scroll(self): GuiScroll { return dial_gui_window_scroll(self); }
+    fn clear_scroll(self): int { return dial_gui_window_clear_scroll(self); }
+    fn set_context(self, c: GuiContext): int { return dial_gui_window_set_context(self, c); }
+    fn context(self): GuiContext { return dial_gui_window_context(self); }
+    fn clear_context(self): int { return dial_gui_window_clear_context(self); }
+    fn set_tooltip(self, t: GuiTooltip): int { return dial_gui_window_set_tooltip(self, t); }
+    fn tooltip(self): GuiTooltip { return dial_gui_window_tooltip(self); }
+    fn clear_tooltip(self): int { return dial_gui_window_clear_tooltip(self); }
+    fn set_statusbar(self, sb: GuiStatusBar): int { return dial_gui_window_set_statusbar(self, sb); }
+    fn statusbar(self): GuiStatusBar { return dial_gui_window_statusbar(self); }
+    fn clear_statusbar(self): int { return dial_gui_window_clear_statusbar(self); }
+    fn set_toast(self, t: GuiToast): int { return dial_gui_window_set_toast(self, t); }
+    fn toast(self): GuiToast { return dial_gui_window_toast(self); }
+    fn clear_toast(self): int { return dial_gui_window_clear_toast(self); }
 }

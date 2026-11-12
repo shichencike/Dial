@@ -262,11 +262,50 @@ int64_t dial_gui_window_close(GuiWindowImpl *win) {
     if (win->menubar) gui_menu_free(win->menubar);
     if (win->popup)   gui_menu_free(win->popup);
     if (win->dialog)  gui_dialog_free(win->dialog);
-    if (win->scroll)  dial_gui_scroll_free(win->scroll);
+    /* 第 9~13 层是**借用**槽位：窗口关闭只丢弃指针，绝不释放对象；
+     * 应用仍持有句柄，可继续 free / 复用（见 dial_gui.h 结构注释）。*/
     free(win);
     gui_core_ok();
     return 0;
 }
+
+/* ---- 第 14 层：窗口级覆盖层挂载（5 层 × set/get/clear，逻辑同构）-------- *
+ * 5 层三件套的实现完全相同，用一个宏一次生成，避免 15 份复制粘贴出现
+ * 「某一层忘了清指针 / 忘了设错误槽」这类不对称缺陷。
+ *
+ * 语义一律为**借用**：窗口只持指针，不转移所有权、不释放对象；clear 只把
+ * 槽位清空。这与第 10 层 GuiContext「set_menu 不转移菜单所有权」的约定一致，
+ * 也避免应用继续 tick / scroll_to / push 时拿到悬空句柄。
+ */
+#define DEFINE_WINDOW_OVERLAY(lname, Type, field)                                  \
+    int64_t dial_gui_window_set_##lname(GuiWindowImpl *win, Type *o) {             \
+        if (!win_ok(win) || !o) {                                                  \
+            gui_core_set_err(GUI_ERR_ARG, "窗口覆盖层挂载失败（空窗口或空对象）");    \
+            return -1;                                                             \
+        }                                                                          \
+        win->field = o;                                                            \
+        gui_core_ok();                                                             \
+        return 0;                                                                  \
+    }                                                                              \
+    Type *dial_gui_window_##lname(GuiWindowImpl *win) {                           \
+        return win_ok(win) ? win->field : NULL;                                    \
+    }                                                                              \
+    int64_t dial_gui_window_clear_##lname(GuiWindowImpl *win) {                   \
+        if (!win_ok(win)) {                                                        \
+            gui_core_set_err(GUI_ERR_ARG, "窗口覆盖层卸载失败（空窗口）");           \
+            return -1;                                                             \
+        }                                                                          \
+        win->field = NULL;                                                         \
+        gui_core_ok();                                                             \
+        return 0;                                                                  \
+    }
+
+DEFINE_WINDOW_OVERLAY(scroll,    GuiScroll,    scroll)
+DEFINE_WINDOW_OVERLAY(context,   GuiContext,   context)
+DEFINE_WINDOW_OVERLAY(tooltip,   GuiTooltip,   tooltip)
+DEFINE_WINDOW_OVERLAY(statusbar, GuiStatusBar, statusbar)
+DEFINE_WINDOW_OVERLAY(toast,     GuiToast,     toast)
+#undef DEFINE_WINDOW_OVERLAY
 
 /*
  * 返回码统一（与 http/json/crypto 包同口径）：**成功返回 0，失败返回 -1**。
