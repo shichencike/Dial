@@ -377,6 +377,11 @@
 <li><a href="#dialc-pack五个视角一条计划">dialc pack：五个视角，一条计划</a></li>
 </ul>
 </li>
+<li><a href="#3411-工具链再强化自检--依赖图--统一诊断--开发循环v110-增补">34.11 工具链再强化：自检 / 依赖图 / 统一诊断 / 开发循环（v1.10 增补）</a><ul>
+<li><a href="#统一诊断渲染人读--机读">统一诊断渲染（人读 + 机读）</a></li>
+<li><a href="#共用基础设施与边界">共用基础设施与边界</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li><a href="#35-v104-增补dwarf-调试信息与--g并入-v104版本不变">35. v1.04 增补：DWARF 调试信息与 -g（并入 [v1.04]，版本不变）</a><ul>
@@ -8089,7 +8094,10 @@ SSE / AVX / NEON。</p>
 <strong>三十组 / 574 ✅</strong>；随后 GUI 第 15 层快捷键 / 命令系统给 AA 组新增 2 条
 断言（编译成功 / 166 条零 DISPLAY 断言），扩为 <strong>三十组 / 576 ✅</strong>；随后
 <code>dialc fmt</code> 强化与 <code>dialc pack</code> 强化给 Q 组新增 11 条断言（4 条格式化 +
-7 条打包），扩为 <strong>三十组 / 587 ✅</strong>，属
+7 条打包），扩为 <strong>三十组 / 587 ✅</strong>（按组累加口径，脚本当时实测 586 ✅）；随后
+工具链再强化（<code>doctor</code> / <code>deps</code> / 统一诊断 / <code>watch</code> / <code>clean</code> / <code>completion</code>，
+§34.11）给 Q 组新增 19 条断言，扩为 <strong>三十组 / 605 ✅</strong>（本节起统一以
+<code>tests/run_tests.sh</code> 实测为准：586 ✅ + 19 = 605 ✅），属
 <strong>未发布的开发中增量</strong>，见 §5.8 / §25.11 / §34.2 / §34.3 / §34.5 / §34.10 /
 §37.12 / §38.14 / §38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §38.20 /
 §38.21 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
@@ -8176,6 +8184,31 @@ SSE / AVX / NEON。</p>
 <td><code>dialc version \| --version \| -V</code></td>
 <td>版本号</td>
 <td>取自 <code>Cargo.toml</code>，全站唯一真相</td>
+</tr>
+<tr>
+<td><code>dialc doctor [--json]</code></td>
+<td>环境自检（编译器 / C 工具链 / 缓存 / 包完整性 / 清单 / src 解析）</td>
+<td>有 <code>fail</code> 即非零退出；<code>--json</code> 机器可读</td>
+</tr>
+<tr>
+<td><code>dialc deps &lt;文件.dial&gt; [--json]</code></td>
+<td>三级 import 依赖图 + 循环检测</td>
+<td><code>--json</code> 给节点 / 深度 / <code>cycles</code></td>
+</tr>
+<tr>
+<td><code>dialc watch &lt;文件.dial&gt; [--action check\|build\|test] [--interval ms] [--max-ticks N]</code></td>
+<td>变更自动重跑</td>
+<td>限拍退出，动作白名单外拒绝</td>
+</tr>
+<tr>
+<td><code>dialc clean [目录] [--apply] [--json]</code></td>
+<td>清理编译产物</td>
+<td>默认 dry-run，<code>--apply</code> 才删</td>
+</tr>
+<tr>
+<td><code>dialc completion &lt;bash\|zsh\|fish&gt;</code></td>
+<td>生成 shell 补全脚本</td>
+<td>与 <code>help</code> 同源的 <code>COMMANDS</code> 元数据</td>
 </tr>
 <tr>
 <td><code>dialc lsp</code></td>
@@ -8376,12 +8409,22 @@ dial: 未捕获的异常（panic）: something broke
 <tr>
 <td>CLI / 前端</td>
 <td><code>main.rs</code></td>
-<td>命令分派表；<code>frontend()</code> 共用流水线；<code>collect_sources()</code> 递归合并本地模块；<code>check / fmt / test / new / list / uninstall / pack</code></td>
+<td>命令分派表；<code>frontend()</code> 共用流水线；<code>collect_sources()</code> 递归合并本地模块；<code>check / fmt / test / new / list / uninstall / pack / doctor / deps / watch / clean / completion</code>；三处前端错误出口统一走 <code>diagnostic::report()</code></td>
 </tr>
 <tr>
 <td>格式化</td>
 <td><code>src/dialfmt.rs</code>（v1.10 新增）</td>
 <td><code>Word / Op / Raw</code> 片段扫描 + 间距规则；<code>protected_spans()</code> 原文自检；<code>format_source()</code> 幂等重排</td>
+</tr>
+<tr>
+<td>工具链命令</td>
+<td><code>src/toolchain.rs</code>（v1.10 新增）</td>
+<td><code>COMMANDS</code> 元数据；<code>doctor</code> 自检 / <code>deps</code> 三级依赖图 / <code>watch</code> 限拍重跑 / <code>clean</code> dry-run / <code>completion</code> 三 shell；共用本地源码递归</td>
+</tr>
+<tr>
+<td>诊断渲染</td>
+<td><code>src/diagnostic.rs</code>（v1.10 新增）</td>
+<td>人读定位 + 稳定错误码 + caret；<code>DIALC_DIAG_FORMAT=json</code> 一行 JSON；stdout 绝不污染</td>
 </tr>
 <tr>
 <td>打包</td>
@@ -8422,7 +8465,10 @@ dial: 未捕获的异常（panic）: something broke
   <code>new → pack → install → import → uninstall</code> 全链路闭环、<code>pack</code> 拒绝动态库 / 缺字段，
   以及 A7 位置信息断言；v1.10 再补 11 条——<code>fmt --diff</code> / 间距规范化 / 原文保护 /
   编译运行一致（4 条），<code>pack --init</code> 草稿与拒绝覆盖 / <code>--dry-run</code> 预览与未登记提示 /
-  <code>--json</code> 机器可读 / <code>--verify</code> 校验与篡改拦截（7 条）；</li>
+  <code>--json</code> 机器可读 / <code>--verify</code> 校验与篡改拦截（7 条）；再补 19 条——<code>doctor</code> 人读 /
+  <code>--json</code>、<code>deps</code> 三级分类 / <code>--json</code> / 循环引用、统一诊断人读定位 / stdout 干净 /
+  一行 JSON、<code>watch</code> 限拍与动作白名单、<code>clean</code> dry-run / <code>--json</code> / <code>--apply</code>、
+  <code>completion</code> 三 shell / 拒绝未知 shell / 管道截断不 panic（见 §34.11）；</li>
 <li><code>bash tests/run_tests.sh</code> <strong>A–Q 全量回归 0 ❌</strong>；<code>check_version</code> / <code>check_links</code> /
   <code>cve_check</code> 全通过；<code>cargo check</code> 零警告；新增 C 入口经 <code>zig cc</code> 三目标编译通过。</li>
 </ul>
@@ -8532,6 +8578,75 @@ dial: 未捕获的异常（panic）: something broke
 绝不自动塞进去。缺字段 / 缺文件的诊断带具体路径与补齐提示。<code>--verify</code> 对
 被篡改的包返回非零并给出期望 / 实际 SHA256。Q 组新增 7 条断言覆盖草稿生成、
 拒绝覆盖、预览、JSON、未登记提示、正常校验与篡改拦截。</p>
+<h3 id="3411-工具链再强化自检--依赖图--统一诊断--开发循环v110-增补">34.11 工具链再强化：自检 / 依赖图 / 统一诊断 / 开发循环（v1.10 增补）</h3>
+<blockquote>
+<p>§34.10 解决了「格式化太差 / 打包太吃操作」，本轮把另外五件过去只能靠人眼或
+外部脚本的高频动作收进 <code>dialc</code> 自身：环境自检、依赖图、诊断机读、变更自动重跑、
+产物清理与 shell 补全。全部落在 <code>src/toolchain.rs</code> 的<strong>一份命令元数据 + 一套本地
+源码递归</strong>上，<code>src/diagnostic.rs</code> 统一前端错误渲染。<strong>不改 ABI / 版本号 / 任何既有
+命令的默认行为</strong>，也不碰用户已安装包的内容（<code>doctor</code> 只校验、不修复）。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>作用</th>
+<th>边界 / 退出码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dialc doctor [--json]</code></td>
+<td>自检编译器版本 / C 编译器与 <code>ar</code> / 包缓存目录 / 已安装包 manifest + 逐文件 SHA256 / 当前目录 <code>dial.toml</code> / 包内 <code>src</code> 模块解析</td>
+<td>有 <code>fail</code> 项即非零退出；<code>--json</code> 给 <code>healthy</code> / <code>failures</code> / <code>warnings</code> / 逐项 <code>checks</code></td>
+</tr>
+<tr>
+<td><code>dialc deps &lt;文件.dial&gt; [--json]</code></td>
+<td>递归展开<strong>三级 import</strong>：① 本地源码 ② 包内 <code>src</code> 模块 ③ 包名</td>
+<td>复用 <code>import_specs()</code> / <code>is_local_import()</code> / <code>find_src_module()</code>；命中循环标注 <code>cyclic</code> 并停止递归</td>
+</tr>
+<tr>
+<td><code>dialc watch &lt;文件.dial&gt; [--action check\|build\|test] [--interval ms] [--max-ticks N]</code></td>
+<td>监控主文件 + 递归本地模块，mtime / 长度变化即重跑指定动作</td>
+<td><code>--max-ticks</code> 限拍便于 CI 与冒烟；动作白名单外一律拒绝</td>
+</tr>
+<tr>
+<td><code>dialc clean [目录] [--apply] [--json]</code></td>
+<td>清理 <code>.o</code> / <code>.bc</code> / <code>.ll</code> / <code>.dialpkg</code> 编译产物</td>
+<td><strong>默认 dry-run 只列不删</strong>，<code>--apply</code> 才真删；<code>.dial</code> 源码与包缓存绝不触碰</td>
+</tr>
+<tr>
+<td><code>dialc completion &lt;bash\|zsh\|fish&gt;</code></td>
+<td>生成 shell 补全脚本</td>
+<td>命令与选项取自 <code>COMMANDS</code> 元数据，与 <code>help</code> / <code>doctor</code> 同源</td>
+</tr>
+</tbody>
+</table>
+<h4 id="统一诊断渲染人读--机读">统一诊断渲染（人读 + 机读）</h4>
+<p><code>build / run / check / test</code> 的前端错误出口统一交给 <code>diagnostic::report()</code>：</p>
+<ul>
+<li><strong>人读模式</strong>：先把<strong>原消息一字不动</strong>打到 stderr（既有回归按原文匹配，一个字都不能
+  改），再追加 <code>--&gt; 文件:行:列 [稳定错误码]</code>、源码行与 <code>^</code> caret。错误码优先取消息里
+  已有的 <code>dialc.xxx</code>，否则按词法 / 缺包 / 重复定义 / 语法 / 语义阶段推断。</li>
+<li><strong>机读模式</strong>：<code>DIALC_DIAG_FORMAT=json</code> 时 stderr 输出<strong>一行 JSON</strong>——
+  <code>tool / severity / code / message / file / line / col / snippet / caret</code>，供编辑器与
+  CI 直接解析；stdout 始终不被诊断污染（与 <code>lsp</code> 的协议通道同一条纪律）。</li>
+<li><strong>绝不重新判定错误</strong>：行列号与错误码只从 <code>frontend()</code> 汇总后的消息里解析，
+  诊断层不碰语义、不改退出条件。</li>
+</ul>
+<h4 id="共用基础设施与边界">共用基础设施与边界</h4>
+<p><code>COMMANDS</code>（<code>src/toolchain.rs</code>）是 <code>help</code>、<code>completion</code>、<code>doctor</code> 三处命令清单的
+唯一真相，避免多份手写清单漂移；<code>local_file_set()</code> / <code>deps_walk()</code> 复用
+<code>import_specs()</code>、<code>lexer::lex()</code> 与 <code>frontend()</code> 的同一套三级解析路径。<code>completion</code>
+把脚本缓冲后<strong>一次性写出</strong>，因此 <code>dialc completion bash | head</code> 提前关闭管道时
+只忽略一次写错误，不会触发逐行 <code>println!</code> 的 Broken pipe panic。<code>doctor</code> 的
+包完整性校验复用安装期同一套 <code>manifest.txt</code> + 逐文件 SHA256 口径（§25.4）。</p>
+<p>Q 组新增 <strong>19 条断言</strong>：help 收录新命令、doctor 人读 / <code>--json</code>、deps 三级分类 /
+<code>--json</code> 结构 / 循环引用、诊断人读定位 / stdout 干净 / 一行 JSON、watch 限拍与
+动作白名单、clean dry-run / <code>--json</code> / <code>--apply</code>、completion 三 shell / 拒绝未知
+shell / 管道截断不 panic。全量 <code>bash tests/run_tests.sh</code> 实测
+<strong>605 ✅ / 0 ❌ / 三十组</strong>；本节起计数统一以回归脚本实测为准（§34.10 此前记的
+587 ✅ 为按组累加口径，586 ✅ + 19 = 605 ✅）。实现落点见 §34.8。</p>
 <hr />
 <h2 id="35-v104-增补dwarf-调试信息与--g并入-v104版本不变">35. v1.04 增补：DWARF 调试信息与 <code>-g</code>（并入 <code>[v1.04]</code>，版本不变）</h2>
 <blockquote>
@@ -9375,7 +9490,8 @@ fn main(): int {
 （本节记录 B1 落地时的验收快照；其后 GUI 第 8 层 OO 封装新增 AD 组、第 14 层
 窗口级覆盖层自动集成新增 AA 组 3 条断言、第 15 层快捷键 / 命令系统新增 AA 组
 2 条断言、<code>fmt</code> / <code>pack</code> 强化再新增 Q 组 11 条断言，当前全量
-<strong>587 ✅ / 三十组</strong>，见 §25.11 / §34.2 / §34.3 / §34.5 / §34.10 / §38.14 /
+<strong>605 ✅ / 三十组</strong>（<code>run_tests.sh</code> 实测；§34.10 记 587 ✅ 为按组累加口径，
+586 ✅ + 19 = 605 ✅），见 §25.11 / §34.2 / §34.3 / §34.5 / §34.10 / §34.11 / §38.14 /
 §38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §38.20 / §38.21。）</p>
 <hr />
 <h2 id="38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</h2>

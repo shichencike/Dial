@@ -22,7 +22,7 @@
 
 ## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）
 
-**主题：手搓 GUI 十五层（七层 C 契约 + 第 9/10/11/12/13/14/15 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统 + 第 8 层 Dial 侧 OO 封装）+ 工具链强化（`dialc fmt` 间距规范化 / `dialc pack` 自动扫描·预览·校验）——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
+**主题：手搓 GUI 十五层（七层 C 契约 + 第 9/10/11/12/13/14/15 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统 + 第 8 层 Dial 侧 OO 封装）+ 工具链强化（`dialc fmt` 间距规范化 / `dialc pack` 自动扫描·预览·校验）+ 工具链再强化（`dialc doctor` 环境自检 / `deps` 三级 import 依赖图 / 统一诊断人读·JSON 机读 / `watch`·`clean`·`completion` 开发循环）——地基包 `gui.dialpkg` + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
 + 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）
 + 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）
@@ -114,10 +114,31 @@
 > **三十组 / 574 ✅**；随后 GUI 第 15 层快捷键 / 命令系统给 AA 组新增 2 条
 > 断言（编译成功 / 166 条零 DISPLAY 断言），扩为 **三十组 / 576 ✅**；随后
 > 工具链强化（`dialc fmt` / `dialc pack`，README §34.10）给 Q 组新增 11 条
-> 断言，扩为 **三十组 / 587 ✅**。
+> 断言，扩为 **三十组 / 587 ✅**（按组累加口径，回归脚本当时实测 586 ✅）；随后
+> 工具链再强化（README §34.11）给 Q 组新增 19 条断言，扩为 **三十组 / 605 ✅**
+> （本节起统一以 `tests/run_tests.sh` 实测为准：586 ✅ + 19 = 605 ✅）。
 > 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
+
+- **工具链再强化：`doctor` / `deps` / 统一诊断 / `watch` / `clean` / `completion`**（README §34.11）：
+  - 新增 `src/toolchain.rs`：五个命令共用 `COMMANDS` 元数据（`help` / `completion` /
+    `doctor` 三处命令清单的唯一真相）与本地源码递归；`doctor` 自检编译器版本 /
+    C 编译器与 `ar` / 包缓存 / 已安装包 manifest + 逐文件 SHA256 / `dial.toml` /
+    包内 `src` 解析；`deps` 展开三级 import 依赖图（本地源码 / 包内 src / 包名，
+    含循环检测）；`watch` 轮询主文件 + 本地模块并限拍重跑 `check / build / test`；
+    `clean` 默认 dry-run、只删 `.o` / `.bc` / `.ll` / `.dialpkg`；`completion` 生成
+    bash / zsh / fish 补全脚本（缓冲后一次性写出，管道被 `head` 截断不 panic）。
+  - 新增 `src/diagnostic.rs`：统一前端错误渲染。人读模式**原消息一字不动**，追加
+    `文件:行:列` + 稳定错误码 + 源码行 + caret；`DIALC_DIAG_FORMAT=json` 输出一行
+    JSON（`code / line / col / snippet / caret`）供机读，stdout 绝不被污染；只解析
+    行列与错误码，**绝不重新判定错误**。
+  - `main.rs`：三处前端错误出口改调 `diagnostic::report()`；命令分派与 `help` 补五个
+    新命令。`Cargo.toml` `1.10.0`、`abi = 6`、既有命令默认行为、包契约与 sha256
+    口径全部不变；`doctor` 只校验不修复，`clean` 绝不碰 `.dial` 源码与包缓存。
+  - **回归**：Q 组新增 19 条断言，全量 **605 ✅ / 0 ❌**（`run_tests.sh` 实测；
+    §34.10 记 587 ✅ 为按组累加口径，本节起统一实测：586 ✅ + 19 = 605 ✅）；
+    `cargo build --release` 零警告。
 
 - **工具链强化：`dialc fmt` 与 `dialc pack`**（README §34.10）：
   - **`dialc fmt` 间距规范化**：新增 `src/dialfmt.rs`，把每行扫成 `Word / Op / Raw`

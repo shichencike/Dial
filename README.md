@@ -4986,7 +4986,10 @@ SSE / AVX / NEON。
 > **三十组 / 574 ✅**；随后 GUI 第 15 层快捷键 / 命令系统给 AA 组新增 2 条
 > 断言（编译成功 / 166 条零 DISPLAY 断言），扩为 **三十组 / 576 ✅**；随后
 > `dialc fmt` 强化与 `dialc pack` 强化给 Q 组新增 11 条断言（4 条格式化 +
-> 7 条打包），扩为 **三十组 / 587 ✅**，属
+> 7 条打包），扩为 **三十组 / 587 ✅**（按组累加口径，脚本当时实测 586 ✅）；随后
+> 工具链再强化（`doctor` / `deps` / 统一诊断 / `watch` / `clean` / `completion`，
+> §34.11）给 Q 组新增 19 条断言，扩为 **三十组 / 605 ✅**（本节起统一以
+> `tests/run_tests.sh` 实测为准：586 ✅ + 19 = 605 ✅），属
 > **未发布的开发中增量**，见 §5.8 / §25.11 / §34.2 / §34.3 / §34.5 / §34.10 /
 > §37.12 / §38.14 / §38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §38.20 /
 > §38.21 / §37.10 与 CHANGELOG `[未发布]` 段。
@@ -5024,6 +5027,11 @@ SSE / AVX / NEON。
 | `dialc list` | 列出已安装包（名字 / 版本 / ABI / 路径） | 无包时给提示 |
 | `dialc uninstall <包名>` | 删除缓存目录里的包 | 未安装则报错 |
 | `dialc version \| --version \| -V` | 版本号 | 取自 `Cargo.toml`，全站唯一真相 |
+| `dialc doctor [--json]` | 环境自检（编译器 / C 工具链 / 缓存 / 包完整性 / 清单 / src 解析） | 有 `fail` 即非零退出；`--json` 机器可读 |
+| `dialc deps <文件.dial> [--json]` | 三级 import 依赖图 + 循环检测 | `--json` 给节点 / 深度 / `cycles` |
+| `dialc watch <文件.dial> [--action check\|build\|test] [--interval ms] [--max-ticks N]` | 变更自动重跑 | 限拍退出，动作白名单外拒绝 |
+| `dialc clean [目录] [--apply] [--json]` | 清理编译产物 | 默认 dry-run，`--apply` 才删 |
+| `dialc completion <bash\|zsh\|fish>` | 生成 shell 补全脚本 | 与 `help` 同源的 `COMMANDS` 元数据 |
 | `dialc lsp` | 编辑器语言服务器 | stdio 协议，stdout 绝不混入人读文本 |
 
 `build / run / check / test` **共用同一条前端流水线**（`main.rs` 的 `frontend()`）：
@@ -5213,8 +5221,10 @@ dial: 未捕获的异常（panic）: something broke
 
 | 层 | 文件 | 改动 |
 | --- | --- | --- |
-| CLI / 前端 | `main.rs` | 命令分派表；`frontend()` 共用流水线；`collect_sources()` 递归合并本地模块；`check / fmt / test / new / list / uninstall / pack` |
+| CLI / 前端 | `main.rs` | 命令分派表；`frontend()` 共用流水线；`collect_sources()` 递归合并本地模块；`check / fmt / test / new / list / uninstall / pack / doctor / deps / watch / clean / completion`；三处前端错误出口统一走 `diagnostic::report()` |
 | 格式化 | `src/dialfmt.rs`（v1.10 新增） | `Word / Op / Raw` 片段扫描 + 间距规则；`protected_spans()` 原文自检；`format_source()` 幂等重排 |
+| 工具链命令 | `src/toolchain.rs`（v1.10 新增） | `COMMANDS` 元数据；`doctor` 自检 / `deps` 三级依赖图 / `watch` 限拍重跑 / `clean` dry-run / `completion` 三 shell；共用本地源码递归 |
+| 诊断渲染 | `src/diagnostic.rs`（v1.10 新增） | 人读定位 + 稳定错误码 + caret；`DIALC_DIAG_FORMAT=json` 一行 JSON；stdout 绝不污染 |
 | 打包 | `src/pkgbuild.rs` | `dial.toml` TOML 子集解析、`pack` 生成 manifest + SHA256 + zip 并自检、`new` 骨架、`list` / `uninstall`；v1.10 抽出 `plan()` 供 `--dry-run` / `--json` 共用，新增 `--init` / `--verify` |
 | AST / 解析 | `ast.rs` / `parser.rs` | `TestDef` / `Program.tests`；顶层 `test "名" { ... }` 用「Ident + 字符串」识别，零新增关键字 |
 | 语义 | `semantic.rs` | `stmt_pos` 提升为 crate 内可见；D5 诊断文本校正 |
@@ -5229,7 +5239,10 @@ dial: 未捕获的异常（panic）: something broke
   `new → pack → install → import → uninstall` 全链路闭环、`pack` 拒绝动态库 / 缺字段，
   以及 A7 位置信息断言；v1.10 再补 11 条——`fmt --diff` / 间距规范化 / 原文保护 /
   编译运行一致（4 条），`pack --init` 草稿与拒绝覆盖 / `--dry-run` 预览与未登记提示 /
-  `--json` 机器可读 / `--verify` 校验与篡改拦截（7 条）；
+  `--json` 机器可读 / `--verify` 校验与篡改拦截（7 条）；再补 19 条——`doctor` 人读 /
+  `--json`、`deps` 三级分类 / `--json` / 循环引用、统一诊断人读定位 / stdout 干净 /
+  一行 JSON、`watch` 限拍与动作白名单、`clean` dry-run / `--json` / `--apply`、
+  `completion` 三 shell / 拒绝未知 shell / 管道截断不 panic（见 §34.11）；
 - `bash tests/run_tests.sh` **A–Q 全量回归 0 ❌**；`check_version` / `check_links` /
   `cve_check` 全通过；`cargo check` 零警告；新增 C 入口经 `zig cc` 三目标编译通过。
 
@@ -5292,6 +5305,51 @@ dial: 未捕获的异常（panic）: something broke
 被篡改的包返回非零并给出期望 / 实际 SHA256。Q 组新增 7 条断言覆盖草稿生成、
 拒绝覆盖、预览、JSON、未登记提示、正常校验与篡改拦截。
 
+
+### 34.11 工具链再强化：自检 / 依赖图 / 统一诊断 / 开发循环（v1.10 增补）
+
+> §34.10 解决了「格式化太差 / 打包太吃操作」，本轮把另外五件过去只能靠人眼或
+> 外部脚本的高频动作收进 `dialc` 自身：环境自检、依赖图、诊断机读、变更自动重跑、
+> 产物清理与 shell 补全。全部落在 `src/toolchain.rs` 的**一份命令元数据 + 一套本地
+> 源码递归**上，`src/diagnostic.rs` 统一前端错误渲染。**不改 ABI / 版本号 / 任何既有
+> 命令的默认行为**，也不碰用户已安装包的内容（`doctor` 只校验、不修复）。
+
+| 命令 | 作用 | 边界 / 退出码 |
+| --- | --- | --- |
+| `dialc doctor [--json]` | 自检编译器版本 / C 编译器与 `ar` / 包缓存目录 / 已安装包 manifest + 逐文件 SHA256 / 当前目录 `dial.toml` / 包内 `src` 模块解析 | 有 `fail` 项即非零退出；`--json` 给 `healthy` / `failures` / `warnings` / 逐项 `checks` |
+| `dialc deps <文件.dial> [--json]` | 递归展开**三级 import**：① 本地源码 ② 包内 `src` 模块 ③ 包名 | 复用 `import_specs()` / `is_local_import()` / `find_src_module()`；命中循环标注 `cyclic` 并停止递归 |
+| `dialc watch <文件.dial> [--action check\|build\|test] [--interval ms] [--max-ticks N]` | 监控主文件 + 递归本地模块，mtime / 长度变化即重跑指定动作 | `--max-ticks` 限拍便于 CI 与冒烟；动作白名单外一律拒绝 |
+| `dialc clean [目录] [--apply] [--json]` | 清理 `.o` / `.bc` / `.ll` / `.dialpkg` 编译产物 | **默认 dry-run 只列不删**，`--apply` 才真删；`.dial` 源码与包缓存绝不触碰 |
+| `dialc completion <bash\|zsh\|fish>` | 生成 shell 补全脚本 | 命令与选项取自 `COMMANDS` 元数据，与 `help` / `doctor` 同源 |
+
+#### 统一诊断渲染（人读 + 机读）
+
+`build / run / check / test` 的前端错误出口统一交给 `diagnostic::report()`：
+
+- **人读模式**：先把**原消息一字不动**打到 stderr（既有回归按原文匹配，一个字都不能
+  改），再追加 `--> 文件:行:列 [稳定错误码]`、源码行与 `^` caret。错误码优先取消息里
+  已有的 `dialc.xxx`，否则按词法 / 缺包 / 重复定义 / 语法 / 语义阶段推断。
+- **机读模式**：`DIALC_DIAG_FORMAT=json` 时 stderr 输出**一行 JSON**——
+  `tool / severity / code / message / file / line / col / snippet / caret`，供编辑器与
+  CI 直接解析；stdout 始终不被诊断污染（与 `lsp` 的协议通道同一条纪律）。
+- **绝不重新判定错误**：行列号与错误码只从 `frontend()` 汇总后的消息里解析，
+  诊断层不碰语义、不改退出条件。
+
+#### 共用基础设施与边界
+
+`COMMANDS`（`src/toolchain.rs`）是 `help`、`completion`、`doctor` 三处命令清单的
+唯一真相，避免多份手写清单漂移；`local_file_set()` / `deps_walk()` 复用
+`import_specs()`、`lexer::lex()` 与 `frontend()` 的同一套三级解析路径。`completion`
+把脚本缓冲后**一次性写出**，因此 `dialc completion bash | head` 提前关闭管道时
+只忽略一次写错误，不会触发逐行 `println!` 的 Broken pipe panic。`doctor` 的
+包完整性校验复用安装期同一套 `manifest.txt` + 逐文件 SHA256 口径（§25.4）。
+
+Q 组新增 **19 条断言**：help 收录新命令、doctor 人读 / `--json`、deps 三级分类 /
+`--json` 结构 / 循环引用、诊断人读定位 / stdout 干净 / 一行 JSON、watch 限拍与
+动作白名单、clean dry-run / `--json` / `--apply`、completion 三 shell / 拒绝未知
+shell / 管道截断不 panic。全量 `bash tests/run_tests.sh` 实测
+**605 ✅ / 0 ❌ / 三十组**；本节起计数统一以回归脚本实测为准（§34.10 此前记的
+587 ✅ 为按组累加口径，586 ✅ + 19 = 605 ✅）。实现落点见 §34.8。
 
 ---
 
@@ -5860,7 +5918,8 @@ fn main(): int {
 （本节记录 B1 落地时的验收快照；其后 GUI 第 8 层 OO 封装新增 AD 组、第 14 层
 窗口级覆盖层自动集成新增 AA 组 3 条断言、第 15 层快捷键 / 命令系统新增 AA 组
 2 条断言、`fmt` / `pack` 强化再新增 Q 组 11 条断言，当前全量
-**587 ✅ / 三十组**，见 §25.11 / §34.2 / §34.3 / §34.5 / §34.10 / §38.14 /
+**605 ✅ / 三十组**（`run_tests.sh` 实测；§34.10 记 587 ✅ 为按组累加口径，
+586 ✅ + 19 = 605 ✅），见 §25.11 / §34.2 / §34.3 / §34.5 / §34.10 / §34.11 / §38.14 /
 §38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §38.20 / §38.21。）
 
 ---

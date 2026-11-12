@@ -36,7 +36,7 @@
 </ul>
 </div>
 <h2 id="未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</h2>
-<p><strong>主题：手搓 GUI 十五层（七层 C 契约 + 第 9/10/11/12/13/14/15 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统 + 第 8 层 Dial 侧 OO 封装）+ 工具链强化（<code>dialc fmt</code> 间距规范化 / <code>dialc pack</code> 自动扫描·预览·校验）——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
+<p><strong>主题：手搓 GUI 十五层（七层 C 契约 + 第 9/10/11/12/13/14/15 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统 + 第 8 层 Dial 侧 OO 封装）+ 工具链强化（<code>dialc fmt</code> 间距规范化 / <code>dialc pack</code> 自动扫描·预览·校验）+ 工具链再强化（<code>dialc doctor</code> 环境自检 / <code>deps</code> 三级 import 依赖图 / 统一诊断人读·JSON 机读 / <code>watch</code>·<code>clean</code>·<code>completion</code> 开发循环）——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
 + 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）
 + 信号槽 / 控件事件订阅（6 类可订阅纯值信号 + 每树环形队列）
@@ -127,12 +127,36 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
 <strong>三十组 / 574 ✅</strong>；随后 GUI 第 15 层快捷键 / 命令系统给 AA 组新增 2 条
 断言（编译成功 / 166 条零 DISPLAY 断言），扩为 <strong>三十组 / 576 ✅</strong>；随后
 工具链强化（<code>dialc fmt</code> / <code>dialc pack</code>，README §34.10）给 Q 组新增 11 条
-断言，扩为 <strong>三十组 / 587 ✅</strong>。
+断言，扩为 <strong>三十组 / 587 ✅</strong>（按组累加口径，回归脚本当时实测 586 ✅）；随后
+工具链再强化（README §34.11）给 Q 组新增 19 条断言，扩为 <strong>三十组 / 605 ✅</strong>
+（本节起统一以 <code>tests/run_tests.sh</code> 实测为准：586 ✅ + 19 = 605 ✅）。
 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>
 <ul>
-<li><strong>工具链强化：<code>dialc fmt</code> 与 <code>dialc pack</code></strong>（README §34.10）：</li>
+<li><strong>工具链再强化：<code>doctor</code> / <code>deps</code> / 统一诊断 / <code>watch</code> / <code>clean</code> / <code>completion</code></strong>（README §34.11）：</li>
+<li>新增 <code>src/toolchain.rs</code>：五个命令共用 <code>COMMANDS</code> 元数据（<code>help</code> / <code>completion</code> /
+    <code>doctor</code> 三处命令清单的唯一真相）与本地源码递归；<code>doctor</code> 自检编译器版本 /
+    C 编译器与 <code>ar</code> / 包缓存 / 已安装包 manifest + 逐文件 SHA256 / <code>dial.toml</code> /
+    包内 <code>src</code> 解析；<code>deps</code> 展开三级 import 依赖图（本地源码 / 包内 src / 包名，
+    含循环检测）；<code>watch</code> 轮询主文件 + 本地模块并限拍重跑 <code>check / build / test</code>；
+    <code>clean</code> 默认 dry-run、只删 <code>.o</code> / <code>.bc</code> / <code>.ll</code> / <code>.dialpkg</code>；<code>completion</code> 生成
+    bash / zsh / fish 补全脚本（缓冲后一次性写出，管道被 <code>head</code> 截断不 panic）。</li>
+<li>新增 <code>src/diagnostic.rs</code>：统一前端错误渲染。人读模式<strong>原消息一字不动</strong>，追加
+    <code>文件:行:列</code> + 稳定错误码 + 源码行 + caret；<code>DIALC_DIAG_FORMAT=json</code> 输出一行
+    JSON（<code>code / line / col / snippet / caret</code>）供机读，stdout 绝不被污染；只解析
+    行列与错误码，<strong>绝不重新判定错误</strong>。</li>
+<li><code>main.rs</code>：三处前端错误出口改调 <code>diagnostic::report()</code>；命令分派与 <code>help</code> 补五个
+    新命令。<code>Cargo.toml</code> <code>1.10.0</code>、<code>abi = 6</code>、既有命令默认行为、包契约与 sha256
+    口径全部不变；<code>doctor</code> 只校验不修复，<code>clean</code> 绝不碰 <code>.dial</code> 源码与包缓存。</li>
+<li>
+<p><strong>回归</strong>：Q 组新增 19 条断言，全量 <strong>605 ✅ / 0 ❌</strong>（<code>run_tests.sh</code> 实测；
+    §34.10 记 587 ✅ 为按组累加口径，本节起统一实测：586 ✅ + 19 = 605 ✅）；
+    <code>cargo build --release</code> 零警告。</p>
+</li>
+<li>
+<p><strong>工具链强化：<code>dialc fmt</code> 与 <code>dialc pack</code></strong>（README §34.10）：</p>
+</li>
 <li><strong><code>dialc fmt</code> 间距规范化</strong>：新增 <code>src/dialfmt.rs</code>，把每行扫成 <code>Word / Op / Raw</code>
     片段，规范运算符两侧、逗号 / 分号 / 冒号后、控制关键字与 <code>(</code> 之间、大括号两侧
     的空白；字符串 / 字符 / 字节字面量与行注释、跨行块注释作为 <code>Raw</code> 原样保留。
