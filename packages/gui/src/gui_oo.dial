@@ -29,10 +29,11 @@
 //     也不重新声明 extern fn dial_gui_*（会与 .diali 契约撞名被 Fail-Fast 拒绝）。
 //   - LSP 当前不递归本地源码模块（v1.04 既有局限），CLI build/run/check/test 不受影响。
 //
-// 覆盖：261 个 extern fn -> 260 个方法 + 1 个入口 dial_gui_app_new。
+// 覆盖：279 个 extern fn -> 278 个方法 + 1 个入口 dial_gui_app_new。
 // （第 8 层 153 + 第 9 层 15 + 第 10 层 15 + 第 11 层 19 + 第 12 层 20 +
-//   第 13 层 23 + 第 14 层 15 = 260 个方法；第 14 层方法挂在第二个
-//   impl GuiWindow 块，见文件末尾。）
+//   第 13 层 23 + 第 14 层 15 + 第 15 层 18 = 278 个方法；第 14 层方法挂在
+//   第二个 impl GuiWindow 块，第 15 层的 hotkey_new 工厂挂 GuiApp、
+//   其余 17 个方法挂 impl GuiHotkey，见文件末尾。）
 
 import "gui";
 
@@ -363,4 +364,32 @@ impl GuiWindow {
     fn set_toast(self, t: GuiToast): int { return dial_gui_window_set_toast(self, t); }
     fn toast(self): GuiToast { return dial_gui_window_toast(self); }
     fn clear_toast(self): int { return dial_gui_window_clear_toast(self); }
+}
+
+// ===== GuiApp —— 第 15 层快捷键表工厂（1 个方法）============================
+impl GuiApp {
+    fn hotkey_new(self): GuiHotkey { return dial_gui_hotkey_new(); }
+}
+
+// ===== GuiHotkey —— 第 15 层：快捷键 / 命令系统（17 个方法）=================
+// 纯内存表：bind 冲突 Fail-Fast、rebind 覆盖、unbind 压实；lookup 读绑定，
+// dispatch 只发启用且命中的命令。命令语义归应用，C 侧零反向回调。
+impl GuiHotkey {
+    fn free(self): int { return dial_gui_hotkey_free(self); }
+    fn bind(self, key: int, mods: int, cmd: int): int { return dial_gui_hotkey_bind(self, key, mods, cmd); }
+    fn rebind(self, key: int, mods: int, cmd: int): int { return dial_gui_hotkey_rebind(self, key, mods, cmd); }
+    fn unbind(self, key: int, mods: int): int { return dial_gui_hotkey_unbind(self, key, mods); }
+    fn lookup(self, key: int, mods: int): int { return dial_gui_hotkey_lookup(self, key, mods); }
+    fn dispatch(self, key: int, mods: int): int { return dial_gui_hotkey_dispatch(self, key, mods); }
+    fn set_enabled(self, cmd: int, on: int): int { return dial_gui_hotkey_set_enabled(self, cmd, on); }
+    fn is_enabled(self, cmd: int): int { return dial_gui_hotkey_is_enabled(self, cmd); }
+    fn clear(self): int { return dial_gui_hotkey_clear(self); }
+    fn count(self): int { return dial_gui_hotkey_count(self); }
+    fn capacity(self): int { return dial_gui_hotkey_capacity(self); }
+    fn set_tag(self, tag: int): int { return dial_gui_hotkey_set_tag(self, tag); }
+    fn tag(self): int { return dial_gui_hotkey_tag(self); }
+    fn key_at(self, idx: int): int { return dial_gui_hotkey_key_at(self, idx); }
+    fn mods_at(self, idx: int): int { return dial_gui_hotkey_mods_at(self, idx); }
+    fn cmd_at(self, idx: int): int { return dial_gui_hotkey_cmd_at(self, idx); }
+    fn draw(self, p: GuiPainter, x: int, y: int): int { return dial_gui_hotkey_draw(p, self, x, y); }
 }

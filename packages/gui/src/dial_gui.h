@@ -110,6 +110,8 @@ typedef struct GuiTooltip     GuiTooltip;
 typedef struct GuiStatusBar   GuiStatusBar;
 /* 第 13 层：通知气泡 Toast（队列覆盖层，纯内存对象）。*/
 typedef struct GuiToast       GuiToast;
+/* 第 15 层：快捷键 / 命令系统（纯内存表，应用拥有，不挂进窗口槽位）。*/
+typedef struct GuiHotkey      GuiHotkey;
 
 typedef struct GuiBackend GuiBackend;
 
@@ -632,6 +634,27 @@ struct GuiToast {
     int64_t tag;          /* 用户 tag（全宽，可 round-trip）*/
 };
 
+/* ---- 第 15 层：快捷键 / 命令系统（纯内存表）--------------------------------
+ * 编译期定长，无动态扩容，内存上界确定。命令 id 是 [0, GUI_HOTKEY_CMD_MAX)
+ * 内的整数，语义完全归应用；C 侧只管「按键组合 → id」与「id 启用态」。
+ * 绝不保存函数指针 / 绝不 C → Dial 反向回调。
+ */
+#define GUI_HOTKEY_CAP       64
+#define GUI_HOTKEY_CMD_MAX   256
+
+typedef struct GuiHotkeyBind {
+    int64_t key;    /* 统一键码（可打印字符是 Unicode 码点，功能键见 GUI_KEY_*）*/
+    int64_t mods;   /* GUI_MOD_SHIFT / GUI_MOD_CTRL / GUI_MOD_ALT 按位或 */
+    int64_t cmd;    /* 命令 id */
+} GuiHotkeyBind;
+
+struct GuiHotkey {
+    GuiHotkeyBind binds[GUI_HOTKEY_CAP];       /* 按插入顺序，unbind 后前移压实 */
+    int  count;
+    uint8_t enabled[GUI_HOTKEY_CMD_MAX];       /* 每命令启用态，默认 1 */
+    int64_t tag;                               /* 用户 tag（64 位 round-trip）*/
+};
+
 /* 菜单项增删 / 访问（纯内存，无窗口；可在无 DISPLAY 环境单元测试）*/
 GuiMenu  *gui_menu_new(void);
 void      gui_menu_free(GuiMenu *m);
@@ -798,5 +821,29 @@ int64_t         dial_gui_window_clear_statusbar(GuiWindowImpl *win);
 int64_t         dial_gui_window_set_toast(GuiWindowImpl *win, GuiToast *t);
 GuiToast       *dial_gui_window_toast(GuiWindowImpl *win);
 int64_t         dial_gui_window_clear_toast(GuiWindowImpl *win);
+
+/* ---- 第 15 层：快捷键 / 命令系统（18 个追加 extern fn，dial_gui_hotkey.c）----
+ * 纯内存表：bind 冲突 Fail-Fast，rebind 覆盖式，unbind 压实顺序；
+ * lookup 读绑定（不看启用态），dispatch 只发启用且命中的命令。
+ * 所有 : int 一律 int64_t（Dial int 是 64 位，返回 -1 不能被零扩展）。
+ */
+GuiHotkey      *dial_gui_hotkey_new(void);
+int64_t         dial_gui_hotkey_free(GuiHotkey *h);
+int64_t         dial_gui_hotkey_bind(GuiHotkey *h, int64_t key, int64_t mods, int64_t cmd);
+int64_t         dial_gui_hotkey_rebind(GuiHotkey *h, int64_t key, int64_t mods, int64_t cmd);
+int64_t         dial_gui_hotkey_unbind(GuiHotkey *h, int64_t key, int64_t mods);
+int64_t         dial_gui_hotkey_lookup(GuiHotkey *h, int64_t key, int64_t mods);
+int64_t         dial_gui_hotkey_dispatch(GuiHotkey *h, int64_t key, int64_t mods);
+int64_t         dial_gui_hotkey_set_enabled(GuiHotkey *h, int64_t cmd, int64_t on);
+int64_t         dial_gui_hotkey_is_enabled(GuiHotkey *h, int64_t cmd);
+int64_t         dial_gui_hotkey_clear(GuiHotkey *h);
+int64_t         dial_gui_hotkey_count(GuiHotkey *h);
+int64_t         dial_gui_hotkey_capacity(GuiHotkey *h);
+int64_t         dial_gui_hotkey_set_tag(GuiHotkey *h, int64_t tag);
+int64_t         dial_gui_hotkey_tag(GuiHotkey *h);
+int64_t         dial_gui_hotkey_key_at(GuiHotkey *h, int64_t idx);
+int64_t         dial_gui_hotkey_mods_at(GuiHotkey *h, int64_t idx);
+int64_t         dial_gui_hotkey_cmd_at(GuiHotkey *h, int64_t idx);
+int64_t         dial_gui_hotkey_draw(GuiPainterImpl *p, GuiHotkey *h, int64_t x, int64_t y);
 
 #endif /* DIAL_GUI_H */

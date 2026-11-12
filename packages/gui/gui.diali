@@ -1152,3 +1152,52 @@ extern fn dial_gui_window_set_toast(win: GuiWindow, t: GuiToast): int;
 extern fn dial_gui_window_toast(win: GuiWindow): GuiToast;
 extern fn dial_gui_window_clear_toast(win: GuiWindow): int;
 
+// ---- 第 15 层：快捷键 / 命令系统（本段 18 个追加 extern fn）----------------
+// 一张纯内存表把「按键组合 (key, mods) → 命令 id」与「命令启用态」收在一起。
+// 应用从 dial_gui_event_key / event_mods 主动送值，命中且启用时 dispatch 返回
+// 命令 id，语义归应用；C 侧绝不保存函数指针、绝不反向回调 Dial。
+// 纯值、不读时钟、不查系统键盘布局、零平台符号，三平台行为逐字节一致。
+// 表容量 64、命令 id 上界 256，均为编译期常量（内存上界确定，无动态扩容）。
+type GuiHotkey;
+
+/// 建 / 释放快捷键表。命令默认全部启用；空句柄 free 返回 -1。
+extern fn dial_gui_hotkey_new(): GuiHotkey;
+extern fn dial_gui_hotkey_free(h: GuiHotkey): int;
+
+/// 绑定 / 覆盖式重绑 / 解绑一条按键组合。
+/// bind 遇「同一 (key, mods) 已存在」或表满即 Fail-Fast 返回 -1（冲突先 unbind）；
+/// rebind 存在则改命令 id、不存在则新增；unbind 未找到返回 -1，删除后顺序压实。
+/// key 须非负；mods 只能是 1 SHIFT / 2 CTRL / 4 ALT 的按位或；cmd 在 [0, 256)。
+extern fn dial_gui_hotkey_bind(h: GuiHotkey, key: int, mods: int, cmd: int): int;
+extern fn dial_gui_hotkey_rebind(h: GuiHotkey, key: int, mods: int, cmd: int): int;
+extern fn dial_gui_hotkey_unbind(h: GuiHotkey, key: int, mods: int): int;
+
+/// lookup 返回绑定的命令 id（不论启用态），未命中返回 -1；
+/// dispatch 只发「命中且命令启用」的命令 id，其余一律 -1（窗口事件主入口）。
+extern fn dial_gui_hotkey_lookup(h: GuiHotkey, key: int, mods: int): int;
+extern fn dial_gui_hotkey_dispatch(h: GuiHotkey, key: int, mods: int): int;
+
+/// 命令启用态：set 的 on 非 0 启用、0 禁用；is 返回 1 / 0，越界 id 返回 -1。
+extern fn dial_gui_hotkey_set_enabled(h: GuiHotkey, cmd: int, on: int): int;
+extern fn dial_gui_hotkey_is_enabled(h: GuiHotkey, cmd: int): int;
+
+/// 清空所有绑定并把命令启用态复位为全启用；tag 属用户数据，保持不变。
+extern fn dial_gui_hotkey_clear(h: GuiHotkey): int;
+/// 当前绑定数 / 表容量（空句柄返回 -1）。
+extern fn dial_gui_hotkey_count(h: GuiHotkey): int;
+extern fn dial_gui_hotkey_capacity(h: GuiHotkey): int;
+
+/// 用户 tag（64 位，可 round-trip）。
+extern fn dial_gui_hotkey_set_tag(h: GuiHotkey, tag: int): int;
+extern fn dial_gui_hotkey_tag(h: GuiHotkey): int;
+
+/// 按插入顺序读回第 idx 条绑定的键码 / 修饰键掩码 / 命令 id，越界返回 -1。
+extern fn dial_gui_hotkey_key_at(h: GuiHotkey, idx: int): int;
+extern fn dial_gui_hotkey_mods_at(h: GuiHotkey, idx: int): int;
+extern fn dial_gui_hotkey_cmd_at(h: GuiHotkey, idx: int): int;
+
+/// 把整张表按插入顺序绘制成 ASCII 列（每行 "Ctrl+Shift+S -> 7"），
+/// 非空时先擦固定 200×8 行面板再画前 8 条（重绘幂等、绑定变化可观测）；
+/// 空表不绘制（返回 0，零像素影响）。p 为离屏 / 窗口画布。返回 0 / -1。
+extern fn dial_gui_hotkey_draw(p: GuiPainter, h: GuiHotkey, x: int, y: int): int;
+

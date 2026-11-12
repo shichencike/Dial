@@ -1,0 +1,180 @@
+// gui.dialpkg 第 15 层：快捷键 / 命令系统端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 立场与第 9~14 层一致：绝不注册回调，按键组合由 Dial 侧主动送入，命令语义
+// 完全归应用；本层不读时钟、不查系统键盘布局、不捕获鼠标，故行为完全确定、
+// headless 可跑。纯内存对象 + 独立 offscreen 画布，零 DISPLAY 依赖。
+//
+// 关键事实（防漂移）：容量 64、命令 id 上界 256、命令默认全启用；
+// bind 冲突 Fail-Fast、rebind 覆盖、unbind 压实顺序；lookup 不看启用态、
+// dispatch 只发启用且命中的命令；clear 复位启用态但保留 tag；
+// draw 空表零像素影响，非空先擦固定面板再画前 8 行（重绘幂等）。
+//
+// 语言宪法 §37.1：禁止文件级 var 全局可变状态。本用例只用局部变量与纯函数。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+
+fn main(): int {
+    // ============ A) 表生命周期与默认值（纯内存，无 DISPLAY 可跑）============
+    var h: GuiHotkey = dial_gui_hotkey_new();
+    expect(!is_null(h), "hotkey_new");
+    expect_int(dial_gui_hotkey_capacity(h), 64, "hotkey_capacity_64");
+    expect_int(dial_gui_hotkey_count(h), 0, "hotkey_empty_by_default");
+    expect_int(dial_gui_hotkey_tag(h), 0, "hotkey_tag_default_zero");
+    expect_int(dial_gui_hotkey_is_enabled(h, 0), 1, "hotkey_cmd0_enabled_by_default");
+    expect_int(dial_gui_hotkey_is_enabled(h, 255), 1, "hotkey_cmd255_enabled_by_default");
+    expect_int(dial_gui_hotkey_lookup(h, 83, 2), -1, "hotkey_lookup_miss");
+    expect_int(dial_gui_hotkey_dispatch(h, 83, 2), -1, "hotkey_dispatch_miss");
+    expect_int(dial_gui_hotkey_key_at(h, 0), -1, "hotkey_key_at_empty");
+    expect_int(dial_gui_hotkey_mods_at(h, 0), -1, "hotkey_mods_at_empty");
+    expect_int(dial_gui_hotkey_cmd_at(h, 0), -1, "hotkey_cmd_at_empty");
+
+    // ============ B) 绑定 / 查表 / 修饰键精确匹配 ============
+    // 'S' = 83, GUI_MOD_CTRL = 2 -> 命令 7
+    expect_int(dial_gui_hotkey_bind(h, 83, 2, 7), 0, "hotkey_bind_ctrl_s");
+    expect_int(dial_gui_hotkey_count(h), 1, "hotkey_count_1");
+    expect_int(dial_gui_hotkey_key_at(h, 0), 83, "hotkey_key_at0");
+    expect_int(dial_gui_hotkey_mods_at(h, 0), 2, "hotkey_mods_at0");
+    expect_int(dial_gui_hotkey_cmd_at(h, 0), 7, "hotkey_cmd_at0");
+    expect_int(dial_gui_hotkey_lookup(h, 83, 2), 7, "hotkey_lookup_ctrl_s");
+    expect_int(dial_gui_hotkey_dispatch(h, 83, 2), 7, "hotkey_dispatch_ctrl_s");
+    // 修饰键不同即不命中（绝不把 Ctrl+S 当成裸 S）
+    expect_int(dial_gui_hotkey_lookup(h, 83, 0), -1, "hotkey_lookup_bare_s_miss");
+    expect_int(dial_gui_hotkey_dispatch(h, 83, 0), -1, "hotkey_dispatch_bare_s_miss");
+
+    // 'R' = 82 + SHIFT = 1 -> 命令 8；BACKSPACE = 1114113 + ALT = 4 -> 命令 9
+    expect_int(dial_gui_hotkey_bind(h, 82, 1, 8), 0, "hotkey_bind_shift_r");
+    expect_int(dial_gui_hotkey_bind(h, 1114113, 4, 9), 0, "hotkey_bind_alt_backspace");
+    expect_int(dial_gui_hotkey_count(h), 3, "hotkey_count_3");
+    expect_int(dial_gui_hotkey_key_at(h, 1), 82, "hotkey_key_at1");
+    expect_int(dial_gui_hotkey_mods_at(h, 2), 4, "hotkey_mods_at2");
+    expect_int(dial_gui_hotkey_cmd_at(h, 2), 9, "hotkey_cmd_at2");
+    expect_int(dial_gui_hotkey_dispatch(h, 1114113, 4), 9, "hotkey_dispatch_alt_backspace");
+    expect_int(dial_gui_hotkey_key_at(h, 3), -1, "hotkey_key_at_out_of_range");
+
+    // 冲突：同一 (key, mods) 再 bind 一律 Fail-Fast，原绑定不变
+    expect_int(dial_gui_hotkey_bind(h, 83, 2, 99), -1, "hotkey_bind_conflict_rejected");
+    expect_int(dial_gui_hotkey_count(h), 3, "hotkey_count_unchanged_after_conflict");
+    expect_int(dial_gui_hotkey_lookup(h, 83, 2), 7, "hotkey_original_binding_kept");
+    // rebind 覆盖：改命令 id，不新增条目
+    expect_int(dial_gui_hotkey_rebind(h, 83, 2, 10), 0, "hotkey_rebind_ctrl_s");
+    expect_int(dial_gui_hotkey_lookup(h, 83, 2), 10, "hotkey_lookup_after_rebind");
+    expect_int(dial_gui_hotkey_count(h), 3, "hotkey_count_unchanged_after_rebind");
+    // rebind 新组合等价于新增
+    expect_int(dial_gui_hotkey_rebind(h, 84, 0, 11), 0, "hotkey_rebind_new_combo");
+    expect_int(dial_gui_hotkey_count(h), 4, "hotkey_count_4");
+    expect_int(dial_gui_hotkey_cmd_at(h, 3), 11, "hotkey_cmd_at3");
+
+    // ============ C) 非法参数 Fail-Fast（count 必须不变）============
+    expect_int(dial_gui_hotkey_bind(h, -1, 0, 1), -1, "hotkey_negative_key_rejected");
+    expect_int(dial_gui_hotkey_bind(h, 83, 8, 1), -1, "hotkey_bad_mods_rejected");
+    expect_int(dial_gui_hotkey_bind(h, 83, 0, 256), -1, "hotkey_cmd_too_big_rejected");
+    expect_int(dial_gui_hotkey_bind(h, 83, 0, -1), -1, "hotkey_negative_cmd_rejected");
+    expect_int(dial_gui_hotkey_rebind(h, 83, -1, 1), -1, "hotkey_rebind_bad_mods_rejected");
+    expect_int(dial_gui_hotkey_set_enabled(h, 256, 0), -1, "hotkey_set_enabled_out_of_range");
+    expect_int(dial_gui_hotkey_is_enabled(h, 256), -1, "hotkey_is_enabled_out_of_range");
+    expect_int(dial_gui_hotkey_unbind(h, 999, 0), -1, "hotkey_unbind_miss");
+    expect_int(dial_gui_hotkey_count(h), 4, "hotkey_count_unchanged_after_rejects");
+
+    // ============ D) 命令启用态：lookup 不看，dispatch 看 ============
+    expect_int(dial_gui_hotkey_dispatch(h, 83, 2), 10, "hotkey_dispatch_enabled");
+    expect_int(dial_gui_hotkey_set_enabled(h, 10, 0), 0, "hotkey_disable_cmd10");
+    expect_int(dial_gui_hotkey_is_enabled(h, 10), 0, "hotkey_cmd10_disabled");
+    expect_int(dial_gui_hotkey_lookup(h, 83, 2), 10, "hotkey_lookup_ignores_disabled");
+    expect_int(dial_gui_hotkey_dispatch(h, 83, 2), -1, "hotkey_dispatch_blocked_when_disabled");
+    // 禁用一个命令不影响其它命令
+    expect_int(dial_gui_hotkey_dispatch(h, 84, 0), 11, "hotkey_other_cmd_unaffected");
+    expect_int(dial_gui_hotkey_set_enabled(h, 10, 1), 0, "hotkey_enable_cmd10_again");
+    expect_int(dial_gui_hotkey_is_enabled(h, 10), 1, "hotkey_cmd10_enabled_again");
+    expect_int(dial_gui_hotkey_dispatch(h, 83, 2), 10, "hotkey_dispatch_after_reenable");
+
+    // ============ E) unbind 压实顺序 / clear 复位 ============
+    expect_int(dial_gui_hotkey_unbind(h, 82, 1), 0, "hotkey_unbind_shift_r");
+    expect_int(dial_gui_hotkey_count(h), 3, "hotkey_count_3_after_unbind");
+    expect_int(dial_gui_hotkey_key_at(h, 1), 1114113, "hotkey_compacted_key_at1");
+    expect_int(dial_gui_hotkey_cmd_at(h, 2), 11, "hotkey_compacted_cmd_at2");
+    expect_int(dial_gui_hotkey_lookup(h, 82, 1), -1, "hotkey_unbound_miss");
+    // tag 先设好，验证 clear 保留用户数据
+    expect_int(dial_gui_hotkey_set_tag(h, 123456789), 0, "hotkey_set_tag");
+    expect_int(dial_gui_hotkey_tag(h), 123456789, "hotkey_tag_roundtrip");
+    expect_int(dial_gui_hotkey_set_enabled(h, 11, 0), 0, "hotkey_disable_cmd11_before_clear");
+    expect_int(dial_gui_hotkey_clear(h), 0, "hotkey_clear");
+    expect_int(dial_gui_hotkey_count(h), 0, "hotkey_count_0_after_clear");
+    expect_int(dial_gui_hotkey_is_enabled(h, 11), 1, "hotkey_clear_resets_enabled");
+    expect_int(dial_gui_hotkey_tag(h), 123456789, "hotkey_clear_keeps_tag");
+    expect_int(dial_gui_hotkey_dispatch(h, 83, 2), -1, "hotkey_dispatch_miss_after_clear");
+
+    // ============ F) 容量上界：64 条满、第 65 条 Fail-Fast ============
+    var h2: GuiHotkey = dial_gui_hotkey_new();
+    var i: int = 0;
+    while (i < 64) {
+        expect_int(dial_gui_hotkey_bind(h2, 200 + i, 0, i), 0, "hotkey_fill_ok");
+        i = i + 1;
+    }
+    expect_int(dial_gui_hotkey_count(h2), 64, "hotkey_full_count_64");
+    expect_int(dial_gui_hotkey_bind(h2, 900, 0, 1), -1, "hotkey_65th_bind_rejected");
+    expect_int(dial_gui_hotkey_rebind(h2, 900, 0, 1), -1, "hotkey_rebind_new_when_full");
+    // 表满时 rebind 已存在组合仍成功（不占新槽）
+    expect_int(dial_gui_hotkey_rebind(h2, 200, 0, 99), 0, "hotkey_rebind_existing_when_full");
+    expect_int(dial_gui_hotkey_lookup(h2, 200, 0), 99, "hotkey_rebind_existing_readback");
+    // 解绑一条后可再绑
+    expect_int(dial_gui_hotkey_unbind(h2, 201, 0), 0, "hotkey_unbind_from_full");
+    expect_int(dial_gui_hotkey_bind(h2, 900, 0, 1), 0, "hotkey_bind_after_unbind");
+    expect_int(dial_gui_hotkey_count(h2), 64, "hotkey_count_64_again");
+    expect_int(dial_gui_hotkey_free(h2), 0, "hotkey_free_h2");
+
+    // ============ G) 离屏画布绘制（零 DISPLAY，CRC32 像素级锁定）===========
+    var p: GuiPainter = dial_gui_painter_offscreen(240, 160);
+    expect(!is_null(p), "hotkey_painter");
+    var crc0: int = dial_gui_painter_crc32(p);
+    // 空表 draw：零像素影响
+    expect_int(dial_gui_hotkey_draw(p, h, 4, 4), 0, "hotkey_draw_empty");
+    var crc_empty: int = dial_gui_painter_crc32(p);
+    expect_int(crc_empty, crc0, "hotkey_empty_draw_zero_pixels");
+    // 3 条绑定后绘制
+    expect_int(dial_gui_hotkey_bind(h, 83, 2, 7), 0, "hotkey_draw_bind1");
+    expect_int(dial_gui_hotkey_bind(h, 82, 1, 8), 0, "hotkey_draw_bind2");
+    expect_int(dial_gui_hotkey_bind(h, 1114113, 4, 9), 0, "hotkey_draw_bind3");
+    expect_int(dial_gui_hotkey_draw(p, h, 4, 4), 0, "hotkey_draw_3");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect(crc1 != crc0, "hotkey_draw_changes_pixels");
+    // 重绘幂等
+    expect_int(dial_gui_hotkey_draw(p, h, 4, 4), 0, "hotkey_draw_again");
+    var crc2: int = dial_gui_painter_crc32(p);
+    expect_int(crc1, crc2, "hotkey_draw_idempotent");
+    // 改命令 id -> 文本变化 -> 像素变化
+    expect_int(dial_gui_hotkey_rebind(h, 83, 2, 77), 0, "hotkey_draw_rebind");
+    expect_int(dial_gui_hotkey_draw(p, h, 4, 4), 0, "hotkey_draw_after_rebind");
+    var crc3: int = dial_gui_painter_crc32(p);
+    expect(crc3 != crc2, "hotkey_draw_changed_on_cmd");
+    // 启用态不参与渲染：像素不变
+    expect_int(dial_gui_hotkey_set_enabled(h, 77, 0), 0, "hotkey_draw_disable");
+    expect_int(dial_gui_hotkey_draw(p, h, 4, 4), 0, "hotkey_draw_disabled");
+    var crc4: int = dial_gui_painter_crc32(p);
+    expect_int(crc3, crc4, "hotkey_draw_ignores_enabled_state");
+    // unbind 一条：面板压实、旧行被背景擦除 -> 像素变化
+    expect_int(dial_gui_hotkey_unbind(h, 82, 1), 0, "hotkey_draw_unbind");
+    expect_int(dial_gui_hotkey_draw(p, h, 4, 4), 0, "hotkey_draw_after_unbind");
+    var crc5: int = dial_gui_painter_crc32(p);
+    expect(crc5 != crc4, "hotkey_draw_changed_on_unbind");
+    // 清空后空表 draw 不绘制，CRC 保持（零像素影响，不主动擦别人画布）
+    expect_int(dial_gui_hotkey_clear(h), 0, "hotkey_draw_clear");
+    expect_int(dial_gui_hotkey_draw(p, h, 4, 4), 0, "hotkey_draw_after_clear");
+    var crc6: int = dial_gui_painter_crc32(p);
+    expect_int(crc5, crc6, "hotkey_clear_draw_zero_pixels");
+
+    expect_int(dial_gui_painter_free(p), 0, "hotkey_painter_free");
+    expect_int(dial_gui_hotkey_free(h), 0, "hotkey_free");
+
+    print("hotkey_window = ok");   // 纯内存路径，无 DISPLAY 亦 ok
+    print("hotkey_done = true");
+    return 0;
+}

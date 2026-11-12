@@ -70,9 +70,10 @@
 #      Xvfb 实窗上屏 + **XTest 真实鼠标/键盘注入**
 #      （xtest_inject.sh：点击聚焦 / 落字 / Tab / Shift+Tab / 按钮激活）/ 无显示
 #      环境自动降级为「窗口路径明确跳过」并如实标注（v1.10 增补）。
-#      另含第 9 ~ 14 层覆盖层 demo（5h ~ 5n）：滚动视图 / 右键上下文菜单 /
-#      悬浮提示 / 状态栏 / 通知气泡 / 窗口级自动集成，纯内存对象 + 离屏 CRC
-#      锁定，第 14 层另在 Xvfb 实窗验证固定 z-order 自动绘制与借用语义。
+#      另含第 9 ~ 15 层覆盖层 demo（5h ~ 5o）：滚动视图 / 右键上下文菜单 /
+#      悬浮提示 / 状态栏 / 通知气泡 / 窗口级自动集成 / 快捷键·命令系统，
+#      纯内存对象 + 离屏 CRC 锁定，第 14 层另在 Xvfb 实窗验证固定 z-order
+#      自动绘制与借用语义，第 15 层零 DISPLAY 依赖（166 条断言）。
 #   AB. int32 / float32 一等类型：零隐式转换 + 显式转换内建 + 同类算术/比较/打印，
 #       FFI 精确 32 位宽度（C 侧按 int32_t/float 读参数·返回值·多参数·
 #       extern struct sizeof/offsetof 与双向字段读写）/ 越界 Fail-Fast /
@@ -84,8 +85,8 @@
 #       dial_gui_window_draw(win)）/ 默认实参 / 容器 push 同名方法隔离 /
 #       6 个 Fail-Fast 负向 + 诊断面向用户（不暴露 mangle 名、参数不含 self）
 #       （v1.10 开发中增量）。
-#   AD. GUI 第 8 层 Dial 侧 OO 封装：packages/gui/src/gui_oo.dial 用 260 个 impl
-#       方法包住 261 个 C 风格 extern fn（纯 Dial 源码、随包 src/ 分发、ABI 不变）；
+#   AD. GUI 第 8 层 Dial 侧 OO 封装：packages/gui/src/gui_oo.dial 用 278 个 impl
+#       方法包住 279 个 C 风格 extern fn（纯 Dial 源码、随包 src/ 分发、ABI 不变）；
 #       契约审计（方法数 / 全覆盖 / 零 extern 声明）、无 DISPLAY 纯内存路径 +
 #       C 风格与 OO 风格绘制 CRC32 逐字节相等、随包 src/ 装包即用（不复制源码，
 #       输出与本地副本逐字节一致）、Xvfb 实窗覆盖层与信号队列、
@@ -2049,7 +2050,7 @@ zpass "crypto 包已卸载"
 # AA) 手搓 GUI 六层：地基 + 控件框架 + 成品外观 + 输入层 + 主题层/控件扩展 + 信号槽
 #     （gui.dialpkg 端到端，v1.10 增补）
 # ---------------------------------------------------------------------------
-echo "== AA) 手搓 GUI 六层 + 第 9~14 层覆盖层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制 / TextBox 输入与焦点链 / 主题色可覆写 + Radio·Slider·Progress / 6 类可订阅纯值信号 · 环形队列 / XTest 实窗注入 / 覆盖层纯内存离屏 CRC / 窗口级自动集成固定 z-order，v1.10 增补） =="
+echo "== AA) 手搓 GUI 六层 + 第 9~15 层覆盖层：gui.dialpkg 端到端（三平台真实现 / XShm+XRender / 像素级 CRC / Widget 树·布局·命中·packed 事件块 / 默认主题四态绘制 / TextBox 输入与焦点链 / 主题色可覆写 + Radio·Slider·Progress / 6 类可订阅纯值信号 · 环形队列 / XTest 实窗注入 / 覆盖层纯内存离屏 CRC / 窗口级自动集成固定 z-order / 快捷键·命令系统，v1.10 增补） =="
 aapass() { echo "  ✅ $1"; }
 aabad()  { echo "  ❌ $1"; fail=1; }
 
@@ -2716,6 +2717,43 @@ else
     echo "  ⚠️  本环境无 xvfb-run：第 14 层实窗路径未实机验证（如实标注，不伪装通过）"
 fi
 
+# 5o) 第 15 层快捷键 / 命令系统：纯内存 KeyMap + 命令启用态 + 离屏画布
+#     （零 DISPLAY 依赖，CRC32 像素级锁定）。独立纯内存对象与独立 offscreen
+#     画布，绝不触碰前十四个 demo 的 CRC 基准。给 AA 组 +1 aapass。
+if "$DIALC" build tests/pkg/use_gui_hotkey.dial -o "${TMP}/use_gui_hotkey" >"${TMP}/aa_hkcomp.log" 2>&1; then
+    aapass "use_gui_hotkey.dial（第 15 层快捷键/命令系统）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_hotkey" >"${TMP}/aa_hknodisplay.log" 2>&1
+    aa_hk_no_exit=$?
+    aa_hk_bad=$(grep -c ' = bad' "${TMP}/aa_hknodisplay.log" || true)
+    if [ "$aa_hk_no_exit" -eq 0 ] && [ "$aa_hk_bad" -eq 0 ] \
+       && grep -qF 'hotkey_new = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_capacity_64 = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_lookup_ctrl_s = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_dispatch_ctrl_s = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_lookup_bare_s_miss = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_bind_conflict_rejected = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_original_binding_kept = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_rebind_ctrl_s = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_negative_key_rejected = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_bad_mods_rejected = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_dispatch_blocked_when_disabled = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_lookup_ignores_disabled = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_compacted_key_at1 = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_clear_resets_enabled = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_clear_keeps_tag = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_full_count_64 = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_65th_bind_rejected = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_draw_idempotent = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_draw_changed_on_unbind = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_clear_draw_zero_pixels = ok' "${TMP}/aa_hknodisplay.log" \
+       && grep -qF 'hotkey_done = true' "${TMP}/aa_hknodisplay.log"; then
+        aapass "第 15 层：绑定/冲突/覆盖/压实/容量上界/命令启用态/离屏 CRC 幂等 166 条断言全绿（零 DISPLAY 依赖）"
+    else
+        aabad "第 15 层断言失败（exit=$aa_hk_no_exit bad=$aa_hk_bad）"
+        tail -40 "${TMP}/aa_hknodisplay.log"
+    fi
+else aabad "use_gui_hotkey.dial 编译失败"; tail -20 "${TMP}/aa_hkcomp.log"; fi
+
 # 6) 清理：卸包，避免污染后续测试与用户环境。
 "$DIALC" uninstall gui >/dev/null 2>&1 || true
 aapass "gui 包已卸载"
@@ -2852,7 +2890,7 @@ else
 fi
 
 # ===========================================================================
-echo "== AD) GUI 第 8 层 OO 封装：260 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
+echo "== AD) GUI 第 8 层 OO 封装：278 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
 adpass() { echo "  ✅ $1"; }
 adbad()  { echo "  ❌ $1"; fail=1; }
 
@@ -2867,8 +2905,8 @@ cp tests/oo/use_gui_oo.dial "$AD_DIR/"
     && "$DIALC" install "${TMP}/ad_gui.dialpkg" >"${TMP}/ad_install.log" 2>&1 \
     || { adbad "gui.dialpkg 打包或安装失败（AD 组）"; tail -6 "${TMP}/ad_pack.log" "${TMP}/ad_install.log"; }
 
-# 1) 契约防漂移审计：260 个方法恰好覆盖 260 个 extern fn（入口 app_new 除外），
-#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 261 个签名。
+# 1) 契约防漂移审计：278 个方法恰好覆盖 278 个 extern fn（入口 app_new 除外），
+#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 279 个签名。
 ad_diag=$(grep '^extern fn' packages/gui/gui.diali | sed -E 's/^extern fn ([A-Za-z0-9_]+).*/\1/' \
           | grep -v '^dial_gui_app_new$' | sort -u)
 ad_refs=$(grep '^    fn ' packages/gui/src/gui_oo.dial | grep -oE 'dial_gui_[A-Za-z0-9_]+' | sort -u)
@@ -2876,9 +2914,9 @@ ad_methods=$(grep -c '^    fn ' packages/gui/src/gui_oo.dial)
 ad_diag_n=$(echo "$ad_diag" | wc -l)
 ad_iface_n=$(grep -c '^extern fn' packages/gui/gui.diali)
 ad_oo_decl=$(grep -c '^extern fn' packages/gui/src/gui_oo.dial || true)
-if [ "$ad_methods" -eq 260 ] && [ "$ad_diag_n" -eq 260 ] && [ "$ad_iface_n" -eq 261 ] \
+if [ "$ad_methods" -eq 278 ] && [ "$ad_diag_n" -eq 278 ] && [ "$ad_iface_n" -eq 279 ] \
    && [ "$ad_oo_decl" -eq 0 ] && [ "$ad_diag" = "$ad_refs" ]; then
-    adpass "契约审计：260 个 impl 方法全覆盖 260 个 extern fn、gui.diali 共 261 个签名、封装层零 extern 声明（ABI 不变）"
+    adpass "契约审计：278 个 impl 方法全覆盖 278 个 extern fn、gui.diali 共 279 个签名、封装层零 extern 声明（ABI 不变）"
 else
     adbad "契约审计不通过：methods=$ad_methods diag=$ad_diag_n iface=$ad_iface_n oo_decl=$ad_oo_decl"
     diff <(echo "$ad_diag") <(echo "$ad_refs") | head -20
@@ -2888,7 +2926,7 @@ fi
 if ! "$DIALC" build "$AD_DIR/use_gui_oo.dial" -o "${TMP}/ad_oo_run" >"${TMP}/ad_build.log" 2>&1; then
     adbad "use_gui_oo.dial 编译失败"; tail -20 "${TMP}/ad_build.log"
 else
-    adpass "OO 封装层 + 用例编译成功（260 个 impl 方法签名全部通过）"
+    adpass "OO 封装层 + 用例编译成功（278 个 impl 方法签名全部通过）"
     if ! env -u DISPLAY "${TMP}/ad_oo_run" >"${TMP}/ad_nodisp.out" 2>&1; then
         adbad "use_gui_oo 无 DISPLAY 运行非零退出"; tail -20 "${TMP}/ad_nodisp.out"
     elif grep -q '= bad' "${TMP}/ad_nodisp.out" \
