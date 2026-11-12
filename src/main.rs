@@ -15,7 +15,9 @@
 
 mod ast;
 mod codegen;
+mod diagnostic;
 mod dialfmt;
+mod toolchain;
 mod error;
 mod index;
 mod lexer;
@@ -81,7 +83,8 @@ fn main() {
             cmd_list();
             return;
         }
-        "check" | "fmt" | "test" | "new" | "uninstall" | "pack" => {
+        "check" | "fmt" | "test" | "new" | "uninstall" | "pack"
+          | "doctor" | "deps" | "watch" | "clean" | "completion" => {
             dispatch_tool(command, &args);
             return;
         }
@@ -299,7 +302,7 @@ fn main() {
     let fe = match frontend(&src_path, &mut |m| println!("{}", m)) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("{}", e);
+            diagnostic::report(&e, &src_path);
             std::process::exit(1);
         }
     };
@@ -1278,6 +1281,13 @@ fn print_usage() {
     eprintln!("  list                           列出已安装包");
     eprintln!("  uninstall <包名>               卸载已安装包");
     eprintln!();
+    eprintln!("工具链（v1.10 增补）");
+    eprintln!("  doctor [--json]                 环境自检（编译器/缓存/包完整性/清单）");
+    eprintln!("  deps   <文件.dial> [--json]     三级 import 依赖图 + 循环检测");
+    eprintln!("  watch  <文件.dial> [--action check|build|test] [--interval ms] [--max-ticks N]");
+    eprintln!("  clean  [目录] [--apply] [--json] 清理 .o / .dialpkg（默认 dry-run）");
+    eprintln!("  completion <bash|zsh|fish>      生成 shell 补全脚本");
+    eprintln!();
     eprintln!("其他");
     eprintln!("  version | --version | -V       显示版本号");
     eprintln!("  lsp                            编辑器语言服务器（stdio 协议）");
@@ -1302,6 +1312,124 @@ fn one_arg(args: &[String], cmd: &str) -> String {
     args[2].clone()
 }
 
+fn cmd_doctor(args: &[String]) {
+    let mut as_json = false;
+    for a in &args[2..] {
+        match a.as_str() {
+            "--json" => as_json = true,
+            _ => {
+                eprintln!("doctor: 未知参数 '{}'（可用: --json）", a);
+                std::process::exit(1);
+            }
+        }
+    }
+    match toolchain::doctor(as_json) {
+        Ok(fails) => {
+            if fails > 0 {
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_deps(args: &[String]) {
+    let mut as_json = false;
+    let mut files: Vec<String> = Vec::new();
+    for a in &args[2..] {
+        match a.as_str() {
+            "--json" => as_json = true,
+            a if a.starts_with('-') => {
+                eprintln!("deps: 未知参数 '{}'（可用: --json）", a);
+                std::process::exit(1);
+            }
+            _ => files.push(a.to_string()),
+        }
+    }
+    if files.len() != 1 {
+        eprintln!("用法: dialc deps <文件.dial> [--json]");
+        std::process::exit(1);
+    }
+    if let Err(e) = toolchain::deps(&files[0], as_json) {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
+}
+
+fn cmd_watch(args: &[String]) {
+    let mut action = "check".to_string();
+    let mut interval: u64 = 500;
+    let mut max_ticks: Option<u64> = None;
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--action" => {
+                i += 1;
+                action = args.get(i).cloned().unwrap_or_default();
+            }
+            "--interval" => {
+                i += 1;
+                interval = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(500);
+            }
+            "--max-ticks" => {
+                i += 1;
+                max_ticks = args.get(i).and_then(|v| v.parse().ok());
+            }
+            a if a.starts_with('-') => {
+                eprintln!("watch: 未知参数 '{}'", a);
+                std::process::exit(1);
+            }
+            _ => files.push(args[i].clone()),
+        }
+        i += 1;
+    }
+    if files.len() != 1 {
+        eprintln!("用法: dialc watch <文件.dial> [--action check|build|test] [--interval ms] [--max-ticks N]");
+        std::process::exit(1);
+    }
+    if let Err(e) = toolchain::watch(&files[0], &action, interval, max_ticks) {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
+}
+
+fn cmd_clean(args: &[String]) {
+    let mut apply = false;
+    let mut as_json = false;
+    let mut dir = ".".to_string();
+    for a in &args[2..] {
+        match a.as_str() {
+            "--apply" => apply = true,
+            "--json" => as_json = true,
+            a if a.starts_with('-') => {
+                eprintln!("clean: 未知参数 '{}'（可用: --apply / --json）", a);
+                std::process::exit(1);
+            }
+            _ => dir = a.to_string(),
+        }
+    }
+    if let Err(e) = toolchain::clean(&dir, apply, as_json) {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
+}
+
+fn cmd_completion(args: &[String]) {
+    let shells: Vec<String> = args[2..].iter().filter(|a| !a.starts_with('-')).cloned().collect();
+    if shells.len() != 1 {
+        eprintln!("用法: dialc completion <bash|zsh|fish>");
+        std::process::exit(1);
+    }
+    if let Err(e) = toolchain::completion(&shells[0]) {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
+}
+
 fn dispatch_tool(command: &str, args: &[String]) {
     match command {
         "check" => cmd_check(args),
@@ -1310,6 +1438,11 @@ fn dispatch_tool(command: &str, args: &[String]) {
         "new" => cmd_new(args),
         "uninstall" => cmd_uninstall(args),
         "pack" => cmd_pack(args),
+        "doctor" => cmd_doctor(args),
+        "deps" => cmd_deps(args),
+        "watch" => cmd_watch(args),
+        "clean" => cmd_clean(args),
+        "completion" => cmd_completion(args),
         _ => unreachable!("dispatch_tool 只接收已分流的工具命令"),
     }
 }
@@ -1659,7 +1792,7 @@ fn cmd_check(args: &[String]) {
             fe.program.tests.len()
         ),
         Err(e) => {
-            eprintln!("{}", e);
+            diagnostic::report(&e, &src);
             std::process::exit(1);
         }
     }
@@ -1959,7 +2092,7 @@ fn cmd_test(args: &[String]) {
     let fe = match frontend(&src, &mut |_| {}) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("{}", e);
+            diagnostic::report(&e, &src);
             std::process::exit(1);
         }
     };

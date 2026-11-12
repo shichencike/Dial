@@ -821,7 +821,7 @@ rm -f "$FFI_DIR/libffi_demo.a" "$FFI_DIR/libffi_export_bridge.a" "$FFI_DIR"/*.o
 
 # =====================================================================
 echo
-echo "== Q) 工程工具链：CLI / 本地模块 / test / fmt / pack 闭环 / dialpkg src/ 随包源码模块（v1.04 增补，v1.10 扩展） =="
+echo "== Q) 工程工具链：CLI / 本地模块 / test / fmt / pack 闭环 / dialpkg src/ 随包源码模块 / doctor·deps·watch·clean·completion / 统一诊断（v1.04 增补，v1.10 扩展） =="
 
 QDIR="${TMP}/qtool"
 QHOME="${TMP}/qhome"
@@ -1209,6 +1209,184 @@ qsrc_ff 'bad/name = "src/qsrc_oo.dial"' '必须是裸名'
 # 向后兼容：完全没有 [src] 段的清单照常可打包 / 安装（第 7 步的 qdemo 已端到端验证）。
 qrun uninstall qsrc >/dev/null 2>&1 || true
 
+
+
+# 11) v1.10 工具链增补：doctor / deps / 统一诊断 / watch / clean / completion
+#     共用 src/toolchain.rs 的命令元数据与本地源码递归（help / completion /
+#     doctor 一份真相）；src/diagnostic.rs 统一前端错误渲染：人读模式原消息
+#     一字不动只追加定位，DIALC_DIAG_FORMAT=json 输出一行 JSON 供机读，
+#     stdout 始终不被诊断污染。
+
+# 11.1 help 列出五个新命令
+qnew_missing=""
+for sub in doctor deps watch clean completion; do
+    echo "$qhelp" | grep -qE "(^|[[:space:]])${sub}([[:space:]]|$)" || qnew_missing="${qnew_missing} ${sub}"
+done
+if [ -z "$qnew_missing" ]; then qpass "help 列出工具链新命令（doctor/deps/watch/clean/completion）"; else qbad "help 缺新命令:${qnew_missing}"; fi
+
+# 11.2 doctor 人读：健康结论 + 七项检查
+if qrun doctor >"${TMP}/q_doctor.log" 2>&1 \
+   && grep -q '结论：健康' "${TMP}/q_doctor.log" \
+   && grep -q '包内 src 模块解析' "${TMP}/q_doctor.log" \
+   && grep -q '已安装包完整性' "${TMP}/q_doctor.log"; then
+    qpass "doctor 人读自检（健康结论 + 编译器/C 编译器/缓存/包完整性/清单/src 解析）"
+else qbad "doctor 人读输出异常"; sed 's/^/       /' "${TMP}/q_doctor.log" | tail -10; fi
+
+# 11.3 doctor --json：机器可读、healthy 且 0 失败
+if qrun doctor --json >"${TMP}/q_doctor.json" 2>&1 \
+   && python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["healthy"] is True and d["failures"]==0, d
+assert len(d["checks"])>=7, d["checks"]
+assert all(set(c)=={"name","status","detail"} for c in d["checks"])
+' "${TMP}/q_doctor.json" >/dev/null 2>&1; then
+    qpass "doctor --json 可解析（healthy / failures / 7 项检查结构）"
+else qbad "doctor --json 结构不合规"; sed 's/^/       /' "${TMP}/q_doctor.json" | tail -8; fi
+
+# 11.4 deps：三级 import 全部分类（本地源码 / 包内 src / 包名）
+#      qsrc 包（带 [src] 段）在 10) 末尾已卸载，这里重装一次专供 deps 命中第二级。
+QDEPS="${TMP}/qdeps"
+mkdir -p "$QDEPS"
+qrun install "${TMP}/qsrc.dialpkg" >/dev/null 2>&1
+cat > "$QDEPS/main.dial" <<'EOF'
+import "./util.dial";
+import "qsrc_oo";
+import "gui";
+fn main(): int { return 0; }
+EOF
+cat > "$QDEPS/util.dial" <<'EOF'
+fn util(): int { return 1; }
+EOF
+if qrun deps "$QDEPS/main.dial" >"${TMP}/q_deps.log" 2>&1 \
+   && grep -q 'ROOT' "${TMP}/q_deps.log" \
+   && grep -q '本地' "${TMP}/q_deps.log" \
+   && grep -q '包内src' "${TMP}/q_deps.log" \
+   && grep -q '包名' "${TMP}/q_deps.log"; then
+    qpass "deps 三级 import 分类齐全（本地源码 / 包内 src / 包名）"
+else qbad "deps 三级分类缺失"; sed 's/^/       /' "${TMP}/q_deps.log" | tail -12; fi
+
+# 11.5 deps --json：节点结构 + 深度 + cycles 字段
+if qrun deps "$QDEPS/main.dial" --json >"${TMP}/q_deps.json" 2>&1 \
+   && python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["root"].endswith("main.dial") and d["cycles"] is False, d
+kinds={n["kind"] for n in d["nodes"]}
+assert {"root","local","pkg-src","package"}<=kinds, kinds
+assert all(set(n)=={"kind","spec","path","depth","cyclic"} for n in d["nodes"])
+' "${TMP}/q_deps.json" >/dev/null 2>&1; then
+    qpass "deps --json 节点结构 / 三级 kind / 深度 / cycles"
+else qbad "deps --json 结构不合规"; sed 's/^/       /' "${TMP}/q_deps.json" | tail -8; fi
+
+# 11.6 deps 循环引用检测（本地模块互相 import）
+cat > "$QDEPS/cyc_a.dial" <<'EOF'
+import "./cyc_b.dial";
+fn ca(): int { return 0; }
+EOF
+cat > "$QDEPS/cyc_b.dial" <<'EOF'
+import "./cyc_a.dial";
+fn cb(): int { return 0; }
+EOF
+if qrun deps "$QDEPS/cyc_a.dial" --json >"${TMP}/q_deps_cyc.json" 2>&1 \
+   && python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["cycles"] is True, d
+assert any(n["cyclic"] for n in d["nodes"]), d["nodes"]
+' "${TMP}/q_deps_cyc.json" >/dev/null 2>&1; then
+    qpass "deps 检出本地模块循环引用并停止递归"
+else qbad "deps 循环引用未检出"; sed 's/^/       /' "${TMP}/q_deps_cyc.json" | tail -8; fi
+
+# 11.7 统一诊断（人读）：原消息一字不动 + 定位/稳定错误码/源码行/caret
+cat > "${TMP}/q_diag_bad.dial" <<'EOF'
+fn main(): int {
+    var x: int = "字符串";
+    return x;
+}
+EOF
+if qrun check "${TMP}/q_diag_bad.dial" >"${TMP}/q_diag_h.out" 2>"${TMP}/q_diag_h.err"; then
+    qbad "诊断负向用例竟然通过检查"
+elif grep -q '语义错误' "${TMP}/q_diag_h.err" \
+     && grep -q -- '--> .*q_diag_bad.dial:2:5' "${TMP}/q_diag_h.err" \
+     && grep -q '\[dialc.sema\]' "${TMP}/q_diag_h.err" \
+     && grep -q '| .*\^' "${TMP}/q_diag_h.err"; then
+    qpass "诊断人读：原消息不变 + 文件:行:列 + 稳定错误码 + 源码行 + caret"
+else qbad "诊断人读缺定位信息"; sed 's/^/       /' "${TMP}/q_diag_h.err" | tail -10; fi
+
+# 11.8 诊断绝不污染 stdout（stdout 是协议/数据通道）
+if [ ! -s "${TMP}/q_diag_h.out" ]; then qpass "诊断失败时 stdout 保持干净（诊断只走 stderr）"; else qbad "诊断写进了 stdout"; fi
+
+# 11.9 统一诊断（机读）：一行合法 JSON + 结构化字段
+if env HOME="$QHOME" DIALC_DIAG_FORMAT=json "$DIALC" check "${TMP}/q_diag_bad.dial" \
+        >"${TMP}/q_diag_j.out" 2>"${TMP}/q_diag_j.err"; then
+    qbad "JSON 诊断模式下负向用例竟然通过"
+elif [ "$(wc -l < "${TMP}/q_diag_j.err")" -eq 1 ] \
+     && python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["tool"]=="dialc" and d["severity"]=="error", d
+assert d["code"]=="dialc.sema" and d["line"]==2 and d["col"]==5, d
+assert "字符串" in d["snippet"] and d["caret"].endswith("^"), d
+assert d["message"] and d["file"].endswith("q_diag_bad.dial"), d
+' "${TMP}/q_diag_j.err" >/dev/null 2>&1 \
+     && [ ! -s "${TMP}/q_diag_j.out" ]; then
+    qpass "DIALC_DIAG_FORMAT=json 输出一行 JSON（code/line/col/snippet/caret）且 stdout 干净"
+else qbad "JSON 诊断不合规"; sed 's/^/       /' "${TMP}/q_diag_j.err" | tail -10; fi
+
+# 11.10 watch：首次执行 + 可限拍正常退出（不引入无限循环）
+if qrun watch examples/hello.dial --action check --interval 60 --max-ticks 2 \
+        >"${TMP}/q_watch.log" 2>&1 \
+   && grep -q '首次执行 check' "${TMP}/q_watch.log" \
+   && grep -q '类型检查通过' "${TMP}/q_watch.log" \
+   && grep -q '达到 --max-ticks 2' "${TMP}/q_watch.log"; then
+    qpass "watch 首次执行 + --max-ticks 限拍正常退出"
+else qbad "watch 限拍执行异常"; sed 's/^/       /' "${TMP}/q_watch.log" | tail -10; fi
+if qrun watch examples/hello.dial --action frobnicate --max-ticks 1 \
+        >"${TMP}/q_watch_bad.log" 2>&1; then
+    qbad "watch 竟然接受未知动作"
+else qpass "watch 拒绝未知动作（只认 check / build / test）"; fi
+
+# 11.11 clean：默认 dry-run / --json / --apply 只删产物不动源码
+QCLEAN="${TMP}/qclean"
+mkdir -p "$QCLEAN"
+for f in a.o b.bc c.ll keep.dial p.dialpkg; do : > "$QCLEAN/$f"; done
+if qrun clean "$QCLEAN" >"${TMP}/q_clean_dry.log" 2>&1 \
+   && grep -q 'dry-run' "${TMP}/q_clean_dry.log" \
+   && [ -f "$QCLEAN/a.o" ] && [ -f "$QCLEAN/keep.dial" ]; then
+    qpass "clean 默认 dry-run（列出产物但一个都不删）"
+else qbad "clean dry-run 误删或输出异常"; sed 's/^/       /' "${TMP}/q_clean_dry.log" | tail -8; fi
+if qrun clean "$QCLEAN" --json >"${TMP}/q_clean.json" 2>&1 \
+   && python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["applied"] is False and len(d["targets"])==4, d
+assert d["removed"]==0
+' "${TMP}/q_clean.json" >/dev/null 2>&1; then
+    qpass "clean --json 列出 4 个产物且 applied=false"
+else qbad "clean --json 结构不合规"; sed 's/^/       /' "${TMP}/q_clean.json" | tail -8; fi
+if qrun clean "$QCLEAN" --apply >"${TMP}/q_clean_apply.log" 2>&1 \
+   && [ ! -f "$QCLEAN/a.o" ] && [ ! -f "$QCLEAN/p.dialpkg" ] \
+   && [ -f "$QCLEAN/keep.dial" ] && grep -q '已删除 4 个' "${TMP}/q_clean_apply.log"; then
+    qpass "clean --apply 只删 .o/.bc/.ll/.dialpkg，保留 .dial 源码"
+else qbad "clean --apply 删除范围不对"; sed 's/^/       /' "${TMP}/q_clean_apply.log" | tail -8; fi
+
+# 11.12 completion：三种 shell + 拒绝未知 shell + 管道截断不 panic
+for sh in bash zsh fish; do
+    if qrun completion "$sh" >"${TMP}/q_comp_${sh}" 2>&1 \
+       && grep -q 'doctor' "${TMP}/q_comp_${sh}" \
+       && grep -q 'completion' "${TMP}/q_comp_${sh}"; then
+        qpass "completion ${sh} 生成脚本且含全部命令名"
+    else qbad "completion ${sh} 输出异常"; fi
+done
+if qrun completion powershell >/dev/null 2>&1; then
+    qbad "completion 竟然接受未知 shell"
+else qpass "completion 拒绝未知 shell（只认 bash / zsh / fish）"; fi
+if qrun completion bash 2>"${TMP}/q_comp_pipe.err" | head -1 >/dev/null \
+   && ! grep -q 'panicked' "${TMP}/q_comp_pipe.err"; then
+    qpass "completion 输出被 head 截断不触发 Broken pipe panic"
+else qbad "completion 管道截断仍 panic"; cat "${TMP}/q_comp_pipe.err"; fi
+qrun uninstall qsrc >/dev/null 2>&1 || true
 
 # =====================================================================
 echo
