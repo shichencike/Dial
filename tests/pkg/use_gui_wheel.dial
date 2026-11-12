@@ -1,0 +1,82 @@
+// gui.dialpkg 第 16 层：右键 / 滚轮交互 端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：滚轮 button=4/5 命中 SLIDER 按步进增减值（clamp 不越界）/
+// 右键 button=3 置 right_pressed 纯值态 / RELEASE 清 right_pressed / 右键不改
+// left pressed 语义 / 滚轮落非 SLIDER 零影响 / SLIDER 绘制 CRC 稳定。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var root: GuiWidget = dial_gui_widget_tree(200, 60);
+    var sl: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_set_kind(sl, 6), 0, "wheel_set_kind_slider");
+    expect_int(dial_gui_widget_set_range(sl, 0, 100), 0, "wheel_set_range");
+    expect_int(dial_gui_widget_set_value(sl, 50), 0, "wheel_set_value");
+    dial_gui_widget_set_rect(sl, 0, 0, 200, 20);
+    dial_gui_widget_set_layout(root, 0);   // ABS
+    dial_gui_widget_layout_apply(root, 200, 60);
+
+    // 滚轮上滚（button=4）→ 值 -1（step = (100-0)/100 = 1）
+    expect_int(dial_gui_widget_handle(root, 1, 10, 10, 4), 1, "wheel_up");  // PRESS button=4
+    expect_int(dial_gui_widget_value(sl), 49, "wheel_value_after_up");
+    // 滚轮下滚（button=5）→ 值 +1
+    expect_int(dial_gui_widget_handle(root, 1, 10, 10, 5), 1, "wheel_down");  // PRESS button=5
+    expect_int(dial_gui_widget_value(sl), 50, "wheel_value_after_down");
+
+    // 步进 clamp：值设到 2，上滚两次到 0，第三次仍 0（不越界、无变化返回 0）
+    expect_int(dial_gui_widget_set_value(sl, 2), 0, "wheel_set_2");
+    expect_int(dial_gui_widget_handle(root, 1, 10, 10, 4), 1, "wheel_up_to_1");
+    expect_int(dial_gui_widget_value(sl), 1, "wheel_v1");
+    expect_int(dial_gui_widget_handle(root, 1, 10, 10, 4), 1, "wheel_up_to_0");
+    expect_int(dial_gui_widget_value(sl), 0, "wheel_v0");
+    expect_int(dial_gui_widget_handle(root, 1, 10, 10, 4), 0, "wheel_up_clamped");  // 已在 0，无变化
+    expect_int(dial_gui_widget_value(sl), 0, "wheel_v0_stay");
+
+    // 右键（button=3）：置 right_pressed 纯值态；不改 left pressed
+    expect_int(dial_gui_widget_handle(root, 1, 10, 10, 3), 0, "right_press");  // PRESS button=3
+    expect_int(dial_gui_widget_right_pressed(sl), 1, "right_pressed_on");
+    expect_int(dial_gui_widget_pressed(sl), 0, "right_does_not_set_left_pressed");
+    // RELEASE（button=3）清 right_pressed
+    expect_int(dial_gui_widget_handle(root, 2, 10, 10, 3), 0, "right_release");  // RELEASE button=3
+    expect_int(dial_gui_widget_right_pressed(sl), 0, "right_pressed_off");
+
+    // 滚轮落非 SLIDER：零影响（值不变、返回 0）
+    var root2: GuiWidget = dial_gui_widget_tree(200, 60);
+    var box2: GuiWidget = dial_gui_widget_add(root2);
+    dial_gui_widget_set_rect(box2, 0, 0, 200, 20);
+    dial_gui_widget_set_layout(root2, 0);
+    dial_gui_widget_layout_apply(root2, 200, 60);
+    expect_int(dial_gui_widget_handle(root2, 1, 10, 10, 4), 0, "wheel_on_box_no_effect");
+    dial_gui_widget_tree_free(root2);
+
+    // SLIDER 离屏绘制 CRC 稳定
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 60);
+    expect(!is_null(p), "wheel_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "wheel_set_aa_off");
+    expect_int(dial_gui_widget_draw(root, p), 0, "wheel_draw");
+    var crc0: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_widget_draw(root, p), 0, "wheel_draw2");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect_int(crc0, crc1, "wheel_crc_stable");
+    expect_str(str(crc0), "2509410687", "wheel_crc_pinned");
+    print("wheel_crc = " + str(crc0));
+
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("wheel_done = true");
+    return 0;
+}

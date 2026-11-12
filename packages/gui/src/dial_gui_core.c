@@ -685,8 +685,9 @@ int64_t dial_gui_widget_userdata(GuiWidgetImpl *w) { return widget_ok(w) ? w->us
 
 int64_t dial_gui_widget_set_layout(GuiWidgetImpl *w, int64_t mode) {
     if (!widget_ok(w)) return -1;
-    if (mode != GUI_LAYOUT_ABS && mode != GUI_LAYOUT_VBOX && mode != GUI_LAYOUT_HBOX) {
-        gui_core_set_err(GUI_ERR_ARG, "布局模式只接受 0 ABS / 1 VBOX / 2 HBOX");
+    if (mode != GUI_LAYOUT_ABS && mode != GUI_LAYOUT_VBOX &&
+        mode != GUI_LAYOUT_HBOX && mode != GUI_LAYOUT_GRID) {
+        gui_core_set_err(GUI_ERR_ARG, "布局模式只接受 0 ABS / 1 VBOX / 2 HBOX / 3 GRID");
         return -1;
     }
     w->layout = (int)mode;
@@ -711,6 +712,35 @@ int64_t dial_gui_widget_layout_apply(GuiWidgetImpl *root, int64_t w, int64_t h) 
         gui_core_set_err(GUI_ERR_ARG, "布局尺寸非法（须为正）");
         return -1;
     }
+    gui_core_ok();
+    return 0;
+}
+
+/* ---- 第 16 层：网格布局（容器声明 cols/rows，子节点声明占格）------------- */
+
+int64_t dial_gui_widget_set_grid(GuiWidgetImpl *w, int64_t cols, int64_t rows) {
+    if (!widget_ok(w)) return -1;
+    if (cols < 1 || rows < 1 || cols > 256 || rows > 256) {
+        gui_core_set_err(GUI_ERR_ARG, "网格列/行须为 1..256（越界明确拒绝而非静默截断）");
+        return -1;
+    }
+    w->grid_cols = (int)cols;
+    w->grid_rows = (int)rows;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_set_grid_cell(GuiWidgetImpl *w, int64_t col, int64_t row,
+                                      int64_t cspan, int64_t rspan) {
+    if (!widget_ok(w)) return -1;
+    if (col < 0 || row < 0 || cspan < 1 || rspan < 1 ||
+        col > 255 || row > 255 || cspan > 256 || rspan > 256) {
+        gui_core_set_err(GUI_ERR_ARG, "网格单元须 0..255 列/行、跨度 1..256（越界拒绝）");
+        return -1;
+    }
+    w->grid_col = (int)col;
+    w->grid_row = (int)row;
+    w->grid_cspan = (int)cspan;
+    w->grid_rspan = (int)rspan;
     gui_core_ok();
     return 0;
 }
@@ -756,10 +786,15 @@ void *dial_gui_event_data(GuiAppImpl *app) {
 
 int64_t dial_gui_widget_set_kind(GuiWidgetImpl *w, int64_t kind) {
     if (!widget_ok(w)) return -1;
-    if (kind < GUI_WIDGET_BOX || kind > GUI_WIDGET_PROGRESS) {
+    /* 8 / 9 是第 7 层信号 kind 标记（MENU / DIALOG），不是可绘制的真实控件：
+     * 上界虽扩到 11（容纳 10 COMBO / 11 LIST），仍必须显式拒绝 8 / 9，
+     * 否则会把控件切成「未知种类」而落进 draw 的 BOX 兜底，静默破坏配色 / 激活。*/
+    if (kind < GUI_WIDGET_BOX || kind > GUI_WIDGET_LIST ||
+        kind == GUI_WIDGET_MENU || kind == GUI_WIDGET_DIALOG) {
         gui_core_set_err(GUI_ERR_ARG,
                          "控件种类只接受 0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX / "
-                         "4 TEXTBOX / 5 RADIO / 6 SLIDER / 7 PROGRESS");
+                         "4 TEXTBOX / 5 RADIO / 6 SLIDER / 7 PROGRESS / 10 COMBO / 11 LIST"
+                         "（8 / 9 为信号标记，不是控件）");
         return -1;
     }
     w->kind = (int)kind;

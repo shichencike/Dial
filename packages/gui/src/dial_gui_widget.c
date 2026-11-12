@@ -31,6 +31,8 @@ static void dispose_subtree(GuiWidgetImpl *n) {
     }
     free(n->id);
     free(n->text);   /* 外观层文本副本（与 id 同为 C 侧 strdup 自有） */
+    /* 第 16 层：组合框 / 列表框项标签副本（与 text 同口径）。*/
+    for (int i = 0; i < GUI_COMBO_CAP; ++i) free(n->items[i].label);
     /* 第 6 层：环形队列只挂在根节点（非根节点 sigq 恒 NULL，free(NULL) 安全）。*/
     free(n->sigq);
     free(n);
@@ -63,6 +65,7 @@ GuiWidgetImpl *gui_widget_tree_new(int w, int h) {
     r->req_w = w; r->req_h = h;
     r->x = 0; r->y = 0; r->w = w; r->h = h;
     r->vmax = 100;          /* SLIDER / PROGRESS 默认值域 0..100 */
+    r->selected_idx = -1;   /* 第 16 层：ComboBox 默认未选 */
     r->next_root = g_roots;
     g_roots = r;
     return r;
@@ -87,6 +90,7 @@ GuiWidgetImpl *gui_widget_add(GuiWidgetImpl *parent) {
     c->layout = GUI_LAYOUT_ABS;
     c->parent = parent;
     c->vmax = 100;          /* SLIDER / PROGRESS 默认值域 0..100 */
+    c->selected_idx = -1;   /* 第 16 层：ComboBox 默认未选 */
     /* 追加到末尾：保持用户加入顺序，命中测试后加子优先与绘制层序一致。 */
     GuiWidgetImpl **pp = &parent->first_child;
     while (*pp) pp = &(*pp)->next_sibling;
@@ -191,6 +195,39 @@ static void layout_node(GuiWidgetImpl *n, int ax, int ay, int aw, int ah) {
             c->w = c->req_w > 0 ? c->req_w : 0;
             c->h = c->req_h > 0 ? c->req_h : 0;
             layout_node(c, ax + c->x, ay + c->y, c->w, c->h);
+        }
+        return;
+    }
+
+    if (n->layout == GUI_LAYOUT_GRID) {
+        /* 行列式栅格：容器声明 cols/rows（<=0 视为 1×1），子节点声明占格
+         * (grid_col, grid_row, cspan, rspan)。单元格按整数均分（向下取整），
+         * 子节点铺满整格；越界跨度自动夹紧，重叠由应用自己负责（确定性）。*/
+        int cols = n->grid_cols > 0 ? n->grid_cols : 1;
+        int rows = n->grid_rows > 0 ? n->grid_rows : 1;
+        int cell_w = cw - gap * (cols - 1);
+        int cell_h = ch - gap * (rows - 1);
+        if (cell_w < 0) cell_w = 0;
+        if (cell_h < 0) cell_h = 0;
+        cell_w = cell_w / cols;
+        cell_h = cell_h / rows;
+        for (GuiWidgetImpl *c = n->first_child; c; c = c->next_sibling) {
+            if (!c->visible) continue;
+            int gc = c->grid_col; if (gc < 0) gc = 0; if (gc >= cols) gc = cols - 1;
+            int gr = c->grid_row; if (gr < 0) gr = 0; if (gr >= rows) gr = rows - 1;
+            int cspan = c->grid_cspan > 0 ? c->grid_cspan : 1;
+            int rspan = c->grid_rspan > 0 ? c->grid_rspan : 1;
+            if (gc + cspan > cols) cspan = cols - gc;
+            if (gr + rspan > rows) rspan = rows - gr;
+            if (cspan < 1) cspan = 1;
+            if (rspan < 1) rspan = 1;
+            int cw_cell = cspan * cell_w + (cspan - 1) * gap;
+            int ch_cell = rspan * cell_h + (rspan - 1) * gap;
+            int gx = cx + gc * (cell_w + gap);
+            int gy = cy + gr * (cell_h + gap);
+            c->x = gx - ax; c->y = gy - ay;
+            c->w = cw_cell; c->h = ch_cell;
+            layout_node(c, gx, gy, cw_cell, ch_cell);
         }
         return;
     }

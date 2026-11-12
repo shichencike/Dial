@@ -419,7 +419,8 @@ extern fn dial_gui_event_data(app: GuiApp): rawptr<byte>;
 // 绘制走禁用配色）。
 
 /// 设置控件种类（0 BOX / 1 LABEL / 2 BUTTON / 3 CHECKBOX / 4 TEXTBOX /
-/// 5 RADIO / 6 SLIDER / 7 PROGRESS）；非法值返回 -1。
+/// 5 RADIO / 6 SLIDER / 7 PROGRESS / 10 COMBO / 11 LIST）；8 / 9 留给第 7 层信号
+/// kind 标记（MENU / DIALOG），不占真实控件；非法值（含 8 / 9）返回 -1。
 extern fn dial_gui_widget_set_kind(w: GuiWidget, kind: int): int;
 extern fn dial_gui_widget_kind(w: GuiWidget): int;
 
@@ -1200,4 +1201,46 @@ extern fn dial_gui_hotkey_cmd_at(h: GuiHotkey, idx: int): int;
 /// 非空时先擦固定 200×8 行面板再画前 8 条（重绘幂等、绑定变化可观测）；
 /// 空表不绘制（返回 0，零像素影响）。p 为离屏 / 窗口画布。返回 0 / -1。
 extern fn dial_gui_hotkey_draw(p: GuiPainter, h: GuiHotkey, x: int, y: int): int;
+
+// ---- 第 16 层：网格布局（本段 2 个追加 extern fn）------------------------
+// 容器用 set_grid 声明 cols/rows（<=0 视为 1×1），子节点用 set_grid_cell 声明
+// 占哪格（col/row 从 0 起，cspan/rspan 默认 1）。layout_apply 按弹性均分余量算
+// 单元格矩形（纯几何，零 DISPLAY 依赖，headless 可测）。set_kind 上界由 7 扩到 11。
+// 8 / 9 仍留给第 7 层信号 kind 标记（MENU / DIALOG），不占真实控件。
+extern fn dial_gui_widget_set_grid(w: GuiWidget, cols: int, rows: int): int;
+extern fn dial_gui_widget_set_grid_cell(w: GuiWidget, col: int, row: int, cspan: int, rspan: int): int;
+
+// ---- 第 16 层：组合框 ComboBox（本段 10 个追加 extern fn）-----------------
+// 只读框 + 点击展开下拉，单选取值；项存 items（容量 64 固定，无动态扩容）。
+// label 由 C 侧 strdup 自有副本；item_label 返回借用 rawptr<byte>，Dial 侧须
+// string_from_cstr 复制。select 选中并收起下拉；open/close/is_open 手动控制展开。
+extern fn dial_gui_combo_add_item(w: GuiWidget, id: int, label: string): int;
+extern fn dial_gui_combo_clear(w: GuiWidget): int;
+extern fn dial_gui_combo_count(w: GuiWidget): int;
+extern fn dial_gui_combo_item_id(w: GuiWidget, idx: int): int;
+extern fn dial_gui_combo_item_label(w: GuiWidget, idx: int): rawptr<byte>;
+extern fn dial_gui_combo_select(w: GuiWidget, idx: int): int;
+extern fn dial_gui_combo_selected(w: GuiWidget): int;
+extern fn dial_gui_combo_open(w: GuiWidget): int;
+extern fn dial_gui_combo_close(w: GuiWidget): int;
+extern fn dial_gui_combo_is_open(w: GuiWidget): int;
+
+// ---- 第 16 层：列表框 ListBox（本段 10 个追加 extern fn）------------------
+// 常显可选项；select 单选、select_toggle 多选（64 位位图），选中发 SELECTED 信号。
+// 项存储与 ComboBox 共用 GuiWidgetImpl.items；容量 64 固定，无动态扩容。
+extern fn dial_gui_list_add_item(w: GuiWidget, id: int, label: string): int;
+extern fn dial_gui_list_clear(w: GuiWidget): int;
+extern fn dial_gui_list_count(w: GuiWidget): int;
+extern fn dial_gui_list_item_id(w: GuiWidget, idx: int): int;
+extern fn dial_gui_list_item_label(w: GuiWidget, idx: int): rawptr<byte>;
+extern fn dial_gui_list_select(w: GuiWidget, idx: int): int;
+extern fn dial_gui_list_select_toggle(w: GuiWidget, idx: int): int;
+extern fn dial_gui_list_is_selected(w: GuiWidget, idx: int): int;
+extern fn dial_gui_list_selected_count(w: GuiWidget): int;
+extern fn dial_gui_list_selected_first(w: GuiWidget): int;
+
+// ---- 第 16 层：右键按下态（本段 1 个追加 extern fn）----------------------
+// 与 left pressed 平行：widget_handle 遇 button==3 置 1，RELEASE 清 0；纯值，
+// 供 Dial 侧在 MOUSE_PRESS 分支区分左 / 右键（右键不改 hovered/pressed 语义）。
+extern fn dial_gui_widget_right_pressed(w: GuiWidget): int;
 

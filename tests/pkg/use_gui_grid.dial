@@ -1,0 +1,91 @@
+// gui.dialpkg 第 16 层：网格布局（GRID）端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：容器 set_grid / 子节点 set_grid_cell、弹性均分几何、
+// 跨度夹紧、越界 Fail-Fast、set_layout 接受 3、离屏绘制 CRC 稳定。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var root: GuiWidget = dial_gui_widget_tree(200, 200);
+
+    // ---- 0) set_grid / set_grid_cell 越界 Fail-Fast -----------------------
+    expect_int(dial_gui_widget_set_grid(root, 0, 2), -1, "grid_cols_zero_rejected");
+    expect_int(dial_gui_widget_set_grid(root, 2, 0), -1, "grid_rows_zero_rejected");
+    expect_int(dial_gui_widget_set_grid(root, 300, 2), -1, "grid_cols_over_rejected");
+    expect_int(dial_gui_widget_set_grid(root, 2, 300), -1, "grid_rows_over_rejected");
+    expect_int(dial_gui_widget_set_grid(root, 2, 2), 0, "grid_set_ok");
+
+    var c0: GuiWidget = dial_gui_widget_add(root);
+    var c1: GuiWidget = dial_gui_widget_add(root);
+    var c2: GuiWidget = dial_gui_widget_add(root);
+    var c3: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_set_grid_cell(c0, -1, 0, 1, 1), -1, "cell_col_neg_rejected");
+    expect_int(dial_gui_widget_set_grid_cell(c0, 256, 0, 1, 1), -1, "cell_col_over_rejected");
+    expect_int(dial_gui_widget_set_grid_cell(c0, 0, 0, 0, 1), -1, "cell_cspan_zero_rejected");
+    expect_int(dial_gui_widget_set_grid_cell(c0, 0, 0, 1, 1), 0, "cell_set_ok");
+
+    // ---- 1) 2×2 网格，gap 0：每格 100×100 -------------------------------
+    expect_int(dial_gui_widget_set_layout(root, 3), 0, "grid_layout_ok");   // 3 = GRID
+    expect_int(dial_gui_widget_set_layout(root, 99), -1, "grid_bad_layout_rejected");
+    dial_gui_widget_set_grid_cell(c0, 0, 0, 1, 1);
+    dial_gui_widget_set_grid_cell(c1, 1, 0, 1, 1);
+    dial_gui_widget_set_grid_cell(c2, 0, 1, 1, 1);
+    dial_gui_widget_set_grid_cell(c3, 1, 1, 1, 1);
+    expect_int(dial_gui_widget_layout_apply(root, 200, 200), 0, "grid_apply_gap0");
+    expect_int(dial_gui_widget_x(c0), 0, "g0_x");
+    expect_int(dial_gui_widget_y(c0), 0, "g0_y");
+    expect_int(dial_gui_widget_width(c0), 100, "g0_w");
+    expect_int(dial_gui_widget_height(c0), 100, "g0_h");
+    expect_int(dial_gui_widget_x(c1), 100, "g1_x");
+    expect_int(dial_gui_widget_y(c1), 0, "g1_y");
+    expect_int(dial_gui_widget_x(c2), 0, "g2_x");
+    expect_int(dial_gui_widget_y(c2), 100, "g2_y");
+    expect_int(dial_gui_widget_x(c3), 100, "g3_x");
+    expect_int(dial_gui_widget_y(c3), 100, "g3_y");
+
+    // ---- 2) gap 10：每格 95×95，间隔 10 --------------------------------
+    dial_gui_widget_set_gap(root, 10);
+    expect_int(dial_gui_widget_layout_apply(root, 200, 200), 0, "grid_apply_gap10");
+    expect_int(dial_gui_widget_width(c0), 95, "g0_w_gap");
+    expect_int(dial_gui_widget_x(c1), 105, "g1_x_gap");
+    expect_int(dial_gui_widget_y(c2), 105, "g2_y_gap");
+    expect_int(dial_gui_widget_x(c3), 105, "g3_x_gap");
+    expect_int(dial_gui_widget_y(c3), 105, "g3_y_gap");
+
+    // ---- 3) 跨度：c0 占满整行（cspan=2）--------------------------------
+    dial_gui_widget_set_grid_cell(c0, 0, 0, 2, 1);
+    expect_int(dial_gui_widget_layout_apply(root, 200, 200), 0, "grid_span_apply");
+    expect_int(dial_gui_widget_width(c0), 200, "g0_span_full_w");
+    expect_int(dial_gui_widget_x(c1), 105, "g1_still_placed");
+
+    // ---- 4) 离屏绘制 CRC 稳定（box 网格，确定性）-----------------------
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 200);
+    expect(!is_null(p), "grid_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "grid_set_aa_off");
+    expect_int(dial_gui_widget_draw(root, p), 0, "grid_draw");
+    var crc0: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_widget_draw(root, p), 0, "grid_draw2");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect_int(crc0, crc1, "grid_crc_stable");
+    expect_str(str(crc0), "4049314674", "grid_crc_pinned");
+    print("grid_crc = " + str(crc0));
+
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("grid_done = true");
+    return 0;
+}

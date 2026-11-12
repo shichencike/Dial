@@ -1,0 +1,123 @@
+// gui.dialpkg 第 16 层：组合框 ComboBox 端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：kind=10 合法 / 12 仍被拒（set_kind 上界 11）、项增删 /
+// 容量上界 / id·label（借用指针的 ARC 复制）/ 单选 select·selected / 展开态
+// open·close·is_open / 点击框体切换展开 / 下拉项命中选中并发 SELECTED 信号 /
+// 离屏绘制 CRC 稳定。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+// 信号纯值块（72 字节，与 C 侧 GuiWidgetSignal 逐字节一致）。
+packed extern struct GuiWidgetSignal {
+    seq: int, signal: int, tag: int, userdata: int, kind: int, a: int, b: int, x: int, y: int
+}
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var root: GuiWidget = dial_gui_widget_tree(200, 100);
+    var box: GuiWidget = dial_gui_widget_add(root);
+
+    // kind=10 COMBO 合法；越界 12 仍被拒（上界 11）；8 / 9 仍为第 7 层信号
+    // kind 标记（MENU / DIALOG），扩上界时绝不能顺手放行——否则控件会被切成
+    // 「未知种类」落进 draw 的 BOX 兜底，静默破坏配色 / 激活（本层回归锁死）。
+    expect_int(dial_gui_widget_set_kind(box, 10), 0, "combo_set_kind");
+    expect_int(dial_gui_widget_kind(box), 10, "combo_kind");
+    expect_int(dial_gui_widget_set_kind(box, 12), -1, "combo_bad_kind_rejected");
+    dial_gui_clear_error();
+    expect_int(dial_gui_widget_set_kind(box, 8), -1, "combo_kind8_menu_marker_rejected");
+    dial_gui_clear_error();
+    expect_int(dial_gui_widget_set_kind(box, 9), -1, "combo_kind9_dialog_marker_rejected");
+    dial_gui_clear_error();
+    expect_int(dial_gui_widget_kind(box), 10, "combo_kind_unchanged_after_rejects");
+
+    // 项增删 / 计数 / 容量上界
+    expect_int(dial_gui_combo_add_item(box, 100, "Apple"), 0, "combo_add_apple");
+    expect_int(dial_gui_combo_add_item(box, 200, "Banana"), 0, "combo_add_banana");
+    expect_int(dial_gui_combo_add_item(box, 300, "Cherry"), 0, "combo_add_cherry");
+    expect_int(dial_gui_combo_count(box), 3, "combo_count_3");
+    expect_int(dial_gui_combo_item_id(box, 1), 200, "combo_item_id_1");
+    expect_str(string_from_cstr(dial_gui_combo_item_label(box, 1)), "Banana", "combo_item_label_1");
+    expect_int(dial_gui_combo_item_id(box, 9), -1, "combo_item_id_oob_rejected");
+    dial_gui_clear_error();
+
+    // 单选：select / selected；selected 默认 -1
+    expect_int(dial_gui_combo_selected(box), -1, "combo_selected_default");
+    expect_int(dial_gui_combo_select(box, 2), 0, "combo_select_2");
+    expect_int(dial_gui_combo_selected(box), 2, "combo_selected_2");
+    expect_int(dial_gui_combo_select(box, 9), -1, "combo_select_oob_rejected");
+    dial_gui_clear_error();
+    expect_int(dial_gui_combo_selected(box), 2, "combo_selected_unchanged");
+    // select 同时收起下拉
+    expect_int(dial_gui_combo_is_open(box), 0, "combo_closed_after_select");
+
+    // 展开态：open / close / is_open
+    expect_int(dial_gui_combo_open(box), 0, "combo_open_call");
+    expect_int(dial_gui_combo_is_open(box), 1, "combo_is_open_true");
+    expect_int(dial_gui_combo_close(box), 0, "combo_close_call");
+    expect_int(dial_gui_combo_is_open(box), 0, "combo_is_closed_again");
+
+    // clear：计数归零、选中与展开态复位
+    expect_int(dial_gui_combo_clear(box), 0, "combo_clear");
+    expect_int(dial_gui_combo_count(box), 0, "combo_count_zero_after_clear");
+    expect_int(dial_gui_combo_selected(box), -1, "combo_selected_reset");
+
+    // 重新加项用于交互 / 绘制
+    dial_gui_combo_add_item(box, 100, "Apple");
+    dial_gui_combo_add_item(box, 200, "Banana");
+    dial_gui_combo_add_item(box, 300, "Cherry");
+    dial_gui_combo_select(box, 1);   // 预选 Banana
+
+    // 交互：点击框体（RELEASE）切换展开；展开后点击下拉项命中即选中并收起、发 SELECTED
+    dial_gui_widget_set_rect(box, 0, 0, 160, 24);
+    dial_gui_widget_set_layout(root, 0);   // ABS
+    dial_gui_widget_layout_apply(root, 200, 100);
+    // 框体高度 24；下拉项 k 位于 y ∈ [24 + k*20, 24 + (k+1)*20)。
+    expect_int(dial_gui_widget_handle(root, 2, 10, 10, 1), 1, "combo_click_toggles_open");  // RELEASE 打开
+    expect_int(dial_gui_combo_is_open(box), 1, "combo_now_open");
+    expect_int(dial_gui_widget_handle(root, 2, 10, 64, 1), 1, "combo_dropdown_item2_hit");   // y=64 → row 2 Cherry
+    expect_int(dial_gui_combo_selected(box), 2, "combo_selected_after_dropdown");
+    expect_int(dial_gui_combo_is_open(box), 0, "combo_closed_after_select");
+
+    // 订阅 SELECTED 后，下拉命中应入队一条信号（a=item id）
+    dial_gui_widget_subscribe(box, 64);  // GUI_SIG_SELECTED 位
+    expect_int(dial_gui_widget_handle(root, 2, 10, 10, 1), 1, "combo_reopen");               // 重新打开
+    expect_int(dial_gui_widget_handle(root, 2, 10, 34, 1), 1, "combo_dropdown_item0_hit");   // y=34 → row 0 Apple
+    expect_int(dial_gui_combo_selected(box), 0, "combo_selected_apple");
+    expect_int(dial_gui_widget_signal_pending(box), 1, "combo_signal_pending");
+    var sdp: rawptr<byte> = dial_gui_widget_signal_data(box);
+    var sig: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(sdp);
+    expect_int(sig.a, 100, "combo_signal_a_itemid");
+    expect_int(dial_gui_widget_signal_pop(box), 1, "combo_signal_pop");
+    expect_int(dial_gui_widget_signal_pending(box), 0, "combo_signal_drained");
+    dial_gui_widget_unsubscribe(box);
+
+    // 离屏绘制 CRC 稳定
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 100);
+    expect(!is_null(p), "combo_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "combo_set_aa_off");
+    expect_int(dial_gui_widget_draw(root, p), 0, "combo_draw");
+    var crc0: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_widget_draw(root, p), 0, "combo_draw2");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect_int(crc0, crc1, "combo_crc_stable");
+    expect_str(str(crc0), "3235232961", "combo_crc_pinned");
+    print("combo_crc = " + str(crc0));
+
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("combo_done = true");
+    return 0;
+}

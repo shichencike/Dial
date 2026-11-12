@@ -260,6 +260,7 @@ struct GuiFontImpl {
 #define GUI_LAYOUT_ABS   0
 #define GUI_LAYOUT_VBOX  1
 #define GUI_LAYOUT_HBOX  2
+#define GUI_LAYOUT_GRID  3   /* 第 16 层：行列栅格布局（容器定义 cols/rows，子节点占格）*/
 
 /* ---- 成品控件外观层：种类 + 内置浅色默认主题 -------------------------- *
  * 颜色常量是**默认主题色**（g_default[] 的唯一真相源），运行时可由
@@ -278,6 +279,13 @@ struct GuiFontImpl {
  * 菜单项选中 = MENU、对话框按钮点击 = DIALOG。set_kind 仍只校验 0..7。 */
 #define GUI_WIDGET_MENU      8
 #define GUI_WIDGET_DIALOG    9
+/* 第 16 层：组合框 / 列表框（真实控件，set_kind 上界扩到 11）。两者复用
+ * GuiWidgetImpl.items 项存储（容量 GUI_COMBO_CAP），绘制/推进在 dial_gui_look.c。*/
+#define GUI_WIDGET_COMBO     10  /* 组合框：只读框 + 点击展开下拉，单选取值 */
+#define GUI_WIDGET_LIST      11  /* 列表框：常显可选项，单击/多选 + 选中信号 */
+
+/* 组合框 / 列表框项容量（固定，无动态扩容，内存上界确定）。*/
+#define GUI_COMBO_CAP        64
 
 /* ---- 对话框按钮位（dial_gui_dialog_set_buttons 的 mask）--------------- *
  * 单个对话框可同时挂多个按钮（按位或）；点击后 dial_gui_dialog_result 返回
@@ -327,6 +335,13 @@ struct GuiFontImpl {
 #define GUI_THEME_FILL      ((gui_color_t)0xFF2F6FE0u)  /* 进度填充（与 MARK 同蓝）*/
 #define GUI_THEME_KNOB      ((gui_color_t)0xFFFFFFFFu)  /* 滑块（白底 + MARK 描边）*/
 
+/* 第 16 层：组合框 / 列表框项（C 侧自有副本，容量固定 GUI_COMBO_CAP）。
+ * label 是 strdup 副本，替换 / 释放时由 widget.c 的 dispose_subtree 负责 free。*/
+typedef struct GuiComboItem {
+    int64_t id;        /* 纯值键（SELECTED 信号的 a）*/
+    char *label;      /* C 侧 strdup 自有副本（NULL = 空）*/
+} GuiComboItem;
+
 struct GuiWidgetImpl {
     GuiWidgetImpl *parent;
     GuiWidgetImpl *first_child;
@@ -369,6 +384,22 @@ struct GuiWidgetImpl {
     int64_t sig_mask;           /* 订阅位掩码（GUI_SIG_* 按位或）*/
     int64_t sig_dropped;        /* 本树累计溢出 / 分配失败丢弃数（仅根用）*/
     GuiSignalQueue *sigq;       /* 环形队列（仅根用，首次 emit 时 calloc）*/
+    /* ---- 第 16 层：网格布局（dial_gui_widget.c）-------------------------- *
+     * 子节点声明自己占哪格（默认 0,0 + 跨度 1,1）；容器声明 cols/rows，
+     * layout_apply 按弹性均分余量算单元格矩形（纯几何，零 DISPLAY 依赖）。 */
+    int  grid_col, grid_row, grid_cspan, grid_rspan;
+    int  grid_cols, grid_rows;  /* 容器网格列数 / 行数（<=0 视为 1×1）*/
+    /* ---- 第 16 层：组合框 / 列表框（dial_gui_look.c）--------------------- *
+     * items 容量固定 GUI_COMBO_CAP，无动态扩容；label 是 C 侧 strdup 自有副本。
+     * 选型态：ComboBox 单选用 selected_idx（默认 -1 未选）；ListBox 多选用
+     * list_sel_bits（64 位位图，每位一项，多选 toggle）。 */
+    int  combo_open;           /* ComboBox 下拉是否展开 */
+    int  selected_idx;         /* ComboBox 当前选中项 idx（-1 未选）*/
+    int  item_count;           /* 已添加项数（<= GUI_COMBO_CAP）*/
+    int64_t list_sel_bits;     /* ListBox 多选用位图（64 位，每位一项）*/
+    /* ---- 第 16 层：右键按下态（dial_gui_look.c，纯值）------------------- */
+    int  right_pressed;        /* 右键按下态（widget_handle 推进，纯值）*/
+    GuiComboItem items[GUI_COMBO_CAP];  /* 组合框 / 列表框项存储 */
 };
 
 /*
@@ -445,6 +476,40 @@ void           gui_widget_dispose_tree(GuiWidgetImpl *root);
 GuiWidgetImpl *gui_widget_add(GuiWidgetImpl *parent);
 int            gui_widget_remove(GuiWidgetImpl *w);
 int            gui_widget_layout_apply(GuiWidgetImpl *root, int w, int h);
+
+/* ---- 第 16 层：网格布局 / 组合框 / 列表框 / 右键态 --------------------- *
+ * 与框架层 / 外观层硬边界一致：只读写 GuiWidgetImpl 上的 C 侧纯值，绝不碰平台
+ * API、绝不 C → Dial 反向回调。set_kind 上界由 GUI_WIDGET_PROGRESS(7) 扩到
+ * GUI_WIDGET_LIST(11)；8/9 仍留给第 7 层信号 kind 标记，不占真实控件。 */
+/* 网格布局：容器声明 cols/rows（<=0 视为 1×1）；子节点声明占格。
+ * 全部 : int 一律 int64_t（Dial int 是 64 位，返回 -1 不能被零扩展）。*/
+int64_t        dial_gui_widget_set_grid(GuiWidgetImpl *w, int64_t cols, int64_t rows);
+int64_t        dial_gui_widget_set_grid_cell(GuiWidgetImpl *w, int64_t col, int64_t row,
+                                             int64_t cspan, int64_t rspan);
+/* 组合框：只读框 + 点击展开下拉，单选取值（items 容量 GUI_COMBO_CAP）。*/
+int64_t        dial_gui_combo_add_item(GuiWidgetImpl *w, int64_t id, DialString label);
+int64_t        dial_gui_combo_clear(GuiWidgetImpl *w);
+int64_t        dial_gui_combo_count(GuiWidgetImpl *w);
+int64_t        dial_gui_combo_item_id(GuiWidgetImpl *w, int idx);
+const char    *dial_gui_combo_item_label(GuiWidgetImpl *w, int idx);   /* 借用指针 */
+int64_t        dial_gui_combo_select(GuiWidgetImpl *w, int idx);
+int64_t        dial_gui_combo_selected(GuiWidgetImpl *w);
+int64_t        dial_gui_combo_open(GuiWidgetImpl *w);
+int64_t        dial_gui_combo_close(GuiWidgetImpl *w);
+int64_t        dial_gui_combo_is_open(GuiWidgetImpl *w);
+/* 列表框：常显可选项，单击单选 / 多选 toggle + 选中信号。*/
+int64_t        dial_gui_list_add_item(GuiWidgetImpl *w, int64_t id, DialString label);
+int64_t        dial_gui_list_clear(GuiWidgetImpl *w);
+int64_t        dial_gui_list_count(GuiWidgetImpl *w);
+int64_t        dial_gui_list_item_id(GuiWidgetImpl *w, int idx);
+const char    *dial_gui_list_item_label(GuiWidgetImpl *w, int idx);    /* 借用指针 */
+int64_t        dial_gui_list_select(GuiWidgetImpl *w, int idx);
+int64_t        dial_gui_list_select_toggle(GuiWidgetImpl *w, int idx);
+int64_t        dial_gui_list_is_selected(GuiWidgetImpl *w, int idx);
+int64_t        dial_gui_list_selected_count(GuiWidgetImpl *w);
+int64_t        dial_gui_list_selected_first(GuiWidgetImpl *w);
+/* 右键按下态（widget_handle 推进的纯值，与左键 pressed 平行）。*/
+int64_t        dial_gui_widget_right_pressed(GuiWidgetImpl *w);
 /* 后加子优先、取最深可见节点；命中时把绝对坐标写回 hit->abs_* 并输出。 */
 GuiWidgetImpl *gui_widget_hit(GuiWidgetImpl *root, int x, int y,
                               int *out_abs_x, int *out_abs_y);

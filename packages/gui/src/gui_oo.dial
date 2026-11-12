@@ -29,11 +29,12 @@
 //     也不重新声明 extern fn dial_gui_*（会与 .diali 契约撞名被 Fail-Fast 拒绝）。
 //   - LSP 当前不递归本地源码模块（v1.04 既有局限），CLI build/run/check/test 不受影响。
 //
-// 覆盖：279 个 extern fn -> 278 个方法 + 1 个入口 dial_gui_app_new。
+// 覆盖：302 个 extern fn -> 301 个方法 + 1 个入口 dial_gui_app_new。
 // （第 8 层 153 + 第 9 层 15 + 第 10 层 15 + 第 11 层 19 + 第 12 层 20 +
-//   第 13 层 23 + 第 14 层 15 + 第 15 层 18 = 278 个方法；第 14 层方法挂在
-//   第二个 impl GuiWindow 块，第 15 层的 hotkey_new 工厂挂 GuiApp、
-//   其余 17 个方法挂 impl GuiHotkey，见文件末尾。）
+//   第 13 层 23 + 第 14 层 15 + 第 15 层 18 + 第 16 层 23 = 301 个方法；
+//   第 14 层方法挂在第二个 impl GuiWindow 块，第 15 层的 hotkey_new 工厂挂
+//   GuiApp、其余 17 个方法挂 impl GuiHotkey，第 16 层 23 个方法挂在
+//   impl GuiWidget，见文件末尾。）
 
 import "gui";
 
@@ -194,6 +195,33 @@ impl GuiWidget {
     fn signal_pop(self): int { return dial_gui_widget_signal_pop(self); }
     fn signal_clear(self): int { return dial_gui_widget_signal_clear(self); }
     fn signal_dropped(self): int { return dial_gui_widget_signal_dropped(self); }
+    // ---- 第 16 层：网格布局 ----
+    fn set_grid(self, cols: int, rows: int): int { return dial_gui_widget_set_grid(self, cols, rows); }
+    fn set_grid_cell(self, col: int, row: int, cspan: int, rspan: int): int { return dial_gui_widget_set_grid_cell(self, col, row, cspan, rspan); }
+    // ---- 第 16 层：组合框 ComboBox ----
+    fn combo_add_item(self, id: int, text: string): int { return dial_gui_combo_add_item(self, id, text); }
+    fn combo_clear(self): int { return dial_gui_combo_clear(self); }
+    fn combo_count(self): int { return dial_gui_combo_count(self); }
+    fn combo_item_id(self, idx: int): int { return dial_gui_combo_item_id(self, idx); }
+    fn combo_item_label(self, idx: int): rawptr<byte> { return dial_gui_combo_item_label(self, idx); }
+    fn combo_select(self, idx: int): int { return dial_gui_combo_select(self, idx); }
+    fn combo_selected(self): int { return dial_gui_combo_selected(self); }
+    fn combo_open(self): int { return dial_gui_combo_open(self); }
+    fn combo_close(self): int { return dial_gui_combo_close(self); }
+    fn combo_is_open(self): int { return dial_gui_combo_is_open(self); }
+    // ---- 第 16 层：列表框 ListBox ----
+    fn list_add_item(self, id: int, text: string): int { return dial_gui_list_add_item(self, id, text); }
+    fn list_clear(self): int { return dial_gui_list_clear(self); }
+    fn list_count(self): int { return dial_gui_list_count(self); }
+    fn list_item_id(self, idx: int): int { return dial_gui_list_item_id(self, idx); }
+    fn list_item_label(self, idx: int): rawptr<byte> { return dial_gui_list_item_label(self, idx); }
+    fn list_select(self, idx: int): int { return dial_gui_list_select(self, idx); }
+    fn list_select_toggle(self, idx: int): int { return dial_gui_list_select_toggle(self, idx); }
+    fn list_is_selected(self, idx: int): int { return dial_gui_list_is_selected(self, idx); }
+    fn list_selected_count(self): int { return dial_gui_list_selected_count(self); }
+    fn list_selected_first(self): int { return dial_gui_list_selected_first(self); }
+    // ---- 第 16 层：右键按下态 ----
+    fn right_pressed(self): int { return dial_gui_widget_right_pressed(self); }
 }
 
 // ===== GuiMenu —— 顶栏与弹出菜单项 =====

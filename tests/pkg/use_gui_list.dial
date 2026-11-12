@@ -1,0 +1,111 @@
+// gui.dialpkg 第 16 层：列表框 ListBox 端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：kind=11 合法 / 12 仍被拒、项增删 / 容量上界 / id·label
+// / 单选 select / 多选 toggle / is_selected / selected_count / selected_first
+// / 点击行选中并发 SELECTED（a=item id）/ 离屏绘制 CRC 稳定。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+packed extern struct GuiWidgetSignal {
+    seq: int, signal: int, tag: int, userdata: int, kind: int, a: int, b: int, x: int, y: int
+}
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var root: GuiWidget = dial_gui_widget_tree(160, 100);
+    var lb: GuiWidget = dial_gui_widget_add(root);
+
+    // kind=11 LIST 合法；越界 12 仍被拒（上界 11）
+    expect_int(dial_gui_widget_set_kind(lb, 11), 0, "list_set_kind");
+    expect_int(dial_gui_widget_kind(lb), 11, "list_kind");
+    expect_int(dial_gui_widget_set_kind(lb, 12), -1, "list_bad_kind_rejected");
+    dial_gui_clear_error();
+
+    expect_int(dial_gui_list_add_item(lb, 10, "Red"), 0, "list_add_red");
+    expect_int(dial_gui_list_add_item(lb, 20, "Green"), 0, "list_add_green");
+    expect_int(dial_gui_list_add_item(lb, 30, "Blue"), 0, "list_add_blue");
+    expect_int(dial_gui_list_add_item(lb, 40, "Yellow"), 0, "list_add_yellow");
+    expect_int(dial_gui_list_count(lb), 4, "list_count_4");
+    expect_int(dial_gui_list_item_id(lb, 2), 30, "list_item_id_2");
+    expect_str(string_from_cstr(dial_gui_list_item_label(lb, 2)), "Blue", "list_item_label_2");
+    expect_int(dial_gui_list_item_id(lb, 9), -1, "list_item_id_oob_rejected");
+    dial_gui_clear_error();
+
+    // 单选
+    expect_int(dial_gui_list_select(lb, 1), 0, "list_select_1");
+    expect_int(dial_gui_list_is_selected(lb, 1), 1, "list_is_selected_1");
+    expect_int(dial_gui_list_selected_count(lb), 1, "list_selected_count_1");
+    expect_int(dial_gui_list_selected_first(lb), 1, "list_selected_first_1");
+    expect_int(dial_gui_list_select(lb, 9), -1, "list_select_oob_rejected");
+    dial_gui_clear_error();
+    expect_int(dial_gui_list_selected_first(lb), 1, "list_selected_first_unchanged");
+
+    // 多选 toggle：再 toggle 0 与 2；再 toggle 1 取消
+    expect_int(dial_gui_list_select_toggle(lb, 0), 0, "list_toggle_0");
+    expect_int(dial_gui_list_select_toggle(lb, 2), 0, "list_toggle_2");
+    expect_int(dial_gui_list_selected_count(lb), 3, "list_selected_count_3");
+    expect_int(dial_gui_list_is_selected(lb, 0), 1, "list_is_selected_0");
+    expect_int(dial_gui_list_is_selected(lb, 2), 1, "list_is_selected_2");
+    expect_int(dial_gui_list_select_toggle(lb, 1), 0, "list_toggle_off_1");
+    expect_int(dial_gui_list_is_selected(lb, 1), 0, "list_is_selected_1_off");
+    expect_int(dial_gui_list_selected_count(lb), 2, "list_selected_count_2");
+    expect_int(dial_gui_list_selected_first(lb), 0, "list_selected_first_0");
+
+    // clear：计数与选中位图归零
+    expect_int(dial_gui_list_clear(lb), 0, "list_clear");
+    expect_int(dial_gui_list_count(lb), 0, "list_count_zero");
+    expect_int(dial_gui_list_selected_count(lb), 0, "list_sel_count_zero_after_clear");
+
+    // 交互：点击行选中（单击单选，覆盖位图）
+    dial_gui_list_add_item(lb, 10, "Red");
+    dial_gui_list_add_item(lb, 20, "Green");
+    dial_gui_list_add_item(lb, 30, "Blue");
+    dial_gui_widget_set_rect(lb, 0, 0, 160, 100);
+    dial_gui_widget_set_layout(root, 0);
+    dial_gui_widget_layout_apply(root, 160, 100);
+    // 行高 20；点击第 2 行（Blue）：y ∈ [40, 60)
+    expect_int(dial_gui_widget_handle(root, 2, 10, 50, 1), 1, "list_row2_click");  // RELEASE
+    expect_int(dial_gui_list_is_selected(lb, 2), 1, "list_row2_selected");
+    expect_int(dial_gui_list_selected_count(lb), 1, "list_row2_single_select");
+    // 订阅 SELECTED 后点第 0 行（Red，a=item id=10）
+    dial_gui_widget_subscribe(lb, 64);
+    expect_int(dial_gui_widget_handle(root, 2, 10, 10, 1), 1, "list_row0_click");  // y ∈ [0,20) → row0 Red
+    expect_int(dial_gui_list_is_selected(lb, 0), 1, "list_row0_selected");
+    expect_int(dial_gui_list_selected_count(lb), 1, "list_row0_single_select");
+    expect_int(dial_gui_widget_signal_pending(lb), 1, "list_signal_pending");
+    var sdp: rawptr<byte> = dial_gui_widget_signal_data(lb);
+    var sig: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(sdp);
+    expect_int(sig.a, 10, "list_signal_a_itemid");
+    expect_int(dial_gui_widget_signal_pop(lb), 1, "list_signal_pop");
+    dial_gui_widget_unsubscribe(lb);
+
+    // 离屏绘制 CRC 稳定
+    var p: GuiPainter = dial_gui_painter_offscreen(160, 100);
+    expect(!is_null(p), "list_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "list_set_aa_off");
+    expect_int(dial_gui_widget_draw(root, p), 0, "list_draw");
+    var crc0: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_widget_draw(root, p), 0, "list_draw2");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect_int(crc0, crc1, "list_crc_stable");
+    expect_str(str(crc0), "3941106424", "list_crc_pinned");
+    print("list_crc = " + str(crc0));
+
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("list_done = true");
+    return 0;
+}
