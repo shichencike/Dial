@@ -242,6 +242,7 @@ def main():
             "foldingRangeProvider",
             "selectionRangeProvider",
             "documentLinkProvider",
+            "documentHighlightProvider",
         ):
             if not srv_caps.get(key):
                 fails.append(f"能力协商缺失: {key}")
@@ -251,8 +252,8 @@ def main():
         if not isinstance(sync, dict):
             fails.append(f"textDocumentSync 应为选项形式（要带 save），实际 {sync!r}")
         else:
-            if sync.get("change") != 1:
-                fails.append(f"textDocumentSync.change 应为 1(Full)，实际 {sync.get('change')!r}")
+            if sync.get("change") != 2:
+                fails.append(f"textDocumentSync.change 应为 2(Incremental)，实际 {sync.get('change')!r}")
             if not sync.get("save"):
                 fails.append("textDocumentSync.save 应为真——否则客户端不发 didSave，诊断刷不出来")
 
@@ -743,6 +744,10 @@ def main():
             ("textDocument/documentLink", {"textDocument": {"uri": args.uri}},
              lambda r: isinstance(r, list) and all("range" in x for x in r),
              "DocumentLink[]（含 range/target?）"),
+            ("textDocument/documentHighlight", {"textDocument": {"uri": args.uri},
+                                                   "position": {"line": 5, "character": 17}},
+             lambda r: isinstance(r, list) and all("range" in x for x in r),
+             "DocumentHighlight[]（含 range/kind?）"),
         ]
         for label, params, ok, spec in CONFORM:
             resp = client.request(label, params)

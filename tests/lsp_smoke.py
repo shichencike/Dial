@@ -164,12 +164,15 @@ def main():
     sync = caps.get("textDocumentSync")
     check(isinstance(sync, dict), "textDocumentSync 是选项形式（含 save）", f"实际: {sync!r}")
     if isinstance(sync, dict):
-        check(sync.get("change") == 1, "textDocumentSync.change = 1（全量同步）", f"实际: {sync.get('change')!r}")
+        check(sync.get("change") == 2, "textDocumentSync.change = 2（增量同步，兼容全量）", f"实际: {sync.get('change')!r}")
         check(bool(sync.get("save")), "textDocumentSync.save 为真（要收到 didSave）", f"实际: {sync.get('save')!r}")
     legend = caps.get("semanticTokensProvider", {}).get("legend", {}).get("tokenTypes", [])
     check(legend == TOKEN_TYPES, "semanticTokens legend 与实现一致", f"实际: {legend}")
     server_info = (r or {}).get("result", {}).get("serverInfo", {})
     check(server_info.get("name") == "dialc", "serverInfo.name = dialc", server_info)
+    check(caps.get("documentHighlightProvider") is True,
+          "documentHighlightProvider = true（文档内同名标识符高亮）",
+          caps.get("documentHighlightProvider"))
 
     srv.notify("initialized", {})
 
@@ -284,6 +287,67 @@ def main():
         "改正后诊断被清空（不再有红色波浪线）",
         cleared,
     )
+
+    # 4.5) v1.10：增量同步 / 统一诊断码 / documentHighlight / 文件监视
+    uri2 = "file:///tmp/t_incr.dial"
+    SRC2 = "fn main(): int {\n    var x: int = 1;\n    return x;\n}\n"
+    srv.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri2, "languageId": "dial", "version": 1, "text": SRC2}})
+    for _ in range(10):
+        m = srv.recv()
+        if m is None or m.get("method") == "textDocument/publishDiagnostics":
+            break
+    line2 = SRC2.split("\n")[1]
+    col1 = line2.index("1")
+    srv.notify("textDocument/didChange", {
+        "textDocument": {"uri": uri2, "version": 2},
+        "contentChanges": [{
+            "range": {"start": {"line": 1, "character": col1},
+                      "end": {"line": 1, "character": col1 + 1}},
+            "text": '"字符串"',
+        }],
+    })
+    srv.notify("textDocument/didSave", {"textDocument": {"uri": uri2}})
+    dmsg = None
+    for _ in range(10):
+        m = srv.recv()
+        if m is None:
+            break
+        if m.get("method") == "textDocument/publishDiagnostics":
+            dmsg = m["params"]
+            break
+    check(dmsg is not None, "增量 didChange + didSave 后重新推送诊断")
+    ds = (dmsg or {}).get("diagnostics", [])
+    check(len(ds) == 1 and ds[0].get("code") == "dialc.sema",
+          "增量补丁生效：1 → 字符串字面量后报语义错误（码表与 CLI 同源）", ds)
+    check(bool(ds) and "href" in ds[0].get("codeDescription", {}),
+          "诊断带 codeDescription.href（稳定错误码可点开查表）", ds[0] if ds else {})
+    check(bool(ds) and ds[0]["range"]["start"]["line"] == 1,
+          "增量补丁定位到第 2 行（0 起 line=1）", ds[0]["range"] if ds else {})
+
+    cx = line2.index("x")
+    rh = srv.request("textDocument/documentHighlight", {
+        "textDocument": {"uri": uri2}, "position": {"line": 1, "character": cx}})
+    hs = (rh or {}).get("result", [])
+    check(isinstance(hs, list) and len(hs) == 2 and all("range" in x for x in hs),
+          "documentHighlight 命中同名标识符 2 处（声明 + 引用）", hs)
+
+    srv.notify("workspace/didChangeWatchedFiles",
+               {"changes": [{"uri": "file:///tmp/other.dial", "type": 2}]})
+    watched = None
+    for _ in range(10):
+        m = srv.recv()
+        if m is None:
+            break
+        if m.get("method") == "textDocument/publishDiagnostics":
+            watched = m["params"]
+            break
+    check(watched is not None, "didChangeWatchedFiles 触发已打开文档重新诊断", watched)
+    srv.notify("textDocument/didClose", {"textDocument": {"uri": uri2}})
+    for _ in range(5):
+        m = srv.recv()
+        if m is None or m.get("method") == "textDocument/publishDiagnostics":
+            break
 
     # 5) didClose：清掉残留诊断
     srv.notify("textDocument/didClose", {"textDocument": {"uri": uri}})

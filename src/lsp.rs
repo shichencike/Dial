@@ -194,19 +194,27 @@ fn handle<W: Write>(
             }
         }
         "textDocument/didChange" => {
-            // 记录最新文本，但**不**在这里发诊断——避免打字过程中刷屏。
-            // 诊断在 didSave（以及 didOpen）时发布。符号索引则**每次都更新**，
-            // 这样补全在打字过程中也能给出当前可见的符号。
+            // v1.10：增量同步（change=2）。逐条应用 contentChanges：带 range 的按
+            // LSP 行列（UTF-16 码元）打补丁，不带 range 的整篇替换——老客户端与
+            // 冒烟脚本继续发全量文本也照常工作。
+            // 仍然**不**在这里发诊断（避免打字刷屏）：诊断由 didOpen / didSave /
+            // didChangeWatchedFiles 刷新；符号索引每次都更新，补全不滞后。
             if let Some(p) = msg.get("params") {
-                if let (Some(uri), Some(text)) = (
-                    p.pointer("/textDocument/uri").and_then(|u| u.as_str()),
-                    p.pointer("/contentChanges/0/text").and_then(|t| t.as_str()),
-                ) {
-                    docs.insert(uri.to_string(), text.to_string());
-                    if let Some(v) = p.pointer("/textDocument/version").and_then(|v| v.as_i64()) {
-                        versions.insert(uri.to_string(), v);
+                let uri = p
+                    .pointer("/textDocument/uri")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(v) = p.pointer("/textDocument/version").and_then(|v| v.as_i64()) {
+                    versions.insert(uri.clone(), v);
+                }
+                if let Some(changes) = p.pointer("/contentChanges").and_then(|c| c.as_array()) {
+                    let mut cur = docs.get(&uri).cloned().unwrap_or_default();
+                    for ch in changes {
+                        cur = apply_change(&cur, ch);
                     }
-                    index_document(ws, uri, text);
+                    docs.insert(uri.clone(), cur.clone());
+                    index_document(ws, &uri, &cur);
                 }
             }
         }
@@ -232,6 +240,46 @@ fn handle<W: Write>(
                 let params = json!({ "uri": uri, "diagnostics": [] });
                 notify(out, "textDocument/publishDiagnostics", params)?;
             }
+        }
+
+        // ---- v1.10：工作区文件感知 / 文档内高亮 ----
+        // 客户端（含 VS Code 插件可配的 watcher）在磁盘文件变化时发此通知。
+        // 包 / 本地模块的改动会影响所有已打开文档的诊断，因此对所有 docs 重跑
+        // 索引与诊断；通知不带 id，绝不回响应。
+        "workspace/didChangeWatchedFiles" => {
+            let touched = msg
+                .pointer("/params/changes")
+                .and_then(|c| c.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let _ = log_msg(
+                out,
+                3,
+                &format!("[didChangeWatchedFiles] {} 个文件变更，重跑已打开文档诊断", touched),
+            );
+            let snapshot: Vec<(String, String)> =
+                docs.iter().map(|(u, t)| (u.clone(), t.clone())).collect();
+            for (u, t) in snapshot {
+                index_document(ws, &u, &t);
+                publish_diagnostics(out, &u, &t)?;
+            }
+        }
+        "textDocument/documentHighlight" => {
+            let uri = msg
+                .pointer("/params/textDocument/uri")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+            let l = msg
+                .pointer("/params/position/line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let c = msg
+                .pointer("/params/position/character")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let reply = document_highlight(docs, &uri, l, c);
+            respond(out, id, json!(reply))?;
         }
 
         // ---- 语法高亮 ----
@@ -494,7 +542,7 @@ fn negotiate_capabilities(client: Option<&Value>) -> Value {
         // 在别的客户端（VS Code 官方客户端等）上会**静默失效**。
         "textDocumentSync": {
             "openClose": true,      // 要收到 didOpen / didClose
-            "change": 1,            // 1 = Full：每次把整篇文档发过来（不做增量同步）
+            "change": 2,            // 2 = Incremental：按 range 打补丁；无 range 的全量 change 也兼容
             "save": { "includeText": false }  // 要收到 didSave（诊断靠它刷新）
         },
         "semanticTokensProvider": {
@@ -549,6 +597,9 @@ fn negotiate_capabilities(client: Option<&Value>) -> Value {
     if supports("/textDocument/documentLink") {
         caps["documentLinkProvider"] = json!(true);
     }
+    // v1.10：文档内同名标识符高亮。无条件广播（与 semanticTokensProvider 同口径）：
+    // 纯本地词法扫描，不依赖客户端额外能力；老客户端不请求也没有副作用。
+    caps["documentHighlightProvider"] = json!(true);
     caps
 }
 
@@ -669,6 +720,93 @@ fn import_stmt_pos(pkg: &str, tokens: &[lexer::Token]) -> Option<(usize, usize)>
     None
 }
 
+// ---------------------------------------------------------------------------
+// v1.10 协议面补齐：增量同步 / 文件监视 / 文档内高亮
+// ---------------------------------------------------------------------------
+
+/// 把一条 `TextDocumentContentChangeEvent` 应用到当前文档。
+/// 带 `range` 的按 LSP 行列打补丁（character 是 **UTF-16 码元**，靠
+/// `index::utf16_to_char_col` 换回 Rust 的 char 列）；不带 `range` 的视为整篇
+/// 替换——老客户端与冒烟脚本继续发完整文本也照常工作。
+fn apply_change(doc: &str, change: &Value) -> String {
+    let new = match change.pointer("/text").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return doc.to_string(),
+    };
+    let range = match change.get("range") {
+        Some(r) => r,
+        None => return new.to_string(),
+    };
+    let sl = range.pointer("/start/line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let sc = range.pointer("/start/character").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let el = range.pointer("/end/line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let ec = range.pointer("/end/character").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let start = byte_offset(doc, sl, sc);
+    let end = byte_offset(doc, el, ec);
+    let (start, end) = if start <= end { (start, end) } else { (end, start) };
+    let mut out = String::with_capacity(doc.len() + new.len());
+    out.push_str(&doc[..start]);
+    out.push_str(new);
+    out.push_str(&doc[end..]);
+    out
+}
+
+/// LSP 的 `(line, utf16_character)`（均 0 起）→ 文档字节偏移。
+fn byte_offset(doc: &str, line0: usize, utf16_col: usize) -> usize {
+    let mut base = 0usize;
+    for (i, line) in doc.split('\n').enumerate() {
+        if i == line0 {
+            let char1 = index::utf16_to_char_col(line, utf16_col); // 1 起
+            let char_idx = char1.saturating_sub(1);
+            return base
+                + line
+                    .char_indices()
+                    .nth(char_idx)
+                    .map(|(b, _)| b)
+                    .unwrap_or(line.len());
+        }
+        base += line.len() + 1; // 含 '\n'
+    }
+    doc.len()
+}
+
+/// 文档内同名标识符高亮：复用编译器词法器，光标下标识符的所有 `Ident` token
+/// 都返回 range（kind=1 / Text）。绝不自己写词法——边界必须与编译一致。
+fn document_highlight(docs: &Docs, uri: &str, line0: usize, char0: usize) -> Vec<Value> {
+    let text = match docs.get(uri) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    let lines: Vec<&str> = text.split('\n').collect();
+    let lt = lines.get(line0).copied().unwrap_or("");
+    let char1 = index::utf16_to_char_col(lt, char0);
+    let name = match index::identifier_at(text, line0 + 1, char1) {
+        Some(n) => n,
+        None => return Vec::new(),
+    };
+    let tokens = match lexer::lex(text) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for t in tokens {
+        if let TokenKind::Ident(s) = &t.kind {
+            if *s == name {
+                let l0 = t.line.saturating_sub(1);
+                let c0 = char_col_to_utf16(lines.get(l0).copied().unwrap_or(""), t.col) as u32;
+                out.push(json!({
+                    "range": {
+                        "start": { "line": l0, "character": c0 },
+                        "end":   { "line": l0, "character": c0 + utf16_len(s) as u32 }
+                    },
+                    "kind": 1
+                }));
+            }
+        }
+    }
+    out
+}
+
 /// 把 `DialcError` 转成 LSP 的 Diagnostic。
 ///
 /// 行列转换是这里唯一容易出错的地方：dialc 的 line / col 都是 **1 起**，
@@ -688,7 +826,13 @@ fn diagnostic(e: &DialcError, phase_code: &str) -> Value {
     } else {
         (e.line - 1, e.col - 1)
     };
-    let code = if e.code.is_empty() { phase_code } else { e.code };
+    // 稳定错误码与 CLI 诊断（src/diagnostic.rs）**共用同一张码表**：错误自带
+    // 具体码时以自带为准，否则按消息推断，再不济才回退到阶段级码。
+    let code = if e.code.is_empty() {
+        crate::diagnostic::stable_code(&e.message, phase_code)
+    } else {
+        e.code.to_string()
+    };
     json!({
         "range": {
             "start": { "line": line, "character": col },
@@ -697,6 +841,7 @@ fn diagnostic(e: &DialcError, phase_code: &str) -> Value {
         "severity": 1,          // 1 = Error
         "source": "dialc",
         "code": code,
+        "codeDescription": { "href": "https://github.com/shichencike/Dial/blob/main/README.md" },
         "message": e.message
     })
 }

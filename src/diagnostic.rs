@@ -53,7 +53,11 @@ fn parse_pos(msg: &str) -> (usize, usize) {
 }
 
 /// 稳定错误码：优先取消息里已有的 `dialc.xxx`，否则按阶段推断。
-fn infer_code(msg: &str) -> String {
+///
+/// 这是 CLI（`report`）与 LSP（`diagnostic`）**共用的唯一码表**：两头都只解析
+/// 不判定，保证同一个错误在命令行与编辑器里拿到同一个 `code`。`fallback` 由
+/// 调用方给：CLI 给 `dialc.error`，LSP 给阶段级码（`dialc.lex` / `parse` / `sema`）。
+pub fn stable_code(msg: &str, fallback: &str) -> String {
     if let Some(p) = msg.find("dialc.") {
         let rest = &msg[p..];
         let code: String = rest
@@ -79,7 +83,7 @@ fn infer_code(msg: &str) -> String {
     if msg.contains("类型") || msg.contains("未定义") || msg.contains("不匹配") {
         return "dialc.sema".to_string();
     }
-    "dialc.error".to_string()
+    fallback.to_string()
 }
 
 fn source_line(path: &str, line: usize) -> String {
@@ -101,7 +105,7 @@ fn source_line(path: &str, line: usize) -> String {
 pub fn report(msg: &str, src_path: &str) {
     let (line, col) = parse_pos(msg);
     let snippet = source_line(src_path, line);
-    let code = infer_code(msg);
+    let code = stable_code(msg, "dialc.error");
     if is_json() {
         eprintln!(
             "{}",
