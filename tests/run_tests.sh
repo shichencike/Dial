@@ -888,6 +888,35 @@ if qrun build "${TMP}/q_messy.dial" -o "${TMP}/q_messy" >/dev/null 2>&1 \
     qpass "fmt 后仍能编译运行且输出一致"
 else qbad "fmt 改变了程序语义"; fi
 
+# 4b) fmt 强化（v1.10）：间距规范化 + 原文保护 + --diff + 幂等
+cat > "${TMP}/q_fmt2.dial" <<'EOF'
+// 注释内  双空格必须原样保留
+fn qadd2(a:int,b:int):int{return a+b;}
+fn main(): int {
+var s:string="a  b // not comment";
+if(qadd2(1,2)>0){print("ok");}
+return 0;
+}
+EOF
+if qrun fmt --diff "${TMP}/q_fmt2.dial" >"${TMP}/q_fmt2.diff" 2>/dev/null; then
+    qbad "fmt --diff 未对未格式化文件报非零"
+else qpass "fmt --diff 逐行报告差异并非零退出"; fi
+if grep -q '^+fn qadd2(a: int, b: int): int { return a + b; }' "${TMP}/q_fmt2.diff"; then
+    qpass "fmt --diff 展示规范间距（运算符 / 逗号 / 冒号 / 大括号）"
+else qbad "fmt --diff 未展示规范间距"; sed -n '1,12p' "${TMP}/q_fmt2.diff"; fi
+if qrun fmt "${TMP}/q_fmt2.dial" >/dev/null 2>&1 \
+   && grep -qF 'fn qadd2(a: int, b: int): int { return a + b; }' "${TMP}/q_fmt2.dial" \
+   && grep -qF 'if (qadd2(1, 2) > 0) { print("ok"); }' "${TMP}/q_fmt2.dial" \
+   && grep -qF '// 注释内  双空格必须原样保留' "${TMP}/q_fmt2.dial" \
+   && grep -qF '"a  b // not comment"' "${TMP}/q_fmt2.dial" \
+   && qrun fmt --check "${TMP}/q_fmt2.dial" >/dev/null 2>&1; then
+    qpass "fmt 规范化间距且字面量 / 注释原文不变、幂等"
+else qbad "fmt 强化断言失败"; cat "${TMP}/q_fmt2.dial"; fi
+if qrun build "${TMP}/q_fmt2.dial" -o "${TMP}/q_fmt2" >/dev/null 2>&1 \
+   && [ "$("${TMP}/q_fmt2" 2>/dev/null)" = "ok" ]; then
+    qpass "fmt 强化后仍能编译运行且输出一致"
+else qbad "fmt 强化改变了程序语义"; fi
+
 # 5) test：通过 / 失败 / 过滤 / 失败带位置
 cat > "${TMP}/q_tests.dial" <<'EOF'
 fn qadd(a: int, b: int): int { return a + b; }
@@ -1010,6 +1039,61 @@ if qrun pack "$QMISS" >"${TMP}/qmiss.log" 2>&1; then
 elif grep -q "缺少必填字段" "${TMP}/qmiss.log"; then
     qpass "pack 对缺字段清单显式报错"
 else qbad "pack 缺字段诊断不明确"; fi
+
+# 8b) pack 强化（v1.10）：--init / --dry-run / --json / --verify / 未登记提示 / 篡改拦截
+QINIT="${TMP}/qinit"
+rm -rf "$QINIT"; cp -r "$QPROJ" "$QINIT"
+rm -f "$QINIT/dial.toml" "$QINIT/qdemo.dialpkg"
+mkdir -p "$QINIT/src"
+printf 'fn qi(): int { return 7; }\n' > "$QINIT/src/qi_oo.dial"
+printf '// 故意不登记\nfn qx(): int { return 0; }\n' > "$QINIT/src/qx_extra.dial"
+if qrun pack --init "$QINIT" >"${TMP}/q_init.log" 2>&1 \
+   && grep -q 'name = "qinit"' "$QINIT/dial.toml" \
+   && grep -q "abi = ${QABI}" "$QINIT/dial.toml" \
+   && grep -qF 'qi_oo = "src/qi_oo.dial"' "$QINIT/dial.toml" \
+   && grep -qF "lib/${QTRIPLE}/libqdemo.a" "$QINIT/dial.toml"; then
+    qpass "pack --init 自动扫描生成清单草稿（iface / targets / src 全为显式声明）"
+else qbad "pack --init 失败或草稿不完整"; cat "${TMP}/q_init.log"; fi
+if qrun pack --init "$QINIT" >/dev/null 2>&1; then
+    qbad "pack --init 竟然覆盖了已有清单"
+else qpass "pack --init 拒绝覆盖已有 dial.toml"; fi
+if qrun pack --dry-run "$QINIT" >"${TMP}/q_dry.log" 2>&1 \
+   && grep -q '将入库' "${TMP}/q_dry.log" \
+   && grep -qF 'src/qi_oo.dial' "${TMP}/q_dry.log" \
+   && ! grep -q '已生成包' "${TMP}/q_dry.log"; then
+    qpass "pack --dry-run 预览入库文件与 SHA256 且不产出包"
+else qbad "pack --dry-run 预览失败"; cat "${TMP}/q_dry.log"; fi
+if qrun pack --json "$QINIT" >"${TMP}/q_pjson.log" 2>&1 \
+   && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["written"] is False and len(d["files"])>=3 and d["name"]=="qinit"' "${TMP}/q_pjson.log" >/dev/null 2>&1; then
+    qpass "pack --json 输出机器可读清单（written=false / 逐文件 SHA256）"
+else qbad "pack --json 输出不合规"; head -10 "${TMP}/q_pjson.log"; fi
+# 未登记提示：从清单里删掉一条 src 声明，dry-run 应提示「磁盘有但不进包」。
+sed -i '/^qx_extra = /d' "$QINIT/dial.toml"
+if qrun pack --dry-run "$QINIT" >"${TMP}/q_unlisted.log" 2>&1 \
+   && grep -q '未登记' "${TMP}/q_unlisted.log" \
+   && grep -qF 'src/qx_extra.dial' "${TMP}/q_unlisted.log"; then
+    qpass "pack --dry-run 提示磁盘有但清单未登记的文件（绝不自动塞进包）"
+else qbad "未登记提示缺失"; cat "${TMP}/q_unlisted.log"; fi
+if qrun pack "$QINIT" -o "${TMP}/qinit.dialpkg" >"${TMP}/q_initpack.log" 2>&1 \
+   && qrun pack --verify "${TMP}/qinit.dialpkg" >"${TMP}/q_verify.log" 2>&1 \
+   && grep -q '逐文件 SHA256 全部通过' "${TMP}/q_verify.log"; then
+    qpass "pack → --verify 用安装期同一套规则校验通过"
+else qbad "pack --verify 校验失败"; cat "${TMP}/q_initpack.log" "${TMP}/q_verify.log"; fi
+python3 - "${TMP}/qinit.dialpkg" "${TMP}/qinit_bad.dialpkg" <<'PY'
+import zipfile, sys
+src, dst = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(src) as z:
+    files = {n: z.read(n) for n in z.namelist()}
+files["src/qi_oo.dial"] = b"fn tampered(): int { return 9; }\n"
+with zipfile.ZipFile(dst, "w") as z:
+    for n, d in files.items():
+        z.writestr(n, d)
+PY
+if qrun pack --verify "${TMP}/qinit_bad.dialpkg" >"${TMP}/q_verify_bad.log" 2>&1; then
+    qbad "pack --verify 竟然放行了被篡改的包"
+elif grep -q 'SHA256' "${TMP}/q_verify_bad.log"; then
+    qpass "pack --verify 拦截篡改包且诊断含 SHA256"
+else qbad "篡改包被拒但诊断不明确"; cat "${TMP}/q_verify_bad.log"; fi
 
 # 9) A7：panic 运行时诊断带文件:行:列
 cat > "${TMP}/q_panic.dial" <<'EOF'

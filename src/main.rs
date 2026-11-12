@@ -15,6 +15,7 @@
 
 mod ast;
 mod codegen;
+mod dialfmt;
 mod error;
 mod index;
 mod lexer;
@@ -1265,9 +1266,11 @@ fn print_usage() {
     eprintln!("  test  <文件.dial> [--filter 名]  运行顶层 test \"名\" {{ ... }} 块");
     eprintln!();
     eprintln!("工程与源码组织");
-    eprintln!("  fmt   <文件.dial>... [--check] 保守格式化（只规整缩进/空白）");
+    eprintln!("  fmt   <文件.dial>... [--check|--diff] 间距规范化（token 流/注释原文不变、幂等）");
     eprintln!("  new   <目录> [包名]            生成可打包的项目骨架（dial.toml）");
-    eprintln!("  pack  <目录> [-o 包.dialpkg]   把 dial.toml 描述的项目打成 .dialpkg");
+    eprintln!("  pack  <目录> [-o 包.dialpkg] [--dry-run|--json|--init]
+                                   打包 / 预览 / 机器可读清单 / 自动生成清单草稿
+  pack  --verify <包.dialpkg>     校验已有包的 manifest 与逐文件 SHA256");
     eprintln!("  import \"./util.dial\";         源码内引用同目录模块（见 README §34）");
     eprintln!();
     eprintln!("包管理");
@@ -1697,6 +1700,10 @@ fn cmd_new(args: &[String]) {
 fn cmd_pack(args: &[String]) {
     let mut out: Option<PathBuf> = None;
     let mut dirs: Vec<String> = Vec::new();
+    let mut dry_run = false;
+    let mut as_json = false;
+    let mut init = false;
+    let mut verify: Option<String> = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -1710,19 +1717,88 @@ fn cmd_pack(args: &[String]) {
                     }
                 }
             }
+            "--dry-run" => dry_run = true,
+            "--json" => as_json = true,
+            "--init" => init = true,
+            "--verify" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => verify = Some(v.clone()),
+                    None => {
+                        eprintln!("选项 --verify 缺少包路径");
+                        std::process::exit(1);
+                    }
+                }
+            }
             a if a.starts_with('-') => {
-                eprintln!("pack: 未知参数 '{}'（可用: -o <输出.dialpkg>）", a);
+                eprintln!(
+                    "pack: 未知参数 '{}'（可用: -o / --dry-run / --json / --init / --verify）",
+                    a
+                );
                 std::process::exit(1);
             }
             _ => dirs.push(args[i].clone()),
         }
         i += 1;
     }
+
+    // --verify 是独立模式：校验已有包，不需要项目目录。
+    if let Some(v) = verify {
+        if !dirs.is_empty() || out.is_some() || dry_run || as_json || init {
+            eprintln!("pack: --verify 是独立模式，不能与其它选项混用");
+            std::process::exit(1);
+        }
+        match pkgbuild::verify_pkg(Path::new(&v)) {
+            Ok(summary) => {
+                println!("✅ 包校验通过: {}", v);
+                println!("   {}", summary);
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if dirs.len() != 1 {
-        eprintln!("用法: dialc pack <项目目录> [-o 输出.dialpkg]");
+        eprintln!("用法: dialc pack <项目目录> [-o 输出.dialpkg] [--dry-run] [--json] [--init]");
+        eprintln!("      dialc pack --verify <包.dialpkg>");
         std::process::exit(1);
     }
-    match pkgbuild::pack(Path::new(&dirs[0]), out.as_deref()) {
+    let dir = Path::new(&dirs[0]);
+
+    if init {
+        if dry_run || as_json || out.is_some() {
+            eprintln!("pack: --init 不能与 --dry-run / --json / -o 混用");
+            std::process::exit(1);
+        }
+        match pkgbuild::init_spec(dir) {
+            Ok(p) => {
+                println!("✅ 已生成清单草稿: {}", p.display());
+                println!("   自动发现 iface / [targets] / [src] 并写成显式声明；请核对 name / version / license。");
+                println!("   下一步: dialc pack --dry-run {} → dialc pack {}", dirs[0], dirs[0]);
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if dry_run || as_json {
+        match pkgbuild::dry_run(dir, out.as_deref(), as_json) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    match pkgbuild::pack(dir, out.as_deref()) {
         Ok(pkg) => {
             println!("✅ 已生成包: {}", pkg.display());
             println!("   manifest / 逐文件 SHA256 已自检通过，可直接 `dialc install {}`", pkg.display());
@@ -1734,100 +1810,27 @@ fn cmd_pack(args: &[String]) {
     }
 }
 
-/// 统计一行里**字符串/字符字面量与行注释之外**的花括号净变化。
-fn brace_delta(line: &str) -> i32 {
-    let chars: Vec<char> = line.chars().collect();
-    let mut i = 0usize;
-    let mut delta = 0i32;
-    let mut in_str = false;
-    let mut in_char = false;
-    let mut escaped = false;
-    while i < chars.len() {
-        let c = chars[i];
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_str = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_char {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '\'' {
-                in_char = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-            break;
-        }
-        if c == '"' {
-            in_str = true;
-        } else if c == '\'' {
-            in_char = true;
-        } else if c == '{' {
-            delta += 1;
-        } else if c == '}' {
-            delta -= 1;
-        }
-        i += 1;
-    }
-    delta
-}
-
-/// 保守格式化：**只**重排每行前导缩进、去掉行尾空白、统一文件末尾换行。
-///
-/// 刻意不重排语句、不增删 token——格式化前后 `lexer::lex` 的 token 序列必须
-/// 完全一致（cmd_fmt 里会当场校验，不一致就拒绝写入）。这样 fmt 永远不会
-/// 改变程序语义，且天然幂等。代价是它不合并/拆分行，属于「敢放心用」的格式化器。
-fn format_source(src: &str) -> String {
-    if src.trim().is_empty() {
-        return "\n".to_string();
-    }
-    let mut depth: i32 = 0;
-    let mut out = String::new();
-    for raw in src.lines() {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            out.push('\n');
-            continue;
-        }
-        // `}` / `)` 开头的行与上一层的 `{` 对齐，而不是与块内语句对齐。
-        let leading_close = trimmed.starts_with('}') || trimmed.starts_with(')');
-        let eff = (depth - if leading_close { 1 } else { 0 }).max(0) as usize;
-        for _ in 0..eff {
-            out.push_str("    ");
-        }
-        out.push_str(trimmed.trim_end());
-        out.push('\n');
-        depth = (depth + brace_delta(raw)).max(0);
-    }
-    out
-}
-
 fn cmd_fmt(args: &[String]) {
     let mut check_only = false;
+    let mut diff_only = false;
     let mut files: Vec<String> = Vec::new();
     for a in &args[2..] {
-        if a == "--check" {
-            check_only = true;
-        } else if a.starts_with('-') {
-            eprintln!("fmt: 未知参数 '{}'（可用: --check）", a);
-            std::process::exit(1);
-        } else {
-            files.push(a.clone());
+        match a.as_str() {
+            "--check" => check_only = true,
+            "--diff" => diff_only = true,
+            a if a.starts_with('-') => {
+                eprintln!("fmt: 未知参数 '{}'（可用: --check / --diff）", a);
+                std::process::exit(1);
+            }
+            _ => files.push(a.clone()),
         }
     }
     if files.is_empty() {
-        eprintln!("用法: dialc fmt <文件.dial>... [--check]");
+        eprintln!("用法: dialc fmt <文件.dial>... [--check | --diff]");
+        std::process::exit(1);
+    }
+    if check_only && diff_only {
+        eprintln!("fmt: --check 与 --diff 不能同时使用");
         std::process::exit(1);
     }
     let mut need_fmt = false;
@@ -1846,9 +1849,11 @@ fn cmd_fmt(args: &[String]) {
                 std::process::exit(1);
             }
         };
-        let formatted = format_source(&src);
+        // 字面量与注释的原文快照：格式化绝不能碰它们（第二条硬契约）。
+        let protected_before = dialfmt::protected_spans(&src);
+        let formatted = dialfmt::format_source(&src);
         // 幂等自检
-        if format_source(&formatted) != formatted {
+        if dialfmt::format_source(&formatted) != formatted {
             eprintln!("fmt: 内部错误——格式化结果不幂等，已拒绝写入 {}", f);
             std::process::exit(1);
         }
@@ -1862,11 +1867,15 @@ fn cmd_fmt(args: &[String]) {
         let same_tokens = before.len() == after.len()
             && before.iter().zip(after.iter()).all(|(x, y)| x.kind == y.kind);
         if !same_tokens {
-            eprintln!("fmt: 格式化改变了 token 流，已拒绝写入 {}（保守格式化不该动语义）", f);
+            eprintln!("fmt: 格式化改变了 token 流，已拒绝写入 {}", f);
+            std::process::exit(1);
+        }
+        if dialfmt::protected_spans(&formatted) != protected_before {
+            eprintln!("fmt: 格式化改变了字面量/注释原文，已拒绝写入 {}", f);
             std::process::exit(1);
         }
         if formatted == src {
-            if !check_only {
+            if !check_only && !diff_only {
                 println!("  无需改动: {}", f);
             }
             continue;
@@ -1874,6 +1883,8 @@ fn cmd_fmt(args: &[String]) {
         need_fmt = true;
         if check_only {
             println!("  需要格式化: {}", f);
+        } else if diff_only {
+            print_fmt_diff(f, &src, &formatted);
         } else {
             if let Err(e) = fs::write(f, &formatted) {
                 eprintln!("fmt: 写入 {} 失败: {}", f, e);
@@ -1882,12 +1893,32 @@ fn cmd_fmt(args: &[String]) {
             println!("✅ 已格式化: {}", f);
         }
     }
-    if check_only {
+    if check_only || diff_only {
         if need_fmt {
-            eprintln!("有文件未格式化（--check 模式不写入）。");
+            eprintln!(
+                "有文件未格式化（{} 模式不写入）。",
+                if check_only { "--check" } else { "--diff" }
+            );
             std::process::exit(1);
         }
         println!("✅ 所有文件已符合格式");
+    }
+}
+
+/// `dialc fmt --diff`：逐行对照，只打印发生变化的行（不写文件）。
+fn print_fmt_diff(file: &str, before: &str, after: &str) {
+    println!("--- {}", file);
+    println!("+++ {}", file);
+    let b: Vec<&str> = before.lines().collect();
+    let a: Vec<&str> = after.lines().collect();
+    for i in 0..b.len().max(a.len()) {
+        let lb = b.get(i).copied().unwrap_or("");
+        let la = a.get(i).copied().unwrap_or("");
+        if lb != la {
+            println!("@@ 第 {} 行", i + 1);
+            println!("-{}", lb);
+            println!("+{}", la);
+        }
     }
 }
 

@@ -40,7 +40,7 @@
 //! （本项目要为三个 target 静态构建）。`package.rs` 里读外部 `manifest.txt` 仍用
 //! `serde_json`，二者边界清晰。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -387,11 +387,89 @@ fn verify_static_lib(path: &Path) -> Result<(), String> {
 /// 返回产出的包路径。打包完成后**就地自检**：用 `package::parse_manifest` 解析刚生成的
 /// manifest、再用 `package::verify_archive` 逐文件复核 SHA256——确保产物一定过得了
 /// `dialc install` 的两道校验，不把「打出来的包」留给安装期才发现问题。
-pub fn pack(project_dir: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
+/// 打包计划：入库文件 + manifest 文本 + 逐文件 SHA256 + 输出路径。
+///
+/// `pack` / `--dry-run` / `--json` 三条路径共用同一个计划，保证「预览看到的」
+/// 和「真正打出来的」逐字节一致——预览与产物分叉是配置类工具最烦人的失败模式。
+pub struct PackPlan {
+    pub spec: PkgSpec,
+    pub staged: Vec<(String, PathBuf)>,
+    pub manifest_text: String,
+    pub sha: Vec<(String, String)>,
+    pub pkg_path: PathBuf,
+    /// 磁盘上有、但清单未登记的文件：**绝不自动塞进包**（清单显式声明是硬规则），
+    /// 只在预览里提示作者，避免「以为打进去了其实没有」。
+    pub unlisted: Vec<String>,
+}
+
+/// 扫描项目目录，列出磁盘上有但清单未登记的 `.diali` / `.a` / `src/*.dial`。
+fn discover_unlisted(project_dir: &Path, staged: &[(String, PathBuf)]) -> Vec<String> {
+    let listed: HashSet<&str> = staged.iter().map(|(p, _)| p.as_str()).collect();
+    let mut out: Vec<String> = Vec::new();
+    let push = |rel: String, out: &mut Vec<String>| {
+        if !listed.contains(rel.as_str()) {
+            out.push(rel);
+        }
+    };
+    // 项目根下的 .diali 接口文件
+    if let Ok(rd) = fs::read_dir(project_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("diali") {
+                if let Some(n) = p.file_name() {
+                    push(n.to_string_lossy().to_string(), &mut out);
+                }
+            }
+        }
+    }
+    // src/ 下的 Dial 源码模块
+    let src_dir = project_dir.join("src");
+    if let Ok(rd) = fs::read_dir(&src_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("dial") {
+                if let Some(n) = p.file_name() {
+                    push(format!("src/{}", n.to_string_lossy()), &mut out);
+                }
+            }
+        }
+    }
+    // lib/<triple>/ 下的静态库
+    let lib_dir = project_dir.join("lib");
+    if let Ok(rd) = fs::read_dir(&lib_dir) {
+        for triple in rd.flatten() {
+            let tp = triple.path();
+            if !tp.is_dir() {
+                continue;
+            }
+            let tname = match tp.file_name() {
+                Some(n) => n.to_string_lossy().to_string(),
+                None => continue,
+            };
+            if let Ok(files) = fs::read_dir(&tp) {
+                for e in files.flatten() {
+                    let p = e.path();
+                    if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("a") {
+                        if let Some(n) = p.file_name() {
+                            push(format!("lib/{}/{}", tname, n.to_string_lossy()), &mut out);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 生成打包计划（不写任何文件）。所有 Fail-Fast 校验都集中在这里。
+pub fn plan(project_dir: &Path, out: Option<&Path>) -> Result<PackPlan, String> {
     let spec_path = project_dir.join("dial.toml");
     let text = fs::read_to_string(&spec_path).map_err(|e| {
         format!(
-            "找不到或无法读取项目清单 {}: {}（可先用 `dialc new <目录>` 生成骨架）",
+            "找不到或无法读取项目清单 {}: {}（可先用 `dialc new <目录>` 生成骨架，\n\
+             或在已有项目里跑 `dialc pack --init <目录>` 自动扫描生成清单草稿）",
             spec_path.display(),
             e
         )
@@ -401,7 +479,8 @@ pub fn pack(project_dir: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
     let iface_src = project_dir.join(&spec.iface);
     if !iface_src.is_file() {
         return Err(format!(
-            "接口文件不存在: {}（dial.toml 的 iface = \"{}\"）",
+            "接口文件不存在: {}（dial.toml 的 iface = \"{}\"）\n\
+             提示：项目根下的 .diali 文件可用 `dialc pack --dry-run <目录>` 列出。",
             iface_src.display(),
             spec.iface
         ));
@@ -423,8 +502,6 @@ pub fn pack(project_dir: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
         verify_static_lib(&p)?;
         staged.push((lib.clone(), p));
     }
-    // [src] 段登记的 Dial 源码模块：与 .diali / .a 一样进 staged，
-    // 因而自动获得「逐文件 SHA256 登记 + 安装期逐文件校验」的全套保护。
     for (module, rel) in &spec.src {
         let p = project_dir.join(rel);
         if !p.is_file() {
@@ -437,9 +514,8 @@ pub fn pack(project_dir: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
         }
         staged.push((rel.clone(), p));
     }
-    // 包内路径必须唯一：zip 允许重名项，但那会让 install 解压时后者覆盖前者，
-    // 且 verify_archive 会对同一路径校验两次——歧义必须在打包期就地拒绝。
-    let mut seen_paths: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // 包内路径必须唯一：zip 允许重名项，但那会让 install 解压时后者覆盖前者。
+    let mut seen_paths: HashSet<&str> = HashSet::new();
     for (zip_path, _) in &staged {
         if !seen_paths.insert(zip_path.as_str()) {
             return Err(format!(
@@ -457,16 +533,13 @@ pub fn pack(project_dir: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
         src_obj.insert(module.clone(), serde_json::Value::String(rel.clone()));
     }
     for (triple, lib) in &spec.targets {
-        targets_obj.insert(
-            triple.clone(),
-            serde_json::json!({ "lib": lib }),
-        );
+        targets_obj.insert(triple.clone(), serde_json::json!({ "lib": lib }));
     }
+    let mut sha: Vec<(String, String)> = Vec::new();
     for (zip_path, real_path) in &staged {
-        sha_obj.insert(
-            zip_path.clone(),
-            serde_json::Value::String(sha256_of(real_path)?),
-        );
+        let h = sha256_of(real_path)?;
+        sha_obj.insert(zip_path.clone(), serde_json::Value::String(h.clone()));
+        sha.push((zip_path.clone(), h));
     }
     let manifest = serde_json::json!({
         "name": spec.name,
@@ -486,13 +559,24 @@ pub fn pack(project_dir: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
         Some(p) => p.to_path_buf(),
         None => project_dir.join(format!("{}.dialpkg", spec.name)),
     };
-    if let Some(parent) = pkg_path.parent() {
+
+    Ok(PackPlan {
+        spec,
+        unlisted: discover_unlisted(project_dir, &staged),
+        staged,
+        manifest_text,
+        sha,
+        pkg_path,
+    })
+}
+
+fn write_archive(p: &PackPlan) -> Result<(), String> {
+    if let Some(parent) = p.pkg_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("创建输出目录 {} 失败: {}", parent.display(), e))?;
     }
-
-    let file = fs::File::create(&pkg_path)
-        .map_err(|e| format!("无法创建 {}: {}", pkg_path.display(), e))?;
+    let file = fs::File::create(&p.pkg_path)
+        .map_err(|e| format!("无法创建 {}: {}", p.pkg_path.display(), e))?;
     let mut zw = zip::ZipWriter::new(file);
     let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     let write_entry = |zw: &mut zip::ZipWriter<fs::File>,
@@ -505,26 +589,232 @@ pub fn pack(project_dir: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
             .map_err(|e| format!("写入包内 '{}' 内容失败: {}", name, e))?;
         Ok(())
     };
-    write_entry(&mut zw, "manifest.txt", manifest_text.as_bytes())?;
-    for (zip_path, real_path) in &staged {
+    write_entry(&mut zw, "manifest.txt", p.manifest_text.as_bytes())?;
+    for (zip_path, real_path) in &p.staged {
         let data = fs::read(real_path)
             .map_err(|e| format!("读取 {} 失败: {}", real_path.display(), e))?;
         write_entry(&mut zw, zip_path, &data)?;
     }
-    let finished = zw
-        .finish()
+    zw.finish()
         .map_err(|e| format!("收尾 .dialpkg 失败: {}", e))?;
-    drop(finished);
+    Ok(())
+}
 
+pub fn pack(project_dir: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
+    let p = plan(project_dir, out)?;
+    write_archive(&p)?;
     // 自检：产物必须能被同一套安装校验代码吃下。
-    let mf = package::parse_manifest(&manifest_text).map_err(|e| e.to_string())?;
-    let check_file = fs::File::open(&pkg_path)
-        .map_err(|e| format!("自检时无法打开 {}: {}", pkg_path.display(), e))?;
+    let mf = package::parse_manifest(&p.manifest_text).map_err(|e| e.to_string())?;
+    let check_file = fs::File::open(&p.pkg_path)
+        .map_err(|e| format!("自检时无法打开 {}: {}", p.pkg_path.display(), e))?;
     let mut archive = zip::ZipArchive::new(check_file)
         .map_err(|e| format!("自检：产物不是合法 zip 容器: {}", e))?;
     package::verify_archive(&mut archive, &mf).map_err(|e| e.to_string())?;
+    Ok(p.pkg_path)
+}
 
-    Ok(pkg_path)
+/// `dialc pack --dry-run [--json]`：预览将入库的文件与哈希，**不产出 .dialpkg**。
+pub fn dry_run(project_dir: &Path, out: Option<&Path>, as_json: bool) -> Result<(), String> {
+    let p = plan(project_dir, out)?;
+    if as_json {
+        let files: Vec<serde_json::Value> = p
+            .sha
+            .iter()
+            .map(|(path, h)| serde_json::json!({ "path": path, "sha256": h }))
+            .collect();
+        let obj = serde_json::json!({
+            "name": p.spec.name,
+            "version": p.spec.version,
+            "abi": p.spec.abi,
+            "iface": p.spec.iface,
+            "license": p.spec.license,
+            "targets": p.spec.targets.keys().collect::<Vec<_>>(),
+            "src": p.spec.src,
+            "files": files,
+            "unlisted": p.unlisted,
+            "output": p.pkg_path.to_string_lossy(),
+            "written": false,
+        });
+        println!("{}", serde_json::to_string_pretty(&obj).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
+    println!("[dry-run] 项目: {}", project_dir.display());
+    println!(
+        "[dry-run] name={} version={} abi={} iface={} license={}",
+        p.spec.name, p.spec.version, p.spec.abi, p.spec.iface, p.spec.license
+    );
+    println!("[dry-run] 将入库 {} 个文件：", p.staged.len());
+    for (path, h) in &p.sha {
+        let bytes = fs::metadata(
+            p.staged
+                .iter()
+                .find(|(x, _)| x == path)
+                .map(|(_, q)| q.as_path())
+                .unwrap_or_else(|| Path::new("")),
+        )
+        .map(|m| m.len())
+        .unwrap_or(0);
+        println!("  {:<48} sha256={}  {} bytes", path, &h[..16], bytes);
+    }
+    if !p.spec.src.is_empty() {
+        println!("[dry-run] manifest.src：{} 个随包 Dial 源码模块", p.spec.src.len());
+        for (m, rel) in &p.spec.src {
+            println!("  {} -> {}", m, rel);
+        }
+    }
+    if !p.unlisted.is_empty() {
+        println!("[dry-run] ⚠️  磁盘上有但清单未登记（不会进包）：");
+        for u in &p.unlisted {
+            println!("  {}", u);
+        }
+        println!("  如需登记：编辑 dial.toml 的 [targets] / [src] 段后重新预览。");
+    }
+    println!("[dry-run] 输出路径（未写出）：{}", p.pkg_path.display());
+    Ok(())
+}
+
+/// `dialc pack --verify <包.dialpkg>`：用安装期同一套规则校验已有包。
+pub fn verify_pkg(path: &Path) -> Result<String, String> {
+    let f = fs::File::open(path)
+        .map_err(|e| format!("无法打开 {}: {}", path.display(), e))?;
+    let mut archive = zip::ZipArchive::new(f)
+        .map_err(|e| format!("不是合法 zip 容器: {}", e))?;
+    let mut mf_text = String::new();
+    {
+        let mut mf = archive
+            .by_name("manifest.txt")
+            .map_err(|_| "包内缺少 manifest.txt".to_string())?;
+        mf.read_to_string(&mut mf_text)
+            .map_err(|e| format!("读取 manifest.txt 失败: {}", e))?;
+    }
+    let mf = package::parse_manifest(&mf_text).map_err(|e| e.to_string())?;
+    package::verify_archive(&mut archive, &mf).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&mf_text)
+        .map_err(|e| format!("manifest.txt 不是合法 JSON: {}", e))?;
+    let sha = v.get("sha256").and_then(|x| x.as_object()).map(|m| m.len()).unwrap_or(0);
+    let src = v.get("src").and_then(|x| x.as_object()).map(|m| m.len()).unwrap_or(0);
+    let targets = v.get("targets").and_then(|x| x.as_object()).map(|m| m.len()).unwrap_or(0);
+    Ok(format!(
+        "name={} version={} abi={} iface={} license={} targets={} src={} files={} 逐文件 SHA256 全部通过",
+        v.get("name").and_then(|x| x.as_str()).unwrap_or("?"),
+        v.get("version").and_then(|x| x.as_str()).unwrap_or("?"),
+        v.get("abi").and_then(|x| x.as_u64()).unwrap_or(0),
+        v.get("iface").and_then(|x| x.as_str()).unwrap_or("?"),
+        v.get("license").and_then(|x| x.as_str()).unwrap_or("?"),
+        targets,
+        src,
+        sha
+    ))
+}
+
+/// `dialc pack --init <目录>`：扫描目录自动生成 `dial.toml` 草稿。
+///
+/// 只写清单、绝不自动把发现的文件塞进包——清单显式声明仍是唯一的入库依据，
+/// 草稿里每一项都是作者可核对、可删改的显式条目。
+pub fn init_spec(project_dir: &Path) -> Result<PathBuf, String> {
+    let spec_path = project_dir.join("dial.toml");
+    if spec_path.exists() {
+        return Err(format!(
+            "{} 已存在，`--init` 拒绝覆盖（请手动编辑，或先备份再删除）",
+            spec_path.display()
+        ));
+    }
+    let name = project_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "mypkg".to_string());
+    if name.contains('/') || name.contains('\\') || name.is_empty() {
+        return Err(format!("无法从目录名 '{}' 推断合法包名", name));
+    }
+    // 自动发现：项目根 .diali / lib/<triple>/*.a / src/*.dial
+    let mut ifaces: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir(project_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("diali") {
+                if let Some(n) = p.file_name() {
+                    ifaces.push(n.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    ifaces.sort();
+    let mut libs: Vec<(String, String)> = Vec::new();
+    let lib_dir = project_dir.join("lib");
+    if let Ok(rd) = fs::read_dir(&lib_dir) {
+        for t in rd.flatten() {
+            let tp = t.path();
+            if !tp.is_dir() {
+                continue;
+            }
+            let tname = match tp.file_name() {
+                Some(n) => n.to_string_lossy().to_string(),
+                None => continue,
+            };
+            if let Ok(files) = fs::read_dir(&tp) {
+                for e in files.flatten() {
+                    let p = e.path();
+                    if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("a") {
+                        if let Some(n) = p.file_name() {
+                            libs.push((
+                                tname.clone(),
+                                format!("lib/{}/{}", tname, n.to_string_lossy()),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    libs.sort();
+    let mut srcs: Vec<(String, String)> = Vec::new();
+    let src_dir = project_dir.join("src");
+    if let Ok(rd) = fs::read_dir(&src_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("dial") {
+                if let Some(n) = p.file_name() {
+                    let file = n.to_string_lossy().to_string();
+                    let module = file.trim_end_matches(".dial").to_string();
+                    srcs.push((module, format!("src/{}", file)));
+                }
+            }
+        }
+    }
+    srcs.sort();
+
+    let iface = ifaces.first().cloned().unwrap_or_else(|| format!("{}.diali", name));
+    let mut text = String::new();
+    text.push_str("# 由 `dialc pack --init` 自动生成的清单草稿：请逐项核对后再打包。\n");
+    text.push_str("# 每一项都是显式声明——`dialc pack` 只会打进这里登记的文件。\n");
+    text.push_str(&format!("name = \"{}\"\n", name));
+    text.push_str("version = \"0.1.0\"\n");
+    text.push_str(&format!("# abi 取当前标准库 ABI（STDLIB_ABI={}），见 src/package.rs\n", package::STDLIB_ABI));
+    text.push_str(&format!("abi = {}\n", package::STDLIB_ABI));
+    text.push_str(&format!("iface = \"{}\"\n", iface));
+    text.push_str("license = \"MIT\"\n\n");
+    text.push_str("[targets]\n");
+    if libs.is_empty() {
+        text.push_str("# 未发现 lib/<triple>/*.a：请把静态库放好后按下面格式登记。\n");
+        text.push_str("# x86_64-linux-gnu = \"lib/x86_64-linux-gnu/libmypkg.a\"\n");
+    } else {
+        for (t, rel) in &libs {
+            text.push_str(&format!("{} = \"{}\"\n", t, rel));
+        }
+    }
+    text.push('\n');
+    text.push_str("[src]\n");
+    if srcs.is_empty() {
+        text.push_str("# 未发现 src/*.dial；如有随包 Dial 源码模块，按下面格式登记。\n");
+        text.push_str("# mylib_oo = \"src/mylib_oo.dial\"\n");
+    } else {
+        for (m, rel) in &srcs {
+            text.push_str(&format!("{} = \"{}\"\n", m, rel));
+        }
+    }
+    fs::write(&spec_path, &text)
+        .map_err(|e| format!("写入 {} 失败: {}", spec_path.display(), e))?;
+    Ok(spec_path)
 }
 
 /// `dialc new <目录> [包名]`：生成一个可直接 `pack` 的项目骨架。
