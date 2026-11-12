@@ -372,6 +372,11 @@
 <li><a href="#347-d-组文档--诊断漂移修复">34.7 D 组文档 / 诊断漂移修复</a></li>
 <li><a href="#348-实现落点">34.8 实现落点</a></li>
 <li><a href="#349-测试与交付">34.9 测试与交付</a></li>
+<li><a href="#3410-工具链强化真格式化与少手工打包v110-增补">34.10 工具链强化：真格式化与少手工打包（v1.10 增补）</a><ul>
+<li><a href="#dialc-fmt间距规范化">dialc fmt：间距规范化</a></li>
+<li><a href="#dialc-pack五个视角一条计划">dialc pack：五个视角，一条计划</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li><a href="#35-v104-增补dwarf-调试信息与--g并入-v104版本不变">35. v1.04 增补：DWARF 调试信息与 -g（并入 [v1.04]，版本不变）</a><ul>
@@ -8082,10 +8087,12 @@ SSE / AVX / NEON。</p>
 <strong>三十组 / 571 ✅</strong>；随后 GUI 第 14 层窗口级覆盖层自动集成给 AA 组新增 3 条
 断言（编译成功 / 无 DISPLAY 空窗口 Fail-Fast / Xvfb 实窗自动绘制 CRC），扩为
 <strong>三十组 / 574 ✅</strong>；随后 GUI 第 15 层快捷键 / 命令系统给 AA 组新增 2 条
-断言（编译成功 / 166 条零 DISPLAY 断言），扩为 <strong>三十组 / 576 ✅</strong>，属
-<strong>未发布的开发中增量</strong>，见 §5.8 / §25.11 / §34.2 / §34.5 / §37.12 / §38.14 /
-§38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §38.20 / §38.21 / §37.10 与
-CHANGELOG <code>[未发布]</code> 段。</p>
+断言（编译成功 / 166 条零 DISPLAY 断言），扩为 <strong>三十组 / 576 ✅</strong>；随后
+<code>dialc fmt</code> 强化与 <code>dialc pack</code> 强化给 Q 组新增 11 条断言（4 条格式化 +
+7 条打包），扩为 <strong>三十组 / 587 ✅</strong>，属
+<strong>未发布的开发中增量</strong>，见 §5.8 / §25.11 / §34.2 / §34.3 / §34.5 / §34.10 /
+§37.12 / §38.14 / §38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §38.20 /
+§38.21 / §37.10 与 CHANGELOG <code>[未发布]</code> 段。</p>
 </blockquote>
 <hr />
 <h2 id="34-v104-增补工程工具链并入-v104版本不变">34. v1.04 增补：工程工具链（并入 <code>[v1.04]</code>，版本不变）</h2>
@@ -8131,9 +8138,9 @@ CHANGELOG <code>[未发布]</code> 段。</p>
 <td>逐块 ✅/❌，有失败即非零退出</td>
 </tr>
 <tr>
-<td><code>dialc fmt &lt;文件.dial&gt;... [--check]</code></td>
-<td>保守格式化</td>
-<td><code>--check</code> 只报告不改，<code>-</code> 参数一律拒绝</td>
+<td><code>dialc fmt &lt;文件.dial&gt;... [--check\|--diff]</code></td>
+<td><strong>间距规范化格式化</strong>（token 流 / 字面量·注释原文不变、幂等）</td>
+<td><code>--check</code> 只报告、<code>--diff</code> 逐行对照，均不写入</td>
 </tr>
 <tr>
 <td><code>dialc new &lt;目录&gt; [包名]</code></td>
@@ -8141,9 +8148,14 @@ CHANGELOG <code>[未发布]</code> 段。</p>
 <td><code>dial.toml</code> / <code>main.dial</code> / <code>&lt;包名&gt;.diali</code> / <code>lib/</code></td>
 </tr>
 <tr>
-<td><code>dialc pack &lt;目录&gt; [-o 包.dialpkg]</code></td>
-<td>把 <code>dial.toml</code> 描述的项目打成 <code>.dialpkg</code></td>
-<td>产物可直接 <code>dialc install</code></td>
+<td><code>dialc pack &lt;目录&gt; [-o 包.dialpkg] [--dry-run\|--json\|--init]</code></td>
+<td>打包 / 预览 / 机器可读清单 / 自动生成清单草稿</td>
+<td><code>--dry-run</code> / <code>--json</code> 不产出包；<code>--init</code> 只写清单、绝不覆盖</td>
+</tr>
+<tr>
+<td><code>dialc pack --verify &lt;包.dialpkg&gt;</code></td>
+<td>用安装期同一套规则校验已有包</td>
+<td>manifest + 逐文件 SHA256，篡改即非零退出</td>
 </tr>
 <tr>
 <td><code>dialc install &lt;包.dialpkg\|URL&gt; [--sha256 哈希]</code></td>
@@ -8206,15 +8218,18 @@ fn main(): int { print(helper() + inner()); return 0; }
 <h3 id="343-dialc-check-与-dialc-fmt">34.3 <code>dialc check</code> 与 <code>dialc fmt</code></h3>
 <p><code>check</code> 跑完整前端但不产出任何文件，适合接进编辑器保存钩子 / CI 的静态检查步骤：
 <code>dialc check src/main.dial</code> → <code>✅ 类型检查通过：...（N 个函数、M 个 test 块）</code>。</p>
-<p><code>fmt</code> 是<strong>保守格式化</strong>：只重排每行前导缩进（4 空格 / 层）、去掉行尾空白、统一末尾换行，
-<strong>不重排语句、不增删 token</strong>。这不是能力取舍而是安全契约：</p>
+<p><code>fmt</code> 是<strong>间距规范化格式化</strong>（v1.10 强化，见 §34.10）：在重排缩进之外，还规范
+运算符两侧、逗号 / 分号 / 冒号后、控制关键字与 <code>(</code> 之间、大括号两侧的空白。
+它仍然<strong>不合并 / 拆分行、不增删 token</strong>，安全性由三条当场自检的硬契约保证：</p>
 <ul>
-<li>格式化前后 <code>lexer::lex</code> 的 <strong>token 序列必须完全一致</strong>，命令会当场校验，不一致就拒绝写入；</li>
-<li>结果<strong>幂等</strong>（命令会自检 <code>fmt(fmt(x)) == fmt(x)</code>）；</li>
-<li>因此格式化永远不会改变程序语义，<code>fmt</code> 后可直接编译运行。</li>
+<li>格式化前后 <code>lexer::lex</code> 的 <strong>token 序列必须完全一致</strong>，不一致就拒绝写入；</li>
+<li><strong>字面量与注释原文必须完全一致</strong>（<code>protected_spans()</code> 提取后逐项比对）；</li>
+<li>结果<strong>幂等</strong>（<code>fmt(fmt(x)) == fmt(x)</code>）。</li>
 </ul>
-<p><code>dialc fmt --check &lt;文件...&gt;</code> 不写文件，只报告哪些需要格式化并以非零码退出，适合 CI。
-它<strong>不</strong>合并 / 拆分行、不调整运算符空格——这是「敢放心用」的取舍，LSP 的格式化（§28.7.1）同属非破坏性动作。</p>
+<p>因此格式化永远不会改变程序语义，<code>fmt</code> 后可直接编译运行。<code>dialc fmt --check &lt;文件...&gt;</code>
+只报告不写入（适合 CI），<code>dialc fmt --diff &lt;文件...&gt;</code> 逐行打印差异也不写入。
+LSP 的编辑器内格式化（§28.7.1）仍是「去行尾空白 + 末尾换行」的非破坏性动作，
+两者刻意不同：命令行敢重排间距，编辑器内绝不改动你正在敲的那一行。</p>
 <h3 id="344-dialc-test顶层测试块a4">34.4 <code>dialc test</code>（顶层测试块，A4）</h3>
 <pre><code class="language-dial">fn add(a: int, b: int): int { return a + b; }
 
@@ -8297,6 +8312,8 @@ dialc uninstall mylib
 </code></pre>
 <p><code>tools/make_stdlib_pkg.py</code> <strong>保留</strong>：CI 生成官方三平台 <code>stdlib.dialpkg</code> 仍走它
 （它一次收三份 <code>.a</code>、包名固定 <code>stdlib</code>），与 <code>dialc pack</code> 的「单项目通用打包」分工明确。</p>
+<p>v1.10 起 <code>dialc pack</code> 另有 <code>--init</code> / <code>--dry-run</code> / <code>--json</code> / <code>--verify</code> 四个选项，
+把「手写清单 + 盲打」变成「自动扫描 + 先预览后打包 + 可校验」，见 §34.10。</p>
 <h3 id="346-诊断带位置a7与-fail-fast-收紧a3">34.6 诊断带位置（A7）与 Fail-Fast 收紧（A3）</h3>
 <p><strong>A7</strong>：<code>panic("...")</code>、<code>assert(...)</code> 失败、未捕获异常现在都带<strong>源码位置</strong>：</p>
 <pre><code>dial: 运行时断言失败（Fail-Fast 终止）: x should be 2 (at /path/main.dial:3:5)
@@ -8362,9 +8379,14 @@ dial: 未捕获的异常（panic）: something broke
 <td>命令分派表；<code>frontend()</code> 共用流水线；<code>collect_sources()</code> 递归合并本地模块；<code>check / fmt / test / new / list / uninstall / pack</code></td>
 </tr>
 <tr>
+<td>格式化</td>
+<td><code>src/dialfmt.rs</code>（v1.10 新增）</td>
+<td><code>Word / Op / Raw</code> 片段扫描 + 间距规则；<code>protected_spans()</code> 原文自检；<code>format_source()</code> 幂等重排</td>
+</tr>
+<tr>
 <td>打包</td>
-<td><code>src/pkgbuild.rs</code>（新）</td>
-<td><code>dial.toml</code> TOML 子集解析、<code>pack</code> 生成 manifest + SHA256 + zip 并自检、<code>new</code> 骨架、<code>list</code> / <code>uninstall</code></td>
+<td><code>src/pkgbuild.rs</code></td>
+<td><code>dial.toml</code> TOML 子集解析、<code>pack</code> 生成 manifest + SHA256 + zip 并自检、<code>new</code> 骨架、<code>list</code> / <code>uninstall</code>；v1.10 抽出 <code>plan()</code> 供 <code>--dry-run</code> / <code>--json</code> 共用，新增 <code>--init</code> / <code>--verify</code></td>
 </tr>
 <tr>
 <td>AST / 解析</td>
@@ -8398,7 +8420,9 @@ dial: 未捕获的异常（panic）: something broke
 <li>新增 <strong>Q 组</strong>：<code>help / version / list / check</code>、A3 非零退出且不产物、<code>fmt</code> 幂等与
   token 流不变、<code>test</code> 通过/失败/过滤、多文件 import 合并与循环/冲突/缺失诊断、
   <code>new → pack → install → import → uninstall</code> 全链路闭环、<code>pack</code> 拒绝动态库 / 缺字段，
-  以及 A7 位置信息断言；</li>
+  以及 A7 位置信息断言；v1.10 再补 11 条——<code>fmt --diff</code> / 间距规范化 / 原文保护 /
+  编译运行一致（4 条），<code>pack --init</code> 草稿与拒绝覆盖 / <code>--dry-run</code> 预览与未登记提示 /
+  <code>--json</code> 机器可读 / <code>--verify</code> 校验与篡改拦截（7 条）；</li>
 <li><code>bash tests/run_tests.sh</code> <strong>A–Q 全量回归 0 ❌</strong>；<code>check_version</code> / <code>check_links</code> /
   <code>cve_check</code> 全通过；<code>cargo check</code> 零警告；新增 C 入口经 <code>zig cc</code> 三目标编译通过。</li>
 </ul>
@@ -8406,6 +8430,108 @@ dial: 未捕获的异常（panic）: something broke
 <p><strong>本轮交付范围</strong>：并入 <code>[v1.04]</code>、版本号与 <code>STDLIB_ABI</code> 均不变；只做<strong>本地提交</strong>，
 不推送 GitHub、不打 tag、不发 Release。<code>v1.0</code> 标签不受影响。</p>
 </blockquote>
+<hr />
+<h3 id="3410-工具链强化真格式化与少手工打包v110-增补">34.10 工具链强化：真格式化与少手工打包（v1.10 增补）</h3>
+<blockquote>
+<p>一个语言好不好用，工具链往往决定第一印象。本轮强化两条最常被手敲的路径：
+<code>fmt</code> 从「只敢理缩进」升级为「敢理间距」，<code>pack</code> 从「手写清单 + 盲打」升级为
+「自动扫描 + 先预览后打包 + 可校验」。两者都<strong>不改 ABI / 版本号 / 既有命令的默认行为</strong>。</p>
+</blockquote>
+<h4 id="dialc-fmt间距规范化"><code>dialc fmt</code>：间距规范化</h4>
+<p>旧版只重排行首缩进、去行尾空白、统一末尾换行——用户嫌「太差」。v1.10 把实现
+换到 <code>src/dialfmt.rs</code>：每行扫成 <code>Word / Op / Raw</code> 三种片段，空白只作为「片段间
+是否补一格」的决策依据，<strong>绝不改写片段内部</strong>。</p>
+<table>
+<thead>
+<tr>
+<th>规范化项</th>
+<th>例子（前 → 后）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>运算符两侧</td>
+<td><code>a+b</code> → <code>a + b</code>、<code>x&gt;0</code> → <code>x &gt; 0</code></td>
+</tr>
+<tr>
+<td>逗号 / 分号 / 类型冒号后</td>
+<td><code>fn add(a:int,b:int):int{...}</code> → <code>fn add(a: int, b: int): int { ... }</code></td>
+</tr>
+<tr>
+<td>控制关键字与 <code>(</code></td>
+<td><code>if(x&gt;0)</code> → <code>if (x &gt; 0)</code>；函数调用 <code>print("x")</code> 不补空格</td>
+</tr>
+<tr>
+<td>大括号两侧</td>
+<td><code>){</code> → <code>) {</code>、<code>return a+b;}</code> → <code>return a + b; }</code></td>
+</tr>
+<tr>
+<td>一元前缀不拆</td>
+<td><code>x=-1</code> → <code>x = -1</code>（绝不变成 <code>x = - 1</code>）</td>
+</tr>
+<tr>
+<td>多字符运算符不拆</td>
+<td><code>a&gt;&gt;b</code> → <code>a &gt;&gt; b</code>（<code>&gt;&gt;</code> 始终是一个片段）</td>
+</tr>
+</tbody>
+</table>
+<p>字符串 / 字符 / 字节字面量（<code>b'..'</code>）、行注释、跨行块注释一律作为 <code>Raw</code> 原样
+保留：<code>"a  b // not comment"</code> 里的双空格与 <code>//</code> 不会被当成代码，注释里的
+双空格也不会被压缩。三条硬契约由 <code>cmd_fmt</code> <strong>当场校验，任一不满足就拒绝写入</strong>：</p>
+<ol>
+<li><code>lexer::lex</code> 的 <strong>token 序列完全一致</strong>；</li>
+<li><code>protected_spans()</code> 提取的<strong>字面量与注释原文序列完全一致</strong>；</li>
+<li><strong>幂等</strong>（<code>format(format(x)) == format(x)</code>）。</li>
+</ol>
+<p><code>--check</code> 只报告不写入（CI 用），<code>--diff</code> 逐行打印 <code>---/+++/@@/-/+</code> 差异也不写入；
+两者对「有文件未格式化」都返回非零。LSP 的编辑器内格式化仍保持非破坏性
+（§28.7.1），命令行与编辑器刻意分工。Q 组新增 4 条断言锁定间距、原文保护、
+幂等与格式化后编译运行一致。</p>
+<h4 id="dialc-pack五个视角一条计划"><code>dialc pack</code>：五个视角，一条计划</h4>
+<p><code>pack</code> 的「收集入库文件 + 生成 manifest + 逐文件 SHA256」被抽成 <code>pkgbuild::plan()</code>，
+<code>pack</code> / <code>--dry-run</code> / <code>--json</code> <strong>共用同一个计划</strong>——预览看到的与真正打出来的
+逐字节一致，不会出现「预览说有、包里没有」。</p>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>作用</th>
+<th>写文件吗</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dialc pack &lt;目录&gt;</code></td>
+<td>原行为：打包并自检</td>
+<td>写 <code>.dialpkg</code></td>
+</tr>
+<tr>
+<td><code>--init</code></td>
+<td>扫描目录自动生成 <code>dial.toml</code> 草稿：自动发现 <code>*.diali</code> / <code>lib/&lt;triple&gt;/*.a</code> / <code>src/*.dial</code>，逐项写成<strong>显式声明</strong></td>
+<td>只写清单，<strong>已有清单拒绝覆盖</strong></td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>打印入库文件、SHA256 前 16 位、字节数、<code>manifest.src</code> 映射与输出路径</td>
+<td>不写</td>
+</tr>
+<tr>
+<td><code>--json</code></td>
+<td>同一份计划的机器可读版本（<code>files</code> / <code>sha256</code> / <code>unlisted</code> / <code>written=false</code>）</td>
+<td>不写</td>
+</tr>
+<tr>
+<td><code>--verify &lt;包.dialpkg&gt;</code></td>
+<td>用<strong>安装期同一套规则</strong>（<code>parse_manifest</code> + <code>verify_archive</code>）校验已有包</td>
+<td>不写</td>
+</tr>
+</tbody>
+</table>
+<p>「清单显式声明」仍是唯一入库依据：<code>--init</code> 只生成可核对、可删改的草稿，
+<code>--dry-run</code> 会额外列出<strong>磁盘上有但清单未登记</strong>的文件并明确标注「不会进包」，
+绝不自动塞进去。缺字段 / 缺文件的诊断带具体路径与补齐提示。<code>--verify</code> 对
+被篡改的包返回非零并给出期望 / 实际 SHA256。Q 组新增 7 条断言覆盖草稿生成、
+拒绝覆盖、预览、JSON、未登记提示、正常校验与篡改拦截。</p>
 <hr />
 <h2 id="35-v104-增补dwarf-调试信息与--g并入-v104版本不变">35. v1.04 增补：DWARF 调试信息与 <code>-g</code>（并入 <code>[v1.04]</code>，版本不变）</h2>
 <blockquote>
@@ -9248,7 +9374,8 @@ fn main(): int {
 全量回归 <strong>538 ✅ → 549 ✅ / 0 ❌</strong>，A–Z + AA + AB + AC 二十九组全绿。
 （本节记录 B1 落地时的验收快照；其后 GUI 第 8 层 OO 封装新增 AD 组、第 14 层
 窗口级覆盖层自动集成新增 AA 组 3 条断言、第 15 层快捷键 / 命令系统新增 AA 组
-2 条断言，当前全量 <strong>576 ✅ / 三十组</strong>，见 §25.11 / §34.2 / §34.5 / §38.14 /
+2 条断言、<code>fmt</code> / <code>pack</code> 强化再新增 Q 组 11 条断言，当前全量
+<strong>587 ✅ / 三十组</strong>，见 §25.11 / §34.2 / §34.3 / §34.5 / §34.10 / §38.14 /
 §38.15 / §38.16 / §38.17 / §38.18 / §38.19 / §38.20 / §38.21。）</p>
 <hr />
 <h2 id="38-手搓-gui-地基包guidialpkg">38. 手搓 GUI 地基包：gui.dialpkg</h2>
