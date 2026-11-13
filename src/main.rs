@@ -197,6 +197,11 @@ fn main() {
     let mut safety = SafetyMode::Debug; // 默认：崩溃保护全开
     let mut pgo = false; // 剖析引导优化（--fast 下的终极杀器）
     let mut debug_info = false; // -g：生成标准 DWARF 调试信息
+    // 第 18 层：两种产物形态编译模式（工具链层，非 gui 契约）。
+    // --tiny 体积模式：C 侧 -Os + 分段 + 链接期 --gc-sections + strip（去掉 DWARF 与符号表）；
+    // --single-file 便携模式：链接期 -static，产物不依赖宿主动态 libc。
+    let mut tiny = false;
+    let mut single_file = false;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -233,6 +238,17 @@ fn main() {
             }
             "--pgo" => {
                 pgo = true;
+                i += 1;
+            }
+            // 第 18 层：--tiny（体积模式）/ --single-file（便携模式）。
+            // 两 flag 只置纯值，具体注入分别在 resolve_stdlib_archive（C 侧 -Os/分段）
+            // 与 final_link（-static / --gc-sections / -s），冲突在下方集中 Fail-Fast。
+            "--tiny" => {
+                tiny = true;
+                i += 1;
+            }
+            "--single-file" => {
+                single_file = true;
                 i += 1;
             }
             // -g：标准 DWARF（GDB/LLDB 可按源码行断点、按 Dial 变量名 print）
@@ -294,6 +310,38 @@ fn main() {
         eprintln!("   非 fast 模式保留运行期检查，PGO 无收益且不插桩。已自动忽略 --pgo。");
         eprintln!();
         pgo = false;
+    }
+
+    // 第 18 层：编译模式冲突矩阵（复用 A3「不认识 / 不合法一律当场失败」铁律）。
+    // --tiny 的目标是最小体积（-Os + 分段 + --gc-sections + strip），与下列开关
+    // 目标相反，明确拒绝而非静默覆盖，避免用户以为两个优化同时生效：
+    //   · --fast / --pgo：-O3 + LTO / 插桩会显著增大产物；
+    //   · -g：strip 会把刚生成的 DWARF 又删掉，自相矛盾。
+    // --single-file 只影响链接期 -static，与 LTO / PGO / -g 正交，允许叠加；
+    // 但 -static 会把 libc 静态段拉进产物，反而比默认动态链接更大，故与 --tiny
+    // 叠加时如实提示：前者求「最小体积」、后者求「不依赖宿主」，二者诉求不同。
+    if tiny {
+        if safety == SafetyMode::ReleaseFast {
+            eprintln!("❌ --tiny 与 --fast 冲突：体积模式用 -Os + --gc-sections + strip，");
+            eprintln!("   --fast 用 -O3 + LTO 拉满性能，两者目标相反。请二选一。");
+            std::process::exit(1);
+        }
+        if pgo {
+            eprintln!("❌ --tiny 与 --pgo 冲突：插桩会增大产物，与体积模式目标相反。请二选一。");
+            std::process::exit(1);
+        }
+        if debug_info {
+            eprintln!("❌ --tiny 与 -g 冲突：体积模式会 strip 掉 DWARF 与符号表，");
+            eprintln!("   刚生成的调试信息又会被删除。请二选一。");
+            std::process::exit(1);
+        }
+    }
+    if tiny && single_file {
+        eprintln!("ℹ️  --tiny + --single-file：可叠加，但 -static 会把 libc 静态段拉入产物，");
+        eprintln!("   通常比 --tiny 单独使用更大；--tiny 求最小体积、--single-file 求不依赖宿主，诉求不同。");
+    }
+    if single_file {
+        eprintln!("ℹ️  --single-file：将用 -static 全静态链接，产物不再依赖宿主动态 libc。");
     }
 
     // 1~3) 词法 / 语法 / 语义（含本地源码模块合并、包解析、FFI 声明校验）
@@ -376,6 +424,16 @@ fn main() {
         eprintln!("⚠️  当前 C 编译器不支持 LTO/PGO（需要 clang），已降级为「仅 O3 + SIMD」的 --fast。");
     }
 
+    // 第 18 层：把 --tiny / --single-file 做成一份共享 base，下面所有 LinkOpts
+    // 构造点一律从它 clone 后再叠各自字段，杜绝「某个分支漏传导致 flag 静默失效」。
+    // （--tiny 已由冲突矩阵挡掉 fast/LTO，但 --single-file 可与 fast 叠加，故 LTO
+    //  分支同样必须带上 single_file，否则 -static 会在那几条路径里丢失。）
+    let mode = LinkOpts {
+        tiny,
+        single_file,
+        ..LinkOpts::default()
+    };
+
     if lto_capable {
         if eff_pgo {
             // —— PGO 两段式 ——
@@ -386,7 +444,7 @@ fn main() {
             let _ = fs::create_dir_all(&profdir);
             let gen_exe = build_dir.join("pgo_gen_bin");
 
-            let mut gen = LinkOpts::default();
+            let mut gen = mode.clone();
             gen.lto = true;
             gen.pgo_gen = true;
             if let Err(e) = clang_compile_bc(&bc_path, &obj_path, &gen) {
@@ -430,7 +488,7 @@ fn main() {
             }
 
             // 阶段二：用 profdata 重新编译并链接出最终二进制。
-            let mut useo = LinkOpts::default();
+            let mut useo = mode.clone();
             useo.lto = true;
             useo.pgo_use = Some(profdata.clone());
             if let Err(e) = clang_compile_bc(&bc_path, &obj_path, &useo) {
@@ -444,7 +502,7 @@ fn main() {
             println!("✅ PGO 优化完成（热路径已据训练样本重排）。");
         } else {
             // 单阶段 LTO：把 .bc 经 clang -flto 编成胖对象，再整体链接。
-            let mut o = LinkOpts::default();
+            let mut o = mode.clone();
             o.lto = true;
             if let Err(e) = clang_compile_bc(&bc_path, &obj_path, &o) {
                 eprintln!("{}", e);
@@ -457,7 +515,8 @@ fn main() {
         }
     } else {
         // 非 LTO 模式（debug / safe，或 fast 但无 clang）：直接用 inkwell 写出的原生 .o 链接。
-        if let Err(e) = link(&obj_path, &exe_path, safety, &fe.pkg_libs, &fe.ffi_rpaths, &LinkOpts::default()) {
+        // 第 18 层：这里必须传 &mode（含 tiny / single_file），不能再用 default()。
+        if let Err(e) = link(&obj_path, &exe_path, safety, &fe.pkg_libs, &fe.ffi_rpaths, &mode) {
             eprintln!("{}", e);
             std::process::exit(1);
         }
@@ -859,6 +918,11 @@ struct LinkOpts {
     /// `dialc test` 会为每个 test 块单独链接一次；逐块打印 stdlib 编译日志
     /// 会把测试结果淹掉，故允许调用方静默这些 ℹ️ 行（不影响错误与警告）。
     quiet: bool,
+    /// 第 18 层 --tiny：C 侧 -Os + -ffunction-sections/-fdata-sections，
+    /// 链接期 -Wl,--gc-sections + -s（strip），并强制关闭 DWARF（由冲突矩阵保证）。
+    tiny: bool,
+    /// 第 18 层 --single-file：链接期 -static，产物不依赖宿主动态 libc。
+    single_file: bool,
 }
 
 /// 返回可用于 LTO / PGO 的 clang（程序名, 前置参数）。
@@ -953,7 +1017,7 @@ fn link(
         final_link(obj, exe, extra_libs, &[], &runtime_objs, ffi_rpaths, opts)
     } else {
         // 非 LTO：优先已安装包，否则实时编译源码归档成 .a。
-        let stdlib_libs = resolve_stdlib_archive(safety, opts.quiet)?;
+        let stdlib_libs = resolve_stdlib_archive(safety, opts.quiet, opts.tiny)?;
         final_link(obj, exe, extra_libs, &stdlib_libs, &[], ffi_rpaths, opts)
     }
 }
@@ -966,8 +1030,16 @@ fn link(
 /// - 若未安装 / 当前平台不在包支持列表：回退到编译 `stdlib/` + `runtime/` 源码。
 ///
 /// 返回的标准库归档列表（通常一份 `libdial_std.a`）交给 `final_link` 链接。
-fn resolve_stdlib_archive(safety: SafetyMode, quiet: bool) -> Result<Vec<PathBuf>, String> {
-    if let Some((dir, manifest)) = package::find_installed("stdlib").map_err(|e| e.to_string())? {
+fn resolve_stdlib_archive(safety: SafetyMode, quiet: bool, tiny: bool) -> Result<Vec<PathBuf>, String> {
+    // --tiny 必须让 C 侧 -Os + -ffunction-sections/-fdata-sections 真正生效：
+    // 预编译 stdlib 包是 -O2 烘焙、且不带函数分段，--gc-sections 对它无效。
+    // 故 tiny 模式强制走下方「源码实时编译」回退路径，绕过已安装包。
+    let installed = if tiny {
+        None
+    } else {
+        package::find_installed("stdlib").map_err(|e| e.to_string())?
+    };
+    if let Some((dir, manifest)) = installed {
         // ABI 兜底：不兼容即报错 + 重装方案，绝不静默崩溃。
         if manifest.abi != package::STDLIB_ABI {
             return Err(format!(
@@ -1012,10 +1084,12 @@ fn resolve_stdlib_archive(safety: SafetyMode, quiet: bool) -> Result<Vec<PathBuf
     let runtime_dir = base.join("runtime");
     let stdlib_dir = base.join("stdlib");
 
-    // 临时构建目录（按安全等级分目录，避免不同等级的 .o 互相污染）
+    // 临时构建目录（按安全等级分目录，避免不同等级的 .o 互相污染）。
+    // 第 18 层：--tiny 编出的 -Os + 分段 .o / .a 再单独隔一层，避免与默认
+    // -O2 的 libdial_std.a 交替构建时互相覆盖（--gc-sections 需要分段版）。
     let build_dir = base
         .join(".dialc_build")
-        .join(format!("safety-{}", safety.as_c_macro()));
+        .join(format!("safety-{}{}", safety.as_c_macro(), if tiny { "-tiny" } else { "" }));
     fs::create_dir_all(&build_dir).map_err(|e| format!("创建构建目录失败: {}", e))?;
 
     let (cc, cc_prefix) = cc_command();
@@ -1048,8 +1122,17 @@ fn resolve_stdlib_archive(safety: SafetyMode, quiet: bool) -> Result<Vec<PathBuf
     for cfile in &entries {
         let out_o = build_dir.join(cfile.file_stem().unwrap()).with_extension("o");
         let mut cmd = Command::new(&cc);
-        cmd.args(&cc_prefix)
-            .arg("-O2")
+        cmd.args(&cc_prefix);
+        // 第 18 层 --tiny：C 侧按尺寸优化，并把每个函数 / 数据放进独立 section，
+        // 供链接期 -Wl,--gc-sections 精确剔除未引用部分。非 tiny 保持 -O2 一字不动。
+        if tiny {
+            cmd.arg("-Os")
+                .arg("-ffunction-sections")
+                .arg("-fdata-sections");
+        } else {
+            cmd.arg("-O2");
+        }
+        cmd
             // 并发运行时（stdlib/dial_thread.c、dial_channel.c）用到 pthread：
             // 必须让编译器生成线程安全的代码（并暴露 _REENTRANT 相关声明）。
             .arg("-pthread")
@@ -1083,6 +1166,36 @@ fn resolve_stdlib_archive(safety: SafetyMode, quiet: bool) -> Result<Vec<PathBuf
     Ok(vec![lib])
 }
 
+/// 第 18 层 --single-file：挑一个**真正支持 -static** 的系统 C 编译器作链接驱动。
+///
+/// 为何不复用 `cc_command()`：它默认优先 `zig cc`，而 zig cc 的 `-static` 对 glibc
+/// 目标无效（只对 `x86_64-linux-musl` 目标真正静态）。改 ABI 目标会与 inkwell 生成的
+/// 原生 .o、zig cc 编出的 stdlib .a 混链失配，故不动目标、只换驱动为 gcc / clang / cc
+/// ——它们的 `-static` 直接吃本机 glibc 的 libc.a / libm.a / libpthread.a，且能链接
+/// 现有对象（已实测）。尊重 `DIAL_C_COMPILER` 覆盖：若用户显式指定了驱动则沿用。
+fn static_link_cc() -> Result<(String, Vec<String>), String> {
+    if let Ok(val) = env::var("DIAL_C_COMPILER") {
+        let val = val.trim();
+        if !val.is_empty() {
+            let mut parts = val.split_whitespace();
+            if let Some(prog) = parts.next() {
+                return Ok((prog.to_string(), parts.map(|s| s.to_string()).collect()));
+            }
+        }
+    }
+    for prog in ["gcc", "clang", "cc"] {
+        let ok = Command::new(prog)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return Ok((prog.to_string(), vec![]));
+        }
+    }
+    Err("--single-file 需要系统 gcc / clang / cc 之一做全静态链接，但都未找到".to_string())
+}
+
 /// 最终链接：用户 .o + 标准库 .a（可能多份）+ C 运行时 .o（LTO 时）+ import 包 .a + 系统库 → 可执行文件。
 ///
 /// - 非 LTO：`stdlib_libs` 是归档 `.a`，直接链入。
@@ -1099,13 +1212,28 @@ fn final_link(
     opts: &LinkOpts,
 ) -> Result<(), String> {
     // LTO/PGO 依赖 clang 的 bitcode 链路，链接驱动也必须用 clang。
+    // 第 18 层 --single-file：zig cc 的 -static 对 glibc 目标**不生效**（实验证实：
+    // 连纯 C 的 printf 仍是 dynamically linked，它只对 musl 目标真正静态）。
+    // 故单文件便携模式改用系统 gcc/clang 作为链接驱动——它们能静态链接现有
+    // zig cc 编出的 .o / .a（对象格式同为 ELF，ABI 一致，已实测 gcc -static
+    // 链接 zig cc -c 产物成功）。仅切「链接」这一步，stdlib 编译仍走原路径。
+    // 优先级：LTO > --single-file > 常规。
     let (cc, cc_prefix) = if opts.lto {
         clang_for_lto().ok_or_else(|| "LTO/PGO 需要 clang 作为链接驱动".to_string())?
+    } else if opts.single_file {
+        static_link_cc()?
     } else {
         cc_command()
     };
     let mut link_cmd = Command::new(&cc);
-    link_cmd.args(&cc_prefix).arg(obj);
+    link_cmd.args(&cc_prefix);
+    // 第 18 层 --single-file：-static 必须最早注入（在 obj 之前），让链接器从
+    // 一开始就以静态模式解析后续所有归档与系统库。实测 glibc 下 -static 与 gui 包
+    // 的 dlopen 平台后端可共存（链接器给 warning 但 dlopen 仍可在运行期装载平台库）。
+    if opts.single_file {
+        link_cmd.arg("-static");
+    }
+    link_cmd.arg(obj);
     // C 运行时 .o（仅 LTO 模式存在）：与用户对象一起整体重排。
     for r in runtime_objs {
         link_cmd.arg(r);
@@ -1160,10 +1288,17 @@ fn final_link(
     // ELF / Mach-O 用 -Wl,-rpath 把库所在目录写进 RUNPATH，产物直接可跑，
     // 不必手工设 LD_LIBRARY_PATH / DYLD_LIBRARY_PATH；PE（Windows）没有 rpath
     // 概念，需把 .dll 放到 exe 同目录或 PATH（见 README §33.8）。
-    if !cfg!(windows) {
+    // 第 18 层：--single-file 全静态产物没有动态装载器，RUNPATH 无意义，跳过。
+    if !cfg!(windows) && !opts.single_file {
         for dir in ffi_rpaths {
             link_cmd.arg(format!("-Wl,-rpath,{}", dir.display()));
         }
+    }
+    // 第 18 层 --tiny：链接期剔除未引用 section + 剥掉符号表 / DWARF。
+    // 与 C 侧的 -ffunction-sections/-fdata-sections 成对；即便走预编译 stdlib 包
+    // （无分段），-s 仍稳定生效，故 tiny 的 strip 语义不依赖是否命中源码编译路径。
+    if opts.tiny {
+        link_cmd.arg("-Wl,--gc-sections").arg("-s");
     }
     link_cmd.arg("-o").arg(exe);
     if !run_ok(&mut link_cmd) {
@@ -1262,9 +1397,11 @@ fn print_usage() {
     eprintln!("用法: dialc <命令> [参数]");
     eprintln!();
     eprintln!("编译与运行");
-    eprintln!("  build <文件.dial> [-o 输出] [-g] [--no-link] [--safety debug|safe|fast] [--pgo]");
+    eprintln!("  build <文件.dial> [-o 输出] [-g] [--no-link] [--safety debug|safe|fast] [--pgo] [--tiny] [--single-file]");
     eprintln!("  run   <文件.dial> [同上]");
     eprintln!("  -g / --debug-info          生成标准 DWARF（GDB/LLDB 源码行断点 + print 变量名）");
+    eprintln!("  --tiny                     体积模式：-Os + 函数/数据分段 + --gc-sections + strip（与 --fast/--pgo/-g 冲突）");
+    eprintln!("  --single-file              便携模式：-static 全静态链接，产物不依赖宿主动态 libc");
     eprintln!("  check <文件.dial>                只做词法/语法/语义检查，不产出文件");
     eprintln!("  test  <文件.dial> [--filter 名]  运行顶层 test \"名\" {{ ... }} 块");
     eprintln!();

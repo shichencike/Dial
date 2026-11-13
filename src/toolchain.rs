@@ -22,8 +22,8 @@ pub struct CmdSpec {
 }
 
 pub const COMMANDS: &[CmdSpec] = &[
-    CmdSpec { name: "build", brief: "编译链接 Dial 源文件", opts: &["-o", "-g", "--no-link", "--safety", "--pgo"] },
-    CmdSpec { name: "run", brief: "编译并运行", opts: &["-o", "-g", "--no-link", "--safety", "--pgo"] },
+    CmdSpec { name: "build", brief: "编译链接 Dial 源文件", opts: &["-o", "-g", "--no-link", "--safety", "--pgo", "--tiny", "--single-file"] },
+    CmdSpec { name: "run", brief: "编译并运行", opts: &["-o", "-g", "--no-link", "--safety", "--pgo", "--tiny", "--single-file"] },
     CmdSpec { name: "check", brief: "只做词法/语法/语义检查", opts: &[] },
     CmdSpec { name: "test", brief: "运行顶层 test 块", opts: &["--filter"] },
     CmdSpec { name: "fmt", brief: "间距规范化格式化", opts: &["--check", "--diff"] },
