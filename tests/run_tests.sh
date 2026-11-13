@@ -81,6 +81,11 @@
 #      每控件主题覆写（未覆写逐像素回落全局表）/ Grid 自动换行，纯内存对象
 #      + 离屏 CRC 锁定，未启用时旧路径逐像素等价（历史 CRC 一字不漂移），
 #      零 DISPLAY 依赖。
+#      第 18 层 demo（5x ~ 5z）：高 DPI 整数放大（painter_scaled 最近邻）/
+#      ListBox 虚拟化 lazy load（100 万逻辑行只持有 <=64 个可视槽，零 C→Dial
+#      反向回调）/ IME 预编辑纯值事件块（不进信号位体系）/ GPU+原生平台纯值
+#      契约层（headless 确定性降级 -2），纯内存对象 + 离屏 CRC 锁定，默认态
+#      未启用时旧路径逐像素等价（历史 CRC 一字不漂移），零 DISPLAY 依赖。
 #   AB. int32 / float32 一等类型：零隐式转换 + 显式转换内建 + 同类算术/比较/打印，
 #       FFI 精确 32 位宽度（C 侧按 int32_t/float 读参数·返回值·多参数·
 #       extern struct sizeof/offsetof 与双向字段读写）/ 越界 Fail-Fast /
@@ -92,12 +97,20 @@
 #       dial_gui_window_draw(win)）/ 默认实参 / 容器 push 同名方法隔离 /
 #       6 个 Fail-Fast 负向 + 诊断面向用户（不暴露 mangle 名、参数不含 self）
 #       （v1.10 开发中增量）。
-#   AD. GUI 第 8 层 Dial 侧 OO 封装：packages/gui/src/gui_oo.dial 用 278 个 impl
-#       方法包住 279 个 C 风格 extern fn（纯 Dial 源码、随包 src/ 分发、ABI 不变）；
-#       契约审计（方法数 / 全覆盖 / 零 extern 声明）、无 DISPLAY 纯内存路径 +
-#       C 风格与 OO 风格绘制 CRC32 逐字节相等、随包 src/ 装包即用（不复制源码，
-#       输出与本地副本逐字节一致）、Xvfb 实窗覆盖层与信号队列、
-#       3 个 Fail-Fast 透传负向 + 诊断面向用户（v1.10 开发中增量）。
+#   AD. GUI 第 8 层 Dial 侧 OO 封装：packages/gui/src/gui_oo.dial 用 343 个 impl
+#       方法包住 344 个 C 风格 extern fn（入口 app_new 除外，纯 Dial 源码、
+#       随包 src/ 分发、ABI 不变）；契约审计（方法数 / 全覆盖 / 零 extern 声明）、
+#       无 DISPLAY 纯内存路径 + C 风格与 OO 风格绘制 CRC32 逐字节相等、
+#       随包 src/ 装包即用（不复制源码，输出与本地副本逐字节一致）、
+#       Xvfb 实窗覆盖层与信号队列、3 个 Fail-Fast 透传负向 +
+#       诊断面向用户（v1.10 开发中增量）。
+#   AE. 编译器产物形态（第 18 层，工具链层非 gui 契约）：--tiny 体积模式
+#       （-Os + 分段 + --gc-sections + strip，体积小于默认、无 .symtab /
+#       .debug_info）/ --single-file 便携模式（-static 全静态，file 显示
+#       statically linked、ldd 显示 not a dynamic executable）/ 两者叠加 /
+#       冲突矩阵 3/3 Fail-Fast（--tiny 与 --fast / --pgo(配合 fast) / -g）/
+#       --single-file 与 --fast 正交叠加，均用 examples/hello.dial 独立验证
+#       （零已安装包依赖，v1.10 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -3204,6 +3217,95 @@ if "$DIALC" build tests/pkg/use_gui_autoflow.dial -o "${TMP}/use_gui_autoflow" >
     fi
 else aabad "use_gui_autoflow.dial 编译失败"; tail -20 "${TMP}/aa_fcomp.log"; fi
 
+# 5x) 第 18 层高 DPI 整数放大 + ListBox 虚拟化 lazy load：纯内存 + 离屏画布
+#     （零 DISPLAY 依赖，CRC32 像素级锁定）。两个独立 offscreen 画布 / 独立
+#     纯内存树，绝不触碰前十六个 demo 的 CRC 基准。给 AA 组 +4 aapass。
+if "$DIALC" build tests/pkg/use_gui_scale.dial -o "${TMP}/use_gui_scale" >"${TMP}/aa_sccomp.log" 2>&1; then
+    aapass "use_gui_scale.dial（第 18 层高 DPI 整数放大）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_scale" >"${TMP}/aa_scnodisplay.log" 2>&1
+    aa_sc_no_exit=$?
+    aa_sc_bad=$(grep -c ' = bad' "${TMP}/aa_scnodisplay.log" || true)
+    if [ "$aa_sc_no_exit" -eq 0 ] && [ "$aa_sc_bad" -eq 0 ] \
+       && grep -qF 'scale_default_1 = ok' "${TMP}/aa_scnodisplay.log" \
+       && grep -qF 'scale_meta_no_pixel_change = ok' "${TMP}/aa_scnodisplay.log" \
+       && grep -qF 'scale_up1_crc_equals_src = ok' "${TMP}/aa_scnodisplay.log" \
+       && grep -qF 'scale_up2_w = ok' "${TMP}/aa_scnodisplay.log" \
+       && grep -qF 'scale_up3_h = ok' "${TMP}/aa_scnodisplay.log" \
+       && grep -qF 'scale_crc_pinned = ok' "${TMP}/aa_scnodisplay.log" \
+       && grep -qF 'scale_done = true' "${TMP}/aa_scnodisplay.log"; then
+        aapass "第 18 层高 DPI：scale 默认 1·越界 [1,4] Fail-Fast·factor=1 逐字节等价·2x/3x 最近邻放大尺寸/像素正确 / 离屏 CRC 稳定全绿"
+    else
+        aabad "第 18 层高 DPI 断言失败（exit=$aa_sc_no_exit bad=$aa_sc_bad）"
+        tail -40 "${TMP}/aa_scnodisplay.log"
+    fi
+else aabad "use_gui_scale.dial 编译失败"; tail -20 "${TMP}/aa_sccomp.log"; fi
+
+if "$DIALC" build tests/pkg/use_gui_virtual.dial -o "${TMP}/use_gui_virtual" >"${TMP}/aa_vtcomp.log" 2>&1; then
+    aapass "use_gui_virtual.dial（第 18 层 ListBox 虚拟化 lazy load）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_virtual" >"${TMP}/aa_vtnodisplay.log" 2>&1
+    aa_vt_no_exit=$?
+    aa_vt_bad=$(grep -c ' = bad' "${TMP}/aa_vtnodisplay.log" || true)
+    if [ "$aa_vt_no_exit" -eq 0 ] && [ "$aa_vt_bad" -eq 0 ] \
+       && grep -qF 'virt_total_1e6 = ok' "${TMP}/aa_vtnodisplay.log" \
+       && grep -qF 'virt_off_equals_legacy_path = ok' "${TMP}/aa_vtnodisplay.log" \
+       && grep -qF 'virt_window_ok = ok' "${TMP}/aa_vtnodisplay.log" \
+       && grep -qF 'virt_slot7 = ok' "${TMP}/aa_vtnodisplay.log" \
+       && grep -qF 'virt_signal_a_slot0_id = ok' "${TMP}/aa_vtnodisplay.log" \
+       && grep -qF 'virt_signal_kind_count_7 = ok' "${TMP}/aa_vtnodisplay.log" \
+       && grep -qF 'virt_crc_pinned = ok' "${TMP}/aa_vtnodisplay.log" \
+       && grep -qF 'virt_done = true' "${TMP}/aa_vtnodisplay.log"; then
+        aapass "第 18 层虚拟化：100 万逻辑行只持有 8 个可视槽·window/槽越界 Fail-Fast·槽数据真实进入绘制与命中·关闭态逐像素等价旧路径·signal_count 仍 7 / 离屏 CRC 稳定全绿"
+    else
+        aabad "第 18 层虚拟化断言失败（exit=$aa_vt_no_exit bad=$aa_vt_bad）"
+        tail -40 "${TMP}/aa_vtnodisplay.log"
+    fi
+else aabad "use_gui_virtual.dial 编译失败"; tail -20 "${TMP}/aa_vtcomp.log"; fi
+
+# 5y) 第 18 层 IME 预编辑纯值事件块：纯内存 + 离屏画布（零 DISPLAY 依赖）。
+#     独立 offscreen 画布，绝不触碰前十七个 demo 的 CRC 基准。给 AA 组 +2 aapass。
+if "$DIALC" build tests/pkg/use_gui_ime.dial -o "${TMP}/use_gui_ime" >"${TMP}/aa_imcomp.log" 2>&1; then
+    aapass "use_gui_ime.dial（第 18 层 IME 预编辑纯值事件块）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_ime" >"${TMP}/aa_imnodisplay.log" 2>&1
+    aa_im_no_exit=$?
+    aa_im_bad=$(grep -c ' = bad' "${TMP}/aa_imnodisplay.log" || true)
+    if [ "$aa_im_no_exit" -eq 0 ] && [ "$aa_im_bad" -eq 0 ] \
+       && grep -qF 'ime_feed_ok = ok' "${TMP}/aa_imnodisplay.log" \
+       && grep -qF 'ime_preedit_zhong = ok' "${TMP}/aa_imnodisplay.log" \
+       && grep -qF 'ime_preedit_256_rejected = ok' "${TMP}/aa_imnodisplay.log" \
+       && grep -qF 'ime_seq_not_reset_by_clear = ok' "${TMP}/aa_imnodisplay.log" \
+       && grep -qF 'ime_no_signal_emitted = ok' "${TMP}/aa_imnodisplay.log" \
+       && grep -qF 'ime_crc_unchanged_by_feed = ok' "${TMP}/aa_imnodisplay.log" \
+       && grep -qF 'ime_crc_pinned = ok' "${TMP}/aa_imnodisplay.log" \
+       && grep -qF 'ime_done = true' "${TMP}/aa_imnodisplay.log"; then
+        aapass "第 18 层 IME：一次 feed 自洽纯值快照·借用串复制·caret/串长/矩形/候选数越界 Fail-Fast·clear 不重置 seq·不进信号位体系·不碰 framebuffer / 离屏 CRC 稳定全绿"
+    else
+        aabad "第 18 层 IME 断言失败（exit=$aa_im_no_exit bad=$aa_im_bad）"
+        tail -40 "${TMP}/aa_imnodisplay.log"
+    fi
+else aabad "use_gui_ime.dial 编译失败"; tail -20 "${TMP}/aa_imcomp.log"; fi
+
+# 5z) 第 18 层 GPU + 原生平台纯值契约层：纯内存 + 离屏画布（零 DISPLAY 依赖）。
+#     独立 offscreen 画布，绝不触碰前十八个 demo 的 CRC 基准。给 AA 组 +2 aapass。
+if "$DIALC" build tests/pkg/use_gui_platform.dial -o "${TMP}/use_gui_platform" >"${TMP}/aa_plcomp.log" 2>&1; then
+    aapass "use_gui_platform.dial（第 18 层 GPU + 原生平台纯值契约层）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_platform" >"${TMP}/aa_plnodisplay.log" 2>&1
+    aa_pl_no_exit=$?
+    aa_pl_bad=$(grep -c ' = bad' "${TMP}/aa_plnodisplay.log" || true)
+    if [ "$aa_pl_no_exit" -eq 0 ] && [ "$aa_pl_bad" -eq 0 ] \
+       && grep -qF 'plat_gpu_available_0 = ok' "${TMP}/aa_plnodisplay.log" \
+       && grep -qF 'plat_gpu_backend_none = ok' "${TMP}/aa_plnodisplay.log" \
+       && grep -qF 'plat_degrade_code_is_minus2 = ok' "${TMP}/aa_plnodisplay.log" \
+       && grep -qF 'plat_try_composite_degraded = ok' "${TMP}/aa_plnodisplay.log" \
+       && grep -qF 'plat_framebuffer_untouched = ok' "${TMP}/aa_plnodisplay.log" \
+       && grep -qF 'plat_crc_pinned = ok' "${TMP}/aa_plnodisplay.log" \
+       && grep -qF 'plat_done = true' "${TMP}/aa_plnodisplay.log"; then
+        aapass "第 18 层平台纯值层：headless 能力恒未装载·降级码 -2·try_composite/托盘/文件框/快捷键参数 Fail-Fast + 确定性降级·不碰 framebuffer·能力位不漂移 / 离屏 CRC 稳定全绿"
+    else
+        aabad "第 18 层平台纯值层断言失败（exit=$aa_pl_no_exit bad=$aa_pl_bad）"
+        tail -40 "${TMP}/aa_plnodisplay.log"
+    fi
+else aabad "use_gui_platform.dial 编译失败"; tail -20 "${TMP}/aa_plcomp.log"; fi
+
 # 6) 清理：卸包，避免污染后续测试与用户环境。
 "$DIALC" uninstall gui >/dev/null 2>&1 || true
 aapass "gui 包已卸载"
@@ -3340,7 +3442,7 @@ else
 fi
 
 # ===========================================================================
-echo "== AD) GUI 第 8 层 OO 封装：317 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
+echo "== AD) GUI 第 8 层 OO 封装：343 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
 adpass() { echo "  ✅ $1"; }
 adbad()  { echo "  ❌ $1"; fail=1; }
 
@@ -3355,8 +3457,8 @@ cp tests/oo/use_gui_oo.dial "$AD_DIR/"
     && "$DIALC" install "${TMP}/ad_gui.dialpkg" >"${TMP}/ad_install.log" 2>&1 \
     || { adbad "gui.dialpkg 打包或安装失败（AD 组）"; tail -6 "${TMP}/ad_pack.log" "${TMP}/ad_install.log"; }
 
-# 1) 契约防漂移审计：317 个方法恰好覆盖 317 个 extern fn（入口 app_new 除外），
-#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 318 个签名。
+# 1) 契约防漂移审计：343 个方法恰好覆盖 343 个 extern fn（入口 app_new 除外），
+#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 344 个签名。
 ad_diag=$(grep '^extern fn' packages/gui/gui.diali | sed -E 's/^extern fn ([A-Za-z0-9_]+).*/\1/' \
           | grep -v '^dial_gui_app_new$' | sort -u)
 ad_refs=$(grep '^    fn ' packages/gui/src/gui_oo.dial | grep -oE 'dial_gui_[A-Za-z0-9_]+' | sort -u)
@@ -3364,9 +3466,9 @@ ad_methods=$(grep -c '^    fn ' packages/gui/src/gui_oo.dial)
 ad_diag_n=$(echo "$ad_diag" | wc -l)
 ad_iface_n=$(grep -c '^extern fn' packages/gui/gui.diali)
 ad_oo_decl=$(grep -c '^extern fn' packages/gui/src/gui_oo.dial || true)
-if [ "$ad_methods" -eq 317 ] && [ "$ad_diag_n" -eq 317 ] && [ "$ad_iface_n" -eq 318 ] \
+if [ "$ad_methods" -eq 343 ] && [ "$ad_diag_n" -eq 343 ] && [ "$ad_iface_n" -eq 344 ] \
    && [ "$ad_oo_decl" -eq 0 ] && [ "$ad_diag" = "$ad_refs" ]; then
-    adpass "契约审计：317 个 impl 方法全覆盖 317 个 extern fn、gui.diali 共 318 个签名、封装层零 extern 声明（ABI 不变）"
+    adpass "契约审计：343 个 impl 方法全覆盖 343 个 extern fn、gui.diali 共 344 个签名、封装层零 extern 声明（ABI 不变）"
 else
     adbad "契约审计不通过：methods=$ad_methods diag=$ad_diag_n iface=$ad_iface_n oo_decl=$ad_oo_decl"
     diff <(echo "$ad_diag") <(echo "$ad_refs") | head -20
@@ -3376,7 +3478,7 @@ fi
 if ! "$DIALC" build "$AD_DIR/use_gui_oo.dial" -o "${TMP}/ad_oo_run" >"${TMP}/ad_build.log" 2>&1; then
     adbad "use_gui_oo.dial 编译失败"; tail -20 "${TMP}/ad_build.log"
 else
-    adpass "OO 封装层 + 用例编译成功（278 个 impl 方法签名全部通过）"
+    adpass "OO 封装层 + 用例编译成功（343 个 impl 方法签名全部通过）"
     if ! env -u DISPLAY "${TMP}/ad_oo_run" >"${TMP}/ad_nodisp.out" 2>&1; then
         adbad "use_gui_oo 无 DISPLAY 运行非零退出"; tail -20 "${TMP}/ad_nodisp.out"
     elif grep -q '= bad' "${TMP}/ad_nodisp.out" \
@@ -3471,6 +3573,111 @@ elif grep -qF "方法 'GuiMenu.add_item' 需要 2~2 个参数，但传入了 1 �
     adpass "诊断面向用户：显示 GuiMenu.add_item、参数个数不含 self、不暴露 mangle 名"
 else
     adbad "诊断未还原用户视角"; tail -6 "${TMP}/ad_cnt.log"
+fi
+
+# ---------------------------------------------------------------------------
+# AE) 第 18 层编译器产物形态（工具链层，非 gui 契约）
+#     --tiny 体积模式 / --single-file 便携模式 / 冲突矩阵 / 正交叠加。
+#     刻意用 examples/hello.dial（零已安装包依赖），与 AA / AD 组解耦。
+# ---------------------------------------------------------------------------
+echo
+echo "== AE) 编译器产物形态：--tiny 体积模式 / --single-file 便携模式（第 18 层）=="
+aepass() { echo "  ✅ $1"; }
+aebad()  { echo "  ❌ $1"; fail=1; }
+
+AE_SRC=examples/hello.dial
+AE_DEF="${TMP}/ae_hello_default"
+AE_TINY="${TMP}/ae_hello_tiny"
+AE_STATIC="${TMP}/ae_hello_static"
+AE_BOTH="${TMP}/ae_hello_both"
+
+# 1) 默认产物基线：可运行、输出一致，作为 --tiny 体积比较基准。
+if "$DIALC" build "$AE_SRC" -o "$AE_DEF" >"${TMP}/ae_def.log" 2>&1 \
+   && "$AE_DEF" >"${TMP}/ae_def.out" 2>&1 \
+   && grep -qF 'Hello, dialc!' "${TMP}/ae_def.out"; then
+    aepass "默认产物运行正常（Hello, dialc!），作为体积基线"
+else
+    aebad "默认产物编译/运行/输出不符"; tail -20 "${TMP}/ae_def.log" "${TMP}/ae_def.out"
+fi
+
+# 2) --tiny：体积显著小于默认、无 .symtab/.debug_info、仍可运行。
+if ! "$DIALC" build "$AE_SRC" --tiny -o "$AE_TINY" >"${TMP}/ae_tiny.log" 2>&1; then
+    aebad "--tiny 编译失败"; tail -20 "${TMP}/ae_tiny.log"
+else
+    ae_def_sz=$(stat -c %s "$AE_DEF" 2>/dev/null || echo 0)
+    ae_tiny_sz=$(stat -c %s "$AE_TINY" 2>/dev/null || echo 0)
+    if [ "$ae_tiny_sz" -gt 0 ] && [ "$ae_def_sz" -gt 0 ] && [ "$ae_tiny_sz" -lt "$ae_def_sz" ]; then
+        aepass "--tiny 产物体积小于默认基线（${ae_tiny_sz} B < ${ae_def_sz} B）"
+    else
+        aebad "--tiny 产物体积未小于默认（tiny=${ae_tiny_sz} default=${ae_def_sz}）"
+    fi
+    if readelf -S "$AE_TINY" 2>/dev/null | grep -qE '\.(symtab|debug_info)'; then
+        aebad "--tiny 产物仍含 .symtab / .debug_info（strip 未生效）"
+    else
+        aepass "--tiny 产物已 strip：readelf -S 无 .symtab / .debug_info"
+    fi
+    if "$AE_TINY" >"${TMP}/ae_tiny.out" 2>&1 && grep -qF 'Hello, dialc!' "${TMP}/ae_tiny.out"; then
+        aepass "--tiny 产物运行正常（Hello, dialc!）"
+    else
+        aebad "--tiny 产物运行/输出不符"; cat "${TMP}/ae_tiny.out"
+    fi
+fi
+
+# 3) --single-file：全静态链接，file / ldd 双重确认，仍可运行。
+if ! "$DIALC" build "$AE_SRC" --single-file -o "$AE_STATIC" >"${TMP}/ae_static.log" 2>&1; then
+    aebad "--single-file 编译失败"; tail -20 "${TMP}/ae_static.log"
+else
+    if file "$AE_STATIC" 2>/dev/null | grep -qF 'statically linked'; then
+        aepass "--single-file 产物 file 显示 statically linked"
+    else
+        aebad "--single-file 产物非静态链接"; file "$AE_STATIC"
+    fi
+    if ldd "$AE_STATIC" 2>&1 | grep -qF 'not a dynamic executable'; then
+        aepass "--single-file 产物 ldd 显示 not a dynamic executable"
+    else
+        aebad "--single-file 产物仍为动态可执行"; ldd "$AE_STATIC" 2>&1 | head -5
+    fi
+    if "$AE_STATIC" >"${TMP}/ae_static.out" 2>&1 && grep -qF 'Hello, dialc!' "${TMP}/ae_static.out"; then
+        aepass "--single-file 产物运行正常（Hello, dialc!）"
+    else
+        aebad "--single-file 产物运行/输出不符"; cat "${TMP}/ae_static.out"
+    fi
+fi
+
+# 4) --tiny + --single-file 可叠加（如实提示诉求不同），静态且可运行。
+if ! "$DIALC" build "$AE_SRC" --tiny --single-file -o "$AE_BOTH" >"${TMP}/ae_both.log" 2>&1; then
+    aebad "--tiny + --single-file 编译失败"; tail -20 "${TMP}/ae_both.log"
+elif ! file "$AE_BOTH" 2>/dev/null | grep -qF 'statically linked'; then
+    aebad "--tiny + --single-file 产物非静态链接"; file "$AE_BOTH"
+elif ! "$AE_BOTH" >"${TMP}/ae_both.out" 2>&1 || ! grep -qF 'Hello, dialc!' "${TMP}/ae_both.out"; then
+    aebad "--tiny + --single-file 产物运行/输出不符"
+else
+    aepass "--tiny + --single-file 可叠加：静态链接且运行正常"
+fi
+
+# 5) 冲突矩阵 Fail-Fast：--tiny 的目标（最小体积）与 --fast / --pgo / -g
+#    目标相反，一律当场拒绝（--pgo 须配合 --fast 才生效，故用 --tiny --pgo --fast）。
+ae_c1=0; ae_c2=0; ae_c3=0
+if ! "$DIALC" build "$AE_SRC" --tiny --fast -o "${TMP}/ae_c1" >"${TMP}/ae_c1.log" 2>&1 \
+   && grep -qF '❌ --tiny 与 --fast 冲突' "${TMP}/ae_c1.log"; then ae_c1=1; fi
+if ! "$DIALC" build "$AE_SRC" --tiny --pgo --fast -o "${TMP}/ae_c2" >"${TMP}/ae_c2.log" 2>&1 \
+   && grep -qF '❌ --tiny' "${TMP}/ae_c2.log"; then ae_c2=1; fi
+if ! "$DIALC" build "$AE_SRC" --tiny -g -o "${TMP}/ae_c3" >"${TMP}/ae_c3.log" 2>&1 \
+   && grep -qF '❌ --tiny 与 -g 冲突' "${TMP}/ae_c3.log"; then ae_c3=1; fi
+if [ "$ae_c1" -eq 1 ] && [ "$ae_c2" -eq 1 ] && [ "$ae_c3" -eq 1 ]; then
+    aepass "冲突矩阵 3/3 拒绝：--tiny 与 --fast / --pgo(配合 fast) / -g 目标相反，Fail-Fast"
+else
+    aebad "冲突矩阵未全部拒绝（fast=$ae_c1 pgo+fast=$ae_c2 g=$ae_c3）"
+fi
+
+# 6) --single-file 只影响链接期 -static，与 --fast 正交，允许叠加（不误拒）。
+if "$DIALC" build "$AE_SRC" --single-file --fast -o "${TMP}/ae_sf" >"${TMP}/ae_sf.log" 2>&1 \
+   && file "${TMP}/ae_sf" 2>/dev/null | grep -qF 'statically linked' \
+   && "${TMP}/ae_sf" >"${TMP}/ae_sf.out" 2>&1 \
+   && grep -qF 'Hello, dialc!' "${TMP}/ae_sf.out"; then
+    aepass "--single-file 与 --fast 正交叠加：静态链接且运行正常"
+else
+    aebad "--single-file 与 --fast 正交叠加被误拒或不静态"; tail -10 "${TMP}/ae_sf.log"
 fi
 
 echo

@@ -163,7 +163,8 @@ int gui_widget_handle(GuiWidgetImpl *root, int kind, int x, int y, int button) {
             int rx = x - oc->abs_x, ry = y - oc->abs_y;
             if (rx >= 0 && rx < oc->w && ry >= oc->h) {
                 int row = (ry - oc->h) / GUI_MENU_ROW_H;
-                if (row >= 0 && row < oc->item_count) {
+                int combo_vis = oc->virtual_on ? oc->virtual_count : oc->item_count;
+                if (row >= 0 && row < combo_vis) {
                     oc->selected_idx = row;
                     oc->combo_open = 0;
                     gui_signal_emit(oc, GUI_SIG_SELECTED, oc->items[row].id, 0, x, y);
@@ -216,7 +217,8 @@ int gui_widget_handle(GuiWidgetImpl *root, int kind, int x, int y, int button) {
         }
         if (hit->kind == GUI_WIDGET_LIST) {
             int row = (y - hit->abs_y) / GUI_MENU_ROW_H;
-            if (row >= 0 && row < hit->item_count) {
+            int list_vis = hit->virtual_on ? hit->virtual_count : hit->item_count;
+            if (row >= 0 && row < list_vis) {
                 if (row < 64) hit->list_sel_bits = (int64_t)1 << row;
                 else          hit->list_sel_bits = 0;
                 gui_signal_emit(hit, GUI_SIG_SELECTED, hit->items[row].id, 0, x, y);
@@ -437,12 +439,13 @@ static void draw_node(GuiPainterImpl *p, GuiWidgetImpl *n,
             int ax0 = ax + w - 14, ay0 = ay + h / 2 - 3;   /* 下拉三角（两道折线）*/
             gui_raster_line(p, ax0, ay0, ax0 + 5, ay0 + 5, 1, C(TEXT));
             gui_raster_line(p, ax0 + 5, ay0 + 5, ax0 + 10, ay0, 1, C(TEXT));
-            if (n->combo_open && n->item_count > 0) {
-                int ph = n->item_count * GUI_MENU_ROW_H;
+            int combo_vis = n->virtual_on ? n->virtual_count : n->item_count;
+            if (n->combo_open && combo_vis > 0) {
+                int ph = combo_vis * GUI_MENU_ROW_H;
                 int py = ay + h;
                 gui_raster_fill_rect(p, ax, py, w, ph, C(BG));
                 gui_raster_stroke_rect(p, ax, py, w, ph, 1, C(BORDER));
-                for (int i = 0; i < n->item_count; ++i) {
+                for (int i = 0; i < combo_vis; ++i) {
                     int ry = py + i * GUI_MENU_ROW_H;
                     if (i == n->selected_idx)
                         gui_raster_fill_rect(p, ax, ry, w, GUI_MENU_ROW_H, C(SEL));
@@ -454,10 +457,14 @@ static void draw_node(GuiPainterImpl *p, GuiWidgetImpl *n,
         }
         case GUI_WIDGET_LIST: {
             /* 列表框：底板 + 边框 + 每行（选中行高亮）；列表项存储在 items，
-             * 不是子控件，行号由几何直接算出（row = (y - top) / ROW_H）。*/
+             * 不是子控件，行号由几何直接算出（row = (y - top) / ROW_H）。
+             * 第 18 层虚拟化：开启时只画可视窗口的 virtual_count 个槽（数据由
+             * Dial 侧按需推进 items[0..count)，逻辑行号 = virtual_first + i）；
+             * 关闭时 vis 恰等于 item_count，与旧路径逐字节一致（CRC 不漂移）。*/
+            int vis = n->virtual_on ? n->virtual_count : n->item_count;
             gui_raster_fill_rect(p, ax, ay, w, h, n->disabled ? C(BTN_DIS) : C(CHECK_BG));
             gui_raster_stroke_rect(p, ax, ay, w, h, 1, C(BORDER));
-            for (int i = 0; i < n->item_count; ++i) {
+            for (int i = 0; i < vis; ++i) {
                 int ry = ay + i * GUI_MENU_ROW_H;
                 if (ry + GUI_MENU_ROW_H > ay + h) break;    /* 超出控件高度不画 */
                 int bit = (i < 64) ? (int)((n->list_sel_bits >> i) & 1) : 0;

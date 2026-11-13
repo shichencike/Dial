@@ -75,8 +75,9 @@
 // 的 const char*，Dial 侧必须用 string_from_cstr 复制成自己的 ARC 对象。
 // C 管 C 的，ARC 管 ARC 的，谁也不越界，零隐式开销。
 //
-// 仍未实现、因此**不写进本契约**：多行文本 / 输入法（IME）、
-// 撤销重做栈、富文本编辑、图片解码、Direct2D、C → Dial 反向回调。
+// 仍未实现、因此**不写进本契约**：多行文本 / 富文本编辑、图片解码、
+// Direct2D / 可切换深色主题包、真实 IMM32/IBus/Fcitx 采集（第 18 层已落地
+// 「IME 预编辑纯值事件块」契约，但平台侧预编辑采集未接）、C → Dial 反向回调。
 // 把未实现的函数写进 .diali 会让用户 import 后链接失败，那是制造漂移
 // 而非预留接口——这条原则六层一律适用。
 // 注：信号槽已由第 6 层以「可订阅纯值信号队列」落地（不是 C 侧回调），
@@ -1290,4 +1291,78 @@ extern fn dial_gui_widget_clear_colors(w: GuiWidget): int;
 // 不做自动换行重排（不因 cspan 变化回溯）、不做双向 / 稀疏网格。
 extern fn dial_gui_widget_set_grid_autoflow(w: GuiWidget, on: int): int;
 extern fn dial_gui_widget_grid_autoflow(w: GuiWidget): int;
+
+// ======================================================================
+// 第 18 层：高 DPI 放大 / 虚拟化 lazy load / IME 预编辑纯值事件 /
+//           GPU 合成 + 原生平台集成「纯值契约层」
+// 本层共追加 26 个 extern fn（旧 318 个签名一字不动）。四组能力默认态
+// （scale=1 / virtual_on=0 / IME 未 feed / 平台能力未装载）逐像素等价于
+// 第 17 层，既有 CRC 钉值一字不改。全部 : int 一律 int64_t；string 形参
+// 映射 C 侧 DialString；返回 C 侧借用 const char* 用 rawptr<byte>（Dial
+// 侧必须 string_from_cstr 复制）。经授权仅放宽「新增 .c 文件」一条宪法。
+// ======================================================================
+
+// ---- 第 18 层：高 DPI 整数放大（挂 GuiPainter，本段 3 个）-----------------
+// scale 是画布的逻辑放大因子元数据，合法 [1,4]，默认 1（= 逐像素等价旧
+// 路径）。painter_scaled 用最近邻把 1x framebuffer 放大 factor 倍，返回
+// 一块新的独立离屏画布（factor==1 时逐字节拷贝、CRC 与源相同）；画布尺寸
+// 放大后超过 16384 上界、factor 越界一律 Fail-Fast 返回空句柄 / -1。
+// 只做整数倍放大，不做 1.25x/1.5x 小数缩放、不做多屏 DPI 热切换。
+extern fn dial_gui_painter_set_scale(p: GuiPainter, scale: int): int;
+extern fn dial_gui_painter_scale(p: GuiPainter): int;
+extern fn dial_gui_painter_scaled(src: GuiPainter, factor: int): GuiPainter;
+
+// ---- 第 18 层：ListBox/Grid 虚拟化 lazy load（本段 7 个）------------------
+// 逻辑总行数 total 可极大（0..1000000），但 C 侧只持有当前可视窗口
+// [first, +count) 的 <= 64 个槽（复用 items[]）。Dial 侧滚动时把可视区
+// 数据「推进」槽（virtual_slot(slot, id, text)），绘制/命中按 first 偏移
+// 换算；**绝不 C → Dial 反向回调索要数据**。virtual_on=0 时走旧 item_count
+// 路径逐像素等价。window 越界（first<0 / count>64 / first+count>total）、
+// 槽索引越界、total 越界一律 Fail-Fast 返回 -1 并写错误槽。
+// 不做滚动条 / 惯性 / 自动估算行高（滚动位置由 Dial 侧显式推进）。
+extern fn dial_gui_widget_set_virtual(w: GuiWidget, on: int, total: int): int;
+extern fn dial_gui_widget_virtual_window(w: GuiWidget, first: int, count: int): int;
+extern fn dial_gui_widget_virtual_slot(w: GuiWidget, slot: int, id: int, text: string): int;
+extern fn dial_gui_widget_virtual_first(w: GuiWidget): int;
+extern fn dial_gui_widget_virtual_count(w: GuiWidget): int;
+extern fn dial_gui_widget_virtual_total(w: GuiWidget): int;
+extern fn dial_gui_widget_virtual_on(w: GuiWidget): int;
+
+// ---- 第 18 层：IME 预编辑纯值事件块（本段 7 个）--------------------------
+// 一次 ime_feed 把「预编辑串 + 光标 + 候选框矩形 + 候选数」写成一个自洽
+// 纯值快照（挂在 widget 树根），seq 单调递增。preedit getter 返回 C 侧借用
+// 串，Dial 侧必须 string_from_cstr 复制。rect(which) 取 0..3 = cx/cy/cw/ch。
+// 不进 GUI_SIG_* 位值体系、不扩 GuiWidgetSignal、signal_count() 仍为 7，
+// 故第 6 层信号订阅相关既有断言一字不动。caret 越界（>len）、预编辑串
+// 超 255 字节、rect which 越界一律 Fail-Fast。clear 复位内容但 seq 不重置。
+// **不含** IMM32 / IBus / Fcitx 平台采集、不含候选框绘制、不含真实输入法。
+extern fn dial_gui_ime_feed(w: GuiWidget, preedit: string, caret: int, cx: int, cy: int, cw: int, ch: int, cand_count: int): int;
+extern fn dial_gui_ime_preedit(w: GuiWidget): rawptr<byte>;
+extern fn dial_gui_ime_caret(w: GuiWidget): int;
+extern fn dial_gui_ime_cand_count(w: GuiWidget): int;
+extern fn dial_gui_ime_rect(w: GuiWidget, which: int): int;
+extern fn dial_gui_ime_seq(w: GuiWidget): int;
+extern fn dial_gui_ime_clear(w: GuiWidget): int;
+
+// ---- 第 18 层：GPU 合成 + 原生平台集成「纯值契约层」（本段 9 个）----------
+// 经用户授权新增唯一一个 .c（dial_gui_platform.c）承载本段。本轮只做
+// extern fn + Fail-Fast 参数校验 + 能力探测 + 确定性降级码：不 dlopen 任何
+// GL/EGL/Vulkan/系统库、不 include 任何平台头、不碰 framebuffer 一个字节。
+// headless（无 /dev/dri、无桌面会话）下 gpu_available 恒 0、gpu_backend 恒
+// "none"、gpu_caps 恒 0、所有动作（try_composite / tray_set / file_dialog /
+// hotkey_register）参数合法时恒返降级码 -2（platform_degrade_code 读回），
+// 参数非法返 -1 并写错误槽。gpu_backend / gpu_degrade_reason 返回 C 侧借用
+// 串，Dial 侧 string_from_cstr 复制。
+// **本轮不做、留下一批**：真实 GPU 合成后端（挂 window_flush 只上传
+// framebuffer 不改像素）、原生弹窗 / 托盘 / 全局快捷键实机。硬件加速与
+// 原生弹窗未实机验证（沿用 Win32 后端既有口径）。
+extern fn dial_gui_gpu_available(): int;
+extern fn dial_gui_gpu_backend(): rawptr<byte>;
+extern fn dial_gui_gpu_caps(): int;
+extern fn dial_gui_gpu_try_composite(p: GuiPainter): int;
+extern fn dial_gui_gpu_degrade_reason(): rawptr<byte>;
+extern fn dial_gui_tray_set(slot: int, flags: int): int;
+extern fn dial_gui_native_file_dialog(mode: int): int;
+extern fn dial_gui_global_hotkey_register(id: int, mods: int, key: int): int;
+extern fn dial_gui_platform_degrade_code(): int;
 

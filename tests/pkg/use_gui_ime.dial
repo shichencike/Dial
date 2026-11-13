@@ -1,0 +1,107 @@
+// gui.dialpkg 第 18 层：IME 预编辑纯值事件块（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：一次 feed 写成自洽纯值快照（预编辑串 / caret / 候选框
+// 矩形 / 候选数 / 单调 seq）、借用串 string_from_cstr 复制、越界 Fail-Fast
+// （caret>len / 串超 255 字节 / rect which / 负矩形 / 负候选数）、clear 复位
+// 内容但 seq 不重置、不进 GUI_SIG_* 位值体系（signal_count 仍 7、零信号）、
+// 不碰 framebuffer（feed 前后绘制 CRC 相同）、离屏 CRC 稳定。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var root: GuiWidget = dial_gui_widget_tree(200, 80);
+    var tb: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_set_kind(tb, 4), 0, "ime_kind_textbox");     // 4 = TEXTBOX
+    expect_int(dial_gui_widget_set_rect(tb, 0, 0, 200, 40), 0, "ime_rect");
+
+    // ---- 0) 初始纯值快照全清零 -----------------------------------------
+    expect_int(dial_gui_ime_seq(root), 0, "ime_seq_init_0");
+    expect_str(string_from_cstr(dial_gui_ime_preedit(root)), "", "ime_preedit_init_empty");
+    expect_int(dial_gui_ime_caret(root), 0, "ime_caret_init_0");
+    expect_int(dial_gui_ime_cand_count(root), 0, "ime_cand_init_0");
+    expect_int(dial_gui_ime_rect(root, 0), 0, "ime_rect0_init_0");
+    expect_int(dial_gui_ime_rect(root, 1), 0, "ime_rect1_init_0");
+    expect_int(dial_gui_ime_rect(root, 2), 0, "ime_rect2_init_0");
+    expect_int(dial_gui_ime_rect(root, 3), 0, "ime_rect3_init_0");
+
+    // ---- 1) 一次 feed 写成自洽纯值快照 --------------------------------
+    expect_int(dial_gui_ime_feed(root, "zhong", 2, 100, 200, 60, 24, 5), 0, "ime_feed_ok");
+    expect_int(dial_gui_ime_seq(root), 1, "ime_seq_1");
+    expect_str(string_from_cstr(dial_gui_ime_preedit(root)), "zhong", "ime_preedit_zhong");
+    expect_int(dial_gui_ime_caret(root), 2, "ime_caret_2");
+    expect_int(dial_gui_ime_cand_count(root), 5, "ime_cand_5");
+    expect_int(dial_gui_ime_rect(root, 0), 100, "ime_rect_cx_100");
+    expect_int(dial_gui_ime_rect(root, 1), 200, "ime_rect_cy_200");
+    expect_int(dial_gui_ime_rect(root, 2), 60, "ime_rect_cw_60");
+    expect_int(dial_gui_ime_rect(root, 3), 24, "ime_rect_ch_24");
+
+    // ---- 2) Fail-Fast：rect which 越界 ---------------------------------
+    expect_int(dial_gui_ime_rect(root, 4), -1, "ime_rect_which4_rejected");
+    expect_int(dial_gui_ime_rect(root, -1), -1, "ime_rect_which_neg_rejected");
+    dial_gui_clear_error();
+
+    // ---- 3) Fail-Fast：caret / 矩形 / 候选数越界 -----------------------
+    expect_int(dial_gui_ime_feed(root, "ab", 3, 0, 0, 0, 0, 0), -1, "ime_caret_gt_len_rejected");
+    expect_int(dial_gui_ime_feed(root, "ab", -1, 0, 0, 0, 0, 0), -1, "ime_caret_neg_rejected");
+    expect_int(dial_gui_ime_feed(root, "ab", 2, 0, 0, 0, 0, 0), 0, "ime_caret_eq_len_ok");
+    expect_int(dial_gui_ime_feed(root, "ab", 0, -1, 0, 0, 0, 0), -1, "ime_cx_neg_rejected");
+    expect_int(dial_gui_ime_feed(root, "ab", 0, 0, 0, 0, 0, -1), -1, "ime_cand_neg_rejected");
+    dial_gui_clear_error();
+
+    // ---- 4) 预编辑串超 255 字节 Fail-Fast ------------------------------
+    var long: string = "";
+    var i: int = 0;
+    while (i < 256) { long = long + "a"; i = i + 1; }
+    expect_int(dial_gui_ime_feed(root, long, 0, 0, 0, 0, 0, 0), -1, "ime_preedit_256_rejected");
+    dial_gui_clear_error();
+
+    // ---- 5) seq 单调递增（成功 feed 2 次：#1 zhong、#3 ab/2）----------
+    expect_int(dial_gui_ime_seq(root), 2, "ime_seq_monotonic_2");
+
+    // ---- 6) clear 复位内容但 seq 不重置 --------------------------------
+    expect_int(dial_gui_ime_clear(root), 0, "ime_clear_ok");
+    expect_str(string_from_cstr(dial_gui_ime_preedit(root)), "", "ime_preedit_cleared");
+    expect_int(dial_gui_ime_caret(root), 0, "ime_caret_cleared");
+    expect_int(dial_gui_ime_cand_count(root), 0, "ime_cand_cleared");
+    expect_int(dial_gui_ime_rect(root, 0), 0, "ime_rect_cleared");
+    expect_int(dial_gui_ime_seq(root), 2, "ime_seq_not_reset_by_clear");
+    expect_int(dial_gui_ime_feed(root, "ni", 1, 10, 20, 30, 18, 3), 0, "ime_feed_after_clear");
+    expect_int(dial_gui_ime_seq(root), 3, "ime_seq_3_after_clear");
+
+    // ---- 7) 不进 GUI_SIG_* 位值体系 -----------------------------------
+    expect_int(dial_gui_signal_count(), 7, "ime_signal_kind_count_7");
+    expect_int(dial_gui_widget_signal_pending(root), 0, "ime_no_signal_emitted");
+
+    // ---- 8) 不碰 framebuffer：feed 前后绘制 CRC 相同且稳定 ------------
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 80);
+    expect(!is_null(p), "ime_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "ime_aa_off");
+    expect_int(dial_gui_widget_layout_apply(root, 200, 80), 0, "ime_apply");
+    expect_int(dial_gui_widget_draw(root, p), 0, "ime_draw");
+    var crc0: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_ime_feed(root, "hao", 1, 1, 2, 3, 4, 9), 0, "ime_feed_before_crc_recheck");
+    expect_int(dial_gui_widget_draw(root, p), 0, "ime_draw2");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect_int(crc0, crc1, "ime_crc_unchanged_by_feed");
+    expect_str(str(crc0), "1103561703", "ime_crc_pinned");
+    print("ime_crc = " + str(crc0));
+
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("ime_done = true");
+    return 0;
+}

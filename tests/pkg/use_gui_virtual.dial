@@ -1,0 +1,135 @@
+// gui.dialpkg 第 18 层：ListBox 虚拟化 lazy load（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：100 万逻辑行只持有 <=64 个可视槽（Dial -> C 单向推进，
+// 零 C -> Dial 反向回调）、first/count 窗口与越界 Fail-Fast、槽数据被绘制与
+// 命中真实使用、关闭态逐像素等价旧 item_count 路径、signal_count 仍为 7、
+// 离屏 CRC 稳定。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+packed extern struct GuiWidgetSignal {
+    seq: int, signal: int, tag: int, userdata: int, kind: int, a: int, b: int, x: int, y: int
+}
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var root: GuiWidget = dial_gui_widget_tree(160, 100);
+    var lb: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_set_kind(lb, 11), 0, "virt_kind_list");        // 11 = LIST
+    expect_int(dial_gui_widget_set_rect(lb, 0, 0, 160, 100), 0, "virt_rect");
+    expect_int(dial_gui_widget_set_layout(root, 0), 0, "virt_layout");
+    expect_int(dial_gui_widget_layout_apply(root, 160, 100), 0, "virt_apply");
+
+    var p: GuiPainter = dial_gui_painter_offscreen(160, 100);
+    expect(!is_null(p), "virt_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "virt_aa_off");
+
+    // ---- 0) 默认：未开虚拟化 -------------------------------------------
+    expect_int(dial_gui_widget_virtual_on(lb), 0, "virt_default_off");
+    expect_int(dial_gui_widget_virtual_total(lb), 0, "virt_default_total_0");
+    expect_int(dial_gui_widget_virtual_first(lb), 0, "virt_default_first_0");
+    expect_int(dial_gui_widget_virtual_count(lb), 0, "virt_default_count_0");
+
+    // ---- 1) 旧路径基线（3 项）+ 关闭态逐像素等价 ------------------------
+    expect_int(dial_gui_list_add_item(lb, 10, "Red"), 0, "virt_base_add_red");
+    expect_int(dial_gui_list_add_item(lb, 20, "Green"), 0, "virt_base_add_green");
+    expect_int(dial_gui_list_add_item(lb, 30, "Blue"), 0, "virt_base_add_blue");
+    expect_int(dial_gui_widget_draw(root, p), 0, "virt_base_draw");
+    var crc_base: int = dial_gui_painter_crc32(p);
+    // on=0 的 set_virtual 不改 item_count，绘制必须逐像素等价旧路径
+    expect_int(dial_gui_widget_set_virtual(lb, 0, 1000000), 0, "virt_set_off_ok");
+    expect_int(dial_gui_widget_virtual_on(lb), 0, "virt_still_off");
+    expect_int(dial_gui_widget_virtual_total(lb), 1000000, "virt_off_total_1e6");
+    expect_int(dial_gui_widget_draw(root, p), 0, "virt_off_draw");
+    var crc_off: int = dial_gui_painter_crc32(p);
+    expect_int(crc_off, crc_base, "virt_off_equals_legacy_path");
+    // 未开虚拟化时 virtual_window 必须 Fail-Fast
+    expect_int(dial_gui_widget_virtual_window(lb, 0, 8), -1, "virt_window_when_off_rejected");
+    dial_gui_clear_error();
+
+    // ---- 2) Fail-Fast：total 越界 --------------------------------------
+    expect_int(dial_gui_widget_set_virtual(lb, 1, -1), -1, "virt_total_neg_rejected");
+    expect_int(dial_gui_widget_set_virtual(lb, 1, 1000001), -1, "virt_total_over_rejected");
+    dial_gui_clear_error();
+
+    // ---- 3) 开启虚拟化：100 万逻辑行，只持有可视窗口 -------------------
+    expect_int(dial_gui_list_clear(lb), 0, "virt_clear_before_on");
+    expect_int(dial_gui_widget_set_virtual(lb, 1, 1000000), 0, "virt_set_on_ok");
+    expect_int(dial_gui_widget_virtual_on(lb), 1, "virt_on_1");
+    expect_int(dial_gui_widget_virtual_total(lb), 1000000, "virt_total_1e6");
+    expect_int(dial_gui_widget_virtual_first(lb), 0, "virt_first_init_0");
+    expect_int(dial_gui_widget_virtual_count(lb), 0, "virt_count_init_0");
+    expect_int(dial_gui_list_count(lb), 0, "virt_item_count_zeroed");
+
+    // ---- 4) window 越界 Fail-Fast --------------------------------------
+    expect_int(dial_gui_widget_virtual_window(lb, -1, 4), -1, "virt_first_neg_rejected");
+    expect_int(dial_gui_widget_virtual_window(lb, 0, 65), -1, "virt_count_65_rejected");
+    expect_int(dial_gui_widget_virtual_window(lb, 999999, 8), -1, "virt_window_past_total_rejected");
+    dial_gui_clear_error();
+
+    // ---- 5) 滚到接近末尾：first=999992, count=8 ------------------------
+    expect_int(dial_gui_widget_virtual_window(lb, 999992, 8), 0, "virt_window_ok");
+    expect_int(dial_gui_widget_virtual_first(lb), 999992, "virt_first_999992");
+    expect_int(dial_gui_widget_virtual_count(lb), 8, "virt_count_8");
+
+    // ---- 6) slot 越界 Fail-Fast ----------------------------------------
+    expect_int(dial_gui_widget_virtual_slot(lb, -1, 1, "x"), -1, "virt_slot_neg_rejected");
+    expect_int(dial_gui_widget_virtual_slot(lb, 8, 1, "x"), -1, "virt_slot_eq_count_rejected");
+    expect_int(dial_gui_widget_virtual_slot(lb, 64, 1, "x"), -1, "virt_slot_64_rejected");
+    dial_gui_clear_error();
+
+    // ---- 7) 推进 8 个槽（Dial -> C 单向纯值，零反向回调）----------------
+    expect_int(dial_gui_widget_virtual_slot(lb, 0, 999992, "row999992"), 0, "virt_slot0");
+    expect_int(dial_gui_widget_virtual_slot(lb, 1, 999993, "row999993"), 0, "virt_slot1");
+    expect_int(dial_gui_widget_virtual_slot(lb, 2, 999994, "row999994"), 0, "virt_slot2");
+    expect_int(dial_gui_widget_virtual_slot(lb, 3, 999995, "row999995"), 0, "virt_slot3");
+    expect_int(dial_gui_widget_virtual_slot(lb, 4, 999996, "row999996"), 0, "virt_slot4");
+    expect_int(dial_gui_widget_virtual_slot(lb, 5, 999997, "row999997"), 0, "virt_slot5");
+    expect_int(dial_gui_widget_virtual_slot(lb, 6, 999998, "row999998"), 0, "virt_slot6");
+    expect_int(dial_gui_widget_virtual_slot(lb, 7, 999999, "row999999"), 0, "virt_slot7");
+
+    // ---- 8) 绘制只取可视窗口 8 行 + CRC 稳定 / 钉死 --------------------
+    expect_int(dial_gui_widget_draw(root, p), 0, "virt_draw");
+    var crc_virt: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_widget_draw(root, p), 0, "virt_draw2");
+    var crc_virt2: int = dial_gui_painter_crc32(p);
+    expect_int(crc_virt, crc_virt2, "virt_crc_stable");
+    expect(!(crc_virt == crc_base), "virt_crc_differs_from_legacy");
+    expect_str(str(crc_virt), "1677088382", "virt_crc_pinned");
+    print("virt_crc = " + str(crc_virt));
+
+    // ---- 9) 命中：点击第 0 行，SELECTED 信号 a = 虚拟槽 id -------------
+    dial_gui_widget_subscribe(lb, 64);
+    expect_int(dial_gui_widget_handle(root, 2, 10, 10, 1), 1, "virt_row0_click");  // RELEASE
+    expect_int(dial_gui_widget_signal_pending(lb), 1, "virt_signal_pending");
+    var sdp: rawptr<byte> = dial_gui_widget_signal_data(lb);
+    var sig: rawptr<GuiWidgetSignal> = ptr_cast<rawptr<GuiWidgetSignal>>(sdp);
+    expect_int(sig.a, 999992, "virt_signal_a_slot0_id");
+    expect_int(dial_gui_widget_signal_pop(lb), 1, "virt_signal_pop");
+    dial_gui_widget_unsubscribe(lb);
+
+    // ---- 10) 关闭虚拟化回到旧路径 --------------------------------------
+    expect_int(dial_gui_widget_set_virtual(lb, 0, 0), 0, "virt_set_off_final");
+    expect_int(dial_gui_widget_virtual_on(lb), 0, "virt_final_off");
+
+    // ---- 11) 不扩 GUI_SIG_* 位值体系：signal_count 仍为 7 --------------
+    expect_int(dial_gui_signal_count(), 7, "virt_signal_kind_count_7");
+
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("virt_done = true");
+    return 0;
+}

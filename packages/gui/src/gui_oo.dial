@@ -29,12 +29,14 @@
 //     也不重新声明 extern fn dial_gui_*（会与 .diali 契约撞名被 Fail-Fast 拒绝）。
 //   - LSP 当前不递归本地源码模块（v1.04 既有局限），CLI build/run/check/test 不受影响。
 //
-// 覆盖：318 个 extern fn -> 317 个方法 + 1 个入口 dial_gui_app_new。
+// 覆盖：344 个 extern fn -> 343 个方法 + 1 个入口 dial_gui_app_new。
 // （第 8 层 153 + 第 9 层 15 + 第 10 层 15 + 第 11 层 19 + 第 12 层 20 +
-//   第 13 层 23 + 第 14 层 15 + 第 15 层 18 + 第 16 层 23 + 第 17 层 16
-//   = 317 个方法；第 14 层方法挂在第二个 impl GuiWindow 块，第 15 层的
-//   hotkey_new 工厂挂 GuiApp、其余 17 个方法挂 impl GuiHotkey，第 16 / 17 层
-//   共 39 个方法挂在 impl GuiWidget。）
+//   第 13 层 23 + 第 14 层 15 + 第 15 层 18 + 第 16 层 23 + 第 17 层 16 +
+//   第 18 层 26 = 343 个方法；第 14 层方法挂在第二个 impl GuiWindow 块，
+//   第 15 层的 hotkey_new 工厂挂 GuiApp、其余 17 个方法挂 impl GuiHotkey，
+//   第 16 / 17 层共 39 个方法挂在 impl GuiWidget；第 18 层 4 个挂 impl
+//   GuiPainter、14 个挂 impl GuiWidget、8 个无 self 的进程级函数挂末尾的
+//   impl GuiApp 命名空间，见文件末尾三个新增 impl 块。）
 
 import "gui";
 
@@ -440,4 +442,49 @@ impl GuiHotkey {
     fn mods_at(self, idx: int): int { return dial_gui_hotkey_mods_at(self, idx); }
     fn cmd_at(self, idx: int): int { return dial_gui_hotkey_cmd_at(self, idx); }
     fn draw(self, p: GuiPainter, x: int, y: int): int { return dial_gui_hotkey_draw(p, self, x, y); }
+}
+
+// ===== GuiPainter —— 第 18 层：高 DPI 放大 + GPU 合成纯值契约（4 个方法）=====
+// set_scale/scale/scaled 是 1x framebuffer 的整数倍放大（默认 1 逐像素等价）；
+// gpu_try_composite 首参是 GuiPainter，故按映射规则挂此处，本轮恒返降级码 -2。
+impl GuiPainter {
+    fn set_scale(self, scale: int): int { return dial_gui_painter_set_scale(self, scale); }
+    fn scale(self): int { return dial_gui_painter_scale(self); }
+    fn scaled(self, factor: int): GuiPainter { return dial_gui_painter_scaled(self, factor); }
+    fn gpu_try_composite(self): int { return dial_gui_gpu_try_composite(self); }
+}
+
+// ===== GuiWidget —— 第 18 层：虚拟化 lazy load + IME 预编辑（14 个方法）=====
+// virtual_* 按需推进可视窗口槽（Dial -> C 单向，零反向回调）；ime_* 把一次
+// 预编辑写成一个纯值事件快照，preedit 返回借用串须 string_from_cstr 复制。
+impl GuiWidget {
+    fn set_virtual(self, on: int, total: int): int { return dial_gui_widget_set_virtual(self, on, total); }
+    fn virtual_window(self, first: int, count: int): int { return dial_gui_widget_virtual_window(self, first, count); }
+    fn virtual_slot(self, slot: int, id: int, text: string): int { return dial_gui_widget_virtual_slot(self, slot, id, text); }
+    fn virtual_first(self): int { return dial_gui_widget_virtual_first(self); }
+    fn virtual_count(self): int { return dial_gui_widget_virtual_count(self); }
+    fn virtual_total(self): int { return dial_gui_widget_virtual_total(self); }
+    fn virtual_on(self): int { return dial_gui_widget_virtual_on(self); }
+    fn ime_feed(self, preedit: string, caret: int, cx: int, cy: int, cw: int, ch: int, cand_count: int): int { return dial_gui_ime_feed(self, preedit, caret, cx, cy, cw, ch, cand_count); }
+    fn ime_preedit(self): rawptr<byte> { return dial_gui_ime_preedit(self); }
+    fn ime_caret(self): int { return dial_gui_ime_caret(self); }
+    fn ime_cand_count(self): int { return dial_gui_ime_cand_count(self); }
+    fn ime_rect(self, which: int): int { return dial_gui_ime_rect(self, which); }
+    fn ime_seq(self): int { return dial_gui_ime_seq(self); }
+    fn ime_clear(self): int { return dial_gui_ime_clear(self); }
+}
+
+// ===== GuiApp —— 第 18 层：GPU/原生平台纯值契约层（8 个无 self 命名空间方法）=
+// 首参不是句柄，按映射规则归到 GuiApp 作命名空间（self 被忽略）。headless 下
+// 能力探测恒「未装载」、动作恒返降级码 -2；gpu_backend / gpu_degrade_reason
+// 返回借用串须 string_from_cstr 复制。真实后端留下一批。
+impl GuiApp {
+    fn gpu_available(self): int { return dial_gui_gpu_available(); }
+    fn gpu_backend(self): rawptr<byte> { return dial_gui_gpu_backend(); }
+    fn gpu_caps(self): int { return dial_gui_gpu_caps(); }
+    fn gpu_degrade_reason(self): rawptr<byte> { return dial_gui_gpu_degrade_reason(); }
+    fn tray_set(self, slot: int, flags: int): int { return dial_gui_tray_set(slot, flags); }
+    fn native_file_dialog(self, mode: int): int { return dial_gui_native_file_dialog(mode); }
+    fn global_hotkey_register(self, id: int, mods: int, key: int): int { return dial_gui_global_hotkey_register(id, mods, key); }
+    fn platform_degrade_code(self): int { return dial_gui_platform_degrade_code(); }
 }

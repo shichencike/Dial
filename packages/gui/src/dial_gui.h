@@ -202,6 +202,9 @@ struct GuiPainterImpl {
     int       ext_pixels;  /* 1 = pixels 指向后端外部缓冲（XShm 共享内存 / DIBSection），
                             *     dispose 不 free，由窗口后端释放 */
     GuiWindowImpl *window; /* 绑定的窗口（可空） */
+    /* 第 18 层：高 DPI 整数放大因子（默认 1 = 逐像素等价旧路径）。
+     * 注意 calloc 归零 ≠ 1，必须在 gui_painter_new 里显式置 1。*/
+    int       scale;
 };
 
 struct GuiWindowImpl {
@@ -290,6 +293,18 @@ struct GuiFontImpl {
 /* 第 17 层：TextBox 撤销 / 重做快照栈容量（固定，无动态扩容）。
  * 栈满时丢最老的一条（线性前移），绝不静默截断成「不可撤销」的黑洞。 */
 #define GUI_UNDO_CAP         32
+
+/* ---- 第 18 层常量 ------------------------------------------------------ *
+ * 全部是纯值 / 固定容量，headless 零 DISPLAY 可测，绝不引入平台符号。 */
+/* 高 DPI：整数放大因子合法范围 [1,4]（1 = 逐像素等价旧路径）。*/
+#define GUI_SCALE_MIN        1
+#define GUI_SCALE_MAX        4
+/* 虚拟化：逻辑总行数上界（纯值，不代表内存——可视窗口槽固定 <= 64）。*/
+#define GUI_VIRTUAL_MAX_TOTAL   (1000000)
+/* IME 预编辑串借用缓冲容量（字节，含结尾 '\0'）。*/
+#define GUI_IME_PREEDIT_CAP  256
+/* 平台纯值契约层：确定性降级返回码（区别于参数错误 -1）。*/
+#define GUI_PLATFORM_DEGRADE (-2)
 
 /* ---- 对话框按钮位（dial_gui_dialog_set_buttons 的 mask）--------------- *
  * 单个对话框可同时挂多个按钮（按位或）；点击后 dial_gui_dialog_result 返回
@@ -431,6 +446,26 @@ struct GuiWidgetImpl {
      * grid_autoflow：容器级开关，子节点按加入顺序自动依次占格。 */
     int  drag_active;
     int  grid_autoflow;
+    /* ---- 第 18 层：ListBox/Grid 虚拟化 lazy load（纯值数据槽，零反向回调）*
+     * 逻辑上可有 virtual_total 行（如 100 万），但 C 侧只持有当前可视窗口
+     * [virtual_first, +virtual_count) 的 <= 64 个槽，复用 items[] 存文本。
+     * Dial 侧在滚动时把可视区数据「推进」这些槽（纯值，Dial -> C 单向），
+     * 绘制/命中按 first 偏移换算，绝不 C -> Dial 反向回调索要数据。
+     * virtual_on == 0 时绘制/命中走旧 item_count 路径，逐像素等价。 */
+    int  virtual_on;
+    int  virtual_total;
+    int  virtual_first;
+    int  virtual_count;
+    /* ---- 第 18 层：IME 预编辑纯值事件块（挂在 widget 树根，非每控件订阅）*
+     * 一次 ime_feed 写成一个自洽纯值快照：预编辑串（固定缓冲，借给 Dial
+     * string_from_cstr 复制）+ 光标 + 候选框矩形 + 候选数 + 单调 seq。
+     * 不进 GUI_SIG_* 位值体系、不扩 GuiWidgetSignal、不改 signal_count()。*/
+    char ime_preedit[GUI_IME_PREEDIT_CAP];
+    int  ime_caret;
+    int  ime_cx, ime_cy, ime_cw, ime_ch;
+    int  ime_cand_count;
+    int  ime_active;
+    int64_t ime_seq;
 };
 
 /*
@@ -566,6 +601,47 @@ int64_t        dial_gui_widget_clear_colors(GuiWidgetImpl *w);
 /* Grid 自动换行：容器级开关，子节点按加入顺序自动依次占格。 */
 int64_t        dial_gui_widget_set_grid_autoflow(GuiWidgetImpl *w, int64_t on);
 int64_t        dial_gui_widget_grid_autoflow(GuiWidgetImpl *w);
+
+/* ---- 第 18 层：高 DPI / 虚拟化 / IME / GPU·原生平台纯值契约 ------------ *
+ * 全部 : int 一律 int64_t；string 形参 -> DialString；返回借用 C 串用
+ * rawptr<byte>（Dial 侧 string_from_cstr 复制）。四组能力未启用时逐像素
+ * 等价于旧路径，故第 1~17 层全部既有 CRC 钉值一字不动。 */
+/* 高 DPI（挂 GuiPainter）：scale 默认 1，set 越界 [1,4] 明确拒绝。
+ * painter_scaled 用最近邻把画布放大 factor 倍，返回一个新的独立离屏画布
+ * （factor==1 时逐字节拷贝，等价旧画布），供离屏 CRC 断言。 */
+int64_t        dial_gui_painter_set_scale(GuiPainterImpl *p, int64_t scale);
+int64_t        dial_gui_painter_scale(GuiPainterImpl *p);
+GuiPainterImpl *dial_gui_painter_scaled(GuiPainterImpl *src, int64_t factor);
+/* 虚拟化 lazy load（挂 GuiWidget）：逻辑总行数可极大，C 侧只持有可视窗口槽。 */
+int64_t        dial_gui_widget_set_virtual(GuiWidgetImpl *w, int64_t on, int64_t total);
+int64_t        dial_gui_widget_virtual_window(GuiWidgetImpl *w, int64_t first, int64_t count);
+int64_t        dial_gui_widget_virtual_slot(GuiWidgetImpl *w, int64_t slot,
+                                            int64_t id, DialString text);
+int64_t        dial_gui_widget_virtual_first(GuiWidgetImpl *w);
+int64_t        dial_gui_widget_virtual_count(GuiWidgetImpl *w);
+int64_t        dial_gui_widget_virtual_total(GuiWidgetImpl *w);
+int64_t        dial_gui_widget_virtual_on(GuiWidgetImpl *w);
+/* IME 预编辑纯值事件块（挂 widget 树根；不进 GUI_SIG_* 位值体系）。 */
+int64_t        dial_gui_ime_feed(GuiWidgetImpl *w, DialString preedit, int64_t caret,
+                                 int64_t cx, int64_t cy, int64_t cw, int64_t ch,
+                                 int64_t cand_count);
+const char    *dial_gui_ime_preedit(GuiWidgetImpl *w);   /* 借用指针 */
+int64_t        dial_gui_ime_caret(GuiWidgetImpl *w);
+int64_t        dial_gui_ime_cand_count(GuiWidgetImpl *w);
+int64_t        dial_gui_ime_rect(GuiWidgetImpl *w, int64_t which); /* 0..3 = cx/cy/cw/ch */
+int64_t        dial_gui_ime_seq(GuiWidgetImpl *w);
+int64_t        dial_gui_ime_clear(GuiWidgetImpl *w);
+/* GPU 合成 + 原生平台集成「纯值契约层」（dial_gui_platform.c，无句柄、无平台符号）。
+ * 本轮只做参数校验 + 能力探测 + 确定性降级码；真实后端留下一批。 */
+int64_t        dial_gui_gpu_available(void);
+const char    *dial_gui_gpu_backend(void);               /* 借用指针 */
+int64_t        dial_gui_gpu_caps(void);
+int64_t        dial_gui_gpu_try_composite(GuiPainterImpl *p);
+const char    *dial_gui_gpu_degrade_reason(void);        /* 借用指针 */
+int64_t        dial_gui_tray_set(int64_t slot, int64_t flags);
+int64_t        dial_gui_native_file_dialog(int64_t mode);
+int64_t        dial_gui_global_hotkey_register(int64_t id, int64_t mods, int64_t key);
+int64_t        dial_gui_platform_degrade_code(void);
 /* 后加子优先、取最深可见节点；命中时把绝对坐标写回 hit->abs_* 并输出。 */
 GuiWidgetImpl *gui_widget_hit(GuiWidgetImpl *root, int x, int y,
                               int *out_abs_x, int *out_abs_y);

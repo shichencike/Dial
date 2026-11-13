@@ -1593,3 +1593,196 @@ int64_t dial_gui_widget_grid_autoflow(GuiWidgetImpl *w) {
     gui_core_ok();
     return w->grid_autoflow ? 1 : 0;
 }
+
+/* ===================================================================== *
+ * 第 18 层：高 DPI 放大 / 虚拟化 lazy load / IME 预编辑纯值事件
+ *
+ * 与前面各层同一条硬边界：只读写 GuiWidgetImpl / GuiPainterImpl 上的 C 侧
+ * 纯值，绝不碰平台 API、绝不 C -> Dial 反向回调。四组能力默认（scale=1、
+ * virtual_on=0、IME 未 feed）时逐像素等价于旧路径，第 1~17 层 CRC 不漂移。
+ * ===================================================================== */
+
+/* ---- 高 DPI（挂 GuiPainter）------------------------------------------- *
+ * scale 是画布的「逻辑放大因子」元数据；真正的高 DPI 渲染由 painter_scaled
+ * 用最近邻把 1x framebuffer 放大成 factor x（纯 C、确定性、可 CRC 钉死）。
+ * factor==1 时 painter_scaled 逐字节拷贝，与源画布 CRC 完全相同。 */
+int64_t dial_gui_painter_set_scale(GuiPainterImpl *p, int64_t scale) {
+    if (!painter_ok(p)) return -1;
+    if (scale < GUI_SCALE_MIN || scale > GUI_SCALE_MAX) {
+        gui_core_set_err(GUI_ERR_ARG, "高 DPI 放大因子非法（只接受 1..4）");
+        return -1;
+    }
+    p->scale = (int)scale;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_painter_scale(GuiPainterImpl *p) {
+    if (!painter_ok(p)) return -1;
+    gui_core_ok();
+    return (int64_t)p->scale;
+}
+GuiPainterImpl *dial_gui_painter_scaled(GuiPainterImpl *src, int64_t factor) {
+    gui_core_ok();
+    if (!painter_ok(src)) return NULL;
+    if (factor < GUI_SCALE_MIN || factor > GUI_SCALE_MAX) {
+        gui_core_set_err(GUI_ERR_ARG, "高 DPI 放大因子非法（只接受 1..4）");
+        return NULL;
+    }
+    int f = (int)factor;
+    if ((int64_t)src->w * f > 16384 || (int64_t)src->h * f > 16384) {
+        gui_core_set_err(GUI_ERR_ARG, "放大后画布尺寸超过 16384 上界");
+        return NULL;
+    }
+    GuiPainterImpl *d = gui_painter_new(src->w * f, src->h * f, 1);
+    if (!d) { gui_core_set_err(GUI_ERR_ALLOC, "高 DPI 放大画布内存分配失败"); return NULL; }
+    for (int y = 0; y < src->h; ++y) {
+        for (int x = 0; x < src->w; ++x) {
+            uint32_t px = src->pixels[(size_t)y * src->w + x];
+            for (int dy = 0; dy < f; ++dy)
+                for (int dx = 0; dx < f; ++dx)
+                    d->pixels[(size_t)(y * f + dy) * d->w + (x * f + dx)] = px;
+        }
+    }
+    return d;   /* d->scale 由 gui_painter_new 置 1（输出画布本身不再缩放）*/
+}
+
+/* ---- 虚拟化 lazy load（挂 GuiWidget）---------------------------------- *
+ * 逻辑总行数 virtual_total 可极大（上界 GUI_VIRTUAL_MAX_TOTAL），但 C 侧只
+ * 持有可视窗口 [first, +count) 的 <= 64 个槽，复用 items[] 存文本 / id。
+ * Dial 侧滚动时把可视区数据「推进」槽（Dial -> C 单向纯值），绘制/命中按
+ * first 偏移换算（见 look.c），绝不 C -> Dial 反向回调索要数据。 */
+int64_t dial_gui_widget_set_virtual(GuiWidgetImpl *w, int64_t on, int64_t total) {
+    if (!widget_ok(w)) return -1;
+    if (total < 0 || total > GUI_VIRTUAL_MAX_TOTAL) {
+        gui_core_set_err(GUI_ERR_ARG, "虚拟化逻辑总行数越界（0..1000000）");
+        return -1;
+    }
+    w->virtual_on = on ? 1 : 0;
+    w->virtual_total = (int)total;
+    /* 打开时把 item_count 归零，避免 combo/list_clear 误 free 虚拟槽指针；
+     * 已有 items[] 标签副本仍由 dispose_subtree 全量遍历兜底释放，不泄漏。*/
+    if (w->virtual_on) { w->item_count = 0; w->virtual_first = 0; w->virtual_count = 0; }
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_virtual_window(GuiWidgetImpl *w, int64_t first, int64_t count) {
+    if (!widget_ok(w)) return -1;
+    if (!w->virtual_on) {
+        gui_core_set_err(GUI_ERR_ARG, "虚拟化未开启（先 set_virtual(on=1, total)）");
+        return -1;
+    }
+    if (first < 0 || count < 0 || count > GUI_COMBO_CAP ||
+        first + count > (int64_t)w->virtual_total) {
+        gui_core_set_err(GUI_ERR_ARG, "可视窗口越界（first>=0、count 0..64、first+count<=total）");
+        return -1;
+    }
+    w->virtual_first = (int)first;
+    w->virtual_count = (int)count;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_virtual_slot(GuiWidgetImpl *w, int64_t slot,
+                                     int64_t id, DialString text) {
+    if (!widget_ok(w)) return -1;
+    if (!w->virtual_on || slot < 0 || slot >= w->virtual_count) {
+        gui_core_set_err(GUI_ERR_ARG, "虚拟槽索引越界（须 0..virtual_count-1 且已开虚拟化）");
+        return -1;
+    }
+    int64_t n = text ? dial_string_length(text) : 0;
+    const char *s = text ? dial_string_cstr(text) : "";
+    char *dup = (char *)malloc((size_t)n + 1);
+    if (!dup) { gui_core_set_err(GUI_ERR_ALLOC, "虚拟槽文本内存分配失败"); return -1; }
+    memcpy(dup, s, (size_t)n); dup[n] = '\0';
+    free(w->items[(int)slot].label);       /* 覆盖旧槽先释放（NULL 安全）*/
+    w->items[(int)slot].label = dup;
+    w->items[(int)slot].id = id;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_virtual_first(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok(); return (int64_t)w->virtual_first;
+}
+int64_t dial_gui_widget_virtual_count(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok(); return (int64_t)w->virtual_count;
+}
+int64_t dial_gui_widget_virtual_total(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok(); return (int64_t)w->virtual_total;
+}
+int64_t dial_gui_widget_virtual_on(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok(); return w->virtual_on ? 1 : 0;
+}
+
+/* ---- IME 预编辑纯值事件块（挂 widget 树根）---------------------------- *
+ * 一次 ime_feed 写成一个自洽纯值快照：预编辑串（固定缓冲，借给 Dial 用
+ * string_from_cstr 复制）+ 光标 + 候选框矩形 + 候选数 + 单调 seq。
+ * 不进 GUI_SIG_* 位值体系、不扩 GuiWidgetSignal、不改 signal_count()==7，
+ * 故第 6 层信号订阅相关既有断言一字不动。不含 IMM32/IBus/Fcitx 采集。 */
+int64_t dial_gui_ime_feed(GuiWidgetImpl *w, DialString preedit, int64_t caret,
+                           int64_t cx, int64_t cy, int64_t cw, int64_t ch,
+                           int64_t cand_count) {
+    if (!widget_ok(w)) return -1;
+    int64_t n = preedit ? dial_string_length(preedit) : 0;
+    const char *s = preedit ? dial_string_cstr(preedit) : "";
+    if (n >= GUI_IME_PREEDIT_CAP) {
+        gui_core_set_err(GUI_ERR_ARG, "IME 预编辑串超长（上限 255 字节）");
+        return -1;
+    }
+    if (caret < 0 || caret > n || cx < 0 || cy < 0 || cw < 0 || ch < 0 || cand_count < 0) {
+        gui_core_set_err(GUI_ERR_ARG, "IME 参数越界（caret 0..len、矩形/候选数 >=0）");
+        return -1;
+    }
+    memcpy(w->ime_preedit, s, (size_t)n);
+    w->ime_preedit[n] = '\0';
+    w->ime_caret = (int)caret;
+    w->ime_cx = (int)cx; w->ime_cy = (int)cy;
+    w->ime_cw = (int)cw; w->ime_ch = (int)ch;
+    w->ime_cand_count = (int)cand_count;
+    w->ime_active = 1;
+    w->ime_seq++;
+    gui_core_ok();
+    return 0;
+}
+const char *dial_gui_ime_preedit(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return "";
+    return w->ime_preedit;
+}
+int64_t dial_gui_ime_caret(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok(); return (int64_t)w->ime_caret;
+}
+int64_t dial_gui_ime_cand_count(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok(); return (int64_t)w->ime_cand_count;
+}
+int64_t dial_gui_ime_rect(GuiWidgetImpl *w, int64_t which) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok();
+    switch (which) {
+        case 0: return w->ime_cx;
+        case 1: return w->ime_cy;
+        case 2: return w->ime_cw;
+        case 3: return w->ime_ch;
+        default:
+            gui_core_set_err(GUI_ERR_ARG, "IME 矩形字段须 0..3（cx/cy/cw/ch）");
+            return -1;
+    }
+}
+int64_t dial_gui_ime_seq(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok(); return w->ime_seq;
+}
+int64_t dial_gui_ime_clear(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    w->ime_preedit[0] = '\0';
+    w->ime_caret = 0;
+    w->ime_cx = w->ime_cy = w->ime_cw = w->ime_ch = 0;
+    w->ime_cand_count = 0;
+    w->ime_active = 0;
+    /* seq 保持单调，clear 不重置（可观测「一共 feed 过多少次」）。*/
+    gui_core_ok();
+    return 0;
+}

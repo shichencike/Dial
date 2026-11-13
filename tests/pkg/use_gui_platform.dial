@@ -1,0 +1,79 @@
+// gui.dialpkg 第 18 层：GPU 合成 + 原生平台集成「纯值契约层」（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：headless 能力探测恒未装载（gpu_available=0 /
+// gpu_backend="none" / gpu_caps=0）、降级码 -2 常量可读、try_composite /
+// tray_set / native_file_dialog / global_hotkey_register 参数 Fail-Fast +
+// 合法参数确定性降级 -2、gpu_degrade_reason 借用串非空、try_composite 不碰
+// framebuffer（CRC 前后相同）、能力位不因调用漂移、离屏 CRC 稳定。
+//
+// 本轮只做纯值契约层，真实 GPU / 原生弹窗 / 托盘 / 快捷键实机留下一批
+// （未实机验证）。输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    // ---- 0) 能力探测：headless 恒未装载 --------------------------------
+    expect_int(dial_gui_platform_degrade_code(), -2, "plat_degrade_code_is_minus2");
+    expect_int(dial_gui_gpu_available(), 0, "plat_gpu_available_0");
+    expect_int(dial_gui_gpu_caps(), 0, "plat_gpu_caps_0");
+    expect_str(string_from_cstr(dial_gui_gpu_backend()), "none", "plat_gpu_backend_none");
+    expect(!(string_from_cstr(dial_gui_gpu_degrade_reason()) == ""), "plat_degrade_reason_nonempty");
+
+    // ---- 1) tray_set Fail-Fast + 确定性降级 ----------------------------
+    expect_int(dial_gui_tray_set(0, 0), -2, "plat_tray_ok_degraded");
+    expect_int(dial_gui_tray_set(15, 255), -2, "plat_tray_max_degraded");
+    expect_int(dial_gui_tray_set(-1, 0), -1, "plat_tray_slot_neg_rejected");
+    expect_int(dial_gui_tray_set(16, 0), -1, "plat_tray_slot_16_rejected");
+    expect_int(dial_gui_tray_set(0, -1), -1, "plat_tray_flags_neg_rejected");
+    expect_int(dial_gui_tray_set(0, 256), -1, "plat_tray_flags_256_rejected");
+    dial_gui_clear_error();
+
+    // ---- 2) native_file_dialog Fail-Fast + 降级 ------------------------
+    expect_int(dial_gui_native_file_dialog(0), -2, "plat_dialog_open_degraded");
+    expect_int(dial_gui_native_file_dialog(1), -2, "plat_dialog_save_degraded");
+    expect_int(dial_gui_native_file_dialog(2), -2, "plat_dialog_dir_degraded");
+    expect_int(dial_gui_native_file_dialog(-1), -1, "plat_dialog_neg_rejected");
+    expect_int(dial_gui_native_file_dialog(3), -1, "plat_dialog_3_rejected");
+    dial_gui_clear_error();
+
+    // ---- 3) global_hotkey_register Fail-Fast + 降级 --------------------
+    expect_int(dial_gui_global_hotkey_register(0, 0, 65), -2, "plat_hotkey_ok_degraded");
+    expect_int(dial_gui_global_hotkey_register(1023, 255, 1114111), -2, "plat_hotkey_max_degraded");
+    expect_int(dial_gui_global_hotkey_register(-1, 0, 65), -1, "plat_hotkey_id_neg_rejected");
+    expect_int(dial_gui_global_hotkey_register(1024, 0, 65), -1, "plat_hotkey_id_1024_rejected");
+    expect_int(dial_gui_global_hotkey_register(0, 256, 65), -1, "plat_hotkey_mods_256_rejected");
+    expect_int(dial_gui_global_hotkey_register(0, 0, 1114112), -1, "plat_hotkey_key_over_rejected");
+    dial_gui_clear_error();
+
+    // ---- 4) gpu_try_composite：合法画布返降级码，不碰 framebuffer ------
+    var p: GuiPainter = dial_gui_painter_offscreen(64, 48);
+    expect(!is_null(p), "plat_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "plat_aa_off");
+    expect_int(dial_gui_set_pixel(p, 1, 1, 4294967295), 0, "plat_px");
+    var crc_before: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_gpu_try_composite(p), -2, "plat_try_composite_degraded");
+    var crc_after: int = dial_gui_painter_crc32(p);
+    expect_int(crc_before, crc_after, "plat_framebuffer_untouched");
+    expect_str(str(crc_before), "2482968047", "plat_crc_pinned");
+    print("plat_crc = " + str(crc_before));
+    dial_gui_painter_free(p);
+
+    // ---- 5) 能力位不因调用漂移（进程级纯值）---------------------------
+    expect_int(dial_gui_gpu_available(), 0, "plat_gpu_available_still_0");
+    expect_int(dial_gui_platform_degrade_code(), -2, "plat_degrade_code_still_minus2");
+
+    print("plat_done = true");
+    return 0;
+}

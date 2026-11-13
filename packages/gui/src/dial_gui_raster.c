@@ -37,6 +37,9 @@ GuiPainterImpl *gui_painter_new(int w, int h, int owned) {
     p->aa = 4;
     p->color = gui_rgba(255, 255, 255, 255);
     p->owned = owned;
+    /* 第 18 层：高 DPI 放大因子默认 1 = 逐像素等价旧路径。calloc 归零是 0，
+     * 必须显式置 1，否则 scale 语义会被静默破坏（参考第 16 层 set_kind 教训）。*/
+    p->scale = 1;
     return p;
 }
 

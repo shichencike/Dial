@@ -1,0 +1,95 @@
+// gui.dialpkg 第 18 层：高 DPI 整数放大 + 默认态逐像素等价（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。验证：scale 默认 1、越界 [1,4] Fail-Fast、
+// painter_scaled factor=1 逐字节拷贝（CRC 与源相同）、2x/3x 最近邻放大尺寸与
+// 像素正确（每个源像素重复 factor×factor）、放大画布 CRC 稳定、离屏 CRC 钉死。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    // ---- 0) 造一块有确定性图案的 4×4 源画布 -----------------------------
+    var p: GuiPainter = dial_gui_painter_offscreen(4, 4);
+    expect(!is_null(p), "scale_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "scale_set_aa_off");
+    // 4×4 里写 4 个不同颜色，放大后可逐块校验最近邻复制
+    expect_int(dial_gui_set_pixel(p, 0, 0, 4278190080), 0, "scale_px00"); // 0xFFFF0000
+    expect_int(dial_gui_set_pixel(p, 1, 0, 4278255360), 0, "scale_px10"); // 0xFF00FF00
+    expect_int(dial_gui_set_pixel(p, 0, 1, 4294901760), 0, "scale_px01"); // 其实顺序无所谓
+    expect_int(dial_gui_set_pixel(p, 3, 3, 4294967295), 0, "scale_px33"); // 0xFFFFFFFF
+    var crc_src: int = dial_gui_painter_crc32(p);
+
+    // ---- 1) scale 元数据默认 1 ------------------------------------------
+    expect_int(dial_gui_painter_scale(p), 1, "scale_default_1");
+    expect_int(dial_gui_painter_set_scale(p, 2), 0, "scale_set_2_ok");
+    expect_int(dial_gui_painter_scale(p), 2, "scale_get_2");
+    expect_int(dial_gui_painter_set_scale(p, 1), 0, "scale_back_1");
+    // 设 scale 不改动一个像素（元数据纯值，CRC 不漂移）
+    expect_int(dial_gui_painter_crc32(p), crc_src, "scale_meta_no_pixel_change");
+
+    // ---- 2) Fail-Fast：放大因子越界 ------------------------------------
+    expect_int(dial_gui_painter_set_scale(p, 0), -1, "scale_bad_0_rejected");
+    expect_int(dial_gui_painter_set_scale(p, 5), -1, "scale_bad_5_rejected");
+    expect_int(dial_gui_painter_set_scale(p, -1), -1, "scale_bad_neg_rejected");
+    expect(is_null(dial_gui_painter_scaled(p, 0)), "scale_up_0_null"); // 越界返回空句柄
+    expect(is_null(dial_gui_painter_scaled(p, 5)), "scale_up_5_null");
+    dial_gui_clear_error();
+
+    // ---- 3) factor=1 逐字节等价（CRC 与源完全相同）----------------------
+    var p1: GuiPainter = dial_gui_painter_scaled(p, 1);
+    expect(!is_null(p1), "scale_up1_not_null");
+    expect_int(dial_gui_painter_width(p1), 4, "scale_up1_w");
+    expect_int(dial_gui_painter_height(p1), 4, "scale_up1_h");
+    expect_int(dial_gui_painter_crc32(p1), crc_src, "scale_up1_crc_equals_src");
+    dial_gui_painter_free(p1);
+
+    // ---- 4) factor=2 最近邻放大：8×8，每个源像素变成 2×2 块 -------------
+    var p2: GuiPainter = dial_gui_painter_scaled(p, 2);
+    expect(!is_null(p2), "scale_up2_not_null");
+    expect_int(dial_gui_painter_width(p2), 8, "scale_up2_w");
+    expect_int(dial_gui_painter_height(p2), 8, "scale_up2_h");
+    expect_int(dial_gui_get_pixel(p2, 0, 0), dial_gui_get_pixel(p, 0, 0), "scale_up2_block00");
+    expect_int(dial_gui_get_pixel(p2, 1, 1), dial_gui_get_pixel(p, 0, 0), "scale_up2_block00_dup");
+    expect_int(dial_gui_get_pixel(p2, 2, 0), dial_gui_get_pixel(p, 1, 0), "scale_up2_block10");
+    expect_int(dial_gui_get_pixel(p2, 3, 1), dial_gui_get_pixel(p, 1, 0), "scale_up2_block10_dup");
+    expect_int(dial_gui_get_pixel(p2, 6, 6), dial_gui_get_pixel(p, 3, 3), "scale_up2_block33");
+    var crc2: int = dial_gui_painter_crc32(p2);
+    var p2b: GuiPainter = dial_gui_painter_scaled(p, 2);
+    expect(!is_null(p2b), "scale_up2b_not_null");
+    var crc2b: int = dial_gui_painter_crc32(p2b);
+    dial_gui_painter_free(p2b);
+    expect_int(crc2, crc2b, "scale_up2_crc_stable");
+    expect(!(crc2 == crc_src), "scale_up2_crc_differs_from_src");
+    // factor=1 与 factor=2 的放大结果不同（放大语义真实生效）
+    expect_str(str(crc2), "2473558418", "scale_crc_pinned");
+    print("scale_crc = " + str(crc2));
+    dial_gui_painter_free(p2);
+
+    // ---- 5) factor=3 尺寸 12×12 ---------------------------------------
+    var p3: GuiPainter = dial_gui_painter_scaled(p, 3);
+    expect(!is_null(p3), "scale_up3_not_null");
+    expect_int(dial_gui_painter_width(p3), 12, "scale_up3_w");
+    expect_int(dial_gui_painter_height(p3), 12, "scale_up3_h");
+    expect_int(dial_gui_get_pixel(p3, 0, 0), dial_gui_get_pixel(p, 0, 0), "scale_up3_block00");
+    expect_int(dial_gui_get_pixel(p3, 2, 2), dial_gui_get_pixel(p, 0, 0), "scale_up3_block00_dup");
+    dial_gui_painter_free(p3);
+
+    // ---- 6) 源画布 CRC 全程未被 scaled 改动 ----------------------------
+    expect_int(dial_gui_painter_crc32(p), crc_src, "scale_src_untouched");
+
+    dial_gui_painter_free(p);
+    print("scale_done = true");
+    return 0;
+}

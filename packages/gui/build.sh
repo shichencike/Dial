@@ -17,8 +17,16 @@
 #   - dial_gui_statusbar.o 第 12 层：状态栏 StatusBar（左右文本 + 进度条槽位，纯 C，三平台共用）
 #   - dial_gui_toast.o     第 13 层：通知气泡 Toast（FIFO 队列覆盖层，纯 C，三平台共用）
 #   - dial_gui_hotkey.o    第 15 层：快捷键 / 命令系统（纯内存 KeyMap + 命令启用态，纯 C，三平台共用）
+#   - dial_gui_platform.o 第 18 层：GPU 合成 + 原生平台集成「纯值契约层」（纯 C，三平台共用）
 #   - dial_gui_x11.o     Linux / Termux 后端：X11 + XShm + XRender（仅 POSIX 目标）
 #   - dial_gui_win32.o   Windows 后端：GDI DIBSection + 消息循环（仅 windows 目标）
+#
+# 【经授权放宽（第 18 层）】17 层以来宪法一直是「不新增 .c 文件、SRCS 不变」。
+# 第 18 层为把 GPU 合成后端 / 原生平台集成的纯值契约独立成层，经用户授权
+# **仅放宽这一条**：新增 1 个 dial_gui_platform.c 并在下方 SRCS 同步 1 行。
+# 该文件纯 C、不 dlopen 任何平台库、不 include GL/X11/windows.h，故「三平台
+# .a 零链接期 GUI 平台符号」等其余宪法一字不动。真实后端（挂 window_flush
+# 只上传 framebuffer）与原生弹窗/托盘/快捷键实机留到下一批，未实机验证。
 #
 # 平台库一律**运行时动态装载**（POSIX dlopen / Win32 LoadLibraryA）：
 #   - .a 自包含，Dial 侧不需要写 link，链接期也不需要 -lX11 / -lgdi32；
@@ -75,7 +83,8 @@ for entry in "${TARGETS[@]}"; do
           "$PKG/src/dial_gui_tooltip.c" \
           "$PKG/src/dial_gui_statusbar.c" \
           "$PKG/src/dial_gui_toast.c" \
-          "$PKG/src/dial_gui_hotkey.c")
+          "$PKG/src/dial_gui_hotkey.c" \
+          "$PKG/src/dial_gui_platform.c")
     if [ "$family" = "win32" ]; then
         SRCS+=("$PKG/src/dial_gui_win32.c")
     else
