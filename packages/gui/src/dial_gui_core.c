@@ -824,6 +824,9 @@ int64_t dial_gui_widget_set_text(GuiWidgetImpl *w, DialString text) {
     w->text = p;
     /* 显式换文本后旧光标 / 选区一律归零，绝不越界（键盘输入另走 input.c）。*/
     w->cursor = 0; w->sel_anchor = 0;
+    /* 第 17 层：显式 set_text 是程序化赋值，建立新基线并清 undo/redo 两栈，
+     * 绝不把程序化赋值记成一次用户编辑（快照只在键盘编辑时入栈）。*/
+    gui_widget_undo_clear(w);
     /* 第 6 层：文本真变化才发一次 TEXT_CHANGED（未订阅=零开销）。*/
     if (changed)
         gui_signal_emit(w, GUI_SIG_TEXT_CHANGED, (int)strlen(p), old_len, 0, 0);
@@ -1449,4 +1452,144 @@ int64_t dial_gui_window_handle(GuiWindowImpl *win, int64_t kind, int64_t x,
     }
     gui_core_ok();
     return (int64_t)r;   /* 3 = 本次菜单/对话框激活 / 1 = 控件激活 / 0 = 无 */
+}
+
+/* ====================================================================== *
+ * 第 17 层（16 个追加 extern fn）：TextBox 撤销 / 重做 + Slider 拖动 +
+ * 每控件主题覆写 + Grid 自动换行。
+ *
+ * 与前十六层同一条硬边界：只做「句柄校验 → 读写 GuiWidgetImpl 上的 C 侧
+ * 纯值」，绝不碰平台 API、绝不 C → Dial 反向回调、旧 302 个签名一字不动。
+ * 全部 : int 一律 int64_t（Dial int 是 64 位，返回 -1 不能被零扩展）。
+ * ====================================================================== */
+
+/* ---- TextBox 撤销 / 重做 ---------------------------------------------- *
+ * 快照只在键盘编辑（input.c replace_range）成功改文本时入栈；显式
+ * set_text 建立新基线并清两栈。栈空返回 0（不是错误，绝不写错误槽）。*/
+int64_t dial_gui_widget_undo(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    int r = gui_widget_undo(w);
+    gui_core_ok();
+    return (int64_t)r;                       /* 1 撤销成功 / 0 栈空 */
+}
+int64_t dial_gui_widget_redo(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    int r = gui_widget_redo(w);
+    gui_core_ok();
+    return (int64_t)r;                       /* 1 重做成功 / 0 栈空 */
+}
+int64_t dial_gui_widget_can_undo(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok();
+    return w->undo_len > 0 ? 1 : 0;
+}
+int64_t dial_gui_widget_can_redo(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok();
+    return w->redo_len > 0 ? 1 : 0;
+}
+int64_t dial_gui_widget_undo_depth(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok();
+    return (int64_t)w->undo_len;
+}
+int64_t dial_gui_widget_redo_depth(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok();
+    return (int64_t)w->redo_len;
+}
+int64_t dial_gui_widget_undo_clear(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_widget_undo_clear(w);
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_undo_capacity(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok();
+    return (int64_t)GUI_UNDO_CAP;
+}
+
+/* ---- Slider 拖动（widget_handle 推进的纯值）---------------------------- */
+int64_t dial_gui_widget_dragging(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok();
+    return w->drag_active ? 1 : 0;
+}
+
+/* ---- 每控件主题覆写 --------------------------------------------------- *
+ * ov_mask 的 bit r 标记角色 r 被覆写，未覆写角色回落进程级全局表；
+ * 因此 color=0x00000000 也是合法覆写值，不与「未覆写」哨兵混淆。
+ * role 越界 / color 高 32 位非 0 一律 Fail-Fast 返回 -1 并写错误槽。 */
+static int widget_role_ok(int64_t role) {
+    return role >= 0 && role < GUI_THEME_ROLE_COUNT;
+}
+int64_t dial_gui_widget_set_color(GuiWidgetImpl *w, int64_t role, int64_t color) {
+    if (!widget_ok(w)) return -1;
+    if (!widget_role_ok(role)) {
+        gui_core_set_err(GUI_ERR_ARG, "每控件主题角色越界（合法范围 0..13）");
+        return -1;
+    }
+    if (color < 0 || color > 0xFFFFFFFFLL) {
+        gui_core_set_err(GUI_ERR_ARG,
+                         "每控件主题颜色须为 0..0xFFFFFFFF 的 0xAARRGGBB（高 32 位必须为 0）");
+        return -1;
+    }
+    w->ov_mask |= (uint64_t)1 << (int)role;
+    w->ov_color[(int)role] = color;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_color(GuiWidgetImpl *w, int64_t role) {
+    if (!widget_ok(w)) return -1;
+    if (!widget_role_ok(role)) {
+        gui_core_set_err(GUI_ERR_ARG, "每控件主题角色越界（合法范围 0..13）");
+        return -1;
+    }
+    gui_core_ok();
+    if (w->ov_mask & ((uint64_t)1 << (int)role))
+        return w->ov_color[(int)role];       /* 覆写优先 */
+    return (int64_t)gui_theme_color((int)role);   /* 否则回落全局表 */
+}
+int64_t dial_gui_widget_has_color(GuiWidgetImpl *w, int64_t role) {
+    if (!widget_ok(w)) return -1;
+    if (!widget_role_ok(role)) {
+        gui_core_set_err(GUI_ERR_ARG, "每控件主题角色越界（合法范围 0..13）");
+        return -1;
+    }
+    gui_core_ok();
+    return (w->ov_mask & ((uint64_t)1 << (int)role)) ? 1 : 0;
+}
+int64_t dial_gui_widget_clear_color(GuiWidgetImpl *w, int64_t role) {
+    if (!widget_ok(w)) return -1;
+    if (!widget_role_ok(role)) {
+        gui_core_set_err(GUI_ERR_ARG, "每控件主题角色越界（合法范围 0..13）");
+        return -1;
+    }
+    w->ov_mask &= ~((uint64_t)1 << (int)role);
+    w->ov_color[(int)role] = 0;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_clear_colors(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    w->ov_mask = 0;
+    for (int i = 0; i < GUI_THEME_ROLE_COUNT; ++i) w->ov_color[i] = 0;
+    gui_core_ok();
+    return 0;
+}
+
+/* ---- Grid 自动换行 ---------------------------------------------------- *
+ * 容器级开关：打开后子节点按加入顺序自动依次占格，显式 grid_col/row 被忽略；
+ * cspan/rspan 仍由子节点显式声明。溢出 cols*rows 夹到最后一行。 */
+int64_t dial_gui_widget_set_grid_autoflow(GuiWidgetImpl *w, int64_t on) {
+    if (!widget_ok(w)) return -1;
+    w->grid_autoflow = on ? 1 : 0;
+    gui_core_ok();
+    return 0;
+}
+int64_t dial_gui_widget_grid_autoflow(GuiWidgetImpl *w) {
+    if (!widget_ok(w)) return -1;
+    gui_core_ok();
+    return w->grid_autoflow ? 1 : 0;
 }

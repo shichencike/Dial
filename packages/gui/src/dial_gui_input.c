@@ -74,6 +74,93 @@ static int utf8_encode(int cp, char out[4]) {
     return 4;
 }
 
+/* ---- 第 17 层：TextBox 撤销 / 重做快照栈（纯 C，零平台符号）------------ *
+ * 快照只在键盘编辑（replace_range）真正改掉文本前入栈；显式 set_text 是
+ * 程序化赋值，由 core.c 清两栈建立新基线，绝不混进用户编辑历史。
+ * 两栈都是控件自身的固定容量数组（calloc 归零），栈满丢最老一条；
+ * 文本副本由 dispose_subtree 与 clear 逐条 free，所有权始终在 C 侧。 */
+static void snap_free(GuiUndoSnap *s) {
+    free(s->text);
+    s->text = NULL;
+    s->cursor = 0; s->sel_anchor = 0;
+}
+
+/* 造一份当前状态副本（NULL text = 空串，零分配）。分配失败返回 0：
+ * 此时放弃本次撤销记录，但编辑本身照常进行，绝不因历史记录阻断输入。 */
+static int snap_take(GuiUndoSnap *dst, const GuiWidgetImpl *w) {
+    dst->text = NULL;
+    dst->cursor = w->cursor;
+    dst->sel_anchor = w->sel_anchor;
+    const char *t = w->text ? w->text : "";
+    size_t n = strlen(t);
+    if (n == 0) return 1;
+    char *p = (char *)malloc(n + 1);
+    if (!p) return 0;
+    memcpy(p, t, n + 1);
+    dst->text = p;
+    return 1;
+}
+
+static void stack_push(GuiUndoSnap *st, int *len, GuiUndoSnap snap) {
+    if (*len >= GUI_UNDO_CAP) {           /* 满：丢最老一条，整体前移 */
+        snap_free(&st[0]);
+        memmove(&st[0], &st[1], sizeof(GuiUndoSnap) * (GUI_UNDO_CAP - 1));
+        *len = GUI_UNDO_CAP - 1;
+    }
+    st[(*len)++] = snap;
+}
+
+static void stack_clear(GuiUndoSnap *st, int *len) {
+    for (int i = 0; i < *len; ++i) snap_free(&st[i]);
+    *len = 0;
+}
+
+/* 编辑前：旧状态入 undo 栈，并清空 redo 分支（新编辑使重做历史失效）。 */
+static void undo_record_edit(GuiWidgetImpl *w) {
+    GuiUndoSnap snap;
+    if (!snap_take(&snap, w)) return;
+    stack_push(w->undo_stack, &w->undo_len, snap);
+    stack_clear(w->redo_stack, &w->redo_len);
+}
+
+/* 把控件换成快照内容（所有权转移，不再额外分配）。 */
+static void snap_apply(GuiWidgetImpl *w, GuiUndoSnap snap) {
+    free(w->text);
+    w->text = snap.text;                  /* NULL = 空串，与既有口径一致 */
+    w->cursor = snap.cursor;
+    w->sel_anchor = snap.sel_anchor;
+}
+
+int gui_widget_undo(GuiWidgetImpl *w) {
+    if (!w || w->undo_len <= 0) return 0;
+    int old_len = text_len(w);
+    GuiUndoSnap cur;
+    if (!snap_take(&cur, w)) return 0;    /* 分配失败：栈保持原样，状态自洽 */
+    GuiUndoSnap prev = w->undo_stack[--w->undo_len];
+    stack_push(w->redo_stack, &w->redo_len, cur);
+    snap_apply(w, prev);
+    gui_signal_emit(w, GUI_SIG_TEXT_CHANGED, text_len(w), old_len, 0, 0);
+    return 1;
+}
+
+int gui_widget_redo(GuiWidgetImpl *w) {
+    if (!w || w->redo_len <= 0) return 0;
+    int old_len = text_len(w);
+    GuiUndoSnap cur;
+    if (!snap_take(&cur, w)) return 0;
+    GuiUndoSnap next = w->redo_stack[--w->redo_len];
+    stack_push(w->undo_stack, &w->undo_len, cur);
+    snap_apply(w, next);
+    gui_signal_emit(w, GUI_SIG_TEXT_CHANGED, text_len(w), old_len, 0, 0);
+    return 1;
+}
+
+void gui_widget_undo_clear(GuiWidgetImpl *w) {
+    if (!w) return;
+    stack_clear(w->undo_stack, &w->undo_len);
+    stack_clear(w->redo_stack, &w->redo_len);
+}
+
 /*
  * 用 ins[0..n) 替换 [a,b)。返回 1 成功 / 0 被 max_len 拒绝 / -1 分配失败。
  * 绝不在原缓冲上原地挪动：一律新分配一块再整体换掉，避免越界与别名问题。
@@ -94,6 +181,8 @@ static int replace_range(GuiWidgetImpl *w, int a, int b,
     if (n > 0 && ins) memcpy(buf + a, ins, (size_t)n);
     if (len - b > 0) memcpy(buf + a + n, old + b, (size_t)(len - b));
     buf[newlen] = '\0';
+    /* 第 17 层：在覆盖 w->text 之前把编辑前状态推进 undo 栈（含光标 / 选区）。*/
+    undo_record_edit(w);
     free(w->text);
     w->text = buf;
     return 1;

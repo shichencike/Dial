@@ -77,6 +77,10 @@
 #      第 16 层 demo（5p ~ 5s）：网格布局 GRID / 组合框 ComboBox / 列表框
 #      ListBox / 右键·滚轮交互，纯内存对象 + 离屏 CRC 锁定，set_kind 上界扩到 11
 #      （8/9 仍留给信号 kind 标记），零 DISPLAY 依赖。
+#      第 17 层 demo（5t ~ 5w）：TextBox 撤销/重做快照栈 / Slider 拖动 /
+#      每控件主题覆写（未覆写逐像素回落全局表）/ Grid 自动换行，纯内存对象
+#      + 离屏 CRC 锁定，未启用时旧路径逐像素等价（历史 CRC 一字不漂移），
+#      零 DISPLAY 依赖。
 #   AB. int32 / float32 一等类型：零隐式转换 + 显式转换内建 + 同类算术/比较/打印，
 #       FFI 精确 32 位宽度（C 侧按 int32_t/float 读参数·返回值·多参数·
 #       extern struct sizeof/offsetof 与双向字段读写）/ 越界 Fail-Fast /
@@ -3108,6 +3112,98 @@ if "$DIALC" build tests/pkg/use_gui_wheel.dial -o "${TMP}/use_gui_wheel" >"${TMP
     fi
 else aabad "use_gui_wheel.dial 编译失败"; tail -20 "${TMP}/aa_wcomp.log"; fi
 
+# 5t) 第 17 层 TextBox 撤销 / 重做：纯内存 + 离屏画布（零 DISPLAY 依赖，CRC32 像素级锁定）。
+#     独立纯内存与独立 offscreen 画布，绝不触碰前十六个 demo 的 CRC 基准。给 AA 组 +2 aapass。
+if "$DIALC" build tests/pkg/use_gui_undo.dial -o "${TMP}/use_gui_undo" >"${TMP}/aa_ucomp.log" 2>&1; then
+    aapass "use_gui_undo.dial（第 17 层 TextBox 撤销 / 重做）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_undo" >"${TMP}/aa_unodisplay.log" 2>&1
+    aa_u_no_exit=$?
+    aa_u_bad=$(grep -c ' = bad' "${TMP}/aa_unodisplay.log" || true)
+    if [ "$aa_u_no_exit" -eq 0 ] && [ "$aa_u_bad" -eq 0 ] \
+       && grep -qF 'undo_set_text_not_recorded = ok' "${TMP}/aa_unodisplay.log" \
+       && grep -qF 'undo_text_abcd = ok' "${TMP}/aa_unodisplay.log" \
+       && grep -qF 'redo_text_abcd = ok' "${TMP}/aa_unodisplay.log" \
+       && grep -qF 'redo_invalidated_by_edit = ok' "${TMP}/aa_unodisplay.log" \
+       && grep -qF 'undo_cursor_restored = ok' "${TMP}/aa_unodisplay.log" \
+       && grep -qF 'undo_full_stack_cap = ok' "${TMP}/aa_unodisplay.log" \
+       && grep -qF 'undo_crc_pinned = ok' "${TMP}/aa_unodisplay.log" \
+       && grep -qF 'undo_done = true' "${TMP}/aa_unodisplay.log"; then
+        aapass "第 17 层：快照式 undo/redo·显式 set_text 不进历史·新编辑使 redo 失效·光标随快照恢复·栈满丢最老 / 离屏 CRC 稳定全绿"
+    else
+        aabad "第 17 层 TextBox 撤销/重做断言失败（exit=$aa_u_no_exit bad=$aa_u_bad）"
+        tail -40 "${TMP}/aa_unodisplay.log"
+    fi
+else aabad "use_gui_undo.dial 编译失败"; tail -20 "${TMP}/aa_ucomp.log"; fi
+
+# 5u) 第 17 层 Slider 拖动：纯内存 + 离屏画布（零 DISPLAY 依赖，CRC32 像素级锁定）。
+#     独立纯内存与独立 offscreen 画布，绝不触碰前十六个 demo 的 CRC 基准。给 AA 组 +2 aapass。
+if "$DIALC" build tests/pkg/use_gui_drag.dial -o "${TMP}/use_gui_drag" >"${TMP}/aa_dcomp.log" 2>&1; then
+    aapass "use_gui_drag.dial（第 17 层 Slider 拖动）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_drag" >"${TMP}/aa_dnodisplay.log" 2>&1
+    aa_d_no_exit=$?
+    aa_d_bad=$(grep -c ' = bad' "${TMP}/aa_dnodisplay.log" || true)
+    if [ "$aa_d_no_exit" -eq 0 ] && [ "$aa_d_bad" -eq 0 ] \
+       && grep -qF 'drag_active_on_press = ok' "${TMP}/aa_dnodisplay.log" \
+       && grep -qF 'drag_press_no_value_change = ok' "${TMP}/aa_dnodisplay.log" \
+       && grep -qF 'drag_value_mid_50 = ok' "${TMP}/aa_dnodisplay.log" \
+       && grep -qF 'drag_value_clamped_far = ok' "${TMP}/aa_dnodisplay.log" \
+       && grep -qF 'drag_active_off_release = ok' "${TMP}/aa_dnodisplay.log" \
+       && grep -qF 'drag_value_unchanged_without_press = ok' "${TMP}/aa_dnodisplay.log" \
+       && grep -qF 'drag_crc_pinned = ok' "${TMP}/aa_dnodisplay.log" \
+       && grep -qF 'drag_done = true' "${TMP}/aa_dnodisplay.log"; then
+        aapass "第 17 层：PRESS 置拖动态不改 value·MOVE 按绝对 x 设值并 clamp·拖出控件仍生效 / 非 SLIDER 不进拖动 / 离屏 CRC 稳定全绿"
+    else
+        aabad "第 17 层 Slider 拖动断言失败（exit=$aa_d_no_exit bad=$aa_d_bad）"
+        tail -40 "${TMP}/aa_dnodisplay.log"
+    fi
+else aabad "use_gui_drag.dial 编译失败"; tail -20 "${TMP}/aa_dcomp.log"; fi
+
+# 5v) 第 17 层每控件主题覆写：纯内存 + 离屏画布（零 DISPLAY 依赖，CRC32 像素级锁定）。
+#     独立纯内存与独立 offscreen 画布，绝不触碰前十六个 demo 的 CRC 基准。给 AA 组 +2 aapass。
+if "$DIALC" build tests/pkg/use_gui_theme_override.dial -o "${TMP}/use_gui_theme_override" >"${TMP}/aa_ocomp.log" 2>&1; then
+    aapass "use_gui_theme_override.dial（第 17 层每控件主题覆写）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_theme_override" >"${TMP}/aa_onodisplay.log" 2>&1
+    aa_o_no_exit=$?
+    aa_o_bad=$(grep -c ' = bad' "${TMP}/aa_onodisplay.log" || true)
+    if [ "$aa_o_no_exit" -eq 0 ] && [ "$aa_o_bad" -eq 0 ] \
+       && grep -qF 'ovr_color_fallback_global = ok' "${TMP}/aa_onodisplay.log" \
+       && grep -qF 'ovr_crc_differs = ok' "${TMP}/aa_onodisplay.log" \
+       && grep -qF 'ovr_pixel_b1_red = ok' "${TMP}/aa_onodisplay.log" \
+       && grep -qF 'ovr_crc_back_to_base = ok' "${TMP}/aa_onodisplay.log" \
+       && grep -qF 'ovr_zero_color_legal = ok' "${TMP}/aa_onodisplay.log" \
+       && grep -qF 'ovr_all_cleared_6 = ok' "${TMP}/aa_onodisplay.log" \
+       && grep -qF 'ovr_crc_pinned = ok' "${TMP}/aa_onodisplay.log" \
+       && grep -qF 'ovr_done = true' "${TMP}/aa_onodisplay.log"; then
+        aapass "第 17 层：未覆写逐像素回落全局表·覆写只影响本控件·Fail-Fast 边界·color=0 合法·clear 后 CRC 回历史基准 / 离屏 CRC 稳定全绿"
+    else
+        aabad "第 17 层每控件主题覆写断言失败（exit=$aa_o_no_exit bad=$aa_o_bad）"
+        tail -40 "${TMP}/aa_onodisplay.log"
+    fi
+else aabad "use_gui_theme_override.dial 编译失败"; tail -20 "${TMP}/aa_ocomp.log"; fi
+
+# 5w) 第 17 层 Grid 自动换行：纯内存 + 离屏画布（零 DISPLAY 依赖，CRC32 像素级锁定）。
+#     独立纯内存与独立 offscreen 画布，绝不触碰前十六个 demo 的 CRC 基准。给 AA 组 +2 aapass。
+if "$DIALC" build tests/pkg/use_gui_autoflow.dial -o "${TMP}/use_gui_autoflow" >"${TMP}/aa_fcomp.log" 2>&1; then
+    aapass "use_gui_autoflow.dial（第 17 层 Grid 自动换行）编译成功"
+    env -u DISPLAY "${TMP}/use_gui_autoflow" >"${TMP}/aa_fnodisplay.log" 2>&1
+    aa_f_no_exit=$?
+    aa_f_bad=$(grep -c ' = bad' "${TMP}/aa_fnodisplay.log" || true)
+    if [ "$aa_f_no_exit" -eq 0 ] && [ "$aa_f_bad" -eq 0 ] \
+       && grep -qF 'flow_c1_x = ok' "${TMP}/aa_fnodisplay.log" \
+       && grep -qF 'flow_c2_y = ok' "${TMP}/aa_fnodisplay.log" \
+       && grep -qF 'flow_explicit_col_ignored = ok' "${TMP}/aa_fnodisplay.log" \
+       && grep -qF 'flow_cspan_respected = ok' "${TMP}/aa_fnodisplay.log" \
+       && grep -qF 'flow_off_c1_default_0 = ok' "${TMP}/aa_fnodisplay.log" \
+       && grep -qF 'flow_overflow_clamped_y = ok' "${TMP}/aa_fnodisplay.log" \
+       && grep -qF 'flow_crc_pinned = ok' "${TMP}/aa_fnodisplay.log" \
+       && grep -qF 'flow_done = true' "${TMP}/aa_fnodisplay.log"; then
+        aapass "第 17 层：按加入顺序自动排格·显式 col/row 被忽略·cspan 仍生效·关闭回到第 16 层语义·溢出夹末行 / 离屏 CRC 稳定全绿"
+    else
+        aabad "第 17 层 Grid 自动换行断言失败（exit=$aa_f_no_exit bad=$aa_f_bad）"
+        tail -40 "${TMP}/aa_fnodisplay.log"
+    fi
+else aabad "use_gui_autoflow.dial 编译失败"; tail -20 "${TMP}/aa_fcomp.log"; fi
+
 # 6) 清理：卸包，避免污染后续测试与用户环境。
 "$DIALC" uninstall gui >/dev/null 2>&1 || true
 aapass "gui 包已卸载"
@@ -3244,7 +3340,7 @@ else
 fi
 
 # ===========================================================================
-echo "== AD) GUI 第 8 层 OO 封装：301 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
+echo "== AD) GUI 第 8 层 OO 封装：317 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
 adpass() { echo "  ✅ $1"; }
 adbad()  { echo "  ❌ $1"; fail=1; }
 
@@ -3259,8 +3355,8 @@ cp tests/oo/use_gui_oo.dial "$AD_DIR/"
     && "$DIALC" install "${TMP}/ad_gui.dialpkg" >"${TMP}/ad_install.log" 2>&1 \
     || { adbad "gui.dialpkg 打包或安装失败（AD 组）"; tail -6 "${TMP}/ad_pack.log" "${TMP}/ad_install.log"; }
 
-# 1) 契约防漂移审计：301 个方法恰好覆盖 301 个 extern fn（入口 app_new 除外），
-#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 302 个签名。
+# 1) 契约防漂移审计：317 个方法恰好覆盖 317 个 extern fn（入口 app_new 除外），
+#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 318 个签名。
 ad_diag=$(grep '^extern fn' packages/gui/gui.diali | sed -E 's/^extern fn ([A-Za-z0-9_]+).*/\1/' \
           | grep -v '^dial_gui_app_new$' | sort -u)
 ad_refs=$(grep '^    fn ' packages/gui/src/gui_oo.dial | grep -oE 'dial_gui_[A-Za-z0-9_]+' | sort -u)
@@ -3268,9 +3364,9 @@ ad_methods=$(grep -c '^    fn ' packages/gui/src/gui_oo.dial)
 ad_diag_n=$(echo "$ad_diag" | wc -l)
 ad_iface_n=$(grep -c '^extern fn' packages/gui/gui.diali)
 ad_oo_decl=$(grep -c '^extern fn' packages/gui/src/gui_oo.dial || true)
-if [ "$ad_methods" -eq 301 ] && [ "$ad_diag_n" -eq 301 ] && [ "$ad_iface_n" -eq 302 ] \
+if [ "$ad_methods" -eq 317 ] && [ "$ad_diag_n" -eq 317 ] && [ "$ad_iface_n" -eq 318 ] \
    && [ "$ad_oo_decl" -eq 0 ] && [ "$ad_diag" = "$ad_refs" ]; then
-    adpass "契约审计：301 个 impl 方法全覆盖 301 个 extern fn、gui.diali 共 302 个签名、封装层零 extern 声明（ABI 不变）"
+    adpass "契约审计：317 个 impl 方法全覆盖 317 个 extern fn、gui.diali 共 318 个签名、封装层零 extern 声明（ABI 不变）"
 else
     adbad "契约审计不通过：methods=$ad_methods diag=$ad_diag_n iface=$ad_iface_n oo_decl=$ad_oo_decl"
     diff <(echo "$ad_diag") <(echo "$ad_refs") | head -20

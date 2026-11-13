@@ -1,0 +1,100 @@
+// gui.dialpkg 第 17 层：每控件主题覆写端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：未覆写逐像素回落全局表、覆写只影响本控件、生效色
+// getter、Fail-Fast 边界、color=0 合法覆写、clear 后 CRC 回到历史基准。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var root: GuiWidget = dial_gui_widget_tree(200, 100);
+    var b1: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_set_kind(b1, 2), 0, "ovr_kind_b1");         // 2 = BUTTON
+    expect_int(dial_gui_widget_set_rect(b1, 0, 0, 100, 40), 0, "ovr_rect_b1");
+    var b2: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_set_kind(b2, 2), 0, "ovr_kind_b2");
+    expect_int(dial_gui_widget_set_rect(b2, 100, 0, 100, 40), 0, "ovr_rect_b2");
+    expect_int(dial_gui_widget_layout_apply(root, 200, 100), 0, "ovr_apply");
+
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 100);
+    expect(!is_null(p), "ovr_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "ovr_set_aa_off");
+
+    // ---- 0) 基线：两按钮同色（都回落进程级全局表）----------------------
+    expect_int(dial_gui_widget_draw(root, p), 0, "ovr_draw_base");
+    var crc_base: int = dial_gui_painter_crc32(p);
+    var global_btn: int = dial_gui_theme_get(4);                            // role 4 = BTN
+    expect_int(dial_gui_widget_has_color(b1, 4), 0, "ovr_none_initially");
+    expect_int(dial_gui_widget_color(b1, 4), global_btn, "ovr_color_fallback_global");
+    expect_int(dial_gui_get_pixel(p, 10, 20), global_btn, "ovr_pixel_b1_default");
+    expect_int(dial_gui_get_pixel(p, 110, 20), global_btn, "ovr_pixel_b2_default");
+
+    // ---- 1) 覆写 b1 的 BTN 角色为纯红 0xFFFF0000 -----------------------
+    expect_int(dial_gui_widget_set_color(b1, 4, 4294901760), 0, "ovr_set_ok");
+    expect_int(dial_gui_widget_has_color(b1, 4), 1, "ovr_has_color");
+    expect_int(dial_gui_widget_color(b1, 4), 4294901760, "ovr_color_get");
+    expect_int(dial_gui_widget_has_color(b2, 4), 0, "ovr_other_untouched");
+    expect_int(dial_gui_widget_color(b2, 4), global_btn, "ovr_other_fallback");
+    expect_int(dial_gui_widget_draw(root, p), 0, "ovr_draw_overridden");
+    var crc_ov: int = dial_gui_painter_crc32(p);
+    expect(!(crc_ov == crc_base), "ovr_crc_differs");
+    expect_int(dial_gui_get_pixel(p, 10, 20), 4294901760, "ovr_pixel_b1_red");
+    expect_int(dial_gui_get_pixel(p, 110, 20), global_btn, "ovr_pixel_b2_still_default");
+
+    // ---- 2) Fail-Fast：role / color 越界一律拒绝 -----------------------
+    expect_int(dial_gui_widget_set_color(b1, 14, 0), -1, "ovr_bad_role_rejected");
+    expect_int(dial_gui_widget_set_color(b1, -1, 0), -1, "ovr_neg_role_rejected");
+    expect_int(dial_gui_widget_set_color(b1, 4, 4294967296), -1, "ovr_color_high32_rejected");
+    expect_int(dial_gui_widget_set_color(b1, 4, -1), -1, "ovr_neg_color_rejected");
+    expect_int(dial_gui_widget_color(b1, 99), -1, "ovr_color_bad_role_rejected");
+    expect_int(dial_gui_widget_has_color(b1, 99), -1, "ovr_has_bad_role_rejected");
+    expect_int(dial_gui_widget_clear_color(b1, 99), -1, "ovr_clear_bad_role_rejected");
+    dial_gui_clear_error();
+
+    // ---- 3) clear_color 回落全局表，CRC 逐像素回到历史基准 -------------
+    expect_int(dial_gui_widget_clear_color(b1, 4), 0, "ovr_clear_color");
+    expect_int(dial_gui_widget_has_color(b1, 4), 0, "ovr_cleared");
+    expect_int(dial_gui_widget_color(b1, 4), global_btn, "ovr_color_back_to_global");
+    expect_int(dial_gui_widget_draw(root, p), 0, "ovr_draw_after_clear");
+    expect_int(dial_gui_painter_crc32(p), crc_base, "ovr_crc_back_to_base");
+
+    // ---- 4) color=0 是合法覆写（不与「未覆写」哨兵混淆）----------------
+    expect_int(dial_gui_widget_set_color(b1, 4, 0), 0, "ovr_zero_color_legal");
+    expect_int(dial_gui_widget_has_color(b1, 4), 1, "ovr_zero_has_color");
+    expect_int(dial_gui_widget_color(b1, 4), 0, "ovr_zero_color_get");
+
+    // ---- 5) clear_colors 清全部 ---------------------------------------
+    expect_int(dial_gui_widget_set_color(b1, 6, 12345), 0, "ovr_second_role_set");
+    expect_int(dial_gui_widget_has_color(b1, 6), 1, "ovr_second_role_has");
+    expect_int(dial_gui_widget_clear_colors(b1), 0, "ovr_clear_all");
+    expect_int(dial_gui_widget_has_color(b1, 4), 0, "ovr_all_cleared_4");
+    expect_int(dial_gui_widget_has_color(b1, 6), 0, "ovr_all_cleared_6");
+
+    // ---- 6) 最终状态 CRC 稳定 -----------------------------------------
+    expect_int(dial_gui_widget_draw(root, p), 0, "ovr_draw_final");
+    var crc0: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_widget_draw(root, p), 0, "ovr_draw_final2");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect_int(crc0, crc1, "ovr_crc_stable");
+    expect_int(crc0, crc_base, "ovr_crc_equals_base");
+    expect_str(str(crc0), "2387101612", "ovr_crc_pinned");
+    print("ovr_crc = " + str(crc0));
+
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("ovr_done = true");
+    return 0;
+}

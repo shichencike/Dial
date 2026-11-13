@@ -27,9 +27,18 @@
  * 永不释放（GUI 单线程事件循环，无需加锁）。绝不传给 gui_font_free。 */
 static GuiFontImpl g_builtin_font;
 
-/* 简写：所有配色都从主题表取，绝不直接引用 GUI_THEME_* 编译期常量，
- * 这样 theme_set 一次改色，整树下一次 widget_draw 立即生效。 */
-#define C(role) gui_theme_color(GUI_THEME_ROLE_##role)
+/* 简写：第 17 层起先查控件自身的角色覆写（ov_mask 置位），未覆写才回落
+ * 进程级主题表。绝不直接引用 GUI_THEME_* 编译期常量，theme_set 一次改色
+ * 整树下一次 widget_draw 立即生效；未覆写时与旧 C(role) 逐像素等价，
+ * 因此 look_crc_normal 等历史 CRC 基准一字不漂移。
+ * n 是各绘制函数的 GuiWidgetImpl * 参数名（draw_node / draw_textbox 同口径）。*/
+static gui_color_t widget_color(const GuiWidgetImpl *n, int role) {
+    if (n && role >= 0 && role < GUI_THEME_ROLE_COUNT &&
+        (n->ov_mask & ((uint64_t)1 << role)))
+        return (gui_color_t)(uint32_t)n->ov_color[role];
+    return gui_theme_color(role);
+}
+#define C(role) widget_color(n, GUI_THEME_ROLE_##role)
 
 /* ---- 纯值事件推进 ------------------------------------------------------ */
 
@@ -54,6 +63,29 @@ static GuiWidgetImpl *find_open_combo(GuiWidgetImpl *n) {
     return NULL;
 }
 
+/* 第 17 层：找到正在拖动的 SLIDER，并沿树累加相对几何得到其绝对 x。
+ * 与框架层 hit_node 同一口径（不依赖 layout_apply 残留），因此鼠标拖到
+ * 控件矩形之外仍能按同一坐标系设值，绝不跳变。 */
+static GuiWidgetImpl *find_dragging(GuiWidgetImpl *n, int ax, int *out_ax) {
+    if (!n) return NULL;
+    if (n->drag_active) {
+        if (out_ax) *out_ax = ax;
+        return n;
+    }
+    for (GuiWidgetImpl *c = n->first_child; c; c = c->next_sibling) {
+        GuiWidgetImpl *r = find_dragging(c, ax + c->x, out_ax);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+/* 第 17 层：拖动态只在 PRESS..RELEASE 之间有效，RELEASE 一律清干净。 */
+static void clear_drag(GuiWidgetImpl *n) {
+    if (!n) return;
+    n->drag_active = 0;
+    for (GuiWidgetImpl *c = n->first_child; c; c = c->next_sibling) clear_drag(c);
+}
+
 int gui_widget_handle(GuiWidgetImpl *root, int kind, int x, int y, int button) {
     if (!root || !gui_widget_is_live(root) || button < 0) return -1;
 
@@ -62,6 +94,16 @@ int gui_widget_handle(GuiWidgetImpl *root, int kind, int x, int y, int button) {
         clear_flags(root, 1, 0);
         GuiWidgetImpl *hit = gui_widget_hit(root, x, y, NULL, NULL);
         if (hit && !hit->disabled) hit->hovered = 1;
+        /* 第 17 层：拖动中的 SLIDER 按拖动点绝对 x 设值（鼠标移出控件仍
+         * 生效）；未拖动时这段完全空转，既有 hovered 语义 / CRC 零影响。 */
+        int drag_ax = 0;
+        GuiWidgetImpl *drag = find_dragging(root, 0, &drag_ax);
+        if (drag && !drag->disabled && drag->kind == GUI_WIDGET_SLIDER) {
+            int oldv = drag->value;
+            if (gui_widget_slider_set_from_x(drag, x - drag_ax))
+                gui_signal_emit(drag, GUI_SIG_VALUE_CHANGED,
+                                drag->value, oldv, x, y);
+        }
         return 0;
     }
     /* PRESS：清 pressed 后给命中控件置位；button 0（模拟）/ 1（左键）生效。
@@ -97,7 +139,12 @@ int gui_widget_handle(GuiWidgetImpl *root, int kind, int x, int y, int button) {
         }
         if (button == 0 || button == 1) {
             GuiWidgetImpl *hit = gui_widget_hit(root, x, y, NULL, NULL);
-            if (hit && !hit->disabled) hit->pressed = 1;
+            if (hit && !hit->disabled) {
+                hit->pressed = 1;
+                /* 第 17 层：左键按下命中 SLIDER 即进入拖动态；PRESS 不改
+                 * value，设值只在 MOVE / RELEASE 发生，既有点击设值语义一字不动。*/
+                if (hit->kind == GUI_WIDGET_SLIDER) hit->drag_active = 1;
+            }
         }
         return 0;
     }
@@ -105,6 +152,7 @@ int gui_widget_handle(GuiWidgetImpl *root, int kind, int x, int y, int button) {
      * 命中时顺带取回绝对 x，SLIDER 用它算局部 x，绝不依赖上一轮布局残留。 */
     if (kind == GUI_EV_MOUSE_RELEASE) {
         clear_flags(root, 0, 1);
+        clear_drag(root);        /* 第 17 层：拖动态只在 PRESS..RELEASE 之间有效 */
         if (button != 0 && button != 1) return 0;   /* 右键 / 滚轮释放不激活 */
 
         /* 第 16 层：若已有组合框展开，优先判定其下拉项的命中（下拉区在控件
@@ -256,7 +304,8 @@ static void draw_textbox(GuiPainterImpl *p, GuiWidgetImpl *n,
 }
 
 /* CheckBox 的勾：两段折线，纯整数坐标，无浮点。 */
-static void draw_check_mark(GuiPainterImpl *p, int bx, int by, int box) {
+static void draw_check_mark(GuiPainterImpl *p, const GuiWidgetImpl *n,
+                            int bx, int by, int box) {
     gui_color_t c = C(MARK);
     int x1 = bx + box / 5;
     int y1 = by + box / 2;
@@ -322,7 +371,7 @@ static void draw_node(GuiPainterImpl *p, GuiWidgetImpl *n,
             gui_raster_fill_rect(p, bx, by, box, box, C(CHECK_BG));
             gui_color_t border = n->disabled ? C(BORDER) : C(MARK);
             gui_raster_stroke_rect(p, bx, by, box, box, 1, border);
-            if (n->checked) draw_check_mark(p, bx, by, box);
+            if (n->checked) draw_check_mark(p, n, bx, by, box);
             /* 文本区从方框右侧开始，左对齐（剩余宽度可能为负，draw_text 会跳过）。 */
             draw_text(p, n->text, bx + box + 6, ay,
                       w - (box + 10), h, tc, 0);

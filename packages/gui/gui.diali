@@ -1244,3 +1244,50 @@ extern fn dial_gui_list_selected_first(w: GuiWidget): int;
 // 供 Dial 侧在 MOUSE_PRESS 分支区分左 / 右键（右键不改 hovered/pressed 语义）。
 extern fn dial_gui_widget_right_pressed(w: GuiWidget): int;
 
+// ---- 第 17 层：TextBox 撤销 / 重做（本段 8 个追加 extern fn）--------------
+// 快照式历史：每次键盘编辑（可打印字符 / Backspace / Delete）成功改文本**前**
+// 把「文本 + 光标 + 选区」推进 undo 栈，并清空 redo 分支（新编辑使重做失效）。
+// 两栈容量 GUI_UNDO_CAP = 32 固定、无动态扩容，栈满丢最老一条；文本副本由
+// C 侧自有，dispose / clear 逐条 free。显式 widget_set_text 是程序化赋值，
+// 建立新基线并清两栈，绝不混进用户编辑历史。
+// undo / redo 返回 1 = 成功、0 = 栈空（不是错误，不写错误槽）、-1 = 无效句柄；
+// 撤销 / 重做恢复文本后照常发一次 TEXT_CHANGED（未订阅零开销）。
+// 不做跨控件全局历史、不做编辑合并（一次按键一条）、不做持久化。
+extern fn dial_gui_widget_undo(w: GuiWidget): int;
+extern fn dial_gui_widget_redo(w: GuiWidget): int;
+extern fn dial_gui_widget_can_undo(w: GuiWidget): int;
+extern fn dial_gui_widget_can_redo(w: GuiWidget): int;
+extern fn dial_gui_widget_undo_depth(w: GuiWidget): int;
+extern fn dial_gui_widget_redo_depth(w: GuiWidget): int;
+extern fn dial_gui_widget_undo_clear(w: GuiWidget): int;
+extern fn dial_gui_widget_undo_capacity(w: GuiWidget): int;
+
+// ---- 第 17 层：Slider 拖动（本段 1 个追加 extern fn）----------------------
+// 左键 PRESS 命中 SLIDER 置纯值 drag_active（PRESS 不改 value，既有点击设值
+// 语义一字不动）；MOVE 按拖动点绝对 x 设值并 clamp，鼠标移出控件矩形仍生效；
+// RELEASE 清 0。dragging 读回该纯值，供 Dial 侧区分拖动与单击。
+// 不做拖动阈值、不做吸附、不读系统时钟。
+extern fn dial_gui_widget_dragging(w: GuiWidget): int;
+
+// ---- 第 17 层：每控件主题覆写（本段 5 个追加 extern fn）-------------------
+// 进程级全局表仍是默认真相源；ov_mask 置位的角色由本控件私有色覆盖，未覆写
+// 角色逐像素回落全局表（历史 CRC 基准一字不漂移）。role 取 0..13（与
+// dial_gui_theme_* 同一张表），color 为 0xAARRGGBB packed 进 int、高 32 位
+// 必须为 0；role 越界 / 颜色越界一律 Fail-Fast 返回 -1 并写错误槽。
+// color getter 返回**生效色**（覆写优先）；clear_color 清单角色、clear_colors
+// 清全部。不做主题包切换、不做继承（覆写不传给子控件）。
+extern fn dial_gui_widget_set_color(w: GuiWidget, role: int, color: int): int;
+extern fn dial_gui_widget_color(w: GuiWidget, role: int): int;
+extern fn dial_gui_widget_has_color(w: GuiWidget, role: int): int;
+extern fn dial_gui_widget_clear_color(w: GuiWidget, role: int): int;
+extern fn dial_gui_widget_clear_colors(w: GuiWidget): int;
+
+// ---- 第 17 层：Grid 自动换行（本段 2 个追加 extern fn）--------------------
+// 容器级开关：打开后子节点按**加入顺序**自动依次占格（第 i 个可见子节点 ->
+// col = i % cols、row = i / cols），忽略显式 set_grid_cell 的 col/row；
+// cspan / rspan 仍由子节点显式声明。溢出 cols*rows 的部分夹到最后一行，
+// 重叠由应用自己负责（确定性）。关闭时与第 16 层逐像素等价。
+// 不做自动换行重排（不因 cspan 变化回溯）、不做双向 / 稀疏网格。
+extern fn dial_gui_widget_set_grid_autoflow(w: GuiWidget, on: int): int;
+extern fn dial_gui_widget_grid_autoflow(w: GuiWidget): int;
+

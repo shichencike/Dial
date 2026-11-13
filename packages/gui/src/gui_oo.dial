@@ -29,12 +29,12 @@
 //     也不重新声明 extern fn dial_gui_*（会与 .diali 契约撞名被 Fail-Fast 拒绝）。
 //   - LSP 当前不递归本地源码模块（v1.04 既有局限），CLI build/run/check/test 不受影响。
 //
-// 覆盖：302 个 extern fn -> 301 个方法 + 1 个入口 dial_gui_app_new。
+// 覆盖：318 个 extern fn -> 317 个方法 + 1 个入口 dial_gui_app_new。
 // （第 8 层 153 + 第 9 层 15 + 第 10 层 15 + 第 11 层 19 + 第 12 层 20 +
-//   第 13 层 23 + 第 14 层 15 + 第 15 层 18 + 第 16 层 23 = 301 个方法；
-//   第 14 层方法挂在第二个 impl GuiWindow 块，第 15 层的 hotkey_new 工厂挂
-//   GuiApp、其余 17 个方法挂 impl GuiHotkey，第 16 层 23 个方法挂在
-//   impl GuiWidget，见文件末尾。）
+//   第 13 层 23 + 第 14 层 15 + 第 15 层 18 + 第 16 层 23 + 第 17 层 16
+//   = 317 个方法；第 14 层方法挂在第二个 impl GuiWindow 块，第 15 层的
+//   hotkey_new 工厂挂 GuiApp、其余 17 个方法挂 impl GuiHotkey，第 16 / 17 层
+//   共 39 个方法挂在 impl GuiWidget。）
 
 import "gui";
 
@@ -222,6 +222,26 @@ impl GuiWidget {
     fn list_selected_first(self): int { return dial_gui_list_selected_first(self); }
     // ---- 第 16 层：右键按下态 ----
     fn right_pressed(self): int { return dial_gui_widget_right_pressed(self); }
+    // ---- 第 17 层：TextBox 撤销 / 重做（快照式历史，8 个）----
+    fn undo(self): int { return dial_gui_widget_undo(self); }
+    fn redo(self): int { return dial_gui_widget_redo(self); }
+    fn can_undo(self): int { return dial_gui_widget_can_undo(self); }
+    fn can_redo(self): int { return dial_gui_widget_can_redo(self); }
+    fn undo_depth(self): int { return dial_gui_widget_undo_depth(self); }
+    fn redo_depth(self): int { return dial_gui_widget_redo_depth(self); }
+    fn undo_clear(self): int { return dial_gui_widget_undo_clear(self); }
+    fn undo_capacity(self): int { return dial_gui_widget_undo_capacity(self); }
+    // ---- 第 17 层：Slider 拖动（1 个）----
+    fn dragging(self): int { return dial_gui_widget_dragging(self); }
+    // ---- 第 17 层：每控件主题覆写（5 个）----
+    fn set_color(self, role: int, color: int): int { return dial_gui_widget_set_color(self, role, color); }
+    fn color(self, role: int): int { return dial_gui_widget_color(self, role); }
+    fn has_color(self, role: int): int { return dial_gui_widget_has_color(self, role); }
+    fn clear_color(self, role: int): int { return dial_gui_widget_clear_color(self, role); }
+    fn clear_colors(self): int { return dial_gui_widget_clear_colors(self); }
+    // ---- 第 17 层：Grid 自动换行（2 个）----
+    fn set_grid_autoflow(self, on: int): int { return dial_gui_widget_set_grid_autoflow(self, on); }
+    fn grid_autoflow(self): int { return dial_gui_widget_grid_autoflow(self); }
 }
 
 // ===== GuiMenu —— 顶栏与弹出菜单项 =====

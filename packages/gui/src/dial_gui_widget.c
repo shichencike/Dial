@@ -33,6 +33,11 @@ static void dispose_subtree(GuiWidgetImpl *n) {
     free(n->text);   /* 外观层文本副本（与 id 同为 C 侧 strdup 自有） */
     /* 第 16 层：组合框 / 列表框项标签副本（与 text 同口径）。*/
     for (int i = 0; i < GUI_COMBO_CAP; ++i) free(n->items[i].label);
+    /* 第 17 层：撤销 / 重做快照文本副本（NULL = 空串，free(NULL) 安全）。*/
+    for (int i = 0; i < GUI_UNDO_CAP; ++i) {
+        free(n->undo_stack[i].text);
+        free(n->redo_stack[i].text);
+    }
     /* 第 6 层：环形队列只挂在根节点（非根节点 sigq 恒 NULL，free(NULL) 安全）。*/
     free(n->sigq);
     free(n);
@@ -211,10 +216,23 @@ static void layout_node(GuiWidgetImpl *n, int ax, int ay, int aw, int ah) {
         if (cell_h < 0) cell_h = 0;
         cell_w = cell_w / cols;
         cell_h = cell_h / rows;
+        /* 第 17 层 autoflow：容器开关打开时，忽略子节点显式 grid_col/row，
+         * 改按「可见子节点加入顺序」依次占格（跨行由序号整除 cols 得到）。
+         * 溢出 cols*rows 的部分夹到最后一行（与既有 clamp 风格一致）；
+         * cspan/rspan 仍由子节点显式声明，重叠由应用自己负责（确定性）。 */
+        int flow = 0;
         for (GuiWidgetImpl *c = n->first_child; c; c = c->next_sibling) {
             if (!c->visible) continue;
-            int gc = c->grid_col; if (gc < 0) gc = 0; if (gc >= cols) gc = cols - 1;
-            int gr = c->grid_row; if (gr < 0) gr = 0; if (gr >= rows) gr = rows - 1;
+            int gc, gr;
+            if (n->grid_autoflow) {
+                gc = flow % cols;
+                gr = flow / cols;
+                if (gr >= rows) gr = rows - 1;
+            } else {
+                gc = c->grid_col; if (gc < 0) gc = 0; if (gc >= cols) gc = cols - 1;
+                gr = c->grid_row; if (gr < 0) gr = 0; if (gr >= rows) gr = rows - 1;
+            }
+            flow++;
             int cspan = c->grid_cspan > 0 ? c->grid_cspan : 1;
             int rspan = c->grid_rspan > 0 ? c->grid_rspan : 1;
             if (gc + cspan > cols) cspan = cols - gc;

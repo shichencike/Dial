@@ -1,0 +1,112 @@
+// gui.dialpkg 第 17 层：TextBox 撤销 / 重做端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：快照式 undo/redo、显式 set_text 建立新基线不进历史、
+// 新编辑使 redo 失效、光标随快照恢复、栈满丢最老、clear 复位、离屏 CRC 稳定。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var root: GuiWidget = dial_gui_widget_tree(200, 80);
+    var tb: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_set_kind(tb, 4), 0, "undo_kind_textbox");   // 4 = TEXTBOX
+    expect_int(dial_gui_widget_set_rect(tb, 0, 0, 200, 40), 0, "undo_rect");
+    expect_int(dial_gui_widget_set_focus(root, tb), 0, "undo_focus");
+
+    // ---- 0) 基线：空栈，栈空操作是 no-op 而不是错误 ---------------------
+    expect_int(dial_gui_widget_undo_capacity(tb), 32, "undo_capacity_32");
+    expect_int(dial_gui_widget_undo_depth(tb), 0, "undo_depth_0");
+    expect_int(dial_gui_widget_redo_depth(tb), 0, "redo_depth_0");
+    expect_int(dial_gui_widget_can_undo(tb), 0, "can_undo_0");
+    expect_int(dial_gui_widget_can_redo(tb), 0, "can_redo_0");
+    expect_int(dial_gui_widget_undo(tb), 0, "undo_empty_noop");
+    expect_int(dial_gui_widget_redo(tb), 0, "redo_empty_noop");
+
+    // ---- 1) 显式 set_text 是程序化赋值：建立新基线，绝不进历史 ----------
+    expect_int(dial_gui_widget_set_text(tb, "ab"), 0, "undo_set_text_baseline");
+    expect_int(dial_gui_widget_undo_depth(tb), 0, "undo_set_text_not_recorded");
+    expect_int(dial_gui_widget_set_cursor(tb, 2), 0, "undo_cursor_end");
+
+    // ---- 2) 两次键盘编辑，各留一条快照 ---------------------------------
+    expect_int(dial_gui_widget_key(root, 4, 99, 0), 1, "undo_key_c");     // 'c'
+    expect_int(dial_gui_widget_key(root, 4, 100, 0), 1, "undo_key_d");    // 'd'
+    expect_str(string_from_cstr(dial_gui_widget_text(tb)), "abcd", "undo_text_abcd");
+    expect_int(dial_gui_widget_undo_depth(tb), 2, "undo_depth_2");
+    expect_int(dial_gui_widget_can_undo(tb), 1, "can_undo_1");
+
+    // ---- 3) 撤销两级：文本 + 深度 + redo 分支同步 -----------------------
+    expect_int(dial_gui_widget_undo(tb), 1, "undo_step1");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb)), "abc", "undo_text_abc");
+    expect_int(dial_gui_widget_undo_depth(tb), 1, "undo_depth_1");
+    expect_int(dial_gui_widget_redo_depth(tb), 1, "redo_depth_1");
+    expect_int(dial_gui_widget_undo(tb), 1, "undo_step2");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb)), "ab", "undo_text_ab");
+    expect_int(dial_gui_widget_can_undo(tb), 0, "can_undo_after_empty");
+    expect_int(dial_gui_widget_undo(tb), 0, "undo_past_empty_noop");
+
+    // ---- 4) 重做两级 ---------------------------------------------------
+    expect_int(dial_gui_widget_redo(tb), 1, "redo_step1");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb)), "abc", "redo_text_abc");
+    expect_int(dial_gui_widget_redo(tb), 1, "redo_step2");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb)), "abcd", "redo_text_abcd");
+    expect_int(dial_gui_widget_redo(tb), 0, "redo_past_empty_noop");
+
+    // ---- 5) 新编辑使 redo 历史失效 -------------------------------------
+    expect_int(dial_gui_widget_undo(tb), 1, "undo_before_new_edit");
+    expect_int(dial_gui_widget_redo_depth(tb), 1, "redo_valid_before_edit");
+    expect_int(dial_gui_widget_key(root, 4, 88, 0), 1, "undo_key_X");     // 'X'
+    expect_int(dial_gui_widget_redo_depth(tb), 0, "redo_invalidated_by_edit");
+    expect_str(string_from_cstr(dial_gui_widget_text(tb)), "abcX", "undo_text_abcX");
+
+    // ---- 6) 光标随快照一并恢复 -----------------------------------------
+    expect_int(dial_gui_widget_set_cursor(tb, 4), 0, "undo_cursor_pre_edit");
+    expect_int(dial_gui_widget_key(root, 4, 89, 0), 1, "undo_key_Y");     // 'Y'
+    expect_int(dial_gui_widget_cursor(tb), 5, "undo_cursor_after_edit");
+    expect_int(dial_gui_widget_undo(tb), 1, "undo_restore_cursor");
+    expect_int(dial_gui_widget_cursor(tb), 4, "undo_cursor_restored");
+
+    // ---- 7) clear 复位两栈 ---------------------------------------------
+    expect_int(dial_gui_widget_undo_clear(tb), 0, "undo_clear");
+    expect_int(dial_gui_widget_undo_depth(tb), 0, "undo_depth_after_clear");
+    expect_int(dial_gui_widget_redo_depth(tb), 0, "redo_depth_after_clear");
+
+    // ---- 8) 栈满丢最老：40 次编辑后深度夹到容量 32 ---------------------
+    var i: int = 0;
+    while (i < 40) {
+        dial_gui_widget_key(root, 4, 122, 0);                              // 'z'
+        i = i + 1;
+    }
+    expect_int(dial_gui_widget_undo_depth(tb), 32, "undo_full_stack_cap");
+    expect_int(dial_gui_widget_can_undo(tb), 1, "undo_full_can_undo");
+
+    // ---- 9) 离屏绘制 CRC 稳定（确定性）---------------------------------
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 80);
+    expect(!is_null(p), "undo_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "undo_set_aa_off");
+    expect_int(dial_gui_widget_layout_apply(root, 200, 80), 0, "undo_apply");
+    expect_int(dial_gui_widget_draw(root, p), 0, "undo_draw");
+    var crc0: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_widget_draw(root, p), 0, "undo_draw2");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect_int(crc0, crc1, "undo_crc_stable");
+    expect_str(str(crc0), "1521191646", "undo_crc_pinned");
+    print("undo_crc = " + str(crc0));
+
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("undo_done = true");
+    return 0;
+}

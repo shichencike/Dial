@@ -1,0 +1,95 @@
+// gui.dialpkg 第 17 层：Grid 自动换行端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：容器开关、按加入顺序自动排格、显式 col/row 被忽略、
+// cspan 仍生效、关闭后回到第 16 层语义、溢出夹到最后一行、离屏 CRC 稳定。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var root: GuiWidget = dial_gui_widget_tree(200, 200);
+    expect_int(dial_gui_widget_set_grid(root, 2, 2), 0, "flow_grid_2x2");
+    expect_int(dial_gui_widget_set_layout(root, 3), 0, "flow_layout_grid"); // 3 = GRID
+    expect_int(dial_gui_widget_grid_autoflow(root), 0, "flow_default_off");
+    expect_int(dial_gui_widget_set_grid_autoflow(root, 1), 0, "flow_enable");
+    expect_int(dial_gui_widget_grid_autoflow(root), 1, "flow_on");
+
+    var c0: GuiWidget = dial_gui_widget_add(root);
+    var c1: GuiWidget = dial_gui_widget_add(root);
+    var c2: GuiWidget = dial_gui_widget_add(root);
+    var c3: GuiWidget = dial_gui_widget_add(root);
+
+    // ---- 0) 不写任何 set_grid_cell：按加入顺序自动依次占格 --------------
+    expect_int(dial_gui_widget_layout_apply(root, 200, 200), 0, "flow_apply_0");
+    expect_int(dial_gui_widget_x(c0), 0, "flow_c0_x");
+    expect_int(dial_gui_widget_y(c0), 0, "flow_c0_y");
+    expect_int(dial_gui_widget_width(c0), 100, "flow_c0_w");
+    expect_int(dial_gui_widget_height(c0), 100, "flow_c0_h");
+    expect_int(dial_gui_widget_x(c1), 100, "flow_c1_x");
+    expect_int(dial_gui_widget_y(c1), 0, "flow_c1_y");
+    expect_int(dial_gui_widget_x(c2), 0, "flow_c2_x");
+    expect_int(dial_gui_widget_y(c2), 100, "flow_c2_y");
+    expect_int(dial_gui_widget_x(c3), 100, "flow_c3_x");
+    expect_int(dial_gui_widget_y(c3), 100, "flow_c3_y");
+
+    // ---- 1) 显式 col/row 被忽略，cspan 仍生效 --------------------------
+    expect_int(dial_gui_widget_set_grid_cell(c0, 1, 1, 1, 1), 0, "flow_explicit_cell_set");
+    expect_int(dial_gui_widget_layout_apply(root, 200, 200), 0, "flow_apply_1");
+    expect_int(dial_gui_widget_x(c0), 0, "flow_explicit_col_ignored");
+    expect_int(dial_gui_widget_y(c0), 0, "flow_explicit_row_ignored");
+    expect_int(dial_gui_widget_set_grid_cell(c0, 0, 0, 2, 1), 0, "flow_cspan_set");
+    expect_int(dial_gui_widget_layout_apply(root, 200, 200), 0, "flow_apply_2");
+    expect_int(dial_gui_widget_width(c0), 200, "flow_cspan_respected");
+
+    // ---- 2) 关闭开关，逐像素回到第 16 层语义 ----------------------------
+    expect_int(dial_gui_widget_set_grid_autoflow(root, 0), 0, "flow_disable");
+    expect_int(dial_gui_widget_grid_autoflow(root), 0, "flow_off");
+    expect_int(dial_gui_widget_layout_apply(root, 200, 200), 0, "flow_apply_off");
+    expect_int(dial_gui_widget_x(c0), 0, "flow_off_c0_x");
+    expect_int(dial_gui_widget_width(c0), 200, "flow_off_c0_span");
+    expect_int(dial_gui_widget_x(c1), 0, "flow_off_c1_default_0");
+    expect_int(dial_gui_widget_y(c1), 0, "flow_off_c1_default_y0");
+
+    // ---- 3) 溢出 cols*rows 夹到最后一行 -------------------------------
+    var c4: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_set_grid_autoflow(root, 1), 0, "flow_enable_again");
+    expect_int(dial_gui_widget_layout_apply(root, 200, 200), 0, "flow_apply_overflow");
+    expect_int(dial_gui_widget_x(c4), 0, "flow_overflow_clamped_x");
+    expect_int(dial_gui_widget_y(c4), 100, "flow_overflow_clamped_y");
+
+    // ---- 4) 关闭后显式占格恢复（c0 声明 col=0,row=0 cspan=2）------------
+    expect_int(dial_gui_widget_set_grid_autoflow(root, 0), 0, "flow_disable_final");
+    expect_int(dial_gui_widget_layout_apply(root, 200, 200), 0, "flow_apply_final");
+    expect_int(dial_gui_widget_width(c0), 200, "flow_final_c0_span");
+    expect_int(dial_gui_widget_x(c1), 0, "flow_final_c1_explicit");
+
+    // ---- 5) 离屏绘制 CRC 稳定（确定性）---------------------------------
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 200);
+    expect(!is_null(p), "flow_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "flow_set_aa_off");
+    expect_int(dial_gui_widget_draw(root, p), 0, "flow_draw");
+    var crc0: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_widget_draw(root, p), 0, "flow_draw2");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect_int(crc0, crc1, "flow_crc_stable");
+    expect_str(str(crc0), "3418075373", "flow_crc_pinned");
+    print("flow_crc = " + str(crc0));
+
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("flow_done = true");
+    return 0;
+}

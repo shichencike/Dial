@@ -287,6 +287,10 @@ struct GuiFontImpl {
 /* 组合框 / 列表框项容量（固定，无动态扩容，内存上界确定）。*/
 #define GUI_COMBO_CAP        64
 
+/* 第 17 层：TextBox 撤销 / 重做快照栈容量（固定，无动态扩容）。
+ * 栈满时丢最老的一条（线性前移），绝不静默截断成「不可撤销」的黑洞。 */
+#define GUI_UNDO_CAP         32
+
 /* ---- 对话框按钮位（dial_gui_dialog_set_buttons 的 mask）--------------- *
  * 单个对话框可同时挂多个按钮（按位或）；点击后 dial_gui_dialog_result 返回
  * 被点按钮对应的值（1/2/4/8）。 */
@@ -341,6 +345,16 @@ typedef struct GuiComboItem {
     int64_t id;        /* 纯值键（SELECTED 信号的 a）*/
     char *label;      /* C 侧 strdup 自有副本（NULL = 空）*/
 } GuiComboItem;
+
+/* 第 17 层：TextBox 撤销 / 重做的一条快照（C 侧自有副本，纯值）。
+ * text 为 NULL 表示空串；cursor / sel_anchor 是编辑前的 UTF-8 字节偏移。
+ * 快照只在键盘编辑（replace_range）成功改文本时入栈；显式 set_text 建立
+ * 新基线并清两栈，绝不把程序化赋值记成一次用户编辑。 */
+typedef struct GuiUndoSnap {
+    char *text;         /* malloc+memcpy 自有副本（NULL = 空串）*/
+    int   cursor;
+    int   sel_anchor;
+} GuiUndoSnap;
 
 struct GuiWidgetImpl {
     GuiWidgetImpl *parent;
@@ -400,6 +414,23 @@ struct GuiWidgetImpl {
     /* ---- 第 16 层：右键按下态（dial_gui_look.c，纯值）------------------- */
     int  right_pressed;        /* 右键按下态（widget_handle 推进，纯值）*/
     GuiComboItem items[GUI_COMBO_CAP];  /* 组合框 / 列表框项存储 */
+    /* ---- 第 17 层：TextBox 撤销 / 重做（固定容量快照栈）---------------- *
+     * 两栈都在控件自身，calloc 归零，dispose_subtree 逐条 free 文本副本。
+     * undo_len / redo_len 是当前深度（0..GUI_UNDO_CAP）。 */
+    GuiUndoSnap undo_stack[GUI_UNDO_CAP];
+    GuiUndoSnap redo_stack[GUI_UNDO_CAP];
+    int  undo_len, redo_len;
+    /* ---- 第 17 层：每控件主题覆写（未覆写角色回落进程级全局表）-------- *
+     * ov_mask 的 bit r 表示角色 r 已被覆写（这样 color=0x00000000 也是合法
+     * 覆写值，不会与「未覆写」哨兵混淆）；ov_color[r] 存 0..0xFFFFFFFF。
+     * 未覆写时绘制逐像素等价于旧 C(role) 路径，历史 CRC 不漂移。 */
+    uint64_t ov_mask;
+    int64_t  ov_color[GUI_THEME_ROLE_COUNT];
+    /* ---- 第 17 层：Slider 拖动 + Grid 自动换行（纯值）------------------ *
+     * drag_active：PRESS 命中 SLIDER 置 1、MOVE 按绝对 x 设值、RELEASE 清 0。
+     * grid_autoflow：容器级开关，子节点按加入顺序自动依次占格。 */
+    int  drag_active;
+    int  grid_autoflow;
 };
 
 /*
@@ -510,6 +541,31 @@ int64_t        dial_gui_list_selected_count(GuiWidgetImpl *w);
 int64_t        dial_gui_list_selected_first(GuiWidgetImpl *w);
 /* 右键按下态（widget_handle 推进的纯值，与左键 pressed 平行）。*/
 int64_t        dial_gui_widget_right_pressed(GuiWidgetImpl *w);
+
+/* ---- 第 17 层：TextBox 撤销 / 重做 + Slider 拖动 + 每控件主题覆写 ------- *
+ * + Grid 自动换行（全部 : int 一律 int64_t，Dial int 是 64 位）。
+ * 与前面各层同一条硬边界：只读写 GuiWidgetImpl 上的 C 侧纯值，绝不碰平台
+ * API、绝不 C → Dial 反向回调；未启用时逐像素等价于旧路径。 */
+/* TextBox 撤销 / 重做：undo / redo 返回 1 成功、0 栈空、-1 无效句柄。 */
+int64_t        dial_gui_widget_undo(GuiWidgetImpl *w);
+int64_t        dial_gui_widget_redo(GuiWidgetImpl *w);
+int64_t        dial_gui_widget_can_undo(GuiWidgetImpl *w);
+int64_t        dial_gui_widget_can_redo(GuiWidgetImpl *w);
+int64_t        dial_gui_widget_undo_depth(GuiWidgetImpl *w);
+int64_t        dial_gui_widget_redo_depth(GuiWidgetImpl *w);
+int64_t        dial_gui_widget_undo_clear(GuiWidgetImpl *w);
+int64_t        dial_gui_widget_undo_capacity(GuiWidgetImpl *w);
+/* Slider 拖动：PRESS 置 drag_active、MOVE 按绝对 x 设值、RELEASE 清。 */
+int64_t        dial_gui_widget_dragging(GuiWidgetImpl *w);
+/* 每控件主题覆写：role 越界 / color 高 32 位非 0 一律失败并写错误槽。 */
+int64_t        dial_gui_widget_set_color(GuiWidgetImpl *w, int64_t role, int64_t color);
+int64_t        dial_gui_widget_color(GuiWidgetImpl *w, int64_t role);
+int64_t        dial_gui_widget_has_color(GuiWidgetImpl *w, int64_t role);
+int64_t        dial_gui_widget_clear_color(GuiWidgetImpl *w, int64_t role);
+int64_t        dial_gui_widget_clear_colors(GuiWidgetImpl *w);
+/* Grid 自动换行：容器级开关，子节点按加入顺序自动依次占格。 */
+int64_t        dial_gui_widget_set_grid_autoflow(GuiWidgetImpl *w, int64_t on);
+int64_t        dial_gui_widget_grid_autoflow(GuiWidgetImpl *w);
 /* 后加子优先、取最深可见节点；命中时把绝对坐标写回 hit->abs_* 并输出。 */
 GuiWidgetImpl *gui_widget_hit(GuiWidgetImpl *root, int x, int y,
                               int *out_abs_x, int *out_abs_y);
@@ -543,6 +599,12 @@ int            gui_widget_key(GuiWidgetImpl *root, int kind, int key, int mods);
 /* a/b 是 UTF-8 字节偏移，自动 clamp 到字符边界；a==b 表示清选区。*/
 int            gui_widget_select(GuiWidgetImpl *w, int a, int b);
 int            gui_widget_set_cursor(GuiWidgetImpl *w, int pos);
+/* ---- 第 17 层：TextBox 撤销 / 重做快照栈（dial_gui_input.c）----------- *
+ * 快照在 replace_range 成功改文本前入栈；显式 set_text 建立新基线并清两栈。
+ * 返回 1 = 成功撤销 / 重做，0 = 栈空（不是错误，绝不写错误槽）。 */
+int            gui_widget_undo(GuiWidgetImpl *w);
+int            gui_widget_redo(GuiWidgetImpl *w);
+void           gui_widget_undo_clear(GuiWidgetImpl *w);
 
 /* ---- 主题层：dial_gui_theme.c（纯 C，三平台共用，无平台符号）---------- *
  * 进程级静态颜色表，GUI 单线程事件循环无需加锁；默认值逐字取自 GUI_THEME_*，

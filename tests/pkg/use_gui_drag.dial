@@ -1,0 +1,87 @@
+// gui.dialpkg 第 17 层：Slider 拖动端到端用例（AA 组，v1.10 未发布增补）。
+//
+// 纯内存 + 离屏画布（零 DISPLAY 依赖）。独立 offscreen GuiPainter，绝不触碰
+// 既有 CRC 基准。验证：PRESS 置拖动态但不改 value、MOVE 按绝对 x 设值并
+// clamp、鼠标移出控件仍生效、RELEASE 清态、非 SLIDER 不进拖动、离屏 CRC 稳定。
+//
+// 输出结构化 `name = ok`（失败 `= bad`），断言交给 run_tests.sh 的 grep。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var root: GuiWidget = dial_gui_widget_tree(200, 100);
+    var sl: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_set_kind(sl, 6), 0, "drag_kind_slider");    // 6 = SLIDER
+    expect_int(dial_gui_widget_set_rect(sl, 0, 0, 200, 40), 0, "drag_rect");
+    expect_int(dial_gui_widget_set_range(sl, 0, 100), 0, "drag_range");
+    var btn: GuiWidget = dial_gui_widget_add(root);
+    expect_int(dial_gui_widget_set_kind(btn, 2), 0, "drag_kind_button");   // 2 = BUTTON
+    expect_int(dial_gui_widget_set_rect(btn, 0, 50, 100, 40), 0, "drag_btn_rect");
+    expect_int(dial_gui_widget_layout_apply(root, 200, 100), 0, "drag_apply");
+
+    // ---- 0) 空闲态 -----------------------------------------------------
+    expect_int(dial_gui_widget_dragging(sl), 0, "drag_idle");
+    expect_int(dial_gui_widget_value(sl), 0, "drag_value_init");
+
+    // ---- 1) PRESS 命中 SLIDER：进入拖动态，但绝不改 value ---------------
+    expect_int(dial_gui_widget_handle(root, 1, 100, 20, 1), 0, "drag_press");
+    expect_int(dial_gui_widget_dragging(sl), 1, "drag_active_on_press");
+    expect_int(dial_gui_widget_value(sl), 0, "drag_press_no_value_change");
+
+    // ---- 2) MOVE 按绝对 x 设值（轨道内宽 192，局部 x 减 4）-------------
+    expect_int(dial_gui_widget_handle(root, 3, 200, 20, 0), 0, "drag_move_right");
+    expect_int(dial_gui_widget_value(sl), 100, "drag_value_max");
+    expect_int(dial_gui_widget_handle(root, 3, 0, 20, 0), 0, "drag_move_left");
+    expect_int(dial_gui_widget_value(sl), 0, "drag_value_min");
+    expect_int(dial_gui_widget_handle(root, 3, 100, 20, 0), 0, "drag_move_mid");
+    expect_int(dial_gui_widget_value(sl), 50, "drag_value_mid_50");
+
+    // ---- 3) 拖出控件矩形仍按同一坐标系设值、绝不跳变 -------------------
+    expect_int(dial_gui_widget_handle(root, 3, 900, 900, 0), 0, "drag_move_far_out");
+    expect_int(dial_gui_widget_value(sl), 100, "drag_value_clamped_far");
+    expect_int(dial_gui_widget_handle(root, 3, -500, -500, 0), 0, "drag_move_neg_out");
+    expect_int(dial_gui_widget_value(sl), 0, "drag_value_clamped_neg");
+    expect_int(dial_gui_widget_handle(root, 3, 100, 20, 0), 0, "drag_move_back_mid");
+    expect_int(dial_gui_widget_value(sl), 50, "drag_value_back_50");
+
+    // ---- 4) RELEASE 清拖动态（并保留既有点击设值语义）------------------
+    expect_int(dial_gui_widget_handle(root, 2, 100, 20, 1), 1, "drag_release");
+    expect_int(dial_gui_widget_dragging(sl), 0, "drag_active_off_release");
+    expect_int(dial_gui_widget_value(sl), 50, "drag_value_after_release");
+
+    // ---- 5) 非 SLIDER 的 PRESS 不进入拖动，MOVE 零影响 -----------------
+    expect_int(dial_gui_widget_handle(root, 1, 50, 70, 1), 0, "drag_press_button");
+    expect_int(dial_gui_widget_dragging(btn), 0, "drag_button_not_dragging");
+    expect_int(dial_gui_widget_dragging(sl), 0, "drag_slider_not_dragging");
+    expect_int(dial_gui_widget_handle(root, 3, 180, 20, 0), 0, "drag_move_without_press");
+    expect_int(dial_gui_widget_value(sl), 50, "drag_value_unchanged_without_press");
+    expect_int(dial_gui_widget_handle(root, 2, 50, 70, 1), 1, "drag_button_release");
+
+    // ---- 6) 离屏绘制 CRC 稳定（确定性）---------------------------------
+    var p: GuiPainter = dial_gui_painter_offscreen(200, 100);
+    expect(!is_null(p), "drag_painter_new");
+    expect_int(dial_gui_set_aa(p, 1), 0, "drag_set_aa_off");
+    expect_int(dial_gui_widget_draw(root, p), 0, "drag_draw");
+    var crc0: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_widget_draw(root, p), 0, "drag_draw2");
+    var crc1: int = dial_gui_painter_crc32(p);
+    expect_int(crc0, crc1, "drag_crc_stable");
+    expect_str(str(crc0), "734328573", "drag_crc_pinned");
+    print("drag_crc = " + str(crc0));
+
+    dial_gui_painter_free(p);
+    dial_gui_widget_tree_free(root);
+    print("drag_done = true");
+    return 0;
+}
