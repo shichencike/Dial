@@ -74,7 +74,7 @@ dialc/
 │   ├── dial_array.h / .c   #   Array<int>
 │   ├── dial_map.h / .c     #   Map（int → int，ARC）
 │   └── dial_io.h / .c      #   打印 / 读行
-├── packages/               # 官方 .dialpkg 包（http / text / json / crypto / gui）
+├── packages/               # 官方 .dialpkg 包（http / text / json / crypto / gui / winapi）
 │   └── gui/                #   手搓 GUI 十五层：七层 C 契约 + 第 9/10/11/12/13/14/15 层（125 个 extern fn，合计 279 个）+ 第 8 层 Dial 侧 OO 封装（gui_oo.dial，278 个 impl 方法，随包 src/ 分发）（见 §38）
 ├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
 ├── tests/
@@ -5876,6 +5876,7 @@ A–Z + AA + AB **二十八组**，见 §38）。
 | `text.dialpkg` | **自研 Thompson NFA + Pike VM**（`packages/text/src/dial_regex.c`），零第三方依赖 | 线性时间，从根上避开回溯爆炸。支持字面量 / `.` / 字符类 / `\d \w \s` 等 / `* + ?` / 分支 `\|` / 捕获组 / `^ $ \b`；**不做**后向引用、lookaround、懒惰量词、`{m,n}`、Unicode 属性类。按字节匹配，捕获组最多 9 个。`Regex` 句柄缓存最近一次匹配结果，**不要跨线程共享**同一句柄的 `find/is_match` 与 `group`。已知语义差异 `(a*)*b` 组 1 取 `"aaa"`（见 `text.diali`） |
 | `json.dialpkg` | **自研递归下降解析 + 紧凑序列化**（`packages/json/src/dial_json_codec.c`），零第三方依赖 | `.diali` 无泛型容器，值树封在 `type Json;`。**所有权唯一规则**：返回 `Json` 的函数都给独立拥有的句柄，一律 `dial_json_free`；`array_push` / `object_set` 深拷贝 `child`。严格模式拒尾随逗号 / 多余根值 / 非法 `\u` / 孤立代理项并给字节偏移，深度上限 64，拒绝 `\u0000`；整数走 `int64_t`（>2^53 不丢精度），浮点走 `double` |
 | `crypto.dialpkg` | **复用 vendor mbedTLS 3.6.2**，只做 FFI 包装 | 五种摘要走 `mbedtls_md()`、HMAC-SHA256 走 `mbedtls_md_hmac()`、Base64 走 `mbedtls_base64_*()`——**密码学绝不手搓**。MD5 / SHA-1 明确标注仅用于校验与兼容。`string` / `bytes` 双入口，`dial_crypto_digest` 返回原始摘要字节。失败返回空值 + 线程局部错误码；`bytes` 类返回长度 0 的空缓冲而非 NULL（`is_null` 不适用于 `Type::Bytes`） |
+| `winapi.dialpkg` | **薄封装 Windows API**（kernel32 / user32 / gdi32 代表函数，`packages/winapi/src/winapi_impl.c` 单源文件），函数名 / 参数名原样不动 | **只做装载 + 调用 + 错误码搬运**，不重写任何 Win32 语义。平台库运行时 `LoadLibraryA` / `GetProcAddress` 动态装载：`.a` 自包含，Dial 侧不写 link、链接期无 `-luser32` / `-lgdi32` 依赖，缺库返回明确错误码 + 错误槽而非加载失败。Windows（x86_64-pc-windows-gnu）真实现；Linux / musl 桩返回 `-1`（句柄类 `0`）并把错误槽置 `WINAPI_ERR_PLATFORM`，诚实告知「本平台不支持」。W 系列收 UTF-16（C 侧手写 UTF-8→UTF-16LE），A 系列（LoadLibraryA）直传 UTF-8。不透明句柄严格禁止字面量 `0`，`HMENU` / `HInstance` / `HGDIOBJ` 无 getter，故提供 `winapi_null_*` 空句柄构造器（非 Win32 函数，不计入「函数名原样」承诺）。**未实装不写进契约**：出参缓冲 API（GetWindowTextW）、结构体参数 API（RegisterClassW / WNDCLASS / MSG / PAINTSTRUCT）、其余 DLL（advapi32 / shell32 / ...）与全量 Win32 表面——那是制造漂移而非预留接口 |
 
 **三包共同的 FFI 约定**（与 `http` 包一致，写进各包 `src/*.h` 注释）：
 

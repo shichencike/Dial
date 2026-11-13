@@ -583,7 +583,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── dial_array.h / .c   #   Array&lt;int&gt;
 │   ├── dial_map.h / .c     #   Map（int → int，ARC）
 │   └── dial_io.h / .c      #   打印 / 读行
-├── packages/               # 官方 .dialpkg 包（http / text / json / crypto / gui）
+├── packages/               # 官方 .dialpkg 包（http / text / json / crypto / gui / winapi）
 │   └── gui/                #   手搓 GUI 十五层：七层 C 契约 + 第 9/10/11/12/13/14/15 层（125 个 extern fn，合计 279 个）+ 第 8 层 Dial 侧 OO 封装（gui_oo.dial，278 个 impl 方法，随包 src/ 分发）（见 §38）
 ├── examples/               # 示例（*.dial + 同名 *.expected 黄金输出）
 ├── tests/
@@ -9543,6 +9543,11 @@ A–Z + AA + AB <strong>二十八组</strong>，见 §38）。</p>
 <td><code>crypto.dialpkg</code></td>
 <td><strong>复用 vendor mbedTLS 3.6.2</strong>，只做 FFI 包装</td>
 <td>五种摘要走 <code>mbedtls_md()</code>、HMAC-SHA256 走 <code>mbedtls_md_hmac()</code>、Base64 走 <code>mbedtls_base64_*()</code>——<strong>密码学绝不手搓</strong>。MD5 / SHA-1 明确标注仅用于校验与兼容。<code>string</code> / <code>bytes</code> 双入口，<code>dial_crypto_digest</code> 返回原始摘要字节。失败返回空值 + 线程局部错误码；<code>bytes</code> 类返回长度 0 的空缓冲而非 NULL（<code>is_null</code> 不适用于 <code>Type::Bytes</code>）</td>
+</tr>
+<tr>
+<td><code>winapi.dialpkg</code></td>
+<td><strong>薄封装 Windows API</strong>（kernel32 / user32 / gdi32 代表函数，<code>packages/winapi/src/winapi_impl.c</code> 单源文件），函数名 / 参数名原样不动</td>
+<td><strong>只做装载 + 调用 + 错误码搬运</strong>，不重写任何 Win32 语义。平台库运行时 <code>LoadLibraryA</code> / <code>GetProcAddress</code> 动态装载：<code>.a</code> 自包含，Dial 侧不写 link、链接期无 <code>-luser32</code> / <code>-lgdi32</code> 依赖，缺库返回明确错误码 + 错误槽而非加载失败。Windows（x86_64-pc-windows-gnu）真实现；Linux / musl 桩返回 <code>-1</code>（句柄类 <code>0</code>）并把错误槽置 <code>WINAPI_ERR_PLATFORM</code>，诚实告知「本平台不支持」。W 系列收 UTF-16（C 侧手写 UTF-8→UTF-16LE），A 系列（LoadLibraryA）直传 UTF-8。不透明句柄严格禁止字面量 <code>0</code>，<code>HMENU</code> / <code>HInstance</code> / <code>HGDIOBJ</code> 无 getter，故提供 <code>winapi_null_*</code> 空句柄构造器（非 Win32 函数，不计入「函数名原样」承诺）。<strong>未实装不写进契约</strong>：出参缓冲 API（GetWindowTextW）、结构体参数 API（RegisterClassW / WNDCLASS / MSG / PAINTSTRUCT）、其余 DLL（advapi32 / shell32 / ...）与全量 Win32 表面——那是制造漂移而非预留接口</td>
 </tr>
 </tbody>
 </table>

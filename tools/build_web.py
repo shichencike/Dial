@@ -839,6 +839,42 @@ fn main(): int {
 ```
 
 三平台零警告构建（mbedTLS 随包 vendor 进仓库）。""",
+
+    "winapi": """\
+## Windows API 薄封装包 winapi
+
+**薄封装 Windows API**（kernel32 / user32 / gdi32 代表函数），Dial 侧函数名与
+参数名**一个都不改**，C 侧只做「装载 + 调用 + 错误码搬运」，不重写任何 Win32 语义。
+
+- **运行时动态装载**：平台库一律 `LoadLibraryA` / `GetProcAddress` 解析，`.a` 自包含；
+  Dial 侧不需要写 link、链接期也没有 `-luser32` / `-lgdi32` 依赖，缺库返回明确错误码 +
+  错误槽，绝不静默崩溃（与 gui 包同口径）。
+- **真实现 vs 桩**：Windows（x86_64-pc-windows-gnu）走真实 user32 / gdi32 / kernel32；
+  其他平台（Linux / musl）诚实返回 `-1`（句柄类返回 `0`）并把错误槽置
+  `WINAPI_ERR_PLATFORM`，明确告知「本平台不支持」。
+- **编码**：W 系列（MessageBoxW / CreateWindowExW / ...）收 UTF-16——C 侧手写
+  UTF-8→UTF-16LE；A 系列（LoadLibraryA）直接传 UTF-8 字节。
+- **错误协议**：`winapi_last_error()` / `winapi_last_error_msg()` 取最近错误码与描述；
+  错误走返回码，不抛 Dial 异常。
+- **空句柄构造器**：Dial 不透明句柄严格禁止字面量 `0`，`HMENU` / `HInstance` / `HGDIOBJ`
+  无 getter，故提供 `winapi_null_hmenu` / `winapi_null_hinstance` / `winapi_null_hgdiobj`
+  （属 FFI 粘合层，非 Win32 函数，不计入「函数名原样」承诺）。
+
+```dial
+import "winapi";
+
+fn main(): int {
+    // Linux 下桩：句柄类取 null（FindWindowW 在桩下返回 0），错误槽置平台错误
+    let w: HWnd = FindWindowW("", "");
+    let r: int = MessageBoxW(w, "hi", "title", 0);
+    print(str(winapi_last_error()));   // 1 = 当前平台不支持
+    return 0;
+}
+```
+
+> 单源文件 `winapi_impl.c`：用 `#ifdef _WIN32` 区分真实现与桩，三平台一份源码。
+> 未实装不写进契约：出参缓冲 API、结构体参数 API、其余 DLL 与全量 Win32 表面
+> ——那是制造漂移而非预留接口。""",
 }
 
 # (slug, 显示名, dial.toml 路径或 None, .diali 路径, version 覆盖, abi 覆盖)
@@ -854,6 +890,8 @@ _PKG_SPECS = [
      PACKAGES_DIR / "json" / "json.diali", None, None),
     ("crypto", "密码学包 crypto", PACKAGES_DIR / "crypto" / "dial.toml",
      PACKAGES_DIR / "crypto" / "crypto.diali", None, None),
+    ("winapi", "Windows API 薄封装包 winapi", PACKAGES_DIR / "winapi" / "dial.toml",
+     PACKAGES_DIR / "winapi" / "winapi.diali", None, None),
 ]
 
 

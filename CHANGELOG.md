@@ -133,6 +133,19 @@
   三平台 `.a` 零链接期 GUI/GL 平台符号、未打 tag / 未发 Release）。AA 组 5x~5z 四 demo
   （scale/virtual/ime/platform）+ AE 组编译器两 flag 随包回归全绿，第 1~17 层 21 个既有 demo
   `bad=0` 防漂移验证通过，见 README §38.24）；
++ **官方包 `winapi.dialpkg`：Windows API 薄封装**（kernel32 / user32 / gdi32 代表函数，
+  `packages/winapi/` 单源文件 `winapi_impl.c`，`#ifdef _WIN32` 区分真实现与桩）。函数名 /
+  参数名原样不动，**只做装载 + 调用 + 错误码搬运**，不重写任何 Win32 语义；平台库一律运行时
+  `LoadLibraryA` / `GetProcAddress` 动态装载，`.a` 自包含、Dial 侧不写 link、链接期零 `-luser32`
+  / `-lgdi32` 依赖；Windows（x86_64-pc-windows-gnu）真实现、Linux / musl 桩返回 `-1`（句柄类 `0`）
+  且错误槽置 `WINAPI_ERR_PLATFORM`；W 系列收 UTF-16（C 侧手写 UTF-8→UTF-16LE）、A 系列直传 UTF-8；
+  `winapi_last_error` / `winapi_last_error_msg` 取最近错误码与描述、不抛 Dial 异常。**共 38 个
+  `extern fn`**（33 三 DLL 外函数 + 2 错误访问器 + 3 空句柄构造器 `winapi_null_hmenu` /
+  `winapi_null_hinstance` / `winapi_null_hgdiobj`）；Dial 不透明句柄严格禁止字面量 `0`，`HMENU` /
+  `HInstance` / `HGDIOBJ` 无 getter，故空句柄构造器归 FFI 粘合层、不计入「函数名原样」承诺。`abi = 6`
+  / `version = 1.10.0` 不变、零 OO 层、三平台 `.a` 零链接期 Win32 平台符号、未打 tag / 未发 Release。
+  AA 组 5aa demo（三 DLL 33 外函数 + 访问器 + 空句柄构造器全走桩、返回 -1/0、错误槽=平台错误、
+  零崩溃）+ AD 组契约审计（38 extern fn / 7 不透明句柄类型 / 零 OO 声明）全绿，见 README 包清单表；
 + **GUI 第 8 层：Dial 侧 OO 封装**（`gui_oo.dial` 用 278 个 `impl` 方法包住 279 个
   C 风格 `extern fn`，纯 Dial 源码、随包 `src/` 分发（装包即用）、零 `extern fn`
   增量、ABI 不变，见 README §25.11 / §38.14）；
