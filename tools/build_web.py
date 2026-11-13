@@ -357,7 +357,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
 # ---------------------------------------------------------------------------
 
 TOPICS = {
-    "unreleased-dev": "手搓 GUI 十五层（TextBox 输入层 / 统一键码 / XTest 实机注入 / 可覆写主题色 + Radio·Slider·Progress / 信号槽·控件事件订阅纯值队列 / 菜单·对话框覆盖层复用纯值信号队列 / 第 9 层滚动视图：视口裁剪 + 滚动条几何·命中·绘制 + 偏移推进 wheel·drag·scroll_to、纯 C 零平台符号、零 DISPLAY 依赖 / 第 10 层右键上下文菜单：复用第 7 层 GuiMenu + 弹出锚点 + 命中·悬停·选中·绘制、借用语义不转移菜单所有权、纯 C 零平台符号、零 DISPLAY 依赖 / 第 11 层悬浮提示：文本 + 位置 + 尺寸 + 悬停计时、延迟由调用方推进不读时钟、纯 C 零平台符号、零 DISPLAY 依赖 / 第 12 层状态栏：左·右文本 + 进度条槽位、进度值越界夹紧、纯 C 零平台符号、零 DISPLAY 依赖 / 第 13 层通知气泡：FIFO 消息队列 + 生命周期纯值推进·到期自动消隐、纯 C 零平台符号、零 DISPLAY 依赖 / 第 14 层窗口级覆盖层自动集成：5 类覆盖层挂窗 + win.draw() 固定 z-order 自动叠加 + 借用语义 + 空槽位零像素影响、纯 C 零平台符号、零时钟依赖 / 第 15 层快捷键 / 命令系统：按键组合 → 命令 id 的纯内存表 + 命令启用态、dispatch 只发启用且命中的命令、冲突 Fail-Fast、容量 64 定长、纯 C 零平台符号、零 DISPLAY 依赖 / 第 8 层 Dial 侧 OO 封装 gui_oo.dial：278 个 impl 方法、纯源码随包 src/ 分发（装包即用）、零 extern fn 增量、C 风格与 OO 风格绘制 CRC 逐字节相等）+ GUI 第 16 层：网格布局 GRID（set_grid/set_grid_cell，set_layout 接受 mode 3，越界 Fail-Fast）+ ComboBox（kind=10，单选 + 下拉展开）+ ListBox（kind=11，单选 / 多选 toggle）+ 右键·滚轮交互（button==3 置 right_pressed、滚轮上/下滚按步进增减 SLIDER 值、clamp 不越界），共 23 个 extern fn（279→302）、OO 封装 278→301 方法、AD 审计 301/301/302、纯 C 零平台符号、零 DISPLAY 依赖、未打 tag（见 README §38.22）+ GUI 第 17 层：TextBox 撤销/重做（快照栈容量 32、显式 set_text 不进历史、光标随快照恢复）+ Slider 拖动（PRESS 置态 / MOVE 按绝对 x 设值 / RELEASE 清）+ 每控件主题覆写（ov_mask 位图、未覆写逐像素回落全局表、color=0 合法）+ Grid 自动换行（按加入顺序自动排格），共 16 个 extern fn（302→318）、OO 封装 301→317 方法、AD 审计 317/317/318、四组能力未启用时旧路径逐像素等价、既有 CRC 全不漂移、纯 C 零平台符号、零 DISPLAY 依赖、未打 tag（见 README §38.23）+ int32/float32 一等类型与 FFI 精确 32 位宽度 + B1 impl 方法块（obj.m() 编译期脱糖、不新增关键字、ABI 不变，GUI 句柄 win.draw()）+ 官网 6 个包介绍页 + 包索引页 + http.dialpkg 三处 Fail-Fast/可用性修复 + dialpkg src/ 随包 Dial 源码模块（[src] 段显式声明 + manifest.src 映射 + 三级 import 装包即用 + 逐文件 SHA256 保护 + 向后兼容，见 README §25.11）+ 工具链强化（dialc fmt 间距规范化 / dialc pack --init·--dry-run·--json·--verify，见 README §34.10）+ 工具链再强化（dialc doctor 环境自检 / deps 三级 import 依赖图 / 统一诊断人读·JSON 机读 / watch·clean·completion 开发循环，见 README §34.11）+ LSP 再强化（诊断码表 CLI/LSP 同源 / 增量文档同步 / 工作区文件监视 / 文档内高亮，见 README §28.7.2）（开发中增量，未升版本号 / 未发布）",
+    "unreleased-dev": "手搓 GUI 十五层（TextBox 输入层 / 统一键码 / XTest 实机注入 / 可覆写主题色 + Radio·Slider·Progress / 信号槽·控件事件订阅纯值队列 / 菜单·对话框覆盖层复用纯值信号队列 / 第 9 层滚动视图：视口裁剪 + 滚动条几何·命中·绘制 + 偏移推进 wheel·drag·scroll_to、纯 C 零平台符号、零 DISPLAY 依赖 / 第 10 层右键上下文菜单：复用第 7 层 GuiMenu + 弹出锚点 + 命中·悬停·选中·绘制、借用语义不转移菜单所有权、纯 C 零平台符号、零 DISPLAY 依赖 / 第 11 层悬浮提示：文本 + 位置 + 尺寸 + 悬停计时、延迟由调用方推进不读时钟、纯 C 零平台符号、零 DISPLAY 依赖 / 第 12 层状态栏：左·右文本 + 进度条槽位、进度值越界夹紧、纯 C 零平台符号、零 DISPLAY 依赖 / 第 13 层通知气泡：FIFO 消息队列 + 生命周期纯值推进·到期自动消隐、纯 C 零平台符号、零 DISPLAY 依赖 / 第 14 层窗口级覆盖层自动集成：5 类覆盖层挂窗 + win.draw() 固定 z-order 自动叠加 + 借用语义 + 空槽位零像素影响、纯 C 零平台符号、零时钟依赖 / 第 15 层快捷键 / 命令系统：按键组合 → 命令 id 的纯内存表 + 命令启用态、dispatch 只发启用且命中的命令、冲突 Fail-Fast、容量 64 定长、纯 C 零平台符号、零 DISPLAY 依赖 / 第 8 层 Dial 侧 OO 封装 gui_oo.dial：278 个 impl 方法、纯源码随包 src/ 分发（装包即用）、零 extern fn 增量、C 风格与 OO 风格绘制 CRC 逐字节相等）+ GUI 第 16 层：网格布局 GRID（set_grid/set_grid_cell，set_layout 接受 mode 3，越界 Fail-Fast）+ ComboBox（kind=10，单选 + 下拉展开）+ ListBox（kind=11，单选 / 多选 toggle）+ 右键·滚轮交互（button==3 置 right_pressed、滚轮上/下滚按步进增减 SLIDER 值、clamp 不越界），共 23 个 extern fn（279→302）、OO 封装 278→301 方法、AD 审计 301/301/302、纯 C 零平台符号、零 DISPLAY 依赖、未打 tag（见 README §38.22）+ GUI 第 17 层：TextBox 撤销/重做（快照栈容量 32、显式 set_text 不进历史、光标随快照恢复）+ Slider 拖动（PRESS 置态 / MOVE 按绝对 x 设值 / RELEASE 清）+ 每控件主题覆写（ov_mask 位图、未覆写逐像素回落全局表、color=0 合法）+ Grid 自动换行（按加入顺序自动排格），共 16 个 extern fn（302→318）、OO 封装 301→317 方法、AD 审计 317/317/318、四组能力未启用时旧路径逐像素等价、既有 CRC 全不漂移、纯 C 零平台符号、零 DISPLAY 依赖、未打 tag（见 README §38.23）+ GUI 第 18 层：高 DPI 整数放大（GuiPainter.scale∈[1,4]、painter_scaled 最近邻放大、scale==1 逐像素等价历史路径、越界 Fail-Fast）+ 虚拟化 lazy load（virtual_on/total/first/count 纯值数据槽、逻辑总行数上限 1000000、可视窗口 <=64 复用 items[]、Dial→C 单向推进、virtual_on==0 恰等于旧 item_count 保证旧 CRC 零漂移）+ IME 预编辑纯值事件块（挂 widget 树根、不扩 GUI_SIG_* 信号位、signal_count() 仍为 7）+ GPU/原生平台纯值契约层（gpu_available/tray_set/native_file_dialog/global_hotkey_register 只做能力探测 + Fail-Fast + 确定性降级码 -2，不 dlopen GL/Vulkan、不碰 framebuffer、真实后端留下一批）+ 编译器 --tiny（体积模式：-Os + --gc-sections + strip，约 7KB）/ --single-file（便携模式：-static 全静态链接、不依赖宿主，正交叠加 --fast），共 26 个 extern fn（318→344）、OO 封装 317→343 方法、AD 审计 343/343/344、纯值契约层不破 GUI 宪法（只放宽「新增 1 个 .c」一条）、旧 318 个签名一字不动、abi=6/version=1.10.0 不变、三平台 .a 零链接期 GUI/GL 平台符号、未打 tag（见 README §38.24）+ int32/float32 一等类型与 FFI 精确 32 位宽度 + B1 impl 方法块（obj.m() 编译期脱糖、不新增关键字、ABI 不变，GUI 句柄 win.draw()）+ 官网 6 个包介绍页 + 包索引页 + http.dialpkg 三处 Fail-Fast/可用性修复 + dialpkg src/ 随包 Dial 源码模块（[src] 段显式声明 + manifest.src 映射 + 三级 import 装包即用 + 逐文件 SHA256 保护 + 向后兼容，见 README §25.11）+ 工具链强化（dialc fmt 间距规范化 / dialc pack --init·--dry-run·--json·--verify，见 README §34.10）+ 工具链再强化（dialc doctor 环境自检 / deps 三级 import 依赖图 / 统一诊断人读·JSON 机读 / watch·clean·completion 开发循环，见 README §34.11）+ LSP 再强化（诊断码表 CLI/LSP 同源 / 增量文档同步 / 工作区文件监视 / 文档内高亮，见 README §28.7.2）（开发中增量，未升版本号 / 未发布）",
     "v1.10": "底层原语补齐（@asm / simd）+ 首个发布标签 v1.1",
     "v1.04": "FFI 成为语言一等公民",
     "v1-0-milestone": "v1.0 里程碑达成的分版记录（v1.00 ~ v1.03）",
@@ -606,8 +606,8 @@ Dial 的**标准库**，随编译器发布、编译你的程序时**自动链入
     "gui": """\
 ## GUI 地基包 gui
 
-不用 Qt / GTK / SDL，**纯 C 手搓**的 GUI 包，前七层 + 第 9/10/11/12/13/14/15/16/17 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统·网格布局 GRID + 组合框 ComboBox + 列表框 ListBox + 右键·滚轮交互·撤销/重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行是 C 契约、
-**共 318 个 `extern fn`**：地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 +
+不用 Qt / GTK / SDL，**纯 C 手搓**的 GUI 包，前七层 + 第 9/10/11/12/13/14/15/16/17/18 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统·网格布局 GRID + 组合框 ComboBox + 列表框 ListBox + 右键·滚轮交互·撤销/重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行·高 DPI 整数放大 + 虚拟化 lazy load + IME 预编辑纯值事件 + GPU/原生平台纯值契约层是 C 契约、
+**共 344 个 `extern fn`**：地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 +
 命中 + 主动分发）/ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态）/
 输入层（TextBox + 焦点链 + 统一功能键码 + XTest 实窗注入）/ 主题层与控件扩展
 （14 个可覆写颜色角色 + Radio / Slider / ProgressBar）/ 信号槽（6 类可订阅纯值
@@ -648,8 +648,19 @@ headless 可测，见 §38.22.1）/ **组合框 ComboBox**（`dial_gui_combo_*`�
 **Grid 自动换行**（容器开关打开后按加入顺序自动依次占格、显式 col/row 被忽略、
 cspan 仍生效、溢出夹末行，见 §38.23.4）。四组能力**未启用时逐像素等价于旧路径**，
 故第 1~16 层既有 CRC 钉值一字未改、七个既有 demo 在新内核下重跑仍 0 bad。
+**第 18 层**（26 个 `extern fn`，见 §38.24）：**高 DPI 整数放大**（`GuiPainter.scale ∈ [1,4]`、
+`painter_scaled` 最近邻放大、`scale==1` 逐像素等价历史路径、越界 Fail-Fast，
+见 §38.24.2）/ **虚拟化 lazy load**（纯值数据槽 `virtual_on/total/first/count`、逻辑总行数
+上限 1000000、可视窗口 <=64 复用 `items[]`、Dial→C 单向推进、`virtual_on==0` 恰等于旧
+`item_count` 保证旧 CRC 零漂移，见 §38.24.3）/ **IME 预编辑纯值事件块**（挂 widget 树根、
+不扩 `GUI_SIG_*` 信号位、`signal_count()` 仍为 7，见 §38.24.4）/ **GPU 合成 + 原生平台集成
+纯值契约层**（只做能力探测 + Fail-Fast + 确定性降级码 `-2`，不 `dlopen` GL/Vulkan、不碰
+framebuffer、真实后端留下一批，见 §38.24.5）/ **编译器 `--tiny` / `--single-file`**（纯工具链层、
+不破 GUI 宪法，见 §38.24.1）。本轮**仅放宽「新增 1 个 `.c`」一条**宪法，其余全守
+（只追加 26 个 `extern fn`、旧 318 个签名一字不动、`abi=6` / `version=1.10.0` 不变、
+三平台 `.a` 零链接期 GUI/GL 平台符号、未打 tag / 未发 Release）。
 **第 8 层是
-Dial 侧 OO 封装层**（`gui_oo.dial`，317 个 `impl` 方法把上述 C 风格函数包成 `win.draw()`
+Dial 侧 OO 封装层**（`gui_oo.dial`，343 个 `impl` 方法把上述 C 风格函数包成 `win.draw()`
 这样的惯用写法，纯 Dial 源码、随包 `src/` 分发（装包即用）、**零 `extern fn` 增量、ABI 不变**，见 §38.14）。
 
 ```dial
@@ -721,7 +732,8 @@ fn main(): int {
 [§38.20 窗口级覆盖层自动集成](../spec.html#3820-窗口级覆盖层自动集成第-14-层)、
 [§38.21 快捷键 / 命令系统](../spec.html#3821-快捷键--命令系统第-15-层)、
 [§38.22 网格布局 + 组合框 / 列表框 + 右键·滚轮交互](../spec.html#3822-网格布局--组合框--列表框--右键滚轮交互第-16-层) 与
-[§38.23 TextBox 撤销/重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行](../spec.html#3823-textbox-撤销--重做--slider-拖动--每控件主题覆写--grid-自动换行第-17-层)。""",
+[§38.23 TextBox 撤销/重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行](../spec.html#3823-textbox-撤销--重做--slider-拖动--每控件主题覆写--grid-自动换行第-17-层) 与
+[§38.24 高 DPI 放大 + 虚拟化 lazy load + IME 预编辑 + GPU/原生纯值契约层 + 编译器两 flag](../spec.html#3824-高-dpi-放大--虚拟化-lazy-load--ime-预编辑--gpu原生纯值契约层--编译器两-flag第-18-层)。""",
 
     "http": """\
 ## HTTP 客户端包 http

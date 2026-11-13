@@ -295,8 +295,8 @@ dialc build main.dial -o main
 ### 3.2.2 命令行用法总览
 
 ```bash
-dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast]
-dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast]
+dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file]
+dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file]
 dialc install <包.dialpkg | URL> [--sha256 <哈希>]
 dialc version | --version | -V
 dialc lsp
@@ -310,6 +310,12 @@ dialc lsp
 | `version` / `--version` / `-V` | **打印版本号**并退出，例如 `dialc 1.10.0` |
 | `lsp` | 启动语言服务器（走 stdio 的 JSON-RPC；**不由人手敲**，见 [§28](#28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化)） |
 
+> **第 18 层两种产物形态**（工具链层，非 `.dialpkg` 契约）：`--tiny` 体积模式
+> （C 侧 `-Os -ffunction-sections -fdata-sections` + 链接期 `-Wl,--gc-sections -s`，
+> 去掉 DWARF 与符号表）、`--single-file` 便携模式（链接期 `-static` 全静态，
+> 产物不依赖宿主动态 libc）。详见 [§38.24.1](#38241-编译器---tiny体积模式---single-file便携模式) 与
+> [§3.4.2](#342---single-file显式全静态链接第-18-层)。
+
 > **版本号只有一个出处**：`dialc version` 打印的版本直接取自 `Cargo.toml` 的 `version` 字段
 > （编译期注入），与官网、CHANGELOG、发布包名**同源**——
 > 任何一处手写版本号都必然随发布漂移（这仓库已经因为硬编码漂过三轮）。
@@ -318,8 +324,8 @@ dialc lsp
 ### 3.3 编译 Dial 程序
 
 ```bash
-dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast]
-dialc run   <源文件.dial> [-o 可执行文件] [--safety debug|safe|fast]
+dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file]
+dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file]
 ```
 
 安全等级（Fail-Fast，详见 §20）：
@@ -331,6 +337,18 @@ dialc run   <源文件.dial> [-o 可执行文件] [--safety debug|safe|fast]
 | `--fast` / `--safety fast` | ReleaseFast | 关闭全部检查，越界/除零即 UB（与 C 一致）——⚠️ **危险，详见下方警告** |
 
 等级同时作用于 LLVM IR 与 C Runtime（`-DDIAL_SAFETY=N`），两侧口径一致。
+
+产物形态开关（第 18 层，与上面的安全等级**正交**）：
+
+| 参数 | 形态 | 行为 |
+| --- | --- | --- |
+| `--tiny` | 体积模式 | C 侧 `-Os -ffunction-sections -fdata-sections`、链接期 `-Wl,--gc-sections -s`（strip 掉 DWARF 与符号表），并强制走源码编译 stdlib 回退路径（绕开预编译 `-O2` 归档）；与 `--fast` / `--pgo` / `-g` 目标相反，一律 **Fail-Fast 拒绝**（见 §38.24.1） |
+| `--single-file` | 便携模式 | 链接期 `-static` 全静态链接，产物 `file` 显示 `statically linked`、`ldd` 显示 `not a dynamic executable`；可与 LTO / PGO / `-g` 叠加（见 §3.4.2） |
+
+两者可叠加，但 `-static` 会把 libc 静态段拉入产物，通常比 `--tiny` 单独使用更大——
+前者求「最小体积」、后者求「不依赖宿主」，编译器如实提示但不静默覆盖任何一侧。
+LLVM 侧（inkwell 无原生 `Oz` 档）保持 `O2`，体积压缩全部压在 C 侧与链接期；
+**不承诺具体 KB 数**，实测数据见 §38.24.1。
 
 > ⚠️ **关于 `--fast` 模式（ReleaseFast）：此模式会关闭所有边界检查、除零检查和空指针保护，
 > 以换取极致的性能。除非你是正在编写底层核心算法、且完全确信你的数组下标绝对不会越界，
@@ -411,6 +429,32 @@ $ ldd examples/hello
 
 > **一句话：工具可以是 GPL，被链进你程序里的运行时绝不能是。**
 > 为标准库选择许可时，请在 MIT 与 Apache-2.0 之间选，不要选 GPL-3.0。
+
+#### 3.4.2 `--single-file`：显式全静态链接（第 18 层）
+
+默认产物按本节开头那张表动态链 libc。加 `--single-file` 后，链接期追加 `-static`，
+产物不再依赖宿主动态 libc：`file` 显示 `statically linked`，`ldd` 显示
+`not a dynamic executable`。这是**用户显式选择**的产物形态，与 3.4.1 的许可隔离
+不冲突——`libdial_std.a` 仍是 MIT / Apache-2.0 豁免，只是 libc 由动态改为静态链入。
+
+> **实现要点（避坑记录）**：实测 `zig cc -static` 对 glibc 目标无效（纯 C 最小实验
+> 仍产出动态可执行文件），故 `--single-file` **仅在链接阶段**把驱动切到系统
+> `gcc` / `clang` / `cc`（`static_link_cc()`，优先尊重 `DIAL_C_COMPILER`），
+> 代码生成与 C Runtime 编译仍走原路径；`-static` 下跳过 `-Wl,-rpath`。
+> 实验确认 `gcc -static` 可链接 `zig cc -c` 编出的 `.o`。与 GUI 包的 `dlopen`
+> 运行期动态装载后端**可共存**——静态链接不影响运行期装载系统库。
+
+本机实测（`examples/hello.dial`，x86_64-linux-gnu）：
+
+| 形态 | 体积 | 链接方式 | 关键证据 |
+| --- | --- | --- | --- |
+| 默认 | `129776 B` | 动态 | `ldd` 列 libc |
+| `--tiny` | `7024 B` | 动态 | `readelf -S` 无 `.symtab` / `.debug_info` |
+| `--single-file` | `1077568 B` | 静态 | `file` = `statically linked`、`ldd` = `not a dynamic executable` |
+| `--tiny --single-file` | `719768 B` | 静态 | 两者叠加，仍可运行 |
+
+详见 [§38.24.1](#38241-编译器---tiny体积模式---single-file便携模式)；AE 组把这四条形态、
+冲突矩阵与正交叠加全部做成回归断言。
 
 ---
 
@@ -1706,7 +1750,7 @@ print("");        // -> Hi
 | `map<K,V>` 的 `string` 值、`map.values()` 对非 `int` 值 | **未实现**（v1.00）：`V` 只支持标量，`values()` 只支持 `V = int`——`get` 未命中时的默认 string 对象会带来所有权移交歧义，见 [§29.5](#295-重型类型与容器) |
 | LSP 的重命名 / 跨文件引用查找 / 格式化 | **已实现**（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的**引用边**（`src/index.rs`），格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作。能力清单见 [§28.7.1](#2871-当前-lsp-能力清单)。另见 v1.04 新增的 `dialc fmt` 命令行格式化（§34）。**尚未实现**：跨工作区的**全量**引用图（当前只覆盖已打开文件与已加载包） |
 | GUI 控件树 / 布局 / 信号槽 | **十五层已落地**（`gui.dialpkg`，见 [§38](#38-手搓-gui-地基包guidialpkg)）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13）+ 滚动视图层（视口裁剪 + 滚动条几何 / 命中 / 绘制 + 偏移推进，零 DISPLAY 依赖，见 §38.15）+ 右键上下文菜单层（复用第 7 层菜单 + 锚点 / 命中 / 悬停 / 选中 / 绘制，零 DISPLAY 依赖，见 §38.16）+ 悬浮提示层（文本 + 位置 + 尺寸 + 悬停计时，延迟由调用方推进、零时钟依赖，见 §38.17）+ 状态栏层（左 / 右文本 + 进度条槽位，进度值越界夹紧、零时钟依赖，见 §38.18）+ 通知气泡层（FIFO 消息队列，生命周期纯值推进、到期自动消隐、零时钟依赖，见 §38.19）+ 窗口级覆盖层自动集成（5 类覆盖层挂到窗口槽位，`win.draw()` 按固定 z-order 自动叠加、借用语义、空槽位零像素影响，见 §38.20）+ 快捷键 / 命令系统（KeyMap + 命令启用态，纯内存表、零 DISPLAY 依赖，
-  见 §38.21），共 **279 个 `extern fn`**（截至第 15 层；第 16 / 17 层追加见 §38.22 / §38.23，现共 **318 个**）；**第 8 层 Dial 侧 OO 封装**（`gui_oo.dial`，278 个 `impl` 方法，现 317 个，纯源码、随包 `src/` 分发（装包即用）、零 `extern fn` 增量，见 §38.14）。撤销重做 / 每控件主题覆写 / Slider 拖动 / Grid 自动换行已于第 17 层落地（见 §38.23）。**仍未实现**：多行文本 / IME、C → Dial 反向回调、富文本编辑、图片解码、可切换深色主题包。Win32 后端**仅交叉编译、未实机验证**（XTest 实机注入仅在 Linux/Xvfb 验收） |
+  见 §38.21），共 **279 个 `extern fn`**（截至第 15 层；第 16 / 17 / 18 层追加见 §38.22 / §38.23 / §38.24，现共 **344 个**）；**第 8 层 Dial 侧 OO 封装**（`gui_oo.dial`，278 个 `impl` 方法，现 343 个，纯源码、随包 `src/` 分发（装包即用）、零 `extern fn` 增量，见 §38.14）。撤销重做 / 每控件主题覆写 / Slider 拖动 / Grid 自动换行已于第 17 层落地（见 §38.23）；高 DPI 整数放大 / ListBox 虚拟化 lazy load / IME 预编辑纯值事件 / GPU+原生平台纯值契约层已于第 18 层落地（见 §38.24）。**仍未实现**：真实 GPU 合成后端与原生弹窗/托盘/全局快捷键实机、IMM32/IBus/Fcitx 输入法平台采集、多行文本 / 富文本排版、C → Dial 反向回调、图片解码、可切换深色主题包。Win32 后端**仅交叉编译、未实机验证**（XTest 实机注入仅在 Linux/Xvfb 验收） |
 | `impl` 方法块（B1） | **已支持**（v1.10 开发中增量）：`impl T { fn m(self, ...) }` 让用户 `struct` 与包不透明句柄（如 `GuiWindow` / `GuiMenu`）挂方法，`obj.m(args)` 编译期降级为静态调用（self 即首参），**ABI 不变、旧签名一字不动、不新增关键字**（`impl` 仍可作普通标识符），见 [§37.12](#3712-b1impl-方法块v110-开发中增补落地)。**现役边界**：只支持具名类型（`Struct` / `Opaque`）；方法内 `self.f = ...` 因 Dial struct **值语义**只改副本、不回写调用者（与 Rust `&mut self` 不同）；暂不支持同类型变参 `...xs`、C ABI 导出、对标量/内建容器挂 impl、关联函数（无 self 的 `T::new()`）。B2 泛型 / B3 枚举 ADT / B4 闭包 / B5 重载维持原裁决 |
 
 ---
@@ -6687,18 +6731,21 @@ XTest 实窗注入实测 `keys 2 / focus 2 / mouse 6 / act 2 / shift 1` 全绿�
   + **窗口级覆盖层自动集成**（5 类覆盖层挂窗、`win.draw()` 固定 z-order 自动叠加、
   空槽位零像素影响、借用语义，见 §38.20）+ **快捷键 / 命令系统**（按键组合 →
   命令 id + 启用态，纯内存表、零 DISPLAY 依赖，见 §38.21）都已有真实现并写进
-  `gui.diali`（共 **279 个 `extern fn`**，截至第 15 层；第 16 / 17 层追加见
-  §38.22 / §38.23，现共 **318 个**）；**第 8 层 Dial 侧 OO 封装层**
+  `gui.diali`（共 **279 个 `extern fn`**，截至第 15 层；第 16 / 17 / 18 层追加见
+  §38.22 / §38.23 / §38.24，现共 **344 个**）；**第 8 层 Dial 侧 OO 封装层**
   （`gui_oo.dial`，278 个 `impl` 方法，纯 Dial 源码、随包 `src/` 分发、零
-  `extern fn` 增量，见 §38.14）也已落地（第 16 / 17 层同步扩到 **317 个方法**）。
+  `extern fn` 增量，见 §38.14）也已落地（第 16 / 17 / 18 层同步扩到 **343 个方法**）。
   主题色仍以**进程级全局表**为默认真相源，但第 17 层已支持**每控件角色覆写**
   （未覆写角色逐像素回落全局表，见 §38.23.3）；Slider 已接通**左键拖动设值**
   （PRESS 置态 / MOVE 按绝对 x 设值 / RELEASE 清态，见 §38.23.2）；TextBox 已有
-  **快照式撤销 / 重做栈**（见 §38.23.1）；Grid 已有**自动换行**（见 §38.23.4）。
+  **快照式撤销 / 重做栈**（见 §38.23.1）；Grid 已有**自动换行**（见 §38.23.4）；
+  第 18 层已支持**高 DPI 整数放大**（见 §38.24.2）、**ListBox 虚拟化 lazy load**
+  （见 §38.24.3）、**IME 预编辑纯值事件**（见 §38.24.4）、**GPU+原生平台纯值契约层**
+  （见 §38.24.5）。
   **仍未实现、也不写进契约**：C → Dial 反向回调（信号槽已由第 6 层以纯值信号
   队列落地，**不是**回调）、富文本编辑（TextBox 只做单行）、图片解码、
-  多行文本 / 输入法（IME）、**可切换深色主题包**（单控件覆写 ≠ 主题包切换）、
-  编辑合并 / 跨控件全局历史 / 历史持久化、ComboBox 可编辑输入、ListBox 虚拟滚动
+  多行文本 / 复杂文本排版（HarfBuzz 级 shaping）、**可切换深色主题包**（单控件覆写 ≠ 主题包切换）、
+  编辑合并 / 跨控件全局历史 / 历史持久化、ComboBox 可编辑输入
   ——把未实现函数写进契约会让用户 `import` 后链接失败，那是制造漂移而非预留接口。
   Dial 侧仍可用 `GuiPainter` 在图元层自由自绘；
 - Windows 后端**未实机验证**（沙箱只能交叉编译），Direct2D **未落地**；
@@ -7573,3 +7620,112 @@ AD 组契约审计由 **301 / 301 / 302** 同步为 **317 / 317 / 318**。
 **宪法**：只追加 16 个 `extern fn`，旧 302 个签名一字不动；`abi = 6` /
 `version = 1.10.0` 不变；**不新增 `.c` 文件**，三平台 `.a` 重建后仍是零链接期
 GUI 平台符号、零反向回调；未打 tag、未发 Release。
+
+### 38.24 高 DPI 放大 + 虚拟化 lazy load + IME 预编辑 + GPU/原生纯值契约层 + 编译器两 flag（第 18 层）
+
+第 18 层回应社区对标的五个能力缺口：虚拟化视图（Model/View）、真实 GPU 渲染与动画、
+输入法与复杂文本排版、平台深度集成（原生文件框 / 系统托盘 / 全局快捷键）、高 DPI 多屏自适应；
+同时落地 Qt 对比里点名的两个编译器分发模式 `--tiny` / `--single-file`。本轮**只做纯值契约层**
+（能力探测 + Fail-Fast 参数校验 + 确定性降级码 `-2`），真实 GPU 合成、原生弹窗 / 托盘 / 快捷键实机、
+IMM32 / IBus / Fcitx 平台采集**有意留下一批**（见 §38.24.5 / §38.24.6）。
+
+契约从 **318 个 `extern fn`** 扩到 **344 个**（追加 26 个），OO 封装从 **317 个方法**
+扩到 **343 个**（追加 26 个方法 + 1 个入口 `dial_gui_app_new`，AD 审计口径 **343 / 343 / 344 / 0**）。
+
+#### 38.24.1 编译器 `--tiny`（体积模式）/ `--single-file`（便携模式）
+
+纯工具链层，**不触碰 GUI 宪法**：不必新增 `.c`、不必改 `abi` / `version`、不破任何旧签名。
+
+| flag | 行为 | 实测（hello.dial） |
+| --- | --- | --- |
+| `--tiny` | C 侧 `-Os -ffunction-sections -fdata-sections`，链接期 `-Wl,--gc-sections -s`；强制走源码编译 stdlib 回退路径（绕开预编译 `-O2` `.a`），构建目录隔离为 `safety-*-tiny` | 产物 **7024 B**，`readelf -S` 无 `.symtab` / `.debug_info` |
+| `--single-file` | `-static` 全静态链接；因 `zig cc -static` 对 glibc 目标无效，链接驱动改用系统 `gcc/clang/cc`（`static_link_cc()`），`-static` 下跳过 rpath | `file` 显示 **statically linked**，`ldd` 显示 **not a dynamic executable** |
+| `--tiny --single-file` | 上述二者叠加（`-static` 会拉入 libc 静态段，通常更大） | 约 719 KB，仍静态链接、可运行 |
+
+冲突矩阵（目标相反即 Fail-Fast，退出码 1）：`--tiny` 与 `--fast` / `--pgo`（配合 `--fast`）/ `-g`
+互斥；`--single-file` 允许与 `--fast` / LTO / `--pgo` / `-g` 正交叠加。AE 组端到端断言上述
+九条形态全部成立。LLVM 侧 inkwell 无原生 Oz 档，体积压缩全部压在 C 侧与链接期，不承诺 60 KB、
+实测多少写多少。
+
+#### 38.24.2 高 DPI 整数放大（scale_factor）
+
+原框架纯像素级 1.0，无 `scale_factor`。本轮**不挂 App/Window 级**（headless 下
+`dial_gui_app_new()` 返回 NULL 测不到），改为挂 `GuiPainter` 的整数放大因子
+`scale ∈ [1, 4]`（常量 `GUI_SCALE_MIN/MAX`）：
+
+- `dial_gui_painter_set_scale(p, n)` / `painter_scale(p)`：设 / 取放大因子，`scale < 1`
+  或 `> 4` 一律 Fail-Fast 返回 `-1` 并写错误槽；
+- `dial_gui_painter_scaled(p, factor)`：用**最近邻**把源画布放大 `factor` 倍，返回新的
+  独立 offscreen painter；`factor == 1` 时逐像素拷贝（与源 CRC 相同），不会改源。
+
+`GuiPainterImpl.scale` 由 `gui_painter_new` **显式置 1**（`calloc` 归零不是 1，这是防漂移头号点）；
+`scale == 1` 时绘制与历史路径逐像素等价，第 1~17 层 demo CRC 一字不漂移。
+AA 组 `use_gui_scale.dial`（38 条）覆盖默认态 / 设值 / 越界 Fail-Fast / `scaled(1)` 等价 /
+`scaled(2)`→8×8 / `scaled(3)`→12×12，离屏 CRC 钉值 **2473558418**。
+
+#### 38.24.3 ListBox / ComboBox 虚拟化 lazy load
+
+不做反向回调、不改 `GuiWidgetSignal`、不改 `signal_count()`（仍为 7）。在 widget 上挂纯值
+数据槽：`virtual_on`（开关）、`virtual_total`（逻辑总行数，上限 `GUI_VIRTUAL_MAX_TOTAL = 1000000`）、
+`virtual_first` / `virtual_count`（可视窗口），C 侧只持有 `<= 64` 个槽（复用 `items[]`）：
+
+- `dial_gui_widget_set_virtual(w, on, total)`：开虚拟模式时清空全量 `item_count`，只收
+  `virtual_first/count` 窗口；
+- `dial_gui_widget_virtual_window(w, first, count)`：`first < 0` / `count > 64` /
+  `first + count > total` 一律 Fail-Fast；
+- `dial_gui_widget_virtual_slot(w, slot, text: string, id)`：Dial → C 单向推进可视窗口内
+  第 `slot` 个数据（`DialString` 铁律：C 侧 `malloc+memcpy` 造自有副本），零 C → Dial 反向回调。
+
+绘制时 `vis = virtual_on ? virtual_count : item_count`，命中时 `row` 以可视窗口为基准；
+`virtual_on == 0` 时 `vis` 恰等于旧 `item_count`，保证旧路径 CRC 零漂移。
+AA 组 `use_gui_virtual.dial`（58 条）覆盖 100 万逻辑行 / 窗口推进 / 槽数据 /
+越界 Fail-Fast / LIST+COMBO 命中信号 id，离屏 CRC 钉值 **1677088382**。
+
+#### 38.24.4 IME 预编辑纯值事件块
+
+不扩 `GUI_SIG_*` 位值体系（避免改写 `signal_count()==7` 与既有 demo 断言），改为挂在 widget
+树根的**独立纯值事件块**（不写 `GuiWidgetSignal`、不改信号类名数）。C 侧字段：`ime_preedit[256]`、
+`ime_caret`、`ime_cx/cy/cw/ch`（候选框矩形）、`ime_cand_count`、`ime_seq`、`ime_active`：
+
+- `dial_gui_ime_feed(w, preedit, caret, cx, cy, cw, ch, cand_count)`：校验预编辑串长度 /
+  caret / 候选框矩形 / 候选数，推进事件块并自增 `ime_seq`；
+- `dial_gui_ime_preedit(w)`（借用 `rawptr<byte>`，Dial 侧 `string_from_cstr` 复制成 ARC string）/
+  `dial_gui_ime_caret` / `dial_gui_ime_cand_count` / `dial_gui_ime_rect` /
+  `dial_gui_ime_seq`：取事件快照；
+- `dial_gui_ime_clear(w)`：清内容但 **`ime_seq` 不重置**（序列号只增，供应用去重）。
+
+`gui.diali` 开头注释由「输入法（IME）未实现」改写为「真实 IMM32/IBus/Fcitx 采集未接；第 18 层已落地
+IME 预编辑纯值事件块契约」。AA 组 `use_gui_ime.dial`（46 条）覆盖 feed / 取串 / caret / rect /
+seq 自增 / clear / 越界，离屏 CRC 钉值 **1103561703**。
+
+#### 38.24.5 GPU 合成 + 原生平台集成纯值契约层
+
+本轮经授权新增唯一一个 `.c`（`dial_gui_platform.c`，见 §38.24.6），但**只做纯值契约层**：
+不 `dlopen` GL/EGL/Vulkan、不 `#include` 平台头、不碰 framebuffer。headless 下能力恒未装载、
+动作恒返 `GUI_PLATFORM_DEGRADE (-2)`：
+
+- `dial_gui_gpu_available()` → `0`（未装载）；`dial_gui_gpu_backend()` → `"none"`（借用串）；
+  `dial_gui_gpu_caps()` → `GPU_CAP_NONE`；`dial_gui_gpu_try_composite(p)` → 参数与尺寸校验后
+  返回 `-2`（真实合成后端留下一批）；
+- `dial_gui_tray_set` / `dial_gui_native_file_dialog` / `dial_gui_global_hotkey_register`：
+  先 Fail-Fast 校验参数，再返回 `-2`；
+- `dial_gui_gpu_degrade_reason()` / `dial_gui_platform_degrade_code()` → 返回 `-2` 与
+  降级原因串（借用 `rawptr<byte>`）。
+
+AA 组 `use_gui_platform.dial`（30 条）覆盖 `gpu_available()` / `gpu_backend()` / 降级码 `-2` /
+参数 Fail-Fast / 不碰 framebuffer（离屏 CRC 前后不变），离屏 CRC 钉值 **2482968047**。
+**明确未实机验证**：真实 GPU 合成、原生弹窗 / 系统托盘 / 全局快捷键 / 原生文件框、IMM32/IBus/Fcitx
+输入法采集——本轮只把契约与降级码钉死，真实后端作为后续批次。
+
+#### 38.24.6 宪法破例声明
+
+本轮**仅放宽一条**宪法约束：**允许新增 1 个 `.c` 文件**（`packages/gui/src/dial_gui_platform.c`），
+并在 `build.sh` 的 `SRCS` 公共清单追加 `dial_gui_platform.c`（头注释写明「第 18 层为纯值契约层
+新增唯一一个 `.c`」）后三平台 `.a` 重建成功（x86_64-linux-gnu 420K / aarch64-linux-musl 376K /
+x86_64-pc-windows-gnu 296K），零链接期 GUI/GL 平台符号审计通过。
+
+其余宪法**全守**：只追加 26 个 `extern fn`（318→344），旧 318 个签名一字不动；`abi = 6` /
+`version = 1.10.0` 不变；OO 封装层零 `extern fn` 声明（317→343 个方法）；零 C → Dial 反向回调；
+三平台 `.a` 仍是零链接期 GUI/GL 平台符号（运行期动态装载符号仅 `dlopen`/`dlsym`/`LoadLibraryA`/`GetProcAddress`）；
+末打 tag、未发 Release。AA 组 5x~5z 四个 demo（scale / virtual / ime / platform）+ AE 组编译器两 flag
+随包回归全绿，第 1~17 层 21 个既有 demo `bad=0` 防漂移验证通过。

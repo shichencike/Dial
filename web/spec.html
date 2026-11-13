@@ -50,6 +50,7 @@
 <li><a href="#33-编译-dial-程序">3.3 编译 Dial 程序</a></li>
 <li><a href="#34-产物依赖契约">3.4 产物依赖契约</a><ul>
 <li><a href="#341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</a></li>
+<li><a href="#342---single-file显式全静态链接第-18-层">3.4.2 --single-file：显式全静态链接（第 18 层）</a></li>
 </ul>
 </li>
 </ul>
@@ -465,6 +466,15 @@
 <li><a href="#38236-oo-封装与回归">38.23.6 OO 封装与回归</a></li>
 </ul>
 </li>
+<li><a href="#3824-高-dpi-放大--虚拟化-lazy-load--ime-预编辑--gpu原生纯值契约层--编译器两-flag第-18-层">38.24 高 DPI 放大 + 虚拟化 lazy load + IME 预编辑 + GPU/原生纯值契约层 + 编译器两 flag（第 18 层）</a><ul>
+<li><a href="#38241-编译器---tiny体积模式---single-file便携模式">38.24.1 编译器 --tiny（体积模式）/ --single-file（便携模式）</a></li>
+<li><a href="#38242-高-dpi-整数放大scale_factor">38.24.2 高 DPI 整数放大（scale_factor）</a></li>
+<li><a href="#38243-listbox--combobox-虚拟化-lazy-load">38.24.3 ListBox / ComboBox 虚拟化 lazy load</a></li>
+<li><a href="#38244-ime-预编辑纯值事件块">38.24.4 IME 预编辑纯值事件块</a></li>
+<li><a href="#38245-gpu-合成--原生平台集成纯值契约层">38.24.5 GPU 合成 + 原生平台集成纯值契约层</a></li>
+<li><a href="#38246-宪法破例声明">38.24.6 宪法破例声明</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -819,8 +829,8 @@ powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 dialc build main.dial -o main
 </code></pre>
 <h3 id="322-命令行用法总览">3.2.2 命令行用法总览</h3>
-<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast]
-dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast]
+<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file]
+dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file]
 dialc install &lt;包.dialpkg | URL&gt; [--sha256 &lt;哈希&gt;]
 dialc version | --version | -V
 dialc lsp
@@ -856,14 +866,19 @@ dialc lsp
 </tbody>
 </table>
 <blockquote>
+<p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式
+（C 侧 <code>-Os -ffunction-sections -fdata-sections</code> + 链接期 <code>-Wl,--gc-sections -s</code>，
+去掉 DWARF 与符号表）、<code>--single-file</code> 便携模式（链接期 <code>-static</code> 全静态，
+产物不依赖宿主动态 libc）。详见 <a href="#38241-编译器---tiny体积模式---single-file便携模式">§38.24.1</a> 与
+<a href="#342---single-file显式全静态链接第-18-层">§3.4.2</a>。</p>
 <p><strong>版本号只有一个出处</strong>：<code>dialc version</code> 打印的版本直接取自 <code>Cargo.toml</code> 的 <code>version</code> 字段
 （编译期注入），与官网、CHANGELOG、发布包名<strong>同源</strong>——
 任何一处手写版本号都必然随发布漂移（这仓库已经因为硬编码漂过三轮）。
 校验脚本见 <code>tools/check_version.py</code>（CI 强制执行）。</p>
 </blockquote>
 <h3 id="33-编译-dial-程序">3.3 编译 Dial 程序</h3>
-<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast]
-dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fast]
+<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file]
+dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file]
 </code></pre>
 <p>安全等级（Fail-Fast，详见 §20）：</p>
 <table>
@@ -893,6 +908,32 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
 </tbody>
 </table>
 <p>等级同时作用于 LLVM IR 与 C Runtime（<code>-DDIAL_SAFETY=N</code>），两侧口径一致。</p>
+<p>产物形态开关（第 18 层，与上面的安全等级<strong>正交</strong>）：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>形态</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--tiny</code></td>
+<td>体积模式</td>
+<td>C 侧 <code>-Os -ffunction-sections -fdata-sections</code>、链接期 <code>-Wl,--gc-sections -s</code>（strip 掉 DWARF 与符号表），并强制走源码编译 stdlib 回退路径（绕开预编译 <code>-O2</code> 归档）；与 <code>--fast</code> / <code>--pgo</code> / <code>-g</code> 目标相反，一律 <strong>Fail-Fast 拒绝</strong>（见 §38.24.1）</td>
+</tr>
+<tr>
+<td><code>--single-file</code></td>
+<td>便携模式</td>
+<td>链接期 <code>-static</code> 全静态链接，产物 <code>file</code> 显示 <code>statically linked</code>、<code>ldd</code> 显示 <code>not a dynamic executable</code>；可与 LTO / PGO / <code>-g</code> 叠加（见 §3.4.2）</td>
+</tr>
+</tbody>
+</table>
+<p>两者可叠加，但 <code>-static</code> 会把 libc 静态段拉入产物，通常比 <code>--tiny</code> 单独使用更大——
+前者求「最小体积」、后者求「不依赖宿主」，编译器如实提示但不静默覆盖任何一侧。
+LLVM 侧（inkwell 无原生 <code>Oz</code> 档）保持 <code>O2</code>，体积压缩全部压在 C 侧与链接期；
+<strong>不承诺具体 KB 数</strong>，实测数据见 §38.24.1。</p>
 <blockquote>
 <p>⚠️ <strong>关于 <code>--fast</code> 模式（ReleaseFast）：此模式会关闭所有边界检查、除零检查和空指针保护，
 以换取极致的性能。除非你是正在编写底层核心算法、且完全确信你的数组下标绝对不会越界，
@@ -1042,6 +1083,58 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件] [--safety debug|safe|fas
 <p><strong>一句话：工具可以是 GPL，被链进你程序里的运行时绝不能是。</strong>
 为标准库选择许可时，请在 MIT 与 Apache-2.0 之间选，不要选 GPL-3.0。</p>
 </blockquote>
+<h4 id="342---single-file显式全静态链接第-18-层">3.4.2 <code>--single-file</code>：显式全静态链接（第 18 层）</h4>
+<p>默认产物按本节开头那张表动态链 libc。加 <code>--single-file</code> 后，链接期追加 <code>-static</code>，
+产物不再依赖宿主动态 libc：<code>file</code> 显示 <code>statically linked</code>，<code>ldd</code> 显示
+<code>not a dynamic executable</code>。这是<strong>用户显式选择</strong>的产物形态，与 3.4.1 的许可隔离
+不冲突——<code>libdial_std.a</code> 仍是 MIT / Apache-2.0 豁免，只是 libc 由动态改为静态链入。</p>
+<blockquote>
+<p><strong>实现要点（避坑记录）</strong>：实测 <code>zig cc -static</code> 对 glibc 目标无效（纯 C 最小实验
+仍产出动态可执行文件），故 <code>--single-file</code> <strong>仅在链接阶段</strong>把驱动切到系统
+<code>gcc</code> / <code>clang</code> / <code>cc</code>（<code>static_link_cc()</code>，优先尊重 <code>DIAL_C_COMPILER</code>），
+代码生成与 C Runtime 编译仍走原路径；<code>-static</code> 下跳过 <code>-Wl,-rpath</code>。
+实验确认 <code>gcc -static</code> 可链接 <code>zig cc -c</code> 编出的 <code>.o</code>。与 GUI 包的 <code>dlopen</code>
+运行期动态装载后端<strong>可共存</strong>——静态链接不影响运行期装载系统库。</p>
+</blockquote>
+<p>本机实测（<code>examples/hello.dial</code>，x86_64-linux-gnu）：</p>
+<table>
+<thead>
+<tr>
+<th>形态</th>
+<th>体积</th>
+<th>链接方式</th>
+<th>关键证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>默认</td>
+<td><code>129776 B</code></td>
+<td>动态</td>
+<td><code>ldd</code> 列 libc</td>
+</tr>
+<tr>
+<td><code>--tiny</code></td>
+<td><code>7024 B</code></td>
+<td>动态</td>
+<td><code>readelf -S</code> 无 <code>.symtab</code> / <code>.debug_info</code></td>
+</tr>
+<tr>
+<td><code>--single-file</code></td>
+<td><code>1077568 B</code></td>
+<td>静态</td>
+<td><code>file</code> = <code>statically linked</code>、<code>ldd</code> = <code>not a dynamic executable</code></td>
+</tr>
+<tr>
+<td><code>--tiny --single-file</code></td>
+<td><code>719768 B</code></td>
+<td>静态</td>
+<td>两者叠加，仍可运行</td>
+</tr>
+</tbody>
+</table>
+<p>详见 <a href="#38241-编译器---tiny体积模式---single-file便携模式">§38.24.1</a>；AE 组把这四条形态、
+冲突矩阵与正交叠加全部做成回归断言。</p>
 <hr />
 <h2 id="4-词法结构">4. 词法结构</h2>
 <h3 id="41-注释">4.1 注释</h3>
@@ -3156,7 +3249,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td><strong>十五层已落地</strong>（<code>gui.dialpkg</code>，见 <a href="#38-手搓-gui-地基包guidialpkg">§38</a>）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13）+ 滚动视图层（视口裁剪 + 滚动条几何 / 命中 / 绘制 + 偏移推进，零 DISPLAY 依赖，见 §38.15）+ 右键上下文菜单层（复用第 7 层菜单 + 锚点 / 命中 / 悬停 / 选中 / 绘制，零 DISPLAY 依赖，见 §38.16）+ 悬浮提示层（文本 + 位置 + 尺寸 + 悬停计时，延迟由调用方推进、零时钟依赖，见 §38.17）+ 状态栏层（左 / 右文本 + 进度条槽位，进度值越界夹紧、零时钟依赖，见 §38.18）+ 通知气泡层（FIFO 消息队列，生命周期纯值推进、到期自动消隐、零时钟依赖，见 §38.19）+ 窗口级覆盖层自动集成（5 类覆盖层挂到窗口槽位，<code>win.draw()</code> 按固定 z-order 自动叠加、借用语义、空槽位零像素影响，见 §38.20）+ 快捷键 / 命令系统（KeyMap + 命令启用态，纯内存表、零 DISPLAY 依赖，</td>
 </tr>
 <tr>
-<td>见 §38.21），共 <strong>279 个 <code>extern fn</code></strong>（截至第 15 层；第 16 / 17 层追加见 §38.22 / §38.23，现共 <strong>318 个</strong>）；<strong>第 8 层 Dial 侧 OO 封装</strong>（<code>gui_oo.dial</code>，278 个 <code>impl</code> 方法，现 317 个，纯源码、随包 <code>src/</code> 分发（装包即用）、零 <code>extern fn</code> 增量，见 §38.14）。撤销重做 / 每控件主题覆写 / Slider 拖动 / Grid 自动换行已于第 17 层落地（见 §38.23）。<strong>仍未实现</strong>：多行文本 / IME、C → Dial 反向回调、富文本编辑、图片解码、可切换深色主题包。Win32 后端<strong>仅交叉编译、未实机验证</strong>（XTest 实机注入仅在 Linux/Xvfb 验收）</td>
+<td>见 §38.21），共 <strong>279 个 <code>extern fn</code></strong>（截至第 15 层；第 16 / 17 / 18 层追加见 §38.22 / §38.23 / §38.24，现共 <strong>344 个</strong>）；<strong>第 8 层 Dial 侧 OO 封装</strong>（<code>gui_oo.dial</code>，278 个 <code>impl</code> 方法，现 343 个，纯源码、随包 <code>src/</code> 分发（装包即用）、零 <code>extern fn</code> 增量，见 §38.14）。撤销重做 / 每控件主题覆写 / Slider 拖动 / Grid 自动换行已于第 17 层落地（见 §38.23）；高 DPI 整数放大 / ListBox 虚拟化 lazy load / IME 预编辑纯值事件 / GPU+原生平台纯值契约层已于第 18 层落地（见 §38.24）。<strong>仍未实现</strong>：真实 GPU 合成后端与原生弹窗/托盘/全局快捷键实机、IMM32/IBus/Fcitx 输入法平台采集、多行文本 / 富文本排版、C → Dial 反向回调、图片解码、可切换深色主题包。Win32 后端<strong>仅交叉编译、未实机验证</strong>（XTest 实机注入仅在 Linux/Xvfb 验收）</td>
 <td></td>
 </tr>
 <tr>
@@ -10692,18 +10785,21 @@ XTest 实窗注入实测 <code>keys 2 / focus 2 / mouse 6 / act 2 / shift 1</cod
 <li><strong>窗口级覆盖层自动集成</strong>（5 类覆盖层挂窗、<code>win.draw()</code> 固定 z-order 自动叠加、
   空槽位零像素影响、借用语义，见 §38.20）+ <strong>快捷键 / 命令系统</strong>（按键组合 →
   命令 id + 启用态，纯内存表、零 DISPLAY 依赖，见 §38.21）都已有真实现并写进
-  <code>gui.diali</code>（共 <strong>279 个 <code>extern fn</code></strong>，截至第 15 层；第 16 / 17 层追加见
-  §38.22 / §38.23，现共 <strong>318 个</strong>）；<strong>第 8 层 Dial 侧 OO 封装层</strong>
+  <code>gui.diali</code>（共 <strong>279 个 <code>extern fn</code></strong>，截至第 15 层；第 16 / 17 / 18 层追加见
+  §38.22 / §38.23 / §38.24，现共 <strong>344 个</strong>）；<strong>第 8 层 Dial 侧 OO 封装层</strong>
   （<code>gui_oo.dial</code>，278 个 <code>impl</code> 方法，纯 Dial 源码、随包 <code>src/</code> 分发、零
-  <code>extern fn</code> 增量，见 §38.14）也已落地（第 16 / 17 层同步扩到 <strong>317 个方法</strong>）。
+  <code>extern fn</code> 增量，见 §38.14）也已落地（第 16 / 17 / 18 层同步扩到 <strong>343 个方法</strong>）。
   主题色仍以<strong>进程级全局表</strong>为默认真相源，但第 17 层已支持<strong>每控件角色覆写</strong>
   （未覆写角色逐像素回落全局表，见 §38.23.3）；Slider 已接通<strong>左键拖动设值</strong>
   （PRESS 置态 / MOVE 按绝对 x 设值 / RELEASE 清态，见 §38.23.2）；TextBox 已有
-  <strong>快照式撤销 / 重做栈</strong>（见 §38.23.1）；Grid 已有<strong>自动换行</strong>（见 §38.23.4）。
+  <strong>快照式撤销 / 重做栈</strong>（见 §38.23.1）；Grid 已有<strong>自动换行</strong>（见 §38.23.4）；
+  第 18 层已支持<strong>高 DPI 整数放大</strong>（见 §38.24.2）、<strong>ListBox 虚拟化 lazy load</strong>
+  （见 §38.24.3）、<strong>IME 预编辑纯值事件</strong>（见 §38.24.4）、<strong>GPU+原生平台纯值契约层</strong>
+  （见 §38.24.5）。
   <strong>仍未实现、也不写进契约</strong>：C → Dial 反向回调（信号槽已由第 6 层以纯值信号
   队列落地，<strong>不是</strong>回调）、富文本编辑（TextBox 只做单行）、图片解码、
-  多行文本 / 输入法（IME）、<strong>可切换深色主题包</strong>（单控件覆写 ≠ 主题包切换）、
-  编辑合并 / 跨控件全局历史 / 历史持久化、ComboBox 可编辑输入、ListBox 虚拟滚动
+  多行文本 / 复杂文本排版（HarfBuzz 级 shaping）、<strong>可切换深色主题包</strong>（单控件覆写 ≠ 主题包切换）、
+  编辑合并 / 跨控件全局历史 / 历史持久化、ComboBox 可编辑输入
   ——把未实现函数写进契约会让用户 <code>import</code> 后链接失败，那是制造漂移而非预留接口。
   Dial 侧仍可用 <code>GuiPainter</code> 在图元层自由自绘；</li>
 <li>Windows 后端<strong>未实机验证</strong>（沙箱只能交叉编译），Direct2D <strong>未落地</strong>；
@@ -11956,7 +12052,119 @@ AD 组契约审计由 <strong>301 / 301 / 302</strong> 同步为 <strong>317 / 3
 </ul>
 <p><strong>宪法</strong>：只追加 16 个 <code>extern fn</code>，旧 302 个签名一字不动；<code>abi = 6</code> /
 <code>version = 1.10.0</code> 不变；<strong>不新增 <code>.c</code> 文件</strong>，三平台 <code>.a</code> 重建后仍是零链接期
-GUI 平台符号、零反向回调；未打 tag、未发 Release。</p></main></div>
+GUI 平台符号、零反向回调；未打 tag、未发 Release。</p>
+<h3 id="3824-高-dpi-放大--虚拟化-lazy-load--ime-预编辑--gpu原生纯值契约层--编译器两-flag第-18-层">38.24 高 DPI 放大 + 虚拟化 lazy load + IME 预编辑 + GPU/原生纯值契约层 + 编译器两 flag（第 18 层）</h3>
+<p>第 18 层回应社区对标的五个能力缺口：虚拟化视图（Model/View）、真实 GPU 渲染与动画、
+输入法与复杂文本排版、平台深度集成（原生文件框 / 系统托盘 / 全局快捷键）、高 DPI 多屏自适应；
+同时落地 Qt 对比里点名的两个编译器分发模式 <code>--tiny</code> / <code>--single-file</code>。本轮<strong>只做纯值契约层</strong>
+（能力探测 + Fail-Fast 参数校验 + 确定性降级码 <code>-2</code>），真实 GPU 合成、原生弹窗 / 托盘 / 快捷键实机、
+IMM32 / IBus / Fcitx 平台采集<strong>有意留下一批</strong>（见 §38.24.5 / §38.24.6）。</p>
+<p>契约从 <strong>318 个 <code>extern fn</code></strong> 扩到 <strong>344 个</strong>（追加 26 个），OO 封装从 <strong>317 个方法</strong>
+扩到 <strong>343 个</strong>（追加 26 个方法 + 1 个入口 <code>dial_gui_app_new</code>，AD 审计口径 <strong>343 / 343 / 344 / 0</strong>）。</p>
+<h4 id="38241-编译器---tiny体积模式---single-file便携模式">38.24.1 编译器 <code>--tiny</code>（体积模式）/ <code>--single-file</code>（便携模式）</h4>
+<p>纯工具链层，<strong>不触碰 GUI 宪法</strong>：不必新增 <code>.c</code>、不必改 <code>abi</code> / <code>version</code>、不破任何旧签名。</p>
+<table>
+<thead>
+<tr>
+<th>flag</th>
+<th>行为</th>
+<th>实测（hello.dial）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--tiny</code></td>
+<td>C 侧 <code>-Os -ffunction-sections -fdata-sections</code>，链接期 <code>-Wl,--gc-sections -s</code>；强制走源码编译 stdlib 回退路径（绕开预编译 <code>-O2</code> <code>.a</code>），构建目录隔离为 <code>safety-*-tiny</code></td>
+<td>产物 <strong>7024 B</strong>，<code>readelf -S</code> 无 <code>.symtab</code> / <code>.debug_info</code></td>
+</tr>
+<tr>
+<td><code>--single-file</code></td>
+<td><code>-static</code> 全静态链接；因 <code>zig cc -static</code> 对 glibc 目标无效，链接驱动改用系统 <code>gcc/clang/cc</code>（<code>static_link_cc()</code>），<code>-static</code> 下跳过 rpath</td>
+<td><code>file</code> 显示 <strong>statically linked</strong>，<code>ldd</code> 显示 <strong>not a dynamic executable</strong></td>
+</tr>
+<tr>
+<td><code>--tiny --single-file</code></td>
+<td>上述二者叠加（<code>-static</code> 会拉入 libc 静态段，通常更大）</td>
+<td>约 719 KB，仍静态链接、可运行</td>
+</tr>
+</tbody>
+</table>
+<p>冲突矩阵（目标相反即 Fail-Fast，退出码 1）：<code>--tiny</code> 与 <code>--fast</code> / <code>--pgo</code>（配合 <code>--fast</code>）/ <code>-g</code>
+互斥；<code>--single-file</code> 允许与 <code>--fast</code> / LTO / <code>--pgo</code> / <code>-g</code> 正交叠加。AE 组端到端断言上述
+九条形态全部成立。LLVM 侧 inkwell 无原生 Oz 档，体积压缩全部压在 C 侧与链接期，不承诺 60 KB、
+实测多少写多少。</p>
+<h4 id="38242-高-dpi-整数放大scale_factor">38.24.2 高 DPI 整数放大（scale_factor）</h4>
+<p>原框架纯像素级 1.0，无 <code>scale_factor</code>。本轮<strong>不挂 App/Window 级</strong>（headless 下
+<code>dial_gui_app_new()</code> 返回 NULL 测不到），改为挂 <code>GuiPainter</code> 的整数放大因子
+<code>scale ∈ [1, 4]</code>（常量 <code>GUI_SCALE_MIN/MAX</code>）：</p>
+<ul>
+<li><code>dial_gui_painter_set_scale(p, n)</code> / <code>painter_scale(p)</code>：设 / 取放大因子，<code>scale &lt; 1</code>
+  或 <code>&gt; 4</code> 一律 Fail-Fast 返回 <code>-1</code> 并写错误槽；</li>
+<li><code>dial_gui_painter_scaled(p, factor)</code>：用<strong>最近邻</strong>把源画布放大 <code>factor</code> 倍，返回新的
+  独立 offscreen painter；<code>factor == 1</code> 时逐像素拷贝（与源 CRC 相同），不会改源。</li>
+</ul>
+<p><code>GuiPainterImpl.scale</code> 由 <code>gui_painter_new</code> <strong>显式置 1</strong>（<code>calloc</code> 归零不是 1，这是防漂移头号点）；
+<code>scale == 1</code> 时绘制与历史路径逐像素等价，第 1~17 层 demo CRC 一字不漂移。
+AA 组 <code>use_gui_scale.dial</code>（38 条）覆盖默认态 / 设值 / 越界 Fail-Fast / <code>scaled(1)</code> 等价 /
+<code>scaled(2)</code>→8×8 / <code>scaled(3)</code>→12×12，离屏 CRC 钉值 <strong>2473558418</strong>。</p>
+<h4 id="38243-listbox--combobox-虚拟化-lazy-load">38.24.3 ListBox / ComboBox 虚拟化 lazy load</h4>
+<p>不做反向回调、不改 <code>GuiWidgetSignal</code>、不改 <code>signal_count()</code>（仍为 7）。在 widget 上挂纯值
+数据槽：<code>virtual_on</code>（开关）、<code>virtual_total</code>（逻辑总行数，上限 <code>GUI_VIRTUAL_MAX_TOTAL = 1000000</code>）、
+<code>virtual_first</code> / <code>virtual_count</code>（可视窗口），C 侧只持有 <code>&lt;= 64</code> 个槽（复用 <code>items[]</code>）：</p>
+<ul>
+<li><code>dial_gui_widget_set_virtual(w, on, total)</code>：开虚拟模式时清空全量 <code>item_count</code>，只收
+  <code>virtual_first/count</code> 窗口；</li>
+<li><code>dial_gui_widget_virtual_window(w, first, count)</code>：<code>first &lt; 0</code> / <code>count &gt; 64</code> /
+  <code>first + count &gt; total</code> 一律 Fail-Fast；</li>
+<li><code>dial_gui_widget_virtual_slot(w, slot, text: string, id)</code>：Dial → C 单向推进可视窗口内
+  第 <code>slot</code> 个数据（<code>DialString</code> 铁律：C 侧 <code>malloc+memcpy</code> 造自有副本），零 C → Dial 反向回调。</li>
+</ul>
+<p>绘制时 <code>vis = virtual_on ? virtual_count : item_count</code>，命中时 <code>row</code> 以可视窗口为基准；
+<code>virtual_on == 0</code> 时 <code>vis</code> 恰等于旧 <code>item_count</code>，保证旧路径 CRC 零漂移。
+AA 组 <code>use_gui_virtual.dial</code>（58 条）覆盖 100 万逻辑行 / 窗口推进 / 槽数据 /
+越界 Fail-Fast / LIST+COMBO 命中信号 id，离屏 CRC 钉值 <strong>1677088382</strong>。</p>
+<h4 id="38244-ime-预编辑纯值事件块">38.24.4 IME 预编辑纯值事件块</h4>
+<p>不扩 <code>GUI_SIG_*</code> 位值体系（避免改写 <code>signal_count()==7</code> 与既有 demo 断言），改为挂在 widget
+树根的<strong>独立纯值事件块</strong>（不写 <code>GuiWidgetSignal</code>、不改信号类名数）。C 侧字段：<code>ime_preedit[256]</code>、
+<code>ime_caret</code>、<code>ime_cx/cy/cw/ch</code>（候选框矩形）、<code>ime_cand_count</code>、<code>ime_seq</code>、<code>ime_active</code>：</p>
+<ul>
+<li><code>dial_gui_ime_feed(w, preedit, caret, cx, cy, cw, ch, cand_count)</code>：校验预编辑串长度 /
+  caret / 候选框矩形 / 候选数，推进事件块并自增 <code>ime_seq</code>；</li>
+<li><code>dial_gui_ime_preedit(w)</code>（借用 <code>rawptr&lt;byte&gt;</code>，Dial 侧 <code>string_from_cstr</code> 复制成 ARC string）/
+  <code>dial_gui_ime_caret</code> / <code>dial_gui_ime_cand_count</code> / <code>dial_gui_ime_rect</code> /
+  <code>dial_gui_ime_seq</code>：取事件快照；</li>
+<li><code>dial_gui_ime_clear(w)</code>：清内容但 <strong><code>ime_seq</code> 不重置</strong>（序列号只增，供应用去重）。</li>
+</ul>
+<p><code>gui.diali</code> 开头注释由「输入法（IME）未实现」改写为「真实 IMM32/IBus/Fcitx 采集未接；第 18 层已落地
+IME 预编辑纯值事件块契约」。AA 组 <code>use_gui_ime.dial</code>（46 条）覆盖 feed / 取串 / caret / rect /
+seq 自增 / clear / 越界，离屏 CRC 钉值 <strong>1103561703</strong>。</p>
+<h4 id="38245-gpu-合成--原生平台集成纯值契约层">38.24.5 GPU 合成 + 原生平台集成纯值契约层</h4>
+<p>本轮经授权新增唯一一个 <code>.c</code>（<code>dial_gui_platform.c</code>，见 §38.24.6），但<strong>只做纯值契约层</strong>：
+不 <code>dlopen</code> GL/EGL/Vulkan、不 <code>#include</code> 平台头、不碰 framebuffer。headless 下能力恒未装载、
+动作恒返 <code>GUI_PLATFORM_DEGRADE (-2)</code>：</p>
+<ul>
+<li><code>dial_gui_gpu_available()</code> → <code>0</code>（未装载）；<code>dial_gui_gpu_backend()</code> → <code>"none"</code>（借用串）；
+  <code>dial_gui_gpu_caps()</code> → <code>GPU_CAP_NONE</code>；<code>dial_gui_gpu_try_composite(p)</code> → 参数与尺寸校验后
+  返回 <code>-2</code>（真实合成后端留下一批）；</li>
+<li><code>dial_gui_tray_set</code> / <code>dial_gui_native_file_dialog</code> / <code>dial_gui_global_hotkey_register</code>：
+  先 Fail-Fast 校验参数，再返回 <code>-2</code>；</li>
+<li><code>dial_gui_gpu_degrade_reason()</code> / <code>dial_gui_platform_degrade_code()</code> → 返回 <code>-2</code> 与
+  降级原因串（借用 <code>rawptr&lt;byte&gt;</code>）。</li>
+</ul>
+<p>AA 组 <code>use_gui_platform.dial</code>（30 条）覆盖 <code>gpu_available()</code> / <code>gpu_backend()</code> / 降级码 <code>-2</code> /
+参数 Fail-Fast / 不碰 framebuffer（离屏 CRC 前后不变），离屏 CRC 钉值 <strong>2482968047</strong>。
+<strong>明确未实机验证</strong>：真实 GPU 合成、原生弹窗 / 系统托盘 / 全局快捷键 / 原生文件框、IMM32/IBus/Fcitx
+输入法采集——本轮只把契约与降级码钉死，真实后端作为后续批次。</p>
+<h4 id="38246-宪法破例声明">38.24.6 宪法破例声明</h4>
+<p>本轮<strong>仅放宽一条</strong>宪法约束：<strong>允许新增 1 个 <code>.c</code> 文件</strong>（<code>packages/gui/src/dial_gui_platform.c</code>），
+并在 <code>build.sh</code> 的 <code>SRCS</code> 公共清单追加 <code>dial_gui_platform.c</code>（头注释写明「第 18 层为纯值契约层
+新增唯一一个 <code>.c</code>」）后三平台 <code>.a</code> 重建成功（x86_64-linux-gnu 420K / aarch64-linux-musl 376K /
+x86_64-pc-windows-gnu 296K），零链接期 GUI/GL 平台符号审计通过。</p>
+<p>其余宪法<strong>全守</strong>：只追加 26 个 <code>extern fn</code>（318→344），旧 318 个签名一字不动；<code>abi = 6</code> /
+<code>version = 1.10.0</code> 不变；OO 封装层零 <code>extern fn</code> 声明（317→343 个方法）；零 C → Dial 反向回调；
+三平台 <code>.a</code> 仍是零链接期 GUI/GL 平台符号（运行期动态装载符号仅 <code>dlopen</code>/<code>dlsym</code>/<code>LoadLibraryA</code>/<code>GetProcAddress</code>）；
+末打 tag、未发 Release。AA 组 5x~5z 四个 demo（scale / virtual / ime / platform）+ AE 组编译器两 flag
+随包回归全绿，第 1~17 层 21 个既有 demo <code>bad=0</code> 防漂移验证通过。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

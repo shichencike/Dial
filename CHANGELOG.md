@@ -100,9 +100,39 @@
   按加入顺序自动依次占格、显式 col/row 被忽略、cspan 仍生效、溢出夹末行、关闭
   逐像素回到第 16 层）。**防漂移铁律**：四组能力未启用时逐像素等价于旧路径，
   故第 1~16 层全部既有 CRC 钉值一字未改、七个既有 demo 在新内核下重跑仍
-  `0 bad`。纯 C、零平台符号、零时钟、零 DISPLAY 依赖、`abi = 6` /
+  `0 bad`。  纯 C、零平台符号、零时钟、零 DISPLAY 依赖、`abi = 6` /
   `version = 1.10.0` 不变、不新增 `.c` 文件、旧 302 个签名一字不动，AD 组契约
   审计由 301 / 301 / 302 同步为 **317 / 317 / 318**，见 README §38.23）；
++ **GUI 第 18 层：高 DPI 整数放大 + 虚拟化 lazy load + IME 预编辑纯值事件 +
+  GPU/原生平台纯值契约层 + 编译器两 flag**（共 26 个 `extern fn`
+  + 26 个 OO 方法，契约 318→344、OO 317→343、AD 审计 **343 / 343 / 344 / 0**）：
+  - **高 DPI 整数放大**（3 个 `dial_gui_painter_*scale*`）：`GuiPainterImpl.scale ∈ [1,4]`
+    （`gui_painter_new` 显式置 1，`calloc` 归零不是 1；`scale==1` 逐像素等价历史路径），
+    `set_scale` 越界 `{0,5,-1}` Fail-Fast、`painter_scaled(p, factor)` 最近邻放大返回
+    独立 offscreen、`factor==1` 逐像素拷贝；
+  - **虚拟化 lazy load**（7 个 `dial_gui_widget_*virtual*`）：纯值数据槽
+    `virtual_on/total/first/count`（逻辑总行数上限 1000000、可视窗口 <=64 复用 `items[]`），
+    Dial→C 单向推进可视窗口、`virtual_window` 越界 Fail-Fast、绘制/命中以窗口为基准、
+    `virtual_on==0` 恰等于旧 `item_count` 保证旧 CRC 零漂移；
+  - **IME 预编辑纯值事件块**（7 个 `dial_gui_ime_*`）：挂在 widget 树根的独立事件块
+    （预编辑串 / caret / 候选框矩形 / 候选数 / `ime_seq`），**不扩 `GUI_SIG_*` 位值体系**
+    （`signal_count()` 仍为 7、不改信号类名数）、`clear` 不重置 `ime_seq`；
+  - **GPU 合成 + 原生平台集成纯值契约层**（9 个 `dial_gui_*gpu* / *tray* / *native_file*
+    / *hotkey* / *platform_degrade*`）：本轮**只做纯值契约层**——不 `dlopen` GL/EGL/Vulkan、
+    不 `#include` 平台头、不碰 framebuffer，headless 下能力恒未装载、动作恒返
+    `GUI_PLATFORM_DEGRADE (-2)`；真实 GPU 合成 / 原生弹窗 / 系统托盘 / 全局快捷键 /
+    IMM32/IBus/Fcitx 采集**有意留下一批**（见下）；
+  - **编译器 `--tiny` / `--single-file`**（纯工具链层、不破 GUI 宪法）：`--tiny` 走
+    `-Os -ffunction-sections -fdata-sections` + 链接期 `-Wl,--gc-sections -s`、强制源码编译
+    stdlib 回退路径、构建目录隔离 `safety-*-tiny`；`--single-file` 改用系统 `gcc/clang/cc`
+    链接驱动做 `-static` 全静态链接（`zig cc -static` 对 glibc 目标无效）、`-static` 下跳 rpath；
+    冲突矩阵 `--tiny` 与 `--fast` / `--pgo(配合 fast)` / `-g` 互斥、`--single-file` 正交叠加。
+  **约束破例**：本轮**仅放宽一条**宪法——允许新增 1 个 `.c`（`dial_gui_platform.c`，
+  `build.sh` SRCS 同步追加）用于纯值契约层；其余宪法全守（只追加 26 个 `extern fn`、旧 318 个
+  签名一字不动、`abi = 6` / `version = 1.10.0` 不变、OO 零 `extern fn` 声明、零 C→Dial 反向回调、
+  三平台 `.a` 零链接期 GUI/GL 平台符号、未打 tag / 未发 Release）。AA 组 5x~5z 四 demo
+  （scale/virtual/ime/platform）+ AE 组编译器两 flag 随包回归全绿，第 1~17 层 21 个既有 demo
+  `bad=0` 防漂移验证通过，见 README §38.24）；
 + **GUI 第 8 层：Dial 侧 OO 封装**（`gui_oo.dial` 用 278 个 `impl` 方法包住 279 个
   C 风格 `extern fn`，纯 Dial 源码、随包 `src/` 分发（装包即用）、零 `extern fn`
   增量、ABI 不变，见 README §25.11 / §38.14）；
@@ -157,6 +187,10 @@
 > 随后 GUI 第 17 层（TextBox 撤销/重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行，
 > 同样纯内存对象 + 离屏画布，零 DISPLAY 依赖）给 AA 组再新增 8 条断言（4 个 demo 各
 > 「编译成功」+「全绿」），扩为 **三十组 / 628 ✅**（620 ✅ + 8 = 628 ✅）。
+> 随后 GUI 第 18 层（高 DPI 整数放大 + 虚拟化 lazy load + IME 预编辑纯值事件 + GPU/原生平台
+> 纯值契约层 + 编译器 `--tiny`/`--single-file`，纯内存对象 + 离屏画布 + 编译器产物形态断言，
+> 零 DISPLAY 依赖）给 AA 组新增 8 条断言（4 个 demo 各「编译成功」+「全绿」）、新增 AE 组
+> 十项断言（编译器两 flag 端到端），全量 **652 ✅ / 0 ❌**（实测以 `tests/run_tests.sh` 为准）。
 > 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
