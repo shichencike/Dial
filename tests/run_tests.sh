@@ -3306,6 +3306,34 @@ if "$DIALC" build tests/pkg/use_gui_platform.dial -o "${TMP}/use_gui_platform" >
     fi
 else aabad "use_gui_platform.dial 编译失败"; tail -20 "${TMP}/aa_plcomp.log"; fi
 
+# 5aa) 第 18 层延伸：winapi 官方包（Windows API 薄封装）Linux 错误路径回归。
+#      Windows 真实现 / 非 Windows 桩返回明确错误。Linux 下断言每函数返回 -1（句柄类 0）
+#      且 winapi_last_error()==WINAPI_ERR_PLATFORM，零崩溃、零误报成功。给 AA 组 +2 aapass。
+if "$DIALC" pack packages/winapi -o "${TMP}/wa_pkg.dialpkg" >"${TMP}/wa_pack.log" 2>&1 \
+   && "$DIALC" install "${TMP}/wa_pkg.dialpkg" >"${TMP}/wa_install.log" 2>&1; then
+    aapass "winapi.dialpkg 打包 + 安装成功（3 平台 targets / 逐文件 SHA256 通过）"
+    if "$DIALC" build tests/pkg/use_winapi.dial -o "${TMP}/use_winapi" >"${TMP}/wa_comp.log" 2>&1; then
+        aapass "use_winapi.dial（import \"winapi\"）编译成功"
+        "${TMP}/use_winapi" >"${TMP}/wa_run.log" 2>&1
+        wa_no_exit=$?
+        wa_bad=$(grep -c ' = bad' "${TMP}/wa_run.log" || true)
+        if [ "$wa_no_exit" -eq 0 ] && [ "$wa_bad" -eq 0 ] \
+           && grep -qF 'winapi_createwindowexw_stub_null = ok' "${TMP}/wa_run.log" \
+           && grep -qF 'winapi_freelibrary_stub_minus1 = ok' "${TMP}/wa_run.log" \
+           && grep -qF 'winapi_zero_false_success = ok' "${TMP}/wa_run.log" \
+           && grep -qF 'winapi_all_stub = ok' "${TMP}/wa_run.log" \
+           && grep -qF 'winapi_stub_platform_err = ok' "${TMP}/wa_run.log" \
+           && grep -qF 'winapi_done = true' "${TMP}/wa_run.log"; then
+            aapass "winapi 薄封装：三 DLL 33 外函数 + 访问器 + 空句柄构造器全走桩、返回 -1/0、错误槽=平台错误、零崩溃全绿"
+        else
+            aabad "winapi 错误路径断言失败（exit=$wa_no_exit bad=$wa_bad）"
+            tail -40 "${TMP}/wa_run.log"
+        fi
+    else aabad "use_winapi.dial 编译失败"; tail -20 "${TMP}/wa_comp.log"; fi
+else aabad "winapi.dialpkg 打包或安装失败"; tail -8 "${TMP}/wa_pack.log" "${TMP}/wa_install.log"; fi
+"$DIALC" uninstall winapi >/dev/null 2>&1 || true
+aapass "winapi 包已卸载"
+
 # 6) 清理：卸包，避免污染后续测试与用户环境。
 "$DIALC" uninstall gui >/dev/null 2>&1 || true
 aapass "gui 包已卸载"
@@ -3442,7 +3470,7 @@ else
 fi
 
 # ===========================================================================
-echo "== AD) GUI 第 8 层 OO 封装：343 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 =="
+echo "== AD) GUI 第 8 层 OO 封装 + winapi 薄封装契约审计：343 个 impl 方法 / 随包 src/ 装包即用 / C 风格 CRC 逐字节相等 / 窗口覆盖层 / Fail-Fast 透传 / winapi 38 extern fn 零 OO 声明 =="
 adpass() { echo "  ✅ $1"; }
 adbad()  { echo "  ❌ $1"; fail=1; }
 
@@ -3472,6 +3500,22 @@ if [ "$ad_methods" -eq 343 ] && [ "$ad_diag_n" -eq 343 ] && [ "$ad_iface_n" -eq 
 else
     adbad "契约审计不通过：methods=$ad_methods diag=$ad_diag_n iface=$ad_iface_n oo_decl=$ad_oo_decl"
     diff <(echo "$ad_diag") <(echo "$ad_refs") | head -20
+fi
+
+# 1.5) winapi 官方包契约审计（第 18 层延伸）：38 个 extern fn（33 三 DLL 外函数 + 2 错误
+#      访问器 + 3 空句柄构造器）/ 7 个不透明句柄类型 / 零 OO 声明（无 src/*.dial 封装层）/
+#      abi=6 与 version=1.10.0 不变。薄封装只追加 extern fn，不碰其他包签名。
+wa_iface_n=$(grep -c '^extern fn' packages/winapi/winapi.diali)
+wa_type_n=$(grep -c '^type ' packages/winapi/winapi.diali)
+wa_oo_dial=$(ls packages/winapi/src/*.dial 2>/dev/null | wc -l)
+wa_oo_decl=$(grep -rc '^extern fn' packages/winapi/src/*.c 2>/dev/null | wc -l)  # C 侧 extern 不计入 OO 层
+wa_abi=$(grep -E '^abi = ' packages/winapi/dial.toml | grep -oE '[0-9]+')
+wa_ver=$(grep -E '^version = ' packages/winapi/dial.toml | grep -oE '[0-9.]+')
+if [ "$wa_iface_n" -eq 38 ] && [ "$wa_type_n" -eq 7 ] && [ "$wa_oo_dial" -eq 0 ] \
+   && [ "$wa_abi" = "6" ] && [ "$wa_ver" = "1.10.0" ]; then
+    adpass "winapi 契约审计：38 个 extern fn + 7 个不透明句柄类型、无 OO 封装层、abi=6/version=1.10.0 不变（薄封装只追加）"
+else
+    adbad "winapi 契约审计不通过：iface=$wa_iface_n type=$wa_type_n oo_dial=$wa_oo_dial abi=$wa_abi ver=$wa_ver"
 fi
 
 # 2) 正向：编译 + 无 DISPLAY 纯内存路径（含 C 风格 / OO 风格 CRC32 逐字节相等）。

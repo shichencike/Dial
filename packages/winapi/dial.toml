@@ -1,0 +1,21 @@
+name = "winapi"
+version = "1.10.0"
+# abi 是「编译此包所依据的标准库 ABI」（STDLIB_ABI=6），不是 winapi 包自己的
+# 版本号；winapi.diali 契约变更由 .diali 的 SHA256 校验保证，故 abi 保持 6。
+abi = 6
+iface = "winapi.diali"
+license = "MIT OR Apache-2.0"
+
+# 键名必须与编译器 package::host_triple() 的取值**逐字一致**
+# （x86_64-linux-gnu / aarch64-unknown-linux-musl / x86_64-pc-windows-gnu），
+# 否则用户装上包后，编译器按 host_triple() 选不到机器码。
+#
+# 三份 .a：Windows（x86_64-pc-windows-gnu）是**真实现**（运行时 LoadLibraryA /
+# GetProcAddress 装载 user32 / gdi32，kernel32 装载器直接链接）；Linux / musl
+# 是**桩实现**（每个函数返回 -1 / 0 并把错误槽置为 WINAPI_ERR_PLATFORM，明确告知
+# 「本平台不支持」）。平台库一律运行时动态装载，.a 自包含，不需要用户写 link，
+# 也不需要在链接期注入 -luser32 / -lgdi32。
+[targets]
+x86_64-linux-gnu = "lib/x86_64-linux-gnu/libwinapi.a"
+aarch64-unknown-linux-musl = "lib/aarch64-unknown-linux-musl/libwinapi.a"
+x86_64-pc-windows-gnu = "lib/x86_64-pc-windows-gnu/libwinapi.a"
