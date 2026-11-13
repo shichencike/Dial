@@ -17,6 +17,7 @@ mod ast;
 mod codegen;
 mod ir; // 自研后端：专属 IR（x86-64 / AArch64 汇编发射器的输入）
 mod target; // 自研后端：目标平台差异抽象（SysV / AAPCS）
+mod lower; // 自研后端：AST → IR 的 lowering（核心子集）
 mod diagnostic;
 mod dialfmt;
 mod toolchain;

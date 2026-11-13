@@ -377,11 +377,13 @@ impl IrProgram {
 /// 寄存器内部宽度（reg_width）：Dial 类型在寄存器 / 栈槽里怎么存。
 pub fn reg_ir(t: &Type) -> IrType {
     match t {
-        Type::Int | Type::Byte | Type::Char => IrType::I64,
+        Type::Int |         Type::Byte | Type::Char => IrType::I64,
         Type::Float => IrType::F64,
         Type::Int32 => IrType::I32,
         Type::Float32 => IrType::F32,
-        Type::Bool => IrType::I1,
+        // 内部寄存器宽度一律用 I64（0/1）搬运布尔，规避 I1 全程搬运的脆弱性；
+        // 只有在 param_ir（C ABI 参数）与 field_ir（结构体字段）两处才按边界收窄。
+        Type::Bool => IrType::I64,
         Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::KvMap(..)
         | Type::Set(_) | Type::Error | Type::Channel(_) | Type::File | Type::Thread
         | Type::Opaque(_) => IrType::Handle,
