@@ -456,6 +456,15 @@
 <li><a href="#38226-oo-封装与回归">38.22.6 OO 封装与回归</a></li>
 </ul>
 </li>
+<li><a href="#3823-textbox-撤销--重做--slider-拖动--每控件主题覆写--grid-自动换行第-17-层">38.23 TextBox 撤销 / 重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行（第 17 层）</a><ul>
+<li><a href="#38231-textbox-撤销--重做栈8-个-extern-fn">38.23.1 TextBox 撤销 / 重做栈（8 个 extern fn）</a></li>
+<li><a href="#38232-slider-拖动1-个-extern-fn">38.23.2 Slider 拖动（1 个 extern fn）</a></li>
+<li><a href="#38233-每控件主题覆写5-个-extern-fn">38.23.3 每控件主题覆写（5 个 extern fn）</a></li>
+<li><a href="#38234-grid-自动换行2-个-extern-fn">38.23.4 Grid 自动换行（2 个 extern fn）</a></li>
+<li><a href="#38235-边界不许当已支持">38.23.5 边界（不许当已支持）</a></li>
+<li><a href="#38236-oo-封装与回归">38.23.6 OO 封装与回归</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -3147,7 +3156,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td><strong>十五层已落地</strong>（<code>gui.dialpkg</code>，见 <a href="#38-手搓-gui-地基包guidialpkg">§38</a>）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13）+ 滚动视图层（视口裁剪 + 滚动条几何 / 命中 / 绘制 + 偏移推进，零 DISPLAY 依赖，见 §38.15）+ 右键上下文菜单层（复用第 7 层菜单 + 锚点 / 命中 / 悬停 / 选中 / 绘制，零 DISPLAY 依赖，见 §38.16）+ 悬浮提示层（文本 + 位置 + 尺寸 + 悬停计时，延迟由调用方推进、零时钟依赖，见 §38.17）+ 状态栏层（左 / 右文本 + 进度条槽位，进度值越界夹紧、零时钟依赖，见 §38.18）+ 通知气泡层（FIFO 消息队列，生命周期纯值推进、到期自动消隐、零时钟依赖，见 §38.19）+ 窗口级覆盖层自动集成（5 类覆盖层挂到窗口槽位，<code>win.draw()</code> 按固定 z-order 自动叠加、借用语义、空槽位零像素影响，见 §38.20）+ 快捷键 / 命令系统（KeyMap + 命令启用态，纯内存表、零 DISPLAY 依赖，</td>
 </tr>
 <tr>
-<td>见 §38.21），共 <strong>279 个 <code>extern fn</code></strong>；<strong>第 8 层 Dial 侧 OO 封装</strong>（<code>gui_oo.dial</code>，278 个 <code>impl</code> 方法，纯源码、随包 <code>src/</code> 分发（装包即用）、零 <code>extern fn</code> 增量，见 §38.14）。<strong>仍未实现</strong>：多行文本 / IME、撤销重做、C → Dial 反向回调、富文本编辑、图片解码。Win32 后端<strong>仅交叉编译、未实机验证</strong>（XTest 实机注入仅在 Linux/Xvfb 验收）</td>
+<td>见 §38.21），共 <strong>279 个 <code>extern fn</code></strong>（截至第 15 层；第 16 / 17 层追加见 §38.22 / §38.23，现共 <strong>318 个</strong>）；<strong>第 8 层 Dial 侧 OO 封装</strong>（<code>gui_oo.dial</code>，278 个 <code>impl</code> 方法，现 317 个，纯源码、随包 <code>src/</code> 分发（装包即用）、零 <code>extern fn</code> 增量，见 §38.14）。撤销重做 / 每控件主题覆写 / Slider 拖动 / Grid 自动换行已于第 17 层落地（见 §38.23）。<strong>仍未实现</strong>：多行文本 / IME、C → Dial 反向回调、富文本编辑、图片解码、可切换深色主题包。Win32 后端<strong>仅交叉编译、未实机验证</strong>（XTest 实机注入仅在 Linux/Xvfb 验收）</td>
 <td></td>
 </tr>
 <tr>
@@ -10683,16 +10692,20 @@ XTest 实窗注入实测 <code>keys 2 / focus 2 / mouse 6 / act 2 / shift 1</cod
 <li><strong>窗口级覆盖层自动集成</strong>（5 类覆盖层挂窗、<code>win.draw()</code> 固定 z-order 自动叠加、
   空槽位零像素影响、借用语义，见 §38.20）+ <strong>快捷键 / 命令系统</strong>（按键组合 →
   命令 id + 启用态，纯内存表、零 DISPLAY 依赖，见 §38.21）都已有真实现并写进
-  <code>gui.diali</code>（共 <strong>279 个 <code>extern fn</code></strong>）；<strong>第 8 层 Dial 侧 OO 封装层</strong>
+  <code>gui.diali</code>（共 <strong>279 个 <code>extern fn</code></strong>，截至第 15 层；第 16 / 17 层追加见
+  §38.22 / §38.23，现共 <strong>318 个</strong>）；<strong>第 8 层 Dial 侧 OO 封装层</strong>
   （<code>gui_oo.dial</code>，278 个 <code>impl</code> 方法，纯 Dial 源码、随包 <code>src/</code> 分发、零
-  <code>extern fn</code> 增量，见 §38.14）也已落地。主题色仍是<strong>进程级全局表</strong>、按角色覆写，
-  不支持每控件独立配色；Slider 只支持水平方向、点击设值（拖动未接线）。
+  <code>extern fn</code> 增量，见 §38.14）也已落地（第 16 / 17 层同步扩到 <strong>317 个方法</strong>）。
+  主题色仍以<strong>进程级全局表</strong>为默认真相源，但第 17 层已支持<strong>每控件角色覆写</strong>
+  （未覆写角色逐像素回落全局表，见 §38.23.3）；Slider 已接通<strong>左键拖动设值</strong>
+  （PRESS 置态 / MOVE 按绝对 x 设值 / RELEASE 清态，见 §38.23.2）；TextBox 已有
+  <strong>快照式撤销 / 重做栈</strong>（见 §38.23.1）；Grid 已有<strong>自动换行</strong>（见 §38.23.4）。
   <strong>仍未实现、也不写进契约</strong>：C → Dial 反向回调（信号槽已由第 6 层以纯值信号
-  队列落地，<strong>不是</strong>回调）、富文本编辑
-  （TextBox 只做单行）、图片解码、多行文本 / 输入法（IME）、撤销重做栈、
-  每控件主题覆写 / 可切换深色主题包——把未实现函数写进契约会让用户
-  <code>import</code> 后链接失败，那是制造漂移而非预留接口。Dial 侧仍可用
-  <code>GuiPainter</code> 在图元层自由自绘；</li>
+  队列落地，<strong>不是</strong>回调）、富文本编辑（TextBox 只做单行）、图片解码、
+  多行文本 / 输入法（IME）、<strong>可切换深色主题包</strong>（单控件覆写 ≠ 主题包切换）、
+  编辑合并 / 跨控件全局历史 / 历史持久化、ComboBox 可编辑输入、ListBox 虚拟滚动
+  ——把未实现函数写进契约会让用户 <code>import</code> 后链接失败，那是制造漂移而非预留接口。
+  Dial 侧仍可用 <code>GuiPainter</code> 在图元层自由自绘；</li>
 <li>Windows 后端<strong>未实机验证</strong>（沙箱只能交叉编译），Direct2D <strong>未落地</strong>；
   XTest 真实事件注入<strong>仅在 Linux / Xvfb 实机验收</strong>，Win32 的键码映射与
   <code>mods</code> 跟踪是同表真实现但<strong>未实机运行</strong>；</li>
@@ -11819,7 +11832,131 @@ Fail-Fast 返回 -1 并写错误槽，绝不静默截断。</p>
 </ul>
 <p><strong>宪法</strong>：只追加 23 个 <code>extern fn</code>，旧 279 个签名一字不动；<code>abi = 6</code> /
 <code>version = 1.10.0</code> 不变；<strong>不新增 <code>.c</code> 文件</strong>，<code>build.sh</code> 源清单不变，三平台 <code>.a</code> 重建后
-仍是零链接期 GUI 平台符号、零反向回调；未打 tag、未发 Release。</p></main></div>
+仍是零链接期 GUI 平台符号、零反向回调；未打 tag、未发 Release。</p>
+<h3 id="3823-textbox-撤销--重做--slider-拖动--每控件主题覆写--grid-自动换行第-17-层">38.23 TextBox 撤销 / 重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行（第 17 层）</h3>
+<p>第 17 层解锁 §38.11 / §38.22.5 里明确留着的四条边界，全部<strong>只追加 16 个 <code>extern fn</code></strong>
+（<code>gui.diali</code> <strong>302 → 318</strong>，<code>gui_oo.dial</code> <strong>301 → 317 个方法</strong>，精确相等），
+旧 302 个签名一字不动；<code>abi = 6</code> / <code>version = 1.10.0</code> 不变；<strong>不新增 <code>.c</code> 文件</strong>
+（改动只落在既有 <code>dial_gui.h</code> / <code>core.c</code> / <code>input.c</code> / <code>look.c</code> / <code>widget.c</code>），
+<code>build.sh</code> 源清单不变；纯 C、零链接期 GUI 平台符号、绝不 C → Dial 反向回调。</p>
+<p>四组能力有一条共同的<strong>防漂移铁律</strong>：未启用时逐像素等价于旧路径。因此第 1~16 层
+全部既有 CRC 钉值（<code>look_crc_normal = 3884455222</code> 起）一字未改，七个既有 demo
+在新内核下重跑仍是 <code>0 bad</code>。</p>
+<h4 id="38231-textbox-撤销--重做栈8-个-extern-fn">38.23.1 TextBox 撤销 / 重做栈（8 个 <code>extern fn</code>）</h4>
+<p>快照式历史：每次键盘编辑（可打印字符 / <code>Backspace</code> / <code>Delete</code>）<strong>成功改掉文本之前</strong>，
+把「文本 C 侧副本 + 光标 + 选区锚点」推进 <code>undo</code> 栈，并清空 <code>redo</code> 分支（新编辑使
+重做历史失效）。两栈容量 <code>GUI_UNDO_CAP = 32</code> 固定、无动态扩容，栈满丢最老一条；
+文本副本逐条由 <code>dispose_subtree</code> / <code>undo_clear</code> 释放。</p>
+<table>
+<thead>
+<tr>
+<th>API</th>
+<th>语义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dial_gui_widget_undo</code> / <code>redo</code></td>
+<td><code>1</code> 成功 / <code>0</code> 栈空（<strong>不是错误，不写错误槽</strong>）/ <code>-1</code> 无效句柄</td>
+</tr>
+<tr>
+<td><code>can_undo</code> / <code>can_redo</code></td>
+<td><code>1</code> / <code>0</code>，纯值读回</td>
+</tr>
+<tr>
+<td><code>undo_depth</code> / <code>redo_depth</code></td>
+<td>当前栈深（0..32）</td>
+</tr>
+<tr>
+<td><code>undo_clear</code></td>
+<td>清两栈并释放副本</td>
+</tr>
+<tr>
+<td><code>undo_capacity</code></td>
+<td>常量 <code>32</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>显式 <code>widget_set_text</code> 是程序化赋值</strong>：建立新基线并清两栈，绝不混进用户编辑历史
+（这是 §38.11「撤销重做栈」从「未实现」移除后仍要写清的边界）。撤销 / 重做恢复
+文本后照常发一次 <code>TEXT_CHANGED</code>（未订阅零开销）；光标随快照一并恢复。</p>
+<h4 id="38232-slider-拖动1-个-extern-fn">38.23.2 Slider 拖动（1 个 <code>extern fn</code>）</h4>
+<p><code>widget_handle</code> 在 <code>MOUSE_PRESS</code> 命中 <code>SLIDER</code> 时置纯值 <code>drag_active</code>（<strong>PRESS 不改
+<code>value</code>，第 5 层「RELEASE 按局部 x 设值」语义一字不动</strong>）；<code>MOUSE_MOVE</code> 沿树累加
+相对几何拿到控件绝对 x（与 <code>hit_node</code> 同口径，不依赖上一轮布局残留），按拖动点
+设值并 clamp 进 <code>[vmin, vmax]</code>，鼠标拖出控件矩形仍生效、绝不跳变；<code>MOUSE_RELEASE</code>
+清态。<code>dial_gui_widget_dragging</code> 读回该纯值，供 Dial 侧区分拖动与单击。
+非 <code>SLIDER</code> 的 PRESS 不进入拖动态，后续 MOVE 对 value 零影响。</p>
+<h4 id="38233-每控件主题覆写5-个-extern-fn">38.23.3 每控件主题覆写（5 个 <code>extern fn</code>）</h4>
+<p>进程级全局表仍是<strong>默认真相源</strong>；<code>ov_mask</code> 置位的角色由本控件私有色覆盖，未覆写
+角色逐像素回落全局表。绘制侧只把 <code>C(role)</code> 简写从「直接查全局表」改成
+「先查控件覆写、再回落全局表」——<strong>默认态与旧路径逐像素一致</strong>，这是既有 CRC
+不漂移的关键。</p>
+<table>
+<thead>
+<tr>
+<th>API</th>
+<th>语义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>set_color(w, role, color)</code></td>
+<td>覆写角色；<code>role</code> 越界 / <code>color</code> 高 32 位非 0 一律 Fail-Fast 返回 <code>-1</code></td>
+</tr>
+<tr>
+<td><code>color(w, role)</code></td>
+<td><strong>生效色</strong>（覆写优先，否则全局表）</td>
+</tr>
+<tr>
+<td><code>has_color(w, role)</code></td>
+<td>该角色是否被本控件覆写</td>
+</tr>
+<tr>
+<td><code>clear_color</code> / <code>clear_colors</code></td>
+<td>清单角色 / 清全部，CRC 逐像素回到历史基准</td>
+</tr>
+</tbody>
+</table>
+<p><code>color = 0x00000000</code> 也是<strong>合法覆写值</strong>：是否覆写由独立位图 <code>ov_mask</code> 判定，
+绝不与「未覆写」哨兵混淆。覆写不传给子控件（不继承），也不等于「可切换深色主题包」。</p>
+<h4 id="38234-grid-自动换行2-个-extern-fn">38.23.4 Grid 自动换行（2 个 <code>extern fn</code>）</h4>
+<p>容器级开关 <code>set_grid_autoflow(w, on)</code> / <code>grid_autoflow(w)</code>：打开后子节点按
+<strong>加入顺序</strong>自动依次占格（第 <code>i</code> 个可见子节点 → <code>col = i % cols</code>、<code>row = i / cols</code>），
+忽略显式 <code>set_grid_cell</code> 的 <code>col/row</code>；<code>cspan</code> / <code>rspan</code> 仍由子节点显式声明。
+溢出 <code>cols×rows</code> 的部分夹到最后一行（与既有 clamp 风格一致），重叠由应用自己负责
+（确定性）。关闭时与第 16 层 <code>layout_node</code> 逐像素等价。</p>
+<h4 id="38235-边界不许当已支持">38.23.5 边界（不许当已支持）</h4>
+<p>不做编辑合并（一次按键一条）、不做跨控件全局历史、不做历史持久化；不做拖动阈值 /
+吸附 / 系统时钟读取；不做主题包切换与覆写继承；不做自动换行重排（不因 <code>cspan</code>
+变化回溯）、不做双向 / 稀疏网格。列 / 行 / 角色 / 颜色越界一律 Fail-Fast 返回 <code>-1</code>
+并写错误槽，绝不静默截断。</p>
+<h4 id="38236-oo-封装与回归">38.23.6 OO 封装与回归</h4>
+<p>第 8 层 <code>gui_oo.dial</code> 在 <code>impl GuiWidget</code> 末尾追加 <strong>16 个方法</strong>（去
+<code>dial_gui_widget_</code> 前缀、接收者变 <code>self</code>）：<code>undo</code> / <code>redo</code> / <code>can_undo</code> /
+<code>can_redo</code> / <code>undo_depth</code> / <code>redo_depth</code> / <code>undo_clear</code> / <code>undo_capacity</code>、
+<code>dragging</code>、<code>set_color</code> / <code>color</code> / <code>has_color</code> / <code>clear_color</code> / <code>clear_colors</code>、
+<code>set_grid_autoflow</code> / <code>grid_autoflow</code>。封装层仍<strong>零 <code>extern fn</code> 声明</strong>，
+AD 组契约审计由 <strong>301 / 301 / 302</strong> 同步为 <strong>317 / 317 / 318</strong>。</p>
+<p><strong>回归（AA 组 5t ~ 5w，纯内存对象 + 离屏 CRC 锁定，零 DISPLAY 依赖）</strong>：
+<code>tests/pkg/use_gui_undo.dial</code>（53 条）/ <code>use_gui_drag.dial</code>（38 条）/
+<code>use_gui_theme_override.dial</code>（46 条）/ <code>use_gui_autoflow.dial</code>（44 条），
+各含独立 offscreen 画布，CRC 用 <code>expect_str(str(crc), "N", "x_crc_pinned")</code> 钉死
+像素级基准——</p>
+<ul>
+<li><strong>撤销 / 重做</strong>：显式 <code>set_text</code> 不进历史、两级 undo / redo 文本与深度同步、
+  新编辑使 redo 失效、光标随快照恢复、栈满夹到 32、clear 复位、
+  离屏 CRC 钉值 <code>1521191646</code>，全绿。</li>
+<li><strong>Slider 拖动</strong>：PRESS 置态不改 value、MOVE 按绝对 x 设值（中点 50）并 clamp、
+  拖出控件仍生效、RELEASE 清态、非 SLIDER 零影响、离屏 CRC 钉值 <code>734328573</code>，全绿。</li>
+<li><strong>每控件主题覆写</strong>：未覆写回落全局表、覆写只改本控件像素、Fail-Fast 六边界、
+  <code>color=0</code> 合法、<code>clear</code> 后 CRC 回到历史基准、离屏 CRC 钉值 <code>2387101612</code>，全绿。</li>
+<li><strong>Grid 自动换行</strong>：按加入顺序排 2×2、显式 col/row 被忽略、cspan 仍生效、
+  关闭回到第 16 层语义、溢出夹末行、离屏 CRC 钉值 <code>3418075373</code>，全绿。</li>
+</ul>
+<p><strong>宪法</strong>：只追加 16 个 <code>extern fn</code>，旧 302 个签名一字不动；<code>abi = 6</code> /
+<code>version = 1.10.0</code> 不变；<strong>不新增 <code>.c</code> 文件</strong>，三平台 <code>.a</code> 重建后仍是零链接期
+GUI 平台符号、零反向回调；未打 tag、未发 Release。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

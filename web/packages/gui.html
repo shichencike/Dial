@@ -24,14 +24,14 @@
   </div>
 </header>
 
-<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>gui</code></td></tr><tr><td>版本</td><td>1.10.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>302</td></tr><tr><td>来源</td><td><code>packages/gui/gui.diali</code></td></tr></tbody></table><div class="toc">
+<div class="layout"><aside class="sidebar"></aside><main class="content"><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody><tr><td>包名</td><td><code>gui</code></td></tr><tr><td>版本</td><td>1.10.0</td></tr><tr><td>ABI</td><td>6</td></tr><tr><td>extern fn 数量</td><td>318</td></tr><tr><td>来源</td><td><code>packages/gui/gui.diali</code></td></tr></tbody></table><div class="toc">
 <ul>
 <li><a href="#gui-地基包-gui">GUI 地基包 gui</a></li>
 </ul>
 </div>
 <h2 id="gui-地基包-gui">GUI 地基包 gui</h2>
-<p>不用 Qt / GTK / SDL，<strong>纯 C 手搓</strong>的 GUI 包，前七层 + 第 9/10/11/12/13/14/15/16 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统·网格布局 GRID + 组合框 ComboBox + 列表框 ListBox + 右键·滚轮交互是 C 契约、
-<strong>共 302 个 <code>extern fn</code></strong>：地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 +
+<p>不用 Qt / GTK / SDL，<strong>纯 C 手搓</strong>的 GUI 包，前七层 + 第 9/10/11/12/13/14/15/16/17 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统·网格布局 GRID + 组合框 ComboBox + 列表框 ListBox + 右键·滚轮交互·撤销/重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行是 C 契约、
+<strong>共 318 个 <code>extern fn</code></strong>：地基（窗 + 事件 + 绘图 + 字体）/ 控件框架层（Widget 树 + 布局 +
 命中 + 主动分发）/ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态）/
 输入层（TextBox + 焦点链 + 统一功能键码 + XTest 实窗注入）/ 主题层与控件扩展
 （14 个可覆写颜色角色 + Radio / Slider / ProgressBar）/ 信号槽（6 类可订阅纯值
@@ -63,8 +63,17 @@ headless 可测，见 §38.22.1）/ <strong>组合框 ComboBox</strong>（<code>
 <code>SLIDER</code> 按 <code>step=span/100</code> 增减并 clamp、落非 SLIDER 零影响，<code>set_kind</code> 上界由 7 扩到
 11（8 / 9 信号 kind 标记仍显式拒绝，四处断言锁死），见 §38.22.4）——以上第 16 层共 23 个 <code>extern fn</code>、旧签名一字不动，纯 C 零平台符号、
 零时钟、零 DISPLAY 依赖，见 §38.22）。
+<strong>第 17 层</strong>（16 个 <code>extern fn</code>，见 §38.23）：<strong>TextBox 撤销 / 重做</strong>（快照式历史，
+键盘编辑改文本前把「文本 + 光标 + 选区」入 undo 栈、新编辑清 redo、容量 32 固定、
+显式 <code>set_text</code> 建新基线不进历史，见 §38.23.1）/ <strong>Slider 拖动</strong>（PRESS 置
+<code>drag_active</code> 不改 value、MOVE 按绝对 x 设值并 clamp、拖出控件仍生效、RELEASE 清态，
+见 §38.23.2）/ <strong>每控件主题覆写</strong>（<code>ov_mask</code> 位图标记覆写角色、未覆写逐像素回落
+进程级全局表、<code>color=0</code> 合法、clear 后 CRC 回历史基准，见 §38.23.3）/
+<strong>Grid 自动换行</strong>（容器开关打开后按加入顺序自动依次占格、显式 col/row 被忽略、
+cspan 仍生效、溢出夹末行，见 §38.23.4）。四组能力<strong>未启用时逐像素等价于旧路径</strong>，
+故第 1~16 层既有 CRC 钉值一字未改、七个既有 demo 在新内核下重跑仍 0 bad。
 <strong>第 8 层是
-Dial 侧 OO 封装层</strong>（<code>gui_oo.dial</code>，301 个 <code>impl</code> 方法把上述 C 风格函数包成 <code>win.draw()</code>
+Dial 侧 OO 封装层</strong>（<code>gui_oo.dial</code>，317 个 <code>impl</code> 方法把上述 C 风格函数包成 <code>win.draw()</code>
 这样的惯用写法，纯 Dial 源码、随包 <code>src/</code> 分发（装包即用）、<strong>零 <code>extern fn</code> 增量、ABI 不变</strong>，见 §38.14）。</p>
 <pre><code class="language-dial">import &quot;gui&quot;;
 
@@ -129,7 +138,8 @@ fn main(): int {
 <a href="../spec.html#3819-通知气泡层第-13-层">§38.19 通知气泡层</a>、
 <a href="../spec.html#3820-窗口级覆盖层自动集成第-14-层">§38.20 窗口级覆盖层自动集成</a>、
 <a href="../spec.html#3821-快捷键--命令系统第-15-层">§38.21 快捷键 / 命令系统</a>、
-<a href="../spec.html#3822-网格布局--组合框--列表框--右键滚轮交互第-16-层">§38.22 网格布局 + 组合框 / 列表框 + 右键·滚轮交互</a>。</p></main></div>
+<a href="../spec.html#3822-网格布局--组合框--列表框--右键滚轮交互第-16-层">§38.22 网格布局 + 组合框 / 列表框 + 右键·滚轮交互</a> 与
+<a href="../spec.html#3823-textbox-撤销--重做--slider-拖动--每控件主题覆写--grid-自动换行第-17-层">§38.23 TextBox 撤销/重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行</a>。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

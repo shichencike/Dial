@@ -102,6 +102,21 @@
   零平台符号、零时钟、零 DISPLAY 依赖、<code>abi = 6</code> / <code>version = 1.10.0</code> 不变、不新增
   <code>.c</code> 文件、旧 279 个签名一字不动，AD 组契约审计由 278 / 278 / 279 同步为
   301 / 301 / 302，见 README §38.22）；
++ </strong>GUI 第 17 层：TextBox 撤销 / 重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行<strong>
+  （共 16 个 <code>extern fn</code>：8 个 <code>dial_gui_widget_undo*</code> 快照式历史——键盘编辑成功改文本
+  </strong>前<strong>把「文本 + 光标 + 选区」入 undo 栈、新编辑清 redo、两栈容量 32 固定、栈满丢
+  最老、显式 <code>set_text</code> 建立新基线并清两栈、撤销恢复照常发 <code>TEXT_CHANGED</code> /
+  1 个 <code>dial_gui_widget_dragging</code>——PRESS 命中 SLIDER 置 <code>drag_active</code>（PRESS 不改
+  value）、MOVE 沿树累加绝对 x 设值并 clamp、拖出控件仍生效、RELEASE 清态 /
+  5 个 <code>dial_gui_widget_*color*</code>——<code>ov_mask</code> 位图标记覆写角色、未覆写逐像素回落
+  进程级全局表、<code>color=0</code> 是合法覆写值、role/颜色高 32 位 Fail-Fast、clear 后
+  CRC 回历史基准 / 2 个 <code>dial_gui_widget_*grid_autoflow</code>——容器开关打开后子节点
+  按加入顺序自动依次占格、显式 col/row 被忽略、cspan 仍生效、溢出夹末行、关闭
+  逐像素回到第 16 层）。</strong>防漂移铁律<strong>：四组能力未启用时逐像素等价于旧路径，
+  故第 1~16 层全部既有 CRC 钉值一字未改、七个既有 demo 在新内核下重跑仍
+  <code>0 bad</code>。纯 C、零平台符号、零时钟、零 DISPLAY 依赖、<code>abi = 6</code> /
+  <code>version = 1.10.0</code> 不变、不新增 <code>.c</code> 文件、旧 302 个签名一字不动，AD 组契约
+  审计由 301 / 301 / 302 同步为 </strong>317 / 317 / 318<strong>，见 README §38.23）；
 + </strong>GUI 第 8 层：Dial 侧 OO 封装<strong>（<code>gui_oo.dial</code> 用 278 个 <code>impl</code> 方法包住 279 个
   C 风格 <code>extern fn</code>，纯 Dial 源码、随包 <code>src/</code> 分发（装包即用）、零 <code>extern fn</code>
   增量、ABI 不变，见 README §25.11 / §38.14）；
@@ -152,6 +167,9 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
 随后 GUI 第 16 层（网格布局 GRID + ComboBox + ListBox + 右键·滚轮交互，纯内存对象 +
 离屏画布，零 DISPLAY 依赖）给 AA 组新增 8 条断言（4 个 demo 各「编译成功」+「全绿」），
 扩为 <strong>三十组 / 620 ✅</strong>（612 ✅ + 8 = 620 ✅）。
+随后 GUI 第 17 层（TextBox 撤销/重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行，
+同样纯内存对象 + 离屏画布，零 DISPLAY 依赖）给 AA 组再新增 8 条断言（4 个 demo 各
+「编译成功」+「全绿」），扩为 <strong>三十组 / 628 ✅</strong>（620 ✅ + 8 = 628 ✅）。
 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。</p>
 </blockquote>
 <h3 id="added">Added</h3>

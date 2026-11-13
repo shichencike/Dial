@@ -88,6 +88,21 @@
   零平台符号、零时钟、零 DISPLAY 依赖、`abi = 6` / `version = 1.10.0` 不变、不新增
   `.c` 文件、旧 279 个签名一字不动，AD 组契约审计由 278 / 278 / 279 同步为
   301 / 301 / 302，见 README §38.22）；
++ **GUI 第 17 层：TextBox 撤销 / 重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行**
+  （共 16 个 `extern fn`：8 个 `dial_gui_widget_undo*` 快照式历史——键盘编辑成功改文本
+  **前**把「文本 + 光标 + 选区」入 undo 栈、新编辑清 redo、两栈容量 32 固定、栈满丢
+  最老、显式 `set_text` 建立新基线并清两栈、撤销恢复照常发 `TEXT_CHANGED` /
+  1 个 `dial_gui_widget_dragging`——PRESS 命中 SLIDER 置 `drag_active`（PRESS 不改
+  value）、MOVE 沿树累加绝对 x 设值并 clamp、拖出控件仍生效、RELEASE 清态 /
+  5 个 `dial_gui_widget_*color*`——`ov_mask` 位图标记覆写角色、未覆写逐像素回落
+  进程级全局表、`color=0` 是合法覆写值、role/颜色高 32 位 Fail-Fast、clear 后
+  CRC 回历史基准 / 2 个 `dial_gui_widget_*grid_autoflow`——容器开关打开后子节点
+  按加入顺序自动依次占格、显式 col/row 被忽略、cspan 仍生效、溢出夹末行、关闭
+  逐像素回到第 16 层）。**防漂移铁律**：四组能力未启用时逐像素等价于旧路径，
+  故第 1~16 层全部既有 CRC 钉值一字未改、七个既有 demo 在新内核下重跑仍
+  `0 bad`。纯 C、零平台符号、零时钟、零 DISPLAY 依赖、`abi = 6` /
+  `version = 1.10.0` 不变、不新增 `.c` 文件、旧 302 个签名一字不动，AD 组契约
+  审计由 301 / 301 / 302 同步为 **317 / 317 / 318**，见 README §38.23）；
 + **GUI 第 8 层：Dial 侧 OO 封装**（`gui_oo.dial` 用 278 个 `impl` 方法包住 279 个
   C 风格 `extern fn`，纯 Dial 源码、随包 `src/` 分发（装包即用）、零 `extern fn`
   增量、ABI 不变，见 README §25.11 / §38.14）；
@@ -139,6 +154,9 @@
 > 随后 GUI 第 16 层（网格布局 GRID + ComboBox + ListBox + 右键·滚轮交互，纯内存对象 +
 > 离屏画布，零 DISPLAY 依赖）给 AA 组新增 8 条断言（4 个 demo 各「编译成功」+「全绿」），
 > 扩为 **三十组 / 620 ✅**（612 ✅ + 8 = 620 ✅）。
+> 随后 GUI 第 17 层（TextBox 撤销/重做 + Slider 拖动 + 每控件主题覆写 + Grid 自动换行，
+> 同样纯内存对象 + 离屏画布，零 DISPLAY 依赖）给 AA 组再新增 8 条断言（4 个 demo 各
+> 「编译成功」+「全绿」），扩为 **三十组 / 628 ✅**（620 ✅ + 8 = 628 ✅）。
 > 以上均为不同时点的真实记录，不是互相矛盾。§33.17 的 499 ✅ 同理，仍为发布快照。
 
 ### Added
