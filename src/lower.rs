@@ -65,6 +65,14 @@ struct Lower<'a> {
     scopes: Vec<HashMap<String, Local>>,
     /// 循环目标栈：(continue 块, break 块, 循环体所在作用域深度)。
     loops: Vec<(u32, u32, usize)>,
+    /// 已登记的 defer 语句：(登记时作用域深度, 语句)。LIFO 触发。
+    defers: Vec<(usize, Stmt)>,
+    /// 活跃 try 帧的「进入前作用域深度」，throw 时只排空本帧及内层的 defer。
+    try_frames: Vec<usize>,
+    /// 与 try_frames 平行：每个活跃 try 的 exbuf 槽地址，供提前 return 时弹栈并释放。
+    try_bufs: Vec<VReg>,
+    /// 函数内标签 → 基本块（goto/label 用）。
+    labels: HashMap<String, u32>,
     /// 函数参数槽（与 func.params 平行），供 prologue 填值。
     param_slots: Vec<VReg>,
 }
@@ -77,6 +85,10 @@ impl<'a> Lower<'a> {
             cur: 0,
             scopes: Vec::new(),
             loops: Vec::new(),
+            defers: Vec::new(),
+            try_frames: Vec::new(),
+            try_bufs: Vec::new(),
+            labels: HashMap::new(),
             param_slots: Vec::new(),
         }
     }
@@ -154,7 +166,7 @@ impl<'a> Lower<'a> {
     /// （例如 `if (c) { return x; }` 之后的收尾），它们仍需能 lookup 到参数；而 `If` /
     /// `While` 的 `pop_scope().unwrap()` 也要求作用域结构完整。被释放的局部标记 moved，
     /// 保证随后 pop_scope 时的 release_scope 不会二次释放。
-    fn release_scopes_upto(&mut self, down_to: usize) {
+    fn release_locals_upto(&mut self, down_to: usize) {
         if self.scopes.len() <= down_to { return; }
         let mut items: Vec<(usize, String, VReg, Option<ArcKind>, Option<String>)> = Vec::new();
         for si in down_to..self.scopes.len() {
@@ -178,6 +190,33 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// 离开若干作用域：先按 LIFO 排空这些作用域的 defer，再释放堆局部。
+    fn release_scopes_upto(&mut self, down_to: usize) -> Result<(), String> {
+        self.drain_defers_from(down_to + 1)?;
+        self.release_locals_upto(down_to);
+        Ok(())
+    }
+
+    /// LIFO 执行所有「登记深度 >= depth」的 defer（作用域深度 = 登记时的 scopes.len()）。
+    fn drain_defers_from(&mut self, depth: usize) -> Result<(), String> {
+        loop {
+            let hit = matches!(self.defers.last(), Some((d, _)) if *d >= depth);
+            if !hit { break; }
+            let (_, st) = self.defers.pop().unwrap();
+            self.lower_stmt(&st)?;
+        }
+        Ok(())
+    }
+
+    /// 离开当前最内层作用域：LIFO defer + 释放该层堆局部。
+    fn leave_scope(&mut self) -> Result<(), String> {
+        let d = self.scopes.len();
+        self.drain_defers_from(d)?;
+        let sc = self.scopes.pop().unwrap();
+        self.release_scope(&sc);
+        Ok(())
+    }
+
     // ---- 函数 ----
 
     fn lower_function(&mut self, f: &Func) -> Result<(), String> {
@@ -194,6 +233,10 @@ impl<'a> Lower<'a> {
         self.func = IrFunction::new(f.name.clone(), params, ret_ir.clone(), linkage);
         self.scopes.clear();
         self.loops.clear();
+        self.defers.clear();
+        self.try_frames.clear();
+        self.try_bufs.clear();
+        self.labels.clear();
         self.param_slots.clear();
 
         let entry = self.new_block(Vec::new());
@@ -235,7 +278,7 @@ impl<'a> Lower<'a> {
         for s in &f.body { self.lower_stmt(s)?; }
 
         if !self.cur_terminated() {
-            self.release_scopes_upto(0);
+            self.release_scopes_upto(0)?;
             if is_main {
                 self.terminate(Term::Return { val: Some(Value::Imm(Imm::I64(0))) });
             } else if ret_ir == IrType::Void {
@@ -420,15 +463,13 @@ impl<'a> Lower<'a> {
                 self.set_cur(then_b);
                 self.push_scope();
                 for st in then_branch { self.lower_stmt(st)?; }
-                let scope = self.scopes.pop().unwrap();
-                self.release_scope(&scope);
+                self.leave_scope()?;
                 if !self.cur_terminated() { self.terminate(Term::Jump { target: merge_b, args: Vec::new() }); }
                 if let Some(eb) = else_branch {
                     self.set_cur(else_b);
                     self.push_scope();
                     for st in eb { self.lower_stmt(st)?; }
-                    let scope = self.scopes.pop().unwrap();
-                self.release_scope(&scope);
+                    self.leave_scope()?;
                     if !self.cur_terminated() { self.terminate(Term::Jump { target: merge_b, args: Vec::new() }); }
                 } else {
                     self.set_cur(else_b);
@@ -452,8 +493,7 @@ impl<'a> Lower<'a> {
                 self.loops.push((header, exit, body_depth));
                 for st in body { self.lower_stmt(st)?; }
                 self.loops.pop();
-                let scope = self.scopes.pop().unwrap();
-                self.release_scope(&scope);
+                self.leave_scope()?;
                 if !self.cur_terminated() { self.terminate(Term::Jump { target: header, args: Vec::new() }); }
                 self.set_cur(exit);
                 Ok(())
@@ -469,8 +509,7 @@ impl<'a> Lower<'a> {
                 self.loops.push((cond_b, exit, body_depth));
                 for st in body { self.lower_stmt(st)?; }
                 self.loops.pop();
-                let scope = self.scopes.pop().unwrap();
-                self.release_scope(&scope);
+                self.leave_scope()?;
                 if !self.cur_terminated() { self.terminate(Term::Jump { target: cond_b, args: Vec::new() }); }
                 self.set_cur(cond_b);
                 let (cond_v, _) = self.lower_expr(cond, &Type::Bool)?;
@@ -508,8 +547,7 @@ impl<'a> Lower<'a> {
                 self.loops.push((header, exit, body_depth));
                 for st in body { self.lower_stmt(st)?; }
                 self.loops.pop();
-                let scope = self.scopes.pop().unwrap();
-                self.release_scope(&scope);
+                self.leave_scope()?;
                 if !self.cur_terminated() {
                     let cv2 = self.new_reg(IrType::I64);
                     self.emit(IrInst::Load { dst: cv2, ptr: slot, ty: IrType::I64 });
@@ -548,8 +586,7 @@ impl<'a> Lower<'a> {
                 self.emit(IrInst::Store { ptr: val_slot, val: Value::Reg(vv), ty: IrType::I64 });
                 for st in body { self.lower_stmt(st)?; }
                 self.loops.pop();
-                let scope = self.scopes.pop().unwrap();
-                self.release_scope(&scope);
+                self.leave_scope()?;
                 if !self.cur_terminated() {
                     let iv2 = self.new_reg(IrType::I64);
                     self.emit(IrInst::Load { dst: iv2, ptr: idx_slot, ty: IrType::I64 });
@@ -629,8 +666,7 @@ impl<'a> Lower<'a> {
                 self.emit(IrInst::Store { ptr: v_slot, val: vv, ty: v_ir });
                 for st in body { self.lower_stmt(st)?; }
                 self.loops.pop();
-                let scope = self.scopes.pop().unwrap();
-                self.release_scope(&scope);
+                self.leave_scope()?;
                 if !self.cur_terminated() {
                     let iv2 = self.new_reg(IrType::I64);
                     self.emit(IrInst::Load { dst: iv2, ptr: idx_slot, ty: IrType::I64 });
@@ -644,20 +680,27 @@ impl<'a> Lower<'a> {
             }
             Stmt::Break(_, _) => {
                 if let Some((_, exit, depth)) = self.loops.last().copied() {
-                    self.release_scopes_upto(depth);
+                    self.release_scopes_upto(depth)?;
                     self.terminate(Term::Jump { target: exit, args: Vec::new() });
                     Ok(())
                 } else { self.err("break 不在循环内") }
             }
             Stmt::Continue(_, _) => {
                 if let Some((cont, _, depth)) = self.loops.last().copied() {
-                    self.release_scopes_upto(depth);
+                    self.release_scopes_upto(depth)?;
                     self.terminate(Term::Jump { target: cont, args: Vec::new() });
                     Ok(())
                 } else { self.err("continue 不在循环内") }
             }
             Stmt::Match { subject, arms, .. } => self.lower_match(subject, arms),
-            Stmt::Defer(_, _, _) => self.err("asm 后端暂不支持 `defer`（后续相位）"),
+            Stmt::Defer(inner, ..) => {
+                // 登记到当前作用域，离开该作用域时按 LIFO 触发（正常落穿 /
+                // return / break / continue / throw 全部出口统一经 leave_scope /
+                // release_scopes_upto 排空）。
+                let d = self.scopes.len();
+                self.defers.push((d, (**inner).clone()));
+                Ok(())
+            }
             Stmt::With { .. } => self.err("asm 后端暂不支持 `with`（后续相位）"),
             Stmt::Label(_, _, _) => self.err("asm 后端暂不支持 `label`（后续相位）"),
             Stmt::Goto(_, _, _) => self.err("asm 后端暂不支持 `goto`（后续相位）"),
@@ -680,22 +723,190 @@ impl<'a> Lower<'a> {
                     }
                     None => None,
                 };
-                self.release_scopes_upto(0);
+                self.release_scopes_upto(0)?;
+                // 提前 return 会绕过 try 的 merge/catch 收尾，必须把本函数仍活跃的
+                // exbuf 逐个弹栈并释放，否则运行时异常栈残留（后续 try 路由错帧）。
+                self.cleanup_try_stack();
                 self.terminate(Term::Return { val: ret_val });
                 Ok(())
             }
-            Stmt::Throw(_, _, _) => self.err("asm 后端暂不支持 `throw`（后续相位，异常 unwinding）"),
-            Stmt::Try { .. } => self.err("asm 后端暂不支持 `try`（后续相位，异常 unwinding）"),
+            Stmt::Throw(e, _, _) => {
+                let dt = self.expr_dt(e);
+                let (err, _) = self.lower_expr(e, &dt)?;
+                // 正要抛出的 Error 本身不能被随后的局部释放降为 0（UAF）。
+                if let Expr::Var(n) = e {
+                    if let Some(l) = self.lookup_mut(n) { l.moved = true; }
+                }
+                // 只排空「本 try 帧及内层」的 defer；外层的留给 catch 之后的
+                // 作用域退出，避免 longjmp 回同帧 catch 时被重复执行。
+                let td = self.try_frames.last().copied().unwrap_or(0);
+                self.drain_defers_from(td + 1)?;
+                // 只释放本帧被跨越的局部；try 之前的局部要留给 catch 体引用。
+                self.release_locals_upto(td);
+                self.lower_throw_value(err)?;
+                Ok(())
+            }
+            Stmt::Try { body, catch, .. } => self.lower_try(body, catch),
             Stmt::Select { .. } => self.err("asm 后端暂不支持 `select`（后续相位，通道并发）"),
             Stmt::Expr(e, _, _) => { self.lower_expr(e, &Type::Void)?; Ok(()) }
             Stmt::Block { body, .. } => {
                 self.push_scope();
                 for st in body { self.lower_stmt(st)?; }
-                let scope = self.scopes.pop().unwrap();
-                self.release_scope(&scope);
+                self.leave_scope()?;
                 Ok(())
             }
         }
+    }
+
+    // ---- 异常（C 侧 setjmp/longjmp + 运行时异常栈） ----
+
+    /// 把本函数仍活跃的 exbuf 逐个弹栈并释放（提前 return 时的兜底清理）。
+    fn cleanup_try_stack(&mut self) {
+        let slots: Vec<VReg> = self.try_bufs.clone();
+        for slot in slots.into_iter().rev() {
+            self.emit(IrInst::Call { dst: None, func: "dial_exc_pop".to_string(),
+                args: vec![], arg_tys: vec![], ret_ty: IrType::Void, linkage: CallLink::Runtime });
+            let b = self.new_reg(IrType::Handle);
+            self.emit(IrInst::Load { dst: b, ptr: slot, ty: IrType::Handle });
+            self.emit(IrInst::Call { dst: None, func: "dial_exbuf_free".to_string(),
+                args: vec![Value::Reg(b)], arg_tys: vec![IrType::Handle],
+                ret_ty: IrType::Void, linkage: CallLink::Runtime });
+        }
+    }
+
+    /// 抛出 Error：取运行时异常栈顶，能捕获则 dial_throw_to（longjmp 回 setjmp
+    /// 调用点），无 try 则 dial_panic 打印消息并终止，绝不静默继续。
+    /// 全 spill 固定栈帧天然满足 longjmp 的要求：所有 vreg 都在固定栈槽里，
+    /// longjmp 恢复 rsp/rbp 后仍能读回 setjmp 之前算好的 exbuf 句柄。
+    fn lower_throw_value(&mut self, err: Value) -> Result<(), String> {
+        let top = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call { dst: Some(top), func: "dial_exc_top".to_string(),
+            args: vec![], arg_tys: vec![], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+        let has = self.new_reg(IrType::I64);
+        self.emit(IrInst::ICmp { op: ACmp::Neq, dst: has, a: Value::Reg(top),
+            b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+        let throw_b = self.new_block(Vec::new());
+        let panic_b = self.new_block(Vec::new());
+        self.terminate(Term::Branch { cond: has, then_b: throw_b, else_b: panic_b,
+            then_args: Vec::new(), else_args: Vec::new() });
+        // 捕获路径
+        self.set_cur(throw_b);
+        self.emit(IrInst::Call { dst: None, func: "dial_throw_to".to_string(),
+            args: vec![Value::Reg(top), err], arg_tys: vec![IrType::Handle, IrType::Handle],
+            ret_ty: IrType::Void, linkage: CallLink::Runtime });
+        self.terminate(Term::Unreachable);
+        // 未捕获路径：dial_error_msg 返回 DialString，必须先 dial_string_cstr
+        // 转成裸 C 字符串再交给 dial_panic（否则打印的是 ARC 头的字节）。
+        self.set_cur(panic_b);
+        let msg = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call { dst: Some(msg), func: "dial_error_msg".to_string(),
+            args: vec![err], arg_tys: vec![IrType::Handle],
+            ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+        let cstr = self.new_reg(IrType::Ptr);
+        self.emit(IrInst::Call { dst: Some(cstr), func: "dial_string_cstr".to_string(),
+            args: vec![Value::Reg(msg)], arg_tys: vec![IrType::Handle],
+            ret_ty: IrType::Ptr, linkage: CallLink::Runtime });
+        self.emit(IrInst::Call { dst: None, func: "dial_panic".to_string(),
+            args: vec![Value::Reg(cstr)], arg_tys: vec![IrType::Ptr],
+            ret_ty: IrType::Void, linkage: CallLink::Runtime });
+        self.terminate(Term::Unreachable);
+        // 后续语句落进不可达块，绝不污染两条已终结路径。
+        let dead = self.new_block(Vec::new());
+        self.set_cur(dead);
+        Ok(())
+    }
+
+    /// try { body } catch e { ... }：与 codegen.rs:3323 的 CFG 同构。
+    /// setjmp 必须由「包含 try 的本函数」亲自调用（jmp_buf 存的是本帧栈指针），
+    /// 因此这里直接 call setjmp，绝不包到 C 助手函数里再返回。
+    fn lower_try(&mut self, body: &[Stmt], catch: &Catch) -> Result<(), String> {
+        // ---- setup：建 exbuf、压异常栈、setjmp ----
+        let buf = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call { dst: Some(buf), func: "dial_exbuf_new".to_string(),
+            args: vec![], arg_tys: vec![], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+        let buf_slot = self.emit_alloca(IrType::Handle);
+        self.emit(IrInst::Store { ptr: buf_slot, val: Value::Reg(buf), ty: IrType::Handle });
+        self.emit(IrInst::Call { dst: None, func: "dial_exc_push".to_string(),
+            args: vec![Value::Reg(buf)], arg_tys: vec![IrType::Handle],
+            ret_ty: IrType::Void, linkage: CallLink::Runtime });
+        let env = self.new_reg(IrType::Ptr);
+        self.emit(IrInst::Call { dst: Some(env), func: "dial_exbuf_env_ptr".to_string(),
+            args: vec![Value::Reg(buf)], arg_tys: vec![IrType::Handle],
+            ret_ty: IrType::Ptr, linkage: CallLink::Runtime });
+        let r32 = self.new_reg(IrType::I32);
+        self.emit(IrInst::Call { dst: Some(r32), func: "setjmp".to_string(),
+            args: vec![Value::Reg(env)], arg_tys: vec![IrType::Ptr],
+            ret_ty: IrType::I32, linkage: CallLink::Runtime });
+        let r = self.new_reg(IrType::I64);
+        self.emit(IrInst::Conv { kind: AConv::Sext, dst: r, a: Value::Reg(r32), ty: IrType::I64 });
+        let is_throw = self.new_reg(IrType::I64);
+        self.emit(IrInst::ICmp { op: ACmp::Neq, dst: is_throw, a: Value::Reg(r),
+            b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+        let body_b = self.new_block(Vec::new());
+        let catch_b = self.new_block(Vec::new());
+        let merge_b = self.new_block(Vec::new());
+        let cont_b = self.new_block(Vec::new());
+        self.terminate(Term::Branch { cond: is_throw, then_b: catch_b, else_b: body_b,
+            then_args: Vec::new(), else_args: Vec::new() });
+
+        // ---- try.body（首次 setjmp 返回 0 走这里）----
+        self.set_cur(body_b);
+        let try_depth = self.scopes.len();
+        self.try_frames.push(try_depth);
+        self.try_bufs.push(buf_slot);
+        self.push_scope();
+        for st in body { self.lower_stmt(st)?; if self.cur_terminated() { break; } }
+        let body_done = !self.cur_terminated();
+        self.leave_scope()?;
+        if body_done { self.terminate(Term::Jump { target: merge_b, args: Vec::new() }); }
+        self.try_frames.pop();
+        self.try_bufs.pop();
+
+        // ---- catch（longjmp 回来，setjmp 返回非 0）----
+        self.set_cur(catch_b);
+        self.emit(IrInst::Call { dst: None, func: "dial_exc_pop".to_string(),
+            args: vec![], arg_tys: vec![], ret_ty: IrType::Void, linkage: CallLink::Runtime });
+        let buf2 = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Load { dst: buf2, ptr: buf_slot, ty: IrType::Handle });
+        let err = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call { dst: Some(err), func: "dial_exbuf_take_err".to_string(),
+            args: vec![Value::Reg(buf2)], arg_tys: vec![IrType::Handle],
+            ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+        self.emit(IrInst::Call { dst: None, func: "dial_exbuf_free".to_string(),
+            args: vec![Value::Reg(buf2)], arg_tys: vec![IrType::Handle],
+            ret_ty: IrType::Void, linkage: CallLink::Runtime });
+        self.push_scope();
+        match &catch.var {
+            Some(name) => {
+                let slot = self.emit_alloca(IrType::Handle);
+                self.emit(IrInst::Store { ptr: slot, val: Value::Reg(err), ty: IrType::Handle });
+                self.declare(name, Local { ptr: slot, ty: IrType::Handle,
+                    dt: Type::Error, is_handle: true, moved: false });
+            }
+            None => {
+                // 无人接收错误对象：立即释放，避免泄漏。
+                let slot = self.emit_alloca(IrType::Handle);
+                self.emit(IrInst::Store { ptr: slot, val: Value::Reg(err), ty: IrType::Handle });
+                self.emit(IrInst::RcRelease { ptr: slot, kind: ArcKind::Error });
+            }
+        }
+        for st in &catch.body { self.lower_stmt(st)?; if self.cur_terminated() { break; } }
+        let catch_done = !self.cur_terminated();
+        self.leave_scope()?;
+        if catch_done { self.terminate(Term::Jump { target: cont_b, args: Vec::new() }); }
+
+        // ---- merge：仅「try 体正常完成」到达，与 catch 严格二选一 ----
+        self.set_cur(merge_b);
+        self.emit(IrInst::Call { dst: None, func: "dial_exc_pop".to_string(),
+            args: vec![], arg_tys: vec![], ret_ty: IrType::Void, linkage: CallLink::Runtime });
+        let buf3 = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Load { dst: buf3, ptr: buf_slot, ty: IrType::Handle });
+        self.emit(IrInst::Call { dst: None, func: "dial_exbuf_free".to_string(),
+            args: vec![Value::Reg(buf3)], arg_tys: vec![IrType::Handle],
+            ret_ty: IrType::Void, linkage: CallLink::Runtime });
+        self.terminate(Term::Jump { target: cont_b, args: Vec::new() });
+        self.set_cur(cont_b);
+        Ok(())
     }
 
     // ---- 表达式：返回 (Value, is_copy) ----
@@ -1469,8 +1680,7 @@ impl<'a> Lower<'a> {
             self.set_cur(body_b);
             self.push_scope();
             for st in &arm.body { self.lower_stmt(st)?; }
-            let scope = self.scopes.pop().unwrap();
-            self.release_scope(&scope);
+            self.leave_scope()?;
             if !self.cur_terminated() { self.terminate(Term::Jump { target: merge, args: Vec::new() }); }
             self.set_cur(next_b);
         }
@@ -1480,8 +1690,7 @@ impl<'a> Lower<'a> {
                 if let MatchPattern::Wildcard = arm.pattern {
                     self.push_scope();
                     for st in &arm.body { self.lower_stmt(st)?; }
-                    let scope = self.scopes.pop().unwrap();
-                self.release_scope(&scope);
+                    self.leave_scope()?;
                     if !self.cur_terminated() { self.terminate(Term::Jump { target: merge, args: Vec::new() }); }
                     break;
                 }

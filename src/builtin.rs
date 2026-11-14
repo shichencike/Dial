@@ -173,6 +173,9 @@ pub fn lookup(name: &str) -> Option<BSpec> {
         "bytes_from_ptr" => return Some(c("dial_ffi_bytes_from_ptr", A_PI, IrType::Handle, Type::Bytes)),
         "string_from_cstr" => return Some(c("dial_ffi_string_from_cstr", A_P, IrType::Handle, Type::String)),
 
+        // ---- 可恢复异常对象（ARC） ----
+        "Error" => return Some(c("dial_error_new", A_P, IrType::Handle, Type::Error)),
+
         // ---- 容器构造 ----
         "new_map" => return Some(c("dial_map_new", A0, IrType::Handle, Type::Map)),
         "new_set" => return Some(c("dial_map_new", A0, IrType::Handle, Type::Set(Box::new(Type::Int)))),
