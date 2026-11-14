@@ -1317,6 +1317,25 @@ impl<'a> Lower<'a> {
                 Ok((Value::Reg(r), false))
             }
             BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                // 字符串比较必须走 **dial_string_eq**（内容比较），绝不能用
+                // 指针相等——两个内容相同的字符串是**不同的堆对象**（字面量
+                // 每次求值都会 dial_string_new 出一份新副本），指针比较必然
+                // 为假，于是 `s == "a"` 恒假、分派链全部走错分支
+                // （bench.dial 的 run(name) 分派就是这样失效的）。
+                // dial_string_eq 的约定是「相等返回 1、不等返回 0」，因此
+                // `a == b` 对应「结果 != 0」、`a != b` 对应「结果 == 0」——
+                // 与数值比较的方向**相反**，切勿照抄。
+                if da == Type::String && db == Type::String && matches!(op, BinOp::Eq | BinOp::Neq) {
+                    let cmp = self.new_reg(IrType::I64);
+                    self.emit(IrInst::Call { dst: Some(cmp), func: "dial_string_eq".to_string(),
+                        args: vec![av, bv], arg_tys: vec![IrType::Handle, IrType::Handle],
+                        ret_ty: IrType::I64, linkage: CallLink::Runtime });
+                    let r = self.new_reg(IrType::I64);
+                    let icmp_op = if op == BinOp::Eq { ACmp::Neq } else { ACmp::Eq };
+                    self.emit(IrInst::ICmp { op: icmp_op, dst: r, a: Value::Reg(cmp),
+                        b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+                    return Ok((Value::Reg(r), false));
+                }
                 let ty = if is_float { IrType::F64 } else { IrType::I64 };
                 let r = self.new_reg(IrType::I64);
                 if is_float {
