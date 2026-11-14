@@ -267,6 +267,32 @@ impl<'a> Lower<'a> {
             for (n, t) in &f.params {
                 // 内部宽度统一用 reg_ir（I64），栈槽 8 字节；emit 的 prologue 把
                 // 边界宽度的实参寄存器填进来（写 32/8 位会自动零扩展到 64 位）。
+                if let Type::Struct(sn) = t {
+                    // 结构体形参按**值**传递（对齐 LLVM 后端 codegen.rs:2152 的
+                    // alloca + store 值拷贝语义）：调用方传「内容区地址」，
+                    // 本函数把它 memcpy 进自己的内容区，得到独立副本——
+                    // 于是被调方改形参不会影响调用方（值语义），且函数返回后
+                    // 调用方的栈帧销毁也不影响被调方正在使用的副本。
+                    //
+                    // 实现上分两段：① 参数槽（8 字节）先由 prologue 写入传入的
+                    // 内容区地址；② 函数体开头据此 memcpy 出本函数的内容区。
+                    // 变量名绑定到**内容区**（Local.ptr 语义 = 内容区地址），
+                    // 与局部结构体变量的表示完全一致。
+                    let ptr_slot = self.emit_alloca(IrType::Ptr);
+                    let content = self.emit_alloca(IrType::Struct(sn.clone()));
+                    let addr = self.new_reg(IrType::Ptr);
+                    self.emit(IrInst::Load { dst: addr, ptr: ptr_slot, ty: IrType::Ptr });
+                    self.emit_memcpy(content, Value::Reg(addr), self.struct_byte_size(t));
+                    self.declare(n, Local {
+                        ptr: content, ty: reg_ir(t), dt: t.clone(), is_handle: false, moved: false,
+                    });
+                    self.param_slots.push(ptr_slot);
+                    // 值拷贝本身不带所有权：内容区里的堆字段需对称 +1（入口），
+                    // 作用域退出时由 release_scope 递归 -1（与 LLVM 的
+                    // retain_struct_fields / release_struct_fields 对称）。
+                    self.emit(IrInst::StructRetain { ptr: content, struct_name: sn.clone() });
+                    continue;
+                }
                 let slot = self.emit_alloca(reg_ir(t));
                 let is_h = rc_kind(t).is_some();
                 self.declare(n, Local { ptr: slot, ty: reg_ir(t), dt: t.clone(), is_handle: is_h, moved: false });
@@ -274,8 +300,6 @@ impl<'a> Lower<'a> {
                 // 堆形参入口 retain（与调用方共享所有权，对称借用）。
                 if let Some(k) = rc_kind(t) {
                     self.emit(IrInst::RcRetain { ptr: slot, kind: k });
-                } else if let Type::Struct(sn) = t {
-                    self.emit(IrInst::StructRetain { ptr: slot, struct_name: sn.clone() });
                 }
             }
         }
@@ -412,6 +436,12 @@ impl<'a> Lower<'a> {
                 let fa = self.new_reg(IrType::Ptr);
                 self.emit(IrInst::FieldAddr { dst: fa, base: base_loc.ptr, struct_name: struct_name_of(&base_loc.dt), field: field_off as u32 });
                 let (v, is_copy) = self.lower_expr(value, &field_ty)?;
+                if let Type::Struct(_) = &field_ty {
+                    // 嵌套结构体字段：按值拷贝内容（v 是内容区地址）。
+                    self.emit_memcpy(fa, v, self.struct_byte_size(&field_ty));
+                    self.emit(IrInst::StructRetain { ptr: fa, struct_name: struct_name_of(&field_ty) });
+                    return Ok(());
+                }
                 if let Some(k) = rc_kind(&field_ty) {
                     self.emit(IrInst::RcRelease { ptr: fa, kind: k });
                 }
@@ -759,14 +789,31 @@ impl<'a> Lower<'a> {
                         let dt = self.expr_dt(e);
                         let (v, _) = self.lower_expr(e, &dt)?;
                         let v = self.adapt_param(v, &dt, &dt);
-                        // 返回值直接来自堆句柄局部变量：标记 moved，所有权随返回值转移，
-                        // 避免紧随其后的作用域释放把返回句柄降为 0（悬垂指针）。
-                        if let Expr::Var(n) = e {
-                            if rc_kind(&dt).is_some() {
-                                if let Some(sl) = self.lookup_mut(n) { sl.moved = true; }
+                        if let Type::Struct(_) = &dt {
+                            // 结构体返回值：内容区在本函数栈帧上，函数返回后即失效，
+                            // 不能直接把内容区地址交出去（调用方会读到已销毁的栈）。
+                            // 故先把内容 **box 到堆**（dial_struct_box，RC 对象），
+                            // 返回其 payload 指针；调用方 memcpy 出自己的副本后 release。
+                            // 与 LLVM 后端对结构体装箱的处理同源（codegen.rs:5895）。
+                            let size = self.struct_byte_size(&dt);
+                            let sz = self.new_reg(IrType::I64);
+                            self.emit(IrInst::Conv { kind: AConv::Zext, dst: sz,
+                                a: Value::Imm(Imm::I64(size)), ty: IrType::I64 });
+                            let boxed = self.new_reg(IrType::Handle);
+                            self.emit(IrInst::Call { dst: Some(boxed), func: "dial_struct_box".to_string(),
+                                args: vec![v, Value::Reg(sz)], arg_tys: vec![IrType::Ptr, IrType::I64],
+                                ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+                            Some(Value::Reg(boxed))
+                        } else {
+                            // 返回值直接来自堆句柄局部变量：标记 moved，所有权随返回值转移，
+                            // 避免紧随其后的作用域释放把返回句柄降为 0（悬垂指针）。
+                            if let Expr::Var(n) = e {
+                                if rc_kind(&dt).is_some() {
+                                    if let Some(sl) = self.lookup_mut(n) { sl.moved = true; }
+                                }
                             }
+                            Some(v)
                         }
-                        Some(v)
                     }
                     None => None,
                 };
@@ -1055,6 +1102,15 @@ impl<'a> Lower<'a> {
                     let fa = self.new_reg(IrType::Ptr);
                     self.emit(IrInst::FieldAddr { dst: fa, base: s2, struct_name: name.clone(), field: off as u32 });
                     let (fv, is_copy) = self.lower_expr(fe, &fty)?;
+                    if let Type::Struct(_) = &fty {
+                        // 嵌套结构体字段：按值拷贝**内容**（fv 是内容区地址），
+                        // 不能只存 8 字节指针——那会让读侧把指针当成字段内容，
+                        // 嵌套访问 r.origin.x 于是读到指针位模式（垃圾值）。
+                        self.emit_memcpy(fa, fv, self.struct_byte_size(&fty));
+                        // 值拷贝不带所有权：字段里的堆字段需对称 +1。
+                        self.emit(IrInst::StructRetain { ptr: fa, struct_name: struct_name_of(&fty) });
+                        continue;
+                    }
                     // 字段内存宽度 field_ir（bool=1B）；内部 I64 需截断。
                     let mty = field_ir(&fty);
                     let fv_store = if mty != reg_ir(&fty) {
@@ -1348,7 +1404,17 @@ impl<'a> Lower<'a> {
             let at = sig.params.get(i).cloned().unwrap_or(Type::Int);
             let (v, _) = self.lower_expr(a, &at)?;
             let v = self.adapt_param(v, &at, &at);
-            arg_vals.push(v);
+            if let Type::Struct(_) = &at {
+                // 结构体实参按值传递：先把内容拷到调用方栈上的一块临时区，
+                // 再把**临时区地址**传给被调方（被调方会 memcpy 出自己的副本）。
+                // 直接传原内容区地址会让被调方在拷贝完成前看到调用方可能已改动的
+                // 内容，且被调方的副本与调用方变量共享存储，破坏值语义。
+                let tmp = self.emit_alloca(IrType::Struct(struct_name_of(&at)));
+                self.emit_memcpy(tmp, v, self.struct_byte_size(&at));
+                arg_vals.push(Value::Reg(tmp));
+            } else {
+                arg_vals.push(v);
+            }
             arg_tys.push(param_ir(&at));
         }
         let linkage = if sig.exported { CallLink::Extern } else { CallLink::Dial };
@@ -1359,6 +1425,20 @@ impl<'a> Lower<'a> {
         match dst {
             None => Ok((Value::Imm(Imm::I64(0)), false)),
             Some(d) => {
+                if let Type::Struct(sn) = &ret_dt {
+                    // 结构体返回值：被调方交回的是**堆上 box 的 payload 指针**
+                    // （见 Stmt::Return 的装箱说明）。调用方 memcpy 出自己的
+                    // 内容区副本，再 release 那个 box（它归调用方所有）。
+                    let content = self.emit_alloca(IrType::Struct(sn.clone()));
+                    self.emit_memcpy(content, Value::Reg(d), self.struct_byte_size(&ret_dt));
+                    self.emit(IrInst::Call { dst: None, func: "dial_rc_release".to_string(),
+                        args: vec![Value::Reg(d)], arg_tys: vec![IrType::Handle],
+                        ret_ty: IrType::Void, linkage: CallLink::Runtime });
+                    // 副本里的堆字段需对称 +1（值拷贝不带所有权），
+                    // 与 LLVM 后端的 retain_struct_fields 对齐。
+                    self.emit(IrInst::StructRetain { ptr: content, struct_name: sn.clone() });
+                    return Ok((Value::Reg(content), false));
+                }
                 let internal = reg_ir(&ret_dt);
                 if internal != ret_ir {
                     let r2 = self.new_reg(internal.clone());
@@ -2064,7 +2144,16 @@ impl<'a> Lower<'a> {
     fn expr_struct_dt(&self, e: &Expr) -> Type {
         match e {
             Expr::Var(name) => self.lookup(name).map(|l| l.dt.clone()).unwrap_or(Type::Struct("?".to_string())),
-            Expr::Field(base, _) => self.expr_struct_dt(base),
+            // 嵌套字段链（r.origin.x）：逐级解析——基类型的**当前字段**类型才是
+            // 本级基类型。此前直接递归到 base 的类型（丢掉字段名），导致
+            // `r.origin.x` 拿 Rect 去查字段 x 而误报「无字段 x」。
+            Expr::Field(base, field) => {
+                let base_dt = self.expr_struct_dt(base);
+                match self.struct_field(&base_dt, field) {
+                    Some((_off, fty)) => fty,
+                    None => base_dt,
+                }
+            }
             _ => self.expr_dt(e),
         }
     }

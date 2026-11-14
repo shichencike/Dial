@@ -356,7 +356,17 @@ impl IrProgram {
     /// 计算一个 Dial 结构体（按名）按 C ABI 的字段布局：返回 (offsets, total_size, align)。
     /// 非 packed：字段按自然对齐（i64/f64/ptr/handle/struct = 8，i32/f32 = 4，i1/i8 = 1）；
     /// packed：逐字节排列无 padding。与现有 LLVM 后端 `build_struct_types` 对齐。
+    ///
+    /// **嵌套结构体必须递归求尺寸/对齐**：C ABI 下 `struct Rect { Point origin; int w; }`
+    /// 的 origin 占 Point 的完整尺寸（16 字节）而非一个指针宽（8 字节），
+    /// 否则字段偏移与 LLVM 后端（按 DataLayout 算真实布局）不一致，双后端会错位。
     pub fn struct_layout(&self, name: &str, packed: bool) -> (Vec<i64>, i64, i64) {
+        self.struct_layout_depth(name, packed, 0)
+    }
+
+    /// struct_layout 的递归实现。depth 用于环检测（自引用结构体在 Dial 里不合法，
+    /// 但坏输入下必须终止而不是无限递归）。
+    fn struct_layout_depth(&self, name: &str, packed: bool, depth: u32) -> (Vec<i64>, i64, i64) {
         // 字段默认值表在此无关；直接用第一个元素（字段列表）。
         let fields = match self.structs.get(name) {
             Some((f, _)) => f.clone(),
@@ -366,9 +376,7 @@ impl IrProgram {
         let mut off = 0i64;
         let mut align = 1i64;
         for (_, t) in &fields {
-            let it = field_ir(t);
-            let a = if it == IrType::I32 || it == IrType::F32 { 4 } else if it == IrType::I1 || it == IrType::I8 { 1 } else { 8 };
-            let sz = field_size(t);
+            let (a, sz) = self.field_align_size(t, packed, depth);
             align = align.max(a);
             if !packed { off = (off + a - 1) / a * a; }
             offsets.push(off);
@@ -376,6 +384,24 @@ impl IrProgram {
         }
         if !packed { off = (off + align - 1) / align * align; }
         (offsets, off, align)
+    }
+
+    /// 字段的 (对齐, 字节数)。标量按宽度；嵌套结构体按其自身的 C ABI 布局递归求。
+    fn field_align_size(&self, t: &Type, packed: bool, depth: u32) -> (i64, u32) {
+        if let Type::Struct(n) = t {
+            if depth < 8 {
+                let (_off, size, align) = self.struct_layout_depth(n, packed, depth + 1);
+                // C ABI：嵌套结构体的对齐取其自身对齐，尺寸取其尾部 padding 后的大小。
+                return (align.max(1), size.max(1) as u32);
+            }
+            // 深度超限（异常输入）：按单指针宽兜底，绝不无限递归。
+            return (8, 8);
+        }
+        let it = field_ir(t);
+        let a = if it == IrType::I32 || it == IrType::F32 { 4 }
+            else if it == IrType::I1 || it == IrType::I8 { 1 }
+            else { 8 };
+        (a, field_size(t))
     }
 }
 
@@ -409,6 +435,10 @@ pub fn param_ir(t: &Type) -> IrType {
     match t {
         Type::Bool => IrType::I32,
         Type::Byte => IrType::I8,
+        // 结构体按**值**传递在 C ABI 下要么进寄存器组、要么走内存，两套后端的
+        // 分级规则不同；自研后端统一用「内容区地址指针」传递（callee 收到后
+        // memcpy 出自己的副本），语义等价于按值且与 LLVM 后端的值拷贝行为一致。
+        Type::Struct(_) => IrType::Ptr,
         other => reg_ir(other),
     }
 }

@@ -1,0 +1,62 @@
+// 结构体按值语义回归用例（M5-a）。
+//
+// 曾经的 bug：asm 后端把结构体当「8 字节指针」传参 / 返回 / 存字段，
+// 读侧拿到的是指针位模式而非内容——输出静默变成垃圾值（如 140722784664888）。
+// 本用例覆盖：嵌套结构体字段、形参按值拷贝、返回值按值拷贝、字段赋值、
+// 结构体整体赋值，以及「被调方改形参不影响调用方」的值语义。
+
+struct Point { x: int, y: int }
+
+struct Rect { origin: Point, w: int, h: int }
+
+fn make_point(x: int, y: int): Point {
+    return Point { x: x, y: y };
+}
+
+fn manhattan(p: Point): int {
+    return p.x + p.y;
+}
+
+// 值语义：被调方改形参不得影响调用方的变量。
+fn bump(p: Point): Point {
+    p.x = p.x + 1000;
+    return p;
+}
+
+fn rect_area(r: Rect): int {
+    return r.w * r.h;
+}
+
+fn main(): int {
+    var p: Point = Point { x: 3, y: 4 };
+    print("p = ", p.x, " ", p.y);
+
+    // 字段赋值
+    p.x = 20;
+    p.y = 10;
+    print("q = ", p.x, " ", p.y);
+
+    // 形参按值传递
+    print("manhattan = ", manhattan(p));
+
+    // 返回值按值传递
+    var m: Point = make_point(7, 8);
+    print("m = ", m.x, " ", m.y);
+
+    // 嵌套结构体字段
+    var r: Rect = Rect { origin: p, w: 5, h: 6 };
+    print("nested = ", r.origin.x, " ", r.origin.y, " ", r.w, " ", r.h);
+    print("area = ", rect_area(r));
+
+    // 值语义：被调方改形参后，调用方的 p 不变
+    var bumped: Point = bump(p);
+    print("bumped = ", bumped.x, " ", bumped.y);
+    print("p unchanged = ", p.x, " ", p.y);
+
+    // 结构体整体赋值（值拷贝）
+    var c: Point = p;
+    c.x = 999;
+    print("c = ", c.x, " ", c.y, " p = ", p.x, " ", p.y);
+
+    return 0;
+}
