@@ -1,0 +1,67 @@
+// M1–M2 覆盖：内建函数表驱动分派 + 方法表驱动分派 + 容器操作。
+// 门禁验收标准：llvm / asm 两后端运行输出逐字节一致。
+
+fn abs_demo(x: int): int {
+    return x < 0 ? -x : x;
+}
+
+fn main(): int {
+    // ---- M1：内建函数（数值 / 转换 / 解析 / 时间 / 环境）----
+    print("min/max = ", min(3, 9), " ", max(3, 9));
+    print("abs = ", abs(-5), " ", abs(5));
+    print("pow = ", pow(2.0, 10.0));
+    print("sqrt = ", sqrt(16.0));
+    print("floor/ceil = ", floor(3.7), " ", ceil(3.2));
+    print("int_to_string = ", int_to_string(123));
+    print("string len = ", "hello".length());
+    var byte_buf: byte[] = [int_to_byte(65), int_to_byte(66)];
+    print("char/byte = ", char_to_int('A'), " ", byte_to_int(byte_buf[0]));
+
+    // ---- M2-a：索引赋值 / 切片 / match 字符串 ----
+    var arr: int[] = [1, 2, 3, 4, 5];
+    arr[0] = 100;
+    arr[4] = 500;
+    print("arr = ", arr[0], " ", arr[1], " ", arr[4]);
+    var sl: int[] = arr.slice(1, 4);
+    print("slice = ", sl[0], " ", sl[1], " ", sl[2], " len = ", sl.length());
+
+    var s: string = "hello world";
+    print("sub = ", s.substring(0, 5));
+    print("get = ", s.get(6));
+    print("eq = ", s.eq("hello world"), " ", s.eq("other"));
+    print("index_of = ", s.index_of("world"));
+
+    match (s) {
+        "hello world" => { print("match: exact"); }
+        _ => { print("match: other"); }
+    }
+
+    // ---- M2-b：方法表驱动分派 + 容器 COW 写回 ----
+    var v: int[] = [3, 1, 2];
+    v.push(4);
+    print("v len = ", v.length(), " last = ", v.get(v.length() - 1));
+    v.reverse();
+    print("reversed = ", v.get(0), " ", v.get(1), " ", v.get(2));
+    v.sort();
+    print("sorted = ", v.get(0), " ", v.get(1), " ", v.get(2));
+
+    var m: map<string, int> = new_kv_map();
+    m.put("a", 1);
+    m.put("b", 2);
+    print("map a = ", m.get("a"), " b = ", m.get("b"), " miss = ", m.get("zz"));
+
+    var st: set<int> = new_set();
+    st.add(7);
+    st.add(8);
+    st.add(7);
+    print("set size = ", st.size(), " has 7 = ", st.contains(7), " has 9 = ", st.contains(9));
+
+    var b: bytes = bytes_new(4);
+    print("bytes len = ", bytes_length(b), " get = ", bytes_get(b, 0));
+    print("bytes from string = ", bytes_to_string(bytes_from_string("abc")));
+
+    // ---- 表达式内调用与递归组合 ----
+    print("abs_demo = ", abs_demo(-12));
+    print("mixed = ", 1, " ", 2.5, " ", true, " ", "str");
+    return 0;
+}

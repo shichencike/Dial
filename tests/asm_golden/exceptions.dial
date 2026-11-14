@@ -1,0 +1,71 @@
+// M3-a 覆盖：defer / try-catch / throw / with 自动释放 / 文件 IO。
+// 门禁验收标准：llvm / asm 两后端运行输出逐字节一致。
+
+fn with_defer(): int {
+    defer { print("defer fired"); }
+    print("body");
+    return 7;
+}
+
+fn catch_demo(n: int): string {
+    try {
+        if (n > 0) {
+            throw Error("positive input");
+        }
+        print("no throw");
+    } catch e {
+        return "caught: " + e.msg();
+    }
+    return "done";
+}
+
+fn nested_try(): int {
+    var acc: int = 0;
+    try {
+        try {
+            throw Error("inner");
+        } catch e1 {
+            acc = acc + 1;
+            print("inner caught");
+        }
+        acc = acc + 10;
+    } catch e2 {
+        acc = acc + 100;
+    }
+    return acc;
+}
+
+fn file_demo(path: string): int {
+    with open(path, "w") as f {
+        write(f, "hello asm backend");
+    }
+
+    with open(path, "r") as g {
+        var content: string = read_all(g);
+        print("file content = ", content);
+    }
+    print("file size = ", file_size(path));
+    print("file exists = ", file_exists(path));
+
+    file_remove(path);
+    print("after remove exists = ", file_exists(path));
+    return 0;
+}
+
+fn main(): int {
+    print("with_defer = ", with_defer());
+    print("catch_demo(1) = ", catch_demo(1));
+    print("catch_demo(0) = ", catch_demo(0));
+    print("nested_try = ", nested_try());
+
+    // 失败路径：打开不存在的文件必须抛 Error 并被 catch 接住
+    try {
+        var bad: file = open("/nonexistent/path/for/dial/asm/backend", "r");
+        print("should not reach here");
+    } catch e {
+        print("open failed caught");
+    }
+
+    file_demo("/tmp/dial_asm_golden_fileio.txt");
+    return 0;
+}

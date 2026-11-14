@@ -315,10 +315,30 @@ dialc lsp
 > 专属 IR → 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化）→ x86-64 SysV 或
 > AArch64 AAPCS 汇编 `.s` → 系统 `cc -c` 汇编成 `.o` → 复用既有链接流程。
 > **不发射 C 源码、不引第三方代码生成库、零新包依赖**；FFI 包、`--tiny`、
-> `--single-file` 因复用链接层而零改动生效。首版覆盖核心子集（标量 / 字符串 /
-> 数组 / 结构体 / 控制流 / 函数 / FFI / 基础 ARC），未覆盖的语言构造会明确报
+> `--single-file` 因复用链接层而零改动生效。未覆盖的语言构造会明确报
 > `[asm 后端] ...` 编译错误，绝不静默降级。`asm` 后端拒绝 `--pgo`、忽略 `-g`。
 > 双后端黄金门禁见 `tools/run_asm_golden.sh`（`run_tests.sh` 的 AF 组）。
+>
+> **当前覆盖范围**（M1–M3 已落地）：
+>
+> | 批次 | 覆盖内容 |
+> | --- | --- |
+> | M1 | 内建函数**表驱动**分派（`src/builtin.rs`）：math / 类型转换 / 解析 / 环境 / 时间 / bytes / 容器构造等约 55 个 |
+> | M2-a | 索引赋值 / 切片 / `match` 字符串分支 / `ForEachMap` 遍历 |
+> | M2-b | 方法**表驱动**分派：全部内建方法（含容器 COW 写回、`kv()`、`eret()`、`one()`、`earg()`） |
+> | M3-a | 控制流与异常：`defer` / `try`–`catch` / `throw`（运行时 setjmp/longjmp + 异常栈）、文件 IO 内建（失败抛 `Error`）、`with` 自动释放 |
+> | M3-b | `label` / `goto`（含跨作用域释放，深度表与 LLVM 后端同源核对） |
+>
+> 尚未覆盖（会明确报错）：`select` / `spawn` / 通道并发、编译期布局内建
+> （`sizeof` / `alignof` / `offsetof`）、内联汇编与 SIMD、`ptr_cast` 类型字面量、
+> 裸指针解引用赋值等。
+>
+> **双后端黄金门禁**（`tools/run_asm_golden.sh`，`run_tests.sh` 的 AF 组）：
+> 同一份 `.dial` 分别用 `llvm` / `asm` 编译运行并**逐字节 diff**——LLVM 后端即基准，
+> 无需维护 `.expected`。正向用例 6 份（`core1`–`core3` 核心子集 + `builtins`
+> 内建与方法表 + `exceptions` 异常与文件 IO + `control_flow` `label`/`goto`）；
+> 负例在 `tests/asm_golden/negative/` 下逐个遍历，每个都要求「LLVM 能编译、
+> asm 报错且带 `[asm 后端]` 前缀」，杜绝静默降级。用例在临时目录编译，仓库零污染。
 
 > **第 18 层两种产物形态**（工具链层，非 `.dialpkg` 契约）：`--tiny` 体积模式
 > （C 侧 `-Os -ffunction-sections -fdata-sections` + 链接期 `-Wl,--gc-sections -s`，

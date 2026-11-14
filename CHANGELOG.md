@@ -780,11 +780,45 @@
   bitcode）、忽略 `-g`（首版无 DWARF），`--fast` 仅作用于 C 运行时；`--tiny` /
   `--single-file` / FFI 包 / rpath 因复用链接层而零改动生效。`DIAL_ASM_TARGET`
   可显式指定交叉目标（配合 `DIAL_C_COMPILER` 使用）。
+- **自研后端成熟度批次 M1–M3（把首版「明确 Fail-Fast」的未覆盖构造逐块补齐）**：
+  首版只覆盖核心子集，其余构造一律报错；本批次按「先补能撑起真实程序的构造」的
+  顺序推进，每块都是**独立逻辑单元**（各自编译通过即提交并经 443 推送），
+  且每块都以「同一份 `.dial` 在 llvm / asm 两后端运行输出逐字节一致」为验收标准。
+  - **M1 · 内建函数表驱动分派**（`src/builtin.rs`）：把散落在 lowering 里的按名分派
+    收进一张规格表（返回类型 + 调用形态 + 逐参数 ABI 提示），覆盖 math / 类型转换 /
+    解析 / 环境 / 时间 / bytes / 容器构造等约 55 个内建；未覆盖者仍明确报「暂不支持」。
+  - **M2-a · 索引赋值 / 切片 / `match` 字符串分支 / `ForEachMap` 遍历**。
+  - **M2-b · 方法表驱动分派**：全部内建方法（容器 COW 写回、`kv()`、`eret()`、
+    `one()`、`earg()` 等标记）。
+  - **M3-a · 控制流与异常**：`defer` / `try`–`catch` / `throw`（运行时 C 侧
+    setjmp/longjmp + `dial_exc_push/pop/top` 异常栈，非 DWARF unwinding）；
+    **文件 IO 内建**（`open` / `read` / `read_all` / `file_read_line` / `write` /
+    `eof` / `file_exists` / `file_size` / `file_remove` / `close`，失败路径抛 `Error`，
+    错误文本与 LLVM 后端逐字一致）；**`with` 自动释放**（复用 defer 机制覆盖全部出口，
+    块内显式 close 后以 moved 标记跳过二次释放）。
+  - **M3-b · `label` / `goto`**：标签作用域深度表由语义层 `analyze_gotos` 统一计算，
+    经 `analyze()` → `IrProgram.goto_depths` → `Lower.label_depths` 贯通，
+    避免两后端各算一套口径；跨作用域 goto 按深度释放 defer 与堆局部，
+    且**不 pop 作用域帧**（与 LLVM 后端同构，标签块在原深度仍能引用该层局部）。
+  - 期间修复两处控制流缺陷：① 函数体循环在 `with` 内早返回后仍处理后续 `return`，
+    用 `terminate` 覆盖前面的 terminator，导致函数错误返回值（现一旦当前块已终结
+    即停止 lower）；② 函数体循环把 `goto` 之后的 `label` 当死代码跳过，
+    使标签目标块停在 `ud2`（现 `label` 例外）。
 - **AF 组（双后端黄金门禁）**：`tools/run_asm_golden.sh` 把 3 份核心子集 `.dial`
   分别用 `llvm` / `asm` 编译运行并逐字节 diff（LLVM 后端即基准，无需维护 `.expected`），
   另校验 `.s` 产物确实生成、默认后端仍为 llvm、未覆盖构造 Fail-Fast 明确报错、
   AArch64 汇编经 `clang --target=aarch64-linux-gnu -c` 语法验证；
   `tests/run_tests.sh` 新增 AF 组调用与头部说明。用例在临时目录编译，仓库零污染。
+  **M1–M3 期间扩充**：正向用例由 3 份增至 **6 份**——新增 `builtins.dial`
+  （M1 内建表 + M2 方法表：math / 转换 / 解析 / bytes / 容器 COW 写回 / 切片 /
+  `match` 字符串）、`exceptions.dial`（M3-a：`defer` / `try`–`catch` / `throw` /
+  `with` 自动释放 / 文件 IO 读写 / 打开失败的异常路径）、`control_flow.dial`
+  （M3-b：`label` / `goto` 的前向跳、后向跳与跨作用域释放）；
+  负例改为**遍历 `negative/` 下全部负例**（不再硬编码单个），并随已支持构造的推进
+  同步更新——原负例用的正是 M3-a1 落地的 `defer`，一度使「静默放行」判据被架空；
+  现换为编译期布局内建 `sizeof<int>()` 与 `select`，两者 LLVM 可编译而 asm 明确报错，
+  互不重叠以免单点失效即整体失守。`.gitignore` 补入 `*.s`（自研后端汇编产物），
+  保证手工在仓库内编译也不污染工作树。
 - **交付状态**：源码已按用户要求**推送到 GitHub**（`main` 分支）；**未升级版本号、
   未打标签、未发 Release**（仍遵循本段开头的「开发中增量」口径）。推送通道按用户
   裁决改为**强制 443**：`~/.ssh/config` 把 `github.com` 解析为
@@ -793,6 +827,11 @@
   走 443。此前 HTTPS 直推连续三次连接超时（curl / gh API 可达、属链路丢包抖动），
   改道后一次成功：`5283e20..f4f2229 main -> main`，11 个积压提交同步完毕；
   本轮第 8 层提交后同样经 443 推送。
+  **M1–M3 成熟度批次新增 3 个提交，同样经 443 推送**：
+  `8c70db5..51ecc39 main -> main`——`d6229b8`（黄金门禁负例随已支持构造同步更新）、
+  `62edaa8`（M3-a2 文件 IO 内建 + `with` 自动释放）、`51ecc39`（M3-b `label` / `goto`）。
+  全量测试 660 项全绿、0 失败；`cargo build` 零警告；`src/codegen.rs` / `src/ast.rs`
+  相对基线 `544d10a` **零改动**；版本号仍 `1.10.0`、未打 tag。
 
 ---
 
