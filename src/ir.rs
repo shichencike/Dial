@@ -147,7 +147,9 @@ pub enum IrInst {
     Load { dst: VReg, ptr: VReg, ty: IrType },
     /// 向指针写一个值。
     Store { ptr: VReg, val: Value, ty: IrType },
-    /// 取结构体字段地址：base 是指向结构体的指针，结果指向第 `field` 字段。
+    /// 取结构体字段地址：base 是指向结构体的指针。
+    /// `field` 是**字段序号**（不是字节偏移）；发射器按 `struct_layout(struct_name).offsets[field]`
+    /// 换算成实际字节偏移，从而自动带上 C ABI 的 padding。
     FieldAddr { dst: VReg, base: VReg, struct_name: String, field: u32 },
     /// 取 rodata 字符串字面量的地址（emit 时落到 `.LstrN`）。
     LeaLabel { dst: VReg, lit: u32 },
@@ -294,6 +296,9 @@ pub struct IrFunction {
     pub linkage: FuncLink,
     pub blocks: Vec<IrBlock>,
     pub entry: u32,
+    /// 与 `params` 平行：每个形参对应的栈槽指针 vreg（entry 块里的 Alloca 定义）。
+    /// prologue 把 C ABI 传参寄存器写入这些槽，函数体再从槽里 Load。
+    pub param_slots: Vec<VReg>,
     /// vreg → 类型（单一赋值，便于分配器 / 类型推导 / 宽度选择）。
     pub reg_ty: Vec<IrType>,
 }
@@ -302,7 +307,7 @@ impl IrFunction {
     pub fn new(name: String, params: Vec<(String, IrType)>, ret: IrType, linkage: FuncLink) -> Self {
         IrFunction {
             name, params, ret, linkage,
-            blocks: Vec::new(), entry: 0, reg_ty: Vec::new(),
+            blocks: Vec::new(), entry: 0, param_slots: Vec::new(), reg_ty: Vec::new(),
         }
     }
     /// 申请一个新 vreg，记录其类型。

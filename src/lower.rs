@@ -125,6 +125,13 @@ impl<'a> Lower<'a> {
         None
     }
 
+    fn lookup_mut(&mut self, name: &str) -> Option<&mut Local> {
+        for s in self.scopes.iter_mut().rev() {
+            if let Some(l) = s.get_mut(name) { return Some(l); }
+        }
+        None
+    }
+
     /// 释放一个作用域里所有存活且未 moved 的堆局部（逆序）。
     fn release_scope(&mut self, scope: &HashMap<String, Local>) {
         let mut items: Vec<&Local> = scope.values().collect();
@@ -179,10 +186,12 @@ impl<'a> Lower<'a> {
             self.declare("argv", Local { ptr: v_ptr, ty: IrType::Ptr, dt: Type::RawPtr(Box::new(Type::Byte)), is_handle: false, moved: false });
             self.param_slots.push(a_ptr);
             self.param_slots.push(v_ptr);
-            self.emit(IrInst::EnvInit {
-                argc: Value::Reg(a_ptr),
-                argv: Value::Reg(v_ptr),
-            });
+            // EnvInit 的实参是「值」而非槽地址：prologue 把 argc/argv 写进槽后，先 Load 再调用。
+            let argc_v = self.new_reg(IrType::I64);
+            self.emit(IrInst::Load { dst: argc_v, ptr: a_ptr, ty: IrType::I64 });
+            let argv_v = self.new_reg(IrType::Ptr);
+            self.emit(IrInst::Load { dst: argv_v, ptr: v_ptr, ty: IrType::Ptr });
+            self.emit(IrInst::EnvInit { argc: Value::Reg(argc_v), argv: Value::Reg(argv_v) });
         } else {
             for (n, t) in &f.params {
                 // 内部宽度统一用 reg_ir（I64），栈槽 8 字节；emit 的 prologue 把
@@ -221,6 +230,7 @@ impl<'a> Lower<'a> {
             }
         }
 
+        self.func.param_slots = self.param_slots.clone();
         self.ip.functions.push(self.func.clone());
         Ok(())
     }
@@ -228,24 +238,33 @@ impl<'a> Lower<'a> {
     // ---- 内存辅助 ----
 
     fn emit_alloca(&mut self, ty: IrType) -> VReg {
+        let bytes = match &ty {
+            // 值语义结构体：槽要能装下整个结构体（按 C ABI 布局），否则字段写入会越界。
+            IrType::Struct(n) => self.struct_byte_size(&Type::Struct(n.clone())) as u32,
+            _ => slot_bytes(ty),
+        };
         let p = self.new_reg(IrType::Ptr);
-        self.emit(IrInst::Alloca { dst: p, bytes: slot_bytes(ty) });
+        self.emit(IrInst::Alloca { dst: p, bytes });
         p
     }
 
-    /// 把一个值写入槽（含 ARC：释放旧值、按 is_copy 决定是否 retain 新值）。
-    fn store_value(&mut self, slot: VReg, val: Value, val_is_copy: bool, val_dt: &Type) {
-        if let Some(k) = rc_kind(val_dt) {
-            self.emit(IrInst::RcRelease { ptr: slot, kind: k });
-        } else if let Type::Struct(sn) = val_dt {
-            self.emit(IrInst::StructRelease { ptr: slot, struct_name: sn.clone() });
+    /// 把一个值写入槽（含 ARC）。
+    ///
+    /// 时序铁律：**先 Store，再 retain 新值**——retain 作用于槽里刚写进去的句柄。
+    /// `release_old` 仅对「已有旧值的槽」（赋值）为 true；VarDecl 的槽是刚分配的，
+    /// 对其 release 会对未初始化的垃圾指针调用 release，属严重 UB。
+    fn store_value(&mut self, slot: VReg, val: Value, val_is_copy: bool, val_dt: &Type, release_old: bool) {
+        if release_old {
+            if let Some(k) = rc_kind(val_dt) {
+                self.emit(IrInst::RcRelease { ptr: slot, kind: k });
+            }
         }
+        self.emit(IrInst::Store { ptr: slot, val, ty: self.val_slot_ty(val_dt) });
         if val_is_copy {
             if let Some(k) = rc_kind(val_dt) {
                 self.emit(IrInst::RcRetain { ptr: slot, kind: k });
             }
         }
-        self.emit(IrInst::Store { ptr: slot, val, ty: self.val_slot_ty(val_dt) });
     }
 
     fn val_slot_ty(&self, dt: &Type) -> IrType {
@@ -260,7 +279,12 @@ impl<'a> Lower<'a> {
                 let dt = ty.clone();
                 let slot = self.emit_alloca(reg_ir(&dt));
                 let (v, is_copy) = self.lower_expr(value, &dt)?;
-                self.store_value(slot, v, is_copy, &dt);
+                if let Type::Struct(_) = &dt {
+                    // 值语义结构体：StructLit 返回一块临时栈区地址，整体拷进变量槽。
+                    self.emit_memcpy(slot, v, self.struct_byte_size(&dt));
+                } else {
+                    self.store_value(slot, v, is_copy, &dt, false);
+                }
                 let is_h = rc_kind(&dt).is_some();
                 let mut loc = Local { ptr: slot, ty: reg_ir(&dt), dt: dt.clone(), is_handle: is_h, moved: *move_hint };
                 if *move_hint { loc.moved = true; }
@@ -284,7 +308,7 @@ impl<'a> Lower<'a> {
                 }
                 let dt = l.dt.clone();
                 let (v, is_copy) = self.lower_expr(value, &dt)?;
-                self.store_value(l.ptr, v, is_copy, &dt);
+                self.store_value(l.ptr, v, is_copy, &dt, true);
                 if let Some(sl) = self.scopes.last_mut().unwrap().get_mut(name) { sl.moved = *move_hint; }
                 if *move_hint {
                     if let Expr::Var(src_name) = value {
@@ -309,7 +333,6 @@ impl<'a> Lower<'a> {
                 let (v, is_copy) = self.lower_expr(value, &field_ty)?;
                 if let Some(k) = rc_kind(&field_ty) {
                     self.emit(IrInst::RcRelease { ptr: fa, kind: k });
-                    if is_copy { self.emit(IrInst::RcRetain { ptr: fa, kind: k }); }
                 }
                 // 字段在内存里的宽度（field_ir）；bool 字段是 1 字节，需从内部 I64 截断。
                 let mty = field_ir(&field_ty);
@@ -319,6 +342,12 @@ impl<'a> Lower<'a> {
                     Value::Reg(t)
                 } else { v };
                 self.emit(IrInst::Store { ptr: fa, val: v_store, ty: mty });
+                // retain 必须在 Store 之后：作用于刚写进字段的新句柄。
+                if is_copy {
+                    if let Some(k) = rc_kind(&field_ty) {
+                        self.emit(IrInst::RcRetain { ptr: fa, kind: k });
+                    }
+                }
                 Ok(())
             }
             Stmt::AssignDeref { .. } => self.err("asm 后端暂不支持裸指针解引用赋值（后续相位）"),
@@ -326,7 +355,8 @@ impl<'a> Lower<'a> {
             Stmt::If { cond, then_branch, else_branch, .. } => {
                 let (cond_v, _) = self.lower_expr(cond, &Type::Bool)?;
                 let then_b = self.new_block(Vec::new());
-                let else_b = if else_branch.is_some() { self.new_block(Vec::new()) } else { 0 };
+                // 无 else 时也必须新建一个空块；复用 0 号块会覆盖 entry 的 terminator。
+                let else_b = self.new_block(Vec::new());
                 let merge_b = self.new_block(Vec::new());
                 let cond = self.cond_reg(cond_v)?;
                 self.terminate(Term::Branch { cond, then_b, else_b, then_args: Vec::new(), else_args: Vec::new() });
@@ -495,16 +525,26 @@ impl<'a> Lower<'a> {
             Stmt::Label(_, _, _) => self.err("asm 后端暂不支持 `label`（后续相位）"),
             Stmt::Goto(_, _, _) => self.err("asm 后端暂不支持 `goto`（后续相位）"),
             Stmt::Return(val, _, _) => {
-                self.release_scopes_upto(0);
-                match val {
+                // 铁律：**先求值，再释放作用域**。若在求值前 release_scopes_upto(0)，
+                // 返回表达式里的局部变量会被提前释放（甚至已出作用域查不到名字），造成悬垂返回。
+                let ret_val = match val {
                     Some(e) => {
                         let dt = self.expr_dt(e);
                         let (v, _) = self.lower_expr(e, &dt)?;
                         let v = self.adapt_param(v, &dt, &dt);
-                        self.terminate(Term::Return { val: Some(v) });
+                        // 返回值直接来自堆句柄局部变量：标记 moved，所有权随返回值转移，
+                        // 避免紧随其后的作用域释放把返回句柄降为 0（悬垂指针）。
+                        if let Expr::Var(n) = e {
+                            if rc_kind(&dt).is_some() {
+                                if let Some(sl) = self.lookup_mut(n) { sl.moved = true; }
+                            }
+                        }
+                        Some(v)
                     }
-                    None => self.terminate(Term::Return { val: None }),
-                }
+                    None => None,
+                };
+                self.release_scopes_upto(0);
+                self.terminate(Term::Return { val: ret_val });
                 Ok(())
             }
             Stmt::Throw(_, _, _) => self.err("asm 后端暂不支持 `throw`（后续相位，异常 unwinding）"),
@@ -606,7 +646,6 @@ impl<'a> Lower<'a> {
                     let fa = self.new_reg(IrType::Ptr);
                     self.emit(IrInst::FieldAddr { dst: fa, base: s2, struct_name: name.clone(), field: off as u32 });
                     let (fv, is_copy) = self.lower_expr(fe, &fty)?;
-                    if let Some(k) = rc_kind(&fty) { if is_copy { self.emit(IrInst::RcRetain { ptr: fa, kind: k }); } }
                     // 字段内存宽度 field_ir（bool=1B）；内部 I64 需截断。
                     let mty = field_ir(&fty);
                     let fv_store = if mty != reg_ir(&fty) {
@@ -615,6 +654,11 @@ impl<'a> Lower<'a> {
                         Value::Reg(t)
                     } else { fv };
                     self.emit(IrInst::Store { ptr: fa, val: fv_store, ty: mty });
+                    if is_copy {
+                        if let Some(k) = rc_kind(&fty) {
+                            self.emit(IrInst::RcRetain { ptr: fa, kind: k });
+                        }
+                    }
                 }
                 Ok((Value::Reg(s2), false))
             }
@@ -869,13 +913,21 @@ impl<'a> Lower<'a> {
             Type::Int | Type::Byte => ("dial_print_int", IrType::I64),
             Type::Float => ("dial_print_float", IrType::F64),
             Type::Int32 => ("dial_print_int", IrType::I32),
-            Type::Float32 => ("dial_print_float", IrType::F32),
+            // dial_print_float 的 C 原型是 (double)：f32 必须先 FpExt 到 f64，
+            // 否则 xmm0 低 32 位会被 C 侧按 double 解释，输出乱码。
+            Type::Float32 => ("dial_print_float", IrType::F64),
             Type::Bool => ("dial_print_bool", IrType::I64),
             Type::Char => ("dial_print_char", IrType::I64),
             Type::String | Type::Bytes => ("dial_print_string", IrType::Handle),
             _ => return self.err(&format!("asm 后端：不能直接 print {}", dt.display())),
         };
-        let v = self.adapt_param(v, &dt, &dt);
+        let v = if dt == Type::Float32 {
+            let r = self.new_reg(IrType::F64);
+            self.emit(IrInst::Conv { kind: AConv::FpExt, dst: r, a: v, ty: IrType::F64 });
+            Value::Reg(r)
+        } else {
+            self.adapt_param(v, &dt, &dt)
+        };
         self.emit(IrInst::Call { dst: None, func: func.to_string(), args: vec![v], arg_tys: vec![aty], ret_ty: IrType::Void, linkage: CallLink::Runtime });
         let _ = name;
         Ok((Value::Imm(Imm::I64(0)), false))
@@ -902,14 +954,20 @@ impl<'a> Lower<'a> {
                             let h = self.new_reg(IrType::Handle);
                             let f = match et {
                                 Type::Int => "dial_int_to_string",
-                                Type::Float => "dial_float_to_string",
+                                Type::Float | Type::Float32 => "dial_float_to_string",
                                 Type::Bool => "dial_bool_to_string",
                                 Type::Char => "dial_char_to_string",
                                 Type::Byte => "dial_byte_to_string",
                                 _ => return self.err(&format!("asm 后端：插值不支持 {}", et.display())),
                             };
-                            let farg = self.adapt_param(ev, &et, &et);
-                            let faty = arg_ty_for_conv(&et);
+                            // dial_float_to_string 的 C 原型是 (double)：f32 需先 FpExt。
+                            let (farg, faty) = if matches!(et, Type::Float32) {
+                                let r = self.new_reg(IrType::F64);
+                                self.emit(IrInst::Conv { kind: AConv::FpExt, dst: r, a: ev, ty: IrType::F64 });
+                                (Value::Reg(r), IrType::F64)
+                            } else {
+                                (self.adapt_param(ev, &et, &et), arg_ty_for_conv(&et))
+                            };
                             self.emit(IrInst::Call { dst: Some(h), func: f.to_string(), args: vec![farg], arg_tys: vec![faty], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
                             Value::Reg(h)
                         }
