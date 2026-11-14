@@ -153,7 +153,7 @@
     （摊薄启动开销）+ 扣除 <code>noop</code> 基线，给出<strong>绝对值</strong>（单次纯耗时 ms）与
     <strong>绝对比值</strong>（C = 1.00× 基准），并采集 6 大工程维度（速度 / 峰值内存 /
     编译耗时 / 启动耗时 / 产物体积 / 源码行数），产出 <code>bench/data.json</code>。</li>
-<li><code>tools/build_bench_web.py</code>：由数据生成独立静态页 <code>web/bench.html</code>——
+<li><code>tools/build_bench_web.py</code>：由数据生成独立静态页 <code>docx/bench.html</code>——
     绝对值表 + 比值表 + 六维表 + 底部<strong>六维雷达图</strong>（手写 SVG，4 语言叠加，
     按各维最优语言归一化，越靠外越优），无外部 CDN / JS 依赖、离线可看。
     触及计时下限（或被编译器常量折叠）的项以 <code>†</code> 诚实标注。</li>
@@ -412,12 +412,12 @@
 <p><strong>官网更新日志改为「版本索引 + 每版本分页」（<code>[v1.04]</code> 后续增补，
   <code>CHANGELOG.md</code> 原文一字不改）</strong>：<code>changelog.html</code> 单文件已达 213 KB，移动端
   首屏渲染与旧版本定位成本高，且重复锚点靠 <code>_1</code> 后缀区分、版本一多更难维护。
-  改的是生成器 <code>tools/build_web.py</code>，<strong>不是手拆产物</strong>：<code>web/changelog.html</code>
-  只放 31 行版本索引（213 KB → 6.1 KB），<code>web/changelog/</code> 下每版本一页存
+  改的是生成器 <code>tools/build_web.py</code>，<strong>不是手拆产物</strong>：<code>docx/changelog.html</code>
+  只放 31 行版本索引（213 KB → 6.1 KB），<code>docx/changelog/</code> 下每版本一页存
   对应条目的原文渲染，另出 <code>overview.html</code>（版本规则）/ <code>index.json</code>（搜索与
   newer / older 导航）。生成器内置两道自检：分段拼接结果与 <code>CHANGELOG.md</code>
   逐字节相等、生成页数 == 段数 + 1；二次生成逐字节一致（满足 CI 的
-  <code>git diff --exit-code -- web/</code>）。正文纯文本旧 / 新逐字符相等（75,397 字符），
+  <code>git diff --exit-code -- docx/</code>）。正文纯文本旧 / 新逐字符相等（75,397 字符），
   重复锚点后缀 73 → 1。<strong>记录粒度不变，只改变组织方式</strong>。</p>
 </li>
 </ul>
@@ -491,8 +491,8 @@
 <li><strong>性能基准与 CI 集成（v1.04 增补）</strong>：<code>build-linux</code> 作业新增 Go 安装与
   「性能基准采集」步骤，实跑 4 语言编译 + 28 项计时 + 112 校验和一致性，
   生成 CI 机器上的数据/网页并经 <code>check_bench_data.py</code> 校验，同时验证仓库内
-  交付快照（<code>bench/data.json</code> + <code>web/bench.html</code>）配套；产物上传为
-  <code>bench-4lang-28dim</code> artifact。CI 只写 <code>/tmp</code> 再上传，绝不回写 <code>web/bench.html</code>，
+  交付快照（<code>bench/data.json</code> + <code>docx/bench.html</code>）配套；产物上传为
+  <code>bench-4lang-28dim</code> artifact。CI 只写 <code>/tmp</code> 再上传，绝不回写 <code>docx/bench.html</code>，
   避免机器相关的实测数据让官网同步校验误报。</li>
 </ul>
 <hr /><p class="note">← 更早：<a href="v1-0-milestone.html">v1.0 里程碑</a> · 更新：<a href="v1.10.html">v1.10</a> → · <a href="../changelog.html">版本索引</a></p></main></div>

@@ -82,32 +82,32 @@ def main() -> None:
     check("CHANGELOG 最新版本标题", bool(heads) and heads[0] == ver,
           f"最新是「{heads[0] if heads else '无'}」，应为 {ver}")
 
-    # 3) 官网产物（web/ 由 tools/build_web.py 生成，版本取自 Cargo.toml）
+    # 3) 官网产物（docx/ 由 tools/build_web.py 生成，版本取自 Cargo.toml）
     for name in ("index.html", "spec.html", "changelog.html"):
-        path = ROOT / "web" / name
+        path = ROOT / "docx" / name
         if not path.exists():
-            problems.append(f"web/{name} 不存在——请先跑 python3 tools/build_web.py")
+            problems.append(f"docx/{name} 不存在——请先跑 python3 tools/build_web.py")
             continue
         html = path.read_text(encoding="utf-8")
         m = re.search(r'class="muted">(v[0-9.]+) · Rust', html)
-        check(f"web/{name} footer 的版本号", bool(m) and m.group(1) == ver,
+        check(f"docx/{name} footer 的版本号", bool(m) and m.group(1) == ver,
               f"是 {m.group(1) if m else '未找到'}，应为 {ver}")
 
-    idx_path = ROOT / "web" / "index.html"
+    idx_path = ROOT / "docx" / "index.html"
     if idx_path.exists():
         idx = idx_path.read_text(encoding="utf-8")
         m = re.search(r"<span><b>(v[0-9.]+)</b> 当前版本</span>", idx)
-        check("web/index.html KPI 的版本号", bool(m) and m.group(1) == ver,
+        check("docx/index.html KPI 的版本号", bool(m) and m.group(1) == ver,
               f"是 {m.group(1) if m else '未找到'}，应为 {ver}")
         # 首页的下载链接应指向当前版本的三平台分包，资产名按短版本推导，
         # 且走 releases/latest/download/ 重定向（不硬编码 tag）。
         want_zip = f"dialc-v{ver_short}-linux-x86_64.zip"
-        check("web/index.html 下载链接指向当前版本", want_zip in idx,
+        check("docx/index.html 下载链接指向当前版本", want_zip in idx,
               f"未找到 {want_zip}")
         # 首页不该再提供单包名 `dialc-v<版本>.zip`——三平台分包后已无此资产。
         # （**只查首页**：changelog 里的旧包名是**历史发布说明**，那一期确实叫这名字。）
         stale = re.findall(r"dialc-v[0-9.]+\.zip", idx)
-        check("web/index.html 不引用已废弃的单包名", not stale,
+        check("docx/index.html 不引用已废弃的单包名", not stale,
               f"仍有 {sorted(set(stale))}（三平台分包后无此资产）")
 
     # 4) VS Code 扩展的版本号：扩展是随编译器走的 LSP 客户端，版本必须跟上。

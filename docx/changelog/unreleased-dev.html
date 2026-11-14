@@ -795,11 +795,11 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
   <code>install</code> 同 ABI 覆盖成功（<code>abi = 6</code> / <code>version = 1.10.0</code> 不变）；
   官网由 <code>tools/build_web.py</code> 重新生成并与文档同步。</li>
 <li><strong>官网新增 6 个包介绍页 + 包索引页</strong>（<code>tools/build_web.py</code> 的 <code>build_packages()</code>）：
-  顶部导航加「包」入口，<code>web/packages.html</code> 索引列出 stdlib / gui / http / text /
+  顶部导航加「包」入口，<code>docx/packages.html</code> 索引列出 stdlib / gui / http / text /
   json / crypto 六个包（name / version / abi / <code>extern fn</code> 计数<strong>直接从各包源文件
-  提取</strong>，包升级后重生成即同步，不硬编码版本号），并生成 <code>web/packages/&lt;slug&gt;.html</code>
+  提取</strong>，包升级后重生成即同步，不硬编码版本号），并生成 <code>docx/packages/&lt;slug&gt;.html</code>
   六个详情页（叙述 + 示例 + 自动刷新的事实表）。<code>check_links.py</code> 放宽 <code>.html</code> 目标
-  的仓库根相对链接误报；生成确定性已验证（<code>git diff --exit-code -- web/</code>）。</li>
+  的仓库根相对链接误报；生成确定性已验证（<code>git diff --exit-code -- docx/</code>）。</li>
 <li><strong>AC 组（B1 impl 方法块）测试资产</strong>：<code>tests/impl/impl_struct.dial</code> /
   <code>impl_default.dial</code> / <code>impl_gui_handle.dial</code> 三个正向用例与同名 <code>.expected</code>
   黄金输出，以及 <code>tests/bad/impl_*.dial</code> 六个 Fail-Fast 负向用例；
@@ -816,6 +816,95 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
   <strong>GUI 包 / C 层 / 三平台 <code>.a</code> / <code>gui.diali</code> / ABI 全部零改动</strong>；
   <code>gui_oo.dial</code> 在 B1 落地当时不重新 <code>pack</code> / <code>install</code>（其后已随包 <code>src/</code> 分发、
   装包即用，见上文）。</li>
+<li><strong>自研代码生成后端（<code>--backend=asm</code>，实验性）</strong>：新增一条与 LLVM 后端<strong>完全并列</strong>的
+  编译链路——专属 IR（<code>src/ir.rs</code>：3 地址码 + 基本块 + 块参数即 SSA 形参）→
+  AST lowering（<code>src/lower.rs</code>）→ 优化 Pass（<code>src/pass.rs</code>：常量折叠 / 代数化简 /
+  DCE / 保守 CSE / 保守 ARC 简化）→ 目标汇编发射（<code>src/codegen_asm.rs</code>：x86-64 SysV
+  严格实现 + AArch64 AAPCS 同构，全 spill 栈帧 + C ABI 传参）→ 复用现有 <code>cc -c</code>
+  把 <code>.s</code> 汇编成 <code>.o</code> → 复用既有 <code>link()</code> / <code>final_link()</code> 链接。
+  <strong>不发射 C 源码、不引 Cranelift、不直接拼二进制机器码、零新包依赖</strong>。
+  <code>--backend llvm|asm</code>（也支持 <code>--backend asm</code>）激活，<strong>默认 llvm</strong>：不指定时行为
+  与既有版本逐字节一致，<code>src/codegen.rs</code> / <code>src/ast.rs</code> <strong>零改动</strong>。
+  首版覆盖标量 / 字符串 / 整数数组 / 结构体（局部 + 字段读写）/ 控制流 / 函数与递归 /
+  FFI / 基础 ARC / print 变参 / 字符串插值 / match（字面量）；未覆盖构造一律
+  Fail-Fast 报 <code>[asm 后端] ...</code>，绝不静默降级。<code>asm</code> 后端拒绝 <code>--pgo</code>（依赖 LLVM
+  bitcode）、忽略 <code>-g</code>（首版无 DWARF），<code>--fast</code> 仅作用于 C 运行时；<code>--tiny</code> /
+  <code>--single-file</code> / FFI 包 / rpath 因复用链接层而零改动生效。<code>DIAL_ASM_TARGET</code>
+  可显式指定交叉目标（配合 <code>DIAL_C_COMPILER</code> 使用）。</li>
+<li><strong>自研后端成熟度批次 M1–M3（把首版「明确 Fail-Fast」的未覆盖构造逐块补齐）</strong>：
+  首版只覆盖核心子集，其余构造一律报错；本批次按「先补能撑起真实程序的构造」的
+  顺序推进，每块都是<strong>独立逻辑单元</strong>（各自编译通过即提交并经 443 推送），
+  且每块都以「同一份 <code>.dial</code> 在 llvm / asm 两后端运行输出逐字节一致」为验收标准。</li>
+<li><strong>M1 · 内建函数表驱动分派</strong>（<code>src/builtin.rs</code>）：把散落在 lowering 里的按名分派
+    收进一张规格表（返回类型 + 调用形态 + 逐参数 ABI 提示），覆盖 math / 类型转换 /
+    解析 / 环境 / 时间 / bytes / 容器构造等约 55 个内建；未覆盖者仍明确报「暂不支持」。</li>
+<li><strong>M2-a · 索引赋值 / 切片 / <code>match</code> 字符串分支 / <code>ForEachMap</code> 遍历</strong>。</li>
+<li><strong>M2-b · 方法表驱动分派</strong>：全部内建方法（容器 COW 写回、<code>kv()</code>、<code>eret()</code>、
+    <code>one()</code>、<code>earg()</code> 等标记）。</li>
+<li><strong>M3-a · 控制流与异常</strong>：<code>defer</code> / <code>try</code>–<code>catch</code> / <code>throw</code>（运行时 C 侧
+    setjmp/longjmp + <code>dial_exc_push/pop/top</code> 异常栈，非 DWARF unwinding）；
+    <strong>文件 IO 内建</strong>（<code>open</code> / <code>read</code> / <code>read_all</code> / <code>file_read_line</code> / <code>write</code> /
+    <code>eof</code> / <code>file_exists</code> / <code>file_size</code> / <code>file_remove</code> / <code>close</code>，失败路径抛 <code>Error</code>，
+    错误文本与 LLVM 后端逐字一致）；<strong><code>with</code> 自动释放</strong>（复用 defer 机制覆盖全部出口，
+    块内显式 close 后以 moved 标记跳过二次释放）。</li>
+<li><strong>M3-b · <code>label</code> / <code>goto</code></strong>：标签作用域深度表由语义层 <code>analyze_gotos</code> 统一计算，
+    经 <code>analyze()</code> → <code>IrProgram.goto_depths</code> → <code>Lower.label_depths</code> 贯通，
+    避免两后端各算一套口径；跨作用域 goto 按深度释放 defer 与堆局部，
+    且<strong>不 pop 作用域帧</strong>（与 LLVM 后端同构，标签块在原深度仍能引用该层局部）。</li>
+<li>期间修复两处控制流缺陷：① 函数体循环在 <code>with</code> 内早返回后仍处理后续 <code>return</code>，
+    用 <code>terminate</code> 覆盖前面的 terminator，导致函数错误返回值（现一旦当前块已终结
+    即停止 lower）；② 函数体循环把 <code>goto</code> 之后的 <code>label</code> 当死代码跳过，
+    使标签目标块停在 <code>ud2</code>（现 <code>label</code> 例外）。</li>
+<li><strong>自研后端成熟度批次 M5（把「能跑但数据全错」的老问题清干净 + 补齐 FFI 与函数指针）</strong>：
+  M3 之后自研后端虽能编译不少程序，但实测 <code>examples/</code> 全量覆盖率时暴露出
+  <strong>一批会静默产出错误数据</strong>的老问题（违反「绝不静默降级」铁律：用户看到的是
+  一个能跑但结果全错的程序）——这类问题比「明确报错」危险得多，故本批次优先
+  清理它们，其次补齐 FFI 与一等函数地址。</li>
+<li><strong>M5-a · 结构体按值语义</strong>：此前结构体在 IR 里是「内容区地址指针」，但跨函数
+    边界时被当成 8 字节值传——形参读到的是指针位模式（输出 <code>140722784664888</code>
+    这类垃圾）、返回值交出的是已销毁栈帧的地址、嵌套字段只存 8 字节指针。
+    现统一为「内容区地址指针」表示并让所有跨边界处显式拷贝：形参
+    「指针槽 → memcpy → 自己的内容区」（值语义，被调方改形参不影响调用方）、
+    实参先拷到调用方临时区、返回值 box 到堆（<code>dial_struct_box</code>）后由调用方
+    memcpy 出副本并 release、嵌套字段改为 memcpy 内容 + 对称 retain。
+    另修 <code>struct_layout</code> 未按 C ABI <strong>递归</strong>计算嵌套结构体尺寸与对齐、
+    <code>expr_struct_dt</code> 逐级解析字段链（此前丢掉字段名，<code>r.origin.x</code> 拿 Rect 查 x）。</li>
+<li><strong>M5-b · 容器元素类型与所有权结算</strong>：多处把数组元素类型<strong>硬编码</strong>成 int——
+    <code>dial_array_new</code> 的 kind 恒为 0（INT）使 <code>string[]</code> 的元素既不被 retain
+    也不被 release（悬垂）、<code>expr_dt</code> 对下标 / 切片 / 字面量一律返回 int / int[]
+    使 print 把字符串句柄当数字吐出。现新增 <code>builtin::array_elem_kind</code>
+    （与 runtime 的 <code>DIAL_ELEM_*</code> 宏、LLVM 侧 <code>array_elem_kind</code> 三方同口径），
+    下标 / 切片 / 字面量按实际元素类型求值与还原位模式，
+    <code>remove</code> / <code>pop</code> 补上堆元素的 retain，元素归属结算按「借来的不释放、
+    自带所有权的归还一份」对齐 LLVM 的 <code>sink_elem_after_retain</code>。</li>
+<li><strong>M5-c · 裸指针 FFI</strong>：补 <code>raw_alloc</code> / <code>raw_free</code> / <code>ptr_cast</code> / <code>offset</code>
+    指针算术 / 裸指针解引用赋值 / 裸指针指向结构体时的字段读写 /
+    <code>string.as_c_str</code> / <code>str(x)</code> 统一字符串化。新增 IR 指令 <code>PtrAdd</code>
+    （指针加字节偏移）。沿途修两处静默错误：<code>*p</code> 多解引用一层（把裸内存里的
+    垃圾当地址读，段错误）、<code>*p</code> 按 8 字节而非元素宽度读（<code>"Hi"</code> 被读成 0x6948）；
+    并修正 char 字面量在类型层面被当成 int（<code>str('A')</code> 打印成 "65"）。</li>
+<li><strong>M5-d · 一等函数地址</strong>：补「取函数地址」能力——具名函数在右值位置求值为
+    纯代码地址（不分配环境对象、不做捕获、不走 ARC），间接调用按签名严格匹配，
+    函数指针可作形参 / 返回值 / 变量值。新增 IR 指令 <code>FuncAddr</code> 与
+    <code>CallIndirect</code>。这也是并发 <code>spawn</code> 的硬前置（<code>dial_thread_new</code> 要函数指针）。</li>
+<li>实测 <code>examples/</code> 全量覆盖率：<strong>34/65 → 44/65</strong>；新增黄金用例
+    <code>structs.dial</code> / <code>containers.dial</code> / <code>rawptr.dial</code> / <code>fnptr.dial</code>
+    （正向用例 6 份 → 10 份），每份都要求双后端逐字节一致。</li>
+<li><strong>AF 组（双后端黄金门禁）</strong>：<code>tools/run_asm_golden.sh</code> 把 3 份核心子集 <code>.dial</code>
+  分别用 <code>llvm</code> / <code>asm</code> 编译运行并逐字节 diff（LLVM 后端即基准，无需维护 <code>.expected</code>），
+  另校验 <code>.s</code> 产物确实生成、默认后端仍为 llvm、未覆盖构造 Fail-Fast 明确报错、
+  AArch64 汇编经 <code>clang --target=aarch64-linux-gnu -c</code> 语法验证；
+  <code>tests/run_tests.sh</code> 新增 AF 组调用与头部说明。用例在临时目录编译，仓库零污染。
+  <strong>M1–M3 期间扩充</strong>：正向用例由 3 份增至 <strong>6 份</strong>——新增 <code>builtins.dial</code>
+  （M1 内建表 + M2 方法表：math / 转换 / 解析 / bytes / 容器 COW 写回 / 切片 /
+  <code>match</code> 字符串）、<code>exceptions.dial</code>（M3-a：<code>defer</code> / <code>try</code>–<code>catch</code> / <code>throw</code> /
+  <code>with</code> 自动释放 / 文件 IO 读写 / 打开失败的异常路径）、<code>control_flow.dial</code>
+  （M3-b：<code>label</code> / <code>goto</code> 的前向跳、后向跳与跨作用域释放）；
+  负例改为<strong>遍历 <code>negative/</code> 下全部负例</strong>（不再硬编码单个），并随已支持构造的推进
+  同步更新——原负例用的正是 M3-a1 落地的 <code>defer</code>，一度使「静默放行」判据被架空；
+  现换为编译期布局内建 <code>sizeof&lt;int&gt;()</code> 与 <code>select</code>，两者 LLVM 可编译而 asm 明确报错，
+  互不重叠以免单点失效即整体失守。<code>.gitignore</code> 补入 <code>*.s</code>（自研后端汇编产物），
+  保证手工在仓库内编译也不污染工作树。</li>
 <li><strong>交付状态</strong>：源码已按用户要求<strong>推送到 GitHub</strong>（<code>main</code> 分支）；<strong>未升级版本号、
   未打标签、未发 Release</strong>（仍遵循本段开头的「开发中增量」口径）。推送通道按用户
   裁决改为<strong>强制 443</strong>：<code>~/.ssh/config</code> 把 <code>github.com</code> 解析为
@@ -823,7 +912,83 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
   <code>insteadOf</code> 把 <code>https://github.com/</code> 重写为 SSH，故之后任何 GitHub 推送都自动
   走 443。此前 HTTPS 直推连续三次连接超时（curl / gh API 可达、属链路丢包抖动），
   改道后一次成功：<code>5283e20..f4f2229 main -&gt; main</code>，11 个积压提交同步完毕；
-  本轮第 8 层提交后同样经 443 推送。</li>
+  本轮第 8 层提交后同样经 443 推送。
+  <strong>M1–M3 成熟度批次新增 3 个提交，同样经 443 推送</strong>：
+  <code>8c70db5..51ecc39 main -&gt; main</code>——<code>d6229b8</code>（黄金门禁负例随已支持构造同步更新）、
+  <code>62edaa8</code>（M3-a2 文件 IO 内建 + <code>with</code> 自动释放）、<code>51ecc39</code>（M3-b <code>label</code> / <code>goto</code>）。
+  <strong>M5 批次再新增 4 个提交，同样经 443 推送</strong>：
+  <code>676fbb3</code>（M5-a 结构体按值语义）、<code>98f5701</code>（M5-b 容器元素类型与所有权结算）、
+  <code>f43d197</code>（M5-c 裸指针 FFI + 指针算术 + char 字符串化）、
+  <code>d7d4979</code>（M5-d 一等函数地址）。
+  全量测试 666 项全绿、0 失败；<code>cargo build</code> 零警告；<code>src/codegen.rs</code> / <code>src/ast.rs</code>
+  相对基线 <code>544d10a</code> <strong>零改动</strong>；版本号仍 <code>1.10.0</code>、未打 tag。</li>
+<li><strong>M6 性能批次（「超越 LLVM」的量化起点）</strong>：新增 <code>tools/bench_asm_vs_llvm.py</code>，
+  复用 <code>bench_harness.py</code> 的 28 项微基准与校验和锚点，让两个后端在<strong>同一份源码、
+  同一套计时口径</strong>下直接对跑（校验和不符立即判定失败，杜绝「算错所以更快」）。
+  首个可信基线：几何平均 <strong>1.3575x</strong>（3 胜 2 平 23 负），最差 b23 popcount
+  4.758x。此前一次 1.60x 的读数建立在字符串 <code>==</code> 错误（校验和全 0）之上，
+  不予采信。</li>
+<li>修掉第 5 个静默错误：字符串 <code>==</code> / <code>!=</code> 在自研后端退化成<strong>指针相等比较</strong>，
+    字面量每次求值都新建堆副本，故 <code>s == "a"</code> 恒假、bench 的 28 路分派链
+    全部走空、校验和全 0。现改走 <code>dial_string_eq</code>（内容比较），与 LLVM 同口径
+    （该函数「相等返回 1」，故 <code>==</code> 对应结果 <code>!= 0</code>、方向与数值比较相反）。</li>
+<li>局部栈槽直接寻址：x86-64 下 <code>Load</code> / <code>Store</code> 命中 Alloca 的编译期栈偏移时，
+    直接把 <code>off(%rsp)</code> 当内存操作数读写，省掉「先算地址到寄存器」那一条；
+    <code>bench.dial</code> 静态指令数 5594 → 4971（−11%）。AArch64 因立即数偏移
+    范围限制保守走通用路径。</li>
+<li><strong>结构性瓶颈已定位</strong>：自研后端是「全 spill 固定栈帧」，b23 内层循环体 24 条
+    指令里仅 3 条是实际计算，其余全是栈搬运；微优化无法抹平这个量级差距，
+    <strong>反超的唯一路径是寄存器分配</strong>（基本块内线性扫描 + callee-saved 寄存器池 +
+    块边界 spill），列为下一批次 M7。</li>
+<li><strong>M7 性能批次（寄存器分配前的指令密度攻坚）</strong>：</li>
+<li><strong>M7-a1 算术源操作数折叠</strong>：x86-64 的二元/比较指令允许一个内存操作数，
+    原先每条 <code>Bin</code> / <code>ICmp</code> / <code>FBin</code> / <code>FCmp</code> 都要 <code>lg(b, g2)</code> 把第二个操作数搬进
+    <code>%r10</code> / <code>%xmm9</code>；现在直接发 <code>addq off_b(%rsp), %rax</code> 这类形式，
+    <code>bench.dial</code> 静态指令数 <strong>4971 → 4772（−199 / −4.0%）</strong>。立即数仅在 imm32
+    范围内且指令支持 <code>reg, imm</code> 形式时折叠（<code>imul</code> / <code>idiv</code> / 移位 / 浮点不折叠），
+    F32 槽只写低 4 字节故不折叠以免读入垃圾高位；AArch64 是 load/store 架构，
+    保持原路径不变。双后端黄金门禁（10 正向 + 2 负例 + AArch64 交叉汇编）与
+    全量测试全绿。此步只减搬运、不触及栈帧布局，是 M7-a2 寄存器驻留的前置。
+    <code>--quick</code>（2 采样）读数为 1.4032x，落在基线 1.3575x 的噪声区间内，
+    不作为性能结论；确定性指标是静态指令数。</li>
+<li><strong>M7-a2/a3 块内寄存器驻留 + 局部变量槽提升</strong>（本批次主体）：<ul>
+<li><strong>瓶颈定性</strong>：全 spill 版的热值其实在 <strong>Alloca 局部变量区</strong>，不在 vreg 槽。
+  b23 内层循环 24 条指令里每次迭代都要反复 Load/Store 同一批栈地址；
+  只把 vreg 驻留进寄存器（a2 单做）反而因块头装载 / 块尾回写让静态指令
+  4772 → 5109、性能不升反降。必须把<strong>局部变量槽本身</strong>提升进寄存器池。</li>
+<li>寄存器池 8 个：6 个 SysV callee-saved（<code>rbx/rbp/r12–r15</code>，prologue 用帧内
+  <code>mov</code> 保存、epilogue 恢复，不动 rsp 以免所有 <code>off(%rsp)</code> 偏移失效）+
+  2 个 caller-saved（<code>r8/r9</code>，因启用驻留的块内一条 call 都没有而无需保存）。
+  刻意避开 <code>rax/rcx/rdx/r10/r11</code>（临时寄存器与 div / 移位 / setcc 隐式操作数）。</li>
+<li><strong>安全护栏</strong>：含 <code>Call</code> / <code>CallIndirect</code> / ARC / <code>EnvInit</code> 的块一律禁用驻留——
+  <code>longjmp</code> 会把 callee-saved 恢复到 setjmp 时刻的值，「寄存器比栈新」的前提
+  在那条路径上不成立；纯计算块不受影响。指令数 &lt; 6 的短块也不启用，
+  避免装载/回写开销超过收益（递归函数体的净退化就是这样消掉的）。</li>
+<li><strong>逃逸分析</strong>：只有地址完全不逃逸（不被当作值传给任何指令 / 块参数 / 返回值，
+  不经 FieldAddr / PtrAdd / ARC 间接访问）、且所有 Load/Store 都是 8 字节整数
+  宽度的 Alloca 才提升；窄整型走 <code>movzbq/movl</code> 零扩展、浮点走 xmm，语义不同，
+  一律不提升。</li>
+<li><strong>活跃性回写</strong>：块尾只回写 ① 提升槽（别的块/含 call 块仍走内存）② 跨块
+  仍被读取的普通 vreg；块内临时值写完即弃。term 仍在驻留态发射，phi 实参 /
+  返回值直接从物理寄存器读，但 <code>sv</code> 强制写目标块 param 的<strong>栈槽</strong>，保证后继块
+  不会读到旧值。</li>
+<li>AArch64 保持原全 spill 路径不变（<code>save_bytes = 0</code>、<code>plans</code> 全空），
+  交叉汇编门禁通过。</li>
+</ul>
+</li>
+<li><strong>量化结果</strong>（<code>--quick</code>，2 采样；校验和 28×2 全一致，双后端黄金门禁 10 正向<ul>
+<li>2 负例 + 全量测试全绿）：几何平均 <strong>1.3575x → 1.2676x</strong>，逐项胜/平/负
+<strong>3/2/23 → 5/4/19</strong>；b23 popcount <strong>4.758x → 2.508x</strong>，b25 三路分支 1.103x →
+0.865x（反超）、b26 0.656x → 0.598x、b05/b07 由负转正。静态指令数
+4971 → <strong>4885</strong>。<code>--quick</code> 单次读数有噪声，但 b23 的降幅与静态指令数下降
+是确定性的，结论可靠。</li>
+</ul>
+</li>
+<li><strong>剩余差距</strong>：递归调用类几何平均 1.8123x（函数体内含 call、享受不到驻留，
+    还要承担 prologue/epilogue 保存）、b08 3n+1 2.908x、b23 2.508x。
+    下一步 M7-b：<strong>跨块寄存器分配</strong>——现在每次循环迭代仍要在块边界把提升槽
+    flush 回内存再 load 回来（b23 内层 18 条里 4 条是这个开销）；让前后块共享
+    同一物理寄存器即可消掉，是继续逼近 / 反超 LLVM 的主要余量。</li>
 </ul>
 <hr /><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../changelog.html">版本索引</a></p></main></div>
 

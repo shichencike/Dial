@@ -597,7 +597,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   ├── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
 │   └── pkg_install_url.py  # L 组：包 URL 安装 + 一键安装脚本
 ├── tools/
-│   ├── build_web.py        # 生成官网 web/（规范 / 更新日志索引 + 每版本分页 / 首页）
+│   ├── build_web.py        # 生成官网 docx/（规范 / 更新日志索引 + 每版本分页 / 首页）
 │   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
 │   ├── check_version.py    # 校验版本号在 README / CHANGELOG / 官网三处一致
 │   ├── check_lsp_stdout_purity.py  # 校验 LSP 路径上不出现 stdout 裸输出（协议流纯净性）
@@ -608,7 +608,7 @@ Dial 代码对这些能力的一切访问都降级为对 C 导出函数的调用
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
 ├── .github/workflows/ci.yml  # GitHub Actions：编译 + 二十八组测试（A–Z+AA+AB）+ 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
-├── web/                    # 官网产物（由 tools/build_web.py 生成；更新日志分页在 web/changelog/）
+├── docx/                    # 官网产物（由 tools/build_web.py 生成；更新日志分页在 docx/changelog/）
 └── README.md               # 本文件
 </code></pre>
 <hr />
@@ -829,8 +829,8 @@ powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 dialc build main.dial -o main
 </code></pre>
 <h3 id="322-命令行用法总览">3.2.2 命令行用法总览</h3>
-<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file]
-dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file]
+<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
+dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
 dialc install &lt;包.dialpkg | URL&gt; [--sha256 &lt;哈希&gt;]
 dialc version | --version | -V
 dialc lsp
@@ -866,6 +866,79 @@ dialc lsp
 </tbody>
 </table>
 <blockquote>
+<p><strong>自研后端 <code>--backend=asm</code>（实验性，默认 llvm）</strong>：不指定时走既有 LLVM 后端，
+行为与旧版逐字节一致。加上 <code>--backend=asm</code>（也可写 <code>--backend asm</code>）改用自研后端：
+专属 IR → 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化）→ x86-64 SysV 或
+AArch64 AAPCS 汇编 <code>.s</code> → 系统 <code>cc -c</code> 汇编成 <code>.o</code> → 复用既有链接流程。
+<strong>不发射 C 源码、不引第三方代码生成库、零新包依赖</strong>；FFI 包、<code>--tiny</code>、
+<code>--single-file</code> 因复用链接层而零改动生效。未覆盖的语言构造会明确报
+<code>[asm 后端] ...</code> 编译错误，绝不静默降级。<code>asm</code> 后端拒绝 <code>--pgo</code>、忽略 <code>-g</code>。
+双后端黄金门禁见 <code>tools/run_asm_golden.sh</code>（<code>run_tests.sh</code> 的 AF 组）。</p>
+<p><strong>当前覆盖范围</strong>（M1–M5 已落地）：</p>
+<table>
+<thead>
+<tr>
+<th>批次</th>
+<th>覆盖内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>M1</td>
+<td>内建函数<strong>表驱动</strong>分派（<code>src/builtin.rs</code>）：math / 类型转换 / 解析 / 环境 / 时间 / bytes / 容器构造等约 55 个</td>
+</tr>
+<tr>
+<td>M2-a</td>
+<td>索引赋值 / 切片 / <code>match</code> 字符串分支 / <code>ForEachMap</code> 遍历</td>
+</tr>
+<tr>
+<td>M2-b</td>
+<td>方法<strong>表驱动</strong>分派：全部内建方法（含容器 COW 写回、<code>kv()</code>、<code>eret()</code>、<code>one()</code>、<code>earg()</code>）</td>
+</tr>
+<tr>
+<td>M3-a</td>
+<td>控制流与异常：<code>defer</code> / <code>try</code>–<code>catch</code> / <code>throw</code>（运行时 setjmp/longjmp + 异常栈）、文件 IO 内建（失败抛 <code>Error</code>）、<code>with</code> 自动释放</td>
+</tr>
+<tr>
+<td>M3-b</td>
+<td><code>label</code> / <code>goto</code>（含跨作用域释放，深度表与 LLVM 后端同源核对）</td>
+</tr>
+<tr>
+<td>M5-a</td>
+<td>结构体<strong>按值语义</strong>（形参 / 返回值 / 嵌套字段 / 值拷贝隔离）</td>
+</tr>
+<tr>
+<td>M5-b</td>
+<td>容器元素类型与所有权结算（<code>string[]</code> / <code>bool[]</code> / <code>float[]</code> 的 kind 与位模式）</td>
+</tr>
+<tr>
+<td>M5-c</td>
+<td>裸指针 FFI：<code>raw_alloc</code> / <code>raw_free</code> / <code>ptr_cast</code> / <code>offset</code> 指针算术 / <code>*p</code> 读写 / C 库互通</td>
+</tr>
+<tr>
+<td>M5-d</td>
+<td>一等<strong>函数地址</strong>（函数指针）：取地址 / 间接调用 / 作参数与返回值</td>
+</tr>
+</tbody>
+</table>
+<p>尚未覆盖（会明确报错）：<code>select</code> / <code>spawn</code> / 通道并发、编译期布局内建
+（<code>sizeof</code> / <code>alignof</code> / <code>offsetof</code>）、内联汇编与 SIMD、高阶容器方法
+（<code>map</code> / <code>filter</code> / <code>reduce</code> / <code>sort_by</code>）、嵌套下标赋值等。</p>
+<p><strong>双后端黄金门禁</strong>（<code>tools/run_asm_golden.sh</code>，<code>run_tests.sh</code> 的 AF 组）：
+同一份 <code>.dial</code> 分别用 <code>llvm</code> / <code>asm</code> 编译运行并<strong>逐字节 diff</strong>——LLVM 后端即基准，
+无需维护 <code>.expected</code>。正向用例 10 份（<code>core1</code>–<code>core3</code> 核心子集 + <code>builtins</code>
+内建与方法表 + <code>exceptions</code> 异常与文件 IO + <code>control_flow</code> <code>label</code>/<code>goto</code> +
+<code>structs</code> 结构体按值语义 + <code>containers</code> 容器元素类型 + <code>rawptr</code> 裸指针 FFI +
+<code>fnptr</code> 一等函数地址）；
+负例在 <code>tests/asm_golden/negative/</code> 下逐个遍历，每个都要求「LLVM 能编译、
+asm 报错且带 <code>[asm 后端]</code> 前缀」，杜绝静默降级。用例在临时目录编译，仓库零污染。</p>
+<p><strong>性能基准</strong>（<code>tools/bench_asm_vs_llvm.py</code>）：用 <code>bench/bench.dial</code> 的 28 项
+跨语言等价微基准，让两个后端在<strong>同一份源码、同一套计时口径</strong>（校准重复数 →
+扣启动基线 → 多次取最小）下直接对跑，并以<strong>内嵌校验和锚点</strong>保证比的是等价
+计算而非「一边算错所以更快」。当前首个可信基线（几何平均 asm/llvm）：
+<strong>1.3575x</strong>，3 胜 2 平 23 负；最短板是位运算密集循环（b23 popcount 4.758x）。
+自研后端目前是「全 spill 固定栈帧」（每个中间值都落栈、无寄存器分配），
+热点循环里约八成指令是栈槽搬运——这是与 LLVM 的主要差距，也是后续优化主战场。</p>
 <p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式
 （C 侧 <code>-Os -ffunction-sections -fdata-sections</code> + 链接期 <code>-Wl,--gc-sections -s</code>，
 去掉 DWARF 与符号表）、<code>--single-file</code> 便携模式（链接期 <code>-static</code> 全静态，
@@ -877,8 +950,8 @@ dialc lsp
 校验脚本见 <code>tools/check_version.py</code>（CI 强制执行）。</p>
 </blockquote>
 <h3 id="33-编译-dial-程序">3.3 编译 Dial 程序</h3>
-<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file]
-dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file]
+<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
+dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
 </code></pre>
 <p>安全等级（Fail-Fast，详见 §20）：</p>
 <table>
@@ -3372,14 +3445,14 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td><strong>官网同步</strong></td>
-<td>重新生成 <code>web/</code> 并与仓库内容比对</td>
+<td>重新生成 <code>docx/</code> 并与仓库内容比对</td>
 <td>立即失败（文档改了但官网没重新生成）</td>
 </tr>
 </tbody>
 </table>
 <p>打 <strong><code>v*</code> 标签</strong>时，额外的 <code>release</code> 作业会把编译器二进制一并打进
 <code>dialc-v&lt;版本&gt;-&lt;平台&gt;.zip</code>（<strong>三个平台各一个</strong>：linux-x86_64 / windows-x86_64 / termux-aarch64；
-含源码、<code>.git</code>、四份许可文件、<code>web/</code>、VS Code 扩展），
+含源码、<code>.git</code>、四份许可文件、<code>docx/</code>、VS Code 扩展），
 上传为 GitHub Release 产物——即官网首页的下载链接。
 打包脚本 <code>tools/package.sh</code> 有<strong>硬性校验</strong>：许可文件不全、或缺 <code>.git</code>、或混入构建产物，一律拒绝出包。</p>
 <h3 id="示例清单">示例清单</h3>
@@ -3830,7 +3903,7 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <blockquote>
 <p>本节仅保留 <strong>v0.3 及以前</strong> 的相对变更摘要（早期历史）。
 <strong>v0.4 及之后</strong> 的每个版本相对变更、跨文件符号表（v0.95）等<strong>完整记录见 <a href="changelog.html">CHANGELOG.md</a></strong>，
-官网渲染为<a href="changelog.html">版本索引 changelog.html</a>与 <code>web/changelog/</code> 下<strong>每版本一页的详情</strong>
+官网渲染为<a href="changelog.html">版本索引 changelog.html</a>与 <code>docx/changelog/</code> 下<strong>每版本一页的详情</strong>
 （正文与 CHANGELOG.md 对应条目逐字一致；索引 + 分页是为避免单文件 200 KB 的长滚动与移动端加载成本，
 并消除跨版本重复小节标题的锚点撞名）；最新版本号与能力矩阵见 <a href="index.html">首页 index.html</a>。</p>
 </blockquote>
@@ -9015,7 +9088,7 @@ GDB 里只剩 <code>&lt;optimized out&gt;</code>，<code>print counter</code> �
 <hr />
 <h2 id="36-v104-增补性能基准4-语言--28-维并入-v104版本不变">36. v1.04 增补：性能基准（4 语言 × 28 维，并入 <code>[v1.04]</code>，版本不变）</h2>
 <p>一套<strong>可复现、跨语言等价</strong>的性能基准：同一台机器、同一套 <strong>28 个微基准</strong>，对比
-<strong>C / Python / Go / Dial</strong> 四种语言；独立网页 <a href="bench.html"><code>web/bench.html</code></a>
+<strong>C / Python / Go / Dial</strong> 四种语言；独立网页 <a href="bench.html"><code>docx/bench.html</code></a>
 存放全部数据，底部叠加<strong>六维工程能力雷达图</strong>。</p>
 <h3 id="361-28-个维度">36.1 28 个维度</h3>
 <p>28 个纯整数微基准按五类组织，全部产出<strong>十进制校验和</strong>：</p>
@@ -9127,7 +9200,7 @@ GDB 里只剩 <code>&lt;optimized out&gt;</code>，<code>print counter</code> �
 再叠加 4 语言多边形（<strong>越靠外越优</strong>）。归一化得分与原始绝对值都在网页列出，
 避免只看雷达面积导致的误读。</p>
 <h3 id="364-网页与复现">36.4 网页与复现</h3>
-<p>独立网页 <a href="bench.html"><code>web/bench.html</code></a> 为<strong>纯静态 HTML</strong>（自带表格与手写 SVG
+<p>独立网页 <a href="bench.html"><code>docx/bench.html</code></a> 为<strong>纯静态 HTML</strong>（自带表格与手写 SVG
 雷达图，无外部 CDN、无 JS 依赖，离线双击可看）。它不由 <code>tools/build_web.py</code> 生成，
 因此不影响「官网产物同步校验」；官网导航、首页 CTA 与安全公告页均已加入口。</p>
 <pre><code class="language-bash"># 采集成 JSON（自动编译 4 语言、校验 112 校验和、采 6 维）
@@ -9140,8 +9213,8 @@ python3 tools/check_bench_data.py
 <p>数据文件 <code>bench/data.json</code> 是本地校准后的<strong>权威快照</strong>，随仓库提交。
 CI 的 <code>build-linux</code> 作业每次都会实跑采集器、校验 112 校验和与交付快照配套，
 把 CI 机器上的实测数据与网页作为 artifact（<code>bench-4lang-28dim</code>）上传；
-CI 产物只写 <code>/tmp</code> 再上传，<strong>绝不回写</strong> <code>web/bench.html</code> —— 否则测得的数据与
-提交的快照不同会让「官网同步校验」的 <code>git diff --exit-code -- web/</code> 误报。</p>
+CI 产物只写 <code>/tmp</code> 再上传，<strong>绝不回写</strong> <code>docx/bench.html</code> —— 否则测得的数据与
+提交的快照不同会让「官网同步校验」的 <code>git diff --exit-code -- docx/</code> 误报。</p>
 <h3 id="365-实现落点">36.5 实现落点</h3>
 <table>
 <thead>
@@ -9174,7 +9247,7 @@ CI 产物只写 <code>/tmp</code> 再上传，<strong>绝不回写</strong> <cod
 </tr>
 <tr>
 <td>数据</td>
-<td><code>bench/data.json</code> / <code>web/bench.html</code></td>
+<td><code>bench/data.json</code> / <code>docx/bench.html</code></td>
 <td>提交的权威快照 / 独立性能页</td>
 </tr>
 <tr>

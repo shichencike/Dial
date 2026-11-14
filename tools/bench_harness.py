@@ -2,7 +2,7 @@
 """dialc 性能基准采集器 —— 4 语言（C / Go / Dial / Python）× 28 项微基准。
 
 产出一个自描述的 JSON（默认 bench/data.json），供 tools/build_bench_web.py
-生成独立性能网页 web/bench.html。
+生成独立性能网页 docx/bench.html。
 
 测量口径
 --------

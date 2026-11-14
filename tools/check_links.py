@@ -220,7 +220,7 @@ def main() -> int:
     # ---- 官网产物：href 重写是否彻底 ----------------------------------------
     # build_web.py 会把指向仓库根 .md / 目录的相对 href 重写为站内页或 GitHub
     # 绝对链接。这里守住两件事：不得有残留；站内 spec.html# 锚点必须真实存在。
-    web = ROOT / "web"
+    web = ROOT / "docx"
     spec_html = web / "spec.html"
     if spec_html.exists():
         spec_ids = set(re.findall(r'id="([^"]+)"',
@@ -234,7 +234,7 @@ def main() -> int:
         for p in sorted(list(web.glob("*.html")) + list(web.glob("changelog/*.html"))):
             t = p.read_text(encoding="utf-8")
             for href in re.findall(r'href="([^"]+)"', t):
-                # .html 目标是站内生成页（含包介绍页 web/packages/*.html），
+                # .html 目标是站内生成页（含包介绍页 docx/packages/*.html），
                 # 不可能是仓库源文件，故跳过 repo_prefixes 检查。
                 if href.endswith(".html"):
                     continue
@@ -246,7 +246,7 @@ def main() -> int:
                     if a not in spec_ids:
                         site_problems.append((p.relative_to(ROOT),
                                               f"spec.html 锚点不存在 #{a}"))
-        print("== web/：官网 href 重写检查")
+        print("== docx/：官网 href 重写检查")
         if site_problems:
             print(f"   ❌ {len(site_problems)} 处问题")
             for p, msg in site_problems[:20]:

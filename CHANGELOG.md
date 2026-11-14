@@ -744,11 +744,11 @@
   `install` 同 ABI 覆盖成功（`abi = 6` / `version = 1.10.0` 不变）；
   官网由 `tools/build_web.py` 重新生成并与文档同步。
 - **官网新增 6 个包介绍页 + 包索引页**（`tools/build_web.py` 的 `build_packages()`）：
-  顶部导航加「包」入口，`web/packages.html` 索引列出 stdlib / gui / http / text /
+  顶部导航加「包」入口，`docx/packages.html` 索引列出 stdlib / gui / http / text /
   json / crypto 六个包（name / version / abi / `extern fn` 计数**直接从各包源文件
-  提取**，包升级后重生成即同步，不硬编码版本号），并生成 `web/packages/<slug>.html`
+  提取**，包升级后重生成即同步，不硬编码版本号），并生成 `docx/packages/<slug>.html`
   六个详情页（叙述 + 示例 + 自动刷新的事实表）。`check_links.py` 放宽 `.html` 目标
-  的仓库根相对链接误报；生成确定性已验证（`git diff --exit-code -- web/`）。
+  的仓库根相对链接误报；生成确定性已验证（`git diff --exit-code -- docx/`）。
 - **AC 组（B1 impl 方法块）测试资产**：`tests/impl/impl_struct.dial` /
   `impl_default.dial` / `impl_gui_handle.dial` 三个正向用例与同名 `.expected`
   黄金输出，以及 `tests/bad/impl_*.dial` 六个 Fail-Fast 负向用例；
@@ -1109,7 +1109,7 @@
     （摊薄启动开销）+ 扣除 `noop` 基线，给出**绝对值**（单次纯耗时 ms）与
     **绝对比值**（C = 1.00× 基准），并采集 6 大工程维度（速度 / 峰值内存 /
     编译耗时 / 启动耗时 / 产物体积 / 源码行数），产出 `bench/data.json`。
-  - `tools/build_bench_web.py`：由数据生成独立静态页 `web/bench.html`——
+  - `tools/build_bench_web.py`：由数据生成独立静态页 `docx/bench.html`——
     绝对值表 + 比值表 + 六维表 + 底部**六维雷达图**（手写 SVG，4 语言叠加，
     按各维最优语言归一化，越靠外越优），无外部 CDN / JS 依赖、离线可看。
     触及计时下限（或被编译器常量折叠）的项以 `†` 诚实标注。
@@ -1360,12 +1360,12 @@
 - **官网更新日志改为「版本索引 + 每版本分页」（`[v1.04]` 后续增补，
   `CHANGELOG.md` 原文一字不改）**：`changelog.html` 单文件已达 213 KB，移动端
   首屏渲染与旧版本定位成本高，且重复锚点靠 `_1` 后缀区分、版本一多更难维护。
-  改的是生成器 `tools/build_web.py`，**不是手拆产物**：`web/changelog.html`
-  只放 31 行版本索引（213 KB → 6.1 KB），`web/changelog/` 下每版本一页存
+  改的是生成器 `tools/build_web.py`，**不是手拆产物**：`docx/changelog.html`
+  只放 31 行版本索引（213 KB → 6.1 KB），`docx/changelog/` 下每版本一页存
   对应条目的原文渲染，另出 `overview.html`（版本规则）/ `index.json`（搜索与
   newer / older 导航）。生成器内置两道自检：分段拼接结果与 `CHANGELOG.md`
   逐字节相等、生成页数 == 段数 + 1；二次生成逐字节一致（满足 CI 的
-  `git diff --exit-code -- web/`）。正文纯文本旧 / 新逐字符相等（75,397 字符），
+  `git diff --exit-code -- docx/`）。正文纯文本旧 / 新逐字符相等（75,397 字符），
   重复锚点后缀 73 → 1。**记录粒度不变，只改变组织方式**。
 
 ### Changed
@@ -1438,8 +1438,8 @@
 - **性能基准与 CI 集成（v1.04 增补）**：`build-linux` 作业新增 Go 安装与
   「性能基准采集」步骤，实跑 4 语言编译 + 28 项计时 + 112 校验和一致性，
   生成 CI 机器上的数据/网页并经 `check_bench_data.py` 校验，同时验证仓库内
-  交付快照（`bench/data.json` + `web/bench.html`）配套；产物上传为
-  `bench-4lang-28dim` artifact。CI 只写 `/tmp` 再上传，绝不回写 `web/bench.html`，
+  交付快照（`bench/data.json` + `docx/bench.html`）配套；产物上传为
+  `bench-4lang-28dim` artifact。CI 只写 `/tmp` 再上传，绝不回写 `docx/bench.html`，
   避免机器相关的实测数据让官网同步校验误报。
 
 ---
@@ -2125,7 +2125,7 @@
 - **VS Code 插件接通 hover / 跳转定义 / 补全**：原扩展仅接了诊断与语义高亮，现补齐三个 provider 转发到
   `dialc lsp`；`initialize` 发送真实 `capabilities`；`package.json` 升 `0.98.0`。
 - 文档同步：`README §28.7`（编辑器插件安装包与 LSP 能力清单）、`ARCHITECTURE`、`CHANGELOG` 更新；
-  各编辑器 README 与 `web/` 重新生成。
+  各编辑器 README 与 `docx/` 重新生成。
 
 ### 轮 2（导航，已完成）
 - **LSP 导航全家桶**：`src/index.rs` 新增**引用边**（`Ref`），`dialc lsp` 落地文档符号大纲、工作区符号、引用查找、重命名（含 `prepareRename`）、签名帮助。
@@ -2411,10 +2411,10 @@
 ### Added（新增）
 - **GitHub Actions 流水线** `.github/workflows/ci.yml`（**编译 + 发布流程**）：
   - `build` 作业（每次 push / PR）：装 LLVM 18 + Rust → `cargo build --release --locked`
-    → 跑**全部十一组**端到端测试（A～K）→ 校验内部锚点 → 校验 `web/` 与文档同步；
+    → 跑**全部十一组**端到端测试（A～K）→ 校验内部锚点 → 校验 `docx/` 与文档同步；
     四道关卡任何一道不过，PR 即不可合并。
   - `release` 作业（打 `v*` 标签时）：复用 build 的二进制，
-    打成 `dialc-v<版本>.zip`（源码 + `.git` + 四份许可文件 + `web/` + VS Code 扩展 + `bin/dialc`），
+    打成 `dialc-v<版本>.zip`（源码 + `.git` + 四份许可文件 + `docx/` + VS Code 扩展 + `bin/dialc`），
     上传为 **GitHub Release** 产物——即官网首页的下载链接。
   - 环境与 README §3.1 一致：Ubuntu 24.04 LTS（近两年内发布的发行版）、Linux x86_64 · 动态 glibc。
 - **新增模块 `src/index.rs`**：作用域树（Scope，parent 链）+ 符号表（Symbol），独立于类型检查。
@@ -2486,7 +2486,7 @@
   现已让 `dial_slugify` **严格复刻 GitHub（github-slugger）语义**，两者同源；
   并新增 `tools/check_links.py` 做**锚点一致性校验**（可 `--fix` 自动修正）。
   实测：README 的 6 处失效锚点、CHANGELOG 的 25 处失效锚点全部归零，
-  生成后的 `web/spec.html`（232 条内部链接）与 `web/changelog.html`（77 条）**零失效**。
+  生成后的 `docx/spec.html`（232 条内部链接）与 `docx/changelog.html`（77 条）**零失效**。
   另修掉 CHANGELOG 里 25 处 `](#…)` 跨文件链接——它们在 CHANGELOG 内部**根本解析不到**，
   已改写为 `](README.md#…)`（链接文字里的 §20→§21、§22 旧标题等一并更正）。
 - **清理过时产物**：删除 10 份逐版本报告（`REPORT_v0.3.md` … `REPORT_v0.91.md`）——
@@ -2512,7 +2512,7 @@
 发布包已做**反向验证**（不是只看它上传成功）：下载 → `unzip -t` 完整性通过 → 解压 →
 本地重新 `cargo build --release` 成功 → 在解压出来的源码树上再跑一遍**十一组测试，全绿**；
 并抽查包内 `bin/dialc`（CI 构建的二进制，ELF x86-64）、`BUILD_INFO.txt`（记录构建提交与时间）、
-四份许可文件、`.git/`、`web/`、`editors/vscode/` 齐备，而**已废弃的 `REPORT_v0.x.md`、
+四份许可文件、`.git/`、`docx/`、`editors/vscode/` 齐备，而**已废弃的 `REPORT_v0.x.md`、
 `TEST_RUN_*.log`、`target/` 确实不在包里**。
 
 > 一处环境差异记录在案：CI 产出的二进制链接的是 apt.llvm.org 的 `libLLVM-18.so.18.1`，
@@ -2695,7 +2695,7 @@
   **内建函数的隐式抛出**（`open` / `read` / `write` 失败）允许写在任何地方 → **编译通过**，
   运行到该处若无捕获则触发未捕获异常 panic 终止。
 - **首页示例使用 `+` 拼接字符串**：Dial 的字符串没有 `+` 运算符，已改为 `print("hello, ".concat(name))`
-  （同步修正生成器 `tools/build_web.py` 与产物 `web/index.html`，避免重新生成时复发）。
+  （同步修正生成器 `tools/build_web.py` 与产物 `docx/index.html`，避免重新生成时复发）。
 
 ### 验证
 - A/B/D/E/C/F **六组原有测试全绿**，新增 G 组（未捕获异常契约）通过。
@@ -3056,7 +3056,7 @@
   ④ 保持代码直白（能用一个循环和一个 if 解决的，绝不套设计模式）。
 - README §8.1 语句一览、§8.4 `break` / `continue`、§17.2 未实现清单（移除已落地的 break/continue）同步更新。
 - 新增 `REPORT_v0.5.md`（`objdump` 真实反汇编证据）与 `TEST_RUN_v0.5.log`。
-- 官网 `web/` 重新生成，首页版本同步 v0.5。
+- 官网 `docx/` 重新生成，首页版本同步 v0.5。
 - 版本号升级至 `v0.5`。
 
 ---
@@ -3092,7 +3092,7 @@
 ### Docs（文档）
 - README 新增 [§12 哈希表 `map`](README.md#12-哈希表-mapint--int)、[§8.2 `else if`](README.md#82-if--else-if--while)、[§8.3 范围 `for`](README.md#83-范围-for-循环)、
   [§19 内存宪法](README.md#19-内存宪法防-gc-铁律)；并将 FFI 表与 C 导出函数清单补齐 `dial_map_*` / `dial_read_line`。
-- 官网文档（`web/`）随 README / CHANGELOG 重新生成。
+- 官网文档（`docx/`）随 README / CHANGELOG 重新生成。
 - 版本号升级至 `v0.4`。
 
 ---

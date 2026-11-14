@@ -88,7 +88,7 @@ dialc/
 │   ├── lsp_features.py     # K 组：LSP 增强（悬停 / 跳转定义 / 补全）
 │   └── pkg_install_url.py  # L 组：包 URL 安装 + 一键安装脚本
 ├── tools/
-│   ├── build_web.py        # 生成官网 web/（规范 / 更新日志索引 + 每版本分页 / 首页）
+│   ├── build_web.py        # 生成官网 docx/（规范 / 更新日志索引 + 每版本分页 / 首页）
 │   ├── check_links.py      # 校验 README / CHANGELOG 的内部锚点（--fix 可自动修正）
 │   ├── check_version.py    # 校验版本号在 README / CHANGELOG / 官网三处一致
 │   ├── check_lsp_stdout_purity.py  # 校验 LSP 路径上不出现 stdout 裸输出（协议流纯净性）
@@ -99,7 +99,7 @@ dialc/
 │   └── make_sample_pkg.sh  # 现场构建示例 .dialpkg（H / J / L 组用）
 ├── .github/workflows/ci.yml  # GitHub Actions：编译 + 二十八组测试（A–Z+AA+AB）+ 打包发布
 ├── editors/vscode/         # 免 npm 安装的 VS Code 扩展
-├── web/                    # 官网产物（由 tools/build_web.py 生成；更新日志分页在 web/changelog/）
+├── docx/                    # 官网产物（由 tools/build_web.py 生成；更新日志分页在 docx/changelog/）
 └── README.md               # 本文件
 ```
 
@@ -1839,11 +1839,11 @@ print("");        // -> Hi
 | **锚点校验** | `python3 tools/check_links.py`——README / CHANGELOG 的内部链接必须全部可解析 | 立即失败（防止再次出现「点不动的链接」） |
 | **协议流纯净性** | `python3 tools/check_lsp_stdout_purity.py`——LSP 运行时用到的模块与被 LSP 调用的函数里不得出现 `println!` | 立即失败（stdout 是协议流，裸输出会让编辑器卡死） |
 | **版本号一致性** | `python3 tools/check_version.py`——README / CHANGELOG / 官网三处产物的版本号必须一致 | 立即失败（防止「代码已发版、文档还停在旧版」） |
-| **官网同步** | 重新生成 `web/` 并与仓库内容比对 | 立即失败（文档改了但官网没重新生成） |
+| **官网同步** | 重新生成 `docx/` 并与仓库内容比对 | 立即失败（文档改了但官网没重新生成） |
 
 打 **`v*` 标签**时，额外的 `release` 作业会把编译器二进制一并打进
 `dialc-v<版本>-<平台>.zip`（**三个平台各一个**：linux-x86_64 / windows-x86_64 / termux-aarch64；
-含源码、`.git`、四份许可文件、`web/`、VS Code 扩展），
+含源码、`.git`、四份许可文件、`docx/`、VS Code 扩展），
 上传为 GitHub Release 产物——即官网首页的下载链接。
 打包脚本 `tools/package.sh` 有**硬性校验**：许可文件不全、或缺 `.git`、或混入构建产物，一律拒绝出包。
 
@@ -2111,9 +2111,9 @@ Rust 前端与 C Runtime 的代码**尽量只依赖标准库**。任何新引入
 
 > 本节仅保留 **v0.3 及以前** 的相对变更摘要（早期历史）。
 > **v0.4 及之后** 的每个版本相对变更、跨文件符号表（v0.95）等**完整记录见 [CHANGELOG.md](CHANGELOG.md)**，
-> 官网渲染为[版本索引 changelog.html](web/changelog.html)与 `web/changelog/` 下**每版本一页的详情**
+> 官网渲染为[版本索引 changelog.html](docx/changelog.html)与 `docx/changelog/` 下**每版本一页的详情**
 > （正文与 CHANGELOG.md 对应条目逐字一致；索引 + 分页是为避免单文件 200 KB 的长滚动与移动端加载成本，
-> 并消除跨版本重复小节标题的锚点撞名）；最新版本号与能力矩阵见 [首页 index.html](web/index.html)。
+> 并消除跨版本重复小节标题的锚点撞名）；最新版本号与能力矩阵见 [首页 index.html](docx/index.html)。
 
 ### 22.0 v0.61（相对 v0.6）
 
@@ -5592,7 +5592,7 @@ GDB 里只剩 `<optimized out>`，`print counter` 依然打不出值。因此：
 ## 36. v1.04 增补：性能基准（4 语言 × 28 维，并入 `[v1.04]`，版本不变）
 
 一套**可复现、跨语言等价**的性能基准：同一台机器、同一套 **28 个微基准**，对比
-**C / Python / Go / Dial** 四种语言；独立网页 [`web/bench.html`](web/bench.html)
+**C / Python / Go / Dial** 四种语言；独立网页 [`docx/bench.html`](docx/bench.html)
 存放全部数据，底部叠加**六维工程能力雷达图**。
 
 ### 36.1 28 个维度
@@ -5647,7 +5647,7 @@ GDB 里只剩 `<optimized out>`，`print counter` 依然打不出值。因此：
 
 ### 36.4 网页与复现
 
-独立网页 [`web/bench.html`](web/bench.html) 为**纯静态 HTML**（自带表格与手写 SVG
+独立网页 [`docx/bench.html`](docx/bench.html) 为**纯静态 HTML**（自带表格与手写 SVG
 雷达图，无外部 CDN、无 JS 依赖，离线双击可看）。它不由 `tools/build_web.py` 生成，
 因此不影响「官网产物同步校验」；官网导航、首页 CTA 与安全公告页均已加入口。
 
@@ -5663,8 +5663,8 @@ python3 tools/check_bench_data.py
 数据文件 `bench/data.json` 是本地校准后的**权威快照**，随仓库提交。
 CI 的 `build-linux` 作业每次都会实跑采集器、校验 112 校验和与交付快照配套，
 把 CI 机器上的实测数据与网页作为 artifact（`bench-4lang-28dim`）上传；
-CI 产物只写 `/tmp` 再上传，**绝不回写** `web/bench.html` —— 否则测得的数据与
-提交的快照不同会让「官网同步校验」的 `git diff --exit-code -- web/` 误报。
+CI 产物只写 `/tmp` 再上传，**绝不回写** `docx/bench.html` —— 否则测得的数据与
+提交的快照不同会让「官网同步校验」的 `git diff --exit-code -- docx/` 误报。
 
 ### 36.5 实现落点
 
@@ -5674,7 +5674,7 @@ CI 产物只写 `/tmp` 再上传，**绝不回写** `web/bench.html` —— 否�
 | 采集器 | `tools/bench_harness.py` | 编译计时、校准法计时、校验和真值、6 维采集、JSON |
 | 网页生成 | `tools/build_bench_web.py` | 绝对值/比值表、六维表、SVG 雷达图 |
 | 校验器 | `tools/check_bench_data.py` | 数据完整性 + 网页/数据同步（CI 复用） |
-| 数据 | `bench/data.json` / `web/bench.html` | 提交的权威快照 / 独立性能页 |
+| 数据 | `bench/data.json` / `docx/bench.html` | 提交的权威快照 / 独立性能页 |
 | CI | `.github/workflows/ci.yml` | `build-linux` 内实跑 + artifact |
 
 > **本轮交付范围**：并入 `[v1.04]`，编译器版本 `1.4.0` 与 `STDLIB_ABI 5` 均不变；

@@ -50,10 +50,10 @@
 <ul>
 <li><strong>GitHub Actions 流水线</strong> <code>.github/workflows/ci.yml</code>（<strong>编译 + 发布流程</strong>）：</li>
 <li><code>build</code> 作业（每次 push / PR）：装 LLVM 18 + Rust → <code>cargo build --release --locked</code>
-    → 跑<strong>全部十一组</strong>端到端测试（A～K）→ 校验内部锚点 → 校验 <code>web/</code> 与文档同步；
+    → 跑<strong>全部十一组</strong>端到端测试（A～K）→ 校验内部锚点 → 校验 <code>docx/</code> 与文档同步；
     四道关卡任何一道不过，PR 即不可合并。</li>
 <li><code>release</code> 作业（打 <code>v*</code> 标签时）：复用 build 的二进制，
-    打成 <code>dialc-v&lt;版本&gt;.zip</code>（源码 + <code>.git</code> + 四份许可文件 + <code>web/</code> + VS Code 扩展 + <code>bin/dialc</code>），
+    打成 <code>dialc-v&lt;版本&gt;.zip</code>（源码 + <code>.git</code> + 四份许可文件 + <code>docx/</code> + VS Code 扩展 + <code>bin/dialc</code>），
     上传为 <strong>GitHub Release</strong> 产物——即官网首页的下载链接。</li>
 <li>环境与 README §3.1 一致：Ubuntu 24.04 LTS（近两年内发布的发行版）、Linux x86_64 · 动态 glibc。</li>
 <li><strong>新增模块 <code>src/index.rs</code></strong>：作用域树（Scope，parent 链）+ 符号表（Symbol），独立于类型检查。</li>
@@ -128,7 +128,7 @@
   现已让 <code>dial_slugify</code> <strong>严格复刻 GitHub（github-slugger）语义</strong>，两者同源；
   并新增 <code>tools/check_links.py</code> 做<strong>锚点一致性校验</strong>（可 <code>--fix</code> 自动修正）。
   实测：README 的 6 处失效锚点、CHANGELOG 的 25 处失效锚点全部归零，
-  生成后的 <code>web/spec.html</code>（232 条内部链接）与 <code>web/changelog.html</code>（77 条）<strong>零失效</strong>。
+  生成后的 <code>docx/spec.html</code>（232 条内部链接）与 <code>docx/changelog.html</code>（77 条）<strong>零失效</strong>。
   另修掉 CHANGELOG 里 25 处 <code>](#…)</code> 跨文件链接——它们在 CHANGELOG 内部<strong>根本解析不到</strong>，
   已改写为 <code>](README.md#…)</code>（链接文字里的 §20→§21、§22 旧标题等一并更正）。</li>
 <li><strong>清理过时产物</strong>：删除 10 份逐版本报告（<code>REPORT_v0.3.md</code> … <code>REPORT_v0.91.md</code>）——
@@ -174,7 +174,7 @@
 <p>发布包已做<strong>反向验证</strong>（不是只看它上传成功）：下载 → <code>unzip -t</code> 完整性通过 → 解压 →
 本地重新 <code>cargo build --release</code> 成功 → 在解压出来的源码树上再跑一遍<strong>十一组测试，全绿</strong>；
 并抽查包内 <code>bin/dialc</code>（CI 构建的二进制，ELF x86-64）、<code>BUILD_INFO.txt</code>（记录构建提交与时间）、
-四份许可文件、<code>.git/</code>、<code>web/</code>、<code>editors/vscode/</code> 齐备，而<strong>已废弃的 <code>REPORT_v0.x.md</code>、
+四份许可文件、<code>.git/</code>、<code>docx/</code>、<code>editors/vscode/</code> 齐备，而<strong>已废弃的 <code>REPORT_v0.x.md</code>、
 <code>TEST_RUN_*.log</code>、<code>target/</code> 确实不在包里</strong>。</p>
 <blockquote>
 <p>一处环境差异记录在案：CI 产出的二进制链接的是 apt.llvm.org 的 <code>libLLVM-18.so.18.1</code>，

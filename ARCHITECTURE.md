@@ -770,13 +770,13 @@ R 组双路验证：静态用 `llvm-dwarfdump` 核对段、七个 Dial 名字与
 | 产物 | 生成者 | 是否入库 |
 | --- | --- | --- |
 | `bench/data.json` | `tools/bench_harness.py`（本地校准实测） | 是，权威快照 |
-| `web/bench.html` | `tools/build_bench_web.py`（读 data.json） | 是，独立静态页 |
+| `docx/bench.html` | `tools/build_bench_web.py`（读 data.json） | 是，独立静态页 |
 | CI 实测数据/网页 | 同一对脚本，`--out /tmp/...` | 否，仅 artifact |
 
-`web/bench.html` 与 `web/cve.html` 一样是**独立页面**，不在 `build_web.py` 的
+`docx/bench.html` 与 `docx/cve.html` 一样是**独立页面**，不在 `build_web.py` 的
 产物清单内，只复用 `assets/style.css`，因此官网同步校验
-（`git diff --exit-code -- web/`）不受影响。CI 实跑采集器验证等价性与交付快照
-配套，但产物只写 `/tmp` 后上传 artifact，**绝不回写** `web/bench.html`——
+（`git diff --exit-code -- docx/`）不受影响。CI 实跑采集器验证等价性与交付快照
+配套，但产物只写 `/tmp` 后上传 artifact，**绝不回写** `docx/bench.html`——
 否则 CI 机器测得的数据与提交的快照不同，会让同步校验误报失败。
 性能数值随机器与负载浮动，网页是某次实测快照，复现以采集器为准。
 

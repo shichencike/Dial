@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""由 bench/data.json 生成独立性能数据网页 web/bench.html。
+"""由 bench/data.json 生成独立性能数据网页 docx/bench.html。
 
 设计
 ----
 * 纯静态 HTML：所有表格与六维雷达图都在生成时渲染完成，不依赖 JavaScript
   或任何外部 CDN，双击 file:// 也能完整查看（离线可复现）。
 * 复用官网 assets/style.css 保持视觉一致；补充样式内联，避免改动官网样式表。
-* 本文件**只生成 web/bench.html**，不触碰 build_web.py 负责的
+* 本文件**只生成 docx/bench.html**，不触碰 build_web.py 负责的
   index/spec/changelog/assets，因此 CI 的「官网产物同步校验」不受影响。
 * 4 个板块：概览与口径 → 六维工程维度 → 28 项绝对值/绝对比值明细 →
   底部六维雷达图（4 语言叠加）。
 
 用法：
-    python3 tools/build_bench_web.py [--data bench/data.json] [--out web/bench.html]
+    python3 tools/build_bench_web.py [--data bench/data.json] [--out docx/bench.html]
 """
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ def legend(langs, colors) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default=str(ROOT / "bench" / "data.json"))
-    ap.add_argument("--out", default=str(ROOT / "web" / "bench.html"))
+    ap.add_argument("--out", default=str(ROOT / "docx" / "bench.html"))
     args = ap.parse_args()
 
     dp = pathlib.Path(args.data)
@@ -418,7 +418,7 @@ window.addEventListener('DOMContentLoaded',function(){showTab('abs');});
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html_doc, encoding="utf-8")
-    print(f"web/bench.html generated: {out} ({len(html_doc)} bytes, "
+    print(f"docx/bench.html generated: {out} ({len(html_doc)} bytes, "
           f"{len(benches)} benchmarks, {len(axes)} radar axes)")
     return 0
 

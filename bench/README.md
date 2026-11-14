@@ -22,7 +22,7 @@
 
 - `bench_harness.py` —— 编译 4 语言、外部统一墙钟计时、校准法测绝对值、
   算绝对比值、采集 6 大工程维度，产出 `data.json`。
-- `build_bench_web.py` —— 由 `data.json` 生成独立静态页 `web/bench.html`
+- `build_bench_web.py` —— 由 `data.json` 生成独立静态页 `docx/bench.html`
   （绝对值表 + 比值表 + 六维表 + 底部六维 SVG 雷达图）。
 - `check_bench_data.py` —— 校验数据完整性与网页/数据同步（CI 与本地共用）。
 
@@ -48,5 +48,5 @@ python3 tools/check_bench_data.py
 极快项或被编译器常量折叠成空操作的项（如 C `-O2` 折叠 `b20` 字符串拼接）
 统一钳到 5µs 计时下限，网页以 `†` 标注，避免 `0.000ms` 与比值虚高。
 
-详见 [README §36](../README.md) 与 `web/bench.html` 的「测量口径」。
+详见 [README §36](../README.md) 与 `docx/bench.html` 的「测量口径」。
 性能数值随机器与负载浮动，`data.json` 是某次实测快照而非固定承诺值。

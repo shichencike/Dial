@@ -6,7 +6,7 @@ CI 与本地通用。检查：
   * 每项 4 语言校验和都与采集器内嵌真值表一致（等价计算的锚点）；
   * 绝对值恒为正、比值以 C=1.00 为基准、雷达得分每语言 6 个；
   * （可选）网页包含全部校验和、维度标签、雷达 SVG 与 4 语言多边形，
-    即 web/bench.html 与 bench/data.json 是配套生成的。
+    即 docx/bench.html 与 bench/data.json 是配套生成的。
 
 用法：
     python3 tools/check_bench_data.py                       # 校验仓库交付数据+网页
@@ -114,7 +114,7 @@ def check(data: dict, html_text: str | None) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default=str(ROOT / "bench" / "data.json"))
-    ap.add_argument("--html", default=str(ROOT / "web" / "bench.html"))
+    ap.add_argument("--html", default=str(ROOT / "docx" / "bench.html"))
     ap.add_argument("--no-html", action="store_true", help="只校验数据，不校验网页")
     args = ap.parse_args()
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Generate the dialc official documentation website from README.md / CHANGELOG.md.
 
-Outputs a static site into web/:
-  web/index.html                  landing page
-  web/spec.html                   full language reference (README)
-  web/changelog.html              version index (one row per release)
-  web/changelog/overview.html      CHANGELOG preamble (versioning rules), verbatim
-  web/changelog/<version>.html     one page per `## ` section, verbatim text
-  web/changelog/index.json         machine-readable index (search + newer/older nav)
-  web/assets/style.css             shared stylesheet
+Outputs a static site into docx/:
+  docx/index.html                  landing page
+  docx/spec.html                   full language reference (README)
+  docx/changelog.html              version index (one row per release)
+  docx/changelog/overview.html      CHANGELOG preamble (versioning rules), verbatim
+  docx/changelog/<version>.html     one page per `## ` section, verbatim text
+  docx/changelog/index.json         machine-readable index (search + newer/older nav)
+  docx/assets/style.css             shared stylesheet
 
 Why the changelog is split (v1.04 tooling): one flat HTML had grown past 200 KB.
 The evidence-chain style of writing — what changed / why / measured data / where
@@ -20,7 +20,7 @@ a small index plus one page per version. This fixes three concrete problems:
      (`..._1` suffixes) disappear.
 
 CHANGELOG.md remains the single source of truth; this script never edits it.
-CI runs `git diff --exit-code -- web/`, so generation must be deterministic and
+CI runs `git diff --exit-code -- docx/`, so generation must be deterministic and
 every output file must be committed. Run: python3 tools/build_web.py
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-WEB = ROOT / "web"
+WEB = ROOT / "docx"
 ASSETS = WEB / "assets"
 CHANGELOG_DIR = WEB / "changelog"
 
@@ -89,7 +89,7 @@ try:
 except ImportError:  # pragma: no cover
     raise SystemExit(
         "缺少依赖 python-markdown。安装：pip install 'markdown==3.10.1'\n"
-        "（版本必须与生成 web/ 时一致，否则 HTML 会有差异、CI 的同步校验会误报。）"
+        "（版本必须与生成 docx/ 时一致，否则 HTML 会有差异、CI 的同步校验会误报。）"
     )
 
 NAV = """
@@ -255,11 +255,11 @@ def dial_slugify(value: str, separator: str) -> str:
 
 # 官网里没有「仓库根文件」这类页面：源 markdown 中指向 README.md / CHANGELOG.md /
 # ARCHITECTURE.md / LICENSE* / examples/ / editors/ 的相对链接，在 GitHub 上有效，
-# 但落到 web/ 目录就成了死链。渲染时统一重写 href（**只改属性，不动正文文字**）：
+# 但落到 docx/ 目录就成了死链。渲染时统一重写 href（**只改属性，不动正文文字**）：
 #   README.md     -> 站内 spec.html（官网就是 README 的渲染版）
 #   CHANGELOG.md  -> 站内 changelog.html（版本索引）
 #   其余仓库文件/目录 -> GitHub 仓库绝对 URL（官网没有对应页面）
-# 分页在 web/changelog/ 下，站内链接要补 "../"；base 由调用方传入。
+# 分页在 docx/changelog/ 下，站内链接要补 "../"；base 由调用方传入。
 GITHUB_BLOB = "https://github.com/shichencike/Dial/blob/main/"
 GITHUB_TREE = "https://github.com/shichencike/Dial/tree/main/"
 
@@ -299,10 +299,10 @@ def md_body(text: str, with_toc: bool, strip_web_prefix: bool = False,
     src = ("[TOC]\n\n" + text) if with_toc else text
     out = md.convert(src)
     if strip_web_prefix:
-        # README 里的 `](web/xxx.html)` 是相对**仓库根**的路径（GitHub 上有效）；
-        # 官网把 spec.html 与这些页面放在同一目录，须去掉 web/ 前缀才点得动。
+        # README 里的 `](docx/xxx.html)` 是相对**仓库根**的路径（GitHub 上有效）；
+        # 官网把 spec.html 与这些页面放在同一目录，须去掉 docx/ 前缀才点得动。
         # 只改 href，不动任何正文文字；CHANGELOG 无此类链接，分页页不受影响。
-        out = out.replace('href="web/', 'href="')
+        out = out.replace('href="docx/', 'href="')
     # 其余指向仓库根 .md / 目录的 href 同理：改成站内页或 GitHub 绝对链接。
     return rewrite_repo_links(out, base)
 
@@ -311,7 +311,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
            base: str = "") -> str:
     """渲染站点页。
 
-    `base` 是站内相对链接前缀：根级页面为 ""，`web/changelog/` 下的分页为
+    `base` 是站内相对链接前缀：根级页面为 ""，`docx/changelog/` 下的分页为
     "../"（样式表与顶部导航都要跟着回退一级）。只重写站内 `.html` 链接，
     NAV 里的 GitHub / LLVM 绝对外链不受影响。
     """
@@ -936,7 +936,7 @@ def main() -> None:
 
     (WEB / "index.html").write_text(render_index(), encoding="utf-8")
 
-    print("web/ generated:", sorted(p.name for p in WEB.rglob("*") if p.is_file()))
+    print("docx/ generated:", sorted(p.name for p in WEB.rglob("*") if p.is_file()))
 
 
 def render_index() -> str:

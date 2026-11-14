@@ -31,7 +31,7 @@
 #   R. DWARF 调试信息：-g 生成 CompileUnit / 函数 / 行号 / 变量名，GDB 按源码行
 #      断点并 print 变量名，无 -g 时不产 Dial 调试符号（v1.04 增补）。
 #   S. 性能基准套件：4 语言（C/Go/Python/Dial）28 项校验和一致（抽验）、
-#      bench/data.json 数据完整性、web/bench.html 与数据配套及六维雷达图（v1.04 增补）。
+#      bench/data.json 数据完整性、docx/bench.html 与数据配套及六维雷达图（v1.04 增补）。
 #      完整计时采集由 CI 独立步骤负责，本组只做秒级快速正确性校验。
 #   T. B/C 组缺口第一批：块注释 B9 / ! 逻辑非 B10 / .slice() B11 /
 #      get_or C6 / eprint C8，含宪法否决项（函数重载 B5）的负向锁定（v1.04 增补）。
@@ -1534,17 +1534,17 @@ mkdir -p "$SDIR"
 
 # 1) 交付数据完整性 + 网页/数据同步（纯 Python，无外部工具依赖）
 if python3 tools/check_bench_data.py \
-     --data "${BDIR}/data.json" --html web/bench.html >"${SDIR}/check.log" 2>&1; then
+     --data "${BDIR}/data.json" --html docx/bench.html >"${SDIR}/check.log" 2>&1; then
     spass "data.json 28×4 / 6 维 / 6 雷达轴 / 校验和齐全，且网页与数据同步"
 else
     sbad "交付数据或网页校验失败"; sed 's/^/       /' "${SDIR}/check.log"
 fi
 
 # 2) 网页含六维雷达图（SVG）、4 语言多边形、C=1.00 基准
-if grep -q '<svg' web/bench.html \
-   && [ "$(grep -c '<polygon' web/bench.html)" -ge 8 ] \
-   && grep -q 'C = 1.00' web/bench.html \
-   && grep -q '六维工程能力雷达图' web/bench.html; then
+if grep -q '<svg' docx/bench.html \
+   && [ "$(grep -c '<polygon' docx/bench.html)" -ge 8 ] \
+   && grep -q 'C = 1.00' docx/bench.html \
+   && grep -q '六维工程能力雷达图' docx/bench.html; then
     spass "网页含六维 SVG 雷达图（4 语言多边形 + 归一化基准）"
 else
     sbad "网页缺六维雷达图或比值基准"
