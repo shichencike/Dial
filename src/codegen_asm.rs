@@ -77,6 +77,37 @@ pub fn emit(ip: &IrProgram, target: EmitTarget) -> Result<String, String> {
 
 fn align_up(x: i64, a: i64) -> i64 { (x + a - 1) / a * a }
 
+/// x86-64 里可供「无 call 基本块」独占的整数寄存器池。
+///
+/// 前 6 个是 SysV callee-saved（含 rbp；本后端用 rsp 直接寻址，rbp 空闲），
+/// 必须在 prologue/epilogue 保存恢复；后 2 个是 caller-saved，因为启用驻留的
+/// 块内一条 call 都没有，它们不会被任何被调方破坏，故无需保存。
+/// 刻意避开 rax / rcx / rdx / r10 / r11：这些是发射器的临时寄存器或
+/// div / 移位 / setcc 的隐式操作数。
+const RES_POOL: [&str; 8] = ["rbx", "r12", "r13", "r14", "r15", "rbp", "r8", "r9"];
+
+fn is_callee_saved(p: &str) -> bool {
+    matches!(p, "rbx" | "rbp" | "r12" | "r13" | "r14" | "r15")
+}
+
+/// 能整槽提升为寄存器值的类型：8 字节、非浮点、非结构体。
+/// 窄整型走 load_stack 的 movzbq/movl 零扩展、浮点走 xmm，语义不同，不提升。
+fn promotable_ty(t: &IrType) -> bool {
+    matches!(t, IrType::I64 | IrType::Ptr | IrType::Handle | IrType::FnPtr)
+}
+
+/// 一个基本块的寄存器驻留方案（编译期确定，emit 时按块装载 / 回写）。
+#[derive(Clone, Default)]
+struct BlockPlan {
+    /// vreg → 物理寄存器（裸名，不含 `%`）。
+    resident: HashMap<VReg, &'static str>,
+    /// 块入口需从栈槽装载的 (vreg, 物理寄存器)，按 vreg 升序。
+    loads: Vec<(VReg, &'static str)>,
+    /// 需要在块尾写回栈槽的普通 vreg（跨块仍被读取的那些）。
+    /// 提升槽不在此列——它们无条件回写，因为别的块/含 call 块走内存路径。
+    keep_flush: HashSet<VReg>,
+}
+
 struct FnEmit<'a> {
     ip: &'a IrProgram,
     f: &'a IrFunction,
@@ -89,6 +120,21 @@ struct FnEmit<'a> {
     frame_size: i64,
     prefix: String,
     out: String,
+    /// 块内寄存器驻留：当前生效的映射 / 脏集合 / 开关。
+    resident: HashMap<VReg, &'static str>,
+    dirty: HashSet<VReg>,
+    residency_on: bool,
+    /// 每个基本块的驻留方案，与 f.blocks 一一对应。
+    plans: Vec<BlockPlan>,
+    /// 本函数实际用到的 callee-saved 寄存器（prologue 保存 / epilogue 恢复）。
+    used_phys: Vec<&'static str>,
+    /// 帧内保存区起始偏移（x86-64 固定预留 6×8 字节；AArch64 为 0）。
+    save_off: i64,
+    /// 函数级判定：地址不逃逸、且所有 Load/Store 都是整槽宽度的 Alloca，
+    /// 可以把它的「值」提升进寄存器池（key 是 Alloca 的 dst vreg）。
+    promotable: HashSet<VReg>,
+    /// 当前块需要回写栈槽的普通 vreg（跨块活跃集合）。
+    flush_mask: HashSet<VReg>,
 }
 
 impl<'a> FnEmit<'a> {
@@ -101,6 +147,9 @@ impl<'a> FnEmit<'a> {
             ip, f, target, local_funcs: local,
             reg_off: Vec::new(), alloca_off: HashMap::new(), frame_size: 0,
             prefix, out: String::new(),
+            resident: HashMap::new(), dirty: HashSet::new(), residency_on: false,
+            plans: Vec::new(), used_phys: Vec::new(), save_off: 0,
+            promotable: HashSet::new(), flush_mask: HashSet::new(),
         }
     }
 
@@ -185,6 +234,13 @@ impl<'a> FnEmit<'a> {
                 self.mov_imm64(reg, n as u64);
             }
             Value::Reg(r) => {
+                // M7-a2：vreg 若驻留在物理寄存器里，直接寄存器搬运，省掉内存 load。
+                if let Some(p) = self.val_phys(r) {
+                    if p != reg {
+                        self.line(&format!("\tmovq {}, {}", self.r(p), self.r(reg)));
+                    }
+                    return;
+                }
                 let off = self.slot(r);
                 match self.target {
                     EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}({}), {}", off, self.r("rsp"), self.r(reg))),
@@ -245,6 +301,15 @@ impl<'a> FnEmit<'a> {
     }
 
     fn sg(&mut self, dst: VReg, reg: &str) {
+        // M7-a2：驻留 vreg 的最新值留在物理寄存器里，块尾统一回写栈槽。
+        // 这样块内一串运算不再反复 store/load 同一个栈槽。
+        if let Some(p) = self.val_phys(dst) {
+            if p != reg {
+                self.line(&format!("\tmovq {}, {}", self.r(reg), self.r(p)));
+            }
+            self.dirty.insert(dst);
+            return;
+        }
         let off = self.slot(dst);
         match self.target {
             EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}, {}({})", self.r(reg), off, self.r("rsp"))),
@@ -267,6 +332,16 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// 强制写回 vreg 的栈槽（绕过驻留映射）。phi 实参必须落到目标块 param
+    /// 的槽里，否则后继块从槽里读到的是旧值。
+    fn sg_force_stack(&mut self, dst: VReg, reg: &str) {
+        let off = self.slot(dst);
+        match self.target {
+            EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}, {}({})", self.r(reg), off, self.r("rsp"))),
+            EmitTarget::AArch64 => self.line(&format!("\tstr {}, [sp, #{}]", reg, off)),
+        }
+    }
+
     /// 把任意 Value 写进某个 vreg 的槽（块参数传递 / 跳转实参用）。
     fn sv(&mut self, dst: VReg, v: Value) {
         if self.rty(dst).is_float() {
@@ -276,7 +351,7 @@ impl<'a> FnEmit<'a> {
         } else {
             let g = self.g1().to_string();
             self.lg(v, &g);
-            self.sg(dst, &g);
+            self.sg_force_stack(dst, &g);
         }
     }
 
@@ -302,6 +377,8 @@ impl<'a> FnEmit<'a> {
                     }
                 }
                 Value::Reg(r) => {
+                    // 驻留 vreg 的栈槽可能已过期，必须读物理寄存器而不是内存。
+                    if let Some(p) = self.val_phys(r) { return self.r(p); }
                     // F32 槽只写了低 4 字节，整槽 8 字节读会带入垃圾高位，
                     // 保持 lf 的 movss 路径、不折叠。
                     if !fp || self.rty(r) == IrType::F64 {
@@ -405,6 +482,216 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    // ---- 块内寄存器驻留（M7-a2/a3，仅 x86-64） ----
+
+    fn phys(&self, v: VReg) -> Option<&'static str> {
+        if self.residency_on { self.resident.get(&v).copied() } else { None }
+    }
+
+    /// lg / sg / bin_src 只处理「值」vreg。Alloca 的 dst vreg 存的是地址，
+    /// 即便它的**值槽**被提升，也绝不能把地址读成句柄值。
+    fn val_phys(&self, v: VReg) -> Option<&'static str> {
+        if self.alloca_off.contains_key(&v) { None } else { self.phys(v) }
+    }
+
+    /// 驻留项在帧内的回写/装载偏移：提升槽落 Alloca 区，普通值落 vreg 槽。
+    fn resident_off(&self, v: VReg) -> i64 {
+        self.alloca_off.get(&v).copied().unwrap_or_else(|| self.slot(v))
+    }
+
+    /// 含任何会发 call / 可能 longjmp 的指令的块禁用驻留：
+    /// longjmp 会把 callee-saved 恢复到 setjmp 时刻的值，而「寄存器比栈新」
+    /// 的前提在那条路径上不成立。纯计算块（微基准热循环）不受影响。
+    fn block_can_reside(b: &IrBlock) -> bool {
+        !b.insts.iter().any(|i| matches!(i,
+            IrInst::Call { .. } | IrInst::CallIndirect { .. }
+            | IrInst::RcRetain { .. } | IrInst::RcRelease { .. }
+            | IrInst::StructRetain { .. } | IrInst::StructRelease { .. }
+            | IrInst::EnvInit { .. }))
+    }
+
+    /// 普通 vreg 的驻留资格：非浮点、且不是 Alloca 地址槽。
+    fn residency_candidate(&self, v: VReg) -> bool {
+        matches!(self.f.reg_ty.get(v as usize), Some(t) if !t.is_float())
+            && !self.alloca_off.contains_key(&v)
+    }
+
+    /// 判定哪些 Alloca 可以整槽提升：地址不逃逸、且所有 Load/Store 都是
+    /// 8 字节整数宽度。逃逸 = 被当作值传给其它指令 / 块参数 / 返回值，
+    /// 或经 FieldAddr / PtrAdd / ARC 间接访问。
+    fn collect_promotable(&self) -> HashSet<VReg> {
+        let mut cand: HashSet<VReg> = self.alloca_off.keys().copied().collect();
+        for b in &self.f.blocks {
+            for i in &b.insts {
+                match i {
+                    IrInst::Load { ptr, ty, .. } => {
+                        if !promotable_ty(ty) { cand.remove(ptr); }
+                    }
+                    IrInst::Store { ptr, val, ty } => {
+                        if !promotable_ty(ty) { cand.remove(ptr); }
+                        if let Value::Reg(r) = val { cand.remove(r); }
+                    }
+                    IrInst::Alloca { .. } => {}
+                    _ => {
+                        let mut uses = Vec::new();
+                        i.reg_uses(&mut uses);
+                        for u in uses { cand.remove(&u); }
+                    }
+                }
+            }
+            match &b.term {
+                Term::Jump { args, .. } =>
+                    for a in args { if let Value::Reg(r) = a { cand.remove(r); } },
+                Term::Branch { cond, then_args, else_args, .. } => {
+                    cand.remove(cond);
+                    for a in then_args.iter().chain(else_args.iter()) {
+                        if let Value::Reg(r) = a { cand.remove(r); }
+                    }
+                }
+                Term::Return { val } =>
+                    if let Some(Value::Reg(r)) = val { cand.remove(r); },
+                Term::Unreachable => {}
+            }
+        }
+        cand
+    }
+
+    /// 逐块挑出最热的至多 8 个「位置」（提升槽加权优先 + 普通 vreg），
+    /// 绑定 RES_POOL。块入口只装载「块内首次出现是读」的那些。
+    fn analyze_residency(&mut self) {
+        self.plans.clear();
+        self.used_phys.clear();
+        if !matches!(self.target, EmitTarget::X86_64SysV) {
+            self.plans = (0..self.f.blocks.len()).map(|_| BlockPlan::default()).collect();
+            return;
+        }
+        self.promotable = self.collect_promotable();
+        // 计算每个 vreg 在哪些块被读取：只有跨块仍被读的普通 vreg 才需要在
+        // 块尾回写栈槽；块内临时值写完就丢，回写纯属浪费。
+        let mut used_in: HashMap<VReg, Vec<usize>> = HashMap::new();
+        for (bi, b) in self.f.blocks.iter().enumerate() {
+            let mut here: HashSet<VReg> = HashSet::new();
+            for i in &b.insts {
+                let mut uses = Vec::new();
+                i.reg_uses(&mut uses);
+                here.extend(uses);
+            }
+            match &b.term {
+                Term::Jump { args, .. } =>
+                    for a in args { if let Value::Reg(r) = a { here.insert(*r); } },
+                Term::Branch { cond, then_args, else_args, .. } => {
+                    here.insert(*cond);
+                    for a in then_args.iter().chain(else_args.iter()) {
+                        if let Value::Reg(r) = a { here.insert(*r); }
+                    }
+                }
+                Term::Return { val } =>
+                    if let Some(Value::Reg(r)) = val { here.insert(*r); },
+                Term::Unreachable => {}
+            }
+            for v in here { used_in.entry(v).or_default().push(bi); }
+        }
+        for (bi, b) in self.f.blocks.iter().enumerate() {
+            let mut plan = BlockPlan::default();
+            // 太短的块（递归函数体、纯跳转块）装载/回写开销大于收益，不驻留。
+            if Self::block_can_reside(b) && b.insts.len() >= 6 {
+                let mut score: HashMap<VReg, usize> = HashMap::new();
+                let mut first_is_def: HashMap<VReg, bool> = HashMap::new();
+                for i in &b.insts {
+                    // 提升槽加权 2：消掉一次 Load/Store 的内存往返比临时值更值钱。
+                    match i {
+                        IrInst::Load { ptr, .. } => if self.promotable.contains(ptr) {
+                            *score.entry(*ptr).or_insert(0) += 2;
+                            first_is_def.entry(*ptr).or_insert(false);
+                        },
+                        IrInst::Store { ptr, .. } => if self.promotable.contains(ptr) {
+                            *score.entry(*ptr).or_insert(0) += 2;
+                            first_is_def.entry(*ptr).or_insert(true);
+                        },
+                        _ => {}
+                    }
+                    let mut uses = Vec::new();
+                    i.reg_uses(&mut uses);
+                    for u in uses {
+                        if self.residency_candidate(u) {
+                            *score.entry(u).or_insert(0) += 1;
+                            first_is_def.entry(u).or_insert(false);
+                        }
+                    }
+                    if let Some(d) = i.def() {
+                        if self.residency_candidate(d) {
+                            *score.entry(d).or_insert(0) += 1;
+                            first_is_def.entry(d).or_insert(true);
+                        }
+                    }
+                }
+                let mut hot: Vec<VReg> = score.keys().copied().collect();
+                hot.sort_by(|x, y| score[y].cmp(&score[x]).then(x.cmp(y)));
+                for (k, v) in hot.into_iter().take(RES_POOL.len()).enumerate() {
+                    let p = RES_POOL[k];
+                    plan.resident.insert(v, p);
+                    if is_callee_saved(p) && !self.used_phys.contains(&p) {
+                        self.used_phys.push(p);
+                    }
+                    if !*first_is_def.get(&v).unwrap_or(&true) {
+                        plan.loads.push((v, p));
+                    }
+                }
+                plan.loads.sort_by_key(|(v, _)| *v);
+                for (v, _) in &plan.resident {
+                    if self.alloca_off.contains_key(v) { continue; }
+                    if let Some(bs) = used_in.get(v) {
+                        if bs.iter().any(|k| *k != bi) { plan.keep_flush.insert(*v); }
+                    }
+                }
+            }
+            self.plans.push(plan);
+        }
+        self.used_phys.sort_by_key(|p| RES_POOL.iter().position(|x| x == p).unwrap_or(99));
+    }
+
+    fn begin_block(&mut self, idx: usize) {
+        self.residency_on = false;
+        self.resident.clear();
+        self.dirty.clear();
+        self.flush_mask.clear();
+        let plan = self.plans.get(idx).cloned().unwrap_or_default();
+        if plan.resident.is_empty() { return; }
+        for (v, p) in &plan.loads {
+            let off = self.resident_off(*v);
+            self.line(&format!("\tmovq {}({}), {}", off, self.r("rsp"), self.r(p)));
+        }
+        self.flush_mask = plan.keep_flush;
+        self.resident = plan.resident;
+        self.residency_on = true;
+    }
+
+    /// 块尾只回写两类位置：① 提升槽（别的块 / 含 call 块仍走内存路径）；
+    /// ② 跨块仍被读取的普通 vreg。块内临时值写完即弃，回写纯属浪费。
+    /// **不关闭驻留**：term 的 phi 实参 / 返回值要继续从寄存器里读。
+    fn flush_residency(&mut self) {
+        if !self.residency_on { return; }
+        let mut items: Vec<(VReg, &'static str)> =
+            self.resident.iter().map(|(v, p)| (*v, *p)).collect();
+        items.sort_by_key(|(v, _)| *v);
+        for (v, p) in items {
+            let is_slot = self.alloca_off.contains_key(&v);
+            if self.dirty.contains(&v) && (is_slot || self.flush_mask.contains(&v)) {
+                let off = self.resident_off(v);
+                self.line(&format!("\tmovq {}, {}({})", self.r(p), off, self.r("rsp")));
+            }
+        }
+        self.dirty.clear();
+    }
+
+    /// term 发射完毕才真正关闭驻留、清空映射。
+    fn end_block(&mut self) {
+        self.residency_on = false;
+        self.resident.clear();
+        self.dirty.clear();
+        self.flush_mask.clear();
+    }
+
     // ---- 栈帧 ----
 
     fn compute_layout(&mut self) {
@@ -421,7 +708,16 @@ impl<'a> FnEmit<'a> {
             }
         }
         let outbound = (max_stack as i64) * 8;
-        let mut off = outbound;
+        // x86-64：固定预留 5 个 callee-saved 保存槽。固定大小让栈帧布局不依赖
+        // 之后的块分析结果；用帧内 mov 保存而非 push，避免 rsp 变动令所有
+        // off(%rsp) 偏移失效。
+        let save_bytes = match self.target {
+            EmitTarget::X86_64SysV =>
+                (RES_POOL.iter().filter(|p| is_callee_saved(p)).count() as i64) * 8,
+            EmitTarget::AArch64 => 0,
+        };
+        self.save_off = outbound;
+        let mut off = outbound + save_bytes;
         for _ in 0..nreg { self.reg_off.push(off); off += 8; }
         for b in &self.f.blocks {
             for i in &b.insts {
@@ -451,6 +747,15 @@ impl<'a> FnEmit<'a> {
             EmitTarget::AArch64 => {
                 self.mov_imm64("x12", self.frame_size as u64);
                 self.line("\tsub sp, sp, x12");
+            }
+        }
+        // 保存本函数用到的 callee-saved 寄存器（帧内槽，不动 rsp）。
+        // 参数寄存器（rdi/rsi/...）不在池里，故保存动作不会踩到入参。
+        let saved = self.used_phys.clone();
+        if matches!(self.target, EmitTarget::X86_64SysV) {
+            for (k, p) in saved.iter().enumerate() {
+                let off = self.save_off + (k as i64) * 8;
+                self.line(&format!("\tmovq {}, {}({})", self.r(p), off, self.r("rsp")));
             }
         }
         // 把 C ABI 传参寄存器 / 栈参数写进 param_slots 对应的槽。
@@ -521,6 +826,13 @@ impl<'a> FnEmit<'a> {
     }
 
     fn epilogue(&mut self) {
+        let saved = self.used_phys.clone();
+        if matches!(self.target, EmitTarget::X86_64SysV) {
+            for (k, p) in saved.iter().enumerate() {
+                let off = self.save_off + (k as i64) * 8;
+                self.line(&format!("\tmovq {}({}), {}", off, self.r("rsp"), self.r(p)));
+            }
+        }
         match self.target {
             EmitTarget::X86_64SysV => self.line(&format!("\taddq ${}, {}", self.frame_size, self.r("rsp"))),
             EmitTarget::AArch64 => {
@@ -581,6 +893,23 @@ impl<'a> FnEmit<'a> {
                 self.sg(*dst, &b);
             }
             IrInst::Load { dst, ptr, ty } => {
+                // M7-a3：局部变量槽已提升进寄存器时，Load 退化成一次寄存器
+                // 搬运；dst 若也驻留，连中间寄存器都省掉。
+                if self.residency_on && self.alloca_off.contains_key(ptr) {
+                    if let Some(pp) = self.phys(*ptr) {
+                        if let Some(pd) = self.val_phys(*dst) {
+                            if pp != pd {
+                                self.line(&format!("\tmovq {}, {}", self.r(pp), self.r(pd)));
+                            }
+                            self.dirty.insert(*dst);
+                            return;
+                        }
+                        let g = self.g1().to_string();
+                        self.line(&format!("\tmovq {}, {}", self.r(pp), self.r(&g)));
+                        self.sg(*dst, &g);
+                        return;
+                    }
+                }
                 // **局部变量直接栈寻址**：ptr 若是 Alloca 的 dst，其地址是编译期
                 // 已知的栈偏移；x86-64 可直接把 off(%rsp) 当内存操作数读，
                 // 省掉「先算地址到寄存器、再间接访存」里的一条指令。
@@ -611,6 +940,18 @@ impl<'a> FnEmit<'a> {
                 }
             }
             IrInst::Store { ptr, val, ty } => {
+                // M7-a3：提升槽的 Store 直接写物理寄存器，块尾统一回写内存。
+                if self.residency_on && self.alloca_off.contains_key(ptr) {
+                    if let Some(pp) = self.phys(*ptr) {
+                        let g = self.g1().to_string();
+                        let src = self.bin_src(*val, &g, true, false);
+                        if src != self.r(pp) {
+                            self.line(&format!("\tmovq {}, {}", src, self.r(pp)));
+                        }
+                        self.dirty.insert(*ptr);
+                        return;
+                    }
+                }
                 if matches!(self.target, EmitTarget::X86_64SysV) {
                     if let Some(off) = self.alloca_off.get(ptr).copied() {
                         if ty.is_float() {
@@ -675,15 +1016,55 @@ impl<'a> FnEmit<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn inst_bin(&mut self, op: ABin, dst: VReg, a: Value, b: Value, _ty: IrType) {
-        let g1 = self.g1().to_string();
-        let g2 = self.g2().to_string();
-        self.lg(a, &g1);
         // imul/idiv/移位没有 `reg, imm` 形式，浮点也没有立即数操作数；
         // 这些情况下仍把 b 装进 g2，其余直接让 x86 读内存/立即数。
         let allow_imm = matches!(op,
             ABin::Add | ABin::Sub | ABin::And | ABin::Or |
             ABin::BitAnd | ABin::BitOr | ABin::BitXor |
             ABin::Eq | ABin::Neq | ABin::Lt | ABin::Gt | ABin::Le | ABin::Ge);
+        // M7-a2 快路径：dst 驻留时把结果直接算进它的物理寄存器。
+        // `acc = acc + x` 这类累加只需一条 `addq`，不再两头搬运栈槽。
+        if matches!(self.target, EmitTarget::X86_64SysV) && self.residency_on {
+            if let Some(pd) = self.val_phys(dst) {
+                // Div/Mod 强制 rax:rdx，交给通用路径。
+                if !matches!(op, ABin::Div | ABin::Mod) {
+                    let scratch = self.g2().to_string();
+                    let a_src = self.bin_src(a, &scratch, true, false);
+                    let pd_r = self.r(pd);
+                    if a_src != pd_r {
+                        self.line(&format!("\tmovq {}, {}", a_src, pd_r));
+                    }
+                    let b_src = self.bin_src(b, &scratch, allow_imm, false);
+                    match op {
+                        ABin::Add => self.line(&format!("\taddq {}, {}", b_src, pd_r)),
+                        ABin::Sub => self.line(&format!("\tsubq {}, {}", b_src, pd_r)),
+                        ABin::Mul => self.line(&format!("\timulq {}, {}", b_src, pd_r)),
+                        ABin::BitAnd | ABin::And => self.line(&format!("\tandq {}, {}", b_src, pd_r)),
+                        ABin::BitOr | ABin::Or => self.line(&format!("\torq {}, {}", b_src, pd_r)),
+                        ABin::BitXor => self.line(&format!("\txorq {}, {}", b_src, pd_r)),
+                        ABin::Shl => {
+                            self.line(&format!("\tmovq {}, {}", b_src, self.r("rcx")));
+                            self.line(&format!("\tshlq {}, {}", self.r("cl"), pd_r));
+                        }
+                        ABin::Shr => {
+                            self.line(&format!("\tmovq {}, {}", b_src, self.r("rcx")));
+                            self.line(&format!("\tsarq {}, {}", self.r("cl"), pd_r));
+                        }
+                        ABin::Eq | ABin::Neq | ABin::Lt | ABin::Gt | ABin::Le | ABin::Ge => {
+                            self.line(&format!("\tcmpq {}, {}", b_src, pd_r));
+                            self.line(&format!("\t{} {}", x86_setcc(abin_cmp(op)), self.r("al")));
+                            self.line(&format!("\tmovzbq {}, {}", self.r("al"), pd_r));
+                        }
+                        ABin::Div | ABin::Mod => unreachable!(),
+                    }
+                    self.dirty.insert(dst);
+                    return;
+                }
+            }
+        }
+        let g1 = self.g1().to_string();
+        let g2 = self.g2().to_string();
+        self.lg(a, &g1);
         let b_reg = self.bin_src(b, &g2, allow_imm, false);
         match self.target {
             EmitTarget::X86_64SysV => {
@@ -770,6 +1151,23 @@ impl<'a> FnEmit<'a> {
     }
 
     fn inst_icmp(&mut self, op: ACmp, dst: VReg, a: Value, b: Value) {
+        // M7-a2 快路径：a 与 dst 都驻留时，cmp 直接用 a 的物理寄存器，
+        // 结果 zero-extend 到 dst 的物理寄存器，全程不碰栈。
+        if matches!(self.target, EmitTarget::X86_64SysV) && self.residency_on {
+            if let Some(pd) = self.val_phys(dst) {
+                if let Value::Reg(ar) = a {
+                    if let Some(pa) = self.val_phys(ar) {
+                        let scratch = self.g2().to_string();
+                        let b_src = self.bin_src(b, &scratch, true, false);
+                        self.line(&format!("\tcmpq {}, {}", b_src, self.r(pa)));
+                        self.line(&format!("\t{} {}", x86_setcc(op), self.r("al")));
+                        self.line(&format!("\tmovzbq {}, {}", self.r("al"), self.r(pd)));
+                        self.dirty.insert(dst);
+                        return;
+                    }
+                }
+            }
+        }
         let g1 = self.g1().to_string();
         let g2 = self.g2().to_string();
         self.lg(a, &g1);
@@ -824,6 +1222,28 @@ impl<'a> FnEmit<'a> {
             }
             self.sf(dst, &f1);
             return;
+        }
+        // M7-a2 快路径：dst 驻留时一元运算就地改它的物理寄存器。
+        if matches!(self.target, EmitTarget::X86_64SysV) && self.residency_on {
+            if let Some(pd) = self.val_phys(dst) {
+                let scratch = self.g2().to_string();
+                let a_src = self.bin_src(a, &scratch, true, false);
+                let pd_r = self.r(pd);
+                if a_src != pd_r {
+                    self.line(&format!("\tmovq {}, {}", a_src, pd_r));
+                }
+                match op {
+                    AUn::Neg => self.line(&format!("\tnegq {}", pd_r)),
+                    AUn::BitNot => self.line(&format!("\tnotq {}", pd_r)),
+                    AUn::Not => {
+                        self.line(&format!("\ttestq {}, {}", pd_r, pd_r));
+                        self.line(&format!("\tsete {}", self.r("al")));
+                        self.line(&format!("\tmovzbq {}, {}", self.r("al"), pd_r));
+                    }
+                }
+                self.dirty.insert(dst);
+                return;
+            }
         }
         let g1 = self.g1().to_string();
         self.lg(a, &g1);
@@ -1279,12 +1699,18 @@ fn emit_function(
 ) -> Result<(), String> {
     let mut e = FnEmit::new(ip, f, target, local);
     e.compute_layout();
+    e.analyze_residency();
     e.prologue();
-    for b in &f.blocks {
+    for (idx, b) in f.blocks.iter().enumerate() {
         let lbl = format!(".{}_b{}:", e.prefix, b.id);
         e.line(&lbl);
+        e.begin_block(idx);
         for inst in &b.insts { e.inst(inst); }
+        // 只回写必须跨块保留的值；term 仍在驻留态发射，phi 实参 / 返回值
+        // 直接从物理寄存器读，随后才关闭驻留。
+        e.flush_residency();
         e.term(b.id, &b.term);
+        e.end_block();
     }
     out.push_str(&e.out);
     Ok(())
