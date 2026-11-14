@@ -330,6 +330,10 @@ fn subst_inst(inst: &mut IrInst, from: VReg, to: VReg) {
         | IrInst::StructRetain { ptr, .. } | IrInst::StructRelease { ptr, .. } => {
             if *ptr == from { *ptr = to; }
         }
+        IrInst::PtrAdd { base, off, .. } => {
+            if *base == from { *base = to; }
+            if let Value::Reg(r) = off { if *r == from { *off = Value::Reg(to); } }
+        }
         IrInst::EnvInit { argc, argv } => {
             if let Value::Reg(r) = argc { if *r == from { *argc = Value::Reg(to); } }
             if let Value::Reg(r) = argv { if *r == from { *argv = Value::Reg(to); } }

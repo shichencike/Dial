@@ -423,18 +423,33 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             Stmt::AssignField { obj, field, value, .. } => {
-                let obj_name = match obj.as_ref() {
-                    Expr::Var(n) => n.clone(),
-                    _ => return self.err("asm 后端：AssignField 的 obj 仅支持对变量取字段"),
+                // 基址分两种（对齐 LLVM 后端 codegen.rs:3990 的 field_base_ptr）：
+                //   · obj 是裸指针：基址是**指针值**本身（写进 C 侧内存）；
+                //   · obj 是变量：基址是该结构体变量的内容区。
+                let obj_ty = self.expr_dt(obj);
+                let is_raw = matches!(obj_ty, Type::RawPtr(_) | Type::VolatilePtr(_));
+                let (base_ptr, base_dt) = if is_raw {
+                    let (bv, _) = self.lower_expr(obj, &obj_ty)?;
+                    let st = match &obj_ty {
+                        Type::RawPtr(e) | Type::VolatilePtr(e) => (**e).clone(),
+                        _ => obj_ty.clone(),
+                    };
+                    (bv.as_reg(), st)
+                } else {
+                    let obj_name = match obj.as_ref() {
+                        Expr::Var(n) => n.clone(),
+                        _ => return self.err("asm 后端：AssignField 的 obj 仅支持对变量或裸指针取字段"),
+                    };
+                    let base_loc = match self.lookup(&obj_name).cloned() {
+                        Some(l) => l,
+                        None => return self.err(&format!("未声明的变量 '{}'", obj_name)),
+                    };
+                    (base_loc.ptr, base_loc.dt)
                 };
-                let base_loc = match self.lookup(&obj_name).cloned() {
-                    Some(l) => l,
-                    None => return self.err(&format!("未声明的变量 '{}'", obj_name)),
-                };
-                let (field_off, field_ty) = self.struct_field(&base_loc.dt, field)
-                    .ok_or_else(|| format!("[asm 后端] 结构体 {} 无字段 {}", base_loc.dt.display(), field))?;
+                let (field_off, field_ty) = self.struct_field(&base_dt, field)
+                    .ok_or_else(|| format!("[asm 后端] 结构体 {} 无字段 {}", base_dt.display(), field))?;
                 let fa = self.new_reg(IrType::Ptr);
-                self.emit(IrInst::FieldAddr { dst: fa, base: base_loc.ptr, struct_name: struct_name_of(&base_loc.dt), field: field_off as u32 });
+                self.emit(IrInst::FieldAddr { dst: fa, base: base_ptr, struct_name: struct_name_of(&base_dt), field: field_off as u32 });
                 let (v, is_copy) = self.lower_expr(value, &field_ty)?;
                 if let Type::Struct(_) = &field_ty {
                     // 嵌套结构体字段：按值拷贝内容（v 是内容区地址）。
@@ -461,7 +476,34 @@ impl<'a> Lower<'a> {
                 }
                 Ok(())
             }
-            Stmt::AssignDeref { .. } => self.err("asm 后端暂不支持裸指针解引用赋值（后续相位）"),
+            Stmt::AssignDeref { ptr, value, .. } => {
+                // `*p = v`：p 是裸指针（rawptr<T> / volatile rawptr<T>），
+                // 写入值的类型由语义层核对过；这里把 Dial 值转成内存表示再写。
+                let pt = self.expr_dt(ptr);
+                let elem = match &pt {
+                    Type::RawPtr(e) | Type::VolatilePtr(e) => (**e).clone(),
+                    other => return self.err(&format!(
+                        "[asm 后端] '*p = v' 的左侧收到 {} 类型（仅支持裸指针）", other.display())),
+                };
+                let (pv, _) = self.lower_expr(ptr, &pt)?;
+                let vdt = self.expr_dt(value);
+                let (vv, _) = self.lower_expr(value, &vdt)?;
+                // 内存宽度：byte=1B、bool=1B、char=4B、其余 8B（与 LLVM 的 raw_to_mem 同口径）。
+                let mty = match &elem {
+                    Type::Byte | Type::Bool => IrType::I8,
+                    Type::Char => IrType::I32,
+                    other => reg_ir(other),
+                };
+                let v_store = if mty != reg_ir(&elem) {
+                    let t = self.new_reg(mty.clone());
+                    // byte / bool / char 都是「取低字节或低 4 字节」：内部宽度是 I64，
+                    // 内存宽度更窄，截断即可（bool 的内部值本就是 0/1）。
+                    self.emit(IrInst::Conv { kind: AConv::Trunc, dst: t, a: vv, ty: mty.clone() });
+                    Value::Reg(t)
+                } else { vv };
+                self.emit(IrInst::Store { ptr: pv.as_reg(), val: v_store, ty: mty });
+                Ok(())
+            }
             Stmt::AssignIndex { arr, index, value, .. } => {
                 // 语义等价于 `arr = dial_array_set(arr, i, v)`：C 侧在共享时会 COW
                 // 克隆并释放本调用者的旧引用，因此**只能写回新句柄，绝不能再 release
@@ -1047,8 +1089,21 @@ impl<'a> Lower<'a> {
                 }
             }
             Expr::Field(base, field) => {
-                let (bv, _) = self.lower_expr(base, &Type::Void)?;
-                let base_dt = self.expr_struct_dt(base);
+                let base_ty = self.expr_dt(base);
+                // 基址分两种（对齐 LLVM 后端 codegen.rs:3990 的 field_base_ptr）：
+                //   · base 是裸指针：基址就是**指针值**本身（指向 C 侧内存的视图）；
+                //   · 否则：base 是结构体内容区地址。
+                let is_raw = matches!(base_ty, Type::RawPtr(_) | Type::VolatilePtr(_));
+                let (bv, _) = self.lower_expr(base, &base_ty)?;
+                // 裸指针的元素类型即结构体类型；否则按字段链逐级解析。
+                let base_dt = if is_raw {
+                    match &base_ty {
+                        Type::RawPtr(e) | Type::VolatilePtr(e) => (**e).clone(),
+                        _ => base_ty.clone(),
+                    }
+                } else {
+                    self.expr_struct_dt(base)
+                };
                 let (off, fty) = self.struct_field(&base_dt, field)
                     .ok_or_else(|| format!("[asm 后端] 结构体 {} 无字段 {}", base_dt.display(), field))?;
                 let fa = self.new_reg(IrType::Ptr);
@@ -1293,12 +1348,30 @@ impl<'a> Lower<'a> {
                 Ok((Value::Reg(r), false))
             }
             UnOp::Deref => {
-                let addr = self.new_reg(IrType::Ptr);
-                self.emit(IrInst::Load { dst: addr, ptr: av.as_reg(), ty: IrType::Ptr });
+                // `*p`：p 是裸指针。`lower_expr(a)` 已把 p 的**指针值**取到 av
+                // （Expr::Var 对裸指针变量做一次 Load，得到的是地址本身）。
+                // 故此处**直接**用 av 作地址读元素——不能再多解引用一层：
+                // 早先把 av 当成「指向指针的槽」又 Load 一次，读到的其实是
+                // 裸内存里的垃圾（rawptr_demo 即栽在这里，表现为段错误）。
+                //
+                // 读取宽度按**内存宽度**（byte/bool=1B、char=4B、其余 8B，
+                // 与 LLVM 后端 raw_elem_llvm 同口径），窄类型再零扩展回内部宽度——
+                // 否则读 byte 会连着后面的字节一起读进来（"Hi" 被读成 0x6948）。
                 let inner = da.strip_ptr();
-                let r = self.new_reg(reg_ir(&inner));
-                self.emit(IrInst::Load { dst: r, ptr: addr, ty: reg_ir(&inner) });
-                Ok((Value::Reg(r), true))
+                let mty = match &inner {
+                    Type::Byte | Type::Bool => IrType::I8,
+                    Type::Char => IrType::I32,
+                    other => reg_ir(other),
+                };
+                let raw = self.new_reg(mty.clone());
+                self.emit(IrInst::Load { dst: raw, ptr: av.as_reg(), ty: mty.clone() });
+                if mty != reg_ir(&inner) {
+                    let r = self.new_reg(reg_ir(&inner));
+                    self.emit(IrInst::Conv { kind: AConv::Zext, dst: r, a: Value::Reg(raw), ty: reg_ir(&inner) });
+                    Ok((Value::Reg(r), true))
+                } else {
+                    Ok((Value::Reg(raw), true))
+                }
             }
             UnOp::AddrOf => {
                 if let Expr::Var(name) = a {
@@ -1316,6 +1389,32 @@ impl<'a> Lower<'a> {
         // remove / pop 返回「被删元素」而非新数组指针，且要写回 COW 新指针。
         if matches!(od, Type::Array(_)) && matches!(method, "remove" | "pop") {
             return self.lower_array_remove(obj, &od, method, args);
+        }
+        // 裸指针 offset(n)：按元素类型步长做指针算术（负偏移靠补码自然生效，
+        // 且支持运行期偏移量——不必是常量）。步长口径与 LLVM 后端的
+        // raw_elem_llvm 一致：byte/bool=1、char=4、int/float=8、struct 按布局、
+        // 其余按 8。
+        if matches!(od, Type::RawPtr(_) | Type::VolatilePtr(_)) && method == "offset" {
+            let elem = match &od {
+                Type::RawPtr(e) | Type::VolatilePtr(e) => (**e).clone(),
+                _ => Type::Byte,
+            };
+            let step = match &elem {
+                Type::Byte | Type::Bool => 1i64,
+                Type::Char => 4,
+                Type::Int | Type::Float | Type::Float32 | Type::Int32 => 8,
+                Type::Struct(sn) => self.struct_byte_size(&Type::Struct(sn.clone())),
+                _ => 8,
+            };
+            let (ov, _) = self.lower_expr(obj, &od)?;
+            let (nv, _) = self.lower_expr(&args[0], &Type::Int)?;
+            // 字节偏移 = n × 步长（乘法在 64 位里做，溢出与 C 侧一致）。
+            let prod = self.new_reg(IrType::I64);
+            self.emit(IrInst::Bin { op: ABin::Mul, dst: prod, a: nv,
+                b: Value::Imm(Imm::I64(step)), ty: IrType::I64 });
+            let p = self.new_reg(IrType::Ptr);
+            self.emit(IrInst::PtrAdd { dst: p, base: ov.as_reg(), off: Value::Reg(prod) });
+            return Ok((Value::Reg(p), false));
         }
         let spec = match builtin::lookup_method(&od, method) {
             Some(s) => s,
@@ -1445,11 +1544,51 @@ impl<'a> Lower<'a> {
             if args.is_empty() { return self.err(&format!("{} 至少需要一个参数", name)); }
             return self.lower_print(name, args);
         }
-        // 文件 IO / with 自动释放是「带失败抛错的 CFG」或「需要 moved 记账」的专用路径，
-        // 不走普通内建表（builtin::special_ret 仅用于类型推断）。
+        // str(x)：统一字符串化入口，按实参类型分派到对应的 to_string 运行时函数
+        // （对齐 LLVM 后端 codegen.rs:5250）。char 走 UTF-8 编码，字符串直接返回自身。
+        if name == "str" {
+            if args.is_empty() { return self.err("str 至少需要一个参数"); }
+            let at = self.expr_dt(&args[0]);
+            let (av, _) = self.lower_expr(&args[0], &at)?;
+            let sym = match &at {
+                Type::Int | Type::Int32 => "dial_int_to_string",
+                Type::Float | Type::Float32 => "dial_float_to_string",
+                Type::Char => "dial_char_to_string",
+                Type::String => return Ok((av, false)),
+                other => return self.err(&format!(
+                    "[asm 后端] str 仅支持 int / int32 / float / float32 / char / string 参数（收到 {}）",
+                    other.display())),
+            };
+            // int32 / float32 的内部宽度窄于 C 侧的 int64_t / double，需先扩展。
+            let arg = match &at {
+                Type::Int32 => {
+                    let r = self.new_reg(IrType::I64);
+                    self.emit(IrInst::Conv { kind: AConv::Sext, dst: r, a: av, ty: IrType::I64 });
+                    Value::Reg(r)
+                }
+                Type::Float32 => {
+                    let r = self.new_reg(IrType::F64);
+                    self.emit(IrInst::Conv { kind: AConv::FpExt, dst: r, a: av, ty: IrType::F64 });
+                    Value::Reg(r)
+                }
+                _ => av,
+            };
+            let h = self.new_reg(IrType::Handle);
+            let aty = match &at {
+                Type::Float | Type::Float32 => IrType::F64,
+                _ => IrType::I64,
+            };
+            self.emit(IrInst::Call { dst: Some(h), func: sym.to_string(),
+                args: vec![arg], arg_tys: vec![aty],
+                ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+            return Ok((Value::Reg(h), false));
+        }
+        // 文件 IO / with 自动释放 / 裸指针视图是「带失败抛错的 CFG」或「需要 moved 记账」
+        // 的专用路径，不走普通内建表（builtin::special_ret 仅用于类型推断）。
         match name {
             "open" | "read" | "read_all" | "file_read_line" | "write" | "eof"
-            | "file_exists" | "file_size" | "file_remove" | "close" | "__with_release" =>
+            | "file_exists" | "file_size" | "file_remove" | "close" | "__with_release"
+            | "ptr_cast" =>
                 return self.lower_special_call(name, args),
             _ => {}
         }
@@ -1635,6 +1774,31 @@ impl<'a> Lower<'a> {
     /// 文件句柄 = 不透明 ptr，**不受 ARC 管理**：必须显式 close，作用域不自动释放。
     fn lower_special_call(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
         match name {
+            // ptr_cast<T>(x)：把 x 转成裸指针视图。
+            //   - 源是裸指针：直接取其地址（对外一律 i8*，目标类型不改变 IR）；
+            //   - 源是 string / bytes：借出其**数据缓冲区**（跳过 8 字节 payload 头）。
+            // 借用得到的指针**不受 ARC 保护**：原对象释放后即悬垂，由使用者负责。
+            "ptr_cast" => {
+                if args.len() < 2 {
+                    return self.err("内部错误：ptr_cast 需要类型实参与源值");
+                }
+                let src_ty = self.expr_dt(&args[1]);
+                let (src, _) = self.lower_expr(&args[1], &src_ty)?;
+                match src_ty {
+                    Type::RawPtr(_) | Type::VolatilePtr(_) => Ok((src, false)),
+                    Type::String | Type::Bytes => {
+                        // payload 布局：[ int64 len ][ data... ]，数据从 +8 开始。
+                        let off = self.new_reg(IrType::I64);
+                        self.emit(IrInst::Conv { kind: AConv::Zext, dst: off,
+                            a: Value::Imm(Imm::I64(8)), ty: IrType::I64 });
+                        let p = self.new_reg(IrType::Ptr);
+                        self.emit(IrInst::PtrAdd { dst: p, base: src.as_reg(), off: Value::Reg(off) });
+                        Ok((Value::Reg(p), false))
+                    }
+                    other => self.err(&format!(
+                        "[asm 后端] ptr_cast 收到 {} 类型的源（仅支持裸指针 / string / bytes）", other.display())),
+                }
+            }
             // open(path, mode)：DialString → DialString，返回 NULL 抛错。
             "open" => {
                 let (p, _) = self.lower_expr(&args[0], &Type::String)?;
@@ -2147,7 +2311,12 @@ impl<'a> Lower<'a> {
 
     fn expr_dt(&self, e: &Expr) -> Type {
         match e {
-            Expr::IntLit(_) | Expr::CharLit(_) | Expr::ByteLit(_) => Type::Int,
+            // char / byte 在**寄存器宽度**上与 int 同为 I64，但**类型层面**是独立的
+            // （语义层 char_to_int / int_to_char 的显式转换依赖这个区分），
+            // 故这里必须给出各自的 Dial 类型，不能一律当 int。
+            Expr::IntLit(_) => Type::Int,
+            Expr::CharLit(_) => Type::Char,
+            Expr::ByteLit(_) => Type::Byte,
             Expr::FloatLit(_) => Type::Float,
             Expr::BoolLit(_) => Type::Bool,
             Expr::StringLit(_) | Expr::Interp(_) => Type::String,
@@ -2192,7 +2361,12 @@ impl<'a> Lower<'a> {
             },
             Expr::Slice(arr, _, _) => self.expr_dt(arr),
             Expr::Field(base, field) => {
-                let bd = self.expr_dt(base);
+                // 裸指针指向结构体时，字段类型取指针的元素结构体的字段类型
+                // （对齐 LLVM 后端 field_base_ptr 的裸指针分支）。
+                let bd = match self.expr_dt(base) {
+                    Type::RawPtr(e) | Type::VolatilePtr(e) => (*e).clone(),
+                    other => other,
+                };
                 if let Some((_, ft)) = self.struct_field(&bd, field) { ft } else { Type::Int }
             }
             Expr::Method(obj, method, _) => {

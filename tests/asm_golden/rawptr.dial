@@ -1,0 +1,59 @@
+// 裸指针（rawptr）与字符串化回归用例（M5-c）。
+//
+// 曾经的 bug：
+//   · `*p` 多解引用一层——把裸内存里的垃圾当成地址读（段错误）；
+//   · `*p` 按 8 字节读而非元素宽度——读 byte 时连后面的字节一起读进来
+//     （"Hi" 被读成 0x6948）；
+//   · `str('A')` 把 char 当 int——打印出 "65" 而非 "A"；
+//   · 裸指针指向结构体时的字段访问（p.x）不被支持。
+// 本用例覆盖：裸内存分配 / 释放、按元素类型读写、指针算术（offset）、
+// 取变量地址、字符串缓冲区借用、C 库函数互通、char 字符串化。
+
+extern fn strlen(s: rawptr<byte>): int;
+extern fn memcmp(a: rawptr<byte>, b: rawptr<byte>, n: int): int;
+extern fn memcpy(dst: rawptr<byte>, src: rawptr<byte>, n: int): rawptr<byte>;
+
+fn main(): int {
+    // 申请 64 字节裸内存（内容未初始化）
+    var buf: rawptr<byte> = raw_alloc(64);
+
+    // 显式转成 rawptr<int> 视图才能按 int 读写（裸指针间无隐式转换）
+    var ip: rawptr<int> = ptr_cast<rawptr<int>>(buf);
+    *ip = 1234;
+    print("deref = ", *ip);
+
+    // 指针算术：offset(1) 按元素类型（int = 8 字节）前移一个元素
+    var next: rawptr<int> = ip.offset(1);
+    *next = 5678;
+    print("orig = ", *ip, " next = ", *next);
+
+    // 取栈上变量的地址：&x 拿到的就是 x 所在的栈槽
+    var x: int = 7;
+    var xp: rawptr<int> = &x;
+    *xp = 8;
+    print("via ptr = ", x);
+
+    // 从 string 借用其字节缓冲区（跳过 8 字节 payload 头）
+    var s: string = "Hi";
+    var sp: rawptr<byte> = ptr_cast<rawptr<byte>>(s);
+    print("byte0 = ", byte_to_int(*sp));
+
+    // C 库函数直接吃裸指针
+    print("strlen = ", strlen(sp));
+
+    // 裸内存与 C 缓冲区互通
+    var dst: rawptr<byte> = raw_alloc(16);
+    memcpy(dst, sp, 2);
+    print("memcmp = ", memcmp(dst, sp, 2) == 0);
+    raw_free(dst);
+
+    // 手动释放（谁申请、谁释放）
+    raw_free(buf);
+
+    // char 字符串化：str('A') 是 "A" 而不是 "65"
+    var cs: string = str('A');
+    print("str(char) = ", cs, " len = ", cs.length());
+    print("concat = ", str('A') + "BC");
+
+    return 0;
+}

@@ -153,6 +153,9 @@ pub enum IrInst {
     FieldAddr { dst: VReg, base: VReg, struct_name: String, field: u32 },
     /// 取 rodata 字符串字面量的地址（emit 时落到 `.LstrN`）。
     LeaLabel { dst: VReg, lit: u32 },
+    /// 指针加字节偏移：`dst = base + off`（off 为 64 位字节数）。
+    /// 用于借出堆对象的内部数据区（如 string / bytes 的 payload 跳过 8 字节头）。
+    PtrAdd { dst: VReg, base: VReg, off: Value },
 
     Bin { op: ABin, dst: VReg, a: Value, b: Value, ty: IrType },
     Un { op: AUn, dst: VReg, a: Value, ty: IrType },
@@ -193,6 +196,7 @@ impl IrInst {
             | IrInst::FCmp { .. }
             | IrInst::Conv { .. }
             | IrInst::Alloca { .. }
+            | IrInst::PtrAdd { .. }
             | IrInst::FieldAddr { .. } => true,
             IrInst::Store { .. }
             | IrInst::Call { .. }
@@ -211,6 +215,7 @@ impl IrInst {
             | IrInst::Load { dst, .. }
             | IrInst::FieldAddr { dst, .. }
             | IrInst::LeaLabel { dst, .. }
+            | IrInst::PtrAdd { dst, .. }
             | IrInst::Bin { dst, .. }
             | IrInst::Un { dst, .. }
             | IrInst::FBin { dst, .. }
@@ -237,6 +242,7 @@ impl IrInst {
             IrInst::Bin { a, b, .. } | IrInst::FBin { a, b, .. } | IrInst::ICmp { a, b, .. }
             | IrInst::FCmp { a, b, .. } => { push_val(*a, out); push_val(*b, out); }
             IrInst::Un { a, .. } | IrInst::Conv { a, .. } => push_val(*a, out),
+            IrInst::PtrAdd { base, off, .. } => { out.push(*base); push_val(*off, out); }
             IrInst::LeaLabel { .. } | IrInst::Alloca { .. } => {}
             IrInst::Call { args, .. } => for a in args { push_val(*a, out); }
             IrInst::EnvInit { argc, argv } => { push_val(*argc, out); push_val(*argv, out); }
@@ -255,6 +261,7 @@ impl IrInst {
             | IrInst::FCmp { a, b, .. } => *a == Value::Reg(v) || *b == Value::Reg(v),
             IrInst::Un { a, .. } | IrInst::Conv { a, .. } => *a == Value::Reg(v),
             IrInst::Load { ptr, .. } | IrInst::FieldAddr { base: ptr, .. } => *ptr == v,
+            IrInst::PtrAdd { base, off, .. } => *base == v || *off == Value::Reg(v),
             IrInst::LeaLabel { .. } | IrInst::Alloca { .. } => false,
             IrInst::EnvInit { argc, argv } => *argc == Value::Reg(v) || *argv == Value::Reg(v),
         }

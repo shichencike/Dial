@@ -103,8 +103,22 @@ pub fn lookup(name: &str) -> Option<BSpec> {
         // ---- 编译期/底层原语：明确不支持，绝不静默降级 ----
         "sizeof" | "alignof" | "offsetof" =>
             return Some(unsup(Type::Int, "编译期布局内建暂未接入（后续相位）")),
-        "asm" | "asm_intel" | "simd" | "bitcast" | "ptr_cast" =>
+        "asm" | "asm_intel" | "simd" | "bitcast" =>
             return Some(unsup(Type::Int, "内联汇编 / SIMD / 底层位强转暂未接入（后续相位）")),
+        // ptr_cast 走专用路径（字符串 / bytes 源要跳过 8 字节 payload 头），
+        // 见 lower.rs 的 lower_special_call。
+        "ptr_cast" => return Some(unsup(Type::RawPtr(Box::new(Type::Byte)), "ptr_cast 需专用路径（见 lower.rs）")),
+
+        // ---- 裸指针（rawptr）：不受 ARC 管束，谁申请谁归还 ----
+        // raw_alloc(n)：申请 n 字节裸内存，返回 rawptr<byte>；编译器不 retain、
+        // 也不在作用域结束时释放——必须由调用方显式 raw_free / drop 归还。
+        "raw_alloc" => return Some(c("dial_raw_alloc", A_I, IrType::Ptr, Type::RawPtr(Box::new(Type::Byte)))),
+        // raw_free(p)：归还裸指针（NULL 安全）。
+        "raw_free" => return Some(c("dial_raw_free", A_P, IrType::Void, Type::Void)),
+
+        // str(x)：统一字符串化入口，按实参类型分派到 int_to_string /
+        // float_to_string / char_to_string（符号随实参类型变，见 lower.rs 特判）。
+        "str" => return Some(ident(Type::String)),
 
         // ---- 零指令类型视图切换（char / byte 与 int 同为 I64） ----
         "char_to_int" | "byte_to_int" => return Some(ident(Type::Int)),
@@ -336,6 +350,10 @@ pub fn lookup_method(recv: &Type, name: &str) -> Option<MSpec> {
             "chars" => MSpec::new("dial_string_chars", MA0, arr(int.clone()), IrType::Handle),
             "char_at" => MSpec::new("dial_string_char_at", MA_I, int.clone(), IrType::I64),
             "char_slice" => MSpec::new("dial_string_char_slice", MA_II, string.clone(), IrType::Handle),
+            // as_c_str：借出字符串的 C 字符串视图（跳过 8 字节 payload 头，追加 '\0'）。
+            // 借用得到的指针**不受 ARC 保护**——原对象释放后即悬垂，由使用者负责。
+            "as_c_str" => MSpec::new("dial_ffi_string_cstr", MA0,
+                Type::RawPtr(Box::new(Type::Byte)), IrType::Ptr),
             _ => return None,
         },
         Type::Array(elem) => match name {
@@ -393,6 +411,11 @@ pub fn lookup_method(recv: &Type, name: &str) -> Option<MSpec> {
         },
         Type::Error => match name {
             "msg" => MSpec::new("dial_error_msg", MA0, string.clone(), IrType::Handle),
+            _ => return None,
+        },
+        // 裸指针：offset 需要按元素类型算步长，走 lower_method 特判（此处仅占位）。
+        Type::RawPtr(_) | Type::VolatilePtr(_) => match name {
+            "offset" => return None,
             _ => return None,
         },
         _ => return None,

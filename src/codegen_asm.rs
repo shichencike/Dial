@@ -506,6 +506,18 @@ impl<'a> FnEmit<'a> {
                 }
                 self.sg(*dst, &g);
             }
+            IrInst::PtrAdd { dst, base, off } => {
+                // dst = base + off（off 为 64 位字节数，放在寄存器里）。
+                let b = self.g2().to_string();
+                let o = self.g1().to_string();
+                self.lg(Value::Reg(*base), &b);
+                self.lg(*off, &o);
+                match self.target {
+                    EmitTarget::X86_64SysV => self.line(&format!("\taddq {}, {}", self.r(&o), self.r(&b))),
+                    EmitTarget::AArch64 => self.line(&format!("\tadd {}, {}, {}", o, b, b)),
+                }
+                self.sg(*dst, &b);
+            }
             IrInst::Load { dst, ptr, ty } => {
                 let a = self.g2().to_string();
                 self.lg(Value::Reg(*ptr), &a);
