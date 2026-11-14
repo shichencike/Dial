@@ -984,11 +984,39 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
 是确定性的，结论可靠。</li>
 </ul>
 </li>
-<li><strong>剩余差距</strong>：递归调用类几何平均 1.8123x（函数体内含 call、享受不到驻留，
-    还要承担 prologue/epilogue 保存）、b08 3n+1 2.908x、b23 2.508x。
-    下一步 M7-b：<strong>跨块寄存器分配</strong>——现在每次循环迭代仍要在块边界把提升槽
-    flush 回内存再 load 回来（b23 内层 18 条里 4 条是这个开销）；让前后块共享
-    同一物理寄存器即可消掉，是继续逼近 / 反超 LLVM 的主要余量。</li>
+<li><strong>M7-b 全函数统一寄存器文件（跨块零 spill）</strong>：<ul>
+<li><strong>触发条件</strong>：整个函数所有基本块都不含 <code>Call</code> / ARC / <code>EnvInit</code>（纯计算函数）。
+  这类函数内没有任何调用会破坏物理寄存器，池寄存器由 8 扩到 <strong>10</strong>：
+  <code>rbx/rbp/r12–r15/r8/r9</code> 之外把 <code>rsi/rdi</code> 也纳入（prologue 读完 C ABI 参数后
+  即空闲；逐块模式仍只用前 8 个，避免与 <code>inst_call</code> 的传参互相踩踏）。
+  含 call 的函数继续走 M7-a 的逐块独立驻留。</li>
+<li><strong>统一绑定</strong>：全函数选出一至多 10 个位置固定绑定物理寄存器，<strong>所有块的
+  resident 完全一致</strong>——任意两块之间都是「兼容边」，值天然留在寄存器里，
+  块尾零回写、块头零装载。热点循环（如 popcount 的 while 体）从此不再有
+  「flush 提升槽回内存 → 下一轮 load 回来」的固定往返。</li>
+<li><strong>循环嵌套深度加权</strong>：若按静态指令数平权选 top-N，最内层循环（动态执行
+  数十万次）的中间值会被入口 / 出口块的冷值挤出寄存器，反而退化成栈槽往返
+  （首次实测几何平均一度从 1.2738x 恶化到 1.3068x）。现按回边区间计算每块
+  嵌套深度，权重 <code>深度 0/1/2 → 1/8/64</code>，让 top-N 优先覆盖最内层循环。</li>
+<li><strong>正确性护栏</strong>：函数入口把参数提升槽从 Alloca 区一次性装载到 p；phi 参数
+  因 <code>write_block_args</code> 写入目标块 param 的栈槽，强制从同一槽装载；p 是提升槽
+  的唯一权威，内存 Alloca 区只在入口作参数来源、全程不回写（函数内无 call，
+  不存在需要「内存权威」的边界）。AArch64 保持全 spill 路径不变。</li>
+<li><strong>量化结果</strong>（<code>--quick</code>，2 采样，两次取数；校验和 28×2 全一致，双后端黄金
+  门禁 10 正向 + 2 负例 + AArch64 交叉汇编 + 全量测试全绿）：几何平均
+  <strong>1.2738x → 1.247x–1.251x</strong>，b23 popcount <strong>2.508x → 约 2.0x</strong>、
+  b05 连乘幂 1.216x → 0.898x（反超）、b07 迭代斐波那契 0.951x → 0.915x。
+  逐项胜/平/负在 <code>5/4/19</code> 附近波动（2 采样的胜负边界噪声较大），确定性结论
+  是 b23 降幅与静态指令数 <strong>4885 → 4775</strong>：b23 内层循环实现<strong>零栈往返</strong>
+  （14 条全为寄存器指令，含 <code>sarq %cl, %rsi</code>）。</li>
+<li><strong>剩余差距</strong>：递归调用类几何平均仍约 1.78x（含 call，享受不到统一文件，
+  还要承担 prologue/epilogue 保存）、b08 3n+1 2.78x、b23 约 2.0x、数组 /
+  字符串类 1.15–1.28x。下一步 M7-c：<strong>指令选择与拷贝合并</strong>——b23 内层 14 条
+  里仍有约一半是 <code>movq</code> 寄存器搬运（SSA 临时值各自绑不同 p），让 def 复用
+  首个操作数的物理寄存器（coalescing）可再砍掉一半；以及<strong>含 call 函数的
+  跨块协调</strong>（递归类反超的主战场）。</li>
+</ul>
+</li>
 </ul>
 <hr /><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../changelog.html">版本索引</a></p></main></div>
 

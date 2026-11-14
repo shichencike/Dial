@@ -935,10 +935,14 @@ asm 报错且带 <code>[asm 后端]</code> 前缀」，杜绝静默降级。用�
 <p><strong>性能基准</strong>（<code>tools/bench_asm_vs_llvm.py</code>）：用 <code>bench/bench.dial</code> 的 28 项
 跨语言等价微基准，让两个后端在<strong>同一份源码、同一套计时口径</strong>（校准重复数 →
 扣启动基线 → 多次取最小）下直接对跑，并以<strong>内嵌校验和锚点</strong>保证比的是等价
-计算而非「一边算错所以更快」。当前首个可信基线（几何平均 asm/llvm）：
-<strong>1.3575x</strong>，3 胜 2 平 23 负；最短板是位运算密集循环（b23 popcount 4.758x）。
-自研后端目前是「全 spill 固定栈帧」（每个中间值都落栈、无寄存器分配），
-热点循环里约八成指令是栈槽搬运——这是与 LLVM 的主要差距，也是后续优化主战场。</p>
+计算而非「一边算错所以更快」。M6 首个可信基线（几何平均 asm/llvm）
+<strong>1.3575x</strong>（3 胜 2 平 23 负，b23 popcount 4.758x）——彼时自研后端是「全 spill
+固定栈帧」，热点循环约八成指令是栈槽搬运。经 M7 的算术源操作数折叠、块内
+寄存器驻留 + 局部变量槽提升、<strong>全函数统一寄存器文件（纯计算函数跨块零
+spill、循环嵌套深度加权、池寄存器 8→10）</strong>，当前几何平均约 <strong>1.249x</strong>，
+b23 降至约 2.0x（内层循环已零栈往返），b05 / b25 / b26 等已反超 LLVM。
+剩余主要差距在递归调用类（含 call，约 1.78x）与指令选择，是后续优化主战场；
+详见 <a href="changelog.html">CHANGELOG 未发布节</a> 的 M6 / M7 批次记录。</p>
 <p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式
 （C 侧 <code>-Os -ffunction-sections -fdata-sections</code> + 链接期 <code>-Wl,--gc-sections -s</code>，
 去掉 DWARF 与符号表）、<code>--single-file</code> 便携模式（链接期 <code>-static</code> 全静态，

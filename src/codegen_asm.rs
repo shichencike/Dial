@@ -80,11 +80,16 @@ fn align_up(x: i64, a: i64) -> i64 { (x + a - 1) / a * a }
 /// x86-64 里可供「无 call 基本块」独占的整数寄存器池。
 ///
 /// 前 6 个是 SysV callee-saved（含 rbp；本后端用 rsp 直接寻址，rbp 空闲），
-/// 必须在 prologue/epilogue 保存恢复；后 2 个是 caller-saved，因为启用驻留的
+/// 必须在 prologue/epilogue 保存恢复；其后是 caller-saved，因为启用驻留的
 /// 块内一条 call 都没有，它们不会被任何被调方破坏，故无需保存。
+/// 末两个 rsi / rdi 是 C ABI 传参寄存器：仅在「全函数无 call」的统一模式里
+/// 才安全（prologue 读完参数后即空闲），逐块模式只用前 RES_PER_BLOCK 个，
+/// 避免与 inst_call 的传参互相踩踏。
 /// 刻意避开 rax / rcx / rdx / r10 / r11：这些是发射器的临时寄存器或
 /// div / 移位 / setcc 的隐式操作数。
-const RES_POOL: [&str; 8] = ["rbx", "r12", "r13", "r14", "r15", "rbp", "r8", "r9"];
+const RES_POOL: [&str; 10] = ["rbx", "r12", "r13", "r14", "r15", "rbp", "r8", "r9", "rsi", "rdi"];
+/// 逐块独立驻留（含 call 的函数）可用的寄存器数：不含 rsi / rdi。
+const RES_PER_BLOCK: usize = 8;
 
 fn is_callee_saved(p: &str) -> bool {
     matches!(p, "rbx" | "rbp" | "r12" | "r13" | "r14" | "r15")
@@ -556,8 +561,12 @@ impl<'a> FnEmit<'a> {
         cand
     }
 
-    /// 逐块挑出最热的至多 8 个「位置」（提升槽加权优先 + 普通 vreg），
-    /// 绑定 RES_POOL。块入口只装载「块内首次出现是读」的那些。
+    /// 寄存器驻留分析总入口（仅 x86-64）。
+    ///
+    /// 纯计算函数（所有块都不含 call / ARC / EnvInit）走 M7-b 的「全函数统一
+    /// 寄存器文件」：至多 10 个池寄存器在整个函数内绑定固定位置，块与块之间不再
+    /// flush / load，循环边界的栈往返被彻底消掉。含 call 的函数仍走 M7-a 的
+    /// 逐块独立驻留（以内存为块边界权威）。
     fn analyze_residency(&mut self) {
         self.plans.clear();
         self.used_phys.clear();
@@ -566,6 +575,111 @@ impl<'a> FnEmit<'a> {
             return;
         }
         self.promotable = self.collect_promotable();
+        let unified = self.f.blocks.len() >= 2
+            && self.f.blocks.iter().all(|b| Self::block_can_reside(b));
+        if unified { self.analyze_unified(); } else { self.analyze_per_block(); }
+        self.used_phys.sort_by_key(|p| RES_POOL.iter().position(|x| x == p).unwrap_or(99));
+    }
+
+    /// M7-b：全函数统一寄存器文件。所有块的 resident 完全一致，因此任意两
+    /// 块之间都是「兼容边」——值天然留在物理寄存器里，无需块尾回写、无需
+    /// 块头装载。函数内没有任何 call，池寄存器全程不会被破坏，p 就是提升槽
+    /// 与热 vreg 的唯一权威；内存里的 Alloca 区仅在入口处作为参数来源。
+    fn analyze_unified(&mut self) {
+        let id_to_idx: HashMap<u32, usize> = self.f.blocks.iter().enumerate()
+            .map(|(i, b)| (b.id, i)).collect();
+
+        // 回边区间 → 每个块的循环嵌套深度。最内层循环（如 popcount 的 while
+        // 体）动态执行次数远高于外层与入口，若按静态指令数平权选 top-N，
+        // 热块的中间值会被冷块的值挤出寄存器、退化成栈槽往返。这里按嵌套
+        // 深度加权（深度 0/1/2 → 1/8/64），让 top-N 优先覆盖最内层循环。
+        let mut intervals: Vec<(usize, usize)> = Vec::new();
+        for (bi, b) in self.f.blocks.iter().enumerate() {
+            let mut tg = Vec::new();
+            match &b.term {
+                Term::Jump { target, .. } => tg.push(*target),
+                Term::Branch { then_b, else_b, .. } => { tg.push(*then_b); tg.push(*else_b); }
+                _ => {}
+            }
+            for t in tg {
+                if let Some(&ti) = id_to_idx.get(&t) {
+                    if ti <= bi { intervals.push((ti, bi)); }
+                }
+            }
+        }
+        let depth_of = |bi: usize| -> usize {
+            intervals.iter().filter(|(lo, hi)| *lo <= bi && bi <= *hi).count()
+        };
+
+        // 全局热度：提升槽加权 2、普通 vreg +1，均乘循环深度权重。
+        let mut score: HashMap<VReg, usize> = HashMap::new();
+        for (bi, b) in self.f.blocks.iter().enumerate() {
+            let w = 1usize << (3 * depth_of(bi).min(2));
+            for i in &b.insts {
+                match i {
+                    IrInst::Load { ptr, .. } if self.promotable.contains(ptr) =>
+                        { *score.entry(*ptr).or_insert(0) += 2 * w; }
+                    IrInst::Store { ptr, .. } if self.promotable.contains(ptr) =>
+                        { *score.entry(*ptr).or_insert(0) += 2 * w; }
+                    _ => {}
+                }
+                let mut uses = Vec::new();
+                i.reg_uses(&mut uses);
+                for u in uses {
+                    if self.residency_candidate(u) { *score.entry(u).or_insert(0) += w; }
+                }
+                if let Some(d) = i.def() {
+                    if self.residency_candidate(d) { *score.entry(d).or_insert(0) += w; }
+                }
+            }
+        }
+        let mut hot: Vec<VReg> = score.keys().copied().collect();
+        hot.sort_by(|x, y| score[y].cmp(&score[x]).then(x.cmp(y)));
+        let bind: HashMap<VReg, &'static str> = hot.into_iter().take(RES_POOL.len())
+            .enumerate().map(|(k, v)| (v, RES_POOL[k])).collect();
+        for p in bind.values() {
+            if is_callee_saved(p) && !self.used_phys.contains(p) { self.used_phys.push(p); }
+        }
+
+        // 入口块 = 没有任何前驱指向的块。它的参数提升槽由 prologue 写进
+        // Alloca 区（内存），需要在入口一次性装载到 p。
+        let mut has_pred = vec![false; self.f.blocks.len()];
+        for b in &self.f.blocks {
+            let mut tg = Vec::new();
+            match &b.term {
+                Term::Jump { target, .. } => tg.push(*target),
+                Term::Branch { then_b, else_b, .. } => { tg.push(*then_b); tg.push(*else_b); }
+                _ => {}
+            }
+            for t in tg { if let Some(&i) = id_to_idx.get(&t) { has_pred[i] = true; } }
+        }
+        let param_slot: HashSet<VReg> = self.f.param_slots.iter().copied().collect();
+
+        for (idx, b) in self.f.blocks.iter().enumerate() {
+            let mut plan = BlockPlan::default();
+            plan.resident = bind.clone();
+            if !has_pred[idx] {
+                for (v, p) in &bind {
+                    if param_slot.contains(v) { plan.loads.push((*v, *p)); }
+                }
+            }
+            // phi 参数：write_block_args 把实参写进 param 的栈槽，必须从同一槽
+            // 装载到 p，否则块内会读到过期的寄存器值。
+            for (pv, _) in &b.params {
+                if let Some(p) = bind.get(pv) {
+                    if !plan.loads.iter().any(|(v, _)| *v == *pv) {
+                        plan.loads.push((*pv, *p));
+                    }
+                }
+            }
+            plan.loads.sort_by_key(|(v, _)| *v);
+            // keep_flush 留空：p 全程权威，不回写内存。
+            self.plans.push(plan);
+        }
+    }
+
+    /// 逐块独立驻留（M7-a2/a3）：含 call 的函数里，块边界以内存为权威。
+    fn analyze_per_block(&mut self) {
         // 计算每个 vreg 在哪些块被读取：只有跨块仍被读的普通 vreg 才需要在
         // 块尾回写栈槽；块内临时值写完就丢，回写纯属浪费。
         let mut used_in: HashMap<VReg, Vec<usize>> = HashMap::new();
@@ -627,7 +741,7 @@ impl<'a> FnEmit<'a> {
                 }
                 let mut hot: Vec<VReg> = score.keys().copied().collect();
                 hot.sort_by(|x, y| score[y].cmp(&score[x]).then(x.cmp(y)));
-                for (k, v) in hot.into_iter().take(RES_POOL.len()).enumerate() {
+                for (k, v) in hot.into_iter().take(RES_PER_BLOCK).enumerate() {
                     let p = RES_POOL[k];
                     plan.resident.insert(v, p);
                     if is_callee_saved(p) && !self.used_phys.contains(&p) {
@@ -639,15 +753,16 @@ impl<'a> FnEmit<'a> {
                 }
                 plan.loads.sort_by_key(|(v, _)| *v);
                 for (v, _) in &plan.resident {
-                    if self.alloca_off.contains_key(v) { continue; }
-                    if let Some(bs) = used_in.get(v) {
+                    if self.alloca_off.contains_key(v) {
+                        // 提升槽：别的块 / 含 call 块仍走内存路径，无条件回写。
+                        plan.keep_flush.insert(*v);
+                    } else if let Some(bs) = used_in.get(v) {
                         if bs.iter().any(|k| *k != bi) { plan.keep_flush.insert(*v); }
                     }
                 }
             }
             self.plans.push(plan);
         }
-        self.used_phys.sort_by_key(|p| RES_POOL.iter().position(|x| x == p).unwrap_or(99));
     }
 
     fn begin_block(&mut self, idx: usize) {
@@ -666,8 +781,9 @@ impl<'a> FnEmit<'a> {
         self.residency_on = true;
     }
 
-    /// 块尾只回写两类位置：① 提升槽（别的块 / 含 call 块仍走内存路径）；
-    /// ② 跨块仍被读取的普通 vreg。块内临时值写完即弃，回写纯属浪费。
+    /// 块尾只回写 plan.keep_flush 里、且确实被弄脏的位置。
+    /// M7-b 统一寄存器文件模式下该集合为空——p 是全程权威，块与块之间
+    /// 直接继承，零回写；逐块模式下则含提升槽与跨块活跃的普通 vreg。
     /// **不关闭驻留**：term 的 phi 实参 / 返回值要继续从寄存器里读。
     fn flush_residency(&mut self) {
         if !self.residency_on { return; }
@@ -675,8 +791,7 @@ impl<'a> FnEmit<'a> {
             self.resident.iter().map(|(v, p)| (*v, *p)).collect();
         items.sort_by_key(|(v, _)| *v);
         for (v, p) in items {
-            let is_slot = self.alloca_off.contains_key(&v);
-            if self.dirty.contains(&v) && (is_slot || self.flush_mask.contains(&v)) {
+            if self.dirty.contains(&v) && self.flush_mask.contains(&v) {
                 let off = self.resident_off(v);
                 self.line(&format!("\tmovq {}, {}({})", self.r(p), off, self.r("rsp")));
             }
