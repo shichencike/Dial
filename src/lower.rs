@@ -147,11 +147,33 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// 释放从当前作用域深度 down_to（含）之前的所有作用域里的堆局部。
+    /// 释放 `down_to` 及以上所有作用域里的堆局部（Return / break / continue 用）。
+    ///
+    /// **只发射 release 指令，绝不 pop 作用域**：Return 之后同一函数里可能还有别的语句
+    /// （例如 `if (c) { return x; }` 之后的收尾），它们仍需能 lookup 到参数；而 `If` /
+    /// `While` 的 `pop_scope().unwrap()` 也要求作用域结构完整。被释放的局部标记 moved，
+    /// 保证随后 pop_scope 时的 release_scope 不会二次释放。
     fn release_scopes_upto(&mut self, down_to: usize) {
-        while self.scopes.len() > down_to {
-            let scope = self.scopes.pop().unwrap();
-            self.release_scope(&scope);
+        if self.scopes.len() <= down_to { return; }
+        let mut items: Vec<(usize, String, VReg, Option<ArcKind>, Option<String>)> = Vec::new();
+        for si in down_to..self.scopes.len() {
+            for (name, l) in &self.scopes[si] {
+                if l.is_handle && !l.moved {
+                    let sn = if let Type::Struct(n) = &l.dt { Some(n.clone()) } else { None };
+                    items.push((si, name.clone(), l.ptr, rc_kind(&l.dt), sn));
+                }
+            }
+        }
+        items.sort_by_key(|x| std::cmp::Reverse(x.2)); // 与 release_scope 一致：按槽地址逆序
+        for (si, name, ptr, k, sn) in items {
+            if let Some(k) = k {
+                self.emit(IrInst::RcRelease { ptr, kind: k });
+            } else if let Some(sn) = sn {
+                self.emit(IrInst::StructRelease { ptr, struct_name: sn });
+            }
+            if let Some(l) = self.scopes.get_mut(si).and_then(|s| s.get_mut(&name)) {
+                l.moved = true;
+            }
         }
     }
 
@@ -800,7 +822,7 @@ impl<'a> Lower<'a> {
         let od = self.expr_dt(obj);
         let (ov, _) = self.lower_expr(obj, &od)?;
         match (od, method) {
-            (Type::String, "len") => {
+            (Type::String, "len" | "length" | "size") => {
                 let r = self.new_reg(IrType::I64);
                 self.emit(IrInst::Call { dst: Some(r), func: "dial_string_length".to_string(), args: vec![ov], arg_tys: vec![IrType::Handle], ret_ty: IrType::I64, linkage: CallLink::Runtime });
                 Ok((Value::Reg(r), false))
@@ -826,7 +848,7 @@ impl<'a> Lower<'a> {
                 self.emit(IrInst::ICmp { op: ACmp::Neq, dst: r1, a: Value::Reg(r), b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
                 Ok((Value::Reg(r1), false))
             }
-            (Type::Array(_), "len") | (Type::Array(_), "size") => {
+            (Type::Array(_), "len" | "length" | "size") => {
                 let r = self.new_reg(IrType::I64);
                 self.emit(IrInst::Call { dst: Some(r), func: "dial_array_length".to_string(), args: vec![ov], arg_tys: vec![IrType::Handle], ret_ty: IrType::I64, linkage: CallLink::Runtime });
                 Ok((Value::Reg(r), false))
@@ -869,8 +891,8 @@ impl<'a> Lower<'a> {
 
     fn lower_call(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
         if name == "print" || name == "eprint" || name == "print_raw" || name == "eprint_raw" || name == "write_char" {
-            if args.len() != 1 { return self.err(&format!("{} 需要一个参数", name)); }
-            return self.lower_print(name, &args[0]);
+            if args.is_empty() { return self.err(&format!("{} 至少需要一个参数", name)); }
+            return self.lower_print(name, args);
         }
         let sig = match self.ip.functions_sig.get(name) {
             Some(s) => s.clone(),
@@ -906,30 +928,38 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn lower_print(&mut self, name: &str, arg: &Expr) -> Result<(Value, bool), String> {
-        let dt = self.expr_dt(arg);
-        let (v, _) = self.lower_expr(arg, &dt)?;
-        let (func, aty) = match dt {
-            Type::Int | Type::Byte => ("dial_print_int", IrType::I64),
-            Type::Float => ("dial_print_float", IrType::F64),
-            Type::Int32 => ("dial_print_int", IrType::I32),
-            // dial_print_float 的 C 原型是 (double)：f32 必须先 FpExt 到 f64，
-            // 否则 xmm0 低 32 位会被 C 侧按 double 解释，输出乱码。
-            Type::Float32 => ("dial_print_float", IrType::F64),
-            Type::Bool => ("dial_print_bool", IrType::I64),
-            Type::Char => ("dial_print_char", IrType::I64),
-            Type::String | Type::Bytes => ("dial_print_string", IrType::Handle),
-            _ => return self.err(&format!("asm 后端：不能直接 print {}", dt.display())),
-        };
-        let v = if dt == Type::Float32 {
-            let r = self.new_reg(IrType::F64);
-            self.emit(IrInst::Conv { kind: AConv::FpExt, dst: r, a: v, ty: IrType::F64 });
-            Value::Reg(r)
-        } else {
-            self.adapt_param(v, &dt, &dt)
-        };
-        self.emit(IrInst::Call { dst: None, func: func.to_string(), args: vec![v], arg_tys: vec![aty], ret_ty: IrType::Void, linkage: CallLink::Runtime });
-        let _ = name;
+    /// Dial 的 print / eprint 是 **variadic**：中间实参紧接输出不换行，只有最后一个换行；
+    /// print_raw / eprint_raw 则全部不换行。这与 LLVM 后端 `emit_print` / `emit_print_raw`
+    /// 的分派一一对应（见 codegen.rs:5231 / 5279）。
+    fn lower_print(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        let to_stderr = name == "eprint" || name == "eprint_raw";
+        let all_raw = name == "print_raw" || name == "eprint_raw" || name == "write_char";
+        let last = args.len() - 1;
+        for (i, arg) in args.iter().enumerate() {
+            let dt = self.expr_dt(arg);
+            let (v, _) = self.lower_expr(arg, &dt)?;
+            let newline = !all_raw && i == last;
+            let (func, aty) = print_symbol(&dt, to_stderr, newline)
+                .ok_or_else(|| format!("[asm 后端] 不能直接 print {}", dt.display()))?;
+            // C 侧标量通道一律收 int64_t / double：窄类型必须显式扩展，不能靠 ABI 猜。
+            let v2 = match dt {
+                Type::Int32 => {
+                    let r = self.new_reg(IrType::I64);
+                    self.emit(IrInst::Conv { kind: AConv::Sext, dst: r, a: v, ty: IrType::I64 });
+                    Value::Reg(r)
+                }
+                Type::Float32 => {
+                    let r = self.new_reg(IrType::F64);
+                    self.emit(IrInst::Conv { kind: AConv::FpExt, dst: r, a: v, ty: IrType::F64 });
+                    Value::Reg(r)
+                }
+                _ => v,
+            };
+            self.emit(IrInst::Call {
+                dst: None, func: func.to_string(), args: vec![v2], arg_tys: vec![aty],
+                ret_ty: IrType::Void, linkage: CallLink::Runtime,
+            });
+        }
         Ok((Value::Imm(Imm::I64(0)), false))
     }
 
@@ -953,20 +983,27 @@ impl<'a> Lower<'a> {
                         _ => {
                             let h = self.new_reg(IrType::Handle);
                             let f = match et {
-                                Type::Int => "dial_int_to_string",
+                                Type::Int | Type::Int32 => "dial_int_to_string",
                                 Type::Float | Type::Float32 => "dial_float_to_string",
                                 Type::Bool => "dial_bool_to_string",
                                 Type::Char => "dial_char_to_string",
                                 Type::Byte => "dial_byte_to_string",
                                 _ => return self.err(&format!("asm 后端：插值不支持 {}", et.display())),
                             };
-                            // dial_float_to_string 的 C 原型是 (double)：f32 需先 FpExt。
-                            let (farg, faty) = if matches!(et, Type::Float32) {
-                                let r = self.new_reg(IrType::F64);
-                                self.emit(IrInst::Conv { kind: AConv::FpExt, dst: r, a: ev, ty: IrType::F64 });
-                                (Value::Reg(r), IrType::F64)
-                            } else {
-                                (self.adapt_param(ev, &et, &et), arg_ty_for_conv(&et))
+                            // *_to_string 的 C 原型统一是 int64_t / double，窄类型显式扩展。
+                            let (farg, faty): (Value, IrType) = match et {
+                                Type::Int32 => {
+                                    let r = self.new_reg(IrType::I64);
+                                    self.emit(IrInst::Conv { kind: AConv::Sext, dst: r, a: ev, ty: IrType::I64 });
+                                    (Value::Reg(r), IrType::I64)
+                                }
+                                Type::Float32 => {
+                                    let r = self.new_reg(IrType::F64);
+                                    self.emit(IrInst::Conv { kind: AConv::FpExt, dst: r, a: ev, ty: IrType::F64 });
+                                    (Value::Reg(r), IrType::F64)
+                                }
+                                Type::Float => (ev, IrType::F64),
+                                _ => (ev, IrType::I64),
                             };
                             self.emit(IrInst::Call { dst: Some(h), func: f.to_string(), args: vec![farg], arg_tys: vec![faty], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
                             Value::Reg(h)
@@ -1100,12 +1137,26 @@ impl<'a> Lower<'a> {
             Expr::BoolLit(_) => Type::Bool,
             Expr::StringLit(_) | Expr::Interp(_) => Type::String,
             Expr::Var(name) => self.lookup(name).map(|l| l.dt.clone()).unwrap_or(Type::Int),
-            Expr::Binary(_, op, _) => match op {
-                BinOp::And | BinOp::Or | BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Type::Bool,
-                _ => Type::Int,
+            Expr::Binary(a, op, b) => {
+                let da = self.expr_dt(a);
+                let db = self.expr_dt(b);
+                match op {
+                    BinOp::And | BinOp::Or | BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Type::Bool,
+                    // 字符串拼接的结果仍是字符串（不能退化成 Int，否则 print 会把句柄当数字吐出）。
+                    BinOp::Add if da == Type::String && db == Type::String => Type::String,
+                    _ => {
+                        if matches!(da, Type::Float | Type::Float32) || matches!(db, Type::Float | Type::Float32) {
+                            Type::Float
+                        } else { da }
+                    }
+                }
+            }
+            Expr::Unary(op, a) => match op {
+                UnOp::Not => Type::Bool,
+                UnOp::Deref => e.strip_ptr_of(),
+                _ => self.expr_dt(a),
             },
-            Expr::Unary(op, _) => match op { UnOp::Not => Type::Bool, UnOp::Deref => e.strip_ptr_of(), _ => Type::Int },
-            Expr::Ternary(..) => Type::Int,
+            Expr::Ternary(_, t, _) => self.expr_dt(t),
             Expr::Call(name, _) => self.ip.functions_sig.get(name).map(|s| s.ret.clone()).unwrap_or(Type::Int),
             Expr::Index(..) => Type::Int,
             Expr::Field(base, field) => {
@@ -1115,7 +1166,8 @@ impl<'a> Lower<'a> {
             Expr::Method(obj, method, _) => {
                 let od = self.expr_dt(obj);
                 match (od, method.as_str()) {
-                    (_, "len" | "size" | "get") => Type::Int,
+                    (_, "len" | "length" | "size" | "get") => Type::Int,
+                    (_, "eq") => Type::Bool,
                     (_, "substring") => Type::String,
                     (o, "push" | "set" | "pop" | "remove") => o,
                     _ => Type::Int,
@@ -1177,15 +1229,42 @@ fn slot_bytes(t: IrType) -> u32 {
     }
 }
 
-fn arg_ty_for_conv(dt: &Type) -> IrType {
-    match dt {
-        Type::Int | Type::Byte | Type::Char => IrType::I64,
-        Type::Float => IrType::F64,
-        Type::Int32 => IrType::I32,
-        Type::Float32 => IrType::F32,
-        Type::Bool => IrType::I64,
+/// print 系列分派表：与 LLVM 后端 emit_print / emit_print_raw / emit_eprint* 一一对应。
+/// `newline=true` → 带换行的通道；`false` → *_raw 通道（char 例外，走 write_char）。
+fn print_symbol(dt: &Type, to_stderr: bool, newline: bool) -> Option<(&'static str, IrType)> {
+    let s = match (dt, to_stderr, newline) {
+        (Type::Int | Type::Byte, false, true) => "dial_print_int",
+        (Type::Int | Type::Byte, false, false) => "dial_print_raw_int",
+        (Type::Int | Type::Byte, true, true) => "dial_eprint_int",
+        (Type::Int | Type::Byte, true, false) => "dial_eprint_raw_int",
+        (Type::Int32, false, true) => "dial_print_int",
+        (Type::Int32, false, false) => "dial_print_raw_int",
+        (Type::Int32, true, true) => "dial_eprint_int",
+        (Type::Int32, true, false) => "dial_eprint_raw_int",
+        (Type::Float | Type::Float32, false, true) => "dial_print_float",
+        (Type::Float | Type::Float32, false, false) => "dial_print_raw_float",
+        (Type::Float | Type::Float32, true, true) => "dial_eprint_float",
+        (Type::Float | Type::Float32, true, false) => "dial_eprint_raw_float",
+        (Type::Bool, false, true) => "dial_print_bool",
+        (Type::Bool, false, false) => "dial_print_raw_bool",
+        (Type::Bool, true, true) => "dial_eprint_bool",
+        (Type::Bool, true, false) => "dial_eprint_raw_bool",
+        (Type::Char, false, true) => "dial_print_char",
+        (Type::Char, false, false) => "dial_write_char",
+        (Type::Char, true, true) => "dial_eprint_char",
+        (Type::Char, true, false) => "dial_eprint_write_char",
+        (Type::String, false, true) => "dial_print_string",
+        (Type::String, false, false) => "dial_print_raw",
+        (Type::String, true, true) => "dial_eprint_string",
+        (Type::String, true, false) => "dial_eprint_raw",
+        _ => return None,
+    };
+    let aty = match dt {
+        Type::Float | Type::Float32 => IrType::F64,
+        Type::String => IrType::Handle,
         _ => IrType::I64,
-    }
+    };
+    Some((s, aty))
 }
 
 /// Value 转寄存器（仅在 Value::Reg 时；用于 FieldAddr 的 base 与 Deref 的 ptr）。
