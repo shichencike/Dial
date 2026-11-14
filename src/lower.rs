@@ -275,7 +275,17 @@ impl<'a> Lower<'a> {
             }
         }
 
-        for s in &f.body { self.lower_stmt(s)?; }
+        // 函数体是扁平语句序列：一旦当前块被 return / throw 终结，后续非标签语句是死代码，
+        // 必须停止 lower（否则 `terminate` 会用后面的 return 覆盖前面的，导致错误返回——
+        // 这正是 M3-a2 早返回修复）。但 `label` 例外：goto 会把当前块终结为 Jump，
+        // 而紧随其后的 `label`/`goto` 目标块仍可达（goto 跳出后由标签重新定位 cur），
+        // 绝不能当作死代码跳过，否则 `done` 块会停在 `ud2`（见 control_flow.dial）。
+        for s in &f.body {
+            if self.cur_terminated() {
+                break;
+            }
+            self.lower_stmt(s)?;
+        }
 
         if !self.cur_terminated() {
             self.release_scopes_upto(0)?;
@@ -701,7 +711,7 @@ impl<'a> Lower<'a> {
                 self.defers.push((d, (**inner).clone()));
                 Ok(())
             }
-            Stmt::With { .. } => self.err("asm 后端暂不支持 `with`（后续相位）"),
+            Stmt::With { resource, name, body, .. } => self.lower_with(resource, name, body),
             Stmt::Label(_, _, _) => self.err("asm 后端暂不支持 `label`（后续相位）"),
             Stmt::Goto(_, _, _) => self.err("asm 后端暂不支持 `goto`（后续相位）"),
             Stmt::Return(val, _, _) => {
@@ -1280,6 +1290,14 @@ impl<'a> Lower<'a> {
             if args.is_empty() { return self.err(&format!("{} 至少需要一个参数", name)); }
             return self.lower_print(name, args);
         }
+        // 文件 IO / with 自动释放是「带失败抛错的 CFG」或「需要 moved 记账」的专用路径，
+        // 不走普通内建表（builtin::special_ret 仅用于类型推断）。
+        match name {
+            "open" | "read" | "read_all" | "file_read_line" | "write" | "eof"
+            | "file_exists" | "file_size" | "file_remove" | "close" | "__with_release" =>
+                return self.lower_special_call(name, args),
+            _ => {}
+        }
         // functions_sig 只含用户函数与 extern 声明；按名字硬编码分派的内建
         // （语义层 RESERVED_NAMES 设防，不会与之撞名）走表驱动分派。
         let sig = match self.ip.functions_sig.get(name) {
@@ -1393,6 +1411,203 @@ impl<'a> Lower<'a> {
                 Ok((v, false))
             }
         }
+    }
+
+    // ---- 文件 IO / with 自动释放：带失败抛错的专用路径 ----
+
+    /// 构造一个 Error 句柄（DialString → dial_error_new），返回其 vreg。
+    fn make_error_handle(&mut self, msg: &str) -> Result<VReg, String> {
+        let lit = self.ip.intern_string(msg);
+        let p = self.new_reg(IrType::Ptr);
+        self.emit(IrInst::LeaLabel { dst: p, lit });
+        let s = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call { dst: Some(s), func: "dial_string_new".to_string(),
+            args: vec![Value::Reg(p)], arg_tys: vec![IrType::Ptr],
+            ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+        let e = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call { dst: Some(e), func: "dial_error_new".to_string(),
+            args: vec![Value::Reg(s)], arg_tys: vec![IrType::Handle],
+            ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+        Ok(e)
+    }
+
+    /// 若 `cond_v` 为真（I64 0/1）则跳到 fail 块抛 Error，否则落到 ok 块继续。
+    fn fail_throw_if(&mut self, cond_v: VReg, msg: &str) -> Result<(), String> {
+        let ok = self.new_block(Vec::new());
+        let fail = self.new_block(Vec::new());
+        self.terminate(Term::Branch { cond: cond_v, then_b: fail, else_b: ok,
+            then_args: Vec::new(), else_args: Vec::new() });
+        self.set_cur(fail);
+        let err = self.make_error_handle(msg)?;
+        self.lower_throw_value(Value::Reg(err))?; // 终结 fail 块（throw 后不可达）
+        self.set_cur(ok);
+        Ok(())
+    }
+
+    /// 句柄为 NULL（ptr == 0）时抛 Error。`h` 必须是 Handle 类型 vreg。
+    fn fail_throw_if_null(&mut self, h: VReg, msg: &str) -> Result<(), String> {
+        let is_null = self.new_reg(IrType::I64);
+        self.emit(IrInst::ICmp { op: ACmp::Eq, dst: is_null, a: Value::Reg(h),
+            b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+        self.fail_throw_if(is_null, msg)
+    }
+
+    /// 文件 IO 与 __with_release：与 codegen.rs:4596–4768 的 CFG / moved 记账同构。
+    /// 文件句柄 = 不透明 ptr，**不受 ARC 管理**：必须显式 close，作用域不自动释放。
+    fn lower_special_call(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        match name {
+            // open(path, mode)：DialString → DialString，返回 NULL 抛错。
+            "open" => {
+                let (p, _) = self.lower_expr(&args[0], &Type::String)?;
+                let (m, _) = self.lower_expr(&args[1], &Type::String)?;
+                let h = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Call { dst: Some(h), func: "dial_file_open".to_string(),
+                    args: vec![p, m], arg_tys: vec![IrType::Handle, IrType::Handle],
+                    ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+                self.fail_throw_if_null(h, "无法打开文件（路径不存在或无访问权限）")?;
+                Ok((Value::Reg(h), false))
+            }
+            // read(f, n) / read_all(f) / file_read_line(f)：NULL 抛错。
+            "read" => {
+                let (f, _) = self.lower_expr(&args[0], &Type::File)?;
+                let (n, _) = self.lower_expr(&args[1], &Type::Int)?;
+                let h = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Call { dst: Some(h), func: "dial_file_read".to_string(),
+                    args: vec![f, n], arg_tys: vec![IrType::Handle, IrType::I64],
+                    ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+                self.fail_throw_if_null(h, "读取文件失败（句柄无效或内存不足）")?;
+                Ok((Value::Reg(h), false))
+            }
+            "read_all" | "file_read_line" => {
+                let (f, _) = self.lower_expr(&args[0], &Type::File)?;
+                let sym = if name == "read_all" { "dial_file_read_all" } else { "dial_file_read_line" };
+                let h = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Call { dst: Some(h), func: sym.to_string(),
+                    args: vec![f], arg_tys: vec![IrType::Handle],
+                    ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+                self.fail_throw_if_null(h, "读取文件失败（句柄无效或内存不足）")?;
+                Ok((Value::Reg(h), false))
+            }
+            // write(f, content)：返回 -1 抛错。
+            "write" => {
+                let (f, _) = self.lower_expr(&args[0], &Type::File)?;
+                let (c, _) = self.lower_expr(&args[1], &Type::String)?;
+                let r = self.new_reg(IrType::I64);
+                self.emit(IrInst::Call { dst: Some(r), func: "dial_file_write".to_string(),
+                    args: vec![f, c], arg_tys: vec![IrType::Handle, IrType::Handle],
+                    ret_ty: IrType::I64, linkage: CallLink::Runtime });
+                let fail = self.new_reg(IrType::I64);
+                self.emit(IrInst::ICmp { op: ACmp::Eq, dst: fail, a: Value::Reg(r),
+                    b: Value::Imm(Imm::I64(-1)), ty: IrType::I64 });
+                self.fail_throw_if(fail, "写入文件失败（句柄无效或写入中断）")?;
+                Ok((Value::Reg(r), false))
+            }
+            // eof(f)：feof，!= 0 → bool。
+            "eof" => {
+                let (f, _) = self.lower_expr(&args[0], &Type::File)?;
+                let r = self.new_reg(IrType::I64);
+                self.emit(IrInst::Call { dst: Some(r), func: "dial_file_eof".to_string(),
+                    args: vec![f], arg_tys: vec![IrType::Handle],
+                    ret_ty: IrType::I64, linkage: CallLink::Runtime });
+                let b = self.new_reg(IrType::I64);
+                self.emit(IrInst::ICmp { op: ACmp::Neq, dst: b, a: Value::Reg(r),
+                    b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+                Ok((Value::Reg(b), false))
+            }
+            // file_exists / file_remove：!= 0 → bool；file_size：int。
+            "file_exists" | "file_remove" | "file_size" => {
+                let sym = if name == "file_exists" { "dial_file_exists" }
+                    else if name == "file_remove" { "dial_file_remove" } else { "dial_file_size" };
+                let (p, _) = self.lower_expr(&args[0], &Type::String)?;
+                let r = self.new_reg(IrType::I64);
+                self.emit(IrInst::Call { dst: Some(r), func: sym.to_string(),
+                    args: vec![p], arg_tys: vec![IrType::Handle],
+                    ret_ty: IrType::I64, linkage: CallLink::Runtime });
+                if name == "file_size" {
+                    Ok((Value::Reg(r), false))
+                } else {
+                    let b = self.new_reg(IrType::I64);
+                    self.emit(IrInst::ICmp { op: ACmp::Neq, dst: b, a: Value::Reg(r),
+                        b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+                    Ok((Value::Reg(b), false))
+                }
+            }
+            // close(f)：file → dial_file_close（空指针安全）；显式关闭即消费句柄，标记 moved
+            // 使 with 块末的自动释放跳过它（fclose 二次调用是 UB）。thread/channel 后续相位。
+            "close" => {
+                let dt = self.expr_dt(&args[0]);
+                let (v, _) = self.lower_expr(&args[0], &dt)?;
+                match dt {
+                    Type::File => {
+                        self.emit(IrInst::Call { dst: None, func: "dial_file_close".to_string(),
+                            args: vec![v], arg_tys: vec![IrType::Handle],
+                            ret_ty: IrType::Void, linkage: CallLink::Runtime });
+                        if let Expr::Var(n) = &args[0] {
+                            if let Some(l) = self.lookup_mut(n) { l.moved = true; }
+                        }
+                    }
+                    other => return self.err(&format!(
+                        "asm 后端：close 暂不支持 {} 类型（仅 file；thread/channel 后续相位）", other.display())),
+                }
+                Ok((Value::Imm(Imm::I64(0)), false))
+            }
+            // __with_release(v)：with 块末自动释放（内部调用，用户代码不可达）。
+            //   块内已显式 close 过 → moved → 跳过；否则按类型释放。
+            "__with_release" => {
+                let vname = match &args[0] {
+                    Expr::Var(n) => n.clone(),
+                    _ => return self.err("内部错误：__with_release 的参数必须是变量名"),
+                };
+                let l = match self.lookup(&vname) {
+                    Some(l) => l.clone(),
+                    None => return self.err(&format!("内部错误：__with_release 找不到变量 '{}'", vname)),
+                };
+                if l.moved { return Ok((Value::Imm(Imm::I64(0)), false)); }
+                let v = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Load { dst: v, ptr: l.ptr, ty: IrType::Handle });
+                match l.dt {
+                    Type::File => self.emit(IrInst::Call { dst: None, func: "dial_file_close".to_string(),
+                        args: vec![Value::Reg(v)], arg_tys: vec![IrType::Handle],
+                        ret_ty: IrType::Void, linkage: CallLink::Runtime }),
+                    Type::Thread => self.emit(IrInst::Call { dst: None, func: "dial_thread_join".to_string(),
+                        args: vec![Value::Reg(v)], arg_tys: vec![IrType::Handle],
+                        ret_ty: IrType::Void, linkage: CallLink::Runtime }),
+                    Type::RawPtr(_) | Type::VolatilePtr(_) => self.emit(IrInst::Call { dst: None,
+                        func: "dial_raw_free".to_string(), args: vec![Value::Reg(v)],
+                        arg_tys: vec![IrType::Handle], ret_ty: IrType::Void, linkage: CallLink::Runtime }),
+                    _ => {}
+                }
+                if let Some(sl) = self.lookup_mut(&vname) { sl.moved = true; }
+                Ok((Value::Imm(Imm::I64(0)), false))
+            }
+            _ => self.err(&format!("asm 后端：未找到函数 `{}`（FFI/内建未覆盖）", name)),
+        }
+    }
+
+    /// with <resource> as <name> { ... }：复用既有的 defer 机制实现自动释放，
+    /// 与 codegen.rs:3730 作用域/defer 帧结构同构。
+    fn lower_with(&mut self, resource: &Expr, name: &str, body: &[Stmt]) -> Result<(), String> {
+        // 1) 在**外层**作用域里求值资源表达式（语义与普通表达式一致）。
+        let rt = self.expr_dt(resource);
+        let (rv, _) = self.lower_expr(resource, &rt)?;
+        // 2) 进入 with 作用域。
+        self.push_scope();
+        // 3) 把资源绑定到块内名字。file 句柄不是 ARC 类型，is_handle=false。
+        let slot = self.emit_alloca(reg_ir(&rt));
+        self.emit(IrInst::Store { ptr: slot, val: rv, ty: reg_ir(&rt) });
+        let is_h = rc_kind(&rt).is_some();
+        self.declare(name, Local { ptr: slot, ty: reg_ir(&rt), dt: rt.clone(), is_handle: is_h, moved: false });
+        // 4) 登记块末自动释放（复用 defer：覆盖正常落穿 / return / break / continue / throw
+        //    全部出口，且各出口互斥各执行一次）。块内若已显式 close，会自动跳过。
+        self.defers.push((self.scopes.len(), Stmt::Expr(
+            Expr::Call("__with_release".to_string(), vec![Expr::Var(name.to_string())]), 0, 0)));
+        // 5) 生成块体。
+        for s in body { self.lower_stmt(s)?; }
+        // 6) 离开 with 作用域：排空本层 defer（含自动释放）再释放块内局部。
+        //    若块体提前 return/break 已排空，leave_scope 因 moved 标记而变为空操作（无指令
+        //    写入已终结块）。
+        self.leave_scope()?;
+        Ok(())
     }
 
     /// 把已 lower 出的值摆进内建所需的 C ABI 通道。
@@ -1786,6 +2001,7 @@ impl<'a> Lower<'a> {
                 self.ip.functions_sig.get(name)
                     .map(|s| s.ret.clone())
                     .or_else(|| builtin::builtin_ret(name))
+                    .or_else(|| builtin::special_ret(name))
                     .unwrap_or(Type::Int)
             }
             Expr::Index(..) => Type::Int,

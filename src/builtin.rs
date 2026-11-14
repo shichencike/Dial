@@ -185,11 +185,8 @@ pub fn lookup(name: &str) -> Option<BSpec> {
         // reverse / join / split / slice / index_of / clone 等在 Dial 里都是**方法**
         // （Expr::Method），由 M2 的方法表处理，不出现在 Expr::Call 里。
 
-        // ---- 文件 IO：成功路径是薄封装，但失败必须抛 Error（依赖异常机制）。
-        //      M1 先明确不支持，M3 接入异常后一并补齐，绝不静默返回空值。 ----
-        "open" | "read" | "write" | "read_all" | "file_read_line" | "eof" |
-        "file_exists" | "file_size" | "file_remove" | "close" =>
-            return Some(unsup(Type::Int, "文件 IO 内建需先接入异常机制（M3 相位）")),
+        // 文件 IO / with 自动释放是「带失败抛错的 CFG」或「需要 moved 记账」的
+        // 专用路径，不走普通内建表：见 lower.rs 的 lower_call 特判与 special_ret。
 
         // ---- 并发 / 高阶函数：后续相位 ----
         "spawn" | "join" | "detach" | "channel" | "recv" | "try_recv" |
@@ -204,6 +201,18 @@ pub fn lookup(name: &str) -> Option<BSpec> {
 /// 仅取内建返回类型（expr_dt 用），不构造完整规格。
 pub fn builtin_ret(name: &str) -> Option<Type> {
     lookup(name).map(|b| b.ret)
+}
+
+/// 专用路径内建的返回 Dial 类型（不走 lookup：它们需要 CFG / moved 记账）。
+pub fn special_ret(name: &str) -> Option<Type> {
+    Some(match name {
+        "open" => Type::File,
+        "close" | "__with_release" => Type::Void,
+        "read" | "read_all" | "file_read_line" => Type::String,
+        "write" | "file_size" => Type::Int,
+        "eof" | "file_exists" | "file_remove" => Type::Bool,
+        _ => return None,
+    })
 }
 
 /// Abi → 传给 lower_expr 的期望 Dial 类型（主要影响字符串字面量 rodata 与
