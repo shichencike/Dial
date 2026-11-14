@@ -19,6 +19,8 @@ mod ir; // 自研后端：专属 IR（x86-64 / AArch64 汇编发射器的输入�
 mod target; // 自研后端：目标平台差异抽象（SysV / AAPCS）
 mod lower; // 自研后端：AST → IR 的 lowering（核心子集）
 mod pass; // 自研后端：优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化）
+mod codegen_asm; // 自研后端：IR → x86-64 / AArch64 汇编
+mod asm; // 自研后端：lower → pass → .s → cc -c → .o 的编排
 mod diagnostic;
 mod dialfmt;
 mod toolchain;
@@ -40,6 +42,11 @@ use std::process::Command;
 
 use codegen::SafetyMode;
 use semantic::analyze;
+
+/// 代码生成后端。`llvm` 是既有路径（默认，零改动），`asm` 是自研后端
+/// （专属 IR + Pass → x86-64 / AArch64 汇编 → cc -c → .o）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Backend { Llvm, Asm }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -206,11 +213,41 @@ fn main() {
     // --single-file 便携模式：链接期 -static，产物不依赖宿主动态 libc。
     let mut tiny = false;
     let mut single_file = false;
+    // 自研后端默认关闭：不指定 --backend 时行为与既有版本完全一致（LLVM 路径零改动）。
+    let mut backend = Backend::Llvm;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
             "--no-link" => {
                 no_link = true;
+                i += 1;
+            }
+            // 自研后端激活参数：支持 `--backend asm` 与 `--backend=asm` 两种写法。
+            "--backend" => {
+                if i + 1 < args.len() {
+                    backend = match args[i + 1].as_str() {
+                        "llvm" => Backend::Llvm,
+                        "asm" => Backend::Asm,
+                        other => {
+                            eprintln!("未知后端 '{}'（可选 llvm / asm）", other);
+                            std::process::exit(1);
+                        }
+                    };
+                    i += 2;
+                } else {
+                    eprintln!("选项 --backend 缺少值（llvm / asm）");
+                    std::process::exit(1);
+                }
+            }
+            s if s.starts_with("--backend=") => {
+                backend = match &s["--backend=".len()..] {
+                    "llvm" => Backend::Llvm,
+                    "asm" => Backend::Asm,
+                    other => {
+                        eprintln!("未知后端 '{}'（可选 llvm / asm）", other);
+                        std::process::exit(1);
+                    }
+                };
                 i += 1;
             }
             // Fail-Fast 安全等级：debug（默认） / safe / fast
@@ -348,6 +385,21 @@ fn main() {
         eprintln!("ℹ️  --single-file：将用 -static 全静态链接，产物不再依赖宿主动态 libc。");
     }
 
+    // 自研后端与 LLVM 专属能力的关系：明确告知，绝不静默降级。
+    if backend == Backend::Asm {
+        eprintln!("ℹ️  已启用自研后端（--backend=asm）：专属 IR → 优化 Pass → 目标汇编 → cc -c → .o。");
+        if pgo {
+            eprintln!("❌ --pgo 依赖 LLVM bitcode 插桩，自研后端不产生 .bc，无法使用。");
+            std::process::exit(1);
+        }
+        if debug_info {
+            eprintln!("ℹ️  --backend=asm 首版暂不生成 DWARF，-g 已忽略。");
+        }
+        if safety == SafetyMode::ReleaseFast {
+            eprintln!("ℹ️  --backend=asm 下 --fast 仅作用于 C 运行时的优化等级；LLVM O3/LTO 不适用。");
+        }
+    }
+
     // 1~3) 词法 / 语法 / 语义（含本地源码模块合并、包解析、FFI 声明校验）
     //      统一交给 frontend()，让 build / run / check / test 共用同一条前端流水线——
     //      否则「检查通过」和「实际编译」可能因为两套解析逻辑而给出不同结论。
@@ -392,23 +444,37 @@ fn main() {
     if debug_info && fast {
         eprintln!("ℹ️  -g 与 --fast 同用：LLVM 仍为 O3，部分变量可能显示 <optimized out>；纯调试建议去掉 --fast。");
     }
-    let cg_opts = codegen::CgOpts {
-        safety,
-        aggressive: fast,
-        bc_out: if fast { Some(bc_path.clone()) } else { None },
-        src_file: fe.src_file.clone(),
-        debug_info,
-    };
-    if let Err(e) = codegen::compile(
-        &fe.program,
-        &fe.functions,
-        &fe.structs,
-        &obj_path,
-        &cg_opts,
-        &fe.externs,
-    ) {
-        eprintln!("{}", e);
-        std::process::exit(1);
+    if backend == Backend::Asm {
+        // 自研后端：lower → pass → .s → cc -c → .o；obj_path 与 LLVM 后端一致，
+        // 后面的 link() / final_link() 完全复用，FFI 包与 --tiny 等零改动生效。
+        if let Err(e) = asm::compile_asm(
+            &fe.program,
+            fe.functions.clone(),
+            fe.structs.clone(),
+            &obj_path,
+        ) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    } else {
+        let cg_opts = codegen::CgOpts {
+            safety,
+            aggressive: fast,
+            bc_out: if fast { Some(bc_path.clone()) } else { None },
+            src_file: fe.src_file.clone(),
+            debug_info,
+        };
+        if let Err(e) = codegen::compile(
+            &fe.program,
+            &fe.functions,
+            &fe.structs,
+            &obj_path,
+            &cg_opts,
+            &fe.externs,
+        ) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
     }
 
     if no_link {
@@ -422,7 +488,8 @@ fn main() {
     // LTO / PGO 需要 clang 支持（-flto 与 IR 级 PGO 的 bitcode 格式是 clang 的）。
     // 若用户强制指定了非 clang 的 C 编译器，则优雅降级：保留 O3/SIMD 的 LLVM 侧收益，
     // 但放弃跨模块的 LTO 内联与 PGO（这两步依赖 clang 的 bitcode 链路）。
-    let lto_capable = fast && clang_for_lto().is_some();
+    // 自研后端不产 .bc，绝不能进入 LTO/PGO 分支（那会去编一个不存在的 bitcode 文件）。
+    let lto_capable = backend == Backend::Llvm && fast && clang_for_lto().is_some();
     let eff_pgo = pgo && lto_capable;
     if fast && !lto_capable && pgo {
         eprintln!("⚠️  当前 C 编译器不支持 LTO/PGO（需要 clang），已降级为「仅 O3 + SIMD」的 --fast。");
@@ -1401,7 +1468,9 @@ fn print_usage() {
     eprintln!("用法: dialc <命令> [参数]");
     eprintln!();
     eprintln!("编译与运行");
-    eprintln!("  build <文件.dial> [-o 输出] [-g] [--no-link] [--safety debug|safe|fast] [--pgo] [--tiny] [--single-file]");
+    eprintln!("  build <文件.dial> [-o 输出] [-g] [--no-link] [--safety debug|safe|fast] [--pgo] [--tiny] [--single-file] [--backend llvm|asm]");
+    eprintln!("  --backend llvm|asm   代码生成后端；默认 llvm（既有路径）。asm 为自研后端：");
+    eprintln!("                      专属 IR + 优化 Pass → x86-64/AArch64 汇编 → cc -c → .o（实验性）");
     eprintln!("  run   <文件.dial> [同上]");
     eprintln!("  -g / --debug-info          生成标准 DWARF（GDB/LLDB 源码行断点 + print 变量名）");
     eprintln!("  --tiny                     体积模式：-Os + 函数/数据分段 + --gc-sections + strip（与 --fast/--pgo/-g 冲突）");
