@@ -291,6 +291,32 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// x86-64：把 `off(%rsp)` 当作**内存操作数**直接读/写。
+    /// 局部变量槽的地址是编译期已知的栈偏移，无需先算地址到寄存器——
+    /// 相比「地址寄存器 + 间接访存」每次访问省一条指令。AArch64 的
+    /// 立即数偏移有范围限制，不走这条捷径。
+    fn load_stack(&mut self, off: i64, val_reg: &str, ty: &IrType) {
+        let m = format!("{}({})", off, self.r("rsp"));
+        match ty {
+            IrType::I1 | IrType::I8 => self.line(&format!("\tmovzbq {}, {}", m, self.r(val_reg))),
+            IrType::I32 => self.line(&format!("\tmovl {}, {}", m, self.r(&self.r32(val_reg)))),
+            IrType::F64 => self.line(&format!("\tmovsd {}, {}", m, self.r(val_reg))),
+            IrType::F32 => self.line(&format!("\tmovss {}, {}", m, self.r(val_reg))),
+            _ => self.line(&format!("\tmovq {}, {}", m, self.r(val_reg))),
+        }
+    }
+
+    fn store_stack(&mut self, off: i64, val_reg: &str, ty: &IrType) {
+        let m = format!("{}({})", off, self.r("rsp"));
+        match ty {
+            IrType::I1 | IrType::I8 => self.line(&format!("\tmovb {}, {}", self.r(&self.r8(val_reg)), m)),
+            IrType::I32 => self.line(&format!("\tmovl {}, {}", self.r(&self.r32(val_reg)), m)),
+            IrType::F64 => self.line(&format!("\tmovsd {}, {}", self.r(val_reg), m)),
+            IrType::F32 => self.line(&format!("\tmovss {}, {}", self.r(val_reg), m)),
+            _ => self.line(&format!("\tmovq {}, {}", self.r(val_reg), m)),
+        }
+    }
+
     /// 从 `[addr_reg]` 按 ty 宽度读到 `reg`（整数用 g1，浮点用 f1）。
     fn load_mem(&mut self, addr_reg: &str, val_reg: &str, ty: IrType) {
         match self.target {
@@ -519,6 +545,23 @@ impl<'a> FnEmit<'a> {
                 self.sg(*dst, &b);
             }
             IrInst::Load { dst, ptr, ty } => {
+                // **局部变量直接栈寻址**：ptr 若是 Alloca 的 dst，其地址是编译期
+                // 已知的栈偏移；x86-64 可直接把 off(%rsp) 当内存操作数读，
+                // 省掉「先算地址到寄存器、再间接访存」里的一条指令。
+                if matches!(self.target, EmitTarget::X86_64SysV) {
+                    if let Some(off) = self.alloca_off.get(ptr).copied() {
+                        if ty.is_float() {
+                            let f = self.f1().to_string();
+                            self.load_stack(off, &f, ty);
+                            self.sf(*dst, &f);
+                        } else {
+                            let g = self.g1().to_string();
+                            self.load_stack(off, &g, ty);
+                            self.sg(*dst, &g);
+                        }
+                        return;
+                    }
+                }
                 let a = self.g2().to_string();
                 self.lg(Value::Reg(*ptr), &a);
                 if ty.is_float() {
@@ -532,6 +575,20 @@ impl<'a> FnEmit<'a> {
                 }
             }
             IrInst::Store { ptr, val, ty } => {
+                if matches!(self.target, EmitTarget::X86_64SysV) {
+                    if let Some(off) = self.alloca_off.get(ptr).copied() {
+                        if ty.is_float() {
+                            let f = self.f1().to_string();
+                            self.lf(*val, &f);
+                            self.store_stack(off, &f, ty);
+                        } else {
+                            let g = self.g1().to_string();
+                            self.lg(*val, &g);
+                            self.store_stack(off, &g, ty);
+                        }
+                        return;
+                    }
+                }
                 let a = self.g2().to_string();
                 self.lg(Value::Reg(*ptr), &a);
                 if ty.is_float() {
