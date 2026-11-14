@@ -319,7 +319,7 @@ dialc lsp
 > `[asm 后端] ...` 编译错误，绝不静默降级。`asm` 后端拒绝 `--pgo`、忽略 `-g`。
 > 双后端黄金门禁见 `tools/run_asm_golden.sh`（`run_tests.sh` 的 AF 组）。
 >
-> **当前覆盖范围**（M1–M3 已落地）：
+> **当前覆盖范围**（M1–M5 已落地）：
 >
 > | 批次 | 覆盖内容 |
 > | --- | --- |
@@ -328,15 +328,21 @@ dialc lsp
 > | M2-b | 方法**表驱动**分派：全部内建方法（含容器 COW 写回、`kv()`、`eret()`、`one()`、`earg()`） |
 > | M3-a | 控制流与异常：`defer` / `try`–`catch` / `throw`（运行时 setjmp/longjmp + 异常栈）、文件 IO 内建（失败抛 `Error`）、`with` 自动释放 |
 > | M3-b | `label` / `goto`（含跨作用域释放，深度表与 LLVM 后端同源核对） |
+> | M5-a | 结构体**按值语义**（形参 / 返回值 / 嵌套字段 / 值拷贝隔离） |
+> | M5-b | 容器元素类型与所有权结算（`string[]` / `bool[]` / `float[]` 的 kind 与位模式） |
+> | M5-c | 裸指针 FFI：`raw_alloc` / `raw_free` / `ptr_cast` / `offset` 指针算术 / `*p` 读写 / C 库互通 |
+> | M5-d | 一等**函数地址**（函数指针）：取地址 / 间接调用 / 作参数与返回值 |
 >
 > 尚未覆盖（会明确报错）：`select` / `spawn` / 通道并发、编译期布局内建
-> （`sizeof` / `alignof` / `offsetof`）、内联汇编与 SIMD、`ptr_cast` 类型字面量、
-> 裸指针解引用赋值等。
+> （`sizeof` / `alignof` / `offsetof`）、内联汇编与 SIMD、高阶容器方法
+> （`map` / `filter` / `reduce` / `sort_by`）、嵌套下标赋值等。
 >
 > **双后端黄金门禁**（`tools/run_asm_golden.sh`，`run_tests.sh` 的 AF 组）：
 > 同一份 `.dial` 分别用 `llvm` / `asm` 编译运行并**逐字节 diff**——LLVM 后端即基准，
-> 无需维护 `.expected`。正向用例 6 份（`core1`–`core3` 核心子集 + `builtins`
-> 内建与方法表 + `exceptions` 异常与文件 IO + `control_flow` `label`/`goto`）；
+> 无需维护 `.expected`。正向用例 10 份（`core1`–`core3` 核心子集 + `builtins`
+> 内建与方法表 + `exceptions` 异常与文件 IO + `control_flow` `label`/`goto` +
+> `structs` 结构体按值语义 + `containers` 容器元素类型 + `rawptr` 裸指针 FFI +
+> `fnptr` 一等函数地址）；
 > 负例在 `tests/asm_golden/negative/` 下逐个遍历，每个都要求「LLVM 能编译、
 > asm 报错且带 `[asm 后端]` 前缀」，杜绝静默降级。用例在临时目录编译，仓库零污染。
 
