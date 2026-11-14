@@ -552,6 +552,20 @@ impl<'a> FnEmit<'a> {
             IrInst::Conv { kind, dst, a, ty } => self.inst_conv(*kind, *dst, *a, ty.clone()),
             IrInst::Call { dst, func, args, arg_tys, ret_ty, .. } =>
                 self.inst_call(*dst, func, args, arg_tys, ret_ty.clone()),
+            IrInst::CallIndirect { dst, target, args, arg_tys, ret_ty } =>
+                self.inst_call_indirect(*dst, *target, args, arg_tys, ret_ty.clone()),
+            IrInst::FuncAddr { dst, func } => {
+                // 取函数代码地址：leaq <符号>(%rip), %reg（PIE 位置无关）。
+                let g = self.g1().to_string();
+                match self.target {
+                    EmitTarget::X86_64SysV => self.line(&format!("\tleaq {}(%rip), {}", func, self.r(&g))),
+                    EmitTarget::AArch64 => {
+                        self.line(&format!("\tadrp {}, {}", g, func));
+                        self.line(&format!("\tadd {}, {}, :lo12:{}", g, g, func));
+                    }
+                }
+                self.sg(*dst, &g);
+            }
             IrInst::RcRetain { ptr, kind } => self.inst_arc(*ptr, *kind, true),
             IrInst::RcRelease { ptr, kind } => self.inst_arc(*ptr, *kind, false),
             IrInst::StructRetain { ptr, struct_name } => self.inst_struct_arc(*ptr, struct_name, true),
@@ -915,6 +929,90 @@ impl<'a> FnEmit<'a> {
         }
         self.do_call(func);
 
+        // 4) 返回值落回 dst 槽。
+        if let Some(d) = dst {
+            if ret_ty.is_float() {
+                let rr = match self.target {
+                    EmitTarget::X86_64SysV => "xmm0".to_string(),
+                    EmitTarget::AArch64 => "d0".to_string(),
+                };
+                self.sf(d, &rr);
+            } else {
+                let rr = self.target.ret_int_reg().to_string();
+                self.sg(d, &rr);
+            }
+        }
+    }
+
+    /// 间接调用：实参按同一套 ABI 规则装载，最后 `call *%reg`。
+    /// 与直接调用的差别只在「调用目标来自寄存器而非符号名」。
+    fn inst_call_indirect(
+        &mut self,
+        dst: Option<VReg>,
+        target: VReg,
+        args: &[Value],
+        arg_tys: &[IrType],
+        ret_ty: IrType,
+    ) {
+        let locs = abi_assign(arg_tys, self.target);
+        let g1 = self.g1().to_string();
+        // 1) 栈传参（低位 outbound 区）
+        for (idx, loc) in locs.iter().enumerate() {
+            if let ArgLoc::Stack(k) = loc {
+                let off = (*k as i64) * 8;
+                if arg_tys[idx].is_float() {
+                    let f = self.f1().to_string();
+                    self.lf(args[idx], &f);
+                    match self.target {
+                        EmitTarget::X86_64SysV => self.line(&format!("\tmovsd {}, {}({})", self.r(&f), off, self.r("rsp"))),
+                        EmitTarget::AArch64 => self.line(&format!("\tstr {}, [sp, #{}]", f, off)),
+                    }
+                } else {
+                    self.lg(args[idx], &g1);
+                    match self.target {
+                        EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}, {}({})", self.r(&g1), off, self.r("rsp"))),
+                        EmitTarget::AArch64 => self.line(&format!("\tstr {}, [sp, #{}]", g1, off)),
+                    }
+                }
+            }
+        }
+        // 2) 寄存器参数
+        for (idx, loc) in locs.iter().enumerate() {
+            match loc {
+                ArgLoc::Int(k) => {
+                    let reg = self.target.int_arg_regs()[*k].to_string();
+                    self.lg(args[idx], &reg);
+                }
+                ArgLoc::Fp(k) => {
+                    let raw = self.target.fp_arg_regs()[*k].to_string();
+                    let reg = match self.target {
+                        EmitTarget::X86_64SysV => raw.clone(),
+                        EmitTarget::AArch64 => raw.replacen('v', "d", 1),
+                    };
+                    self.lf(args[idx], &reg);
+                }
+                ArgLoc::Stack(_) => {}
+            }
+        }
+        // 3) 调用目标放进一个**不与实参寄存器冲突**的寄存器。
+        //    x86-64 用 %r11（caller-saved，且不在 int_arg_regs 里）；
+        //    AArch64 用 x16（IP0， caller-saved）。
+        // 裸寄存器名（lg / sg 内部会自己加 '%' 前缀）。
+        let call_reg = match self.target {
+            EmitTarget::X86_64SysV => "r11",
+            EmitTarget::AArch64 => "x16",
+        };
+        self.lg(Value::Reg(target), call_reg);
+        match self.target {
+            EmitTarget::X86_64SysV => {
+                // SysV variadic 约定：%al = 使用的向量寄存器个数（对非 variadic 无副作用）。
+                self.line(&format!("\txorl {}, {}", self.r("eax"), self.r("eax")));
+                self.line(&format!("\tcall *{}", self.r(call_reg)));
+            }
+            EmitTarget::AArch64 => {
+                self.line(&format!("\tblr {}", call_reg));
+            }
+        }
         // 4) 返回值落回 dst 槽。
         if let Some(d) = dst {
             if ret_ty.is_float() {

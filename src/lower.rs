@@ -1078,7 +1078,17 @@ impl<'a> Lower<'a> {
             Expr::Var(name) => {
                 let l = match self.lookup(name) {
                     Some(l) => l.clone(),
-                    None => return self.err(&format!("未声明的变量 '{}'", name)),
+                    None => {
+                        // 不是局部变量，但可能是**具名函数**——函数名在右值位置
+                        // 求值为纯代码地址（v1.03 的一等函数指针，语义层同口径：
+                        // 名字既不是变量也不是函数时才报错）。
+                        if self.ip.functions_sig.contains_key(name) {
+                            let p = self.new_reg(IrType::FnPtr);
+                            self.emit(IrInst::FuncAddr { dst: p, func: name.clone() });
+                            return Ok((Value::Reg(p), false));
+                        }
+                        return self.err(&format!("未声明的变量 '{}'", name));
+                    }
                 };
                 if let Type::Struct(_) = l.dt {
                     Ok((Value::Reg(l.ptr), false)) // 结构体变量：返回槽地址（指针语义）
@@ -1244,8 +1254,17 @@ impl<'a> Lower<'a> {
                 Ok((Value::Reg(r), false))
             }
             Expr::Call(name, args) => self.lower_call(name, args),
-            Expr::TypeLit(_) => self.err("asm 后端暂不支持 `ptr_cast` 类型字面量（后续相位）"),
-            Expr::FuncRef(_) => self.err("asm 后端暂不支持 `spawn`（后续相位，线程）"),
+            Expr::TypeLit(_) => self.err("asm 后端暂不支持类型字面量（后续相位）"),
+            // 具名函数当值：取其**代码地址**（纯代码地址，无闭包、无环境）。
+            // 与 LLVM 后端一致：fn(A,B):R 在 IR 层就是一个 ptr。
+            Expr::FuncRef(fname) => {
+                if !self.ip.functions_sig.contains_key(fname) {
+                    return self.err(&format!("未定义的函数 '{}'", fname));
+                }
+                let p = self.new_reg(IrType::FnPtr);
+                self.emit(IrInst::FuncAddr { dst: p, func: fname.clone() });
+                Ok((Value::Reg(p), false))
+            }
         }
     }
 
@@ -1596,7 +1615,14 @@ impl<'a> Lower<'a> {
         // （语义层 RESERVED_NAMES 设防，不会与之撞名）走表驱动分派。
         let sig = match self.ip.functions_sig.get(name) {
             Some(s) => s.clone(),
-            None => return self.lower_builtin(name, args),
+            None => {
+                // 名字不是函数，但可能是**持有函数指针的变量** —— 间接调用
+                // （语义层 codegen 对应处：type_of 的 FnPtr 分支，签名严格匹配）。
+                if let Some(Type::FnPtr(ps, ret)) = self.lookup(name).map(|l| l.dt.clone()) {
+                    return self.lower_call_indirect(name, &ps, &ret, args);
+                }
+                return self.lower_builtin(name, args);
+            }
         };
         let ret_dt = sig.ret.clone();
         let mut arg_vals = Vec::new();
@@ -1653,6 +1679,51 @@ impl<'a> Lower<'a> {
     }
 
     // ---- 表驱动的内建分派 ----
+
+    /// 间接调用：被调目标是**函数指针变量**（fn(A,B):R）。
+    /// 签名严格匹配（语义层已核对实参类型），调用目标从寄存器取出后 `call *%reg`。
+    fn lower_call_indirect(
+        &mut self,
+        name: &str,
+        ps: &[Type],
+        ret: &Type,
+        args: &[Expr],
+    ) -> Result<(Value, bool), String> {
+        if args.len() != ps.len() {
+            return self.err(&format!(
+                "[asm 后端] 函数指针 '{}' 需要 {} 个参数，但传入了 {} 个",
+                name, ps.len(), args.len()
+            ));
+        }
+        let (fv, _) = self.lower_expr(&Expr::Var(name.to_string()), &Type::Void)?;
+        let mut arg_vals = Vec::new();
+        let mut arg_tys = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let pt = ps[i].clone();
+            let (v, _) = self.lower_expr(a, &pt)?;
+            let v = self.adapt_param(v, &pt, &pt);
+            arg_vals.push(v);
+            arg_tys.push(param_ir(&pt));
+        }
+        let ret_ir = param_ir(ret);
+        let dst = if *ret == Type::Void { None } else { Some(self.new_reg(ret_ir.clone())) };
+        self.emit(IrInst::CallIndirect {
+            dst, target: fv.as_reg(), args: arg_vals, arg_tys, ret_ty: ret_ir.clone(),
+        });
+        match dst {
+            None => Ok((Value::Imm(Imm::I64(0)), false)),
+            Some(d) => {
+                let internal = reg_ir(ret);
+                if internal != ret_ir {
+                    let r2 = self.new_reg(internal.clone());
+                    self.emit(IrInst::Conv { kind: AConv::Zext, dst: r2, a: Value::Reg(d), ty: internal });
+                    Ok((Value::Reg(r2), false))
+                } else {
+                    Ok((Value::Reg(d), false))
+                }
+            }
+        }
+    }
 
     /// functions_sig 未命中时调用：查 src/builtin.rs 的分派表。
     fn lower_builtin(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
@@ -2320,7 +2391,14 @@ impl<'a> Lower<'a> {
             Expr::FloatLit(_) => Type::Float,
             Expr::BoolLit(_) => Type::Bool,
             Expr::StringLit(_) | Expr::Interp(_) => Type::String,
-            Expr::Var(name) => self.lookup(name).map(|l| l.dt.clone()).unwrap_or(Type::Int),
+            Expr::Var(name) => match self.lookup(name) {
+                Some(l) => l.dt.clone(),
+                // 具名函数在右值位置求值为**纯函数地址**（fn(A,B):R）。
+                None => match self.ip.functions_sig.get(name) {
+                    Some(info) => Type::FnPtr(info.params.clone(), Box::new(info.ret.clone())),
+                    None => Type::Int,
+                },
+            },
             Expr::Binary(a, op, b) => {
                 let da = self.expr_dt(a);
                 let db = self.expr_dt(b);
@@ -2378,6 +2456,12 @@ impl<'a> Lower<'a> {
                 builtin::method_ret(&od, method).unwrap_or(Type::Int)
             }
             Expr::StructLit(name, _) => Type::Struct(name.clone()),
+            // 具名函数在右值位置求值为**纯函数地址**（fn(A,B):R）——
+            // 不分配环境对象、不做捕获、不走 ARC，只有一个代码地址。
+            Expr::FuncRef(fname) => match self.ip.functions_sig.get(fname) {
+                Some(info) => Type::FnPtr(info.params.clone(), Box::new(info.ret.clone())),
+                None => Type::Int,
+            },
             Expr::ArrayLit(elems, expect) => match expect {
                 Some(et) => Type::Array(Box::new((**et).clone())),
                 None => {

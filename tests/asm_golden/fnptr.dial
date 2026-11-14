@@ -1,0 +1,51 @@
+// 一等函数地址（函数指针）回归用例（M5-d）。
+//
+// 曾经的 bug：asm 后端完全没有「取函数地址」的能力——函数名当值报
+// 「未声明的变量」，间接调用无从谈起（这也让并发 spawn 缺少硬前置）。
+// 本用例覆盖：函数名当值（纯代码地址）、间接调用、函数指针作参数、
+// 函数指针作返回值、函数指针存进变量再调用。
+
+fn double(x: int): int {
+    return x * 2;
+}
+
+fn inc(x: int): int {
+    return x + 1;
+}
+
+fn add(a: int, b: int): int {
+    return a + b;
+}
+
+fn apply(f: fn(int): int, v: int): int {
+    return f(v);
+}
+
+fn pick(flag: bool): fn(int): int {
+    if (flag) {
+        return double;
+    }
+    return inc;
+}
+
+fn main(): int {
+    // 函数名当值 → 纯代码地址
+    var cb: fn(int): int = double;
+    print("indirect = ", cb(21));
+
+    // 具名函数直接当实参
+    print("apply = ", apply(inc, 9));
+
+    // 函数指针作返回值
+    var g: fn(int): int = pick(true);
+    print("pick(true) = ", g(5));
+    var h: fn(int): int = pick(false);
+    print("pick(false) = ", h(5));
+
+    // 普通调用不受影响
+    print("add = ", add(1, 2));
+
+    // 函数指针存进结构体字段后再取出调用
+    print("again = ", cb(10), " ", cb(10));
+    return 0;
+}

@@ -173,6 +173,19 @@ pub enum IrInst {
         linkage: CallLink,
     },
 
+    /// 取具名函数的代码地址（函数指针的一等值）。
+    /// 发射为 `leaq <符号>(%rip), %reg`——纯代码地址，无闭包、无环境。
+    FuncAddr { dst: VReg, func: String },
+    /// 间接调用：target 是**函数指针值**（IrType::FnPtr）。
+    /// 实参与返回值的宽度按 arg_tys / ret_ty 走，与直接调用同一套 ABI 规则。
+    CallIndirect {
+        dst: Option<VReg>,
+        target: VReg,
+        args: Vec<Value>,
+        arg_tys: Vec<IrType>,
+        ret_ty: IrType,
+    },
+
     /// ARC 原语（发射时落为具体 C call）。
     RcRetain { ptr: VReg, kind: ArcKind },
     RcRelease { ptr: VReg, kind: ArcKind },
@@ -197,9 +210,11 @@ impl IrInst {
             | IrInst::Conv { .. }
             | IrInst::Alloca { .. }
             | IrInst::PtrAdd { .. }
+            | IrInst::FuncAddr { .. }
             | IrInst::FieldAddr { .. } => true,
             IrInst::Store { .. }
             | IrInst::Call { .. }
+            | IrInst::CallIndirect { .. }
             | IrInst::RcRetain { .. }
             | IrInst::RcRelease { .. }
             | IrInst::StructRetain { .. }
@@ -215,6 +230,7 @@ impl IrInst {
             | IrInst::Load { dst, .. }
             | IrInst::FieldAddr { dst, .. }
             | IrInst::LeaLabel { dst, .. }
+            | IrInst::FuncAddr { dst, .. }
             | IrInst::PtrAdd { dst, .. }
             | IrInst::Bin { dst, .. }
             | IrInst::Un { dst, .. }
@@ -223,6 +239,7 @@ impl IrInst {
             | IrInst::FCmp { dst, .. }
             | IrInst::Conv { dst, .. } => Some(*dst),
             IrInst::Call { dst, .. } => *dst,
+            IrInst::CallIndirect { dst, .. } => *dst,
             IrInst::Store { .. }
             | IrInst::RcRetain { .. }
             | IrInst::RcRelease { .. }
@@ -243,8 +260,12 @@ impl IrInst {
             | IrInst::FCmp { a, b, .. } => { push_val(*a, out); push_val(*b, out); }
             IrInst::Un { a, .. } | IrInst::Conv { a, .. } => push_val(*a, out),
             IrInst::PtrAdd { base, off, .. } => { out.push(*base); push_val(*off, out); }
-            IrInst::LeaLabel { .. } | IrInst::Alloca { .. } => {}
+            IrInst::LeaLabel { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => {}
             IrInst::Call { args, .. } => for a in args { push_val(*a, out); }
+            IrInst::CallIndirect { target, args, .. } => {
+                out.push(*target);
+                for a in args { push_val(*a, out); }
+            }
             IrInst::EnvInit { argc, argv } => { push_val(*argc, out); push_val(*argv, out); }
         }
     }
@@ -257,12 +278,13 @@ impl IrInst {
             IrInst::RcRetain { ptr, .. } | IrInst::RcRelease { ptr, .. }
             | IrInst::StructRetain { ptr, .. } | IrInst::StructRelease { ptr, .. } => *ptr == v,
             IrInst::Call { args, .. } => args.contains(&Value::Reg(v)),
+            IrInst::CallIndirect { target, args, .. } => *target == v || args.contains(&Value::Reg(v)),
             IrInst::Bin { a, b, .. } | IrInst::FBin { a, b, .. } | IrInst::ICmp { a, b, .. }
             | IrInst::FCmp { a, b, .. } => *a == Value::Reg(v) || *b == Value::Reg(v),
             IrInst::Un { a, .. } | IrInst::Conv { a, .. } => *a == Value::Reg(v),
             IrInst::Load { ptr, .. } | IrInst::FieldAddr { base: ptr, .. } => *ptr == v,
             IrInst::PtrAdd { base, off, .. } => *base == v || *off == Value::Reg(v),
-            IrInst::LeaLabel { .. } | IrInst::Alloca { .. } => false,
+            IrInst::LeaLabel { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => false,
             IrInst::EnvInit { argc, argv } => *argc == Value::Reg(v) || *argv == Value::Reg(v),
         }
     }
