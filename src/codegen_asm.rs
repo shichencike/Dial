@@ -1149,6 +1149,14 @@ impl<'a> FnEmit<'a> {
                     if a_src != pd_r {
                         self.line(&format!("\tmovq {}, {}", a_src, pd_r));
                     }
+                    // M7-c1：常量移位量直接编码为 imm8，跳过 %cl 变址装载。
+                    let simm = if matches!(op, ABin::Shl | ABin::Shr) { shift_imm(b) } else { None };
+                    if let Some(n) = simm {
+                        let m = if matches!(op, ABin::Shl) { "shlq" } else { "sarq" };
+                        self.line(&format!("\t{} ${}, {}", m, n, pd_r));
+                        self.dirty.insert(dst);
+                        return;
+                    }
                     let b_src = self.bin_src(b, &scratch, allow_imm, false);
                     match op {
                         ABin::Add => self.line(&format!("\taddq {}, {}", b_src, pd_r)),
@@ -1180,6 +1188,16 @@ impl<'a> FnEmit<'a> {
         let g1 = self.g1().to_string();
         let g2 = self.g2().to_string();
         self.lg(a, &g1);
+        // M7-c1：x86-64 常量移位量折叠（AArch64 的 lslv/asrv 仍走寄存器形式）。
+        let simm = if matches!(self.target, EmitTarget::X86_64SysV)
+            && matches!(op, ABin::Shl | ABin::Shr) { shift_imm(b) } else { None };
+        if let Some(n) = simm {
+            let a_reg = self.r(&g1);
+            let m = if matches!(op, ABin::Shl) { "shlq" } else { "sarq" };
+            self.line(&format!("\t{} ${}, {}", m, n, a_reg));
+            self.sg(dst, &g1);
+            return;
+        }
         let b_reg = self.bin_src(b, &g2, allow_imm, false);
         match self.target {
             EmitTarget::X86_64SysV => {
@@ -1751,6 +1769,72 @@ fn abin_cmp(op: ABin) -> ACmp {
     }
 }
 
+/// 解析 x86-64 的 `\tmovq %reg, off(%rsp)`（整 8 字节栈写），返回 (reg, off)。
+fn parse_rsp_store(line: &str) -> Option<(&str, &str)> {
+    let s = line.strip_prefix("\tmovq ")?;
+    let (l, r) = s.split_once(", ")?;
+    if !l.starts_with('%') { return None; }
+    let off = r.strip_suffix("(%rsp)")?;
+    if off.is_empty() || !off.bytes().all(|b| b.is_ascii_digit() || b == b'-') { return None; }
+    Some((l, off))
+}
+
+/// 解析 x86-64 的 `\tmovq off(%rsp), %reg`（整 8 字节栈读），返回 (off, reg)。
+fn parse_rsp_load(line: &str) -> Option<(&str, &str)> {
+    let s = line.strip_prefix("\tmovq ")?;
+    let (l, r) = s.split_once(", ")?;
+    if !r.starts_with('%') { return None; }
+    let off = l.strip_suffix("(%rsp)")?;
+    if off.is_empty() || !off.bytes().all(|b| b.is_ascii_digit() || b == b'-') { return None; }
+    Some((off, r))
+}
+
+/// M7-c2：消除全 spill 里「刚把物理寄存器整 8 字节写进栈槽、紧接下一行又
+/// 从同一槽读回同一寄存器」的冗余 load。
+///
+/// 正确性：`movq %reg, off(%rsp)` 不修改源寄存器，删掉紧邻的
+/// `movq off(%rsp), %reg` 后，`reg` 里仍是刚写入的值、内存槽里也是同一值，
+/// 语义完全等价；且 `movq` 不影响标志位。匹配被严格限定为：
+///   · 两行文本严格相邻（label / term / 其它指令都会打断，绝不跨基本块）；
+///   · 必须是同一个 `%reg`、同一个 `off`；
+///   · 只认 `movq`——窄整型（movl/movzbq/movb）、浮点（movsd/movss）、
+///     立即数（`$imm`）、AArch64（str/ldr）一律不动。
+/// 仅用于 x86-64；AArch64 原样返回。
+fn elide_redundant_reloads(asm: &str) -> String {
+    let lines: Vec<&str> = asm.lines().collect();
+    let mut out = String::with_capacity(asm.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let mut skip_next = false;
+        if i + 1 < lines.len() {
+            if let (Some((sreg, soff)), Some((loff, lreg))) =
+                (parse_rsp_store(lines[i]), parse_rsp_load(lines[i + 1]))
+            {
+                if sreg == lreg && soff == loff { skip_next = true; }
+            }
+        }
+        out.push_str(lines[i]);
+        out.push('\n');
+        i += if skip_next { 2 } else { 1 };  // 保留 store、丢弃紧邻的冗余 load
+    }
+    out
+}
+
+/// M7-c1：x86-64 移位指令的立即数形式只接受 imm8，且 64 位操作数实际按
+/// `count & 63` 生效。当移位量是 `[0,63]` 的整数常量时，`shlq/sarq $n, reg`
+/// 与 `movq $n,%rcx; shlq %cl,reg` 语义完全一致，可以直接折叠、省掉两次搬运。
+/// 其余（寄存器 / 越界 / 浮点位模式）一律返回 None，退回原变址移位路径。
+fn shift_imm(v: Value) -> Option<i64> {
+    let n = match v {
+        Value::Imm(Imm::I64(n)) => n,
+        Value::Imm(Imm::I32(n)) => n as i64,
+        Value::Imm(Imm::I8(n)) => n as i64,
+        Value::Imm(Imm::I1(b)) => b as i64,
+        _ => return None,
+    };
+    if (0..=63).contains(&n) { Some(n) } else { None }
+}
+
 fn x86_setcc(op: ACmp) -> &'static str {
     match op {
         ACmp::Eq => "sete", ACmp::Neq => "setne", ACmp::Lt => "setl",
@@ -1827,6 +1911,11 @@ fn emit_function(
         e.term(b.id, &b.term);
         e.end_block();
     }
-    out.push_str(&e.out);
+    // M7-c2：x86-64 发射末尾做一次受严格约束的冗余 load 消除。
+    if matches!(target, EmitTarget::X86_64SysV) {
+        out.push_str(&elide_redundant_reloads(&e.out));
+    } else {
+        out.push_str(&e.out);
+    }
     Ok(())
 }
