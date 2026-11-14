@@ -765,6 +765,26 @@
   **GUI 包 / C 层 / 三平台 `.a` / `gui.diali` / ABI 全部零改动**；
   `gui_oo.dial` 在 B1 落地当时不重新 `pack` / `install`（其后已随包 `src/` 分发、
   装包即用，见上文）。
+- **自研代码生成后端（`--backend=asm`，实验性）**：新增一条与 LLVM 后端**完全并列**的
+  编译链路——专属 IR（`src/ir.rs`：3 地址码 + 基本块 + 块参数即 SSA 形参）→
+  AST lowering（`src/lower.rs`）→ 优化 Pass（`src/pass.rs`：常量折叠 / 代数化简 /
+  DCE / 保守 CSE / 保守 ARC 简化）→ 目标汇编发射（`src/codegen_asm.rs`：x86-64 SysV
+  严格实现 + AArch64 AAPCS 同构，全 spill 栈帧 + C ABI 传参）→ 复用现有 `cc -c`
+  把 `.s` 汇编成 `.o` → 复用既有 `link()` / `final_link()` 链接。
+  **不发射 C 源码、不引 Cranelift、不直接拼二进制机器码、零新包依赖**。
+  `--backend llvm|asm`（也支持 `--backend asm`）激活，**默认 llvm**：不指定时行为
+  与既有版本逐字节一致，`src/codegen.rs` / `src/ast.rs` **零改动**。
+  首版覆盖标量 / 字符串 / 整数数组 / 结构体（局部 + 字段读写）/ 控制流 / 函数与递归 /
+  FFI / 基础 ARC / print 变参 / 字符串插值 / match（字面量）；未覆盖构造一律
+  Fail-Fast 报 `[asm 后端] ...`，绝不静默降级。`asm` 后端拒绝 `--pgo`（依赖 LLVM
+  bitcode）、忽略 `-g`（首版无 DWARF），`--fast` 仅作用于 C 运行时；`--tiny` /
+  `--single-file` / FFI 包 / rpath 因复用链接层而零改动生效。`DIAL_ASM_TARGET`
+  可显式指定交叉目标（配合 `DIAL_C_COMPILER` 使用）。
+- **AF 组（双后端黄金门禁）**：`tools/run_asm_golden.sh` 把 3 份核心子集 `.dial`
+  分别用 `llvm` / `asm` 编译运行并逐字节 diff（LLVM 后端即基准，无需维护 `.expected`），
+  另校验 `.s` 产物确实生成、默认后端仍为 llvm、未覆盖构造 Fail-Fast 明确报错、
+  AArch64 汇编经 `clang --target=aarch64-linux-gnu -c` 语法验证；
+  `tests/run_tests.sh` 新增 AF 组调用与头部说明。用例在临时目录编译，仓库零污染。
 - **交付状态**：源码已按用户要求**推送到 GitHub**（`main` 分支）；**未升级版本号、
   未打标签、未发 Release**（仍遵循本段开头的「开发中增量」口径）。推送通道按用户
   裁决改为**强制 443**：`~/.ssh/config` 把 `github.com` 解析为

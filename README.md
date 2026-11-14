@@ -295,8 +295,8 @@ dialc build main.dial -o main
 ### 3.2.2 命令行用法总览
 
 ```bash
-dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file]
-dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file]
+dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
+dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
 dialc install <包.dialpkg | URL> [--sha256 <哈希>]
 dialc version | --version | -V
 dialc lsp
@@ -309,6 +309,16 @@ dialc lsp
 | `install` | 安装 `.dialpkg` 包；给 URL 时先下载，再做整包哈希与逐文件 SHA256 校验（见 [§25](#25-包分发与依赖管理生态规划--最终规范)） |
 | `version` / `--version` / `-V` | **打印版本号**并退出，例如 `dialc 1.10.0` |
 | `lsp` | 启动语言服务器（走 stdio 的 JSON-RPC；**不由人手敲**，见 [§28](#28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化)） |
+
+> **自研后端 `--backend=asm`（实验性，默认 llvm）**：不指定时走既有 LLVM 后端，
+> 行为与旧版逐字节一致。加上 `--backend=asm`（也可写 `--backend asm`）改用自研后端：
+> 专属 IR → 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化）→ x86-64 SysV 或
+> AArch64 AAPCS 汇编 `.s` → 系统 `cc -c` 汇编成 `.o` → 复用既有链接流程。
+> **不发射 C 源码、不引第三方代码生成库、零新包依赖**；FFI 包、`--tiny`、
+> `--single-file` 因复用链接层而零改动生效。首版覆盖核心子集（标量 / 字符串 /
+> 数组 / 结构体 / 控制流 / 函数 / FFI / 基础 ARC），未覆盖的语言构造会明确报
+> `[asm 后端] ...` 编译错误，绝不静默降级。`asm` 后端拒绝 `--pgo`、忽略 `-g`。
+> 双后端黄金门禁见 `tools/run_asm_golden.sh`（`run_tests.sh` 的 AF 组）。
 
 > **第 18 层两种产物形态**（工具链层，非 `.dialpkg` 契约）：`--tiny` 体积模式
 > （C 侧 `-Os -ffunction-sections -fdata-sections` + 链接期 `-Wl,--gc-sections -s`，
@@ -324,8 +334,8 @@ dialc lsp
 ### 3.3 编译 Dial 程序
 
 ```bash
-dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file]
-dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file]
+dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
+dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
 ```
 
 安全等级（Fail-Fast，详见 §20）：

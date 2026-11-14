@@ -562,25 +562,25 @@ impl<'a> FnEmit<'a> {
         self.lg(b, &g2);
         match self.target {
             EmitTarget::X86_64SysV => {
-                let A = self.r(&g1); let B = self.r(&g2);
+                let a_reg = self.r(&g1); let b_reg = self.r(&g2);
                 match op {
-                    ABin::Add => self.line(&format!("\taddq {}, {}", B, A)),
-                    ABin::Sub => self.line(&format!("\tsubq {}, {}", B, A)),
-                    ABin::Mul => self.line(&format!("\timulq {}, {}", B, A)),
-                    ABin::Div => { self.line("\tcqo"); self.line(&format!("\tidivq {}", B)); }
-                    ABin::Mod => { self.line("\tcqo"); self.line(&format!("\tidivq {}", B)); self.line(&format!("\tmovq {}, {}", self.r("rdx"), A)); }
-                    ABin::BitAnd => self.line(&format!("\tandq {}, {}", B, A)),
-                    ABin::BitOr => self.line(&format!("\torq {}, {}", B, A)),
-                    ABin::BitXor => self.line(&format!("\txorq {}, {}", B, A)),
-                    ABin::Shl => { self.line(&format!("\tmovq {}, {}", B, self.r("rcx"))); self.line(&format!("\tshlq {}, {}", self.r("cl"), A)); }
-                    ABin::Shr => { self.line(&format!("\tmovq {}, {}", B, self.r("rcx"))); self.line(&format!("\tsarq {}, {}", self.r("cl"), A)); }
+                    ABin::Add => self.line(&format!("\taddq {}, {}", b_reg, a_reg)),
+                    ABin::Sub => self.line(&format!("\tsubq {}, {}", b_reg, a_reg)),
+                    ABin::Mul => self.line(&format!("\timulq {}, {}", b_reg, a_reg)),
+                    ABin::Div => { self.line("\tcqo"); self.line(&format!("\tidivq {}", b_reg)); }
+                    ABin::Mod => { self.line("\tcqo"); self.line(&format!("\tidivq {}", b_reg)); self.line(&format!("\tmovq {}, {}", self.r("rdx"), a_reg)); }
+                    ABin::BitAnd => self.line(&format!("\tandq {}, {}", b_reg, a_reg)),
+                    ABin::BitOr => self.line(&format!("\torq {}, {}", b_reg, a_reg)),
+                    ABin::BitXor => self.line(&format!("\txorq {}, {}", b_reg, a_reg)),
+                    ABin::Shl => { self.line(&format!("\tmovq {}, {}", b_reg, self.r("rcx"))); self.line(&format!("\tshlq {}, {}", self.r("cl"), a_reg)); }
+                    ABin::Shr => { self.line(&format!("\tmovq {}, {}", b_reg, self.r("rcx"))); self.line(&format!("\tsarq {}, {}", self.r("cl"), a_reg)); }
                     ABin::Eq | ABin::Neq | ABin::Lt | ABin::Gt | ABin::Le | ABin::Ge => {
-                        self.line(&format!("\tcmpq {}, {}", B, A));
+                        self.line(&format!("\tcmpq {}, {}", b_reg, a_reg));
                         self.line(&format!("\t{} {}", x86_setcc(abin_cmp(op)), self.r("al")));
-                        self.line(&format!("\tmovzbq {}, {}", self.r("al"), A));
+                        self.line(&format!("\tmovzbq {}, {}", self.r("al"), a_reg));
                     }
-                    ABin::And => self.line(&format!("\tandq {}, {}", B, A)),
-                    ABin::Or => self.line(&format!("\torq {}, {}", B, A)),
+                    ABin::And => self.line(&format!("\tandq {}, {}", b_reg, a_reg)),
+                    ABin::Or => self.line(&format!("\torq {}, {}", b_reg, a_reg)),
                 }
                 self.sg(dst, &g1);
             }
@@ -618,16 +618,16 @@ impl<'a> FnEmit<'a> {
         self.lf(b, &f2);
         match self.target {
             EmitTarget::X86_64SysV => {
-                let A = self.r(&f1); let B = self.r(&f2);
+                let a_reg = self.r(&f1); let b_reg = self.r(&f2);
                 match op {
-                    ABin::Add => self.line(&format!("\taddsd {}, {}", B, A)),
-                    ABin::Sub => self.line(&format!("\tsubsd {}, {}", B, A)),
-                    ABin::Mul => self.line(&format!("\tmulsd {}, {}", B, A)),
-                    ABin::Div => self.line(&format!("\tdivsd {}, {}", B, A)),
+                    ABin::Add => self.line(&format!("\taddsd {}, {}", b_reg, a_reg)),
+                    ABin::Sub => self.line(&format!("\tsubsd {}, {}", b_reg, a_reg)),
+                    ABin::Mul => self.line(&format!("\tmulsd {}, {}", b_reg, a_reg)),
+                    ABin::Div => self.line(&format!("\tdivsd {}, {}", b_reg, a_reg)),
                     ABin::Mod => { // 浮点取模首版不走这里（lower 未生成）
-                        self.line(&format!("\tdivsd {}, {}", B, A));
+                        self.line(&format!("\tdivsd {}, {}", b_reg, a_reg));
                     }
-                    _ => self.line(&format!("\taddsd {}, {}", B, A)),
+                    _ => self.line(&format!("\taddsd {}, {}", b_reg, a_reg)),
                 }
                 self.sf(dst, &f1);
             }

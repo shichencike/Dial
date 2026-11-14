@@ -111,6 +111,9 @@
 #       冲突矩阵 3/3 Fail-Fast（--tiny 与 --fast / --pgo(配合 fast) / -g）/
 #       --single-file 与 --fast 正交叠加，均用 examples/hello.dial 独立验证
 #       （零已安装包依赖，v1.10 增补）。
+#   AF. 自研后端（--backend=asm）：llvm / asm 双后端对同一份 .dial 的运行输出
+#      逐字节一致 / 确实产出 .s / 默认后端仍为 llvm / 未覆盖构造 Fail-Fast 明确报错 /
+#      AArch64 汇编语法经交叉汇编器验证（tools/run_asm_golden.sh，v1.10 增补）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -3678,6 +3681,14 @@ if "$DIALC" build "$AE_SRC" --single-file --fast -o "${TMP}/ae_sf" >"${TMP}/ae_s
     aepass "--single-file 与 --fast 正交叠加：静态链接且运行正常"
 else
     aebad "--single-file 与 --fast 正交叠加被误拒或不静态"; tail -10 "${TMP}/ae_sf.log"
+fi
+
+echo
+echo "== AF) 自研后端（--backend=asm）双后端黄金门禁 =="
+if bash tools/run_asm_golden.sh "$DIALC"; then
+    :   # 脚本自己逐条打印 ✅；失败项会打印 ❌ 并以非 0 退出
+else
+    fail=1
 fi
 
 echo

@@ -1,0 +1,10 @@
+fn main(): int {
+    print("asm backend hello");
+    var x: int = 40;
+    x = x + 2;
+    print(x);
+    if (x == 42) {
+        print("answer");
+    }
+    return 0;
+}

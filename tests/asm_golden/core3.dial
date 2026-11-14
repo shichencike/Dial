@@ -1,0 +1,54 @@
+struct P { name: string, flag: bool }
+
+fn gcd(a: int, b: int): int {
+    while (b != 0) {
+        var t: int = b;
+        b = a % b;
+        a = t;
+    }
+    return a;
+}
+
+fn classify(n: int): int {
+    match (n) {
+        1 => { return 10; }
+        2 => { return 20; }
+        _ => { return 99; }
+    }
+    return 0;
+}
+
+fn main(): int {
+    var a: int = 17;
+    print("interp a=${a} sum=${a + 3}");
+    print("gcd(48,18) = ", gcd(48, 18));
+    print("classify(2) = ", classify(2));
+    print("classify(7) = ", classify(7));
+
+    var i: int = 0;
+    do {
+        i = i + 1;
+    } while (i < 3);
+    print("do-while i = ", i);
+
+    var arr: int[] = [5, 6, 7];
+    for (v in arr) {
+        print("item ", v);
+    }
+
+    var s: string = "abcdef";
+    print("strlen = ", s.length());
+    print("s[2] = ", s.get(2));
+    print("sub = ", s.substring(1, 4));
+    print("eq = ", s.eq("abcdef"));
+
+    var p: P = P { name: "dial", flag: true };
+    print("p = ", p.name, "/", p.flag);
+    p.name = "changed";
+    print("p2 = ", p.name);
+
+    print("bits = ", (12 & 10), " ", (12 | 10), " ", (12 ^ 10), " ", (1 << 4), " ", (16 >> 2));
+    print("neg = ", -7, " not = ", !false, " bitnot = ", ~0);
+    print("mod = ", 17 % 5, " div = ", 17 / 5);
+    return 0;
+}

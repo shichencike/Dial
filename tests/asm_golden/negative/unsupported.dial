@@ -1,0 +1,7 @@
+// 自研后端首版明确排除的构造：defer。
+// LLVM 后端能正常编译；asm 后端必须 Fail-Fast 报「[asm 后端] ...」，绝不静默降级。
+fn main(): int {
+    defer { print("bye"); }
+    print("hi");
+    return 0;
+}

@@ -15,12 +15,15 @@
 
 mod ast;
 mod codegen;
-mod ir; // 自研后端：专属 IR（x86-64 / AArch64 汇编发射器的输入）
-mod target; // 自研后端：目标平台差异抽象（SysV / AAPCS）
-mod lower; // 自研后端：AST → IR 的 lowering（核心子集）
-mod pass; // 自研后端：优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化）
-mod codegen_asm; // 自研后端：IR → x86-64 / AArch64 汇编
-mod asm; // 自研后端：lower → pass → .s → cc -c → .o 的编排
+// 自研后端首版只覆盖核心子集：IR / 目标平台 trait / Pass 里刻意保留了后续相位
+// （异常 unwinding、NEON / Win64、更多 Conv 与 Pass）要用的枚举变体与方法。
+// 这些「预留接口」暂时没有调用点，统一容忍 dead_code，避免淹没真正的警告。
+#[allow(dead_code)] mod ir;          // 专属 IR（汇编发射器的输入）
+#[allow(dead_code)] mod target;      // 目标平台差异抽象（SysV / AAPCS）
+#[allow(dead_code)] mod lower;       // AST → IR 的 lowering（核心子集）
+#[allow(dead_code)] mod pass;        // 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC）
+#[allow(dead_code)] mod codegen_asm; // IR → x86-64 / AArch64 汇编
+#[allow(dead_code)] mod asm;         // lower → pass → .s → cc -c → .o 编排
 mod diagnostic;
 mod dialfmt;
 mod toolchain;

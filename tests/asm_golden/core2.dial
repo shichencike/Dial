@@ -1,0 +1,50 @@
+fn add(a: int, b: int): int {
+    return a + b;
+}
+
+fn fib(n: int): int {
+    if (n <= 1) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+struct Point { x: int, y: int }
+
+fn main(): int {
+    print("add(3,4) = ", add(3, 4));
+    print("fib(10) = ", fib(10));
+
+    var i: int = 0;
+    var sum: int = 0;
+    while (i < 5) {
+        sum = sum + i;
+        i = i + 1;
+    }
+    print("while sum = ", sum);
+
+    var t: int = 0;
+    for (k in 0..5) {
+        t = t + k;
+    }
+    print("for sum = ", t);
+
+    var p: Point = Point { x: 3, y: 7 };
+    print("point = ", p.x, ",", p.y);
+
+    var arr: int[] = [10, 20, 30];
+    print("arr len = ", arr.length());
+    print("arr[1] = ", arr.get(1));
+
+    var s: string = "ab" + "cd";
+    print("concat = ", s);
+    print("mixed = ", 7, " / ", 3.5, " / ", true);
+
+    var f: float = 1.5;
+    f = f + 2.25;
+    print("float = ", f);
+
+    print("ternary = ", (i > 3) ? "yes" : "no");
+    print("logic = ", (i == 5) and (sum == 10));
+    return 0;
+}
