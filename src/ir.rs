@@ -34,7 +34,7 @@ pub enum IrType {
 
 impl IrType {
     /// 该类型在内存/栈槽里占几个字节（用于栈帧布局与 load/store 宽度）。
-    pub fn size(self) -> u32 {
+    pub fn size(&self) -> u32 {
         match self {
             IrType::I64 | IrType::F64 | IrType::Ptr | IrType::Handle | IrType::FnPtr => 8,
             IrType::I32 | IrType::F32 => 4,
@@ -46,7 +46,7 @@ impl IrType {
         }
     }
 
-    pub fn is_float(self) -> bool { matches!(self, IrType::F64 | IrType::F32) }
+    pub fn is_float(&self) -> bool { matches!(self, IrType::F64 | IrType::F32) }
 }
 
 // ============================================================================
