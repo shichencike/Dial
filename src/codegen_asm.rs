@@ -280,6 +280,42 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// x86-64：把 Value 折叠成「可直接作二元/比较指令源操作数」的字符串。
+    ///
+    /// 全 spill 布局里每个 vreg 的值就在 `off(%rsp)`，而 x86 的算术指令允许一个
+    /// 内存操作数，因此 `lg(b, g2)` 那条搬运在多数情况下可以完全消掉：
+    /// `movq off_b(%rsp), %r10; addq %r10, %rax` → `addq off_b(%rsp), %rax`。
+    /// 立即数仅在落在 imm32 范围内、且对应指令支持 `reg, imm` 形式时才折叠
+    /// （imul/idiv 没有立即数形式，浮点也没有立即数操作数）。
+    /// AArch64 是 load/store 架构，一律先 ldr 进临时寄存器。
+    fn bin_src(&mut self, v: Value, scratch: &str, allow_imm: bool, fp: bool) -> String {
+        if matches!(self.target, EmitTarget::X86_64SysV) {
+            match v {
+                Value::Imm(i) if allow_imm && !matches!(i, Imm::F64(_) | Imm::F32(_)) => {
+                    let n = match i {
+                        Imm::I64(n) => n, Imm::I32(n) => n as i64,
+                        Imm::I8(n) => n as i64, Imm::I1(b) => b as i64,
+                        _ => 0,
+                    };
+                    if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
+                        return format!("${}", n);
+                    }
+                }
+                Value::Reg(r) => {
+                    // F32 槽只写了低 4 字节，整槽 8 字节读会带入垃圾高位，
+                    // 保持 lf 的 movss 路径、不折叠。
+                    if !fp || self.rty(r) == IrType::F64 {
+                        let off = self.slot(r);
+                        return format!("{}({})", off, self.r("rsp"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if fp { self.lf(v, scratch); } else { self.lg(v, scratch); }
+        self.r(scratch)
+    }
+
     /// 取栈上某偏移的地址到整数寄存器。
     fn addr(&mut self, reg: &str, off: i64) {
         match self.target {
@@ -642,10 +678,16 @@ impl<'a> FnEmit<'a> {
         let g1 = self.g1().to_string();
         let g2 = self.g2().to_string();
         self.lg(a, &g1);
-        self.lg(b, &g2);
+        // imul/idiv/移位没有 `reg, imm` 形式，浮点也没有立即数操作数；
+        // 这些情况下仍把 b 装进 g2，其余直接让 x86 读内存/立即数。
+        let allow_imm = matches!(op,
+            ABin::Add | ABin::Sub | ABin::And | ABin::Or |
+            ABin::BitAnd | ABin::BitOr | ABin::BitXor |
+            ABin::Eq | ABin::Neq | ABin::Lt | ABin::Gt | ABin::Le | ABin::Ge);
+        let b_reg = self.bin_src(b, &g2, allow_imm, false);
         match self.target {
             EmitTarget::X86_64SysV => {
-                let a_reg = self.r(&g1); let b_reg = self.r(&g2);
+                let a_reg = self.r(&g1);
                 match op {
                     ABin::Add => self.line(&format!("\taddq {}, {}", b_reg, a_reg)),
                     ABin::Sub => self.line(&format!("\tsubq {}, {}", b_reg, a_reg)),
@@ -698,10 +740,10 @@ impl<'a> FnEmit<'a> {
         let f1 = self.f1().to_string();
         let f2 = self.f2().to_string();
         self.lf(a, &f1);
-        self.lf(b, &f2);
+        let b_reg = self.bin_src(b, &f2, false, true);
         match self.target {
             EmitTarget::X86_64SysV => {
-                let a_reg = self.r(&f1); let b_reg = self.r(&f2);
+                let a_reg = self.r(&f1);
                 match op {
                     ABin::Add => self.line(&format!("\taddsd {}, {}", b_reg, a_reg)),
                     ABin::Sub => self.line(&format!("\tsubsd {}, {}", b_reg, a_reg)),
@@ -731,10 +773,10 @@ impl<'a> FnEmit<'a> {
         let g1 = self.g1().to_string();
         let g2 = self.g2().to_string();
         self.lg(a, &g1);
-        self.lg(b, &g2);
+        let b_reg = self.bin_src(b, &g2, true, false);
         match self.target {
             EmitTarget::X86_64SysV => {
-                self.line(&format!("\tcmpq {}, {}", self.r(&g2), self.r(&g1)));
+                self.line(&format!("\tcmpq {}, {}", b_reg, self.r(&g1)));
                 self.line(&format!("\t{} {}", x86_setcc(op), self.r("al")));
                 self.line(&format!("\tmovzbq {}, {}", self.r("al"), self.r(&g1)));
             }
@@ -750,10 +792,10 @@ impl<'a> FnEmit<'a> {
         let f1 = self.f1().to_string();
         let f2 = self.f2().to_string();
         self.lf(a, &f1);
-        self.lf(b, &f2);
+        let b_reg = self.bin_src(b, &f2, false, true);
         match self.target {
             EmitTarget::X86_64SysV => {
-                self.line(&format!("\tucomisd {}, {}", self.r(&f2), self.r(&f1)));
+                self.line(&format!("\tucomisd {}, {}", b_reg, self.r(&f1)));
                 self.line(&format!("\t{} {}", x86_float_setcc(op), self.r("al")));
                 self.line(&format!("\tmovzbq {}, {}", self.r("al"), self.r(self.g1())));
             }
