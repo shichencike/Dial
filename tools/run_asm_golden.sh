@@ -85,21 +85,25 @@ else
 fi
 
 # 未覆盖构造必须 Fail-Fast，绝不静默降级。
-neg="$CASES/negative/unsupported.dial"
-neg_work="$TMP/negative"
-mkdir -p "$neg_work"
-cp "$neg" "$neg_work/unsupported.dial"
-if "$DIALC" build "$neg_work/unsupported.dial" --backend=llvm -o "$neg_work/llvm_bin" >"$neg_work/llvm.log" 2>&1; then
-    if "$DIALC" build "$neg_work/unsupported.dial" --backend=asm -o "$neg_work/asm_bin" >"$neg_work/asm.log" 2>&1; then
-        bad "unsupported：asm 后端静默放行了未覆盖构造（应为 Fail-Fast）"
-    elif grep -qF '[asm 后端]' "$neg_work/asm.log"; then
-        ok "unsupported：asm 后端明确报错（Fail-Fast），LLVM 后端仍可用"
+# 遍历 negative/ 下全部负例：每个负例都必须是「LLVM 能编译、asm 明确报错」。
+for neg_src in "$CASES"/negative/*.dial; do
+    [ -f "$neg_src" ] || continue
+    neg_name="$(basename "$neg_src" .dial)"
+    neg_work="$TMP/neg_$neg_name"
+    mkdir -p "$neg_work"
+    cp "$neg_src" "$neg_work/$neg_name.dial"
+    if "$DIALC" build "$neg_work/$neg_name.dial" --backend=llvm -o "$neg_work/llvm_bin" >"$neg_work/llvm.log" 2>&1; then
+        if "$DIALC" build "$neg_work/$neg_name.dial" --backend=asm -o "$neg_work/asm_bin" >"$neg_work/asm.log" 2>&1; then
+            bad "$neg_name：asm 后端静默放行了未覆盖构造（应为 Fail-Fast）"
+        elif grep -qF '[asm 后端]' "$neg_work/asm.log"; then
+            ok "$neg_name：asm 后端明确报错（Fail-Fast），LLVM 后端仍可用"
+        else
+            bad "$neg_name：asm 后端失败但错误信息缺少 [asm 后端] 前缀"; tail -8 "$neg_work/asm.log"
+        fi
     else
-        bad "unsupported：asm 后端失败但错误信息缺少 [asm 后端] 前缀"; tail -8 "$neg_work/asm.log"
+        bad "$neg_name：llvm 后端竟编译失败（用例本身不合法）"; tail -8 "$neg_work/llvm.log"
     fi
-else
-    bad "unsupported：llvm 后端竟编译失败（用例本身不合法）"; tail -8 "$neg_work/llvm.log"
-fi
+done
 
 # AArch64 汇编语法（可选）：交叉汇编出 ELF aarch64 relocatable .o。
 # 该检查只验证助记符合法性，不验证运行语义（x86 宿主无法执行 aarch64 程序）。

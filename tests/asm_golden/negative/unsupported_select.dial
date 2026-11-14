@@ -1,0 +1,14 @@
+// 第二个负例：`select`（通道并发选择）。LLVM 后端支持，asm 后端必须 Fail-Fast。
+// 与 unsupported.dial 形成互不重叠的覆盖：前者是编译期布局内建，本者是并发控制流。
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    select {
+        case recv(ch) as v {
+            print("got ", v);
+        }
+        default {
+            print("nothing");
+        }
+    }
+    return 0;
+}

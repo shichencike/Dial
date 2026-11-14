@@ -1,7 +1,10 @@
-// 自研后端首版明确排除的构造：defer。
-// LLVM 后端能正常编译；asm 后端必须 Fail-Fast 报「[asm 后端] ...」，绝不静默降级。
+// 自研后端**当前仍未覆盖**的构造：编译期布局内建（sizeof）。
+// LLVM 后端能正常编译（编译期常量，零运行时指令）；asm 后端必须 Fail-Fast
+// 报「[asm 后端] ...」，绝不静默降级或给出错误数值。
+//
+// 注：defer / with / try / throw / label / goto 等已在 M3 系列落地，
+// 不再适合当负例——负例必须随已支持构造的推进而更新。
 fn main(): int {
-    defer { print("bye"); }
-    print("hi");
+    print("size = ", sizeof<int>());
     return 0;
 }
