@@ -13,6 +13,7 @@
 //! 参数或返回值 / 结构体方法调用 / ptr_cast / 裸指针解引用赋值 / 数组元素赋值。
 
 use crate::ast::*;
+use crate::builtin;
 use crate::ir::*;
 use crate::semantic::{FuncInfo, StructTable};
 use std::collections::HashMap;
@@ -894,9 +895,11 @@ impl<'a> Lower<'a> {
             if args.is_empty() { return self.err(&format!("{} 至少需要一个参数", name)); }
             return self.lower_print(name, args);
         }
+        // functions_sig 只含用户函数与 extern 声明；按名字硬编码分派的内建
+        // （语义层 RESERVED_NAMES 设防，不会与之撞名）走表驱动分派。
         let sig = match self.ip.functions_sig.get(name) {
             Some(s) => s.clone(),
-            None => return self.err(&format!("asm 后端：未找到函数 `{}`（FFI/内建未覆盖）", name)),
+            None => return self.lower_builtin(name, args),
         };
         let ret_dt = sig.ret.clone();
         let mut arg_vals = Vec::new();
@@ -926,6 +929,164 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+    }
+
+    // ---- 表驱动的内建分派 ----
+
+    /// functions_sig 未命中时调用：查 src/builtin.rs 的分派表。
+    fn lower_builtin(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        let spec = match builtin::lookup(name) {
+            Some(s) => s,
+            None => return self.err(&format!("asm 后端：未找到函数 `{}`（FFI/内建未覆盖）", name)),
+        };
+        let ret_dt = spec.ret.clone();
+        match spec.kind {
+            builtin::BKind::Unsupported(why) =>
+                return self.err(&format!("asm 后端：内建 `{}` 暂不支持——{}", name, why)),
+            // char/byte 与 int 在 IR 里同为 I64：零指令类型视图切换。
+            builtin::BKind::Identity => {
+                let dt = self.expr_dt(&args[0]);
+                let (v, _) = self.lower_expr(&args[0], &dt)?;
+                Ok((v, false))
+            }
+            builtin::BKind::Conv { kind, to_ir } => {
+                let dt = self.expr_dt(&args[0]);
+                let (v, _) = self.lower_expr(&args[0], &dt)?;
+                let d = self.new_reg(to_ir.clone());
+                self.emit(IrInst::Conv { kind, dst: d, a: v, ty: to_ir });
+                Ok((Value::Reg(d), false))
+            }
+            builtin::BKind::MinMax { is_min } => self.lower_minmax(is_min, args),
+            builtin::BKind::Abs => self.lower_abs(args),
+            builtin::BKind::Call { sym, args: abis, ret_ir, post } => {
+                let mut vals = Vec::new();
+                let mut tys = Vec::new();
+                for (i, a) in args.iter().enumerate() {
+                    let abi = abis.get(i).copied().unwrap_or(builtin::Abi::Auto);
+                    let hint = if abi == builtin::Abi::Auto { self.expr_dt(a) } else { builtin::abi_hint(abi) };
+                    let (v, _) = self.lower_expr(a, &hint)?;
+                    let (v2, ty) = self.coerce_to_abi(v, a, abi);
+                    vals.push(v2);
+                    tys.push(ty);
+                }
+                let dst = if ret_ir == IrType::Void { None } else { Some(self.new_reg(ret_ir.clone())) };
+                self.emit(IrInst::Call {
+                    dst, func: sym.to_string(), args: vals, arg_tys: tys,
+                    ret_ty: ret_ir.clone(), linkage: CallLink::Runtime,
+                });
+                let mut v = match dst {
+                    None => return Ok((Value::Imm(Imm::I64(0)), false)),
+                    Some(d) => Value::Reg(d),
+                };
+                // C 侧谓词返回 0/1（或任意非零）→ 规整成 Dial bool 的严格 0/1。
+                if post != builtin::Post::None {
+                    let r = self.new_reg(IrType::I64);
+                    let op = if post == builtin::Post::NeqZero { ACmp::Neq } else { ACmp::Eq };
+                    self.emit(IrInst::ICmp { op, dst: r, a: v, b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+                    v = Value::Reg(r);
+                }
+                // C ABI 返回宽度 → IR 内部宽度（仅精确宽度标量需要转换）。
+                let internal = reg_ir(&ret_dt);
+                if internal != ret_ir
+                    && !matches!(internal, IrType::Handle | IrType::Ptr | IrType::Void)
+                    && !matches!(ret_ir, IrType::Handle | IrType::Ptr | IrType::Void)
+                {
+                    let r = self.new_reg(internal.clone());
+                    let kind = match (&ret_ir, &internal) {
+                        (IrType::F32, IrType::F64) => AConv::FpExt,
+                        (IrType::F64, IrType::F32) => AConv::FpTrunc,
+                        (_, IrType::I64) => AConv::Sext,
+                        _ => AConv::Trunc,
+                    };
+                    self.emit(IrInst::Conv { kind, dst: r, a: v, ty: internal });
+                    v = Value::Reg(r);
+                }
+                Ok((v, false))
+            }
+        }
+    }
+
+    /// 把已 lower 出的值摆进内建所需的 C ABI 通道。
+    /// 指针 / 句柄与 I64 同为 8 字节整数通道，只需改 arg_ty，不改值本身。
+    fn coerce_to_abi(&mut self, v: Value, a: &Expr, abi: builtin::Abi) -> (Value, IrType) {
+        let target = builtin::abi_ir(abi);
+        let src = reg_ir(&self.expr_dt(a));
+        if src == target { return (v, target); }
+        let (kind, dst_ty) = match (&src, &target) {
+            (IrType::F32, IrType::F64) => (AConv::FpExt, IrType::F64),
+            (IrType::F64, IrType::F32) => (AConv::FpTrunc, IrType::F32),
+            (IrType::I32, IrType::I64) => (AConv::Sext, IrType::I64),
+            (_, IrType::I32) => (AConv::Trunc, IrType::I32),
+            (_, IrType::I8) => (AConv::Trunc, IrType::I8),
+            _ => return (v, target),
+        };
+        let d = self.new_reg(dst_ty.clone());
+        self.emit(IrInst::Conv { kind, dst: d, a: v, ty: dst_ty });
+        (Value::Reg(d), target)
+    }
+
+    /// 用块参数做一个「已有值」的 SSA 三目（不重复求值，避免副作用被放大）。
+    fn select_values(&mut self, cond: VReg, a: Value, b: Value, ty: IrType) -> VReg {
+        let tb = self.new_block(Vec::new());
+        let eb = self.new_block(Vec::new());
+        let mb = self.new_block(Vec::new());
+        let p = self.new_reg(ty.clone());
+        self.func.blocks[mb as usize].params.push((p, ty));
+        self.terminate(Term::Branch { cond, then_b: tb, else_b: eb, then_args: Vec::new(), else_args: Vec::new() });
+        self.set_cur(tb);
+        self.terminate(Term::Jump { target: mb, args: vec![a] });
+        self.set_cur(eb);
+        self.terminate(Term::Jump { target: mb, args: vec![b] });
+        self.set_cur(mb);
+        p
+    }
+
+    fn lower_minmax(&mut self, is_min: bool, args: &[Expr]) -> Result<(Value, bool), String> {
+        let dt = self.expr_dt(&args[0]);
+        let is_float = matches!(dt, Type::Float | Type::Float32);
+        let (mut av, _) = self.lower_expr(&args[0], &dt)?;
+        let (mut bv, _) = self.lower_expr(&args[1], &dt)?;
+        let ty = if is_float { IrType::F64 } else { IrType::I64 };
+        if dt == Type::Float32 {
+            let a2 = self.new_reg(IrType::F64);
+            self.emit(IrInst::Conv { kind: AConv::FpExt, dst: a2, a: av, ty: IrType::F64 });
+            let b2 = self.new_reg(IrType::F64);
+            self.emit(IrInst::Conv { kind: AConv::FpExt, dst: b2, a: bv, ty: IrType::F64 });
+            av = Value::Reg(a2); bv = Value::Reg(b2);
+        }
+        let cmp = self.new_reg(IrType::I64);
+        let op = if is_min { ACmp::Lt } else { ACmp::Gt };
+        if is_float {
+            self.emit(IrInst::FCmp { op, dst: cmp, a: av.clone(), b: bv.clone(), ty });
+        } else {
+            self.emit(IrInst::ICmp { op, dst: cmp, a: av.clone(), b: bv.clone(), ty });
+        }
+        // is_min: a < b ? a : b；is_max: a > b ? a : b。
+        let r = self.select_values(cmp, av, bv, if is_float { IrType::F64 } else { IrType::I64 });
+        Ok((Value::Reg(r), false))
+    }
+
+    fn lower_abs(&mut self, args: &[Expr]) -> Result<(Value, bool), String> {
+        let dt = self.expr_dt(&args[0]);
+        let (av, _) = self.lower_expr(&args[0], &dt)?;
+        if matches!(dt, Type::Float | Type::Float32) {
+            let mut a2 = av;
+            if dt == Type::Float32 {
+                let r = self.new_reg(IrType::F64);
+                self.emit(IrInst::Conv { kind: AConv::FpExt, dst: r, a: av, ty: IrType::F64 });
+                a2 = Value::Reg(r);
+            }
+            let d = self.new_reg(IrType::F64);
+            self.emit(IrInst::Call { dst: Some(d), func: "fabs".to_string(), args: vec![a2], arg_tys: vec![IrType::F64], ret_ty: IrType::F64, linkage: CallLink::Runtime });
+            return Ok((Value::Reg(d), false));
+        }
+        // 整数：a < 0 ? 0 - a : a。
+        let cmp = self.new_reg(IrType::I64);
+        self.emit(IrInst::ICmp { op: ACmp::Lt, dst: cmp, a: av.clone(), b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+        let neg = self.new_reg(IrType::I64);
+        self.emit(IrInst::Bin { op: ABin::Sub, dst: neg, a: Value::Imm(Imm::I64(0)), b: av.clone(), ty: IrType::I64 });
+        let r = self.select_values(cmp, Value::Reg(neg), av, IrType::I64);
+        Ok((Value::Reg(r), false))
     }
 
     /// Dial 的 print / eprint 是 **variadic**：中间实参紧接输出不换行，只有最后一个换行；
@@ -1157,7 +1318,16 @@ impl<'a> Lower<'a> {
                 _ => self.expr_dt(a),
             },
             Expr::Ternary(_, t, _) => self.expr_dt(t),
-            Expr::Call(name, _) => self.ip.functions_sig.get(name).map(|s| s.ret.clone()).unwrap_or(Type::Int),
+            Expr::Call(name, args) => {
+                // min / max / abs 的返回类型跟随实参（表里只能写一个占位）。
+                if matches!(name.as_str(), "min" | "max" | "abs") && !args.is_empty() {
+                    return self.expr_dt(&args[0]);
+                }
+                self.ip.functions_sig.get(name)
+                    .map(|s| s.ret.clone())
+                    .or_else(|| builtin::builtin_ret(name))
+                    .unwrap_or(Type::Int)
+            }
             Expr::Index(..) => Type::Int,
             Expr::Field(base, field) => {
                 let bd = self.expr_dt(base);

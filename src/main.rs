@@ -21,6 +21,7 @@ mod codegen;
 #[allow(dead_code)] mod ir;          // 专属 IR（汇编发射器的输入）
 #[allow(dead_code)] mod target;      // 目标平台差异抽象（SysV / AAPCS）
 #[allow(dead_code)] mod lower;       // AST → IR 的 lowering（核心子集）
+#[allow(dead_code)] mod builtin;     // 内建函数表驱动分派（C 运行时符号 / ABI 宽度）
 #[allow(dead_code)] mod pass;        // 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC）
 #[allow(dead_code)] mod codegen_asm; // IR → x86-64 / AArch64 汇编
 #[allow(dead_code)] mod asm;         // lower → pass → .s → cc -c → .o 编排
