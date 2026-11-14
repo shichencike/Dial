@@ -140,6 +140,8 @@ struct FnEmit<'a> {
     promotable: HashSet<VReg>,
     /// 当前块需要回写栈槽的普通 vreg（跨块活跃集合）。
     flush_mask: HashSet<VReg>,
+    /// M7-e1：定义了但全函数从未被读取的普通 vreg——其 spill store 可整条省略。
+    dead_defs: HashSet<VReg>,
 }
 
 impl<'a> FnEmit<'a> {
@@ -155,6 +157,7 @@ impl<'a> FnEmit<'a> {
             resident: HashMap::new(), dirty: HashSet::new(), residency_on: false,
             plans: Vec::new(), used_phys: Vec::new(), save_off: 0,
             promotable: HashSet::new(), flush_mask: HashSet::new(),
+            dead_defs: HashSet::new(),
         }
     }
 
@@ -315,6 +318,10 @@ impl<'a> FnEmit<'a> {
             self.dirty.insert(dst);
             return;
         }
+        // M7-e1：死 def 的 spill store 整条省略。驻留 / phi / alloca / param
+        // 均已在 analyze_dead_defs 排除或先于此处返回，落到这里的必是
+        // 「定义了却再无人读」的普通全 spill 值，跳过不影响任何读取路径。
+        if self.dead_defs.contains(&dst) { return; }
         let off = self.slot(dst);
         match self.target {
             EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}, {}({})", self.r(reg), off, self.r("rsp"))),
@@ -567,6 +574,53 @@ impl<'a> FnEmit<'a> {
     /// 寄存器文件」：至多 10 个池寄存器在整个函数内绑定固定位置，块与块之间不再
     /// flush / load，循环边界的栈往返被彻底消掉。含 call 的函数仍走 M7-a 的
     /// 逐块独立驻留（以内存为块边界权威）。
+    /// M7-e1：全函数活跃性扫描。收集所有「被读取」的 vreg（每条指令的
+    /// reg_uses + term 的 cond / 跳转实参 / 返回值），凡是「有 def 却从不
+    /// 出现在读取集合」的普通 vreg，其 spill store 就是死代码，sg 整条省略。
+    ///
+    /// 安全边界：Alloca 的 dst（地址槽，后续 Load/Store 靠它寻址）与
+    /// param_slots（C ABI 参数）一律排除；phi 实参走 sv/sg_force_stack，
+    /// 不经过 sg；驻留路径（写物理寄存器）在 sg 里先于本判断返回，不改。
+    /// reg_uses 的 match 由编译器保证穷尽，覆盖了所有带 Value 操作数的变体，
+    /// 因此「∉ live」等价于「函数内没有任何指令 / term 会读它的栈槽」。
+    fn analyze_dead_defs(&mut self) {
+        let mut live: HashSet<VReg> = HashSet::new();
+        for b in &self.f.blocks {
+            for i in &b.insts {
+                let mut uses = Vec::new();
+                i.reg_uses(&mut uses);
+                live.extend(uses);
+            }
+            match &b.term {
+                Term::Jump { args, .. } =>
+                    for a in args { if let Value::Reg(r) = a { live.insert(*r); } },
+                Term::Branch { cond, then_args, else_args, .. } => {
+                    live.insert(*cond);
+                    for a in then_args.iter().chain(else_args.iter()) {
+                        if let Value::Reg(r) = a { live.insert(*r); }
+                    }
+                }
+                Term::Return { val } =>
+                    if let Some(Value::Reg(r)) = val { live.insert(*r); },
+                Term::Unreachable => {}
+            }
+        }
+        let mut dead = HashSet::new();
+        for b in &self.f.blocks {
+            for i in &b.insts {
+                if let Some(d) = i.def() {
+                    if !live.contains(&d)
+                        && !self.alloca_off.contains_key(&d)
+                        && !self.f.param_slots.iter().any(|s| *s == d)
+                    {
+                        dead.insert(d);
+                    }
+                }
+            }
+        }
+        self.dead_defs = dead;
+    }
+
     fn analyze_residency(&mut self) {
         self.plans.clear();
         self.used_phys.clear();
@@ -1862,6 +1916,62 @@ fn elide_redundant_reloads(asm: &str) -> String {
     out
 }
 
+/// M7-e1：全函数「死 store」消除，仅作用于 vreg spill 槽区 `[lo, hi)`。
+/// 该区间由 compute_layout 的 reg_off 精确圈定，天然排除：outbound 栈传参区
+/// （更低偏移、被外部被调方读取）、callee-saved 帧内保存区（epilogue 读回）、
+/// 以及 Alloca 区（更高偏移、可能被 leaq 取地址后间接读写）。
+///
+/// 判定：某槽 off 若被 `movq %reg, off(%rsp)` 写过，却在整个函数里从未以
+/// 任何其它形式出现（load / 算术内存源 / leaq / test / cmp …），说明该 vreg
+/// 的值从未经栈槽读回——这些 store 全是死代码。只要 off 出现过一次非 store
+/// 形式，就整体保留它的所有 store（保守，绝不跨函数/间接访问推断）。
+/// 与 elide_redundant_reloads 配合：必须先删掉紧邻的冗余 load，才会暴露这些
+/// 已无人读的孤立 store。
+fn rsp_offsets(line: &str) -> Vec<i64> {
+    let mut res = Vec::new();
+    let b = line.as_bytes();
+    let pat = b"(%rsp)";
+    if b.len() < pat.len() { return res; }
+    for i in 0..=b.len() - pat.len() {
+        if &b[i..i + pat.len()] == &pat[..] {
+            let mut j = i;
+            while j > 0 && (b[j - 1].is_ascii_digit() || b[j - 1] == b'-') { j -= 1; }
+            if j < i {
+                if let Ok(o) = line[j..i].parse::<i64>() { res.push(o); }
+            }
+        }
+    }
+    res
+}
+
+fn elide_dead_stores(asm: &str, lo: i64, hi: i64) -> String {
+    let lines: Vec<&str> = asm.lines().collect();
+    let mut writes: HashMap<i64, Vec<usize>> = HashMap::new();
+    let mut touched: HashSet<i64> = HashSet::new();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some((_, off)) = parse_rsp_store(line) {
+            if let Ok(o) = off.parse::<i64>() {
+                writes.entry(o).or_default().push(i);
+                continue; // 纯 movq store：只记它的目标槽
+            }
+        }
+        for o in rsp_offsets(line) { touched.insert(o); }
+    }
+    let mut remove: HashSet<usize> = HashSet::new();
+    for (off, idxs) in &writes {
+        if *off >= lo && *off < hi && !touched.contains(off) {
+            remove.extend(idxs.iter().copied());
+        }
+    }
+    let mut out = String::with_capacity(asm.len());
+    for (i, line) in lines.iter().enumerate() {
+        if remove.contains(&i) { continue; }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// M7-c1：x86-64 移位指令的立即数形式只接受 imm8，且 64 位操作数实际按
 /// `count & 63` 生效。当移位量是 `[0,63]` 的整数常量时，`shlq/sarq $n, reg`
 /// 与 `movq $n,%rcx; shlq %cl,reg` 语义完全一致，可以直接折叠、省掉两次搬运。
@@ -2016,6 +2126,7 @@ fn emit_function(
 ) -> Result<(), String> {
     let mut e = FnEmit::new(ip, f, target, local);
     e.compute_layout();
+    e.analyze_dead_defs();
     e.analyze_residency();
     e.prologue();
     for (idx, b) in f.blocks.iter().enumerate() {
@@ -2029,9 +2140,16 @@ fn emit_function(
         e.term(b.id, &b.term);
         e.end_block();
     }
-    // M7-c2：x86-64 发射末尾做一次受严格约束的冗余 load 消除。
+    // M7-c2 + M7-e1：x86-64 发射末尾依次做「相邻冗余 reload 消除」与
+    // 「全函数死 store 消除」。顺序不可颠倒——先删掉紧邻 load，才会暴露
+    // 那些再无人读的孤立 store 供第二步删除。lo/hi 圈定本函数 vreg spill 槽区。
     if matches!(target, EmitTarget::X86_64SysV) {
-        out.push_str(&elide_redundant_reloads(&e.out));
+        let s = elide_redundant_reloads(&e.out);
+        let (lo, hi) = match (e.reg_off.first(), e.reg_off.last()) {
+            (Some(&a), Some(&b)) => (a, b + 8),
+            _ => (0, 0),
+        };
+        out.push_str(&elide_dead_stores(&s, lo, hi));
     } else {
         out.push_str(&e.out);
     }

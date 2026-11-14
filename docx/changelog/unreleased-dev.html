@@ -1080,11 +1080,33 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     累计降至 1.1099x（<strong>−18%</strong>），为历史最佳；算术循环类 1.1169x，
     数组内存类 0.9398x 持续反超 LLVM，b03 除法混合 1.842x → 1.005x
     （持平）、b08 3n+1 2.913x → 1.76x。</li>
-<li><strong>剩余差距</strong>：b23 popcount 2.31x、b08 3n+1 1.76x、递归/含 call 类
-  约 1.36x（享受不到统一寄存器文件、还要承担 call 与 prologue）、
-  b21/b22 字符串 1.26x/1.42x。下一步 M7-e：<strong>拷贝合并 / coalescing</strong>
-  （SSA def 复用首个操作数的物理寄存器，砍掉 b23 内层剩余搬运）+
-  <strong>含 call 函数的跨块协调</strong>（递归类反超的主战场）+ <strong>字符串专用优化</strong>。</li>
+<li><strong>M7-e1 全函数死 store 消除（几何平均 1.1099x → 1.0995x，四类全面改善）</strong>：
+  诊断发现 IR 层 DCE 已删净死 def（实测 <code>dead_defs</code> 恒为 0），但 M7-c2 的
+  「相邻冗余 reload 消除」在文本层删掉了紧邻 load，遗留大量「只写不读」的
+  <strong>孤立 spill store</strong>——IR 层看不到这层删除。改为<strong>文本层全函数死 store
+  消除</strong>：用 <code>compute_layout</code> 的 <code>reg_off</code> 边界精确圈定 vreg spill 槽区
+  <code>[lo, hi)</code>，天然排除 outbound 栈传参区（更低偏移、被被调方读）、
+  callee-saved 帧内保存区（epilogue 读回）与 Alloca 区（更高偏移、可能被
+  leaq 取地址间接读写）；某槽若只被 <code>movq %reg, off(%rsp)</code> 写过、却从未以
+  任何其它形式出现即判死，只要出现过一次非 store 形式就整体保留（保守，
+  不跨函数 / 间接访问推断）。与 M7-c2 顺序固定：先删 load 才暴露孤立 store。
+  IR 层活跃性扫描保留为 DCE 遗漏时的兜底。</li>
+<li><strong>确定性指标</strong>：静态指令数 <strong>4668 → 4140（−528 / −11.3%）</strong>，<code>bench.dial</code>
+    内「只写不读」槽由 528 处降为 <strong>0</strong>；黄金门禁 10 正向 + 2 负例 +
+    AArch64 交叉汇编全绿（逐字节 diff，拦住 outbound / phi 误删）。</li>
+<li><strong>A/B 双二进制交替</strong>（<code>m7d,m7e1,m7e1,m7d</code>）：几何平均
+    <strong>M7-d 1.2173/1.2173 → M7-e1 1.1017/1.0987（约 −9.6%）</strong>；递归调用类
+    1.629/1.630 → 1.476/1.497（−8.6%）、数组内存类 1.261/1.268 →
+    1.003/0.992（整体反超 / 持平）、字符串类 1.188/1.173 → 1.024/1.025
+    （几乎追平）；胜/平/负 <code>4/5/19 → 8/7/13 · 7/8/13</code>。28×2 校验和全一致。</li>
+<li>完整模式（5 采样）：几何平均 <strong>1.0995x</strong>，M6 基线 1.3575x 累计
+    <strong>−19%</strong>，历史最佳；数组内存类 0.9954x 反超 LLVM、字符串类 1.0342x、
+    算术循环类 1.0558x。静态指令累计 5594 → 4140（<strong>−26%</strong>）。</li>
+<li><strong>剩余差距</strong>：递归 / 含 call 类仍约 1.48x（含 call，享受不到统一寄存器
+  文件、还要承担 call 与 prologue）、b23 popcount、b08 3n+1、分支密集负载。
+  下一步 M7-e2：<strong>双重跳转 / 纯跳转块折叠</strong>（term 的 <code>jz 中间块</code> → 中间块
+  只有 <code>jmp</code>，全文件 95 处，主要打递归与分支密集函数）+ <strong>拷贝合并 /
+  coalescing</strong> + <strong>含 call 函数跨块协调</strong>（递归类反超的主战场）。</li>
 </ul>
 </li>
 </ul>
