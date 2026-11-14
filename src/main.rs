@@ -455,6 +455,7 @@ fn main() {
             &fe.program,
             fe.functions.clone(),
             fe.structs.clone(),
+            fe.goto_depths.clone(),
             &obj_path,
         ) {
             eprintln!("{}", e);
@@ -1684,6 +1685,8 @@ struct Frontend {
     raw_program: ast::Program,
     functions: HashMap<String, semantic::FuncInfo>,
     structs: semantic::StructTable,
+    /// label/goto 的作用域深度表（自研后端生成 phi / 释放层所需）。
+    goto_depths: HashMap<String, usize>,
     externs: Vec<(String, semantic::FuncInfo)>,
     pkg_libs: Vec<PathBuf>,
     ffi_rpaths: Vec<PathBuf>,
@@ -1958,7 +1961,7 @@ fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, Strin
     }
 
     let raw_program = program.clone();
-    let (functions, structs) = analyze(&mut program, &externs)
+    let (functions, structs, goto_depths) = analyze(&mut program, &externs)
         .map_err(|e| format!("{}：{}", src_path, e))?;
 
     Ok(Frontend {
@@ -1966,6 +1969,7 @@ fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, Strin
         raw_program,
         functions,
         structs,
+        goto_depths,
         externs,
         pkg_libs,
         ffi_rpaths,
@@ -2348,7 +2352,7 @@ fn cmd_test(args: &[String]) {
             col: t.col,
             exported: false,
         });
-        let (functions, structs) = match analyze(&mut prog, &fe.externs) {
+        let (functions, structs, _goto_depths) = match analyze(&mut prog, &fe.externs) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  ❌ {} 语义检查失败：{}", t.name, e);

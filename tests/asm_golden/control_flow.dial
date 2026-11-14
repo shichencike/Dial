@@ -1,0 +1,59 @@
+// label / goto 黄金用例（M3-a3）：前向跳、后向跳（goto 循环）、
+// 跨作用域释放（块内字符串句柄随 goto 跳出被正确 ARC 释放）。
+// 双后端（LLVM / asm）运行输出必须逐字节一致。
+
+fn count_down(n: int): int {
+    var sum: int = 0;
+    var i: int = n;
+    label loop_start:
+    if (i <= 0) { goto done; }
+    sum = sum + i;
+    i = i - 1;
+    goto loop_start;
+    label done:
+    return sum;
+}
+
+fn build(sep: string): string {
+    var acc: string = "";
+    var i: int = 0;
+    label loop:
+    if (i >= 4) { goto end; }
+    acc = acc + sep + "x";
+    i = i + 1;
+    goto loop;
+    label end:
+    return acc;
+}
+
+// 跨作用域释放：从嵌套块 goto 跳出，块内字符串句柄必须被正确释放（不可双释放/悬垂）。
+fn cross_scope(x: int): int {
+    var total: int = 0;
+    {
+        var s: string = "block-local-handle";
+        if (x > 0) {
+            goto out;
+        }
+        total = total + s.length();
+    }
+    label out:
+    return total;
+}
+
+fn forward_only(x: int): int {
+    if (x < 0) { goto neg; }
+    return x * 2;
+    label neg:
+    return 0;
+}
+
+fn main(): int {
+    print("count_down(5) = ", count_down(5));
+    print("count_down(0) = ", count_down(0));
+    print("build(-) = ", build("-"));
+    print("cross_scope(1) = ", cross_scope(1));
+    print("cross_scope(0) = ", cross_scope(0));
+    print("forward_only(-3) = ", forward_only(-3));
+    print("forward_only(7) = ", forward_only(7));
+    return 0;
+}

@@ -49,8 +49,9 @@ pub fn lower_program(
     prog: &Program,
     functions_sig: HashMap<String, FuncInfo>,
     structs: StructTable,
+    goto_depths: HashMap<String, usize>,
 ) -> Result<IrProgram, String> {
-    let mut ip = IrProgram::new(functions_sig, structs);
+    let mut ip = IrProgram::new(functions_sig, structs, goto_depths);
     for func in &prog.functions {
         let mut l = Lower::new(&mut ip);
         l.lower_function(func)?;
@@ -73,12 +74,15 @@ struct Lower<'a> {
     try_bufs: Vec<VReg>,
     /// 函数内标签 → 基本块（goto/label 用）。
     labels: HashMap<String, u32>,
+    /// 函数内标签 → 作用域深度（来自 ip.goto_depths，goto 跨作用域释放时按深度消费）。
+    label_depths: HashMap<String, usize>,
     /// 函数参数槽（与 func.params 平行），供 prologue 填值。
     param_slots: Vec<VReg>,
 }
 
 impl<'a> Lower<'a> {
     fn new(ip: &'a mut IrProgram) -> Self {
+        let label_depths = ip.goto_depths.clone();
         Lower {
             ip,
             func: IrFunction::new(String::new(), Vec::new(), IrType::Void, FuncLink::Private),
@@ -89,6 +93,7 @@ impl<'a> Lower<'a> {
             try_frames: Vec::new(),
             try_bufs: Vec::new(),
             labels: HashMap::new(),
+            label_depths,
             param_slots: Vec::new(),
         }
     }
@@ -281,7 +286,7 @@ impl<'a> Lower<'a> {
         // 而紧随其后的 `label`/`goto` 目标块仍可达（goto 跳出后由标签重新定位 cur），
         // 绝不能当作死代码跳过，否则 `done` 块会停在 `ud2`（见 control_flow.dial）。
         for s in &f.body {
-            if self.cur_terminated() {
+            if self.cur_terminated() && !matches!(s, Stmt::Label(..)) {
                 break;
             }
             self.lower_stmt(s)?;
@@ -712,8 +717,40 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             Stmt::With { resource, name, body, .. } => self.lower_with(resource, name, body),
-            Stmt::Label(_, _, _) => self.err("asm 后端暂不支持 `label`（后续相位）"),
-            Stmt::Goto(_, _, _) => self.err("asm 后端暂不支持 `goto`（后续相位）"),
+            // label / goto：与 codegen 的作用域压栈点一一对应（analyze_gotos 的
+            // depth 与 scopes.len() 口径一致，见 semantic.rs:5290）。goto 跨作用域
+            // 释放时按 label_depths 把 scopes 收敛到标签所在深度。
+            Stmt::Label(name, ..) => {
+                let bid = match self.labels.get(name) {
+                    Some(b) => *b,
+                    None => { let b = self.new_block(Vec::new()); self.labels.insert(name.clone(), b); b }
+                };
+                // 前一条语句若未终结（顺序落到标签），补一条无条件跳转接上。
+                if !self.cur_terminated() {
+                    self.terminate(Term::Jump { target: bid, args: Vec::new() });
+                }
+                self.set_cur(bid);
+                Ok(())
+            }
+            Stmt::Goto(target, ..) => {
+                let bid = match self.labels.get(target) {
+                    Some(b) => *b,
+                    None => { let b = self.new_block(Vec::new()); self.labels.insert(target.clone(), b); b }
+                };
+                let d = match self.label_depths.get(target) {
+                    Some(d) => *d,
+                    None => return self.err(&format!("asm 后端：goto 目标标签 '{}' 深度未知（语义层未登记）", target)),
+                };
+                // 跨作用域释放：与 LLVM 后端 codegen.rs:3813 的作用域口径对齐——
+                // 只释放「标签深度 d 及以上」所有层的 defer 与堆局部（标记 moved 防双释放），
+                // **绝不 pop 作用域帧**：LLVM 后端同样保留帧，使标签块在原深度仍能 lookup
+                // 到该层局部（如 count_down 的 sum/i）。若此处 truncate，外层 if/块收尾的
+                // leave_scope 会误弹被跨过的帧、把标签层局部一起删掉（→「未声明的变量」）。
+                self.drain_defers_from(d)?;
+                self.release_locals_upto(d);
+                self.terminate(Term::Jump { target: bid, args: Vec::new() });
+                Ok(())
+            }
             Stmt::Return(val, _, _) => {
                 // 铁律：**先求值，再释放作用域**。若在求值前 release_scopes_upto(0)，
                 // 返回表达式里的局部变量会被提前释放（甚至已出作用域查不到名字），造成悬垂返回。

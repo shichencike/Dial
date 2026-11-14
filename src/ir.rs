@@ -331,14 +331,18 @@ pub struct IrProgram {
     pub functions_sig: HashMap<String, FuncInfo>,
     /// 结构体名 → (字段(名,类型), 默认值)，复用 semantic 的 StructTable。
     pub structs: HashMap<String, (Vec<(String, Type)>, HashMap<String, ast::Expr>)>,
+    /// label 名 → 作用域深度（语义层 analyze_gotos 统一计算，自研后端生成
+    /// load/释放层时按深度跨作用域释放）。
+    pub goto_depths: HashMap<String, usize>,
 }
 
 impl IrProgram {
     pub fn new(
         functions_sig: HashMap<String, FuncInfo>,
         structs: HashMap<String, (Vec<(String, Type)>, HashMap<String, ast::Expr>)>,
+        goto_depths: HashMap<String, usize>,
     ) -> Self {
-        IrProgram { functions: Vec::new(), string_literals: Vec::new(), functions_sig, structs }
+        IrProgram { functions: Vec::new(), string_literals: Vec::new(), functions_sig, structs, goto_depths }
     }
     /// 登记一个字符串字面量，返回其索引。
     pub fn intern_string(&mut self, s: &str) -> u32 {

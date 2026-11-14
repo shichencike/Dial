@@ -3680,7 +3680,7 @@ const RESERVED_NAMES: &[&str] = &[
 pub fn analyze(
     program: &mut Program,
     externs: &[(String, FuncInfo)],
-) -> Result<(HashMap<String, FuncInfo>, StructTable)> {
+) -> Result<(HashMap<String, FuncInfo>, StructTable, HashMap<String, usize>)> {
     // v1.03：同类型变参先做 AST 脱糖。之后的类型检查 / LSP / codegen 都只看得见
     // 一个普通的 T[] 形参 —— 编译产物里没有任何变参专用的运行期机制。
     desugar_varargs(program)?;
@@ -3795,6 +3795,9 @@ pub fn analyze(
 
     // 2) 函数签名
     let mut funcs: HashMap<String, FuncInfo> = HashMap::new();
+    // v1.04：label/goto 的作用域深度（自研后端生成 phi / 释放层所需，LLVM 后端
+    // 已有等价计算；这里统一收集，避免两个后端各算一套导致深度口径不一致）。
+    let mut goto_depths: HashMap<String, usize> = HashMap::new();
     // v1.04 FFI 导出校验：extern struct 名集合（按值嵌入 C 结构的字段才走 C ABI）。
     let cstruct_names: Vec<String> = program.cstructs.iter().map(|c| c.name.clone()).collect();
     for f in &program.functions {
@@ -3904,7 +3907,7 @@ pub fn analyze(
     }
 
     for f in &program.functions {
-        check_function(f, &funcs, &structs)?;
+        check_function(f, &funcs, &structs, &mut goto_depths)?;
     }
 
     // 3) 数据流分析：写入 move_hint
@@ -3912,7 +3915,7 @@ pub fn analyze(
         run_usage_analysis(f, &structs);
     }
 
-    Ok((funcs, structs))
+    Ok((funcs, structs, goto_depths))
 }
 
 /// 类型良构性检查：拒绝当前版本尚无法正确实现的类型。
@@ -4017,6 +4020,7 @@ fn check_function(
     f: &Func,
     funcs: &HashMap<String, FuncInfo>,
     structs: &StructTable,
+    goto_depths: &mut HashMap<String, usize>,
 ) -> Result<()> {
     // 形参类型良构性
     for (pname, pty) in &f.params {
@@ -4044,7 +4048,10 @@ fn check_function(
     }
     // goto / label 的三条死锁在**函数级**统一校验（需要看到全部标签才能判断
     // 目标是否存在、是否同块、是否跨越 try / with 边界）。
-    analyze_gotos(&f.body)?;
+    let ga = analyze_gotos(&f.body)?;
+    for (name, site) in ga.labels {
+        goto_depths.insert(name, site.depth);
+    }
     for stmt in &f.body {
         check_stmt_at(stmt, &mut scopes, funcs, f, structs, false, 0)?;
     }

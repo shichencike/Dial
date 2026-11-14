@@ -44,11 +44,12 @@ pub fn compile_asm(
     prog: &Program,
     functions: HashMap<String, FuncInfo>,
     structs: StructTable,
+    goto_depths: HashMap<String, usize>,
     obj_path: &Path,
 ) -> Result<(), String> {
     let target = detect_target()?;
 
-    let mut ip = lower::lower_program(prog, functions, structs)?;
+    let mut ip = lower::lower_program(prog, functions, structs, goto_depths)?;
     pass::run_passes(&mut ip);
     let asm_text = codegen_asm::emit(&ip, target)?;
 
