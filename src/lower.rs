@@ -374,7 +374,41 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             Stmt::AssignDeref { .. } => self.err("asm 后端暂不支持裸指针解引用赋值（后续相位）"),
-            Stmt::AssignIndex { .. } => self.err("asm 后端暂不支持数组元素赋值 `arr[i] = v`（后续相位）"),
+            Stmt::AssignIndex { arr, index, value, .. } => {
+                // 语义等价于 `arr = dial_array_set(arr, i, v)`：C 侧在共享时会 COW
+                // 克隆并释放本调用者的旧引用，因此**只能写回新句柄，绝不能再 release
+                // 旧值**（否则悬垂 / 双重释放）。见 codegen.rs:2727 的所有权契约注释。
+                let name = match arr.as_ref() {
+                    Expr::Var(n) => n.clone(),
+                    _ => return self.err("asm 后端：索引赋值目标仅支持变量（嵌套下标后续相位）"),
+                };
+                let l = match self.lookup(&name).cloned() {
+                    Some(x) => x,
+                    None => return self.err(&format!("未声明的变量 '{}'", name)),
+                };
+                if !matches!(l.dt, Type::Array(_)) {
+                    return self.err("asm 后端：索引赋值仅支持数组");
+                }
+                let cur = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Load { dst: cur, ptr: l.ptr, ty: IrType::Handle });
+                let (iv, _) = self.lower_expr(index, &Type::Int)?;
+                let vdt = self.expr_dt(value);
+                if rc_kind(&vdt).is_some() {
+                    return self.err("asm 后端：堆类型数组元素赋值需额外所有权结算（后续相位）");
+                }
+                let (vv, _) = self.lower_expr(value, &vdt)?;
+                let bits = self.coerce_elem_bits(vv, &vdt)?;
+                let newp = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Call {
+                    dst: Some(newp), func: "dial_array_set".to_string(),
+                    args: vec![Value::Reg(cur), iv, bits],
+                    arg_tys: vec![IrType::Handle, IrType::I64, IrType::I64],
+                    ret_ty: IrType::Handle, linkage: CallLink::Runtime,
+                });
+                // 只写回，不做 ARC（旧引用已由 C 侧结算）。
+                self.emit(IrInst::Store { ptr: l.ptr, val: Value::Reg(newp), ty: IrType::Handle });
+                Ok(())
+            }
             Stmt::If { cond, then_branch, else_branch, .. } => {
                 let (cond_v, _) = self.lower_expr(cond, &Type::Bool)?;
                 let then_b = self.new_block(Vec::new());
@@ -527,7 +561,87 @@ impl<'a> Lower<'a> {
                 self.set_cur(exit);
                 Ok(())
             }
-            Stmt::ForEachMap { .. } => self.err("asm 后端暂不支持 `for (k, v in m)`（后续相位）"),
+            Stmt::ForEachMap { key, value, coll, body, line, col, .. } => {
+                let ct = self.expr_dt(coll);
+                let is_kv = matches!(ct, Type::KvMap(..));
+                let (k_ty, v_ty) = match &ct {
+                    Type::KvMap(k, v) => ((**k).clone(), (**v).clone()),
+                    _ => (Type::Int, Type::Int),
+                };
+                let (cv, _) = self.lower_expr(coll, &ct)?;
+                // 键集快照（堆数组）登记到当前作用域，由作用域退出统一释放；
+                // 循环体里提前 return 也会经 release_scopes_upto 释放它。
+                let keys = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Call {
+                    dst: Some(keys),
+                    func: (if is_kv { "dial_kvmap_keys" } else { "dial_map_keys" }).to_string(),
+                    args: vec![cv.clone()], arg_tys: vec![IrType::Handle],
+                    ret_ty: IrType::Handle, linkage: CallLink::Runtime,
+                });
+                let keys_slot = self.emit_alloca(IrType::Handle);
+                self.emit(IrInst::Store { ptr: keys_slot, val: Value::Reg(keys), ty: IrType::Handle });
+                self.declare(&format!("__asm_mapkeys_{}_{}", line, col), Local {
+                    ptr: keys_slot, ty: IrType::Handle,
+                    dt: Type::Array(Box::new(k_ty.clone())), is_handle: true, moved: false,
+                });
+                let len = self.new_reg(IrType::I64);
+                self.emit(IrInst::Call { dst: Some(len), func: "dial_array_length".to_string(),
+                    args: vec![Value::Reg(keys)], arg_tys: vec![IrType::Handle],
+                    ret_ty: IrType::I64, linkage: CallLink::Runtime });
+                let idx_slot = self.emit_alloca(IrType::I64);
+                self.emit(IrInst::Store { ptr: idx_slot, val: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+                let k_ir = reg_ir(&k_ty);
+                let v_ir = reg_ir(&v_ty);
+                let k_slot = self.emit_alloca(k_ir.clone());
+                let v_slot = self.emit_alloca(v_ir.clone());
+                // 键/值是「借用」自键集与表内（C 侧未 retain），故 is_handle=false，
+                // 循环体作用域退出时绝不 release，避免 double free。
+                self.declare(key, Local { ptr: k_slot, ty: k_ir.clone(), dt: k_ty, is_handle: false, moved: false });
+                self.declare(value, Local { ptr: v_slot, ty: v_ir.clone(), dt: v_ty, is_handle: false, moved: false });
+                let header = self.new_block(Vec::new());
+                let body_b = self.new_block(Vec::new());
+                let exit = self.new_block(Vec::new());
+                self.terminate(Term::Jump { target: header, args: Vec::new() });
+                self.set_cur(header);
+                let iv = self.new_reg(IrType::I64);
+                self.emit(IrInst::Load { dst: iv, ptr: idx_slot, ty: IrType::I64 });
+                let cmp = self.new_reg(IrType::I64);
+                self.emit(IrInst::ICmp { op: ACmp::Lt, dst: cmp, a: Value::Reg(iv), b: Value::Reg(len), ty: IrType::I64 });
+                self.terminate(Term::Branch { cond: cmp, then_b: body_b, else_b: exit, then_args: Vec::new(), else_args: Vec::new() });
+                self.set_cur(body_b);
+                let body_depth = self.scopes.len();
+                self.push_scope();
+                self.loops.push((header, exit, body_depth));
+                // k = keys[i]（位模式 → 按 K 重新解释）
+                let kb = self.new_reg(IrType::I64);
+                self.emit(IrInst::Call { dst: Some(kb), func: "dial_array_get".to_string(),
+                    args: vec![Value::Reg(keys), Value::Reg(iv)], arg_tys: vec![IrType::Handle, IrType::I64],
+                    ret_ty: IrType::I64, linkage: CallLink::Runtime });
+                let kv = self.reinterpret_bits(Value::Reg(kb), k_ir.clone())?;
+                self.emit(IrInst::Store { ptr: k_slot, val: kv, ty: k_ir });
+                // v = m.get(k)
+                let vb = self.new_reg(IrType::I64);
+                self.emit(IrInst::Call { dst: Some(vb),
+                    func: (if is_kv { "dial_kvmap_get" } else { "dial_map_get" }).to_string(),
+                    args: vec![cv, Value::Reg(kb)], arg_tys: vec![IrType::Handle, IrType::I64],
+                    ret_ty: IrType::I64, linkage: CallLink::Runtime });
+                let vv = self.reinterpret_bits(Value::Reg(vb), v_ir.clone())?;
+                self.emit(IrInst::Store { ptr: v_slot, val: vv, ty: v_ir });
+                for st in body { self.lower_stmt(st)?; }
+                self.loops.pop();
+                let scope = self.scopes.pop().unwrap();
+                self.release_scope(&scope);
+                if !self.cur_terminated() {
+                    let iv2 = self.new_reg(IrType::I64);
+                    self.emit(IrInst::Load { dst: iv2, ptr: idx_slot, ty: IrType::I64 });
+                    let nv = self.new_reg(IrType::I64);
+                    self.emit(IrInst::Bin { op: ABin::Add, dst: nv, a: Value::Reg(iv2), b: Value::Imm(Imm::I64(1)), ty: IrType::I64 });
+                    self.emit(IrInst::Store { ptr: idx_slot, val: Value::Reg(nv), ty: IrType::I64 });
+                    self.terminate(Term::Jump { target: header, args: Vec::new() });
+                }
+                self.set_cur(exit);
+                Ok(())
+            }
             Stmt::Break(_, _) => {
                 if let Some((_, exit, depth)) = self.loops.last().copied() {
                     self.release_scopes_upto(depth);
@@ -647,6 +761,20 @@ impl<'a> Lower<'a> {
                 self.emit(IrInst::Call { dst: Some(r), func: "dial_array_get".to_string(), args: vec![av, iv], arg_tys: vec![IrType::Handle, IrType::I64], ret_ty: IrType::I64, linkage: CallLink::Runtime });
                 Ok((Value::Reg(r), false))
             }
+            Expr::Slice(arr, from, to) => {
+                // a[from..to] / a.slice(from, to)：半开区间，返回新数组句柄。
+                let (av, _) = self.lower_expr(arr, &Type::Array(Box::new(Type::Int)))?;
+                let (fv, _) = self.lower_expr(from, &Type::Int)?;
+                let (tv, _) = self.lower_expr(to, &Type::Int)?;
+                let r = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Call {
+                    dst: Some(r), func: "dial_array_slice".to_string(),
+                    args: vec![av, fv, tv],
+                    arg_tys: vec![IrType::Handle, IrType::I64, IrType::I64],
+                    ret_ty: IrType::Handle, linkage: CallLink::Runtime,
+                });
+                Ok((Value::Reg(r), false))
+            }
             Expr::ArrayLit(elems, _) => {
                 let mut h = self.new_reg(IrType::Handle);
                 self.emit(IrInst::Call { dst: Some(h), func: "dial_array_new".to_string(), args: vec![Value::Imm(Imm::I64(0))], arg_tys: vec![IrType::I64], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
@@ -697,8 +825,6 @@ impl<'a> Lower<'a> {
             Expr::Call(name, args) => self.lower_call(name, args),
             Expr::TypeLit(_) => self.err("asm 后端暂不支持 `ptr_cast` 类型字面量（后续相位）"),
             Expr::FuncRef(_) => self.err("asm 后端暂不支持 `spawn`（后续相位，线程）"),
-            // 其余（Slice / 未覆盖构造）：明确报错，不静默降级。
-            _ => self.err("asm 后端暂不支持该表达式形态（后续相位）"),
         }
     }
 
@@ -1041,6 +1167,50 @@ impl<'a> Lower<'a> {
         p
     }
 
+    /// 把元素值按 C 侧的 int64 位模式重解释。数组元素在 C 运行时里统一按
+    /// int64_t 槽存放（float 是 double 的位模式，f32 是低 32 位）。
+    fn coerce_elem_bits(&mut self, v: Value, dt: &Type) -> Result<Value, String> {
+        match reg_ir(dt) {
+            IrType::I64 => Ok(v),
+            IrType::I32 => {
+                let d = self.new_reg(IrType::I64);
+                self.emit(IrInst::Conv { kind: AConv::Sext, dst: d, a: v, ty: IrType::I64 });
+                Ok(Value::Reg(d))
+            }
+            IrType::F32 => {
+                // 先把 8 字节槽清零，再写 f32 的低 32 位，最后按 I64 读出位模式。
+                let s = self.emit_alloca(IrType::I64);
+                self.emit(IrInst::Store { ptr: s, val: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+                self.emit(IrInst::Store { ptr: s, val: v, ty: IrType::F32 });
+                let d = self.new_reg(IrType::I64);
+                self.emit(IrInst::Load { dst: d, ptr: s, ty: IrType::I64 });
+                Ok(Value::Reg(d))
+            }
+            src @ (IrType::F64 | IrType::Handle | IrType::Ptr) => {
+                let s = self.emit_alloca(src.clone());
+                self.emit(IrInst::Store { ptr: s, val: v, ty: src });
+                let d = self.new_reg(IrType::I64);
+                self.emit(IrInst::Load { dst: d, ptr: s, ty: IrType::I64 });
+                Ok(Value::Reg(d))
+            }
+            _ => Err(format!("[asm 后端] 数组元素类型 {} 暂不支持赋值", dt.display())),
+        }
+    }
+
+    /// 把 C 返回的 int64 位模式按 Dial 类型重新解释（KvMap 的键/值、
+    /// float[] 元素等）。整数通道的 8 字节类型直接复用；窄/浮点类型经
+    /// 同一个 8 字节槽 store→load 完成位模式重解释。
+    fn reinterpret_bits(&mut self, v: Value, target: IrType) -> Result<Value, String> {
+        if matches!(target, IrType::I64 | IrType::Handle | IrType::Ptr | IrType::FnPtr) {
+            return Ok(v);
+        }
+        let s = self.emit_alloca(IrType::I64);
+        self.emit(IrInst::Store { ptr: s, val: v, ty: IrType::I64 });
+        let d = self.new_reg(target.clone());
+        self.emit(IrInst::Load { dst: d, ptr: s, ty: target });
+        Ok(Value::Reg(d))
+    }
+
     fn lower_minmax(&mut self, is_min: bool, args: &[Expr]) -> Result<(Value, bool), String> {
         let dt = self.expr_dt(&args[0]);
         let is_float = matches!(dt, Type::Float | Type::Float32);
@@ -1196,6 +1366,37 @@ impl<'a> Lower<'a> {
 
     // ---- match（字面量模式 → if 链）----
 
+    fn emit_icmp_eq(&mut self, a: Value, b: Value) -> VReg {
+        let r = self.new_reg(IrType::I64);
+        self.emit(IrInst::ICmp { op: ACmp::Eq, dst: r, a, b, ty: IrType::I64 });
+        r
+    }
+
+    /// match 的字符串模式：模式串必须经 dial_string_new 包成 DialString（带 ARC
+    /// 头）再交给 dial_string_eq，比较完立即释放临时对象，避免每个分支泄漏。
+    fn lower_string_pattern_eq(&mut self, subj: Value, s: &str) -> Result<VReg, String> {
+        let lit = self.ip.intern_string(s);
+        let p = self.new_reg(IrType::Ptr);
+        self.emit(IrInst::LeaLabel { dst: p, lit });
+        let h = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call {
+            dst: Some(h), func: "dial_string_new".to_string(),
+            args: vec![Value::Reg(p)], arg_tys: vec![IrType::Ptr],
+            ret_ty: IrType::Handle, linkage: CallLink::Runtime,
+        });
+        let eq = self.new_reg(IrType::I64);
+        self.emit(IrInst::Call {
+            dst: Some(eq), func: "dial_string_eq".to_string(),
+            args: vec![subj, Value::Reg(h)], arg_tys: vec![IrType::Handle, IrType::Handle],
+            ret_ty: IrType::I64, linkage: CallLink::Runtime,
+        });
+        // RcRelease 的 ptr 是「存放句柄的槽地址」，发射器会先取句柄再调用。
+        let slot = self.emit_alloca(IrType::Handle);
+        self.emit(IrInst::Store { ptr: slot, val: Value::Reg(h), ty: IrType::Handle });
+        self.emit(IrInst::RcRelease { ptr: slot, kind: ArcKind::String });
+        Ok(self.emit_icmp_eq(Value::Reg(eq), Value::Imm(Imm::I64(1))))
+    }
+
     fn lower_match(&mut self, subject: &Expr, arms: &[MatchArm]) -> Result<(), String> {
         let sd = self.expr_dt(subject);
         let (sv, _) = self.lower_expr(subject, &sd)?;
@@ -1203,15 +1404,13 @@ impl<'a> Lower<'a> {
         // 顺序 if 链（self.cur 已是当前块，逐分支串联）。
         let mut has_wild = false;
         for arm in arms {
-            let (lit_v, cmp_op): (Value, ACmp) = match &arm.pattern {
-                MatchPattern::Int(v) => (Value::Imm(Imm::I64(*v)), ACmp::Eq),
-                MatchPattern::Bool(v) => (Value::Imm(Imm::I64(if *v { 1 } else { 0 })), ACmp::Eq),
-                MatchPattern::Char(v) => (Value::Imm(Imm::I64(*v)), ACmp::Eq),
-                MatchPattern::Str(_) => return self.err("asm 后端：match 字符串模式暂未实现（后续相位）"),
+            let cmp: VReg = match &arm.pattern {
+                MatchPattern::Int(v) => self.emit_icmp_eq(sv, Value::Imm(Imm::I64(*v))),
+                MatchPattern::Bool(v) => self.emit_icmp_eq(sv, Value::Imm(Imm::I64(if *v { 1 } else { 0 }))),
+                MatchPattern::Char(v) => self.emit_icmp_eq(sv, Value::Imm(Imm::I64(*v))),
+                MatchPattern::Str(s) => self.lower_string_pattern_eq(sv, s)?,
                 MatchPattern::Wildcard => { has_wild = true; continue; }
             };
-            let cmp = self.new_reg(IrType::I64);
-            self.emit(IrInst::ICmp { op: cmp_op, dst: cmp, a: sv, b: lit_v, ty: IrType::I64 });
             let body_b = self.new_block(Vec::new());
             let next_b = self.new_block(Vec::new());
             self.terminate(Term::Branch { cond: cmp, then_b: body_b, else_b: next_b, then_args: Vec::new(), else_args: Vec::new() });
@@ -1329,6 +1528,7 @@ impl<'a> Lower<'a> {
                     .unwrap_or(Type::Int)
             }
             Expr::Index(..) => Type::Int,
+            Expr::Slice(..) => Type::Array(Box::new(Type::Int)),
             Expr::Field(base, field) => {
                 let bd = self.expr_dt(base);
                 if let Some((_, ft)) = self.struct_field(&bd, field) { ft } else { Type::Int }
