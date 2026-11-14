@@ -481,9 +481,6 @@ impl<'a> Lower<'a> {
                 self.emit(IrInst::Load { dst: cur, ptr: l.ptr, ty: IrType::Handle });
                 let (iv, _) = self.lower_expr(index, &Type::Int)?;
                 let vdt = self.expr_dt(value);
-                if rc_kind(&vdt).is_some() {
-                    return self.err("asm 后端：堆类型数组元素赋值需额外所有权结算（后续相位）");
-                }
                 let (vv, _) = self.lower_expr(value, &vdt)?;
                 let bits = self.coerce_elem_bits(vv, &vdt)?;
                 let newp = self.new_reg(IrType::Handle);
@@ -493,6 +490,21 @@ impl<'a> Lower<'a> {
                     arg_tys: vec![IrType::Handle, IrType::I64, IrType::I64],
                     ret_ty: IrType::Handle, linkage: CallLink::Runtime,
                 });
+                // 元素归属结算（对齐 LLVM 后端 codegen.rs:2743 的 sink_elem_after_retain）：
+                // C 侧 dial_array_set 已为元素 retain 一份（数组成为该元素的持有者）。
+                //   · 借来的值（变量 / 字段 / 数组元素 / get / at）：来源仍持有，
+                //     不得再释放，否则悬垂 / 双重释放；
+                //   · 自带所有权的值（字面量 / clone / 方法返回值等）：本语句的临时
+                //     所有权应当移交给数组，故此处归还一份，否则每轮循环泄漏一次引用。
+                if let Some(k) = rc_kind(&vdt) {
+                    if !yields_borrowed_ref(value) {
+                        // RcRelease 作用于「槽地址」（内部 load 出句柄值再 release），
+                        // 故先把句柄落进临时槽。
+                        let tmp = self.emit_alloca(reg_ir(&vdt));
+                        self.emit(IrInst::Store { ptr: tmp, val: vv.clone(), ty: reg_ir(&vdt) });
+                        self.emit(IrInst::RcRelease { ptr: tmp, kind: k });
+                    }
+                }
                 // 只写回，不做 ARC（旧引用已由 C 侧结算）。
                 self.emit(IrInst::Store { ptr: l.ptr, val: Value::Reg(newp), ty: IrType::Handle });
                 Ok(())
@@ -1060,15 +1072,28 @@ impl<'a> Lower<'a> {
             }
             Expr::Method(obj, method, args) => self.lower_method(obj, method, args),
             Expr::Index(arr, idx) => {
-                let (av, _) = self.lower_expr(arr, &Type::Array(Box::new(Type::Int)))?;
+                // 元素类型必须按数组的真实类型取（此前硬编码 int[]，导致 string[]
+                // 的元素位模式没被按句柄还原——读出来是一串指针数值）。
+                let at = self.expr_dt(arr);
+                let (av, _) = self.lower_expr(arr, &at)?;
                 let (iv, _) = self.lower_expr(idx, &Type::Int)?;
                 let r = self.new_reg(IrType::I64);
                 self.emit(IrInst::Call { dst: Some(r), func: "dial_array_get".to_string(), args: vec![av, iv], arg_tys: vec![IrType::Handle, IrType::I64], ret_ty: IrType::I64, linkage: CallLink::Runtime });
-                Ok((Value::Reg(r), false))
+                // 元素按其真实类型还原位模式（句柄 / 浮点 / 窄整型）。
+                let et = match &at {
+                    Type::Array(e) => (**e).clone(),
+                    other => other.clone(),
+                };
+                let out = self.reinterpret_bits(Value::Reg(r), reg_ir(&et))?;
+                // 借来的元素：数组仍持有它，读侧不得释放（对齐 LLVM 后端
+                // codegen.rs 的 from_elem_bits + 借用语义）。
+                Ok((out, false))
             }
             Expr::Slice(arr, from, to) => {
                 // a[from..to] / a.slice(from, to)：半开区间，返回新数组句柄。
-                let (av, _) = self.lower_expr(arr, &Type::Array(Box::new(Type::Int)))?;
+                // 数组类型按实际取（此前硬编码 int[]，string[] 的切片会被误判元素类型）。
+                let at = self.expr_dt(arr);
+                let (av, _) = self.lower_expr(arr, &at)?;
                 let (fv, _) = self.lower_expr(from, &Type::Int)?;
                 let (tv, _) = self.lower_expr(to, &Type::Int)?;
                 let r = self.new_reg(IrType::Handle);
@@ -1080,14 +1105,41 @@ impl<'a> Lower<'a> {
                 });
                 Ok((Value::Reg(r), false))
             }
-            Expr::ArrayLit(elems, _) => {
+            Expr::ArrayLit(elems, expect) => {
+                // 元素类型决定 kind（0=INT 1=RC 2=ATOMIC 3=FLOAT 4=BOOL 5=BYTE 6=CHAR）。
+                // kind 必须与元素类型严格对应：kind=INT 时 C 侧的 elem_retain /
+                // elem_release 是 no-op，句柄元素就既不被 retain 也不被 release，
+                // 数组释放后留下悬垂指针（string_array_demo 即栽在这里）。
+                let elem_ty = match expect {
+                    Some(et) => (**et).clone(),
+                    None => match elems.first() {
+                        Some(e) => self.expr_dt(e),
+                        None => Type::Int,
+                    },
+                };
+                let kind = builtin::array_elem_kind(&elem_ty);
                 let mut h = self.new_reg(IrType::Handle);
-                self.emit(IrInst::Call { dst: Some(h), func: "dial_array_new".to_string(), args: vec![Value::Imm(Imm::I64(0))], arg_tys: vec![IrType::I64], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+                self.emit(IrInst::Call { dst: Some(h), func: "dial_array_new".to_string(),
+                    args: vec![Value::Imm(Imm::I64(kind as i64))], arg_tys: vec![IrType::I64],
+                    ret_ty: IrType::Handle, linkage: CallLink::Runtime });
                 for el in elems {
-                    let (ev, _) = self.lower_expr(el, &Type::Int)?;
+                    let ety = self.expr_dt(el);
+                    let (ev, _) = self.lower_expr(el, &ety)?;
+                    let bits = self.coerce_elem_bits(ev.clone(), &ety)?;
                     let h2 = self.new_reg(IrType::Handle);
-                    self.emit(IrInst::Call { dst: Some(h2), func: "dial_array_push".to_string(), args: vec![Value::Reg(h), ev], arg_tys: vec![IrType::Handle, IrType::I64], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+                    self.emit(IrInst::Call { dst: Some(h2), func: "dial_array_push".to_string(),
+                        args: vec![Value::Reg(h), bits], arg_tys: vec![IrType::Handle, IrType::I64],
+                        ret_ty: IrType::Handle, linkage: CallLink::Runtime });
                     h = h2;
+                    // push 会为元素 retain 一份（数组成为持有者）。字面量自带的那一份
+                    // 所有权本应直接移交数组，故此处归还——否则每个字面量元素泄漏一份引用。
+                    if let Some(k) = rc_kind(&ety) {
+                        if !yields_borrowed_ref(el) {
+                            let tmp = self.emit_alloca(reg_ir(&ety));
+                            self.emit(IrInst::Store { ptr: tmp, val: ev, ty: reg_ir(&ety) });
+                            self.emit(IrInst::RcRelease { ptr: tmp, kind: k });
+                        }
+                    }
                 }
                 Ok((Value::Reg(h), false))
             }
@@ -1335,15 +1387,17 @@ impl<'a> Lower<'a> {
     }
 
     /// 数组 remove(i) / pop()：返回被删元素（按元素类型还原），并把 COW 新指针
-    /// 写回接收变量。堆元素需要额外 retain（C 侧会从数组释放它），首版明确延后。
+    /// 写回接收变量。
+    ///
+    /// 堆元素的所有权结算（对齐 LLVM 后端 codegen.rs:5640）：
+    /// C 侧 `dial_array_remove` / `dial_array_pop` 会把该元素从数组里**摘走并释放**
+    /// （数组不再是它的持有者），因此返回值必须额外 retain 一份，
+    /// 否则调用方拿到的就是一个已释放的悬垂句柄。
     fn lower_array_remove(&mut self, obj: &Expr, od: &Type, method: &str, args: &[Expr]) -> Result<(Value, bool), String> {
         let elem = match od {
             Type::Array(e) => (**e).clone(),
             _ => return self.err("asm 后端：remove/pop 仅支持数组"),
         };
-        if rc_kind(&elem).is_some() {
-            return self.err("asm 后端：堆类型数组的 remove/pop 需额外所有权结算（后续相位）");
-        }
         let (ov, _) = self.lower_expr(obj, od)?;
         let idx: Value = if method == "pop" {
             let len = self.new_reg(IrType::I64);
@@ -1360,6 +1414,14 @@ impl<'a> Lower<'a> {
             args: vec![ov, idx], arg_tys: vec![IrType::Handle, IrType::I64],
             ret_ty: IrType::I64, linkage: CallLink::Runtime });
         let removed = self.reinterpret_bits(Value::Reg(got), reg_ir(&elem))?;
+        // 堆元素：C 侧 remove/pop 会把它从数组摘走并释放（数组不再是持有者），
+        // 故返回值需额外 retain 一份，否则调用方拿到的是已释放的悬垂句柄。
+        // RcRetain 作用于「槽地址」（内部会 load 出句柄值），故先落临时槽。
+        if let Some(k) = rc_kind(&elem) {
+            let tmp = self.emit_alloca(reg_ir(&elem));
+            self.emit(IrInst::Store { ptr: tmp, val: removed.clone(), ty: reg_ir(&elem) });
+            self.emit(IrInst::RcRetain { ptr: tmp, kind: k });
+        }
         let newp = self.new_reg(IrType::Handle);
         self.emit(IrInst::Call {
             dst: Some(newp),
@@ -2121,8 +2183,14 @@ impl<'a> Lower<'a> {
                     .or_else(|| builtin::special_ret(name))
                     .unwrap_or(Type::Int)
             }
-            Expr::Index(..) => Type::Int,
-            Expr::Slice(..) => Type::Array(Box::new(Type::Int)),
+            // 下标 / 切片 / 字面量的元素类型必须按数组的**实际**类型推导：
+            // 此前一律硬编码 int / int[]，于是 string[] 的元素被当成整数——
+            // print 走 dial_print_int 通道，把句柄当数字吐出（指针数值）。
+            Expr::Index(arr, _) => match self.expr_dt(arr) {
+                Type::Array(e) => *e,
+                other => other,
+            },
+            Expr::Slice(arr, _, _) => self.expr_dt(arr),
             Expr::Field(base, field) => {
                 let bd = self.expr_dt(base);
                 if let Some((_, ft)) = self.struct_field(&bd, field) { ft } else { Type::Int }
@@ -2136,7 +2204,16 @@ impl<'a> Lower<'a> {
                 builtin::method_ret(&od, method).unwrap_or(Type::Int)
             }
             Expr::StructLit(name, _) => Type::Struct(name.clone()),
-            Expr::ArrayLit(_, _) => Type::Array(Box::new(Type::Int)),
+            Expr::ArrayLit(elems, expect) => match expect {
+                Some(et) => Type::Array(Box::new((**et).clone())),
+                None => {
+                    let et = match elems.first() {
+                        Some(e) => self.expr_dt(e),
+                        None => Type::Int,
+                    };
+                    Type::Array(Box::new(et))
+                }
+            },
             _ => Type::Int,
         }
     }
@@ -2190,6 +2267,19 @@ fn abin(op: BinOp) -> ABin {
 
 fn struct_name_of(dt: &Type) -> String {
     if let Type::Struct(n) = dt { n.clone() } else { "?".to_string() }
+}
+
+/// 表达式是否产出「借来的」引用（来源仍持有所有权）。
+///
+/// 与 LLVM 后端 codegen.rs 的 yields_borrowed_ref 同口径：变量 / 字段 / 数组元素
+/// 以及容器 get / at 的返回值都是借来的——写进容器时容器会 retain 一份，
+/// 但来源那份不能因此被释放（否则悬垂 / 双重释放）。
+fn yields_borrowed_ref(e: &Expr) -> bool {
+    match e {
+        Expr::Var(_) | Expr::Field(..) | Expr::Index(..) => true,
+        Expr::Method(_, m, _) => matches!(m.as_str(), "get" | "at"),
+        _ => false,
+    }
 }
 
 fn slot_bytes(t: IrType) -> u32 {

@@ -1,0 +1,64 @@
+// 容器元素类型回归用例（M5-b）。
+//
+// 曾经的 bug：asm 后端在多处把数组元素类型**硬编码**成 int——
+//   · dial_array_new 的 kind 恒为 0（INT），于是 string[] 的元素既不被
+//     retain 也不被 release，数组释放后留下悬垂指针；
+//   · expr_dt 对下标 / 切片 / 字面量一律返回 int / int[]，于是 print 走
+//     dial_print_int 通道，把字符串句柄当数字吐出（打印出指针数值）。
+// 本用例覆盖：字符串数组的字面量 / 读 / 赋值 / push / clone、bool 数组元素、
+// 浮点与窄整型数组元素的下标读取。
+
+fn main(): int {
+    // ---- string[]：字面量与逐元素读取 ----
+    var names: string[] = ["alice", "bob", "carol"];
+    print("len = ", names.length());
+    print("n0 = ", names[0]);
+    print("n1 = ", names[1]);
+    print("n2 = ", names.get(2));
+
+    // 循环逐元素
+    var i: int = 0;
+    while (i < names.length()) {
+        print("loop ", names[i]);
+        i = i + 1;
+    }
+
+    // 下标赋值（元素归属结算：C 侧 retain 一份，借来的值不释放）
+    names[0] = "ALICE";
+    print("after set n0 = ", names[0]);
+
+    // push（字面量自带所有权 → 归还一份，避免每轮泄漏）
+    names.push("dave");
+    print("after push len = ", names.length(), " last = ", names[3]);
+
+    // 切片
+    var part: string[] = names.slice(1, 3);
+    print("slice len = ", part.length(), " p0 = ", part[0]);
+
+    // clone
+    var cl: string[] = names.clone();
+    print("clone len = ", cl.length(), " c2 = ", cl[2]);
+
+    // remove / pop：返回被删元素（C 侧会释放它，返回值需额外 retain）
+    var rm: string = names.remove(0);
+    print("removed = ", rm, " len = ", names.length());
+    var popped: string = names.pop();
+    print("popped = ", popped, " len = ", names.length());
+
+    // ---- bool[]：元素按 bool 语义（不是 int）----
+    var flags: bool[] = [true, false, true];
+    print("f0 = ", flags[0], " f1 = ", flags[1], " f2 = ", flags[2]);
+
+    // ---- float[] / byte[]：元素按各自宽度还原 ----
+    var fs: float[] = [1.5, 2.25, 3.75];
+    print("fs1 = ", fs[1], " fs2 = ", fs[2]);
+    var bs: byte[] = [int_to_byte(1), int_to_byte(2)];
+    print("bs0 = ", byte_to_int(bs[0]), " bs1 = ", byte_to_int(bs[1]));
+
+    // ---- int[]：原有路径不回归 ----
+    var is: int[] = [10, 20, 30];
+    is[1] = 99;
+    print("is = ", is[0], " ", is[1], " ", is[2]);
+    print("is remove = ", is.remove(0), " len = ", is.length());
+    return 0;
+}

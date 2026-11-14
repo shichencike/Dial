@@ -215,6 +215,31 @@ pub fn special_ret(name: &str) -> Option<Type> {
     })
 }
 
+/// 数组元素类别 → `dial_array_new` 的 kind 参数。
+///
+/// 与 runtime/dial_array.c 的 `DIAL_ELEM_*` 宏、LLVM 后端 codegen.rs 的
+/// `array_elem_kind` 三方同口径：0=INT 1=RC 2=ATOMIC 3=FLOAT 4=BOOL 5=BYTE 6=CHAR。
+///
+/// **kind 必须与元素类型严格对应**：kind=INT(0) 时 C 侧的 elem_retain /
+/// elem_release 是 no-op，句柄元素（string 等）就既不会被 retain 也不会被
+/// release——数组不是它的持有者，却在释放数组时按 INT 处理，最终留下悬垂指针。
+pub fn array_elem_kind(t: &Type) -> u64 {
+    match t {
+        Type::Int => 0,
+        Type::Float => 3,
+        Type::Float32 => 3,
+        Type::Bool => 4,
+        Type::Byte => 5,
+        Type::Char => 6,
+        Type::Channel(_) => 2,
+        Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::Set(_)
+        | Type::KvMap(..) | Type::Error | Type::Opaque(_) => 1,
+        // 结构体装箱为 RC 句柄（指针），与 string/array 等同走 kind=1。
+        Type::Struct(_) => 1,
+        _ => 0,
+    }
+}
+
 /// Abi → 传给 lower_expr 的期望 Dial 类型（主要影响字符串字面量 rodata 与
 /// 浮点字面量的内部宽度；语义层已保证实参类型合法）。
 pub fn abi_hint(a: Abi) -> Type {
