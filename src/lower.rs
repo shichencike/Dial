@@ -947,71 +947,119 @@ impl<'a> Lower<'a> {
 
     fn lower_method(&mut self, obj: &Expr, method: &str, args: &[Expr]) -> Result<(Value, bool), String> {
         let od = self.expr_dt(obj);
-        let (ov, _) = self.lower_expr(obj, &od)?;
-        match (od, method) {
-            (Type::String, "len" | "length" | "size") => {
-                let r = self.new_reg(IrType::I64);
-                self.emit(IrInst::Call { dst: Some(r), func: "dial_string_length".to_string(), args: vec![ov], arg_tys: vec![IrType::Handle], ret_ty: IrType::I64, linkage: CallLink::Runtime });
-                Ok((Value::Reg(r), false))
-            }
-            (Type::String, "get") => {
-                let (iv, _) = self.lower_expr(&args[0], &Type::Int)?;
-                let r = self.new_reg(IrType::I64);
-                self.emit(IrInst::Call { dst: Some(r), func: "dial_string_get".to_string(), args: vec![ov, iv], arg_tys: vec![IrType::Handle, IrType::I64], ret_ty: IrType::I64, linkage: CallLink::Runtime });
-                Ok((Value::Reg(r), false))
-            }
-            (Type::String, "substring") => {
-                let (a, _) = self.lower_expr(&args[0], &Type::Int)?;
-                let (b, _) = self.lower_expr(&args[1], &Type::Int)?;
-                let r = self.new_reg(IrType::Handle);
-                self.emit(IrInst::Call { dst: Some(r), func: "dial_string_substring".to_string(), args: vec![ov, a, b], arg_tys: vec![IrType::Handle, IrType::I64, IrType::I64], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
-                Ok((Value::Reg(r), false))
-            }
-            (Type::String, "eq") => {
-                let (bv, _) = self.lower_expr(&args[0], &Type::String)?;
-                let r = self.new_reg(IrType::I64);
-                self.emit(IrInst::Call { dst: Some(r), func: "dial_string_eq".to_string(), args: vec![ov, bv], arg_tys: vec![IrType::Handle, IrType::Handle], ret_ty: IrType::I64, linkage: CallLink::Runtime });
-                let r1 = self.new_reg(IrType::I64);
-                self.emit(IrInst::ICmp { op: ACmp::Neq, dst: r1, a: Value::Reg(r), b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
-                Ok((Value::Reg(r1), false))
-            }
-            (Type::Array(_), "len" | "length" | "size") => {
-                let r = self.new_reg(IrType::I64);
-                self.emit(IrInst::Call { dst: Some(r), func: "dial_array_length".to_string(), args: vec![ov], arg_tys: vec![IrType::Handle], ret_ty: IrType::I64, linkage: CallLink::Runtime });
-                Ok((Value::Reg(r), false))
-            }
-            (Type::Array(_), "get") => {
-                let (iv, _) = self.lower_expr(&args[0], &Type::Int)?;
-                let r = self.new_reg(IrType::I64);
-                self.emit(IrInst::Call { dst: Some(r), func: "dial_array_get".to_string(), args: vec![ov, iv], arg_tys: vec![IrType::Handle, IrType::I64], ret_ty: IrType::I64, linkage: CallLink::Runtime });
-                Ok((Value::Reg(r), false))
-            }
-            (Type::Array(_), "push") => {
-                let (ev, _) = self.lower_expr(&args[0], &Type::Int)?;
-                let r = self.new_reg(IrType::Handle);
-                self.emit(IrInst::Call { dst: Some(r), func: "dial_array_push".to_string(), args: vec![ov, ev], arg_tys: vec![IrType::Handle, IrType::I64], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
-                Ok((Value::Reg(r), false))
-            }
-            (Type::Array(_), "set") => {
-                let (iv, _) = self.lower_expr(&args[0], &Type::Int)?;
-                let (ev, _) = self.lower_expr(&args[1], &Type::Int)?;
-                let r = self.new_reg(IrType::Handle);
-                self.emit(IrInst::Call { dst: Some(r), func: "dial_array_set".to_string(), args: vec![ov, iv, ev], arg_tys: vec![IrType::Handle, IrType::I64, IrType::I64], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
-                Ok((Value::Reg(r), false))
-            }
-            (Type::Array(_), "pop") => {
-                let r = self.new_reg(IrType::Handle);
-                self.emit(IrInst::Call { dst: Some(r), func: "dial_array_pop".to_string(), args: vec![ov], arg_tys: vec![IrType::Handle], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
-                Ok((Value::Reg(r), false))
-            }
-            (Type::Array(_), "remove") => {
-                let (iv, _) = self.lower_expr(&args[0], &Type::Int)?;
-                let r = self.new_reg(IrType::Handle);
-                self.emit(IrInst::Call { dst: Some(r), func: "dial_array_remove".to_string(), args: vec![ov, iv], arg_tys: vec![IrType::Handle, IrType::I64], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
-                Ok((Value::Reg(r), false))
-            }
-            _ => self.err(&format!("asm 后端：方法 `{}` 暂不支持（后续相位）", method)),
+        // remove / pop 返回「被删元素」而非新数组指针，且要写回 COW 新指针。
+        if matches!(od, Type::Array(_)) && matches!(method, "remove" | "pop") {
+            return self.lower_array_remove(obj, &od, method, args);
         }
+        let spec = match builtin::lookup_method(&od, method) {
+            Some(s) => s,
+            None => return self.err(&format!("asm 后端：方法 `{}` 暂不支持（后续相位）", method)),
+        };
+        let (ov, _) = self.lower_expr(obj, &od)?;
+        // COW 写回目标：接收者必须是变量（与 LLVM 后端 gen_stmt 的 container_inplace 一致）。
+        let obj_slot = if spec.writeback {
+            if let Expr::Var(n) = obj { self.lookup(n).map(|l| l.ptr) } else { None }
+        } else { None };
+
+        let mut vals: Vec<Value> = vec![ov];
+        let mut tys: Vec<IrType> = vec![IrType::Handle];
+        for (i, a) in args.iter().enumerate() {
+            let abi = spec.args.get(i).copied().unwrap_or(builtin::Abi::Auto);
+            let bit_mode = spec.elem_arg == Some(i) || spec.is_kv;
+            let hint = if bit_mode || abi == builtin::Abi::Auto {
+                self.expr_dt(a)
+            } else {
+                builtin::abi_hint(abi)
+            };
+            let (v, _) = self.lower_expr(a, &hint)?;
+            let v2 = if bit_mode {
+                // 数组元素 / KvMap 键与值：按实参静态类型转成 C 的 int64 位模式。
+                self.coerce_elem_bits(v, &self.expr_dt(a))?
+            } else {
+                self.coerce_to_abi(v, a, abi).0
+            };
+            vals.push(v2);
+            tys.push(builtin::abi_ir(abi));
+        }
+        if spec.extra_one {
+            // set.add(k) → dial_map_put(m, k, 1)
+            vals.push(Value::Imm(Imm::I64(1)));
+            tys.push(IrType::I64);
+        }
+
+        let ret_ir = spec.ret_ir.clone();
+        let dst = if ret_ir == IrType::Void { None } else { Some(self.new_reg(ret_ir.clone())) };
+        self.emit(IrInst::Call {
+            dst, func: spec.sym.to_string(), args: vals, arg_tys: tys,
+            ret_ty: ret_ir, linkage: CallLink::Runtime,
+        });
+        let mut out = match dst {
+            None => Value::Imm(Imm::I64(0)),
+            Some(d) => Value::Reg(d),
+        };
+        // C 侧谓词 0/1 → Dial bool 严格 0/1。
+        if spec.post != builtin::Post::None {
+            let r = self.new_reg(IrType::I64);
+            let op = if spec.post == builtin::Post::NeqZero { ACmp::Neq } else { ACmp::Eq };
+            self.emit(IrInst::ICmp { op, dst: r, a: out, b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+            out = Value::Reg(r);
+        }
+        // 数组元素 / KvMap 值：按元素类型把 int64 位模式还原。
+        if spec.elem_ret {
+            let et = match &od {
+                Type::Array(e) => (**e).clone(),
+                Type::KvMap(_, v) => (**v).clone(),
+                _ => Type::Int,
+            };
+            out = self.reinterpret_bits(out, reg_ir(&et))?;
+        }
+        // COW：只写回新句柄，绝不 release 旧值（C 侧已结算）。
+        if let (Some(slot), Some(d)) = (obj_slot, dst) {
+            self.emit(IrInst::Store { ptr: slot, val: Value::Reg(d), ty: IrType::Handle });
+        }
+        Ok((out, false))
+    }
+
+    /// 数组 remove(i) / pop()：返回被删元素（按元素类型还原），并把 COW 新指针
+    /// 写回接收变量。堆元素需要额外 retain（C 侧会从数组释放它），首版明确延后。
+    fn lower_array_remove(&mut self, obj: &Expr, od: &Type, method: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        let elem = match od {
+            Type::Array(e) => (**e).clone(),
+            _ => return self.err("asm 后端：remove/pop 仅支持数组"),
+        };
+        if rc_kind(&elem).is_some() {
+            return self.err("asm 后端：堆类型数组的 remove/pop 需额外所有权结算（后续相位）");
+        }
+        let (ov, _) = self.lower_expr(obj, od)?;
+        let idx: Value = if method == "pop" {
+            let len = self.new_reg(IrType::I64);
+            self.emit(IrInst::Call { dst: Some(len), func: "dial_array_length".to_string(),
+                args: vec![ov], arg_tys: vec![IrType::Handle], ret_ty: IrType::I64, linkage: CallLink::Runtime });
+            let last = self.new_reg(IrType::I64);
+            self.emit(IrInst::Bin { op: ABin::Sub, dst: last, a: Value::Reg(len), b: Value::Imm(Imm::I64(1)), ty: IrType::I64 });
+            Value::Reg(last)
+        } else {
+            self.lower_expr(&args[0], &Type::Int)?.0
+        };
+        let got = self.new_reg(IrType::I64);
+        self.emit(IrInst::Call { dst: Some(got), func: "dial_array_get".to_string(),
+            args: vec![ov, idx], arg_tys: vec![IrType::Handle, IrType::I64],
+            ret_ty: IrType::I64, linkage: CallLink::Runtime });
+        let removed = self.reinterpret_bits(Value::Reg(got), reg_ir(&elem))?;
+        let newp = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call {
+            dst: Some(newp),
+            func: if method == "pop" { "dial_array_pop" } else { "dial_array_remove" }.to_string(),
+            args: if method == "pop" { vec![ov] } else { vec![ov, idx] },
+            arg_tys: if method == "pop" { vec![IrType::Handle] } else { vec![IrType::Handle, IrType::I64] },
+            ret_ty: IrType::Handle, linkage: CallLink::Runtime,
+        });
+        if let Expr::Var(n) = obj {
+            if let Some(l) = self.lookup(n).cloned() {
+                self.emit(IrInst::Store { ptr: l.ptr, val: Value::Reg(newp), ty: IrType::Handle });
+            }
+        }
+        Ok((removed, false))
     }
 
     // ---- 函数调用 ----
@@ -1085,9 +1133,13 @@ impl<'a> Lower<'a> {
             builtin::BKind::MinMax { is_min } => self.lower_minmax(is_min, args),
             builtin::BKind::Abs => self.lower_abs(args),
             builtin::BKind::Call { sym, args: abis, ret_ir, post } => {
+                // new_kv_map 在「结构体值」场景由 parser 补第 3 个实参（结构体名
+                // 字符串），但 C 的 dial_kvmap_new 只有两个 kind 参数。与 LLVM
+                // 后端一致只取前两个，避免多生成一个字符串临时对象并造成泄漏。
+                let eff: &[Expr] = if sym == "dial_kvmap_new" && args.len() > 2 { &args[..2] } else { args };
                 let mut vals = Vec::new();
                 let mut tys = Vec::new();
-                for (i, a) in args.iter().enumerate() {
+                for (i, a) in eff.iter().enumerate() {
                     let abi = abis.get(i).copied().unwrap_or(builtin::Abi::Auto);
                     let hint = if abi == builtin::Abi::Auto { self.expr_dt(a) } else { builtin::abi_hint(abi) };
                     let (v, _) = self.lower_expr(a, &hint)?;
@@ -1535,13 +1587,11 @@ impl<'a> Lower<'a> {
             }
             Expr::Method(obj, method, _) => {
                 let od = self.expr_dt(obj);
-                match (od, method.as_str()) {
-                    (_, "len" | "length" | "size" | "get") => Type::Int,
-                    (_, "eq") => Type::Bool,
-                    (_, "substring") => Type::String,
-                    (o, "push" | "set" | "pop" | "remove") => o,
-                    _ => Type::Int,
+                // remove/pop 返回被删元素（不是新数组指针）。
+                if matches!(method.as_str(), "remove" | "pop") {
+                    if let Type::Array(e) = &od { return *e.clone(); }
                 }
+                builtin::method_ret(&od, method).unwrap_or(Type::Int)
             }
             Expr::StructLit(name, _) => Type::Struct(name.clone()),
             Expr::ArrayLit(_, _) => Type::Array(Box::new(Type::Int)),

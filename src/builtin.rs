@@ -225,3 +225,145 @@ pub fn abi_ir(a: Abi) -> IrType {
         Abi::Auto => IrType::I64,
     }
 }
+
+// ============================================================================
+// 方法分派表（obj.m(args)）
+// ============================================================================
+//
+// 与 codegen.rs:5503 的 `match (&ot, method)` 一一对应。接收者恒为不透明句柄
+// （Abi::Ptr），args 只描述 obj 之后的参数。
+//   * writeback：C 侧 COW 返回「可能更新的新指针」，必须写回接收变量槽，
+//     且绝不 release 旧值（与 Stmt::AssignIndex 的所有权契约相同）。
+//   * elem_arg / elem_ret：数组元素按 C 的 int64 位模式存取，需按元素类型
+//     做位模式重解释（float 保留 IEEE754、句柄按指针位模式）。
+//   * is_kv：泛型 map<K,V> 走 dial_kvmap_*，键/值按 K/V 静态类型转位模式。
+
+#[derive(Clone, Debug)]
+pub struct MSpec {
+    pub sym: &'static str,
+    pub args: &'static [Abi],
+    pub ret: Type,
+    pub ret_ir: IrType,
+    pub post: Post,
+    pub writeback: bool,
+    pub elem_arg: Option<usize>,
+    pub elem_ret: bool,
+    pub is_kv: bool,
+    /// set.add：C 侧是 dial_map_put(m, k, 1)，需追加常量 1 作为第三个实参。
+    pub extra_one: bool,
+}
+
+impl MSpec {
+    fn new(sym: &'static str, args: &'static [Abi], ret: Type, ret_ir: IrType) -> Self {
+        MSpec { sym, args, ret, ret_ir, post: Post::None, writeback: false,
+                elem_arg: None, elem_ret: false, is_kv: false, extra_one: false }
+    }
+    fn post(mut self, p: Post) -> Self { self.post = p; self }
+    fn wb(mut self) -> Self { self.writeback = true; self }
+    fn earg(mut self, i: usize) -> Self { self.elem_arg = Some(i); self }
+    fn eret(mut self) -> Self { self.elem_ret = true; self }
+    fn kv(mut self) -> Self { self.is_kv = true; self }
+    fn one(mut self) -> Self { self.extra_one = true; self }
+}
+
+const MA0: &[Abi] = &[];
+const MA_I: &[Abi] = &[Abi::I64];
+const MA_II: &[Abi] = &[Abi::I64, Abi::I64];
+const MA_P: &[Abi] = &[Abi::Ptr];
+const MA_PP: &[Abi] = &[Abi::Ptr, Abi::Ptr];
+
+fn arr(ret: Type) -> Type { Type::Array(Box::new(ret)) }
+
+/// 方法 → 规格。返回 None 表示「非内建方法」（impl 方法 / 未覆盖构造）。
+pub fn lookup_method(recv: &Type, name: &str) -> Option<MSpec> {
+    let int = Type::Int;
+    let string = Type::String;
+    let spec = match recv {
+        Type::String => match name {
+            "length" | "len" => MSpec::new("dial_string_length", MA0, int.clone(), IrType::I64),
+            "concat" => MSpec::new("dial_string_concat", MA_P, string.clone(), IrType::Handle),
+            "get" => MSpec::new("dial_string_get", MA_I, int.clone(), IrType::I64),
+            "substring" => MSpec::new("dial_string_substring", MA_II, string.clone(), IrType::Handle),
+            "clone" => MSpec::new("dial_string_clone", MA0, string.clone(), IrType::Handle),
+            "eq" => MSpec::new("dial_string_eq", MA_P, Type::Bool, IrType::I64).post(Post::NeqZero),
+            "index_of" => MSpec::new("dial_string_index_of", MA_P, int.clone(), IrType::I64),
+            "replace" => MSpec::new("dial_string_replace", MA_PP, string.clone(), IrType::Handle),
+            "trim" => MSpec::new("dial_string_trim", MA0, string.clone(), IrType::Handle),
+            "split" => MSpec::new("dial_string_split", MA_P, arr(string.clone()), IrType::Handle),
+            "to_upper" => MSpec::new("dial_string_to_upper", MA0, string.clone(), IrType::Handle),
+            "to_lower" => MSpec::new("dial_string_to_lower", MA0, string.clone(), IrType::Handle),
+            "contains" => MSpec::new("dial_string_contains", MA_P, Type::Bool, IrType::I64).post(Post::NeqZero),
+            "starts_with" => MSpec::new("dial_string_starts_with", MA_P, Type::Bool, IrType::I64).post(Post::NeqZero),
+            "ends_with" => MSpec::new("dial_string_ends_with", MA_P, Type::Bool, IrType::I64).post(Post::NeqZero),
+            "char_count" => MSpec::new("dial_string_char_count", MA0, int.clone(), IrType::I64),
+            "chars" => MSpec::new("dial_string_chars", MA0, arr(int.clone()), IrType::Handle),
+            "char_at" => MSpec::new("dial_string_char_at", MA_I, int.clone(), IrType::I64),
+            "char_slice" => MSpec::new("dial_string_char_slice", MA_II, string.clone(), IrType::Handle),
+            _ => return None,
+        },
+        Type::Array(elem) => match name {
+            "length" | "len" | "size" => MSpec::new("dial_array_length", MA0, int.clone(), IrType::I64),
+            "get" => MSpec::new("dial_array_get", MA_I, (**elem).clone(), IrType::I64).eret(),
+            "push" => MSpec::new("dial_array_push", MA_I, recv.clone(), IrType::Handle).earg(0).wb(),
+            "set" => MSpec::new("dial_array_set", MA_II, recv.clone(), IrType::Handle).earg(1).wb(),
+            "insert" => MSpec::new("dial_array_insert", MA_II, recv.clone(), IrType::Handle).earg(1).wb(),
+            "index_of" => MSpec::new("dial_array_index_of", MA_I, int.clone(), IrType::I64).earg(0),
+            "clone" => MSpec::new("dial_array_clone", MA0, recv.clone(), IrType::Handle),
+            "slice" => MSpec::new("dial_array_slice", MA_II, recv.clone(), IrType::Handle),
+            // remove / pop 返回**被删元素**（不是新数组指针），另见 lower_method 特判。
+            "sort" => MSpec::new(if **elem == Type::String { "dial_array_sort_string" } else { "dial_array_sort" },
+                                 MA0, recv.clone(), IrType::Handle).wb(),
+            "reverse" => MSpec::new("dial_array_reverse", MA0, recv.clone(), IrType::Handle).wb(),
+            "clear" => MSpec::new("dial_array_clear", MA0, recv.clone(), IrType::Handle).wb(),
+            "join" => MSpec::new("dial_array_join", MA_P, string.clone(), IrType::Handle),
+            // 高阶方法需要 fnptr thunk，明确不支持（由 lower_method 报 Fail-Fast）。
+            "map" | "filter" | "reduce" | "sort_by" => return None,
+            _ => return None,
+        },
+        Type::Map => match name {
+            "put" => MSpec::new("dial_map_put", MA_II, recv.clone(), IrType::Handle).wb(),
+            "get" => MSpec::new("dial_map_get", MA_I, int.clone(), IrType::I64),
+            "get_or" => MSpec::new("dial_map_get_or", MA_II, int.clone(), IrType::I64),
+            "contains" => MSpec::new("dial_map_contains", MA_I, Type::Bool, IrType::I64).post(Post::NeqZero),
+            "remove" => MSpec::new("dial_map_remove", MA_I, int.clone(), IrType::I64),
+            "size" => MSpec::new("dial_map_size", MA0, int.clone(), IrType::I64),
+            _ => return None,
+        },
+        Type::Set(_) => match name {
+            "add" => MSpec::new("dial_map_put", MA_I, recv.clone(), IrType::Handle).wb().one(),
+            "contains" => MSpec::new("dial_map_contains", MA_I, Type::Bool, IrType::I64).post(Post::NeqZero),
+            "remove" => MSpec::new("dial_map_remove", MA_I, int.clone(), IrType::I64),
+            "size" => MSpec::new("dial_map_size", MA0, int.clone(), IrType::I64),
+            "values" => MSpec::new("dial_map_keys", MA0, arr(int.clone()), IrType::Handle),
+            _ => return None,
+        },
+        Type::KvMap(k, v) => match name {
+            "put" => MSpec::new("dial_kvmap_put", MA_II, recv.clone(), IrType::Handle).kv().wb(),
+            "get" => MSpec::new("dial_kvmap_get", MA_I, (**v).clone(), IrType::I64).kv().eret(),
+            "get_or" => MSpec::new("dial_kvmap_get_or", MA_II, (**v).clone(), IrType::I64).kv().eret(),
+            "contains" => MSpec::new("dial_kvmap_contains", MA_I, Type::Bool, IrType::I64).kv().post(Post::NeqZero),
+            "remove" => MSpec::new("dial_kvmap_remove", MA_I, (**v).clone(), IrType::I64).kv().eret(),
+            "size" => MSpec::new("dial_kvmap_size", MA0, int.clone(), IrType::I64).kv(),
+            "keys" => MSpec::new("dial_kvmap_keys", MA0, arr((**k).clone()), IrType::Handle).kv(),
+            "values" => MSpec::new("dial_kvmap_values", MA0, arr((**v).clone()), IrType::Handle).kv(),
+            _ => return None,
+        },
+        Type::Bytes => match name {
+            "as_ptr" => MSpec::new("dial_ffi_bytes_data", MA0, Type::RawPtr(Box::new(Type::Byte)), IrType::Ptr),
+            "length" | "len" => MSpec::new("dial_bytes_length", MA0, int.clone(), IrType::I64),
+            "get" => MSpec::new("dial_bytes_get", MA_I, int.clone(), IrType::I64),
+            _ => return None,
+        },
+        Type::Error => match name {
+            "msg" => MSpec::new("dial_error_msg", MA0, string.clone(), IrType::Handle),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(spec)
+}
+
+/// expr_dt 用：方法的返回 Dial 类型（不含接收者上下文）。
+pub fn method_ret(recv: &Type, name: &str) -> Option<Type> {
+    lookup_method(recv, name).map(|m| m.ret)
+}
