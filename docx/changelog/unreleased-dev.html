@@ -1042,12 +1042,49 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
 <li>确定性结论以静态指令数为准：M6 基线 5594 → M7-b 4775 → <strong>M7-c 4302</strong>，
     累计 −23%；465 处冗余消除与 4 处常量折叠可直接从 <code>.s</code> 复现，不受计时噪声影响。</li>
 <li><strong>剩余差距</strong>：b08 3n+1 <strong>2.913x</strong>、b23 popcount <strong>2.324x</strong>、b03 除法取模
-  1.842x、b25 三路分支 1.310x、递归调用类 1.346x、b10 1.373x。这些多是
-  <strong>除法/取模</strong>（<code>idivq</code> 无法折叠）、<strong>递归/含 call 的 prologue-epilogue
-  开销</strong>与<strong>分支密集</strong>负载，靠搬运消除已到极限。下一步 M7-d：<strong>拷贝合并 /
-  coalescing</strong>（让 SSA def 复用首个操作数的物理寄存器，砍掉 b23 内层剩余的
-  寄存器搬运）+ <strong>指令选择</strong>（常量除法改乘法逆元、比较与分支融合）+
-  <strong>含 call 函数的跨块协调</strong>（递归类反超的主战场）。</li>
+  1.842x、b25 三路分支 1.310x、递归调用类 1.346x、b10 1.373x。诊断确认
+  这些多是 <strong>除法/取模</strong>（<code>idivq</code> 无法折叠）、<strong>递归/含 call 的
+  prologue-epilogue 开销</strong>与<strong>分支密集</strong>负载，靠搬运消除已到极限。</li>
+</ul>
+</li>
+<li><strong>M7-d 常量除法乘法逆元（历史最大单次改善，几何平均 1.1836x → 1.1099x）</strong>：<ul>
+<li><strong>根因</strong>：<code>bench.dial</code> 28 项几乎每项收尾都有 <code>% 1000000007</code>，另有
+  <code>/7</code>、<code>%97</code>、<code>%3</code>、<code>%1000003</code>、<code>/2</code>、<code>%2</code> 等，全部编译成 <code>idivq</code>——
+  x86-64 上 20–90 周期的微码指令。gcc -O2 / LLVM 早已用
+  Granlund–Montgomery 乘法逆元把「除以常量」换成 <code>movabsq $M</code> +
+  单操作数 <code>imulq</code> + 移位 + 符号修正（约 6–10 条单周期指令），这是
+  除法密集基准差 2–3x 的主因。</li>
+<li><strong>实现</strong>：<code>const_div_magic(b)</code> 在编译期对 <code>2 &lt;= d &lt;= i32::MAX</code> 的正常量
+  除数搜索 <code>(M, s, add)</code>，序列与 gcc -O2 同构（<code>movabsq $M,%rax;
+  imulq %r11; [add] addq %r11,%rdx; [s&gt;0] sarq $s,%rdx; 符号修正</code>），
+  Div 取 <code>rdx</code>、Mod 再算 <code>n - q*d</code>（<code>imulq $d,%rdx,%r10; subq</code>，
+  d ≤ i32::MAX 保证 imm32 立即数可用）。只用 <code>rax/rdx/r10/r11</code>，
+  均不属 RES_POOL，驻留态下不破坏任何活跃值；AArch64 仍走 sdiv/msub。</li>
+<li><strong>安全护栏（自校验）</strong>：魔数不是硬编码表，而是编译期用 <code>i128</code> <strong>精确
+  模拟即将发射的 128 位有符号乘法</strong>，对端点（i64::MIN/MAX）、<code>k·d±2</code>
+  临界区、2 的幂、<code>xorshift</code> 伪随机大数等约 1300 个 <code>n</code> 逐值验证
+  <code>商 == n / d</code>（向零截断，与 idivq 一致）。只有全部通过才启用；
+  浮点位模式 / 寄存器除数 / 负或零除数 / &gt;i32::MAX / 搜索无解，一律
+  <strong>原样退回 <code>idivq</code></strong>。落地前另用独立 C + 手写 .S 对 17 个除数、
+  16031 个值（div 与 mod）逐值比对，fails=0；魔数值与 gcc -O2 完全一致。</li>
+<li><strong>量化结果</strong>（校验和 28×2 全一致，双后端黄金门禁 10 正向 + 2 负例 +
+  AArch64 交叉汇编 + 全量测试全绿）：</li>
+<li><code>idivq</code> <strong>57 处 → 1 处</strong>（仅剩 <code>gcdI</code> 的 <code>x % y</code> 变量除数），
+    61 处魔数序列生效；静态指令数 4302 → 4668（除法被多条单周期指令
+    替代，属预期上涨，不再以指令数衡量本批次收益）。</li>
+<li>A/B 交替（<code>--quick</code>，<code>m7c,m7d,m7d,m7c</code>）：几何平均 <strong>M7-c
+    1.1776/1.1978 → M7-d 1.1081/1.1191（约 −6%）</strong>；算术循环类
+    <strong>1.298/1.315 → 1.110/1.124（约 −14.5%）</strong>，递归/数组类持平；
+    逐项胜/平/负 <code>5/4/19·4/5/19 → 6/8/14·5/10/13</code>。</li>
+<li>完整模式（5 采样）：几何平均 <strong>1.1099x</strong>——M6 首个可信基线 1.3575x
+    累计降至 1.1099x（<strong>−18%</strong>），为历史最佳；算术循环类 1.1169x，
+    数组内存类 0.9398x 持续反超 LLVM，b03 除法混合 1.842x → 1.005x
+    （持平）、b08 3n+1 2.913x → 1.76x。</li>
+<li><strong>剩余差距</strong>：b23 popcount 2.31x、b08 3n+1 1.76x、递归/含 call 类
+  约 1.36x（享受不到统一寄存器文件、还要承担 call 与 prologue）、
+  b21/b22 字符串 1.26x/1.42x。下一步 M7-e：<strong>拷贝合并 / coalescing</strong>
+  （SSA def 复用首个操作数的物理寄存器，砍掉 b23 内层剩余搬运）+
+  <strong>含 call 函数的跨块协调</strong>（递归类反超的主战场）+ <strong>字符串专用优化</strong>。</li>
 </ul>
 </li>
 </ul>

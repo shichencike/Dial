@@ -1129,8 +1129,50 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// 发射「有符号 64 位整数 / 常量 d」的乘法逆元序列（仅 x86-64）。
+    /// 只用 rax/rdx/r10/r11，均不属 RES_POOL，驻留态下不会破坏任何活跃值；
+    /// 被除数常驻 r11（单操作数 imulq 不写它），商留在 rdx。
+    fn inst_const_div(&mut self, op: ABin, dst: VReg, a: Value,
+                      m: i64, s: u32, add: bool, d: i64) {
+        let n = self.g3().to_string();     // r11：被除数，全程保留
+        let mr = self.g1().to_string();    // rax：魔数 / 余数结果
+        let tmp = self.g2().to_string();   // r10：符号掩码 / q*d
+        self.lg(a, &n);
+        self.line(&format!("\tmovabsq ${}, {}", m, self.r(&mr)));
+        self.line(&format!("\timulq {}", self.r(&n))); // rdx:rax = m*n
+        if add {
+            self.line(&format!("\taddq {}, {}", self.r(&n), self.r("rdx")));
+        }
+        if s > 0 {
+            self.line(&format!("\tsarq ${}, {}", s, self.r("rdx")));
+        }
+        self.line(&format!("\tmovq {}, {}", self.r(&n), self.r(&tmp)));
+        self.line(&format!("\tsarq $63, {}", self.r(&tmp)));
+        self.line(&format!("\tsubq {}, {}", self.r(&tmp), self.r("rdx"))); // rdx = 商
+        match op {
+            ABin::Div => self.sg(dst, "rdx"),
+            ABin::Mod => {
+                // d <= i32::MAX，imulq 三操作数立即数为 imm32。
+                self.line(&format!("\timulq ${}, {}, {}", d, self.r("rdx"), self.r(&tmp)));
+                self.line(&format!("\tmovq {}, {}", self.r(&n), self.r(&mr)));
+                self.line(&format!("\tsubq {}, {}", self.r(&tmp), self.r(&mr)));
+                self.sg(dst, &mr);
+            }
+            _ => unreachable!(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn inst_bin(&mut self, op: ABin, dst: VReg, a: Value, b: Value, _ty: IrType) {
+        // M7-d：常量除数的乘法逆元。idivq 是 20–90 周期的微码指令，而
+        // 每个基准的收尾几乎都有 `% 1000000007`；仅 x86-64、自校验通过才启用。
+        if matches!(self.target, EmitTarget::X86_64SysV)
+            && matches!(op, ABin::Div | ABin::Mod) {
+            if let Some((m, s, add, d)) = const_div_magic(b) {
+                self.inst_const_div(op, dst, a, m, s, add, d);
+                return;
+            }
+        }
         // imul/idiv/移位没有 `reg, imm` 形式，浮点也没有立即数操作数；
         // 这些情况下仍把 b 装进 g2，其余直接让 x86 读内存/立即数。
         let allow_imm = matches!(op,
@@ -1833,6 +1875,82 @@ fn shift_imm(v: Value) -> Option<i64> {
         _ => return None,
     };
     if (0..=63).contains(&n) { Some(n) } else { None }
+}
+
+/// 编译期为「有符号 64 位整数 / 正常量 d」求 Granlund–Montgomery 乘法逆元。
+///
+/// 返回 `(M, s, add, d)`，对应即将发射的序列（`n` 在 r11）：
+/// ```text
+///   movabsq $M, %rax ; imulq %r11   ; rdx = 高 64 位 (M×n)
+///   [add] addq %r11, %rdx
+///   [s>0] sarq $s, %rdx
+///   movq %r11, %r10 ; sarq $63, %r10 ; subq %r10, %rdx  ; rdx = 商
+/// ```
+/// `add` 为真表示 M 的位模式 ≥ 2^63（打印为负立即数），此时需 `rdx += n`。
+/// 该序列与 gcc -O2 的常量除法输出同构，复现 `idivq` 的向零截断语义。
+///
+/// **自校验**：只有 `2 <= d <= i32::MAX`（Mod 里 `imulq` 的立即数必须是
+/// imm32）且「搜索出的 (M,s,add) 通过全边界逐值模拟」才返回 Some；任何一步
+/// 不确定都返回 None，由调用方原样退回 `idivq`。宁可不优化，绝不发错代码。
+fn const_div_magic(b: Value) -> Option<(i64, u32, bool, i64)> {
+    let d = match b {
+        Value::Imm(Imm::I64(n)) => n,
+        Value::Imm(Imm::I32(n)) => n as i64,
+        Value::Imm(Imm::I8(n)) => n as i64,
+        Value::Imm(Imm::I1(v)) => v as i64,
+        _ => return None, // 浮点位模式 / 寄存器除数：交给 idivq
+    };
+    if d < 2 || d > i32::MAX as i64 { return None; }
+
+    // 用 i128 精确模拟 128 位有符号乘法（imulq 单操作数），返回商。
+    fn sim(n: i64, m: i64, s: u32, add: bool) -> i64 {
+        let full = (n as i128) * (m as i128);
+        let mut hi = (full >> 64) as i64;
+        if add { hi = hi.wrapping_add(n); }
+        let q = hi >> s;
+        q.wrapping_sub(n >> 63) // n>>63 = -1 (n<0) 或 0
+    }
+    // 端点、k·d 临界区、2 的幂、伪随机大数——魔数误差是系统性的，会在
+    // k·d 边界立刻暴露；`all` 短路让错误候选几乎立刻失败。
+    fn verify(d: i64, m: i64, s: u32, add: bool) -> bool {
+        let mut pts: Vec<i64> = vec![
+            i64::MIN, i64::MIN + 1, i64::MIN + 2,
+            i64::MAX, i64::MAX - 1, i64::MAX - 2,
+            0, 1, -1, 2, -2, 3, -3,
+            d, -d, d - 1, -d + 1, d + 1, -d - 1,
+        ];
+        let qm = i64::MAX / d;
+        for k in [1i64, 2, 3, 7, 100, 1000, qm, qm - 1] {
+            for dl in -2i64..=2 {
+                for base in [k.wrapping_mul(d), (-k).wrapping_mul(d)] {
+                    pts.push(base.wrapping_add(dl));
+                }
+            }
+        }
+        for j in [1u32, 2, 3, 15, 16, 31, 32, 62] {
+            let p = 1i64 << j;
+            pts.extend([p, -p, p - 1, p + 1]);
+        }
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..600 {
+            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            let v = (x >> 1) as i64;
+            pts.push(v); pts.push(-v);
+        }
+        pts.iter().all(|&n| sim(n, m, s, add) == n / d)
+    }
+
+    for s in 0..63u32 {
+        let num = 1u128 << (64 + s);
+        let fl = num / (d as u128);
+        for m0 in [fl, fl + 1] {
+            if m0 >= (1u128 << 64) { continue; }
+            let m = m0 as i64;          // ≥2^63 时位模式解释为负立即数
+            let add = m < 0;
+            if verify(d, m, s, add) { return Some((m, s, add, d)); }
+        }
+    }
+    None
 }
 
 fn x86_setcc(op: ACmp) -> &'static str {
