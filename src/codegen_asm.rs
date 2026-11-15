@@ -2080,6 +2080,74 @@ fn thread_jumps(asm: &str) -> String {
     out
 }
 
+/// M7-e3a：删除 M7-e2 重定向后已无引用、且无 fallthrough 进入的死 trampoline
+/// 块，并在删块后的紧凑布局上再消一次新暴露的 fallthrough `jmp`。
+///
+/// 安全性：
+///  - **trampoline 块** = 紧邻若干标签 / 汇编指示后紧跟一条 `jmp`、块内无任何
+///    其它真实指令。M7-e2 重定向后这些标签已无任何跳转引用；
+///  - 仅当「块前最后一条真实指令是无条件控制转移（`jmp`/`ret`/`ud2`）」时才删
+///    ——若是普通指令或条件跳转，控制流会 fallthrough 进入该块，删除即改变语义；
+///  - 别名标签（多个标签指向同一 jmp）须全部无引用才整体删除；函数最前的块
+///    （前面无可判定指令）一律保守保留；
+///  - 不删任何仍被引用的标签，删块后全函数无悬空跳转目标。
+///
+/// 删掉死块后，原本被它隔开的 `jmp X` 与目标 X 变成紧邻，会产生新的
+/// fallthrough 机会——这些是**运行时执行路径上的**跳转（不是死代码），再消一次
+/// 有真实收益。仅 x86-64，逐函数运行。
+fn elide_dead_trampolines(asm: &str) -> String {
+    let lines: Vec<&str> = asm.lines().collect();
+    let n = lines.len();
+    // 所有跳转引用的标签集合。
+    let mut refs: HashSet<String> = HashSet::new();
+    for l in &lines {
+        if let Some((_, t)) = parse_jmp(l) { refs.insert(t.to_string()); }
+    }
+    // 识别可删 trampoline 块：从每条块首 jmp 往前回退连续的标签 / skip 行，
+    // 直到遇到前一块的最后一条真实指令。
+    let mut remove: HashSet<usize> = HashSet::new();
+    for j in 0..n {
+        if !matches!(parse_jmp(lines[j]), Some(("jmp", _))) { continue; }
+        let mut k = j as isize - 1;
+        let mut group: Vec<usize> = Vec::new();
+        while k >= 0 {
+            if parse_label(lines[k as usize]).is_some() {
+                group.push(k as usize); k -= 1; continue;
+            }
+            if is_skip(lines[k as usize]) { k -= 1; continue; }
+            break;
+        }
+        if group.is_empty() { continue; }                 // jmp 前无标签：不是块首
+        // 任一别名标签仍被跳转引用 → 整个块保守保留。
+        if group.iter().any(|&g| refs.contains(parse_label(lines[g]).unwrap())) {
+            continue;
+        }
+        if k < 0 { continue; }                            // 函数最前，保守保留
+        let t = lines[k as usize].trim();
+        let no_fallthrough = t.starts_with("jmp ")
+            || t.starts_with("ret") || t.starts_with("ud2");
+        if !no_fallthrough { continue; }                 // 有 fallthrough 进入，保留
+        for g in group { remove.insert(g); }
+        remove.insert(j);
+    }
+    // 生成删块后的行序列。
+    let stage: Vec<String> = lines.iter().enumerate()
+        .filter(|(i, _)| !remove.contains(i))
+        .map(|(_, l)| (*l).to_string())
+        .collect();
+    // 删块后再做一次 fallthrough 消除：死块消失后原本被隔开的 `jmp X` 与 X
+    // 变成紧邻，这些跳转运行时会执行，消除有真实收益。
+    let mut out = String::with_capacity(asm.len());
+    for i in 0..stage.len() {
+        if let Some((m, tgt)) = parse_jmp(&stage[i]) {
+            if m == "jmp" && labels_prefix(&stage, i).contains(&tgt) { continue; }
+        }
+        out.push_str(&stage[i]);
+        out.push('\n');
+    }
+    out
+}
+
 /// M7-c1：x86-64 移位指令的立即数形式只接受 imm8，且 64 位操作数实际按
 /// `count & 63` 生效。当移位量是 `[0,63]` 的整数常量时，`shlq/sarq $n, reg`
 /// 与 `movq $n,%rcx; shlq %cl,reg` 语义完全一致，可以直接折叠、省掉两次搬运。
@@ -2248,11 +2316,13 @@ fn emit_function(
         e.term(b.id, &b.term);
         e.end_block();
     }
-    // M7-c2 / M7-e1 / M7-e2：x86-64 发射末尾依次做三个纯文本 pass，顺序固定：
-    //   ① 相邻冗余 reload 消除 → ② 全函数死 store 消除 → ③ 跳转重定向 +
-    //   fallthrough jmp 消除。①② 顺序不可颠倒（先删紧邻 load 才暴露孤立 store
-    //   供第二步删除）；③ 放在最后，可在 ①② 精简后的指令流上看到最完整的
-    //   trampoline 集合。lo/hi 圈定本函数 vreg spill 槽区。
+    // M7-c2 / M7-e1 / M7-e2 / M7-e3a：x86-64 发射末尾依次做四个纯文本 pass，
+    // 顺序固定：① 相邻冗余 reload 消除 → ② 全函数死 store 消除 → ③ 跳转重定向
+    // + fallthrough jmp 消除 → ④ 死 trampoline 块删除 + 再消一次 fallthrough。
+    // ①② 顺序不可颠倒（先删紧邻 load 才暴露孤立 store）；③ 在 ①② 精简后的
+    // 指令流上重定向，清空 trampoline 引用；④ 才能在无引用前提下安全删死块，
+    // 并在删块后更紧凑的布局上消掉新暴露的 fallthrough。lo/hi 圈定本函数 vreg
+    // spill 槽区。
     if matches!(target, EmitTarget::X86_64SysV) {
         let s = elide_redundant_reloads(&e.out);
         let (lo, hi) = match (e.reg_off.first(), e.reg_off.last()) {
@@ -2260,7 +2330,8 @@ fn emit_function(
             _ => (0, 0),
         };
         let d = elide_dead_stores(&s, lo, hi);
-        out.push_str(&thread_jumps(&d));
+        let t = thread_jumps(&d);
+        out.push_str(&elide_dead_trampolines(&t));
     } else {
         out.push_str(&e.out);
     }

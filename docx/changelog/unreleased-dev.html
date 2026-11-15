@@ -1128,11 +1128,39 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     反超、胜/平/负 <strong>8/11/9</strong>（负项首次降到个位数）。<strong>注意</strong>：完整模式绝对
     读数与 M7-e1 的 1.0995x 跨了不同整机负载时段，不可直接相减；本轮净收益
     以 A/B 交替的相对改善为准。</li>
-<li><strong>剩余差距</strong>：递归 / 含 call 类仍约 1.13x（含 call，享受不到统一寄存器
-  文件、还要承担 call 与 prologue）、b23 popcount、b08 3n+1、字符串类约 1.06x。
-  下一步 M7-e3：<strong>死 trampoline 块删除</strong>（重定向后它们已无引用、不执行，可
-  进一步缩代码体积 / 改善 icache，需精确排除 fallthrough 进入）+ <strong>拷贝合并 /
-  coalescing</strong> + <strong>含 call 函数跨块协调</strong>（递归类继续逼近的主战场）。</li>
+<li><strong>M7-e3a 死 trampoline 块删除 + 二次 fallthrough 消除（几何平均 A/B −1.7%，
+  静态指令 4087 → 3872）</strong>：</li>
+<li><strong>诊断</strong>：M7-e2 重定向后，123 个 trampoline 块全部「无跳转引用 + 无
+    fallthrough 进入」（块前最后一条真实指令都是 <code>jmp</code>/<code>ret</code>/<code>ud2</code>），是纯死
+    代码。关键发现：<strong>删掉这些隔在中间的死块后，原本被隔开的 <code>jmp X</code> 与目标
+    X 变成紧邻</strong>——删块前可消的 fallthrough jmp 只剩 3 个，删块后新暴露
+    <strong>92 个，且这些都在运行时执行路径上</strong>（不是死代码），消除有真实收益。</li>
+<li><strong>方案</strong>：<code>emit_function</code> 末尾第四个纯文本 pass（仅 x86-64）。从每条块首
+    <code>jmp</code> 往前回退连续标签/指示，判定「所有别名标签无引用 + 块前最后一条真实
+    指令是无条件控制转移（<code>jmp</code>/<code>ret</code>/<code>ud2</code>）+ 块内只有标签和这一条 jmp」，
+    满足才删标签行与 jmp 行；随后在删块后更紧凑的布局上再跑一次 fallthrough
+    消除。函数最前的块（前无可判定指令）、任何仍被引用的标签一律保守保留。</li>
+<li><strong>正确性护栏</strong>：删块后全文件<strong>悬空跳转目标 0</strong>、残留 trampoline <strong>123 → 0</strong>；
+    fibR 现在 <code>jz b3</code> 后直接 fallthrough 进 base case、<code>jmp b1</code> 亦被消除（<code>jz</code>
+    假分支自然落入 b1、真分支跳 b3，语义等价）；黄金门禁（10 正向 + 2 负例 +
+    AArch64 交叉汇编）逐字节全绿、28×2 校验和全一致。AArch64 保持原路径。</li>
+<li><strong>确定性指标</strong>：静态指令 <strong>4087 → 3872（−215 / −5.3%）</strong>，M6 基线 5594
+    累计 <strong>−31%</strong>；<code>jmp</code> 助记符大幅减少、.s 体积缩小。</li>
+<li><strong>A/B 双二进制交替</strong>（<code>m7e2,m7e3,m7e3,m7e2</code>）：几何平均 <strong>M7-e2
+    1.0360/1.0270 → M7-e3a 1.0108/1.0188（约 −1.7%）</strong>，首次逼近 1.01x；
+    递归类 1.126/1.118 → 1.096/1.104、数组内存类 0.864/0.862 → 0.839/0.842
+    （反超扩大）、位与控制流 1.045/1.053 → 1.029/1.031、字符串 1.082/1.047 →
+    1.034/1.041，各类别普遍小幅改善、算术循环持平。完整模式（5 采样）
+    <strong>1.0172x</strong>、数组内存类 0.8400x 反超。</li>
+<li><strong>诚实判断</strong>：收益明显小于 M7-d/e1/e2（−6%~−10%），因为删的是单周期
+    <code>jmp</code> 与死代码，属边际优化；绝对读数仍随整机负载波动，跨批次不可直接相减。</li>
+<li><strong>剩余差距</strong>：递归 / 含 call 类仍约 1.10x（含 call，享受不到统一寄存器
+  文件、还要承担 call 与 prologue）、算术循环类约 1.10x、字符串类约 1.04x、
+  b23 popcount、b08 3n+1。下一步 M7-e3b：<strong>拷贝合并 / coalescing</strong>（统一寄存器
+  文件里热循环仍有约八成 <code>movq</code> 搬运，需按干扰图给 SSA def 复用操作数物理
+  寄存器，是继续逼近 / 反超 LLVM 的主战场）+ <strong>含 call 函数跨块协调</strong> +
+  <strong>布尔比较-分支融合</strong>（全文件 95 组 <code>cmp/setcc/movzbq/testq/jz</code> 可压成
+  <code>cmp/jcc</code>，需 IR 层活跃性支撑）。</li>
 </ul>
 </li>
 </ul>
