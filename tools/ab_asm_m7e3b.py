@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
-"""A/B 对跑：OLD(M7-e3a @3180271) vs NEW(M7-e3b) 自研 asm 后端。
+"""A/B 对跑：OLD vs NEW 两个版本自研 asm 后端的通用交替基准。
 
 与 bench_asm_vs_llvm.py 同口径（校准重复数 → 扣启动基线 → 多次取最小）。
 关键差异：同一任务在 OLD / NEW 两个二进制间**交替采样**，抵消整机噪声
 （跨时段绝对读数不可直接相减，以相对改善为准）。
+
+OLD / NEW 两个 dialc 二进制由外部准备，脚本只负责用它们各自编译 bench.dial
+并交替计时：
+  · OLD = /tmp/dialc_old/target/release/dialc —— 通常是「上一逻辑单元」的
+    干净 git worktree（如 `git worktree add /tmp/dialc_old <old-rev>` 后 cargo build）。
+  · NEW = 主工作树 target/release/dialc —— 当前逻辑单元。
+历史用法：M7-e3b 批次 OLD=M7-e3a@3180271；M7-e3c 批次 OLD=M7-e3b@0b7d9cd。
+文件名沿用首次创建时的批次名，不代表 OLD/NEW 的固定版本。
+
+ratio = old_ms / new_ms（>1 表示 NEW 更快）。
 
 用法：
     python3 tools/ab_asm_m7e3b.py                 # 全量 28 项，每项 5 采样
