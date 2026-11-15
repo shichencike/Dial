@@ -1959,6 +1959,102 @@
         （该文件被 `.gitignore` 的 `*.s` 忽略、不进版本库，仅作检视用）。
         跨时段绝对读数不直接相减，收益一律以 A/B 交替相对改善为准。
 
+    - **M7-e3n xorshift 移位-xor 链的寄存器内融合（`x ^= (x<<k)&MASK` /
+      `x ^= x>>k` → 就地 `shlq|sarq; xorq`）**
+      （e3m「下一步 ① 补标准优化」的第六个落地；**b24 性能近乎翻倍、
+      从 asm 落后 LLVM 35% 直接反超 32%**，把 asm↔LLVM 全 28 项几何平均
+      压到 **0.9513x 历史新低**；第四次用布局补偿实验坐实链接段平移伪影）：
+      延续 e3i / e3j / e3k / e3l / e3m 已验证可采纳的「补齐 LLVM 标准优化」
+      主线。e3m 之后 b24 xorshift32 仍是最大绝对值短板（asm↔LLVM 1.347x）。
+      其循环体 66 条指令里，xorshift 三步 `x = x ^ ((x<<13)&MASK)` /
+      `x = x ^ (x>>7)` / `x = x ^ ((x<<17)&MASK)` 占 33 条：中间值因池寄存器
+      不足被 spill 到 `144/160/184(%rsp)` 再以内存源读回，加大量搬运；而
+      LLVM/Clang 用 `mov %eax,%ecx`（32 位零扩展）+ `shl/shr + xor` 只需
+      14 条。本质仍是**能力缺口**，不是对齐或栈槽问题。
+      - **实现**：`FnEmit` 新增 `xorshift_fuse: HashMap<(块下标, 起点),
+        (XorshiftPlan, 窗口条数)>`；新增 `XorshiftPlan` 两形态（ShiftMaskXor /
+        ShiftXor）；`analyze_xorshift()` 在 `analyze_residency` 之后运行，
+        全函数重算 `use_count`，块内扫描两种严格 IR 窗口并校验中间 vreg
+        use_count==1；发射新增 `inst_xorshift_fused()`，发射期二次确认 x 槽
+        确实驻留才就地发指令，`emit_function` 命中处跳过窗口余下 IR。
+      - **两种窗口（命中条件极严）**：形态 A `x = x ^ ((x << k) & 0xFFFFFFFF)`
+        恰 6 条连续 I64 IR（`Load x; Load x; Shl k; BitAnd 0xFFFFFFFF; BitXor;
+        Store x`），形态 B `x = x ^ (x >> k)` 恰 5 条（`Load x; Load x; Shr k;
+        BitXor; Store x`）；两 Load 必须读同一槽、移位量 k∈[1,63]、BitXor
+        两侧恰是「第一个 Load」与「移位/掩码结果」（异或可交换）、Store 写回
+        同一槽。窗口内所有中间 vreg 全函数 `use_count == 1`（跳过安全）；
+        掩码非 0xFFFFFFFF、移位量非法、中间值另作他用、Xor 换 Add 一律不命中。
+        仅 x86-64；AArch64 分析与发射都不参与、`.s` 逐字节不变。
+      - **等价性**：x 的两个 Load 读到同一旧值（窗口内两 Load 间无 Store），
+        故用 x 物理寄存器的当前值既作 xor 左操作数、又作移位源；形态 A 的
+        `shlq $k` 后 `movl %eax,%eax` 取低 32 位并零扩展，正是 `& 0xFFFFFFFF`
+        语义；形态 B 的 `sarq` 与通用 Shr 的算术右移一致（喂负数初值亦与
+        LLVM 逐字节一致）。结果直接落回 x 的物理寄存器并标记 dirty 供块尾
+        回写。scratch 只用 g1=rax（不在驻留池），不破坏任何活跃值。
+      - **正确性专项**：72 行输出 asm / LLVM **逐字节一致**，覆盖两形态、两
+        移位量（13/17）、Xor 两侧交换、xorshift32 完整一轮与 64 次迭代、
+        0 / ±1 / ±7 / ±1023 / `i32::MIN`·`MAX` / `i64::MIN`·`MAX` / 大数；
+        4 个「必须不融合」对照（掩码非 0xFFFFFFFF、k=64、Xor 换 Add、中间值
+        多使用者）逐段核对均走原路径（对照保留 `xorq ...(%rsp)` 栈回绕或
+        `shlq %cl`，融合段为就地 `shlq|sarq $k,%rax; xorq %rax,<x-reg>`）。
+      - **门禁**：`run_asm_golden.sh`（10 正向 + 2 负例 + 默认后端 +
+        AArch64 交叉汇编）、`cargo test --release`、`tests/run_tests.sh`
+        （AA~AF 组）全绿；Rust 构建零警告；AArch64 OLD/NEW `.s` 逐字节一致；
+        OLD/NEW 全 28 项 checksum 逐一相同。
+      - **静态证据**：指令 **3273 → 3258（−15）**，`movabsq` 159 / `imulq`
+        127 / `leaq` 65 / `p2align` 54 / `sarq` 109 / `adcq` 1 全不变。全模块
+        diff 仅一个 hunk（`@@ -2505,32 +2505,17 @@`）、**仅 b24 一个函数 `.s`
+        变化**：循环体 66 → 51 条，三步分别由 11 / 8 / 11 条压成 4 / 3 / 4 条
+        就地指令，`144/160/184(%rsp)` 三处 spill 全部消失。
+      - **A/B 原始两轮（OLD=@0276b22，NEW=本批）**：`tools/ab_asm_m7e3b.py`
+        两轮 **b24 1.9784 / 1.9562（+97.8/+95.6%，近乎翻倍）**、几何均值
+        1.0298 / 1.0268、28 项 checksum 全 ok；但 b21 稳定 1.0929 / 1.0845
+        （+9%）、b18 1.0112 / 1.0224 正向，`.s` 逐字节未变，必须归因。
+      - **`nm` 定量归因**：`b01` 到 `b24` 入口 delta **全部为 0**（含 b24 自身
+        入口未平移），`b25` −75 B、`b27`/`b28`/`main` −80 B，`.text`
+        38316 → 38236（−80 B）。b21 函数体文本未变，但运行时库函数
+        `dial_*` 地址整体 −80 B（b24 删 15 条指令 = 75 B，加 b25 内
+        `.p2align` 填充再变 5 B），调用密集型的 b21 / b18 因此出现正向
+        伪影。与 e3k / e3l / e3m 同源。
+      - **单点布局补偿实验（第四次正面坐实伪影）**：构造第三个二进制
+        **PAD = NEW 计算量 + OLD 布局**——在 `b25:` 前插入 `.space 75, 0x90`
+        不执行 NOP（位于 b24 `ret` 之后死区）。`nm` 确认 b01~b24 / b25 /
+        b27 / b28 / main 与 `dial_string_new` / `dial_array_new` /
+        `dial_array_push` 全部 delta = 0，`.text` 回到 38316。OLD vs PAD
+        两轮：**b24 1.9828 / 1.9431（收益完全保留）**，而 b21 从 +9% 收敛到
+        **1.0012 / 1.0039**、b18 收敛到 **0.9900 / 1.0007**，全部落回噪声带；
+        几何均值 1.0249 / 1.0248。NOP padding 仅作隔离测量工具、绝不进产品。
+      - **asm↔LLVM 独立口径**：`tools/bench_asm_vs_llvm.py` 同脚本连续两次
+        （OLD、NEW）：OLD b24 `asm 6.645 / llvm 4.933 = 1.347x` → NEW
+        `3.334 / 4.930 = **0.676x**`（**从落后 35% 变为反超 32%**）；位与
+        控制流类 0.9023x → **0.8001x**，全 28 项几何平均 0.9810x →
+        **0.9513x（历史新低）**，总净耗时 0.9761x → **0.9277x**，逐项
+        胜/平/负 10/8/10 → **11/10/7**。两次 LLVM 读数极稳（b24 4.933 →
+        4.930，仅 0.06%），证明 LLVM 路径零改动。
+      - **诚实边界**：几何平均 0.9513x 是**单时段同脚本对照读数**，不宣称
+        统计意义或长期格局（e3k 已记录多次时段读数波动）；价值在 b24 这一
+        确定性机制收益（静态 −15 条与 +95% 逐条对应），与四轮 A/B + 单点
+        布局补偿 + asm↔LLVM 两口径构成可复现证据链。若未来有更干净的隔离
+        测验证伪收益，可据本证据链整体回退 `src/codegen_asm.rs`。
+      - **下一步方向**：剩余 LLVM 短板按量级为 **b10 浅递归**（本时段约
+        1.43x）、b11 二叉递归树（约 1.26x）、递归 / 含 call 类 **约 1.20x**
+        仍是最大类别短板（e3g 已证伪全函数驻留、e3f/e3h 已证伪入口对齐）；
+        b24 反超 LLVM 后位与控制流类降到 0.8001x、b23 已持平。① 继续按
+        「补标准优化」逐个定位 b10/b11 的调用序列与递归开销；② 把「固定
+        模块布局」做成真正的构建层基建（函数级 section + 链接脚本 / 显式
+        相位），本批第四次 PAD 证明布局补偿能完全消除伪影，但 NOP padding
+        绝不进产品；③ 补齐前端常量折叠，让负整数字面量 / 括号常量直接成为
+        `Value::Imm`。
+      - **本批护栏**：最终**仅改 `src/codegen_asm.rs`**（`FnEmit` 一集合 +
+        `XorshiftPlan` 枚举 + `plan_slot` / `imm_is_u32_max` / 两个窗口匹配
+        helper + `analyze_xorshift` + `inst_xorshift_fused` + `emit_function`
+        的窗口跳过）；`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、
+        `Cargo.toml` 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打
+        tag、全套门禁全绿、`docx/` 确定性生成无漂移；本地静态基线
+        `bench/bench.s` 同步为 M7-e3n 版（该文件被 `.gitignore` 的 `*.s`
+        忽略、不进版本库，仅作检视用）。跨时段绝对读数不直接相减，收益一律
+        以 A/B 交替相对改善为准。
+
 ---
 
 ## [v1.10] — 2026-11-08

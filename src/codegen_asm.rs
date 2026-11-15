@@ -164,6 +164,24 @@ struct FnEmit<'a> {
     /// 仅 x86-64 填充。发射期还会二次确认两槽都驻留、物理寄存器不同，
     /// 任一不满足就逐条退回原路径（见 inst_popcnt_fused）。
     popcnt_fuse: HashMap<(usize, usize), (VReg, VReg)>,
+    /// M7-e3n：xorshift 步的寄存器内融合。key = (块下标, 窗口起始指令下标)，
+    /// value = (融合计划, 窗口 IR 条数)。覆盖 b24 的两种形态：
+    ///   A `x = x ^ ((x << k) & 0xFFFFFFFF)`（6 条 IR）；
+    ///   B `x = x ^ (x >> k)`（5 条 IR，Shr 算术右移）。
+    /// 直接在 x 槽的物理寄存器上就地算，消除中间值的 spill / reload 与搬运。
+    /// 仅 x86-64 填充；发射期二次确认 x 槽确实驻留，否则退回原路径。
+    xorshift_fuse: HashMap<(usize, usize), (XorshiftPlan, usize)>,
+}
+
+/// M7-e3n：xorshift 一步的融合计划。`slot` 是 x 的 Alloca 槽 vreg（驻留在
+/// 物理寄存器里），`k` 是移位量（1..=63）。两种形态的窗口长度不同，故连同
+/// 窗口条数一起存进 map，供发射主循环跳过余下 IR。
+#[derive(Clone, Copy)]
+enum XorshiftPlan {
+    /// `x = x ^ ((x << k) & 0xFFFFFFFF)`：shlq + movl(eax,eax) + xorq。
+    ShiftMaskXor { slot: VReg, k: u32 },
+    /// `x = x ^ (x >> k)`：sarq（算术右移，与通用 Shr 语义一致）+ xorq。
+    ShiftXor { slot: VReg, k: u32 },
 }
 
 impl<'a> FnEmit<'a> {
@@ -182,7 +200,7 @@ impl<'a> FnEmit<'a> {
             dead_defs: HashSet::new(), fusable: HashMap::new(),
             pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
             lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
-            popcnt_fuse: HashMap::new(),
+            popcnt_fuse: HashMap::new(), xorshift_fuse: HashMap::new(),
         }
     }
 
@@ -853,6 +871,92 @@ impl<'a> FnEmit<'a> {
         // 融合直接改了驻留物理寄存器，标记脏以便块尾 flush 正确回写。
         self.dirty.insert(pc);
         self.dirty.insert(px);
+        true
+    }
+
+    /// M7-e3n：分析并登记 xorshift 步融合。依赖 promotable，须在
+    /// analyze_residency 之后。全函数重算 use_count（含 term），窗口内所有
+    /// 中间 vreg 必须 use_count==1（跳过才安全），且 x 槽必须 promotable。
+    /// 扫描块内任意连续窗口（贪心 i+=win），命中登记到 xorshift_fuse。
+    /// 仅 x86-64；AArch64 直接返回。
+    fn analyze_xorshift(&mut self) {
+        if !matches!(self.target, EmitTarget::X86_64SysV) { return; }
+        let mut use_count: HashMap<VReg, usize> = HashMap::new();
+        for b in &self.f.blocks {
+            for i in &b.insts {
+                let mut u = Vec::new();
+                i.reg_uses(&mut u);
+                for v in u { *use_count.entry(v).or_insert(0) += 1; }
+            }
+            match &b.term {
+                Term::Jump { args, .. } =>
+                    for a in args { if let Value::Reg(r) = a { *use_count.entry(*r).or_insert(0) += 1; } },
+                Term::Branch { cond, then_args, else_args, .. } => {
+                    *use_count.entry(*cond).or_insert(0) += 1;
+                    for a in then_args.iter().chain(else_args.iter()) {
+                        if let Value::Reg(r) = a { *use_count.entry(*r).or_insert(0) += 1; }
+                    }
+                }
+                Term::Return { val } =>
+                    if let Some(Value::Reg(r)) = val { *use_count.entry(*r).or_insert(0) += 1; },
+                Term::Unreachable => {}
+            }
+        }
+        for (bi, b) in self.f.blocks.iter().enumerate() {
+            let n = b.insts.len();
+            let mut i = 0;
+            while i < n {
+                let mut hit = None;
+                for (plan, mids, wlen) in [
+                    match_xorshift_mask(&b.insts[i..]),
+                    match_xorshift_shift(&b.insts[i..]),
+                ].into_iter().flatten() {
+                    if self.promotable.contains(&plan_slot(&plan))
+                        && mids.iter().all(|v| use_count.get(v) == Some(&1)) {
+                        hit = Some((plan, wlen));
+                        break;
+                    }
+                }
+                if let Some((plan, wlen)) = hit {
+                    self.xorshift_fuse.insert((bi, i), (plan, wlen));
+                    i += wlen; // 贪心跳过整个窗口，避免登记重叠窗口
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    /// M7-e3n：发射 xorshift 融合。发射期二次确认——仅 x86-64、驻留态开启、
+    /// x 槽确实驻留到物理寄存器才发；否则返回 false、不发射任何指令，由调用
+    /// 方逐条走原路径。两种形态都只碰 g1=rax（不在驻留 RES_POOL，安全）与
+    /// x 的物理寄存器；结果直接落回 x 的物理寄存器并标记 dirty，块尾回写。
+    ///
+    /// 形态 A `x = x ^ ((x<<k) & 0xFFFFFFFF)`：
+    ///   movq rx,rax; shlq $k,rax; movl %eax,%eax; xorq rax,rx
+    /// 形态 B `x = x ^ (x>>k)`（算术右移，与通用 Shr 的 sarq 一致）：
+    ///   movq rx,rax; sarq $k,rax; xorq rax,rx
+    /// 注意 x 的两个 Load 读到同一值（窗口内两 Load 之间无 Store），故用
+    /// rx 的当前值既作 xor 左操作数、又作移位源，与原 IR 完全等价。
+    fn inst_xorshift_fused(&mut self, plan: XorshiftPlan) -> bool {
+        if !matches!(self.target, EmitTarget::X86_64SysV) || !self.residency_on { return false; }
+        let slot = plan_slot(&plan);
+        let rx = match self.phys(slot) { Some(p) => p.to_string(), None => return false };
+        let g1 = self.g1().to_string(); // rax
+        if rx == g1 { return false; }
+        self.line(&format!("\tmovq {}, {}", self.r(&rx), self.r(&g1)));
+        match plan {
+            XorshiftPlan::ShiftMaskXor { k, .. } => {
+                self.line(&format!("\tshlq ${}, {}", k, self.r(&g1)));
+                let e = self.r(&self.r32(&g1));
+                self.line(&format!("\tmovl {}, {}", e, e)); // & 0xFFFFFFFF，零扩展清高位
+            }
+            XorshiftPlan::ShiftXor { k, .. } => {
+                self.line(&format!("\tsarq ${}, {}", k, self.r(&g1)));
+            }
+        }
+        self.line(&format!("\txorq {}, {}", self.r(&g1), self.r(&rx)));
+        self.dirty.insert(slot);
         true
     }
 
@@ -2813,6 +2917,99 @@ fn imm_is_one(v: Value) -> bool {
         | Value::Imm(Imm::I8(1)) | Value::Imm(Imm::I1(true)))
 }
 
+/// M7-e3n：返回 XorshiftPlan 里的 x 槽 vreg。
+fn plan_slot(p: &XorshiftPlan) -> VReg {
+    match p { XorshiftPlan::ShiftMaskXor { slot, .. } | XorshiftPlan::ShiftXor { slot, .. } => *slot }
+}
+
+/// M7-e3n：判定 Value 是否为 64 位立即数 0xFFFFFFFF（xorshift32 掩码）。
+fn imm_is_u32_max(v: Value) -> bool {
+    matches!(v, Value::Imm(Imm::I64(n)) if n == 0xFFFF_FFFFi64)
+}
+
+/// M7-e3n：识别形态 A `x = x ^ ((x << k) & 0xFFFFFFFF)` 的连续 6 条 IR：
+///   Load A,ptr; Load B,ptr; Shl C=B<<k; BitAnd D=C&0xFFFFFFFF;
+///   BitXor E=A^D; Store ptr=E
+/// 两个 Load 必须读同一槽 ptr，且槽在窗口内不被改写；移位量 k∈[1,63]。
+/// 返回 (plan, 5 个中间 vreg, 窗口条数=6)。BitXor 两侧允许交换（异或可交换）。
+fn match_xorshift_mask(w: &[IrInst]) -> Option<(XorshiftPlan, Vec<VReg>, usize)> {
+    if w.len() < 6 { return None; }
+    let is_i64 = |t: &IrType| *t == IrType::I64;
+    let (slot, la) = match &w[0] {
+        IrInst::Load { dst, ptr, ty } if is_i64(ty) => (*ptr, *dst), _ => return None,
+    };
+    let lb = match &w[1] {
+        IrInst::Load { dst, ptr, ty } if is_i64(ty) && *ptr == slot => *dst, _ => return None,
+    };
+    let (shc, k) = match &w[2] {
+        IrInst::Bin { op: ABin::Shl, dst, a, b, ty }
+            if is_i64(ty) && *a == Value::Reg(lb) => {
+            let k = shift_imm(*b)?;
+            (*dst, k)
+        }
+        _ => return None,
+    };
+    if k < 1 || k > 63 { return None; }
+    let k = k as u32;
+    let andd = match &w[3] {
+        IrInst::Bin { op: ABin::BitAnd, dst, a, b, ty }
+            if is_i64(ty) && *a == Value::Reg(shc) && imm_is_u32_max(*b) => *dst,
+        _ => return None,
+    };
+    let xore = match &w[4] {
+        IrInst::Bin { op: ABin::BitXor, dst, a, b, ty } if is_i64(ty) => {
+            let ok = matches!((*a, *b),
+                (Value::Reg(x), Value::Reg(y)) if (x == la && y == andd) || (x == andd && y == la));
+            if !ok { return None; }
+            *dst
+        }
+        _ => return None,
+    };
+    match &w[5] {
+        IrInst::Store { ptr, val, ty } if is_i64(ty) && *ptr == slot && *val == Value::Reg(xore) => {}
+        _ => return None,
+    }
+    Some((XorshiftPlan::ShiftMaskXor { slot, k }, vec![la, lb, shc, andd, xore], 6))
+}
+
+/// M7-e3n：识别形态 B `x = x ^ (x >> k)` 的连续 5 条 IR：
+///   Load A,ptr; Load B,ptr; Shr C=B>>k; BitXor E=A^C; Store ptr=E
+/// Shr 为算术右移（sarq），与通用 Shr 语义一致。返回 (plan, 4 个中间 vreg, 5)。
+fn match_xorshift_shift(w: &[IrInst]) -> Option<(XorshiftPlan, Vec<VReg>, usize)> {
+    if w.len() < 5 { return None; }
+    let is_i64 = |t: &IrType| *t == IrType::I64;
+    let (slot, la) = match &w[0] {
+        IrInst::Load { dst, ptr, ty } if is_i64(ty) => (*ptr, *dst), _ => return None,
+    };
+    let lb = match &w[1] {
+        IrInst::Load { dst, ptr, ty } if is_i64(ty) && *ptr == slot => *dst, _ => return None,
+    };
+    let (shc, k) = match &w[2] {
+        IrInst::Bin { op: ABin::Shr, dst, a, b, ty }
+            if is_i64(ty) && *a == Value::Reg(lb) => {
+            let k = shift_imm(*b)?;
+            (*dst, k)
+        }
+        _ => return None,
+    };
+    if k < 1 || k > 63 { return None; }
+    let k = k as u32;
+    let xore = match &w[3] {
+        IrInst::Bin { op: ABin::BitXor, dst, a, b, ty } if is_i64(ty) => {
+            let ok = matches!((*a, *b),
+                (Value::Reg(x), Value::Reg(y)) if (x == la && y == shc) || (x == shc && y == la));
+            if !ok { return None; }
+            *dst
+        }
+        _ => return None,
+    };
+    match &w[4] {
+        IrInst::Store { ptr, val, ty } if is_i64(ty) && *ptr == slot && *val == Value::Reg(xore) => {}
+        _ => return None,
+    }
+    Some((XorshiftPlan::ShiftXor { slot, k }, vec![la, lb, shc, xore], 5))
+}
+
 /// M7-e3m：识别 popcount 内层 `c = c + (x & 1); x = x >> 1` 的 8 条连续
 /// IR 形态，返回 (c 槽 Alloca vreg, x 槽 Alloca vreg, 6 个中间 vreg)。
 /// 这是 GCC/LLVM 对 `while(x){ c+=x&1; x>>=1 }` 的标准变换：
@@ -3064,20 +3261,26 @@ fn emit_function(
     e.analyze_fusable();
     e.analyze_residency();
     e.analyze_popcnt(); // M7-e3m：依赖 promotable，须在 analyze_residency 之后
+    e.analyze_xorshift(); // M7-e3n：同上，两种融合窗口形态互斥、互不重叠
     e.prologue();
     for (idx, b) in f.blocks.iter().enumerate() {
         let lbl = format!(".{}_b{}:", e.prefix, b.id);
         e.line(&lbl);
         e.begin_block(idx);
-        // M7-e3m：窗口可在块内任意起点。命中处由 inst_popcnt_fused 的两条
-        // 指令取代整段 8 条 IR，skip 计数跳过窗口余下 7 条；发射期二次确认
-        // 失败则 skip 保持 0，逐条走原路径，行为完全不变。
+        // M7-e3m/e3n：窗口可在块内任意起点。popcnt 命中处由 inst_popcnt_fused
+        // 的两条指令取代整段 8 条 IR（skip 7）；xorshift 命中处由
+        // inst_xorshift_fused 取代 5/6 条 IR（skip wlen-1）。发射期二次确认
+        // 失败则 skip 保持 0，逐条走原路径，行为完全不变。两类窗口形态互斥
+        // （popcnt 是 Load/Add/BitAnd/Shr，xorshift 是 Shl|Shr+BitXor），同一
+        // 起点至多命中一类，故共用一个 skip 计数安全。
         let mut skip = 0usize;
         for (ii, inst) in b.insts.iter().enumerate() {
             if skip > 0 { skip -= 1; continue; }
-            let hit = e.popcnt_fuse.get(&(idx, ii)).copied();
-            if let Some((pc, px)) = hit {
+            if let Some((pc, px)) = e.popcnt_fuse.get(&(idx, ii)).copied() {
                 if e.inst_popcnt_fused(pc, px) { skip = 7; continue; }
+            }
+            if let Some((plan, wlen)) = e.xorshift_fuse.get(&(idx, ii)).copied() {
+                if e.inst_xorshift_fused(plan) { skip = wlen - 1; continue; }
             }
             e.inst(inst);
         }
