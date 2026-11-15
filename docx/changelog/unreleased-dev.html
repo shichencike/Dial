@@ -1221,16 +1221,56 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
   收益。这解释了为何 M7-e3a/e3b 删指令仍有净收益（省的是热路径上成组的
   真实指令、收益足以压过噪声），而后期薄收益优化测不稳。</li>
 <li><strong>下一步方向</strong>：① <strong>回边循环入口 <code>.p2align</code> 对齐</strong>——固定每个超热循环的
-  入口地址，消除字节平移噪声；它本身可能是净收益，更能<strong>解锁后续所有删
-  指令 pass 的稳定测量</strong>（对齐后再重评 store→load 转发的 −3.7% 静态收益
-  能否落地）；② <strong>含 call 函数跨块寄存器协调</strong>（递归 / 含 call 类 ~1.10x
-  主战场）。两者均须单独 A/B 双二进制交替验证，方向不稳即否决。</li>
+  入口地址，消除字节平移噪声，解锁后续删指令 pass 的稳定测量（对齐后重评
+  store→load 转发的 −3.7% 静态收益能否落地）；② <strong>含 call 函数跨块寄存器
+  协调</strong>（递归 / 含 call 类 ~1.10x 主战场）。两者均须单独 A/B 双二进制交替
+  验证，方向不稳即否决。<strong>① 已在紧随其后的 M7-e3d 完成闭环</strong>（对齐 + 复活
+  转发，组合 A/B +1.0% 稳定正收益、b23 从 −27% 翻身 +4~5%）；② 仍待做。</li>
 <li><strong>本批护栏</strong>：<code>tools/ab_asm_m7e3b.py</code> 头部注释通用化（该脚本已服务多个
   批次，OLD/NEW 由外部 worktree 决定）。<code>src/codegen.rs</code> / <code>src/ast.rs</code>
   相对 544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、构建零警告、
   黄金门禁（10 正向 + 2 负例 + AArch64 交叉汇编）逐字节全绿。</li>
 </ul>
 </li>
+<li><strong>M7-e3d 回边循环头 16B 对齐 + 解锁 store→load 转发</strong>（把 M7-e3c 那 −3.7%
+  静态收益借对齐落地；组合几何平均 A/B <strong>+0.89% / +1.00%</strong> 稳定正收益）：
+  这是 M7-e3c 探索结论「下一步方向 ①」的完整闭环——先用对齐消除字节平移
+  噪声根因，再重评被否决的转发，验证收益能否真正落地。</li>
+<li><strong>① <code>align_loop_headers</code>（新增第五个文本 pass，挂在 pass 链最后）</strong>：在
+    最终指令流（前四个 pass 已把跳转 / 删块 / 删 store 定型）上识别「回边」——
+    跳转目标 label 定义行严格早于跳转行，其「连续标签组」首行即循环头，在该行
+    前插 <code>.p2align 4</code>。仅 x86-64、仅向后跳目标、<code>.p2align</code> 绝不插进别名 label
+    之间（否则 NOP 会让原本同址的别名分离）、只新增 directive 行、填充 NOP 在
+    循环头之前 / 循环之外。objdump 铁证：向后跳目标地址 <code>mod16==0</code> 比例
+    <strong>3/54 → 54/54</strong>，NOP padding 0→54、<code>.text</code> 20324→20714B。</li>
+<li><strong>对齐单独 A/B</strong>（OLD = M7-e3b @0b7d9cd）：几何均值 <strong>+0.14% / +0.09%</strong>，
+    方向一致但幅度落在噪声带内；b23 从上批 −27% 恢复到 ±2%（不再退化），
+    b11/b12/b22 稳定 +2~7%、b18 稳定 −4~5%。<strong>单独不构成干净胜利</strong>，但达成
+    了解锁前提。</li>
+<li><strong>② 复活 <code>forward_store_load</code></strong>（M7-e3c 被否决的删 store 版，排在 ① 之后、
+    <code>elide_dead_stores</code> 之前）：紧邻 <code>movq %rA,off(%rsp)</code> + <code>movq off(%rsp),%rB</code>
+    （A≠B、<code>off ∈ [lo,hi)</code> spill 槽区）把 load 改写为 <code>movq %rA,%rB</code>，store 由 ②
+    按「只写不读」删除；133 处共删 133 条指令，静态 <strong>3556 → 3423（−3.7%）</strong>、
+    store 702→569、load 754→621。共用 <code>[lo,hi)</code> 边界、严格相邻、只认整 8 字节
+    <code>movq</code>、排除 <code>%rsp</code>、A≠B（A==B 由 ① 处理）。</li>
+<li><strong>闭环关键证据</strong>：组合版删了 133 条指令、<code>.text</code> 20714→19248B，objdump 仍
+    显示 <strong>54/54 循环头 <code>mod16==0</code></strong>——<code>.p2align</code> 的 NOP padding 吸收了被删 store
+    的字节变化，循环体取指边界不变。这正是 M7-e3c 单独做转发时 b23 稳定 −27%
+    的根因被消除的直接证据。</li>
+<li><strong>组合 A/B</strong>（OLD = M7-e3b @0b7d9cd，5 采样双二进制交替，两次完整复现）：
+    几何均值 <strong>1.0089 / 1.0100（+0.89% / +1.00%，方向一致、幅度稳定、明显高于
+    噪声带）</strong>；逐项 b10 +11.5/+10.2%、b22 +12.9/+13.3%、b11 +8.3/+7.8%、
+    <strong>b23 popcount +5.5/+3.8%（从 −27% 翻身）</strong>、b08 +2.7/+2.5%、b14 +2.0/+3.7%；
+    b18 −3.6/−3.9%、b12 −2.9/−2.6%、b16 −1.2/−1.1% 稳定小退化（b18 在「仅对齐」
+    时已 −4~5%，属对齐本身的布局副作用，非转发引入）。转发的增量净贡献
+    ≈ <strong>+0.8~0.9%</strong>（组合 +1.0% 减去仅对齐 +0.1%）。</li>
+<li><strong>诚实判断</strong>：+1.0% 幅度小于 M7-d/e1/e2，但两次方向一致、有 objdump 与静态
+    −3.7% 的机制性支撑、且修复了上批 b23 的灾难性退化；跨时段绝对读数不可直接
+    相减，收益一律以 A/B 交替相对改善为准。</li>
+<li><strong>本批护栏</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、
+    <code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、黄金门禁
+    （10 正向 + 2 负例 + AArch64 交叉汇编）逐字节全绿、<code>run_tests.sh</code> /
+    <code>cargo test</code> 全过、<code>docx/</code> 确定性生成无漂移。</li>
 </ul>
 </li>
 </ul>

@@ -1986,6 +1986,56 @@ fn elide_redundant_reloads(asm: &str) -> String {
     out
 }
 
+/// M7-e3d（借循环对齐复活 M7-e3c 的转发）：紧邻异寄存器 store→load 转发。
+///
+/// M7-e3c 曾实现并被否决：单独做时，删 store 造成的字节平移让 bench.s 单一
+/// main 函数里后续超热循环（b23 popcount）入口跨 16/32B 取指边界，稳定退化
+/// −27%，−3.7% 静态收益被对齐噪声淹没。M7-e3d 先在最终布局给每个回边循环头
+/// 加 `.p2align 4`（见 align_loop_headers），循环头地址低 4 位恒为 0、对删指令
+/// 免疫，转发才得以安全落地：`.p2align` 用 NOP padding 吸收被删 store 的字节，
+/// 循环体取指边界不变。
+///
+/// 做法：`movq %rA, off(%rsp)` 紧接 `movq off(%rsp), %rB`（A≠B）时，把 load
+/// 改写为 `movq %rA, %rB`：store 不改动 %rA、两行之间无任何指令破坏它，故
+/// %rA 里仍是刚写入槽的值，直搬到 %rB 与「写内存→读回内存」语义等价。store
+/// 行保留，由随后的 elide_dead_stores 按「只写不读」判定删除（若该槽另有跨块
+/// 读者，② 保守保留所有 store，转发仍正确）。
+///
+/// 严格限定（与 ② 共用 `[lo,hi)` spill 槽区边界）：
+///   · 两行文本严格相邻（label / 其它指令打断即不跨基本块）；
+///   · 同一 off 且 off ∈ `[lo, hi)`，排除 outbound 传参区 / callee-saved 保存区 /
+///     可能被 leaq 间接读写的 Alloca 区；
+///   · 只认整 8 字节 movq、源与目标均为寄存器（parse_rsp_* 保证），排除 %rsp；
+///   · A≠B（A==B 由 elide_redundant_reloads 删除 load，本 pass 不重复处理）。
+/// 仅用于 x86-64，必须排在 ① 之后、② 之前、⑤ 之前（对齐在最后统一兜底）。
+fn forward_store_load(asm: &str, lo: i64, hi: i64) -> String {
+    let lines: Vec<&str> = asm.lines().collect();
+    let mut out = String::with_capacity(asm.len());
+    let mut i = 0;
+    while i < lines.len() {
+        if i + 1 < lines.len() {
+            if let (Some((sreg, soff)), Some((loff, lreg))) =
+                (parse_rsp_store(lines[i]), parse_rsp_load(lines[i + 1]))
+            {
+                let in_spill = soff.parse::<i64>().ok()
+                    .map_or(false, |o| o >= lo && o < hi);
+                let safe = sreg != "%rsp" && lreg != "%rsp";
+                if sreg != lreg && soff == loff && in_spill && safe {
+                    out.push_str(lines[i]);                       // 保留 store（② 判定删除）
+                    out.push('\n');
+                    out.push_str(&format!("\tmovq {}, {}\n", sreg, lreg));  // 改写 load
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        out.push_str(lines[i]);
+        out.push('\n');
+        i += 1;
+    }
+    out
+}
+
 /// M7-e1：全函数「死 store」消除，仅作用于 vreg spill 槽区 `[lo, hi)`。
 /// 该区间由 compute_layout 的 reg_off 精确圈定，天然排除：outbound 栈传参区
 /// （更低偏移、被外部被调方读取）、callee-saved 帧内保存区（epilogue 读回）、
@@ -2227,6 +2277,60 @@ fn elide_dead_trampolines(asm: &str) -> String {
     out
 }
 
+/// M7-e3d：回边循环头 16 字节对齐（x86-64 纯文本 pass，挂在四个既有 pass 之后）。
+///
+/// 背景（M7-e3c 探索结论）：bench.s 把多个微基准内联进单一 main 函数，任何改变
+/// 指令字节数的文本 pass 都会平移后续超热循环的入口地址；objdump 实测 popcount
+/// 内循环地址会在 0x3524/0x3230/0x341b 间漂移（低 6 位 36/48/27），跨 16/32B
+/// 取指边界造成 ±5% 甚至 -27% 的性能噪声，淹没薄收益优化的测量。
+///
+/// 做法：在最终指令流（前四个 pass 已把跳转 / 删块定型）上识别「回边」——某跳转
+/// 指令的目标 label 定义位置严格早于该跳转指令位置，该目标即循环头。在每个
+/// 循环头 label 组的首行前插入 `.p2align 4`：此后无论循环头之前的指令字节数
+/// 如何变化，汇编器都用 NOP padding 吸收，循环头地址低 4 位恒为 0，循环体
+/// 取指边界稳定；同时也修正了原来「碰巧跨边界」的慢循环。
+///
+/// 严格限定（与既有文本 pass 同口径，绝不改程序语义）：
+///   · 仅 x86-64 生效（AArch64 走原路径，不插任何 directive）；
+///   · 仅认 parse_jmp 识别的直接跳转（jmp / j<cc>），间接跳转不参与回边判定；
+///   · 仅「向后跳」（目标定义行 < 跳转行）的目标算循环头；前向跳转目标
+///     （else / case 等）不插，避免给直线代码加无谓 padding；
+///   · .p2align 只插在「连续标签组」的首行之前，绝不插进别名标签之间
+///     （否则 NOP 会让原本同址的别名 label 分离）；
+///   · 保留所有原有行，只新增 directive 行；填充的 NOP 位于循环头 label
+///     之前、循环之外，每次进入循环前执行一次，不在热循环体内；
+///   · 逐函数对本函数局部标签自成体系，回边判定基于本函数内的文本行序。
+fn align_loop_headers(asm: &str) -> String {
+    let lines: Vec<&str> = asm.lines().collect();
+    // ① 局部标签首次定义行号。
+    let mut def_line: HashMap<&str, usize> = HashMap::new();
+    for (i, l) in lines.iter().enumerate() {
+        if let Some(name) = parse_label(l) { def_line.entry(name).or_insert(i); }
+    }
+    // ② 回边目标 → 其「连续标签组」首行。
+    let mut heads: HashSet<usize> = HashSet::new();
+    for (i, l) in lines.iter().enumerate() {
+        if let Some((_, tgt)) = parse_jmp(l) {
+            if let Some(&d) = def_line.get(tgt) {
+                if d < i {
+                    let mut h = d;
+                    while h > 0 && parse_label(lines[h - 1]).is_some() { h -= 1; }
+                    heads.insert(h);
+                }
+            }
+        }
+    }
+    if heads.is_empty() { return asm.to_string(); }
+    // ③ 输出：循环头组首行前插 .p2align 4（16B），其余行原样保留。
+    let mut out = String::with_capacity(asm.len() + heads.len() * 16);
+    for (i, l) in lines.iter().enumerate() {
+        if heads.contains(&i) { out.push_str("\t.p2align 4\n"); }
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
 /// M7-c1：x86-64 移位指令的立即数形式只接受 imm8，且 64 位操作数实际按
 /// `count & 63` 生效。当移位量是 `[0,63]` 的整数常量时，`shlq/sarq $n, reg`
 /// 与 `movq $n,%rcx; shlq %cl,reg` 语义完全一致，可以直接折叠、省掉两次搬运。
@@ -2396,22 +2500,28 @@ fn emit_function(
         e.term(b.id, &b.term);
         e.end_block();
     }
-    // M7-c2 / M7-e1 / M7-e2 / M7-e3a：x86-64 发射末尾依次做四个纯文本 pass，
-    // 顺序固定：① 相邻冗余 reload 消除 → ② 全函数死 store 消除 → ③ 跳转重定向
-    // + fallthrough jmp 消除 → ④ 死 trampoline 块删除 + 再消一次 fallthrough。
-    // ①② 顺序不可颠倒（先删紧邻 load 才暴露孤立 store）；③ 在 ①② 精简后的
-    // 指令流上重定向，清空 trampoline 引用；④ 才能在无引用前提下安全删死块，
-    // 并在删块后更紧凑的布局上消掉新暴露的 fallthrough。lo/hi 圈定本函数 vreg
-    // spill 槽区。
+    // M7-c2 / M7-e1 / M7-e2 / M7-e3a / M7-e3d：x86-64 发射末尾依次做六个纯文本
+    // pass，顺序固定：① 相邻冗余 reload 消除 → ①' 紧邻异寄存器 store→load 转发
+    // → ② 全函数死 store 消除 → ③ 跳转重定向 + fallthrough jmp 消除 → ④ 死
+    // trampoline 块删除 + 二次 fallthrough 消除 → ⑤ 回边循环头 16B 对齐。
+    // ①①'② 顺序不可颠倒（先删 / 改写紧邻 load 才暴露孤立 store）；③ 在精简后的
+    // 指令流上重定向，清空 trampoline 引用；④ 在无引用前提下安全删死块并消掉
+    // 新暴露的 fallthrough；⑤ 必须最后——只有最终跳转 / 删块 / 删 store 定型后，
+    // 回边集合才反映真实布局，.p2align 才能用 NOP padding 吸收前面所有 pass 的
+    // 字节变化，令每个循环头地址低 4 位恒为 0、取指边界稳定。正是 ⑤ 让 ①' 的
+    // 删 store 不再平移后续超热循环、−3.7% 静态收益得以落地（M7-e3c 单独做 ①'
+    // 时 b23 稳定退化 −27%）。lo/hi 圈定本函数 vreg spill 槽区，①'② 共用。
     if matches!(target, EmitTarget::X86_64SysV) {
         let s = elide_redundant_reloads(&e.out);
         let (lo, hi) = match (e.reg_off.first(), e.reg_off.last()) {
             (Some(&a), Some(&b)) => (a, b + 8),
             _ => (0, 0),
         };
-        let d = elide_dead_stores(&s, lo, hi);
+        let f = forward_store_load(&s, lo, hi);
+        let d = elide_dead_stores(&f, lo, hi);
         let t = thread_jumps(&d);
-        out.push_str(&elide_dead_trampolines(&t));
+        let dt = elide_dead_trampolines(&t);
+        out.push_str(&align_loop_headers(&dt));
     } else {
         out.push_str(&e.out);
     }
