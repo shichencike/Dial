@@ -145,6 +145,12 @@ struct FnEmit<'a> {
     /// M7-e3b：ICmp 结果「全函数仅被一处 Branch.cond 使用」时，可免物化，
     /// 直接在 Branch 处发 `cmp; jcc`。value = (比较算子, a, b)。
     fusable: HashMap<VReg, (ACmp, Value, Value)>,
+    /// M7-e3k：`(a % 2^k) == 0 / != 0` 且 Mod 结果与 ICmp 结果都只被这一条
+    /// Branch.cond 链式使用时，跳过 Mod + ICmp 物化，直接在 Branch 处发
+    /// `testq $(2^k-1), a; jcc`。key = ICmp 的 dst，value = (算子, Mod 输入 a, k)。
+    pow2_mod_test: HashMap<VReg, (ACmp, Value, u32)>,
+    /// M7-e3k：上述 Mod 指令的 dst——发射时整条跳过（结果不再有使用者）。
+    skip_pow2_mod: HashSet<VReg>,
 }
 
 impl<'a> FnEmit<'a> {
@@ -161,6 +167,7 @@ impl<'a> FnEmit<'a> {
             plans: Vec::new(), used_phys: Vec::new(), save_off: 0,
             promotable: HashSet::new(), flush_mask: HashSet::new(),
             dead_defs: HashSet::new(), fusable: HashMap::new(),
+            pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
         }
     }
 
@@ -661,9 +668,47 @@ impl<'a> FnEmit<'a> {
                 Term::Unreachable => {}
             }
         }
-        for (r, info) in defs {
-            if use_count.get(&r) == Some(&1) && branch_cond.contains(&r) {
-                self.fusable.insert(r, info);
+        for (r, info) in &defs {
+            if use_count.get(r) == Some(&1) && branch_cond.contains(r) {
+                self.fusable.insert(*r, *info);
+            }
+        }
+
+        // M7-e3k：把 `(a % 2^k) == 0 / != 0` 融合成单条 `testq $(2^k-1), a` + jcc。
+        // 与 LLVM/Clang 的 InstCombine 同类变换。等价性：有符号余数向零截断，
+        // 余数符号跟随被除数，故 `a % 2^k == 0` ⟺ `2^k | a` ⟺ 补码低 k 位全 0
+        // ⟺ `a & (2^k-1) == 0`，对负数同样成立（-4 % 4 == 0、-3 % 4 == -3 != 0）。
+        // 命中条件极严：① ICmp 是 Eq/Neq 且一侧为 Imm(0)；② 另一侧恰是某条
+        // Mod 的结果 vreg，且该 Mod 的除数是 2 的幂（复用 const_div_pow2 的
+        // k∈[1,30] 判定，保证 testq 立即数 2^k-1 是合法正 imm32）；③ 该 Mod
+        // 结果全函数只被这一条 ICmp 使用（use_count==1），④ 该 ICmp 结果也只
+        // 被这一处 Branch.cond 使用（已在 fusable 中）。任一不满足都必须保留
+        // 物化结果供其它使用者读取。仅 x86-64，AArch64 路径逐字节不变。
+        if matches!(self.target, EmitTarget::X86_64SysV) {
+            let mut mod_defs: HashMap<VReg, (Value, Value)> = HashMap::new();
+            for b in &self.f.blocks {
+                for i in &b.insts {
+                    if let IrInst::Bin { op: ABin::Mod, dst, a, b, .. } = i {
+                        mod_defs.insert(*dst, (*a, *b));
+                    }
+                }
+            }
+            for (r, (op, ca, cb)) in &defs {
+                if !matches!(op, ACmp::Eq | ACmp::Neq) { continue; }
+                if !self.fusable.contains_key(r) { continue; }
+                let mod_side = if imm_is_zero(*ca) {
+                    *cb
+                } else if imm_is_zero(*cb) {
+                    *ca
+                } else {
+                    continue;
+                };
+                let m = match mod_side { Value::Reg(m) => m, _ => continue };
+                let (x, c) = match mod_defs.get(&m) { Some(v) => *v, None => continue };
+                let k = match const_div_pow2(c) { Some(k) => k, None => continue };
+                if use_count.get(&m) != Some(&1) { continue; }
+                self.pow2_mod_test.insert(*r, (*op, x, k));
+                self.skip_pow2_mod.insert(m);
             }
         }
     }
@@ -1203,7 +1248,13 @@ impl<'a> FnEmit<'a> {
                     self.store_mem(&a, &g, ty.clone());
                 }
             }
-            IrInst::Bin { op, dst, a, b, ty } => self.inst_bin(*op, *dst, *a, *b, ty.clone()),
+            IrInst::Bin { op, dst, a, b, ty } => {
+                // M7-e3k：Mod 结果只用于一处 `(..) == 0 / != 0` 融合分支时整条跳过，
+                // 由 Branch 处直接发 `testq $(2^k-1), a; jcc`（见 term()）。
+                if !self.skip_pow2_mod.contains(dst) {
+                    self.inst_bin(*op, *dst, *a, *b, ty.clone());
+                }
+            }
             IrInst::FBin { op, dst, a, b, ty } => self.inst_fbin(*op, *dst, *a, *b, ty.clone()),
             IrInst::ICmp { op, dst, a, b, .. } => {
                 // M7-e3b：结果只被一处 Branch.cond 用的 ICmp 不物化，等到 Branch
@@ -1944,17 +1995,32 @@ impl<'a> FnEmit<'a> {
                 // `cmpq b,a; jcc(不成立) else`，省去 setcc/movzbq/testq 物化。
                 // 仅 x86-64：AArch64 的 bin_src 行为未在此路径验证，保守走 cbz。
                 if matches!(self.target, EmitTarget::X86_64SysV) && self.fusable.contains_key(cond) {
-                    let (op, a, b) = self.fusable.get(cond).unwrap().clone();
-                    let g1 = self.g1().to_string();
-                    let g2 = self.g2().to_string();
-                    self.lg(a, &g1);
-                    let b_src = self.bin_src(b, &g2, true, false);
-                    self.line(&format!("\tcmpq {}, {}", b_src, self.r(&g1)));
-                    let jcc = match op {
-                        ACmp::Eq => "jne", ACmp::Neq => "je", ACmp::Lt => "jge",
-                        ACmp::Gt => "jle", ACmp::Le => "jg", ACmp::Ge => "jl",
-                    };
-                    self.line(&format!("\t{} {}", jcc, else_lbl));
+                    if let Some((op, x, k)) = self.pow2_mod_test.get(cond).copied() {
+                        // M7-e3k：`(a % 2^k) == 0 / != 0` → 单条 testq + jcc，
+                        // Mod 整条已被 skip_pow2_mod 跳过。testq 置 ZF=1 ⟺
+                        // (x & (2^k-1))==0 ⟺ x % 2^k == 0（负数亦成立），故
+                        // Eq 用 jne（ZF=0 跳 else）、Neq 用 je，与下方 jcc 表同向。
+                        let g1 = self.g1().to_string();
+                        self.lg(x, &g1);
+                        let mask = (1i64 << k) - 1;
+                        self.line(&format!("\ttestq ${}, {}", mask, self.r(&g1)));
+                        let jcc = match op {
+                            ACmp::Eq => "jne", ACmp::Neq => "je", _ => unreachable!(),
+                        };
+                        self.line(&format!("\t{} {}", jcc, else_lbl));
+                    } else {
+                        let (op, a, b) = self.fusable.get(cond).unwrap().clone();
+                        let g1 = self.g1().to_string();
+                        let g2 = self.g2().to_string();
+                        self.lg(a, &g1);
+                        let b_src = self.bin_src(b, &g2, true, false);
+                        self.line(&format!("\tcmpq {}, {}", b_src, self.r(&g1)));
+                        let jcc = match op {
+                            ACmp::Eq => "jne", ACmp::Neq => "je", ACmp::Lt => "jge",
+                            ACmp::Gt => "jle", ACmp::Le => "jg", ACmp::Ge => "jl",
+                        };
+                        self.line(&format!("\t{} {}", jcc, else_lbl));
+                    }
                 } else {
                     let g1 = self.g1().to_string();
                     self.lg(Value::Reg(*cond), &g1);
@@ -2503,6 +2569,13 @@ fn const_div_magic(b: Value) -> Option<(i64, u32, bool, i64)> {
         }
     }
     None
+}
+
+/// M7-e3k：判定 Value 是否为整数立即数 0（用于 `(a % 2^k) == 0` 融合）。
+/// 只认整数 Imm 变体；F64/F32 是浮点位模式，不参与整数比较，显式排除。
+fn imm_is_zero(v: Value) -> bool {
+    matches!(v, Value::Imm(Imm::I64(0)) | Value::Imm(Imm::I32(0))
+        | Value::Imm(Imm::I8(0)) | Value::Imm(Imm::I1(false)))
 }
 
 /// M7-e3i：判定常量 b 是否为 `2^k`（`k∈[1,30]`）并逐值自校验位移序列。
