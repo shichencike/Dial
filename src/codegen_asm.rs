@@ -151,6 +151,12 @@ struct FnEmit<'a> {
     pow2_mod_test: HashMap<VReg, (ACmp, Value, u32)>,
     /// M7-e3k：上述 Mod 指令的 dst——发射时整条跳过（结果不再有使用者）。
     skip_pow2_mod: HashSet<VReg>,
+    /// M7-e3l：`(base * c) + disp`（c∈{2,3,5,9}）融合成单条
+    /// `leaq disp(base, base, c-1), dst`。key = Add 的 dst，
+    /// value = (乘法变量因子, scale = c-1 ∈ {1,2,4,8}, disp32)。
+    lea_fuse: HashMap<VReg, (Value, u32, i64)>,
+    /// M7-e3l：上述 Mul 指令的 dst——发射时整条跳过（结果不再有使用者）。
+    skip_lea_mul: HashSet<VReg>,
 }
 
 impl<'a> FnEmit<'a> {
@@ -168,6 +174,7 @@ impl<'a> FnEmit<'a> {
             promotable: HashSet::new(), flush_mask: HashSet::new(),
             dead_defs: HashSet::new(), fusable: HashMap::new(),
             pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
+            lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
         }
     }
 
@@ -711,6 +718,60 @@ impl<'a> FnEmit<'a> {
                 self.skip_pow2_mod.insert(m);
             }
         }
+
+        // M7-e3l：`(base * c) + disp` → 单条 `leaq disp(base, base, c-1), dst`。
+        // 与 LLVM/Clang 的 InstCombine / DAGCombiner 同类变换（b08 的 `3*x+1`
+        // 原来发 movabsq $3 + imulq + addq $1，LLVM 发单条 leaq）。
+        // 等价性：x86-64 两操作数 `imulq` 与 `leaq` 都只保留 64 位低半（模 2^64
+        // 回绕）；`addq $imm32` 与 LEA 的 disp32 都把立即数有符号扩展到 64 位再
+        // 相加，因此负数、i64::MIN/MAX 溢出回绕、负 disp 的行为完全一致；LEA
+        // 不写标志位，本路径也不依赖标志位。命中条件极严：
+        //   ① Mul 与 Add/Sub 在同一基本块内严格相邻（中间不允许任何指令，杜绝
+        //      base 被重定义、控制权分叉或 call 破坏临时寄存器）；
+        //   ② Mul 的常量因子 c∈{2,3,5,9}（scale = c-1 ∈ {1,2,4,8}）；
+        //   ③ Add/Sub 的一侧恰是该 Mul 的 dst、另一侧是 i32 范围内的整数
+        //      立即数（Sub 只接受 `m - n`，等价编码为 disp = -n）；
+        //   ④ 该 Mul 结果全函数仅被这一条 Add/Sub 使用（use_count == 1）；
+        //   ⑤ Add/Sub 的 dst 与该 Mul 的 dst 不同。
+        // 任一不满足都保留原来的通用路径。仅 x86-64：AArch64 的分析与发射都
+        // 不参与，.s 逐字节不变。
+        if matches!(self.target, EmitTarget::X86_64SysV) {
+            for b in &self.f.blocks {
+                for w in b.insts.windows(2) {
+                    let (m, base, scale) = match &w[0] {
+                        IrInst::Bin { op: ABin::Mul, dst, a, b: mb, .. } =>
+                            match lea_mul_scale(*a, *mb) {
+                                Some((base, scale)) => (*dst, base, scale),
+                                None => continue,
+                            },
+                        _ => continue,
+                    };
+                    let (d, disp) = match &w[1] {
+                        IrInst::Bin { op: ABin::Add, dst, a, b: ab, .. } => {
+                            let disp = match (a, ab) {
+                                (Value::Reg(r), x) if *r == m => lea_disp(*x),
+                                (x, Value::Reg(r)) if *r == m => lea_disp(*x),
+                                _ => None,
+                            };
+                            match disp { Some(n) => (*dst, n), None => continue }
+                        }
+                        // `m - n` == `m + (-n)`：disp32 直接写负数。减法不可交换，
+                        // 只接受 a=Reg(m), b=Imm(n)；`n - m` 不命中。
+                        IrInst::Bin { op: ABin::Sub, dst, a, b: ab, .. } => {
+                            let disp = match (a, ab) {
+                                (Value::Reg(r), x) if *r == m => lea_sub_disp(*x),
+                                _ => None,
+                            };
+                            match disp { Some(n) => (*dst, n), None => continue }
+                        }
+                        _ => continue,
+                    };
+                    if d == m || use_count.get(&m) != Some(&1) { continue; }
+                    self.lea_fuse.insert(d, (base, scale, disp));
+                    self.skip_lea_mul.insert(m);
+                }
+            }
+        }
     }
 
     fn analyze_residency(&mut self) {
@@ -1249,9 +1310,21 @@ impl<'a> FnEmit<'a> {
                 }
             }
             IrInst::Bin { op, dst, a, b, ty } => {
+                // M7-e3l：Add 命中常量乘加融合时，整条 Mul 已由 skip_lea_mul
+                // 跳过，这里直接发单条 leaq；否则走通用 inst_bin。
+                let mut done = false;
+                let mut skip = self.skip_pow2_mod.contains(dst);
+                if matches!(self.target, EmitTarget::X86_64SysV) {
+                    if let Some((base, scale, disp)) = self.lea_fuse.get(dst).copied() {
+                        self.inst_lea_fused(*dst, base, scale, disp);
+                        done = true;
+                    } else if self.skip_lea_mul.contains(dst) {
+                        skip = true;
+                    }
+                }
                 // M7-e3k：Mod 结果只用于一处 `(..) == 0 / != 0` 融合分支时整条跳过，
                 // 由 Branch 处直接发 `testq $(2^k-1), a; jcc`（见 term()）。
-                if !self.skip_pow2_mod.contains(dst) {
+                if !done && !skip {
                     self.inst_bin(*op, *dst, *a, *b, ty.clone());
                 }
             }
@@ -1378,6 +1451,30 @@ impl<'a> FnEmit<'a> {
             self.line(&format!("\tandl ${}, {}", n, d));
         }
         self.sg(dst, &g1);
+    }
+
+    /// M7-e3l：把 `(base * c) ± disp` 发成单条 `leaq disp(base, base, c-1), dst`
+    /// （Sub 形态已由 `lea_sub_disp` 折算成负 disp）。
+    /// base 若是驻留 vreg 可直接用它的物理寄存器作 LEA 的 base/index；dst 若
+    /// 也驻留则结果直接落进它的物理寄存器——两者同址时即最优的就地更新
+    /// `leaq 1(%rbx, %rbx, 2), %rbx`（与 LLVM 对 `3*x+1` 的发射一致）。否则
+    /// 先把 base 读进 g1，再由 sg 负责把结果落到栈槽 / 物理寄存器。
+    fn inst_lea_fused(&mut self, dst: VReg, base: Value, scale: u32, disp: i64) {
+        let g1 = self.g1().to_string();
+        let base_phys = if self.residency_on {
+            match base { Value::Reg(v) => self.val_phys(v).map(|p| p.to_string()), _ => None }
+        } else { None };
+        let base_r = match base_phys {
+            Some(p) => self.r(&p),
+            None => { self.lg(base, &g1); self.r(&g1) }
+        };
+        let dst_reg = if self.residency_on {
+            self.val_phys(dst).map(|p| p.to_string()).unwrap_or_else(|| g1.clone())
+        } else { g1.clone() };
+        let disp_s = if disp == 0 { String::new() } else { disp.to_string() };
+        self.line(&format!("\tleaq {}({}, {}, {}), {}",
+            disp_s, base_r, base_r, scale, self.r(&dst_reg)));
+        self.sg(dst, &dst_reg);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2569,6 +2666,55 @@ fn const_div_magic(b: Value) -> Option<(i64, u32, bool, i64)> {
         }
     }
     None
+}
+
+/// M7-e3l：从整数乘法 `a * b` 里分离出「LEA 可表达的常量因子 c」与变量因子。
+/// x86-64 的 `leaq disp(base, index, scale), dst` 中 scale 只能是 1/2/4/8；
+/// 当 base == index 时它计算 `base * (scale + 1) + disp`，故恰好能表达
+/// c ∈ {2,3,5,9}。浮点 Imm 是位模式（`as_i64` 会 panic），显式排除；两侧
+/// 都是立即数的常量折叠不归本 pass 管，也显式排除。返回 (base, scale=c-1)。
+fn lea_mul_scale(a: Value, b: Value) -> Option<(Value, u32)> {
+    fn int_imm(v: Value) -> Option<i64> {
+        match v {
+            Value::Imm(i) if !matches!(i, Imm::F64(_) | Imm::F32(_)) => Some(i.as_i64()),
+            _ => None,
+        }
+    }
+    let (base, c) = match (int_imm(a), int_imm(b)) {
+        (Some(c), None) => (b, c),
+        (None, Some(c)) => (a, c),
+        _ => return None,
+    };
+    let scale = match c { 2 => 1, 3 => 2, 5 => 4, 9 => 8, _ => return None };
+    Some((base, scale))
+}
+
+/// M7-e3l：取整数立即数作为 LEA 的 disp32。越出 i32 范围必须退回通用路径：
+/// x86-64 的 disp32 会被符号扩展，无法承载 64 位大常量。
+fn lea_disp(v: Value) -> Option<i64> {
+    match v {
+        Value::Imm(i) if !matches!(i, Imm::F64(_) | Imm::F32(_)) => {
+            let n = i.as_i64();
+            if n >= i32::MIN as i64 && n <= i32::MAX as i64 { Some(n) } else { None }
+        }
+        _ => None,
+    }
+}
+
+/// M7-e3l：`m - n` 等价于 `m + (-n)`，把 -n 直接编码成 LEA 的 disp32。
+/// n 必须落在 i32 范围内（超出时通用路径是 movabsq + subq，不能这样折叠），
+/// 且 n != i32::MIN（-n 会溢出 i32，无法编码为 disp32）。由此负 disp 也得到
+/// 覆盖，能实证 LEA disp32 的符号扩展与 `subq $imm32` 完全一致。
+fn lea_sub_disp(v: Value) -> Option<i64> {
+    match v {
+        Value::Imm(i) if !matches!(i, Imm::F64(_) | Imm::F32(_)) => {
+            let n = i.as_i64();
+            if n >= i32::MIN as i64 && n <= i32::MAX as i64 && n != i32::MIN as i64 {
+                Some(-n)
+            } else { None }
+        }
+        _ => None,
+    }
 }
 
 /// M7-e3k：判定 Value 是否为整数立即数 0（用于 `(a % 2^k) == 0` 融合）。

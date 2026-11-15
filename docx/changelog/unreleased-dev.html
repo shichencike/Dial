@@ -1820,7 +1820,8 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     ② 把「固定模块布局」做成真正的构建层基建（函数级 section + 链接
     脚本 / 显式相位），本批 PAD 实验已首次证明布局补偿能完全消除伪影，
     但 NOP padding 不可进产品；③ 递归 / 含 call 类需另找机制，不在此列。</li>
-<li><strong>本批护栏</strong>：最终<strong>仅改 <code>src/codegen_asm.rs</code></strong>（<code>FnEmit</code> 两集合 +
+<li>
+<p><strong>本批护栏</strong>：最终<strong>仅改 <code>src/codegen_asm.rs</code></strong>（<code>FnEmit</code> 两集合 +
     <code>analyze_fusable</code> 链式识别 + <code>imm_is_zero</code> + <code>inst()</code> / <code>term()</code> 各一处
     分支）；<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、
     <code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、
@@ -1828,7 +1829,108 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     <code>bench/bench.s</code> 同步为 M7-e3k 版（该文件被 <code>.gitignore</code> 的 <code>*.s</code>
     忽略、不进版本库，仅作检视用）。跨时段绝对读数不直接相减，
     收益一律以 A/B 交替
-    相对改善为准。</li>
+    相对改善为准。</p>
+</li>
+<li>
+<p><strong>M7-e3l 常量乘加融合为单条 LEA（<code>(base * c) ± disp</code> → <code>leaq</code>）</strong>
+  （e3k「下一步 ① 补标准优化」的第四个落地；<strong>首次让 asm↔LLVM 同口径
+  几何平均降到 1.0 以下</strong>，且首次把「布局补偿」从单点推进到双点）：
+  延续 e3i / e3j / e3k 已验证可采纳的「补齐 LLVM 标准优化」主线。e3k
+  之后 b08 仍是最大绝对值短板之一，其内层 <code>3 * x + 1</code> 在汇编里发
+  <code>movq x→rax; movq rax→栈槽; movabsq $3, %rax; imulq 栈槽, %rax;
+  addq $1, %rax; movq rax→x</code>（6 条），而 LLVM/Clang 的 InstCombine /
+  DAGCombiner 发单条 <code>leaq 1(%r, %r, 2), %r</code>。同一形态还出现在 b04 的
+  <code>s = (s * 3 + 7) % 1000000007</code>（5 条 → 1 条）。这是<strong>能力缺口</strong>，
+  不是取指对齐或栈槽问题。</p>
+</li>
+<li><strong>实现</strong>：<code>FnEmit</code> 新增 <code>lea_fuse</code> / <code>skip_lea_mul</code> 两个集合；
+    <code>analyze_fusable()</code> 在 M7-e3b 已有的 <code>use_count</code> 之上，对每个基本块
+    用 <code>insts.windows(2)</code> 扫描「严格相邻的 Mul + Add/Sub」；模块级新增
+    <code>lea_mul_scale</code>（分离 LEA 可表达的常量因子 c∈{2,3,5,9}，
+    scale=c-1∈{1,2,4,8}）、<code>lea_disp</code>（i32 范围内的 disp32）、
+    <code>lea_sub_disp</code>（<code>m - n</code> 等价 <code>m + (-n)</code>，覆盖负 disp）；发射新增
+    <code>inst_lea_fused</code>（base 驻留则直接用其物理寄存器作 LEA 的 base/index，
+    dst 驻留则结果直接落进其物理寄存器，同址时即最优就地更新），
+    <code>inst()</code> 的 <code>Bin</code> 分支按「融合 / 跳过 Mul / 通用」三路分派。</li>
+<li><strong>命中条件极严</strong>（五条全满足）：① Mul 与 Add/Sub 在同一基本块内
+    <strong>严格相邻</strong>（杜绝 base 被重定义、控制权分叉或 call 破坏临时寄存器）；
+    ② 常量因子 c∈{2,3,5,9}；③ Add/Sub 的一侧恰是该 Mul 的 dst、
+    另一侧是 i32 范围内的整数立即数（Sub 只接受 <code>m - n</code>，减法不可交换）；
+    ④ 该 Mul 结果全函数仅被这一条 Add/Sub 使用（<code>use_count == 1</code>）；
+    ⑤ Add 的 dst 与该 Mul 的 dst 不同。任一不满足都保留通用路径。</li>
+<li><strong>等价性</strong>：x86-64 两操作数 <code>imulq</code> 与 <code>leaq</code> 都只保留 64 位低半
+    （模 2^64 回绕）；<code>addq/subq $imm32</code> 与 LEA 的 disp32 都把立即数
+    有符号扩展到 64 位再相加/相减；LEA 不写标志位，本路径不依赖标志位。
+    故负数、<code>i64::MIN/MAX</code> 溢出回绕、负 disp 行为完全一致。仅 x86-64，
+    AArch64 的分析与发射都不参与、<code>.s</code> 逐字节不变。</li>
+<li><strong>正确性专项</strong>：276 行输出 asm/LLVM <strong>逐字节一致</strong>，覆盖 c 全集合、
+    两种乘法 / 加法操作数顺序、disp=0 / i32::MAX / 负 disp（-1、
+    -2147483647）、<code>i64::MIN/MAX</code> 溢出回绕、循环内融合（b04 / b08 同形态）、
+    Collatz 深层循环。按函数段核对：<strong>13 处融合精确落在应命中的 13 个
+    函数，13 个「必须不融合」对照全为 0</strong>（c∉集合、负 c、|disp| 超 i32、
+    变量 disp、<code>n-m</code> 不可交换、减数超 i32、Mul 结果多使用者、Mul/Add
+    不相邻）。另确认一个<strong>前端边界</strong>：Dial 把负整数字面量 / 括号常量
+    物化成独立 vreg，Add 操作数不再是 Imm 且不再相邻，故不融合——LLVM
+    会常量折叠，属 asm 侧剩余缺口；负 disp 已由 <code>m - n</code> 的 Sub 形态覆盖。</li>
+<li><strong>门禁</strong>：<code>run_asm_golden.sh</code>（10 正向 + 2 负例 + 默认后端 +
+    AArch64 交叉汇编）、<code>cargo test --release</code>、<code>tests/run_tests.sh</code>
+    （AA~AF 组）全绿；构建零警告；AArch64 OLD/NEW <code>.s</code> 逐字节一致。</li>
+<li><strong>静态证据</strong>：指令 <strong>3289 → 3282（−7）</strong>，<code>movabsq</code> 161 → 159、
+    <code>imulq</code> 129 → 127、<code>leaq</code> 63 → 65，<code>.p2align</code> 54 / <code>testq</code> 3 /
+    全局 label 37 全不变。全模块 37 个函数里<strong>只有 b04、b08 两处 <code>.s</code>
+    变化</strong>：b04 的 5 条 → <code>leaq 7(%r14,%r14,2), %rbp</code>，b08 的 4 条
+    （含一次 spill）→ <code>leaq 1(%rax,%rax,2), %rax</code>。</li>
+<li><strong>A/B 四轮（OLD=@2dc40fe，NEW=本批）</strong>：<code>tools/ab_asm_m7e3b.py</code>
+    两轮 <strong>b04 1.1519 / 1.1550（+15.2/+15.5%）</strong>、<strong>b08 1.3142 /
+    1.3081（+31.4/+30.8%）</strong>、几何均值 1.0181 / 1.0216、28 项
+    checksum 全 ok；但 b18/b22/b27 两轮稳定「正向」+4~7%，<code>.s</code> 逐字节
+    未变，必须归因。</li>
+<li><strong><code>nm</code> 定量归因</strong>：<code>b01/b03/b04</code> 入口 delta = 0（<strong>b04 自身入口未
+    平移 → 干净排除 b04 的对齐混淆</strong>），b05 −19 B、b06/b08 −16 B、
+    b09 及之后 −48 B，<code>.text</code> 38396 → 38348（−48 B）。b04 是第一个变化
+    点，b08 是第二个，两者各删字节造成分段平移。</li>
+<li><strong>双点布局补偿实验（本批首次）</strong>：构造第三个二进制
+    <strong>PAD = NEW 计算量 + OLD 布局</strong>——在 <code>b05:</code> 前补 19B、<code>b09:</code> 前补
+    26B 不执行的 NOP（位于前一函数 <code>ret</code> 之后，绝不进执行路径、
+    绝不进产品代码）。<code>nm</code> 确认 <strong>b01/b03/b04/b05/b06/b08/b09/b10/
+    b18/b22/b23/b27/b24/main 全部入口 delta = 0</strong>，<code>.text</code> 回到 38396。
+    OLD vs PAD 两轮：<strong>b04 1.1536 / 1.1531、b08 1.3666 / 1.3756
+    （补偿后收益完全保留甚至更高）</strong>，而 b18 从 +4.2/+4.8% 收敛到
+    −0.84/+0.92%、b22 从 +7.0/+6.4% 收敛到 +0.5/+0.3%、b27 从
+    +1.9/+2.8% 收敛到 −1.3/+0.6%（全部落回噪声带）。这第二次用<strong>正面
+    实验</strong>坐实：收益与绝对地址无关、是纯计算量削减；那些「正向」项
+    同样是链接段平移伪影（此前 e3k 只见过负向伪影）。</li>
+<li><strong>asm↔LLVM 独立口径</strong>：<code>tools/bench_asm_vs_llvm.py</code> 同脚本连续两次
+    （OLD、NEW），OLD b04 <code>asm 4.109 / llvm 3.972 = 1.0344x</code> → NEW
+    <code>3.556 / 3.965 = 0.8968x</code>；OLD b08 <code>4.364 / 3.379 = 1.2915x</code> →
+    NEW <code>3.328 / 3.355 = 0.9920x</code>；两次 LLVM 读数仅差 0.2~0.7%
+    （证明 LLVM 路径零改动）。算术循环类 0.9918x → <strong>0.9424x</strong>，
+    几何平均 1.0029x → <strong>0.9917x</strong>（总净耗时 1.0022x → 0.9825x），
+    逐项胜/平/负 10/7/11 → 10/8/10。<strong>b08 从 e3k 后的最大短板变为
+    追平 LLVM、b04 反超 LLVM 约 10%</strong>。</li>
+<li><strong>诚实边界</strong>：几何平均降到 1.0 以下是<strong>单时段同脚本对照读数</strong>，
+    不宣称统计意义或长期格局逆转（e3k 已记录多次时段读数 0.996~1.017x
+    的波动）；价值在 b04 / b08 两个确定性机制收益，与四轮 A/B + 双点
+    布局补偿构成的可复现证据链。若未来有更干净的隔离测验证伪收益，
+    可据本证据链整体回退 <code>src/codegen_asm.rs</code>。</li>
+<li><strong>下一步方向</strong>：剩余 LLVM 短板按量级为 <strong>b10 浅递归 1.429x</strong>、
+    b24 xorshift 1.345x、<strong>b23 popcount 1.321x</strong>、b11 二叉递归树
+    1.265x；递归 / 含 call 类 <strong>1.2072x</strong> 仍是最大类别短板（e3g 已证伪
+    全函数驻留、e3f/e3h 已证伪入口对齐）。① 继续按「补标准优化」逐个
+    定位：b23 的 <code>c += x &amp; 1</code> 可考虑 ADC 类融合、b24 的 xorshift 移位链、
+    b10/b11 的调用序列；② 把「固定模块布局」做成真正的构建层基建
+    （函数级 section + 链接脚本 / 显式相位），本批双点 PAD 再次证明布局
+    补偿能完全消除伪影，但 NOP padding 绝不进产品；③ 补齐前端常量折叠，
+    让负整数字面量 / 括号常量直接成为 <code>Value::Imm</code>，使 <code>-2147483648</code>
+    这类 disp 也能命中 LEA（本批已用 Sub 形态覆盖负 disp）。</li>
+<li><strong>本批护栏</strong>：最终<strong>仅改 <code>src/codegen_asm.rs</code></strong>（<code>FnEmit</code> 两集合 +
+    三个模块级 helper + <code>analyze_fusable</code> 相邻窗口 + <code>inst_lea_fused</code> +
+    <code>inst()</code> 的 <code>Bin</code> 分支）；<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a
+    零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建
+    零警告、不打 tag、全套门禁全绿、<code>docx/</code> 确定性生成无漂移；本地静态
+    基线 <code>bench/bench.s</code> 同步为 M7-e3l 版（该文件被 <code>.gitignore</code> 的
+    <code>*.s</code> 忽略、不进版本库，仅作检视用）。跨时段绝对读数不直接相减，
+    收益一律以 A/B 交替相对改善为准。</li>
 </ul>
 </li>
 </ul>
