@@ -1229,7 +1229,10 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
   验证，方向不稳即否决。<strong>① 已在紧随其后的 M7-e3d 完成闭环</strong>（对齐 + 复活
   转发，组合 A/B +1.0% 稳定正收益、b23 从 −27% 翻身 +4~5%）；② 已由紧随
   其后的 <strong>M7-e3e 起步</strong>（消除孤儿 leaq，A/B +0.5~0.6%、b12 +7%；同时否决
-  删 xorl、定位「函数入口对齐敏感」新坑），续做方向见 M7-e3e 条目。</li>
+  删 xorl、定位「函数入口对齐敏感」新坑），续做方向见 M7-e3e 条目；<strong>② 的
+  主线方案（含 call 函数全函数统一寄存器驻留）已在 M7-e3g 正面实现并 A/B
+  证伪</strong>（两轮几何均值 −3.2~3.6%、二叉 / 互递归 −25~41%），性能代码零改动，
+  详见 M7-e3g 条目。</li>
 <li><strong>本批护栏</strong>：<code>tools/ab_asm_m7e3b.py</code> 头部注释通用化（该脚本已服务多个
   批次，OLD/NEW 由外部 worktree 决定）。<code>src/codegen.rs</code> / <code>src/ast.rs</code>
   相对 544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、构建零警告、
@@ -1397,6 +1400,77 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     <code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、
     门禁全绿、<code>docx/</code> 确定性生成无漂移。跨时段绝对读数不直接相减，收益一律
     以 A/B 交替相对改善为准。</li>
+<li><strong>M7-e3g 含 call 函数全函数统一寄存器驻留（M7-e3c「下一步 ②」主线方案
+  A/B 证伪，性能代码零改动）</strong>：M7-e3c 把「含 call 函数跨块寄存器协调」
+  列为递归 / 含 call 类 ~1.10x 主战场，M7-e3e 起步后本批正面实现其主线
+  方案——让含 call 函数也走全函数统一驻留，参数 / 调用结果跨 call 留在
+  寄存器里，省掉反复栈往返。两轮 A/B 稳定净负、并有三项灾难退化，按
+  「绝不带病合并」铁律否决，撤回性能代码至 b1645ff 逐字节，仅沉淀结论。</li>
+<li><strong>实现（最终撤回）</strong>：<code>analyze_unified</code> 增加 <code>pool</code> 参数；新增
+    <code>cs_unified_eligible()</code>；<code>analyze_residency</code> 在 <code>unified=false</code> 时对合格
+    函数改走 <code>analyze_unified(&amp;RES_POOL[..6])</code>（仅 rbx/r12-r15/rbp 六个
+    callee-saved）。含 call 函数此前被 <code>block_can_reside</code> 整体挡在
+    <code>analyze_per_block</code> 之外（且短块 &lt;6 指令也不驻留），fibR/treeR/evR/odR
+    全程走纯栈槽路径。</li>
+<li><strong>正确性论证（longjmp 是唯一硬约束，门禁实测成立）</strong>：Dial 的
+    try/catch 由 <code>lower_try</code> 直连 libc <code>setjmp</code>（本帧发起）+
+    <code>dial_throw_to</code> 的 longjmp 实现；longjmp 只可能跳回「含 setjmp 的那个
+    函数」并把所有 callee-saved 恢复到 setjmp 时刻的值，令「寄存器比栈新」
+    的统一驻留前提失效。故 <code>cs_unified_eligible</code> <strong>精确排除含 <code>setjmp</code> 调用
+    的函数</strong>（longjmp 目标，继续走 <code>analyze_per_block</code>：块尾回写内存、块头
+    重新装载，longjmp 回来后从内存取权威值），并保守排除
+    <code>dial_throw_to</code> / <code>EnvInit</code> / ARC / 间接调用。被放宽函数在 longjmp 路径
+    上帧被 unwound、不再执行，正常返回时 callee-saved 由 SysV ABI 保证不变
+    （<code>inst_call</code> 只用 rax / 参数寄存器、从不写 callee-saved）。全套门禁
+    全绿，<strong>尤其 <code>exceptions</code>（try/catch/throw）与 <code>fnptr</code> 双后端输出
+    逐字节一致</strong>，AArch64 交叉汇编通过，A/B 28 项校验和全 ok。</li>
+<li><strong>静态证据</strong>：仅新增 / 改写发射逻辑，零新依赖；但 <code>used_phys</code> 被 6 个
+    callee-saved 填满，每个放宽函数 prologue/epilogue 各多 6 条保存 / 恢复，
+    bench.s 总指令 <strong>3305 → 3469（+164，+5%）</strong>。fibR 的 b3 块从 BASE 的
+    15 条涨到 NEW 的 22 条——6 个 hot vreg 全绑 p 后产生
+    <code>movq %rbx,%r13</code> → <code>%r14</code> → <code>%rax</code>、<code>movq %rbx,%rbp</code> 等<strong>搬运链</strong>。</li>
+<li><strong>A/B 数据（OLD = b1645ff，5 采样双二进制交替，两轮）</strong>：几何均值
+    <strong>0.9680 / 0.9636（−3.20% / −3.64%，稳定负）</strong>；<strong>b09 二叉递归 fib
+    0.7474/0.7378（−25~26%）、b11 二叉递归树 0.6765/0.6729（−32~33%）、
+    b12 互递归奇偶 0.5910/0.6346（−37~41%）</strong> 三项灾难退化；<strong>b10 浅递归
+    求和 1.1695/1.1748（+17%）、b21 子串查找 1.0872/1.0904（+9%）</strong> 稳定
+    正；其余 23 项 ±2% 噪声。</li>
+<li><strong>归因（为什么同为递归却方向相反）</strong>：x86-64 的<strong>直接栈寻址 + 内存
+    操作数折叠</strong>（<code>movq off(%rsp),%rax</code>、<code>addq off(%rsp),%rax</code>）已让
+    「全 spill」路径相当高效，统一驻留的收益只剩「省跨 call 的
+    store→load 往返」：<ul>
+<li>rsumR（b10）单 call 块、活跃值少，BASE 把参数 n 存 <code>72(%rsp)</code> 跨
+  call 再读回、结果走 <code>96(%rsp)</code> 往返，NEW 留在 callee-saved 并以
+  <code>addq %rbp,%rax</code> 替代 <code>addq 96(%rsp),%rax</code>；深度 25 递归 × 5 万次，
+  省下的 store-forwarding 延迟累积压过 12 条保存恢复 → +17%。</li>
+<li>fibR/treeR（b09/b11）b3 有<strong>两次 call</strong>，需同时跨 call 保持参数 n
+  与首个调用结果，6 个 vreg 全绑 p → 搬运链 + 每帧 12 条保存恢复，
+  b3 15 → 22 条，净负 −25~32%。</li>
+<li>evR/odR（b12）极短互递归，函数体仅约 10 条指令，12 条保存恢复
+  占比最高，退化最重 −37~41%。</li>
+<li>b21 非递归，prologue 保存恢复只付一次，收益在 2 万轮循环累积 +9%。</li>
+</ul>
+</li>
+<li><strong>否决理由（诚实判断）</strong>：① 几何均值两轮稳定负 −3.2~3.6%，且有
+    −25~41% 的三个灾难退化项，远超噪声、方向全一致，按「绝不带病合并」
+    铁律必须否决。② 唯一能捞回 b10/b21 正收益的做法是「挑出受益函数」
+    （单 call / 非递归 / 函数体够长…），这类条件退化为对 bench.s 的
+    过拟合、收益集中在个别基准，与 M7-e3f 否决统一对齐时确立的「非
+    机制性收益不采纳」判据一致，故不再试变体。③ <strong>M7-e3c「下一步 ②」
+    的主线方案（复用全函数统一驻留）由此证伪</strong>：含 call 函数的优化不能
+    整体切换驻留模型。</li>
+<li><strong>下一步方向</strong>：② 若继续，应走<strong>局部、专用</strong>路子——只定向消解
+    「跨 call 的单个 store→load 往返」（如把该值留在 1 个 callee-saved、
+    按需保存），而非整体切换驻留；或优先转 M7-e3f 指出的<strong>入口取指 /
+    prologue 布局</strong>方向（b09/b11 仅靠对齐就 +12~20%，量级更大）。硬约束
+    不变：任何改函数体字节数的 pass 之前必须先固定入口地址。</li>
+<li><strong>本批护栏</strong>：最终<strong>性能代码零改动</strong>（<code>src/codegen_asm.rs</code> 撤回至
+    b1645ff 逐字节、工作树干净）、<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对
+    544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、
+    构建零警告、不打 tag、全套门禁（10 正向 + 2 负例 + 默认后端 +
+    AArch64 交叉汇编、<code>cargo test --release</code>、<code>run_tests.sh</code> 全部通过）全绿、
+    <code>docx/</code> 确定性生成无漂移。跨时段绝对读数不直接相减，收益一律以 A/B
+    交替相对改善为准。</li>
 </ul>
 </li>
 </ul>
