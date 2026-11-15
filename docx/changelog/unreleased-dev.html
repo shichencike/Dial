@@ -1154,13 +1154,51 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     <strong>1.0172x</strong>、数组内存类 0.8400x 反超。</li>
 <li><strong>诚实判断</strong>：收益明显小于 M7-d/e1/e2（−6%~−10%），因为删的是单周期
     <code>jmp</code> 与死代码，属边际优化；绝对读数仍随整机负载波动，跨批次不可直接相减。</li>
+<li><strong>M7-e3b 布尔比较-分支融合（ICmp 结果仅被一处 Branch.cond 使用时不物化、
+  直接 <code>cmp; jcc</code>；几何平均 A/B +1.9%，静态指令 3872 → 3557）</strong>：</li>
+<li><strong>诊断</strong>：<code>bench.dial</code> 全文件有 <strong>95 组</strong> <code>ICmp</code> 物化为布尔寄存器后，
+    马上被唯一的 <code>Branch.cond</code> 消费（<code>setcc/movzbq/testq/jz</code> 五连，或 AArch64
+    的 <code>cset/cbz</code>），比较结果从不被别处复用。这 95 组是纯「为分支而比较」，
+    中间物化的 bool 寄存器完全多余。</li>
+<li><strong>方案</strong>：文本层布尔融合不可行（统一寄存器文件下 <code>%rax</code> 被多 SSA 值复用，
+    「后续不使用」检查会误杀安全情况），故改在 <strong>IR 层</strong>：<code>analyze_fusable()</code>
+    遍历全函数收集 <code>ICmp</code> 的 <code>(op, a, b)</code>，再用 <code>reg_uses()</code> + 手动遍历 <code>Term</code>
+    的 cond/args，统计每个 vreg 的 use 计数与「是否只被一处 Branch.cond 使用」；
+    仅当 <code>use_count == 1</code> 且 <code>branch_cond</code> 命中时才标 <code>fusable</code>。<code>emit</code> 时该
+    <code>ICmp</code> <strong>跳过物化</strong>，<code>Branch</code> 处（仅 x86-64）直接发 <code>cmpq b,a; jcc(不成立→
+    else</code>，省掉 <code>setcc/movzbq/testq</code> 三条；<code>jcc</code> 方向按 <code>ACmp</code> 取反（Eq→jne、
+    Neq→je、Lt→jge、Gt→jle、Le→jg、Ge→jl）。AArch64 保持原 <code>cset/cbz</code> 路径。</li>
+<li><strong>正确性护栏（含一个关键 bug 修复）</strong>：融合后 <code>Branch</code> 改发 <code>jne/je/jge/…</code>
+    条件跳转，而 <code>elide_dead_trampolines</code>（M7-e3a）靠 <code>parse_jmp</code> 收集被引用
+    标签来判定死 trampoline——原 <code>parse_jmp</code> 只认 <code>jmp</code>/<code>jz</code>，<strong>else 标签
+    <code>.Lxxx_bN_else:</code> 不再被视为「被引用」，被误删成悬空符号</strong>（<code>Undefined
+    temporary symbol .Ldial_main_b1_else</code>），黄金门禁一度全红。修复：把
+    <code>parse_jmp</code> 放行全部 <code>j&lt;cc&gt;</code> 条件跳转（<code>x86-64</code> 中 <code>j</code> 开头且非 <code>jmp</code> 的
+    助记符必为条件跳转），让融合分支的 else 标签正确计入 <code>refs</code> 而保留；该改动
+    对 <code>thread_jumps</code> 亦安全（trampoline 表只含纯 <code>jmp</code> 块，条件跳转穿 trampoline
+    语义恒等）。修复后黄金门禁（10 正向 + 2 负例 + AArch64 交叉汇编）逐字节全绿、
+    28×2 校验和全一致。</li>
+<li><strong>确定性指标</strong>：<code>setcc</code> <strong>95 → 2</strong>、<code>testq</code> ~93 → 2（仅 2 组 ICmp 仍被复用
+    而保留物化）、静态指令 <strong>3872 → 3557（−315 / −8.2%）</strong>，M6 基线 5594 累计
+    <strong>−36%</strong>；<code>.s</code> 体积进一步缩小。</li>
+<li><strong>A/B 双二进制交替</strong>（OLD = M7-e3a @3180271，NEW = 本批；<code>old,new,new,old</code>
+    交替抵消整机漂移）：几何平均 <strong>M7-e3a 1.0 → M7-e3b 1.0191（NEW 快约 +1.9%）</strong>；
+    逐项放量的主战场是<strong>比较 / 分支密集型</strong>任务——b08 3n+1 <strong>+15.1%</strong>、b23
+    popcount <strong>+21.3%</strong>（原剩余差距项，本轮基本追平）、b06 乘加取模 +5.1%、
+    b11 素数筛 +4.2%、b15 最大子段和 +2.2%、b03 除法混合 +1.8%；算术循环类
+    （b01/b04/b07/b25/b26/b27）持平（融合不改变无分支热点），b20/b21 等微噪
+    动在 ±3% 内属测量误差。完整模式（5 采样）<strong>1.0191x</strong>、快速模式（2 采样）
+    <strong>1.0238x</strong>，方向一致。</li>
+<li><strong>诚实判断</strong>：本轮收益（+1.9%）小于 M7-d/e1/e2（−6%~−10%）但大于 M7-e3a
+    （−1.7%），因为省的是「比较→分支」的热路径 3 指令对，且只在「ICmp 仅被
+    一处分支用」时生效（保守，避免误伤被复用的比较）；绝对读数随整机负载波动，
+    跨批次不可直接相减，以 A/B 交替相对改善为准。</li>
 <li><strong>剩余差距</strong>：递归 / 含 call 类仍约 1.10x（含 call，享受不到统一寄存器
   文件、还要承担 call 与 prologue）、算术循环类约 1.10x、字符串类约 1.04x、
-  b23 popcount、b08 3n+1。下一步 M7-e3b：<strong>拷贝合并 / coalescing</strong>（统一寄存器
-  文件里热循环仍有约八成 <code>movq</code> 搬运，需按干扰图给 SSA def 复用操作数物理
-  寄存器，是继续逼近 / 反超 LLVM 的主战场）+ <strong>含 call 函数跨块协调</strong> +
-  <strong>布尔比较-分支融合</strong>（全文件 95 组 <code>cmp/setcc/movzbq/testq/jz</code> 可压成
-  <code>cmp/jcc</code>，需 IR 层活跃性支撑）。</li>
+  b08 3n+1。下一步 M7-e3c：<strong>拷贝合并 / coalescing（寄存器分配 coalescing）</strong>
+  （统一寄存器文件里热循环仍有约八成 <code>movq</code> 搬运，需按干扰图给 SSA def 复用
+  操作数物理寄存器，是继续逼近 / 反超 LLVM 的主战场，b23 内层 8 条 <code>movq</code> 搬运
+  首当其冲）+ <strong>含 call 函数跨块协调</strong>（递归类反超主战场）。</li>
 </ul>
 </li>
 </ul>

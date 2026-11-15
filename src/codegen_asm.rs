@@ -142,6 +142,9 @@ struct FnEmit<'a> {
     flush_mask: HashSet<VReg>,
     /// M7-e1：定义了但全函数从未被读取的普通 vreg——其 spill store 可整条省略。
     dead_defs: HashSet<VReg>,
+    /// M7-e3b：ICmp 结果「全函数仅被一处 Branch.cond 使用」时，可免物化，
+    /// 直接在 Branch 处发 `cmp; jcc`。value = (比较算子, a, b)。
+    fusable: HashMap<VReg, (ACmp, Value, Value)>,
 }
 
 impl<'a> FnEmit<'a> {
@@ -157,7 +160,7 @@ impl<'a> FnEmit<'a> {
             resident: HashMap::new(), dirty: HashSet::new(), residency_on: false,
             plans: Vec::new(), used_phys: Vec::new(), save_off: 0,
             promotable: HashSet::new(), flush_mask: HashSet::new(),
-            dead_defs: HashSet::new(),
+            dead_defs: HashSet::new(), fusable: HashMap::new(),
         }
     }
 
@@ -619,6 +622,50 @@ impl<'a> FnEmit<'a> {
             }
         }
         self.dead_defs = dead;
+    }
+
+    /// M7-e3b：标记「ICmp 结果全函数仅被一处 Branch.cond 使用」的 vreg。
+    /// 这些 ICmp 不必物化为 bool 寄存器（省 setcc/movzbq/testq 三条），直接在
+    /// Branch 处发 `cmp; jcc`。条件是 result 的 use 计数恰好为 1 且那唯一一次
+    /// 使用就是某个 Branch 的 cond——否则（被 store / call 实参 / 其它计算 /
+    /// phi 实参使用，或多次使用）必须保留物化结果。
+    fn analyze_fusable(&mut self) {
+        let mut defs: HashMap<VReg, (ACmp, Value, Value)> = HashMap::new();
+        for b in &self.f.blocks {
+            for i in &b.insts {
+                if let IrInst::ICmp { op, dst, a, b, .. } = i {
+                    defs.insert(*dst, (*op, *a, *b));
+                }
+            }
+        }
+        let mut use_count: HashMap<VReg, usize> = HashMap::new();
+        let mut branch_cond: HashSet<VReg> = HashSet::new();
+        for b in &self.f.blocks {
+            for i in &b.insts {
+                let mut uses = Vec::new();
+                i.reg_uses(&mut uses);
+                for u in uses { *use_count.entry(u).or_insert(0) += 1; }
+            }
+            match &b.term {
+                Term::Jump { args, .. } =>
+                    for a in args { if let Value::Reg(r) = a { *use_count.entry(*r).or_insert(0) += 1; } }
+                Term::Branch { cond, then_args, else_args, .. } => {
+                    *use_count.entry(*cond).or_insert(0) += 1;
+                    branch_cond.insert(*cond);
+                    for a in then_args.iter().chain(else_args.iter()) {
+                        if let Value::Reg(r) = a { *use_count.entry(*r).or_insert(0) += 1; }
+                    }
+                }
+                Term::Return { val } =>
+                    if let Some(Value::Reg(r)) = val { *use_count.entry(*r).or_insert(0) += 1; }
+                Term::Unreachable => {}
+            }
+        }
+        for (r, info) in defs {
+            if use_count.get(&r) == Some(&1) && branch_cond.contains(&r) {
+                self.fusable.insert(r, info);
+            }
+        }
     }
 
     fn analyze_residency(&mut self) {
@@ -1149,7 +1196,13 @@ impl<'a> FnEmit<'a> {
             }
             IrInst::Bin { op, dst, a, b, ty } => self.inst_bin(*op, *dst, *a, *b, ty.clone()),
             IrInst::FBin { op, dst, a, b, ty } => self.inst_fbin(*op, *dst, *a, *b, ty.clone()),
-            IrInst::ICmp { op, dst, a, b, .. } => self.inst_icmp(*op, *dst, *a, *b),
+            IrInst::ICmp { op, dst, a, b, .. } => {
+                // M7-e3b：结果只被一处 Branch.cond 用的 ICmp 不物化，等到 Branch
+                // 处直接 `cmp; jcc`，省 setcc/movzbq/testq 三条。
+                if !self.fusable.contains_key(dst) {
+                    self.inst_icmp(*op, *dst, *a, *b);
+                }
+            }
             IrInst::FCmp { op, dst, a, b, .. } => self.inst_fcmp(*op, *dst, *a, *b),
             IrInst::Un { op, dst, a, ty } => self.inst_un(*op, *dst, *a, ty.clone()),
             IrInst::Conv { kind, dst, a, ty } => self.inst_conv(*kind, *dst, *a, ty.clone()),
@@ -1803,15 +1856,32 @@ impl<'a> FnEmit<'a> {
                 self.line(&format!("\t{} .{}_b{}", jmp_mnem, self.prefix, target));
             }
             Term::Branch { cond, then_b, else_b, then_args, else_args } => {
-                let g1 = self.g1().to_string();
-                self.lg(Value::Reg(*cond), &g1);
                 let else_lbl = format!(".{}_b{}_else", self.prefix, block_id);
-                match self.target {
-                    EmitTarget::X86_64SysV => {
-                        self.line(&format!("\ttestq {}, {}", self.r(&g1), self.r(&g1)));
-                        self.line(&format!("\tjz {}", else_lbl));
+                // M7-e3b：ICmp 结果仅被此处使用的，把比较直接并入分支——
+                // `cmpq b,a; jcc(不成立) else`，省去 setcc/movzbq/testq 物化。
+                // 仅 x86-64：AArch64 的 bin_src 行为未在此路径验证，保守走 cbz。
+                if matches!(self.target, EmitTarget::X86_64SysV) && self.fusable.contains_key(cond) {
+                    let (op, a, b) = self.fusable.get(cond).unwrap().clone();
+                    let g1 = self.g1().to_string();
+                    let g2 = self.g2().to_string();
+                    self.lg(a, &g1);
+                    let b_src = self.bin_src(b, &g2, true, false);
+                    self.line(&format!("\tcmpq {}, {}", b_src, self.r(&g1)));
+                    let jcc = match op {
+                        ACmp::Eq => "jne", ACmp::Neq => "je", ACmp::Lt => "jge",
+                        ACmp::Gt => "jle", ACmp::Le => "jg", ACmp::Ge => "jl",
+                    };
+                    self.line(&format!("\t{} {}", jcc, else_lbl));
+                } else {
+                    let g1 = self.g1().to_string();
+                    self.lg(Value::Reg(*cond), &g1);
+                    match self.target {
+                        EmitTarget::X86_64SysV => {
+                            self.line(&format!("\ttestq {}, {}", self.r(&g1), self.r(&g1)));
+                            self.line(&format!("\tjz {}", else_lbl));
+                        }
+                        EmitTarget::AArch64 => self.line(&format!("\tcbz {}, {}", g1, else_lbl)),
                     }
-                    EmitTarget::AArch64 => self.line(&format!("\tcbz {}, {}", g1, else_lbl)),
                 }
                 self.write_block_args(*then_b, then_args);
                 self.line(&format!("\t{} .{}_b{}", jmp_mnem, self.prefix, then_b));
@@ -1984,14 +2054,23 @@ fn parse_label(line: &str) -> Option<&str> {
     }
 }
 
-/// 解析直接跳转 `jmp .Lxxx` / `jz .Lxxx`，返回 (助记符, 目标标签)。
-/// 只认这两种本后端实际会发射的直接跳转、且目标必须是点开头标签；
-/// 间接跳转、带额外操作数、其它助记符一律不参与重定向。
+/// 解析直接跳转，返回 (助记符, 目标标签)。
+///
+/// 本后端会发射三类直接跳转：
+///  - 无条件 `jmp .Lxxx`（fallthrough 消除 / 死 trampoline 删除的主体）；
+///  - 非融合分支的 `jz .Lxxx`（testq;jz 路径）；
+///  - M7-e3b 融合分支的 `jne/je/jge/jle/jg/jl` 等条件跳转（cmpq;jcc 路径）。
+///
+/// **关键**：条件跳转的目标标签同样是「被引用」的，必须全部计入 `refs`，
+/// 否则 `elide_dead_trampolines` 会把 else 标签（`.Lxxx_bN_else:` 后紧跟
+/// `jmp .Lxxx_bM`）误判为无引用死 trampoline 而删除，造成悬空符号。因此这里
+/// 放行 `jmp` 与所有 `j<cc>` 条件跳转（x86-64 中 `j` 开头且非 `jmp` 的助记符
+/// 必为条件跳转），其它助记符、间接跳转、带额外操作数的一律不参与重定向。
 fn parse_jmp(line: &str) -> Option<(&str, &str)> {
     let t = line.trim();
     let mut it = t.split_whitespace();
     let m = it.next()?;
-    if m != "jmp" && m != "jz" { return None; }
+    if m != "jmp" && !m.starts_with('j') { return None; }
     let tgt = it.next()?;
     if it.next().is_some() || !tgt.starts_with('.') { return None; }
     Some((m, tgt))
@@ -2303,6 +2382,7 @@ fn emit_function(
     let mut e = FnEmit::new(ip, f, target, local);
     e.compute_layout();
     e.analyze_dead_defs();
+    e.analyze_fusable();
     e.analyze_residency();
     e.prologue();
     for (idx, b) in f.blocks.iter().enumerate() {
