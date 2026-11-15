@@ -1972,6 +1972,114 @@ fn elide_dead_stores(asm: &str, lo: i64, hi: i64) -> String {
     out
 }
 
+/// 解析形如 `  .Lxxx:` 的局部标签行，返回含点、不含冒号的标签名。
+fn parse_label(line: &str) -> Option<&str> {
+    let t = line.trim();
+    if !t.starts_with('.') { return None; }
+    let name = t.strip_suffix(':')?;
+    match name.get(1..) {
+        Some(rest) if !rest.is_empty()
+            && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => Some(name),
+        _ => None,
+    }
+}
+
+/// 解析直接跳转 `jmp .Lxxx` / `jz .Lxxx`，返回 (助记符, 目标标签)。
+/// 只认这两种本后端实际会发射的直接跳转、且目标必须是点开头标签；
+/// 间接跳转、带额外操作数、其它助记符一律不参与重定向。
+fn parse_jmp(line: &str) -> Option<(&str, &str)> {
+    let t = line.trim();
+    let mut it = t.split_whitespace();
+    let m = it.next()?;
+    if m != "jmp" && m != "jz" { return None; }
+    let tgt = it.next()?;
+    if it.next().is_some() || !tgt.starts_with('.') { return None; }
+    Some((m, tgt))
+}
+
+/// 空行 / 注释 / 汇编指示（`.` 开头但非标签）都不算真实指令。
+fn is_skip(line: &str) -> bool {
+    let t = line.trim();
+    t.is_empty() || t.starts_with('#')
+        || (t.starts_with('.') && parse_label(line).is_none())
+}
+
+fn is_instr(line: &str) -> bool {
+    !is_skip(line) && parse_label(line).is_none()
+}
+
+/// 跟随 trampoline 链到最终目标；有环时停在环内（结果仍是真实标签，不会悬空）。
+fn resolve_jump(x: &str, tramp: &HashMap<String, String>) -> String {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut cur = x.to_string();
+    while let Some(t) = tramp.get(&cur) {
+        if !seen.insert(cur.clone()) { break; }
+        cur = t.clone();
+    }
+    cur
+}
+
+/// 紧邻 `lines[i]` 之后的「标签前缀」：跳过空行/指示/连续标签，直到第一条
+/// 真实指令。返回的标签都指向同一条指令（彼此是别名）。
+fn labels_prefix<'a>(lines: &'a [String], i: usize) -> Vec<&'a str> {
+    let mut res = Vec::new();
+    let mut j = i + 1;
+    while j < lines.len() {
+        if let Some(l) = parse_label(&lines[j]) { res.push(l); j += 1; continue; }
+        if is_skip(&lines[j]) { j += 1; continue; }
+        break;
+    }
+    res
+}
+
+/// M7-e2：跳转目标重定向（jump threading）+ fallthrough `jmp` 消除，仅 x86-64。
+///
+/// - **trampoline 块** = 标签后第一条真实指令就是无条件 `jmp T`、中间无任何
+///   指令（因此绝无 phi 参数写入副作用）的块。跟随纯 jmp 链不产生任何状态
+///   变化，把 `jmp/jz L`（L 为 trampoline）改写成链末目标 `resolve(L)`，运行时
+///   即可跳过中间跳转——递归热路径常见 2~3 跳、`bench.dial` 里最长链达 26 跳。
+/// - `jmp X` 且 X 恰是紧邻的下一个标签时删掉该 jmp，让控制流自然落入；
+///   fallthrough 与跳到 X 语义等价（无条件 jmp 无副作用）。
+///
+/// 不删除任何标签、不改变跳转目标集合，resolve 结果必为真实存在的标签。
+/// 逐函数对 `e.out` 运行，局部标签自成体系，绝不跨函数重定向。
+fn thread_jumps(asm: &str) -> String {
+    let lines: Vec<&str> = asm.lines().collect();
+    // 1) 构建 trampoline 表：标签 -> 其块首 jmp 的目标标签。
+    let mut tramp: HashMap<String, String> = HashMap::new();
+    for i in 0..lines.len() {
+        if let Some(l) = parse_label(lines[i]) {
+            let mut j = i + 1;
+            while j < lines.len() && !is_instr(lines[j]) { j += 1; }
+            if j < lines.len() {
+                if let Some((m, t)) = parse_jmp(lines[j]) {
+                    if m == "jmp" { tramp.insert(l.to_string(), t.to_string()); }
+                }
+            }
+        }
+    }
+    // 2) 重定向所有 jmp/jz 目标到链末。
+    let mut stage: Vec<String> = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let mut s = (*line).to_string();
+        if let Some((_, tgt)) = parse_jmp(line) {
+            let r = resolve_jump(tgt, &tramp);
+            if r.as_str() != tgt { s = line.replacen(tgt, r.as_str(), 1); }
+        }
+        stage.push(s);
+    }
+    // 3) 删 fallthrough jmp，输出。
+    let mut out = String::with_capacity(asm.len());
+    for i in 0..stage.len() {
+        if let Some((m, tgt)) = parse_jmp(&stage[i]) {
+            if m == "jmp" && labels_prefix(&stage, i).contains(&tgt) { continue; }
+        }
+        out.push_str(&stage[i]);
+        out.push('\n');
+    }
+    out
+}
+
 /// M7-c1：x86-64 移位指令的立即数形式只接受 imm8，且 64 位操作数实际按
 /// `count & 63` 生效。当移位量是 `[0,63]` 的整数常量时，`shlq/sarq $n, reg`
 /// 与 `movq $n,%rcx; shlq %cl,reg` 语义完全一致，可以直接折叠、省掉两次搬运。
@@ -2140,16 +2248,19 @@ fn emit_function(
         e.term(b.id, &b.term);
         e.end_block();
     }
-    // M7-c2 + M7-e1：x86-64 发射末尾依次做「相邻冗余 reload 消除」与
-    // 「全函数死 store 消除」。顺序不可颠倒——先删掉紧邻 load，才会暴露
-    // 那些再无人读的孤立 store 供第二步删除。lo/hi 圈定本函数 vreg spill 槽区。
+    // M7-c2 / M7-e1 / M7-e2：x86-64 发射末尾依次做三个纯文本 pass，顺序固定：
+    //   ① 相邻冗余 reload 消除 → ② 全函数死 store 消除 → ③ 跳转重定向 +
+    //   fallthrough jmp 消除。①② 顺序不可颠倒（先删紧邻 load 才暴露孤立 store
+    //   供第二步删除）；③ 放在最后，可在 ①② 精简后的指令流上看到最完整的
+    //   trampoline 集合。lo/hi 圈定本函数 vreg spill 槽区。
     if matches!(target, EmitTarget::X86_64SysV) {
         let s = elide_redundant_reloads(&e.out);
         let (lo, hi) = match (e.reg_off.first(), e.reg_off.last()) {
             (Some(&a), Some(&b)) => (a, b + 8),
             _ => (0, 0),
         };
-        out.push_str(&elide_dead_stores(&s, lo, hi));
+        let d = elide_dead_stores(&s, lo, hi);
+        out.push_str(&thread_jumps(&d));
     } else {
         out.push_str(&e.out);
     }

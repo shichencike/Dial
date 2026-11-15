@@ -942,16 +942,18 @@ asm 报错且带 <code>[asm 后端]</code> 前缀」，杜绝静默降级。用�
 spill、循环嵌套深度加权、池寄存器 8→10）</strong>、<strong>M7-c 常量移位立即数折叠 +
 相邻冗余 reload 消除</strong>、<strong>M7-d 常量除法乘法逆元</strong>（<code>idivq</code> 57 处 → 1 处，
 编译期 i128 逐值自校验、魔数与 gcc -O2 一致、无解即退回 <code>idivq</code>），以及
-<strong>M7-e1 全函数死 store 消除</strong>（文本层按 <code>reg_off</code> 精确圈定 spill 槽区，
-静态指令 4668 → 4140、消除 528 处孤立 store），当前几何平均
-<strong>1.0995x</strong>（完整模式 5 采样；M6 基线 1.3575x 累计 <strong>−19%</strong>，历史最佳，
-静态指令累计 5594 → 4140 即 <strong>−26%</strong>）。<strong>数组内存类 0.995x 已整体反超
-LLVM、字符串类 1.034x 几乎追平</strong>，算术循环类 1.056x；b03 除法混合 1.84x →
-1.005x（持平）、b08 3n+1 2.9x → 1.76x，b05 / b14–b18 / b21 / b25 / b26 / b27
-等单项反超。性能对比采用 <strong>A/B 双二进制交替对跑</strong>（同一时段交替测两个逻辑
-单元）以抵消整机负载漂移；M7-e1 单批 A/B 显示几何平均约 −9.6%、四类全面改善。
-剩余主要差距在递归 / 含 call 负载（约 1.48x）、popcount（b23）、3n+1（b08）
-与分支密集负载，是后续优化主战场；
+<strong>M7-e1 全函数死 store 消除</strong>（文本层按 <code>reg_off</code> 精确圈定 spill 槽区、
+消除 528 处孤立 store），<strong>M7-e2 跳转目标重定向 + fallthrough 消除</strong>（131 个
+trampoline 块、最长链 26 层，<code>jmp/jz</code> 直连链末目标，静态指令 4140 → 4087），
+静态指令累计 <strong>5594 → 4087（−27%）</strong>。当前完整模式（5 采样）几何平均约
+<strong>1.03x–1.10x</strong>（随整机负载时段波动，<strong>跨批次不可直接相减</strong>；M6 基线
+1.3575x 起明显下降）；<strong>数组内存类约 0.87–0.99x 已整体反超 LLVM</strong>，递归 /
+含 call 类约 1.13x、字符串类约 1.06x、算术循环类约 1.10x；b03 除法混合
+1.84x → 1.005x（持平）、b08 3n+1 2.9x → 1.76x，b05 / b14–b18 / b21 / b25 /
+b26 / b27 等单项反超。性能结论一律采用 <strong>A/B 双二进制交替对跑</strong>（同一时段
+交替测两个逻辑单元）以抵消整机负载漂移：M7-e1 净 −9.6%、M7-e2 净 −3.1%
+（递归类 −12.9%）。剩余主要差距在递归 / 含 call 负载（约 1.13x）、popcount
+（b23）、3n+1（b08）与字符串类，是后续优化主战场；
 详见 <a href="changelog.html">CHANGELOG 未发布节</a> 的 M6 / M7 批次记录。</p>
 <p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式
 （C 侧 <code>-Os -ffunction-sections -fdata-sections</code> + 链接期 <code>-Wl,--gc-sections -s</code>，
