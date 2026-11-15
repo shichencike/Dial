@@ -1317,7 +1317,10 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     正是 b12 对删指令极度敏感的根源。这解释了为何同为递归、同样删 leaq+xorl 的
     b09/b10/b11 几乎不变（热循环被对齐保护）、唯 b12（函数入口热路径）剧变。
     <strong>下一步 ② 续做前须评估「函数入口 <code>.p2align</code>」</strong>——把热函数入口地址也固定，
-    解锁含 call 函数删指令 pass 的稳定测量；须单独 A/B 验证，方向不稳即否决。</li>
+    解锁含 call 函数删指令 pass 的稳定测量；须单独 A/B 验证，方向不稳即否决。
+    <strong>该评估已在紧随其后的 M7-e3f 完成</strong>（16B / 32B 两变体四轮 A/B：净正但
+    b12 稳定退化 ~12%，按「绝不带病合并」铁律全部否决、性能代码零改动，
+    详见 M7-e3f 条目）。</li>
 <li><strong>诚实判断</strong>：+0.5~0.6% 幅度小于 M7-e3d，收益集中在 b12 与一批小项，但两次
     方向一致、有四版归因 + 静态 −3.4% + 修 bug 的机制支撑、且无稳定退化；B 的
     −19% 灾难已用四版归因精确定性并否决，绝不带病合并。跨时段绝对读数不直接
@@ -1327,6 +1330,73 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     <code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、黄金门禁
     （10 正向 + 2 负例 + AArch64 交叉汇编）逐字节全绿、<code>run_tests.sh</code> /
     <code>cargo test</code> 全过、<code>docx/</code> 确定性生成无漂移。</li>
+<li><strong>M7-e3f 函数入口 <code>.p2align</code> 对齐评估（两变体 A/B 均否决，性能代码零改动）</strong>
+  （M7-e3e「下一步 ② 续做前须评估」的完整闭环）：M7-e3e 定位了「函数入口
+  对齐敏感」新坑——<code>align_loop_headers</code> 只护回边循环头，evR/odR 这类无循环、
+  靠函数入口取指的尾互递归入口地址会随删指令平移，b12 对字节变化极度敏感。
+  本批实现并单独 A/B 评估「全局函数入口 <code>.p2align</code>」，16B / 32B 两个对齐粒度
+  变体静态均完美达成目标，但四轮 A/B 一致显示<strong>净正收益却带 b12 稳定退化
+  ~12%</strong>，按「绝不带病合并」铁律全部否决，撤回性能代码至 9a3890c 逐字节，
+  仅沉淀结论与数据。</li>
+<li><strong>实现（最终撤回）</strong>：新增独立纯文本 pass <code>align_function_entries</code>，挂在
+    既有五个 pass 之后、所有对齐定型最后；识别「不以 <code>.</code> 开头、以 <code>:</code> 结尾、
+    纯 ASCII 标识符」的全局函数入口 label（局部块 label / 字符串 label 均为
+    <code>.L*</code>、<code>.globl</code> 等指示以 <code>.</code> 开头，天然排除），在其定义行前插 <code>.p2align 4</code>
+    （16B 变体）/ <code>.p2align 5</code>（32B 变体）。仅 x86-64 生效、只新增 directive
+    行、AArch64 零变化；与 <code>align_loop_headers</code> 目标形态不同、绝不重合。</li>
+<li><strong>静态证据（两变体一致）</strong>：baseline（9a3890c）37 个全局函数入口 <code>mod16</code>
+    <strong>完全散乱</strong>（evR=2、odR=13、gcdI=0、fibR=9、rsumR=14、treeR=9、
+    main=12、b12=12…），无一对齐——M7-e3e 的字节平移敏感根因坐实。16B 版
+    37 入口全 <code>mod16==0</code>、32B 版全 <code>mod32==0</code>（nm 逐个核对、零遗漏）；两版
+    均<strong>仅新增 37 行对齐 directive、零删除</strong>，真实指令数 3305 / leaq 63 /
+    54 个循环头 <code>.p2align 4</code> 全部不变。全门禁在 16B 版上全绿（10 正向 +
+    2 负例 + 默认后端 + AArch64 交叉汇编、<code>cargo test --release</code>、
+    <code>run_tests.sh</code> 全部测试通过）。</li>
+<li><strong>A/B 数据（OLD = M7-e3e @9a3890c，5 采样双二进制交替，各两轮）</strong>：<ul>
+<li><strong>16B</strong>：几何均值 <strong>+0.72% / +0.37%</strong>；b09 二叉递归 fib
+  <strong>+19.8/+18.2%</strong>、b11 二叉递归树 <strong>+14.5/+12.3%</strong>（大幅稳定正）；
+  <strong>b12 互递归奇偶 −11.5/−11.9%（0.8846/0.8809，稳定大幅退化）</strong>；
+  其余 25 项 ±2% 内、部分翻转（噪声）。</li>
+<li><strong>32B</strong>：几何均值 <strong>+0.86% / +0.63%</strong>；b09 <strong>+19.6/+19.6%</strong>、b11
+  <strong>+14.8/+10.3%</strong>、b21 <strong>+8.6/+8.3%</strong> 稳定正；<strong>b12 −12.9/−12.3%
+  （0.8713/0.8768，退化依旧甚至略差）</strong>、b18 −2.3/−3.0% 新增稳定小幅
+  退化；其余噪声。</li>
+<li>四轮 b12 全在 0.87~0.88，<strong>换对齐粒度救不了 b12</strong>。</li>
+</ul>
+</li>
+<li><strong>机制解释</strong>：函数入口对齐把「碰巧散乱的入口地址」统一到规则边界，本质是
+    一次<strong>取指边界重新洗牌</strong>，净收益来自部分函数恰好受益、并非稳健的机制性
+    收益。b09/b11 是<strong>自递归</strong>（<code>call</code> 回自身入口）、prologue 较长，对齐后
+    前几条指令落进同一 16/32B 取指块，故单项 +12~20%；b12 的 evR/odR 是
+    <strong>互递归</strong>（<code>call</code> 到<strong>另一个</strong>函数入口，见 <code>bench/bench.s</code> 的
+    <code>call odR</code> / <code>call evR</code>），双入口跳转分布对规则边界敏感，baseline 碰巧的
+    <code>mod16=2/13</code> 反优于规则边界的 0，稳定受损 ~12%。同为递归却方向相反，
+    根源在此。</li>
+<li><strong>否决理由（诚实判断）</strong>：① 项目铁律「绝不带病合并」——b12 四轮稳定退化
+    11~13%，幅度远超噪声、方向全一致；历史上采纳的性能优化（M7-e3d /
+    M7-e3e A）均<strong>无稳定退化项</strong>，带稳定退化项的（M7-e3e B）一律否决。
+    ② 净几何均值虽四轮为正，但 16B 第二轮 +0.37% 已落在噪声带边缘，且收益
+    高度依赖 baseline 碰巧的对齐点，不是可复用的机制性收益。③ 更关键：带病
+    合并会把 b12 基线固化脏 −12%，<strong>污染未来「含 call 函数跨块寄存器协调」
+    的 A/B 测量</strong>（正如 M7-e3c 的 −27% 对齐噪声曾淹没薄收益），与「下一步 ②」
+    主战场直接冲突。故两变体全部否决、性能代码零改动。</li>
+<li><strong>工程发现 + 下一步方向（本批最有价值产出）</strong>：<ul>
+<li><strong>函数入口取指才是递归类的真正主战场</strong>：仅靠对齐入口，b09/b11 单项就
+  +12~20%，量级远超 M7 各批删指令的几何均值收益（+0.5~1.9%）。未来
+  「含 call / 递归类」优化应优先处理入口取指与 prologue 布局，而非继续
+  纠结删一两条指令。</li>
+<li><strong>统一对齐点非最优</strong>：需按函数特征（自递归 vs 互递归、prologue 长度、
+  入口热度）<strong>分治</strong>对齐，或 profile-guided 对齐，才能同时拿到 b09/b11
+  收益又不伤 b12；全局单一 16B/32B 已被四轮 A/B 证伪。</li>
+<li><strong>硬约束</strong>：任何改变函数体字节数的 pass 之前，必须先固定（或等价消除
+  敏感性）入口地址，否则 A/B 会被 ±12~20% 的取指噪声淹没。</li>
+</ul>
+</li>
+<li><strong>本批护栏</strong>：最终<strong>性能代码零改动</strong>（<code>src/codegen_asm.rs</code> 撤回至 9a3890c
+    逐字节、工作树干净）、<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、
+    <code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、
+    门禁全绿、<code>docx/</code> 确定性生成无漂移。跨时段绝对读数不直接相减，收益一律
+    以 A/B 交替相对改善为准。</li>
 </ul>
 </li>
 </ul>
