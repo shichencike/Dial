@@ -950,20 +950,25 @@ trampoline 块、最长链 26 层，<code>jmp/jz</code> 直连链末目标）、
 一处 <code>Branch.cond</code> 使用时免物化、直接在分支处发 <code>cmp; jcc</code>）、<strong>M7-e3d 回边
 循环头 16B 对齐 + 解锁 store→load 转发</strong>（<code>.p2align 4</code> 把 54 个循环头地址固定到
 <code>mod16==0</code>、消除字节平移噪声后，133 处槽中转转发删 133 条指令、静态 −3.7%
-才得以稳定落地），静态指令累计 <strong>5594 → 3423（−39%）</strong>。当前完整模式（5 采样）
-几何平均 <strong>0.9963x</strong>（asm 已反超 LLVM，&lt;1 即 asm 更快；随整机负载时段波动，
-<strong>跨批次不可直接相减</strong>；M6 基线 1.3575x 起累计下降并跨过 1.0 持平线）、
-<strong>数组内存类约 0.85x 已整体反超 LLVM</strong>、位与控制流类约 1.00x 已追平；
-算术循环类约 1.07x、递归 / 含 call 类约 1.05x、字符串类约 1.04x 仍落后；
-b03 除法混合 1.84x → 1.005x（持平）、b08 3n+1 2.9x → 1.59x、b23 popcount
-约 1.22x，b05 / b14–b18 / b21 / b25 / b26 / b27 等单项反超。
+才得以稳定落地）、<strong>M7-e3e 消除孤儿 leaq</strong>（promotable Alloca 的死地址计算整段
+跳过、删 114 条 <code>leaq</code>，含 call 尾互递归 b12 +7%；同时以四版归因否决「删 Dial
+调用 xorl」），静态指令累计 <strong>5594 → 3305（−41%）</strong>。当前完整模式（5 采样）
+几何平均 <strong>约 1.0x、在 1.0 附近波动</strong>（多次时段读数 0.996~1.017x，asm 与 LLVM
+持平 / 多次反超，&lt;1 即 asm 更快；随整机负载时段波动，<strong>跨批次绝对读数不可直接
+相减</strong>、性能结论一律以 A/B 交替相对改善为准；M6 基线 1.3575x 起累计下降并跨过
+1.0 持平线）、<strong>数组内存类约 0.85x 已整体反超 LLVM</strong>、位与控制流类约 1.00x 已
+追平；算术循环类约 1.07x、递归 / 含 call 类约 1.05x、字符串类约 1.04x 仍落后
+（类别读数为长期格局，单时段波动更大）；b03 除法混合 1.84x → 1.005x（持平）、
+b08 3n+1 2.9x → 1.59x、b23 popcount 约 1.22x，b05 / b14–b18 / b21 / b25 /
+b26 / b27 等单项反超。
 性能结论一律采用 <strong>A/B 双二进制交替对跑</strong>（同一时段交替测两个逻辑单元）以
 抵消整机负载漂移：M7-e1 净 −9.6%、M7-e2 净 −3.1%（递归类 −12.9%）、M7-e3a
 净 −1.7%、<strong>M7-e3b 净 +1.9%</strong>（asm 对已落后基线再快 1.9%，推动 asm/llvm
 跨过 1.0）、<strong>M7-e3d 净 +0.9~1.0%</strong>（循环对齐单独仅 +0.1% 落在噪声带，叠加
-转发后 b23 从 −27% 翻身 +4~5%、组合稳定正收益）。剩余主要差距在递归 / 含 call
-负载（约 1.05x）、算术循环（约 1.07x）与 popcount（b23）、3n+1（b08），是后续
-优化主战场；详见 <a href="changelog.html">CHANGELOG 未发布节</a> 的 M6 / M7 批次记录。</p>
+转发后 b23 从 −27% 翻身 +4~5%、组合稳定正收益）、<strong>M7-e3e 净 +0.5~0.6%</strong>
+（b12 尾互递归 +7%，四版归因精确定性后否决负优化）。剩余主要差距在递归 /
+含 call 负载（约 1.05x）、算术循环（约 1.07x）与 popcount（b23）、3n+1（b08），
+是后续优化主战场；详见 <a href="changelog.html">CHANGELOG 未发布节</a> 的 M6 / M7 批次记录。</p>
 <p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式
 （C 侧 <code>-Os -ffunction-sections -fdata-sections</code> + 链接期 <code>-Wl,--gc-sections -s</code>，
 去掉 DWARF 与符号表）、<code>--single-file</code> 便携模式（链接期 <code>-static</code> 全静态，

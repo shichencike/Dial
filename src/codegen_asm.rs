@@ -1064,10 +1064,19 @@ impl<'a> FnEmit<'a> {
     fn inst(&mut self, i: &IrInst) {
         match i {
             IrInst::Alloca { dst, .. } => {
-                let off = *self.alloca_off.get(dst).unwrap_or(&0);
-                let g = self.g2().to_string();
-                self.addr(&g, off);
-                self.sg(*dst, &g);
+                // M7-e3e：可提升（promotable）的 Alloca，其地址值在函数内无任何
+                // 消费者——所有 Load/Store 都已提升进寄存器、直接读写提升槽，
+                // 不经指针寻址（collect_promotable 已排除地址逃逸 / 间接访问）。
+                // 旧实现无条件 addr() 算地址 + sg() 把地址存进 dst 槽：sg 的
+                // store 被 elide_dead_stores 当死槽删掉，却留下孤儿 leaq。这里
+                // 整段跳过，从源头不发射。AArch64 下 residency 不启用、
+                // promotable 恒空，Load 仍按指针寻址，走原路径不受影响。
+                if !self.promotable.contains(dst) {
+                    let off = *self.alloca_off.get(dst).unwrap_or(&0);
+                    let g = self.g2().to_string();
+                    self.addr(&g, off);
+                    self.sg(*dst, &g);
+                }
             }
             IrInst::LeaLabel { dst, lit } => {
                 match self.target {
