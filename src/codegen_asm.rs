@@ -1312,8 +1312,38 @@ impl<'a> FnEmit<'a> {
         self.sg(dst, &res);
     }
 
+    /// M7-e3j：常量位与掩码 n∈[2^31, 2^32-1] 的 32 位强度削减。
+    /// 用 g1=rax 及其 32 位视图 eax：lg 把 a 装入 rax，andl $n,%eax（32 位
+    /// 立即数不符号扩展，且 32 位写自动零扩展清高 32 位，正是 x & n 的语义），
+    /// 再 sg 回写。n=0xFFFFFFFF 时用一条 movl %eax,%eax（LLVM 对「取低 32 位」
+    /// 的标准同构输出）。只碰 g1，不触碰 RES_POOL，驻留态下无需额外保存。
+    fn inst_and_u32(&mut self, dst: VReg, a: Value, n: i64) {
+        let g1 = self.g1().to_string();          // rax
+        let d = self.r(&self.r32(&g1));          // %eax
+        self.lg(a, &g1);
+        if n == 0xFFFF_FFFFi64 {
+            self.line(&format!("\tmovl {}, {}", d, d));
+        } else {
+            self.line(&format!("\tandl ${}, {}", n, d));
+        }
+        self.sg(dst, &g1);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn inst_bin(&mut self, op: ABin, dst: VReg, a: Value, b: Value, _ty: IrType) {
+        // M7-e3j：常量位与掩码 n∈[2^31, 2^32-1] 时，andq $imm32 会把立即数
+        // 符号扩展成负数（0xFFFFFFFF_8xxxxxxx）而语义错误，通用路径只能退回
+        // movabsq 装 64 位掩码再 andq（2 条、13 字节）。但这类 n 的高 32 位
+        // 本就为 0，x & n 的结果高 32 位必为 0 —— 恰好等于「低 32 位按位与 +
+        // 零扩展清高位」，一条 32 位 andl（或 n=0xFFFFFFFF 时的 movl）即可，
+        // 与 LLVM/clang 同构。const_and_u32 内含 i64 逐值自校验。仅 x86-64。
+        if matches!(self.target, EmitTarget::X86_64SysV)
+            && matches!(op, ABin::BitAnd) {
+            if let Some(n) = const_and_u32(b) {
+                self.inst_and_u32(dst, a, n);
+                return;
+            }
+        }
         // M7-e3i：常量除数为 2 的幂时优先走位移序列，比魔数逆元少 8~10 条
         // 指令且无 imulq 乘法依赖链；const_div_pow2 内含逐值自校验，不通过
         // 或非 2 的幂就继续往下走 M7-d 魔数逆元 / idivq。仅 x86-64。
@@ -2523,6 +2553,52 @@ fn const_div_pow2(b: Value) -> Option<u32> {
     }
     if pts.iter().all(|&n| { let (q, r) = sim(n, k); q == n / d && r == n % d }) {
         Some(k)
+    } else {
+        None
+    }
+}
+
+/// M7-e3j：判定常量位与掩码 n 是否落在 `[2^31, 2^32-1]` 并逐值自校验。
+///
+/// 下界 2^31：`n <= i32::MAX` 时 andq 的 imm32 为正、符号扩展高位为 0，
+///   `andq $n, %r` 一条已最优，bin_src 直接吃立即数，无需优化；只有
+///   `n > i32::MAX` 才会被 materialize 成 movabsq 64 位掩码（本批的目标）。
+/// 上界 2^32-1：n 的高 32 位必须为 0，才保证 `x & n` 的结果高 32 位恒为 0，
+///   才能用「32 位与 + 零扩展清高位」等价替代；`n >= 2^32` 掩码含高位，
+///   32 位与语义不成立，必须退回 movabsq + andq。
+/// 返回 Some(n) 前用 i64 逐值模拟 32 位序列 `(x as u32 & n as u32)` 的
+/// 零扩展结果，覆盖 i64::MIN/MAX、0、±1、2^31/2^32 边界与 2000 组伪随机
+/// 大数，必须等于 Rust/C 的 64 位按位与 `x & n`；任一点不符即返回 None，
+/// 由调用方退回通用 andq。「宁可不优化，绝不发错代码」。
+fn const_and_u32(b: Value) -> Option<i64> {
+    let n = match b {
+        Value::Imm(Imm::I64(v)) => v,
+        Value::Imm(Imm::I32(v)) => v as i64,
+        Value::Imm(Imm::I8(v)) => v as i64,
+        Value::Imm(Imm::I1(v)) => v as i64,
+        _ => return None,
+    };
+    if n < (1i64 << 31) || n > 0xFFFF_FFFFi64 { return None; }
+    // 精确模拟发射序列：andl $n,%eax / movl %eax,%eax 的结果都是
+    // 「低 32 位按位与 n 的低 32 位，再零扩展到 64 位」。
+    fn sim(x: i64, n32: u32) -> i64 {
+        ((x as u32) & n32) as u64 as i64
+    }
+    let n32 = n as u32;
+    let mut pts: Vec<i64> = vec![
+        i64::MIN, i64::MIN + 1, i64::MAX, i64::MAX - 1,
+        0, 1, -1, 2, -2, 3, -3,
+        n, -n, n - 1, n + 1,
+        0x7fff_ffffi64, 0x8000_0000i64, 0xffff_ffffi64, 0x1_0000_0000i64,
+    ];
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    for _ in 0..2000 {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        let v = (x >> 1) as i64;
+        pts.push(v); pts.push(-v);
+    }
+    if pts.iter().all(|&v| sim(v, n32) == (v & n)) {
+        Some(n)
     } else {
         None
     }

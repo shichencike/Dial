@@ -957,8 +957,17 @@ trampoline 块、最长链 26 层，<code>jmp/jz</code> 直连链末目标）、
 <code>imulq</code> 序列，本批以 4~6 条有符号向零截断位移序列替代、编译期 i64 逐值自校验，
 静态 <code>imulq</code> −5 / <code>movabsq</code> −3；仅 b08、b21 两个函数的 <code>.s</code> 变化，A/B 四轮
 b08 +11~13% / b21 +8~9% 稳定正收益，把最大短板 b08 3n+1 本时段 1.801x 降到
-1.613x；负数/边界语义 216 行 asm/LLVM 双后端逐字节一致、AArch64 零变化），
-静态指令累计 <strong>5594 → 3300（−41%）</strong>。当前完整模式（5 采样）
+1.613x；负数/边界语义 216 行 asm/LLVM 双后端逐字节一致、AArch64 零变化）、
+<strong>M7-e3j 大 u32 常量位与的 32 位掩码强度削减</strong>（补齐 LLVM/Clang 对
+<code>x &amp; 0xFFFFFFFF</code> 发单条 <code>movl %eXX,%eXX</code> 的标准优化：通用路径因 <code>andq</code> 立即数
+只能符号扩展 imm32，<code>0xFFFFFFFF</code> 会变成 <code>-1</code> 而语义错误、被迫 <code>movabsq</code> 装
+64 位掩码再 <code>andq</code>；本批对 <code>n∈[2^31,2^32-1]</code> 用 32 位 <code>movl</code>/<code>andl</code> 等价替代
+（32 位写自动零扩展清高 32 位），编译期 i64 逐值自校验，静态 <code>movabsq</code> −3 /
+<code>movl</code> +3 / 指令 −2；仅 b24 一个函数的 <code>.s</code> 变化，A/B 两轮 b24 +14.7~14.8%
+稳定正收益、几何均值 +0.73/+0.89% 两轮稳定正、无稳定退化项，把 b24 xorshift
+本时段 1.550x 降到 1.355x；负数 / <code>andl</code> 分支 / 区间边界 77 行 asm/LLVM 双后端
+逐字节一致、AArch64 零变化），
+静态指令累计 <strong>5594 → 3298（−41%）</strong>。当前完整模式（5 采样）
 几何平均 <strong>约 1.0x、在 1.0 附近波动</strong>（多次时段读数 0.996~1.017x，asm 与 LLVM
 持平 / 多次反超，&lt;1 即 asm 更快；随整机负载时段波动，<strong>跨批次绝对读数不可直接
 相减</strong>、性能结论一律以 A/B 交替相对改善为准；M6 基线 1.3575x 起累计下降并跨过
@@ -967,8 +976,9 @@ b08 +11~13% / b21 +8~9% 稳定正收益，把最大短板 b08 3n+1 本时段 1.8
 （类别读数为长期格局，单时段波动更大）；b03 除法混合 1.84x → 1.005x（持平）、
 b08 3n+1 2.9x → 1.59x（M7-e3i 后本时段同脚本复测 1.801x → 1.613x，
 <strong>跨时段读数不可相减</strong>，此处仅示量级；补 LLVM 标准 2 幂强度削减后 b08 内层
-每次迭代省掉 2 次 <code>imulq</code> 乘法链）、b23 popcount 约 1.22x，b05 / b14–b18 /
-b21 / b25 / b26 / b27 等单项反超。
+每次迭代省掉 2 次 <code>imulq</code> 乘法链）、b24 xorshift 本时段 1.550x → 1.355x
+（M7-e3j 补 32 位掩码强度削减，每轮迭代省 3 次 64 位立即数加载）、
+b23 popcount 约 1.22x，b05 / b14–b18 / b21 / b25 / b26 / b27 等单项反超。
 性能结论一律采用 <strong>A/B 双二进制交替对跑</strong>（同一时段交替测两个逻辑单元）以
 抵消整机负载漂移：M7-e1 净 −9.6%、M7-e2 净 −3.1%（递归类 −12.9%）、M7-e3a
 净 −1.7%、<strong>M7-e3b 净 +1.9%</strong>（asm 对已落后基线再快 1.9%，推动 asm/llvm
@@ -979,10 +989,14 @@ b21 / b25 / b26 / b27 等单项反超。
 （几何均值四轮中心约 +0.25% 落在噪声带、<strong>不宣称统计显著提升</strong>，但 b08
 +11~13% / b21 +8~9% 四轮全稳、与代码削减逐条对应、asm↔LLVM 独立口径印证；
 其余项 −2~3% 波动经 nm 定量归因为「改字节数 → 链接段平移 −64~−96B」的
-全段取指相位伪影，退化项 <code>.s</code> 逐字节未变、异源且随下次字节改动重新洗牌）。
+全段取指相位伪影，退化项 <code>.s</code> 逐字节未变、异源且随下次字节改动重新洗牌）、
+<strong>M7-e3j 补齐 LLVM 标准 32 位掩码强度削减</strong>（b24 +14.7~14.8% 两轮全稳、
+几何均值 +0.73/+0.89% 两轮稳定正、无稳定退化项，仅 b24 的 <code>.s</code> 变化、
+asm↔LLVM 独立口径印证 1.550x → 1.355x）。
 剩余主要差距在递归 / 含 call 负载（约 1.05~1.20x）、算术循环（约 1.07x）与
-popcount（b23）、xorshift（b24）、3n+1（b08，M7-e3i 已显著缩小），
-是后续优化主战场；详见 <a href="changelog.html">CHANGELOG 未发布节</a> 的 M6 / M7 批次记录。</p>
+popcount（b23）、3n+1（b08，M7-e3i 已显著缩小）、xorshift（b24，M7-e3j 已
+从 1.550x 缩到 1.355x），是后续优化主战场；详见
+<a href="changelog.html">CHANGELOG 未发布节</a> 的 M6 / M7 批次记录。</p>
 <p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式
 （C 侧 <code>-Os -ffunction-sections -fdata-sections</code> + 链接期 <code>-Wl,--gc-sections -s</code>，
 去掉 DWARF 与符号表）、<code>--single-file</code> 便携模式（链接期 <code>-static</code> 全静态，
