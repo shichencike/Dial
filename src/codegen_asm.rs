@@ -1278,8 +1278,52 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// M7-e3i：常量除数为 2 的幂（2..=2^30）时的有符号向零截断位移序列。
+    /// 与 gcc -O2 / clang 同构，只用 r11(被除数)/rax(结果)/r10(bias)，均不属
+    /// RES_POOL，驻留态下不会破坏任何活跃值。`bias = n<0 ? 2^k-1 : 0`：
+    ///   Div: q = (n + bias) >> k            （算术右移 sarq）
+    ///   Mod: t = (n + bias) & (2^k-1); r = t - bias
+    /// 相比 M7-d 魔数逆元省掉 movabsq(64 位立即数) + imulq(乘法依赖链) +
+    /// 符号修正等 8~10 条指令，是 3n+1 这类「内层每轮都要 %2 / /2」负载的关键。
+    fn inst_const_div_pow2(&mut self, op: ABin, dst: VReg, a: Value, k: u32) {
+        let n = self.g3().to_string();    // r11：被除数，全程保留
+        let res = self.g1().to_string();  // rax：商 / 余数结果
+        let bias = self.g2().to_string(); // r10：符号修正 bias
+        self.lg(a, &n);
+        // bias = ((n 算术>> 63) 逻辑>> (64-k)) = n<0 ? (2^k-1) : 0
+        self.line(&format!("\tmovq {}, {}", self.r(&n), self.r(&bias)));
+        self.line(&format!("\tsarq $63, {}", self.r(&bias)));
+        self.line(&format!("\tshrq ${}, {}", 64 - k, self.r(&bias)));
+        match op {
+            ABin::Div => {
+                self.line(&format!("\tmovq {}, {}", self.r(&n), self.r(&res)));
+                self.line(&format!("\taddq {}, {}", self.r(&bias), self.r(&res)));
+                self.line(&format!("\tsarq ${}, {}", k, self.r(&res)));
+            }
+            ABin::Mod => {
+                let mask = (1i64 << k) - 1; // k<=30，是合法 imm32 正数
+                self.line(&format!("\tmovq {}, {}", self.r(&n), self.r(&res)));
+                self.line(&format!("\taddq {}, {}", self.r(&bias), self.r(&res)));
+                self.line(&format!("\tandq ${}, {}", mask, self.r(&res)));
+                self.line(&format!("\tsubq {}, {}", self.r(&bias), self.r(&res)));
+            }
+            _ => unreachable!(),
+        }
+        self.sg(dst, &res);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn inst_bin(&mut self, op: ABin, dst: VReg, a: Value, b: Value, _ty: IrType) {
+        // M7-e3i：常量除数为 2 的幂时优先走位移序列，比魔数逆元少 8~10 条
+        // 指令且无 imulq 乘法依赖链；const_div_pow2 内含逐值自校验，不通过
+        // 或非 2 的幂就继续往下走 M7-d 魔数逆元 / idivq。仅 x86-64。
+        if matches!(self.target, EmitTarget::X86_64SysV)
+            && matches!(op, ABin::Div | ABin::Mod) {
+            if let Some(k) = const_div_pow2(b) {
+                self.inst_const_div_pow2(op, dst, a, k);
+                return;
+            }
+        }
         // M7-d：常量除数的乘法逆元。idivq 是 20–90 周期的微码指令，而
         // 每个基准的收尾几乎都有 `% 1000000007`；仅 x86-64、自校验通过才启用。
         if matches!(self.target, EmitTarget::X86_64SysV)
@@ -2429,6 +2473,59 @@ fn const_div_magic(b: Value) -> Option<(i64, u32, bool, i64)> {
         }
     }
     None
+}
+
+/// M7-e3i：判定常量 b 是否为 `2^k`（`k∈[1,30]`）并逐值自校验位移序列。
+///
+/// `k<=30` 保证 Mod 序列里 `andq` 的掩码 `2^k-1` 是合法 imm32 正数、Div/Mod
+/// 的移位量 `k` 与 Bias 序列的 `64-k`（∈[34,63]）都是合法 imm8。返回 Some(k)
+/// 前用 i64 逐值模拟 `inst_const_div_pow2` 发射的 Div/Mod 结果，覆盖
+/// i64::MIN/MAX、0、±1、±2^k 边界、k·2^k±δ 临界区、2000 组伪随机大数，
+/// 商与余数都必须等于 Rust/C 的向零截断 `/`、`%`；任一点不符即返回 None，
+/// 由调用方退回 M7-d 魔数逆元 / idivq。「宁可不优化，绝不发错代码」。
+fn const_div_pow2(b: Value) -> Option<u32> {
+    let d = match b {
+        Value::Imm(Imm::I64(n)) => n,
+        Value::Imm(Imm::I32(n)) => n as i64,
+        Value::Imm(Imm::I8(n)) => n as i64,
+        Value::Imm(Imm::I1(v)) => v as i64,
+        _ => return None,
+    };
+    if d < 2 || d > (1i64 << 30) { return None; }
+    if d & (d - 1) != 0 { return None; }  // 非 2 的幂
+    let k = d.trailing_zeros();
+    // 精确模拟发射序列（wrapping 语义对应 x86 64 位寄存器行为）。
+    fn sim(n: i64, k: u32) -> (i64, i64) {
+        let bias = ((n >> 63) as u64 >> (64 - k)) as i64; // 算术>>63 得全 1/0，逻辑>>(64-k)
+        let mask = (1i64 << k) - 1;
+        let sum = n.wrapping_add(bias);
+        let q = sum >> k;                       // sarq $k
+        let r = (sum & mask).wrapping_sub(bias); // andq mask; subq bias
+        (q, r)
+    }
+    let mut pts: Vec<i64> = vec![
+        i64::MIN, i64::MIN + 1, i64::MAX, i64::MAX - 1,
+        0, 1, -1, 2, -2, 3, -3,
+        d, -d, d - 1, d + 1, -d + 1, -d - 1,
+    ];
+    let qm = i64::MAX / d;
+    for mul in [1i64, 2, 3, 7, 100, 1000, qm, qm - 1] {
+        for dl in -2i64..=2 {
+            pts.push(mul.wrapping_mul(d).wrapping_add(dl));
+            pts.push((-mul).wrapping_mul(d).wrapping_add(dl));
+        }
+    }
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    for _ in 0..2000 {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        let v = (x >> 1) as i64;
+        pts.push(v); pts.push(-v);
+    }
+    if pts.iter().all(|&n| { let (q, r) = sim(n, k); q == n / d && r == n % d }) {
+        Some(k)
+    } else {
+        None
+    }
 }
 
 fn x86_setcc(op: ACmp) -> &'static str {

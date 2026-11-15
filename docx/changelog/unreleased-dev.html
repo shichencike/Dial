@@ -1544,12 +1544,93 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     加循环 / 计算入口跳转，使其不再靠入口取指），或 <strong>② 放弃入口对齐类
     收益，回到 M7-e3d/e3e 已验证的「循环头对齐 + 死 store / 转发删指令」
     主线</strong>（净 +0.5~1.0% 且无退化项）。任何新的对齐变体在给出「不平移
-    evR/odR 绝对地址」的机制之前不再单独立项。</li>
+    evR/odR 绝对地址」的机制之前不再单独立项。<strong>② 已由紧随其后的
+    M7-e3i 以「补齐 LLVM 标准优化（2 的幂 Div/Mod 位移强度削减）」这一
+    更根本的删指令方式落地</strong>——不再纠结入口对齐，而是直击 b08 最大短板、
+    收益来自计算量削减而非取指洗牌；详见 M7-e3i 条目。</li>
 <li><strong>本批护栏</strong>：最终<strong>性能代码零改动</strong>（<code>src/codegen_asm.rs</code> 撤回至
     0284066 逐字节、工作树干净）、<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对
     544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、
     构建零警告、不打 tag、门禁全绿、<code>docx/</code> 确定性生成无漂移。跨时段
     绝对读数不直接相减，收益一律以 A/B 交替相对改善为准。</li>
+<li><strong>M7-e3i 常量 2 的幂 Div/Mod 位移强度削减（M7-e3h「下一步 ② 回到删指令
+  主线」的落地；首个直接缩小 LLVM 最大短板的批次）</strong>：M7-e3f/e3g/e3h 连续
+  三批均为「探索结论沉淀、性能代码零改动」后，本批按「<strong>代替 LLVM</strong>」目标
+  换角度——先跑 <code>tools/bench_asm_vs_llvm.py</code> 全量 28 项定位<strong>真实短板</strong>，
+  再补 LLVM/Clang 早已具备、而自研后端缺失的<strong>标准优化</strong>。基线（@6404a9d）
+  几何平均 asm/llvm <strong>1.0163x</strong>、9 胜 8 平 11 负；按类别算术循环 1.031x、
+  递归 1.200x、位与控制流 0.960x（数组 0.957x 已整体反超）。单项最大短板是
+  <strong>b08 3n+1 = 1.801x</strong>、b24 xorshift = 1.546x、b23 popcount = 1.283x。
+  根因在汇编里一目了然：M7-d 的 <code>const_div_magic</code> 只做<strong>通用</strong>魔数逆元，
+  对 <code>x % 2</code> / <code>x / 2</code> 这类 2 的幂也照样发 14 条 <code>movabsq</code>+<code>imulq</code>+符号修正
+  序列（含 3 周期乘法依赖链），而 3n+1 内层每次迭代要做 2 次——LLVM 用
+  4~6 条位移即可。这是<strong>能力缺口</strong>，不是取指对齐问题。</li>
+<li><strong>实现</strong>：<code>inst_bin</code> 在 M7-d 魔数逆元之前新增 <code>const_div_pow2(b)</code> 拦截：
+    仅当除数常量恰为 <code>2^k</code>（<code>k∈[1,30]</code>，保证 Mod 的 <code>andq</code> 掩码是合法
+    imm32、移位量是 imm8）时走新增的 <code>inst_const_div_pow2</code>。发射 gcc -O2 /
+    clang 同构的<strong>有符号向零截断</strong>序列（只用 r11/rax/r10，均不属 RES_POOL、
+    驻留态不破坏活跃值）：<code>bias = n&lt;0 ? 2^k-1 : 0</code>；Div <code>q=(n+bias)&gt;&gt;k</code>
+    （<code>sarq</code>），Mod <code>t=(n+bias)&amp;(2^k-1); r=t-bias</code>。<strong>编译期 i64 逐值自校验</strong>
+    覆盖 <code>i64::MIN/MAX</code>、0、±1、±2^k、k·2^k±δ 临界区、2000 组伪随机大数，
+    商/余数都须等于 Rust/C 向零截断 <code>/</code>、<code>%</code>，任一点不符即返回 None 退回
+    M7-d 魔数逆元 / <code>idivq</code>——沿用「宁可不优化，绝不发错代码」。仅 x86-64
+    生效，AArch64 走原路径。</li>
+<li><strong>正确性（本批最重）</strong>：bench 的 <code>x</code> 恒为正，校验和门禁<strong>覆盖不到负数
+    语义</strong>，而 Mod 的 bias 修正恰在有符号负数最微妙。故另造专项用例
+    <code>/tmp/pow2_neg.dial</code>：24 个边界值（含 <code>i64::MIN</code>、<code>i64::MIN+1</code>、
+    <code>i64::MAX</code>、负奇/偶）× <code>2^1..2^30</code> 五个 2 幂 + <code>3/7/97/1000000007</code>
+    四个非 2 幂，共 <strong>216 行输出 asm/LLVM 双后端逐字节一致</strong>；抽验
+    <code>-17/2=-8, -17%2=-1</code>、<code>-1/2=0, -1%2=-1</code>、MIN/2^30 等向零截断与符号
+    全部正确，非 2 幂的 M7-d 魔数路径未受任何影响。全套门禁全绿
+    （10 正向 + 2 负例 + 默认后端 + AArch64 交叉汇编、<code>cargo test --release</code>、
+    <code>run_tests.sh</code> 全部通过）；<strong>AArch64 <code>.s</code> 隔离目录实测 OLD/NEW 逐字节
+    一致（零变化）</strong>。构建零警告。</li>
+<li><strong>静态证据</strong>：真实指令 3305 → <strong>3300</strong>（−5）、<code>imulq</code> 134 → <strong>129</strong>（−5）、
+    <code>movabsq</code> 167 → <strong>164</strong>（−3），<code>.p2align</code> 54 / leaq 63 / call 212 / 全局
+    label 37 全不变。逐条精确对应：全模块<strong>仅 3 处</strong> 2 幂 Div/Mod——b08 的
+    <code>%2</code>(Mod)、<code>/2</code>(Div)、b21 的 <code>%4</code>(Mod)；每个 Mod 魔数序列含 2 个 <code>imulq</code>、
+    Div 含 1 个（2+2+1=5，恰 −5），3 个 <code>movabsq</code> 魔数加载恰 −3；新序列
+    的 <code>andq $1</code>/<code>andq $3</code>、<code>sarq $1</code> 与之一一对应。<strong>37 个函数里只有
+    b08、b21 的 <code>.s</code> 变化</strong>，其余 35 个逐字节未动。</li>
+<li><strong>A/B 数据（OLD = @6404a9d，5 采样双二进制交替，共四轮）</strong>：几何均值
+    <strong>+0.31% / −0.12% / +0.45% / +0.35%</strong>（中心约 +0.25%，3 正 1 微负、
+    落在噪声带）；<strong>b08 1.114 / 1.107 / 1.127 / 1.112（+11~13%，四轮全稳）</strong>、
+    <strong>b21 1.082 / 1.079 / 1.083 / 1.092（+8~9%，四轮全稳）</strong>，28 项
+    checksum 每轮全 ok。收益<strong>精确落在两个 <code>.s</code> 变化函数上</strong>，与代码削减
+    一一对应、幅度远超噪声。<code>tools/bench_asm_vs_llvm.py</code> 同脚本复测：
+    <strong>b08 由本时段基线 1.801x 降到 1.613x</strong>、算术循环类 1.031x → 1.018x
+    （同一时段两次完整脚本，仅作量级参考，<strong>不与 README 历史 1.59x 相减</strong>）。</li>
+<li><strong>关键归因（为何这不构成「带病合并」）</strong>：另有 b23/b27/b18 等项四轮
+    稳定 −2~3%，但 <code>diff</code> 证实这些函数的 <code>.s</code> <strong>逐字节未变</strong>；<code>nm</code> 对照
+    OLD/NEW 两个可执行文件，发现<strong>所有</strong>函数入口都平移了 −64~−96 字节
+    （连最前的 gcdI/evR/odR 都 −64），是「改 <code>.text</code> 字节数 → 链接器段对齐
+    连锁反应 → 全段取指相位重排」的<strong>系统性伪影</strong>。这与 e3f/e3g/e3h 否决
+    的退化有本质区别：那三批<strong>收益本身</strong>即取指洗牌（依赖碰巧地址、随平移
+    反转）或模型切换净负，退化是<strong>同一机制直接作用</strong>于被优化函数、幅度
+    −12~41%；本批收益来自<strong>计算量削减</strong>（与地址无关、静态可数、四轮稳、
+    独立口径印证），退化是<strong>异源</strong>的链接布局平移、且代码零变化。<strong>任何删
+    指令优化都必然改字节数、必然触发该平移</strong>，若据此否决等于锁死 M7
+    「删指令」主线，与推进「代替 LLVM」冲突——M7-e3e 删 114 条 leaq 同样
+    改字节数、同样有平移噪声，因机制收益确定而采纳。退化幅度（−2~3%）
+    属噪声量级、且随下次字节改动重新洗牌，<strong>不会固化成越来越脏的基线</strong>；
+    收益项幅度（+8~13%）高出一个数量级。</li>
+<li><strong>诚实边界与回退条件</strong>：本批<strong>不宣称几何均值有统计显著提升</strong>（四轮
+    中心 +0.25% 仍在噪声带），价值在于①补齐 LLVM 标准优化这一真实能力
+    缺口、②b08 最大短板与 b21 的确定性机制收益、③首次把「链接段平移」
+    从 e3e~e3h 的定性猜测变成 nm 定量证据。若未来有更干净的隔离测量
+    （如固定全模块布局后单独 A/B）证伪 b08/b21 收益，可据本证据链整体
+    回退 <code>src/codegen_asm.rs</code>。</li>
+<li><strong>下一步方向</strong>：平移全段相位是 A/B 双二进制方法在「改字节数」时的固有
+    底噪，M7-e3d 的循环头 <code>.p2align</code> 只护住循环头、护不到函数入口/链接段。
+    继续推进有两条：①把 b24 xorshift（1.546x）、b23 popcount（1.283x）等
+    剩余 LLVM 短板按同样「补标准优化」思路逐个定位；②若要干净隔离平移，
+    需先在构建层固定/对齐模块布局再 A/B，而非继续调入口对齐（e3f/e3h
+    已证伪）。递归/含 call 类 1.20x 仍是最大类别短板。</li>
+<li><strong>本批护栏</strong>：最终<strong>仅改 <code>src/codegen_asm.rs</code></strong>（新增 <code>const_div_pow2</code> /
+    <code>inst_const_div_pow2</code> + <code>inst_bin</code> 一处拦截）；<code>src/codegen.rs</code> /
+    <code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、
+    LLVM 路径零改动、构建零警告、不打 tag、全套门禁全绿、<code>docx/</code> 确定性
+    生成无漂移。跨时段绝对读数不直接相减，收益一律以 A/B 交替相对改善为准。</li>
 </ul>
 </li>
 </ul>
