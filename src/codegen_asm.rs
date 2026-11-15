@@ -157,6 +157,13 @@ struct FnEmit<'a> {
     lea_fuse: HashMap<VReg, (Value, u32, i64)>,
     /// M7-e3l：上述 Mul 指令的 dst——发射时整条跳过（结果不再有使用者）。
     skip_lea_mul: HashSet<VReg>,
+    /// M7-e3m：popcount 内层 `c += x & 1; x >>= 1` 的 8 条 IR 窗口融合。
+    /// key = (块下标, 窗口起始指令下标)，value = (c 槽 Alloca vreg, x 槽 Alloca vreg)。
+    /// 窗口是块内任意连续 8 条（不限整块，故 for 循环体含 index 递增也能命中）；
+    /// 命中处发 `sarq $1, phys(x); adcq $0, phys(c)` 并跳过窗口内 8 条 IR。
+    /// 仅 x86-64 填充。发射期还会二次确认两槽都驻留、物理寄存器不同，
+    /// 任一不满足就逐条退回原路径（见 inst_popcnt_fused）。
+    popcnt_fuse: HashMap<(usize, usize), (VReg, VReg)>,
 }
 
 impl<'a> FnEmit<'a> {
@@ -175,6 +182,7 @@ impl<'a> FnEmit<'a> {
             dead_defs: HashSet::new(), fusable: HashMap::new(),
             pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
             lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
+            popcnt_fuse: HashMap::new(),
         }
     }
 
@@ -772,6 +780,80 @@ impl<'a> FnEmit<'a> {
                 }
             }
         }
+    }
+
+    /// M7-e3m：在每个块内扫描任意「连续 8 条」窗口，识别 popcount 内层
+    /// `c = c + (x & 1); x = x >> 1` 形态，登记到 popcnt_fuse。窗口不限整块，
+    /// 故 for 循环体即便含 index 递增（块 >8 条）也能命中——与 LLVM 在循环体
+    /// 块内任意位置做 DAGCombine 的口径一致。必须在 analyze_residency 之后
+    /// 调用（要用 promotable）。命中还需：
+    ///   · c / x 两槽都是 promotable 提升槽（发射期还会再确认实际驻留）；
+    ///   · 6 个中间 vreg 全函数 use_count 恰为 1（窗口外无人读取，跳过才安全）；
+    ///   · 命中后贪心跳过整个窗口（i += 8），避免登记重叠窗口。
+    /// 仅 x86-64：AArch64 直接返回，popcnt_fuse 恒空，.s 逐字节不变。
+    fn analyze_popcnt(&mut self) {
+        if !matches!(self.target, EmitTarget::X86_64SysV) { return; }
+        // 重算全函数 use_count（含 term 的 cond / args / return），只用于校验
+        // 窗口内 6 个中间 vreg 是否「全函数仅一次使用」。Store 的 ptr 也会
+        // 计入，但 pc/px 是槽、不参与本校验，无妨。
+        let mut use_count: HashMap<VReg, usize> = HashMap::new();
+        for b in &self.f.blocks {
+            for i in &b.insts {
+                let mut u = Vec::new();
+                i.reg_uses(&mut u);
+                for v in u { *use_count.entry(v).or_insert(0) += 1; }
+            }
+            match &b.term {
+                Term::Jump { args, .. } =>
+                    for a in args { if let Value::Reg(r) = a { *use_count.entry(*r).or_insert(0) += 1; } },
+                Term::Branch { cond, then_args, else_args, .. } => {
+                    *use_count.entry(*cond).or_insert(0) += 1;
+                    for a in then_args.iter().chain(else_args.iter()) {
+                        if let Value::Reg(r) = a { *use_count.entry(*r).or_insert(0) += 1; }
+                    }
+                }
+                Term::Return { val } =>
+                    if let Some(Value::Reg(r)) = val { *use_count.entry(*r).or_insert(0) += 1; },
+                Term::Unreachable => {}
+            }
+        }
+        for (bi, b) in self.f.blocks.iter().enumerate() {
+            let n = b.insts.len();
+            if n < 8 { continue; }
+            let mut i = 0;
+            while i + 8 <= n {
+                if let Some((pc, px, mids)) = match_popcnt_window(&b.insts[i..i + 8]) {
+                    let ok = self.promotable.contains(&pc) && self.promotable.contains(&px)
+                        && mids.iter().all(|v| use_count.get(v) == Some(&1));
+                    if ok {
+                        self.popcnt_fuse.insert((bi, i), (pc, px));
+                        i += 8; // 贪心跳过整个窗口，避免登记重叠窗口
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+
+    /// M7-e3m：发射 popcount 融合指令。发射期二次确认——只有 x86-64、驻留态
+    /// 开启、c / x 两槽都实际驻留且物理寄存器不同，才发 `sarq $1, x;
+    /// adcq $0, c` 并返回 true（调用方跳过整块 8 条 IR）。任一不满足返回
+    /// false、且不发射任何指令，由调用方逐条走原路径，行为完全不变。
+    /// 两条紧邻：sarq 移出的 bit0（== x & 1，对负数 / i64::MIN 同样成立）
+    /// 进 CF，adcq 立即把 CF 加进 c；sarq 同时完成 x >>= 1（算术右移）。
+    fn inst_popcnt_fused(&mut self, pc: VReg, px: VReg) -> bool {
+        if !matches!(self.target, EmitTarget::X86_64SysV) || !self.residency_on { return false; }
+        let (rc, rx) = match (self.phys(pc), self.phys(px)) {
+            (Some(a), Some(b)) if a != b => (a, b),
+            _ => return false,
+        };
+        self.line(&format!("\tsarq $1, {}", self.r(rx)));
+        self.line(&format!("\tadcq $0, {}", self.r(rc)));
+        // 融合直接改了驻留物理寄存器，标记脏以便块尾 flush 正确回写。
+        self.dirty.insert(pc);
+        self.dirty.insert(px);
+        true
     }
 
     fn analyze_residency(&mut self) {
@@ -2724,6 +2806,98 @@ fn imm_is_zero(v: Value) -> bool {
         | Value::Imm(Imm::I8(0)) | Value::Imm(Imm::I1(false)))
 }
 
+/// M7-e3m：判定 Value 是否为整数立即数 1（用于 `x & 1` / `x >> 1` 识别）。
+/// 与 imm_is_zero 同口径：只认整数 Imm 变体，浮点位模式显式排除。
+fn imm_is_one(v: Value) -> bool {
+    matches!(v, Value::Imm(Imm::I64(1)) | Value::Imm(Imm::I32(1))
+        | Value::Imm(Imm::I8(1)) | Value::Imm(Imm::I1(true)))
+}
+
+/// M7-e3m：识别 popcount 内层 `c = c + (x & 1); x = x >> 1` 的 8 条连续
+/// IR 形态，返回 (c 槽 Alloca vreg, x 槽 Alloca vreg, 6 个中间 vreg)。
+/// 这是 GCC/LLVM 对 `while(x){ c+=x&1; x>>=1 }` 的标准变换：
+///   `sarq $1, x` 把旧 x 的 bit0 移入 CF（补码最低位即 `x & 1`，对负数 /
+///   i64::MIN 同样成立），`adcq $0, c` 用 CF 完成 `c += x & 1`；两条还同时
+///   完成 `x >>= 1`（算术右移，与通用 Shr 的 sarq 一致），故 8 条 IR 可压成
+///   2 条机器指令。命中条件极严（任一不符返回 None）：
+///     ① 恰 8 条、全部 I64；Add 恒为第 4 条、后 4 条次序固定；
+///     ② c 槽与 x 槽是两个不同的 Alloca vreg（pc != px）；
+///     ③ BitAnd 掩码是立即数 1、源是第一次 Load x 的结果（`x&1` / `1&x`）；
+///     ④ Add 两侧恰是「Load c 结果」与「BitAnd 结果」（加法可交换）；
+///     ⑤ Shr 源是第二次 Load x 的结果、移位量是立即数 1（不可交换）；
+///     ⑥ 两个 Store 分别写回 pc / px 槽，值恰是 Add / Shr 的结果。
+/// 前 4 条前缀支持两种等价排列（Dial 按「先左后右」内联求值二元运算）：
+///   A `c + (x&1)`  → Load c(0); Load x(1); BitAnd(2); Add(3)
+///   B `(x&1) + c`  → Load x(0); BitAnd(1); Load c(2); Add(3)
+/// 前 3 条都在任何 Store 之前，读到的都是循环开始时的旧值，故两种排列
+/// 语义完全等价；逐一尝试 (Load c 索引, Load x 索引, BitAnd 索引) 映射。
+/// 仅 x86-64 使用；AArch64 从不调用本函数。
+fn match_popcnt_window(w: &[IrInst]) -> Option<(VReg, VReg, [VReg; 6])> {
+    if w.len() != 8 { return None; }
+    let is_i64 = |t: &IrType| *t == IrType::I64;
+    for (ic, ix, ib) in [(0usize, 1usize, 2usize), (2, 0, 1)] {
+        // [ic] c = *pc
+        let (pc, lc) = match &w[ic] {
+            IrInst::Load { dst, ptr, ty } if is_i64(ty) => (*ptr, *dst),
+            _ => continue,
+        };
+        // [ix] x = *px
+        let (px, lx) = match &w[ix] {
+            IrInst::Load { dst, ptr, ty } if is_i64(ty) => (*ptr, *dst),
+            _ => continue,
+        };
+        if pc == px { continue; }
+        // [ib] t = x & 1（或 1 & x）
+        let t = match &w[ib] {
+            IrInst::Bin { op: ABin::BitAnd, dst, a, b, ty } if is_i64(ty) => {
+                let (aa, bb) = (*a, *b);
+                let (rx, ok) = match (aa, bb) {
+                    (Value::Reg(r), x) => (r, imm_is_one(x)),
+                    (x, Value::Reg(r)) => (r, imm_is_one(x)),
+                    _ => continue,
+                };
+                if rx != lx || !ok { continue; }
+                *dst
+            }
+            _ => continue,
+        };
+        // [3] c2 = lc + t（或 t + lc）
+        let c2 = match &w[3] {
+            IrInst::Bin { op: ABin::Add, dst, a, b, ty } if is_i64(ty) => {
+                let (aa, bb) = (*a, *b);
+                let ok = matches!((aa, bb),
+                    (Value::Reg(x), Value::Reg(y)) if (x == lc && y == t) || (x == t && y == lc));
+                if !ok { continue; }
+                *dst
+            }
+            _ => continue,
+        };
+        // [4] *pc = c2
+        match &w[4] {
+            IrInst::Store { ptr, val, ty } if is_i64(ty) && *ptr == pc && *val == Value::Reg(c2) => {}
+            _ => continue,
+        }
+        // [5] x = *px（第二次）
+        let lx2 = match &w[5] {
+            IrInst::Load { dst, ptr, ty } if is_i64(ty) && *ptr == px => *dst,
+            _ => continue,
+        };
+        // [6] x2 = lx2 >> 1
+        let x2 = match &w[6] {
+            IrInst::Bin { op: ABin::Shr, dst, a, b, ty }
+                if is_i64(ty) && *a == Value::Reg(lx2) && imm_is_one(*b) => *dst,
+            _ => continue,
+        };
+        // [7] *px = x2
+        match &w[7] {
+            IrInst::Store { ptr, val, ty } if is_i64(ty) && *ptr == px && *val == Value::Reg(x2) => {}
+            _ => continue,
+        }
+        return Some((pc, px, [lc, lx, t, c2, lx2, x2]));
+    }
+    None
+}
+
 /// M7-e3i：判定常量 b 是否为 `2^k`（`k∈[1,30]`）并逐值自校验位移序列。
 ///
 /// `k<=30` 保证 Mod 序列里 `andq` 的掩码 `2^k-1` 是合法 imm32 正数、Div/Mod
@@ -2889,12 +3063,24 @@ fn emit_function(
     e.analyze_dead_defs();
     e.analyze_fusable();
     e.analyze_residency();
+    e.analyze_popcnt(); // M7-e3m：依赖 promotable，须在 analyze_residency 之后
     e.prologue();
     for (idx, b) in f.blocks.iter().enumerate() {
         let lbl = format!(".{}_b{}:", e.prefix, b.id);
         e.line(&lbl);
         e.begin_block(idx);
-        for inst in &b.insts { e.inst(inst); }
+        // M7-e3m：窗口可在块内任意起点。命中处由 inst_popcnt_fused 的两条
+        // 指令取代整段 8 条 IR，skip 计数跳过窗口余下 7 条；发射期二次确认
+        // 失败则 skip 保持 0，逐条走原路径，行为完全不变。
+        let mut skip = 0usize;
+        for (ii, inst) in b.insts.iter().enumerate() {
+            if skip > 0 { skip -= 1; continue; }
+            let hit = e.popcnt_fuse.get(&(idx, ii)).copied();
+            if let Some((pc, px)) = hit {
+                if e.inst_popcnt_fused(pc, px) { skip = 7; continue; }
+            }
+            e.inst(inst);
+        }
         // 只回写必须跨块保留的值；term 仍在驻留态发射，phi 实参 / 返回值
         // 直接从物理寄存器读，随后才关闭驻留。
         e.flush_residency();

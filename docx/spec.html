@@ -990,14 +990,29 @@ b04 的 <code>s*3+7</code> 原发 5 条，本批在「Mul 与 Add/Sub 同块严�
 同脚本连续两次 asm/llvm b04 1.0344x → <strong>0.8968x</strong>、b08 1.2915x →
 <strong>0.9920x（追平 LLVM）</strong>、几何平均 1.0029x → <strong>0.9917x</strong>、算术循环类
 0.9918x → 0.9424x；276 行双后端逐字节一致、13 处融合 / 13 个对照全 0、
-AArch64 零变化），
-静态指令累计 <strong>5594 → 3282（−41%）</strong>。当前完整模式（5 采样）
+AArch64 零变化）、
+<strong>M7-e3m popcount 内层 <code>sarq + adcq</code> 融合</strong>（补齐 GCC / LLVM 对
+<code>while(x){ c += x &amp; 1; x &gt;&gt;= 1 }</code> 发 <code>sarq $1, x; adcq $0, c</code> 的标准变换：
+b23 内层原发 8 条 IR / 11 条机器指令，本批在「严格 8 条连续 I64 窗口、
+c / x 两槽均 promotable、6 个中间 vreg 全函数 use_count==1」时整段跳过、
+发 2 条；前缀支持 <code>c+(x&amp;1)</code> 与 <code>(x&amp;1)+c</code> 两种排列、BitAnd <code>1&amp;x</code> 交换；
+<code>sarq</code> 移出的 CF 即 bit0（负数 / <code>i64::MIN</code> 同样成立），<code>adcq</code> 用 CF 完成
+累加并同时完成算术右移，仅 x86-64。静态指令 −9、<code>andq $1</code> −1 /
+<code>adcq</code> +1，仅 b23 一处 <code>.s</code> 变化；A/B 两轮 b23 +27.8/+30.1%，单点布局
+补偿（b24 前补 27B NOP 使入口与运行时 <code>dial_*</code> 地址全回 OLD）后 b23
++27.9/+29.0% 收益保留、b21/b18/b27 收敛到 ±1% 噪声带、几何平均
++0.98/+0.85%；同脚本 asm/llvm b23 1.300x → <strong>1.018x（基本追平 LLVM）</strong>、
+位与控制流类 0.9305x → 0.8928x、几何平均 0.9859x → 0.9792x；103 行双
+后端逐字节一致、6 处融合 / 7 个对照全 0、AArch64 零变化），
+静态指令累计 <strong>5594 → 3273（−41.5%）</strong>。当前完整模式（5 采样）
 几何平均 <strong>约 1.0x、在 1.0 附近波动</strong>（多次时段读数 0.996~1.017x，asm 与 LLVM
 持平 / 多次反超，&lt;1 即 asm 更快；M7-e3l 本时段同脚本连续两次对照
-1.0029x → <strong>0.9917x</strong> 首次落到 1.0 以下，但<strong>单时段读数不宣称长期格局逆转</strong>；
+1.0029x → <strong>0.9917x</strong> 首次落到 1.0 以下；M7-e3m 本时段同脚本连续两次
+0.9859x → <strong>0.9792x</strong> 继续走低，但<strong>单时段读数不宣称长期格局逆转</strong>；
 随整机负载时段波动，<strong>跨批次绝对读数不可直接相减</strong>、性能结论一律以 A/B
 交替相对改善为准；M6 基线 1.3575x 起累计下降并跨过 1.0 持平线）、
-<strong>数组内存类约 0.85x 已整体反超 LLVM</strong>、位与控制流类约 0.94x 已反超、
+<strong>数组内存类约 0.85x 已整体反超 LLVM</strong>、位与控制流类约 0.94x 已反超
+（M7-e3m 本时段再到 0.8928x）、
 算术循环类经 M7-e3k 降到约 0.99x、M7-e3l 本时段再到 0.9424x；递归 /
 含 call 类约 1.21x 仍是最大类别短板、字符串类约 1.02x 仍略落后
 （类别读数为长期格局，单时段波动更大）；b03 除法混合 1.84x → 1.005x（持平）、
@@ -1010,7 +1025,8 @@ b08 3n+1 2.9x → 1.59x（M7-e3i 后本时段同脚本复测 1.801x → 1.613x�
 b04 FMA 乘加链本时段同脚本 1.0344x → 0.8968x（M7-e3l 反超 LLVM 约 10%）、
 b24 xorshift 本时段 1.550x → 1.355x
 （M7-e3j 补 32 位掩码强度削减，每轮迭代省 3 次 64 位立即数加载）、
-b23 popcount 约 1.29x，b05 / b14–b18 / b21 / b25 / b26 / b27 等单项反超。
+b23 popcount 经 M7-e3m 由 1.300x 缩到 1.018x（基本追平 LLVM），
+b05 / b14–b18 / b21 / b25 / b26 / b27 等单项反超。
 性能结论一律采用 <strong>A/B 双二进制交替对跑</strong>（同一时段交替测两个逻辑单元）以
 抵消整机负载漂移：M7-e1 净 −9.6%、M7-e2 净 −3.1%（递归类 −12.9%）、M7-e3a
 净 −1.7%、<strong>M7-e3b 净 +1.9%</strong>（asm 对已落后基线再快 1.9%，推动 asm/llvm
@@ -1038,10 +1054,19 @@ b08 +31.4/+30.8% 两轮全稳、几何均值 +1.81/+2.16%，仅 b04 / b08 两处
 19B、b09 前补 26B NOP 使全模块入口回到 OLD 地址——证实同为链接段平移
 伪影：补偿后三项全部收敛到 ±1% 噪声带、b04/b08 收益完全保留（b08 甚至
 升到 +36.7/+37.6%）；NOP padding 绝不进产品代码，详见 CHANGELOG M7-e3l
-条目）。
-剩余主要差距在递归 / 含 call 负载（约 1.21x，b10 浅递归 1.429x 最重）、
-xorshift（b24，1.345x）、popcount（b23，1.321x）、二叉递归树（b11，1.265x），
-是后续优化主战场；b08 3n+1 已由 M7-e3k / M7-e3l 从 1.6247x 缩到
+条目）、
+<strong>M7-e3m 补齐 GCC / LLVM 标准 popcount <code>sarq+adcq</code> 融合</strong>（b23
++27.8/+30.1% 两轮全稳、几何均值 +0.64/+0.53%，仅 b23 一处 <code>.s</code> 变化、
+asm↔LLVM 同脚本 b23 1.300x → 1.018x；b21/b18/b27 的稳定退化经<strong>单点
+布局补偿实验</strong>——b24 前补 27B NOP 使全模块入口与运行时 <code>dial_*</code> 函数
+地址全部回到 OLD——证实同为链接段平移伪影：补偿后 b23 +27.9/+29.0%
+收益完全保留、三项全部收敛到 ±1% 噪声带、几何平均升到 +0.98/+0.85%；
+本批首次把归因推进到「运行时库函数地址平移」；NOP padding 绝不进产品
+代码，详见 CHANGELOG M7-e3m 条目）。
+剩余主要差距在递归 / 含 call 负载（约 1.21x，b10 浅递归 1.431x 最重）、
+xorshift（b24，1.349x）、二叉递归树（b11，1.264x），
+是后续优化主战场；b23 popcount 已由 M7-e3m 从 1.300x 缩到 1.018x
+（基本追平 LLVM）、b08 3n+1 已由 M7-e3k / M7-e3l 从 1.6247x 缩到
 0.9920x（追平 LLVM）、b04 已反超；详见
 <a href="changelog.html">CHANGELOG 未发布节</a> 的 M6 / M7 批次记录。</p>
 <p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式

@@ -1923,14 +1923,129 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     补偿能完全消除伪影，但 NOP padding 绝不进产品；③ 补齐前端常量折叠，
     让负整数字面量 / 括号常量直接成为 <code>Value::Imm</code>，使 <code>-2147483648</code>
     这类 disp 也能命中 LEA（本批已用 Sub 形态覆盖负 disp）。</li>
-<li><strong>本批护栏</strong>：最终<strong>仅改 <code>src/codegen_asm.rs</code></strong>（<code>FnEmit</code> 两集合 +
+<li>
+<p><strong>本批护栏</strong>：最终<strong>仅改 <code>src/codegen_asm.rs</code></strong>（<code>FnEmit</code> 两集合 +
     三个模块级 helper + <code>analyze_fusable</code> 相邻窗口 + <code>inst_lea_fused</code> +
     <code>inst()</code> 的 <code>Bin</code> 分支）；<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a
     零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建
     零警告、不打 tag、全套门禁全绿、<code>docx/</code> 确定性生成无漂移；本地静态
     基线 <code>bench/bench.s</code> 同步为 M7-e3l 版（该文件被 <code>.gitignore</code> 的
     <code>*.s</code> 忽略、不进版本库，仅作检视用）。跨时段绝对读数不直接相减，
-    收益一律以 A/B 交替相对改善为准。</li>
+    收益一律以 A/B 交替相对改善为准。</p>
+</li>
+<li>
+<p><strong>M7-e3m popcount 内层 <code>sarq + adcq</code> 融合（<code>c += x &amp; 1; x &gt;&gt;= 1</code>
+  → <code>sarq $1, x; adcq $0, c</code>）</strong>
+  （e3l「下一步 ① 补标准优化」的第五个落地；<strong>把 b23 popcount 从
+  1.300x 打到 1.018x、基本追平 LLVM</strong>，并第三次用布局补偿实验坐实
+  链接段平移伪影，且首次把归因推进到「运行时库函数地址平移」）：
+  延续 e3i / e3j / e3k / e3l 已验证可采纳的「补齐 LLVM 标准优化」主线。
+  e3l 之后 b23 仍是位与控制流类最大短板（1.321x），其内层
+  <code>c = c + (x &amp; 1); x = x &gt;&gt; 1</code> 在 asm 里发 8 条 IR → 11 条机器指令
+  （两次 Load、BitAnd、Add、Store、Load、Shr、Store 加寄存器搬运），
+  而 GCC / LLVM 对 <code>while(x){ c += x &amp; 1; x &gt;&gt;= 1 }</code> 的标准变换只有两条：
+  <code>sarq $1, x</code> 把旧 x 的 bit0 送入 CF、<code>adcq $0, c</code> 用 CF 完成累加，
+  <code>sarq</code> 同时完成算术右移。这是<strong>能力缺口</strong>，不是对齐或栈槽问题。</p>
+</li>
+<li><strong>实现</strong>：<code>FnEmit</code> 新增 <code>popcnt_fuse: HashMap&lt;(块下标, 窗口起始下标),
+    (c 槽, x 槽)&gt;</code>；模块级新增 <code>imm_is_one</code>（只认整数立即数 1，排除
+    F64 / F32 位模式）与 <code>match_popcnt_window</code>（严格 8 条 IR 窗口匹配）；
+    <code>analyze_popcnt()</code> 在 <code>analyze_residency()</code> 之后运行，重算全函数
+    <code>use_count</code>，对块内<strong>任意连续 8 条</strong>窗口（不限整块，故 for 循环体
+    含 index 递增也能命中）贪心扫描；发射新增 <code>inst_popcnt_fused()</code>，
+    在发射期<strong>二次确认</strong>两槽都实际驻留、物理寄存器不同，
+    <code>emit_function()</code> 命中处跳过窗口余下 7 条 IR（<code>skip = 7</code>）。</li>
+<li><strong>命中条件极严</strong>（任一不满足逐条退回原路径）：① 恰 8 条连续 I64 IR，
+    后 4 条次序固定为 <code>Store c; Load x; Shr x&gt;&gt;1; Store x</code>；② c / x 是
+    两个不同的 Alloca 槽且都是 <code>promotable</code>；③ BitAnd 掩码是立即数 1、
+    源是第一次 Load x 的结果（<code>x&amp;1</code> / <code>1&amp;x</code>）；④ Add 两侧恰是「Load c
+    结果」与「BitAnd 结果」（加法可交换）；⑤ Shr 源是第二次 Load x 结果、
+    移位量是立即数 1（不可交换）；⑥ 6 个中间 vreg 全函数
+    <code>use_count == 1</code>（窗口外无人读取，跳过才安全）。前 4 条前缀支持
+    两种等价排列（Dial 按「先左后右」内联求值二元运算）：
+    <code>Load c; Load x; BitAnd; Add</code> 与 <code>Load x; BitAnd; Load c; Add</code>；
+    前 3 条都在任何 Store 之前读旧值，故语义完全等价。仅 x86-64，
+    AArch64 的分析与发射都不参与、<code>.s</code> 逐字节不变。</li>
+<li><strong>等价性</strong>：x86-64 <code>sarq $1</code> 移出的 CF 就是补码最低位，对负数与
+    <code>i64::MIN</code> 与 <code>x &amp; 1</code> 完全一致（符号位扩展不改变 bit0）；<code>adcq $0</code>
+    只加 CF，<code>addq</code> 与 <code>adcq</code> 同样模 2^64 回绕；通用 <code>Shr</code> 本就发
+    <code>sarq</code>，故 <code>x &gt;&gt;= 1</code> 的算术右移语义一致。两条指令紧邻、中间无写
+    CF 的指令，融合直接改驻留物理寄存器并标记 <code>dirty</code> 供块尾回写。</li>
+<li><strong>正确性专项</strong>：103 行输出 asm / LLVM <strong>逐字节一致</strong>，覆盖 0 / ±1 /
+    ±2 / ±3 / <code>i64::MIN</code>·<code>MAX</code> / 大数 / 累加器接近溢出回绕 / while 与
+    for 固定 64 次（让负 x 真正进入）/ 加法交换 / BitAnd 交换 / 深层
+    循环命中；按函数段核对：<strong>6 个应融合函数 <code>adcq=1</code>，7 个「必须不
+    融合」对照全部 <code>adcq=0</code></strong>（掩码 &amp;3、移位 &gt;&gt;2、左移 &lt;&lt;1、Sub、
+    c 与 x 同槽、位与结果多使用者、窗口被插入语句打断）。抽验
+    <code>F -1 64 64 64</code> 与 <code>F i64::MIN 1 1 1</code> 与 LLVM 一致。</li>
+<li><strong>门禁</strong>：<code>run_asm_golden.sh</code>（10 正向 + 2 负例 + 默认后端 +
+    AArch64 交叉汇编）、<code>cargo test --release</code>、<code>tests/run_tests.sh</code>
+    （AA~AF 组）全绿；Rust 构建零警告；AArch64 OLD/NEW <code>.s</code> 逐字节一致。</li>
+<li><strong>静态证据</strong>：指令 <strong>3282 → 3273（−9）</strong>，<code>andq $1</code> 2 → 1、
+    <code>adcq</code> 0 → 1；<code>sarq</code> 109、<code>movabsq</code> 159、<code>imulq</code> 127、<code>leaq</code> 65、
+    <code>p2align</code> 54、<code>testq</code> 3 全不变。全模块 diff 仅一个 hunk
+    （<code>@@ -2460,17 +2460,8 @@</code>）、<strong>仅 b23 一个函数 <code>.s</code> 变化</strong>：内层
+    11 条压成 <code>sarq $1, %rbx</code> + <code>adcq $0, %r12</code>。</li>
+<li><strong>A/B 原始两轮（OLD=@09c58c1，NEW=本批）</strong>：
+    <code>tools/ab_asm_m7e3b.py</code> 两轮 <strong>b23 1.2778 / 1.3006（+27.8/+30.1%）</strong>、
+    几何均值 1.0064 / 1.0053、28 项 checksum 全 ok；但 b21 稳定
+    0.9266 / 0.9256（−7.4%）、b18 / b27 等也负向，<code>.s</code> 逐字节未变，
+    必须归因。</li>
+<li><strong><code>nm</code> / <code>objdump</code> 定量归因（本批新发现）</strong>：<code>b01</code> 到 <code>b23</code> 入口
+    delta <strong>全部为 0</strong>（<strong>b23 自身入口未平移 → 干净排除 b23 的对齐
+    混淆</strong>），<code>b24</code> −27 B、<code>b25</code> / <code>b27</code> / <code>b28</code> / <code>main</code> −32 B，
+    <code>.text</code> 38348 → 38316。b21 函数体文本 / 入口逐字节相同，但所有
+    <code>call dial_*</code> 目标地址整体 −32 B（如 <code>dial_string_new</code>
+    <code>100a030 → 100a010</code>）——根因是 b23 净删 9 条指令（27 B）使 b24
+    入口前移，b24 内 <code>.p2align</code> 因入口变化又多补 5 B，累计 32 B，
+    令<strong>运行时库函数地址整体平移</strong>，影响调用密集型 b21 / b18 / b27。
+    这是 e3k / e3l 只见过「函数入口平移」之后，首次定位到「运行时
+    函数地址平移」这一层。</li>
+<li><strong>单点布局补偿实验（第三次正面坐实伪影）</strong>：构造第三个二进制
+    <strong>PAD = NEW 计算量 + OLD 布局</strong>——在 <code>b24:</code> 标签前（b23 尾部
+    <code>jmp</code> 之后的死区）插入 <code>.space 27, 0x90</code> 不执行 NOP，把删掉的
+    27 B 补回来；b24 入口回到 OLD 后其 <code>.p2align</code> 填充自动少 5 B，
+    于是后续全部归零。<code>nm</code> 确认 <strong>b01 / b18 / b21 / b22 / b23 / b24 /
+    b25 / b27 / b28 / main 与 <code>dial_string_new</code> / <code>dial_array_new</code> /
+    <code>dial_array_push</code> / <code>dial_string_release</code> / <code>dial_string_index_of</code>
+    全部 delta = 0</strong>，<code>.text</code> 回到 38348。OLD vs PAD 两轮：
+    <strong>b23 1.2785 / 1.2898（收益完全保留）</strong>，而 b21 从 −7.4% 收敛到
+    <strong>1.0002 / 0.9988</strong>、b18 <strong>0.9998 / 0.9988</strong>、b27 <strong>0.9948 /
+    1.0093</strong>，全部落回噪声带；几何均值反而升到 <strong>1.0098 / 1.0085</strong>；
+    28 项 checksum 全 ok（证明 NOP 不进执行路径）。这第三次以<strong>正面
+    实验</strong>坐实：收益与绝对地址无关、是纯计算量削减；负向项全部是
+    链接段平移伪影。</li>
+<li><strong>asm↔LLVM 独立口径</strong>：<code>tools/bench_asm_vs_llvm.py</code> 同脚本连续
+    两次（OLD、NEW）：OLD b23 <code>asm 1.327 / llvm 1.021 = 1.300x</code> →
+    NEW <code>asm 1.021 / llvm 1.003 = 1.018x</code>（<strong>基本追平 LLVM</strong>）；
+    位与控制流类 0.9305x → <strong>0.8928x</strong>，几何平均 0.9859x →
+    <strong>0.9792x</strong>（总净耗时 0.9772x → 0.9774x），逐项胜/平/负
+    11/7/10 → 11/8/9。两次 LLVM 读数稳定（b04 3.961 → 3.958、
+    b10 4.884 → 4.843、b24 4.915 → 4.917，仅 0.0~0.8% 波动），
+    证明 LLVM 路径零改动。NEW 的 b21 <code>1.070x</code> 是未做布局补偿的
+    同一伪影，PAD 实验已证其收敛到 1.0 附近，不作为真实退化。</li>
+<li><strong>诚实边界</strong>：几何平均 0.9792x 是<strong>单时段同脚本对照读数</strong>，
+    不宣称统计意义或长期格局逆转（e3k 已记录多次时段读数
+    0.996~1.017x 的波动）；价值在 b23 这一确定性机制收益，与四轮
+    A/B + 单点布局补偿构成的可复现证据链。若未来有更干净的隔离
+    测验证伪收益，可据本证据链整体回退 <code>src/codegen_asm.rs</code>。</li>
+<li><strong>下一步方向</strong>：剩余 LLVM 短板按量级为 <strong>b10 浅递归 1.431x</strong>、
+    b24 xorshift 1.349x、b11 二叉递归树 1.264x、递归 / 含 call 类
+    <strong>1.2071x</strong> 仍是最大类别短板（e3g 已证伪全函数驻留、e3f / e3h
+    已证伪入口对齐）。① 继续按「补标准优化」逐个定位：b24 的
+    xorshift 移位链、b10 / b11 的调用序列；② 把「固定模块布局」做成
+    真正的构建层基建（函数级 section + 链接脚本 / 显式相位），本批
+    PAD 第三次证明布局补偿能完全消除伪影，但 NOP padding 绝不进
+    产品；③ 补齐前端常量折叠，让负整数字面量 / 括号常量直接成为
+    <code>Value::Imm</code>。</li>
+<li><strong>本批护栏</strong>：最终<strong>仅改 <code>src/codegen_asm.rs</code></strong>（<code>FnEmit</code> 一集合 +
+    两个模块级 helper + <code>analyze_popcnt</code> + <code>inst_popcnt_fused</code> +
+    <code>emit_function</code> 的窗口跳过）；<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对
+    544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径
+    零改动、构建零警告、不打 tag、全套门禁全绿、<code>docx/</code> 确定性
+    生成无漂移；本地静态基线 <code>bench/bench.s</code> 同步为 M7-e3m 版
+    （该文件被 <code>.gitignore</code> 的 <code>*.s</code> 忽略、不进版本库，仅作检视用）。
+    跨时段绝对读数不直接相减，收益一律以 A/B 交替相对改善为准。</li>
 </ul>
 </li>
 </ul>
