@@ -56,6 +56,10 @@ pub fn compile_asm(
     if matches!(target, EmitTarget::X86_64SysV) {
         pass::fold_pure_calls(&mut ip);
     }
+    // M7-e3t：归纳变量强度削减（base*C+iv → 累加器）。仅 x86-64；AArch64 零变化。
+    if matches!(target, EmitTarget::X86_64SysV) {
+        pass::ivr_strength_reduce(&mut ip);
+    }
     let asm_text = codegen_asm::emit(&ip, target)?;
 
     let s_path = obj_path.with_extension("s");

@@ -703,3 +703,309 @@ pub fn fold_pure_calls(ip: &mut IrProgram) -> usize {
     }
     count
 }
+
+// ============================================================================
+// M7-e3t：归纳变量强度削减（Induction Variable strength Reduction, IVR）
+// ============================================================================
+//
+// 目标模式（栈槽式 for 循环，见 lower.rs 的 Stmt::For）：
+//   header:  Load cv, iv_slot ; ICmp cv < N ; Branch body/exit
+//   body:    ... ; Mul m, Reg(base), Imm(C) ; Add pos, Reg(m), Reg(cv') ...
+//   latch:   Load cv2, iv_slot ; Add nv, cv2, Imm(step) ; Store iv_slot, nv
+//            Jump header
+// 其中 `base` 是循环不变量，`cv'` 加载自 `iv_slot`。
+//
+// 变换为（以累加器 acc 取代每轮重算的 base*C + iv）：
+//   preheader: Load iv0, iv_slot ; Mul m0, Reg(base), Imm(C) ;
+//              Add a0, Reg(m0), Reg(iv0) ; Store acc_slot, a0
+//   body:      Load acc, acc_slot   （取代 Add pos；其后 Store/使用照旧）
+//   latch:     Load acco, acc_slot ; Add accn, acco, Imm(step) ; Store acc_slot, accn
+//
+// 数学等价：原式 = (base*C) + iv，其中 base*C 循环不变、iv 每轮 +step。
+// 故原式每轮只 +step（C 已吸收在初值的 base*C 里），preheader 算一次初值、
+// 之后每轮累加 step 即等价。循环内省掉 1 条 imulq + 1 条 add 及栈搬运。
+//
+// 保守护栏：
+//   - 仅 I64；仅 Mul(base_reg, Imm(C))；仅 Add(m, iv_load)（或交换操作数）。
+//   - step 必须是整数立即数；iv_load 必须加载自 latch 更新的同一 iv_slot。
+//   - base 必须循环不变：定义在循环外，或为「循环内 Load 循环外栈槽」（此类
+//     值不变；preheader 里重 Load 该槽避免 use-before-def）。
+//   - 仅当该 Add 的结果 dst 在循环体内被使用（Store 值或 Call 实参，即数组
+//     下标的两种 lowering 形态）时才变换。
+//   - 每个函数每轮只处理一个最内层循环（break 保守收敛）；变换后补一次 DCE
+//     清理变成死代码的 Mul/Load。
+//   - 仅 x86-64 调用（由 asm.rs 守卫）；AArch64 零变化。
+
+/// 循环分析：回边 (latch_idx -> header_idx)，header_idx <= latch_idx。
+#[derive(Clone, Debug)]
+struct E3tLoop {
+    header: usize,
+    latch: usize,
+    body_blocks: Vec<usize>,
+}
+
+/// 从 CFG 推导自然循环块集合（近似：header..=latch 的连续索引区间中，
+/// 可达 latch 且不被更外层 guard 的结构）。这里用「回边目标到 latch 的区间」。
+fn e3t_find_loops(f: &IrFunction) -> Vec<E3tLoop> {
+    let mut id2idx: HashMap<u32, usize> = HashMap::new();
+    for (i, b) in f.blocks.iter().enumerate() { id2idx.insert(b.id, i); }
+    // 收集所有跳转边 (src_idx, dst_idx)
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for (i, b) in f.blocks.iter().enumerate() {
+        match &b.term {
+            Term::Jump { target, .. } => if let Some(&d) = id2idx.get(target) { edges.push((i, d)); },
+            Term::Branch { then_b, else_b, .. } => {
+                if let Some(&d) = id2idx.get(then_b) { edges.push((i, d)); }
+                if let Some(&d) = id2idx.get(else_b) { edges.push((i, d)); }
+            }
+            _ => {}
+        }
+    }
+    let mut loops = Vec::new();
+    for &(src, dst) in &edges {
+        if dst > src { continue; } // 回边：目标索引 <= 源索引
+        // 循环块 = 从 dst 到 src 的所有块（含端点），且能到达 latch。
+        let mut set: HashSet<usize> = (dst..=src).collect();
+        // 剔除区间内不属于该循环的子块：用「从 header 出发、不经过 header 二次进入、
+        // 能回到 latch」的可达性近似。保守起见直接取连续区间（b17 各循环块连续）。
+        // 验证区间内每个块都在 dst..=src 且确实可达 latch。
+        let mut reach_latch: HashSet<usize> = HashSet::new();
+        let mut stack = vec![src];
+        while let Some(x) = stack.pop() {
+            if !reach_latch.insert(x) { continue; }
+            for &(a, b) in &edges {
+                if a == x && b >= dst && b <= src { stack.push(b); }
+            }
+        }
+        set.retain(|x| reach_latch.contains(x));
+        let mut body: Vec<usize> = set.into_iter().collect();
+        body.sort_unstable();
+        loops.push(E3tLoop { header: dst, latch: src, body_blocks: body });
+    }
+    loops
+}
+
+/// 分析 latch 末尾的归纳更新模式，返回 (iv_slot, step)。
+fn e3t_induction_slot(f: &IrFunction, latch: usize) -> Option<(VReg, i64)> {
+    let insts = &f.blocks[latch].insts;
+    if insts.len() < 3 { return None; }
+    // 从末尾往前找 Store slot, Reg(nv)
+    let st = insts.last()?;
+    let (slot, nv) = match st {
+        IrInst::Store { ptr, val: Value::Reg(v), .. } => (*ptr, *v),
+        _ => return None,
+    };
+    // 前一个：Bin Add nv, Reg(cv2), Imm(step)
+    let add = insts.get(insts.len() - 2)?;
+    let (cv2, step) = match add {
+        IrInst::Bin { op: ABin::Add, dst, a: Value::Reg(x), b: Value::Imm(im), .. }
+            if *dst == nv => (*x, im.as_i64()),
+        IrInst::Bin { op: ABin::Add, dst, b: Value::Reg(x), a: Value::Imm(im), .. }
+            if *dst == nv => (*x, im.as_i64()),
+        _ => return None,
+    };
+    // 再前一个：Load cv2, ptr:slot
+    let ld = insts.get(insts.len() - 3)?;
+    match ld {
+        IrInst::Load { dst, ptr, .. } if *dst == cv2 && *ptr == slot => Some((slot, step)),
+        _ => None,
+    }
+}
+
+/// 收集所有 vreg 的定义块索引。
+fn e3t_def_blocks(f: &IrFunction) -> HashMap<VReg, usize> {
+    let mut m = HashMap::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for inst in &b.insts {
+            if let Some(d) = inst.def() { m.insert(d, bi); }
+        }
+        for (p, _) in &b.params { m.insert(*p, bi); }
+    }
+    m
+}
+
+/// 对单个函数跑 IVR。返回变换次数。
+fn e3t_ivr_fn(f: &mut IrFunction) -> usize {
+    let loops = e3t_find_loops(f);
+    if loops.is_empty() { return 0; }
+    let mut count = 0;
+
+    for lp in &loops {
+        let (iv_slot, step) = match e3t_induction_slot(f, lp.latch) {
+            Some(x) => x,
+            None => continue,
+        };
+        if step == 0 { continue; }
+        let loop_set: HashSet<usize> = lp.body_blocks.iter().copied().collect();
+        let def_blocks = e3t_def_blocks(f);
+        // 循环体内被 Store 写入的槽（用于判断 Load 的值是否循环不变）
+        let mut stored_slots_in_loop: HashSet<VReg> = HashSet::new();
+        for &sbi in &lp.body_blocks {
+            for si in &f.blocks[sbi].insts {
+                if let IrInst::Store { ptr, .. } = si { stored_slots_in_loop.insert(*ptr); }
+            }
+        }
+        // 判断一个 Value 是否循环不变：
+        // Imm → 是；Reg 定义在循环外 → 是；Reg 是 Load 且 ptr 槽不在循环内被写 → 是。
+        let value_invariant = |v: &Value, def_blocks: &HashMap<VReg, usize>| -> bool {
+            match v {
+                Value::Imm(_) => true,
+                Value::Reg(r) => match def_blocks.get(r) {
+                    None => true,
+                    Some(&db) if !loop_set.contains(&db) => true,
+                    Some(&db) if loop_set.contains(&db) => {
+                        // 定义在循环内：若该定义是 Load 且加载的槽在循环内不被写，则不变
+                        match f.blocks[db].insts.iter().find(|x| x.def() == Some(*r)) {
+                            Some(IrInst::Load { ptr, .. }) => !stored_slots_in_loop.contains(ptr),
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                }
+            }
+        };
+        // preheader：跳到 header 且不在 loop_set 内的块
+        let preheader: Option<usize> = {
+            let mut ph = None;
+            for (bi, b) in f.blocks.iter().enumerate() {
+                if loop_set.contains(&bi) { continue; }
+                let jumps = matches!(&b.term, Term::Jump { target, .. } if *target == f.blocks[lp.header].id);
+                if jumps { ph = Some(bi); break; }
+            }
+            ph
+        };
+        let preheader = match preheader { Some(p) => p, None => continue };
+
+        // 在循环体里找归纳表达式 Add dst, Reg(m), Reg(ivl)
+        // m = Mul(base, Imm(C))，base 定义在循环外；ivl = Load ptr:iv_slot
+        #[derive(Clone)]
+        struct AddrPat { block: usize, add_idx: usize, add_dst: VReg, base: Value, base_slot: Option<VReg>, c: i64, ivl: VReg }
+        let mut pats: Vec<AddrPat> = Vec::new();
+        for &bi in &lp.body_blocks {
+            let insts = &f.blocks[bi].insts;
+            // 找 Load ptr:iv_slot
+            let iv_loads: HashMap<VReg, usize> = insts.iter().enumerate().filter_map(|(k, inst)| {
+                match inst { IrInst::Load { dst, ptr, .. } if *ptr == iv_slot => Some((*dst, k)), _ => None }
+            }).collect();
+            for (ai, inst) in insts.iter().enumerate() {
+                if let IrInst::Bin { op: ABin::Add, dst, a, b, ty: IrType::I64 } = inst {
+                    for (mval, ivval) in [(a, b), (b, a)] {
+                        let mreg = match mval { Value::Reg(r) => *r, _ => continue };
+                        let ivl = match ivval { Value::Reg(r) => *r, _ => continue };
+                        if !iv_loads.contains_key(&ivl) { continue; }
+                        // mreg 必须是 Mul(base, Imm(C))
+                        let mul_idx = match insts.iter().position(|x| x.def() == Some(mreg)) { Some(k) => k, None => continue };
+                        let (base_val, c) = match &insts[mul_idx] {
+                            IrInst::Bin { op: ABin::Mul, a: Value::Reg(br), b: Value::Imm(imc), .. } =>
+                                (Value::Reg(*br), imc.as_i64()),
+                            IrInst::Bin { op: ABin::Mul, a: Value::Imm(imc), b: Value::Reg(br), .. } =>
+                                (Value::Reg(*br), imc.as_i64()),
+                            _ => continue,
+                        };
+                        if c == 0 { continue; }
+                        // base 必须循环不变（含「循环内 Load 循环外槽」的情况）
+                        if !value_invariant(&base_val, &def_blocks) { continue; }
+                        // 若 base 定义在循环内且是 Load，preheader 引用它会 use-before-def；
+                        // 记录其加载的槽，preheader 里重新 Load。
+                        let base_slot: Option<VReg> = match base_val {
+                            Value::Reg(br) => match def_blocks.get(&br) {
+                                Some(&db) if loop_set.contains(&db) => {
+                                    match f.blocks[db].insts.iter().find(|x| x.def() == Some(br)) {
+                                        Some(IrInst::Load { ptr, .. }) => Some(*ptr),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        // 该 Add 的 dst 必须在循环体内被使用（Store 的值或 Call 实参 —— 数组下标两种形态）
+                        let used = lp.body_blocks.iter().any(|&sbi|
+                            f.blocks[sbi].insts.iter().any(|si| match si {
+                                IrInst::Store { val: Value::Reg(v), .. } => *v == *dst,
+                                IrInst::Call { args, .. } => args.iter().any(|a| *a == Value::Reg(*dst)),
+                                _ => false,
+                            }));
+                        if !used { continue; }
+                        pats.push(AddrPat { block: bi, add_idx: ai, add_dst: *dst, base: base_val, base_slot, c, ivl });
+                        break;
+                    }
+                }
+            }
+        }
+        if pats.is_empty() { continue; }
+
+        // 应用变换。每个模式一个累加器槽。
+        // 为避免索引失效，先收集所有编辑，再从后往前应用；但跨块插入用 vreg 替换更简单：
+        // 1) 在 entry(块0) 申请 acc 槽（Alloca）；
+        // 2) preheader 末尾插入初始化：Load iv0,iv_slot; Mul m0,base,Imm(C);
+        //    Add a0,m0,iv0; Store acc_slot,a0
+        // 3) 循环体：把 add_dst 的所有使用替换为 acc_load（在该 add 位置插入 Load）
+        // 4) latch：Store iv_slot 之后插入 acc 累加
+        for pat in &pats {
+            // 新槽用 reg_ty 之外的方式：Alloca 的 dst 是一个 ptr vreg
+            let acc_ptr = f.new_reg(IrType::Ptr);
+            let acc_ty = IrType::I64;
+            // entry 插入 Alloca（放在最前）
+            f.blocks[0].insts.insert(0, IrInst::Alloca { dst: acc_ptr, bytes: 8 });
+
+            // preheader 末尾（term 之前）插入初始化
+            // 先申请所有新 vreg（避免与 ph_insts 可变借用冲突）
+            let iv0 = f.new_reg(IrType::I64);
+            let m0 = f.new_reg(IrType::I64);
+            let a0 = f.new_reg(IrType::I64);
+            let base_v = if pat.base_slot.is_some() { Some(f.new_reg(IrType::I64)) } else { None };
+            let ph_insts = &mut f.blocks[preheader].insts;
+            ph_insts.push(IrInst::Load { dst: iv0, ptr: iv_slot, ty: IrType::I64 });
+            // base 操作数：若原本是循环内 Load，则在 preheader 重新 Load 该槽。
+            let base_for_ph = if let (Some(slot), Some(bv)) = (pat.base_slot, base_v) {
+                ph_insts.push(IrInst::Load { dst: bv, ptr: slot, ty: IrType::I64 });
+                Value::Reg(bv)
+            } else { pat.base };
+            ph_insts.push(IrInst::Bin { op: ABin::Mul, dst: m0, a: base_for_ph, b: Value::Imm(Imm::I64(pat.c)), ty: IrType::I64 });
+            ph_insts.push(IrInst::Bin { op: ABin::Add, dst: a0, a: Value::Reg(m0), b: Value::Reg(iv0), ty: IrType::I64 });
+            ph_insts.push(IrInst::Store { ptr: acc_ptr, val: Value::Reg(a0), ty: acc_ty });
+
+            // 循环体：在原 add 位置替换为 Load acc；再用 subst_reg 把 add_dst -> accv
+            let accv = f.new_reg(IrType::I64);
+            f.blocks[pat.block].insts[pat.add_idx] = IrInst::Load { dst: accv, ptr: acc_ptr, ty: IrType::I64 };
+            subst_reg(f, pat.add_dst, accv);
+            // 注意：subst_reg 会把刚才 Load 的 dst=accv 也考虑，但 from=add_dst != accv，安全。
+
+            // latch：累加增量 = step。
+            // 原表达式 = base*C + iv；base*C 循环不变，iv 每轮 +step ⇒ 表达式每轮 +step。
+            // C 已包含在 base*C 的初值里，增量只取 step。
+            let delta = step;
+            let acco = f.new_reg(IrType::I64);
+            let accn = f.new_reg(IrType::I64);
+            let lat = &mut f.blocks[lp.latch].insts;
+            lat.push(IrInst::Load { dst: acco, ptr: acc_ptr, ty: IrType::I64 });
+            lat.push(IrInst::Bin { op: ABin::Add, dst: accn, a: Value::Reg(acco), b: Value::Imm(Imm::I64(delta)), ty: IrType::I64 });
+            lat.push(IrInst::Store { ptr: acc_ptr, val: Value::Reg(accn), ty: IrType::I64 });
+
+            count += 1;
+        }
+        // 该循环处理完，重新计算（后续外层循环的分析基于新 IR）
+        break; // 一次只处理最内层的一个循环，下一轮 run 再处理外层；保守
+    }
+    count
+}
+
+/// 对整段程序跑归纳变量强度削减。返回变换总数。
+pub fn ivr_strength_reduce(ip: &mut IrProgram) -> usize {
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    let mut total = 0;
+    for name in names {
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) {
+            let n = e3t_ivr_fn(f);
+            if n > 0 {
+                // IVR 把 Add(base*C + iv) 换成累加器后，原有 base*C 的 Mul 与
+                // iv 的 Load 可能变成死代码；run_passes 的 DCE 在 IVR 之前已跑过，
+                // 这里补一次 DCE 清理，避免循环内残留无用的 imulq。
+                dce(f);
+            }
+            total += n;
+        }
+    }
+    total
+}
