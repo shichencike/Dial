@@ -1149,6 +1149,15 @@ b17 内层两处 <code>movabsq $64; imulq</code> 归零；A/B 普通两轮 +7.37
 +4.5~7.4%；asm↔LLVM b17 1.045x→1.026x、数组类 0.9652x→0.9480x；全 28 项
 checksum 不变、双后端专项一致、AArch64 零变化。局限：每函数每轮只处理一个
 最内层循环、仅 I64/单归纳形态；详见 CHANGELOG M7-e3t 条目）。
+<strong>M7-e3u 循环级优化方向穷尽诊断（两方向证伪，性能代码零改动）</strong>（承接 e3t
+官方下一步，用等价 Dial 微基准 POC 逐一测收益上限：① IVR 迭代到外层循环——
+b17 k 层 aik 下标增量 ratio 0.9893x、② 受限循环展开 2×——ratio 0.9792x，
+均被内层 3× 数组调用掩盖、按「非机制性收益不采纳」铁律否决；关键机制发现：
+<code>--backend=asm --fast</code> 仅优化 C 运行时、LLVM O3 对 asm 的 Dial 函数体零作用
+（main.rs:403），fast 差距属架构级管线差距非 IR pass 可达；循环级三路
+LICM/IVR 外层/展开全部证伪，剩余差距锁定为 LLVM O3 对 Dial 代码的完整优化
+管线，后续门槛升级为全局寄存器分配/向量化等架构级工程；全门禁绿、二进制
+md5 与 e3t 一致 fb282c0，详见 CHANGELOG M7-e3u 条目）。
 递归 / 含 call 类最大类别短板已由 M7-e3p（常量实参纯递归折叠）与 M7-e3q
 （非常量实参的纯尾递归 sibling-call）<strong>两批联手彻底击穿</strong>——b09/b10/b11
 常量递归折叠反超数十~数百倍，b12 互递归由 E3q 尾调用消除从落后 LLVM 1.078x
