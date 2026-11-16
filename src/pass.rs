@@ -418,3 +418,288 @@ fn uses_reg(inst: &IrInst, r: VReg) -> bool {
     inst.reg_uses(&mut tmp);
     tmp.contains(&r)
 }
+
+// ============================================================================
+// M7-e3p：过程间常量折叠（纯整数函数调用的编译期求值）
+// ============================================================================
+//
+// 动机：bench 的 fibR/rsumR/treeR 是纯整数递归函数，被循环以**常量实参**
+// 反复调用（rsumR(25) × 50000 等）。LLVM 因 Dial 的 Call 未标记纯性而无法
+// 外提 / 折叠，这里在 IR Pass 层对满足严格白名单的函数调用做编译期求值，
+// 把 `call` 直接替换为常量定义，彻底消除运行时的递归开销。
+//
+// 安全性（任一不满足即放弃、保持原样）：
+//   1. 被调函数必须是 `Private` linkage、`func` 在同一程序内可查；
+//   2. 被调函数的所有参数与返回值都是 I64（第一版仅 I64，最窄最安全）；
+//   3. 函数体指令只在白名单内：Alloca / Load / Store(本地栈槽) /
+//      Bin(整数) / Un / ICmp / Conv(整数) / Call(纯 Dial 函数) / 控制流；
+//      任何 FBin/FCmp/浮点 Conv/FieldAddr/LeaLabel/PtrAdd/FuncAddr/
+//      CallIndirect/ARC 原语/EnvInit/Extern/Runtime 调用 → 整函数判非纯；
+//   4. 调用实参全部是整数立即数（Reg 实参一律不折叠）；
+//   5. 求值有步数与递归深度上限，除零即放弃，超时即放弃；
+//   6. 仅 x86-64 启用（由 asm.rs 的 target 守卫控制）；AArch64 零变化。
+//
+// 这是「语义保持」变换：纯整数函数在相同实参下结果确定，编译期求值与
+// 运行时逐位一致（wrapping 语义与 codegen 的 add/sub/imul/cqo/idiv 对齐）。
+
+/// 递归步数上限（防病态函数拖慢编译 / 指数递归）。treeR(18) 约 1 万次调用。
+const E3P_MAX_STEPS: u64 = 2_000_000;
+/// 递归深度上限（防栈溢出；Dial 递归函数典型深度 < 1000）。
+const E3P_MAX_DEPTH: u32 = 4096;
+
+/// 求值环境：vreg → i64。Alloca 分配的栈槽也用 vreg 号索引（值语义）。
+struct E3pEnv {
+    regs: HashMap<VReg, i64>,
+    steps: u64,
+    depth: u32,
+}
+
+impl E3pEnv {
+    fn new() -> Self {
+        E3pEnv { regs: HashMap::new(), steps: 0, depth: 0 }
+    }
+    fn tick(&mut self) -> bool {
+        self.steps += 1;
+        self.steps <= E3P_MAX_STEPS && self.depth <= E3P_MAX_DEPTH
+    }
+}
+
+/// 读取一个 Value 的整数值（仅立即数 / 已求值寄存器）。
+fn e3p_val(v: &Value, env: &E3pEnv) -> Option<i64> {
+    match v {
+        Value::Imm(im) => Some(im.as_i64()),
+        Value::Reg(r) => env.regs.get(r).copied(),
+    }
+}
+
+/// 求值一个整数二元运算，语义与 pass.rs 的 fold_bin_i64 完全一致。
+fn e3p_bin(op: ABin, x: i64, y: i64) -> Option<i64> {
+    fold_bin_i64(op, x, y)
+}
+
+/// 判定函数是否为「可编译期求值的纯整数函数」（白名单，保守）。
+/// `visiting` 用于打断自递归 / 互递归的判定环。
+fn e3p_is_pure(ip: &IrProgram, name: &str, visiting: &mut HashSet<String>) -> bool {
+    if visiting.contains(name) { return true; } // 递归环：暂视为纯，最终由全体指令白名单兜底
+    let f = match ip.functions.iter().find(|f| f.name == name) {
+        Some(f) => f,
+        None => return false,
+    };
+    if f.linkage != FuncLink::Private { return false; }
+    if f.ret != IrType::I64 { return false; }
+    if f.params.iter().any(|(_, t)| *t != IrType::I64) { return false; }
+    // 第一版要求零 phi：块参数会让「跨块携带值」的求值复杂化，直接放弃更安全。
+    if f.blocks.iter().any(|b| !b.params.is_empty()) { return false; }
+    // 调用实参里也不能有块参数传递（Jump/Branch 的 args）。
+    for b in &f.blocks {
+        match &b.term {
+            Term::Jump { args, .. } if !args.is_empty() => return false,
+            Term::Branch { then_args, else_args, .. }
+                if !then_args.is_empty() || !else_args.is_empty() => return false,
+            _ => {}
+        }
+        for inst in &b.insts {
+            match inst {
+                IrInst::Alloca { .. } | IrInst::Load { .. } => {}
+                IrInst::Store { ty, .. } => if *ty != IrType::I64 { return false; },
+                IrInst::Bin { op, ty, .. } => {
+                    // 只接受确定性的整数运算（与 fold_bin_i64 对齐）；Div/Mod 除零在求值期放弃。
+                    let ok = matches!(op,
+                        ABin::Add | ABin::Sub | ABin::Mul | ABin::Div | ABin::Mod
+                        | ABin::Eq | ABin::Neq | ABin::Lt | ABin::Gt | ABin::Le | ABin::Ge
+                        | ABin::And | ABin::Or | ABin::BitAnd | ABin::BitOr | ABin::BitXor
+                        | ABin::Shl | ABin::Shr);
+                    if !ok || *ty != IrType::I64 { return false; }
+                }
+                IrInst::Un { ty, .. } => if *ty != IrType::I64 { return false; },
+                IrInst::ICmp { ty, .. } => if *ty != IrType::I64 { return false; },
+                IrInst::Conv { kind, ty, .. } => {
+                    // 仅整数扩展/截断；浮点转换一律拒绝。
+                    if !matches!(kind, AConv::Sext | AConv::Zext | AConv::Trunc) { return false; }
+                    if ty.is_float() { return false; }
+                }
+                IrInst::Call { func, linkage, arg_tys, ret_ty, .. } => {
+                    if *linkage != CallLink::Dial || *ret_ty != IrType::I64 { return false; }
+                    if arg_tys.iter().any(|t| *t != IrType::I64) { return false; }
+                    // 被调函数也必须纯（递归判定）。
+                    visiting.insert(name.to_string());
+                    let pure = e3p_is_pure(ip, func, visiting);
+                    visiting.remove(name);
+                    if !pure { return false; }
+                }
+                // 任何副作用 / 地址 / 浮点 / ARC / 间接调用一律拒绝。
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
+/// 解释执行一个纯整数函数 `name(args)`，返回常量结果；失败 / 超时返回 None。
+fn e3p_eval_call(ip: &IrProgram, name: &str, args: &[i64], env: &mut E3pEnv) -> Option<i64> {
+    if !env.tick() { return None; }
+    env.depth += 1;
+    if env.depth > E3P_MAX_DEPTH { env.depth -= 1; return None; }
+    let f = ip.functions.iter().find(|f| f.name == name)?;
+    if args.len() != f.params.len() { env.depth -= 1; return None; }
+
+    // 参数槽：prologue 语义 —— 形参 i 写入 param_slots[i]。
+    for (slot, val) in f.param_slots.iter().zip(args.iter()) {
+        env.regs.insert(*slot, *val);
+    }
+    // Alloca 是栈槽分配：这里用 vreg 号直接当槽，初始化为 0（若尚未定义）。
+    for b in &f.blocks {
+        for inst in &b.insts {
+            if let IrInst::Alloca { dst, .. } = inst {
+                env.regs.entry(*dst).or_insert(0);
+            }
+        }
+    }
+
+    let mut cur = f.entry;
+    let result = loop {
+        if !env.tick() { env.depth -= 1; return None; }
+        let b = f.blocks.iter().find(|b| b.id == cur)?;
+        for inst in &b.insts {
+            if !env.tick() { env.depth -= 1; return None; }
+            match inst {
+                IrInst::Alloca { dst, .. } => { env.regs.entry(*dst).or_insert(0); }
+                IrInst::Load { dst, ptr, .. } => {
+                    let v = *env.regs.get(ptr)?;
+                    env.regs.insert(*dst, v);
+                }
+                IrInst::Store { ptr, val, .. } => {
+                    let v = e3p_val(val, env)?;
+                    env.regs.insert(*ptr, v);
+                }
+                IrInst::Bin { op, dst, a, b: rb, .. } => {
+                    let x = e3p_val(a, env)?;
+                    let y = e3p_val(rb, env)?;
+                    let r = e3p_bin(*op, x, y)?; // 除零 → None → 放弃折叠
+                    env.regs.insert(*dst, r);
+                }
+                IrInst::Un { op, dst, a, .. } => {
+                    let x = e3p_val(a, env)?;
+                    let r = match op {
+                        AUn::Neg => x.wrapping_neg(),
+                        AUn::Not => (x == 0) as i64, // 逻辑非
+                        AUn::BitNot => !x,
+                    };
+                    env.regs.insert(*dst, r);
+                }
+                IrInst::ICmp { op, dst, a, b: rb, .. } => {
+                    let x = e3p_val(a, env)?;
+                    let y = e3p_val(rb, env)?;
+                    env.regs.insert(*dst, cmp_i64(*op, x, y));
+                }
+                IrInst::Conv { kind, dst, a, .. } => {
+                    let x = e3p_val(a, env)?;
+                    let r = match kind {
+                        AConv::Sext | AConv::Zext => x,
+                        AConv::Trunc => x, // 函数内全 I64，截断恒等
+                        _ => { env.depth -= 1; return None; }
+                    };
+                    env.regs.insert(*dst, r);
+                }
+                IrInst::Call { dst, func, args: cargs, linkage, .. } => {
+                    if *linkage != CallLink::Dial { env.depth -= 1; return None; }
+                    // 实参先在当前（父）环境求值。
+                    let mut cv = Vec::with_capacity(cargs.len());
+                    for a in cargs { cv.push(e3p_val(a, env)?); }
+                    // Dial 的 vreg 是「函数内编号」，递归重入会复用同样的 vreg 号；
+                    // 因此子调用必须用独立的 regs 环境，否则内层会覆盖外层活跃值。
+                    // 仅把步数计数带入 / 带回，保证总预算仍受控。
+                    let mut child = E3pEnv {
+                        regs: HashMap::new(),
+                        steps: env.steps,
+                        depth: env.depth,
+                    };
+                    let r = e3p_eval_call(ip, func, &cv, &mut child)?;
+                    env.steps = child.steps;
+                    if let Some(d) = dst { env.regs.insert(*d, r); }
+                }
+                _ => { env.depth -= 1; return None; }
+            }
+        }
+        match &b.term {
+            Term::Jump { target, .. } => cur = *target,
+            Term::Branch { cond, then_b, else_b, .. } => {
+                let c = *env.regs.get(cond)?;
+                cur = if c != 0 { *then_b } else { *else_b };
+            }
+            Term::Return { val } => {
+                let v = match val { Some(x) => e3p_val(x, env)?, None => { env.depth -= 1; return None; } };
+                break v;
+            }
+            Term::Unreachable => { env.depth -= 1; return None; }
+        }
+    };
+    env.depth -= 1;
+    Some(result)
+}
+
+/// 对程序中所有「实参全为整数常量的纯函数调用」做编译期求值，
+/// 把 Call 指令替换为 `Conv Zext dst (Imm I64 result)`（既有 pass 已用的常量定义形式）。
+/// 返回被折叠的调用数。
+pub fn fold_pure_calls(ip: &mut IrProgram) -> usize {
+    // 先算出全程序纯函数集合。
+    let mut pure: HashSet<String> = HashSet::new();
+    let all_names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for name in &all_names {
+        let mut visiting = HashSet::new();
+        if e3p_is_pure(ip, name, &mut visiting) {
+            pure.insert(name.clone());
+        }
+    }
+    if pure.is_empty() { return 0; }
+
+    // 收集待折叠：(func_name, block_idx, inst_idx, dst, result)。
+    let mut edits: Vec<(String, usize, usize, VReg, i64)> = Vec::new();
+    for f in &ip.functions {
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for (ii, inst) in b.insts.iter().enumerate() {
+                if let IrInst::Call { dst: Some(d), func, args, linkage: CallLink::Dial, ret_ty, .. } = inst {
+                    if *ret_ty != IrType::I64 || !pure.contains(func) { continue; }
+                    // 护栏：只折叠「带非空常量实参」的调用。
+                    // 无参纯函数（如 benchmark 的 b02/b03 任务体）虽可整体求值且语义正确，
+                    // 但会让 driver 的调用被常量替换、使运行时基准失真，且编译期求值面更大；
+                    // 第一版保守排除。递归内部的 rsumR(n-1) 等实参非空，照常处理。
+                    if args.is_empty() { continue; }
+                    // 实参必须全部是整数立即数。
+                    let mut cv = Vec::with_capacity(args.len());
+                    let mut ok = true;
+                    for a in args {
+                        match a {
+                            Value::Imm(im) => cv.push(im.as_i64()),
+                            _ => { ok = false; break; }
+                        }
+                    }
+                    if !ok { continue; }
+                    let mut env = E3pEnv::new();
+                    if let Some(r) = e3p_eval_call(ip, func, &cv, &mut env) {
+                        edits.push((f.name.clone(), bi, ii, *d, r));
+                    }
+                }
+            }
+        }
+    }
+
+    // 应用替换（按块/指令索引从后往前，避免索引失效）。用 dst 定位以防同块多改。
+    let mut count = 0;
+    for (fname, bi, ii, dst, result) in edits {
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == fname) {
+            if let Some(inst) = f.blocks.get_mut(bi).and_then(|b| b.insts.get_mut(ii)) {
+                if inst.def() == Some(dst) && matches!(inst, IrInst::Call { .. }) {
+                    *inst = IrInst::Conv {
+                        kind: AConv::Zext,
+                        dst,
+                        a: Value::Imm(Imm::I64(result)),
+                        ty: IrType::I64,
+                    };
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}

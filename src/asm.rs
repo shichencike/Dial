@@ -51,6 +51,11 @@ pub fn compile_asm(
 
     let mut ip = lower::lower_program(prog, functions, structs, goto_depths)?;
     pass::run_passes(&mut ip);
+    // M7-e3p：过程间常量折叠（纯整数函数调用编译期求值）。
+    // 仅 x86-64 启用：AArch64 保持既有发射路径，`.s` 零变化。
+    if matches!(target, EmitTarget::X86_64SysV) {
+        pass::fold_pure_calls(&mut ip);
+    }
     let asm_text = codegen_asm::emit(&ip, target)?;
 
     let s_path = obj_path.with_extension("s");
