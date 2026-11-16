@@ -2569,6 +2569,34 @@
       - **本批护栏**：性能代码零改动（lower/pass/codegen_asm/ir 等均未改），不改
         checksum、不改 `.s`；A/B POC 全在 `/tmp` 独立目录用 C 基准完成，不污染
         产物。宪法约束一律满足。
+    - **M7-e3y 原生 POPCNT 指令融合（targeted ISA 路线首战，代替 LLVM 支柱①）**：
+      承接 e3x 的 targeted ISA 指令融合结论，把 b23 位计数的逐位循环融合为 CPU
+      原生 `popcnt` 一条指令。这是 e3m（单迭代 `sarq+adcq` 融合）的架构级升级：
+      e3m 每迭代 2 条指令 × 约 16 次，e3y 一次算完全部置位位。
+      - **等价性论证（正确性根基）**：进入 `while(x>0)` 循环体的 x 恒为正（否则
+        cond 不进 then），逐位算术右移跑完 x 必然归 0。故「`popcnt(x)` 一次累加到
+        c + 把 x 归零让 cond 读到 0 自然退出」与原逐位循环在**所有变量**上等价，
+        且不改 CFG、不新增基本块。
+      - **严格循环结构判据**（`is_popcount_while`，任一不符即回落 e3m 逐位路径）：
+        ① 8 条窗口占满 body 块尾部；② body 的 term 是无参 Jump 回 header；
+        ③ header 的 Branch 真分支进 body；④ cond 由 `ICmp(Gt, read_x, 0)` 产生且
+        read_x 恰是 header 内 `Load{ptr: x槽}` 的结果；⑤ body 的唯一前驱是 header
+        （防别处跳进循环体内部；header 可有 2 前驱＝外层入口＋回边，属正常嵌套）。
+        仅 x86-64 填充 native 集合；发射期再确认 scratch(rax) 与 c/x 物理寄存器
+        不冲突，否则回落逐位路径。
+      - **收益（A/B 交替，OLD=e3x@5be5d5b 仅含 e3m，NEW=e3y）**：b23 单项
+        第一轮 **2.1363x**、第二轮 **2.2018x**（提速 +114%~+120%）；几何平均
+        第一轮 +2.12%、第二轮 +2.49%，两轮方向一致；其余 27 项在 ±2% 噪声内。
+        OLD/NEW 完整 `bench.s` diff **仅 5 行**、唯一差异即 b23 循环体
+        （`sarq+adcq` → `popcnt+add+mov0`），机制归因排除布局伪影。
+      - **零开销与门禁**：非目标函数 `.s` 逐字节不变；AArch64 `.s` 与 OLD 逐字节
+        一致且零 popcnt 指令（全部改动在 x86-64 守卫下）；`-g` 下零 popcnt（DWARF
+        禁用驻留→不走融合）；全 28 项 checksum 不变（b23=815024）、golden 10 用例
+        双后端逐字节一致、cargo test / run_tests.sh / AArch64 交叉汇编全绿。
+      - **护栏**：`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、`Cargo.toml`
+        仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
+        `src/codegen_asm.rs`（+86/-4）。确立「targeted ISA 指令融合」为支柱①后续
+        主线，下一门槛：b17 紧凑乘加 / 连续 load 的 addressing 优化。
 
 ---
 

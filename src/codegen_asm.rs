@@ -352,6 +352,12 @@ struct FnEmit<'a> {
     /// 仅 x86-64 填充。发射期还会二次确认两槽都驻留、物理寄存器不同，
     /// 任一不满足就逐条退回原路径（见 inst_popcnt_fused）。
     popcnt_fuse: HashMap<(usize, usize), (VReg, VReg)>,
+    /// M7-e3y：popcnt_fuse 的子集——窗口经确认是 `while(x>0){c+=x&1;x>>=1}`
+    /// 的完整自循环（x 是循环变量、回边到读 x 的 cond、循环后 x 归零即自然结束）。
+    /// 这类窗口可用单条 `popcnt` 一次算完并把 x 归零让 cond 自然退出，无需改 CFG。
+    /// 其余窗口（如 for 循环体的一部分）仍走 e3m 的 sarq+adcq 逐位路径。
+    /// 仅 x86-64 填充；发射期二次确认同 popcnt_fuse。
+    popcnt_native: HashSet<(usize, usize)>,
     /// M7-e3n：xorshift 步的寄存器内融合。key = (块下标, 窗口起始指令下标)，
     /// value = (融合计划, 窗口 IR 条数)。覆盖 b24 的两种形态：
     ///   A `x = x ^ ((x << k) & 0xFFFFFFFF)`（6 条 IR）；
@@ -395,8 +401,8 @@ impl<'a> FnEmit<'a> {
             dead_defs: HashSet::new(), fusable: HashMap::new(),
             pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
             lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
-            popcnt_fuse: HashMap::new(), xorshift_fuse: HashMap::new(),
-            gra_blocked, debug_info,
+            popcnt_fuse: HashMap::new(), popcnt_native: HashSet::new(),
+            xorshift_fuse: HashMap::new(), gra_blocked, debug_info,
         }
     }
 
@@ -1043,6 +1049,12 @@ impl<'a> FnEmit<'a> {
                     let ok = self.promotable.contains(&pc) && self.promotable.contains(&px)
                         && mids.iter().all(|v| use_count.get(v) == Some(&1));
                     if ok {
+                        // M7-e3y：若窗口恰是 `while(x>0){c+=x&1;x>>=1}` 的完整自循环，
+                        // 则可用单条 popcnt + x 归零一次算完（回落到 cond 自然退出）。
+                        // 判据不满足则仍走 e3m 的 sarq+adcq 逐位路径，行为不变。
+                        if self.is_popcount_while(i, b, px) {
+                            self.popcnt_native.insert((bi, i));
+                        }
                         self.popcnt_fuse.insert((bi, i), (pc, px));
                         i += 8; // 贪心跳过整个窗口，避免登记重叠窗口
                         continue;
@@ -1053,18 +1065,87 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// M7-e3y：确认 body 块 `i` 处的 8 条窗口是 `while(x>0){c+=x&1;x>>=1}` 的完整
+    /// 自循环体，因而可用「popcnt 一次算完 + x 归零让 cond 自然退出」替代逐位循环。
+    /// 严格判据（任一不符返回 false，安全回落到 e3m 的 sarq+adcq）：
+    ///   ① 窗口延伸到 body 块末尾（i+8 == insts.len()）——窗口后无别的 IR；
+    ///   ② body 的 term 是无参 Jump 回 header H（回边）；
+    ///   ③ H 的 term 是 Branch{cond, then_b == body, else_b != body}；
+    ///   ④ cond 由 `ICmp(Gt, read_x, 0)` 产生（self.fusable 里有），其中 read_x
+    ///      是 H 内 `Load{ptr: px}` 的结果 vreg——即循环条件读的正是 x 槽；
+    ///   ⑤ body 只有一个前驱 header（无别处跳进循环体内部）；header 可有 2 个
+    ///      前驱（外层入口首次进入 + body 回边），这是正常嵌套循环。
+    /// 这些条件保证：进入 body 的 x 恒为正（否则 cond 不会进 then），逐位循环
+    /// 跑完 x 必然为 0；因此 popcnt(x) 一次累加 + x=0 与原循环在所有变量上等价，
+    /// 且不改 CFG。
+    fn is_popcount_while(&self, i: usize, body: &IrBlock, px: VReg) -> bool {
+        // ① 窗口须占满 body 块尾部
+        if i + 8 != body.insts.len() { return false; }
+        // ② body -> header（无参回边）
+        let h = match &body.term {
+            Term::Jump { target, args } if args.is_empty() => *target,
+            _ => return false,
+        };
+        let header = match self.f.blocks.iter().find(|b| b.id == h) { Some(b) => b, None => return false };
+        // ③ header 的 Branch 条件真时进 body
+        let cond = match &header.term {
+            Term::Branch { cond, then_b, else_b, .. }
+                if *then_b == body.id && *else_b != body.id => *cond,
+            _ => return false,
+        };
+        // ④ cond = ICmp(Gt, read_x, 0)，read_x 是 H 内 Load{ptr: px} 的 dst
+        let (op, a, b) = match self.fusable.get(&cond) { Some(v) => *v, None => return false };
+        if op != ACmp::Gt { return false; }
+        let zero_is_rhs = matches!(b, Value::Imm(Imm::I64(0)) | Value::Imm(Imm::I32(0)));
+        let zero_is_lhs = matches!(a, Value::Imm(Imm::I64(0)) | Value::Imm(Imm::I32(0)));
+        if !zero_is_rhs && !zero_is_lhs { return false; }
+        let read_val = if zero_is_rhs { a } else { b };
+        let read_x = match read_val { Value::Reg(r) => r, _ => return false };
+        let x_loaded = header.insts.iter().any(|inst| matches!(inst,
+            IrInst::Load { dst, ptr, ty } if *dst == read_x && *ptr == px && *ty == IrType::I64));
+        if !x_loaded { return false; }
+        // ⑤ body 块的唯一前驱是 header（防止别处跳进循环体内部）。
+        //    header 自身可有 2 个前驱（外层入口首次进入 + body 回边）——正常嵌套循环。
+        let body_preds = self.f.blocks.iter().filter(|blk| match &blk.term {
+            Term::Jump { target, .. } => *target == body.id,
+            Term::Branch { then_b, else_b, .. } => *then_b == body.id || *else_b == body.id,
+            _ => false,
+        }).count();
+        body_preds == 1
+    }
+
     /// M7-e3m：发射 popcount 融合指令。发射期二次确认——只有 x86-64、驻留态
     /// 开启、c / x 两槽都实际驻留且物理寄存器不同，才发 `sarq $1, x;
     /// adcq $0, c` 并返回 true（调用方跳过整块 8 条 IR）。任一不满足返回
     /// false、且不发射任何指令，由调用方逐条走原路径，行为完全不变。
     /// 两条紧邻：sarq 移出的 bit0（== x & 1，对负数 / i64::MIN 同样成立）
     /// 进 CF，adcq 立即把 CF 加进 c；sarq 同时完成 x >>= 1（算术右移）。
-    fn inst_popcnt_fused(&mut self, pc: VReg, px: VReg) -> bool {
+    ///
+    /// M7-e3y：native=true 时改发单条 `popcnt` 一次算完整个 x 的置位数并累加到
+    /// c，随后把 x 归零——由 is_popcount_while 保证 x 是 `while(x>0)` 的循环变量、
+    /// 进入体时恒正、逐位跑完必为 0，故归零即自然结束、cond 读到 0 退出，与逐位
+    /// 循环在所有变量上等价且不改 CFG。scratch 用 g1(rax)，须与 rc/rx 都不同，
+    /// 否则退回 e3m 逐位路径（x86-64 驻留池是 callee-saved，rax 恒空闲）。
+    fn inst_popcnt_fused(&mut self, pc: VReg, px: VReg, native: bool) -> bool {
         if !matches!(self.target, EmitTarget::X86_64SysV) || !self.residency_on { return false; }
         let (rc, rx) = match (self.phys(pc), self.phys(px)) {
             (Some(a), Some(b)) if a != b => (a, b),
             _ => return false,
         };
+        if native {
+            let scratch = self.g1().to_string(); // "rax"
+            if rc != scratch && rx != scratch {
+                // popcnt src,dst：dst = popcount(src)，不修改 src。
+                self.line(&format!("\tpopcnt {}, {}", self.r(rx), self.r(&scratch)));
+                self.line(&format!("\taddq {}, {}", self.r(&scratch), self.r(rc)));
+                // x 归零：下一次 cond 读 x==0 自然退出；等价于逐位右移到 0。
+                self.line(&format!("\tmovq $0, {}", self.r(rx)));
+                self.dirty.insert(pc);
+                self.dirty.insert(px);
+                return true;
+            }
+            // scratch 冲突（理论不会发生）：回落逐位路径
+        }
         self.line(&format!("\tsarq $1, {}", self.r(rx)));
         self.line(&format!("\tadcq $0, {}", self.r(rc)));
         // 融合直接改了驻留物理寄存器，标记脏以便块尾 flush 正确回写。
@@ -3794,7 +3875,8 @@ fn emit_function(
         for (ii, inst) in b.insts.iter().enumerate() {
             if skip > 0 { skip -= 1; continue; }
             if let Some((pc, px)) = e.popcnt_fuse.get(&(idx, ii)).copied() {
-                if e.inst_popcnt_fused(pc, px) { skip = 7; continue; }
+                let native = e.popcnt_native.contains(&(idx, ii));
+                if e.inst_popcnt_fused(pc, px, native) { skip = 7; continue; }
             }
             if let Some((plan, wlen)) = e.xorshift_fuse.get(&(idx, ii)).copied() {
                 if e.inst_xorshift_fused(plan) { skip = wlen - 1; continue; }
