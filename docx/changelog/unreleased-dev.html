@@ -2410,12 +2410,69 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
     继续缩小数组/字符串类差距，应攻<strong>调用开销本身</strong>（如 array 访问内联、
     索引计算与边界检查融合），而非在 ALU 指令层叠加。硬约束不变：任何改
     函数体字节数的 pass 之前必须先固定入口地址。</li>
-<li><strong>本批护栏</strong>：最终<strong>性能代码零改动</strong>（<code>src/codegen_asm.rs</code> 撤回至
+<li>
+<p><strong>本批护栏</strong>：最终<strong>性能代码零改动</strong>（<code>src/codegen_asm.rs</code> 撤回至
     8892846 逐字节、工作树干净、二进制 md5 与 e3q 一致）、<code>src/codegen.rs</code> /
     <code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、
     LLVM 路径零改动、构建零警告、不打 tag、全套门禁全绿、<code>docx/</code> 确定性
     生成无漂移、本地静态基线 <code>bench/bench.s</code> 保持 M7-e3q 版。跨时段绝对
-    读数不直接相减，收益一律以 A/B 交替相对改善为准。</li>
+    读数不直接相减，收益一律以 A/B 交替相对改善为准。</p>
+</li>
+<li>
+<p><strong>M7-e3s 剩余短板根因系统诊断（五方向 A/POC 证伪，性能代码零改动）</strong>：
+  e3r 结论把下一方向指向「调用开销本身」。本批基线 asm↔LLVM 几何平均
+  0.5518x（17 胜/7 平/4 负），数组内存类 0.9654x / 字符串类 1.0228x，
+  真落后项集中为 b17 矩阵 1.069x（2.586ms）、b22 字符串 1.149x、b06 gcd
+  1.084x。为找出可落地的机制优化，系统验证五个方向，<strong>全部证伪</strong>，并
+  由此锁定剩余差距的真实层级：</p>
+</li>
+<li><strong>方向① 库调用内联（<code>dial_array_get/set</code>）</strong>：反汇编两后端 debug 二进制，
+    <code>call dial_array_get</code> 次数 <strong>23:23</strong>、<code>dial_array_set</code> <strong>9:9</strong> 完全相同，
+    <code>dial_array_get</code> 函数体两边同为 45B——LLVM 默认口径下并未内联数组访问，
+    「内联库调用反超 LLVM」的前提不成立，否决。</li>
+<li><strong>方向② Dial 小函数内联（b06 的 gcdI，循环调用 30000 次）</strong>：写双模式
+    POC（同一 asm 编译器下「调用版」vs「手写内联展开版」，校验和均为
+    74999 一致），10 次取最小：调用 0.834ms vs 内联 0.845ms（内联反而略慢）。
+    根因：gcdI 内层是变量除法 <code>idivq</code>（20~90 周期微码），调用/prologue 开销
+    被 idiv 完全主导，省掉调用无意义。否决。</li>
+<li><strong>方向③ 扩展 copy propagation 窗口</strong>：现有 <code>forward_store_load</code> 窗口=1
+    （只处理紧邻 store→load），静态扫描发现 b17 有 7 处、b15 8 处、b16 6 处
+    「store %rax→槽; 隔 1 条 load 槽→%rsi」的安全转发模式（源寄存器未改写）。
+    写汇编前 POC 变换脚本（安全条件：off&gt;0 spill 区、窗口 ≤7、不跨 call/
+    label/jmp、源寄存器不被改写、同槽不再写），全模块转发 80 处、全 28 项
+    checksum 一致；A/B 两轮几何均值 <strong>0.9992 / 0.9964（−0.08% / −0.36%）</strong>
+    ——b17 +0.70/+0.59% 微正被 b08 −4.2%/−6.5%、b28 等抵消，无净收益。
+    坐实 e3r 结论：asm 后端的冗余栈搬运同样被 CPU 乱序执行 / Store Buffer
+    掩盖，不是墙钟瓶颈。否决（POC 仅 .s 变换、未入产品）。</li>
+<li><strong>方向④ 关键对照实验（<code>--fast</code> 关闭安全检查 + LLVM O3 全开）</strong>：标准口径
+    重测，b17 <strong>asm 2.151ms vs llvm 0.734ms = 2.932x</strong>（debug 口径仅
+    1.069x）、b22 1.417x、b06 1.175x。asm 从 debug→fast 仅加速 1.20x
+    （2.586→2.151），LLVM 加速 3.28x（2.418→0.734）。反汇编确认 LLVM fast
+    的 SIMD 指令主要是字符串常量复制（非 b17 向量化），差距真正来自 LLVM
+    O3 的<strong>循环优化管线</strong>（归纳变量 / 不变量外提 / 深度寄存器分配 / 循环展开）。</li>
+<li><strong>方向⑤ 静态体积旁证</strong>：asm <code>.text</code> 53518B vs LLVM 48006B（+11%），
+    b17 单函数栈搬运 109 条——asm 后端无全局寄存器分配，SSA 值大量物化到
+    栈槽，这与方向③④共同指向架构级差距。</li>
+<li><strong>根因结论（本批最重要产出）</strong>：剩余落后项<strong>不是指令级/调用级小优化可达</strong>
+    ——ALU 削减（e3r）、库调用内联①、函数内联②、copy propagation③ 四类
+    peephole 全部被证伪，收益被 CPU 微架构（乱序执行、Store Buffer、idiv 微码）
+    掩盖。真实差距是 <strong>LLVM O3 循环优化管线</strong>，属架构级工程。默认 Debug 口径
+    下 LLVM 被安全检查束缚，asm 已 0.5518x 大幅领先；差距只在放开 O3 的 fast
+    口径暴露（b17 2.932x）。自研后端若要以「代替 LLVM」为目标继续成熟，
+    真正的门槛是<strong>实现循环优化（循环不变量外提 LICM / 归纳变量强度削减 IVR /
+    受限循环展开），以及最终的模式化向量化</strong>，而非继续在 peephole 层叠加。</li>
+<li><strong>下一步方向</strong>：以 e3s 为界，peephole 主线（e3i/j/k/l/m/n/p/q，含两次
+    证伪 e3o/e3r）已系统覆盖 LLVM 标准尾部优化并基本收敛。下一阶段应转向
+    <strong>循环级优化</strong>：优先做「循环不变量外提 + 归纳变量强度削减」——它们直接
+    对应 b17 的 <code>i*64+k</code>、<code>k*64+j</code> 内层重复计算与 <code>C[pos]</code> 地址链，是 debug
+    与 fast 两个口径下都存在的真实开销。硬约束不变：任何改函数体字节数的
+    pass 之前必须先固定入口地址；收益一律 A/B 交替 + 布局补偿归因。</li>
+<li><strong>本批护栏</strong>：最终<strong>性能代码零改动</strong>（<code>src/codegen_asm.rs</code> 相对 8892846
+    零改动、工作树干净、编译器二进制 md5 与 e3q 一致 a415ce9e；所有 POC 均为
+    <code>/tmp</code> 下的 .s 变换脚本、未入产品）、<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对
+    544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建
+    零警告、不打 tag、<code>docx/</code> 确定性生成无漂移、本地静态基线 <code>bench/bench.s</code>
+    保持 M7-e3q 版。跨时段绝对读数不直接相减，收益一律以 A/B 交替相对改善为准。</li>
 </ul>
 </li>
 </ul>

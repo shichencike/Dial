@@ -1127,6 +1127,19 @@ checksum 一致、全门禁绿、AArch64 零变化；但普通 A/B 表面 +0.30/
 3 次 <code>dial_array_get/set</code> 调用掩盖了 imulq 延迟。纯 ALU 指令削减在 array
 调用密集内核无墙钟收益，按「非机制性收益不采纳」铁律否决撤回；性能代码零
 改动、详见 CHANGELOG M7-e3r 条目）。
+<strong>M7-e3s 剩余短板根因系统诊断（五方向证伪，性能代码零改动）</strong>
+（承接 e3r「攻调用开销本身」，系统验证五方向全部证伪：① 库调用内联——两后端
+<code>dial_array_get</code> 调用次数 23:23、set 9:9 完全相同，LLVM 默认口径并未内联；
+② Dial 小函数内联——b06 gcdI 调用 vs 手写内联 POC 0.834 vs 0.845ms，idiv 微码
+主导、省调用无意义；③ 扩展 copy propagation 窗口——转发 80 处栈搬运、checksum
+全对，A/B 两轮 −0.08%/−0.36% 无净收益，坐实冗余搬运被乱序执行掩盖；④ 关键
+<code>--fast</code> 对照——b17 asm/llvm <strong>2.932x</strong>（debug 口径仅 1.069x）、LLVM 加速 3.28x
+vs asm 1.20x；⑤ .text asm 比 LLVM 大 11%、b17 栈搬运 109 条。根因结论：剩余
+落后项（b17/b22/b06）非 peephole 可达，真实差距是 <strong>LLVM O3 循环优化管线</strong>
+（架构级）；默认 Debug 口径 LLVM 被安全检查束缚、asm 已 0.5518x 大幅领先，
+差距只在 fast 口径暴露。下一阶段门槛是<strong>循环级优化（LICM / 归纳变量强度削减 /
+受限展开 / 模式化向量化）</strong>，peephole 主线至此基本收敛；性能代码零改动、
+详见 CHANGELOG M7-e3s 条目）。
 递归 / 含 call 类最大类别短板已由 M7-e3p（常量实参纯递归折叠）与 M7-e3q
 （非常量实参的纯尾递归 sibling-call）<strong>两批联手彻底击穿</strong>——b09/b10/b11
 常量递归折叠反超数十~数百倍，b12 互递归由 E3q 尾调用消除从落后 LLVM 1.078x
