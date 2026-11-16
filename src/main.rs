@@ -397,7 +397,7 @@ fn main() {
             std::process::exit(1);
         }
         if debug_info {
-            eprintln!("ℹ️  --backend=asm 首版暂不生成 DWARF，-g 已忽略。");
+            eprintln!("ℹ️  --backend=asm -g：生成 DWARF 源码行断点 + 符号名（.g 下自动禁用寄存器驻留以保证变量 location 准确）。");
         }
         if safety == SafetyMode::ReleaseFast {
             eprintln!("ℹ️  --backend=asm 下 --fast 仅作用于 C 运行时的优化等级；LLVM O3/LTO 不适用。");
@@ -457,6 +457,8 @@ fn main() {
             fe.structs.clone(),
             fe.goto_depths.clone(),
             &obj_path,
+            debug_info,
+            &src_path,
         ) {
             eprintln!("{}", e);
             std::process::exit(1);

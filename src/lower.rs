@@ -50,10 +50,13 @@ pub fn lower_program(
     functions_sig: HashMap<String, FuncInfo>,
     structs: StructTable,
     goto_depths: HashMap<String, usize>,
+    debug_info: bool,
 ) -> Result<IrProgram, String> {
     let mut ip = IrProgram::new(functions_sig, structs, goto_depths);
     for func in &prog.functions {
-        let mut l = Lower::new(&mut ip);
+        // M7-e3w：调试标记只在 -g 时插入。非 -g 的 IR 必须与 e3v 逐字节一致，
+        // 否则 Line/DebugVar 会打断 e3p 折叠 / popcount 融合等 pass 的模式窗口。
+        let mut l = Lower::new(&mut ip, debug_info);
         l.lower_function(func)?;
     }
     Ok(ip)
@@ -78,13 +81,16 @@ struct Lower<'a> {
     label_depths: HashMap<String, usize>,
     /// 函数参数槽（与 func.params 平行），供 prologue 填值。
     param_slots: Vec<VReg>,
+    /// M7-e3w：-g 时才插入 Line/DebugVar 调试标记。
+    debug_info: bool,
 }
 
 impl<'a> Lower<'a> {
-    fn new(ip: &'a mut IrProgram) -> Self {
+    fn new(ip: &'a mut IrProgram, debug_info: bool) -> Self {
         let label_depths = ip.goto_depths.clone();
         Lower {
             ip,
+            debug_info,
             func: IrFunction::new(String::new(), Vec::new(), IrType::Void, FuncLink::Private),
             cur: 0,
             scopes: Vec::new(),
@@ -236,6 +242,7 @@ impl<'a> Lower<'a> {
             for (n, t) in &f.params { params.push((n.clone(), param_ir(t))); }
         }
         self.func = IrFunction::new(f.name.clone(), params, ret_ir.clone(), linkage);
+        self.func.decl_line = f.line as u32; // M7-e3w：-g DW_AT_decl_line
         self.scopes.clear();
         self.loops.clear();
         self.defers.clear();
@@ -378,11 +385,39 @@ impl<'a> Lower<'a> {
 
     // ---- 语句 ----
 
+    /// M7-e3w：提取语句源码行号（AST 各 Stmt 变体的行号位置不统一）。
+    /// 仅用于 -g 调试的行标记；非 -g 编译时这些 Line 指令会被发射器跳过。
+    fn stmt_line(s: &Stmt) -> u32 {
+        let line = match s {
+            Stmt::VarDecl { line, .. } | Stmt::Assign { line, .. }
+            | Stmt::AssignDeref { line, .. } | Stmt::AssignField { line, .. }
+            | Stmt::AssignIndex { line, .. } | Stmt::If { line, .. }
+            | Stmt::While { line, .. } | Stmt::For { line, .. }
+            | Stmt::ForEach { line, .. } | Stmt::ForEachMap { line, .. }
+            | Stmt::DoWhile { line, .. } | Stmt::Match { line, .. }
+            | Stmt::With { line, .. } | Stmt::Try { line, .. }
+            | Stmt::Select { line, .. } | Stmt::Block { line, .. } => *line,
+            Stmt::Break(l, _) | Stmt::Continue(l, _) | Stmt::Label(_, l, _)
+            | Stmt::Goto(_, l, _) | Stmt::Return(_, l, _) | Stmt::Throw(_, l, _)
+            | Stmt::Expr(_, l, _) | Stmt::Defer(_, l, _) => *l,
+        };
+        line as u32
+    }
+
     fn lower_stmt(&mut self, s: &Stmt) -> Result<(), String> {
+        // M7-e3w：每条语句起点插一条行标记，行号随指令流经 pass（重排不丢失）。
+        // 仅 -g：非 -g 下这些标记会打断折叠/融合 pass 的模式窗口，必须完全不插入。
+        if self.debug_info {
+            self.emit(IrInst::Line(Self::stmt_line(s)));
+        }
         match s {
-            Stmt::VarDecl { name, ty, value, move_hint, .. } => {
+            Stmt::VarDecl { name, ty, value, move_hint, line, .. } => {
                 let dt = ty.clone();
                 let slot = self.emit_alloca(reg_ir(&dt));
+                // M7-e3w：-g 调试变量名标记（非 -g 完全不插入，保证 IR 与 e3v 一致）。
+                if self.debug_info {
+                    self.emit(IrInst::DebugVar { name: name.clone(), slot, line: *line as u32 });
+                }
                 let (v, is_copy) = self.lower_expr(value, &dt)?;
                 if let Type::Struct(_) = &dt {
                     // 值语义结构体：StructLit 返回一块临时栈区地址，整体拷进变量槽。

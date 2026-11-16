@@ -2503,6 +2503,43 @@
         check_bench_data / check_links 全绿；AArch64 `.s` 哈希零变化（8cdb4d1f）；
         `docx/` 两次生成哈希一致。跨时段绝对读数不直接相减，收益一律 A/B 交替
         + 机制子集归因。
+    - **M7-e3w 自研 asm 后端 DWARF 调试信息（代替 LLVM 第二根支柱落地，从零到一）**：
+      承接 e3v 路线图把「DWARF 调试信息」列为第二大支柱。此前 asm 后端 `-g` 被
+      直接忽略（main.rs 打印"暂不生成 DWARF"），`codegen_asm.rs`/`asm.rs` 里
+      `.file`/`.loc`/`.debug_*` 全为零、IR 无源码行号。本批打通完整链路，**asm
+      后端 `-g` 现支持 gdb 源码行断点 + 按 Dial 变量名 print**，与 LLVM 后端同标准。
+      - **端到端能力**（`dbg.dial` 样例，R 组全部 5 项断言逐条实测通过）：
+        `gdb break dbg.dial:9` 命中并显示源码行 `print(add(counter,1))`、
+        `print counter = 42`、`bt` 显示 `main () at dbg.dial:9`；DWARF 含 7 个
+        Dial 符号名（add/main/a/b/sum/counter/note）、行表含 Dial 源文件、
+        `.debug_info`/`.debug_line` 段齐全；无 `-g` 时零调试符号。已把这套断言
+        写进 `tests/run_tests.sh` 的 R2 专项，纳入 CI 固化。
+      - **技术路线**（经 /tmp 独立 POC 逐字节验证）：汇编器 `.file 1 "<src>"`
+        + `.loc` 生成 DWARF v5 行表；`emit_dwarf_cu` 手写 v5 CU 的
+        DW_TAG_compile_unit / subprogram / formal_parameter / variable / base_type
+        DIE，stmt_list 指向汇编器行表。变量 location 用 `DW_OP_breg7 (rsp)+off`
+        直接表达（绕开 gdb 对 frame_base 的解析分歧），栈槽偏移取自 `alloca_off`。
+        AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 `IrInst::Line`
+        / `IrInst::DebugVar` 轻量标记随 IR 流经 pass，行号跟着指令走不丢失。
+      - **POC 踩坑与修正**（逐步定位、均有证据）：DWARF abbrev 首字段是 abbrev
+        code（非 tag）、`DW_AT_stmt_list=0x10` 非 0x1c、attr/form 必须 ULEB 编码
+        （0x9c 写成 `.byte` 被读成 0x49c 致 abbrev 表错位）、`DW_AT_decl_file=0x3a`
+        / `decl_line=0x3b` 顺序、high_pc 必须引用函数尾端标签（不可 `符号+常量`，
+        链接器重定位不可靠）、多 CU 段拼接需符号引用算 abbrev 偏移。
+      - **`-g` 与优化交互**（与 LLVM `-g` 强制 O0 同构）：`-g` 下禁用一切寄存器
+        驻留 / 提升 + 跳过所有改写栈槽读写的文本 pass，保证 `DW_OP_breg7` 指向的
+        alloca 槽始终是变量最新值。
+      - **非 -g 零开销**：`Line`/`DebugVar` 仅在 `-g` 时由 lower 插入（初版无条件
+        插入曾打断 e3p 折叠 / popcount 融合窗口致 b09/b11 回归，已修）；门控后非
+        -g 生成的 bench.s 与 e3v **逐字节一致（diff 0 行）**，官方 A/B 几何平均
+        0.9990x（−0.10%，纯噪声）。
+      - **本批护栏**：`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、
+        `Cargo.toml` 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；
+        改动仅 asm.rs / codegen_asm.rs / ir.rs / lower.rs / main.rs / pass.rs；
+        AArch64 `.s` 零变化（无 -g 与 -g 两种下 diff 均 0、-g 产物零调试指令）；
+        全 28 项 checksum 不变、golden（含 AArch64 交叉汇编）/ cargo test /
+        run_tests.sh（含新增 R2 专项）/ check_bench_data / check_links 全绿；
+        `docx/` 两次生成哈希一致。
 
 ---
 

@@ -344,6 +344,8 @@ fn subst_inst(inst: &mut IrInst, from: VReg, to: VReg) {
             if let Value::Reg(r) = argc { if *r == from { *argc = Value::Reg(to); } }
             if let Value::Reg(r) = argv { if *r == from { *argv = Value::Reg(to); } }
         }
+        IrInst::Line(..) => {} // M7-e3w：行标记无寄存器操作数
+        IrInst::DebugVar { slot, .. } => { if *slot == from { *slot = to; } }
     }
 }
 

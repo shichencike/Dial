@@ -193,6 +193,15 @@ pub enum IrInst {
     StructRelease { ptr: VReg, struct_name: String },
     /// 调用 `dial_env_init(argc, argv)`（main 入口首句）。
     EnvInit { argc: Value, argv: Value },
+    /// M7-e3w：源码行标记（仅 -g 调试用）。不产生任何机器码，发射期遇到它
+    /// 就更新当前 `.loc`（行号跟着指令走，pass 重排后仍落在正确位置）。
+    /// 非 -g 编译时发射器直接跳过，零开销。行号来自 AST 的 Stmt.line。
+    Line(u32),
+    /// M7-e3w：局部变量声明标记（仅 -g 调试用）。不产生机器码，携带变量名 +
+    /// 其所在栈槽 vreg + 声明行，供发射期生成 DW_TAG_variable 的
+    /// DW_AT_name / DW_AT_location(DW_OP_fbreg)。slot 指向的 Alloca 在 -g 下
+    /// 必定留在栈槽（驻留被禁用），location 用 alloca_off[slot] 表达。
+    DebugVar { name: String, slot: VReg, line: u32 },
 }
 
 impl IrInst {
@@ -219,7 +228,8 @@ impl IrInst {
             | IrInst::RcRelease { .. }
             | IrInst::StructRetain { .. }
             | IrInst::StructRelease { .. }
-            | IrInst::EnvInit { .. } => false,
+            | IrInst::EnvInit { .. }
+            | IrInst::Line(..) | IrInst::DebugVar { .. } => false,
         }
     }
 
@@ -245,7 +255,8 @@ impl IrInst {
             | IrInst::RcRelease { .. }
             | IrInst::StructRetain { .. }
             | IrInst::StructRelease { .. }
-            | IrInst::EnvInit { .. } => None,
+            | IrInst::EnvInit { .. }
+            | IrInst::Line(..) | IrInst::DebugVar { .. } => None,
         }
     }
 
@@ -267,6 +278,8 @@ impl IrInst {
                 for a in args { push_val(*a, out); }
             }
             IrInst::EnvInit { argc, argv } => { push_val(*argc, out); push_val(*argv, out); }
+            IrInst::Line(..) => {}
+            IrInst::DebugVar { slot, .. } => out.push(*slot),
         }
     }
 
@@ -286,6 +299,8 @@ impl IrInst {
             IrInst::PtrAdd { base, off, .. } => *base == v || *off == Value::Reg(v),
             IrInst::LeaLabel { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => false,
             IrInst::EnvInit { argc, argv } => *argc == Value::Reg(v) || *argv == Value::Reg(v),
+            IrInst::Line(..) => false,
+            IrInst::DebugVar { .. } => false,
         }
     }
 }
@@ -330,6 +345,8 @@ pub struct IrFunction {
     pub param_slots: Vec<VReg>,
     /// vreg → 类型（单一赋值，便于分配器 / 类型推导 / 宽度选择）。
     pub reg_ty: Vec<IrType>,
+    /// M7-e3w：函数声明的源码行（AST Func.line），-g 时写入 DW_AT_decl_line。
+    pub decl_line: u32,
 }
 
 impl IrFunction {
@@ -337,6 +354,7 @@ impl IrFunction {
         IrFunction {
             name, params, ret, linkage,
             blocks: Vec::new(), entry: 0, param_slots: Vec::new(), reg_ty: Vec::new(),
+            decl_line: 0,
         }
     }
     /// 申请一个新 vreg，记录其类型。

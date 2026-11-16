@@ -1516,6 +1516,49 @@ else
     rbad "-g 与 --fast 同用异常"; sed 's/^/       /' "${RDIR}/fast.log" | tail -12
 fi
 
+# ---- R2) 自研 asm 后端 -g 的 DWARF（M7-e3w，支柱②）----
+# 验证 asm 后端也能源码级断点 + print 变量名，与 LLVM 后端同标准。
+if "$DIALC" build "${RDIR}/dbg.dial" --backend asm -g -o "${RDIR}/dbg_asm" >"${RDIR}/asmdbg.log" 2>&1 \
+   && [ "$("${RDIR}/dbg_asm")" = "43" ]; then
+    rpass "asm 后端 -g 编译且运行输出不变（43）"
+else
+    rbad "asm 后端 -g 编译/运行失败"; sed 's/^/       /' "${RDIR}/asmdbg.log" | tail -12
+fi
+if [ -n "$DDUMP" ] && [ -f "${RDIR}/dbg_asm" ]; then
+    admiss=""
+    for sym in add main a b sum counter note; do
+        "$DDUMP" --debug-info "${RDIR}/dbg_asm" 2>/dev/null | grep -q "DW_AT_name.*\"${sym}\"" \
+          || admiss="${admiss} ${sym}"
+    done
+    if [ -z "$admiss" ]; then rpass "asm 后端 DWARF 含 Dial 函数名 / 形参名 / 局部变量名"
+    else rbad "asm 后端 DWARF 缺符号:${admiss}"; fi
+    if "$DDUMP" --debug-line "${RDIR}/dbg_asm" 2>/dev/null | grep -q 'dbg.dial'; then
+        rpass "asm 后端 DWARF 行表含 Dial 源文件"
+    else rbad "asm 后端 DWARF 行表缺 Dial 源文件"; fi
+fi
+if command -v gdb >/dev/null 2>&1 && [ -f "${RDIR}/dbg_asm" ]; then
+    gdb -q -batch -ex "set pagination off" \
+        -ex "break ${RDIR}/dbg.dial:9" -ex "run" \
+        -ex "print counter" -ex "bt" \
+        "${RDIR}/dbg_asm" > "${RDIR}/gdb_asm.log" 2>&1
+    if grep -qF '$1 = 42' "${RDIR}/gdb_asm.log" \
+       && grep -qF 'Breakpoint 1, main () at' "${RDIR}/gdb_asm.log"; then
+        rpass "asm 后端 GDB 按源码行断点命中且 print counter = 42"
+    else
+        rbad "asm 后端 GDB 断点/print 失败"; sed 's/^/       /' "${RDIR}/gdb_asm.log" | tail -16
+    fi
+    if grep -q 'dbg.dial:9' "${RDIR}/gdb_asm.log"; then
+        rpass "asm 后端 GDB backtrace 显示 Dial 源码行"
+    else rbad "asm 后端 GDB backtrace 缺源码行"; fi
+fi
+# 负向：无 -g 时 asm 后端不应混入 Dial 调试符号
+if "$DIALC" build "${RDIR}/dbg.dial" --backend asm -o "${RDIR}/plain_asm" >/dev/null 2>&1 \
+   && [ -n "$DDUMP" ]; then
+    if "$DDUMP" --debug-line "${RDIR}/plain_asm" 2>/dev/null | grep -q 'dbg.dial'; then
+        rbad "asm 后端无 -g 也混入 Dial 行号"
+    else rpass "asm 后端无 -g 时不产 Dial 调试符号（零开销）"; fi
+fi
+
 
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验

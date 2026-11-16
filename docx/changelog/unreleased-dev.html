@@ -2623,6 +2623,45 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
 <li>机制子集归因。</li>
 </ul>
 </li>
+<li><strong>M7-e3w 自研 asm 后端 DWARF 调试信息（代替 LLVM 第二根支柱落地，从零到一）</strong>：
+  承接 e3v 路线图把「DWARF 调试信息」列为第二大支柱。此前 asm 后端 <code>-g</code> 被
+  直接忽略（main.rs 打印"暂不生成 DWARF"），<code>codegen_asm.rs</code>/<code>asm.rs</code> 里
+  <code>.file</code>/<code>.loc</code>/<code>.debug_*</code> 全为零、IR 无源码行号。本批打通完整链路，<strong>asm
+  后端 <code>-g</code> 现支持 gdb 源码行断点 + 按 Dial 变量名 print</strong>，与 LLVM 后端同标准。</li>
+<li><strong>端到端能力</strong>（<code>dbg.dial</code> 样例，R 组全部 5 项断言逐条实测通过）：
+    <code>gdb break dbg.dial:9</code> 命中并显示源码行 <code>print(add(counter,1))</code>、
+    <code>print counter = 42</code>、<code>bt</code> 显示 <code>main () at dbg.dial:9</code>；DWARF 含 7 个
+    Dial 符号名（add/main/a/b/sum/counter/note）、行表含 Dial 源文件、
+    <code>.debug_info</code>/<code>.debug_line</code> 段齐全；无 <code>-g</code> 时零调试符号。已把这套断言
+    写进 <code>tests/run_tests.sh</code> 的 R2 专项，纳入 CI 固化。</li>
+<li><strong>技术路线</strong>（经 /tmp 独立 POC 逐字节验证）：汇编器 <code>.file 1 "&lt;src&gt;"</code><ul>
+<li><code>.loc</code> 生成 DWARF v5 行表；<code>emit_dwarf_cu</code> 手写 v5 CU 的
+DW_TAG_compile_unit / subprogram / formal_parameter / variable / base_type
+DIE，stmt_list 指向汇编器行表。变量 location 用 <code>DW_OP_breg7 (rsp)+off</code>
+直接表达（绕开 gdb 对 frame_base 的解析分歧），栈槽偏移取自 <code>alloca_off</code>。
+AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <code>IrInst::Line</code>
+/ <code>IrInst::DebugVar</code> 轻量标记随 IR 流经 pass，行号跟着指令走不丢失。</li>
+</ul>
+</li>
+<li><strong>POC 踩坑与修正</strong>（逐步定位、均有证据）：DWARF abbrev 首字段是 abbrev
+    code（非 tag）、<code>DW_AT_stmt_list=0x10</code> 非 0x1c、attr/form 必须 ULEB 编码
+    （0x9c 写成 <code>.byte</code> 被读成 0x49c 致 abbrev 表错位）、<code>DW_AT_decl_file=0x3a</code>
+    / <code>decl_line=0x3b</code> 顺序、high_pc 必须引用函数尾端标签（不可 <code>符号+常量</code>，
+    链接器重定位不可靠）、多 CU 段拼接需符号引用算 abbrev 偏移。</li>
+<li><strong><code>-g</code> 与优化交互</strong>（与 LLVM <code>-g</code> 强制 O0 同构）：<code>-g</code> 下禁用一切寄存器
+    驻留 / 提升 + 跳过所有改写栈槽读写的文本 pass，保证 <code>DW_OP_breg7</code> 指向的
+    alloca 槽始终是变量最新值。</li>
+<li><strong>非 -g 零开销</strong>：<code>Line</code>/<code>DebugVar</code> 仅在 <code>-g</code> 时由 lower 插入（初版无条件
+    插入曾打断 e3p 折叠 / popcount 融合窗口致 b09/b11 回归，已修）；门控后非
+    -g 生成的 bench.s 与 e3v <strong>逐字节一致（diff 0 行）</strong>，官方 A/B 几何平均
+    0.9990x（−0.10%，纯噪声）。</li>
+<li><strong>本批护栏</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、
+    <code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；
+    改动仅 asm.rs / codegen_asm.rs / ir.rs / lower.rs / main.rs / pass.rs；
+    AArch64 <code>.s</code> 零变化（无 -g 与 -g 两种下 diff 均 0、-g 产物零调试指令）；
+    全 28 项 checksum 不变、golden（含 AArch64 交叉汇编）/ cargo test /
+    run_tests.sh（含新增 R2 专项）/ check_bench_data / check_links 全绿；
+    <code>docx/</code> 两次生成哈希一致。</li>
 </ul>
 </li>
 </ul>

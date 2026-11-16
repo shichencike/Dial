@@ -46,10 +46,17 @@ pub fn compile_asm(
     structs: StructTable,
     goto_depths: HashMap<String, usize>,
     obj_path: &Path,
+    debug_info: bool,
+    src_path: &str,
 ) -> Result<(), String> {
     let target = detect_target()?;
+    // M7-e3w：gdb 源码断点用绝对路径（与 LLVM 后端 DW_AT_name 一致）。
+    // canonicalize 失败（如虚拟路径）时退回原字符串，不致命。
+    let src_abs = fs::canonicalize(src_path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| src_path.to_string());
 
-    let mut ip = lower::lower_program(prog, functions, structs, goto_depths)?;
+    let mut ip = lower::lower_program(prog, functions, structs, goto_depths, debug_info)?;
     pass::run_passes(&mut ip);
     // M7-e3p：过程间常量折叠（纯整数函数调用编译期求值）。
     // 仅 x86-64 启用：AArch64 保持既有发射路径，`.s` 零变化。
@@ -60,7 +67,7 @@ pub fn compile_asm(
     if matches!(target, EmitTarget::X86_64SysV) {
         pass::ivr_strength_reduce(&mut ip);
     }
-    let asm_text = codegen_asm::emit(&ip, target)?;
+    let asm_text = codegen_asm::emit(&ip, target, debug_info, &src_abs)?;
 
     let s_path = obj_path.with_extension("s");
     fs::write(&s_path, asm_text)

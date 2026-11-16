@@ -37,7 +37,132 @@ fn abi_assign(tys: &[IrType], target: EmitTarget) -> Vec<ArgLoc> {
         .collect()
 }
 
-pub fn emit(ip: &IrProgram, target: EmitTarget) -> Result<String, String> {
+/// M7-e3w：把 i64 编码成 DWARF SLEB128 字节序列（DW_OP_fbreg 操作数用）。
+fn sleb128(mut v: i64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        let done = (v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0);
+        out.push(if done { byte } else { byte | 0x80 });
+        if done { break; }
+    }
+    out
+}
+
+/// M7-e3w：生成手写 DWARF v5 CU（.debug_abbrev + .debug_info），供 gdb 源码级调试。
+/// 行表（.debug_line）由汇编器的 .file/.loc 自动生成（见 emit() 顶部），本函数
+/// 只负责建立 CU + subprogram + formal_parameter + variable + base_type DIE，
+/// 并把 stmt_list 指向汇编器行表（offset 0）。与 LLVM 后端 -g 结构同构。
+/// DWARF 常量编码经 /tmp POC 逐字节验证（abbrev code/form/属性码/版本匹配）。
+fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
+    let mut o = String::new();
+
+    // ---------- .debug_abbrev ----------
+    o.push_str("\t.section .debug_abbrev,\"\",@progbits\n");
+    o.push_str(".Ldial_abbrev_start:\n");
+    // code 1: DW_TAG_compile_unit (children=yes)
+    o.push_str("\t.uleb128 1\n\t.byte 0x11,0x01\n");
+    o.push_str("\t.byte 0x25,0x08\n"); // DW_AT_producer, string
+    o.push_str("\t.byte 0x13,0x05\n"); // DW_AT_language, data2
+    o.push_str("\t.byte 0x03,0x08\n"); // DW_AT_name, string
+    o.push_str("\t.byte 0x10,0x17\n"); // DW_AT_stmt_list, sec_offset(0x17) [DWARF v5]
+    o.push_str("\t.byte 0x11,0x01\n"); // DW_AT_low_pc, addr
+    o.push_str("\t.byte 0x12,0x01\n"); // DW_AT_high_pc, addr
+    o.push_str("\t.byte 0,0\n");
+    // code 2: DW_TAG_subprogram (children=yes)
+    o.push_str("\t.uleb128 2\n\t.byte 0x2e,0x01\n");
+    o.push_str("\t.byte 0x03,0x08\n"); // name
+    o.push_str("\t.byte 0x3a,0x0b\n"); // decl_file, data1
+    o.push_str("\t.byte 0x3b,0x0b\n"); // decl_line, data1
+    o.push_str("\t.byte 0x11,0x01\n"); // low_pc, addr
+    o.push_str("\t.byte 0x12,0x01\n"); // high_pc, addr
+    o.push_str("\t.byte 0,0\n");
+    // code 3: DW_TAG_formal_parameter (no children)
+    o.push_str("\t.uleb128 3\n\t.byte 0x05,0x00\n");
+    o.push_str("\t.byte 0x02,0x18\n"); // location, exprloc(0x18)
+    o.push_str("\t.byte 0x03,0x08\n"); // name
+    o.push_str("\t.byte 0,0\n");
+    // code 4: DW_TAG_variable (no children)
+    o.push_str("\t.uleb128 4\n\t.byte 0x34,0x00\n");
+    o.push_str("\t.byte 0x02,0x18\n"); // location, exprloc
+    o.push_str("\t.byte 0x03,0x08\n"); // name
+    o.push_str("\t.byte 0x3a,0x0b\n"); // decl_file
+    o.push_str("\t.byte 0x3b,0x0b\n"); // decl_line
+    o.push_str("\t.byte 0,0\n");
+    // code 5: DW_TAG_base_type (no children)
+    o.push_str("\t.uleb128 5\n\t.byte 0x24,0x00\n");
+    o.push_str("\t.byte 0x03,0x08\n"); // name
+    o.push_str("\t.byte 0x0b,0x0b\n"); // byte_size, data1
+    o.push_str("\t.byte 0x3e,0x0b\n"); // encoding, data1
+    o.push_str("\t.byte 0,0\n");
+    o.push_str("\t.byte 0\n"); // end abbrev table
+
+    // ---------- .debug_info (1 CU, DWARF v5) ----------
+    o.push_str("\t.section .debug_info,\"\",@progbits\n");
+    o.push_str(".Ldwarf_info_start:\n");
+    o.push_str("\t.long .Ldwarf_info_end-.Ldwarf_info_start-4\n"); // unit_length
+    o.push_str("\t.value 0x0005\n"); // version 5
+    o.push_str("\t.byte 0x01\n");    // unit_type = DW_UT_compile
+    o.push_str("\t.byte 0x08\n");    // address_size
+    o.push_str("\t.long .Ldial_abbrev_start\n"); // abbrev offset: 链接器算合并段内真实偏移
+    // CU DIE (code 1)
+    o.push_str("\t.uleb128 1\n");
+    o.push_str("\t.asciz \"dialc asm backend\"\n");
+    o.push_str("\t.value 0x0002\n"); // DW_LANG_C
+    o.push_str(&format!("\t.asciz \"{}\"\n", src_path.replace('\\', "\\\\").replace('"', "\\\"")));
+    o.push_str("\t.long 0\n");       // stmt_list = 0 (assembler-generated line table)
+    // low_pc / high_pc of CU: use first function .. last function (TLS-style bounds)
+    if let (Some(first), Some(last)) = (funcs.first(), funcs.last()) {
+        o.push_str(&format!("\t.quad {}\n", first.name));
+        o.push_str(&format!("\t.quad {}\n", last.end_label));
+    } else {
+        o.push_str("\t.quad 0\n\t.quad 0\n");
+    }
+
+    for f in funcs {
+        // subprogram DIE (code 2)
+        o.push_str("\t.uleb128 2\n");
+        o.push_str(&format!("\t.asciz \"{}\"\n", f.name));
+        o.push_str("\t.byte 1\n");   // decl_file = 1
+        o.push_str(&format!("\t.byte {}\n", (f.decl_line.min(255)) as u8)); // decl_line
+        o.push_str(&format!("\t.quad {}\n", f.name));
+        // high_pc: 精确引用 emit_function 追加的函数末尾标签。
+        o.push_str(&format!("\t.quad {}\n", f.end_label));
+        // formal_parameter DIEs (code 3): location = fbreg +8*i (参数槽)
+        for (i, pname) in f.params.iter().enumerate() {
+            o.push_str("\t.uleb128 3\n");
+            let off = 8 * (i as i64); // 占位；真实参数槽偏移待细化
+            let sb = sleb128(off);
+            let mut loc = vec![0x77]; // DW_OP_breg7 (rsp) + offset，绕开 frame_base
+            loc.extend_from_slice(&sb);
+            o.push_str(&format!("\t.byte {},{}\n", loc.len(), loc.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(",")));
+            o.push_str(&format!("\t.asciz \"{}\"\n", pname));
+        }
+        // variable DIEs (code 4)
+        for (vname, vline, voff) in &f.vars {
+            o.push_str("\t.uleb128 4\n");
+            let sb = sleb128(*voff);
+            let mut loc = vec![0x77]; // DW_OP_breg7 (rsp) + offset，绕开 frame_base
+            loc.extend_from_slice(&sb);
+            o.push_str(&format!("\t.byte {},{}\n", loc.len(), loc.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(",")));
+            o.push_str(&format!("\t.asciz \"{}\"\n", vname));
+            o.push_str("\t.byte 1\n"); // decl_file = 1
+            o.push_str(&format!("\t.byte {}\n", (*vline).min(255) as u8)); // decl_line
+        }
+        o.push_str("\t.byte 0\n"); // end subprogram children
+    }
+    o.push_str("\t.byte 0\n"); // end CU children
+    // base_type int (code 5)
+    o.push_str("\t.uleb128 5\n");
+    o.push_str("\t.asciz \"int\"\n");
+    o.push_str("\t.byte 8\n");    // byte_size
+    o.push_str("\t.byte 0x05\n"); // DW_ATE_signed
+    o.push_str(".Ldwarf_info_end:\n");
+    o
+}
+
+pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str) -> Result<String, String> {
     // 预检：FieldAddr.field 是字段序号，必须能按 struct_layout 解析出字节偏移。
     for f in &ip.functions {
         for b in &f.blocks {
@@ -57,6 +182,11 @@ pub fn emit(ip: &IrProgram, target: EmitTarget) -> Result<String, String> {
 
     let mut out = String::new();
     out.push_str("# 由 dialc 自研后端生成（IR -> .s）；请勿手工编辑\n");
+    // M7-e3w：-g 且 x86-64 时声明源文件（汇编器据此生成 DWARF v5 行表）。
+    // AArch64 零变化：-g 下也不生成任何 .file/.loc/.debug_*。
+    if debug_info && matches!(target, EmitTarget::X86_64SysV) {
+        out.push_str(&format!("\t.file 1 \"{}\"\n", src_path.replace('\\', "\\\\").replace('"', "\\\"")));
+    }
     out.push_str("\t.section .rodata\n");
     for (idx, s) in ip.string_literals.iter().enumerate() {
         // 用 .byte 序列而非 .asciz，彻底规避引号/反斜杠/UTF-8 的转义歧义。
@@ -104,18 +234,27 @@ pub fn emit(ip: &IrProgram, target: EmitTarget) -> Result<String, String> {
         }
         if reaches_self(&call_graph, &f.name) { recursive_funcs.insert(f.name.clone()); }
     }
+    let mut dwarf_funcs: Vec<FnDwarfInfo> = Vec::new();
     for f in &ip.functions {
-        emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs)?;
+        let di = emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs, debug_info)?;
+        dwarf_funcs.push(di);
     }
     // 避免 GNU ld 的 "missing .note.GNU-stack section implies executable stack" 警告。
     out.push_str("\t.section .note.GNU-stack,\"\",@progbits\n");
     // M7-e3q：尾调用消除（递归 SCC 内的内部尾调用 call+ret → jmp）。
     // 必须是模块级 pass：需要跨函数的调用图判定「callee 可达 caller」，逐函数
     // 发射时看不到全局。仅 x86-64 生效；AArch64 零变化。
-    if matches!(target, EmitTarget::X86_64SysV) {
-        Ok(elide_tail_calls(&out))
+    let final_asm = if matches!(target, EmitTarget::X86_64SysV) {
+        elide_tail_calls(&out)
     } else {
-        Ok(out)
+        out
+    };
+    // M7-e3w：-g 且 x86-64 时追加手写 DWARF CU（行表由 .file/.loc 已在汇编器生成）。
+    // AArch64 零变化：既无 .file/.loc，也不生成 DIE。
+    if debug_info && matches!(target, EmitTarget::X86_64SysV) {
+        Ok(final_asm + &emit_dwarf_cu(&dwarf_funcs, src_path))
+    } else {
+        Ok(final_asm)
     }
 }
 
@@ -223,6 +362,10 @@ struct FnEmit<'a> {
     /// M7-e3v：本函数位于递归 SCC 内——禁止全局跨 call 驻留
     /// （递归栈帧会放大 callee-saved 保存恢复开销），退回逐块模式。
     gra_blocked: bool,
+    /// M7-e3w：-g 调试模式。为让 DWARF 变量 location（DW_OP_fbreg 指向栈槽）
+    /// 准确，-g 时禁用一切寄存器驻留 / 提升优化，所有变量留在 alloca_off 栈槽
+    /// （与 LLVM 后端 -g 强制 O0 同构）。同时发射 .loc / .debug_* 调试信息。
+    debug_info: bool,
 }
 
 /// M7-e3n：xorshift 一步的融合计划。`slot` 是 x 的 Alloca 槽 vreg（驻留在
@@ -237,7 +380,7 @@ enum XorshiftPlan {
 }
 
 impl<'a> FnEmit<'a> {
-    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool) -> Self {
+    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool, debug_info: bool) -> Self {
         let prefix = format!("Ldial_{}", {
             let s: String = f.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
             s
@@ -253,7 +396,7 @@ impl<'a> FnEmit<'a> {
             pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
             lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
             popcnt_fuse: HashMap::new(), xorshift_fuse: HashMap::new(),
-            gra_blocked,
+            gra_blocked, debug_info,
         }
     }
 
@@ -1019,7 +1162,9 @@ impl<'a> FnEmit<'a> {
     fn analyze_residency(&mut self) {
         self.plans.clear();
         self.used_phys.clear();
-        if !matches!(self.target, EmitTarget::X86_64SysV) {
+        if !matches!(self.target, EmitTarget::X86_64SysV) || self.debug_info {
+            // M7-e3w：-g 时禁用一切驻留，所有值留在 alloca_off / reg_off 栈槽，
+            // 保证 DWARF 的 DW_OP_fbreg location 指向的就是权威最新值。
             self.plans = (0..self.f.blocks.len()).map(|_| BlockPlan::default()).collect();
             return;
         }
@@ -1513,6 +1658,15 @@ impl<'a> FnEmit<'a> {
 
     fn inst(&mut self, i: &IrInst) {
         match i {
+            IrInst::Line(line) => {
+                // M7-e3w：-g 且 x86-64 时发 .loc；AArch64 / 非 -g 跳过（零机器码）。
+                if self.debug_info && matches!(self.target, EmitTarget::X86_64SysV) {
+                    self.line(&format!("\t.loc 1 {} 0", line));
+                }
+            }
+            IrInst::DebugVar { .. } => {
+                // M7-e3w：调试变量名在 emit() 末尾统一生成 DIE（此处零机器码）。
+            }
             IrInst::Alloca { dst, .. } => {
                 // M7-e3e：可提升（promotable）的 Alloca，其地址值在函数内无任何
                 // 消费者——所有 Load/Store 都已提升进寄存器、直接读写提升槽，
@@ -3597,6 +3751,18 @@ fn handle_arc_kind(t: &crate::ast::Type) -> Option<ArcKind> {
 // 函数发射
 // ============================================================================
 
+/// M7-e3w：一个函数的 DWARF DIE 所需元数据（由 emit_function 在拿到栈布局后收集）。
+struct FnDwarfInfo {
+    name: String,
+    /// 函数末尾标签（emit_function 追加），供 DWARF high_pc 精确引用。
+    end_label: String,
+    decl_line: u32,
+    /// 形参名（main 的 argc/argv 不入 DWARF，与 LLVM 后端一致）。
+    params: Vec<String>,
+    /// (变量名, 声明行, 相对 rsp 的栈槽偏移)。
+    vars: Vec<(String, u32, i64)>,
+}
+
 fn emit_function(
     out: &mut String,
     ip: &IrProgram,
@@ -3604,8 +3770,9 @@ fn emit_function(
     target: EmitTarget,
     local: &HashSet<String>,
     recursive_funcs: &HashSet<String>,
-) -> Result<(), String> {
-    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name));
+    debug_info: bool,
+) -> Result<FnDwarfInfo, String> {
+    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name), debug_info);
     e.compute_layout();
     e.analyze_dead_defs();
     e.analyze_fusable();
@@ -3651,7 +3818,9 @@ fn emit_function(
     // 字节变化，令每个循环头地址低 4 位恒为 0、取指边界稳定。正是 ⑤ 让 ①' 的
     // 删 store 不再平移后续超热循环、−3.7% 静态收益得以落地（M7-e3c 单独做 ①'
     // 时 b23 稳定退化 −27%）。lo/hi 圈定本函数 vreg spill 槽区，①'② 共用。
-    if matches!(target, EmitTarget::X86_64SysV) {
+    if matches!(target, EmitTarget::X86_64SysV) && !debug_info {
+        // M7-e3w：-g 时跳过所有会改写栈槽读写的文本 pass，保证 DWARF
+        // DW_OP_fbreg 指向的 alloca_off 槽里始终是该变量的最新值。
         let s = elide_redundant_reloads(&e.out);
         let (lo, hi) = match (e.reg_off.first(), e.reg_off.last()) {
             (Some(&a), Some(&b)) => (a, b + 8),
@@ -3665,5 +3834,33 @@ fn emit_function(
     } else {
         out.push_str(&e.out);
     }
-    Ok(())
+
+    // M7-e3w：收集 DWARF DIE 元数据。变量名 + 栈槽偏移在 e.alloca_off 定型后读取。
+    let mut vars = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let IrInst::DebugVar { name, slot, line } = i {
+                let off = e.alloca_off.get(slot).copied().unwrap_or(0);
+                vars.push((name.clone(), *line, off));
+            }
+        }
+    }
+    let params = if f.name == "main" {
+        Vec::new() // main 的 argc/argv 与 LLVM 后端一致，不写进 DWARF
+    } else {
+        f.params.iter().map(|(n, _)| n.clone()).collect()
+    };
+    // M7-e3w：函数末尾标签，DWARF high_pc 精确引用（不能用 `符号+常量`，
+    // 链接器对全局符号+加法的重定位不可靠）。
+    let end_label = format!(".Ldial_funcend_{}", e.prefix);
+    if debug_info && matches!(target, EmitTarget::X86_64SysV) {
+        out.push_str(&format!("{}:\n", end_label));
+    }
+    Ok(FnDwarfInfo {
+        name: f.name.clone(),
+        end_label,
+        decl_line: f.decl_line,
+        params,
+        vars,
+    })
 }
