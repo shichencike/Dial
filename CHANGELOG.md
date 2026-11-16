@@ -2185,6 +2185,78 @@
         `bench/bench.s` 同步为 M7-e3p 版。跨时段绝对读数不直接相减，收益
         一律以 A/B 交替相对改善为准。
 
+    - **M7-e3q 尾调用消除（sibling call / tail-call elimination）：递归尾调用
+      `call+ret` 转 `jmp`**（补齐 LLVM `-O` 的 tailcallelim；递归类最后一个
+      非常量实参真短板 b12 从落后 LLVM 变为**大幅反超**，asm↔LLVM b12
+      1.078x → 0.663x、全 28 项几何平均 0.5604x → 0.5476x 历史新低；
+      A/B 三轮 b12 +64.0~64.8% 稳定、几何均值 +1.72~2.17%）：
+      承接 e3p「非常量实参递归需另寻机制」的结论。b12 的 evR/odR 是
+      `return 对方(n-1)` 的**纯尾互递归**，实参 `k%60+1` 非常量故不被 e3p
+      折叠；自研后端为函数级 Return 发射固定序列
+      `call <callee>; addq $N,%rsp; ret`——每层递归压一次栈帧、留一层
+      call/ret，而 LLVM 默认把尾调用转成 sibling call（jmp），直接在同一个
+      栈帧上执行并由被调方的 ret 返回到本函数调用者。这是 LLVM/Clang 标准
+      优化里我们长期缺失的一项，也是 b12 落后 LLVM 的机制根因。
+      - **实现位置**：`src/codegen_asm.rs` 新增模块级纯文本 pass
+        `elide_tail_calls`（约 170 行），在 `emit()` 把全部函数发射完、加完
+        `.note.GNU-stack` 之后对整段 `.s` 运行一次（必须是模块级——需要跨
+        函数**调用图**判定「callee 可达 caller」，逐函数发射时看不到全局；
+        开发中首次误挂在 `emit_function` 内因 `fn_starts.len()<2` 空转，已修正）。
+        仅 `matches!(target, EmitTarget::X86_64SysV)` 调用；AArch64 走原路径、
+        `.s` 逐字节不变。受保护的 `codegen.rs` / `ast.rs` 零改动（`pass.rs` /
+        `asm.rs` 本批未动）。
+      - **变换**：`call G / addq $N,%rsp / ret` → `addq $N,%rsp / jmp G`。
+        `addq` 销毁本函数栈帧后 rsp 恰好回到「入口刚被 call 压入返回地址」
+        的状态，`jmp G` 令 G 在同级栈帧执行、其 ret 直接返回到本函数调用者，
+        省去一层 call/ret 与逐层栈帧累积。净省 5B/处（call 5B + ret 1B →
+        jmp 5B），evR/odR 各一处、`.text` 71083 → 71071B。
+      - **严格白名单（任一不满足即整处不动）**：① 仅 x86-64；② prologue
+        形如 `subq $N,%rsp` 且**无 callee-saved 栈保存**（有则 epilogue 会先
+        恢复再 ret，jmp 跳过恢复会破坏调用者的 callee-saved）；③ `call G`
+        为内部 Dial 函数（无 @PLT / 非 .L），实参全在寄存器；④ `addq $N`
+        的 N 与 prologue subq 逐字相等；⑤ `ret` 紧随 addq、为 Return 块结尾；
+        ⑥ G 与本函数在**同一递归 SCC**（G 可达本函数入口）——只消递归尾调用，
+        绝不碰 `run→bXX` 一次性 dispatch（29 处候选中 27 处 run dispatch 被排除）；
+        ⑦ 双方参数保存数一致且 ≤6（调用约定兼容）。
+      - **命中性**：全基准仅 evR↔odR 两处命中（call odR/evR → jmp odR/evR）；
+        专项程序另验证自递归尾调用（sumTail）、深互递归（deepA/deepB 1000 层）
+        命中，**非尾递归 fib（`return fib(n-1)+fib(n-2)`）绝不命中**。
+      - **正确性专项**：tail-call 专项 15 行输出 asm / LLVM **逐字节一致**
+        （互递归奇偶 0/1/大值边界、自递归尾累加、fib 非尾对照、deepA/B
+        500/1000 层无栈溢出）；全 28 项 checksum 逐一相同；黄金门禁 10 正向
+        + 2 负例 + 默认后端 + AArch64 交叉汇编逐字节全绿；`cargo test --release`
+        全过；AArch64 OLD/NEW `.s` 逐字节一致。
+      - **静态证据**：`.s` diff 仅 evR/odR 两函数变化（各删 1 条 call、ret→jmp），
+        b01/b12/b20/b23/b24/b28/main 及全部运行时 `dial_*` **逐字节不变**。
+        因 `align_loop_headers` 的 `.p2align` padding 吸收了 evR/odR 删字节，
+        nm 显示 odR/b01 入口前移 4/8B，**b12 及之后所有函数与运行时入口
+        delta=0**——本批布局零扰动，无需 NOP PAD 补偿（与 e3k~e3p 历次需
+        补偿形成对比）。b20/b28/b23 的 ±1~3% 波动在三轮间方向不一致、且
+        其 `.s` 与入口地址均未变，归因为纯运行噪声。
+      - **A/B 原始三轮（OLD=@4b73b76 干净副本，5 采样双二进制交替）**：
+        b12 **1.645 / 1.648 / 1.640**（0.924→0.562ms，+64% 极稳），其余 27 项
+        ±1~2% 噪声带；几何均值 **1.0180 / 1.0217 / 1.0172**。布局零平移使本批
+        归因异常干净——收益全部来自 TCE 消除递归栈帧这一确定性机制。
+      - **asm↔LLVM 独立口径（同脚本连续 OLD/NEW）**：b12 **1.078x → 0.663x**
+        （从落后 LLVM 7.8% 变为反超 33.7%，递归类最后一个真真短板击穿）；
+        递归类类别几何平均 0.0305x → 0.0270x；全 28 项几何平均
+        **0.5604x → 0.5476x**、总耗时比 0.7824x → 0.7736x、胜/平/负
+        15/7/6 → 16/9/3。LLVM 侧 b12 读数稳定（0.853→0.858ms），印证 LLVM
+        路径零改动。
+      - **待观察 / 局限**：① 仅递归 SCC 内的尾调用折叠，`run→bXX` dispatch
+        与不可达回边的尾调用不优化（无收益）；② 参数保存数判定基于文本层
+        `movq %rdi..,%rsp` 计数，对超过 6 参数或非常规调用约定保守放弃；
+        ③ b12 折叠后绝对值小，倍率受 `FLOOR_MS` 影响，收益以未触底的原始
+        计时（0.924→0.562ms）与三轮 A/B 为准。
+      - **门禁**：`run_asm_golden.sh`（10 正向 + 2 负例 + 默认后端 + AArch64
+        交叉汇编）、`cargo test --release`、`tests/run_tests.sh`（AA~AF 组）
+        全绿；Rust 构建零警告；AArch64 OLD/NEW `.s` 逐字节一致。
+      - **本批护栏**：`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、
+        `Cargo.toml` 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、
+        不打 tag、全套门禁全绿、`docx/` 确定性生成无漂移、本地静态基线
+        `bench/bench.s` 同步为 M7-e3q 版。跨时段绝对读数不直接相减，收益
+        一律以 A/B 交替相对改善为准。
+
 ---
 
 ## [v1.10] — 2026-11-08

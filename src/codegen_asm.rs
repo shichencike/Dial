@@ -72,7 +72,14 @@ pub fn emit(ip: &IrProgram, target: EmitTarget) -> Result<String, String> {
     }
     // 避免 GNU ld 的 "missing .note.GNU-stack section implies executable stack" 警告。
     out.push_str("\t.section .note.GNU-stack,\"\",@progbits\n");
-    Ok(out)
+    // M7-e3q：尾调用消除（递归 SCC 内的内部尾调用 call+ret → jmp）。
+    // 必须是模块级 pass：需要跨函数的调用图判定「callee 可达 caller」，逐函数
+    // 发射时看不到全局。仅 x86-64 生效；AArch64 零变化。
+    if matches!(target, EmitTarget::X86_64SysV) {
+        Ok(elide_tail_calls(&out))
+    } else {
+        Ok(out)
+    }
 }
 
 fn align_up(x: i64, a: i64) -> i64 { (x + a - 1) / a * a }
@@ -2758,6 +2765,197 @@ fn align_loop_headers(asm: &str) -> String {
     for (i, l) in lines.iter().enumerate() {
         if heads.contains(&i) { out.push_str("\t.p2align 4\n"); }
         out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
+/// M7-e3q：x86-64 尾调用消除（sibling call / tail-call elimination）。
+///
+/// 自研后端当前为「函数级 Return」发射的固定序列是：
+/// ```text
+///   call <callee>        ; 实参已在 rdi/rsi/...（call 前由 inst_call 装好）
+///   addq $N, %rsp        ; epilogue 销毁本函数栈帧（N = prologue 的 subq 值）
+///   ret                  ; 返回到本函数调用者
+/// ```
+/// 若该 `call` 正处于尾位置（返回值不经任何加工直接 Return），则它语义上
+/// 等价于 sibling call：栈帧在跳转前销毁后，rsp 恰好回到「本函数入口刚被
+/// call 压入返回地址」的状态，此时 `jmp <callee>` 令被调方直接在同一个栈帧
+/// 上执行、并在自己的 ret 处**直接返回到本函数的调用者**——省去一层
+/// call/ret 与递归深度的栈帧累积。LLVM `-O` 的 tailcallelim / sibling-call
+/// 即做此变换，这是递归类（b12 互递归）长期落后 LLVM 的标准优化缺口。
+///
+/// 变换：`call G / addq $N,%rsp / ret` → `addq $N,%rsp / jmp G`（G 后接括号
+/// 由汇编器解析）。净省一条 call 与一条 ret，且递归不再逐层压栈。
+///
+/// **严格护栏（任一不满足即整处不动，宁可不优化，绝不发错代码）**：
+///   1. 仅 x86-64 调用本 pass（AArch64 走原路径，`.s` 逐字节不变）；
+///   2. 函数 prologue 形如 `subq $N,%rsp`，且不存在 callee-saved 寄存器的
+///      栈保存/恢复（`movq %rbx/%rbp/%r12-%r15, off(%rsp)`）——否则 epilogue
+///      先恢复它们再 ret，直接 jmp 会跳过恢复、破坏调用者的 callee-saved；
+///   3. `call G` 为内部 Dial 函数（无 `@PLT`、无 `.L` 前缀），实参全在寄存器；
+///   4. `addq $N,%rsp` 的 N 与 prologue 的 subq 值**逐字相等**；
+///   5. `ret` 紧随 addq 之后，且是该 Return 块的结尾（下一行为标签/块末）；
+///   6. G 与本函数在**同一递归 SCC**（G 可达本函数入口）——只消除递归尾调用，
+///      绝不碰 `run → bXX` 这类一次性 dispatch（无收益且徒增布局扰动）；
+///   7. 本函数与 G 的参数保存数一致且都 ≤6（保证调用约定兼容、实参寄存器布局相同）。
+///
+/// 这是「语义保持」变换：尾调用的返回值本就原样透传，jmp 后由 G 的 ret 直接
+/// 返回同一值；`xorl %eax,%eax`（变参 ABI 清零 %al）对 Dial 内部调用无意义，
+/// 保留不动不影响正确性。
+fn elide_tail_calls(asm: &str) -> String {
+    let lines: Vec<&str> = asm.lines().collect();
+    let nlines = lines.len();
+
+    // ---- ① 切分函数：顶格 `name:` 是函数入口（局部 label 以 '.' 开头，排除）。
+    let mut fn_starts: Vec<(String, usize)> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if let Some(name) = l.strip_suffix(':') {
+            if !name.starts_with('.')
+                && !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                fn_starts.push((name.to_string(), i));
+            }
+        }
+    }
+    if fn_starts.len() < 2 { return asm.to_string(); }
+    let mut bounds: Vec<(String, usize, usize)> = Vec::new();
+    for k in 0..fn_starts.len() {
+        let end = if k + 1 < fn_starts.len() { fn_starts[k + 1].1 } else { nlines };
+        bounds.push((fn_starts[k].0.clone(), fn_starts[k].1 + 1, end));
+    }
+
+    // ---- ② 每函数：栈帧大小 N、是否含 callee-saved 栈保存、内部 callee 集合。
+    #[derive(Default)]
+    struct FInfo {
+        frame: Option<i64>,
+        has_callee_saved: bool,
+        calls: Vec<String>,
+    }
+    let mut info: HashMap<String, FInfo> = HashMap::new();
+    for (name, s, e) in &bounds {
+        let mut fi = FInfo::default();
+        for l in &lines[*s..*e] {
+            let t = l.trim();
+            if fi.frame.is_none() {
+                if let Some(rest) = t.strip_prefix("subq $") {
+                    if let Some(v) = rest.split(", %rsp").next().and_then(|x| x.parse::<i64>().ok()) {
+                        fi.frame = Some(v);
+                    }
+                }
+            }
+            // callee-saved 寄存器写栈：prologue 保存（epilogue 会读回）。
+            for csr in ["%rbx", "%rbp", "%r12", "%r13", "%r14", "%r15"] {
+                if t.contains(&format!("movq {},", csr)) && t.contains("(%rsp)") {
+                    fi.has_callee_saved = true;
+                }
+            }
+            // 内部 Dial 调用：`call name`（无 @PLT / 无 .L / 合法标识符）。
+            if let Some(rest) = t.strip_prefix("call ") {
+                let callee = rest.trim();
+                if !callee.contains('@') && !callee.starts_with('.')
+                    && !callee.is_empty()
+                    && callee.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    fi.calls.push(callee.to_string());
+                }
+            }
+        }
+        info.insert(name.clone(), fi);
+    }
+
+    // ---- ③ 可达性：callee 能否回到 caller（同递归 SCC）。深度有界。
+    fn reaches(info: &HashMap<String, FInfo>, from: &str, target: &str) -> bool {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut stack: Vec<String> = vec![from.to_string()];
+        let mut steps = 0usize;
+        while let Some(cur) = stack.pop() {
+            if steps > 10_000 { return false; }
+            steps += 1;
+            if !seen.insert(cur.clone()) { continue; }
+            if let Some(fi) = info.get(&cur) {
+                for c in &fi.calls {
+                    if c == target { return true; }
+                    if !seen.contains(c) { stack.push(c.clone()); }
+                }
+            }
+        }
+        false
+    }
+
+    // ---- ④ 逐函数扫描尾调用三连并登记替换（按行号，避免索引失效）。
+    let mut drop: HashSet<usize> = HashSet::new();   // 要删除的 `call G` 行
+    let mut jmp_at: HashMap<usize, String> = HashMap::new(); // ret 行号 → 替换为 `jmp G`
+    for (name, s, e) in &bounds {
+        let fi = match info.get(name) { Some(x) => x, None => continue };
+        if fi.has_callee_saved || fi.frame.is_none() { continue; }
+        let frame = fi.frame.unwrap();
+        // 参数保存数（prologue 里 movq %rdi/%rsi/%rdx/%rcx/%r8/%r9 → 栈）。
+        let mut nparams = 0usize;
+        for l in &lines[*s..*e] {
+            let t = l.trim();
+            if ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"].iter()
+                .any(|r| t.starts_with(&format!("movq {},", r)) && t.contains("(%rsp)"))
+            {
+                nparams += 1;
+            }
+        }
+        if nparams > 6 { continue; }
+
+        let mut i = *s;
+        while i + 2 < *e {
+            let tcall = lines[i].trim();
+            let callee = match tcall.strip_prefix("call ") {
+                Some(c) if !c.contains('@') && !c.starts_with('.')
+                    && c.chars().all(|x| x.is_ascii_alphanumeric() || x == '_') => c,
+                _ => { i += 1; continue; }
+            };
+            // addq $N, %rsp 必须紧随，N 与 frame 相等。
+            let add_ok = lines[i + 1].trim()
+                .strip_prefix("addq $")
+                .and_then(|r| r.split(", %rsp").next())
+                .and_then(|x| x.parse::<i64>().ok())
+                .map_or(false, |v| v == frame);
+            let ret_ok = lines[i + 2].trim() == "ret";
+            if !add_ok || !ret_ok { i += 1; continue; }
+            // callee 必须已知、与本函数同递归 SCC、参数数一致且 ≤6。
+            let ginfo = match info.get(callee) { Some(x) => x, None => { i += 1; continue; } };
+            let gparams = {
+                let mut c = 0usize;
+                if let Some((gs, ge)) = bounds.iter().find(|(n, _, _)| n == callee).map(|(_, a, b)| (*a, *b)) {
+                    for l in &lines[gs..ge] {
+                        let tt = l.trim();
+                        if ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"].iter()
+                            .any(|r| tt.starts_with(&format!("movq {},", r)) && tt.contains("(%rsp)"))
+                        { c += 1; }
+                    }
+                }
+                c
+            };
+            let same_sig = gparams == nparams && nparams <= 6;
+            let in_scc = reaches(&info, callee, name);
+            if !ginfo.has_callee_saved && same_sig && in_scc {
+                // 用 ret 行的索引记录 jmp 目标；call 行登记删除；addq 行保留。
+                drop.insert(i);
+                jmp_at.insert(i + 2, format!("\tjmp {}", callee));
+                i += 3; // 跳过整个三连，避免相邻窗口重复处理
+            } else {
+                i += 1;
+            }
+        }
+    }
+    if drop.is_empty() { return asm.to_string(); }
+
+    // ---- ⑤ 应用替换。
+    let mut out = String::with_capacity(asm.len());
+    for (i, l) in lines.iter().enumerate() {
+        if drop.contains(&i) { continue; }
+        if let Some(rep) = jmp_at.get(&i) {
+            out.push_str(rep);
+        } else {
+            out.push_str(l);
+        }
         out.push('\n');
     }
     out
