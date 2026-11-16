@@ -67,8 +67,45 @@ pub fn emit(ip: &IrProgram, target: EmitTarget) -> Result<String, String> {
     out.push_str("\t.text\n");
 
     let local_funcs: HashSet<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+
+    // M7-e3v：构建调用图，标记「递归 SCC 成员」（自己可达自己）。
+    // 递归函数每层调用都要在 prologue/epilogue 保存恢复 callee-saved，
+    // 若再做全函数全局驻留，栈帧膨胀会被递归深度放大成数量级回归
+    // （evR/odR 互递归实测 2.5x）。这类函数必须退回逐块 / 零驻留路径。
+    let mut call_graph: HashMap<String, Vec<String>> = HashMap::new();
     for f in &ip.functions {
-        emit_function(&mut out, ip, f, target, &local_funcs)?;
+        let mut callees = Vec::new();
+        for b in &f.blocks {
+            for i in &b.insts {
+                if let IrInst::Call { func, .. } = i { callees.push(func.clone()); }
+                if let IrInst::CallIndirect { .. } = i { /* 间接调用目标未知，不建边 */ }
+            }
+        }
+        call_graph.insert(f.name.clone(), callees);
+    }
+    let mut recursive_funcs: HashSet<String> = HashSet::new();
+    for f in &ip.functions {
+        // f 能否经任意长度调用链回到自己（深度有界，防病态环）。
+        fn reaches_self(graph: &HashMap<String, Vec<String>>, start: &str) -> bool {
+            let mut seen = HashSet::new();
+            let mut stack = vec![start.to_string()];
+            let mut steps = 0usize;
+            while let Some(cur) = stack.pop() {
+                if steps > 10000 { return false; }
+                steps += 1;
+                if let Some(cs) = graph.get(&cur) {
+                    for c in cs {
+                        if c == start { return true; }
+                        if seen.insert(c.clone()) { stack.push(c.clone()); }
+                    }
+                }
+            }
+            false
+        }
+        if reaches_self(&call_graph, &f.name) { recursive_funcs.insert(f.name.clone()); }
+    }
+    for f in &ip.functions {
+        emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs)?;
     }
     // 避免 GNU ld 的 "missing .note.GNU-stack section implies executable stack" 警告。
     out.push_str("\t.section .note.GNU-stack,\"\",@progbits\n");
@@ -97,6 +134,11 @@ fn align_up(x: i64, a: i64) -> i64 { (x + a - 1) / a * a }
 const RES_POOL: [&str; 10] = ["rbx", "r12", "r13", "r14", "r15", "rbp", "r8", "r9", "rsi", "rdi"];
 /// 逐块独立驻留（含 call 的函数）可用的寄存器数：不含 rsi / rdi。
 const RES_PER_BLOCK: usize = 8;
+/// M7-e3v：含 call 函数做全函数全局驻留时，只能用 callee-saved 寄存器——
+/// 它们由被调方保证返回时原值不变，故可跨 call 持有最新值。刻意不含
+/// r8/r9/rsi/rdi（caller-saved，会被 call 破坏）与 rax/rcx/rdx/r10/r11
+/// （发射器临时 / div / 移位隐式操作数）。
+const CALLEE_SAVED_POOL: [&str; 6] = ["rbx", "r12", "r13", "r14", "r15", "rbp"];
 
 fn is_callee_saved(p: &str) -> bool {
     matches!(p, "rbx" | "rbp" | "r12" | "r13" | "r14" | "r15")
@@ -178,6 +220,9 @@ struct FnEmit<'a> {
     /// 直接在 x 槽的物理寄存器上就地算，消除中间值的 spill / reload 与搬运。
     /// 仅 x86-64 填充；发射期二次确认 x 槽确实驻留，否则退回原路径。
     xorshift_fuse: HashMap<(usize, usize), (XorshiftPlan, usize)>,
+    /// M7-e3v：本函数位于递归 SCC 内——禁止全局跨 call 驻留
+    /// （递归栈帧会放大 callee-saved 保存恢复开销），退回逐块模式。
+    gra_blocked: bool,
 }
 
 /// M7-e3n：xorshift 一步的融合计划。`slot` 是 x 的 Alloca 槽 vreg（驻留在
@@ -192,7 +237,7 @@ enum XorshiftPlan {
 }
 
 impl<'a> FnEmit<'a> {
-    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>) -> Self {
+    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool) -> Self {
         let prefix = format!("Ldial_{}", {
             let s: String = f.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
             s
@@ -208,6 +253,7 @@ impl<'a> FnEmit<'a> {
             pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
             lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
             popcnt_fuse: HashMap::new(), xorshift_fuse: HashMap::new(),
+            gra_blocked,
         }
     }
 
@@ -622,8 +668,11 @@ impl<'a> FnEmit<'a> {
     ///
     /// 纯计算函数（所有块都不含 call / ARC / EnvInit）走 M7-b 的「全函数统一
     /// 寄存器文件」：至多 10 个池寄存器在整个函数内绑定固定位置，块与块之间不再
-    /// flush / load，循环边界的栈往返被彻底消掉。含 call 的函数仍走 M7-a 的
-    /// 逐块独立驻留（以内存为块边界权威）。
+    /// flush / load，循环边界的栈往返被彻底消掉。含 call 的非递归函数走 M7-e3v
+    /// 的「callee-saved 全局驻留」（6 个 callee-saved 跨 call 持有最新值，消掉
+    /// 数组密集内核每轮几十条栈搬运）；递归 SCC 成员与含 EnvInit 的函数仍走
+    /// M7-a 的逐块独立驻留（以内存为块边界权威，避免递归栈帧放大保存开销 /
+    /// longjmp 破坏「寄存器比栈新」前提）。
     /// M7-e1：全函数活跃性扫描。收集所有「被读取」的 vreg（每条指令的
     /// reg_uses + term 的 cond / 跳转实参 / 返回值），凡是「有 def 却从不
     /// 出现在读取集合」的普通 vreg，其 spill store 就是死代码，sg 整条省略。
@@ -977,7 +1026,18 @@ impl<'a> FnEmit<'a> {
         self.promotable = self.collect_promotable();
         let unified = self.f.blocks.len() >= 2
             && self.f.blocks.iter().all(|b| Self::block_can_reside(b));
-        if unified { self.analyze_unified(); } else { self.analyze_per_block(); }
+        if unified {
+            self.analyze_unified();
+        } else if self.f.blocks.len() >= 2
+            && !self.gra_blocked
+            // longjmp 会把 callee-saved 恢复到 setjmp 时刻，跨 call 驻留的
+            // 「寄存器比栈新」前提在 EnvInit 函数中不成立——保守退回逐块模式。
+            && !self.f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, IrInst::EnvInit { .. })))
+        {
+            self.analyze_unified_with_calls();
+        } else {
+            self.analyze_per_block();
+        }
         self.used_phys.sort_by_key(|p| RES_POOL.iter().position(|x| x == p).unwrap_or(99));
     }
 
@@ -1074,6 +1134,97 @@ impl<'a> FnEmit<'a> {
             }
             plan.loads.sort_by_key(|(v, _)| *v);
             // keep_flush 留空：p 全程权威，不回写内存。
+            self.plans.push(plan);
+        }
+    }
+
+    /// M7-e3v：含 call（但无 EnvInit/longjmp）函数的全函数全局驻留。
+    /// 逻辑与 analyze_unified 完全一致，唯一差别是绑定池限定为 6 个
+    /// callee-saved 寄存器（CALLEE_SAVED_POOL）——它们跨 call 保持原值，
+    /// 故「p 全程权威、块间零回写」的前提在含 call 函数里依然成立。
+    /// call 的实参由 lg 从绑定寄存器读取、返回值由 sg 写回绑定寄存器，
+    /// 且实参寄存器 (rdi/rsi/...) 与临时寄存器 (rax/r10/...) 均不在绑定池，
+    /// 不会踩踏驻留值。AArch64 不进此路径（analyze_residency 已挡）。
+    fn analyze_unified_with_calls(&mut self) {
+        let id_to_idx: HashMap<u32, usize> = self.f.blocks.iter().enumerate()
+            .map(|(i, b)| (b.id, i)).collect();
+
+        // 回边区间 → 循环嵌套深度权重（与 analyze_unified 同）。
+        let mut intervals: Vec<(usize, usize)> = Vec::new();
+        for (bi, b) in self.f.blocks.iter().enumerate() {
+            let mut tg = Vec::new();
+            match &b.term {
+                Term::Jump { target, .. } => tg.push(*target),
+                Term::Branch { then_b, else_b, .. } => { tg.push(*then_b); tg.push(*else_b); }
+                _ => {}
+            }
+            for t in tg {
+                if let Some(&ti) = id_to_idx.get(&t) {
+                    if ti <= bi { intervals.push((ti, bi)); }
+                }
+            }
+        }
+        let depth_of = |bi: usize| -> usize {
+            intervals.iter().filter(|(lo, hi)| *lo <= bi && bi <= *hi).count()
+        };
+
+        let mut score: HashMap<VReg, usize> = HashMap::new();
+        for (bi, b) in self.f.blocks.iter().enumerate() {
+            let w = 1usize << (3 * depth_of(bi).min(2));
+            for i in &b.insts {
+                match i {
+                    IrInst::Load { ptr, .. } if self.promotable.contains(ptr) =>
+                        { *score.entry(*ptr).or_insert(0) += 2 * w; }
+                    IrInst::Store { ptr, .. } if self.promotable.contains(ptr) =>
+                        { *score.entry(*ptr).or_insert(0) += 2 * w; }
+                    _ => {}
+                }
+                let mut uses = Vec::new();
+                i.reg_uses(&mut uses);
+                for u in uses {
+                    if self.residency_candidate(u) { *score.entry(u).or_insert(0) += w; }
+                }
+                if let Some(d) = i.def() {
+                    if self.residency_candidate(d) { *score.entry(d).or_insert(0) += w; }
+                }
+            }
+        }
+        let mut hot: Vec<VReg> = score.keys().copied().collect();
+        hot.sort_by(|x, y| score[y].cmp(&score[x]).then(x.cmp(y)));
+        let bind: HashMap<VReg, &'static str> = hot.into_iter().take(CALLEE_SAVED_POOL.len())
+            .enumerate().map(|(k, v)| (v, CALLEE_SAVED_POOL[k])).collect();
+        for p in bind.values() {
+            if !self.used_phys.contains(p) { self.used_phys.push(p); }
+        }
+
+        let mut has_pred = vec![false; self.f.blocks.len()];
+        for b in &self.f.blocks {
+            let mut tg = Vec::new();
+            match &b.term {
+                Term::Jump { target, .. } => tg.push(*target),
+                Term::Branch { then_b, else_b, .. } => { tg.push(*then_b); tg.push(*else_b); }
+                _ => {}
+            }
+            for t in tg { if let Some(&i) = id_to_idx.get(&t) { has_pred[i] = true; } }
+        }
+        let param_slot: HashSet<VReg> = self.f.param_slots.iter().copied().collect();
+
+        for (idx, b) in self.f.blocks.iter().enumerate() {
+            let mut plan = BlockPlan::default();
+            plan.resident = bind.clone();
+            if !has_pred[idx] {
+                for (v, p) in &bind {
+                    if param_slot.contains(v) { plan.loads.push((*v, *p)); }
+                }
+            }
+            for (pv, _) in &b.params {
+                if let Some(p) = bind.get(pv) {
+                    if !plan.loads.iter().any(|(v, _)| *v == *pv) {
+                        plan.loads.push((*pv, *p));
+                    }
+                }
+            }
+            plan.loads.sort_by_key(|(v, _)| *v);
             self.plans.push(plan);
         }
     }
@@ -3452,8 +3603,9 @@ fn emit_function(
     f: &IrFunction,
     target: EmitTarget,
     local: &HashSet<String>,
+    recursive_funcs: &HashSet<String>,
 ) -> Result<(), String> {
-    let mut e = FnEmit::new(ip, f, target, local);
+    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name));
     e.compute_layout();
     e.analyze_dead_defs();
     e.analyze_fusable();

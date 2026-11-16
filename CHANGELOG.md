@@ -2457,6 +2457,52 @@
         生成无漂移；全 28 项 checksum 不变、golden / cargo test / run_tests.sh /
         check_bench_data 全绿；编译器二进制 md5 与 e3t 一致 fb282c0。跨时段绝对
         读数不直接相减，收益一律以 A/B 交替相对改善为准。
+    - **M7-e3v 函数级全局寄存器分配 GRA（代替 LLVM 第一根支柱落地）**：承接 e3u
+      锁定的架构级门槛与用户「代替 LLVM」的核心诉求，正式把 **O3 级优化管线**
+      与 **DWARF 调试信息** 列为自研 asm 后端代替 LLVM 的两根头等核心支柱（详见
+      README「自研 asm 后端『代替 LLVM』路线图」章节）。本批攻下第一根支柱中最关键的一环——**函数级
+      全局寄存器分配**：含 call 的普通函数不再整块禁用驻留，改用 6 个 callee-saved
+      寄存器（rbx/r12/r13/r14/r15/rbp，SysV ABI 保证跨 call 不变）做全函数统一
+      绑定，跨块 / 跨 call 零回写，直接消去热循环里反复的栈搬运。
+      - **实现要点**（仅 x86-64，AArch64 零变化）：
+        - 新增 `analyze_unified_with_calls()`：复用 `analyze_unified` 的「全程权威、
+          块间不 flush/load」逻辑，但绑定池限定为 6 个 callee-saved（caller-saved
+          的 r8/r9/rsi/rdi 会被 call 破坏，不可用）。
+        - 新增调用图 + 递归 SCC 检测（`emit()` 里基于 `IrInst::Call.func` 建图，
+          传递闭包判定「自己可达自己」的递归成员），递归函数 `gra_blocked`
+          强制退回逐块模式。
+        - `EnvInit`（setjmp/longjmp）函数同样排除：longjmp 会把 callee-saved
+          恢复成 setjmp 时刻的值，「寄存器比栈新」前提不成立。
+      - **递归毒药及其修复（严谨性记录）**：初版未排除递归时 b12 出现 0.36x
+        （慢 2.76 倍）灾难性回归——递归每层栈帧都要保存恢复 6 个 callee-saved，
+        被递归深度放大；排除递归 SCC 后 b12 恢复到 0.997，回归彻底消除。
+      - **机制性收益归因**（OLD=e02b8fb / NEW=固化版）：
+        - 全量 A/B 三轮：+2.27% / +2.25% / +2.09%；官方 A/B 工具全量 +1.91%。
+        - `.s` 实际变化的 6 个数组密集项（机制子集）：几何平均 **+9.91%**；
+          b17 +14.3%、b14 +11.9%、b22 +9.2%、b15 +9.0%、b28 +8.4%。
+        - `.s` 完全未变的 8 项（对照子集）：−0.67%（纯布局噪声带）——证明未改动
+          代码无系统性回归，数组项 +9~14% 必来自 GRA 机制本身。
+        - b17 最内层热循环 b11 栈搬运 36 → 25 条，归纳量（pos/kb/j）进
+          rbx/r13/r14 跨 call 常驻。
+        - b08 −5.5% 为已知链接段平移伪影（其 `.s` 未变，GRA 改变了前序函数
+          字节数、平移入口取指相位），非机制回归。
+      - **asm↔LLVM（同口径全量）**：debug 几何平均 0.5466x → **0.5384x**
+        （16 胜/7 平/5 负 → 18 胜/9 平/1 负），数组类 0.9553x → 0.8796x，
+        字符串 1.0129x → 0.9772x；fast 数组类 1.7619x → 1.6421x（--quick
+        采样，仅作方向参考）。这是首个真正缩小与 LLVM 架构级差距的性能批次。
+      - **局限与下一步（两大支柱的剩余部分）**：GRA 只覆盖 callee-saved 6 个
+        寄存器、只绑定整数值；caller-saved / 浮点 / 跨函数寄存器分配仍未做。
+        支柱一剩余：模式化向量化（b17 矩阵乘 / b19-b22 字符串 SIMD）、与 LLVM
+        同级的多级优化管线；**支柱二（DWARF）尚未开工**——asm 后端目前
+        `.file`/`.loc`/`.debug_*` 全为零、IR 无 span/line，gdb 无源码级断点，
+        需打通 AST span → IR 行号 → `.file/.loc` → `.debug_*` 链路，从零到一。
+      - **本批护栏**：`src/codegen_asm.rs` 相对 e02b8fb +158/-6 行（唯一性能改动
+        文件），`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、`Cargo.toml`
+        仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；全 28 项
+        checksum 不变、golden（含 AArch64 交叉汇编）/ cargo test / run_tests.sh /
+        check_bench_data / check_links 全绿；AArch64 `.s` 哈希零变化（8cdb4d1f）；
+        `docx/` 两次生成哈希一致。跨时段绝对读数不直接相减，收益一律 A/B 交替
+        + 机制子集归因。
 
 ---
 
