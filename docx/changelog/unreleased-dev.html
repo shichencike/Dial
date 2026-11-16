@@ -2353,11 +2353,69 @@ Dial 源码模块（README §25.11）给 Q 组新增 10 条断言到 <strong>570
 <li><strong>门禁</strong>：<code>run_asm_golden.sh</code>（10 正向 + 2 负例 + 默认后端 + AArch64
     交叉汇编）、<code>cargo test --release</code>、<code>tests/run_tests.sh</code>（AA~AF 组）
     全绿；Rust 构建零警告；AArch64 OLD/NEW <code>.s</code> 逐字节一致。</li>
-<li><strong>本批护栏</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、
+<li>
+<p><strong>本批护栏</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、
     <code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、
     不打 tag、全套门禁全绿、<code>docx/</code> 确定性生成无漂移、本地静态基线
     <code>bench/bench.s</code> 同步为 M7-e3q 版。跨时段绝对读数不直接相减，收益
-    一律以 A/B 交替相对改善为准。</li>
+    一律以 A/B 交替相对改善为准。</p>
+</li>
+<li>
+<p><strong>M7-e3r 常量 2 的幂乘法 <code>x*2^k → shlq</code> 强度削减（A/B 证伪，性能代码零改动）</strong>：
+  e3q 之后基线 asm↔LLVM 几何平均 0.5494x（16 胜/8 平/4 负），数组内存类
+  0.9613x、字符串类 1.0121x 是仅存的两个接近/落后 LLVM 的类别。定位到
+  一个真实的 LLVM 标准优化缺口：e3i 只削减 2 的幂<strong>除/取模</strong>（<code>const_div_pow2</code>），
+  e3l 乘加 LEA 只覆盖 c∈{2,3,5,9} 且需紧邻 Add/Sub，而纯 2 幂<strong>乘法</strong>
+  仍走通用 <code>movabsq $2^k,%r10; imulq %r10,%rax</code>（imulq 有 3 周期乘法依赖链）。
+  全 bench.s 仅 4 处：b17 内层 3 处 <code>i*64</code>（在 64³=262144 次热循环内）、
+  b25 1 处 <code>i*2</code>。</p>
+</li>
+<li><strong>实现（最终撤回）</strong>：仿 e3i/e3j 发射层方案（利用 vreg 信息、比纯文本
+    pass 安全），新增 <code>const_mul_pow2(b)</code>（k∈[1,62] + i64 逐值自校验
+    <code>n.wrapping_mul(2^k)==n.wrapping_shl(k)</code>，覆盖 i64::MIN/MAX、±2^k 边界、
+    2000 组伪随机大数）、<code>inst_mul_pow2(dst,a,k)</code>（<code>lg a,rax; shlq $k,rax;
+    sg</code>，只碰 g1、不触 RES_POOL），inst_bin 中 Mul 分支在 e3i 除法拦截后
+    插入、仅 x86-64。e3l 融合的 Mul 在 inst_bin 外被 skip_lea_mul 跳过，
+    无交互。</li>
+<li><strong>静态 + 正确性证据</strong>：<code>shlq $6</code> 命中 3 处（b17）、<code>shlq $1</code> 1 处
+    （b25），<code>movabsq $64</code> 归零，非 2 幂魔数乘法（i<em>7/i</em>11/i<em>13）全保留；
+    静态指令 3187→3181（−6）。专用 20 行专项（x</em>2^1..2^7 + 负数/i64::MIN·MAX/
+    2^62 边界 wrapping + 非 2 幂对照）双后端逐字节一致；全 28 项 checksum
+    一致；全套门禁（10 正向 + 2 负例 + 默认后端 + AArch64 交叉汇编、
+    <code>cargo test --release</code>、<code>run_tests.sh</code> AA~AF 组）全绿、构建零警告；
+    AArch64 OLD/NEW <code>.s</code> 逐字节一致（零变化）。</li>
+<li><strong>A/B 数据（OLD = M7-e3q @8892846，5 采样双二进制交替，各两轮）</strong>：
+    几何均值 <strong>1.0030 / 1.0023（+0.30% / +0.23%，表面正）</strong>；目标项 b17
+    1.0167 / 0.9993（+1.67% / −0.07%，不稳定）、b25 0.9997 / 0.9973。
+    他项 b22 1.0595 / 1.0703（+6~7%）、b18 1.0221 / 1.0223（+2.2% 稳定正）
+    高度可疑。</li>
+<li><strong>布局补偿归因（第七次坐实链接段平移伪影）</strong>：逐函数 <code>.s</code> 比对显示
+    <strong>仅 b17 / b25 两函数变化</strong>（正是目标），其余 26 函数逐字节不变；.text
+    总字节 71071→70984（−87B）。nm 显示 b17 删 32B 使 b18 及之后入口前移
+    −32B、b25 再删 11B 使 b26 起 −43B，而 b18/b22/b23 的 <code>.s</code> 未变——其
+    "正收益"是平移伪影。在 <code>b18:</code> 前补 32B、<code>b26:</code> 前补 11B 不执行 NOP 的
+    PAD 二进制使全模块入口与运行时 <code>dial_*</code> 地址全部归零后：几何均值翻为
+    <strong>0.9959 / 0.9986（−0.41% / −0.14%）</strong>，b22 翻负（0.9558 / 0.9395）、
+    b18 归零（0.9783 / 0.9975），目标项 b17 仅 1.0022 / 0.9850（噪声带、
+    不稳定）。证实普通 A/B 的表面正收益全部来自链接段平移伪影。</li>
+<li><strong>否决理由（诚实判断）</strong>：① 布局归零后无稳定正收益——b17 在目标热循环
+    里内层每迭代 3 次 <code>dial_array_get/set</code> 函数调用，i*64 的 imulq 延迟被
+    调用/内存延迟掩盖，省掉 1 条乘法指令不转化为墙钟收益；b25 瓶颈在取模
+    与分支预测。② 唯一"正收益"来自布局补偿前他项的平移伪影，与 M7-e3f/g/h/o
+    确立的「非机制性收益不采纳」判据一致。③ 机制上虽是 LLVM 标准优化、静态
+    指令确实减少，但无可观测墙钟收益，按「绝不带病合并」铁律否决。</li>
+<li><strong>下一步方向</strong>：纯 ALU 指令削减在 array 调用密集内核（b17/b22/b25）里
+    已被 e3i（除法）、e3j（掩码）、本批（乘法）反复验证为「有静态收益、无
+    墙钟收益」——瓶颈在 <code>dial_array_get/set</code> 调用与字符串库调用本身。若要
+    继续缩小数组/字符串类差距，应攻<strong>调用开销本身</strong>（如 array 访问内联、
+    索引计算与边界检查融合），而非在 ALU 指令层叠加。硬约束不变：任何改
+    函数体字节数的 pass 之前必须先固定入口地址。</li>
+<li><strong>本批护栏</strong>：最终<strong>性能代码零改动</strong>（<code>src/codegen_asm.rs</code> 撤回至
+    8892846 逐字节、工作树干净、二进制 md5 与 e3q 一致）、<code>src/codegen.rs</code> /
+    <code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、零新依赖、
+    LLVM 路径零改动、构建零警告、不打 tag、全套门禁全绿、<code>docx/</code> 确定性
+    生成无漂移、本地静态基线 <code>bench/bench.s</code> 保持 M7-e3q 版。跨时段绝对
+    读数不直接相减，收益一律以 A/B 交替相对改善为准。</li>
 </ul>
 </li>
 </ul>
