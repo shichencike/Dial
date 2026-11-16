@@ -1209,7 +1209,7 @@ LLVM 的通用后端」。经 M7-e3u 的系统诊断，剩余差距不在单条 
 <td><strong>① O3 级优化管线</strong>（核心＝全局寄存器分配）</td>
 <td>inkwell + clang <code>-O3 -flto</code> 全流程</td>
 <td>曾有 4 个本地 pass + 2 专项 pass，无全局寄存器分配 → b17 内层 109 条栈搬运</td>
-<td><strong>M7-e3v 落地函数级 GRA</strong>（callee-saved 全函数驻留），数组密集项 +9.91%；向量化 / caller-saved / 多级管线仍待补</td>
+<td><strong>M7-e3v 落地函数级 GRA</strong>（callee-saved 全函数驻留），数组密集项 +9.91%；<strong>M7-e3x 定量证伪完整 SIMD 后端</strong>（整体 −6.7%），转 targeted ISA 指令融合；caller-saved / 多级管线仍待补</td>
 </tr>
 <tr>
 <td><strong>② DWARF 调试信息</strong></td>
@@ -1222,8 +1222,11 @@ LLVM 的通用后端」。经 M7-e3u 的系统诊断，剩余差距不在单条 
 <blockquote>
 <p>每批仍守死宪法约束：LLVM 路径零改动、<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 544d10a
 零改动、AArch64 零变化；每批带 A/B 交替 + 布局补偿归因 + 全门禁 + 证据链。支柱①
-的后续门槛是模式化向量化（b17 矩阵乘 / b19-b22 字符串 SIMD）；支柱② DWARF 已由
-M7-e3w 从零到一落地，后续门槛是多文件 source 映射与更完整类型信息。</p>
+的向量化门槛已由 <strong>M7-e3x 诊断批次</strong>定量回答：完整 SIMD 后端在这套 i64+取模
+workload 上整体 <strong>−6.7%</strong>（b15 冒泡排序更是慢 18×），从零造 SIMD 后端 ROI 为负、
+已否决；改为走 <strong>targeted ISA 指令融合</strong>路线（POPCNT / 紧凑乘加 / 连续 load），
+下一批 e3y 先做 POPCNT 融合。支柱② DWARF 已由 M7-e3w 从零到一落地，后续门槛是
+多文件 source 映射与更完整类型信息。</p>
 <p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式
 （C 侧 <code>-Os -ffunction-sections -fdata-sections</code> + 链接期 <code>-Wl,--gc-sections -s</code>，
 去掉 DWARF 与符号表）、<code>--single-file</code> 便携模式（链接期 <code>-static</code> 全静态，

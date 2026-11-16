@@ -2662,6 +2662,35 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
     全 28 项 checksum 不变、golden（含 AArch64 交叉汇编）/ cargo test /
     run_tests.sh（含新增 R2 专项）/ check_bench_data / check_links 全绿；
     <code>docx/</code> 两次生成哈希一致。</li>
+<li><strong>M7-e3x 模式化向量化收益上限诊断（证伪批次，性能代码零改动）</strong>：承接 e3v
+  路线图把「模式化向量化」列为支柱①后续门槛。本批不动产品代码，只用<strong>同一份
+  <code>bench.c</code> 在 <code>-O3 -march=x86-64-v3</code> 下仅切换 <code>-fno-tree-vectorize</code></strong> 做隔离
+  变量 POC，量化「自动向量化」在这套 Dial workload 上的收益上限，作为是否投入
+  从零造 SIMD 后端的决策依据。</li>
+<li><strong>结论：完整 SIMD 后端整体负 ROI，不采纳</strong>。28 项几何平均
+    <code>ratio(novec/vec)=0.9330</code>（向量化整体 <strong>−6.7%</strong>）；24/28 项收益在
+    ±0.7% 噪声内（这批内核绝大多数是 i64 + <code>% 1000000007</code> 大质数取模 + 串行
+    依赖链 / 控制流，SIMD 无高效 64 位取模且 lane 间依赖难展开）。更严重的是
+    向量化在控制流密集项上是<strong>灾难性负收益</strong>：b15 冒泡排序 0.054x（慢 18×，
+    masked 分支 + swap 的经典反模式）、b21 子串查找 0.786x。从零造向量 IR +
+    向量寄存器分配 + 指令选择 + mask 控制流是数量级更大的工程，却会让整体变慢，
+    ROI 为负，故否决。</li>
+<li><strong>但存在 targeted 机会</strong>：收益高度集中在 4 项紧密数值循环——b23 位计数
+    +52.6%、b17 矩阵乘 +69.8%、b13 顺序求和 +14.3%、b16 反转归约 +6.2%。
+    这些收益的底层是<strong>少数几条 ISA 级指令惯用法</strong>（POPCNT、紧凑乘加、连续
+    load），不必造完整 SIMD 后端即可用针对性指令融合 / addressing 拿到。</li>
+<li><strong>顺带证伪另一个怀疑</strong>：曾怀疑 asm↔LLVM 差距来自非 2 幂常量除法走硬件
+    除法；检视当前 x86-64 <code>bench.s</code> 确认 <code>% 1000000007</code> 早已是魔术数乘法
+    （<code>movabsq</code> 立即数 + <code>imulq</code> + <code>sarq</code>），全文件仅 1 条 <code>idiv</code>、127 条
+    <code>imul</code>，该方向无收益可言。</li>
+<li><strong>确认下一个 targeted 突破口：原生 POPCNT</strong>。b23 当前用 <code>sarq $1; adcq $0</code>
+    逐位计数（e3m 融合形态，约 32 轮），而 CPU 原生 <code>POPCNT</code> 一条指令即可
+    （<code>/proc/cpuinfo</code> 已确认 popcnt 位）。C POC 校验和与 b23 的 815024 一致、
+    确认 popcnt 指令可生成；1 条 vs ~32 条是数量级收益。定为下一批 e3y：
+    识别「移位-与-累加」惯用法并融合为 POPCNT（含 CPU 特性兜底与非 x86 门禁）。</li>
+<li><strong>本批护栏</strong>：性能代码零改动（lower/pass/codegen_asm/ir 等均未改），不改
+    checksum、不改 <code>.s</code>；A/B POC 全在 <code>/tmp</code> 独立目录用 C 基准完成，不污染
+    产物。宪法约束一律满足。</li>
 </ul>
 </li>
 </ul>
