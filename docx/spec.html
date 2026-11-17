@@ -875,7 +875,8 @@ dialc lsp
 AArch64 AAPCS 汇编 <code>.s</code> → 系统 <code>cc -c</code> 汇编成 <code>.o</code> → 复用既有链接流程。
 <strong>不发射 C 源码、不引第三方代码生成库、零新包依赖</strong>；FFI 包、<code>--tiny</code>、
 <code>--single-file</code> 因复用链接层而零改动生效。未覆盖的语言构造会明确报
-<code>[asm 后端] ...</code> 编译错误，绝不静默降级。<code>asm</code> 后端拒绝 <code>--pgo</code>、忽略 <code>-g</code>。
+<code>[asm 后端] ...</code> 编译错误，绝不静默降级。<code>asm</code> 后端拒绝 <code>--pgo</code>；<code>-g</code> 自
+M7-e3w 起已支持完整 DWARF（源码行断点 + 变量名 + M7-e3z 类型 DIE，详见 §35 与路线图）。
 双后端黄金门禁见 <code>tools/run_asm_golden.sh</code>（<code>run_tests.sh</code> 的 AF 组）。</p>
 <p><strong>当前覆盖范围</strong>（M1–M5 已落地）：</p>
 <table>
@@ -1215,7 +1216,7 @@ LLVM 的通用后端」。经 M7-e3u 的系统诊断，剩余差距不在单条 
 <td><strong>② DWARF 调试信息</strong></td>
 <td><code>codegen.rs:16</code> 用 <code>inkwell::debug_info</code> 生成完整 DWARF（<code>-g</code>，见 <a href="#35-v104-增补dwarf-调试信息与--g并入-v104版本不变">§35</a>）</td>
 <td>—</td>
-<td><strong>M7-e3w 已落地（从零到一）</strong>：<code>.file/.loc</code> 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名，R 组 5 项断言全过；非 -g 零开销、AArch64 零变化。剩余：宏/多文件 source 映射、更完整类型信息</td>
+<td><strong>M7-e3w 已落地（从零到一）</strong>：<code>.file/.loc</code> 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；<strong>M7-e3z 深度补全类型 DIE</strong>：int/float/bool/string/array 按真实类型显示（gdb <code>print ratio</code>=3.5、<code>flag</code>=true、<code>note</code>=char*），与 LLVM 后端格式一致。R 组 R2+R3 断言全过；非 -g 零开销、AArch64 零变化。剩余：宏/多文件 source 映射</td>
 </tr>
 </tbody>
 </table>
@@ -1226,8 +1227,12 @@ LLVM 的通用后端」。经 M7-e3u 的系统诊断，剩余差距不在单条 
 workload 上整体 <strong>−6.7%</strong>（b15 冒泡排序更是慢 18×），从零造 SIMD 后端 ROI 为负、
 已否决；改为走 <strong>targeted ISA 指令融合</strong>路线（POPCNT / 紧凑乘加 / 连续 load）。
 <strong>M7-e3y 已落地首战</strong>：原生 POPCNT 融合令 b23 提速 +114%~120%、整体几何平均
-+2.5%，确立该路线为支柱①后续主线。支柱② DWARF 已由 M7-e3w 从零到一落地，
-后续门槛是多文件 source 映射与更完整类型信息。</p>
++2.5%，确立该路线为支柱①后续主线。支柱② DWARF 已由 M7-e3w 从零到一落地、
+<strong>M7-e3z 补齐类型 DIE</strong>（gdb 按真实类型显示 int/float/bool/string，与 LLVM 后端
+一致）。<strong>M7-e3z 前的全量诊断</strong>：asm↔LLVM 几何平均 0.5353x（整体领先 46%）、
+13 胜 14 平 1 负，剩余平/负项多为 C 运行时 / idiv 微码主导（e3s 已证伪可从后端
+侧优化），targeted ISA 微融合收益已边际，故转入支柱②深度补全。支柱②后续门槛
+是多文件 source 映射与宏信息。</p>
 <p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式
 （C 侧 <code>-Os -ffunction-sections -fdata-sections</code> + 链接期 <code>-Wl,--gc-sections -s</code>，
 去掉 DWARF 与符号表）、<code>--single-file</code> 便携模式（链接期 <code>-static</code> 全静态，

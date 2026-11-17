@@ -2597,6 +2597,43 @@
         仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
         `src/codegen_asm.rs`（+86/-4）。确立「targeted ISA 指令融合」为支柱①后续
         主线，下一门槛：b17 紧凑乘加 / 连续 load 的 addressing 优化。
+    - **M7-e3z DWARF 类型信息 DIE（支柱②深度补全，gdb 按真实类型显示变量）**：
+      承接 e3w 从零到一的 DWARF，补齐其最大短板——e3w 虽生成了 CU / subprogram /
+      variable DIE，但**没有任何类型 DIE 被变量引用**（原有的一个 `DW_TAG_base_type`
+      还错误地放在 CU children 终止符之后、完全失效），导致 gdb `print` 把所有变量
+      当裸 i64。实测对比暴露差距：`counter:int` 恰好对，但 `flag:bool` 显示 `1`、
+      `ratio:float` 显示 `0`、`note:string` / `arr:int[]` 显示裸十进制地址；而 LLVM
+      后端（inkwell debug_info）四项全对。
+      - **改动**：① `IrInst::DebugVar` 增加 `ty: ast::Type` 字段（lower 时把 AST 声明
+        类型带入 IR，不动冻结的 ast.rs）；② 新增 `DwarfType` 五类（Int/Float/Bool/
+        Str/Ptr）单点映射 `dwarf_type` / `dwarf_type_ir`；③ abbrev code 3/4 增加
+        `DW_AT_type(ref4)`，新增 code 6 `DW_TAG_pointer_type`；④ 在 CU children 内
+        生成 int/float/bool/char base_type + str/ptr pointer_type 六类 DIE，变量 /
+        形参 DIE 用 `.long .Ldwarf_t_*-.Ldwarf_info_start` 的 ref4 引用。
+        类型语义：bool 底层 i64(0/1) 配 `DW_ATE_boolean`+byte_size 8 → gdb 显示
+        true/false；float 配 `DW_ATE_float`；string/bytes 句柄按 `char*` 呈现，
+        gdb 能显示字符串内容。
+      - **效果（gdb 实测，与 LLVM 后端格式一致）**：`info locals` 从
+        `flag=1 / ratio=0 / note=1077863240 / arr=1077863320` 变为
+        `flag=true / ratio=3.5 / note=0x…"\\004" / arr=0x…`；`ptype ratio`→float、
+        `ptype flag`→bool、`ptype note`→`char *`。llvm-dwarfdump 验证所有变量
+        `DW_AT_type` 正确指向对应类型 DIE、无 error。
+      - **零开销与门禁**：类型信息只在 `-g && x86-64` 下生成；非 -g 的 IR 与 `.s`
+        与 e3y 逐字节一致（DebugVar 加字段不影响——非 -g 根本不插入该标记）；
+        AArch64（含 -g）`.s` 逐字节一致、零调试指令；`-g` 的 x86-64 **代码段**
+        （排除 DWARF 段）与 e3y 逐字节一致——全部改动都在元数据段，机器码不变。
+        非 -g / -g 全 28 项 checksum 全过（b23=815024）、golden 10 用例双后端
+        逐字节一致、cargo test / AArch64 交叉汇编 / 全量 run_tests.sh 全绿；
+        R 组新增 **R3 类型 DIE 专项**（int/float/bool/char 类型 DIE + gdb 真实类型
+        显示 + string char* + 求值 3.5/true）全过。
+      - **方向说明**：本批启动前先做了全量 asm↔LLVM 诊断——几何平均 **0.5353x**
+        （asm 整体领先 LLVM 46%）、逐项 13 胜 14 平 1 负，唯一负项 b22 是字符串
+        运行时调用主导（两后端共用 C 运行时、e3s 已证伪可从后端侧优化）；剩余
+        平手项多为 C 运行时 / idiv 微码主导，继续 targeted ISA 微融合收益已边际。
+        故本批转向支柱②的真实功能短板（调试信息类型），而非再挤性能。
+      - **护栏**：`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、`Cargo.toml`
+        仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
+        `src/ir.rs` / `src/lower.rs` / `src/codegen_asm.rs` 源文件三处 + 测试 / 文档。
 
 ---
 

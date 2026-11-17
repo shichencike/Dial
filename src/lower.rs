@@ -416,7 +416,7 @@ impl<'a> Lower<'a> {
                 let slot = self.emit_alloca(reg_ir(&dt));
                 // M7-e3w：-g 调试变量名标记（非 -g 完全不插入，保证 IR 与 e3v 一致）。
                 if self.debug_info {
-                    self.emit(IrInst::DebugVar { name: name.clone(), slot, line: *line as u32 });
+                    self.emit(IrInst::DebugVar { name: name.clone(), slot, line: *line as u32, ty: dt.clone() });
                 }
                 let (v, is_copy) = self.lower_expr(value, &dt)?;
                 if let Type::Struct(_) = &dt {

@@ -316,7 +316,8 @@ dialc lsp
 > AArch64 AAPCS 汇编 `.s` → 系统 `cc -c` 汇编成 `.o` → 复用既有链接流程。
 > **不发射 C 源码、不引第三方代码生成库、零新包依赖**；FFI 包、`--tiny`、
 > `--single-file` 因复用链接层而零改动生效。未覆盖的语言构造会明确报
-> `[asm 后端] ...` 编译错误，绝不静默降级。`asm` 后端拒绝 `--pgo`、忽略 `-g`。
+> `[asm 后端] ...` 编译错误，绝不静默降级。`asm` 后端拒绝 `--pgo`；`-g` 自
+> M7-e3w 起已支持完整 DWARF（源码行断点 + 变量名 + M7-e3z 类型 DIE，详见 §35 与路线图）。
 > 双后端黄金门禁见 `tools/run_asm_golden.sh`（`run_tests.sh` 的 AF 组）。
 >
 > **当前覆盖范围**（M1–M5 已落地）：
@@ -609,7 +610,7 @@ dialc lsp
 | 支柱 | LLVM 后端现状 | asm 后端现状 | 进展 |
 |---|---|---|---|
 | **① O3 级优化管线**（核心＝全局寄存器分配） | inkwell + clang `-O3 -flto` 全流程 | 曾有 4 个本地 pass + 2 专项 pass，无全局寄存器分配 → b17 内层 109 条栈搬运 | **M7-e3v 落地函数级 GRA**（callee-saved 全函数驻留），数组密集项 +9.91%；**M7-e3x 定量证伪完整 SIMD 后端**（整体 −6.7%）转 targeted ISA 路线；**M7-e3y 原生 POPCNT 融合** b23 +114%~120%、几何平均 +2.5%；caller-saved / 多级管线仍待补 |
-| **② DWARF 调试信息** | `codegen.rs:16` 用 `inkwell::debug_info` 生成完整 DWARF（`-g`，见 [§35](#35-v104-增补dwarf-调试信息与--g并入-v104版本不变)） | — | **M7-e3w 已落地（从零到一）**：`.file/.loc` 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名，R 组 5 项断言全过；非 -g 零开销、AArch64 零变化。剩余：宏/多文件 source 映射、更完整类型信息 |
+| **② DWARF 调试信息** | `codegen.rs:16` 用 `inkwell::debug_info` 生成完整 DWARF（`-g`，见 [§35](#35-v104-增补dwarf-调试信息与--g并入-v104版本不变)） | — | **M7-e3w 已落地（从零到一）**：`.file/.loc` 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；**M7-e3z 深度补全类型 DIE**：int/float/bool/string/array 按真实类型显示（gdb `print ratio`=3.5、`flag`=true、`note`=char*），与 LLVM 后端格式一致。R 组 R2+R3 断言全过；非 -g 零开销、AArch64 零变化。剩余：宏/多文件 source 映射 |
 
 > 每批仍守死宪法约束：LLVM 路径零改动、`src/codegen.rs`/`src/ast.rs` 相对 544d10a
 > 零改动、AArch64 零变化；每批带 A/B 交替 + 布局补偿归因 + 全门禁 + 证据链。支柱①
@@ -617,8 +618,12 @@ dialc lsp
 > workload 上整体 **−6.7%**（b15 冒泡排序更是慢 18×），从零造 SIMD 后端 ROI 为负、
 > 已否决；改为走 **targeted ISA 指令融合**路线（POPCNT / 紧凑乘加 / 连续 load）。
 > **M7-e3y 已落地首战**：原生 POPCNT 融合令 b23 提速 +114%~120%、整体几何平均
-> +2.5%，确立该路线为支柱①后续主线。支柱② DWARF 已由 M7-e3w 从零到一落地，
-> 后续门槛是多文件 source 映射与更完整类型信息。
+> +2.5%，确立该路线为支柱①后续主线。支柱② DWARF 已由 M7-e3w 从零到一落地、
+> **M7-e3z 补齐类型 DIE**（gdb 按真实类型显示 int/float/bool/string，与 LLVM 后端
+> 一致）。**M7-e3z 前的全量诊断**：asm↔LLVM 几何平均 0.5353x（整体领先 46%）、
+> 13 胜 14 平 1 负，剩余平/负项多为 C 运行时 / idiv 微码主导（e3s 已证伪可从后端
+> 侧优化），targeted ISA 微融合收益已边际，故转入支柱②深度补全。支柱②后续门槛
+> 是多文件 source 映射与宏信息。
 
 > **第 18 层两种产物形态**（工具链层，非 `.dialpkg` 契约）：`--tiny` 体积模式
 > （C 侧 `-Os -ffunction-sections -fdata-sections` + 链接期 `-Wl,--gc-sections -s`，

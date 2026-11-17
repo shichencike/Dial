@@ -50,6 +50,28 @@ fn sleb128(mut v: i64) -> Vec<u8> {
     out
 }
 
+/// M7-e3z：IR 类型 → DWARF 分类（形参走这条；IR 已丢失 bool/string 的细分，
+/// 只能粗分——局部变量走 dwarf_type(&ast::Type) 保留完整信息）。
+fn dwarf_type_ir(t: &IrType) -> DwarfType {
+    match t {
+        IrType::F64 | IrType::F32 => DwarfType::Float,
+        IrType::Handle => DwarfType::Str, // string/bytes 句柄优先按 char* 呈现
+        IrType::I64 | IrType::I32 | IrType::I8 | IrType::I1 => DwarfType::Int,
+        _ => DwarfType::Ptr,
+    }
+}
+
+/// M7-e3z：类型分类 → 类型 DIE 符号标签（均为 .Ldwarf_t_* 标签，ref4 引用）。
+fn dwarf_type_sym(t: DwarfType) -> &'static str {
+    match t {
+        DwarfType::Int => ".Ldwarf_t_int",
+        DwarfType::Float => ".Ldwarf_t_float",
+        DwarfType::Bool => ".Ldwarf_t_bool",
+        DwarfType::Str => ".Ldwarf_t_str",
+        DwarfType::Ptr => ".Ldwarf_t_ptr",
+    }
+}
+
 /// M7-e3w：生成手写 DWARF v5 CU（.debug_abbrev + .debug_info），供 gdb 源码级调试。
 /// 行表（.debug_line）由汇编器的 .file/.loc 自动生成（见 emit() 顶部），本函数
 /// 只负责建立 CU + subprogram + formal_parameter + variable + base_type DIE，
@@ -82,6 +104,7 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
     o.push_str("\t.uleb128 3\n\t.byte 0x05,0x00\n");
     o.push_str("\t.byte 0x02,0x18\n"); // location, exprloc(0x18)
     o.push_str("\t.byte 0x03,0x08\n"); // name
+    o.push_str("\t.byte 0x49,0x13\n"); // M7-e3z: DW_AT_type, ref4
     o.push_str("\t.byte 0,0\n");
     // code 4: DW_TAG_variable (no children)
     o.push_str("\t.uleb128 4\n\t.byte 0x34,0x00\n");
@@ -89,12 +112,18 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
     o.push_str("\t.byte 0x03,0x08\n"); // name
     o.push_str("\t.byte 0x3a,0x0b\n"); // decl_file
     o.push_str("\t.byte 0x3b,0x0b\n"); // decl_line
+    o.push_str("\t.byte 0x49,0x13\n"); // M7-e3z: DW_AT_type, ref4
     o.push_str("\t.byte 0,0\n");
     // code 5: DW_TAG_base_type (no children)
     o.push_str("\t.uleb128 5\n\t.byte 0x24,0x00\n");
     o.push_str("\t.byte 0x03,0x08\n"); // name
     o.push_str("\t.byte 0x0b,0x0b\n"); // byte_size, data1
     o.push_str("\t.byte 0x3e,0x0b\n"); // encoding, data1
+    o.push_str("\t.byte 0,0\n");
+    // code 6: DW_TAG_pointer_type (no children)  M7-e3z
+    o.push_str("\t.uleb128 6\n\t.byte 0x0f,0x00\n");
+    o.push_str("\t.byte 0x49,0x13\n"); // DW_AT_type, ref4
+    o.push_str("\t.byte 0x0b,0x0b\n"); // byte_size, data1
     o.push_str("\t.byte 0,0\n");
     o.push_str("\t.byte 0\n"); // end abbrev table
 
@@ -129,8 +158,8 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
         o.push_str(&format!("\t.quad {}\n", f.name));
         // high_pc: 精确引用 emit_function 追加的函数末尾标签。
         o.push_str(&format!("\t.quad {}\n", f.end_label));
-        // formal_parameter DIEs (code 3): location = fbreg +8*i (参数槽)
-        for (i, pname) in f.params.iter().enumerate() {
+        // formal_parameter DIEs (code 3): location = breg7 +8*i (参数槽)
+        for (i, (pname, pty)) in f.params.iter().enumerate() {
             o.push_str("\t.uleb128 3\n");
             let off = 8 * (i as i64); // 占位；真实参数槽偏移待细化
             let sb = sleb128(off);
@@ -138,9 +167,10 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
             loc.extend_from_slice(&sb);
             o.push_str(&format!("\t.byte {},{}\n", loc.len(), loc.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(",")));
             o.push_str(&format!("\t.asciz \"{}\"\n", pname));
+            o.push_str(&format!("\t.long {}-.Ldwarf_info_start\n", dwarf_type_sym(*pty)));
         }
         // variable DIEs (code 4)
-        for (vname, vline, voff) in &f.vars {
+        for (vname, vline, voff, vty) in &f.vars {
             o.push_str("\t.uleb128 4\n");
             let sb = sleb128(*voff);
             let mut loc = vec![0x77]; // DW_OP_breg7 (rsp) + offset，绕开 frame_base
@@ -149,15 +179,24 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
             o.push_str(&format!("\t.asciz \"{}\"\n", vname));
             o.push_str("\t.byte 1\n"); // decl_file = 1
             o.push_str(&format!("\t.byte {}\n", (*vline).min(255) as u8)); // decl_line
+            o.push_str(&format!("\t.long {}-.Ldwarf_info_start\n", dwarf_type_sym(*vty)));
         }
         o.push_str("\t.byte 0\n"); // end subprogram children
     }
+    // ---- M7-e3z：类型 DIE（必须位于 CU children 内、end 之前，ref4 才有效）----
+    // int: 有符号 8 字节
+    o.push_str(".Ldwarf_t_int:\n\t.uleb128 5\n\t.asciz \"int\"\n\t.byte 8\n\t.byte 0x05\n");
+    // float: 浮点 8 字节（DW_ATE_float=0x04）
+    o.push_str(".Ldwarf_t_float:\n\t.uleb128 5\n\t.asciz \"float\"\n\t.byte 8\n\t.byte 0x04\n");
+    // bool: 底层 i64 存 0/1，8 字节 boolean → gdb 显示 true/false
+    o.push_str(".Ldwarf_t_bool:\n\t.uleb128 5\n\t.asciz \"bool\"\n\t.byte 8\n\t.byte 0x02\n");
+    // char: 供 string 指针指向（DW_ATE_signed=0x05，gdb 按 C 字符串解读）
+    o.push_str(".Ldwarf_t_char:\n\t.uleb128 5\n\t.asciz \"char\"\n\t.byte 1\n\t.byte 0x05\n");
+    // str: pointer → char，gdb 显示 char* 并解引用成字符串
+    o.push_str(".Ldwarf_t_str:\n\t.uleb128 6\n\t.long .Ldwarf_t_char-.Ldwarf_info_start\n\t.byte 8\n");
+    // ptr: pointer → char（数组/map/结构体等不透明句柄，gdb 显示为指针）
+    o.push_str(".Ldwarf_t_ptr:\n\t.uleb128 6\n\t.long .Ldwarf_t_char-.Ldwarf_info_start\n\t.byte 8\n");
     o.push_str("\t.byte 0\n"); // end CU children
-    // base_type int (code 5)
-    o.push_str("\t.uleb128 5\n");
-    o.push_str("\t.asciz \"int\"\n");
-    o.push_str("\t.byte 8\n");    // byte_size
-    o.push_str("\t.byte 0x05\n"); // DW_ATE_signed
     o.push_str(".Ldwarf_info_end:\n");
     o
 }
@@ -3832,16 +3871,45 @@ fn handle_arc_kind(t: &crate::ast::Type) -> Option<ArcKind> {
 // 函数发射
 // ============================================================================
 
+/// M7-e3z：DWARF 类型 DIE 的分类。Dial 的 AST 类型很多，但 gdb print 关心的只是
+/// 底层机内表示与编码类别——收敛成 5 类，对应 emit_dwarf_cu 里的类型 DIE。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DwarfType {
+    /// 有符号整数（int / byte / char / int32，底层 i64/i32）。
+    Int,
+    /// 浮点（float / float32，底层 f64/f32）。
+    Float,
+    /// 布尔（底层 i64 存 0/1，DW_ATE_boolean + byte_size 8 让 gdb 显示 true/false）。
+    Bool,
+    /// 字符串 / 字节串：堆句柄，按 char* 呈现，gdb 能显示 C 字符串内容。
+    Str,
+    /// 数组 / map / set / 结构体 / 裸指针 / 函数地址：不透明指针句柄。
+    Ptr,
+}
+
+/// M7-e3z：把 AST 声明类型映射到 DWARF 分类。单点实现，避免多处散落判断。
+fn dwarf_type(t: &crate::ast::Type) -> DwarfType {
+    use crate::ast::Type as T;
+    match t {
+        T::Bool => DwarfType::Bool,
+        T::Float | T::Float32 => DwarfType::Float,
+        T::String | T::Bytes => DwarfType::Str,
+        T::Int | T::Byte | T::Char | T::Int32 => DwarfType::Int,
+        // 其余（容器句柄 / 结构体 / 指针 / 函数地址 / void）统一呈现为指针。
+        _ => DwarfType::Ptr,
+    }
+}
+
 /// M7-e3w：一个函数的 DWARF DIE 所需元数据（由 emit_function 在拿到栈布局后收集）。
 struct FnDwarfInfo {
     name: String,
     /// 函数末尾标签（emit_function 追加），供 DWARF high_pc 精确引用。
     end_label: String,
     decl_line: u32,
-    /// 形参名（main 的 argc/argv 不入 DWARF，与 LLVM 后端一致）。
-    params: Vec<String>,
-    /// (变量名, 声明行, 相对 rsp 的栈槽偏移)。
-    vars: Vec<(String, u32, i64)>,
+    /// (形参名, 类型分类)（main 的 argc/argv 不入 DWARF，与 LLVM 后端一致）。
+    params: Vec<(String, DwarfType)>,
+    /// (变量名, 声明行, 相对 rsp 的栈槽偏移, 类型分类)。
+    vars: Vec<(String, u32, i64, DwarfType)>,
 }
 
 fn emit_function(
@@ -3921,16 +3989,16 @@ fn emit_function(
     let mut vars = Vec::new();
     for b in &f.blocks {
         for i in &b.insts {
-            if let IrInst::DebugVar { name, slot, line } = i {
+            if let IrInst::DebugVar { name, slot, line, ty } = i {
                 let off = e.alloca_off.get(slot).copied().unwrap_or(0);
-                vars.push((name.clone(), *line, off));
+                vars.push((name.clone(), *line, off, dwarf_type(ty)));
             }
         }
     }
     let params = if f.name == "main" {
         Vec::new() // main 的 argc/argv 与 LLVM 后端一致，不写进 DWARF
     } else {
-        f.params.iter().map(|(n, _)| n.clone()).collect()
+        f.params.iter().map(|(n, t)| (n.clone(), dwarf_type_ir(t))).collect()
     };
     // M7-e3w：函数末尾标签，DWARF high_pc 精确引用（不能用 `符号+常量`，
     // 链接器对全局符号+加法的重定位不可靠）。

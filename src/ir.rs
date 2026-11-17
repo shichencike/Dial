@@ -201,7 +201,9 @@ pub enum IrInst {
     /// 其所在栈槽 vreg + 声明行，供发射期生成 DW_TAG_variable 的
     /// DW_AT_name / DW_AT_location(DW_OP_fbreg)。slot 指向的 Alloca 在 -g 下
     /// 必定留在栈槽（驻留被禁用），location 用 alloca_off[slot] 表达。
-    DebugVar { name: String, slot: VReg, line: u32 },
+    /// M7-e3z：`ty` 携带变量的 AST 声明类型，供发射期生成正确的 DWARF 类型 DIE
+    /// （I64/I1/F64/string/array 各不同——否则 gdb print 全当裸 i64）。
+    DebugVar { name: String, slot: VReg, line: u32, ty: Type },
 }
 
 impl IrInst {

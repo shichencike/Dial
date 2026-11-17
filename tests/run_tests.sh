@@ -1559,6 +1559,60 @@ if "$DIALC" build "${RDIR}/dbg.dial" --backend asm -o "${RDIR}/plain_asm" >/dev/
     else rpass "asm 后端无 -g 时不产 Dial 调试符号（零开销）"; fi
 fi
 
+# ---- R3) 自研 asm 后端 DWARF 类型 DIE（M7-e3z，支柱②深度补全）----
+# 验证 int/float/bool/string 变量带正确 DW_AT_type，gdb 按真实类型显示与求值。
+cat > "${RDIR}/types.dial" <<'EOF'
+fn main(): int {
+    let counter: int = 42;
+    let ratio: float = 3.5;
+    let flag: bool = true;
+    let note: string = "dial";
+    let arr: int[] = [7, 8];
+    print(counter);
+    return counter;
+}
+EOF
+if "$DIALC" build "${RDIR}/types.dial" --backend asm -g -o "${RDIR}/types_asm" >"${RDIR}/types.log" 2>&1 \
+   && [ "$("${RDIR}/types_asm")" = "42" ]; then
+    rpass "asm 后端类型专项 -g 编译且运行输出不变（42）"
+else
+    rbad "asm 后端类型专项 -g 编译/运行失败"; sed 's/^/       /' "${RDIR}/types.log" | tail -12
+fi
+if [ -n "$DDUMP" ] && [ -f "${RDIR}/types_asm" ]; then
+    "$DDUMP" --debug-info "${RDIR}/types_asm" > "${RDIR}/types_di.log" 2>&1
+    tmiss=""
+    for t in '"int"' '"float"' '"bool"' '"char"'; do
+        grep -q "DW_AT_name.*${t}" "${RDIR}/types_di.log" || tmiss="${tmiss} ${t}"
+    done
+    # 变量 DW_AT_type 必须指向类型 DIE（而不是缺失）
+    for var in counter ratio flag note arr; do
+        grep -q "\"${var}\"" "${RDIR}/types_di.log" || tmiss="${tmiss} var:${var}"
+    done
+    if [ -z "$tmiss" ]; then rpass "asm 后端 DWARF 含 int/float/bool/char 类型 DIE + 全部变量"
+    else rbad "asm 后端 DWARF 类型 DIE 缺:${tmiss}"; fi
+fi
+if command -v gdb >/dev/null 2>&1 && [ -f "${RDIR}/types_asm" ]; then
+    gdb -q -batch -ex "set pagination off" \
+        -ex "break ${RDIR}/types.dial:7" -ex "run" \
+        -ex "ptype counter" -ex "print counter" \
+        -ex "ptype ratio" -ex "print ratio" \
+        -ex "ptype flag" -ex "print flag" \
+        -ex "print note" \
+        "${RDIR}/types_asm" > "${RDIR}/gdb_types.log" 2>&1
+    if grep -qF 'type = int' "${RDIR}/gdb_types.log" \
+       && grep -qF 'type = float' "${RDIR}/gdb_types.log" \
+       && grep -qF '$2 = 3.5' "${RDIR}/gdb_types.log" \
+       && grep -qF 'type = bool' "${RDIR}/gdb_types.log" \
+       && grep -qF 'true' "${RDIR}/gdb_types.log"; then
+        rpass "asm 后端 GDB 按真实类型显示 int/float/bool 且求值正确（3.5/true）"
+    else
+        rbad "asm 后端 GDB 类型显示失败"; sed 's/^/       /' "${RDIR}/gdb_types.log" | tail -20
+    fi
+    if grep -qE 'print note.*0x|\$4 = 0x' "${RDIR}/gdb_types.log"; then
+        rpass "asm 后端 GDB string 显示为 char* 指针"
+    else rbad "asm 后端 GDB string 类型显示失败"; fi
+fi
+
 
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
