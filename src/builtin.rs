@@ -15,9 +15,10 @@
 //
 // 覆盖范围：转换 / 数学 / 解析 / 断言退出 / 环境时间 / 字符串 / 字节 /
 //           数组 / 容器构造与操作 / 文件 IO（失败抛错类见 M3 异常相位）。
-// 未覆盖：@asm / simd / sizeof / alignof / offsetof / 高阶函数(map/filter/
-//         reduce/sort_by) / 并发(spawn/channel/select) —— 一律明确 Unsupported，
-//         绝不静默降级。
+// 未覆盖：@asm / simd / 高阶函数(map/filter/reduce/sort_by) / 并发(spawn/channel/
+//         select) —— 一律明确 Unsupported，绝不静默降级。
+// 已由 lower.rs 专用路径接管（表中条目仅作防御兜底，正常不会走到）：
+//         sizeof / alignof / offsetof（M7-e3ag）、bitcast（M7-e3ah）、ptr_cast。
 // ============================================================================
 
 use crate::ast::Type;
@@ -103,8 +104,11 @@ pub fn lookup(name: &str) -> Option<BSpec> {
         // ---- 编译期/底层原语：明确不支持，绝不静默降级 ----
         "sizeof" | "alignof" | "offsetof" =>
             return Some(unsup(Type::Int, "编译期布局内建暂未接入（后续相位）")),
-        "asm" | "asm_intel" | "simd" | "bitcast" =>
-            return Some(unsup(Type::Int, "内联汇编 / SIMD / 底层位强转暂未接入（后续相位）")),
+        "asm" | "asm_intel" | "simd" =>
+            return Some(unsup(Type::Int, "内联汇编 / SIMD 暂未接入（后续相位）")),
+        // bitcast 走 lower.rs 专用路径（M7-e3ah：标量槽位重解释 / struct 零拷贝
+        // 槽地址）；此条目仅作防御兜底，正常调用在 lower_call 分派处已被拦截。
+        "bitcast" => return Some(unsup(Type::Int, "bitcast 需专用路径（见 lower.rs）")),
         // ptr_cast 走专用路径（字符串 / bytes 源要跳过 8 字节 payload 头），
         // 见 lower.rs 的 lower_special_call。
         "ptr_cast" => return Some(unsup(Type::RawPtr(Box::new(Type::Byte)), "ptr_cast 需专用路径（见 lower.rs）")),

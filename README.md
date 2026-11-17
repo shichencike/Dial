@@ -337,7 +337,8 @@ dialc lsp
 > 尚未覆盖（会明确报错）：`select` / `spawn` / 通道并发、内联汇编与 SIMD、
 > 高阶容器方法（`map` / `filter` / `reduce` / `sort_by`）、嵌套下标赋值等。
 > 编译期布局内建 `sizeof` / `alignof` / `offsetof` 已支持（M7-e3ag，含 packed struct
-> 对齐与双后端一致性验证）。
+> 对齐与双后端一致性验证）；底层位重解释 `bitcast` 已支持（M7-e3ah，标量双后端一致，
+> struct↔struct 同尺寸 asm 零拷贝实现——该项 LLVM IR verifier 本身拒绝，属 asm 超越）。
 >
 > **双后端黄金门禁**（`tools/run_asm_golden.sh`，`run_tests.sh` 的 AF 组）：
 > 同一份 `.dial` 分别用 `llvm` / `asm` 编译运行并**逐字节 diff**——LLVM 后端即基准，
@@ -5225,6 +5226,15 @@ var back: rawptr<byte> = bitcast<rawptr<byte>>(addr);  // 整数 -> 指针
   整数 ↔ 整数、浮点 ↔ 整数同位宽互转走真正的 `bitcast`。
 - 目标类型是**类型实参**（`bitcast<T>(x)`），与 `ptr_cast<T>(x)` /
   `sizeof<T>()` 同一套约定。
+
+**双后端支持**（M7-e3ah）：`llvm` 与 `asm` 均支持标量位模式重解释
+（`int`↔`float`、`int32`↔`float32`、`int`↔`rawptr`），输出逐字一致。
+asm 侧标量走 8 字节槽 `store`→`load` 重解释，位宽按 `field_size` 校验，
+与 LLVM DataLayout 口径一致（位宽不匹配、ptr/int↔struct、array、simd 一律 Fail-Fast 拒绝）。
+此外 asm 后端额外支持 **struct↔struct 同尺寸位重解释**（零拷贝槽地址，下游按目标
+结构体布局解读同一块内存）；LLVM IR verifier 本身拒绝聚合类型 `bitcast`
+（`Invalid bitcast`），这项属 asm 超越 LLVM，仅有 asm 单侧可编译。
+含聚合跨类（如 `bitcast<Struct>(rawptr)`）在两后端均被拒绝。
 
 ### 33.13 `@asm<T>(...)`：内嵌汇编
 

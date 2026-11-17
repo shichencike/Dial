@@ -929,7 +929,8 @@ M7-e3w 起已支持完整 DWARF（源码行断点 + 变量名 + M7-e3z 类型 DI
 <p>尚未覆盖（会明确报错）：<code>select</code> / <code>spawn</code> / 通道并发、内联汇编与 SIMD、
 高阶容器方法（<code>map</code> / <code>filter</code> / <code>reduce</code> / <code>sort_by</code>）、嵌套下标赋值等。
 编译期布局内建 <code>sizeof</code> / <code>alignof</code> / <code>offsetof</code> 已支持（M7-e3ag，含 packed struct
-对齐与双后端一致性验证）。</p>
+对齐与双后端一致性验证）；底层位重解释 <code>bitcast</code> 已支持（M7-e3ah，标量双后端一致，
+struct↔struct 同尺寸 asm 零拷贝实现——该项 LLVM IR verifier 本身拒绝，属 asm 超越）。</p>
 <p><strong>双后端黄金门禁</strong>（<code>tools/run_asm_golden.sh</code>，<code>run_tests.sh</code> 的 AF 组）：
 同一份 <code>.dial</code> 分别用 <code>llvm</code> / <code>asm</code> 编译运行并<strong>逐字节 diff</strong>——LLVM 后端即基准，
 无需维护 <code>.expected</code>。正向用例 10 份（<code>core1</code>–<code>core3</code> 核心子集 + <code>builtins</code>
@@ -8413,6 +8414,14 @@ var back: rawptr&lt;byte&gt; = bitcast&lt;rawptr&lt;byte&gt;&gt;(addr);  // 整�
 <li>目标类型是<strong>类型实参</strong>（<code>bitcast&lt;T&gt;(x)</code>），与 <code>ptr_cast&lt;T&gt;(x)</code> /
   <code>sizeof&lt;T&gt;()</code> 同一套约定。</li>
 </ul>
+<p><strong>双后端支持</strong>（M7-e3ah）：<code>llvm</code> 与 <code>asm</code> 均支持标量位模式重解释
+（<code>int</code>↔<code>float</code>、<code>int32</code>↔<code>float32</code>、<code>int</code>↔<code>rawptr</code>），输出逐字一致。
+asm 侧标量走 8 字节槽 <code>store</code>→<code>load</code> 重解释，位宽按 <code>field_size</code> 校验，
+与 LLVM DataLayout 口径一致（位宽不匹配、ptr/int↔struct、array、simd 一律 Fail-Fast 拒绝）。
+此外 asm 后端额外支持 <strong>struct↔struct 同尺寸位重解释</strong>（零拷贝槽地址，下游按目标
+结构体布局解读同一块内存）；LLVM IR verifier 本身拒绝聚合类型 <code>bitcast</code>
+（<code>Invalid bitcast</code>），这项属 asm 超越 LLVM，仅有 asm 单侧可编译。
+含聚合跨类（如 <code>bitcast&lt;Struct&gt;(rawptr)</code>）在两后端均被拒绝。</p>
 <h3 id="3313-asmt内嵌汇编">33.13 <code>@asm&lt;T&gt;(...)</code>：内嵌汇编</h3>
 <p>把一段汇编<strong>原样</strong>交给 LLVM，编译产物里就是一条 <code>call ... asm sideeffect ...</code>。
 这是写系统调用、读时间戳计数器、操作特殊寄存器的最后一道口子。</p>

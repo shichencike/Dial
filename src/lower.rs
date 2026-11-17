@@ -1679,6 +1679,11 @@ impl<'a> Lower<'a> {
             // 必须在此拦截——否则会落到下方 lower_builtin 的 BKind::Unsupported 报错。
             "sizeof" | "alignof" | "offsetof" =>
                 return self.lower_layout_call(name, args),
+            // M7-e3ah：底层位模式重解释 bitcast<T>(x)。标量走 8 字节槽 store→load；
+            // struct↔struct 同尺寸走零拷贝槽地址重解释（FieldAddr 按目标 struct_name
+            // 解读同一块内存，等价 LLVM 同尺寸聚合零开销 bitcast）。必须在此拦截——
+            // 否则会落到下方 lower_builtin 的 BKind::Unsupported 报错。
+            "bitcast" => return self.lower_bitcast(args),
             _ => {}
         }
         // functions_sig 只含用户函数与 extern 声明；按名字硬编码分派的内建
@@ -1982,6 +1987,77 @@ impl<'a> Lower<'a> {
         };
         // 与整型字面量 lower_expr(Expr::IntLit) 完全同形，emit 全链已支持无 vreg 的 Imm。
         Ok((Value::Imm(Imm::I64(v)), false))
+    }
+
+    /// M7-e3ah：bitcast<T>(x) —— 底层位模式重解释，对齐 LLVM codegen.rs:4842-4924。
+    /// 不改内存、不读源数据，只把 x 的位模式按目标类型 T 重新解读。
+    ///
+    /// asm 栈槽模型下的正确性依据：
+    ///   - 标量：所有值都是 8 字节槽，reinterpret_bits 以 store(I64)→load(target)
+    ///     重解释位模式，与整型字面量同形；
+    ///   - struct：值是「指向栈槽的 Ptr vreg」，地址本身不携带 struct 类型标签；
+    ///     FieldAddr 的偏移完全由指令里的 struct_name 显式查 struct_layout 得出，
+    ///     从不读 base vreg 类型。故 struct↔struct 同尺寸只需返回源槽地址（零拷贝），
+    ///     下游 FieldAddr 用目标 struct_name 即按新布局解读同一块内存。
+    ///
+    /// Fail-Fast 拒绝（绝不静默给错误值）：位宽不一致、array（堆 Handle 非连续栈槽，
+    /// 无法做槽重解释）、simd（宽度口径与 LLVM 无法对齐）。
+    fn lower_bitcast(&mut self, args: &[Expr]) -> Result<(Value, bool), String> {
+        if args.len() < 2 {
+            return self.err("bitcast 需要类型实参与源表达式，形如 bitcast<int>(x)");
+        }
+        let target = match &args[0] {
+            Expr::TypeLit(t) => t.clone(),
+            _ => return self.err("bitcast 的第一个参数必须是类型实参"),
+        };
+        let src_ty = self.expr_dt(&args[1]);
+        let (v, _) = self.lower_expr(&args[1], &src_ty)?;
+
+        // 位宽/尺寸校验（对齐 LLVM llvm_bit_width）：标量用 field_size×8；
+        // struct 用 layout_size_align（区分 packed）；simd/array 明确拒绝。
+        let bit_size = |t: &Type| -> Result<u64, String> {
+            match t {
+                Type::Simd(..) => self.err("bitcast 暂不支持 simd 类型（LLVM 按向量宽度计算，自研后端无法对齐）"),
+                Type::Array(..) => self.err("bitcast 暂不支持 array 类型（数组是堆句柄，无法做同址位重解释）"),
+                Type::Struct(_) => Ok(self.layout_size_align(t)?.0 as u64 * 8),
+                _ => Ok(field_size(t) as u64 * 8),
+            }
+        };
+        let src_bits = bit_size(&src_ty)?;
+        let dst_bits = bit_size(&target)?;
+        if src_bits != dst_bits {
+            return self.err(&format!(
+                "bitcast 源（{}，{} 位）与目标 '{}'（{} 位）位宽不一致，无法做位模式重解释",
+                src_ty.display(), src_bits, target.display(), dst_bits));
+        }
+
+        // 类界限（对齐 LLVM codegen.rs:4888-4912）：聚合类型（struct）只能与同尺寸
+        // 聚合互转，不能与指针 / 整数 / 标量互转。位宽相同也不行——这是 LLVM 的
+        // 「指针 / 整数 / 聚合」三类硬界限。bit_size 已拒绝 array，这里只处理 struct。
+        let src_is_struct = matches!(src_ty, Type::Struct(_));
+        let dst_is_struct = matches!(target, Type::Struct(_));
+        if src_is_struct != dst_is_struct {
+            return self.err(&format!(
+                "bitcast 不能在结构体与非结构体之间转换（源 {} → 目标 '{}'）；请先用 rawptr 指向那块内存再按字段读取",
+                src_ty.display(), target.display()));
+        }
+
+        // 同类型恒等（reg_ir 相同）：int↔byte↔char、bool↔bool、各 Ptr/Handle/FnPtr、
+        // 同名 struct 等——直接返回源值，零指令。与 LLVM src_ty==dst_ty 恒等分支等价。
+        if reg_ir(&src_ty) == reg_ir(&target) {
+            return Ok((v, false));
+        }
+
+        // struct↔struct 同尺寸：源 v 已是槽地址 Ptr vreg，尺寸校验通过→零拷贝返回，
+        // 下游 FieldAddr 按目标 struct_name 解读同一块内存。
+        if matches!(src_ty, Type::Struct(_)) && matches!(target, Type::Struct(_)) {
+            return Ok((v, false));
+        }
+
+        // 标量跨类重解释：int↔float(F64)、int32↔float32(F32) 等。
+        // ptr↔int 因 reg_ir 同为 Ptr/I64 已在上面恒等分支覆盖。
+        let result = self.reinterpret_bits(v, reg_ir(&target))?;
+        Ok((result, false))
     }
 
     /// 文件 IO 与 __with_release：与 codegen.rs:4596–4768 的 CFG / moved 记账同构。
@@ -2566,6 +2642,14 @@ impl<'a> Lower<'a> {
                 // min / max / abs 的返回类型跟随实参（表里只能写一个占位）。
                 if matches!(name.as_str(), "min" | "max" | "abs") && !args.is_empty() {
                     return self.expr_dt(&args[0]);
+                }
+                // M7-e3ah：bitcast<T>(x) 的返回类型就是类型实参 T，而非表里占位
+                // 的 Int。否则 bitcast<B>(a).f 链式访问字段时 base 被当成 Int，
+                // 字段解析错位（Expr::Field 按 expr_dt(base) 查 struct_field）。
+                if name == "bitcast" {
+                    if let Some(Expr::TypeLit(t)) = args.get(0) {
+                        return t.clone();
+                    }
                 }
                 self.ip.functions_sig.get(name)
                     .map(|s| s.ret.clone())

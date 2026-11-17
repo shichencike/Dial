@@ -2466,11 +2466,66 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
     asm 带 <code>[asm 后端] 前缀</code> 拒绝，近期不可能落地，最稳定）；<code>core1.dial</code> 加正向断言使
     <code>run_asm_golden.sh</code> 双后端 diff 覆盖本特性；新增 <strong>R8 组</strong>（双后端布局输出逐字比对、
     packed align=1 断言、simd 明确拒绝）；全量 <code>run_tests.sh</code> 绿、golden 门禁绿。</li>
-<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、
+<li>
+<p><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、
     零新依赖、LLVM 路径零改动、构建零警告、不打 tag；本批唯一源码改动是 <code>src/lower.rs</code>。
     本特性只产立即数、不发射指令 → 非布局程序（p1/p2/p3 覆盖结构体/循环/函数调用）
     在 O2/O3 的 <code>.s</code> 与 OLD(f0f0a54) <strong>逐字节一致</strong>；AArch64 普通程序 O0/O2/O3 <code>.s</code> 零变化。
-    docx 确定性生成；check_links/check_version 全过。</li>
+    docx 确定性生成；check_links/check_version 全过。</p>
+</li>
+<li>
+<p><strong>M7-e3ah 自研 asm 后端补齐 FFI 内建 <code>bitcast&lt;T&gt;(x)</code>（双后端一致性补全）</strong>：
+  承接 e3ag，继续"代替 LLVM"的非墙钟硬指标补全。<code>bitcast&lt;T&gt;(x)</code> 是 FFI 刚需的
+  底层位模式重解释（整数地址↔裸指针、float 位模式、同尺寸类型视图）：LLVM 完整
+  支持（<code>codegen.rs:4842-4924</code>，位宽校验 + ptrtoint/inttoptr + bit_cast），而 asm
+  后端走 <code>builtin.rs::BKind::Unsupported</code> 明确 Fail-Fast 报错，既有负例
+  <code>tests/bad/bitcast_width_mismatch.dial</code> / <code>bitcast_ptr_to_struct.dial</code>，且现有
+  FFI 正向用例 <code>ffi_export_demo.dial::cast_probe</code>（地址↔整数）只敢跑 LLVM 后端。</p>
+</li>
+<li><strong>用户要求（ designing constraint）</strong>：明确"不要因现有工具不合适就用拒绝偷懒，
+    工具不合适就造新的正确工具支持，否则支持上了也不是好东西"。因此本批不满足于
+    只支持标量 + 拒绝 struct，而是为 struct↔struct 也造一个正确的位重解释工具。</li>
+<li><strong>核心洞察（为何 struct 能零拷贝正确支持）</strong>：asm 后端 struct 值是「指向栈槽的
+    Ptr vreg」，地址 vreg 本身<strong>不携带 struct 类型标签</strong>；<code>IrInst::FieldAddr{base,
+    struct_name, field}</code> 的字段偏移完全由指令里的 <code>struct_name</code> 显式查 <code>struct_layout</code>
+    得出，<strong>从不读 base vreg 类型</strong>。故 struct↔struct 同尺寸 bitcast 只需把源槽地址
+    原样返回，下游 <code>FieldAddr</code> 用目标 struct_name 即按新布局解读同一块内存——等价
+    LLVM「同尺寸聚合零开销 bitcast」。这就是用户要的"新工具"：基于槽地址 + 尺寸
+    校验的零拷贝位重解释分支，非字节复制、不引入别名风险（VarDecl/传参/返回本就
+    各自 memcpy 保持值语义）。</li>
+<li><strong>实现（唯一核心源码改动 src/lower.rs）</strong>：<code>lower_call</code> 分派加 <code>bitcast</code> →
+    新增 <code>lower_bitcast</code>：从 <code>args[0]</code> 的 <code>Expr::TypeLit</code> 取目标、<code>expr_dt(args[1])</code>
+    取源类型、<code>lower_expr</code> 取值（is_copy 丢弃传 false，仿 ptr_cast）。位宽校验
+    <code>bit_size</code>：标量 <code>field_size×8</code>、struct 用 <code>layout_size_align().0</code>（区分 packed）、
+    simd/array 明确拒绝；<code>src_bits != dst_bits</code> → Fail-Fast。类界限对齐 LLVM
+    <code>codegen.rs:4888-4912</code>：ptr/int↔struct 拒绝（<code>src_is_struct != dst_is_struct</code>），
+    与 LLVM「指针/整数/聚合三类硬界限」一致；array 因堆 Handle 非连续栈槽全拒。
+    同类型 <code>reg_ir(src)==reg_ir(target)</code> 恒等返回；标量跨类走 <code>reinterpret_bits</code>
+    （int↔float 的 F64 store→load、int32↔float32 的 F32 低位读）；struct↔struct
+    同尺寸零拷贝返回槽地址。配套：<code>expr_dt</code> 的 Call 分支对 bitcast 特判——返回
+    <code>args[0]</code> 的 TypeLit 目标类型而非表中占位的 Int，否则 <code>bitcast&lt;B&gt;(a).f</code> 链式
+    访问字段时 base 被当 Int、<code>struct_field</code> 解析错位（实测覆盖）。</li>
+<li><strong>位宽口径对照（field_size×8 vs LLVM bitcast 路径 llvm_bit_width）</strong>：int/float/
+    char/byte=64（LLVM <code>dialc_type_to_llvm</code> 里 Byte/Char 也映射 i64，非 i8——
+    最大风险点经查证不成立）、int32/float32=32、rawptr/容器/fnptr=64（i8ptr）、
+    bool=8 vs LLVM=1（数值不等但拦截决策一致：bool 仅与 bool 恒等放行，与其余两边都拒）。
+    struct 用 ABI 字节数，packed 用 <code>layout_size_align</code> 正确收窄。</li>
+<li><strong>重要定位修正（struct 项是 asm 超越 LLVM，非一致性差异）</strong>：实测 LLVM 后端对
+    <code>bitcast&lt;B&gt;(a struct)</code> 报 <code>Invalid bitcast</code>——LLVM IR verifier 拒绝聚合类型
+    bitcast。故 struct↔struct 无法做双后端逐字比对，R9 对该项只验证 asm 单侧正确性
+    （<code>B=7,9</code>），并加一条"LLVM 是否仍拒绝"的佐证断言；标量项才是双后端一致性覆盖对象。</li>
+<li><strong>实测</strong>：标量 <code>bitcast&lt;int&gt;(1.5f)=4609434218613702656</code>、反向 <code>=1.500000</code>、
+    int32↔float32（1065353216↔1.0、2.5→1075838976）、int↔rawptr roundtrip(12345)
+    双后端输出逐字一致（diff 空）；struct↔struct asm <code>B=7,9</code> 正确；负例位宽不匹配
+    （int→bool 64vs8）、ptr→struct、array bitcast 均 Fail-Fast 带 <code>[asm 后端]</code>。</li>
+<li><strong>测试与门禁</strong>：新增 R9 组（标量双后端逐字比对 / struct asm 单侧 + LLVM 拒绝佐证
+    / 3 类负例拒绝）；<code>builtin.rs</code> L18-20 注释更新（删 sizeof/alignof/offsetof，
+    bitcast 标注走专用路径，L106 unsup 保留作防御兜底）；全量 <code>run_tests.sh</code> 绿。</li>
+<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍
+    1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；本批唯一核心源码改动
+    是 <code>src/lower.rs</code>（+ <code>builtin.rs</code> 注释）。本特性只在调用 bitcast 的程序中改变行为 →
+    非 bitcast 程序（p1/p2/p3）O2/O3 <code>.s</code> 与 OLD(e1859bf) 逐字节一致；AArch64 普通
+    程序 O0/O2/O3 <code>.s</code> 零变化。docx 确定性生成；check_links/check_version 全过。</li>
 </ul>
 </li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>

@@ -1969,6 +1969,87 @@ fi
 
 
 # ===========================================================================
+# R9) 底层位重解释 bitcast 双后端一致性（M7-e3ah）
+#     - 标量（int↔float / int32↔float32 / int↔rawptr）：LLVM 与 asm 输出逐字比对；
+#     - struct↔struct 同尺寸：LLVM IR verifier 拒绝聚合 bitcast（Invalid bitcast），
+#       故此项只验证 asm 零拷贝槽地址方案的正确性，不做双后端比对（asm 超越 LLVM）；
+#     - 负例（位宽不匹配 / ptr→struct / array）：asm 须 Fail-Fast 且带 [asm 后端] 前缀。
+# ===========================================================================
+echo
+echo "  -- R9) 底层位重解释 bitcast 双后端一致性 --"
+BDIR="${RDIR}/bitcast"; mkdir -p "$BDIR"
+cat > "${BDIR}/scalar.dial" <<'DIALEOF'
+fn ptr_roundtrip(a: int): int {
+    var back: rawptr<byte> = bitcast<rawptr<byte>>(a);
+    var addr: int = bitcast<int>(back);
+    return addr;
+}
+fn main(): int {
+    var f: float = 1.5;
+    print("f_bits=", bitcast<int>(f));
+    var bits: int = 4609434218613702656;
+    print("f_rev=", bitcast<float>(bits));
+    var i32b: int32 = int_to_int32(1065353216);
+    print("f32=", float32_to_float(bitcast<float32>(i32b)));
+    var f32s: float32 = float_to_float32(2.5);
+    print("f32_bits=", int32_to_int(bitcast<int32>(f32s)));
+    print("rt=", ptr_roundtrip(12345));
+    return 0;
+}
+DIALEOF
+${DIALC} build "${BDIR}/scalar.dial" --backend llvm -o "${BDIR}/llvm" >/dev/null 2>&1 || rbad "R9 LLVM 编译标量 bitcast 失败"
+${DIALC} build "${BDIR}/scalar.dial" --backend asm  -o "${BDIR}/asm"  >/dev/null 2>&1 || rbad "R9 asm 编译标量 bitcast 失败"
+_bc_expected="$( ${BDIR}/llvm 2>/dev/null | tr '\n' ' ' )"
+_bc_actual="$( ${BDIR}/asm 2>/dev/null | tr '\n' ' ' )"
+[ -n "$_bc_expected" ] && [ "$_bc_actual" = "$_bc_expected" ] \
+    && rpass "bitcast 标量位模式/int↔rawptr 双后端输出逐字一致" \
+    || rbad "R9 标量 bitcast 双后端不一致（llvm=[$_bc_expected] asm=[$_bc_actual]）"
+
+# struct↔struct 同尺寸：LLVM verifier 拒绝聚合 bitcast，只验证 asm 零拷贝正确性。
+cat > "${BDIR}/struct.dial" <<'DIALEOF'
+struct A { x: int, y: int }
+struct B { p: int, q: int }
+fn main(): int {
+    var a: A = A{x: 7, y: 9};
+    var b: B = bitcast<B>(a);
+    print("B=", b.p, ",", b.q);
+    return 0;
+}
+DIALEOF
+${DIALC} build "${BDIR}/struct.dial" --backend asm -o "${BDIR}/sasm" >/dev/null 2>&1 \
+    && [ "$( ${BDIR}/sasm 2>/dev/null | tr '\n' ' ' )" = "B=7,9 " ] \
+    && rpass "struct↔struct 同尺寸零拷贝位重解释正确（asm 超越 LLVM IR verifier）" \
+    || rbad "R9 struct↔struct bitcast 失败"
+# 佐证 LLVM 确实拒绝（若哪天 LLVM 支持了，这条提示我们可升级为双后端比对）。
+if ${DIALC} build "${BDIR}/struct.dial" --backend llvm -o "${BDIR}/sllvm" >"${BDIR}/sllvm.log" 2>&1; then
+    rskip "LLVM 现已支持 struct bitcast——可升级 R9 为双后端比对"
+else
+    rpass "LLVM IR verifier 拒绝聚合 bitcast（struct 项由 asm 单侧覆盖，非一致性差异）"
+fi
+
+# 负例：位宽不匹配 / ptr→struct / array —— asm 须 Fail-Fast。
+for _bc_neg in bitcast_width_mismatch bitcast_ptr_to_struct; do
+    if ${DIALC} build "tests/bad/${_bc_neg}.dial" --backend asm -o "${BDIR}/neg" >"${BDIR}/neg.log" 2>&1; then
+        rbad "R9 ${_bc_neg} 应被 asm 拒绝却编译成功"
+    elif grep -q '\[asm 后端\]' "${BDIR}/neg.log"; then
+        rpass "${_bc_neg}：asm Fail-Fast 拒绝（带 [asm 后端] 前缀）"
+    else
+        rbad "R9 ${_bc_neg} 拒绝但缺少 [asm 后端] 诊断"
+    fi
+done
+cat > "${BDIR}/arr.dial" <<'DIALEOF'
+fn main(): int { var a: int[] = [1, 2, 3]; print(bitcast<int>(a)); return 0; }
+DIALEOF
+if ${DIALC} build "${BDIR}/arr.dial" --backend asm -o "${BDIR}/arr" >"${BDIR}/arr.log" 2>&1; then
+    rbad "R9 array bitcast 应被 asm 拒绝却编译成功"
+elif grep -q '\[asm 后端\].*array' "${BDIR}/arr.log"; then
+    rpass "array bitcast：asm Fail-Fast 拒绝（堆句柄无法同址重解释）"
+else
+    rbad "R9 array bitcast 拒绝但缺少 [asm 后端] 诊断"
+fi
+
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。
