@@ -611,7 +611,7 @@ dialc lsp
 | 支柱 | LLVM 后端现状 | asm 后端现状 | 进展 |
 |---|---|---|---|
 | **① O3 级优化管线**（核心＝全局寄存器分配） | inkwell + clang `-O3 -flto` 全流程 | 曾有 4 个本地 pass + 2 专项 pass，无全局寄存器分配 → b17 内层 109 条栈搬运 | **M7-e3v 落地函数级 GRA**（callee-saved 全函数驻留），数组密集项 +9.91%；**M7-e3x 定量证伪完整 SIMD 后端**（整体 −6.7%）转 targeted ISA 路线；**M7-e3y 原生 POPCNT 融合** b23 +114%~120%、几何平均 +2.5%；caller-saved / 多级管线仍待补 |
-| **② DWARF 调试信息** | `codegen.rs:16` 用 `inkwell::debug_info` 生成完整 DWARF（`-g`，见 [§35](#35-v104-增补dwarf-调试信息与--g并入-v104版本不变)） | — | **M7-e3w 已落地（从零到一）**：`.file/.loc` 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；**M7-e3z 深度补全类型 DIE**：int/float/bool/string/array 按真实类型显示（gdb `print ratio`=3.5、`flag`=true、`note`=char*），与 LLVM 后端格式一致。R 组 R2+R3 断言全过；非 -g 零开销、AArch64 零变化。剩余：宏/多文件 source 映射 |
+| **② DWARF 调试信息** | `codegen.rs:16` 用 `inkwell::debug_info` 生成完整 DWARF（`-g`，见 [§35](#35-v104-增补dwarf-调试信息与--g并入-v104版本不变)） | — | **M7-e3w 已落地（从零到一）**：`.file/.loc` 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；**M7-e3z 深度补全类型 DIE**：int/float/bool/string/array 按真实类型显示（gdb `print ratio`=3.5、`flag`=true、`note`=char*），与 LLVM 后端格式一致；**M7-e3aa 多文件 source 映射**：`import` 合并编译时子模块函数的 `.loc`/`DW_AT_decl_file` 指向各自源文件，gdb `break helper.dial:N` 可命中（R 组 R2+R3+R4 断言全过）。非 -g 零开销、AArch64 零变化。剩余：宏信息 |
 
 > 每批仍守死宪法约束：LLVM 路径零改动、`src/codegen.rs`/`src/ast.rs` 相对 544d10a
 > 零改动、AArch64 零变化；每批带 A/B 交替 + 布局补偿归因 + 全门禁 + 证据链。支柱①

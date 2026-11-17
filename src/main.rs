@@ -459,6 +459,7 @@ fn main() {
             &obj_path,
             debug_info,
             &src_path,
+            &fe.fn_origin,
         ) {
             eprintln!("{}", e);
             std::process::exit(1);
@@ -1693,6 +1694,9 @@ struct Frontend {
     pkg_libs: Vec<PathBuf>,
     ffi_rpaths: Vec<PathBuf>,
     src_file: String,
+    /// M7-e3aa：函数名 → 定义它的源文件路径（多文件 import 合并编译时）。
+    /// 仅供自研 asm 后端 -g 生成多文件 DWARF source 映射；LLVM 路径零改动。
+    fn_origin: HashMap<String, String>,
 }
 
 /// 只从 token 流里抽 `import "..."` 的字符串，不做完整语法解析。
@@ -1976,6 +1980,7 @@ fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, Strin
         pkg_libs,
         ffi_rpaths,
         src_file: src_path.to_string(),
+        fn_origin,
     })
 }
 

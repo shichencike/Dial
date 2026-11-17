@@ -2103,3 +2103,40 @@
       - **护栏**：`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、`Cargo.toml`
         仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
         `src/ir.rs` / `src/lower.rs` / `src/codegen_asm.rs` 源文件三处 + 测试 / 文档。
+
+    - **M7-e3aa 自研 asm 后端多文件 DWARF source 映射（支柱② DWARF 补全）**：承接 e3z
+      后路线图列出的支柱②剩余门槛「多文件 source 映射」。`import "./x.dial";` 合并编译
+      多个源文件时，`frontend()` 早已有 `fn_origin: HashMap<函数名, 源文件路径>`（用于
+      重复函数定义检测），但 DWARF 发射阶段没用它：所有函数的 `DW_AT_decl_file` 恒为 1、
+      行表只有 `.file 1 <主源文件>`，子模块函数用各自文件的相对行号却错指主文件，
+      gdb `break helper.dial:N` 打不上断点。LLVM 后端（codegen.rs:128 注释）声称「各块
+      行列按各自文件准确」，故这是 asm 落后 LLVM 的真实功能短板。
+      - **发现（POC 复现）**：主文件 `main.dial` import 子模块 `helper.dial`（内含
+        `helper_add`），`dialc build main.dial -g --backend=asm --no-link` 后：
+        `main.s` 只有 `.file 1 ".../main.dial"`，`helper_add` 的
+        `DW_AT_decl_file` 与局部变量 `result` 都错误指向 `main.dial`。这是真实 gap，
+        不是推测。
+      - **实现**：`fn_origin` 存入 `Frontend` 并沿 `main → asm::compile_asm →
+        codegen_asm::emit` 传递（签名各加一参数）。`emit()` 在 `-g && x86-64` 时构建
+        有序文件表（主源文件恒为索引 0/.file 1，子模块按函数出现顺序稳定分配），
+        为每个文件发 `.file N "<abs path>"`；每函数查自身 origin 得 `file_index`，
+        经 `emit_function` 传给 `FnEmit`（`.loc N line` 用之）与 `FnDwarfInfo`
+        （subprogram / variable 的 `DW_AT_decl_file N` 用之，变量继承所属函数）。
+        单文件 / 非 -g / AArch64 路径：`dwarf_on=false` 时文件表为空、file_index 恒 1，
+        代码路径与改前等价。
+      - **效果（POC 实测）**：修复后 `main.s` 有 `.file 1 main.dial` + `.file 2 helper.dial`；
+        `main` 的函数体 `.loc 1`、行 3/4/5，`helper_add` 的 `.loc 2`、行 2/3（各自文件
+        相对行号）；llvm-dwarfdump 显示 `helper_add` 与 `result` 的 `DW_AT_decl_file`
+        均为 `helper.dial`（修复前为 `main.dial`）。gdb `break helper.dial:2` 精确命中
+        `helper_add`，backtrace 帧 #0 在 `helper.dial:2`、帧 #12 在 `main.dial:3`——
+        多文件源码映射完全生效。
+      - **零变化与门禁**：新旧编译器对同一单文件 -g 编译的 `.s` **md5 逐字节一致**
+        （e33a60ae…）；多文件非 -g `.s` 逐字节一致（dwarf_on=false 跳过全部改动）；
+        AArch64 代码路径未触及（`-g` 下仍不发射任何 .file/.loc/DWARF）。R 组新增
+        **R4 多文件专项**：静态 decl_file 分文件 + 行表含子模块 + gdb 子模块行断点。
+      - **约束边界**：AST 语句（`src/ast.rs`）只有 `line: usize`、无文件身份字段且冻结，
+        故无法在 AST 层编码文件来源；本批走「frontend 已有 fn_origin → emit」的旁路，
+        不改 ast.rs/codegen.rs、不动 LLVM 路径。宏信息仍未实现（路线图支柱②剩余项）。
+      - **护栏**：`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、`Cargo.toml`
+        仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
+        `src/main.rs` / `src/asm.rs` / `src/codegen_asm.rs` 三处源文件 + 测试 / 文档。

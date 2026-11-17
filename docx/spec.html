@@ -1218,7 +1218,7 @@ LLVM 的通用后端」。经 M7-e3u 的系统诊断，剩余差距不在单条 
 <td><strong>② DWARF 调试信息</strong></td>
 <td><code>codegen.rs:16</code> 用 <code>inkwell::debug_info</code> 生成完整 DWARF（<code>-g</code>，见 <a href="#35-v104-增补dwarf-调试信息与--g并入-v104版本不变">§35</a>）</td>
 <td>—</td>
-<td><strong>M7-e3w 已落地（从零到一）</strong>：<code>.file/.loc</code> 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；<strong>M7-e3z 深度补全类型 DIE</strong>：int/float/bool/string/array 按真实类型显示（gdb <code>print ratio</code>=3.5、<code>flag</code>=true、<code>note</code>=char*），与 LLVM 后端格式一致。R 组 R2+R3 断言全过；非 -g 零开销、AArch64 零变化。剩余：宏/多文件 source 映射</td>
+<td><strong>M7-e3w 已落地（从零到一）</strong>：<code>.file/.loc</code> 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；<strong>M7-e3z 深度补全类型 DIE</strong>：int/float/bool/string/array 按真实类型显示（gdb <code>print ratio</code>=3.5、<code>flag</code>=true、<code>note</code>=char<em>），与 LLVM 后端格式一致；</em><em>M7-e3aa 多文件 source 映射</em>*：<code>import</code> 合并编译时子模块函数的 <code>.loc</code>/<code>DW_AT_decl_file</code> 指向各自源文件，gdb <code>break helper.dial:N</code> 可命中（R 组 R2+R3+R4 断言全过）。非 -g 零开销、AArch64 零变化。剩余：宏信息</td>
 </tr>
 </tbody>
 </table>

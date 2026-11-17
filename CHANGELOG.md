@@ -24,6 +24,17 @@
 
 ### Added
 
+- **M7-e3aa 自研 asm 后端多文件 DWARF source 映射（支柱② DWARF 补全）**：`import "./x.dial";`
+  合并编译多个源文件时，`-g` 生成的 DWARF 此前把所有函数的 `DW_AT_decl_file` / 行表都指向
+  主源文件，子模块函数（如 `helper.dial` 里的函数）按各自文件的相对行号却错指主文件，
+  gdb `break helper.dial:N` 打不上断点。本批让 `frontend()` 已有的 `fn_origin` 沿
+  `compile_asm → codegen_asm::emit` 传到 DWARF 发射：为每个不同源文件分配 `.file N`（主文件
+  恒为 1），每个函数按来源发 `.loc N` 与 `DW_AT_decl_file N`，其局部变量继承所属文件。
+  POC 确认修复前 `helper_add` 的 decl_file 错误指向 `main.dial`，修复后指向 `helper.dial`、
+  gdb `break helper.dial:2` 精确命中且 backtrace 分文件显示。R 组新增 R4 专项（静态 decl_file
+  + 行表 + gdb 子模块断点）。单文件 / 非 -g / AArch64 零变化（单文件 `.s` 新旧编译器 md5 一致、多文件
+  非 -g `.s` 逐字节一致）。宪法约束不动：`src/codegen.rs`/`src/ast.rs`/LLVM 路径/依赖/版本零改动。
+  证据链见 [rationale/unreleased-dev.md](rationale/unreleased-dev.md)。
 - **LSP 再强化：诊断一体化 / 增量同步 / 文件监视 / 文档内高亮**（README §28.7.2）：
   - **码表同源**：`src/diagnostic.rs::stable_code(msg, fallback)` 公开，CLI `report()`
     与 LSP `diagnostic()` 共用；诊断新增 `codeDescription.href`。同一个错误在

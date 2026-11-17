@@ -153,7 +153,7 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
         // subprogram DIE (code 2)
         o.push_str("\t.uleb128 2\n");
         o.push_str(&format!("\t.asciz \"{}\"\n", f.name));
-        o.push_str("\t.byte 1\n");   // decl_file = 1
+        o.push_str(&format!("\t.byte {}\n", f.file_index)); // M7-e3aa: decl_file = 本函数源文件
         o.push_str(&format!("\t.byte {}\n", (f.decl_line.min(255)) as u8)); // decl_line
         o.push_str(&format!("\t.quad {}\n", f.name));
         // high_pc: 精确引用 emit_function 追加的函数末尾标签。
@@ -177,7 +177,7 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
             loc.extend_from_slice(&sb);
             o.push_str(&format!("\t.byte {},{}\n", loc.len(), loc.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(",")));
             o.push_str(&format!("\t.asciz \"{}\"\n", vname));
-            o.push_str("\t.byte 1\n"); // decl_file = 1
+            o.push_str(&format!("\t.byte {}\n", f.file_index)); // M7-e3aa: 变量随所属函数的源文件
             o.push_str(&format!("\t.byte {}\n", (*vline).min(255) as u8)); // decl_line
             o.push_str(&format!("\t.long {}-.Ldwarf_info_start\n", dwarf_type_sym(*vty)));
         }
@@ -201,7 +201,7 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
     o
 }
 
-pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str) -> Result<String, String> {
+pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str, fn_origin: &std::collections::HashMap<String, String>) -> Result<String, String> {
     // 预检：FieldAddr.field 是字段序号，必须能按 struct_layout 解析出字节偏移。
     for f in &ip.functions {
         for b in &f.blocks {
@@ -223,8 +223,26 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
     out.push_str("# 由 dialc 自研后端生成（IR -> .s）；请勿手工编辑\n");
     // M7-e3w：-g 且 x86-64 时声明源文件（汇编器据此生成 DWARF v5 行表）。
     // AArch64 零变化：-g 下也不生成任何 .file/.loc/.debug_*。
-    if debug_info && matches!(target, EmitTarget::X86_64SysV) {
-        out.push_str(&format!("\t.file 1 \"{}\"\n", src_path.replace('\\', "\\\\").replace('"', "\\\"")));
+    // M7-e3aa：多文件 import 合并编译时，为每个不同源文件分配一个 .file 编号：
+    //   索引 0（.file 1）恒为主源文件 src_path，其余按函数出现顺序稳定分配。
+    // 单文件 / 非 -g / AArch64 路径不受影响（文件表仍只含主文件、编号恒为 1）。
+    let dwarf_on = debug_info && matches!(target, EmitTarget::X86_64SysV);
+    let mut file_table: Vec<String> = Vec::new();
+    if dwarf_on {
+        file_table.push(src_path.to_string());
+        for f in &ip.functions {
+            if let Some(origin) = fn_origin.get(&f.name) {
+                let abs = std::fs::canonicalize(origin)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| origin.clone());
+                if !file_table.iter().any(|x| x == &abs) {
+                    file_table.push(abs);
+                }
+            }
+        }
+        for (i, path) in file_table.iter().enumerate() {
+            out.push_str(&format!("\t.file {} \"{}\"\n", i + 1, path.replace('\\', "\\\\").replace('"', "\\\"")));
+        }
     }
     out.push_str("\t.section .rodata\n");
     for (idx, s) in ip.string_literals.iter().enumerate() {
@@ -275,7 +293,22 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
     }
     let mut dwarf_funcs: Vec<FnDwarfInfo> = Vec::new();
     for f in &ip.functions {
-        let di = emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs, debug_info)?;
+        // M7-e3aa：本函数源文件编号（.file N / DW_AT_decl_file N）。
+        // 主源文件恒为 1；子模块函数取其 origin 在 file_table 中的位置。
+        let file_index: u8 = if dwarf_on {
+            let origin_abs = fn_origin.get(&f.name).and_then(|origin| {
+                std::fs::canonicalize(origin)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .ok().or_else(|| Some(origin.clone()))
+            });
+            match origin_abs.and_then(|a| file_table.iter().position(|x| x == &a)) {
+                Some(i) => (i + 1) as u8,
+                None => 1,
+            }
+        } else {
+            1
+        };
+        let di = emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs, debug_info, file_index)?;
         dwarf_funcs.push(di);
     }
     // 避免 GNU ld 的 "missing .note.GNU-stack section implies executable stack" 警告。
@@ -290,7 +323,7 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
     };
     // M7-e3w：-g 且 x86-64 时追加手写 DWARF CU（行表由 .file/.loc 已在汇编器生成）。
     // AArch64 零变化：既无 .file/.loc，也不生成 DIE。
-    if debug_info && matches!(target, EmitTarget::X86_64SysV) {
+    if dwarf_on {
         Ok(final_asm + &emit_dwarf_cu(&dwarf_funcs, src_path))
     } else {
         Ok(final_asm)
@@ -411,6 +444,8 @@ struct FnEmit<'a> {
     /// 准确，-g 时禁用一切寄存器驻留 / 提升优化，所有变量留在 alloca_off 栈槽
     /// （与 LLVM 后端 -g 强制 O0 同构）。同时发射 .loc / .debug_* 调试信息。
     debug_info: bool,
+    /// M7-e3aa：本函数源文件的 .file 编号（1-based），供 .loc N 使用。
+    file_index: u8,
 }
 
 /// M7-e3n：xorshift 一步的融合计划。`slot` 是 x 的 Alloca 槽 vreg（驻留在
@@ -425,7 +460,7 @@ enum XorshiftPlan {
 }
 
 impl<'a> FnEmit<'a> {
-    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool, debug_info: bool) -> Self {
+    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool, debug_info: bool, file_index: u8) -> Self {
         let prefix = format!("Ldial_{}", {
             let s: String = f.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
             s
@@ -441,7 +476,7 @@ impl<'a> FnEmit<'a> {
             pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
             lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
             popcnt_fuse: HashMap::new(), popcnt_native: HashSet::new(),
-            xorshift_fuse: HashMap::new(), gra_blocked, debug_info,
+            xorshift_fuse: HashMap::new(), gra_blocked, debug_info, file_index,
         }
     }
 
@@ -1781,7 +1816,7 @@ impl<'a> FnEmit<'a> {
             IrInst::Line(line) => {
                 // M7-e3w：-g 且 x86-64 时发 .loc；AArch64 / 非 -g 跳过（零机器码）。
                 if self.debug_info && matches!(self.target, EmitTarget::X86_64SysV) {
-                    self.line(&format!("\t.loc 1 {} 0", line));
+                    self.line(&format!("\t.loc {} {} 0", self.file_index, line));
                 }
             }
             IrInst::DebugVar { .. } => {
@@ -3905,6 +3940,8 @@ struct FnDwarfInfo {
     name: String,
     /// 函数末尾标签（emit_function 追加），供 DWARF high_pc 精确引用。
     end_label: String,
+    /// M7-e3aa：本函数源文件的 .file 编号（1-based）。单文件恒为 1。
+    file_index: u8,
     decl_line: u32,
     /// (形参名, 类型分类)（main 的 argc/argv 不入 DWARF，与 LLVM 后端一致）。
     params: Vec<(String, DwarfType)>,
@@ -3920,8 +3957,9 @@ fn emit_function(
     local: &HashSet<String>,
     recursive_funcs: &HashSet<String>,
     debug_info: bool,
+    file_index: u8,
 ) -> Result<FnDwarfInfo, String> {
-    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name), debug_info);
+    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name), debug_info, file_index);
     e.compute_layout();
     e.analyze_dead_defs();
     e.analyze_fusable();
@@ -4009,6 +4047,7 @@ fn emit_function(
     Ok(FnDwarfInfo {
         name: f.name.clone(),
         end_label,
+        file_index,
         decl_line: f.decl_line,
         params,
         vars,

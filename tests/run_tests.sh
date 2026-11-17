@@ -1613,6 +1613,58 @@ if command -v gdb >/dev/null 2>&1 && [ -f "${RDIR}/types_asm" ]; then
     else rbad "asm 后端 GDB string 类型显示失败"; fi
 fi
 
+# ---- R4) 自研 asm 后端多文件 DWARF source 映射（M7-e3aa，支柱②）----
+# 主文件 + 本地子模块各一函数：子模块函数的 decl_file / 行表必须指向自己的文件，
+# 而不是一律指向主源文件（改前 bug：helper_add 的 decl_file 错误指向 main.dial）。
+cat > "${RDIR}/r4_helper.dial" <<'EOF'
+fn helper_add(a: int, b: int): int {
+    let result: int = a + b;
+    return result;
+}
+EOF
+cat > "${RDIR}/r4_main.dial" <<'EOF'
+import "./r4_helper.dial";
+fn main(): int {
+    let x: int = helper_add(3, 4);
+    print(x);
+    return 0;
+}
+EOF
+if "$DIALC" build "${RDIR}/r4_main.dial" --backend asm -g -o "${RDIR}/r4_exe" >"${RDIR}/r4.log" 2>&1 \
+   && [ "$("${RDIR}/r4_exe")" = "7" ]; then
+    rpass "asm 后端多文件 -g 编译且运行输出不变（7）"
+else
+    rbad "asm 后端多文件 -g 编译/运行失败"; sed 's/^/       /' "${RDIR}/r4.log" | tail -12
+fi
+if [ -n "$DDUMP" ] && [ -f "${RDIR}/r4_exe" ]; then
+    "$DDUMP" --debug-info "${RDIR}/r4_exe" > "${RDIR}/r4_di.log" 2>&1
+    # helper_add 与其局部变量 result 的 decl_file 必须落到 r4_helper.dial
+    # （用 dwarfdump 的 helper.dial 文件名出现次数 >= 2 判定：函数 + 变量各一处）
+    hcount=$(grep -c 'r4_helper.dial' "${RDIR}/r4_di.log" || true)
+    if [ "$hcount" -ge 2 ] && grep -q 'r4_main.dial' "${RDIR}/r4_di.log"; then
+        rpass "asm 后端多文件 DWARF：helper 函数/变量 decl_file 指向 r4_helper.dial"
+    else rbad "asm 后端多文件 DWARF decl_file 未分文件（hcount=${hcount}）"; fi
+    if "$DDUMP" --debug-line "${RDIR}/r4_exe" 2>/dev/null | grep -q 'r4_helper.dial'; then
+        rpass "asm 后端多文件 DWARF 行表含子模块源文件"
+    else rbad "asm 后端多文件 DWARF 行表缺子模块源文件"; fi
+else
+    rskip "多文件静态 DWARF 检查（环境无 llvm-dwarfdump）"
+fi
+if command -v gdb >/dev/null 2>&1 && [ -f "${RDIR}/r4_exe" ]; then
+    gdb -q -batch -ex "set pagination off" \
+        -ex "break ${RDIR}/r4_helper.dial:2" -ex "run" \
+        -ex "print result" -ex "bt" \
+        "${RDIR}/r4_exe" > "${RDIR}/r4_gdb.log" 2>&1
+    if grep -qF 'helper_add' "${RDIR}/r4_gdb.log" \
+       && grep -qF 'r4_helper.dial:2' "${RDIR}/r4_gdb.log"; then
+        rpass "asm 后端 GDB 按子模块源码行断点命中（helper.dial:2）"
+    else
+        rbad "asm 后端 GDB 子模块断点失败"; sed 's/^/       /' "${RDIR}/r4_gdb.log" | tail -16
+    fi
+else
+    rskip "多文件 GDB 交互检查（环境无 gdb）"
+fi
+
 
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验

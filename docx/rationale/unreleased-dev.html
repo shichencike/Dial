@@ -2204,9 +2204,49 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
     运行时调用主导（两后端共用 C 运行时、e3s 已证伪可从后端侧优化）；剩余
     平手项多为 C 运行时 / idiv 微码主导，继续 targeted ISA 微融合收益已边际。
     故本批转向支柱②的真实功能短板（调试信息类型），而非再挤性能。</li>
+<li>
+<p><strong>护栏</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code>
+    仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
+    <code>src/ir.rs</code> / <code>src/lower.rs</code> / <code>src/codegen_asm.rs</code> 源文件三处 + 测试 / 文档。</p>
+</li>
+<li>
+<p><strong>M7-e3aa 自研 asm 后端多文件 DWARF source 映射（支柱② DWARF 补全）</strong>：承接 e3z
+  后路线图列出的支柱②剩余门槛「多文件 source 映射」。<code>import "./x.dial";</code> 合并编译
+  多个源文件时，<code>frontend()</code> 早已有 <code>fn_origin: HashMap&lt;函数名, 源文件路径&gt;</code>（用于
+  重复函数定义检测），但 DWARF 发射阶段没用它：所有函数的 <code>DW_AT_decl_file</code> 恒为 1、
+  行表只有 <code>.file 1 &lt;主源文件&gt;</code>，子模块函数用各自文件的相对行号却错指主文件，
+  gdb <code>break helper.dial:N</code> 打不上断点。LLVM 后端（codegen.rs:128 注释）声称「各块
+  行列按各自文件准确」，故这是 asm 落后 LLVM 的真实功能短板。</p>
+</li>
+<li><strong>发现（POC 复现）</strong>：主文件 <code>main.dial</code> import 子模块 <code>helper.dial</code>（内含
+    <code>helper_add</code>），<code>dialc build main.dial -g --backend=asm --no-link</code> 后：
+    <code>main.s</code> 只有 <code>.file 1 ".../main.dial"</code>，<code>helper_add</code> 的
+    <code>DW_AT_decl_file</code> 与局部变量 <code>result</code> 都错误指向 <code>main.dial</code>。这是真实 gap，
+    不是推测。</li>
+<li><strong>实现</strong>：<code>fn_origin</code> 存入 <code>Frontend</code> 并沿 <code>main → asm::compile_asm →
+    codegen_asm::emit</code> 传递（签名各加一参数）。<code>emit()</code> 在 <code>-g &amp;&amp; x86-64</code> 时构建
+    有序文件表（主源文件恒为索引 0/.file 1，子模块按函数出现顺序稳定分配），
+    为每个文件发 <code>.file N "&lt;abs path&gt;"</code>；每函数查自身 origin 得 <code>file_index</code>，
+    经 <code>emit_function</code> 传给 <code>FnEmit</code>（<code>.loc N line</code> 用之）与 <code>FnDwarfInfo</code>
+    （subprogram / variable 的 <code>DW_AT_decl_file N</code> 用之，变量继承所属函数）。
+    单文件 / 非 -g / AArch64 路径：<code>dwarf_on=false</code> 时文件表为空、file_index 恒 1，
+    代码路径与改前等价。</li>
+<li><strong>效果（POC 实测）</strong>：修复后 <code>main.s</code> 有 <code>.file 1 main.dial</code> + <code>.file 2 helper.dial</code>；
+    <code>main</code> 的函数体 <code>.loc 1</code>、行 3/4/5，<code>helper_add</code> 的 <code>.loc 2</code>、行 2/3（各自文件
+    相对行号）；llvm-dwarfdump 显示 <code>helper_add</code> 与 <code>result</code> 的 <code>DW_AT_decl_file</code>
+    均为 <code>helper.dial</code>（修复前为 <code>main.dial</code>）。gdb <code>break helper.dial:2</code> 精确命中
+    <code>helper_add</code>，backtrace 帧 #0 在 <code>helper.dial:2</code>、帧 #12 在 <code>main.dial:3</code>——
+    多文件源码映射完全生效。</li>
+<li><strong>零变化与门禁</strong>：新旧编译器对同一单文件 -g 编译的 <code>.s</code> <strong>md5 逐字节一致</strong>
+    （e33a60ae…）；多文件非 -g <code>.s</code> 逐字节一致（dwarf_on=false 跳过全部改动）；
+    AArch64 代码路径未触及（<code>-g</code> 下仍不发射任何 .file/.loc/DWARF）。R 组新增
+    <strong>R4 多文件专项</strong>：静态 decl_file 分文件 + 行表含子模块 + gdb 子模块行断点。</li>
+<li><strong>约束边界</strong>：AST 语句（<code>src/ast.rs</code>）只有 <code>line: usize</code>、无文件身份字段且冻结，
+    故无法在 AST 层编码文件来源；本批走「frontend 已有 fn_origin → emit」的旁路，
+    不改 ast.rs/codegen.rs、不动 LLVM 路径。宏信息仍未实现（路线图支柱②剩余项）。</li>
 <li><strong>护栏</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code>
     仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
-    <code>src/ir.rs</code> / <code>src/lower.rs</code> / <code>src/codegen_asm.rs</code> 源文件三处 + 测试 / 文档。</li>
+    <code>src/main.rs</code> / <code>src/asm.rs</code> / <code>src/codegen_asm.rs</code> 三处源文件 + 测试 / 文档。</li>
 </ul>
 </li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>

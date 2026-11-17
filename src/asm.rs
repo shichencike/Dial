@@ -48,6 +48,7 @@ pub fn compile_asm(
     obj_path: &Path,
     debug_info: bool,
     src_path: &str,
+    fn_origin: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     let target = detect_target()?;
     // M7-e3w：gdb 源码断点用绝对路径（与 LLVM 后端 DW_AT_name 一致）。
@@ -67,7 +68,7 @@ pub fn compile_asm(
     if matches!(target, EmitTarget::X86_64SysV) {
         pass::ivr_strength_reduce(&mut ip);
     }
-    let asm_text = codegen_asm::emit(&ip, target, debug_info, &src_abs)?;
+    let asm_text = codegen_asm::emit(&ip, target, debug_info, &src_abs, fn_origin)?;
 
     let s_path = obj_path.with_extension("s");
     fs::write(&s_path, asm_text)
