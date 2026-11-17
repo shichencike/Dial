@@ -610,7 +610,7 @@ dialc lsp
 
 | 支柱 | LLVM 后端现状 | asm 后端现状 | 进展 |
 |---|---|---|---|
-| **① O3 级优化管线**（核心＝全局寄存器分配） | inkwell + clang `-O3 -flto` 全流程 | 曾有 4 个本地 pass + 2 专项 pass，无全局寄存器分配 → b17 内层 109 条栈搬运 | **M7-e3v 落地函数级 GRA**（callee-saved 全函数驻留），数组密集项 +9.91%；**M7-e3x 定量证伪完整 SIMD 后端**（整体 −6.7%）转 targeted ISA 路线；**M7-e3y 原生 POPCNT 融合** b23 +114%~120%、几何平均 +2.5%；caller-saved / 多级管线仍待补 |
+| **① O3 级优化管线**（核心＝全局寄存器分配） | inkwell + clang `-O3 -flto` 全流程（仅 `--fast`） | 曾有 4 个本地 pass + 2 专项 pass，无全局寄存器分配 → b17 内层 109 条栈搬运 | **M7-e3v 落地函数级 GRA**（callee-saved 全函数驻留），数组密集项 +9.91%；**M7-e3x 定量证伪完整 SIMD 后端**（整体 −6.7%）转 targeted ISA 路线；**M7-e3y 原生 POPCNT 融合** b23 +114%~120%、几何平均 +2.5%；**M7-e3ac/e3ad 优化级别参数 `-O0`~`-O3`**（对齐 LLVM，O2 默认零回归）+ **移植 LLVM InstCombine 恒等式**（O3，`a+0`/`a*1` 等消除，密集循环 +23%）；caller-saved / 多级管线仍待补 |
 | **② DWARF 调试信息** | `codegen.rs:16` 用 `inkwell::debug_info` 生成完整 DWARF（`-g`，见 [§35](#35-v104-增补dwarf-调试信息与--g并入-v104版本不变)） | — | **M7-e3w 已落地（从零到一）**：`.file/.loc` 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；**M7-e3z 深度补全类型 DIE**：int/float/bool/string/array 按真实类型显示（gdb `print ratio`=3.5、`flag`=true、`note`=char*），与 LLVM 后端格式一致；**M7-e3aa 多文件 source 映射**：`import` 合并编译时子模块函数的 `.loc`/`DW_AT_decl_file` 指向各自源文件，gdb `break helper.dial:N` 可命中；**M7-e3ab 精确宽度类型 DIE**：int32(4)/byte(1 无符号)/float32(4) 按真实宽度显示，gdb `print`/`ptype` 正确（R 组 R2~R5 断言全过）。非 -g 零开销、AArch64 零变化 |
 
 > 每批仍守死宪法约束：LLVM 路径零改动、`src/codegen.rs`/`src/ast.rs` 相对 544d10a
@@ -666,6 +666,24 @@ dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|s
 前者求「最小体积」、后者求「不依赖宿主」，编译器如实提示但不静默覆盖任何一侧。
 LLVM 侧（inkwell 无原生 `Oz` 档）保持 `O2`，体积压缩全部压在 C 侧与链接期；
 **不承诺具体 KB 数**，实测数据见 §38.24.1。
+
+**优化级别（`-O0`~`-O3`，仅自研 asm 后端；M7-e3ac/e3ad）**：对齐 LLVM 的 `-O` 语义，
+补齐编译器必备的分级优化参数界面（亦支持 `-O N` / `--opt-level=N`，非法级别 Fail-Fast 拒绝）：
+
+| 级别 | Dial IR Pass | GRA 驻留 / ISA 融合 | LLVM InstCombine 恒等式 |
+| --- | --- | --- | --- |
+| `-O0` | 无（真·无优化，配合 `-g` 得到「所写即所得」） | 禁用（全 spill） | 无 |
+| `-O1` | 基础（fold / cse / dce / ARC 化简） | 禁用（全 spill） | 无 |
+| `-O2`（**默认**） | + 过程间常量折叠 / 归纳变量强度削减 | 启用（既有全部优化） | 无 |
+| `-O3` | 同 `-O2` | 启用 | **启用**（`a+0→a`、`a*1→a`、`a|0→a`、`a<<0→a`、`a&-1→a` 等，仅 x86-64/整数） |
+
+默认 `-O2` = 既有全部优化，**未指定 `-O` 的既有构建逐字节零回归**；`-O0`/`-O1` 关驻留走全
+spill（低优化级别不跨指令保持值）；`-O3` 从 LLVM InstCombine 借鉴的代数恒等式仅对可证明
+等价的整数运算生效（不碰浮点 NaN、逻辑短路、除零语义），恒等式密集循环实测比 O2 快约
+1.23x。此参数**不影响 LLVM 后端**（LLVM 优化级别仍由 `--fast` / `-g` 控制，传 `-O` 会给出
+忽略提示）；AArch64 各级别 `.s` 逐字节一致（分级开关均在 x86-64 guard 内）。R 组 R6 专项
+7 项覆盖四级编译/运行、默认与 O2 零回归、GRA 分级、恒等式生效与正确性、非法级别拒绝。
+证据链见 `rationale/unreleased-dev.md` 的 M7-e3ac/e3ad 批次。
 
 > ⚠️ **关于 `--fast` 模式（ReleaseFast）：此模式会关闭所有边界检查、除零检查和空指针保护，
 > 以换取极致的性能。除非你是正在编写底层核心算法、且完全确信你的数组下标绝对不会越界，

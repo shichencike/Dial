@@ -24,6 +24,8 @@
 
 ### Added
 
+- **M7-e3ac/e3ad 自研 asm 后端优化级别参数 `-O0/-O1/-O2/-O3` + 移植 LLVM InstCombine 恒等式（支柱① O3 管线）**：此前自研后端所有优化（fold/cse/dce/ivr/GRA/ISA 指令融合）无条件全开、没有任何优化级别参数，而 LLVM 后端也仅在 `--fast` 下 O3——缺少编译器必备的 `-O` 参数界面。本批引入对齐 LLVM 语义的 `-O0`（无 Dial 优化，真·调试）/`-O1`（基础 IR Pass）/`-O2`（默认：既有全部优化，逐字节零回归）/`-O3`（+LLVM 风格代数恒等式），支持 `-O N`/`--opt-level=N` 写法，非法级别 Fail-Fast 拒绝；仅作用于 asm 后端，LLVM 路径给提示且零改动。O3 从 LLVM InstCombine 借鉴一组保守可证等价的整数恒等式（`a+0→a`、`a*1→a`、`a|0→a`、`a<<0→a`、`a&-1→a`、幂等 `a&a→a`/`a|a→a`），仅 x86-64/ty=I64，跑完补 DCE。新增 R6 专项 7 项；A/B：默认与 -O2 逐字节一致（md5 40548450…）、AArch64 各级别 .s 全同、恒等式密集循环 O3 比 O2 快约 1.23x（0.27s→0.22s），四级输出一致。冻结文件/依赖/版本/AArch64/LLVM 路径零改动。
+
 - **M7-e3ab 自研 asm 后端 DWARF 精确宽度类型 DIE（支柱② DWARF 补全）**：e3z 的类型 DIE
   只有 int/float/bool/string/ptr 五类，FFI 精确宽度标量 `int32`(栈槽低 4 字节)、`byte`(低
   1 字节无符号)、`float32`(低 4 字节) 被错误映射成 int(8 字节有符号)/int/float(8 字节)，

@@ -12,6 +12,30 @@ use std::collections::HashMap;
 use crate::ast::{self, Type};
 use crate::semantic::FuncInfo;
 
+/// 优化级别（对齐 LLVM 的 -O0/-O1/-O2/-O3 语义，由 `-O` 参数控制）。
+///
+/// 默认 O2 = 自研后端既有全部优化（fold/cse/dce/ivr/GRA/ISA 融合），保证默认零回归；
+/// O3 = O2 + LLVM InstCombine 风格代数恒等式；O1 = 仅基础 IR pass；O0 = 无 Dial 优化
+/// （真·调试，配合 -g）。仅作用于 asm 后端；LLVM 路径零改动。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum OptLevel {
+    O0,
+    O1,
+    O2,
+    O3,
+}
+impl Default for OptLevel {
+    fn default() -> Self { OptLevel::O2 }
+}
+impl OptLevel {
+    pub fn from_u8(n: u8) -> Option<Self> {
+        match n { 0 => Some(Self::O0), 1 => Some(Self::O1), 2 => Some(Self::O2), 3 => Some(Self::O3), _ => None }
+    }
+    pub fn as_u8(self) -> u8 {
+        match self { Self::O0 => 0, Self::O1 => 1, Self::O2 => 2, Self::O3 => 3 }
+    }
+}
+
 // ============================================================================
 // 类型
 // ============================================================================

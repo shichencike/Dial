@@ -1011,3 +1011,102 @@ pub fn ivr_strength_reduce(ip: &mut IrProgram) -> usize {
     }
     total
 }
+
+// ============================================================================
+// M7-e3ad：LLVM InstCombine 风格代数恒等式（-O3 专用）
+// ============================================================================
+//
+// 从 LLVM 的 InstCombine pass 借鉴一组**保守、可证明等价**的代数恒等式，
+// 把无意义的计算折叠掉。与 fold_constants 的分工：
+//   - fold_constants（O1+）：只折叠「两个操作数都是立即数」的纯算术/比较；
+//   - instcombine（O3）：折叠「一个操作数是立即数、另一个是任意值」的恒等式，
+//     例如 x+0→x、x*0→0、x&0→0、x<<0→x。
+//
+// 保守原则（避免踩 NaN / 溢出 / 逻辑短路语义）：
+//   - 仅处理整数 `IrInst::Bin` 且 `ty == I64`（与 fold_bin_i64 的字宽口径一致）；
+//   - 不碰 FBin（浮点）、不碰逻辑 And/Or（短路语义）、不碰 Div/Mod（除零陷阱）；
+//   - 结果写成 `Conv { Zext, a, ty: I64 }`，发射期就是一条安全搬运（见 inst_conv）。
+
+/// 读取一个 Value 的 i64 立即数（严格匹配 Imm::I64）。
+fn ic_imm_i64(v: &Value) -> Option<i64> {
+    match v { Value::Imm(Imm::I64(n)) => Some(*n), _ => None }
+}
+
+/// 对单条整数 Bin 指令尝试代数恒等式。返回 Some(替换后的指令) 表示命中。
+fn instcombine_bin(op: ABin, dst: VReg, a: &Value, b: &Value, ty: &IrType) -> Option<IrInst> {
+    if *ty != IrType::I64 { return None; }
+    let mov = |v: Value| IrInst::Conv { kind: AConv::Zext, dst, a: v, ty: IrType::I64 };
+    let zero = || mov(Value::Imm(Imm::I64(0)));
+    use ABin::*;
+    let ia = ic_imm_i64(a);
+    let ib = ic_imm_i64(b);
+    match op {
+        Add => {
+            if ia == Some(0) { return Some(mov(b.clone())); }
+            if ib == Some(0) { return Some(mov(a.clone())); }
+        }
+        Sub => {
+            // x - 0 → x；0 - x 不能化简（非交换）；x - x 已由 fold_constants 处理。
+            if ib == Some(0) { return Some(mov(a.clone())); }
+        }
+        Mul => {
+            if ia == Some(0) || ib == Some(0) { return Some(zero()); }
+            if ia == Some(1) { return Some(mov(b.clone())); }
+            if ib == Some(1) { return Some(mov(a.clone())); }
+        }
+        BitAnd => {
+            // x & 0 → 0；x & -1 → x（全 1 掩码是恒等）。
+            if ia == Some(0) || ib == Some(0) { return Some(zero()); }
+            if ia == Some(-1) { return Some(mov(b.clone())); }
+            if ib == Some(-1) { return Some(mov(a.clone())); }
+            // 幂等：x & x → x
+            if let (Value::Reg(ra), Value::Reg(rb)) = (a, b) {
+                if ra == rb { return Some(mov(a.clone())); }
+            }
+        }
+        BitOr => {
+            if ia == Some(0) { return Some(mov(b.clone())); }
+            if ib == Some(0) { return Some(mov(a.clone())); }
+            if let (Value::Reg(ra), Value::Reg(rb)) = (a, b) {
+                if ra == rb { return Some(mov(a.clone())); }
+            }
+        }
+        BitXor => {
+            if ia == Some(0) { return Some(mov(b.clone())); }
+            if ib == Some(0) { return Some(mov(a.clone())); }
+            // x ^ x → 0 已由 fold_constants 处理，这里不重复。
+        }
+        Shl | Shr => {
+            // x << 0 → x、x >> 0 → x（移位量必须来自常量 0；变量移位不动）。
+            if ib == Some(0) { return Some(mov(a.clone())); }
+        }
+        // Eq/Neq/Lt/... 与逻辑 And/Or、Div/Mod 不做恒等，交回 fold_constants 或发射器。
+        _ => {}
+    }
+    None
+}
+
+/// 对整段程序跑 LLVM InstCombine 风格代数恒等式。返回变换总数。
+/// 仅在 -O3 由 `asm.rs` 调用；跑完补一次 DCE 清理失效的源指令。
+pub fn instcombine(ip: &mut IrProgram) -> usize {
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    let mut total = 0;
+    for name in names {
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) {
+            let mut n = 0;
+            for b in &mut f.blocks {
+                for inst in &mut b.insts {
+                    if let IrInst::Bin { op, dst, a, b, ty } = &*inst {
+                        if let Some(new_inst) = instcombine_bin(*op, *dst, a, b, ty) {
+                            *inst = new_inst;
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            if n > 0 { dce(f); }
+            total += n;
+        }
+    }
+    total
+}

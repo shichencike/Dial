@@ -6,6 +6,7 @@
 //! LLVM 路径（`src/codegen.rs`）与这里完全并列，由 `main.rs` 的 `--backend` 分派。
 
 use crate::ast::Program;
+use crate::ir::OptLevel;
 use crate::semantic::{FuncInfo, StructTable};
 use crate::target::EmitTarget;
 use crate::{codegen_asm, lower, pass};
@@ -49,6 +50,7 @@ pub fn compile_asm(
     debug_info: bool,
     src_path: &str,
     fn_origin: &std::collections::HashMap<String, String>,
+    opt_level: OptLevel,
 ) -> Result<(), String> {
     let target = detect_target()?;
     // M7-e3w：gdb 源码断点用绝对路径（与 LLVM 后端 DW_AT_name 一致）。
@@ -58,17 +60,26 @@ pub fn compile_asm(
         .unwrap_or_else(|_| src_path.to_string());
 
     let mut ip = lower::lower_program(prog, functions, structs, goto_depths, debug_info)?;
-    pass::run_passes(&mut ip);
-    // M7-e3p：过程间常量折叠（纯整数函数调用编译期求值）。
+    // M7-e3ac：优化级别分级。O2（默认）= 既有全部优化，逐字节零回归；
+    // O0 跳过全部 Dial 级 IR pass（配合 -g 得到"所写即所得"的调试体验）；
+    // O1 仅基础 IR pass；O3 在 O2 之上追加 LLVM InstCombine 风格代数恒等式。
+    if opt_level >= OptLevel::O1 {
+        pass::run_passes(&mut ip);
+    }
+    // M7-e3p：过程间常量折叠（纯整数函数调用编译期求值）。O2+ 启用。
     // 仅 x86-64 启用：AArch64 保持既有发射路径，`.s` 零变化。
-    if matches!(target, EmitTarget::X86_64SysV) {
+    if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV) {
         pass::fold_pure_calls(&mut ip);
     }
-    // M7-e3t：归纳变量强度削减（base*C+iv → 累加器）。仅 x86-64；AArch64 零变化。
-    if matches!(target, EmitTarget::X86_64SysV) {
+    // M7-e3t：归纳变量强度削减（base*C+iv → 累加器）。O2+，仅 x86-64。
+    if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV) {
         pass::ivr_strength_reduce(&mut ip);
     }
-    let asm_text = codegen_asm::emit(&ip, target, debug_info, &src_abs, fn_origin)?;
+    // M7-e3ad：LLVM InstCombine 风格代数恒等式（x*0→0、x+0→x 等）。O3 only，仅 x86-64。
+    if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV) {
+        pass::instcombine(&mut ip);
+    }
+    let asm_text = codegen_asm::emit(&ip, target, debug_info, &src_abs, fn_origin, opt_level)?;
 
     let s_path = obj_path.with_extension("s");
     fs::write(&s_path, asm_text)

@@ -219,6 +219,8 @@ fn main() {
     let mut single_file = false;
     // 自研后端默认关闭：不指定 --backend 时行为与既有版本完全一致（LLVM 路径零改动）。
     let mut backend = Backend::Llvm;
+    // 优化级别（仅作用于 asm 后端）：默认 O2 = 既有全部优化，零回归。
+    let mut opt_level = ir::OptLevel::O2;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -253,6 +255,39 @@ fn main() {
                     }
                 };
                 i += 1;
+            }
+            // 优化级别（仅 asm 后端）：-O0/-O1/-O2/-O3 与 -O N / --opt-level[=]N。
+            // O2 是默认，等价于自研后端既有全部优化；LLVM 路径忽略此参数（零改动）。
+            "-O0" | "-O1" | "-O2" | "-O3" => {
+                let n = args[i].as_bytes()[2] - b'0';
+                opt_level = ir::OptLevel::from_u8(n).unwrap();
+                i += 1;
+            }
+            "-O" | "--opt-level" => {
+                if i + 1 < args.len() {
+                    // 直接解析原始 token：负数（如 -1）parse::<u8> 失败→拒绝，
+                    // 不用 trim_start_matches('-')，否则 "-1" 会被误读成 "1"。
+                    match args[i + 1].parse::<u8>().ok().and_then(ir::OptLevel::from_u8) {
+                        Some(l) => { opt_level = l; i += 2; }
+                        None => {
+                            eprintln!("未知优化级别 '{}'（可选 0/1/2/3，即 -O0..-O3）", args[i + 1]);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("选项 {} 缺少级别（0/1/2/3）", args[i]);
+                    std::process::exit(1);
+                }
+            }
+            s if s.starts_with("--opt-level=") || s.starts_with("-O=") => {
+                let raw = &s[s.find('=').unwrap() + 1..];
+                match raw.parse::<u8>().ok().and_then(ir::OptLevel::from_u8) {
+                    Some(l) => { opt_level = l; i += 1; }
+                    None => {
+                        eprintln!("未知优化级别 '{}'（可选 0/1/2/3，即 -O0..-O3）", raw);
+                        std::process::exit(1);
+                    }
+                }
             }
             // Fail-Fast 安全等级：debug（默认） / safe / fast
             "--safety" => {
@@ -392,6 +427,10 @@ fn main() {
     // 自研后端与 LLVM 专属能力的关系：明确告知，绝不静默降级。
     if backend == Backend::Asm {
         eprintln!("ℹ️  已启用自研后端（--backend=asm）：专属 IR → 优化 Pass → 目标汇编 → cc -c → .o。");
+        eprintln!("ℹ️  自研后端优化级别 -O{}（0=无 Dial 优化 / 1=基础 IR Pass / 2=默认全开 / 3=+LLVM 风格代数恒等式）。", opt_level.as_u8());
+        if opt_level == ir::OptLevel::O0 && !debug_info {
+            eprintln!("ℹ️  -O0 为无优化构建（适合调试/对照）；如需 DWARF 源码行断点请再加 -g。");
+        }
         if pgo {
             eprintln!("❌ --pgo 依赖 LLVM bitcode 插桩，自研后端不产生 .bc，无法使用。");
             std::process::exit(1);
@@ -460,11 +499,15 @@ fn main() {
             debug_info,
             &src_path,
             &fe.fn_origin,
+            opt_level,
         ) {
             eprintln!("{}", e);
             std::process::exit(1);
         }
     } else {
+        if opt_level != ir::OptLevel::O2 {
+            eprintln!("ℹ️  -O{} 仅作用于自研后端（--backend=asm）；LLVM 后端优化级别由 --fast/-g 控制，已忽略。", opt_level.as_u8());
+        }
         let cg_opts = codegen::CgOpts {
             safety,
             aggressive: fast,
@@ -1479,6 +1522,8 @@ fn print_usage() {
     eprintln!("  build <文件.dial> [-o 输出] [-g] [--no-link] [--safety debug|safe|fast] [--pgo] [--tiny] [--single-file] [--backend llvm|asm]");
     eprintln!("  --backend llvm|asm   代码生成后端；默认 llvm（既有路径）。asm 为自研后端：");
     eprintln!("                      专属 IR + 优化 Pass → x86-64/AArch64 汇编 → cc -c → .o（实验性）");
+    eprintln!("  -O0|-O1|-O2|-O3             优化级别（仅 asm 后端；等价 -O N / --opt-level=N）：");
+    eprintln!("                      0=无 Dial 优化、1=基础 IR Pass、2=默认(全开)、3=+LLVM 风格代数恒等式");
     eprintln!("  run   <文件.dial> [同上]");
     eprintln!("  -g / --debug-info          生成标准 DWARF（GDB/LLDB 源码行断点 + print 变量名）");
     eprintln!("  --tiny                     体积模式：-Os + 函数/数据分段 + --gc-sections + strip（与 --fast/--pgo/-g 冲突）");

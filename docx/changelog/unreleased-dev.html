@@ -38,7 +38,11 @@
 <h2 id="未发布--开发中增量未升版本号--未打标签--未发-release">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</h2>
 <h3 id="added">Added</h3>
 <ul>
-<li><strong>M7-e3ab 自研 asm 后端 DWARF 精确宽度类型 DIE（支柱② DWARF 补全）</strong>：e3z 的类型 DIE
+<li>
+<p><strong>M7-e3ac/e3ad 自研 asm 后端优化级别参数 <code>-O0/-O1/-O2/-O3</code> + 移植 LLVM InstCombine 恒等式（支柱① O3 管线）</strong>：此前自研后端所有优化（fold/cse/dce/ivr/GRA/ISA 指令融合）无条件全开、没有任何优化级别参数，而 LLVM 后端也仅在 <code>--fast</code> 下 O3——缺少编译器必备的 <code>-O</code> 参数界面。本批引入对齐 LLVM 语义的 <code>-O0</code>（无 Dial 优化，真·调试）/<code>-O1</code>（基础 IR Pass）/<code>-O2</code>（默认：既有全部优化，逐字节零回归）/<code>-O3</code>（+LLVM 风格代数恒等式），支持 <code>-O N</code>/<code>--opt-level=N</code> 写法，非法级别 Fail-Fast 拒绝；仅作用于 asm 后端，LLVM 路径给提示且零改动。O3 从 LLVM InstCombine 借鉴一组保守可证等价的整数恒等式（<code>a+0→a</code>、<code>a*1→a</code>、<code>a|0→a</code>、<code>a&lt;&lt;0→a</code>、<code>a&amp;-1→a</code>、幂等 <code>a&amp;a→a</code>/<code>a|a→a</code>），仅 x86-64/ty=I64，跑完补 DCE。新增 R6 专项 7 项；A/B：默认与 -O2 逐字节一致（md5 40548450…）、AArch64 各级别 .s 全同、恒等式密集循环 O3 比 O2 快约 1.23x（0.27s→0.22s），四级输出一致。冻结文件/依赖/版本/AArch64/LLVM 路径零改动。</p>
+</li>
+<li>
+<p><strong>M7-e3ab 自研 asm 后端 DWARF 精确宽度类型 DIE（支柱② DWARF 补全）</strong>：e3z 的类型 DIE
   只有 int/float/bool/string/ptr 五类，FFI 精确宽度标量 <code>int32</code>(栈槽低 4 字节)、<code>byte</code>(低
   1 字节无符号)、<code>float32</code>(低 4 字节) 被错误映射成 int(8 字节有符号)/int/float(8 字节)，
   gdb 按 8 字节读会串入高位未定义字节，<code>print</code>/<code>ptype</code> 显示错误宽度与符号性。本批新增
@@ -48,7 +52,8 @@
   全部正确；新增 DIE 只在 DWARF 元数据段，机器码段与非 -g <code>.s</code> 与新编译器前逐字节一致，
   dwarfdump 无 error。R 组新增 R5 专项（类型 DIE byte_size/encoding + gdb ptype/print）。
   宪法约束不动（codegen.rs/ast.rs/LLVM 路径/依赖/版本零改动）。证据链见
-  <a href="../rationale/unreleased-dev.html">rationale/unreleased-dev.md</a>。</li>
+  <a href="../rationale/unreleased-dev.html">rationale/unreleased-dev.md</a>。</p>
+</li>
 <li><strong>M7-e3aa 自研 asm 后端多文件 DWARF source 映射（支柱② DWARF 补全）</strong>：<code>import "./x.dial";</code>
   合并编译多个源文件时，<code>-g</code> 生成的 DWARF 此前把所有函数的 <code>DW_AT_decl_file</code> / 行表都指向
   主源文件，子模块函数（如 <code>helper.dial</code> 里的函数）按各自文件的相对行号却错指主文件，

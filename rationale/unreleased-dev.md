@@ -2177,3 +2177,38 @@
       - **护栏**：`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、`Cargo.toml`
         仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
         `src/codegen_asm.rs` 一处源文件 + 测试 / 文档。
+
+    - **M7-e3ac/e3ad 自研 asm 后端优化级别参数 -O0..-O3 + 移植 LLVM InstCombine（支柱①）**：
+      路线图支柱①（O3 管线）此前只有"优化全开"一种形态——fold/cse/dce/ivr/GRA/ISA 融合
+      全部无条件开启，既没有 LLVM 式的 `-O` 分级参数界面（用户明确要求"代替 LLVM 不得不
+      支持按参数优化"），也缺少一个能持续从 LLVM 借鉴优化能力的接入口。
+      - **诊断**：LLVM 后端其实也只在 `--fast` 下才 `OptimizationLevel::Aggressive`（O3），
+        `-g` 隐含 O0（codegen.rs:1735）；asm 后端完全没有 opt level 概念。缺的是编译器
+        必备的参数界面 + 一个"LLVM 好东西拿过来"的载体。
+      - **参数系统（e3ac）**：`ir::OptLevel {O0,O1,O2,O3}`（Default=O2）；main.rs 手写
+        解析 `-O0..-O3` / `-O N` / `--opt-level[=]N`，非法值 Fail-Fast；沿 main→
+        asm::compile_asm→codegen_asm::emit→emit_function→FnEmit 传递。
+        分级：O0 跳过全部 Dial IR pass（真·无优化）；O1 仅 run_passes；O2（默认）
+        +fold_pure_calls+ivr+GRA+ISA 融合；O3（e3ad）+InstCombine。GRA/popcnt/xorshift
+        在 analyze_residency 里对 `opt_level < O2` 禁用（与 -g 同理走全 spill），
+        popcnt/xorshift 依赖 promotable 随之自动失效。LLVM 后端传 -O 给忽略提示、零改动。
+      - **LLVM InstCombine 移植（e3ad）**：pass.rs 新增 `instcombine()`，借鉴一组保守
+        可证等价的整数恒等式：a+0→a、0+a→a、a-0→a、a*0→0、a*1→a、a|0→a、a&0→0、
+        a&-1→a、a<<0→a、a>>0→a、幂等 a&a→a / a|a→a。边界：仅 `ty==I64`、仅整数
+        `Bin`、不碰 FBin（NaN）、逻辑 And/Or（短路）、Div/Mod（除零）；结果写成
+        `Conv{Zext,I64}` 安全搬运，跑完补 DCE。仅 x86-64 且 O3 调用，AArch64 零变化。
+      - **A/B 与零回归**：旧编译器 vs 新编译器对同一程序（fib+popcnt+add）默认 .s
+        **md5 逐字节一致**（405484508bc5b9124e4d055db7514a6d）——默认与 -O2 都是全开，
+        零回归坐实。AArch64 交叉 .s 在 O0/O2/O3 下 md5 全同（8e7b6531…），分级开关
+        均在 x86-64 guard 内。四级运行输出一致（42/3）；-g 各级 DWARF 行号保留。
+      - **真实差异**：GRA 驻留 callee-saved 出现次数 O0=0 / O2=37（O0 禁用驻留生效）；
+        恒等式 POC（a+0/a*1/a|0）O2 的 .s 含 addq $0 / imulq / orq $0，O3 全部消除
+        （71→66 行），输出 7/7/7 正确。恒等式密集循环（2e8 次）O3 中位 0.22s vs O2
+        0.27s，**约快 1.23x**（ratio old/new），证明 LLVM 风格恒等式在自研后端真实收益。
+      - **测试与门禁**：R 组新增 **R6 专项 7 项**（四级编译/运行、默认与 O2 逐字节一致、
+        GRA 分级、O3 恒等式生效、恒等式结果正确、非法 -O9 拒绝、LLVM 忽略 -O 提示）；
+        全量 run_tests.sh 绿；docx 确定性生成；check_links/check_version 全过。
+      - **护栏**：`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、`Cargo.toml`
+        仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
+        `src/ir.rs` / `src/main.rs` / `src/asm.rs` / `src/pass.rs` / `src/codegen_asm.rs`
+        + 测试 / 文档。

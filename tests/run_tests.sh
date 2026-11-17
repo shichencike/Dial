@@ -1727,6 +1727,83 @@ else
 fi
 
 
+# ---- R6) 自研 asm 后端优化级别参数 -O0..-O3（M7-e3ac/e3ad）----
+# 对齐 LLVM -O 语义：O0 无 Dial 优化 / O1 基础 IR Pass / O2 默认全开 /
+# O3 +LLVM InstCombine 代数恒等式。O2 为默认，保证既有用例零回归。
+ODIR="${RDIR}/opt"
+mkdir -p "$ODIR"
+cat > "${ODIR}/opt.dial" <<'DIALEOF'
+fn add(a: int, b: int): int {
+    let s: int = a + b;
+    return s;
+}
+fn popcnt(v0: int): int {
+    var v: int = v0;
+    var cnt: int = 0;
+    while (v > 0) { cnt = cnt + (v & 1); v = v >> 1; }
+    return cnt;
+}
+fn main(): int {
+    let x: int = add(20, 22);
+    let c: int = popcnt(7);
+    print(x);
+    print(c);
+    return 0;
+}
+DIALEOF
+cat > "${ODIR}/ic.dial" <<'DIALEOF'
+fn f(a: int): int {
+    let r1: int = a + 0;
+    let r2: int = a * 1;
+    let r3: int = a | 0;
+    print(r1);
+    print(r2);
+    print(r3);
+    return 0;
+}
+fn main(): int { let x: int = f(7); return 0; }
+DIALEOF
+# 四级都能编译且运行输出一致
+opt_all_ok=1
+for _o in 0 1 2 3; do
+    if ! ${DIALC} build "${ODIR}/opt.dial" --backend asm -O${_o} -o "${ODIR}/exe${_o}" >"${ODIR}/build${_o}.log" 2>&1; then opt_all_ok=0; fi
+    if [ "$( ${ODIR}/exe${_o} 2>/dev/null | tr '\n' ' ' )" != "42 3 " ]; then opt_all_ok=0; fi
+done
+if [ "$opt_all_ok" -eq 1 ]; then rpass "asm 后端 -O0/-O1/-O2/-O3 均可编译且运行输出一致（42/3）"
+else rbad "asm 后端优化级别编译/运行失败"; fi
+# 默认（无 -O）与 -O2 的 .s 逐字节一致（零回归）
+${DIALC} build "${ODIR}/opt.dial" --backend asm --no-link -o "${ODIR}/def" >/dev/null 2>&1; cp "${ODIR}/opt.s" "${ODIR}/def.s"
+${DIALC} build "${ODIR}/opt.dial" --backend asm -O2 --no-link -o "${ODIR}/o2" >/dev/null 2>&1; cp "${ODIR}/opt.s" "${ODIR}/o2.s"
+if cmp -s "${ODIR}/def.s" "${ODIR}/o2.s"; then rpass "asm 后端默认构建与 -O2 逐字节一致（零回归）"
+else rbad "asm 后端默认与 -O2 汇编不一致"; fi
+# O0/O1 禁用 GRA 驻留（无 callee-saved 寄存器），O2/O3 启用
+${DIALC} build "${ODIR}/opt.dial" --backend asm -O0 --no-link -o "${ODIR}/o0s" >/dev/null 2>&1; cp "${ODIR}/opt.s" "${ODIR}/o0s.s"
+if ! grep -qE '%r1[2345]|%rbx' "${ODIR}/o0s.s" && grep -qE '%r1[2345]|%rbx' "${ODIR}/o2.s"; then
+    rpass "asm 后端 -O0 禁用 GRA 驻留、-O2 启用（优化级别真实生效）"
+else rbad "asm 后端优化级别对 GRA 驻留无效"; fi
+# O3 InstCombine：消除 a+0 / a*1 / a|0（O3 无 addq $0 / imulq / orq $0）
+${DIALC} build "${ODIR}/ic.dial" --backend asm -O2 --no-link -o "${ODIR}/ic2" >/dev/null 2>&1; cp "${ODIR}/ic.s" "${ODIR}/ic2.s"
+${DIALC} build "${ODIR}/ic.dial" --backend asm -O3 --no-link -o "${ODIR}/ic3" >/dev/null 2>&1; cp "${ODIR}/ic.s" "${ODIR}/ic3.s"
+if grep -q 'addq \$0' "${ODIR}/ic2.s" && ! grep -q 'addq \$0' "${ODIR}/ic3.s" \
+   && grep -q 'imulq' "${ODIR}/ic2.s" && ! grep -q 'imulq' "${ODIR}/ic3.s"; then
+    rpass "asm 后端 -O3 移植 LLVM InstCombine 恒等式（a+0/a*1 消除）"
+else rbad "asm 后端 -O3 代数恒等式未生效"; fi
+# O3 恒等式结果运行正确
+${DIALC} build "${ODIR}/ic.dial" --backend asm -O3 -o "${ODIR}/ic3exe" >/dev/null 2>&1
+if [ "$( ${ODIR}/ic3exe 2>/dev/null | tr '\n' ' ' )" = "7 7 7 " ]; then
+    rpass "asm 后端 -O3 恒等式优化后运行输出正确（7/7/7）"
+else rbad "asm 后端 -O3 恒等式优化结果错误"; fi
+# 非法级别 Fail-Fast 拒绝
+if ${DIALC} build "${ODIR}/opt.dial" --backend asm -O9 -o "${ODIR}/bad" >"${ODIR}/bad.log" 2>&1; then
+    rbad "asm 后端非法 -O9 未拒绝"
+else rpass "asm 后端非法优化级别 -O9 被 Fail-Fast 拒绝"; fi
+# LLVM 后端传 -O 给提示且零改动（输出仍正确）
+llvm_o_log="$( ${DIALC} build "${ODIR}/opt.dial" --backend llvm -O0 -o "${ODIR}/llvm_o0" 2>&1 )"
+if echo "$llvm_o_log" | grep -q '仅作用于自研后端' && [ "$( ${ODIR}/llvm_o0 2>/dev/null | tr '\n' ' ' )" = "42 3 " ]; then
+    rpass "LLVM 后端忽略 -O 参数并给出提示（零改动）"
+else rbad "LLVM 后端 -O 参数处理异常"; fi
+
+
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付

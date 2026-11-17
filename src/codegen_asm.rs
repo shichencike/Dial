@@ -217,7 +217,7 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
     o
 }
 
-pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str, fn_origin: &std::collections::HashMap<String, String>) -> Result<String, String> {
+pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str, fn_origin: &std::collections::HashMap<String, String>, opt_level: OptLevel) -> Result<String, String> {
     // 预检：FieldAddr.field 是字段序号，必须能按 struct_layout 解析出字节偏移。
     for f in &ip.functions {
         for b in &f.blocks {
@@ -324,7 +324,7 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
         } else {
             1
         };
-        let di = emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs, debug_info, file_index)?;
+        let di = emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs, debug_info, file_index, opt_level)?;
         dwarf_funcs.push(di);
     }
     // 避免 GNU ld 的 "missing .note.GNU-stack section implies executable stack" 警告。
@@ -456,6 +456,9 @@ struct FnEmit<'a> {
     /// M7-e3v：本函数位于递归 SCC 内——禁止全局跨 call 驻留
     /// （递归栈帧会放大 callee-saved 保存恢复开销），退回逐块模式。
     gra_blocked: bool,
+    /// M7-e3ac：优化级别。O0/O1 禁用 GRA 驻留与 ISA 指令融合（popcnt/xorshift），
+    /// 与 -g 一样走全 spill 路径；O2（默认）/O3 保持既有全部优化。
+    opt_level: OptLevel,
     /// M7-e3w：-g 调试模式。为让 DWARF 变量 location（DW_OP_fbreg 指向栈槽）
     /// 准确，-g 时禁用一切寄存器驻留 / 提升优化，所有变量留在 alloca_off 栈槽
     /// （与 LLVM 后端 -g 强制 O0 同构）。同时发射 .loc / .debug_* 调试信息。
@@ -476,7 +479,7 @@ enum XorshiftPlan {
 }
 
 impl<'a> FnEmit<'a> {
-    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool, debug_info: bool, file_index: u8) -> Self {
+    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool, debug_info: bool, file_index: u8, opt_level: OptLevel) -> Self {
         let prefix = format!("Ldial_{}", {
             let s: String = f.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
             s
@@ -492,7 +495,7 @@ impl<'a> FnEmit<'a> {
             pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
             lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
             popcnt_fuse: HashMap::new(), popcnt_native: HashSet::new(),
-            xorshift_fuse: HashMap::new(), gra_blocked, debug_info, file_index,
+            xorshift_fuse: HashMap::new(), gra_blocked, opt_level, debug_info, file_index,
         }
     }
 
@@ -1333,9 +1336,12 @@ impl<'a> FnEmit<'a> {
     fn analyze_residency(&mut self) {
         self.plans.clear();
         self.used_phys.clear();
-        if !matches!(self.target, EmitTarget::X86_64SysV) || self.debug_info {
+        if !matches!(self.target, EmitTarget::X86_64SysV) || self.debug_info || self.opt_level < OptLevel::O2 {
             // M7-e3w：-g 时禁用一切驻留，所有值留在 alloca_off / reg_off 栈槽，
             // 保证 DWARF 的 DW_OP_fbreg location 指向的就是权威最新值。
+            // M7-e3ac：O0/O1 同样禁用驻留（走全 spill）——低优化级别不跨指令保持
+            // 值，得到"所写即所得"的代码；popcnt/xorshift 融合依赖 promotable，
+            // 随之自动失效。O2（默认）/O3 不受影响。
             self.plans = (0..self.f.blocks.len()).map(|_| BlockPlan::default()).collect();
             return;
         }
@@ -3984,8 +3990,9 @@ fn emit_function(
     recursive_funcs: &HashSet<String>,
     debug_info: bool,
     file_index: u8,
+    opt_level: OptLevel,
 ) -> Result<FnDwarfInfo, String> {
-    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name), debug_info, file_index);
+    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name), debug_info, file_index, opt_level);
     e.compute_layout();
     e.analyze_dead_defs();
     e.analyze_fusable();

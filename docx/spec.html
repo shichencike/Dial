@@ -1210,9 +1210,9 @@ LLVM 的通用后端」。经 M7-e3u 的系统诊断，剩余差距不在单条 
 <tbody>
 <tr>
 <td><strong>① O3 级优化管线</strong>（核心＝全局寄存器分配）</td>
-<td>inkwell + clang <code>-O3 -flto</code> 全流程</td>
+<td>inkwell + clang <code>-O3 -flto</code> 全流程（仅 <code>--fast</code>）</td>
 <td>曾有 4 个本地 pass + 2 专项 pass，无全局寄存器分配 → b17 内层 109 条栈搬运</td>
-<td><strong>M7-e3v 落地函数级 GRA</strong>（callee-saved 全函数驻留），数组密集项 +9.91%；<strong>M7-e3x 定量证伪完整 SIMD 后端</strong>（整体 −6.7%）转 targeted ISA 路线；<strong>M7-e3y 原生 POPCNT 融合</strong> b23 +114%~120%、几何平均 +2.5%；caller-saved / 多级管线仍待补</td>
+<td><strong>M7-e3v 落地函数级 GRA</strong>（callee-saved 全函数驻留），数组密集项 +9.91%；<strong>M7-e3x 定量证伪完整 SIMD 后端</strong>（整体 −6.7%）转 targeted ISA 路线；<strong>M7-e3y 原生 POPCNT 融合</strong> b23 +114%~120%、几何平均 +2.5%；<strong>M7-e3ac/e3ad 优化级别参数 <code>-O0</code>~<code>-O3</code></strong>（对齐 LLVM，O2 默认零回归）+ <strong>移植 LLVM InstCombine 恒等式</strong>（O3，<code>a+0</code>/<code>a*1</code> 等消除，密集循环 +23%）；caller-saved / 多级管线仍待补</td>
 </tr>
 <tr>
 <td><strong>② DWARF 调试信息</strong></td>
@@ -1304,6 +1304,51 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety d
 前者求「最小体积」、后者求「不依赖宿主」，编译器如实提示但不静默覆盖任何一侧。
 LLVM 侧（inkwell 无原生 <code>Oz</code> 档）保持 <code>O2</code>，体积压缩全部压在 C 侧与链接期；
 <strong>不承诺具体 KB 数</strong>，实测数据见 §38.24.1。</p>
+<p><strong>优化级别（<code>-O0</code>~<code>-O3</code>，仅自研 asm 后端；M7-e3ac/e3ad）</strong>：对齐 LLVM 的 <code>-O</code> 语义，
+补齐编译器必备的分级优化参数界面（亦支持 <code>-O N</code> / <code>--opt-level=N</code>，非法级别 Fail-Fast 拒绝）：</p>
+<table>
+<thead>
+<tr>
+<th>级别</th>
+<th>Dial IR Pass</th>
+<th>GRA 驻留 / ISA 融合</th>
+<th>LLVM InstCombine 恒等式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-O0</code></td>
+<td>无（真·无优化，配合 <code>-g</code> 得到「所写即所得」）</td>
+<td>禁用（全 spill）</td>
+<td>无</td>
+</tr>
+<tr>
+<td><code>-O1</code></td>
+<td>基础（fold / cse / dce / ARC 化简）</td>
+<td>禁用（全 spill）</td>
+<td>无</td>
+</tr>
+<tr>
+<td><code>-O2</code>（<strong>默认</strong>）</td>
+<td>+ 过程间常量折叠 / 归纳变量强度削减</td>
+<td>启用（既有全部优化）</td>
+<td>无</td>
+</tr>
+<tr>
+<td><code>-O3</code></td>
+<td>同 <code>-O2</code></td>
+<td>启用</td>
+<td><strong>启用</strong>（<code>a+0→a</code>、<code>a*1→a</code>、<code>a|0→a</code>、<code>a&lt;&lt;0→a</code>、<code>a&amp;-1→a</code> 等，仅 x86-64/整数）</td>
+</tr>
+</tbody>
+</table>
+<p>默认 <code>-O2</code> = 既有全部优化，<strong>未指定 <code>-O</code> 的既有构建逐字节零回归</strong>；<code>-O0</code>/<code>-O1</code> 关驻留走全
+spill（低优化级别不跨指令保持值）；<code>-O3</code> 从 LLVM InstCombine 借鉴的代数恒等式仅对可证明
+等价的整数运算生效（不碰浮点 NaN、逻辑短路、除零语义），恒等式密集循环实测比 O2 快约
+1.23x。此参数<strong>不影响 LLVM 后端</strong>（LLVM 优化级别仍由 <code>--fast</code> / <code>-g</code> 控制，传 <code>-O</code> 会给出
+忽略提示）；AArch64 各级别 <code>.s</code> 逐字节一致（分级开关均在 x86-64 guard 内）。R 组 R6 专项
+7 项覆盖四级编译/运行、默认与 O2 零回归、GRA 分级、恒等式生效与正确性、非法级别拒绝。
+证据链见 <code>rationale/unreleased-dev.md</code> 的 M7-e3ac/e3ad 批次。</p>
 <blockquote>
 <p>⚠️ <strong>关于 <code>--fast</code> 模式（ReleaseFast）：此模式会关闭所有边界检查、除零检查和空指针保护，
 以换取极致的性能。除非你是正在编写底层核心算法、且完全确信你的数组下标绝对不会越界，
