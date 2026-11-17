@@ -1920,6 +1920,54 @@ done
     || rbad "全审计佐证失败：越界类未按 --safety 分级"
 
 
+# ---------------------------------------------------------------------------
+# R8) 编译期布局内建 sizeof/alignof/offsetof 双后端一致性（M7-e3ag）
+#     LLVM 用 TargetData 算常量；asm 复用 ir.rs 的 ABI 布局单点真理。
+#     同一程序两后端运行输出必须逐字相等（含 packed struct align=1 修正）。
+# ---------------------------------------------------------------------------
+echo
+echo "  -- R8) 编译期布局内建双后端一致性（sizeof/alignof/offsetof） --"
+LDIR="${RDIR}/layout"; mkdir -p "$LDIR"
+cat > "${LDIR}/layout.dial" <<'DIALEOF'
+struct Point { x: int, y: int }
+struct Mixed { a: byte, b: int, c: int32, d: bool }
+packed struct PktHdr { seq: int, flags: byte, len: byte }
+fn main(): int {
+    print(sizeof<int>(), alignof<int>(), sizeof<byte>(), sizeof<bool>());
+    print(sizeof<int32>(), sizeof<float>(), sizeof<float32>(), sizeof<char>());
+    print(sizeof<Point>(), alignof<Point>(), offsetof<Point>(y));
+    print(sizeof<Mixed>(), alignof<Mixed>());
+    print(offsetof<Mixed>(b), offsetof<Mixed>(c), offsetof<Mixed>(d));
+    print("PKT=", sizeof<PktHdr>(), "/", alignof<PktHdr>());
+    print("PKTOFF=", offsetof<PktHdr>(flags), "/", offsetof<PktHdr>(len));
+    print(sizeof<rawptr<void>>());
+    return 0;
+}
+DIALEOF
+${DIALC} build "${LDIR}/layout.dial" --backend llvm -o "${LDIR}/llvm" >/dev/null 2>&1 || rbad "R8 LLVM 编译布局程序失败"
+${DIALC} build "${LDIR}/layout.dial" --backend asm  -o "${LDIR}/asm"  >/dev/null 2>&1 || rbad "R8 asm 编译布局程序失败"
+_lo_expected="$( ${LDIR}/llvm 2>/dev/null | tr '\n' ' ' )"
+_lo_actual="$( ${LDIR}/asm 2>/dev/null | tr '\n' ' ' )"
+[ -n "$_lo_expected" ] && [ "$_lo_actual" = "$_lo_expected" ] \
+    && rpass "sizeof/alignof/offsetof 双后端输出逐字一致（标量/普通 struct/packed/容器/offset）" \
+    || rbad "R8 双后端布局输出不一致（llvm=[$_lo_expected] asm=[$_lo_actual]）"
+# packed 对齐必须是 1（若 struct_layout 的 packed align 未特判会得 8，此处即失败）
+[ "$( ${LDIR}/asm 2>/dev/null | sed -n '6p' )" = "PKT=24/1" ] \
+    && rpass "packed struct alignof=1（对齐 LLVM/C，非自然对齐 8）" \
+    || rbad "packed struct alignof 未按 C ABI 口径修正"
+# simd 布局内建须明确 Fail-Fast 拒绝（不给错误数值）
+cat > "${LDIR}/simd.dial" <<'DIALEOF'
+fn main(): int { print(sizeof<simd<int,4>>()); return 0; }
+DIALEOF
+if ${DIALC} build "${LDIR}/simd.dial" --backend asm -o "${LDIR}/simd" >"${LDIR}/simd.log" 2>&1; then
+    rbad "R8 simd 布局内建应被拒绝却编译成功"
+elif grep -q '\[asm 后端\].*simd' "${LDIR}/simd.log"; then
+    rpass "simd 布局内建明确 Fail-Fast 拒绝（带 [asm 后端] 前缀）"
+else
+    rbad "R8 simd 拒绝但未给出 [asm 后端] 诊断"
+fi
+
+
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付

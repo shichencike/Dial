@@ -334,9 +334,10 @@ dialc lsp
 > | M5-c | 裸指针 FFI：`raw_alloc` / `raw_free` / `ptr_cast` / `offset` 指针算术 / `*p` 读写 / C 库互通 |
 > | M5-d | 一等**函数地址**（函数指针）：取地址 / 间接调用 / 作参数与返回值 |
 >
-> 尚未覆盖（会明确报错）：`select` / `spawn` / 通道并发、编译期布局内建
-> （`sizeof` / `alignof` / `offsetof`）、内联汇编与 SIMD、高阶容器方法
-> （`map` / `filter` / `reduce` / `sort_by`）、嵌套下标赋值等。
+> 尚未覆盖（会明确报错）：`select` / `spawn` / 通道并发、内联汇编与 SIMD、
+> 高阶容器方法（`map` / `filter` / `reduce` / `sort_by`）、嵌套下标赋值等。
+> 编译期布局内建 `sizeof` / `alignof` / `offsetof` 已支持（M7-e3ag，含 packed struct
+> 对齐与双后端一致性验证）。
 >
 > **双后端黄金门禁**（`tools/run_asm_golden.sh`，`run_tests.sh` 的 AF 组）：
 > 同一份 `.dial` 分别用 `llvm` / `asm` 编译运行并**逐字节 diff**——LLVM 后端即基准，
@@ -5179,7 +5180,9 @@ packed struct ValHdr { ... }       // Dial 自己的值语义结构体，同样�
 - `packed struct` —— **Dial 值语义结构体**的紧凑布局（字段走 Dial 内部宽度）。
 
 布局用 §33.3 那套编译期内建核对：`sizeof<T>()` / `alignof<T>()` / `offsetof<T>(field)`
-在编译期按 target DataLayout 算出，零运行时开销。P 组把 Dial 侧的三个数与 C 侧
+在编译期按 target DataLayout 算出，零运行时开销。**LLVM 与自研 asm 两后端均支持**
+（M7-e3ag：asm 复用与 LLVM DataLayout 对齐的 ABI 布局单点真理，packed struct 的
+`alignof` 固定为 1、与 C 一致；simd 布局内建明确拒绝）。P 组把 Dial 侧的三个数与 C 侧
 `sizeof` / `_Alignof` / `offsetof` **逐项比对**（且刻意不写死期望值——布局随平台变，
 「两边相等」才是要锁住的东西）。
 

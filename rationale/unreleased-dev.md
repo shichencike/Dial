@@ -2306,3 +2306,44 @@
         的一致性补全（更多语言特性 / 目标平台双后端对齐）；② 调试信息深度（优化态下的
         变量位置 / 作用域 DIE）；③ 或接受架构级工程需长周期投入的现实，不再以单批微优化
         为目标。本批把该结论固化在证据链，供后续方向决策引用。
+
+    - **M7-e3ag 自研 asm 后端补齐编译期布局内建 sizeof/alignof/offsetof（双后端一致性补全）**：
+      承接 e3af 结论转向证据链方向①（非墙钟指标的双后端语义一致性）。先排除了"作用域
+      DIE"这个看似合理的调试信息方向——实测 gdb 发现 **LLVM 后端本身也把块内变量暴露在
+      块外**（`info locals` 两后端都显示 `inner=22`），即作用域 DIE 不是 asm 落后 LLVM 的
+      差距，故不落地。转而锁定确凿缺口：`sizeof<T>()`/`alignof<T>()`/`offsetof<T>(field)`
+      是 FFI 刚需的编译期常量（零运行时指令），LLVM 用 `TargetData::get_abi_size` 支持，
+      而 asm 后端经 `builtin.rs` 的 `BKind::Unsupported` 明确 Fail-Fast 报错，还配有专门
+      负例 `tests/asm_golden/negative/unsupported.dial`。
+      - **可行性（无需碰冻结文件 / 零新依赖）**：asm 后端早已把 LLVM DataLayout 口径固化为
+        单点真理——`ir.rs::struct_layout(name,packed)->(offsets,total_size,align)` 递归算 C ABI
+        布局、`field_size(t)`（I32/F32=4、I1/I8=1、其余 8）、`field_ir(t)`，这些本就为结构体
+        字段地址服务、与 LLVM 逐字节对齐。sizeof 系列只需复用它们，天然保证双后端一致，
+        无需 inkwell 的 `TargetData`（它在 codegen.rs、宪法冻结，且 LLVM 路径须零改动）。
+      - **实现**：`lower.rs` 的 `lower_call` 特殊内建分派加入三名字 → 新增 `lower_layout_call`
+        （从 args[0] 的 `Expr::TypeLit` 取类型、args[1] 的 `Expr::StringLit` 取字段名，均不 lower
+        实参本身）、`layout_size_align`、`layout_offset`，编译期算出整数后返回 `Value::Imm(I64(n))`
+        ——与 `lower_expr(Expr::IntLit)` 完全同形，emit 全链（`lg`/`bin_src`/`inst_call`）早已支持
+        无 vreg 的纯立即数，零运行时指令。实测 `sizeof<int>()` 直接物化为 `movabsq $8, %rdi`。
+      - **关键正确性修正（设计评审抓到）**：Dial 有 `packed struct`/`packed extern struct`
+        语法（parser L85-99、ast.rs L598），LLVM 按 C ABI 算 packed `align=1`、`size` 为紧密值；
+        而 `struct_layout(name).2` 对 packed 仍返回字段自然对齐（如 8），直接复用会制造新的
+        双后端不一致。修正：从 `prog.structs`/`prog.cstructs` 的 `packed` 标志收集类型名集合
+        传入 `Lower`，packed 时 `size=struct_layout(name,true).1`、`align` 固定 1；offset 也按
+        packed 口径取。simd 在 LLVM 按 `N×elem` 向量宽度算、asm 宽度映射无法对齐，明确
+        Fail-Fast 拒绝（带 `[asm 后端]` 前缀），绝不静默给错误数值。内建容器（String/Array/
+        Map/RawPtr/Handle…）LLVM 一律擦除为 i8ptr=8，asm `field_ir`→Ptr/Handle→field_size=8、
+        align=8，天然一致。
+      - **实测双后端逐字一致**：标量 `int=8/byte=8/bool=1/int32=4/float=8/f32=4/char=8`、
+        `alignof<int>=8`；`Point{x:int,y:int}` size16/align8、`Mixed{a:byte,b:int,c:int32,d:bool}`
+        size24/align8、offset(b=8,c=16,d=20)；**packed `PktHdr{seq:int,flags:byte,len:byte}`
+        size24/align1/offset(flags=8,len=16)**；`sizeof<rawptr<void>>=8`。LLVM 与 asm 输出 diff 为空。
+      - **测试与门禁**：负例 `unsupported.dial` 从 sizeof 换为 `@asm` 内联汇编（LLVM 编译输出 1、
+        asm 带 `[asm 后端] 前缀` 拒绝，近期不可能落地，最稳定）；`core1.dial` 加正向断言使
+        `run_asm_golden.sh` 双后端 diff 覆盖本特性；新增 **R8 组**（双后端布局输出逐字比对、
+        packed align=1 断言、simd 明确拒绝）；全量 `run_tests.sh` 绿、golden 门禁绿。
+      - **护栏**：`src/codegen.rs`/`src/ast.rs` 相对 544d10a 零改动、`Cargo.toml` 仍 1.10.0、
+        零新依赖、LLVM 路径零改动、构建零警告、不打 tag；本批唯一源码改动是 `src/lower.rs`。
+        本特性只产立即数、不发射指令 → 非布局程序（p1/p2/p3 覆盖结构体/循环/函数调用）
+        在 O2/O3 的 `.s` 与 OLD(f0f0a54) **逐字节一致**；AArch64 普通程序 O0/O2/O3 `.s` 零变化。
+        docx 确定性生成；check_links/check_version 全过。

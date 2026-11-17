@@ -16,7 +16,7 @@ use crate::ast::*;
 use crate::builtin;
 use crate::ir::*;
 use crate::semantic::{FuncInfo, StructTable};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// 一个局部变量在 lowering 期的记账。
 #[derive(Clone)]
@@ -53,10 +53,18 @@ pub fn lower_program(
     debug_info: bool,
 ) -> Result<IrProgram, String> {
     let mut ip = IrProgram::new(functions_sig, structs, goto_depths);
+    // M7-e3ag：收集 packed 结构体名。布局内建（sizeof/alignof/offsetof）须按 C ABI
+    // 口径处理 packed：size 为紧密排列值、align 固定 1（struct_layout 对 packed 的
+    // align 仍返回自然对齐，直接复用会与 LLVM/C 不一致）。从 AST 的 structs/cstructs
+    // 取 packed 标志，不修改 IrProgram / Lower::new 之外的签名。
+    let packed: HashSet<String> = prog.structs.iter()
+        .filter(|s| s.packed).map(|s| s.name.clone())
+        .chain(prog.cstructs.iter().filter(|s| s.packed).map(|s| s.name.clone()))
+        .collect();
     for func in &prog.functions {
         // M7-e3w：调试标记只在 -g 时插入。非 -g 的 IR 必须与 e3v 逐字节一致，
         // 否则 Line/DebugVar 会打断 e3p 折叠 / popcount 融合等 pass 的模式窗口。
-        let mut l = Lower::new(&mut ip, debug_info);
+        let mut l = Lower::new(&mut ip, debug_info, &packed);
         l.lower_function(func)?;
     }
     Ok(ip)
@@ -83,14 +91,17 @@ struct Lower<'a> {
     param_slots: Vec<VReg>,
     /// M7-e3w：-g 时才插入 Line/DebugVar 调试标记。
     debug_info: bool,
+    /// M7-e3ag：packed 结构体名集合，供布局内建按 C ABI 口径计算（packed align=1）。
+    packed: HashSet<String>,
 }
 
 impl<'a> Lower<'a> {
-    fn new(ip: &'a mut IrProgram, debug_info: bool) -> Self {
+    fn new(ip: &'a mut IrProgram, debug_info: bool, packed: &HashSet<String>) -> Self {
         let label_depths = ip.goto_depths.clone();
         Lower {
             ip,
             debug_info,
+            packed: packed.clone(),
             func: IrFunction::new(String::new(), Vec::new(), IrType::Void, FuncLink::Private),
             cur: 0,
             scopes: Vec::new(),
@@ -1663,6 +1674,11 @@ impl<'a> Lower<'a> {
             | "file_exists" | "file_size" | "file_remove" | "close" | "__with_release"
             | "ptr_cast" =>
                 return self.lower_special_call(name, args),
+            // M7-e3ag：编译期布局内建。复用 ir.rs 的 ABI 布局单点真理（与 LLVM
+            // DataLayout 对齐），在编译期算出常量并返回 Value::Imm，零运行时指令。
+            // 必须在此拦截——否则会落到下方 lower_builtin 的 BKind::Unsupported 报错。
+            "sizeof" | "alignof" | "offsetof" =>
+                return self.lower_layout_call(name, args),
             _ => {}
         }
         // functions_sig 只含用户函数与 extern 声明；按名字硬编码分派的内建
@@ -1893,6 +1909,79 @@ impl<'a> Lower<'a> {
         self.emit(IrInst::ICmp { op: ACmp::Eq, dst: is_null, a: Value::Reg(h),
             b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
         self.fail_throw_if(is_null, msg)
+    }
+
+    // ---- M7-e3ag：编译期布局内建 sizeof / alignof / offsetof ----
+    // 复用 ir.rs 的 ABI 布局「单点真理」（struct_layout / field_size / field_ir），
+    // 其口径与 LLVM 后端 TargetData（DataLayout）逐字节对齐。返回 Imm → 零运行时指令。
+
+    /// 某类型的 (字节大小, 对齐)。口径对齐 LLVM `dialc_type_to_llvm` + TargetData。
+    fn layout_size_align(&self, t: &Type) -> Result<(i64, i64), String> {
+        match t {
+            // 语义层已拒绝 void，这里只做防御。
+            Type::Void => self.err("布局内建不接受 void 类型"),
+            // LLVM 按向量宽度算（N × elem），asm 侧宽度映射无法对齐——明确拒绝，
+            // 绝不静默给出错误数值（符合项目 fail-fast 哲学）。
+            Type::Simd(..) => self.err("布局内建暂不支持 simd 类型（LLVM 按向量宽度计算，自研后端无法对齐）"),
+            Type::Struct(n) => {
+                let pk = self.packed.contains(n);
+                let (_offs, size, align) = self.ip.struct_layout(n, pk);
+                // 关键修正：LLVM/C 的 packed 对齐固定为 1；struct_layout 对 packed
+                // 仍返回字段自然对齐（如 8），直接复用会与 LLVM/C 不一致。
+                Ok((size, if pk { 1 } else { align }))
+            }
+            _ => {
+                // 标量 + 内建容器：LLVM 把 String/Array/Map/RawPtr/Handle 等一律
+                // 擦除为 i8ptr（8 字节/8 对齐）；field_ir 将这些映射为 Ptr/Handle，
+                // field_size=8、对齐=8，天然一致。bool=I1(1)，i32/f32=4。
+                let size = field_size(t) as i64;
+                let align = match field_ir(t) {
+                    IrType::I1 | IrType::I8 => 1,
+                    IrType::I32 | IrType::F32 => 4,
+                    _ => 8,
+                };
+                Ok((size, align))
+            }
+        }
+    }
+
+    /// offsetof：字段在结构体内的字节偏移（按 packed 口径）。
+    fn layout_offset(&self, t: &Type, field: &str) -> Result<i64, String> {
+        let n = match t {
+            Type::Struct(n) => n.clone(),
+            _ => return self.err("offsetof 的第一个参数必须是结构体类型"),
+        };
+        let idx = match self.struct_field(t, field) {
+            Some((i, _)) => i,
+            None => return self.err(&format!("offsetof：结构体 '{}' 没有字段 '{}'", n, field)),
+        };
+        let pk = self.packed.contains(&n);
+        let (offs, _, _) = self.ip.struct_layout(&n, pk);
+        Ok(offs[idx])
+    }
+
+    /// sizeof/alignof/offsetof 统一入口。args[0] 是 Expr::TypeLit（语义层已校验），
+    /// offsetof 的 args[1] 是 Expr::StringLit（字段名）。不 lower 实参本身——
+    /// TypeLit 无运行时值、StringLit lower 会生成运行时字符串对象（错误）。
+    fn lower_layout_call(&self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        let ty = match args.get(0) {
+            Some(Expr::TypeLit(t)) => t.clone(),
+            _ => return self.err(&format!("{} 的第一个参数必须是类型实参", name)),
+        };
+        let v = match name {
+            "sizeof" => self.layout_size_align(&ty)?.0,
+            "alignof" => self.layout_size_align(&ty)?.1,
+            "offsetof" => {
+                let field = match args.get(1) {
+                    Some(Expr::StringLit(f)) => f.clone(),
+                    _ => return self.err("offsetof 的第二个参数必须是字段名"),
+                };
+                self.layout_offset(&ty, &field)?
+            }
+            _ => unreachable!("lower_layout_call 仅处理 sizeof/alignof/offsetof"),
+        };
+        // 与整型字面量 lower_expr(Expr::IntLit) 完全同形，emit 全链已支持无 vreg 的 Imm。
+        Ok((Value::Imm(Imm::I64(v)), false))
     }
 
     /// 文件 IO 与 __with_release：与 codegen.rs:4596–4768 的 CFG / moved 记账同构。

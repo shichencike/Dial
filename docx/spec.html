@@ -926,9 +926,10 @@ M7-e3w 起已支持完整 DWARF（源码行断点 + 变量名 + M7-e3z 类型 DI
 </tr>
 </tbody>
 </table>
-<p>尚未覆盖（会明确报错）：<code>select</code> / <code>spawn</code> / 通道并发、编译期布局内建
-（<code>sizeof</code> / <code>alignof</code> / <code>offsetof</code>）、内联汇编与 SIMD、高阶容器方法
-（<code>map</code> / <code>filter</code> / <code>reduce</code> / <code>sort_by</code>）、嵌套下标赋值等。</p>
+<p>尚未覆盖（会明确报错）：<code>select</code> / <code>spawn</code> / 通道并发、内联汇编与 SIMD、
+高阶容器方法（<code>map</code> / <code>filter</code> / <code>reduce</code> / <code>sort_by</code>）、嵌套下标赋值等。
+编译期布局内建 <code>sizeof</code> / <code>alignof</code> / <code>offsetof</code> 已支持（M7-e3ag，含 packed struct
+对齐与双后端一致性验证）。</p>
 <p><strong>双后端黄金门禁</strong>（<code>tools/run_asm_golden.sh</code>，<code>run_tests.sh</code> 的 AF 组）：
 同一份 <code>.dial</code> 分别用 <code>llvm</code> / <code>asm</code> 编译运行并<strong>逐字节 diff</strong>——LLVM 后端即基准，
 无需维护 <code>.expected</code>。正向用例 10 份（<code>core1</code>–<code>core3</code> 核心子集 + <code>builtins</code>
@@ -8373,7 +8374,9 @@ packed struct ValHdr { ... }       // Dial 自己的值语义结构体，同样�
 <li><code>packed struct</code> —— <strong>Dial 值语义结构体</strong>的紧凑布局（字段走 Dial 内部宽度）。</li>
 </ul>
 <p>布局用 §33.3 那套编译期内建核对：<code>sizeof&lt;T&gt;()</code> / <code>alignof&lt;T&gt;()</code> / <code>offsetof&lt;T&gt;(field)</code>
-在编译期按 target DataLayout 算出，零运行时开销。P 组把 Dial 侧的三个数与 C 侧
+在编译期按 target DataLayout 算出，零运行时开销。<strong>LLVM 与自研 asm 两后端均支持</strong>
+（M7-e3ag：asm 复用与 LLVM DataLayout 对齐的 ABI 布局单点真理，packed struct 的
+<code>alignof</code> 固定为 1、与 C 一致；simd 布局内建明确拒绝）。P 组把 Dial 侧的三个数与 C 侧
 <code>sizeof</code> / <code>_Alignof</code> / <code>offsetof</code> <strong>逐项比对</strong>（且刻意不写死期望值——布局随平台变，
 「两边相等」才是要锁住的东西）。</p>
 <h3 id="3311-volatile-rawptrt内存映射-io-的易失访问">33.11 <code>volatile rawptr&lt;T&gt;</code>：内存映射 IO 的易失访问</h3>

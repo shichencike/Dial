@@ -2419,14 +2419,58 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
     回退后 NEW 二进制 md5 = OLD = <code>36d9fb04c32c439e33bbddb2280467ad</code>，工作树干净，
     <code>src/codegen.rs</code> / <code>src/ast.rs</code> / <code>Cargo.toml</code> / LLVM 路径 / 依赖 / 版本零改动，
     构建零警告。<strong>不打 tag、不升版本、CHANGELOG 不列功能条目</strong>（本批无实际代码变更）。</li>
-<li><strong>结论与后续</strong>：至此 LLVM 标配 O2 pass 中，条件常量传播 / 分支折叠这条最后的可疑
+<li>
+<p><strong>结论与后续</strong>：至此 LLVM 标配 O2 pass 中，条件常量传播 / 分支折叠这条最后的可疑
     方向也被证伪。结合 e3s/e3u（循环级）/ e3x（向量化）/ 本批（SCCP），可以确认：
     自研 asm 后端在 peephole + 局部 IR pass 层的墙钟优化空间已基本收敛，剩余差距是
     架构级（LLVM O3 对 Dial 代码的完整管线 + 深度寄存器分配 + 向量化协同），单批
     IR pass 难以再产出确定性墙钟收益。若继续"代替 LLVM"成熟，应转向：① 非墙钟指标
     的一致性补全（更多语言特性 / 目标平台双后端对齐）；② 调试信息深度（优化态下的
     变量位置 / 作用域 DIE）；③ 或接受架构级工程需长周期投入的现实，不再以单批微优化
-    为目标。本批把该结论固化在证据链，供后续方向决策引用。</li>
+    为目标。本批把该结论固化在证据链，供后续方向决策引用。</p>
+</li>
+<li>
+<p><strong>M7-e3ag 自研 asm 后端补齐编译期布局内建 sizeof/alignof/offsetof（双后端一致性补全）</strong>：
+  承接 e3af 结论转向证据链方向①（非墙钟指标的双后端语义一致性）。先排除了"作用域
+  DIE"这个看似合理的调试信息方向——实测 gdb 发现 <strong>LLVM 后端本身也把块内变量暴露在
+  块外</strong>（<code>info locals</code> 两后端都显示 <code>inner=22</code>），即作用域 DIE 不是 asm 落后 LLVM 的
+  差距，故不落地。转而锁定确凿缺口：<code>sizeof&lt;T&gt;()</code>/<code>alignof&lt;T&gt;()</code>/<code>offsetof&lt;T&gt;(field)</code>
+  是 FFI 刚需的编译期常量（零运行时指令），LLVM 用 <code>TargetData::get_abi_size</code> 支持，
+  而 asm 后端经 <code>builtin.rs</code> 的 <code>BKind::Unsupported</code> 明确 Fail-Fast 报错，还配有专门
+  负例 <code>tests/asm_golden/negative/unsupported.dial</code>。</p>
+</li>
+<li><strong>可行性（无需碰冻结文件 / 零新依赖）</strong>：asm 后端早已把 LLVM DataLayout 口径固化为
+    单点真理——<code>ir.rs::struct_layout(name,packed)-&gt;(offsets,total_size,align)</code> 递归算 C ABI
+    布局、<code>field_size(t)</code>（I32/F32=4、I1/I8=1、其余 8）、<code>field_ir(t)</code>，这些本就为结构体
+    字段地址服务、与 LLVM 逐字节对齐。sizeof 系列只需复用它们，天然保证双后端一致，
+    无需 inkwell 的 <code>TargetData</code>（它在 codegen.rs、宪法冻结，且 LLVM 路径须零改动）。</li>
+<li><strong>实现</strong>：<code>lower.rs</code> 的 <code>lower_call</code> 特殊内建分派加入三名字 → 新增 <code>lower_layout_call</code>
+    （从 args[0] 的 <code>Expr::TypeLit</code> 取类型、args[1] 的 <code>Expr::StringLit</code> 取字段名，均不 lower
+    实参本身）、<code>layout_size_align</code>、<code>layout_offset</code>，编译期算出整数后返回 <code>Value::Imm(I64(n))</code>
+    ——与 <code>lower_expr(Expr::IntLit)</code> 完全同形，emit 全链（<code>lg</code>/<code>bin_src</code>/<code>inst_call</code>）早已支持
+    无 vreg 的纯立即数，零运行时指令。实测 <code>sizeof&lt;int&gt;()</code> 直接物化为 <code>movabsq $8, %rdi</code>。</li>
+<li><strong>关键正确性修正（设计评审抓到）</strong>：Dial 有 <code>packed struct</code>/<code>packed extern struct</code>
+    语法（parser L85-99、ast.rs L598），LLVM 按 C ABI 算 packed <code>align=1</code>、<code>size</code> 为紧密值；
+    而 <code>struct_layout(name).2</code> 对 packed 仍返回字段自然对齐（如 8），直接复用会制造新的
+    双后端不一致。修正：从 <code>prog.structs</code>/<code>prog.cstructs</code> 的 <code>packed</code> 标志收集类型名集合
+    传入 <code>Lower</code>，packed 时 <code>size=struct_layout(name,true).1</code>、<code>align</code> 固定 1；offset 也按
+    packed 口径取。simd 在 LLVM 按 <code>N×elem</code> 向量宽度算、asm 宽度映射无法对齐，明确
+    Fail-Fast 拒绝（带 <code>[asm 后端]</code> 前缀），绝不静默给错误数值。内建容器（String/Array/
+    Map/RawPtr/Handle…）LLVM 一律擦除为 i8ptr=8，asm <code>field_ir</code>→Ptr/Handle→field_size=8、
+    align=8，天然一致。</li>
+<li><strong>实测双后端逐字一致</strong>：标量 <code>int=8/byte=8/bool=1/int32=4/float=8/f32=4/char=8</code>、
+    <code>alignof&lt;int&gt;=8</code>；<code>Point{x:int,y:int}</code> size16/align8、<code>Mixed{a:byte,b:int,c:int32,d:bool}</code>
+    size24/align8、offset(b=8,c=16,d=20)；<strong>packed <code>PktHdr{seq:int,flags:byte,len:byte}</code>
+    size24/align1/offset(flags=8,len=16)</strong>；<code>sizeof&lt;rawptr&lt;void&gt;&gt;=8</code>。LLVM 与 asm 输出 diff 为空。</li>
+<li><strong>测试与门禁</strong>：负例 <code>unsupported.dial</code> 从 sizeof 换为 <code>@asm</code> 内联汇编（LLVM 编译输出 1、
+    asm 带 <code>[asm 后端] 前缀</code> 拒绝，近期不可能落地，最稳定）；<code>core1.dial</code> 加正向断言使
+    <code>run_asm_golden.sh</code> 双后端 diff 覆盖本特性；新增 <strong>R8 组</strong>（双后端布局输出逐字比对、
+    packed align=1 断言、simd 明确拒绝）；全量 <code>run_tests.sh</code> 绿、golden 门禁绿。</li>
+<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍 1.10.0、
+    零新依赖、LLVM 路径零改动、构建零警告、不打 tag；本批唯一源码改动是 <code>src/lower.rs</code>。
+    本特性只产立即数、不发射指令 → 非布局程序（p1/p2/p3 覆盖结构体/循环/函数调用）
+    在 O2/O3 的 <code>.s</code> 与 OLD(f0f0a54) <strong>逐字节一致</strong>；AArch64 普通程序 O0/O2/O3 <code>.s</code> 零变化。
+    docx 确定性生成；check_links/check_version 全过。</li>
 </ul>
 </li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
