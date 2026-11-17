@@ -15,6 +15,7 @@
       <a href="../index.html">首页</a>
       <a href="../spec.html">语言规范</a>
       <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../rationale.html">理由与证据</a>
       <a href="../packages.html">包</a>
       <a href="../cve.html">安全公告</a>
       <a href="../bench.html">性能基准</a>
@@ -24,19 +25,17 @@
   </div>
 </header>
 
-<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a> · <a href="../rationale/v0.3.html">理由与证据链 →</a></p><div class="toc">
 <ul>
 <li><a href="#v03--2026-10-28">[v0.3] — 2026-10-28</a><ul>
 <li><a href="#added新增">Added（新增）</a></li>
 <li><a href="#changed变更">Changed（变更）</a></li>
 <li><a href="#fixed修复">Fixed（修复）</a></li>
-<li><a href="#docs文档">Docs（文档）</a></li>
 </ul>
 </li>
 </ul>
 </div>
 <h2 id="v03--2026-10-28">[v0.3] — 2026-10-28</h2>
-<p>本版只修改<strong>语义与诊断</strong>，未改变任何架构契约（不透明指针、两步构建、产物零 LLVM 依赖、C 承担一切容器）。</p>
 <h3 id="added新增">Added（新增）</h3>
 <ul>
 <li>内置类型转换函数 <code>int_to_float(int): float</code>，编译为 LLVM <code>sitofp</code>（x86-64：<code>cvtsi2sd</code>）。</li>
@@ -60,13 +59,9 @@
 <li>修复了 <code>int → float</code> 隐式转换可能造成的静默精度丢失（如 <code>1 + 2.0</code> 曾默默将 <code>int</code> 提升为 <code>double</code>）。</li>
 <li>修复了 <code>let</code> 变量调用 <code>push</code> 时"容器被原地修改但接收者无法接收新指针"的悬垂风险，将其提前到编译期拒绝。</li>
 </ul>
-<h3 id="docs文档">Docs（文档）</h3>
-<ul>
-<li>README 同步更新：§5.3 零隐式转换铁律、§6.2 可变性判定（含 <code>push</code>/<code>set</code>）、§7.2 类型规则、
-  §7.3 语义细则表（修正 <code>and</code>/<code>or</code> 与混合算术两行）、§11.3–§11.4 接收者须为 <code>var</code>、§18 v0.3 变更摘要。</li>
-<li>新增 <code>REPORT_v0.3.md</code>：基于 <code>objdump -d</code> 真实反汇编的短路求值与 <code>int_to_float</code>/<code>float_to_int</code> 落地证据，
-  以及端到端自测结果与产物零 LLVM 依赖契约校验。</li>
-</ul>
+<blockquote>
+<p>📄 本版的理由、实测数据与边界见 <a href="../rationale/v0.3.html">rationale/v0.3.md</a>。</p>
+</blockquote>
 <hr /><p class="note">← 更早：<a href="v0.2.html">v0.2</a> · 更新：<a href="v0.4.html">v0.4</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
 
 <footer class="site-footer">

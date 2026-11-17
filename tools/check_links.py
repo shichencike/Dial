@@ -231,7 +231,8 @@ def main() -> int:
             "tools/", "tests/", "stdlib/", "runtime/", "packages/",
         )
         site_problems = []
-        for p in sorted(list(web.glob("*.html")) + list(web.glob("changelog/*.html"))):
+        for p in sorted(list(web.glob("*.html")) + list(web.glob("changelog/*.html"))
+                        + list(web.glob("rationale/*.html"))):
             t = p.read_text(encoding="utf-8")
             for href in re.findall(r'href="([^"]+)"', t):
                 # .html 目标是站内生成页（含包介绍页 docx/packages/*.html），

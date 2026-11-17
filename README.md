@@ -599,7 +599,8 @@ dialc lsp
 > LLVM（b24 xorshift 由 M7-e3n 从 1.347x 缩到 0.676x、b23 popcount 由
 > M7-e3m 从 1.300x 缩到 1.018x）、b08 3n+1 已由 M7-e3k / M7-e3l 从
 > 1.6247x 缩到 0.9920x（追平 LLVM）、b04 已反超；详见
-> [CHANGELOG 未发布节](CHANGELOG.md) 的 M6 / M7 批次记录。
+> [理由与证据链 · 未发布段](rationale/unreleased-dev.md) 的 M6 / M7 批次记录
+> （CHANGELOG.md 只记变更条目，证据链按版本拆在 `rationale/`）。
 
 #### 自研 asm 后端「代替 LLVM」路线图（两根头等支柱）
 
@@ -2381,9 +2382,12 @@ Rust 前端与 C Runtime 的代码**尽量只依赖标准库**。任何新引入
 ## 22. 早期版本摘要（v0.3 及以前）
 
 > 本节仅保留 **v0.3 及以前** 的相对变更摘要（早期历史）。
-> **v0.4 及之后** 的每个版本相对变更、跨文件符号表（v0.95）等**完整记录见 [CHANGELOG.md](CHANGELOG.md)**，
-> 官网渲染为[版本索引 changelog.html](docx/changelog.html)与 `docx/changelog/` 下**每版本一页的详情**
-> （正文与 CHANGELOG.md 对应条目逐字一致；索引 + 分页是为避免单文件 200 KB 的长滚动与移动端加载成本，
+> **v0.4 及之后** 的每个版本相对变更见 [CHANGELOG.md](CHANGELOG.md)——它只记
+> **新增 / 更改 / 破坏性变更 / 修复**；「为什么改 / 实测数据 / 边界在哪」等**理由与证据链**按版本
+> 拆在仓库根 `rationale/<版本>.md`（如 `rationale/v0.95.md`），CHANGELOG 每个版本条目都有链接直达。
+> 官网渲染为[版本索引 changelog.html](docx/changelog.html)、`docx/changelog/` 下**每版本变更页**，
+> 以及[理由与证据索引 rationale.html](docx/rationale.html)、`docx/rationale/` 下**每版本理由详情页**
+> （各自的正文与对应 markdown 源文件逐字一致；索引 + 分页是为避免单文件体积过大导致长滚动与移动端加载成本，
 > 并消除跨版本重复小节标题的锚点撞名）；最新版本号与能力矩阵见 [首页 index.html](docx/index.html)。
 
 ### 22.0 v0.61（相对 v0.6）

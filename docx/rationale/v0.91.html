@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v0.91 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v0.91.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v091--2026-10-30--理由与证据链">[v0.91] — 2026-10-30 · 理由与证据链</a><ul>
+<li><a href="#性能数据">性能数据</a></li>
+<li><a href="#已知限制与未来方向">已知限制与未来方向</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="v091--2026-10-30--理由与证据链">[v0.91] — 2026-10-30 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v0.91] — 2026-10-30</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p>本版落地<strong>多路复用 <code>select</code></strong>（见 README <a href="../spec.html#279-多路复用-selectv091">§27.9</a>）——
+同时监听多个通道，任一就绪即执行对应分支。</p>
+<h3 id="性能数据">性能数据</h3>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>50 万次 send + select（阻塞式，事件驱动）</td>
+<td><strong>wall 0.19 s</strong>，CPU 0.36 s</td>
+</tr>
+<tr>
+<td>同等工作量改用 <code>default</code>（非阻塞轮询）</td>
+<td>空转 0.38 s 后<strong>卡死在 join</strong>（队列塞满、生产者永久阻塞），120 s 超时</td>
+</tr>
+<tr>
+<td>8 消费者 / 100 万元素并发压测（F 组）</td>
+<td>回归不变：<code>received=1000000 duplicate=0</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="已知限制与未来方向">已知限制与未来方向</h3>
+<ul>
+<li><strong>惊群</strong>：全局广播会唤醒所有 select 等待者，多数醒来后发现「不是我」。
+  基线实现选择「逻辑正确 + 低延迟」优先于惊群开销（惊群只造成少量无谓唤醒，
+  轮询方案则持续 CPU 空转 + 毫秒级延迟）。
+  Linux 上可用 <strong>epoll + eventfd</strong> 消除惊群——v0.92 之后的优化方向，不影响本版语义。</li>
+<li><code>select</code> <strong>不带超时</strong>：要「等一会儿再看」请用 <code>recv_timeout</code> 单独接收。</li>
+</ul><p class="note">← 更早：<a href="v0.9.html">v0.9</a> · 更新：<a href="v0.92.html">v0.92</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

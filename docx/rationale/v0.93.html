@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v0.93 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v0.93.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v093--2026-10-31--理由与证据链">[v0.93] — 2026-10-31 · 理由与证据链</a><ul>
+<li><a href="#尚未实现本版刻意留白">尚未实现（本版刻意留白）</a></li>
+<li><a href="#验证">验证</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="v093--2026-10-31--理由与证据链">[v0.93] — 2026-10-31 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v0.93] — 2026-10-31</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p>本版落地 <strong><code>import</code> 与 <code>.dialpkg</code> 包分发</strong>（见 README <a href="../spec.html#259-用法import-与-dialc-installv093-已实现v096-支持-url">§25.9</a>），
+完成了 ARCHITECTURE.md 实现路线的<strong>阶段 1 / 3 / 4</strong> 与阶段 2 的本地安装部分。
+这是让「标准库能跑起来」的第一块地基。</p>
+<h3 id="尚未实现本版刻意留白">尚未实现（本版刻意留白）</h3>
+<ul>
+<li><code>dialc install &lt;URL&gt;</code>（网络下载；本地文件安装已可用）。</li>
+<li>一键安装脚本（<code>install-dial.sh</code> / <code>.ps1</code>）、Windows 线程后端、官方标准库的 <code>.dialpkg</code> 化。</li>
+<li><code>.diali</code> 接入 LSP（补全 / 悬停）——待 LSP 骨架落地。</li>
+</ul>
+<h3 id="验证">验证</h3>
+<ul>
+<li>A/B/D/E/C/F/G <strong>七组原有测试全绿</strong>，新增 H 组通过；端到端实测
+  <code>demo_add</code>→7、<code>demo_version</code>→42、不透明句柄 <code>demo_new</code>+<code>demo_get</code>→99、void <code>demo_free</code> 正常。</li>
+</ul><p class="note">← 更早：<a href="v0.92.html">v0.92</a> · 更新：<a href="v0.94.html">v0.94</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

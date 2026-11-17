@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v1.04 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v1.04.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v104--2026-11-06--理由与证据链">[v1.04] — 2026-11-06 · 理由与证据链</a><ul>
+<li><a href="#测试">测试</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="v104--2026-11-06--理由与证据链">[v1.04] — 2026-11-06 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v1.04] — 2026-11-06</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p><strong>主题：FFI 成为语言一等公民。</strong> 详见 <a href="../spec.html#33-v104ffi外部函数接口">README §33</a>。</p>
+<blockquote>
+<p><strong>版本定位</strong>：<code>v1.0</code> 里程碑已在 <code>[v1.03]</code> 达成、标签 <code>v1.0</code> 已打并推送；
+<code>[v1.00]</code> ~ <code>[v1.03]</code> 是「达成 v1.0」过程中的分版记录（见下方里程碑大标题）。
+<code>[v1.04]</code> 是<strong>里程碑达成之后的第一个增量分版</strong>，不归入上面那批分版记录。
+按本轮交付约定：<strong>只做本地提交，不推送 GitHub、不打 tag</strong>。
+本版后续还并入了「语言层动态链接」「工程工具链增补」「DWARF 调试信息（-g）」
+「性能基准（4 语言 × 28 维）」与「真实程序缺口补齐（B/C 组，第一批）」
+（见 <a href="../spec.html#34-v104-增补工程工具链并入-v104版本不变">README §34</a>、§35、§36、§37），
+均不新增分版记录，编译器版本 <code>1.4.0</code> 保持不变。
+<strong>最后一批起 <code>STDLIB_ABI 5 → 6</code></strong>（新增 <code>dial_eprint_*</code> / <code>get_or</code> 等导出符号，
+按既有判据递增，见 §37.6）；术语「绝不引入全局变量」统一为
+「绝不引入可变全局状态」，并把「函数名重载」「闭包」写入永久否决（§37.1–37.2）。</p>
+</blockquote>
+<h3 id="测试">测试</h3>
+<ul>
+<li>4 个正向示例：<code>ffi_hello</code>（语言层 extern + 系统库 + C 变参 + 双向字符串）、
+  <code>ffi_buffer</code>（rawptr 喂 <code>memcpy</code> / <code>memcmp</code>）、<code>ffi_struct</code>（C ABI 字段读写）、
+  <code>ffi_callback</code>（libc <code>atexit</code> 反调 Dial 函数）。</li>
+<li>19 个负向用例：伪装的 <code>.so</code> / <code>.dll</code> / <code>.dylib</code>、动态库缺失、非归档后缀、
+  <code>extern struct</code> 的 string/char/map 字段、保留名与撞名、C 变参不在末尾、
+  <code>rawptr&lt;byte&gt;</code> 字段访问、<code>as_c_str</code> 带参、方法用错类型、数据总线参数个数/类型、
+  struct 撞名、<code>extern</code> 后跟错关键字。</li>
+<li>新增 <strong>P 组</strong>：把 C 侧专项库编成 <code>.a</code>，逐项比对 <code>sizeof</code> / <code>offsetof</code> 与 C 完全一致，
+  验证 Dial↔C 双向字段读写、C 回调状态透传；另编真实共享库做动态链接端到端
+  （显式 <code>link</code> + <code>extern fn</code>，并用 <code>readelf -d</code> 断言 <code>RUNPATH</code> 已注入），再用伪装的
+  <code>.a</code> / <code>.so</code> / <code>.dll</code> / <code>.dylib</code> 验证魔数拒绝不是靠「文件不存在」蒙混过关。</li>
+<li>新增 <strong>Q 组（工程工具链专项）</strong>：全部新子命令、A3 非零退出且不产物、<code>fmt</code> 幂等与
+  token 流不变、<code>test</code> 通过 / 失败 / 过滤、多文件 import 合并与循环 / 冲突 / 缺失诊断、
+  <code>new → pack → install → import → uninstall</code> 全链路闭环、<code>pack</code> 拒绝动态库与缺字段、
+  A7 运行时位置断言。回归脚本由 <strong>A–P 扩为 A–Q</strong>（后续由 R 组扩为 A–R，见下）。</li>
+<li>新增 <strong>R 组（DWARF 调试信息专项）</strong>：<code>llvm-dwarfdump</code> 核对 <code>.debug_info</code> / <code>.debug_line</code>
+  段与 <code>add</code> / <code>main</code> / <code>a</code> / <code>b</code> / <code>sum</code> / <code>counter</code> / <code>note</code> 七个 Dial 名字、行表含
+  <code>.dial</code> 源文件；真实 <code>gdb -batch</code> 在 <code>.dial:9</code> 断点断言 <code>print counter = 42</code>、
+  <code>bt</code> 显示源码行；无 <code>-g</code> 不产 Dial 调试符号的负向断言、<code>-g --fast</code> 兼容断言。
+  环境缺 <code>gdb</code> / <code>llvm-dwarfdump</code> 时对应子项明确跳过（⏭️）而非误报失败，
+  保证 CI 不被工具缺失阻断。回归脚本由 <strong>A–Q 扩为 A–R</strong>。</li>
+<li><strong>性能基准与 CI 集成（v1.04 增补）</strong>：<code>build-linux</code> 作业新增 Go 安装与
+  「性能基准采集」步骤，实跑 4 语言编译 + 28 项计时 + 112 校验和一致性，
+  生成 CI 机器上的数据/网页并经 <code>check_bench_data.py</code> 校验，同时验证仓库内
+  交付快照（<code>bench/data.json</code> + <code>docx/bench.html</code>）配套；产物上传为
+  <code>bench-4lang-28dim</code> artifact。CI 只写 <code>/tmp</code> 再上传，绝不回写 <code>docx/bench.html</code>，
+  避免机器相关的实测数据让官网同步校验误报。</li>
+</ul><p class="note">← 更早：<a href="v1-0-milestone.html">v1.0 里程碑</a> · 更新：<a href="v1.10.html">v1.10</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

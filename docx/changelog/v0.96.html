@@ -15,6 +15,7 @@
       <a href="../index.html">首页</a>
       <a href="../spec.html">语言规范</a>
       <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../rationale.html">理由与证据</a>
       <a href="../packages.html">包</a>
       <a href="../cve.html">安全公告</a>
       <a href="../bench.html">性能基准</a>
@@ -24,24 +25,17 @@
   </div>
 </header>
 
-<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a> · <a href="../rationale/v0.96.html">理由与证据链 →</a></p><div class="toc">
 <ul>
 <li><a href="#v096--2026-10-31">[v0.96] — 2026-10-31</a><ul>
 <li><a href="#added新增">Added（新增）</a></li>
 <li><a href="#fixed修复">Fixed（修复）</a></li>
 <li><a href="#added测试">Added（测试）</a></li>
-<li><a href="#docs文档">Docs（文档）</a></li>
-<li><a href="#验证">验证</a></li>
 </ul>
 </li>
 </ul>
 </div>
 <h2 id="v096--2026-10-31">[v0.96] — 2026-10-31</h2>
-<p>本版补齐 <strong>ARCHITECTURE.md §8 实现路线</strong> 的<strong>阶段 2 剩余部分</strong>与<strong>阶段 5</strong>：
-包的来源不再只能是本地文件，<strong>也可以是 URL</strong>；并新增<strong>一键安装脚本</strong>，
-把「装好 Dial 环境 + 把该装的包装上」变成一条命令。</p>
-<p>至此路线图 7 个阶段已完成 <strong>1 / 2 / 3 / 4 / 5</strong>，
-剩余阶段 6（Windows 线程后端）与阶段 7（官方标准库 <code>.dialpkg</code> 化）。</p>
 <h3 id="added新增">Added（新增）</h3>
 <ul>
 <li><strong><code>dialc install &lt;URL&gt;</code></strong>（阶段 2）：包可以直接从 URL 装，<strong>不用先手动下载</strong>。</li>
@@ -100,22 +94,9 @@
     用装好的编译器编译 import 程序并运行——这是「一键安装」的意义所在。
   全部用例在<strong>隔离的 HOME</strong> 下运行，不碰用户真实缓存。</li>
 </ul>
-<h3 id="docs文档">Docs（文档）</h3>
-<ul>
-<li>README §25.9 补 URL 安装用法（https 强制、<code>--sha256</code>、三步流程）与一键脚本；
-  新增 §3.2.1「一键安装」；§2 目录结构补两个脚本与 L 组测试；§17.2 更新 import 行状态；
-  §18 新增 L 组（测试组数 十一 → 十二）。</li>
-<li>ARCHITECTURE.md §8 路线表更新：阶段 2 / 5 标记完成，阶段 3 的「LSP 侧待落地」补注
-  已由 v0.95 的跨文件符号表兑现；文首「仍待实现」清单同步收窄。</li>
-<li>官网重新生成，新增「包 URL 安装 + 一键安装」特性卡。</li>
-</ul>
-<h3 id="验证">验证</h3>
-<ul>
-<li><strong>A～L 十二组测试全绿</strong>（新增 L 组 26 项断言）；
-  端到端实测：URL 安装 → <code>import "demo"</code> → 编译 → 运行输出正确；
-  篡改包 / 哈希不符 / 404 / 明文 http 四种坏包全部装不进去且不留残骸；
-  一键脚本装完后，在独立项目目录里编译 <code>import</code> 程序成功（输出 3 = <code>demo_add(1,2)</code>）。</li>
-</ul>
+<blockquote>
+<p>📄 本版的理由、实测数据与边界见 <a href="../rationale/v0.96.html">rationale/v0.96.md</a>。</p>
+</blockquote>
 <hr /><p class="note">← 更早：<a href="v0.95.html">v0.95</a> · 更新：<a href="stdlib-v1.0.0.html">stdlib v1.0.0</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
 
 <footer class="site-footer">

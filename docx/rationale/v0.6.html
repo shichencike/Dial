@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v0.6 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v0.6.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v06--2026-10-29--理由与证据链">[v0.6] — 2026-10-29 · 理由与证据链</a><ul>
+<li><a href="#实测对照同一份越界代码三档行为">实测对照（同一份越界代码，三档行为）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="v06--2026-10-29--理由与证据链">[v0.6] — 2026-10-29 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v0.6] — 2026-10-29</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p>本版把 Zig 式 <strong>Fail-Fast</strong> 确立为与内存宪法并列的语言底线（见 README §20）：
+<strong>宁可当场崩溃，绝不产生未定义行为或静默错误数据。</strong></p>
+<h3 id="实测对照同一份越界代码三档行为">实测对照（同一份越界代码，三档行为）</h3>
+<table>
+<thead>
+<tr>
+<th>等级</th>
+<th><code>a[99]</code>（长度 3）</th>
+<th><code>100 / 0</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Debug（默认）</td>
+<td>SIGTRAP(5)，<code>int3</code> 当场终止</td>
+<td>SIGTRAP(5) 当场终止</td>
+</tr>
+<tr>
+<td>ReleaseSafe</td>
+<td>SIGILL(4)，<code>ud2</code> 当场终止</td>
+<td>SIGILL(4) 当场终止</td>
+</tr>
+<tr>
+<td>ReleaseFast</td>
+<td>读出 <code>0</code> 并继续执行，打印哨兵</td>
+<td>打印 <code>0</code> 并继续执行（<strong>静默错误结果</strong>）</td>
+</tr>
+</tbody>
+</table><p class="note">← 更早：<a href="v0.5.html">v0.5</a> · 更新：<a href="v0.61.html">v0.61</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

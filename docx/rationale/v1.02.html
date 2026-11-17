@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v1.02 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v1.02.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v102--2026-11-05--理由与证据链">[v1.02] — 2026-11-05 · 理由与证据链</a><ul>
+<li><a href="#测试">测试</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="v102--2026-11-05--理由与证据链">[v1.02] — 2026-11-05 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v1.02] — 2026-11-05</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p><strong>底层控制三件套</strong>：<code>goto</code> + 标签、<code>with</code> 资源作用域块、裸指针 <code>rawptr&lt;T&gt;</code>。</p>
+<p>三样互为因果：<code>goto</code> 是底层清理的利器，但无限制乱跳会把程序打崩，因此配三条<strong>死锁</strong>；
+死锁之一是「不得跳出 with 块」，所以要先有 <code>with</code>；而 <code>with</code> 要能自动释放裸指针，
+于是裸指针必须先落地。</p>
+<p>本版继续守住项目铁律：<strong>不引入 GC</strong>；ARC 所有权语义不退化；<strong>零隐式转换</strong>
+（裸指针与 ARC 容器之间、裸指针与裸指针之间都<strong>没有</strong>隐式转换）。</p>
+<h3 id="测试">测试</h3>
+<ul>
+<li>3 个新增正向示例 + 同名 <code>.expected</code> 黄金文件：<code>goto_demo</code>、<code>with_demo</code>、<code>rawptr_demo</code>；</li>
+<li>12 个新增负向用例：跨初始化（同块 + 跨块）/ 跳出 with / 跨 try / 跳进嵌套块 /
+  未定义标签 / 对 <code>let</code> 取址 / 解引用非指针 / <code>rawptr&lt;void&gt;</code> 算术 / <code>free</code> 非指针 /
+  <code>with</code> 非资源 / 裸指针隐式转换；</li>
+<li><code>bash tests/run_tests.sh</code> A–O 全套通过；H 组另加一条回归：<code>drop(不透明句柄)</code>
+  必须报错并给出「不受 ARC 管理、请手动释放」的指引。</li>
+</ul><p class="note">← 更早：<a href="v1.01.html">v1.01</a> · 更新：<a href="v1.03.html">v1.03</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

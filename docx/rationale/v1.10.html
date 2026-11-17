@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v1.10 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v1.10.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v110--2026-11-08--理由与证据链">[v1.10] — 2026-11-08 · 理由与证据链</a><ul>
+<li><a href="#测试与交付">测试与交付</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="v110--2026-11-08--理由与证据链">[v1.10] — 2026-11-08 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v1.10] — 2026-11-08</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p><strong>主题：底层原语补齐，首个带发布标签的正式分版。</strong> 详见
+<a href="../spec.html#33-v104ffi外部函数接口">README §33</a>、§33.13 / §33.14。</p>
+<blockquote>
+<p><strong>版本与发布标签映射（防漂移，务必先读）</strong>：本次发布打的 <strong>Git 标签是 <code>v1.1</code></strong>
+（用户指定的简短里程碑名），它对应的<strong>文档版本号是 <code>v1.10</code></strong>、<code>Cargo.toml</code> 存储
+<code>1.10.0</code>、<code>dialc --version</code> 输出 <code>dialc 1.10.0</code>。按 <a href="../spec.html#23-版本号规则">README §23</a>
+规则，主版本 ≥ 1 时次版本补零到两位，<code>1.10.0</code> 因此显示为 <code>v1.10</code>——<strong><code>v1.1</code> 只是标签名，
+不是版本号</strong>，资产文件名一律以版本号为准（<code>dialc-v1.10-*.zip</code> / <code>dial-1.10.0.vsix</code>），
+下载地址走 <code>releases/latest/download/</code> 重定向，不硬编码标签。钉版本安装时
+<code>DIAL_VERSION</code> 填标签去掉 <code>v</code> 的部分，即 <code>1.1</code>。</p>
+<p>从 <code>[v1.04]</code>（<code>1.4.0</code>）跳到 <code>[v1.10]</code>（<code>1.10.0</code>）系<strong>用户明确要求跳版</strong>，符合 §23 第 3 条
+「除非用户明确要求跳版」的例外；数值 <code>1.10 &gt; 1.04</code>，不违反第 4 条「严格递增、绝不倒流」。
+<code>[v1.04]</code> 及其后续各轮增补（§33–§37）均随本次 <code>v1.1</code> 标签一并推送 <code>origin/main</code> 并发布；
+历史章节里「本轮只做本地提交」是<strong>当时</strong>的交付约定记录，不代表最终状态。</p>
+<p><strong>交付状态</strong>：已推送 <code>origin/main</code>、已打并推送标签 <code>v1.1</code>、由 <code>v*</code> CI 规则触发 Release；
+<code>v1.0</code> 里程碑标签不动。<code>STDLIB_ABI</code> 保持 <code>6</code>（本版不新增标准库导出符号）。</p>
+</blockquote>
+<h3 id="测试与交付">测试与交付</h3>
+<ul>
+<li><code>bash tests/run_tests.sh</code> <strong>A–Z 二十六组全套通过（499 ✅ / 0 ❌）</strong>，含 P 组 2d
+  底层原语 IR 形态断言（<code>asm sideeffect</code> / <code>inteldialect</code> / <code>add &lt;4 x i64&gt;</code>）；
+  <code>tools/cve_check.py</code> 8/8；语言能力审计 <code>TOTAL=38 PASS=38 FAIL=0</code>；
+  <code>check_version</code> / <code>check_links</code> 全通过；<code>cargo check</code> 零警告。</li>
+</ul><p class="note">← 更早：<a href="v1.04.html">v1.04</a> · 更新：<a href="unreleased-dev.html">未发布</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

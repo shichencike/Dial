@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v0.99 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v0.99.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v099--2026-11-03--理由与证据链">[v0.99] — 2026-11-03 · 理由与证据链</a></li>
+</ul>
+</div>
+<h1 id="v099--2026-11-03--理由与证据链">[v0.99] — 2026-11-03 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v0.99] — 2026-11-03</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p>本版是 <strong>v0.98 线的功能发布（<code>+0.01</code>，非补丁）</strong>：数组从「只能装 <code>int</code>」扩展到
+「<code>int</code> 或任意 8 字节句柄」，并支持多维数组与嵌套下标赋值。所有基于 v0.98 的程序
+<strong>无需改动即可运行</strong>；用到新能力的程序获得了更大的表达力。</p>
+<blockquote>
+<p>说明：本版同时正式收纳此前以「v0.98.2（规划）」叙述的连续输出三件套
+（<code>print_raw</code> / <code>write_char</code> / <code>str(char)</code>）、<code>byte</code> 单字节值类型与 <code>bytes</code> 二进制缓冲区、
+裸块 <code>{ ... }</code> 词法作用域——它们随本版一并发布，文档锚点已统一为 v0.99。</p>
+</blockquote><p class="note">← 更早：<a href="v0.98.1.html">v0.98.1</a> · 更新：<a href="v0.99.1.html">v0.99.1</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

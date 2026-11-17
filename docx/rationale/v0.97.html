@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v0.97 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v0.97.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v097--2026-10-31--理由与证据链">[v0.97] — 2026-10-31 · 理由与证据链</a><ul>
+<li><a href="#notes说明">Notes（说明）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="v097--2026-10-31--理由与证据链">[v0.97] — 2026-10-31 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v0.97] — 2026-10-31</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p>本版把 Dial 从「仅 Linux x86_64」扩展到<strong>三平台原生构建</strong>——各平台均为 CI 在对应宿主上
+直接编译（编译期目标即运行期平台，无交叉编译 ABI 陷阱）：</p>
+<table>
+<thead>
+<tr>
+<th>平台</th>
+<th>包 slug</th>
+<th>编译器运行依赖</th>
+<th>用户程序</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Linux x86_64</strong></td>
+<td><code>linux-x86_64</code></td>
+<td>系统 <code>libLLVM-18.so</code>（动态 glibc）</td>
+<td>仅依赖 libc</td>
+</tr>
+<tr>
+<td><strong>Windows x64（MinGW）</strong></td>
+<td><code>windows-x86_64</code></td>
+<td>同目录 <code>LLVM-C.dll</code>（随包分发）</td>
+<td>单文件 <code>.exe</code>，无外部依赖</td>
+</tr>
+<tr>
+<td><strong>Termux aarch64（musl）</strong></td>
+<td><code>termux-aarch64</code></td>
+<td><strong>无</strong>（musl 全静态）</td>
+<td>单文件，无外部依赖</td>
+</tr>
+</tbody>
+</table>
+<h3 id="notes说明">Notes（说明）</h3>
+<ul>
+<li><strong>LLVM 18 必须保留</strong>：Alpine 3.22 恰好只提供 llvm18，升版会断 Termux 路线；故 Windows 走官方
+  MSVC 包 + C 接口，而非 MSYS2（其 mingw64-llvm 现已是 23.x，18.x 已下架）。</li>
+<li>路线图 7 阶段已完成 1 / 2 / 3 / 4 / 5 / 7；仅剩阶段 6（<strong>纯 MSVC</strong> 线程后端）在 MinGW 路线下已非阻塞。
+  阶段 7（官方标准库 <code>.dialpkg</code> 化）随独立 Release <strong><code>stdlib-v1.0.0</code></strong> 落地，详见下条目。</li>
+<li><strong>实跑结果</strong>：<code>v0.97</code> 三平台作业全部通过并已发布（run <code>41253324073</code>，<code>release</code> 作业 success），
+  三个资产 <code>dialc-v0.97-{linux-x86_64,windows-x86_64,termux-aarch64}.zip</code> 均已上传。
+  下载后反向验证：Linux 包编译 <code>hello.dial</code> 输出 <code>Hello, dialc!</code>（产物仅 <code>NEEDED libc.so.6</code>）；
+  Termux 包 <code>readelf</code> 确认 <strong>AArch64 / 无 <code>INTERP</code> / 无 <code>NEEDED</code></strong>（真全静态）；
+  Windows 包含 <code>dialc.exe</code> + <code>LLVM-C.dll</code> + <code>install-dial.ps1</code>，CI 冒烟通过。</li>
+</ul><p class="note">← 更早：<a href="stdlib-v1.0.0.html">stdlib v1.0.0</a> · 更新：<a href="v0.98.html">v0.98</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

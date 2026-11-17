@@ -8,6 +8,8 @@ Outputs a static site into docx/:
   docx/changelog/overview.html      CHANGELOG preamble (versioning rules), verbatim
   docx/changelog/<version>.html     one page per `## ` section, verbatim text
   docx/changelog/index.json         machine-readable index (search + newer/older nav)
+  docx/rationale.html               index of the split-off "why / evidence" records
+  docx/rationale/<version>.html     one page per rationale/<version>.md, verbatim text
   docx/assets/style.css             shared stylesheet
 
 Why the changelog is split (v1.04 tooling): one flat HTML had grown past 200 KB.
@@ -19,7 +21,11 @@ a small index plus one page per version. This fixes three concrete problems:
   3. each page builds its own TOC, so cross-version anchor collisions
      (`..._1` suffixes) disappear.
 
-CHANGELOG.md remains the single source of truth; this script never edits it.
+CHANGELOG.md remains the single source of truth for change entries; this script
+never edits it.  Since v1.10-dev the long "why / measured data / boundaries"
+evidence chains live in root-level `rationale/<version>.md` (one per version),
+linked from each CHANGELOG entry; this script renders them into docx/rationale/.
+Both CHANGELOG.md and rationale/*.md are inputs, neither is edited here.
 CI runs `git diff --exit-code -- docx/`, so generation must be deterministic and
 every output file must be committed. Run: python3 tools/build_web.py
 """
@@ -34,6 +40,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WEB = ROOT / "docx"
 ASSETS = WEB / "assets"
 CHANGELOG_DIR = WEB / "changelog"
+RATIONALE_SRC = ROOT / "rationale"          # 理由/证据链源 markdown（每版本一个）
+RATIONALE_DIR = WEB / "rationale"           # 对应官网详情页
 
 
 def current_version() -> tuple[str, str]:
@@ -100,6 +108,7 @@ NAV = """
       <a href="index.html">首页</a>
       <a href="spec.html">语言规范</a>
       <a href="changelog.html">更新日志</a>
+      <a href="rationale.html">理由与证据</a>
       <a href="packages.html">包</a>
       <a href="cve.html">安全公告</a>
       <a href="bench.html">性能基准</a>
@@ -273,18 +282,28 @@ REPO_PATH_PREFIXES = (
 
 
 def rewrite_repo_links(out: str, base: str) -> str:
-    """把源 markdown 的仓库根相对 href 重写成官网可用链接（只动 href 属性）。"""
+    """把源 markdown 的仓库根相对 href 重写成官网可用链接（只动 href 属性）。
+
+    rationale/*.md 存在仓库根的 rationale/ 子目录里，其源码链接写成 `../README.md`
+    / `../CHANGELOG.md` 才能在 GitHub 上跳对；这里统一剥掉可选的前导 `../` 再匹配，
+    站内页则一律补回调用方的 `base`（分页为 `../`）。
+    """
     def repl(m):
         href = m.group(1)
-        if href == "README.md" or href.startswith("README.md#"):
-            return f'href="{base}spec.html{href[len("README.md"):]}"'
-        if href == "CHANGELOG.md" or href.startswith("CHANGELOG.md#"):
-            return f'href="{base}changelog.html{href[len("CHANGELOG.md"):]}"'
-        head = href.split("#", 1)[0]
+        core = href[3:] if href.startswith("../") else href
+        anchor = core.split("#", 1)[1] if "#" in core else ""
+        if core == "README.md" or core.startswith("README.md#"):
+            return f'href="{base}spec.html{"#" + anchor if anchor else ""}"'
+        if core == "CHANGELOG.md" or core.startswith("CHANGELOG.md#"):
+            return f'href="{base}changelog.html{"#" + anchor if anchor else ""}"'
+        head = core.split("#", 1)[0]
+        # rationale/<version>.md -> 站内 docx/rationale/<version>.html
+        if head.startswith("rationale/") and head.endswith(".md"):
+            return f'href="{base}rationale/{head[len("rationale/"):-3]}.html{"#" + anchor if anchor else ""}"'
         for p in REPO_PATH_PREFIXES:
             if head == p or head.startswith(p):
                 url = GITHUB_TREE if head.endswith("/") else GITHUB_BLOB
-                return f'href="{url}{href}"'
+                return f'href="{url}{core}"'
         return m.group(0)
     return re.sub(r'href="([^"]+)"', repl, out)
 
@@ -316,7 +335,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
     NAV 里的 GitHub / LLVM 绝对外链不受影响。
     """
     nav_html = re.sub(
-        r'href="(index|spec|changelog|packages|cve|bench)\.html"',
+        r'href="(index|spec|changelog|rationale|packages|cve|bench)\.html"',
         lambda m: f'href="{base}{m.group(1)}.html"',
         NAV,
     )
@@ -324,6 +343,7 @@ def render(title: str, body: str, active: str, landing: bool = False,
         "index":     f'href="{base}index.html"',
         "spec":      f'href="{base}spec.html"',
         "changelog": f'href="{base}changelog.html"',
+        "rationale": f'href="{base}rationale.html"',
         "packages":  f'href="{base}packages.html"',
         "bench":     f'href="{base}bench.html"',
     }
@@ -452,8 +472,11 @@ def auto_topic(segment: str) -> str:
     return (buf[:70] + "…") if len(buf) > 70 else (buf or "（见详情页）")
 
 
-def build_changelog(changelog_text: str) -> None:
-    """把 CHANGELOG.md 拆成「索引 + 前言 + 每版本一页 + index.json」。"""
+def build_changelog(changelog_text: str) -> list[dict]:
+    """把 CHANGELOG.md 拆成「索引 + 前言 + 每版本一页 + index.json」。
+
+    返回 metas（供 build_rationale 复用版本顺序与标签）。
+    """
     lines = changelog_text.splitlines(keepends=True)
     starts = [i for i, l in enumerate(lines) if l.startswith("## ")]
     if not starts:
@@ -504,8 +527,14 @@ def build_changelog(changelog_text: str) -> None:
     for i, m in enumerate(metas):
         older = metas[i + 1] if m["older"] else None
         newer = metas[i - 1] if m["newer"] else None
+        # 该版本若有拆出的理由详情，给一条直达链接。
+        rationale_link = ""
+        if (RATIONALE_SRC / f'{m["id"]}.md').exists():
+            rationale_link = (f' · <a href="../rationale/{m["id"]}.html">'
+                              f'理由与证据链 →</a>')
         back = ('<p class="note"><a href="../changelog.html">← 版本索引</a>'
-                ' · <a href="overview.html">版本规则</a></p>')
+                ' · <a href="overview.html">版本规则</a>'
+                f'{rationale_link}</p>')
         nav = ['<p class="note">']
         if older:
             nav.append(f'← 更早：<a href="{older["file"]}">{html.escape(older["label"])}</a>')
@@ -523,11 +552,13 @@ def build_changelog(changelog_text: str) -> None:
 
     # 3) 索引页：只放版本表格，保持轻量。
     intro = (
-        "<p>本页是<strong>版本索引</strong>。Dial 的更新日志按「证据链」记录："
-        "每个版本不只写改了什么，还写为什么改、实测数据与边界在哪。"
-        "为便于检索与移动端加载，完整记录按版本拆成独立页，"
-        "<strong>各页正文与 CHANGELOG.md 对应条目逐字一致</strong>。"
-        "点击版本号查看详情；<a href=\"changelog/overview.html\">版本规则与前言</a>单列一页。</p>"
+        "<p>本页是<strong>版本索引</strong>。CHANGELOG.md 只记「改了什么」——"
+        "新增 / 更改 / 破坏性变更 / 修复；"
+        "「为什么改 / 实测数据 / 边界在哪」等证据链按版本拆到 "
+        "<code>rationale/</code>，见 <a href=\"rationale.html\">理由与证据链索引</a>。"
+        "为便于检索与移动端加载，每个版本拆成独立页，"
+        "<strong>各页正文与对应 markdown 源文件逐字一致</strong>。"
+        "点击版本号看变更条目；<a href=\"changelog/overview.html\">版本规则与前言</a>单列一页。</p>"
     )
     rows = []
     for m in metas:
@@ -562,6 +593,94 @@ def build_changelog(changelog_text: str) -> None:
             f"更新日志分页自检失败：生成 {len(produced)} 页，"
             f"预期 {len(metas) + 1} 页")
     print(f"  changelog: {len(metas)} 个版本 + 1 个前言页 + index.json")
+    return metas
+
+
+# ---------------------------------------------------------------------------
+# 理由 / 证据链详情页
+#
+# CHANGELOG.md 只留「变更条目」，长篇「为什么改 / 实测数据 / 边界」拆到仓库根
+# rationale/<version>.md（见 split 工具说明）。这里把每份 rationale/*.md 渲染
+# 成 docx/rationale/<version>.html，一份一个详情页；正文逐字来自 markdown，
+# 与 CHANGELOG 分页同样的 TOC / 前后导航体验。slug 与 CHANGELOG 版本一一对应。
+# ---------------------------------------------------------------------------
+def build_rationale(metas: list[dict]) -> None:
+    """把 rationale/*.md 渲染成官网详情页 + 索引；确定性，可重复生成。"""
+    if not RATIONALE_SRC.is_dir():
+        print("  rationale: 无 rationale/ 目录，跳过")
+        return
+    sources = sorted(RATIONALE_SRC.glob("*.md"))
+    if not sources:
+        print("  rationale: rationale/ 为空，跳过")
+        return
+
+    # 用 CHANGELOG 的版本顺序驱动导航：新→旧，前一项更新、后一项更早。
+    by_id = {m["id"]: m for m in metas}
+    order = [m["id"] for m in metas]           # 已登记版本，按 CHANGELOG 顺序
+    known = set(order)
+    extra = sorted(p.stem for p in sources if p.stem not in known)
+    order += extra                              # 未登记的兜底排最后（稳定序）
+
+    RATIONALE_DIR.mkdir(exist_ok=True)
+    for stale in list(RATIONALE_DIR.glob("*.html")):
+        stale.unlink()
+
+    produced = []
+    for i, slug in enumerate(order):
+        src = RATIONALE_SRC / f"{slug}.md"
+        if not src.exists():
+            continue
+        text = src.read_text(encoding="utf-8")
+        meta = by_id.get(slug, {})
+        label = meta.get("label", slug)
+        # 前后导航：与 CHANGELOG 同序。
+        newer = order[i - 1] if i > 0 and (RATIONALE_SRC / f"{order[i-1]}.md").exists() else None
+        older = (order[i + 1] if i + 1 < len(order)
+                 and (RATIONALE_SRC / f"{order[i+1]}.md").exists() else None)
+        back = ('<p class="note"><a href="../changelog.html">← 更新日志索引</a>'
+                f' · <a href="../changelog/{slug}.html">变更条目</a></p>')
+        nav = ['<p class="note">']
+        if older:
+            nav.append(f'← 更早：<a href="{older}.html">{html.escape(by_id.get(older, {}).get("label", older))}</a>')
+        if older and newer:
+            nav.append(" · ")
+        if newer:
+            nav.append(f'更新：<a href="{newer}.html">{html.escape(by_id.get(newer, {}).get("label", newer))}</a> →')
+        if older or newer:
+            nav.append(' · <a href="../rationale.html">理由索引</a>')
+        nav.append("</p>")
+        page = back + md_body(text, True, base="../") + "".join(nav)
+        (RATIONALE_DIR / f"{slug}.html").write_text(
+            render(f"理由与证据链 {label}", page, "rationale", base="../"),
+            encoding="utf-8")
+        produced.append((slug, label, meta.get("date", ""),
+                         meta.get("topic", f"{slug} 的理由与证据链")))
+
+    # 索引页：只放表格，轻量；与 changelog.html 对应但独立。
+    intro = (
+        "<p>本页是<strong>理由与证据链索引</strong>。CHANGELOG.md 只记「改了什么」，"
+        "而「为什么改 / 实测数据 / 边界在哪」逐版本拆在 "
+        "<code>rationale/&lt;版本&gt;.md</code>；这里按版本列出对应详情页，"
+        "<strong>正文与各 .md 源文件逐字一致</strong>。</p>"
+    )
+    rows = []
+    for slug, label, date, topic in produced:
+        stamp = date or "开发中"
+        short = topic if len(topic) <= 90 else topic[:90] + "…"
+        rows.append(
+            f'<tr><td><a href="rationale/{slug}.html">{html.escape(label)}</a></td>'
+            f'<td>{html.escape(stamp)}</td>'
+            f'<td>{html.escape(short)}</td></tr>'
+        )
+    table = ("<table><thead><tr><th>版本</th><th>日期</th><th>主题</th>"
+             "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
+    (WEB / "rationale.html").write_text(
+        render("理由与证据链 · 索引", intro + table, "rationale"),
+        encoding="utf-8")
+
+    if len(list(RATIONALE_DIR.glob("*.html"))) != len(produced):
+        raise SystemExit("理由详情页自检失败：生成的页面数与源文件数不一致")
+    print(f"  rationale: {len(produced)} 个详情页 + 1 个索引页")
 
 
 # ---------------------------------------------------------------------------
@@ -931,7 +1050,8 @@ def main() -> None:
     (WEB / "spec.html").write_text(
         render("语言规范", md_body(readme, True, strip_web_prefix=True), "spec"),
         encoding="utf-8")
-    build_changelog(changelog)
+    metas = build_changelog(changelog)
+    build_rationale(metas)
     build_packages()
 
     (WEB / "index.html").write_text(render_index(), encoding="utf-8")

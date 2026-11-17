@@ -15,6 +15,7 @@
       <a href="../index.html">首页</a>
       <a href="../spec.html">语言规范</a>
       <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../rationale.html">理由与证据</a>
       <a href="../packages.html">包</a>
       <a href="../cve.html">安全公告</a>
       <a href="../bench.html">性能基准</a>
@@ -24,22 +25,17 @@
   </div>
 </header>
 
-<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a> · <a href="../rationale/v0.93.html">理由与证据链 →</a></p><div class="toc">
 <ul>
 <li><a href="#v093--2026-10-31">[v0.93] — 2026-10-31</a><ul>
 <li><a href="#added新增">Added（新增）</a></li>
 <li><a href="#changed变更">Changed（变更）</a></li>
 <li><a href="#added测试">Added（测试）</a></li>
-<li><a href="#尚未实现本版刻意留白">尚未实现（本版刻意留白）</a></li>
-<li><a href="#验证">验证</a></li>
 </ul>
 </li>
 </ul>
 </div>
 <h2 id="v093--2026-10-31">[v0.93] — 2026-10-31</h2>
-<p>本版落地 <strong><code>import</code> 与 <code>.dialpkg</code> 包分发</strong>（见 README <a href="../spec.html#259-用法import-与-dialc-installv093-已实现v096-支持-url">§25.9</a>），
-完成了 ARCHITECTURE.md 实现路线的<strong>阶段 1 / 3 / 4</strong> 与阶段 2 的本地安装部分。
-这是让「标准库能跑起来」的第一块地基。</p>
 <h3 id="added新增">Added（新增）</h3>
 <ul>
 <li><strong><code>import "包名";</code> 语句</strong>（词法 / 语法 / 两阶段解析）。包名是字符串字面量而非标识符——
@@ -80,17 +76,9 @@
 <li><code>tests/pkg/use_demo.dial</code> 覆盖四种签名形态：纯数值、无参、返回不透明句柄、
   以不透明句柄为参数，以及 void 释放函数。</li>
 </ul>
-<h3 id="尚未实现本版刻意留白">尚未实现（本版刻意留白）</h3>
-<ul>
-<li><code>dialc install &lt;URL&gt;</code>（网络下载；本地文件安装已可用）。</li>
-<li>一键安装脚本（<code>install-dial.sh</code> / <code>.ps1</code>）、Windows 线程后端、官方标准库的 <code>.dialpkg</code> 化。</li>
-<li><code>.diali</code> 接入 LSP（补全 / 悬停）——待 LSP 骨架落地。</li>
-</ul>
-<h3 id="验证">验证</h3>
-<ul>
-<li>A/B/D/E/C/F/G <strong>七组原有测试全绿</strong>，新增 H 组通过；端到端实测
-  <code>demo_add</code>→7、<code>demo_version</code>→42、不透明句柄 <code>demo_new</code>+<code>demo_get</code>→99、void <code>demo_free</code> 正常。</li>
-</ul>
+<blockquote>
+<p>📄 本版的理由、实测数据与边界见 <a href="../rationale/v0.93.html">rationale/v0.93.md</a>。</p>
+</blockquote>
 <hr /><p class="note">← 更早：<a href="v0.92.html">v0.92</a> · 更新：<a href="v0.94.html">v0.94</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
 
 <footer class="site-footer">

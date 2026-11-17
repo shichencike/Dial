@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v0.96 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v0.96.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v096--2026-10-31--理由与证据链">[v0.96] — 2026-10-31 · 理由与证据链</a><ul>
+<li><a href="#docs文档">Docs（文档）</a></li>
+<li><a href="#验证">验证</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="v096--2026-10-31--理由与证据链">[v0.96] — 2026-10-31 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v0.96] — 2026-10-31</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p>本版补齐 <strong>ARCHITECTURE.md §8 实现路线</strong> 的<strong>阶段 2 剩余部分</strong>与<strong>阶段 5</strong>：
+包的来源不再只能是本地文件，<strong>也可以是 URL</strong>；并新增<strong>一键安装脚本</strong>，
+把「装好 Dial 环境 + 把该装的包装上」变成一条命令。</p>
+<p>至此路线图 7 个阶段已完成 <strong>1 / 2 / 3 / 4 / 5</strong>，
+剩余阶段 6（Windows 线程后端）与阶段 7（官方标准库 <code>.dialpkg</code> 化）。</p>
+<h3 id="docs文档">Docs（文档）</h3>
+<ul>
+<li>README §25.9 补 URL 安装用法（https 强制、<code>--sha256</code>、三步流程）与一键脚本；
+  新增 §3.2.1「一键安装」；§2 目录结构补两个脚本与 L 组测试；§17.2 更新 import 行状态；
+  §18 新增 L 组（测试组数 十一 → 十二）。</li>
+<li>ARCHITECTURE.md §8 路线表更新：阶段 2 / 5 标记完成，阶段 3 的「LSP 侧待落地」补注
+  已由 v0.95 的跨文件符号表兑现；文首「仍待实现」清单同步收窄。</li>
+<li>官网重新生成，新增「包 URL 安装 + 一键安装」特性卡。</li>
+</ul>
+<h3 id="验证">验证</h3>
+<ul>
+<li><strong>A～L 十二组测试全绿</strong>（新增 L 组 26 项断言）；
+  端到端实测：URL 安装 → <code>import "demo"</code> → 编译 → 运行输出正确；
+  篡改包 / 哈希不符 / 404 / 明文 http 四种坏包全部装不进去且不留残骸；
+  一键脚本装完后，在独立项目目录里编译 <code>import</code> 程序成功（输出 3 = <code>demo_add(1,2)</code>）。</li>
+</ul><p class="note">← 更早：<a href="v0.95.html">v0.95</a> · 更新：<a href="stdlib-v1.0.0.html">stdlib v1.0.0</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v0.7 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v0.7.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v07--2026-10-30--理由与证据链">[v0.7] — 2026-10-30 · 理由与证据链</a><ul>
+<li><a href="#设计约束用户拍板">设计约束（用户拍板）</a></li>
+<li><a href="#推迟不在本版">推迟（不在本版）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="v07--2026-10-30--理由与证据链">[v0.7] — 2026-10-30 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v0.7] — 2026-10-30</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p>本版落地<strong>可恢复异常（try / catch / throw）</strong>（见 README <a href="../spec.html#26-可恢复异常trycatchthrow">§26</a>），
+补齐了 v0.6 只有 <code>ud2</code>（不可恢复崩溃）的那一半；同时正式声明<strong>三重开源许可</strong>。</p>
+<h3 id="设计约束用户拍板">设计约束（用户拍板）</h3>
+<ul>
+<li><strong>极简语法</strong>：只 <code>throw Error(...)</code> 与 <code>try/catch</code>；<strong>严禁抛出非 <code>Error</code> 类型</strong>（裸 int/string 编译期拒绝）。</li>
+<li><strong>catch 后不得有圆括号</strong>：括号在 C 骨架里属于函数或条件专属，用在 <code>catch</code> 后属视觉污染。</li>
+<li><strong>底层防漏</strong>：跳转前<strong>必须</strong>自动为 try 作用域内所有活跃 ARC 局部插入 <code>release</code>，绝不泄漏。</li>
+<li><strong>失败与业务分离</strong>：系统崩溃走 <code>ud2</code>（Fail-Fast），业务失败走 <code>throw</code>（可恢复）。</li>
+<li><strong>零隐式负担</strong>：无异常的代码运行时开销为零；已用 <code>nm</code> 实测验证（见 §26.6）。</li>
+</ul>
+<h3 id="推迟不在本版">推迟（不在本版）</h3>
+<ul>
+<li><code>move_to</code> 所有权转移与多线程并发（thread / channel）——需先有并发原语，留待后续专属版本。</li>
+</ul><p class="note">← 更早：<a href="v0.61.html">v0.61</a> · 更新：<a href="v0.8.html">v0.8</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

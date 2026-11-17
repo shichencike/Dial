@@ -15,6 +15,7 @@
       <a href="../index.html">首页</a>
       <a href="../spec.html">语言规范</a>
       <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../rationale.html">理由与证据</a>
       <a href="../packages.html">包</a>
       <a href="../cve.html">安全公告</a>
       <a href="../bench.html">性能基准</a>
@@ -24,18 +25,16 @@
   </div>
 </header>
 
-<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a> · <a href="../rationale/unreleased.html">理由与证据链 →</a></p><div class="toc">
 <ul>
 <li><a href="#未实现-unreleased-v02v03-语言层均未暴露v04-起部分已落地">未实现（-Unreleased-，v0.2/v0.3 语言层均未暴露，v0.4 起部分已落地）</a></li>
 </ul>
 </div>
 <h2 id="未实现-unreleased-v02v03-语言层均未暴露v04-起部分已落地">未实现（-Unreleased-，v0.2/v0.3 语言层均未暴露，v0.4 起部分已落地）</h2>
-<ul>
-<li>多维数组、非 <code>int</code> 元素数组、<code>char</code> 类型。</li>
-<li>裸块 <code>{ ... }</code>。</li>
-<li>模块 / 包 / import、泛型、接口、trait、闭包。</li>
-<li>指针、地址取值、指针算术（永不提供）；运算符重载（永不提供）；可变全局状态（<code>var</code> 全局变量，v1.04 §37.1 统一措辞）。</li>
-</ul><p class="note">更新：<a href="v0.2.html">v0.2</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
+<blockquote>
+<p>📄 本版的理由、实测数据与边界见 <a href="../rationale/unreleased.html">rationale/unreleased.md</a>。</p>
+</blockquote>
+<hr /><p class="note">更新：<a href="v0.2.html">v0.2</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

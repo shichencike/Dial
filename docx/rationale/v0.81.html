@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 v0.81 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/v0.81.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#v081--2026-10-30--理由与证据链">[v0.81] — 2026-10-30 · 理由与证据链</a><ul>
+<li><a href="#修正的设计回退">修正的设计回退</a></li>
+<li><a href="#测试">测试</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="v081--2026-10-30--理由与证据链">[v0.81] — 2026-10-30 · 理由与证据链</h1>
+<blockquote>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v0.81] — 2026-10-30</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+</blockquote>
+<p>本版补上 v0.8 并发模型<strong>唯一的功能缺口：通道的关闭与 EOF</strong>
+（见 README <a href="../spec.html#277-通道关闭与-eofv081">§27.7</a>）。</p>
+<blockquote>
+<p><strong>缺口本身</strong>：v0.8 的通道没有 EOF。生产者一旦退出，消费者就永远卡在 <code>recv</code> 上——
+程序不是跑错，而是<strong>死锁</strong>。也就是说「生产者结束 → 消费者收尾」这个最常见的并发范式
+在 v0.8 里<strong>根本写不出来</strong>。v0.81 让它可以写了。</p>
+</blockquote>
+<h3 id="修正的设计回退">修正的设计回退</h3>
+<ul>
+<li>v0.8 曾刻意<strong>不</strong>把 <code>close</code> 扩展到 <code>channel</code>，担心「关掉之后变量还在、作用域结束再
+  <code>release</code> 一次」造成二次释放。复核后确认该担心<strong>不成立</strong>：<code>close</code> 只置标志 + 广播，
+  既不释放通道对象也不动引用计数；对象销毁仍<strong>只由原子 ARC 归零触发一次</strong>。二者职责不重叠。</li>
+</ul>
+<h3 id="测试">测试</h3>
+<ul>
+<li>A 组新增 <code>examples/channel_close.dial</code>（生产者 <code>close</code> → 消费者 <code>done</code> 收尾）与
+  <code>examples/channel_try_recv.dial</code>（<code>len</code> / <code>try_recv</code> / <code>closed</code> / <code>done</code> 状态机），
+  各连跑 10 次输出逐字节一致。</li>
+<li>B 组新增 11 个负向用例（错用 <code>close</code> / <code>closed</code> / <code>done</code> / <code>len</code> / <code>try_recv</code>、
+  元素类型未定就 <code>try_recv</code>、用保留名定义函数与结构体）。</li>
+<li>D 组新增 <code>tests/trap/channel_send_after_close.dial</code>：关闭后 <code>send</code> 必须信号终止且不打印哨兵；
+  E 组 <code>--fast</code> 下恢复 UB（打印哨兵），证明陷阱确由编译器插入。</li>
+<li>压力测试：20 万次移交 + EOF 收尾，RSS 稳定 1.4 MB 不增长，无死锁、无泄漏。</li>
+</ul><p class="note">← 更早：<a href="v0.8.html">v0.8</a> · 更新：<a href="v0.9.html">v0.9</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

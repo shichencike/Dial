@@ -15,6 +15,7 @@
       <a href="../index.html">首页</a>
       <a href="../spec.html">语言规范</a>
       <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../rationale.html">理由与证据</a>
       <a href="../packages.html">包</a>
       <a href="../cve.html">安全公告</a>
       <a href="../bench.html">性能基准</a>
@@ -24,20 +25,17 @@
   </div>
 </header>
 
-<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a> · <a href="../rationale/v0.92.html">理由与证据链 →</a></p><div class="toc">
 <ul>
 <li><a href="#v092--2026-10-31">[v0.92] — 2026-10-31</a><ul>
 <li><a href="#added新增">Added（新增）</a></li>
 <li><a href="#changed语义与规则变更">Changed（语义与规则变更）</a></li>
 <li><a href="#fixed修复">Fixed（修复）</a></li>
-<li><a href="#验证">验证</a></li>
 </ul>
 </li>
 </ul>
 </div>
 <h2 id="v092--2026-10-31">[v0.92] — 2026-10-31</h2>
-<p>本版落地 <strong><code>char</code> 单字符类型</strong>（见 README <a href="../spec.html#54-char单字符类型v092">§5.4</a>），
-并集中修复了一批<strong>宪法级文档自相矛盾</strong>与一个真实的运行时缺陷。</p>
 <h3 id="added新增">Added（新增）</h3>
 <ul>
 <li><strong><code>char</code> 类型</strong>：一个 Unicode 码点。值类型、无 ARC、无堆分配、无空指针，
@@ -83,11 +81,9 @@
 <li><strong>首页示例使用 <code>+</code> 拼接字符串</strong>：Dial 的字符串没有 <code>+</code> 运算符，已改为 <code>print("hello, ".concat(name))</code>
   （同步修正生成器 <code>tools/build_web.py</code> 与产物 <code>docx/index.html</code>，避免重新生成时复发）。</li>
 </ul>
-<h3 id="验证">验证</h3>
-<ul>
-<li>A/B/D/E/C/F <strong>六组原有测试全绿</strong>，新增 G 组（未捕获异常契约）通过。</li>
-<li>新增 5 个 char 负向用例 + 2 个写回规则负向用例 + 2 个 select 安全退出正例，均纳入自测。</li>
-</ul>
+<blockquote>
+<p>📄 本版的理由、实测数据与边界见 <a href="../rationale/v0.92.html">rationale/v0.92.md</a>。</p>
+</blockquote>
 <hr /><p class="note">← 更早：<a href="v0.91.html">v0.91</a> · 更新：<a href="v0.93.html">v0.93</a> → · <a href="../changelog.html">版本索引</a></p></main></div>
 
 <footer class="site-footer">
