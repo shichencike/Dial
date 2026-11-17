@@ -2140,3 +2140,40 @@
       - **护栏**：`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、`Cargo.toml`
         仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
         `src/main.rs` / `src/asm.rs` / `src/codegen_asm.rs` 三处源文件 + 测试 / 文档。
+
+    - **M7-e3ab 自研 asm 后端 DWARF 精确宽度类型 DIE（支柱② DWARF 补全）**：承接 e3aa
+      后对支柱②剩余项的再诊断——原路线图写「剩余宏信息」，但 Dial 语言无宏概念
+      （源码里只有 Rust `cfg!` / C `DIAL_ELEM_*` 宏，非语言层宏），宏信息是伪需求、
+      无从实现。转而在 e3z 类型 DIE 上发现真实短板：e3z 只有 int/float/bool/string/ptr
+      五类，FFI 精确宽度标量被错误映射。
+      - **发现（POC 复现）**：`let b: int32` / `let c: byte` / `let d: float32` 三个
+        局部变量，`dialc build -g --backend=asm` 后 llvm-dwarfdump 显示三者
+        `DW_AT_type` 分别指向 int(0xa2)/int(0xa2)/float(0xa9)——即 8 字节有符号 /
+        8 字节有符号 / 8 字节浮点，全错。真实应为 4 字节有符号 / 1 字节无符号 /
+        4 字节浮点。
+      - **根因（为什么必须修）**：全 spill 布局下这些值的 store 只写栈槽低 N 字节
+        （`movl`→4B、`movb`→1B、`movss`→4B），高字节未定义。DIE 若报 8 字节，
+        gdb 按 8 字节读会串入高位垃圾。修准宽度后 gdb 只读有效位，值与类型才正确。
+      - **实现**：`DwarfType` 枚举加 `I32`/`Byte`/`F32` 三变体；`dwarf_type_sym` 加
+        对应 `.Ldwarf_t_i32`/`_byte`/`_f32` 标签；`dwarf_type(&ast::Type)` 精确映射
+        `Int32→I32`、`Byte→Byte`、`Float32→F32`（`Int/Char→Int`、`Float→Float` 不变）；
+        `dwarf_type_ir(&IrType)` 映射 `I32→I32`、`F32→F32`，但 `I8/I1` 仍映射 Int——
+        因 IR 丢失 byte/bool 细分且 bool 形参走这条，映射成 Byte 会把 bool 形参误显示
+        为无符号字节（局部变量走 AST 路径保留精确信息，故主路径不受此限制）。
+        `emit_dwarf_cu` 的 base_type 段新增三个 DIE：int32(byte_size 4, DW_ATE_signed=0x05)、
+        byte(1, DW_ATE_unsigned=0x07)、float32(4, DW_ATE_float=0x04)。
+      - **效果（gdb 实测，断点在变量全部赋值后）**：`ptype b`→int32、`print b`→7；
+        `ptype c`→byte、`print c`→255；`ptype d`→float32、`print d`→1.5；常规
+        int→42 不变。栈槽原始字节 `d`=00 00 c0 3f（1.5 的 f32 位模式），gdb 按 4 字节
+        浮点读得 1.5。llvm-dwarfdump 确认三个 base_type 的 byte_size/encoding 正确、
+        无 error。
+      - **排雷记录**：中途曾见 `float32` 显示 7.79e19，排查为 POC 断点打在声明行首
+        （变量尚未 store，栈槽是未初始化垃圾），非 DWARF bug；把断点移到所有变量
+        赋值后即正确。运行时输出 `42/7/255/1.500000` 双后端一致，证明值本身无误。
+      - **零变化与门禁**：新旧编译器对常规类型程序的**机器码段逐字节一致**（3 个新
+        DIE 只在 `.debug_info` 元数据段，多余未引用类型 DIE 不影响 gdb、无 dwarfdump
+        error）；非 -g `.s` 逐字节一致；AArch64 路径未触及。R 组新增 **R5 精确宽度
+        专项**（类型 DIE byte_size/encoding + gdb ptype/print）全过。
+      - **护栏**：`src/codegen.rs` / `src/ast.rs` 相对 544d10a 零改动、`Cargo.toml`
+        仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
+        `src/codegen_asm.rs` 一处源文件 + 测试 / 文档。

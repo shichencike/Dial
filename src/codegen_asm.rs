@@ -54,9 +54,14 @@ fn sleb128(mut v: i64) -> Vec<u8> {
 /// 只能粗分——局部变量走 dwarf_type(&ast::Type) 保留完整信息）。
 fn dwarf_type_ir(t: &IrType) -> DwarfType {
     match t {
-        IrType::F64 | IrType::F32 => DwarfType::Float,
+        IrType::F64 => DwarfType::Float,
+        // M7-e3ab：形参层的精确宽度类型（IR 的 I32/F32 无 bool 歧义）。
+        IrType::F32 => DwarfType::F32,
+        IrType::I32 => DwarfType::I32,
         IrType::Handle => DwarfType::Str, // string/bytes 句柄优先按 char* 呈现
-        IrType::I64 | IrType::I32 | IrType::I8 | IrType::I1 => DwarfType::Int,
+        // I8/I1：IR 丢失 byte/bool 细分，且 bool 形参走这里——保持 Int（8 字节有符号），
+        // 避免把 bool 形参误显示成无符号字节；局部变量走 dwarf_type(&ast::Type) 保留精确信息。
+        IrType::I64 | IrType::I8 | IrType::I1 => DwarfType::Int,
         _ => DwarfType::Ptr,
     }
 }
@@ -66,6 +71,9 @@ fn dwarf_type_sym(t: DwarfType) -> &'static str {
     match t {
         DwarfType::Int => ".Ldwarf_t_int",
         DwarfType::Float => ".Ldwarf_t_float",
+        DwarfType::I32 => ".Ldwarf_t_i32",
+        DwarfType::Byte => ".Ldwarf_t_byte",
+        DwarfType::F32 => ".Ldwarf_t_f32",
         DwarfType::Bool => ".Ldwarf_t_bool",
         DwarfType::Str => ".Ldwarf_t_str",
         DwarfType::Ptr => ".Ldwarf_t_ptr",
@@ -192,6 +200,14 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
     o.push_str(".Ldwarf_t_bool:\n\t.uleb128 5\n\t.asciz \"bool\"\n\t.byte 8\n\t.byte 0x02\n");
     // char: 供 string 指针指向（DW_ATE_signed=0x05，gdb 按 C 字符串解读）
     o.push_str(".Ldwarf_t_char:\n\t.uleb128 5\n\t.asciz \"char\"\n\t.byte 1\n\t.byte 0x05\n");
+    // M7-e3ab：精确宽度标量 DIE。栈槽里这些值只写低 N 字节（movl/movb/movss），
+    // 高字节未定义；DIE 宽度报准后 gdb 只读有效位，print/ptype 才不串入垃圾高位。
+    // int32: 有符号 4 字节（DW_ATE_signed=0x05）
+    o.push_str(".Ldwarf_t_i32:\n\t.uleb128 5\n\t.asciz \"int32\"\n\t.byte 4\n\t.byte 0x05\n");
+    // byte: 无符号 1 字节（DW_ATE_unsigned=0x07）——与 char(有符号)区分，byte 0~255 显示正确
+    o.push_str(".Ldwarf_t_byte:\n\t.uleb128 5\n\t.asciz \"byte\"\n\t.byte 1\n\t.byte 0x07\n");
+    // float32: 浮点 4 字节（DW_ATE_float=0x04）
+    o.push_str(".Ldwarf_t_f32:\n\t.uleb128 5\n\t.asciz \"float32\"\n\t.byte 4\n\t.byte 0x04\n");
     // str: pointer → char，gdb 显示 char* 并解引用成字符串
     o.push_str(".Ldwarf_t_str:\n\t.uleb128 6\n\t.long .Ldwarf_t_char-.Ldwarf_info_start\n\t.byte 8\n");
     // ptr: pointer → char（数组/map/结构体等不透明句柄，gdb 显示为指针）
@@ -3910,10 +3926,16 @@ fn handle_arc_kind(t: &crate::ast::Type) -> Option<ArcKind> {
 /// 底层机内表示与编码类别——收敛成 5 类，对应 emit_dwarf_cu 里的类型 DIE。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DwarfType {
-    /// 有符号整数（int / byte / char / int32，底层 i64/i32）。
+    /// 有符号 64 位整数（int / char，底层 i64）。
     Int,
-    /// 浮点（float / float32，底层 f64/f32）。
+    /// 64 位浮点（float，底层 f64）。
     Float,
+    /// M7-e3ab：有符号 32 位整数（int32，底层 i32，栈槽 4 字节）。
+    I32,
+    /// M7-e3ab：无符号 8 位整数（byte，底层 i8，栈槽低 1 字节，DW_ATE_unsigned）。
+    Byte,
+    /// M7-e3ab：32 位浮点（float32，底层 f32，栈槽低 4 字节）。
+    F32,
     /// 布尔（底层 i64 存 0/1，DW_ATE_boolean + byte_size 8 让 gdb 显示 true/false）。
     Bool,
     /// 字符串 / 字节串：堆句柄，按 char* 呈现，gdb 能显示 C 字符串内容。
@@ -3927,9 +3949,13 @@ fn dwarf_type(t: &crate::ast::Type) -> DwarfType {
     use crate::ast::Type as T;
     match t {
         T::Bool => DwarfType::Bool,
-        T::Float | T::Float32 => DwarfType::Float,
+        T::Float => DwarfType::Float,
+        // M7-e3ab：局部变量保留精确宽度 / 符号性。
+        T::Float32 => DwarfType::F32,
+        T::Int32 => DwarfType::I32,
+        T::Byte => DwarfType::Byte,
         T::String | T::Bytes => DwarfType::Str,
-        T::Int | T::Byte | T::Char | T::Int32 => DwarfType::Int,
+        T::Int | T::Char => DwarfType::Int,
         // 其余（容器句柄 / 结构体 / 指针 / 函数地址 / void）统一呈现为指针。
         _ => DwarfType::Ptr,
     }

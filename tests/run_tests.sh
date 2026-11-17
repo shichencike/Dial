@@ -1665,6 +1665,67 @@ else
     rskip "多文件 GDB 交互检查（环境无 gdb）"
 fi
 
+# ---- R5) 自研 asm 后端 DWARF 精确宽度类型 DIE（M7-e3ab，支柱②）----
+# int32/byte/float32 是 FFI 精确宽度标量，栈槽只写低 4/1/4 字节；类型 DIE 必须
+# 报准 byte_size 与符号性，否则 gdb 按 8 字节读会串入高位未定义字节。
+cat > "${RDIR}/width.dial" <<'EOF'
+fn main(): int {
+    let a: int = 42;
+    let b: int32 = int_to_int32(7);
+    let c: byte = int_to_byte(255);
+    let d: float32 = float_to_float32(1.5);
+    let de: float = float32_to_float(d);
+    print(a);
+    print(int32_to_int(b));
+    print(byte_to_int(c));
+    print(de);
+    return 0;
+}
+EOF
+if "$DIALC" build "${RDIR}/width.dial" --backend asm -g -o "${RDIR}/width_exe" >"${RDIR}/width.log" 2>&1 \
+   && [ "$("$RDIR/width_exe")" = "$(printf '42\n7\n255\n1.500000')" ]; then
+    rpass "asm 后端精确宽度专项 -g 编译且运行输出正确（42/7/255/1.5）"
+else
+    rbad "asm 后端精确宽度专项 -g 编译/运行失败"; sed 's/^/       /' "${RDIR}/width.log" | tail -12
+fi
+if [ -n "$DDUMP" ] && [ -f "${RDIR}/width_exe" ]; then
+    "$DDUMP" --debug-info "${RDIR}/width_exe" > "${RDIR}/width_di.log" 2>&1
+    # int32=4/signed, byte=1/unsigned, float32=4/float，且变量 DW_AT_type 指向对应 DIE
+    wmiss=""
+    for want in '"int32"' '"byte"' '"float32"'; do
+        grep -q "DW_AT_name.*${want}" "${RDIR}/width_di.log" || wmiss="${wmiss} type:${want}"
+    done
+    # 用 dwarfdump 结构化输出取各 base_type 的 byte_size：名字后随 byte_size 的行
+    grep -A1 'DW_AT_name.*"int32"' "${RDIR}/width_di.log" | grep -q 'byte_size.*(0x04)' || wmiss="${wmiss} int32.size4"
+    grep -A1 'DW_AT_name.*"byte"' "${RDIR}/width_di.log" | grep -q 'byte_size.*(0x01)' || wmiss="${wmiss} byte.size1"
+    grep -A1 'DW_AT_name.*"float32"' "${RDIR}/width_di.log" | grep -q 'byte_size.*(0x04)' || wmiss="${wmiss} float32.size4"
+    if [ -z "$wmiss" ]; then rpass "asm 后端 DWARF 含 int32(4)/byte(1)/float32(4) 精确宽度类型 DIE"
+    else rbad "asm 后端 DWARF 精确宽度 DIE 缺:${wmiss}"; fi
+else
+    rskip "精确宽度静态 DWARF 检查（环境无 llvm-dwarfdump）"
+fi
+if command -v gdb >/dev/null 2>&1 && [ -f "${RDIR}/width_exe" ]; then
+    # 断在第 7 行（所有变量已赋值），ptype + print 验证类型与求值
+    gdb -q -batch -ex "set pagination off" \
+        -ex "break ${RDIR}/width.dial:7" -ex "run" \
+        -ex "ptype b" -ex "print b" \
+        -ex "ptype c" -ex "print c" \
+        -ex "ptype d" -ex "print d" \
+        "${RDIR}/width_exe" > "${RDIR}/width_gdb.log" 2>&1
+    if grep -qF 'type = int32' "${RDIR}/width_gdb.log" \
+       && grep -qF 'type = byte' "${RDIR}/width_gdb.log" \
+       && grep -qF 'type = float32' "${RDIR}/width_gdb.log" \
+       && grep -qE '\$1 = 7' "${RDIR}/width_gdb.log" \
+       && grep -qE '\$2 = 255' "${RDIR}/width_gdb.log" \
+       && grep -qE '\$3 = 1\.5' "${RDIR}/width_gdb.log"; then
+        rpass "asm 后端 GDB 精确宽度类型显示 int32/byte/float32 且求值正确（7/255/1.5）"
+    else
+        rbad "asm 后端 GDB 精确宽度显示失败"; sed 's/^/       /' "${RDIR}/width_gdb.log" | tail -20
+    fi
+else
+    rskip "精确宽度 GDB 交互检查（环境无 gdb）"
+fi
+
 
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验

@@ -1218,7 +1218,7 @@ LLVM 的通用后端」。经 M7-e3u 的系统诊断，剩余差距不在单条 
 <td><strong>② DWARF 调试信息</strong></td>
 <td><code>codegen.rs:16</code> 用 <code>inkwell::debug_info</code> 生成完整 DWARF（<code>-g</code>，见 <a href="#35-v104-增补dwarf-调试信息与--g并入-v104版本不变">§35</a>）</td>
 <td>—</td>
-<td><strong>M7-e3w 已落地（从零到一）</strong>：<code>.file/.loc</code> 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；<strong>M7-e3z 深度补全类型 DIE</strong>：int/float/bool/string/array 按真实类型显示（gdb <code>print ratio</code>=3.5、<code>flag</code>=true、<code>note</code>=char<em>），与 LLVM 后端格式一致；</em><em>M7-e3aa 多文件 source 映射</em>*：<code>import</code> 合并编译时子模块函数的 <code>.loc</code>/<code>DW_AT_decl_file</code> 指向各自源文件，gdb <code>break helper.dial:N</code> 可命中（R 组 R2+R3+R4 断言全过）。非 -g 零开销、AArch64 零变化。剩余：宏信息</td>
+<td><strong>M7-e3w 已落地（从零到一）</strong>：<code>.file/.loc</code> 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；<strong>M7-e3z 深度补全类型 DIE</strong>：int/float/bool/string/array 按真实类型显示（gdb <code>print ratio</code>=3.5、<code>flag</code>=true、<code>note</code>=char<em>），与 LLVM 后端格式一致；</em><em>M7-e3aa 多文件 source 映射</em><em>：<code>import</code> 合并编译时子模块函数的 <code>.loc</code>/<code>DW_AT_decl_file</code> 指向各自源文件，gdb <code>break helper.dial:N</code> 可命中；</em><em>M7-e3ab 精确宽度类型 DIE</em>*：int32(4)/byte(1 无符号)/float32(4) 按真实宽度显示，gdb <code>print</code>/<code>ptype</code> 正确（R 组 R2~R5 断言全过）。非 -g 零开销、AArch64 零变化</td>
 </tr>
 </tbody>
 </table>
@@ -1233,8 +1233,9 @@ workload 上整体 <strong>−6.7%</strong>（b15 冒泡排序更是慢 18×）�
 <strong>M7-e3z 补齐类型 DIE</strong>（gdb 按真实类型显示 int/float/bool/string，与 LLVM 后端
 一致）。<strong>M7-e3z 前的全量诊断</strong>：asm↔LLVM 几何平均 0.5353x（整体领先 46%）、
 13 胜 14 平 1 负，剩余平/负项多为 C 运行时 / idiv 微码主导（e3s 已证伪可从后端
-侧优化），targeted ISA 微融合收益已边际，故转入支柱②深度补全。支柱②后续门槛
-是多文件 source 映射与宏信息。</p>
+侧优化），targeted ISA 微融合收益已边际，故转入支柱②深度补全。支柱②已由
+M7-e3aa 补多文件 source 映射、M7-e3ab 补 FFI 精确宽度类型 DIE（int32/byte/float32）；
+宏信息因 Dial 语言无宏概念而不可实现，不再列为门槛，支柱②功能至此完备。</p>
 <p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式
 （C 侧 <code>-Os -ffunction-sections -fdata-sections</code> + 链接期 <code>-Wl,--gc-sections -s</code>，
 去掉 DWARF 与符号表）、<code>--single-file</code> 便携模式（链接期 <code>-static</code> 全静态，

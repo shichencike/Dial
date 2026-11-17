@@ -611,7 +611,7 @@ dialc lsp
 | 支柱 | LLVM 后端现状 | asm 后端现状 | 进展 |
 |---|---|---|---|
 | **① O3 级优化管线**（核心＝全局寄存器分配） | inkwell + clang `-O3 -flto` 全流程 | 曾有 4 个本地 pass + 2 专项 pass，无全局寄存器分配 → b17 内层 109 条栈搬运 | **M7-e3v 落地函数级 GRA**（callee-saved 全函数驻留），数组密集项 +9.91%；**M7-e3x 定量证伪完整 SIMD 后端**（整体 −6.7%）转 targeted ISA 路线；**M7-e3y 原生 POPCNT 融合** b23 +114%~120%、几何平均 +2.5%；caller-saved / 多级管线仍待补 |
-| **② DWARF 调试信息** | `codegen.rs:16` 用 `inkwell::debug_info` 生成完整 DWARF（`-g`，见 [§35](#35-v104-增补dwarf-调试信息与--g并入-v104版本不变)） | — | **M7-e3w 已落地（从零到一）**：`.file/.loc` 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；**M7-e3z 深度补全类型 DIE**：int/float/bool/string/array 按真实类型显示（gdb `print ratio`=3.5、`flag`=true、`note`=char*），与 LLVM 后端格式一致；**M7-e3aa 多文件 source 映射**：`import` 合并编译时子模块函数的 `.loc`/`DW_AT_decl_file` 指向各自源文件，gdb `break helper.dial:N` 可命中（R 组 R2+R3+R4 断言全过）。非 -g 零开销、AArch64 零变化。剩余：宏信息 |
+| **② DWARF 调试信息** | `codegen.rs:16` 用 `inkwell::debug_info` 生成完整 DWARF（`-g`，见 [§35](#35-v104-增补dwarf-调试信息与--g并入-v104版本不变)） | — | **M7-e3w 已落地（从零到一）**：`.file/.loc` 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；**M7-e3z 深度补全类型 DIE**：int/float/bool/string/array 按真实类型显示（gdb `print ratio`=3.5、`flag`=true、`note`=char*），与 LLVM 后端格式一致；**M7-e3aa 多文件 source 映射**：`import` 合并编译时子模块函数的 `.loc`/`DW_AT_decl_file` 指向各自源文件，gdb `break helper.dial:N` 可命中；**M7-e3ab 精确宽度类型 DIE**：int32(4)/byte(1 无符号)/float32(4) 按真实宽度显示，gdb `print`/`ptype` 正确（R 组 R2~R5 断言全过）。非 -g 零开销、AArch64 零变化 |
 
 > 每批仍守死宪法约束：LLVM 路径零改动、`src/codegen.rs`/`src/ast.rs` 相对 544d10a
 > 零改动、AArch64 零变化；每批带 A/B 交替 + 布局补偿归因 + 全门禁 + 证据链。支柱①
@@ -623,8 +623,9 @@ dialc lsp
 > **M7-e3z 补齐类型 DIE**（gdb 按真实类型显示 int/float/bool/string，与 LLVM 后端
 > 一致）。**M7-e3z 前的全量诊断**：asm↔LLVM 几何平均 0.5353x（整体领先 46%）、
 > 13 胜 14 平 1 负，剩余平/负项多为 C 运行时 / idiv 微码主导（e3s 已证伪可从后端
-> 侧优化），targeted ISA 微融合收益已边际，故转入支柱②深度补全。支柱②后续门槛
-> 是多文件 source 映射与宏信息。
+> 侧优化），targeted ISA 微融合收益已边际，故转入支柱②深度补全。支柱②已由
+> M7-e3aa 补多文件 source 映射、M7-e3ab 补 FFI 精确宽度类型 DIE（int32/byte/float32）；
+> 宏信息因 Dial 语言无宏概念而不可实现，不再列为门槛，支柱②功能至此完备。
 
 > **第 18 层两种产物形态**（工具链层，非 `.dialpkg` 契约）：`--tiny` 体积模式
 > （C 侧 `-Os -ffunction-sections -fdata-sections` + 链接期 `-Wl,--gc-sections -s`，

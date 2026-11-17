@@ -2244,9 +2244,49 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
 <li><strong>约束边界</strong>：AST 语句（<code>src/ast.rs</code>）只有 <code>line: usize</code>、无文件身份字段且冻结，
     故无法在 AST 层编码文件来源；本批走「frontend 已有 fn_origin → emit」的旁路，
     不改 ast.rs/codegen.rs、不动 LLVM 路径。宏信息仍未实现（路线图支柱②剩余项）。</li>
+<li>
+<p><strong>护栏</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code>
+    仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
+    <code>src/main.rs</code> / <code>src/asm.rs</code> / <code>src/codegen_asm.rs</code> 三处源文件 + 测试 / 文档。</p>
+</li>
+<li>
+<p><strong>M7-e3ab 自研 asm 后端 DWARF 精确宽度类型 DIE（支柱② DWARF 补全）</strong>：承接 e3aa
+  后对支柱②剩余项的再诊断——原路线图写「剩余宏信息」，但 Dial 语言无宏概念
+  （源码里只有 Rust <code>cfg!</code> / C <code>DIAL_ELEM_*</code> 宏，非语言层宏），宏信息是伪需求、
+  无从实现。转而在 e3z 类型 DIE 上发现真实短板：e3z 只有 int/float/bool/string/ptr
+  五类，FFI 精确宽度标量被错误映射。</p>
+</li>
+<li><strong>发现（POC 复现）</strong>：<code>let b: int32</code> / <code>let c: byte</code> / <code>let d: float32</code> 三个
+    局部变量，<code>dialc build -g --backend=asm</code> 后 llvm-dwarfdump 显示三者
+    <code>DW_AT_type</code> 分别指向 int(0xa2)/int(0xa2)/float(0xa9)——即 8 字节有符号 /
+    8 字节有符号 / 8 字节浮点，全错。真实应为 4 字节有符号 / 1 字节无符号 /
+    4 字节浮点。</li>
+<li><strong>根因（为什么必须修）</strong>：全 spill 布局下这些值的 store 只写栈槽低 N 字节
+    （<code>movl</code>→4B、<code>movb</code>→1B、<code>movss</code>→4B），高字节未定义。DIE 若报 8 字节，
+    gdb 按 8 字节读会串入高位垃圾。修准宽度后 gdb 只读有效位，值与类型才正确。</li>
+<li><strong>实现</strong>：<code>DwarfType</code> 枚举加 <code>I32</code>/<code>Byte</code>/<code>F32</code> 三变体；<code>dwarf_type_sym</code> 加
+    对应 <code>.Ldwarf_t_i32</code>/<code>_byte</code>/<code>_f32</code> 标签；<code>dwarf_type(&amp;ast::Type)</code> 精确映射
+    <code>Int32→I32</code>、<code>Byte→Byte</code>、<code>Float32→F32</code>（<code>Int/Char→Int</code>、<code>Float→Float</code> 不变）；
+    <code>dwarf_type_ir(&amp;IrType)</code> 映射 <code>I32→I32</code>、<code>F32→F32</code>，但 <code>I8/I1</code> 仍映射 Int——
+    因 IR 丢失 byte/bool 细分且 bool 形参走这条，映射成 Byte 会把 bool 形参误显示
+    为无符号字节（局部变量走 AST 路径保留精确信息，故主路径不受此限制）。
+    <code>emit_dwarf_cu</code> 的 base_type 段新增三个 DIE：int32(byte_size 4, DW_ATE_signed=0x05)、
+    byte(1, DW_ATE_unsigned=0x07)、float32(4, DW_ATE_float=0x04)。</li>
+<li><strong>效果（gdb 实测，断点在变量全部赋值后）</strong>：<code>ptype b</code>→int32、<code>print b</code>→7；
+    <code>ptype c</code>→byte、<code>print c</code>→255；<code>ptype d</code>→float32、<code>print d</code>→1.5；常规
+    int→42 不变。栈槽原始字节 <code>d</code>=00 00 c0 3f（1.5 的 f32 位模式），gdb 按 4 字节
+    浮点读得 1.5。llvm-dwarfdump 确认三个 base_type 的 byte_size/encoding 正确、
+    无 error。</li>
+<li><strong>排雷记录</strong>：中途曾见 <code>float32</code> 显示 7.79e19，排查为 POC 断点打在声明行首
+    （变量尚未 store，栈槽是未初始化垃圾），非 DWARF bug；把断点移到所有变量
+    赋值后即正确。运行时输出 <code>42/7/255/1.500000</code> 双后端一致，证明值本身无误。</li>
+<li><strong>零变化与门禁</strong>：新旧编译器对常规类型程序的<strong>机器码段逐字节一致</strong>（3 个新
+    DIE 只在 <code>.debug_info</code> 元数据段，多余未引用类型 DIE 不影响 gdb、无 dwarfdump
+    error）；非 -g <code>.s</code> 逐字节一致；AArch64 路径未触及。R 组新增 <strong>R5 精确宽度
+    专项</strong>（类型 DIE byte_size/encoding + gdb ptype/print）全过。</li>
 <li><strong>护栏</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code>
     仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
-    <code>src/main.rs</code> / <code>src/asm.rs</code> / <code>src/codegen_asm.rs</code> 三处源文件 + 测试 / 文档。</li>
+    <code>src/codegen_asm.rs</code> 一处源文件 + 测试 / 文档。</li>
 </ul>
 </li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>

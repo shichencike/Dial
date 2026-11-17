@@ -24,6 +24,17 @@
 
 ### Added
 
+- **M7-e3ab 自研 asm 后端 DWARF 精确宽度类型 DIE（支柱② DWARF 补全）**：e3z 的类型 DIE
+  只有 int/float/bool/string/ptr 五类，FFI 精确宽度标量 `int32`(栈槽低 4 字节)、`byte`(低
+  1 字节无符号)、`float32`(低 4 字节) 被错误映射成 int(8 字节有符号)/int/float(8 字节)，
+  gdb 按 8 字节读会串入高位未定义字节，`print`/`ptype` 显示错误宽度与符号性。本批新增
+  `int32`(4/signed)/`byte`(1/unsigned)/`float32`(4/float) 三个 base_type DIE，扩展 `DwarfType`
+  分类并让 `dwarf_type`(AST) 精确映射 Int32/Byte/Float32、`dwarf_type_ir`(IR) 映射 I32/F32
+  （I8 保留 Int 避免 bool 形参回归）。gdb 实测 `ptype`/`print`：int32=7、byte=255、float32=1.5
+  全部正确；新增 DIE 只在 DWARF 元数据段，机器码段与非 -g `.s` 与新编译器前逐字节一致，
+  dwarfdump 无 error。R 组新增 R5 专项（类型 DIE byte_size/encoding + gdb ptype/print）。
+  宪法约束不动（codegen.rs/ast.rs/LLVM 路径/依赖/版本零改动）。证据链见
+  [rationale/unreleased-dev.md](rationale/unreleased-dev.md)。
 - **M7-e3aa 自研 asm 后端多文件 DWARF source 映射（支柱② DWARF 补全）**：`import "./x.dial";`
   合并编译多个源文件时，`-g` 生成的 DWARF 此前把所有函数的 `DW_AT_decl_file` / 行表都指向
   主源文件，子模块函数（如 `helper.dial` 里的函数）按各自文件的相对行号却错指主文件，
