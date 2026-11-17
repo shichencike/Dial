@@ -2369,14 +2369,64 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
 <li><strong>测试与门禁</strong>：R 组新增 <strong>R7 专项</strong>（x86 三档退出码/哨兵、.s 陷阱标记分级、
     AArch64 cbnz+brk 结构性、fast 无检查标记、正常除法一致性、越界类全审计佐证）；
     全量 run_tests.sh 绿；docx 确定性生成；check_links/check_version 全过。</li>
-<li><strong>护栏与破例声明</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、
+<li>
+<p><strong>护栏与破例声明</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、
     <code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
     <code>src/main.rs</code> / <code>src/asm.rs</code> / <code>src/codegen_asm.rs</code> + 测试 / 文档。
     <strong>唯一破例</strong>："AArch64 零变化"是本批验证口径而非绝对铁律——AArch64 含除法的程序
     <code>.s</code> 新增 cbnz+brk 检查指令（用户明确授权：正确性优先于该护栏），已如实声明；
     非除法程序的 AArch64 <code>.s</code> 不受影响（检查只在 Div/Mod 通用路径发射）。此破例是
     修复静默错误数据的正确性必需——若严守 AArch64 零变化，就等于默许 <code>sdiv</code> 除零
-    静默产出 0，直接违背本批要对齐的 fail-fast 哲学。</li>
+    静默产出 0，直接违背本批要对齐的 fail-fast 哲学。</p>
+</li>
+<li>
+<p><strong>M7-e3af 完整 SCCP + 删不可达块（LLVM 标准 O2 pass 移植，A/B 证伪 / 性能代码零改动）</strong>：
+  承接用户"把 LLVM 好东西拿过来 + 参数化优化"的诉求，本批瞄准一个历史证据链尚未
+  证伪的 LLVM 标配 pass——<strong>SCCP（稀疏条件常量传播）+ 条件分支折叠 + 不可达块消除</strong>。
+  与已证伪的 LICM（e3s 0.997x）/ 循环展开（e3u 0.9792x）/ IVR 外层 / copy
+  propagation / 函数内联 / 向量化（e3x）不同，SCCP 消除的是<strong>每轮真实执行的比较 +
+  分支 + 栈 load</strong>，性质上不属于被 CPU 乱序执行掩盖的"挪指令 / 削 ALU"类优化。</p>
+</li>
+<li><strong>方向筛选（先查证据链，避免重做已证伪方向）</strong>：通读 rationale 确认 e3s/e3u 已把
+    循环级三条路径全部证伪，且从 pass 家底确认当前有 fold/cse/dce/IVR/InstCombine/GRA，
+    唯独没有条件常量传播与分支折叠。用 POC 先测收益上限（等价 Dial 微基准，校验和
+    一致）：<code>var flag=1</code>（循环外）→ 循环内 <code>if(flag==1){s+=i}else{s+=1000}</code>，现状 .s
+    有 2 个 cmp / 5.03ms，写成恒真形态（<code>s+=i</code>）1 个 cmp / 3.70ms，<strong>ratio 1.36x</strong>；
+    LLVM IR 印证 <code>%flag</code> alloca+store 1、循环内 <code>load flag</code>→<code>icmp eq</code>→<code>br</code>。据此判定
+    该方向未被证伪、值得实现。</li>
+<li><strong>实现（曾落地，后按 A/B 结论回退）</strong>：在 <code>src/pass.rs</code> 写了约 380 行 <code>sccp</code>：CFG
+    基建（id2idx / 可达 BFS / 迭代支配树）、常量槽候选（局部 Alloca、排除 param_slots
+    / 逃逸槽 / 浮点槽）、格值数据流（Uninit/Const/Conflict，Store 须支配 Load，循环回边
+    按 Conflict）、reg_const 传播（Load/ICmp/Conv/Bin→常量，除零不折叠）、常量条件
+    Branch→Jump、DCE、删不可达块并校验所有 term target 合法。<code>src/asm.rs</code> 在 IVR 之后
+    挂接（O2+、仅 x86-64）。正确性诊断中发现并修复两处实现 bug：① 逃逸检查误把
+    <code>Load.ptr==slot</code> 当逃逸（地址用法合法）；② 用 <code>Alloca.dst</code> 的 reg_ty（恒为 Ptr）
+    判类型错误，改为按 Store/Load 的 ty 字段判整数槽。修复后 POC 场景 cmpq 2→1、
+    代码行 64→50，输出与 LLVM 逐字一致；分支合流 / 循环内改写 / 逃逸槽三类负例均未被
+    误编译；全量 run_tests.sh <strong>701 PASS / 0 FAIL</strong>；AArch64 .s 在 O2/O3 逐字节零变化。</li>
+<li><strong>A/B 判定（决定性）——证伪</strong>：建 OLD worktree @ c824304 与 NEW 交替计时（校验和
+    一致、每次 16 采样）。首轮 ratio(OLD/NEW)=1.0195x，连续 3 轮降到 1.005/1.006/
+    1.008x——稳定但远低于 1.36x 理论上限、且低于 1% 噪声线。按 e3t 建立的<strong>布局补偿</strong>
+    门禁插入无关函数改变 .text 布局后，ratio 在 <strong>0.9859x ~ 1.2435x</strong> 间大幅翻转
+    （pad=2 时 NEW 反而慢 1.4%），<strong>坐实前面的微弱正收益是链接段布局伪影，非机制性
+    墙钟收益</strong>。反编译显示机制本身真实存在（热循环每轮从 <code>movq 216(%rsp);cmpq $1;
+    jne;jmp</code> 4 条降到单条 <code>jmp</code>，确实消掉一次栈 load + 比较 + 分支），但循环主体
+    <code>s=s+i</code> 的栈读写占主导，加上分支永远单向、CPU 分支预测与乱序执行已把这点开销
+    掩盖——与 e3r（常量 shlq 削减）、e3s（copy propagation）"机制存在但墙钟无收益"
+    的证伪模式完全同构。</li>
+<li><strong>处置（用户明确选择：诚实收敛、性能代码零改动）</strong>：按"非机制性收益不采纳"铁律
+    回退 <code>src/pass.rs</code> 的 <code>sccp</code> 与 <code>src/asm.rs</code> 的挂接（<code>git checkout</code> 两文件）。铁证：
+    回退后 NEW 二进制 md5 = OLD = <code>36d9fb04c32c439e33bbddb2280467ad</code>，工作树干净，
+    <code>src/codegen.rs</code> / <code>src/ast.rs</code> / <code>Cargo.toml</code> / LLVM 路径 / 依赖 / 版本零改动，
+    构建零警告。<strong>不打 tag、不升版本、CHANGELOG 不列功能条目</strong>（本批无实际代码变更）。</li>
+<li><strong>结论与后续</strong>：至此 LLVM 标配 O2 pass 中，条件常量传播 / 分支折叠这条最后的可疑
+    方向也被证伪。结合 e3s/e3u（循环级）/ e3x（向量化）/ 本批（SCCP），可以确认：
+    自研 asm 后端在 peephole + 局部 IR pass 层的墙钟优化空间已基本收敛，剩余差距是
+    架构级（LLVM O3 对 Dial 代码的完整管线 + 深度寄存器分配 + 向量化协同），单批
+    IR pass 难以再产出确定性墙钟收益。若继续"代替 LLVM"成熟，应转向：① 非墙钟指标
+    的一致性补全（更多语言特性 / 目标平台双后端对齐）；② 调试信息深度（优化态下的
+    变量位置 / 作用域 DIE）；③ 或接受架构级工程需长周期投入的现实，不再以单批微优化
+    为目标。本批把该结论固化在证据链，供后续方向决策引用。</li>
 </ul>
 </li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>

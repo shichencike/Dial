@@ -2259,3 +2259,50 @@
         非除法程序的 AArch64 `.s` 不受影响（检查只在 Div/Mod 通用路径发射）。此破例是
         修复静默错误数据的正确性必需——若严守 AArch64 零变化，就等于默许 `sdiv` 除零
         静默产出 0，直接违背本批要对齐的 fail-fast 哲学。
+
+    - **M7-e3af 完整 SCCP + 删不可达块（LLVM 标准 O2 pass 移植，A/B 证伪 / 性能代码零改动）**：
+      承接用户"把 LLVM 好东西拿过来 + 参数化优化"的诉求，本批瞄准一个历史证据链尚未
+      证伪的 LLVM 标配 pass——**SCCP（稀疏条件常量传播）+ 条件分支折叠 + 不可达块消除**。
+      与已证伪的 LICM（e3s 0.997x）/ 循环展开（e3u 0.9792x）/ IVR 外层 / copy
+      propagation / 函数内联 / 向量化（e3x）不同，SCCP 消除的是**每轮真实执行的比较 +
+      分支 + 栈 load**，性质上不属于被 CPU 乱序执行掩盖的"挪指令 / 削 ALU"类优化。
+      - **方向筛选（先查证据链，避免重做已证伪方向）**：通读 rationale 确认 e3s/e3u 已把
+        循环级三条路径全部证伪，且从 pass 家底确认当前有 fold/cse/dce/IVR/InstCombine/GRA，
+        唯独没有条件常量传播与分支折叠。用 POC 先测收益上限（等价 Dial 微基准，校验和
+        一致）：`var flag=1`（循环外）→ 循环内 `if(flag==1){s+=i}else{s+=1000}`，现状 .s
+        有 2 个 cmp / 5.03ms，写成恒真形态（`s+=i`）1 个 cmp / 3.70ms，**ratio 1.36x**；
+        LLVM IR 印证 `%flag` alloca+store 1、循环内 `load flag`→`icmp eq`→`br`。据此判定
+        该方向未被证伪、值得实现。
+      - **实现（曾落地，后按 A/B 结论回退）**：在 `src/pass.rs` 写了约 380 行 `sccp`：CFG
+        基建（id2idx / 可达 BFS / 迭代支配树）、常量槽候选（局部 Alloca、排除 param_slots
+        / 逃逸槽 / 浮点槽）、格值数据流（Uninit/Const/Conflict，Store 须支配 Load，循环回边
+        按 Conflict）、reg_const 传播（Load/ICmp/Conv/Bin→常量，除零不折叠）、常量条件
+        Branch→Jump、DCE、删不可达块并校验所有 term target 合法。`src/asm.rs` 在 IVR 之后
+        挂接（O2+、仅 x86-64）。正确性诊断中发现并修复两处实现 bug：① 逃逸检查误把
+        `Load.ptr==slot` 当逃逸（地址用法合法）；② 用 `Alloca.dst` 的 reg_ty（恒为 Ptr）
+        判类型错误，改为按 Store/Load 的 ty 字段判整数槽。修复后 POC 场景 cmpq 2→1、
+        代码行 64→50，输出与 LLVM 逐字一致；分支合流 / 循环内改写 / 逃逸槽三类负例均未被
+        误编译；全量 run_tests.sh **701 PASS / 0 FAIL**；AArch64 .s 在 O2/O3 逐字节零变化。
+      - **A/B 判定（决定性）——证伪**：建 OLD worktree @ c824304 与 NEW 交替计时（校验和
+        一致、每次 16 采样）。首轮 ratio(OLD/NEW)=1.0195x，连续 3 轮降到 1.005/1.006/
+        1.008x——稳定但远低于 1.36x 理论上限、且低于 1% 噪声线。按 e3t 建立的**布局补偿**
+        门禁插入无关函数改变 .text 布局后，ratio 在 **0.9859x ~ 1.2435x** 间大幅翻转
+        （pad=2 时 NEW 反而慢 1.4%），**坐实前面的微弱正收益是链接段布局伪影，非机制性
+        墙钟收益**。反编译显示机制本身真实存在（热循环每轮从 `movq 216(%rsp);cmpq $1;
+        jne;jmp` 4 条降到单条 `jmp`，确实消掉一次栈 load + 比较 + 分支），但循环主体
+        `s=s+i` 的栈读写占主导，加上分支永远单向、CPU 分支预测与乱序执行已把这点开销
+        掩盖——与 e3r（常量 shlq 削减）、e3s（copy propagation）"机制存在但墙钟无收益"
+        的证伪模式完全同构。
+      - **处置（用户明确选择：诚实收敛、性能代码零改动）**：按"非机制性收益不采纳"铁律
+        回退 `src/pass.rs` 的 `sccp` 与 `src/asm.rs` 的挂接（`git checkout` 两文件）。铁证：
+        回退后 NEW 二进制 md5 = OLD = `36d9fb04c32c439e33bbddb2280467ad`，工作树干净，
+        `src/codegen.rs` / `src/ast.rs` / `Cargo.toml` / LLVM 路径 / 依赖 / 版本零改动，
+        构建零警告。**不打 tag、不升版本、CHANGELOG 不列功能条目**（本批无实际代码变更）。
+      - **结论与后续**：至此 LLVM 标配 O2 pass 中，条件常量传播 / 分支折叠这条最后的可疑
+        方向也被证伪。结合 e3s/e3u（循环级）/ e3x（向量化）/ 本批（SCCP），可以确认：
+        自研 asm 后端在 peephole + 局部 IR pass 层的墙钟优化空间已基本收敛，剩余差距是
+        架构级（LLVM O3 对 Dial 代码的完整管线 + 深度寄存器分配 + 向量化协同），单批
+        IR pass 难以再产出确定性墙钟收益。若继续"代替 LLVM"成熟，应转向：① 非墙钟指标
+        的一致性补全（更多语言特性 / 目标平台双后端对齐）；② 调试信息深度（优化态下的
+        变量位置 / 作用域 DIE）；③ 或接受架构级工程需长周期投入的现实，不再以单批微优化
+        为目标。本批把该结论固化在证据链，供后续方向决策引用。
