@@ -1804,6 +1804,122 @@ if echo "$llvm_o_log" | grep -q '仅作用于自研后端' && [ "$( ${ODIR}/llvm
 else rbad "LLVM 后端 -O 参数处理异常"; fi
 
 
+# ---------------------------------------------------------------------------
+# R7) 自研 asm 后端 Fail-Fast 整数除零检查（M7-e3ae）：--safety 分级
+#    LLVM 后端 emit_div_zero_check 在 safety!=fast 下对 Div/Mod 插入 divisor!=0
+#    检查（Debug=int3/SIGTRAP、Safe=ud2/SIGILL）。此前 asm 后端完全无检查：
+#    x86 靠裸 idiv 的 SIGFPE、AArch64 sdiv 除零静默返回 0（违反 §20）。本组锁定：
+#      ① x86 debug=133 / safe=132 / fast=136（硬件 SIGFPE），均无 9999 哨兵
+#      ② .s 陷阱标记随分级：debug 含 int3、safe 含 ud2、fast 两者皆无
+#      ③ AArch64：debug/safe 含 cbnz+brk、fast 无（正确性破例，非除法 .s 不变）
+#      ④ 正常除法 100/7=14、100%7=2 三档一致且与 LLVM 相同
+#      ⑤ 全审计佐证：越界类在 asm 后端 debug 已 trap、fast 无检查（共享 C runtime）
+# ---------------------------------------------------------------------------
+echo
+echo "== R7) asm 后端 Fail-Fast 除零检查：--safety 分级（M7-e3ae） =="
+
+FFDIR="${TMP}/rfailfast"
+mkdir -p "$FFDIR"
+# 除零用例：除数是局部变量（非编译期常量），确保落到通用 idivq/sdiv 路径。
+cp tests/trap/div_by_zero.dial "${FFDIR}/dz.dial"
+# 正常除法用例：覆盖 +、- 被除数与函数调用，作输出一致性对照。
+cat > "${FFDIR}/div.dial" <<'DIALEOF'
+fn divmod(a: int, b: int): int {
+    return a / b;
+}
+fn main(): int {
+    print(100 / 7);
+    print(100 % 7);
+    print(divmod(100, 7));
+    print(divmod(-100, 7));
+    return 0;
+}
+DIALEOF
+
+# ① x86 除零退出码 + 无哨兵
+for _ff in "debug 133" "safe 132" "fast 136"; do
+    set -- $_ff; _lvl=$1; _want=$2
+    if ${DIALC} build "${FFDIR}/dz.dial" --backend asm --safety "$_lvl" -o "${FFDIR}/dz_$_lvl" >"${FFDIR}/build_$_lvl.log" 2>&1; then
+        "${FFDIR}/dz_$_lvl" >"${FFDIR}/out_$_lvl.txt" 2>/dev/null; _rc=$?
+        if [ "$_rc" = "$_want" ] && ! grep -q 9999 "${FFDIR}/out_$_lvl.txt"; then
+            rpass "asm 除零 --safety $_lvl：rc=$_rc 当场终止、无 9999 哨兵"
+        else
+            rbad "asm 除零 --safety $_lvl：期望 rc=$_want，实得 $_rc 或哨兵泄漏"
+        fi
+    else
+        rbad "asm 除零 --safety $_lvl 编译失败"
+        sed 's/^/       /' "${FFDIR}/build_$_lvl.log"
+    fi
+done
+
+# ② .s 陷阱标记随分级（--no-link，检视发射文本）
+for _lvl in debug safe fast; do
+    ${DIALC} build "${FFDIR}/dz.dial" --backend asm --safety "$_lvl" --no-link >/dev/null 2>&1
+    cp "${FFDIR}/dz.s" "${FFDIR}/dz_${_lvl}.s"
+done
+_ff_i=$(grep -c 'int3' "${FFDIR}/dz_debug.s" || true)
+_ff_u=$(grep -c 'ud2' "${FFDIR}/dz_debug.s" || true)
+[ "$_ff_i" -ge 1 ] && [ "$_ff_u" -eq 0 ] \
+    && rpass "asm debug .s 含 int3 且无 ud2（debugtrap 语义）" \
+    || rbad "asm debug .s 陷阱标记错误（int3=$_ff_i ud2=$_ff_u）"
+_ff_u=$(grep -c 'ud2' "${FFDIR}/dz_safe.s" || true)
+_ff_i=$(grep -c 'int3' "${FFDIR}/dz_safe.s" || true)
+[ "$_ff_u" -ge 1 ] && [ "$_ff_i" -eq 0 ] \
+    && rpass "asm safe .s 含 ud2 且无 int3（trap 语义）" \
+    || rbad "asm safe .s 陷阱标记错误（ud2=$_ff_u int3=$_ff_i）"
+_ff_i=$(grep -c 'int3' "${FFDIR}/dz_fast.s" || true)
+_ff_u=$(grep -c 'ud2' "${FFDIR}/dz_fast.s" || true)
+_ff_c=$(grep -c 'dchk_ok' "${FFDIR}/dz_fast.s" || true)
+[ "$_ff_i" -eq 0 ] && [ "$_ff_u" -eq 0 ] && [ "$_ff_c" -eq 0 ] \
+    && rpass "asm fast .s 不含任何除零检查标记（零开销）" \
+    || rbad "asm fast .s 仍含检查（int3=$_ff_i ud2=$_ff_u dchk=$_ff_c）"
+
+# ③ AArch64：debug/safe 含 cbnz+brk，fast 无（交叉汇编失败不影响 .s 检视）
+for _lvl in debug safe fast; do
+    DIAL_ASM_TARGET=aarch64 ${DIALC} build "${FFDIR}/dz.dial" --backend asm --safety "$_lvl" --no-link >/dev/null 2>&1
+    cp "${FFDIR}/dz.s" "${FFDIR}/a64_${_lvl}.s"
+done
+for _lvl in debug safe; do
+    _ff_cb=$(grep -c 'cbnz' "${FFDIR}/a64_${_lvl}.s" || true)
+    _ff_br=$(grep -c 'brk' "${FFDIR}/a64_${_lvl}.s" || true)
+    [ "$_ff_cb" -ge 1 ] && [ "$_ff_br" -ge 1 ] \
+        && rpass "AArch64 $_lvl .s 含 cbnz+brk 除零检查（正确性破例）" \
+        || rbad "AArch64 $_lvl .s 缺除零检查（cbnz=$_ff_cb brk=$_ff_br）"
+done
+_ff_cb=$(grep -c 'cbnz' "${FFDIR}/a64_fast.s" || true)
+_ff_br=$(grep -c 'brk' "${FFDIR}/a64_fast.s" || true)
+[ "$_ff_cb" -eq 0 ] && [ "$_ff_br" -eq 0 ] \
+    && rpass "AArch64 fast .s 不含除零检查" \
+    || rbad "AArch64 fast .s 仍含检查（cbnz=$_ff_cb brk=$_ff_br）"
+
+# ④ 正常除法三档一致且与 LLVM 相同
+${DIALC} build "${FFDIR}/div.dial" --backend llvm --safety safe -o "${FFDIR}/div_llvm" >/dev/null 2>&1
+_ff_expected="$( ${FFDIR}/div_llvm 2>/dev/null | tr '\n' ' ' )"
+_ff_div_ok=1
+for _lvl in debug safe fast; do
+    ${DIALC} build "${FFDIR}/div.dial" --backend asm --safety "$_lvl" -o "${FFDIR}/div_$_lvl" >/dev/null 2>&1 || _ff_div_ok=0
+    [ "$( ${FFDIR}/div_$_lvl 2>/dev/null | tr '\n' ' ' )" = "$_ff_expected" ] || _ff_div_ok=0
+done
+[ "$_ff_div_ok" -eq 1 ] && [ "$_ff_expected" = "14 2 14 -14 " ] \
+    && rpass "正常除法（含负被除数）三档与 LLVM 输出一致（14/2/14/-14）" \
+    || rbad "正常除法三档一致性失败（expected=[$_ff_expected]）"
+
+# ⑤ 全审计佐证：越界类在 asm 后端 debug trap、fast 无检查（共享 C runtime，天然分级）
+_ff_audit_ok=1
+for _src in array_oob_read array_negative_index string_oob_get; do
+    cp "tests/trap/${_src}.dial" "${FFDIR}/${_src}.dial"
+    ${DIALC} build "${FFDIR}/${_src}.dial" --backend asm --safety debug -o "${FFDIR}/${_src}_dbg" >/dev/null 2>&1 || _ff_audit_ok=0
+    "${FFDIR}/${_src}_dbg" >"${FFDIR}/${_src}_dbg.out" 2>/dev/null; _ff_rc=$?
+    [ "$_ff_rc" -ge 128 ] && ! grep -q 9999 "${FFDIR}/${_src}_dbg.out" || _ff_audit_ok=0
+    ${DIALC} build "${FFDIR}/${_src}.dial" --backend asm --safety fast -o "${FFDIR}/${_src}_fast" >/dev/null 2>&1 || _ff_audit_ok=0
+    "${FFDIR}/${_src}_fast" >"${FFDIR}/${_src}_fast.out" 2>/dev/null || true
+    grep -q 9999 "${FFDIR}/${_src}_fast.out" || _ff_audit_ok=0
+done
+[ "$_ff_audit_ok" -eq 1 ] \
+    && rpass "全审计佐证：越界/负下标/字符串越界在 asm 后端 debug trap、fast 无检查" \
+    || rbad "全审计佐证失败：越界类未按 --safety 分级"
+
+
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付

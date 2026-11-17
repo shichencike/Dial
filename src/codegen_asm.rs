@@ -12,6 +12,7 @@
 //! 栈对齐：x86 入口 rsp ≡ 8 (mod 16)，故 frame_size ≡ 8 (mod 16) 才能让 call 时
 //! rsp ≡ 0；AArch64 入口 sp 已 16 对齐，frame_size 取 16 的倍数即可。
 
+use crate::codegen::SafetyMode;
 use crate::ir::*;
 use crate::target::EmitTarget;
 use std::collections::{HashMap, HashSet};
@@ -217,7 +218,7 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
     o
 }
 
-pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str, fn_origin: &std::collections::HashMap<String, String>, opt_level: OptLevel) -> Result<String, String> {
+pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str, fn_origin: &std::collections::HashMap<String, String>, opt_level: OptLevel, safety: SafetyMode) -> Result<String, String> {
     // 预检：FieldAddr.field 是字段序号，必须能按 struct_layout 解析出字节偏移。
     for f in &ip.functions {
         for b in &f.blocks {
@@ -324,7 +325,7 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
         } else {
             1
         };
-        let di = emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs, debug_info, file_index, opt_level)?;
+        let di = emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs, debug_info, file_index, opt_level, safety)?;
         dwarf_funcs.push(di);
     }
     // 避免 GNU ld 的 "missing .note.GNU-stack section implies executable stack" 警告。
@@ -465,6 +466,11 @@ struct FnEmit<'a> {
     debug_info: bool,
     /// M7-e3aa：本函数源文件的 .file 编号（1-based），供 .loc N 使用。
     file_index: u8,
+    /// M7-e3ae：Fail-Fast 安全等级。Debug/Safe 为整数除零插入分级陷阱，
+    /// ReleaseFast 不插检查（与 LLVM 后端 emit_div_zero_check 同口径）。
+    safety: SafetyMode,
+    /// M7-e3ae：本函数内除零检查的 ok 标签序号，保证标签唯一。
+    dchk_seq: u32,
 }
 
 /// M7-e3n：xorshift 一步的融合计划。`slot` 是 x 的 Alloca 槽 vreg（驻留在
@@ -479,7 +485,7 @@ enum XorshiftPlan {
 }
 
 impl<'a> FnEmit<'a> {
-    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool, debug_info: bool, file_index: u8, opt_level: OptLevel) -> Self {
+    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool, debug_info: bool, file_index: u8, opt_level: OptLevel, safety: SafetyMode) -> Self {
         let prefix = format!("Ldial_{}", {
             let s: String = f.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
             s
@@ -496,6 +502,7 @@ impl<'a> FnEmit<'a> {
             lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
             popcnt_fuse: HashMap::new(), popcnt_native: HashSet::new(),
             xorshift_fuse: HashMap::new(), gra_blocked, opt_level, debug_info, file_index,
+            safety, dchk_seq: 0,
         }
     }
 
@@ -2152,6 +2159,18 @@ impl<'a> FnEmit<'a> {
         self.sg(dst, &dst_reg);
     }
 
+    /// M7-e3ae：Fail-Fast 整数除零陷阱。Debug 用可被调试器当断点的 int3 / brk #1
+    /// （对齐 LLVM `llvm.debugtrap` → SIGTRAP），Safe 用更短的 ud2 / brk #0
+    /// （对齐 `llvm.trap` → SIGILL）。刻意与 `Term::Unreachable` 的无条件
+    /// ud2 / brk #0 分开实现，后者不动，避免影响非除零程序的黄金 `.s`。
+    fn emit_div_trap(&mut self) {
+        let debug = self.safety == SafetyMode::Debug;
+        match self.target {
+            EmitTarget::X86_64SysV => self.line(if debug { "\tint3" } else { "\tud2" }),
+            EmitTarget::AArch64 => self.line(if debug { "\tbrk #1" } else { "\tbrk #0" }),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn inst_bin(&mut self, op: ABin, dst: VReg, a: Value, b: Value, _ty: IrType) {
         // M7-e3j：常量位与掩码 n∈[2^31, 2^32-1] 时，andq $imm32 会把立即数
@@ -2254,6 +2273,31 @@ impl<'a> FnEmit<'a> {
             return;
         }
         let b_reg = self.bin_src(b, &g2, allow_imm, false);
+        // M7-e3ae：Fail-Fast 整数除零检查，与 LLVM 后端 emit_div_zero_check 同口径。
+        // safety != ReleaseFast 时：除数为 0 当场陷阱，绝不静默产出 poison（LLVM）
+        // 或让 AArch64 sdiv 返回 0（静默错误数据，违反 §20）。常量除数 0/1 已被
+        // const_div_pow2 / const_div_magic（均要求 d>=2）挡在通用路径之外，故只有
+        // 真正落到 idivq/sdiv 的非常量除数才会走到这里——检查精准且零误报。
+        if matches!(op, ABin::Div | ABin::Mod) && self.safety != SafetyMode::ReleaseFast {
+            let ok_lbl = format!(".{}_dchk_ok_{}", self.prefix, self.dchk_seq);
+            self.dchk_seq += 1;
+            match self.target {
+                EmitTarget::X86_64SysV => {
+                    // 必须用 cmpq $0, r/m64：b_reg 可能是 `off(%rsp)` 内存操作数，
+                    // testq b_reg,b_reg 在双内存操作数时是非法汇编。
+                    self.line(&format!("\tcmpq $0, {}", b_reg));
+                    self.line(&format!("\tjne {}", ok_lbl));
+                    self.emit_div_trap();
+                    self.line(&format!("{}:", ok_lbl));
+                }
+                EmitTarget::AArch64 => {
+                    // AArch64 的 bin_src 恒把 b 装进 g2（寄存器），cbnz 直接可用。
+                    self.line(&format!("\tcbnz {}, {}", g2, ok_lbl));
+                    self.emit_div_trap();
+                    self.line(&format!("{}:", ok_lbl));
+                }
+            }
+        }
         match self.target {
             EmitTarget::X86_64SysV => {
                 let a_reg = self.r(&g1);
@@ -3991,8 +4035,9 @@ fn emit_function(
     debug_info: bool,
     file_index: u8,
     opt_level: OptLevel,
+    safety: SafetyMode,
 ) -> Result<FnDwarfInfo, String> {
-    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name), debug_info, file_index, opt_level);
+    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name), debug_info, file_index, opt_level, safety);
     e.compute_layout();
     e.analyze_dead_defs();
     e.analyze_fusable();

@@ -6,6 +6,7 @@
 //! LLVM 路径（`src/codegen.rs`）与这里完全并列，由 `main.rs` 的 `--backend` 分派。
 
 use crate::ast::Program;
+use crate::codegen::SafetyMode;
 use crate::ir::OptLevel;
 use crate::semantic::{FuncInfo, StructTable};
 use crate::target::EmitTarget;
@@ -51,6 +52,7 @@ pub fn compile_asm(
     src_path: &str,
     fn_origin: &std::collections::HashMap<String, String>,
     opt_level: OptLevel,
+    safety: SafetyMode,
 ) -> Result<(), String> {
     let target = detect_target()?;
     // M7-e3w：gdb 源码断点用绝对路径（与 LLVM 后端 DW_AT_name 一致）。
@@ -79,7 +81,7 @@ pub fn compile_asm(
     if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV) {
         pass::instcombine(&mut ip);
     }
-    let asm_text = codegen_asm::emit(&ip, target, debug_info, &src_abs, fn_origin, opt_level)?;
+    let asm_text = codegen_asm::emit(&ip, target, debug_info, &src_abs, fn_origin, opt_level, safety)?;
 
     let s_path = obj_path.with_extension("s");
     fs::write(&s_path, asm_text)

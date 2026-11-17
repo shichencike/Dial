@@ -2321,12 +2321,62 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
 <li><strong>测试与门禁</strong>：R 组新增 <strong>R6 专项 7 项</strong>（四级编译/运行、默认与 O2 逐字节一致、
     GRA 分级、O3 恒等式生效、恒等式结果正确、非法 -O9 拒绝、LLVM 忽略 -O 提示）；
     全量 run_tests.sh 绿；docx 确定性生成；check_links/check_version 全过。</li>
-<li><strong>护栏</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code>
+<li>
+<p><strong>护栏</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code>
     仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
-    <code>src/ir.rs</code> / <code>src/main.rs</code> / <code>src/asm.rs</code> / <code>src/pass.rs</code> / <code>src/codegen_asm.rs</code><ul>
+    <code>src/ir.rs</code> / <code>src/main.rs</code> / <code>src/asm.rs</code> / <code>src/pass.rs</code> / <code>src/codegen_asm.rs</code></p>
+<ul>
 <li>测试 / 文档。</li>
 </ul>
 </li>
+<li>
+<p><strong>M7-e3ae 自研 asm 后端 Fail-Fast 整数除零检查：<code>--safety</code> 分级贯通（代替 LLVM 的哲学对齐）</strong>：
+  用户尖锐指出"作为一个代替 LLVM 的后端，怎么能不支持 fail-fast 这个哲学"。这要求把
+  §20 铁律在自研后端做到与 LLVM 同口径，而非只保留 LLVM 路径。</p>
+</li>
+<li><strong>全面审计（检查种类 × LLVM 机制 × asm 机制 × safety 分级）</strong>：先穷尽核对所有
+    fail-fast 检查在两条路径的覆盖，避免在错误的地方动刀：
+    | 检查 | LLVM 后端 | 自研 asm 后端 | 需改？ |
+    | --- | --- | --- | --- |
+    | 数组越界读/写/嵌套 | <code>emit_bounds_check</code>+trap | <code>dial_array_get/set</code> 内 C runtime <code>DIAL_CHECK_BOUNDS</code> | 否（已分级） |
+    | 字符串越界 | 同上 | <code>dial_string_get</code> 内 C runtime | 否 |
+    | 空指针 / channel 关闭 / 句柄二次用 | C runtime + <code>emit_throw</code> | 同一份 C runtime | 否 |
+    | int→byte / int→int32 范围 | <code>call_c</code> C runtime | 同一份 C runtime（stdlib/dial_bytes.c） | 否 |
+    | SIMD lane 除零 | 明确故意不检查（poison，调用方保证） | 不实现 SIMD | 否（无对齐义务） |
+    | INT_MIN / -1 溢出 | <code>build_int_neg</code> 不检查 | 同语义 | 否（LLVM 自身不检查） |
+    | <strong>整数 / % 除零</strong> | <strong><code>emit_div_zero_check</code>+trap</strong> | <strong>无——裸 <code>idivq</code>/<code>sdiv</code></strong> | <strong>是（唯一缺口）</strong> |
+    结论：唯一真实缺口是除零。C runtime 侧检查经 <code>-DDIAL_SAFETY=N</code> 注入、等级 0 时
+    被编译器消除，天然分级，实测 asm/debug 越界 rc132+中文诊断、asm/fast 打印 9999
+    哨兵（检查关闭）——<strong>不需要动 runtime</strong>。</li>
+<li><strong>缺口之严重性</strong>：<code>compile_asm</code> 签名里根本没有 <code>SafetyMode</code>。x86 的 <code>idiv</code> 除零
+    靠硬件 SIGFPE（rc136），<code>--safety fast</code> 对它毫无影响（与 LLVM fast 的 poison
+    UB 口径不一致）；更糟的是 AArch64 的 <code>sdiv</code> 除零<strong>静默返回 0</strong>，正是 §20 明令
+    禁止的"静默产生错误数据"——这在要代替 LLVM 的后端上不可接受。</li>
+<li><strong>实现</strong>：<code>SafetyMode</code> 从 main.rs:493 调用点贯通 <code>asm::compile_asm</code> →
+    <code>codegen_asm::emit</code> → <code>emit_function</code> → <code>FnEmit</code>（存 <code>safety</code> 字段）。在
+    <code>inst_bin</code> 通用 Div/Mod 路径、<code>b_reg</code> 装载之后插入检查：x86 用
+    <code>cmpq $0, {b_reg}; jne ok; &lt;trap&gt;; ok:</code>（<strong>关键</strong>：必须用 cmp 而非
+    <code>testq b_reg,b_reg</code>——b_reg 可能是 <code>off(%rsp)</code> 内存操作数，test 双内存非法）；
+    AArch64 用 <code>cbnz {g2}, ok; &lt;trap&gt;; ok:</code>。分级陷阱：Debug→<code>int3</code>/<code>brk #1</code>、
+    Safe→<code>ud2</code>/<code>brk #0</code>、ReleaseFast 不插。<code>Term::Unreachable</code> 的既有 ud2 刻意不改，
+    避免影响非除零程序。常量 0/1 被 <code>const_div_pow2</code>/<code>const_div_magic</code>（均要求 d≥2）
+    挡在通用路径外，检查精准无 falsely-positive。</li>
+<li><strong>实测 A/B（三档 × 双架构）</strong>：x86 退出码 debug=133(SIGTRAP)/safe=132(SIGILL)/
+    fast=136(SIGFPE)，均无 9999 哨兵；<code>.s</code> 标记 debug 含 int3 无 ud2、safe 含 ud2
+    无 int3、fast 三者全无（int3 此前全 emitter 未用，是干净标记）；AArch64
+    debug/safe 含 cbnz+brk、fast 无。正常除法（100/7=14、100%7=2、divmod(100,7)=14、
+    divmod(-100,7)=-14）三档输出逐字相同且与 LLVM 一致。</li>
+<li><strong>测试与门禁</strong>：R 组新增 <strong>R7 专项</strong>（x86 三档退出码/哨兵、.s 陷阱标记分级、
+    AArch64 cbnz+brk 结构性、fast 无检查标记、正常除法一致性、越界类全审计佐证）；
+    全量 run_tests.sh 绿；docx 确定性生成；check_links/check_version 全过。</li>
+<li><strong>护栏与破例声明</strong>：<code>src/codegen.rs</code> / <code>src/ast.rs</code> 相对 544d10a 零改动、
+    <code>Cargo.toml</code> 仍 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；改动仅
+    <code>src/main.rs</code> / <code>src/asm.rs</code> / <code>src/codegen_asm.rs</code> + 测试 / 文档。
+    <strong>唯一破例</strong>："AArch64 零变化"是本批验证口径而非绝对铁律——AArch64 含除法的程序
+    <code>.s</code> 新增 cbnz+brk 检查指令（用户明确授权：正确性优先于该护栏），已如实声明；
+    非除法程序的 AArch64 <code>.s</code> 不受影响（检查只在 Div/Mod 通用路径发射）。此破例是
+    修复静默错误数据的正确性必需——若严守 AArch64 零变化，就等于默许 <code>sdiv</code> 除零
+    静默产出 0，直接违背本批要对齐的 fail-fast 哲学。</li>
 </ul>
 </li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>

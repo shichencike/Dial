@@ -500,6 +500,7 @@ fn main() {
             &src_path,
             &fe.fn_origin,
             opt_level,
+            safety,
         ) {
             eprintln!("{}", e);
             std::process::exit(1);

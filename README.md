@@ -653,7 +653,7 @@ dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|s
 | `--release` / `--safety safe` | ReleaseSafe | 保留防 UB 检查，陷阱用 `llvm.trap`（x86 `ud2`） |
 | `--fast` / `--safety fast` | ReleaseFast | 关闭全部检查，越界/除零即 UB（与 C 一致）——⚠️ **危险，详见下方警告** |
 
-等级同时作用于 LLVM IR 与 C Runtime（`-DDIAL_SAFETY=N`），两侧口径一致。
+等级同时作用于 LLVM IR、自研 asm 后端发射的整数除零检查与 C Runtime（`-DDIAL_SAFETY=N`），两侧口径一致（M7-e3ae 起 asm 后端除零也随分级：debug=`int3`/safe=`ud2`/fast 不插）。
 
 产物形态开关（第 18 层，与上面的安全等级**正交**）：
 
@@ -2328,6 +2328,14 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 
 同一个等级**同时**作用于 LLVM IR 与 C Runtime（通过 `-DDIAL_SAFETY=N` 注入），
 保证两侧检查口径一致。等级是编译期常量，ReleaseFast 下检查代码被编译器完全消除：
+
+> **M7-e3ae：自研 asm 后端（`--backend asm`）同样按 `--safety` 分级 fail-fast。**
+> 数组/字符串越界、空指针、channel 关闭、int→byte/int32 范围校验经共享 C Runtime
+> 天然分级；整数除零由编译器在通用 `idivq`/`sdiv` 前插入检查——Debug 用 `int3`
+> （SIGTRAP）、Safe 用 `ud2`（SIGILL）、ReleaseFast 不插（x86 退回硬件 SIGFPE）。
+> 两条后端同口径：`--safety debug` 下除零当场终止且无哨兵，`--safety fast` 下检查消除。
+> 这是"代替 LLVM"的哲学对齐——AArch64 的 `sdiv` 除零不再静默返回 0（正确性破例，
+> 详见 CHANGELOG M7-e3ae）。
 
 ```asm
 # ReleaseFast 下的 a[99]：无长度调用、无比较、无跳转、无陷阱
