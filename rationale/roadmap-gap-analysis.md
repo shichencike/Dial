@@ -106,6 +106,18 @@ SIMD 完整后端（−6.7%）、caller-saved GRA（ROI 为负）、函数名重
    折叠值与生成 `.s` 逐字节不变。这是「代替 LLVM」在编译速度维度上首个前端
    算法级改进（e3an3 是产物/链接层）。
 
+### 阶段二补充：DWARF 调试信息维度（M7-e3ax）
+
+7. ✅ **DWARF 端到端 gdb 实证 + 形参 location 修复**：DWARF 自 e3w/e3z/e3aa/e3ab
+   落地后从未做过 gdb 端到端验证。本批用 readelf/llvm-dwarfdump/gdb 对同一程序
+   两后端 `-g -O0` 对比：DIE 树统计本已对等（subprogram/param/variable/location
+   数完全一致），但 gdb 实测暴露真 bug——ASM 断点停在 `add` 时 `print a/b` 显示
+   11/11（实参 3/4）。根因：`emit_dwarf_cu` 把形参 `DW_OP_breg7` 偏移写成占位
+   `8*i`，而 prologue 实际写参位置是 `alloca_off[param_slots[idx]]`（局部变量用
+   真实 alloca_off，故只有形参错）。修复后形参偏移接上真值，gdb 正确 print
+   （7 参数混合类型含栈传参专项全对），运行时与非-g/AArch64 产物逐字节不变。
+   **结论：调试信息维度从「段存在」升级为「gdb 实证可用」，护栏内缺陷清零。**
+
 ### 阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）
 
 6. `select` 超时 / impl 关联函数 / map string 值 —— 若要做，作为**独立语言版本主题**，

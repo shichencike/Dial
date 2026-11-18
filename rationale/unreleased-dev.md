@@ -3207,3 +3207,37 @@ imulq   %r10, %r15     # s * 31
 - 全门禁：AF 18 用例、AG 差分 180 次（golden 11 + 固化语料 4 + 在线 fuzz O0/O2/O3）零不一致、全量 run_tests.sh rc=0、cargo test 绿。
 
 **范围与护栏**：改动只在 `src/pass.rs` 的 e3p 解释器内部，且 `fold_pure_calls` 的调用受 `opt_level>=O2 && EmitTarget::X86_64SysV` 守卫——AArch64 与普通 O0/O1 零变化，LLVM 路径零改动（该函数只服务 asm 路径）。`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0 零改动、零新依赖（仅用已有 HashMap）、构建零警告、不打 tag、docx 确定性。**注**：本批前期还做了字符串类落后项归因（b20/b21/b22 双后端 A/B + b22 反汇编）——字符串类已追平 LLVM（几何平均 1.0016x，比路线图记录的 1.02x 更好），唯一落后项 b22 1.10x 根因是 LLVM O3 把 28 个基准内联进 main 的架构级循环管线差距，peephole 不可达（与 e3r/e3s/e3t 结论一致），不构成可落地缺口，故未改动产品代码。
+
+#### M7-e3ax：修复 DWARF 函数形参 location 偏移错误（gdb 可正确 print 参数）
+
+**为什么做（调试信息维度，首次端到端实证）**：「代替 LLVM」拆成语义/性能/O3/DWARF/fail-fast/产物形态/编译速度多维度。DWARF 自 e3w（手写 v5 CU）/e3z（类型 DIE）/e3aa（多文件 source 映射）/e3ab（byte/bool/float32 精确类型）落地后，**从未做过 gdb 端到端实证**——只验证过「段存在 + 能编译」。本批补上这一环，延续「先量化/实证、再决定投入」纪律。
+
+**诊断方法（只读工具，零产品代码改动）**：
+- 同一程序 `tests/asm_golden/core2.dial`（覆盖 int 形参/局部变量/struct/数组/string/float/bool + while/for/三元/逻辑）在两独立目录用 `dialc build --backend=asm|llvm -g -O0` 编译，避免 `.s` 副作用互覆盖。
+- `readelf -S`：两后端都有 6 个核心 DWARF 段（abbrev/info/line/loc/ranges/str）；LLVM 额外有 pubnames/pubtypes（DWARF v4 加速表，非必需，gdb 顺序扫描仍可工作）。
+- `llvm-dwarfdump --debug-info` 精确提取 core2.dial 单一 CU 的 DIE 树统计：**subprogram 3/3、formal_parameter 3/3、variable 7/7、location 属性 10/10、low_pc/high_pc 4/4 全部对等**；ASM base_type 7 vs LLVM 3（e3ab 精确类型更丰富）、DWARF v5 vs v4。**DIE 树层面完全对等，看似无缺口**。
+- **gdb 端到端才是决定性证据**：`-ex 'break core2.dial:2' -ex run -ex 'print a' ...`
+  - ASM：`Breakpoint 1, add (a=11, b=11)` —— 实参本是 `add(3,4)`，读成 11/11；`print i=0/sum=0`（局部变量正确）。
+  - LLVM：`add (a=3, b=4)` 正确（但其 main 局部变量 `i=26` 呈现差异，属 LLVM 冻结路径，不在本批护栏内）。
+  - 复跑 3 次 11/11 稳定；运行时 stdout 完全正确（`add(3,4)=7`）——确认是**纯 DWARF 元数据错误，不影响程序语义**。
+
+**根因（临时插桩 + objdump 反汇编 + llvm-dwarfdump 三方定位）**：
+- llvm-dwarfdump 显示参数 DIE：`a → DW_AT_location (DW_OP_breg7 RSP+0)`、`b → RSP+8`。
+- objdump 反汇编 `add`：`sub $0x78,%rsp` 后 `mov %rdi,0x58(%rsp)`（a 实存 0x58=88）、`mov %rsi,0x60(%rsp)`（b 实存 0x60=96）。gdb 在断点处读 RSP+0/+8，落到栈帧顶部垃圾（恰为 11）。
+- 源码定位：`src/codegen_asm.rs::emit_dwarf_cu`（约 170-180 行）把 formal_parameter 偏移写成 `let off = 8 * (i as i64); // 占位；真实参数槽偏移待细化`——从未细化；而局部变量 DIE（约 182-192 行）用的是真实 `alloca_off`。prologue（约 1883-1956 行）把 C ABI 参数寄存器写进 `alloca_off[param_slots[idx]]`（本例 slot 的 alloca_off=0x58/0x60）。**只有形参的 DWARF 偏移没接上真实值**。
+
+**实现（仅 `src/codegen_asm.rs`）**：
+- `FnDwarfInfo.params`：`Vec<(String, DwarfType)>` → `Vec<(String, i64, DwarfType)>`（名, 真实偏移, 类型）。
+- `emit_function` 收集 params 时，对每个形参 `idx` 取 `f.param_slots.get(idx).and_then(|slot| e.alloca_off.get(slot)).copied().unwrap_or(0)`——与 prologue 写参、函数体 Load 读参、局部变量 location **完全同源**；栈传参（>6 个，ArgLoc::Stack 分支经 g1 落同一 slot）偏移仍为 alloca_off[slot]；被 DCE 删除的死参数槽跳过（写 0 占位，该参数 DWARF 不可 print，与 LLVM 对死参数呈现一致，不影响可达读取）。
+- `emit_dwarf_cu`：`for (pname, off, pty) in &f.params`，`sleb128(*off)` 替代 `8*i`。
+- **生效面**：只在 `dwarf_on = debug_info && matches!(target, EmitTarget::X86_64SysV)`（约 255 行）时 emit_dwarf_cu 被调用——AArch64/非-g/LLVM 路径零影响。
+
+**验证**：
+1. 修复后 llvm-dwarfdump：a→RSP+88(0x58)、b→RSP+96(0x60)、fib 的 n→RSP+136，与反汇编写参位置精确一致。
+2. gdb `break core2.dial:2`：`Breakpoint 1, add (a=3, b=4)`；`print a=3`、`print b=4`、`info args` a=3/b=4 全对。
+3. 7 参数混合专项 `paramtypes.dial`（int/float/bool × 6 寄存器 + 第 7 个栈传参）：一次断点显示 `mix(a=11,b=2.5,c=1,d=44,e=55,f=66,g=77)`，全部正确；运行时 `result=253`。
+4. 运行时输出不变：`add(3,4)=7`、`fib(10)=55`。
+5. **零回归**：用未修复 HEAD 基线二进制（临时 stash + 独立 CARGO_TARGET_DIR 构建）对比——非-g 全部 18 个源码（bench+17 golden）`.s` 逐字节一致（差异 0）；AArch64 全部 17 个源码 `.s` 逐字节一致（差异 0）。证明修复精确限定在 x86-64 `-g` DWARF 段，机器码与 AArch64 产物完全不变。
+6. 门禁：run_tests.sh、cargo test、差分 fuzz（golden+固化语料+在线）全绿。
+
+**范围与护栏**：改动只在 `src/codegen_asm.rs` 的 DWARF 元数据收集/发射（约 3 处），且只在 x86-64 `-g` 路径生效；`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。附带对 LLVM 后端 main 局部变量呈现差异（i=26）如实记录——LLVM 路径冻结，不在 asm 后端批次护栏内，不处理。

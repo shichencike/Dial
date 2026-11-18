@@ -167,11 +167,13 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
         o.push_str(&format!("\t.quad {}\n", f.name));
         // high_pc: 精确引用 emit_function 追加的函数末尾标签。
         o.push_str(&format!("\t.quad {}\n", f.end_label));
-        // formal_parameter DIEs (code 3): location = breg7 +8*i (参数槽)
-        for (i, (pname, pty)) in f.params.iter().enumerate() {
+        // formal_parameter DIEs (code 3): location = breg7 + 真实参数槽偏移。
+        // M7-e3ax：此前用 8*i 占位值，与 prologue 实际写参位置（alloca_off）
+        // 不符，gdb print 形参读到栈上垃圾（如 add 的 a/b 显示 11 而非 3/4）。
+        // 现在偏移由 emit_function 从 alloca_off[param_slot] 取真值传入。
+        for (pname, off, pty) in &f.params {
             o.push_str("\t.uleb128 3\n");
-            let off = 8 * (i as i64); // 占位；真实参数槽偏移待细化
-            let sb = sleb128(off);
+            let sb = sleb128(*off);
             let mut loc = vec![0x77]; // DW_OP_breg7 (rsp) + offset，绕开 frame_base
             loc.extend_from_slice(&sb);
             o.push_str(&format!("\t.byte {},{}\n", loc.len(), loc.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(",")));
@@ -4312,8 +4314,10 @@ struct FnDwarfInfo {
     /// M7-e3aa：本函数源文件的 .file 编号（1-based）。单文件恒为 1。
     file_index: u8,
     decl_line: u32,
-    /// (形参名, 类型分类)（main 的 argc/argv 不入 DWARF，与 LLVM 后端一致）。
-    params: Vec<(String, DwarfType)>,
+    /// (形参名, 相对 rsp 的真实栈槽偏移, 类型分类)（main 的 argc/argv 不入 DWARF，
+    /// 与 LLVM 后端一致）。M7-e3ax：偏移取自 prologue 写参用的 alloca_off[param_slot]，
+    /// 与局部变量的 location 同源；此前误用 8*i 占位值，gdb print 形参读到垃圾。
+    params: Vec<(String, i64, DwarfType)>,
     /// (变量名, 声明行, 相对 rsp 的栈槽偏移, 类型分类)。
     vars: Vec<(String, u32, i64, DwarfType)>,
 }
@@ -4407,7 +4411,20 @@ fn emit_function(
     let params = if f.name == "main" {
         Vec::new() // main 的 argc/argv 与 LLVM 后端一致，不写进 DWARF
     } else {
-        f.params.iter().map(|(n, t)| (n.clone(), dwarf_type_ir(t))).collect()
+        // M7-e3ax：形参真实偏移 = prologue 写参用的 alloca_off[param_slot]。
+        // param_slots[idx] 是形参 Alloca 的 dst vreg，其 alloca_off 即 ABI 参数
+        // 被 mov 写入的栈槽（与函数体 Load 读参、局部变量 location 完全同源）。
+        // 栈传参（>6 个）走 prologue 的 ArgLoc::Stack 分支，值经 g1 落到同一 slot，
+        // 偏移仍为 alloca_off[slot]。若某槽被 DCE（回调从不读的 state 参数），
+        // prologue 已跳过写入，此处同样用 0 占位——该参数 DWARF 不可 print，
+        // 与 LLVM 后端对死参数的呈现一致，不影响任何可达读取路径。
+        f.params.iter().enumerate().map(|(idx, (n, t))| {
+            let off = f.param_slots.get(idx)
+                .and_then(|slot| e.alloca_off.get(slot))
+                .copied()
+                .unwrap_or(0);
+            (n.clone(), off, dwarf_type_ir(t))
+        }).collect()
     };
     // M7-e3w：函数末尾标签，DWARF high_pc 精确引用（不能用 `符号+常量`，
     // 链接器对全局符号+加法的重定位不可靠）。

@@ -41,6 +41,7 @@
 <li><a href="#阶段一护栏内的确定性工作低风险">阶段一：护栏内的确定性工作（低风险）</a></li>
 <li><a href="#阶段二c-类性能方向先诊断后投入">阶段二：C 类性能方向（先诊断后投入）</a></li>
 <li><a href="#阶段二补充编译速度维度m7-e3aw">阶段二补充：编译速度维度（M7-e3aw）</a></li>
+<li><a href="#阶段二补充dwarf-调试信息维度m7-e3ax">阶段二补充：DWARF 调试信息维度（M7-e3ax）</a></li>
 <li><a href="#阶段三b-类语言特性需单独裁决默认不进-asm-批次">阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）</a></li>
 </ul>
 </li>
@@ -226,6 +227,18 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
    97 万步。加 <code>(name, args)→result</code> 记忆化后编译提速 ~30%（bench 112.9→76.1ms），
    折叠值与生成 <code>.s</code> 逐字节不变。这是「代替 LLVM」在编译速度维度上首个前端
    算法级改进（e3an3 是产物/链接层）。</li>
+</ol>
+<h3 id="阶段二补充dwarf-调试信息维度m7-e3ax">阶段二补充：DWARF 调试信息维度（M7-e3ax）</h3>
+<ol start="7">
+<li>✅ <strong>DWARF 端到端 gdb 实证 + 形参 location 修复</strong>：DWARF 自 e3w/e3z/e3aa/e3ab
+   落地后从未做过 gdb 端到端验证。本批用 readelf/llvm-dwarfdump/gdb 对同一程序
+   两后端 <code>-g -O0</code> 对比：DIE 树统计本已对等（subprogram/param/variable/location
+   数完全一致），但 gdb 实测暴露真 bug——ASM 断点停在 <code>add</code> 时 <code>print a/b</code> 显示
+   11/11（实参 3/4）。根因：<code>emit_dwarf_cu</code> 把形参 <code>DW_OP_breg7</code> 偏移写成占位
+   <code>8*i</code>，而 prologue 实际写参位置是 <code>alloca_off[param_slots[idx]]</code>（局部变量用
+   真实 alloca_off，故只有形参错）。修复后形参偏移接上真值，gdb 正确 print
+   （7 参数混合类型含栈传参专项全对），运行时与非-g/AArch64 产物逐字节不变。
+   <strong>结论：调试信息维度从「段存在」升级为「gdb 实证可用」，护栏内缺陷清零。</strong></li>
 </ol>
 <h3 id="阶段三b-类语言特性需单独裁决默认不进-asm-批次">阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）</h3>
 <ol start="6">
