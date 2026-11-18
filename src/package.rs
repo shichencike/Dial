@@ -823,6 +823,15 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", h.finalize()))
 }
 
+/// 计算字符串的 SHA256（十六进制小写）。
+///
+/// 供 stdlib 持久缓存拼接 key 使用（源码 hash + safety + tiny + 编译器 + C flags）。
+pub fn sha256_str(s: &str) -> Result<String> {
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    Ok(format!("{:x}", h.finalize()))
+}
+
 // ---------------------------------------------------------------------------
 // .diali：接口签名（纯文本、平台无关）
 // ---------------------------------------------------------------------------

@@ -123,5 +123,23 @@ else
     skip "跳过 AArch64 语法校验（缺少 clang 或 file）"
 fi
 
+# --fast-compile（M7-e3an3）：极速编译模式下双后端输出仍须逐字节一致。
+fc_work="$TMP/fast_compile"
+mkdir -p "$fc_work"
+cp "$CASES/core1.dial" "$fc_work/core1.dial"
+if "$DIALC" build "$fc_work/core1.dial" --backend=llvm --fast-compile -o "$fc_work/llvm" >"$fc_work/llvm.log" 2>&1 \
+   && "$DIALC" build "$fc_work/core1.dial" --backend=asm --fast-compile -o "$fc_work/asm" >"$fc_work/asm.log" 2>&1 \
+   && "$fc_work/llvm" >"$fc_work/llvm.out" 2>&1 \
+   && "$fc_work/asm" >"$fc_work/asm.out" 2>&1; then
+    if diff -q "$fc_work/llvm.out" "$fc_work/asm.out" >/dev/null 2>&1; then
+        ok "--fast-compile：双后端输出逐字节一致"
+        count=$((count + 1))
+    else
+        bad "--fast-compile：双后端输出不一致"
+    fi
+else
+    bad "--fast-compile：编译/运行失败"; tail -8 "$fc_work/asm.log"
+fi
+
 echo "  共 $count 个双后端黄金用例"
 exit "$fail"

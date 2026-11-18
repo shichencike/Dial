@@ -295,8 +295,8 @@ dialc build main.dial -o main
 ### 3.2.2 命令行用法总览
 
 ```bash
-dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
-dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
+dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--fast-compile] [--backend llvm|asm]
+dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--fast-compile] [--backend llvm|asm]
 dialc install <包.dialpkg | URL> [--sha256 <哈希>]
 dialc version | --version | -V
 dialc lsp
@@ -646,8 +646,8 @@ dialc lsp
 ### 3.3 编译 Dial 程序
 
 ```bash
-dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
-dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
+dialc build <源文件.dial> [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--fast-compile] [--backend llvm|asm]
+dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--fast-compile] [--backend llvm|asm]
 ```
 
 安全等级（Fail-Fast，详见 §20）：
@@ -678,8 +678,9 @@ channel 原语族在双后端一致（M7-e3al，单线程部分）：`channel(ca
 | --- | --- | --- |
 | `--tiny` | 体积模式 | C 侧 `-Os -ffunction-sections -fdata-sections`、链接期 `-Wl,--gc-sections -s`（strip 掉 DWARF 与符号表），并强制走源码编译 stdlib 回退路径（绕开预编译 `-O2` 归档）；与 `--fast` / `--pgo` / `-g` 目标相反，一律 **Fail-Fast 拒绝**（见 §38.24.1） |
 | `--single-file` | 便携模式 | 链接期 `-static` 全静态链接，产物 `file` 显示 `statically linked`、`ldd` 显示 `not a dynamic executable`；可与 LTO / PGO / `-g` 叠加（见 §3.4.2） |
+| `--fast-compile` | 极速编译 | 强制 `-O0` 跳过 Dial IR pass、C stdlib 改 `-O0`、并复用按内容哈希的 stdlib 持久缓存（M7-e3an3）；与 `--fast` / `--pgo` / `--tiny` / 显式 `-O1..3` 目标相反，一律 Fail-Fast 拒绝（见 §38.24.2） |
 
-两者可叠加，但 `-static` 会把 libc 静态段拉入产物，通常比 `--tiny` 单独使用更大——
+三者中 `--tiny` 与 `--single-file` 可叠加，但 `-static` 会把 libc 静态段拉入产物，通常比 `--tiny` 单独使用更大——
 前者求「最小体积」、后者求「不依赖宿主」，编译器如实提示但不静默覆盖任何一侧。
 LLVM 侧（inkwell 无原生 `Oz` 档）保持 `O2`，体积压缩全部压在 C 侧与链接期；
 **不承诺具体 KB 数**，实测数据见 §38.24.1。
@@ -701,6 +702,21 @@ spill（低优化级别不跨指令保持值）；`-O3` 从 LLVM InstCombine 借
 忽略提示）；AArch64 各级别 `.s` 逐字节一致（分级开关均在 x86-64 guard 内）。R 组 R6 专项
 7 项覆盖四级编译/运行、默认与 O2 零回归、GRA 分级、恒等式生效与正确性、非法级别拒绝。
 证据链见 `rationale/unreleased-dev.md` 的 M7-e3ac/e3ad 批次。
+
+**stdlib 持久缓存 + `--fast-compile`（M7-e3an3，编译速度维度）**：未安装预编译 `stdlib.dialpkg`
+时，编译器过去每次都把 `runtime/`+`stdlib/` 的全部 C 源码（15 个）重新编译一遍——这是构建慢
+的根因。现按「源码内容 SHA256（含 `.c` 与 `.h`）+ 安全等级 + tiny + fast + C 编译器 + C flags」
+生成缓存 key，命中则直接复用 `libdial_std.a`、跳过全部 C 编译；缓存位于
+`.dialc_build/stdlib-cache/<key>/`，写后先落 `.a` 再落 `key.txt`（原子发布，崩溃最多退化重编）。
+默认构建同样受益（纯加速，**不改变产物语义**：同输入同 flags 编出的 `.a` 逐字节一致）；
+缓存对 `touch`（mtime 变但内容不变）不敏感，只有内容真正变化才失效。非 quiet 下打印
+`ℹ️ 标准库缓存命中/未命中`。
+`--fast-compile` 是**一键极速编译**：隐含强制 `-O0`（跳过 Dial IR pass）+ C stdlib 用 `-O0`
++ 走独立缓存分区（`-O0` 归档不与默认 `-O2` 混用），与 `--fast` / `--pgo` / `--tiny` /
+显式 `-O1..3` 目标相反、一律 Fail-Fast。对 LLVM 后端它只作用于 C stdlib（`-O0` + 缓存），
+Dial 优化仍由 `--fast` / `-g` 控制。实测某示例默认编译 ~0.35s，缓存命中后 C 编译部分完全跳过；
+双后端输出与语义逐字节一致（R15 组 12 项 + AF 门禁 `--fast-compile` 用例）。详见
+`rationale/unreleased-dev.md` 的 M7-e3an3 批次。
 
 > ⚠️ **关于 `--fast` 模式（ReleaseFast）：此模式会关闭所有边界检查、除零检查和空指针保护，
 > 以换取极致的性能。除非你是正在编写底层核心算法、且完全确信你的数组下标绝对不会越界，

@@ -211,16 +211,21 @@ fn main() {
     let mut no_link = false;
     let mut safety = SafetyMode::Debug; // 默认：崩溃保护全开
     let mut pgo = false; // 剖析引导优化（--fast 下的终极杀器）
+    let mut pgo_explicit = false; // 是否显式传过 --pgo（fast-compile 冲突检测用：不被"自动忽略"掩盖）
     let mut debug_info = false; // -g：生成标准 DWARF 调试信息
     // 第 18 层：两种产物形态编译模式（工具链层，非 gui 契约）。
     // --tiny 体积模式：C 侧 -Os + 分段 + 链接期 --gc-sections + strip（去掉 DWARF 与符号表）；
     // --single-file 便携模式：链接期 -static，产物不依赖宿主动态 libc。
     let mut tiny = false;
     let mut single_file = false;
+    // --fast-compile：极致编译速度（隐含强制 O0 + C stdlib -O0 + 最大化缓存复用）。
+    let mut fast_compile = false;
     // 自研后端默认关闭：不指定 --backend 时行为与既有版本完全一致（LLVM 路径零改动）。
     let mut backend = Backend::Llvm;
     // 优化级别（仅作用于 asm 后端）：默认 O2 = 既有全部优化，零回归。
     let mut opt_level = ir::OptLevel::O2;
+    // 是否显式设置过优化级别（用于 --fast-compile 冲突检测：显式 -O1..3 拒绝，默认 O2 不冲突）。
+    let mut opt_level_explicit: Option<u8> = None;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -261,6 +266,7 @@ fn main() {
             "-O0" | "-O1" | "-O2" | "-O3" => {
                 let n = args[i].as_bytes()[2] - b'0';
                 opt_level = ir::OptLevel::from_u8(n).unwrap();
+                opt_level_explicit = Some(n);
                 i += 1;
             }
             "-O" | "--opt-level" => {
@@ -268,7 +274,7 @@ fn main() {
                     // 直接解析原始 token：负数（如 -1）parse::<u8> 失败→拒绝，
                     // 不用 trim_start_matches('-')，否则 "-1" 会被误读成 "1"。
                     match args[i + 1].parse::<u8>().ok().and_then(ir::OptLevel::from_u8) {
-                        Some(l) => { opt_level = l; i += 2; }
+                        Some(l) => { opt_level = l; opt_level_explicit = Some(l.as_u8()); i += 2; }
                         None => {
                             eprintln!("未知优化级别 '{}'（可选 0/1/2/3，即 -O0..-O3）", args[i + 1]);
                             std::process::exit(1);
@@ -282,7 +288,7 @@ fn main() {
             s if s.starts_with("--opt-level=") || s.starts_with("-O=") => {
                 let raw = &s[s.find('=').unwrap() + 1..];
                 match raw.parse::<u8>().ok().and_then(ir::OptLevel::from_u8) {
-                    Some(l) => { opt_level = l; i += 1; }
+                    Some(l) => { opt_level = l; opt_level_explicit = Some(l.as_u8()); i += 1; }
                     None => {
                         eprintln!("未知优化级别 '{}'（可选 0/1/2/3，即 -O0..-O3）", raw);
                         std::process::exit(1);
@@ -318,6 +324,7 @@ fn main() {
             }
             "--pgo" => {
                 pgo = true;
+                pgo_explicit = true;
                 i += 1;
             }
             // 第 18 层：--tiny（体积模式）/ --single-file（便携模式）。
@@ -329,6 +336,11 @@ fn main() {
             }
             "--single-file" => {
                 single_file = true;
+                i += 1;
+            }
+            // --fast-compile：极致编译速度（隐含强制 O0 + C stdlib -O0 + 缓存复用）。
+            "--fast-compile" => {
+                fast_compile = true;
                 i += 1;
             }
             // -g：标准 DWARF（GDB/LLDB 可按源码行断点、按 Dial 变量名 print）
@@ -424,6 +436,32 @@ fn main() {
         eprintln!("ℹ️  --single-file：将用 -static 全静态链接，产物不再依赖宿主动态 libc。");
     }
 
+    // --fast-compile 冲突矩阵：目标是编译速度优先（-O0 + 跳过 Dial pass + C stdlib -O0），
+    // 与下列「产物性能/体积优先」的开关目标相反，一律 Fail-Fast 拒绝而非静默覆盖。
+    if fast_compile {
+        if safety == SafetyMode::ReleaseFast {
+            eprintln!("❌ --fast-compile 与 --fast 冲突：前者用 -O0 求最快编译，后者拉满 O3+LTO 求最快运行。请二选一。");
+            std::process::exit(1);
+        }
+        if pgo_explicit || pgo {
+            eprintln!("❌ --fast-compile 与 --pgo 冲突：PGO 插桩走 LTO 流程，与快速编译目标相反。请二选一。");
+            std::process::exit(1);
+        }
+        if tiny {
+            eprintln!("❌ --fast-compile 与 --tiny 冲突：前者 C stdlib 用 -O0，后者用 -Os + 分段 + strip。请二选一。");
+            std::process::exit(1);
+        }
+        if let Some(n) = opt_level_explicit {
+            if n > 0 {
+                eprintln!("❌ --fast-compile 与显式 -O{} 冲突：fast-compile 隐含强制 -O0。请去掉该优化级别或去掉 --fast-compile。", n);
+                std::process::exit(1);
+            }
+        }
+        // 冲突检查通过：统一强制 O0（asm 前端跳过全部 Dial IR pass）。
+        opt_level = ir::OptLevel::O0;
+        eprintln!("ℹ️  --fast-compile：强制 -O0（跳过 Dial IR pass）+ C stdlib -O0 + 缓存复用，追求最快编译。");
+    }
+
     // 自研后端与 LLVM 专属能力的关系：明确告知，绝不静默降级。
     if backend == Backend::Asm {
         eprintln!("ℹ️  已启用自研后端（--backend=asm）：专属 IR → 优化 Pass → 目标汇编 → cc -c → .o。");
@@ -506,8 +544,11 @@ fn main() {
             std::process::exit(1);
         }
     } else {
-        if opt_level != ir::OptLevel::O2 {
+        if opt_level != ir::OptLevel::O2 && !fast_compile {
             eprintln!("ℹ️  -O{} 仅作用于自研后端（--backend=asm）；LLVM 后端优化级别由 --fast/-g 控制，已忽略。", opt_level.as_u8());
+        }
+        if fast_compile {
+            eprintln!("ℹ️  --fast-compile 对 LLVM 后端仅作用于 C stdlib（-O0 + 缓存复用）；Dial 优化仍由 --fast/-g 控制。");
         }
         let cg_opts = codegen::CgOpts {
             safety,
@@ -554,6 +595,7 @@ fn main() {
     let mode = LinkOpts {
         tiny,
         single_file,
+        fast_compile,
         ..LinkOpts::default()
     };
 
@@ -1046,6 +1088,9 @@ struct LinkOpts {
     tiny: bool,
     /// 第 18 层 --single-file：链接期 -static，产物不依赖宿主动态 libc。
     single_file: bool,
+    /// --fast-compile：C stdlib 用 -O0 + 走独立的缓存分区（-O0 归档不与默认 -O2 混用）。
+    /// 注：Dial 前端的 O0 由 opt_level 字段之外的 opt_level 变量控制（见 main）。
+    fast_compile: bool,
 }
 
 /// 返回可用于 LTO / PGO 的 clang（程序名, 前置参数）。
@@ -1139,8 +1184,8 @@ fn link(
         let runtime_objs = compile_runtime_lto(safety, opts)?;
         final_link(obj, exe, extra_libs, &[], &runtime_objs, ffi_rpaths, opts)
     } else {
-        // 非 LTO：优先已安装包，否则实时编译源码归档成 .a。
-        let stdlib_libs = resolve_stdlib_archive(safety, opts.quiet, opts.tiny)?;
+        // 非 LTO：优先已安装包，否则（带缓存地）实时编译源码归档成 .a。
+        let stdlib_libs = resolve_stdlib_archive(safety, opts)?;
         final_link(obj, exe, extra_libs, &stdlib_libs, &[], ffi_rpaths, opts)
     }
 }
@@ -1153,11 +1198,14 @@ fn link(
 /// - 若未安装 / 当前平台不在包支持列表：回退到编译 `stdlib/` + `runtime/` 源码。
 ///
 /// 返回的标准库归档列表（通常一份 `libdial_std.a`）交给 `final_link` 链接。
-fn resolve_stdlib_archive(safety: SafetyMode, quiet: bool, tiny: bool) -> Result<Vec<PathBuf>, String> {
+fn resolve_stdlib_archive(safety: SafetyMode, opts: &LinkOpts) -> Result<Vec<PathBuf>, String> {
+    let quiet = opts.quiet;
+    let tiny = opts.tiny;
     // --tiny 必须让 C 侧 -Os + -ffunction-sections/-fdata-sections 真正生效：
     // 预编译 stdlib 包是 -O2 烘焙、且不带函数分段，--gc-sections 对它无效。
-    // 故 tiny 模式强制走下方「源码实时编译」回退路径，绕过已安装包。
-    let installed = if tiny {
+    // --fast-compile 必须让 C 侧 -O0 生效：预编译包是 -O2 烘焙，同样要绕过。
+    // 故这两种模式强制走下方「源码实时编译（带缓存）」回退路径，绕过已安装包。
+    let installed = if tiny || opts.fast_compile {
         None
     } else {
         package::find_installed("stdlib").map_err(|e| e.to_string())?
@@ -1201,21 +1249,33 @@ fn resolve_stdlib_archive(safety: SafetyMode, quiet: bool, tiny: bool) -> Result
         }
     }
 
-    // ---- 回退：实时编译 runtime/ + stdlib/ 源码 → libdial_std.a ----
+    // ---- 回退：编译 runtime/ + stdlib/ 源码 → libdial_std.a（内容哈希持久缓存）----
+    //
+    // M7-e3an3：过去这里每次编译都无条件重编全部 C 源码（构建慢的根因）。现改为按
+    // 「源码内容 + 安全等级 + tiny + fast_compile + 编译器 + C flags」算 SHA256 作 key，
+    // 命中缓存直接复用 libdial_std.a，跳过全部 C 编译。缓存对默认构建也生效（纯加速、
+    // 零语义变化：同样输入 + 同样 flags 编出的 .a 逐字节一致）。
     let base = find_project_base()
         .ok_or_else(|| "找不到 stdlib/ 与 runtime/ 目录（请用 DIALC_STDLIB_DIR 指定工程根）".to_string())?;
     let runtime_dir = base.join("runtime");
     let stdlib_dir = base.join("stdlib");
 
-    // 临时构建目录（按安全等级分目录，避免不同等级的 .o 互相污染）。
-    // 第 18 层：--tiny 编出的 -Os + 分段 .o / .a 再单独隔一层，避免与默认
-    // -O2 的 libdial_std.a 交替构建时互相覆盖（--gc-sections 需要分段版）。
-    let build_dir = base
-        .join(".dialc_build")
-        .join(format!("safety-{}{}", safety.as_c_macro(), if tiny { "-tiny" } else { "" }));
-    fs::create_dir_all(&build_dir).map_err(|e| format!("创建构建目录失败: {}", e))?;
-
     let (cc, cc_prefix) = cc_command();
+
+    // C 编译 flag：tiny=-Os+分段 / fast_compile=-O0 / 默认=-O2（tiny 与 fast_compile 已互斥）。
+    let mut cflags: Vec<String> = Vec::new();
+    if tiny {
+        cflags.push("-Os".into());
+        cflags.push("-ffunction-sections".into());
+        cflags.push("-fdata-sections".into());
+    } else if opts.fast_compile {
+        cflags.push("-O0".into());
+    } else {
+        cflags.push("-O2".into());
+    }
+    cflags.push("-pthread".into()); // 并发运行时用 pthread，须生成线程安全代码
+    cflags.push(format!("-DDIAL_SAFETY={}", safety.as_c_macro())); // Fail-Fast 等级注入
+
     if !quiet {
         println!(
             "ℹ️  C 编译器: {} {}（编译 stdlib/ 与 runtime/ 为 libdial_std.a）",
@@ -1229,64 +1289,102 @@ fn resolve_stdlib_archive(safety: SafetyMode, quiet: bool, tiny: bool) -> Result
         );
     }
 
-    // 编译所有 C 源文件 -> .o
-    let mut obj_files: Vec<PathBuf> = Vec::new();
-    let mut entries: Vec<PathBuf> = Vec::new();
+    // 收集所有 .c 与 .h（头文件必须入 key：.c 经 -I include，头改而 .c 不变不能陈旧）。
+    let mut srcs: Vec<PathBuf> = Vec::new();
     for dir in [&runtime_dir, &stdlib_dir] {
         if let Ok(rd) = fs::read_dir(dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.extension().map(|x| x == "c").unwrap_or(false) {
-                    entries.push(p);
+                if let Some(ext) = p.extension() {
+                    if ext == "c" || ext == "h" { srcs.push(p); }
                 }
             }
         }
     }
-    for cfile in &entries {
-        let out_o = build_dir.join(cfile.file_stem().unwrap()).with_extension("o");
-        let mut cmd = Command::new(&cc);
-        cmd.args(&cc_prefix);
-        // 第 18 层 --tiny：C 侧按尺寸优化，并把每个函数 / 数据放进独立 section，
-        // 供链接期 -Wl,--gc-sections 精确剔除未引用部分。非 tiny 保持 -O2 一字不动。
-        if tiny {
-            cmd.arg("-Os")
-                .arg("-ffunction-sections")
-                .arg("-fdata-sections");
-        } else {
-            cmd.arg("-O2");
+    // 归档/编译沿用 read_dir 原始顺序（与旧版逐字节一致，产物零回归）；
+    // 只有 key 计算用排序副本，保证 key 与目录遍历顺序无关。
+    let mut srcs_for_key = srcs.clone();
+    srcs_for_key.sort();
+    let csrcs: Vec<&PathBuf> = srcs.iter()
+        .filter(|p| p.extension().map(|e| e == "c").unwrap_or(false))
+        .collect();
+
+    // cache key = v1| sorted(相对路径:sha256) | safety | tiny | fast | cc | flags，整体 SHA256。
+    let mut kp: Vec<String> = vec!["v1".to_string()];
+    for p in &srcs_for_key {
+        let rel = p.strip_prefix(&base).unwrap_or(p).to_string_lossy().replace('\\', "/");
+        let h = package::sha256_file(p).map_err(|e| e.to_string())?;
+        kp.push(format!("{}:{}", rel, h));
+    }
+    kp.push(format!("safety={}", safety.as_c_macro()));
+    kp.push(format!("tiny={}", tiny));
+    kp.push(format!("fast={}", opts.fast_compile));
+    kp.push(format!("cc={} {}", cc, cc_prefix.join(" ")));
+    kp.push(format!("flags={}", cflags.join(" ")));
+    let key = package::sha256_str(&kp.join("|")).map_err(|e| e.to_string())?;
+    let short: String = key.chars().take(12).collect();
+
+    let cache_dir = base.join(".dialc_build")
+        .join("stdlib-cache")
+        .join(key.chars().take(16).collect::<String>());
+    let lib = cache_dir.join("libdial_std.a");
+    let keyfile = cache_dir.join("key.txt");
+
+    // 命中：key.txt 内容 == 当前 key 且 .a 存在。
+    let hit = fs::read_to_string(&keyfile).map(|s| s == key).unwrap_or(false) && lib.is_file();
+    if hit {
+        if !quiet {
+            println!("ℹ️  标准库缓存命中: {} — 跳过 {} 个 C 源文件", short, csrcs.len());
         }
-        cmd
-            // 并发运行时（stdlib/dial_thread.c、dial_channel.c）用到 pthread：
-            // 必须让编译器生成线程安全的代码（并暴露 _REENTRANT 相关声明）。
-            .arg("-pthread")
-            // Fail-Fast 等级注入 C Runtime：等级 0 时检查代码被编译器完全消除
-            .arg(format!("-DDIAL_SAFETY={}", safety.as_c_macro()))
-            .arg("-I")
-            .arg(&runtime_dir)
-            .arg("-I")
-            .arg(&stdlib_dir)
-            .arg("-c")
-            .arg(cfile)
-            .arg("-o")
-            .arg(&out_o);
+        return Ok(vec![lib]);
+    }
+    if !quiet {
+        println!("ℹ️  标准库缓存未命中: {} — 编译 {} 个 C 源文件", short, csrcs.len());
+    }
+
+    // 未命中：编到 PID 临时子目录，归档到全新路径，原子发布（先 .a 后 key.txt——
+    // 顺序不可颠倒：崩溃时最多退化为下次重编，绝不会出现「key 新、.a 旧」）。
+    fs::create_dir_all(&cache_dir).map_err(|e| format!("创建缓存目录失败: {}", e))?;
+    let tmp_dir = cache_dir.join(format!(".tmp-{}", std::process::id()));
+    fs::create_dir_all(&tmp_dir).map_err(|e| format!("创建缓存临时目录失败: {}", e))?;
+
+    let mut obj_files: Vec<PathBuf> = Vec::new();
+    for cfile in &csrcs {
+        let out_o = tmp_dir.join(cfile.file_stem().unwrap()).with_extension("o");
+        let mut cmd = Command::new(&cc);
+        cmd.args(&cc_prefix)
+            .args(&cflags)
+            .arg("-I").arg(&runtime_dir)
+            .arg("-I").arg(&stdlib_dir)
+            .arg("-c").arg(cfile)
+            .arg("-o").arg(&out_o);
         if !run_ok(&mut cmd) {
             return Err(format!("编译 C 源文件失败: {}", cfile.display()));
         }
         obj_files.push(out_o);
     }
 
-    // 归档为静态库 libdial_std.a
-    let lib = build_dir.join("libdial_std.a");
+    // ar rcs 对已存在的归档是「增量更新」会残留旧成员，故输出到全新 tmp 路径。
+    let lib_tmp = cache_dir.join(format!("libdial_std.a.tmp.{}", std::process::id()));
     let mut ar = Command::new("ar");
-    ar.arg("rcs").arg(&lib);
+    ar.arg("rcs").arg(&lib_tmp);
     for o in &obj_files {
         ar.arg(o);
     }
     if !run_ok(&mut ar) {
         return Err("归档静态库 libdial_std.a 失败（请确认 ar 可用）".to_string());
     }
-
-    Ok(vec![lib])
+    let published = fs::rename(&lib_tmp, &lib).is_ok();
+    if published {
+        let key_tmp = cache_dir.join(format!("key.txt.tmp.{}", std::process::id()));
+        if fs::write(&key_tmp, &key).is_ok() {
+            let _ = fs::rename(&key_tmp, &keyfile);
+        }
+    }
+    let _ = fs::remove_dir_all(&tmp_dir);
+    // 缓存写入失败（权限等）时优雅退化：直接用刚编出的 .a（published 时 lib_tmp 已不存在）。
+    let final_lib = if lib.is_file() { lib } else { lib_tmp };
+    Ok(vec![final_lib])
 }
 
 /// 第 18 层 --single-file：挑一个**真正支持 -static** 的系统 C 编译器作链接驱动。
@@ -1520,7 +1618,7 @@ fn print_usage() {
     eprintln!("用法: dialc <命令> [参数]");
     eprintln!();
     eprintln!("编译与运行");
-    eprintln!("  build <文件.dial> [-o 输出] [-g] [--no-link] [--safety debug|safe|fast] [--pgo] [--tiny] [--single-file] [--backend llvm|asm]");
+    eprintln!("  build <文件.dial> [-o 输出] [-g] [--no-link] [--safety debug|safe|fast] [--pgo] [--tiny] [--single-file] [--fast-compile] [--backend llvm|asm]");
     eprintln!("  --backend llvm|asm   代码生成后端；默认 llvm（既有路径）。asm 为自研后端：");
     eprintln!("                      专属 IR + 优化 Pass → x86-64/AArch64 汇编 → cc -c → .o（实验性）");
     eprintln!("  -O0|-O1|-O2|-O3             优化级别（仅 asm 后端；等价 -O N / --opt-level=N）：");
@@ -1529,6 +1627,7 @@ fn print_usage() {
     eprintln!("  -g / --debug-info          生成标准 DWARF（GDB/LLDB 源码行断点 + print 变量名）");
     eprintln!("  --tiny                     体积模式：-Os + 函数/数据分段 + --gc-sections + strip（与 --fast/--pgo/-g 冲突）");
     eprintln!("  --single-file              便携模式：-static 全静态链接，产物不依赖宿主动态 libc");
+    eprintln!("  --fast-compile             极速编译：强制 -O0 + C stdlib -O0 + stdlib 缓存复用（与 --fast/--pgo/--tiny/显式 -O1..3 冲突）");
     eprintln!("  check <文件.dial>                只做词法/语法/语义检查，不产出文件");
     eprintln!("  test  <文件.dial> [--filter 名]  运行顶层 test \"名\" {{ ... }} 块");
     eprintln!();

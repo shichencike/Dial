@@ -833,8 +833,8 @@ powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 dialc build main.dial -o main
 </code></pre>
 <h3 id="322-命令行用法总览">3.2.2 命令行用法总览</h3>
-<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
-dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
+<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--fast-compile] [--backend llvm|asm]
+dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--fast-compile] [--backend llvm|asm]
 dialc install &lt;包.dialpkg | URL&gt; [--sha256 &lt;哈希&gt;]
 dialc version | --version | -V
 dialc lsp
@@ -1255,8 +1255,8 @@ M7-e3aa 补多文件 source 映射、M7-e3ab 补 FFI 精确宽度类型 DIE（in
 校验脚本见 <code>tools/check_version.py</code>（CI 强制执行）。</p>
 </blockquote>
 <h3 id="33-编译-dial-程序">3.3 编译 Dial 程序</h3>
-<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
-dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--backend llvm|asm]
+<pre><code class="language-bash">dialc build &lt;源文件.dial&gt; [-o 可执行文件] [--no-link] [--safety debug|safe|fast] [--tiny] [--single-file] [--fast-compile] [--backend llvm|asm]
+dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety debug|safe|fast] [--tiny] [--single-file] [--fast-compile] [--backend llvm|asm]
 </code></pre>
 <p>安全等级（Fail-Fast，详见 §20）：</p>
 <table>
@@ -1312,9 +1312,14 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety d
 <td>便携模式</td>
 <td>链接期 <code>-static</code> 全静态链接，产物 <code>file</code> 显示 <code>statically linked</code>、<code>ldd</code> 显示 <code>not a dynamic executable</code>；可与 LTO / PGO / <code>-g</code> 叠加（见 §3.4.2）</td>
 </tr>
+<tr>
+<td><code>--fast-compile</code></td>
+<td>极速编译</td>
+<td>强制 <code>-O0</code> 跳过 Dial IR pass、C stdlib 改 <code>-O0</code>、并复用按内容哈希的 stdlib 持久缓存（M7-e3an3）；与 <code>--fast</code> / <code>--pgo</code> / <code>--tiny</code> / 显式 <code>-O1..3</code> 目标相反，一律 Fail-Fast 拒绝（见 §38.24.2）</td>
+</tr>
 </tbody>
 </table>
-<p>两者可叠加，但 <code>-static</code> 会把 libc 静态段拉入产物，通常比 <code>--tiny</code> 单独使用更大——
+<p>三者中 <code>--tiny</code> 与 <code>--single-file</code> 可叠加，但 <code>-static</code> 会把 libc 静态段拉入产物，通常比 <code>--tiny</code> 单独使用更大——
 前者求「最小体积」、后者求「不依赖宿主」，编译器如实提示但不静默覆盖任何一侧。
 LLVM 侧（inkwell 无原生 <code>Oz</code> 档）保持 <code>O2</code>，体积压缩全部压在 C 侧与链接期；
 <strong>不承诺具体 KB 数</strong>，实测数据见 §38.24.1。</p>
@@ -1363,6 +1368,20 @@ spill（低优化级别不跨指令保持值）；<code>-O3</code> 从 LLVM Inst
 忽略提示）；AArch64 各级别 <code>.s</code> 逐字节一致（分级开关均在 x86-64 guard 内）。R 组 R6 专项
 7 项覆盖四级编译/运行、默认与 O2 零回归、GRA 分级、恒等式生效与正确性、非法级别拒绝。
 证据链见 <code>rationale/unreleased-dev.md</code> 的 M7-e3ac/e3ad 批次。</p>
+<p><strong>stdlib 持久缓存 + <code>--fast-compile</code>（M7-e3an3，编译速度维度）</strong>：未安装预编译 <code>stdlib.dialpkg</code>
+时，编译器过去每次都把 <code>runtime/</code>+<code>stdlib/</code> 的全部 C 源码（15 个）重新编译一遍——这是构建慢
+的根因。现按「源码内容 SHA256（含 <code>.c</code> 与 <code>.h</code>）+ 安全等级 + tiny + fast + C 编译器 + C flags」
+生成缓存 key，命中则直接复用 <code>libdial_std.a</code>、跳过全部 C 编译；缓存位于
+<code>.dialc_build/stdlib-cache/&lt;key&gt;/</code>，写后先落 <code>.a</code> 再落 <code>key.txt</code>（原子发布，崩溃最多退化重编）。
+默认构建同样受益（纯加速，<strong>不改变产物语义</strong>：同输入同 flags 编出的 <code>.a</code> 逐字节一致）；
+缓存对 <code>touch</code>（mtime 变但内容不变）不敏感，只有内容真正变化才失效。非 quiet 下打印
+<code>ℹ️ 标准库缓存命中/未命中</code>。
+<code>--fast-compile</code> 是<strong>一键极速编译</strong>：隐含强制 <code>-O0</code>（跳过 Dial IR pass）+ C stdlib 用 <code>-O0</code>
++ 走独立缓存分区（<code>-O0</code> 归档不与默认 <code>-O2</code> 混用），与 <code>--fast</code> / <code>--pgo</code> / <code>--tiny</code> /
+显式 <code>-O1..3</code> 目标相反、一律 Fail-Fast。对 LLVM 后端它只作用于 C stdlib（<code>-O0</code> + 缓存），
+Dial 优化仍由 <code>--fast</code> / <code>-g</code> 控制。实测某示例默认编译 ~0.35s，缓存命中后 C 编译部分完全跳过；
+双后端输出与语义逐字节一致（R15 组 12 项 + AF 门禁 <code>--fast-compile</code> 用例）。详见
+<code>rationale/unreleased-dev.md</code> 的 M7-e3an3 批次。</p>
 <blockquote>
 <p>⚠️ <strong>关于 <code>--fast</code> 模式（ReleaseFast）：此模式会关闭所有边界检查、除零检查和空指针保护，
 以换取极致的性能。除非你是正在编写底层核心算法、且完全确信你的数组下标绝对不会越界，

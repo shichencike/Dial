@@ -32,6 +32,7 @@
 <li><a href="#m7-e3am自研-asm-后端补齐-spawn--join--detach-真多线程双后端一致性补全">M7-e3am：自研 asm 后端补齐 spawn / join / detach 真多线程（双后端一致性补全）</a></li>
 <li><a href="#m7-e3an自研-asm-后端补齐-map--filter--reduce--sort_by双后端一致性补全动态回调最后一块">M7-e3an：自研 asm 后端补齐 map / filter / reduce / sort_by（双后端一致性补全，动态回调最后一块）</a></li>
 <li><a href="#m7-e3an2自研-asm-后端补齐-select-多路通道选择双后端一致性补全语句级控制流最后一块">M7-e3an2：自研 asm 后端补齐 select 多路通道选择（双后端一致性补全，语句级控制流最后一块）</a></li>
+<li><a href="#m7-e3an3双后端补齐产物工程层能力stdlib-持久缓存----fast-compile编译速度维度">M7-e3an3：双后端补齐产物/工程层能力——stdlib 持久缓存 + --fast-compile（编译速度维度）</a></li>
 </ul>
 </li>
 </ul>
@@ -2985,6 +2986,62 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
   循环内若通道变量本身被重新赋值需按语言规则另行处理；select 语句级超时仍不支持
   （超时用 <code>recv_timeout(ch, ms)</code> 作用于单通道，见 README §27 表）。至此 asm 后端
   在语言层面对齐 LLVM 的已知缺口全部补齐。</li>
+</ul>
+<h4 id="m7-e3an3双后端补齐产物工程层能力stdlib-持久缓存----fast-compile编译速度维度">M7-e3an3：双后端补齐产物/工程层能力——stdlib 持久缓存 + <code>--fast-compile</code>（编译速度维度）</h4>
+<ul>
+<li><strong>背景</strong>：用户质疑"语言层面对齐缺口全补齐"仅限语义层，追问单文件 / 极致体积 /
+  极致编译速度。实测确认前两项（<code>--single-file</code> 全静态、<code>--tiny</code> 149KB→6.9KB）
+  双后端均已支持；<strong>极致编译速度是真缺口</strong>：无一键开关；未装预编译 stdlib 包时
+  <code>resolve_stdlib_archive</code>（main.rs:1156）回退分支每次无条件重编全部 15 个 C 源
+  （实测默认/-O0 均 ~0.35s），<code>-O0</code> 仅跳过 Dial IR pass（asm.rs:64-84）与 C 编译无关。</li>
+<li><strong>① stdlib 持久缓存</strong>（默认对所有非 tiny/非 LTO 构建生效，纯加速零语义变化）：</li>
+<li><strong>key</strong>（<code>v1|</code> 前缀 + 整体 SHA256）：<code>sorted(相对路径:sha256_file(.c 与 .h))</code> +
+    <code>safety.as_c_macro()</code> + <code>tiny</code> + <code>fast_compile</code> + <code>cc + " " + cc_prefix</code>（含
+    <code>--target=</code>，机器码不兼容） + 完整 C flags 串。<strong>.h 必须入 key</strong>（.c 经 <code>-I</code>
+    include，头改而 .c 不变会陈旧）；复用 <code>package::sha256_file</code>（package.rs:818），
+    新增 <code>package::sha256_str</code>（package.rs 同文件已有 Sha256 import）。</li>
+<li><strong>位置</strong> <code>.dialc_build/stdlib-cache/&lt;key前16&gt;/{libdial_std.a,key.txt}</code>（沿用
+    find_project_base，与 safety-N/-tiny/lto 目录隔离，clean 可覆盖）。</li>
+<li><strong>命中</strong>：key.txt 内容 == 当前 key 且 .a 存在 → 跳过全部 C 编译与归档。</li>
+<li><strong>未命中</strong>：编到 key 目录内 PID 子目录；<code>ar rcs</code> 输出到<strong>全新</strong> <code>libdial_std.a.tmp.&lt;pid&gt;</code>
+    （对已存在归档 rcs 是增量更新会残留旧成员）；<code>fs::rename</code> 到 <code>libdial_std.a</code>；
+    <strong>最后</strong>才 rename <code>key.tmp&lt;pid&gt;</code>→<code>key.txt</code>（写序不可颠倒：崩溃时最多退化为重编，
+    不会出现「key 新 .a 旧」）；写入失败优雅退化用刚编出的 .a，不 fail。</li>
+<li><strong>归档顺序（产物零回归的关键细节）</strong>：<strong>编译/归档沿用 <code>read_dir</code> 原始顺序</strong>（与旧版
+    逐字节一致），只有 cache key 计算用排序副本（保证 key 与目录遍历顺序无关）。
+    过程中曾把 <code>srcs.sort()</code> 也用于归档，导致 <code>.a</code> 成员顺序与旧版不同、最终可执行文件字节
+    变化；修正为上述分离后，实证缓存路径的 <code>.a</code> 与旧版实时编译的 <code>.a</code>、最终可执行文件
+    <strong>均逐字节一致</strong>（同一输入目录，git worktree 编译 aba9e3d 旧二进制对比）。</li>
+<li><strong>可观测</strong>：非 quiet 打印 <code>ℹ️ 标准库缓存命中/未命中: &lt;k12&gt; — 跳过/编译 N 个 C 源文件</code>。</li>
+<li><strong>语义不变</strong>：同输入 + 同 flags 编出的 .a 逐字节一致；基于内容 hash 而非 mtime，
+    touch（mtime 变内容不变）不触发重编。</li>
+<li><strong>② <code>--fast-compile</code> 开关</strong>（用户确认"隐含强制 O0"）：</li>
+<li>CLI 全链路（main.rs）：变量声明、解析分支、help 两处、<code>LinkOpts.fast_compile</code>、
+    mode 构造；<code>resolve_stdlib_archive</code> 签名改收 <code>&amp;LinkOpts</code>（调用点 link():1143）。</li>
+<li>冲突矩阵：与 <code>--fast</code>/<code>--pgo</code>/<code>--tiny</code>/显式 <code>-O1..3</code>（用 <code>opt_level_explicit</code> 追踪
+    区分默认 O2）硬拒 exit(1)，与 <code>-O0</code>/<code>-g</code>/<code>--single-file</code> 允许。</li>
+<li>冲突检查后强制 <code>opt_level=O0</code>（asm 前端跳过全部 Dial IR pass）；C stdlib 用 <code>-O0</code>
+    替代默认 <code>-O2</code>（main.rs cflags 构造处）；<strong>强制 <code>installed=None</code></strong> 绕开已装 -O2
+    预编译包（否则缓存与 -O0 失效）；LTO 分支固定 -O3 不缓存（已与 fast/pgo 互斥，
+    保证走非 LTO 分支）；cache key 含 fast_compile（-O0/-O2 归档不混用）。</li>
+<li>LLVM 后端：抑制误导读出的"-O0 已忽略"提示，改为 <code>ℹ️ --fast-compile 对 LLVM 后端
+    仅作用于 C stdlib（-O0 + 缓存复用）；Dial 优化仍由 --fast/-g 控制</code>。</li>
+<li><strong>实测数据</strong>：首编未命中（15 个 C 源）/二编命中且 .a sha256 不变；改 .h 内容 → 新 key
+  （7626a3...）未命中、再编命中、改 .c 内容 → 又一新 key（e41819...）未命中；touch .h
+  （内容不变）仍命中（正确）；默认 -O2 与 fast -O0 为两个独立缓存分区（2 个 .a）；
+  冲突矩阵 4/4（-O2/--fast/--pgo/--tiny）Fail-Fast；fast-compile 双后端输出与非 fast
+  逐字节一致（core1）；AF 门禁 13 个用例全绿（新增 fast-compile 用例）。</li>
+<li><strong>测试</strong>：新增 R15 组（tests/run_tests.sh，临时副本 DIALC_STDLIB_DIR 隔离、缓存写在
+  副本 base 下不污染仓库）：首编未命中 + .a hash、二编命中 + hash 不变 + 运行正确、
+  改 .h 内容失效、fast-compile 双后端与语义一致、冲突 4/4 Fail-Fast。完整回归 758 PASS / 0 FAIL
+  （基线 746 + R15 组 12 项），AF 门禁 13 个用例。</li>
+<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0/零新依赖/LLVM 路径/
+  AArch64 零改动、构建零警告、不打 tag、docx 确定性。非 fast-compile 程序 .s 与产物
+  与 HEAD（aba9e3d）旧编译器逐字节一致（缓存只改构建过程、不改输出）。</li>
+<li><strong>已知边界</strong>：缓存命中收益取决于是否安装预编译 stdlib 包（已装则本来就快，缓存主要
+  惠及未装包的源码回退路径）；<code>dialc clean</code> 目前不清 stdlib-cache（如需释放空间可手动
+  <code>rm -rf .dialc_build/stdlib-cache</code>）；并发首个编译者写缓存、后来者命中，同 key 内容
+  一致故后者覆盖无害。</li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">

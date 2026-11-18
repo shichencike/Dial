@@ -2454,6 +2454,89 @@ done
 
 
 # ===========================================================================
+# R15) stdlib 持久缓存 + --fast-compile 极速编译（M7-e3an3）
+#     用 DIALC_STDLIB_DIR 指向 runtime/ 与 stdlib/ 的临时副本，缓存写在副本 base
+#     的 .dialc_build 下，绝不污染仓库。验证：首编未命中 / 二编命中且 .a 不变 /
+#     改头文件内容触发失效 / fast-compile 双后端与语义一致 / 冲突 Fail-Fast。
+# ===========================================================================
+echo
+echo "  -- R15) stdlib 持久缓存 + --fast-compile 极速编译 --"
+CDIR15="${TMP}/r15"
+mkdir -p "$CDIR15"
+cp -r runtime stdlib "$CDIR15/"
+cat > "$CDIR15/probe.dial" <<'EOF'
+fn main(): int {
+    print("cache-ok");
+    return 0;
+}
+EOF
+# 用副本目录编译，抓缓存日志行到文件；clear 一次该副本的缓存目录保证干净起点。
+rm -rf "$CDIR15/.dialc_build/stdlib-cache"
+export DIALC_STDLIB_DIR="$CDIR15"
+
+# 1) 首次未命中 + 记录 .a 内容 hash
+${DIALC} build "$CDIR15/probe.dial" --backend=asm -o "$CDIR15/p1" >"$CDIR15/build1.log" 2>&1 \
+    || rbad "R15 首次编译失败"
+if grep -qF "标准库缓存未命中" "$CDIR15/build1.log"; then
+    rpass "R15 首次编译缓存未命中"
+else
+    rbad "R15 首次编译未报告缓存未命中"; tail -6 "$CDIR15/build1.log"
+fi
+_a15=$(find "$CDIR15/.dialc_build/stdlib-cache" -name libdial_std.a | head -1)
+if [ -n "$_a15" ]; then
+    _h15=$(sha256sum "$_a15" | cut -d' ' -f1)
+else
+    rbad "R15 未找到缓存产物 libdial_std.a"; _h15="missing"
+fi
+
+# 2) 二次命中 + .a 内容 hash 不变
+${DIALC} build "$CDIR15/probe.dial" --backend=asm -o "$CDIR15/p2" >"$CDIR15/build2.log" 2>&1 \
+    || rbad "R15 二次编译失败"
+if grep -qF "标准库缓存命中" "$CDIR15/build2.log"; then
+    rpass "R15 二次编译缓存命中（跳过 C 编译）"
+else
+    rbad "R15 二次编译未报告缓存命中"; tail -6 "$CDIR15/build2.log"
+fi
+_h15b=$(sha256sum "$_a15" 2>/dev/null | cut -d' ' -f1)
+[ "$_h15" = "$_h15b" ] && rpass "R15 命中后 .a 内容哈希不变" \
+    || rbad "R15 命中后 .a 内容变化（$_h15 -> $_h15b）"
+"$CDIR15/p2" > "$CDIR15/run2.out" 2>&1
+[ "$(cat "$CDIR15/run2.out")" = "cache-ok" ] && rpass "R15 缓存构建产物运行正确" \
+    || rbad "R15 缓存构建产物输出异常（$(cat "$CDIR15/run2.out")）"
+
+# 3) 改头文件内容 → 缓存失效并重新编译
+echo "// r15-invalidate" >> "$CDIR15/stdlib/dial_array.h"
+${DIALC} build "$CDIR15/probe.dial" --backend=asm -o "$CDIR15/p3" >"$CDIR15/build3.log" 2>&1 \
+    || rbad "R15 头文件改动后编译失败"
+grep -qF "标准库缓存未命中" "$CDIR15/build3.log" \
+    && rpass "R15 头文件内容变化触发缓存失效" \
+    || { rbad "R15 头文件变化未触发失效"; tail -6 "$CDIR15/build3.log"; }
+
+# 4) --fast-compile：双后端输出一致，且与非 fast 语义一致
+${DIALC} build "$CDIR15/probe.dial" --backend=llvm --fast-compile -o "$CDIR15/fl" >/dev/null 2>&1 \
+    || rbad "R15 LLVM fast-compile 编译失败"
+${DIALC} build "$CDIR15/probe.dial" --backend=asm  --fast-compile -o "$CDIR15/fa" >/dev/null 2>&1 \
+    || rbad "R15 asm fast-compile 编译失败"
+"$CDIR15/fl" > "$CDIR15/fl.out" 2>&1; "$CDIR15/fa" > "$CDIR15/fa.out" 2>&1
+diff -q "$CDIR15/fl.out" "$CDIR15/fa.out" >/dev/null \
+    && rpass "R15 --fast-compile 双后端输出逐字节一致" \
+    || rbad "R15 --fast-compile 双后端不一致"
+[ "$(cat "$CDIR15/fa.out")" = "cache-ok" ] && rpass "R15 --fast-compile 语义与非 fast 一致" \
+    || rbad "R15 --fast-compile 输出异常（$(cat "$CDIR15/fa.out")）"
+
+# 5) 冲突矩阵 Fail-Fast：显式 -O2 / --fast / --pgo / --tiny 与 fast-compile 互斥
+for combo in "-O2" "--fast" "--pgo" "--tiny"; do
+    if ${DIALC} build "$CDIR15/probe.dial" --fast-compile $combo -o "$CDIR15/bad" >"$CDIR15/bad.log" 2>&1; then
+        rbad "R15 --fast-compile 与 $combo 未 Fail-Fast"
+    else
+        rpass "R15 --fast-compile 与 $combo 冲突 Fail-Fast"
+    fi
+done
+
+unset DIALC_STDLIB_DIR
+
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

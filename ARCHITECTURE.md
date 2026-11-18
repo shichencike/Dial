@@ -780,6 +780,25 @@ R 组双路验证：静态用 `llvm-dwarfdump` 核对段、七个 Dial 名字与
 否则 CI 机器测得的数据与提交的快照不同，会让同步校验误报失败。
 性能数值随机器与负载浮动，网页是某次实测快照，复现以采集器为准。
 
+### 13.5 编译速度与 stdlib 持久缓存（v1.10 开发中增补，M7-e3an3）
+
+「性能」在 Dial 里有两条正交维度：**运行期性能**（§13.1–13.4 的基准）与**编译期速度**。
+后者过去是无一键开关的缺口：未安装预编译 `stdlib.dialpkg` 时，链接阶段每次都把
+`runtime/`+`stdlib/` 的 15 个 C 源重新编译成 `libdial_std.a`（冷编译 ~0.35s，瓶颈在 C
+编译而非 Dial 前端）；-O0 只跳过 Dial IR pass，与此无关。
+
+现补两层能力（对 LLVM / asm 双后端同样生效，因走共享链接层）：
+
+| 机制 | 位置 | 行为 |
+| --- | --- | --- |
+| stdlib 持久缓存 | `src/main.rs::resolve_stdlib_archive` 回退分支 | key = 源码内容 SHA256（含 .c/.h）+ safety + tiny + fast + 编译器（含 --target）+ C flags；命中直接复用 `.dialc_build/stdlib-cache/<key16>/libdial_std.a`，跳过全部 C 编译。原子发布（先 .a 后 key.txt），崩溃退化重编；默认构建同样受益、零语义变化 |
+| `--fast-compile` | CLI 全链路 + `LinkOpts.fast_compile` | 隐含强制 -O0（跳过 Dial IR pass）+ C stdlib -O0 + 独立缓存分区；与 --fast/--pgo/--tiny/显式 -O1..3 硬拒 Fail-Fast。对 LLVM 后端仅作用于 C stdlib，Dial 优化仍由 --fast/-g 控制 |
+
+缓存是**可重建的派生数据**，存放在工程 `.dialc_build/stdlib-cache/`（不入库），可随时
+整个删除；它与 `.dialpkg` 的**分发缓存**（§3，`~/.dial/packages/`，存预编译机器码）是两回事：
+后者是权威包解压产物，前者是本机 C 源码编译结果。已安装 `stdlib.dialpkg` 时链接走分发缓存、
+本层缓存不介入；`--fast-compile` 强制绕开已安装包（其为 -O2 烘焙）以确保 -O0 生效。
+
 ---
 
 ## 14. 真实程序缺口补齐与宪法裁决（v1.04 增补）
