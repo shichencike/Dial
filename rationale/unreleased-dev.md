@@ -3241,3 +3241,8 @@ imulq   %r10, %r15     # s * 31
 6. 门禁：run_tests.sh、cargo test、差分 fuzz（golden+固化语料+在线）全绿。
 
 **范围与护栏**：改动只在 `src/codegen_asm.rs` 的 DWARF 元数据收集/发射（约 3 处），且只在 x86-64 `-g` 路径生效；`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。附带对 LLVM 后端 main 局部变量呈现差异（i=26）如实记录——LLVM 路径冻结，不在 asm 后端批次护栏内，不处理。
+
+**e3ax 后续实证：DWARF 复合类型呈现 —— 两端共同缺口，依用户指示搁置（不改产品代码）**：e3ax 修复形参后，继续对 `types.dial`（int/float/bool/string/struct/int[] 全类型局部变量）做两后端 `-g -O0` gdb `info locals` 对比，确认范围边界：
+- **标量透明**：ASM `i=42`/`f=3.5`/`b=true` 全部正确；LLVM `i=42`/`f=3.5` 正确但 `b=false`（实参 true，LLVM 自身 bool DWARF 呈现错误）——ASM 在标量 bool 上反而更准。
+- **复合类型是两端共同限制**：`s`(string) 两端都显示 `0x… "\005"`（运行时 COW 句柄被按 char* 呈现）、`p`(Point struct) 两端都显示 `0x7 <error>`（句柄首字被当指针）、`arr` 两端都显示裸指针。根因是 Dial 的 string/struct/array 是运行时引用计数/COW 句柄而非 C 内存布局，DWARF 无对应的结构描述——这是**语言层 DWARF 类型映射的共性缺口**，LLVM 后端（冻结）同样存在。
+- **决策**：按用户「两端都缺的话暂时不用管」的明确指示，此项不属 asm 落后 LLVM，且修复须改 `src/codegen.rs` 的 LLVM 类型映射（违反护栏）。**不新增产品代码**，仅在此留痕。DWARF 维度在护栏内的可补缺陷已由 e3ax（形参 location）清零；剩余复合类型 print 属独立语言版本主题（需双后端同步 + 放宽护栏），默认不进 asm 批次。

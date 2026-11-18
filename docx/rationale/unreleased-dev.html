@@ -3402,7 +3402,11 @@ imulq   %r10, %r15     # s * 31
 4. 运行时输出不变：<code>add(3,4)=7</code>、<code>fib(10)=55</code>。
 5. <strong>零回归</strong>：用未修复 HEAD 基线二进制（临时 stash + 独立 CARGO_TARGET_DIR 构建）对比——非-g 全部 18 个源码（bench+17 golden）<code>.s</code> 逐字节一致（差异 0）；AArch64 全部 17 个源码 <code>.s</code> 逐字节一致（差异 0）。证明修复精确限定在 x86-64 <code>-g</code> DWARF 段，机器码与 AArch64 产物完全不变。
 6. 门禁：run_tests.sh、cargo test、差分 fuzz（golden+固化语料+在线）全绿。</p>
-<p><strong>范围与护栏</strong>：改动只在 <code>src/codegen_asm.rs</code> 的 DWARF 元数据收集/发射（约 3 处），且只在 x86-64 <code>-g</code> 路径生效；<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。附带对 LLVM 后端 main 局部变量呈现差异（i=26）如实记录——LLVM 路径冻结，不在 asm 后端批次护栏内，不处理。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+<p><strong>范围与护栏</strong>：改动只在 <code>src/codegen_asm.rs</code> 的 DWARF 元数据收集/发射（约 3 处），且只在 x86-64 <code>-g</code> 路径生效；<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。附带对 LLVM 后端 main 局部变量呈现差异（i=26）如实记录——LLVM 路径冻结，不在 asm 后端批次护栏内，不处理。</p>
+<p><strong>e3ax 后续实证：DWARF 复合类型呈现 —— 两端共同缺口，依用户指示搁置（不改产品代码）</strong>：e3ax 修复形参后，继续对 <code>types.dial</code>（int/float/bool/string/struct/int[] 全类型局部变量）做两后端 <code>-g -O0</code> gdb <code>info locals</code> 对比，确认范围边界：
+- <strong>标量透明</strong>：ASM <code>i=42</code>/<code>f=3.5</code>/<code>b=true</code> 全部正确；LLVM <code>i=42</code>/<code>f=3.5</code> 正确但 <code>b=false</code>（实参 true，LLVM 自身 bool DWARF 呈现错误）——ASM 在标量 bool 上反而更准。
+- <strong>复合类型是两端共同限制</strong>：<code>s</code>(string) 两端都显示 <code>0x… "\005"</code>（运行时 COW 句柄被按 char<em> 呈现）、<code>p</code>(Point struct) 两端都显示 <code>0x7 &lt;error&gt;</code>（句柄首字被当指针）、<code>arr</code> 两端都显示裸指针。根因是 Dial 的 string/struct/array 是运行时引用计数/COW 句柄而非 C 内存布局，DWARF 无对应的结构描述——这是</em><em>语言层 DWARF 类型映射的共性缺口</em><em>，LLVM 后端（冻结）同样存在。
+- </em><em>决策</em><em>：按用户「两端都缺的话暂时不用管」的明确指示，此项不属 asm 落后 LLVM，且修复须改 <code>src/codegen.rs</code> 的 LLVM 类型映射（违反护栏）。</em><em>不新增产品代码</em>*，仅在此留痕。DWARF 维度在护栏内的可补缺陷已由 e3ax（形参 location）清零；剩余复合类型 print 属独立语言版本主题（需双后端同步 + 放宽护栏），默认不进 asm 批次。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

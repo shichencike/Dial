@@ -117,6 +117,11 @@ SIMD 完整后端（−6.7%）、caller-saved GRA（ROI 为负）、函数名重
    真实 alloca_off，故只有形参错）。修复后形参偏移接上真值，gdb 正确 print
    （7 参数混合类型含栈传参专项全对），运行时与非-g/AArch64 产物逐字节不变。
    **结论：调试信息维度从「段存在」升级为「gdb 实证可用」，护栏内缺陷清零。**
+   后续对 string/struct/array 复合类型的 gdb print 实证：两端都只按句柄/裸指针呈现
+   （Dial 运行时 COW/RC 句柄非 C 布局，DWARF 无对应结构描述），且 LLVM 的 bool
+   呈现还有错——属**两端共同的语言层 DWARF 映射缺口**，按用户「两端都缺暂时不用管」
+   指示搁置（修复须改冻结的 codegen.rs，违反护栏）；ASM 标量 int/float/bool print
+   均正确、比 LLVM 更准。默认不进 asm 批次。
 
 ### 阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）
 
