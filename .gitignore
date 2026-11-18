@@ -1,6 +1,9 @@
 # 构建产物
 /target/
 /.dialc_build/
+# 双后端差分 fuzz 的运行产物（失败用例落盘目录，非源码）
+/.dialc_fuzz/
+/.dialc_fuzz_gate/
 # 阶段 7：标准库预编译中间产物与最终包
 /dist-stdlib/
 *.dialpkg

@@ -1,0 +1,40 @@
+fn dfn(a: int, b: int = 12): int { return a + b; }
+struct PT { x: int, y: int }
+impl PT {
+  fn sum(self): int { return self.x + self.y; }
+  fn add(self, k: int = 8): int { return self.sum() + k; }
+}
+fn main(): int {
+if (false) {
+  print("T0");
+} else {
+  print("F0");
+}
+var a1: int[] = [29];
+var sl2: int[] = a1.slice(0, 1);
+sl2[0] = 30;
+print(sl2.get(0), a1.get(0));
+if (false) {
+  print("T2");
+} else {
+  print("F2");
+}
+print(sl2.get(0));
+print(sl2.get(0), a1.get(0));
+sl2.push(1);
+var m3: int[][] = [[6, 8], [14, -2], [17, -3]];
+var pt4: PT = PT { x: -2, y: 6 };
+print(pt4.add());
+print(pt4.add(3));
+print(sl2.get(0));
+var al5: int[] = sl2;
+al5.push(31);
+print(al5.get(0), sl2.get(0), al5.length(), sl2.length());
+var al6: int[] = al5;
+al6.push(29);
+print(al6.get(0), al5.get(0), al6.length(), al5.length());
+var s7: string = "dial";
+var a8: int[] = [14, -7, 29, 26, 1, 12];
+var a9: int[] = [-8, 0, 13, 30, 6, 4];
+return 0;
+}

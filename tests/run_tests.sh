@@ -4929,6 +4929,14 @@ else
 fi
 
 echo
+echo "== AG) 双后端差分 fuzz 门禁（确定性生成 + 固化语料 + 最小化）=="
+if bash tools/run_diff_fuzz_gate.sh "$DIALC" --quick; then
+    :
+else
+    fail=1
+fi
+
+echo
 if [ $fail -eq 0 ]; then
     echo "== 全部测试通过 ✅ =="
 else

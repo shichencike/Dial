@@ -1,0 +1,61 @@
+fn dfn(a: int, b: int = 17): int { return a + b; }
+struct PT { x: int, y: int }
+impl PT {
+  fn sum(self): int { return self.x + self.y; }
+  fn add(self, k: int = 6): int { return self.sum() + k; }
+}
+fn main(): int {
+var s1: string = "beta";
+var m2: int[][] = [[-3, 17, -5], [4, 3, 9], [2, 1, -2]];
+var pt3: PT = PT { x: 15, y: 25 };
+print(pt3.add());
+print(pt3.add(3));
+var m4: int[][] = [[17, 10, 9], [19, 15, 19], [-5, 0, 17]];
+var sa5: string[] = ["ee"];
+if ((-9 != 27)) {
+  print("T5");
+} else {
+  print("F5");
+}
+var a6: int[] = [4, 18, 6];
+var m7: int[][] = [[12, 4], [15, 12], [-4, 3]];
+var al8: int[] = a6;
+al8.push(24);
+print(al8.get(0), a6.get(0), al8.length(), a6.length());
+print(dfn(-15));
+var sa9: string[] = ["dd", "dd", "a"];
+var al10: int[] = a6;
+al10.push(23);
+print(al10.get(0), a6.get(0), al10.length(), a6.length());
+var sl11: int[] = a6.slice(0, 1);
+sl11[0] = 37;
+print(sl11.get(0), a6.get(0));
+print(s1.index_of("a"));
+sl11[0] = 31;
+var sa12: string[] = ["bb", "bb", "bb", "a"];
+sl11[0] = 13;
+m7[1][0] = 19;
+var se13: string = sa12.get(0);
+print(se13);
+var se14: string = sa9.get(0);
+print(se14);
+print(se13.length());
+print(se14, sa12.get(0));
+var b15: bool = (27 <= 26);
+var b16: bool = (-10 >= -14);
+var acc18: int = 0;
+var w17: int = 0;
+while (w17 < 5) {
+  acc18 = acc18 + w17;
+  w17 = w17 + 1;
+}
+print(acc18);
+print(sl11.length());
+print(se14.length());
+var row19: int[] = m7.get(0);
+print(row19.get(0));
+print(dfn(22, 8));
+print(se13.to_upper());
+var b20: bool = false;
+return 0;
+}

@@ -3017,3 +3017,56 @@
   新增 R18 测试组（三官方 impl 用例 + 默认参数边界 + 各 O 级别）。
 - **护栏**：`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0/零新依赖/LLVM 路径/AArch64
   零改动，构建零警告，不打 tag，docx 确定性。
+
+#### M7-e3ar：新增双后端差分 fuzz 框架（把「实现一致性 bug」变成可复现的自动化发现流程）
+
+- **背景**：承接 e3ao（嵌套下标赋值）/ e3ap（借用句柄 retain）/ e3aq（impl + 默认实参）
+  三批的教训——这些真实缺口有一个共同特征：**静态审计发现不了**。它们不是「asm 明确
+  拒绝某构造」（那类靠 grep `Unsupported` 就能找到，已全部补齐），而是「两个后端都
+  编译成功、但运行输出不同」的实现一致性 bug（retain 少一份 → 退出时 unaligned free；
+  默认实参没补齐 → 读到栈槽垃圾 102）。用户「继续可以」后，按上一批建议专门搭一套
+  差分 fuzz 框架，把这类 bug 的发现从「靠人跑特定程序碰运气」变成「确定性批量对比」。
+- **为什么现有工具不够**：`tools/bench_asm_vs_llvm.py` / `ab_asm_m7e3b.py` 是**性能**对跑，
+  用校验和锚点保证等价计算后只比墙钟时间，发现不了「算错但能跑完」的语义差异；
+  `tools/run_asm_golden.sh` 是固定用例的黄金门禁，覆盖不到随机组合暴露的交互 bug。
+  需要一个新的**正确性差分**工具。
+- **实现 `tools/diff_fuzz.py`（零新依赖，纯标准库，不碰编译器产品代码）**：
+  - **确定性生成器 `Gen(seed)`**：固定 seed 的 `random.Random`，同一 seed 永远生成同一
+    程序。维护 `vars: [(name,type)]` 符号表，只引用已声明变量；int 表达式用受限深度的
+    `+ - *` 与常量（无除零），数组声明长度 ≥1、所有元素读固定用 `get(0)`、slice 固定
+    `slice(0,1)`（规避越界 UB），排除 now/random/getenv/文件 IO 等非确定性内建。覆盖
+    标量/控制流（if/while）/int[]/string[]/int[][] 声明与写、借用绑定（句柄元素绑局部
+    变量，e3ap 路径）、嵌套下标赋值（e3ao）、默认实参调用与 impl 方法（e3aq）、COW
+    别名 + push、slice 后写。概率性启用 `fn dfn(a:int,b:int=K)` 与 `struct PT`+`impl PT`
+    的 prelude。**合法率经迭代修正达 100%（100/100）**——修过三类生成器 bug：语句误拼在
+    `fn main` 外、`get(0)` 返回标量却绑给数组类型、`slice(0,2)` 对长度 1 数组越界。
+  - **差分对比器 `check_source`**：同一源码分别 `--backend=llvm`/`--backend=asm` 编译
+    （各带可选 `-O0..-O3/-g`），要求两边编译成功且生成了 `.s`（防假路径），运行后逐字节
+    对比 stdout + 退出码。裁决：LLVM 运行崩溃（UB/非确定性）记 `RUN_FAIL_LLVM` 跳过、不
+    当 oracle；编译失败记 `BUILD_FAIL_*` 跳过（作为生成器合法率指标）；只有「LLVM 正常、
+    asm 输出/退出码不同」才记 `DIFF`。
+  - **最小化器 `minimize_source`**：delta-debugging 按行删减，保留仍能复现 DIFF 的版本。
+  - **三模式**：`--golden-check`（可配 `--diff-corpus` 扫任意目录）、`--seeds N`（在线
+    fuzz，支持 `--start` 分段 / `--opt-levels` 多级别 / `--jobs` 并行）、`--replay`（复跑
+    落盘用例）。失败用例连同 detail 落盘到 `--out/failures/`。
+- **元测试（证明框架不是永远返回 OK 的空壳）**：用 git worktree 构建修复前编译器
+  `5262fbf`（缺默认实参补齐），构造 `fn add(a:int,b:int=10){...}; print(add(5));`——
+  框架对它报 `DIFF`（`llvm: 15\n8`、`asm: 140733879947203\n8`，精确复现 e3aq 记录的
+  bug）；对当前编译器报 `OK`。掺入 13 行无关语句的同款程序经最小化器收敛到 4 行
+  （`fn add` 声明 + `print(add(5))`），最小化有效。
+- **实测规模**：golden 自检 15/15 OK；增强生成器后 **500 seeds × 5 优化级别（O0/O1/
+  O2/O3/g）= 2500 次双后端编译运行对比，全部 OK、0 DIFF、0 编译失败、0 运行失败**。
+  这说明 e3ao~e3aq 补齐后，asm 在这些覆盖面上与 LLVM 确已一致。
+- **门禁固化**：新增 `tests/diff/` 4 份确定性语料（覆盖 scalar_ctrl / default+impl+COW /
+  nested+borrow+slice / 全路径），双后端差分一致。新增 `tools/run_diff_fuzz_gate.sh`
+  三段门禁：① golden 自检 ② 固化语料差分 ③ 固定 seed（起点 40000）在线 fuzz
+  （quick 60 seeds × O0/O2/O3）。接入 `tests/run_tests.sh` 为 AG 组。完整回归 EXIT=0、
+  0 失败、AG 三段全过。
+- **确定性 / 护栏**：固定 seed 生成 + 独立临时目录（`.s` 与源文件同目录，不污染工作树），
+  结果可复现；纯工具增量、编译器产品代码零改动，现有 golden `.s` 天然零变化；
+  `src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0/零新依赖/LLVM 路径/AArch64 零改动，
+  构建零警告，不打 tag，docx 确定性。
+- **结论与后续**：本批交付的是「发现工具」而非新缺口修复——2500 次对比 0 不一致说明
+  当前覆盖面已一致。今后每次改 asm 后端，AG 门禁都会自动做确定性差分回归；若某类构造
+  未被生成覆盖（如更复杂的 map/set 容器、文件 IO、异常路径），扩充 `Gen` 的动作池即可，
+  框架其余部分不动。这也给出了一条比逐个静态审计更高效的「找缺口」方法论。

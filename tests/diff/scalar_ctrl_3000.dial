@@ -1,0 +1,52 @@
+fn dfn(a: int, b: int = 9): int { return a + b; }
+struct PT { x: int, y: int }
+impl PT {
+  fn sum(self): int { return self.x + self.y; }
+  fn add(self, k: int = 10): int { return self.sum() + k; }
+}
+fn main(): int {
+if (false) {
+  print("T0");
+} else {
+  print("F0");
+}
+var sa1: string[] = ["ee", "bb"];
+var acc3: int = 0;
+var w2: int = 0;
+while (w2 < 2) {
+  acc3 = acc3 + w2;
+  w2 = w2 + 1;
+}
+print(acc3);
+var acc5: int = 0;
+var w4: int = 0;
+while (w4 < 5) {
+  acc5 = acc5 + w4;
+  w4 = w4 + 1;
+}
+print(acc5);
+var se6: string = sa1.get(0);
+print(se6);
+print(se6, sa1.get(0));
+print(se6, sa1.get(0));
+var acc8: int = 0;
+var w7: int = 0;
+while (w7 < 3) {
+  acc8 = acc8 + w7;
+  w7 = w7 + 1;
+}
+print(acc8);
+var acc10: int = 0;
+var w9: int = 0;
+while (w9 < 3) {
+  acc10 = acc10 + w9;
+  w9 = w9 + 1;
+}
+print(acc10);
+var s11: string = "hello";
+var i12: int = ((8 * -15) * (11 * 9));
+var a13: int[] = [9, 25, -3, -4, 3, 0];
+var se14: string = sa1.get(0);
+print(se14);
+return 0;
+}

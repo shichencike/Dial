@@ -863,6 +863,32 @@ LLVM 的 B1 impl 方法调用（`gen_method_call`）与默认实参补齐（`gen
 > 修复前编译器逐字节一致，AArch64 普通程序（core1/structs）零变化；新增
 > `impl_method.dial` golden 与 R18 测试组（三官方 impl 用例 + 默认参数边界 + 各 O 级别）。
 
+### 13.9 双后端差分 fuzz：实现一致性 bug 的自动化发现（v1.10 开发中增补，M7-e3ar）
+
+e3ao/e3ap/e3aq 三批暴露的真实缺口共享一个特征：**两个后端都 `build` 成功、只有运行
+输出不同**——这类「实现一致性 bug」恰好是静态审计（`grep Unsupported`、Stmt/Expr 变体
+对照）覆盖不到的盲区。本批新增的是**发现方法论的基础设施**，不是某个具体缺口的修复。
+
+| 组件 | 职责 | 关键决策 |
+| --- | --- | --- |
+| `tools/diff_fuzz.py::Gen` | 确定性程序生成 | 固定 seed PRNG + 符号表（只引用已声明变量）+ 规避 UB（下标固定 `get(0)`、slice 固定 `slice(0,1)`、无除零/无非确定性内建）；动作池覆盖近期全部高风险路径（默认实参/impl/借用绑定/嵌套下标/COW/slice 写）。合法率 100% |
+| `check_source` | 双后端差分裁决 | 同源码编 llvm/asm（各带可选 O 级别），校验 `.s` 存在，逐字节比 stdout + rc；**只有**「LLVM 正常 + asm 输出/rc 不同」才记 DIFF；编译失败/LLVM 自身 UB 记 skip，绝不误报 |
+| `minimize_source` | delta-debugging | 按行删减保留可复现 DIFF 的最小程序（元测试 13 行→4 行） |
+| `run_diff_fuzz_gate.sh` | 三段门禁 | golden 自检 + `tests/diff/` 固化语料 + 固定 seed 在线 fuzz；接入 run_tests.sh AG 组 |
+
+**为什么 LLVM 是 oracle**：LLVM 路径在 v1.10 全程冻结、有独立的 golden 与性能回归背书，
+是「正确语义」的可信参照；asm 的目标是代替它，故「LLVM 正常而 asm 不同」即 asm 的 bug。
+反之若 LLVM 自身运行崩溃（生成的程序触发 UB），该样本不可作 oracle，跳过而不计入。
+
+**元测试（框架有效性证明）**：对修复前编译器 5262fbf（缺默认实参补齐）跑
+`print(add(5))`，框架报 DIFF（`asm=140733879947203` vs `llvm=15`），对当前编译器报 OK——
+排除了「框架永远返回 OK」的假阳性风险。规模实测：500 seeds × 5 优化级别 = 2500 次
+双后端对比全 OK、0 不一致，佐证 e3ao~e3aq 补齐后的面上一致性。
+
+**架构意义**：把「找缺口」从逐个静态审计升级为「确定性批量差分 + 最小化」；今后新增
+asm 特性或改 IR pass，AG 门禁自动回归；发现新 bug 时只需往 `Gen` 动作池加一类构造，
+对比/最小化/门禁三段不动。纯工具增量，编译器产品代码与所有 `.s` 输出零变化。
+
 ---
 
 ## 14. 真实程序缺口补齐与宪法裁决（v1.04 增补）

@@ -1,0 +1,38 @@
+fn main(): int {
+var s1: string = "dial";
+print(s1);
+var b2: bool = (-1 != -17);
+var m3: int[][] = [[20, 17], [6, -1], [-4, -5]];
+m3[1][0] = -13;
+print(m3.length());
+var i4: int = ((-12 - -4) * (39 - -16));
+var a5: int[] = [15];
+var a6: int[] = [-7, 12, 17, 16, 11];
+var sc7: string = s1 + "_x";
+var m8: int[][] = [[12, 14], [17, 13], [8, 15]];
+var acc10: int = 0;
+var w9: int = 0;
+while (w9 < 2) {
+  acc10 = acc10 + w9;
+  w9 = w9 + 1;
+}
+print(acc10);
+var i11: int = ((-20 * i4) - (i4 * i4));
+var al12: int[] = a5;
+al12.push(38);
+print(al12.get(0), a5.get(0), al12.length(), a5.length());
+var row13: int[] = m3.get(0);
+print(row13.get(0));
+var i14: int = ((i4 + 28) + (i4 * i11));
+m8[1][0] = 24;
+var sl15: int[] = al12.slice(0, 1);
+sl15[0] = 30;
+print(sl15.get(0), al12.get(0));
+var al16: int[] = row13;
+al16.push(-6);
+print(al16.get(0), row13.get(0), al16.length(), row13.length());
+var sl17: int[] = sl15.slice(0, 1);
+sl17[0] = 38;
+print(sl17.get(0), sl15.get(0));
+return 0;
+}
