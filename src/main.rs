@@ -430,8 +430,10 @@ fn main() {
         }
         eprintln!();
     }
-    if pgo && safety != SafetyMode::ReleaseFast {
-        eprintln!("ℹ️  --pgo（剖析引导优化）必须配合 --fast 使用：");
+    // R4：自研后端的 PGO 独立于 --fast（插桩走自己的 .dialprof 流程，不依赖
+    // LLVM LTO）。只有 LLVM 后端仍要求 --fast。tiny / fast-compile 的互斥见下。
+    if backend == Backend::Llvm && pgo && safety != SafetyMode::ReleaseFast {
+        eprintln!("ℹ️  --pgo（剖析引导优化）在 LLVM 后端必须配合 --fast 使用：");
         eprintln!("   非 fast 模式保留运行期检查，PGO 无收益且不插桩。已自动忽略 --pgo。");
         eprintln!();
         pgo = false;
@@ -503,8 +505,8 @@ fn main() {
             eprintln!("ℹ️  -O0 为无优化构建（适合调试/对照）；如需 DWARF 源码行断点请再加 -g。");
         }
         if pgo {
-            eprintln!("❌ --pgo 依赖 LLVM bitcode 插桩，自研后端不产生 .bc，无法使用。");
-            std::process::exit(1);
+            eprintln!("ℹ️  --backend=asm --pgo：自研 PGO（零 bitcode 依赖）——");
+            eprintln!("   阶段一插桩编训练版 → 跑训练样本写 .dialprof → 阶段二读回重编（热函数聚拢 + 热循环对齐）。");
         }
         if debug_info {
             eprintln!("ℹ️  --backend=asm -g：生成 DWARF 源码行断点 + 符号名（.g 下自动禁用寄存器驻留以保证变量 location 准确）。");
@@ -563,21 +565,81 @@ fn main() {
     if backend == Backend::Asm {
         // 自研后端：lower → pass → .s → cc -c → .o；obj_path 与 LLVM 后端一致，
         // 后面的 link() / final_link() 完全复用，FFI 包与 --tiny 等零改动生效。
-        if let Err(e) = asm::compile_asm(
-            &fe.program,
-            fe.functions.clone(),
-            fe.structs.clone(),
-            fe.goto_depths.clone(),
-            &obj_path,
-            debug_info,
-            &src_path,
-            &fe.fn_origin,
-            opt_level,
-            safety,
-            target_cpu,
-        ) {
-            eprintln!("{}", e);
-            std::process::exit(1);
+        if pgo {
+            // ── R4 自研 PGO 两段式（零 bitcode / 零 LLVM 工具）────────────────
+            // 阶段一：插桩编译 + 链接出训练二进制，跑一遍写 .dialprof；
+            // 阶段二：读回 profile 重新编译出优化版 .o，覆盖 obj_path。
+            let prof_dir = build_dir.join(format!("pgo-asm-{}", obj_path.file_stem().unwrap().to_string_lossy()));
+            if let Err(e) = fs::create_dir_all(&prof_dir) {
+                eprintln!("创建 PGO 目录失败: {}", e);
+                std::process::exit(1);
+            }
+            let gen_exe = prof_dir.join("pgo_gen_bin");
+            let prof_path = prof_dir.join("profile.dialprof");
+
+            // 阶段一：插桩版 .o（instrument=true, 无 profile）
+            if let Err(e) = asm::compile_asm(
+                &fe.program, fe.functions.clone(), fe.structs.clone(),
+                fe.goto_depths.clone(), &obj_path, debug_info, &src_path,
+                &fe.fn_origin, opt_level, safety, target_cpu, true, None,
+            ) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = link(&obj_path, &gen_exe, safety, &fe.pkg_libs, &fe.ffi_rpaths, &LinkOpts::default()) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+            // 训练运行：DIAL_PGO_FILE 指向 profile 落点；输出静默（训练只采样，
+            // 最终优化版的运行才把真实结果打到终端，避免重复）。
+            println!("ℹ️  PGO：运行训练样本收集热点（训练输出已静默）…");
+            let mut run = Command::new(&gen_exe);
+            run.env("DIAL_PGO_FILE", &prof_path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let _train_status = run.status();
+            let _ = fs::remove_file(&gen_exe); // 训练二进制用完即删，profile 保留供复现
+
+            let prof = match pgo::ProfileData::load(&prof_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("❌ PGO：{}", e);
+                    eprintln!("   请确认训练程序正常运行并写出 profile（需 main 正常返回）。");
+                    std::process::exit(1);
+                }
+            };
+            if prof.total() == 0 {
+                eprintln!("ℹ️  PGO：profile 计数全零（训练样本未覆盖热路径？），回退 baseline 布局。");
+            }
+            // 阶段二：读回 profile 重编出优化版 .o（覆盖 obj_path）
+            if let Err(e) = asm::compile_asm(
+                &fe.program, fe.functions.clone(), fe.structs.clone(),
+                fe.goto_depths.clone(), &obj_path, debug_info, &src_path,
+                &fe.fn_origin, opt_level, safety, target_cpu, false, Some(&prof),
+            ) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+            println!("✅ PGO 优化完成（profile: {}）。", prof_path.display());
+        } else {
+            if let Err(e) = asm::compile_asm(
+                &fe.program,
+                fe.functions.clone(),
+                fe.structs.clone(),
+                fe.goto_depths.clone(),
+                &obj_path,
+                debug_info,
+                &src_path,
+                &fe.fn_origin,
+                opt_level,
+                safety,
+                target_cpu,
+                false,
+                None,
+            ) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
         }
     } else {
         if opt_level != ir::OptLevel::O2 && !fast_compile {

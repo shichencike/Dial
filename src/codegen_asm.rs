@@ -220,7 +220,110 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
     o
 }
 
-pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str, fn_origin: &std::collections::HashMap<String, String>, opt_level: OptLevel, safety: SafetyMode, target_cpu: TargetCpu) -> Result<String, String> {
+// ===========================================================================
+// R4：自研 PGO 计划（instrument / optimize 两态；baseline 恒为 None，零回归）
+// ===========================================================================
+
+/// PGO 三态中的发射期计划。由 `emit()` 依 instrument / profile 构建，透传给
+/// 每个 `emit_function`。baseline（profile=None 且 !instrument）下 `instrument=false`
+/// 且 `profile=None`，所有分支短路，输出与引入 PGO 前逐字节一致。
+struct PgoPlan<'a> {
+    /// 阶段一插桩：发 .comm 计数器、函数/循环入口 incq、main 返回前 dump。
+    instrument: bool,
+    /// 阶段二优化：读回 profile，热函数分段 + 只对齐热循环。
+    profile: Option<&'a crate::pgo::ProfileData>,
+    /// 计数器总数 N（函数数 + 回边循环头数）。instrument 态用于 .comm 与 dump 实参。
+    counter_count: usize,
+    /// 函数名 → 函数计数器 idx（0..F-1，源码序）。
+    fn_counter_idx: std::collections::HashMap<String, usize>,
+    /// (函数名, 块 id) → 循环计数器 idx（F + 序号）。仅回边循环头有条目。
+    loop_counter_idx: std::collections::HashMap<(String, u32), usize>,
+    /// 热函数集合。profile=None 时为空但 `is_hot()` 恒 true（走原布局）。
+    hot_fns: std::collections::HashSet<String>,
+    /// 是否处于 optimize 态（profile.is_some()）。
+    optimize: bool,
+}
+
+impl<'a> PgoPlan<'a> {
+    /// 该函数是否热。baseline/instrument 恒 true（保留原全对齐 + 单 .text）；
+    /// 只有 optimize 态才按 profile 判定。
+    fn is_hot(&self, name: &str) -> bool {
+        !self.optimize || self.hot_fns.contains(name)
+    }
+}
+
+/// 从 IR 判定回边循环头：跳转目标的块下标 < 当前块下标（与文本级
+/// align_loop_headers 的"目标定义早于跳转"口径一致）。返回按源码序、
+/// 块 id 升序排列的 (函数名, 块 id) 列表。
+fn ir_backedge_loop_headers(ip: &IrProgram) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    for f in &ip.functions {
+        // 块下标 → block id
+        let idx_of: std::collections::HashMap<u32, usize> =
+            f.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+        let mut heads: Vec<u32> = Vec::new();
+        for (i, b) in f.blocks.iter().enumerate() {
+            let targets: Vec<u32> = match &b.term {
+                Term::Jump { target, .. } => vec![*target],
+                Term::Branch { then_b, else_b, .. } => vec![*then_b, *else_b],
+                _ => Vec::new(),
+            };
+            for t in targets {
+                if let Some(&td) = idx_of.get(&t) {
+                    if td < i && !heads.contains(&b.id) {
+                        // b 是回边源；其跳转目标 t 所在块是循环头
+                        let header_id = f.blocks[td].id;
+                        if !heads.contains(&header_id) { heads.push(header_id); }
+                    }
+                }
+            }
+        }
+        heads.sort_unstable();
+        for h in heads { out.push((f.name.clone(), h)); }
+    }
+    out
+}
+
+/// 依 profile 计算热函数集合。函数热度 = 入口计数 + 其所有循环头计数之和
+/// （一个只在循环里干活的函数，入口只调 1 次但循环跑 N 次，理应判为热函数）。
+/// 判热用相对阈值：分数 ≥ 最高分 × 10% 即热（宽松判热——"把热函数误判为冷、
+/// 甩进 .text.unlikely"的代价，远大于"把冷函数误判为热、多占一点热段"），
+/// 且天然避免固定 top-K 把多个同等热函数中的一部分误判为冷。强制 main 入热；
+/// 全零 → 全部入热（回退 baseline 布局）。
+fn compute_hot_fns(
+    ip: &IrProgram,
+    prof: &crate::pgo::ProfileData,
+    loop_idx: &std::collections::HashMap<(String, u32), usize>,
+) -> std::collections::HashSet<String> {
+    let mut hot = std::collections::HashSet::new();
+    if prof.total() == 0 {
+        for f in &ip.functions { hot.insert(f.name.clone()); }
+        return hot;
+    }
+    // 先把每个循环头的计数累加到所属函数。
+    let mut loop_bonus: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for ((fname, _bid), &idx) in loop_idx.iter() {
+        let c = prof.counts.get(idx).copied().unwrap_or(0);
+        let slot = loop_bonus.entry(fname.clone()).or_insert(0);
+        *slot = slot.saturating_add(c);
+    }
+    let scored: Vec<(&str, u64)> = ip.functions.iter().enumerate()
+        .map(|(i, f)| {
+            let entry = prof.counts.get(i).copied().unwrap_or(0);
+            let bonus = loop_bonus.get(&f.name).copied().unwrap_or(0);
+            (f.name.as_str(), entry.saturating_add(bonus))
+        })
+        .collect();
+    let max_score = scored.iter().map(|x| x.1).max().unwrap_or(0);
+    let threshold = (max_score / 10).max(1); // 最高分的 10%，至少 1
+    for (name, score) in scored {
+        if score >= threshold { hot.insert(name.to_string()); }
+    }
+    hot.insert("main".to_string()); // 强制 main 入热
+    hot
+}
+
+pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str, fn_origin: &std::collections::HashMap<String, String>, opt_level: OptLevel, safety: SafetyMode, target_cpu: TargetCpu, instrument: bool, profile: Option<&crate::pgo::ProfileData>) -> Result<String, String> {
     // M7-e3ay：--target-cpu 仅控制新增高级 ISA 融合的开关；baseline 下不发射任何
     // 新指令，产物与引入本参数前逐字节一致。当前批次只建立开关基础设施，后续
     // 各 targeted 融合（LZCNT/BMI/AVX2/FMA…）各自读取 target_cpu 的 has_* 门控。
@@ -250,6 +353,35 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
             }
         }
     }
+
+    // R4：PGO 仅 x86-64 且非 -g 生效；其余目标/模式一律退化为 baseline。
+    let pgo_active = matches!(target, EmitTarget::X86_64SysV) && !debug_info;
+    let eff_instrument = instrument && pgo_active;
+    let eff_profile = if pgo_active { profile } else { None };
+
+    let loops = if eff_instrument { ir_backedge_loop_headers(ip) } else { Vec::new() };
+    let fn_count = ip.functions.len();
+    let mut fn_counter_idx = std::collections::HashMap::new();
+    for (i, f) in ip.functions.iter().enumerate() {
+        fn_counter_idx.insert(f.name.clone(), i);
+    }
+    let mut loop_counter_idx = std::collections::HashMap::new();
+    for (j, (fname, bid)) in loops.iter().enumerate() {
+        loop_counter_idx.insert((fname.clone(), *bid), fn_count + j);
+    }
+    let counter_count = if eff_instrument { fn_count + loops.len() } else { 0 };
+    let hot_fns = eff_profile
+        .map(|p| compute_hot_fns(ip, p, &loop_counter_idx))
+        .unwrap_or_default();
+    let pgo = PgoPlan {
+        instrument: eff_instrument,
+        profile: eff_profile,
+        counter_count,
+        fn_counter_idx,
+        loop_counter_idx,
+        hot_fns,
+        optimize: eff_profile.is_some(),
+    };
 
     let mut out = String::new();
     out.push_str("# 由 dialc 自研后端生成（IR -> .s）；请勿手工编辑\n");
@@ -283,7 +415,17 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
         bytes.push("0".to_string());
         out.push_str(&format!(".Lstr{}:\n\t.byte {}\n", idx, bytes.join(", ")));
     }
-    out.push_str("\t.text\n");
+    // R4 阶段一：插桩计数器数组（.comm 零初始化、8 字节对齐）。
+    if pgo.instrument {
+        out.push_str(&format!(
+            "\t.comm dial_pgo_counters,{},{}\n",
+            pgo.counter_count * 8, 8
+        ));
+    }
+    // R4 阶段二：optimize 态不在此处发单 .text；每个函数按冷热各发自己的 .section。
+    if !pgo.optimize {
+        out.push_str("\t.text\n");
+    }
 
     let local_funcs: HashSet<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
 
@@ -340,7 +482,16 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
         } else {
             1
         };
-        let di = emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs, debug_info, file_index, opt_level, safety)?;
+        // R4 optimize：按冷热切段，令 linker 聚拢热函数（冷函数甩 .text.unlikely）。
+        if pgo.optimize {
+            let sec = if pgo.is_hot(&f.name) {
+                "\t.section .text.hot,\"ax\",@progbits\n"
+            } else {
+                "\t.section .text.unlikely,\"ax\",@progbits\n"
+            };
+            out.push_str(sec);
+        }
+        let di = emit_function(&mut out, ip, f, target, &local_funcs, &recursive_funcs, debug_info, file_index, opt_level, safety, &pgo)?;
         dwarf_funcs.push(di);
     }
     // 避免 GNU ld 的 "missing .note.GNU-stack section implies executable stack" 警告。
@@ -502,6 +653,10 @@ struct FnEmit<'a> {
     safety: SafetyMode,
     /// M7-e3ae：本函数内除零检查的 ok 标签序号，保证标签唯一。
     dchk_seq: u32,
+    /// R4：本函数的 PGO 计划（引用 emit 期构建的整体计划）。
+    pgo: &'a PgoPlan<'a>,
+    /// R4：本函数是否热（baseline/instrument 恒 true）。
+    pgo_hot: bool,
 }
 
 /// M7-e3n：xorshift 一步的融合计划。`slot` 是 x 的 Alloca 槽 vreg（驻留在
@@ -516,13 +671,15 @@ enum XorshiftPlan {
 }
 
 impl<'a> FnEmit<'a> {
-    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool, debug_info: bool, file_index: u8, opt_level: OptLevel, safety: SafetyMode) -> Self {
+    fn new(ip: &'a IrProgram, f: &'a IrFunction, target: EmitTarget, local: &'a HashSet<String>, gra_blocked: bool, debug_info: bool, file_index: u8, opt_level: OptLevel, safety: SafetyMode, pgo: &'a PgoPlan<'a>) -> Self {
+        let pgo_hot = pgo.is_hot(&f.name);
         let prefix = format!("Ldial_{}", {
             let s: String = f.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
             s
         });
         FnEmit {
             ip, f, target, local_funcs: local,
+            pgo, pgo_hot,
             reg_off: Vec::new(), alloca_off: HashMap::new(), frame_size: 0,
             prefix, out: String::new(),
             resident: HashMap::new(), dirty: HashSet::new(), residency_on: false,
@@ -1863,6 +2020,30 @@ impl<'a> FnEmit<'a> {
         };
     }
 
+    /// R4 插桩：给计数器 idx 加一。pushfq/popfq 保护 flags；
+    /// incq 的助记符不匹配任何现有文本 pass（那些只认 movq/jmp/jcc 等），安全。
+    fn pgo_counter_inc(&mut self, idx: usize) {
+        if !self.pgo.instrument { return; }
+        self.line("\tpushfq");
+        self.line(&format!("\tincq dial_pgo_counters+{}(%rip)", idx * 8));
+        self.line("\tpopfq");
+    }
+
+    /// R4 插桩：main 返回前把计数器写到 profile 文件。
+    /// 必须完整保护易失寄存器——返回值的 Value::Reg 可能仍驻留在 rdi/rsi/rax 等
+    /// （lg 在 val_phys 命中时直接从物理寄存器搬运，flush_residency 只回写
+    /// flush_mask 内的值），故先 push 全部 caller-saved，call 后逆序 pop 复原，
+    /// 再让原有的 lg(v)/epilogue 照常执行，返回值不受影响。
+    fn pgo_emit_dump(&mut self) {
+        if !self.pgo.instrument || self.f.name != "main" { return; }
+        let saved = ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
+        for r in saved.iter() { self.line(&format!("\tpushq {}", self.r(r))); }
+        self.line("\tleaq dial_pgo_counters(%rip), %rdi");
+        self.line(&format!("\tmovl ${}, %esi", self.pgo.counter_count));
+        self.line("\tcall dial_pgo_dump@PLT");
+        for r in saved.iter().rev() { self.line(&format!("\tpopq {}", self.r(r))); }
+    }
+
     fn prologue(&mut self) {
         let f = self.f;
         if f.linkage == FuncLink::External {
@@ -3154,6 +3335,9 @@ impl<'a> FnEmit<'a> {
                 self.line(&format!("\t{} .{}_b{}", jmp_mnem, self.prefix, else_b));
             }
             Term::Return { val } => {
+                // R4 插桩：main 返回前写 profile。dump 内部 push/pop 全部易失
+                // 寄存器，现场完全复原，故放在 lg(v) 之前也不破坏返回值。
+                self.pgo_emit_dump();
                 if let Some(v) = val {
                     if self.f.ret.is_float() {
                         let rr = match self.target {
@@ -4337,8 +4521,9 @@ fn emit_function(
     file_index: u8,
     opt_level: OptLevel,
     safety: SafetyMode,
+    pgo: &PgoPlan<'_>,
 ) -> Result<FnDwarfInfo, String> {
-    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name), debug_info, file_index, opt_level, safety);
+    let mut e = FnEmit::new(ip, f, target, local, recursive_funcs.contains(&f.name), debug_info, file_index, opt_level, safety, pgo);
     e.compute_layout();
     e.analyze_dead_defs();
     e.analyze_fusable();
@@ -4346,9 +4531,17 @@ fn emit_function(
     e.analyze_popcnt(); // M7-e3m：依赖 promotable，须在 analyze_residency 之后
     e.analyze_xorshift(); // M7-e3n：同上，两种融合窗口形态互斥、互不重叠
     e.prologue();
+    // R4 插桩：函数入口计数（在驻留开启前，clobber 的寄存器无活跃值）。
+    if let Some(&fi) = pgo.fn_counter_idx.get(&f.name) {
+        e.pgo_counter_inc(fi);
+    }
     for (idx, b) in f.blocks.iter().enumerate() {
         let lbl = format!(".{}_b{}:", e.prefix, b.id);
         e.line(&lbl);
+        // R4 插桩：回边循环头计数（begin_block 前，避免干扰驻留态）。
+        if let Some(&li) = pgo.loop_counter_idx.get(&(f.name.clone(), b.id)) {
+            e.pgo_counter_inc(li);
+        }
         e.begin_block(idx);
         // M7-e3m/e3n：窗口可在块内任意起点。popcnt 命中处由 inst_popcnt_fused
         // 的两条指令取代整段 8 条 IR（skip 7）；xorshift 命中处由
@@ -4397,7 +4590,13 @@ fn emit_function(
         let d = elide_dead_stores(&f, lo, hi);
         let t = thread_jumps(&d);
         let dt = elide_dead_trampolines(&t);
-        out.push_str(&align_loop_headers(&dt));
+        // R4：仅 optimize 态的冷函数跳过循环头对齐（省 padding）；baseline /
+        // instrument / optimize-hot 一律保留原对齐，故默认输出逐字节不变。
+        if pgo.optimize && !e.pgo_hot {
+            out.push_str(&dt);
+        } else {
+            out.push_str(&align_loop_headers(&dt));
+        }
     } else {
         out.push_str(&e.out);
     }
