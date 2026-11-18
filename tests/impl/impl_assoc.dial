@@ -1,0 +1,47 @@
+// R3「impl 关联函数（无 self 静态方法）」正向用例。
+//
+// 覆盖：
+//   - impl T { fn new(x, y): T } —— 首参非 self，编译期 mangle 为 __impl_T_new；
+//   - 空参关联函数 fn origin(): T；
+//   - 返回标量的关联函数 fn scale(v: int): int；
+//   - 调用语法 T::m(args)，双后端均复用普通 Call 链路；
+//   - 链式调用 Point::new(10, 20).sum()（关联函数返回 struct 后再调实例方法）；
+//   - 前向引用：main 写在 struct/impl 定义之前，token 预扫描仍能识别类型与方法。
+//
+// 编译期脱糖：T::m(args) -> Expr::Call(__impl_T_m, args)；`::` 解析后消失、不进符号表。
+// 关联函数首参不可命名 self（那是实例方法的保留规则）。
+
+fn main(): int {
+    var p: Point = Point::new(3, 4);
+    print(p.sum());                       // 7
+    var o: Point = Point::origin();
+    print(o.x);                           // 0
+    print(Point::scale(21));              // 42
+    print(Point::new(10, 20).sum());      // 30（链式）
+
+    if (p.sum() != 7) { return 1; }
+    if (o.x != 0) { return 2; }
+    if (Point::scale(21) != 42) { return 3; }
+    if (Point::new(10, 20).sum() != 30) { return 4; }
+    return 0;
+}
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+impl Point {
+    fn new(x: int, y: int): Point {
+        return Point { x: x, y: y };
+    }
+    fn origin(): Point {
+        return Point { x: 0, y: 0 };
+    }
+    fn scale(v: int): int {
+        return v * 2;
+    }
+    fn sum(self): int {
+        return self.x + self.y;
+    }
+}

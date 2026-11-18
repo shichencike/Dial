@@ -77,11 +77,11 @@
 - 重启条件（写死在诊断工具输出）：① 出现高频小函数调用的新 workload；② 出现大量循环不变量计算；③ 语言层新增可并行语义 / 显式展开提示；④ 落后项归因改变。满足任一则重跑诊断。
 - 护栏：零产品代码、零新依赖、baseline/AArch64 零回归。
 
-**第 3 项 · B 类语言语义（在 asm 侧自建）** — 中高风险
+**第 3 项 · B 类语言语义（在 asm 侧自建）** — 部分完成：**impl 关联函数已落地**，其余三项按用户 2026-11-18 决策暂不展开
 - 目标：把 LLVM 也没有的语言能力在 asm 后端补齐——select 超时 / impl 关联函数 `T::new()` / map<string> 值 / 原子类型，按总纲视为真实缺口。
-- 动作：① 逐项在 `semantic.rs`（非冻结）+ `lower.rs` + `codegen_asm.rs` 实现，**不碰冻结的 `codegen.rs`/`ast.rs`**；② 确保 LLVM 后端不因语义层扩展而崩溃（transitional 兼容）；③ 以「LLVM 缺失时 asm 独立可用」为准。
-- 验收：新增 golden 覆盖 + 全门禁；LLVM 后端构建不回归。
-- 护栏：改语义层须评估对 LLVM 路径影响；并发/原子触及内存模型宪法裁决，放该项最后。
+- ✅ **已完成：impl 关联函数 `T::new()`（无 self 静态方法）**。纯编译期脱糖：`lexer.rs` 加 `ColonColon` token；`parser.rs` 加 token 预扫描（前向引用 + 友好诊断）+ `parse_impl_def` 按首参名区分方法/关联函数 + `parse_primary` 的 `::` 降级为 `Expr::Call(__impl_T_m, args)`。`codegen.rs`/`lower.rs`/`semantic.rs`/`ast.rs` 零改动（复用 Call 链路）。覆盖带参/空参、返回 struct/标量、链式调用、前向引用；双后端一致、26 源码 .s 零回归；新增 `tests/impl/impl_assoc.dial`（R18 组）。
+- ⏸ **暂不展开**：select 超时（底层 `recv_timeout` 已具备，仅缺多通道语法糖）、map<string> 值（触及 semantic 泛型策略）、原子类型/无锁（内存模型宪法裁决）。用户 2026-11-18 明确本轮 R3 只做 impl 关联函数；其余待单独裁决再启。
+- 护栏遵守：零新依赖、`codegen.rs`/`ast.rs`/1.10.0 零改动、AArch64 零变化、双后端一致。
 
 **第 4 项 · PGO / LTO / bitcode（自建 profile 基础设施）** — 高风险、工程量最大，最后启动
 - 目标：让 asm 不再因缺 `.bc` 拒绝 `--pgo`，自建「插桩 → profile 收集 → 优化决策」闭环；LTO 走自研 IR 跨模块合并。
@@ -93,7 +93,8 @@
 
 - ~~第 1 项（工具链去 LLVM 化）~~ ✅ 已完成（2026-11-18，`tools/verify_no_llvm_toolchain.sh` AF2 组）。
 - ~~第 2 项（LLVM 独占优化回收）~~ ✅ 诊断完成、量化搁置（2026-11-18，`tools/diag_opt_gaps.py`）。
-- 当前开放项：**第 3 项（B 类语言语义在 asm 侧自建）**。
+- ~~第 3 项（B 类语言语义）~~ ✅ impl 关联函数 `T::new()` 已落地（2026-11-18，`tests/impl/impl_assoc.dial`）；其余三项按用户决策暂不展开。
+- 当前开放项：**第 4 项（PGO / LTO / bitcode 自建）**——高风险、工程量最大，前三项已收口，可择机启动。
 - 完成一项 → 在本附则勾选一项 → 再进下一项；不得并行铺开。
 
 ## 0. 护栏（路线的硬边界）

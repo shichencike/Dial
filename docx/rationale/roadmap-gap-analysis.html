@@ -161,11 +161,11 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 - 结论：<strong>诊断后量化搁置，不硬做负收益 pass</strong>（延续 e3at GRA 否决 / e3au ISA 边际递减 / e3av 跨函数 GRA 否决的纪律）。
 - 重启条件（写死在诊断工具输出）：① 出现高频小函数调用的新 workload；② 出现大量循环不变量计算；③ 语言层新增可并行语义 / 显式展开提示；④ 落后项归因改变。满足任一则重跑诊断。
 - 护栏：零产品代码、零新依赖、baseline/AArch64 零回归。</p>
-<p><strong>第 3 项 · B 类语言语义（在 asm 侧自建）</strong> — 中高风险
+<p><strong>第 3 项 · B 类语言语义（在 asm 侧自建）</strong> — 部分完成：<strong>impl 关联函数已落地</strong>，其余三项按用户 2026-11-18 决策暂不展开
 - 目标：把 LLVM 也没有的语言能力在 asm 后端补齐——select 超时 / impl 关联函数 <code>T::new()</code> / map<string> 值 / 原子类型，按总纲视为真实缺口。
-- 动作：① 逐项在 <code>semantic.rs</code>（非冻结）+ <code>lower.rs</code> + <code>codegen_asm.rs</code> 实现，<strong>不碰冻结的 <code>codegen.rs</code>/<code>ast.rs</code></strong>；② 确保 LLVM 后端不因语义层扩展而崩溃（transitional 兼容）；③ 以「LLVM 缺失时 asm 独立可用」为准。
-- 验收：新增 golden 覆盖 + 全门禁；LLVM 后端构建不回归。
-- 护栏：改语义层须评估对 LLVM 路径影响；并发/原子触及内存模型宪法裁决，放该项最后。</p>
+- ✅ <strong>已完成：impl 关联函数 <code>T::new()</code>（无 self 静态方法）</strong>。纯编译期脱糖：<code>lexer.rs</code> 加 <code>ColonColon</code> token；<code>parser.rs</code> 加 token 预扫描（前向引用 + 友好诊断）+ <code>parse_impl_def</code> 按首参名区分方法/关联函数 + <code>parse_primary</code> 的 <code>::</code> 降级为 <code>Expr::Call(__impl_T_m, args)</code>。<code>codegen.rs</code>/<code>lower.rs</code>/<code>semantic.rs</code>/<code>ast.rs</code> 零改动（复用 Call 链路）。覆盖带参/空参、返回 struct/标量、链式调用、前向引用；双后端一致、26 源码 .s 零回归；新增 <code>tests/impl/impl_assoc.dial</code>（R18 组）。
+- ⏸ <strong>暂不展开</strong>：select 超时（底层 <code>recv_timeout</code> 已具备，仅缺多通道语法糖）、map<string> 值（触及 semantic 泛型策略）、原子类型/无锁（内存模型宪法裁决）。用户 2026-11-18 明确本轮 R3 只做 impl 关联函数；其余待单独裁决再启。
+- 护栏遵守：零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64 零变化、双后端一致。</p>
 <p><strong>第 4 项 · PGO / LTO / bitcode（自建 profile 基础设施）</strong> — 高风险、工程量最大，最后启动
 - 目标：让 asm 不再因缺 <code>.bc</code> 拒绝 <code>--pgo</code>，自建「插桩 → profile 收集 → 优化决策」闭环；LTO 走自研 IR 跨模块合并。
 - 动作：① 定义不依赖 LLVM bitcode 的自研 profile 格式；② 插桩版 IR + 运行时 profile 写回；③ 基于 profile 的块布局/热冷分离；④ 跨模块 IR 合并实现 LTO。
@@ -175,7 +175,8 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 <ul>
 <li>~~第 1 项（工具链去 LLVM 化）~~ ✅ 已完成（2026-11-18，<code>tools/verify_no_llvm_toolchain.sh</code> AF2 组）。</li>
 <li>~~第 2 项（LLVM 独占优化回收）~~ ✅ 诊断完成、量化搁置（2026-11-18，<code>tools/diag_opt_gaps.py</code>）。</li>
-<li>当前开放项：<strong>第 3 项（B 类语言语义在 asm 侧自建）</strong>。</li>
+<li>~~第 3 项（B 类语言语义）~~ ✅ impl 关联函数 <code>T::new()</code> 已落地（2026-11-18，<code>tests/impl/impl_assoc.dial</code>）；其余三项按用户决策暂不展开。</li>
+<li>当前开放项：<strong>第 4 项（PGO / LTO / bitcode 自建）</strong>——高风险、工程量最大，前三项已收口，可择机启动。</li>
 <li>完成一项 → 在本附则勾选一项 → 再进下一项；不得并行铺开。</li>
 </ul>
 <h2 id="0-护栏路线的硬边界">0. 护栏（路线的硬边界）</h2>

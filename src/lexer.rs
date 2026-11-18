@@ -132,6 +132,7 @@ pub enum TokenKind {
     LBrace,
     RBrace,
     Colon,
+    ColonColon, // :: （R3：impl 关联函数 T::new() 调用）
     Dot,
     DotDot, // ..
     At,     // @ 注解前缀（v1.04 FFI 导出：@export fn）
@@ -804,11 +805,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 i += 1;
                 col += 1;
             }
-            ':' => {
-                push(TokenKind::Colon, start_line, start_col, &mut tokens);
-                i += 1;
-                col += 1;
-            }
+            ':' => match peek {
+                Some(':') => {
+                    // R3：`::` 用于 impl 关联函数调用 `T::new()`。最长匹配优先于单 `:`。
+                    push(TokenKind::ColonColon, start_line, start_col, &mut tokens);
+                    i += 2;
+                    col += 2;
+                }
+                _ => {
+                    push(TokenKind::Colon, start_line, start_col, &mut tokens);
+                    i += 1;
+                    col += 1;
+                }
+            },
             '.' => {
                 if peek == Some('.') && chars.get(i + 2).copied() == Some('.') {
                     // 三点优先于两点：`...xs: T` 不能被切成 `..` + `.`。

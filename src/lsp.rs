@@ -969,6 +969,7 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::LBrace
         | TokenKind::RBrace
         | TokenKind::Colon
+        | TokenKind::ColonColon
         | TokenKind::Dot
         | TokenKind::DotDot
         | TokenKind::Ellipsis
@@ -1077,6 +1078,7 @@ fn fixed_text(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::LBrace => "{",
         TokenKind::RBrace => "}",
         TokenKind::Colon => ":",
+        TokenKind::ColonColon => "::",
         TokenKind::Dot => ".",
         TokenKind::DotDot => "..",
         TokenKind::Ellipsis => "...",

@@ -22,13 +22,86 @@ use std::collections::HashMap;
 /// 之所以要外部传入：包要先 `import` 才能知道它有哪些句柄，而 `import` 本身
 /// 又在源码里——所以调用方先解析一遍拿到 import 列表、解析好包，再带着这批名字重新解析。
 /// 解析一遍的成本可以忽略，换来的是「类型名在语法阶段就正确」。
+/// R3：token 级预扫描，收集可挂 impl 的类型名与每个类型的关联函数名。
+///
+/// 之所以在正式解析前单独扫一遍，是为了让 `T::new()` 支持前向引用——与类型标注
+/// （struct 可后定义）行为一致；若像 enum_names 那样单遍填充，写在 struct 定义之前的
+/// `T::new()` 会被误报"类型未声明"。
+///
+/// 只认**顶层**（花括号深度 0）的 `Struct Ident` 与 `impl Ident { ... }`：
+/// struct 定义只允许出现在顶层；impl 块内的方法体在更深的花括号层，不会误收。
+fn collect_type_names(
+    tokens: &[Token],
+    opaque: &[String],
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashMap<String, std::collections::HashSet<String>>,
+) {
+    let mut type_names: std::collections::HashSet<String> = opaque.iter().cloned().collect();
+    let mut impl_methods: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut depth: i32 = 0;
+    // impl 块追踪：Some((类型名, 进入时的深度))。方法定义出现在 depth == impl_depth+1。
+    let mut impl_stack: Vec<(String, i32)> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        let kind = &tokens[i].kind;
+        match kind {
+            TokenKind::LBrace => {
+                depth += 1;
+            }
+            TokenKind::RBrace => {
+                depth -= 1;
+                impl_stack.retain(|(_, d)| depth > *d);
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            // struct / extern struct / packed struct：Struct 后紧跟 Ident 即类型名。
+            if matches!(kind, TokenKind::Struct) {
+                if let Some(Token { kind: TokenKind::Ident(n), .. }) = tokens.get(i + 1) {
+                    type_names.insert(n.clone());
+                }
+            }
+            // impl T { （impl 仍是普通标识符）
+            if let TokenKind::Ident(n) = kind {
+                if n == "impl" {
+                    if let (Some(Token { kind: TokenKind::Ident(t), .. }), Some(Token { kind: TokenKind::LBrace, .. })) =
+                        (tokens.get(i + 1), tokens.get(i + 2))
+                    {
+                        type_names.insert(t.clone());
+                        impl_methods.entry(t.clone()).or_default();
+                        // 记录进入深度为当前 depth(0)；LBrace 将在下一轮把 depth 变 1。
+                        impl_stack.push((t.clone(), depth));
+                    }
+                }
+            }
+        }
+        // 方法定义：处在某个 impl 块内、相对深度 == impl_depth+1 的 `fn <name>`。
+        if matches!(kind, TokenKind::Fn) && !impl_stack.is_empty() {
+            if let Some((t, d)) = impl_stack.last() {
+                if depth == *d + 1 {
+                    if let Some(Token { kind: TokenKind::Ident(m), .. }) = tokens.get(i + 1) {
+                        impl_methods.entry(t.clone()).or_default().insert(m.clone());
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    (type_names, impl_methods)
+}
+
 pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program> {
+    let (pre_type_names, pre_impl_methods) = collect_type_names(&tokens, opaque_types);
     let mut p = Parser {
         tokens,
         pos: 0,
         opaque: opaque_types.to_vec(),
         consts: std::collections::HashMap::new(),
         enum_names: std::collections::HashSet::new(),
+        type_names: pre_type_names,
+        impl_methods: pre_impl_methods,
     };
     let mut imports = Vec::new();
     let mut structs = Vec::new();
@@ -138,6 +211,11 @@ struct Parser {
     consts: std::collections::HashMap<String, (Type, Expr)>,
     /// 已声明的枚举名（v1.00）：用于把 `Name.Variant` 整段识别为枚举变体。
     enum_names: std::collections::HashSet<String>,
+    /// R3：可挂 impl 的类型名（本程序 struct + 导入包 opaque）。由 pre-scan 一次性收集，
+    /// 用于 `T::m()` 校验 T 已声明（支持前向引用）。
+    type_names: std::collections::HashSet<String>,
+    /// R3：每个类型已定义的关联函数/方法名，用于 `T::m()` 的友好诊断（"类型 X 没有关联函数 y"）。
+    impl_methods: std::collections::HashMap<String, std::collections::HashSet<String>>,
 }
 
 impl Parser {
@@ -388,17 +466,10 @@ impl Parser {
                 ));
             }
             let f = self.parse_function_with_self(Some(recv_ty.clone()))?;
-            // 首参必须是 self，且不写类型标注（源码形如 `fn m(self, x: int)`）。
-            if f.params.first().map(|(n, _)| n.as_str()) != Some("self") {
-                return Err(DialcError::new(
-                    format!(
-                        "语法错误：impl 方法 '{}' 的第一个形参必须是 self（无类型标注）",
-                        f.name
-                    ),
-                    f.line,
-                    f.col,
-                ));
-            }
+            // R3：首参名为 `self` 即实例方法（注入接收者类型）；否则是**关联函数**
+            // （无 self 的静态方法，如 `fn new(x: int): T`），首参原样保留、不注入类型。
+            // 关联函数首参不可命名 self——那是方法的保留规则。
+            let is_method = f.params.first().map(|(n, _)| n.as_str()) == Some("self");
             // B1 现役边界（如实标注、不夸大）：impl 方法暂不支持同类型变参
             // `...xs: T`。变参脱糖 desugar_varargs 基于 `Expr::Call(name, ...)`
             // 的**函数名**打包尾部实参，而 impl 调用的符号名要到语义层按 obj
@@ -415,9 +486,12 @@ impl Parser {
                     f.col,
                 ));
             }
-            // 把 self 的类型补成接收者类型，并 mangle 方法名。
+            // 方法：把 self 的类型补成接收者类型（is_method 保证 params[0] 存在）。
+            // 关联函数：首参原样保留，不注入。两者都 mangle 成普通函数名复用 Call 链路。
             let mut f = f;
-            f.params[0].1 = recv_ty.clone();
+            if is_method {
+                f.params[0].1 = recv_ty.clone();
+            }
             let raw_name = f.name.clone();
             f.name = impl_method_symbol(&recv, &raw_name);
             if !seen.insert(f.name.clone()) {
@@ -517,6 +591,7 @@ impl Parser {
             }
         }
         self.expect(TokenKind::RBrace)?;
+        self.type_names.insert(name.clone()); // R3 双保险
         Ok(CStructDef {
             name,
             fields,
@@ -593,6 +668,7 @@ impl Parser {
             }
         }
         self.expect(TokenKind::RBrace)?;
+        self.type_names.insert(name.clone()); // R3 双保险
         Ok(StructDef {
             name,
             fields,
@@ -790,6 +866,8 @@ impl Parser {
             opaque: self.opaque.clone(),
             consts: self.consts.clone(),
             enum_names: self.enum_names.clone(),
+            type_names: self.type_names.clone(),
+            impl_methods: self.impl_methods.clone(),
         };
         sub.parse_expr().map_err(|_| {
             DialcError::new("语法错误：字符串插值 ${...} 内的表达式语法错误", line, col)
@@ -2279,6 +2357,48 @@ impl Parser {
                         format!("语法错误：枚举 '{}' 没有变体 '{}'", name, v),
                         vl, vc,
                     ));
+                }
+                // R3：关联函数调用 `T::m(args)`。在正式解析前已由 collect_type_names
+                // 收集全部顶层 struct/opaque 与 impl 方法名，故支持前向引用。
+                // 直接脱糖为 `Expr::Call(__impl_T_m, args)`——复用整条 Call 链路，
+                // `::` 解析后消失、不进符号表，两端代码生成零改动。
+                if self.pos + 1 < self.tokens.len()
+                    && matches!(self.tokens[self.pos + 1].kind, TokenKind::ColonColon)
+                {
+                    if !self.type_names.contains(&name) {
+                        return Err(DialcError::new(
+                            format!(
+                                "语法错误：类型 '{}' 未声明，无法调用关联函数（关联函数只能定义在 struct / 不透明句柄上）",
+                                name
+                            ),
+                            tok.line, tok.col,
+                        ));
+                    }
+                    self.advance(); // 消费类型名 T
+                    self.expect(TokenKind::ColonColon)?;
+                    let (method, ml, mc) = self.expect_ident_pos()?;
+                    let known = self.impl_methods.get(&name);
+                    if known.map_or(true, |set| !set.contains(&method)) {
+                        return Err(DialcError::new(
+                            format!("语法错误：类型 '{}' 没有关联函数 '{}'", name, method),
+                            ml, mc,
+                        ));
+                    }
+                    self.expect(TokenKind::LParen)?;
+                    let mut call_args = Vec::new();
+                    if !self.check(&TokenKind::RParen) {
+                        loop {
+                            call_args.push(self.parse_expr()?);
+                            if self.check(&TokenKind::Comma) {
+                                self.advance();
+                                continue;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(Expr::Call(impl_method_symbol(&name, &method), call_args));
                 }
                 self.advance();
                 // 类型实参（v1.02）：`ptr_cast<rawptr<byte>>(x)`。

@@ -2698,15 +2698,15 @@ done
 # R18) impl 方法块调用 + 默认实参补齐（M7-e3aq）
 #     B1 impl 方法：Struct/Opaque 具名类型的 obj.m() 改写为 __impl_T_m 普通调用；
 #     默认实参：缺失尾部参数在调用点按 FuncInfo.defaults 补齐（此前 asm 完全缺失，
-#     读到栈槽垃圾）。验证三个官方 impl 用例 + 普通默认参数函数双后端一致。
+#     读到栈槽垃圾）。验证 impl 用例（含 R3 关联函数）+ 普通默认参数函数双后端一致。
 # ===========================================================================
 echo
 echo "  -- R18) impl 方法调用与默认参数补齐双后端一致性 --"
 CDIR18="${TMP}/r18"
 mkdir -p "$CDIR18"
 
-# 18a) 三个官方 impl 用例：asm 输出须匹配 .expected 且与 LLVM 一致
-for t in impl_struct impl_default impl_gui_handle; do
+# 18a) impl 用例（含关联函数 impl_assoc）：asm 输出须匹配 .expected 且与 LLVM 一致
+for t in impl_struct impl_default impl_gui_handle impl_assoc; do
     if ${DIALC} build "tests/impl/$t.dial" --backend=asm -o "$CDIR18/${t}_a" >/dev/null 2>&1 \
        && ${DIALC} build "tests/impl/$t.dial" --backend=llvm -o "$CDIR18/${t}_l" >/dev/null 2>&1; then
         "$CDIR18/${t}_a" > "$CDIR18/${t}_a.out" 2>&1; _ra=$?
@@ -4662,8 +4662,10 @@ else
     acpass "包不透明句柄 impl 全绿：win.draw() 等价 dial_gui_window_draw(win)，self 作 Opaque 首参传给包 extern fn"
 fi
 
-# 4) 负向：6 个 Fail-Fast 边界（未知方法 / 参数类型 / 参数个数 / 缺 self /
+# 4) 负向：6 个 Fail-Fast 边界（未知方法 / 参数类型 / 参数个数 / 关联函数类型未声明 /
 #    重复方法 / 空块）逐一拒绝，并锁定诊断不暴露内部 mangle 名、不把 self 计入参数个数。
+#    注：R3 放开「impl 方法首参必须是 self」后，原「缺 self」用例转为测关联函数调用点
+#    的类型未声明 Fail-Fast（首参非 self 现为合法的关联函数，见正向 impl_assoc.dial）。
 ac_neg_ok=0
 ac_neg_total=0
 for f in tests/bad/impl_*.dial; do
@@ -4673,7 +4675,7 @@ for f in tests/bad/impl_*.dial; do
     fi
 done
 if [ "$ac_neg_total" -ge 6 ] && [ "$ac_neg_ok" -eq "$ac_neg_total" ]; then
-    acpass "Fail-Fast 负向 $ac_neg_ok/$ac_neg_total 全被拒绝（未知方法·参数类型·参数个数·缺 self·重复方法·空块）"
+    acpass "Fail-Fast 负向 $ac_neg_ok/$ac_neg_total 全被拒绝（未知方法·参数类型·参数个数·关联函数类型未声明·重复方法·空块）"
 else
     acbad "Fail-Fast 负向未全部拒绝（$ac_neg_ok/$ac_neg_total）"
 fi

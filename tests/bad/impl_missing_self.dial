@@ -1,4 +1,7 @@
-// 应当编译失败：impl 方法首参必须是 self（无类型标注）
+// 应当编译失败（R3 关联函数负向）：对未声明的类型调用关联函数 T::m()。
+// 旧规则下本文件测「impl 方法首参必须是 self」；R3 放开该限制后，首参非 self
+// 已合法（见正向用例 tests/impl/impl_assoc.dial），故转为锁定关联函数调用点的
+// Fail-Fast：parser 预扫描须报「类型 'Unknown' 未声明，无法调用关联函数」。
 struct P { x: int }
-impl P { fn get(k: int): int { return k; } }
-fn main(): int { return 0; }
+impl P { fn get(self): int { return self.x; } }
+fn main(): int { var v: int = Unknown::new(); return v; }

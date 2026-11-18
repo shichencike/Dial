@@ -3318,3 +3318,24 @@ imulq   %r10, %r15     # s * 31
 8. 门禁：run_tests.sh、cargo test、差分 fuzz（golden+固化语料+在线 180 次零不一致）。
 
 **范围与护栏**：改动只在 `src/ir.rs`（类型映射 reg_ir Simd→Ptr）与 `src/lower.rs`（simd 构造/二元/提取/layout/expr_dt + 栈段辅助方法），不改 `codegen_asm.rs`/`pass.rs`（无新 IR 指令，故所有穷举 match 不变）、不改 `src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0、零新依赖、LLVM 路径零改动、AArch64 零变化、构建零警告、不打 tag、docx 确定性。注：run_tests.sh 的 R8 断言从「asm 应拒绝 simd 布局内建」更新为「asm/llvm 双后端 simd 布局输出一致」（int4=32 byte16=16/16）——这是本批补齐能力后的预期测试更新。
+
+---
+
+## R3：impl 关联函数 `T::new()`（无 self 静态方法）—— 唯一后端收回路线图第 3 项
+
+**为什么做**：唯一后端总纲（见 roadmap-gap-analysis.md）确立「假设 LLVM 不存在、只有自己」，收回路线图把 B 类语言语义缺口列为真实能力缺口。用户 2026-11-18 决策本轮 R3 只落地 impl 关联函数这一小项——`impl T { fn m(self,...) }` 已支持，但无 self 的 `T::new()` 是 README §37.12 明列的现役边界。
+
+**实现**：纯编译期脱糖，把 `T::m(args)` 在 parser 阶段改写为 `Expr::Call(__impl_T_m, args)`，复用整条既有 Call 链路。改动严格限定在：
+- `src/lexer.rs`：`TokenKind` 加 `ColonColon`；`:` 分支照 `=`/`.` 模式最长匹配 `::`；`src/lsp.rs` 同步高亮配色与 token→字符串（两处穷尽 match）。
+- `src/parser.rs`：① 新增 `collect_type_names` token 预扫描（在正式解析前一次性收集顶层 `Struct Ident` 与 `impl Ident { fn m }` 名，支持前向引用、与类型标注行为一致），Parser 加 `type_names`/`impl_methods` 字段并在 `parse_with`/子 Parser 初始化；② `parse_struct_def`/`parse_extern_struct` 加 type_names 双保险；③ `parse_impl_def` 以首参名是否为 `self` 区分实例方法（注入接收者类型）与关联函数（首参原样），空参 guard 防 `fn new()` 越界，统一 mangle；④ `parse_primary` 的 `::` 分支校验 T 已声明与方法存在后降级为 `Expr::Call`，给出「类型 'X' 未声明」「类型 'X' 没有关联函数 'y'」友好诊断。
+- `codegen.rs`/`lower.rs`/`semantic.rs`/`ast.rs` **零改动**：mangle 后是普通函数，自然进 funcs/functions_sig 表，两端代码生成复用 Call 链路；`::` 解析后消失不进符号表。
+
+**验证（语义正确 + 零回归）**：
+1. **正向**：带参关联函数 `Point::new(3,4)`、空参 `Point::origin()`、返回标量 `Point::scale(21)`、链式 `Point::new(10,20).sum()`（实测可用）——asm/llvm 双后端输出逐字节一致（7/0/42/30）。
+2. **前向引用**：main 写在 struct/impl 之前仍能解析（预扫描生效）。
+3. **负向 Fail-Fast**：`Unknown::new()`→「类型 'Unknown' 未声明」；`P::missing()`→「类型 'P' 没有关联函数 'missing'」。
+4. **零回归铁证**：git worktree 从 HEAD(3011131) 构建基线二进制，26 个源码（18 golden + bench + 现有 3 impl + batch）的 asm -O2 `.s` 与新版**逐字节一致**（归一化 `.file` 调试路径后差异 0）。这直接证明 lexer 的 `:` 最长匹配改动未影响 struct 字段、形参、默认参数、枚举显式值等所有单 `:` 构造。
+5. 完整 golden 门禁（19 用例）全绿；cargo test 全过；现有三个 impl 用例输出匹配 .expected。
+6. 新增 `tests/impl/impl_assoc.dial` + `.expected`，挂入 run_tests.sh R18 组（双编译 + 互 diff + 对 .expected diff）。
+
+**范围与护栏**：`::` 为新增语法、不新增关键字（`impl`/`new` 仍可作普通标识符）；关联函数首参不可命名 self（保留规则）；不支持链式 `T::A::B()` 与泛型形态（B2 未落地）。只改 lexer/parser/lsp + 测试/文档，零新依赖、`codegen.rs`/`ast.rs`/1.10.0 零改动、AArch64 零变化、双后端一致、不打 tag、docx 确定性。剩余三项（select 超时 / map<string> 值 / 原子类型）按用户决策暂不展开。

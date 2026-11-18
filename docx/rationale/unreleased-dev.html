@@ -48,6 +48,7 @@
 <li><a href="#m7-e3azasm-后端补齐显式-simdt-n-原生向量高级指令集主线第二批语义逐值对齐-llvm">M7-e3az：asm 后端补齐显式 simd&lt;T, N&gt; 原生向量（高级指令集主线第二批，语义逐值对齐 LLVM）</a></li>
 </ul>
 </li>
+<li><a href="#r3impl-关联函数-tnew无-self-静态方法-唯一后端收回路线图第-3-项">R3：impl 关联函数 T::new()（无 self 静态方法）—— 唯一后端收回路线图第 3 项</a></li>
 </ul>
 </li>
 </ul>
@@ -3459,7 +3460,22 @@ imulq   %r10, %r15     # s * 31
 6. <strong>语义拒绝仍生效</strong>：<code>bad/simd_*.dial</code>（bad_elem/nested/len_not_const/ctor_arity/mixed_types 等）在 parser/sema 层仍全部拒绝（这些是本批之前的语言层约束，不受影响）。
 7. <strong>新增 golden</strong> <code>tests/asm_golden/simd.dial</code>：双后端输出逐字节一致，run_asm_golden 19 用例全绿。
 8. 门禁：run_tests.sh、cargo test、差分 fuzz（golden+固化语料+在线 180 次零不一致）。</p>
-<p><strong>范围与护栏</strong>：改动只在 <code>src/ir.rs</code>（类型映射 reg_ir Simd→Ptr）与 <code>src/lower.rs</code>（simd 构造/二元/提取/layout/expr_dt + 栈段辅助方法），不改 <code>codegen_asm.rs</code>/<code>pass.rs</code>（无新 IR 指令，故所有穷举 match 不变）、不改 <code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0、零新依赖、LLVM 路径零改动、AArch64 零变化、构建零警告、不打 tag、docx 确定性。注：run_tests.sh 的 R8 断言从「asm 应拒绝 simd 布局内建」更新为「asm/llvm 双后端 simd 布局输出一致」（int4=32 byte16=16/16）——这是本批补齐能力后的预期测试更新。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+<p><strong>范围与护栏</strong>：改动只在 <code>src/ir.rs</code>（类型映射 reg_ir Simd→Ptr）与 <code>src/lower.rs</code>（simd 构造/二元/提取/layout/expr_dt + 栈段辅助方法），不改 <code>codegen_asm.rs</code>/<code>pass.rs</code>（无新 IR 指令，故所有穷举 match 不变）、不改 <code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0、零新依赖、LLVM 路径零改动、AArch64 零变化、构建零警告、不打 tag、docx 确定性。注：run_tests.sh 的 R8 断言从「asm 应拒绝 simd 布局内建」更新为「asm/llvm 双后端 simd 布局输出一致」（int4=32 byte16=16/16）——这是本批补齐能力后的预期测试更新。</p>
+<hr />
+<h2 id="r3impl-关联函数-tnew无-self-静态方法-唯一后端收回路线图第-3-项">R3：impl 关联函数 <code>T::new()</code>（无 self 静态方法）—— 唯一后端收回路线图第 3 项</h2>
+<p><strong>为什么做</strong>：唯一后端总纲（见 roadmap-gap-analysis.md）确立「假设 LLVM 不存在、只有自己」，收回路线图把 B 类语言语义缺口列为真实能力缺口。用户 2026-11-18 决策本轮 R3 只落地 impl 关联函数这一小项——<code>impl T { fn m(self,...) }</code> 已支持，但无 self 的 <code>T::new()</code> 是 README §37.12 明列的现役边界。</p>
+<p><strong>实现</strong>：纯编译期脱糖，把 <code>T::m(args)</code> 在 parser 阶段改写为 <code>Expr::Call(__impl_T_m, args)</code>，复用整条既有 Call 链路。改动严格限定在：
+- <code>src/lexer.rs</code>：<code>TokenKind</code> 加 <code>ColonColon</code>；<code>:</code> 分支照 <code>=</code>/<code>.</code> 模式最长匹配 <code>::</code>；<code>src/lsp.rs</code> 同步高亮配色与 token→字符串（两处穷尽 match）。
+- <code>src/parser.rs</code>：① 新增 <code>collect_type_names</code> token 预扫描（在正式解析前一次性收集顶层 <code>Struct Ident</code> 与 <code>impl Ident { fn m }</code> 名，支持前向引用、与类型标注行为一致），Parser 加 <code>type_names</code>/<code>impl_methods</code> 字段并在 <code>parse_with</code>/子 Parser 初始化；② <code>parse_struct_def</code>/<code>parse_extern_struct</code> 加 type_names 双保险；③ <code>parse_impl_def</code> 以首参名是否为 <code>self</code> 区分实例方法（注入接收者类型）与关联函数（首参原样），空参 guard 防 <code>fn new()</code> 越界，统一 mangle；④ <code>parse_primary</code> 的 <code>::</code> 分支校验 T 已声明与方法存在后降级为 <code>Expr::Call</code>，给出「类型 'X' 未声明」「类型 'X' 没有关联函数 'y'」友好诊断。
+- <code>codegen.rs</code>/<code>lower.rs</code>/<code>semantic.rs</code>/<code>ast.rs</code> <strong>零改动</strong>：mangle 后是普通函数，自然进 funcs/functions_sig 表，两端代码生成复用 Call 链路；<code>::</code> 解析后消失不进符号表。</p>
+<p><strong>验证（语义正确 + 零回归）</strong>：
+1. <strong>正向</strong>：带参关联函数 <code>Point::new(3,4)</code>、空参 <code>Point::origin()</code>、返回标量 <code>Point::scale(21)</code>、链式 <code>Point::new(10,20).sum()</code>（实测可用）——asm/llvm 双后端输出逐字节一致（7/0/42/30）。
+2. <strong>前向引用</strong>：main 写在 struct/impl 之前仍能解析（预扫描生效）。
+3. <strong>负向 Fail-Fast</strong>：<code>Unknown::new()</code>→「类型 'Unknown' 未声明」；<code>P::missing()</code>→「类型 'P' 没有关联函数 'missing'」。
+4. <strong>零回归铁证</strong>：git worktree 从 HEAD(3011131) 构建基线二进制，26 个源码（18 golden + bench + 现有 3 impl + batch）的 asm -O2 <code>.s</code> 与新版<strong>逐字节一致</strong>（归一化 <code>.file</code> 调试路径后差异 0）。这直接证明 lexer 的 <code>:</code> 最长匹配改动未影响 struct 字段、形参、默认参数、枚举显式值等所有单 <code>:</code> 构造。
+5. 完整 golden 门禁（19 用例）全绿；cargo test 全过；现有三个 impl 用例输出匹配 .expected。
+6. 新增 <code>tests/impl/impl_assoc.dial</code> + <code>.expected</code>，挂入 run_tests.sh R18 组（双编译 + 互 diff + 对 .expected diff）。</p>
+<p><strong>范围与护栏</strong>：<code>::</code> 为新增语法、不新增关键字（<code>impl</code>/<code>new</code> 仍可作普通标识符）；关联函数首参不可命名 self（保留规则）；不支持链式 <code>T::A::B()</code> 与泛型形态（B2 未落地）。只改 lexer/parser/lsp + 测试/文档，零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64 零变化、双后端一致、不打 tag、docx 确定性。剩余三项（select 超时 / map<string> 值 / 原子类型）按用户决策暂不展开。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
