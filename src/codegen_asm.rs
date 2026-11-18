@@ -2364,10 +2364,15 @@ impl<'a> FnEmit<'a> {
                 return;
             }
         }
-        // imul/idiv/移位没有 `reg, imm` 形式，浮点也没有立即数操作数；
-        // 这些情况下仍把 b 装进 g2，其余直接让 x86 读内存/立即数。
+        // M7-e3au：imul 亦有 imm32 形式——x86-64 的 `imulq $imm32, r/m64, r64`
+        // （GAS 对两操作数 `imulq $imm32, r/m64` 自动编码为隐含目的的三操作数形式），
+        // 且 imm32 按符号扩展参与 64 位乘法，与「先 movabsq 装 64 位再 imulq reg」
+        // 在 int64 低 64 位语义上完全等价（已用 cc 汇编 + objdump 验证正/负 imm32）。
+        // 因此把 Mul 一并纳入立即数折叠：常量落在 imm32 时省掉一条 movabsq（10 字节）
+        // 与一个临时寄存器。idiv/移位、浮点仍无立即数形式，维持装寄存器。
+        // AArch64 的 bin_src 根本不处理 Imm（恒走 lg/lf），此开关对其零影响。
         let allow_imm = matches!(op,
-            ABin::Add | ABin::Sub | ABin::And | ABin::Or |
+            ABin::Add | ABin::Sub | ABin::Mul | ABin::And | ABin::Or |
             ABin::BitAnd | ABin::BitOr | ABin::BitXor |
             ABin::Eq | ABin::Neq | ABin::Lt | ABin::Gt | ABin::Le | ABin::Ge);
         // M7-a2 快路径：dst 驻留时把结果直接算进它的物理寄存器。

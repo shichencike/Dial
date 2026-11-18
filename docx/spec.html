@@ -1221,7 +1221,7 @@ LLVM 的通用后端」。经 M7-e3u 的系统诊断，剩余差距不在单条 
 <td><strong>① O3 级优化管线</strong>（核心＝全局寄存器分配）</td>
 <td>inkwell + clang <code>-O3 -flto</code> 全流程（仅 <code>--fast</code>）</td>
 <td>曾有 4 个本地 pass + 2 专项 pass，无全局寄存器分配 → b17 内层 109 条栈搬运</td>
-<td><strong>M7-e3v 落地函数级 GRA</strong>（callee-saved 全函数驻留），数组密集项 +9.91%；<strong>M7-e3x 定量证伪完整 SIMD 后端</strong>（整体 −6.7%）转 targeted ISA 路线；<strong>M7-e3y 原生 POPCNT 融合</strong> b23 +114%~120%、几何平均 +2.5%；<strong>M7-e3ac/e3ad 优化级别参数 <code>-O0</code>~<code>-O3</code></strong>（对齐 LLVM，O2 默认零回归）+ <strong>移植 LLVM InstCombine 恒等式</strong>（O3，<code>a+0</code>/<code>a*1</code> 等消除，密集循环 +23%）；<strong>M7-e3at 定量诊断 caller-saved GRA</strong>（上界比 0.629&lt;1、86.8% 栈槽仅访问≤2 次为 C ABI 强制落栈），ROI 为负、暂否决内核级 live-range 重写（附重启条件）；多级管线仍待补</td>
+<td><strong>M7-e3v 落地函数级 GRA</strong>（callee-saved 全函数驻留），数组密集项 +9.91%；<strong>M7-e3x 定量证伪完整 SIMD 后端</strong>（整体 −6.7%）转 targeted ISA 路线；<strong>M7-e3y 原生 POPCNT 融合</strong> b23 +114%~120%、几何平均 +2.5%；<strong>M7-e3ac/e3ad 优化级别参数 <code>-O0</code>~<code>-O3</code></strong>（对齐 LLVM，O2 默认零回归）+ <strong>移植 LLVM InstCombine 恒等式</strong>（O3，<code>a+0</code>/<code>a*1</code> 等消除，密集循环 +23%）；<strong>M7-e3at 定量诊断 caller-saved GRA</strong>（上界比 0.629&lt;1、86.8% 栈槽仅访问≤2 次为 C ABI 强制落栈），ROI 为负、暂否决内核级 live-range 重写（附重启条件）；<strong>M7-e3au 常量乘立即数融合</strong>（<code>imulq $imm32,r</code> 省掉 movabsq，取整乘 imm32 边界正确）；多级管线仍待补</td>
 </tr>
 <tr>
 <td><strong>② DWARF 调试信息</strong></td>

@@ -39,6 +39,7 @@
 <li><a href="#m7-e3ar新增双后端差分-fuzz-框架把实现一致性-bug变成可复现的自动化发现流程">M7-e3ar：新增双后端差分 fuzz 框架（把「实现一致性 bug」变成可复现的自动化发现流程）</a></li>
 <li><a href="#m7-e3as自研-asm-后端补齐内联汇编-asmt--asm_intelt语义层最后的纯能力差距">M7-e3as：自研 asm 后端补齐内联汇编 @asm&lt;T&gt;(...) / @asm_intel&lt;T&gt;(...)（语义层最后的纯能力差距）</a></li>
 <li><a href="#m7-e3atcaller-saved-寄存器分配的收益诊断用数据否决高风险架构重写零产品代码改动">M7-e3at：caller-saved 寄存器分配的收益诊断（用数据否决高风险架构重写，零产品代码改动）</a></li>
+<li><a href="#m7-e3au常量乘立即数融合imulq-imm32-r-代替-movabsq--imulq">M7-e3au：常量乘立即数融合（imulq $imm32, r 代替 movabsq + imulq）</a></li>
 </ul>
 </li>
 </ul>
@@ -3284,7 +3285,20 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
 - <strong>call 密集函数栈帧巨大</strong>：run 1416B、b17 936B、b21 520B——这不是寄存器少导致的 spill，而是跨 call 的 ARC/字符串/数组值必须落栈。</p>
 <p><strong>结论：暂不投入 live-range 重写</strong>。三条证据同源：call 密集函数里值得驻留的值，要么活不过下一次 call（占多数，再多 caller-saved 也救不了），要么已在 6 个 callee-saved 里（够用）；收益空间恰好落在已领先 LLVM 的数组/字符串类，而持平 LLVM、最该提速的算术类是无 call 函数（caller-saved 根本够不着）。live-range 重写即便成功，可消除量受限于上述 ABI 事实，不足以抵消内核级重写成本与回归风险。<strong>这与 e3x 否决完整 SIMD 是同一决策模式</strong>：不是「做不到」，而是「ROI 为负，把工程投到确定的方向」。</p>
 <p><strong>重启条件（写下来，避免以后重复评估）</strong>：若将来出现新的 workload——call 之间有大量长 live-range 整数值（例如密集的多参数数值计算、跨多个 call 持有的累加器），使 <code>diag_gra.py</code> 的上界比显著 &gt;1 且高频栈槽占比明显上升——则重新评估 caller-saved live-range 分配。当前 bench 不满足。</p>
-<p><strong>护栏</strong>：本批零产品代码改动——<code>src/</code> 全部文件、<code>Cargo.toml</code>、所有 <code>.s</code> 输出逐字节不变；新增的只有 <code>tools/diag_gra.py</code>（诊断工具）与本条 rationale。A/B 基准、AF/AG 门禁、docx 确定性均不受影响。性能支柱①的后续主线仍是已证明正收益的 targeted ISA 融合与 InstCombine 恒等式移植。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+<p><strong>护栏</strong>：本批零产品代码改动——<code>src/</code> 全部文件、<code>Cargo.toml</code>、所有 <code>.s</code> 输出逐字节不变；新增的只有 <code>tools/diag_gra.py</code>（诊断工具）与本条 rationale。A/B 基准、AF/AG 门禁、docx 确定性均不受影响。性能支柱①的后续主线仍是已证明正收益的 targeted ISA 融合与 InstCombine 恒等式移植。</p>
+<hr />
+<h4 id="m7-e3au常量乘立即数融合imulq-imm32-r-代替-movabsq--imulq">M7-e3au：常量乘立即数融合（<code>imulq $imm32, r</code> 代替 <code>movabsq + imulq</code>）</h4>
+<p><strong>为什么做这个</strong>：承接 e3at——caller-saved 架构级重写被数据否决后，延续「已证明正收益」的 targeted ISA 微融合主线（POPCNT/e3l LEA/e3k 掩码折叠均属此列）。审计 b02（乘加取模，A/B 中算术类唯一明显落后项，1.075x）的汇编，发现每次循环迭代都发：</p>
+<pre><code>movabsq $31, %r10      # 10 字节，把小常量 31 装进 64 位寄存器
+imulq   %r10, %r15     # s * 31
+</code></pre>
+<p>根因：<code>inst_bin</code> 的 <code>allow_imm</code> 变量排除了 <code>ABin::Mul</code>，注释写「imul 没有立即数形式」——这对 32 位 x86 成立，但 <strong>x86-64 有 <code>imulq $imm32, r/m64, r64</code> 三操作数形式</strong>。常量 31 因此在驻留快路径里走 <code>bin_src(allow_imm=false)</code> → <code>lg</code> → <code>mov_imm64</code> → <code>movabsq</code>，白白多一条 10 字节指令并占用一个临时寄存器。</p>
+<p><strong>权威验证（汇编器 + 反汇编）</strong>：写最小 <code>.s</code> 交 <code>cc -c</code>，<code>objdump</code> 确认 <code>imulq $31, %r15</code> 编码成 <code>imul $0x1f,%r15,%r15</code>、<code>imulq $-7, %rax</code> 编码成 <code>imul $0xfffffffffffffff9,%rax,%rax</code>（imm32 正确符号扩展）、<code>imulq $100000, %r14, %r14</code> 三操作数形式合法。语义等价性：两操作数/三操作数 imul 都只保留 64 位低半，与「movabsq 装完整 64 位 + imulq reg」在 Dial 的 int64 模 2^64 语义下逐位相同；<code>bin_src</code> 自身有 imm32 范围检查（超出即退回 lg 装寄存器），且内置 <code>!matches!(Imm::F64|F32)</code> 保护，浮点乘走 FBin 不经过此处。</p>
+<p><strong>实现</strong>：<code>codegen_asm.rs</code> 一处小改——<code>allow_imm</code> 的 <code>matches!</code> 列表加入 <code>ABin::Mul</code>（净 +8/-3 行）。驻留快路径（<code>imulq b_src, pd_r</code>）与通用路径（<code>imulq b_reg, a_reg</code>）统一受益：imm32 常量直接得到 <code>$n</code>，生成单条 <code>imulq $imm, reg</code>。超范围常量（如 4294967296）自动退回 <code>movabsq + imulq</code>，已实测。AArch64 的 <code>bin_src</code> 在 <code>if matches!(X86_64SysV)</code> 分支内，恒走 lg/lf，此开关对其完全不可见。</p>
+<p><strong>零回归归因</strong>（这是护栏的核心）：以改动前编译器（二进制 md5 5849a728…）为基线，逐 golden 编译对比 <code>.s</code>。17 个 golden 中仅 <code>control_flow</code>、<code>fnptr</code> 两个汇编变化，且 diff <strong>逐行全部是</strong> <code>movabsq $2,%r10; imulq %r10,reg</code> → <code>imulq $2,reg</code>（正是预期融合），无任何意外变化；其余 15 个逐字节不变。含常量乘的专项程序在 AArch64 交叉汇编下 <code>.o</code> 逐字节一致（md5 596424068c…）。这种「变化可被逐条归因到预期特性、其余零变化」是仓库零回归纪律的黄金标准。</p>
+<p><strong>性能归因（诚实记录边际性）</strong>：用 bench 程序的 <code>./bin &lt;tid&gt; &lt;rep&gt;</code> 单项计时接口，基线与新编译器各 7 轮取最小：b03 +1.2%、b05 +1.4%、b02 +0.25%；b02 收益最小是因为其瓶颈是 <code>% 1000000007</code> 除法逆元的乘法依赖链（约 10 条指令），常量 31 的 imul 只占循环一角。<code>--quick</code> 整体几何平均 0.5337x→0.5367x 属计时噪声带（15/11/2→14/10/4 为抖动）。<strong>b02 仍 1.067x 落后 LLVM</strong>——这与 README 既有判断「targeted ISA 微融合收益已边际」一致：本批的价值在「省指令、消除一类编译器缺陷（imul 无立即数是过时认知）、零回归」，而非大幅性能跃升。</p>
+<p><strong>决策意义</strong>：这是 targeted ISA 主线的又一个小步增量，验证了「multiply 立即数折叠」这一 LLVM 早在做的优化现已对齐。它与 e3at 形成对照——e3at 用数据否决高成本架构重写，e3au 用极小改动拿到确定收益；两者共同体现「先量化 ROI、再决定投入」的纪律。后续若继续该主线，边际收益将持续递减，应转向其他支柱（如 DWARF/工程形态已完备，性能层剩下浮点/跨函数 GRA 均属高成本方向）。</p>
+<p><strong>回归</strong>：AF 黄金门禁 17 用例全绿（含 AArch64 交叉汇编、--fast-compile）；AG 差分门禁 180 次零不一致；全量 <code>tests/run_tests.sh</code> rc=0「全部测试通过」；<code>cargo test --release</code> 绿。护栏：<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
