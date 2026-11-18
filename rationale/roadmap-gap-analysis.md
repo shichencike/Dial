@@ -27,7 +27,7 @@
 | impl 具名类型方法（`self`） | 支持 | M7-e3aq 已支持 | 已清零 |
 | 嵌套下标赋值 `a[i][j]=v` | 支持 | e3ao 已支持 | 已清零 |
 | sizeof/alignof/offsetof、bitcast、assert/panic、is_null、drop、channel、spawn/join、HOF、select | 支持 | e3ag~e3an3 全支持 | 已清零 |
-| SIMD `simd<T,N>` | 支持 | 战略拒绝 | M7-e3x 定量否决（−6.7%），不算缺口 |
+| SIMD `simd<T,N>` | 支持 | M7-e3az 已支持 | 显式向量类型已补齐（逐值一致）；e3x 否决的是**自动向量化**，两者不同。指令级 SSE/AVX 融合见阶段二补充第 11 项 |
 
 ### B 类 · 两后端共同缺的语言特性 —— 须改 codegen.rs，违反护栏
 
@@ -131,12 +131,24 @@ SIMD 完整后端（−6.7%）、caller-saved GRA（ROI 为负）、函数名重
 
 8. ✅ **e3ay `--target-cpu` 开关基础设施**：只建开关、不发射新指令。默认 baseline
    与旧版 `.s` 逐字节一致（18 源码），四级别编译运行正确，非法值 Fail-Fast。
-9. ⏳ **标量 ISA 扩展（下一批）**：LZCNT/TZCNT/BMI1/CMOV targeted 融合。**每类先量化
-   bench 中是否存在对应惯用法与正 ROI**，只对有收益的动手；受 `--target-cpu` 门控。
-10. ⏳ **SIMD targeted 惯用法**：⚠️ 绝不重造 e3x 已证伪的完整自动向量化（−6.7%、
-    b15 慢 18×）；只做 targeted 惯用法 + ROI 量化，先诊断再决定。
-11. ⏳ **浮点 FMA 融合**：衔接 e3av 浮点驻留，需处理浮点语义/精度对齐。
-12. ⏳ **加密/专用指令**（AES-NI/SHA/CRC32）：最后做，难度最大收益较小。
+9. ⏸️ **标量 ISA 扩展（诊断后搁置）**：ROI 诊断（`tools/diag_scalar_isa.py`）确认当前
+   全部语料中 LZCNT/TZCNT/BMI1/CMOV 的可替代惯用法频次为 **0**（位扫描/变量移位/andn
+   全 0，63 个 cmp+jcc 全是控制流非条件赋值）；popcount(e3y)/xorshift(e3n)/常量乘(e3au)
+   三个 targeted 机会已被吃干净。**当前无可安全优化目标，硬做=零收益死代码**。重启条件：
+   语言层新增 clz/ctz/ctpop 内建（双后端同步）或出现位密集新 workload。
+10. ✅ **e3az 显式 `simd<T,N>` 原生向量（语义补齐批）**：asm 后端从「builtin 明确拒绝」
+    到完整支持——构造（广播/逐 lane）、向量加减乘除取模/位运算、六种比较→simd<bool,N>、
+    lane 提取、sizeof/alignof。实现为「Ptr 指向 N×8 字节栈段 + 逐 lane 展开为既有标量
+    IR」，复用发射器、AArch64 零变化、GRA 隔离。两后端逐值一致（ffi demo + 广覆盖 +
+    含 call）、83 源码 `.s` 零回归、19 golden 全绿。**注意**：这是**显式向量类型**（程序员
+    主动使用、语言一等类型），与 e3x 否决的**自动向量化**（编译器强行向量化标量循环）是
+    两件事，不引入后者的灾难性负收益。本批为语义补齐；下一步才做目标 CPU 指令发射。
+11. ⏳ **SIMD 指令发射（下一批，受 `--target-cpu` 门控）**：目标 CPU 支持时把逐 lane
+    标量展开 targeted 融合为 SSE/AVX 打包指令（paddq/addpd 等），只对有正 ROI 的形态做。
+    ⚠️ 绝不重造 e3x 已证伪的完整自动向量化（−6.7%、b15 慢 18×）；baseline 保持逐 lane
+    标量（零兼容风险），v2/v3+ 才启用打包指令。
+12. ⏳ **浮点 FMA 融合**：衔接 e3av 浮点驻留，需处理浮点语义/精度对齐。
+13. ⏳ **加密/专用指令**（AES-NI/SHA/CRC32）：最后做，难度最大收益较小。
 
 ### 阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）
 

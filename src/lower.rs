@@ -644,6 +644,36 @@ impl<'a> Lower<'a> {
         p
     }
 
+    /// M7-e3az：分配一个 simd 向量栈段（N 个 lane × 8 字节），返回段首指针 vreg。
+    fn emit_simd_alloca(&mut self, n: u32) -> VReg {
+        let p = self.new_reg(IrType::Ptr);
+        self.emit(IrInst::Alloca { dst: p, bytes: n * 8 });
+        p
+    }
+
+    /// M7-e3az：取向量段 `base` 的第 `lane` 个元素地址 = base + lane*8（字节）。
+    fn simd_lane_addr(&mut self, base: VReg, lane: u32) -> VReg {
+        let p = self.new_reg(IrType::Ptr);
+        self.emit(IrInst::PtrAdd {
+            dst: p, base, off: Value::Imm(Imm::I64(lane as i64 * 8)),
+        });
+        p
+    }
+
+    /// M7-e3az：把 lane 值按元素标量宽度写入向量段的第 `lane` 槽。
+    fn simd_store_lane(&mut self, base: VReg, lane: u32, val: Value, ty: IrType) {
+        let addr = self.simd_lane_addr(base, lane);
+        self.emit(IrInst::Store { ptr: addr, val, ty });
+    }
+
+    /// M7-e3az：从向量段第 `lane` 槽读出 lane 值（按元素标量宽度）。
+    fn simd_load_lane(&mut self, base: VReg, lane: u32, ty: IrType) -> VReg {
+        let addr = self.simd_lane_addr(base, lane);
+        let r = self.new_reg(ty.clone());
+        self.emit(IrInst::Load { dst: r, ptr: addr, ty });
+        r
+    }
+
     /// 把一个值写入槽（含 ARC）。
     ///
     /// 时序铁律：**先 Store，再 retain 新值**——retain 作用于槽里刚写进去的句柄。
@@ -1485,6 +1515,19 @@ impl<'a> Lower<'a> {
                 // 元素类型必须按数组的真实类型取（此前硬编码 int[]，导致 string[]
                 // 的元素位模式没被按句柄还原——读出来是一串指针数值）。
                 let at = self.expr_dt(arr);
+                // M7-e3az：向量 lane 提取 `v[i]`。对齐 LLVM 4108 的 extractelement。
+                // lane 索引须为编译期整数常量（语义层已约束；这里尽力解析）。
+                if let Type::Simd(elem, n) = &at {
+                    let lane = match idx.as_ref() {
+                        Expr::IntLit(k) if *k >= 0 && (*k as u32) < *n => *k as u32,
+                        _ => return self.err(&format!(
+                            "[asm 后端] 向量 lane 索引必须是 0..{} 的整数字面量", n - 1)),
+                    };
+                    let (av, _) = self.lower_expr(arr, &at)?;
+                    // lane 存的是 Dial 内部位模式，直接按标量宽度读出即可返回。
+                    let r = self.simd_load_lane(av.as_reg(), lane, simd_lane_ir(elem));
+                    return Ok((Value::Reg(r), false));
+                }
                 let (av, _) = self.lower_expr(arr, &at)?;
                 let (iv, _) = self.lower_expr(idx, &Type::Int)?;
                 let r = self.new_reg(IrType::I64);
@@ -1635,6 +1678,58 @@ impl<'a> Lower<'a> {
     // ---- 二元 / 一元 ----
 
     fn lower_binary(&mut self, a: &Expr, op: BinOp, b: &Expr) -> Result<(Value, bool), String> {
+        // M7-e3az：向量二元 / 比较运算。任一侧是 simd 即走向量路径（对齐 LLVM
+        // gen_simd_binary）。比较两个向量产生 simd<bool,N>（不是标量 bool），
+        // 故必须在标量比较分支之前处理。
+        let da = self.expr_dt(a);
+        let db = self.expr_dt(b);
+        if let Type::Simd(elem, n) = &da {
+            let (av, _) = self.lower_expr(a, &da)?;
+            let (bv, _) = self.lower_expr(b, &db)?;
+            let a_ptr = av.as_reg();
+            let b_ptr = bv.as_reg();
+            let lane_ty = simd_lane_ir(elem);
+            let is_float = lane_ty.is_float();
+            let is_cmp = matches!(op, BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge);
+            let out = self.emit_simd_alloca(*n);
+            // 逐 lane 展开：load a[i]/b[i] → 标量 Bin/FBin 或 ICmp/FCmp → store out[i]。
+            // 复用既有标量发射器，天然兼容 AArch64；byte 比较值 0..255 非负，
+            // 有符号 ICmp 即得无符号语义（对齐 LLVM 的无符号向量谓词）。
+            for i in 0..*n {
+                let a_lane = self.simd_load_lane(a_ptr, i, lane_ty.clone());
+                let b_lane = self.simd_load_lane(b_ptr, i, lane_ty.clone());
+                let r = self.new_reg(if is_cmp { IrType::I64 } else { lane_ty.clone() });
+                if is_cmp {
+                    if is_float {
+                        self.emit(IrInst::FCmp { op: acmp(op), dst: r, a: Value::Reg(a_lane),
+                            b: Value::Reg(b_lane), ty: lane_ty.clone() });
+                    } else {
+                        self.emit(IrInst::ICmp { op: acmp(op), dst: r, a: Value::Reg(a_lane),
+                            b: Value::Reg(b_lane), ty: lane_ty.clone() });
+                    }
+                    // 比较结果 0/1 作为 bool lane 存入（I64 宽度）。
+                    self.simd_store_lane(out, i, Value::Reg(r), IrType::I64);
+                } else {
+                    let bin = match op {
+                        BinOp::Add => ABin::Add, BinOp::Sub => ABin::Sub,
+                        BinOp::Mul => ABin::Mul, BinOp::Div => ABin::Div,
+                        BinOp::Mod => ABin::Mod, BinOp::BitAnd => ABin::BitAnd,
+                        BinOp::BitOr => ABin::BitOr, BinOp::BitXor => ABin::BitXor,
+                        BinOp::Shl => ABin::Shl, BinOp::Shr => ABin::Shr,
+                        _ => return self.err(&format!("[asm 后端] 向量不支持运算符 {:?}", op)),
+                    };
+                    if is_float {
+                        self.emit(IrInst::FBin { op: bin, dst: r, a: Value::Reg(a_lane),
+                            b: Value::Reg(b_lane), ty: IrType::F64 });
+                    } else {
+                        self.emit(IrInst::Bin { op: bin, dst: r, a: Value::Reg(a_lane),
+                            b: Value::Reg(b_lane), ty: IrType::I64 });
+                    }
+                    self.simd_store_lane(out, i, Value::Reg(r), lane_ty.clone());
+                }
+            }
+            return Ok((Value::Reg(out), false));
+        }
         let is_string_concat = op == BinOp::Add && self.expr_dt(a) == Type::String && self.expr_dt(b) == Type::String;
         if is_string_concat {
             let (av, _) = self.lower_expr(a, &Type::String)?;
@@ -2147,6 +2242,10 @@ impl<'a> Lower<'a> {
             // 宽度进出。必须在此拦截——否则落到下方 lower_builtin 的
             // BKind::Unsupported 报错。仅 x86-64：AArch64 方言语义不同，Fail-Fast。
             "asm" | "asm_intel" => return self.lower_inline_asm(name, args),
+            // M7-e3az：simd<T, N>(...) 向量构造。对齐 LLVM gen_simd_construct：
+            // 1 个实参广播、N 个实参逐 lane。必须在此拦截——否则落到下方
+            // lower_builtin 的 BKind::Unsupported 报错。
+            "simd" => return self.lower_simd_construct(args),
             // M7-e3ai：assert / panic 的 Fail-Fast 专用路径。对齐 LLVM 后端
             // emit_fail_loc：assert 条件失败 / panic 都打印「消息 + file:line:col」
             // 后终止进程。必须在此拦截——否则落到下方 lower_builtin 的
@@ -2488,6 +2587,40 @@ impl<'a> Lower<'a> {
         self.fail_throw_if(is_null, msg)
     }
 
+    /// M7-e3az：`simd<T, N>(...)` 向量构造。对齐 LLVM `gen_simd_construct`：
+    /// 第一个实参是 `Expr::TypeLit(Type::Simd(elem, n))`（parser 塞入），其余是
+    /// lane 值。1 个 lane 值→广播到全部 N 个；N 个→逐 lane。返回一个 Ptr vreg
+    /// 指向 N×8 字节的向量栈段（每 lane 存 Dial 标量内部宽度的位模式）。
+    fn lower_simd_construct(&mut self, args: &[Expr]) -> Result<(Value, bool), String> {
+        let (elem, n) = match args.first() {
+            Some(Expr::TypeLit(Type::Simd(e, n))) => ((**e).clone(), *n),
+            _ => return self.err("simd 构造缺少类型实参 `simd<T, N>`"),
+        };
+        let lanes_expr = &args[1..];
+        if lanes_expr.len() != 1 && lanes_expr.len() != n as usize {
+            return self.err(&format!(
+                "simd<{}, {}> 构造需要 1 个（广播）或 {} 个实参，实际 {} 个",
+                elem.display(), n, n, lanes_expr.len()));
+        }
+        // 逐 lane 求值（用元素 Dial 类型作 hint，确保 float 走 F64、窄整型正确）。
+        let mut lane_vals: Vec<Value> = Vec::with_capacity(n as usize);
+        for e in lanes_expr {
+            let (v, _) = self.lower_expr(e, &elem)?;
+            lane_vals.push(v);
+        }
+        // 广播：复制第一份到 N 份。
+        if lane_vals.len() == 1 {
+            lane_vals = vec![lane_vals[0]; n as usize];
+        }
+        // 分配 N×8 字节栈段（每 lane 一个 8 字节槽，存 Dial 内部位模式）。
+        let dst = self.emit_simd_alloca(n);
+        let lane_ty = simd_lane_ir(&elem);
+        for (i, v) in lane_vals.into_iter().enumerate() {
+            self.simd_store_lane(dst, i as u32, v, lane_ty.clone());
+        }
+        Ok((Value::Reg(dst), false))
+    }
+
     // ---- M7-e3ag：编译期布局内建 sizeof / alignof / offsetof ----
     // 复用 ir.rs 的 ABI 布局「单点真理」（struct_layout / field_size / field_ir），
     // 其口径与 LLVM 后端 TargetData（DataLayout）逐字节对齐。返回 Imm → 零运行时指令。
@@ -2497,9 +2630,14 @@ impl<'a> Lower<'a> {
         match t {
             // 语义层已拒绝 void，这里只做防御。
             Type::Void => self.err("布局内建不接受 void 类型"),
-            // LLVM 按向量宽度算（N × elem），asm 侧宽度映射无法对齐——明确拒绝，
-            // 绝不静默给出错误数值（符合项目 fail-fast 哲学）。
-            Type::Simd(..) => self.err("布局内建暂不支持 simd 类型（LLVM 按向量宽度计算，自研后端无法对齐）"),
+            // M7-e3az：向量 ABI 布局与 LLVM `<N x T>` 对齐：size=N×原生元素宽度，
+            // align=size 向上取 2 的幂（上限 32，覆盖 byte16=16 / int4=32）。
+            Type::Simd(elem, n) => {
+                let es = simd_elem_size(elem) as i64;
+                let size = es * *n as i64;
+                let align = if size <= 1 { 1 } else { (1i64 << (64 - (size - 1).leading_zeros())).min(32) };
+                Ok((size, align))
+            }
             Type::Struct(n) => {
                 let pk = self.packed.contains(n);
                 let (_offs, size, align) = self.ip.struct_layout(n, pk);
@@ -3868,6 +4006,8 @@ impl<'a> Lower<'a> {
             // print 走 dial_print_int 通道，把句柄当数字吐出（指针数值）。
             Expr::Index(arr, _) => match self.expr_dt(arr) {
                 Type::Array(e) => *e,
+                // M7-e3az：向量下标返回元素类型（lane 提取），供 print 等按标量分派。
+                Type::Simd(e, _) => *e,
                 other => other,
             },
             Expr::Slice(arr, _, _) => self.expr_dt(arr),
@@ -4004,6 +4144,27 @@ fn slot_bytes(t: IrType) -> u32 {
         IrType::I1 | IrType::I8 => 1,
         _ => 8,
     }
+}
+
+/// M7-e3az：simd 元素的原生机器宽度（字节），对齐 LLVM `simd_elem_llvm`：
+/// int=i64(8)、float=f64(8)、bool=i1(1)、byte=i8(1)、char=i32(4)。
+fn simd_elem_size(t: &Type) -> u32 {
+    match t {
+        Type::Int => 8,
+        Type::Float => 8,
+        Type::Bool => 1,
+        Type::Byte => 1,
+        Type::Char => 4,
+        _ => 8, // parser 已保证 simd 元素只能是上述标量
+    }
+}
+
+/// M7-e3az：simd lane 的**内部存储宽度**——直接用 Dial 标量的寄存器宽度
+/// （int/byte/char/bool=I64、float=F64），与 `reg_ir` 一致。每个 lane 占 8 字节槽，
+/// 存的是 Dial 内部位模式（byte 为 0..255 零扩展值）——因此无符号 byte 比较
+/// 直接用有符号 ICmp 即得正确结果（值非负），lane 提取也可直接当标量返回。
+fn simd_lane_ir(t: &Type) -> IrType {
+    reg_ir(t)
 }
 
 /// print 系列分派表：与 LLVM 后端 emit_print / emit_print_raw / emit_eprint* 一一对应。

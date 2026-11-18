@@ -107,8 +107,8 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 <tr>
 <td>SIMD <code>simd&lt;T,N&gt;</code></td>
 <td>支持</td>
-<td>战略拒绝</td>
-<td>M7-e3x 定量否决（−6.7%），不算缺口</td>
+<td>M7-e3az 已支持</td>
+<td>显式向量类型已补齐（逐值一致）；e3x 否决的是<strong>自动向量化</strong>，两者不同。指令级 SSE/AVX 融合见阶段二补充第 11 项</td>
 </tr>
 </tbody>
 </table>
@@ -253,10 +253,22 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 <ol start="8">
 <li>✅ <strong>e3ay <code>--target-cpu</code> 开关基础设施</strong>：只建开关、不发射新指令。默认 baseline
    与旧版 <code>.s</code> 逐字节一致（18 源码），四级别编译运行正确，非法值 Fail-Fast。</li>
-<li>⏳ <strong>标量 ISA 扩展（下一批）</strong>：LZCNT/TZCNT/BMI1/CMOV targeted 融合。<strong>每类先量化
-   bench 中是否存在对应惯用法与正 ROI</strong>，只对有收益的动手；受 <code>--target-cpu</code> 门控。</li>
-<li>⏳ <strong>SIMD targeted 惯用法</strong>：⚠️ 绝不重造 e3x 已证伪的完整自动向量化（−6.7%、
-    b15 慢 18×）；只做 targeted 惯用法 + ROI 量化，先诊断再决定。</li>
+<li>⏸️ <strong>标量 ISA 扩展（诊断后搁置）</strong>：ROI 诊断（<code>tools/diag_scalar_isa.py</code>）确认当前
+   全部语料中 LZCNT/TZCNT/BMI1/CMOV 的可替代惯用法频次为 <strong>0</strong>（位扫描/变量移位/andn
+   全 0，63 个 cmp+jcc 全是控制流非条件赋值）；popcount(e3y)/xorshift(e3n)/常量乘(e3au)
+   三个 targeted 机会已被吃干净。<strong>当前无可安全优化目标，硬做=零收益死代码</strong>。重启条件：
+   语言层新增 clz/ctz/ctpop 内建（双后端同步）或出现位密集新 workload。</li>
+<li>✅ <strong>e3az 显式 <code>simd&lt;T,N&gt;</code> 原生向量（语义补齐批）</strong>：asm 后端从「builtin 明确拒绝」
+    到完整支持——构造（广播/逐 lane）、向量加减乘除取模/位运算、六种比较→simd<bool,N>、
+    lane 提取、sizeof/alignof。实现为「Ptr 指向 N×8 字节栈段 + 逐 lane 展开为既有标量
+    IR」，复用发射器、AArch64 零变化、GRA 隔离。两后端逐值一致（ffi demo + 广覆盖 +
+    含 call）、83 源码 <code>.s</code> 零回归、19 golden 全绿。<strong>注意</strong>：这是<strong>显式向量类型</strong>（程序员
+    主动使用、语言一等类型），与 e3x 否决的<strong>自动向量化</strong>（编译器强行向量化标量循环）是
+    两件事，不引入后者的灾难性负收益。本批为语义补齐；下一步才做目标 CPU 指令发射。</li>
+<li>⏳ <strong>SIMD 指令发射（下一批，受 <code>--target-cpu</code> 门控）</strong>：目标 CPU 支持时把逐 lane
+    标量展开 targeted 融合为 SSE/AVX 打包指令（paddq/addpd 等），只对有正 ROI 的形态做。
+    ⚠️ 绝不重造 e3x 已证伪的完整自动向量化（−6.7%、b15 慢 18×）；baseline 保持逐 lane
+    标量（零兼容风险），v2/v3+ 才启用打包指令。</li>
 <li>⏳ <strong>浮点 FMA 融合</strong>：衔接 e3av 浮点驻留，需处理浮点语义/精度对齐。</li>
 <li>⏳ <strong>加密/专用指令</strong>（AES-NI/SHA/CRC32）：最后做，难度最大收益较小。</li>
 </ol>

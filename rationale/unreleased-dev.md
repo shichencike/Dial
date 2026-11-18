@@ -3291,3 +3291,30 @@ imulq   %r10, %r15     # s * 31
 **重启条件**：① 语言层新增 `clz/ctz/ctpop` 等位操作内建（须双后端同步 + 放宽 codegen.rs 护栏，属独立语言版本主题）；② 出现含变量移位/位扫描密集惯用法的新 workload。否则不投入标量 ISA 融合。
 
 **战略重心调整建议**：真正可补的能力缺口是**显式 `simd<T,N>` 类型**——它是语言一等类型（ast.rs `Type::Simd`），LLVM 后端有完整实现（构造/二元运算/lane 提取），asm 后端在 builtin.rs 明确拒绝。注意这与 e3x 证伪的「自动向量化」是两件事：自动向量化对现有标量循环强行 SIMD（−6.7%、b15 慢 18×），显式 SIMD 是程序员主动使用、不引入灾难性负收益。实现需 IR 层加向量类型 + xmm/ymm 寄存器 + 构造/运算/lane 提取，是大工程，待用户裁决是否提前到标量 ISA 之前。
+
+#### M7-e3az：asm 后端补齐显式 `simd<T, N>` 原生向量（高级指令集主线第二批，语义逐值对齐 LLVM）
+
+**背景与定位**：多维度核查确认语义/DWARF/fail-fast/产物形态/编译速度均已补齐，唯一实质能力缺口是高级指令集。e3ay 已建 `--target-cpu` 开关（默认 baseline 零回归）。用户确认从显式 `simd<T,N>` 开工。关键认知（不重蹈 e3x 覆辙）：e3x 定量否决的是**完整自动向量化后端**（对现有标量循环强行 SIMD，几何平均 0.9330/−6.7%、b15 慢 18×），而显式 `simd<T,N>` 是**语言一等类型、程序员主动使用**（LLVM `ast.rs::Type::Simd` + 完整实现），二者是两件事。补显式 simd 是能力补齐，不引入自动向量化的灾难性负收益。
+
+**此前状态**：`simd<T,N>` 是 LLVM 独有——asm 侧 `builtin.rs` 的 `lookup("simd")` 返回 Unsupported、`reg_ir(Simd)=I64`（首版不实现）、`layout_size_align` 明确拒绝。这是语义层盘点后 asm 相对 LLVM 的唯一实质缺口。
+
+**实现（仅 `src/ir.rs`/`src/lower.rs`，不改 codegen_asm）**：
+- **向量值表示**：`reg_ir(Type::Simd) = IrType::Ptr`——向量值是「指向 N×8 字节栈段的指针」，仿 struct 内容区模型。每个 lane 占 8 字节槽，存**Dial 标量内部位模式**（int/byte/char/bool=I64、float=F64；byte 为 0..255 零扩展值）。这个表示的关键好处：① byte 无符号比较直接用有符号 ICmp（值非负）即得 LLVM 无符号谓词语义；② lane 提取直接按标量宽度读出即可返回，无需窄→宽转换；③ 不引入新 IR 指令、不改 codegen 分派。
+- **`lower_simd_construct`**（在 `lower_call` 拦截 `"simd"`）：第 0 参是 `Expr::TypeLit(Type::Simd(elem,n))`（parser 塞入），1 个 lane 值→广播到 N 份、N 个→逐 lane；`emit_simd_alloca(n)` 分配 N×8 字节段，逐 lane `simd_store_lane`（PtrAdd base+lane*8 + Store）。
+- **向量二元/比较**（在 `lower_binary` 最前）：`da=Simd` 即走向量路径；逐 lane `simd_load_lane`(a[i])/`simd_load_lane`(b[i]) → 标量 `Bin`/`FBin`（算术）或 `ICmp`/`FCmp`（六种比较）→ `simd_store_lane`(out[i])。结果比较向量 lane 存 0/1（I64）。→simd<bool,N> 而非标量 bool。
+- **lane 提取**（`Expr::Index` 分支）：`at=Simd` 时索引须为 0..N-1 整数字面量（对齐 LLVM extractelement 的常量 lane），`simd_load_lane` 直接读出标量。`expr_dt(Index)` 对 Simd 返回元素类型（供 print/float 分派）。
+- **`layout_size_align`**：`Type::Simd(elem,n)` → size=n×原生元素宽度（int/float=8、byte/bool=1、char=4）、align=size 向上取 2 的幂（上限 32）。对齐 LLVM：`sizeof<simd<int,4>>=32`、`sizeof<simd<byte,16>>=16`、`alignof<simd<byte,16>>=16`。
+
+**为何「逐 lane 标量展开」而非直接发射 SIMD 指令（分两批的工程决策）**：第一批目标是**语义完整正确**——把向量运算展开为既有标量 IR（Load/Bin/Store/ICmp/FCmp），复用经过千锤百炼的发射器，天然兼容 AArch64（同一套标量指令）、与整数/浮点 GRA 完全隔离（`collect_promotable` 会把被 Vector 段地址使用的 Alloca 排除，向量栈段不驻留、安全）。风险降到最低、验证最快。第二批（后续）才做目标 CPU 相关的 SSE/AVX targeted 指令融合，受 `--target-cpu` 门控——延续 e3x「targeted、不重造完整自动向量化」纪律。
+
+**验证（语义正确 + 零回归）**：
+1. **ffi_lowlevel_demo 两后端 14 行输出逐行一致**：构造（逐 lane/广播）、int 加、float 乘、float 比较、byte 无符号比较、lane 提取、sizeof/alignof 全对。
+2. **广覆盖专项**（simd_more.dial）两后端一致：int4 加减乘/按位与、float2 六种比较谓词、byte 边界 255、lane 提取。
+3. **含 call 函数**（simd_call.dial）两后端一致：向量除法 + 含 call 的函数里向量提取，验证向量栈段与 GRA/call 保存恢复不冲突。
+4. **各 O 级别**：simd 在 O0/O1/O2/O3 输出 md5 全一致（a4893b1...）。
+5. **零回归铁证**：83 个源码（bench+17 golden+65 examples）默认 O2 `.s` 与改动前基线（独立 CARGO_TARGET_DIR 构建）**逐字节一致**（差异 0）；AArch64 17 个源码 `.s` 逐字节一致（差异 0）。simd 改动只对含 simd 的程序生效，现有程序零影响。
+6. **语义拒绝仍生效**：`bad/simd_*.dial`（bad_elem/nested/len_not_const/ctor_arity/mixed_types 等）在 parser/sema 层仍全部拒绝（这些是本批之前的语言层约束，不受影响）。
+7. **新增 golden** `tests/asm_golden/simd.dial`：双后端输出逐字节一致，run_asm_golden 19 用例全绿。
+8. 门禁：run_tests.sh、cargo test、差分 fuzz（golden+固化语料+在线 180 次零不一致）。
+
+**范围与护栏**：改动只在 `src/ir.rs`（类型映射 reg_ir Simd→Ptr）与 `src/lower.rs`（simd 构造/二元/提取/layout/expr_dt + 栈段辅助方法），不改 `codegen_asm.rs`/`pass.rs`（无新 IR 指令，故所有穷举 match 不变）、不改 `src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0、零新依赖、LLVM 路径零改动、AArch64 零变化、构建零警告、不打 tag、docx 确定性。注：run_tests.sh 的 R8 断言从「asm 应拒绝 simd 布局内建」更新为「asm/llvm 双后端 simd 布局输出一致」（int4=32 byte16=16/16）——这是本批补齐能力后的预期测试更新。

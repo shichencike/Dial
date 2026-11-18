@@ -1955,16 +1955,23 @@ _lo_actual="$( ${LDIR}/asm 2>/dev/null | tr '\n' ' ' )"
 [ "$( ${LDIR}/asm 2>/dev/null | sed -n '6p' )" = "PKT=24/1" ] \
     && rpass "packed struct alignof=1（对齐 LLVM/C，非自然对齐 8）" \
     || rbad "packed struct alignof 未按 C ABI 口径修正"
-# simd 布局内建须明确 Fail-Fast 拒绝（不给错误数值）
+# M7-e3az：simd 布局内建现已支持（对齐 LLVM 向量 ABI：int4=32、byte16=16/16）
 cat > "${LDIR}/simd.dial" <<'DIALEOF'
-fn main(): int { print(sizeof<simd<int,4>>()); return 0; }
+fn main(): int {
+    print(sizeof<simd<int,4>>(), sizeof<simd<byte,16>>(), alignof<simd<byte,16>>());
+    return 0;
+}
 DIALEOF
-if ${DIALC} build "${LDIR}/simd.dial" --backend asm -o "${LDIR}/simd" >"${LDIR}/simd.log" 2>&1; then
-    rbad "R8 simd 布局内建应被拒绝却编译成功"
-elif grep -q '\[asm 后端\].*simd' "${LDIR}/simd.log"; then
-    rpass "simd 布局内建明确 Fail-Fast 拒绝（带 [asm 后端] 前缀）"
+if ! ${DIALC} build "${LDIR}/simd.dial" --backend asm -o "${LDIR}/simd" >"${LDIR}/simd.log" 2>&1; then
+    rbad "R8 simd 布局内建 asm 应支持却编译失败"
 else
-    rbad "R8 simd 拒绝但未给出 [asm 后端] 诊断"
+    _simd_out="$(${LDIR}/simd 2>/dev/null)"
+    _simd_llvm_bin="${LDIR}/simd_llvm"
+    ${DIALC} build "${LDIR}/simd.dial" --backend llvm -o "${_simd_llvm_bin}" >/dev/null 2>&1 \
+        && _simd_exp="$(${_simd_llvm_bin} 2>/dev/null)" || _simd_exp="321616"
+    [ "${_simd_out}" = "${_simd_exp}" ] \
+        && rpass "simd 布局内建双后端一致（int4=32 byte16=16/16）" \
+        || rbad "R8 simd 布局 asm=[${_simd_out}] llvm=[${_simd_exp}]"
 fi
 
 

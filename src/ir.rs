@@ -524,7 +524,9 @@ pub fn reg_ir(t: &Type) -> IrType {
         Type::Struct(n) => IrType::Struct(n.clone()),
         Type::RawPtr(_) | Type::VolatilePtr(_) => IrType::Ptr,
         Type::FnPtr(..) => IrType::FnPtr,
-        Type::Simd(..) => IrType::I64, // 首版不实现 simd
+        // M7-e3az：simd 值是「指向栈段的指针」（每个 lane 占 8 字节，仿 struct
+        // 内容区模型），向量构造/运算/提取在 lower 阶段展开为逐 lane 标量 IR。
+        Type::Simd(..) => IrType::Ptr,
         Type::Void => IrType::Void,
     }
 }
