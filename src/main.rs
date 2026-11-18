@@ -25,6 +25,7 @@ mod codegen;
 #[allow(dead_code)] mod pass;        // 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC）
 #[allow(dead_code)] mod codegen_asm; // IR → x86-64 / AArch64 汇编
 #[allow(dead_code)] mod asm;         // lower → pass → .s → cc -c → .o 编排
+#[allow(dead_code)] mod pgo;         // 自研 PGO profile（.dialprof）读写与合并
 mod diagnostic;
 mod dialfmt;
 mod toolchain;
