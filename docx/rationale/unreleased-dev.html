@@ -44,6 +44,7 @@
 <li><a href="#m7-e3aw编译期常量折叠解释器记忆化asm-后端编译提速-30零语义产物变化">M7-e3aw：编译期常量折叠解释器记忆化（asm 后端编译提速 ~30%，零语义/产物变化）</a></li>
 <li><a href="#m7-e3ax修复-dwarf-函数形参-location-偏移错误gdb-可正确-print-参数">M7-e3ax：修复 DWARF 函数形参 location 偏移错误（gdb 可正确 print 参数）</a></li>
 <li><a href="#m7-e3ay--target-cpu-高级指令集总开关基础设施批默认-baseline-零回归">M7-e3ay：--target-cpu 高级指令集总开关（基础设施批，默认 baseline 零回归）</a></li>
+<li><a href="#标量-isa-扩展-roi-诊断e3ay-后续2026-11-18当前语料零可优化目标">标量 ISA 扩展 ROI 诊断（e3ay 后续，2026-11-18）：当前语料零可优化目标</a></li>
 </ul>
 </li>
 </ul>
@@ -3420,7 +3421,24 @@ imulq   %r10, %r15     # s * 31
 - baseline/v2/v3/v4 四级别编译 core2.dial 均 rc=0、输出一致（<code>add(3,4) = 7</code>）。
 - 非法值 <code>--target-cpu=avx512-foo</code> 当场报错、rc≠0。
 - 门禁：run_tests.sh（含差分 fuzz 180 次零不一致）、cargo test、构建零警告全绿。</p>
-<p><strong>范围与护栏</strong>：改动只在 <code>src/target.rs</code>/<code>src/main.rs</code>/<code>src/asm.rs</code>/<code>src/codegen_asm.rs</code> 的参数传递链；不发射任何新指令；AArch64 忽略设置零变化；<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+<p><strong>范围与护栏</strong>：改动只在 <code>src/target.rs</code>/<code>src/main.rs</code>/<code>src/asm.rs</code>/<code>src/codegen_asm.rs</code> 的参数传递链；不发射任何新指令；AArch64 忽略设置零变化；<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。</p>
+<h4 id="标量-isa-扩展-roi-诊断e3ay-后续2026-11-18当前语料零可优化目标">标量 ISA 扩展 ROI 诊断（e3ay 后续，2026-11-18）：当前语料零可优化目标</h4>
+<p><strong>背景</strong>：用户启动高级指令集主线，顺序「标量 ISA → SIMD → FMA → 加密（由简到难）」，标量 ISA（LZCNT/TZCNT/BMI1/CMOV）排第一。按纪律先量化 ROI 再投入。</p>
+<p><strong>诊断工具</strong>：新增 <code>tools/diag_scalar_isa.py</code>（只读 baseline <code>.s</code>，命令在 docstring，完全可复现），延续 e3x/e3at「先量化再投入」纪律。</p>
+<p><strong>实测（bench baseline O2，4069 行汇编）</strong>：
+| 目标指令 | 可替代惯用法 | 频次 |
+|---|---|---|
+| BMI2 shlx/shrx/sarx | 变量移位 <code>shlq/sarq %cl</code> | <strong>0</strong> |
+| LZCNT/TZCNT | 位扫描 <code>bsf/bsr</code> | <strong>0</strong> |
+| BMI1 andn | <code>notq</code>（~x&amp;y 粗上界） | <strong>0</strong> |
+| — | 固定移位 <code>$N</code>（非 BMI2 目标） | 112 |
+| CMOV | <code>cmp+jcc+mov</code> 候选 | 63（粗上界） |
+| popcnt | 已有 | 1（e3y 已融合） |</p>
+<p>全语料源码扫描（examples + 所有测试 + bench）：<code>x&amp;(x-1)</code>（ctz 惯用）0 处、<code>x&gt;&gt;常数</code> 仅 4 处、三元条件赋值仅 3 处（单个 demo）。Dial 语言无 <code>clz/ctz/ctpop</code> 位操作内建，LLVM 后端也不存在对应 intrinsic——这些惯用法在 Dial 程序里根本不会自然出现。</p>
+<p><strong>63 个 cmp+jcc 候选人工抽检</strong>：全部是循环边界判断（<code>i&lt;N</code>）、递归基（<code>n&lt;=1</code>）、除零检查（<code>int3</code>）等控制流——分支体含循环/递归/取模副作用，不是 CMOV 可安全替换的「无条件算两个值再选择」形态。强行 CMOV 会破坏语义且更慢。</p>
+<p><strong>结论：当前 Dial 语料中标量 ISA 扩展无可安全优化的目标，硬做 LZCNT/TZCNT/BMI/CMOV 融合 = 零收益死代码。</strong> 这是 e3x「targeted ISA 路线」的延续结论——.popcount（e3y）、xorshift（e3n）、常量乘（e3au）三个 targeted 机会已被此前批次吃干净。</p>
+<p><strong>重启条件</strong>：① 语言层新增 <code>clz/ctz/ctpop</code> 等位操作内建（须双后端同步 + 放宽 codegen.rs 护栏，属独立语言版本主题）；② 出现含变量移位/位扫描密集惯用法的新 workload。否则不投入标量 ISA 融合。</p>
+<p><strong>战略重心调整建议</strong>：真正可补的能力缺口是<strong>显式 <code>simd&lt;T,N&gt;</code> 类型</strong>——它是语言一等类型（ast.rs <code>Type::Simd</code>），LLVM 后端有完整实现（构造/二元运算/lane 提取），asm 后端在 builtin.rs 明确拒绝。注意这与 e3x 证伪的「自动向量化」是两件事：自动向量化对现有标量循环强行 SIMD（−6.7%、b15 慢 18×），显式 SIMD 是程序员主动使用、不引入灾难性负收益。实现需 IR 层加向量类型 + xmm/ymm 寄存器 + 构造/运算/lane 提取，是大工程，待用户裁决是否提前到标量 ISA 之前。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
