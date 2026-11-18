@@ -2502,3 +2502,47 @@
         1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
         不打 tag。新增 R11 测试组（多句柄判空 + 严格布尔 + 各 O 级别 + 标量拒绝）。
         docx 确定性生成；check_links/check_version 全过。
+
+    - **M7-e3ak 自研 asm 后端补齐 `drop(x)` 所有权释放（双后端一致性补全）**：
+      承接 e3ag~e3aj 双后端一致性主线，补齐所有权系统的核心接口 `drop`——
+      提前释放一个变量的所有权（move 语义）。这是「代替 LLVM」在资源管理维度的
+      硬缺口：rawptr 的「谁申请谁释放」、ARC 句柄提前归还、with 块自动释放的
+      同源机制，全都依赖 drop 的正确 move 记账。
+      - **确凿缺口**：LLVM 后端在 `codegen.rs:4939` 实现 drop——参数须 Expr::Var，
+        按类型分派（File→dial_file_close、Thread→dial_thread_join、RawPtr/VolatilePtr
+        →dial_raw_free、其余 ARC→`self.release(&ty,ptr)`、标量经 release_value 的
+        `_=>return` 为 no-op），释放后 `moved.borrow_mut().insert(ptr)` 防双释放。
+        asm 后端把 drop 和 spawn/channel/map/filter 一起批量塞进 `builtin.rs` 的
+        「并发 / 高阶函数内建暂未接入（后续相位）」`BKind::Unsupported`，明确
+        Fail-Fast 拒绝。drop 与并发无关——又被批量误归类牵连。
+      - **asm 侧基础设施已齐备**：`Local.moved:bool` 字段、`release_scope` /
+        `release_locals_upto`（作用域退出逆序释放、标记 moved）、`rc_kind(dt)→ArcKind`
+        分派、`IrInst::RcRelease{slot,kind}`（作用于槽地址、发射器内部 load 后 release）、
+        `__with_release`（with 块末自动释放，drop 的近亲）、`close`（File→close + moved）
+        的 C 调用范式——全部就位，本批只是把 drop 接入既有专用路径。
+      - **实现（核心源码改动仅 src/lower.rs + builtin.rs）**：
+        ① `lower_call` 的 special_call 列表加入 `drop`，转 `lower_special_call`。
+        ② 新增 drop 分支：语义层已保证参数是 Expr::Var 且非 Opaque/FnPtr；
+        按 `l.dt` 分派——File/Thread/RawPtr/VolatilePtr 先 `Load` 出槽里的句柄
+        **值**再传 C 函数（与 `__with_release`/`close` 同款；注意 RcRelease 相反，
+        作用于**槽地址**）；ARC 句柄→`RcRelease{l.ptr, rc_kind}`；struct/标量→no-op
+        （对齐 LLVM `release_value` 的 `_=>return`——struct 字段由作用域退出的
+        `release_scope` 单独管理，若在此 StructRelease 会与 LLVM 不一致且 drop 后
+        用字段 UAF）。释放后 `lookup_mut(vname).moved=true`，已 moved 再 drop 幂等
+        no-op（对齐 LLVM 的 moved 槽二次 release 防护）。
+        ③ `builtin.rs` 把 drop 从「并发/高阶函数」Unsupported 表拆出，改为转专用
+        路径的防御兜底（同 bitcast/assert/is_null 范式），头部注释同步。
+      - **验证**：rawptr(raw_alloc)/ARC map/标量 no-op/数组/循环内/返回字符串后
+        drop 全场景双后端 stdout 逐字一致（`42 7 3 0 10 20 hello world done`），
+        全部哨兵输出证明无 double free/UAF；`-O0/-O1/-O2/-O3/-g/-g -O3` 各级别一致；
+        FnPtr `drop(f)` 在语义层编译期拒绝（两端同源）。注意 `drop(s.as_c_str())`
+        这类误用（借用指针非堆分配起始）LLVM 与 asm 都会 `munmap_chunk(): invalid
+        pointer`——是测试程序误用而非实现缺陷，双后端行为一致。
+      - **A/B 零回归**：7 个 golden 程序（core1/builtins/control_flow/core2/structs/
+        exceptions/rawptr）O2 `.s` 与 OLD(53b3404) 逐字节一致（md5 全同）；AArch64
+        普通程序零变化；drop 程序经 clang 交叉汇编产出 ELF aarch64 `.o`。
+        本特性只在调用 drop 的程序中改变行为。
+      - **护栏**：`src/codegen.rs`/`src/ast.rs` 相对 53b3404 零改动、`Cargo.toml` 仍
+        1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
+        不打 tag。新增 R12 测试组（全场景 + 严格输出 + 各 O 级别 + FnPtr 拒绝）。
+        docx 确定性生成；check_links/check_version 全过。

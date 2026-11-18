@@ -2210,6 +2210,89 @@ fi
 
 
 # ===========================================================================
+echo
+echo "  -- R12) drop 所有权释放双后端一致性 --"
+DDIR="${RDIR}/drop"; mkdir -p "$DDIR"
+
+# drop(x) 提前释放变量所有权（move 语义）：对齐 LLVM codegen.rs:4939。
+# 覆盖 rawptr→dial_raw_free、ARC map→release、标量 no-op、数组 release，
+# 以及循环作用域 / 返回字符串后 drop（验证 moved 记账不二次释放）。
+cat > "${DDIR}/probe.dial" <<'DIALEOF'
+fn make(): string {
+    var s: string = "hello world";
+    return s;
+}
+fn main(): int {
+    var p: rawptr<byte> = raw_alloc(16);
+    drop(p);
+    var m: map = new_map();
+    m.put(1, 42);
+    print(m.get(1));
+    drop(m);
+    var x: int = 7;
+    drop(x);
+    print(x);
+    var a: int[] = [1, 2, 3];
+    print(a.length());
+    drop(a);
+    var i: int = 0;
+    while (i < 3) {
+        var lm: map = new_map();
+        lm.put(i, i * 10);
+        print(lm.get(i));
+        drop(lm);
+        i = i + 1;
+    }
+    var s: string = make();
+    print(s);
+    drop(s);
+    print("done");
+    return 0;
+}
+DIALEOF
+
+# 1) O2 默认：全场景覆盖，双后端 stdout 逐字一致（且都不崩溃=无 double free）。
+${DIALC} build "${DDIR}/probe.dial" --backend llvm -o "${DDIR}/probe_llvm" >/dev/null 2>&1 || rbad "R12 LLVM 编译 drop 用例失败"
+${DIALC} build "${DDIR}/probe.dial" --backend asm  -o "${DDIR}/probe_asm"  >/dev/null 2>&1 || rbad "R12 asm 编译 drop 用例失败"
+_d_llvm="$( ${DDIR}/probe_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_d_asm="$( ${DDIR}/probe_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_d_exp="42 7 3 0 10 20 hello world done "
+[ -n "$_d_llvm" ] && [ "$_d_asm" = "$_d_llvm" ] \
+    && rpass "drop 全场景（rawptr/map/标量/数组/循环/字符串）：双后端 stdout 逐字一致" \
+    || rbad "R12 drop 双后端不一致（llvm=[$_d_llvm] asm=[$_d_asm]）"
+[ "$_d_asm" = "$_d_exp" ] \
+    && rpass "drop 后无 double free / UAF：全部哨兵输出正确" \
+    || rbad "R12 drop 输出不符预期（got=[$_d_asm] exp=[$_d_exp]）"
+
+# 2) 各优化级别 -O0..-O3 与 -g：双后端一致，drop 不随 pass 漂移。
+for _d_opt in "-O0" "-O1" "-O3" "-g -O3"; do
+    ${DIALC} build "${DDIR}/probe.dial" --backend llvm -o "${DDIR}/opt_llvm" $_d_opt >/dev/null 2>&1 || { rbad "R12 LLVM 编译 $_d_opt 失败"; continue; }
+    ${DIALC} build "${DDIR}/probe.dial" --backend asm  -o "${DDIR}/opt_asm"  $_d_opt >/dev/null 2>&1 || { rbad "R12 asm 编译 $_d_opt 失败"; continue; }
+    _d_lo="$( ${DDIR}/opt_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    _d_ao="$( ${DDIR}/opt_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    [ -n "$_d_lo" ] && [ "$_d_ao" = "$_d_lo" ] \
+        && rpass "drop $_d_opt：双后端一致" \
+        || rbad "R12 drop $_d_opt 双后端不一致"
+done
+
+# 3) 不透明句柄 / FnPtr 在编译期被语义层拒绝（两端同源，drop 不会误标 moved）。
+#    FnPtr 是可直接构造的无所有权值，语义层明确拒绝 drop（不透明句柄同理）。
+cat > "${DDIR}/bad_fnptr.dial" <<'DIALEOF'
+fn foo(): int { return 1; }
+fn main(): int {
+    var f: fn(): int = foo;
+    drop(f);
+    return 0;
+}
+DIALEOF
+if ${DIALC} build "${DDIR}/bad_fnptr.dial" --backend asm -o "${DDIR}/bad_asm" >"${DDIR}/bad.log" 2>&1; then
+    rbad "R12 drop 函数指针应在编译期被拒（asm 却编译通过）"
+else
+    rpass "drop 函数指针编译期拒绝：双后端同源准入名单"
+fi
+
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

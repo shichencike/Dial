@@ -1688,7 +1688,9 @@ impl<'a> Lower<'a> {
         match name {
             "open" | "read" | "read_all" | "file_read_line" | "write" | "eof"
             | "file_exists" | "file_size" | "file_remove" | "close" | "__with_release"
-            | "ptr_cast" =>
+            // M7-e3ak：drop(x) 提前释放所有权（move 语义），与 __with_release 同属
+            // 需要 moved 记账的专用路径。对齐 LLVM codegen.rs:4939。
+            | "ptr_cast" | "drop" =>
                 return self.lower_special_call(name, args),
             // M7-e3ag：编译期布局内建。复用 ir.rs 的 ABI 布局单点真理（与 LLVM
             // DataLayout 对齐），在编译期算出常量并返回 Value::Imm，零运行时指令。
@@ -2347,6 +2349,55 @@ impl<'a> Lower<'a> {
                 }
                 if let Some(sl) = self.lookup_mut(&vname) { sl.moved = true; }
                 Ok((Value::Imm(Imm::I64(0)), false))
+            }
+            // M7-e3ak：drop(x) —— 提前释放一个变量的所有权（move 语义），
+            // 对齐 LLVM codegen.rs:4939。语义层已保证参数是 Expr::Var 且非
+            // Opaque/FnPtr；这里按变量静态类型分派：
+            //   - File → dial_file_close、Thread → dial_thread_join（显式资源）；
+            //   - RawPtr/VolatilePtr → dial_raw_free（裸指针「谁申请谁释放」）；
+            //   - ARC 句柄 → RcRelease(slot, rc_kind)（槽地址，发射器内部 load 后 release）；
+            //   - struct（字段各自 ARC）→ StructRelease；
+            //   - 标量 → no-op（LLVM release_value 的 `_ => return`）。
+            // 释放后标记 moved，使作用域退出时的 release_scope 跳过它（防双释放/UAF）。
+            "drop" => {
+                let vname = match &args[0] {
+                    Expr::Var(n) => n.clone(),
+                    _ => return self.err("内部错误：drop 的参数必须是变量名（应由语义层拦截）"),
+                };
+                let l = match self.lookup(&vname) {
+                    Some(l) => l.clone(),
+                    None => return self.err(&format!("内部错误：drop 找不到变量 '{}'", vname)),
+                };
+                // 已 moved 的变量再 drop 是 no-op：对齐 LLVM 的幂等行为（moved 槽
+                // 二次 release 是 UAF），这里直接跳过整段发射。
+                if !l.moved {
+                    match &l.dt {
+                        // 显式资源 / 裸指针：先 load 出槽里的句柄**值**，再传给 C 函数
+                        // （与 __with_release / close 同款；RcRelease/StructRelease 则
+                        // 相反——它们作用于**槽地址**，发射器内部负责 load）。
+                        dt @ (Type::File | Type::Thread | Type::RawPtr(_) | Type::VolatilePtr(_)) => {
+                            let v = self.new_reg(IrType::Handle);
+                            self.emit(IrInst::Load { dst: v, ptr: l.ptr, ty: IrType::Handle });
+                            let func = match dt {
+                                Type::File => "dial_file_close",
+                                Type::Thread => "dial_thread_join",
+                                _ => "dial_raw_free",
+                            };
+                            self.emit(IrInst::Call { dst: None, func: func.to_string(),
+                                args: vec![Value::Reg(v)], arg_tys: vec![IrType::Handle],
+                                ret_ty: IrType::Void, linkage: CallLink::Runtime });
+                        }
+                        // struct / 标量：对齐 LLVM release_value 的 `_ => return`（no-op）。
+                        // struct 的字段 ARC 由作用域退出的 release_scope 单独管理；
+                        // 这里若提前 StructRelease 会与 LLVM 不一致且 drop 后用字段 UAF。
+                        // rc_kind 对 struct/标量返回 None，自然落到 no-op。
+                        dt => if let Some(k) = rc_kind(dt) {
+                            self.emit(IrInst::RcRelease { ptr: l.ptr, kind: k });
+                        },
+                    }
+                }
+                if let Some(sl) = self.lookup_mut(&vname) { sl.moved = true; }
+                Ok((Value::Imm(Imm::I64(0)), false)) // Void 占位，对齐 LLVM
             }
             _ => self.err(&format!("asm 后端：未找到函数 `{}`（FFI/内建未覆盖）", name)),
         }
