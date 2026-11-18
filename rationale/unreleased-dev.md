@@ -2972,3 +2972,48 @@
   O 级别）。
 - **护栏**：`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0/零新依赖/LLVM 路径/AArch64
   零改动，构建零警告，不打 tag，docx 确定性。
+
+#### M7-e3aq：自研 asm 后端补齐 B1 impl 方法块调用 + 默认实参补齐
+
+- **背景**：用户「继续」。对双后端能力做一次彻底审计（Stmt/Expr 全变体、内建表、方法表、
+  测试/示例覆盖），确认 Stmt/Expr 变体与内建名两侧已对齐、simd/内联汇编/thread 为有意
+  不做项后，锁定两处 LLVM 支持却 asm 完全缺失的真实缺口。
+- **缺口①：B1 impl 方法块调用**（主）。具名类型（用户 `struct` = `Type::Struct`、包
+  `type X;` = `Type::Opaque`）的 `obj.m()` 在 LLVM 由 `gen_method_call`（codegen.rs:5479）
+  用 `impl_receiver_name`→`impl_method_symbol`→`make_impl_call`（均在 ast.rs，冻结文件只读
+  复用）就地改写为 `Expr::Call(__impl_<T>_<m>, [obj]+args)` 并递归 `gen_expr`——于是实参求值、
+  默认实参、C ABI 适配、build_call、返回值处理全部零改动复用普通调用链，ABI 天然不变，
+  `self` 即首参。asm 的 `lower_method`（lower.rs:1807）对 Struct/Opaque 恒返回
+  「方法暂不支持（后续相位）」。实证 baseline（5262fbf）：`tests/impl/impl_struct.dial`
+  的 `p.sum()` 报「方法 sum 暂不支持（后续相位）」；`impl_gui_handle.dial` 的 `win.add()`
+  同；GUI 的 OO 封装层 `packages/gui/src/gui_oo.dial`（整层 B1 方法）在 asm 下不可用。
+- **缺口②：默认实参补齐**（实现 impl_default 时暴露，更根本）。LLVM `gen_call`
+  （codegen.rs:5384）在调用点按 `FuncInfo.defaults` 补齐缺失尾部参数（每次调用求值一次）。
+  asm `lower_call` 完全没有此步：少传的参数在栈槽里是未初始化垃圾——实测顶层
+  `fn add(a:int, b:int=10)` 的 `add(5)` 在 asm 得 102（LLVM 得 15）。影响所有带默认值的
+  函数与 impl 方法，不限于 B1。
+- **实现**（`src/lower.rs` 唯一产品代码改动）：
+  - `lower_method`：开头（`od` 算出后、所有内建方法分派前）判断 `impl_receiver_name(&od)`，
+    若 `impl_method_symbol(recv, method)` 在 `self.ip.functions_sig`，则
+    `make_impl_call(obj, recv, method, args)` 构造 `Expr::Call` 递归 `lower_expr`。必须前置——
+    impl 方法可与内建撞名（`Point.push`），具名类型分派权归 impl，对齐 LLVM 的放置顺序。
+  - `expr_dt` 的 `Expr::Method` 分支：Impl 命中时返回 `functions_sig[symbol].ret.clone()`，
+    否则 `method_ret(...).unwrap_or(Type::Int)` 会把返回 string/struct/具名类型的方法在
+    表达式位置误判为 Int（语义层 type_of 已按 Call 链返回 info.ret，此处须同步）。
+  - `lower_call_arg(a, at)` 辅助方法：`lower_expr(a, at)`→`adapt_param`→struct 形参按值
+    拷贝到栈临时区再传地址；显式实参和补齐的默认实参共用，保证 ABI 处理一致。
+  - `lower_call`：args 循环改用 `lower_call_arg`；循环后若 `!sig.variadic` 按
+    `sig.defaults.iter().enumerate()` 补齐 `i >= arg_vals.len()` 且 `d=Some(e)` 的参数。
+- **实测**：三个官方 impl 用例 `impl_struct`（值语义 self / 方法间调用 / 返回 struct /
+  撞名 push / self 字段赋值）、`impl_default`（默认实参）、`impl_gui_handle`（Opaque 句柄）
+  asm 输出全部匹配 `.expected` 且与 LLVM 逐字节一致；`builtin_demo.dial`（含默认参数）
+  双后端一致；边界用例（多默认值 / 表达式 `*`/string/struct 默认值 / impl 默认参数）双后端
+  一致；`-O0..-O3`/`-g` 全通过。
+- **A/B 零回归**：新增 `tests/asm_golden/impl_method.dial`（第 15 个 golden，golden 门禁共
+  16 用例）。其余 14 个 golden 程序 `.s` 与 HEAD（5262fbf，git worktree 独立构建）旧编译器
+  **逐字节一致**——证明 `lower_call` 重构与 impl 前置分派对无默认参数、非具名类型方法的
+  程序零影响；AArch64 普通程序（core1/structs）`.s` 零变化；impl 程序经
+  `clang --target=aarch64-linux-gnu` 交叉汇编产出 ELF aarch64 `.o`（4 个 `__impl_Point` 符号）。
+  新增 R18 测试组（三官方 impl 用例 + 默认参数边界 + 各 O 级别）。
+- **护栏**：`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0/零新依赖/LLVM 路径/AArch64
+  零改动，构建零警告，不打 tag，docx 确定性。

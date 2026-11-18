@@ -1769,6 +1769,19 @@ impl<'a> Lower<'a> {
 
     fn lower_method(&mut self, obj: &Expr, method: &str, args: &[Expr]) -> Result<(Value, bool), String> {
         let od = self.expr_dt(obj);
+        // M7-e3aq：B1「impl 方法块」——具名类型（用户 struct / 包不透明句柄）的
+        // `obj.m(args)` 优先改写为对 `__impl_<T>_<m>` 的普通函数调用（对齐 LLVM
+        // gen_method_call，codegen.rs:5479）。必须放在下面所有内建方法分派之前：
+        // impl 方法可与内建方法撞名（如 Point.push），具名类型的分派权归 impl。
+        // 复用既有 Expr::Call 链路 = 实参求值 / 默认实参补齐 / C ABI 宽度适配 /
+        // struct 按值传递 / 返回值处理零改动，ABI 天然不变，self 即首参。
+        if let Some(recv) = impl_receiver_name(&od) {
+            let symbol = impl_method_symbol(recv, method);
+            if self.ip.functions_sig.contains_key(&symbol) {
+                let call = make_impl_call(obj, recv, method, args);
+                return self.lower_expr(&call, &Type::Int);
+            }
+        }
         // remove / pop 返回「被删元素」而非新数组指针，且要写回 COW 新指针。
         if matches!(od, Type::Array(_)) && matches!(method, "remove" | "pop") {
             return self.lower_array_remove(obj, &od, method, args);
@@ -2050,6 +2063,22 @@ impl<'a> Lower<'a> {
 
     // ---- 函数调用 ----
 
+    /// M7-e3aq：把单个调用实参按**形参静态类型**求值并适配到 C ABI 宽度。
+    /// 显式实参和补齐的默认实参走同一条路径，保证 ABI 处理完全一致。
+    /// struct 形参按值传递：先拷到调用方栈上临时区，再把临时区地址传给被调方
+    /// （被调方 memcpy 出自己的副本），避免共享存储破坏值语义。
+    fn lower_call_arg(&mut self, a: &Expr, at: &Type) -> Result<Value, String> {
+        let (v, _) = self.lower_expr(a, at)?;
+        let v = self.adapt_param(v, at, at);
+        if let Type::Struct(_) = at {
+            let tmp = self.emit_alloca(IrType::Struct(struct_name_of(at)));
+            self.emit_memcpy(tmp, v, self.struct_byte_size(at));
+            Ok(Value::Reg(tmp))
+        } else {
+            Ok(v)
+        }
+    }
+
     fn lower_call(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
         if name == "print" || name == "eprint" || name == "print_raw" || name == "eprint_raw" || name == "write_char" {
             if args.is_empty() { return self.err(&format!("{} 至少需要一个参数", name)); }
@@ -2155,20 +2184,26 @@ impl<'a> Lower<'a> {
         let mut arg_tys = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let at = sig.params.get(i).cloned().unwrap_or(Type::Int);
-            let (v, _) = self.lower_expr(a, &at)?;
-            let v = self.adapt_param(v, &at, &at);
-            if let Type::Struct(_) = &at {
-                // 结构体实参按值传递：先把内容拷到调用方栈上的一块临时区，
-                // 再把**临时区地址**传给被调方（被调方会 memcpy 出自己的副本）。
-                // 直接传原内容区地址会让被调方在拷贝完成前看到调用方可能已改动的
-                // 内容，且被调方的副本与调用方变量共享存储，破坏值语义。
-                let tmp = self.emit_alloca(IrType::Struct(struct_name_of(&at)));
-                self.emit_memcpy(tmp, v, self.struct_byte_size(&at));
-                arg_vals.push(Value::Reg(tmp));
-            } else {
-                arg_vals.push(v);
-            }
+            let v = self.lower_call_arg(a, &at)?;
+            arg_vals.push(v);
             arg_tys.push(param_ir(&at));
+        }
+        // M7-e3aq：默认实参补齐（对齐 LLVM gen_call，codegen.rs:5384）。
+        // 缺失的尾部参数按声明顺序用 FuncInfo.defaults 里的**常量表达式**补齐，
+        // 每次调用求值一次。此前 asm 完全缺失此步：少传的参数在栈槽里是未初始化
+        // 垃圾（实测 add(5) 得到 102 而非 15），影响所有带默认值的函数与 impl 方法。
+        // 变参（FFI varargs）尾部无默认值定义，跳过。
+        if !sig.variadic {
+            for (i, d) in sig.defaults.iter().enumerate() {
+                if i >= arg_vals.len() {
+                    if let Some(e) = d {
+                        let at = sig.params.get(i).cloned().unwrap_or(Type::Int);
+                        let v = self.lower_call_arg(e, &at)?;
+                        arg_vals.push(v);
+                        arg_tys.push(param_ir(&at));
+                    }
+                }
+            }
         }
         let linkage = if sig.exported { CallLink::Extern } else { CallLink::Dial };
         let ret_ir = param_ir(&ret_dt);
@@ -3780,6 +3815,16 @@ impl<'a> Lower<'a> {
             }
             Expr::Method(obj, method, margs) => {
                 let od = self.expr_dt(obj);
+                // M7-e3aq：B1 impl 方法返回类型从脱糖符号的签名取（对齐 LLVM
+                // type_of：语义层已把 Method 递归降级为 Call 校验并返回 info.ret）。
+                // 必须放在内建方法推断之前，否则 impl 方法会 fallback 到 Type::Int，
+                // 使返回 string / struct / 另一具名类型的方法在表达式位置类型错位。
+                if let Some(recv) = impl_receiver_name(&od) {
+                    let symbol = impl_method_symbol(recv, method);
+                    if let Some(info) = self.ip.functions_sig.get(&symbol) {
+                        return info.ret.clone();
+                    }
+                }
                 // remove/pop 返回被删元素（不是新数组指针）。
                 if matches!(method.as_str(), "remove" | "pop") {
                     if let Type::Array(e) = &od { return *e.clone(); }

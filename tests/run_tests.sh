@@ -2688,6 +2688,73 @@ done
 
 
 # ===========================================================================
+# R18) impl 方法块调用 + 默认实参补齐（M7-e3aq）
+#     B1 impl 方法：Struct/Opaque 具名类型的 obj.m() 改写为 __impl_T_m 普通调用；
+#     默认实参：缺失尾部参数在调用点按 FuncInfo.defaults 补齐（此前 asm 完全缺失，
+#     读到栈槽垃圾）。验证三个官方 impl 用例 + 普通默认参数函数双后端一致。
+# ===========================================================================
+echo
+echo "  -- R18) impl 方法调用与默认参数补齐双后端一致性 --"
+CDIR18="${TMP}/r18"
+mkdir -p "$CDIR18"
+
+# 18a) 三个官方 impl 用例：asm 输出须匹配 .expected 且与 LLVM 一致
+for t in impl_struct impl_default impl_gui_handle; do
+    if ${DIALC} build "tests/impl/$t.dial" --backend=asm -o "$CDIR18/${t}_a" >/dev/null 2>&1 \
+       && ${DIALC} build "tests/impl/$t.dial" --backend=llvm -o "$CDIR18/${t}_l" >/dev/null 2>&1; then
+        "$CDIR18/${t}_a" > "$CDIR18/${t}_a.out" 2>&1; _ra=$?
+        "$CDIR18/${t}_l" > "$CDIR18/${t}_l.out" 2>&1; _rl=$?
+        if [ "$_ra" -eq 0 ] && [ "$_rl" -eq 0 ] \
+           && diff -q "$CDIR18/${t}_a.out" "$CDIR18/${t}_l.out" >/dev/null \
+           && diff -q "$CDIR18/${t}_a.out" "tests/impl/$t.expected" >/dev/null; then
+            rpass "R18 $t 双后端一致且匹配 .expected"
+        else
+            rbad "R18 $t 输出不一致 (asm_rc=$_ra llvm_rc=$_rl)"
+        fi
+    else
+        rbad "R18 $t 双后端编译失败"
+    fi
+done
+
+# 18b) 普通默认参数函数（非 impl）：多默认值 / 表达式 / string / struct 默认值
+cat > "$CDIR18/defaults.dial" <<'EOF'
+struct P { x: int, y: int }
+fn calc(a: int, b: int = 2 * 3, tag: string = "hi"): int { return a + b; }
+fn make(p: P = P { x: 1, y: 2 }): int { return p.x + p.y; }
+fn main(): int {
+    print(calc(1));
+    print(calc(1, 5));
+    print(calc(1, 5, "x"));
+    print(make());
+    print(make(P { x: 10, y: 20 }));
+    return 0;
+}
+EOF
+if ${DIALC} build "$CDIR18/defaults.dial" --backend=asm -o "$CDIR18/da" >/dev/null 2>&1 \
+   && ${DIALC} build "$CDIR18/defaults.dial" --backend=llvm -o "$CDIR18/dl" >/dev/null 2>&1; then
+    "$CDIR18/da" > "$CDIR18/da.out" 2>&1; "$CDIR18/dl" > "$CDIR18/dl.out" 2>&1
+    diff -q "$CDIR18/da.out" "$CDIR18/dl.out" >/dev/null \
+        && rpass "R18 默认参数（表达式/string/struct）双后端一致" \
+        || { rbad "R18 默认参数双后端输出不一致"; diff "$CDIR18/da.out" "$CDIR18/dl.out" | head; }
+else
+    rbad "R18 默认参数双后端编译失败"
+fi
+
+# 18c) impl 各 O 级别
+for _o in -O0 -O1 -O2 -O3 -g; do
+    if ${DIALC} build "tests/impl/impl_default.dial" --backend=asm $_o -o "$CDIR18/ia" >/dev/null 2>&1 \
+       && ${DIALC} build "tests/impl/impl_default.dial" --backend=llvm $_o -o "$CDIR18/il" >/dev/null 2>&1; then
+        "$CDIR18/ia" > "$CDIR18/ia.out" 2>&1; "$CDIR18/il" > "$CDIR18/il.out" 2>&1
+        diff -q "$CDIR18/ia.out" "$CDIR18/il.out" >/dev/null \
+            && rpass "R18 impl $_o 双后端一致" \
+            || rbad "R18 impl $_o 双后端不一致"
+    else
+        rbad "R18 impl $_o 编译失败"
+    fi
+done
+
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

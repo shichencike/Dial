@@ -841,6 +841,28 @@ C 侧 `DIAL_CHECK_BOUNDS` 统一负责（ReleaseFast 消除），IR 层不重复
 > golden 的 `.s` 与修复前编译器逐字节一致；AArch64 普通程序 `.s` 零变化。新增
 > `borrow_bind.dial` golden 与 R17 测试组锁定该场景。
 
+### 13.8 B1 impl 方法块调用 + 默认实参补齐（v1.10 开发中增补，M7-e3aq）
+
+LLVM 的 B1 impl 方法调用（`gen_method_call`）与默认实参补齐（`gen_call`）在 asm 后端
+此前双双缺失。`src/lower.rs` 补齐：
+
+| 缺口 | LLVM 权威实现 | asm 修复 |
+| --- | --- | --- |
+| impl 方法调用 | `gen_method_call`（codegen.rs:5479）：具名类型接收者用 `make_impl_call` 改写 `obj.m(args)`→`Expr::Call(__impl_T_m,[obj]+args)` 递归 `gen_expr` | `lower_method` 开头（所有内建分派前）对 `impl_receiver_name(&od)` 命中符号者同样改写并递归 `lower_expr`；`expr_dt` 同步从符号签名取返回类型 |
+| 默认实参补齐 | `gen_call`（codegen.rs:5384）：按 `FuncInfo.defaults` 在调用点补齐缺失尾部参数 | `lower_call` args 循环后按 `sig.defaults`（`!variadic`）补齐；实参求值抽成 `lower_call_arg`（lower_expr→adapt_param→struct 按值拷贝），显式/补齐共用 |
+
+**为何必须前置 impl 分派**：impl 方法可与内建容器方法撞名（`Point.push`），具名类型的
+分派权归 impl——与 LLVM 把 impl 判断放在 `gen_expr(obj)` 之前同源（否则 obj 被求值两次、
+撞名误入容器 COW 写回）。两处改写都只复用既有 `Expr::Call` 链路，故 ABI 天然不变。
+
+默认实参缺口比 impl 更根本：asm 此前少传参数读到未初始化栈槽（`add(5)` 得 102 而非 15），
+影响**所有**带默认值的函数，不限于 B1。修复后显式与补齐参数共用适配路径，struct 默认值
+也按值正确传递。
+
+> **影响面控制**：`lower_call` 重构对无默认参数程序零影响——14 个既有 golden `.s` 与
+> 修复前编译器逐字节一致，AArch64 普通程序（core1/structs）零变化；新增
+> `impl_method.dial` golden 与 R18 测试组（三官方 impl 用例 + 默认参数边界 + 各 O 级别）。
+
 ---
 
 ## 14. 真实程序缺口补齐与宪法裁决（v1.04 增补）

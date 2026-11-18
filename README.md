@@ -6369,6 +6369,15 @@ fn main(): int {
 逐字节不变**；`funcs` / `func_values` 两张表按名字自动登记方法，`analyze` 的
 重复定义校验会在极端撞名时 Fail-Fast。
 
+> **双后端一致（v1.10 开发中增量，M7-e3aq）**：自研 asm 后端此前对具名类型的 `obj.m()`
+> 恒报「方法暂不支持」，`tests/impl/*.dial` 与 GUI 的 B1 OO 封装层只能用 LLVM 编译。
+> 现 `lower.rs::lower_method` 同样在具名类型接收者上用 `make_impl_call` 改写为
+> `Expr::Call` 递归降级（放在内建方法分派前，保证撞名 `Point.push` 归 impl），`expr_dt`
+> 同步从脱糖符号签名取返回类型；三官方 impl 用例双后端逐字节一致。同批修复一个更根本的
+> 缺口——asm 的 `lower_call` 此前完全没有**默认实参补齐**（`add(5)` 读到栈槽垃圾），
+> 现按 `FuncInfo.defaults` 在调用点补齐（显式与补齐参数共用 `lower_call_arg` 适配路径），
+> 所有带默认值的函数不再错位。无默认参数、非具名类型方法的既有程序汇编逐字节不变。
+
 **容器特例收窄**：`push` / `set` / `put` / `add` 同时是内建容器的 COW 原地写回
 协议名。codegen `gen_stmt` 与 semantic `check_stmt` 用 `is_impl_receiver` 把这套
 特例**精确排除具名类型接收者**——否则一个恰好叫 `push` 的 impl 方法会被误当成

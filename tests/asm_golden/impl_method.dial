@@ -1,0 +1,32 @@
+// M7-e3aq：B1「impl 方法块」+ 默认实参补齐（双后端一致性）。
+// 覆盖：Struct / Opaque 具名类型的 obj.m() 改写为 __impl_T_m 普通调用；
+// self 首参、方法间调用、返回 struct、与内建方法撞名（push）、
+// 默认实参（含表达式/string/struct 默认值）在调用点补齐。
+struct Point { x: int, y: int }
+impl Point {
+    fn sum(self): int { return self.x + self.y; }
+    fn add(self, k: int = 100): int { return self.sum() + k; }
+    fn scaled(self, k: int): Point { return Point { x: self.x * k, y: self.y * k }; }
+    // 与内建容器方法撞名：须走 impl 分派而非容器写回。
+    fn push(self, k: int): int { return self.x + k; }
+}
+// 默认实参：多默认值 + 表达式 / string / struct 默认值。
+fn calc(a: int, b: int = 2 * 3, tag: string = "hi"): int { return a + b; }
+fn make(p: Point = Point { x: 1, y: 2 }): int { return p.x + p.y; }
+
+fn main(): int {
+    var p: Point = Point { x: 3, y: 4 };
+    print(p.sum());                 // 7
+    print(p.add());                 // 107
+    print(p.add(1));                // 8
+    var q: Point = p.scaled(2);
+    print(q.sum());                 // 14
+    print(p.push(7));               // 10（impl，不是容器）
+    print(p.sum());                 // 7（未被写回）
+    print(calc(1));                 // 7
+    print(calc(1, 5));              // 6
+    print(calc(1, 5, "x"));         // 6
+    print(make());                  // 3
+    print(make(Point { x: 10, y: 20 })); // 30
+    return 0;
+}

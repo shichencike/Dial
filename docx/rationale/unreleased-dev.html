@@ -35,6 +35,7 @@
 <li><a href="#m7-e3an3双后端补齐产物工程层能力stdlib-持久缓存----fast-compile编译速度维度">M7-e3an3：双后端补齐产物/工程层能力——stdlib 持久缓存 + --fast-compile（编译速度维度）</a></li>
 <li><a href="#m7-e3ao自研-asm-后端补齐嵌套下标赋值-aij--v语言层面最后一块被明确拒绝的构造">M7-e3ao：自研 asm 后端补齐嵌套下标赋值 a[i][j] = v（语言层面最后一块被明确拒绝的构造）</a></li>
 <li><a href="#m7-e3ap修复-asm-后端借用句柄绑局部变量的-retain-结算缺口e3ao-记录的独立缺口本批补齐">M7-e3ap：修复 asm 后端借用句柄绑局部变量的 retain 结算缺口（e3ao 记录的独立缺口，本批补齐）</a></li>
+<li><a href="#m7-e3aq自研-asm-后端补齐-b1-impl-方法块调用--默认实参补齐">M7-e3aq：自研 asm 后端补齐 B1 impl 方法块调用 + 默认实参补齐</a></li>
 </ul>
 </li>
 </ul>
@@ -3147,6 +3148,51 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
   参数（不绑定变量），不在本修复影响面内；AArch64 普通程序（core1/core3/hof/containers）
   <code>.s</code> 零变化。新增 R17 测试组（multi_dim_demo 原文崩溃回归 + 借用绑定综合场景 + 各
   O 级别）。</li>
+<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0/零新依赖/LLVM 路径/AArch64
+  零改动，构建零警告，不打 tag，docx 确定性。</li>
+</ul>
+<h4 id="m7-e3aq自研-asm-后端补齐-b1-impl-方法块调用--默认实参补齐">M7-e3aq：自研 asm 后端补齐 B1 impl 方法块调用 + 默认实参补齐</h4>
+<ul>
+<li><strong>背景</strong>：用户「继续」。对双后端能力做一次彻底审计（Stmt/Expr 全变体、内建表、方法表、
+  测试/示例覆盖），确认 Stmt/Expr 变体与内建名两侧已对齐、simd/内联汇编/thread 为有意
+  不做项后，锁定两处 LLVM 支持却 asm 完全缺失的真实缺口。</li>
+<li><strong>缺口①：B1 impl 方法块调用</strong>（主）。具名类型（用户 <code>struct</code> = <code>Type::Struct</code>、包
+  <code>type X;</code> = <code>Type::Opaque</code>）的 <code>obj.m()</code> 在 LLVM 由 <code>gen_method_call</code>（codegen.rs:5479）
+  用 <code>impl_receiver_name</code>→<code>impl_method_symbol</code>→<code>make_impl_call</code>（均在 ast.rs，冻结文件只读
+  复用）就地改写为 <code>Expr::Call(__impl_&lt;T&gt;_&lt;m&gt;, [obj]+args)</code> 并递归 <code>gen_expr</code>——于是实参求值、
+  默认实参、C ABI 适配、build_call、返回值处理全部零改动复用普通调用链，ABI 天然不变，
+  <code>self</code> 即首参。asm 的 <code>lower_method</code>（lower.rs:1807）对 Struct/Opaque 恒返回
+  「方法暂不支持（后续相位）」。实证 baseline（5262fbf）：<code>tests/impl/impl_struct.dial</code>
+  的 <code>p.sum()</code> 报「方法 sum 暂不支持（后续相位）」；<code>impl_gui_handle.dial</code> 的 <code>win.add()</code>
+  同；GUI 的 OO 封装层 <code>packages/gui/src/gui_oo.dial</code>（整层 B1 方法）在 asm 下不可用。</li>
+<li><strong>缺口②：默认实参补齐</strong>（实现 impl_default 时暴露，更根本）。LLVM <code>gen_call</code>
+  （codegen.rs:5384）在调用点按 <code>FuncInfo.defaults</code> 补齐缺失尾部参数（每次调用求值一次）。
+  asm <code>lower_call</code> 完全没有此步：少传的参数在栈槽里是未初始化垃圾——实测顶层
+  <code>fn add(a:int, b:int=10)</code> 的 <code>add(5)</code> 在 asm 得 102（LLVM 得 15）。影响所有带默认值的
+  函数与 impl 方法，不限于 B1。</li>
+<li><strong>实现</strong>（<code>src/lower.rs</code> 唯一产品代码改动）：</li>
+<li><code>lower_method</code>：开头（<code>od</code> 算出后、所有内建方法分派前）判断 <code>impl_receiver_name(&amp;od)</code>，
+    若 <code>impl_method_symbol(recv, method)</code> 在 <code>self.ip.functions_sig</code>，则
+    <code>make_impl_call(obj, recv, method, args)</code> 构造 <code>Expr::Call</code> 递归 <code>lower_expr</code>。必须前置——
+    impl 方法可与内建撞名（<code>Point.push</code>），具名类型分派权归 impl，对齐 LLVM 的放置顺序。</li>
+<li><code>expr_dt</code> 的 <code>Expr::Method</code> 分支：Impl 命中时返回 <code>functions_sig[symbol].ret.clone()</code>，
+    否则 <code>method_ret(...).unwrap_or(Type::Int)</code> 会把返回 string/struct/具名类型的方法在
+    表达式位置误判为 Int（语义层 type_of 已按 Call 链返回 info.ret，此处须同步）。</li>
+<li><code>lower_call_arg(a, at)</code> 辅助方法：<code>lower_expr(a, at)</code>→<code>adapt_param</code>→struct 形参按值
+    拷贝到栈临时区再传地址；显式实参和补齐的默认实参共用，保证 ABI 处理一致。</li>
+<li><code>lower_call</code>：args 循环改用 <code>lower_call_arg</code>；循环后若 <code>!sig.variadic</code> 按
+    <code>sig.defaults.iter().enumerate()</code> 补齐 <code>i &gt;= arg_vals.len()</code> 且 <code>d=Some(e)</code> 的参数。</li>
+<li><strong>实测</strong>：三个官方 impl 用例 <code>impl_struct</code>（值语义 self / 方法间调用 / 返回 struct /
+  撞名 push / self 字段赋值）、<code>impl_default</code>（默认实参）、<code>impl_gui_handle</code>（Opaque 句柄）
+  asm 输出全部匹配 <code>.expected</code> 且与 LLVM 逐字节一致；<code>builtin_demo.dial</code>（含默认参数）
+  双后端一致；边界用例（多默认值 / 表达式 <code>*</code>/string/struct 默认值 / impl 默认参数）双后端
+  一致；<code>-O0..-O3</code>/<code>-g</code> 全通过。</li>
+<li><strong>A/B 零回归</strong>：新增 <code>tests/asm_golden/impl_method.dial</code>（第 15 个 golden，golden 门禁共
+  16 用例）。其余 14 个 golden 程序 <code>.s</code> 与 HEAD（5262fbf，git worktree 独立构建）旧编译器
+  <strong>逐字节一致</strong>——证明 <code>lower_call</code> 重构与 impl 前置分派对无默认参数、非具名类型方法的
+  程序零影响；AArch64 普通程序（core1/structs）<code>.s</code> 零变化；impl 程序经
+  <code>clang --target=aarch64-linux-gnu</code> 交叉汇编产出 ELF aarch64 <code>.o</code>（4 个 <code>__impl_Point</code> 符号）。
+  新增 R18 测试组（三官方 impl 用例 + 默认参数边界 + 各 O 级别）。</li>
 <li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0/零新依赖/LLVM 路径/AArch64
   零改动，构建零警告，不打 tag，docx 确定性。</li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
