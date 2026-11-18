@@ -616,7 +616,7 @@ dialc lsp
 
 | 支柱 | LLVM 后端现状 | asm 后端现状 | 进展 |
 |---|---|---|---|
-| **① O3 级优化管线**（核心＝全局寄存器分配） | inkwell + clang `-O3 -flto` 全流程（仅 `--fast`） | 曾有 4 个本地 pass + 2 专项 pass，无全局寄存器分配 → b17 内层 109 条栈搬运 | **M7-e3v 落地函数级 GRA**（callee-saved 全函数驻留），数组密集项 +9.91%；**M7-e3x 定量证伪完整 SIMD 后端**（整体 −6.7%）转 targeted ISA 路线；**M7-e3y 原生 POPCNT 融合** b23 +114%~120%、几何平均 +2.5%；**M7-e3ac/e3ad 优化级别参数 `-O0`~`-O3`**（对齐 LLVM，O2 默认零回归）+ **移植 LLVM InstCombine 恒等式**（O3，`a+0`/`a*1` 等消除，密集循环 +23%）；caller-saved / 多级管线仍待补 |
+| **① O3 级优化管线**（核心＝全局寄存器分配） | inkwell + clang `-O3 -flto` 全流程（仅 `--fast`） | 曾有 4 个本地 pass + 2 专项 pass，无全局寄存器分配 → b17 内层 109 条栈搬运 | **M7-e3v 落地函数级 GRA**（callee-saved 全函数驻留），数组密集项 +9.91%；**M7-e3x 定量证伪完整 SIMD 后端**（整体 −6.7%）转 targeted ISA 路线；**M7-e3y 原生 POPCNT 融合** b23 +114%~120%、几何平均 +2.5%；**M7-e3ac/e3ad 优化级别参数 `-O0`~`-O3`**（对齐 LLVM，O2 默认零回归）+ **移植 LLVM InstCombine 恒等式**（O3，`a+0`/`a*1` 等消除，密集循环 +23%）；**M7-e3at 定量诊断 caller-saved GRA**（上界比 0.629<1、86.8% 栈槽仅访问≤2 次为 C ABI 强制落栈），ROI 为负、暂否决内核级 live-range 重写（附重启条件）；多级管线仍待补 |
 | **② DWARF 调试信息** | `codegen.rs:16` 用 `inkwell::debug_info` 生成完整 DWARF（`-g`，见 [§35](#35-v104-增补dwarf-调试信息与--g并入-v104版本不变)） | — | **M7-e3w 已落地（从零到一）**：`.file/.loc` 行表 + 手写 v5 CU，gdb 源码行断点 + print 变量名；**M7-e3z 深度补全类型 DIE**：int/float/bool/string/array 按真实类型显示（gdb `print ratio`=3.5、`flag`=true、`note`=char*），与 LLVM 后端格式一致；**M7-e3aa 多文件 source 映射**：`import` 合并编译时子模块函数的 `.loc`/`DW_AT_decl_file` 指向各自源文件，gdb `break helper.dial:N` 可命中；**M7-e3ab 精确宽度类型 DIE**：int32(4)/byte(1 无符号)/float32(4) 按真实宽度显示，gdb `print`/`ptype` 正确（R 组 R2~R5 断言全过）。非 -g 零开销、AArch64 零变化 |
 
 > 每批仍守死宪法约束：LLVM 路径零改动、`src/codegen.rs`/`src/ast.rs` 相对 544d10a

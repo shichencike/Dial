@@ -38,6 +38,7 @@
 <li><a href="#m7-e3aq自研-asm-后端补齐-b1-impl-方法块调用--默认实参补齐">M7-e3aq：自研 asm 后端补齐 B1 impl 方法块调用 + 默认实参补齐</a></li>
 <li><a href="#m7-e3ar新增双后端差分-fuzz-框架把实现一致性-bug变成可复现的自动化发现流程">M7-e3ar：新增双后端差分 fuzz 框架（把「实现一致性 bug」变成可复现的自动化发现流程）</a></li>
 <li><a href="#m7-e3as自研-asm-后端补齐内联汇编-asmt--asm_intelt语义层最后的纯能力差距">M7-e3as：自研 asm 后端补齐内联汇编 @asm&lt;T&gt;(...) / @asm_intel&lt;T&gt;(...)（语义层最后的纯能力差距）</a></li>
+<li><a href="#m7-e3atcaller-saved-寄存器分配的收益诊断用数据否决高风险架构重写零产品代码改动">M7-e3at：caller-saved 寄存器分配的收益诊断（用数据否决高风险架构重写，零产品代码改动）</a></li>
 </ul>
 </li>
 </ul>
@@ -3271,7 +3272,19 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
 - 探索中 <code>+r</code> 读写约束与自建多行模板让 <strong>LLVM 后端自身段错误（rc=139）</strong>——属冻结 LLVM 路径的既有边界，非本实现问题，未追逐；asm 后端对同输入给出正确结果，不纳入 golden。</p>
 <p><strong>护栏 / A/B</strong>：新增 <code>tests/asm_golden/inline_asm.dial</code>（第 17 个 golden），删除失效的 <code>negative/unsupported.dial</code>（其唯一用例就是内联汇编）。基线与新编译器对比：16 个既有 golden + 28 项 bench 程序（均不含 asm）<code>.s</code> <strong>逐字节一致</strong>；AArch64 普通程序（core3）交叉汇编 <code>.o</code> md5 <code>596424068c909e170dab0bd07317c1ce</code> 前后一致；几何平均 0.5402x→0.5366x 属计时噪声带（胜/平/负 13/12/3→14/11/3）。<code>src/codegen.rs</code>/<code>src/ast.rs</code> 零改动、<code>Cargo.toml</code> 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。</p>
 <p><strong>回归</strong>：AF 黄金门禁 17 用例全绿（含 AArch64 交叉汇编 / --fast-compile）；AG 差分门禁 golden 自检 + 4 固化语料 + 180 次在线 fuzz（60 seeds × O0/O2/O3）零不一致；全量 <code>tests/run_tests.sh</code> rc=0「全部测试通过」；<code>cargo test --release</code> 绿。</p>
-<p><strong>结论与边界</strong>：内联汇编补齐后，LLVM 有而 asm 无的<strong>语义构造清零</strong>。剩余与 LLVM 的差别都是非语义的：① 性能层 O3 管线的 caller-saved / 浮点 / 跨函数寄存器分配（caller-saved 经分析需把 GRA 重写为 live-range 分配，且 call 点保存/恢复成本可能抵消收益，b28 有 110 个 call，暂未做）；② SIMD（战略否决）；③ 字段级 ARC 等两后端共同的宪法限制。这些不再是「asm 少一个能编译的构造」。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+<p><strong>结论与边界</strong>：内联汇编补齐后，LLVM 有而 asm 无的<strong>语义构造清零</strong>。剩余与 LLVM 的差别都是非语义的：① 性能层 O3 管线的 caller-saved / 浮点 / 跨函数寄存器分配（caller-saved 经分析需把 GRA 重写为 live-range 分配，且 call 点保存/恢复成本可能抵消收益，b28 有 110 个 call，暂未做）；② SIMD（战略否决）；③ 字段级 ARC 等两后端共同的宪法限制。这些不再是「asm 少一个能编译的构造」。</p>
+<hr />
+<h4 id="m7-e3atcaller-saved-寄存器分配的收益诊断用数据否决高风险架构重写零产品代码改动">M7-e3at：caller-saved 寄存器分配的收益诊断（用数据否决高风险架构重写，零产品代码改动）</h4>
+<p><strong>为什么做这个</strong>：承接 e3as 差距盘点——语义构造已清零，性能支柱① O3 管线里 caller-saved / 浮点 / 跨函数寄存器分配是最后有工程量的方向。用户要求「不留缺口逐个补」，但 caller-saved 与前几批不同：它不是增量 pass，而是要把 GRA 从「全函数固定绑定」重写为「有活跃区间的 live-range 分配」，属内核级工程、多批次、高风险。按仓库 e3x 定量否决完整 SIMD 的纪律（先量化 ROI 再决定投不投入），本批先做诊断，<strong>不改任何产品代码</strong>。</p>
+<p><strong>为什么朴素方案一眼该否</strong>：GRA 现状分三路——<code>analyze_unified</code>（无 call，已用满 10 个寄存器）、<code>analyze_unified_with_calls</code>（含 call，<strong>只准用 6 个 callee-saved</strong>，因为 r8/r9/rsi/rdi 会被 call 破坏、且 rsi/rdi 同时是 ABI 传参寄存器）、<code>analyze_per_block</code>（递归/longjmp 逐块）。把 caller-saved 加进「全函数固定绑定」池，就必须在每个 call 点 save/restore 这 4 个寄存器 = <strong>8 条 mov/call</strong>。而收益上限是该函数的全部栈访问数 S（实际远小于 S）。所以判据 <code>S &lt; 8*C</code> 一旦成立，朴素方案必负收益。</p>
+<p><strong>诊断工具</strong>（<code>tools/diag_gra.py</code>，只读 asm 后端生成的 .s）：三个独立指标——① 上界比 <code>S/(8*C)</code>；② 每函数独立统计的栈槽访问频次分布（区分 C ABI 强制的 call 结果落栈 vs 真正的寄存器压力 spill）；③ call 密集函数的栈帧规模。生成命令写在工具 docstring，完全可复现。</p>
+<p><strong>实测（bench.dial，O2，21 个含 call 函数、208 个 call）</strong>：
+- <strong>上界比合计 0.629 &lt; 1</strong>：即使 4 个额外寄存器消除全部 1047 条栈访问，也抵不过 1664 条 save/restore 成本。call 最密集的 <code>run</code>（86 call）只有 0.472，b21（18 call）0.479。
+- <strong>栈槽频次</strong>：311 个栈槽中 <strong>86.8% 只访问 ≤2 次</strong>（1 次 15.1% + 2 次 71.7%），高频热点（≥4 次）仅 9.6%、贡献 26% 访问；访问 29 次的极热点全 bench 只有 1 个。绝大多数栈访问是「call 结果落栈 / 参数中转」——值活不过下一次 call，被 C ABI 强制落栈，跟寄存器数量无关。
+- <strong>call 密集函数栈帧巨大</strong>：run 1416B、b17 936B、b21 520B——这不是寄存器少导致的 spill，而是跨 call 的 ARC/字符串/数组值必须落栈。</p>
+<p><strong>结论：暂不投入 live-range 重写</strong>。三条证据同源：call 密集函数里值得驻留的值，要么活不过下一次 call（占多数，再多 caller-saved 也救不了），要么已在 6 个 callee-saved 里（够用）；收益空间恰好落在已领先 LLVM 的数组/字符串类，而持平 LLVM、最该提速的算术类是无 call 函数（caller-saved 根本够不着）。live-range 重写即便成功，可消除量受限于上述 ABI 事实，不足以抵消内核级重写成本与回归风险。<strong>这与 e3x 否决完整 SIMD 是同一决策模式</strong>：不是「做不到」，而是「ROI 为负，把工程投到确定的方向」。</p>
+<p><strong>重启条件（写下来，避免以后重复评估）</strong>：若将来出现新的 workload——call 之间有大量长 live-range 整数值（例如密集的多参数数值计算、跨多个 call 持有的累加器），使 <code>diag_gra.py</code> 的上界比显著 &gt;1 且高频栈槽占比明显上升——则重新评估 caller-saved live-range 分配。当前 bench 不满足。</p>
+<p><strong>护栏</strong>：本批零产品代码改动——<code>src/</code> 全部文件、<code>Cargo.toml</code>、所有 <code>.s</code> 输出逐字节不变；新增的只有 <code>tools/diag_gra.py</code>（诊断工具）与本条 rationale。A/B 基准、AF/AG 门禁、docx 确定性均不受影响。性能支柱①的后续主线仍是已证明正收益的 targeted ISA 融合与 InstCombine 恒等式移植。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

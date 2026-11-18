@@ -3102,3 +3102,24 @@
 **回归**：AF 黄金门禁 17 用例全绿（含 AArch64 交叉汇编 / --fast-compile）；AG 差分门禁 golden 自检 + 4 固化语料 + 180 次在线 fuzz（60 seeds × O0/O2/O3）零不一致；全量 `tests/run_tests.sh` rc=0「全部测试通过」；`cargo test --release` 绿。
 
 **结论与边界**：内联汇编补齐后，LLVM 有而 asm 无的**语义构造清零**。剩余与 LLVM 的差别都是非语义的：① 性能层 O3 管线的 caller-saved / 浮点 / 跨函数寄存器分配（caller-saved 经分析需把 GRA 重写为 live-range 分配，且 call 点保存/恢复成本可能抵消收益，b28 有 110 个 call，暂未做）；② SIMD（战略否决）；③ 字段级 ARC 等两后端共同的宪法限制。这些不再是「asm 少一个能编译的构造」。
+
+---
+
+#### M7-e3at：caller-saved 寄存器分配的收益诊断（用数据否决高风险架构重写，零产品代码改动）
+
+**为什么做这个**：承接 e3as 差距盘点——语义构造已清零，性能支柱① O3 管线里 caller-saved / 浮点 / 跨函数寄存器分配是最后有工程量的方向。用户要求「不留缺口逐个补」，但 caller-saved 与前几批不同：它不是增量 pass，而是要把 GRA 从「全函数固定绑定」重写为「有活跃区间的 live-range 分配」，属内核级工程、多批次、高风险。按仓库 e3x 定量否决完整 SIMD 的纪律（先量化 ROI 再决定投不投入），本批先做诊断，**不改任何产品代码**。
+
+**为什么朴素方案一眼该否**：GRA 现状分三路——`analyze_unified`（无 call，已用满 10 个寄存器）、`analyze_unified_with_calls`（含 call，**只准用 6 个 callee-saved**，因为 r8/r9/rsi/rdi 会被 call 破坏、且 rsi/rdi 同时是 ABI 传参寄存器）、`analyze_per_block`（递归/longjmp 逐块）。把 caller-saved 加进「全函数固定绑定」池，就必须在每个 call 点 save/restore 这 4 个寄存器 = **8 条 mov/call**。而收益上限是该函数的全部栈访问数 S（实际远小于 S）。所以判据 `S < 8*C` 一旦成立，朴素方案必负收益。
+
+**诊断工具**（`tools/diag_gra.py`，只读 asm 后端生成的 .s）：三个独立指标——① 上界比 `S/(8*C)`；② 每函数独立统计的栈槽访问频次分布（区分 C ABI 强制的 call 结果落栈 vs 真正的寄存器压力 spill）；③ call 密集函数的栈帧规模。生成命令写在工具 docstring，完全可复现。
+
+**实测（bench.dial，O2，21 个含 call 函数、208 个 call）**：
+- **上界比合计 0.629 < 1**：即使 4 个额外寄存器消除全部 1047 条栈访问，也抵不过 1664 条 save/restore 成本。call 最密集的 `run`（86 call）只有 0.472，b21（18 call）0.479。
+- **栈槽频次**：311 个栈槽中 **86.8% 只访问 ≤2 次**（1 次 15.1% + 2 次 71.7%），高频热点（≥4 次）仅 9.6%、贡献 26% 访问；访问 29 次的极热点全 bench 只有 1 个。绝大多数栈访问是「call 结果落栈 / 参数中转」——值活不过下一次 call，被 C ABI 强制落栈，跟寄存器数量无关。
+- **call 密集函数栈帧巨大**：run 1416B、b17 936B、b21 520B——这不是寄存器少导致的 spill，而是跨 call 的 ARC/字符串/数组值必须落栈。
+
+**结论：暂不投入 live-range 重写**。三条证据同源：call 密集函数里值得驻留的值，要么活不过下一次 call（占多数，再多 caller-saved 也救不了），要么已在 6 个 callee-saved 里（够用）；收益空间恰好落在已领先 LLVM 的数组/字符串类，而持平 LLVM、最该提速的算术类是无 call 函数（caller-saved 根本够不着）。live-range 重写即便成功，可消除量受限于上述 ABI 事实，不足以抵消内核级重写成本与回归风险。**这与 e3x 否决完整 SIMD 是同一决策模式**：不是「做不到」，而是「ROI 为负，把工程投到确定的方向」。
+
+**重启条件（写下来，避免以后重复评估）**：若将来出现新的 workload——call 之间有大量长 live-range 整数值（例如密集的多参数数值计算、跨多个 call 持有的累加器），使 `diag_gra.py` 的上界比显著 >1 且高频栈槽占比明显上升——则重新评估 caller-saved live-range 分配。当前 bench 不满足。
+
+**护栏**：本批零产品代码改动——`src/` 全部文件、`Cargo.toml`、所有 `.s` 输出逐字节不变；新增的只有 `tools/diag_gra.py`（诊断工具）与本条 rationale。A/B 基准、AF/AG 门禁、docx 确定性均不受影响。性能支柱①的后续主线仍是已证明正收益的 targeted ISA 融合与 InstCombine 恒等式移植。
