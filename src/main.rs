@@ -565,7 +565,14 @@ fn main() {
     if backend == Backend::Asm {
         // 自研后端：lower → pass → .s → cc -c → .o；obj_path 与 LLVM 后端一致，
         // 后面的 link() / final_link() 完全复用，FFI 包与 --tiny 等零改动生效。
-        if pgo {
+        // R4：自研 PGO 插桩/分段仅 x86-64 有效；AArch64 目标下训练二进制无法在
+        // 本机运行，故优雅降级为 baseline（不插桩、不训练），保持 AArch64 零变化。
+        let asm_target = asm::detect_target().unwrap_or(crate::target::EmitTarget::X86_64SysV);
+        let pgo_effective = pgo && matches!(asm_target, crate::target::EmitTarget::X86_64SysV);
+        if pgo && !pgo_effective {
+            eprintln!("ℹ️  --pgo 在当前 asm 目标（AArch64）不适用，已降级为无 PGO 构建（AArch64 零变化）。");
+        }
+        if pgo_effective {
             // ── R4 自研 PGO 两段式（零 bitcode / 零 LLVM 工具）────────────────
             // 阶段一：插桩编译 + 链接出训练二进制，跑一遍写 .dialprof；
             // 阶段二：读回 profile 重新编译出优化版 .o，覆盖 obj_path。

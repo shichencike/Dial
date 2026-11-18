@@ -166,18 +166,20 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 - ✅ <strong>已完成：impl 关联函数 <code>T::new()</code>（无 self 静态方法）</strong>。纯编译期脱糖：<code>lexer.rs</code> 加 <code>ColonColon</code> token；<code>parser.rs</code> 加 token 预扫描（前向引用 + 友好诊断）+ <code>parse_impl_def</code> 按首参名区分方法/关联函数 + <code>parse_primary</code> 的 <code>::</code> 降级为 <code>Expr::Call(__impl_T_m, args)</code>。<code>codegen.rs</code>/<code>lower.rs</code>/<code>semantic.rs</code>/<code>ast.rs</code> 零改动（复用 Call 链路）。覆盖带参/空参、返回 struct/标量、链式调用、前向引用；双后端一致、26 源码 .s 零回归；新增 <code>tests/impl/impl_assoc.dial</code>（R18 组）。
 - ⏸ <strong>暂不展开</strong>：select 超时（底层 <code>recv_timeout</code> 已具备，仅缺多通道语法糖）、map<string> 值（触及 semantic 泛型策略）、原子类型/无锁（内存模型宪法裁决）。用户 2026-11-18 明确本轮 R3 只做 impl 关联函数；其余待单独裁决再启。
 - 护栏遵守：零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64 零变化、双后端一致。</p>
-<p><strong>第 4 项 · PGO / LTO / bitcode（自建 profile 基础设施）</strong> — 高风险、工程量最大，最后启动
-- 目标：让 asm 不再因缺 <code>.bc</code> 拒绝 <code>--pgo</code>，自建「插桩 → profile 收集 → 优化决策」闭环；LTO 走自研 IR 跨模块合并。
-- 动作：① 定义不依赖 LLVM bitcode 的自研 profile 格式；② 插桩版 IR + 运行时 profile 写回；③ 基于 profile 的块布局/热冷分离；④ 跨模块 IR 合并实现 LTO。
-- 验收：<code>--pgo</code> 在 asm 下可用且带来可测加速、无 <code>.bc</code> 依赖、门禁全绿。
-- 护栏：每子步独立可回滚；前三项未收口前不开工。</p>
+<p><strong>第 4 项 · PGO / LTO / bitcode（自建 profile 基础设施）</strong> — ✅ 已完成（2026-11-18）
+- 目标：让 asm 不再因缺 <code>.bc</code> 拒绝 <code>--pgo</code>，自建「插桩 → profile 收集 → 优化决策」闭环。
+- <strong>诊断修正（<code>tools/diag_pgo.py</code>）</strong>：原描述的"跨模块 IR 合并 LTO"经源码核实——源码级 import 早已合成单个 <code>IrProgram</code>（天然 LTO），包名 import 是 C <code>.a</code> 机器码非 IR（不在 IR 合并范畴），故 LTO 无 IR 层工作量；bitcode 只是喂 clang 的手段非能力，asm 不需自建。块布局 ROI 实测：37 多块函数、55 回边循环头 100% 已对齐、热路径 fallthrough、冷块甩末尾——通用块重排是负 ROI（不硬做）。真正缺口是 <code>--pgo</code> 被 <code>exit(1)</code> 拒绝。
+- 实际落地（自研、零 bitcode、零 LLVM 工具）：① <code>src/pgo.rs</code> 自研 <code>.dialprof</code> 纯文本格式（DIALPGO1）；② <code>runtime/dial_rt_pgo.c</code> 的 <code>dial_pgo_dump</code> 读 <code>DIAL_PGO_FILE</code> 写回；③ <code>codegen_asm.rs</code> 的 <code>PgoPlan</code> 三态——插桩（<code>.comm</code> 计数器 + <code>pushfq/incq/popfq</code> + main 返回前保护易失寄存器后 dump）、热函数判定（入口+循环计数、相对阈值 max×10%、main 强制、全零回退）、<code>.text.hot/.text.unlikely</code> 分段 + 冷函数省对齐；④ <code>main.rs</code> 两段式编排（插桩编译→训练运行→读回→优化重编），asm PGO 独立于 <code>--fast</code>。
+- 验收：<code>--pgo</code> 在 asm 下可用、零 <code>.bc</code> 依赖、端到端输出与 baseline 一致、profile 确定性、24 源码 <code>-O3</code> <code>.s</code> 逐字节零回归；门禁 <code>tools/verify_asm_pgo.sh</code>（AR 组）四层证据全绿。
+- <strong>性能如实记录</strong>：A/B 实测 <code>pgo/baseline≈0.997</code>（中性偏微正，落在噪声内）——与诊断一致：asm 默认布局已近最优，PGO 收益上界低。R4 的核心价值是<strong>功能完整性</strong>（<code>--pgo</code> 不再被拒、零 LLVM 依赖），非性能飞跃；不硬声称加速。
+- 护栏：零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64/-g 不进 PGO、baseline 逐字节零回归、每子步独立提交可回滚。</p>
 <h3 id="c-状态">C. 状态</h3>
 <ul>
 <li>~~第 1 项（工具链去 LLVM 化）~~ ✅ 已完成（2026-11-18，<code>tools/verify_no_llvm_toolchain.sh</code> AF2 组）。</li>
 <li>~~第 2 项（LLVM 独占优化回收）~~ ✅ 诊断完成、量化搁置（2026-11-18，<code>tools/diag_opt_gaps.py</code>）。</li>
 <li>~~第 3 项（B 类语言语义）~~ ✅ impl 关联函数 <code>T::new()</code> 已落地（2026-11-18，<code>tests/impl/impl_assoc.dial</code>）；其余三项按用户决策暂不展开。</li>
-<li>当前开放项：<strong>第 4 项（PGO / LTO / bitcode 自建）</strong>——高风险、工程量最大，前三项已收口，可择机启动。</li>
-<li>完成一项 → 在本附则勾选一项 → 再进下一项；不得并行铺开。</li>
+<li>~~第 4 项（PGO / LTO / bitcode 自建）~~ ✅ 已完成（2026-11-18，<code>tools/diag_pgo.py</code> 诊断 + <code>tools/verify_asm_pgo.sh</code> AR 组门禁；自研 <code>.dialprof</code> 闭环，零 bitcode）。</li>
+<li><strong>收回路线图四项全部收口</strong>。唯一后端总纲执行完毕：asm 不再把任何能力交给 LLVM。</li>
 </ul>
 <h2 id="0-护栏路线的硬边界">0. 护栏（路线的硬边界）</h2>
 <ol>

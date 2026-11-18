@@ -114,6 +114,10 @@
 #   AF. 自研后端（--backend=asm）：llvm / asm 双后端对同一份 .dial 的运行输出
 #      逐字节一致 / 确实产出 .s / 默认后端仍为 llvm / 未覆盖构造 Fail-Fast 明确报错 /
 #      AArch64 汇编语法经交叉汇编器验证（tools/run_asm_golden.sh，v1.10 增补）。
+#   AF2. 零 LLVM 工具链独立性（gcc-only 回归，总纲第 1 项，verify_no_llvm_toolchain.sh）。
+#   AG. 双后端差分 fuzz 门禁（run_diff_fuzz_gate.sh）。
+#   AR. 自研 PGO 闭环门禁（零 bitcode：插桩→profile→热函数分段，总纲第 4 项，
+#      tools/verify_asm_pgo.sh：功能闭环/布局生效/确定性/零回归四层证据）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -4949,6 +4953,14 @@ echo
 echo "== AG) 双后端差分 fuzz 门禁（确定性生成 + 固化语料 + 最小化）=="
 if bash tools/run_diff_fuzz_gate.sh "$DIALC" --quick; then
     :
+else
+    fail=1
+fi
+
+echo
+echo "== AR) 自研 PGO 闭环门禁（零 bitcode，总纲第 4 项）=="
+if bash tools/verify_asm_pgo.sh "$DIALC"; then
+    :   # 脚本逐条打印 ✅；失败项打印 ❌ 并以非 0 退出
 else
     fail=1
 fi

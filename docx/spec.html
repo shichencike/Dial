@@ -876,8 +876,9 @@ dialc lsp
 AArch64 AAPCS 汇编 <code>.s</code> → 系统 <code>cc -c</code> 汇编成 <code>.o</code> → 复用既有链接流程。
 <strong>不发射 C 源码、不引第三方代码生成库、零新包依赖</strong>；FFI 包、<code>--tiny</code>、
 <code>--single-file</code> 因复用链接层而零改动生效。未覆盖的语言构造会明确报
-<code>[asm 后端] ...</code> 编译错误，绝不静默降级。<code>asm</code> 后端拒绝 <code>--pgo</code>；<code>-g</code> 自
-M7-e3w 起已支持完整 DWARF（源码行断点 + 变量名 + M7-e3z 类型 DIE，详见 §35 与路线图）。
+<code>[asm 后端] ...</code> 编译错误，绝不静默降级。<code>asm</code> 自 R4 起支持<strong>自研 PGO</strong>（<code>--pgo</code>，
+零 bitcode / 零 LLVM 工具：插桩 → <code>.dialprof</code> → 热函数 <code>.text.hot</code> 聚拢，详见 §38 PGO 段）；
+<code>-g</code> 自 M7-e3w 起已支持完整 DWARF（源码行断点 + 变量名 + M7-e3z 类型 DIE，详见 §35 与路线图）。
 双后端黄金门禁见 <code>tools/run_asm_golden.sh</code>（<code>run_tests.sh</code> 的 AF 组）。</p>
 <p><strong>当前覆盖范围</strong>（M1–M5 已落地）：</p>
 <table>
@@ -1426,6 +1427,13 @@ Dial 优化仍由 <code>--fast</code> / <code>-g</code> 控制。实测某示例
 </tbody>
 </table>
 <blockquote>
+<p><strong>自研后端的 PGO（<code>--backend=asm --pgo</code>，R4）</strong>：与上面 LLVM 路径不同——<strong>零 bitcode、
+零 LLVM 工具依赖</strong>。两段式：① 插桩编译出训练版（计数器写 <code>.comm</code>）→ 训练运行把热点写到
+环境变量 <code>DIAL_PGO_FILE</code> 指定的 <code>.dialprof</code>（纯文本 <code>DIALPGO1</code> 格式）→ ② 读回 profile 重编，
+把热函数聚拢到 <code>.text.hot</code>、冷函数甩 <code>.text.unlikely</code>、冷循环省对齐 padding。独立于 <code>--fast</code>；
+训练运行无参（与 LLVM 路径同局限，热路径需写入 main 调用链）。诊断（<code>tools/diag_pgo.py</code>）表明
+asm 默认布局已近最优，PGO 核心价值是功能完整性而非性能飞跃（A/B 实测中性偏微正）。
+门禁见 <code>tools/verify_asm_pgo.sh</code>（<code>run_tests.sh</code> AR 组）。</p>
 <p>注意：<code>--fast</code> 生成的二进制按<strong>本机 CPU 微架构级别</strong>（<code>x86-64-v3</code>/<code>-v4</code> 或 NEON）调优，
 仅供本机运行，请勿跨机型分发（否则可能 <code>SIGILL</code>）。</p>
 </blockquote>

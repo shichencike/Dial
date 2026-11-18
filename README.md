@@ -316,8 +316,9 @@ dialc lsp
 > AArch64 AAPCS 汇编 `.s` → 系统 `cc -c` 汇编成 `.o` → 复用既有链接流程。
 > **不发射 C 源码、不引第三方代码生成库、零新包依赖**；FFI 包、`--tiny`、
 > `--single-file` 因复用链接层而零改动生效。未覆盖的语言构造会明确报
-> `[asm 后端] ...` 编译错误，绝不静默降级。`asm` 后端拒绝 `--pgo`；`-g` 自
-> M7-e3w 起已支持完整 DWARF（源码行断点 + 变量名 + M7-e3z 类型 DIE，详见 §35 与路线图）。
+> `[asm 后端] ...` 编译错误，绝不静默降级。`asm` 自 R4 起支持**自研 PGO**（`--pgo`，
+> 零 bitcode / 零 LLVM 工具：插桩 → `.dialprof` → 热函数 `.text.hot` 聚拢，详见 §38 PGO 段）；
+> `-g` 自 M7-e3w 起已支持完整 DWARF（源码行断点 + 变量名 + M7-e3z 类型 DIE，详见 §35 与路线图）。
 > 双后端黄金门禁见 `tools/run_asm_golden.sh`（`run_tests.sh` 的 AF 组）。
 >
 > **当前覆盖范围**（M1–M5 已落地）：
@@ -743,6 +744,14 @@ Dial 优化仍由 `--fast` / `-g` 控制。实测某示例默认编译 ~0.35s，
 | **① 自动向量化 (SIMD) + 循环展开** | LLVM 用 `O3` + 宿主 SIMD（x86 的 AVX2/AVX-512、ARM64 的 NEON）一次吃 4~8 个 int64，并展开循环减少分支 | 反汇编可见 `ymm`/`zmm` 向量指令 |
 | **② LTO 链接时优化** | 把 Dial 代码与 C 运行时的 bitcode 整体重排，`dial_array_get`/`push` 等热函数被直接内联进主程序，消灭函数调用开销 | 反汇编中热循环 0 次 `call dial_array_*` |
 | **③ PGO 剖析引导优化**（`--pgo`） | 先插桩跑一遍训练样本记录最热分支，再据热点把热路径顶到 I-Cache 最前、冷错误后置 | 构建日志出现「PGO 优化完成」 |
+
+> **自研后端的 PGO（`--backend=asm --pgo`，R4）**：与上面 LLVM 路径不同——**零 bitcode、
+> 零 LLVM 工具依赖**。两段式：① 插桩编译出训练版（计数器写 `.comm`）→ 训练运行把热点写到
+> 环境变量 `DIAL_PGO_FILE` 指定的 `.dialprof`（纯文本 `DIALPGO1` 格式）→ ② 读回 profile 重编，
+> 把热函数聚拢到 `.text.hot`、冷函数甩 `.text.unlikely`、冷循环省对齐 padding。独立于 `--fast`；
+> 训练运行无参（与 LLVM 路径同局限，热路径需写入 main 调用链）。诊断（`tools/diag_pgo.py`）表明
+> asm 默认布局已近最优，PGO 核心价值是功能完整性而非性能飞跃（A/B 实测中性偏微正）。
+> 门禁见 `tools/verify_asm_pgo.sh`（`run_tests.sh` AR 组）。
 
 > 注意：`--fast` 生成的二进制按**本机 CPU 微架构级别**（`x86-64-v3`/`-v4` 或 NEON）调优，
 > 仅供本机运行，请勿跨机型分发（否则可能 `SIGILL`）。

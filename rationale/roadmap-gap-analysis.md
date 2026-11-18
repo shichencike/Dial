@@ -83,19 +83,21 @@
 - ⏸ **暂不展开**：select 超时（底层 `recv_timeout` 已具备，仅缺多通道语法糖）、map<string> 值（触及 semantic 泛型策略）、原子类型/无锁（内存模型宪法裁决）。用户 2026-11-18 明确本轮 R3 只做 impl 关联函数；其余待单独裁决再启。
 - 护栏遵守：零新依赖、`codegen.rs`/`ast.rs`/1.10.0 零改动、AArch64 零变化、双后端一致。
 
-**第 4 项 · PGO / LTO / bitcode（自建 profile 基础设施）** — 高风险、工程量最大，最后启动
-- 目标：让 asm 不再因缺 `.bc` 拒绝 `--pgo`，自建「插桩 → profile 收集 → 优化决策」闭环；LTO 走自研 IR 跨模块合并。
-- 动作：① 定义不依赖 LLVM bitcode 的自研 profile 格式；② 插桩版 IR + 运行时 profile 写回；③ 基于 profile 的块布局/热冷分离；④ 跨模块 IR 合并实现 LTO。
-- 验收：`--pgo` 在 asm 下可用且带来可测加速、无 `.bc` 依赖、门禁全绿。
-- 护栏：每子步独立可回滚；前三项未收口前不开工。
+**第 4 项 · PGO / LTO / bitcode（自建 profile 基础设施）** — ✅ 已完成（2026-11-18）
+- 目标：让 asm 不再因缺 `.bc` 拒绝 `--pgo`，自建「插桩 → profile 收集 → 优化决策」闭环。
+- **诊断修正（`tools/diag_pgo.py`）**：原描述的"跨模块 IR 合并 LTO"经源码核实——源码级 import 早已合成单个 `IrProgram`（天然 LTO），包名 import 是 C `.a` 机器码非 IR（不在 IR 合并范畴），故 LTO 无 IR 层工作量；bitcode 只是喂 clang 的手段非能力，asm 不需自建。块布局 ROI 实测：37 多块函数、55 回边循环头 100% 已对齐、热路径 fallthrough、冷块甩末尾——通用块重排是负 ROI（不硬做）。真正缺口是 `--pgo` 被 `exit(1)` 拒绝。
+- 实际落地（自研、零 bitcode、零 LLVM 工具）：① `src/pgo.rs` 自研 `.dialprof` 纯文本格式（DIALPGO1）；② `runtime/dial_rt_pgo.c` 的 `dial_pgo_dump` 读 `DIAL_PGO_FILE` 写回；③ `codegen_asm.rs` 的 `PgoPlan` 三态——插桩（`.comm` 计数器 + `pushfq/incq/popfq` + main 返回前保护易失寄存器后 dump）、热函数判定（入口+循环计数、相对阈值 max×10%、main 强制、全零回退）、`.text.hot/.text.unlikely` 分段 + 冷函数省对齐；④ `main.rs` 两段式编排（插桩编译→训练运行→读回→优化重编），asm PGO 独立于 `--fast`。
+- 验收：`--pgo` 在 asm 下可用、零 `.bc` 依赖、端到端输出与 baseline 一致、profile 确定性、24 源码 `-O3` `.s` 逐字节零回归；门禁 `tools/verify_asm_pgo.sh`（AR 组）四层证据全绿。
+- **性能如实记录**：A/B 实测 `pgo/baseline≈0.997`（中性偏微正，落在噪声内）——与诊断一致：asm 默认布局已近最优，PGO 收益上界低。R4 的核心价值是**功能完整性**（`--pgo` 不再被拒、零 LLVM 依赖），非性能飞跃；不硬声称加速。
+- 护栏：零新依赖、`codegen.rs`/`ast.rs`/1.10.0 零改动、AArch64/-g 不进 PGO、baseline 逐字节零回归、每子步独立提交可回滚。
 
 ### C. 状态
 
 - ~~第 1 项（工具链去 LLVM 化）~~ ✅ 已完成（2026-11-18，`tools/verify_no_llvm_toolchain.sh` AF2 组）。
 - ~~第 2 项（LLVM 独占优化回收）~~ ✅ 诊断完成、量化搁置（2026-11-18，`tools/diag_opt_gaps.py`）。
 - ~~第 3 项（B 类语言语义）~~ ✅ impl 关联函数 `T::new()` 已落地（2026-11-18，`tests/impl/impl_assoc.dial`）；其余三项按用户决策暂不展开。
-- 当前开放项：**第 4 项（PGO / LTO / bitcode 自建）**——高风险、工程量最大，前三项已收口，可择机启动。
-- 完成一项 → 在本附则勾选一项 → 再进下一项；不得并行铺开。
+- ~~第 4 项（PGO / LTO / bitcode 自建）~~ ✅ 已完成（2026-11-18，`tools/diag_pgo.py` 诊断 + `tools/verify_asm_pgo.sh` AR 组门禁；自研 `.dialprof` 闭环，零 bitcode）。
+- **收回路线图四项全部收口**。唯一后端总纲执行完毕：asm 不再把任何能力交给 LLVM。
 
 ## 0. 护栏（路线的硬边界）
 

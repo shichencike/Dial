@@ -3339,3 +3339,33 @@ imulq   %r10, %r15     # s * 31
 6. 新增 `tests/impl/impl_assoc.dial` + `.expected`，挂入 run_tests.sh R18 组（双编译 + 互 diff + 对 .expected diff）。
 
 **范围与护栏**：`::` 为新增语法、不新增关键字（`impl`/`new` 仍可作普通标识符）；关联函数首参不可命名 self（保留规则）；不支持链式 `T::A::B()` 与泛型形态（B2 未落地）。只改 lexer/parser/lsp + 测试/文档，零新依赖、`codegen.rs`/`ast.rs`/1.10.0 零改动、AArch64 零变化、双后端一致、不打 tag、docx 确定性。剩余三项（select 超时 / map<string> 值 / 原子类型）按用户决策暂不展开。
+
+---
+
+## R4：自研 PGO 闭环 —— 唯一后端收回路线图第 4 项（四项全部收口）
+
+**为什么做**：唯一后端总纲（roadmap-gap-analysis.md）确立"假设 LLVM 不存在、只有自己"。收回路线图前三项（工具链去 LLVM / 优化回收诊断 / impl 关联函数）已收口，R4 是最后一项。`--pgo` 在 asm 下 `main.rs:504-507` 直接 `exit(1)`——用户可见 flag 被拒，是真实功能缺口，按总纲必须补，不因"性能收益可能有限"就搁置（那是把活推给 LLVM 的心态）。
+
+**诊断先行（`tools/diag_pgo.py`，只读、确定性）**：原路线图写"跨模块 IR 合并实现 LTO"经源码核实需修正——① 源码级 import 已把多 unit 合入单个 `ast::Program` → 单个 `IrProgram`（`main.rs:2039-2160`），**天然 LTO**；② 包名 import 走 C `.a` 静态链接（`main.rs:1497`），是机器码非 IR，不在 IR 合并范畴；③ bitcode 是 `codegen.rs:1759` 喂 clang 的手段非能力，asm 不需自建。块布局 ROI 实证：37 个多块函数、55 个回边循环头 100% 已 `.p2align 4`、热路径 fallthrough、冷退出块甩末尾——**PGO 想拿的块布局收益已被默认布局吃干净**，通用块重排负 ROI（延续 R2 的 e3at/e3au 纪律不硬做）。落地点排序：高=功能完整性（`--pgo` 可用、零 `.bc`、自研闭环）；中=热函数聚拢 + 只对齐热循环；低=通用块重排（不做）。
+
+**实现（自研、零 bitcode、零 LLVM 工具）**：
+1. `src/pgo.rs`（新）：`.dialprof` 纯文本格式 `DIALPGO1`/N/`idx count` 行。`ProfileData{counts}`，`load()` 严格 Fail-Fast（magic/版本/N/索引递增/数值），`to_text`、`merge`（逐项饱和加，为多次训练合并预留）、`total`（全零检测）。7 个单测。idx→语义由编译器 PgoPlan 重算，文件不存符号表，训练版与优化版天然对齐。
+2. `runtime/dial_rt_pgo.c`（新）：`dial_pgo_dump(const u64* counters, u32 n)` 读环境变量 `DIAL_PGO_FILE`（镜像 LLVM_PROFILE_FILE），`fopen("w")` 写 `.dialprof`；未设置则 no-op。被 `main.rs:1327-1345` 的 runtime `read_dir` 自动收进 `libdial_std.a`，缓存 key 含 SHA256 自动失效，无需登记。
+3. `codegen_asm.rs`：`PgoPlan` 三态（baseline / instrument / optimize），仅 `X86_64 && !debug_info` 生效。
+   - 计数器编号 = IR 纯函数：函数入口 `0..F-1`（源码序），回边循环头续接（函数间源码序、函数内 block id 升序）。回边判定 IR 层复刻文本级 align_loop_headers 口径（目标块下标 < 当前块下标）。
+   - instrument：`.comm dial_pgo_counters,N*8,8`；函数入口/循环头发 `pushfq; incq ...(%rip); popfq`（助记符不匹配任何现有文本 pass）。
+   - **main dump 的正确性关键**：`lg(Value::Reg)` 在 `val_phys` 命中时直接从物理寄存器取返回值（`codegen_asm.rs:611`），`flush_residency` 只回写 flush_mask 内的值（1799），故返回值可能仍在 rdi/rsi/rax 等易失寄存器。dump 在 Return 分支最前面发，先 `pushq` 全部 9 个 caller-saved（rax,rcx,rdx,rsi,rdi,r8-r11）→ `leaq counters,%rdi; movl $N,%esi; call dial_pgo_dump@PLT` → 逆序 pop，现场完全复原后再走原 `lg(v)`/epilogue。已用临时调试开关实证插桩 .s 正确。
+   - 热函数判定：分数 = 入口计数 + 其所有循环头计数之和（在循环里干活的函数理应判热）；相对阈值 `score ≥ max_score*10%`（宽松判热——把热函数误甩 .text.unlikely 的代价远大于多判热），main 强制入热，全零回退全热。改用相对阈值而非固定 top-K，是因为实测发现 top-K 会把与 work1/work2 同计数（各循环 1000500 次）的 work3 误判为冷。
+   - optimize：每个函数按冷热发 `.section .text.hot/.text.unlikely,"ax",@progbits`；冷函数跳过 `align_loop_headers`（省 padding）。文本 pass 逐函数操作、尾调用消除按顶格 label 切函数，`.section` 行不干扰（已核实）。
+   - 零回归：profile=None 时 hot 恒真、无分段、走原对齐 → baseline `.s` 逐字节不变。
+4. `main.rs`：放开 504-507 拒绝改提示；非 fast 强制忽略 pgo 改为仅对 LLVM 生效（asm PGO 独立于 `--fast`）；tiny/fast-compile 互斥保留。asm 分支内两段式（镜像 LLVM 637-702 但用 `.dialprof`、无 llvm-profdata）：插桩编译 → link 训练 exe（`.dialc_build/pgo-asm-<stem>/`）→ `Command::env("DIAL_PGO_FILE").stdout/stderr(null).status()` 跑训练 → `ProfileData::load()`（失败 Fail-Fast；全零回退提示）→ 读回优化重编覆盖 `.o` → 删训练 exe 留 profile。no_link 仍走两段式。
+
+**验证**：
+1. 功能闭环：自包含固定 workload（无随机/无 args，训练运行即真实路径），baseline 与 PGO 输出逐字节一致；`.dialprof` 计数反映真实热路径（循环头 6000+ 次）。
+2. 布局生效：优化版 .s 出现 .text.hot/.text.unlikely，3 个热函数（含高频循环）入 hot、2 个冷函数入 unlikely、main 强制 hot。
+3. 确定性：固定 workload 两次训练 profile 逐字节一致。
+4. 零回归铁证：git worktree 从 HEAD(fd06fcf) 构建基线，24 源码（bench + 18 golden + impl_assoc + batch）`-O3` `.s` 逐字节一致；baseline 路径无 --pgo 两次 .s 稳定。
+5. **A/B 性能如实记录**：多轮交替 `pgo/baseline≈0.997`（中性偏微正、噪声内）。与诊断一致——asm 默认布局已近最优，PGO 收益上界低；核心价值是功能完整性（--pgo 不再被拒、零 LLVM 依赖），不硬声称加速。
+6. 门禁 `tools/verify_asm_pgo.sh`（run_tests.sh AR 组）四层证据全绿；cargo test 全过。
+
+**范围与护栏**：训练运行无参（与 LLVM 路径同局限，训练只覆盖 main 内嵌路径；args() 驱动的程序需把热路径写入 main 调用链）；热判定为启发式（相对阈值）；不做通用块重排（负 ROI）。零新依赖、`codegen.rs`/`ast.rs`/1.10.0 零改动、AArch64/-g 不进 PGO、baseline 逐字节零回归、双后端一致、不打 tag、docx 确定性。收回路线图 R1-R4 四项至此全部收口。

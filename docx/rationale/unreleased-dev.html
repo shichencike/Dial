@@ -49,6 +49,7 @@
 </ul>
 </li>
 <li><a href="#r3impl-关联函数-tnew无-self-静态方法-唯一后端收回路线图第-3-项">R3：impl 关联函数 T::new()（无 self 静态方法）—— 唯一后端收回路线图第 3 项</a></li>
+<li><a href="#r4自研-pgo-闭环--唯一后端收回路线图第-4-项四项全部收口">R4：自研 PGO 闭环 —— 唯一后端收回路线图第 4 项（四项全部收口）</a></li>
 </ul>
 </li>
 </ul>
@@ -3475,7 +3476,30 @@ imulq   %r10, %r15     # s * 31
 4. <strong>零回归铁证</strong>：git worktree 从 HEAD(3011131) 构建基线二进制，26 个源码（18 golden + bench + 现有 3 impl + batch）的 asm -O2 <code>.s</code> 与新版<strong>逐字节一致</strong>（归一化 <code>.file</code> 调试路径后差异 0）。这直接证明 lexer 的 <code>:</code> 最长匹配改动未影响 struct 字段、形参、默认参数、枚举显式值等所有单 <code>:</code> 构造。
 5. 完整 golden 门禁（19 用例）全绿；cargo test 全过；现有三个 impl 用例输出匹配 .expected。
 6. 新增 <code>tests/impl/impl_assoc.dial</code> + <code>.expected</code>，挂入 run_tests.sh R18 组（双编译 + 互 diff + 对 .expected diff）。</p>
-<p><strong>范围与护栏</strong>：<code>::</code> 为新增语法、不新增关键字（<code>impl</code>/<code>new</code> 仍可作普通标识符）；关联函数首参不可命名 self（保留规则）；不支持链式 <code>T::A::B()</code> 与泛型形态（B2 未落地）。只改 lexer/parser/lsp + 测试/文档，零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64 零变化、双后端一致、不打 tag、docx 确定性。剩余三项（select 超时 / map<string> 值 / 原子类型）按用户决策暂不展开。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+<p><strong>范围与护栏</strong>：<code>::</code> 为新增语法、不新增关键字（<code>impl</code>/<code>new</code> 仍可作普通标识符）；关联函数首参不可命名 self（保留规则）；不支持链式 <code>T::A::B()</code> 与泛型形态（B2 未落地）。只改 lexer/parser/lsp + 测试/文档，零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64 零变化、双后端一致、不打 tag、docx 确定性。剩余三项（select 超时 / map<string> 值 / 原子类型）按用户决策暂不展开。</p>
+<hr />
+<h2 id="r4自研-pgo-闭环--唯一后端收回路线图第-4-项四项全部收口">R4：自研 PGO 闭环 —— 唯一后端收回路线图第 4 项（四项全部收口）</h2>
+<p><strong>为什么做</strong>：唯一后端总纲（roadmap-gap-analysis.md）确立"假设 LLVM 不存在、只有自己"。收回路线图前三项（工具链去 LLVM / 优化回收诊断 / impl 关联函数）已收口，R4 是最后一项。<code>--pgo</code> 在 asm 下 <code>main.rs:504-507</code> 直接 <code>exit(1)</code>——用户可见 flag 被拒，是真实功能缺口，按总纲必须补，不因"性能收益可能有限"就搁置（那是把活推给 LLVM 的心态）。</p>
+<p><strong>诊断先行（<code>tools/diag_pgo.py</code>，只读、确定性）</strong>：原路线图写"跨模块 IR 合并实现 LTO"经源码核实需修正——① 源码级 import 已把多 unit 合入单个 <code>ast::Program</code> → 单个 <code>IrProgram</code>（<code>main.rs:2039-2160</code>），<strong>天然 LTO</strong>；② 包名 import 走 C <code>.a</code> 静态链接（<code>main.rs:1497</code>），是机器码非 IR，不在 IR 合并范畴；③ bitcode 是 <code>codegen.rs:1759</code> 喂 clang 的手段非能力，asm 不需自建。块布局 ROI 实证：37 个多块函数、55 个回边循环头 100% 已 <code>.p2align 4</code>、热路径 fallthrough、冷退出块甩末尾——<strong>PGO 想拿的块布局收益已被默认布局吃干净</strong>，通用块重排负 ROI（延续 R2 的 e3at/e3au 纪律不硬做）。落地点排序：高=功能完整性（<code>--pgo</code> 可用、零 <code>.bc</code>、自研闭环）；中=热函数聚拢 + 只对齐热循环；低=通用块重排（不做）。</p>
+<p><strong>实现（自研、零 bitcode、零 LLVM 工具）</strong>：
+1. <code>src/pgo.rs</code>（新）：<code>.dialprof</code> 纯文本格式 <code>DIALPGO1</code>/N/<code>idx count</code> 行。<code>ProfileData{counts}</code>，<code>load()</code> 严格 Fail-Fast（magic/版本/N/索引递增/数值），<code>to_text</code>、<code>merge</code>（逐项饱和加，为多次训练合并预留）、<code>total</code>（全零检测）。7 个单测。idx→语义由编译器 PgoPlan 重算，文件不存符号表，训练版与优化版天然对齐。
+2. <code>runtime/dial_rt_pgo.c</code>（新）：<code>dial_pgo_dump(const u64* counters, u32 n)</code> 读环境变量 <code>DIAL_PGO_FILE</code>（镜像 LLVM_PROFILE_FILE），<code>fopen("w")</code> 写 <code>.dialprof</code>；未设置则 no-op。被 <code>main.rs:1327-1345</code> 的 runtime <code>read_dir</code> 自动收进 <code>libdial_std.a</code>，缓存 key 含 SHA256 自动失效，无需登记。
+3. <code>codegen_asm.rs</code>：<code>PgoPlan</code> 三态（baseline / instrument / optimize），仅 <code>X86_64 &amp;&amp; !debug_info</code> 生效。
+   - 计数器编号 = IR 纯函数：函数入口 <code>0..F-1</code>（源码序），回边循环头续接（函数间源码序、函数内 block id 升序）。回边判定 IR 层复刻文本级 align_loop_headers 口径（目标块下标 &lt; 当前块下标）。
+   - instrument：<code>.comm dial_pgo_counters,N*8,8</code>；函数入口/循环头发 <code>pushfq; incq ...(%rip); popfq</code>（助记符不匹配任何现有文本 pass）。
+   - <strong>main dump 的正确性关键</strong>：<code>lg(Value::Reg)</code> 在 <code>val_phys</code> 命中时直接从物理寄存器取返回值（<code>codegen_asm.rs:611</code>），<code>flush_residency</code> 只回写 flush_mask 内的值（1799），故返回值可能仍在 rdi/rsi/rax 等易失寄存器。dump 在 Return 分支最前面发，先 <code>pushq</code> 全部 9 个 caller-saved（rax,rcx,rdx,rsi,rdi,r8-r11）→ <code>leaq counters,%rdi; movl $N,%esi; call dial_pgo_dump@PLT</code> → 逆序 pop，现场完全复原后再走原 <code>lg(v)</code>/epilogue。已用临时调试开关实证插桩 .s 正确。
+   - 热函数判定：分数 = 入口计数 + 其所有循环头计数之和（在循环里干活的函数理应判热）；相对阈值 <code>score ≥ max_score*10%</code>（宽松判热——把热函数误甩 .text.unlikely 的代价远大于多判热），main 强制入热，全零回退全热。改用相对阈值而非固定 top-K，是因为实测发现 top-K 会把与 work1/work2 同计数（各循环 1000500 次）的 work3 误判为冷。
+   - optimize：每个函数按冷热发 <code>.section .text.hot/.text.unlikely,"ax",@progbits</code>；冷函数跳过 <code>align_loop_headers</code>（省 padding）。文本 pass 逐函数操作、尾调用消除按顶格 label 切函数，<code>.section</code> 行不干扰（已核实）。
+   - 零回归：profile=None 时 hot 恒真、无分段、走原对齐 → baseline <code>.s</code> 逐字节不变。
+4. <code>main.rs</code>：放开 504-507 拒绝改提示；非 fast 强制忽略 pgo 改为仅对 LLVM 生效（asm PGO 独立于 <code>--fast</code>）；tiny/fast-compile 互斥保留。asm 分支内两段式（镜像 LLVM 637-702 但用 <code>.dialprof</code>、无 llvm-profdata）：插桩编译 → link 训练 exe（<code>.dialc_build/pgo-asm-&lt;stem&gt;/</code>）→ <code>Command::env("DIAL_PGO_FILE").stdout/stderr(null).status()</code> 跑训练 → <code>ProfileData::load()</code>（失败 Fail-Fast；全零回退提示）→ 读回优化重编覆盖 <code>.o</code> → 删训练 exe 留 profile。no_link 仍走两段式。</p>
+<p><strong>验证</strong>：
+1. 功能闭环：自包含固定 workload（无随机/无 args，训练运行即真实路径），baseline 与 PGO 输出逐字节一致；<code>.dialprof</code> 计数反映真实热路径（循环头 6000+ 次）。
+2. 布局生效：优化版 .s 出现 .text.hot/.text.unlikely，3 个热函数（含高频循环）入 hot、2 个冷函数入 unlikely、main 强制 hot。
+3. 确定性：固定 workload 两次训练 profile 逐字节一致。
+4. 零回归铁证：git worktree 从 HEAD(fd06fcf) 构建基线，24 源码（bench + 18 golden + impl_assoc + batch）<code>-O3</code> <code>.s</code> 逐字节一致；baseline 路径无 --pgo 两次 .s 稳定。
+5. <strong>A/B 性能如实记录</strong>：多轮交替 <code>pgo/baseline≈0.997</code>（中性偏微正、噪声内）。与诊断一致——asm 默认布局已近最优，PGO 收益上界低；核心价值是功能完整性（--pgo 不再被拒、零 LLVM 依赖），不硬声称加速。
+6. 门禁 <code>tools/verify_asm_pgo.sh</code>（run_tests.sh AR 组）四层证据全绿；cargo test 全过。</p>
+<p><strong>范围与护栏</strong>：训练运行无参（与 LLVM 路径同局限，训练只覆盖 main 内嵌路径；args() 驱动的程序需把热路径写入 main 调用链）；热判定为启发式（相对阈值）；不做通用块重排（负 ROI）。零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64/-g 不进 PGO、baseline 逐字节零回归、双后端一致、不打 tag、docx 确定性。收回路线图 R1-R4 四项至此全部收口。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
