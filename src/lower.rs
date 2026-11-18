@@ -1713,6 +1713,12 @@ impl<'a> Lower<'a> {
             // 已保证实参是可空句柄（标量在编译期被拒），两端准入名单同源。
             // 必须在此拦截——否则落到下方 lower_builtin 的 BKind::Unsupported。
             "is_null" => return self.lower_is_null(args),
+            // M7-e3al：channel 原语族（单线程可测部分）。对齐 LLVM
+            // codegen.rs:4984-5160：channel/recv/try_recv/recv_timeout/closed/
+            // done/len 是 C 调用薄封装，move_to 是零拷贝所有权移交 intrinsic。
+            // 必须在此拦截——否则落到 lower_builtin 的 BKind::Unsupported。
+            "channel" | "recv" | "try_recv" | "recv_timeout" | "closed" | "done"
+            | "len" | "move_to" => return self.lower_channel_call(name, args),
             _ => {}
         }
         // functions_sig 只含用户函数与 extern 声明；按名字硬编码分派的内建
@@ -2126,6 +2132,123 @@ impl<'a> Lower<'a> {
         Ok((Value::Reg(r), false))
     }
 
+    /// M7-e3al：channel 原语族 —— 对齐 LLVM codegen.rs:4984-5160。
+    /// 单线程可测的部分全部覆盖；spawn/thread（真多线程）仍属后续相位。
+    ///
+    /// - `channel(cap)` → `dial_channel_new(cap, elem_release)`：元素析构器按
+    ///   LLVM elem_release_fn 取 C 函数地址（FuncAddr）。默认 `dial_rc_release`
+    ///   （覆盖 string/array/map/error 等 RC 句柄与标量——标量元素 C 侧根本不会
+    ///   调析构）；嵌套 channel 元素 LLVM 用 `dial_channel_release`，但那需要真
+    ///   并发才有意义，本批暂不覆盖（声明为已知边界，不静默给错值）。
+    /// - `recv`/`try_recv`/`recv_timeout` → C 调用，队列弹出即移交所有权（不 retain）。
+    /// - `closed`/`done` → C 调用返回 int64，ICmp(Neq, r, 0) → 严格 bool。
+    /// - `len` → `dial_channel_len` → i64（int）。
+    /// - `move_to(var, ch)` → load 槽值 → `dial_channel_send(ch, v)` → 槽清零 →
+    ///   moved（零拷贝所有权移交，全程零 retain/release）。对齐 LLVM：语义层
+    ///   已保证首参是变量、元素类型匹配。
+    fn lower_channel_call(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        match name {
+            "channel" => {
+                if args.len() != 1 {
+                    return self.err("channel 需要 1 个参数（容量 cap: int）");
+                }
+                let cap = self.lower_expr(&args[0], &Type::Int)?.0;
+                let rel = self.new_reg(IrType::FnPtr);
+                self.emit(IrInst::FuncAddr { dst: rel, func: "dial_rc_release".to_string() });
+                let dst = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Call {
+                    dst: Some(dst), func: "dial_channel_new".to_string(),
+                    args: vec![cap, Value::Reg(rel)],
+                    arg_tys: vec![IrType::I64, IrType::FnPtr],
+                    ret_ty: IrType::Handle, linkage: CallLink::Runtime,
+                });
+                Ok((Value::Reg(dst), false))
+            }
+            "recv" | "try_recv" => {
+                if args.len() != 1 { return self.err(&format!("{} 需要 1 个参数（channel）", name)); }
+                let ct = self.expr_dt(&args[0]);
+                let ch = self.lower_expr(&args[0], &ct)?.0;
+                let func = if name == "recv" { "dial_channel_recv" } else { "dial_channel_try_recv" };
+                let dst = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Call {
+                    dst: Some(dst), func: func.to_string(), args: vec![ch],
+                    arg_tys: vec![IrType::Handle], ret_ty: IrType::Handle,
+                    linkage: CallLink::Runtime,
+                });
+                Ok((Value::Reg(dst), false))
+            }
+            "recv_timeout" => {
+                if args.len() != 2 { return self.err("recv_timeout 需要 2 个参数（channel, 毫秒）"); }
+                let ct = self.expr_dt(&args[0]);
+                let ch = self.lower_expr(&args[0], &ct)?.0;
+                let ms = self.lower_expr(&args[1], &Type::Int)?.0;
+                let dst = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Call {
+                    dst: Some(dst), func: "dial_channel_recv_timeout".to_string(),
+                    args: vec![ch, ms], arg_tys: vec![IrType::Handle, IrType::I64],
+                    ret_ty: IrType::Handle, linkage: CallLink::Runtime,
+                });
+                Ok((Value::Reg(dst), false))
+            }
+            "closed" | "done" => {
+                if args.len() != 1 { return self.err(&format!("{} 需要 1 个参数（channel）", name)); }
+                let ct = self.expr_dt(&args[0]);
+                let ch = self.lower_expr(&args[0], &ct)?.0;
+                let func = if name == "closed" { "dial_channel_closed" } else { "dial_channel_done" };
+                let r = self.new_reg(IrType::I64);
+                self.emit(IrInst::Call {
+                    dst: Some(r), func: func.to_string(), args: vec![ch],
+                    arg_tys: vec![IrType::Handle], ret_ty: IrType::I64,
+                    linkage: CallLink::Runtime,
+                });
+                // C 侧 int64 0/非0 → 严格 bool（对齐 LLVM 的 icmp ne 0）。
+                let b = self.new_reg(IrType::I64);
+                self.emit(IrInst::ICmp { op: ACmp::Neq, dst: b, a: Value::Reg(r),
+                    b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+                Ok((Value::Reg(b), false))
+            }
+            "len" => {
+                if args.len() != 1 { return self.err("len 需要 1 个参数（channel）"); }
+                let ct = self.expr_dt(&args[0]);
+                let ch = self.lower_expr(&args[0], &ct)?.0;
+                let dst = self.new_reg(IrType::I64);
+                self.emit(IrInst::Call {
+                    dst: Some(dst), func: "dial_channel_len".to_string(), args: vec![ch],
+                    arg_tys: vec![IrType::Handle], ret_ty: IrType::I64,
+                    linkage: CallLink::Runtime,
+                });
+                Ok((Value::Reg(dst), false))
+            }
+            "move_to" => {
+                if args.len() != 2 { return self.err("move_to 需要 2 个参数（变量, 目标 channel）"); }
+                let vname = match &args[0] {
+                    Expr::Var(n) => n.clone(),
+                    _ => return self.err("内部错误：move_to 的第一个参数必须是变量（应由语义层拦截）"),
+                };
+                let l = match self.lookup(&vname) {
+                    Some(l) => l.clone(),
+                    None => return self.err(&format!("内部错误：move_to 找不到变量 '{}'", vname)),
+                };
+                // 取变量当前值（load 槽），交给 channel_send，再清零原槽 + 标记 moved。
+                let v = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Load { dst: v, ptr: l.ptr, ty: IrType::Handle });
+                let ct = self.expr_dt(&args[1]);
+                let ch = self.lower_expr(&args[1], &ct)?.0;
+                self.emit(IrInst::Call {
+                    dst: None, func: "dial_channel_send".to_string(),
+                    args: vec![ch, Value::Reg(v)],
+                    arg_tys: vec![IrType::Handle, IrType::Handle],
+                    ret_ty: IrType::Void, linkage: CallLink::Runtime,
+                });
+                // 原槽清零（从这一刻起不再持有所有权）+ 标记 moved（作用域退出跳过 release）。
+                self.emit(IrInst::Store { ptr: l.ptr, val: Value::Imm(Imm::I64(0)), ty: IrType::Handle });
+                if let Some(sl) = self.lookup_mut(&vname) { sl.moved = true; }
+                Ok((Value::Imm(Imm::I64(0)), false)) // Void 占位，对齐 LLVM
+            }
+            _ => unreachable!("lower_channel_call 仅处理 channel 原语族"),
+        }
+    }
+
     /// M7-e3ah：bitcast<T>(x) —— 底层位模式重解释，对齐 LLVM codegen.rs:4842-4924。
     /// 不改内存、不读源数据，只把 x 的位模式按目标类型 T 重新解读。
     ///
@@ -2316,8 +2439,15 @@ impl<'a> Lower<'a> {
                             if let Some(l) = self.lookup_mut(n) { l.moved = true; }
                         }
                     }
+                    // M7-e3al：channel 关闭。对齐 LLVM codegen.rs:4720——**不标 moved**：
+                    // channel 受 ARC 管理，标记 moved 会让作用域退出跳过 release 而泄漏。
+                    Type::Channel(_) => {
+                        self.emit(IrInst::Call { dst: None, func: "dial_channel_close".to_string(),
+                            args: vec![v], arg_tys: vec![IrType::Handle],
+                            ret_ty: IrType::Void, linkage: CallLink::Runtime });
+                    }
                     other => return self.err(&format!(
-                        "asm 后端：close 暂不支持 {} 类型（仅 file；thread/channel 后续相位）", other.display())),
+                        "asm 后端：close 暂不支持 {} 类型（仅 file/channel；thread 后续相位）", other.display())),
                 }
                 Ok((Value::Imm(Imm::I64(0)), false))
             }

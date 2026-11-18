@@ -663,6 +663,8 @@ dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|s
 
 所有权释放内建 `drop(x)` 在双后端同样一致（M7-e3ak）：提前释放变量所有权（move 语义），按类型分派——文件→关闭、线程→join、裸指针→`raw_free`、ARC 句柄→release、标量 no-op，释放后标记变量已转移，作用域退出不再二次释放（防 double free / UAF）。这是 rawptr「谁申请谁释放」与 with 块自动释放的同源机制；`-O0`~`-O3`/`-g` 下行为一致，非 drop 程序的汇编输出逐字节不变。
 
+channel 原语族在双后端一致（M7-e3al，单线程部分）：`channel(cap)` 创建、`move_to(x, ch)` 零拷贝移交所有权、`recv`/`try_recv`/`recv_timeout` 接收、`is_null` 判 EOF、`closed`/`done`/`len` 状态查询、`close` 关闭——与 `is_null`/`drop` 形成完整所有权闭环。通道 EOF 或超时后 `recv` 返回空值，用 `is_null` 判别；`-O0`~`-O3`/`-g` 下行为一致，非 channel 程序的汇编输出逐字节不变。真多线程原语（`spawn`/`thread`/`join`/`detach`）仍在后续相位。
+
 产物形态开关（第 18 层，与上面的安全等级**正交**）：
 
 | 参数 | 形态 | 行为 |

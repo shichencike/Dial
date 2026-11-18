@@ -2546,3 +2546,55 @@
         1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
         不打 tag。新增 R12 测试组（全场景 + 严格输出 + 各 O 级别 + FnPtr 拒绝）。
         docx 确定性生成；check_links/check_version 全过。
+
+    - **M7-e3al 自研 asm 后端补齐 channel 原语族（双后端一致性补全，单线程闭环）**：
+      承接 e3ag~e3ak 主线，补齐并发原语中**单线程可测**的全部 channel 接口。
+      这是「代替 LLVM」在所有权/通信维度的又一块拼图——与刚补的 is_null（判空）、
+      drop（释放）形成完整闭环：`channel → move_to → recv → is_null → close`。
+      - **确凿缺口**：LLVM 后端在 `codegen.rs:4984-5160` 实现 channel 原语族——
+        channel(cap)→`dial_channel_new(cap, elem_release_fn)`、recv/try_recv/
+        recv_timeout→对应 C 调用、closed/done→C 调用 + icmp ne 0、len→dial_channel_len、
+        move_to（零拷贝所有权移交 intrinsic）、close 的 channel 分支。asm 后端把
+        它们和 spawn/channel 一起批量塞进 `builtin.rs` 的「并发 / 高阶函数内建
+        暂未接入（后续相位）」`BKind::Unsupported`，明确 Fail-Fast 拒绝。实测完整
+        闭环程序 LLVM 输出 `0 false false 1 hello 1 world 0 true true true done`、
+        asm 直接报 `内建 channel 暂不支持`。
+      - **为何是单线程子集**：channel 原语族里 `spawn`/`thread`/`join`/`detach`
+        涉及真多线程（pthread_create + argcell + 函数指针 thunk），是更大的工程，
+        本批明确留作后续相位；而 channel 创建、收发、状态查询、零拷贝 move_to
+        在单线程下完全可测且自洽，先落地这批。
+      - **基础设施审计（全部就位，无需造新能力）**：C runtime 12 个 `dial_channel_*`
+        符号齐备；`IrInst::FuncAddr{dst,func}` 可取任意 C 符号地址（发射器用
+        `leaq sym(%rip)` / AArch64 `adrp+add`），用于元素析构器；`rc_kind(Channel)=
+        Generic` 已支持 channel 的 ARC release；`Local.moved` 记账与 `close` 的
+        File 范式已就位。
+      - **实现（核心源码改动 src/lower.rs + builtin.rs）**：
+        ① `lower_call` 拦截 channel 族转 `lower_channel_call`。
+        ② `channel(cap)`：取 `FuncAddr dial_rc_release` 作元素析构器，调
+        `dial_channel_new(cap, rel)` 返回 Handle。对齐 LLVM `elem_release_fn`：
+        嵌套 channel 元素 LLVM 用 `dial_channel_release`，但那需真并发才有意义，
+        本批默认 `dial_rc_release`（也匹配 C 侧 `dial_channel_new` 的 NULL 回退），
+        声明为已知边界而非静默给错值。
+        ③ `recv`/`try_recv`/`recv_timeout`→对应 C 调用返回 Handle（弹出即移交
+        所有权、不 retain）；`closed`/`done`→C 调用 + `ICmp(Neq, r, 0)` 规整成严格
+        bool；`len`→`dial_channel_len` 返回 I64。
+        ④ `move_to(var, ch)`：load 变量槽值 → `dial_channel_send(ch, v)` → 原槽清零
+        → 标记 moved，零拷贝所有权移交（零 retain/release），对齐 LLVM。
+        ⑤ 扩展 `close` 支持 channel→`dial_channel_close`，且**不标 moved**（对齐
+        LLVM：channel 受 ARC 管理，标记 moved 会让作用域退出跳过 release 而泄漏；
+        File 分支仍标 moved，因 fclose 二次调用是 UB）。
+        ⑥ `builtin.rs` 把 channel 族从「并发/高阶函数」Unsupported 表拆出为转专用
+        路径的防御兜底，头部注释同步；表中只剩 spawn/join/detach/thread + 高阶函数。
+      - **验证**：完整闭环程序双后端 stdout 逐字一致，且严格等于预期
+        `0 false false 1 hello 1 world 0 true true true done`——其中末尾 `recv`
+        在通道关闭且空后返回 NULL 被 `is_null` 判 true，证明 channel 与 is_null
+        闭环正确；`recv_timeout` 超时返回 NULL + is_null 一致（`first|true|true|ok`）；
+        `-O0/-O1/-O2/-O3/-g/-g -O3` 各级别一致，channel 不随 pass 漂移。
+      - **A/B 零回归**：7 个 golden 程序（core1/builtins/control_flow/core2/structs/
+        exceptions/rawptr）O2 `.s` 与 OLD(85a6405) 逐字节一致（md5 全同）；AArch64
+        普通程序 core3 `.s` 零变化；channel 程序经 clang 交叉汇编产出 ELF aarch64 `.o`。
+        本特性只在调用 channel 原语的程序中改变行为。
+      - **护栏**：`src/codegen.rs`/`src/ast.rs` 相对 85a6405 零改动、`Cargo.toml` 仍
+        1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
+        不打 tag。新增 R13 测试组（完整闭环 + recv_timeout + 各 O 级别）。
+        docx 确定性生成；check_links/check_version 全过。

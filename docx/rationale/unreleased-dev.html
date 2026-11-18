@@ -2680,9 +2680,64 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
     exceptions/rawptr）O2 <code>.s</code> 与 OLD(53b3404) 逐字节一致（md5 全同）；AArch64
     普通程序零变化；drop 程序经 clang 交叉汇编产出 ELF aarch64 <code>.o</code>。
     本特性只在调用 drop 的程序中改变行为。</li>
-<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 53b3404 零改动、<code>Cargo.toml</code> 仍
+<li>
+<p><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 53b3404 零改动、<code>Cargo.toml</code> 仍
     1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
     不打 tag。新增 R12 测试组（全场景 + 严格输出 + 各 O 级别 + FnPtr 拒绝）。
+    docx 确定性生成；check_links/check_version 全过。</p>
+</li>
+<li>
+<p><strong>M7-e3al 自研 asm 后端补齐 channel 原语族（双后端一致性补全，单线程闭环）</strong>：
+  承接 e3ag~e3ak 主线，补齐并发原语中<strong>单线程可测</strong>的全部 channel 接口。
+  这是「代替 LLVM」在所有权/通信维度的又一块拼图——与刚补的 is_null（判空）、
+  drop（释放）形成完整闭环：<code>channel → move_to → recv → is_null → close</code>。</p>
+</li>
+<li><strong>确凿缺口</strong>：LLVM 后端在 <code>codegen.rs:4984-5160</code> 实现 channel 原语族——
+    channel(cap)→<code>dial_channel_new(cap, elem_release_fn)</code>、recv/try_recv/
+    recv_timeout→对应 C 调用、closed/done→C 调用 + icmp ne 0、len→dial_channel_len、
+    move_to（零拷贝所有权移交 intrinsic）、close 的 channel 分支。asm 后端把
+    它们和 spawn/channel 一起批量塞进 <code>builtin.rs</code> 的「并发 / 高阶函数内建
+    暂未接入（后续相位）」<code>BKind::Unsupported</code>，明确 Fail-Fast 拒绝。实测完整
+    闭环程序 LLVM 输出 <code>0 false false 1 hello 1 world 0 true true true done</code>、
+    asm 直接报 <code>内建 channel 暂不支持</code>。</li>
+<li><strong>为何是单线程子集</strong>：channel 原语族里 <code>spawn</code>/<code>thread</code>/<code>join</code>/<code>detach</code>
+    涉及真多线程（pthread_create + argcell + 函数指针 thunk），是更大的工程，
+    本批明确留作后续相位；而 channel 创建、收发、状态查询、零拷贝 move_to
+    在单线程下完全可测且自洽，先落地这批。</li>
+<li><strong>基础设施审计（全部就位，无需造新能力）</strong>：C runtime 12 个 <code>dial_channel_*</code>
+    符号齐备；<code>IrInst::FuncAddr{dst,func}</code> 可取任意 C 符号地址（发射器用
+    <code>leaq sym(%rip)</code> / AArch64 <code>adrp+add</code>），用于元素析构器；<code>rc_kind(Channel)=
+    Generic</code> 已支持 channel 的 ARC release；<code>Local.moved</code> 记账与 <code>close</code> 的
+    File 范式已就位。</li>
+<li><strong>实现（核心源码改动 src/lower.rs + builtin.rs）</strong>：
+    ① <code>lower_call</code> 拦截 channel 族转 <code>lower_channel_call</code>。
+    ② <code>channel(cap)</code>：取 <code>FuncAddr dial_rc_release</code> 作元素析构器，调
+    <code>dial_channel_new(cap, rel)</code> 返回 Handle。对齐 LLVM <code>elem_release_fn</code>：
+    嵌套 channel 元素 LLVM 用 <code>dial_channel_release</code>，但那需真并发才有意义，
+    本批默认 <code>dial_rc_release</code>（也匹配 C 侧 <code>dial_channel_new</code> 的 NULL 回退），
+    声明为已知边界而非静默给错值。
+    ③ <code>recv</code>/<code>try_recv</code>/<code>recv_timeout</code>→对应 C 调用返回 Handle（弹出即移交
+    所有权、不 retain）；<code>closed</code>/<code>done</code>→C 调用 + <code>ICmp(Neq, r, 0)</code> 规整成严格
+    bool；<code>len</code>→<code>dial_channel_len</code> 返回 I64。
+    ④ <code>move_to(var, ch)</code>：load 变量槽值 → <code>dial_channel_send(ch, v)</code> → 原槽清零
+    → 标记 moved，零拷贝所有权移交（零 retain/release），对齐 LLVM。
+    ⑤ 扩展 <code>close</code> 支持 channel→<code>dial_channel_close</code>，且<strong>不标 moved</strong>（对齐
+    LLVM：channel 受 ARC 管理，标记 moved 会让作用域退出跳过 release 而泄漏；
+    File 分支仍标 moved，因 fclose 二次调用是 UB）。
+    ⑥ <code>builtin.rs</code> 把 channel 族从「并发/高阶函数」Unsupported 表拆出为转专用
+    路径的防御兜底，头部注释同步；表中只剩 spawn/join/detach/thread + 高阶函数。</li>
+<li><strong>验证</strong>：完整闭环程序双后端 stdout 逐字一致，且严格等于预期
+    <code>0 false false 1 hello 1 world 0 true true true done</code>——其中末尾 <code>recv</code>
+    在通道关闭且空后返回 NULL 被 <code>is_null</code> 判 true，证明 channel 与 is_null
+    闭环正确；<code>recv_timeout</code> 超时返回 NULL + is_null 一致（<code>first|true|true|ok</code>）；
+    <code>-O0/-O1/-O2/-O3/-g/-g -O3</code> 各级别一致，channel 不随 pass 漂移。</li>
+<li><strong>A/B 零回归</strong>：7 个 golden 程序（core1/builtins/control_flow/core2/structs/
+    exceptions/rawptr）O2 <code>.s</code> 与 OLD(85a6405) 逐字节一致（md5 全同）；AArch64
+    普通程序 core3 <code>.s</code> 零变化；channel 程序经 clang 交叉汇编产出 ELF aarch64 <code>.o</code>。
+    本特性只在调用 channel 原语的程序中改变行为。</li>
+<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 85a6405 零改动、<code>Cargo.toml</code> 仍
+    1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
+    不打 tag。新增 R13 测试组（完整闭环 + recv_timeout + 各 O 级别）。
     docx 确定性生成；check_links/check_version 全过。</li>
 </ul>
 </li>

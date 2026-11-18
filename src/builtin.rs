@@ -21,7 +21,8 @@
 //         sizeof / alignof / offsetof（M7-e3ag）、bitcast（M7-e3ah）、
 //         assert / panic（M7-e3ai，带 file:line:col 的 Fail-Fast 诊断）、
 //         is_null（M7-e3aj，句柄判空 = ICmp Eq(ptr, 0)）、
-//         drop（M7-e3ak，提前释放所有权 = 按类型 release + moved 记账）、ptr_cast。
+//         drop（M7-e3ak，提前释放所有权 = 按类型 release + moved 记账）、
+//         channel 原语族（M7-e3al，单线程收发/判空/状态/零拷贝 move_to）、ptr_cast。
 // ============================================================================
 
 use crate::ast::Type;
@@ -218,9 +219,17 @@ pub fn lookup(name: &str) -> Option<BSpec> {
         // LLVM codegen.rs:4939），此条目仅作防御兜底，正常在 lower_call 已拦截。
         "drop" => return Some(unsup(Type::Void, "drop 需专用路径（见 lower.rs）")),
 
-        // ---- 并发 / 高阶函数：后续相位 ----
-        "spawn" | "join" | "detach" | "channel" | "recv" | "try_recv" |
-        "recv_timeout" | "move_to" | "thread" | "done" | "closed" |
+        // channel 原语族走 lower.rs 专用路径（M7-e3al：单线程可测的
+        // channel/recv/try_recv/recv_timeout/closed/done/len/move_to，对齐 LLVM
+        // codegen.rs:4984-5160），此条目仅作防御兜底，正常在 lower_call 已拦截。
+        "channel" => return Some(unsup(Type::Channel(Box::new(Type::Void)), "channel 需专用路径（见 lower.rs）")),
+        "recv" | "try_recv" | "recv_timeout" =>
+            return Some(unsup(Type::Channel(Box::new(Type::Void)), "recv 族需专用路径（见 lower.rs）")),
+        "closed" | "done" => return Some(unsup(Type::Bool, "closed/done 需专用路径（见 lower.rs）")),
+        "move_to" => return Some(unsup(Type::Void, "move_to 需专用路径（见 lower.rs）")),
+
+        // ---- 并发 / 高阶函数：后续相位（真多线程 / 闭包 thunk） ----
+        "spawn" | "join" | "detach" | "thread" |
         "map" | "filter" | "reduce" | "sort_by" =>
             return Some(unsup(Type::Int, "并发 / 高阶函数内建暂未接入（后续相位）")),
 

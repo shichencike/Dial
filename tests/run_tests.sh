@@ -2293,6 +2293,91 @@ fi
 
 
 # ===========================================================================
+echo
+echo "  -- R13) channel 原语族双后端一致性（单线程闭环） --"
+CDIR="${RDIR}/channel"; mkdir -p "$CDIR"
+
+# channel 原语族（M7-e3al）：对齐 LLVM codegen.rs:4984-5160。用纯单线程
+# send/recv 闭环验证（spawn/thread 真并发仍属后续相位）：
+# channel(cap) → move_to（零拷贝移交）→ recv/try_recv → is_null（EOF 判空）
+# → closed/done/len（状态查询）→ close（不标 moved，ARC 管理）。
+cat > "${CDIR}/probe.dial" <<'DIALEOF'
+fn main(): int {
+    let ch: channel<string> = channel(4);
+    print(len(ch));
+    print(closed(ch));
+    print(done(ch));
+    var a: string = "hello";
+    move_to(a, ch);
+    print(len(ch));
+    var b: string = "world";
+    move_to(b, ch);
+    var r1: string = recv(ch);
+    print(r1);
+    print(len(ch));
+    var r2: string = try_recv(ch);
+    print(r2);
+    print(len(ch));
+    close(ch);
+    print(closed(ch));
+    print(done(ch));
+    var r3: string = recv(ch);
+    print(is_null(r3));
+    print("done");
+    return 0;
+}
+DIALEOF
+
+# 1) O2 默认：完整闭环，双后端 stdout 逐字一致（含 EOF 判空 true）。
+${DIALC} build "${CDIR}/probe.dial" --backend llvm -o "${CDIR}/probe_llvm" >/dev/null 2>&1 || rbad "R13 LLVM 编译 channel 用例失败"
+${DIALC} build "${CDIR}/probe.dial" --backend asm  -o "${CDIR}/probe_asm"  >/dev/null 2>&1 || rbad "R13 asm 编译 channel 用例失败"
+_c_llvm="$( ${CDIR}/probe_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_c_asm="$( ${CDIR}/probe_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_c_exp="0 false false 1 hello 1 world 0 true true true done "
+[ -n "$_c_llvm" ] && [ "$_c_asm" = "$_c_llvm" ] \
+    && rpass "channel 完整闭环（move_to/recv/try_recv/is_null/closed/done/len/close）：双后端逐字一致" \
+    || rbad "R13 channel 双后端不一致（llvm=[$_c_llvm] asm=[$_c_asm]）"
+[ "$_c_asm" = "$_c_exp" ] \
+    && rpass "channel EOF 判空与状态查询语义正确（recv 空→is_null=true，closed/done=true）" \
+    || rbad "R13 channel 输出不符预期（got=[$_c_asm] exp=[$_c_exp]）"
+
+# 2) recv_timeout（超时返回 NULL）+ is_null：双后端一致。
+cat > "${CDIR}/timeout.dial" <<'DIALEOF'
+fn main(): int {
+    let ci: channel<string> = channel(2);
+    var x: string = "first";
+    move_to(x, ci);
+    var got: string = recv_timeout(ci, 100);
+    print(got);
+    var none: string = recv_timeout(ci, 5);
+    print(is_null(none));
+    close(ci);
+    print(done(ci));
+    print("ok");
+    return 0;
+}
+DIALEOF
+${DIALC} build "${CDIR}/timeout.dial" --backend llvm -o "${CDIR}/timeout_llvm" >/dev/null 2>&1 || rbad "R13 LLVM 编译 recv_timeout 失败"
+${DIALC} build "${CDIR}/timeout.dial" --backend asm  -o "${CDIR}/timeout_asm"  >/dev/null 2>&1 || rbad "R13 asm 编译 recv_timeout 失败"
+_c_tl="$( ${CDIR}/timeout_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_c_ta="$( ${CDIR}/timeout_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+[ -n "$_c_tl" ] && [ "$_c_ta" = "$_c_tl" ] \
+    && rpass "recv_timeout 超时返回 NULL + is_null：双后端一致" \
+    || rbad "R13 recv_timeout 双后端不一致（llvm=[$_c_tl] asm=[$_c_ta]）"
+
+# 3) 各优化级别 -O0..-O3 与 -g：双后端一致，channel 不随 pass 漂移。
+for _c_opt in "-O0" "-O1" "-O3" "-g -O3"; do
+    ${DIALC} build "${CDIR}/probe.dial" --backend llvm -o "${CDIR}/opt_llvm" $_c_opt >/dev/null 2>&1 || { rbad "R13 LLVM 编译 $_c_opt 失败"; continue; }
+    ${DIALC} build "${CDIR}/probe.dial" --backend asm  -o "${CDIR}/opt_asm"  $_c_opt >/dev/null 2>&1 || { rbad "R13 asm 编译 $_c_opt 失败"; continue; }
+    _c_lo="$( ${CDIR}/opt_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    _c_ao="$( ${CDIR}/opt_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    [ -n "$_c_lo" ] && [ "$_c_ao" = "$_c_lo" ] \
+        && rpass "channel $_c_opt：双后端一致" \
+        || rbad "R13 channel $_c_opt 双后端不一致"
+done
+
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。
