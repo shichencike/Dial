@@ -889,6 +889,33 @@ e3ao/e3ap/e3aq 三批暴露的真实缺口共享一个特征：**两个后端都
 asm 特性或改 IR pass，AG 门禁自动回归；发现新 bug 时只需往 `Gen` 动作池加一类构造，
 对比/最小化/门禁三段不动。纯工具增量，编译器产品代码与所有 `.s` 输出零变化。
 
+### 13.10 内联汇编：模板占位符替换作为跨后端可落地的底层原语（v1.10 开发中增补，M7-e3as）
+
+「代替 LLVM」的语义层缺口盘点中，内联汇编 `@asm`/`@asm_intel` 是唯一 LLVM 完整支持
+而 asm 明确 `BKind::Unsupported` 拒绝的构造（SIMD 由 M7-e3x 定量证伪完整后端 ROI 为负、
+战略否决，不计）。旧的 `negative/unsupported.dial` 断言「需内嵌汇编器，短期不可能落地」；
+本批推翻：LLVM inline asm 的本质是**编译期模板占位符替换 + 操作数寄存器分配 + 原样
+交付系统汇编器**,真正的机器码由 `cc` 生成——asm 后端只需产出等价 `.s`，无需内嵌汇编器。
+
+| 层 | 改动 | 关键点 |
+| --- | --- | --- |
+| `ir.rs` | 新增 `IrInst::InlineAsm` | 带 template/constraints/dialect/args/arg_tys/ret_ty；补 `is_pure`（副作用，DCE 不删）/ `def`/`reg_uses`/`escapes`；`pass.rs::subst_inst` 同步替换输入 vreg |
+| `lower.rs` | `lower_call` 拦截 → `lower_inline_asm` | 输入按 `param_ir` 窄化到 C ABI 宽度；返回按 LLVM `abi_adapt` 口径用 Conv Zext 扩回 `reg_ir`（byte i8→i64、bool i32→i64） |
+| `codegen_asm.rs` | `inst_inline_asm` + `render_asm_template` | 约束串解析（`=r`/`=&r`/`+r`/`r`/数字绑定）；操作数用整数实参寄存器池 rdi/rsi/rdx/rcx/r8/r9（避开 GRA 驻留池与发射临时 rax/r10/r11）；`$N` 按操作数宽度渲染 `%rax`/`%eax`/`%al`、`$$`→`$`；Intel 经 `.intel_syntax` 包裹、寄存器名无 `%` |
+
+**核心架构决策——含 asm 函数全 spill**：手写汇编模板可触达任意物理寄存器，若同函数
+的值驻留在 GRA 池（callee-saved）或实参寄存器里会被踩踏。`analyze_residency` 对含
+InlineAsm 的函数强制走全 spill（与 -g / O0 同一条久经考验的路径），所有值留栈槽；
+操作数池因此与驻留值彻底隔离。内联汇编是稀有底层原语，性能不敏感；**不含 asm 的函数
+汇编输出逐字节不变**——这是零回归护栏的关键。AArch64 方言语义不同，`emit()` 预检
+Fail-Fast 拒绝，普通 AArch64 程序 `.o` 零变化。
+
+**对照 LLVM 的语义保真**：四种形态——`$1→$0` 搬运（`"=r,r"`）、`$$7` 字面转义 +
+绑定约束（`"=r,0"`，输入输出同寄存器原地累加）、Intel 方言（`mov $0, $1`）、byte
+宽度 C ABI 适配（`@asm<byte>` i8 进出）——双后端 stdout 逐字节一致。golden
+`tests/asm_golden/inline_asm.dial` 锁定；失效的 `negative/unsupported.dial` 移除。
+AF 17 用例 / AG 180 次差分 / 全量 run_tests.sh 全绿。
+
 ---
 
 ## 14. 真实程序缺口补齐与宪法裁决（v1.04 增补）

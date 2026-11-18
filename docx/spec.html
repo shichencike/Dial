@@ -926,12 +926,13 @@ M7-e3w 起已支持完整 DWARF（源码行断点 + 变量名 + M7-e3z 类型 DI
 </tr>
 <tr>
 <td>M7</td>
-<td>双后端一致性补全：布局内建 <code>sizeof</code>/<code>alignof</code>/<code>offsetof</code>、<code>bitcast</code>、<code>assert</code>/<code>panic</code>、<code>is_null</code>、<code>drop</code>、channel 原语族、<code>spawn</code>/<code>join</code>/<code>detach</code> 真多线程、<code>map</code>/<code>filter</code>/<code>reduce</code>/<code>sort_by</code> 高阶数组方法、<code>select</code> 多路通道选择——均与 LLVM 后端逐字节一致</td>
+<td>双后端一致性补全：布局内建 <code>sizeof</code>/<code>alignof</code>/<code>offsetof</code>、<code>bitcast</code>、<code>assert</code>/<code>panic</code>、<code>is_null</code>、<code>drop</code>、channel 原语族、<code>spawn</code>/<code>join</code>/<code>detach</code> 真多线程、<code>map</code>/<code>filter</code>/<code>reduce</code>/<code>sort_by</code> 高阶数组方法、<code>select</code> 多路通道选择、<strong>内联汇编 <code>asm</code>/<code>asm_intel</code>（M7-e3as）</strong>、<code>impl</code> 方法 + 默认实参（M7-e3aq）、嵌套下标赋值（M7-e3ao）——均与 LLVM 后端逐字节一致</td>
 </tr>
 </tbody>
 </table>
-<p>尚未覆盖（会明确报错）：内联汇编与 SIMD（<code>asm</code> / <code>asm_intel</code> / <code>simd</code>）、
-嵌套下标赋值等；高阶函数仅句柄元素开放（标量元素通道编译期拒绝，两端同源）。
+<p>尚未覆盖（会明确报错）：SIMD（<code>simd&lt;T,N&gt;</code>，M7-e3x 定量证伪完整 SIMD 后端 ROI 为负，战略否决）；
+高阶函数仅句柄元素开放（标量元素通道编译期拒绝，两端同源）。
+内联汇编 <code>@asm</code>/<code>@asm_intel</code> 已由 M7-e3as 落地，双后端逐字一致（仅 x86-64，AArch64 明确 Fail-Fast）。
 编译期布局内建 <code>sizeof</code> / <code>alignof</code> / <code>offsetof</code> 已支持（M7-e3ag，含 packed struct
 对齐与双后端一致性验证）；底层位重解释 <code>bitcast</code> 已支持（M7-e3ah，标量双后端一致，
 struct↔struct 同尺寸 asm 零拷贝实现——该项 LLVM IR verifier 本身拒绝，属 asm 超越）。
@@ -8497,6 +8498,13 @@ fn asm_intel_id(x: int): int {
 <li><code>sideeffects = true</code>：编译器不得把这段汇编当纯函数删掉、合并或重排。</li>
 <li><strong>平台相关</strong>：模板、约束、寄存器名都是目标机的事，编译器不做可移植性保证。
   这是「信任开发者」的底层原语——它本身就是显式的，与零隐式转换铁律不冲突。</li>
+<li><strong>双后端支持（M7-e3as）</strong>：<code>--backend=asm</code> 同样支持 <code>@asm</code>/<code>@asm_intel</code>，模板 /
+  约束原样交付、<code>$N</code>/<code>$$</code> 占位符在发射期按 C ABI 宽度替换为物理寄存器（ATT 带 <code>%</code>、
+  Intel 不带，Intel 模板经 <code>.intel_syntax</code> 包裹），四种形态（<code>$1→$0</code> 搬运、<code>=r,0</code>
+  绑定原地累加、Intel 方言、byte 宽度适配）与 LLVM 后端逐字节一致，golden 用例
+  <code>tests/asm_golden/inline_asm.dial</code> 锁定。仅 x86-64——AArch64 方言语义不同，明确
+  Fail-Fast 拒绝（普通程序不含 asm，AArch64 既有行为零变化）。含 asm 的函数禁用
+  GRA 驻留（全 spill），其余函数汇编输出零变化。</li>
 </ul>
 <h3 id="3314-simdt-n原生向量类型">33.14 <code>simd&lt;T, N&gt;</code>：原生向量类型</h3>
 <pre><code class="language-dial">var a: simd&lt;int, 4&gt; = simd&lt;int, 4&gt;(1, 2, 3, 4);   // 逐 lane

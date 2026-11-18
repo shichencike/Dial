@@ -333,10 +333,11 @@ dialc lsp
 > | M5-b | 容器元素类型与所有权结算（`string[]` / `bool[]` / `float[]` 的 kind 与位模式） |
 > | M5-c | 裸指针 FFI：`raw_alloc` / `raw_free` / `ptr_cast` / `offset` 指针算术 / `*p` 读写 / C 库互通 |
 > | M5-d | 一等**函数地址**（函数指针）：取地址 / 间接调用 / 作参数与返回值 |
-> | M7 | 双后端一致性补全：布局内建 `sizeof`/`alignof`/`offsetof`、`bitcast`、`assert`/`panic`、`is_null`、`drop`、channel 原语族、`spawn`/`join`/`detach` 真多线程、`map`/`filter`/`reduce`/`sort_by` 高阶数组方法、`select` 多路通道选择——均与 LLVM 后端逐字节一致 |
+> | M7 | 双后端一致性补全：布局内建 `sizeof`/`alignof`/`offsetof`、`bitcast`、`assert`/`panic`、`is_null`、`drop`、channel 原语族、`spawn`/`join`/`detach` 真多线程、`map`/`filter`/`reduce`/`sort_by` 高阶数组方法、`select` 多路通道选择、**内联汇编 `asm`/`asm_intel`（M7-e3as）**、`impl` 方法 + 默认实参（M7-e3aq）、嵌套下标赋值（M7-e3ao）——均与 LLVM 后端逐字节一致 |
 >
-> 尚未覆盖（会明确报错）：内联汇编与 SIMD（`asm` / `asm_intel` / `simd`）、
-> 嵌套下标赋值等；高阶函数仅句柄元素开放（标量元素通道编译期拒绝，两端同源）。
+> 尚未覆盖（会明确报错）：SIMD（`simd<T,N>`，M7-e3x 定量证伪完整 SIMD 后端 ROI 为负，战略否决）；
+> 高阶函数仅句柄元素开放（标量元素通道编译期拒绝，两端同源）。
+> 内联汇编 `@asm`/`@asm_intel` 已由 M7-e3as 落地，双后端逐字一致（仅 x86-64，AArch64 明确 Fail-Fast）。
 > 编译期布局内建 `sizeof` / `alignof` / `offsetof` 已支持（M7-e3ag，含 packed struct
 > 对齐与双后端一致性验证）；底层位重解释 `bitcast` 已支持（M7-e3ah，标量双后端一致，
 > struct↔struct 同尺寸 asm 零拷贝实现——该项 LLVM IR verifier 本身拒绝，属 asm 超越）。
@@ -5313,6 +5314,13 @@ fn asm_intel_id(x: int): int {
 - `sideeffects = true`：编译器不得把这段汇编当纯函数删掉、合并或重排。
 - **平台相关**：模板、约束、寄存器名都是目标机的事，编译器不做可移植性保证。
   这是「信任开发者」的底层原语——它本身就是显式的，与零隐式转换铁律不冲突。
+- **双后端支持（M7-e3as）**：`--backend=asm` 同样支持 `@asm`/`@asm_intel`，模板 /
+  约束原样交付、`$N`/`$$` 占位符在发射期按 C ABI 宽度替换为物理寄存器（ATT 带 `%`、
+  Intel 不带，Intel 模板经 `.intel_syntax` 包裹），四种形态（`$1→$0` 搬运、`=r,0`
+  绑定原地累加、Intel 方言、byte 宽度适配）与 LLVM 后端逐字节一致，golden 用例
+  `tests/asm_golden/inline_asm.dial` 锁定。仅 x86-64——AArch64 方言语义不同，明确
+  Fail-Fast 拒绝（普通程序不含 asm，AArch64 既有行为零变化）。含 asm 的函数禁用
+  GRA 驻留（全 spill），其余函数汇编输出零变化。
 
 ### 33.14 `simd<T, N>`：原生向量类型
 

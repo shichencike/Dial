@@ -332,6 +332,11 @@ fn subst_inst(inst: &mut IrInst, from: VReg, to: VReg) {
                 if let Value::Reg(r) = v { if *r == from { *v = Value::Reg(to); } }
             }
         }
+        IrInst::InlineAsm { args, .. } => {
+            for v in args.iter_mut() {
+                if let Value::Reg(r) = v { if *r == from { *v = Value::Reg(to); } }
+            }
+        }
         IrInst::RcRetain { ptr, .. } | IrInst::RcRelease { ptr, .. }
         | IrInst::StructRetain { ptr, .. } | IrInst::StructRelease { ptr, .. } => {
             if *ptr == from { *ptr = to; }

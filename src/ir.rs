@@ -163,6 +163,11 @@ pub enum ArcKind { Generic, String, Array, Error, Bytes }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CallLink { Dial, Extern, Runtime }
 
+/// 内联汇编方言（对齐 LLVM `InlineAsmDialect`）：`@asm`=ATT、`@asm_intel`=Intel。
+/// 决定发射模板时 `$N` 占位符替换成的寄存器名是否带 `%` 前缀，以及模板原样交付。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AsmDialect { Att, Intel }
+
 #[derive(Clone, Debug)]
 pub enum IrInst {
     /// 在栈上分配 `slots` 个 8 字节槽，返回其首地址（指针 vreg）。
@@ -210,6 +215,23 @@ pub enum IrInst {
         ret_ty: IrType,
     },
 
+    /// 内联汇编 `@asm<T>(template, constraints, args...)`（仅 x86-64）。
+    /// 对齐 LLVM `gen_inline_asm`：模板与约束原样交付汇编器，`$N`/`$$` 占位符
+    /// 由本后端在发射期替换为分配的物理寄存器；操作数按 C ABI 宽度进出。
+    /// - `template` / `constraints` 是编译期字符串字面量（语义层已强制）；
+    /// - `args` / `arg_tys` 是输入操作数（不构成输出绑定）；`ret_ty` 是输出宽度；
+    /// - `dialect` 决定 `$N` 替换的寄存器名是否带 `%`（ATT）以及模板方言原样保留。
+    /// 有副作用，DCE 绝不删除；AArch64 在 lower 阶段 Fail-Fast，不生成此指令。
+    InlineAsm {
+        dst: VReg,
+        template: String,
+        constraints: String,
+        dialect: AsmDialect,
+        args: Vec<Value>,
+        arg_tys: Vec<IrType>,
+        ret_ty: IrType,
+    },
+
     /// ARC 原语（发射时落为具体 C call）。
     RcRetain { ptr: VReg, kind: ArcKind },
     RcRelease { ptr: VReg, kind: ArcKind },
@@ -250,6 +272,7 @@ impl IrInst {
             IrInst::Store { .. }
             | IrInst::Call { .. }
             | IrInst::CallIndirect { .. }
+            | IrInst::InlineAsm { .. }
             | IrInst::RcRetain { .. }
             | IrInst::RcRelease { .. }
             | IrInst::StructRetain { .. }
@@ -276,6 +299,7 @@ impl IrInst {
             | IrInst::Conv { dst, .. } => Some(*dst),
             IrInst::Call { dst, .. } => *dst,
             IrInst::CallIndirect { dst, .. } => *dst,
+            IrInst::InlineAsm { dst, .. } => Some(*dst),
             IrInst::Store { .. }
             | IrInst::RcRetain { .. }
             | IrInst::RcRelease { .. }
@@ -303,6 +327,7 @@ impl IrInst {
                 out.push(*target);
                 for a in args { push_val(*a, out); }
             }
+            IrInst::InlineAsm { args, .. } => for a in args { push_val(*a, out); },
             IrInst::EnvInit { argc, argv } => { push_val(*argc, out); push_val(*argv, out); }
             IrInst::Line(..) => {}
             IrInst::DebugVar { slot, .. } => out.push(*slot),
@@ -318,6 +343,7 @@ impl IrInst {
             | IrInst::StructRetain { ptr, .. } | IrInst::StructRelease { ptr, .. } => *ptr == v,
             IrInst::Call { args, .. } => args.contains(&Value::Reg(v)),
             IrInst::CallIndirect { target, args, .. } => *target == v || args.contains(&Value::Reg(v)),
+            IrInst::InlineAsm { args, .. } => args.contains(&Value::Reg(v)),
             IrInst::Bin { a, b, .. } | IrInst::FBin { a, b, .. } | IrInst::ICmp { a, b, .. }
             | IrInst::FCmp { a, b, .. } => *a == Value::Reg(v) || *b == Value::Reg(v),
             IrInst::Un { a, .. } | IrInst::Conv { a, .. } => *a == Value::Reg(v),

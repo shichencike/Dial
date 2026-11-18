@@ -1,0 +1,29 @@
+// M7-e3as：内联汇编 @asm<T>(...) / @asm_intel<T>(...) 双后端一致性。
+// 对齐 LLVM gen_inline_asm：模板 / 约束原样交付，操作数按 C ABI 宽度进出，
+// $N/$$ 占位符在发射期替换为物理寄存器。覆盖四种形态：
+//   - $1→$0 寄存器搬运（"=r,r"）
+//   - $$ 字面转义 + 绑定约束 "=r,0"（输入与输出同寄存器，原地累加）
+//   - Intel 方言（.intel_syntax 包裹，寄存器名不带 %）
+//   - byte 宽度 C ABI 适配（i8  Low byte 零扩展回 i64）
+// LLVM 后端即 oracle，逐字节 diff 输出。
+
+fn asm_identity(x: int): int {
+    return @asm<int>("movq $1, $0", "=r,r", x);
+}
+fn asm_add7(x: int): int {
+    return @asm<int>("addq $$7, $0", "=r,0", x);
+}
+fn asm_intel_id(x: int): int {
+    return @asm_intel<int>("mov $0, $1", "=r,r", x);
+}
+fn asm_byte(x: int): int {
+    return byte_to_int(@asm<byte>("movb $1, $0", "=r,r", int_to_byte(x)));
+}
+
+fn main(): int {
+    print(asm_identity(42));   // 42
+    print(asm_add7(35));       // 42
+    print(asm_intel_id(77));   // 77
+    print(asm_byte(200));      // 200
+    return 0;
+}

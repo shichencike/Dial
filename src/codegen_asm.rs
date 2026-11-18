@@ -219,6 +219,15 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
 }
 
 pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str, fn_origin: &std::collections::HashMap<String, String>, opt_level: OptLevel, safety: SafetyMode) -> Result<String, String> {
+    // M7-e3as 预检：内联汇编的 AT&T/Intel 方言是 x86 专属，模板原样交付只在
+    // x86-64 有意义。AArch64 收到含 InlineAsm 的程序 Fail-Fast，明确报错而非
+    // 静默降级（普通程序不含 InlineAsm，AArch64 既有行为零变化）。
+    if !matches!(target, EmitTarget::X86_64SysV)
+        && ip.functions.iter().any(|f| f.blocks.iter().any(|b|
+            b.insts.iter().any(|i| matches!(i, IrInst::InlineAsm { .. }))))
+    {
+        return Err("[asm 后端] 内联汇编 @asm/@asm_intel 仅支持 x86-64 目标".to_string());
+    }
     // 预检：FieldAddr.field 是字段序号，必须能按 struct_layout 解析出字节偏移。
     for f in &ip.functions {
         for b in &f.blocks {
@@ -1343,7 +1352,15 @@ impl<'a> FnEmit<'a> {
     fn analyze_residency(&mut self) {
         self.plans.clear();
         self.used_phys.clear();
-        if !matches!(self.target, EmitTarget::X86_64SysV) || self.debug_info || self.opt_level < OptLevel::O2 {
+        // M7-e3as：含内联汇编的函数禁用一切驻留（全 spill）。内联汇编的模板是
+        // 开发者手写的任意汇编，会在发射期独占 rax/rcx/rdx/rsi/rdi/r8/r9 等
+        // caller-saved 临时寄存器；若同函数的值驻留在其中会被踩踏。走全 spill
+        // 让所有值留在 alloca_off / reg_off 栈槽，asm 操作数池与栈槽互不干扰。
+        // 内联汇编是稀有底层原语，性能不敏感；不含 asm 的函数汇编输出零变化。
+        let has_asm = self.f.blocks.iter().any(|b|
+            b.insts.iter().any(|i| matches!(i, IrInst::InlineAsm { .. })));
+        if !matches!(self.target, EmitTarget::X86_64SysV) || self.debug_info
+            || self.opt_level < OptLevel::O2 || has_asm {
             // M7-e3w：-g 时禁用一切驻留，所有值留在 alloca_off / reg_off 栈槽，
             // 保证 DWARF 的 DW_OP_fbreg location 指向的就是权威最新值。
             // M7-e3ac：O0/O1 同样禁用驻留（走全 spill）——低优化级别不跨指令保持
@@ -2034,6 +2051,8 @@ impl<'a> FnEmit<'a> {
                 self.inst_call(*dst, func, args, arg_tys, ret_ty.clone()),
             IrInst::CallIndirect { dst, target, args, arg_tys, ret_ty } =>
                 self.inst_call_indirect(*dst, *target, args, arg_tys, ret_ty.clone()),
+            IrInst::InlineAsm { dst, template, constraints, dialect, args, arg_tys, ret_ty } =>
+                self.inst_inline_asm(*dst, template, constraints, *dialect, args, arg_tys, ret_ty.clone()),
             IrInst::FuncAddr { dst, func } => {
                 // 取函数代码地址：leaq <符号>(%rip), %reg（PIE 位置无关）。
                 let g = self.g1().to_string();
@@ -2058,6 +2077,137 @@ impl<'a> FnEmit<'a> {
                 self.do_call("dial_env_init");
             }
         }
+    }
+
+    /// M7-e3as：发射内联汇编。对齐 LLVM gen_inline_asm 的调用约定：
+    /// 约束串逗号分隔，首项是输出（`=r`/`+r`/`=&r`），其后是输入（`r`）或
+    /// 绑定（`0` = 与操作数 0 同寄存器）。操作数编号 = 约束串里的位置：
+    /// `$0` 是输出、`$1` 起是输入。`$$` 转义成字面 `$`。
+    /// 物理寄存器用 x86-64 的整数实参寄存器池 rdi/rsi/rdx/rcx/r8/r9（不属
+    /// GRA 驻留池、也不属发射临时 rax/r10/r11）；含 asm 的函数已强制全 spill，
+    /// 故不会踩踏任何 vreg 栈槽宽度之外的值。ATT 方言 `$N` 渲染成 `%reg`，
+    /// Intel 方言渲染成裸 `reg`，宽度按操作数 IrType（i8→al/i32→eax/i64→rax）。
+    fn inst_inline_asm(&mut self, dst: VReg, template: &str, constraints: &str,
+                       dialect: AsmDialect, args: &[Value], arg_tys: &[IrType], ret_ty: IrType) {
+        // 实参寄存器池（caller-saved，跨 call 无需保存；asm 块内独占）。
+        const POOL: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+
+        // 约束串解析：每项形如 "=r" / "=&r" / "+r" / "r" / "0"。
+        // 提取每项的「绑定编号」：纯数字 = 与该编号操作数同寄存器；否则新分配。
+        let specs: Vec<&str> = constraints.split(',').map(|s| s.trim()).collect();
+        let mut op_reg: Vec<String> = Vec::with_capacity(specs.len());
+        let mut pool_idx = 0usize;
+        for spec in &specs {
+            let tied = spec.parse::<usize>().ok();
+            if let Some(t) = tied {
+                if t < op_reg.len() {
+                    op_reg.push(op_reg[t].clone());
+                } else {
+                    // 绑定了尚未分配的操作数——防御性退回新寄存器（语义层已保证合法）。
+                    op_reg.push(POOL[pool_idx.min(POOL.len() - 1)].to_string());
+                    pool_idx += 1;
+                }
+            } else {
+                op_reg.push(POOL[pool_idx.min(POOL.len() - 1)].to_string());
+                pool_idx += 1;
+            }
+        }
+        // 操作数 0 必须有寄存器（输出）；约束串为空时兜底用 rdi。
+        if op_reg.is_empty() { op_reg.push("rdi".to_string()); }
+
+        // 输入实参从操作数 1 开始（$1, $2, ...），把它们装进各自寄存器。
+        // arg_tys[i] 与 args[i] 一一对应，位于操作数 i+1。
+        for (i, v) in args.iter().enumerate() {
+            let oi = i + 1;
+            if oi >= op_reg.len() { break; }
+            let reg = op_reg[oi].clone();
+            // 按操作数宽度装载：i8 用 8 位名 + movzbq 零扩展，其余 lg 统一 64 位。
+            let ty = arg_tys.get(i).cloned().unwrap_or(IrType::I64);
+            if ty == IrType::I8 || ty == IrType::I1 {
+                self.lg(*v, &self.g1().to_string());
+                self.line(&format!("\tmovzbq {}, {}", self.r(&self.r8(&self.g1())), self.r(&reg)));
+            } else {
+                self.lg(*v, &reg);
+            }
+        }
+
+        // 模板占位符替换：$N → 操作数 N 的寄存器名（按 dialect + 操作数宽度），
+        // $$ → 字面 $。逐字符扫描，模板里的换行 / 制表符保持原样。
+        let rendered = self.render_asm_template(template, &op_reg, &arg_tys, &ret_ty, dialect);
+        // Intel 方言：模板是 Intel 语法，需临时切换汇编器模式，模板后切回 ATT
+        // （输入装载 / 输出回写及本后端其余发射都用 ATT）。ATT 方言无需切换。
+        if dialect == AsmDialect::Intel {
+            self.line("\t.intel_syntax noprefix");
+        }
+        // 模板可能含 \n 多行；按行发出（line() 会加 \n）。跳过空行以免多余空行。
+        for ln in rendered.split('\n') {
+            if ln.is_empty() { continue; }
+            self.line(ln);
+        }
+        if dialect == AsmDialect::Intel {
+            self.line("\t.att_syntax prefix");
+        }
+
+        // 输出：操作数 0 的寄存器 → dst 槽。i8 结果高 8 字节可能为垃圾，
+        // 用 movzbq 取低 8 位零扩展（对齐 LLVM zext）；其余整槽搬运。
+        let out_reg = op_reg[0].clone();
+        if ret_ty == IrType::I8 || ret_ty == IrType::I1 {
+            self.line(&format!("\tmovzbq {}, {}", self.r(&self.r8(&out_reg)), self.r(&self.g1().to_string())));
+            self.sg(dst, &self.g1().to_string());
+        } else {
+            self.sg(dst, &out_reg);
+        }
+    }
+
+    /// 把 ASM 模板里的 `$N` / `$$` 替换成物理寄存器名。
+    /// ATT 加 `%` 前缀、Intel 不加；宽度按操作数 IrType（i8→r8、i32→r32、其余 r64）。
+    /// 操作数 0 的宽度取 ret_ty；操作数 i≥1 取 arg_tys[i-1]（缺失按 i64）。
+    fn render_asm_template(&self, template: &str, op_reg: &[String],
+                           arg_tys: &[IrType], ret_ty: &IrType, dialect: AsmDialect) -> String {
+        let mut out = String::with_capacity(template.len() + 16);
+        let bytes = template.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'$' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
+                    out.push('$');
+                    i += 2;
+                    continue;
+                }
+                // 读取 $ 后面的十进制操作数编号（可能多位）。
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_digit() { j += 1; }
+                if j > i + 1 {
+                    let idx: usize = template[i + 1..j].parse().unwrap_or(0);
+                    if let Some(base) = op_reg.get(idx) {
+                        let ty: IrType = if idx == 0 {
+                            ret_ty.clone()
+                        } else {
+                            arg_tys.get(idx - 1).cloned().unwrap_or(IrType::I64)
+                        };
+                        let named = match ty {
+                            IrType::I8 | IrType::I1 => self.r8(base),
+                            IrType::I32 | IrType::F32 => self.r32(base),
+                            _ => base.clone(),
+                        };
+                        let shown = match dialect {
+                            AsmDialect::Att => format!("%{}", named),
+                            AsmDialect::Intel => named,
+                        };
+                        out.push_str(&shown);
+                    } else {
+                        // 编号越界：原样保留，交由汇编器报错（语义层已保证合法）。
+                        out.push_str(&template[i..j]);
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            // 逐字节复制（模板是 ASCII 汇编文本；非 ASCII 按字节保留）。
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        out
     }
 
     /// 发射「有符号 64 位整数 / 常量 d」的乘法逆元序列（仅 x86-64）。

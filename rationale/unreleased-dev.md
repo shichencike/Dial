@@ -3070,3 +3070,35 @@
   当前覆盖面已一致。今后每次改 asm 后端，AG 门禁都会自动做确定性差分回归；若某类构造
   未被生成覆盖（如更复杂的 map/set 容器、文件 IO、异常路径），扩充 `Gen` 的动作池即可，
   框架其余部分不动。这也给出了一条比逐个静态审计更高效的「找缺口」方法论。
+
+---
+
+#### M7-e3as：自研 asm 后端补齐内联汇编 `@asm<T>(...)` / `@asm_intel<T>(...)`（语义层最后的纯能力差距）
+
+**为什么做这个**：承接「代替 LLVM」主线，对双后端做能力差距盘点。结论是 LLVM 完整支持而 asm 明确拒绝的**纯语义构造只剩内联汇编**（SIMD 由 M7-e3x 定量证伪完整后端 ROI 为负、战略否决，不算遗漏；`caller-saved` 寄存器分配是性能取舍而非语义缺失；字段级 ARC / 闭包 / 重载 / 泛型是两后端共同的宪法层限制）。`tests/asm_golden/negative/unsupported.dial` 曾把它当作「最稳定的 unsupported 负例」，注释断言「需自研后端内嵌汇编器，短期不可能落地」。
+
+**为什么这个断言是错的**：LLVM inline asm 的本质不是「内嵌一套汇编器」——它是①编译期解析约束串、②给每个操作数分配物理寄存器、③把模板里的 `$N`/`$$` 占位符替换成寄存器名、④把结果原样交给系统汇编器（`cc`/`clang`）。asm 后端本身就在生成 `.s` 再交 `cc`，所以只需在发射期完成同样三步，真正的机器码仍由 `cc` 生成。这把它从「不可能」降级为「一个中等规模的发射期特性」。
+
+**权威基准（LLVM oracle）**：用 `DIALC_DUMP_IR=1` 编译 `ffi_lowlevel_demo.dial` 拿到 LLVM IR，再反汇编 `-O2` 产物，确认 LLVM 的替换口径：
+- `asm_identity("movq $1, $0","=r,r",x)` → `mov %rdi,%rax`（`$0`=输出 rax、`$1`=输入 rdi）；
+- `asm_add7("addq $$7, $0","=r,0",x)` → `mov %rdi,%rax; add $0x7,%rax`（`$$`→字面 `$`，`0` 绑定输入输出同寄存器）；
+- `asm_intel_id("mov $0, $1","=r,r",x)` → Intel 方言、`mov rax,rdi`（无 `%` 前缀）；
+- `asm_byte("@asm<byte>")` → `mov %al,%al; movzbl %al,%eax`（i8 低字节进出 + 零扩展回 i64）。
+
+**实现三层**：
+- `ir.rs`：新增 `IrInst::InlineAsm { dst, template, constraints, dialect, args, arg_tys, ret_ty }` 与 `AsmDialect::{Att,Intel}`。Rust 穷尽匹配逼出全部 `match` 点：`is_pure`（有副作用，DCE 绝不删，对齐 LLVM `sideeffects=true`）/ `def` / `reg_uses` / `escapes` 四处，加 `pass.rs::subst_inst`（把输入 vreg 随变量重命名一起替换）。
+- `lower.rs`：`lower_call` 在 `bitcast` 之后、`lower_builtin`（会落到 `BKind::Unsupported`）之前拦截 `asm`/`asm_intel`；`lower_inline_asm` 从 `args[0..3]` 取 TypeLit/StringLit/StringLit，逐输入 `lower_expr` + `adapt_param` 窄化到 `param_ir`（byte→i8、bool→i32），生成 InlineAsm IR；返回侧先算 `need_widen = ret_abi != ret_internal` 再移动 `ret_abi`，用 Conv Zext 把 C ABI 宽度扩回 `reg_ir`（对齐 LLVM `abi_adapt(raw, ret_llvm, dialc_type)` 的 zext 方向）。
+- `codegen_asm.rs`：`render_asm_template` 逐字节扫描模板——`$$`→`$`、`$N`→操作数 N 的物理寄存器名，宽度按 IrType 渲染（`i8→r8`/`i32→r32`/其余 r64）、方言决定 `%` 前缀（ATT 带、Intel 不带）。`inst_inline_asm` 解析约束串（逗号分隔，`=r`/`=&r`/`+r`/`r`/纯数字绑定如 `=r,0` 同寄存器），操作数池选 x86-64 整数实参寄存器 `["rdi","rsi","rdx","rcx","r8","r9"]`——刻意避开 GRA 驻留池（callee-saved）与发射临时（rax/r10/r11）；输入经 `lg`（i8 走 movzbq 零扩展）装载、模板逐行发出、输出经 `sg`（i8 再 movzbq 取低字节）写回。Intel 模板经 `.intel_syntax noprefix` … `.att_syntax prefix` 包裹（其余发射都是 ATT）。
+
+**最关键的正确性决策——含 asm 函数全 spill**：手写模板可触达任意物理寄存器；若同函数的值驻留在被模板踩踏的寄存器里就静默出错。`analyze_residency` 对含 InlineAsm 的函数强制走全 spill（与 `-g`/O0 完全同一条久经考验的路径），所有值留栈槽，操作数池与驻留值彻底隔离。内联汇编是稀有底层原语、性能不敏感；代价仅限含 asm 的函数。**不含 asm 的函数汇编输出逐字节不变**——这是零回归的基石。AArch64 方言语义与 x86 的 AT&T/Intel 不同，`emit()` 预检发现非 x86-64 含 InlineAsm 即 Fail-Fast 明确拒绝（普通 AArch64 程序零变化）。
+
+**实测**：
+- 官方四形态 + 单输出 `=r`：双后端 stdout 逐字节一致（`asm_identity(42)=42`、`asm_add7(35)=42`、`asm_intel_id(77)=77`、`asm_byte(200)=200`、`=r` 单输出 99）。
+- 语义层四负例（返回类型/缺参/无输出约束/模板非常量）在 asm 下仍 rc=1 被拒；AArch64 交叉编译含 asm 程序明确报 `[asm 后端] 内联汇编仅支持 x86-64`。
+- 探索中 `+r` 读写约束与自建多行模板让 **LLVM 后端自身段错误（rc=139）**——属冻结 LLVM 路径的既有边界，非本实现问题，未追逐；asm 后端对同输入给出正确结果，不纳入 golden。
+
+**护栏 / A/B**：新增 `tests/asm_golden/inline_asm.dial`（第 17 个 golden），删除失效的 `negative/unsupported.dial`（其唯一用例就是内联汇编）。基线与新编译器对比：16 个既有 golden + 28 项 bench 程序（均不含 asm）`.s` **逐字节一致**；AArch64 普通程序（core3）交叉汇编 `.o` md5 `596424068c909e170dab0bd07317c1ce` 前后一致；几何平均 0.5402x→0.5366x 属计时噪声带（胜/平/负 13/12/3→14/11/3）。`src/codegen.rs`/`src/ast.rs` 零改动、`Cargo.toml` 1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。
+
+**回归**：AF 黄金门禁 17 用例全绿（含 AArch64 交叉汇编 / --fast-compile）；AG 差分门禁 golden 自检 + 4 固化语料 + 180 次在线 fuzz（60 seeds × O0/O2/O3）零不一致；全量 `tests/run_tests.sh` rc=0「全部测试通过」；`cargo test --release` 绿。
+
+**结论与边界**：内联汇编补齐后，LLVM 有而 asm 无的**语义构造清零**。剩余与 LLVM 的差别都是非语义的：① 性能层 O3 管线的 caller-saved / 浮点 / 跨函数寄存器分配（caller-saved 经分析需把 GRA 重写为 live-range 分配，且 call 点保存/恢复成本可能抵消收益，b28 有 110 个 call，暂未做）；② SIMD（战略否决）；③ 字段级 ARC 等两后端共同的宪法限制。这些不再是「asm 少一个能编译的构造」。

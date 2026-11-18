@@ -2142,6 +2142,11 @@ impl<'a> Lower<'a> {
             // 解读同一块内存，等价 LLVM 同尺寸聚合零开销 bitcast）。必须在此拦截——
             // 否则会落到下方 lower_builtin 的 BKind::Unsupported 报错。
             "bitcast" => return self.lower_bitcast(args),
+            // M7-e3as：内联汇编 @asm<T>(...) / @asm_intel<T>(...)。对齐 LLVM
+            // codegen.rs:6113 gen_inline_asm：模板 / 约束原样交付，操作数按 C ABI
+            // 宽度进出。必须在此拦截——否则落到下方 lower_builtin 的
+            // BKind::Unsupported 报错。仅 x86-64：AArch64 方言语义不同，Fail-Fast。
+            "asm" | "asm_intel" => return self.lower_inline_asm(name, args),
             // M7-e3ai：assert / panic 的 Fail-Fast 专用路径。对齐 LLVM 后端
             // emit_fail_loc：assert 条件失败 / panic 都打印「消息 + file:line:col」
             // 后终止进程。必须在此拦截——否则落到下方 lower_builtin 的
@@ -2876,6 +2881,68 @@ impl<'a> Lower<'a> {
         // ptr↔int 因 reg_ir 同为 Ptr/I64 已在上面恒等分支覆盖。
         let result = self.reinterpret_bits(v, reg_ir(&target))?;
         Ok((result, false))
+    }
+
+    /// M7-e3as：内联汇编 @asm<T>(template, constraints, args...) —— 对齐 LLVM
+    /// codegen.rs:6113 gen_inline_asm。语义层（semantic.rs:797-875）已强制：
+    /// 类型实参是标量/裸指针、模板与约束是字符串字面量、约束首项是 =/+ 输出、
+    /// 输入标量/裸指针。这里把实参按 C ABI 宽度适配（param_ir）后交给 IR，
+    /// 模板里的 `$N`/`$$` 占位符与物理寄存器分配留到 codegen_asm.rs 发射期。
+    /// 返回值的 C ABI 宽度→Dial 内部宽度的适配也在这里用 Conv 补齐（对齐 LLVM
+    /// abi_adapt：ret_ty=param_ir 窄→ reg_ir 宽用 Zext）。
+    fn lower_inline_asm(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        if args.len() < 3 {
+            return self.err("内联汇编形如 @asm<T>(\"模板\", \"约束\", 输入...)，至少需要类型实参、模板与约束");
+        }
+        let ret_ty_dial = match &args[0] {
+            Expr::TypeLit(t) => t.clone(),
+            _ => return self.err("内联汇编第一参数必须是类型实参 @asm<T>(...)"),
+        };
+        let template = match &args[1] {
+            Expr::StringLit(s) => s.clone(),
+            _ => return self.err("内联汇编模板必须是字符串字面量"),
+        };
+        let constraints = match &args[2] {
+            Expr::StringLit(s) => s.clone(),
+            _ => return self.err("内联汇编约束必须是字符串字面量"),
+        };
+        let dialect = if name == "asm_intel" { AsmDialect::Intel } else { AsmDialect::Att };
+
+        // AArch64 方言语义与 x86 的 AT&T/Intel 不同，模板原样交付在交叉目标上
+        // 无法保证正确——Fail-Fast 明确拒绝（普通程序不含 asm，零影响）。
+        // 真正的 target 判定在 emit() 预检里（lower 阶段拿不到 target）。
+
+        // 返回值 C ABI 宽度（byte→i8、bool→i32、其余同 reg）。
+        let ret_abi = param_ir(&ret_ty_dial);
+        let ret_internal = reg_ir(&ret_ty_dial);
+
+        // 输入实参：lower + 按 C ABI 宽度适配（对齐 LLVM abi_adapt 的窄化方向）。
+        let mut in_vals: Vec<Value> = Vec::new();
+        let mut in_tys: Vec<IrType> = Vec::new();
+        for a in args.iter().skip(3) {
+            let at = self.expr_dt(a);
+            let (v, _) = self.lower_expr(a, &at)?;
+            let adapted = self.adapt_param(v, &at, &at);
+            in_tys.push(param_ir(&at));
+            in_vals.push(adapted);
+        }
+
+        // C ABI 宽度 → Dial 内部宽度：byte(i8)→i64、bool(i32)→i64 用零扩展，
+        // 与 LLVM abi_adapt(raw, ret_llvm, dialc_type) 完全一致。先算判据再移动 ret_abi。
+        let need_widen = ret_abi != ret_internal;
+        let dst = self.new_reg(ret_abi.clone());
+        self.emit(IrInst::InlineAsm {
+            dst, template, constraints, dialect,
+            args: in_vals, arg_tys: in_tys, ret_ty: ret_abi,
+        });
+
+        if need_widen {
+            let wide = self.new_reg(ret_internal.clone());
+            self.emit(IrInst::Conv { kind: AConv::Zext, dst: wide,
+                a: Value::Reg(dst), ty: ret_internal });
+            return Ok((Value::Reg(wide), false));
+        }
+        Ok((Value::Reg(dst), false))
     }
 
     /// 文件 IO 与 __with_release：与 codegen.rs:4596–4768 的 CFG / moved 记账同构。
