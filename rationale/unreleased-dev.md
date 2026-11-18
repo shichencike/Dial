@@ -3174,3 +3174,36 @@ imulq   %r10, %r15     # s * 31
 - 零回归归因：17 个既有 golden 中仅 `hof`（含 float sort_by 比较器）汇编变化，diff 全部是 `movsd 栈↔栈`→`xmm↔xmm` 的预期驻留优化、输出一致；其余 16 个逐字节不变；bench 纯整数程序 `.s` 逐字节一致；AArch64 含浮点程序（hof/core2）`.o` 逐字节一致。
 - AF 18 用例、AG 180 次差分零不一致、全量 run_tests.sh rc=0、cargo test 绿。
 - 护栏：`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。
+
+#### M7-e3aw：编译期常量折叠解释器记忆化（asm 后端编译提速 ~30%，零语义/产物变化）
+
+**为什么做这个（编译速度维度，承接 e3an3）**：差距盘点路线图把「代替 LLVM」拆成语义/性能/O3/DWARF/fail-fast/产物形态/编译速度多维度。e3an3 已攻编译速度（stdlib 持久缓存 + `--fast-compile`），但那是**产物/链接层**；前端（lower→pass→emit）从未被系统量化过。本批先插桩归因，再决定是否投入——延续 e3at「先量化 ROI 再决定投入」纪律。
+
+**插桩归因（临时插桩，测量后已全部恢复、零残留）**：asm 后端 O2 编译 bench.dial（9529B，28 项）各阶段耗时（多次稳定值）：
+
+| 阶段 | 耗时 | 占比 |
+|---|---|---|
+| lower | 0.36ms | ~0.6% |
+| run_passes（fold/cse/dce/arc） | 0.20ms | ~0.3% |
+| **fold_pure_calls** | **34.5ms** | **~48%** |
+| ivr_strength_reduce | 0.21ms | ~0.3% |
+| emit（生成汇编文本） | 9.6ms | ~13% |
+| `cc -c`（zig cc 汇编用户 .s） | 26ms | ~37% |
+
+**fold_pure_calls 占前端近半**——它不是缺陷，而是 e3p（M7-e3p）把 `fibR(23)`/`treeR(18)` 等「常量实参纯整数递归函数」在编译期求值的核心优化，正是递归类基准 b09/b10/b11 从落后 LLVM 变为大幅反超（asm↔LLVM 几何平均 0.9554→0.5597）的来源。但**朴素递归解释器**对同一子问题指数级重复求解：插桩每次顶层求值显示 `fibR(23)` 耗 973,714 步、`treeR(18)` 91,966 步、`rsumR(25)` 331 步。纯函数返回值完全由 `(name, args)` 决定——这是可以消除的纯浪费。
+
+**实现（仅 `src/pass.rs`，+18/-3 行）**：
+- 新增 `type E3pMemo = HashMap<(String, Vec<i64>), i64>`：键 = (函数名, 全整数实参)，值 = 求值结果。
+- `e3p_eval_call` 加 `memo: &mut E3pMemo` 参数：入口构造 key、`memo.get` 命中直接 `return Some(cached)`（**不消耗步数预算**——该结果上一次已在 200 万步预算内算出，复用不引入新工作量）；正常返回前 `memo.insert(key, result)`，**只缓存成功求值**（除零 `?`、超预算、非白名单等失败路径提前 return，不写缓存，避免污染）。
+- 递归子调用把同一个 `memo` 传下去（与独立 `regs` 环境并存：regs 防 vreg 重入污染，memo 跨递归层共享以复用子问题结果）。
+- `fold_pure_calls` 每个顶层折叠点新建独立 `E3pMemo`（保守：不改变任何折叠决策、不跨顶层调用共享，只加速单次求值）。
+
+**关键正确性论证**：① 缓存键只含纯函数参数 `(name, args)`，e3p 白名单保证函数体是纯整数计算（无内存副作用/浮点/ARC），返回值是参数的确定函数，命中与重新求值逐位一致；② 失败不写缓存，避免除零/超预算的非结果被当作有效值；③ 每个顶层调用独立 memo，跨调用零交互；④ 命中不消耗步数只影响「还能算多少步」，不影响「算出什么值」——所有被折叠的结果数学上完全相同。
+
+**验证（零语义/产物变化）**：
+- 折叠值不变：`rsumR(25)=325` / `fibR(23)=28657` / `treeR(18)=8361`；bench 28 项校验和全一致。
+- **产物逐字节一致**：bench + 全部 18 个 golden 程序 `.s` 与 HEAD 基线（`/tmp` 独立 CARGO_TARGET_DIR 构建的干净二进制）逐字节一致——生成代码完全没变，运行时性能与语义天然一致（无需重测运行时 A/B）。
+- **A/B 交替计时**（OLD/NEW 二进制成对采样抵消抖动，min 口径）：bench.dial 112.9ms→76.1ms（**-32.6%**）、p25 117.7→84.8ms、median 120.3→85.2ms（-29.1%）；多源码复测 bench.dial -34.4%、channel_multiconsumer +4.8%（噪声）、array_demo -2.0%（噪声）——收益精确来自 e3p 指数重复消除，无递归常量的程序零变化。
+- 全门禁：AF 18 用例、AG 差分 180 次（golden 11 + 固化语料 4 + 在线 fuzz O0/O2/O3）零不一致、全量 run_tests.sh rc=0、cargo test 绿。
+
+**范围与护栏**：改动只在 `src/pass.rs` 的 e3p 解释器内部，且 `fold_pure_calls` 的调用受 `opt_level>=O2 && EmitTarget::X86_64SysV` 守卫——AArch64 与普通 O0/O1 零变化，LLVM 路径零改动（该函数只服务 asm 路径）。`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0 零改动、零新依赖（仅用已有 HashMap）、构建零警告、不打 tag、docx 确定性。**注**：本批前期还做了字符串类落后项归因（b20/b21/b22 双后端 A/B + b22 反汇编）——字符串类已追平 LLVM（几何平均 1.0016x，比路线图记录的 1.02x 更好），唯一落后项 b22 1.10x 根因是 LLVM O3 把 28 个基准内联进 main 的架构级循环管线差距，peephole 不可达（与 e3r/e3s/e3t 结论一致），不构成可落地缺口，故未改动产品代码。

@@ -461,6 +461,14 @@ struct E3pEnv {
     depth: u32,
 }
 
+/// M7-e3aw：编译期常量折叠记忆化缓存，键 = (函数名, 全整数实参)。
+/// 纯整数函数的返回值完全由 (name, args) 决定，朴素递归解释器会对同一
+/// 子问题反复求值（fibR(23) 达 97 万步、treeR(18) 9 万步），占 asm 后端
+/// 编译时间近半。缓存只记录**成功求值**的结果：命中直接返回、不消耗步数，
+/// 数学结果逐位一致，仅消除指数级重复计算。每个顶层折叠用独立 memo（保守：
+/// 不改变任何折叠决策，只加速单次求值），与 CSE 的值编号思想同源。
+type E3pMemo = HashMap<(String, Vec<i64>), i64>;
+
 impl E3pEnv {
     fn new() -> Self {
         E3pEnv { regs: HashMap::new(), steps: 0, depth: 0 }
@@ -543,7 +551,11 @@ fn e3p_is_pure(ip: &IrProgram, name: &str, visiting: &mut HashSet<String>) -> bo
 }
 
 /// 解释执行一个纯整数函数 `name(args)`，返回常量结果；失败 / 超时返回 None。
-fn e3p_eval_call(ip: &IrProgram, name: &str, args: &[i64], env: &mut E3pEnv) -> Option<i64> {
+fn e3p_eval_call(ip: &IrProgram, name: &str, args: &[i64], env: &mut E3pEnv, memo: &mut E3pMemo) -> Option<i64> {
+    // M7-e3aw：命中缓存直接返回——纯函数结果只由 (name, args) 决定，且不消耗
+    // 步数预算（该结果上一次已在预算内算出，复用它不引入新的工作量）。
+    let key = (name.to_string(), args.to_vec());
+    if let Some(&cached) = memo.get(&key) { return Some(cached); }
     if !env.tick() { return None; }
     env.depth += 1;
     if env.depth > E3P_MAX_DEPTH { env.depth -= 1; return None; }
@@ -621,7 +633,7 @@ fn e3p_eval_call(ip: &IrProgram, name: &str, args: &[i64], env: &mut E3pEnv) -> 
                         steps: env.steps,
                         depth: env.depth,
                     };
-                    let r = e3p_eval_call(ip, func, &cv, &mut child)?;
+                    let r = e3p_eval_call(ip, func, &cv, &mut child, memo)?;
                     env.steps = child.steps;
                     if let Some(d) = dst { env.regs.insert(*d, r); }
                 }
@@ -642,6 +654,8 @@ fn e3p_eval_call(ip: &IrProgram, name: &str, args: &[i64], env: &mut E3pEnv) -> 
         }
     };
     env.depth -= 1;
+    // M7-e3aw：只缓存成功求值；失败/放弃路径（除零、超预算、非白名单）不写入。
+    memo.insert(key, result);
     Some(result)
 }
 
@@ -683,7 +697,8 @@ pub fn fold_pure_calls(ip: &mut IrProgram) -> usize {
                     }
                     if !ok { continue; }
                     let mut env = E3pEnv::new();
-                    if let Some(r) = e3p_eval_call(ip, func, &cv, &mut env) {
+                    let mut memo = E3pMemo::new();
+                    if let Some(r) = e3p_eval_call(ip, func, &cv, &mut env, &mut memo) {
                         edits.push((f.name.clone(), bi, ii, *d, r));
                     }
                 }

@@ -40,6 +40,7 @@
 <li><a href="#2-执行路线图按护栏兼容性与-roi-排序">2. 执行路线图（按护栏兼容性与 ROI 排序）</a><ul>
 <li><a href="#阶段一护栏内的确定性工作低风险">阶段一：护栏内的确定性工作（低风险）</a></li>
 <li><a href="#阶段二c-类性能方向先诊断后投入">阶段二：C 类性能方向（先诊断后投入）</a></li>
+<li><a href="#阶段二补充编译速度维度m7-e3aw">阶段二补充：编译速度维度（M7-e3aw）</a></li>
 <li><a href="#阶段三b-类语言特性需单独裁决默认不进-asm-批次">阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）</a></li>
 </ul>
 </li>
@@ -200,10 +201,31 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 </ol>
 <h3 id="阶段二c-类性能方向先诊断后投入">阶段二：C 类性能方向（先诊断后投入）</h3>
 <ol start="3">
-<li><strong>浮点寄存器分配收益诊断</strong> → 若 ROI 为正再实现。</li>
-<li><strong>跨函数寄存器分配收益诊断</strong> → 同上。</li>
+<li><strong>浮点寄存器分配收益诊断</strong> → 若 ROI 为正再实现。
+   ✅ <strong>已完成（M7-e3av）</strong>：诊断为正收益缺口（浮点全 spill，静态栈访问比 5.8×、
+   动态 asm/LLVM 3.0×），已实现 fGRA（浮点寄存器驻留），动态比降至 1.64×。
+   剩余边界（含 call 函数 / 单块函数）受 SysV xmm 全 caller-saved 结构性限制、
+   且 bench 无含 call 浮点函数（浮点栈访问合计 0），ROI 为负，不再投入。</li>
+<li><strong>跨函数寄存器分配收益诊断</strong> → 同上。
+   ⏸ <strong>实质已被覆盖</strong>：整数 caller-saved 由 M7-e3at 量化否决（上界比 0.629&lt;1）；
+   浮点跨 call 因 SysV xmm 全 caller-saved（无 callee-saved 兜底）结构上不可行，
+   比整数更差。无新 workload 触发则维持否决（见 e3at 重启条件）。</li>
 <li><strong>字符串类落后项归因</strong>：b20/b22 的 C runtime 开销是否有 asm 侧可优化空间
-   （如 substring 的边界检查、拼接的拷贝次数），先归因后动手。</li>
+   （如 substring 的边界检查、拼接的拷贝次数），先归因后动手。
+   ✅ <strong>已完成（M7-e3aw 附带）</strong>：字符串类已追平 LLVM（几何平均 1.0016x，优于
+   原记录的 1.02x；b20 0.949x / b21 0.984x / b22 1.107x）。唯一落后项 b22 的
+   反汇编确认瓶颈是 <code>dial_string_substring</code> 库调用（每次分配新字符串）+ <code>s % 1e9+7</code>
+   魔数除法（数据依赖、无法强度削减）；LLVM 靠 O3 把 28 个基准内联进 main 并用
+   循环管线优化——架构级差距，peephole 不可达（与 e3r/e3s/e3t 结论一致），
+   无 asm 侧可落地空间，不改动产品代码。</li>
+</ol>
+<h3 id="阶段二补充编译速度维度m7-e3aw">阶段二补充：编译速度维度（M7-e3aw）</h3>
+<ol start="6">
+<li>✅ <strong>前端常量折叠解释器记忆化</strong>：插桩归因发现 e3p 的 <code>fold_pure_calls</code> 占 asm
+   前端近半（34.5ms），根因是朴素递归解释器对 <code>fibR(23)</code> 等纯递归函数重复求解
+   97 万步。加 <code>(name, args)→result</code> 记忆化后编译提速 ~30%（bench 112.9→76.1ms），
+   折叠值与生成 <code>.s</code> 逐字节不变。这是「代替 LLVM」在编译速度维度上首个前端
+   算法级改进（e3an3 是产物/链接层）。</li>
 </ol>
 <h3 id="阶段三b-类语言特性需单独裁决默认不进-asm-批次">阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）</h3>
 <ol start="6">
