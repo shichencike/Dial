@@ -5,6 +5,64 @@
 
 use crate::ir::IrType;
 
+/// x86-64 微架构级别（--target-cpu，仅作用于 asm 后端；对齐 LLVM 的
+/// `x86-64`/`x86-64-v2`/`x86-64-v3`/`x86-64-v4` 命名与 host_cpu() 语义）。
+///
+/// 默认 Baseline：只用所有 x86-64 CPU 都保证支持的指令（SSE2），生成的 `.s`
+/// 与引入本枚举之前逐字节一致（零回归护栏）。显式指定更高级别才启用对应
+/// ISA 的 targeted 指令融合（BMI/LZCNT/AVX2/FMA…），每类融合由独立批次实现
+/// 并受这些 `has_*` 门控；本批只建立开关基础设施，不发射任何新指令。
+///
+/// AArch64 忽略本设置（NEON 为标配，无等效分级），零变化。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub enum TargetCpu {
+    /// x86-64 基线（SSE2），默认。
+    #[default]
+    Baseline,
+    /// x86-64-v2：+ SSE4.2 / POPCNT / LZCNT / BMI1 / ABM。
+    V2,
+    /// x86-64-v3：+ AVX2 / BMI2 / FMA / LZCNT（含 v2 全部）。
+    V3,
+    /// x86-64-v4：+ AVX-512F（含 v3 全部）。
+    V4,
+}
+
+impl TargetCpu {
+    /// 解析命令行值；别名 `native` 映射最高级（与 LLVM host_cpu() 一致的
+    /// 常识性约定，实际仍由用户保证目标机支持）。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "baseline" | "x86-64" | "x86_64" => Some(Self::Baseline),
+            "x86-64-v2" | "v2" => Some(Self::V2),
+            "x86-64-v3" | "v3" => Some(Self::V3),
+            "x86-64-v4" | "v4" | "native" => Some(Self::V4),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "x86-64",
+            Self::V2 => "x86-64-v2",
+            Self::V3 => "x86-64-v3",
+            Self::V4 => "x86-64-v4",
+        }
+    }
+
+    /// 是否启用 POPCNT / LZCNT（v2+）。注：现有 popcnt 融合（e3y）在 baseline
+    /// 下也已启用——因为 /proc/cpuinfo 实测目标机支持，且那是有 CPU 特性兜底的
+    /// 既有行为；本开关只约束**新增**高级指令融合，不改变 e3y 既有路径。
+    pub fn has_lzcnt(self) -> bool { self >= Self::V2 }
+    /// BMI1（andn / bextr / blsi 等）v2+。
+    pub fn has_bmi1(self) -> bool { self >= Self::V2 }
+    /// BMI2（shlx / shrx / sarx / pdep / pext / mulx）v3+。
+    pub fn has_bmi2(self) -> bool { self >= Self::V3 }
+    /// AVX2（含 FMA）v3+。
+    pub fn has_avx2(self) -> bool { self >= Self::V3 }
+    /// FMA3 v3+。
+    pub fn has_fma(self) -> bool { self >= Self::V3 }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EmitTarget {
     /// x86-64 System V AMD64 ABI（首版严格验证目标）。

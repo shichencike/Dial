@@ -14,7 +14,7 @@
 
 use crate::codegen::SafetyMode;
 use crate::ir::*;
-use crate::target::EmitTarget;
+use crate::target::{EmitTarget, TargetCpu};
 use std::collections::{HashMap, HashSet};
 
 /// 参数落在哪个 C ABI 位置。
@@ -220,7 +220,11 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
     o
 }
 
-pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str, fn_origin: &std::collections::HashMap<String, String>, opt_level: OptLevel, safety: SafetyMode) -> Result<String, String> {
+pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str, fn_origin: &std::collections::HashMap<String, String>, opt_level: OptLevel, safety: SafetyMode, target_cpu: TargetCpu) -> Result<String, String> {
+    // M7-e3ay：--target-cpu 仅控制新增高级 ISA 融合的开关；baseline 下不发射任何
+    // 新指令，产物与引入本参数前逐字节一致。当前批次只建立开关基础设施，后续
+    // 各 targeted 融合（LZCNT/BMI/AVX2/FMA…）各自读取 target_cpu 的 has_* 门控。
+    let _ = target_cpu;
     // M7-e3as 预检：内联汇编的 AT&T/Intel 方言是 x86 专属，模板原样交付只在
     // x86-64 有意义。AArch64 收到含 InlineAsm 的程序 Fail-Fast，明确报错而非
     // 静默降级（普通程序不含 InlineAsm，AArch64 既有行为零变化）。

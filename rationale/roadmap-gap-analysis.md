@@ -123,6 +123,21 @@ SIMD 完整后端（−6.7%）、caller-saved GRA（ROI 为负）、函数名重
    指示搁置（修复须改冻结的 codegen.rs，违反护栏）；ASM 标量 int/float/bool print
    均正确、比 LLVM 更准。默认不进 asm 批次。
 
+### 阶段二补充：高级指令集主线（用户 2026-11-18 决策启动）
+
+用户确认多维度补齐后启动"超越 LLVM"的高级指令集主线，决策：
+- **兼容策略**：编译期 `--target-cpu`（baseline/v2/v3/v4），默认 baseline 零回归，避免 SIGILL。
+- **推进顺序**：由简到难——标量 ISA 扩展 → SIMD → 浮点 FMA → 加密/专用指令（最后，锦上添花）。
+
+8. ✅ **e3ay `--target-cpu` 开关基础设施**：只建开关、不发射新指令。默认 baseline
+   与旧版 `.s` 逐字节一致（18 源码），四级别编译运行正确，非法值 Fail-Fast。
+9. ⏳ **标量 ISA 扩展（下一批）**：LZCNT/TZCNT/BMI1/CMOV targeted 融合。**每类先量化
+   bench 中是否存在对应惯用法与正 ROI**，只对有收益的动手；受 `--target-cpu` 门控。
+10. ⏳ **SIMD targeted 惯用法**：⚠️ 绝不重造 e3x 已证伪的完整自动向量化（−6.7%、
+    b15 慢 18×）；只做 targeted 惯用法 + ROI 量化，先诊断再决定。
+11. ⏳ **浮点 FMA 融合**：衔接 e3av 浮点驻留，需处理浮点语义/精度对齐。
+12. ⏳ **加密/专用指令**（AES-NI/SHA/CRC32）：最后做，难度最大收益较小。
+
 ### 阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）
 
 6. `select` 超时 / impl 关联函数 / map string 值 —— 若要做，作为**独立语言版本主题**，

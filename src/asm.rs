@@ -53,6 +53,7 @@ pub fn compile_asm(
     fn_origin: &std::collections::HashMap<String, String>,
     opt_level: OptLevel,
     safety: SafetyMode,
+    target_cpu: crate::target::TargetCpu,
 ) -> Result<(), String> {
     let target = detect_target()?;
     // M7-e3w：gdb 源码断点用绝对路径（与 LLVM 后端 DW_AT_name 一致）。
@@ -81,7 +82,7 @@ pub fn compile_asm(
     if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV) {
         pass::instcombine(&mut ip);
     }
-    let asm_text = codegen_asm::emit(&ip, target, debug_info, &src_abs, fn_origin, opt_level, safety)?;
+    let asm_text = codegen_asm::emit(&ip, target, debug_info, &src_abs, fn_origin, opt_level, safety, target_cpu)?;
 
     let s_path = obj_path.with_extension("s");
     fs::write(&s_path, asm_text)

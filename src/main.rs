@@ -226,6 +226,9 @@ fn main() {
     let mut opt_level = ir::OptLevel::O2;
     // 是否显式设置过优化级别（用于 --fast-compile 冲突检测：显式 -O1..3 拒绝，默认 O2 不冲突）。
     let mut opt_level_explicit: Option<u8> = None;
+    // --target-cpu：asm 后端高级指令集总开关（baseline/v2/v3/v4），默认 baseline 零回归。
+    // 仅作用于 asm 后端；LLVM 路径仍由 host_cpu() / --fast 自行决定微架构级别。
+    let mut target_cpu = crate::target::TargetCpu::Baseline;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -347,6 +350,35 @@ fn main() {
             "-g" | "--debug-info" => {
                 debug_info = true;
                 i += 1;
+            }
+            // --target-cpu：asm 后端高级指令集总开关（baseline/x86-64-v2/v3/v4）。
+            // Fail-Fast：非法值当场报错，绝不静默降级到 baseline（否则用户以为启用了
+            // AVX2 实际没有，是危险的静默行为）。
+            "--target-cpu" => {
+                if i + 1 < args.len() {
+                    match crate::target::TargetCpu::parse(&args[i + 1]) {
+                        Some(tc) => { target_cpu = tc; i += 2; }
+                        None => {
+                            eprintln!("❌ --target-cpu 取值非法：'{}'", args[i + 1]);
+                            eprintln!("   可用：baseline | x86-64-v2 | x86-64-v3 | x86-64-v4 | native");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("选项 --target-cpu 缺少值（baseline | x86-64-v2 | x86-64-v3 | x86-64-v4）");
+                    std::process::exit(1);
+                }
+            }
+            s if s.starts_with("--target-cpu=") => {
+                let raw = &s["--target-cpu=".len()..];
+                match crate::target::TargetCpu::parse(raw) {
+                    Some(tc) => { target_cpu = tc; i += 1; }
+                    None => {
+                        eprintln!("❌ --target-cpu 取值非法：'{}'", raw);
+                        eprintln!("   可用：baseline | x86-64-v2 | x86-64-v3 | x86-64-v4 | native");
+                        std::process::exit(1);
+                    }
+                }
             }
             "-o" => {
                 if i + 1 < args.len() {
@@ -479,6 +511,8 @@ fn main() {
         if safety == SafetyMode::ReleaseFast {
             eprintln!("ℹ️  --backend=asm 下 --fast 仅作用于 C 运行时的优化等级；LLVM O3/LTO 不适用。");
         }
+        eprintln!("ℹ️  --target-cpu={}（baseline=仅通用指令；v2/v3/v4 逐级启用高级 ISA 融合）。",
+                 target_cpu.as_str());
     }
 
     // 1~3) 词法 / 语法 / 语义（含本地源码模块合并、包解析、FFI 声明校验）
@@ -539,6 +573,7 @@ fn main() {
             &fe.fn_origin,
             opt_level,
             safety,
+            target_cpu,
         ) {
             eprintln!("{}", e);
             std::process::exit(1);
@@ -1623,6 +1658,8 @@ fn print_usage() {
     eprintln!("                      专属 IR + 优化 Pass → x86-64/AArch64 汇编 → cc -c → .o（实验性）");
     eprintln!("  -O0|-O1|-O2|-O3             优化级别（仅 asm 后端；等价 -O N / --opt-level=N）：");
     eprintln!("                      0=无 Dial 优化、1=基础 IR Pass、2=默认(全开)、3=+LLVM 风格代数恒等式");
+    eprintln!("  --target-cpu <级别>          asm 后端高级指令集开关（默认 baseline=仅通用指令，零回归）：");
+    eprintln!("                      baseline | x86-64-v2 | x86-64-v3 | x86-64-v4 | native（须目标 CPU 真实支持）");
     eprintln!("  run   <文件.dial> [同上]");
     eprintln!("  -g / --debug-info          生成标准 DWARF（GDB/LLDB 源码行断点 + print 变量名）");
     eprintln!("  --tiny                     体积模式：-Os + 函数/数据分段 + --gc-sections + strip（与 --fast/--pgo/-g 冲突）");

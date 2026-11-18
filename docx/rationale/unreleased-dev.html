@@ -43,6 +43,7 @@
 <li><a href="#m7-e3av浮点寄存器驻留fgra无-call-纯计算函数浮点值独占-xmm-池">M7-e3av：浮点寄存器驻留（fGRA，无 call 纯计算函数浮点值独占 xmm 池）</a></li>
 <li><a href="#m7-e3aw编译期常量折叠解释器记忆化asm-后端编译提速-30零语义产物变化">M7-e3aw：编译期常量折叠解释器记忆化（asm 后端编译提速 ~30%，零语义/产物变化）</a></li>
 <li><a href="#m7-e3ax修复-dwarf-函数形参-location-偏移错误gdb-可正确-print-参数">M7-e3ax：修复 DWARF 函数形参 location 偏移错误（gdb 可正确 print 参数）</a></li>
+<li><a href="#m7-e3ay--target-cpu-高级指令集总开关基础设施批默认-baseline-零回归">M7-e3ay：--target-cpu 高级指令集总开关（基础设施批，默认 baseline 零回归）</a></li>
 </ul>
 </li>
 </ul>
@@ -3406,7 +3407,20 @@ imulq   %r10, %r15     # s * 31
 <p><strong>e3ax 后续实证：DWARF 复合类型呈现 —— 两端共同缺口，依用户指示搁置（不改产品代码）</strong>：e3ax 修复形参后，继续对 <code>types.dial</code>（int/float/bool/string/struct/int[] 全类型局部变量）做两后端 <code>-g -O0</code> gdb <code>info locals</code> 对比，确认范围边界：
 - <strong>标量透明</strong>：ASM <code>i=42</code>/<code>f=3.5</code>/<code>b=true</code> 全部正确；LLVM <code>i=42</code>/<code>f=3.5</code> 正确但 <code>b=false</code>（实参 true，LLVM 自身 bool DWARF 呈现错误）——ASM 在标量 bool 上反而更准。
 - <strong>复合类型是两端共同限制</strong>：<code>s</code>(string) 两端都显示 <code>0x… "\005"</code>（运行时 COW 句柄被按 char<em> 呈现）、<code>p</code>(Point struct) 两端都显示 <code>0x7 &lt;error&gt;</code>（句柄首字被当指针）、<code>arr</code> 两端都显示裸指针。根因是 Dial 的 string/struct/array 是运行时引用计数/COW 句柄而非 C 内存布局，DWARF 无对应的结构描述——这是</em><em>语言层 DWARF 类型映射的共性缺口</em><em>，LLVM 后端（冻结）同样存在。
-- </em><em>决策</em><em>：按用户「两端都缺的话暂时不用管」的明确指示，此项不属 asm 落后 LLVM，且修复须改 <code>src/codegen.rs</code> 的 LLVM 类型映射（违反护栏）。</em><em>不新增产品代码</em>*，仅在此留痕。DWARF 维度在护栏内的可补缺陷已由 e3ax（形参 location）清零；剩余复合类型 print 属独立语言版本主题（需双后端同步 + 放宽护栏），默认不进 asm 批次。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+- </em><em>决策</em><em>：按用户「两端都缺的话暂时不用管」的明确指示，此项不属 asm 落后 LLVM，且修复须改 <code>src/codegen.rs</code> 的 LLVM 类型映射（违反护栏）。</em><em>不新增产品代码</em>*，仅在此留痕。DWARF 维度在护栏内的可补缺陷已由 e3ax（形参 location）清零；剩余复合类型 print 属独立语言版本主题（需双后端同步 + 放宽护栏），默认不进 asm 批次。</p>
+<h4 id="m7-e3ay--target-cpu-高级指令集总开关基础设施批默认-baseline-零回归">M7-e3ay：<code>--target-cpu</code> 高级指令集总开关（基础设施批，默认 baseline 零回归）</h4>
+<p><strong>背景与用户决策</strong>：多维度核查确认语义/DWARF/fail-fast/产物形态/编译速度均已补齐，唯一实质缺口是高级指令集（LLVM 侧有 <code>simd&lt;T,N&gt;</code> + host_cpu 微架构分级，asm 侧无 CPU 特性检测、只有 popcnt/移位/常量乘融合）。用户明确决策：① 兼容策略用<strong>编译期 <code>--target-cpu</code> 参数</strong>（默认 baseline，显式指定才启用，与 LLVM host_cpu 语义对齐，避免生成高级指令导致目标 CPU 不支持时 SIGILL）；② 推进顺序<strong>由简到难</strong>：标量 ISA 扩展 → SIMD 向量化 → 浮点 FMA → 加密/专用指令（最后，难度最大收益较小、锦上添花）。</p>
+<p><strong>重启 SIMD 的前置认知（不重蹈 e3x 覆辙）</strong>：e3x 当初定量否决的是<strong>完整自动向量化后端</strong>——几何平均 0.9330（−6.7%），根因是这套 Dial workload 以 i64 + <code>% 1000000007</code> 大质数取模 + 串行依赖链为主，SIMD 无高效 64 位取模、lane 间依赖难展开，且控制流密集项灾难性负收益（b15 冒泡排序 0.054x 慢 18×）。收益只集中在 4 个紧密数值循环（b23 位计数 +52.6% 等），而这些已由 e3y 用 targeted POPCNT 指令拿到。<strong>故后续 SIMD 批次绝不重造完整自动向量化</strong>，只做 targeted 惯用法 + <code>--target-cpu</code> 门控，且每批先量化 ROI。</p>
+<p><strong>本批实现（仅开关基础设施，不发射新指令）</strong>：
+- <code>src/target.rs</code> 新增 <code>TargetCpu { Baseline, V2, V3, V4 }</code>（<code>#[derive(PartialOrd, Ord)]</code> 支持逐级 <code>&gt;=</code> 判定；<code>Default=Baseline</code>）。<code>parse</code> 接受 baseline/x86-64(=baseline)/x86-64-v2/v3/v4/native(=v4) 及 v2/v3/v4 简写；<code>as_str</code> 返回规范名；特性查询 <code>has_lzcnt</code>/<code>has_bmi1</code>(v2+)、<code>has_bmi2</code>/<code>has_avx2</code>/<code>has_fma</code>(v3+)。
+- <code>src/main.rs</code> 全链路：变量声明、<code>--target-cpu X</code> 与 <code>--target-cpu=X</code> 两种写法、非法值 Fail-Fast（打印可用值 + rc≠0，绝不静默降级——否则用户以为启用 AVX2 实际没有是危险行为）、asm 分支提示当前级别、<code>compile_asm</code> 传参、help 文本。仅作用于 asm 后端。
+- <code>src/asm.rs::compile_asm</code>、<code>src/codegen_asm.rs::emit</code> 各加一个 <code>target_cpu</code> 参数；emit 内 <code>let _ = target_cpu;</code> 占位，后续 targeted 融合批次各自读 <code>has_*</code> 门控。</p>
+<p><strong>验证（默认零回归 + 开关可用）</strong>：
+- 默认（无 <code>--target-cpu</code>）= Baseline：bench + 17 golden 共 18 个源码 <code>.s</code> 与改动前基线二进制（独立 CARGO_TARGET_DIR 构建）<strong>逐字节一致</strong>（差异 0）——开关基础设施不改变任何现有产物。
+- baseline/v2/v3/v4 四级别编译 core2.dial 均 rc=0、输出一致（<code>add(3,4) = 7</code>）。
+- 非法值 <code>--target-cpu=avx512-foo</code> 当场报错、rc≠0。
+- 门禁：run_tests.sh（含差分 fuzz 180 次零不一致）、cargo test、构建零警告全绿。</p>
+<p><strong>范围与护栏</strong>：改动只在 <code>src/target.rs</code>/<code>src/main.rs</code>/<code>src/asm.rs</code>/<code>src/codegen_asm.rs</code> 的参数传递链；不发射任何新指令；AArch64 忽略设置零变化；<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

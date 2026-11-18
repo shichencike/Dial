@@ -3246,3 +3246,22 @@ imulq   %r10, %r15     # s * 31
 - **标量透明**：ASM `i=42`/`f=3.5`/`b=true` 全部正确；LLVM `i=42`/`f=3.5` 正确但 `b=false`（实参 true，LLVM 自身 bool DWARF 呈现错误）——ASM 在标量 bool 上反而更准。
 - **复合类型是两端共同限制**：`s`(string) 两端都显示 `0x… "\005"`（运行时 COW 句柄被按 char* 呈现）、`p`(Point struct) 两端都显示 `0x7 <error>`（句柄首字被当指针）、`arr` 两端都显示裸指针。根因是 Dial 的 string/struct/array 是运行时引用计数/COW 句柄而非 C 内存布局，DWARF 无对应的结构描述——这是**语言层 DWARF 类型映射的共性缺口**，LLVM 后端（冻结）同样存在。
 - **决策**：按用户「两端都缺的话暂时不用管」的明确指示，此项不属 asm 落后 LLVM，且修复须改 `src/codegen.rs` 的 LLVM 类型映射（违反护栏）。**不新增产品代码**，仅在此留痕。DWARF 维度在护栏内的可补缺陷已由 e3ax（形参 location）清零；剩余复合类型 print 属独立语言版本主题（需双后端同步 + 放宽护栏），默认不进 asm 批次。
+
+#### M7-e3ay：`--target-cpu` 高级指令集总开关（基础设施批，默认 baseline 零回归）
+
+**背景与用户决策**：多维度核查确认语义/DWARF/fail-fast/产物形态/编译速度均已补齐，唯一实质缺口是高级指令集（LLVM 侧有 `simd<T,N>` + host_cpu 微架构分级，asm 侧无 CPU 特性检测、只有 popcnt/移位/常量乘融合）。用户明确决策：① 兼容策略用**编译期 `--target-cpu` 参数**（默认 baseline，显式指定才启用，与 LLVM host_cpu 语义对齐，避免生成高级指令导致目标 CPU 不支持时 SIGILL）；② 推进顺序**由简到难**：标量 ISA 扩展 → SIMD 向量化 → 浮点 FMA → 加密/专用指令（最后，难度最大收益较小、锦上添花）。
+
+**重启 SIMD 的前置认知（不重蹈 e3x 覆辙）**：e3x 当初定量否决的是**完整自动向量化后端**——几何平均 0.9330（−6.7%），根因是这套 Dial workload 以 i64 + `% 1000000007` 大质数取模 + 串行依赖链为主，SIMD 无高效 64 位取模、lane 间依赖难展开，且控制流密集项灾难性负收益（b15 冒泡排序 0.054x 慢 18×）。收益只集中在 4 个紧密数值循环（b23 位计数 +52.6% 等），而这些已由 e3y 用 targeted POPCNT 指令拿到。**故后续 SIMD 批次绝不重造完整自动向量化**，只做 targeted 惯用法 + `--target-cpu` 门控，且每批先量化 ROI。
+
+**本批实现（仅开关基础设施，不发射新指令）**：
+- `src/target.rs` 新增 `TargetCpu { Baseline, V2, V3, V4 }`（`#[derive(PartialOrd, Ord)]` 支持逐级 `>=` 判定；`Default=Baseline`）。`parse` 接受 baseline/x86-64(=baseline)/x86-64-v2/v3/v4/native(=v4) 及 v2/v3/v4 简写；`as_str` 返回规范名；特性查询 `has_lzcnt`/`has_bmi1`(v2+)、`has_bmi2`/`has_avx2`/`has_fma`(v3+)。
+- `src/main.rs` 全链路：变量声明、`--target-cpu X` 与 `--target-cpu=X` 两种写法、非法值 Fail-Fast（打印可用值 + rc≠0，绝不静默降级——否则用户以为启用 AVX2 实际没有是危险行为）、asm 分支提示当前级别、`compile_asm` 传参、help 文本。仅作用于 asm 后端。
+- `src/asm.rs::compile_asm`、`src/codegen_asm.rs::emit` 各加一个 `target_cpu` 参数；emit 内 `let _ = target_cpu;` 占位，后续 targeted 融合批次各自读 `has_*` 门控。
+
+**验证（默认零回归 + 开关可用）**：
+- 默认（无 `--target-cpu`）= Baseline：bench + 17 golden 共 18 个源码 `.s` 与改动前基线二进制（独立 CARGO_TARGET_DIR 构建）**逐字节一致**（差异 0）——开关基础设施不改变任何现有产物。
+- baseline/v2/v3/v4 四级别编译 core2.dial 均 rc=0、输出一致（`add(3,4) = 7`）。
+- 非法值 `--target-cpu=avx512-foo` 当场报错、rc≠0。
+- 门禁：run_tests.sh（含差分 fuzz 180 次零不一致）、cargo test、构建零警告全绿。
+
+**范围与护栏**：改动只在 `src/target.rs`/`src/main.rs`/`src/asm.rs`/`src/codegen_asm.rs` 的参数传递链；不发射任何新指令；AArch64 忽略设置零变化；`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。

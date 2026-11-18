@@ -42,6 +42,7 @@
 <li><a href="#阶段二c-类性能方向先诊断后投入">阶段二：C 类性能方向（先诊断后投入）</a></li>
 <li><a href="#阶段二补充编译速度维度m7-e3aw">阶段二补充：编译速度维度（M7-e3aw）</a></li>
 <li><a href="#阶段二补充dwarf-调试信息维度m7-e3ax">阶段二补充：DWARF 调试信息维度（M7-e3ax）</a></li>
+<li><a href="#阶段二补充高级指令集主线用户-2026-11-18-决策启动">阶段二补充：高级指令集主线（用户 2026-11-18 决策启动）</a></li>
 <li><a href="#阶段三b-类语言特性需单独裁决默认不进-asm-批次">阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）</a></li>
 </ul>
 </li>
@@ -244,6 +245,20 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
    呈现还有错——属<strong>两端共同的语言层 DWARF 映射缺口</strong>，按用户「两端都缺暂时不用管」
    指示搁置（修复须改冻结的 codegen.rs，违反护栏）；ASM 标量 int/float/bool print
    均正确、比 LLVM 更准。默认不进 asm 批次。</li>
+</ol>
+<h3 id="阶段二补充高级指令集主线用户-2026-11-18-决策启动">阶段二补充：高级指令集主线（用户 2026-11-18 决策启动）</h3>
+<p>用户确认多维度补齐后启动"超越 LLVM"的高级指令集主线，决策：
+- <strong>兼容策略</strong>：编译期 <code>--target-cpu</code>（baseline/v2/v3/v4），默认 baseline 零回归，避免 SIGILL。
+- <strong>推进顺序</strong>：由简到难——标量 ISA 扩展 → SIMD → 浮点 FMA → 加密/专用指令（最后，锦上添花）。</p>
+<ol start="8">
+<li>✅ <strong>e3ay <code>--target-cpu</code> 开关基础设施</strong>：只建开关、不发射新指令。默认 baseline
+   与旧版 <code>.s</code> 逐字节一致（18 源码），四级别编译运行正确，非法值 Fail-Fast。</li>
+<li>⏳ <strong>标量 ISA 扩展（下一批）</strong>：LZCNT/TZCNT/BMI1/CMOV targeted 融合。<strong>每类先量化
+   bench 中是否存在对应惯用法与正 ROI</strong>，只对有收益的动手；受 <code>--target-cpu</code> 门控。</li>
+<li>⏳ <strong>SIMD targeted 惯用法</strong>：⚠️ 绝不重造 e3x 已证伪的完整自动向量化（−6.7%、
+    b15 慢 18×）；只做 targeted 惯用法 + ROI 量化，先诊断再决定。</li>
+<li>⏳ <strong>浮点 FMA 融合</strong>：衔接 e3av 浮点驻留，需处理浮点语义/精度对齐。</li>
+<li>⏳ <strong>加密/专用指令</strong>（AES-NI/SHA/CRC32）：最后做，难度最大收益较小。</li>
 </ol>
 <h3 id="阶段三b-类语言特性需单独裁决默认不进-asm-批次">阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）</h3>
 <ol start="6">
