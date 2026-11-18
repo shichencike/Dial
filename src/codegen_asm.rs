@@ -376,6 +376,11 @@ const RES_PER_BLOCK: usize = 8;
 /// r8/r9/rsi/rdi（caller-saved，会被 call 破坏）与 rax/rcx/rdx/r10/r11
 /// （发射器临时 / div / 移位隐式操作数）。
 const CALLEE_SAVED_POOL: [&str; 6] = ["rbx", "r12", "r13", "r14", "r15", "rbp"];
+/// M7-e3av：无 call 的纯计算函数里供浮点值独占的 xmm 驻留池。
+/// xmm0 = 返回值、xmm1-7 = ABI 浮点传参、xmm8/xmm9 = f1/f2 固定 scratch——
+/// 全部排除，故只剩 xmm10-15。SysV 下它们虽是 caller-saved，但在「全函数
+/// 无 call」前提下无被调方踩踏，故无需 prologue/epilogue 保存（绝不进 used_phys）。
+const FP_RES_POOL: [&str; 13] = ["xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
 
 fn is_callee_saved(p: &str) -> bool {
     matches!(p, "rbx" | "rbp" | "r12" | "r13" | "r14" | "r15")
@@ -397,6 +402,13 @@ struct BlockPlan {
     /// 需要在块尾写回栈槽的普通 vreg（跨块仍被读取的那些）。
     /// 提升槽不在此列——它们无条件回写，因为别的块/含 call 块走内存路径。
     keep_flush: HashSet<VReg>,
+    /// M7-e3av：浮点 vreg → 物理 xmm 裸名（与整数 resident 完全独立）。
+    fp_resident: HashMap<VReg, &'static str>,
+    /// M7-e3av：块入口需 movsd/movss 装载的 (浮点 vreg, 物理 xmm)，按 vreg 升序。
+    /// 与整数 loads 分开——begin_block 对整数 loads 发 movq，浮点必须发 movsd/movss。
+    fp_loads: Vec<(VReg, &'static str)>,
+    /// M7-e3av：浮点块尾回写集合。第一版（unified 模式）恒空，为逐块模式预留。
+    fp_keep_flush: HashSet<VReg>,
 }
 
 struct FnEmit<'a> {
@@ -415,6 +427,10 @@ struct FnEmit<'a> {
     resident: HashMap<VReg, &'static str>,
     dirty: HashSet<VReg>,
     residency_on: bool,
+    /// M7-e3av：浮点驻留映射 / 回写掩码。与整数 resident 共用 residency_on 开关，
+    /// 但映射表完全独立——phys/val_phys 只查整数表，fp_phys/val_fp_phys 只查此表。
+    fp_resident: HashMap<VReg, &'static str>,
+    fp_flush_mask: HashSet<VReg>,
     /// 每个基本块的驻留方案，与 f.blocks 一一对应。
     plans: Vec<BlockPlan>,
     /// 本函数实际用到的 callee-saved 寄存器（prologue 保存 / epilogue 恢复）。
@@ -504,6 +520,7 @@ impl<'a> FnEmit<'a> {
             reg_off: Vec::new(), alloca_off: HashMap::new(), frame_size: 0,
             prefix, out: String::new(),
             resident: HashMap::new(), dirty: HashSet::new(), residency_on: false,
+            fp_resident: HashMap::new(), fp_flush_mask: HashSet::new(),
             plans: Vec::new(), used_phys: Vec::new(), save_off: 0,
             promotable: HashSet::new(), flush_mask: HashSet::new(),
             dead_defs: HashSet::new(), fusable: HashMap::new(),
@@ -646,8 +663,17 @@ impl<'a> FnEmit<'a> {
                 }
             }
             Value::Reg(r) => {
-                let off = self.slot(r);
                 let f32 = self.rty(r) == IrType::F32;
+                // M7-e3av：驻留浮点值直接从物理 xmm 读，不再走栈槽。
+                // 仅 x86-64；非 x86 的 val_fp_phys 恒 None，原路径不变。
+                if let Some(p) = self.val_fp_phys(r) {
+                    if p != reg {
+                        let m = if f32 { "movss" } else { "movsd" };
+                        self.line(&format!("\t{} {}, {}", m, self.r(p), self.r(reg)));
+                    }
+                    return;
+                }
+                let off = self.slot(r);
                 match self.target {
                     EmitTarget::X86_64SysV => {
                         let m = if f32 { "movss" } else { "movsd" };
@@ -684,6 +710,33 @@ impl<'a> FnEmit<'a> {
     }
 
     fn sf(&mut self, dst: VReg, reg: &str) {
+        let f32 = self.rty(dst) == IrType::F32;
+        // M7-e3av：驻留浮点 dst 写回物理 xmm + 标脏，块尾必要时才落栈。
+        // 仅 x86-64；非 x86 的 val_fp_phys 恒 None，原路径不变。
+        if let Some(p) = self.val_fp_phys(dst) {
+            if p != reg {
+                let m = if f32 { "movss" } else { "movsd" };
+                self.line(&format!("\t{} {}, {}", m, self.r(reg), self.r(p)));
+            }
+            self.dirty.insert(dst);
+            return;
+        }
+        let off = self.slot(dst);
+        match self.target {
+            EmitTarget::X86_64SysV => {
+                let m = if f32 { "movss" } else { "movsd" };
+                self.line(&format!("\t{} {}, {}({})", m, self.r(reg), off, self.r("rsp")));
+            }
+            EmitTarget::AArch64 => {
+                let rr = if f32 { self.fs(reg) } else { reg.to_string() };
+                self.line(&format!("\tstr {}, [sp, #{}]", rr, off));
+            }
+        }
+    }
+
+    /// M7-e3av：强制写浮点 vreg 的栈槽（绕过驻留映射）。 phi 实参必须落目标块
+    /// param 的栈槽，否则后继块入口 reload 读到旧值——与整数 sg_force_stack 对称。
+    fn sf_force_stack(&mut self, dst: VReg, reg: &str) {
         let off = self.slot(dst);
         let f32 = self.rty(dst) == IrType::F32;
         match self.target {
@@ -713,7 +766,8 @@ impl<'a> FnEmit<'a> {
         if self.rty(dst).is_float() {
             let f = self.f1().to_string();
             self.lf(v, &f);
-            self.sf(dst, &f);
+            // M7-e3av：phi 实参必须强制落栈，不能被 sf 的驻留快路径劫持。
+            self.sf_force_stack(dst, &f);
         } else {
             let g = self.g1().to_string();
             self.lg(v, &g);
@@ -744,7 +798,9 @@ impl<'a> FnEmit<'a> {
                 }
                 Value::Reg(r) => {
                     // 驻留 vreg 的栈槽可能已过期，必须读物理寄存器而不是内存。
-                    if let Some(p) = self.val_phys(r) { return self.r(p); }
+                    // M7-e3av：浮点操作数查浮点驻留表（xmm），整数查整数表（GPR）。
+                    let p = if fp { self.val_fp_phys(r) } else { self.val_phys(r) };
+                    if let Some(p) = p { return self.r(p); }
                     // F32 槽只写了低 4 字节，整槽 8 字节读会带入垃圾高位，
                     // 保持 lf 的 movss 路径、不折叠。
                     if !fp || self.rty(r) == IrType::F64 {
@@ -879,6 +935,26 @@ impl<'a> FnEmit<'a> {
     /// 普通 vreg 的驻留资格：非浮点、且不是 Alloca 地址槽。
     fn residency_candidate(&self, v: VReg) -> bool {
         matches!(self.f.reg_ty.get(v as usize), Some(t) if !t.is_float())
+            && !self.alloca_off.contains_key(&v)
+    }
+
+    // ---- M7-e3av：浮点驻留查询（与整数 phys/val_phys 完全独立） ----
+
+    /// 浮点 vreg 是否驻留在物理 xmm。仅 x86-64；非 x86 恒 None（AArch64 零变化）。
+    fn fp_phys(&self, v: VReg) -> Option<&'static str> {
+        if matches!(self.target, EmitTarget::X86_64SysV) && self.residency_on {
+            self.fp_resident.get(&v).copied()
+        } else { None }
+    }
+
+    /// lf/sf/bin_src 用：同 val_phys，Alloca 的 dst 存地址、绝不当浮点值读。
+    fn val_fp_phys(&self, v: VReg) -> Option<&'static str> {
+        if self.alloca_off.contains_key(&v) { None } else { self.fp_phys(v) }
+    }
+
+    /// 浮点 vreg 的驻留资格：浮点、且不是 Alloca 地址槽（整数侧取反）。
+    fn fp_residency_candidate(&self, v: VReg) -> bool {
+        matches!(self.f.reg_ty.get(v as usize), Some(t) if t.is_float())
             && !self.alloca_off.contains_key(&v)
     }
 
@@ -1418,7 +1494,9 @@ impl<'a> FnEmit<'a> {
         };
 
         // 全局热度：提升槽加权 2、普通 vreg +1，均乘循环深度权重。
+        // M7-e3av：浮点 vreg 用独立的 fp_score 并行统计，共用同一深度权重与指令遍历。
         let mut score: HashMap<VReg, usize> = HashMap::new();
+        let mut fp_score: HashMap<VReg, usize> = HashMap::new();
         for (bi, b) in self.f.blocks.iter().enumerate() {
             let w = 1usize << (3 * depth_of(bi).min(2));
             for i in &b.insts {
@@ -1433,9 +1511,11 @@ impl<'a> FnEmit<'a> {
                 i.reg_uses(&mut uses);
                 for u in uses {
                     if self.residency_candidate(u) { *score.entry(u).or_insert(0) += w; }
+                    if self.fp_residency_candidate(u) { *fp_score.entry(u).or_insert(0) += w; }
                 }
                 if let Some(d) = i.def() {
                     if self.residency_candidate(d) { *score.entry(d).or_insert(0) += w; }
+                    if self.fp_residency_candidate(d) { *fp_score.entry(d).or_insert(0) += w; }
                 }
             }
         }
@@ -1446,6 +1526,12 @@ impl<'a> FnEmit<'a> {
         for p in bind.values() {
             if is_callee_saved(p) && !self.used_phys.contains(p) { self.used_phys.push(p); }
         }
+        // M7-e3av：浮点值绑定到独立的 xmm10-15 池。绝不进 used_phys——
+        // prologue/epilogue 对它一律发 movq 保存，xmm 进去会生成非法指令。
+        let mut fp_hot: Vec<VReg> = fp_score.keys().copied().collect();
+        fp_hot.sort_by(|x, y| fp_score[y].cmp(&fp_score[x]).then(x.cmp(y)));
+        let fp_bind: HashMap<VReg, &'static str> = fp_hot.into_iter().take(FP_RES_POOL.len())
+            .enumerate().map(|(k, v)| (v, FP_RES_POOL[k])).collect();
 
         // 入口块 = 没有任何前驱指向的块。它的参数提升槽由 prologue 写进
         // Alloca 区（内存），需要在入口一次性装载到 p。
@@ -1479,7 +1565,17 @@ impl<'a> FnEmit<'a> {
                 }
             }
             plan.loads.sort_by_key(|(v, _)| *v);
-            // keep_flush 留空：p 全程权威，不回写内存。
+            // M7-e3av：浮点驻留绑定 + phi 装载，与整数同构但用独立池/表。
+            plan.fp_resident = fp_bind.clone();
+            for (pv, _) in &b.params {
+                if let Some(p) = fp_bind.get(pv) {
+                    if !plan.fp_loads.iter().any(|(v, _)| *v == *pv) {
+                        plan.fp_loads.push((*pv, *p));
+                    }
+                }
+            }
+            plan.fp_loads.sort_by_key(|(v, _)| *v);
+            // keep_flush / fp_keep_flush 留空：p 全程权威，不回写内存。
             self.plans.push(plan);
         }
     }
@@ -1667,14 +1763,26 @@ impl<'a> FnEmit<'a> {
         self.resident.clear();
         self.dirty.clear();
         self.flush_mask.clear();
+        self.fp_resident.clear();
+        self.fp_flush_mask.clear();
         let plan = self.plans.get(idx).cloned().unwrap_or_default();
-        if plan.resident.is_empty() { return; }
+        if plan.resident.is_empty() && plan.fp_resident.is_empty() { return; }
         for (v, p) in &plan.loads {
             let off = self.resident_off(*v);
             self.line(&format!("\tmovq {}({}), {}", off, self.r("rsp"), self.r(p)));
         }
+        // M7-e3av：浮点块入口装载，按 vrty 选 movss/movsd（整数 loads 是 movq）。
+        if matches!(self.target, EmitTarget::X86_64SysV) {
+            for (v, p) in &plan.fp_loads {
+                let off = self.resident_off(*v);
+                let m = if self.rty(*v) == IrType::F32 { "movss" } else { "movsd" };
+                self.line(&format!("\t{} {}({}), {}", m, off, self.r("rsp"), self.r(p)));
+            }
+        }
         self.flush_mask = plan.keep_flush;
         self.resident = plan.resident;
+        self.fp_flush_mask = plan.fp_keep_flush;
+        self.fp_resident = plan.fp_resident;
         self.residency_on = true;
     }
 
@@ -1702,6 +1810,8 @@ impl<'a> FnEmit<'a> {
         self.resident.clear();
         self.dirty.clear();
         self.flush_mask.clear();
+        self.fp_resident.clear();
+        self.fp_flush_mask.clear();
     }
 
     // ---- 栈帧 ----
@@ -2516,6 +2626,25 @@ impl<'a> FnEmit<'a> {
     fn inst_fbin(&mut self, op: ABin, dst: VReg, a: Value, b: Value, _ty: IrType) {
         let f1 = self.f1().to_string();
         let f2 = self.f2().to_string();
+        // M7-e3av：dst 驻留快路径（镜像整数 inst_bin）——a 直接读进 dst 的物理
+        // xmm，运算落在物理寄存器，结果不经过 xmm8 scratch、也不写回栈槽。
+        // b 若是常量仍由 bin_src 物化到 f2=xmm9；若驻留则直接返回其物理 xmm。
+        if matches!(self.target, EmitTarget::X86_64SysV) {
+            if let Some(pd) = self.val_fp_phys(dst) {
+                self.lf(a, pd);
+                let b_reg = self.bin_src(b, &f2, false, true);
+                let pd_r = self.r(pd);
+                match op {
+                    ABin::Add => self.line(&format!("\taddsd {}, {}", b_reg, pd_r)),
+                    ABin::Sub => self.line(&format!("\tsubsd {}, {}", b_reg, pd_r)),
+                    ABin::Mul => self.line(&format!("\tmulsd {}, {}", b_reg, pd_r)),
+                    ABin::Div | ABin::Mod => self.line(&format!("\tdivsd {}, {}", b_reg, pd_r)),
+                    _ => self.line(&format!("\taddsd {}, {}", b_reg, pd_r)),
+                }
+                self.dirty.insert(dst);
+                return;
+            }
+        }
         self.lf(a, &f1);
         let b_reg = self.bin_src(b, &f2, false, true);
         match self.target {

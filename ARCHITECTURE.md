@@ -938,6 +938,33 @@ x86-64 有 `imulq $imm32,r/m,r` 三操作数形式（cc 汇编 + objdump 验证�
 在噪声带——价值在消除一类编译器缺陷并对齐 LLVM，而非大幅跃升，与「微融合收益
 已边际」的既有判断一致。
 
+### 13.12 浮点寄存器驻留：独立 xmm 池 + 与整数表隔离的驻留查询（v1.10 开发中增补，M7-e3av）
+
+e3at 用数据否决了含 call 函数的 caller-saved GRA，但浮点寄存器分配此前从未诊断。
+`tools/diag_fgra.py` 实测：浮点值被 `residency_candidate`（`!t.is_float()`）排除在 GRA
+池外，无 call 浮点密集热循环栈访问/运算比 5.8×、asm/LLVM 耗时比 3.0×。与 caller-saved
+本质不同——这是无 call 纯计算、x86-16 个 xmm 闲置未被利用，属正收益缺口。
+
+**架构要点**（仅 `src/codegen_asm.rs`）：
+- **独立池 + 独立查询表**：`FP_RES_POOL`（xmm1-7 + xmm10-15 共 13 个，排除返回值 xmm0
+  与 scratch xmm8/9）与整数 `RES_POOL` 完全独立；`fp_phys`/`val_fp_phys` 只查 `fp_resident`，
+  整数 `phys`/`val_phys` 只查 `resident`——两表互不干扰是零回归的结构性保证。绝不把
+  xmm 名放进 `used_phys`（prologue/epilogue 对它发 movq 保存会生成非法指令）。
+- **三 helper 覆盖所有浮点读写点**：`lf`/`sf`/`bin_src` 命中浮点驻留则寄存器直读直写，
+  自动覆盖 FBin/FCmp/Un/Conv/Load/Store/Return/call 实参；`inst_fbin` 另加 dst 快路径
+  （结果直接落物理 xmm）。phi 用 `sf_force_stack` 强制写栈 + 块入口 `fp_loads` 重载，
+  避免被快路径劫持导致跨块读到旧值（与整数 `sg_force_stack` 对称）。
+- **范围**：只覆盖 `analyze_unified`（无 call 多块纯计算函数）；含 call（SysV 无 callee-saved
+  xmm）、单块、`-g`/O0-O1/含 asm 函数仍全 spill。AArch64 的 fp 映射恒空，汇编零变化。
+
+**根因实验**：只扩 6 个 xmm 池收益仅 8%（中间临时值落栈稀释），扩到 13 个得 3.0×→1.64×；
+极致单变量场景 6 池即 1.48×——机制有效、容量是瓶颈。这是「先诊断再投入、用数据说话」
+决策模式的又一次实践（与 e3at 否决、e3x 否决 SIMD 同源），但结论相反：正收益故落地。
+
+**验证**：静态比 5.8×→2.87×、动态 3.0×→1.64×；新 golden `fp_residency` 覆盖多块浮点
+phi/8 浮点参数/浮点返回；17 个既有 golden 仅 `hof`（float sort_by 比较器）有预期驻留
+diff、其余逐字节不变；AF 18 用例、AG 180 次差分、全量 run_tests.sh 全绿。
+
 ---
 
 ## 14. 真实程序缺口补齐与宪法裁决（v1.04 增补）

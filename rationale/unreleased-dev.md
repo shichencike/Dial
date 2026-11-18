@@ -3145,6 +3145,32 @@ imulq   %r10, %r15     # s * 31
 
 **性能归因（诚实记录边际性）**：用 bench 程序的 `./bin <tid> <rep>` 单项计时接口，基线与新编译器各 7 轮取最小：b03 +1.2%、b05 +1.4%、b02 +0.25%；b02 收益最小是因为其瓶颈是 `% 1000000007` 除法逆元的乘法依赖链（约 10 条指令），常量 31 的 imul 只占循环一角。`--quick` 整体几何平均 0.5337x→0.5367x 属计时噪声带（15/11/2→14/10/4 为抖动）。**b02 仍 1.067x 落后 LLVM**——这与 README 既有判断「targeted ISA 微融合收益已边际」一致：本批的价值在「省指令、消除一类编译器缺陷（imul 无立即数是过时认知）、零回归」，而非大幅性能跃升。
 
-**决策意义**：这是 targeted ISA 主线的又一个小步增量，验证了「multiply 立即数折叠」这一 LLVM 早在做的优化现已对齐。它与 e3at 形成对照——e3at 用数据否决高成本架构重写，e3au 用极小改动拿到确定收益；两者共同体现「先量化 ROI、再决定投入」的纪律。后续若继续该主线，边际收益将持续递减，应转向其他支柱（如 DWARF/工程形态已完备，性能层剩下浮点/跨函数 GRA 均属高成本方向）。
+**决策意义**：这是 targeted ISA 主线的又一个小步增量，验证了「multiply 立即数折叠」这一 LLVM 早在做的优化现已对齐。它与 e3at 形成对照——e3at 用数据否决高成本架构重写，e3au 用极小改动拿到确定收益；两者共同体现「先量化 ROI、再决定投入」的纪律。后续若继续该主线，边际收益将持续递减，应转向其他支柱（如 DWARF/工程形态已完备）。**注**：本条曾断言「浮点 GRA 属高成本方向」，随后 M7-e3av 用实测诊断推翻——浮点 GRA 是无 call 纯计算场景下的正收益缺口（3.0×→1.64×），详见下方 e3av 条目；跨函数 GRA 仍属高成本方向。
 
 **回归**：AF 黄金门禁 17 用例全绿（含 AArch64 交叉汇编、--fast-compile）；AG 差分门禁 180 次零不一致；全量 `tests/run_tests.sh` rc=0「全部测试通过」；`cargo test --release` 绿。护栏：`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。
+
+---
+
+#### M7-e3av：浮点寄存器驻留（fGRA，无 call 纯计算函数浮点值独占 xmm 池）
+
+**为什么做这个（并更正 e3au 末尾的判断）**：e3au 结尾曾写「浮点/跨函数 GRA 均属高成本方向」——本批用数据推翻了「浮点 GRA 高成本/低收益」这一未经验证的假设。承接差距盘点，性能支柱①里 caller-saved 已被 e3at 用数据否决，而浮点寄存器分配**从未诊断过**。按「先量化 ROI 再决定投入」纪律，先写诊断工具再说。
+
+**实测诊断（`tools/diag_fgra.py`，可复现）**：`residency_candidate`（codegen_asm.rs:880，`!t.is_float()`）把浮点值排除在 GRA 驻留池外，每个 FBin 都走 `lf`(栈→xmm8)→op→`sf`(xmm8→栈)。一个无 call 的浮点密集热循环（滚动累加 + 多项式）：静态浮点栈访问/运算比 **5.8×**（15 条 addsd/mulsd 对 87 条 movsd 栈访问），asm/LLVM 耗时比 **3.0×**——与整数基准全面领先 LLVM 形成鲜明反差。受控实验（把浮点常量外提成循环外变量）证明外提前后都是 3.0×，主因是**浮点反复 load/store 栈**，非常量物化。这与 e3at 的 caller-saved **本质不同**：那里是含 call 函数、值活不过下一次 call、落栈被 C ABI 强制；这里是**无 call 纯计算**，x86-64 有 16 个 xmm 寄存器闲置，落栈纯属编译器未利用寄存器，补齐驻留有明确正收益。
+
+**Authority（LLVM oracle）**：反汇编 LLVM 版同 workload，其浮点运算全程在 xmm 寄存器、几乎不落栈——这正是 asm 要对齐的目标。
+
+**实现三层（仅 `src/codegen_asm.rs`，+134/-5 行）**：
+- **池与绑定**：新增 `FP_RES_POOL`（xmm1-7 + xmm10-15 共 13 个；排除 xmm0 返回值、xmm8/9=f1/f2 scratch），在 `analyze_unified`（无 call 多块函数）的同一指令遍历里并行累加 `fp_score`（use/def 经 `fp_residency_candidate` 过滤），`fp_hot` 按 score 降序/vreg 升序 tie-break 绑到池；**绝不进 used_phys**（prologue/epilogue 对它发 movq，xmm 进去会生成非法指令）。
+- **读写快路径**：新增完全独立的 `fp_phys`/`val_fp_phys`（整数 `phys`/`val_phys` 只查整数表，一动不动，锁死整数回归面）；`lf` 的 `Value::Reg` 分支命中驻留则 xmm→xmm 搬运（按 rty 选 movsd/movss），`sf` 命中则写物理 xmm + 标脏；`bin_src` 的 `Value::Reg` 分支按 fp 参数查对应表；`inst_fbin` 加 dst 驻留快路径（a 直接读进 dst 物理 xmm、运算落物理寄存器，不经 xmm8 scratch、不写回栈）。
+- **phi 与生命周期**：新增 `sf_force_stack`（phi 实参强制写目标块 param 栈槽），`sv` 浮点分支改用它——这是头号静默错误点：若用 `sf` 会被快路径劫持写寄存器、不落栈，后继块入口 reload 读到旧值。`begin_block`/`end_block` 管 fp 映射生命周期，`begin_block` 的 `fp_loads`（phi 参数）用 movsd/movss 装载（整数 loads 是 movq，必须分开）。`flush_residency` 第一版不改（fp_flush_mask 恒空、unified 零回写）。非 x86 的 fp 映射恒空 → AArch64 零变化；`-g`/O0-O1/含 asm 早退分支不动 → 快路径自动失效。
+
+**关键根因实验（容量是瓶颈，不是机制）**：只扩 6 个 xmm（xmm10-15）收益仅 3.0×→2.77×（+8%）——因为复杂表达式的大量中间临时值落栈、6 个池被循环 carried 值占满；扩到 13 个后 **3.0×→1.64×**（+45%）。再用极致简化 workload（单循环变量、无中间值）验证：6 池即达 1.48×。**证明驻留机制本身有效，收益被容量限制**。曾尝试 phi 直连（sv 直接写目标物理 xmm、去掉 fp_loads）但收益无额外改善且引入静默错误风险，已回退——保留更简单的 force-stack phi（改动更小、已被整数侧验证的机制）。
+
+**范围边界**：只覆盖 `analyze_unified`（全函数无 call、多块）的纯计算函数。含 call 函数（SysV 下 xmm 全是 caller-saved，无 callee-saved，跨 call 无法持有）、单块函数（走 `analyze_per_block`）、`-g`/O0-O1/含内联 asm 函数——浮点仍全 spill、零变化。后续阶段可扩展 `analyze_per_block` + fp 回写循环覆盖单块/含 call 非 call 块，单独归因。
+
+**验证**：
+- diag_fgra 静态比 5.8×→2.87×（减半）、动态比 3.0×→1.64×，双后端 stdout 逐字一致；8 浮点参数函数（xmm0-7 ABI 全用）双后端一致——证明扩容到 xmm1-7 不踩参数。
+- 新 golden `fp_residency.dial` 覆盖多块浮点 phi / 8 浮点参数 / 浮点比较分支 / 浮点返回。
+- 零回归归因：17 个既有 golden 中仅 `hof`（含 float sort_by 比较器）汇编变化，diff 全部是 `movsd 栈↔栈`→`xmm↔xmm` 的预期驻留优化、输出一致；其余 16 个逐字节不变；bench 纯整数程序 `.s` 逐字节一致；AArch64 含浮点程序（hof/core2）`.o` 逐字节一致。
+- AF 18 用例、AG 180 次差分零不一致、全量 run_tests.sh rc=0、cargo test 绿。
+- 护栏：`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0 零改动、零新依赖、LLVM 路径零改动、构建零警告、不打 tag、docx 确定性。

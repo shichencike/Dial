@@ -1,0 +1,41 @@
+// M7-e3av：浮点寄存器驻留双后端回归。
+// 覆盖：无 call 多块浮点热循环（浮点 phi + 循环 carried 值 + 浮点常量 +
+// 比较分支）、8 个浮点参数（xmm0-7 ABI 传参，验证驻留池 xmm1-7 不踩参数）、
+// 浮点函数返回。双后端 stdout 必须逐字节一致。
+fn sum8(a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float): float {
+    var s: float = 0.0;
+    var i: int = 0;
+    while (i < 100) {
+        s = s + a + b + c + d + e + f + g + h;
+        i = i + 1;
+    }
+    return s;
+}
+fn poly(n: int): float {
+    var x: float = 1.000001;
+    var acc: float = 0.0;
+    var i: int = 0;
+    while (i < n) {
+        x = x * 1.0000001 + 0.0000003;
+        acc = acc + x * x - x / 2.0 + 3.14159265;
+        i = i + 1;
+    }
+    return acc;
+}
+fn cmp_hot(n: int): int {
+    var x: float = 1.5;
+    var cnt: int = 0;
+    var i: int = 0;
+    while (i < n) {
+        if (x > 1000000.0) { x = x / 2.0; } else { x = x * 1.5; }
+        cnt = cnt + 1;
+        i = i + 1;
+    }
+    return cnt + float_to_int(x);
+}
+fn main(): int {
+    print(float_to_int(sum8(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0)));
+    print(float_to_int(poly(2000)));
+    print(cmp_hot(2000));
+    return 0;
+}
