@@ -663,7 +663,9 @@ dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|s
 
 所有权释放内建 `drop(x)` 在双后端同样一致（M7-e3ak）：提前释放变量所有权（move 语义），按类型分派——文件→关闭、线程→join、裸指针→`raw_free`、ARC 句柄→release、标量 no-op，释放后标记变量已转移，作用域退出不再二次释放（防 double free / UAF）。这是 rawptr「谁申请谁释放」与 with 块自动释放的同源机制；`-O0`~`-O3`/`-g` 下行为一致，非 drop 程序的汇编输出逐字节不变。
 
-channel 原语族在双后端一致（M7-e3al，单线程部分）：`channel(cap)` 创建、`move_to(x, ch)` 零拷贝移交所有权、`recv`/`try_recv`/`recv_timeout` 接收、`is_null` 判 EOF、`closed`/`done`/`len` 状态查询、`close` 关闭——与 `is_null`/`drop` 形成完整所有权闭环。通道 EOF 或超时后 `recv` 返回空值，用 `is_null` 判别；`-O0`~`-O3`/`-g` 下行为一致，非 channel 程序的汇编输出逐字节不变。真多线程原语（`spawn`/`thread`/`join`/`detach`）仍在后续相位。
+channel 原语族在双后端一致（M7-e3al，单线程部分）：`channel(cap)` 创建、`move_to(x, ch)` 零拷贝移交所有权、`recv`/`try_recv`/`recv_timeout` 接收、`is_null` 判 EOF、`closed`/`done`/`len` 状态查询、`close` 关闭——与 `is_null`/`drop` 形成完整所有权闭环。通道 EOF 或超时后 `recv` 返回空值，用 `is_null` 判别；`-O0`~`-O3`/`-g` 下行为一致，非 channel 程序的汇编输出逐字节不变。
+
+真多线程原语 `spawn`/`join`/`detach` 同样双后端一致（M7-e3am）：`spawn(fn, args...)` 创建并立即启动线程（实参按所有权移交——堆句柄 move、channel 共享 retain、标量按值，先写满 argcell 再 `pthread_create`），线程入口由编译器合成统一签名的 `__dial_thunk_<fn>`（pthread 只认 `void(*)(void*)`，thunk 从 argcell 按类型读参后直接调用目标函数），worker 可经 channel 回传结果，`join` 等待回收、`detach` 分离；二次 join/detach 由 C 侧 Fail-Fast 拦截而非 use-after-free。与 channel 组合形成「spawn 生产 → channel 回传 → is_null 判 EOF → join 回收」的完整并发闭环；`-O0`~`-O3`/`-g` 下双后端逐字一致，非 spawn 程序的汇编输出逐字节不变。高阶函数（`map`/`filter`/`reduce`/`sort_by`）仍在后续相位。
 
 产物形态开关（第 18 层，与上面的安全等级**正交**）：
 

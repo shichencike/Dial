@@ -2376,6 +2376,82 @@ for _c_opt in "-O0" "-O1" "-O3" "-g -O3"; do
         || rbad "R13 channel $_c_opt 双后端不一致"
 done
 
+# ---------------------------------------------------------------------------
+# R14) 真多线程 spawn / join / detach（M7-e3am）：对齐 LLVM codegen.rs:5109/5139。
+# spawn(fn,args...) = argcell 移交实参 + 合成 __dial_thunk_<fn> 线程入口 + dial_thread_new；
+# join/detach = C 回收/分离 + 槽清零（join 另标 moved）。用 channel 回传结果做同步，
+# 避免依赖线程调度顺序，保证双后端 stdout 逐字可比。
+TDIR="${RDIR}/thread"; mkdir -p "$TDIR"
+cat > "${TDIR}/probe.dial" <<'DIALEOF'
+fn worker(prefix: string, suffix: string, ch: channel<string>): void {
+    var msg: string = prefix + suffix;
+    move_to(msg, ch);
+}
+fn main(): int {
+    let ch: channel<string> = channel(2);
+    let t: thread = spawn(worker, "a", "1", ch);
+    var got: string = recv(ch);
+    print(got);
+    join(t);
+    print("joined");
+    return 0;
+}
+DIALEOF
+
+# 1) O2：spawn + channel 回传 + join，双后端逐字一致 + 严格输出。
+${DIALC} build "${TDIR}/probe.dial" --backend llvm -o "${TDIR}/probe_llvm" >/dev/null 2>&1 || rbad "R14 LLVM 编译 spawn 用例失败"
+${DIALC} build "${TDIR}/probe.dial" --backend asm  -o "${TDIR}/probe_asm"  >/dev/null 2>&1 || rbad "R14 asm 编译 spawn 用例失败"
+_t_llvm="$( ${TDIR}/probe_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_t_asm="$( ${TDIR}/probe_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+[ -n "$_t_llvm" ] && [ "$_t_asm" = "$_t_llvm" ] \
+    && rpass "spawn + channel 回传 + join：双后端逐字一致" \
+    || rbad "R14 spawn 双后端不一致（llvm=[$_t_llvm] asm=[$_t_asm]）"
+[ "$_t_asm" = "a1 joined " ] \
+    && rpass "spawn 线程入口 thunk 正确（string move + channel 共享回传 + join 回收）" \
+    || rbad "R14 spawn 输出不符预期（got=[$_t_asm]）"
+
+# 2) 标量/句柄混合实参 + 多 worker + detach：双后端一致。
+cat > "${TDIR}/multi.dial" <<'DIALEOF'
+fn one(x: int): void {
+    print("x=", x);
+}
+fn worker(s: string, ch: channel<string>): void {
+    var msg: string = s + "!";
+    move_to(msg, ch);
+}
+fn main(): int {
+    let t0: thread = spawn(one, 42);
+    join(t0);
+    let ch: channel<string> = channel(2);
+    let t1: thread = spawn(worker, "p", ch);
+    let t2: thread = spawn(worker, "q", ch);
+    var a: string = recv(ch);
+    var b: string = recv(ch);
+    print(a, ",", b);
+    join(t1);
+    detach(t2);
+    return 0;
+}
+DIALEOF
+${DIALC} build "${TDIR}/multi.dial" --backend llvm -o "${TDIR}/multi_llvm" >/dev/null 2>&1 || rbad "R14 LLVM 编译 multi 用例失败"
+${DIALC} build "${TDIR}/multi.dial" --backend asm  -o "${TDIR}/multi_asm"  >/dev/null 2>&1 || rbad "R14 asm 编译 multi 用例失败"
+_m_llvm="$( ${TDIR}/multi_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_m_asm="$( ${TDIR}/multi_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+[ -n "$_m_llvm" ] && [ "$_m_asm" = "$_m_llvm" ] \
+    && rpass "标量/句柄混合实参 + 多 worker + join/detach：双后端一致" \
+    || rbad "R14 multi 双后端不一致（llvm=[$_m_llvm] asm=[$_m_asm]）"
+
+# 3) 各优化级别 / -g 下 spawn 双后端一致（thunk 不受 O 级别影响）。
+for _t_opt in -O0 -O1 -O3 -g; do
+    ${DIALC} build "${TDIR}/probe.dial" --backend llvm -o "${TDIR}/opt_llvm" $_t_opt >/dev/null 2>&1 || { rbad "R14 LLVM 编译 $_t_opt 失败"; continue; }
+    ${DIALC} build "${TDIR}/probe.dial" --backend asm  -o "${TDIR}/opt_asm"  $_t_opt >/dev/null 2>&1 || { rbad "R14 asm 编译 $_t_opt 失败"; continue; }
+    _t_lo="$( ${TDIR}/opt_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    _t_ao="$( ${TDIR}/opt_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    [ -n "$_t_lo" ] && [ "$_t_ao" = "$_t_lo" ] \
+        && rpass "spawn $_t_opt：双后端一致" \
+        || rbad "R14 spawn $_t_opt 双后端不一致"
+done
+
 
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验

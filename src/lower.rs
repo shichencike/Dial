@@ -62,13 +62,108 @@ pub fn lower_program(
         .filter(|s| s.packed).map(|s| s.name.clone())
         .chain(prog.cstructs.iter().filter(|s| s.packed).map(|s| s.name.clone()))
         .collect();
+    let mut spawn_targets: HashSet<String> = HashSet::new();
     for func in &prog.functions {
         // M7-e3w：调试标记只在 -g 时插入。非 -g 的 IR 必须与 e3v 逐字节一致，
         // 否则 Line/DebugVar 会打断 e3p 折叠 / popcount 融合等 pass 的模式窗口。
         let mut l = Lower::new(&mut ip, debug_info, &packed, src_file);
         l.lower_function(func)?;
+        // M7-e3am：收集本函数内 spawn 引用的线程入口目标（去重在生成阶段）。
+        spawn_targets.extend(l.spawn_targets.drain());
+    }
+    // M7-e3am：为所有 spawn 目标生成线程入口 thunk（对齐 LLVM gen_spawn_thunk）。
+    // 必须在所有函数 lower 完之后统一生成——thunk 是独立函数，不能嵌在调用方体内。
+    // 排序保证生成顺序确定（哈希集合遍历无序），否则 .s 输出会随哈希种子漂移。
+    let mut targets: Vec<String> = spawn_targets.into_iter().collect();
+    targets.sort();
+    for fname in &targets {
+        gen_spawn_thunk(&mut ip, fname)?;
     }
     Ok(ip)
+}
+
+/// M7-e3am：为 `spawn(fn, ...)` 生成线程入口 thunk：`void __dial_thunk_fn(ptr cell)`。
+///
+/// C 的 pthread_create 只认统一签名 `void (*)(void*)`，而 Dial 函数实参类型各异。
+/// thunk 从 argcell 的 8 字节槽按形参类型 Load 出实参，直接调用目标函数（具名调用，
+/// 对齐 LLVM gen_spawn_thunk），调用后对移交进来的 ARC 形参各做一次 RcRelease
+/// （释放 spawn 写端移交的那一份所有权；目标函数入口 retain / 出口 release 净零）。
+///
+/// 直接构造 IrFunction（不借 Lower 的可变状态），复用与 lower_call 普通调用一致的
+/// ABI 规则：arg_tys 用 param_ir(pty)，调用返回值 void。
+fn gen_spawn_thunk(ip: &mut IrProgram, fname: &str) -> Result<(), String> {
+    let thunk_name = format!("__dial_thunk_{}", fname);
+    // 同一函数被多处 spawn：thunk 只生成一次。
+    if ip.functions.iter().any(|f| f.name == thunk_name) {
+        return Ok(());
+    }
+    let sig = ip.functions_sig.get(fname)
+        .ok_or_else(|| format!("[asm 后端] spawn 目标函数 `{}` 无签名信息", fname))?
+        .clone();
+    // 与 lower_function 一致：形参用 param_ir 声明（C ABI 宽度），prologue 按此填槽。
+    let params: Vec<(String, IrType)> = sig.params.iter().enumerate()
+        .map(|(i, t)| (format!("a{}", i), param_ir(t)))
+        .collect();
+    let mut f = IrFunction::new(thunk_name.clone(), params, IrType::Void, FuncLink::Private);
+
+    // 手动构造 entry 块（IrFunction::new_block 返回 &mut IrBlock，这里直接 push）。
+    f.blocks.push(IrBlock { id: 0, params: Vec::new(), insts: Vec::new(), term: Term::Unreachable });
+    f.entry = 0;
+    // 形参 cell（void*）的栈槽：prologue 把第 0 个实参寄存器（rdi/x0）写进来。
+    // 必须与 params 平行地登记到 param_slots。
+    let cell_slot = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::Alloca { dst: cell_slot, bytes: 8 });
+    f.param_slots.push(cell_slot);
+
+    // 从 cell_slot 读回 argcell 指针值。
+    let cell_v = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::Load { dst: cell_v, ptr: cell_slot, ty: IrType::Ptr });
+
+    // 逐形参：从 argcell 的第 i 个 8 字节槽 Load 出实参。
+    // 槽宽统一 8 字节；load 类型对齐写端的 store 类型：
+    //   Float→F64、句柄→Handle、裸指针→Ptr、其余（int/bool/byte/int32）→I64。
+    let mut arg_vals: Vec<Value> = Vec::new();
+    let mut arg_tys: Vec<IrType> = Vec::new();
+    for (i, pty) in sig.params.iter().enumerate() {
+        let slot = f.new_reg(IrType::Ptr);
+        f.blocks[0].insts.push(IrInst::PtrAdd {
+            dst: slot, base: cell_v, off: Value::Imm(Imm::I64((i * 8) as i64)),
+        });
+        let load_ty = match pty {
+            Type::Float => IrType::F64,
+            Type::Float32 => IrType::F32,
+            t if reg_ir(t) == IrType::Handle => IrType::Handle,
+            t if reg_ir(t) == IrType::Ptr => IrType::Ptr,
+            _ => IrType::I64,
+        };
+        let v = f.new_reg(load_ty.clone());
+        f.blocks[0].insts.push(IrInst::Load { dst: v, ptr: slot, ty: load_ty });
+        arg_vals.push(Value::Reg(v));
+        arg_tys.push(param_ir(pty));
+    }
+
+    // 直接调用目标函数（无返回值——语义层已保证线程入口返回 void）。
+    f.blocks[0].insts.push(IrInst::Call {
+        dst: None, func: fname.to_string(), args: arg_vals, arg_tys,
+        ret_ty: IrType::Void, linkage: CallLink::Dial,
+    });
+
+    // 释放 spawn 写端移交的那一份所有权（对齐 LLVM thunk 末的 release_value）。
+    // RcRelease 作用于「槽地址」，故复用前面 load 出的参数槽地址即可——但那几个
+    // slot vreg 在循环里是局部的，这里重新计算一遍（cell_v 在整个函数体持续有效）。
+    for (i, pty) in sig.params.iter().enumerate() {
+        if let Some(k) = rc_kind(pty) {
+            let slot = f.new_reg(IrType::Ptr);
+            f.blocks[0].insts.push(IrInst::PtrAdd {
+                dst: slot, base: cell_v, off: Value::Imm(Imm::I64((i * 8) as i64)),
+            });
+            f.blocks[0].insts.push(IrInst::RcRelease { ptr: slot, kind: k });
+        }
+    }
+
+    f.blocks[0].term = Term::Return { val: None };
+    ip.functions.push(f);
+    Ok(())
 }
 
 struct Lower<'a> {
@@ -102,6 +197,10 @@ struct Lower<'a> {
     /// M7-e3ai：当前编译单元的源文件路径（原始字符串，与 LLVM 后端 self.src_file
     /// 同源），供 assert/panic 的位置诊断作为编译期常量串写入 .rodata。
     src_file: String,
+    /// M7-e3am：本编译单元内被 spawn 引用的线程入口函数名集合。thunk 无法在
+    /// 当前函数体内生成（它是独立函数），故只记录名字，由 lower_program 在
+    /// 遍历完所有函数后统一为每个目标生成 `__dial_thunk_<fn>` 追加到 ip.functions。
+    spawn_targets: HashSet<String>,
 }
 
 impl<'a> Lower<'a> {
@@ -114,6 +213,7 @@ impl<'a> Lower<'a> {
             packed: packed.clone(),
             cur_pos: (0, 0),
             src_file: src_file.to_string(),
+            spawn_targets: HashSet::new(),
             func: IrFunction::new(String::new(), Vec::new(), IrType::Void, FuncLink::Private),
             cur: 0,
             scopes: Vec::new(),
@@ -1719,6 +1819,11 @@ impl<'a> Lower<'a> {
             // 必须在此拦截——否则落到 lower_builtin 的 BKind::Unsupported。
             "channel" | "recv" | "try_recv" | "recv_timeout" | "closed" | "done"
             | "len" | "move_to" => return self.lower_channel_call(name, args),
+            // M7-e3am：真多线程原语 spawn/join/detach。对齐 LLVM codegen.rs:5109/5139。
+            // spawn：分配 argcell + 移交实参 + 生成线程入口 thunk + dial_thread_new；
+            // join/detach：C 调用 + 槽清零（join 另标 moved 防二次回收）。
+            // 必须在此拦截——否则落到 lower_builtin 的 BKind::Unsupported。
+            "spawn" | "join" | "detach" => return self.lower_thread_call(name, args),
             _ => {}
         }
         // functions_sig 只含用户函数与 extern 声明；按名字硬编码分派的内建
@@ -2247,6 +2352,113 @@ impl<'a> Lower<'a> {
             }
             _ => unreachable!("lower_channel_call 仅处理 channel 原语族"),
         }
+    }
+
+    /// M7-e3am：真多线程原语 spawn / join / detach，对齐 LLVM codegen.rs:5109/5139。
+    ///
+    /// C runtime（stdlib/dial_thread.c）：
+    ///   - `dial_thread_argcell(n)`：分配 n 个 8 字节槽（calloc，NULL 安全 Fail-Fast）。
+    ///   - `dial_thread_new(fn, cell)`：pthread_create，返回 Thread 句柄。
+    ///   - `dial_thread_join/join(t)`、`dial_thread_detach(t)`：回收/分离线程。
+    ///
+    /// spawn 的所有权会计（与 LLVM 同源，易错点）：
+    ///   - 堆句柄（string/array/map/set/kvmap/error）：move 进槽（store 值 + 源槽清零
+    ///     + 源标 moved），目标函数入口 retain、thunk 末 release，净零；
+    ///   - channel：共享语义，retain +1 后 store（源变量仍可用）；
+    ///   - 标量（int/bool/byte/…）与 float：按值 store（槽宽 8 字节）。
+    /// 顺序铁律：**先写满所有槽，再 dial_thread_new**——pthread_create 之后实参必须已就位。
+    fn lower_thread_call(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        if name == "join" || name == "detach" {
+            if args.len() != 1 {
+                return self.err(&format!("{} 需要 1 个参数（thread 句柄）", name));
+            }
+            let (tv, _) = self.lower_expr(&args[0], &Type::Thread)?;
+            let h = tv.as_reg();
+            let sym = if name == "join" { "dial_thread_join" } else { "dial_thread_detach" };
+            self.emit(IrInst::Call { dst: None, func: sym.to_string(), args: vec![Value::Reg(h)],
+                arg_tys: vec![IrType::Handle], ret_ty: IrType::Void, linkage: CallLink::Runtime });
+            // 槽清零：二次 join/detach 会当场 Fail-Fast（dial_thread_join 的 HEAP_ASSERT）
+            // 而非 use-after-free；join 即消费句柄，另标 moved 使 with 块末跳过 release。
+            if let Expr::Var(vn) = &args[0] {
+                let slot_ptr = self.lookup(vn).map(|l| l.ptr);
+                if let Some(p) = slot_ptr {
+                    self.emit(IrInst::Store { ptr: p, val: Value::Imm(Imm::I64(0)), ty: IrType::Handle });
+                    if name == "join" {
+                        if let Some(l) = self.lookup_mut(vn) { l.moved = true; }
+                    }
+                }
+            }
+            return Ok((Value::Imm(Imm::I64(0)), false)); // Void 占位
+        }
+
+        // ---- spawn ----
+        let fname = match &args[0] {
+            Expr::FuncRef(n) => n.clone(),
+            _ => return self.err("spawn 的第一个参数必须是具名函数（见语义层约束）"),
+        };
+        let sig = self.ip.functions_sig.get(&fname)
+            .ok_or_else(|| format!("spawn 引用了未定义的函数 `{}`", fname))?
+            .clone();
+        if args.len() - 1 != sig.params.len() {
+            return self.err(&format!("spawn 传给 `{}` 的实参数目与形参不符", fname));
+        }
+
+        // 1) 分配 argcell：dial_thread_argcell(n)。
+        let n = sig.params.len() as i64;
+        let cell = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call { dst: Some(cell), func: "dial_thread_argcell".to_string(),
+            args: vec![Value::Imm(Imm::I64(n))], arg_tys: vec![IrType::I64],
+            ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+
+        // 2) 逐实参写入 argcell 的第 i 个 8 字节槽。
+        for (i, pty) in sig.params.iter().enumerate() {
+            let (v, _) = self.lower_expr(&args[i + 1], pty)?;
+            let slot = self.new_reg(IrType::Ptr);
+            self.emit(IrInst::PtrAdd { dst: slot, base: cell, off: Value::Imm(Imm::I64((i * 8) as i64)) });
+            match pty {
+                // 共享：channel 原子 +1，源变量仍可用。
+                Type::Channel(_) => {
+                    if let Some(k) = rc_kind(pty) {
+                        self.emit(IrInst::RcRetain { ptr: slot, kind: k });
+                    }
+                    self.emit(IrInst::Store { ptr: slot, val: v, ty: IrType::Handle });
+                }
+                // 移动：堆句柄 store 值 + 源槽清零 + 源标 moved（无 retain/release）。
+                t if rc_kind(t).is_some() => {
+                    self.emit(IrInst::Store { ptr: slot, val: v, ty: IrType::Handle });
+                    if let Expr::Var(vn) = &args[i + 1] {
+                        let slot_ptr = self.lookup(vn).map(|l| l.ptr);
+                        if let Some(p) = slot_ptr {
+                            self.emit(IrInst::Store { ptr: p, val: Value::Imm(Imm::I64(0)), ty: IrType::Handle });
+                            if let Some(l) = self.lookup_mut(vn) { l.moved = true; }
+                        }
+                    }
+                }
+                // 标量 / float / 裸指针 / fnptr：按值 store（槽宽 8 字节）。
+                _ => {
+                    let sty = match pty {
+                        Type::Float => IrType::F64,
+                        Type::Float32 => IrType::F32,
+                        t2 => reg_ir(t2),
+                    };
+                    self.emit(IrInst::Store { ptr: slot, val: v, ty: sty });
+                }
+            }
+        }
+
+        // 3) 记录 thunk 目标，取线程入口函数地址。
+        self.spawn_targets.insert(fname.clone());
+        let thunk_name = format!("__dial_thunk_{}", fname);
+        let thunk_addr = self.new_reg(IrType::Ptr);
+        self.emit(IrInst::FuncAddr { dst: thunk_addr, func: thunk_name });
+
+        // 4) dial_thread_new(thunk, cell) → Thread 句柄。
+        let t = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call { dst: Some(t), func: "dial_thread_new".to_string(),
+            args: vec![Value::Reg(thunk_addr), Value::Reg(cell)],
+            arg_tys: vec![IrType::Ptr, IrType::Handle], ret_ty: IrType::Handle,
+            linkage: CallLink::Runtime });
+        Ok((Value::Reg(t), false))
     }
 
     /// M7-e3ah：bitcast<T>(x) —— 底层位模式重解释，对齐 LLVM codegen.rs:4842-4924。

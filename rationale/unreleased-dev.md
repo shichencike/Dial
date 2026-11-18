@@ -2598,3 +2598,59 @@
         1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
         不打 tag。新增 R13 测试组（完整闭环 + recv_timeout + 各 O 级别）。
         docx 确定性生成；check_links/check_version 全过。
+
+#### M7-e3am：自研 asm 后端补齐 `spawn` / `join` / `detach` 真多线程（双后端一致性补全）
+
+- **背景**：e3ag~e3al 逐批补齐了 asm 相对 LLVM 的语义缺口（sizeof/alignof/offsetof、
+  bitcast、assert/panic、is_null、drop、channel 单线程族）。审计两侧内建面差集后，
+  剩余真缺口只剩两族：`spawn/join/detach`（真多线程）与 `map/filter/reduce/sort_by`
+  （高阶函数），二者都依赖 asm 尚不具备的「合成 thunk 函数」能力。本批选前者——
+  它的 thunk 是直接调用具名入口函数（比高阶函数的「间接调用 + 位模式还原」简单），
+  且 C runtime 与 `drop`/`close` 的 Thread→join 全就位，无缝接续 e3al 的 channel
+  形成完整并发闭环。
+
+- **确凿缺口**：`spawn/join/detach` 在 LLVM 完整支持（`codegen.rs:5109/5139`：
+  `dial_thread_argcell(n)` 分配参数槽 + 为每个入口函数合成 `__dial_thunk_<fn>`
+  （统一签名 `void(*)(void*)`）+ `dial_thread_new`）；asm 却把它们归入「并发/高阶
+  函数后续相位」`BKind::Unsupported` 明确 Fail-Fast 拒绝。实测 worker 经 channel
+  回传结果的程序：LLVM 正常输出、asm 直接报错。
+
+- **实现**（核心 `src/lower.rs`，`src/builtin.rs` 仅分派表注释 + 拆分条目）：
+  - `lower_call` 拦截 spawn/join/detach → `lower_thread_call`。
+  - `join`/`detach`：load 线程句柄值 → `dial_thread_join`/`dial_thread_detach` →
+    槽清零（二次 join/detach 由 C 侧 HEAP_ASSERT 当场 Fail-Fast，而非 use-after-free）；
+    join 另标 `moved` 使 with 块末跳过自动释放（线程句柄已被 C 回收）。
+  - `spawn`：① `dial_thread_argcell(n)` 分配 n 个 8 字节槽；② 逐实参按静态类型写槽
+    ——堆句柄（string/array/map/set/kvmap/error）move 进槽（store 值 + 源槽清零 +
+    标 moved）、channel 共享（retain +1 后 store，源仍可用）、标量/float/裸指针按值
+    store；③ 记录 spawn 目标函数（去重集合 `Lower.spawn_targets`）；④ `FuncAddr`
+    取 `__dial_thunk_<fn>` 地址；⑤ `dial_thread_new(thunk, cell)` 返回 Thread 句柄。
+    顺序铁律：先写满所有槽再 `dial_thread_new`（pthread_create 后实参必须已就位）。
+  - **合成 thunk**（`gen_spawn_thunk`，在 `lower_program` 遍历完所有函数后统一生成）：
+    对每个 spawn 目标构造独立 `IrFunction __dial_thunk_<fn>`（单 Ptr 形参 cell），
+    逐形参从 argcell 第 i 个 8 字节槽 Load 实参（Float→F64、句柄→Handle、裸指针→Ptr、
+    其余→I64），直接 `Call` 目标入口函数（对齐 LLVM gen_spawn_thunk），调用后对移交
+    的 ARC 形参各发一条 RcRelease（释放写端移交的那一份；目标函数入口 retain / 出口
+    release 净零，被 move_to 进通道的形参计数恰好落在 thunk 这一份上，既不泄漏也不
+    双释放）。thunk 名字写入 `.s` 成为真实全局符号；目标集合排序后生成，避免哈希
+    遍历顺序导致 `.s` 漂移。
+
+- **验证**：
+  - worker 经 `channel<string>` 回传（string move + channel 共享）+ join：双后端
+    stdout 逐字一致（`a1` / `joined` 两行）；标量实参 + 多 worker + join/detach：
+    `x=42` / `p!,q!` 两行一致；无 crash / double-free / corrupt。
+  - `-O0/-O1/-O3/-g` 各级别双后端一致（thunk 不受 O 级别影响）。
+  - A/B：8 个 golden 程序（core1/builtins/control_flow/core2/structs/exceptions/
+    rawptr/fnptr）`.s` 与 OLD（cf2fff6）逐字节一致（md5 全同）——本特性只在调用
+    spawn 的程序中改变行为；AArch64 普通程序零变化；spawn 程序经 clang 交叉汇编
+    产出 ELF aarch64 `.o`。
+  - 新增 R14 测试组（channel 回传闭环 + 标量/句柄混合实参 + 多 worker + join/detach
+    + 各 O 级别）。
+
+- **已知边界**：高阶函数 `map/filter/reduce/sort_by`（需「间接调用 + 位模式还原」
+  的 hof thunk）仍未接入，是并发族之后的下一块；嵌套 channel 元素析构器（e3al 记为
+  边界）在 spawn 场景沿用同一口径。
+
+- **护栏**：`src/codegen.rs`/`src/ast.rs` 相对 cf2fff6 零改动、`Cargo.toml` 仍
+  1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
+  不打 tag。docx 确定性生成；check_links/check_version 全过。

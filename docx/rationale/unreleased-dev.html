@@ -28,7 +28,10 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/unreleased-dev.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release--理由与证据链">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release） · 理由与证据链</a><ul>
-<li><a href="#测试与交付">测试与交付</a></li>
+<li><a href="#测试与交付">测试与交付</a><ul>
+<li><a href="#m7-e3am自研-asm-后端补齐-spawn--join--detach-真多线程双后端一致性补全">M7-e3am：自研 asm 后端补齐 spawn / join / detach 真多线程（双后端一致性补全）</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -2740,6 +2743,75 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
     不打 tag。新增 R13 测试组（完整闭环 + recv_timeout + 各 O 级别）。
     docx 确定性生成；check_links/check_version 全过。</li>
 </ul>
+</li>
+</ul>
+<h4 id="m7-e3am自研-asm-后端补齐-spawn--join--detach-真多线程双后端一致性补全">M7-e3am：自研 asm 后端补齐 <code>spawn</code> / <code>join</code> / <code>detach</code> 真多线程（双后端一致性补全）</h4>
+<ul>
+<li>
+<p><strong>背景</strong>：e3ag~e3al 逐批补齐了 asm 相对 LLVM 的语义缺口（sizeof/alignof/offsetof、
+  bitcast、assert/panic、is_null、drop、channel 单线程族）。审计两侧内建面差集后，
+  剩余真缺口只剩两族：<code>spawn/join/detach</code>（真多线程）与 <code>map/filter/reduce/sort_by</code>
+  （高阶函数），二者都依赖 asm 尚不具备的「合成 thunk 函数」能力。本批选前者——
+  它的 thunk 是直接调用具名入口函数（比高阶函数的「间接调用 + 位模式还原」简单），
+  且 C runtime 与 <code>drop</code>/<code>close</code> 的 Thread→join 全就位，无缝接续 e3al 的 channel
+  形成完整并发闭环。</p>
+</li>
+<li>
+<p><strong>确凿缺口</strong>：<code>spawn/join/detach</code> 在 LLVM 完整支持（<code>codegen.rs:5109/5139</code>：
+  <code>dial_thread_argcell(n)</code> 分配参数槽 + 为每个入口函数合成 <code>__dial_thunk_&lt;fn&gt;</code>
+  （统一签名 <code>void(*)(void*)</code>）+ <code>dial_thread_new</code>）；asm 却把它们归入「并发/高阶
+  函数后续相位」<code>BKind::Unsupported</code> 明确 Fail-Fast 拒绝。实测 worker 经 channel
+  回传结果的程序：LLVM 正常输出、asm 直接报错。</p>
+</li>
+<li>
+<p><strong>实现</strong>（核心 <code>src/lower.rs</code>，<code>src/builtin.rs</code> 仅分派表注释 + 拆分条目）：</p>
+</li>
+<li><code>lower_call</code> 拦截 spawn/join/detach → <code>lower_thread_call</code>。</li>
+<li><code>join</code>/<code>detach</code>：load 线程句柄值 → <code>dial_thread_join</code>/<code>dial_thread_detach</code> →
+    槽清零（二次 join/detach 由 C 侧 HEAP_ASSERT 当场 Fail-Fast，而非 use-after-free）；
+    join 另标 <code>moved</code> 使 with 块末跳过自动释放（线程句柄已被 C 回收）。</li>
+<li><code>spawn</code>：① <code>dial_thread_argcell(n)</code> 分配 n 个 8 字节槽；② 逐实参按静态类型写槽
+    ——堆句柄（string/array/map/set/kvmap/error）move 进槽（store 值 + 源槽清零 +
+    标 moved）、channel 共享（retain +1 后 store，源仍可用）、标量/float/裸指针按值
+    store；③ 记录 spawn 目标函数（去重集合 <code>Lower.spawn_targets</code>）；④ <code>FuncAddr</code>
+    取 <code>__dial_thunk_&lt;fn&gt;</code> 地址；⑤ <code>dial_thread_new(thunk, cell)</code> 返回 Thread 句柄。
+    顺序铁律：先写满所有槽再 <code>dial_thread_new</code>（pthread_create 后实参必须已就位）。</li>
+<li>
+<p><strong>合成 thunk</strong>（<code>gen_spawn_thunk</code>，在 <code>lower_program</code> 遍历完所有函数后统一生成）：
+    对每个 spawn 目标构造独立 <code>IrFunction __dial_thunk_&lt;fn&gt;</code>（单 Ptr 形参 cell），
+    逐形参从 argcell 第 i 个 8 字节槽 Load 实参（Float→F64、句柄→Handle、裸指针→Ptr、
+    其余→I64），直接 <code>Call</code> 目标入口函数（对齐 LLVM gen_spawn_thunk），调用后对移交
+    的 ARC 形参各发一条 RcRelease（释放写端移交的那一份；目标函数入口 retain / 出口
+    release 净零，被 move_to 进通道的形参计数恰好落在 thunk 这一份上，既不泄漏也不
+    双释放）。thunk 名字写入 <code>.s</code> 成为真实全局符号；目标集合排序后生成，避免哈希
+    遍历顺序导致 <code>.s</code> 漂移。</p>
+</li>
+<li>
+<p><strong>验证</strong>：</p>
+</li>
+<li>worker 经 <code>channel&lt;string&gt;</code> 回传（string move + channel 共享）+ join：双后端
+    stdout 逐字一致（<code>a1</code> / <code>joined</code> 两行）；标量实参 + 多 worker + join/detach：
+    <code>x=42</code> / <code>p!,q!</code> 两行一致；无 crash / double-free / corrupt。</li>
+<li><code>-O0/-O1/-O3/-g</code> 各级别双后端一致（thunk 不受 O 级别影响）。</li>
+<li>A/B：8 个 golden 程序（core1/builtins/control_flow/core2/structs/exceptions/
+    rawptr/fnptr）<code>.s</code> 与 OLD（cf2fff6）逐字节一致（md5 全同）——本特性只在调用
+    spawn 的程序中改变行为；AArch64 普通程序零变化；spawn 程序经 clang 交叉汇编
+    产出 ELF aarch64 <code>.o</code>。</li>
+<li>
+<p>新增 R14 测试组（channel 回传闭环 + 标量/句柄混合实参 + 多 worker + join/detach</p>
+<ul>
+<li>各 O 级别）。</li>
+</ul>
+</li>
+<li>
+<p><strong>已知边界</strong>：高阶函数 <code>map/filter/reduce/sort_by</code>（需「间接调用 + 位模式还原」
+  的 hof thunk）仍未接入，是并发族之后的下一块；嵌套 channel 元素析构器（e3al 记为
+  边界）在 spawn 场景沿用同一口径。</p>
+</li>
+<li>
+<p><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 cf2fff6 零改动、<code>Cargo.toml</code> 仍
+  1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
+  不打 tag。docx 确定性生成；check_links/check_version 全过。</p>
 </li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 

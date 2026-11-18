@@ -22,7 +22,8 @@
 //         assert / panic（M7-e3ai，带 file:line:col 的 Fail-Fast 诊断）、
 //         is_null（M7-e3aj，句柄判空 = ICmp Eq(ptr, 0)）、
 //         drop（M7-e3ak，提前释放所有权 = 按类型 release + moved 记账）、
-//         channel 原语族（M7-e3al，单线程收发/判空/状态/零拷贝 move_to）、ptr_cast。
+//         channel 原语族（M7-e3al，单线程收发/判空/状态/零拷贝 move_to）、
+//         spawn / join / detach（M7-e3am，真多线程 = argcell + 合成入口 thunk）、ptr_cast。
 // ============================================================================
 
 use crate::ast::Type;
@@ -228,10 +229,14 @@ pub fn lookup(name: &str) -> Option<BSpec> {
         "closed" | "done" => return Some(unsup(Type::Bool, "closed/done 需专用路径（见 lower.rs）")),
         "move_to" => return Some(unsup(Type::Void, "move_to 需专用路径（见 lower.rs）")),
 
-        // ---- 并发 / 高阶函数：后续相位（真多线程 / 闭包 thunk） ----
-        "spawn" | "join" | "detach" | "thread" |
-        "map" | "filter" | "reduce" | "sort_by" =>
-            return Some(unsup(Type::Int, "并发 / 高阶函数内建暂未接入（后续相位）")),
+        // spawn / join / detach 走 lower.rs 专用路径（M7-e3am：argcell 移交 +
+        // 合成 __dial_thunk_<fn> 入口 + dial_thread_new/join/detach）；防御兜底。
+        "spawn" | "join" | "detach" =>
+            return Some(unsup(Type::Thread, "spawn/join/detach 需专用路径（见 lower.rs）")),
+
+        // ---- 高阶函数（闭包 thunk）/ 未定义的 thread 名：后续相位 ----
+        "thread" | "map" | "filter" | "reduce" | "sort_by" =>
+            return Some(unsup(Type::Int, "高阶函数内建暂未接入（后续相位）")),
 
         _ => return None,
     }
