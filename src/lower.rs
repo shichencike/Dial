@@ -63,6 +63,7 @@ pub fn lower_program(
         .chain(prog.cstructs.iter().filter(|s| s.packed).map(|s| s.name.clone()))
         .collect();
     let mut spawn_targets: HashSet<String> = HashSet::new();
+    let mut hof_thunks: Vec<(Type, Type, usize)> = Vec::new();
     for func in &prog.functions {
         // M7-e3w：调试标记只在 -g 时插入。非 -g 的 IR 必须与 e3v 逐字节一致，
         // 否则 Line/DebugVar 会打断 e3p 折叠 / popcount 融合等 pass 的模式窗口。
@@ -70,6 +71,8 @@ pub fn lower_program(
         l.lower_function(func)?;
         // M7-e3am：收集本函数内 spawn 引用的线程入口目标（去重在生成阶段）。
         spawn_targets.extend(l.spawn_targets.drain());
+        // M7-e3an：收集本函数内高阶方法需要的回调 thunk 描述。
+        hof_thunks.append(&mut l.hof_thunks);
     }
     // M7-e3am：为所有 spawn 目标生成线程入口 thunk（对齐 LLVM gen_spawn_thunk）。
     // 必须在所有函数 lower 完之后统一生成——thunk 是独立函数，不能嵌在调用方体内。
@@ -78,6 +81,16 @@ pub fn lower_program(
     targets.sort();
     for fname in &targets {
         gen_spawn_thunk(&mut ip, fname)?;
+    }
+    // M7-e3an：为所有高阶方法生成回调 thunk（对齐 LLVM gen_hof_thunk）。
+    // Type 未实现 Hash，故先按 thunk 名字（elem码 + ret码 + arity，确定性）排序去重，
+    // 再逐个生成；gen_hof_thunk 内部亦按名字幂等去重，双保险。
+    hof_thunks.sort_by_key(|(e, r, a)| {
+        format!("{}_{}_{}", hof_code(e), hof_code(r), a)
+    });
+    hof_thunks.dedup_by(|x, y| x.0 == y.0 && x.1 == y.1 && x.2 == y.2);
+    for (elem, ret, arity) in &hof_thunks {
+        gen_hof_thunk(&mut ip, elem, ret, *arity)?;
     }
     Ok(ip)
 }
@@ -166,6 +179,149 @@ fn gen_spawn_thunk(ip: &mut IrProgram, fname: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ============================================================================
+// M7-e3an：高阶数组方法（map/filter/reduce/sort_by）的回调 thunk。
+//
+// C 运行时 dial_array_hof / dial_array_reduce 只认统一签名
+//   int64_t (*thunk)(int64_t a, int64_t b, void *fn_raw, void *state)
+// 而 Dial 回调签名精确（fn(elem[, elem], rawptr<void>): ret，标量宽度各异：
+// float=f64 / bool=C ABI i32 / byte=i8 / int=i64）。硬套统一签名是 UB——编译器
+// 知道静态签名，于是生成一份「i64 槽位位模式 ↔ 精确 C ABI 类型」的适配代码。
+// 与 LLVM 后端 gen_hof_thunk 逐口径对齐（名字、位转换、C ABI 宽度、空 state）。
+// ============================================================================
+
+/// thunk 名字里的单字符类型码（与 LLVM gen_hof_thunk 的 code 闭包一致）。
+fn hof_code(t: &Type) -> &'static str {
+    match t {
+        Type::Int => "i",
+        Type::Float => "f",
+        Type::Bool => "b",
+        Type::Byte => "y",
+        Type::Char => "c",
+        _ => "x",
+    }
+}
+
+/// 把 C 槽位的 i64 位模式 `v` 按 Dial 类型 `t` 还原，并适配到回调的 C ABI 参数宽度。
+/// 返回 (参数值, 该参数的 IrType)：float 经 store/load 重解释位模式，
+/// bool/byte 内部是 I64、再按 param_ir 收窄到 i32/i8（对齐 LLVM from_elem_bits + abi_adapt）。
+fn hof_bits_to_cb_arg(f: &mut IrFunction, v: VReg, t: &Type) -> (Value, IrType) {
+    let rit = reg_ir(t);
+    let pit = param_ir(t);
+    // 1) i64 位模式 → 内部宽度值（float 需 store/load 重解释；其余标量内部即 I64）。
+    let internal: Value = if rit == IrType::I64 {
+        Value::Reg(v)
+    } else {
+        let s = f.new_reg(IrType::Ptr);
+        f.blocks[0].insts.push(IrInst::Alloca { dst: s, bytes: 8 });
+        f.blocks[0].insts.push(IrInst::Store { ptr: s, val: Value::Reg(v), ty: IrType::I64 });
+        let d = f.new_reg(rit.clone());
+        f.blocks[0].insts.push(IrInst::Load { dst: d, ptr: s, ty: rit.clone() });
+        Value::Reg(d)
+    };
+    // 2) 内部宽度 → C ABI 宽度（bool→i32 / byte→i8）。
+    if pit == rit {
+        (internal, pit)
+    } else {
+        let d = f.new_reg(pit.clone());
+        let kind = match (&rit, &pit) {
+            (IrType::I64, IrType::I32) | (IrType::I64, IrType::I8) => AConv::Trunc,
+            _ => AConv::Zext,
+        };
+        f.blocks[0].insts.push(IrInst::Conv { kind, dst: d, a: internal, ty: pit.clone() });
+        (Value::Reg(d), pit)
+    }
+}
+
+/// 把回调返回的 C ABI 值 `cb_v`（宽度 param_ir(t)）转回 Dial 内部宽度，
+/// 再压成 i64 槽位位模式（对齐 LLVM abi_adapt + to_elem_bits）。
+fn hof_cb_ret_to_bits(f: &mut IrFunction, cb_v: VReg, t: &Type) -> VReg {
+    let pit = param_ir(t);
+    let rit = reg_ir(t);
+    // 1) C ABI 返回宽度 → 内部宽度（bool/byte 窄整型零扩展回 I64）。
+    let internal: VReg = if pit == rit {
+        cb_v
+    } else {
+        let d = f.new_reg(rit.clone());
+        let kind = match (&pit, &rit) {
+            (IrType::I32, IrType::I64) | (IrType::I8, IrType::I64) => AConv::Zext,
+            _ => AConv::Zext,
+        };
+        f.blocks[0].insts.push(IrInst::Conv { kind, dst: d, a: Value::Reg(cb_v), ty: rit.clone() });
+        d
+    };
+    // 2) 内部宽度 → i64 位模式（float 经 store/load 取 IEEE754 位）。
+    if rit == IrType::I64 {
+        internal
+    } else {
+        let s = f.new_reg(IrType::Ptr);
+        f.blocks[0].insts.push(IrInst::Alloca { dst: s, bytes: 8 });
+        f.blocks[0].insts.push(IrInst::Store { ptr: s, val: Value::Reg(internal), ty: rit.clone() });
+        let d = f.new_reg(IrType::I64);
+        f.blocks[0].insts.push(IrInst::Load { dst: d, ptr: s, ty: IrType::I64 });
+        d
+    }
+}
+
+/// 生成 `__dial_hof_<arity><elem><ret>` thunk（独立函数，追加到 ip.functions）。
+/// arity=1: fn(elem, state): ret；arity=2: fn(elem, elem, state): ret。
+fn gen_hof_thunk(ip: &mut IrProgram, elem: &Type, ret: &Type, arity: usize) -> Result<(), String> {
+    let name = format!("__dial_hof_{}_{}_{}", arity, hof_code(elem), hof_code(ret));
+    if ip.functions.iter().any(|f| f.name == name) {
+        return Ok(());
+    }
+    // thunk 自身签名（C ABI）：(i64 a, i64 b, ptr fn_raw, ptr state) -> i64。
+    let params: Vec<(String, IrType)> = vec![
+        ("a".into(), IrType::I64),
+        ("b".into(), IrType::I64),
+        ("fn".into(), IrType::Ptr),
+        ("state".into(), IrType::Ptr),
+    ];
+    let mut f = IrFunction::new(name.clone(), params, IrType::I64, FuncLink::Private);
+    f.blocks.push(IrBlock { id: 0, params: Vec::new(), insts: Vec::new(), term: Term::Unreachable });
+    f.entry = 0;
+
+    // 4 个 C ABI 参数各一个栈槽，按序登记到 param_slots 供 prologue 填值。
+    let mut arg_regs: Vec<VReg> = Vec::new();
+    for ty in [IrType::I64, IrType::I64, IrType::Ptr, IrType::Ptr] {
+        let slot = f.new_reg(IrType::Ptr);
+        f.blocks[0].insts.push(IrInst::Alloca { dst: slot, bytes: 8 });
+        f.param_slots.push(slot);
+        let v = f.new_reg(ty.clone());
+        f.blocks[0].insts.push(IrInst::Load { dst: v, ptr: slot, ty });
+        arg_regs.push(v);
+    }
+    let a_bits = arg_regs[0];
+    let b_bits = arg_regs[1];
+    let fn_raw = arg_regs[2];
+    let state = arg_regs[3];
+
+    // i64 位模式 → 回调实参（C ABI 宽度），arity=2 时两个 elem 参数。
+    let (a_val, a_ty) = hof_bits_to_cb_arg(&mut f, a_bits, elem);
+    let mut args = vec![a_val];
+    let mut arg_tys = vec![a_ty];
+    if arity == 2 {
+        let (b_val, b_ty) = hof_bits_to_cb_arg(&mut f, b_bits, elem);
+        args.push(b_val);
+        arg_tys.push(b_ty);
+    }
+    // 第 3 个回调参数是 rawptr<void> 状态（Ptr），原样透传。
+    args.push(Value::Reg(state));
+    arg_tys.push(IrType::Ptr);
+
+    // 间接调用回调：目标来自 fn_raw 寄存器，返回宽度按 C ABI。
+    let ret_abi = param_ir(ret);
+    let cb_dst = f.new_reg(ret_abi.clone());
+    f.blocks[0].insts.push(IrInst::CallIndirect {
+        dst: Some(cb_dst), target: fn_raw, args, arg_tys, ret_ty: ret_abi,
+    });
+
+    let bits = hof_cb_ret_to_bits(&mut f, cb_dst, ret);
+    f.blocks[0].term = Term::Return { val: Some(Value::Reg(bits)) };
+    ip.functions.push(f);
+    Ok(())
+}
+
 struct Lower<'a> {
     ip: &'a mut IrProgram,
     func: IrFunction,
@@ -201,6 +357,10 @@ struct Lower<'a> {
     /// 当前函数体内生成（它是独立函数），故只记录名字，由 lower_program 在
     /// 遍历完所有函数后统一为每个目标生成 `__dial_thunk_<fn>` 追加到 ip.functions。
     spawn_targets: HashSet<String>,
+    /// M7-e3an：本编译单元内需要的高阶回调 thunk 描述 (elem, ret, arity)。
+    /// 与 spawn_targets 同理（独立函数），由 lower_program 统一生成；Type 未实现
+    /// Hash，故用 Vec 保存，生成时按 thunk 名字去重 + 排序保证 .s 确定性。
+    hof_thunks: Vec<(Type, Type, usize)>,
 }
 
 impl<'a> Lower<'a> {
@@ -214,6 +374,7 @@ impl<'a> Lower<'a> {
             cur_pos: (0, 0),
             src_file: src_file.to_string(),
             spawn_targets: HashSet::new(),
+            hof_thunks: Vec::new(),
             func: IrFunction::new(String::new(), Vec::new(), IrType::Void, FuncLink::Private),
             cur: 0,
             scopes: Vec::new(),
@@ -1590,6 +1751,11 @@ impl<'a> Lower<'a> {
         if matches!(od, Type::Array(_)) && matches!(method, "remove" | "pop") {
             return self.lower_array_remove(obj, &od, method, args);
         }
+        // M7-e3an：高阶数组方法（map/filter/reduce/sort_by）走专用路径——生成回调
+        // thunk + 调用 C 运行时 dial_array_hof / dial_array_reduce（对齐 LLVM）。
+        if matches!(od, Type::Array(_)) && matches!(method, "map" | "filter" | "reduce" | "sort_by") {
+            return self.lower_hof_method(obj, &od, method, args);
+        }
         // 裸指针 offset(n)：按元素类型步长做指针算术（负偏移靠补码自然生效，
         // 且支持运行期偏移量——不必是常量）。步长口径与 LLVM 后端的
         // raw_elem_llvm 一致：byte/bool=1、char=4、int/float=8、struct 按布局、
@@ -1683,6 +1849,129 @@ impl<'a> Lower<'a> {
             self.emit(IrInst::Store { ptr: slot, val: Value::Reg(d), ty: IrType::Handle });
         }
         Ok((out, false))
+    }
+
+    /// M7-e3an：高阶数组方法 map / filter / sort_by / reduce 的专用 lowering。
+    /// 对齐 LLVM codegen.rs gen_method 的 (Type::Array, 高阶方法) 分支：
+    ///   - 生成精确签名回调 thunk（__dial_hof_<arity><elem><ret>），登记到 hof_thunks；
+    ///   - 求值回调为 fn_raw（具名函数→FuncAddr，函数指针变量→load 出的地址）；
+    ///   - state 显式透传（缺省空 rawptr<void>）；reduce 另有 init 位模式实参；
+    ///   - 调用 dial_array_hof(op/out_kind) 或 dial_array_reduce；
+    ///   - sort_by 把 COW 后新指针写回接收变量槽；reduce 把 i64 位模式还原成 elem。
+    fn lower_hof_method(
+        &mut self,
+        obj: &Expr,
+        od: &Type,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<(Value, bool), String> {
+        let elem = match od {
+            Type::Array(e) => (**e).clone(),
+            _ => return self.err("asm 后端：高阶方法仅支持数组"),
+        };
+
+        // 回调签名 fn(elem[, elem], rawptr<void>): ret —— 语义层已严格核对。
+        let cb_dt = self.expr_dt(&args[0]);
+        let (ps, cb_ret) = match &cb_dt {
+            Type::FnPtr(ps, ret) => (ps.clone(), (**ret).clone()),
+            _ => return self.err("asm 后端：高阶方法首参必须是函数指针"),
+        };
+        // ps 末位是 state(rawptr<void>)，前面 1/2 个是 elem → arity。
+        let arity = ps.len().saturating_sub(1);
+        if arity == 0 || arity > 2 {
+            return self.err("asm 后端：高阶回调 arity 仅支持 1 或 2");
+        }
+
+        // thunk 的 ret：map 用回调返回类型；filter=Bool；sort_by=Int；reduce=elem。
+        let thunk_ret = match method {
+            "map" => cb_ret.clone(),
+            "filter" => Type::Bool,
+            "sort_by" => Type::Int,
+            "reduce" => elem.clone(),
+            _ => return self.err("asm 后端：未知高阶方法"),
+        };
+        // 登记 thunk 描述（去重 + 统一生成在 lower_program）。
+        let key = (elem.clone(), thunk_ret.clone(), arity);
+        if !self.hof_thunks.contains(&key) {
+            self.hof_thunks.push(key);
+        }
+        let thunk_name = format!(
+            "__dial_hof_{}_{}_{}", arity, hof_code(&elem), hof_code(&thunk_ret)
+        );
+
+        // 接收者数组指针。
+        let (ov, _) = self.lower_expr(obj, od)?;
+
+        // fn_raw：具名函数求值为 FuncAddr，函数指针变量求值为 load 出的地址。
+        let (fn_raw, _) = self.lower_expr(&args[0], &cb_dt)?;
+
+        // state：map/filter/sort_by 是第 2 参，reduce 是第 3 参；缺省空指针。
+        let state_idx = if method == "reduce" { 2 } else { 1 };
+        let state = if args.len() > state_idx {
+            let st = self.lower_expr(&args[state_idx], &Type::RawPtr(Box::new(Type::Void)))?;
+            st.0
+        } else {
+            Value::Imm(Imm::I64(0))
+        };
+
+        // thunk 函数地址。
+        let thunk_addr = self.new_reg(IrType::FnPtr);
+        self.emit(IrInst::FuncAddr { dst: thunk_addr, func: thunk_name });
+
+        if method == "reduce" {
+            // init：第 2 参，按 elem 静态类型压成 i64 槽位位模式。
+            let (init_v, _) = self.lower_expr(&args[1], &elem)?;
+            let init_bits = self.coerce_elem_bits(init_v, &elem)?;
+            let dst = self.new_reg(IrType::I64);
+            self.emit(IrInst::Call {
+                dst: Some(dst),
+                func: "dial_array_reduce".to_string(),
+                args: vec![ov, init_bits, fn_raw, state, Value::Reg(thunk_addr)],
+                arg_tys: vec![IrType::Handle, IrType::I64, IrType::FnPtr, IrType::Ptr, IrType::FnPtr],
+                ret_ty: IrType::I64,
+                linkage: CallLink::Runtime,
+            });
+            // i64 位模式 → elem（标量经 8 字节槽重解释）。
+            let out = self.reinterpret_bits(Value::Reg(dst), reg_ir(&elem))?;
+            Ok((out, false))
+        } else {
+            let op: i64 = match method {
+                "map" => 0,
+                "filter" => 1,
+                "sort_by" => 2,
+                _ => unreachable!(),
+            };
+            let out_elem = if method == "map" { &thunk_ret } else { &elem };
+            let out_kind = builtin::array_elem_kind(out_elem) as i64;
+            let dst = self.new_reg(IrType::Handle);
+            self.emit(IrInst::Call {
+                dst: Some(dst),
+                func: "dial_array_hof".to_string(),
+                args: vec![
+                    ov,
+                    Value::Imm(Imm::I64(op)),
+                    Value::Imm(Imm::I64(out_kind)),
+                    fn_raw,
+                    state,
+                    Value::Reg(thunk_addr),
+                ],
+                arg_tys: vec![
+                    IrType::Handle, IrType::I64, IrType::I64,
+                    IrType::FnPtr, IrType::Ptr, IrType::FnPtr,
+                ],
+                ret_ty: IrType::Handle,
+                linkage: CallLink::Runtime,
+            });
+            // sort_by 原地排序（COW 后可能换 buffer）：写回接收变量槽，与 sort 一致。
+            if method == "sort_by" {
+                if let Expr::Var(n) = obj {
+                    if let Some(slot) = self.lookup(n).map(|l| l.ptr) {
+                        self.emit(IrInst::Store { ptr: slot, val: Value::Reg(dst), ty: IrType::Handle });
+                    }
+                }
+            }
+            Ok((Value::Reg(dst), false))
+        }
     }
 
     /// 数组 remove(i) / pop()：返回被删元素（按元素类型还原），并把 COW 新指针
@@ -3202,11 +3491,26 @@ impl<'a> Lower<'a> {
                 };
                 if let Some((_, ft)) = self.struct_field(&bd, field) { ft } else { Type::Int }
             }
-            Expr::Method(obj, method, _) => {
+            Expr::Method(obj, method, margs) => {
                 let od = self.expr_dt(obj);
                 // remove/pop 返回被删元素（不是新数组指针）。
                 if matches!(method.as_str(), "remove" | "pop") {
                     if let Type::Array(e) = &od { return *e.clone(); }
+                }
+                // M7-e3an：高阶方法返回类型（与语义层 check_method_call 同口径）。
+                // lookup_method 对这些方法返回 None（走专用路径），此处须显式推断，
+                // 否则链式调用（如 a.map(f).get(0)）会把结果误当成 Int。
+                if matches!(method.as_str(), "map" | "filter" | "reduce" | "sort_by") {
+                    if let Type::Array(e) = &od {
+                        return match method.as_str() {
+                            "reduce" => (**e).clone(),
+                            "map" => match margs.first().map(|a| self.expr_dt(a)) {
+                                Some(Type::FnPtr(_, r)) => Type::Array(r),
+                                _ => Type::Array(e.clone()),
+                            },
+                            _ => Type::Array(e.clone()), // filter / sort_by
+                        };
+                    }
                 }
                 builtin::method_ret(&od, method).unwrap_or(Type::Int)
             }

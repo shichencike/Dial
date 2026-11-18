@@ -1761,7 +1761,16 @@ impl<'a> FnEmit<'a> {
             let ty = tys[idx].clone();
             // param_slots 里存的是 Alloca 的 dst vreg：它的「值」是栈区地址，
             // 真正的参数数据要写进那块 alloca 区（不是 vreg 自己的 8 字节槽）。
-            let off = *self.alloca_off.get(&slot).unwrap_or(&0);
+            // M7-e3an：若该槽的 Alloca 已被 DCE 删除（典型：回调从不读的 rawptr<void>
+            // state 参数），函数体内不可能有 Load 读它——必须跳过写入。旧代码
+            // unwrap_or(&0) 会写到偏移 0，恰好覆盖 x86 的 callee-saved 保存位
+            // （save_off=0），破坏 C 运行时回调链里的 rbx/r12/r13，导致 sort_by
+            // 插入排序错乱甚至 SIGSEGV。普通程序所有参数槽都被读取而保活，off 必
+            // 命中，此分支零影响。
+            let off = match self.alloca_off.get(&slot) {
+                Some(o) => *o,
+                None => continue,
+            };
             let src_reg: String;
             match loc {
                 ArgLoc::Int(k) => src_reg = self.target.int_arg_regs()[*k].to_string(),

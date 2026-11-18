@@ -1,0 +1,80 @@
+// M7-e3an：高阶数组方法 map / filter / reduce / sort_by 双后端回归。
+//
+// 覆盖：4 种标量元素（int/float/byte/char）× 精确签名回调 thunk，C ABI 宽度适配
+// （float=f64 / bool=C ABI i32 / byte=i8 / int=i64）、状态显式透传（state）、
+// null state、以及 float 比较器的 sort_by（曾因 state 槽与 callee-saved 保存位
+// 重叠触发 SIGSEGV，M7-e3an 修复）。
+//
+// 双后端（--backend=llvm / --backend=asm）运行输出必须逐字节一致。
+
+// ---- int：map / filter / reduce / sort_by ----
+fn scale(x: int, st: rawptr<void>): int {
+    var p: rawptr<int> = ptr_cast<rawptr<int>>(st);
+    return x * *p;
+}
+fn is_even(x: int, st: rawptr<void>): bool { return x % 2 == 0; }
+fn iadd(a: int, b: int, st: rawptr<void>): int { return a + b; }
+fn idesc(a: int, b: int, st: rawptr<void>): int { return b - a; }
+
+// ---- float：map / filter / reduce / sort_by ----
+fn dbl(x: float, st: rawptr<void>): float { return x * 2.0; }
+fn fsum(a: float, b: float, st: rawptr<void>): float { return a + b; }
+fn is_pos(x: float, st: rawptr<void>): bool { return x > 0.0; }
+fn fdesc(a: float, b: float, st: rawptr<void>): int {
+    if (a > b) { return -1; }
+    if (a < b) { return 1; }
+    return 0;
+}
+
+// ---- byte / char：map / reduce ----
+fn binc(x: byte, st: rawptr<void>): byte { return int_to_byte(byte_to_int(x) + 1); }
+fn badd(a: byte, b: byte, st: rawptr<void>): byte {
+    return int_to_byte(byte_to_int(a) + byte_to_int(b));
+}
+fn cupper(x: char, st: rawptr<void>): char {
+    return int_to_char(char_to_int(x) - 32);
+}
+
+fn show_f(f: float[]): int {
+    print(f.get(0), ",", f.get(1), ",", f.get(2), ",", f.get(3));
+    return 0;
+}
+
+fn main(): int {
+    // 具名函数 + 真实 state（scale 解引用状态指针）。
+    var kp: rawptr<byte> = raw_alloc(8);
+    var ip: rawptr<int> = ptr_cast<rawptr<int>>(kp);
+    *ip = 10;
+    var st: rawptr<void> = ptr_cast<rawptr<void>>(kp);
+
+    var a: int[] = [1, 2, 3, 4, 5, 6];
+    var m: int[] = a.map(scale, st);
+    print("map=", m.get(0), ",", m.get(5));   // 10,60
+    var e: int[] = a.filter(is_even);
+    print("filter=", e.length(), ",", e.get(2)); // 3,6
+    print("reduce=", a.reduce(iadd, 0));         // 21
+    a.sort_by(idesc);
+    print("sort_by=", a.get(0), ",", a.get(5));  // 6,1
+
+    // float：null state。
+    var f: float[] = [1.5, -2.0, 3.25, 4.0];
+    var d: float[] = f.map(dbl);
+    print("fmap=", d.get(0), ",", d.get(3));     // 3,8
+    print("freduce=", f.reduce(fsum, 0.0));       // 6.75
+    var fp: float[] = f.filter(is_pos);
+    print("ffilter=", fp.length());               // 3
+    f.sort_by(fdesc);
+    print("fsort="); show_f(f);                   // 4,3.25,1.5,-2
+
+    // byte / char。
+    var b: byte[] = [int_to_byte(1), int_to_byte(2), int_to_byte(3)];
+    var bi: byte[] = b.map(binc);
+    print("bmap=", byte_to_int(bi.get(0)), ",", byte_to_int(bi.get(2))); // 2,4
+    print("breduce=", byte_to_int(b.reduce(badd, int_to_byte(0))));       // 6
+    var c: char[] = ['a', 'b', 'c'];
+    var cu: char[] = c.map(cupper);
+    print("cmap=", char_to_int(cu.get(0)), ",", char_to_int(cu.get(2)));  // 65,67
+
+    raw_free(kp);
+    return 0;
+}

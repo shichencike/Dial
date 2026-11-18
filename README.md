@@ -665,7 +665,9 @@ dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|s
 
 channel 原语族在双后端一致（M7-e3al，单线程部分）：`channel(cap)` 创建、`move_to(x, ch)` 零拷贝移交所有权、`recv`/`try_recv`/`recv_timeout` 接收、`is_null` 判 EOF、`closed`/`done`/`len` 状态查询、`close` 关闭——与 `is_null`/`drop` 形成完整所有权闭环。通道 EOF 或超时后 `recv` 返回空值，用 `is_null` 判别；`-O0`~`-O3`/`-g` 下行为一致，非 channel 程序的汇编输出逐字节不变。
 
-真多线程原语 `spawn`/`join`/`detach` 同样双后端一致（M7-e3am）：`spawn(fn, args...)` 创建并立即启动线程（实参按所有权移交——堆句柄 move、channel 共享 retain、标量按值，先写满 argcell 再 `pthread_create`），线程入口由编译器合成统一签名的 `__dial_thunk_<fn>`（pthread 只认 `void(*)(void*)`，thunk 从 argcell 按类型读参后直接调用目标函数），worker 可经 channel 回传结果，`join` 等待回收、`detach` 分离；二次 join/detach 由 C 侧 Fail-Fast 拦截而非 use-after-free。与 channel 组合形成「spawn 生产 → channel 回传 → is_null 判 EOF → join 回收」的完整并发闭环；`-O0`~`-O3`/`-g` 下双后端逐字一致，非 spawn 程序的汇编输出逐字节不变。高阶函数（`map`/`filter`/`reduce`/`sort_by`）仍在后续相位。
+真多线程原语 `spawn`/`join`/`detach` 同样双后端一致（M7-e3am）：`spawn(fn, args...)` 创建并立即启动线程（实参按所有权移交——堆句柄 move、channel 共享 retain、标量按值，先写满 argcell 再 `pthread_create`），线程入口由编译器合成统一签名的 `__dial_thunk_<fn>`（pthread 只认 `void(*)(void*)`，thunk 从 argcell 按类型读参后直接调用目标函数），worker 可经 channel 回传结果，`join` 等待回收、`detach` 分离；二次 join/detach 由 C 侧 Fail-Fast 拦截而非 use-after-free。与 channel 组合形成「spawn 生产 → channel 回传 → is_null 判 EOF → join 回收」的完整并发闭环；`-O0`~`-O3`/`-g` 下双后端逐字一致，非 spawn 程序的汇编输出逐字节不变。
+
+高阶数组方法 `map`/`filter`/`reduce`/`sort_by` 同样双后端一致（M7-e3an）：回调经编译器生成的**精确签名 thunk**（`__dial_hof_<arity><elem><ret>`）间接调用——thunk 把 C 运行时的 8 字节位模式按标量类型还原（float=f64 / bool=C ABI i32 / byte=i8 / int=i64）、经 `rawptr<void>` 显式透传状态、再把回调返回值转回位模式；这正是「代替 LLVM」主线上 asm 相对 LLVM 的最后一个语义缺口，补齐后 `examples/hof_demo.dial` 在两后端逐字一致。仅支持标量元素的口径与 §32.4 相同；`-O0`~`-O3`/`-g` 下逐字一致，非高阶程序的汇编输出逐字节不变。
 
 产物形态开关（第 18 层，与上面的安全等级**正交**）：
 
@@ -4909,6 +4911,7 @@ H 组回归同时锁定正向（int64 / double / bool 混传输出 `i=42 f=3.5 b
 | `arr.map(f[, state])` | `fn(T, rawptr<void>): U` | `U[]`（新数组） |
 | `arr.filter(f[, state])` | `fn(T, rawptr<void>): bool` | `T[]`（新数组） |
 | `arr.sort_by(cmp[, state])` | `fn(T, T, rawptr<void>): int` | `T[]`（原地排序，COW 安全） |
+| `arr.reduce(f, init[, state])` | `fn(T, T, rawptr<void>): T` | `T`（标量归约值） |
 
 - 回调签名**固定带一个 `rawptr<void>` 状态参数**——没有闭包，状态必须显式穿过 C 运行时
   再交回回调；省略 `state` 时回调收到空指针。
@@ -4918,6 +4921,10 @@ H 组回归同时锁定正向（int64 / double / bool 混传输出 `i=42 f=3.5 b
 - 仅支持标量元素（`int` / `float` / `bool` / `byte` / `char`）：句柄元素数组请自己写循环
   （C 侧新建数组时不做 ARC 所有权结算）。
 - `sort_by` 用插入排序而非 `qsort`：`qsort` 的比较器拿不到 `fn_raw` / `state`，无法透传状态。
+- **双后端一致**（M7-e3an）：LLVM 与自研 asm 后端对这四个方法逐字一致——两者都由编译器生成
+  精确签名 thunk（asm 侧名 `__dial_hof_<arity><elem><ret>`）适配回调，共用同一套 C runtime
+  `dial_array_hof` / `dial_array_reduce`。四种标量元素（int/float/bool/byte/char）、真实 state
+  与省略 state、各 `-O` 级别下输出均逐字节一致；非高阶程序的汇编输出不变。
 
 ### 32.5 释放契约：谁自动、谁手动（**不要混淆**）
 

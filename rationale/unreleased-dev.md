@@ -2648,9 +2648,106 @@
     + 各 O 级别）。
 
 - **已知边界**：高阶函数 `map/filter/reduce/sort_by`（需「间接调用 + 位模式还原」
-  的 hof thunk）仍未接入，是并发族之后的下一块；嵌套 channel 元素析构器（e3al 记为
-  边界）在 spawn 场景沿用同一口径。
+  的 hof thunk）仍未接入，是并发族之后的下一块——**已于 e3an 接入，见文末**；
+  嵌套 channel 元素析构器（e3al 记为边界）在 spawn 场景沿用同一口径。
 
 - **护栏**：`src/codegen.rs`/`src/ast.rs` 相对 cf2fff6 零改动、`Cargo.toml` 仍
   1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
   不打 tag。docx 确定性生成；check_links/check_version 全过。
+
+
+#### M7-e3an：自研 asm 后端补齐 `map` / `filter` / `reduce` / `sort_by`（双后端一致性补全，动态回调最后一块）
+
+- **背景**：e3ag~e3am 逐批补齐了 asm 相对 LLVM 的语义缺口（sizeof/bitcast/assert/
+  is_null/drop/channel/spawn），e3am 的「已知边界」明确预告高阶数组方法是下一块。
+  本批落地它——这是「代替 LLVM」主线上最后一个「LLVM 支持、asm 明确 Fail-Fast 拒绝」
+  的语义构造族，补齐后 asm 在语言层面对齐 LLVM 的最后一处大缺口。
+
+- **确凿缺口（实测，非推测）**：`map/filter/reduce/sort_by` 在 LLVM 后端完整支持
+  （`codegen.rs::gen_method` 的 `(Type::Array, 高阶方法)` 分支 + `gen_hof_thunk` +
+  C runtime `dial_array_hof`/`dial_array_reduce`），asm 却把它们在两处明确拒绝：
+  ① `builtin.rs` 顶层 `lookup` 归入「高阶函数后续相位」`BKind::Unsupported`；
+  ② `lookup_method` 的 Array 分支 `map|filter|reduce|sort_by => return None`。
+  实测 `examples/hof_demo.dial` 在 LLVM 输出 `10/60/3/6/6/1`，asm 直接 Fail-Fast。
+  额外问题：`expr_dt(Expr::Method)` 对 `lookup_method=None` 的方法一律推断成
+  `Type::Int`，即使 lower 接通，链式调用（如 `a.map(f).get(0)`）也会类型错位。
+
+- **硬前置审计（全齐）**：C runtime `dial_array.c` 已实现 `dial_array_hof(a,op,
+  out_kind,fn_raw,state,thunk)` 与 `dial_array_reduce(a,init,fn_raw,state,thunk)`
+  （LLVM 后端已在用，符号随 libdial_std.a 链接）；`IrInst::FuncAddr` 可取具名函数
+  代码地址（fnptr golden 已验证）；`CallIndirect` 支持寄存器目标间接调用；8 字节槽
+  位模式重解释 `reinterpret_bits`/`coerce_elem_bits` 与三套标量宽度 `reg_ir`/
+  `param_ir` 全部就位；`Lower.hof_thunks` 收集表可沿用 spawn_targets 的「统一生成
+  确定性」模式。
+
+- **设计（对齐 LLVM `gen_hof_thunk`）**：C 运行时只认统一 thunk 签名
+  `int64_t(*)(int64_t a, int64_t b, void* fn_raw, void* state)`，而 Dial 回调签名
+  精确（float=f64 / bool=C ABI i32 / byte=i8 / int=i64，第 3 参是 rawptr<void> 状态），
+  无闭包、状态显式透传。硬套统一签名是 UB（C 无法按 Dial 任意签名调回调，float 走
+  SSE、bool 是 i1、返回类型各异）——编译器知道静态签名，故生成精确适配代码。
+  `gen_hof_thunk(ip, elem, ret, arity)` 造独立 `IrFunction __dial_hof_<arity><elem码>
+  <ret码>`（4 个 C ABI 参数 + i64 返回）：
+  1. 4 个参数各建栈槽登记 param_slots，prologue 填值后 Load 出来（a_bits/b_bits/
+     fn_raw/state）；
+  2. `hof_bits_to_cb_arg`：a_bits（i64 位模式）按 elem 还原——float 经 alloca
+     store(I64)/load(F64) 重解释 IEEE754 位、bool/byte 内部 I64 再按 param_ir 收窄
+     到 i32/i8（对齐 LLVM from_elem_bits + abi_adapt）；arity=2 时 b_bits 同款；
+     state 原样作第 3 参（Ptr）；
+  3. `CallIndirect` 调 fn_raw，ret_ty=param_ir(ret)；
+  4. `hof_cb_ret_to_bits`：回调返回值 C ABI 宽度转回内部（bool/byte 窄整型零扩展
+     回 I64），再压回 i64 位模式（float 经 store/load 取位），Return。
+  `lower_program` 末尾按 thunk 名字排序去重后统一生成（Type 未实现 Hash，用 Vec +
+  `hof_code` 键去重），`gen_hof_thunk` 内部再按名字幂等去重，双保险保证 .s 确定性。
+
+- **`lower_method` 专用路径**：`lower_hof_method` 在 `lower_array_remove` 之前拦截
+  四个方法。取 elem（数组元素）、从 `expr_dt(args[0])` 的 FnPtr 拿回调返回类型与
+  arity（ps.len()-1）；thunk_ret：map=回调返回类型、filter=Bool、sort_by=Int、
+  reduce=elem；登记 thunk → FuncAddr 取 thunk 地址；fn_raw 由 `lower_expr(args[0])`
+  求值（具名函数→FuncAddr，函数指针变量→load 出的地址）；state 是 map/filter/
+  sort_by 第 2 参、reduce 第 3 参，缺省 `Imm::I64(0)` 空指针。
+  - map(op=0)/filter(1)/sort_by(2) → `dial_array_hof(a,op,out_kind,fn_raw,state,
+    thunk)`，out_kind：map 按返回类型、其余按元素类型（`builtin::array_elem_kind`）；
+    sort_by 另把 COW 后新指针写回接收变量槽（与 `dial_array_sort` 一致）；
+  - reduce → `dial_array_reduce(a,init_bits,fn_raw,state,thunk)`，init 经
+    `coerce_elem_bits` 压位模式、结果经 `reinterpret_bits` 还原成 elem。
+  - `expr_dt` 补高阶方法返回类型推断（map→Array(回调返回)、filter/sort_by→
+    Array(elem)、reduce→elem），与语义层 check_method_call 同口径。
+  - `builtin.rs` 两处 Unsupported 注释更新为「已由 lower.rs 专用路径接管」（防御
+    兜底语义不变：方法调用走 lookup_method=None + lower_method 拦截，全局函数位置
+    的 map/filter/reduce/sort_by 仍明确 Unsupported）。
+
+- **过程中发现并修复的既有 codegen_asm bug（关键）**：float 比较器 `sort_by` 首测
+  崩 SIGSEGV（结果错乱 `[4,-2,3.25,4]` vs LLVM `[4,3.25,1.5,-2]`）。gdb 定位：
+  崩在 `stdlib/dial_array.c:315 e[j+1]=key`，C 的 callee-saved 寄存器全被破坏
+  （rbx=state-1、r13=-2.0 的 IEEE754 位模式）。根因：回调 `fdesc(a:float,b:float,
+  st:rawptr<void>)` 从不读 state，其参数槽 Alloca 被 DCE 删除；prologue 写参数时
+  `let off = *self.alloca_off.get(&slot).unwrap_or(&0)` 查不到就写偏移 0，而 x86
+  callee-saved 保存位正是 save_off=0（`mov %rbx,(%rsp)` 与 `mov %rdi,(%rsp)` 重叠），
+  epilogue 恢复的 rbx/r13 变成 state/垃圾数据，破坏 C 运行时插入排序的循环变量。
+  这在本批之前从未暴露，因 asm 不支持 hof、不存在「C 运行时回调 asm 函数」场景。
+  修复：prologue 写入处改为 `match alloca_off.get(&slot) { Some(o)=>*o, None=>continue }`
+  ——槽的 Alloca 已被删则函数体内不可能有 Load 读它，跳过写入等价且避免踩 save 区。
+  普通程序所有参数槽都被读取而保活、off 必命中，此分支对既有程序零影响（实证见下）。
+
+- **实测数据**：
+  - int：map（真实 state 解引用 ×10）=10/60；filter=长度 3、末元素 6；reduce=21；
+    sort_by 降序=6/1。float：map=3/8、reduce=6.75、filter 长度 3、比较器 sort_by
+    降序=4,3.25,1.5,-2（修复前 SIGSEGV，修复后退出码 0 且逐字一致）。
+  - byte：map=2/4、reduce=6；char：map=65/67。null state 与真实 state 两种形态
+    双后端 stdout 逐字节一致。
+  - `-O0/-O1/-O2/-O3/-g` 各级别双后端一致（thunk 不受 O 级别影响）。
+  - A/B（git worktree 编译 HEAD 9f0ed9b 的旧二进制对比）：10 个既有 golden 程序
+    （core1/core2/core3/builtins/containers/control_flow/exceptions/fnptr/rawptr/
+    structs）`.s` 逐字节一致（md5 全同）；AArch64 普通程序 core3 `.s` 新旧逐字节
+    一致（零变化）；新增 `tests/asm_golden/hof.dial`（第 11 个 golden）；hof 程序经
+    clang 交叉汇编产出 ELF aarch64 `.o`（42 个 thunk 符号引用）。
+  - 完整回归 746 PASS / 0 FAIL（基线 745 + hof golden 1），双后端黄金用例 10→11。
+
+- **护栏**：`src/codegen.rs`/`src/ast.rs` 相对 9f0ed9b 零改动、`Cargo.toml` 仍
+  1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
+  不打 tag。docx 确定性生成；check_links/check_version 全过。
+
+- **已知边界**：回调按 Dial C ABI 精确签名调用，暂不支持返回句柄元素（string[] 等
+  的 map，语义层本就拒绝句柄元素高阶方法，两端同源）；嵌套高阶（回调返回函数指针）
+  未覆盖；thunk 的 float32/int32 标量元素口径与 LLVM 未逐一比对（现有高阶方法元素
+  只开放 int/float/bool/byte/char，语义层已限制）。

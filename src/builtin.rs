@@ -234,9 +234,13 @@ pub fn lookup(name: &str) -> Option<BSpec> {
         "spawn" | "join" | "detach" =>
             return Some(unsup(Type::Thread, "spawn/join/detach 需专用路径（见 lower.rs）")),
 
-        // ---- 高阶函数（闭包 thunk）/ 未定义的 thread 名：后续相位 ----
-        "thread" | "map" | "filter" | "reduce" | "sort_by" =>
-            return Some(unsup(Type::Int, "高阶函数内建暂未接入（后续相位）")),
+        // map/filter/reduce/sort_by 是数组**方法**，走 lower_method 专用路径
+        // （M7-e3an：__dial_hof_<arity><elem><ret> thunk + dial_array_hof/reduce），
+        // 这里仅作全局函数位置的防御兜底，正常不会被方法调用命中。
+        "map" | "filter" | "reduce" | "sort_by" =>
+            return Some(unsup(Type::Int, "高阶方法需数组接收者，走专用路径（见 lower.rs：lower_hof_method）")),
+        // thread 名尚未接入（后续相位）。
+        "thread" => return Some(unsup(Type::Int, "thread 构造暂未接入（后续相位）")),
 
         _ => return None,
     }
@@ -401,7 +405,8 @@ pub fn lookup_method(recv: &Type, name: &str) -> Option<MSpec> {
             "reverse" => MSpec::new("dial_array_reverse", MA0, recv.clone(), IrType::Handle).wb(),
             "clear" => MSpec::new("dial_array_clear", MA0, recv.clone(), IrType::Handle).wb(),
             "join" => MSpec::new("dial_array_join", MA_P, string.clone(), IrType::Handle),
-            // 高阶方法需要 fnptr thunk，明确不支持（由 lower_method 报 Fail-Fast）。
+            // M7-e3an：高阶方法走 lower_method 专用路径（gen_hof_thunk + C 运行时），
+            // 不经本分派表；返回 None 表示"无通用 C 符号映射"，lower_method 已先行拦截。
             "map" | "filter" | "reduce" | "sort_by" => return None,
             _ => return None,
         },

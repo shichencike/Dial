@@ -1284,7 +1284,8 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety d
 <p>句柄判空内建 <code>is_null(x)</code> 在双后端同样一致（M7-e3aj）：LLVM 的 <code>ptrtoint + icmp eq null</code> 对应 asm 的一条 <code>ICmp(Eq, 句柄, 0)</code>，产出严格 <code>false/true</code>、零运行时开销，典型用于 FFI/句柄错误路径（如连接失败返回空句柄）。准入类型由语义层 <code>is_nullable_type</code> 统一把关（字符串/容器/错误/通道/线程/文件/不透明句柄可判空，标量编译期拒绝），两端同源；<code>-O0</code>~<code>-O3</code>/<code>-g</code> 下结果不漂移，非 is_null 程序的汇编输出逐字节不变。</p>
 <p>所有权释放内建 <code>drop(x)</code> 在双后端同样一致（M7-e3ak）：提前释放变量所有权（move 语义），按类型分派——文件→关闭、线程→join、裸指针→<code>raw_free</code>、ARC 句柄→release、标量 no-op，释放后标记变量已转移，作用域退出不再二次释放（防 double free / UAF）。这是 rawptr「谁申请谁释放」与 with 块自动释放的同源机制；<code>-O0</code>~<code>-O3</code>/<code>-g</code> 下行为一致，非 drop 程序的汇编输出逐字节不变。</p>
 <p>channel 原语族在双后端一致（M7-e3al，单线程部分）：<code>channel(cap)</code> 创建、<code>move_to(x, ch)</code> 零拷贝移交所有权、<code>recv</code>/<code>try_recv</code>/<code>recv_timeout</code> 接收、<code>is_null</code> 判 EOF、<code>closed</code>/<code>done</code>/<code>len</code> 状态查询、<code>close</code> 关闭——与 <code>is_null</code>/<code>drop</code> 形成完整所有权闭环。通道 EOF 或超时后 <code>recv</code> 返回空值，用 <code>is_null</code> 判别；<code>-O0</code>~<code>-O3</code>/<code>-g</code> 下行为一致，非 channel 程序的汇编输出逐字节不变。</p>
-<p>真多线程原语 <code>spawn</code>/<code>join</code>/<code>detach</code> 同样双后端一致（M7-e3am）：<code>spawn(fn, args...)</code> 创建并立即启动线程（实参按所有权移交——堆句柄 move、channel 共享 retain、标量按值，先写满 argcell 再 <code>pthread_create</code>），线程入口由编译器合成统一签名的 <code>__dial_thunk_&lt;fn&gt;</code>（pthread 只认 <code>void(*)(void*)</code>，thunk 从 argcell 按类型读参后直接调用目标函数），worker 可经 channel 回传结果，<code>join</code> 等待回收、<code>detach</code> 分离；二次 join/detach 由 C 侧 Fail-Fast 拦截而非 use-after-free。与 channel 组合形成「spawn 生产 → channel 回传 → is_null 判 EOF → join 回收」的完整并发闭环；<code>-O0</code>~<code>-O3</code>/<code>-g</code> 下双后端逐字一致，非 spawn 程序的汇编输出逐字节不变。高阶函数（<code>map</code>/<code>filter</code>/<code>reduce</code>/<code>sort_by</code>）仍在后续相位。</p>
+<p>真多线程原语 <code>spawn</code>/<code>join</code>/<code>detach</code> 同样双后端一致（M7-e3am）：<code>spawn(fn, args...)</code> 创建并立即启动线程（实参按所有权移交——堆句柄 move、channel 共享 retain、标量按值，先写满 argcell 再 <code>pthread_create</code>），线程入口由编译器合成统一签名的 <code>__dial_thunk_&lt;fn&gt;</code>（pthread 只认 <code>void(*)(void*)</code>，thunk 从 argcell 按类型读参后直接调用目标函数），worker 可经 channel 回传结果，<code>join</code> 等待回收、<code>detach</code> 分离；二次 join/detach 由 C 侧 Fail-Fast 拦截而非 use-after-free。与 channel 组合形成「spawn 生产 → channel 回传 → is_null 判 EOF → join 回收」的完整并发闭环；<code>-O0</code>~<code>-O3</code>/<code>-g</code> 下双后端逐字一致，非 spawn 程序的汇编输出逐字节不变。</p>
+<p>高阶数组方法 <code>map</code>/<code>filter</code>/<code>reduce</code>/<code>sort_by</code> 同样双后端一致（M7-e3an）：回调经编译器生成的<strong>精确签名 thunk</strong>（<code>__dial_hof_&lt;arity&gt;&lt;elem&gt;&lt;ret&gt;</code>）间接调用——thunk 把 C 运行时的 8 字节位模式按标量类型还原（float=f64 / bool=C ABI i32 / byte=i8 / int=i64）、经 <code>rawptr&lt;void&gt;</code> 显式透传状态、再把回调返回值转回位模式；这正是「代替 LLVM」主线上 asm 相对 LLVM 的最后一个语义缺口，补齐后 <code>examples/hof_demo.dial</code> 在两后端逐字一致。仅支持标量元素的口径与 §32.4 相同；<code>-O0</code>~<code>-O3</code>/<code>-g</code> 下逐字一致，非高阶程序的汇编输出逐字节不变。</p>
 <p>产物形态开关（第 18 层，与上面的安全等级<strong>正交</strong>）：</p>
 <table>
 <thead>
@@ -7975,6 +7976,11 @@ print(sum());             // 0（缺省就是空数组）
 <td><code>fn(T, T, rawptr&lt;void&gt;): int</code></td>
 <td><code>T[]</code>（原地排序，COW 安全）</td>
 </tr>
+<tr>
+<td><code>arr.reduce(f, init[, state])</code></td>
+<td><code>fn(T, T, rawptr&lt;void&gt;): T</code></td>
+<td><code>T</code>（标量归约值）</td>
+</tr>
 </tbody>
 </table>
 <ul>
@@ -7986,6 +7992,10 @@ print(sum());             // 0（缺省就是空数组）
 <li>仅支持标量元素（<code>int</code> / <code>float</code> / <code>bool</code> / <code>byte</code> / <code>char</code>）：句柄元素数组请自己写循环
   （C 侧新建数组时不做 ARC 所有权结算）。</li>
 <li><code>sort_by</code> 用插入排序而非 <code>qsort</code>：<code>qsort</code> 的比较器拿不到 <code>fn_raw</code> / <code>state</code>，无法透传状态。</li>
+<li><strong>双后端一致</strong>（M7-e3an）：LLVM 与自研 asm 后端对这四个方法逐字一致——两者都由编译器生成
+  精确签名 thunk（asm 侧名 <code>__dial_hof_&lt;arity&gt;&lt;elem&gt;&lt;ret&gt;</code>）适配回调，共用同一套 C runtime
+  <code>dial_array_hof</code> / <code>dial_array_reduce</code>。四种标量元素（int/float/bool/byte/char）、真实 state
+  与省略 state、各 <code>-O</code> 级别下输出均逐字节一致；非高阶程序的汇编输出不变。</li>
 </ul>
 <h3 id="325-释放契约谁自动谁手动不要混淆">32.5 释放契约：谁自动、谁手动（<strong>不要混淆</strong>）</h3>
 <p>最容易搞错的一点：<strong>「不受自动管束」不等于「都需要手动释放」</strong>。</p>
