@@ -2608,6 +2608,86 @@ fi
 
 
 # ===========================================================================
+# R17) 借用句柄绑局部变量的 retain 结算（M7-e3ap）
+#     Expr::Index / Method(get,at) 是从容器借来的元素句柄，绑到局部变量时必须
+#     retain 一份（对齐 LLVM retain_if_borrowed），否则作用域退出 release 多减 1。
+#     用官方示例 multi_dim_demo.dial 原文回归（历史上 asm 在此 free(): unaligned
+#     chunk 崩溃），并覆盖 get/Index 绑局部变量、链式重绑、赋值右值、string[][]、各 O 级别。
+# ===========================================================================
+echo
+echo "  -- R17) 借用句柄绑定 retain 结算双后端一致性 --"
+CDIR17="${TMP}/r17"
+mkdir -p "$CDIR17"
+
+# 7a) 官方示例 multi_dim_demo.dial 原文：历史崩溃回归（asm 退出时不得报错，rc=0）
+if ${DIALC} build examples/multi_dim_demo.dial --backend=asm -o "$CDIR17/md_asm" >/dev/null 2>&1 \
+   && ${DIALC} build examples/multi_dim_demo.dial --backend=llvm -o "$CDIR17/md_llvm" >/dev/null 2>&1; then
+    "$CDIR17/md_asm" > "$CDIR17/md_asm.out" 2>"$CDIR17/md_asm.err"; _rc_asm=$?
+    "$CDIR17/md_llvm" > "$CDIR17/md_llvm.out" 2>"$CDIR17/md_llvm.err"; _rc_llvm=$?
+    if [ "$_rc_asm" -eq 0 ] && [ "$_rc_llvm" -eq 0 ] \
+       && [ ! -s "$CDIR17/md_asm.err" ] \
+       && diff -q "$CDIR17/md_asm.out" "$CDIR17/md_llvm.out" >/dev/null; then
+        rpass "R17 multi_dim_demo 原文 asm 退出无崩溃且双后端一致"
+    else
+        rbad "R17 multi_dim_demo 原文回归失败 (asm_rc=$_rc_asm llvm_rc=$_rc_llvm err=$(cat "$CDIR17/md_asm.err"))"
+    fi
+else
+    rbad "R17 multi_dim_demo 原文双后端编译失败"
+fi
+
+# 7b) 借用绑定综合场景
+cat > "$CDIR17/borrow.dial" <<'EOF'
+fn main(): int {
+    var m: int[][] = [[10, 20], [30, 40], [50, 60]];
+    var i: int = 0;
+    while (i < m.length()) {
+        var row: int[] = m.get(i);
+        print(row.get(0));
+        i = i + 1;
+    }
+    m[0][0] = 99;
+    print(m[0][0]);
+    var row2: int[] = m[1];
+    print(row2.get(1));
+    var row3: int[] = row2;
+    print(row3.get(0));
+    var row4: int[] = [0, 0];
+    row4 = m[2];
+    print(row4.get(1));
+    var s: string[][] = [["a", "bb"], ["ccc"]];
+    var sr: string[] = s.get(0);
+    print(sr.get(1));
+    s[1][0] = "ZZ";
+    var sr2: string[] = s[1];
+    print(sr2.get(0));
+    return 0;
+}
+EOF
+if ${DIALC} build "$CDIR17/borrow.dial" --backend=llvm -o "$CDIR17/bl" >/dev/null 2>&1 \
+   && ${DIALC} build "$CDIR17/borrow.dial" --backend=asm  -o "$CDIR17/ba" >/dev/null 2>&1; then
+    "$CDIR17/bl" > "$CDIR17/bl.out" 2>&1; "$CDIR17/ba" > "$CDIR17/ba.out" 2>&1
+    diff -q "$CDIR17/bl.out" "$CDIR17/ba.out" >/dev/null \
+        && rpass "R17 借用绑定综合场景双后端 stdout 一致" \
+        || { rbad "R17 借用绑定综合场景输出不一致"; diff "$CDIR17/bl.out" "$CDIR17/ba.out" | head; }
+else
+    rbad "R17 借用绑定综合场景双后端编译失败"
+fi
+
+# 7c) 各 O 级别
+for _o in -O0 -O1 -O2 -O3 -g; do
+    if ${DIALC} build "$CDIR17/borrow.dial" --backend=asm $_o -o "$CDIR17/ba_o" >/dev/null 2>&1 \
+       && ${DIALC} build "$CDIR17/borrow.dial" --backend=llvm $_o -o "$CDIR17/bl_o" >/dev/null 2>&1; then
+        "$CDIR17/ba_o" > "$CDIR17/ba_o.out" 2>&1; "$CDIR17/bl_o" > "$CDIR17/bl_o.out" 2>&1
+        diff -q "$CDIR17/ba_o.out" "$CDIR17/bl_o.out" >/dev/null \
+            && rpass "R17 借用绑定 $_o 双后端一致" \
+            || rbad "R17 借用绑定 $_o 双后端不一致"
+    else
+        rbad "R17 借用绑定 $_o 编译失败"
+    fi
+done
+
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

@@ -1,0 +1,41 @@
+// M7-e3ap：借用句柄绑定到局部变量的 retain 结算（对齐 LLVM retain_if_borrowed）。
+// Expr::Index / Method(get,at) 返回的是从容器借来的元素句柄，绑到局部变量时
+// 必须 retain 一份，否则作用域退出 release 会把 rc 多减 1，特定组合下触发
+// free(): unaligned chunk。覆盖：get 绑局部变量 + 嵌套赋值（原崩溃组合）、
+// Index 绑局部变量、链式重绑、借用句柄作为赋值右值、string[][] 句柄元素。
+fn main(): int {
+    var m: int[][] = [[10, 20], [30, 40], [50, 60]];
+
+    // 原触发崩溃的组合：while 内 get 绑局部变量 + 之后嵌套赋值
+    var i: int = 0;
+    while (i < m.length()) {
+        var row: int[] = m.get(i);
+        print(row.get(0));
+        i = i + 1;
+    }
+    m[0][0] = 99;
+    print(m[0][0]);
+
+    // Index 绑局部变量
+    var row2: int[] = m[1];
+    print(row2.get(1));
+
+    // 链式重绑（借用 → 借用）
+    var row3: int[] = row2;
+    print(row3.get(0));
+
+    // 借用句柄作为赋值右值
+    var row4: int[] = [0, 0];
+    row4 = m[2];
+    print(row4.get(1));
+
+    // string[][] 句柄元素
+    var s: string[][] = [["a", "bb"], ["ccc"]];
+    var sr: string[] = s.get(0);
+    print(sr.get(1));
+    s[1][0] = "ZZ";
+    var sr2: string[] = s[1];
+    print(sr2.get(0));
+
+    return 0;
+}

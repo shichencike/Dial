@@ -2908,7 +2908,7 @@
   `dial_array_set_borrowed` 符号）。完整回归 0 FAIL，AF 门禁 14 个用例全绿。
 - **护栏**：`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0/零新依赖/LLVM 路径/
   AArch64 普通程序零改动，构建零警告，不打 tag，docx 确定性。
-- **另发现一个独立既有缺口（本次不修，留后续批次）**：asm 后端 `Expr::Index`
+- **另发现一个独立既有缺口（e3ao 本次不修 → 已由 e3ap 修复，见下文）**：asm 后端 `Expr::Index`
   （lower.rs:1490）与 `Expr::Method get/at`（lower.rs:1863）返回借用句柄时
   `is_copy=false`，而 `Expr::Var` 同类场景返回 `true`（注释「句柄需 retain 当
   存到别处」）。`VarDecl`/`Assign` 的 `store_value` 仅在 `is_copy=true` 时 retain，
@@ -2925,3 +2925,50 @@
   改变所有含句柄元素读取程序的汇编，风险超出本批零回归护栏，故如实记录、留
   后续专项批次处理。此缺口不影响本批嵌套赋值功能本身（已用不含该陷阱的用例
   充分验证双后端一致）。
+
+#### M7-e3ap：修复 asm 后端借用句柄绑局部变量的 retain 结算缺口（e3ao 记录的独立缺口，本批补齐）
+
+- **背景**：承接 e3ao 末尾记录的独立既有缺口。用户「继续」——专项攻这一处。
+  e3ao 使官方示例 `examples/multi_dim_demo.dial` 原文可用 asm 编译后，暴露出退出时
+  `free(): unaligned chunk detected in tcache 2`（修复前实测 rc=134，输出 23 行后崩）。
+- **根因（引用计数记账不一致）**：
+  - `store_value`（lower.rs:652）的第二个参数 `val_is_copy` 语义是「值是从别处借来的
+    别名，须为新变量 retain 一份」——`if val_is_copy { RcRetain(slot) }`。
+  - `lower_expr` 返回该标志：`Expr::Var`（1433）/ `Expr::Field`（1466/1468）/ 解引用
+    窄类型（1744/1746）返回 `true`；但 `Expr::Index`（1490，注释「借来的元素：数组仍
+    持有它」）与 `Expr::Method(get,at)`（1863）返回 `false`。
+  - `VarDecl`（lower.rs:709-714）/ `Assign`（738-739）直接把这个标志传给 `store_value`，
+    而 `release_scope`（lower.rs:443）对所有 `is_handle && !moved` 局部变量**无条件**
+    `RcRelease`。于是 `var row: int[] = m.get(i)` / `var row = m[i]` 这类「借用句柄绑
+    局部变量」少 retain 一份、退出多减一份，rc 净 -1。
+  - LLVM 权威实现 `retain_if_borrowed`（codegen.rs:1970）：
+    `if is_heap_type(ty) && yields_borrowed_ref(e) { retain(ty, val) }`，且在 VarDecl
+    （2561）/ Assign（2612）均以 `if !move_hint` 包裹。`yields_borrowed_ref`（两端同名，
+    lower.rs:3871 / codegen.rs:7044）判定 `Var/Field/Index` 与 `Method(get,at)` 为借用，
+    与 asm 的 `is_copy` 唯一差异正是 `Index`/`get`/`at` 三处。
+  - 潜伏原因：纯读取 / 未与嵌套赋值叠加的程序里，内层数组初始 rc 更高（字面量1 +
+    外层持有1 = 2），while 的借用绑定各多减 1 → 变 1，退出时外层 release_buffer 再减到 0，
+    **恰好平衡不崩**；e3ao 的嵌套赋值走 `dial_array_set_borrowed` 提前 retain/release
+    改变了 rc 轨迹，平衡被打破，退出时遍历到已被提前 free 的内层数组句柄而崩溃。
+- **修复**（`src/lower.rs` 唯一产品代码改动）：`VarDecl`/`Assign` 传给 `store_value` 的
+  判据由 `is_copy` 改为 `is_copy || (yields_borrowed_ref(value) && !*move_hint)`。
+  - `yields_borrowed_ref(value)` 兜住 `Index`/`get`/`at` 的遗漏，复用既有同口径判定函数，
+    不新增语义副本；
+  - `!*move_hint` 对齐 LLVM 移动语义——所有权已转移时不 retain（move_hint 由数据流
+    分析写入，仅对 `Expr::Var` 形式的赋值可能为 true，get/Index 绑变量恒为 false）；
+  - **纯增量**：对 `Expr::Var`/`Field`（is_copy 已 true）、字面量/新建对象（均 false）
+    完全不变，只有「句柄元素的 Index/get/at 绑变量且非 move」多一次 RcRetain。
+- **实测**：
+  - `examples/multi_dim_demo.dial` 原文：修复前 asm rc=134 + `free(): unaligned chunk`，
+    修复后 asm rc=0、stderr 空、双后端 stdout 逐字节一致（23 行完整输出）。
+  - 综合场景：get 绑局部变量 + 嵌套赋值（原崩溃组合）、Index 绑局部变量、链式重绑
+    （借用→借用）、借用句柄作赋值右值、`string[][]` 句柄元素 + COW 写，双后端逐字节
+    一致；`-O0/-O1/-O2/-O3/-g` 全一致；`MALLOC_CHECK_=3` 退出无诊断。
+- **A/B 零回归**：新增 `tests/asm_golden/borrow_bind.dial`（第 14 个 golden，golden 门禁
+  共 15 用例）。其余 13 个 golden 程序 `.s` 与 HEAD（067d006）旧编译器（git worktree
+  独立构建）**逐字节一致**——盘点确认 golden 里的 `arr[0]`/`.get()` 全部是 `print` 的
+  参数（不绑定变量），不在本修复影响面内；AArch64 普通程序（core1/core3/hof/containers）
+  `.s` 零变化。新增 R17 测试组（multi_dim_demo 原文崩溃回归 + 借用绑定综合场景 + 各
+  O 级别）。
+- **护栏**：`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0/零新依赖/LLVM 路径/AArch64
+  零改动，构建零警告，不打 tag，docx 确定性。

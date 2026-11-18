@@ -817,12 +817,29 @@ LLVM 完整支持而 asm 明确 Fail-Fast 拒绝的语句构造——此前 `Stm
 C 侧 `DIAL_CHECK_BOUNDS` 统一负责（ReleaseFast 消除），IR 层不重复。单层 `a[i] = v`
 仍走既有 `dial_array_set` 路径，汇编输出零变化。
 
-> **已发现、未修的独立缺口**：asm 后端 `Expr::Index` / `get` 返回借用句柄时 `is_copy=false`
-> （`Expr::Var` 同类为 `true`），局部变量绑定时少 retain 一份、作用域退出多 release 一份。
-> 纯场景 rc 恰好平衡不崩，但与嵌套赋值叠加后可使 `examples/multi_dim_demo.dial` 退出时
-> `free(): unaligned chunk`。修复需统一借用返回值语义（对齐 LLVM `retain_if_borrowed`），
-> 会改变所有含句柄元素读取程序的汇编，风险超本批护栏，留后续专项批次（见 rationale
-> M7-e3ao）。本批嵌套赋值功能本身已用不含该陷阱的用例充分验证双后端一致。
+> 本批曾发现一个独立缺口，已由 M7-e3ap 修复（见 §13.7）。
+
+### 13.7 借用句柄绑局部变量的 retain 结算（v1.10 开发中增补，M7-e3ap）
+
+`var row = m[i]` / `var row = m.get(i)` 把**从容器借来的元素句柄**绑到局部变量：源容器仍
+持有该元素，绑定时必须 retain 一份，否则作用域退出 `release_scope`（lower.rs:443）对
+`is_handle && !moved` 局部变量无条件 release 会把 rc 多减 1。此前 asm 的 `VarDecl`/`Assign`
+用 `lower_expr` 返回的 `is_copy` 判据决定 retain，而该标志对 `Expr::Var`/`Field` 为 `true`、
+对 `Expr::Index`/`get`/`at` 却误为 `false`——正是遗漏处。LLVM 权威实现
+`retain_if_borrowed`（codegen.rs:1970：`is_heap_type && yields_borrowed_ref && !move_hint`）
+无此差异。
+
+修复落在 `src/lower.rs` 的 `VarDecl`/`Assign`：`store_value` 的 retain 判据由 `is_copy`
+改为 `is_copy || (yields_borrowed_ref(value) && !*move_hint)`——复用同口径的既有判定函数
+`yields_borrowed_ref`（lower.rs:3871，Var/Field/Index/get/at），`!move_hint` 对齐 LLVM 移动
+语义不 retain。纯增量：只影响「句柄元素的 Index/get/at 绑变量且非 move」场景，其余程序
+汇编零变化。此 bug 此前潜伏（纯读取程序 rc 恰好平衡），e3ao 使 `multi_dim_demo.dial`
+原文可编译后暴露——退出时遍历释放已被提前 free 的内层数组，报
+`free(): unaligned chunk`（rc=134）；修复后 asm rc=0、双后端 stdout 逐字一致。
+
+> **影响面控制**：golden 中的 `arr[0]`/`.get()` 全是 `print` 参数（不绑变量），13 个既有
+> golden 的 `.s` 与修复前编译器逐字节一致；AArch64 普通程序 `.s` 零变化。新增
+> `borrow_bind.dial` golden 与 R17 测试组锁定该场景。
 
 ---
 

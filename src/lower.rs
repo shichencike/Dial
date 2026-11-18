@@ -711,7 +711,15 @@ impl<'a> Lower<'a> {
                     // 值语义结构体：StructLit 返回一块临时栈区地址，整体拷进变量槽。
                     self.emit_memcpy(slot, v, self.struct_byte_size(&dt));
                 } else {
-                    self.store_value(slot, v, is_copy, &dt, false);
+                    // M7-e3ap：对齐 LLVM 后端 retain_if_borrowed（codegen.rs:1970）。
+                    // lower_expr 返回的 is_copy 对 Expr::Var/Field 为 true，但对
+                    // Expr::Index / Method(get,at) 误返回 false——它们同样是「借用别名」：
+                    // 源容器仍持有该元素，绑到本变量须 retain 一份，否则作用域退出时
+                    // release 会把 rc 多减 1（`var row = m[i]` / `var row = m.get(i)`）。
+                    // 用 yields_borrowed_ref(value) 兜住这一缺口；move 语义下所有权已转移，
+                    // 不应 retain（对齐 LLVM 的 `!move_hint` 条件）。
+                    let need_retain = is_copy || (yields_borrowed_ref(value) && !*move_hint);
+                    self.store_value(slot, v, need_retain, &dt, false);
                 }
                 let is_h = rc_kind(&dt).is_some();
                 let mut loc = Local { ptr: slot, ty: reg_ir(&dt), dt: dt.clone(), is_handle: is_h, moved: *move_hint };
@@ -736,7 +744,9 @@ impl<'a> Lower<'a> {
                 }
                 let dt = l.dt.clone();
                 let (v, is_copy) = self.lower_expr(value, &dt)?;
-                self.store_value(l.ptr, v, is_copy, &dt, true);
+                // M7-e3ap：同 VarDecl，补齐借用别名（Index/get/at）绑变量的 retain。
+                let need_retain = is_copy || (yields_borrowed_ref(value) && !*move_hint);
+                self.store_value(l.ptr, v, need_retain, &dt, true);
                 if let Some(sl) = self.scopes.last_mut().unwrap().get_mut(name) { sl.moved = *move_hint; }
                 if *move_hint {
                     if let Expr::Var(src_name) = value {

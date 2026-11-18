@@ -34,6 +34,7 @@
 <li><a href="#m7-e3an2自研-asm-后端补齐-select-多路通道选择双后端一致性补全语句级控制流最后一块">M7-e3an2：自研 asm 后端补齐 select 多路通道选择（双后端一致性补全，语句级控制流最后一块）</a></li>
 <li><a href="#m7-e3an3双后端补齐产物工程层能力stdlib-持久缓存----fast-compile编译速度维度">M7-e3an3：双后端补齐产物/工程层能力——stdlib 持久缓存 + --fast-compile（编译速度维度）</a></li>
 <li><a href="#m7-e3ao自研-asm-后端补齐嵌套下标赋值-aij--v语言层面最后一块被明确拒绝的构造">M7-e3ao：自研 asm 后端补齐嵌套下标赋值 a[i][j] = v（语言层面最后一块被明确拒绝的构造）</a></li>
+<li><a href="#m7-e3ap修复-asm-后端借用句柄绑局部变量的-retain-结算缺口e3ao-记录的独立缺口本批补齐">M7-e3ap：修复 asm 后端借用句柄绑局部变量的 retain 结算缺口（e3ao 记录的独立缺口，本批补齐）</a></li>
 </ul>
 </li>
 </ul>
@@ -3084,7 +3085,7 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
   <code>dial_array_set_borrowed</code> 符号）。完整回归 0 FAIL，AF 门禁 14 个用例全绿。</li>
 <li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0/零新依赖/LLVM 路径/
   AArch64 普通程序零改动，构建零警告，不打 tag，docx 确定性。</li>
-<li><strong>另发现一个独立既有缺口（本次不修，留后续批次）</strong>：asm 后端 <code>Expr::Index</code>
+<li><strong>另发现一个独立既有缺口（e3ao 本次不修 → 已由 e3ap 修复，见下文）</strong>：asm 后端 <code>Expr::Index</code>
   （lower.rs:1490）与 <code>Expr::Method get/at</code>（lower.rs:1863）返回借用句柄时
   <code>is_copy=false</code>，而 <code>Expr::Var</code> 同类场景返回 <code>true</code>（注释「句柄需 retain 当
   存到别处」）。<code>VarDecl</code>/<code>Assign</code> 的 <code>store_value</code> 仅在 <code>is_copy=true</code> 时 retain，
@@ -3101,6 +3102,53 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
   改变所有含句柄元素读取程序的汇编，风险超出本批零回归护栏，故如实记录、留
   后续专项批次处理。此缺口不影响本批嵌套赋值功能本身（已用不含该陷阱的用例
   充分验证双后端一致）。</li>
+</ul>
+<h4 id="m7-e3ap修复-asm-后端借用句柄绑局部变量的-retain-结算缺口e3ao-记录的独立缺口本批补齐">M7-e3ap：修复 asm 后端借用句柄绑局部变量的 retain 结算缺口（e3ao 记录的独立缺口，本批补齐）</h4>
+<ul>
+<li><strong>背景</strong>：承接 e3ao 末尾记录的独立既有缺口。用户「继续」——专项攻这一处。
+  e3ao 使官方示例 <code>examples/multi_dim_demo.dial</code> 原文可用 asm 编译后，暴露出退出时
+  <code>free(): unaligned chunk detected in tcache 2</code>（修复前实测 rc=134，输出 23 行后崩）。</li>
+<li><strong>根因（引用计数记账不一致）</strong>：</li>
+<li><code>store_value</code>（lower.rs:652）的第二个参数 <code>val_is_copy</code> 语义是「值是从别处借来的
+    别名，须为新变量 retain 一份」——<code>if val_is_copy { RcRetain(slot) }</code>。</li>
+<li><code>lower_expr</code> 返回该标志：<code>Expr::Var</code>（1433）/ <code>Expr::Field</code>（1466/1468）/ 解引用
+    窄类型（1744/1746）返回 <code>true</code>；但 <code>Expr::Index</code>（1490，注释「借来的元素：数组仍
+    持有它」）与 <code>Expr::Method(get,at)</code>（1863）返回 <code>false</code>。</li>
+<li><code>VarDecl</code>（lower.rs:709-714）/ <code>Assign</code>（738-739）直接把这个标志传给 <code>store_value</code>，
+    而 <code>release_scope</code>（lower.rs:443）对所有 <code>is_handle &amp;&amp; !moved</code> 局部变量<strong>无条件</strong>
+    <code>RcRelease</code>。于是 <code>var row: int[] = m.get(i)</code> / <code>var row = m[i]</code> 这类「借用句柄绑
+    局部变量」少 retain 一份、退出多减一份，rc 净 -1。</li>
+<li>LLVM 权威实现 <code>retain_if_borrowed</code>（codegen.rs:1970）：
+    <code>if is_heap_type(ty) &amp;&amp; yields_borrowed_ref(e) { retain(ty, val) }</code>，且在 VarDecl
+    （2561）/ Assign（2612）均以 <code>if !move_hint</code> 包裹。<code>yields_borrowed_ref</code>（两端同名，
+    lower.rs:3871 / codegen.rs:7044）判定 <code>Var/Field/Index</code> 与 <code>Method(get,at)</code> 为借用，
+    与 asm 的 <code>is_copy</code> 唯一差异正是 <code>Index</code>/<code>get</code>/<code>at</code> 三处。</li>
+<li>潜伏原因：纯读取 / 未与嵌套赋值叠加的程序里，内层数组初始 rc 更高（字面量1 +
+    外层持有1 = 2），while 的借用绑定各多减 1 → 变 1，退出时外层 release_buffer 再减到 0，
+    <strong>恰好平衡不崩</strong>；e3ao 的嵌套赋值走 <code>dial_array_set_borrowed</code> 提前 retain/release
+    改变了 rc 轨迹，平衡被打破，退出时遍历到已被提前 free 的内层数组句柄而崩溃。</li>
+<li><strong>修复</strong>（<code>src/lower.rs</code> 唯一产品代码改动）：<code>VarDecl</code>/<code>Assign</code> 传给 <code>store_value</code> 的
+  判据由 <code>is_copy</code> 改为 <code>is_copy || (yields_borrowed_ref(value) &amp;&amp; !*move_hint)</code>。</li>
+<li><code>yields_borrowed_ref(value)</code> 兜住 <code>Index</code>/<code>get</code>/<code>at</code> 的遗漏，复用既有同口径判定函数，
+    不新增语义副本；</li>
+<li><code>!*move_hint</code> 对齐 LLVM 移动语义——所有权已转移时不 retain（move_hint 由数据流
+    分析写入，仅对 <code>Expr::Var</code> 形式的赋值可能为 true，get/Index 绑变量恒为 false）；</li>
+<li><strong>纯增量</strong>：对 <code>Expr::Var</code>/<code>Field</code>（is_copy 已 true）、字面量/新建对象（均 false）
+    完全不变，只有「句柄元素的 Index/get/at 绑变量且非 move」多一次 RcRetain。</li>
+<li><strong>实测</strong>：</li>
+<li><code>examples/multi_dim_demo.dial</code> 原文：修复前 asm rc=134 + <code>free(): unaligned chunk</code>，
+    修复后 asm rc=0、stderr 空、双后端 stdout 逐字节一致（23 行完整输出）。</li>
+<li>综合场景：get 绑局部变量 + 嵌套赋值（原崩溃组合）、Index 绑局部变量、链式重绑
+    （借用→借用）、借用句柄作赋值右值、<code>string[][]</code> 句柄元素 + COW 写，双后端逐字节
+    一致；<code>-O0/-O1/-O2/-O3/-g</code> 全一致；<code>MALLOC_CHECK_=3</code> 退出无诊断。</li>
+<li><strong>A/B 零回归</strong>：新增 <code>tests/asm_golden/borrow_bind.dial</code>（第 14 个 golden，golden 门禁
+  共 15 用例）。其余 13 个 golden 程序 <code>.s</code> 与 HEAD（067d006）旧编译器（git worktree
+  独立构建）<strong>逐字节一致</strong>——盘点确认 golden 里的 <code>arr[0]</code>/<code>.get()</code> 全部是 <code>print</code> 的
+  参数（不绑定变量），不在本修复影响面内；AArch64 普通程序（core1/core3/hof/containers）
+  <code>.s</code> 零变化。新增 R17 测试组（multi_dim_demo 原文崩溃回归 + 借用绑定综合场景 + 各
+  O 级别）。</li>
+<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code>/<code>Cargo.toml</code> 1.10.0/零新依赖/LLVM 路径/AArch64
+  零改动，构建零警告，不打 tag，docx 确定性。</li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
