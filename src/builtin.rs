@@ -18,7 +18,8 @@
 // 未覆盖：@asm / simd / 高阶函数(map/filter/reduce/sort_by) / 并发(spawn/channel/
 //         select) —— 一律明确 Unsupported，绝不静默降级。
 // 已由 lower.rs 专用路径接管（表中条目仅作防御兜底，正常不会走到）：
-//         sizeof / alignof / offsetof（M7-e3ag）、bitcast（M7-e3ah）、ptr_cast。
+//         sizeof / alignof / offsetof（M7-e3ag）、bitcast（M7-e3ah）、
+//         assert / panic（M7-e3ai，带 file:line:col 的 Fail-Fast 诊断）、ptr_cast。
 // ============================================================================
 
 use crate::ast::Type;
@@ -161,12 +162,13 @@ pub fn lookup(name: &str) -> Option<BSpec> {
         "max" => return Some(BSpec { ret: Type::Int, kind: BKind::MinMax { is_min: false } }),
 
         // ---- 退出 ----
-        // assert / panic 需要「当前语句行列 + 源文件名」编译期常量，并且 assert 本身
-        // 是一条带条件的控制流；首版没有语句位置追踪，明确延后（绝不静默降级成
-        // 无诊断的 abort）。exit 是无位置依赖的薄封装，先行接入。
+        // exit 是无位置依赖的薄封装，走普通内建表。
         "exit" => return Some(c("dial_exit", A_I, IrType::Void, Type::Void)),
+        // assert / panic 走 lower.rs 专用路径（M7-e3ai：带 file:line:col 的
+        // Fail-Fast 诊断 + assert 条件 CFG，对齐 LLVM emit_fail_loc）；本条目
+        // 仅作防御兜底，正常调用在 lower_call 分派处已被拦截。
         "assert" | "panic" =>
-            return Some(unsup(Type::Void, "assert / panic 需语句位置追踪（后续相位）")),
+            return Some(unsup(Type::Void, "assert / panic 需专用路径（见 lower.rs）")),
 
         // ---- 环境 / 时间 / 系统（无可变全局状态） ----
         "args" => return Some(c("dial_args", A0, IrType::Handle, Type::Array(Box::new(Type::String)))),

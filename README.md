@@ -657,6 +657,8 @@ dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|s
 
 等级同时作用于 LLVM IR、自研 asm 后端发射的整数除零检查与 C Runtime（`-DDIAL_SAFETY=N`），两侧口径一致（M7-e3ae 起 asm 后端除零也随分级：debug=`int3`/safe=`ud2`/fast 不插）。
 
+用户级 Fail-Fast 内建 `assert(cond[, msg])` / `panic(msg)` 在 LLVM 与自研 asm 后端**完全一致**（M7-e3ai）：失败时都打印「消息 + `file:line:col` 源码位置」后终止进程（`assert` 条件假、退出码随陷阱类型；`panic` 为 `SIGABRT`），位置是编译期常量、运行期零开销；`assert` 条件为真时继续执行。`--safety` 各等级与 `-g`/`-O0`~`-O3` 下诊断位置不漂移，非 assert/panic 程序的汇编输出逐字节不变。
+
 产物形态开关（第 18 层，与上面的安全等级**正交**）：
 
 | 参数 | 形态 | 行为 |

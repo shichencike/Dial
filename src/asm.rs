@@ -61,7 +61,7 @@ pub fn compile_asm(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| src_path.to_string());
 
-    let mut ip = lower::lower_program(prog, functions, structs, goto_depths, debug_info)?;
+    let mut ip = lower::lower_program(prog, functions, structs, goto_depths, debug_info, src_path)?;
     // M7-e3ac：优化级别分级。O2（默认）= 既有全部优化，逐字节零回归；
     // O0 跳过全部 Dial 级 IR pass（配合 -g 得到"所写即所得"的调试体验）；
     // O1 仅基础 IR pass；O3 在 O2 之上追加 LLVM InstCombine 风格代数恒等式。

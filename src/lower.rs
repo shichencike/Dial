@@ -51,6 +51,7 @@ pub fn lower_program(
     structs: StructTable,
     goto_depths: HashMap<String, usize>,
     debug_info: bool,
+    src_file: &str,
 ) -> Result<IrProgram, String> {
     let mut ip = IrProgram::new(functions_sig, structs, goto_depths);
     // M7-e3ag：收集 packed 结构体名。布局内建（sizeof/alignof/offsetof）须按 C ABI
@@ -64,7 +65,7 @@ pub fn lower_program(
     for func in &prog.functions {
         // M7-e3w：调试标记只在 -g 时插入。非 -g 的 IR 必须与 e3v 逐字节一致，
         // 否则 Line/DebugVar 会打断 e3p 折叠 / popcount 融合等 pass 的模式窗口。
-        let mut l = Lower::new(&mut ip, debug_info, &packed);
+        let mut l = Lower::new(&mut ip, debug_info, &packed, src_file);
         l.lower_function(func)?;
     }
     Ok(ip)
@@ -93,15 +94,26 @@ struct Lower<'a> {
     debug_info: bool,
     /// M7-e3ag：packed 结构体名集合，供布局内建按 C ABI 口径计算（packed align=1）。
     packed: HashSet<String>,
+    /// M7-e3ai：当前语句的源码行列（文件级），供 assert/panic 的
+    /// 「file:line:col」Fail-Fast 诊断使用。对齐 LLVM 后端 cur_pos（在 gen_stmt
+    /// 入口 set crate::semantic::stmt_pos(stmt)）。仅在 lower_stmt 入口更新，
+    /// 不产生任何 IR，也不影响 -g / 非 -g 的既有指令流。
+    cur_pos: (usize, usize),
+    /// M7-e3ai：当前编译单元的源文件路径（原始字符串，与 LLVM 后端 self.src_file
+    /// 同源），供 assert/panic 的位置诊断作为编译期常量串写入 .rodata。
+    src_file: String,
 }
 
 impl<'a> Lower<'a> {
-    fn new(ip: &'a mut IrProgram, debug_info: bool, packed: &HashSet<String>) -> Self {
+    fn new(ip: &'a mut IrProgram, debug_info: bool, packed: &HashSet<String>,
+           src_file: &str) -> Self {
         let label_depths = ip.goto_depths.clone();
         Lower {
             ip,
             debug_info,
             packed: packed.clone(),
+            cur_pos: (0, 0),
+            src_file: src_file.to_string(),
             func: IrFunction::new(String::new(), Vec::new(), IrType::Void, FuncLink::Private),
             cur: 0,
             scopes: Vec::new(),
@@ -416,6 +428,10 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_stmt(&mut self, s: &Stmt) -> Result<(), String> {
+        // M7-e3ai：无条件记录当前语句行列，供 assert/panic 的位置诊断读取。
+        // 纯内存赋值、不 emit 任何 IR，对齐 LLVM 后端 gen_stmt 入口的 cur_pos.set。
+        // 只有真正调用 assert/panic 时该值才会被消费，对其它程序零影响。
+        self.cur_pos = crate::semantic::stmt_pos(s);
         // M7-e3w：每条语句起点插一条行标记，行号随指令流经 pass（重排不丢失）。
         // 仅 -g：非 -g 下这些标记会打断折叠/融合 pass 的模式窗口，必须完全不插入。
         if self.debug_info {
@@ -1684,6 +1700,11 @@ impl<'a> Lower<'a> {
             // 解读同一块内存，等价 LLVM 同尺寸聚合零开销 bitcast）。必须在此拦截——
             // 否则会落到下方 lower_builtin 的 BKind::Unsupported 报错。
             "bitcast" => return self.lower_bitcast(args),
+            // M7-e3ai：assert / panic 的 Fail-Fast 专用路径。对齐 LLVM 后端
+            // emit_fail_loc：assert 条件失败 / panic 都打印「消息 + file:line:col」
+            // 后终止进程。必须在此拦截——否则落到下方 lower_builtin 的
+            // BKind::Unsupported 报错。
+            "assert" | "panic" => return self.lower_assert_panic(name, args),
             _ => {}
         }
         // functions_sig 只含用户函数与 extern 声明；按名字硬编码分派的内建
@@ -1750,6 +1771,87 @@ impl<'a> Lower<'a> {
                     Ok((Value::Reg(d), false))
                 }
             }
+        }
+    }
+
+    /// M7-e3ai：assert / panic 的 Fail-Fast 专用路径（对齐 LLVM 后端
+    /// codegen.rs 的 gen_builtin 中 assert/panic 分支 + emit_fail_loc）。
+    ///
+    /// C 运行时符号（stdlib/dial_exc.c）：
+    ///   - `dial_assert_fail_loc(what, file, line, col)`：打印断言失败 + 位置后 abort。
+    ///   - `dial_panic_loc(what, file, line, col)`：打印未捕获异常 + 位置后 abort。
+    /// 二者都要求 `what` 是 **const char\***：Dial string 句柄须先经
+    /// `dial_string_cstr` 跳过 8 字节 ARC 头（与 lower_throw_value 的未捕获路径、
+    /// LLVM 后端同款，少这一步会打印出头的字节）。
+    ///
+    /// 位置取当前语句的 stmt_pos（lower_stmt 入口已写入 self.cur_pos），
+    /// 文件名是编译期常量串（intern 进 .rodata），行列是编译期常量整数——
+    /// 运行期只有一次 printf + abort，与 LLVM 后端口径逐字一致。
+    ///
+    /// assert 是**带条件的控制流**：条件为真走 ok 块（返回 0 继续），为假才进
+    /// fail 块调 dial_assert_fail_loc 后 Unreachable（绝不静默继续）。
+    fn lower_assert_panic(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        let is_assert = name == "assert";
+        if is_assert {
+            if args.is_empty() || args.len() > 2 {
+                return self.err("assert 需要 1 或 2 个参数（bool 条件 [，string 消息]）");
+            }
+        } else if args.len() != 1 {
+            return self.err("panic 需要 1 个 string 参数");
+        }
+
+        // fail / panic 分支：把消息 DialString → const char*。
+        // 断言可为单参（无消息），此时用编译期常量串 "assert 失败"。
+        let build_fail = |l: &mut Lower<'a>| -> Result<(), String> {
+            let msg_cstr = if is_assert && args.len() == 1 {
+                let lit = l.ip.intern_string("assert 失败");
+                let p = l.new_reg(IrType::Ptr);
+                l.emit(IrInst::LeaLabel { dst: p, lit });
+                Value::Reg(p)
+            } else {
+                let msg_idx = if is_assert { 1 } else { 0 };
+                let (mv, _) = l.lower_expr(&args[msg_idx], &Type::String)?;
+                let cstr = l.new_reg(IrType::Ptr);
+                l.emit(IrInst::Call { dst: Some(cstr), func: "dial_string_cstr".to_string(),
+                    args: vec![mv], arg_tys: vec![IrType::Handle],
+                    ret_ty: IrType::Ptr, linkage: CallLink::Runtime });
+                Value::Reg(cstr)
+            };
+            // 文件名编译期常量串 → const char*。
+            let file_lit = l.ip.intern_string(&l.src_file.clone());
+            let file_p = l.new_reg(IrType::Ptr);
+            l.emit(IrInst::LeaLabel { dst: file_p, lit: file_lit });
+            let (line, col) = l.cur_pos;
+            let callee = if is_assert { "dial_assert_fail_loc" } else { "dial_panic_loc" };
+            l.emit(IrInst::Call { dst: None, func: callee.to_string(),
+                args: vec![msg_cstr, Value::Reg(file_p),
+                           Value::Imm(Imm::I64(line as i64)), Value::Imm(Imm::I64(col as i64))],
+                arg_tys: vec![IrType::Ptr, IrType::Ptr, IrType::I64, IrType::I64],
+                ret_ty: IrType::Void, linkage: CallLink::Runtime });
+            // dial_*_loc 不返回（abort）；显式 Unreachable，绝不让后续语句落进死块。
+            l.terminate(Term::Unreachable);
+            Ok(())
+        };
+
+        if is_assert {
+            // 条件：语义层保证 args[0] 是 bool。
+            let (cv, _) = self.lower_expr(&args[0], &Type::Bool)?;
+            let cond = self.cond_reg(cv)?;
+            let ok_b = self.new_block(Vec::new());
+            let fail_b = self.new_block(Vec::new());
+            self.terminate(Term::Branch { cond, then_b: ok_b, else_b: fail_b,
+                then_args: Vec::new(), else_args: Vec::new() });
+            self.set_cur(fail_b);
+            build_fail(self)?;
+            self.set_cur(ok_b);
+            // assert 返回 0（对齐 LLVM 的 zero）——语句语境下该值被丢弃。
+            Ok((Value::Imm(Imm::I64(0)), false))
+        } else {
+            // panic：无条件终止。后续语句落进新建的不可达块。
+            build_fail(self)?;
+            let dead = self.new_block(Vec::new());
+            self.set_cur(dead);
+            Ok((Value::Imm(Imm::I64(0)), false))
         }
     }
 

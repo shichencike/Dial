@@ -2048,6 +2048,101 @@ else
     rbad "R9 array bitcast 拒绝但缺少 [asm 后端] 诊断"
 fi
 
+# ===========================================================================
+# R10) assert / panic 的 Fail-Fast 双后端一致性（M7-e3ai）
+#     - assert 通过（含单参/双参）：双后端 stdout 逐字一致、rc=0；
+#     - assert 失败（自定义消息 / 默认消息）：双后端都 abort，stderr 的诊断首行
+#       + 「file:line:col」位置逐字一致，且后续语句不执行（哨兵不打印）；
+#     - panic：同上，双后端诊断与位置逐字一致；
+#     - 各 O 级别与 -g 下诊断不漂移（位置来自语句，与优化/调试开关正交）。
+#     退出码经 sh -c 包装取真实值（abort → 134，int3 → 132），绕过 shell 的
+#     "Aborted" 作业提示（同 G 组 / q_panic 用例）。
+# ===========================================================================
+echo
+echo "  -- R10) assert / panic Fail-Fast 双后端一致性 --"
+ADIR="${RDIR}/assert_panic"; mkdir -p "$ADIR"
+
+# 1) assert 通过：单参 + 双参，双后端 stdout 逐字一致。
+cat > "${ADIR}/pass.dial" <<'DIALEOF'
+fn main(): int {
+    print("A");
+    assert(1 + 1 == 2);
+    print("B");
+    assert(3 > 2, "自定义消息-通过");
+    print("C");
+    return 0;
+}
+DIALEOF
+${DIALC} build "${ADIR}/pass.dial" --backend llvm -o "${ADIR}/pass_llvm" >/dev/null 2>&1 || rbad "R10 LLVM 编译 assert 通过用例失败"
+${DIALC} build "${ADIR}/pass.dial" --backend asm  -o "${ADIR}/pass_asm"  >/dev/null 2>&1 || rbad "R10 asm 编译 assert 通过用例失败"
+_ap_llvm="$( ${ADIR}/pass_llvm 2>/dev/null | tr '\n' ' ' )"
+_ap_asm="$( ${ADIR}/pass_asm 2>/dev/null | tr '\n' ' ' )"
+[ -n "$_ap_llvm" ] && [ "$_ap_asm" = "$_ap_llvm" ] \
+    && rpass "assert 通过（单参/双参）：双后端 stdout 逐字一致" \
+    || rbad "R10 assert 通过双后端不一致（llvm=[$_ap_llvm] asm=[$_ap_asm]）"
+
+# 2) assert 失败 / panic：双后端都终止，诊断 + 位置逐字一致，后续语句不执行。
+#    比较时把诊断里的绝对路径基名之后部分保留（file:line:col 必须一致）。
+cat > "${ADIR}/fail_msg.dial" <<'DIALEOF'
+fn main(): int {
+    print("before");
+    assert(1 == 2, "断言崩了");
+    print("SENTINEL_AFTER");
+    return 0;
+}
+DIALEOF
+cat > "${ADIR}/fail_default.dial" <<'DIALEOF'
+fn main(): int {
+    assert(1 == 2);
+    return 0;
+}
+DIALEOF
+cat > "${ADIR}/panic.dial" <<'DIALEOF'
+fn main(): int {
+    print("start");
+    panic("爆炸消息");
+    print("SENTINEL_AFTER");
+    return 0;
+}
+DIALEOF
+for _ap_case in fail_msg fail_default panic; do
+    ${DIALC} build "${ADIR}/${_ap_case}.dial" --backend llvm -o "${ADIR}/${_ap_case}_llvm" >/dev/null 2>&1 || { rbad "R10 LLVM 编译 ${_ap_case} 失败"; continue; }
+    ${DIALC} build "${ADIR}/${_ap_case}.dial" --backend asm  -o "${ADIR}/${_ap_case}_asm"  >/dev/null 2>&1 || { rbad "R10 asm 编译 ${_ap_case} 失败"; continue; }
+    # 取真实退出码（sh -c 包一层吞掉 shell 的 Aborted 作业提示）。
+    sh -c '"$1" >"$2" 2>"$3"; echo $?' _ "${ADIR}/${_ap_case}_llvm" "${ADIR}/${_ap_case}_l.out" "${ADIR}/${_ap_case}_l.err" > "${ADIR}/${_ap_case}_l.rc"
+    sh -c '"$1" >"$2" 2>"$3"; echo $?' _ "${ADIR}/${_ap_case}_asm"  "${ADIR}/${_ap_case}_a.out" "${ADIR}/${_ap_case}_a.err" > "${ADIR}/${_ap_case}_a.rc"
+    _ap_lrc="$( cat "${ADIR}/${_ap_case}_l.rc" )"; _ap_arc="$( cat "${ADIR}/${_ap_case}_a.rc" )"
+    # 诊断含「dial:」行 + 「位置:」(panic) 或 「(at file:line:col)」(assert)。
+    grep -E 'dial:|位置:|\(at ' "${ADIR}/${_ap_case}_l.err" > "${ADIR}/${_ap_case}_l.diag"
+    grep -E 'dial:|位置:|\(at ' "${ADIR}/${_ap_case}_a.err" > "${ADIR}/${_ap_case}_a.diag"
+    if [ "$_ap_lrc" = "$_ap_arc" ] \
+       && diff -q "${ADIR}/${_ap_case}_l.diag" "${ADIR}/${_ap_case}_a.diag" >/dev/null 2>&1 \
+       && ! grep -q 'SENTINEL_AFTER' "${ADIR}/${_ap_case}_a.out" \
+       && ! grep -q 'SENTINEL_AFTER' "${ADIR}/${_ap_case}_l.out"; then
+        rpass "${_ap_case}：双后端诊断/位置逐字一致 rc=$_ap_arc，终止后哨兵未打印"
+    else
+        rbad "R10 ${_ap_case} 双后端不一致（llvm_rc=$_ap_lrc asm_rc=$_ap_arc）"
+        sed 's/^/       llvm: /' "${ADIR}/${_ap_case}_l.diag"
+        sed 's/^/       asm : /' "${ADIR}/${_ap_case}_a.diag"
+    fi
+done
+
+# 3) -g 与 -O3 下位置不漂移（与优化/调试开关正交）。
+for _ap_opt in "-g" "-O3" "-g -O0"; do
+    ${DIALC} build "${ADIR}/fail_msg.dial" --backend llvm -o "${ADIR}/opt_llvm" $_ap_opt >/dev/null 2>&1 || { rbad "R10 LLVM 编译 ${_ap_opt} 失败"; continue; }
+    ${DIALC} build "${ADIR}/fail_msg.dial" --backend asm  -o "${ADIR}/opt_asm"  $_ap_opt >/dev/null 2>&1 || { rbad "R10 asm 编译 ${_ap_opt} 失败"; continue; }
+    sh -c '"$1" >/dev/null 2>"$2"; exit 0' _ "${ADIR}/opt_llvm" "${ADIR}/opt_l.err"
+    sh -c '"$1" >/dev/null 2>"$2"; exit 0' _ "${ADIR}/opt_asm"  "${ADIR}/opt_a.err"
+    grep -E 'dial:|\(at ' "${ADIR}/opt_l.err" > "${ADIR}/opt_l.diag"
+    grep -E 'dial:|\(at ' "${ADIR}/opt_a.err" > "${ADIR}/opt_a.diag"
+    if diff -q "${ADIR}/opt_l.diag" "${ADIR}/opt_a.diag" >/dev/null 2>&1; then
+        rpass "assert 位置诊断在 ${_ap_opt} 下双后端一致（不漂移）"
+    else
+        rbad "R10 assert 位置诊断在 ${_ap_opt} 下漂移"
+        diff "${ADIR}/opt_l.diag" "${ADIR}/opt_a.diag" | sed 's/^/       /'
+    fi
+done
+
 
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验

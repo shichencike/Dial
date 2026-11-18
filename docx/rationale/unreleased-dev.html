@@ -2521,11 +2521,79 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
 <li><strong>测试与门禁</strong>：新增 R9 组（标量双后端逐字比对 / struct asm 单侧 + LLVM 拒绝佐证
     / 3 类负例拒绝）；<code>builtin.rs</code> L18-20 注释更新（删 sizeof/alignof/offsetof，
     bitcast 标注走专用路径，L106 unsup 保留作防御兜底）；全量 <code>run_tests.sh</code> 绿。</li>
-<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍
+<li>
+<p><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍
     1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；本批唯一核心源码改动
     是 <code>src/lower.rs</code>（+ <code>builtin.rs</code> 注释）。本特性只在调用 bitcast 的程序中改变行为 →
     非 bitcast 程序（p1/p2/p3）O2/O3 <code>.s</code> 与 OLD(e1859bf) 逐字节一致；AArch64 普通
-    程序 O0/O2/O3 <code>.s</code> 零变化。docx 确定性生成；check_links/check_version 全过。</li>
+    程序 O0/O2/O3 <code>.s</code> 零变化。docx 确定性生成；check_links/check_version 全过。</p>
+</li>
+<li>
+<p><strong>M7-e3ai 自研 asm 后端补齐 <code>assert</code> / <code>panic</code>（Fail-Fast 哲学 + 双后端一致性补全）</strong>：
+  承接 e3ae（整数除零检查，哲学对齐）与 e3ag/e3ah（双后端一致性补全）两条主线，
+  补齐用户级 Fail-Fast 内建 <code>assert(cond[,msg])</code> / <code>panic(msg)</code>。这是继除零之后
+  「代替 LLVM 必须支持的 fail-fast 哲学」的下一块硬拼图——之前只覆盖了<strong>运行时隐式
+  检查</strong>（越界/空指针/除零），而<strong>用户显式触发</strong>的 assert/panic 仍缺。</p>
+</li>
+<li><strong>确凿缺口</strong>：LLVM 后端在 <code>codegen.rs::gen_builtin</code>（6573-6596）实现 assert
+    （条件 CFG：真→ok、假→fail 块调 <code>emit_fail_loc</code> 后 unreachable）与 panic
+    （直接 <code>emit_fail_loc</code>）；<code>emit_fail_loc</code>（1511-1530）用 <code>cur_pos</code>（在 gen_stmt
+    入口 set <code>stmt_pos(stmt)</code>）+ 编译期文件名串，调 C runtime
+    <code>dial_assert_fail_loc(msg,file,line,col)</code> / <code>dial_panic_loc(...)</code>（stdlib/dial_exc.c
+    42-62，打印诊断后 abort）。asm 后端 <code>builtin.rs</code> 明确 <code>BKind::Unsupported(
+    "assert / panic 需语句位置追踪（后续相位）")</code>，含 assert 的程序（如
+    <code>examples/builtin_demo.dial</code>）只能跑 LLVM。</li>
+<li><strong>为何这是真正的哲学缺口而非纯一致性差异</strong>：assert/panic 的语义核心是
+    「立即、带诊断地终止，绝不静默继续」。asm 若继续拒绝，用户「代替 LLVM」后
+    连最基本的断言都用不了——这与 e3ae 修 AArch64 除零「静默返回 0 产出错误数据」
+    是同一类正确性铁律（§20），只是触发方式从隐式变显式。</li>
+<li><strong>实现（核心源码改动 src/lower.rs + src/asm.rs 传参 + builtin.rs 注释）</strong>：
+    ① <code>Lower</code> 新增 <code>cur_pos:(usize,usize)</code> 与 <code>src_file:String</code> 两字段；<code>lower_stmt</code>
+    入口无条件 <code>self.cur_pos = crate::semantic::stmt_pos(s)</code>（<strong>纯内存赋值、不 emit
+    任何 IR</strong>，对齐 LLVM gen_stmt 的 cur_pos.set，对非 assert/panic 程序零影响）。
+    ② <code>lower_program</code> 新增 <code>src_file:&amp;str</code> 参数，从 <code>compile_asm</code> 的 <code>src_path</code>
+    贯通（<code>asm.rs</code> 调用点同步）——注意用<strong>原始 src_path</strong>而非 canonicalize 的
+    <code>src_abs</code>，与 LLVM 后端 <code>self.src_file = fe.src_file</code> 同源，保证诊断文件名逐字一致。
+    ③ <code>lower_call</code> 分派 match 在 <code>lower_builtin</code> <strong>之前</strong>拦截 <code>"assert"|"panic"</code>
+    → <code>lower_assert_panic</code>（否则仍落 Unsupported 报错）。
+    ④ <code>lower_assert_panic</code>：assert 校验 1~2 参、panic 校验 1 参（与语义层同款）；
+    fail/panic 分支把消息转 <code>const char*</code>——单参 assert 用编译期常量串
+    <code>"assert 失败"</code>（intern + LeaLabel，对齐 LLVM <code>global_string("assert.default",…)</code>），
+    其余经 <code>dial_string_cstr</code> 跳过 8 字节 ARC 头（与 <code>lower_throw_value</code> 未捕获路径
+    同款，直接传句柄会打印头字节）。文件名 intern 进 .rodata，行列用
+    <code>Value::Imm(I64)</code>，arg_tys <code>[Ptr,Ptr,I64,I64]</code>，调 <code>dial_assert_fail_loc</code>/
+    <code>dial_panic_loc</code> 后显式 <code>Term::Unreachable</code>（绝不落进后续语句）。assert 生成
+    ok/fail 两块的 <code>Term::Branch</code>（cond 经 <code>cond_reg</code>，复用 if/while 范式），fail 块
+    终止后 <code>set_cur(ok_b)</code> 返回 <code>Imm(0)</code>（对齐 LLVM assert 的 zero）；panic 终止后
+    新建 dead 块承接后续语句（与 lower_throw_value 同款，防止 CFG 污染）。<ul>
+<li><strong>位置诊断的运行期零开销</strong>：行列与文件名都是编译期常量（进 .rodata /
+  立即数），运行期只有一次 C printf + abort，与 LLVM emit_fail_loc 完全同构。</li>
+</ul>
+</li>
+<li><strong>实测（双后端逐字对齐）</strong>：assert 通过（单参+双参）双后端 stdout 均
+    <code>[A B C]</code> rc=0；assert 失败（自定义消息 "断言崩了"）双后端 stderr 均
+    <code>dial: 运行时断言失败（Fail-Fast 终止）: 断言崩了 (at &lt;file&gt;:3:5)</code>；
+    assert 默认消息均 <code>...: assert 失败 (at &lt;file&gt;:2:5)</code>；panic 均两行
+    <code>dial: 未捕获的异常（panic）: 爆炸消息</code> + <code>位置: &lt;file&gt;:3:5</code>；三种失败情形
+    双后端诊断逐字一致、<code>SENTINEL_AFTER</code> 均未打印、真实退出码一致
+    （assert=132/SIGILL int3、panic=134/SIGABRT，sh -c 包装绕过作业提示）。
+    <code>-O0/-O1/-O2/-O3/-g/-g -O0</code> 各级别位置诊断不漂移。</li>
+<li><strong>A/B 与架构护栏</strong>：OLD=<code>8c9961f</code>（stash 回退源码重建 dialc_OLD），NEW=本批；
+    6 个 golden 程序（core1/builtins/control_flow/core2/structs/exceptions）O2 <code>.s</code>
+    md5 全同（core1 f5bd68c5…、builtins 6f6e8d6c… 等逐字节一致）；AArch64 普通程序
+    core3 <code>.s</code> md5 两端一致（5f370ccd…）；assert/panic 程序经
+    <code>clang --target=aarch64-linux-gnu</code> 交叉汇编产出 ELF aarch64 .o（新特性在
+    AArch64 亦可用，普通程序仍零变化）。</li>
+<li><strong>测试与门禁</strong>：新增 R10 测试组——assert 通过（单/双参双后端 stdout 逐字）、
+    assert 失败（自定义/默认消息）+ panic（诊断 + file:line:col + 真实退出码 +
+    终止后哨兵未打印）、<code>-g</code>/<code>-O3</code>/<code>-g -O0</code> 位置不漂移；<code>run_tests.sh</code> 全量绿。
+    <code>builtin.rs</code> 头部覆盖注释 + assert/panic 表项注释更新（标注走专用路径，unsup
+    保留作防御兜底）。</li>
+<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍
+    1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；核心源码仅
+    <code>src/lower.rs</code> + <code>src/asm.rs</code>（1 行传参）+ <code>builtin.rs</code>（注释）。本特性只在调用
+    assert/panic 的程序中改变行为 → 非目标程序 <code>.s</code> 与 OLD 逐字节一致（A/B 已证）。
+    docx 确定性生成；check_links/check_version 全过。</li>
 </ul>
 </li>
 </ul><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>

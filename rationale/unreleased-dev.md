@@ -2399,3 +2399,66 @@
         是 `src/lower.rs`（+ `builtin.rs` 注释）。本特性只在调用 bitcast 的程序中改变行为 →
         非 bitcast 程序（p1/p2/p3）O2/O3 `.s` 与 OLD(e1859bf) 逐字节一致；AArch64 普通
         程序 O0/O2/O3 `.s` 零变化。docx 确定性生成；check_links/check_version 全过。
+
+    - **M7-e3ai 自研 asm 后端补齐 `assert` / `panic`（Fail-Fast 哲学 + 双后端一致性补全）**：
+      承接 e3ae（整数除零检查，哲学对齐）与 e3ag/e3ah（双后端一致性补全）两条主线，
+      补齐用户级 Fail-Fast 内建 `assert(cond[,msg])` / `panic(msg)`。这是继除零之后
+      「代替 LLVM 必须支持的 fail-fast 哲学」的下一块硬拼图——之前只覆盖了**运行时隐式
+      检查**（越界/空指针/除零），而**用户显式触发**的 assert/panic 仍缺。
+      - **确凿缺口**：LLVM 后端在 `codegen.rs::gen_builtin`（6573-6596）实现 assert
+        （条件 CFG：真→ok、假→fail 块调 `emit_fail_loc` 后 unreachable）与 panic
+        （直接 `emit_fail_loc`）；`emit_fail_loc`（1511-1530）用 `cur_pos`（在 gen_stmt
+        入口 set `stmt_pos(stmt)`）+ 编译期文件名串，调 C runtime
+        `dial_assert_fail_loc(msg,file,line,col)` / `dial_panic_loc(...)`（stdlib/dial_exc.c
+        42-62，打印诊断后 abort）。asm 后端 `builtin.rs` 明确 `BKind::Unsupported(
+        "assert / panic 需语句位置追踪（后续相位）")`，含 assert 的程序（如
+        `examples/builtin_demo.dial`）只能跑 LLVM。
+      - **为何这是真正的哲学缺口而非纯一致性差异**：assert/panic 的语义核心是
+        「立即、带诊断地终止，绝不静默继续」。asm 若继续拒绝，用户「代替 LLVM」后
+        连最基本的断言都用不了——这与 e3ae 修 AArch64 除零「静默返回 0 产出错误数据」
+        是同一类正确性铁律（§20），只是触发方式从隐式变显式。
+      - **实现（核心源码改动 src/lower.rs + src/asm.rs 传参 + builtin.rs 注释）**：
+        ① `Lower` 新增 `cur_pos:(usize,usize)` 与 `src_file:String` 两字段；`lower_stmt`
+        入口无条件 `self.cur_pos = crate::semantic::stmt_pos(s)`（**纯内存赋值、不 emit
+        任何 IR**，对齐 LLVM gen_stmt 的 cur_pos.set，对非 assert/panic 程序零影响）。
+        ② `lower_program` 新增 `src_file:&str` 参数，从 `compile_asm` 的 `src_path`
+        贯通（`asm.rs` 调用点同步）——注意用**原始 src_path**而非 canonicalize 的
+        `src_abs`，与 LLVM 后端 `self.src_file = fe.src_file` 同源，保证诊断文件名逐字一致。
+        ③ `lower_call` 分派 match 在 `lower_builtin` **之前**拦截 `"assert"|"panic"`
+        → `lower_assert_panic`（否则仍落 Unsupported 报错）。
+        ④ `lower_assert_panic`：assert 校验 1~2 参、panic 校验 1 参（与语义层同款）；
+        fail/panic 分支把消息转 `const char*`——单参 assert 用编译期常量串
+        `"assert 失败"`（intern + LeaLabel，对齐 LLVM `global_string("assert.default",…)`），
+        其余经 `dial_string_cstr` 跳过 8 字节 ARC 头（与 `lower_throw_value` 未捕获路径
+        同款，直接传句柄会打印头字节）。文件名 intern 进 .rodata，行列用
+        `Value::Imm(I64)`，arg_tys `[Ptr,Ptr,I64,I64]`，调 `dial_assert_fail_loc`/
+        `dial_panic_loc` 后显式 `Term::Unreachable`（绝不落进后续语句）。assert 生成
+        ok/fail 两块的 `Term::Branch`（cond 经 `cond_reg`，复用 if/while 范式），fail 块
+        终止后 `set_cur(ok_b)` 返回 `Imm(0)`（对齐 LLVM assert 的 zero）；panic 终止后
+        新建 dead 块承接后续语句（与 lower_throw_value 同款，防止 CFG 污染）。
+        - **位置诊断的运行期零开销**：行列与文件名都是编译期常量（进 .rodata /
+          立即数），运行期只有一次 C printf + abort，与 LLVM emit_fail_loc 完全同构。
+      - **实测（双后端逐字对齐）**：assert 通过（单参+双参）双后端 stdout 均
+        `[A B C]` rc=0；assert 失败（自定义消息 "断言崩了"）双后端 stderr 均
+        `dial: 运行时断言失败（Fail-Fast 终止）: 断言崩了 (at <file>:3:5)`；
+        assert 默认消息均 `...: assert 失败 (at <file>:2:5)`；panic 均两行
+        `dial: 未捕获的异常（panic）: 爆炸消息` + `位置: <file>:3:5`；三种失败情形
+        双后端诊断逐字一致、`SENTINEL_AFTER` 均未打印、真实退出码一致
+        （assert=132/SIGILL int3、panic=134/SIGABRT，sh -c 包装绕过作业提示）。
+        `-O0/-O1/-O2/-O3/-g/-g -O0` 各级别位置诊断不漂移。
+      - **A/B 与架构护栏**：OLD=`8c9961f`（stash 回退源码重建 dialc_OLD），NEW=本批；
+        6 个 golden 程序（core1/builtins/control_flow/core2/structs/exceptions）O2 `.s`
+        md5 全同（core1 f5bd68c5…、builtins 6f6e8d6c… 等逐字节一致）；AArch64 普通程序
+        core3 `.s` md5 两端一致（5f370ccd…）；assert/panic 程序经
+        `clang --target=aarch64-linux-gnu` 交叉汇编产出 ELF aarch64 .o（新特性在
+        AArch64 亦可用，普通程序仍零变化）。
+      - **测试与门禁**：新增 R10 测试组——assert 通过（单/双参双后端 stdout 逐字）、
+        assert 失败（自定义/默认消息）+ panic（诊断 + file:line:col + 真实退出码 +
+        终止后哨兵未打印）、`-g`/`-O3`/`-g -O0` 位置不漂移；`run_tests.sh` 全量绿。
+        `builtin.rs` 头部覆盖注释 + assert/panic 表项注释更新（标注走专用路径，unsup
+        保留作防御兜底）。
+      - **护栏**：`src/codegen.rs`/`src/ast.rs` 相对 544d10a 零改动、`Cargo.toml` 仍
+        1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；核心源码仅
+        `src/lower.rs` + `src/asm.rs`（1 行传参）+ `builtin.rs`（注释）。本特性只在调用
+        assert/panic 的程序中改变行为 → 非目标程序 `.s` 与 OLD 逐字节一致（A/B 已证）。
+        docx 确定性生成；check_links/check_version 全过。
