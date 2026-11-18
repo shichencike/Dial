@@ -2145,6 +2145,71 @@ done
 
 
 # ===========================================================================
+echo
+echo "  -- R11) is_null 句柄判空双后端一致性 --"
+IDIR="${RDIR}/is_null"; mkdir -p "$IDIR"
+
+# is_null 的准入名单由语义层 is_nullable_type 统一把关（两端同源）。
+# 用 libc strchr（找不到字符返回 NULL）作为干净的可控 null/non-null 来源：
+#   extern fn 返回 string（ARC 句柄，在判空名单内），C NULL 直接映射为空句柄。
+cat > "${IDIR}/probe.dial" <<'DIALEOF'
+extern fn strchr(s: rawptr<byte>, c: int): string;
+fn main(): int {
+    var s: string = "hello";
+    var a: string = strchr(s.as_c_str(), 104);
+    var b: string = strchr(s.as_c_str(), 122);
+    var c: string = strchr(s.as_c_str(), 111);
+    print(is_null(a));
+    print(is_null(b));
+    print(is_null(c));
+    if (is_null(b)) { print("b is null"); } else { print("b not null"); }
+    return 0;
+}
+DIALEOF
+
+# 1) O2 默认：多句柄 + 条件分支，双后端 stdout 逐字一致。
+${DIALC} build "${IDIR}/probe.dial" --backend llvm -o "${IDIR}/probe_llvm" >/dev/null 2>&1 || rbad "R11 LLVM 编译 is_null 用例失败"
+${DIALC} build "${IDIR}/probe.dial" --backend asm  -o "${IDIR}/probe_asm"  >/dev/null 2>&1 || rbad "R11 asm 编译 is_null 用例失败"
+_i_llvm="$( ${IDIR}/probe_llvm 2>/dev/null )"
+_i_asm="$( ${IDIR}/probe_asm 2>/dev/null )"
+[ -n "$_i_llvm" ] && [ "$_i_asm" = "$_i_llvm" ] \
+    && rpass "is_null 多句柄+条件分支：双后端 stdout 逐字一致" \
+    || rbad "R11 is_null 双后端不一致（llvm=[$_i_llvm] asm=[$_i_asm]）"
+
+# 2) 严格 0/1 值：is_null 结果必须恰好是 false/true（不是非零任意值）。
+if printf '%s\n' "$_i_asm" | grep -qxF 'false' && printf '%s\n' "$_i_asm" | grep -qxF 'true'; then
+    rpass "is_null 结果为严格 false/true 布尔值"
+else
+    rbad "R11 is_null 结果非严格布尔值：[$(printf '%s' "$_i_asm" | tr '\n' ' ')]"
+fi
+
+# 3) 各优化级别 -O0..-O3 与 -g：双后端逐字一致，判空不随 pass 漂移。
+for _i_opt in "-O0" "-O1" "-O3" "-g -O3"; do
+    ${DIALC} build "${IDIR}/probe.dial" --backend llvm -o "${IDIR}/opt_llvm" $_i_opt >/dev/null 2>&1 || { rbad "R11 LLVM 编译 $_i_opt 失败"; continue; }
+    ${DIALC} build "${IDIR}/probe.dial" --backend asm  -o "${IDIR}/opt_asm"  $_i_opt >/dev/null 2>&1 || { rbad "R11 asm 编译 $_i_opt 失败"; continue; }
+    _i_lo="$( ${IDIR}/opt_llvm 2>/dev/null )"
+    _i_ao="$( ${IDIR}/opt_asm 2>/dev/null )"
+    [ -n "$_i_lo" ] && [ "$_i_ao" = "$_i_lo" ] \
+        && rpass "is_null $_i_opt：双后端一致" \
+        || rbad "R11 is_null $_i_opt 双后端不一致"
+done
+
+# 4) 标量在编译期被拒（is_nullable_type 名单两端同源，asm 复用语义层）。
+cat > "${IDIR}/scalar.dial" <<'DIALEOF'
+fn main(): int {
+    var x: int = 1;
+    print(is_null(x));
+    return 0;
+}
+DIALEOF
+if ${DIALC} build "${IDIR}/scalar.dial" --backend asm -o "${IDIR}/scalar_asm" >"${IDIR}/scalar.log" 2>&1; then
+    rbad "R11 is_null 标量参数应在编译期被拒（asm 却编译通过）"
+else
+    rpass "is_null 标量参数编译期拒绝：双后端同源准入名单"
+fi
+
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

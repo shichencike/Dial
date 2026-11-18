@@ -659,6 +659,8 @@ dialc run   <源文件.dial> [-o 可执行文件]              [--safety debug|s
 
 用户级 Fail-Fast 内建 `assert(cond[, msg])` / `panic(msg)` 在 LLVM 与自研 asm 后端**完全一致**（M7-e3ai）：失败时都打印「消息 + `file:line:col` 源码位置」后终止进程（`assert` 条件假、退出码随陷阱类型；`panic` 为 `SIGABRT`），位置是编译期常量、运行期零开销；`assert` 条件为真时继续执行。`--safety` 各等级与 `-g`/`-O0`~`-O3` 下诊断位置不漂移，非 assert/panic 程序的汇编输出逐字节不变。
 
+句柄判空内建 `is_null(x)` 在双后端同样一致（M7-e3aj）：LLVM 的 `ptrtoint + icmp eq null` 对应 asm 的一条 `ICmp(Eq, 句柄, 0)`，产出严格 `false/true`、零运行时开销，典型用于 FFI/句柄错误路径（如连接失败返回空句柄）。准入类型由语义层 `is_nullable_type` 统一把关（字符串/容器/错误/通道/线程/文件/不透明句柄可判空，标量编译期拒绝），两端同源；`-O0`~`-O3`/`-g` 下结果不漂移，非 is_null 程序的汇编输出逐字节不变。
+
 产物形态开关（第 18 层，与上面的安全等级**正交**）：
 
 | 参数 | 形态 | 行为 |

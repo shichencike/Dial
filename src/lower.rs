@@ -1705,6 +1705,12 @@ impl<'a> Lower<'a> {
             // 后终止进程。必须在此拦截——否则落到下方 lower_builtin 的
             // BKind::Unsupported 报错。
             "assert" | "panic" => return self.lower_assert_panic(name, args),
+            // M7-e3aj：句柄判空 is_null(x)。对齐 LLVM codegen.rs:5031 的
+            // ptrtoint + icmp eq null：句柄在 IR 里就是指针，与 0 做一次 Eq
+            // 比较即得严格 0/1 的 bool，零函数调用。语义层 is_nullable_type
+            // 已保证实参是可空句柄（标量在编译期被拒），两端准入名单同源。
+            // 必须在此拦截——否则落到下方 lower_builtin 的 BKind::Unsupported。
+            "is_null" => return self.lower_is_null(args),
             _ => {}
         }
         // functions_sig 只含用户函数与 extern 声明；按名字硬编码分派的内建
@@ -2089,6 +2095,33 @@ impl<'a> Lower<'a> {
         };
         // 与整型字面量 lower_expr(Expr::IntLit) 完全同形，emit 全链已支持无 vreg 的 Imm。
         Ok((Value::Imm(Imm::I64(v)), false))
+    }
+
+    /// M7-e3aj：is_null(x) —— 句柄判空，对齐 LLVM codegen.rs:5031。
+    ///
+    /// LLVM 侧实现：v.into_pointer_value() → ptrtoint i64 → icmp eq 0 → i1。
+    /// asm 侧所有句柄值本身就是「指针语义的 8 字节槽值」（IrType::Ptr/Handle），
+    /// 直接 emit 一条 ICmp(Eq, x, 0) 即得严格 0/1 的 bool（IrType::I64），
+    /// 完全等价，零函数调用、零运行时依赖。
+    ///
+    /// 准入名单由语义层 is_nullable_type 统一把关（String/Array/Map/Set/KvMap/
+    /// Error/Channel/Thread/File/Opaque），两端同源；标量在编译期已被拒，
+    /// 因此这里无需再做类型判断。参数按自身静态类型 lower，避免被误当标量。
+    fn lower_is_null(&mut self, args: &[Expr]) -> Result<(Value, bool), String> {
+        if args.len() != 1 {
+            return self.err("is_null 需要 1 个参数（句柄）");
+        }
+        let dt = self.expr_dt(&args[0]);
+        let (v, _) = self.lower_expr(&args[0], &dt)?;
+        let r = self.new_reg(IrType::I64);
+        self.emit(IrInst::ICmp {
+            op: ACmp::Eq,
+            dst: r,
+            a: v,
+            b: Value::Imm(Imm::I64(0)),
+            ty: IrType::I64,
+        });
+        Ok((Value::Reg(r), false))
     }
 
     /// M7-e3ah：bitcast<T>(x) —— 底层位模式重解释，对齐 LLVM codegen.rs:4842-4924。

@@ -2462,3 +2462,43 @@
         `src/lower.rs` + `src/asm.rs`（1 行传参）+ `builtin.rs`（注释）。本特性只在调用
         assert/panic 的程序中改变行为 → 非目标程序 `.s` 与 OLD 逐字节一致（A/B 已证）。
         docx 确定性生成；check_links/check_version 全过。
+
+    - **M7-e3aj 自研 asm 后端补齐 `is_null(x)` 句柄判空（双后端一致性补全）**：
+      承接 e3ag/e3ah/e3ai 双后端一致性主线，补齐又一个 LLVM 支持却 asm 明确
+      Fail-Fast 拒绝的内建 `is_null`。这是 FFI / 句柄错误路径的判空核心接口
+      （如 `HttpResponse`/`HttpConn` 在连接失败、EOF、超时后返回空句柄，须由
+      `is_null` 判别，见 `tests/pkg/use_http.dial`）。
+      - **确凿缺口**：LLVM 后端在 `codegen.rs:5031` 实现 is_null——
+        `v.into_pointer_value()` → `ptrtoint i64` → `icmp eq 0` → i1，全程零函数调用、
+        不碰引用计数。asm 后端把它和 spawn/channel/map/filter 等一起批量塞进
+        `builtin.rs` 的「并发 / 高阶函数内建暂未接入（后续相位）」`BKind::Unsupported`，
+        明确 Fail-Fast 报错。实测 `strchr` 返回 NULL / 非 NULL 的程序：LLVM 输出
+        `true` / `false`，asm 直接报
+        `内建 is_null 暂不支持——并发 / 高阶函数内建暂未接入（后续相位）`。
+        这是一个被批量误归类的**纯判空语义内建**，与并发/高阶函数无关——不该因
+        同处一张表就被拖着一起拒绝。
+      - **实现（核心源码改动仅 src/lower.rs + builtin.rs）**：
+        ① `lower_call` 分派处拦截 `is_null`（在 bitcast/assert 拦截之后、
+        `lower_builtin` 之前），转 `lower_is_null`。
+        ② `lower_is_null`：`expr_dt` 取实参静态类型 → `lower_expr` 得到句柄 Value →
+        emit 一条 `IrInst::ICmp { op: Eq, a: v, b: Imm(0), ty: I64 }` → 返回
+        `Value::Reg`（严格 0/1 的 bool）。asm 的所有句柄值本身就是指针语义的
+        8 字节槽值（IrType::Ptr/Handle），与 0 做 Eq 比较完全等价于 LLVM 的
+        ptrtoint+icmp eq null，零函数调用、零运行时依赖。
+        ③ 准入名单由语义层 `is_nullable_type`（semantic.rs:176）统一把关：
+        String/Array/Map/Set/KvMap/Error/Channel/Thread/File/Opaque，标量编译期拒绝。
+        两端共用同一 semantic 层，名单天然同源，无需在 asm 侧重复判断。
+        ④ `builtin.rs` 把 is_null 从「并发/高阶函数」Unsupported 表拆出，改为转
+        专用路径的防御兜底（同 bitcast/assert/panic 范式），头部注释同步。
+      - **验证**：多句柄 + 条件分支场景（`strchr("hello", h/z/o)`）双后端 stdout
+        逐字一致（`false/true/false` + `b is null`）；结果严格是 `false/true`
+        （非任意非零值）；`-O0/-O1/-O2/-O3/-g/-g -O3` 各级别一致，判空不随
+        pass 漂移；标量 `is_null(int)` 在 asm 侧编译期被语义层拒绝（与 LLVM 同源）。
+      - **A/B 零回归**：7 个 golden 程序（core1/builtins/control_flow/core2/structs/
+        exceptions/rawptr）O2 `.s` 与 OLD(f31ec3b) 逐字节一致（md5 全同）；AArch64
+        普通程序 core3 `.s` 零变化；is_null 程序经 clang 交叉汇编产出 ELF aarch64 `.o`。
+        本特性只在调用 is_null 的程序中改变行为。
+      - **护栏**：`src/codegen.rs`/`src/ast.rs` 相对 f31ec3b 零改动、`Cargo.toml` 仍
+        1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
+        不打 tag。新增 R11 测试组（多句柄判空 + 严格布尔 + 各 O 级别 + 标量拒绝）。
+        docx 确定性生成；check_links/check_version 全过。

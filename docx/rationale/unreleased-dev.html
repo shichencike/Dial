@@ -2589,10 +2589,53 @@ AST 各 Stmt 变体已有 line/col（宪法冻结文件零改动），新增 <co
     终止后哨兵未打印）、<code>-g</code>/<code>-O3</code>/<code>-g -O0</code> 位置不漂移；<code>run_tests.sh</code> 全量绿。
     <code>builtin.rs</code> 头部覆盖注释 + assert/panic 表项注释更新（标注走专用路径，unsup
     保留作防御兜底）。</li>
-<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍
+<li>
+<p><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 544d10a 零改动、<code>Cargo.toml</code> 仍
     1.10.0、零新依赖、LLVM 路径零改动、构建零警告、不打 tag；核心源码仅
     <code>src/lower.rs</code> + <code>src/asm.rs</code>（1 行传参）+ <code>builtin.rs</code>（注释）。本特性只在调用
     assert/panic 的程序中改变行为 → 非目标程序 <code>.s</code> 与 OLD 逐字节一致（A/B 已证）。
+    docx 确定性生成；check_links/check_version 全过。</p>
+</li>
+<li>
+<p><strong>M7-e3aj 自研 asm 后端补齐 <code>is_null(x)</code> 句柄判空（双后端一致性补全）</strong>：
+  承接 e3ag/e3ah/e3ai 双后端一致性主线，补齐又一个 LLVM 支持却 asm 明确
+  Fail-Fast 拒绝的内建 <code>is_null</code>。这是 FFI / 句柄错误路径的判空核心接口
+  （如 <code>HttpResponse</code>/<code>HttpConn</code> 在连接失败、EOF、超时后返回空句柄，须由
+  <code>is_null</code> 判别，见 <code>tests/pkg/use_http.dial</code>）。</p>
+</li>
+<li><strong>确凿缺口</strong>：LLVM 后端在 <code>codegen.rs:5031</code> 实现 is_null——
+    <code>v.into_pointer_value()</code> → <code>ptrtoint i64</code> → <code>icmp eq 0</code> → i1，全程零函数调用、
+    不碰引用计数。asm 后端把它和 spawn/channel/map/filter 等一起批量塞进
+    <code>builtin.rs</code> 的「并发 / 高阶函数内建暂未接入（后续相位）」<code>BKind::Unsupported</code>，
+    明确 Fail-Fast 报错。实测 <code>strchr</code> 返回 NULL / 非 NULL 的程序：LLVM 输出
+    <code>true</code> / <code>false</code>，asm 直接报
+    <code>内建 is_null 暂不支持——并发 / 高阶函数内建暂未接入（后续相位）</code>。
+    这是一个被批量误归类的<strong>纯判空语义内建</strong>，与并发/高阶函数无关——不该因
+    同处一张表就被拖着一起拒绝。</li>
+<li><strong>实现（核心源码改动仅 src/lower.rs + builtin.rs）</strong>：
+    ① <code>lower_call</code> 分派处拦截 <code>is_null</code>（在 bitcast/assert 拦截之后、
+    <code>lower_builtin</code> 之前），转 <code>lower_is_null</code>。
+    ② <code>lower_is_null</code>：<code>expr_dt</code> 取实参静态类型 → <code>lower_expr</code> 得到句柄 Value →
+    emit 一条 <code>IrInst::ICmp { op: Eq, a: v, b: Imm(0), ty: I64 }</code> → 返回
+    <code>Value::Reg</code>（严格 0/1 的 bool）。asm 的所有句柄值本身就是指针语义的
+    8 字节槽值（IrType::Ptr/Handle），与 0 做 Eq 比较完全等价于 LLVM 的
+    ptrtoint+icmp eq null，零函数调用、零运行时依赖。
+    ③ 准入名单由语义层 <code>is_nullable_type</code>（semantic.rs:176）统一把关：
+    String/Array/Map/Set/KvMap/Error/Channel/Thread/File/Opaque，标量编译期拒绝。
+    两端共用同一 semantic 层，名单天然同源，无需在 asm 侧重复判断。
+    ④ <code>builtin.rs</code> 把 is_null 从「并发/高阶函数」Unsupported 表拆出，改为转
+    专用路径的防御兜底（同 bitcast/assert/panic 范式），头部注释同步。</li>
+<li><strong>验证</strong>：多句柄 + 条件分支场景（<code>strchr("hello", h/z/o)</code>）双后端 stdout
+    逐字一致（<code>false/true/false</code> + <code>b is null</code>）；结果严格是 <code>false/true</code>
+    （非任意非零值）；<code>-O0/-O1/-O2/-O3/-g/-g -O3</code> 各级别一致，判空不随
+    pass 漂移；标量 <code>is_null(int)</code> 在 asm 侧编译期被语义层拒绝（与 LLVM 同源）。</li>
+<li><strong>A/B 零回归</strong>：7 个 golden 程序（core1/builtins/control_flow/core2/structs/
+    exceptions/rawptr）O2 <code>.s</code> 与 OLD(f31ec3b) 逐字节一致（md5 全同）；AArch64
+    普通程序 core3 <code>.s</code> 零变化；is_null 程序经 clang 交叉汇编产出 ELF aarch64 <code>.o</code>。
+    本特性只在调用 is_null 的程序中改变行为。</li>
+<li><strong>护栏</strong>：<code>src/codegen.rs</code>/<code>src/ast.rs</code> 相对 f31ec3b 零改动、<code>Cargo.toml</code> 仍
+    1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
+    不打 tag。新增 R11 测试组（多句柄判空 + 严格布尔 + 各 O 级别 + 标量拒绝）。
     docx 确定性生成；check_links/check_version 全过。</li>
 </ul>
 </li>

@@ -19,7 +19,8 @@
 //         select) —— 一律明确 Unsupported，绝不静默降级。
 // 已由 lower.rs 专用路径接管（表中条目仅作防御兜底，正常不会走到）：
 //         sizeof / alignof / offsetof（M7-e3ag）、bitcast（M7-e3ah）、
-//         assert / panic（M7-e3ai，带 file:line:col 的 Fail-Fast 诊断）、ptr_cast。
+//         assert / panic（M7-e3ai，带 file:line:col 的 Fail-Fast 诊断）、
+//         is_null（M7-e3aj，句柄判空 = ICmp Eq(ptr, 0)）、ptr_cast。
 // ============================================================================
 
 use crate::ast::Type;
@@ -208,10 +209,14 @@ pub fn lookup(name: &str) -> Option<BSpec> {
         // 文件 IO / with 自动释放是「带失败抛错的 CFG」或「需要 moved 记账」的
         // 专用路径，不走普通内建表：见 lower.rs 的 lower_call 特判与 special_ret。
 
+        // is_null 走 lower.rs 专用路径（M7-e3aj：ICmp Eq(句柄, 0) → bool），
+        // 此条目仅作防御兜底，正常调用在 lower_call 分派处已被拦截。
+        "is_null" => return Some(unsup(Type::Bool, "is_null 需专用路径（见 lower.rs）")),
+
         // ---- 并发 / 高阶函数：后续相位 ----
         "spawn" | "join" | "detach" | "channel" | "recv" | "try_recv" |
         "recv_timeout" | "move_to" | "thread" | "done" | "closed" |
-        "map" | "filter" | "reduce" | "sort_by" | "is_null" | "drop" =>
+        "map" | "filter" | "reduce" | "sort_by" | "drop" =>
             return Some(unsup(Type::Int, "并发 / 高阶函数内建暂未接入（后续相位）")),
 
         _ => return None,
