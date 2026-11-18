@@ -4936,6 +4936,14 @@ else
 fi
 
 echo
+echo "== AF2) 零 LLVM 工具链独立性（asm 后端 gcc-only 回归，总纲第 1 项）=="
+if bash tools/verify_no_llvm_toolchain.sh "$DIALC"; then
+    :   # 脚本逐条打印 ✅；失败项打印 ❌ 并以非 0 退出
+else
+    fail=1
+fi
+
+echo
 echo "== AG) 双后端差分 fuzz 门禁（确定性生成 + 固化语料 + 最小化）=="
 if bash tools/run_diff_fuzz_gate.sh "$DIALC" --quick; then
     :

@@ -28,6 +28,13 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/roadmap-gap-analysis.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#缺口盘点与执行路线图2026-11-18源码核实版">缺口盘点与执行路线图（2026-11-18，源码核实版）</a><ul>
+<li><a href="#总纲唯一后端哲学用户-2026-11-18-确立最高优先级">总纲：唯一后端哲学（用户 2026-11-18 确立，最高优先级）</a></li>
+<li><a href="#总纲执行附则从-llvm-收回全部职责的路线图用户-2026-11-18-决策">总纲执行附则：从 LLVM 收回全部职责的路线图（用户 2026-11-18 决策）</a><ul>
+<li><a href="#a-四类活的真实起点源码核实-2026-11-18避免重复造已完成之物">A. 四类活的真实起点（源码核实 2026-11-18，避免重复造已完成之物）</a></li>
+<li><a href="#b-串行执行顺序一个一个来">B. 串行执行顺序（一个一个来）</a></li>
+<li><a href="#c-状态">C. 状态</a></li>
+</ul>
+</li>
 <li><a href="#0-护栏路线的硬边界">0. 护栏（路线的硬边界）</a></li>
 <li><a href="#1-盘点结果四类">1. 盘点结果（四类）</a><ul>
 <li><a href="#a-类--llvm-有而-asm-无--护栏内可做">A 类 · LLVM 有而 asm 无 —— 护栏内可做</a></li>
@@ -58,6 +65,113 @@
 LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它须改 <code>codegen.rs</code>/<code>semantic.rs</code>，
 违反护栏）、「战略/宪法否决」（永久不做）、「过时文档」（不是缺口）四类。</p>
 </blockquote>
+<h2 id="总纲唯一后端哲学用户-2026-11-18-确立最高优先级">总纲：唯一后端哲学（用户 2026-11-18 确立，最高优先级）</h2>
+<blockquote>
+<p><strong>asm 后端的目标是代替 LLVM，不是与 LLVM 并存。</strong> 因此在本路线的一切推理中，
+<strong>假设 LLVM 不存在——这个后端自己就是一个完整后端，而且只有它自己。</strong>
+本总纲统领下面所有分梯队决策；当任何「相对 LLVM」的论证与它冲突时，以本总纲为准。</p>
+</blockquote>
+<p>三条核心内涵：</p>
+<ol>
+<li><strong>没有退路，没有参照系。</strong> 不得把 LLVM 当作 fallback、参考实现或「兜底后端」。
+   凡是以「LLVM 也这样」作为不作为理由的论证一律不成立：在 LLVM 不存在的世界里，
+   用户需要的能力就是<strong>真的没有</strong>。</li>
+<li><strong>自己就是一个完整后端。</strong> 代码生成、优化（O3）、调试信息（DWARF）、多目标架构、
+   产物形态（单文件 / 极致体积 / 极致编译速度）、Fail-Fast、高级指令集——这些不是
+   「追赶 LLVM 的加分项」，而是唯一后端与生俱来的<strong>本来职责</strong>。</li>
+<li><strong>而且只有自己。</strong> 全部正确性、完整性、性能责任由本后端独自承担，不存在「另一个
+   后端补位」的可能。任何「两端共同缺、暂不用管」的处理，都必须附带一条
+   「若 LLVM 不存在，此项是否仍可接受」的复核，不能仅凭 LLVM 也没有就搁置。</li>
+</ol>
+<p><strong>对现有论证的修正指引（须牢记）</strong>：</p>
+<ul>
+<li>B 类「LLVM 也没有，故不构成差距」：在总纲下应视为「语言层真实能力缺口，需独立裁决
+  是否纳入」，而非「LLVM 也没有所以不算差距」。搁置理由只能是「触及语言 / 内存模型
+  宪法需裁决」，不能是「LLVM 也没有」。</li>
+<li>护栏「LLVM 路径零改动」「冻结 <code>codegen.rs</code> / <code>ast.rs</code>」：这是<strong>并行过渡期的工程纪律</strong>，
+  当前批次继续严格遵守；但它不是永久宪法。在「LLVM 不存在」的终局里，本后端必须 own
+  整条语言栈，届时这些冻结项须逐项复核解除。不得把过渡护栏误当作能力上限或永久不做。</li>
+<li>性能基准「几何平均 ~0.54x / 领先 LLVM ~46%」：LLVM 仅作<strong>外部标尺</strong>用于量化，不是
+  存在前提；即便 LLVM 消失，更快 / 更小 / 更准的目标仍独立成立。</li>
+</ul>
+<p><strong>当前状态（2026-11-18）</strong>：本总纲即刻生效，为最高推理准绳与终局方向；现行护栏在并行期
+继续有效、不因本总纲而改变当前批次的执行约束。阶段二第 11 项「SIMD 指令发射」原按用户
+指示暂不开工；用户 2026-11-18 后续决策以本附则的「全部收回、串行推进」覆盖该暂缓，
+从附则第 1 项开始逐项推进。</p>
+<h2 id="总纲执行附则从-llvm-收回全部职责的路线图用户-2026-11-18-决策">总纲执行附则：从 LLVM 收回全部职责的路线图（用户 2026-11-18 决策）</h2>
+<blockquote>
+<p>用户决策原文：<strong>四类活全都要收回</strong>，但不要一次性理想化，「写成路线图，一个一个来」。
+本附则把总纲「假设 LLVM 不存在、只有自己」落成可串行执行的清单。
+排序原则：先低风险独立性验证 → 再优化与语义深水 → 最后重型基础设施。
+规则：<strong>完成一项、勾选一项、再进下一项；不得并行铺开。</strong></p>
+</blockquote>
+<h3 id="a-四类活的真实起点源码核实-2026-11-18避免重复造已完成之物">A. 四类活的真实起点（源码核实 2026-11-18，避免重复造已完成之物）</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>类别</th>
+<th>真实起点</th>
+<th>自主度</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R1</td>
+<td>工具链去 LLVM 化</td>
+<td><code>.s→.o</code>/链接走 <code>cc_command()</code>，优先 <code>zig cc → clang</code>（LLVM 系），gcc/cc 可选；C 运行时 gcc/cc 可编，无 clang-only 硬依赖</td>
+<td>部分（clang 仅 LTO/PGO 分支用）</td>
+</tr>
+<tr>
+<td>R2</td>
+<td>LLVM 独占优化回收</td>
+<td>asm 已有 fold/cse/dce/arc_simplify + O3 代数恒等式；尾调用消除 e3q 已落地（<code>elide_tail_calls</code>）</td>
+<td>大部分已自主，剩差集需诊断</td>
+</tr>
+<tr>
+<td>R3</td>
+<td>B 类语言语义</td>
+<td>select 超时 / impl 关联函数 <code>T::new()</code> / map<string> 值 / 并发原子，LLVM 也没有；此前按「两端都缺暂不管」搁置</td>
+<td>未做；总纲下改判为真实缺口</td>
+</tr>
+<tr>
+<td>R4</td>
+<td>PGO / LTO / bitcode</td>
+<td><code>--pgo</code> 在 asm 下直接 <code>exit(1)</code>（<code>main.rs:504</code>，依赖 LLVM <code>.bc</code>）；LTO 仅 LLVM 分支；纯 LLVM 独占</td>
+<td>零；工程量最大</td>
+</tr>
+</tbody>
+</table>
+<h3 id="b-串行执行顺序一个一个来">B. 串行执行顺序（一个一个来）</h3>
+<p><strong>第 1 项 · 工具链去 LLVM 化（独立性验证）</strong> — ✅ <strong>已完成（2026-11-18）</strong>
+- 目标：证明 asm 后端在<strong>完全无 LLVM 工具</strong>（仅 gcc/cc/binutils）环境下全链路可编译、可运行、产物正确。
+- 落地：新增 <code>tools/verify_no_llvm_toolchain.sh</code>（已挂入 <code>tests/run_tests.sh</code> AF2 组），三层证据全绿：
+  - <strong>L1 环境自检</strong>：gcc/cc/ar/as/ld 全部可用。
+  - <strong>L2 官方开关</strong>：<code>DIAL_C_COMPILER=gcc</code> 下 18 个 golden 用例的 <strong>asm 产物</strong>与默认工具链逐字节一致（含 <code>.s</code> 产物），把工具链隔离为唯一变量；只测 asm 后端，不以 LLVM 后端为基准——因为发现 LLVM 后端在 gcc 下 fnptr/hof 有 PIE relocation 兼容问题，属 LLVM 侧、与 asm 独立性无关（已单独确认这两例 asm-via-gcc 编译运行正常）。
+  - <strong>L3 兜底选择</strong>：构造屏蔽 clang/zig/lld/llvm-ar 的隔离 PATH（仅留 GNU cc/as/ld），不设 <code>DIAL_C_COMPILER</code> 时 <code>cc_command()</code> 自动落到 GNU cc，asm 编译运行正确。
+- 护栏遵守：不改默认 cc 优先级、零产品代码改动、零新依赖、AArch64 零变化；默认 golden 门禁复跑全绿。
+- 结论：<strong>asm 后端零 LLVM 工具依赖得到回归脚本固化</strong>，第 1 项收口。</p>
+<p><strong>第 2 项 · LLVM 独占优化回收（诊断先行）</strong> — 中风险
+- 目标：找出「LLVM <code>-O</code> 做而 asm 未做」且<strong>有正 ROI</strong>的优化，逐个实现（尾调用已做，不重复）。
+- 动作：① 反汇编对比 LLVM O3 与 asm 产出，列 pass 差集（如 LICM、归纳变量、分支融合等）；② 每个候选做 ROI 诊断（收益上界 + 触发频次），只对正收益动手；③ 每实现一个走金标准门禁。
+- 验收：至少一个新优化落地且 bench 几何平均不劣化、golden 零回归。
+- 护栏：延续 e3at/e3av「先量化后投入」纪律，负 ROI 不硬做；baseline/AArch64 零回归。</p>
+<p><strong>第 3 项 · B 类语言语义（在 asm 侧自建）</strong> — 中高风险
+- 目标：把 LLVM 也没有的语言能力在 asm 后端补齐——select 超时 / impl 关联函数 <code>T::new()</code> / map<string> 值 / 原子类型，按总纲视为真实缺口。
+- 动作：① 逐项在 <code>semantic.rs</code>（非冻结）+ <code>lower.rs</code> + <code>codegen_asm.rs</code> 实现，<strong>不碰冻结的 <code>codegen.rs</code>/<code>ast.rs</code></strong>；② 确保 LLVM 后端不因语义层扩展而崩溃（transitional 兼容）；③ 以「LLVM 缺失时 asm 独立可用」为准。
+- 验收：新增 golden 覆盖 + 全门禁；LLVM 后端构建不回归。
+- 护栏：改语义层须评估对 LLVM 路径影响；并发/原子触及内存模型宪法裁决，放该项最后。</p>
+<p><strong>第 4 项 · PGO / LTO / bitcode（自建 profile 基础设施）</strong> — 高风险、工程量最大，最后启动
+- 目标：让 asm 不再因缺 <code>.bc</code> 拒绝 <code>--pgo</code>，自建「插桩 → profile 收集 → 优化决策」闭环；LTO 走自研 IR 跨模块合并。
+- 动作：① 定义不依赖 LLVM bitcode 的自研 profile 格式；② 插桩版 IR + 运行时 profile 写回；③ 基于 profile 的块布局/热冷分离；④ 跨模块 IR 合并实现 LTO。
+- 验收：<code>--pgo</code> 在 asm 下可用且带来可测加速、无 <code>.bc</code> 依赖、门禁全绿。
+- 护栏：每子步独立可回滚；前三项未收口前不开工。</p>
+<h3 id="c-状态">C. 状态</h3>
+<ul>
+<li>~~第 1 项（工具链去 LLVM 化）~~ ✅ 已完成（2026-11-18，<code>tools/verify_no_llvm_toolchain.sh</code> AF2 组）。</li>
+<li>当前开放项：<strong>第 2 项（LLVM 独占优化回收，诊断先行）</strong>。</li>
+<li>完成一项 → 在本附则勾选一项 → 再进下一项；不得并行铺开。</li>
+</ul>
 <h2 id="0-护栏路线的硬边界">0. 护栏（路线的硬边界）</h2>
 <ol>
 <li>LLVM 路径零改动：<code>src/codegen.rs</code>、<code>src/ast.rs</code> 相对基线冻结。</li>
