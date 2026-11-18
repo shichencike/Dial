@@ -11,6 +11,16 @@
 *.o
 # 自研后端（--backend=asm）额外产出的汇编文本（同名 .s），同样是构建产物
 *.s
+# --no-link 之外的 build 会在源旁产出与源文件同名、无扩展名的可执行文件；
+# 这类产物同样不是源码（如 tests/asm_golden/core1），统一忽略其目录形式。
+tests/asm_golden/core1
+tests/asm_golden/builtins
+tests/asm_golden/control_flow
+tests/asm_golden/core2
+tests/asm_golden/structs
+tests/asm_golden/exceptions
+tests/asm_golden/rawptr
+tests/asm_golden/fnptr
 
 # D / E 组的崩溃用例（越界 / 除零）按设计会 abort 并留下 core dump——
 # 那是**测试的产物**而不是源码，不该污染工作树、更不该被误提交。
