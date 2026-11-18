@@ -151,11 +151,16 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
   - <strong>L3 兜底选择</strong>：构造屏蔽 clang/zig/lld/llvm-ar 的隔离 PATH（仅留 GNU cc/as/ld），不设 <code>DIAL_C_COMPILER</code> 时 <code>cc_command()</code> 自动落到 GNU cc，asm 编译运行正确。
 - 护栏遵守：不改默认 cc 优先级、零产品代码改动、零新依赖、AArch64 零变化；默认 golden 门禁复跑全绿。
 - 结论：<strong>asm 后端零 LLVM 工具依赖得到回归脚本固化</strong>，第 1 项收口。</p>
-<p><strong>第 2 项 · LLVM 独占优化回收（诊断先行）</strong> — 中风险
+<p><strong>第 2 项 · LLVM 独占优化回收（诊断先行）</strong> — ✅ <strong>诊断完成，量化搁置（2026-11-18）</strong>
 - 目标：找出「LLVM <code>-O</code> 做而 asm 未做」且<strong>有正 ROI</strong>的优化，逐个实现（尾调用已做，不重复）。
-- 动作：① 反汇编对比 LLVM O3 与 asm 产出，列 pass 差集（如 LICM、归纳变量、分支融合等）；② 每个候选做 ROI 诊断（收益上界 + 触发频次），只对正收益动手；③ 每实现一个走金标准门禁。
-- 验收：至少一个新优化落地且 bench 几何平均不劣化、golden 零回归。
-- 护栏：延续 e3at/e3av「先量化后投入」纪律，负 ROI 不硬做；baseline/AArch64 零回归。</p>
+- 落地：新增 <code>tools/diag_opt_gaps.py</code>（只读 .s，零产品代码改动）。反汇编对比 LLVM <code>--fast</code>（O3+LTO+SIMD）与 asm <code>-O3</code>，源码核实 pass 差集 + 形态量化，结论：<strong>当前无正 ROI 的可回收 pass</strong>。
+  - <strong>pass 差集核实</strong>：asm 已具备常量折叠/CSE/DCE/ARC 简化/过程间折叠(e3p)/归纳变量强度削减(e3t)/InstCombine 代数恒等式(e3ad)/尾调用(e3q)/魔数除法(e3au)/ISA 微融合/浮点 GRA(e3av)；LLVM O3 有而 asm 无的经典 pass = LICM / 循环展开 / 函数内联 / SCCP。
+  - <strong>形态量化</strong>（asm -O3 bench.s）：纯寄存器 mov 673、相邻拷贝链 82（x86 move elimination 零延迟，非瓶颈）；变量除数 idiv <strong>0</strong>（所有除法已是常量魔数路径）；高频 call 全是 C runtime（dial_string_new 39 / dial_string_eq 28 / dial_array_get 23 …），<strong>无 Dial 用户小函数</strong>——LTO 才可内联，asm 侧 IR 内联不可触及。
+  - <strong>落后项归因</strong>：b02 1.071x（串行依赖链 <code>s=(s*31+i)%MOD</code>，LICM/展开免疫）、b20 1.057x / b22 1.144x（C runtime substring/拼接 + 数据依赖除法）。三者均架构级、非单点 pass 可解。
+  - <strong>基准现状</strong>：<code>bench_asm_vs_llvm.py --quick</code> 实测几何平均 0.5321x、胜平负 14/11/3、字符串类 1.0361x——asm 整体领先 LLVM ~47%，高 ROI 优化已吃干净。
+- 结论：<strong>诊断后量化搁置，不硬做负收益 pass</strong>（延续 e3at GRA 否决 / e3au ISA 边际递减 / e3av 跨函数 GRA 否决的纪律）。
+- 重启条件（写死在诊断工具输出）：① 出现高频小函数调用的新 workload；② 出现大量循环不变量计算；③ 语言层新增可并行语义 / 显式展开提示；④ 落后项归因改变。满足任一则重跑诊断。
+- 护栏：零产品代码、零新依赖、baseline/AArch64 零回归。</p>
 <p><strong>第 3 项 · B 类语言语义（在 asm 侧自建）</strong> — 中高风险
 - 目标：把 LLVM 也没有的语言能力在 asm 后端补齐——select 超时 / impl 关联函数 <code>T::new()</code> / map<string> 值 / 原子类型，按总纲视为真实缺口。
 - 动作：① 逐项在 <code>semantic.rs</code>（非冻结）+ <code>lower.rs</code> + <code>codegen_asm.rs</code> 实现，<strong>不碰冻结的 <code>codegen.rs</code>/<code>ast.rs</code></strong>；② 确保 LLVM 后端不因语义层扩展而崩溃（transitional 兼容）；③ 以「LLVM 缺失时 asm 独立可用」为准。
@@ -169,7 +174,8 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 <h3 id="c-状态">C. 状态</h3>
 <ul>
 <li>~~第 1 项（工具链去 LLVM 化）~~ ✅ 已完成（2026-11-18，<code>tools/verify_no_llvm_toolchain.sh</code> AF2 组）。</li>
-<li>当前开放项：<strong>第 2 项（LLVM 独占优化回收，诊断先行）</strong>。</li>
+<li>~~第 2 项（LLVM 独占优化回收）~~ ✅ 诊断完成、量化搁置（2026-11-18，<code>tools/diag_opt_gaps.py</code>）。</li>
+<li>当前开放项：<strong>第 3 项（B 类语言语义在 asm 侧自建）</strong>。</li>
 <li>完成一项 → 在本附则勾选一项 → 再进下一项；不得并行铺开。</li>
 </ul>
 <h2 id="0-护栏路线的硬边界">0. 护栏（路线的硬边界）</h2>
