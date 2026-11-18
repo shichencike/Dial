@@ -2537,6 +2537,77 @@ unset DIALC_STDLIB_DIR
 
 
 # ===========================================================================
+# R16) 嵌套下标赋值 a[i][j] = v（M7-e3ao）
+#     asm 后端递归左值解析（对齐 LLVM gen_assign_lvalue）：逐层
+#     dial_array_set_borrowed + 写回外层容器 + 精确所有权结算。验证：双后端
+#     stdout 逐字节一致、各 O 级别一致、COW 共享后写正确、句柄元素（string[]）
+#     嵌套写正确；并确认单层 a[i]=v 与非嵌套程序的行为不受影响。
+# ===========================================================================
+echo
+echo "  -- R16) 嵌套下标赋值双后端一致性 --"
+CDIR16="${TMP}/r16"
+mkdir -p "$CDIR16"
+cat > "$CDIR16/nested.dial" <<'EOF'
+fn main(): int {
+    var m: int[][] = [[1, 2, 3], [4, 5], [6, 7, 8, 9]];
+    print(m[2][3]);
+    m[0][0] = 11;
+    print(m[0][0]);
+    m[1][0] = 44;
+    print(m[1][0]);
+    var extra: int[] = [70, 80];
+    m.push(extra);
+    print(m.length());
+    m[3][1] = 88;
+    print(m[3][1]);
+    return 0;
+}
+EOF
+if ${DIALC} build "$CDIR16/nested.dial" --backend=llvm -o "$CDIR16/nl" >/dev/null 2>&1 \
+   && ${DIALC} build "$CDIR16/nested.dial" --backend=asm  -o "$CDIR16/na" >/dev/null 2>&1; then
+    "$CDIR16/nl" > "$CDIR16/nl.out" 2>&1; "$CDIR16/na" > "$CDIR16/na.out" 2>&1
+    diff -q "$CDIR16/nl.out" "$CDIR16/na.out" >/dev/null \
+        && rpass "R16 嵌套下标赋值双后端 stdout 逐字节一致" \
+        || { rbad "R16 嵌套赋值双后端输出不一致"; diff "$CDIR16/nl.out" "$CDIR16/na.out" | head; }
+else
+    rbad "R16 嵌套赋值双后端编译失败"
+fi
+
+# 各 O 级别产出一致
+for _o in -O0 -O1 -O2 -O3 -g; do
+    if ${DIALC} build "$CDIR16/nested.dial" --backend=asm $_o -o "$CDIR16/a" >/dev/null 2>&1 \
+       && ${DIALC} build "$CDIR16/nested.dial" --backend=llvm $_o -o "$CDIR16/l" >/dev/null 2>&1; then
+        "$CDIR16/a" > "$CDIR16/a.out" 2>&1; "$CDIR16/l" > "$CDIR16/l.out" 2>&1
+        diff -q "$CDIR16/a.out" "$CDIR16/l.out" >/dev/null \
+            && rpass "R16 嵌套赋值 $_o 双后端一致" \
+            || rbad "R16 嵌套赋值 $_o 双后端不一致"
+    else
+        rbad "R16 嵌套赋值 $_o 编译失败"
+    fi
+done
+
+# 句柄元素（string[]）嵌套写：验证 rc_kind 结算路径
+cat > "$CDIR16/str.dial" <<'EOF'
+fn main(): int {
+    var m: string[][] = [["a", "b"], ["c"]];
+    m[0][1] = "Z";
+    print(m[0][1]);
+    print(m[1][0]);
+    return 0;
+}
+EOF
+if ${DIALC} build "$CDIR16/str.dial" --backend=llvm -o "$CDIR16/sl" >/dev/null 2>&1 \
+   && ${DIALC} build "$CDIR16/str.dial" --backend=asm  -o "$CDIR16/sa" >/dev/null 2>&1; then
+    "$CDIR16/sl" > "$CDIR16/sl.out" 2>&1; "$CDIR16/sa" > "$CDIR16/sa.out" 2>&1
+    diff -q "$CDIR16/sl.out" "$CDIR16/sa.out" >/dev/null \
+        && rpass "R16 句柄元素 string[][] 嵌套写双后端一致" \
+        || { rbad "R16 string[][] 嵌套写不一致"; diff "$CDIR16/sl.out" "$CDIR16/sa.out" | head; }
+else
+    rbad "R16 string[][] 嵌套写编译失败"
+fi
+
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

@@ -828,6 +828,18 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             Stmt::AssignIndex { arr, index, value, .. } => {
+                // M7-e3ao：嵌套下标赋值（a[i][j] = v）——arr 本身是 Expr::Index，
+                // 交给递归左值解析（对齐 LLVM gen_assign_lvalue，codegen.rs:2450）：
+                // 逐层 dial_array_set_borrowed（不消耗借来的内层数组）+ 写回外层容器，
+                // 精确结算每层 value 所有权。单层 a[i] = v（arr 为变量）仍走下方既有
+                // 逻辑——int[] 既有测试路径与汇编输出完全不变。
+                if matches!(arr.as_ref(), Expr::Index(..)) {
+                    let full = Expr::Index(arr.clone(), index.clone());
+                    let vdt = self.expr_dt(value);
+                    let (vv, _) = self.lower_expr(value, &vdt)?;
+                    let borrowed = yields_borrowed_ref(value);
+                    return self.lower_assign_lvalue(&full, vv, &vdt, borrowed);
+                }
                 // 语义等价于 `arr = dial_array_set(arr, i, v)`：C 侧在共享时会 COW
                 // 克隆并释放本调用者的旧引用，因此**只能写回新句柄，绝不能再 release
                 // 旧值**（否则悬垂 / 双重释放）。见 codegen.rs:2727 的所有权契约注释。
@@ -3097,6 +3109,76 @@ impl<'a> Lower<'a> {
 
     /// 把元素值按 C 侧的 int64 位模式重解释。数组元素在 C 运行时里统一按
     /// int64_t 槽存放（float 是 double 的位模式，f32 是低 32 位）。
+    /// M7-e3ao：嵌套下标赋值的递归左值解析（对齐 LLVM `gen_assign_lvalue`）。
+    ///
+    /// `lhs` 形如 `m[i][j]`（`Expr::Index(Index(Var, i), j)`）：从最外层变量槽递归
+    /// 下钻，每层用 `dial_array_set_borrowed` 写入（内层数组是从外层元素槽**借来**的
+    /// 引用，绝不能被消耗），把「可能 COW 更新」的新句柄写回外层容器，直到最外层
+    /// 变量槽，最后结算每层 value 的所有权。
+    ///
+    /// - `value` / `value_dt`：本层要写入的元素值（已 lower 成内部位模式）及其类型；
+    /// - `is_borrowed`：value 是否借来的——借来的来源仍持有，set 内部已 retain 一份
+    ///   归数组所有，调用方不得再释放；自带所有权的值（字面量 / clone）须归还一份。
+    fn lower_assign_lvalue(
+        &mut self,
+        lhs: &Expr,
+        value: Value,
+        value_dt: &Type,
+        is_borrowed: bool,
+    ) -> Result<(), String> {
+        match lhs {
+            Expr::Var(name) => {
+                // 最外层：把新容器句柄写回变量槽，释放槽里被替换的旧引用。
+                // 对齐 LLVM gen_assign_lvalue 的 Var 分支（load old → store → release old）。
+                let l = match self.lookup(name).cloned() {
+                    Some(x) => x,
+                    None => return self.err(&format!("未声明的变量 '{}'", name)),
+                };
+                let old = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Load { dst: old, ptr: l.ptr, ty: IrType::Handle });
+                self.emit(IrInst::Store { ptr: l.ptr, val: value, ty: IrType::Handle });
+                // 释放被替换的旧容器引用（RcRelease 作用于槽地址，先落进临时槽）。
+                if let Some(k) = rc_kind(&l.dt) {
+                    let tmp = self.emit_alloca(IrType::Handle);
+                    self.emit(IrInst::Store { ptr: tmp, val: Value::Reg(old), ty: IrType::Handle });
+                    self.emit(IrInst::RcRelease { ptr: tmp, kind: k });
+                }
+                Ok(())
+            }
+            Expr::Index(container, idx) => {
+                // container（如 m[i]）求值得到的是从外层元素槽**借来**的内层数组句柄；
+                // 其自身的写回由下一层递归负责。这里只负责把 value 写进 container。
+                let cty = self.expr_dt(container);
+                let (carr, _) = self.lower_expr(container, &cty)?;
+                let (iv, _) = self.lower_expr(idx, &Type::Int)?;
+                // Fail-Fast：越界写由 C 侧 dial_array_set_borrowed 内的 DIAL_CHECK_BOUNDS
+                // 当场 trap（与单层 dial_array_set 同口径，ReleaseFast 下消除），无需 IR 层重复。
+                let bits = self.coerce_elem_bits(value, value_dt)?;
+                let new_child = self.new_reg(IrType::Handle);
+                self.emit(IrInst::Call {
+                    dst: Some(new_child), func: "dial_array_set_borrowed".to_string(),
+                    args: vec![carr, iv, bits],
+                    arg_tys: vec![IrType::Handle, IrType::I64, IrType::I64],
+                    ret_ty: IrType::Handle, linkage: CallLink::Runtime,
+                });
+                // 递归把新容器写回 container 左值。new_child 是运行时新对象、自带
+                // 所有权（borrowed=false）；递归到最外层 Var 分支时由槽负责持有它。
+                self.lower_assign_lvalue(container, Value::Reg(new_child), &cty, false)?;
+                // 结算本层 value：set_borrowed 为元素 retain 了一份归数组所有，
+                // 借来的值来源仍持有不得再释放；自带所有权的值须归还这一份。
+                if !is_borrowed {
+                    if let Some(k) = rc_kind(value_dt) {
+                        let tmp = self.emit_alloca(reg_ir(value_dt));
+                        self.emit(IrInst::Store { ptr: tmp, val: value, ty: reg_ir(value_dt) });
+                        self.emit(IrInst::RcRelease { ptr: tmp, kind: k });
+                    }
+                }
+                Ok(())
+            }
+            _ => self.err("[asm 后端] 嵌套下标赋值目标必须是变量或数组下标"),
+        }
+    }
+
     fn coerce_elem_bits(&mut self, v: Value, dt: &Type) -> Result<Value, String> {
         match reg_ir(dt) {
             IrType::I64 => Ok(v),

@@ -799,6 +799,31 @@ R 组双路验证：静态用 `llvm-dwarfdump` 核对段、七个 Dial 名字与
 后者是权威包解压产物，前者是本机 C 源码编译结果。已安装 `stdlib.dialpkg` 时链接走分发缓存、
 本层缓存不介入；`--fast-compile` 强制绕开已安装包（其为 -O2 烘焙）以确保 -O0 生效。
 
+### 13.6 嵌套下标赋值的递归左值解析（v1.10 开发中增补，M7-e3ao）
+
+「代替 LLVM」的语言层面缺口盘点中，`a[i][j] = v`（`arr` 为 `Expr::Index`）是最后一处
+LLVM 完整支持而 asm 明确 Fail-Fast 拒绝的语句构造——此前 `Stmt::AssignIndex` 只接受
+`arr` 为变量。补齐方式是照搬 LLVM 的 `gen_assign_lvalue` 递归左值解析，落在
+`src/lower.rs::lower_assign_lvalue`：
+
+| 左值形态 | lowering | 所有权要点 |
+| --- | --- | --- |
+| `Expr::Var(m)`（最外层） | load 旧容器→store 新容器→`RcRelease(旧)` | 新容器是内层递归交出的自带所有权引用，由变量槽接管 |
+| `Expr::Index(container, i)` | lower 借来的容器句柄→`dial_array_set_borrowed(c, i, v)`→递归写回 container | 内层数组是从外层元素槽**借来**的引用，`set_borrowed` 不消耗它；返回值是新拥有引用，递归写回后按 `is_borrowed` 结算本层 value |
+
+关键契约：借来的值（变量 / 字段 / 元素 / `get`）来源仍持有，set 内部已 retain 一份归
+数组所有，调用方不得再释放；自带所有权的值（字面量 / clone）须归还 set 多 retain 的
+那一份——与 LLVM 的 `retain_if_borrowed` / `settle_fresh_value` 同源。越界 Fail-Fast 由
+C 侧 `DIAL_CHECK_BOUNDS` 统一负责（ReleaseFast 消除），IR 层不重复。单层 `a[i] = v`
+仍走既有 `dial_array_set` 路径，汇编输出零变化。
+
+> **已发现、未修的独立缺口**：asm 后端 `Expr::Index` / `get` 返回借用句柄时 `is_copy=false`
+> （`Expr::Var` 同类为 `true`），局部变量绑定时少 retain 一份、作用域退出多 release 一份。
+> 纯场景 rc 恰好平衡不崩，但与嵌套赋值叠加后可使 `examples/multi_dim_demo.dial` 退出时
+> `free(): unaligned chunk`。修复需统一借用返回值语义（对齐 LLVM `retain_if_borrowed`），
+> 会改变所有含句柄元素读取程序的汇编，风险超本批护栏，留后续专项批次（见 rationale
+> M7-e3ao）。本批嵌套赋值功能本身已用不含该陷阱的用例充分验证双后端一致。
+
 ---
 
 ## 14. 真实程序缺口补齐与宪法裁决（v1.04 增补）

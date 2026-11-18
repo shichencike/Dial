@@ -2867,3 +2867,61 @@
   惠及未装包的源码回退路径）；`dialc clean` 目前不清 stdlib-cache（如需释放空间可手动
   `rm -rf .dialc_build/stdlib-cache`）；并发首个编译者写缓存、后来者命中，同 key 内容
   一致故后者覆盖无害。
+
+#### M7-e3ao：自研 asm 后端补齐嵌套下标赋值 `a[i][j] = v`（语言层面最后一块被明确拒绝的构造）
+
+- **背景**：用户「继续，看看还有什么缺口没有补上」。对 `src/lower.rs` 里所有
+  「asm 后端…后续相位 / BKind::Unsupported」拒绝点逐条审计，并实测 `examples/`：
+  确认 `sizeof/bitcast/assert/is_null/drop/channel/spawn/高阶方法/select` 已有专用
+  路径接管（builtin.rs 里的 `unsup` 仅是防御兜底），`simd`/内联汇编是 LLVM 有但
+  e3x 已定量证伪 ROI 为负的有意不做项，`thread` 构造 LLVM 自身也未单独实现——
+  **唯一确凿缺口是嵌套下标赋值**：`Stmt::AssignIndex` 只接受 `arr` 为 `Expr::Var`，
+  `arr` 为 `Expr::Index`（`m[i][j] = v`）时 `lower.rs:836` 明确 Fail-Fast 拒绝。
+  官方示例 `examples/multi_dim_demo.dial` 的 `m[0][0] = 11` 即触发——实测 HEAD
+  编译器 asm 后端直接报「索引赋值目标仅支持变量」，LLVM 后端编译运行正常。
+- **确凿缺口**：LLVM 后端有完整递归左值解析 `gen_assign_lvalue`（codegen.rs:2450）：
+  - `Expr::Var`：load 旧容器→store 新容器→`release_value(vty, old)`；
+  - `Expr::Index`：`carr = gen_expr(container)` 取出的内层数组是从外层元素槽
+    **借来**的引用（不消耗），`dial_array_set_borrowed(carr, i, v)` 写入并返回
+    一份新拥有的引用→递归 `gen_assign_lvalue(container, new_child, cty, false)`
+    把新容器写回外层→按 `is_borrowed` 结算本层 value（借来的来源仍持有不得再
+    释放、自带所有权的须归还 set 内部 retain 的那一份）。
+  C runtime 的 `dial_array_set_borrowed`（stdlib/dial_array.c:170）符号早在 e3an
+  引入高阶方法时就已落地（共享时 COW 克隆不释放被借的 a、独占时原地写并 retain
+  一份），硬前置全齐，纯前端缺口。
+- **实现**（`src/lower.rs`，唯一产品代码改动）：
+  - `Stmt::AssignIndex` 分支：当 `arr` 为 `Expr::Index` 时构造 `full =
+    Expr::Index(arr, index)`，`lower` value 后带 `yields_borrowed_ref(value)` 转入
+    新函数；单层 `a[i]=v` 仍走既有 `dial_array_set` 路径（汇编零变化）。
+  - 新增 `lower_assign_lvalue(lhs, value, value_dt, is_borrowed)`：`Var` 分支
+    load 旧句柄→store 新句柄→`RcRelease(Array)` 释放旧（`rc_kind(l.dt)`）；
+    `Index` 分支 lower 借来的容器句柄→`coerce_elem_bits`→`dial_array_set_borrowed`
+    →递归写回 container→`rc_kind(value_dt)` 按 `is_borrowed` 结算。越界 Fail-Fast
+    沿用 C 侧 `DIAL_CHECK_BOUNDS`（与单层同口径，ReleaseFast 消除），IR 层不重复。
+- **实测**：多维读写 / push 后写 / COW 共享后写 / 多次嵌套写 / 句柄元素
+  `string[][]` 嵌套写 / `-O0..-O3` / `-g` 双后端 stdout 逐字节一致、无崩溃。
+  `examples/multi_dim_demo.dial` 去掉独立 get-borrow 陷阱后的等价程序双后端一致。
+- **A/B 零回归**：新增 `tests/asm_golden/nested_index.dial`（第 13 个 golden）。
+  其余 12 个 golden 程序 `.s` 与 HEAD（ed342cf）旧编译器（git worktree 独立构建）
+  **逐字节一致**；AArch64 普通程序（core1/core3/hof）`.s` 零变化；nested_index
+  经 `clang --target=aarch64-linux-gnu` 交叉汇编产出 ELF aarch64 `.o`（含
+  `dial_array_set_borrowed` 符号）。完整回归 0 FAIL，AF 门禁 14 个用例全绿。
+- **护栏**：`src/codegen.rs`/`src/ast.rs`/`Cargo.toml` 1.10.0/零新依赖/LLVM 路径/
+  AArch64 普通程序零改动，构建零警告，不打 tag，docx 确定性。
+- **另发现一个独立既有缺口（本次不修，留后续批次）**：asm 后端 `Expr::Index`
+  （lower.rs:1490）与 `Expr::Method get/at`（lower.rs:1863）返回借用句柄时
+  `is_copy=false`，而 `Expr::Var` 同类场景返回 `true`（注释「句柄需 retain 当
+  存到别处」）。`VarDecl`/`Assign` 的 `store_value` 仅在 `is_copy=true` 时 retain，
+  但作用域退出 `release_scope` 对所有 `is_handle && !moved` 局部变量无条件 release。
+  于是 `var row: int[] = m.get(i)` / `var row = m[i]` 这类「借用句柄绑局部变量」
+  少 retain 一份、退出多减一份，rc 被多扣 1。LLVM 用 `retain_if_borrowed`
+  （codegen.rs:1970，对 `is_heap_type && yields_borrowed_ref` retain）补正。
+  该 bug 此前潜伏——纯 while+get 程序 rc 恰好平衡不崩；本次嵌套赋值使
+  `examples/multi_dim_demo.dial` 原文（含 `var row: int[] = m.get(i)`）可编译后
+  才暴露：退出时 `dial_array_release(m)` 遍历元素释放已被提前 free 的内层数组，
+  gdb 定位 `free(): unaligned chunk detected in tcache 2`（backtrace:
+  `dial_array_release → release_buffer → elem_release(kind=1) → dial_rc_release`）。
+  修复需统一 `Expr::Index`/`get` 的借用返回值语义（对齐 `Expr::Var=true`），会
+  改变所有含句柄元素读取程序的汇编，风险超出本批零回归护栏，故如实记录、留
+  后续专项批次处理。此缺口不影响本批嵌套赋值功能本身（已用不含该陷阱的用例
+  充分验证双后端一致）。
