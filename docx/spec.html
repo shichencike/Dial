@@ -924,19 +924,25 @@ M7-e3w 起已支持完整 DWARF（源码行断点 + 变量名 + M7-e3z 类型 DI
 <td>M5-d</td>
 <td>一等<strong>函数地址</strong>（函数指针）：取地址 / 间接调用 / 作参数与返回值</td>
 </tr>
+<tr>
+<td>M7</td>
+<td>双后端一致性补全：布局内建 <code>sizeof</code>/<code>alignof</code>/<code>offsetof</code>、<code>bitcast</code>、<code>assert</code>/<code>panic</code>、<code>is_null</code>、<code>drop</code>、channel 原语族、<code>spawn</code>/<code>join</code>/<code>detach</code> 真多线程、<code>map</code>/<code>filter</code>/<code>reduce</code>/<code>sort_by</code> 高阶数组方法、<code>select</code> 多路通道选择——均与 LLVM 后端逐字节一致</td>
+</tr>
 </tbody>
 </table>
-<p>尚未覆盖（会明确报错）：<code>select</code> / <code>spawn</code> / 通道并发、内联汇编与 SIMD、
-高阶容器方法（<code>map</code> / <code>filter</code> / <code>reduce</code> / <code>sort_by</code>）、嵌套下标赋值等。
+<p>尚未覆盖（会明确报错）：内联汇编与 SIMD（<code>asm</code> / <code>asm_intel</code> / <code>simd</code>）、
+嵌套下标赋值等；高阶函数仅句柄元素开放（标量元素通道编译期拒绝，两端同源）。
 编译期布局内建 <code>sizeof</code> / <code>alignof</code> / <code>offsetof</code> 已支持（M7-e3ag，含 packed struct
 对齐与双后端一致性验证）；底层位重解释 <code>bitcast</code> 已支持（M7-e3ah，标量双后端一致，
-struct↔struct 同尺寸 asm 零拷贝实现——该项 LLVM IR verifier 本身拒绝，属 asm 超越）。</p>
+struct↔struct 同尺寸 asm 零拷贝实现——该项 LLVM IR verifier 本身拒绝，属 asm 超越）。
+<code>select</code>（M7-e3an2）经多基本块控制流实现，default / 全体 EOF / break 跳出外层循环 /
+多通道公平选取全部双后端一致，事件驱动等待（非轮询）。</p>
 <p><strong>双后端黄金门禁</strong>（<code>tools/run_asm_golden.sh</code>，<code>run_tests.sh</code> 的 AF 组）：
 同一份 <code>.dial</code> 分别用 <code>llvm</code> / <code>asm</code> 编译运行并<strong>逐字节 diff</strong>——LLVM 后端即基准，
-无需维护 <code>.expected</code>。正向用例 10 份（<code>core1</code>–<code>core3</code> 核心子集 + <code>builtins</code>
+无需维护 <code>.expected</code>。正向用例 12 份（<code>core1</code>–<code>core3</code> 核心子集 + <code>builtins</code>
 内建与方法表 + <code>exceptions</code> 异常与文件 IO + <code>control_flow</code> <code>label</code>/<code>goto</code> +
 <code>structs</code> 结构体按值语义 + <code>containers</code> 容器元素类型 + <code>rawptr</code> 裸指针 FFI +
-<code>fnptr</code> 一等函数地址）；
+<code>fnptr</code> 一等函数地址 + <code>hof</code> 高阶数组方法 + <code>select</code> 多路通道选择）；
 负例在 <code>tests/asm_golden/negative/</code> 下逐个遍历，每个都要求「LLVM 能编译、
 asm 报错且带 <code>[asm 后端]</code> 前缀」，杜绝静默降级。用例在临时目录编译，仓库零污染。</p>
 <p><strong>性能基准</strong>（<code>tools/bench_asm_vs_llvm.py</code>）：用 <code>bench/bench.dial</code> 的 28 项
@@ -6284,6 +6290,11 @@ if (is_null(s)) {
 </table>
 <p>实测：50 万次「send + select」往返，<strong>wall 0.19 s</strong>，CPU 0.36 s。</p>
 <blockquote>
+<p><strong>自研 asm 后端（M7-e3an2）</strong>：<code>select</code> 已由自研后端以多基本块控制流实现，与 LLVM
+后端<strong>双后端逐字节一致</strong>（<code>--backend=asm</code>）。default / 全体 EOF / 多通道公平选取 /
+case 内 <code>break</code> 跳出<strong>外层循环</strong>（select 是语句、不是可 break 的块）全部语义对齐；
+等待同样是事件驱动（<code>dial_chan_wait(epoch)</code>，非轮询）。6 个 <code>examples/select_*.dial</code>
+与 <code>tests/asm_golden/select.dial</code> 双后端输出逐字节一致，<code>-O0</code>~<code>-O3</code>/<code>-g</code> 一致。</p>
 <p><strong>Windows 说明</strong>：Windows 没有 pthread，对应实现是 <code>WakeConditionVariable</code> / <code>SetEvent</code>
 （见 <a href="https://github.com/shichencike/Dial/blob/main/ARCHITECTURE.md#02-平台差异对-c-runtime-的约束实现路线备忘">ARCHITECTURE.md §0.2</a> 的线程后端规划）。</p>
 </blockquote>

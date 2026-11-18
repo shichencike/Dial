@@ -2751,3 +2751,63 @@
   的 map，语义层本就拒绝句柄元素高阶方法，两端同源）；嵌套高阶（回调返回函数指针）
   未覆盖；thunk 的 float32/int32 标量元素口径与 LLVM 未逐一比对（现有高阶方法元素
   只开放 int/float/bool/byte/char，语义层已限制）。
+
+#### M7-e3an2：自研 asm 后端补齐 `select` 多路通道选择（双后端一致性补全，语句级控制流最后一块）
+
+- **背景**：e3ag~e3an 逐批补齐了 asm 相对 LLVM 的语义缺口（sizeof/bitcast/assert/
+  is_null/drop/channel/spawn/hof），逐项对比后确认最后一个**语句级**缺口是 `select`
+  （v0.91 多路通道选择）：`lower.rs:1221` 对 `Stmt::Select` 直接报
+  `asm 后端暂不支持 select`。这是并发族的最后一块——channel（单线程收发）、
+  spawn/join/detach（真多线程）已就位，select 是「同时监听多路通道」的调度原语。
+- **确凿缺口与前置审计**：`select` 在 LLVM 完整支持（codegen.rs:3466-3688），
+  asm 明确 Fail-Fast。硬前置全齐：C runtime 的 `dial_sel_{new,add,pick,recv,free}`
+  + `dial_chan_{epoch,wait}` 已在 stdlib/dial_channel.c 实现并链接（同一套符号
+  LLVM 后端也在用）；IR 的多基本块（`new_block`/`Term::Branch`/`Term::Jump`）、
+  静态栈槽跨块传值（`emit_alloca`/`Load`/`Store`）、Runtime C 调用
+  （`CallLink::Runtime`，channel 调用已验证）、`ICmp` 齐备。
+- **实现**（`src/lower.rs::lower_select`）：仿 LLVM 搭 7 类块——
+  `setup`（建 selector + 登记各 case 通道）→ `loop`（先读 epoch 再 pick）→
+  `chk`（idx>=0 判就绪）→ `dispatch_i` 条件链（idx==i ? take_i : next，IR 无 Switch，
+  复用 lower_match 的顺序分支思路）→ `take_i`（dial_sel_recv 非阻塞取元素）/
+  `case_i`（绑定变量 + 分支体）→ `nowait`（default / dial_chan_wait 阻塞）→
+  `eof`（全体 EOF 直接结束）→ `end`（统一续跑点）。
+  - **跨块值**：selector 句柄 / epoch / 就绪下标 / 元素句柄全部经 `emit_alloca`
+    栈槽传递（alloca 是静态布局，循环内不增长栈帧），规避 ICmp 融合（`analyze_fusable`
+    只查 use_count==1、不查定义块==使用块）跨块重发的隐患。
+  - **break 语义（关键）**：select 的 retry loop **不 push `self.loops`**——case body
+    的 `break` 必须经 `self.loops.last()` 跳到 select **外层**那个 while 的 exit
+    （select 是语句不是可 break 的块，对齐 LLVM basic block 天然行为）。
+    `release_scopes_upto(depth)` 在 break 时释放 case 作用域的绑定变量并标 moved，
+    后续 `pop_scope` 经 `release_scope` 跳过，不二次释放；case body 循环在
+    `cur_terminated()` 时提前 break，避免语句 emit 到已终止块。
+  - **retry 回边只回 loop，绝不回 setup**：否则每轮重复 `dial_sel_new` 泄漏 selector。
+  - **free 时机**：`dial_sel_free` 在 case/default body **之前**发（body 里 return 也
+    不泄漏）；但 `take_i` 的 isnull 重试路径（元素在 pick 后被别的消费者抢走）
+    **不 free**、直接回 loop 重挑（此时 selector 还要留着）；eof 路径单独 free。
+  - **不丢唤醒**：epoch 先于 pick 读取——若两者之间发生变化，nowait 的
+    `dial_chan_wait(epoch)` 会立即返回而非睡死。
+  - **绑定变量**：类型=通道元素类型（语义层 white-list 只放行句柄：string/array/
+    map/set/kvmap/error/channel，标量编译期拒绝，见 semantic.rs:3993-4010），
+    `dial_sel_recv` 返回句柄所有权直接转移（is_copy=false 不 retain），
+    `Local{is_handle: rc_kind(elem).is_some()}`，push_scope/leave_scope 严格限定作用域。
+- **实测数据**：
+  - 6 个示例双后端 stdout 逐字节一致：select_default（0/5）、select_eof（1/5）、
+    select_two_channels（2/2/0，无串通道）、select_fairness（true/true/400，公平性）、
+    select_exit_break（2，break 跳出外层 while）、select_exit_condition（2）。
+  - `-O0/-O1/-O2/-O3/-g` 各级别双后端一致。
+  - 新 golden `tests/asm_golden/select.dial`（单线程确定性，default + EOF + 双通道
+    总数统计 + 绑定变量内容验证）5 次运行稳定一致（输出 3/hello/1/4/2）。
+  - A/B（git worktree 编译 HEAD 0688434 旧二进制对比）：其余 11 个 golden 程序
+    （含 hof）`.s` 逐字节一致；AArch64 普通程序 core3 `.s` 新旧逐字节一致（零变化）；
+    select 程序经 clang 交叉汇编产出 ELF aarch64 `.o`（27 个 select/chan 符号）。
+  - 删除已失效负例 `tests/asm_golden/negative/unsupported_select.dial`（asm 现已支持
+    该构造，实证：可编译且输出 "nothing"），Fail-Fast 机制由 `unsupported.dial` 继续覆盖。
+  - 完整回归 746 PASS / 0 FAIL（新增 select golden +1、删失效负例 -1，净持平），
+    双后端黄金用例 11→12。
+- **护栏**：`src/codegen.rs`/`src/ast.rs` 相对 0688434 零改动、`Cargo.toml` 仍
+  1.10.0、零新依赖、LLVM 路径零改动、AArch64 普通程序零改动、构建零警告、
+  不打 tag。docx 确定性生成；check_links/check_version 全过。
+- **已知边界**：select 各 case 的通道表达式在 setup 阶段一次性求值（与 LLVM 一致），
+  循环内若通道变量本身被重新赋值需按语言规则另行处理；select 语句级超时仍不支持
+  （超时用 `recv_timeout(ch, ms)` 作用于单通道，见 README §27 表）。至此 asm 后端
+  在语言层面对齐 LLVM 的已知缺口全部补齐。

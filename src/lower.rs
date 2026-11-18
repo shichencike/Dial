@@ -1218,7 +1218,7 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             Stmt::Try { body, catch, .. } => self.lower_try(body, catch),
-            Stmt::Select { .. } => self.err("asm 后端暂不支持 `select`（后续相位，通道并发）"),
+            Stmt::Select { arms, default_body, .. } => self.lower_select(arms, default_body),
             Stmt::Expr(e, _, _) => { self.lower_expr(e, &Type::Void)?; Ok(()) }
             Stmt::Block { body, .. } => {
                 self.push_scope();
@@ -3363,6 +3363,201 @@ impl<'a> Lower<'a> {
         }
         if !self.cur_terminated() { self.terminate(Term::Jump { target: merge, args: Vec::new() }); }
         self.set_cur(merge);
+        Ok(())
+    }
+
+    /// M7-e3an2：多路通道选择 `select`（v0.91），对齐 LLVM 后端 codegen.rs 的
+    /// Stmt::Select 实现。控制流骨架：
+    ///   setup -> loop -> chk -> dispatch(条件链) -> take_i/case_i
+    ///   nowait(default / 阻塞等待)、eof(全体关闭)、end(统一续跑点)。
+    ///
+    /// 关键约束：
+    ///   · retry 回边只能回 loop，绝不回 setup（否则每轮重复 dial_sel_new 泄漏 selector）；
+    ///   · 不 push self.loops —— case body 的 break 必须通过 self.loops.last() 跳到
+    ///     select **外层**那个循环（select 是语句，不是可 break 的块，对齐 LLVM 语义）；
+    ///   · dial_sel_free 在 case/default body 之前发（body 里 return 不泄漏），但 isnull
+    ///     重试路径不能 free（被别的消费者抢走时 selector 还要留着重试）；
+    ///   · epoch 先于 pick 读取，避免「读 epoch 与 pick 之间发生变化」导致睡死（不丢唤醒）。
+    ///
+    /// 跨块值全部经 alloca 栈槽传递（sel/epoch/idx/v），规避 ICmp 融合跨块重发的隐患；
+    /// 绑定变量生命周期严格限制在本 case 块内，由 push_scope/leave_scope 管理。
+    fn lower_select(
+        &mut self,
+        arms: &[SelectArm],
+        default_body: &Option<Vec<Stmt>>,
+    ) -> Result<(), String> {
+        let n = arms.len();
+        if n == 0 { return self.err("select 至少需要一个 case"); }
+
+        // ---- 跨块状态槽（静态栈布局，循环内 alloca 不增长栈帧）----
+        let sel_slot = self.emit_alloca(IrType::Handle);   // DialSelector*
+        let epoch_slot = self.emit_alloca(IrType::I64);    // epoch（nowait 等待用）
+        let idx_slot = self.emit_alloca(IrType::I64);      // dial_sel_pick 结果
+        let v_slot = self.emit_alloca(IrType::Handle);     // dial_sel_recv 取到的元素句柄
+
+        // ---- 块骨架 ----
+        let setup_b = self.new_block(Vec::new());
+        let loop_b = self.new_block(Vec::new());
+        let chk_b = self.new_block(Vec::new());
+        let nowait_b = self.new_block(Vec::new());
+        let eof_b = self.new_block(Vec::new());
+        let end_b = self.new_block(Vec::new());
+        // dispatch 条件链 + take/case 块，每个 arm 一对。
+        let mut dispatch_b: Vec<u32> = Vec::new();
+        let mut take_b: Vec<u32> = Vec::new();
+        let mut case_b: Vec<u32> = Vec::new();
+        for _ in 0..n {
+            dispatch_b.push(self.new_block(Vec::new()));
+            take_b.push(self.new_block(Vec::new()));
+            case_b.push(self.new_block(Vec::new()));
+        }
+
+        // 通用 C 调用发射助手（避免重复构造 IrInst::Call）。
+        fn call_runtime(
+            l: &mut Lower<'_>, func: &str, args: Vec<Value>, arg_tys: Vec<IrType>, ret_ty: IrType,
+        ) -> Option<VReg> {
+            let dst = if ret_ty == IrType::Void { None } else { Some(l.new_reg(ret_ty.clone())) };
+            l.emit(IrInst::Call {
+                dst, func: func.to_string(), args, arg_tys, ret_ty, linkage: CallLink::Runtime,
+            });
+            dst
+        }
+
+        // ---- setup：建 selector，登记各 case 的通道 ----
+        if !self.cur_terminated() { self.terminate(Term::Jump { target: setup_b, args: Vec::new() }); }
+        self.set_cur(setup_b);
+        let sel = call_runtime(self, "dial_sel_new", vec![], vec![], IrType::Handle).unwrap();
+        self.emit(IrInst::Store { ptr: sel_slot, val: Value::Reg(sel), ty: IrType::Handle });
+        for arm in arms {
+            // case 形状已由语义层校验为 recv(ch)；取通道表达式 ch（不求值 recv 本身）。
+            let ch_expr = match &arm.chan {
+                Expr::Call(fname, cargs) if fname == "recv" && cargs.len() == 1 => &cargs[0],
+                _ => return self.err("内部错误：select 的 case 必须是 recv(ch) 形式"),
+            };
+            let ct = self.expr_dt(ch_expr);
+            let ch = self.lower_expr(ch_expr, &ct)?.0;
+            call_runtime(self, "dial_sel_add",
+                vec![Value::Reg(sel), ch], vec![IrType::Handle, reg_ir(&ct)], IrType::Void);
+        }
+        self.terminate(Term::Jump { target: loop_b, args: Vec::new() });
+
+        // ---- loop：先读 epoch，再挑就绪通道 ----
+        self.set_cur(loop_b);
+        let epoch = call_runtime(self, "dial_chan_epoch", vec![], vec![], IrType::I64).unwrap();
+        self.emit(IrInst::Store { ptr: epoch_slot, val: Value::Reg(epoch), ty: IrType::I64 });
+        let idx = call_runtime(self, "dial_sel_pick",
+            vec![Value::Reg(sel)], vec![IrType::Handle], IrType::I64).unwrap();
+        self.emit(IrInst::Store { ptr: idx_slot, val: Value::Reg(idx), ty: IrType::I64 });
+        // is_eof = idx == -2（本块内计算+使用，不跨块）。
+        let is_eof = self.new_reg(IrType::I64);
+        self.emit(IrInst::ICmp { op: ACmp::Eq, dst: is_eof,
+            a: Value::Reg(idx), b: Value::Imm(Imm::I64(-2)), ty: IrType::I64 });
+        self.terminate(Term::Branch { cond: is_eof, then_b: eof_b, else_b: chk_b,
+            then_args: Vec::new(), else_args: Vec::new() });
+
+        // ---- chk：is_ready = idx >= 0（从槽重新 load，避免跨块 ICmp 融合）----
+        self.set_cur(chk_b);
+        let idx_v = self.new_reg(IrType::I64);
+        self.emit(IrInst::Load { dst: idx_v, ptr: idx_slot, ty: IrType::I64 });
+        let is_ready = self.new_reg(IrType::I64);
+        self.emit(IrInst::ICmp { op: ACmp::Ge, dst: is_ready,
+            a: Value::Reg(idx_v), b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+        self.terminate(Term::Branch { cond: is_ready, then_b: dispatch_b[0], else_b: nowait_b,
+            then_args: Vec::new(), else_args: Vec::new() });
+
+        // ---- dispatch 条件链：idx == i ? take_i : next ----
+        for i in 0..n {
+            self.set_cur(dispatch_b[i]);
+            let iv = self.new_reg(IrType::I64);
+            self.emit(IrInst::Load { dst: iv, ptr: idx_slot, ty: IrType::I64 });
+            let eq = self.new_reg(IrType::I64);
+            self.emit(IrInst::ICmp { op: ACmp::Eq, dst: eq,
+                a: Value::Reg(iv), b: Value::Imm(Imm::I64(i as i64)), ty: IrType::I64 });
+            let next = if i + 1 < n { dispatch_b[i + 1] } else { loop_b };
+            self.terminate(Term::Branch { cond: eq, then_b: take_b[i], else_b: next,
+                then_args: Vec::new(), else_args: Vec::new() });
+        }
+
+        // ---- take_i / case_i ----
+        for (i, arm) in arms.iter().enumerate() {
+            // take：非阻塞取元素；NULL = 被别的消费者抢走 -> 回 loop 重挑（不是 EOF）。
+            self.set_cur(take_b[i]);
+            let sv = self.new_reg(IrType::Handle);
+            self.emit(IrInst::Load { dst: sv, ptr: sel_slot, ty: IrType::Handle });
+            let v = call_runtime(self, "dial_sel_recv",
+                vec![Value::Reg(sv), Value::Imm(Imm::I64(i as i64))],
+                vec![IrType::Handle, IrType::I64], IrType::Handle).unwrap();
+            self.emit(IrInst::Store { ptr: v_slot, val: Value::Reg(v), ty: IrType::Handle });
+            let vnull = self.new_reg(IrType::I64);
+            self.emit(IrInst::ICmp { op: ACmp::Eq, dst: vnull,
+                a: Value::Reg(v), b: Value::Imm(Imm::I64(0)), ty: IrType::Handle });
+            self.terminate(Term::Branch { cond: vnull, then_b: loop_b, else_b: case_b[i],
+                then_args: Vec::new(), else_args: Vec::new() });
+
+            // case：先释放 selector（body 里 return 也不泄漏），再绑定变量 + 执行分支体。
+            self.set_cur(case_b[i]);
+            let sv = self.new_reg(IrType::Handle);
+            self.emit(IrInst::Load { dst: sv, ptr: sel_slot, ty: IrType::Handle });
+            call_runtime(self, "dial_sel_free", vec![Value::Reg(sv)], vec![IrType::Handle], IrType::Void);
+
+            // 绑定变量类型 = 通道元素类型（语义层已保证为句柄，非 void）。
+            let ch_expr = match &arm.chan {
+                Expr::Call(_, cargs) => &cargs[0],
+                _ => unreachable!(),
+            };
+            let ct = self.expr_dt(ch_expr);
+            let elem = match ct {
+                Type::Channel(e) => *e,
+                _ => return self.err("内部错误：select case 的通道类型异常"),
+            };
+            self.push_scope();
+            let var_slot = self.emit_alloca(reg_ir(&elem));
+            let ev = self.new_reg(IrType::Handle);
+            self.emit(IrInst::Load { dst: ev, ptr: v_slot, ty: IrType::Handle });
+            // 元素句柄所有权已由 dial_sel_recv 转移给接收方：is_copy=false，不再 retain。
+            self.store_value(var_slot, Value::Reg(ev), false, &elem, false);
+            let is_h = rc_kind(&elem).is_some() || matches!(elem, Type::Struct(_));
+            self.declare(&arm.var, Local {
+                ptr: var_slot, ty: reg_ir(&elem), dt: elem.clone(), is_handle: is_h, moved: false,
+            });
+            for st in &arm.body {
+                self.lower_stmt(st)?;
+                if self.cur_terminated() { break; }  // break/return 后不再 emit（对齐 LLVM）
+            }
+            self.leave_scope()?;
+            if !self.cur_terminated() { self.terminate(Term::Jump { target: end_b, args: Vec::new() }); }
+        }
+
+        // ---- nowait：无就绪通道 ----
+        self.set_cur(nowait_b);
+        if let Some(db) = default_body {
+            let sv = self.new_reg(IrType::Handle);
+            self.emit(IrInst::Load { dst: sv, ptr: sel_slot, ty: IrType::Handle });
+            call_runtime(self, "dial_sel_free", vec![Value::Reg(sv)], vec![IrType::Handle], IrType::Void);
+            self.push_scope();
+            for st in db {
+                self.lower_stmt(st)?;
+                if self.cur_terminated() { break; }
+            }
+            self.leave_scope()?;
+            if !self.cur_terminated() { self.terminate(Term::Jump { target: end_b, args: Vec::new() }); }
+        } else {
+            // 无 default：事件驱动阻塞等待（非轮询），epoch 来自进入 select 时记录的值。
+            let ep = self.new_reg(IrType::I64);
+            self.emit(IrInst::Load { dst: ep, ptr: epoch_slot, ty: IrType::I64 });
+            call_runtime(self, "dial_chan_wait", vec![Value::Reg(ep)], vec![IrType::I64], IrType::Void);
+            self.terminate(Term::Jump { target: loop_b, args: Vec::new() });
+        }
+
+        // ---- eof：全体通道已关闭且已空 -> 直接结束，不执行任何分支 ----
+        self.set_cur(eof_b);
+        let sv = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Load { dst: sv, ptr: sel_slot, ty: IrType::Handle });
+        call_runtime(self, "dial_sel_free", vec![Value::Reg(sv)], vec![IrType::Handle], IrType::Void);
+        self.terminate(Term::Jump { target: end_b, args: Vec::new() });
+
+        // ---- end：统一续跑点 ----
+        self.set_cur(end_b);
         Ok(())
     }
 

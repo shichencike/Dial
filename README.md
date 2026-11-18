@@ -333,19 +333,22 @@ dialc lsp
 > | M5-b | 容器元素类型与所有权结算（`string[]` / `bool[]` / `float[]` 的 kind 与位模式） |
 > | M5-c | 裸指针 FFI：`raw_alloc` / `raw_free` / `ptr_cast` / `offset` 指针算术 / `*p` 读写 / C 库互通 |
 > | M5-d | 一等**函数地址**（函数指针）：取地址 / 间接调用 / 作参数与返回值 |
+> | M7 | 双后端一致性补全：布局内建 `sizeof`/`alignof`/`offsetof`、`bitcast`、`assert`/`panic`、`is_null`、`drop`、channel 原语族、`spawn`/`join`/`detach` 真多线程、`map`/`filter`/`reduce`/`sort_by` 高阶数组方法、`select` 多路通道选择——均与 LLVM 后端逐字节一致 |
 >
-> 尚未覆盖（会明确报错）：`select` / `spawn` / 通道并发、内联汇编与 SIMD、
-> 高阶容器方法（`map` / `filter` / `reduce` / `sort_by`）、嵌套下标赋值等。
+> 尚未覆盖（会明确报错）：内联汇编与 SIMD（`asm` / `asm_intel` / `simd`）、
+> 嵌套下标赋值等；高阶函数仅句柄元素开放（标量元素通道编译期拒绝，两端同源）。
 > 编译期布局内建 `sizeof` / `alignof` / `offsetof` 已支持（M7-e3ag，含 packed struct
 > 对齐与双后端一致性验证）；底层位重解释 `bitcast` 已支持（M7-e3ah，标量双后端一致，
 > struct↔struct 同尺寸 asm 零拷贝实现——该项 LLVM IR verifier 本身拒绝，属 asm 超越）。
+> `select`（M7-e3an2）经多基本块控制流实现，default / 全体 EOF / break 跳出外层循环 /
+> 多通道公平选取全部双后端一致，事件驱动等待（非轮询）。
 >
 > **双后端黄金门禁**（`tools/run_asm_golden.sh`，`run_tests.sh` 的 AF 组）：
 > 同一份 `.dial` 分别用 `llvm` / `asm` 编译运行并**逐字节 diff**——LLVM 后端即基准，
-> 无需维护 `.expected`。正向用例 10 份（`core1`–`core3` 核心子集 + `builtins`
+> 无需维护 `.expected`。正向用例 12 份（`core1`–`core3` 核心子集 + `builtins`
 > 内建与方法表 + `exceptions` 异常与文件 IO + `control_flow` `label`/`goto` +
 > `structs` 结构体按值语义 + `containers` 容器元素类型 + `rawptr` 裸指针 FFI +
-> `fnptr` 一等函数地址）；
+> `fnptr` 一等函数地址 + `hof` 高阶数组方法 + `select` 多路通道选择）；
 > 负例在 `tests/asm_golden/negative/` 下逐个遍历，每个都要求「LLVM 能编译、
 > asm 报错且带 `[asm 后端]` 前缀」，杜绝静默降级。用例在临时目录编译，仓库零污染。
 >
@@ -3839,6 +3842,12 @@ select **不用**「一把大锁锁住所有队列」（那会引入复杂的锁
 | **不死锁** | 通知（notify）一律在**释放通道本地锁之后**才调用 —— 「持通道锁 → 取全局锁」与「持全局锁 → 取通道锁」两种嵌套**都不存在**，全局锁与通道锁永不死锁 |
 
 实测：50 万次「send + select」往返，**wall 0.19 s**，CPU 0.36 s。
+
+> **自研 asm 后端（M7-e3an2）**：`select` 已由自研后端以多基本块控制流实现，与 LLVM
+> 后端**双后端逐字节一致**（`--backend=asm`）。default / 全体 EOF / 多通道公平选取 /
+> case 内 `break` 跳出**外层循环**（select 是语句、不是可 break 的块）全部语义对齐；
+> 等待同样是事件驱动（`dial_chan_wait(epoch)`，非轮询）。6 个 `examples/select_*.dial`
+> 与 `tests/asm_golden/select.dial` 双后端输出逐字节一致，`-O0`~`-O3`/`-g` 一致。
 
 > **Windows 说明**：Windows 没有 pthread，对应实现是 `WakeConditionVariable` / `SetEvent`
 > （见 [ARCHITECTURE.md §0.2](ARCHITECTURE.md#02-平台差异对-c-runtime-的约束实现路线备忘) 的线程后端规划）。

@@ -15,15 +15,16 @@
 //
 // 覆盖范围：转换 / 数学 / 解析 / 断言退出 / 环境时间 / 字符串 / 字节 /
 //           数组 / 容器构造与操作 / 文件 IO（失败抛错类见 M3 异常相位）。
-// 未覆盖：@asm / simd / 高阶函数(map/filter/reduce/sort_by) / 并发(spawn/channel/
-//         select) —— 一律明确 Unsupported，绝不静默降级。
+// 未覆盖：@asm / simd —— 一律明确 Unsupported，绝不静默降级。
 // 已由 lower.rs 专用路径接管（表中条目仅作防御兜底，正常不会走到）：
 //         sizeof / alignof / offsetof（M7-e3ag）、bitcast（M7-e3ah）、
 //         assert / panic（M7-e3ai，带 file:line:col 的 Fail-Fast 诊断）、
 //         is_null（M7-e3aj，句柄判空 = ICmp Eq(ptr, 0)）、
 //         drop（M7-e3ak，提前释放所有权 = 按类型 release + moved 记账）、
 //         channel 原语族（M7-e3al，单线程收发/判空/状态/零拷贝 move_to）、
-//         spawn / join / detach（M7-e3am，真多线程 = argcell + 合成入口 thunk）、ptr_cast。
+//         spawn / join / detach（M7-e3am，真多线程 = argcell + 合成入口 thunk）、
+//         高阶数组方法 map/filter/reduce/sort_by（M7-e3an，hof thunk）、
+//         select（M7-e3an2，语句级多路通道选择，走 lower_stmt 专用路径）、ptr_cast。
 // ============================================================================
 
 use crate::ast::Type;
