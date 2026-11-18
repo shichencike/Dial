@@ -1180,8 +1180,9 @@ O3 级优化管线与 DWARF 调试信息列为自研 asm 后端代替 LLVM 的�
 官方工具 +1.91%，机制子集（.s 变化的 6 个数组密集项）+9.91%、未变子集 −0.67%
 （噪声带），b17 内层栈搬运 36→25；asm↔LLVM debug 0.5466x→0.5384x、数组类
 0.9553x→0.8796x、胜负 16/7/5→18/9/1。仅 x86-64、AArch64 .s 零变化、全门禁绿；
-支柱二 DWARF 尚未开工（asm 后端 IR 无 span/line、无 .file/.loc/.debug_<em>），详见
-CHANGELOG M7-e3v 条目与下方路线图）。
+支柱二 DWARF 在<strong>该批次（e3v）当时</strong>尚未开工（asm 后端 IR 无 span/line、无
+.file/.loc/.debug_<em>），详见 CHANGELOG M7-e3v 条目与下方路线图；</em><em>现已由紧随其后的
+M7-e3w 落地，不是当前缺口</em><em>）。
 </em><em>M7-e3w 自研 asm 后端 DWARF 调试信息（第二大支柱落地，从零到一）</em><em>（asm 后端
 <code>-g</code> 现支持 gdb 源码行断点 + 按 Dial 变量名 print：<code>break dbg.dial:9</code> 命中显示
 源码行、<code>print counter = 42</code>、<code>bt</code> 显示源码行；DWARF 含函数名/形参名/局部变量名、
@@ -1245,6 +1246,10 @@ workload 上整体 <strong>−6.7%</strong>（b15 冒泡排序更是慢 18×）�
 侧优化），targeted ISA 微融合收益已边际，故转入支柱②深度补全。支柱②已由
 M7-e3aa 补多文件 source 映射、M7-e3ab 补 FFI 精确宽度类型 DIE（int32/byte/float32）；
 宏信息因 Dial 语言无宏概念而不可实现，不再列为门槛，支柱②功能至此完备。</p>
+<p><strong>当前缺口的源码核实盘点与分梯队执行计划</strong>见
+<a href="rationale/roadmap-gap-analysis.html">rationale/roadmap-gap-analysis.md</a>：语义构造已追平 LLVM，
+剩余项按「LLVM 有而 asm 无 / 两后端共同缺的语言特性（须改冻结文件、超出护栏）/ 性能层高成本方向 /
+战略否决」四类归置，并附每项的源码证据与先后次序。</p>
 <p><strong>第 18 层两种产物形态</strong>（工具链层，非 <code>.dialpkg</code> 契约）：<code>--tiny</code> 体积模式
 （C 侧 <code>-Os -ffunction-sections -fdata-sections</code> + 链接期 <code>-Wl,--gc-sections -s</code>，
 去掉 DWARF 与符号表）、<code>--single-file</code> 便携模式（链接期 <code>-static</code> 全静态，

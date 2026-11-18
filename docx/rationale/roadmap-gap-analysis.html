@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 roadmap-gap-analysis · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/roadmap-gap-analysis.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#缺口盘点与执行路线图2026-11-18源码核实版">缺口盘点与执行路线图（2026-11-18，源码核实版）</a><ul>
+<li><a href="#0-护栏路线的硬边界">0. 护栏（路线的硬边界）</a></li>
+<li><a href="#1-盘点结果四类">1. 盘点结果（四类）</a><ul>
+<li><a href="#a-类--llvm-有而-asm-无--护栏内可做">A 类 · LLVM 有而 asm 无 —— 护栏内可做</a></li>
+<li><a href="#b-类--两后端共同缺的语言特性--须改-codegenrs违反护栏">B 类 · 两后端共同缺的语言特性 —— 须改 codegen.rs，违反护栏</a></li>
+<li><a href="#c-类--性能层-o3--真正的剩余工程但高成本边际">C 类 · 性能层 O3 —— 真正的剩余工程，但高成本/边际</a></li>
+<li><a href="#d-类--战略宪法否决永久不做不进计划">D 类 · 战略/宪法否决（永久不做，不进计划）</a></li>
+<li><a href="#e-类--过时文档--不是缺口核实后排除">E 类 · 过时文档 / 不是缺口（核实后排除）</a></li>
+</ul>
+</li>
+<li><a href="#2-执行路线图按护栏兼容性与-roi-排序">2. 执行路线图（按护栏兼容性与 ROI 排序）</a><ul>
+<li><a href="#阶段一护栏内的确定性工作低风险">阶段一：护栏内的确定性工作（低风险）</a></li>
+<li><a href="#阶段二c-类性能方向先诊断后投入">阶段二：C 类性能方向（先诊断后投入）</a></li>
+<li><a href="#阶段三b-类语言特性需单独裁决默认不进-asm-批次">阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）</a></li>
+</ul>
+</li>
+<li><a href="#3-一句话结论">3. 一句话结论</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="缺口盘点与执行路线图2026-11-18源码核实版">缺口盘点与执行路线图（2026-11-18，源码核实版）</h1>
+<blockquote>
+<p>本文是「代替 LLVM」主线下对当前缺口的系统盘点，以及据此制定的分梯队执行计划。
+与以往凭印象的盘点不同，<strong>每一项都经过源码核实</strong>：区分「LLVM 有而 asm 无」（可在
+LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它须改 <code>codegen.rs</code>/<code>semantic.rs</code>，
+违反护栏）、「战略/宪法否决」（永久不做）、「过时文档」（不是缺口）四类。</p>
+</blockquote>
+<h2 id="0-护栏路线的硬边界">0. 护栏（路线的硬边界）</h2>
+<ol>
+<li>LLVM 路径零改动：<code>src/codegen.rs</code>、<code>src/ast.rs</code> 相对基线冻结。</li>
+<li>语义构造已清零（M7-e3as 后，LLVM 能编译而 asm 拒绝的构造为零）。</li>
+<li>AArch64 普通程序零变化；版本 1.10.0；零新依赖；docx 确定性；不打 tag。</li>
+<li>每批带 A/B 交替 + 归因 + 全门禁 + 证据链。</li>
+</ol>
+<p><strong>推论</strong>：只有「LLVM 已支持、asm 缺失」的项能在护栏内补齐；语言层新特性若要动
+<code>codegen.rs</code>，必须先申请放宽护栏或列为独立版本主题，不能塞进 asm 后端批次。</p>
+<h2 id="1-盘点结果四类">1. 盘点结果（四类）</h2>
+<h3 id="a-类--llvm-有而-asm-无--护栏内可做">A 类 · LLVM 有而 asm 无 —— 护栏内可做</h3>
+<p>盘点结论：<strong>此类已清零</strong>。逐一核实：</p>
+<table>
+<thead>
+<tr>
+<th>候选</th>
+<th>LLVM 状态</th>
+<th>asm 状态</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>内联汇编 <code>@asm</code>/<code>@asm_intel</code></td>
+<td>支持</td>
+<td>M7-e3as 已支持</td>
+<td>已清零</td>
+</tr>
+<tr>
+<td>impl 具名类型方法（<code>self</code>）</td>
+<td>支持</td>
+<td>M7-e3aq 已支持</td>
+<td>已清零</td>
+</tr>
+<tr>
+<td>嵌套下标赋值 <code>a[i][j]=v</code></td>
+<td>支持</td>
+<td>e3ao 已支持</td>
+<td>已清零</td>
+</tr>
+<tr>
+<td>sizeof/alignof/offsetof、bitcast、assert/panic、is_null、drop、channel、spawn/join、HOF、select</td>
+<td>支持</td>
+<td>e3ag~e3an3 全支持</td>
+<td>已清零</td>
+</tr>
+<tr>
+<td>SIMD <code>simd&lt;T,N&gt;</code></td>
+<td>支持</td>
+<td>战略拒绝</td>
+<td>M7-e3x 定量否决（−6.7%），不算缺口</td>
+</tr>
+</tbody>
+</table>
+<h3 id="b-类--两后端共同缺的语言特性--须改-codegenrs违反护栏">B 类 · 两后端共同缺的语言特性 —— 须改 codegen.rs，违反护栏</h3>
+<p>这四项经源码核实 LLVM 后端<strong>也没有实现</strong>，加它们必须改冻结文件：</p>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>核实证据</th>
+<th>性质</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>select</code> 语句级超时</td>
+<td><code>src/codegen.rs</code> 无 <code>select timeout</code> 实现；README:2116 记「未实现」，变通为单通道 <code>recv_timeout</code></td>
+<td>语言新特性，两后端共同缺</td>
+</tr>
+<tr>
+<td>impl 关联函数 <code>T::new()</code>（无 self）</td>
+<td><code>gen_method_call</code> 与 <code>make_impl_call</code> 均假设 <code>self=params[0]</code>；semantic.rs:354 明确 self 是首参；无无-self 分派</td>
+<td>语言新特性，两后端共同缺</td>
+</tr>
+<tr>
+<td><code>map&lt;K,string&gt;</code> 值 / <code>values()</code> 非 int</td>
+<td>semantic.rs:3952 <strong>语义层统一拒绝</strong></td>
+<td>语言新特性，两后端共同缺</td>
+</tr>
+<tr>
+<td>线程池 / 协程 / 异步、原子类型 / 无锁结构</td>
+<td>README:2118-2119「未实现」</td>
+<td>触及内存模型与并发宪法，需设计裁决</td>
+</tr>
+</tbody>
+</table>
+<p><strong>结论</strong>：这些不是 asm 后端落后 LLVM，而是<strong>语言本身尚未提供的能力</strong>。在「代替 LLVM」
+语境下它们不构成差距（LLVM 也没有）；要做必须作为独立语言版本主题并改 <code>codegen.rs</code>，
+不属于 asm 后端补齐范畴。</p>
+<h3 id="c-类--性能层-o3--真正的剩余工程但高成本边际">C 类 · 性能层 O3 —— 真正的剩余工程，但高成本/边际</h3>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>现状</th>
+<th>决策</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>caller-saved GRA</td>
+<td>未做</td>
+<td>M7-e3at 量化否决（上界比 0.629&lt;1、86.8% 栈槽仅访问≤2 次为 ABI 强制落栈），附重启条件</td>
+</tr>
+<tr>
+<td>浮点 / 跨函数寄存器分配</td>
+<td>未做</td>
+<td>高成本内核级方向，<strong>建议先做同类收益诊断再决定</strong>（延续 e3at 纪律）</td>
+</tr>
+<tr>
+<td>多级管线（LTO 级）</td>
+<td>未做</td>
+<td>同上，须先量化</td>
+</tr>
+<tr>
+<td>ISA 微融合</td>
+<td>POPCNT/LEA/掩码/常量乘已做</td>
+<td>e3au 后边际收益递减，b02/b13/b22 落后项是 C runtime + idiv 微码主导，非微融合可解</td>
+</tr>
+</tbody>
+</table>
+<p>基准现状（几何平均 ~0.54x，整体领先 LLVM ~46%；胜/平/负约 14/10/4）：
+算术类基本持平（0.985x）、数组类领先（0.76x）、递归类大幅领先（0.025x）、
+位与控制流领先（0.81x）、字符串类略落后（1.09x）。</p>
+<h3 id="d-类--战略宪法否决永久不做不进计划">D 类 · 战略/宪法否决（永久不做，不进计划）</h3>
+<p>SIMD 完整后端（−6.7%）、caller-saved GRA（ROI 为负）、函数名重载、闭包、
+运算符重载、用户自定义泛型/接口/trait、可变全局状态、追踪式 GC。</p>
+<h3 id="e-类--过时文档--不是缺口核实后排除">E 类 · 过时文档 / 不是缺口（核实后排除）</h3>
+<ul>
+<li>README:590「DWARF 尚未开工」是 e3v 段落的<strong>历史叙述</strong>，紧接 e3w 已落地（37 处 DWARF 代码）。</li>
+<li>README:338「尚未覆盖嵌套下标赋值」在 e3as 批次已修正。</li>
+<li><code>lower.rs:1602</code> TypeLit 独立表达式：LLVM:4211 同样拒绝（「应由 Sema 先行拦截」），两后端同源。</li>
+<li><code>builtin.rs</code> 的 thread 构造 / 布局内建「后续相位」：thread 构造 LLVM 自身未单独实现；
+  布局内建已由 e3e 落地，属过时注释。</li>
+</ul>
+<h2 id="2-执行路线图按护栏兼容性与-roi-排序">2. 执行路线图（按护栏兼容性与 ROI 排序）</h2>
+<h3 id="阶段一护栏内的确定性工作低风险">阶段一：护栏内的确定性工作（低风险）</h3>
+<ol>
+<li><strong>过时文档清理</strong>：修正 README:590 等历史叙述的时态标注，避免误导（纯文档）。</li>
+<li><strong>收益诊断工具化</strong>：把 e3at 的 <code>tools/diag_gra.py</code> 思路扩展到浮点/跨函数 GRA，
+   先在 bench 与真实 workload 上量化 ROI（纯工具，零产品代码改动）。</li>
+</ol>
+<h3 id="阶段二c-类性能方向先诊断后投入">阶段二：C 类性能方向（先诊断后投入）</h3>
+<ol start="3">
+<li><strong>浮点寄存器分配收益诊断</strong> → 若 ROI 为正再实现。</li>
+<li><strong>跨函数寄存器分配收益诊断</strong> → 同上。</li>
+<li><strong>字符串类落后项归因</strong>：b20/b22 的 C runtime 开销是否有 asm 侧可优化空间
+   （如 substring 的边界检查、拼接的拷贝次数），先归因后动手。</li>
+</ol>
+<h3 id="阶段三b-类语言特性需单独裁决默认不进-asm-批次">阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）</h3>
+<ol start="6">
+<li><code>select</code> 超时 / impl 关联函数 / map string 值 —— 若要做，作为<strong>独立语言版本主题</strong>，
+   明确放宽 <code>codegen.rs</code> 零改动护栏，双后端同步实现 + 全门禁。</li>
+<li>线程池 / 协程 / 原子 —— 先做内存模型宪法裁决（数据竞争、§20 零悬垂底线），
+   裁决通过才进入设计。</li>
+</ol>
+<h2 id="3-一句话结论">3. 一句话结论</h2>
+<p><strong>语义层 asm 已完全追平 LLVM；剩余差距全是性能深度与语言层新特性。</strong>
+前者须用收益诊断决定投入（高成本、易负收益），后者须改冻结文件、超出 asm 后端补齐范畴。
+护栏内真正低风险可做的，是收益诊断工具与过时文档清理；其余要么先量化、要么先裁决。</p><p class="note">更新：<a href="unreleased.html">未实现 / 尚未落地</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

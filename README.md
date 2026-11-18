@@ -587,8 +587,9 @@ dialc lsp
 > 官方工具 +1.91%，机制子集（.s 变化的 6 个数组密集项）+9.91%、未变子集 −0.67%
 > （噪声带），b17 内层栈搬运 36→25；asm↔LLVM debug 0.5466x→0.5384x、数组类
 > 0.9553x→0.8796x、胜负 16/7/5→18/9/1。仅 x86-64、AArch64 .s 零变化、全门禁绿；
-> 支柱二 DWARF 尚未开工（asm 后端 IR 无 span/line、无 .file/.loc/.debug_*），详见
-> CHANGELOG M7-e3v 条目与下方路线图）。
+> 支柱二 DWARF 在**该批次（e3v）当时**尚未开工（asm 后端 IR 无 span/line、无
+> .file/.loc/.debug_*），详见 CHANGELOG M7-e3v 条目与下方路线图；**现已由紧随其后的
+> M7-e3w 落地，不是当前缺口**）。
 > **M7-e3w 自研 asm 后端 DWARF 调试信息（第二大支柱落地，从零到一）**（asm 后端
 > `-g` 现支持 gdb 源码行断点 + 按 Dial 变量名 print：`break dbg.dial:9` 命中显示
 > 源码行、`print counter = 42`、`bt` 显示源码行；DWARF 含函数名/形参名/局部变量名、
@@ -632,6 +633,11 @@ dialc lsp
 > 侧优化），targeted ISA 微融合收益已边际，故转入支柱②深度补全。支柱②已由
 > M7-e3aa 补多文件 source 映射、M7-e3ab 补 FFI 精确宽度类型 DIE（int32/byte/float32）；
 > 宏信息因 Dial 语言无宏概念而不可实现，不再列为门槛，支柱②功能至此完备。
+>
+> **当前缺口的源码核实盘点与分梯队执行计划**见
+> [rationale/roadmap-gap-analysis.md](rationale/roadmap-gap-analysis.md)：语义构造已追平 LLVM，
+> 剩余项按「LLVM 有而 asm 无 / 两后端共同缺的语言特性（须改冻结文件、超出护栏）/ 性能层高成本方向 /
+> 战略否决」四类归置，并附每项的源码证据与先后次序。
 
 > **第 18 层两种产物形态**（工具链层，非 `.dialpkg` 契约）：`--tiny` 体积模式
 > （C 侧 `-Os -ffunction-sections -fdata-sections` + 链接期 `-Wl,--gc-sections -s`，
