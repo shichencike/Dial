@@ -1,0 +1,45 @@
+// 互递归尾调用 + 栈帧复用回归用例。
+// 曾引入严重 bug：帧复用标签插在 `movq %rdi,off(%rsp)` 之后，导致尾跳跳过参数
+// 保存、递归读到旧参数永不终止（b12 单项跑 6 分钟不结束）。本用例钉死该路径。
+// 覆盖：① 单参数互递归（evR/odR，b12 原型）；② 双参数互递归（ping/pong，
+// 验证尾跳时所有实参都重新保存进复用帧）；③ 不同深度与终止边界。
+
+fn evR(n: int): int {
+    if (n == 0) { return 1; }
+    return odR(n - 1);
+}
+fn odR(n: int): int {
+    if (n == 0) { return 0; }
+    return evR(n - 1);
+}
+fn ping(n: int, acc: int): int {
+    if (n == 0) { return acc; }
+    return pong(n - 1, acc + n);
+}
+fn pong(n: int, acc: int): int {
+    if (n == 0) { return acc + 1000; }
+    return ping(n - 1, acc + n);
+}
+
+fn main(): int {
+    // 单参数互递归：evR(n) == (n % 2 == 0)
+    print(evR(0));
+    print(evR(1));
+    print(evR(2));
+    print(evR(59));
+    print(evR(60));
+    print(odR(1));
+    print(odR(60));
+
+    // 双参数互递归：累加和 + 奇偶分支结果
+    print(ping(0, 0));
+    print(ping(1, 0));
+    print(ping(10, 0));
+    print(pong(10, 0));
+
+    // 与 b12 同构的归约（缩小轮次，门禁要快）
+    var s: int = 0;
+    for (k in 0..2000) { s = (s + evR(k % 60 + 1)) % 1000000007; }
+    print(s);
+    return 0;
+}

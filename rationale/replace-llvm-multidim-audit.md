@@ -19,6 +19,19 @@
 > `dial_array_set` 内联因 COW 分支 + 元素所有权结算 + 与 C runtime 布局耦合，风险/收益
 > 比不划算，本轮不动（延续「不硬做负收益优化」纪律）。
 
+> **2026-11-19 后续更新（互递归尾调用帧复用）**：asm 的文本级尾调用消除
+> `elide_tail_calls` 此前虽把互递归 `evR`/`odR` 的 `call` 改成 `jmp`，但每层仍要
+> `subq $120` 建帧 + `movq` 存参 + `addq $120` 拆帧——b12 互递归奇偶判定 4.263x
+> 的根因。本轮扩展该 pass：caller/callee 同签名、同栈帧大小、无 callee-saved 时，
+> 尾跳保持 rsp 不变、跳到 callee 的 prologue 内别名标签（跳过 subq、保留参数保存），
+> N 层递归只建/拆一次帧。**实测 b12 4.263x → 3.360x（-21%）**，递归类 0.5562x→0.5316x，
+> 整体 1.0905x→1.0891x（噪声内）。实现中曾踩严重 bug：别名标签误插在参数保存之后，
+> 尾跳跳过保存、递归读到旧参数永不终止（b12 跑 6 分钟超时）；已修正为插在参数保存
+> 之前，并新增 `tests/asm_golden/mutual_recursion.dial`（单/双参数互递归）钉死该路径，
+> ReleaseFast 双后端门禁覆盖。剩余 b12 3.36x 是「递归 vs LLVM 折叠成 n%2 闭式」的
+> 本质差距，属前端优化，本轮不动。全门禁绿（差分 fuzz 450 + golden 23/22 + 工具链 22
+> + PGO L1-L4 + 全量 tests）。
+
 > **2026-11-19 后续更新（维度 1 已修复）**：审计报告后，维度 1 的功能硬缺口
 > 「struct 进容器（B6）」已在 asm 后端补齐——`lower.rs` 的 `coerce_elem_bits`/
 > `reinterpret_bits` 支持 struct 装箱/解箱，新增 `unbox_struct_nullable`（无分支

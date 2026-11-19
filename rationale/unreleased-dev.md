@@ -3420,3 +3420,21 @@ imulq   %r10, %r15     # s * 31
 **总裁裁不变**：整体仍慢约 9%，尚未全面代替 LLVM。剩余差距（GRA 全 spill + C runtime 字符串路径 + LTO 整体调度）属架构级工程，非单点 pass 可回收，量化搁置。`dial_array_set` 内联因 COW 分支 + 元素所有权结算 + 与 C runtime 内存布局耦合，风险/收益比不划算，本轮不动（延续「不硬做负收益优化」纪律）。
 
 **护栏**：版本 1.10.0/零依赖/AArch64 零变化/不打 tag 不变；只改 asm 发射器与 golden 门禁，LLVM 路径与 IR 层零改动；safe/debug 行为零变化。
+
+---
+
+## v1.10 开发增量：互递归尾调用帧复用（b12 4.263x → 3.360x）
+
+**为什么做**：延续代替 LLVM 的性能主线。上轮内联 dial_array_get 后全量仍慢约 9%，数据定位到 b12 互递归奇偶判定 4.263x——递归类其他项 0.066x/0.342x 大幅领先，唯独它拖后腿，是最突出的单点缺口。
+
+**根因**：`src/codegen_asm.rs::elide_tail_calls`（M7-e3q 文本 pass）此前已把互递归 `evR`/`odR` 的 `call` 改成 `jmp`（尾调用消除），但每个函数仍保留完整 prologue/epilogue——每次互跳都 `subq $120,%rsp` 建帧 + `movq %rdi,96(%rsp)` 存参 + `addq $120,%rsp` 拆帧。b12 调 `evR(k%60+1)`（最多 60 层递归）× 2 万轮 = 上百万次冗余栈帧加减，而函数体本身只有一个比较和减法。
+
+**实现（仅 src/codegen_asm.rs::elide_tail_calls，扩展既有 pass）**：caller 与 callee 同签名、同栈帧大小、均无 callee-saved 时，尾调用消除走「帧复用」分支——删掉 `addq $N,%rsp`（不拆帧），把 `jmp G` 改为 `jmp G_dial_fr`，并在 callee 的 prologue 内 `subq` 之后、参数保存 `movq` 之前插入 `G_dial_fr:` 别名标签。跳来时 rsp 不变（复用 caller 帧）、跳过 subq、但重新执行参数保存（尾跳前 caller 已把新实参放进 rdi/rsi/...），把新参写进同一帧参数槽。N 层递归只建/拆一次帧。帧大小不同的递归对自动退回普通尾调用消除（拆帧后 jmp）。AArch64 零变化。
+
+**踩坑与修复（重要）**：初版把别名标签误插在 `movq %rdi,off(%rsp)` **之后**，帧复用跳过去时跳过了参数保存——`evR` 把 n-1 放进 rdi 但没写回栈槽，`odR` 读到旧的 n，递归永不终止。症状：b12 单项 bench 跑 6 分钟不结束；最小互递归程序 `timeout 5` 退出码 124（超时）。修正为标签插在参数保存**之前**，最小程序恢复终止且与 LLVM 退出码一致。新增 `tests/asm_golden/mutual_recursion.dial`（单参数 evR/odR + 双参数 ping/pong + 2000 轮归约）钉死该路径，默认 golden 与 ReleaseFast 双后端两组门禁均覆盖。
+
+**实测（公平 --fast -O3，校验和锚点 4×2 一致）**：b12 4.263x → 3.360x（-21%），递归类几何平均 0.5562x → 0.5316x，整体 1.0905x → 1.0891x（噪声内）。剩余 b12 3.36x 是「递归实现 vs LLVM 折叠成 n%2 闭式」的本质差距，属编译器前端优化（尾递归→迭代/闭式），非文本 pass 可补，本轮不动。
+
+**验证全绿**：默认 golden 23 + ReleaseFast 双后端 22 + 差分 fuzz 450（0 不一致）+ 工具链去 LLVM 化 22 + 自研 PGO L1-L4 + 全量 run_tests。
+
+**护栏**：1.10.0/零依赖/AArch64/LLVM 路径零变化、不打 tag；只改 asm 文本 pass + 新增 golden 用例。

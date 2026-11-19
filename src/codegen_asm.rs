@@ -3936,6 +3936,13 @@ fn elide_tail_calls(asm: &str) -> String {
     // ---- ④ 逐函数扫描尾调用三连并登记替换（按行号，避免索引失效）。
     let mut drop: HashSet<usize> = HashSet::new();   // 要删除的 `call G` 行
     let mut jmp_at: HashMap<usize, String> = HashMap::new(); // ret 行号 → 替换为 `jmp G`
+    // M7-互递归帧复用：caller 与 callee 同帧大小、无 callee-saved 时，尾跳可复用
+    // 同一栈帧——删掉 addq（不销毁帧）、跳到 callee 的 prologue 后别名标签（跳过
+    // subq），令 N 层递归只建/拆一次帧，而非每层 subq/addq。evR/odR 互递归 4.26x
+    // 的根因即每层 120B 栈帧反复加减；帧复用后递归链 rsp 不变。
+    let mut drop_add: HashSet<usize> = HashSet::new();        // 要删除的 `addq $N,%rsp` 行
+    let mut fr_jmp_at: HashMap<usize, String> = HashMap::new(); // ret 行 → `jmp G_dial_fr`
+    let mut fr_labels: HashSet<String> = HashSet::new();      // 需插入 `_dial_fr` 标签的函数
     for (name, s, e) in &bounds {
         let fi = match info.get(name) { Some(x) => x, None => continue };
         if fi.has_callee_saved || fi.frame.is_none() { continue; }
@@ -3985,9 +3992,18 @@ fn elide_tail_calls(asm: &str) -> String {
             let same_sig = gparams == nparams && nparams <= 6;
             let in_scc = reaches(&info, callee, name);
             if !ginfo.has_callee_saved && same_sig && in_scc {
-                // 用 ret 行的索引记录 jmp 目标；call 行登记删除；addq 行保留。
-                drop.insert(i);
-                jmp_at.insert(i + 2, format!("\tjmp {}", callee));
+                // 帧复用判定：callee 帧大小必须 == caller 帧大小。此时尾跳可保持 rsp
+                // 不变、跳到 callee prologue 后别名标签，N 层递归只建/拆一次帧。
+                if ginfo.frame == Some(frame) && frame > 0 {
+                    drop.insert(i);                       // 删 `call G`
+                    drop_add.insert(i + 1);               // 删 `addq $N,%rsp`（帧不拆）
+                    fr_jmp_at.insert(i + 2, format!("\tjmp {}_dial_fr", callee));
+                    fr_labels.insert(callee.to_string()); // callee 插入别名标签
+                } else {
+                    // 帧大小不同：退回普通尾调用消除（拆帧后 jmp，rsp 归位）。
+                    drop.insert(i);
+                    jmp_at.insert(i + 2, format!("\tjmp {}", callee));
+                }
                 i += 3; // 跳过整个三连，避免相邻窗口重复处理
             } else {
                 i += 1;
@@ -3996,11 +4012,36 @@ fn elide_tail_calls(asm: &str) -> String {
     }
     if drop.is_empty() { return asm.to_string(); }
 
-    // ---- ⑤ 应用替换。
+    // ---- ⑤ 应用替换。帧复用分支还需在 callee prologue 内插入 `_dial_fr` 别名标签。
+    // 标签必须插在 `subq $N,%rsp` **之后、参数保存 `movq %rdi,off(%rsp)` 之前**：
+    // 帧复用跳来时 caller 的帧仍在、rsp 不变，绝不能再 subq；但必须重新执行参数保存
+    // （尾跳前 caller 已把新实参放进 rdi/rsi/...），把新参写进复用的同一帧参数槽。
+    // 若误插在 movq 之后， callee 读到的是 caller 未更新的旧参数 → 递归不终止（实测踩过）。
+    let mut fr_insert_before: HashMap<usize, String> = HashMap::new();
+    if !fr_labels.is_empty() {
+        for (name, s, e) in &bounds {
+            if !fr_labels.contains(name) { continue; }
+            // 在 [s,e) 内找第一条 `movq %<argreg>,...(%rsp)`（prologue 参数保存），插其前。
+            for i in *s..*e {
+                let t = lines[i].trim();
+                if ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"].iter()
+                    .any(|r| t.starts_with(&format!("movq {},", r)) && t.contains("(%rsp)"))
+                {
+                    fr_insert_before.insert(i, format!("{}_dial_fr:", name));
+                    break;
+                }
+            }
+        }
+    }
     let mut out = String::with_capacity(asm.len());
     for (i, l) in lines.iter().enumerate() {
-        if drop.contains(&i) { continue; }
-        if let Some(rep) = jmp_at.get(&i) {
+        if drop.contains(&i) || drop_add.contains(&i) { continue; }
+        // 标签插在参数保存行之前（跳来时执行保存，但不执行它前面的 subq）。
+        if let Some(lbl) = fr_insert_before.get(&i) {
+            out.push_str(lbl);
+            out.push('\n');
+        }
+        if let Some(rep) = jmp_at.get(&i).or_else(|| fr_jmp_at.get(&i)) {
             out.push_str(rep);
         } else {
             out.push_str(l);
