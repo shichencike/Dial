@@ -115,6 +115,14 @@
 
 > 注意：这些要改冻结的 `codegen.rs`/`semantic.rs`，属独立语言版本主题，不塞进 asm 后端批次。
 > 若裁决「纳入」，须走双后端同步 + 全门禁，与后端优化解耦。
+>
+> **跨后端内存缺口（P0 审计延伸发现，2026-11-19，单列 P2 裁决）**：`print(str(i))` 这类
+> 「owned 临时直传只读消费方（无变量承接）」两后端都泄漏（30 万次 RSS asm 10.5MB / LLVM
+> 10.8MB）——LLVM `emit_print`→`dial_print_string` 只读不消费、print 路径未调
+> `settle_fresh_value`，与 asm 同缺。因两后端行为一致、不构成 asm 相对 LLVM 的差距，且真正修复
+> 须双后端同步改所有权契约（print/open/write/== 等所有只读消费方），按「两边都缺暂不管」
+> 裁决不擅改、不塞进 asm 批次。asm 拼接/插值主路径（concat/interp）泄漏已于 P0 修复。
+> 证据链见 [unreleased-dev.md](unreleased-dev.md)。
 
 ### P3 · 工程化与文档（可信度与可维护性）
 

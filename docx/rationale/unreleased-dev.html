@@ -86,6 +86,33 @@
 - 新增 golden <code>tests/asm_golden/string_concat_arc.dial</code>：9 类场景（借用变量 / owned 中间 / 嵌套拼接 / map get 借用 / get 未命中静态串 / 拼接结果再用 / 真插值混合 / 拼接结果入 map / 循环混合 100 轮）双后端逐字节一致。
 - golden 全量 24 用例、差分 fuzz 450（OK=450, DIFF=0）、全量 <code>run_tests.sh</code>（含新 AH 门禁段）全部通过；无 double-free / heap assert。</p>
 <p><strong>边界</strong>：仅 asm lowering 路径变化；LLVM 后端从 AST 直接生成、零改动；AArch64 / 优化级别无关；不打 tag、不升版本号。</p>
+<p><strong>延伸审计（P0 收尾，顺藤摸瓜查同类 owned 临时传只读消费方）——诚实记录，未擅改</strong>：
+修完 concat/interp 后审计所有 owned-handle 返回路径，确认 <code>str()</code> 独立 lowering（<code>lower_call</code> 的 <code>name=="str"</code>）、<code>Expr::Slice</code>、<code>dial_array_new</code>、channel recv 等返回的 owned 值，均由「变量承接→作用域 release」或「容器 put/push→sink_elem_after_retain 同款结算」正确回收（既有代码，对齐 LLVM），无同类遗漏。<strong>唯一新发现</strong>：<code>print(str(i))</code> 这种把 owned 临时直接传给只读消费方（不变量承接）的场景两后端都泄漏——A/B 实测（30 万次，RSS）：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>asm（本批修复后）</th>
+<th>LLVM（参照）</th>
+<th>判定</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>var s = "k"+str(i)</code>（concat 绑定变量）</td>
+<td><strong>1.4MB</strong></td>
+<td>20.6MB</td>
+<td>asm 已修复；LLVM 拼接场景自身泄漏更重</td>
+</tr>
+<tr>
+<td><code>print(str(i))</code>（owned 临时直传只读消费方）</td>
+<td>10.5MB</td>
+<td>10.8MB</td>
+<td><strong>两后端共同既有缺口</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>裁决：不擅改</strong>。理由：① <code>print(str(i))</code> 泄漏两后端行为一致、asm 与「语义参照 LLVM」无差距，不构成 asm 相对 LLVM 的 P0 缺陷；② 单边改 asm 需在 print/open/write/==/切片等所有只读消费方逐一结算 owned 临时，是架构级所有权契约变更，且 LLVM 后端（<code>emit_print</code>→<code>dial_print_string</code> 只读不消费、<code>settle_fresh_value</code> 在 print 路径未调用）同样缺位——真正修复须双后端同步改冻结的 <code>codegen.rs</code>/<code>lower.rs</code>，属 P2 语言语义裁决；③ 与用户「两边都缺暂不管」的既有裁决一致。已记入路线图 P2 备注。<strong>§19 零泄漏底线在 asm 拼接/插值主路径已恢复</strong>；<code>print(str(i))</code> 作为跨后端历史缺口单列，不塞进本次 asm 批次。</p>
 <hr />
 <h4 id="m9-linrec线性递推循环编译期闭式求值总耗时首次反超-llvm几何平均-0574x">M9-linrec：线性递推循环编译期闭式求值（总耗时首次反超 LLVM，几何平均 0.574x）</h4>
 <p><strong>用户追问脉络</strong>：延续 M8-recspec「私有后端更激进」的方向；路线图 <code>roadmap-gap-analysis.md</code> C 类记录「循环调度五路证伪后，唯一可攻方向是循环内线性递推闭式（clang -O3 / SCEV 同族，待评估 ROI）」。本轮先量化 ROI 再投入。</p>

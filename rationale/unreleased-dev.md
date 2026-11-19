@@ -27,6 +27,16 @@
 
 **边界**：仅 asm lowering 路径变化；LLVM 后端从 AST 直接生成、零改动；AArch64 / 优化级别无关；不打 tag、不升版本号。
 
+**延伸审计（P0 收尾，顺藤摸瓜查同类 owned 临时传只读消费方）——诚实记录，未擅改**：
+修完 concat/interp 后审计所有 owned-handle 返回路径，确认 `str()` 独立 lowering（`lower_call` 的 `name=="str"`）、`Expr::Slice`、`dial_array_new`、channel recv 等返回的 owned 值，均由「变量承接→作用域 release」或「容器 put/push→sink_elem_after_retain 同款结算」正确回收（既有代码，对齐 LLVM），无同类遗漏。**唯一新发现**：`print(str(i))` 这种把 owned 临时直接传给只读消费方（不变量承接）的场景两后端都泄漏——A/B 实测（30 万次，RSS）：
+
+| 场景 | asm（本批修复后） | LLVM（参照） | 判定 |
+|---|---|---|---|
+| `var s = "k"+str(i)`（concat 绑定变量） | **1.4MB** | 20.6MB | asm 已修复；LLVM 拼接场景自身泄漏更重 |
+| `print(str(i))`（owned 临时直传只读消费方） | 10.5MB | 10.8MB | **两后端共同既有缺口** |
+
+**裁决：不擅改**。理由：① `print(str(i))` 泄漏两后端行为一致、asm 与「语义参照 LLVM」无差距，不构成 asm 相对 LLVM 的 P0 缺陷；② 单边改 asm 需在 print/open/write/==/切片等所有只读消费方逐一结算 owned 临时，是架构级所有权契约变更，且 LLVM 后端（`emit_print`→`dial_print_string` 只读不消费、`settle_fresh_value` 在 print 路径未调用）同样缺位——真正修复须双后端同步改冻结的 `codegen.rs`/`lower.rs`，属 P2 语言语义裁决；③ 与用户「两边都缺暂不管」的既有裁决一致。已记入路线图 P2 备注。**§19 零泄漏底线在 asm 拼接/插值主路径已恢复**；`print(str(i))` 作为跨后端历史缺口单列，不塞进本次 asm 批次。
+
 ---
 
 #### M9-linrec：线性递推循环编译期闭式求值（总耗时首次反超 LLVM，几何平均 0.574x）
