@@ -48,7 +48,8 @@
 <li><a href="#6-可复现验证每期">6. 可复现验证（每期）</a></li>
 <li><a href="#7-当前状态2026-11-20-更新">7. 当前状态（2026-11-20 更新）</a><ul>
 <li><a href="#p40--核心能力---已落地2026-11-20">P4.0 · 核心能力 —— ✅ 已落地（2026-11-20）</a></li>
-<li><a href="#p41p43---未启动">P4.1–P4.3 —— ⬜ 未启动</a></li>
+<li><a href="#p41--静态索引与搜索---已落地2026-11-20">P4.1 · 静态索引与搜索 —— ✅ 已落地（2026-11-20）</a></li>
+<li><a href="#p42p43---未启动">P4.2–P4.3 —— ⬜ 未启动</a></li>
 </ul>
 </li>
 </ul>
@@ -344,18 +345,61 @@ mode = &quot;prebuilt&quot;         # prebuilt | source
 <ul>
 <li><strong>门禁固化</strong>：<code>tools/verify_p4_pkg.sh</code>（10 项，缺 zig 自动 skip）挂入 <code>run_tests.sh</code> AK 段。</li>
 <li><strong>§1 五维度对照</strong>：① 零脚本可审计 ✅（清单声明式编译、包内脚本数恒 0、源码随包）；
-  ② 一条命令装完即用 ✅（prebuilt 无需用户工具链）；③ 完整依赖管理 ⬜ <strong>P4.2</strong>（本批未达）；
-  ④ Dial 原生 FFI ✅（<code>.diali</code> 装完即列导出函数、双后端 import 运行通过）；⑤ pack 全自动 ✅
-  （自动填 manifest/哈希/三平台 <code>.a</code>，用户零手填）。维度③留待 P4.2。</li>
+  ② 一条命令装完即用 ✅（prebuilt 无需用户工具链）；③ 完整依赖管理 ⬜ <strong>P4.2</strong>（本批未达，
+  其中 <code>search</code> 部分已由 P4.1 达成）；④ Dial 原生 FFI ✅（<code>.diali</code> 装完即列导出函数、双后端
+  import 运行通过）；⑤ pack 全自动 ✅（自动填 manifest/哈希/三平台 <code>.a</code>，用户零手填）。
+  维度③的语义版本/传递依赖/lockfile 留待 P4.2。</li>
 <li>零产品代码外的依赖变化：复用现有 <code>zig</code>/<code>zip</code>/<code>sha2</code>/<code>serde_json</code>，无新依赖；版本 1.10.0、不打 tag。</li>
 </ul>
-<h3 id="p41p43---未启动">P4.1–P4.3 —— ⬜ 未启动</h3>
+<h3 id="p41--静态索引与搜索---已落地2026-11-20">P4.1 · 静态索引与搜索 —— ✅ 已落地（2026-11-20）</h3>
+<table>
+<thead>
+<tr>
+<th>子项</th>
+<th>实现</th>
+<th>证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dialc search &lt;词&gt;</code></td>
+<td><code>registry.rs</code> 静态索引搜索：子串匹配包名/描述、多版本去重取最新、按包名排序；表格 + <code>--json</code> 稳定字段</td>
+<td>门禁 1/2/3：子串匹配、去重、描述匹配、JSON 合法</td>
+</tr>
+<tr>
+<td><code>dialc info &lt;包名&gt;</code></td>
+<td>精确包名匹配，展示元数据/版本列表/ABI/许可/平台 + 可直接复制的安装命令（<code>--sha256</code> 有时自动带上）</td>
+<td>门禁 2/3：版本列表有序、ABI/许可/平台、JSON 有序</td>
+</tr>
+<tr>
+<td>索引签名校验</td>
+<td>沿用 SHA256 信任链：<code>--index-sha256</code> 钉死索引整文件哈希；<strong>哈希不符 Fail-Fast 且绝不回退缓存</strong>（钉死来源不可被绕过）；回退缓存也校验钉的哈希</td>
+<td>门禁 4：正确值通过、错误值非零退出不回退</td>
+</tr>
+<tr>
+<td>无中心服务 + 可复现</td>
+<td>索引是静态 JSON 单文件（默认 GitHub Releases，<code>--index</code>/<code>DIAL_INDEX_URL</code> 可覆盖）；下载复用 <code>package::download_to</code>（https 强制）；本地缓存 <code>~/.dial/cache/index.json</code> 原子落盘；<code>--offline</code> 只读缓存</td>
+<td>门禁 5/6/7：offline 命中/缺失 Fail-Fast、schema 错误 Fail-Fast、网络失败回退且来源标注准确</td>
+</tr>
+</tbody>
+</table>
 <ul>
-<li>P4.1 静态索引与搜索、P4.2 完整依赖管理（语义版本/传递解析/lockfile）、P4.3 离线镜像与增量：
+<li><strong>门禁固化</strong>：<code>tools/verify_p4_index.sh</code>（12 项，缺 curl/python3 自动 skip）挂入 <code>run_tests.sh</code> AL 段。</li>
+<li><strong>§1 五维度对照</strong>：③ 完整依赖管理——<code>search</code>/<code>info</code> ✅（静态索引可发现包）；语义版本区间 /
+  传递依赖解析 / <code>dial.lock</code> ⬜ 留待 P4.2。其余维度沿用 P4.0 达成状态。</li>
+<li><strong>信任模型（务实、不含糊）</strong>：索引靠 HTTPS 传输保护 + 可选 <code>--index-sha256</code> 钉死整文件；
+  每个包条目登记 <code>sha256</code>，<code>info</code> 直接给出带 <code>--sha256</code> 的安装命令，把信任链从索引延伸到下载物。
+  <strong>不宣称非对称签名</strong>——那需要新依赖或手写密码学，违反零依赖/不手写安全栈铁律。</li>
+<li>零新依赖：复用 <code>curl</code>/<code>sha2</code>/<code>serde_json</code>；注册模块 <code>src/registry.rs</code>；版本 1.10.0、不打 tag。</li>
+</ul>
+<h3 id="p42p43---未启动">P4.2–P4.3 —— ⬜ 未启动</h3>
+<ul>
+<li>P4.2 完整依赖管理（语义版本区间 / 传递解析 + 版本仲裁 / <code>dial.lock</code>）、P4.3 离线镜像与增量：
   按批次独立推进，每期对照 §1 勾验。</li>
 </ul>
 <blockquote>
-<p>路线图文档初版（2026-11-19）确立战略定位与分期；P4.0 代码于 2026-11-20 落地。</p>
+<p>路线图文档初版（2026-11-19）确立战略定位与分期；P4.0 代码于 2026-11-20 落地；
+P4.1 静态索引与搜索于 2026-11-20 落地。</p>
 </blockquote><p class="note">← 更早：<a href="replace-llvm-multidim-audit.html">replace-llvm-multidim-audit</a> · 更新：<a href="unreleased.html">未实现 / 尚未落地</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">

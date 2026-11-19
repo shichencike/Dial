@@ -2727,7 +2727,9 @@ Dial 的包分发只解决一件事：**把别人写好的机器码 + 函数签�
 > 2026-11-20 落地**：`dial.toml` 的 `[c]` 段可声明 C 源，`dialc pack` 用 `zig cc -target`
 > 自动交叉编译三平台 `.a`（prebuilt 默认）并填好 manifest/哈希；`mode="source"` 的包在
 > `dialc install` 期就地声明式编译（零脚本）；安装改为原子 rename + 回滚；install/list/
-> uninstall/new 均支持 `--json`。语义版本/传递依赖/lockfile/search 属 P4.2/P4.1，尚未落地。
+> uninstall/new 均支持 `--json`。**P4.1 静态索引与搜索于 2026-11-20 落地**：`dialc search`/
+> `info` 基于托管静态索引（无中心服务），支持 `--json`/`--offline`/`--index-sha256`（哈希不符
+> Fail-Fast 且不回退缓存）。语义版本/传递依赖/lockfile 属 P4.2，尚未落地。
 > 本节 §25 其余内容描述的是 v1.10 分发格式（仍然有效、仍是新能力的地基）；「刻意不做」的
 > 边界以 §25.7 的转向注记为准。零脚本可审计、SHA256 信任链、项目目录零侵入等核心约束**继续保留**。
 
@@ -3307,7 +3309,13 @@ mylib.dialpkg
 > 用户零手填。`dial.toml` 的 `[c]` 段声明 sources/includes/flags/defines/mode；`mode="source"`
 > 的包在 install 期就地声明式编译（零脚本）。这是「把 dialpkg 打磨成通用 C 包管理标准」路线的
 > P4.0，详见 [`rationale/dialpkg-roadmap.md`](rationale/dialpkg-roadmap.md) §2/§3/§7。
-> 门禁 `tools/verify_p4_pkg.sh` 10/10 全绿。语义版本/传递依赖/lockfile/search 属 P4.1/P4.2，仍未落地。
+> 门禁 `tools/verify_p4_pkg.sh` 10/10 全绿。
+>
+> **P4.1 已落地（2026-11-20）**：新增 `dialc search <词>` / `dialc info <包名>`，基于托管的静态索引
+> JSON（无中心服务，`--index`/`DIAL_INDEX_URL` 可覆盖），支持 `--json`、`--offline`、`--index-sha256`
+> 钉死索引哈希（哈希不符 Fail-Fast 且不回退缓存）。`info` 直接给出带 `--sha256` 的安装命令，把
+> SHA256 信任链从索引延伸到下载物。门禁 `tools/verify_p4_index.sh` 12/12 全绿。**语义版本 /
+> 传递依赖 / `dial.lock` 仍属 P4.2，未落地**。详见 [`rationale/dialpkg-roadmap.md`](rationale/dialpkg-roadmap.md) §7。
 
 > 本章为**生态规划**，不含任何实现承诺与时间表。**完整规范**（平台矩阵、包内目录树、
 > JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
