@@ -1,0 +1,39 @@
+// v1.10：map<string,string> 的 get_or() 与 values() 正向测试。
+// get_or 四象限（命中/未命中 × 默认字面量/借用变量）验证引用计数平衡，
+// 5 万次压测 + safety=2 的 heap assert 保证无 double-free / use-after-free。
+// values() 返回 string[] 快照，修改快照不影响原表。
+// 双后端输出必须逐字节一致。
+
+fn main(): int {
+    var m: map<string, string> = new_kv_map();
+    m.put("hit", "HITVAL");
+    var defvar: string = "DEFVAR";
+
+    // get_or 四象限
+    var r1: string = m.get_or("hit", "LITDEF");     // 命中 + 字面量默认
+    print("GO r1=", r1);
+    var r2: string = m.get_or("miss1", "LITDEF2");  // 未命中 + 字面量默认
+    print("GO r2=", r2);
+    var r3: string = m.get_or("hit", defvar);       // 命中 + 借用变量默认
+    print("GO r3=", r3);
+    var r4: string = m.get_or("miss2", defvar);     // 未命中 + 借用变量默认
+    print("GO r4=", r4);
+    print("GO defvar=", defvar);                    // 默认变量仍存活
+
+    // values() 快照
+    var vals: string[] = m.values();
+    print("GO vals_size=", vals.length());
+    vals.set(0, "CHANGED");
+    print("GO m_hit=", m.get("hit"));               // 原表不受影响
+
+    // 压测引用计数平衡
+    var i: int = 0;
+    while (i < 50000) {
+        var x: string = m.get_or("hit", "D");
+        var y: string = m.get_or("miss", defvar);
+        i = i + 1;
+    }
+    print("GO loop=", i);
+    print("GO final=", m.get("hit"));
+    return 0;
+}

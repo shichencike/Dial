@@ -6099,20 +6099,25 @@ impl<'ctx> CodeGen<'ctx> {
             }
             // v1.04 C6：泛型 map 的 get_or(k, default)。键与默认值都按静态类型
             // 转成 8 字节位模式；C 侧命中返回真实值、未命中返回默认值位模式。
-            // 语义层目前把 V 限定为标量 / 标量字段结构体（v1.10 的 string 值仅
-            // 经 get/put/values 支持，get_or 的 string 放开在 Phase C 配套所有权
-            // 结算后落地），故当前不存在句柄所有权结算问题。
+            // v1.10：V 可为标量 / 标量字段结构体 / string。
+            // 标量无所有权；结构体默认值见下方手动结算；string 由 C 侧
+            // dial_kvmap_get_or 对返回值补一份 retain（成为「已拥有」值），
+            // 调用方（yields_borrowed_ref 不含 get_or）退出作用域时 release。
             "get_or" => {
                 let (ka, kb) = self.kv_arg(&args[0], k, function, scopes, func_values, functions, structs)?;
-                let (_da, db) = self.kv_arg(&args[1], v, function, scopes, func_values, functions, structs)?;
+                let (da, db) = self.kv_arg(&args[1], v, function, scopes, func_values, functions, structs)?;
                 let r = self.call_c("dial_kvmap_get_or", &[optr.into(), kb.into(), db.into()]);
                 self.settle_fresh_value(&args[0], k, ka);
                 let out = self.kv_from_bits(function, r.into_int_value(), v);
-                // 结构体默认值：先按值拷出（未命中时返回值就是本地这份装箱），
-                // 再归还本地那份装箱——副本已是纯标量位，释放不影响已拷出的值。
                 if matches!(v, Type::Struct(_)) {
+                    // 结构体默认值：先按值拷出（未命中时返回值就是本地这份装箱），
+                    // 再归还本地那份装箱——副本已是纯标量位，释放不影响已拷出的值。
                     let boxp = self.builder.build_int_to_ptr(db, self.i8ptr(), "boxp").unwrap();
                     self.call_c_void("dial_rc_release", &[boxp.into()]);
+                } else if matches!(v, Type::String) {
+                    // string 默认值：C 侧已对返回值 +1，这里归还默认实参的本地那份
+                    // （字面量 rc=1 -> 归还；借用变量 no-op），引用计数平衡。
+                    self.settle_fresh_value(&args[1], v, da);
                 }
                 Ok(out)
             }

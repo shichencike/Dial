@@ -3706,7 +3706,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td><code>map.values()</code> 对非 <code>int</code> 值</td>
-<td><strong>未实现</strong>（v1.00）：<code>values()</code> 仍只支持 <code>V = int</code>（及标量字段结构体）；string 值的 <code>values()</code> 计划在后续阶段补齐</td>
+<td><strong>已支持</strong>（v1.10）：<code>values()</code> 支持 <code>V = int</code> / <code>string</code> / 标量字段结构体，返回对应快照数组；string 值返回 <code>string[]</code>（C 侧逐元素 retain，快照与原表互不影响）。<code>get_or()</code> 亦支持 string 值（返回值按已拥有语义，两端结算默认实参所有权，四象限计数平衡）</td>
 </tr>
 <tr>
 <td>LSP 的重命名 / 跨文件引用查找 / 格式化</td>
@@ -7229,8 +7229,10 @@ var ks: string[] = m.keys();    // 键快照
   命中返回表内借用值、未命中返回静态串，两端 codegen 统一按借用处理——零拷贝、零泄漏、
   零 double-free，覆盖 print / 拼接 / 插值 / for-in 等全部消费点。旧版"未命中新建 rc=1 空串"
   的所有权移交歧义由此根除。</li>
-<li><strong>已知边界</strong>：<code>map.values()</code> 当前只支持 <code>V = int</code>（及标量字段结构体），string 值的
-  <code>values()</code> 与 <code>get_or()</code> 计划在后续阶段补齐。
+<li><strong><code>string</code> 值的 <code>values()</code> / <code>get_or()</code>（v1.10 已支持）</strong>：<code>values()</code> 对 <code>V=string</code> 返回
+  <code>string[]</code> 快照（逐元素 retain，改快照不影响原表）；<code>get_or(k, d)</code> 对 string 返回「已拥有」
+  值——C 侧对返回值补 retain，两端 codegen 归还默认实参的本地那份，命中/未命中 × 字面量/
+  借用变量默认值四象限引用计数全部平衡（5 万次压测 + safety=2 heap assert 验证）。
   （<code>for (k, v in m)</code> 对泛型 map 的限制已在 <strong>v1.01 解除</strong>，见 <a href="#307-泛型-mapkv-支持-for-k-v-in-m">§30.7</a>。）</li>
 </ul>
 <h3 id="296-实现落点">29.6 实现落点</h3>

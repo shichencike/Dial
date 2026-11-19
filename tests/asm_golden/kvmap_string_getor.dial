@@ -1,0 +1,15 @@
+// v1.10：map<string,string> get_or/values 双后端一致性黄金用例（轻量确定性）。
+
+fn main(): int {
+    var defvar: string = "DEF";
+    var m: map<string, string> = new_kv_map();
+    m.put("hit", "HIT");
+    print("KG hit_lit=", m.get_or("hit", "LIT"));
+    print("KG miss_lit=", m.get_or("miss", "LIT2"));
+    print("KG hit_var=", m.get_or("hit", defvar));
+    print("KG miss_var=", m.get_or("miss", defvar));
+    print("KG defvar=", defvar);
+    var vals: string[] = m.values();
+    print("KG vals=", vals.length());
+    return 0;
+}

@@ -255,11 +255,20 @@ int64_t dial_kvmap_get(DialKvMap mh, int64_t key) {
 
 /* v1.04 C6：命中返回真实值的位模式，未命中返回调用方给的默认值位模式。
  * 与 dial_map_get_or 同款「一次探测」，把「没找到」与「找到了默认值」分开。
- * 只服务标量 V；句柄 V 由语义层拦下，不进入这里（见头文件注释）。 */
+ *
+ * v1.10：V=string 也放开。调用方约定 get_or 的返回值是「已拥有」值（两端
+ * yields_borrowed_ref 不含 get_or，绑定变量不 retain、作用域退出 release），
+ * 因此这里对 KV_STRING 的返回值补一份 retain：
+ *   - 命中：表内借用值 +1（调用方 release 抵消，表仍独占原引用）；
+ *   - 未命中：默认实参位模式 +1（编译器随后归还默认实参的本地那份；见两端 codegen）。
+ * 这样四象限（命中/未命中 × 字面量/借用变量默认值）引用计数全部平衡。
+ * 标量 / 结构体 V 不受影响（结构体仍由编译器手动结算 box，见 codegen）。 */
 int64_t dial_kvmap_get_or(DialKvMap mh, int64_t key, int64_t def_bits) {
     void *m = (void *)mh;
     int64_t i = kv_find(m, key);
-    return i < 0 ? def_bits : k_ents(m)[i].val;
+    int64_t ret = i < 0 ? def_bits : k_ents(m)[i].val;
+    if (v_kind(m) == KV_STRING) kv_retain_kind(KV_STRING, ret);
+    return ret;
 }
 
 int64_t dial_kvmap_contains(DialKvMap mh, int64_t key) {

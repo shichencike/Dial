@@ -1926,6 +1926,8 @@ impl<'a> Lower<'a> {
 
         let mut vals: Vec<Value> = vec![ov];
         let mut tys: Vec<IrType> = vec![IrType::Handle];
+        // v1.10：保留各实参的原始值（get_or 的 string 默认值结算需要）。
+        let mut raw_args: Vec<Value> = Vec::with_capacity(args.len());
         for (i, a) in args.iter().enumerate() {
             let abi = spec.args.get(i).copied().unwrap_or(builtin::Abi::Auto);
             let bit_mode = spec.elem_arg == Some(i) || spec.is_kv;
@@ -1935,6 +1937,7 @@ impl<'a> Lower<'a> {
                 builtin::abi_hint(abi)
             };
             let (v, _) = self.lower_expr(a, &hint)?;
+            raw_args.push(v.clone());
             let v2 = if bit_mode {
                 // 数组元素 / KvMap 键与值：按实参静态类型转成 C 的 int64 位模式。
                 self.coerce_elem_bits(v, &self.expr_dt(a))?
@@ -1979,6 +1982,25 @@ impl<'a> Lower<'a> {
         // COW：只写回新句柄，绝不 release 旧值（C 侧已结算）。
         if let (Some(slot), Some(d)) = (obj_slot, dst) {
             self.emit(IrInst::Store { ptr: slot, val: Value::Reg(d), ty: IrType::Handle });
+        }
+        // v1.10：get_or 的 string 默认值结算（对齐 LLVM settle_fresh_value）。
+        // C 侧 dial_kvmap_get_or 已对返回值 +1（调用方退出作用域 release）；
+        // 这里归还默认实参的本地那份：字面量等自带所有权的值 rc=1 需 release，
+        // 借用变量 no-op（否则悬垂/双重释放）。
+        if method == "get_or" {
+            if let Type::KvMap(_, v) = &od {
+                if matches!(v.as_ref(), Type::String) {
+                    if let Some(def_v) = raw_args.get(1) {
+                        if let Some(k) = rc_kind(&Type::String) {
+                            if !yields_borrowed_ref(&args[1]) {
+                                let tmp = self.emit_alloca(reg_ir(&Type::String));
+                                self.emit(IrInst::Store { ptr: tmp, val: def_v.clone(), ty: reg_ir(&Type::String) });
+                                self.emit(IrInst::RcRelease { ptr: tmp, kind: k });
+                            }
+                        }
+                    }
+                }
+            }
         }
         Ok((out, false))
     }

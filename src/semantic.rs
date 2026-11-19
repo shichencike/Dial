@@ -3358,23 +3358,21 @@ fn kvmap_method_type<V>(
             Ok(if method == "contains" { Type::Bool } else { v.clone() })
         }
         // v1.04 C6：泛型 map 的 get_or(k, default)。
-        // 刻意只放行**标量 V**：标量按值存储，默认值位模式没有 ARC 所有权问题；
-        // 若放行 string 这类句柄 V，「未命中时返回的默认字符串该由谁 retain」会
-        // 产生歧义，与 §19「宁可泄漏，不可悬垂」相悖。那种场景请用 contains + get。
-        // v1.04 B6：额外放行**标量字段结构体 V**——结构体值按值拷出（装箱对象只是
-        // 容器内的存储），默认值与命中值都不产生所有权歧义。
+        // v1.10：放行 string——C 侧 dial_kvmap_get_or 对 KV_STRING 返回值补一份
+        // retain（成为「已拥有」值），两端 codegen 归还默认实参的本地那份，
+        // 四象限引用计数平衡（详见 stdlib/dial_kvmap.c 注释）。
+        // v1.04 B6：放行标量字段结构体 V——结构体值按值拷出，无所有权歧义。
         "get_or" => {
             let scalar_v = matches!(v, Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char);
             let struct_v = match v {
                 Type::Struct(name) => struct_has_only_scalar_fields(name, structs),
                 _ => false,
             };
-            if !scalar_v && !struct_v {
+            if !scalar_v && !struct_v && !matches!(v, Type::String) {
                 return Err(DialcError::new(
                     format!(
-                        "语义错误：map<{}, {}>.get_or() 只支持标量值类型（int/float/bool/byte/char）\
-                         或字段全为标量的结构体；\n\
-                         句柄值请用 contains(k) + get(k) 显式处理（避免默认值的所有权歧义）",
+                        "语义错误：map<{}, {}>.get_or() 支持标量值类型（int/float/bool/byte/char）、\
+                         string 或字段全为标量的结构体",
                         k.name(), v.name()
                     ),
                     0, 0,
@@ -3411,11 +3409,13 @@ fn kvmap_method_type<V>(
             }
             // V = int：返回 int[]（位模式快照）。
             // v1.04 B6：V = 结构体时返回对应结构体数组（装箱对象快照，读出即按值拷贝）。
+            // v1.10：V = string 时返回 string[]——C 侧 dial_kvmap_values 用
+            // dial_array_new(1) + dial_array_push 对每个值 retain，快照与原表互不影响。
             match v {
                 Type::Int => Ok(Type::Array(Box::new(Type::Int))),
-                Type::Struct(_) => Ok(Type::Array(Box::new(v.clone()))),
+                Type::Struct(_) | Type::String => Ok(Type::Array(Box::new(v.clone()))),
                 _ => Err(DialcError::new(
-                    "语义错误：map.values() 当前版本只支持 V = int 或结构体（其它标量值请用 get 逐键取值）",
+                    "语义错误：map.values() 当前版本只支持 V = int / string / 结构体（其它标量值请用 get 逐键取值）",
                     0, 0,
                 )),
             }

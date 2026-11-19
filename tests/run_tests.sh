@@ -3116,6 +3116,22 @@ if "$DIALC" build tests/select_timeout_smoke.dial -o "${TMP}/v_sto" >"${TMP}/v_s
     else vbad "V 组：select_timeout_smoke 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
 else vbad "V 组：select_timeout_smoke 编译失败"; tail -8 "${TMP}/v_sto.log"; fi
 
+# 3d) v1.10 map<string,string> get_or 四象限 + values + 5万次压测（引用计数平衡）。
+if "$DIALC" build tests/kvmap_string_getor_values.dial -o "${TMP}/v_go" >"${TMP}/v_go.log" 2>&1; then
+    out=$("${TMP}/v_go" 2>/dev/null)
+    if printf '%s\n' "$out" | grep -q 'GO r1=HITVAL' \
+       && printf '%s\n' "$out" | grep -q 'GO r2=LITDEF2' \
+       && printf '%s\n' "$out" | grep -q 'GO r3=HITVAL' \
+       && printf '%s\n' "$out" | grep -q 'GO r4=DEFVAR' \
+       && printf '%s\n' "$out" | grep -q 'GO defvar=DEFVAR' \
+       && printf '%s\n' "$out" | grep -q 'GO vals_size=1' \
+       && printf '%s\n' "$out" | grep -q 'GO m_hit=HITVAL' \
+       && printf '%s\n' "$out" | grep -q 'GO loop=50000' \
+       && printf '%s\n' "$out" | grep -q 'GO final=HITVAL' ; then
+        vpass "v1.10：map<string> get_or 四象限 + values 快照 + 5万次压测（无 double-free）通过"
+    else vbad "V 组：kvmap_string_getor_values 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
+else vbad "V 组：kvmap_string_getor_values 编译失败"; tail -8 "${TMP}/v_go.log"; fi
+
 # 4) B7 负向：顶层 var 全局变量必须被拒（红线：禁止可变全局状态）。
 if "$DIALC" build tests/bad/const_top_level_var.dial -o "${TMP}/v_var" >"${TMP}/v_var.log" 2>&1; then
     vbad "B7：顶层 var 全局变量竟被接受（违反禁止可变全局状态红线）"

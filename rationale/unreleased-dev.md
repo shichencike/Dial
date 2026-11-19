@@ -3394,3 +3394,11 @@ imulq   %r10, %r15     # s * 31
 
 **护栏（Phase B）**：版本 1.10.0/零依赖/AArch64 零变化/不打 tag 不变；timeout 非全局关键字（`timeout` 仍可作普通标识符，仅 select 后 `(` 上下文解析）；不改 select 既有语义（无 timeout 时走原 dial_chan_wait 路径、产物零变化）。
 
+**Phase C · values()/get_or 放开 string 值（提交 `feat(kvmap): values()/get_or 放开 string 值并修正默认值所有权`）**：
+- C1 `values()`：`semantic.rs` 的 `kvmap_method_type` 加 `Type::String => string[]`（C 侧 `dial_kvmap_values` 早已用 `dial_array_new(1)` + `dial_array_push` 逐元素 retain，快照与原表互不影响），两端 codegen 走通用 call 零改动。
+- C2 `get_or()`：**所有权契约**——get_or 返回值是「已拥有」值（两端 `yields_borrowed_ref` 不含 get_or，绑定变量不 retain、作用域退出 release）。朴素放开会 double-free（C 侧命中返回表内借用值、未命中返回默认位模式，两侧都不 retain）。修复：① C 侧 `dial_kvmap_get_or` 对 `KV_STRING` 返回值补 `kv_retain_kind`（命中=表值+1、未命中=默认值+1；标量/结构体不受影响）；② LLVM `codegen.rs` 把丢弃的 `_da` 改为 `da`，对 string 调用后 `settle_fresh_value(&args[1], v, da)` 归还默认实参字面量那份（借用变量 no-op）；③ asm `lower.rs::lower_method` 保留每个实参原始值，对 get_or+string 且默认实参非 borrowed 发 `RcRelease` 归还。四象限推演全部平衡：命中(字面量默认)=表+1/本地-1、命中(借用默认)=表+1/本地 no-op、未命中(字面量默认)=默认+1/本地-1/调用方-1、未命中(借用默认)=默认+1/调用方-1。
+- 验证：`tests/kvmap_string_getor_values.dial` 四象限 + values 快照 + 5 万次压测（safety=2 heap assert 无 double-free）；`tests/asm_golden/kvmap_string_getor.dial` 轻量黄金（21 goldens 全绿）；双后端逐字节一致；struct 的 get_or（batch3_b6_smoke）不受影响（C 侧只对 KV_STRING retain）。
+- 至此 B 类语言特性（map<string> 值 / select 块超时 / values+get_or 全面放开）全部落地，放宽护栏后的语言栈补齐收口。
+
+**护栏（Phase C）**：版本 1.10.0/零依赖/AArch64 零变化/不打 tag 不变；C 侧改动仅对 KV_STRING 生效、标量/结构体路径零变化；双后端输出逐字节一致。
+

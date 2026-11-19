@@ -32,10 +32,11 @@ DialKvMap dial_kvmap_put(DialKvMap m, int64_t key_bits, int64_t val_bits);
  * v1.10：V=string 未命中返回进程级共享的 immortal 静态空串（借用语义，
  * 永不释放）；命中返回表内借用值——两者对调用方一致，无需结算所有权。 */
 int64_t dial_kvmap_get(DialKvMap m, int64_t key_bits);
-/* v1.04 C6：命中返回真实值的位模式，未命中返回调用方给的默认值位模式。
- * 仅用于标量 V（int/float/bool/char/byte）：这些值的位模式无 ARC 所有权，
- * 默认值可以安全地按值返回。句柄 V（string）刻意不走这里，避免「返回的默认
- * 字符串该由谁 retain」的歧义——那种情况请用 contains + get 显式处理。 */
+/* v1.04 C6 / v1.10：命中返回真实值的位模式，未命中返回调用方给的默认值位模式。
+ * 标量 V 无 ARC 所有权，按值返回。v1.10 起 V=string 也支持：本函数对 KV_STRING
+ * 的返回值补一份 retain，使其成为「已拥有」值——调用方约定 get_or 返回值由自己
+ * release（两端 codegen 的 yields_borrowed_ref 不含 get_or），并归还默认实参的
+ * 本地那份。命中/未命中 × 字面量/借用变量默认值四象限引用计数平衡。 */
 int64_t dial_kvmap_get_or(DialKvMap m, int64_t key_bits, int64_t def_bits);
 int64_t dial_kvmap_contains(DialKvMap m, int64_t key_bits);
 int64_t dial_kvmap_remove(DialKvMap m, int64_t key_bits);
