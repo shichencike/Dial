@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/unreleased-dev.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release--理由与证据链">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release） · 理由与证据链</a><ul>
+<li><a href="#m8-gra-span加入-llvm-式高级分配优先级-span--freqb05-2098x1909x">M8-gra-span：加入 LLVM 式高级分配优先级 span × freq（b05 2.098x→1.909x）</a></li>
 <li><a href="#测试与交付">测试与交付</a><ul>
 <li><a href="#m7-e3am自研-asm-后端补齐-spawn--join--detach-真多线程双后端一致性补全">M7-e3am：自研 asm 后端补齐 spawn / join / detach 真多线程（双后端一致性补全）</a></li>
 <li><a href="#m7-e3an自研-asm-后端补齐-map--filter--reduce--sort_by双后端一致性补全动态回调最后一块">M7-e3an：自研 asm 后端补齐 map / filter / reduce / sort_by（双后端一致性补全，动态回调最后一块）</a></li>
@@ -65,6 +66,23 @@
 <p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
 变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
 </blockquote>
+<hr />
+<h4 id="m8-gra-span加入-llvm-式高级分配优先级-span--freqb05-2098x1909x">M8-gra-span：加入 LLVM 式高级分配优先级 <code>span × freq</code>（b05 2.098x→1.909x）</h4>
+<p><strong>为什么做这个</strong>：用户追问「LLVM 有一个高级的分配逻辑，asm 有没有；有则加强、无则加入」。核查确认：asm 后端已有三种固定绑定 GRA（<code>analyze_unified</code> 无-call 全函数绑定 10 池 / <code>analyze_unified_with_calls</code> 含-call 仅 6 callee-saved / <code>analyze_per_block</code> 递归逐块）+ 静态循环深度加权 + fGRA 浮点驻留 + ISA 微融合，但<strong>缺 LLVM Greedy 分配器的核心 <code>priority = span × freq</code></strong>（搜索核实 LLVM RAGreedy <code>computePriority = LI.getSize() × MBFI.getBlockFreq()</code>）。当前 top-N 排序只按 <code>use 次数 × 深度权重</code>，跨块长命值会被内层单块短命中间值挤出物理寄存器——这正是 LLVM 用 span 因子解决的经典问题。</p>
+<p><strong>收益诊断（只读 .s）</strong>：写 <code>/tmp/gra_probe/diag_interval.py</code> 按函数统计「是否含 call / 用到的池寄存器数 / 栈槽访问频次」。结论：无-call 纯计算函数池寄存器已用满 9-10/10，但 b05「连乘幂内核」仍有 25 处栈访问、2 个高频槽（最高 5 次），gcdI 等其它无-call 函数只有纯 ABI 落栈流量（≤2 次）——b05 是分配层最明确的单点短板。反查 b05 源码 + 汇编：外层循环 phi 值 <code>s</code>/<code>a</code> 存在 248/256(%rsp)，每轮外层迭代都读写（b1 读 a、b5 末读改写 a、b6 读改写 s），而内层 base/r/j 已驻留 r13/r12/rbx。根因坐实：外层块深度权重仅 8、内层短命中间值权重 64，把 top-10 池占满，s/a 被挤出。</p>
+<p><strong>实现</strong>（仅 <code>src/codegen_asm.rs</code>）：新增 <code>compute_live_span()</code>——遍历每个块，收集块内 inst 的 def/reg_uses + term 的 cond/跳转实参/返回值，统计每个 vreg 出现在几个不同块（即 live range 的跨块跨度）。<code>analyze_unified</code> 的绑定排序从 <code>score</code> 改为 <code>score × span</code>。语义零影响：只重排哪些值占用池寄存器，不改池大小、块间 resident 一致契约、phi 装载逻辑或发射路径。</p>
+<p><strong>背靠背 A/B 纪律（关键）</strong>：先「全量加」（含-call 路径也加 span），<code>--fast -O3</code> 各跑 2 次（5 采样取最小），逐项对比绝对耗时——发现含-call 函数退化：b21 +9.4%、b17 +6.4%、b15 +4.7%（均走 <code>analyze_unified_with_calls</code>），纯计算函数（b01/02/03/04/07）持平或改善。原因：含-call 路径只有 6 个 callee-saved 且极紧张，跨块跨度大的数组/字符串中转值未必是热点，乘 span 挤掉了真正热的驻留值。<strong>据此回退含-call 路径的 span 加权，仅在无-call 的 <code>analyze_unified</code> 保留</strong>（<code>analyze_unified_with_calls</code> 加注释说明为何不引入 span）。</p>
+<p><strong>修正后实测</strong>（同配置 <code>--fast -O3</code>，基线/span 各 2 次背靠背）：
+| 指标 | 基线 avg | span 全加 avg | <strong>span 仅 unify avg</strong> |
+|---|---|---|---|
+| 几何平均 | 0.9828x | 0.9864x ❌ | <strong>0.9808x</strong> ✅ |
+| 加权总耗时 | 1.0752x | 1.0800x ❌ | <strong>1.0749x</strong> ✅ |
+| b05 | 2.098x | 1.927x | <strong>1.909x（-9%）</strong> ✅ |
+| b08（外溢） | ~2.04x | — | <strong>1.948x</strong> ✅ |
+| b17/b21（含-call） | 基线 | +6.4%/+9.4% ❌ | 回退到基线 ✅ |</p>
+<p>b05 汇编栈访问 25→16、高频槽 2→0、248/256 槽不再访问（s/a 已驻留）。几何平均进一步反超（0.9808x）、总耗时微降，b05/b08 明显改善；含-call 退化消失。<strong>诚实边界</strong>：这是 targeted 分配层增强，<strong>未触碰</strong> caller-saved live-range 全重写（e3at 已用上界比 0.773&lt;1 否决，语料不满足其重启条件）；总耗时仍慢约 7%、b12 闭式/b22 substring/GRA 全 spill 等架构级工程仍在。</p>
+<p><strong>护栏</strong>：<code>codegen.rs</code>/<code>ast.rs</code>/IR/lower/C 运行时/LLVM 路径/AArch64/safe-debug 零改动，1.10.0 零依赖、不打 tag。门禁全绿：golden 23/22（含 ReleaseFast 双后端）+ 差分 fuzz 450（0 不一致）+ 工具链去 LLVM 22 + PGO L1-L4 + 全量 run_tests。</p>
+<hr />
 <p><strong>主题：手搓 GUI 十五层（七层 C 契约 + 第 9/10/11/12/13/14/15 层滚动视图·右键上下文菜单·悬浮提示·状态栏·通知气泡·窗口级覆盖层自动集成·快捷键 / 命令系统 + 第 8 层 Dial 侧 OO 封装）+ 工具链强化（<code>dialc fmt</code> 间距规范化 / <code>dialc pack</code> 自动扫描·预览·校验）+ 工具链再强化（<code>dialc doctor</code> 环境自检 / <code>deps</code> 三级 import 依赖图 / 统一诊断人读·JSON 机读 / <code>watch</code>·<code>clean</code>·<code>completion</code> 开发循环）+ LSP 再强化（诊断码表 CLI/LSP 同源 / 增量文档同步 / 工作区文件监视 / 文档内高亮）——地基包 <code>gui.dialpkg</code> + 控件框架层 + 成品控件外观层
 + 输入层（TextBox 单行编辑 / 焦点链 / 两平台统一功能键码 / XTest 实窗注入）
 + 主题层 / 控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar）

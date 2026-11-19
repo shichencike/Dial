@@ -1109,6 +1109,41 @@ impl<'a> FnEmit<'a> {
             && !self.alloca_off.contains_key(&v)
     }
 
+    /// M8-gra-span：LLVM Greedy 分配器 `priority = span × freq` 里的 **span**
+    /// ——一个 vreg 作为 def / use / phi 实参出现过的不同基本块数。
+    ///
+    /// 跨块越多 ⇒ live range 越长 ⇒ 越应优先驻留：长命的循环携带 phi / 累加器
+    /// 若被挤出物理寄存器，会在每个块边界反复 spill/reload（b05 的 s、a 每轮
+    /// 外层迭代都走 248/256(%rsp)），而单块短命中间值挤占寄存器后几条指令就死。
+    /// 本函数只产出跨度，不改变任何绑定/发射语义；排序权重的用法见 analyze_unified。
+    fn compute_live_span(&self) -> HashMap<VReg, usize> {
+        let mut span: HashMap<VReg, usize> = HashMap::new();
+        for b in &self.f.blocks {
+            let mut here: HashSet<VReg> = HashSet::new();
+            for i in &b.insts {
+                if let Some(d) = i.def() { here.insert(d); }
+                let mut uses = Vec::new();
+                i.reg_uses(&mut uses);
+                here.extend(uses);
+            }
+            match &b.term {
+                Term::Jump { args, .. } =>
+                    for a in args { if let Value::Reg(r) = a { here.insert(*r); } },
+                Term::Branch { cond, then_args, else_args, .. } => {
+                    here.insert(*cond);
+                    for a in then_args.iter().chain(else_args.iter()) {
+                        if let Value::Reg(r) = a { here.insert(*r); }
+                    }
+                }
+                Term::Return { val } =>
+                    if let Some(Value::Reg(r)) = val { here.insert(*r); },
+                Term::Unreachable => {}
+            }
+            for v in here { *span.entry(v).or_insert(0) += 1; }
+        }
+        span
+    }
+
     // ---- M7-e3av：浮点驻留查询（与整数 phys/val_phys 完全独立） ----
 
     /// 浮点 vreg 是否驻留在物理 xmm。仅 x86-64；非 x86 恒 None（AArch64 零变化）。
@@ -1690,8 +1725,18 @@ impl<'a> FnEmit<'a> {
                 }
             }
         }
+        // M8-gra-span：LLVM Greedy 的 priority = span × freq。score 已是
+        // 「use/def 次数 × 循环深度频率权重」，这里再乘 live-range 跨块跨度，
+        // 让长命的循环携带 phi / 累加器优先于单块短命中间值占据池寄存器。
+        // baseline（无 profile）与未加权的差别仅在「同深度、多块 vs 单块」的值
+        // 之间重排；不改变池大小、块间契约或输出语义。
+        let live_span = self.compute_live_span();
         let mut hot: Vec<VReg> = score.keys().copied().collect();
-        hot.sort_by(|x, y| score[y].cmp(&score[x]).then(x.cmp(y)));
+        hot.sort_by(|x, y| {
+            let px = score[x] * live_span.get(x).copied().unwrap_or(1);
+            let py = score[y] * live_span.get(y).copied().unwrap_or(1);
+            py.cmp(&px).then(x.cmp(y))
+        });
         let bind: HashMap<VReg, &'static str> = hot.into_iter().take(RES_POOL.len())
             .enumerate().map(|(k, v)| (v, RES_POOL[k])).collect();
         for p in bind.values() {
@@ -1802,6 +1847,10 @@ impl<'a> FnEmit<'a> {
                 }
             }
         }
+        // 注：span×freq 权重只用于无-call 的 analyze_unified。含-call 路径的
+        // 6 个 callee-saved 极紧张，实测（M8-gra-span A/B）跨块跨度大的值未必
+        // 是热点，乘跨度会挤掉真正热的数组/字符串中转值（b17 +6.4%、b15 +4.7%、
+        // b21 +9.4%），故此处保持原 use×depth 排序，不引入 span 因子。
         let mut hot: Vec<VReg> = score.keys().copied().collect();
         hot.sort_by(|x, y| score[y].cmp(&score[x]).then(x.cmp(y)));
         let bind: HashMap<VReg, &'static str> = hot.into_iter().take(CALLEE_SAVED_POOL.len())
