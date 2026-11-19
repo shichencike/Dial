@@ -197,14 +197,23 @@
 </ul>
 <h3 id="p1--平台覆盖唯一后端必须跨平台可用">P1 · 平台覆盖（「唯一后端」必须跨平台可用）</h3>
 <ul>
-<li><strong>AArch64 只验证汇编写法、未实机跑语义</strong>：当前 golden 用 <code>clang --target=aarch64</code>
-  交叉汇编出 ELF .o 即算通过（x86 宿主无法执行）。沙箱当前<strong>无 qemu-user</strong>，需先安装
-  <code>qemu-user-static</code>，用 <code>qemu-aarch64</code> + aarch64 sysroot 实机跑 golden 子集，验证运行
-  语义（不只是助记符合法性）。</li>
-<li><strong>AArch64 能力降级项</strong>：内联汇编 Fail-Fast、DWARF、PGO 在 AArch64 降级（<code>pgo_effective=
-  false</code>）。逐项评估：哪些是「暂时降级可接受」、哪些是「代替 LLVM 必须有」。LLVM 在多平台
-  走完整 codegen，asm 要真正代替必须至少保证核心语义在 AArch64 实机正确。</li>
-<li>门禁固化：把 AArch64 实机语义验证做成与其它门禁同级的脚本（挂入 <code>run_tests.sh</code>）。</li>
+<li>~~<strong>AArch64 只验证汇编写法、未实机跑语义</strong>~~ —— <strong>已收口（2026-11-19）</strong>：安装
+  <code>qemu-user-static</code> 8.2.2 + <code>aarch64-linux-gnu-gcc</code> 13.3 + aarch64 sysroot，实机跑 golden
+  后一次抓出 <strong>3 个语法校验永远发现不了的根本 bug</strong>（全部已修，仅 <code>src/codegen_asm.rs</code>）：
+  ① <strong>LR(x30) 未保存</strong>——x30 是 caller-saved，<code>bl</code> 覆盖后末尾 <code>ret</code> 跳回最后一次调用的返回
+  地址→<strong>所有含调用的函数死循环</strong>（连 <code>main(){return 0}</code> 都 hang，因 codegen 插入的
+  <code>dial_env_init</code> 也走 bl）；统一给所有 AArch64 函数 prologue <code>str x30</code>、epilogue <code>ldr x30</code>。
+  ② <strong>ICmp fuse 跳过物化</strong>——<code>analyze_fusable</code> 把「仅一处 Branch.cond 使用」的 ICmp 标为
+  不物化，但 fuse 的 <code>cmp+jcc</code> 只实现了 x86，AArch64 分支仍 <code>cbz cond</code> 读未写槽→<strong>while
+  条件随机→死循环</strong>；AArch64 禁用 fuse、ICmp 一律物化。③ <strong>PtrAdd 发射笔误</strong>——写成
+  <code>add o,b,b</code>（o=b+b、b 不变）而非 <code>add b,b,o</code>，<code>p.offset(1)</code> 指针偏移完全失效（连带 simd
+  lane 提取错位）；修正操作数顺序。<strong>实机验证</strong>：golden 22 用例（inline_asm 预期 Fail-Fast
+  降级 skip）x86 LLVM 与 AArch64 asm qemu 实机输出 <strong>22/22 逐字节一致</strong>，x86 golden 24 用例
+  零回归、差分 fuzz 450 零不一致、全量 run_tests 全绿。门禁固化为
+  <code>tools/verify_aarch64_semantics.sh</code>（缺 qemu/交叉 gcc 自动 skip，挂入 run_tests.sh AI 段）。</li>
+<li><strong>AArch64 能力降级项（仍开放）</strong>：内联汇编 Fail-Fast（已确认按设计拒绝，不属 bug）、
+  DWARF、PGO 在 AArch64 降级（<code>pgo_effective=false</code>）。逐项评估哪些「暂时降级可接受」、
+  哪些「代替 LLVM 必须有」——核心运行语义已实机验证正确，剩余是调试/分析能力的平台对等。</li>
 </ul>
 <h3 id="p2--功能对等b-类语言特性按llvm-不存在总纲裁决">P2 · 功能对等（B 类语言特性，按「LLVM 不存在」总纲裁决）</h3>
 <p>以下 LLVM 后端也没有，但按「假设 LLVM 不存在、只有自己」总纲，它们是<strong>语言层真实能力

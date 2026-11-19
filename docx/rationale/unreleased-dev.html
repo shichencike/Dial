@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/unreleased-dev.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release--理由与证据链">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release） · 理由与证据链</a><ul>
+<li><a href="#p1aarch64-实机语义验证抓出并修复-3-个语法校验盲区的根本-bug">P1：AArch64 实机语义验证——抓出并修复 3 个语法校验盲区的根本 bug</a></li>
 <li><a href="#p0-修复string-拼接--插值临时操作数引用泄漏19-零泄漏底线">P0 修复：string 拼接 / 插值临时操作数引用泄漏（§19 零泄漏底线）</a></li>
 <li><a href="#m9-linrec线性递推循环编译期闭式求值总耗时首次反超-llvm几何平均-0574x">M9-linrec：线性递推循环编译期闭式求值（总耗时首次反超 LLVM，几何平均 0.574x）</a></li>
 <li><a href="#m8-recspec递归纯函数闭式特化b12-330x0477x几何平均-098x0914x">M8-recspec：递归纯函数闭式特化（b12 3.30x→0.477x，几何平均 0.98x→0.914x）</a></li>
@@ -69,6 +70,39 @@
 <p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
 变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
 </blockquote>
+<hr />
+<h4 id="p1aarch64-实机语义验证抓出并修复-3-个语法校验盲区的根本-bug">P1：AArch64 实机语义验证——抓出并修复 3 个语法校验盲区的根本 bug</h4>
+<p><strong>路线图原判</strong>：P1 记「AArch64 只验证汇编写法、未实机跑语义」，需装 qemu-user 实机跑 golden。</p>
+<p><strong>为什么必须实机跑</strong>：过去 golden 对 AArch64 只做 <code>clang --target=aarch64</code> 交叉汇编产 ELF .o
+即算通过——助记符合法 ≠ 语义正确。安装 <code>qemu-user-static</code> 8.2.2 + <code>aarch64-linux-gnu-gcc</code>
+13.3 + aarch64 sysroot（apt，仅门禁依赖、缺则 skip）后，实机跑 golden <strong>一次抓出 3 个 bug</strong>：</p>
+<p><strong>诊断过程（分层二分，不靠猜）</strong>：
+1. 最小复现 <code>main(){return 0;}</code> 在 qemu 下 <strong>hang</strong>（<code>timeout</code> exit=124）；纯 C 静态 hello
+   正常 → 排除 qemu/工具链环境问题，锁定 dialc 生成的 AArch64 代码。
+2. <code>-strace</code> 看卡在 <code>clock_gettime</code>（<code>dial_env_init</code> 的 <code>time(NULL)</code>）之后、0 次 write；
+   <code>-d in_asm</code> 指令流见反复执行 main 的 <code>mov x0,#0</code>——<code>ret</code> 跳回自身。
+3. gdb-multiarch + objdump 反汇编确认 main 序言逻辑正确，但 <strong>x30(LR) 未保存</strong>：AAPCS64 中
+   x30 caller-saved，<code>bl dial_env_init</code> 覆盖它，末尾 <code>ret</code> 用被污染的 x30 跳回调用返回地址。
+   手动改 .s 加 <code>str/ldr x30</code> 后 exit 0——<strong>诊断坐实</strong>。</p>
+<p><strong>三个 bug 与修复（仅 <code>src/codegen_asm.rs</code>）</strong>：
+- <strong>① LR(x30) 未保存</strong>：统一给所有 AArch64 函数 prologue <code>str x30,[sp,#lr_slot]</code>、epilogue
+  <code>ldr x30</code>；<code>lr_slot</code> 在帧尾预留 8 字节。曾试图只给「含 Call 的函数」保存，但 <code>dial_env_init</code>
+  由 codegen 通过 <code>IrInst::EnvInit</code> 插入、IR 扫描看不见，故改为<strong>无条件全函数保存</strong>（十余处
+  发射 bl，逐指令枚举易遗漏）。x86 call/ret 走栈，<code>lr_slot=-1</code> 零变化。
+- <strong>② ICmp fuse 跳物化</strong>：<code>analyze_fusable</code> 把「仅一处 Branch.cond 使用」的 ICmp 标为不物化，
+  期望 Branch 处 <code>cmp+jcc</code>——但该 fuse <strong>只实现 x86</strong>，AArch64 分支仍 <code>cbz cond</code> 读从未写入
+  的槽（随机值）→ while 条件随机→死循环（gcd/循环用例全 hang）。修复：<code>analyze_fusable</code>
+  对 AArch64 直接 return、fusable 恒空，ICmp 一律物化（AArch64 本就无 fuse，零性能损失）。
+- <strong>③ PtrAdd 发射笔误</strong>：<code>add o,b,b</code>（o=b+b、b 不变）应为 <code>add b,b,o</code>（dst=base+off，且
+  <code>sg(dst)</code> 存 b）；<code>p.offset(1)</code> 完全失效（orig/next 读到同一地址），连带 simd lane 提取
+  地址错位（4 个 lane 都读末位）。修正操作数顺序后 rawptr 与 simd 同时转绿。</p>
+<p><strong>验证（全绿）</strong>：
+- <code>tools/verify_aarch64_semantics.sh</code>：golden 22 用例编译为 AArch64 静态 ELF、qemu 实机运行，
+  与 x86 LLVM 基线输出 <strong>22/22 逐字节一致</strong>；inline_asm 按设计 Fail-Fast（仅 x86-64）skip。
+- x86 golden 24 用例零回归、差分 fuzz 450 零不一致、全量 <code>run_tests.sh</code>（含新 AI 段）全绿。
+- 门禁缺 qemu/交叉 gcc 时自动 skip，不污染 x86 CI；所有 DIAL_ASM_TARGET 设置限于子进程。</p>
+<p><strong>边界</strong>：仅 <code>src/codegen_asm.rs</code> 的 AArch64 发射路径变化；x86-64 逐字节零变化；DWARF/PGO
+在 AArch64 仍降级（P1 剩余开放项）；inline_asm AArch64 不支持属预期能力降级、非 bug。</p>
 <hr />
 <h4 id="p0-修复string-拼接--插值临时操作数引用泄漏19-零泄漏底线">P0 修复：string 拼接 / 插值临时操作数引用泄漏（§19 零泄漏底线）</h4>
 <p><strong>路线图原判</strong>：P0 记「map<string,\*> string key 本地引用未归还，50 万次 put/remove 泄漏 ~30MB」。</p>

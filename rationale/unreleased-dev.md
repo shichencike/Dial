@@ -5,6 +5,47 @@
 
 ---
 
+#### P1：AArch64 实机语义验证——抓出并修复 3 个语法校验盲区的根本 bug
+
+**路线图原判**：P1 记「AArch64 只验证汇编写法、未实机跑语义」，需装 qemu-user 实机跑 golden。
+
+**为什么必须实机跑**：过去 golden 对 AArch64 只做 `clang --target=aarch64` 交叉汇编产 ELF .o
+即算通过——助记符合法 ≠ 语义正确。安装 `qemu-user-static` 8.2.2 + `aarch64-linux-gnu-gcc`
+13.3 + aarch64 sysroot（apt，仅门禁依赖、缺则 skip）后，实机跑 golden **一次抓出 3 个 bug**：
+
+**诊断过程（分层二分，不靠猜）**：
+1. 最小复现 `main(){return 0;}` 在 qemu 下 **hang**（`timeout` exit=124）；纯 C 静态 hello
+   正常 → 排除 qemu/工具链环境问题，锁定 dialc 生成的 AArch64 代码。
+2. `-strace` 看卡在 `clock_gettime`（`dial_env_init` 的 `time(NULL)`）之后、0 次 write；
+   `-d in_asm` 指令流见反复执行 main 的 `mov x0,#0`——`ret` 跳回自身。
+3. gdb-multiarch + objdump 反汇编确认 main 序言逻辑正确，但 **x30(LR) 未保存**：AAPCS64 中
+   x30 caller-saved，`bl dial_env_init` 覆盖它，末尾 `ret` 用被污染的 x30 跳回调用返回地址。
+   手动改 .s 加 `str/ldr x30` 后 exit 0——**诊断坐实**。
+
+**三个 bug 与修复（仅 `src/codegen_asm.rs`）**：
+- **① LR(x30) 未保存**：统一给所有 AArch64 函数 prologue `str x30,[sp,#lr_slot]`、epilogue
+  `ldr x30`；`lr_slot` 在帧尾预留 8 字节。曾试图只给「含 Call 的函数」保存，但 `dial_env_init`
+  由 codegen 通过 `IrInst::EnvInit` 插入、IR 扫描看不见，故改为**无条件全函数保存**（十余处
+  发射 bl，逐指令枚举易遗漏）。x86 call/ret 走栈，`lr_slot=-1` 零变化。
+- **② ICmp fuse 跳物化**：`analyze_fusable` 把「仅一处 Branch.cond 使用」的 ICmp 标为不物化，
+  期望 Branch 处 `cmp+jcc`——但该 fuse **只实现 x86**，AArch64 分支仍 `cbz cond` 读从未写入
+  的槽（随机值）→ while 条件随机→死循环（gcd/循环用例全 hang）。修复：`analyze_fusable`
+  对 AArch64 直接 return、fusable 恒空，ICmp 一律物化（AArch64 本就无 fuse，零性能损失）。
+- **③ PtrAdd 发射笔误**：`add o,b,b`（o=b+b、b 不变）应为 `add b,b,o`（dst=base+off，且
+  `sg(dst)` 存 b）；`p.offset(1)` 完全失效（orig/next 读到同一地址），连带 simd lane 提取
+  地址错位（4 个 lane 都读末位）。修正操作数顺序后 rawptr 与 simd 同时转绿。
+
+**验证（全绿）**：
+- `tools/verify_aarch64_semantics.sh`：golden 22 用例编译为 AArch64 静态 ELF、qemu 实机运行，
+  与 x86 LLVM 基线输出 **22/22 逐字节一致**；inline_asm 按设计 Fail-Fast（仅 x86-64）skip。
+- x86 golden 24 用例零回归、差分 fuzz 450 零不一致、全量 `run_tests.sh`（含新 AI 段）全绿。
+- 门禁缺 qemu/交叉 gcc 时自动 skip，不污染 x86 CI；所有 DIAL_ASM_TARGET 设置限于子进程。
+
+**边界**：仅 `src/codegen_asm.rs` 的 AArch64 发射路径变化；x86-64 逐字节零变化；DWARF/PGO
+在 AArch64 仍降级（P1 剩余开放项）；inline_asm AArch64 不支持属预期能力降级、非 bug。
+
+---
+
 #### P0 修复：string 拼接 / 插值临时操作数引用泄漏（§19 零泄漏底线）
 
 **路线图原判**：P0 记「map<string,\*> string key 本地引用未归还，50 万次 put/remove 泄漏 ~30MB」。

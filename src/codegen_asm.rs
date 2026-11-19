@@ -602,6 +602,13 @@ struct FnEmit<'a> {
     used_phys: Vec<&'static str>,
     /// 帧内保存区起始偏移（x86-64 固定预留 6×8 字节；AArch64 为 0）。
     save_off: i64,
+    /// AArch64 链接寄存器 x30(LR) 的帧内保存槽（相对 sp）；-1 表示 x86-64（不保存）。
+    /// x30 是 caller-saved，`bl`/`blr` 调用会覆盖它；AArch64 所有函数统一在 prologue
+    /// 保存、epilogue 恢复，否则末尾 `ret` 跳回最后一次调用的返回地址形成死循环
+    /// （实机 qemu 验证抓到；交叉汇编语法校验看不出）。发射调用处有十余种 IR 指令
+    /// （含 codegen 插入的 EnvInit），逐指令枚举易遗漏，故统一保存。
+    /// x86-64 的 call/ret 走栈天然隔离，恒为 -1（零变化）。
+    lr_slot: i64,
     /// 函数级判定：地址不逃逸、且所有 Load/Store 都是整槽宽度的 Alloca，
     /// 可以把它的「值」提升进寄存器池（key 是 Alloca 的 dst vreg）。
     promotable: HashSet<VReg>,
@@ -692,7 +699,7 @@ impl<'a> FnEmit<'a> {
             prefix, out: String::new(),
             resident: HashMap::new(), dirty: HashSet::new(), residency_on: false,
             fp_resident: HashMap::new(), fp_flush_mask: HashSet::new(),
-            plans: Vec::new(), used_phys: Vec::new(), save_off: 0,
+            plans: Vec::new(), used_phys: Vec::new(), save_off: 0, lr_slot: -1,
             promotable: HashSet::new(), flush_mask: HashSet::new(),
             dead_defs: HashSet::new(), fusable: HashMap::new(),
             pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
@@ -1266,6 +1273,14 @@ impl<'a> FnEmit<'a> {
     /// 使用就是某个 Branch 的 cond——否则（被 store / call 实参 / 其它计算 /
     /// phi 实参使用，或多次使用）必须保留物化结果。
     fn analyze_fusable(&mut self) {
+        // fuse 优化（ICmp 不物化、Branch 处直接 cmp+jcc）只实现了 x86-64 路径。
+        // AArch64 的 Branch 走 cbz cond，依赖 ICmp 结果已物化到 cond 槽；若此处
+        // 把 ICmp 标为 fusable 跳过物化，cbz 会读未写入的槽（随机值）→ 含 while
+        // 条件的程序死循环。实机 qemu 验证抓到；交叉汇编语法校验看不出。
+        // AArch64 直接返回，fusable 恒空，所有 ICmp 正常物化（无性能损失，本就无 fuse）。
+        if matches!(self.target, EmitTarget::AArch64) {
+            return;
+        }
         let mut defs: HashMap<VReg, (ACmp, Value, Value)> = HashMap::new();
         for b in &self.f.blocks {
             for i in &b.insts {
@@ -2070,10 +2085,20 @@ impl<'a> FnEmit<'a> {
             }
         }
         let total = off;
+        // AArch64：x30(LR) 是 caller-saved，任何 bl/blr 调用（Call / CallIndirect /
+        // EnvInit→dial_env_init / 浮点转换 / 除零陷阱 do_call 等十余处）都会覆盖它，
+        // 末尾 ret 依赖 x30——一旦被覆盖就跳回最后一次调用返回地址、死循环。
+        // 因此**统一给所有 AArch64 函数留槽保存/恢复 x30**，不逐指令枚举（易遗漏，
+        // 且 EnvInit 这类由 codegen 插入的调用在 IR 扫描里看不见）。
+        // 槽放在帧尾（total 处），不影响上面任何 reg_off/alloca_off 的偏移。
+        // x86-64 的 call/ret 走栈天然隔离，lr_slot 恒 -1、帧布局零变化。
         self.frame_size = match self.target {
             // 入口 rsp ≡ 8 (mod 16)；sub 后需 ≡ 0 (mod 16) 才能 call。
             EmitTarget::X86_64SysV => align_up(total, 16) + 8,
-            EmitTarget::AArch64 => align_up(total, 16).max(16),
+            EmitTarget::AArch64 => {
+                self.lr_slot = total;
+                align_up(total + 8, 16).max(16)
+            }
         };
     }
 
@@ -2113,6 +2138,10 @@ impl<'a> FnEmit<'a> {
             EmitTarget::AArch64 => {
                 self.mov_imm64("x12", self.frame_size as u64);
                 self.line("\tsub sp, sp, x12");
+                // 含调用的函数保存 LR：bl/blr 会覆盖 x30，末尾 ret 依赖它。
+                if self.lr_slot >= 0 {
+                    self.line(&format!("\tstr x30, [sp, #{}]", self.lr_slot));
+                }
             }
         }
         // 保存本函数用到的 callee-saved 寄存器（帧内槽，不动 rsp）。
@@ -2211,6 +2240,10 @@ impl<'a> FnEmit<'a> {
         match self.target {
             EmitTarget::X86_64SysV => self.line(&format!("\taddq ${}, {}", self.frame_size, self.r("rsp"))),
             EmitTarget::AArch64 => {
+                // 恢复 LR（必须与 prologue 的 str x30 配对，且在任何 sp 变动之前）。
+                if self.lr_slot >= 0 {
+                    self.line(&format!("\tldr x30, [sp, #{}]", self.lr_slot));
+                }
                 self.mov_imm64("x12", self.frame_size as u64);
                 self.line("\tadd sp, sp, x12");
             }
@@ -2296,7 +2329,10 @@ impl<'a> FnEmit<'a> {
                 self.lg(*off, &o);
                 match self.target {
                     EmitTarget::X86_64SysV => self.line(&format!("\taddq {}, {}", self.r(&o), self.r(&b))),
-                    EmitTarget::AArch64 => self.line(&format!("\tadd {}, {}, {}", o, b, b)),
+                    // dst = base + off，且 sg(dst) 存的是 b：两条目标都要更新 b。
+                    // 旧代码误写 `add o, b, b`（o=b+b、b 不变），既算错也没存对新地址
+                    // ——实机 qemu 下 `p.offset(1)` 完全失效。修正为 b = b + o。
+                    EmitTarget::AArch64 => self.line(&format!("\tadd {}, {}, {}", b, b, o)),
                 }
                 self.sg(*dst, &b);
             }

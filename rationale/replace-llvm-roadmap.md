@@ -93,14 +93,23 @@
 
 ### P1 · 平台覆盖（「唯一后端」必须跨平台可用）
 
-- **AArch64 只验证汇编写法、未实机跑语义**：当前 golden 用 `clang --target=aarch64`
-  交叉汇编出 ELF .o 即算通过（x86 宿主无法执行）。沙箱当前**无 qemu-user**，需先安装
-  `qemu-user-static`，用 `qemu-aarch64` + aarch64 sysroot 实机跑 golden 子集，验证运行
-  语义（不只是助记符合法性）。
-- **AArch64 能力降级项**：内联汇编 Fail-Fast、DWARF、PGO 在 AArch64 降级（`pgo_effective=
-  false`）。逐项评估：哪些是「暂时降级可接受」、哪些是「代替 LLVM 必须有」。LLVM 在多平台
-  走完整 codegen，asm 要真正代替必须至少保证核心语义在 AArch64 实机正确。
-- 门禁固化：把 AArch64 实机语义验证做成与其它门禁同级的脚本（挂入 `run_tests.sh`）。
+- ~~**AArch64 只验证汇编写法、未实机跑语义**~~ —— **已收口（2026-11-19）**：安装
+  `qemu-user-static` 8.2.2 + `aarch64-linux-gnu-gcc` 13.3 + aarch64 sysroot，实机跑 golden
+  后一次抓出 **3 个语法校验永远发现不了的根本 bug**（全部已修，仅 `src/codegen_asm.rs`）：
+  ① **LR(x30) 未保存**——x30 是 caller-saved，`bl` 覆盖后末尾 `ret` 跳回最后一次调用的返回
+  地址→**所有含调用的函数死循环**（连 `main(){return 0}` 都 hang，因 codegen 插入的
+  `dial_env_init` 也走 bl）；统一给所有 AArch64 函数 prologue `str x30`、epilogue `ldr x30`。
+  ② **ICmp fuse 跳过物化**——`analyze_fusable` 把「仅一处 Branch.cond 使用」的 ICmp 标为
+  不物化，但 fuse 的 `cmp+jcc` 只实现了 x86，AArch64 分支仍 `cbz cond` 读未写槽→**while
+  条件随机→死循环**；AArch64 禁用 fuse、ICmp 一律物化。③ **PtrAdd 发射笔误**——写成
+  `add o,b,b`（o=b+b、b 不变）而非 `add b,b,o`，`p.offset(1)` 指针偏移完全失效（连带 simd
+  lane 提取错位）；修正操作数顺序。**实机验证**：golden 22 用例（inline_asm 预期 Fail-Fast
+  降级 skip）x86 LLVM 与 AArch64 asm qemu 实机输出 **22/22 逐字节一致**，x86 golden 24 用例
+  零回归、差分 fuzz 450 零不一致、全量 run_tests 全绿。门禁固化为
+  `tools/verify_aarch64_semantics.sh`（缺 qemu/交叉 gcc 自动 skip，挂入 run_tests.sh AI 段）。
+- **AArch64 能力降级项（仍开放）**：内联汇编 Fail-Fast（已确认按设计拒绝，不属 bug）、
+  DWARF、PGO 在 AArch64 降级（`pgo_effective=false`）。逐项评估哪些「暂时降级可接受」、
+  哪些「代替 LLVM 必须有」——核心运行语义已实机验证正确，剩余是调试/分析能力的平台对等。
 
 ### P2 · 功能对等（B 类语言特性，按「LLVM 不存在」总纲裁决）
 

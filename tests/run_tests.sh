@@ -120,6 +120,9 @@
 #      tools/verify_asm_pgo.sh：功能闭环/布局生效/确定性/零回归四层证据）。
 #   AH. string concat/interp 临时引用零泄漏门禁（P0 正确性，verify_string_arc_no_leak.sh：
 #      RSS 斜率断言 + 双后端输出一致，钉死 concat/interp 的 owned 操作数结算）。
+#   AI. AArch64 实机语义门禁（P1 平台，verify_aarch64_semantics.sh：qemu-user-static +
+#      aarch64 交叉 gcc 把 golden 编成 AArch64 静态 ELF 实机跑，与 x86 LLVM 输出逐字节
+#      对比；缺 qemu/交叉 gcc 则 skip。钉死 LR(x30)/ICmp fuse/PtrAdd 三处 AArch64 修复）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -5038,6 +5041,14 @@ echo
 echo "== AH) string concat/interp 临时引用零泄漏门禁（P0 正确性）=="
 if bash tools/verify_string_arc_no_leak.sh "$DIALC"; then
     :   # 脚本逐条打印 ✅；失败项打印 ❌ 并以非 0 退出
+else
+    fail=1
+fi
+
+echo
+echo "== AI) AArch64 实机语义门禁（P1 平台，qemu 实机跑 + 双后端逐字节对比）=="
+if bash tools/verify_aarch64_semantics.sh "$DIALC"; then
+    :   # 缺 qemu/交叉 gcc 时脚本自行 skip；有则逐条打印 ✅，失败以非 0 退出
 else
     fail=1
 fi
