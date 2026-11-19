@@ -28,7 +28,9 @@ DialKvMap dial_kvmap_new(int64_t key_kind, int64_t val_kind);
 /* 返回（可能更新后的）指针，调用方须写回接收变量（COW 契约）。 */
 DialKvMap dial_kvmap_put(DialKvMap m, int64_t key_bits, int64_t val_bits);
 
-/* 返回值的位模式；未命中返回 V 的默认值（-1 / -1.0 / 0）。 */
+/* 返回值的位模式；未命中返回 V 的默认值（-1 / -1.0 / 0 / 静态空串 / 0）。
+ * v1.10：V=string 未命中返回进程级共享的 immortal 静态空串（借用语义，
+ * 永不释放）；命中返回表内借用值——两者对调用方一致，无需结算所有权。 */
 int64_t dial_kvmap_get(DialKvMap m, int64_t key_bits);
 /* v1.04 C6：命中返回真实值的位模式，未命中返回调用方给的默认值位模式。
  * 仅用于标量 V（int/float/bool/char/byte）：这些值的位模式无 ARC 所有权，

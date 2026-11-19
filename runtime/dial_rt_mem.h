@@ -5,6 +5,17 @@
 #include <stdlib.h>
 
 /*
+ * 静态 immortal 对象的 refcount 哨兵（v1.10，map<string> 值支持）。
+ * 合法 refcount 恒 > 0；INT64_MIN 落在合法区间之外，专用于进程级共享的
+ * 不可变对象（当前仅 map<K,string> 未命中的空串）。dial_rc_retain /
+ * dial_rc_release / dial_rc_clone 三处对该哨兵一律 no-op，使这类对象
+ * "永不释放、永不泄漏、可被安全借用"，命中/未命中在两端 codegen 看来
+ * 统一为借用语义，无需任何表达式级临时对象结算。
+ * 注意：no-op 判断必须在 DIAL_HEAP_ASSERT(rc > 0) 之前（哨兵为负数）。
+ */
+#define DIAL_RC_IMMORTAL INT64_MIN
+
+/*
  * dialc 引用计数堆对象布局（C Runtime 内部契约）：
  *
  *     [ int64 refcount ][ payload ... ]

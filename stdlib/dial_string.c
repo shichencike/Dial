@@ -10,6 +10,27 @@
 /* payload: [ int64 len ][ char data[] ]；data 指针 = s + 8 */
 static char *s_data(void *s) { return (char *)s + 8; }
 
+/*
+ * v1.10：进程级共享的静态空串。布局严格匹配 DialString 的
+ * [ int64 refcount ][ int64 len ][ char data[]\0 ]：
+ *   - 对外指针指向 len 字段（payload 起点），其 [-1] 是 refcount 哨兵、
+ *     [0] 是长度 0、s_data()=+8 指向 data[0]=""；
+ *   - refcount 用 DIAL_RC_IMMORTAL，dial_rc_retain/release/clone 对它 no-op，
+ *     故永不释放、永不泄漏、可被任意借用/结算。
+ * 声明为非 const：理论上 Dial 不会写它，但避免把静态对象强转去掉 const 的 UB。
+ */
+typedef struct {
+    int64_t rc;       /* = DIAL_RC_IMMORTAL */
+    int64_t len;      /* = 0 */
+    char    data[1];  /* = "\0" */
+} DialStaticString;
+static DialStaticString dial_empty_static = { DIAL_RC_IMMORTAL, 0, { '\0' } };
+
+DialString dial_string_empty_static(void) {
+    /* 返回 payload 起点 = len 字段地址；前 8 字节是 immortal refcount 哨兵。 */
+    return (DialString)&dial_empty_static.len;
+}
+
 DialString dial_bool_to_string(int64_t b) {
     return dial_string_new(b ? "true" : "false");
 }

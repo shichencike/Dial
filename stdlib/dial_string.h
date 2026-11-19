@@ -14,6 +14,15 @@ typedef void *DialString;
 /* 从 C 字符串字面量构造（Dial 的 "abc" 字面量走这里） */
 DialString dial_string_new(const char *lit);
 
+/*
+ * v1.10：进程级共享的静态空串（refcount 为 DIAL_RC_IMMORTAL 哨兵）。
+ * 用于 map<K,string> 的 get/remove 未命中默认值——命中(表内借用)与未命中
+ * (此静态串)统一为「借用」语义，两端 codegen 无需区分。调用方**不得**把
+ * 它当作拥有对象去做配对 release；即便误做，immortal 的 RC 函数也会 no-op。
+ * 返回的串内容恒为 ""、length()==0，且永不被释放。
+ */
+DialString dial_string_empty_static(void);
+
 /* v1.00：布尔值转字符串（true / false），供字符串插值使用 */
 DialString dial_bool_to_string(int64_t b);
 

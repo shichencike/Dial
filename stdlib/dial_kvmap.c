@@ -108,7 +108,10 @@ static int64_t kv_default(int64_t vk) {
     switch (vk) {
         case KV_FLOAT:  return f64_bits(-1.0);
         case KV_BOOL:   return 0;
-        case KV_STRING: return (int64_t)(intptr_t)dial_string_new("");
+        /* v1.10：未命中返回共享静态空串（immortal），而非新建 rc=1 对象。
+         * 这样命中(表内借用)/未命中(静态串)对两端 codegen 都是「借用」语义，
+         * 不会泄漏、也不会因结算而 double-free（见 dial_string_empty_static）。 */
+        case KV_STRING: return (int64_t)(intptr_t)dial_string_empty_static();
         /* v1.04 B6：结构体值未命中返回 0（空指针）——由编译器还原为零值结构体，
          * 绝不解引用空指针（那会让「未命中」变成段错误而非可预期的值）。 */
         case KV_STRUCT: return 0;

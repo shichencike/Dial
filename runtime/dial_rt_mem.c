@@ -12,6 +12,9 @@ void *dial_rc_alloc(int64_t payload_size) {
 
 void dial_rc_retain(void *p) {
     if (!p) return;
+    /* 静态 immortal 对象（如 map<string> 未命中的空串）：refcount 是哨兵，
+     * 不是真引用——必须先于 DIAL_HEAP_ASSERT(rc>0)短路，否则哨兵负数会误炸。 */
+    if (((int64_t *)p)[-1] == DIAL_RC_IMMORTAL) return;
     /*
      * refcount <= 0 说明这块内存已经被释放过了（use-after-free）。
      * C 会让它“看起来还能用”，Dial 在这里立刻炸。
@@ -22,6 +25,8 @@ void dial_rc_retain(void *p) {
 
 void dial_rc_release(void *p) {
     if (!p) return;
+    /* 静态 immortal 对象：永不释放（否则会 free 静态存储区 → 崩溃）。 */
+    if (((int64_t *)p)[-1] == DIAL_RC_IMMORTAL) return;
     /* 多释放一次（double free / 引用计数下溢）同样当场终止。 */
     DIAL_HEAP_ASSERT(((int64_t *)p)[-1] > 0, "release 了引用计数已归零的对象（double free）");
     if (--((int64_t *)p)[-1] == 0) free((char *)p - 8);
@@ -39,6 +44,9 @@ void *dial_struct_box(const void *src, int64_t size) {
 
 void *dial_rc_clone(void *p, int64_t payload_size) {
     if (!p) return NULL;
+    // 静态 immortal 对象不可变：原样返回自身（配合 dial_string_clone 的
+    // retain→clone→release 组合——三步全 no-op，仍返回这唯一的静态串）。
+    if (((int64_t *)p)[-1] == DIAL_RC_IMMORTAL) return p;
     // 与 retain/release 对齐：传入已是 freed 的指针（refcount <= 0）时立刻终止，
     // 而非去读 ((int64_t*)p)[-1] 这块已归还给分配器的内存（那是 use-after-free）。
     DIAL_HEAP_ASSERT(((int64_t *)p)[-1] > 0, "clone 了已释放的对象（use-after-free）");
