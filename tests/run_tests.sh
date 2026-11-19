@@ -3132,6 +3132,25 @@ if "$DIALC" build tests/kvmap_string_getor_values.dial -o "${TMP}/v_go" >"${TMP}
     else vbad "V 组：kvmap_string_getor_values 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
 else vbad "V 组：kvmap_string_getor_values 编译失败"; tail -8 "${TMP}/v_go.log"; fi
 
+# 3e) v1.10 B6：结构体进容器（Point[] / map<string,Point>）asm 后端补齐。
+# 此前 asm 在 coerce_elem_bits 对 struct 直接 Fail-Fast，而门禁用默认 LLVM 编译该用例
+# 从未暴露——这里显式 --backend=asm 且覆盖 O0-O3，并逐字节对比 LLVM 输出。
+if "$DIALC" build tests/batch3_b6_smoke.dial -o "${TMP}/v_b6_ll" >"${TMP}/v_b6_ll.log" 2>&1; then
+    "$TMP/v_b6_ll" >"${TMP}/v_b6_ll.out" 2>&1
+    b6_all_ok=1
+    for b6_O in 0 1 2 3; do
+        if "$DIALC" build tests/batch3_b6_smoke.dial --backend=asm -O${b6_O} -o "${TMP}/v_b6_a${b6_O}" >"${TMP}/v_b6_a${b6_O}.log" 2>&1 \
+           && "${TMP}/v_b6_a${b6_O}" >"${TMP}/v_b6_a${b6_O}.out" 2>&1 \
+           && diff -q "${TMP}/v_b6_ll.out" "${TMP}/v_b6_a${b6_O}.out" >/dev/null 2>&1 \
+           && grep -q 'B6 map miss.x = 0' "${TMP}/v_b6_a${b6_O}.out"; then
+            :
+        else b6_all_ok=0; fi
+    done
+    if [ "$b6_all_ok" -eq 1 ]; then
+        vpass "v1.10：B6 结构体进容器 asm 后端 O0-O3 全通过（map miss 零值 + 双后端逐字节一致）"
+    else vbad "V 组：B6 asm O0-O3 有级别不一致/编译失败"; tail -8 "${TMP}/v_b6_a0.log"; fi
+else vbad "V 组：B6 LLVM 基线编译失败"; tail -8 "${TMP}/v_b6_ll.log"; fi
+
 # 4) B7 负向：顶层 var 全局变量必须被拒（红线：禁止可变全局状态）。
 if "$DIALC" build tests/bad/const_top_level_var.dial -o "${TMP}/v_var" >"${TMP}/v_var.log" 2>&1; then
     vbad "B7：顶层 var 全局变量竟被接受（违反禁止可变全局状态红线）"

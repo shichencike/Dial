@@ -6213,7 +6213,7 @@ U 组回归锁定：8 组 API 端到端输出断言、C2 解析失败 Fail-Fast�
 | --- | --- | --- |
 | B7 | 文件级只读 `const` | 标量 / 字符串 / 数组 / 嵌套数组 / 字符串数组 / 结构体字面量，以及字面量上的常量表达式（可常量折叠）；const 可引用其他 const（解析期内联展开）；**顶层 `var` 全局变量编译期拒绝**（§37.1 红线：禁止可变全局状态）；const 重赋值 / 非编译期常量值 / 类型不匹配 / 局部变量遮蔽 const 均被拒 |
 | B8 | 结构体字段默认值 | `struct Point { x: int = 0, y: int = 0 }`；默认值必须是**编译期常量**；省略有默认值的字段取默认值、省略无默认值的字段**编译期报错**（不静默零初始化）；默认值类型不匹配按零隐式转换铁律拒绝 |
-| B6 | 结构体进容器 | `Point[]` 与 `map<string, Struct>`：值类型结构体装不进 8 字节数组槽，故**装箱**为引用计数对象（`[int64 refcount][payload]`）后入槽，读出时**解箱按值**拷贝；`put` / `get` / `contains` / `remove` / `get_or` / `values()` 全通路打通 |
+| B6 | 结构体进容器 | `Point[]` 与 `map<string, Struct>`：值类型结构体装不进 8 字节数组槽，故**装箱**为引用计数对象（`[int64 refcount][payload]`）后入槽，读出时**解箱按值**拷贝；`put` / `get` / `contains` / `remove` / `get_or` / `values()` 全通路打通。**v1.10 起双后端**：此前 asm 后端对 struct 进容器直接 Fail-Fast（`coerce_elem_bits` 的 `Aggregate` 分支），而门禁用默认 LLVM 编译该用例从未暴露；现 asm 用同一套 `dial_struct_box` 装箱 + 无分支 select 解箱（map 未命中零值），补齐 put/get_or/remove 的 box 结算，`batch3_b6_smoke.dial` 在 asm O0-O3 全部编译、双后端输出逐字节一致 |
 
 **B6 的现役边界（如实标注，不夸大）**：本批只放开「**字段全为标量**」的结构体。
 含句柄字段（`string` / 数组 / map 等）的结构体进容器，需要装箱与释放时**逐字段**

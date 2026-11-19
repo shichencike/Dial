@@ -913,7 +913,10 @@ impl<'a> Lower<'a> {
                 //     不得再释放，否则悬垂 / 双重释放；
                 //   · 自带所有权的值（字面量 / clone / 方法返回值等）：本语句的临时
                 //     所有权应当移交给数组，故此处归还一份，否则每轮循环泄漏一次引用。
-                if let Some(k) = rc_kind(&vdt) {
+                if matches!(&vdt, Type::Struct(_)) {
+                    // v1.10 B6：struct 值 coerce 时无条件新建 box，array_set 又 +1，归还本地这份。
+                    self.release_box(bits.clone());
+                } else if let Some(k) = rc_kind(&vdt) {
                     if !yields_borrowed_ref(value) {
                         // RcRelease 作用于「槽地址」（内部 load 出句柄值再 release），
                         // 故先把句柄落进临时槽。
@@ -1588,7 +1591,11 @@ impl<'a> Lower<'a> {
                     h = h2;
                     // push 会为元素 retain 一份（数组成为持有者）。字面量自带的那一份
                     // 所有权本应直接移交数组，故此处归还——否则每个字面量元素泄漏一份引用。
-                    if let Some(k) = rc_kind(&ety) {
+                    if matches!(&ety, Type::Struct(_)) {
+                        // v1.10 B6：struct 值 coerce 时无条件新建 box（rc=1），push 又 +1，
+                        // 归还本地这份（对齐 LLVM sink_elem_after_retain）。
+                        self.release_box(bits.clone());
+                    } else if let Some(k) = rc_kind(&ety) {
                         if !yields_borrowed_ref(el) {
                             let tmp = self.emit_alloca(reg_ir(&ety));
                             self.emit(IrInst::Store { ptr: tmp, val: ev, ty: reg_ir(&ety) });
@@ -1926,8 +1933,10 @@ impl<'a> Lower<'a> {
 
         let mut vals: Vec<Value> = vec![ov];
         let mut tys: Vec<IrType> = vec![IrType::Handle];
-        // v1.10：保留各实参的原始值（get_or 的 string 默认值结算需要）。
+        // v1.10：保留各实参的原始值（get_or 的 string 默认值结算需要）
+        // 与装箱后的位模式（get_or 的 struct 默认值 box 归还需要）。
         let mut raw_args: Vec<Value> = Vec::with_capacity(args.len());
+        let mut coerced: Vec<Value> = Vec::with_capacity(args.len());
         for (i, a) in args.iter().enumerate() {
             let abi = spec.args.get(i).copied().unwrap_or(builtin::Abi::Auto);
             let bit_mode = spec.elem_arg == Some(i) || spec.is_kv;
@@ -1944,6 +1953,7 @@ impl<'a> Lower<'a> {
             } else {
                 self.coerce_to_abi(v, a, abi).0
             };
+            coerced.push(v2.clone());
             vals.push(v2);
             tys.push(builtin::abi_ir(abi));
         }
@@ -1963,6 +1973,9 @@ impl<'a> Lower<'a> {
             None => Value::Imm(Imm::I64(0)),
             Some(d) => Value::Reg(d),
         };
+        // v1.10 B6：Call 返回的原始位模式（struct 的 box 指针），在 elem_ret 解箱后
+        // 用于 remove/get_or 的 box 归还（解箱是按值 memcpy，释放不影响副本）。
+        let raw_out = out.clone();
         // C 侧谓词 0/1 → Dial bool 严格 0/1。
         if spec.post != builtin::Post::None {
             let r = self.new_reg(IrType::I64);
@@ -1977,7 +1990,14 @@ impl<'a> Lower<'a> {
                 Type::KvMap(_, v) => (**v).clone(),
                 _ => Type::Int,
             };
-            out = self.reinterpret_bits(out, reg_ir(&et))?;
+            if matches!(&et, Type::Struct(_)) {
+                // v1.10 B6：map get/get_or/remove 的 struct 值可能未命中（bits==0），
+                // 走跨块 phi 还原零值；数组元素恒非 null，但走此路也安全（0 分支不会命中）。
+                // 对齐 codegen.rs::kv_from_bits。
+                out = self.unbox_struct_nullable(out, &et)?;
+            } else {
+                out = self.reinterpret_bits(out, reg_ir(&et))?;
+            }
         }
         // COW：只写回新句柄，绝不 release 旧值（C 侧已结算）。
         if let (Some(slot), Some(d)) = (obj_slot, dst) {
@@ -1998,6 +2018,35 @@ impl<'a> Lower<'a> {
                                 self.emit(IrInst::RcRelease { ptr: tmp, kind: k });
                             }
                         }
+                    }
+                } else if matches!(v.as_ref(), Type::Struct(_)) {
+                    // v1.10 B6：struct 默认值 coerce 时新建 box（rc=1）；C 侧 get_or 对
+                    // struct 不 retain，未命中返回的就是这份默认 box。解箱按值拷出后归还它
+                    // （命中时归还的是那份未被使用的默认 box，同样正确）。对齐 codegen.rs:6111。
+                    if let Some(def_bits) = coerced.get(1) {
+                        self.release_box(def_bits.clone());
+                    }
+                }
+            }
+        }
+        // v1.10 B6：remove 的 struct 值——C 侧把被删条目的值所有权移交调用方
+        // （只 release 键、不 release 值），解箱按值拷出后须归还这个值 box，否则泄漏。
+        // 未命中时 raw_out=0，dial_rc_release(NULL) 是 no-op，安全。对齐 codegen.rs:6091。
+        if method == "remove" {
+            if let Type::KvMap(_, v) = &od {
+                if matches!(v.as_ref(), Type::Struct(_)) {
+                    self.release_box(raw_out);
+                }
+            }
+        }
+        // v1.10 B6：put 的 struct 值——coerce 时新建 box（rc=1），C 侧 kvmap_put 又
+        // retain 进表里（rc=2），归还本地这份让表独占（rc=1）。对齐 codegen.rs 的
+        // sink_elem_after_retain。
+        if method == "put" {
+            if let Type::KvMap(_, v) = &od {
+                if matches!(v.as_ref(), Type::Struct(_)) {
+                    if let Some(val_bits) = coerced.get(1) {
+                        self.release_box(val_bits.clone());
                     }
                 }
             }
@@ -3431,7 +3480,7 @@ impl<'a> Lower<'a> {
                 let new_child = self.new_reg(IrType::Handle);
                 self.emit(IrInst::Call {
                     dst: Some(new_child), func: "dial_array_set_borrowed".to_string(),
-                    args: vec![carr, iv, bits],
+                    args: vec![carr, iv, bits.clone()],
                     arg_tys: vec![IrType::Handle, IrType::I64, IrType::I64],
                     ret_ty: IrType::Handle, linkage: CallLink::Runtime,
                 });
@@ -3440,7 +3489,10 @@ impl<'a> Lower<'a> {
                 self.lower_assign_lvalue(container, Value::Reg(new_child), &cty, false)?;
                 // 结算本层 value：set_borrowed 为元素 retain 了一份归数组所有，
                 // 借来的值来源仍持有不得再释放；自带所有权的值须归还这一份。
-                if !is_borrowed {
+                if matches!(value_dt, Type::Struct(_)) {
+                    // v1.10 B6：struct 值 coerce 时无条件新建 box，set_borrowed 又 +1，归还本地这份。
+                    self.release_box(bits.clone());
+                } else if !is_borrowed {
                     if let Some(k) = rc_kind(value_dt) {
                         let tmp = self.emit_alloca(reg_ir(value_dt));
                         self.emit(IrInst::Store { ptr: tmp, val: value, ty: reg_ir(value_dt) });
@@ -3454,6 +3506,22 @@ impl<'a> Lower<'a> {
     }
 
     fn coerce_elem_bits(&mut self, v: Value, dt: &Type) -> Result<Value, String> {
+        // v1.10 B6：值语义结构体进容器——box 成 RC 对象，返回 payload 指针的 i64 位模式。
+        // 对齐 codegen.rs::to_elem_bits（codegen.rs:1300）的 dial_struct_box + ptr_to_int。
+        // v 对 struct 是「内容区地址」Ptr vreg；dial_struct_box 把它拷进堆对象。
+        // ret_ty=I64 直接拿整型返回寄存器的位模式（dial_struct_box 返回 void*，与 i64 同通道）。
+        if let Type::Struct(_) = dt {
+            let size = self.struct_byte_size(dt);
+            let sz = self.new_reg(IrType::I64);
+            self.emit(IrInst::Conv { kind: AConv::Zext, dst: sz,
+                a: Value::Imm(Imm::I64(size)), ty: IrType::I64 });
+            let boxed = self.new_reg(IrType::I64);
+            self.emit(IrInst::Call {
+                dst: Some(boxed), func: "dial_struct_box".to_string(),
+                args: vec![v, Value::Reg(sz)], arg_tys: vec![IrType::Ptr, IrType::I64],
+                ret_ty: IrType::I64, linkage: CallLink::Runtime });
+            return Ok(Value::Reg(boxed));
+        }
         match reg_ir(dt) {
             IrType::I64 => Ok(v),
             IrType::I32 => {
@@ -3487,6 +3555,15 @@ impl<'a> Lower<'a> {
     fn reinterpret_bits(&mut self, v: Value, target: IrType) -> Result<Value, String> {
         if matches!(target, IrType::I64 | IrType::Handle | IrType::Ptr | IrType::FnPtr) {
             return Ok(v);
+        }
+        // v1.10 B6：struct 元素解箱——bits 是 box payload 指针（数组元素恒非 null），
+        // memcpy 到一块新的内容区并返回其地址。容器仍持有那份 box，读侧不 release
+        // （对齐 codegen.rs::from_elem_bits 的借用语义）。
+        if let IrType::Struct(ref sn) = target {
+            let size = self.struct_byte_size(&Type::Struct(sn.clone()));
+            let content = self.emit_alloca(IrType::Struct(sn.clone()));
+            self.emit_memcpy(content, v, size);
+            return Ok(Value::Reg(content));
         }
         let s = self.emit_alloca(IrType::I64);
         self.emit(IrInst::Store { ptr: s, val: v, ty: IrType::I64 });
@@ -4182,6 +4259,59 @@ impl<'a> Lower<'a> {
         let sz = self.new_reg(IrType::I64);
         self.emit(IrInst::Conv { kind: AConv::Zext, dst: sz, a: Value::Imm(Imm::I64(size)), ty: IrType::I64 });
         self.emit(IrInst::Call { dst: None, func: "memcpy".to_string(), args: vec![Value::Reg(dst), src, Value::Reg(sz)], arg_tys: vec![IrType::Ptr, IrType::Ptr, IrType::I64], ret_ty: IrType::Ptr, linkage: CallLink::Extern });
+    }
+
+    /// v1.10 B6：把一块内容区清零，构造零值结构体（对齐 LLVM sty.const_zero()）。
+    /// 用于 map get 未命中（bits==0）时的零值还原。memset 是 libc 符号，
+    /// Call 有副作用不被 DCE 删除，O0-O3 都发射。
+    fn emit_memset(&mut self, dst: VReg, size: i64) {
+        let sz = self.new_reg(IrType::I64);
+        self.emit(IrInst::Conv { kind: AConv::Zext, dst: sz, a: Value::Imm(Imm::I64(size)), ty: IrType::I64 });
+        let z = self.new_reg(IrType::I64);
+        self.emit(IrInst::Conv { kind: AConv::Zext, dst: z, a: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+        self.emit(IrInst::Call { dst: None, func: "memset".to_string(), args: vec![Value::Reg(dst), Value::Reg(z), Value::Reg(sz)], arg_tys: vec![IrType::Ptr, IrType::I64, IrType::I64], ret_ty: IrType::Ptr, linkage: CallLink::Extern });
+    }
+
+    /// v1.10 B6：归还 struct box 的本地那份引用（对齐 LLVM sink_elem_after_retain）。
+    /// dial_struct_box 造出 rc=1 的 box，容器 push/put 内部又 retain 一份（rc=2），
+    /// 容器释放时只还它自己那份（rc=1）——本地这份若不还就泄漏。bits 是 box payload
+    /// 指针的 i64 位模式，转成指针后 dial_rc_release。
+    fn release_box(&mut self, bits: Value) {
+        let p = self.bits_as_ptr(bits);
+        self.emit(IrInst::Call { dst: None, func: "dial_rc_release".to_string(),
+            args: vec![p], arg_tys: vec![IrType::Handle],
+            ret_ty: IrType::Void, linkage: CallLink::Runtime });
+    }
+
+    /// i64 位模式的指针 → Ptr vreg（对齐 LLVM int_to_ptr）。
+    fn bits_as_ptr(&mut self, bits: Value) -> Value {
+        let s = self.emit_alloca(IrType::I64);
+        self.emit(IrInst::Store { ptr: s, val: bits, ty: IrType::I64 });
+        let p = self.new_reg(IrType::Ptr);
+        self.emit(IrInst::Load { dst: p, ptr: s, ty: IrType::Ptr });
+        Value::Reg(p)
+    }
+
+    /// v1.10 B6：map get 未命中的 struct 还原——bits==0 → 零值结构体，否则解箱。
+    /// 无分支方案：先无条件造一块零值内容区，再用 select 在「零值区地址」与
+    /// 「bits（box 指针）」之间选源地址，最后单次 memcpy。select 选的是**地址**
+    /// 而非解引用，故 bits==0 时不会像 LLVM select 两侧求值那样解引用空指针。
+    /// 用项目现成的 select_values（经过大量验证的块参数 phi），避免手写 phi 落地出错。
+    /// 返回的 Value 是内容区地址（Ptr）；self.cur 被切到合流块，后续指令自然落进去。
+    fn unbox_struct_nullable(&mut self, bits: Value, dt: &Type) -> Result<Value, String> {
+        let sn = match dt { Type::Struct(n) => n.clone(), _ => return self.err("unbox_struct_nullable 仅接受 struct") };
+        let size = self.struct_byte_size(dt);
+        // 零值模板：无条件清零一块内容区（当前块）。
+        let zero = self.emit_alloca(IrType::Struct(sn.clone()));
+        self.emit_memset(zero, size);
+        // bits == 0 ? 选源地址：null → zero 区地址；非 null → bits（box 指针）。
+        let is_null = self.new_reg(IrType::I64);
+        self.emit(IrInst::ICmp { op: ACmp::Eq, dst: is_null, a: bits.clone(), b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+        let src = self.select_values(is_null, Value::Reg(zero), bits, IrType::Ptr);
+        // 单次解箱 memcpy 到结果内容区（容器仍持有 box，读侧不 release）。
+        let content = self.emit_alloca(IrType::Struct(sn.clone()));
+        self.emit_memcpy(content, Value::Reg(src), size);
+        Ok(Value::Reg(content))
     }
 }
 

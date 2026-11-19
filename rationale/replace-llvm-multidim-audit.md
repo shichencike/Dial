@@ -4,6 +4,17 @@
 > 真正代替 LLVM？** 结论不预设立场，全部由当机实测数据说话。审计范围覆盖五个独立维度，
 > 任一维度不达标即不能宣称「已代替」。所有命令可复现。
 
+> **2026-11-19 后续更新（维度 1 已修复）**：审计报告后，维度 1 的功能硬缺口
+> 「struct 进容器（B6）」已在 asm 后端补齐——`lower.rs` 的 `coerce_elem_bits`/
+> `reinterpret_bits` 支持 struct 装箱/解箱，新增 `unbox_struct_nullable`（无分支
+> select 方案）处理 map get 未命中零值，并补齐 put/get_or/remove 的 box 所有权结算。
+> `batch3_b6_smoke.dial` 现 asm O0-O3 全部编译、双后端逐字节一致，已纳入 golden（22 个）
+> 与 V 组门禁；int-key 50 万次 put/remove 无内存泄漏（asm 1440KB ≈ LLVM 1664KB）。
+> **总裁决不变**：维度 2（性能整体慢 12%）仍是硬缺口，故仍不能代替 LLVM。
+> 另发现一个与本轮无关的既有问题：`map<string,*>` 的 string key 本地引用未归还，
+> 50 万次循环泄漏约 30MB（string key + int value 同样复现），记入独立待办。
+> 下方保留审计当时的原始结论与全部证据，不因后续修复而改写历史记录。
+
 ## 裁决（先给结论）
 
 **当前不能代替 LLVM。** 五个维度中，四个达标或部分达标，**两个存在硬缺口**：

@@ -9926,7 +9926,7 @@ B1/B2/B3/B6/B7/B8 与 C11 按 §37.3–37.5 的裁决在后续批次落地，
 <tr>
 <td>B6</td>
 <td>结构体进容器</td>
-<td><code>Point[]</code> 与 <code>map&lt;string, Struct&gt;</code>：值类型结构体装不进 8 字节数组槽，故<strong>装箱</strong>为引用计数对象（<code>[int64 refcount][payload]</code>）后入槽，读出时<strong>解箱按值</strong>拷贝；<code>put</code> / <code>get</code> / <code>contains</code> / <code>remove</code> / <code>get_or</code> / <code>values()</code> 全通路打通</td>
+<td><code>Point[]</code> 与 <code>map&lt;string, Struct&gt;</code>：值类型结构体装不进 8 字节数组槽，故<strong>装箱</strong>为引用计数对象（<code>[int64 refcount][payload]</code>）后入槽，读出时<strong>解箱按值</strong>拷贝；<code>put</code> / <code>get</code> / <code>contains</code> / <code>remove</code> / <code>get_or</code> / <code>values()</code> 全通路打通。<strong>v1.10 起双后端</strong>：此前 asm 后端对 struct 进容器直接 Fail-Fast（<code>coerce_elem_bits</code> 的 <code>Aggregate</code> 分支），而门禁用默认 LLVM 编译该用例从未暴露；现 asm 用同一套 <code>dial_struct_box</code> 装箱 + 无分支 select 解箱（map 未命中零值），补齐 put/get_or/remove 的 box 结算，<code>batch3_b6_smoke.dial</code> 在 asm O0-O3 全部编译、双后端输出逐字节一致</td>
 </tr>
 </tbody>
 </table>
