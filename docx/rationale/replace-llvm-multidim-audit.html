@@ -73,6 +73,21 @@ safety 语义均等价，负数除法双后端逐值验证通过）。<strong>�
 遵循「不硬做负收益优化」纪律<strong>已整体回退</strong>，零代码留痕。这印证了审计报告原文
 「idiv/除法微码主导、e3s 已证伪可从后端侧优化」的判断——b08 属 LLVM 深度值域分析
 优势，非简单发射层 pass 可补，量化搁置。</p>
+<p><strong>2026-11-19 证伪记录（维度 2：b04/b07 算术循环"指令级调度"五连证伪，零代码留痕）</strong>：
+承接 M8-recspec 后加权总耗时仍慢 ~6.6% 的短板，按绝对耗时定位到 b04(3.56ms/1.30x)、
+b07(3.28ms/1.33x)、b08(3.34ms/2.03x)、b14(3.77ms/1.05x) 四个 <code>% 常量</code> 串行循环占大头。
+汇编对照发现 asm 版 b04/b07 每轮有 ~10 条冗余寄存器搬运、魔数 <code>movabsq</code> 每轮执行、
+符号修正用 <code>sar63+sub</code>（LLVM 用 <code>shr63+add</code>），据此提出三个直觉落点。<strong>五个汇编级受控
+POC（同进程背靠背、9 采样取最小、校验和一致）逐一证伪</strong>：① 消除全部冗余 mov → 0.997x
+（x86 move elimination 令纯搬运近零成本）；② 魔数外提到循环外 → 0.998x（movabs 单 uop）；
+③ 4 路循环展开 → 1.001x（斐波那契 a/b 是真数据依赖链，展开无法打破）；④ 符号修正
+改 LLVM 模式（关键路径同为 6 周期，无差）；⑤ <strong>逐指令精确复刻两后端 b07 循环 →
+0.998x（耗时完全相同）</strong>。决定性结论：asm 与 LLVM 后端生成的 b07 循环指令级性能
+<strong>无差异</strong>，bench 观测的 1.3x 来自 LLVM 后端对整程序的更深层优化（clang -O3 甚至对
+线性递推做闭式求解到 0.000ms），非局部发射层可补。遵循「不硬做负收益优化」纪律，
+<strong>本轮零产品代码改动、零回退</strong>。这印证 e3s/e3u 原判断：算术循环短板属 LLVM 深度
+值域/闭式分析优势；唯一可攻方向是「循环内线性递推闭式」（clang 同族思路，与
+M8-recspec 递归闭式同源），留给后续单独评估 ROI，不与指令级微调混淆。</p>
 <p><strong>2026-11-19 后续更新（维度 2 部分改善：asm 自行内联 dial_array_get）</strong>：
 审计报告后，asm 后端在 <code>--fast</code>（ReleaseFast）下于 <code>codegen_asm.rs::inst_call</code> 就地
 内联 <code>dial_array_get(a,i)</code>——发射 <code>load [a+24+i*8]</code>（数组 payload 布局），跳过 C
