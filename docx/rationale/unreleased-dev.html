@@ -3747,6 +3747,9 @@ imulq   %r10, %r15     # s * 31
 5. 完整 golden 门禁（19 用例）全绿；cargo test 全过；现有三个 impl 用例输出匹配 .expected。
 6. 新增 <code>tests/impl/impl_assoc.dial</code> + <code>.expected</code>，挂入 run_tests.sh R18 组（双编译 + 互 diff + 对 .expected diff）。</p>
 <p><strong>范围与护栏</strong>：<code>::</code> 为新增语法、不新增关键字（<code>impl</code>/<code>new</code> 仍可作普通标识符）；关联函数首参不可命名 self（保留规则）；不支持链式 <code>T::A::B()</code> 与泛型形态（B2 未落地）。只改 lexer/parser/lsp + 测试/文档，零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64 零变化、双后端一致、不打 tag、docx 确定性。剩余三项（select 超时 / map<string> 值 / 原子类型）按用户决策暂不展开。</p>
+<blockquote>
+<p><strong>2026-11-19 收口更新</strong>：上句「剩余三项暂不展开」为当时史实。现 select 超时（<code>1ce1061</code>）、map<string> 值/<code>values()</code>（<code>0d13bbd</code>）均已落地；原子类型/无锁<strong>宪法永久否决</strong>（README §37.2）。四项终态见 <a href="replace-llvm-roadmap.md"><code>replace-llvm-roadmap.md</code></a> P2 段。</p>
+</blockquote>
 <hr />
 <h2 id="r4自研-pgo-闭环--唯一后端收回路线图第-4-项四项全部收口">R4：自研 PGO 闭环 —— 唯一后端收回路线图第 4 项（四项全部收口）</h2>
 <p><strong>为什么做</strong>：唯一后端总纲（roadmap-gap-analysis.md）确立"假设 LLVM 不存在、只有自己"。收回路线图前三项（工具链去 LLVM / 优化回收诊断 / impl 关联函数）已收口，R4 是最后一项。<code>--pgo</code> 在 asm 下 <code>main.rs:504-507</code> 直接 <code>exit(1)</code>——用户可见 flag 被拒，是真实功能缺口，按总纲必须补，不因"性能收益可能有限"就搁置（那是把活推给 LLVM 的心态）。</p>

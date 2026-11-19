@@ -66,14 +66,22 @@ class Gen:
         # 概率性启用「最近批次刚修的高风险路径」——这些是差分最该覆盖的区域
         self.has_default_fn = self.rng.random() < 0.65
         self.has_impl = self.rng.random() < 0.65
+        # P3 门禁盲区固化：struct 进容器（B6/f7a94a4 修复路径）。原 fuzz 只生成
+        # 局部 PT{} 并调方法，从不把 struct 放进 PT[] / map<string,PT>，导致
+        # 「一边根本编不过」的盲区被 skip 掩盖。启用后 prelude 总是声明 PT。
+        self.has_struct_container = self.rng.random() < 0.6
+        need_struct = self.has_impl or self.has_struct_container
         if self.has_default_fn:
             k = self.rng.randint(1, 20)
             self.prelude.append(
                 f"fn dfn(a: int, b: int = {k}): int {{ return a + b; }}")
+        if need_struct:
+            # 字段带默认值，与 golden batch3_b6_smoke.dial 一致，保证 get miss
+            # 返回零值结构体时语义确定、可差分。
+            self.prelude.append("struct PT { x: int = 0, y: int = 0 }")
         if self.has_impl:
             d = self.rng.randint(1, 20)
             self.prelude.extend([
-                "struct PT { x: int, y: int }",
                 "impl PT {",
                 "  fn sum(self): int { return self.x + self.y; }",
                 f"  fn add(self, k: int = {d}): int {{ return self.sum() + k; }}",
@@ -270,6 +278,67 @@ class Gen:
             self.lines.append(f"print({name}.add());")       # 方法默认参数
         self.lines.append(f"print({name}.add(3));")
 
+    def struct_container_ops(self):
+        """struct 进容器——B6（f7a94a4 修复）的核心场景，P3 门禁盲区固化。
+
+        原 fuzz 只在 impl_ops 里生成局部 PT{} 并调方法，从不把 struct 装进容器，
+        因此无法暴露「一边支持 struct 装箱、另一边根本编不过」的差距。本方法
+        严格复用 golden batch3_b6_smoke.dial 已双后端验证的语法：
+          * PT[] 数组字面量 / 下标读字段 / 下标写 / set / push 到空数组；
+          * map<string,PT> 的 put / get / get_or / contains / size / values / remove。
+        元素类型 PT 只含 int 字段（满足装箱元素白名单），key 用静态串字面量
+        （immortal，不触发 P0 拼接泄漏），输出全程确定、可差分。
+        """
+        if not self.has_struct_container:
+            return
+        if self.rng.random() < 0.5:
+            # ---- PT[] 数组路径 ----
+            name = self.fresh("pts")
+            x1, y1, x2, y2 = (self.int_lit() for _ in range(4))
+            self.lines.append(
+                f"var {name}: PT[] = [PT{{x: {x1}, y: {y1}}}, PT{{x: {x2}, y: {y2}}}];")
+            self.lines.append(f"print({name}.length(), {name}[0].x, {name}[1].y);")
+            # 下标写 + set 写（重新装箱路径）
+            self.lines.append(
+                f"{name}[0] = PT{{x: {self.int_lit()}, y: {self.int_lit()}}};")
+            self.lines.append(
+                f"{name}.set(1, PT{{x: {self.int_lit()}, y: {self.int_lit()}}});")
+            self.lines.append(f"print({name}[0].x, {name}[1].x);")
+            # push 到空数组
+            name2 = self.fresh("pts")
+            self.lines.append(f"var {name2}: PT[] = [];")
+            self.lines.append(
+                f"{name2}.push(PT{{x: {self.int_lit()}, y: {self.int_lit()}}});")
+            self.lines.append(f"print({name2}.length(), {name2}[0].y);")
+        else:
+            # ---- map<string,PT> 路径 ----
+            name = self.fresh("pm")
+            self.lines.append(f"var {name}: map<string, PT> = new_kv_map();")
+            self.lines.append(
+                f'{name}.put("ka", PT{{x: {self.int_lit()}, y: {self.int_lit()}}});')
+            self.lines.append(
+                f'{name}.put("kb", PT{{x: {self.int_lit()}, y: {self.int_lit()}}});')
+            v = self.fresh("pv")
+            self.lines.append(f"var {v}: PT = {name}.get(\"ka\");")
+            self.lines.append(f"print({v}.x, {v}.y);")
+            # 未命中 → 零值结构体（字段带默认值，语义确定）
+            miss = self.fresh("pv")
+            self.lines.append(f"var {miss}: PT = {name}.get(\"zz\");")
+            self.lines.append(f"print({miss}.x, {miss}.y);")
+            # get_or（默认值路径 + 命中路径）
+            d = self.fresh("pv")
+            self.lines.append(
+                f'var {d}: PT = {name}.get_or("kb", PT{{x: {self.int_lit()}, y: {self.int_lit()}}});')
+            self.lines.append(f"print({d}.x);")
+            # contains / size / values / remove
+            self.lines.append(f"print({name}.contains(\"ka\"), {name}.size());")
+            vals = self.fresh("pvals")
+            self.lines.append(f"var {vals}: PT[] = {name}.values();")
+            self.lines.append(f"print({vals}.length());")
+            rm = self.fresh("pv")
+            self.lines.append(f'var {rm}: PT = {name}.remove("ka");')
+            self.lines.append(f"print({rm}.x, {name}.size());")
+
     def cow_alias(self):
         """数组别名 + push 触发 COW——所有权/引用计数高发区。"""
         arrs = self.of_type("int[]")
@@ -330,6 +399,7 @@ class Gen:
             (self.nested_write, 3),
             (self.call_default_fn, 3),
             (self.impl_ops, 3),
+            (self.struct_container_ops, 3),
             (self.cow_alias, 3),
             (self.slice_write, 2),
             (self.if_block, 2),
@@ -466,21 +536,39 @@ def fuzz(seed_start: int, n: int, opt_levels: list[str | None], jobs: int,
     diffs = 0
     stats = {"OK": 0, "BUILD_FAIL_LLVM": 0, "BUILD_FAIL_ASM": 0,
              "RUN_FAIL_LLVM_OR_ASM": 0, "NO_ASM_EMIT": 0, "DIFF": 0}
+    # P3 门禁盲区固化：struct 进容器（PT[] / map<string,PT>）的覆盖率与
+    # 「一边编不过」专项计数。这类构造在 golden 已证明两后端都支持，所以一旦
+    # 生成了它却出现 BUILD_FAIL，就绝不能像普通 skip 那样被掩盖——那是盲区
+    # 本身（编译失败被当成「生成器合法率」噪声放过）。
+    sc_stats = {"generated": 0, "build_fail": 0}
 
     def one(seed: int):
-        src = Gen(seed).build()
+        g = Gen(seed)
+        src = g.build()
+        # 该程序是否真的生成了 struct 进容器构造（而非只在 prelude 声明 PT）
+        has_sc = ("PT[]" in src) or ("map<string, PT>" in src)
         results = []
         for opt in opt_levels:
             with tempfile.TemporaryDirectory(prefix=f"dfuzz_{seed}_") as td:
                 v, detail, mini = check_source(src, pathlib.Path(td), opt, dialc,
                                                minimize=False)
                 results.append((opt, v, detail, mini))
-        return seed, src, results
+        return seed, src, results, has_sc
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         futs = [ex.submit(one, s) for s in seeds]
         for fut in concurrent.futures.as_completed(futs):
-            seed, src, results = fut.result()
+            seed, src, results, has_sc = fut.result()
+            if has_sc:
+                sc_stats["generated"] += 1
+                # 任一优化级别编不过都算盲区命中（说明一边对该构造支持不全）
+                if any(v.startswith("BUILD_FAIL") or v == "NO_ASM_EMIT"
+                       for _, v, _, _ in results):
+                    sc_stats["build_fail"] += 1
+                    tag = f"seed{seed}_struct_container_build_fail"
+                    (fail_dir / f"{tag}.dial").write_text(src, encoding="utf-8")
+                    print(f"  ❌ STRUCT-CONTAINER BUILD FAIL {tag}（盲区命中，"
+                          f"一边根本编不过，不得按 skip 放过）")
             for opt, v, detail, mini in results:
                 stats[v] = stats.get(v, 0) + 1
                 if v == "DIFF":
@@ -503,8 +591,11 @@ def fuzz(seed_start: int, n: int, opt_levels: list[str | None], jobs: int,
                 print(f"  ... 已处理 {seed - seed_start + 1}/{n} seeds")
 
     print(f"[fuzz] 统计（按 opt 展开）: {stats}")
+    print(f"[fuzz] struct 进容器覆盖: 生成 {sc_stats['generated']} 个程序，"
+          f"其中一边编不过 {sc_stats['build_fail']} 个（应为 0）")
     print(f"[fuzz] 不一致数={diffs}，用例目录={fail_dir}")
-    return 1 if diffs else 0
+    # 门禁失败条件：出现输出不一致，或 struct 容器构造出现「一边编不过」盲区。
+    return 1 if (diffs or sc_stats["build_fail"] or sc_stats["generated"] == 0) else 0
 
 
 def replay(path: pathlib.Path, opt: str | None, dialc: pathlib.Path) -> int:

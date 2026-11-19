@@ -3587,6 +3587,8 @@ imulq   %r10, %r15     # s * 31
 
 **范围与护栏**：`::` 为新增语法、不新增关键字（`impl`/`new` 仍可作普通标识符）；关联函数首参不可命名 self（保留规则）；不支持链式 `T::A::B()` 与泛型形态（B2 未落地）。只改 lexer/parser/lsp + 测试/文档，零新依赖、`codegen.rs`/`ast.rs`/1.10.0 零改动、AArch64 零变化、双后端一致、不打 tag、docx 确定性。剩余三项（select 超时 / map<string> 值 / 原子类型）按用户决策暂不展开。
 
+> **2026-11-19 收口更新**：上句「剩余三项暂不展开」为当时史实。现 select 超时（`1ce1061`）、map<string> 值/`values()`（`0d13bbd`）均已落地；原子类型/无锁**宪法永久否决**（README §37.2）。四项终态见 [`replace-llvm-roadmap.md`](replace-llvm-roadmap.md) P2 段。
+
 ---
 
 ## R4：自研 PGO 闭环 —— 唯一后端收回路线图第 4 项（四项全部收口）

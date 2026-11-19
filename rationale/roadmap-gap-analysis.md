@@ -96,6 +96,7 @@
 - 目标：把 LLVM 也没有的语言能力在 asm 后端补齐——select 超时 / impl 关联函数 `T::new()` / map<string> 值 / 原子类型，按总纲视为真实缺口。
 - ✅ **已完成：impl 关联函数 `T::new()`（无 self 静态方法）**。纯编译期脱糖：`lexer.rs` 加 `ColonColon` token；`parser.rs` 加 token 预扫描（前向引用 + 友好诊断）+ `parse_impl_def` 按首参名区分方法/关联函数 + `parse_primary` 的 `::` 降级为 `Expr::Call(__impl_T_m, args)`。`codegen.rs`/`lower.rs`/`semantic.rs`/`ast.rs` 零改动（复用 Call 链路）。覆盖带参/空参、返回 struct/标量、链式调用、前向引用；双后端一致、26 源码 .s 零回归；新增 `tests/impl/impl_assoc.dial`（R18 组）。
 - ⏸ **暂不展开**：select 超时（底层 `recv_timeout` 已具备，仅缺多通道语法糖）、map<string> 值（触及 semantic 泛型策略）、原子类型/无锁（内存模型宪法裁决）。用户 2026-11-18 明确本轮 R3 只做 impl 关联函数；其余待单独裁决再启。
+  > **2026-11-19 收口更新（以 [`replace-llvm-roadmap.md`](replace-llvm-roadmap.md) P2 为准）**：此处「待单独裁决再启」三项均已有终态——select 超时已落地（`1ce1061`）、map<string> 值/`values()` 已落地（`0d13bbd`），原子类型/无锁**宪法永久否决**（入 README §37.2，理由见新路线图 P2）。本节「暂不展开」为当时史实，不再表示当前状态。
 - 护栏遵守：零新依赖、`codegen.rs`/`ast.rs`/1.10.0 零改动、AArch64 零变化、双后端一致。
 
 **第 4 项 · PGO / LTO / bitcode（自建 profile 基础设施）** — ✅ 已完成（2026-11-18）
@@ -152,6 +153,11 @@
 **结论**：这些不是 asm 后端落后 LLVM，而是**语言本身尚未提供的能力**。在「代替 LLVM」
 语境下它们不构成差距（LLVM 也没有）；要做必须作为独立语言版本主题并改 `codegen.rs`，
 不属于 asm 后端补齐范畴。
+
+> **2026-11-19 收口更新（上表为 2026-11-18 历史核实快照，保留不删）**：表中四项现状均已
+> 变化——`select` 超时已落地（`1ce1061`）、impl 关联函数已落地、`map<string>` 值/`values()`
+> 已落地（`0d13bbd`），原子类型/无锁**宪法永久否决**（README §37.2）。线程池/协程/异步
+> 仍未实现。各项终态以 [`replace-llvm-roadmap.md`](replace-llvm-roadmap.md) P2 为准。
 
 ### C 类 · 性能层 O3 —— 真正的剩余工程，但高成本/边际
 

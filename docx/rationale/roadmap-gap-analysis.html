@@ -179,8 +179,11 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 <p><strong>第 3 项 · B 类语言语义（在 asm 侧自建）</strong> — 部分完成：<strong>impl 关联函数已落地</strong>，其余三项按用户 2026-11-18 决策暂不展开
 - 目标：把 LLVM 也没有的语言能力在 asm 后端补齐——select 超时 / impl 关联函数 <code>T::new()</code> / map<string> 值 / 原子类型，按总纲视为真实缺口。
 - ✅ <strong>已完成：impl 关联函数 <code>T::new()</code>（无 self 静态方法）</strong>。纯编译期脱糖：<code>lexer.rs</code> 加 <code>ColonColon</code> token；<code>parser.rs</code> 加 token 预扫描（前向引用 + 友好诊断）+ <code>parse_impl_def</code> 按首参名区分方法/关联函数 + <code>parse_primary</code> 的 <code>::</code> 降级为 <code>Expr::Call(__impl_T_m, args)</code>。<code>codegen.rs</code>/<code>lower.rs</code>/<code>semantic.rs</code>/<code>ast.rs</code> 零改动（复用 Call 链路）。覆盖带参/空参、返回 struct/标量、链式调用、前向引用；双后端一致、26 源码 .s 零回归；新增 <code>tests/impl/impl_assoc.dial</code>（R18 组）。
-- ⏸ <strong>暂不展开</strong>：select 超时（底层 <code>recv_timeout</code> 已具备，仅缺多通道语法糖）、map<string> 值（触及 semantic 泛型策略）、原子类型/无锁（内存模型宪法裁决）。用户 2026-11-18 明确本轮 R3 只做 impl 关联函数；其余待单独裁决再启。
+- ⏸ <strong>暂不展开</strong>：select 超时（底层 <code>recv_timeout</code> 已具备，仅缺多通道语法糖）、map<string> 值（触及 semantic 泛型策略）、原子类型/无锁（内存模型宪法裁决）。用户 2026-11-18 明确本轮 R3 只做 impl 关联函数；其余待单独裁决再启。</p>
+<blockquote>
+<p><strong>2026-11-19 收口更新（以 <a href="replace-llvm-roadmap.md"><code>replace-llvm-roadmap.md</code></a> P2 为准）</strong>：此处「待单独裁决再启」三项均已有终态——select 超时已落地（<code>1ce1061</code>）、map<string> 值/<code>values()</code> 已落地（<code>0d13bbd</code>），原子类型/无锁<strong>宪法永久否决</strong>（入 README §37.2，理由见新路线图 P2）。本节「暂不展开」为当时史实，不再表示当前状态。
 - 护栏遵守：零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64 零变化、双后端一致。</p>
+</blockquote>
 <p><strong>第 4 项 · PGO / LTO / bitcode（自建 profile 基础设施）</strong> — ✅ 已完成（2026-11-18）
 - 目标：让 asm 不再因缺 <code>.bc</code> 拒绝 <code>--pgo</code>，自建「插桩 → profile 收集 → 优化决策」闭环。
 - <strong>诊断修正（<code>tools/diag_pgo.py</code>）</strong>：原描述的"跨模块 IR 合并 LTO"经源码核实——源码级 import 早已合成单个 <code>IrProgram</code>（天然 LTO），包名 import 是 C <code>.a</code> 机器码非 IR（不在 IR 合并范畴），故 LTO 无 IR 层工作量；bitcode 只是喂 clang 的手段非能力，asm 不需自建。块布局 ROI 实测：37 多块函数、55 回边循环头 100% 已对齐、热路径 fallthrough、冷块甩末尾——通用块重排是负 ROI（不硬做）。真正缺口是 <code>--pgo</code> 被 <code>exit(1)</code> 拒绝。
@@ -286,6 +289,12 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 <p><strong>结论</strong>：这些不是 asm 后端落后 LLVM，而是<strong>语言本身尚未提供的能力</strong>。在「代替 LLVM」
 语境下它们不构成差距（LLVM 也没有）；要做必须作为独立语言版本主题并改 <code>codegen.rs</code>，
 不属于 asm 后端补齐范畴。</p>
+<blockquote>
+<p><strong>2026-11-19 收口更新（上表为 2026-11-18 历史核实快照，保留不删）</strong>：表中四项现状均已
+变化——<code>select</code> 超时已落地（<code>1ce1061</code>）、impl 关联函数已落地、<code>map&lt;string&gt;</code> 值/<code>values()</code>
+已落地（<code>0d13bbd</code>），原子类型/无锁<strong>宪法永久否决</strong>（README §37.2）。线程池/协程/异步
+仍未实现。各项终态以 <a href="replace-llvm-roadmap.md"><code>replace-llvm-roadmap.md</code></a> P2 为准。</p>
+</blockquote>
 <h3 id="c-类--性能层-o3--真正的剩余工程但高成本边际">C 类 · 性能层 O3 —— 真正的剩余工程，但高成本/边际</h3>
 <table>
 <thead>
