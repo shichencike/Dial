@@ -55,6 +55,7 @@
 <li><a href="#v110-开发增量互递归尾调用帧复用b12-4263x--3360x">v1.10 开发增量：互递归尾调用帧复用（b12 4.263x → 3.360x）</a></li>
 <li><a href="#v110-开发增量字符串字面量静态化b20-2275x--1084x">v1.10 开发增量：字符串字面量静态化（b20 2.275x → 1.084x）</a></li>
 <li><a href="#v110-开发增量dial_array_set-独占快路径内联几何平均首次反超-llvm">v1.10 开发增量：dial_array_set 独占快路径内联（几何平均首次反超 LLVM）</a></li>
+<li><a href="#v110-尝试并回退pow2-除法运行时符号快路径b08-负收益零留痕">v1.10 尝试并回退：pow2 除法运行时符号快路径（b08 负收益，零留痕）</a></li>
 </ul>
 </li>
 </ul>
@@ -3585,7 +3586,26 @@ b18 1.259→1.037）；整体几何平均 <strong>1.0794x → 0.9793x，首次 &
 发射器一个内联块。</p>
 <p><strong>总裁裁更新</strong>：按几何平均已统计意义上追平/反超 LLVM；按总耗时仍未全面代替。剩余
 b12 互递归闭式、b08/b05 算术深度优化、b22 substring C runtime、GRA 全 spill 属架构级
-工程，继续推进。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+工程，继续推进。</p>
+<hr />
+<h2 id="v110-尝试并回退pow2-除法运行时符号快路径b08-负收益零留痕">v1.10 尝试并回退：pow2 除法运行时符号快路径（b08 负收益，零留痕）</h2>
+<p><strong>为什么试</strong>：延续代替 LLVM 的性能主线。按加权耗时差定位到 b08「3n+1 总步数」占总差距
+57%（Δ+1.733ms、ratio 2.049），是最大单点短板；此前「算术深度优化不动」的定性下得太早，
+本轮用数据重新检验。汇编根因：<code>x%2==0</code> 已用 <code>testq $1</code>、<code>3*x+1</code> 已用 <code>leaq</code> 均最优，唯
+<code>x/2</code> 用 6 条通用有符号 bias 修正序列，而 gcc -O3 靠值域分析证明 <code>x&gt;1</code> 恒正、用单条
+<code>sarq</code>。受控 C 实验（内联汇编精确模拟 asm 序列）预测：6 条→单 sar 省 33%、加运行时符号
+检查的可移植版省 ~18%，校验和一致。</p>
+<p><strong>实现又回退</strong>：在 <code>inst_const_div_pow2</code>（仅 x86-64）Div 分支加「n&gt;=0 走 mov+sar、n&lt;0
+回退原 bias」快路径，语义完全等价（向零截断，所有 safety 模式可用，负数除法双后端逐值
+验证通过）。先后试两种分支布局（js+jmp / jns fall-through），均正确。</p>
+<p><strong>证伪（背靠背 A/B）</strong>：基线 b08 3.30-3.38ms（ratio 2.01-2.06），改动版 3.56-3.59ms
+（ratio 2.17-2.22），<strong>反而慢约 7-8%</strong>。受控 C 实验的正收益在真实编译管线不成立——推断
+运行时分支破坏了原无分支 bias 序列的乱序执行/微码融合收益，孤立微基准高估了省指令的收益。
+遵循「不硬做负收益优化」纪律<strong>整体回退</strong>，<code>git checkout</code> 后重新编译确认零代码留痕，仓库
+干净。</p>
+<p><strong>结论</strong>：b08 属 LLVM 深度值域分析（证明循环变量恒正→省 bias）优势，非发射层简单 pass
+可补；印证审计报告原文「除法微码主导、e3s 已证伪可从后端侧优化」的判断。量化搁置，不扩散。
+本轮无代码提交（仅文档记录证伪结论）。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
