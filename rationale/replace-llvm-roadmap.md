@@ -107,9 +107,25 @@
   降级 skip）x86 LLVM 与 AArch64 asm qemu 实机输出 **22/22 逐字节一致**，x86 golden 24 用例
   零回归、差分 fuzz 450 零不一致、全量 run_tests 全绿。门禁固化为
   `tools/verify_aarch64_semantics.sh`（缺 qemu/交叉 gcc 自动 skip，挂入 run_tests.sh AI 段）。
-- **AArch64 能力降级项（仍开放）**：内联汇编 Fail-Fast（已确认按设计拒绝，不属 bug）、
-  DWARF、PGO 在 AArch64 降级（`pgo_effective=false`）。逐项评估哪些「暂时降级可接受」、
-  哪些「代替 LLVM 必须有」——核心运行语义已实机验证正确，剩余是调试/分析能力的平台对等。
+- ~~**DWARF 在 AArch64 降级**~~ —— **已收口（2026-11-19，P1 平台对等）**：手写 DWARF
+  v5 生成主体本与目标无关，但被 x86-64 门控硬关。打开后暴露两处目标相关问题并修复（仅
+  `src/codegen_asm.rs`）：① **`.value` 伪指令**在 aarch64 GNU as 下是 unknown pseudo-op →
+  改跨平台 `.2byte`（2 字节同义词，x86 二进制零变化）；② **变量/形参 location 的
+  `DW_OP_breg7(rsp)=0x77`** 是 x86 专用 → AArch64 用 `DW_OP_breg31(sp)=0x8f`（DWARF for
+  AArch64：sp=31），偏移仍为相对当前 sp 的 alloca_off（与 x86 rsp 同构、绕开 frame_base）。
+  三处门控（.file 表 / CU / end_label）统一走 `dwarf_enabled` 共因函数，杜绝 high_pc 引用
+  未定义标签。**实机验证**：AArch64 `-g` 静态 ELF 含 .debug_info/.debug_line、dwarfdump
+  7 符号齐全 + 行表含源名 + `--verify` 无错误、.s 中 breg=0x8f 且无 0x77 残留、qemu
+  gdbstub 实机 `break dbg.dial:9` 命中 + `print counter=42` + bt 显示源码行；无 `-g` 零
+  符号。交付门禁 `tools/verify_aarch64_dwarf.sh`（缺 qemu/交叉 gcc/gdb 自动 skip，挂入
+  run_tests.sh AJ 段），全量 run_tests（含 R2 x86 DWARF / AI 语义 / AJ DWARF）全绿。
+- **AArch64 能力降级项——逐项裁决完毕（2026-11-19）**：
+  - **内联汇编 Fail-Fast**：按设计拒绝（仅支持 x86-64 方言），**可接受降级**——非 bug，
+    AArch64 无对应内联汇编语义，强造反而破坏 Fail-Fast 哲学；不纳入本批次。
+  - **PGO**（`pgo_effective=false`）：**可接受降级**——战略转向后性能已冻结为回归护栏，
+    AArch64 无法在本机跑训练样本（`pgo_active` 本就仅 x86），补齐 ROI 为零；保留功能完整性
+    即可，不纳入本批次。
+  两者均零代码改动，仅在路线图标注裁决理由；核心运行语义 + 源码级调试已在 AArch64 实机验证。
 
 ### P2 · 功能对等（B 类语言特性，按「LLVM 不存在」总纲裁决）
 
@@ -149,7 +165,7 @@
 一条清晰、可检验的线，替代过去模糊的「性能是否领先」：
 
 > **当且仅当**：① 性能维持 OPT-ENOUGH（§1 够用线，已满足）；② P0 正确性缺口清零；
-> ③ P1 AArch64 实机语义 golden 通过；④ P2 各项有明确裁决（纳入并落地，或宪法否决并
+> ③ P1 AArch64 实机语义 golden 通过 + 源码级调试（DWARF gdb 断点/print）可用；④ P2 各项有明确裁决（纳入并落地，或宪法否决并
 > 记录理由）；⑤ P3 过时结论清理完成——即可宣布 **asm 后端在能力上代替 LLVM**，此后
 > LLVM 路径可进入冻结/退役流程。
 

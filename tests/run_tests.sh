@@ -123,6 +123,9 @@
 #   AI. AArch64 实机语义门禁（P1 平台，verify_aarch64_semantics.sh：qemu-user-static +
 #      aarch64 交叉 gcc 把 golden 编成 AArch64 静态 ELF 实机跑，与 x86 LLVM 输出逐字节
 #      对比；缺 qemu/交叉 gcc 则 skip。钉死 LR(x30)/ICmp fuse/PtrAdd 三处 AArch64 修复）。
+#   AJ. AArch64 DWARF 源码级调试门禁（P1 平台对等，verify_aarch64_dwarf.sh：AArch64 -g
+#      产合法 DWARF v5 + qemu gdbstub 实机 gdb 源码行断点命中 + print counter=42；
+#      钉死 .value→.2byte 兼容性 + DW_OP_breg31(sp)=0x8f location 编码；缺依赖则 skip）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -5049,6 +5052,14 @@ echo
 echo "== AI) AArch64 实机语义门禁（P1 平台，qemu 实机跑 + 双后端逐字节对比）=="
 if bash tools/verify_aarch64_semantics.sh "$DIALC"; then
     :   # 缺 qemu/交叉 gcc 时脚本自行 skip；有则逐条打印 ✅，失败以非 0 退出
+else
+    fail=1
+fi
+
+echo
+echo "== AJ) AArch64 DWARF 源码级调试门禁（P1 平台对等，qemu gdbstub 实机断点）=="
+if bash tools/verify_aarch64_dwarf.sh "$DIALC"; then
+    :   # 缺 qemu/交叉 gcc/gdb-multiarch 时脚本自行 skip；有则逐条打印 ✅，失败非 0 退出
 else
     fail=1
 fi

@@ -81,12 +81,27 @@ fn dwarf_type_sym(t: DwarfType) -> &'static str {
     }
 }
 
+/// P1 平台对等：是否发射 DWARF。三处（emit 顶部的 .file 表 / emit() 末尾的 CU /
+/// emit_function 的 end_label）必须共因调用本函数——尤其 end_label 与 CU 必须同 gate，
+/// 否则 high_pc 引用未定义标签会链接失败。当前 x86-64 与 AArch64 都要 DWARF（token
+/// 与生成主体是目标无关的 GAS 汇编），故直接取 debug_info；保留函数是为了单一真相源，
+/// 未来若某目标不支持 DWARF 只在此处收紧即可，杜绝门控漂移。
+fn dwarf_enabled(debug_info: bool, _target: EmitTarget) -> bool {
+    debug_info
+}
+
 /// M7-e3w：生成手写 DWARF v5 CU（.debug_abbrev + .debug_info），供 gdb 源码级调试。
 /// 行表（.debug_line）由汇编器的 .file/.loc 自动生成（见 emit() 顶部），本函数
 /// 只负责建立 CU + subprogram + formal_parameter + variable + base_type DIE，
 /// 并把 stmt_list 指向汇编器行表（offset 0）。与 LLVM 后端 -g 结构同构。
 /// DWARF 常量编码经 /tmp POC 逐字节验证（abbrev code/form/属性码/版本匹配）。
-fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
+/// P1：变量/形参 location 用 DW_OP_bregN + 相对当前栈指针的偏移（绕开 frame_base）；
+/// 栈指针的 DWARF 寄存器号随目标不同——x86-64 rsp=7 (0x77)，AArch64 sp=31 (0x8f)。
+fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str, target: EmitTarget) -> String {
+    let breg: u8 = match target {
+        EmitTarget::X86_64SysV => 0x77, // DW_OP_breg7 = rsp
+        EmitTarget::AArch64 => 0x8f,   // DW_OP_breg31 = sp (DWARF for AArch64)
+    };
     let mut o = String::new();
 
     // ---------- .debug_abbrev ----------
@@ -140,14 +155,17 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
     o.push_str("\t.section .debug_info,\"\",@progbits\n");
     o.push_str(".Ldwarf_info_start:\n");
     o.push_str("\t.long .Ldwarf_info_end-.Ldwarf_info_start-4\n"); // unit_length
-    o.push_str("\t.value 0x0005\n"); // version 5
+    // 2 字节常量用 .2byte（GAS 跨平台伪指令）；旧 .value 在 aarch64 GNU as 下是
+    // unknown pseudo-op（P1 平台对等实测暴露）。.value/.short/.hword/.2byte 同为
+    // 2 字节同义词，二进制等价，x86 输出零变化。
+    o.push_str("\t.2byte 0x0005\n"); // version 5
     o.push_str("\t.byte 0x01\n");    // unit_type = DW_UT_compile
     o.push_str("\t.byte 0x08\n");    // address_size
     o.push_str("\t.long .Ldial_abbrev_start\n"); // abbrev offset: 链接器算合并段内真实偏移
     // CU DIE (code 1)
     o.push_str("\t.uleb128 1\n");
     o.push_str("\t.asciz \"dialc asm backend\"\n");
-    o.push_str("\t.value 0x0002\n"); // DW_LANG_C
+    o.push_str("\t.2byte 0x0002\n"); // DW_LANG_C
     o.push_str(&format!("\t.asciz \"{}\"\n", src_path.replace('\\', "\\\\").replace('"', "\\\"")));
     o.push_str("\t.long 0\n");       // stmt_list = 0 (assembler-generated line table)
     // low_pc / high_pc of CU: use first function .. last function (TLS-style bounds)
@@ -174,7 +192,7 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
         for (pname, off, pty) in &f.params {
             o.push_str("\t.uleb128 3\n");
             let sb = sleb128(*off);
-            let mut loc = vec![0x77]; // DW_OP_breg7 (rsp) + offset，绕开 frame_base
+            let mut loc = vec![breg]; // DW_OP_breg7(rsp)/breg31(sp) + offset，绕开 frame_base
             loc.extend_from_slice(&sb);
             o.push_str(&format!("\t.byte {},{}\n", loc.len(), loc.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(",")));
             o.push_str(&format!("\t.asciz \"{}\"\n", pname));
@@ -184,7 +202,7 @@ fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str) -> String {
         for (vname, vline, voff, vty) in &f.vars {
             o.push_str("\t.uleb128 4\n");
             let sb = sleb128(*voff);
-            let mut loc = vec![0x77]; // DW_OP_breg7 (rsp) + offset，绕开 frame_base
+            let mut loc = vec![breg]; // DW_OP_breg7(rsp)/breg31(sp) + offset，绕开 frame_base
             loc.extend_from_slice(&sb);
             o.push_str(&format!("\t.byte {},{}\n", loc.len(), loc.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(",")));
             o.push_str(&format!("\t.asciz \"{}\"\n", vname));
@@ -385,12 +403,13 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
 
     let mut out = String::new();
     out.push_str("# 由 dialc 自研后端生成（IR -> .s）；请勿手工编辑\n");
-    // M7-e3w：-g 且 x86-64 时声明源文件（汇编器据此生成 DWARF v5 行表）。
-    // AArch64 零变化：-g 下也不生成任何 .file/.loc/.debug_*。
+    // M7-e3w：-g 时声明源文件（汇编器据此生成 DWARF v5 行表）。
+    // P1：AArch64 与 x86-64 同标准生成 .file/.loc/.debug_*（源码级调试平台对等）。
     // M7-e3aa：多文件 import 合并编译时，为每个不同源文件分配一个 .file 编号：
     //   索引 0（.file 1）恒为主源文件 src_path，其余按函数出现顺序稳定分配。
-    // 单文件 / 非 -g / AArch64 路径不受影响（文件表仍只含主文件、编号恒为 1）。
-    let dwarf_on = debug_info && matches!(target, EmitTarget::X86_64SysV);
+    // 单文件 / 非 -g 路径不受影响（文件表仍只含主文件、编号恒为 1）。
+    // P1：x86-64 与 AArch64 共用 dwarf_enabled 单一真相源。
+    let dwarf_on = dwarf_enabled(debug_info, target);
     let mut file_table: Vec<String> = Vec::new();
     if dwarf_on {
         file_table.push(src_path.to_string());
@@ -513,9 +532,9 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
         out
     };
     // M7-e3w：-g 且 x86-64 时追加手写 DWARF CU（行表由 .file/.loc 已在汇编器生成）。
-    // AArch64 零变化：既无 .file/.loc，也不生成 DIE。
+    // P1：AArch64 与 x86-64 同标准生成 DWARF CU（行表由 .file/.loc 已在汇编器生成）。
     if dwarf_on {
-        Ok(final_asm + &emit_dwarf_cu(&dwarf_funcs, src_path))
+        Ok(final_asm + &emit_dwarf_cu(&dwarf_funcs, src_path, target))
     } else {
         Ok(final_asm)
     }
@@ -2256,8 +2275,9 @@ impl<'a> FnEmit<'a> {
     fn inst(&mut self, i: &IrInst) {
         match i {
             IrInst::Line(line) => {
-                // M7-e3w：-g 且 x86-64 时发 .loc；AArch64 / 非 -g 跳过（零机器码）。
-                if self.debug_info && matches!(self.target, EmitTarget::X86_64SysV) {
+                // M7-e3w：-g 时发 .loc（行表由汇编器生成，零机器码）。P1：x86-64 与
+                // AArch64 同标准发射，共因调用 dwarf_enabled。
+                if dwarf_enabled(self.debug_info, self.target) {
                     self.line(&format!("\t.loc {} {} 0", self.file_index, line));
                 }
             }
@@ -4865,7 +4885,8 @@ fn emit_function(
     // M7-e3w：函数末尾标签，DWARF high_pc 精确引用（不能用 `符号+常量`，
     // 链接器对全局符号+加法的重定位不可靠）。
     let end_label = format!(".Ldial_funcend_{}", e.prefix);
-    if debug_info && matches!(target, EmitTarget::X86_64SysV) {
+    // P1：end_label 与 CU 发射必须同 gate（high_pc 引用），共用 dwarf_enabled。
+    if dwarf_enabled(debug_info, target) {
         out.push_str(&format!("{}:\n", end_label));
     }
     Ok(FnDwarfInfo {

@@ -5,6 +5,34 @@
 
 ---
 
+#### P1 平台对等：AArch64 后端补齐 DWARF 源码级调试（`-g` 静默降级 → 实机可用）
+
+**路线图原判**：P1 记「DWARF 在 AArch64 降级」，列为调试能力平台对等的剩余开放项；用户此前明确点名「O3 还有调试信息都没有」。
+
+**为什么重要**：「假设 LLVM 不存在、要代替 LLVM」的总纲下，一个只能跑、不能源码级调试的后端不算完整。AArch64 核心运行语义已实机验证正确（见下条），但 `-g` 静默不产任何调试信息——`emit_dwarf_cu` / `.file` / `.loc` 生成主体本是目标无关 GAS 汇编，却因 x86-64 门控被硬关。
+
+**实现（仅 `src/codegen_asm.rs`，AArch64 `-g` 路径）**：
+1. 新增 `dwarf_enabled(debug_info, target)` 共因函数，统一三处门控（emit 顶部 `.file` 表 / emit 末尾 CU / emit_function 的 `end_label`）。`end_label` 与 CU 必须同 gate——high_pc 用其作重定位目标，不同 gate 会链接未定义标签。原门控 `debug_info && X86_64SysV` 改为两目标共用函数（保留函数作单一真相源，便于未来某目标收紧）。
+2. 实测发现两处目标相关问题：
+   - **`.value` 伪指令**（DWARF CU header 的 version=0x0005 / DW_LANG_C=0x0002）在 aarch64 GNU as（binutils 2.42）下报 `unknown pseudo-op`。改跨平台 `.2byte`（GAS 中 `.value`/`.short`/`.hword`/`.2byte` 同为 2 字节同义词，x86 二进制零变化）。
+   - **变量/形参 location 编码**：原 `DW_OP_breg7(rsp)=0x77` 是 x86 专用。AArch64 用 `DW_OP_breg31(sp)=0x8f`（DWARF for AArch64 寄存器号：x0–x30=0–30、sp=31）；偏移仍是 alloca_off[slot]（相对当前 sp 的正偏移，prologue `sub sp,sp,frame` 后稳定，槽寻址 `ldr [sp,#off]`），与 x86 rsp+off 同构，DIE 不发 frame_base、天然绕开 CFA。x86 天然有利条件：AArch64 本就走全 spill（`!X86_64 || debug_info`），所有值在栈槽，location 天然准确。
+
+**实机证据链（qemu-aarch64-static 8.2.2 + gdb-multiarch + llvm-dwarfdump-18）**：
+- `build ... --backend=asm --single-file -g` 编译成功，qemu 运行输出 **43**（DWARF 零语义影响）。
+- `aarch64-linux-gnu-readelf -S`：.debug_info / .debug_abbrev / .debug_line 三段齐全。
+- `llvm-dwarfdump --debug-info`：add/main/a/b/sum/counter/note **7 符号全在**；`--debug-line` 含 dbg.dial；`--verify` 报 **No errors**（abbrev/偏移/CU 链合法）。
+- 生成 .s 中 `0x8f` 出现 5 处、`0x77` **0 处**（breg 编码切换坐实）。
+- **gdb 端到端**（`qemu -g PORT` + `gdb-multiarch -batch ... -ex 'break dbg.dial:9' -ex continue -ex 'print counter' -ex bt`）：断点命中 `Breakpoint 1, main () at .../dbg.dial:9`、`$1 = 42`、bt 显示源码行——源码级调试真正可用（非仅结构存在）。
+- 负向：无 `-g` 时行表/`.debug_info` 计数均 0（零开销）。
+
+**门禁**：新增 `tools/verify_aarch64_dwarf.sh`（9 项断言：输出 43 / 段存在 / 7 符号 / 行表 / --verify / breg=0x8f 无 0x77 / gdb 断点 print counter=42 / bt 源码行 / 无 -g 零符号）；依赖探测缺 qemu/交叉 gcc/gdb 自动 skip，挂入 run_tests.sh AJ 段。全量 run_tests（含 R2 x86 DWARF / AI 语义 / AJ DWARF）全绿，x86 golden 24、差分 fuzz 450 零回归。
+
+**裁决（P1 其余开放项）**：inline_asm 按设计 Fail-Fast 拒绝（AArch64 无对应语义，非 bug）；PGO 在 AArch64 降级（`pgo_active` 本就仅 x86，性能已冻结为回归护栏、无法本机训练，补齐 ROI 为零）——两者均记「可接受降级」，仅路线图标注理由、零代码改动。
+
+**边界**：仅 AArch64 `-g` 路径变化；x86 DWARF（`.value`→`.2byte` 二进制等价）与非 `-g` 路径零变化；LLVM 后端 / 优化级别无关；1.10.0/零依赖变化/不打 tag。
+
+---
+
 #### P1：AArch64 实机语义验证——抓出并修复 3 个语法校验盲区的根本 bug
 
 **路线图原判**：P1 记「AArch64 只验证汇编写法、未实机跑语义」，需装 qemu-user 实机跑 golden。
