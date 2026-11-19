@@ -1448,11 +1448,13 @@ impl<'a> Lower<'a> {
             Expr::ByteLit(v) => Ok((Value::Imm(Imm::I64(*v)), false)),
             Expr::StringLit(s) => {
                 let lit = self.ip.intern_string(s);
-                let p = self.new_reg(IrType::Ptr);
-                self.emit(IrInst::LeaLabel { dst: p, lit });
+                // 静态 immortal DialString：字面量编译期已知且字符串不可变，
+                // 直接用 .rodata 静态对象句柄（rc=INT64_MIN，retain/release no-op），
+                // 省去每次求值的 dial_string_new(malloc+strlen+memcpy) 与成对 release。
+                // 语义等价：内容相同、比较仍走 dial_string_eq（内容比较，无身份依赖）。
                 let h = self.new_reg(IrType::Handle);
-                self.emit(IrInst::Call { dst: Some(h), func: "dial_string_new".to_string(), args: vec![Value::Reg(p)], arg_tys: vec![IrType::Ptr], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
-                Ok((Value::Reg(h), false)) // 新建对象 +1 自有，存槽不 retain
+                self.emit(IrInst::LeaStaticString { dst: h, lit });
+                Ok((Value::Reg(h), false)) // 静态 immortal 对象，无需 retain/release
             }
             Expr::Interp(parts) => self.lower_interp(parts),
             Expr::Var(name) => {

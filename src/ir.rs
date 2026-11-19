@@ -180,8 +180,13 @@ pub enum IrInst {
     /// `field` 是**字段序号**（不是字节偏移）；发射器按 `struct_layout(struct_name).offsets[field]`
     /// 换算成实际字节偏移，从而自动带上 C ABI 的 padding。
     FieldAddr { dst: VReg, base: VReg, struct_name: String, field: u32 },
-    /// 取 rodata 字符串字面量的地址（emit 时落到 `.LstrN`）。
+    /// 取 rodata 字符串字面量的地址（emit 时落到 `.LstrN`，纯 C 字符串字节）。
     LeaLabel { dst: VReg, lit: u32 },
+    /// 取字符串字面量的**静态 immortal DialString 句柄**：emit 时落到 `.LdstrN+8`，
+    /// 即静态对象 `[rc=INT64_MIN][len][data\0]` 的 len 字段（DialString 对外指针）。
+    /// 仅在自研 asm 后端使用：字面量编译期已知且不可变，静态化可省去循环内
+    /// 每次求值的 dial_string_new（malloc+strlen+memcpy）与成对 release。
+    LeaStaticString { dst: VReg, lit: u32 },
     /// 指针加字节偏移：`dst = base + off`（off 为 64 位字节数）。
     /// 用于借出堆对象的内部数据区（如 string / bytes 的 payload 跳过 8 字节头）。
     PtrAdd { dst: VReg, base: VReg, off: Value },
@@ -259,6 +264,7 @@ impl IrInst {
         match self {
             IrInst::Load { .. }
             | IrInst::LeaLabel { .. }
+            | IrInst::LeaStaticString { .. }
             | IrInst::Bin { .. }
             | IrInst::Un { .. }
             | IrInst::FBin { .. }
@@ -289,6 +295,7 @@ impl IrInst {
             | IrInst::Load { dst, .. }
             | IrInst::FieldAddr { dst, .. }
             | IrInst::LeaLabel { dst, .. }
+            | IrInst::LeaStaticString { dst, .. }
             | IrInst::FuncAddr { dst, .. }
             | IrInst::PtrAdd { dst, .. }
             | IrInst::Bin { dst, .. }
@@ -321,7 +328,7 @@ impl IrInst {
             | IrInst::FCmp { a, b, .. } => { push_val(*a, out); push_val(*b, out); }
             IrInst::Un { a, .. } | IrInst::Conv { a, .. } => push_val(*a, out),
             IrInst::PtrAdd { base, off, .. } => { out.push(*base); push_val(*off, out); }
-            IrInst::LeaLabel { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => {}
+            IrInst::LeaLabel { .. } | IrInst::LeaStaticString { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => {}
             IrInst::Call { args, .. } => for a in args { push_val(*a, out); }
             IrInst::CallIndirect { target, args, .. } => {
                 out.push(*target);
@@ -349,7 +356,7 @@ impl IrInst {
             IrInst::Un { a, .. } | IrInst::Conv { a, .. } => *a == Value::Reg(v),
             IrInst::Load { ptr, .. } | IrInst::FieldAddr { base: ptr, .. } => *ptr == v,
             IrInst::PtrAdd { base, off, .. } => *base == v || *off == Value::Reg(v),
-            IrInst::LeaLabel { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => false,
+            IrInst::LeaLabel { .. } | IrInst::LeaStaticString { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => false,
             IrInst::EnvInit { argc, argv } => *argc == Value::Reg(v) || *argv == Value::Reg(v),
             IrInst::Line(..) => false,
             IrInst::DebugVar { .. } => false,

@@ -75,6 +75,23 @@ AArch64 保持原 call。这正是 LLVM 靠 <code>--fast</code> 的 LTO 吃掉�
 C runtime 字符串路径 + LTO 整体调度的架构级工程，非单点 pass 可回收，量化搁置。
 <code>dial_array_set</code> 内联因 COW 分支 + 元素所有权结算 + 与 C runtime 布局耦合，风险/收益
 比不划算，本轮不动（延续「不硬做负收益优化」纪律）。</p>
+<p><strong>2026-11-19 后续更新（维度 2 再改善：字符串字面量静态化）</strong>：审计指出
+「C runtime 字符串路径」是架构级差距，本轮攻其中最高 ROI 的一点——字符串字面量
+编译期已知且不可变，却每次求值都调用 <code>dial_string_new</code>（malloc+strlen+memcpy）。
+b20「<code>x=x+"y"</code> 循环 4000 次」实测该调用占约 50% 开销。asm 后端新增 IR 指令
+<code>LeaStaticString</code>，把每个字面量在 <code>.rodata</code> 发射为静态 immortal DialString
+（<code>[rc=INT64_MIN][len][data\0]</code>，retain/release no-op），<code>Expr::StringLit</code> 直接取
+静态句柄，彻底省去运行时构造；字符串不可变、<code>==</code> 走内容比较，无对象身份依赖，
+语义等价。仅改 asm 路径（ir/lower/codegen_asm/pass），LLVM 后端从 AST 直接生成、
+零改动。<strong>实测 b20 2.275x → 1.084x（-52%，近乎追平）</strong>，全 <code>.s</code> 中
+<code>dial_string_new</code> 调用 23→0，字符串类几何平均 ~1.33x→1.083x，整体 1.0891x→1.0794x。
+过程中发现既有测试 R11 的 probe 用 <code>extern strchr</code> 返回裸 C 指针当 string 句柄
+（既有 UB：旧版 exit=132 double-free，测试只看 stdout 漏检），静态化进 .rodata 后
+更早暴露为 SIGSEGV；已改用 channel close+recv 的合法 null 来源重写 probe（各优化
+级别双后端一致、exit=0），不改编译器语义、不掩盖 bug。全门禁绿（golden 23/22 +
+差分 fuzz 450 + 工具链 22 + PGO + 全量 tests + ARC 压测 + glibc 堆检查）。
+<strong>总裁裁不变</strong>：整体仍慢约 9%，字符串类已接近追平；剩余差距是 GRA 全 spill、
+数组 set 的 COW、b22 substring/C runtime 等架构级工程，继续量化推进。</p>
 <p><strong>2026-11-19 后续更新（互递归尾调用帧复用）</strong>：asm 的文本级尾调用消除
 <code>elide_tail_calls</code> 此前虽把互递归 <code>evR</code>/<code>odR</code> 的 <code>call</code> 改成 <code>jmp</code>，但每层仍要
 <code>subq $120</code> 建帧 + <code>movq</code> 存参 + <code>addq $120</code> 拆帧——b12 互递归奇偶判定 4.263x

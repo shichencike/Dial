@@ -310,7 +310,7 @@ fn subst_reg(f: &mut IrFunction, from: VReg, to: VReg) {
 
 fn subst_inst(inst: &mut IrInst, from: VReg, to: VReg) {
     match inst {
-        IrInst::Alloca { .. } | IrInst::LeaLabel { .. } | IrInst::FuncAddr { .. } => {}
+        IrInst::Alloca { .. } | IrInst::LeaLabel { .. } | IrInst::LeaStaticString { .. } | IrInst::FuncAddr { .. } => {}
         IrInst::Load { ptr, .. } => { if *ptr == from { *ptr = to; } }
         IrInst::Store { ptr, val, .. } => { if *ptr == from { *ptr = to; } if let Value::Reg(r) = val { if *r == from { *val = Value::Reg(to); } } }
         IrInst::FieldAddr { base, .. } => { if *base == from { *base = to; } }

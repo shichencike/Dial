@@ -414,6 +414,14 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
         let mut bytes: Vec<String> = s.as_bytes().iter().map(|b| b.to_string()).collect();
         bytes.push("0".to_string());
         out.push_str(&format!(".Lstr{}:\n\t.byte {}\n", idx, bytes.join(", ")));
+        // 静态 immortal DialString：布局 [rc=INT64_MIN][len][data\0]，8 字节对齐。
+        // DialString handle 指向 len 字段（= 对象 +8），dial_rc_retain/release/clone
+        // 对 INT64_MIN 哨兵 no-op，故可安全共享、永不释放。字面量编译期已知且不可变，
+        // 用它替代运行时 dial_string_new，消除循环内反复的 malloc+strlen+memcpy。
+        out.push_str(&format!(
+            "\t.balign 8\n.Ldstr{}:\n\t.quad -9223372036854775808\n\t.quad {}\n\t.byte {}\n",
+            idx, s.as_bytes().len(), bytes.join(", ")
+        ));
     }
     // R4 阶段一：插桩计数器数组（.comm 零初始化、8 字节对齐）。
     if pgo.instrument {
@@ -2197,6 +2205,21 @@ impl<'a> FnEmit<'a> {
                     EmitTarget::AArch64 => {
                         self.line(&format!("\tadrp {}, .Lstr{}", self.g3(), lit));
                         self.line(&format!("\tadd {}, {}, :lo12:.Lstr{}", self.g2(), self.g3(), lit));
+                    }
+                }
+                let g = self.g2().to_string();
+                self.sg(*dst, &g);
+            }
+            IrInst::LeaStaticString { dst, lit } => {
+                // 静态 immortal DialString 的对外句柄指向 len 字段 = 对象起点 +8。
+                match self.target {
+                    EmitTarget::X86_64SysV => {
+                        self.line(&format!("\tleaq .Ldstr{}+8({}), {}", lit, self.r("rip"), self.r(self.g2())));
+                    }
+                    EmitTarget::AArch64 => {
+                        self.line(&format!("\tadrp {}, .Ldstr{}", self.g3(), lit));
+                        self.line(&format!("\tadd {}, {}, :lo12:.Ldstr{}", self.g2(), self.g3(), lit));
+                        self.line(&format!("\tadd {}, {}, #8", self.g2(), self.g2()));
                     }
                 }
                 let g = self.g2().to_string();

@@ -3438,3 +3438,19 @@ imulq   %r10, %r15     # s * 31
 **验证全绿**：默认 golden 23 + ReleaseFast 双后端 22 + 差分 fuzz 450（0 不一致）+ 工具链去 LLVM 化 22 + 自研 PGO L1-L4 + 全量 run_tests。
 
 **护栏**：1.10.0/零依赖/AArch64/LLVM 路径零变化、不打 tag；只改 asm 文本 pass + 新增 golden 用例。
+
+---
+
+## v1.10 开发增量：字符串字面量静态化（b20 2.275x → 1.084x）
+
+**为什么做**：延续代替 LLVM 的性能主线，攻审计列出的「C runtime 字符串路径」架构级差距中最高 ROI 的一点。b20（`x=x+"y"` 循环 4000 次）2.275x 是除互递归外最落后的单点。受控 C 实验（复用 safety-0 runtime）坐实：循环内每次 `dial_string_new("y")`（malloc+strlen+memcpy）占该模式约 50% 开销，静态对象版校验和一致。
+
+**实现（仅 asm 路径：ir.rs / lower.rs / codegen_asm.rs / pass.rs）**：新增 IR 指令 `LeaStaticString { dst, lit }`；`.rodata` 为每个字面量额外发射 `.LdstrN`（`.balign 8` + `[.quad INT64_MIN][.quad len][.byte data,0]`）；`Expr::StringLit` 从原来的 `LeaLabel + dial_string_new` 改为直接 `LeaStaticString` 取静态句柄（指向 len 字段 = 对象+8），省去运行时构造与成对 release。语义安全性：字符串不可变（runtime 无任何原地写 data）、`==` 走 `dial_string_eq` 内容比较（lower.rs 注释明确禁用指针相等）、immortal rc 哨兵使 retain/release/clone no-op。LLVM 后端 `codegen.rs::compile(program:&Program)` 从 AST 直接生成、不消费 IR，零改动。AArch64 用 adrp/add+8 发射，交叉汇编验证通过。
+
+**实测（公平 --fast -O3，校验和锚点）**：b20 2.275x → 1.084x（-52%，近乎追平），全 `.s` 中 `dial_string_new` 调用 23→0，字符串类几何平均 ~1.33x → 1.083x，整体 1.0891x → 1.0794x，胜/平/负 6/7/15 → 7/5/16。b22（substring）1.37x 瓶颈在 `dial_string_substring` 的 C runtime，非字面量，本轮不动。
+
+**踩坑与修复（既有测试 UB，重要）**：改动后全量 tests 的 R11「is_null 双后端一致性」失败——probe 用 `extern fn strchr(...): string` 把 C 返回的裸指针当 DialString 句柄管理 ARC，是既有 UB（回退验证：旧版 asm 虽 stdout 正确但 exit=132 Fail-Fast double-free，测试只看 stdout 漏检）。静态化把 `"hello"` 放进 .rodata 后，strchr 指向只读段内部，release 写只读内存 → SIGSEGV（exit=139），stdout 未输出完。LLVM 后端在该 UB 上 exit=0 属碰巧。修正：用语言内合法 null 来源重写 probe——channel `close(ch)` 后 `recv`/`try_recv` 返回 NULL（R13 已验证），各优化级别（-O0/O1/O2/O3/g-O3）双后端一致、exit=0。**不改编译器语义、不掩盖 bug**，只是让测试测它本该测的 is_null 语义。
+
+**验证全绿**：golden 默认 23 + ReleaseFast 双后端 22 + 差分 fuzz 450（0 不一致）+ 工具链去 LLVM 化 22 + 自研 PGO L1-L4 + 全量 run_tests（exit=0）+ ARC 压测（20 万次字面量拼接，双后端输出一致、RSS 接近）+ glibc MALLOC_CHECK_=3 堆检查（无 double-free）。
+
+**护栏**：1.10.0/零依赖/LLVM 路径零改动/不打 tag；只改 asm IR 发射器 + 1 处测试 probe（修既有 UB）。

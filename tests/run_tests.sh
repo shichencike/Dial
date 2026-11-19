@@ -2161,15 +2161,21 @@ echo "  -- R11) is_null 句柄判空双后端一致性 --"
 IDIR="${RDIR}/is_null"; mkdir -p "$IDIR"
 
 # is_null 的准入名单由语义层 is_nullable_type 统一把关（两端同源）。
-# 用 libc strchr（找不到字符返回 NULL）作为干净的可控 null/non-null 来源：
-#   extern fn 返回 string（ARC 句柄，在判空名单内），C NULL 直接映射为空句柄。
+# 用 channel 的 close+recv / try_recv 作为合法的可控 null/non-null string 来源：
+#   recv 到元素=non-null，close 后 recv/try_recv 空通道=null。
+# 注意：早期版本用 extern strchr 返回裸 C 指针当 string 句柄——那是既有 UB
+#   （C 返回值非 DialString 对象，作用域结束 ARC release 会 double-free，
+#   旧版 exit=132 只是测试只看 stdout 而漏检）。asm 字面量静态化进 .rodata 后
+#   该 UB 更早暴露为 SIGSEGV，故改用 channel 这一语言内合法 null 来源。
 cat > "${IDIR}/probe.dial" <<'DIALEOF'
-extern fn strchr(s: rawptr<byte>, c: int): string;
 fn main(): int {
+    let ch: channel<string> = channel(2);
     var s: string = "hello";
-    var a: string = strchr(s.as_c_str(), 104);
-    var b: string = strchr(s.as_c_str(), 122);
-    var c: string = strchr(s.as_c_str(), 111);
+    move_to(s, ch);
+    var a: string = recv(ch);          // non-null: "hello"
+    close(ch);
+    var b: string = recv(ch);          // null: closed + empty
+    var c: string = try_recv(ch);      // null: closed + empty
     print(is_null(a));
     print(is_null(b));
     print(is_null(c));

@@ -19,6 +19,24 @@
 > `dial_array_set` 内联因 COW 分支 + 元素所有权结算 + 与 C runtime 布局耦合，风险/收益
 > 比不划算，本轮不动（延续「不硬做负收益优化」纪律）。
 
+> **2026-11-19 后续更新（维度 2 再改善：字符串字面量静态化）**：审计指出
+> 「C runtime 字符串路径」是架构级差距，本轮攻其中最高 ROI 的一点——字符串字面量
+> 编译期已知且不可变，却每次求值都调用 `dial_string_new`（malloc+strlen+memcpy）。
+> b20「`x=x+"y"` 循环 4000 次」实测该调用占约 50% 开销。asm 后端新增 IR 指令
+> `LeaStaticString`，把每个字面量在 `.rodata` 发射为静态 immortal DialString
+> （`[rc=INT64_MIN][len][data\0]`，retain/release no-op），`Expr::StringLit` 直接取
+> 静态句柄，彻底省去运行时构造；字符串不可变、`==` 走内容比较，无对象身份依赖，
+> 语义等价。仅改 asm 路径（ir/lower/codegen_asm/pass），LLVM 后端从 AST 直接生成、
+> 零改动。**实测 b20 2.275x → 1.084x（-52%，近乎追平）**，全 `.s` 中
+> `dial_string_new` 调用 23→0，字符串类几何平均 ~1.33x→1.083x，整体 1.0891x→1.0794x。
+> 过程中发现既有测试 R11 的 probe 用 `extern strchr` 返回裸 C 指针当 string 句柄
+> （既有 UB：旧版 exit=132 double-free，测试只看 stdout 漏检），静态化进 .rodata 后
+> 更早暴露为 SIGSEGV；已改用 channel close+recv 的合法 null 来源重写 probe（各优化
+> 级别双后端一致、exit=0），不改编译器语义、不掩盖 bug。全门禁绿（golden 23/22 +
+> 差分 fuzz 450 + 工具链 22 + PGO + 全量 tests + ARC 压测 + glibc 堆检查）。
+> **总裁裁不变**：整体仍慢约 9%，字符串类已接近追平；剩余差距是 GRA 全 spill、
+> 数组 set 的 COW、b22 substring/C runtime 等架构级工程，继续量化推进。
+
 > **2026-11-19 后续更新（互递归尾调用帧复用）**：asm 的文本级尾调用消除
 > `elide_tail_calls` 此前虽把互递归 `evR`/`odR` 的 `call` 改成 `jmp`，但每层仍要
 > `subq $120` 建帧 + `movq` 存参 + `addq $120` 拆帧——b12 互递归奇偶判定 4.263x
