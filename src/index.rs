@@ -421,6 +421,7 @@ impl Indexer {
                 Stmt::Select {
                     arms,
                     default_body,
+                    timeout_body,
                     line,
                     col,
                     ..
@@ -447,6 +448,11 @@ impl Indexer {
                     if let Some(db) = default_body {
                         let d = self.push_scope(Some(scope_id));
                         self.index_stmts(db, d);
+                    }
+                    // v1.10：timeout 分支自成作用域。
+                    if let Some(tb) = timeout_body {
+                        let t = self.push_scope(Some(scope_id));
+                        self.index_stmts(tb, t);
                     }
                 }
                 // 裸块（v0.98.next）：引入新作用域并递归索引内部语句。

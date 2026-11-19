@@ -1,0 +1,33 @@
+// v1.10：select 块级超时——线程延迟到达与超时唤醒竞态端到端测试。
+// 时间差留足余量（线程 200ms vs 超时 30ms），输出确定。
+
+fn sender(ch: channel<string>): void {
+    sleep(200);
+    var a: string = "late";
+    move_to(a, ch);
+}
+
+fn main(): int {
+    // 线程 200ms 后才发；select 只等 30ms -> 必超时先到。
+    let ch: channel<string> = channel(2);
+    let t: thread = spawn(sender, ch);
+    select(30) {
+        case recv(ch) as v {
+            print("STS unexpected-early-case:", v);
+        }
+        timeout {
+            print("STS timeout-before-late");
+        }
+    }
+    join(t);
+    // join 后数据已在通道，select 立即收到（不走超时）。
+    select(1000) {
+        case recv(ch) as w {
+            print("STS case-after:", w);
+        }
+        timeout {
+            print("STS unexpected-late-timeout");
+        }
+    }
+    return 0;
+}

@@ -753,6 +753,11 @@ impl<'ctx> CodeGen<'ctx> {
         // v0.91 多路复用：全局事件广播 + 选择器对象
         self.decl_func("dial_chan_epoch", self.context.i64_type().into(), &[]);
         self.decl_void("dial_chan_wait", &[self.context.i64_type().into()]);
+        // v1.10 select 块级超时：绝对 deadline 等待。
+        self.decl_func("dial_chan_now_ms", self.context.i64_type().into(), &[]);
+        self.decl_func("dial_chan_wait_timeout", self.context.i64_type().into(), &[
+            self.context.i64_type().into(), self.context.i64_type().into(),
+        ]);
         self.decl_func("dial_sel_new", i8b, &[]);
         self.decl_void("dial_sel_add", &[i8b.into(), i8b.into()]);
         self.decl_func("dial_sel_pick", self.context.i64_type().into(), &[i8b.into()]);
@@ -3483,6 +3488,8 @@ impl<'ctx> CodeGen<'ctx> {
             Stmt::Select {
                 arms,
                 default_body,
+                timeout,
+                timeout_body,
                 line,
                 col,
             } => {
@@ -3494,6 +3501,26 @@ impl<'ctx> CodeGen<'ctx> {
                 let nowait_bb = self.context.append_basic_block(function, "select.nowait");
                 let eof_bb = self.context.append_basic_block(function, "select.eof");
                 let end_bb = self.context.append_basic_block(function, "select.end");
+                let timeout_end_bb = if timeout.is_some() {
+                    Some(self.context.append_basic_block(function, "select.timeout.end"))
+                } else {
+                    None
+                };
+
+                // v1.10：绝对 deadline = now_ms + timeout_ms，在 select 入口的
+                // 前驱块求值一次（支配 nowait 块）。用绝对时刻而非相对时长，epoch
+                // 多次变化导致多次重等时不会累计超时。超时表达式有副作用也只求值一次。
+                let deadline_val = match timeout {
+                    Some(te) => {
+                        let ms = self.gen_expr(te, function, scopes, func_values, functions, structs)?
+                            .into_int_value();
+                        let now = self.call_c("dial_chan_now_ms", &[]);
+                        Some(self.builder.build_int_add(
+                            now.into_int_value(), ms, "select.deadline",
+                        ).unwrap())
+                    }
+                    None => None,
+                };
 
                 // 选择器句柄的槽必须在 entry block（否则栈帧会随循环增长）。
                 let sel_slot = self.alloca_in_entry(function, self.i8ptr().into(), "select.sel");
@@ -3667,10 +3694,51 @@ impl<'ctx> CodeGen<'ctx> {
                         self.builder.build_unconditional_branch(end_bb).unwrap();
                     }
                     scopes.pop();
+                } else if let (Some(dl), Some(tend)) = (deadline_val, timeout_end_bb) {
+                    // v1.10：无 default、有超时——带 deadline 的阻塞等待。
+                    // 返回 1=超时 -> timeout.end，0=被唤醒 -> loop 重挑。
+                    let timed_out = self.call_c(
+                        "dial_chan_wait_timeout",
+                        &[epoch.into(), dl.into()],
+                    );
+                    let is_to = self.builder.build_int_compare(
+                        IntPredicate::EQ,
+                        timed_out.into_int_value(),
+                        self.context.i64_type().const_int(1, false),
+                        "sel.timedout",
+                    ).unwrap();
+                    self.builder
+                        .build_conditional_branch(is_to, tend, loop_bb)
+                        .unwrap();
                 } else {
-                    // 无 default：阻塞等待事件（事件驱动，非轮询）。
+                    // 无 default、无超时：阻塞等待事件（事件驱动，非轮询）。
                     self.call_c_void("dial_chan_wait", &[epoch.into()]);
                     self.builder.build_unconditional_branch(loop_bb).unwrap();
+                }
+
+                // ---- timeout.end：超时分支（v1.10）----
+                if let Some(tend) = timeout_end_bb {
+                    self.builder.position_at_end(tend);
+                    self.call_c_void("dial_sel_free", &[sel.into()]);
+                    if let Some(tb) = timeout_body {
+                        scopes.push(HashMap::new());
+                        self.push_defer_frame();
+                        for s in tb {
+                            self.gen_stmt(s, function, scopes, func_values, functions, structs)?;
+                            if self.is_terminated() {
+                                break;
+                            }
+                        }
+                        self.pop_defer_frame_emit(function, scopes, func_values, functions, structs)?;
+                        if !self.is_terminated() {
+                            self.release_scope_locals(scopes.last().unwrap(), structs);
+                        }
+                        scopes.pop();
+                    }
+                    // 无 timeout body 或 body 未 return -> 落到 end。
+                    if !self.is_terminated() {
+                        self.builder.build_unconditional_branch(end_bb).unwrap();
+                    }
                 }
 
                 // ---- eof：全体通道已关闭且已空 -> select 直接结束，不执行任何分支 ----

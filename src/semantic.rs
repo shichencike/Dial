@@ -3605,13 +3605,20 @@ fn desugar_stmts(stmts: &mut [Stmt], map: &HashMap<String, (usize, Type)>) {
                 desugar_stmts(body, map);
                 desugar_stmts(&mut catch.body, map);
             }
-            Stmt::Select { arms, default_body, .. } => {
+            Stmt::Select { arms, default_body, timeout, timeout_body, .. } => {
                 for arm in arms.iter_mut() {
                     desugar_expr(&mut arm.chan, map);
                     desugar_stmts(&mut arm.body, map);
                 }
                 if let Some(db) = default_body {
                     desugar_stmts(db, map);
+                }
+                // v1.10：超时表达式与 timeout 分支也要脱糖。
+                if let Some(te) = timeout {
+                    desugar_expr(te, map);
+                }
+                if let Some(tb) = timeout_body {
+                    desugar_stmts(tb, map);
                 }
             }
             Stmt::Block { body, .. } => desugar_stmts(body, map),
@@ -4125,9 +4132,13 @@ fn defer_has_jump(s: &Stmt) -> bool {
         Stmt::Try { body, catch, .. } => {
             body.iter().any(defer_has_jump) || catch.body.iter().any(defer_has_jump)
         }
-        Stmt::Select { arms, default_body, .. } => {
+        Stmt::Select { arms, default_body, timeout_body, .. } => {
             arms.iter().any(|a| a.body.iter().any(defer_has_jump))
                 || default_body
+                    .as_ref()
+                    .map(|b| b.iter().any(defer_has_jump))
+                    .unwrap_or(false)
+                || timeout_body
                     .as_ref()
                     .map(|b| b.iter().any(defer_has_jump))
                     .unwrap_or(false)
@@ -4207,11 +4218,13 @@ fn check_moved_stmt(
         // 若这里再递归一遍，同一条 move_to 会被检查两次：第一次通过并标记 moved，
         // 第二次立刻报「变量已转移，无法使用」——一个完全合法的程序被误拒
         // （例如 select { case recv(ch) as v { move_to(s, ch); } } 只写了一次 move_to）。
-        Stmt::Select {
-            arms, ..
-        } => {
+        Stmt::Select { arms, timeout, .. } => {
             for arm in arms {
                 check_moved_expr(&arm.chan, scopes, funcs, structs, line, col)?;
+            }
+            // v1.10：超时表达式也受所有权约束（如引用了已 transfer 的变量）。
+            if let Some(te) = timeout {
+                check_moved_expr(te, scopes, funcs, structs, line, col)?;
             }
             Ok(())
         }
@@ -5088,9 +5101,25 @@ fn check_stmt(
         Stmt::Select {
             arms,
             default_body,
+            timeout,
+            timeout_body,
             line,
             col,
         } => {
+            // v1.10：超时毫秒表达式须为 int（毫秒整数）。
+            if let Some(te) = timeout {
+                let tty = type_of(te, scopes, funcs, structs)?;
+                if !matches!(tty, Type::Int) {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：select(ms) 的超时时间必须是 int（毫秒），实际为 {}",
+                            tty.name()
+                        ),
+                        *line,
+                        *col,
+                    ));
+                }
+            }
             for arm in arms {
                 // 规则 1：形状校验
                 let chan_expr = match &arm.chan {
@@ -5142,6 +5171,14 @@ fn check_stmt(
             if let Some(db) = default_body {
                 scopes.push(HashMap::new());
                 for s in db {
+                    check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth)?;
+                }
+                scopes.pop();
+            }
+            // v1.10：timeout 分支自成一个作用域，没有绑定变量。
+            if let Some(tb) = timeout_body {
+                scopes.push(HashMap::new());
+                for s in tb {
                     check_stmt_at(s, scopes, funcs, f, structs, in_loop, try_depth)?;
                 }
                 scopes.pop();
@@ -5576,6 +5613,7 @@ fn walk_gotos(
             Stmt::Select {
                 arms,
                 default_body,
+                timeout_body,
                 ..
             } => {
                 for arm in arms {
@@ -5606,6 +5644,14 @@ fn walk_gotos(
                         out,
                         ids,
                     )?;
+                    path.pop();
+                }
+                // v1.10：timeout 分支自成一个 goto 块。
+                if let Some(tb) = timeout_body {
+                    let id = ids.next_block;
+                    ids.next_block += 1;
+                    path.push(id);
+                    walk_gotos(tb, depth + 1, path, try_path, with_path, out, ids)?;
                     path.pop();
                 }
             }
@@ -5751,7 +5797,7 @@ fn collect_refs(stmts: &[Stmt], si: &mut usize, loop_d: usize, cond_d: usize, re
             }
             // select（v0.91）：各 case 的通道表达式与分支体都要纳入引用分析。
             Stmt::Select {
-                arms, default_body, ..
+                arms, default_body, timeout, timeout_body, ..
             } => {
                 for arm in arms {
                     record_expr_refs(&arm.chan, *si, unsafe_ctx, refs);
@@ -5759,6 +5805,13 @@ fn collect_refs(stmts: &[Stmt], si: &mut usize, loop_d: usize, cond_d: usize, re
                 }
                 if let Some(db) = default_body {
                     collect_refs(db, si, loop_d, cond_d, refs);
+                }
+                // v1.10：超时表达式与 timeout 分支纳入引用分析。
+                if let Some(te) = timeout {
+                    record_expr_refs(te, *si, unsafe_ctx, refs);
+                }
+                if let Some(tb) = timeout_body {
+                    collect_refs(tb, si, loop_d, cond_d, refs);
                 }
             }
             Stmt::Expr(e, ..) => {
@@ -5819,15 +5872,18 @@ fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, f
                 set_moves(body, si, loop_d, cond_d, facts);
                 set_moves(&mut catch.body, si, loop_d, cond_d, facts);
             }
-            // select（v0.91）
+            // select（v0.91；v1.10 增 timeout 分支）
             Stmt::Select {
-                arms, default_body, ..
+                arms, default_body, timeout_body, ..
             } => {
                 for arm in arms {
                     set_moves(&mut arm.body, si, loop_d, cond_d, facts);
                 }
                 if let Some(db) = default_body {
                     set_moves(db, si, loop_d, cond_d, facts);
+                }
+                if let Some(tb) = timeout_body {
+                    set_moves(tb, si, loop_d, cond_d, facts);
                 }
             }
             _ => {}

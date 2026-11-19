@@ -3107,6 +3107,15 @@ if "$DIALC" build tests/kvmap_string_value_smoke.dial -o "${TMP}/v_sv" >"${TMP}/
     else vbad "V 组：kvmap_string_value_smoke 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
 else vbad "V 组：kvmap_string_value_smoke 编译失败"; tail -8 "${TMP}/v_sv.log"; fi
 
+# 3c) v1.10 select 块超时：线程延迟到达与超时唤醒竞态。
+if "$DIALC" build tests/select_timeout_smoke.dial -o "${TMP}/v_sto" >"${TMP}/v_sto.log" 2>&1; then
+    out=$("${TMP}/v_sto" 2>/dev/null)
+    if printf '%s\n' "$out" | grep -q 'STS timeout-before-late' \
+       && printf '%s\n' "$out" | grep -q 'STS case-after:late' ; then
+        vpass "v1.10：select 块超时（线程延迟 30ms 超时先到 + join 后立即收）通过"
+    else vbad "V 组：select_timeout_smoke 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
+else vbad "V 组：select_timeout_smoke 编译失败"; tail -8 "${TMP}/v_sto.log"; fi
+
 # 4) B7 负向：顶层 var 全局变量必须被拒（红线：禁止可变全局状态）。
 if "$DIALC" build tests/bad/const_top_level_var.dial -o "${TMP}/v_var" >"${TMP}/v_var.log" 2>&1; then
     vbad "B7：顶层 var 全局变量竟被接受（违反禁止可变全局状态红线）"

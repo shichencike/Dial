@@ -50,6 +50,40 @@ void dial_chan_wait(int64_t since) {
     pthread_mutex_unlock(&g_ev_mutex);
 }
 
+/* v1.10 select 块级超时：返回 CLOCK_REALTIME 的绝对毫秒时刻。
+ * 用绝对 deadline 而非相对时长——epoch 因其它通道状态变化而多次改变时，
+ * select 会多次重挑重等；绝对 deadline 保证「从进入 select 起最多等 ms」，
+ * 不因重等而累计超时。 */
+int64_t dial_chan_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000L;
+}
+
+/* v1.10：等待直到 epoch 变化(被唤醒)或到达绝对 deadline_ms。
+ * 返回 1 = 超时(epoch 仍未变)，0 = 被事件唤醒(epoch 已变)。
+ * 语义与 dial_chan_wait 一致：只等 epoch 变化，不直接取元素——
+ * 唤醒后 select 重挑就绪通道。用 pthread_cond_timedwait 事件驱动、非轮询。 */
+int64_t dial_chan_wait_timeout(int64_t since, int64_t deadline_ms) {
+    if (deadline_ms < 0) deadline_ms = 0;
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(deadline_ms / 1000);
+    ts.tv_nsec = (long)((deadline_ms % 1000) * 1000000L);
+    pthread_mutex_lock(&g_ev_mutex);
+    while (atomic_load(&g_epoch) == since) {
+        int rc = pthread_cond_timedwait(&g_ev_cond, &g_ev_mutex, &ts);
+        if (rc == ETIMEDOUT) {
+            /* 超时这一刻再看一眼 epoch：变化与超时同时发生时，以「有事件」为准，
+             * 不把已被唤醒的 select 误判为超时（对齐 recv_timeout 的处理）。 */
+            if (atomic_load(&g_epoch) != since) break;
+            pthread_mutex_unlock(&g_ev_mutex);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&g_ev_mutex);
+    return 0;
+}
+
 /*
  * 在就绪通道中挑一个。
  *

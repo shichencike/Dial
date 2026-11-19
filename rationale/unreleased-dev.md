@@ -3385,3 +3385,12 @@ imulq   %r10, %r15     # s * 31
 
 **护栏**：版本 1.10.0 不变、零新依赖、AArch64 零变化、不打 tag、baseline .s 零回归（Phase A 不碰发射器）、双后端输出逐字节一致。get_or/values 的 string 放开留 Phase C（配套 get_or 默认值所有权结算，避免 double-free）。
 
+**Phase B · select 块级超时（提交 `feat(select): 块级超时参数（双后端一致）`）**：按用户裁决语法 `select(ms) { case ... timeout { ... } default { ... } }`，timeout 分支可选、必须置末、须配 select(ms)；default 与 timeout 可并存且 default 优先（非阻塞不触发超时）。实现：
+- `ast.rs` 的 `Stmt::Select` 加 `timeout: Option<Expr>` 与 `timeout_body: Option<Vec<Stmt>>`；`parser.rs::parse_select` 解析 `select(ms)` 头括号（timeout 非全局关键字，仅 select 后紧跟 `(` 才识别）+ 块内 `timeout { }` 分支 + 顺序校验。
+- `semantic.rs` 校验 timeout 表达式为 int、timeout_body 自成作用域。
+- C 侧 `dial_channel.c` 新增 `dial_chan_now_ms()`（CLOCK_REALTIME 绝对毫秒）与 `dial_chan_wait_timeout(since, deadline_ms)`（pthread_cond_timedwait 事件驱动；返回 1=超时/0=唤醒；超时与 epoch 变化竞态时以「有事件」为准，对齐 recv_timeout）。用**绝对 deadline** 而非相对时长——epoch 因其它通道状态变化多次改变时 select 会多次重等，绝对时刻保证「进入 select 起最多等 ms」不累计。
+- 两端 codegen：LLVM `codegen.rs` 在 select 入口前驱块算 deadline=now_ms+ms，nowait 无 default 有 timeout 时调 wait_timeout 按返回值分支到 `select.timeout.end`（执行 timeout_body 或直落 end）；asm `lower.rs::lower_select` 用 deadline 栈槽 + `IrInst::Call`/`ICmp Eq`/`Term::Branch` 镜像同一骨架。`codegen_asm.rs` 零改动（通用 C 调用发射）。
+- 测试：`tests/asm_golden/select_timeout.dial`（4 确定性场景：case 优先/空通道超时/无 body 直落/default 优先，20 goldens 全绿）+ `tests/select_timeout_smoke.dial`（线程 200ms 延迟 vs 30ms 超时竞态 + join 后立即收，V 组断言）。双后端输出逐字节一致。
+
+**护栏（Phase B）**：版本 1.10.0/零依赖/AArch64 零变化/不打 tag 不变；timeout 非全局关键字（`timeout` 仍可作普通标识符，仅 select 后 `(` 上下文解析）；不改 select 既有语义（无 timeout 时走原 dial_chan_wait 路径、产物零变化）。
+

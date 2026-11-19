@@ -3673,8 +3673,8 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td>文件级 <code>const</code> 的数组字面量按 §37.1 的宪法裁决纳入只读常量；具体落地状态见 §37.4 批次表</td>
 </tr>
 <tr>
-<td><code>select</code> 语句级超时（<code>select</code> 块本身没有超时参数）</td>
-<td><strong>未实现</strong>——<code>select</code>（v0.91 已落地）一旦进入就阻塞到「有通道就绪」或「全体 EOF」，<strong>没有超时参数</strong>。要「最多等 N 毫秒」，用<strong>已实现</strong>的 <code>recv_timeout(ch, ms)</code>（v0.9 起，作用于<strong>单个通道</strong>）——它不能替代多路复用，只是「等一会儿再看」的手段</td>
+<td><code>select</code> 语句级超时</td>
+<td><strong>已支持</strong>（v1.10）：<code>select(ms) { ... timeout { ... } }</code> 可选块级超时，等待超过 ms 且无通道就绪时执行 timeout 分支（timeout 体可省略——省略则超时直接结束）。底层用 <code>pthread_cond_timedwait</code> + 绝对 deadline（epoch 多次变化不累计超时），事件驱动非轮询；与 <code>default</code> 并存时 default 优先（非阻塞，不触发超时）。单通道场景仍可用 <code>recv_timeout(ch, ms)</code></td>
 </tr>
 <tr>
 <td>通道关闭的「反向」操作（重新打开）</td>
@@ -6265,7 +6265,19 @@ if (is_null(s)) {
 <li>绑定变量的类型<strong>自动推导</strong>为通道的元素类型（<code>channel&lt;string&gt;</code> → <code>string</code>），
   生命周期<strong>严格限制</strong>在 case 的 <code>{}</code> 内，出了块再用即编译错误。</li>
 <li><code>default</code> 至多一个，且必须放在所有 case 之后。</li>
+<li><strong>块级超时（v1.10）</strong>：<code>select(ms) { ... }</code> 的第一个括号内是毫秒表达式（int），
+  表示「最多等待 ms」。块内可写一个可选的 <code>timeout { ... }</code> 分支（必须放在最后）：
+  等待超过 ms 且仍无通道就绪时执行它；省略 timeout 分支则超时后 select 直接结束。
+  超时用绝对 deadline（<code>pthread_cond_timedwait</code>），epoch 因其它通道变化而多次改变时
+  不会累计超时；事件驱动非轮询。与 <code>default</code> 并存时 <strong>default 优先</strong>——有 default 时
+  select 非阻塞、永不触发 timeout。</li>
 </ul>
+<pre><code class="language-dial">select(500) {
+    case recv(chA) as a { print(a); }
+    case recv(chB) as b { print(b); }
+    timeout { print(&quot;等了 500ms，没有通道就绪&quot;); }
+}
+</code></pre>
 <h4 id="2792-三条语义">27.9.2 三条语义</h4>
 <table>
 <thead>

@@ -1270,7 +1270,9 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             Stmt::Try { body, catch, .. } => self.lower_try(body, catch),
-            Stmt::Select { arms, default_body, .. } => self.lower_select(arms, default_body),
+            Stmt::Select { arms, default_body, timeout, timeout_body, .. } => {
+                self.lower_select(arms, default_body, timeout, timeout_body)
+            }
             Stmt::Expr(e, _, _) => { self.lower_expr(e, &Type::Void)?; Ok(()) }
             Stmt::Block { body, .. } => {
                 self.push_scope();
@@ -3717,6 +3719,8 @@ impl<'a> Lower<'a> {
         &mut self,
         arms: &[SelectArm],
         default_body: &Option<Vec<Stmt>>,
+        timeout: &Option<Expr>,
+        timeout_body: &Option<Vec<Stmt>>,
     ) -> Result<(), String> {
         let n = arms.len();
         if n == 0 { return self.err("select 至少需要一个 case"); }
@@ -3726,6 +3730,12 @@ impl<'a> Lower<'a> {
         let epoch_slot = self.emit_alloca(IrType::I64);    // epoch（nowait 等待用）
         let idx_slot = self.emit_alloca(IrType::I64);      // dial_sel_pick 结果
         let v_slot = self.emit_alloca(IrType::Handle);     // dial_sel_recv 取到的元素句柄
+        // v1.10：绝对 deadline（now_ms + 超时毫秒），跨块传到 nowait 等待。
+        let deadline_slot = if timeout.is_some() {
+            Some(self.emit_alloca(IrType::I64))
+        } else {
+            None
+        };
 
         // ---- 块骨架 ----
         let setup_b = self.new_block(Vec::new());
@@ -3734,6 +3744,11 @@ impl<'a> Lower<'a> {
         let nowait_b = self.new_block(Vec::new());
         let eof_b = self.new_block(Vec::new());
         let end_b = self.new_block(Vec::new());
+        let timeout_end_b = if timeout.is_some() {
+            Some(self.new_block(Vec::new()))
+        } else {
+            None
+        };
         // dispatch 条件链 + take/case 块，每个 arm 一对。
         let mut dispatch_b: Vec<u32> = Vec::new();
         let mut take_b: Vec<u32> = Vec::new();
@@ -3753,6 +3768,18 @@ impl<'a> Lower<'a> {
                 dst, func: func.to_string(), args, arg_tys, ret_ty, linkage: CallLink::Runtime,
             });
             dst
+        }
+
+        // ---- v1.10：绝对 deadline = now_ms + 超时毫秒（在 select 入口当前块求值一次）----
+        if let (Some(te), Some(dslot)) = (timeout, deadline_slot) {
+            let (ms_val, _) = self.lower_expr(te, &Type::Int)?;
+            let ms_reg = self.cond_reg(ms_val)?;
+            let now = call_runtime(self, "dial_chan_now_ms", vec![], vec![], IrType::I64).unwrap();
+            let dl = self.new_reg(IrType::I64);
+            self.emit(IrInst::Bin {
+                op: ABin::Add, dst: dl, a: Value::Reg(now), b: Value::Reg(ms_reg), ty: IrType::I64,
+            });
+            self.emit(IrInst::Store { ptr: dslot, val: Value::Reg(dl), ty: IrType::I64 });
         }
 
         // ---- setup：建 selector，登记各 case 的通道 ----
@@ -3873,12 +3900,50 @@ impl<'a> Lower<'a> {
             }
             self.leave_scope()?;
             if !self.cur_terminated() { self.terminate(Term::Jump { target: end_b, args: Vec::new() }); }
+        } else if let (Some(dslot), Some(tend)) = (deadline_slot, timeout_end_b) {
+            // v1.10：无 default、有超时——带绝对 deadline 的阻塞等待。
+            // dial_chan_wait_timeout 返回 1=超时、0=被唤醒。
+            let ep = self.new_reg(IrType::I64);
+            self.emit(IrInst::Load { dst: ep, ptr: epoch_slot, ty: IrType::I64 });
+            let dl = self.new_reg(IrType::I64);
+            self.emit(IrInst::Load { dst: dl, ptr: dslot, ty: IrType::I64 });
+            let to = call_runtime(
+                self, "dial_chan_wait_timeout",
+                vec![Value::Reg(ep), Value::Reg(dl)],
+                vec![IrType::I64, IrType::I64], IrType::I64,
+            ).unwrap();
+            let is_to = self.new_reg(IrType::I64);
+            self.emit(IrInst::ICmp {
+                op: ACmp::Eq, dst: is_to, a: Value::Reg(to), b: Value::Imm(Imm::I64(1)),
+                ty: IrType::I64,
+            });
+            self.terminate(Term::Branch {
+                cond: is_to, then_b: tend, else_b: loop_b,
+                then_args: Vec::new(), else_args: Vec::new(),
+            });
         } else {
-            // 无 default：事件驱动阻塞等待（非轮询），epoch 来自进入 select 时记录的值。
+            // 无 default、无超时：事件驱动阻塞等待（非轮询），epoch 来自进入 select 时记录的值。
             let ep = self.new_reg(IrType::I64);
             self.emit(IrInst::Load { dst: ep, ptr: epoch_slot, ty: IrType::I64 });
             call_runtime(self, "dial_chan_wait", vec![Value::Reg(ep)], vec![IrType::I64], IrType::Void);
             self.terminate(Term::Jump { target: loop_b, args: Vec::new() });
+        }
+
+        // ---- timeout.end：超时分支（v1.10）----
+        if let Some(tend) = timeout_end_b {
+            self.set_cur(tend);
+            let sv = self.new_reg(IrType::Handle);
+            self.emit(IrInst::Load { dst: sv, ptr: sel_slot, ty: IrType::Handle });
+            call_runtime(self, "dial_sel_free", vec![Value::Reg(sv)], vec![IrType::Handle], IrType::Void);
+            if let Some(tb) = timeout_body {
+                self.push_scope();
+                for st in tb {
+                    self.lower_stmt(st)?;
+                    if self.cur_terminated() { break; }
+                }
+                self.leave_scope()?;
+            }
+            if !self.cur_terminated() { self.terminate(Term::Jump { target: end_b, args: Vec::new() }); }
         }
 
         // ---- eof：全体通道已关闭且已空 -> 直接结束，不执行任何分支 ----

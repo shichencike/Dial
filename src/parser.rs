@@ -1879,13 +1879,52 @@ impl Parser {
     /// `default` 必须在所有 case 之后，且至多一个。
     fn parse_select(&mut self) -> Result<Stmt> {
         let start = self.advance(); // select
+        // v1.10：可选块级超时 `select(ms) { ... }`。timeout 不是全局关键字，
+        // 只有 select 后紧跟 `(` 才解析为超时表达式。
+        let timeout = if self.check(&TokenKind::LParen) {
+            self.advance(); // (
+            let e = self.parse_expr()?;
+            self.expect(TokenKind::RParen)?;
+            Some(e)
+        } else {
+            None
+        };
         self.expect(TokenKind::LBrace)?;
 
         let mut arms: Vec<SelectArm> = Vec::new();
         let mut default_body: Option<Vec<Stmt>> = None;
+        let mut timeout_body: Option<Vec<Stmt>> = None;
 
         loop {
+            // v1.10：timeout 分支——识别标识符 `timeout` 后紧跟 `{`（非全局关键字）。
+            if matches!(&self.peek().kind, TokenKind::Ident(n) if n == "timeout")
+                && matches!(self.peek_at(1).kind, TokenKind::LBrace)
+            {
+                if timeout.is_none() {
+                    return Err(DialcError::new(
+                        "语法错误：timeout 分支只有在 select(ms) 指定了超时时间时才可用",
+                        start.line, start.col,
+                    ));
+                }
+                if timeout_body.is_some() {
+                    return Err(DialcError::new(
+                        "语法错误：timeout 分支至多只能出现一次",
+                        start.line, start.col,
+                    ));
+                }
+                self.advance(); // timeout
+                timeout_body = Some(self.parse_block()?);
+                // timeout 之后不再允许 case / default —— 直接结束
+                break;
+            }
             if self.check(&TokenKind::Case) {
+                if default_body.is_some() || timeout_body.is_some() {
+                    return Err(DialcError::new(
+                        "语法错误：case 必须放在 default / timeout 分支之前",
+                        start.line,
+                        start.col,
+                    ));
+                }
                 let case_tok = self.advance(); // case
                 // case 后是一个接收调用：recv(ch)
                 let chan = self.parse_expr()?;
@@ -1911,13 +1950,6 @@ impl Parser {
                 continue;
             }
             if self.check(&TokenKind::Default) {
-                if !arms.is_empty() && default_body.is_some() {
-                    return Err(DialcError::new(
-                        "语法错误：default 至多只能出现一次，且必须放在所有 case 之后",
-                        start.line,
-                        start.col,
-                    ));
-                }
                 if default_body.is_some() {
                     return Err(DialcError::new(
                         "语法错误：default 至多只能出现一次",
@@ -1927,22 +1959,23 @@ impl Parser {
                 }
                 self.advance(); // default
                 default_body = Some(self.parse_block()?);
-                // default 之后不再允许 case —— 直接结束循环
-                if self.check(&TokenKind::Case) {
-                    return Err(DialcError::new(
-                        "语法错误：default 必须放在所有 case 之后",
-                        start.line,
-                        start.col,
-                    ));
-                }
-                break;
+                // default 之后允许再跟 timeout（超时分支），但不允许 case。
+                continue;
             }
             break;
         }
 
-        if arms.is_empty() && default_body.is_none() {
+        if arms.is_empty() && default_body.is_none() && timeout_body.is_none() {
             return Err(DialcError::new(
                 "语法错误：select 至少需要一个 case 分支",
+                start.line,
+                start.col,
+            ));
+        }
+        if timeout_body.is_some() && timeout.is_none() {
+            // 双重保险：理论上 timeout 分支解析时已校验。
+            return Err(DialcError::new(
+                "语法错误：timeout 分支需要 select(ms) 指定超时时间",
                 start.line,
                 start.col,
             ));
@@ -1952,6 +1985,8 @@ impl Parser {
         Ok(Stmt::Select {
             arms,
             default_body,
+            timeout,
+            timeout_body,
             line: start.line,
             col: start.col,
         })

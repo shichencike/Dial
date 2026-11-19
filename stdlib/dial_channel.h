@@ -144,6 +144,14 @@ int64_t dial_chan_epoch(void);
 /* 等待直到全局 epoch 发生变化（即至少有一个通道的状态变了）。 */
 void    dial_chan_wait(int64_t since);
 
+/* v1.10 select 块级超时支持：
+ *   dial_chan_now_ms()                  取 CLOCK_REALTIME 绝对毫秒时刻
+ *   dial_chan_wait_timeout(since, dl)   等 epoch 变化或绝对 deadline(dl, 毫秒)；
+ *                                       返回 1=超时、0=被事件唤醒。
+ * 用绝对 deadline 保证「进入 select 起最多等 ms」，epoch 多次变化也不累计超时。 */
+int64_t dial_chan_now_ms(void);
+int64_t dial_chan_wait_timeout(int64_t since, int64_t deadline_ms);
+
 /*
  * 在就绪的通道中挑一个（多通道同时就绪时**随机**挑选，防饿死）。
  *

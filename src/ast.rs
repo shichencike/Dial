@@ -478,11 +478,20 @@ pub enum Stmt {
     /// `default_body` 为 `None` 时 select 阻塞等待；为 `Some` 时是**非阻塞**语义：
     /// 没有任何通道就绪就立刻走 default。
     ///
+    /// v1.10：可选块级超时 `select(ms) { ... timeout { ... } }`。`timeout` 是毫秒
+    /// 表达式（int），`timeout_body` 是超时后执行的分支（可选）。语义：等待超过
+    /// ms 且仍无通道就绪时执行 timeout_body；若没有 timeout_body，则像 EOF 一样
+    /// 直接结束。default 优先级更高——有 default 时 select 非阻塞，不会走到超时。
+    ///
     /// 全体通道 EOF（已关闭且已空）时，select **直接结束**，不执行任何分支
-    /// （包括 default）——EOF 是终止信号，不是「又一个可触发的事件」。
+    /// （包括 default / timeout）——EOF 是终止信号，不是「又一个可触发的事件」。
     Select {
         arms: Vec<SelectArm>,
         default_body: Option<Vec<Stmt>>,
+        /// v1.10 块级超时毫秒表达式（int）；None 表示永久等待（旧语义）。
+        timeout: Option<Expr>,
+        /// v1.10 超时后执行的分支体；None 表示超时直接结束。
+        timeout_body: Option<Vec<Stmt>>,
         line: usize,
         col: usize,
     },

@@ -1,0 +1,51 @@
+// v1.10：select 块级超时 `select(ms) { ... timeout { ... } }` 双后端一致性黄金用例。
+// 全部确定性：不打印耗时，超时间隔留足余量；通道空且不 close 保证超时必触发。
+
+fn main(): int {
+    // 1) 通道已有元素 -> 立即走 case（不走 timeout）
+    let ch: channel<string> = channel(2);
+    var a: string = "ready";
+    move_to(a, ch);
+    select(1000) {
+        case recv(ch) as v {
+            print("ST case:", v);
+        }
+        timeout {
+            print("ST unexpected-case-timeout");
+        }
+    }
+
+    // 2) 空通道（不 close）-> 超时走 timeout body
+    let empty: channel<string> = channel(2);
+    select(20) {
+        case recv(empty) as w {
+            print("ST unexpected-empty-case:", w);
+        }
+        timeout {
+            print("ST timeout-body");
+        }
+    }
+
+    // 3) 超时无 timeout body -> 直接结束，不崩
+    var before: int = 7;
+    select(20) {
+        case recv(empty) as z {
+            print("ST unexpected-nobody-case");
+        }
+    }
+    print("ST after-nobody:", before);
+
+    // 4) default 优先：有 default 时非阻塞，不触发 timeout
+    select(10) {
+        case recv(empty) as q {
+            print("ST unexpected-default-case");
+        }
+        default {
+            print("ST default-first");
+        }
+        timeout {
+            print("ST unexpected-default-timeout");
+        }
+    }
+    return 0;
+}
