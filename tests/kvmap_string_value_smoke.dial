@@ -1,0 +1,54 @@
+// v1.10：map<K,string> 值类型正向测试（静态 immortal 空串方案）。
+// 覆盖：put / get(命中) / get(未命中→静态空串) / contains / size /
+// for-in 遍历 / remove / 静态串参与拼接与插值 / 静态串 put 回表 /
+// 10 万次未命中循环（RC 免疫，不崩不泄漏）。
+// get_or / values 的 string 放开属后续阶段，本用例不触及。
+// 双后端（llvm / asm）输出必须逐字节一致。
+
+fn main(): int {
+    var m: map<string, string> = new_kv_map();
+    m.put("a", "alpha");
+    m.put("b", "beta");
+
+    // 命中：返回表内借用值
+    print("SV hit = ", m.get("a"));            // alpha
+    print("SV hit2 = ", m.get("b"));           // beta
+
+    // 未命中：返回共享静态空串（借用语义）
+    print("SV miss = [", m.get("zz"), "]");    // []
+    print("SV misslen = ", m.get("zz").length()); // 0
+
+    // 静态串参与拼接：不崩、不 double-free
+    print("SV miss_plus = [", m.get("zz") + "x", "]"); // [x]
+    print("SV interp = [", "p" + m.get("zz") + "q", "]"); // [pq]
+
+    print("SV has_a = ", m.contains("a"));     // true
+    print("SV has_zz = ", m.contains("zz"));   // false
+    print("SV size = ", m.size());             // 2
+
+    // for-in：命中值借用绑定
+    print("SV foreach:");
+    for (k, v in m) { print("  ", k, "->", v); }
+
+    // 未命中返回静态串可安全 put 回表（kv_retain_kind 对它 no-op）
+    m.put("empty", m.get("zz"));
+    print("SV empty_hit = [", m.get("empty"), "]"); // []
+    print("SV size2 = ", m.size());            // 3
+
+    // remove 命中与未命中
+    var rm: string = m.remove("a");
+    print("SV removed = ", rm);                // alpha
+    print("SV has_a_after = ", m.contains("a")); // false
+    print("SV size3 = ", m.size());            // 2
+
+    // 反复未命中：每次返回静态串，绑定变量退出作用域时 release 是 no-op，
+    // 10 万次后进程仍健康（无 heap assert / 无 OOM）。
+    var i: int = 0;
+    while (i < 100000) {
+        var s: string = m.get("missing");
+        i = i + 1;
+    }
+    print("SV loop_done = ", i);               // 100000
+    print("SV still_ok = ", m.get("b"));       // beta
+    return 0;
+}

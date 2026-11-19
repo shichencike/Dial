@@ -1344,8 +1344,9 @@
   - COW 克隆、扩容重哈希、墓碑法删除，全部逐条目 retain / release。
 - 正向示例：`examples/container_demo.dial`、`set_demo.dial`、`kvmap_demo.dial`。
 
-**已知边界**：泛型 map 的 `V` 暂不开放 `string`（`get` 未命中时的默认对象会带来所有权移交歧义）；
-`map.values()` 当前只支持 `V = int`。两点计划在后续版本补齐。
+**已知边界（v1.10 更新）**：泛型 map 的 `V = string` **已支持**——`get`/`remove` 未命中返回
+共享的 immortal 静态空串（借用语义、永不释放），根除了旧版默认对象的所有权移交歧义；
+`get_or()` 与 `values()` 对 string 的放开仍在后续阶段，当前 `values()` 只支持 `V = int` 及标量字段结构体。
 
 ### Fixed
 - **开放寻址哈希表删除采用「左移紧凑」导致键不可达**：`dial_map_remove` 与新

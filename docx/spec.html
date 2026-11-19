@@ -3701,8 +3701,12 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 <td><strong>已支持</strong>（v1.03）：<code>fn(A, B): R</code> 一等函数指针、函数名作右值、高阶数组方法与 C 回调（见 §32）。<strong>闭包仍不支持</strong>：跨回调状态须显式经 <code>rawptr&lt;void&gt;</code> 透传</td>
 </tr>
 <tr>
-<td><code>map&lt;K,V&gt;</code> 的 <code>string</code> 值、<code>map.values()</code> 对非 <code>int</code> 值</td>
-<td><strong>未实现</strong>（v1.00）：<code>V</code> 只支持标量，<code>values()</code> 只支持 <code>V = int</code>——<code>get</code> 未命中时的默认 string 对象会带来所有权移交歧义，见 <a href="#295-重型类型与容器">§29.5</a></td>
+<td><code>map&lt;K,V&gt;</code> 的 <code>string</code> 值</td>
+<td><strong>已支持</strong>（v1.10）：<code>V</code> 支持 string（以及标量与标量字段结构体）。<code>get</code>/<code>remove</code> 未命中返回进程级共享的 <strong>immortal 静态空串</strong>（借用语义、永不释放），双后端 codegen 无需区分命中/未命中，彻底消除旧版默认对象的所有权移交歧义，见 <a href="#295-重型类型与容器">§29.5</a></td>
+</tr>
+<tr>
+<td><code>map.values()</code> 对非 <code>int</code> 值</td>
+<td><strong>未实现</strong>（v1.00）：<code>values()</code> 仍只支持 <code>V = int</code>（及标量字段结构体）；string 值的 <code>values()</code> 计划在后续阶段补齐</td>
 </tr>
 <tr>
 <td>LSP 的重命名 / 跨文件引用查找 / 格式化</td>
@@ -7208,8 +7212,13 @@ var ks: string[] = m.keys();    // 键快照
   令其永远查不到。2 万键压测中删除 1 万个后 <code>size</code> 曾只剩 13082（应为 10000）；
   现统一改为墓碑标记 + 负载过高时重建（老 <code>dial_map.c</code> 同步修复，<code>set&lt;T&gt;</code> 与
   <code>for (k, v in m)</code> 一并受益）。</li>
-<li><strong>已知边界</strong>：<code>V</code> 暂不开放 <code>string</code>（<code>get</code> 未命中时的默认 string 对象会带来所有权
-  移交歧义）；<code>map.values()</code> 当前只支持 <code>V = int</code>。
+<li><strong><code>string</code> 值（v1.10 已支持）</strong>：<code>V = string</code> 时，<code>get</code>/<code>remove</code> 未命中返回进程级共享的
+  <strong>immortal 静态空串</strong>（refcount 为 <code>DIAL_RC_IMMORTAL</code> 哨兵，retain/release/clone 对它 no-op）。
+  命中返回表内借用值、未命中返回静态串，两端 codegen 统一按借用处理——零拷贝、零泄漏、
+  零 double-free，覆盖 print / 拼接 / 插值 / for-in 等全部消费点。旧版"未命中新建 rc=1 空串"
+  的所有权移交歧义由此根除。</li>
+<li><strong>已知边界</strong>：<code>map.values()</code> 当前只支持 <code>V = int</code>（及标量字段结构体），string 值的
+  <code>values()</code> 与 <code>get_or()</code> 计划在后续阶段补齐。
   （<code>for (k, v in m)</code> 对泛型 map 的限制已在 <strong>v1.01 解除</strong>，见 <a href="#307-泛型-mapkv-支持-for-k-v-in-m">§30.7</a>。）</li>
 </ul>
 <h3 id="296-实现落点">29.6 实现落点</h3>

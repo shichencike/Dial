@@ -3090,6 +3090,23 @@ if "$DIALC" build tests/batch3_b6_smoke.dial -o "${TMP}/v_b6" >"${TMP}/v_b6.log"
     else vbad "V 组：batch3_b6_smoke 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
 else vbad "V 组：batch3_b6_smoke 编译失败"; tail -8 "${TMP}/v_b6.log"; fi
 
+# 3b) v1.10 map<string,string> 值：静态 immortal 空串方案（命中/未命中/拼接/for-in/重复未命中）。
+if "$DIALC" build tests/kvmap_string_value_smoke.dial -o "${TMP}/v_sv" >"${TMP}/v_sv.log" 2>&1; then
+    out=$("${TMP}/v_sv" 2>/dev/null)
+    if printf '%s\n' "$out" | grep -q 'SV hit = alpha' \
+       && printf '%s\n' "$out" | grep -q 'SV miss = \[\]' \
+       && printf '%s\n' "$out" | grep -q 'SV misslen = 0' \
+       && printf '%s\n' "$out" | grep -q 'SV miss_plus = \[x\]' \
+       && printf '%s\n' "$out" | grep -q 'SV interp = \[pq\]' \
+       && printf '%s\n' "$out" | grep -q 'SV size = 2' \
+       && printf '%s\n' "$out" | grep -q 'SV empty_hit = \[\]' \
+       && printf '%s\n' "$out" | grep -q 'SV removed = alpha' \
+       && printf '%s\n' "$out" | grep -q 'SV loop_done = 100000' \
+       && printf '%s\n' "$out" | grep -q 'SV still_ok = beta' ; then
+        vpass "v1.10：map<string,string> 静态空串（命中/未命中/拼接/for-in/10万次未命中不崩）通过"
+    else vbad "V 组：kvmap_string_value_smoke 输出缺失关键断言"; printf '%s\n' "$out" | head -40; fi
+else vbad "V 组：kvmap_string_value_smoke 编译失败"; tail -8 "${TMP}/v_sv.log"; fi
+
 # 4) B7 负向：顶层 var 全局变量必须被拒（红线：禁止可变全局状态）。
 if "$DIALC" build tests/bad/const_top_level_var.dial -o "${TMP}/v_var" >"${TMP}/v_var.log" 2>&1; then
     vbad "B7：顶层 var 全局变量竟被接受（违反禁止可变全局状态红线）"

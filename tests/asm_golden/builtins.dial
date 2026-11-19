@@ -50,6 +50,11 @@ fn main(): int {
     m.put("b", 2);
     print("map a = ", m.get("a"), " b = ", m.get("b"), " miss = ", m.get("zz"));
 
+    // v1.10：map<string,string> 值——静态 immortal 空串（双后端逐字节一致）
+    var ms: map<string, string> = new_kv_map();
+    ms.put("k", "val");
+    print("maps hit = ", ms.get("k"), " miss = [", ms.get("none"), "] len = ", ms.get("none").length());
+
     var st: set<int> = new_set();
     st.add(7);
     st.add(8);

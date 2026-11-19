@@ -3369,3 +3369,19 @@ imulq   %r10, %r15     # s * 31
 6. 门禁 `tools/verify_asm_pgo.sh`（run_tests.sh AR 组）四层证据全绿；cargo test 全过。
 
 **范围与护栏**：训练运行无参（与 LLVM 路径同局限，训练只覆盖 main 内嵌路径；args() 驱动的程序需把热路径写入 main 调用链）；热判定为启发式（相对阈值）；不做通用块重排（负 ROI）。零新依赖、`codegen.rs`/`ast.rs`/1.10.0 零改动、AArch64/-g 不进 PGO、baseline 逐字节零回归、双后端一致、不打 tag、docx 确定性。收回路线图 R1-R4 四项至此全部收口。
+
+---
+
+## v1.10 开发增量：放宽护栏，双后端补齐 B 类语言特性（map<string> 值）
+
+**为什么做**：收回路线图 R1-R4 收口、高级指令集主线四项（标量 ISA / SIMD 打包 / FMA / 加密）经 `tools/diag_advanced_isa.py` + `diag_scalar_isa.py` 诊断量化搁置后，护栏内已无高 ROI 项。按总纲「假设 LLVM 不存在、asm 自己就是唯一完整后端」，用户选择解除 `codegen.rs`/`ast.rs` 冻结护栏（过渡期工程纪律，非永久宪法），把「LLVM 消失后仍需自己拥有」的语言能力补齐。经源码核实 B 类四项里 select 语句、impl 关联函数均已落地，唯一真实缺口是 `map<K,string>` 值。用户确认 all-in：Phase A（map<string> 值）→ Phase B（select 块超时）→ Phase C（values()/get_or 全面放开），串行独立提交。
+
+**核心阻塞与方案裁决**：C 运行时 `stdlib/dial_kvmap.c` 的 KV_STRING=2 数据路径（hash/eq/retain/release/put/get/values）早已完整，唯一阻塞是 `get` 未命中默认值 `kv_default(KV_STRING)` 返回 rc=1 的新空串，而两端把 `get` 结果当借用（`yields_borrowed_ref` 只列 get/at）——命中（表内借用）/未命中（新对象）对 codegen 是同一种指针，要么泄漏要么结算即 double-free。三方案对比后用户裁决**静态 immortal 空串**：①「命中标志+零拷贝」经深挖发现需新建整套表达式级 owned 返回值+临时对象 release 机制（覆盖 print/表达式语句/for-in/插值全部消费点），架构级改造，否决；②「接受泄漏」违反 §19 底线，否决；③ 静态空串——`dial_rt_mem.h` 加 `DIAL_RC_IMMORTAL=INT64_MIN` 哨兵，retain/release/clone 三处在 `DIAL_HEAP_ASSERT(rc>0)` 前对它 no-op（clone 原样返回）；`dial_string.c` 定义 `[immortal rc][len=0][data=""]` 静态对象，`kv_default(KV_STRING)` 改调它。命中/未命中统一借用语义 → 两端 codegen 零改动、零拷贝零泄漏、自动覆盖所有消费点。
+
+**Phase A 实现（三个独立提交）**：
+- A1 `d5bff4e` C 运行时静态空串：哨兵宏 + 三处 no-op + 静态对象 + kv_default 接线。验证布局（rc=哨兵/len=0/cstr=空）、10 万次 RC 操作哨兵不变、eq 空串=1、safety=0/2 双级别通过；此时语义层未放行、纯 C 改动零 Dial 可达。
+- A2 `87931c7` 语义层放行：semantic.rs `ok_v` 加 Type::String + 诊断文案、ast.rs 注释、删除 `tests/bad/kvmap_value_string.dial`（放开后编译成功会误报）、codegen.rs get_or 注释澄清。codegen/lower 数据路径零改动。验证 map<string,string> 的 put/get命中/未命中/空串 length/拼接/插值/contains/size/for-in/remove/10 万次未命中循环，双后端逐字节一致、无 heap assert。
+- A3 测试+文档：`tests/kvmap_string_value_smoke.dial` 正向用例（V 组门禁 + asm_golden/builtins.dial 双后端逐字节）、README/CHANGELOG 同步。
+
+**护栏**：版本 1.10.0 不变、零新依赖、AArch64 零变化、不打 tag、baseline .s 零回归（Phase A 不碰发射器）、双后端输出逐字节一致。get_or/values 的 string 放开留 Phase C（配套 get_or 默认值所有权结算，避免 double-free）。
+

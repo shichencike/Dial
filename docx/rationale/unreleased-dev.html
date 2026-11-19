@@ -50,6 +50,7 @@
 </li>
 <li><a href="#r3impl-关联函数-tnew无-self-静态方法-唯一后端收回路线图第-3-项">R3：impl 关联函数 T::new()（无 self 静态方法）—— 唯一后端收回路线图第 3 项</a></li>
 <li><a href="#r4自研-pgo-闭环--唯一后端收回路线图第-4-项四项全部收口">R4：自研 PGO 闭环 —— 唯一后端收回路线图第 4 项（四项全部收口）</a></li>
+<li><a href="#v110-开发增量放宽护栏双后端补齐-b-类语言特性map-值">v1.10 开发增量：放宽护栏，双后端补齐 B 类语言特性（map 值）</a></li>
 </ul>
 </li>
 </ul>
@@ -3499,7 +3500,16 @@ imulq   %r10, %r15     # s * 31
 4. 零回归铁证：git worktree 从 HEAD(fd06fcf) 构建基线，24 源码（bench + 18 golden + impl_assoc + batch）<code>-O3</code> <code>.s</code> 逐字节一致；baseline 路径无 --pgo 两次 .s 稳定。
 5. <strong>A/B 性能如实记录</strong>：多轮交替 <code>pgo/baseline≈0.997</code>（中性偏微正、噪声内）。与诊断一致——asm 默认布局已近最优，PGO 收益上界低；核心价值是功能完整性（--pgo 不再被拒、零 LLVM 依赖），不硬声称加速。
 6. 门禁 <code>tools/verify_asm_pgo.sh</code>（run_tests.sh AR 组）四层证据全绿；cargo test 全过。</p>
-<p><strong>范围与护栏</strong>：训练运行无参（与 LLVM 路径同局限，训练只覆盖 main 内嵌路径；args() 驱动的程序需把热路径写入 main 调用链）；热判定为启发式（相对阈值）；不做通用块重排（负 ROI）。零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64/-g 不进 PGO、baseline 逐字节零回归、双后端一致、不打 tag、docx 确定性。收回路线图 R1-R4 四项至此全部收口。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+<p><strong>范围与护栏</strong>：训练运行无参（与 LLVM 路径同局限，训练只覆盖 main 内嵌路径；args() 驱动的程序需把热路径写入 main 调用链）；热判定为启发式（相对阈值）；不做通用块重排（负 ROI）。零新依赖、<code>codegen.rs</code>/<code>ast.rs</code>/1.10.0 零改动、AArch64/-g 不进 PGO、baseline 逐字节零回归、双后端一致、不打 tag、docx 确定性。收回路线图 R1-R4 四项至此全部收口。</p>
+<hr />
+<h2 id="v110-开发增量放宽护栏双后端补齐-b-类语言特性map-值">v1.10 开发增量：放宽护栏，双后端补齐 B 类语言特性（map<string> 值）</h2>
+<p><strong>为什么做</strong>：收回路线图 R1-R4 收口、高级指令集主线四项（标量 ISA / SIMD 打包 / FMA / 加密）经 <code>tools/diag_advanced_isa.py</code> + <code>diag_scalar_isa.py</code> 诊断量化搁置后，护栏内已无高 ROI 项。按总纲「假设 LLVM 不存在、asm 自己就是唯一完整后端」，用户选择解除 <code>codegen.rs</code>/<code>ast.rs</code> 冻结护栏（过渡期工程纪律，非永久宪法），把「LLVM 消失后仍需自己拥有」的语言能力补齐。经源码核实 B 类四项里 select 语句、impl 关联函数均已落地，唯一真实缺口是 <code>map&lt;K,string&gt;</code> 值。用户确认 all-in：Phase A（map<string> 值）→ Phase B（select 块超时）→ Phase C（values()/get_or 全面放开），串行独立提交。</p>
+<p><strong>核心阻塞与方案裁决</strong>：C 运行时 <code>stdlib/dial_kvmap.c</code> 的 KV_STRING=2 数据路径（hash/eq/retain/release/put/get/values）早已完整，唯一阻塞是 <code>get</code> 未命中默认值 <code>kv_default(KV_STRING)</code> 返回 rc=1 的新空串，而两端把 <code>get</code> 结果当借用（<code>yields_borrowed_ref</code> 只列 get/at）——命中（表内借用）/未命中（新对象）对 codegen 是同一种指针，要么泄漏要么结算即 double-free。三方案对比后用户裁决<strong>静态 immortal 空串</strong>：①「命中标志+零拷贝」经深挖发现需新建整套表达式级 owned 返回值+临时对象 release 机制（覆盖 print/表达式语句/for-in/插值全部消费点），架构级改造，否决；②「接受泄漏」违反 §19 底线，否决；③ 静态空串——<code>dial_rt_mem.h</code> 加 <code>DIAL_RC_IMMORTAL=INT64_MIN</code> 哨兵，retain/release/clone 三处在 <code>DIAL_HEAP_ASSERT(rc&gt;0)</code> 前对它 no-op（clone 原样返回）；<code>dial_string.c</code> 定义 <code>[immortal rc][len=0][data=""]</code> 静态对象，<code>kv_default(KV_STRING)</code> 改调它。命中/未命中统一借用语义 → 两端 codegen 零改动、零拷贝零泄漏、自动覆盖所有消费点。</p>
+<p><strong>Phase A 实现（三个独立提交）</strong>：
+- A1 <code>d5bff4e</code> C 运行时静态空串：哨兵宏 + 三处 no-op + 静态对象 + kv_default 接线。验证布局（rc=哨兵/len=0/cstr=空）、10 万次 RC 操作哨兵不变、eq 空串=1、safety=0/2 双级别通过；此时语义层未放行、纯 C 改动零 Dial 可达。
+- A2 <code>87931c7</code> 语义层放行：semantic.rs <code>ok_v</code> 加 Type::String + 诊断文案、ast.rs 注释、删除 <code>tests/bad/kvmap_value_string.dial</code>（放开后编译成功会误报）、codegen.rs get_or 注释澄清。codegen/lower 数据路径零改动。验证 map<string,string> 的 put/get命中/未命中/空串 length/拼接/插值/contains/size/for-in/remove/10 万次未命中循环，双后端逐字节一致、无 heap assert。
+- A3 测试+文档：<code>tests/kvmap_string_value_smoke.dial</code> 正向用例（V 组门禁 + asm_golden/builtins.dial 双后端逐字节）、README/CHANGELOG 同步。</p>
+<p><strong>护栏</strong>：版本 1.10.0 不变、零新依赖、AArch64 零变化、不打 tag、baseline .s 零回归（Phase A 不碰发射器）、双后端输出逐字节一致。get_or/values 的 string 放开留 Phase C（配套 get_or 默认值所有权结算，避免 double-free）。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

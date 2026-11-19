@@ -388,13 +388,33 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
     含 call）、83 源码 <code>.s</code> 零回归、19 golden 全绿。<strong>注意</strong>：这是<strong>显式向量类型</strong>（程序员
     主动使用、语言一等类型），与 e3x 否决的<strong>自动向量化</strong>（编译器强行向量化标量循环）是
     两件事，不引入后者的灾难性负收益。本批为语义补齐；下一步才做目标 CPU 指令发射。</li>
-<li>⏳ <strong>SIMD 指令发射（下一批，受 <code>--target-cpu</code> 门控）</strong>：目标 CPU 支持时把逐 lane
-    标量展开 targeted 融合为 SSE/AVX 打包指令（paddq/addpd 等），只对有正 ROI 的形态做。
-    ⚠️ 绝不重造 e3x 已证伪的完整自动向量化（−6.7%、b15 慢 18×）；baseline 保持逐 lane
-    标量（零兼容风险），v2/v3+ 才启用打包指令。</li>
-<li>⏳ <strong>浮点 FMA 融合</strong>：衔接 e3av 浮点驻留，需处理浮点语义/精度对齐。</li>
-<li>⏳ <strong>加密/专用指令</strong>（AES-NI/SHA/CRC32）：最后做，难度最大收益较小。</li>
+<li>⏸️ <strong>SIMD 指令发射 —— 诊断完成、量化搁置（2026-11-19，<code>tools/diag_advanced_isa.py</code>）</strong>：
+    原计划 v3+ 把逐 lane 展开 targeted 融合为 SSE/AVX 打包指令（paddq/addpd）。诊断三项
+    证据一致否决此刻开工：① <strong>无 workload</strong>——bench 含 simd 的文件=0，simd 仅出现在
+    golden + tests/bad（14 文件/50 行），无可测 ROI；② <strong>发射层拿不到向量操作</strong>——lower.rs
+    已把向量逐 lane 展开为标量 IR（<code>IrInst::Bin/FBin/ICmp/FCmp</code> 40 处），codegen 层只见标量；
+    ③ <strong>布局绑定 LLVM 语义</strong>——golden 断言 <code>sizeof&lt;simd&lt;int,4&gt;&gt;=32</code>（每 lane 8B），紧密打包
+    布局会破坏双后端逐值一致。汇编佐证：simd golden 展开 1144 行、751 条标量算术/mov，且
+    baseline 与 <code>--target-cpu=v3</code> 的 <code>.s</code> <strong>逐字节一致</strong>（当前零打包发射）。baseline 保持逐 lane
+    标量（零兼容风险）；⚠️ 绝不重造 e3x 已证伪的完整自动向量化（−6.7%、b15 慢 18×）。
+    <strong>重启条件</strong>：bench/真实 workload 出现热点 simd 运算，或语言层引入独立紧密向量 ABI
+    （双后端同步、明确放宽 sizeof 护栏），或 e3x 结论被新证据推翻。</li>
+<li>⏸️ <strong>浮点 FMA 融合 —— 诊断完成、量化搁置（2026-11-19）</strong>：bench 无浮点类型命中、
+    浮点 <code>a*b+c</code> 形态=0（乘加全是整数，走 imulq+addq），无负载；且 FMA 单次舍入与「先乘后加」
+    两次舍入语义不同，对齐须改冻结的 codegen.rs，属双后端语言层裁决。<strong>重启条件</strong>：出现热点
+    浮点乘加 workload 且实测有正 ROI，或语言层明确 FMA 舍入规范并放宽护栏。</li>
+<li>⏸️ <strong>加密/专用指令（AES-NI/SHA/CRC32）—— 诊断完成、量化搁置（2026-11-19）</strong>：
+    tests/bench/examples 全部命中（25 文件/124 行）均为 C 库调用（dial_crypto_<em> 包 /
+    dial_gui_painter_crc32），非本编译器发射的标量代码，ISA 发射层无从 targeted 融合；重写进
+    语言层属独立主题、收益小难度最大，排序最后。</em><em>重启条件</em>*：语言层引入原生加密内建由本后端
+    发射其标量主体，或出现可实测热点且指令级加密有正 ROI。</li>
 </ol>
+<p><strong>高级指令集主线状态（2026-11-19 收口）</strong>：第 8 项开关基础设施 ✅、第 10 项显式向量
+语义 ✅ 已落地；第 9 项标量 ISA、第 11 项 SIMD 打包、第 12 项 FMA、第 13 项加密指令
+四项均经 <code>tools/diag_scalar_isa.py</code> / <code>tools/diag_advanced_isa.py</code> 诊断后<strong>量化搁置</strong>
+（无正 ROI workload 或触及双后端护栏），重启条件已逐项写死。至此高级指令集主线
+<strong>无护栏内可立即开工且有正 ROI 的项</strong>；「开关 + 语义」已就位，实际指令发射属有硬件、
+无负载的储备能力，条件满足再重开诊断，不硬做零收益死代码。</p>
 <h3 id="阶段三b-类语言特性需单独裁决默认不进-asm-批次">阶段三：B 类语言特性（需单独裁决，默认不进 asm 批次）</h3>
 <ol start="6">
 <li><code>select</code> 超时 / impl 关联函数 / map string 值 —— 若要做，作为<strong>独立语言版本主题</strong>，
