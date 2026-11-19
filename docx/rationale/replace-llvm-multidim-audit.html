@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/replace-llvm-multidim-audit.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#asm-后端能否真正代替-llvm多维度审计2026-11-19实测版">asm 后端能否真正代替 LLVM：多维度审计（2026-11-19，实测版）</a><ul>
+<li><a href="#-2026-11-19-战略转向裁决口径已更新审计正文保留作证据链">⚠️ 2026-11-19 战略转向：裁决口径已更新（审计正文保留作证据链）</a></li>
 <li><a href="#裁决先给结论">裁决（先给结论）</a></li>
 <li><a href="#维度-1功能对等性---有硬缺口">维度 1：功能对等性 —— ❌ 有硬缺口</a><ul>
 <li><a href="#测法">测法</a></li>
@@ -58,6 +59,15 @@
 </div>
 <h1 id="asm-后端能否真正代替-llvm多维度审计2026-11-19实测版">asm 后端能否真正代替 LLVM：多维度审计（2026-11-19，实测版）</h1>
 <blockquote>
+<h2 id="-2026-11-19-战略转向裁决口径已更新审计正文保留作证据链">⚠️ 2026-11-19 战略转向：裁决口径已更新（审计正文保留作证据链）</h2>
+<p>用户 2026-11-19 决策：<strong>目标是代替 LLVM，不是纯粹超越；性能够用即可，±5% 噪声下
+继续死优化用户感知不到。</strong> 本文下方「裁决：当前不能代替 LLVM」基于「性能落后 12%」
+的旧数据；此后经 9 轮优化，性能已达标收口——几何平均 <strong>0.574x / 0.572x</strong>、总耗时
+<strong>0.911x</strong>（反超 LLVM），<strong>维度 2「性能硬缺口」已消除</strong>。</p>
+<p><strong>新裁决以 <code>rationale/replace-llvm-roadmap.md</code> 为准</strong>：性能不再是代替的阻断项；剩余
+待办转为「代替能力完备」——P0 正确性（本文维度 1 发现的 map string key 泄漏）、P1
+平台（本文维度 4 的 AArch64 未实机验证）、P2 功能对等裁决、P3 文档收口。
+下方五维数据与证据链<strong>全部保留</strong>，但「不能代替」的结论及其性能归因已被新战略取代。</p>
 <p>本文回答一个此前一直被「单维度乐观结论」掩盖的问题：<strong>自研 asm 后端现在到底能不能
 真正代替 LLVM？</strong> 结论不预设立场，全部由当机实测数据说话。审计范围覆盖五个独立维度，
 任一维度不达标即不能宣称「已代替」。所有命令可复现。</p>
@@ -233,6 +243,14 @@ select 方案）处理 map get 未命中零值，并补齐 put/get_or/remove 的
 </tbody>
 </table>
 <p><strong>一句话</strong>：asm 在「能编译的程序上输出正确、工具链独立、x86-64 语义完备」，但<strong>还不能在功能覆盖和性能上全面接管 LLVM</strong>——存在 1 个确凿的编译期功能缺口（struct 进容器），且公平对比下整体慢约 12%（数组/字符串/算术循环明显落后）。</p>
+<blockquote>
+<p><strong>2026-11-19 战略转向更新（覆盖上表裁决）</strong>：上表两个硬缺口中，<strong>维度 2 性能已消除</strong>
+（几何平均 0.574x、总耗时 0.911x 反超 LLVM，见顶部转向声明）；<strong>维度 1 的 B6 struct
+进容器也已修复并纳入 asm 门禁</strong>（见本文维度 1 的「已修复」更新段）。但战略转向的意义
+在于：<strong>性能已不再是代替的判据</strong>——即便性能数字倒退一点，只要落在 ±5% 噪声与够用线内
+仍算达标。当前真正的阻断项转为 map string key 泄漏（正确性）与 AArch64 实机语义（平台），
+详见 <code>rationale/replace-llvm-roadmap.md</code>。</p>
+</blockquote>
 <hr />
 <h2 id="维度-1功能对等性---有硬缺口">维度 1：功能对等性 —— ❌ 有硬缺口</h2>
 <h3 id="测法">测法</h3>
@@ -399,7 +417,7 @@ bash tools/verify_no_llvm_toolchain.sh
 bash tools/run_asm_golden.sh ./target/release/dialc
 # 维度5：差分一致性
 bash tools/run_diff_fuzz_gate.sh
-</code></pre><p class="note">← 更早：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> · 更新：<a href="unreleased.html">未实现 / 尚未落地</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+</code></pre><p class="note">← 更早：<a href="replace-llvm-roadmap.html">replace-llvm-roadmap</a> · 更新：<a href="unreleased.html">未实现 / 尚未落地</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

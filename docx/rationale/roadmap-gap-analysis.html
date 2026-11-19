@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/roadmap-gap-analysis.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#缺口盘点与执行路线图2026-11-18源码核实版">缺口盘点与执行路线图（2026-11-18，源码核实版）</a><ul>
+<li><a href="#-2026-11-19-战略转向本文已被新路线图取代历史文档保留不删">⚠️ 2026-11-19 战略转向：本文已被新路线图取代（历史文档，保留不删）</a></li>
 <li><a href="#总纲唯一后端哲学用户-2026-11-18-确立最高优先级">总纲：唯一后端哲学（用户 2026-11-18 确立，最高优先级）</a></li>
 <li><a href="#总纲执行附则从-llvm-收回全部职责的路线图用户-2026-11-18-决策">总纲执行附则：从 LLVM 收回全部职责的路线图（用户 2026-11-18 决策）</a><ul>
 <li><a href="#a-四类活的真实起点源码核实-2026-11-18避免重复造已完成之物">A. 四类活的真实起点（源码核实 2026-11-18，避免重复造已完成之物）</a></li>
@@ -60,6 +61,18 @@
 </div>
 <h1 id="缺口盘点与执行路线图2026-11-18源码核实版">缺口盘点与执行路线图（2026-11-18，源码核实版）</h1>
 <blockquote>
+<h2 id="-2026-11-19-战略转向本文已被新路线图取代历史文档保留不删">⚠️ 2026-11-19 战略转向：本文已被新路线图取代（历史文档，保留不删）</h2>
+<p>用户 2026-11-19 决策：<strong>目标是代替 LLVM，不是纯粹超越它；性能够用即可，±5% 噪声下
+继续死优化用户感知不到。</strong> 本文记录了「性能追赶期」的盘点，其中所有「性能优化方向」
+已<strong>整体冻结</strong>，以 <strong><code>rationale/replace-llvm-roadmap.md</code>（战略转向版）为准</strong>。</p>
+<ul>
+<li>性能已达标收口：几何平均 <strong>0.574x / 0.572x</strong>、总耗时 <strong>0.911x</strong>（反超 LLVM），远超
+  够用线；「性能未达标故不能代替」的焦虑结论已失效。</li>
+<li>新主线是「代替能力完备」：P0 正确性（map string key 泄漏）→ P1 平台（AArch64 实机
+  语义）→ P2 功能对等裁决 → P3 工程化；性能只作回归护栏，不再投入。</li>
+<li>下方第 1 节「领先 46%」删节线、第 2/C 类性能投入计划、第 3 节「一句话结论」均为
+  历史记录，<strong>不再作为行动依据</strong>。</li>
+</ul>
 <p>本文是「代替 LLVM」主线下对当前缺口的系统盘点，以及据此制定的分梯队执行计划。
 与以往凭印象的盘点不同，<strong>每一项都经过源码核实</strong>：区分「LLVM 有而 asm 无」（可在
 LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它须改 <code>codegen.rs</code>/<code>semantic.rs</code>，
@@ -464,7 +477,7 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 </blockquote>
 <p>~~<strong>语义层 asm 已完全追平 LLVM；剩余差距全是性能深度与语言层新特性。</strong>
 前者须用收益诊断决定投入（高成本、易负收益），后者须改冻结文件、超出 asm 后端补齐范畴。
-护栏内真正低风险可做的，是收益诊断工具与过时文档清理；其余要么先量化、要么先裁决。~~</p><p class="note">更新：<a href="replace-llvm-multidim-audit.html">replace-llvm-multidim-audit</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+护栏内真正低风险可做的，是收益诊断工具与过时文档清理；其余要么先量化、要么先裁决。~~</p><p class="note">更新：<a href="replace-llvm-roadmap.html">replace-llvm-roadmap</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

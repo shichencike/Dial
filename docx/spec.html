@@ -1205,6 +1205,13 @@ M7-e3m 从 1.300x 缩到 1.018x）、b08 3n+1 已由 M7-e3k / M7-e3l 从
 </blockquote>
 <h4 id="自研-asm-后端代替-llvm路线图两根头等支柱">自研 asm 后端「代替 LLVM」路线图（两根头等支柱）</h4>
 <blockquote>
+<p><strong>⚠️ 2026-11-19 战略转向（以此为准）</strong>：目标是<strong>代替</strong> LLVM，不是纯粹超越；性能够用即可，
+±5% 运行时噪声下继续死优化用户感知不到。下方「支柱① O3 优化管线」所列性能工作<strong>已整体
+冻结</strong>——性能已达标（几何平均 0.57x、总耗时 0.91x 反超 LLVM，远超够用线），作为回归护栏
+保留、不再投入。新主线按「代替能力完备」推进：P0 正确性（map string key 泄漏）→ P1 平台
+（AArch64 实机语义）→ P2 功能对等裁决 → P3 工程化。完整路线见
+<a href="rationale/replace-llvm-roadmap.html"><code>rationale/replace-llvm-roadmap.md</code></a>；下表中「仍待补」等
+性能表述属追赶期历史记录，不再作为行动依据。</p>
 <p>目标是把 <code>--backend=asm</code> 从「多数基准快于 LLVM 的专用后端」推进到「可完整代替
 LLVM 的通用后端」。经 M7-e3u 的系统诊断，剩余差距不在单条 peephole / IR pass，
 而在两根架构级支柱。二者列为头等核心矛盾，不再淹没在微优化批次里：</p>

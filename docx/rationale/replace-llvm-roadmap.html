@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 replace-llvm-roadmap · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/replace-llvm-roadmap.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#替代-llvm-路线图2026-11-19-战略转向版">替代 LLVM 路线图（2026-11-19 战略转向版）</a><ul>
+<li><a href="#0-战略转向从性能竞赛回归代替能力">0. 战略转向：从「性能竞赛」回归「代替能力」</a></li>
+<li><a href="#1-性能维度已达够用线正式冻结">1. 性能维度：已达「够用线」，正式冻结</a><ul>
+<li><a href="#11-达标证据同配置---fast--o3-公平-ab背靠背各-2-次">1.1 达标证据（同配置 --fast -O3 公平 A/B，背靠背各 2 次）</a></li>
+<li><a href="#12-够用线的定义与理由">1.2 「够用线」的定义与理由</a></li>
+<li><a href="#13-5-噪声的量化认知">1.3 ±5% 噪声的量化认知</a></li>
+<li><a href="#14-冻结清单性能优化方向一律不再投入">1.4 冻结清单（性能优化方向一律不再投入）</a></li>
+</ul>
+</li>
+<li><a href="#2-新重心代替能力完备用户可感知的维度">2. 新重心：代替能力完备（用户可感知的维度）</a><ul>
+<li><a href="#p0--正确性底线最高优先属代替的硬前提">P0 · 正确性底线（最高优先，属「代替」的硬前提）</a></li>
+<li><a href="#p1--平台覆盖唯一后端必须跨平台可用">P1 · 平台覆盖（「唯一后端」必须跨平台可用）</a></li>
+<li><a href="#p2--功能对等b-类语言特性按llvm-不存在总纲裁决">P2 · 功能对等（B 类语言特性，按「LLVM 不存在」总纲裁决）</a></li>
+<li><a href="#p3--工程化与文档可信度与可维护性">P3 · 工程化与文档（可信度与可维护性）</a></li>
+</ul>
+</li>
+<li><a href="#3-验收判据什么叫已代替-llvm">3. 验收判据（什么叫「已代替 LLVM」）</a></li>
+<li><a href="#4-护栏延续不变">4. 护栏（延续，不变）</a></li>
+<li><a href="#5-性能优化的重启条件写死非满足不重启">5. 性能优化的重启条件（写死，非满足不重启）</a></li>
+<li><a href="#6-一句话结论">6. 一句话结论</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="替代-llvm-路线图2026-11-19-战略转向版">替代 LLVM 路线图（2026-11-19 战略转向版）</h1>
+<blockquote>
+<p><strong>本文取代 <code>roadmap-gap-analysis.md</code> 与 <code>replace-llvm-multidim-audit.md</code> 作为当前主线。
+那两份文档记录的是「性能追赶期」的历史盘点与证据链，保留不删；但其中「性能未达标
+故不能代替 LLVM」的裁决已因本转向失效，一切以本文为准。</strong></p>
+</blockquote>
+<h2 id="0-战略转向从性能竞赛回归代替能力">0. 战略转向：从「性能竞赛」回归「代替能力」</h2>
+<p>用户 2026-11-19 决策原文精神：</p>
+<blockquote>
+<p>目标不是<strong>纯粹超越</strong> LLVM，而是<strong>代替</strong> LLVM。只要性能够用就行，没必要再死优化——
+运行时本来就有 <strong>±5% 噪声</strong>，再优化用户也感知不到。优化到一个足够的性能就足够了。
+因此重新制定路线图。</p>
+</blockquote>
+<p>这条决策纠正了过去若干批次的方向偏差：此前把「几何平均 / 加权总耗时再降几个百分点」
+当作主线 KPI，投入了大量精力做闭式特化、指令级调度 POC、GRA 微调、ISA 诊断——其中
+大量工作证伪为噪声（0.997x~1.001x）或边际递减。在 ±5% 运行时噪声面前，把这些数字从
+0.57x 推到 0.55x，<strong>用户无法感知</strong>，却消耗了本可用于补齐「代替能力」的预算。</p>
+<p><strong>新判据</strong>： OPT-ENOUGH。性能达到「够用线」即冻结，不再作为投入方向；资源转向功能、
+平台、正确性、工程化这些「用户能直接感知、且 LLVM 缺了就不叫代替」的维度。</p>
+<hr />
+<h2 id="1-性能维度已达够用线正式冻结">1. 性能维度：已达「够用线」，正式冻结</h2>
+<h3 id="11-达标证据同配置---fast--o3-公平-ab背靠背各-2-次">1.1 达标证据（同配置 <code>--fast -O3</code> 公平 A/B，背靠背各 2 次）</h3>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>第 1 次</th>
+<th>第 2 次</th>
+<th>够用线</th>
+<th>判定</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>几何平均比值（asm/llvm，&lt;1 为快）</td>
+<td><strong>0.5743x</strong></td>
+<td><strong>0.5718x</strong></td>
+<td>≤ 1.05x</td>
+<td>✅ 领先约 43%</td>
+</tr>
+<tr>
+<td>加权总净耗时比</td>
+<td><strong>0.9111x</strong></td>
+<td><strong>0.9106x</strong></td>
+<td>≤ 1.10x</td>
+<td>✅ 反超约 9%</td>
+</tr>
+<tr>
+<td>逐项胜/平/负</td>
+<td>11 / — / 17</td>
+<td>10 / — / 18</td>
+<td>—</td>
+<td>✅ 多数项领先</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>数据文件：<code>/tmp/loop_linrec_full.json</code>、<code>/tmp/loop_linrec_full2.json</code>（可复跑）
+复现：<code>python3 tools/bench_asm_vs_llvm.py --backend-flags "--fast -O3"</code></p>
+</blockquote>
+<h3 id="12-够用线的定义与理由">1.2 「够用线」的定义与理由</h3>
+<ul>
+<li><strong>几何平均 ≤ 1.05x</strong>：几何平均衡量典型程序的普遍表现；≤1.05x 意味着「不比 LLVM 慢」，
+  落在 ±5% 噪声内即视为等价。当前 0.57x，裕度极大。</li>
+<li><strong>加权总耗时 ≤ 1.10x</strong>：总耗时反映重负载总和；≤1.10x 意味着整体不落后。当前 0.91x，
+  已反超。</li>
+<li>两条都满足即判定 <strong>性能达标（OPT-ENOUGH）</strong>。当前<strong>早已满足</strong>，且经过 9 轮 targeted
+  优化（数组 get/set 内联、字符串静态化、尾调用帧复用、GRA span×freq、递归闭式、线性
+  递推闭式等）验证稳定，非单点侥幸。</li>
+</ul>
+<h3 id="13-5-噪声的量化认知">1.3 ±5% 噪声的量化认知</h3>
+<p>历史 POC 已经反复证明边际优化落在噪声内：冗余 mov 消除 0.997x、魔数外提 0.998x、
+循环展开 1.001x、逐指令复刻 0.998x、PGO 布局 0.997x。<strong>这些数字即使全部达成，也改变
+不了用户哪怕一帧的体验。</strong> 继续在此投入是负 ROI（机会成本 = 未补齐的代替能力）。</p>
+<h3 id="14-冻结清单性能优化方向一律不再投入">1.4 冻结清单（性能优化方向一律不再投入）</h3>
+<p>以下方向<strong>全部冻结</strong>，除非命中第 5 节重启条件：</p>
+<table>
+<thead>
+<tr>
+<th>方向</th>
+<th>历史结论</th>
+<th>冻结状态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>caller-saved GRA / 跨函数 GRA</td>
+<td>e3at ROI 否决</td>
+<td>❄️ 冻结</td>
+</tr>
+<tr>
+<td>span×freq 高级分配优先级</td>
+<td>M8 已落地、含-call 退化已回退</td>
+<td>❄️ 冻结（保留现状）</td>
+</tr>
+<tr>
+<td>递归闭式 / 线性递推闭式</td>
+<td>M8/M9 已落地</td>
+<td>❄️ 冻结（保留现状）</td>
+</tr>
+<tr>
+<td>循环指令级调度 / 展开</td>
+<td>五个 POC 证伪</td>
+<td>❄️ 冻结</td>
+</tr>
+<tr>
+<td>ISA：标量/SIMD 打包/FMA/加密</td>
+<td>诊断无 workload、量化搁置</td>
+<td>❄️ 冻结</td>
+</tr>
+<tr>
+<td>字符串 / 数组 C runtime 微优化</td>
+<td>已接近追平、剩余架构级</td>
+<td>❄️ 冻结</td>
+</tr>
+<tr>
+<td>PGO 布局 / 块重排</td>
+<td>中性偏噪声、负 ROI</td>
+<td>❄️ 冻结（保留功能完整性）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>重要区分</strong>：冻结的是「以性能为目标的 Further optimization」，<strong>不是</strong>回退已落地的优化。
+现有全部优化成果作为基线保留，<code>tools/bench_asm_vs_llvm.py</code> 与 golden 门禁继续存在，
+但用途从「优化 KPI」降级为「回归护栏」——只在这些指标因其它改动而意外退化时报警。</p>
+<hr />
+<h2 id="2-新重心代替能力完备用户可感知的维度">2. 新重心：代替能力完备（用户可感知的维度）</h2>
+<p>性能达标后，「能否代替 LLVM」的判据完全落在<strong>功能、平台、正确性、工程化</strong>上。按此
+重新排序，剩余待办如下（这是本路线图真正要推进的内容）。</p>
+<h3 id="p0--正确性底线最高优先属代替的硬前提">P0 · 正确性底线（最高优先，属「代替」的硬前提）</h3>
+<ul>
+<li><strong>map<string,\*> 的 string key 本地引用未归还</strong>：50 万次 put/remove 循环泄漏约 30MB
+  （审计 <code>replace-llvm-multidim-audit.md</code> 维度 1 修复时发现，记独立待办）。这违反项目
+  §19「零泄漏」内存宪法——<strong>正确性缺口比任何性能数字都重要</strong>。需定位 key 借用/结算
+  路径并补齐 release，双后端一致 + glibc 堆检查 + 长循环内存压测验证。</li>
+<li>复核其它容器键类型的所有权结算（int key 已验证无泄漏；string key 是已知缺口）。</li>
+</ul>
+<h3 id="p1--平台覆盖唯一后端必须跨平台可用">P1 · 平台覆盖（「唯一后端」必须跨平台可用）</h3>
+<ul>
+<li><strong>AArch64 只验证汇编写法、未实机跑语义</strong>：当前 golden 用 <code>clang --target=aarch64</code>
+  交叉汇编出 ELF .o 即算通过（x86 宿主无法执行）。沙箱当前<strong>无 qemu-user</strong>，需先安装
+  <code>qemu-user-static</code>，用 <code>qemu-aarch64</code> + aarch64 sysroot 实机跑 golden 子集，验证运行
+  语义（不只是助记符合法性）。</li>
+<li><strong>AArch64 能力降级项</strong>：内联汇编 Fail-Fast、DWARF、PGO 在 AArch64 降级（<code>pgo_effective=
+  false</code>）。逐项评估：哪些是「暂时降级可接受」、哪些是「代替 LLVM 必须有」。LLVM 在多平台
+  走完整 codegen，asm 要真正代替必须至少保证核心语义在 AArch64 实机正确。</li>
+<li>门禁固化：把 AArch64 实机语义验证做成与其它门禁同级的脚本（挂入 <code>run_tests.sh</code>）。</li>
+</ul>
+<h3 id="p2--功能对等b-类语言特性按llvm-不存在总纲裁决">P2 · 功能对等（B 类语言特性，按「LLVM 不存在」总纲裁决）</h3>
+<p>以下 LLVM 后端也没有，但按「假设 LLVM 不存在、只有自己」总纲，它们是<strong>语言层真实能力
+缺口</strong>，需独立裁决是否纳入（不再是「LLVM 也没有所以不算差距」）：</p>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>现状</th>
+<th>裁决方向</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>select</code> 语句级超时</td>
+<td>底层 <code>recv_timeout</code> 已具备，缺多通道语法糖</td>
+<td>低工作量，建议纳入</td>
+</tr>
+<tr>
+<td><code>map&lt;K,string&gt;</code> 值 / <code>values()</code> 非 int</td>
+<td>semantic.rs 语义层统一拒绝</td>
+<td>中工作量，需设计</td>
+</tr>
+<tr>
+<td>原子类型 / 无锁结构</td>
+<td>触及内存模型与并发宪法</td>
+<td>需宪法裁决，默认不进</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>注意：这些要改冻结的 <code>codegen.rs</code>/<code>semantic.rs</code>，属独立语言版本主题，不塞进 asm 后端批次。
+若裁决「纳入」，须走双后端同步 + 全门禁，与后端优化解耦。</p>
+</blockquote>
+<h3 id="p3--工程化与文档可信度与可维护性">P3 · 工程化与文档（可信度与可维护性）</h3>
+<ul>
+<li><strong>过时结论清理</strong>：<code>roadmap-gap-analysis.md</code> 第 1 节的「领先 46%」删节线、<code>replace-llvm-
+  multidim-audit.md</code> 的「当前不能代替」裁决、诊断工具里的旧口径——统一指向本转向版。
+  （本轮已加顶部声明，后续逐条收口。）</li>
+<li><strong>门禁盲区固化</strong>：B6 struct 进容器虽已修复并纳入 asm 门禁，但差分 fuzz 生成器未覆盖
+  该构造——扩展 fuzz 语料，避免「两边都能编译才比一致」的盲区掩盖「一边根本编不过」。</li>
+<li><strong>可复现性</strong>:所有「达标 / 代替」结论保持命令可复现、数据可重跑、双次确定性。</li>
+</ul>
+<hr />
+<h2 id="3-验收判据什么叫已代替-llvm">3. 验收判据（什么叫「已代替 LLVM」）</h2>
+<p>一条清晰、可检验的线，替代过去模糊的「性能是否领先」：</p>
+<blockquote>
+<p><strong>当且仅当</strong>：① 性能维持 OPT-ENOUGH（§1 够用线，已满足）；② P0 正确性缺口清零；
+③ P1 AArch64 实机语义 golden 通过；④ P2 各项有明确裁决（纳入并落地，或宪法否决并
+记录理由）；⑤ P3 过时结论清理完成——即可宣布 <strong>asm 后端在能力上代替 LLVM</strong>，此后
+LLVM 路径可进入冻结/退役流程。</p>
+</blockquote>
+<p>性能<strong>不再是</strong>代替的阻断项——这是本转向与旧审计最根本的区别。</p>
+<hr />
+<h2 id="4-护栏延续不变">4. 护栏（延续，不变）</h2>
+<ol>
+<li>LLVM 路径零改动：<code>src/codegen.rs</code>、<code>src/ast.rs</code> 相对基线冻结（P2 若纳入须单独申请放宽）。</li>
+<li>AArch64 普通程序零变化（性能冻结意味着更少扰动）；版本 1.10.0；零新依赖；docx 确定性；不打 tag。</li>
+<li>每批带 A/B 回归护栏 + 全门禁 + 证据链（即便不以优化为目标，回归不可破）。</li>
+<li>「假设 LLVM 不存在、只有自己」总纲继续有效，统领一切裁决。</li>
+</ol>
+<hr />
+<h2 id="5-性能优化的重启条件写死非满足不重启">5. 性能优化的重启条件（写死，非满足不重启）</h2>
+<p>冻结 ≠ 永久删除。命中以下任一，<strong>才</strong>允许重启对应性能方向的诊断：</p>
+<ol>
+<li>出现<strong>新 workload</strong>（bench 或真实程序）使 OPT-ENOUGH 指标退化到够用线外（几何平均<blockquote>
+<p>1.05x 或总耗时 &gt;1.10x）；</p>
+</blockquote>
+</li>
+<li>语言层新增可并行语义 / 显式向量提示，使此前负 ROI 的方向（SIMD/展开）出现正收益；</li>
+<li>P0/P1/P2/P3 全部收口后，仍有明确预算且用户主动要求进一步压榨性能。</li>
+</ol>
+<p>不满足以上而「只是想再快一点」——<strong>一律不重启</strong>，资源留给代替能力。</p>
+<hr />
+<h2 id="6-一句话结论">6. 一句话结论</h2>
+<blockquote>
+<p><strong>性能已经够用（几何平均 0.57x、总耗时 0.91x，远超 ±5% 噪声阈值），性能优化正式冻结。
+接下来的主线不再是「比 LLVM 更快」，而是「在功能、平台、正确性上让 LLVM 变得不必要」——
+先清 P0 map key 泄漏（正确性底线），再补 P1 AArch64 实机语义，然后裁决 P2 语言特性，
+最后 P3 文档收口。性能只作回归护栏，不再投入。</strong></p>
+</blockquote><p class="note">← 更早：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> · 更新：<a href="replace-llvm-multidim-audit.html">replace-llvm-multidim-audit</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
