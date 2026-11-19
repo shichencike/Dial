@@ -61,6 +61,20 @@
 <p>本文回答一个此前一直被「单维度乐观结论」掩盖的问题：<strong>自研 asm 后端现在到底能不能
 真正代替 LLVM？</strong> 结论不预设立场，全部由当机实测数据说话。审计范围覆盖五个独立维度，
 任一维度不达标即不能宣称「已代替」。所有命令可复现。</p>
+<p><strong>2026-11-19 后续更新（维度 2 部分改善：asm 自行内联 dial_array_get）</strong>：
+审计报告后，asm 后端在 <code>--fast</code>（ReleaseFast）下于 <code>codegen_asm.rs::inst_call</code> 就地
+内联 <code>dial_array_get(a,i)</code>——发射 <code>load [a+24+i*8]</code>（数组 payload 布局），跳过 C
+runtime 调用的 call/ret 开销；safe/debug 保留原 call，Fail-Fast 边界检查不绕过；
+AArch64 保持原 call。这正是 LLVM 靠 <code>--fast</code> 的 LTO 吃掉、asm 长期吃不到的那块，
+如今 asm 自己拿回（符合「LLVM 不存在」总纲）。公平 A/B <code>--fast -O3</code> 实测：
+数组内存类 <strong>1.60x → 1.485x</strong>，整体几何平均 <strong>1.1155x → 1.0905x</strong>（仍慢约 9%），
+胜/平/负 6/6/16 → 6/7/15。校验和锚点 + ReleaseFast 双后端 21 用例 + 450 差分 fuzz
++ 工具链独立性 + PGO + 全量 run_tests 全绿。已将 ReleaseFast 双后端对比固化进
+<code>tools/run_asm_golden.sh</code>（堵住「默认 safety 门禁测不到内联路径」的盲区）。
+<strong>总裁裁仍不变</strong>：整体仍慢约 9%，尚未全面代替 LLVM；剩余差距是 GRA 全 spill +
+C runtime 字符串路径 + LTO 整体调度的架构级工程，非单点 pass 可回收，量化搁置。
+<code>dial_array_set</code> 内联因 COW 分支 + 元素所有权结算 + 与 C runtime 布局耦合，风险/收益
+比不划算，本轮不动（延续「不硬做负收益优化」纪律）。</p>
 <p><strong>2026-11-19 后续更新（维度 1 已修复）</strong>：审计报告后，维度 1 的功能硬缺口
 「struct 进容器（B6）」已在 asm 后端补齐——<code>lower.rs</code> 的 <code>coerce_elem_bits</code>/
 <code>reinterpret_bits</code> 支持 struct 装箱/解箱，新增 <code>unbox_struct_nullable</code>（无分支

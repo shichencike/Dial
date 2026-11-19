@@ -157,6 +157,11 @@
 同配置 `--fast -O3` 公平 A/B（跑两次，见 `rationale/replace-llvm-multidim-audit.md`）：
 几何平均 **1.12x（asm 慢 12%）**，胜/平/负 = 6/6/16；递归类领先（0.55x）、位控制流略领先（0.94x），
 算术循环（1.26x）、字符串（1.33x）、数组内存（1.60x）落后。性能上尚未代替 LLVM。
+**2026-11-19 再更新（asm 自内联 dial_array_get）**：asm 在 ReleaseFast 下于 `inst_call`
+就地发射 `load [a+24+i*8]` 内联数组读（`dial_array_get`），自己拿回 LLVM 靠 LTO 做的
+优化。同配置公平 A/B：数组内存 **1.60x → 1.485x**、几何平均 **1.12x → 1.0905x**
+（仍慢约 9%）、胜/平/负 6/7/15。ReleaseFast 双后端对比已固化进 golden 门禁。
+剩余差距（GRA 全 spill + C runtime 字符串 + LTO 整体调度）仍属架构级，量化搁置。
 
 ### D 类 · 战略/宪法否决（永久不做，不进计划）
 

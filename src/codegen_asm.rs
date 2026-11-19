@@ -3107,6 +3107,46 @@ impl<'a> FnEmit<'a> {
     }
 
     fn inst_call(&mut self, dst: Option<VReg>, func: &str, args: &[Value], arg_tys: &[IrType], ret_ty: IrType) {
+        // ── 热路径内联：dial_array_get(a, i) ────────────────────────────────
+        // 背景：数组下标 a[i] 在 lower 里降级为对 C runtime 的 dial_array_get 调用。
+        // 其函数体在 ReleaseFast 下（DIAL_SAFETY=0，边界检查编译期消除）等价于一条
+        // `load [a + 24 + i*8]`——数组 payload 布局为 [kind@0][len@8][cap@16][elems@24]。
+        // 手写汇编调用预编译 C 函数无法被链接期 LTO 内联，故每次读都要付 call/ret 与
+        // ABI 开销；这正是 LLVM 后端靠 --fast 的 LTO 吃掉、而 asm 长期落后的部分
+        // （数组内存类微基准慢 ~2x）。在「LLVM 不存在」的总纲下，正解是 asm 自己内联。
+        //
+        // 只在语义完全等价时内联：
+        //   · x86-64 SysV：发射序列针对该 ABI；AArch64 保持原 call（语义不变）。
+        //   · ReleaseFast：此时 C 侧边界检查已被编译期消除（越界=UB），纯 load 与之一致；
+        //     safe/debug 保留原 call，Fail-Fast 边界检查绝不绕过。
+        //   · 签名严格为 [Handle, I64] -> I64，且 dst 存在（读值必被使用）。
+        // 用 g1/g2（rax/r10）发射临时——它们不在 GRA 驻留池，不会踩踏任何 vreg。
+        if func == "dial_array_get"
+            && self.target == EmitTarget::X86_64SysV
+            && self.safety == SafetyMode::ReleaseFast
+            && dst.is_some()
+            && args.len() == 2
+            && arg_tys.len() == 2
+            && arg_tys[0] == IrType::Handle
+            && arg_tys[1] == IrType::I64
+            && !ret_ty.is_float()
+        {
+            let g1 = self.g1().to_string();
+            let g2 = self.g2().to_string();
+            // rax = a（payload 指针，Handle 位模式即地址）
+            self.lg(args[0], &g1);
+            // r10 = i
+            self.lg(args[1], &g2);
+            // r10 = i * 8（元素宽 8 字节）
+            self.line(&format!("\tshlq $3, {}", self.r(&g2)));
+            // rax = a + i*8
+            self.line(&format!("\taddq {}, {}", self.r(&g2), self.r(&g1)));
+            // rax = load[rax + 24]（跳过 [kind][len][cap] 三个 int64 头）
+            self.line(&format!("\tmovq 24({}), {}", self.r(&g1), self.r(&g1)));
+            // 返回值落回 dst 槽——与原 call 的 `sg(dst, ret_int_reg)` 语义完全一致。
+            self.sg(dst.unwrap(), &g1);
+            return;
+        }
         let locs = abi_assign(arg_tys, self.target);
         let g1 = self.g1().to_string();
 

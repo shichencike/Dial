@@ -3402,3 +3402,21 @@ imulq   %r10, %r15     # s * 31
 
 **护栏（Phase C）**：版本 1.10.0/零依赖/AArch64 零变化/不打 tag 不变；C 侧改动仅对 KV_STRING 生效、标量/结构体路径零变化；双后端输出逐字节一致。
 
+
+---
+
+## v1.10 开发增量：asm 后端自行内联 dial_array_get（攻性能硬阻断）
+
+**为什么做**：多维度审计（`rationale/replace-llvm-multidim-audit.md`）裁决当前不能代替 LLVM，功能硬缺口 B6 已修复，唯一剩余硬阻断是性能——公平 A/B `--fast -O3` 整体慢约 12%、数组内存类慢 60%。根因坐实：数组下标 `a[i]` 在两端都降级为 C runtime `dial_array_get(a,i)` 调用；其函数体在 ReleaseFast（`DIAL_SAFETY=0`，边界检查编译期消除）下等价于一条 `load [a+24+i*8]`（payload 布局 `[kind@0][len@8][cap@16][elems@24]`）。手写汇编调用预编译 C 函数无法被链接期 LTO 内联，故每次读都付完整 call/ret + ABI 开销——这正是 LLVM 靠 `--fast` 的 LTO 吃掉、asm 长期吃不到的那块。按总纲「假设 LLVM 不存在、asm 自己就是唯一完整后端」，正解是 asm 自己拿回这个优化。
+
+**实现（提交：asm 后端内联 dial_array_get）**：`src/codegen_asm.rs::inst_call` 开头加内联快路径，仅当 ① target=x86-64 SysV ② safety=ReleaseFast ③ `func=="dial_array_get"` ④ 签名严格 `[Handle,I64]->I64` 且 dst 存在时，用发射临时 g1/g2（rax/r10，不在 GRA 驻留池）就地发射 `lg a→rax; lg i→r10; shlq $3,r10; addq r10,rax; movq 24(rax),rax; sg(dst,rax)`。语义等价性：ReleaseFast 下越界=UB，C 侧无边界检查，纯 load 与之一致；safe/debug 保留原 call，Fail-Fast 边界检查绝不绕过；AArch64 保持原 call（语义不变）。零 IR 改动、零 lower 改动、零 LLVM 路径改动、零新依赖。
+
+**实测收益（公平 A/B `--fast -O3`，校验和锚点保证等价计算）**：数组内存类几何平均 **1.60x → 1.485x**，整体几何平均 **1.1155x → 1.0905x**（仍慢约 9%），胜/平/负 6/6/16 → 6/7/15；逐项 b14 1.715→1.606、b15 2.193→1.954、b17 2.203→2.075。`.s` 中 `dial_array_get` 调用 23→0，内联序列已核实发射。
+
+**门禁补盲区**：审计曾指出「默认 safety 门禁测不到内联路径」。原 golden 用默认 ReleaseSafe，不经过快路径。故在 `tools/run_asm_golden.sh` 新增 ReleaseFast 双后端对比组（21 用例），LLVM 走 LTO 内联、asm 走发射内联，输出必须逐字节一致，长期固化该路径回归。
+
+**验证全绿**：ReleaseFast 双后端 21 用例 + 默认 golden 22 用例 + 差分 fuzz 450 次 0 不一致 + 工具链去 LLVM 化（gcc-only 21 用例）+ 自研 PGO 闭环 L1-L4 + 全量 `run_tests.sh` 全部通过。
+
+**总裁裁不变**：整体仍慢约 9%，尚未全面代替 LLVM。剩余差距（GRA 全 spill + C runtime 字符串路径 + LTO 整体调度）属架构级工程，非单点 pass 可回收，量化搁置。`dial_array_set` 内联因 COW 分支 + 元素所有权结算 + 与 C runtime 内存布局耦合，风险/收益比不划算，本轮不动（延续「不硬做负收益优化」纪律）。
+
+**护栏**：版本 1.10.0/零依赖/AArch64 零变化/不打 tag 不变；只改 asm 发射器与 golden 门禁，LLVM 路径与 IR 层零改动；safe/debug 行为零变化。

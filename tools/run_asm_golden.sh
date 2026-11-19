@@ -141,5 +141,34 @@ else
     bad "--fast-compile：编译/运行失败"; tail -8 "$fc_work/asm.log"
 fi
 
-echo "  共 $count 个双后端黄金用例"
+# ReleaseFast（--fast）双后端一致性：覆盖 asm 后端在 ReleaseFast 下内联 dial_array_get
+# 的快路径。默认 safety=ReleaseSafe 的主循环不经过该路径，若不单列 --fast 组，
+# 内联发射的任何语义偏差都会逃过门禁（审计「门禁盲区」教训）。此处 --fast 下
+# LLVM 走 LTO 内联、asm 走发射内联，两者输出必须逐字节一致。
+fast_work="$TMP/fast_all"; mkdir -p "$fast_work"
+fast_ok=0; fast_fail=0
+for src in "$CASES"/*.dial; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src" .dial)"
+    fw="$fast_work/$name"; mkdir -p "$fw"; cp "$src" "$fw/$name.dial"
+    if ! "$DIALC" build "$fw/$name.dial" --backend=llvm --fast -o "$fw/llvm" >"$fw/ll.log" 2>&1; then
+        bad "--fast/$name：llvm 编译失败"; fast_fail=$((fast_fail+1)); continue
+    fi
+    if ! "$DIALC" build "$fw/$name.dial" --backend=asm --fast -o "$fw/asm" >"$fw/as.log" 2>&1; then
+        bad "--fast/$name：asm 编译失败"; sed 's/^/       /' "$fw/as.log" | tail -8; fast_fail=$((fast_fail+1)); continue
+    fi
+    "$fw/llvm" >"$fw/ll.out" 2>&1; "$fw/asm" >"$fw/as.out" 2>&1
+    if diff -q "$fw/ll.out" "$fw/as.out" >/dev/null 2>&1; then
+        fast_ok=$((fast_ok+1))
+    else
+        bad "--fast/$name：双后端输出不一致"; diff "$fw/ll.out" "$fw/as.out" | head -10; fast_fail=$((fast_fail+1))
+    fi
+done
+if [ "$fast_fail" -eq 0 ]; then
+    ok "ReleaseFast(--fast) 双后端一致：$fast_ok 用例（覆盖 dial_array_get 内联快路径）"
+else
+    bad "ReleaseFast(--fast) 有 $fast_fail 用例不一致"
+fi
+
+echo "  共 $count 个双后端黄金用例（另 $fast_ok 个 --fast 快速路径）"
 exit "$fail"

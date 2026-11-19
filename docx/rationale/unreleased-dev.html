@@ -51,6 +51,7 @@
 <li><a href="#r3impl-关联函数-tnew无-self-静态方法-唯一后端收回路线图第-3-项">R3：impl 关联函数 T::new()（无 self 静态方法）—— 唯一后端收回路线图第 3 项</a></li>
 <li><a href="#r4自研-pgo-闭环--唯一后端收回路线图第-4-项四项全部收口">R4：自研 PGO 闭环 —— 唯一后端收回路线图第 4 项（四项全部收口）</a></li>
 <li><a href="#v110-开发增量放宽护栏双后端补齐-b-类语言特性map-值">v1.10 开发增量：放宽护栏，双后端补齐 B 类语言特性（map 值）</a></li>
+<li><a href="#v110-开发增量asm-后端自行内联-dial_array_get攻性能硬阻断">v1.10 开发增量：asm 后端自行内联 dial_array_get（攻性能硬阻断）</a></li>
 </ul>
 </li>
 </ul>
@@ -3522,7 +3523,16 @@ imulq   %r10, %r15     # s * 31
 - C2 <code>get_or()</code>：<strong>所有权契约</strong>——get_or 返回值是「已拥有」值（两端 <code>yields_borrowed_ref</code> 不含 get_or，绑定变量不 retain、作用域退出 release）。朴素放开会 double-free（C 侧命中返回表内借用值、未命中返回默认位模式，两侧都不 retain）。修复：① C 侧 <code>dial_kvmap_get_or</code> 对 <code>KV_STRING</code> 返回值补 <code>kv_retain_kind</code>（命中=表值+1、未命中=默认值+1；标量/结构体不受影响）；② LLVM <code>codegen.rs</code> 把丢弃的 <code>_da</code> 改为 <code>da</code>，对 string 调用后 <code>settle_fresh_value(&amp;args[1], v, da)</code> 归还默认实参字面量那份（借用变量 no-op）；③ asm <code>lower.rs::lower_method</code> 保留每个实参原始值，对 get_or+string 且默认实参非 borrowed 发 <code>RcRelease</code> 归还。四象限推演全部平衡：命中(字面量默认)=表+1/本地-1、命中(借用默认)=表+1/本地 no-op、未命中(字面量默认)=默认+1/本地-1/调用方-1、未命中(借用默认)=默认+1/调用方-1。
 - 验证：<code>tests/kvmap_string_getor_values.dial</code> 四象限 + values 快照 + 5 万次压测（safety=2 heap assert 无 double-free）；<code>tests/asm_golden/kvmap_string_getor.dial</code> 轻量黄金（21 goldens 全绿）；双后端逐字节一致；struct 的 get_or（batch3_b6_smoke）不受影响（C 侧只对 KV_STRING retain）。
 - 至此 B 类语言特性（map<string> 值 / select 块超时 / values+get_or 全面放开）全部落地，放宽护栏后的语言栈补齐收口。</p>
-<p><strong>护栏（Phase C）</strong>：版本 1.10.0/零依赖/AArch64 零变化/不打 tag 不变；C 侧改动仅对 KV_STRING 生效、标量/结构体路径零变化；双后端输出逐字节一致。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+<p><strong>护栏（Phase C）</strong>：版本 1.10.0/零依赖/AArch64 零变化/不打 tag 不变；C 侧改动仅对 KV_STRING 生效、标量/结构体路径零变化；双后端输出逐字节一致。</p>
+<hr />
+<h2 id="v110-开发增量asm-后端自行内联-dial_array_get攻性能硬阻断">v1.10 开发增量：asm 后端自行内联 dial_array_get（攻性能硬阻断）</h2>
+<p><strong>为什么做</strong>：多维度审计（<code>rationale/replace-llvm-multidim-audit.md</code>）裁决当前不能代替 LLVM，功能硬缺口 B6 已修复，唯一剩余硬阻断是性能——公平 A/B <code>--fast -O3</code> 整体慢约 12%、数组内存类慢 60%。根因坐实：数组下标 <code>a[i]</code> 在两端都降级为 C runtime <code>dial_array_get(a,i)</code> 调用；其函数体在 ReleaseFast（<code>DIAL_SAFETY=0</code>，边界检查编译期消除）下等价于一条 <code>load [a+24+i*8]</code>（payload 布局 <code>[kind@0][len@8][cap@16][elems@24]</code>）。手写汇编调用预编译 C 函数无法被链接期 LTO 内联，故每次读都付完整 call/ret + ABI 开销——这正是 LLVM 靠 <code>--fast</code> 的 LTO 吃掉、asm 长期吃不到的那块。按总纲「假设 LLVM 不存在、asm 自己就是唯一完整后端」，正解是 asm 自己拿回这个优化。</p>
+<p><strong>实现（提交：asm 后端内联 dial_array_get）</strong>：<code>src/codegen_asm.rs::inst_call</code> 开头加内联快路径，仅当 ① target=x86-64 SysV ② safety=ReleaseFast ③ <code>func=="dial_array_get"</code> ④ 签名严格 <code>[Handle,I64]-&gt;I64</code> 且 dst 存在时，用发射临时 g1/g2（rax/r10，不在 GRA 驻留池）就地发射 <code>lg a→rax; lg i→r10; shlq $3,r10; addq r10,rax; movq 24(rax),rax; sg(dst,rax)</code>。语义等价性：ReleaseFast 下越界=UB，C 侧无边界检查，纯 load 与之一致；safe/debug 保留原 call，Fail-Fast 边界检查绝不绕过；AArch64 保持原 call（语义不变）。零 IR 改动、零 lower 改动、零 LLVM 路径改动、零新依赖。</p>
+<p><strong>实测收益（公平 A/B <code>--fast -O3</code>，校验和锚点保证等价计算）</strong>：数组内存类几何平均 <strong>1.60x → 1.485x</strong>，整体几何平均 <strong>1.1155x → 1.0905x</strong>（仍慢约 9%），胜/平/负 6/6/16 → 6/7/15；逐项 b14 1.715→1.606、b15 2.193→1.954、b17 2.203→2.075。<code>.s</code> 中 <code>dial_array_get</code> 调用 23→0，内联序列已核实发射。</p>
+<p><strong>门禁补盲区</strong>：审计曾指出「默认 safety 门禁测不到内联路径」。原 golden 用默认 ReleaseSafe，不经过快路径。故在 <code>tools/run_asm_golden.sh</code> 新增 ReleaseFast 双后端对比组（21 用例），LLVM 走 LTO 内联、asm 走发射内联，输出必须逐字节一致，长期固化该路径回归。</p>
+<p><strong>验证全绿</strong>：ReleaseFast 双后端 21 用例 + 默认 golden 22 用例 + 差分 fuzz 450 次 0 不一致 + 工具链去 LLVM 化（gcc-only 21 用例）+ 自研 PGO 闭环 L1-L4 + 全量 <code>run_tests.sh</code> 全部通过。</p>
+<p><strong>总裁裁不变</strong>：整体仍慢约 9%，尚未全面代替 LLVM。剩余差距（GRA 全 spill + C runtime 字符串路径 + LTO 整体调度）属架构级工程，非单点 pass 可回收，量化搁置。<code>dial_array_set</code> 内联因 COW 分支 + 元素所有权结算 + 与 C runtime 内存布局耦合，风险/收益比不划算，本轮不动（延续「不硬做负收益优化」纪律）。</p>
+<p><strong>护栏</strong>：版本 1.10.0/零依赖/AArch64 零变化/不打 tag 不变；只改 asm 发射器与 golden 门禁，LLVM 路径与 IR 层零改动；safe/debug 行为零变化。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

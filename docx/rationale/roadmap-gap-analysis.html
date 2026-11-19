@@ -312,7 +312,12 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 <strong>2026-11-19 修正</strong>：上述为不公平对比（asm O2/O3 vs LLVM 默认 O0 + 常量折叠干扰）产物。
 同配置 <code>--fast -O3</code> 公平 A/B（跑两次，见 <code>rationale/replace-llvm-multidim-audit.md</code>）：
 几何平均 <strong>1.12x（asm 慢 12%）</strong>，胜/平/负 = 6/6/16；递归类领先（0.55x）、位控制流略领先（0.94x），
-算术循环（1.26x）、字符串（1.33x）、数组内存（1.60x）落后。性能上尚未代替 LLVM。</p>
+算术循环（1.26x）、字符串（1.33x）、数组内存（1.60x）落后。性能上尚未代替 LLVM。
+<strong>2026-11-19 再更新（asm 自内联 dial_array_get）</strong>：asm 在 ReleaseFast 下于 <code>inst_call</code>
+就地发射 <code>load [a+24+i*8]</code> 内联数组读（<code>dial_array_get</code>），自己拿回 LLVM 靠 LTO 做的
+优化。同配置公平 A/B：数组内存 <strong>1.60x → 1.485x</strong>、几何平均 <strong>1.12x → 1.0905x</strong>
+（仍慢约 9%）、胜/平/负 6/7/15。ReleaseFast 双后端对比已固化进 golden 门禁。
+剩余差距（GRA 全 spill + C runtime 字符串 + LTO 整体调度）仍属架构级，量化搁置。</p>
 <h3 id="d-类--战略宪法否决永久不做不进计划">D 类 · 战略/宪法否决（永久不做，不进计划）</h3>
 <p>SIMD 完整后端（−6.7%）、caller-saved GRA（ROI 为负）、函数名重载、闭包、
 运算符重载、用户自定义泛型/接口/trait、可变全局状态、追踪式 GC。</p>
