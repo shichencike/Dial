@@ -1,0 +1,158 @@
+# asm 后端能否真正代替 LLVM：多维度审计（2026-11-19，实测版）
+
+> 本文回答一个此前一直被「单维度乐观结论」掩盖的问题：**自研 asm 后端现在到底能不能
+> 真正代替 LLVM？** 结论不预设立场，全部由当机实测数据说话。审计范围覆盖五个独立维度，
+> 任一维度不达标即不能宣称「已代替」。所有命令可复现。
+
+## 裁决（先给结论）
+
+**当前不能代替 LLVM。** 五个维度中，四个达标或部分达标，**两个存在硬缺口**：
+
+| 维度 | 结论 | 硬数据 |
+| --- | --- | --- |
+| 1. 功能对等性 | ❌ **有硬缺口** | 124 个可编译源码中 1 个 asm 全优化级别编译失败（struct 进数组/容器，B6）；LLVM 正确运行 |
+| 2. 性能 | ❌ **整体落后** | 同配置 `--fast -O3` 公平 A/B：几何平均 **1.12x（asm 慢 12%）**，胜/平/负 = 6/6/16 |
+| 3. 优化深度 | ⚠️ 部分达标 | 常量折叠/CSE/DCE/IVR/fGRA 等已吃干净；但数组内存类仍慢 1.60x，归因 LTO+寄存器分配架构级差距 |
+| 4. 平台/工具链 | ⚠️ 部分达标 | 工具链去 LLVM 化 20 用例全绿；但 AArch64 只验证汇编写法、**不验证运行语义**，且内联汇编/DWARF/PGO 在 AArch64 降级 |
+| 5. 正确性/一致性 | ✅ 达标 | 21 双后端 golden + 450 差分 fuzz 对比 0 不一致 |
+
+**一句话**：asm 在「能编译的程序上输出正确、工具链独立、x86-64 语义完备」，但**还不能在功能覆盖和性能上全面接管 LLVM**——存在 1 个确凿的编译期功能缺口（struct 进容器），且公平对比下整体慢约 12%（数组/字符串/算术循环明显落后）。
+
+---
+
+## 维度 1：功能对等性 —— ❌ 有硬缺口
+
+### 测法
+全仓 378 个 `.dial` 源码，逐个用 `--backend=llvm --no-link` 与 `--backend=asm -O0 --no-link` 编译，
+比较成功/失败集合。排除含 `import` 的源码（单文件编译缺模块路径，非后端差异）。
+`run_tests.sh` 已通过（工作区从本轮起点 0d13bbd 起干净）。
+
+### 结果
+- LLVM 成功 125 / asm 成功 124；**两者都成功 124**。
+- 215 个「都失败」经核实全是负例或环境依赖：`bad/` 213、`pkg/` 7（需包路径）、`ffi/` 3（需 C 库路径）、examples 全过。
+- **唯一差异集：`tests/batch3_b6_smoke.dial` —— LLVM 成功、asm 失败。**
+
+### 缺口坐实
+```
+$ dialc build tests/batch3_b6_smoke.dial --backend=asm -O{0,1,2,3} --no-link
+[asm 后端] 数组元素类型 struct Point 暂不支持赋值     # O0/O1/O2/O3 全部失败
+$ dialc build tests/batch3_b6_smoke.dial --backend=llvm && ./a.out
+B6 len = 2 ... B6 map contains = true                  # LLVM 完整正确运行
+```
+根因：`src/lower.rs::coerce_elem_bits` 对 `IrType::Aggregate`（struct）走 `_ => Err`，
+即 **struct 值无法存入数组元素**。进一步隔离测试显示，连 `var pts: Point[] = [Point{...}]`
+（无下标赋值）与 `m.put("a", Point{...})` 也失败——整个「结构体进容器（B6）」在 asm 后端不可用。
+该限制由 `3ab9f80`（M2-a）引入，**本轮零改动**，是历史遗留缺口。
+
+### 为何门禁没发现
+`tests/run_tests.sh:3078` 的 B6 断言用 `dialc build tests/batch3_b6_smoke.dial`
+（**不指定 `--backend`，默认 LLVM**）编译。因此 README 声称的「B6 双后端一致」从未被门禁真正验证。
+这正是「只看单维度（功能声明 / 默认后端门禁全绿）会漏掉」的直接例证。
+
+---
+
+## 维度 2：性能 —— ❌ 整体落后（推翻旧结论）
+
+### 测法
+`tools/bench_asm_vs_llvm.py`，同一份 `bench/bench.dial`（28 项跨语言等价微基准），
+只有 `--backend` 不同，带校验和锚点保证「比的是等价计算」。为对比各自最强发布配置，
+两后端都传 `--fast -O3`（LLVM 走 `--fast` O3+LTO 并忽略 -O3；asm 走 O3+fast C 运行时）。
+独立跑两次验证稳定性。
+
+### 结果（两次运行高度一致）
+| 指标 | 第 1 次 | 第 2 次 |
+| --- | --- | --- |
+| 几何平均比值（asm/llvm，<1 为 asm 快） | **1.1155x** | **1.1194x** |
+| 总净耗时 | 50.43 vs 41.51 ms = 1.215x | 50.63 vs 41.51 ms = 1.220x |
+| 逐项胜/平/负 | 6 / 6 / 16 | 6 / 6 / 16 |
+
+### 按类别几何平均
+| 类别 | 比值 | 判定 |
+| --- | --- | --- |
+| 递归调用 | 0.55x | 🟢 asm 大幅领先（尾调用消除，b09 达 0.065x） |
+| 位与控制流 | 0.94x | 🟢 略领先 |
+| 算术循环 | 1.26x | 🔴 落后（b05 2.11x、b08 1.94x、b12 互递归 4.06x） |
+| 字符串 | 1.33x | 🔴 落后（b20 拼接 2.28x） |
+| 数组内存 | 1.60x | 🔴 最差（b15 冒泡 2.23x、b17 矩阵乘 2.27x、b14 随机索引 1.59x） |
+
+### 与旧结论的冲突（必须纠正）
+`rationale/roadmap-gap-analysis.md` 总纲与 `tools/diag_opt_gaps.py` 结论仍写着
+「几何平均 ~0.54x / 领先 LLVM ~46%」。该数字是**不公平对比**的产物（asm O2/O3 vs LLVM 默认 O0，
+或被常量折叠项干扰）。公平同配置 A/B 证明：**asm 实际整体慢约 12%**。旧结论必须修正，
+否则会持续误导「性能已超过 LLVM」的判断。
+
+---
+
+## 维度 3：优化深度 —— ⚠️ 部分达标
+
+`tools/diag_opt_gaps.py /tmp/r2/bench.s`（asm -O3，4069 行）量化：
+- 已有并吃干净：常量折叠 / CSE / DCE / IVR（归纳变量）/ InstCombine / 尾调用 / 常量魔数除法 / fGRA / ISA 微融合 / 过程间折叠。
+- 缺失的经典 pass（LICM / 循环展开 / 内联 / SCCP）：在当前基准语料上判**负 ROI**——
+  循环多为串行依赖链（无循环不变量、迭代不可并行），小函数各只调一次。
+- 落后项（b02/b20/b22）归因：C runtime 开销 + 串行依赖链 + LLVM `--fast` 的 **LTO 整体调度/内联**，
+  属架构级差距，非单点 pass 可回收。
+
+诚实解读：asm 的**纯 IR 优化层已接近榨干**，剩余性能差距不在「缺哪个 pass」，而在
+LTO 整体内联 + 数组/字符串 C runtime 路径。**这不是「做几个 pass 就能补上」的问题**。
+
+---
+
+## 维度 4：平台与工具链 —— ⚠️ 部分达标
+
+### 达标项
+- **工具链去 LLVM 化**（`tools/verify_no_llvm_toolchain.sh`）：20 用例在 gcc-only + 隔离 PATH
+  （屏蔽 clang/zig/lld）下 asm 产物与默认工具链逐字节一致——**编译器本身不依赖 LLVM 工具链**，这是「代替」的关键前提，已满足。
+- 产物形态三件套（单文件 / 极致体积 / 极致编译速度）、Fail-Fast、FFI/C ABI、x86-64 DWARF 均已落地。
+
+### 缺口项
+- **AArch64 只验证「汇编写法合法」，不验证运行语义**：`run_asm_golden.sh:114` 用
+  `clang --target=aarch64-linux-gnu` 交叉汇编出 ELF .o 即算通过；x86 宿主无法执行 aarch64 程序，
+  **从未实机跑过**。且 AArch64 下内联汇编 Fail-Fast、无 DWARF、PGO 优雅降级（`pgo_effective=false`）。
+  即 asm 在 AArch64 上是「能生成代码但能力缩水且未实机验证」的状态。
+- 对比 LLVM：LLVM 路径是多平台成熟后端，AArch64 走完整 codegen。asm 在平台覆盖广度与深度上仍有明显差距。
+
+---
+
+## 维度 5：正确性与一致性 —— ✅ 达标
+
+- `tools/run_asm_golden.sh`：**21 个双后端黄金用例**输出 + .s 产物逐字节一致。
+- `tools/run_diff_fuzz_gate.sh`：golden 自检 + 4 个固化差分语料 + **150 seeds × O0/O2/O3 = 450 次
+  双后端对比，0 不一致**（OK 450 / DIFF 0 / BUILD_FAIL 0）。
+- 历史一致性 bug（默认实参补齐、借用绑定 retain、嵌套下标 COW）均已被 diff fuzz 捕获并修复。
+
+**但维度盲区**：fuzz 生成器未覆盖「struct 进容器」这类构造，因此维度 5 的「0 不一致」
+不能为维度 1 的缺口背书——fuzz 只保证「两边都能编译的程序输出一致」，不保证「覆盖所有语言构造」。
+
+---
+
+## 阻断项清单（要真正代替 LLVM，必须先解决）
+
+按优先级排序，均为实测确凿项，非猜测：
+
+1. **【功能·硬阻断】struct 进容器（B6）在 asm 后端全优化级别编译失败**。
+   位置 `src/lower.rs::coerce_elem_bits` 的 `Aggregate` 分支。需实现 struct 值的位模式装箱/还原
+   （对齐 LLVM 的 `kv_from_bits` struct 路径），并把 `batch3_b6_smoke.dial` 纳入 `--backend=asm` 门禁。
+2. **【性能·硬阻断】公平对比整体慢约 12%，数组内存类慢 60%**。
+   根因是 LTO 整体内联缺失 + 数组/字符串 C runtime 路径开销。这是架构级工程，非单点 pass。
+3. **【平台·重要】AArch64 未实机验证运行语义，且内联汇编/DWARF/PGO 降级**。
+4. **【文档·必须纠正】roadmap 与诊断工具里「领先 LLVM 46%」的过时结论**，以及
+   「语义层 asm 已完全追平 LLVM」的断言（与维度 1 实测矛盾）。
+
+## 复现命令
+
+```bash
+cd /workspace/dialc
+# 维度1：功能覆盖率（脚本逻辑见正文）
+bash /tmp/coverage_probe.sh
+# 维度2：性能公平 A/B（本次实测配置）
+python3 tools/bench_asm_vs_llvm.py --backend-flags "--fast -O3"
+# 维度3：优化缺口
+mkdir -p /tmp/r2 && cp bench/bench.dial /tmp/r2/
+dialc build /tmp/r2/bench.dial --backend=asm -O3 --no-link -o /tmp/r2/bin
+python3 tools/diag_opt_gaps.py /tmp/r2/bench.s
+# 维度4：工具链独立性 + AArch64 语法
+bash tools/verify_no_llvm_toolchain.sh
+bash tools/run_asm_golden.sh ./target/release/dialc
+# 维度5：差分一致性
+bash tools/run_diff_fuzz_gate.sh
+```

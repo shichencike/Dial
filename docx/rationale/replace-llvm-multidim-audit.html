@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>理由与证据链 replace-llvm-multidim-audit · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html">更新日志</a>
+      <a href="../rationale.html" class="active">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/replace-llvm-multidim-audit.html">变更条目</a></p><div class="toc">
+<ul>
+<li><a href="#asm-后端能否真正代替-llvm多维度审计2026-11-19实测版">asm 后端能否真正代替 LLVM：多维度审计（2026-11-19，实测版）</a><ul>
+<li><a href="#裁决先给结论">裁决（先给结论）</a></li>
+<li><a href="#维度-1功能对等性---有硬缺口">维度 1：功能对等性 —— ❌ 有硬缺口</a><ul>
+<li><a href="#测法">测法</a></li>
+<li><a href="#结果">结果</a></li>
+<li><a href="#缺口坐实">缺口坐实</a></li>
+<li><a href="#为何门禁没发现">为何门禁没发现</a></li>
+</ul>
+</li>
+<li><a href="#维度-2性能---整体落后推翻旧结论">维度 2：性能 —— ❌ 整体落后（推翻旧结论）</a><ul>
+<li><a href="#测法_1">测法</a></li>
+<li><a href="#结果两次运行高度一致">结果（两次运行高度一致）</a></li>
+<li><a href="#按类别几何平均">按类别几何平均</a></li>
+<li><a href="#与旧结论的冲突必须纠正">与旧结论的冲突（必须纠正）</a></li>
+</ul>
+</li>
+<li><a href="#维度-3优化深度---部分达标">维度 3：优化深度 —— ⚠️ 部分达标</a></li>
+<li><a href="#维度-4平台与工具链---部分达标">维度 4：平台与工具链 —— ⚠️ 部分达标</a><ul>
+<li><a href="#达标项">达标项</a></li>
+<li><a href="#缺口项">缺口项</a></li>
+</ul>
+</li>
+<li><a href="#维度-5正确性与一致性---达标">维度 5：正确性与一致性 —— ✅ 达标</a></li>
+<li><a href="#阻断项清单要真正代替-llvm必须先解决">阻断项清单（要真正代替 LLVM，必须先解决）</a></li>
+<li><a href="#复现命令">复现命令</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h1 id="asm-后端能否真正代替-llvm多维度审计2026-11-19实测版">asm 后端能否真正代替 LLVM：多维度审计（2026-11-19，实测版）</h1>
+<blockquote>
+<p>本文回答一个此前一直被「单维度乐观结论」掩盖的问题：<strong>自研 asm 后端现在到底能不能
+真正代替 LLVM？</strong> 结论不预设立场，全部由当机实测数据说话。审计范围覆盖五个独立维度，
+任一维度不达标即不能宣称「已代替」。所有命令可复现。</p>
+</blockquote>
+<h2 id="裁决先给结论">裁决（先给结论）</h2>
+<p><strong>当前不能代替 LLVM。</strong> 五个维度中，四个达标或部分达标，<strong>两个存在硬缺口</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>结论</th>
+<th>硬数据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1. 功能对等性</td>
+<td>❌ <strong>有硬缺口</strong></td>
+<td>124 个可编译源码中 1 个 asm 全优化级别编译失败（struct 进数组/容器，B6）；LLVM 正确运行</td>
+</tr>
+<tr>
+<td>2. 性能</td>
+<td>❌ <strong>整体落后</strong></td>
+<td>同配置 <code>--fast -O3</code> 公平 A/B：几何平均 <strong>1.12x（asm 慢 12%）</strong>，胜/平/负 = 6/6/16</td>
+</tr>
+<tr>
+<td>3. 优化深度</td>
+<td>⚠️ 部分达标</td>
+<td>常量折叠/CSE/DCE/IVR/fGRA 等已吃干净；但数组内存类仍慢 1.60x，归因 LTO+寄存器分配架构级差距</td>
+</tr>
+<tr>
+<td>4. 平台/工具链</td>
+<td>⚠️ 部分达标</td>
+<td>工具链去 LLVM 化 20 用例全绿；但 AArch64 只验证汇编写法、<strong>不验证运行语义</strong>，且内联汇编/DWARF/PGO 在 AArch64 降级</td>
+</tr>
+<tr>
+<td>5. 正确性/一致性</td>
+<td>✅ 达标</td>
+<td>21 双后端 golden + 450 差分 fuzz 对比 0 不一致</td>
+</tr>
+</tbody>
+</table>
+<p><strong>一句话</strong>：asm 在「能编译的程序上输出正确、工具链独立、x86-64 语义完备」，但<strong>还不能在功能覆盖和性能上全面接管 LLVM</strong>——存在 1 个确凿的编译期功能缺口（struct 进容器），且公平对比下整体慢约 12%（数组/字符串/算术循环明显落后）。</p>
+<hr />
+<h2 id="维度-1功能对等性---有硬缺口">维度 1：功能对等性 —— ❌ 有硬缺口</h2>
+<h3 id="测法">测法</h3>
+<p>全仓 378 个 <code>.dial</code> 源码，逐个用 <code>--backend=llvm --no-link</code> 与 <code>--backend=asm -O0 --no-link</code> 编译，
+比较成功/失败集合。排除含 <code>import</code> 的源码（单文件编译缺模块路径，非后端差异）。
+<code>run_tests.sh</code> 已通过（工作区从本轮起点 0d13bbd 起干净）。</p>
+<h3 id="结果">结果</h3>
+<ul>
+<li>LLVM 成功 125 / asm 成功 124；<strong>两者都成功 124</strong>。</li>
+<li>215 个「都失败」经核实全是负例或环境依赖：<code>bad/</code> 213、<code>pkg/</code> 7（需包路径）、<code>ffi/</code> 3（需 C 库路径）、examples 全过。</li>
+<li><strong>唯一差异集：<code>tests/batch3_b6_smoke.dial</code> —— LLVM 成功、asm 失败。</strong></li>
+</ul>
+<h3 id="缺口坐实">缺口坐实</h3>
+<pre><code>$ dialc build tests/batch3_b6_smoke.dial --backend=asm -O{0,1,2,3} --no-link
+[asm 后端] 数组元素类型 struct Point 暂不支持赋值     # O0/O1/O2/O3 全部失败
+$ dialc build tests/batch3_b6_smoke.dial --backend=llvm &amp;&amp; ./a.out
+B6 len = 2 ... B6 map contains = true                  # LLVM 完整正确运行
+</code></pre>
+<p>根因：<code>src/lower.rs::coerce_elem_bits</code> 对 <code>IrType::Aggregate</code>（struct）走 <code>_ =&gt; Err</code>，
+即 <strong>struct 值无法存入数组元素</strong>。进一步隔离测试显示，连 <code>var pts: Point[] = [Point{...}]</code>
+（无下标赋值）与 <code>m.put("a", Point{...})</code> 也失败——整个「结构体进容器（B6）」在 asm 后端不可用。
+该限制由 <code>3ab9f80</code>（M2-a）引入，<strong>本轮零改动</strong>，是历史遗留缺口。</p>
+<h3 id="为何门禁没发现">为何门禁没发现</h3>
+<p><code>tests/run_tests.sh:3078</code> 的 B6 断言用 <code>dialc build tests/batch3_b6_smoke.dial</code>
+（<strong>不指定 <code>--backend</code>，默认 LLVM</strong>）编译。因此 README 声称的「B6 双后端一致」从未被门禁真正验证。
+这正是「只看单维度（功能声明 / 默认后端门禁全绿）会漏掉」的直接例证。</p>
+<hr />
+<h2 id="维度-2性能---整体落后推翻旧结论">维度 2：性能 —— ❌ 整体落后（推翻旧结论）</h2>
+<h3 id="测法_1">测法</h3>
+<p><code>tools/bench_asm_vs_llvm.py</code>，同一份 <code>bench/bench.dial</code>（28 项跨语言等价微基准），
+只有 <code>--backend</code> 不同，带校验和锚点保证「比的是等价计算」。为对比各自最强发布配置，
+两后端都传 <code>--fast -O3</code>（LLVM 走 <code>--fast</code> O3+LTO 并忽略 -O3；asm 走 O3+fast C 运行时）。
+独立跑两次验证稳定性。</p>
+<h3 id="结果两次运行高度一致">结果（两次运行高度一致）</h3>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>第 1 次</th>
+<th>第 2 次</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>几何平均比值（asm/llvm，&lt;1 为 asm 快）</td>
+<td><strong>1.1155x</strong></td>
+<td><strong>1.1194x</strong></td>
+</tr>
+<tr>
+<td>总净耗时</td>
+<td>50.43 vs 41.51 ms = 1.215x</td>
+<td>50.63 vs 41.51 ms = 1.220x</td>
+</tr>
+<tr>
+<td>逐项胜/平/负</td>
+<td>6 / 6 / 16</td>
+<td>6 / 6 / 16</td>
+</tr>
+</tbody>
+</table>
+<h3 id="按类别几何平均">按类别几何平均</h3>
+<table>
+<thead>
+<tr>
+<th>类别</th>
+<th>比值</th>
+<th>判定</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>递归调用</td>
+<td>0.55x</td>
+<td>🟢 asm 大幅领先（尾调用消除，b09 达 0.065x）</td>
+</tr>
+<tr>
+<td>位与控制流</td>
+<td>0.94x</td>
+<td>🟢 略领先</td>
+</tr>
+<tr>
+<td>算术循环</td>
+<td>1.26x</td>
+<td>🔴 落后（b05 2.11x、b08 1.94x、b12 互递归 4.06x）</td>
+</tr>
+<tr>
+<td>字符串</td>
+<td>1.33x</td>
+<td>🔴 落后（b20 拼接 2.28x）</td>
+</tr>
+<tr>
+<td>数组内存</td>
+<td>1.60x</td>
+<td>🔴 最差（b15 冒泡 2.23x、b17 矩阵乘 2.27x、b14 随机索引 1.59x）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="与旧结论的冲突必须纠正">与旧结论的冲突（必须纠正）</h3>
+<p><code>rationale/roadmap-gap-analysis.md</code> 总纲与 <code>tools/diag_opt_gaps.py</code> 结论仍写着
+「几何平均 ~0.54x / 领先 LLVM ~46%」。该数字是<strong>不公平对比</strong>的产物（asm O2/O3 vs LLVM 默认 O0，
+或被常量折叠项干扰）。公平同配置 A/B 证明：<strong>asm 实际整体慢约 12%</strong>。旧结论必须修正，
+否则会持续误导「性能已超过 LLVM」的判断。</p>
+<hr />
+<h2 id="维度-3优化深度---部分达标">维度 3：优化深度 —— ⚠️ 部分达标</h2>
+<p><code>tools/diag_opt_gaps.py /tmp/r2/bench.s</code>（asm -O3，4069 行）量化：
+- 已有并吃干净：常量折叠 / CSE / DCE / IVR（归纳变量）/ InstCombine / 尾调用 / 常量魔数除法 / fGRA / ISA 微融合 / 过程间折叠。
+- 缺失的经典 pass（LICM / 循环展开 / 内联 / SCCP）：在当前基准语料上判<strong>负 ROI</strong>——
+  循环多为串行依赖链（无循环不变量、迭代不可并行），小函数各只调一次。
+- 落后项（b02/b20/b22）归因：C runtime 开销 + 串行依赖链 + LLVM <code>--fast</code> 的 <strong>LTO 整体调度/内联</strong>，
+  属架构级差距，非单点 pass 可回收。</p>
+<p>诚实解读：asm 的<strong>纯 IR 优化层已接近榨干</strong>，剩余性能差距不在「缺哪个 pass」，而在
+LTO 整体内联 + 数组/字符串 C runtime 路径。<strong>这不是「做几个 pass 就能补上」的问题</strong>。</p>
+<hr />
+<h2 id="维度-4平台与工具链---部分达标">维度 4：平台与工具链 —— ⚠️ 部分达标</h2>
+<h3 id="达标项">达标项</h3>
+<ul>
+<li><strong>工具链去 LLVM 化</strong>（<code>tools/verify_no_llvm_toolchain.sh</code>）：20 用例在 gcc-only + 隔离 PATH
+  （屏蔽 clang/zig/lld）下 asm 产物与默认工具链逐字节一致——<strong>编译器本身不依赖 LLVM 工具链</strong>，这是「代替」的关键前提，已满足。</li>
+<li>产物形态三件套（单文件 / 极致体积 / 极致编译速度）、Fail-Fast、FFI/C ABI、x86-64 DWARF 均已落地。</li>
+</ul>
+<h3 id="缺口项">缺口项</h3>
+<ul>
+<li><strong>AArch64 只验证「汇编写法合法」，不验证运行语义</strong>：<code>run_asm_golden.sh:114</code> 用
+  <code>clang --target=aarch64-linux-gnu</code> 交叉汇编出 ELF .o 即算通过；x86 宿主无法执行 aarch64 程序，
+  <strong>从未实机跑过</strong>。且 AArch64 下内联汇编 Fail-Fast、无 DWARF、PGO 优雅降级（<code>pgo_effective=false</code>）。
+  即 asm 在 AArch64 上是「能生成代码但能力缩水且未实机验证」的状态。</li>
+<li>对比 LLVM：LLVM 路径是多平台成熟后端，AArch64 走完整 codegen。asm 在平台覆盖广度与深度上仍有明显差距。</li>
+</ul>
+<hr />
+<h2 id="维度-5正确性与一致性---达标">维度 5：正确性与一致性 —— ✅ 达标</h2>
+<ul>
+<li><code>tools/run_asm_golden.sh</code>：<strong>21 个双后端黄金用例</strong>输出 + .s 产物逐字节一致。</li>
+<li><code>tools/run_diff_fuzz_gate.sh</code>：golden 自检 + 4 个固化差分语料 + <strong>150 seeds × O0/O2/O3 = 450 次
+  双后端对比，0 不一致</strong>（OK 450 / DIFF 0 / BUILD_FAIL 0）。</li>
+<li>历史一致性 bug（默认实参补齐、借用绑定 retain、嵌套下标 COW）均已被 diff fuzz 捕获并修复。</li>
+</ul>
+<p><strong>但维度盲区</strong>：fuzz 生成器未覆盖「struct 进容器」这类构造，因此维度 5 的「0 不一致」
+不能为维度 1 的缺口背书——fuzz 只保证「两边都能编译的程序输出一致」，不保证「覆盖所有语言构造」。</p>
+<hr />
+<h2 id="阻断项清单要真正代替-llvm必须先解决">阻断项清单（要真正代替 LLVM，必须先解决）</h2>
+<p>按优先级排序，均为实测确凿项，非猜测：</p>
+<ol>
+<li><strong>【功能·硬阻断】struct 进容器（B6）在 asm 后端全优化级别编译失败</strong>。
+   位置 <code>src/lower.rs::coerce_elem_bits</code> 的 <code>Aggregate</code> 分支。需实现 struct 值的位模式装箱/还原
+   （对齐 LLVM 的 <code>kv_from_bits</code> struct 路径），并把 <code>batch3_b6_smoke.dial</code> 纳入 <code>--backend=asm</code> 门禁。</li>
+<li><strong>【性能·硬阻断】公平对比整体慢约 12%，数组内存类慢 60%</strong>。
+   根因是 LTO 整体内联缺失 + 数组/字符串 C runtime 路径开销。这是架构级工程，非单点 pass。</li>
+<li><strong>【平台·重要】AArch64 未实机验证运行语义，且内联汇编/DWARF/PGO 降级</strong>。</li>
+<li><strong>【文档·必须纠正】roadmap 与诊断工具里「领先 LLVM 46%」的过时结论</strong>，以及
+   「语义层 asm 已完全追平 LLVM」的断言（与维度 1 实测矛盾）。</li>
+</ol>
+<h2 id="复现命令">复现命令</h2>
+<pre><code class="language-bash">cd /workspace/dialc
+# 维度1：功能覆盖率（脚本逻辑见正文）
+bash /tmp/coverage_probe.sh
+# 维度2：性能公平 A/B（本次实测配置）
+python3 tools/bench_asm_vs_llvm.py --backend-flags &quot;--fast -O3&quot;
+# 维度3：优化缺口
+mkdir -p /tmp/r2 &amp;&amp; cp bench/bench.dial /tmp/r2/
+dialc build /tmp/r2/bench.dial --backend=asm -O3 --no-link -o /tmp/r2/bin
+python3 tools/diag_opt_gaps.py /tmp/r2/bench.s
+# 维度4：工具链独立性 + AArch64 语法
+bash tools/verify_no_llvm_toolchain.sh
+bash tools/run_asm_golden.sh ./target/release/dialc
+# 维度5：差分一致性
+bash tools/run_diff_fuzz_gate.sh
+</code></pre><p class="note">← 更早：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> · 更新：<a href="unreleased.html">未实现 / 尚未落地</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

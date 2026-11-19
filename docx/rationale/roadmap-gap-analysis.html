@@ -92,7 +92,9 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
   当前批次继续严格遵守；但它不是永久宪法。在「LLVM 不存在」的终局里，本后端必须 own
   整条语言栈，届时这些冻结项须逐项复核解除。不得把过渡护栏误当作能力上限或永久不做。</li>
 <li>性能基准「几何平均 ~0.54x / 领先 LLVM ~46%」：LLVM 仅作<strong>外部标尺</strong>用于量化，不是
-  存在前提；即便 LLVM 消失，更快 / 更小 / 更准的目标仍独立成立。</li>
+  存在前提；即便 LLVM 消失，更快 / 更小 / 更准的目标仍独立成立。
+  <strong>（2026-11-19 修正：该 46% 数字已被公平 A/B 推翻，实测为 asm 慢约 12%，见
+  <code>rationale/replace-llvm-multidim-audit.md</code>；LLVM 作为「外部标尺」的定位不变。）</strong></li>
 </ul>
 <p><strong>当前状态（2026-11-18）</strong>：本总纲即刻生效，为最高推理准绳与终局方向；现行护栏在并行期
 继续有效、不因本总纲而改变当前批次的执行约束。阶段二第 11 项「SIMD 指令发射」原按用户
@@ -303,9 +305,14 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
 </tr>
 </tbody>
 </table>
-<p>基准现状（几何平均 ~0.54x，整体领先 LLVM ~46%；胜/平/负约 14/10/4）：
+<p>基准现状：
+~~（几何平均 ~0.54x，整体领先 LLVM ~46%；胜/平/负约 14/10/4）：
 算术类基本持平（0.985x）、数组类领先（0.76x）、递归类大幅领先（0.025x）、
-位与控制流领先（0.81x）、字符串类略落后（1.09x）。</p>
+位与控制流领先（0.81x）、字符串类略落后（1.09x）。~~
+<strong>2026-11-19 修正</strong>：上述为不公平对比（asm O2/O3 vs LLVM 默认 O0 + 常量折叠干扰）产物。
+同配置 <code>--fast -O3</code> 公平 A/B（跑两次，见 <code>rationale/replace-llvm-multidim-audit.md</code>）：
+几何平均 <strong>1.12x（asm 慢 12%）</strong>，胜/平/负 = 6/6/16；递归类领先（0.55x）、位控制流略领先（0.94x），
+算术循环（1.26x）、字符串（1.33x）、数组内存（1.60x）落后。性能上尚未代替 LLVM。</p>
 <h3 id="d-类--战略宪法否决永久不做不进计划">D 类 · 战略/宪法否决（永久不做，不进计划）</h3>
 <p>SIMD 完整后端（−6.7%）、caller-saved GRA（ROI 为负）、函数名重载、闭包、
 运算符重载、用户自定义泛型/接口/trait、可变全局状态、追踪式 GC。</p>
@@ -423,9 +430,16 @@ LLVM 零改动护栏内补）、「两后端共同缺的语言特性」（加它
    裁决通过才进入设计。</li>
 </ol>
 <h2 id="3-一句话结论">3. 一句话结论</h2>
-<p><strong>语义层 asm 已完全追平 LLVM；剩余差距全是性能深度与语言层新特性。</strong>
+<blockquote>
+<p><strong>⚠️ 2026-11-19 多维审计修正</strong>：下面这段是旧的「单维度乐观结论」，已被实测推翻，
+保留仅为记录。以 <code>rationale/replace-llvm-multidim-audit.md</code> 为准：<strong>当前不能代替 LLVM</strong>。
+两个硬缺口——(1) struct 进容器（B6）在 asm 全优化级别编译失败，LLVM 正确运行；
+(2) 同配置 <code>--fast -O3</code> 公平 A/B 几何平均 1.12x（asm 慢 12%，数组内存类慢 60%）。
+旧结论「领先 LLVM 46%」是不公平对比产物；「语义层已完全追平」被 B6 缺口直接证伪。</p>
+</blockquote>
+<p>~~<strong>语义层 asm 已完全追平 LLVM；剩余差距全是性能深度与语言层新特性。</strong>
 前者须用收益诊断决定投入（高成本、易负收益），后者须改冻结文件、超出 asm 后端补齐范畴。
-护栏内真正低风险可做的，是收益诊断工具与过时文档清理；其余要么先量化、要么先裁决。</p><p class="note">更新：<a href="unreleased.html">未实现 / 尚未落地</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+护栏内真正低风险可做的，是收益诊断工具与过时文档清理；其余要么先量化、要么先裁决。~~</p><p class="note">更新：<a href="replace-llvm-multidim-audit.html">replace-llvm-multidim-audit</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
