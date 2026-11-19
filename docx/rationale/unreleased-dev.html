@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/unreleased-dev.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release--理由与证据链">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release） · 理由与证据链</a><ul>
+<li><a href="#新路线-p4dialpkg-从专用分发格式升为通用-c-包管理标准仅路线图零代码">新路线 P4：dialpkg 从「专用分发格式」升为「通用 C 包管理标准」（仅路线图，零代码）</a></li>
 <li><a href="#p1-平台对等aarch64-后端补齐-dwarf-源码级调试-g-静默降级--实机可用">P1 平台对等：AArch64 后端补齐 DWARF 源码级调试（-g 静默降级 → 实机可用）</a></li>
 <li><a href="#p1aarch64-实机语义验证抓出并修复-3-个语法校验盲区的根本-bug">P1：AArch64 实机语义验证——抓出并修复 3 个语法校验盲区的根本 bug</a></li>
 <li><a href="#p0-修复string-拼接--插值临时操作数引用泄漏19-零泄漏底线">P0 修复：string 拼接 / 插值临时操作数引用泄漏（§19 零泄漏底线）</a></li>
@@ -71,6 +72,39 @@
 <p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
 变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
 </blockquote>
+<hr />
+<h4 id="新路线-p4dialpkg-从专用分发格式升为通用-c-包管理标准仅路线图零代码">新路线 P4：dialpkg 从「专用分发格式」升为「通用 C 包管理标准」（仅路线图，零代码）</h4>
+<p><strong>用户决策原文精神（2026-11-19）</strong>：</p>
+<blockquote>
+<p>再加入一个路线，打磨包还有包管理相关命令，打磨到极致好用。标准是什么？标准到足够让人
+放弃掉其他，用这个作为 C 包管理分发。再给 dialpkg 强化一下，可以放 C 源代码。</p>
+</blockquote>
+<p><strong>三个方向澄清（用户选择）</strong>：</p>
+<ol>
+<li>C 源码模式：<strong>prebuilt 与 source 两者都支持，按包声明选择</strong>。</li>
+<li>本轮范围：<strong>只写路线图，代码下轮再说</strong>。</li>
+<li>极致好用维度：零脚本可审计 + 一条命令装完即用 + 完整依赖管理 + Dial 原生 FFI，另加一段 pack 自动化诉求。</li>
+</ol>
+<p><strong>用户补充诉求解析（已复述确认，理解吻合）</strong>：</p>
+<blockquote>
+<p>「自动帮你打包 dialpkg、自动填哈希值等元数据、自动归档出三平台 .a；（包里）单独存放源码文件的
+目录、不会自动帮你编译；再来一个目录存放 C 语言源代码、但会自动帮你编译。」</p>
+</blockquote>
+<p>映射为三类包内目录：<code>src/</code>（Dial 源码，只分发不编译，现有 §25.11）/ <code>c/</code>（C 源码，pack 时自动交叉编译成
+三平台 <code>.a</code>）/ <code>native-src/</code>（源码存档，仅供审计不编译）。<code>pack</code> 全自动：自动填 manifest、自动算逐文件
+SHA256、自动产出 <code>x86_64-linux-gnu</code>/<code>x86_64-pc-windows-gnu</code>/<code>aarch64-unknown-linux-musl</code> 三平台 <code>.a</code>。</p>
+<p><strong>推翻的旧铁律</strong>：README §25.7 / ARCHITECTURE §6 曾写死「刻意不做」——不做 C 源码分发/就地编译、
+不做版本求解、不做传递依赖、不做中央仓库。旧理由是「包是纯数据、防依赖地狱、用户无需工具链」。
+新路线逐条推翻（中央仓库部分保留为静态索引），核心保留「包内不执行任意构建脚本」「项目目录零侵入」。</p>
+<p><strong>为什么敢推翻</strong>：dialpkg 已有逐文件 SHA256、<code>.diali</code> 接入 Sema/LSP、按 triple 选库、内容哈希缓存——
+地基够牢。用户放弃 vcpkg/conan 的痛点恰是「要跑构建脚本、依赖地狱」，dialpkg 的机会是用
+「零脚本 + 确定性 + 原生 FFI」重新定义 C 包体验，而不是继续躲在「极简」里。就地编译 C 源也是
+<strong>声明式</strong>的（编译什么/参数全由清单静态决定），没有 configure/CMake/钩子，守住零脚本核心约束。</p>
+<p><strong>交付（本轮）</strong>：新建 <a href="dialpkg-roadmap.md"><code>dialpkg-roadmap.md</code></a>——战略定位、5 维度可度量验收标准、
+C 源码双模式设计（含 prebuilt/source 对照表）、包目录结构、命令面分期 P4.0–P4.3、验证方案；
+README §25 开头/§25.7/§25.11 + ARCHITECTURE §6 加战略转向注记（保留历史理由、核心约束继续有效）；
+replace-llvm-roadmap 顶部加并行路线指引。<strong>边界</strong>：纯文档，零产品代码、零依赖、零版本号变化、不打 tag；
+P4.0–P4.3 代码能力下一轮起逐期落地，每期对照 §1 五维度勾验。</p>
 <hr />
 <h4 id="p1-平台对等aarch64-后端补齐-dwarf-源码级调试-g-静默降级--实机可用">P1 平台对等：AArch64 后端补齐 DWARF 源码级调试（<code>-g</code> 静默降级 → 实机可用）</h4>
 <p><strong>路线图原判</strong>：P1 记「DWARF 在 AArch64 降级」，列为调试能力平台对等的剩余开放项；用户此前明确点名「O3 还有调试信息都没有」。</p>
