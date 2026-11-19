@@ -4703,9 +4703,13 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <blockquote>
 <p><strong>⚠️ 战略转向注记（2026-11-19）</strong>：上述「不做包管理器」的定位<strong>已变更</strong>。新路线要把 dialpkg
 打磨成通用 C 包管理标准，纳入 C 源码分发、语义版本、传递依赖、lockfile 与 search——
-详见 <a href="rationale/dialpkg-roadmap.html"><code>rationale/dialpkg-roadmap.md</code></a>。本节 §25 其余内容描述的是
-<strong>当前已实现</strong>的 v1.10 分发格式（仍然有效、仍是新能力的地基）；「刻意不做」的边界以 §25.7 的
-转向注记为准。零脚本可审计、SHA256 信任链、项目目录零侵入等核心约束<strong>继续保留</strong>。</p>
+详见 <a href="rationale/dialpkg-roadmap.html"><code>rationale/dialpkg-roadmap.md</code></a>。<strong>P4.0 核心能力已于
+2026-11-20 落地</strong>：<code>dial.toml</code> 的 <code>[c]</code> 段可声明 C 源，<code>dialc pack</code> 用 <code>zig cc -target</code>
+自动交叉编译三平台 <code>.a</code>（prebuilt 默认）并填好 manifest/哈希；<code>mode="source"</code> 的包在
+<code>dialc install</code> 期就地声明式编译（零脚本）；安装改为原子 rename + 回滚；install/list/
+uninstall/new 均支持 <code>--json</code>。语义版本/传递依赖/lockfile/search 属 P4.2/P4.1，尚未落地。
+本节 §25 其余内容描述的是 v1.10 分发格式（仍然有效、仍是新能力的地基）；「刻意不做」的
+边界以 §25.7 的转向注记为准。零脚本可审计、SHA256 信任链、项目目录零侵入等核心约束<strong>继续保留</strong>。</p>
 </blockquote>
 <h3 id="250-目标平台">25.0 目标平台</h3>
 <table>
@@ -5546,11 +5550,13 @@ helpers  = &quot;src/helpers.dial&quot;
 <code>.dial</code> 优先于包内副本、4 条非法声明 Fail-Fast，10 条断言全绿。</p>
 <hr />
 <blockquote>
-<p><strong>P4 前瞻（2026-11-19，规划中，非已实现）</strong>：新路线要在 <code>src/</code>（Dial 源码，只分发不编译）之外
-再引入两类包内目录——<code>c/</code>（C 源码，<code>pack</code> 时自动交叉编译成三平台 <code>.a</code>）与 <code>native-src/</code>
-（源码存档，仅供审计、不编译）；并由 <code>dialc pack</code> 自动填 manifest / 哈希 / 多平台归档，用户零手填。
-这是「把 dialpkg 打磨成通用 C 包管理标准」路线的一部分，详见
-<a href="rationale/dialpkg-roadmap.html"><code>rationale/dialpkg-roadmap.md</code></a> §2/§3。<strong>当前实现仍只有 <code>src/</code> 一类源码目录。</strong></p>
+<p><strong>P4.0 已落地（2026-11-20）</strong>：在 <code>src/</code>（Dial 源码，只分发不编译）之外，现已支持两类包内
+目录——<code>c/</code>（C 源码，<code>pack</code> 时自动交叉编译成三平台 <code>.a</code>，prebuilt 默认）与 <code>native-src/</code>
+（源码存档，仅供审计、不编译）；<code>dialc pack</code> 自动填 manifest / 逐文件哈希 / 三平台归档，
+用户零手填。<code>dial.toml</code> 的 <code>[c]</code> 段声明 sources/includes/flags/defines/mode；<code>mode="source"</code>
+的包在 install 期就地声明式编译（零脚本）。这是「把 dialpkg 打磨成通用 C 包管理标准」路线的
+P4.0，详见 <a href="rationale/dialpkg-roadmap.html"><code>rationale/dialpkg-roadmap.md</code></a> §2/§3/§7。
+门禁 <code>tools/verify_p4_pkg.sh</code> 10/10 全绿。语义版本/传递依赖/lockfile/search 属 P4.1/P4.2，仍未落地。</p>
 <p>本章为<strong>生态规划</strong>，不含任何实现承诺与时间表。<strong>完整规范</strong>（平台矩阵、包内目录树、
 JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 <strong><a href="https://github.com/shichencike/Dial/blob/main/ARCHITECTURE.md">ARCHITECTURE.md《Dial 标准库与包分发最终规范》</a></strong>。

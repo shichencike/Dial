@@ -2723,9 +2723,13 @@ Dial 的包分发只解决一件事：**把别人写好的机器码 + 函数签�
 
 > **⚠️ 战略转向注记（2026-11-19）**：上述「不做包管理器」的定位**已变更**。新路线要把 dialpkg
 > 打磨成通用 C 包管理标准，纳入 C 源码分发、语义版本、传递依赖、lockfile 与 search——
-> 详见 [`rationale/dialpkg-roadmap.md`](rationale/dialpkg-roadmap.md)。本节 §25 其余内容描述的是
-> **当前已实现**的 v1.10 分发格式（仍然有效、仍是新能力的地基）；「刻意不做」的边界以 §25.7 的
-> 转向注记为准。零脚本可审计、SHA256 信任链、项目目录零侵入等核心约束**继续保留**。
+> 详见 [`rationale/dialpkg-roadmap.md`](rationale/dialpkg-roadmap.md)。**P4.0 核心能力已于
+> 2026-11-20 落地**：`dial.toml` 的 `[c]` 段可声明 C 源，`dialc pack` 用 `zig cc -target`
+> 自动交叉编译三平台 `.a`（prebuilt 默认）并填好 manifest/哈希；`mode="source"` 的包在
+> `dialc install` 期就地声明式编译（零脚本）；安装改为原子 rename + 回滚；install/list/
+> uninstall/new 均支持 `--json`。语义版本/传递依赖/lockfile/search 属 P4.2/P4.1，尚未落地。
+> 本节 §25 其余内容描述的是 v1.10 分发格式（仍然有效、仍是新能力的地基）；「刻意不做」的
+> 边界以 §25.7 的转向注记为准。零脚本可审计、SHA256 信任链、项目目录零侵入等核心约束**继续保留**。
 
 ### 25.0 目标平台
 
@@ -3297,11 +3301,13 @@ mylib.dialpkg
 
 ---
 
-> **P4 前瞻（2026-11-19，规划中，非已实现）**：新路线要在 `src/`（Dial 源码，只分发不编译）之外
-> 再引入两类包内目录——`c/`（C 源码，`pack` 时自动交叉编译成三平台 `.a`）与 `native-src/`
-> （源码存档，仅供审计、不编译）；并由 `dialc pack` 自动填 manifest / 哈希 / 多平台归档，用户零手填。
-> 这是「把 dialpkg 打磨成通用 C 包管理标准」路线的一部分，详见
-> [`rationale/dialpkg-roadmap.md`](rationale/dialpkg-roadmap.md) §2/§3。**当前实现仍只有 `src/` 一类源码目录。**
+> **P4.0 已落地（2026-11-20）**：在 `src/`（Dial 源码，只分发不编译）之外，现已支持两类包内
+> 目录——`c/`（C 源码，`pack` 时自动交叉编译成三平台 `.a`，prebuilt 默认）与 `native-src/`
+> （源码存档，仅供审计、不编译）；`dialc pack` 自动填 manifest / 逐文件哈希 / 三平台归档，
+> 用户零手填。`dial.toml` 的 `[c]` 段声明 sources/includes/flags/defines/mode；`mode="source"`
+> 的包在 install 期就地声明式编译（零脚本）。这是「把 dialpkg 打磨成通用 C 包管理标准」路线的
+> P4.0，详见 [`rationale/dialpkg-roadmap.md`](rationale/dialpkg-roadmap.md) §2/§3/§7。
+> 门禁 `tools/verify_p4_pkg.sh` 10/10 全绿。语义版本/传递依赖/lockfile/search 属 P4.1/P4.2，仍未落地。
 
 > 本章为**生态规划**，不含任何实现承诺与时间表。**完整规范**（平台矩阵、包内目录树、
 > JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见

@@ -46,7 +46,11 @@
 </li>
 <li><a href="#5-与代替-llvm路线的关系">5. 与「代替 LLVM」路线的关系</a></li>
 <li><a href="#6-可复现验证每期">6. 可复现验证（每期）</a></li>
-<li><a href="#7-当前状态2026-11-19">7. 当前状态（2026-11-19）</a></li>
+<li><a href="#7-当前状态2026-11-20-更新">7. 当前状态（2026-11-20 更新）</a><ul>
+<li><a href="#p40--核心能力---已落地2026-11-20">P4.0 · 核心能力 —— ✅ 已落地（2026-11-20）</a></li>
+<li><a href="#p41p43---未启动">P4.1–P4.3 —— ⬜ 未启动</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -296,14 +300,63 @@ mode = &quot;prebuilt&quot;         # prebuilt | source
 <li><strong>JSON 验证</strong>：所有 <code>--json</code> 命令输出可被 <code>jq</code> 解析、字段稳定。</li>
 <li><strong>确定性</strong>：<code>pack</code> 同一输入两次产出字节一致（哈希/时间戳归一化）。</li>
 </ul>
-<h2 id="7-当前状态2026-11-19">7. 当前状态（2026-11-19）</h2>
-<p><strong>本轮：仅路线图文档</strong>（用户明确选择「只写路线图，代码下轮再说」）。</p>
+<h2 id="7-当前状态2026-11-20-更新">7. 当前状态（2026-11-20 更新）</h2>
+<p><strong>前置门槛已满足</strong>：用户要求「P1–P3 全部完成才进 P4」，2026-11-19 已复核 P0 正确性 / P1 平台
+（AArch64 语义+DWARF）/ P2 功能对等裁决 / P3 工程化（fuzz 盲区）全绿（见
+<a href="replace-llvm-roadmap.md"><code>replace-llvm-roadmap.md</code></a> §3），gated 放行本路线。</p>
+<h3 id="p40--核心能力---已落地2026-11-20">P4.0 · 核心能力 —— ✅ 已落地（2026-11-20）</h3>
+<table>
+<thead>
+<tr>
+<th>子项</th>
+<th>实现</th>
+<th>证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>pack 编 C 源（prebuilt）</td>
+<td><code>pkgbuild.rs</code> 新增 <code>[c]</code> 段解析 + <code>cross_compile_c()</code>：<code>zig cc -target</code> 交叉编译三平台 <code>.a</code>，自动生成 <code>[targets]</code> 与逐文件 SHA256；可复现三件套 <code>-g0</code>/<code>-ffile-prefix-map</code>/<code>SOURCE_DATE_EPOCH</code></td>
+<td>门禁 1/2/3：三平台 <code>.a</code>、两次 pack 逐字节一致、源码随包审计</td>
+</tr>
+<tr>
+<td>install source 模式</td>
+<td><code>package.rs</code> 的 <code>CInfo</code> manifest 字段 + <code>build_c_for_host()</code>：缺预编译 <code>.a</code> 或 <code>mode=source</code> 时 install 期就地声明式编译（零脚本）+ 更新 manifest.targets；工具链缺失 Fail-Fast</td>
+<td>门禁 7/8：就地编译出 <code>.a</code> 且 import 运行正确、缺 zig Fail-Fast 给指引</td>
+</tr>
+<tr>
+<td>原子安装 + 回滚</td>
+<td><code>install_inner()</code> 改为临时目录解压 → 校验 → <code>rename</code> 原子发布；覆盖安装先备份旧目录，失败回滚</td>
+<td>门禁 5/6：无 <code>.install</code>/<code>.backup</code> 残留、篡改包被拒且旧包完好</td>
+</tr>
+<tr>
+<td><code>--json</code> 全覆盖</td>
+<td>install / list / uninstall / new 补 <code>--json</code>（pack/doctor 原有）</td>
+<td>门禁 9：全部可被 <code>python3 -m json.tool</code> 解析、字段稳定</td>
+</tr>
+<tr>
+<td>doctor 扩展</td>
+<td><code>check_installed_platform()</code>：已装包逐文件 SHA256（原有）+ 缺失 host target + ABI 一致性</td>
+<td>门禁 10：含「包平台/ABI 一致性」检查项</td>
+</tr>
+</tbody>
+</table>
 <ul>
-<li>✅ 本路线图确立：战略定位、5 维度验收标准、C 源码双模式、目录结构、命令面分期 P4.0–P4.3。</li>
-<li>✅ 旧铁律（README §25.7 / ARCHITECTURE §6）加战略转向注记，指向本路线，保留历史理由可追溯。</li>
-<li>⬜ P4.0–P4.3 全部代码能力：<strong>下一轮起</strong>逐期落地，每期对照 §1 五维度勾验。</li>
-<li>本文档零产品代码、零依赖、零版本号变化、不打 tag。</li>
-</ul><p class="note">← 更早：<a href="replace-llvm-multidim-audit.html">replace-llvm-multidim-audit</a> · 更新：<a href="unreleased.html">未实现 / 尚未落地</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+<li><strong>门禁固化</strong>：<code>tools/verify_p4_pkg.sh</code>（10 项，缺 zig 自动 skip）挂入 <code>run_tests.sh</code> AK 段。</li>
+<li><strong>§1 五维度对照</strong>：① 零脚本可审计 ✅（清单声明式编译、包内脚本数恒 0、源码随包）；
+  ② 一条命令装完即用 ✅（prebuilt 无需用户工具链）；③ 完整依赖管理 ⬜ <strong>P4.2</strong>（本批未达）；
+  ④ Dial 原生 FFI ✅（<code>.diali</code> 装完即列导出函数、双后端 import 运行通过）；⑤ pack 全自动 ✅
+  （自动填 manifest/哈希/三平台 <code>.a</code>，用户零手填）。维度③留待 P4.2。</li>
+<li>零产品代码外的依赖变化：复用现有 <code>zig</code>/<code>zip</code>/<code>sha2</code>/<code>serde_json</code>，无新依赖；版本 1.10.0、不打 tag。</li>
+</ul>
+<h3 id="p41p43---未启动">P4.1–P4.3 —— ⬜ 未启动</h3>
+<ul>
+<li>P4.1 静态索引与搜索、P4.2 完整依赖管理（语义版本/传递解析/lockfile）、P4.3 离线镜像与增量：
+  按批次独立推进，每期对照 §1 勾验。</li>
+</ul>
+<blockquote>
+<p>路线图文档初版（2026-11-19）确立战略定位与分期；P4.0 代码于 2026-11-20 落地。</p>
+</blockquote><p class="note">← 更早：<a href="replace-llvm-multidim-audit.html">replace-llvm-multidim-audit</a> · 更新：<a href="unreleased.html">未实现 / 尚未落地</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

@@ -173,11 +173,32 @@ mode = "prebuilt"         # prebuilt | source
 - **JSON 验证**：所有 `--json` 命令输出可被 `jq` 解析、字段稳定。
 - **确定性**：`pack` 同一输入两次产出字节一致（哈希/时间戳归一化）。
 
-## 7. 当前状态（2026-11-19）
+## 7. 当前状态（2026-11-20 更新）
 
-**本轮：仅路线图文档**（用户明确选择「只写路线图，代码下轮再说」）。
+**前置门槛已满足**：用户要求「P1–P3 全部完成才进 P4」，2026-11-19 已复核 P0 正确性 / P1 平台
+（AArch64 语义+DWARF）/ P2 功能对等裁决 / P3 工程化（fuzz 盲区）全绿（见
+[`replace-llvm-roadmap.md`](replace-llvm-roadmap.md) §3），gated 放行本路线。
 
-- ✅ 本路线图确立：战略定位、5 维度验收标准、C 源码双模式、目录结构、命令面分期 P4.0–P4.3。
-- ✅ 旧铁律（README §25.7 / ARCHITECTURE §6）加战略转向注记，指向本路线，保留历史理由可追溯。
-- ⬜ P4.0–P4.3 全部代码能力：**下一轮起**逐期落地，每期对照 §1 五维度勾验。
-- 本文档零产品代码、零依赖、零版本号变化、不打 tag。
+### P4.0 · 核心能力 —— ✅ 已落地（2026-11-20）
+
+| 子项 | 实现 | 证据 |
+|---|---|---|
+| pack 编 C 源（prebuilt） | `pkgbuild.rs` 新增 `[c]` 段解析 + `cross_compile_c()`：`zig cc -target` 交叉编译三平台 `.a`，自动生成 `[targets]` 与逐文件 SHA256；可复现三件套 `-g0`/`-ffile-prefix-map`/`SOURCE_DATE_EPOCH` | 门禁 1/2/3：三平台 `.a`、两次 pack 逐字节一致、源码随包审计 |
+| install source 模式 | `package.rs` 的 `CInfo` manifest 字段 + `build_c_for_host()`：缺预编译 `.a` 或 `mode=source` 时 install 期就地声明式编译（零脚本）+ 更新 manifest.targets；工具链缺失 Fail-Fast | 门禁 7/8：就地编译出 `.a` 且 import 运行正确、缺 zig Fail-Fast 给指引 |
+| 原子安装 + 回滚 | `install_inner()` 改为临时目录解压 → 校验 → `rename` 原子发布；覆盖安装先备份旧目录，失败回滚 | 门禁 5/6：无 `.install`/`.backup` 残留、篡改包被拒且旧包完好 |
+| `--json` 全覆盖 | install / list / uninstall / new 补 `--json`（pack/doctor 原有） | 门禁 9：全部可被 `python3 -m json.tool` 解析、字段稳定 |
+| doctor 扩展 | `check_installed_platform()`：已装包逐文件 SHA256（原有）+ 缺失 host target + ABI 一致性 | 门禁 10：含「包平台/ABI 一致性」检查项 |
+
+- **门禁固化**：`tools/verify_p4_pkg.sh`（10 项，缺 zig 自动 skip）挂入 `run_tests.sh` AK 段。
+- **§1 五维度对照**：① 零脚本可审计 ✅（清单声明式编译、包内脚本数恒 0、源码随包）；
+  ② 一条命令装完即用 ✅（prebuilt 无需用户工具链）；③ 完整依赖管理 ⬜ **P4.2**（本批未达）；
+  ④ Dial 原生 FFI ✅（`.diali` 装完即列导出函数、双后端 import 运行通过）；⑤ pack 全自动 ✅
+  （自动填 manifest/哈希/三平台 `.a`，用户零手填）。维度③留待 P4.2。
+- 零产品代码外的依赖变化：复用现有 `zig`/`zip`/`sha2`/`serde_json`，无新依赖；版本 1.10.0、不打 tag。
+
+### P4.1–P4.3 —— ⬜ 未启动
+
+- P4.1 静态索引与搜索、P4.2 完整依赖管理（语义版本/传递解析/lockfile）、P4.3 离线镜像与增量：
+  按批次独立推进，每期对照 §1 勾验。
+
+> 路线图文档初版（2026-11-19）确立战略定位与分期；P4.0 代码于 2026-11-20 落地。
