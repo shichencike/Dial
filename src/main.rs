@@ -36,6 +36,7 @@ mod lsp;
 mod package;
 mod parser;
 mod pkgbuild;
+mod registry;
 mod semantic;
 
 use std::collections::{HashMap, HashSet};
@@ -219,6 +220,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+
+    // `dialc search <词>` / `dialc info <包名>`：静态索引查询（P4.1）。
+    // 需要一个查询位置参数，与 install 同属"带参"命令，放在普通工具分流之后。
+    if command == "search" || command == "info" {
+        cmd_registry(command, &args);
+        return;
     }
 
     if !matches!(command, "build" | "run") {
@@ -1769,6 +1777,9 @@ fn print_usage() {
     eprintln!("  install   <包.dialpkg|URL> [--sha256 哈希] [--json]");
     eprintln!("  list      [--json]             列出已安装包");
     eprintln!("  uninstall <包名> [--json]      卸载已安装包");
+    eprintln!("  search    <词> [--json] [--index <url>] [--index-sha256 <hex>] [--offline]");
+    eprintln!("                                搜索静态索引中的包（P4.1，无中心服务）");
+    eprintln!("  info      <包名> [同上选项]    查看包元数据/版本/ABI/许可/平台");
     eprintln!();
     eprintln!("工具链（v1.10 增补）");
     eprintln!("  doctor [--json]                 环境自检（编译器/缓存/包完整性/清单）");
@@ -2294,6 +2305,151 @@ fn cmd_list(args: &[String]) {
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(1);
+        }
+    }
+}
+
+/// `dialc search <词>` / `dialc info <包名>`（P4.1 静态索引查询）。
+///
+/// 公共选项：`--json`、`--index <url>`、`--index-sha256 <hex>`、`--offline`。
+/// 索引 URL 优先级：--index > 环境变量 DIAL_INDEX_URL > 内置默认（GitHub Releases）。
+fn cmd_registry(command: &str, args: &[String]) {
+    let mut as_json = false;
+    let mut offline = false;
+    let mut index_url: Option<String> = None;
+    let mut index_sha256: Option<String> = None;
+    let mut queries: Vec<String> = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => as_json = true,
+            "--offline" => offline = true,
+            "--index" | "--index-sha256" => {
+                let flag = args[i].clone();
+                i += 1;
+                match args.get(i) {
+                    Some(v) if !v.starts_with('-') => {
+                        if flag == "--index" {
+                            index_url = Some(v.clone());
+                        } else {
+                            index_sha256 = Some(v.clone());
+                        }
+                    }
+                    _ => {
+                        eprintln!("{} 后面缺少参数值", flag);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            other if other.starts_with('-') => {
+                eprintln!("{}: 不认识的参数 '{}'", command, other);
+                std::process::exit(1);
+            }
+            other => queries.push(other.to_string()),
+        }
+        i += 1;
+    }
+    if queries.len() != 1 {
+        eprintln!("用法: dialc {} <{}> [--json] [--index <url>] [--index-sha256 <hex>] [--offline]",
+            command, if command == "info" { "包名" } else { "搜索词" });
+        std::process::exit(1);
+    }
+    let query = &queries[0];
+
+    let url = index_url
+        .or_else(|| std::env::var("DIAL_INDEX_URL").ok())
+        .unwrap_or_else(|| registry::DEFAULT_INDEX_URL.to_string());
+    let source = if offline {
+        registry::Source::Offline
+    } else {
+        registry::Source::Online
+    };
+
+    let loaded = registry::load(&url, index_sha256.as_deref(), source);
+    let (idx, origin, cache) = match loaded {
+        Ok(v) => v,
+        Err(e) => {
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false, "error": e.to_string(),
+                })).unwrap());
+            } else {
+                eprintln!("{}", e);
+            }
+            std::process::exit(1);
+        }
+    };
+
+    let fail_empty = || {
+        if as_json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true, "command": command, "query": query,
+                "results": [], "count": 0,
+                "source": origin, "cache": cache.display().to_string(),
+            })).unwrap());
+        } else if command == "info" {
+            println!("索引中未找到包 '{}'。可用 `dialc search <词>` 查找。", query);
+        } else {
+            println!("未找到与 '{}' 匹配的包（来源: {}）。", query, origin);
+        }
+    };
+
+    if command == "search" {
+        let hits = registry::search(&idx, query);
+        if hits.is_empty() {
+            fail_empty();
+            return;
+        }
+        if as_json {
+            let arr: Vec<serde_json::Value> = hits.iter().map(|e| registry::entry_to_json(e)).collect();
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true, "command": "search", "query": query,
+                "results": arr, "count": arr.len(),
+                "source": origin, "cache": cache.display().to_string(),
+            })).unwrap());
+        } else {
+            println!("搜索 '{}'：{} 个结果（来源: {}）", query, hits.len(), origin);
+            for e in hits {
+                let ts = if e.targets.is_empty() {
+                    "-".to_string()
+                } else {
+                    e.targets.join(", ")
+                };
+                println!("  {:<18} v{:<10} ABI {:<3} {}",
+                    e.name, e.version, e.abi,
+                    if e.desc.is_empty() { "-" } else { &e.desc });
+                println!("      平台: {}", ts);
+                println!("      下载: {}", e.url);
+            }
+        }
+    } else {
+        match registry::info(&idx, query) {
+            None => fail_empty(),
+            Some(hits) => {
+                if as_json {
+                    let arr: Vec<serde_json::Value> = hits.iter().map(|e| registry::entry_to_json(e)).collect();
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true, "command": "info", "query": query,
+                        "versions": arr, "count": arr.len(),
+                        "source": origin, "cache": cache.display().to_string(),
+                    })).unwrap());
+                } else {
+                    let latest = hits[0];
+                    println!("包 '{}'（{} 个版本，来源: {}）", query, hits.len(), origin);
+                    println!("  描述: {}", if latest.desc.is_empty() { "-" } else { &latest.desc });
+                    println!("  许可: {}", if latest.license.is_empty() { "-" } else { &latest.license });
+                    println!("  版本: {}", hits.iter().map(|e| format!("v{}", e.version)).collect::<Vec<_>>().join(", "));
+                    println!("  ABI: {}", latest.abi);
+                    println!("  平台: {}", if latest.targets.is_empty() { "-".to_string() } else { latest.targets.join(", ") });
+                    println!("  下载: {}", latest.url);
+                    if !latest.sha256.is_empty() {
+                        println!("  SHA256: {}", latest.sha256);
+                        println!("  安装: dialc install {} --sha256 {}", latest.url, latest.sha256);
+                    } else {
+                        println!("  安装: dialc install {}", latest.url);
+                    }
+                }
+            }
         }
     }
 }

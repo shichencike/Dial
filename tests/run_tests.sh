@@ -5071,6 +5071,13 @@ else
     fail=1
 fi
 
+echo "== AL) dialpkg P4.1 静态索引与搜索门禁（search/info/SHA256/offline/schema）=="
+if bash tools/verify_p4_index.sh "$DIALC"; then
+    :   # 缺 curl/python3 时脚本自行 skip；有则逐条打印 ✅，失败非 0 退出
+else
+    fail=1
+fi
+
 echo
 if [ $fail -eq 0 ]; then
     echo "== 全部测试通过 ✅ =="

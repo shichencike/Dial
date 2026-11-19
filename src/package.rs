@@ -62,7 +62,7 @@ pub fn cache_root() -> Result<PathBuf> {
 
 /// 取用户主目录。优先 `HOME`（Linux / Termux），回退 `USERPROFILE`（Windows），
 /// 最后回退当前目录——但回退到当前目录**有风险**（会污染项目），故直接报错更诚实。
-fn dirs_home() -> Result<PathBuf> {
+pub(crate) fn dirs_home() -> Result<PathBuf> {
     if let Some(h) = std::env::var_os("HOME") {
         if !h.is_empty() {
             return Ok(PathBuf::from(h));
@@ -456,7 +456,7 @@ fn http_allowed(url: &str) -> bool {
 /// - `--proto '=https'` 禁止 curl 降级协议、禁止跟随到 `file://`；
 /// - `-f` 让 HTTP 错误码（404/500…）直接失败；
 /// - 下载后必须**非空**。
-fn download_to(url: &str, dest: &Path) -> Result<()> {
+pub(crate) fn download_to(url: &str, dest: &Path) -> Result<()> {
     let is_https = url.starts_with("https://");
     if !is_https && !http_allowed(url) {
         return Err(DialcError::new(

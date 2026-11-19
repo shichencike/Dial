@@ -32,6 +32,8 @@ pub const COMMANDS: &[CmdSpec] = &[
     CmdSpec { name: "install", brief: "安装包或 URL", opts: &["--sha256"] },
     CmdSpec { name: "list", brief: "列出已安装包", opts: &[] },
     CmdSpec { name: "uninstall", brief: "卸载已安装包", opts: &[] },
+    CmdSpec { name: "search", brief: "搜索静态索引中的包（P4.1）", opts: &["--json", "--index", "--index-sha256", "--offline"] },
+    CmdSpec { name: "info", brief: "查看包元数据/版本/ABI/许可/平台（P4.1）", opts: &["--json", "--index", "--index-sha256", "--offline"] },
     CmdSpec { name: "doctor", brief: "环境自检（编译器/缓存/包完整性/版本）", opts: &["--json"] },
     CmdSpec { name: "deps", brief: "三级 import 依赖图", opts: &["--json"] },
     CmdSpec { name: "watch", brief: "文件变更后自动重跑 check/build/test", opts: &["--action", "--interval", "--max-ticks"] },
