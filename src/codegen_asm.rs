@@ -3170,6 +3170,50 @@ impl<'a> FnEmit<'a> {
             self.sg(dst.unwrap(), &g1);
             return;
         }
+        // M7-e3 续：ReleaseFast 下内联 dial_array_set 的「独占 int[] 快路径」。
+        // dial_array_set(a,i,v) 在独占(refcount==1)且元素为 int(kind==0)时，C 侧既不
+        // COW 克隆也不 retain/release 元素，热路径等价于 `a_elems(a)[i]=v; return a;`
+        // ——即一条 `mov v,[a+24+i*8]`。但共享或引用元素必须回退原 call 保留 COW/ARC。
+        // 故生成条件快路径：rdi/rsi/rdx 装好实参（回退 call 直接复用），检查 rc==1 且
+        // kind==0，满足则直写并返回 a，否则 call。仅 x86-64 + ReleaseFast；safe/debug
+        // 保留原 call（Fail-Fast 边界检查不绕过），AArch64 原样。
+        // 受控实验：冒泡内层 set 调用开销占 ~80%，是本类别最高 ROI 点。
+        if func == "dial_array_set"
+            && self.target == EmitTarget::X86_64SysV
+            && self.safety == SafetyMode::ReleaseFast
+            && dst.is_some()
+            && args.len() == 3
+            && arg_tys.len() == 3
+            && arg_tys[0] == IrType::Handle
+            && arg_tys[1] == IrType::I64
+            && arg_tys[2] == IrType::I64
+            && !ret_ty.is_float()
+        {
+            let slow = format!(".{}_set_slow_{}", self.prefix, self.dchk_seq);
+            let done = format!(".{}_set_done_{}", self.prefix, self.dchk_seq + 1);
+            self.dchk_seq += 2;
+            // 实参装进 SysV ABI 寄存器：rdi=a, rsi=i, rdx=v（回退 call 直接复用）。
+            self.lg(args[0], &"rdi".to_string());
+            self.lg(args[1], &"rsi".to_string());
+            self.lg(args[2], &"rdx".to_string());
+            // 独占检查：a[-8] == 1（refcount），否则共享 → COW 回退。
+            self.line("\tmovq -8(%rdi), %rax");
+            self.line("\tcmpq $1, %rax");
+            self.line(&format!("\tjne {}", slow));
+            // 元素类型检查：a[0] == 0（DIAL_ELEM_INT），否则引用元素 → ARC 回退。
+            self.line("\tcmpq $0, (%rdi)");
+            self.line(&format!("\tjne {}", slow));
+            // 快路径：a_elems(a)[i] = v（跳过 [kind][len][cap] 24 字节头）。
+            self.line("\tmovq %rdx, 24(%rdi,%rsi,8)");
+            self.line("\tmovq %rdi, %rax"); // 返回 a
+            self.line(&format!("\tjmp {}", done));
+            // 慢路径：实参仍在 rdi/rsi/rdx，直接调用原函数保留 COW/ARC。
+            self.line(&format!("{}:", slow));
+            self.do_call(func);
+            self.line(&format!("{}:", done));
+            self.sg(dst.unwrap(), &"rax".to_string());
+            return;
+        }
         let locs = abi_assign(arg_tys, self.target);
         let g1 = self.g1().to_string();
 

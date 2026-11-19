@@ -633,8 +633,11 @@ dialc lsp
 > 13 胜 14 平 1 负，剩余平/负项多为 C 运行时 / idiv 微码主导（e3s 已证伪可从后端
 > 侧优化），targeted ISA 微融合收益已边际，故转入支柱②深度补全。
 > **⚠️ 该 0.5353x/领先 46% 为早期不公平对比（asm O2/O3 vs LLVM 默认 O0），已被
-> `rationale/replace-llvm-multidim-audit.md` 同配置 `--fast -O3` 公平 A/B 推翻：
-> asm 实际整体慢约 9%（内联 dial_array_get 后，此前 12%），尚未代替 LLVM。**
+> `rationale/replace-llvm-multidim-audit.md` 同配置 `--fast -O3` 公平 A/B 推翻。经多轮
+> 优化（内联 dial_array_get、字面量静态化、dial_array_set 独占快路径内联），最新公平
+> A/B：几何平均 **0.9793x（首次反超 LLVM 约 2%）**、胜平负 9/7/12；但加权总净耗时仍
+> 1.0728x（慢约 7%，b08/b14/b18 等大耗项仍落后）。两类指标结论不同，均未宣称全面
+> 代替 LLVM，详见审计报告。**
 > 支柱②已由
 > M7-e3aa 补多文件 source 映射、M7-e3ab 补 FFI 精确宽度类型 DIE（int32/byte/float32）；
 > 宏信息因 Dial 语言无宏概念而不可实现，不再列为门槛，支柱②功能至此完备。

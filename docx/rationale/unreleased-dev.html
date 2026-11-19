@@ -54,6 +54,7 @@
 <li><a href="#v110-开发增量asm-后端自行内联-dial_array_get攻性能硬阻断">v1.10 开发增量：asm 后端自行内联 dial_array_get（攻性能硬阻断）</a></li>
 <li><a href="#v110-开发增量互递归尾调用帧复用b12-4263x--3360x">v1.10 开发增量：互递归尾调用帧复用（b12 4.263x → 3.360x）</a></li>
 <li><a href="#v110-开发增量字符串字面量静态化b20-2275x--1084x">v1.10 开发增量：字符串字面量静态化（b20 2.275x → 1.084x）</a></li>
+<li><a href="#v110-开发增量dial_array_set-独占快路径内联几何平均首次反超-llvm">v1.10 开发增量：dial_array_set 独占快路径内联（几何平均首次反超 LLVM）</a></li>
 </ul>
 </li>
 </ul>
@@ -3551,7 +3552,40 @@ imulq   %r10, %r15     # s * 31
 <p><strong>实测（公平 --fast -O3，校验和锚点）</strong>：b20 2.275x → 1.084x（-52%，近乎追平），全 <code>.s</code> 中 <code>dial_string_new</code> 调用 23→0，字符串类几何平均 ~1.33x → 1.083x，整体 1.0891x → 1.0794x，胜/平/负 6/7/15 → 7/5/16。b22（substring）1.37x 瓶颈在 <code>dial_string_substring</code> 的 C runtime，非字面量，本轮不动。</p>
 <p><strong>踩坑与修复（既有测试 UB，重要）</strong>：改动后全量 tests 的 R11「is_null 双后端一致性」失败——probe 用 <code>extern fn strchr(...): string</code> 把 C 返回的裸指针当 DialString 句柄管理 ARC，是既有 UB（回退验证：旧版 asm 虽 stdout 正确但 exit=132 Fail-Fast double-free，测试只看 stdout 漏检）。静态化把 <code>"hello"</code> 放进 .rodata 后，strchr 指向只读段内部，release 写只读内存 → SIGSEGV（exit=139），stdout 未输出完。LLVM 后端在该 UB 上 exit=0 属碰巧。修正：用语言内合法 null 来源重写 probe——channel <code>close(ch)</code> 后 <code>recv</code>/<code>try_recv</code> 返回 NULL（R13 已验证），各优化级别（-O0/O1/O2/O3/g-O3）双后端一致、exit=0。<strong>不改编译器语义、不掩盖 bug</strong>，只是让测试测它本该测的 is_null 语义。</p>
 <p><strong>验证全绿</strong>：golden 默认 23 + ReleaseFast 双后端 22 + 差分 fuzz 450（0 不一致）+ 工具链去 LLVM 化 22 + 自研 PGO L1-L4 + 全量 run_tests（exit=0）+ ARC 压测（20 万次字面量拼接，双后端输出一致、RSS 接近）+ glibc MALLOC_CHECK_=3 堆检查（无 double-free）。</p>
-<p><strong>护栏</strong>：1.10.0/零依赖/LLVM 路径零改动/不打 tag；只改 asm IR 发射器 + 1 处测试 probe（修既有 UB）。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+<p><strong>护栏</strong>：1.10.0/零依赖/LLVM 路径零改动/不打 tag；只改 asm IR 发射器 + 1 处测试 probe（修既有 UB）。</p>
+<hr />
+<h2 id="v110-开发增量dial_array_set-独占快路径内联几何平均首次反超-llvm">v1.10 开发增量：dial_array_set 独占快路径内联（几何平均首次反超 LLVM）</h2>
+<p><strong>为什么做</strong>：延续代替 LLVM 的性能主线。上轮字符串静态化后，数组内存类仍是最大短板
+（b15 冒泡 2.676x、b17 矩阵乘 2.091x）。受控 C 实验（复用 safety-0 runtime，模拟冒泡内层
+大量 set）坐实 <code>dial_array_set</code> 调用开销占该模式约 80%——比上轮 string new 的 50% 还高。</p>
+<p><strong>为什么之前克制、现在做</strong>：set 比 get 复杂——含 COW（refcount&gt;1 克隆）+ 元素所有权
+结算（引用元素 retain/release）+ 返回可能变更的句柄。之前判断风险/收益不划算。本轮找到
+安全切入：不做无条件内联，而是<strong>条件快路径 + 回退</strong>。</p>
+<p><strong>实现（仅 src/codegen_asm.rs::inst_call，紧邻 get 内联块）</strong>：仅 x86-64 + ReleaseFast +
+签名 <code>[Handle,I64,I64]-&gt;Handle</code> 时：实参装进 rdi/rsi/rdx（回退 call 直接复用），
+<code>movq -8(%rdi),%rax; cmpq $1; jne slow</code>（refcount 独占检查），<code>cmpq $0,(%rdi); jne slow</code>
+（kind==0 即 DIAL_ELEM_INT），满足则 <code>movq %rdx,24(%rdi,%rsi,8); movq %rdi,%rax; jmp done</code>
+直写并返回 a；slow 标签 <code>call dial_array_set</code>（参数仍在位）；done 落 dst 槽。标签用
+复用 <code>dchk_seq</code> 自增保证唯一。safe/debug 保留原 call（Fail-Fast 边界检查不绕过），
+AArch64 原样。零 IR/lower/LLVM 改动。</p>
+<p><strong>正确性（本轮最高风险点）</strong>：COW 共享写是最易错场景——<code>var b=a; b[i]=v</code> 时 refcount=2
+必须回退 call 执行克隆，否则污染原数组。专门验证：int[] 共享写 2 万次压测，
+asm/llvm 输出一致、原数组未被污染、glibc MALLOC_CHECK_=3 堆检查 0 错误（无
+double-free/UAF）；string[] 引用元素（kind!=0）set 走回退路径双后端一致；最小程序
+覆盖独占写 + 共享写 + a[0]=a[0] 自赋值；golden 23/22（含 ReleaseFast 组）、差分 fuzz 450
+（0 不一致）。</p>
+<p><strong>实测（公平 --fast -O3，校验和 5×2 一致）</strong>：数组内存类几何平均 1.556x → 1.0945x
+（b15 2.676→1.195、b17 2.091→1.364、b14 1.435→1.019、b16 1.231→0.912 反超、
+b18 1.259→1.037）；整体几何平均 <strong>1.0794x → 0.9793x，首次 &lt;1</strong>（按几何平均 asm 反超
+约 2%），胜/平/负 7/5/16 → 9/7/12。<strong>诚实补充</strong>：几何平均已反超，但加权总净耗时仍
+1.0728x（asm 慢约 7%），b08/b14/b18 大耗项仍落后——两类指标结论不同，都如实记录。</p>
+<p><strong>验证全绿</strong>：golden 23/22 + 差分 fuzz 450 + 工具链去 LLVM 化 22 + 自研 PGO L1-L4
++ COW 压测 2 万次 + glibc 堆检查 + 全量 run_tests。</p>
+<p><strong>护栏</strong>：1.10.0/零依赖/AArch64/LLVM 路径/safe-debug 行为零变化、不打 tag；只改 asm
+发射器一个内联块。</p>
+<p><strong>总裁裁更新</strong>：按几何平均已统计意义上追平/反超 LLVM；按总耗时仍未全面代替。剩余
+b12 互递归闭式、b08/b05 算术深度优化、b22 substring C runtime、GRA 全 spill 属架构级
+工程，继续推进。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

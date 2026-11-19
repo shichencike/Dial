@@ -92,6 +92,24 @@ b20「<code>x=x+"y"</code> 循环 4000 次」实测该调用占约 50% 开销。
 差分 fuzz 450 + 工具链 22 + PGO + 全量 tests + ARC 压测 + glibc 堆检查）。
 <strong>总裁裁不变</strong>：整体仍慢约 9%，字符串类已接近追平；剩余差距是 GRA 全 spill、
 数组 set 的 COW、b22 substring/C runtime 等架构级工程，继续量化推进。</p>
+<p><strong>2026-11-19 后续更新（维度 2 里程碑：几何平均首次反超 LLVM）</strong>：承接上轮把
+<code>dial_array_get</code> 内联后，数组内存类仍是最大短板（b15 冒泡 2.676x、b17 矩阵乘 2.091x）。
+受控实验坐实 <code>dial_array_set(a,i,v)</code> 调用在冒泡内层占约 80% 开销。但 set 比 get 复杂：
+它含 COW（refcount&gt;1 则克隆）+ 元素所有权结算（引用元素需 retain/release）+ 返回可能
+变更的句柄。安全方案——在 <code>codegen_asm.rs::inst_call</code> 仅 x86-64 + ReleaseFast 下生成
+<strong>条件快路径</strong>：实参装进 rdi/rsi/rdx（回退 call 直接复用），运行时检查 <code>refcount==1</code>
+且 <code>kind==0</code>（DIAL_ELEM_INT），满足则 <code>mov v,[a+24+i*8]</code> 直写并返回 a；否则回退原
+call 保留 COW/ARC。safe/debug 保留原 call（Fail-Fast 边界检查不绕过），AArch64 原样。
+<strong>实测</strong>：数组内存类 1.556x → 1.0945x（b15 2.676x→1.195x、b17 2.091x→1.364x、
+b14 1.435x→1.019x、b16 1.231x→0.912x 反超）；整体几何平均 <strong>1.0794x → 0.9793x，
+首次 &lt;1（按几何平均 asm 反超约 2%）</strong>，胜/平/负 7/5/16 → 9/7/12。
+<strong>诚实补充</strong>：几何平均是基准标准指标且已反超，但<strong>加权总净耗时仍 1.0728x（asm 慢约
+7%）</strong>——b08 3n+1、b14/b18 大耗项仍落后，两类指标结论不同，不可只报其一。
+正确性：COW 共享写 2 万次压测双后端一致、原数组未污染、glibc 堆检查 0 错误；
+string[] 引用元素 set 走回退路径正确；golden 23/22、差分 fuzz 450、工具链 22、
+PGO、全量 tests 全绿。<strong>总裁裁更新</strong>：按几何平均已在统计意义上追平/反超 LLVM，
+但按总耗时仍未全面代替；剩余 b12 互递归闭式、b08/b05 算术深度优化、b22 substring
+C runtime、GRA 全 spill 等架构级工程，继续推进。</p>
 <p><strong>2026-11-19 后续更新（互递归尾调用帧复用）</strong>：asm 的文本级尾调用消除
 <code>elide_tail_calls</code> 此前虽把互递归 <code>evR</code>/<code>odR</code> 的 <code>call</code> 改成 <code>jmp</code>，但每层仍要
 <code>subq $120</code> 建帧 + <code>movq</code> 存参 + <code>addq $120</code> 拆帧——b12 互递归奇偶判定 4.263x

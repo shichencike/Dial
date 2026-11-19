@@ -3454,3 +3454,46 @@ imulq   %r10, %r15     # s * 31
 **验证全绿**：golden 默认 23 + ReleaseFast 双后端 22 + 差分 fuzz 450（0 不一致）+ 工具链去 LLVM 化 22 + 自研 PGO L1-L4 + 全量 run_tests（exit=0）+ ARC 压测（20 万次字面量拼接，双后端输出一致、RSS 接近）+ glibc MALLOC_CHECK_=3 堆检查（无 double-free）。
 
 **护栏**：1.10.0/零依赖/LLVM 路径零改动/不打 tag；只改 asm IR 发射器 + 1 处测试 probe（修既有 UB）。
+
+---
+
+## v1.10 开发增量：dial_array_set 独占快路径内联（几何平均首次反超 LLVM）
+
+**为什么做**：延续代替 LLVM 的性能主线。上轮字符串静态化后，数组内存类仍是最大短板
+（b15 冒泡 2.676x、b17 矩阵乘 2.091x）。受控 C 实验（复用 safety-0 runtime，模拟冒泡内层
+大量 set）坐实 `dial_array_set` 调用开销占该模式约 80%——比上轮 string new 的 50% 还高。
+
+**为什么之前克制、现在做**：set 比 get 复杂——含 COW（refcount>1 克隆）+ 元素所有权
+结算（引用元素 retain/release）+ 返回可能变更的句柄。之前判断风险/收益不划算。本轮找到
+安全切入：不做无条件内联，而是**条件快路径 + 回退**。
+
+**实现（仅 src/codegen_asm.rs::inst_call，紧邻 get 内联块）**：仅 x86-64 + ReleaseFast +
+签名 `[Handle,I64,I64]->Handle` 时：实参装进 rdi/rsi/rdx（回退 call 直接复用），
+`movq -8(%rdi),%rax; cmpq $1; jne slow`（refcount 独占检查），`cmpq $0,(%rdi); jne slow`
+（kind==0 即 DIAL_ELEM_INT），满足则 `movq %rdx,24(%rdi,%rsi,8); movq %rdi,%rax; jmp done`
+直写并返回 a；slow 标签 `call dial_array_set`（参数仍在位）；done 落 dst 槽。标签用
+复用 `dchk_seq` 自增保证唯一。safe/debug 保留原 call（Fail-Fast 边界检查不绕过），
+AArch64 原样。零 IR/lower/LLVM 改动。
+
+**正确性（本轮最高风险点）**：COW 共享写是最易错场景——`var b=a; b[i]=v` 时 refcount=2
+必须回退 call 执行克隆，否则污染原数组。专门验证：int[] 共享写 2 万次压测，
+asm/llvm 输出一致、原数组未被污染、glibc MALLOC_CHECK_=3 堆检查 0 错误（无
+double-free/UAF）；string[] 引用元素（kind!=0）set 走回退路径双后端一致；最小程序
+覆盖独占写 + 共享写 + a[0]=a[0] 自赋值；golden 23/22（含 ReleaseFast 组）、差分 fuzz 450
+（0 不一致）。
+
+**实测（公平 --fast -O3，校验和 5×2 一致）**：数组内存类几何平均 1.556x → 1.0945x
+（b15 2.676→1.195、b17 2.091→1.364、b14 1.435→1.019、b16 1.231→0.912 反超、
+b18 1.259→1.037）；整体几何平均 **1.0794x → 0.9793x，首次 <1**（按几何平均 asm 反超
+约 2%），胜/平/负 7/5/16 → 9/7/12。**诚实补充**：几何平均已反超，但加权总净耗时仍
+1.0728x（asm 慢约 7%），b08/b14/b18 大耗项仍落后——两类指标结论不同，都如实记录。
+
+**验证全绿**：golden 23/22 + 差分 fuzz 450 + 工具链去 LLVM 化 22 + 自研 PGO L1-L4
++ COW 压测 2 万次 + glibc 堆检查 + 全量 run_tests。
+
+**护栏**：1.10.0/零依赖/AArch64/LLVM 路径/safe-debug 行为零变化、不打 tag；只改 asm
+发射器一个内联块。
+
+**总裁裁更新**：按几何平均已统计意义上追平/反超 LLVM；按总耗时仍未全面代替。剩余
+b12 互递归闭式、b08/b05 算术深度优化、b22 substring C runtime、GRA 全 spill 属架构级
+工程，继续推进。
