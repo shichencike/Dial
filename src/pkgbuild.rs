@@ -44,6 +44,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
@@ -68,6 +69,51 @@ pub struct PkgSpec {
     /// 合并编译（见 `main.rs::collect_sources` 的三级优先）。`.dialpkg` 因此从
     /// 「机器码 + 签名」扩展为「机器码 + 签名 + 随包 Dial 源码模块」。
     pub src: BTreeMap<String, String>,
+    /// P4.0：C 源码声明（`[c]` 段）。`None` 表示这是纯机器码包（现状，零 C 源），
+    /// `Some` 表示 pack 需自动交叉编译 C 源成三平台 `.a`（prebuilt），或随包分发
+    /// C 源供 install 期就地编译（source）。字段全部来自清单显式声明，零脚本。
+    pub c: Option<CSpec>,
+}
+
+/// P4.0：`[c]` 段的解析结果——声明式 C 源码编译参数（零构建脚本）。
+#[derive(Debug, Clone)]
+pub struct CSpec {
+    /// 待编译的 `.c` 源文件相对路径（位于 `c/` 目录下），按声明顺序编译。
+    pub sources: Vec<String>,
+    /// 头文件搜索目录相对路径（位于 `c/` 目录下，`-I`）。
+    pub includes: Vec<String>,
+    /// 额外编译 flag（如 `-O2`、`-Wall`）。禁止那些会引入副作用/脚本的项。
+    pub flags: Vec<String>,
+    /// 预处理器宏定义（如 `MYLIB_VERSION=1`，编译期加 `-D`）。
+    pub defines: Vec<String>,
+    /// 分发模式：`prebuilt`（pack 期交叉编译三平台 `.a`，默认）或
+    /// `source`（install 期就地声明式编译，需用户工具链）。
+    pub mode: CMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CMode {
+    Prebuilt,
+    Source,
+}
+
+impl CMode {
+    fn parse(s: &str, line_no: usize) -> Result<Self, String> {
+        match s {
+            "prebuilt" => Ok(CMode::Prebuilt),
+            "source" => Ok(CMode::Source),
+            other => Err(format!(
+                "dial.toml 第 {} 行：[c] mode 只能是 'prebuilt' 或 'source'，收到 '{}'",
+                line_no, other
+            )),
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CMode::Prebuilt => "prebuilt",
+            CMode::Source => "source",
+        }
+    }
 }
 
 /// 去掉一行中字符串字面量之外的 `#` 注释。
@@ -132,6 +178,27 @@ fn parse_string(v: &str, line: usize) -> Result<String, String> {
     Ok(out)
 }
 
+/// 解析逗号分隔的带引号字符串列表，如 `"a.c", "b.c"`（P4.0 `[c]` 段）。
+/// 空串返回空列表。用 parse_string 复用转义与引号校验，杜绝裸 token。
+fn parse_string_list(v: &str, line: usize) -> Result<Vec<String>, String> {
+    let t = v.trim();
+    if t.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for part in t.split(',') {
+        let p = part.trim();
+        if p.is_empty() {
+            return Err(format!(
+                "dial.toml 第 {} 行：[c] 列表中出现空项（逗号之间不能有空元素）",
+                line
+            ));
+        }
+        out.push(parse_string(p, line)?);
+    }
+    Ok(out)
+}
+
 /// 校验包名 / triple / 相对路径，拒绝一切能逃出项目目录的写法。
 fn check_component(what: &str, s: &str) -> Result<(), String> {
     if s.is_empty() {
@@ -161,9 +228,16 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
     let mut license: Option<String> = None;
     let mut targets: BTreeMap<String, String> = BTreeMap::new();
     let mut src: BTreeMap<String, String> = BTreeMap::new();
+    // P4.0 [c] 段字段
+    let mut c_sources: Vec<String> = Vec::new();
+    let mut c_includes: Vec<String> = Vec::new();
+    let mut c_flags: Vec<String> = Vec::new();
+    let mut c_defines: Vec<String> = Vec::new();
+    let mut c_mode: Option<CMode> = None;
     let mut section: Option<String> = None;
     let mut seen_targets = false;
     let mut seen_src = false;
+    let mut seen_c = false;
 
     for (idx, raw) in text.lines().enumerate() {
         let line_no = idx + 1;
@@ -176,16 +250,16 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
                 return Err(format!("dial.toml 第 {} 行：段头缺少右方括号 ']'", line_no));
             }
             let sec = line[1..line.len() - 1].trim();
-            if sec != "targets" && sec != "src" {
+            if sec != "targets" && sec != "src" && sec != "c" {
                 return Err(format!(
-                    "dial.toml 第 {} 行：不支持的段 '[{}]'（只支持 [targets] 与 [src]）",
+                    "dial.toml 第 {} 行：不支持的段 '[{}]'（只支持 [targets] / [src] / [c]）",
                     line_no, sec
                 ));
             }
-            let seen = if sec == "targets" {
-                &mut seen_targets
-            } else {
-                &mut seen_src
+            let seen = match sec {
+                "targets" => &mut seen_targets,
+                "src" => &mut seen_src,
+                _ => &mut seen_c,
             };
             if *seen {
                 return Err(format!("dial.toml 第 {} 行：[{}] 段重复", line_no, sec));
@@ -261,6 +335,68 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
             continue;
         }
 
+        if section.as_deref() == Some("c") {
+            // P4.0：[c] 段声明 C 源码的声明式编译参数。列表用逗号分隔的带引号
+            // 字符串（如 sources = "c/a.c", "c/b.c"），保持 TOML 子集零依赖。
+            let list = |val: &str, line: usize| parse_string_list(val, line);
+            match key {
+                "sources" | "includes" | "flags" | "defines" => {
+                    let vals = list(val, line_no)?;
+                    let slot = match key {
+                        "sources" => &mut c_sources,
+                        "includes" => &mut c_includes,
+                        "flags" => &mut c_flags,
+                        _ => &mut c_defines,
+                    };
+                    if !slot.is_empty() {
+                        return Err(format!(
+                            "dial.toml 第 {} 行：[c] 字段 '{}' 重复",
+                            line_no, key
+                        ));
+                    }
+                    // sources / includes 是相对路径，做穿越校验；flags / defines
+                    // 是编译参数，禁止引入会执行Shell的片段（分号/反引号/管道）。
+                    for v in &vals {
+                        if key == "sources" || key == "includes" {
+                            check_component(&format!("[c].{} 项", key), v)?;
+                            if key == "sources" && !v.ends_with(".c") {
+                                return Err(format!(
+                                    "dial.toml 第 {} 行：[c] sources 项 '{}' 必须以 .c 结尾",
+                                    line_no, v
+                                ));
+                            }
+                        } else {
+                            // 零脚本铁律：编译参数里不允许出现 shell 元字符。
+                            if v.contains(';') || v.contains('`') || v.contains('|')
+                                || v.contains('$') || v.contains('\n') || v.contains("&&")
+                            {
+                                return Err(format!(
+                                    "dial.toml 第 {} 行：[c].{} 项 '{}' 含 shell 元字符，\
+                                     包内绝不执行脚本（零脚本铁律）",
+                                    line_no, key, v
+                                ));
+                            }
+                        }
+                    }
+                    *slot = vals;
+                }
+                "mode" => {
+                    if c_mode.is_some() {
+                        return Err(format!("dial.toml 第 {} 行：[c] mode 重复", line_no));
+                    }
+                    let m = parse_string(val, line_no)?;
+                    c_mode = Some(CMode::parse(&m, line_no)?);
+                }
+                other => {
+                    return Err(format!(
+                        "dial.toml 第 {} 行：[c] 未知字段 '{}'（支持 sources/includes/flags/defines/mode）",
+                        line_no, other
+                    ))
+                }
+            }
+            continue;
+        }
+
         match key {
             "name" | "version" | "iface" | "license" => {
                 let s = parse_string(val, line_no)?;
@@ -319,9 +455,44 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
             iface
         ));
     }
-    if targets.is_empty() {
-        return Err("dial.toml：[targets] 段至少要登记一个平台的静态库".to_string());
-    }
+    // P4.0：声明 [c] 段时 [targets] 可为空——prebuilt 由 pack 自动交叉编译填充，
+    // source 由 install 期就地编译；纯机器码包（无 [c]）仍必须显式登记 ≥1 个 target。
+    let c = if seen_c {
+        if c_sources.is_empty() {
+            return Err("dial.toml：[c] 段必须声明至少一个 sources（.c 源文件）".to_string());
+        }
+        for s in &c_sources {
+            if !s.starts_with("c/") {
+                return Err(format!(
+                    "dial.toml：[c] sources 项 '{}' 必须位于 c/ 目录下",
+                    s
+                ));
+            }
+        }
+        for s in &c_includes {
+            if !s.starts_with("c/") {
+                return Err(format!(
+                    "dial.toml：[c] includes 项 '{}' 必须位于 c/ 目录下",
+                    s
+                ));
+            }
+        }
+        Some(CSpec {
+            sources: c_sources,
+            includes: c_includes,
+            flags: c_flags,
+            defines: c_defines,
+            mode: c_mode.unwrap_or(CMode::Prebuilt),
+        })
+    } else {
+        if c_mode.is_some() || !c_includes.is_empty() || !c_flags.is_empty() || !c_defines.is_empty() {
+            return Err("dial.toml：[c] 段字段（mode/includes/flags/defines）出现在 [c] 段外，或缺少 sources".to_string());
+        }
+        if targets.is_empty() {
+            return Err("dial.toml：[targets] 段至少要登记一个平台的静态库（纯机器码包），或声明 [c] 段让 pack 自动编译".to_string());
+        }
+        None
+    };
 
     Ok(PkgSpec {
         name,
@@ -331,6 +502,7 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
         license,
         targets,
         src,
+        c,
     })
 }
 
@@ -463,6 +635,197 @@ fn discover_unlisted(project_dir: &Path, staged: &[(String, PathBuf)]) -> Vec<St
     out
 }
 
+/// P4.0 三平台交叉编译目标表：(zig cc -target 名, manifest/host triple 键)。
+///
+/// 与 `packages/{http,gui,...}/build.sh` 完全同一套映射——前者给 `zig cc`，后者
+/// 逐字等于 `package::host_triple()` 返回、也是 manifest `[targets]` 的键。
+const CROSS_TARGETS: &[(&str, &str)] = &[
+    ("x86_64-linux-gnu", "x86_64-linux-gnu"),
+    ("aarch64-linux-musl", "aarch64-unknown-linux-musl"),
+    ("x86_64-windows-gnu", "x86_64-pc-windows-gnu"),
+];
+
+/// 找到交叉编译用的 zig 可执行文件。
+///
+/// 允许 `DIAL_C_COMPILER` 覆盖为带 zig 语义的编译器（例如自定义位置的 zig），
+/// 但默认必须能调起 `zig cc -target` 与 `zig ar`——prebuilt 编 C 源是包作者责任，
+/// 缺 zig 时 Fail-Fast 给出安装指引（零脚本、无隐式下载）。
+fn find_zig() -> Result<PathBuf, String> {
+    // DIAL_C_COMPILER 若首段就是 zig，直接采用其路径，尊重作者环境。
+    if let Ok(val) = std::env::var("DIAL_C_COMPILER") {
+        let prog = val.split_whitespace().next().unwrap_or("").trim();
+        if !prog.is_empty() && Path::new(prog).is_file() {
+            return Ok(PathBuf::from(prog));
+        }
+    }
+    for cand in ["zig", "/usr/local/bin/zig", "/usr/bin/zig"] {
+        if let Some(p) = which_like(cand) {
+            return Ok(p);
+        }
+    }
+    Err("找不到 zig 交叉编译器——pack 编 C 源需要 zig（zig cc -target + zig ar）。\
+         请安装 zig 0.11+ 并加入 PATH，或设 DIAL_C_COMPILER 指向 zig。"
+        .to_string())
+}
+
+/// 极简 PATH 查找（零依赖，避免引入 which crate）：含 '/' 时直接查文件，
+/// 否则遍历 PATH 各段找可执行文件。
+fn which_like(name: &str) -> Option<PathBuf> {
+    if name.contains('/') {
+        let p = Path::new(name);
+        return p.is_file().then(|| p.to_path_buf());
+    }
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let p = dir.join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// P4.0：把 `[c]` 段声明的 C 源交叉编译成三平台静态库，写入项目 `lib/<triple>/`。
+///
+/// 返回 (triple 键, 包内相对路径) 列表，供 plan 登记进 `[targets]`。可复现三件套：
+/// `-g0`（去 COFF CodeView 随机 obj 名）、`-ffile-prefix-map`（规范化 __FILE__ 的
+/// 临时目录路径）、`SOURCE_DATE_EPOCH=0`（固定 COFF 时间戳）——与仓库现成 build.sh
+/// 同款，保证同一输入两次 pack 产物逐字节一致。
+fn cross_compile_c(project_dir: &Path, spec: &PkgSpec) -> Result<BTreeMap<String, String>, String> {
+    let cspec = spec.c.as_ref().ok_or("cross_compile_c 要求 spec.c 已声明")?;
+    let zig = find_zig()?;
+
+    // 源文件在声明时已统一要求位于 c/ 下；这里解析成绝对路径并确认存在。
+    let mut abs_sources: Vec<PathBuf> = Vec::new();
+    for rel in &cspec.sources {
+        let p = project_dir.join(rel);
+        if !p.is_file() {
+            return Err(format!("[c] 源文件不存在: {}（声明为 '{}'）", p.display(), rel));
+        }
+        abs_sources.push(p);
+    }
+    for inc in &cspec.includes {
+        let p = project_dir.join(inc);
+        if !p.is_dir() {
+            return Err(format!("[c] 头文件目录不存在: {}（声明为 '{}'）", p.display(), inc));
+        }
+    }
+
+    let mut result = BTreeMap::new();
+    for (zig_target, triple) in CROSS_TARGETS {
+        let work = temp_build_dir(&format!("dialpack_{}_{}", spec.name, triple));
+        let obj_dir = work.join("obj");
+        fs::create_dir_all(&obj_dir)
+            .map_err(|e| format!("创建交叉编译临时目录失败: {}", e))?;
+
+        // -ffile-prefix-map：把项目根与临时目录都规范化为稳定前缀。
+        let mut cc_args: Vec<String> = vec![
+            "cc".to_string(),
+            "-target".to_string(),
+            (*zig_target).to_string(),
+            "-c".to_string(),
+            "-O2".to_string(),
+            "-fPIC".to_string(),
+            "-g0".to_string(),
+            format!("-ffile-prefix-map={}=.", project_dir.display()),
+            format!("-ffile-prefix-map={}=.", work.display()),
+        ];
+        for inc in &cspec.includes {
+            cc_args.push("-I".to_string());
+            cc_args.push(project_dir.join(inc).display().to_string());
+        }
+        for d in &cspec.defines {
+            cc_args.push(format!("-D{}", d));
+        }
+        for f in &cspec.flags {
+            cc_args.push(f.clone());
+        }
+
+        let mut objs: Vec<PathBuf> = Vec::new();
+        for (i, src) in abs_sources.iter().enumerate() {
+            let obj = obj_dir.join(format!("src{}.o", i));
+            let mut args = cc_args.clone();
+            args.push(src.display().to_string());
+            args.push("-o".to_string());
+            args.push(obj.display().to_string());
+            let status = Command::new(&zig)
+                .args(&args)
+                .env("SOURCE_DATE_EPOCH", "0")
+                .current_dir(project_dir)
+                .status()
+                .map_err(|e| format!("调用 zig cc 编译 {} 失败: {}", triple, e))?;
+            if !status.success() {
+                return Err(format!(
+                    "zig cc 交叉编译 '{}' 到 {} 失败（退出码 {:?}）——\
+                     请检查 [c] sources 的 C 代码是否可移植到该平台",
+                    src.display(), triple, status.code()
+                ));
+            }
+            objs.push(obj);
+        }
+
+        // 归档：zig ar rcs lib<name>.a obj...
+        let lib_name = format!("lib{}.a", spec.name);
+        let out_lib = obj_dir.join(&lib_name);
+        let mut ar_args: Vec<String> = vec![
+            "ar".to_string(), "rcs".to_string(), out_lib.display().to_string()
+        ];
+        for obj in &objs {
+            ar_args.push(obj.display().to_string());
+        }
+        let status = Command::new(&zig)
+            .args(&ar_args)
+            .env("SOURCE_DATE_EPOCH", "0")
+            .status()
+            .map_err(|e| format!("调用 zig ar 归档 {} 失败: {}", triple, e))?;
+        if !status.success() {
+            return Err(format!("zig ar 归档 {} 失败（退出码 {:?}）", triple, status.code()));
+        }
+
+        // 落到项目 lib/<triple>/lib<name>.a（包内路径与磁盘路径一致）。
+        let dest_rel = format!("lib/{}/{}", triple, lib_name);
+        let dest = project_dir.join(&dest_rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("创建库目录 {} 失败: {}", parent.display(), e))?;
+        }
+        fs::copy(&out_lib, &dest)
+            .map_err(|e| format!("复制交叉编译产物到 {} 失败: {}", dest.display(), e))?;
+        result.insert(triple.to_string(), dest_rel);
+
+        let _ = fs::remove_dir_all(&work);
+    }
+    Ok(result)
+}
+
+/// 生成一个确定命名的临时构建目录名（内容哈希无关，仅用于放 .o；
+/// __FILE__ 已被 -ffile-prefix-map 规范化，故目录名不影响产物字节）。
+fn temp_build_dir(tag: &str) -> PathBuf {
+    let base = std::env::temp_dir().join(format!("dialc_cross_{}", tag));
+    // 复用同一路径覆盖写，避免随机目录名进入任何调试段。
+    let _ = fs::remove_dir_all(&base);
+    base
+}
+
+/// 递归收集目录下的所有普通文件为 (包内相对路径, 绝对路径) 列表。
+/// 用于 P4.0 native-src/ 源码存档随包分发（审计用，不进编译路径）。
+fn collect_tree_recursive(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("读取目录 {} 失败: {}", dir.display(), e))?;
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_tree_recursive(base, &p, out)?;
+        } else if p.is_file() {
+            let rel = p.strip_prefix(base)
+                .map_err(|_| format!("路径 {} 不在 {} 下", p.display(), base.display()))?
+                .to_string_lossy().replace('\\', "/");
+            out.push((rel, p));
+        }
+    }
+    Ok(())
+}
+
 /// 生成打包计划（不写任何文件）。所有 Fail-Fast 校验都集中在这里。
 pub fn plan(project_dir: &Path, out: Option<&Path>) -> Result<PackPlan, String> {
     let spec_path = project_dir.join("dial.toml");
@@ -474,7 +837,18 @@ pub fn plan(project_dir: &Path, out: Option<&Path>) -> Result<PackPlan, String> 
             e
         )
     })?;
-    let spec = parse_spec(&text)?;
+    let mut spec = parse_spec(&text)?;
+
+    // P4.0 prebuilt：声明了 [c] 且 mode=prebuilt 时，先交叉编译三平台 .a，
+    // 自动生成 [targets] 登记（用户零手填哈希/路径）。source 模式不在这里编译。
+    if let Some(cspec) = spec.c.as_ref() {
+        if cspec.mode == CMode::Prebuilt {
+            let built = cross_compile_c(project_dir, &spec)?;
+            for (triple, rel) in built {
+                spec.targets.insert(triple, rel);
+            }
+        }
+    }
 
     let iface_src = project_dir.join(&spec.iface);
     if !iface_src.is_file() {
@@ -514,6 +888,30 @@ pub fn plan(project_dir: &Path, out: Option<&Path>) -> Result<PackPlan, String> 
         }
         staged.push((rel.clone(), p));
     }
+    // P4.0：声明了 [c] 时，C 源与头文件随包分发：
+    //   - prebuilt：随包供审计（用户拿到机器码 + 可审阅源码）；
+    //   - source：随包供 install 期就地编译。
+    // 同时把 native-src/ 源码存档目录整体纳入（仅供审计，不进编译路径）。
+    if let Some(cspec) = spec.c.as_ref() {
+        let mut c_files: Vec<(String, PathBuf)> = Vec::new();
+        for rel in cspec.sources.iter().chain(cspec.includes.iter()) {
+            let p = project_dir.join(rel);
+            if !p.is_file() && !p.is_dir() {
+                return Err(format!("[c] 声明的文件/目录不存在: {}", p.display()));
+            }
+            if p.is_file() {
+                c_files.push((rel.clone(), p));
+            } else {
+                // includes 声明的是目录，递归纳入其下头文件
+                collect_tree_recursive(project_dir, &p, &mut c_files)?;
+            }
+        }
+        staged.extend(c_files);
+        let native_src = project_dir.join("native-src");
+        if native_src.is_dir() {
+            collect_tree_recursive(project_dir, &native_src, &mut staged)?;
+        }
+    }
     // 包内路径必须唯一：zip 允许重名项，但那会让 install 解压时后者覆盖前者。
     let mut seen_paths: HashSet<&str> = HashSet::new();
     for (zip_path, _) in &staged {
@@ -541,7 +939,16 @@ pub fn plan(project_dir: &Path, out: Option<&Path>) -> Result<PackPlan, String> 
         sha_obj.insert(zip_path.clone(), serde_json::Value::String(h.clone()));
         sha.push((zip_path.clone(), h));
     }
-    let manifest = serde_json::json!({
+    // P4.0：c 字段（可选）。有 [c] 段时写入声明供 install 期使用/审计，
+    // 无 [c] 段时完全不写该键（保持旧包 manifest 逐字段兼容）。
+    let c_json = spec.c.as_ref().map(|c| serde_json::json!({
+        "sources": c.sources,
+        "includes": c.includes,
+        "flags": c.flags,
+        "defines": c.defines,
+        "mode": c.mode.as_str(),
+    }));
+    let mut manifest = serde_json::json!({
         "name": spec.name,
         "version": spec.version,
         "abi": spec.abi,
@@ -551,6 +958,9 @@ pub fn plan(project_dir: &Path, out: Option<&Path>) -> Result<PackPlan, String> 
         "src": src_obj,
         "sha256": sha_obj,
     });
+    if let Some(cj) = c_json {
+        manifest["c"] = cj;
+    }
     let manifest_text = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("序列化 manifest.txt 失败: {}", e))?
         + "\n";

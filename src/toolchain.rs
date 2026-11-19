@@ -116,6 +116,37 @@ fn check_installed(dir: &Path) -> (usize, Vec<String>) {
     (n, errors)
 }
 
+/// P4.0：检查单个已装包的平台覆盖与 ABI 一致性。
+/// - 缺当前 host triple 的预编译 .a（且非 source 模式可就地编译）→ 警告；
+/// - manifest.abi 与编译器 STDLIB_ABI 不符 → 警告（stdlib 包会因此失效）。
+fn check_installed_platform(dir: &Path) -> Vec<String> {
+    let mut warns = Vec::new();
+    let mf_path = dir.join("manifest.txt");
+    let text = match fs::read_to_string(&mf_path) { Ok(t) => t, Err(_) => return warns };
+    let v: serde_json::Value = match serde_json::from_str(&text) { Ok(v) => v, Err(_) => return warns };
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+    // ABI 一致性
+    if let Some(abi) = v.get("abi").and_then(|x| x.as_u64()) {
+        if abi != package::STDLIB_ABI {
+            warns.push(format!(
+                "{} ABI={} 与编译器 STDLIB_ABI={} 不符（可能需重装）",
+                name, abi, package::STDLIB_ABI
+            ));
+        }
+    }
+    // 平台覆盖：非 source 模式且缺当前 host 的 .a
+    let is_source = v.get("c").and_then(|x| x.get("mode")).and_then(|m| m.as_str()) == Some("source");
+    if !is_source {
+        let host = package::host_triple();
+        let has_host = v.get("targets").and_then(|x| x.as_object())
+            .map(|t| t.contains_key(&host)).unwrap_or(false);
+        if !has_host {
+            warns.push(format!("{} 无当前平台 '{}' 的预编译库", name, host));
+        }
+    }
+    warns
+}
+
 /// 返回失败项数量（>0 时调用方以非零码退出）。
 pub fn doctor(as_json: bool) -> Result<i32, String> {
     let mut checks: Vec<Check> = Vec::new();
@@ -181,6 +212,21 @@ pub fn doctor(as_json: bool) -> Result<i32, String> {
         ));
     } else {
         checks.push(Check::fail("已安装包完整性", pkg_errors.join("；")));
+    }
+
+    // P4.0：已装包的平台覆盖 + ABI 一致性检查。
+    let mut platform_warns: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&root) {
+        for e in rd.flatten() {
+            if e.path().is_dir() {
+                platform_warns.extend(check_installed_platform(&e.path()));
+            }
+        }
+    }
+    if platform_warns.is_empty() {
+        checks.push(Check::ok("包平台/ABI 一致性", format!("{} 个包均覆盖当前平台且 ABI 匹配", pkg_count)));
+    } else {
+        checks.push(Check::warn("包平台/ABI 一致性", platform_warns.join("；")));
     }
 
     // 项目清单（当前目录有 dial.toml 才检查）

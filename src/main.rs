@@ -95,8 +95,7 @@ fn main() {
             return;
         }
         "list" => {
-            ensure_no_extra(&args, 2);
-            cmd_list();
+            cmd_list(&args);
             return;
         }
         "check" | "fmt" | "test" | "new" | "uninstall" | "pack"
@@ -121,8 +120,9 @@ fn main() {
     // 再做「整包哈希（若给了 --sha256）」与「解压前逐文件 SHA256」两道校验，
     // 全过才解压（§5.1：校验先于一切）。
     if command == "install" {
-        // 解析可选的 --sha256 <hex>（只有 install 用得到）
+        // 解析可选的 --sha256 <hex> 与 --json（只有 install 用得到）
         let mut expected_sha256: Option<String> = None;
+        let mut as_json = false;
         let mut i = 3;
         while i < args.len() {
             match args[i].as_str() {
@@ -136,6 +136,7 @@ fn main() {
                         }
                     }
                 }
+                "--json" => as_json = true,
                 other => {
                     eprintln!("install: 不认识的参数 '{}'", other);
                     std::process::exit(1);
@@ -156,6 +157,18 @@ fn main() {
         };
         match result {
             Ok((dir, manifest)) => {
+                if as_json {
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "name": manifest.name,
+                        "version": manifest.version,
+                        "abi": manifest.abi,
+                        "license": manifest.license,
+                        "path": dir.display().to_string(),
+                        "targets": manifest.supported_triples(),
+                    })).unwrap());
+                    return;
+                }
                 println!("✅ 已安装包 '{}' v{}（ABI {}）", manifest.name, manifest.version, manifest.abi);
                 println!("   许可: {}", manifest.license);
                 println!("   位置: {}", dir.display());
@@ -196,7 +209,13 @@ fn main() {
                 return;
             }
             Err(e) => {
-                eprintln!("{}", e);
+                if as_json {
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": false, "error": e.to_string(),
+                    })).unwrap());
+                } else {
+                    eprintln!("{}", e);
+                }
                 std::process::exit(1);
             }
         }
@@ -1740,16 +1759,16 @@ fn print_usage() {
     eprintln!();
     eprintln!("工程与源码组织");
     eprintln!("  fmt   <文件.dial>... [--check|--diff] 间距规范化（token 流/注释原文不变、幂等）");
-    eprintln!("  new   <目录> [包名]            生成可打包的项目骨架（dial.toml）");
+    eprintln!("  new   <目录> [包名] [--json]   生成可打包的项目骨架（dial.toml）");
     eprintln!("  pack  <目录> [-o 包.dialpkg] [--dry-run|--json|--init]
                                    打包 / 预览 / 机器可读清单 / 自动生成清单草稿
   pack  --verify <包.dialpkg>     校验已有包的 manifest 与逐文件 SHA256");
     eprintln!("  import \"./util.dial\";         源码内引用同目录模块（见 README §34）");
     eprintln!();
     eprintln!("包管理");
-    eprintln!("  install   <包.dialpkg|URL> [--sha256 哈希]");
-    eprintln!("  list                           列出已安装包");
-    eprintln!("  uninstall <包名>               卸载已安装包");
+    eprintln!("  install   <包.dialpkg|URL> [--sha256 哈希] [--json]");
+    eprintln!("  list      [--json]             列出已安装包");
+    eprintln!("  uninstall <包名> [--json]      卸载已安装包");
     eprintln!();
     eprintln!("工具链（v1.10 增补）");
     eprintln!("  doctor [--json]                 环境自检（编译器/缓存/包完整性/清单）");
@@ -2240,8 +2259,29 @@ fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, Strin
 //  子命令实现
 // ---------------------------------------------------------------------------
 
-fn cmd_list() {
+fn cmd_list(args: &[String]) {
+    let mut as_json = false;
+    for a in &args[2..] {
+        match a.as_str() {
+            "--json" => as_json = true,
+            other => {
+                eprintln!("list: 未知参数 '{}'（可用: --json）", other);
+                std::process::exit(1);
+            }
+        }
+    }
     match pkgbuild::list_installed() {
+        Ok(rows) if as_json => {
+            let arr: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|(name, ver, abi, dir)| serde_json::json!({
+                    "name": name, "version": ver, "abi": abi, "path": dir.display().to_string(),
+                }))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "packages": arr, "count": arr.len(),
+            })).unwrap());
+        }
         Ok(rows) if rows.is_empty() => {
             println!("尚未安装任何包。用 `dialc install <包.dialpkg>` 安装，或 `dialc pack` 先打一个。");
         }
@@ -2276,32 +2316,85 @@ fn cmd_check(args: &[String]) {
 }
 
 fn cmd_uninstall(args: &[String]) {
-    ensure_no_extra(args, 3);
-    let name = one_arg(args, "uninstall");
-    match pkgbuild::uninstall(&name) {
-        Ok(dir) => println!("✅ 已卸载包 '{}'（删除 {}）", name, dir.display()),
+    let mut as_json = false;
+    let mut names: Vec<String> = Vec::new();
+    for a in &args[2..] {
+        match a.as_str() {
+            "--json" => as_json = true,
+            a if a.starts_with('-') => {
+                eprintln!("uninstall: 未知参数 '{}'（可用: --json）", a);
+                std::process::exit(1);
+            }
+            other => names.push(other.to_string()),
+        }
+    }
+    if names.len() != 1 {
+        eprintln!("用法: dialc uninstall <包名> [--json]");
+        std::process::exit(1);
+    }
+    let name = &names[0];
+    match pkgbuild::uninstall(name) {
+        Ok(dir) => {
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true, "name": name, "removed": dir.display().to_string(),
+                })).unwrap());
+            } else {
+                println!("✅ 已卸载包 '{}'（删除 {}）", name, dir.display());
+            }
+        }
         Err(e) => {
-            eprintln!("{}", e);
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false, "error": e,
+                })).unwrap());
+            } else {
+                eprintln!("{}", e);
+            }
             std::process::exit(1);
         }
     }
 }
 
 fn cmd_new(args: &[String]) {
-    if args.len() < 3 || args.len() > 4 {
-        eprintln!("用法: dialc new <目录> [包名]");
+    let mut as_json = false;
+    let mut pos: Vec<String> = Vec::new();
+    for a in &args[2..] {
+        match a.as_str() {
+            "--json" => as_json = true,
+            a if a.starts_with('-') => {
+                eprintln!("new: 未知参数 '{}'（可用: --json）", a);
+                std::process::exit(1);
+            }
+            other => pos.push(other.to_string()),
+        }
+    }
+    if pos.is_empty() || pos.len() > 2 {
+        eprintln!("用法: dialc new <目录> [包名] [--json]");
         std::process::exit(1);
     }
-    let dir = Path::new(&args[2]);
-    let name = args.get(3).map(|s| s.as_str());
+    let dir = Path::new(&pos[0]);
+    let name = pos.get(1).map(|s| s.as_str());
     match pkgbuild::new_project(dir, name) {
         Ok(p) => {
-            println!("✅ 项目骨架已生成: {}", p.display());
-            println!("   dial.toml / main.dial / {}.diali / lib/", args.get(3).map(|s| s.as_str()).unwrap_or_else(|| dir.file_name().and_then(|x| x.to_str()).unwrap_or("mylib")));
-            println!("   下一步：把编译好的 .a 放进 dial.toml [targets] 登记的路径，再执行 `dialc pack {}`。", p.display());
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true, "path": p.display().to_string(),
+                })).unwrap());
+            } else {
+                println!("✅ 项目骨架已生成: {}", p.display());
+                println!("   dial.toml / main.dial / {}.diali / lib/", pos.get(1).map(|s| s.as_str()).unwrap_or_else(|| dir.file_name().and_then(|x| x.to_str()).unwrap_or("mylib")));
+                println!("   下一步：把编译好的 .a 放进 dial.toml [targets] 登记的路径，再执行 `dialc pack {}`。", p.display());
+            }
         }
         Err(e) => {
-            eprintln!("{}", e);
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false, "error": e,
+                })).unwrap());
+            } else {
+                eprintln!("{}", e);
+            }
             std::process::exit(1);
         }
     }

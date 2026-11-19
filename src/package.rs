@@ -149,6 +149,20 @@ pub struct Manifest {
     pub src: HashMap<String, String>,
     /// 包内相对路径 -> SHA256（十六进制小写）。
     pub sha256: HashMap<String, String>,
+    /// P4.0：C 源码声明（可选，旧包无此字段 → None，向后兼容）。
+    /// prebuilt 包用它随包分发源码供审计；source 包用它 install 期就地编译。
+    pub c: Option<CInfo>,
+}
+
+/// P4.0 manifest 中的 C 源码声明（与 pkgbuild::CSpec 对应，序列化在 manifest.txt）。
+#[derive(Debug, Clone)]
+pub struct CInfo {
+    pub sources: Vec<String>,
+    pub includes: Vec<String>,
+    pub flags: Vec<String>,
+    pub defines: Vec<String>,
+    /// "prebuilt" | "source"
+    pub mode: String,
 }
 
 impl Manifest {
@@ -255,6 +269,58 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
         }
     }
 
+    // P4.0：c 可选字段。旧包无 → None（向后兼容）。一旦给出，校验结构与路径安全。
+    let c = match v.get("c") {
+        None => None,
+        Some(cv) => {
+            let obj = cv.as_object().ok_or_else(|| {
+                DialcError::new("manifest.txt 的 'c' 字段必须是对象", 0, 0)
+            })?;
+            let str_list = |key: &str| -> Result<Vec<String>> {
+                match obj.get(key) {
+                    None => Ok(Vec::new()),
+                    Some(val) => {
+                        let arr = val.as_array().ok_or_else(|| {
+                            DialcError::new(format!("manifest.txt 的 c.{} 必须是字符串数组", key), 0, 0)
+                        })?;
+                        arr.iter().map(|x| {
+                            x.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                                DialcError::new(format!("manifest.txt 的 c.{} 含非字符串项", key), 0, 0)
+                            })
+                        }).collect()
+                    }
+                }
+            };
+            let sources = str_list("sources")?;
+            let includes = str_list("includes")?;
+            let flags = str_list("flags")?;
+            let defines = str_list("defines")?;
+            let mode = obj.get("mode").and_then(|x| x.as_str()).unwrap_or("prebuilt").to_string();
+            if mode != "prebuilt" && mode != "source" {
+                return Err(DialcError::new(
+                    format!("manifest.txt 的 c.mode = '{}' 非法（只能 prebuilt/source）", mode),
+                    0, 0,
+                ));
+            }
+            // sources / includes 必须是 c/ 下的相对路径，防路径穿越。
+            for s in sources.iter().chain(includes.iter()) {
+                let n = s.replace('\\', "/");
+                if !n.starts_with("c/") || n.starts_with('/') || n.contains("..")
+                    || (n.len() >= 2 && n.as_bytes()[1] == b':')
+                {
+                    return Err(DialcError::new(
+                        format!("manifest.txt 的 c 源路径 '{}' 非法：必须位于 c/ 下且无路径穿越", s),
+                        0, 0,
+                    ));
+                }
+            }
+            if sources.is_empty() {
+                return Err(DialcError::new("manifest.txt 的 c.sources 不能为空", 0, 0));
+            }
+            Some(CInfo { sources, includes, flags, defines, mode })
+        }
+    };
+
     Ok(Manifest {
         name,
         version,
@@ -264,6 +330,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
         targets,
         src,
         sha256,
+        c,
     })
 }
 
@@ -586,9 +653,11 @@ fn install_inner(pkg_path: &Path) -> Result<(PathBuf, Manifest)> {
     // 一个字节都还没落到磁盘上。校验不过就地失败，绝不留下半个残缺的包。
     verify_archive(&mut archive, &manifest)?;
 
-    let dest = cache_root()?.join(&manifest.name);
+    let cache = cache_root()?;
+    let dest = cache.join(&manifest.name);
+
+    // 已安装：先读出旧 manifest 比对 ABI（在动任何文件之前，冲突就直接拒绝）。
     if dest.join("manifest.txt").exists() {
-        // 已安装：读出旧 manifest 比对 ABI，决定覆盖还是拒绝。
         let old_text = fs::read_to_string(dest.join("manifest.txt")).map_err(|e| {
             DialcError::new(format!("读取已安装包 manifest 失败 {}: {}", dest.display(), e), 0, 0)
         })?;
@@ -606,37 +675,248 @@ fn install_inner(pkg_path: &Path) -> Result<(PathBuf, Manifest)> {
                 0,
             ));
         }
-        // ABI 相同：整目录删除后重新解压（覆盖，避免残留旧文件）。
-        fs::remove_dir_all(&dest).map_err(|e| {
-            DialcError::new(format!("覆盖安装时删除旧目录失败 {}: {}", dest.display(), e), 0, 0)
+    }
+
+    // P4.0 原子安装：先解压到同文件系统下的唯一临时目录，全部成功后
+    // 用 rename 原子发布。覆盖安装时先把旧目录 rename 成备份，发布成功后
+    // 再删备份；任一步失败都回滚，绝不留下半包或让旧包消失。
+    let tmp = atomic_tmp_path(&cache, &manifest.name);
+    let backup = atomic_backup_path(&cache, &manifest.name);
+    // 防御：残留的上次临时/备份目录先清掉（正常路径不会留下，这里仅为健壮）。
+    let _ = fs::remove_dir_all(&tmp);
+    let _ = fs::remove_dir_all(&backup);
+
+    let mut unpack = || -> Result<()> {
+        fs::create_dir_all(&tmp)
+            .map_err(|e| DialcError::new(format!("创建临时安装目录失败 {}: {}", tmp.display(), e), 0, 0))?;
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| DialcError::new(format!("读取包内第 {} 项失败: {}", i, e), 0, 0))?;
+            let out = safe_join(&tmp, entry.name())?;
+            if entry.name().ends_with('/') {
+                fs::create_dir_all(&out).map_err(|e| {
+                    DialcError::new(format!("创建目录失败 {}: {}", out.display(), e), 0, 0)
+                })?;
+                continue;
+            }
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    DialcError::new(format!("创建目录失败 {}: {}", parent.display(), e), 0, 0)
+                })?;
+            }
+            let mut w = fs::File::create(&out)
+                .map_err(|e| DialcError::new(format!("写入 {} 失败: {}", out.display(), e), 0, 0))?;
+            std::io::copy(&mut entry, &mut w)
+                .map_err(|e| DialcError::new(format!("解压 {} 失败: {}", out.display(), e), 0, 0))?;
+        }
+        Ok(())
+    };
+
+    if let Err(e) = unpack() {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+
+    // P4.0 source 模式：若包声明了 C 源且当前 triple 缺预编译 .a，就在临时目录里
+    // 就地声明式编译（零脚本），并把 .a 登记进 manifest.targets、重写 tmp 内的
+    // manifest.txt。编译在 tmp 里完成——失败只删 tmp，不触碰已安装的旧包（原子性延续）。
+    let mut manifest = manifest;
+    let cinfo_clone = manifest.c.clone();
+    if let Some(cinfo) = cinfo_clone.as_ref() {
+        let host = host_triple();
+        let need_build = cinfo.mode == "source" || !manifest.targets.contains_key(&host);
+        if need_build {
+            if let Err(e) = build_c_for_host(&tmp, &host, cinfo, &mut manifest) {
+                let _ = fs::remove_dir_all(&tmp);
+                return Err(e);
+            }
+        }
+    }
+
+    // 发布阶段：旧目录 → backup，tmp → dest；失败逐步回滚。
+    let had_old = dest.exists();
+    if had_old {
+        fs::rename(&dest, &backup).map_err(|e| {
+            let _ = fs::remove_dir_all(&tmp);
+            DialcError::new(format!("备份旧包失败 {}: {}", dest.display(), e), 0, 0)
         })?;
     }
-    fs::create_dir_all(&dest)
-        .map_err(|e| DialcError::new(format!("创建包缓存目录失败 {}: {}", dest.display(), e), 0, 0))?;
-
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| DialcError::new(format!("读取包内第 {} 项失败: {}", i, e), 0, 0))?;
-        let out = safe_join(&dest, entry.name())?;
-        if entry.name().ends_with('/') {
-            fs::create_dir_all(&out).map_err(|e| {
-                DialcError::new(format!("创建目录失败 {}: {}", out.display(), e), 0, 0)
-            })?;
-            continue;
+    if let Err(e) = fs::rename(&tmp, &dest) {
+        // 回滚：backup → dest（若有），清理 tmp。
+        if had_old {
+            let _ = fs::rename(&backup, &dest);
         }
-        if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                DialcError::new(format!("创建目录失败 {}: {}", parent.display(), e), 0, 0)
-            })?;
-        }
-        let mut w = fs::File::create(&out)
-            .map_err(|e| DialcError::new(format!("写入 {} 失败: {}", out.display(), e), 0, 0))?;
-        std::io::copy(&mut entry, &mut w)
-            .map_err(|e| DialcError::new(format!("解压 {} 失败: {}", out.display(), e), 0, 0))?;
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(DialcError::new(
+            format!("原子发布新包失败（已回滚旧包）: {}", e),
+            0,
+            0,
+        ));
+    }
+    // 发布成功，删除旧备份；删不掉不影响正确性（下次安装会清理），仅提示。
+    if had_old && fs::remove_dir_all(&backup).is_err() {
+        // 尽力而为：备份残留不影响已发布的新包，静默忽略。
     }
 
     Ok((dest, manifest))
+}
+
+/// 原子安装的临时/备份目录名（同 cache 根下，保证 rename 同文件系统）。
+fn atomic_tmp_path(cache: &Path, name: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    // 用纳秒时间戳 + 序号 + pid，避免并发安装同名包时冲突。
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    cache.join(format!(".install-{}-{}-{}-{}", name, pid, nanos, n))
+}
+
+fn atomic_backup_path(cache: &Path, name: &str) -> PathBuf {
+    cache.join(format!(".backup-{}", name))
+}
+
+/// manifest/host triple → zig cc -target 名（与 pkgbuild::CROSS_TARGETS 对应）。
+/// 未知 triple 返回 None（该包无法在此平台就地编译，Fail-Fast 给指引）。
+fn zig_target_for_triple(triple: &str) -> Option<&'static str> {
+    match triple {
+        "x86_64-linux-gnu" => Some("x86_64-linux-gnu"),
+        "aarch64-unknown-linux-musl" => Some("aarch64-linux-musl"),
+        "x86_64-pc-windows-gnu" => Some("x86_64-windows-gnu"),
+        _ => None,
+    }
+}
+
+/// P4.0：install 期就地声明式编译 C 源（零脚本）。
+///
+/// 在已解压的包目录 `pkg_dir` 内把 `cinfo.sources` 编成 `lib/<triple>/lib<name>.a`，
+/// 更新 `manifest.targets` 并重写 `pkg_dir/manifest.txt`。编译参数全部来自 manifest
+/// 的静态声明，没有钩子/ configure / CMake——守住零脚本铁律。失败返回 Err，
+/// 由调用方回滚（删除临时目录、不动旧包）。
+fn build_c_for_host(pkg_dir: &Path, host: &str, cinfo: &CInfo, manifest: &mut Manifest) -> Result<()> {
+    let zig_target = zig_target_for_triple(host).ok_or_else(|| {
+        DialcError::new(
+            format!(
+                "包 '{}' 为 source 模式，但当前平台 '{}' 没有对应的 zig 交叉目标，\
+                 无法就地编译 C 源。请在受支持的平台（x86_64-linux-gnu / \
+                 aarch64-unknown-linux-musl / x86_64-pc-windows-gnu）安装，\
+                 或选用含该平台预编译 .a 的 prebuilt 包。",
+                manifest.name, host
+            ),
+            0,
+            0,
+        )
+    })?;
+
+    // 工具链前置检查：source 模式必须要有 zig，缺失 Fail-Fast 给安装指引。
+    let zig = find_zig_for_install().ok_or_else(|| {
+        DialcError::new(
+            "该包为 source 模式，安装期需就地编译 C 源，但找不到 zig 编译器。\n\
+             请安装 zig 0.11+ 并加入 PATH；或改用含本机预编译 .a 的 prebuilt 包。"
+                .to_string(),
+            0,
+            0,
+        )
+    })?;
+
+    let mut objs: Vec<PathBuf> = Vec::new();
+    for (i, rel) in cinfo.sources.iter().enumerate() {
+        let src = safe_join(pkg_dir, rel)?;
+        if !src.is_file() {
+            return Err(DialcError::new(
+                format!("source 模式：C 源文件 {} 不存在于包内", rel),
+                0, 0,
+            ));
+        }
+        let obj = pkg_dir.join(format!(".build_src{}.o", i));
+        let mut args: Vec<String> = vec![
+            "cc".to_string(), "-target".to_string(), zig_target.to_string(),
+            "-c".to_string(), "-O2".to_string(), "-fPIC".to_string(), "-g0".to_string(),
+            format!("-ffile-prefix-map={}=.", pkg_dir.display()),
+        ];
+        for inc in &cinfo.includes {
+            args.push("-I".to_string());
+            args.push(pkg_dir.join(inc).display().to_string());
+        }
+        for d in &cinfo.defines {
+            args.push(format!("-D{}", d));
+        }
+        for f in &cinfo.flags {
+            args.push(f.clone());
+        }
+        args.push(src.display().to_string());
+        args.push("-o".to_string());
+        args.push(obj.display().to_string());
+        let status = Command::new(&zig).args(&args).env("SOURCE_DATE_EPOCH", "0")
+            .status()
+            .map_err(|e| DialcError::new(format!("source 模式调用 zig cc 失败: {}", e), 0, 0))?;
+        if !status.success() {
+            let _ = fs::remove_file(&obj);
+            return Err(DialcError::new(
+                format!("source 模式编译 {} 失败（退出码 {:?}）", rel, status.code()), 0, 0,
+            ));
+        }
+        objs.push(obj);
+    }
+
+    let lib_name = format!("lib{}.a", manifest.name);
+    let out_lib = pkg_dir.join(format!(".build_{}", lib_name));
+    let mut ar_args: Vec<String> = vec!["ar".to_string(), "rcs".to_string(), out_lib.display().to_string()];
+    for obj in &objs { ar_args.push(obj.display().to_string()); }
+    let status = Command::new(&zig).args(&ar_args).env("SOURCE_DATE_EPOCH", "0")
+        .status()
+        .map_err(|e| DialcError::new(format!("source 模式调用 zig ar 失败: {}", e), 0, 0))?;
+    for obj in &objs { let _ = fs::remove_file(obj); }
+    if !status.success() {
+        let _ = fs::remove_file(&out_lib);
+        return Err(DialcError::new("source 模式 zig ar 归档失败".to_string(), 0, 0));
+    }
+
+    // 落到 lib/<triple>/lib<name>.a
+    let rel_lib = format!("lib/{}/{}", host, lib_name);
+    let dest = safe_join(pkg_dir, &rel_lib)?;
+    if let Some(parent) = dest.parent() { fs::create_dir_all(parent).map_err(|e| {
+        DialcError::new(format!("创建 source 库目录失败: {}", e), 0, 0)
+    })?; }
+    fs::rename(&out_lib, &dest).map_err(|e| {
+        DialcError::new(format!("放置 source 编译产物失败: {}", e), 0, 0)
+    })?;
+
+    // 更新 manifest.targets 并重写 manifest.txt（让 resolve_lib 找到新 .a）。
+    manifest.targets.insert(host.to_string(), rel_lib.clone());
+    let mf_path = safe_join(pkg_dir, "manifest.txt")?;
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&mf_path)
+        .map_err(|e| DialcError::new(format!("读取 manifest.txt 失败: {}", e), 0, 0))?)
+        .map_err(|e| DialcError::new(format!("解析 manifest.txt 失败: {}", e), 0, 0))?;
+    let mut v = v;
+    let targets = v.as_object_mut().and_then(|o| o.get_mut("targets")).and_then(|t| t.as_object_mut())
+        .ok_or_else(|| DialcError::new("manifest.txt 缺少 targets 对象".to_string(), 0, 0))?;
+    targets.insert(host.to_string(), serde_json::json!({ "lib": rel_lib }));
+    let text = serde_json::to_string_pretty(&v)
+        .map_err(|e| DialcError::new(format!("序列化 manifest.txt 失败: {}", e), 0, 0))? + "\n";
+    fs::write(&mf_path, text)
+        .map_err(|e| DialcError::new(format!("写回 manifest.txt 失败: {}", e), 0, 0))?;
+    Ok(())
+}
+
+/// 找 install 期就地编译用的 zig（PATH 或 DIAL_C_COMPILER 含 zig 时复用）。
+fn find_zig_for_install() -> Option<PathBuf> {
+    if let Ok(val) = std::env::var("DIAL_C_COMPILER") {
+        let prog = val.split_whitespace().next().unwrap_or("").trim();
+        if !prog.is_empty() && Path::new(prog).is_file() {
+            return Some(PathBuf::from(prog));
+        }
+    }
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let p = dir.join("zig");
+        if p.is_file() { return Some(p); }
+    }
+    None
 }
 
 /// 路径穿越防护：把包内相对路径 `name` 安全地拼到 `root` 下。
