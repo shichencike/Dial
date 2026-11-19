@@ -118,6 +118,8 @@
 #   AG. 双后端差分 fuzz 门禁（run_diff_fuzz_gate.sh）。
 #   AR. 自研 PGO 闭环门禁（零 bitcode：插桩→profile→热函数分段，总纲第 4 项，
 #      tools/verify_asm_pgo.sh：功能闭环/布局生效/确定性/零回归四层证据）。
+#   AH. string concat/interp 临时引用零泄漏门禁（P0 正确性，verify_string_arc_no_leak.sh：
+#      RSS 斜率断言 + 双后端输出一致，钉死 concat/interp 的 owned 操作数结算）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -5027,6 +5029,14 @@ fi
 echo
 echo "== AR) 自研 PGO 闭环门禁（零 bitcode，总纲第 4 项）=="
 if bash tools/verify_asm_pgo.sh "$DIALC"; then
+    :   # 脚本逐条打印 ✅；失败项打印 ❌ 并以非 0 退出
+else
+    fail=1
+fi
+
+echo
+echo "== AH) string concat/interp 临时引用零泄漏门禁（P0 正确性）=="
+if bash tools/verify_string_arc_no_leak.sh "$DIALC"; then
     :   # 脚本逐条打印 ✅；失败项打印 ❌ 并以非 0 退出
 else
     fail=1

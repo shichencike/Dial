@@ -182,11 +182,18 @@
 重新排序，剩余待办如下（这是本路线图真正要推进的内容）。</p>
 <h3 id="p0--正确性底线最高优先属代替的硬前提">P0 · 正确性底线（最高优先，属「代替」的硬前提）</h3>
 <ul>
-<li><strong>map<string,\*> 的 string key 本地引用未归还</strong>：50 万次 put/remove 循环泄漏约 30MB
-  （审计 <code>replace-llvm-multidim-audit.md</code> 维度 1 修复时发现，记独立待办）。这违反项目
-  §19「零泄漏」内存宪法——<strong>正确性缺口比任何性能数字都重要</strong>。需定位 key 借用/结算
-  路径并补齐 release，双后端一致 + glibc 堆检查 + 长循环内存压测验证。</li>
-<li>复核其它容器键类型的所有权结算（int key 已验证无泄漏；string key 是已知缺口）。</li>
+<li>~~<strong>map<string,\*> 的 string key 本地引用未归还</strong>：50 万次 put/remove 循环泄漏约 30MB~~
+  —— <strong>归因修正 + 已修复（2026-11-19）</strong>：隔离实验证明 map 常量 string key <strong>不泄漏</strong>；真正
+  泄漏源是 <strong>string 拼接 / 插值的 lowering 未归还自带所有权的临时操作数</strong>。C runtime
+  <code>dial_string_concat</code> / <code>dial_string_new</code> / <code>*_to_string</code> 只读不消费操作数，而 <code>"k"+str(i)</code> 的
+  <code>str(i)</code> 中间值没有 Local 持有、concat 后不 release → 每轮循环泄漏一份（~31B/轮，N=50万
+  17MB、N=200万 64MB，线性增长）。修复（<code>src/lower.rs</code>）：concat 后 release owned 操作数、
+  插值逐段追踪 owned 状态并结算，借用引用（变量/字段/下标/get/at）与静态串（immortal）跳过。
+  <strong>门禁</strong>：<code>tools/verify_string_arc_no_leak.sh</code>（RSS 斜率断言 + 双后端输出一致）；实测
+  concat/interp/chain 各 20 万次 RSS 由修复前 ~7MB 降至 ~1.4MB；新增 golden
+  <code>tests/asm_golden/string_concat_arc.dial</code>（借用/owned/嵌套/map get/重复用/真插值/循环混合）
+  双后端逐字节一致，差分 fuzz 450 零不一致，无 double-free / heap assert。§19 零泄漏底线恢复。</li>
+<li>复核其它容器键类型的所有权结算（int key 已验证无泄漏；string key 经归因修正后亦确认无泄漏）。</li>
 </ul>
 <h3 id="p1--平台覆盖唯一后端必须跨平台可用">P1 · 平台覆盖（「唯一后端」必须跨平台可用）</h3>
 <ul>

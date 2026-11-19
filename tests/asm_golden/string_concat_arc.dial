@@ -1,0 +1,34 @@
+// concat/interp ARC 结算综合正确性：覆盖借用、owned、嵌套、map get、拼接结果再用。
+fn main(): int {
+    var m: map<string, string> = new_kv_map();
+    m.put("k", "VAL");
+    var base: string = "base";
+
+    // 1) 借用变量拼接
+    print("1=", base + "/x");
+    // 2) owned 中间值拼接
+    print("2=", str(10) + str(20));
+    // 3) 嵌套拼接（内层结果 owned）
+    print("3=", ("a" + "b") + ("c" + str(3)));
+    // 4) map get 返回值（借用）+ 拼接
+    print("4=", m.get("k") + "!");
+    // 5) get 未命中（静态串）+ 拼接
+    print("5=", m.get("miss") + "?");
+    // 6) 拼接结果存入变量后反复使用
+    var joined: string = base + "-" + str(7);
+    print("6a=", joined, " 6b=", joined + "+", " 6c=", joined);
+    // 7) 真插值混合
+    print("7=", "${base}:${str(9)}:${m.get("k")}");
+    // 8) 拼接结果 put 进 map 再取出
+    m.put("combo", base + str(1));
+    print("8=", m.get("combo"));
+    // 9) 循环内混合（压测引用结算稳定）
+    var i: int = 0;
+    while (i < 100) {
+        var t: string = "n=" + str(i) + " v=" + base;
+        m.put(str(i), t);
+        i = i + 1;
+    }
+    print("9=", m.size(), " last=", m.get("99"));
+    return 0;
+}

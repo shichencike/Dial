@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/unreleased-dev.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release--理由与证据链">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release） · 理由与证据链</a><ul>
+<li><a href="#p0-修复string-拼接--插值临时操作数引用泄漏19-零泄漏底线">P0 修复：string 拼接 / 插值临时操作数引用泄漏（§19 零泄漏底线）</a></li>
 <li><a href="#m9-linrec线性递推循环编译期闭式求值总耗时首次反超-llvm几何平均-0574x">M9-linrec：线性递推循环编译期闭式求值（总耗时首次反超 LLVM，几何平均 0.574x）</a></li>
 <li><a href="#m8-recspec递归纯函数闭式特化b12-330x0477x几何平均-098x0914x">M8-recspec：递归纯函数闭式特化（b12 3.30x→0.477x，几何平均 0.98x→0.914x）</a></li>
 <li><a href="#m8-gra-span加入-llvm-式高级分配优先级-span--freqb05-2098x1909x">M8-gra-span：加入 LLVM 式高级分配优先级 span × freq（b05 2.098x→1.909x）</a></li>
@@ -68,6 +69,23 @@
 <p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
 变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
 </blockquote>
+<hr />
+<h4 id="p0-修复string-拼接--插值临时操作数引用泄漏19-零泄漏底线">P0 修复：string 拼接 / 插值临时操作数引用泄漏（§19 零泄漏底线）</h4>
+<p><strong>路线图原判</strong>：P0 记「map<string,\*> string key 本地引用未归还，50 万次 put/remove 泄漏 ~30MB」。</p>
+<p><strong>归因修正过程（隔离实验，不靠猜）</strong>：
+1. 先用最小复现隔离 map 场景：<code>new_kv_map</code> + 常量 string key 反复 put/remove，RSS 不随 N 增长 → <strong>map 常量 key 不泄漏</strong>，原判归因错误。
+2. 写 RSS 采样脚本（<code>/usr/bin/time -v</code> 取 Maximum RSS），对拼接 / 插值分别压测：小 N 曾因进程启动 RSS 主导误判「不泄漏」，加大到 N=50万/200万后确认 <strong>纯拼接线性泄漏</strong>（50万 17MB、200万 64MB，~31B/轮），真插值 <code>${i}</code> 同样线性（50万 70MB）。
+3. 根因：<code>dial_string_concat(a,b)</code> / <code>dial_string_new</code> / <code>*_to_string</code> 在 C runtime 侧<strong>只读操作数、不 retain/release</strong>。低优化级靠变量作用域的 <code>RcRelease</code> 回收，但 <code>"k"+str(i)</code> 的 <code>str(i)</code>、<code>"v=${i}!"</code> 的插值段是<strong>没有 Local 持有的表达式临时</strong>——concat 用完不 release，这块引用就再也无人归还，每轮泄漏。</p>
+<p><strong>修复（<code>src/lower.rs</code>，仅 asm lowering 路径）</strong>：
+- <code>+</code> 拼接：concat 调用改用 <code>av.clone()/bv.clone()</code> 保留操作数，随后 <code>release_string_temp(&amp;av, a)</code> / <code>release_string_temp(&amp;bv, b)</code>。
+- 插值 <code>lower_interp</code>：累加状态 <code>Option&lt;Value&gt;</code> → <code>Option&lt;(Value, owned)&gt;</code>。Text 段（<code>dial_string_new</code>）、<code>*_to_string</code> 结果标记 owned；字符串段按 <code>!yields_borrowed_ref(e)</code> 判定 owned；每段 concat 后对 owned 的 prev/seg 调 <code>release_owned_string</code>，新结果标记 owned；最终 acc 的 owned 标记丢弃、交回变量作用域管理（由外层 release）。
+- <code>release_string_temp</code>：借用引用（<code>Var</code>/<code>Field</code>/<code>Index</code>/<code>get</code>/<code>at</code>，与 LLVM 后端同口径）与 <code>StringLit</code>（immortal）跳过——前者来源仍持有、释放会悬垂/双释放，后者 release 是 no-op、跳过少发指令。
+- <code>release_owned_string</code>：<code>RcRelease</code> 作用于槽地址，先 <code>emit_alloca(Handle)</code> 落临时槽再 release。</p>
+<p><strong>验证（全绿）</strong>：
+- <code>tools/verify_string_arc_no_leak.sh</code>：concat / interp / chain 各 20 万次，RSS <strong>1412/1376/1356KB</strong>（修复前 ~7MB），阈值 8MB；三项双后端输出逐字节一致。
+- 新增 golden <code>tests/asm_golden/string_concat_arc.dial</code>：9 类场景（借用变量 / owned 中间 / 嵌套拼接 / map get 借用 / get 未命中静态串 / 拼接结果再用 / 真插值混合 / 拼接结果入 map / 循环混合 100 轮）双后端逐字节一致。
+- golden 全量 24 用例、差分 fuzz 450（OK=450, DIFF=0）、全量 <code>run_tests.sh</code>（含新 AH 门禁段）全部通过；无 double-free / heap assert。</p>
+<p><strong>边界</strong>：仅 asm lowering 路径变化；LLVM 后端从 AST 直接生成、零改动；AArch64 / 优化级别无关；不打 tag、不升版本号。</p>
 <hr />
 <h4 id="m9-linrec线性递推循环编译期闭式求值总耗时首次反超-llvm几何平均-0574x">M9-linrec：线性递推循环编译期闭式求值（总耗时首次反超 LLVM，几何平均 0.574x）</h4>
 <p><strong>用户追问脉络</strong>：延续 M8-recspec「私有后端更激进」的方向；路线图 <code>roadmap-gap-analysis.md</code> C 类记录「循环调度五路证伪后，唯一可攻方向是循环内线性递推闭式（clang -O3 / SCEV 同族，待评估 ROI）」。本轮先量化 ROI 再投入。</p>

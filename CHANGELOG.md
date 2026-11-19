@@ -22,6 +22,10 @@
 
 ## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）
 
+### Fixed
+
+- **P0 正确性：修复 string 拼接 / 插值的临时操作数引用泄漏（违 §19 零泄漏底线）**：路线图原记「map string key 泄漏 ~30MB」，本轮隔离实验先证伪该归因——map 常量 string key 不泄漏；真正泄漏源是 **`src/lower.rs` 中 string concat / interp 未归还自带所有权的临时操作数**。C runtime `dial_string_concat` / `dial_string_new` / `*_to_string` 只读、不消费操作数引用，而 `"k"+str(i)`、`"v=${i}!"` 里的 `str(i)` / 插值段中间值没有 Local 持有、concat 后不 release → 每轮循环泄漏一份（~31B/轮）；实测 N=50万 17MB、N=200万 64MB 线性增长。修复：① `+` 拼接 lowering 在 concat 后对 owned、非借用、非静态串操作数插入 `RcRelease`；② 插值 `lower_interp` 把累加状态从 `Value` 改为 `(Value, owned)` 逐段追踪，中间段 / `to_string` 结果在 concat 后归还本地引用，最终 acc 交回变量作用域管理。借用引用（`yields_borrowed_ref`：变量/字段/下标/get/at）由来源继续持有、静态串（immortal，release no-op）跳过，避免悬垂与双重释放。护栏：新增 `tools/verify_string_arc_no_leak.sh`（RSS 斜率断言 + 双后端输出一致），实测 concat/interp/chain 各 20 万次 RSS 由 ~7MB 降至 **~1.4MB**；新增 golden `tests/asm_golden/string_concat_arc.dial`（借用/owned/嵌套拼接/map get/重复用/真插值/循环混合 9 类）；golden 24 用例、差分 fuzz 450（0 不一致）、全量 run_tests 全绿，无 double-free / heap assert。路线图 P0 段同步标注归因修正与收口。**仅 asm lowering 路径变化**，LLVM 后端 / AArch64 / 优化级别零改动，不打 tag。证据链见 [rationale/unreleased-dev.md](rationale/unreleased-dev.md)。
+
 ### Added
 
 - **战略转向：路线图重制——性能达标收口，重心从「超越 LLVM」回归「代替 LLVM」**（纯文档，零产品代码）：用户决策——目标不是纯粹超越 LLVM，而是**代替**它；性能够用即可，运行时 ±5% 噪声下继续死优化用户感知不到。据此新建主线 [`rationale/replace-llvm-roadmap.md`](rationale/replace-llvm-roadmap.md)，宣布**性能维度正式冻结**：同配置 `--fast -O3` 背靠背 2 次几何平均 **0.5743x/0.5718x**、总净耗时 **0.9111x/0.9106x（反超 LLVM ~9%）**，远超「够用线」（几何平均 ≤1.05x、总耗时 ≤1.10x），不再作为投入方向，降级为回归护栏。新主线按「代替能力完备」重排：P0 正确性（map string key 泄漏 ~30MB，违 §19 零泄漏底线）→ P1 平台（AArch64 未实机跑语义、沙箱无 qemu）→ P2 功能对等裁决（B 类语言特性，按「LLVM 不存在」总纲独立裁决）→ P3 工程化（过时结论清理、fuzz 盲区）。写死性能优化**重启条件**（仅新 workload 使指标跌出够用线、或新增可并行语义、或 P0~P3 收口后用户主动要求），不满足一律不重启。同步更新 `roadmap-gap-analysis.md` 与 `replace-llvm-multidim-audit.md` 顶部转向声明（旧「性能落后故不能代替」裁决失效，作历史证据链保留）。1.10.0/零依赖/零产品代码变更。详见 [rationale/replace-llvm-roadmap.md](rationale/replace-llvm-roadmap.md)。

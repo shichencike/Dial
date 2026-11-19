@@ -5,6 +5,30 @@
 
 ---
 
+#### P0 修复：string 拼接 / 插值临时操作数引用泄漏（§19 零泄漏底线）
+
+**路线图原判**：P0 记「map<string,\*> string key 本地引用未归还，50 万次 put/remove 泄漏 ~30MB」。
+
+**归因修正过程（隔离实验，不靠猜）**：
+1. 先用最小复现隔离 map 场景：`new_kv_map` + 常量 string key 反复 put/remove，RSS 不随 N 增长 → **map 常量 key 不泄漏**，原判归因错误。
+2. 写 RSS 采样脚本（`/usr/bin/time -v` 取 Maximum RSS），对拼接 / 插值分别压测：小 N 曾因进程启动 RSS 主导误判「不泄漏」，加大到 N=50万/200万后确认 **纯拼接线性泄漏**（50万 17MB、200万 64MB，~31B/轮），真插值 `${i}` 同样线性（50万 70MB）。
+3. 根因：`dial_string_concat(a,b)` / `dial_string_new` / `*_to_string` 在 C runtime 侧**只读操作数、不 retain/release**。低优化级靠变量作用域的 `RcRelease` 回收，但 `"k"+str(i)` 的 `str(i)`、`"v=${i}!"` 的插值段是**没有 Local 持有的表达式临时**——concat 用完不 release，这块引用就再也无人归还，每轮泄漏。
+
+**修复（`src/lower.rs`，仅 asm lowering 路径）**：
+- `+` 拼接：concat 调用改用 `av.clone()/bv.clone()` 保留操作数，随后 `release_string_temp(&av, a)` / `release_string_temp(&bv, b)`。
+- 插值 `lower_interp`：累加状态 `Option<Value>` → `Option<(Value, owned)>`。Text 段（`dial_string_new`）、`*_to_string` 结果标记 owned；字符串段按 `!yields_borrowed_ref(e)` 判定 owned；每段 concat 后对 owned 的 prev/seg 调 `release_owned_string`，新结果标记 owned；最终 acc 的 owned 标记丢弃、交回变量作用域管理（由外层 release）。
+- `release_string_temp`：借用引用（`Var`/`Field`/`Index`/`get`/`at`，与 LLVM 后端同口径）与 `StringLit`（immortal）跳过——前者来源仍持有、释放会悬垂/双释放，后者 release 是 no-op、跳过少发指令。
+- `release_owned_string`：`RcRelease` 作用于槽地址，先 `emit_alloca(Handle)` 落临时槽再 release。
+
+**验证（全绿）**：
+- `tools/verify_string_arc_no_leak.sh`：concat / interp / chain 各 20 万次，RSS **1412/1376/1356KB**（修复前 ~7MB），阈值 8MB；三项双后端输出逐字节一致。
+- 新增 golden `tests/asm_golden/string_concat_arc.dial`：9 类场景（借用变量 / owned 中间 / 嵌套拼接 / map get 借用 / get 未命中静态串 / 拼接结果再用 / 真插值混合 / 拼接结果入 map / 循环混合 100 轮）双后端逐字节一致。
+- golden 全量 24 用例、差分 fuzz 450（OK=450, DIFF=0）、全量 `run_tests.sh`（含新 AH 门禁段）全部通过；无 double-free / heap assert。
+
+**边界**：仅 asm lowering 路径变化；LLVM 后端从 AST 直接生成、零改动；AArch64 / 优化级别无关；不打 tag、不升版本号。
+
+---
+
 #### M9-linrec：线性递推循环编译期闭式求值（总耗时首次反超 LLVM，几何平均 0.574x）
 
 **用户追问脉络**：延续 M8-recspec「私有后端更激进」的方向；路线图 `roadmap-gap-analysis.md` C 类记录「循环调度五路证伪后，唯一可攻方向是循环内线性递推闭式（clang -O3 / SCEV 同族，待评估 ROI）」。本轮先量化 ROI 再投入。

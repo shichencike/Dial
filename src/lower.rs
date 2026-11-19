@@ -1746,7 +1746,11 @@ impl<'a> Lower<'a> {
             let (av, _) = self.lower_expr(a, &Type::String)?;
             let (bv, _) = self.lower_expr(b, &Type::String)?;
             let r = self.new_reg(IrType::Handle);
-            self.emit(IrInst::Call { dst: Some(r), func: "dial_string_concat".to_string(), args: vec![av, bv], arg_tys: vec![IrType::Handle, IrType::Handle], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+            self.emit(IrInst::Call { dst: Some(r), func: "dial_string_concat".to_string(), args: vec![av.clone(), bv.clone()], arg_tys: vec![IrType::Handle, IrType::Handle], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+            // C 侧 concat 只读不消费操作数：归还自带所有权的临时操作数引用，
+            // 否则 `str(i)` 这类无 Local 持有的中间值每轮循环泄漏一份。
+            self.release_string_temp(&av, a);
+            self.release_string_temp(&bv, b);
             return Ok((Value::Reg(r), false));
         }
         let da = self.expr_dt(a);
@@ -3658,22 +3662,25 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_interp(&mut self, parts: &[InterpPart]) -> Result<(Value, bool), String> {
-        let mut acc: Option<Value> = None;
+        // (值, 是否自带所有权)：owned 的中间段/累积值在 concat 之后必须归还本地引用，
+        // 否则它们没有任何 Local 持有、作用域退出不释放——真插值 `"v=${i}!"` 每轮泄漏。
+        let mut acc: Option<(Value, bool)> = None;
         for part in parts {
-            let seg: Value = match part {
+            let (seg, seg_owned): (Value, bool) = match part {
                 InterpPart::Text(t) => {
                     let lit = self.ip.intern_string(t);
                     let p = self.new_reg(IrType::Ptr);
                     self.emit(IrInst::LeaLabel { dst: p, lit });
                     let h = self.new_reg(IrType::Handle);
                     self.emit(IrInst::Call { dst: Some(h), func: "dial_string_new".to_string(), args: vec![Value::Reg(p)], arg_tys: vec![IrType::Ptr], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
-                    Value::Reg(h)
+                    (Value::Reg(h), true) // dial_string_new 新分配，owned
                 }
                 InterpPart::Expr(e) => {
                     let et = self.expr_dt(e);
                     let (ev, _) = self.lower_expr(e, &et)?;
                     match et {
-                        Type::String | Type::Bytes => ev, // 已是字符串，直接复用
+                        // 已是字符串：借用引用由来源持有（不 release），其余自带所有权。
+                        Type::String | Type::Bytes => (ev, !yields_borrowed_ref(e)),
                         _ => {
                             let h = self.new_reg(IrType::Handle);
                             let f = match et {
@@ -3700,22 +3707,25 @@ impl<'a> Lower<'a> {
                                 _ => (ev, IrType::I64),
                             };
                             self.emit(IrInst::Call { dst: Some(h), func: f.to_string(), args: vec![farg], arg_tys: vec![faty], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
-                            Value::Reg(h)
+                            (Value::Reg(h), true) // *_to_string 新分配，owned
                         }
                     }
                 }
             };
             acc = Some(match acc {
-                None => seg,
-                Some(prev) => {
+                None => (seg, seg_owned),
+                Some((prev, prev_owned)) => {
                     let r = self.new_reg(IrType::Handle);
-                    self.emit(IrInst::Call { dst: Some(r), func: "dial_string_concat".to_string(), args: vec![prev, seg], arg_tys: vec![IrType::Handle, IrType::Handle], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
-                    Value::Reg(r)
+                    self.emit(IrInst::Call { dst: Some(r), func: "dial_string_concat".to_string(), args: vec![prev.clone(), seg.clone()], arg_tys: vec![IrType::Handle, IrType::Handle], ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+                    // concat 只读不消费：归还 prev 与 seg 的本地引用（若 owned）。
+                    if prev_owned { self.release_owned_string(&prev); }
+                    if seg_owned { self.release_owned_string(&seg); }
+                    (Value::Reg(r), true) // 新 concat 结果 owned
                 }
             });
         }
         match acc {
-            Some(v) => Ok((v, false)),
+            Some((v, _)) => Ok((v, false)),
             None => {
                 let lit = self.ip.intern_string("");
                 let p = self.new_reg(IrType::Ptr);
@@ -4283,6 +4293,30 @@ impl<'a> Lower<'a> {
         self.emit(IrInst::Call { dst: None, func: "dial_rc_release".to_string(),
             args: vec![p], arg_tys: vec![IrType::Handle],
             ret_ty: IrType::Void, linkage: CallLink::Runtime });
+    }
+
+    /// 释放一个「自带所有权、不绑定到局部变量」的临时 string 句柄。
+    ///
+    /// `dial_string_concat(a,b)` 只读操作数、不消费其引用（C 侧不 retain/release），
+    /// 因此当操作数是表达式临时（如 `str(i)`、嵌套拼接结果、`dial_string_new`）时，
+    /// 调用方必须在 concat 之后归还这份本地引用——否则该临时没有任何 Local 持有，
+    /// 作用域退出不会释放它，每轮循环泄漏一份（`"k"+str(i)` 每轮 ~31B）。
+    ///
+    /// 判定：借用引用（变量 / 字段 / 下标 / get / at）由来源继续持有，**不得**释放，
+    /// 否则悬垂或双重释放；静态串字面量是 immortal（release no-op），跳过以少发指令。
+    fn release_string_temp(&mut self, val: &Value, expr: &Expr) {
+        if yields_borrowed_ref(expr) || matches!(expr, Expr::StringLit(_)) { return; }
+        self.release_owned_string(val);
+    }
+
+    /// 释放一个已知「自带所有权」的临时 string 句柄（插入插值中间段使用）。
+    /// RcRelease 作用于槽地址，故先落临时槽。静态 immortal 对象由 C 侧短路 no-op。
+    fn release_owned_string(&mut self, val: &Value) {
+        if let Some(k) = rc_kind(&Type::String) {
+            let tmp = self.emit_alloca(IrType::Handle);
+            self.emit(IrInst::Store { ptr: tmp, val: val.clone(), ty: IrType::Handle });
+            self.emit(IrInst::RcRelease { ptr: tmp, kind: k });
+        }
     }
 
     /// i64 位模式的指针 → Ptr vreg（对齐 LLVM int_to_ptr）。
