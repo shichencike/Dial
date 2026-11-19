@@ -1363,3 +1363,389 @@ pub fn instcombine(ip: &mut IrProgram) -> usize {
     }
     total
 }
+
+// ============================================================================
+// M9-linrec：常量上界线性递推循环的编译期闭式求值（clang -O3 SCEV 同族）
+// ============================================================================
+//
+// 目标模式：无参 Private I64 纯函数，函数体是一个**单循环**，状态变量满足
+// 一阶线性（仿射）递推或二阶线性（斐波那契型）递推，循环上界是编译期常量。
+// 这类循环在微基准与真实程序（迭代收敛、伪随机序列、DP 滚动数组）中极常见，
+// LLVM 的 SCEV 只在有限场景折叠它；私有后端掌控全部语义，可以走得更远：
+// 编译期用矩阵快速幂 O(log N) 算出终值，把整个函数体折叠为 `return const`。
+//
+// 识别的四块结构（lower.rs 的 Stmt::For 产物，见 dump）：
+//   block0 entry : Alloca state; Store state init; Alloca iv; Store iv start; Jump header
+//   block1 header: Load cv iv; ICmp op cv, limit_imm; Branch body/exit
+//   block2 body  : <递推序列>; Load iv; Add iv+step; Store iv; Jump header
+//   block3 exit  : Load ret ← state; Return ret
+//
+// 两种递推：
+//   Affine : s' = (a*s + b) mod m       （b04: s=(3s+7)%1e9+7）
+//   Fib    : (a',b') = (b, (a+b) mod m) （b07: 迭代斐波那契）
+//
+// 正确性护栏（缺一不可）：
+//   1. 目标必须是 Private + 无参 + I64 返回；指令全在确定性白名单内。
+//   2. 严格匹配四块骨架；body 只允许递推序列 + iv 自增 + 这些序列用到的 Alloca，
+//      任何 Call / 数组访问 / 额外 Store / 分支一律放弃（Collatz 的 b08 不匹配）。
+//   3. 闭式结果在采样点 k（逐次模拟）与矩阵幂结果逐位相等才采纳；采样覆盖
+//      k=0..=SAMPLE，捕获任何系数错位 / 加减搞反 / 初值误读。
+//   4. 循环次数 n 必须精确整除、step>0、n>0；系数与初值必须是非负立即数
+//      （bench 铁律保证值域非负；负系数语义复杂，保守放弃）。
+//   5. 全 i128 中间运算避免溢出，结果 mod m 后落在 [0,m) ⊆ i64。
+//   6. 仅 O3 + x86-64 挂接（asm.rs 守卫）；AArch64 / 低优化级 / LLVM 路径零变化。
+
+/// 递推闭式的种类与系数。
+#[derive(Clone, Debug)]
+enum LrKind {
+    /// s' = (a*s + b) mod m；m==0 表示无模（当前不使用，保留扩展位）。
+    Affine { a: i128, b: i128, m: i128 },
+    /// (a',b') = (b, (a+b) mod m)。m>0。
+    Fib { m: i128 },
+}
+
+/// 识别出的一个可闭式循环。
+#[derive(Clone, Debug)]
+struct LinRec {
+    kind: LrKind,
+    /// 状态槽（Affine 1 个 / Fib 2 个），顺序为入口初值对应顺序。
+    state_slots: Vec<VReg>,
+    /// 状态初值（与 state_slots 平行）。
+    inits: Vec<i128>,
+    iv_slot: VReg,
+    start: i128,
+    limit: i128,
+    step: i128,
+    /// header 比较符：true=Lt(i<limit)，false=Le(i<=limit)。
+    cmp_lt: bool,
+    /// exit 块返回的状态槽（必须在 state_slots 内）。
+    ret_slot: VReg,
+    header: usize,
+    body: usize,
+    exit: usize,
+}
+
+/// 从 Value 读非负立即数（i128），非立即数或负数返回 None。
+fn lr_nonneg_imm(v: &Value) -> Option<i128> {
+    match v {
+        Value::Imm(im) => { let x = im.as_i64() as i128; if x >= 0 { Some(x) } else { None } }
+        _ => None,
+    }
+}
+
+/// 2×2 矩阵乘法（模 m；m==0 用 i128 直接乘，调用方保证不溢出）。
+#[inline]
+fn lr_matmul(x: [[i128; 2]; 2], y: [[i128; 2]; 2], m: i128) -> [[i128; 2]; 2] {
+    let mut r = [[0i128; 2]; 2];
+    for i in 0..2 {
+        for j in 0..2 {
+            let v = x[i][0] * y[0][j] + x[i][1] * y[1][j];
+            r[i][j] = if m > 0 { v % m } else { v };
+        }
+    }
+    r
+}
+
+/// 矩阵快速幂 T^n（模 m）。
+fn lr_matpow(t: [[i128; 2]; 2], mut n: u64, m: i128) -> [[i128; 2]; 2] {
+    let mut r = [[1i128, 0], [0, 1]];
+    let mut base = t;
+    while n > 0 {
+        if n & 1 == 1 { r = lr_matmul(r, base, m); }
+        base = lr_matmul(base, base, m);
+        n >>= 1;
+    }
+    r
+}
+
+/// 用矩阵闭式算 n 次迭代后的状态向量（与 kind 平行）。
+fn lr_closed(kind: &LrKind, inits: &[i128], n: u64) -> Vec<i128> {
+    match kind {
+        LrKind::Affine { a, b, m } => {
+            let mm = if *m > 0 { *m } else { 0 };
+            let t = if mm > 0 { [[a % mm, b % mm], [0, 1]] } else { [[*a, *b], [0, 1]] };
+            let p = lr_matpow(t, n, mm);
+            let s0 = inits[0];
+            let s = p[0][0] * s0 + p[0][1];
+            vec![if mm > 0 { s % mm } else { s }]
+        }
+        LrKind::Fib { m } => {
+            let p = lr_matpow([[0, 1], [1, 1]], n, *m);
+            let a0 = inits[0];
+            let b0 = inits[1];
+            let x = p[0][0] * a0 + p[0][1] * b0;
+            let y = p[1][0] * a0 + p[1][1] * b0;
+            vec![x % m, y % m]
+        }
+    }
+}
+
+/// 用真实 IR 解释器（e3p）验证闭式：克隆程序，把目标函数的循环上界改成
+/// 「恰好迭代 k 次」，跑 e3p，与 lr_closed(k) 比对。这样验证锚定在 IR 语义，
+/// 避免「识别错但闭式与自造模拟共同错」的自证漏洞（例如系数读反、初值张冠李戴）。
+fn lr_verify_by_interp(ip: &IrProgram, name: &str, rec: &LinRec, k: u64) -> bool {
+    let mut probe = ip.clone();
+    let pf = match probe.functions.iter_mut().find(|f| f.name == name) { Some(f) => f, None => return false };
+    // header.insts[1] 是 ICmp cv, limit；把 limit 改成让循环恰好跑 k 次的立即数。
+    let new_limit = if rec.cmp_lt {
+        // i<L，i 取 start, start+step, ...；跑 k 次 ⟹ L = start + (k-1)*step + 1
+        // 取 L = start + k*step 也恰好 k 次（第 k+1 次 i=start+k*step >= L 退出）。
+        rec.start + (k as i128) * rec.step
+    } else {
+        // i<=L，跑 k 次 ⟹ L = start + (k-1)*step （k>=1）
+        if k == 0 { rec.start - 1 } else { rec.start + (k as i128 - 1) * rec.step }
+    };
+    if let Some(hdr) = pf.blocks.get_mut(rec.header) {
+        match hdr.insts.get_mut(1) {
+            Some(IrInst::ICmp { b: lim, .. }) => { *lim = Value::Imm(Imm::I64(new_limit as i64)); }
+            _ => return false,
+        }
+    } else { return false; }
+    // e3p 求值截断版函数（必须纯；四块结构无 phi/块参数，符合白名单）。
+    let mut visiting = HashSet::new();
+    if !e3p_is_pure(&probe, name, &mut visiting) { return false; }
+    let mut env = E3pEnv::new();
+    let mut memo = E3pMemo::new();
+    let real = match e3p_eval_call(&probe, name, &[], &mut env, &mut memo) { Some(v) => v, None => return false };
+    let closed = lr_closed(&rec.kind, &rec.inits, k);
+    let ret_idx = match rec.state_slots.iter().position(|&s| s == rec.ret_slot) { Some(i) => i, None => return false };
+    closed[ret_idx] == real as i128
+}
+
+/// 识别单个函数的可闭式线性递推循环。保守：任何不确定即 None。
+fn lr_recognize(f: &IrFunction) -> Option<LinRec> {
+    // 护栏 1：Private + 无参 + I64 返回。
+    if f.linkage != FuncLink::Private || !f.params.is_empty() || f.ret != IrType::I64 { return None; }
+    // 精确四块骨架：entry → header → body → exit，且 header 分支到 body/exit、
+    // body 回边到 header。多于 4 块（如含 break/多分支）一律放弃。
+    if f.blocks.len() != 4 { return None; }
+    let (b0, b1, b2, b3) = (&f.blocks[0], &f.blocks[1], &f.blocks[2], &f.blocks[3]);
+    // entry → header
+    if !matches!(&b0.term, Term::Jump { target, .. } if *target == b1.id) { return None; }
+    // header: Load cv iv; ICmp ...; Branch -> body / exit
+    if b1.insts.len() != 2 { return None; }
+    let (iv_slot, cmp_lt, limit) = match (&b1.insts[0], &b1.insts[1]) {
+        (IrInst::Load { dst: cv, ptr: iv, ty: IrType::I64 },
+         IrInst::ICmp { op, a: Value::Reg(a), b: lim, ty: IrType::I64, .. })
+            if *a == *cv && matches!(op, ACmp::Lt | ACmp::Le) => {
+            (*iv, matches!(op, ACmp::Lt), lr_nonneg_imm(lim)?)
+        }
+        _ => return None,
+    };
+    match &b1.term {
+        Term::Branch { cond, then_b, else_b, .. }
+            if *cond == match &b1.insts[1] { IrInst::ICmp { dst, .. } => *dst, _ => u32::MAX }
+               && *then_b == b2.id && *else_b == b3.id => {}
+        _ => return None,
+    }
+    // body 末三条：Load iv; Add step; Store iv; term = Jump header
+    let bn = b2.insts.len();
+    if bn < 4 { return None; }
+    let (_iv_slot2, step) = match (&b2.insts[bn - 3], &b2.insts[bn - 2], &b2.insts[bn - 1]) {
+        (IrInst::Load { dst: cv2, ptr: iv2, ty: IrType::I64 },
+         IrInst::Bin { op: ABin::Add, dst: nv, a: Value::Reg(x), b, ty: IrType::I64 },
+         IrInst::Store { ptr: iv3, val: Value::Reg(y), ty: IrType::I64 })
+            if *cv2 == *x && *nv == *y && *iv2 == *iv3 && *iv2 == iv_slot => {
+            (*iv2, lr_nonneg_imm(b)?)
+        }
+        _ => return None,
+    };
+    if step == 0 { return None; }
+    if !matches!(&b2.term, Term::Jump { target, .. } if *target == b1.id) { return None; }
+    // exit: Load ret ← state; Return ret
+    if b3.insts.len() != 1 { return None; }
+    let ret_slot = match (&b3.insts[0], &b3.term) {
+        (IrInst::Load { dst: rv, ptr: slot, ty: IrType::I64 }, Term::Return { val: Some(Value::Reg(x)) })
+            if *rv == *x => *slot,
+        _ => return None,
+    };
+
+    // entry 初始化：收集 Alloca{dst}→随后 Store{dst, imm} 的 (槽, 初值)。
+    let mut init_map: HashMap<VReg, i128> = HashMap::new();
+    for (i, inst) in b0.insts.iter().enumerate() {
+        if let IrInst::Alloca { dst, .. } = inst {
+            if let Some(IrInst::Store { ptr, val, ty: IrType::I64 }) = b0.insts.get(i + 1) {
+                if *ptr == *dst {
+                    if let Some(v) = lr_nonneg_imm(val) { init_map.insert(*dst, v); }
+                }
+            }
+        }
+    }
+    // iv 槽必须有初值。
+    let start = *init_map.get(&iv_slot)?;
+
+    // 从 body 的递推前缀（去掉末 3 条 iv 自增）识别状态转移。
+    let prefix = &b2.insts[..bn - 3];
+    if let Some(rec) = lr_match_affine(prefix, &init_map, ret_slot, iv_slot)? {
+        return Some(LinRec { kind: rec.kind, state_slots: rec.state_slots, inits: rec.inits,
+            iv_slot, start, limit, step, ret_slot, header: 1, body: 2, exit: 3, cmp_lt });
+    }
+    if let Some(rec) = lr_match_fib(prefix, &init_map, ret_slot, iv_slot)? {
+        return Some(LinRec { kind: rec.kind, state_slots: rec.state_slots, inits: rec.inits,
+            iv_slot, start, limit, step, ret_slot, header: 1, body: 2, exit: 3, cmp_lt });
+    }
+    None
+}
+
+/// 仿射匹配的中间结果。
+struct LrMatched { kind: LrKind, state_slots: Vec<VReg>, inits: Vec<i128> }
+
+/// 匹配 body 前缀为 s=(a*s+b) mod m 并 Store 回同一槽。
+/// prefix 允许出现的指令：Alloca（循环内临时槽）；以及一条 Load state + 至多
+/// 两条 Bin + 一条 Mod + 一条 Store state 的严格链。任何多余 Store 放弃。
+fn lr_match_affine(prefix: &[IrInst], init_map: &HashMap<VReg, i128>, ret_slot: VReg, _iv_slot: VReg)
+    -> Option<Option<LrMatched>>
+{
+    // state 槽必须是返回槽。
+    let s0 = match init_map.get(&ret_slot) { Some(&v) => v, None => return Some(None) };
+    // 允许循环内 Alloca（b04 无；保留以兼容其它 lowering）。
+    let insts: Vec<&IrInst> = prefix.iter().filter(|i| !matches!(i, IrInst::Alloca { .. })).collect();
+    // 期望形态（按序）：
+    //   Load ld_s, ptr:ret_slot
+    //   [可选] Bin{Mul|Sub|Add} dst=t1, (Reg(ld_s), Imm(c1)) 或 (Imm(c1), Reg(ld_s))
+    //   [可选] Bin{Add|Sub}    dst=t2, (Reg(prev), Imm(c2)) ...
+    //   [可选] Bin{Mod}        dst=t3, a=Reg(prev), b=Imm(m)
+    //   Store ptr:ret_slot, val=Reg(last)
+    // 严格约束 Store 只能写回 ret_slot，且是唯一 Store（iv 槽不在 prefix 内）。
+    let stores: Vec<&IrInst> = insts.iter().copied().filter(|i| matches!(i, IrInst::Store { .. })).collect();
+    if stores.len() != 1 { return Some(None); }
+    let store = stores[0];
+    let (st_ptr, st_val) = match store { IrInst::Store { ptr, val: Value::Reg(v), ty: IrType::I64 } => (*ptr, *v), _ => return Some(None) };
+    if st_ptr != ret_slot { return Some(None); }
+    let store_pos = insts.iter().position(|i| std::ptr::eq(*i, store))?;
+
+    // 解析从 ld_s 到 st_val 的计算链，提取 a,b,m。
+    let mut a: i128 = 1;
+    let mut b: i128 = 0;
+    let mut m: i128 = 0;
+    let mut cur_vreg = match insts.first()? {
+        IrInst::Load { dst, ptr, ty: IrType::I64 } if *ptr == ret_slot => *dst,
+        _ => return Some(None),
+    };
+    let mut idx = 1;
+    // 计算链最多三条 Bin（Mul/Add/Sub + Mod）；下一条必须是 Store。
+    while idx < store_pos {
+        match insts[idx] {
+            IrInst::Bin { op, dst, a: x, b: y, ty: IrType::I64 } => {
+                // 指令必须以 cur_vreg 为唯一寄存器操作数（另一个是立即数），保证线性。
+                let (reg, imm) = match (x, y) {
+                    (Value::Reg(r), Value::Imm(im)) => (*r, im.as_i64() as i128),
+                    (Value::Imm(im), Value::Reg(r)) => (*r, im.as_i64() as i128),
+                    _ => return Some(None),
+                };
+                if reg != cur_vreg || imm < 0 { return Some(None); }
+                match op {
+                    ABin::Mul => { a *= imm; }
+                    ABin::Add => { b += imm; }
+                    ABin::Sub => {
+                        // 只接受 s - imm（imm - s 会引入负系数，放弃）。
+                        if !matches!(x, Value::Reg(_)) { return Some(None); }
+                        b -= imm;
+                    }
+                    ABin::Mod => { if m != 0 || imm <= 0 { return Some(None); } m = imm; }
+                    _ => return Some(None),
+                }
+                cur_vreg = *dst;
+                idx += 1;
+            }
+            _ => return Some(None),
+        }
+    }
+    if cur_vreg != st_val { return Some(None); }
+    // b 必须非负（Sub 可能造出负数）；m>0；a 非负。
+    if a < 0 || b < 0 || m <= 0 { return Some(None); }
+    Some(Some(LrMatched { kind: LrKind::Affine { a, b, m }, state_slots: vec![ret_slot], inits: vec![s0] }))
+}
+
+/// 匹配 body 前缀为斐波那契型 (a,b)→(b,(a+b)%m)。
+/// 形态（b07 dump）：
+///   Alloca tmp
+///   Load la←slotA; Load lb←slotB
+///   Bin Add s, la, lb; Bin Mod t, s, Imm(m); Store tmp←t
+///   Load bx←slotB; Store slotA←bx        (a=b)
+///   Load ty←tmp;   Store slotB←ty        (b=t)
+/// 返回槽必须是 slotA（返回 a）。
+fn lr_match_fib(prefix: &[IrInst], init_map: &HashMap<VReg, i128>, ret_slot: VReg, iv_slot: VReg)
+    -> Option<Option<LrMatched>>
+{
+    let insts: Vec<&IrInst> = prefix.iter().filter(|i| !matches!(i, IrInst::Alloca { .. })).collect();
+    if insts.len() != 9 { return Some(None); }
+    // 形如：Load, Load, Bin, Bin, Store, Load, Store, Load, Store
+    let (la, slot_a) = match insts[0] { IrInst::Load { dst, ptr, ty: IrType::I64 } => (*dst, *ptr), _ => return Some(None) };
+    let (lb, slot_b) = match insts[1] { IrInst::Load { dst, ptr, ty: IrType::I64 } => (*dst, *ptr), _ => return Some(None) };
+    let (sum, addx, addy) = match insts[2] { IrInst::Bin { op: ABin::Add, dst, a: Value::Reg(x), b: Value::Reg(y), ty: IrType::I64 } => (*dst, *x, *y), _ => return Some(None) };
+    if !((addx == la && addy == lb) || (addx == lb && addy == la)) { return Some(None); }
+    let (modv, m) = match insts[3] { IrInst::Bin { op: ABin::Mod, dst, a: Value::Reg(x), b: y, ty: IrType::I64 } if *x == sum => (*dst, lr_nonneg_imm(y)?), _ => return Some(None) };
+    if m <= 0 { return Some(None); }
+    let tmp_slot = match insts[4] { IrInst::Store { ptr, val: Value::Reg(v), ty: IrType::I64 } if *v == modv => *ptr, _ => return Some(None) };
+    // a = b
+    let (bx, src_b) = match insts[5] { IrInst::Load { dst, ptr, ty: IrType::I64 } => (*dst, *ptr), _ => return Some(None) };
+    match insts[6] { IrInst::Store { ptr, val: Value::Reg(v), ty: IrType::I64 } if *ptr == slot_a && *v == bx => {}, _ => return Some(None) }
+    // b = t
+    let (ty_v, src_t) = match insts[7] { IrInst::Load { dst, ptr, ty: IrType::I64 } => (*dst, *ptr), _ => return Some(None) };
+    match insts[8] { IrInst::Store { ptr, val: Value::Reg(v), ty: IrType::I64 } if *ptr == slot_b && *v == ty_v => {}, _ => return Some(None) }
+    if src_b != slot_b || src_t != tmp_slot { return Some(None); }
+    // slot_a 与 slot_b 必须不同、且都不是 iv 槽；初值都在 init_map。
+    if slot_a == slot_b || slot_a == iv_slot || slot_b == iv_slot { return Some(None); }
+    // 返回槽必须是 a（滚动后返回 a_n）。
+    if ret_slot != slot_a { return Some(None); }
+    let ia = match init_map.get(&slot_a) { Some(&v) => v, None => return Some(None) };
+    let ib = match init_map.get(&slot_b) { Some(&v) => v, None => return Some(None) };
+    Some(Some(LrMatched { kind: LrKind::Fib { m }, state_slots: vec![slot_a, slot_b], inits: vec![ia, ib] }))
+}
+
+/// 计算循环迭代次数 n（要求上界与起点同余、step>0、n>0）。
+fn lr_trip_count(rec: &LinRec) -> Option<u64> {
+    if rec.start >= rec.limit || rec.step <= 0 { return None; }
+    let span = rec.limit - rec.start;
+    let n = if rec.cmp_lt {
+        // i < limit：迭代次数 = ceil(span/step)
+        (span + rec.step - 1) / rec.step
+    } else {
+        // i <= limit：迭代次数 = floor(span/step) + 1
+        span / rec.step + 1
+    };
+    if n <= 0 { return None; }
+    u64::try_from(n).ok()
+}
+
+/// 对整段程序跑线性递推闭式特化。返回特化函数数。
+pub fn specialize_linear_recurrences(ip: &mut IrProgram) -> usize {
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    let mut count = 0;
+    for name in names {
+        let rec = {
+            let f = match ip.functions.iter().find(|f| f.name == name) { Some(f) => f, None => continue };
+            match lr_recognize(f) { Some(r) => r, None => continue }
+        };
+        let n = match lr_trip_count(&rec) { Some(n) => n, None => continue };
+        // 采样验证：用真实 IR 解释器（e3p）对「截断上界」副本求值，与闭式逐点比对。
+        // 采样点含 0/1 边界与若干中等值，覆盖系数、初值、取模绕回；任一不符即放弃。
+        // 这是锚定真实语义的验证，杜绝「识别错但闭式与模拟共同错」的自证漏洞。
+        let mut verified = true;
+        for &k in &[0u64, 1, 2, 3, 7, 31, 128, 511] {
+            if k > n { continue; }
+            if !lr_verify_by_interp(ip, &name, &rec, k) { verified = false; break; }
+        }
+        if !verified { continue; }
+        // 闭式算终值；取返回槽对应的分量。
+        let final_state = lr_closed(&rec.kind, &rec.inits, n);
+        let ret_idx = match rec.state_slots.iter().position(|&s| s == rec.ret_slot) { Some(i) => i, None => continue };
+        let result = final_state[ret_idx];
+        let result_i64 = match i64::try_from(result) { Ok(v) => v, Err(_) => continue };
+
+        // 变换：把函数体折叠为单块 `return Imm(result)`。
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) {
+            // 保留原 entry 块对象、就地清空：id/entry 仍是 0，外部引用零变化。
+            if let Some(b0) = f.blocks.get_mut(0) {
+                b0.insts.clear();
+                b0.params.clear();
+                b0.term = Term::Return { val: Some(Value::Imm(Imm::I64(result_i64))) };
+            }
+            f.blocks.truncate(1);
+            f.entry = 0;
+            count += 1;
+        }
+    }
+    count
+}

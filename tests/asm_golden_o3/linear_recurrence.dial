@@ -1,0 +1,72 @@
+// M9-linrec 线性递推闭式专项回归（仅 O3 触发，见 run_asm_golden.sh 的 O3 段）。
+// 覆盖：① 仿射递推 s=(a*s+b)%m 多种系数/模数/初值；② 斐波那契 (a,b)->(b,a+b)；
+// ③ 非递推/带参循环不被误折叠（结果须与逐次计算一致）。
+// LLVM 忽略 opt-level、asm 走闭式折叠，两后端输出必须逐字节一致。
+
+fn affine(a: int, b: int, m: int, s0: int, n: int): int {
+    var s: int = s0;
+    for (i in 0..n) { s = (s * a + b) % m; }
+    return s;
+}
+// 无参版本（pass 的匹配目标）：常量上界 + 常量系数
+fn f_aff1(): int {
+    var s: int = 0;
+    for (i in 0..1000) { s = (s * 3 + 7) % 1000000007; }
+    return s;
+}
+fn f_aff2(): int {
+    var s: int = 5;
+    for (i in 0..777) { s = (s * 1 + 13) % 97; }   // a=1 边界
+    return s;
+}
+fn f_aff3(): int {
+    var s: int = 12345;
+    for (i in 0..2048) { s = (s * 6 + 2) % 1000003; }
+    return s;
+}
+fn f_fib1(): int {
+    var a: int = 0;
+    var b: int = 1;
+    for (i in 0..1000) {
+        var t: int = (a + b) % 1000000007;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+fn f_fib2(): int {
+    var a: int = 3;
+    var b: int = 5;
+    for (i in 0..500) {
+        var t: int = (a + b) % 97;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+// 非递推：Collatz 步数（有数据依赖分支，pass 必须放弃、走原循环）
+fn collatz_steps(): int {
+    var s: int = 0;
+    for (n in 1..300) {
+        var x: int = n;
+        var st: int = 0;
+        while (x > 1) {
+            if (x % 2 == 0) { x = x / 2; } else { x = 3 * x + 1; }
+            st = st + 1;
+        }
+        s = (s + st) % 1000000007;
+    }
+    return s;
+}
+
+fn main(): int {
+    print(f_aff1());
+    print(f_aff2());
+    print(f_aff3());
+    print(f_fib1());
+    print(f_fib2());
+    print(collatz_steps());
+    // 带参版本（pass 不匹配无参目标，仍需正确）
+    print(affine(3, 7, 1000000007, 0, 1000));
+    print(affine(1, 13, 97, 5, 777));
+}

@@ -170,5 +170,37 @@ else
     bad "ReleaseFast(--fast) 有 $fast_fail 用例不一致"
 fi
 
-echo "  共 $count 个双后端黄金用例（另 $fast_ok 个 --fast 快速路径）"
+# O3 专项（M9-linrec）：asm 后端 O3-only 的线性递推闭式特化（仿射/斐波那契）
+# 在主循环（O2）与 --fast（O2）组都不触发。此段用 --fast -O3 双后端编译
+# tests/asm_golden_o3/*.dial，LLVM 忽略 opt-level、asm 走闭式折叠，输出必须逐字节一致。
+# 钉死：① 仿射递推 s=(a*s+b)%m；② 斐波那契 (a,b)→(b,a+b)；③ 非递推/带参循环不误折叠。
+O3CASES="$ROOT/tests/asm_golden_o3"
+if [ -d "$O3CASES" ]; then
+    o3_work="$TMP/o3_all"; mkdir -p "$o3_work"
+    o3_ok=0; o3_fail=0
+    for src in "$O3CASES"/*.dial; do
+        [ -f "$src" ] || continue
+        name="$(basename "$src" .dial)"
+        ow="$o3_work/$name"; mkdir -p "$ow"; cp "$src" "$ow/$name.dial"
+        if ! "$DIALC" build "$ow/$name.dial" --backend=llvm --fast -O3 -o "$ow/llvm" >"$ow/ll.log" 2>&1; then
+            bad "O3/$name：llvm 编译失败"; o3_fail=$((o3_fail+1)); continue
+        fi
+        if ! "$DIALC" build "$ow/$name.dial" --backend=asm --fast -O3 -o "$ow/asm" >"$ow/as.log" 2>&1; then
+            bad "O3/$name：asm 编译失败"; sed 's/^/       /' "$ow/as.log" | tail -8; o3_fail=$((o3_fail+1)); continue
+        fi
+        "$ow/llvm" >"$ow/ll.out" 2>&1; "$ow/asm" >"$ow/as.out" 2>&1
+        if diff -q "$ow/ll.out" "$ow/as.out" >/dev/null 2>&1; then
+            o3_ok=$((o3_ok+1))
+        else
+            bad "O3/$name：双后端输出不一致"; diff "$ow/ll.out" "$ow/as.out" | head -10; o3_fail=$((o3_fail+1))
+        fi
+    done
+    if [ "$o3_fail" -eq 0 ]; then
+        ok "O3(--fast -O3) 双后端一致：$o3_ok 用例（覆盖 M9-linrec 线性递推闭式）"
+    else
+        bad "O3 有 $o3_fail 用例不一致"
+    fi
+fi
+
+echo "  共 $count 个双后端黄金用例（另 $fast_ok 个 --fast 快速路径、$o3_ok 个 O3 用例）"
 exit "$fail"

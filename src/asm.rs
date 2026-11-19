@@ -87,6 +87,13 @@ pub fn compile_asm(
     if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV) {
         pass::ivr_strength_reduce(&mut ip);
     }
+    // M9-linrec：常量上界线性递推循环编译期闭式求值（仿射/斐波那契）。O3 + x86-64。
+    // 私有后端专属：LLVM SCEV 只在有限场景折叠它；这里用 e3p 同源的严格识别 +
+    // 采样验证 + i128 矩阵幂，把无参纯函数的单循环递推折叠为 return const。
+    // AArch64 / 低优化级 / LLVM 路径零变化。
+    if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV) {
+        pass::specialize_linear_recurrences(&mut ip);
+    }
     // M7-e3ad：LLVM InstCombine 风格代数恒等式（x*0→0、x+0→x 等）。O3 only，仅 x86-64。
     if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV) {
         pass::instcombine(&mut ip);
