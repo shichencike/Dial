@@ -6031,7 +6031,9 @@ impl<'ctx> CodeGen<'ctx> {
             }
             // v1.04 C6：泛型 map 的 get_or(k, default)。键与默认值都按静态类型
             // 转成 8 字节位模式；C 侧命中返回真实值、未命中返回默认值位模式。
-            // 语义层已把 V 限定为标量，故这里不存在句柄所有权结算问题。
+            // 语义层目前把 V 限定为标量 / 标量字段结构体（v1.10 的 string 值仅
+            // 经 get/put/values 支持，get_or 的 string 放开在 Phase C 配套所有权
+            // 结算后落地），故当前不存在句柄所有权结算问题。
             "get_or" => {
                 let (ka, kb) = self.kv_arg(&args[0], k, function, scopes, func_values, functions, structs)?;
                 let (_da, db) = self.kv_arg(&args[1], v, function, scopes, func_values, functions, structs)?;

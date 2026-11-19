@@ -64,8 +64,9 @@ pub enum Type {
     Map,    // 哈希表（int -> int，不透明指针，C 侧引用计数 ARC）
     /// 泛型哈希表（v1.00）：`map<K, V>`，独立 C 运行时（stdlib/dial_kvmap.c）。
     /// 键支持 int/float/bool/char/byte/string（string 键按条目 ARC 管理）；
-    /// 值支持标量 int/float/bool/char/byte —— v1.00 刻意不开放 string 值，
-    /// 因为 `get` 未命中时的「空串默认对象」会引入所有权移交歧义（见 §29）。
+    /// 值支持标量 int/float/bool/char/byte、string（v1.10）与字段全为标量的结构体（v1.04 B6）。
+    /// v1.10 放开 string 值：get/remove 未命中返回共享的 immortal 静态空串（借用语义），
+    /// 消除了旧版「空串默认对象」的所有权移交歧义（见 §29）。
     KvMap(Box<Type>, Box<Type>),
     /// 集合（v1.00）：`set<T>`，底层复用 int→int map（成员键 -> 1）。
     /// v1.00 的元素类型仅支持 int；不透明指针、ARC 与 map 完全同构。

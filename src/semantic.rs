@@ -3936,10 +3936,12 @@ fn check_type_wellformed(
         // 避免「写了 set<float> 却静默按 int 截断」这类数据损坏。
         Type::KvMap(k, v) => {
             let ok_k = matches!(k.as_ref(), Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String);
-            // v1.00 值只支持标量：string 值的 get 未命中默认对象会带来所有权移交歧义。
+            // v1.10：值放开 string。C 运行时对 KV_STRING 已完整支持（按条目 ARC），
+            // get/remove 未命中返回共享的 immortal 静态空串（借用语义），
+            // 两端 codegen 无需区分命中/未命中，故不再有所有权移交歧义。
             // v1.04 B6：值额外放开「字段全为标量」的结构体——装箱为 RC 对象后存指针位模式，
             // 未命中返回空指针，由编译器还原为零值结构体（不存在所有权移交歧义）。
-            let ok_v = matches!(v.as_ref(), Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte)
+            let ok_v = matches!(v.as_ref(), Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String)
                 || match v.as_ref() {
                     Type::Struct(name) => struct_has_only_scalar_fields(name, structs),
                     _ => false,
@@ -3949,7 +3951,7 @@ fn check_type_wellformed(
             } else {
                 Err(DialcError::new(
                     format!(
-                        "语义错误：{} 是 map<{}, {}> 类型；当前版本键支持 int/float/bool/char/byte/string，值支持标量（暂不支持 string 值）与字段全为标量的结构体",
+                        "语义错误：{} 是 map<{}, {}> 类型；当前版本键支持 int/float/bool/char/byte/string，值支持标量与 string 以及字段全为标量的结构体",
                         ctx, k.name(), v.name()
                     ),
                     line, col,
