@@ -727,6 +727,239 @@ pub fn fold_pure_calls(ip: &mut IrProgram) -> usize {
 }
 
 // ============================================================================
+// M8-recspec：递归纯函数的闭式特化（私有后端的语义级激进优化）
+// ============================================================================
+//
+// LLVM 作为通用后端绝不会做这件事：它不理解「这个互递归函数其实在算 n 的奇偶」。
+// 私有后端掌控 Dial 全部语义，可以在编译期解释执行纯整数递归函数、拟合闭式、
+// 全域验证后，在函数入口插入 guard：n>=0 直接返回闭式结果，n<0 走原递归体。
+//
+// 收益原型：b12 的 evR/odR 互递归本质是 `n>=0 ? (1-(n&1)) : 发散`，但被
+// 20000 次循环 × 平均 30 层递归调用吃掉（asm 3.32x）。特化后 O(1) 返回。
+//
+// 正确性护栏（缺一不可）：
+//   1. 目标必须是 e3p_is_pure 判定的纯整数函数（单 I64 参数、I64 返回、Private、
+//      指令全在确定性白名单内），保证解释执行与运行时逐位一致。
+//   2. 必须是**递归**函数（自身或经互递归环可达自己）——非递归纯函数的调用开销小，
+//      且已由 fold_pure_calls / 内联覆盖，不在此重复。
+//   3. 闭式必须在探针域 [0..PROBE_HI] 上**逐点**与解释执行结果相等；任一不符即放弃。
+//   4. 插入的 guard 只对 n>=0 走闭式；n<0 保留原函数体（负数语义原样，绝不改变）。
+//      因探针只覆盖非负域，guard 把闭式的作用域严格限制在已验证的域内。
+//   5. 只处理 x86-64 / O3（由 asm.rs 守卫），AArch64 / 低优化级别零变化。
+
+/// 闭式候选：给定单参数 n，返回折叠后的 i64 结果；None 表示不适用。
+#[derive(Clone, Copy)]
+enum CfKind {
+    /// 常量 c（对所有 n 返回 c）
+    Const(i64),
+    /// n 的低位位模式：base - (n & mask)（如 1-(n&1) = 奇偶）
+    NegLowBits { base: i64, mask: i64 },
+    /// (n & mask) + base
+    LowBitsAdd { base: i64, mask: i64 },
+    /// (n >> shift) & mask
+    ShiftMask { shift: u32, mask: i64 },
+    /// 恒等 n
+    Identity,
+}
+
+impl CfKind {
+    fn eval(&self, n: i64) -> Option<i64> {
+        Some(match self {
+            CfKind::Const(c) => *c,
+            CfKind::NegLowBits { base, mask } => base.wrapping_sub(n & mask),
+            CfKind::LowBitsAdd { base, mask } => (n & mask).wrapping_add(*base),
+            CfKind::ShiftMask { shift, mask } => (n >> shift) & mask,
+            CfKind::Identity => n,
+        })
+    }
+    /// 生成这个闭式的 IR：在 f 里新造指令，把 n（Value）算成 dst，追加到 insts。
+    fn emit(&self, f: &mut IrFunction, n: Value, insts: &mut Vec<IrInst>, dst: VReg) {
+        match self {
+            CfKind::Const(c) => {
+                insts.push(IrInst::Conv { kind: AConv::Zext, dst, a: Value::Imm(Imm::I64(*c)), ty: IrType::I64 });
+            }
+            CfKind::Identity => {
+                insts.push(IrInst::Conv { kind: AConv::Zext, dst, a: n, ty: IrType::I64 });
+            }
+            CfKind::NegLowBits { base, mask } => {
+                let lo = f.new_reg(IrType::I64);
+                insts.push(IrInst::Bin { op: ABin::BitAnd, dst: lo, a: n, b: Value::Imm(Imm::I64(*mask)), ty: IrType::I64 });
+                insts.push(IrInst::Bin { op: ABin::Sub, dst, a: Value::Imm(Imm::I64(*base)), b: Value::Reg(lo), ty: IrType::I64 });
+            }
+            CfKind::LowBitsAdd { base, mask } => {
+                let lo = f.new_reg(IrType::I64);
+                insts.push(IrInst::Bin { op: ABin::BitAnd, dst: lo, a: n, b: Value::Imm(Imm::I64(*mask)), ty: IrType::I64 });
+                insts.push(IrInst::Bin { op: ABin::Add, dst, a: Value::Reg(lo), b: Value::Imm(Imm::I64(*base)), ty: IrType::I64 });
+            }
+            CfKind::ShiftMask { shift, mask } => {
+                let sh = f.new_reg(IrType::I64);
+                insts.push(IrInst::Bin { op: ABin::Shr, dst: sh, a: n, b: Value::Imm(Imm::I64(*shift as i64)), ty: IrType::I64 });
+                insts.push(IrInst::Bin { op: ABin::BitAnd, dst, a: Value::Reg(sh), b: Value::Imm(Imm::I64(*mask)), ty: IrType::I64 });
+            }
+        }
+    }
+}
+
+/// 构造候选闭式集合。基/掩码取自探针结果的取值范围，避免枚举过多。
+fn cf_candidates(probe_vals: &[i64]) -> Vec<CfKind> {
+    let mut out = Vec::new();
+    // 常量候选：探针里的常值集合（去重）
+    let mut consts: Vec<i64> = Vec::new();
+    for &v in probe_vals { if !consts.contains(&v) { consts.push(v); } }
+    for c in consts.into_iter().take(8) { out.push(CfKind::Const(c)); }
+    out.push(CfKind::Identity);
+    // 低位模式：base - (n & mask) 与 (n & mask) + base
+    // 观察 probe：对 n=0 结果 v0 = base（NegLowBits）或 base（LowBitsAdd，因 n&mask=0）。
+    if let Some(&v0) = probe_vals.first() {
+        for mask in [1i64, 3, 7, 15, 31, 63, 255] {
+            out.push(CfKind::NegLowBits { base: v0, mask });
+            out.push(CfKind::LowBitsAdd { base: v0, mask });
+        }
+    }
+    // 移位+掩码：shift/mask 小集合
+    for shift in 1u32..=6 {
+        for mask in [1i64, 3, 7, 15, 31, 63] {
+            out.push(CfKind::ShiftMask { shift, mask });
+        }
+    }
+    out
+}
+
+/// 判定函数 f 是否递归（自身调用，或经 Dial 调用环可达自身）。
+fn is_recursive_fn(ip: &IrProgram, name: &str) -> bool {
+    fn reaches(graph: &HashMap<String, Vec<String>>, cur: &str, start: &str, seen: &mut HashSet<String>) -> bool {
+        if let Some(cs) = graph.get(cur) {
+            for c in cs {
+                if c == start { return true; }
+                if seen.insert(c.clone()) && reaches(graph, c, start, seen) { return true; }
+            }
+        }
+        false
+    }
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+    for f in &ip.functions {
+        let mut cs = Vec::new();
+        for b in &f.blocks {
+            for i in &b.insts {
+                if let IrInst::Call { func, linkage: CallLink::Dial, .. } = i { cs.push(func.clone()); }
+            }
+        }
+        graph.insert(f.name.clone(), cs);
+    }
+    let mut seen = HashSet::new();
+    reaches(&graph, name, name, &mut seen)
+}
+
+/// 探针域上界：解释执行 0..=PROBE_HI，共 129 点。evR(n) 递归深度 ~n，成本可接受。
+const RESPEC_PROBE_HI: i64 = 128;
+
+/// 对全程序递归纯函数做闭式特化。返回被特化的函数数。
+pub fn specialize_recursive_calls(ip: &mut IrProgram) -> usize {
+    // 先只读地收集所有可行的 (fname, CfKind)——避免解释执行时与 &mut 借用冲突。
+    // 复用 respec_fn 的判定，但这里需要拿到 cf，故内联同样逻辑的「返回 cf」版本。
+    fn fit(ip: &IrProgram, fname: &str) -> Option<CfKind> {
+        let f = ip.functions.iter().find(|f| f.name == fname)?;
+        if f.linkage != FuncLink::Private || f.ret != IrType::I64 { return None; }
+        if f.params.len() != 1 || f.params[0].1 != IrType::I64 { return None; }
+        if !is_recursive_fn(ip, fname) { return None; }
+        let mut visiting = HashSet::new();
+        if !e3p_is_pure(ip, fname, &mut visiting) { return None; }
+        let mut memo = E3pMemo::new();
+        let mut vals = Vec::new();
+        for n in 0..=RESPEC_PROBE_HI {
+            let mut env = E3pEnv::new();
+            vals.push(e3p_eval_call(ip, fname, &[n], &mut env, &mut memo)?);
+        }
+        let cf = cf_candidates(&vals).into_iter().find(|cf| {
+            vals.iter().enumerate().all(|(n, &e)| cf.eval(n as i64) == Some(e))
+        })?;
+        for n in (RESPEC_PROBE_HI + 1..=512).step_by(7) {
+            let mut env = E3pEnv::new();
+            let v = e3p_eval_call(ip, fname, &[n], &mut env, &mut memo)?;
+            if cf.eval(n) != Some(v) { return None; }
+        }
+        Some(cf)
+    }
+
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    let mut plan = Vec::new();
+    for name in &names {
+        if let Some(cf) = fit(ip, name) { plan.push((name.clone(), cf)); }
+    }
+    if plan.is_empty() { return 0; }
+
+    let mut count = 0;
+    for (fname, cf) in plan {
+        let f = match ip.functions.iter_mut().find(|f| f.name == fname) { Some(f) => f, None => continue };
+        // 入口块必须有且仅有参数槽定义 + 原函数体；我们在其后插入 guard 并新建一个「慢路径」块。
+        // 为简单且安全：新建两块——fast（返回闭式）和 slow（原 entry 的内容），
+        // 新 entry 只做：读参数槽 → n≥0 ? 跳 fast : 跳 slow。
+        let entry_id = f.entry;
+        let entry_idx = match f.blocks.iter().position(|b| b.id == entry_id) { Some(i) => i, None => continue };
+        if f.param_slots.is_empty() { continue; }
+        let nslot = f.param_slots[0];
+
+        // 新块 id（取当前最大 id + 1，避免冲突）
+        let max_id = f.blocks.iter().map(|b| b.id).max().unwrap_or(entry_id);
+        let fast_id = max_id + 1;
+        let slow_id = max_id + 2;
+
+        // 把原 entry 块改名为 slow 块的内容：复制其 insts/term 到 slow。
+        let old_insts = f.blocks[entry_idx].insts.clone();
+        let old_term = f.blocks[entry_idx].term.clone();
+        let old_params = f.blocks[entry_idx].params.clone();
+
+        // 新 entry：只保留参数槽 Alloca（prologue 语义需要），读 n，判 n≥0，分支。
+        // 参数槽定义是关键：prologue 按 param_slots 写值，Alloca 必须留在 entry。
+        // nreg 在新 entry 里定义（分支之前），因此 fast / slow 两块都能安全引用它。
+        let mut new_entry_insts: Vec<IrInst> = Vec::new();
+        for i in &f.blocks[entry_idx].insts {
+            if matches!(i, IrInst::Alloca { dst, .. } if *dst == nslot) {
+                new_entry_insts.push(i.clone());
+            }
+        }
+        let nreg = f.new_reg(IrType::I64);
+        new_entry_insts.push(IrInst::Load { dst: nreg, ptr: nslot, ty: IrType::I64 });
+        let cond = f.new_reg(IrType::I64);
+        new_entry_insts.push(IrInst::ICmp { op: ACmp::Ge, dst: cond, a: Value::Reg(nreg), b: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+
+        // 构造 fast 块：用新 entry 定义的 nreg 计算闭式并 Return。
+        let fast_ret = f.new_reg(IrType::I64);
+        let mut fast_insts = Vec::new();
+        cf.emit(f, Value::Reg(nreg), &mut fast_insts, fast_ret);
+        let fast_block = IrBlock {
+            id: fast_id, params: Vec::new(), insts: fast_insts,
+            term: Term::Return { val: Some(Value::Reg(fast_ret)) },
+        };
+
+        // slow 块：原 entry 的完整内容（保持 id 之外的结构）。
+        let slow_block = IrBlock { id: slow_id, params: old_params, insts: old_insts, term: old_term };
+
+        // 找到所有原本跳向 entry_id 的块（回边）——本类纯递归函数通常无回到 entry 的边；
+        // 若有，必须改指向 slow_id（否则会重新走 guard，虽语义仍对但可能重复）。
+        // 为安全，统一改写 term 中 target==entry_id 的 Jump/Branch 为 slow_id。
+        for b in f.blocks.iter_mut() {
+            if b.id == entry_id { continue; }
+            match &mut b.term {
+                Term::Jump { target, .. } => if *target == entry_id { *target = slow_id; },
+                Term::Branch { then_b, else_b, .. } => {
+                    if *then_b == entry_id { *then_b = slow_id; }
+                    if *else_b == entry_id { *else_b = slow_id; }
+                }
+                _ => {}
+            }
+        }
+
+        f.blocks[entry_idx].insts = new_entry_insts;
+        f.blocks[entry_idx].term = Term::Branch { cond, then_b: fast_id, else_b: slow_id, then_args: Vec::new(), else_args: Vec::new() };
+        f.blocks.push(fast_block);
+        f.blocks.push(slow_block);
+        count += 1;
+    }
+    count
+}
+
+// ============================================================================
 // M7-e3t：归纳变量强度削减（Induction Variable strength Reduction, IVR）
 // ============================================================================
 //

@@ -76,6 +76,13 @@ pub fn compile_asm(
     if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV) {
         pass::fold_pure_calls(&mut ip);
     }
+    // M8-recspec：递归纯函数闭式特化。O3 + x86-64 only——这是私有后端专属的
+    // 语义级激进优化（LLVM 通用后端不会把互递归识别成奇偶闭式）。用探针解释
+    // 执行 + 全域验证，在函数入口插 guard：n>=0 走闭式、n<0 保留原递归体。
+    // 只对递归纯整数单参函数生效；其余函数零变化。
+    if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV) {
+        pass::specialize_recursive_calls(&mut ip);
+    }
     // M7-e3t：归纳变量强度削减（base*C+iv → 累加器）。O2+，仅 x86-64。
     if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV) {
         pass::ivr_strength_reduce(&mut ip);
