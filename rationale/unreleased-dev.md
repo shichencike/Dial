@@ -5,6 +5,34 @@
 
 ---
 
+#### P4.6 AArch64 常量移位立即数折叠 + P4.3 下载门禁竞态修复
+
+**缘起**：延续用户「把 AArch64 相关补上」的要求。P4.5 已把 PGO / 内联汇编这两块 A 类能力缺口补齐，本轮继续盘点 AArch64 在**指令发射层**相对 x86 的对等性，发现常量移位是最后一块明确的、确定有收益且零风险的落后项。
+
+**缺口坐实（源码级）**：`src/codegen_asm.rs` 的通用二元运算路径里，`shift_imm()`（返回 `[0,63]` 的整数移位量）早已存在，M7-c1 用它把 x86-64 常量移位折叠成 `shlq/sarq $n, reg`（省掉 `movq $n,%rcx`）。但 2923 行的门控写死 `matches!(self.target, EmitTarget::X86_64SysV) && matches!(op, Shl|Shr)`，AArch64 永远拿不到 `simm`，只能走 `lslv/asrv g1,g1,g2`——必须先把移位量装进 g2。AArch64 立即数移位 `lsl/asr Xd,Xn,#imm`（imm 0..63）与 x86 的 imm8 形式**范围完全一致**，所以这是纯粹的门控遗漏，不是 ISA 能力差异。
+
+**改动**（仅 `src/codegen_asm.rs`，x86 发射字节零变化）：
+- 去掉 `simm` 判定的 target 门控，两个 ISA 共用 `shift_imm()`；
+- `simm` 命中时按目标发射：x86 仍 `shlq/sarq $n, %rax`（经 `self.r(&g1)`，逐字节不变），AArch64 发 `lsl/asr g1,g1,#n`；
+- `Shl→lsl`、`Shr→asr`（算术右移，与 x86 `sarq` 语义一致，与替换前的 `asrv` 语义一致）；
+- 非常量移位（`shift_imm` 返回 None）仍走各自变址路径（x86 `%cl`、AArch64 `lslv/asrv`），完全不误折叠；
+- 越界常量（如 `<< 64`）走原变址路径，保留 `count&63` 语义。
+- 更新三处注释（通用路径、allow_imm 说明、shift_imm 文档），明确双目标共用。
+
+**证据（`tools/verify_aarch64_shift.sh`，挂 `run_tests.sh` AP5 段）**：
+- **L1 结构**：`x<<3`→`lsl x9,x9,#3`、`x>>2`→`asr x9,x9,#2`（AArch64 `.s` 断言）；
+- **L2 边界**：`x<<0`、`x<<63` 同样折叠为立即数（验证 `[0,63]` 闭区间两端）；
+- **L3 非常量**：`x<<n`（变量）仍走 `lslv x9,x9,x10`，证明未误折叠；
+- **L4 qemu 实机**：`x<<3 / x>>2 / x<<0 / x<<63 / x<<n` 输出 `8/4/7/0/12`，与 x86 原生**逐字节一致**；
+- **L5 x86 零回归**：x86 `.s` 常量仍 `shlq $3`/`sarq $2`、非常量仍 `%cl` 变址，形态完全不变。
+- 缺 qemu / 交叉 gcc 时整段 skip（CI 无依赖不误红），有则必须全绿。
+
+**同批修复：P4.3 下载门禁的 HTTP 服务进程泄漏（全量回归暴露的既有工程化 bug）**：全量 `run_tests.sh` 首次跑出 EXIT=1，失败点是 AO 段 P4.3 下载门禁的镜像重写 / `--json` 偶发红，与 AArch64 改动无关。定位发现 `tools/verify_p4_offline.sh::start_http` 用 `( cd "$WWW" && python3 -m http.server "$p" ) &`，`$!` 记录的是**子 shell 的 PID**，而 `cleanup`/`kill` 只杀子 shell，`python3 -m http.server` 变孤儿持续监听端口——系统里已累积 **67 个残留服务**，随机端口（`24000+RANDOM%20000`）撞上被占端口即 404 / 连接失败。修复：① 子 shell 内 `exec python3`，使 `$!` 记录的就是 python3 进程 PID，`kill` 真正回收（消除孤儿累积）；② 固定 `sleep 1` 改 curl 轮询直到端口可连（消除就绪竞态），并检测服务进程早死（端口被占）立即返回。修复后连跑 5 次 P4.3 门禁全绿、残留进程恒 0，全量回归恢复 EXIT=0。
+
+**战略边界**：性能维度已冻结（够用线内），本批 AArch64 移位折叠属「平台对等」的指令级补齐（LLVM 在 AArch64 同样用立即数移位），不是性能竞赛；结构上每条常量移位省 1 条装载指令，收益确定但不宣称性能数字（±5% 噪声内）。护栏：x86-64 `.s` 逐字节不变、LLVM 后端零改动、零新 Rust 依赖、版本 1.10.0、不打 tag；qemu / 交叉 gcc 仅为门禁依赖（缺则 skip）。
+
+---
+
 #### P4.5 AArch64 PGO 与内联汇编（补齐「LLVM 有 asm 无」能力缺口）
 
 **缘起**：用户看了缺口盘点后指出「aarch64 还不如 x86，先把 aarch64 相关补上」，直接推翻

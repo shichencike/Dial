@@ -141,6 +141,15 @@
     （与 LLVM 一致）。门禁 `tools/verify_aarch64_inline_asm.sh` qemu 实机逐值验证 identity/
     add7/byte/Intel 方言 + 形态断言（裸名/无方言切换/uxtb）全绿，挂 AP4 段；x86 双后端零回归。
   核心运行语义（AI）、源码级调试（AJ）、PGO（AP3）、内联汇编（AP4）现均在 AArch64 实机验证。
+- ~~**常量移位在 AArch64 仍走变址形式（相对 x86 指令级落后）**~~ —— **已收口（2026-11-20，
+  P4.6 平台对等）**：x86-64 早在 M7-c1 就把 `[0,63]` 常量移位量折叠为 `shlq/sarq $n, reg`，
+  但 `shift_imm()` 判定被 target 门控只在 x86 生效，AArch64 始终发 `lslv/asrv reg,reg,reg`
+  （须先装移位量到寄存器）。AArch64 立即数移位 `lsl/asr #n`（imm 0..63）与 x86 范围完全
+  同构，去掉门控让两 ISA 共用折叠：AArch64 常量移位改发 `lsl/asr g1,g1,#n`，非常量仍走
+  `lslv/asrv`。这是性能冻结后「平台对等」的指令级补齐（LLVM 在 AArch64 同样用立即数移位），
+  非性能竞赛。门禁 `tools/verify_aarch64_shift.sh` 五层证据（常量折叠/边界 0、63/非常量仍
+  变址/qemu 实机与 x86 逐字节一致/x86 零回归）全绿，挂 run_tests.sh AP5 段。x86 `.s`
+  逐字节不变、LLVM 零改动、零新依赖、1.10.0、不打 tag。
 
 ### P2 · 功能对等（B 类语言特性，按「LLVM 不存在」总纲裁决）—— ✅ 已全部收口（2026-11-19）
 

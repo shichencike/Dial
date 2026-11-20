@@ -5086,6 +5086,14 @@ else
     fail=1
 fi
 
+echo
+echo "== AP5) AArch64 常量移位折叠门禁（P4.6 平台对等，lsl/asr #imm + qemu 实机 + x86 零回归）=="
+if bash tools/verify_aarch64_shift.sh "$DIALC"; then
+    :   # 缺 qemu/交叉 gcc 时脚本自行 skip；有则逐条打印 ✅，失败非 0 退出
+else
+    fail=1
+fi
+
 echo "== AK) dialpkg P4.0 包管理门禁（pack 编 C 源 / 双模式 / 原子安装 / JSON / doctor）=="
 if bash tools/verify_p4_pkg.sh "$DIALC"; then
     :   # 缺 zig 时脚本自行 skip；有则逐条打印 ✅，失败非 0 退出

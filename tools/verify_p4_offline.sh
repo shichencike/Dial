@@ -65,7 +65,22 @@ EOF
 SHA=$(sha256sum "$WWW/dlgate.dialpkg" | cut -d' ' -f1)
 H="$TD/home"; mkdir -p "$H/.dial"
 
-start_http() { local p="$1" pf="$2"; ( cd "$WWW" && python3 -m http.server "$p" >/dev/null 2>&1 ) & echo $! > "$pf"; sleep 1; }
+# 启动静态 HTTP 服务并等待端口真正就绪。
+# 关键：必须用 exec 让 python3 替换子 shell，使 $! 记录的就是 python3 进程 PID；
+# 否则 kill $! 只杀到子 shell，python3 变孤儿持续占端口（会累积并撞随机端口）。
+# 再用 curl 轮询直到端口可连，消除 sleep 固定等待的就绪竞态。
+start_http() {
+    local p="$1" pf="$2"
+    ( cd "$WWW" && exec python3 -m http.server "$p" >/dev/null 2>&1 ) &
+    echo $! > "$pf"
+    local i
+    for i in $(seq 1 50); do
+        if curl -sf -o /dev/null "http://localhost:$p/" 2>/dev/null; then return 0; fi
+        if ! kill -0 "$(cat "$pf")" 2>/dev/null; then return 1; fi  # 服务进程已死，端口可能被占
+        sleep 0.1
+    done
+    return 1
+}
 
 echo "== P4.3 下载层门禁 =="
 

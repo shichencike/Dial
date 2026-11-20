@@ -2862,8 +2862,9 @@ impl<'a> FnEmit<'a> {
         // 且 imm32 按符号扩展参与 64 位乘法，与「先 movabsq 装 64 位再 imulq reg」
         // 在 int64 低 64 位语义上完全等价（已用 cc 汇编 + objdump 验证正/负 imm32）。
         // 因此把 Mul 一并纳入立即数折叠：常量落在 imm32 时省掉一条 movabsq（10 字节）
-        // 与一个临时寄存器。idiv/移位、浮点仍无立即数形式，维持装寄存器。
-        // AArch64 的 bin_src 根本不处理 Imm（恒走 lg/lf），此开关对其零影响。
+        // 与一个临时寄存器。idiv/浮点仍无立即数形式，维持装寄存器；移位走下方
+        // shift_imm 折叠路径（不在 allow_imm 集合内）。
+        // AArch64 的 bin_src 不处理 Imm（恒走 lg/lf），此开关只作用于 x86-64。
         let allow_imm = matches!(op,
             ABin::Add | ABin::Sub | ABin::Mul | ABin::And | ABin::Or |
             ABin::BitAnd | ABin::BitOr | ABin::BitXor |
@@ -2919,13 +2920,24 @@ impl<'a> FnEmit<'a> {
         let g1 = self.g1().to_string();
         let g2 = self.g2().to_string();
         self.lg(a, &g1);
-        // M7-c1：x86-64 常量移位量折叠（AArch64 的 lslv/asrv 仍走寄存器形式）。
-        let simm = if matches!(self.target, EmitTarget::X86_64SysV)
-            && matches!(op, ABin::Shl | ABin::Shr) { shift_imm(b) } else { None };
+        // M7-c1 / P4.6：常量移位量折叠双目标共用。shift_imm 已保证 n ∈ [0,63]，
+        // 正是 x86 imm8 与 AArch64 立即数移位都接受的范围（超出则退回原路径，
+        // 保留 count&63 的变址语义）。
+        //   x86-64 : shlq/sarq $n, reg       —— 跳过 %cl 装载
+        //   AArch64: lsl/asr reg, reg, #n    —— 跳过把移位量装 g2 再 lslv/asrv
+        let simm = if matches!(op, ABin::Shl | ABin::Shr) { shift_imm(b) } else { None };
         if let Some(n) = simm {
-            let a_reg = self.r(&g1);
-            let m = if matches!(op, ABin::Shl) { "shlq" } else { "sarq" };
-            self.line(&format!("\t{} ${}, {}", m, n, a_reg));
+            match self.target {
+                EmitTarget::X86_64SysV => {
+                    let a_reg = self.r(&g1);
+                    let m = if matches!(op, ABin::Shl) { "shlq" } else { "sarq" };
+                    self.line(&format!("\t{} ${}, {}", m, n, a_reg));
+                }
+                EmitTarget::AArch64 => {
+                    let m = if matches!(op, ABin::Shl) { "lsl" } else { "asr" };
+                    self.line(&format!("\t{} {}, {}, #{}", m, g1, g1, n));
+                }
+            }
             self.sg(dst, &g1);
             return;
         }
@@ -4291,10 +4303,11 @@ fn elide_tail_calls(asm: &str) -> String {
     out
 }
 
-/// M7-c1：x86-64 移位指令的立即数形式只接受 imm8，且 64 位操作数实际按
-/// `count & 63` 生效。当移位量是 `[0,63]` 的整数常量时，`shlq/sarq $n, reg`
-/// 与 `movq $n,%rcx; shlq %cl,reg` 语义完全一致，可以直接折叠、省掉两次搬运。
-/// 其余（寄存器 / 越界 / 浮点位模式）一律返回 None，退回原变址移位路径。
+/// M7-c1 / P4.6：移位指令立即数折叠的量判定（x86-64 与 AArch64 双目标共用）。
+/// 两个 ISA 的 64 位移位都按 `count & 63` 生效，立即数形式（x86 `shlq/sarq $n`、
+/// AArch64 `lsl/asr #n`）都只接受 `[0,63]`；当移位量是该范围的整数常量时，
+/// 折叠为立即数形式与「先装寄存器再变址移位」语义完全一致。其余（寄存器 /
+/// 越界 / 浮点位模式）一律返回 None，退回原变址移位路径（保留 &63 语义）。
 fn shift_imm(v: Value) -> Option<i64> {
     let n = match v {
         Value::Imm(Imm::I64(n)) => n,
