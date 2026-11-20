@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -152,6 +152,9 @@ pub struct Manifest {
     /// P4.0：C 源码声明（可选，旧包无此字段 → None，向后兼容）。
     /// prebuilt 包用它随包分发源码供审计；source 包用它 install 期就地编译。
     pub c: Option<CInfo>,
+    /// P4.3：显式声明「本包允许安装在哪些平台」（Target Triple 列表）。
+    /// 空 = 不限制（旧包无此字段 → 空，向后兼容）；非空时 install 期强制校验。
+    pub platforms: Vec<String>,
 }
 
 /// P4.0 manifest 中的 C 源码声明（与 pkgbuild::CSpec 对应，序列化在 manifest.txt）。
@@ -321,6 +324,32 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
         }
     };
 
+    // P4.3：platforms 可选字段。旧包无 → 空（不限制，向后兼容）。
+    // 一旦给出，必须是非空字符串数组，且每项形似 Target Triple（无路径穿越/空白）。
+    let mut platforms = Vec::new();
+    if let Some(pv) = v.get("platforms") {
+        let arr = pv.as_array().ok_or_else(|| {
+            DialcError::new("manifest.txt 的 'platforms' 必须是字符串数组", 0, 0)
+        })?;
+        for item in arr {
+            let t = item.as_str().ok_or_else(|| {
+                DialcError::new("manifest.txt 的 platforms 含非字符串项", 0, 0)
+            })?;
+            if t.trim().is_empty() || t.chars().any(|c| c.is_whitespace()) {
+                return Err(DialcError::new(
+                    format!("manifest.txt 的 platforms 平台 '{}' 不是合法 triple（空或含空白）", t),
+                    0, 0,
+                ));
+            }
+            if t.contains("..") || t.starts_with('/') {
+                return Err(DialcError::new(
+                    format!("manifest.txt 的 platforms 平台 '{}' 不是合法 triple", t), 0, 0,
+                ));
+            }
+            platforms.push(t.to_string());
+        }
+    }
+
     Ok(Manifest {
         name,
         version,
@@ -331,6 +360,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
         src,
         sha256,
         c,
+        platforms,
     })
 }
 
@@ -363,46 +393,223 @@ pub fn install(pkg_path: &Path) -> Result<(PathBuf, Manifest)> {
 /// `expected_sha256` 为 `None` 时仍会做第 3 步（能发现残缺与篡改），
 /// 但**无法**证明「这就是我要的那一份包」——此时会打印一条明确提示，
 /// 绝不静默降级（§5.1：失败即终止，不做降级）。
+/// 保留原签名（P4.1/P4.2 调用点不变）：联机下载，不使用 offline。
 pub fn install_from_url(url: &str, expected_sha256: Option<&str>) -> Result<(PathBuf, Manifest)> {
-    let tmp_dir = download_dir()?;
-    let fname = url_filename(url)?;
-    let tmp = tmp_dir.join(format!("{}.part", fname));
+    install_from_url_opts(url, expected_sha256, false, true)
+}
 
-    let res = (|| -> Result<(PathBuf, Manifest)> {
-        download_to(url, &tmp)?;
+/// P4.3：带下载策略的 URL 安装。
+///
+/// - `offline=true`：只从下载缓存取包（`~/.dial/cache/downloads/`），缺缓存即 Fail-Fast，
+///   绝不联网；并联校验缓存文件与 `expected_sha256`（若给）。
+/// - `offline=false`：优先复用缓存（若给了 --sha256 会校验，不符则重新下载）；否则
+///   带断点续传下载到 `<cache>.part`，成功后原子 rename 成缓存文件。
+/// - `progress=true`：TTY 显示 curl 进度条；`--json` 场景传 false 保持输出干净。
+pub fn install_from_url_opts(
+    url: &str,
+    expected_sha256: Option<&str>,
+    offline: bool,
+    progress: bool,
+) -> Result<(PathBuf, Manifest)> {
+    let cache_file = download_cache_path(url)?;
+    let want = expected_sha256.map(|s| s.trim().to_ascii_lowercase());
 
-        // 整包哈希：钉死「这就是我要的那一份」。
-        if let Some(want) = expected_sha256 {
-            let want = want.trim().to_ascii_lowercase();
-            let got = sha256_file(&tmp)?;
-            if got != want {
-                return Err(DialcError::new(
-                    format!(
-                        "下载的包 SHA256 不符：期望 {}，实际 {}\n\
-                         下载物已删除，绝不安装未经校验的文件。\n\
-                         请核对哈希来源（发行页提供的校验值），或先手动下载后用 \
-                         `dialc install <本地文件>` 安装。",
-                        want, got
-                    ),
-                    0,
-                    0,
-                ));
+    // 1) 取到本地缓存文件（联机时缺失才下载）。
+    if cache_file.is_file() {
+        if let Some(ref w) = want {
+            let got = sha256_file(&cache_file)?;
+            if &got != w {
+                if offline {
+                    return Err(DialcError::new(
+                        format!(
+                            "--offline：缓存文件 {} 的 SHA256={} 与指定 {} 不符，拒绝使用。\n\
+                             请删除该缓存后用联机模式重新下载。",
+                            cache_file.display(), got, w
+                        ),
+                        0, 0,
+                    ));
+                }
+                // 联机且缓存哈希不符：删除缓存，走重新下载。
+                let _ = fs::remove_file(&cache_file);
             }
-        } else {
-            println!(
-                "ℹ️  未指定 --sha256：本次只校验包内各文件与 manifest.txt 的一致性\n\
-                 （能发现残缺与篡改），**未**校验整包来源。\n\
-                 若需强保证，请追加 --sha256 <发行页给出的哈希>。"
-            );
         }
+    }
+    if !cache_file.is_file() {
+        if offline {
+            return Err(DialcError::new(
+                format!(
+                    "--offline：下载缓存中找不到 '{}' 对应的包（{}）。\n\
+                     请先联机执行一次 `dialc install <url> --sha256 <hash>` 生成缓存，\n\
+                     或去掉 --offline 联网安装。",
+                    url, cache_file.display()
+                ),
+                0, 0,
+            ));
+        }
+        download_package_cached(url, &cache_file, want.as_deref(), progress)?;
+    }
 
-        let r = install_inner(&tmp);
-        r
-    })();
+    // 2) 整包哈希校验（offline 命中且上面已校验过；这里统一再验一次，幂等）。
+    if let Some(ref w) = want {
+        let got = sha256_file(&cache_file)?;
+        if &got != w {
+            return Err(DialcError::new(
+                format!(
+                    "下载的包 SHA256 不符：期望 {}，实际 {}\n\
+                     文件保留在 {} 供排查，绝不安装未经校验的文件。\n\
+                     请核对哈希来源（发行页给出的校验值）。",
+                    w, got, cache_file.display()
+                ),
+                0, 0,
+            ));
+        }
+    } else if !offline {
+        // 提示走 stderr：即使 --json 且未给 --sha256，也不污染 stdout 的 JSON。
+        eprintln!(
+            "ℹ️  未指定 --sha256：本次只校验包内各文件与 manifest.txt 的一致性\n\
+             （能发现残缺与篡改），**未**校验整包来源。\n\
+             若需强保证，请追加 --sha256 <发行页给出的哈希>。"
+        );
+    }
 
-    // 临时文件一律清掉：成功也删（解压已完成），失败也删（不留残骸）。
-    let _ = fs::remove_file(&tmp);
-    res
+    // 3) 从缓存文件安装（install_inner 只读，不改缓存）。
+    install_inner(&cache_file)
+}
+
+/// 包的持久缓存路径：`download_dir()/<sha256(url)[..16]>_<filename>`。
+/// 用**原始 URL**（镜像重写前）做哈希——换镜像不会让缓存失效，内容由 SHA256 把关。
+fn download_cache_path(url: &str) -> Result<PathBuf> {
+    let fname = url_filename(url)?;
+    let key = sha256_str(url)?;
+    let short: String = key.chars().take(16).collect();
+    Ok(download_dir()?.join(format!("{}_{}", short, fname)))
+}
+
+/// 应用镜像重写：`DIAL_MIRROR` = "原前缀=镜像前缀"（可多条，逗号分隔）。
+/// 只做字符串前缀替换；镜像 URL 仍须满足 download_to 的 https 强制（localhost 除外）。
+/// 返回 (重写后的 URL, 是否发生重写)。
+fn apply_mirror(url: &str) -> (String, bool) {
+    let raw = match std::env::var("DIAL_MIRROR") {
+        Ok(v) => v,
+        Err(_) => return (url.to_string(), false),
+    };
+    for rule in raw.split(',') {
+        let rule = rule.trim();
+        if rule.is_empty() {
+            continue;
+        }
+        if let Some((from, to)) = rule.split_once('=') {
+            if !from.is_empty() && !to.is_empty() && url.starts_with(from) {
+                let rewritten = format!("{}{}", to, &url[from.len()..]);
+                return (rewritten, true);
+            }
+        }
+    }
+    (url.to_string(), false)
+}
+
+/// 带断点续传的缓存下载：下载到 `<cache>.part`，成功后 rename 成 cache。
+/// 续传用 curl `-C -`（若 .part 存在且非空），失败保留 .part 供下次续传。
+fn download_package_cached(
+    url: &str,
+    cache: &Path,
+    expected_sha256: Option<&str>,
+    progress: bool,
+) -> Result<()> {
+    let (fetch_url, mirrored) = apply_mirror(url);
+    let part = cache.with_extension("part");
+
+    // 若 .part 存在但 SHA256 已等于目标（上次下载完未 rename 就中断），直接 rename。
+    if part.is_file() {
+        if let Some(w) = expected_sha256 {
+            if sha256_file(&part)? == w {
+                fs::rename(&part, cache).map_err(|e| {
+                    DialcError::new(format!("提交缓存文件失败: {}", e), 0, 0)
+                })?;
+                return Ok(());
+            }
+        }
+    }
+
+    let curl = which("curl").ok_or_else(|| {
+        DialcError::new(
+            "未找到 curl，无法下载包。请先安装 curl，或手动下载后用 `dialc install <本地文件>` 安装。",
+            0, 0,
+        )
+    })?;
+    let is_https = fetch_url.starts_with("https://");
+    if !is_https && !http_allowed(&fetch_url) {
+        return Err(DialcError::new(
+            format!("镜像/源地址只允许 https:// 或本机地址（当前: {}）", fetch_url),
+            0, 0,
+        ));
+    }
+    let allow_http = http_allowed(&fetch_url);
+    let proto = if allow_http { "=https,http" } else { "=https" };
+    let proto_redir = if allow_http { "=https,http" } else { "=https" };
+
+    let can_resume = part.is_file() && fs::metadata(&part).map(|m| m.len() > 0).unwrap_or(false);
+    let mut cmd = Command::new(&curl);
+    cmd.arg("--fail")
+        .arg("--location")
+        .arg("--proto").arg(proto)
+        .arg("--proto-redir").arg(proto_redir)
+        .arg("--tlsv1.2")
+        .arg("--connect-timeout").arg("15")
+        .arg("--max-time").arg("600")
+        .arg("--retry").arg("2");
+    if can_resume {
+        cmd.arg("--continue-at").arg("-");
+    }
+    if progress && std::io::stderr().is_terminal() {
+        cmd.arg("--progress-bar");
+    } else {
+        cmd.arg("--silent").arg("--show-error");
+    }
+    cmd.arg("--output").arg(&part).arg(&fetch_url);
+
+    if mirrored {
+        eprintln!("ℹ️  镜像重写: {} -> {}", url, fetch_url);
+    }
+    if can_resume {
+        eprintln!("ℹ️  检测到未完成下载，断点续传: {}", part.display());
+    }
+    let out = cmd.output().map_err(|e| {
+        DialcError::new(format!("调用 curl 失败（{}）: {}", curl.display(), e), 0, 0)
+    })?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(DialcError::new(
+            format!(
+                "下载失败: {}\n{}\n（部分文件保留在 {}，下次可断点续传）",
+                fetch_url,
+                err.trim().lines().last().unwrap_or("（无详细输出）"),
+                part.display()
+            ),
+            0, 0,
+        ));
+    }
+    if fs::metadata(&part).map(|m| m.len() == 0).unwrap_or(true) {
+        return Err(DialcError::new(format!("下载得到空文件: {}", fetch_url), 0, 0));
+    }
+    // 下载成功：若给了 SHA256，先验 .part 再提交缓存（避免把坏文件缓存下来）。
+    if let Some(w) = expected_sha256 {
+        let got = sha256_file(&part)?;
+        if got != w {
+            return Err(DialcError::new(
+                format!(
+                    "下载的包 SHA256 不符：期望 {}，实际 {}。\n\
+                     部分文件保留在 {} 供排查，绝不缓存或安装未经校验的文件。",
+                    w, got, part.display()
+                ),
+                0, 0,
+            ));
+        }
+    }
+    fs::rename(&part, cache).map_err(|e| {
+        DialcError::new(format!("提交下载缓存失败: {}", e), 0, 0)
+    })?;
+    Ok(())
 }
 
 /// 下载缓存目录：`~/.dial/cache/downloads/`。
@@ -648,6 +855,37 @@ fn install_inner(pkg_path: &Path) -> Result<(PathBuf, Manifest)> {
             .map_err(|e| DialcError::new(format!("读取 manifest.txt 失败: {}", e), 0, 0))?;
         parse_manifest(&s)?
     };
+
+    // P4.3 平台声明校验（Fail-Fast，早于解压、零字节落盘）：
+    // 包若显式声明了 platforms，则当前 host 必须在此白名单内，否则拒绝安装，
+    // 并明确列出「当前平台」+「本包支持的平台」+「可用 DIAL_TARGET 交叉安装」的指引。
+    // platforms 为空（旧包 / 未声明）时不限制——向后兼容，平台兼容性仍由 targets 在链接期把关。
+    if !manifest.platforms.is_empty() {
+        let host = host_triple();
+        if !manifest.platforms.iter().any(|t| t == &host) {
+            let mut supported = manifest.platforms.clone();
+            supported.sort();
+            supported.dedup();
+            return Err(DialcError::new(
+                format!(
+                    "包 '{}' 不支持当前平台 '{}'，已拒绝安装（一个字节都未写入）。\n\
+                     该包声明支持的平台：{}\n\
+                     当前平台：{}（由 DIAL_TARGET 环境变量或编译目标决定）。\n\
+                     处理方式：\n\
+                       · 换用与当前平台匹配的包版本；或\n\
+                       · 若你确实要为目标平台安装，设置 DIAL_TARGET=<上表某个平台> 后重试；或\n\
+                       · 用 `dialc info {}` 查看该包详情与支持的平台。",
+                    manifest.name,
+                    host,
+                    supported.join(", "),
+                    host,
+                    manifest.name,
+                ),
+                0,
+                0,
+            ));
+        }
+    }
 
     // **校验先于解压**（§5.1）：先把包里每个文件按 manifest 登记的哈希验一遍，
     // 一个字节都还没落到磁盘上。校验不过就地失败，绝不留下半个残缺的包。

@@ -5085,6 +5085,20 @@ else
     fail=1
 fi
 
+echo "== AN) 平台声明门禁（dial.toml platforms / install 期平台校验 / 索引展示）=="
+if bash tools/verify_p4_platform.sh "$DIALC"; then
+    :   # 缺 curl/python3/zig 时脚本自行 skip
+else
+    fail=1
+fi
+
+echo "== AO) dialpkg P4.3 下载层门禁（缓存/offline/镜像/断点续传/JSON）=="
+if bash tools/verify_p4_offline.sh "$DIALC"; then
+    :   # 缺 curl/python3/zig 时脚本自行 skip
+else
+    fail=1
+fi
+
 echo
 if [ $fail -eq 0 ]; then
     echo "== 全部测试通过 ✅ =="

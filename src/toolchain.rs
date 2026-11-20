@@ -29,7 +29,7 @@ pub const COMMANDS: &[CmdSpec] = &[
     CmdSpec { name: "fmt", brief: "间距规范化格式化", opts: &["--check", "--diff"] },
     CmdSpec { name: "new", brief: "生成可打包的项目骨架", opts: &[] },
     CmdSpec { name: "pack", brief: "打包 / 预览 / 校验 .dialpkg", opts: &["-o", "--init", "--dry-run", "--json", "--verify"] },
-    CmdSpec { name: "install", brief: "安装包或 URL / --locked 按 lock 装", opts: &["--sha256", "--locked", "--json"] },
+    CmdSpec { name: "install", brief: "安装包或 URL / --locked 按 lock 装", opts: &["--sha256", "--locked", "--offline", "--json"] },
     CmdSpec { name: "resolve", brief: "解析依赖并生成 dial.lock（P4.2）", opts: &["--json", "--check", "--index", "--index-sha256", "--offline", "--lock"] },
     CmdSpec { name: "list", brief: "列出已安装包", opts: &[] },
     CmdSpec { name: "uninstall", brief: "卸载已安装包", opts: &[] },

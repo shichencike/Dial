@@ -21,9 +21,10 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_INDEX_URL: &str =
     "https://github.com/dial-lang/dial-index/releases/latest/download/index.json";
 
-/// 索引文件格式版本。v2 增加每包 `deps` 字段（P4.2）；v1 仍可读（无 deps 视为空）。
+/// 索引文件格式版本。v2 增加每包 `deps` 字段（P4.2）；v3 增加每包 `platforms`
+/// 字段（P4.3 平台声明展示）。v1/v2 仍可读（缺失字段视为空）——向后兼容。
 /// 其它版本 Fail-Fast（防止新格式被旧编译器误读）。
-const SCHEMA_VERSION: u64 = 2;
+const SCHEMA_VERSION: u64 = 3;
 const MIN_SCHEMA_VERSION: u64 = 1;
 
 /// 索引里的单个包条目。
@@ -43,6 +44,8 @@ pub struct IndexEntry {
     pub sha256: String,
     /// P4.2：该版本的依赖（包名 → 语义版本区间，如 `^1.2.0`）。v1 索引无此字段视为空。
     pub deps: BTreeMap<String, String>,
+    /// P4.3：显式声明允许安装的平台（triple）列表。空=不限制（v1/v2 索引无此字段）。
+    pub platforms: Vec<String>,
 }
 
 /// 静态索引根节点。
@@ -313,6 +316,25 @@ fn parse(text: &str) -> Result<IndexFile> {
                 deps.insert(dep_name.clone(), req_str.to_string());
             }
         }
+        // P4.3：platforms 是字符串数组（允许安装的平台）。缺失视为空（不限制）。
+        // 逐项做基本 triple 形态校验（无空白/路径成分），Fail-Fast。
+        let mut platforms: Vec<String> = Vec::new();
+        if let Some(arr) = p.get("platforms").and_then(|x| x.as_array()) {
+            for pv in arr {
+                let t = pv.as_str().ok_or_else(|| {
+                    DialcError::new(format!("包 '{}' 的 platforms 含非字符串项", name), 0, 0)
+                })?;
+                if t.trim().is_empty() || t.chars().any(|c| c.is_whitespace())
+                    || t.contains("..") || t.starts_with('/')
+                {
+                    return Err(DialcError::new(
+                        format!("包 '{}' 的 platforms 平台 '{}' 不是合法 triple", name, t),
+                        0, 0,
+                    ));
+                }
+                platforms.push(t.to_string());
+            }
+        }
         packages.push(IndexEntry {
             name,
             version,
@@ -323,6 +345,7 @@ fn parse(text: &str) -> Result<IndexFile> {
             url,
             sha256,
             deps,
+            platforms,
         });
     }
     Ok(IndexFile { schema, updated, packages })
@@ -379,6 +402,7 @@ pub fn entry_to_json(e: &IndexEntry) -> serde_json::Value {
         "url": e.url,
         "sha256": e.sha256,
         "deps": e.deps,
+        "platforms": e.platforms,
     })
 }
 

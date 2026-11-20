@@ -75,6 +75,11 @@ pub struct PkgSpec {
     pub c: Option<CSpec>,
     /// P4.2：`[dependencies]` 段——依赖包名 → 语义版本区间。空 map 表示无依赖。
     pub dependencies: BTreeMap<String, String>,
+    /// P4.3：显式声明「本包允许安装在哪些平台」（Target Triple 列表）。
+    /// 空列表表示**不限制**（向后兼容旧包：旧清单无此字段 → 空 → 任何平台都能装，
+    /// 平台兼容性仍由 `targets` 在链接期把关）。非空时 install 期强制校验，
+    /// host 不在其中即拒绝安装并列出支持的平台。
+    pub platforms: Vec<String>,
 }
 
 /// P4.0：`[c]` 段的解析结果——声明式 C 源码编译参数（零构建脚本）。
@@ -238,6 +243,8 @@ fn parse_spec_inner(text: &str, require_targets: bool) -> Result<PkgSpec, String
     let mut c_mode: Option<CMode> = None;
     // P4.2 [dependencies] 段：包名 → 语义版本区间
     let mut dependencies: BTreeMap<String, String> = BTreeMap::new();
+    // P4.3 顶层 platforms 字段：允许安装的平台（triple）列表，空=不限制
+    let mut platforms: Vec<String> = Vec::new();
     let mut section: Option<String> = None;
     let mut seen_targets = false;
     let mut seen_src = false;
@@ -451,9 +458,25 @@ fn parse_spec_inner(text: &str, require_targets: bool) -> Result<PkgSpec, String
                 })?;
                 abi = Some(n);
             }
+            "platforms" => {
+                if !platforms.is_empty() {
+                    return Err(format!("dial.toml 第 {} 行：字段 'platforms' 重复", line_no));
+                }
+                // 逗号分隔的带引号 triple 列表（与 [c] 段列表同风格，零依赖）。
+                platforms = parse_string_list(val, line_no)?;
+                for t in &platforms {
+                    check_component(&format!("platforms 平台 '{}'", t), t)?;
+                    if t.chars().any(|c| c.is_whitespace()) {
+                        return Err(format!(
+                            "dial.toml 第 {} 行：platforms 平台 '{}' 含空白字符，非法 triple",
+                            line_no, t
+                        ));
+                    }
+                }
+            }
             other => {
                 return Err(format!(
-                    "dial.toml 第 {} 行：未知字段 '{}'（支持 name/version/abi/iface/license 与 [targets] / [src] 段）",
+                    "dial.toml 第 {} 行：未知字段 '{}'（支持 name/version/abi/iface/license/platforms 与 [targets] / [src] / [c] / [dependencies] 段）",
                     line_no, other
                 ))
             }
@@ -532,6 +555,7 @@ fn parse_spec_inner(text: &str, require_targets: bool) -> Result<PkgSpec, String
         src,
         c,
         dependencies,
+        platforms,
     })
 }
 
@@ -1000,6 +1024,11 @@ pub fn plan(project_dir: &Path, out: Option<&Path>) -> Result<PackPlan, String> 
     if let Some(cj) = c_json {
         manifest["c"] = cj;
     }
+    // P4.3：platforms 非空才写入 manifest（空=不限制，旧包无此字段照常兼容）。
+    if !spec.platforms.is_empty() {
+        manifest["platforms"] = serde_json::to_value(&spec.platforms)
+            .map_err(|e| format!("序列化 platforms 失败: {}", e))?;
+    }
     // P4.2：dependencies 可选记录到 manifest 供审计（空则不写，保持旧包兼容）。
     if !spec.dependencies.is_empty() {
         manifest["dependencies"] = serde_json::to_value(&spec.dependencies)
@@ -1267,7 +1296,10 @@ pub fn init_spec(project_dir: &Path) -> Result<PathBuf, String> {
             text.push_str(&format!("{} = \"{}\"\n", m, rel));
         }
     }
-    text.push_str("\n[dependencies]\n");
+    text.push_str("\n# P4.3 平台声明（可选）：只允许这些 triple 安装，其它平台 install 期即拒绝。\n");
+    text.push_str("# 不写或留空则不限制（兼容旧包），平台兼容性仍由 [targets] 在链接期把关。\n");
+    text.push_str("# platforms = \"x86_64-linux-gnu\", \"aarch64-linux-gnu\"\n\n");
+    text.push_str("[dependencies]\n");
     text.push_str("# P4.2：依赖包名 = 语义版本区间（^1.2.0 / ~1.2.3 / =1.2.3 / *）。\n");
     text.push_str("# 用 `dialc resolve .` 从静态索引解析并生成 dial.lock。\n");
     text.push_str("# json = \"^2.0.0\"\n");

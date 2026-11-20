@@ -144,9 +144,10 @@ fn main() {
             return;
         }
 
-        // 解析可选的 --sha256 <hex> 与 --json（只有 install 用得到）
+        // 解析可选的 --sha256 <hex> / --json / --offline（只有 install 用得到）
         let mut expected_sha256: Option<String> = None;
         let mut as_json = false;
+        let mut offline = false;
         let mut i = 3;
         while i < args.len() {
             match args[i].as_str() {
@@ -161,6 +162,7 @@ fn main() {
                     }
                 }
                 "--json" => as_json = true,
+                "--offline" => offline = true,
                 other => {
                     eprintln!("install: 不认识的参数 '{}'", other);
                     std::process::exit(1);
@@ -171,8 +173,12 @@ fn main() {
 
         let is_url = src_path.starts_with("http://") || src_path.starts_with("https://");
         let result = if is_url {
-            package::install_from_url(&src_path, expected_sha256.as_deref())
+            package::install_from_url_opts(&src_path, expected_sha256.as_deref(), offline, !as_json)
         } else {
+            if offline {
+                eprintln!("--offline 只对 URL 安装有意义（本地文件本就无需联网）");
+                std::process::exit(1);
+            }
             if expected_sha256.is_some() {
                 eprintln!("--sha256 只对 URL 安装有意义（本地文件安装的校验由包内 manifest 负责）");
                 std::process::exit(1);
@@ -1803,7 +1809,8 @@ fn print_usage() {
     eprintln!("  import \"./util.dial\";         源码内引用同目录模块（见 README §34）");
     eprintln!();
     eprintln!("包管理");
-    eprintln!("  install   <包.dialpkg|URL> [--sha256 哈希] [--json]");
+    eprintln!("  install   <包.dialpkg|URL> [--sha256 哈希] [--offline] [--json]");
+    eprintln!("            --offline 只用下载缓存（P4.3）；DIAL_MIRROR=原前缀=镜像前缀 重写下载源");
     eprintln!("  install   --locked [目录] [--json]  按 dial.lock 批量安装依赖（P4.2）");
     eprintln!("  resolve   [目录] [--json] [--check] [--index <url>] [--index-sha256 <hex>] [--offline]");
     eprintln!("                                解析 [dependencies] 并生成/校验 dial.lock（P4.2）");
@@ -2473,6 +2480,9 @@ fn cmd_registry(command: &str, args: &[String]) {
                     println!("  版本: {}", hits.iter().map(|e| format!("v{}", e.version)).collect::<Vec<_>>().join(", "));
                     println!("  ABI: {}", latest.abi);
                     println!("  平台: {}", if latest.targets.is_empty() { "-".to_string() } else { latest.targets.join(", ") });
+                    if !latest.platforms.is_empty() {
+                        println!("  可安装平台: {}（其它平台 install 期将被拒绝）", latest.platforms.join(", "));
+                    }
                     println!("  下载: {}", latest.url);
                     if !latest.sha256.is_empty() {
                         println!("  SHA256: {}", latest.sha256);
