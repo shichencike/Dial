@@ -123,13 +123,24 @@
   gdbstub 实机 `break dbg.dial:9` 命中 + `print counter=42` + bt 显示源码行；无 `-g` 零
   符号。交付门禁 `tools/verify_aarch64_dwarf.sh`（缺 qemu/交叉 gcc/gdb 自动 skip，挂入
   run_tests.sh AJ 段），全量 run_tests（含 R2 x86 DWARF / AI 语义 / AJ DWARF）全绿。
-- **AArch64 能力降级项——逐项裁决完毕（2026-11-19）**：
-  - **内联汇编 Fail-Fast**：按设计拒绝（仅支持 x86-64 方言），**可接受降级**——非 bug，
-    AArch64 无对应内联汇编语义，强造反而破坏 Fail-Fast 哲学；不纳入本批次。
-  - **PGO**（`pgo_effective=false`）：**可接受降级**——战略转向后性能已冻结为回归护栏，
-    AArch64 无法在本机跑训练样本（`pgo_active` 本就仅 x86），补齐 ROI 为零；保留功能完整性
-    即可，不纳入本批次。
-  两者均零代码改动，仅在路线图标注裁决理由；核心运行语义 + 源码级调试已在 AArch64 实机验证。
+- ~~**AArch64 能力降级项——逐项裁决为「可接受降级」（2026-11-19）**~~ —— **已补齐
+  （2026-11-20，P4.5）**。用户随后明确要求「把 AArch64 相关补上」，推翻了此前"可接受降级"
+  裁决。理由校正：这两项是 **A 类「LLVM 有、asm 无」的能力缺口**（LLVM 在 AArch64 支持
+  inline asm 与 PGO），不是性能竞赛——补齐它们不违背"性能冻结"（冻结的是优化投入，不是
+  功能对等）。同为 1.10.0、零新依赖、LLVM 路径零改动：
+  - **PGO 放开 AArch64**：`pgo_active` 去掉 target 门控；插桩改 target-aware——
+    `counter_inc` 用 `adrp + add :lo12:` 取 `.comm` 地址、`ldr/add/str` 自增（add 不改 NZCV，
+    scratch x9/x10/x11 在驻留开启前无活跃值）；`dump` 用 `stp/ldp` 保护 x0-x17 + **LR(x30)**
+    （AArch64 `bl` 覆盖 LR，x86 `call` 压栈不覆盖）。训练二进制 `-static` 链接 + `qemu-aarch64-static`
+    执行（原生 AArch64 直接跑），**缺 qemu 当场 Fail-Fast**（不静默降级伪装成功）。门禁
+    `tools/verify_aarch64_pgo.sh` 六层证据（magic/计数反映真实执行/冷热分段/qemu 输出一致/
+    确定性/Fail-Fast）全绿，挂 run_tests.sh AP3 段。
+  - **内联汇编放开 AArch64**：去掉两处 Fail-Fast 预检；`inst_inline_asm`/`render_asm_template`
+    改 target-aware——操作数池 x86 `rdi..r9` → AArch64 `x0-x5`、i8/i1 零扩展 `movzbq` → `uxtb`、
+    AArch64 寄存器裸名（不加 ATT 的 `%`）、Intel 方言切换仅 x86 发射。模板按目标汇编语法书写
+    （与 LLVM 一致）。门禁 `tools/verify_aarch64_inline_asm.sh` qemu 实机逐值验证 identity/
+    add7/byte/Intel 方言 + 形态断言（裸名/无方言切换/uxtb）全绿，挂 AP4 段；x86 双后端零回归。
+  核心运行语义（AI）、源码级调试（AJ）、PGO（AP3）、内联汇编（AP4）现均在 AArch64 实机验证。
 
 ### P2 · 功能对等（B 类语言特性，按「LLVM 不存在」总纲裁决）—— ✅ 已全部收口（2026-11-19）
 

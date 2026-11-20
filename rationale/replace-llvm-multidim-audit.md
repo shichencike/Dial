@@ -17,6 +17,13 @@
 > 在「性能够用即可」战略下，剩余项（AArch64 PGO/inline asm、DWARF 内联与复合类型、Os/Oz）
 > 属**性能/体验的边际边界或两端共同缺口，不构成代替的硬阻塞**，已在
 > `rationale/dialpkg-roadmap.md` §P4.4 与 `rationale/roadmap-gap-analysis.md` 如实标注。
+>
+> **2026-11-20 二次补记（P4.5）**：用户随后要求「把 AArch64 相关补上」，此前按够用线暂缓的
+> **AArch64 PGO 与内联汇编已在同日落地**（同为 1.10.0，非性能竞赛而是补 A 类「LLVM 有 asm 无」
+> 能力缺口）：PGO 插桩改 target-aware（adrp+ldr/add/str + 保护 LR），训练二进制 -static + qemu
+> 执行、缺 qemu Fail-Fast；内联汇编操作数池 x0-x5 / uxtb 零扩展 / 裸寄存器名 / 方言仅 x86。
+> 两个 qemu 实机门禁 AP3/AP4 全绿。**剩余真正未做的是 DWARF 内联 DIE 与复合类型结构化**（两端
+> 共同的语言层缺口）与 Os/Oz（已有 `--tiny`/`--fast-compile` 覆盖），仍按够用线不投入。
 
 > 本文回答一个此前一直被「单维度乐观结论」掩盖的问题：**自研 asm 后端现在到底能不能
 > 真正代替 LLVM？** 结论不预设立场，全部由当机实测数据说话。审计范围覆盖五个独立维度，

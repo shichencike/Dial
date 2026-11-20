@@ -692,13 +692,30 @@ fn main() {
     if backend == Backend::Asm {
         // 自研后端：lower → pass → .s → cc -c → .o；obj_path 与 LLVM 后端一致，
         // 后面的 link() / final_link() 完全复用，FFI 包与 --tiny 等零改动生效。
-        // R4：自研 PGO 插桩/分段仅 x86-64 有效；AArch64 目标下训练二进制无法在
-        // 本机运行，故优雅降级为 baseline（不插桩、不训练），保持 AArch64 零变化。
+        // R4/P4.5：自研 PGO 插桩/分段在 x86-64 与 AArch64 双目标均有效。
+        // AArch64 为交叉目标时训练二进制需 qemu-aarch64-static（静态链接）运行；
+        // 若缺 qemu 则 Fail-Fast 明确报错（不做静默降级——那会伪装成 PGO 成功但
+        // 无 profile），原生 AArch64 宿主直接执行。
         let asm_target = asm::detect_target().unwrap_or(crate::target::EmitTarget::X86_64SysV);
-        let pgo_effective = pgo && matches!(asm_target, crate::target::EmitTarget::X86_64SysV);
+        let pgo_effective = pgo && !debug_info;
         if pgo && !pgo_effective {
-            eprintln!("ℹ️  --pgo 在当前 asm 目标（AArch64）不适用，已降级为无 PGO 构建（AArch64 零变化）。");
+            eprintln!("ℹ️  --pgo 与 -g 不可同用（插桩会扰动调试与 DWARF），已降级为无 PGO 构建。");
         }
+        // AArch64 交叉目标：预先确认 qemu 存在，缺则 Fail-Fast（ fail before write）。
+        let aarch64_runner = if pgo_effective
+            && matches!(asm_target, crate::target::EmitTarget::AArch64)
+        {
+            match pgo_aarch64_runner() {
+                Some(q) => Some(q),
+                None => {
+                    eprintln!("❌ --pgo 在 AArch64 交叉编译下需要 qemu-aarch64-static / qemu-aarch64 运行训练二进制，但未找到。");
+                    eprintln!("   请安装 qemu-user-static（apt install qemu-user-static）后重试；原生 AArch64 宿主无需此步骤。");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
         if pgo_effective {
             // ── R4 自研 PGO 两段式（零 bitcode / 零 LLVM 工具）────────────────
             // 阶段一：插桩编译 + 链接出训练二进制，跑一遍写 .dialprof；
@@ -720,14 +737,27 @@ fn main() {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
-            if let Err(e) = link(&obj_path, &gen_exe, safety, &fe.pkg_libs, &fe.ffi_rpaths, &LinkOpts::default()) {
+            // AArch64 交叉目标训练二进制用静态链接（-static），这样 qemu 无需
+            // aarch64 sysroot 即可运行；原生 x86-64 保持原默认链接零变化。
+            let train_opts = LinkOpts {
+                single_file: aarch64_runner.is_some(),
+                ..LinkOpts::default()
+            };
+            if let Err(e) = link(&obj_path, &gen_exe, safety, &fe.pkg_libs, &fe.ffi_rpaths, &train_opts) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
             // 训练运行：DIAL_PGO_FILE 指向 profile 落点；输出静默（训练只采样，
             // 最终优化版的运行才把真实结果打到终端，避免重复）。
+            // AArch64 交叉目标经 qemu-aarch64-static 执行；其余直接执行。
             println!("ℹ️  PGO：运行训练样本收集热点（训练输出已静默）…");
-            let mut run = Command::new(&gen_exe);
+            let mut run = if let Some(ref qemu) = aarch64_runner {
+                let mut q = Command::new(qemu);
+                q.arg(&gen_exe);
+                q
+            } else {
+                Command::new(&gen_exe)
+            };
             run.env("DIAL_PGO_FILE", &prof_path)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
@@ -1831,6 +1861,27 @@ fn compile_runtime_lto(safety: SafetyMode, opts: &LinkOpts) -> Result<Vec<PathBu
 /// 运行命令并返回是否成功退出。
 fn run_ok(cmd: &mut Command) -> bool {
     cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// P4.5：找 AArch64 训练二进制的用户态模拟器。
+/// 交叉编译（宿主 x86-64、目标 AArch64）时，插桩训练二进制是 aarch64 ELF，
+/// 无法在宿主直接执行，需 qemu-aarch64-static（静态链接，无需 sysroot）。
+/// 原生 AArch64 宿主返回 None（直接执行即可）。
+fn pgo_aarch64_runner() -> Option<String> {
+    if std::env::consts::ARCH == "aarch64" {
+        return None; // 原生目标，直接跑
+    }
+    for cand in ["qemu-aarch64-static", "qemu-aarch64"] {
+        if let Some(path) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path) {
+                let p = dir.join(cand);
+                if p.is_file() {
+                    return Some(p.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 

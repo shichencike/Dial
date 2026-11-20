@@ -126,6 +126,12 @@
 #   AJ. AArch64 DWARF 源码级调试门禁（P1 平台对等，verify_aarch64_dwarf.sh：AArch64 -g
 #      产合法 DWARF v5 + qemu gdbstub 实机 gdb 源码行断点命中 + print counter=42；
 #      钉死 .value→.2byte 兼容性 + DW_OP_breg31(sp)=0x8f location 编码；缺依赖则 skip）。
+#   AP3. AArch64 自研 PGO 实机门禁（P4.5 平台对等，verify_aarch64_pgo.sh：插桩 target-aware
+#      (adrp+ldr/add/str + 保护 LR)，训练二进制 -static + qemu 执行，缺 qemu Fail-Fast；
+#      六层证据：magic/计数/冷热分段/qemu 输出一致/确定性/ Fail-Fast；缺依赖则 skip）。
+#   AP4. AArch64 内联汇编实机门禁（P4.5 平台对等，verify_aarch64_inline_asm.sh：@asm
+#      target-aware，操作数池 x0-x5 / uxtb 零扩展 / 裸寄存器名 / 方言仅 x86；
+#      qemu 逐值验证 identity/add7/byte/intel + 形态断言；缺依赖则 skip）。
 set -u
 set +m   # 关闭作业控制提示（避免 "Trace/breakpoint trap" 噪音）
 
@@ -5060,6 +5066,22 @@ echo
 echo "== AJ) AArch64 DWARF 源码级调试门禁（P1 平台对等，qemu gdbstub 实机断点）=="
 if bash tools/verify_aarch64_dwarf.sh "$DIALC"; then
     :   # 缺 qemu/交叉 gcc/gdb-multiarch 时脚本自行 skip；有则逐条打印 ✅，失败非 0 退出
+else
+    fail=1
+fi
+
+echo
+echo "== AP3) AArch64 自研 PGO 实机门禁（P4.5 平台对等，插桩 target-aware + qemu 训练 + Fail-Fast）=="
+if bash tools/verify_aarch64_pgo.sh "$DIALC"; then
+    :   # 缺 qemu/交叉 gcc 时脚本自行 skip；有则逐条打印 ✅，失败非 0 退出
+else
+    fail=1
+fi
+
+echo
+echo "== AP4) AArch64 内联汇编实机门禁（P4.5 平台对等，@asm target-aware + qemu 逐值验证）=="
+if bash tools/verify_aarch64_inline_asm.sh "$DIALC"; then
+    :   # 缺 qemu/交叉 gcc 时脚本自行 skip；有则逐条打印 ✅，失败非 0 退出
 else
     fail=1
 fi

@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/unreleased-dev.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release--理由与证据链">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release） · 理由与证据链</a><ul>
+<li><a href="#p45-aarch64-pgo-与内联汇编补齐llvm-有-asm-无能力缺口">P4.5 AArch64 PGO 与内联汇编（补齐「LLVM 有 asm 无」能力缺口）</a></li>
 <li><a href="#p44-依赖闭环--升级体验--工程加固缺口盘点后补完">P4.4 依赖闭环 + 升级体验 + 工程加固（缺口盘点后补完）</a></li>
 <li><a href="#ci-windows-二进制安全加固按版一次性自签--密码学擦除crypto-shredding">CI Windows 二进制安全加固：按版一次性自签 + 密码学擦除（crypto-shredding）</a></li>
 <li><a href="#新路线-p4dialpkg-从专用分发格式升为通用-c-包管理标准仅路线图零代码">新路线 P4：dialpkg 从「专用分发格式」升为「通用 C 包管理标准」（仅路线图，零代码）</a></li>
@@ -75,6 +76,46 @@
 变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
 </blockquote>
 <hr />
+<h4 id="p45-aarch64-pgo-与内联汇编补齐llvm-有-asm-无能力缺口">P4.5 AArch64 PGO 与内联汇编（补齐「LLVM 有 asm 无」能力缺口）</h4>
+<p><strong>缘起</strong>：用户看了缺口盘点后指出「aarch64 还不如 x86，先把 aarch64 相关补上」，直接推翻
+上一批按「性能够用即可」战略把 <strong>AArch64 PGO / 内联汇编</strong> 记为「可接受降级、暂缓」的裁决。</p>
+<p><strong>理由校正</strong>：这两项此前被误归入「性能边际」而暂缓。但源码盘点定性它们是 <strong>A 类「LLVM 有、
+asm 无」的能力缺口</strong>——LLVM 在 AArch64 完整支持 inline asm 与 PGO。补齐它们是「功能对等」
+而非「性能竞赛」，与「性能维度冻结」（冻结的是优化投入）不冲突。仍守护栏：同为 1.10.0、
+零新 Rust 依赖、LLVM 后端零改动。</p>
+<p><strong>PGO 放开的关键正确性点</strong>（<code>src/codegen_asm.rs</code>）：
+- 插桩在「驻留开启前」执行（函数入口 prologue 后、循环头 begin_block 前），scratch 寄存器
+  x9/x10/x11 此时无活跃值，用完即弃。x86 用 <code>incq mem(%rip)</code> + <code>pushfq/popfq</code> 不碰 GPR；
+  AArch64 无内存自增，用 <code>adrp + add :lo12:dial_pgo_counters</code> 取 <code>.comm</code> 地址、<code>ldr/add/str</code>
+  自增——<code>add</code>（非 <code>adds</code>）不改 NZCV，故无需保 flags。偏移用 <code>mov_imm64</code> 进 x11 再做寄存器
+  偏移，避开 <code>ldr/str</code> 立即数 32760 字节上限（大程序计数器多时可能超）。
+- dump 在 main 返回前调用（<code>lg(v)</code> 之前）。x86 <code>call</code> 把返回地址压栈、<code>ret</code> 自然弹回；
+  AArch64 <code>bl</code> <strong>覆盖 LR(x30)</strong>，且 main 可能无 lr_slot（无 call 的最小程序），故 dump 内部
+  必须 <code>stp</code> 保存 x0-x17 + x30 到 160 字节（16 对齐）栈块、调用后 <code>ldp</code> 恢复，返回值与 LR
+  都不受影响。
+- 训练运行：AArch64 交叉编译的插桩二进制是 aarch64 ELF，x86 宿主无法执行。训练二进制改用
+  <code>-static</code> 链接（qemu 无需 sysroot）+ <code>qemu-aarch64-static</code> 执行；原生 AArch64 宿主直接跑。
+  <strong>缺 qemu 当场 Fail-Fast</strong>（rc=1 并提示 apt install qemu-user-static）——静默降级会伪装成
+  「PGO 成功但无 profile」，违背 fail-fast 哲学。</p>
+<p><strong>内联汇编放开的关键正确性点</strong>（<code>src/codegen_asm.rs</code>）：
+- 操作数池：x86 <code>rdi/rsi/rdx/rcx/r8/r9</code>；AArch64 <code>x0-x5</code>（x6/x7 留 ABI 边界；含 asm 函数
+  已全 spill，这些寄存器无驻留值，独占安全）。都不用发射器 scratch 与 callee-saved。
+- i8/i1 零扩展：x86 <code>movzbq</code>；AArch64 <code>lg</code> 装入 64 位后 <code>uxtb wN,wN</code>（写 w 寄存器自动清高
+  32 位 = 零扩展到 64 位）。模板占位符宽度按 IrType：i8/i1→r8(AArch64 wN)、i32→r32(wN)。
+- 模板渲染：ATT 的 <code>%</code> 前缀是 x86 语法，AArch64 GAS 用裸名（x0/w0），任何 dialect 都不加 <code>%</code>。
+  Intel 方言切换（<code>.intel_syntax</code>/<code>.att_syntax</code>）仅 x86 发射；AArch64 只有一种汇编语法，
+  <code>@asm</code>/<code>@asm_intel</code> 等价（模板都按 AArch64 语法书写，与 LLVM 一致）。</p>
+<p><strong>实测证据</strong>：
+- AArch64 PGO 两段式：profile magic <code>DIALPGO1</code>、计数精确反映真实执行（work1/work2 循环头
+  各 6020 = 20×300+20，函数入口 20/21），冷热分段正确（热函数入 <code>.text.hot</code>、冷函数入
+  <code>.text.unlikely</code>），qemu 实机 baseline 与 PGO 输出逐字节一致，profile 重复编译一致，缺 qemu
+  拒绝。门禁 <code>tools/verify_aarch64_pgo.sh</code> 六层全绿 → run_tests.sh AP3 段。
+- AArch64 inline asm qemu 实机：<code>mov x0,x1</code>（identity）、<code>add x0,x0,#7</code>（绑定约束 "=r,0"）、
+  <code>uxtb</code>+<code>mov w0,w1</code>（byte 200/255）、Intel 方言入口不误发 <code>.intel_syntax</code>、无 asm 普通程序
+  输出不变。门禁 <code>tools/verify_aarch64_inline_asm.sh</code> 10 项全绿 → AP4 段。
+- 零回归：x86 inline asm 双后端 golden 逐字节一致、ffi_lowlevel_demo 输出全对、x86 PGO 门禁
+  全绿；<code>verify_aarch64_semantics.sh</code> 对 x86 语法的 inline_asm golden 仍 skip（改由 AP4 用
+  AArch64 语法模板覆盖）。</p>
 <h4 id="p44-依赖闭环--升级体验--工程加固缺口盘点后补完">P4.4 依赖闭环 + 升级体验 + 工程加固（缺口盘点后补完）</h4>
 <p><strong>缘起</strong>：2026-11-20 用户要求「看看还有什么缺口：包管理有哪些、代替 LLVM 有哪些」。
 派两路只读代理做源码级盘点（不轻信文档），我抽查 9 条硬结论确认无误。发现包管理的

@@ -54,7 +54,9 @@ npass=0; nskip=0
 
 for src in tests/asm_golden/*.dial; do
     name="$(basename "$src" .dial)"
-    # inline_asm：AArch64 明确 Fail-Fast（仅支持 x86-64），属预期能力降级，跳过。
+    # inline_asm：该 golden 模板是 x86 汇编语法（movq/addq），无法在 AArch64 汇编。
+    # P4.5 起 AArch64 已支持内联汇编，但须用 AArch64 语法模板，由专用门禁
+    # verify_aarch64_inline_asm.sh 实机覆盖；此处跳过 x86 模板的 golden，避免误红。
     if [ "$name" = "inline_asm" ]; then
         nskip=$((nskip + 1))
         continue
@@ -88,5 +90,5 @@ for src in tests/asm_golden/*.dial; do
     npass=$((npass + 1))
 done
 
-echo "  ── AArch64 实机语义门禁：通过 $npass，skip $nskip（inline_asm 预期降级）──"
+echo "  ── AArch64 实机语义门禁：通过 $npass，skip $nskip（inline_asm 用 x86 模板，由专用门禁覆盖）──"
 exit "$fail"

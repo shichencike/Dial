@@ -226,13 +226,24 @@
   gdbstub 实机 <code>break dbg.dial:9</code> 命中 + <code>print counter=42</code> + bt 显示源码行；无 <code>-g</code> 零
   符号。交付门禁 <code>tools/verify_aarch64_dwarf.sh</code>（缺 qemu/交叉 gcc/gdb 自动 skip，挂入
   run_tests.sh AJ 段），全量 run_tests（含 R2 x86 DWARF / AI 语义 / AJ DWARF）全绿。</li>
-<li><strong>AArch64 能力降级项——逐项裁决完毕（2026-11-19）</strong>：</li>
-<li><strong>内联汇编 Fail-Fast</strong>：按设计拒绝（仅支持 x86-64 方言），<strong>可接受降级</strong>——非 bug，
-    AArch64 无对应内联汇编语义，强造反而破坏 Fail-Fast 哲学；不纳入本批次。</li>
-<li><strong>PGO</strong>（<code>pgo_effective=false</code>）：<strong>可接受降级</strong>——战略转向后性能已冻结为回归护栏，
-    AArch64 无法在本机跑训练样本（<code>pgo_active</code> 本就仅 x86），补齐 ROI 为零；保留功能完整性
-    即可，不纳入本批次。
-  两者均零代码改动，仅在路线图标注裁决理由；核心运行语义 + 源码级调试已在 AArch64 实机验证。</li>
+<li>~~<strong>AArch64 能力降级项——逐项裁决为「可接受降级」（2026-11-19）</strong>~~ —— <strong>已补齐
+  （2026-11-20，P4.5）</strong>。用户随后明确要求「把 AArch64 相关补上」，推翻了此前"可接受降级"
+  裁决。理由校正：这两项是 <strong>A 类「LLVM 有、asm 无」的能力缺口</strong>（LLVM 在 AArch64 支持
+  inline asm 与 PGO），不是性能竞赛——补齐它们不违背"性能冻结"（冻结的是优化投入，不是
+  功能对等）。同为 1.10.0、零新依赖、LLVM 路径零改动：</li>
+<li><strong>PGO 放开 AArch64</strong>：<code>pgo_active</code> 去掉 target 门控；插桩改 target-aware——
+    <code>counter_inc</code> 用 <code>adrp + add :lo12:</code> 取 <code>.comm</code> 地址、<code>ldr/add/str</code> 自增（add 不改 NZCV，
+    scratch x9/x10/x11 在驻留开启前无活跃值）；<code>dump</code> 用 <code>stp/ldp</code> 保护 x0-x17 + <strong>LR(x30)</strong>
+    （AArch64 <code>bl</code> 覆盖 LR，x86 <code>call</code> 压栈不覆盖）。训练二进制 <code>-static</code> 链接 + <code>qemu-aarch64-static</code>
+    执行（原生 AArch64 直接跑），<strong>缺 qemu 当场 Fail-Fast</strong>（不静默降级伪装成功）。门禁
+    <code>tools/verify_aarch64_pgo.sh</code> 六层证据（magic/计数反映真实执行/冷热分段/qemu 输出一致/
+    确定性/Fail-Fast）全绿，挂 run_tests.sh AP3 段。</li>
+<li><strong>内联汇编放开 AArch64</strong>：去掉两处 Fail-Fast 预检；<code>inst_inline_asm</code>/<code>render_asm_template</code>
+    改 target-aware——操作数池 x86 <code>rdi..r9</code> → AArch64 <code>x0-x5</code>、i8/i1 零扩展 <code>movzbq</code> → <code>uxtb</code>、
+    AArch64 寄存器裸名（不加 ATT 的 <code>%</code>）、Intel 方言切换仅 x86 发射。模板按目标汇编语法书写
+    （与 LLVM 一致）。门禁 <code>tools/verify_aarch64_inline_asm.sh</code> qemu 实机逐值验证 identity/
+    add7/byte/Intel 方言 + 形态断言（裸名/无方言切换/uxtb）全绿，挂 AP4 段；x86 双后端零回归。
+  核心运行语义（AI）、源码级调试（AJ）、PGO（AP3）、内联汇编（AP4）现均在 AArch64 实机验证。</li>
 </ul>
 <h3 id="p2--功能对等b-类语言特性按llvm-不存在总纲裁决--已全部收口2026-11-19">P2 · 功能对等（B 类语言特性，按「LLVM 不存在」总纲裁决）—— ✅ 已全部收口（2026-11-19）</h3>
 <p>以下 LLVM 后端也没有，但按「假设 LLVM 不存在、只有自己」总纲，它们是<strong>语言层真实能力

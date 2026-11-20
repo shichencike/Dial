@@ -5,6 +5,52 @@
 
 ---
 
+#### P4.5 AArch64 PGO 与内联汇编（补齐「LLVM 有 asm 无」能力缺口）
+
+**缘起**：用户看了缺口盘点后指出「aarch64 还不如 x86，先把 aarch64 相关补上」，直接推翻
+上一批按「性能够用即可」战略把 **AArch64 PGO / 内联汇编** 记为「可接受降级、暂缓」的裁决。
+
+**理由校正**：这两项此前被误归入「性能边际」而暂缓。但源码盘点定性它们是 **A 类「LLVM 有、
+asm 无」的能力缺口**——LLVM 在 AArch64 完整支持 inline asm 与 PGO。补齐它们是「功能对等」
+而非「性能竞赛」，与「性能维度冻结」（冻结的是优化投入）不冲突。仍守护栏：同为 1.10.0、
+零新 Rust 依赖、LLVM 后端零改动。
+
+**PGO 放开的关键正确性点**（`src/codegen_asm.rs`）：
+- 插桩在「驻留开启前」执行（函数入口 prologue 后、循环头 begin_block 前），scratch 寄存器
+  x9/x10/x11 此时无活跃值，用完即弃。x86 用 `incq mem(%rip)` + `pushfq/popfq` 不碰 GPR；
+  AArch64 无内存自增，用 `adrp + add :lo12:dial_pgo_counters` 取 `.comm` 地址、`ldr/add/str`
+  自增——`add`（非 `adds`）不改 NZCV，故无需保 flags。偏移用 `mov_imm64` 进 x11 再做寄存器
+  偏移，避开 `ldr/str` 立即数 32760 字节上限（大程序计数器多时可能超）。
+- dump 在 main 返回前调用（`lg(v)` 之前）。x86 `call` 把返回地址压栈、`ret` 自然弹回；
+  AArch64 `bl` **覆盖 LR(x30)**，且 main 可能无 lr_slot（无 call 的最小程序），故 dump 内部
+  必须 `stp` 保存 x0-x17 + x30 到 160 字节（16 对齐）栈块、调用后 `ldp` 恢复，返回值与 LR
+  都不受影响。
+- 训练运行：AArch64 交叉编译的插桩二进制是 aarch64 ELF，x86 宿主无法执行。训练二进制改用
+  `-static` 链接（qemu 无需 sysroot）+ `qemu-aarch64-static` 执行；原生 AArch64 宿主直接跑。
+  **缺 qemu 当场 Fail-Fast**（rc=1 并提示 apt install qemu-user-static）——静默降级会伪装成
+  「PGO 成功但无 profile」，违背 fail-fast 哲学。
+
+**内联汇编放开的关键正确性点**（`src/codegen_asm.rs`）：
+- 操作数池：x86 `rdi/rsi/rdx/rcx/r8/r9`；AArch64 `x0-x5`（x6/x7 留 ABI 边界；含 asm 函数
+  已全 spill，这些寄存器无驻留值，独占安全）。都不用发射器 scratch 与 callee-saved。
+- i8/i1 零扩展：x86 `movzbq`；AArch64 `lg` 装入 64 位后 `uxtb wN,wN`（写 w 寄存器自动清高
+  32 位 = 零扩展到 64 位）。模板占位符宽度按 IrType：i8/i1→r8(AArch64 wN)、i32→r32(wN)。
+- 模板渲染：ATT 的 `%` 前缀是 x86 语法，AArch64 GAS 用裸名（x0/w0），任何 dialect 都不加 `%`。
+  Intel 方言切换（`.intel_syntax`/`.att_syntax`）仅 x86 发射；AArch64 只有一种汇编语法，
+  `@asm`/`@asm_intel` 等价（模板都按 AArch64 语法书写，与 LLVM 一致）。
+
+**实测证据**：
+- AArch64 PGO 两段式：profile magic `DIALPGO1`、计数精确反映真实执行（work1/work2 循环头
+  各 6020 = 20×300+20，函数入口 20/21），冷热分段正确（热函数入 `.text.hot`、冷函数入
+  `.text.unlikely`），qemu 实机 baseline 与 PGO 输出逐字节一致，profile 重复编译一致，缺 qemu
+  拒绝。门禁 `tools/verify_aarch64_pgo.sh` 六层全绿 → run_tests.sh AP3 段。
+- AArch64 inline asm qemu 实机：`mov x0,x1`（identity）、`add x0,x0,#7`（绑定约束 "=r,0"）、
+  `uxtb`+`mov w0,w1`（byte 200/255）、Intel 方言入口不误发 `.intel_syntax`、无 asm 普通程序
+  输出不变。门禁 `tools/verify_aarch64_inline_asm.sh` 10 项全绿 → AP4 段。
+- 零回归：x86 inline asm 双后端 golden 逐字节一致、ffi_lowlevel_demo 输出全对、x86 PGO 门禁
+  全绿；`verify_aarch64_semantics.sh` 对 x86 语法的 inline_asm golden 仍 skip（改由 AP4 用
+  AArch64 语法模板覆盖）。
+
 #### P4.4 依赖闭环 + 升级体验 + 工程加固（缺口盘点后补完）
 
 **缘起**：2026-11-20 用户要求「看看还有什么缺口：包管理有哪些、代替 LLVM 有哪些」。

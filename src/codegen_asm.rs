@@ -346,15 +346,9 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
     // 新指令，产物与引入本参数前逐字节一致。当前批次只建立开关基础设施，后续
     // 各 targeted 融合（LZCNT/BMI/AVX2/FMA…）各自读取 target_cpu 的 has_* 门控。
     let _ = target_cpu;
-    // M7-e3as 预检：内联汇编的 AT&T/Intel 方言是 x86 专属，模板原样交付只在
-    // x86-64 有意义。AArch64 收到含 InlineAsm 的程序 Fail-Fast，明确报错而非
-    // 静默降级（普通程序不含 InlineAsm，AArch64 既有行为零变化）。
-    if !matches!(target, EmitTarget::X86_64SysV)
-        && ip.functions.iter().any(|f| f.blocks.iter().any(|b|
-            b.insts.iter().any(|i| matches!(i, IrInst::InlineAsm { .. }))))
-    {
-        return Err("[asm 后端] 内联汇编 @asm/@asm_intel 仅支持 x86-64 目标".to_string());
-    }
+    // M7-e3as / P4.5：内联汇编在 x86-64 与 AArch64 双目标均支持。模板由开发者
+    // 按目标汇编语法书写（AArch64 用 AAPCS64 寄存器名 x0-x7），后端负责 $N 占位
+    // 符到物理寄存器的渲染与操作数进出；方言切换（ATT/Intel）仅 x86-64 有意义。
     // 预检：FieldAddr.field 是字段序号，必须能按 struct_layout 解析出字节偏移。
     for f in &ip.functions {
         for b in &f.blocks {
@@ -372,8 +366,9 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
         }
     }
 
-    // R4：PGO 仅 x86-64 且非 -g 生效；其余目标/模式一律退化为 baseline。
-    let pgo_active = matches!(target, EmitTarget::X86_64SysV) && !debug_info;
+    // R4/P4.5：PGO 在 x86-64 与 AArch64 双目标均生效（插桩已 target-aware）；
+    // -g 调试态一律退化为 baseline（插桩会扰动调试体验与 DWARF 行号）。
+    let pgo_active = !debug_info;
     let eff_instrument = instrument && pgo_active;
     let eff_profile = if pgo_active { profile } else { None };
 
@@ -2121,13 +2116,34 @@ impl<'a> FnEmit<'a> {
         };
     }
 
-    /// R4 插桩：给计数器 idx 加一。pushfq/popfq 保护 flags；
-    /// incq 的助记符不匹配任何现有文本 pass（那些只认 movq/jmp/jcc 等），安全。
+    /// R4/P4.5 插桩：给计数器 idx 加一。两个目标都在「驻留开启前」调用，
+    /// 此时 scratch 寄存器无活跃值，且 must-not-clobber 的 callee-saved / SP / LR
+    /// 均不碰。
+    /// - x86-64：pushfq/popfq 保护 flags，用 incq 内存操作数（不改任何 GPR）。
+    /// - AArch64：用 x9/x10（发射器 scratch，非 callee-saved、非传参），adrp+add
+    ///   取 .comm 符号地址，ldr/add/str 完成自增；add（非 adds）不改 NZCV，
+    ///   无需保存 flags。x9/x10 在插桩点无活跃值（入口在 prologue 后、驻留前；
+    ///   循环头在 begin_block 前），用完即弃，不影响后续发射。
     fn pgo_counter_inc(&mut self, idx: usize) {
         if !self.pgo.instrument { return; }
-        self.line("\tpushfq");
-        self.line(&format!("\tincq dial_pgo_counters+{}(%rip)", idx * 8));
-        self.line("\tpopfq");
+        match self.target {
+            EmitTarget::X86_64SysV => {
+                self.line("\tpushfq");
+                self.line(&format!("\tincq dial_pgo_counters+{}(%rip)", idx * 8));
+                self.line("\tpopfq");
+            }
+            EmitTarget::AArch64 => {
+                // 用寄存器偏移而非立即数：AArch64 ldr/str 无符号立即数上限 32760
+                // （4095*8），大程序计数器多时可超；寄存器偏移无此限制。
+                self.line("\tadrp x9, dial_pgo_counters");
+                self.line("\tadd x9, x9, :lo12:dial_pgo_counters");
+                self.mov_imm64("x11", (idx * 8) as u64);
+                self.line("\tadd x9, x9, x11");
+                self.line("\tldr x10, [x9]");
+                self.line("\tadd x10, x10, #1");
+                self.line("\tstr x10, [x9]");
+            }
+        }
     }
 
     /// R4 插桩：main 返回前把计数器写到 profile 文件。
@@ -2137,12 +2153,36 @@ impl<'a> FnEmit<'a> {
     /// 再让原有的 lg(v)/epilogue 照常执行，返回值不受影响。
     fn pgo_emit_dump(&mut self) {
         if !self.pgo.instrument || self.f.name != "main" { return; }
-        let saved = ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
-        for r in saved.iter() { self.line(&format!("\tpushq {}", self.r(r))); }
-        self.line("\tleaq dial_pgo_counters(%rip), %rdi");
-        self.line(&format!("\tmovl ${}, %esi", self.pgo.counter_count));
-        self.line("\tcall dial_pgo_dump@PLT");
-        for r in saved.iter().rev() { self.line(&format!("\tpopq {}", self.r(r))); }
+        match self.target {
+            EmitTarget::X86_64SysV => {
+                let saved = ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
+                for r in saved.iter() { self.line(&format!("\tpushq {}", self.r(r))); }
+                self.line("\tleaq dial_pgo_counters(%rip), %rdi");
+                self.line(&format!("\tmovl ${}, %esi", self.pgo.counter_count));
+                self.line("\tcall dial_pgo_dump@PLT");
+                for r in saved.iter().rev() { self.line(&format!("\tpopq {}", self.r(r))); }
+            }
+            EmitTarget::AArch64 => {
+                // 保护全部 caller-saved GPR(x0-x17) + LR(x30)：返回值 val 的 lg
+                // 在 dump 之后执行，若其值驻留物理寄存器，bl 会踩踏；且 bl 覆盖
+                // x30，而 main 可能无 lr_slot（无 call 的最小程序），必须自保。
+                // 20 槽(x0..x17 + x30 + 1 padding)=160 字节，SP 保持 16 对齐。
+                self.line("\tsub sp, sp, #160");
+                for i in (0..18).step_by(2) {
+                    self.line(&format!("\tstp x{}, x{}, [sp, #{}]", i, i + 1, i * 8));
+                }
+                self.line("\tstr x30, [sp, #144]");
+                self.line("\tadrp x0, dial_pgo_counters");
+                self.line("\tadd x0, x0, :lo12:dial_pgo_counters");
+                self.mov_imm64("x1", self.pgo.counter_count as u64);
+                self.line("\tbl dial_pgo_dump");
+                self.line("\tldr x30, [sp, #144]");
+                for i in (0..18).step_by(2).rev() {
+                    self.line(&format!("\tldp x{}, x{}, [sp, #{}]", i, i + 1, i * 8));
+                }
+                self.line("\tadd sp, sp, #160");
+            }
+        }
     }
 
     fn prologue(&mut self) {
@@ -2515,7 +2555,19 @@ impl<'a> FnEmit<'a> {
     fn inst_inline_asm(&mut self, dst: VReg, template: &str, constraints: &str,
                        dialect: AsmDialect, args: &[Value], arg_tys: &[IrType], ret_ty: IrType) {
         // 实参寄存器池（caller-saved，跨 call 无需保存；asm 块内独占）。
-        const POOL: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+        // x86-64：整数实参寄存器 rdi/rsi/rdx/rcx/r8/r9；
+        // AArch64：整数实参寄存器 x0-x5（x6/x7 留给 ABI 边界；含 asm 函数全 spill，
+        // 这些寄存器无驻留值，独占安全）。两目标都不用发射器 scratch（x86 rax/r10/r11、
+        // AArch64 x9/x10/x11/x12）与 callee-saved。
+        let pool: Vec<&str> = match self.target {
+            EmitTarget::X86_64SysV => vec!["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+            EmitTarget::AArch64 => vec!["x0", "x1", "x2", "x3", "x4", "x5"],
+        };
+        let fallback = match self.target {
+            EmitTarget::X86_64SysV => "rdi",
+            EmitTarget::AArch64 => "x0",
+        };
+        let is_x86 = matches!(self.target, EmitTarget::X86_64SysV);
 
         // 约束串解析：每项形如 "=r" / "=&r" / "+r" / "r" / "0"。
         // 提取每项的「绑定编号」：纯数字 = 与该编号操作数同寄存器；否则新分配。
@@ -2529,16 +2581,16 @@ impl<'a> FnEmit<'a> {
                     op_reg.push(op_reg[t].clone());
                 } else {
                     // 绑定了尚未分配的操作数——防御性退回新寄存器（语义层已保证合法）。
-                    op_reg.push(POOL[pool_idx.min(POOL.len() - 1)].to_string());
+                    op_reg.push(pool[pool_idx.min(pool.len() - 1)].to_string());
                     pool_idx += 1;
                 }
             } else {
-                op_reg.push(POOL[pool_idx.min(POOL.len() - 1)].to_string());
+                op_reg.push(pool[pool_idx.min(pool.len() - 1)].to_string());
                 pool_idx += 1;
             }
         }
-        // 操作数 0 必须有寄存器（输出）；约束串为空时兜底用 rdi。
-        if op_reg.is_empty() { op_reg.push("rdi".to_string()); }
+        // 操作数 0 必须有寄存器（输出）；约束串为空时兜底。
+        if op_reg.is_empty() { op_reg.push(fallback.to_string()); }
 
         // 输入实参从操作数 1 开始（$1, $2, ...），把它们装进各自寄存器。
         // arg_tys[i] 与 args[i] 一一对应，位于操作数 i+1。
@@ -2546,11 +2598,20 @@ impl<'a> FnEmit<'a> {
             let oi = i + 1;
             if oi >= op_reg.len() { break; }
             let reg = op_reg[oi].clone();
-            // 按操作数宽度装载：i8 用 8 位名 + movzbq 零扩展，其余 lg 统一 64 位。
+            // 按操作数宽度装载：i8/i1 零扩展，其余 lg 统一 64 位。
+            // x86：movzbq 从 8 位视图零扩展到 64 位；
+            // AArch64：lg 已装入 64 位，用 uxtb wN, wN 截低字节并零扩展到 32 位
+            // （写 w 寄存器自动把高 32 位清零，等价于零扩展到 64 位）。
             let ty = arg_tys.get(i).cloned().unwrap_or(IrType::I64);
             if ty == IrType::I8 || ty == IrType::I1 {
-                self.lg(*v, &self.g1().to_string());
-                self.line(&format!("\tmovzbq {}, {}", self.r(&self.r8(&self.g1())), self.r(&reg)));
+                if is_x86 {
+                    self.lg(*v, &self.g1().to_string());
+                    self.line(&format!("\tmovzbq {}, {}", self.r(&self.r8(&self.g1())), self.r(&reg)));
+                } else {
+                    self.lg(*v, &reg);
+                    let w = self.r32(&reg);
+                    self.line(&format!("\tuxtb {}, {}", w, w));
+                }
             } else {
                 self.lg(*v, &reg);
             }
@@ -2559,9 +2620,8 @@ impl<'a> FnEmit<'a> {
         // 模板占位符替换：$N → 操作数 N 的寄存器名（按 dialect + 操作数宽度），
         // $$ → 字面 $。逐字符扫描，模板里的换行 / 制表符保持原样。
         let rendered = self.render_asm_template(template, &op_reg, &arg_tys, &ret_ty, dialect);
-        // Intel 方言：模板是 Intel 语法，需临时切换汇编器模式，模板后切回 ATT
-        // （输入装载 / 输出回写及本后端其余发射都用 ATT）。ATT 方言无需切换。
-        if dialect == AsmDialect::Intel {
+        // Intel 方言切换仅 x86-64 有意义（AArch64 只有一种汇编语法，忽略方言差异）。
+        if is_x86 && dialect == AsmDialect::Intel {
             self.line("\t.intel_syntax noprefix");
         }
         // 模板可能含 \n 多行；按行发出（line() 会加 \n）。跳过空行以免多余空行。
@@ -2569,16 +2629,22 @@ impl<'a> FnEmit<'a> {
             if ln.is_empty() { continue; }
             self.line(ln);
         }
-        if dialect == AsmDialect::Intel {
+        if is_x86 && dialect == AsmDialect::Intel {
             self.line("\t.att_syntax prefix");
         }
 
         // 输出：操作数 0 的寄存器 → dst 槽。i8 结果高 8 字节可能为垃圾，
-        // 用 movzbq 取低 8 位零扩展（对齐 LLVM zext）；其余整槽搬运。
+        // 用零扩展取低 8 位（对齐 LLVM zext）；其余整槽搬运。
         let out_reg = op_reg[0].clone();
         if ret_ty == IrType::I8 || ret_ty == IrType::I1 {
-            self.line(&format!("\tmovzbq {}, {}", self.r(&self.r8(&out_reg)), self.r(&self.g1().to_string())));
-            self.sg(dst, &self.g1().to_string());
+            if is_x86 {
+                self.line(&format!("\tmovzbq {}, {}", self.r(&self.r8(&out_reg)), self.r(&self.g1().to_string())));
+                self.sg(dst, &self.g1().to_string());
+            } else {
+                let w = self.r32(&out_reg);
+                self.line(&format!("\tuxtb {}, {}", w, w));
+                self.sg(dst, &out_reg);
+            }
         } else {
             self.sg(dst, &out_reg);
         }
@@ -2615,9 +2681,11 @@ impl<'a> FnEmit<'a> {
                             IrType::I32 | IrType::F32 => self.r32(base),
                             _ => base.clone(),
                         };
-                        let shown = match dialect {
-                            AsmDialect::Att => format!("%{}", named),
-                            AsmDialect::Intel => named,
+                        // ATT 的 `%` 前缀是 x86 语法；AArch64 GAS 用裸寄存器名
+                        // （x0/w0/s0），任何 dialect 都不加 `%`。
+                        let shown = match self.target {
+                            EmitTarget::X86_64SysV if dialect == AsmDialect::Att => format!("%{}", named),
+                            _ => named,
                         };
                         out.push_str(&shown);
                     } else {
