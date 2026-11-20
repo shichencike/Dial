@@ -4711,12 +4711,17 @@ uninstall/new 均支持 <code>--json</code>。<strong>P4.1 静态索引与搜索
 <code>info</code> 基于托管静态索引（无中心服务），支持 <code>--json</code>/<code>--offline</code>/<code>--index-sha256</code>（哈希不符
 Fail-Fast 且不回退缓存）。<strong>P4.2 完整依赖管理于 2026-11-20 落地</strong>：<code>dial.toml [dependencies]</code>
 声明语义版本区间（<code>^</code>/<code>~</code>/精确/<code>*</code>），<code>dialc resolve</code> 解析传递依赖并仲裁（冲突可读报错）、
-生成 <code>dial.lock</code> 锁定精确版本+SHA256，<code>dialc install --locked</code> 按 lock 复现安装——§1 五维度
-至此全部达成。<strong>P4.3 下载韧性与平台声明于 2026-11-20 落地</strong>：包下载缓存 + <code>dialc install
+生成 <code>dial.lock</code> 锁定精确版本+SHA256，<code>dialc install --locked</code> 按 lock 复现安装——版本求解能力
+至此齐备（但普通 <code>install &lt;url&gt;</code> 仍只装单包，依赖闭环由下方 P4.4 补完）。<strong>P4.3 下载韧性与平台声明于 2026-11-20 落地</strong>：包下载缓存 + <code>dialc install
 &lt;url&gt; --offline</code>（只用缓存、缺失 Fail-Fast）+ <code>DIAL_MIRROR</code> 镜像重写 + curl 断点续传；
 <code>dial.toml platforms = "..."</code> 声明允许安装的平台，<strong>install 期</strong>校验 host、不匹配即拒绝
 并列出支持平台（零字节落盘）——平台兼容性此前仅在链接期由 <code>targets</code> 把关，现在提前到安装期。
-增量更新评估结论为本批不做（体积/收益不成正比 + 整包 SHA256 信任链优先）。至此 P4.0–P4.3 全部落地。
+增量更新评估结论为本批不做（体积/收益不成正比 + 整包 SHA256 信任链优先）。
+<strong>P4.4 依赖闭环与升级体验于 2026-11-20 落地</strong>（源码缺口盘点后补完）：manifest.txt 携带
+<code>dependencies</code>，<code>dialc install &lt;url&gt; --with-deps</code> 装完按依赖自动 resolve + 递归安装（失败即拒，
+默认模式仅提示缺失不阻断）；<code>uninstall</code> 检查反依赖防破坏性卸载；跨进程安装锁防并发 TOCTOU；
+新增 <code>dialc outdated</code> / <code>dialc upgrade [包名]</code> 检查并升级过期包；<code>search</code>/<code>info</code> 版本比较修为
+语义版本。至此 P4.0–P4.4 全部落地。
 本节 §25 其余内容描述的是 v1.10 分发格式（仍然有效、仍是新能力的地基）；「刻意不做」的
 边界以 §25.7 的转向注记为准。零脚本可审计、SHA256 信任链、项目目录零侵入等核心约束<strong>继续保留</strong>。</p>
 </blockquote>
@@ -5151,10 +5156,12 @@ extern fn db_close(db: Db): void;
 若允许同名不同 ABI 的包同时躺在缓存里，编译器无法判断该链哪一份——版本冲突的口子就开了。
 Dial 选择「同名即唯一」，把冲突暴露成「先卸载再装」的显式动作，而非静默选错。</p>
 </blockquote>
-<p><strong>③ 卸载——直接删目录即可。</strong>
-Dial 目前<strong>没有</strong> <code>dialc uninstall</code> 命令，因为缓存是<strong>纯派生数据</strong>：包的所有内容都来自
-<code>.dialpkg</code>，删了随时能重装。要卸载一个包，直接在终端删除它的缓存目录即可：</p>
-<pre><code class="language-bash">rm -rf ~/.dial/packages/&lt;包名&gt;/
+<p><strong>③ 卸载——用 <code>dialc uninstall &lt;包名&gt;</code>。</strong>
+缓存是<strong>纯派生数据</strong>（内容都来自 <code>.dialpkg</code>，删了随时能重装），但 Dial 仍提供
+<code>dialc uninstall &lt;包名&gt;</code>（<code>--json</code> 可用）：它会在删除前检查<strong>反依赖</strong>——若有其它已安装包
+声明依赖该包，则拒绝卸载并列出它们，避免破坏性卸载（P4.4）。确认无反依赖后再删除缓存目录：</p>
+<pre><code class="language-bash">dialc uninstall &lt;包名&gt;
+# 或手动：rm -rf ~/.dial/packages/&lt;包名&gt;/
 </code></pre>
 <blockquote>
 <p>注意这条与 ② 的报错提示是自洽的：ABI 冲突时，运行上面这行删掉旧包，再 <code>dialc install</code>

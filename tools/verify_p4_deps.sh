@@ -197,6 +197,39 @@ assert d['ok'] is False, d
 " 2>/dev/null && [ $FRC -ne 0 ] && ok "索引不可用时 --with-deps 拒装（ok=false）" \
    || bad "--with-deps 索引失败未 Fail-Fast (rc=$FRC)"
 
+# ---- 6.5) outdated / upgrade（版本升级体验）----
+echo "-- 6.5) outdated 报告过期 + upgrade 原子升级 --"
+make_pkg demo p44_demo_add 1.0.0 "$TD/www/demo-1.0.0.dialpkg"
+make_pkg demo p44_demo_add 2.0.0 "$TD/www/demo-2.0.0.dialpkg"
+D1="$(sha256sum "$TD/www/demo-1.0.0.dialpkg" | cut -d' ' -f1)"
+D2="$(sha256sum "$TD/www/demo-2.0.0.dialpkg" | cut -d' ' -f1)"
+cat > "$TD/www/index2.json" <<EOF
+{
+  "schema": 3, "updated": "2026-11-20",
+  "packages": [
+    {"name":"demo","version":"1.0.0","abi":6,"license":"MIT","desc":"demo","targets":["x86_64-linux-gnu"],"url":"http://127.0.0.1:$PORT/demo-1.0.0.dialpkg","sha256":"$D1","deps":{}},
+    {"name":"demo","version":"2.0.0","abi":6,"license":"MIT","desc":"demo","targets":["x86_64-linux-gnu"],"url":"http://127.0.0.1:$PORT/demo-2.0.0.dialpkg","sha256":"$D2","deps":{}}
+  ]
+}
+EOF
+rm -rf "$THOME/.dial/packages/demo"
+$DIALC install "$TD/www/demo-1.0.0.dialpkg" >/dev/null 2>&1
+OUTD="$($DIALC outdated --index "http://127.0.0.1:$PORT/index2.json" --json 2>/dev/null)"
+echo "$OUTD" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+row=[x for x in d['outdated'] if x['name']=='demo']
+assert len(row)==1 and row[0]['current']=='1.0.0' and row[0]['latest']=='2.0.0', d
+" && ok "outdated 报告 demo v1.0.0→v2.0.0" || bad "outdated 报告异常: $OUTD"
+UPG="$($DIALC upgrade demo --index "http://127.0.0.1:$PORT/index2.json" --json 2>/dev/null)"
+echo "$UPG" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+assert d['ok'] is True and d['count']==1 and d['upgraded'][0]['to']=='2.0.0', d
+" && ok "upgrade 把 demo 升到 v2.0.0" || bad "upgrade 异常: $UPG"
+DEMO_VER="$(grep -o '"version": *"[^"]*"' "$THOME/.dial/packages/demo/manifest.txt" | head -1 | grep -o '2.0.0')"
+[ "$DEMO_VER" = "2.0.0" ] && ok "升级后 manifest 版本为 v2.0.0" || bad "升级后版本未更新"
+
 # ---- 7) semver 单测 ----
 # 注意：cargo 依赖真实 HOME 下的 rustup，临时 HOME 会找不到工具链，故此处切回原 HOME。
 echo "-- 7) semver 版本比较单测 --"

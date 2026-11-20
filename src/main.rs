@@ -101,6 +101,10 @@ fn main() {
             cmd_list(&args);
             return;
         }
+        "outdated" | "upgrade" => {
+            cmd_upgrade(command, &args);
+            return;
+        }
         "check" | "fmt" | "test" | "new" | "uninstall" | "pack"
           | "doctor" | "deps" | "watch" | "clean" | "completion" => {
             dispatch_tool(command, &args);
@@ -1878,6 +1882,9 @@ fn print_usage() {
     eprintln!("  resolve   [目录] [--json] [--check] [--index <url>] [--index-sha256 <hex>] [--offline]");
     eprintln!("                                解析 [dependencies] 并生成/校验 dial.lock（P4.2）");
     eprintln!("  list      [--json]             列出已安装包");
+    eprintln!("  outdated  [选项]               列出可升级包（当前→最新，P4.4）");
+    eprintln!("  upgrade   [包名] [选项]        升级过期包到索引最新版（P4.4）");
+    eprintln!("            [选项]=--index <url> --index-sha256 <hex> --offline --json");
     eprintln!("  uninstall <包名> [--json]      卸载已安装包");
     eprintln!("  search    <词> [--json] [--index <url>] [--index-sha256 <hex>] [--offline]");
     eprintln!("                                搜索静态索引中的包（P4.1，无中心服务）");
@@ -2408,6 +2415,183 @@ fn cmd_list(args: &[String]) {
             eprintln!("{}", e);
             std::process::exit(1);
         }
+    }
+}
+
+/// 一个过期包的可升级信息。
+struct OutdatedRow {
+    name: String,
+    current: String,
+    latest: String,
+    url: String,
+    sha256: String,
+}
+
+/// 解析 outdated/upgrade 的公共索引选项。
+fn parse_upgrade_args(command: &str, args: &[String]) -> (bool, bool, Option<String>, Option<String>, Option<String>) {
+    let mut as_json = false;
+    let mut offline = false;
+    let mut index_url: Option<String> = None;
+    let mut index_sha256: Option<String> = None;
+    let mut only: Option<String> = None;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => as_json = true,
+            "--offline" => offline = true,
+            "--index" | "--index-sha256" => {
+                let flag = args[i].clone();
+                i += 1;
+                match args.get(i) {
+                    Some(v) if !v.starts_with('-') => {
+                        if flag == "--index" { index_url = Some(v.clone()); }
+                        else { index_sha256 = Some(v.clone()); }
+                    }
+                    _ => { eprintln!("{} 后面缺少参数值", flag); std::process::exit(1); }
+                }
+            }
+            other if other.starts_with('-') => {
+                eprintln!("{}: 不认识的参数 '{}'", command, other);
+                std::process::exit(1);
+            }
+            other => {
+                if only.is_some() {
+                    eprintln!("{}: 只能指定一个包名", command);
+                    std::process::exit(1);
+                }
+                only = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+    (as_json, offline, index_url, index_sha256, only)
+}
+
+/// `dialc outdated` / `dialc upgrade [包名]`（P4.4 版本升级体验）。
+///
+/// 读已装包版本 → 查索引最新版本 → semver 比较 → 列出/升级。
+/// `outdated` 只报告；`upgrade` 用索引里最新版的 url/sha256 原子覆盖安装。
+fn cmd_upgrade(command: &str, args: &[String]) {
+    let is_upgrade = command == "upgrade";
+    let (as_json, offline, index_url, index_sha256, only) = parse_upgrade_args(command, args);
+
+    let installed = match pkgbuild::list_installed() {
+        Ok(v) => v,
+        Err(e) => { emit_registry_err(as_json, &e); return; }
+    };
+    let install_filtered: Vec<_> = installed.iter()
+        .filter(|(n, _, _, _)| only.as_ref().map(|o| o == n).unwrap_or(true))
+        .cloned()
+        .collect();
+    if let Some(ref name) = only {
+        if install_filtered.is_empty() {
+            emit_registry_err(as_json, &format!("包 '{}' 未安装", name));
+            return;
+        }
+    }
+    if install_filtered.is_empty() {
+        if as_json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true, "outdated": [], "count": 0,
+            })).unwrap());
+        } else {
+            println!("尚未安装任何包，无需检查升级。");
+        }
+        return;
+    }
+
+    let url = index_url
+        .or_else(|| std::env::var("DIAL_INDEX_URL").ok())
+        .unwrap_or_else(|| registry::DEFAULT_INDEX_URL.to_string());
+    let source = if offline { registry::Source::Offline } else { registry::Source::Online };
+    let idx = match registry::load(&url, index_sha256.as_deref(), source) {
+        Ok((idx, _, _)) => idx,
+        Err(e) => { emit_registry_err(as_json, &format!("加载索引失败: {}", e)); return; }
+    };
+
+    // name -> 索引里语义版本最高的条目（复用 registry 的 semver 选版）。
+    let mut latest_by_name: HashMap<&str, &registry::IndexEntry> = HashMap::new();
+    for e in idx.packages() {
+        let replace = latest_by_name.get(e.name.as_str())
+            .map(|cur| crate::version::Version::parse(&e.version).ok()
+                .zip(crate::version::Version::parse(&cur.version).ok())
+                .map(|(a, b)| a > b).unwrap_or_else(|| e.version > cur.version))
+            .unwrap_or(true);
+        if replace { latest_by_name.insert(e.name.as_str(), e); }
+    }
+
+    let mut outdated: Vec<OutdatedRow> = Vec::new();
+    for (name, current, _, _) in &install_filtered {
+        if let Some(latest) = latest_by_name.get(name.as_str()) {
+            let is_newer = crate::version::Version::parse(&latest.version).ok()
+                .zip(crate::version::Version::parse(current).ok())
+                .map(|(a, b)| a > b).unwrap_or_else(|| latest.version > *current);
+            if is_newer {
+                outdated.push(OutdatedRow {
+                    name: name.clone(),
+                    current: current.clone(),
+                    latest: latest.version.clone(),
+                    url: latest.url.clone(),
+                    sha256: latest.sha256.clone(),
+                });
+            }
+        }
+    }
+    outdated.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if !is_upgrade {
+        if as_json {
+            let arr: Vec<_> = outdated.iter().map(|r| serde_json::json!({
+                "name": r.name, "current": r.current, "latest": r.latest,
+            })).collect();
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true, "outdated": arr, "count": arr.len(),
+            })).unwrap());
+        } else if outdated.is_empty() {
+            println!("所有已安装包均为最新版本。");
+        } else {
+            println!("有 {} 个包可升级：", outdated.len());
+            for r in &outdated {
+                println!("  {:<18} v{:<10} → v{}", r.name, r.current, r.latest);
+            }
+            println!("运行 `dialc upgrade [包名]` 升级。");
+        }
+        return;
+    }
+
+    // upgrade：逐个原子覆盖安装。
+    if outdated.is_empty() {
+        if as_json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true, "upgraded": [], "count": 0,
+            })).unwrap());
+        } else {
+            println!("所有已安装包均为最新版本，无需升级。");
+        }
+        return;
+    }
+    let mut upgraded = Vec::new();
+    for r in &outdated {
+        let sha = if r.sha256.is_empty() { None } else { Some(r.sha256.as_str()) };
+        match package::install_from_url_opts(&r.url, sha, offline, false) {
+            Ok((_, m)) => {
+                upgraded.push(serde_json::json!({
+                    "name": r.name, "from": r.current, "to": m.version,
+                }));
+                if !as_json {
+                    println!("✅ 升级 {} v{} → v{}", r.name, r.current, m.version);
+                }
+            }
+            Err(e) => {
+                emit_registry_err(as_json, &format!("升级 '{}' 失败: {}", r.name, e.message));
+                return;
+            }
+        }
+    }
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true, "upgraded": upgraded, "count": upgraded.len(),
+        })).unwrap());
     }
 }
 

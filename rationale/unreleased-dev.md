@@ -5,6 +5,41 @@
 
 ---
 
+#### P4.4 依赖闭环 + 升级体验 + 工程加固（缺口盘点后补完）
+
+**缘起**：2026-11-20 用户要求「看看还有什么缺口：包管理有哪些、代替 LLVM 有哪些」。
+派两路只读代理做源码级盘点（不轻信文档），我抽查 9 条硬结论确认无误。发现包管理的
+核心症结：P4.2 虽实现「版本求解」，但 `install <url>` 只装单包、不解析依赖；`pack` 早把
+deps 写进 `manifest.txt`，`Manifest` 结构与 `parse_manifest` 却不读它——「一条命令装完即用」
+与「完整依赖管理」两个卖点实际未连起来。据此定了 all-in 的补完批次。
+
+**为什么这样修（关键决策与取舍）**：
+- **默认模式 vs `--with-deps`**：默认装包只做依赖「满足性检查 + 提示」，**不 Fail-Fast**——
+  因为旧包/离线包/手动管理依赖的用户不该被新检查打断；只有显式 `--with-deps` 才承诺
+  「装齐依赖」，此时失败才拒装。这是「不破坏既有行为」优先于「强制完备」的取舍。
+- **并发锁为何纯 std**：`Cargo.toml` 只有 inkwell/zip/serde_json/sha2，无 libc；零新依赖铁律下
+  用 `create_new` 原子创建锁文件（跨平台），mtime 超 30min 视为陈旧自愈（崩溃可恢复），
+  nonce 防止「旧持有者 Drop 误删接管者新锁」。装/卸共用同一把锁防 TOCTOU。
+- **manifest deps 逐条校验区间**：解析期即调 `parse_requirement` 校验，畸形区间 Fail-Fast，
+  与 registry 索引 deps 的校验策略一致。
+- **outdated/upgrade 复用索引**：不引入新数据源，沿用 `registry::load` + semver 选版；
+  `upgrade` 用索引最新版 url/sha256 走既有原子安装路径。
+
+**代替 LLVM 缺口的诚实裁决（本批暂缓项）**：源码核实后，把剩余项按用户「性能够用即可、
+停止无意义微优化」战略分类——① PGO 插桩 `pgo_counter_inc`/`pgo_emit_dump` 是 x86 专用汇编
+（pushfq/incq/%rip/pushq），放开 AArch64 需实现 AArch64 版计数器自增与 dump，属实质工作；
+② DWARF 基本 gdb 调试（断点/print/源码行）已端到端验证，缺的是内联 DIE 与复合类型结构化，
+属两端共同的语言层缺口；③ AArch64 inline asm 是 x86 方言语义，移植属新增能力而非补齐；
+④ Os/Oz 已由 `--tiny`/`--fast-compile` 覆盖诉求。以上均**不构成代替的硬阻塞**，如实记入
+路线图而不盲目投入架构级改动——这正是「够用线」战略的体现。
+
+**证据链**：`tools/verify_p4_deps.sh` 13 项断言——manifest 写 deps / 默认模式报告不 Fail /
+`--with-deps` 自动装齐 / 反依赖拒绝卸载 / 并发锁拒绝+陈旧自愈 / 索引失败 Fail-Fast /
+outdated+upgrade / semver 单测，全绿；挂 `run_tests.sh` AP2 段，全量回归 EXIT=0（4 分钟）。
+commit f704878。护栏：LLVM 后端零改动、零新 Rust 依赖、版本 1.10.0、不打 tag。
+
+---
+
 #### CI Windows 二进制安全加固：按版一次性自签 + 密码学擦除（crypto-shredding）
 
 **用户诉求原文精神（2026-11-20）**：

@@ -68,6 +68,11 @@
 待办转为「代替能力完备」——P0 正确性（本文维度 1 发现的 map string key 泄漏）、P1
 平台（本文维度 4 的 AArch64 未实机验证）、P2 功能对等裁决、P3 文档收口。
 下方五维数据与证据链<strong>全部保留</strong>，但「不能代替」的结论及其性能归因已被新战略取代。</p>
+<p><strong>2026-11-20 补记</strong>：P0–P3 已全部收口（全量门禁 4 分钟全绿），维度 1 的 B6 struct 进容器、
+维度 4 的 AArch64 实机语义/DWARF 均已修复并有门禁。同日源码级缺口盘点进一步确认：
+在「性能够用即可」战略下，剩余项（AArch64 PGO/inline asm、DWARF 内联与复合类型、Os/Oz）
+属<strong>性能/体验的边际边界或两端共同缺口，不构成代替的硬阻塞</strong>，已在
+<code>rationale/dialpkg-roadmap.md</code> §P4.4 与 <code>rationale/roadmap-gap-analysis.md</code> 如实标注。</p>
 <p>本文回答一个此前一直被「单维度乐观结论」掩盖的问题：<strong>自研 asm 后端现在到底能不能
 真正代替 LLVM？</strong> 结论不预设立场，全部由当机实测数据说话。审计范围覆盖五个独立维度，
 任一维度不达标即不能宣称「已代替」。所有命令可复现。</p>

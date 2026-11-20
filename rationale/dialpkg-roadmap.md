@@ -227,7 +227,9 @@ mode = "prebuilt"         # prebuilt | source
 
 - **门禁固化**：`tools/verify_p4_resolve.sh`（11 项，缺 curl/python3/zig 自动 skip）挂入 `run_tests.sh` AM 段。
 - **§1 五维度对照**：③ 完整依赖管理——语义版本区间 ✅ / 传递依赖+仲裁 ✅ / `dial.lock` ✅ /
-  search ✅。**五维度全部达成**，dialpkg 在「让人放弃其它 C 包管理器」的产品定义上闭环。
+  search ✅。此时「版本求解」能力齐备，但**「一条命令装完即用」尚未闭环**：普通
+  `install <url>` 仍只装单包、不解析依赖（deps 虽已写进 manifest.txt 却未被读取），
+  需手动 `resolve` + `install --locked` 两步——见下方 P4.4 的补完。
 - **设计边界（不含糊）**：① 不回溯——semver 区间单调，贪心选最高 + 交集判冲突即可收敛，
   冲突明确报错而非静默换版（Fail-Fast 铁律）；② 语义版本选「装哪个版本」，`abi` 把关「能否链接」
   （README §25.3），两者职责分离不冲突；③ 零新依赖（手写版本逻辑）、零脚本、无中心服务。
@@ -252,4 +254,28 @@ mode = "prebuilt"         # prebuilt | source
   `tools/verify_p4_platform.sh`（11 项）挂 AN 段；均缺 curl/python3/zig 自动 skip。
 - **五维度不变**：本批是分发韧性与安装安全的横向增强，不改变 §1 五维度的达成状态。
 
-> 路线图文档初版（2026-11-19）确立战略定位与分期；P4.0/P4.1/P4.2/P4.3 代码均于 2026-11-20 落地。
+### P4.4 · 依赖闭环、升级体验与工程加固 —— ✅ 已落地（2026-11-20，缺口盘点后补完）
+
+> 缘起：2026-11-20 源码级缺口盘点发现——P4.2 虽实现了「版本求解」，但普通
+> `install <url>` 只装单包、不解析依赖；deps 虽由 `pack` 写进 `manifest.txt`，
+> `Manifest` 结构与 `parse_manifest` 却不读取它。于是「一条命令装完即用」与
+> 「完整依赖管理」两个卖点实际未连起来。P4.4 补上这一断链。
+
+| 子项 | 实现 | 证据 |
+|---|---|---|
+| manifest 携带 deps | `Manifest.dependencies` 字段 + `parse_manifest` 解析（逐条校验区间、Fail-Fast），与 `pack` 侧已有序列化对齐；旧包无此字段视为空 | 门禁 1：pack 后 manifest 含 `dependencies{json:^2.0.0}` |
+| `--with-deps` | `install <url> --with-deps` 装完按 manifest 依赖自动 `resolve` 完整依赖图 → 递归 `install_from_url_opts`；任一失败 Fail-Fast。**默认模式**只报告 declared/satisfied/missing、不阻断（保护旧包/离线/手动依赖用户） | 门禁 2/3/6：默认不 Fail / 自动装齐 json / 索引失败拒装 |
+| 反依赖检查 | `uninstall` 扫描已装包 manifest，若有包声明依赖待卸载者则拒绝，避免破坏性卸载 | 门禁 4：top 依赖 json → 拒绝卸载 json；卸 top 后可卸 |
+| 并发安装锁 | 纯 std `create_new` 锁文件 + mtime 超时自愈（30min）+ nonce 防误删；装/卸共用同一把锁防 TOCTOU。**零新依赖、跨平台** | 门禁 5：持锁时拒装 / 陈旧锁自愈 |
+| 版本升级体验 | `dialc outdated`（当前→最新）、`dialc upgrade [包名]`（按索引最新版原子覆盖安装），semver 选版；usage/completion 同步 | 门禁 6.5：报告 v1→v2、升级后 manifest=v2.0.0 |
+| search/info semver 修正 | 版本比较由字符串序改语义版本（`cmp_version`），修复 `10.0.0` 被排到 `2.0.0` 后；补回归单测 | 门禁 7：2 项单测通过 |
+
+- **门禁固化**：`tools/verify_p4_deps.sh`（13 项）挂 `run_tests.sh` AP2 段；全量回归 EXIT=0。
+- **战略边界（延续够用线）**：本批只补「正确性/功能闭环」，不卷入性能微优化。经源码评估，
+  以下项**在「性能够用即可」战略下不构成阻塞、本批如实暂缓**：① PGO 仅在 x86-64 生效
+  （AArch64 插桩是 x86 专用汇编，放开需实现 AArch64 版计数器/dump）；② DWARF 缺内联 DIE 与
+  复合类型结构化（基本 gdb 调试已端到端验证，属两端共同的语言层缺口）；③ AArch64 inline asm
+  Fail-Fast（x86 方言语义，移植属新增能力）；④ Os/Oz（已有 `--tiny`/`--fast-compile` 覆盖诉求）。
+- 零新 Rust 依赖、LLVM 路径零改动、版本 1.10.0、不打 tag。
+
+> 路线图文档初版（2026-11-19）确立战略定位与分期；P4.0/P4.1/P4.2/P4.3/P4.4 代码均于 2026-11-20 落地。

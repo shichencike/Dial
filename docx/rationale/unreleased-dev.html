@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/unreleased-dev.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release--理由与证据链">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release） · 理由与证据链</a><ul>
+<li><a href="#p44-依赖闭环--升级体验--工程加固缺口盘点后补完">P4.4 依赖闭环 + 升级体验 + 工程加固（缺口盘点后补完）</a></li>
 <li><a href="#ci-windows-二进制安全加固按版一次性自签--密码学擦除crypto-shredding">CI Windows 二进制安全加固：按版一次性自签 + 密码学擦除（crypto-shredding）</a></li>
 <li><a href="#新路线-p4dialpkg-从专用分发格式升为通用-c-包管理标准仅路线图零代码">新路线 P4：dialpkg 从「专用分发格式」升为「通用 C 包管理标准」（仅路线图，零代码）</a></li>
 <li><a href="#p1-平台对等aarch64-后端补齐-dwarf-源码级调试-g-静默降级--实机可用">P1 平台对等：AArch64 后端补齐 DWARF 源码级调试（-g 静默降级 → 实机可用）</a></li>
@@ -73,6 +74,35 @@
 <p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
 变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
 </blockquote>
+<hr />
+<h4 id="p44-依赖闭环--升级体验--工程加固缺口盘点后补完">P4.4 依赖闭环 + 升级体验 + 工程加固（缺口盘点后补完）</h4>
+<p><strong>缘起</strong>：2026-11-20 用户要求「看看还有什么缺口：包管理有哪些、代替 LLVM 有哪些」。
+派两路只读代理做源码级盘点（不轻信文档），我抽查 9 条硬结论确认无误。发现包管理的
+核心症结：P4.2 虽实现「版本求解」，但 <code>install &lt;url&gt;</code> 只装单包、不解析依赖；<code>pack</code> 早把
+deps 写进 <code>manifest.txt</code>，<code>Manifest</code> 结构与 <code>parse_manifest</code> 却不读它——「一条命令装完即用」
+与「完整依赖管理」两个卖点实际未连起来。据此定了 all-in 的补完批次。</p>
+<p><strong>为什么这样修（关键决策与取舍）</strong>：
+- <strong>默认模式 vs <code>--with-deps</code></strong>：默认装包只做依赖「满足性检查 + 提示」，<strong>不 Fail-Fast</strong>——
+  因为旧包/离线包/手动管理依赖的用户不该被新检查打断；只有显式 <code>--with-deps</code> 才承诺
+  「装齐依赖」，此时失败才拒装。这是「不破坏既有行为」优先于「强制完备」的取舍。
+- <strong>并发锁为何纯 std</strong>：<code>Cargo.toml</code> 只有 inkwell/zip/serde_json/sha2，无 libc；零新依赖铁律下
+  用 <code>create_new</code> 原子创建锁文件（跨平台），mtime 超 30min 视为陈旧自愈（崩溃可恢复），
+  nonce 防止「旧持有者 Drop 误删接管者新锁」。装/卸共用同一把锁防 TOCTOU。
+- <strong>manifest deps 逐条校验区间</strong>：解析期即调 <code>parse_requirement</code> 校验，畸形区间 Fail-Fast，
+  与 registry 索引 deps 的校验策略一致。
+- <strong>outdated/upgrade 复用索引</strong>：不引入新数据源，沿用 <code>registry::load</code> + semver 选版；
+  <code>upgrade</code> 用索引最新版 url/sha256 走既有原子安装路径。</p>
+<p><strong>代替 LLVM 缺口的诚实裁决（本批暂缓项）</strong>：源码核实后，把剩余项按用户「性能够用即可、
+停止无意义微优化」战略分类——① PGO 插桩 <code>pgo_counter_inc</code>/<code>pgo_emit_dump</code> 是 x86 专用汇编
+（pushfq/incq/%rip/pushq），放开 AArch64 需实现 AArch64 版计数器自增与 dump，属实质工作；
+② DWARF 基本 gdb 调试（断点/print/源码行）已端到端验证，缺的是内联 DIE 与复合类型结构化，
+属两端共同的语言层缺口；③ AArch64 inline asm 是 x86 方言语义，移植属新增能力而非补齐；
+④ Os/Oz 已由 <code>--tiny</code>/<code>--fast-compile</code> 覆盖诉求。以上均<strong>不构成代替的硬阻塞</strong>，如实记入
+路线图而不盲目投入架构级改动——这正是「够用线」战略的体现。</p>
+<p><strong>证据链</strong>：<code>tools/verify_p4_deps.sh</code> 13 项断言——manifest 写 deps / 默认模式报告不 Fail /
+<code>--with-deps</code> 自动装齐 / 反依赖拒绝卸载 / 并发锁拒绝+陈旧自愈 / 索引失败 Fail-Fast /
+outdated+upgrade / semver 单测，全绿；挂 <code>run_tests.sh</code> AP2 段，全量回归 EXIT=0（4 分钟）。
+commit f704878。护栏：LLVM 后端零改动、零新 Rust 依赖、版本 1.10.0、不打 tag。</p>
 <hr />
 <h4 id="ci-windows-二进制安全加固按版一次性自签--密码学擦除crypto-shredding">CI Windows 二进制安全加固：按版一次性自签 + 密码学擦除（crypto-shredding）</h4>
 <p><strong>用户诉求原文精神（2026-11-20）</strong>：</p>
