@@ -114,7 +114,8 @@ echo 'json = "^2.0.0"' >> "$TD/projA/dial.toml"
 printf 'json = "^2.0.0"\nhttp = "^1.0.0"\n' >> "$TD/projB/dial.toml"
 echo 'nonexistent = "^1.0.0"' >> "$TD/projC/dial.toml"
 
-( cd "$TD/www" && python3 -m http.server "$PORT" >/dev/null 2>&1 ) &
+# exec 让 python3 替换子 shell，使 $! 是 python3 真 PID（cleanup 能真正回收，避免孤儿占端口）
+( cd "$TD/www" && exec python3 -m http.server "$PORT" >/dev/null 2>&1 ) &
 HTTP_PID=$!
 for _i in 1 2 3 4 5 6 7 8 9 10; do
     curl -sf "$IDX" -o /dev/null 2>/dev/null && break

@@ -27,7 +27,7 @@
 - **L5 x86 零回归**：x86 `.s` 常量仍 `shlq $3`/`sarq $2`、非常量仍 `%cl` 变址，形态完全不变。
 - 缺 qemu / 交叉 gcc 时整段 skip（CI 无依赖不误红），有则必须全绿。
 
-**同批修复：P4.3 下载门禁的 HTTP 服务进程泄漏（全量回归暴露的既有工程化 bug）**：全量 `run_tests.sh` 首次跑出 EXIT=1，失败点是 AO 段 P4.3 下载门禁的镜像重写 / `--json` 偶发红，与 AArch64 改动无关。定位发现 `tools/verify_p4_offline.sh::start_http` 用 `( cd "$WWW" && python3 -m http.server "$p" ) &`，`$!` 记录的是**子 shell 的 PID**，而 `cleanup`/`kill` 只杀子 shell，`python3 -m http.server` 变孤儿持续监听端口——系统里已累积 **67 个残留服务**，随机端口（`24000+RANDOM%20000`）撞上被占端口即 404 / 连接失败。修复：① 子 shell 内 `exec python3`，使 `$!` 记录的就是 python3 进程 PID，`kill` 真正回收（消除孤儿累积）；② 固定 `sleep 1` 改 curl 轮询直到端口可连（消除就绪竞态），并检测服务进程早死（端口被占）立即返回。修复后连跑 5 次 P4.3 门禁全绿、残留进程恒 0，全量回归恢复 EXIT=0。
+**同批修复：4 个 P4.x 门禁的 HTTP 服务进程泄漏（全量回归暴露的既有工程化 bug）**：全量 `run_tests.sh` 首次跑出 EXIT=1，失败点是 AO 段 P4.3 下载门禁的镜像重写 / `--json` 偶发红，与 AArch64 改动无关。定位发现 `tools/verify_p4_offline.sh` / `verify_p4_index.sh` / `verify_p4_platform.sh` / `verify_p4_resolve.sh` 四个脚本都用 `( cd ... && python3 -m http.server "$p" ) &`，`$!` 记录的是**子 shell 的 PID**，而 `cleanup`/`kill` 只杀子 shell，`python3 -m http.server` 变孤儿持续监听端口——系统里已累积 **67 个残留服务**，随机端口（`24000+RANDOM%20000`）撞上被占端口即 404 / 连接失败。修复：① 四个脚本子 shell 内统一加 `exec python3`，使 `$!` 记录的就是 python3 进程 PID，`kill` 真正回收（消除孤儿累积）；② `verify_p4_offline.sh` 固定 `sleep 1` 改 curl 轮询直到端口可连（消除就绪竞态），并检测服务进程早死（端口被占）立即返回。修复后四个脚本各自连跑全绿、残留进程恒 0，全量回归恢复 EXIT=0。
 
 **战略边界**：性能维度已冻结（够用线内），本批 AArch64 移位折叠属「平台对等」的指令级补齐（LLVM 在 AArch64 同样用立即数移位），不是性能竞赛；结构上每条常量移位省 1 条装载指令，收益确定但不宣称性能数字（±5% 噪声内）。护栏：x86-64 `.s` 逐字节不变、LLVM 后端零改动、零新 Rust 依赖、版本 1.10.0、不打 tag；qemu / 交叉 gcc 仅为门禁依赖（缺则 skip）。
 

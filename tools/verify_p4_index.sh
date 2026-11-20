@@ -89,7 +89,8 @@ IDXSHA="$(sha256sum "$TD/index.json" | cut -d' ' -f1)"
 IDXURL="http://localhost:$PORT/index.json"
 
 # 起本地静态 HTTP 服务。
-( cd "$TD" && python3 -m http.server "$PORT" >/dev/null 2>&1 ) &
+# exec 让 python3 替换子 shell，使 $! 是 python3 真 PID（cleanup 能真正回收，避免孤儿占端口）
+( cd "$TD" && exec python3 -m http.server "$PORT" >/dev/null 2>&1 ) &
 HTTP_PID=$!
 # 等服务起来（最多 ~2s，不用 sleep 循环：直接探测端口）。
 for _i in 1 2 3 4 5 6 7 8 9 10; do

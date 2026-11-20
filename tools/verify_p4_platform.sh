@@ -143,7 +143,8 @@ cat > "$IDXDIR/index.json" <<EOF
   "platforms":["x86_64-linux-gnu","aarch64-linux-gnu"],"deps":{}}
 ]}
 EOF
-( cd "$IDXDIR" && python3 -m http.server "$PORT" >/dev/null 2>&1 ) & HTTP_PID=$!
+# exec 让 python3 替换子 shell，使 $! 是 python3 真 PID（cleanup 能真正回收，避免孤儿占端口）
+( cd "$IDXDIR" && exec python3 -m http.server "$PORT" >/dev/null 2>&1 ) & HTTP_PID=$!
 sleep 1
 IDXURL="http://localhost:$PORT/index.json"
 if "$DIALC" info pfi --index "$IDXURL" 2>&1 | grep -q "可安装平台"; then
