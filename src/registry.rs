@@ -21,8 +21,10 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_INDEX_URL: &str =
     "https://github.com/dial-lang/dial-index/releases/latest/download/index.json";
 
-/// 索引文件格式版本。不匹配即 Fail-Fast（防止新格式被旧编译器误读）。
-const SCHEMA_VERSION: u32 = 1;
+/// 索引文件格式版本。v2 增加每包 `deps` 字段（P4.2）；v1 仍可读（无 deps 视为空）。
+/// 其它版本 Fail-Fast（防止新格式被旧编译器误读）。
+const SCHEMA_VERSION: u64 = 2;
+const MIN_SCHEMA_VERSION: u64 = 1;
 
 /// 索引里的单个包条目。
 #[derive(Debug, Clone)]
@@ -39,6 +41,8 @@ pub struct IndexEntry {
     pub url: String,
     /// 整包 SHA256（可选；有则 `install --sha256` 可钉死来源）。
     pub sha256: String,
+    /// P4.2：该版本的依赖（包名 → 语义版本区间，如 `^1.2.0`）。v1 索引无此字段视为空。
+    pub deps: BTreeMap<String, String>,
 }
 
 /// 静态索引根节点。
@@ -221,12 +225,12 @@ fn parse(text: &str) -> Result<IndexFile> {
         .get("schema")
         .and_then(|x| x.as_u64())
         .ok_or_else(|| DialcError::new("索引缺少整数字段 'schema'".to_string(), 0, 0))?;
-    if schema != SCHEMA_VERSION as u64 {
+    if schema < MIN_SCHEMA_VERSION || schema > SCHEMA_VERSION {
         return Err(DialcError::new(
             format!(
-                "索引 schema={} 不受支持（本编译器只认 schema={}）。\n\
+                "索引 schema={} 不受支持（本编译器只认 schema {}..={}）。\n\
                  请升级编译器，或改用匹配的索引文件。",
-                schema, SCHEMA_VERSION
+                schema, MIN_SCHEMA_VERSION, SCHEMA_VERSION
             ),
             0,
             0,
@@ -289,6 +293,26 @@ fn parse(text: &str) -> Result<IndexFile> {
             .and_then(|x| x.as_array())
             .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
+        // P4.2：deps 是「依赖包名 → 版本区间」对象；逐条校验区间语法（Fail-Fast）。
+        // v1 索引无 deps 字段视为空依赖。
+        let mut deps: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(obj) = p.get("deps").and_then(|x| x.as_object()) {
+            for (dep_name, req) in obj {
+                let req_str = req.as_str().ok_or_else(|| {
+                    DialcError::new(
+                        format!("包 '{}' 的依赖 '{}' 版本区间必须是字符串", name, dep_name),
+                        0, 0,
+                    )
+                })?;
+                if let Err(e) = crate::version::parse_requirement(req_str) {
+                    return Err(DialcError::new(
+                        format!("包 '{}' 的依赖 '{}' 区间非法：{}", name, dep_name, e.message),
+                        0, 0,
+                    ));
+                }
+                deps.insert(dep_name.clone(), req_str.to_string());
+            }
+        }
         packages.push(IndexEntry {
             name,
             version,
@@ -298,6 +322,7 @@ fn parse(text: &str) -> Result<IndexFile> {
             targets,
             url,
             sha256,
+            deps,
         });
     }
     Ok(IndexFile { schema, updated, packages })
@@ -353,6 +378,7 @@ pub fn entry_to_json(e: &IndexEntry) -> serde_json::Value {
         "targets": e.targets,
         "url": e.url,
         "sha256": e.sha256,
+        "deps": e.deps,
     })
 }
 
@@ -398,10 +424,16 @@ fn write_cache_atomic(cache: &Path, text: &str) -> Result<()> {
 
 /// 把索引按包名聚合（供 info 展示"版本列表"时使用），返回 name -> 版本列表。
 #[allow(dead_code)]
-pub fn versions_by_name(idx: &IndexFile) -> BTreeMap<&str, Vec<&str>> {
-    let mut m: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for p in &idx.packages {
-        m.entry(p.name.as_str()).or_default().push(p.version.as_str());
-    }
-    m
+/// 仅供本 crate 单元测试：走真实 parse 路径从字符串构造索引。
+#[cfg(test)]
+pub(crate) fn parse_for_test(text: &str) -> Result<IndexFile> {
+    parse(text)
 }
+
+/// 供依赖求解器遍历全部条目。
+impl IndexFile {
+    pub fn packages(&self) -> &[IndexEntry] {
+        &self.packages
+    }
+}
+

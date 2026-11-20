@@ -5078,6 +5078,13 @@ else
     fail=1
 fi
 
+echo "== AM) dialpkg P4.2 完整依赖管理门禁（版本区间/传递解析/仲裁/lock/install --locked）=="
+if bash tools/verify_p4_resolve.sh "$DIALC"; then
+    :   # 缺 curl/python3/zig 时脚本自行 skip；有则逐条打印 ✅，失败非 0 退出
+else
+    fail=1
+fi
+
 echo
 if [ $fail -eq 0 ]; then
     echo "== 全部测试通过 ✅ =="

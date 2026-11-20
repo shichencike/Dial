@@ -31,12 +31,14 @@ mod dialfmt;
 mod toolchain;
 mod error;
 mod index;
+mod version;
 mod lexer;
 mod lsp;
 mod package;
 mod parser;
 mod pkgbuild;
 mod registry;
+mod resolve;
 mod semantic;
 
 use std::collections::{HashMap, HashSet};
@@ -121,6 +123,27 @@ fn main() {
     // 再做「整包哈希（若给了 --sha256）」与「解压前逐文件 SHA256」两道校验，
     // 全过才解压（§5.1：校验先于一切）。
     if command == "install" {
+        // P4.2：`dialc install --locked [项目目录]` —— 按 dial.lock 批量安装项目依赖。
+        // 每个包用锁定 URL + SHA256 安装，逐包失败即终止（Fail-Fast）。
+        if args.get(2).map(|s| s.as_str()) == Some("--locked") {
+            let mut lock_dir = ".".to_string();
+            let mut lock_as_json = false;
+            let mut j = 3;
+            while j < args.len() {
+                match args[j].as_str() {
+                    "--json" => lock_as_json = true,
+                    other if other.starts_with('-') => {
+                        eprintln!("install --locked: 不认识的参数 '{}'", other);
+                        std::process::exit(1);
+                    }
+                    other => lock_dir = other.to_string(),
+                }
+                j += 1;
+            }
+            cmd_install_locked(Path::new(&lock_dir), lock_as_json);
+            return;
+        }
+
         // 解析可选的 --sha256 <hex> 与 --json（只有 install 用得到）
         let mut expected_sha256: Option<String> = None;
         let mut as_json = false;
@@ -226,6 +249,12 @@ fn main() {
     // 需要一个查询位置参数，与 install 同属"带参"命令，放在普通工具分流之后。
     if command == "search" || command == "info" {
         cmd_registry(command, &args);
+        return;
+    }
+
+    // `dialc resolve [项目目录]`：依赖求解 + 生成 dial.lock（P4.2）。
+    if command == "resolve" {
+        cmd_resolve(&args);
         return;
     }
 
@@ -1775,6 +1804,9 @@ fn print_usage() {
     eprintln!();
     eprintln!("包管理");
     eprintln!("  install   <包.dialpkg|URL> [--sha256 哈希] [--json]");
+    eprintln!("  install   --locked [目录] [--json]  按 dial.lock 批量安装依赖（P4.2）");
+    eprintln!("  resolve   [目录] [--json] [--check] [--index <url>] [--index-sha256 <hex>] [--offline]");
+    eprintln!("                                解析 [dependencies] 并生成/校验 dial.lock（P4.2）");
     eprintln!("  list      [--json]             列出已安装包");
     eprintln!("  uninstall <包名> [--json]      卸载已安装包");
     eprintln!("  search    <词> [--json] [--index <url>] [--index-sha256 <hex>] [--offline]");
@@ -2452,6 +2484,192 @@ fn cmd_registry(command: &str, args: &[String]) {
             }
         }
     }
+}
+
+/// `dialc resolve [项目目录]`（P4.2）：从 dial.toml [dependencies] 求解依赖并生成 dial.lock。
+///
+/// 选项：`--json`、`--check`（只校验现有 lock，不写）、`--index <url>`、`--index-sha256 <hex>`、
+/// `--offline`、`--lock <path>`（默认 <项目目录>/dial.lock）。
+fn cmd_resolve(args: &[String]) {
+    let mut as_json = false;
+    let mut check_only = false;
+    let mut offline = false;
+    let mut index_url: Option<String> = None;
+    let mut index_sha256: Option<String> = None;
+    let mut lock_path: Option<String> = None;
+    let mut dirs: Vec<String> = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => as_json = true,
+            "--check" => check_only = true,
+            "--offline" => offline = true,
+            "--index" | "--index-sha256" | "--lock" => {
+                let flag = args[i].clone();
+                i += 1;
+                match args.get(i) {
+                    Some(v) if !v.starts_with('-') => {
+                        match flag.as_str() {
+                            "--index" => index_url = Some(v.clone()),
+                            "--index-sha256" => index_sha256 = Some(v.clone()),
+                            _ => lock_path = Some(v.clone()),
+                        }
+                    }
+                    _ => { eprintln!("{} 后面缺少参数值", flag); std::process::exit(1); }
+                }
+            }
+            other if other.starts_with('-') => {
+                eprintln!("resolve: 不认识的参数 '{}'", other); std::process::exit(1);
+            }
+            other => dirs.push(other.to_string()),
+        }
+        i += 1;
+    }
+    if dirs.len() > 1 {
+        eprintln!("resolve: 最多接受一个项目目录参数，收到 {} 个", dirs.len());
+        std::process::exit(1);
+    }
+    let dir = PathBuf::from(dirs.first().cloned().unwrap_or_else(|| ".".to_string()));
+    let manifest = dir.join("dial.toml");
+    let text = match fs::read_to_string(&manifest) {
+        Ok(t) => t,
+        Err(e) => {
+            let msg = format!("读取 {} 失败: {}", manifest.display(), e);
+            emit_registry_err(as_json, &msg); return;
+        }
+    };
+    let spec = match pkgbuild::parse_spec_for_resolve(&text) {
+        Ok(s) => s,
+        Err(e) => { emit_registry_err(as_json, &e); return; }
+    };
+
+    let url = index_url
+        .or_else(|| std::env::var("DIAL_INDEX_URL").ok())
+        .unwrap_or_else(|| registry::DEFAULT_INDEX_URL.to_string());
+    let source = if offline { registry::Source::Offline } else { registry::Source::Online };
+    let (idx, origin, _) = match registry::load(&url, index_sha256.as_deref(), source) {
+        Ok(v) => v,
+        Err(e) => { emit_registry_err(as_json, &e.message); return; }
+    };
+    let res = match resolve::resolve(&idx, &spec.dependencies) {
+        Ok(r) => r,
+        Err(e) => { emit_registry_err(as_json, &e.message); return; }
+    };
+
+    let lock = PathBuf::from(lock_path.clone().unwrap_or_else(|| dir.join("dial.lock").to_string_lossy().to_string()));
+    if check_only {
+        let lock_text = match fs::read_to_string(&lock) {
+            Ok(t) => t,
+            Err(e) => {
+                emit_registry_err(as_json, &format!("--check：读取 {} 失败: {}", lock.display(), e));
+                return;
+            }
+        };
+        let (_, parsed) = match resolve::parse_lock(&lock_text) {
+            Ok(v) => v,
+            Err(e) => { emit_registry_err(as_json, &e.message); return; }
+        };
+        if let Err(e) = resolve::lock_matches(&res, &parsed) {
+            emit_registry_err(as_json, &e.message); return;
+        }
+        if as_json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true, "command": "resolve", "check": true,
+                "source": origin, "count": res.packages.len(),
+            })).unwrap());
+        } else {
+            println!("✅ dial.lock 与依赖解析一致（{} 个包，来源: {}）", res.packages.len(), origin);
+        }
+        return;
+    }
+
+    let text = match resolve::lock_text(&res, &spec.name) {
+        Ok(t) => t,
+        Err(e) => { emit_registry_err(as_json, &e.message); return; }
+    };
+    if let Err(e) = resolve::write_lock(&lock, &text) {
+        emit_registry_err(as_json, &e.message); return;
+    }
+    if as_json {
+        let mut obj = resolve::resolution_to_json(&res).as_object().unwrap().clone();
+        obj.insert("ok".to_string(), serde_json::json!(true));
+        obj.insert("command".to_string(), serde_json::json!("resolve"));
+        obj.insert("lock".to_string(), serde_json::json!(lock.display().to_string()));
+        obj.insert("source".to_string(), serde_json::json!(origin));
+        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(obj)).unwrap());
+    } else {
+        println!("✅ 已解析 {} 个依赖，锁定到 {}", res.packages.len(), lock.display());
+        for e in &res.packages {
+            println!("  {} v{} (ABI {}) {}", e.name, e.version, e.abi, e.url);
+        }
+        println!("  来源: {}", origin);
+    }
+}
+
+/// `dialc install --locked [项目目录]`（P4.2）：按 dial.lock 逐包安装依赖。
+/// 每包用锁定 URL + SHA256，任一失败即终止（Fail-Fast）；已装同版本会覆盖安装。
+fn cmd_install_locked(dir: &Path, as_json: bool) {
+    let lock = dir.join("dial.lock");
+    let text = match fs::read_to_string(&lock) {
+        Ok(t) => t,
+        Err(e) => {
+            emit_registry_err(as_json, &format!("读取 {} 失败: {}（先运行 `dialc resolve`）", lock.display(), e));
+            return;
+        }
+    };
+    let (_, entries) = match resolve::parse_lock(&text) {
+        Ok(v) => v,
+        Err(e) => { emit_registry_err(as_json, &e.message); return; }
+    };
+    if entries.is_empty() {
+        if as_json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true, "installed": [], "count": 0,
+            })).unwrap());
+        } else {
+            println!("dial.lock 中没有依赖，无需安装。");
+        }
+        return;
+    }
+    let mut installed = Vec::new();
+    for (name, e) in &entries {
+        if e.url.is_empty() {
+            emit_registry_err(as_json, &format!("dial.lock 中 '{}' 没有 url，无法安装", name));
+            return;
+        }
+        let sha = if e.sha256.is_empty() { None } else { Some(e.sha256.as_str()) };
+        match package::install_from_url(&e.url, sha) {
+            Ok((path, manifest)) => {
+                installed.push(serde_json::json!({
+                    "name": name, "version": manifest.version, "path": path.display().to_string(),
+                }));
+                if !as_json {
+                    println!("✅ 已安装 {} v{}（按 lock 锁定）", name, manifest.version);
+                }
+            }
+            Err(err) => {
+                emit_registry_err(as_json, &format!("按 dial.lock 安装 '{}' 失败: {}", name, err.message));
+                return;
+            }
+        }
+    }
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true, "installed": installed, "count": installed.len(),
+        })).unwrap());
+    }
+}
+
+/// resolve 失败时统一输出（JSON / 文本）。
+fn emit_registry_err(as_json: bool, msg: &str) {
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": false, "error": msg,
+        })).unwrap());
+    } else {
+        eprintln!("{}", msg);
+    }
+    std::process::exit(1);
 }
 
 fn cmd_check(args: &[String]) {

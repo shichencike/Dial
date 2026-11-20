@@ -73,6 +73,8 @@ pub struct PkgSpec {
     /// `Some` 表示 pack 需自动交叉编译 C 源成三平台 `.a`（prebuilt），或随包分发
     /// C 源供 install 期就地编译（source）。字段全部来自清单显式声明，零脚本。
     pub c: Option<CSpec>,
+    /// P4.2：`[dependencies]` 段——依赖包名 → 语义版本区间。空 map 表示无依赖。
+    pub dependencies: BTreeMap<String, String>,
 }
 
 /// P4.0：`[c]` 段的解析结果——声明式 C 源码编译参数（零构建脚本）。
@@ -220,7 +222,7 @@ fn check_component(what: &str, s: &str) -> Result<(), String> {
 }
 
 /// 解析 `dial.toml` 的 TOML 子集。
-pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
+fn parse_spec_inner(text: &str, require_targets: bool) -> Result<PkgSpec, String> {
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
     let mut abi: Option<u64> = None;
@@ -234,10 +236,13 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
     let mut c_flags: Vec<String> = Vec::new();
     let mut c_defines: Vec<String> = Vec::new();
     let mut c_mode: Option<CMode> = None;
+    // P4.2 [dependencies] 段：包名 → 语义版本区间
+    let mut dependencies: BTreeMap<String, String> = BTreeMap::new();
     let mut section: Option<String> = None;
     let mut seen_targets = false;
     let mut seen_src = false;
     let mut seen_c = false;
+    let mut seen_dependencies = false;
 
     for (idx, raw) in text.lines().enumerate() {
         let line_no = idx + 1;
@@ -250,16 +255,17 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
                 return Err(format!("dial.toml 第 {} 行：段头缺少右方括号 ']'", line_no));
             }
             let sec = line[1..line.len() - 1].trim();
-            if sec != "targets" && sec != "src" && sec != "c" {
+            if sec != "targets" && sec != "src" && sec != "c" && sec != "dependencies" {
                 return Err(format!(
-                    "dial.toml 第 {} 行：不支持的段 '[{}]'（只支持 [targets] / [src] / [c]）",
+                    "dial.toml 第 {} 行：不支持的段 '[{}]'（只支持 [targets] / [src] / [c] / [dependencies]）",
                     line_no, sec
                 ));
             }
             let seen = match sec {
                 "targets" => &mut seen_targets,
                 "src" => &mut seen_src,
-                _ => &mut seen_c,
+                "c" => &mut seen_c,
+                _ => &mut seen_dependencies,
             };
             if *seen {
                 return Err(format!("dial.toml 第 {} 行：[{}] 段重复", line_no, sec));
@@ -397,6 +403,28 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
             continue;
         }
 
+        if section.as_deref() == Some("dependencies") {
+            // P4.2：[dependencies] 段——键是依赖包名（裸名），值是语义版本区间
+            // （"^1.2.0" / "~1.2" / "=1.2.3" / "*"）。区间语法在此 Fail-Fast 校验，
+            // 不让非法区间流到求解阶段。
+            if dependencies.contains_key(key) {
+                return Err(format!(
+                    "dial.toml 第 {} 行：[dependencies] 依赖 '{}' 重复",
+                    line_no, key
+                ));
+            }
+            check_component(&format!("[dependencies] 包名 '{}'", key), key)?;
+            let req = parse_string(val, line_no)?;
+            if let Err(e) = crate::version::parse_requirement(&req) {
+                return Err(format!(
+                    "dial.toml 第 {} 行：[dependencies] '{}' 的版本区间非法：{}",
+                    line_no, key, e.message
+                ));
+            }
+            dependencies.insert(key.to_string(), req);
+            continue;
+        }
+
         match key {
             "name" | "version" | "iface" | "license" => {
                 let s = parse_string(val, line_no)?;
@@ -488,7 +516,7 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
         if c_mode.is_some() || !c_includes.is_empty() || !c_flags.is_empty() || !c_defines.is_empty() {
             return Err("dial.toml：[c] 段字段（mode/includes/flags/defines）出现在 [c] 段外，或缺少 sources".to_string());
         }
-        if targets.is_empty() {
+        if require_targets && targets.is_empty() {
             return Err("dial.toml：[targets] 段至少要登记一个平台的静态库（纯机器码包），或声明 [c] 段让 pack 自动编译".to_string());
         }
         None
@@ -503,7 +531,18 @@ pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
         targets,
         src,
         c,
+        dependencies,
     })
+}
+
+/// 打包用解析：要求纯机器码包至少登记一个 target（保持 pack 既有校验）。
+pub fn parse_spec(text: &str) -> Result<PkgSpec, String> {
+    parse_spec_inner(text, true)
+}
+
+/// 依赖解析用解析（P4.2）：项目只需 [dependencies]，不要求 [targets]（项目不是待打包的库）。
+pub fn parse_spec_for_resolve(text: &str) -> Result<PkgSpec, String> {
+    parse_spec_inner(text, false)
 }
 
 fn sha256_of(path: &Path) -> Result<String, String> {
@@ -961,6 +1000,11 @@ pub fn plan(project_dir: &Path, out: Option<&Path>) -> Result<PackPlan, String> 
     if let Some(cj) = c_json {
         manifest["c"] = cj;
     }
+    // P4.2：dependencies 可选记录到 manifest 供审计（空则不写，保持旧包兼容）。
+    if !spec.dependencies.is_empty() {
+        manifest["dependencies"] = serde_json::to_value(&spec.dependencies)
+            .map_err(|e| format!("序列化 dependencies 失败: {}", e))?;
+    }
     let manifest_text = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("序列化 manifest.txt 失败: {}", e))?
         + "\n";
@@ -1040,6 +1084,7 @@ pub fn dry_run(project_dir: &Path, out: Option<&Path>, as_json: bool) -> Result<
             "license": p.spec.license,
             "targets": p.spec.targets.keys().collect::<Vec<_>>(),
             "src": p.spec.src,
+            "dependencies": p.spec.dependencies,
             "files": files,
             "unlisted": p.unlisted,
             "output": p.pkg_path.to_string_lossy(),
@@ -1222,6 +1267,10 @@ pub fn init_spec(project_dir: &Path) -> Result<PathBuf, String> {
             text.push_str(&format!("{} = \"{}\"\n", m, rel));
         }
     }
+    text.push_str("\n[dependencies]\n");
+    text.push_str("# P4.2：依赖包名 = 语义版本区间（^1.2.0 / ~1.2.3 / =1.2.3 / *）。\n");
+    text.push_str("# 用 `dialc resolve .` 从静态索引解析并生成 dial.lock。\n");
+    text.push_str("# json = \"^2.0.0\"\n");
     fs::write(&spec_path, &text)
         .map_err(|e| format!("写入 {} 失败: {}", spec_path.display(), e))?;
     Ok(spec_path)
