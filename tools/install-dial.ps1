@@ -353,14 +353,8 @@ Ok "Directory tree: $DialcHome\{bin,packages,cache\downloads}"
 Copy-Item -Force $DialcBin (Join-Path $DialcHome "bin\dialc.exe")
 Ok "Compiler installed to $DialcHome\bin\dialc.exe"
 
-# LLVM-C.dll must sit next to dialc.exe, or the runtime loader fails.
-$llvmDll = Join-Path $DialcSrc "LLVM-C.dll"
-if (Test-Path $llvmDll) {
-    Copy-Item -Force $llvmDll (Join-Path $DialcHome "bin\LLVM-C.dll")
-    Ok "LLVM-C.dll installed next to dialc.exe (runtime dependency)"
-} else {
-    Warn "LLVM-C.dll not found under $DialcSrc.`n  dialc.exe needs it in the same folder at runtime.`n  Copy LLVM-C.dll from the LLVM 18 release into $DialcHome\bin\."
-}
+# The compiler is built with the LLVM backend as an optional feature disabled,
+# so dialc.exe has zero LLVM runtime dependencies (no LLVM-C.dll needed).
 
 if ((Test-Path (Join-Path $DialcSrc "stdlib")) -and (Test-Path (Join-Path $DialcSrc "runtime"))) {
     foreach ($d in @("stdlib", "runtime")) {

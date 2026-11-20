@@ -33,6 +33,31 @@ struct Local {
     moved: bool,
 }
 
+/// 给一个 IR 标量宽度返回对应的「全零」立即数，用于结构体省略字段的防御性零初始化。
+/// 与既有 lower_expr(IntLit/FloatLit) 的 Imm 表示一致，发射器直接支持无 vreg 的 Imm。
+fn zero_imm_for(ty: &IrType) -> Value {
+    match ty {
+        IrType::F64 => Value::Imm(Imm::F64(0)),
+        IrType::F32 => Value::Imm(Imm::F32(0)),
+        IrType::I1 => Value::Imm(Imm::I1(false)),
+        IrType::I8 => Value::Imm(Imm::I8(0)),
+        IrType::I32 => Value::Imm(Imm::I32(0)),
+        // Ptr/Handle/Struct/FnPtr 等一律用 I64(0) 位模式的空值。
+        _ => Value::Imm(Imm::I64(0)),
+    }
+}
+
+/// 结构体字段的**内存宽度**口径：extern struct（C ABI）字段 byte=I8(1B)，
+/// 普通 struct（寄存器口径）字段 byte=I64(8B)，与 LLVM 后端的
+/// cstruct_field_llvm / dialc_type_to_llvm 两套映射逐字节对齐。bool 两者均为 1B。
+/// base_dt 必须是字段所属的结构体类型（含 extern struct）。
+fn field_mem_ir(cstructs: &HashSet<String>, base_dt: &Type, fty: &Type) -> IrType {
+    match struct_name_of(base_dt) {
+        n if cstructs.contains(&n) => cabi_field_ir(fty),
+        _ => field_ir(fty),
+    }
+}
+
 /// 某个堆句柄类型的 ARC 种类；非句柄返回 None。
 fn rc_kind(dt: &Type) -> Option<ArcKind> {
     match dt {
@@ -53,7 +78,10 @@ pub fn lower_program(
     debug_info: bool,
     src_file: &str,
 ) -> Result<IrProgram, String> {
-    let mut ip = IrProgram::new(functions_sig, structs, goto_depths);
+    // v1.04 FFI：extern struct 名集合。struct_layout 与字段 load/store 需据此区分
+    // 两套字段口径（extern=C ABI byte=1B / 普通=寄存器 byte=8B），对齐 LLVM 后端。
+    let cstruct_names: HashSet<String> = prog.cstructs.iter().map(|c| c.name.clone()).collect();
+    let mut ip = IrProgram::new(functions_sig, structs, goto_depths, cstruct_names);
     // M7-e3ag：收集 packed 结构体名。布局内建（sizeof/alignof/offsetof）须按 C ABI
     // 口径处理 packed：size 为紧密排列值、align 固定 1（struct_layout 对 packed 的
     // align 仍返回自然对齐，直接复用会与 LLVM/C 不一致）。从 AST 的 structs/cstructs
@@ -493,11 +521,19 @@ impl<'a> Lower<'a> {
     }
 
     /// LIFO 执行所有「登记深度 >= depth」的 defer（作用域深度 = 登记时的 scopes.len()）。
+    ///
+    /// **只 clone 发射，绝不消耗 self.defers**（对齐 LLVM codegen.rs:1438）：defer 是
+    /// 编译期静态结构，break/continue/return 的提前出口与正常落穿两条路径互斥，各自
+    /// 发射自己那一份 clone，运行期只走其中一条。此前用 pop 消耗，导致循环体里
+    /// break/continue 展开后，同一循环体的正常落穿路径拿到空 defer → 漏发（defer_demo
+    /// 的 iter.end / inner.end 在部分迭代消失）。原 defer 由 leave_scope 在真正离开
+    /// 作用域时统一清理。
     fn drain_defers_from(&mut self, depth: usize) -> Result<(), String> {
-        loop {
-            let hit = matches!(self.defers.last(), Some((d, _)) if *d >= depth);
-            if !hit { break; }
-            let (_, st) = self.defers.pop().unwrap();
+        let to_run: Vec<Stmt> = self.defers.iter().rev()
+            .filter(|(d, _)| *d >= depth)
+            .map(|(_, st)| st.clone())
+            .collect();
+        for st in to_run {
             self.lower_stmt(&st)?;
         }
         Ok(())
@@ -506,7 +542,15 @@ impl<'a> Lower<'a> {
     /// 离开当前最内层作用域：LIFO defer + 释放该层堆局部。
     fn leave_scope(&mut self) -> Result<(), String> {
         let d = self.scopes.len();
-        self.drain_defers_from(d)?;
+        // 当前块已终止（前一条是 return/break/continue/goto/throw）：正常落穿路径不可达，
+        // 该出口的 defer 已由 drain_defers_from 在跳转前发射过。此处只清理 defer 帧，
+        // 切勿再往已终止的块追加指令（否则 defer 被发射两次——goto_demo 的 cleanup 重复）。
+        // 对齐 LLVM codegen.rs:1426 的 is_terminated 保护。
+        if !self.cur_terminated() {
+            self.drain_defers_from(d)?;
+        }
+        // drain 只 clone 不消耗；此处（真正退出作用域）清理本层及更深的 defer。
+        self.defers.retain(|(dep, _)| *dep < d);
         let sc = self.scopes.pop().unwrap();
         self.release_scope(&sc);
         Ok(())
@@ -823,8 +867,9 @@ impl<'a> Lower<'a> {
                 if let Some(k) = rc_kind(&field_ty) {
                     self.emit(IrInst::RcRelease { ptr: fa, kind: k });
                 }
-                // 字段在内存里的宽度（field_ir）；bool 字段是 1 字节，需从内部 I64 截断。
-                let mty = field_ir(&field_ty);
+                // 字段内存宽度按 struct 类型分口径：extern struct 的 byte=I8(1B)，
+                // 普通 struct 的 byte=I64(8B)；与 struct_layout 偏移同口径。
+                let mty = field_mem_ir(&self.ip.cstruct_names, &base_dt, &field_ty);
                 let v_store = if mty != reg_ir(&field_ty) {
                     let t = self.new_reg(mty.clone());
                     self.emit(IrInst::Conv { kind: AConv::Trunc, dst: t, a: v, ty: mty.clone() });
@@ -1007,45 +1052,86 @@ impl<'a> Lower<'a> {
                 };
                 let header = self.new_block(Vec::new());
                 let body_b = self.new_block(Vec::new());
+                // continue 目标必须是独立的自增块（inc_b）而非条件块（header）：
+                // 若 continue 跳 header，自增指令（内联在 body 尾部）会被跳过，循环变量
+                // 永不变化 → 死循环。这是 loop_control.dial 注释明确点出的正确性点。
+                let inc_b = self.new_block(Vec::new());
                 let exit = self.new_block(Vec::new());
                 self.terminate(Term::Jump { target: header, args: Vec::new() });
                 self.set_cur(header);
                 let cv = self.new_reg(IrType::I64);
                 self.emit(IrInst::Load { dst: cv, ptr: slot, ty: IrType::I64 });
                 let (ev, _) = self.lower_expr(end, &dt)?;
-                let step_is_pos = matches!(step_v, Value::Imm(Imm::I64(n)) if n >= 0);
-                let op = if step_is_pos { ACmp::Lt } else { ACmp::Gt };
+                // 循环条件无条件 i < end，与 LLVM 后端（codegen.rs:2913 恒 SLT）对齐。
+                // 此前按 step 常量符号选 Lt/Gt：step 是变量表达式（如 `for i in 0..9 step s`）
+                // 时 step_v 非 Imm → 误判为负 → 用 Gt → 初始 i=0 立即退出、循环体从不执行。
+                let op = ACmp::Lt;
                 let cmp = self.new_reg(IrType::I64);
                 self.emit(IrInst::ICmp { op, dst: cmp, a: Value::Reg(cv), b: ev, ty: IrType::I64 });
                 self.terminate(Term::Branch { cond: cmp, then_b: body_b, else_b: exit, then_args: Vec::new(), else_args: Vec::new() });
                 self.set_cur(body_b);
                 let body_depth = self.scopes.len();
                 self.push_scope();
-                self.loops.push((header, exit, body_depth));
+                self.loops.push((inc_b, exit, body_depth));
                 for st in body { self.lower_stmt(st)?; }
                 self.loops.pop();
                 self.leave_scope()?;
                 if !self.cur_terminated() {
-                    let cv2 = self.new_reg(IrType::I64);
-                    self.emit(IrInst::Load { dst: cv2, ptr: slot, ty: IrType::I64 });
-                    let nv = self.new_reg(IrType::I64);
-                    self.emit(IrInst::Bin { op: ABin::Add, dst: nv, a: Value::Reg(cv2), b: step_v, ty: IrType::I64 });
-                    self.emit(IrInst::Store { ptr: slot, val: Value::Reg(nv), ty: IrType::I64 });
-                    self.terminate(Term::Jump { target: header, args: Vec::new() });
+                    self.terminate(Term::Jump { target: inc_b, args: Vec::new() });
                 }
+                // 自增块：正常落穿与 continue 都汇入这里，执行 i = i + step 后回到条件判定。
+                self.set_cur(inc_b);
+                let cv2 = self.new_reg(IrType::I64);
+                self.emit(IrInst::Load { dst: cv2, ptr: slot, ty: IrType::I64 });
+                let nv = self.new_reg(IrType::I64);
+                self.emit(IrInst::Bin { op: ABin::Add, dst: nv, a: Value::Reg(cv2), b: step_v, ty: IrType::I64 });
+                self.emit(IrInst::Store { ptr: slot, val: Value::Reg(nv), ty: IrType::I64 });
+                self.terminate(Term::Jump { target: header, args: Vec::new() });
                 self.set_cur(exit);
                 Ok(())
             }
-            Stmt::ForEach { value, coll, body, .. } => {
-                let (arr_v, _) = self.lower_expr(coll, &Type::Array(Box::new(Type::Int)))?;
+            Stmt::ForEach { value, coll, body, line, col, .. } => {
+                // 迭代变量的元素类型必须取自数组真实类型：硬编码 Int 会让 string[] 的
+                // 元素（句柄位模式）被 print 当整数打印成地址。行参 slot 仍用 I64
+                // （句柄/标量位模式都是 64 位），is_handle 保持 false（dial_array_get
+                // 返回 borrowed 引用，retain 会 double free）；仅 dt 决定 print 分派。
+                let coll_dt = self.expr_dt(coll);
+                let elem_dt = match &coll_dt {
+                    Type::Array(e) => (**e).clone(),
+                    Type::Set(e) => (**e).clone(),
+                    _ => Type::Int,
+                };
+                let (coll_v, _) = self.lower_expr(coll, &coll_dt)?;
+                // 集合迭代（for v in set）：成员即 map 的键，先快照成 int[] 再走数组迭代
+                // 路径——与 LLVM 后端（codegen.rs:2956 dial_map_keys）对齐。此前直接把
+                // set handle 当数组传给 dial_array_get，取出的元素全是 0（set_demo 红）。
+                // 快照登记到当前作用域（is_handle=true），函数出口统一 release。
+                let arr_v = if matches!(coll_dt, Type::Set(_)) {
+                    let keys = self.new_reg(IrType::Handle);
+                    self.emit(IrInst::Call { dst: Some(keys), func: "dial_map_keys".to_string(),
+                        args: vec![coll_v], arg_tys: vec![IrType::Handle], ret_ty: IrType::Handle,
+                        linkage: CallLink::Runtime });
+                    let keys_slot = self.emit_alloca(IrType::Handle);
+                    self.emit(IrInst::Store { ptr: keys_slot, val: Value::Reg(keys), ty: IrType::Handle });
+                    self.declare(&format!("__asm_setkeys_{}_{}", line, col), Local {
+                        ptr: keys_slot, ty: IrType::Handle,
+                        dt: Type::Array(Box::new(Type::Int)), is_handle: true, moved: false,
+                    });
+                    Value::Reg(keys)
+                } else {
+                    coll_v
+                };
                 let idx_slot = self.emit_alloca(IrType::I64);
                 self.emit(IrInst::Store { ptr: idx_slot, val: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
                 let len = self.new_reg(IrType::I64);
                 self.emit(IrInst::Call { dst: Some(len), func: "dial_array_length".to_string(), args: vec![arr_v], arg_tys: vec![IrType::Handle], ret_ty: IrType::I64, linkage: CallLink::Runtime });
                 let val_slot = self.emit_alloca(IrType::I64);
-                self.declare(value, Local { ptr: val_slot, ty: IrType::I64, dt: Type::Int, is_handle: false, moved: false });
+                self.declare(value, Local { ptr: val_slot, ty: IrType::I64, dt: elem_dt, is_handle: false, moved: false });
                 let header = self.new_block(Vec::new());
                 let body_b = self.new_block(Vec::new());
+                // continue 目标为独立自增块（同 Stmt::For）：continue 跳过 body 尾部的
+                // idx 自增会死循环。
+                let inc_b = self.new_block(Vec::new());
                 let exit = self.new_block(Vec::new());
                 self.terminate(Term::Jump { target: header, args: Vec::new() });
                 self.set_cur(header);
@@ -1057,7 +1143,7 @@ impl<'a> Lower<'a> {
                 self.set_cur(body_b);
                 let body_depth = self.scopes.len();
                 self.push_scope();
-                self.loops.push((header, exit, body_depth));
+                self.loops.push((inc_b, exit, body_depth));
                 let vv = self.new_reg(IrType::I64);
                 self.emit(IrInst::Call { dst: Some(vv), func: "dial_array_get".to_string(), args: vec![arr_v, Value::Reg(iv)], arg_tys: vec![IrType::Handle, IrType::I64], ret_ty: IrType::I64, linkage: CallLink::Runtime });
                 self.emit(IrInst::Store { ptr: val_slot, val: Value::Reg(vv), ty: IrType::I64 });
@@ -1065,13 +1151,15 @@ impl<'a> Lower<'a> {
                 self.loops.pop();
                 self.leave_scope()?;
                 if !self.cur_terminated() {
-                    let iv2 = self.new_reg(IrType::I64);
-                    self.emit(IrInst::Load { dst: iv2, ptr: idx_slot, ty: IrType::I64 });
-                    let nv = self.new_reg(IrType::I64);
-                    self.emit(IrInst::Bin { op: ABin::Add, dst: nv, a: Value::Reg(iv2), b: Value::Imm(Imm::I64(1)), ty: IrType::I64 });
-                    self.emit(IrInst::Store { ptr: idx_slot, val: Value::Reg(nv), ty: IrType::I64 });
-                    self.terminate(Term::Jump { target: header, args: Vec::new() });
+                    self.terminate(Term::Jump { target: inc_b, args: Vec::new() });
                 }
+                self.set_cur(inc_b);
+                let iv2 = self.new_reg(IrType::I64);
+                self.emit(IrInst::Load { dst: iv2, ptr: idx_slot, ty: IrType::I64 });
+                let nv = self.new_reg(IrType::I64);
+                self.emit(IrInst::Bin { op: ABin::Add, dst: nv, a: Value::Reg(iv2), b: Value::Imm(Imm::I64(1)), ty: IrType::I64 });
+                self.emit(IrInst::Store { ptr: idx_slot, val: Value::Reg(nv), ty: IrType::I64 });
+                self.terminate(Term::Jump { target: header, args: Vec::new() });
                 self.set_cur(exit);
                 Ok(())
             }
@@ -1114,6 +1202,8 @@ impl<'a> Lower<'a> {
                 self.declare(value, Local { ptr: v_slot, ty: v_ir.clone(), dt: v_ty, is_handle: false, moved: false });
                 let header = self.new_block(Vec::new());
                 let body_b = self.new_block(Vec::new());
+                // continue 目标为独立自增块（同 Stmt::For / ForEach）。
+                let inc_b = self.new_block(Vec::new());
                 let exit = self.new_block(Vec::new());
                 self.terminate(Term::Jump { target: header, args: Vec::new() });
                 self.set_cur(header);
@@ -1125,7 +1215,7 @@ impl<'a> Lower<'a> {
                 self.set_cur(body_b);
                 let body_depth = self.scopes.len();
                 self.push_scope();
-                self.loops.push((header, exit, body_depth));
+                self.loops.push((inc_b, exit, body_depth));
                 // k = keys[i]（位模式 → 按 K 重新解释）
                 let kb = self.new_reg(IrType::I64);
                 self.emit(IrInst::Call { dst: Some(kb), func: "dial_array_get".to_string(),
@@ -1145,13 +1235,15 @@ impl<'a> Lower<'a> {
                 self.loops.pop();
                 self.leave_scope()?;
                 if !self.cur_terminated() {
-                    let iv2 = self.new_reg(IrType::I64);
-                    self.emit(IrInst::Load { dst: iv2, ptr: idx_slot, ty: IrType::I64 });
-                    let nv = self.new_reg(IrType::I64);
-                    self.emit(IrInst::Bin { op: ABin::Add, dst: nv, a: Value::Reg(iv2), b: Value::Imm(Imm::I64(1)), ty: IrType::I64 });
-                    self.emit(IrInst::Store { ptr: idx_slot, val: Value::Reg(nv), ty: IrType::I64 });
-                    self.terminate(Term::Jump { target: header, args: Vec::new() });
+                    self.terminate(Term::Jump { target: inc_b, args: Vec::new() });
                 }
+                self.set_cur(inc_b);
+                let iv2 = self.new_reg(IrType::I64);
+                self.emit(IrInst::Load { dst: iv2, ptr: idx_slot, ty: IrType::I64 });
+                let nv = self.new_reg(IrType::I64);
+                self.emit(IrInst::Bin { op: ABin::Add, dst: nv, a: Value::Reg(iv2), b: Value::Imm(Imm::I64(1)), ty: IrType::I64 });
+                self.emit(IrInst::Store { ptr: idx_slot, val: Value::Reg(nv), ty: IrType::I64 });
+                self.terminate(Term::Jump { target: header, args: Vec::new() });
                 self.set_cur(exit);
                 Ok(())
             }
@@ -1503,8 +1595,9 @@ impl<'a> Lower<'a> {
                 match &fty {
                     Type::Struct(_) => Ok((Value::Reg(fa), false)),
                     other => {
-                        // 内存宽度 field_ir（bool=1B）；内部宽度 reg_ir（bool=I64）。
-                        let mty = field_ir(other);
+                        // 字段内存宽度按 struct 类型分口径（extern byte=1B / 普通 byte=8B）；
+                        // 与 struct_layout 偏移同口径，内部宽度 reg_ir。
+                        let mty = field_mem_ir(&self.ip.cstruct_names, &base_dt, other);
                         let r = self.new_reg(mty.clone());
                         self.emit(IrInst::Load { dst: r, ptr: fa, ty: mty.clone() });
                         if mty != reg_ir(other) {
@@ -1612,31 +1705,58 @@ impl<'a> Lower<'a> {
                 let size = self.struct_byte_size(&dt) as u32;
                 let s2 = self.new_reg(IrType::Ptr);
                 self.emit(IrInst::Alloca { dst: s2, bytes: size.max(8) });
-                for (fname, fe) in fields {
-                    let (off, fty) = self.struct_field(&dt, fname)
-                        .ok_or_else(|| format!("[asm 后端] 结构体 {} 无字段 {}", name, fname))?;
+
+                // B8 结构体字段默认值：对齐 LLVM codegen.rs 的 StructLit 处理——
+                // 遍历**定义的所有字段**，字面量显式提供的用提供值，省略且有默认值的
+                // 用编译期常量默认值。此前 asm 后端只遍历显式 fields，省略字段留在
+                // Alloca 的未初始化栈区（p0.x=64 / r0.tag=NULL 崩溃即由此而来）。
+                // 先 clone 出字段表与默认值表，避免后续 lower_expr(&mut self) 借用冲突。
+                let (def_fields, def_defaults) = match self.ip.structs.get(name) {
+                    Some((f, d)) => (f.clone(), d.clone()),
+                    None => return self.err(&format!("[asm 后端] 未知结构体 {}", name)),
+                };
+                let provided: HashMap<&str, &Expr> = fields.iter()
+                    .map(|(f, e)| (f.as_str(), e)).collect();
+
+                for (fidx, (fname, fty)) in def_fields.iter().enumerate() {
                     let fa = self.new_reg(IrType::Ptr);
-                    self.emit(IrInst::FieldAddr { dst: fa, base: s2, struct_name: name.clone(), field: off as u32 });
-                    let (fv, is_copy) = self.lower_expr(fe, &fty)?;
+                    self.emit(IrInst::FieldAddr { dst: fa, base: s2, struct_name: name.clone(), field: fidx as u32 });
+
+                    // 提供值优先；省略则用语义层已校验为编译期常量的默认值。
+                    let fe: &Expr = match provided.get(fname.as_str()) {
+                        Some(e) => *e,
+                        None => match def_defaults.get(fname) {
+                            Some(d) => d,
+                            None => {
+                                // 防御：语义层通常会拒绝「省略且无默认值」；万一漏过，
+                                // 按字段内存宽度写 0，杜绝未初始化垃圾（对齐 LLVM const_zero）。
+                                let mty0 = field_mem_ir(&self.ip.cstruct_names, &dt, fty);
+                                let z = zero_imm_for(&mty0);
+                                self.emit(IrInst::Store { ptr: fa, val: z, ty: mty0 });
+                                continue;
+                            }
+                        },
+                    };
+                    let (fv, is_copy) = self.lower_expr(fe, fty)?;
                     if let Type::Struct(_) = &fty {
                         // 嵌套结构体字段：按值拷贝**内容**（fv 是内容区地址），
                         // 不能只存 8 字节指针——那会让读侧把指针当成字段内容，
                         // 嵌套访问 r.origin.x 于是读到指针位模式（垃圾值）。
-                        self.emit_memcpy(fa, fv, self.struct_byte_size(&fty));
-                        // 值拷贝不带所有权：字段里的堆字段需对称 +1。
-                        self.emit(IrInst::StructRetain { ptr: fa, struct_name: struct_name_of(&fty) });
+                        self.emit_memcpy(fa, fv, self.struct_byte_size(fty));
+                        self.emit(IrInst::StructRetain { ptr: fa, struct_name: struct_name_of(fty) });
                         continue;
                     }
-                    // 字段内存宽度 field_ir（bool=1B）；内部 I64 需截断。
-                    let mty = field_ir(&fty);
-                    let fv_store = if mty != reg_ir(&fty) {
+                    // 字段内存宽度按 struct 类型分口径（extern byte=1B / 普通 byte=8B）；
+                    // 与 struct_layout 偏移同口径，内部 I64 需截断。
+                    let mty = field_mem_ir(&self.ip.cstruct_names, &dt, fty);
+                    let fv_store = if mty != reg_ir(fty) {
                         let t = self.new_reg(mty.clone());
                         self.emit(IrInst::Conv { kind: AConv::Trunc, dst: t, a: fv, ty: mty.clone() });
                         Value::Reg(t)
                     } else { fv };
                     self.emit(IrInst::Store { ptr: fa, val: fv_store, ty: mty });
                     if is_copy {
-                        if let Some(k) = rc_kind(&fty) {
+                        if let Some(k) = rc_kind(fty) {
                             self.emit(IrInst::RcRetain { ptr: fa, kind: k });
                         }
                     }
@@ -1757,20 +1877,27 @@ impl<'a> Lower<'a> {
         let db = self.expr_dt(b);
         let is_float = matches!(da, Type::Float | Type::Float32) || matches!(db, Type::Float | Type::Float32);
         let (av, _) = self.lower_expr(a, &da)?;
-        let (bv, _) = self.lower_expr(b, &db)?;
+        // and / or 必须短路：右操作数 b 只能由 lower_value_if 在条件分支内求值。
+        // 此前在此处无条件 `lower_expr(b)`，既让被短路的 b 副作用照常触发，又让
+        // lower_value_if 内再 lower 一次 b（副作用重复）——short_circuit.dial 因此
+        // 右侧 print 多出或重复。故 And/Or 直接在这里返回，不预先求值 b。
         match op {
             BinOp::And => {
-                // 短路：a ? b : false
+                // 短路：a ? b : false（b 仅在 a 为真时求值）
                 let cc = self.cond_reg(av)?;
                 let r = self.lower_value_if(cc, b, &Expr::BoolLit(false), &Type::Bool)?;
-                Ok((Value::Reg(r), false))
+                return Ok((Value::Reg(r), false));
             }
             BinOp::Or => {
-                // 短路：a ? true : b
+                // 短路：a ? true : b（b 仅在 a 为假时求值）
                 let cc = self.cond_reg(av)?;
                 let r = self.lower_value_if(cc, &Expr::BoolLit(true), b, &Type::Bool)?;
-                Ok((Value::Reg(r), false))
+                return Ok((Value::Reg(r), false));
             }
+            _ => {}
+        }
+        let (bv, _) = self.lower_expr(b, &db)?;
+        match op {
             BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 // 字符串比较必须走 **dial_string_eq**（内容比较），绝不能用
                 // 指针相等——两个内容相同的字符串是**不同的堆对象**（字面量
@@ -1802,15 +1929,25 @@ impl<'a> Lower<'a> {
             }
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
             | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
-                let ty = if is_float { IrType::F64 } else { IrType::I64 };
+                // F32 算术必须保留 F32 宽度：此前恒用 F64（addsd），把 f32 位模式当
+                // double 读——`float32(1.5)+float32(0.25)` 得 0.0（FFI32 门禁红点）。
+                // 操作数由 lower_expr 按各自 dt 产出（Float32 → F32 寄存器/movss）。
+                let f_ty = if matches!(da, Type::Float32) && matches!(db, Type::Float32) {
+                    IrType::F32
+                } else {
+                    IrType::F64
+                };
+                let ty = if is_float { f_ty.clone() } else { IrType::I64 };
                 let r = self.new_reg(ty.clone());
                 if is_float {
-                    self.emit(IrInst::FBin { op: abin(op), dst: r, a: av, b: bv, ty: IrType::F64 });
+                    self.emit(IrInst::FBin { op: abin(op), dst: r, a: av, b: bv, ty: f_ty });
                 } else {
                     self.emit(IrInst::Bin { op: abin(op), dst: r, a: av, b: bv, ty: IrType::I64 });
                 }
                 Ok((Value::Reg(r), false))
             }
+            // And/Or 已在上方短路分支 return；此处仅满足 match 穷尽性。
+            BinOp::And | BinOp::Or => unreachable!("and/or handled above"),
         }
     }
 
@@ -2366,7 +2503,20 @@ impl<'a> Lower<'a> {
         let mut arg_vals = Vec::new();
         let mut arg_tys = Vec::new();
         for (i, a) in args.iter().enumerate() {
-            let at = sig.params.get(i).cloned().unwrap_or(Type::Int);
+            // C 变参（FFI varargs）的尾部实参超出声明形参表：此前一律 fallback 到
+            // Type::Int，导致 `demo_vprintf(fmt, 42, 3.5, true)` 里的 3.5 被当整数
+            // 位模式塞进 %rdx（而非 %xmm0），C 侧 va_arg 读 double 得 0.0、bool 读垃圾。
+            // 修复（对齐 LLVM codegen.rs:5413）：尾部实参用其**实际静态类型**；bool /
+            // byte / char 按 C 默认参数提升为 Int（i64，匹配用例的 %ld 读取）。固定参数
+            // 仍严格用声明类型（语义层已校验）。
+            let at = if sig.variadic && i >= sig.params.len() {
+                match self.expr_dt(a) {
+                    Type::Bool | Type::Byte | Type::Char => Type::Int,
+                    other => other,
+                }
+            } else {
+                sig.params.get(i).cloned().unwrap_or(Type::Int)
+            };
             let v = self.lower_call_arg(a, &at)?;
             arg_vals.push(v);
             arg_tys.push(param_ir(&at));
@@ -4146,7 +4296,12 @@ impl<'a> Lower<'a> {
                     // 字符串拼接的结果仍是字符串（不能退化成 Int，否则 print 会把句柄当数字吐出）。
                     BinOp::Add if da == Type::String && db == Type::String => Type::String,
                     _ => {
-                        if matches!(da, Type::Float | Type::Float32) || matches!(db, Type::Float | Type::Float32) {
+                        // F32+F32 必须仍是 F32（此前一律退化成 F64，导致 lower 产出 f32
+                        // 位模式而 print 按 f64 读 → float32 算术打印成 0.0）；F32 与 F64
+                        // 混合仍按 F64（对齐 lower_binary 的 f_ty 判定）。
+                        if matches!(da, Type::Float32) && matches!(db, Type::Float32) {
+                            Type::Float32
+                        } else if matches!(da, Type::Float | Type::Float32) || matches!(db, Type::Float | Type::Float32) {
                             Type::Float
                         } else { da }
                     }

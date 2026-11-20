@@ -6,7 +6,7 @@
 //! LLVM 路径（`src/codegen.rs`）与这里完全并列，由 `main.rs` 的 `--backend` 分派。
 
 use crate::ast::Program;
-use crate::codegen::SafetyMode;
+use crate::safety::SafetyMode;
 use crate::ir::OptLevel;
 use crate::semantic::{FuncInfo, StructTable};
 use crate::target::EmitTarget;

@@ -7,14 +7,13 @@
 # 发布作业在打 `v*` 标签时把三个平台的产物上传到 GitHub Release。
 #
 # 平台决策（用户拍板 + 工具链可得性约束）：
-#   - Linux x86_64      : glibc 动态链接，运行期需要系统 libLLVM-18
-#   - Windows x64       : MinGW（x86_64-pc-windows-gnu）。LLVM 用官方 MSVC 构建的 18 全量包，
-#                         仅取 C 接口（LLVM-C.lib 导入库 + LLVM-C.dll 运行期），纯 C ABI 跨工具链无冲突；
-#                         stdlib 的 pthread 代码由 winpthreads 提供，无需改写（阶段 6 的 Win32 后端可延后）。
+#   - Linux x86_64      : glibc 动态链接；发布产物零 libLLVM（测试构建另带 --features llvm 作 oracle）
+#   - Windows x64       : MinGW（x86_64-pc-windows-gnu），发布产物零 LLVM-C.dll；
+#                         stdlib 的 pthread 代码由 winpthreads 提供，无需改写。
 #   - Termux aarch64    : musl 全静态（单文件、无外部依赖），在原生 ARM64 宿主
-#                         （ubuntu-24.04-arm）的 Alpine aarch64 容器内构建。
-#   注：LLVM 18 必须保留——Alpine 3.22 恰好只提供 llvm18，升版会断 Termux 路线。
-#   注：MSYS2 现仅提供 LLVM 23、WinLibs 的 18.x 已下架，故 Windows 走官方 MSVC 包 + C 接口路线。
+#                         （ubuntu-24.04-arm）的 Alpine aarch64 容器内构建；零 libLLVM。
+#   注：LLVM 后端已改为可选 Cargo feature（默认关闭）——发布构建不带 feature → 三平台产物
+#       彻底剥离 LLVM；仅 build-linux 的测试构建显式 --features llvm 保留正确性 oracle 阵容。
 
 name: CI
 
@@ -88,8 +87,10 @@ jobs:
         with:
           workspaces: . -> target
 
-      - name: 编译 dialc（release）
-        run: cargo build --release --locked
+      - name: 编译 dialc（release，带 llvm feature 供正确性 oracle）
+        # 测试/CVE/LSP 等步骤需要 LLVM 后端作 oracle（golden / 差分 fuzz）。
+        # 发布产物另在打包前用不带 feature 的 asm-only 构建覆盖（见打包步骤）。
+        run: cargo build --release --features llvm --locked
 
       # -------------------------------------------------------------------
       # 性能基准：4 语言（C / Go / Python / Dial）× 28 项微基准。
@@ -240,6 +241,16 @@ jobs:
           fi
           echo "✅ docx/ 与文档同步"
 
+      - name: 重新构建 asm-only 发布二进制（零 libLLVM）
+        # 上面测试用的是 --features llvm（含 oracle）；发布产物必须不带该 feature，
+        # 否则分发包会链接 libLLVM。这里覆盖 target/release/dialc 后立刻打包。
+        run: |
+          cargo build --release --locked
+          if ldd target/release/dialc | grep -qi llvm; then
+            echo "::error::发布二进制仍链接 libLLVM"; exit 1
+          fi
+          echo "✅ 发布二进制零 libLLVM 依赖"
+
       - name: 打包发布 zip（linux-x86_64）
         env:
           GITHUB_SHA: ${{ github.sha }}
@@ -261,12 +272,8 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 90
 
-    env:
-      # 注意：Windows 上 Rust 的 Command::new 对无扩展名路径只补 .exe、不补 .cmd，
-      # 因此旧版 .cmd 垫片无法被 llvm-sys 解析（表现为 No suitable version of LLVM）。
-      # 改为把 C:\llvm-shim\bin 放进 PATH，让 llvm-sys 在 PATH 中按 PATHEXT 裸名找到
-      # 我们由 tools/llvm-config-win-shim.c 编译出的**真正的 llvm-config.exe**（见下方步骤）。
-      LLVM18_DIR: C:\llvm18
+    # LLVM 后端为可选 feature，Windows 发布构建不带 feature → 零 libLLVM/LLVM-C.dll，
+    # 无需下载/解压 LLVM 18、无需 llvm-config 垫片（这些步骤已随可选化删除）。
 
     steps:
       - name: 检出源码
@@ -292,71 +299,38 @@ jobs:
           echo "$MINGW_BIN" >> "$GITHUB_PATH"
           "$MINGW_BIN/gcc.exe" --version | head -1
 
-      - name: 下载并解压官方 LLVM 18（MSVC 全量包，提供 C 接口：LLVM-C.lib / LLVM-C.dll / 头文件）
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fSL --retry 3 -o /tmp/llvm18.tar.xz \
-            https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz
-          mkdir -p "$LLVM18_DIR"
-          tar -xf /tmp/llvm18.tar.xz -C "$LLVM18_DIR" --strip-components=1
-          ls "$LLVM18_DIR/bin/LLVM-C.dll" "$LLVM18_DIR/lib/LLVM-C.lib"
-
-      - name: 编译并放置 llvm-config 垫片（真正的 .exe，让 llvm-sys 只链 LLVM-C）
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p /c/llvm-shim/bin
-          # 必须生成**真正的 .exe**（不能用 .cmd/.bat）：
-          #   llvm-sys 在 Windows 上先尝试 "llvm-config.exe"，再尝试裸名；
-          #   而 CreateProcess 对不带扩展名的名字只补 ".exe"、不补 ".cmd"，
-          #   所以批处理垫片永远不会被找到（表现为 No suitable version of LLVM）。
-          # gcc 由「定位 MinGW」步骤写入的 GITHUB_PATH 提供。
-          gcc -O2 -o /c/llvm-shim/bin/llvm-config.exe tools/llvm-config-win-shim.c
-          "/c/llvm-shim/bin/llvm-config.exe" --version
-          "/c/llvm-shim/bin/llvm-config.exe" --libnames --link-static
-          # GNU ld 的 -lLLVM-C 按 lib<name>.a 查找；MSVC 导入库名为 LLVM-C.lib，
-          # 补一份同内容副本，确保链接器一定能解析到。
-          cp "$LLVM18_DIR/lib/LLVM-C.lib" "$LLVM18_DIR/lib/libLLVM-C.a"
-          ls -la "$LLVM18_DIR/lib/LLVM-C.lib" "$LLVM18_DIR/lib/libLLVM-C.a" "$LLVM18_DIR/bin/LLVM-C.dll"
-
       - name: 安装 Rust 工具链并加 MinGW 目标
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu
 
-      - name: 编译 dialc（release，x86_64-pc-windows-gnu）
+      - name: 编译 dialc（release，x86_64-pc-windows-gnu，asm-only 零 LLVM）
         shell: bash
         env:
-          # 关键：build 步 PATH **不能**包含 C:\llvm18\bin——官方 MSVC 包自带真正的
-          # llvm-config.exe，会盖过我们的 .cmd 垫片，报 "LLVM-18.dll is missing"。
-          # 只留 C:\llvm-shim\bin（垫片）；MinGW gcc 已通过「定位 MinGW」写入 GITHUB_PATH。
-          # 链接所需的 LLVM-C.lib 由垫片返回的 -L C:\llvm18\lib 提供，无需 bin 在 PATH。
-          PATH: C:\llvm-shim\bin:$PATH
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
         run: |
           set -euo pipefail
           # windows-2022 runner 已预装 rustup，dtolnay action 不会把 cargo 写进 PATH，需手动补
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo --version
+          # 不带 --features llvm → 产物零 LLVM-C.dll 依赖
           cargo build --release --target x86_64-pc-windows-gnu --locked
           ls -la target/x86_64-pc-windows-gnu/release/dialc.exe
 
-      - name: 诊断 dialc.exe 的 DLL 依赖
+      - name: 校验 dialc.exe 导入表无 LLVM
         shell: bash
-        env:
-          PATH: C:\llvm18\bin:$PATH
         run: |
           set -euo pipefail
           BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
-          echo "--- COFF 导入表（LLVM / MinGW 运行时）---"
-          llvm-readobj --coff-imports "$BIN" 2>/dev/null | grep -iE "LLVM|gcc|winpthread|stdc" || true
+          export PATH="$MINGW_BIN:$PATH"
+          if objdump -p "$BIN" 2>/dev/null | grep -qi "LLVM"; then
+            echo "❌ dialc.exe 仍导入 LLVM"; objdump -p "$BIN" | grep -i LLVM; exit 1
+          fi
+          echo "✅ dialc.exe 零 LLVM 导入"
           ls -la "$BIN"
 
       - name: 核心冒烟：编译并运行示例
         shell: bash
-        env:
-          PATH: C:\llvm18\bin:$PATH
         run: |
           set -euo pipefail
           # dialc 按 gcc -> clang -> zig -> cc 的顺序挑选 C 编译器。GITHUB_PATH 的追加
@@ -366,10 +340,7 @@ jobs:
           command -v gcc && gcc --version | head -1
           BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
           D=$(dirname "$BIN")
-          # Windows 加载 DLL 时**优先搜索可执行文件所在目录**：把运行期依赖
-          # （LLVM-C.dll 与 MinGW 运行时 DLL）复制到 dialc.exe 同目录，确保必定能加载。
-          # 编译用户程序需要 gcc（已由「定位 MinGW」步骤写入 GITHUB_PATH）。
-          cp "$LLVM18_DIR/bin/LLVM-C.dll" "$D/"
+          # 只复制 MinGW 运行时 DLL（编译用户程序需要 gcc）；LLVM-C.dll 已随可选化移除。
           for dll in libgcc_s_seh-1.dll libwinpthread-1.dll libstdc++-6.dll; do
             if [ -f "$MINGW_BIN/$dll" ]; then cp "$MINGW_BIN/$dll" "$D/"; fi
           done
@@ -380,29 +351,21 @@ jobs:
           /tmp/hello.exe | tee /tmp/hello.out
           grep -q "Hello, dialc" /tmp/hello.out && echo "✅ Windows 冒烟通过" || { echo "❌ 输出不符"; exit 1; }
 
-      - name: 平台契约：用户程序不依赖 LLVM-C.dll
+      - name: 平台契约：用户程序不依赖 LLVM
         shell: bash
-        env:
-          PATH: C:\llvm18\bin:$PATH
         run: |
           set -euo pipefail
           export PATH="$MINGW_BIN:$PATH"
           BIN=target/x86_64-pc-windows-gnu/release/dialc.exe
           "$BIN" build examples/hello.dial -o /tmp/hello2.exe
-          # 用 llvm-readobj / dumpbin 检查导入表：只允许系统 DLL，不应出现 LLVM-C.dll（那是 dialc.exe 自己的依赖）
-          if command -v llvm-readobj >/dev/null 2>&1; then
-            IMPORTS=$(llvm-readobj --coff-imports /tmp/hello2.exe 2>/dev/null | grep -i "LLVM" || true)
-          else
-            IMPORTS=""
-          fi
+          # 用 objdump（MinGW 自带）检查导入表：用户程序不应出现任何 LLVM DLL
+          IMPORTS=$(objdump -p /tmp/hello2.exe 2>/dev/null | grep -i "LLVM" || true)
           if [ -n "$IMPORTS" ]; then echo "❌ 用户程序依赖 LLVM"; echo "$IMPORTS"; exit 1; fi
           echo "✅ 用户程序无 LLVM 依赖"
 
       # 阶段 7：预编译官方标准库（runtime + stdlib）为单份静态库（MinGW gcc 产 .a）。
       - name: 构建标准库静态库（x86_64-pc-windows-gnu）
         shell: bash
-        env:
-          PATH: C:\llvm18\bin:$PATH
         run: |
           set -euo pipefail
           export PATH="$MINGW_BIN:$PATH"
@@ -432,11 +395,10 @@ jobs:
           bash tools/sign_windows_release.sh \
             target/x86_64-pc-windows-gnu/release/dialc.exe "$VER" dist-sign
 
-      - name: 打包发布 zip（windows-x86_64，含 LLVM-C.dll + 验签证书）
+      - name: 打包发布 zip（windows-x86_64，零 LLVM + 验签证书）
         shell: bash
         env:
           GITHUB_SHA: ${{ github.sha }}
-          LLVM18_DIR: C:\llvm18
         run: bash tools/package_release.sh windows-x86_64 target/x86_64-pc-windows-gnu/release/dialc.exe
 
       - name: 上传发布产物（zip + 公钥证书 + 审计密封密文）
@@ -454,7 +416,7 @@ jobs:
   # Termux aarch64（musl 全静态）—— 原生 ARM64 宿主 + Alpine 容器构建
   #   ubuntu-24.04-arm 是 GitHub 免费提供的**原生 ARM64** runner；在其上跑
   #   arm64v8/alpine 容器是原生执行（无需 QEMU），彻底绕开 QEMU binfmt 故障。
-  #   Alpine 提供 musl 原生的 LLVM 18 静态库，全程 musl，产物完全静态。
+  #   发布构建不带 LLVM feature → 无需 LLVM 静态库，全程 musl，产物完全静态。
   # ===========================================================================
   build-termux:
     name: Termux aarch64（musl 全静态核心冒烟）
@@ -475,48 +437,24 @@ jobs:
           set -euo pipefail
           docker run --rm -v "$PWD:/work" -w /work arm64v8/alpine:3.22 sh -c '
             set -euo pipefail
-            apk add --no-cache curl bash git make binutils zip unzip gcc g++ clang \
-              zlib-static zstd-static xz-static ncurses-static libxml2-static libffi-dev \
-              llvm18-dev llvm18-static
+            apk add --no-cache curl bash git make binutils zip unzip gcc g++ \
+              zlib-static zstd-static xz-static ncurses-static libxml2-static libffi-dev
             # 强制静态链接 libffi：产物里若残留 NEEDED libffi.so.8，Termux（无该库）
             # 上执行会直接 not found。libffi.a 由 libffi-dev 提供，删掉 .so 让链接器
-            # 只能命中静态归档（实测 --system-libs 并不含 -lffi，它来自别处的符号解析）。
+            # 只能命中静态归档（FFI 用户程序仍需该符号解析）。
             rm -f /usr/lib/libffi.so*
-            # 确保 LLVM_SYS_181_PREFIX 下有 llvm-config（Alpine 只提供 llvm-config-18）
-            [ -e /usr/lib/llvm18/bin/llvm-config ] \
-              || ln -sf /usr/bin/llvm-config-18 /usr/lib/llvm18/bin/llvm-config
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --default-host aarch64-unknown-linux-musl --profile minimal
             source "$HOME/.cargo/env"
-            # 关键：inkwell 的 llvm18-1-prefer-dynamic 会让 llvm-sys **主动优先动态**
-            # 链接 libLLVM.so；那样的二进制在 Termux（无 glibc/musl 加载器）上无法执行。
-            # llvm-sys 没有 *_STATIC 环境变量可覆盖，故用「只静态」垫片接管 llvm-config：
-            # 它对 --libnames --link-shared 返回非零，迫使 llvm-sys 回退到 --link-static。
-            mkdir -p /usr/local/llvm18-static/bin
-            cp tools/llvm-config-static-linux.sh /usr/local/llvm18-static/bin/llvm-config
-            chmod 0755 /usr/local/llvm18-static/bin/llvm-config
-            export LLVM_CONFIG_REAL=llvm-config-18
-            export LLVM_SYS_181_PREFIX=/usr/local/llvm18-static
-            "/usr/local/llvm18-static/bin/llvm-config" --version
-            echo "--- 静态库名（应含 libLLVM.a）---"
-            "/usr/local/llvm18-static/bin/llvm-config" --libnames --link-static | head -c 200; echo
-            echo "--- 原始 --system-libs --link-static（与 llvm-sys 调用顺序一致）---"
-            llvm-config-18 --system-libs --link-static
-            echo "--- 对照：--link-static --system-libs ---"
-            llvm-config-18 --link-static --system-libs
-            echo "--- libffi 静态归档是否存在 ---"
-            ls -la /usr/lib/libffi.a /usr/lib/*/libffi.a 2>/dev/null || echo "(未找到 libffi.a)"
-            echo "--- 垫片输出 --system-libs --link-static ---"
-            "/usr/local/llvm18-static/bin/llvm-config" --system-libs --link-static
+            # LLVM 后端已可选：发布构建不带 feature → 零 libLLVM，无需 llvm18-dev/static、
+            # 无需 llvm-config 静态垫片、无需 LLVM_SYS_181_PREFIX。
             # 完全静态：musl libc 静态（crt-static）+ 显式用 GCC 链接器（musl gcc，稳定且支持经典 -static），
             # 连同 libstdc++/libgcc/libz/libzstd/libxml2/libffi/liblzma 一并静态，产出单文件无动态依赖的 dialc。
             # （注：linker-features=-lld 在 musl 目标上是 unstable，需 -Z unstable-options，故改用 -C linker=gcc）
-            # -lgcc：libLLVM.a 各组件引用 __clear_cache，该符号由 libgcc.a 提供；
-            #        全静态时它不会自动进入链接，需显式补上（放最后以解析前面的未定义符号）。
-            export RUSTFLAGS="-C target-feature=+crt-static -C linker=gcc -C link-arg=-static -C link-arg=-lgcc -C link-arg=/usr/lib/libffi.a"
+            # libffi.a 供 FFI 符号解析；原 -lgcc 仅为 libLLVM.a 的 __clear_cache，LLVM 移除后不再需要。
+            export RUSTFLAGS="-C target-feature=+crt-static -C linker=gcc -C link-arg=-static -C link-arg=/usr/lib/libffi.a"
             echo "RUSTFLAGS=$RUSTFLAGS"
-            rustc --version && llvm-config-18 --version
-            echo "--- llvm-config --link-static --libs ---"; llvm-config-18 --link-static --libs | head -c 300; echo
+            rustc --version
             cargo build --release --target aarch64-unknown-linux-musl --locked
             BIN=target/aarch64-unknown-linux-musl/release/dialc
             ls -la "$BIN"
@@ -703,9 +641,9 @@ jobs:
 
             | 平台 | 文件名 slug | 运行环境要求 |
             | --- | --- | --- |
-            | **Linux x86_64** | `linux-x86_64` | 动态 glibc；运行期需系统装有 libLLVM-18（apt.llvm.org 的 llvm-18，或设置 `LD_LIBRARY_PATH` 指向 `libLLVM-18.so`） |
-            | **Windows x64** | `windows-x86_64` | MinGW（gnu）目标；`dialc.exe` 运行期需同目录的 `LLVM-C.dll`（已随包分发）；编译你的 `.dial` 程序需 MinGW-w64 工具链（gcc + winpthreads），产物为单文件 `.exe` |
-            | **Termux aarch64** | `termux-aarch64` | **musl 全静态**，单文件、无外部依赖；编译你的程序仅需本机 `gcc`/`clang` |
+            | **Linux x86_64** | `linux-x86_64` | 动态 glibc；**零 LLVM 依赖**（编译器不链接 libLLVM）；编译你的 `.dial` 程序需系统 gcc/clang |
+            | **Windows x64** | `windows-x86_64` | MinGW（gnu）目标；**零 LLVM 依赖**（无需 LLVM-C.dll）；编译你的 `.dial` 程序需 MinGW-w64 工具链（gcc + winpthreads），产物为单文件 `.exe` |
+            | **Termux aarch64** | `termux-aarch64` | **musl 全静态**，单文件、无外部依赖；编译器零 LLVM；编译你的程序仅需本机 `gcc`/`clang` |
 
             ### 安装
 

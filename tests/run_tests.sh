@@ -139,8 +139,10 @@ cd "$(dirname "$0")/.." || exit 1
 
 export LLVM_SYS_181_PREFIX="${LLVM_SYS_181_PREFIX:-/usr/lib/llvm-18}"
 
-echo "== 0) 构建 dialc 编译器 =="
-cargo build --release 2>&1 | tail -3
+echo "== 0) 构建 dialc 编译器（带 llvm feature：正确性 oracle 阵容）=="
+# 全量门禁的 golden / 差分 fuzz / AArch64 语义等段以 LLVM 后端为 oracle，
+# 故测试构建必须显式 --features llvm（发布产物另走不带 feature 的 asm-only 构建）。
+cargo build --release --features llvm 2>&1 | tail -3
 DIALC=./target/release/dialc
 [ -x "$DIALC" ] || { echo "FAIL: 编译器未构建成功"; exit 1; }
 
@@ -713,11 +715,15 @@ else
             echo "  ❌ FFI 导出专项 --no-link 失败"; sed 's/^/       /' "${TMP}/ffiexpobj.log"; fail=1
         else
             EXPORTED=$(nm -g "$FFI_DIR/ffi_export_demo.o" 2>/dev/null | grep -c " T dial_add$")
-            INTERNAL=$(nm "$FFI_DIR/ffi_export_demo.o" 2>/dev/null | grep -c "dial_internal_only")
+            # 只查**全局导出符号**：未标注 @export 的内部函数应不进导出符号表。
+            # asm 后端把它收成小写 t（本地符号，语义正确但未消除），LLVM 后端则
+            # 直接优化消除；两者用 nm -g 都为 0。此前用 nm（含本地符号）对 asm
+            # 得到 1 是断言口径错误——本地符号本就不导出，不是可见性 bug。
+            INTERNAL=$(nm -g "$FFI_DIR/ffi_export_demo.o" 2>/dev/null | grep -c "dial_internal_only")
             if [ "$EXPORTED" -ge 1 ] && [ "$INTERNAL" -eq 0 ]; then
                 echo "  ✅ @export 函数以全局 C 符号暴露，未标注的内部函数不导出"
             else
-                echo "  ❌ @export 符号可见性不对（dial_add 全局数=$EXPORTED，内部函数出现数=$INTERNAL）"; fail=1
+                echo "  ❌ @export 符号可见性不对（dial_add 全局数=$EXPORTED，内部函数全局数=$INTERNAL）"; fail=1
             fi
         fi
     fi
@@ -725,7 +731,9 @@ else
     # 2c-2) volatile 的 IR 形态：易失访问必须真的是 volatile load/store。
     #        运行期看不出来（编译器没开优化），但 IR 里必须带 volatile 标记——
     #        这才是「每次访问都落总线」的真正保证。
-    if DIALC_DUMP_IR=1 "$DIALC" build "$FFI_DIR/ffi_export_demo.dial" -o "${TMP}/ffi_export_demo2" >"${TMP}/ffiexpout2.log" 2>"${TMP}/ffiexp_ir.txt"; then
+    # 检查的是 LLVM IR 文本形态（load/store volatile），asm 后端不产 LLVM IR；
+    # 默认后端切 asm 后，这类「IR 形态」门禁显式走 llvm oracle。
+    if DIALC_DUMP_IR=1 "$DIALC" build "$FFI_DIR/ffi_export_demo.dial" -o "${TMP}/ffi_export_demo2" --backend=llvm >"${TMP}/ffiexpout2.log" 2>"${TMP}/ffiexp_ir.txt"; then
         if grep -q "load volatile" "${TMP}/ffiexp_ir.txt" && grep -q "store volatile" "${TMP}/ffiexp_ir.txt"; then
             echo "  ✅ volatile 指针的读写在 IR 里确实是 volatile load/store"
         else
@@ -767,7 +775,8 @@ else
 fi
 
 # IR 形态：必须是真正的 asm 调用 + 向量类型/指令。
-if DIALC_DUMP_IR=1 "$DIALC" build "$FFI_DIR/ffi_lowlevel_demo.dial" -o "${TMP}/ffi_lowlevel_demo2" >"${TMP}/ffilow_ir.txt" 2>&1; then
+# IR 形态：检查 LLVM inline asm / 原生向量类型，须显式走 llvm oracle（asm 后端不产 IR）。
+if DIALC_DUMP_IR=1 "$DIALC" build "$FFI_DIR/ffi_lowlevel_demo.dial" -o "${TMP}/ffi_lowlevel_demo2" --backend=llvm >"${TMP}/ffilow_ir.txt" 2>&1; then
     IR_OK=1
     grep -q "asm sideeffect"        "${TMP}/ffilow_ir.txt" || IR_OK=0
     grep -q "inteldialect"          "${TMP}/ffilow_ir.txt" || IR_OK=0
@@ -3153,9 +3162,10 @@ if "$DIALC" build tests/kvmap_string_getor_values.dial -o "${TMP}/v_go" >"${TMP}
 else vbad "V 组：kvmap_string_getor_values 编译失败"; tail -8 "${TMP}/v_go.log"; fi
 
 # 3e) v1.10 B6：结构体进容器（Point[] / map<string,Point>）asm 后端补齐。
-# 此前 asm 在 coerce_elem_bits 对 struct 直接 Fail-Fast，而门禁用默认 LLVM 编译该用例
+# 此前 asm 在 coerce_elem_bits 对 struct 直接 Fail-Fast，而门禁用 LLVM 编译该用例
 # 从未暴露——这里显式 --backend=asm 且覆盖 O0-O3，并逐字节对比 LLVM 输出。
-if "$DIALC" build tests/batch3_b6_smoke.dial -o "${TMP}/v_b6_ll" >"${TMP}/v_b6_ll.log" 2>&1; then
+# 默认后端已切 asm，故 oracle 基线必须显式 --backend llvm（否则变成 asm 自比）。
+if "$DIALC" build tests/batch3_b6_smoke.dial --backend llvm -o "${TMP}/v_b6_ll" >"${TMP}/v_b6_ll.log" 2>&1; then
     "$TMP/v_b6_ll" >"${TMP}/v_b6_ll.out" 2>&1
     b6_all_ok=1
     for b6_O in 0 1 2 3; do

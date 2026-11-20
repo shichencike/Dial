@@ -71,17 +71,17 @@ if [ "$count" -eq 0 ]; then
     bad "未找到任何黄金用例（$CASES/*.dial）"
 fi
 
-# 默认后端必须仍是 llvm：不带 --backend 时输出与显式 --backend=llvm 一致。
+# 默认后端必须是 asm（代替 LLVM 的终局）：不带 --backend 时输出与显式 --backend=asm 一致。
 def_src="$TMP/default.dial"
 cp "$CASES/core1.dial" "$def_src"
 if "$DIALC" build "$def_src" -o "$TMP/default_bin" >"$TMP/default.log" 2>&1 \
-   && "$DIALC" build "$def_src" --backend=llvm -o "$TMP/llvm_bin" >"$TMP/default_llvm.log" 2>&1 \
+   && "$DIALC" build "$def_src" --backend=asm -o "$TMP/asm_bin" >"$TMP/default_asm.log" 2>&1 \
    && "$TMP/default_bin" >"$TMP/default.out" 2>&1 \
-   && "$TMP/llvm_bin" >"$TMP/default_llvm.out" 2>&1 \
-   && diff -q "$TMP/default.out" "$TMP/default_llvm.out" >/dev/null 2>&1; then
-    ok "默认后端仍为 llvm（不带 --backend 与显式 --backend=llvm 输出一致）"
+   && "$TMP/asm_bin" >"$TMP/default_asm.out" 2>&1 \
+   && diff -q "$TMP/default.out" "$TMP/default_asm.out" >/dev/null 2>&1; then
+    ok "默认后端为 asm（不带 --backend 与显式 --backend=asm 输出一致）"
 else
-    bad "默认后端行为与 --backend=llvm 不一致"; tail -8 "$TMP/default.log"
+    bad "默认后端行为与 --backend=asm 不一致"; tail -8 "$TMP/default.log"
 fi
 
 # 未覆盖构造必须 Fail-Fast，绝不静默降级。

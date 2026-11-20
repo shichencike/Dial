@@ -5,6 +5,24 @@
 
 ---
 
+#### 默认后端切 asm 后全量回归 9 项失败修复（FFI 布局 / struct 默认值 / GUI 悬垂指针 / IR 形态门禁）
+
+**缘起**：用户战略「LLVM 变可选 oracle、发布包零 libLLVM、默认后端切 asm」落地后，默认走 asm 暴露了一批此前被 `--backend=llvm` 掩盖的既有缺陷。用户明确要求「有 bug 就得修，不慌发，先修再说」，故暂停发布推进，逐一修复全量 `run_tests.sh` 的 9 项失败。修复后又发现并修正了自身引入的 3 项布局回归。最终全量 **EXIT=0、1023 项全绿、0 失败**。
+
+**① FFI bool 往返 + extern struct 布局（byte=1B）根因与修复**：`ffi_link_demo` 两行 bool 输出反转、编译期布局内建 `sizeof<Point>` Dial=24 vs C=16、`offsetof(flag)` 16 vs 9、packed/extern struct 布局多处不一致——**同一根因**：`src/ir.rs` 的 `field_ir(Type::Byte)` 走 `reg_ir` 映射成 I64（8 字节），而 C ABI 结构体字段 `byte`(uint8_t)/`bool`(_Bool) 都是 1 字节。`Point{int64 x; uint8 y; _Bool flag}` 里 y 被算成 8 字节 → flag 偏移从 9 变 16 → `p.y=9` 的 8 字节 store 正好覆盖 offset 9 的 flag，C 侧读出 0；C 写 flag 到 offset 9、Dial 从 offset 16 读到垃圾。修复引入 `cabi_field_ir`/`cabi_field_size`（byte→I8=1B）专供 struct 内存布局与字段 load/store 宽度。
+
+**② ①的过度泛化与回归修正（关键）：按 struct 名区分两套口径**。初版让**所有** struct 的字段都用 C ABI 口径（byte=1B），修好了 FFI 却让 R8 双后端一致性门禁失败——普通 packed struct `PktHdr{seq:int, flags:byte, len:byte}` 的 `sizeof` 从 LLVM 的 24 变成 10。查明 LLVM 后端本就有**两套**字段映射：`dialc_type_to_llvm`（普通 struct，byte→i64=8B）/ `cstruct_field_llvm`（extern struct，byte→i8=1B），`build_struct_types` 按 `program.cstructs` 分派；R8 硬编码 `PKT=24/1` 正是普通 struct 口径。**最终修复**：`IrProgram` 新增 `cstruct_names: HashSet<String>`（从 `prog.cstructs` 收集）；`struct_layout` / `field_align_size` 按被布局 struct 名是否在集合中选 `field_*`（普通，byte=8B）或 `cabi_field_*`（extern，byte=1B），嵌套 struct 递归时按其自身名判定；`src/lower.rs` 四处字段 load/store 改用 `field_mem_ir(cstructs, base_dt, fty)` 同口径选宽度。验证：普通 packed struct 双后端输出逐字一致（均 `PKT=24/1`、`PKTOFF=8/16`）、extern struct `16/8/0/8/9` 与 C 一致、FFI bool 往返 diff 为空。
+
+**③ V 组 b8 结构体字段默认值缺失**：`batch3_b8_smoke` 全省略/部分省略字段（p0.x、p1.y、r0.h/tag）读到栈垃圾并 NULL string 崩溃，显式全提供字段正常。根因：LLVM `gen_expr(StructLit)` 遍历**所有定义字段**、省略的用语义层已校验的编译期常量默认值；asm `lower_expr(StructLit)` 只遍历字面量显式提供的 `fields`，省略字段留在 Alloca 未初始化栈区。修复：asm 侧先 clone 出定义字段表与默认值表（避开 `lower_expr(&mut self)` 借用冲突），按「提供值优先 → 默认值兜底 → 无默认值按字段内存宽度写 0」遍历全部定义字段；嵌套 struct 字段仍按 memcpy 值拷贝 + retain；string 默认值编译期常量正确 lower。验证 6 条关键断言全中、无崩溃。
+
+**④ GUI 第16层 list / 第18层 virtual double free**：`use_gui_list` / `use_gui_virtual` 收尾 `tree_free` 时 `free(): double free detected in tcache 2`。用 gdb 定位崩溃在 C 侧 `dispose_subtree()` 递归；关键对照实验证明是 **asm 后端问题**（同 Dial 源码 + 同 C 库，LLVM 后端正常退出）。最小复现三步收敛：`tree+4add+free` 正常，`+clear+3add` 崩，`+clear+4add` 又不崩——根因是 **C 库真 bug**：`packages/gui/src/dial_gui_look.c` 的 `dial_gui_list_clear` / `dial_gui_combo_clear` 调 `free(items[i].label)` 后**未置 NULL**，而 `dispose_subtree` 无条件遍历全部 `GUI_COMBO_CAP` 槽位 free；clear 后重新 add 3 项只覆盖 items[0..2]，items[3] 残留悬垂指针 → 二次释放。LLVM 后端因不同 malloc 模式碰巧未触发（UB，非其正确）。修复：两个 clear 函数 free 后置 NULL，重建 gui 三平台 `.a`、重新 pack/install。验证两用例 EXIT=0、bad_count=0、done=true。
+
+**⑤ 三个 LLVM IR 形态门禁**：默认切 asm 后，检查 LLVM IR 特有产物的门禁必然失败，按「只有 LLVM IR 形态类门禁可正当改 llvm」原则处理：① `@export` 符号可见性门禁——复现发现 asm 的 `dial_add` 是 `T`（全局导出）、`dial_internal_only` 是 `t`（本地符号，**语义正确**），是测试断言口径错（用 `nm` 列出含本地符号，应为 `nm -g` 只看全局导出）；修正断言为 `nm -g`，两后端都语义正确且不掩盖 bug。② `volatile load/store`、③ `IR asm/向量指令` 两项是纯 LLVM IR 文本检查（asm 后端不产 LLVM IR），显式加 `--backend=llvm`。验证三处修复后各自通过。
+
+**门禁与验证**：`run_tests.sh` 全量三轮——r2（修复前）9 失败 → r3（首轮修复后）3 失败（②的布局回归）→ **r4 EXIT=0、1023 项全绿**。手动专项：FFI bool 往返 diff 空、普通 packed struct 双后端逐字一致、extern struct 布局 C ABI 一致、b8 六断言全中、GUI 两用例 EXIT=0。护栏：LLVM 后端零改动（仅门禁显式指定）、零新 Rust 依赖、版本 1.10.0、不打 tag、C 库改动仅限 gui 包且已重打包。
+
+---
+
 #### P4.6 AArch64 常量移位立即数折叠 + P4.3 下载门禁竞态修复
 
 **缘起**：延续用户「把 AArch64 相关补上」的要求。P4.5 已把 PGO / 内联汇编这两块 A 类能力缺口补齐，本轮继续盘点 AArch64 在**指令发射层**相对 x86 的对等性，发现常量移位是最后一块明确的、确定有收益且零风险的落后项。

@@ -10,8 +10,15 @@ license = "GPL-3.0 OR MIT OR Apache-2.0"
 name = "dialc"
 path = "src/main.rs"
 
+[features]
+# LLVM 后端为可选：默认关闭 → 默认 `cargo build` 即 asm-only、零 libLLVM 依赖。
+# 测试/CI 显式 `--features llvm` 打开 LLVM 后端作为正确性 oracle（golden / 差分 fuzz）。
+# 发布构建不带 feature → 三平台产物彻底剥离 LLVM。
+default = []
+llvm = ["dep:inkwell"]
+
 [dependencies]
-inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm18-1-prefer-dynamic"] }
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm18-1-prefer-dynamic"], optional = true }
 
 # 包分发（v0.92 起，见 ARCHITECTURE.md / README §25）：
 #  .dialpkg 是 zip 容器（专属扩展名，但复用成熟容器格式而非自造轮子）；

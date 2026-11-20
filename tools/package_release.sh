@@ -83,14 +83,7 @@ if [ "$SLUG" = "windows-x86_64" ]; then
   else
     echo "   ⚠️  未提供 DIAL_SIGN_CER（非发布构建，跳过证书嵌入）" >&2
   fi
-  # LLVM-C.dll：dialc.exe 运行期依赖（与官方 MSVC LLVM 18 的 C 接口配套）
-  LLVM_DLL="${LLVM18_DIR:-C:/llvm18}/bin/LLVM-C.dll"
-  if [ -f "$LLVM_DLL" ]; then
-    cp "$LLVM_DLL" "$DEST/LLVM-C.dll"
-    echo "   ✅ 已随包附带 LLVM-C.dll"
-  else
-    echo "   ⚠️  未找到 LLVM-C.dll（LLVM18_DIR=$LLVM18_DIR）；dialc.exe 运行期将缺该 DLL" >&2
-  fi
+  # LLVM 后端已可选：发布构建不带 feature → dialc.exe 零 LLVM-C.dll 依赖，无需随包分发。
 fi
 
 # 平台运行环境说明
@@ -104,14 +97,14 @@ fi
   echo
   case "$SLUG" in
     linux-x86_64)
-      echo "运行环境：Linux x86_64，动态链接 glibc，运行期需要系统装有 libLLVM-18"
-      echo "（apt 源 apt.llvm.org 的 llvm-18，或自行设置 LD_LIBRARY_PATH 指向 libLLVM-18.so）。";;
+      echo "运行环境：Linux x86_64，动态链接 glibc，编译器零 LLVM 依赖（不链接 libLLVM）。"
+      echo "用 dialc 编译你的 .dial 程序时需系统装有 gcc（或 clang）。";;
     windows-x86_64)
-      echo "运行环境：Windows x64（MinGW 目标）。dialc.exe 运行期需要同目录的 LLVM-C.dll"
-      echo "（已随包分发）。用 dialc 编译你的 .dial 程序时，需要 MinGW-w64 工具链"
+      echo "运行环境：Windows x64（MinGW 目标）。编译器零 LLVM 依赖（无需 LLVM-C.dll）。"
+      echo "用 dialc 编译你的 .dial 程序时，需要 MinGW-w64 工具链"
       echo "（gcc + winpthreads），产物为单文件 .exe，不依赖 LLVM。";;
     termux-aarch64)
-      echo "运行环境：Termux / 任意 ARM64 Linux，完全静态链接（musl），无外部依赖。"
+      echo "运行环境：Termux / 任意 ARM64 Linux，完全静态链接（musl），无外部依赖，编译器零 LLVM。"
       echo "用 dialc 编译 .dial 程序时仅需本机装有 gcc（或 clang），产物同样无外部依赖。";;
   esac
   echo

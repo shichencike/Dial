@@ -8,7 +8,7 @@
 //!
 //! 与现有 LLVM 后端（`src/codegen.rs`）完全独立、互不干扰——LLVM 路径零改动。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::ast::{self, Type};
 use crate::semantic::FuncInfo;
 
@@ -437,6 +437,12 @@ pub struct IrProgram {
     pub functions_sig: HashMap<String, FuncInfo>,
     /// 结构体名 → (字段(名,类型), 默认值)，复用 semantic 的 StructTable。
     pub structs: HashMap<String, (Vec<(String, Type)>, HashMap<String, ast::Expr>)>,
+    /// v1.04 FFI：`extern struct`（C ABI 布局）的名字集合。
+    /// 与 LLVM 后端 `cstruct_names` 对应：普通 struct 字段 byte 按寄存器口径 I64(8B)，
+    /// 而 extern struct 字段 byte 按 C ABI 口径 I8(1B)。struct_layout 与字段 load/store
+    /// 必须按 struct 名区分这两套口径——否则要么普通 struct 布局错（PKT 24→10），
+    /// 要么 extern struct 的 byte/bool 字段偏移与 load/store 宽度错位（FFI bool 往返错）。
+    pub cstruct_names: HashSet<String>,
     /// label 名 → 作用域深度（语义层 analyze_gotos 统一计算，自研后端生成
     /// load/释放层时按深度跨作用域释放）。
     pub goto_depths: HashMap<String, usize>,
@@ -447,8 +453,9 @@ impl IrProgram {
         functions_sig: HashMap<String, FuncInfo>,
         structs: HashMap<String, (Vec<(String, Type)>, HashMap<String, ast::Expr>)>,
         goto_depths: HashMap<String, usize>,
+        cstruct_names: HashSet<String>,
     ) -> Self {
-        IrProgram { functions: Vec::new(), string_literals: Vec::new(), functions_sig, structs, goto_depths }
+        IrProgram { functions: Vec::new(), string_literals: Vec::new(), functions_sig, structs, cstruct_names, goto_depths }
     }
     /// 登记一个字符串字面量，返回其索引。
     pub fn intern_string(&mut self, s: &str) -> u32 {
@@ -467,12 +474,15 @@ impl IrProgram {
     /// 的 origin 占 Point 的完整尺寸（16 字节）而非一个指针宽（8 字节），
     /// 否则字段偏移与 LLVM 后端（按 DataLayout 算真实布局）不一致，双后端会错位。
     pub fn struct_layout(&self, name: &str, packed: bool) -> (Vec<i64>, i64, i64) {
-        self.struct_layout_depth(name, packed, 0)
+        let is_c = self.cstruct_names.contains(name);
+        self.struct_layout_depth(name, packed, 0, is_c)
     }
 
     /// struct_layout 的递归实现。depth 用于环检测（自引用结构体在 Dial 里不合法，
-    /// 但坏输入下必须终止而不是无限递归）。
-    fn struct_layout_depth(&self, name: &str, packed: bool, depth: u32) -> (Vec<i64>, i64, i64) {
+    /// 但坏输入下必须终止而不是无限递归）。is_c 表示**当前被布局的 struct** 是否 extern：
+    /// extern struct 字段 byte 按 C ABI I8(1B)，普通 struct 字段 byte 按寄存器 I64(8B)。
+    /// 与 LLVM 后端的 dialc_type_to_llvm / cstruct_field_llvm 两套映射逐字节对齐。
+    fn struct_layout_depth(&self, name: &str, packed: bool, depth: u32, is_c: bool) -> (Vec<i64>, i64, i64) {
         // 字段默认值表在此无关；直接用第一个元素（字段列表）。
         let fields = match self.structs.get(name) {
             Some((f, _)) => f.clone(),
@@ -482,7 +492,7 @@ impl IrProgram {
         let mut off = 0i64;
         let mut align = 1i64;
         for (_, t) in &fields {
-            let (a, sz) = self.field_align_size(t, packed, depth);
+            let (a, sz) = self.field_align_size(t, packed, depth, is_c);
             align = align.max(a);
             if !packed { off = (off + a - 1) / a * a; }
             offsets.push(off);
@@ -492,22 +502,30 @@ impl IrProgram {
         (offsets, off, align)
     }
 
-    /// 字段的 (对齐, 字节数)。标量按宽度；嵌套结构体按其自身的 C ABI 布局递归求。
-    fn field_align_size(&self, t: &Type, packed: bool, depth: u32) -> (i64, u32) {
+    /// 字段的 (对齐, 字节数)。标量按宽度；嵌套结构体按其自身的布局递归求。
+    /// is_c 决定标量字段口径：extern struct 走 cabi_field_*（byte=1B），
+    /// 普通 struct 走 field_*（byte=8B，对齐 LLVM dialc_type_to_llvm 的 byte→i64）。
+    fn field_align_size(&self, t: &Type, packed: bool, depth: u32, is_c: bool) -> (i64, u32) {
         if let Type::Struct(n) = t {
             if depth < 8 {
-                let (_off, size, align) = self.struct_layout_depth(n, packed, depth + 1);
-                // C ABI：嵌套结构体的对齐取其自身对齐，尺寸取其尾部 padding 后的大小。
+                // 嵌套 struct 的口径由它**自身**是否在 cstruct_names 决定（sema 保证
+                // extern struct 的嵌套字段也是 extern struct，普通 struct 同理）。
+                let nested_is_c = self.cstruct_names.contains(n);
+                let (_off, size, align) = self.struct_layout_depth(n, packed, depth + 1, nested_is_c);
                 return (align.max(1), size.max(1) as u32);
             }
             // 深度超限（异常输入）：按单指针宽兜底，绝不无限递归。
             return (8, 8);
         }
-        let it = field_ir(t);
+        let (it, sz) = if is_c {
+            (cabi_field_ir(t), cabi_field_size(t))
+        } else {
+            (field_ir(t), field_size(t))
+        };
         let a = if it == IrType::I32 || it == IrType::F32 { 4 }
             else if it == IrType::I1 || it == IrType::I8 { 1 }
             else { 8 };
-        (a, field_size(t))
+        (a, sz)
     }
 }
 
@@ -551,7 +569,9 @@ pub fn param_ir(t: &Type) -> IrType {
     }
 }
 
-/// Dial 结构体字段宽度（field_layout）：bool 占 1 字节、byte 占 8 字节，其余同 reg。
+/// Dial 结构体字段宽度（寄存器口径）：bool 占 1 字节、byte 占 8 字节，其余同 reg。
+/// 用于**普通 struct** 的布局偏移与字段 load/store 宽度（对齐 LLVM dialc_type_to_llvm
+/// 的 byte→i64）。extern struct 另走 cabi_field_ir（byte→i8），见 struct_layout 的 is_c 分派。
 pub fn field_ir(t: &Type) -> IrType {
     match t {
         Type::Bool => IrType::I1,
@@ -559,9 +579,37 @@ pub fn field_ir(t: &Type) -> IrType {
     }
 }
 
-/// Dial 结构体字段占用的字节数（用于布局偏移推进）。
+/// Dial 结构体字段占用的字节数（寄存器口径，用于标量 sizeof 内建）。
 pub fn field_size(t: &Type) -> u32 {
     match field_ir(t) {
+        IrType::I32 | IrType::F32 => 4,
+        IrType::I1 | IrType::I8 => 1,
+        _ => 8,
+    }
+}
+
+/// C ABI 结构体字段宽度（struct 内存布局口径）：byte=uint8_t(1B)、bool=_Bool(1B)、
+/// int32=4B、float32=4B、其余指针宽(8B)。与 LLVM 后端 `dialc_type_to_llvm` 在
+/// `build_struct_types` 处对字段的映射逐字节一致（byte→i8 / bool→i8 / i32→i32 ...）。
+///
+/// 与 `field_ir` 的关键差异只在 Byte：寄存器口径 byte=I64(8B)，C ABI 口径 byte=I8(1B)。
+/// **extern struct** 的 struct_layout / 字段 load/store 必须用本口径推进字节偏移，
+/// 否则 Point 的 sizeof/offsetof 会与 C 不符（24 vs 16、flag 偏移 16 vs 9），并经
+/// 字段 store 覆盖面污染相邻字段（FFI bool 往返错位即由此而来）。普通 struct 仍走
+/// field_ir（byte=8B），否则 R8 的 packed struct 布局（PKT=24）会被错算成 10。
+/// 注意：这**不改变**标量 `sizeof<byte>()`（仍为 8，走 field_size 的寄存器口径），
+/// 因为 Dial 标量 byte 在寄存器/栈槽里确实占 8 字节。
+pub fn cabi_field_ir(t: &Type) -> IrType {
+    match t {
+        Type::Bool => IrType::I1,
+        Type::Byte => IrType::I8,
+        other => reg_ir(other),
+    }
+}
+
+/// C ABI 结构体字段占用的字节数（用于 struct 布局偏移推进）。
+pub fn cabi_field_size(t: &Type) -> u32 {
+    match cabi_field_ir(t) {
         IrType::I32 | IrType::F32 => 4,
         IrType::I1 | IrType::I8 => 1,
         _ => 8,

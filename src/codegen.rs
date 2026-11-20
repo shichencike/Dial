@@ -11,6 +11,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::safety::SafetyMode;
+
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::debug_info::{
@@ -100,23 +102,8 @@ fn dial_type_name(t: &Type) -> String {
  *  优化器有权把后续代码整段删掉。这不是"崩溃"，而是更坏——程序会静默跑出错误结果。
  * ============================================================================
  */
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SafetyMode {
-    Debug,
-    ReleaseSafe,
-    ReleaseFast,
-}
-
-impl SafetyMode {
-    /// 对应 C Runtime 的 -DDIAL_SAFETY=N
-    pub fn as_c_macro(self) -> &'static str {
-        match self {
-            SafetyMode::Debug => "2",
-            SafetyMode::ReleaseSafe => "1",
-            SafetyMode::ReleaseFast => "0",
-        }
-    }
-}
+// SafetyMode 已外置到 src/safety.rs（跨后端共用）：LLVM 后端改为可选 feature 后，
+// asm 后端与链接层仍需它，故移出本模块，使本文件可整模块 cfg 门控。
 
 /// 代码生成选项。除 Fail-Fast 等级外，还携带「是否启用终极优化」的信息，
 /// 用以打开 LLVM 的 O3 + SIMD 自动向量化 + 循环展开，以及是否额外导出

@@ -12,7 +12,7 @@
 //! 栈对齐：x86 入口 rsp ≡ 8 (mod 16)，故 frame_size ≡ 8 (mod 16) 才能让 call 时
 //! rsp ≡ 0；AArch64 入口 sp 已 16 对齐，frame_size 取 16 的倍数即可。
 
-use crate::codegen::SafetyMode;
+use crate::safety::SafetyMode;
 use crate::ir::*;
 use crate::target::{EmitTarget, TargetCpu};
 use std::collections::{HashMap, HashSet};
@@ -3018,9 +3018,20 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    fn inst_fbin(&mut self, op: ABin, dst: VReg, a: Value, b: Value, _ty: IrType) {
+    fn inst_fbin(&mut self, op: ABin, dst: VReg, a: Value, b: Value, ty: IrType) {
         let f1 = self.f1().to_string();
         let f2 = self.f2().to_string();
+        // F32 运算必须用单精度指令（addss/subss/mulss/divss）：此前恒用双精度
+        // addsd 等，把 f32 位模式当 double 读——`float32(1.5)+float32(0.25)` 得 0.0
+        // （scalar32_probe.dial line 38，FFI32 门禁红点）。F32 操作数已在 xmm 低 32 位
+        // （lf 对 F32 用 movss），只差运算指令后缀。
+        let suf = if ty == IrType::F32 { "ss" } else { "sd" };
+        let fop = |op: ABin| -> &'static str {
+            match op {
+                ABin::Add => "add", ABin::Sub => "sub", ABin::Mul => "mul",
+                ABin::Div | ABin::Mod => "div", _ => "add",
+            }
+        };
         // M7-e3av：dst 驻留快路径（镜像整数 inst_bin）——a 直接读进 dst 的物理
         // xmm，运算落在物理寄存器，结果不经过 xmm8 scratch、也不写回栈槽。
         // b 若是常量仍由 bin_src 物化到 f2=xmm9；若驻留则直接返回其物理 xmm。
@@ -3029,13 +3040,7 @@ impl<'a> FnEmit<'a> {
                 self.lf(a, pd);
                 let b_reg = self.bin_src(b, &f2, false, true);
                 let pd_r = self.r(pd);
-                match op {
-                    ABin::Add => self.line(&format!("\taddsd {}, {}", b_reg, pd_r)),
-                    ABin::Sub => self.line(&format!("\tsubsd {}, {}", b_reg, pd_r)),
-                    ABin::Mul => self.line(&format!("\tmulsd {}, {}", b_reg, pd_r)),
-                    ABin::Div | ABin::Mod => self.line(&format!("\tdivsd {}, {}", b_reg, pd_r)),
-                    _ => self.line(&format!("\taddsd {}, {}", b_reg, pd_r)),
-                }
+                self.line(&format!("\t{}{} {}, {}", fop(op), suf, b_reg, pd_r));
                 self.dirty.insert(dst);
                 return;
             }
@@ -3045,16 +3050,7 @@ impl<'a> FnEmit<'a> {
         match self.target {
             EmitTarget::X86_64SysV => {
                 let a_reg = self.r(&f1);
-                match op {
-                    ABin::Add => self.line(&format!("\taddsd {}, {}", b_reg, a_reg)),
-                    ABin::Sub => self.line(&format!("\tsubsd {}, {}", b_reg, a_reg)),
-                    ABin::Mul => self.line(&format!("\tmulsd {}, {}", b_reg, a_reg)),
-                    ABin::Div => self.line(&format!("\tdivsd {}, {}", b_reg, a_reg)),
-                    ABin::Mod => { // 浮点取模首版不走这里（lower 未生成）
-                        self.line(&format!("\tdivsd {}, {}", b_reg, a_reg));
-                    }
-                    _ => self.line(&format!("\taddsd {}, {}", b_reg, a_reg)),
-                }
+                self.line(&format!("\t{}{} {}, {}", fop(op), suf, b_reg, a_reg));
                 self.sf(dst, &f1);
             }
             EmitTarget::AArch64 => {
@@ -3446,9 +3442,17 @@ impl<'a> FnEmit<'a> {
                 ArgLoc::Stack(_) => {}
             }
         }
-        // 3) SysV variadic 约定：%al = 使用的向量寄存器个数。对非 variadic 无副作用。
+        // 3) SysV variadic 约定：%al = 传给向量寄存器（xmm0-7）的参数个数。
+        //    恒置 0 会让变参函数（如 printf 系列）的 va_arg 读浮点时拿到错误值
+        //    （ffi_varargs：3.5→0.0、bool→垃圾）。非变参调用 %al 是 caller-saved，
+        //    写入正确值也无害。栈传的浮点（ArgLoc::Stack）不计入。
         if self.target == EmitTarget::X86_64SysV {
-            self.line(&format!("\txorl {}, {}", self.r("eax"), self.r("eax")));
+            let n_fp = locs.iter().filter(|l| matches!(l, ArgLoc::Fp(_))).count();
+            if n_fp == 0 {
+                self.line(&format!("\txorl {}, {}", self.r("eax"), self.r("eax")));
+            } else {
+                self.line(&format!("\tmovl ${}, {}", n_fp, self.r("eax")));
+            }
         }
         self.do_call(func);
 
@@ -3528,8 +3532,13 @@ impl<'a> FnEmit<'a> {
         self.lg(Value::Reg(target), call_reg);
         match self.target {
             EmitTarget::X86_64SysV => {
-                // SysV variadic 约定：%al = 使用的向量寄存器个数（对非 variadic 无副作用）。
-                self.line(&format!("\txorl {}, {}", self.r("eax"), self.r("eax")));
+                // SysV variadic 约定：%al = 传给向量寄存器（xmm0-7）的参数个数。
+                let n_fp = locs.iter().filter(|l| matches!(l, ArgLoc::Fp(_))).count();
+                if n_fp == 0 {
+                    self.line(&format!("\txorl {}, {}", self.r("eax"), self.r("eax")));
+                } else {
+                    self.line(&format!("\tmovl ${}, {}", n_fp, self.r("eax")));
+                }
                 self.line(&format!("\tcall *{}", self.r(call_reg)));
             }
             EmitTarget::AArch64 => {

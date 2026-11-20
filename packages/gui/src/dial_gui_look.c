@@ -524,7 +524,10 @@ int64_t dial_gui_combo_add_item(GuiWidgetImpl *w, int64_t id, DialString label) 
 
 int64_t dial_gui_combo_clear(GuiWidgetImpl *w) {
     if (!w) return -1;
-    for (int i = 0; i < w->item_count; ++i) free(w->items[i].label);
+    // free 后必须把槽位置 NULL：dispose_subtree 在析构时无条件遍历全部
+    // GUI_COMBO_CAP 个槽位 free(items[i].label)，残留的悬垂指针会被二次释放
+    // （clear 后再 add 少于原数量的项时，尾部旧槽位无人覆盖 → double free）。
+    for (int i = 0; i < w->item_count; ++i) { free(w->items[i].label); w->items[i].label = NULL; }
     w->item_count = 0;
     w->selected_idx = -1;
     w->combo_open = 0;
@@ -591,7 +594,10 @@ int64_t dial_gui_list_add_item(GuiWidgetImpl *w, int64_t id, DialString label) {
 
 int64_t dial_gui_list_clear(GuiWidgetImpl *w) {
     if (!w) return -1;
-    for (int i = 0; i < w->item_count; ++i) free(w->items[i].label);
+    // free 后必须把槽位置 NULL：dispose_subtree 在析构时无条件遍历全部
+    // GUI_COMBO_CAP 个槽位 free(items[i].label)，残留的悬垂指针会被二次释放
+    // （clear 后再 add 少于原数量的项时，尾部旧槽位无人覆盖 → double free）。
+    for (int i = 0; i < w->item_count; ++i) { free(w->items[i].label); w->items[i].label = NULL; }
     w->item_count = 0;
     w->selected_idx = -1;
     w->combo_open = 0;

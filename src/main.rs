@@ -14,7 +14,10 @@
 //!      静态库 libdial_std.a，再把用户的 .o 与之链接，得到只依赖 C Runtime(libc) 的原生可执行文件。
 
 mod ast;
+// LLVM 后端为可选 feature：关闭时本模块整块不进编译单元，产物零 LLVM/inkwell 符号。
+#[cfg(feature = "llvm")]
 mod codegen;
+mod safety;
 // 自研后端首版只覆盖核心子集：IR / 目标平台 trait / Pass 里刻意保留了后续相位
 // （异常 unwinding、NEON / Win64、更多 Conv 与 Pass）要用的枚举变体与方法。
 // 这些「预留接口」暂时没有调用点，统一容忍 dead_code，避免淹没真正的警告。
@@ -48,7 +51,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use codegen::SafetyMode;
+use safety::SafetyMode;
 use semantic::analyze;
 
 /// 代码生成后端。`llvm` 是既有路径（默认，零改动），`asm` 是自研后端
@@ -348,8 +351,9 @@ fn main() {
     let mut single_file = false;
     // --fast-compile：极致编译速度（隐含强制 O0 + C stdlib -O0 + 最大化缓存复用）。
     let mut fast_compile = false;
-    // 自研后端默认关闭：不指定 --backend 时行为与既有版本完全一致（LLVM 路径零改动）。
-    let mut backend = Backend::Llvm;
+    // 默认后端为自研 asm（代替 LLVM 的终局）：不指定 --backend 即走 asm。
+    // 显式 --backend llvm 仍可用，但仅当二进制以 --features llvm 构建时有效。
+    let mut backend = Backend::Asm;
     // 优化级别（仅作用于 asm 后端）：默认 O2 = 既有全部优化，零回归。
     let mut opt_level = ir::OptLevel::O2;
     // 是否显式设置过优化级别（用于 --fast-compile 冲突检测：显式 -O1..3 拒绝，默认 O2 不冲突）。
@@ -676,10 +680,13 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".dialc_build")
         .join(format!("safety-{}", safety.as_c_macro()));
+    // bitcode 路径供 LLVM 后端的 LTO/PGO 分支引用（该分支 feature off 时运行期恒不进入，
+    // 但为保持编译期符号完整，PathBuf 定义保留；仅目录创建在 feature on 时执行，避免 asm-only 白建目录）。
     let bc_path = build_dir.join(obj_path.file_stem().unwrap()).with_extension("bc");
     // --fast（ReleaseFast）会把 Dial 代码导出为 LLVM bitcode（.bc）供 LTO 重排；
     // 必须先把父目录建好，否则 write_bitcode_to_path 在全新检出（无残留 .dialc_build/）时
     // 会因目录不存在而静默失败，进而让所有 --fast 构建在 CI 上崩溃。
+    #[cfg(feature = "llvm")]
     if fast {
         if let Err(e) = fs::create_dir_all(&build_dir) {
             eprintln!("创建 bitcode 构建目录失败: {}", e);
@@ -806,29 +813,40 @@ fn main() {
             }
         }
     } else {
-        if opt_level != ir::OptLevel::O2 && !fast_compile {
-            eprintln!("ℹ️  -O{} 仅作用于自研后端（--backend=asm）；LLVM 后端优化级别由 --fast/-g 控制，已忽略。", opt_level.as_u8());
-        }
-        if fast_compile {
-            eprintln!("ℹ️  --fast-compile 对 LLVM 后端仅作用于 C stdlib（-O0 + 缓存复用）；Dial 优化仍由 --fast/-g 控制。");
-        }
-        let cg_opts = codegen::CgOpts {
-            safety,
-            aggressive: fast,
-            bc_out: if fast { Some(bc_path.clone()) } else { None },
-            src_file: fe.src_file.clone(),
-            debug_info,
-        };
-        if let Err(e) = codegen::compile(
-            &fe.program,
-            &fe.functions,
-            &fe.structs,
-            &obj_path,
-            &cg_opts,
-            &fe.externs,
-        ) {
-            eprintln!("{}", e);
+        // LLVM 后端仅在 --features llvm 构建中存在。默认（asm-only）构建若显式
+        // 指定 --backend llvm，Fail-Fast 明确拒绝，绝不静默降级到 asm。
+        #[cfg(not(feature = "llvm"))]
+        {
+            eprintln!("❌ 此 dialc 构建未启用 LLVM 后端（编译时未带 --features llvm）。");
+            eprintln!("   请去掉 --backend llvm 使用默认的 asm 后端，或用 `cargo build --release --features llvm` 重新构建。");
             std::process::exit(1);
+        }
+        #[cfg(feature = "llvm")]
+        {
+            if opt_level != ir::OptLevel::O2 && !fast_compile {
+                eprintln!("ℹ️  -O{} 仅作用于自研后端（--backend=asm）；LLVM 后端优化级别由 --fast/-g 控制，已忽略。", opt_level.as_u8());
+            }
+            if fast_compile {
+                eprintln!("ℹ️  --fast-compile 对 LLVM 后端仅作用于 C stdlib（-O0 + 缓存复用）；Dial 优化仍由 --fast/-g 控制。");
+            }
+            let cg_opts = codegen::CgOpts {
+                safety,
+                aggressive: fast,
+                bc_out: if fast { Some(bc_path.clone()) } else { None },
+                src_file: fe.src_file.clone(),
+                debug_info,
+            };
+            if let Err(e) = codegen::compile(
+                &fe.program,
+                &fe.functions,
+                &fe.structs,
+                &obj_path,
+                &cg_opts,
+                &fe.externs,
+            ) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
         }
     }
 
@@ -1902,8 +1920,9 @@ fn print_usage() {
     eprintln!();
     eprintln!("编译与运行");
     eprintln!("  build <文件.dial> [-o 输出] [-g] [--no-link] [--safety debug|safe|fast] [--pgo] [--tiny] [--single-file] [--fast-compile] [--backend llvm|asm]");
-    eprintln!("  --backend llvm|asm   代码生成后端；默认 llvm（既有路径）。asm 为自研后端：");
-    eprintln!("                      专属 IR + 优化 Pass → x86-64/AArch64 汇编 → cc -c → .o（实验性）");
+    eprintln!("  --backend llvm|asm   代码生成后端；默认 asm（自研后端）：");
+    eprintln!("                      专属 IR + 优化 Pass → x86-64/AArch64 汇编 → cc -c → .o");
+    eprintln!("                      llvm 为可选后端，仅 --features llvm 构建的二进制可用（测试 oracle）。");
     eprintln!("  -O0|-O1|-O2|-O3             优化级别（仅 asm 后端；等价 -O N / --opt-level=N）：");
     eprintln!("                      0=无 Dial 优化、1=基础 IR Pass、2=默认(全开)、3=+LLVM 风格代数恒等式");
     eprintln!("  --target-cpu <级别>          asm 后端高级指令集开关（默认 baseline=仅通用指令，零回归）：");
@@ -2135,6 +2154,8 @@ struct Frontend {
     externs: Vec<(String, semantic::FuncInfo)>,
     pkg_libs: Vec<PathBuf>,
     ffi_rpaths: Vec<PathBuf>,
+    // src_file 仅供 LLVM 后端的 CgOpts 使用；asm-only 构建（无 llvm feature）下未读。
+    #[cfg_attr(not(feature = "llvm"), allow(dead_code))]
     src_file: String,
     /// M7-e3aa：函数名 → 定义它的源文件路径（多文件 import 合并编译时）。
     /// 仅供自研 asm 后端 -g 生成多文件 DWARF source 映射；LLVM 路径零改动。
@@ -3507,7 +3528,9 @@ fn cmd_test(args: &[String]) {
             col: t.col,
             exported: false,
         });
-        let (functions, structs, _goto_depths) = match analyze(&mut prog, &fe.externs) {
+        // goto_depths 仅 asm-only 构建（无 llvm feature）的 codegen 分支使用。
+        #[cfg_attr(feature = "llvm", allow(unused_variables))]
+        let (functions, structs, goto_depths) = match analyze(&mut prog, &fe.externs) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  ❌ {} 语义检查失败：{}", t.name, e);
@@ -3517,17 +3540,35 @@ fn cmd_test(args: &[String]) {
         };
         let obj = tmp.join(format!("t{}.o", idx));
         let exe = tmp.join(format!("t{}", idx));
-        let cg = codegen::CgOpts {
-            safety: SafetyMode::Debug,
-            aggressive: false,
-            bc_out: None,
-            src_file: src.clone(),
-            debug_info: false, // dialc test 只跑断言，不需要调试符号
-        };
-        if let Err(e) = codegen::compile(&prog, &functions, &structs, &obj, &cg, &fe.externs) {
-            eprintln!("  ❌ {} 代码生成失败：{}", t.name, e);
-            failed += 1;
-            continue;
+        #[cfg(feature = "llvm")]
+        {
+            let cg = codegen::CgOpts {
+                safety: SafetyMode::Debug,
+                aggressive: false,
+                bc_out: None,
+                src_file: src.clone(),
+                debug_info: false, // dialc test 只跑断言，不需要调试符号
+            };
+            if let Err(e) = codegen::compile(&prog, &functions, &structs, &obj, &cg, &fe.externs) {
+                eprintln!("  ❌ {} 代码生成失败：{}", t.name, e);
+                failed += 1;
+                continue;
+            }
+        }
+        #[cfg(not(feature = "llvm"))]
+        {
+            // 发布版无 LLVM：dialc test 走自研 asm 后端（合成的单 main 程序，O0/Debug）。
+            // 合成 main 无源码 origin，fn_origin 传空表；不开 PGO 插桩、不读 profile。
+            let empty_origin = std::collections::HashMap::new();
+            if let Err(e) = asm::compile_asm(
+                &prog, functions, structs, goto_depths, &obj, false, &src,
+                &empty_origin, ir::OptLevel::O0, SafetyMode::Debug,
+                crate::target::TargetCpu::default(), false, None,
+            ) {
+                eprintln!("  ❌ {} 代码生成失败：{}", t.name, e);
+                failed += 1;
+                continue;
+            }
         }
         if let Err(e) = link(
             &obj,
