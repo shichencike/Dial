@@ -233,7 +233,9 @@ DEMO_VER="$(grep -o '"version": *"[^"]*"' "$THOME/.dial/packages/demo/manifest.t
 # ---- 7) semver 单测 ----
 # 注意：cargo 依赖真实 HOME 下的 rustup，临时 HOME 会找不到工具链，故此处切回原 HOME。
 echo "-- 7) semver 版本比较单测 --"
-TUNIT="$(HOME="$OLD_HOME" cargo test --manifest-path /workspace/dialc/Cargo.toml registry::tests 2>&1)"
+# 用相对路径（脚本开头已 cd 到项目根），不要硬编码本地沙箱路径——
+# 否则 CI runner（工作目录 /home/runner/work/Dial/Dial）上 cargo test 找不到清单而假失败。
+TUNIT="$(HOME="$OLD_HOME" cargo test --manifest-path Cargo.toml registry::tests 2>&1)"
 echo "$TUNIT" | grep -q "2 passed" && ok "search/info semver 单测通过" || bad "semver 单测未通过"
 
 echo

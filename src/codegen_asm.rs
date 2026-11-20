@@ -517,7 +517,13 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
         dwarf_funcs.push(di);
     }
     // 避免 GNU ld 的 "missing .note.GNU-stack section implies executable stack" 警告。
-    out.push_str("\t.section .note.GNU-stack,\"\",@progbits\n");
+    // 该段是 **ELF 专用**（section 名含 '-'、类型 @progbits），Windows 的 MinGW/COFF
+    // 汇编器会把 `.note.GNU-stack` 里的 '-' 当成 junk 报 "first unrecognized character is `-'"。
+    // 故仅非 Windows 构建发射；Windows 目标下 COFF 本身默认非可执行栈，无需此标记。
+    // 用编译期 cfg! 判断：Linux 构建逐字节不变，Windows 构建跳过该行。
+    if !cfg!(windows) {
+        out.push_str("\t.section .note.GNU-stack,\"\",@progbits\n");
+    }
     // M7-e3q：尾调用消除（递归 SCC 内的内部尾调用 call+ret → jmp）。
     // 必须是模块级 pass：需要跨函数的调用图判定「callee 可达 caller」，逐函数
     // 发射时看不到全局。仅 x86-64 生效；AArch64 零变化。
