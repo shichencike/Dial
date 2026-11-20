@@ -5106,6 +5106,13 @@ else
     fail=1
 fi
 
+echo "== AP2) P4.4 依赖闭环门禁（manifest deps/--with-deps/反依赖/并发锁/semver）=="
+if bash tools/verify_p4_deps.sh "$DIALC"; then
+    :   # 缺 curl/python3/unzip 时脚本自行 skip
+else
+    fail=1
+fi
+
 echo
 if [ $fail -eq 0 ]; then
     echo "== 全部测试通过 ✅ =="

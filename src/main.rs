@@ -41,7 +41,7 @@ mod registry;
 mod resolve;
 mod semantic;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -144,10 +144,14 @@ fn main() {
             return;
         }
 
-        // 解析可选的 --sha256 <hex> / --json / --offline（只有 install 用得到）
+        // 解析可选的 --sha256 <hex> / --json / --offline / --with-deps（只有 install 用得到）。
+        // P4.4：--with-deps 装完主包后按 manifest.dependencies 自动 resolve + 递归安装。
         let mut expected_sha256: Option<String> = None;
         let mut as_json = false;
         let mut offline = false;
+        let mut with_deps = false;
+        let mut index_url: Option<String> = None;
+        let mut index_sha256: Option<String> = None;
         let mut i = 3;
         while i < args.len() {
             match args[i].as_str() {
@@ -163,6 +167,24 @@ fn main() {
                 }
                 "--json" => as_json = true,
                 "--offline" => offline = true,
+                "--with-deps" => with_deps = true,
+                "--index" | "--index-sha256" => {
+                    let flag = args[i].clone();
+                    i += 1;
+                    match args.get(i) {
+                        Some(v) if !v.starts_with('-') => {
+                            if flag == "--index" {
+                                index_url = Some(v.clone());
+                            } else {
+                                index_sha256 = Some(v.clone());
+                            }
+                        }
+                        _ => {
+                            eprintln!("{} 后面缺少参数值", flag);
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 other => {
                     eprintln!("install: 不认识的参数 '{}'", other);
                     std::process::exit(1);
@@ -187,16 +209,23 @@ fn main() {
         };
         match result {
             Ok((dir, manifest)) => {
+                // P4.4：处理声明的依赖（默认仅检查提示；--with-deps 递归安装，失败即拒）。
+                let dep_report = handle_install_deps(
+                    &manifest, with_deps, offline, index_url.as_deref(), index_sha256.as_deref(),
+                );
+                let deps_failed = dep_report.get("ok").and_then(|v| v.as_bool()) == Some(false);
                 if as_json {
                     println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": true,
+                        "ok": !deps_failed,
                         "name": manifest.name,
                         "version": manifest.version,
                         "abi": manifest.abi,
                         "license": manifest.license,
                         "path": dir.display().to_string(),
                         "targets": manifest.supported_triples(),
+                        "dependencies": dep_report,
                     })).unwrap());
+                    if deps_failed { std::process::exit(1); }
                     return;
                 }
                 println!("✅ 已安装包 '{}' v{}（ABI {}）", manifest.name, manifest.version, manifest.abi);
@@ -234,6 +263,38 @@ fn main() {
                                 }
                             }
                         }
+                    }
+                }
+                // P4.4：依赖处理的人类可读汇总。
+                let n_declared = dep_report["declared"].as_u64().unwrap_or(0);
+                if n_declared > 0 {
+                    let sat = dep_report["satisfied"].as_array().map(|a| a.len()).unwrap_or(0);
+                    let inst = dep_report["installed"].as_array().map(|a| a.len()).unwrap_or(0);
+                    let miss = dep_report["missing"].as_array().map(|a| a.len()).unwrap_or(0);
+                    println!("   依赖: 声明 {} / 已满足 {} / 本次安装 {} / 缺失 {}", n_declared, sat, inst, miss);
+                    if with_deps {
+                        if let Some(arr) = dep_report["installed"].as_array() {
+                            for v in arr {
+                                println!("     ✅ 自动安装 {} v{}", v["name"].as_str().unwrap_or("?"), v["version"].as_str().unwrap_or("?"));
+                            }
+                        }
+                    }
+                    if let Some(arr) = dep_report["missing"].as_array() {
+                        for v in arr {
+                            let name = v["name"].as_str().unwrap_or("?");
+                            if let Some(err) = v.get("error").and_then(|x| x.as_str()) {
+                                println!("     ❌ 依赖 {} 未能安装: {}", name, err);
+                            } else {
+                                let req = v["requirement"].as_str().unwrap_or("?");
+                                println!("     ⚠️  依赖 {} {} 未满足（未安装或版本不符）", name, req);
+                            }
+                        }
+                        if !with_deps {
+                            println!("     提示: 重新安装并加 --with-deps 可自动装齐依赖；或用 dialc resolve + dialc install --locked。");
+                        }
+                    }
+                    if deps_failed {
+                        std::process::exit(1);
                     }
                 }
                 return;
@@ -1809,8 +1870,10 @@ fn print_usage() {
     eprintln!("  import \"./util.dial\";         源码内引用同目录模块（见 README §34）");
     eprintln!();
     eprintln!("包管理");
-    eprintln!("  install   <包.dialpkg|URL> [--sha256 哈希] [--offline] [--json]");
+    eprintln!("  install   <包.dialpkg|URL> [--sha256 哈希] [--offline] [--with-deps] [--json]");
+    eprintln!("            [--index <url>] [--index-sha256 <hex>]");
     eprintln!("            --offline 只用下载缓存（P4.3）；DIAL_MIRROR=原前缀=镜像前缀 重写下载源");
+    eprintln!("            --with-deps 装完按 manifest 依赖自动 resolve+递归安装（P4.4，失败即拒）");
     eprintln!("  install   --locked [目录] [--json]  按 dial.lock 批量安装依赖（P4.2）");
     eprintln!("  resolve   [目录] [--json] [--check] [--index <url>] [--index-sha256 <hex>] [--offline]");
     eprintln!("                                解析 [dependencies] 并生成/校验 dial.lock（P4.2）");
@@ -2618,6 +2681,127 @@ fn cmd_resolve(args: &[String]) {
 
 /// `dialc install --locked [项目目录]`（P4.2）：按 dial.lock 逐包安装依赖。
 /// 每包用锁定 URL + SHA256，任一失败即终止（Fail-Fast）；已装同版本会覆盖安装。
+/// P4.4 依赖闭环：装完主包后处理它声明的直接依赖。
+///
+/// - 无 `with_deps`：只做「满足性检查」并提示缺失（不阻断安装）——旧包/离线包/手动
+///   管理依赖的用户不受影响，只是被明确告知还缺哪些依赖。
+/// - `with_deps=true`：加载索引 → resolve 完整依赖图 → 递归安装，任一失败 Fail-Fast。
+///
+/// 返回 `serde_json::Value` 便于 --json 输出，同时用文本回调打印人类提示。
+fn handle_install_deps(
+    manifest: &package::Manifest,
+    with_deps: bool,
+    offline: bool,
+    index_url: Option<&str>,
+    index_sha256: Option<&str>,
+) -> serde_json::Value {
+    let declared: BTreeMap<String, String> = manifest.dependencies.clone();
+    let mut report = serde_json::json!({
+        "declared": declared.len(),
+        "with_deps": with_deps,
+        "satisfied": [],
+        "installed": [],
+        "missing": [],
+    });
+    if declared.is_empty() {
+        return report;
+    }
+
+    // 已安装包的 (name -> version)，用于满足性检查。
+    let installed_versions: HashMap<String, String> = match pkgbuild::list_installed() {
+        Ok(rows) => rows.into_iter().map(|(n, v, _, _)| (n, v)).collect(),
+        Err(_) => HashMap::new(),
+    };
+
+    let mut satisfied = Vec::new();
+    let mut missing: Vec<serde_json::Value> = Vec::new();
+    let mut need_resolve: BTreeMap<String, String> = BTreeMap::new();
+
+    for (name, req) in &declared {
+        let ok = installed_versions.get(name)
+            .and_then(|v| version::Version::parse(v).ok())
+            .and_then(|v| version::parse_requirement(req).ok().map(|c| c.matches(&v)))
+            .unwrap_or(false);
+        if ok {
+            satisfied.push(serde_json::json!({"name": name, "version": installed_versions[name]}));
+        } else {
+            if with_deps {
+                need_resolve.insert(name.clone(), req.clone());
+            } else {
+                let have = installed_versions.get(name).cloned();
+                missing.push(serde_json::json!({
+                    "name": name, "requirement": req,
+                    "installed": have,
+                    "hint": "重新安装并加 --with-deps 自动装依赖，或 dialc resolve + dialc install --locked",
+                }));
+            }
+        }
+    }
+
+    let mut installed_now = Vec::new();
+    if with_deps && !need_resolve.is_empty() {
+        // 索引加载沿用 registry 的统一逻辑（--index > DIAL_INDEX_URL > 默认）。
+        let url = index_url.map(|s| s.to_string())
+            .or_else(|| std::env::var("DIAL_INDEX_URL").ok())
+            .unwrap_or_else(|| registry::DEFAULT_INDEX_URL.to_string());
+        let source = if offline { registry::Source::Offline } else { registry::Source::Online };
+        let idx = match registry::load(&url, index_sha256, source) {
+            Ok((idx, _, _)) => idx,
+            Err(e) => {
+                for (name, req) in &need_resolve {
+                    missing.push(serde_json::json!({
+                        "name": name, "requirement": req,
+                        "error": format!("索引加载失败，无法自动装依赖: {}", e),
+                    }));
+                }
+                report["satisfied"] = serde_json::json!(satisfied);
+                report["installed"] = serde_json::json!(installed_now);
+                report["missing"] = serde_json::json!(missing);
+                report["ok"] = serde_json::json!(false);
+                return report;
+            }
+        };
+        let res = match resolve::resolve(&idx, &need_resolve) {
+            Ok(r) => r,
+            Err(e) => {
+                report["satisfied"] = serde_json::json!(satisfied);
+                report["error"] = serde_json::json!(e.message);
+                report["ok"] = serde_json::json!(false);
+                return report;
+            }
+        };
+        for entry in &res.packages {
+            // 已装且版本一致则跳过；版本不一致时 install_inner 会按 ABI 决定复用/拒绝。
+            if installed_versions.get(&entry.name).map(|v| v == &entry.version).unwrap_or(false) {
+                continue;
+            }
+            let sha = if entry.sha256.is_empty() { None } else { Some(entry.sha256.as_str()) };
+            match package::install_from_url_opts(&entry.url, sha, offline, false) {
+                Ok((path, m)) => {
+                    installed_now.push(serde_json::json!({
+                        "name": entry.name, "version": m.version,
+                        "path": path.display().to_string(),
+                    }));
+                }
+                Err(e) => {
+                    missing.push(serde_json::json!({
+                        "name": entry.name, "requirement": entry.version,
+                        "error": e.message,
+                    }));
+                }
+            }
+        }
+    }
+
+    report["satisfied"] = serde_json::json!(satisfied);
+    report["installed"] = serde_json::json!(installed_now);
+    report["missing"] = serde_json::json!(missing);
+    // 默认模式只提示缺失、安装本身仍算成功（不 Fail-Fast）；
+    // 仅 --with-deps 承诺「装齐依赖」，此时有缺失才算失败。
+    report["ok"] = serde_json::json!(!with_deps || missing.is_empty());
+    report
+}
+
 fn cmd_install_locked(dir: &Path, as_json: bool) {
     let lock = dir.join("dial.lock");
     let text = match fs::read_to_string(&lock) {

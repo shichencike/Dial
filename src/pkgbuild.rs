@@ -1432,6 +1432,8 @@ pub fn uninstall(name: &str) -> Result<PathBuf, String> {
     if name.contains('/') {
         return Err(format!("包名 '{}' 不能含路径分隔符", name));
     }
+    // P4.4：与安装共用同一把跨进程锁，防止「一边装一边删」的竞态。
+    let _lock = package::InstallLock::acquire().map_err(|e| e.message)?;
     let root = package::cache_root().map_err(|e| e.to_string())?;
     let dir = root.join(name);
     if !dir.is_dir() {
@@ -1439,6 +1441,39 @@ pub fn uninstall(name: &str) -> Result<PathBuf, String> {
             "包 '{}' 未安装（缓存目录 {} 下没有它）。可用 `dialc list` 查看已安装包。",
             name,
             root.display()
+        ));
+    }
+    // P4.4：反依赖检查——若其它已安装包声明了对 name 的依赖，拒绝破坏性卸载。
+    let rd = fs::read_dir(&root).map_err(|e| format!("读取包目录失败: {}", e))?;
+    let mut dependents: Vec<String> = Vec::new();
+    for entry in rd.flatten() {
+        let d = entry.path();
+        if d == dir || !d.is_dir() {
+            continue;
+        }
+        let mf = d.join("manifest.txt");
+        if !mf.is_file() {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(&mf) {
+            if let Ok(m) = package::parse_manifest(&text) {
+                if m.dependencies.contains_key(name) {
+                    dependents.push(m.name);
+                }
+            }
+        }
+    }
+    if !dependents.is_empty() {
+        dependents.sort();
+        dependents.dedup();
+        return Err(format!(
+            "无法卸载 '{}'：以下已安装包声明了对它的依赖：\n  {}\n\
+             请先卸载这些包（或逐一 `dialc uninstall <包名>`）后再卸载 '{}'。\n\
+             若确认要强制卸载（可能导致上述包链接失败），请手动删除 {}。",
+            name,
+            dependents.join(", "),
+            name,
+            dir.display()
         ));
     }
     fs::remove_dir_all(&dir)

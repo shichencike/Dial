@@ -8,7 +8,7 @@
 //! - 解压时**拒绝路径穿越**——包是外部输入，不能给它写入任意路径的能力。
 //! - SHA256 **校验先于一切**：残缺或被篡改的二进制绝不允许流到链接阶段。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -58,6 +58,102 @@ pub const STDLIB_ABI: u64 = 6;
 pub fn cache_root() -> Result<PathBuf> {
     let home = dirs_home()?;
     Ok(home.join(".dial").join("packages"))
+}
+
+// ---------------------------------------------------------------------------
+// 跨进程安装锁（P4.4 工程加固）
+// ---------------------------------------------------------------------------
+
+/// 锁文件被视为陈旧的秒数。安装/卸载是短事务，30 分钟阈值足够宽松；
+/// 一旦持有者崩溃，锁会在此后自动失效，避免死锁（崩溃自愈）。
+const STALE_LOCK_SECS: u64 = 30 * 60;
+
+/// 跨进程安装/卸载互斥锁。
+///
+/// 零新依赖、跨平台（Linux/Windows/macOS 通用）——只用 std 的 `create_new`
+/// 原子创建语义：同一时刻只有一个进程能成功新建锁文件，其余进程立即拿到
+/// `AlreadyExists`。锁文件UTF-8 内容是 `pid:nonce`，nonce 用于防止「陈旧锁被
+/// 别的进程接管后，旧持有者 Drop 时误删新锁」。崩溃残留靠 mtime 超时自愈。
+pub(crate) struct InstallLock {
+    path: PathBuf,
+    nonce: String,
+}
+
+impl InstallLock {
+    /// 获取全局安装锁；锁被其他进程持有时 Fail-Fast 并给出处理指引。
+    pub(crate) fn acquire() -> Result<Self> {
+        let home = dirs_home()?;
+        let dial_dir = home.join(".dial");
+        fs::create_dir_all(&dial_dir).map_err(|e| {
+            DialcError::new(format!("创建锁目录失败 {}: {}", dial_dir.display(), e), 0, 0)
+        })?;
+        let path = dial_dir.join(".install.lock");
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let nonce = format!("{}:{}", pid, nanos);
+
+        // 至多两次：首次尝试；若锁陈旧则清理后再试一次。
+        for attempt in 0..2 {
+            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_f) => {
+                    // 句柄 _f 离开作用域即关闭；内容写入用 nonce 供 Drop 比对。
+                    let _ = fs::write(&path, &nonce);
+                    return Ok(InstallLock { path, nonce });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if attempt == 0 && Self::is_stale(&path) {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    let holder = fs::read_to_string(&path).unwrap_or_default();
+                    return Err(DialcError::new(
+                        format!(
+                            "另一个 dialc 安装/卸载正在进行（锁文件 {}，持有者 {}），本次操作已拒绝以避免并发写坏包缓存。\n\
+                             若确认没有其它 dialc 进程在运行，删除该锁文件后重试：\n\
+                               rm -f '{}'",
+                            path.display(),
+                            holder.trim(),
+                            path.display()
+                        ),
+                        0,
+                        0,
+                    ));
+                }
+                Err(e) => {
+                    return Err(DialcError::new(
+                        format!("访问锁文件 {} 失败: {}", path.display(), e),
+                        0,
+                        0,
+                    ));
+                }
+            }
+        }
+        unreachable!("循环至多两次且每次都返回或 continue")
+    }
+
+    fn is_stale(path: &Path) -> bool {
+        match fs::metadata(path).and_then(|m| m.modified()) {
+            Ok(mtime) => match mtime.elapsed() {
+                Ok(age) => age.as_secs() > STALE_LOCK_SECS,
+                Err(_) => true, // 系统时间倒退 → 视为陈旧
+            },
+            Err(_) => true, // 读不到 mtime（如刚好被删）→ 视为陈旧，重试
+        }
+    }
+}
+
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        // 仅当锁文件内容仍是自己的 nonce 才删除——防止误删接管者的新锁。
+        if let Ok(s) = fs::read_to_string(&self.path) {
+            if s.trim() == self.nonce {
+                let _ = fs::remove_file(&self.path);
+            }
+        }
+    }
 }
 
 /// 取用户主目录。优先 `HOME`（Linux / Termux），回退 `USERPROFILE`（Windows），
@@ -155,6 +251,10 @@ pub struct Manifest {
     /// P4.3：显式声明「本包允许安装在哪些平台」（Target Triple 列表）。
     /// 空 = 不限制（旧包无此字段 → 空，向后兼容）；非空时 install 期强制校验。
     pub platforms: Vec<String>,
+    /// P4.4：本包的直接依赖（包名 → 语义版本区间）。由打包时写入 manifest.txt，
+    /// 安装后供「缺失依赖」校验与 `--with-deps` 递归安装使用。
+    /// 空 = 无依赖（旧包无此字段 → 空，向后兼容）。
+    pub dependencies: BTreeMap<String, String>,
 }
 
 /// P4.0 manifest 中的 C 源码声明（与 pkgbuild::CSpec 对应，序列化在 manifest.txt）。
@@ -350,6 +450,34 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
         }
     }
 
+    // P4.4：dependencies 可选字段——包名 → 语义版本区间。旧包无此字段视为空（无依赖）。
+    // 逐条校验区间语法（Fail-Fast）：畸形的依赖区间绝不能悄悄进入求解器。
+    let mut dependencies = BTreeMap::new();
+    if let Some(dv) = v.get("dependencies") {
+        let dobj = dv.as_object().ok_or_else(|| {
+            DialcError::new("manifest.txt 的 'dependencies' 必须是对象（包名→版本区间）", 0, 0)
+        })?;
+        for (dep_name, req_val) in dobj {
+            if dep_name.trim().is_empty() {
+                return Err(DialcError::new(
+                    "manifest.txt 的 dependencies 含空包名".to_string(), 0, 0,
+                ));
+            }
+            let req = req_val.as_str().ok_or_else(|| {
+                DialcError::new(
+                    format!("manifest.txt 的依赖 '{}' 版本区间必须是字符串", dep_name), 0, 0,
+                )
+            })?;
+            if let Err(e) = crate::version::parse_requirement(req) {
+                return Err(DialcError::new(
+                    format!("manifest.txt 的依赖 '{}' 区间 '{}' 非法：{}", dep_name, req, e.message),
+                    0, 0,
+                ));
+            }
+            dependencies.insert(dep_name.clone(), req.to_string());
+        }
+    }
+
     Ok(Manifest {
         name,
         version,
@@ -361,6 +489,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest> {
         sha256,
         c,
         platforms,
+        dependencies,
     })
 }
 
@@ -833,6 +962,9 @@ pub fn verify_archive<R: std::io::Read + std::io::Seek>(
 
 /// 本地安装的真正实现（`install` 与 `install_from_url` 共用）。
 fn install_inner(pkg_path: &Path) -> Result<(PathBuf, Manifest)> {
+    // P4.4：全程持有跨进程安装锁，直到本函数返回（发布完成/失败回滚）才释放。
+    // 防止两个进程并发安装/卸载同名包造成 TOCTOU（校验后旧包被替换、备份目录互相踩踏）。
+    let _install_lock = InstallLock::acquire()?;
     if !pkg_path.exists() {
         return Err(DialcError::new(
             format!("找不到包文件: {}", pkg_path.display()),

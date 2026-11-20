@@ -356,8 +356,20 @@ fn is_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// 按语义版本比较两个版本字符串；无法解析（非法版本）时回退字符串序。
+///
+/// 索引可能含历史遗留的非规范版本串，Fail-Fast 不适用于「展示排序」这种只读场景，
+/// 故解析失败仅退化为字典序，而不拒绝整个索引。合法版本一律走 semver，避免
+/// `"10.0.0" < "2.0.0"` 这类字符串序错误把旧版本误标成「最新」。
+fn cmp_version(a: &str, b: &str) -> std::cmp::Ordering {
+    match (crate::version::Version::parse(a), crate::version::Version::parse(b)) {
+        (Ok(va), Ok(vb)) => va.cmp(&vb),
+        _ => a.cmp(b),
+    }
+}
+
 /// 搜索：子串匹配包名或描述（大小写不敏感），**每个包只返回最新版本**，
-/// 按包名排序。多版本用 info 查看。（版本比较为字符串序，够用于展示最新版本。）
+/// 按包名排序。多版本用 info 查看。版本比较走语义版本（见 `cmp_version`）。
 pub fn search<'a>(idx: &'a IndexFile, query: &str) -> Vec<&'a IndexEntry> {
     let q = query.trim().to_ascii_lowercase();
     // name -> 当前最高版本条目
@@ -371,7 +383,7 @@ pub fn search<'a>(idx: &'a IndexFile, query: &str) -> Vec<&'a IndexEntry> {
         }
         let replace = latest
             .get(p.name.as_str())
-            .map(|cur| p.version.as_str() > cur.version.as_str())
+            .map(|cur| cmp_version(&p.version, &cur.version) == std::cmp::Ordering::Greater)
             .unwrap_or(true);
         if replace {
             latest.insert(p.name.as_str(), p);
@@ -380,13 +392,13 @@ pub fn search<'a>(idx: &'a IndexFile, query: &str) -> Vec<&'a IndexEntry> {
     latest.into_values().collect()
 }
 
-/// 查询某包的全部版本（精确包名匹配），按版本号降序（字符串排序，够用于展示）。
+/// 查询某包的全部版本（精确包名匹配），按语义版本降序（见 `cmp_version`）。
 pub fn info<'a>(idx: &'a IndexFile, name: &str) -> Option<Vec<&'a IndexEntry>> {
     let mut hits: Vec<_> = idx.packages.iter().filter(|p| p.name == name).collect();
     if hits.is_empty() {
         return None;
     }
-    hits.sort_by(|a, b| b.version.cmp(&a.version));
+    hits.sort_by(|a, b| cmp_version(&b.version, &a.version));
     Some(hits)
 }
 
@@ -458,6 +470,40 @@ pub(crate) fn parse_for_test(text: &str) -> Result<IndexFile> {
 impl IndexFile {
     pub fn packages(&self) -> &[IndexEntry] {
         &self.packages
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn idx_with_versions() -> IndexFile {
+        // 故意让字符串序与 semver 序相反："2.0.0" > "10.0.0"（字符串），但 semver 相反。
+        let text = r#"{
+            "schema": 3, "updated": "2026-01-01",
+            "packages": [
+                {"name":"demo","version":"2.0.0","abi":1,"url":"https://x/2.zip"},
+                {"name":"demo","version":"10.0.0","abi":1,"url":"https://x/10.zip"},
+                {"name":"demo","version":"1.9.9","abi":1,"url":"https://x/1.zip"}
+            ]
+        }"#;
+        parse_for_test(text).unwrap()
+    }
+
+    #[test]
+    fn search_returns_semver_latest() {
+        let idx = idx_with_versions();
+        let hits = search(&idx, "demo");
+        assert_eq!(hits.len(), 1, "search 每包只返回一条");
+        assert_eq!(hits[0].version, "10.0.0", "search 必须按 semver 取最新版");
+    }
+
+    #[test]
+    fn info_sorts_by_semver_desc() {
+        let idx = idx_with_versions();
+        let hits = info(&idx, "demo").unwrap();
+        let versions: Vec<_> = hits.iter().map(|e| e.version.as_str()).collect();
+        assert_eq!(versions, ["10.0.0", "2.0.0", "1.9.9"], "info 必须按 semver 降序");
     }
 }
 
