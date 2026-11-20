@@ -632,7 +632,10 @@ def build_rationale(metas: list[dict]) -> None:
             continue
         text = src.read_text(encoding="utf-8")
         meta = by_id.get(slug, {})
-        label = meta.get("label", slug)
+        # unreleased-dev.md 承载的是当前 [v1.20] 段（该文件自 v1.10 后持续累积开发中
+        # 增量，故沿用历史文件名）；CHANGELOG slug 已是 v1.20，不再有「未发布」段，
+        # 因此这里给该文件一个可读 label，避免官网索引显示裸 slug。
+        label = meta.get("label", "v1.20" if slug == "unreleased-dev" else slug)
         # 前后导航：与 CHANGELOG 同序。
         newer = order[i - 1] if i > 0 and (RATIONALE_SRC / f"{order[i-1]}.md").exists() else None
         older = (order[i + 1] if i + 1 < len(order)

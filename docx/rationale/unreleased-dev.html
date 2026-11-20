@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>理由与证据链 未发布 · Dial 语言</title>
+<title>理由与证据链 v1.20 · Dial 语言</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
@@ -27,7 +27,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/unreleased-dev.html">变更条目</a></p><div class="toc">
 <ul>
-<li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release--理由与证据链">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release） · 理由与证据链</a><ul>
+<li><a href="#v120--开发中增量--理由与证据链">v1.20 — 开发中增量 · 理由与证据链</a><ul>
 <li><a href="#默认后端切-asm-后全量回归-9-项失败修复ffi-布局--struct-默认值--gui-悬垂指针--ir-形态门禁">默认后端切 asm 后全量回归 9 项失败修复（FFI 布局 / struct 默认值 / GUI 悬垂指针 / IR 形态门禁）</a></li>
 <li><a href="#p46-aarch64-常量移位立即数折叠--p43-下载门禁竞态修复">P4.6 AArch64 常量移位立即数折叠 + P4.3 下载门禁竞态修复</a></li>
 <li><a href="#p45-aarch64-pgo-与内联汇编补齐llvm-有-asm-无能力缺口">P4.5 AArch64 PGO 与内联汇编（补齐「LLVM 有 asm 无」能力缺口）</a></li>
@@ -72,10 +72,11 @@
 </li>
 </ul>
 </div>
-<h1 id="未发布--开发中增量未升版本号--未打标签--未发-release--理由与证据链">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release） · 理由与证据链</h1>
+<h1 id="v120--开发中增量--理由与证据链">v1.20 — 开发中增量 · 理由与证据链</h1>
 <blockquote>
-<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
-变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
+<p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [v1.20]</code> 版本段（发布标签 <code>v1.2</code>）拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
+变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。
+文件名沿用历史 <code>unreleased-dev.md</code>（该段自 v1.10 发布后持续累积开发中增量），内容对应当前 <code>v1.20</code> 发布。</p>
 </blockquote>
 <hr />
 <h4 id="默认后端切-asm-后全量回归-9-项失败修复ffi-布局--struct-默认值--gui-悬垂指针--ir-形态门禁">默认后端切 asm 后全量回归 9 项失败修复（FFI 布局 / struct 默认值 / GUI 悬垂指针 / IR 形态门禁）</h4>
@@ -4019,12 +4020,12 @@ b12 互递归闭式、b08/b05 算术深度优化、b22 substring C runtime、GRA
 干净。</p>
 <p><strong>结论</strong>：b08 属 LLVM 深度值域分析（证明循环变量恒正→省 bias）优势，非发射层简单 pass
 可补；印证审计报告原文「除法微码主导、e3s 已证伪可从后端侧优化」的判断。量化搁置，不扩散。
-本轮无代码提交（仅文档记录证伪结论）。</p><p class="note">← 更早：<a href="v1.10.html">v1.10</a> · <a href="../rationale.html">理由索引</a></p></main></div>
+本轮无代码提交（仅文档记录证伪结论）。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v1.10 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.20 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

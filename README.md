@@ -1,4 +1,4 @@
-# dialc — Dial 语言编译器 v1.10
+# dialc — Dial 语言编译器 v1.20
 
 [![CI](https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg)](https://github.com/shichencike/Dial/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83)](https://github.com/shichencike/Dial/releases)
@@ -224,7 +224,7 @@ irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.p
 > **关于 URL 稳定性与「零硬编码」**：这两条命令取的是 **`main` 分支上 `tools/` 里的安装脚本**（直出文件，脚本本身不走任何重定向）。脚本运行时通过 GitHub API 读取**最新 Release 的真实资产清单**，再用
 > `https://github.com/shichencike/Dial/releases/latest/download/<资产名>` 下载——版本、标签、资产名**都不写死在脚本里**，发新版后无需改脚本即可自动跟上。
 >
-> 之所以仍需解析资产名：GitHub 的 `latest/download/` 要求**精确文件名**，而本项目的 zip / vsix 名字带版本号（`dialc-v1.10-linux-x86_64.zip`、`dial-1.10.0.vsix`），靠重定向本身推不出来；脚本按平台 slug 与扩展名从清单里挑，`stdlib.dialpkg` 名字固定、且现在与 zip / vsix 挂在**同一个 `v*` Release 页面**，因此同样能被 latest 找到。
+> 之所以仍需解析资产名：GitHub 的 `latest/download/` 要求**精确文件名**，而本项目的 zip / vsix 名字带版本号（`dialc-v1.20-linux-x86_64.zip`、`dial-1.20.0.vsix`），靠重定向本身推不出来；脚本按平台 slug 与扩展名从清单里挑，`stdlib.dialpkg` 名字固定、且现在与 zip / vsix 挂在**同一个 `v*` Release 页面**，因此同样能被 latest 找到。
 >
 > 需要复现旧环境或离线时，用 `DIAL_VERSION`（钉编译器版本）、`STDLIB_RELEASE`（钉旧 `stdlib-v*` 通道）、`STDLIB_URL` / `DIAL_VSIX_URL`（完全覆盖地址）即可；镜像优先 + 官方回退 + 失败原因可见的行为不变。安装脚本本身也随每个发布包一起分发。
 >
@@ -236,23 +236,23 @@ irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.p
 
 ```bash
 # Linux x86_64
-curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v1.10-linux-x86_64.zip
-unzip dialc-v1.10-linux-x86_64.zip && cd Dial
+curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v1.20-linux-x86_64.zip
+unzip dialc-v1.20-linux-x86_64.zip && cd Dial
 bash install-dial.sh                 # 扫描当前目录及其子目录
 bash install-dial.sh /path/to/pkgs   # 或扫描指定目录
 ```
 
 ```bash
 # Termux aarch64（musl 全静态，包名 slug = termux-aarch64）
-curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v1.10-termux-aarch64.zip
-unzip dialc-v1.10-termux-aarch64.zip && cd Dial
+curl -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v1.20-termux-aarch64.zip
+unzip dialc-v1.20-termux-aarch64.zip && cd Dial
 bash install-dial.sh
 ```
 
 ```powershell
 # Windows x64（MinGW）：解压后运行 PowerShell 安装脚本
-curl.exe -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v1.10-windows-x86_64.zip
-Expand-Archive dialc-v1.10-windows-x86_64.zip -DestinationPath .
+curl.exe -LO https://github.com/shichencike/Dial/releases/latest/download/dialc-v1.20-windows-x86_64.zip
+Expand-Archive dialc-v1.20-windows-x86_64.zip -DestinationPath .
 powershell -ExecutionPolicy Bypass -File Dial\install-dial.ps1
 ```
 
@@ -2596,6 +2596,11 @@ Dial 目前处于 v0.x 快速演进阶段。版本号采用**最多两位小数*
    > `releases/latest/download/` 重定向，不硬编码标签。从 `v1.04` 跳到 `v1.10`
    > 属本条「用户明确要求跳版」的例外，数值 `1.10 > 1.04` 不倒流；完整映射与交付清单
    > 见 CHANGELOG 的 `[v1.10]` 段。
+   >
+   > **v1.2 发布标签（延续 v1.1 映射）**：沿用同一「标签短、版本号补零」映射——发布标签
+   > `v1.2` 对应版本号 **`v1.20`**（`Cargo.toml` 存 `1.20.0`），资产名按版本号推导
+   > （`dialc-v1.20-*.zip` / `dial-1.20.0.vsix`），下载地址仍走 `releases/latest/download/`
+   > 重定向、不硬编码标签。数值 `1.20 > 1.10` 不倒流。
 4. **版本号必须严格按时间递增，绝不许倒流**：后发版本的日期不得早于先前版本。
    CHANGELOG 中一旦出现日期倒流（例如 `v0.4` 的日期晚于 `v0.5`），即视为文档缺陷，必须当场修正。
 5. **每档一次完整交付**：每一个版本号都对应一次完整交付——代码实现 + 端到端测试（A/B/D/E/C 全绿）
@@ -4304,7 +4309,7 @@ fn main() {
 
 | 编辑器 | 接入方式 | 安装包 | 说明 |
 | --- | --- | --- | --- |
-| **VS Code** | 手写 LSP 客户端（无 npm 依赖） | [`editors/vscode/dial-1.10.0.vsix`](editors/vscode/)（`code --install-extension` 侧载） | 免 Node / npm / 联网；能力最全 |
+| **VS Code** | 手写 LSP 客户端（无 npm 依赖） | [`editors/vscode/dial-1.20.0.vsix`](editors/vscode/)（`code --install-extension` 侧载） | 免 Node / npm / 联网；能力最全 |
 | **Neovim** | 内置 LSP 客户端 | [`editors/neovim/`](editors/neovim/)（拷进 `runtimepath` 即可） | 零依赖，不需要 nvim-lspconfig |
 | **Emacs** | 内置 `eglot` | [`editors/emacs/README.md`](editors/emacs/)（init.el 片段） | 不开发插件——eglot 原生连 LSP，加几行配置即可 |
 
@@ -4316,8 +4321,8 @@ fn main() {
 还会**自动下载并安装 VS Code 插件**（从 Release 取 `dial-<版本>.vsix`，再用 `code --install-extension` 装上），
 不必再自己去 Release 页翻资产、手动侧载。
 
-- 版本只有一个来源：`DIAL_VERSION`（默认**空**：跟随最新 Release；钉版本写法如 `DIAL_VERSION=1.1`，对应发布标签 `v1.1`）——Release 标签（`v1.1`）与资产文件名
-  （`dial-1.10.0.vsix`）都由它推导，不会三处各说各话。
+- 版本只有一个来源：`DIAL_VERSION`（默认**空**：跟随最新 Release；钉版本写法如 `DIAL_VERSION=1.2`，对应发布标签 `v1.2`）——Release 标签（`v1.2`）与资产文件名
+  （`dial-1.20.0.vsix`）都由它推导，不会三处各说各话。
 - **没装 VS Code / 离线时只告警、不阻断安装**：编译器本体与包安装不受影响。
 - **不加 `--force`**：用户若已装了更新版本的插件，不该在「一键安装」里被悄悄降级。
 - 下载地址可用 `DIAL_VSIX_URL` 覆盖（自建镜像 / 网络受限时用）。

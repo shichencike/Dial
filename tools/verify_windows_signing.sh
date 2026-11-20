@@ -37,7 +37,7 @@ TD="$(mktemp -d /tmp/winsign_gate_XXXX)"
 cleanup() { rm -rf "$TD"; }
 trap cleanup EXIT
 
-VER="1.10.0"
+VER="1.20.0"
 CN="dialc-sign-v${VER}"
 GEN_DIR="$TD/gen"        # 生成/密封工作区（含明文，签完即毁）
 OUT_DIR="$TD/out"        # 待发布产物（只允许公钥证书 + 密封密文）
