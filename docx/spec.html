@@ -4709,7 +4709,10 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
 <code>dialc install</code> 期就地声明式编译（零脚本）；安装改为原子 rename + 回滚；install/list/
 uninstall/new 均支持 <code>--json</code>。<strong>P4.1 静态索引与搜索于 2026-11-20 落地</strong>：<code>dialc search</code>/
 <code>info</code> 基于托管静态索引（无中心服务），支持 <code>--json</code>/<code>--offline</code>/<code>--index-sha256</code>（哈希不符
-Fail-Fast 且不回退缓存）。语义版本/传递依赖/lockfile 属 P4.2，尚未落地。
+Fail-Fast 且不回退缓存）。<strong>P4.2 完整依赖管理于 2026-11-20 落地</strong>：<code>dial.toml [dependencies]</code>
+声明语义版本区间（<code>^</code>/<code>~</code>/精确/<code>*</code>），<code>dialc resolve</code> 解析传递依赖并仲裁（冲突可读报错）、
+生成 <code>dial.lock</code> 锁定精确版本+SHA256，<code>dialc install --locked</code> 按 lock 复现安装——§1 五维度
+至此全部达成。P4.3（下载层离线/镜像/增量）未启动。
 本节 §25 其余内容描述的是 v1.10 分发格式（仍然有效、仍是新能力的地基）；「刻意不做」的
 边界以 §25.7 的转向注记为准。零脚本可审计、SHA256 信任链、项目目录零侵入等核心约束<strong>继续保留</strong>。</p>
 </blockquote>
@@ -5562,8 +5565,13 @@ P4.0，详见 <a href="rationale/dialpkg-roadmap.html"><code>rationale/dialpkg-r
 <p><strong>P4.1 已落地（2026-11-20）</strong>：新增 <code>dialc search &lt;词&gt;</code> / <code>dialc info &lt;包名&gt;</code>，基于托管的静态索引
 JSON（无中心服务，<code>--index</code>/<code>DIAL_INDEX_URL</code> 可覆盖），支持 <code>--json</code>、<code>--offline</code>、<code>--index-sha256</code>
 钉死索引哈希（哈希不符 Fail-Fast 且不回退缓存）。<code>info</code> 直接给出带 <code>--sha256</code> 的安装命令，把
-SHA256 信任链从索引延伸到下载物。门禁 <code>tools/verify_p4_index.sh</code> 12/12 全绿。<strong>语义版本 /
-传递依赖 / <code>dial.lock</code> 仍属 P4.2，未落地</strong>。详见 <a href="rationale/dialpkg-roadmap.html"><code>rationale/dialpkg-roadmap.md</code></a> §7。</p>
+SHA256 信任链从索引延伸到下载物。门禁 <code>tools/verify_p4_index.sh</code> 12/12 全绿。</p>
+<p><strong>P4.2 已落地（2026-11-20）</strong>：<code>dial.toml [dependencies]</code> 支持语义版本区间（<code>^</code>/<code>~</code>/精确/<code>*</code>），
+<code>dialc resolve</code> 解析传递依赖并仲裁（冲突给可读路径）、生成 <code>dial.lock</code>（精确版本+SHA256），
+<code>dialc install --locked</code> 按 lock 复现安装；<code>--check</code> 校验 lock 一致性/篡改。索引 schema v2 增加
+每包 <code>deps</code> 字段（向后兼容 v1）。门禁 <code>tools/verify_p4_resolve.sh</code> 11/11 全绿。<strong>§1 五维度全部
+达成</strong>，dialpkg 产品定义闭环；P4.3（下载层离线/镜像/增量）未启动。详见
+<a href="rationale/dialpkg-roadmap.html"><code>rationale/dialpkg-roadmap.md</code></a> §7。</p>
 <p>本章为<strong>生态规划</strong>，不含任何实现承诺与时间表。<strong>完整规范</strong>（平台矩阵、包内目录树、
 JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 <strong><a href="https://github.com/shichencike/Dial/blob/main/ARCHITECTURE.md">ARCHITECTURE.md《Dial 标准库与包分发最终规范》</a></strong>。

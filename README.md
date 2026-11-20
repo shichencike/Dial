@@ -2729,7 +2729,10 @@ Dial 的包分发只解决一件事：**把别人写好的机器码 + 函数签�
 > `dialc install` 期就地声明式编译（零脚本）；安装改为原子 rename + 回滚；install/list/
 > uninstall/new 均支持 `--json`。**P4.1 静态索引与搜索于 2026-11-20 落地**：`dialc search`/
 > `info` 基于托管静态索引（无中心服务），支持 `--json`/`--offline`/`--index-sha256`（哈希不符
-> Fail-Fast 且不回退缓存）。语义版本/传递依赖/lockfile 属 P4.2，尚未落地。
+> Fail-Fast 且不回退缓存）。**P4.2 完整依赖管理于 2026-11-20 落地**：`dial.toml [dependencies]`
+> 声明语义版本区间（`^`/`~`/精确/`*`），`dialc resolve` 解析传递依赖并仲裁（冲突可读报错）、
+> 生成 `dial.lock` 锁定精确版本+SHA256，`dialc install --locked` 按 lock 复现安装——§1 五维度
+> 至此全部达成。P4.3（下载层离线/镜像/增量）未启动。
 > 本节 §25 其余内容描述的是 v1.10 分发格式（仍然有效、仍是新能力的地基）；「刻意不做」的
 > 边界以 §25.7 的转向注记为准。零脚本可审计、SHA256 信任链、项目目录零侵入等核心约束**继续保留**。
 
@@ -3314,8 +3317,14 @@ mylib.dialpkg
 > **P4.1 已落地（2026-11-20）**：新增 `dialc search <词>` / `dialc info <包名>`，基于托管的静态索引
 > JSON（无中心服务，`--index`/`DIAL_INDEX_URL` 可覆盖），支持 `--json`、`--offline`、`--index-sha256`
 > 钉死索引哈希（哈希不符 Fail-Fast 且不回退缓存）。`info` 直接给出带 `--sha256` 的安装命令，把
-> SHA256 信任链从索引延伸到下载物。门禁 `tools/verify_p4_index.sh` 12/12 全绿。**语义版本 /
-> 传递依赖 / `dial.lock` 仍属 P4.2，未落地**。详见 [`rationale/dialpkg-roadmap.md`](rationale/dialpkg-roadmap.md) §7。
+> SHA256 信任链从索引延伸到下载物。门禁 `tools/verify_p4_index.sh` 12/12 全绿。
+>
+> **P4.2 已落地（2026-11-20）**：`dial.toml [dependencies]` 支持语义版本区间（`^`/`~`/精确/`*`），
+> `dialc resolve` 解析传递依赖并仲裁（冲突给可读路径）、生成 `dial.lock`（精确版本+SHA256），
+> `dialc install --locked` 按 lock 复现安装；`--check` 校验 lock 一致性/篡改。索引 schema v2 增加
+> 每包 `deps` 字段（向后兼容 v1）。门禁 `tools/verify_p4_resolve.sh` 11/11 全绿。**§1 五维度全部
+> 达成**，dialpkg 产品定义闭环；P4.3（下载层离线/镜像/增量）未启动。详见
+> [`rationale/dialpkg-roadmap.md`](rationale/dialpkg-roadmap.md) §7。
 
 > 本章为**生态规划**，不含任何实现承诺与时间表。**完整规范**（平台矩阵、包内目录树、
 > JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见

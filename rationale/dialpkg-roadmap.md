@@ -208,16 +208,34 @@ mode = "prebuilt"         # prebuilt | source
 
 - **门禁固化**：`tools/verify_p4_index.sh`（12 项，缺 curl/python3 自动 skip）挂入 `run_tests.sh` AL 段。
 - **§1 五维度对照**：③ 完整依赖管理——`search`/`info` ✅（静态索引可发现包）；语义版本区间 /
-  传递依赖解析 / `dial.lock` ⬜ 留待 P4.2。其余维度沿用 P4.0 达成状态。
+  传递依赖解析 / `dial.lock` ✅ 由 P4.2 达成。其余维度沿用 P4.0 达成状态。
 - **信任模型（务实、不含糊）**：索引靠 HTTPS 传输保护 + 可选 `--index-sha256` 钉死整文件；
   每个包条目登记 `sha256`，`info` 直接给出带 `--sha256` 的安装命令，把信任链从索引延伸到下载物。
   **不宣称非对称签名**——那需要新依赖或手写密码学，违反零依赖/不手写安全栈铁律。
 - 零新依赖：复用 `curl`/`sha2`/`serde_json`；注册模块 `src/registry.rs`；版本 1.10.0、不打 tag。
 
-### P4.2–P4.3 —— ⬜ 未启动
+### P4.2 · 完整依赖管理 —— ✅ 已落地（2026-11-20）
 
-- P4.2 完整依赖管理（语义版本区间 / 传递解析 + 版本仲裁 / `dial.lock`）、P4.3 离线镜像与增量：
-  按批次独立推进，每期对照 §1 勾验。
+| 子项 | 实现 | 证据 |
+|---|---|---|
+| 语义版本区间 | 新模块 `version.rs` 手写 semver 子集：`^` caret（锁最左非零位）、`~` tilde（锁 minor）、`=`/裸版本 精确、`*` 通配；预发布比较；区间**交集**运算供仲裁；语法非法 Fail-Fast | version 单测 4 项 + 门禁 1：caret 选最高 2.1.0 不跨大版本 |
+| 传递依赖 + 版本仲裁 | 新模块 `resolve.rs`：工作队列传播传递依赖；同一包多约束求交，空集即冲突（Fail-Fast 打印每条约束的**来源路径**）；正式版优先、选最高满足版本；缺包 Fail-Fast；环检测（去重终止） | 门禁 2/3/4：冲突给出 `http@1.0.0 -> json` 路径、缺包报错、环终止单测 |
+| `dial.lock` | `resolve` 生成精确 `name/version/abi/url/sha256` 锁定文件（原子写）；`--check` 校验 lock 与解析一致且未被篡改；`install --locked [目录]` 按 lock 逐包下载安装（钉 SHA256） | 门禁 5/6/9：lock 生成、`--check` 一致/篡改拦截、按 lock 装真实包并可 import 运行 |
+| 索引 schema v2 | `registry.rs` 的 `IndexEntry` 增 `deps` 字段（包名→区间），schema 升 2 且**向后兼容 v1**（v1 条目视为无依赖）；deps 区间在解析期即校验 | P4.1 门禁 12/12 回归（v1 索引仍可读、schema 99 仍拒） |
+| CLI 与工程化 | `dialc resolve [目录]`（`--json`/`--check`/`--index`/`--index-sha256`/`--offline`/`--lock`）；`dial.toml [dependencies]` 段解析；usage/completion 同步；与源码级 `deps`（import 图）命名区分 | 门禁 7/8/10：JSON 合法、offline 缓存解析、version/resolve 单测全过 |
 
-> 路线图文档初版（2026-11-19）确立战略定位与分期；P4.0 代码于 2026-11-20 落地；
-> P4.1 静态索引与搜索于 2026-11-20 落地。
+- **门禁固化**：`tools/verify_p4_resolve.sh`（11 项，缺 curl/python3/zig 自动 skip）挂入 `run_tests.sh` AM 段。
+- **§1 五维度对照**：③ 完整依赖管理——语义版本区间 ✅ / 传递依赖+仲裁 ✅ / `dial.lock` ✅ /
+  search ✅。**五维度全部达成**，dialpkg 在「让人放弃其它 C 包管理器」的产品定义上闭环。
+- **设计边界（不含糊）**：① 不回溯——semver 区间单调，贪心选最高 + 交集判冲突即可收敛，
+  冲突明确报错而非静默换版（Fail-Fast 铁律）；② 语义版本选「装哪个版本」，`abi` 把关「能否链接」
+  （README §25.3），两者职责分离不冲突；③ 零新依赖（手写版本逻辑）、零脚本、无中心服务。
+- 零新依赖：复用 `curl`/`sha2`/`serde_json`；新模块 `src/version.rs`/`src/resolve.rs`；版本 1.10.0、不打 tag。
+
+### P4.3 —— ⬜ 未启动
+
+- 离线 / 镜像与增量（`--offline` 下载层、镜像源配置、断点续传、增量更新评估）：按批次独立推进，
+  每期对照 §1 勾验。注意 P4.1/P4.2 的 `--offline` 仅指「索引/依赖解析只读缓存」，与 P4.3 的
+  「包下载离线/镜像」是不同层。
+
+> 路线图文档初版（2026-11-19）确立战略定位与分期；P4.0/P4.1/P4.2 代码均于 2026-11-20 落地。
