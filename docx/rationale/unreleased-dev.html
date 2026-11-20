@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 更新日志索引</a> · <a href="../changelog/unreleased-dev.html">变更条目</a></p><div class="toc">
 <ul>
 <li><a href="#未发布--开发中增量未升版本号--未打标签--未发-release--理由与证据链">[未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release） · 理由与证据链</a><ul>
+<li><a href="#ci-windows-二进制安全加固按版一次性自签--密码学擦除crypto-shredding">CI Windows 二进制安全加固：按版一次性自签 + 密码学擦除（crypto-shredding）</a></li>
 <li><a href="#新路线-p4dialpkg-从专用分发格式升为通用-c-包管理标准仅路线图零代码">新路线 P4：dialpkg 从「专用分发格式」升为「通用 C 包管理标准」（仅路线图，零代码）</a></li>
 <li><a href="#p1-平台对等aarch64-后端补齐-dwarf-源码级调试-g-静默降级--实机可用">P1 平台对等：AArch64 后端补齐 DWARF 源码级调试（-g 静默降级 → 实机可用）</a></li>
 <li><a href="#p1aarch64-实机语义验证抓出并修复-3-个语法校验盲区的根本-bug">P1：AArch64 实机语义验证——抓出并修复 3 个语法校验盲区的根本 bug</a></li>
@@ -72,6 +73,50 @@
 <p>本文件是 <a href="../changelog.html">CHANGELOG.md</a> 中 <code>## [未发布] — 开发中增量（未升版本号 / 未打标签 / 未发 Release）</code> 版本段拆出的「理由 / 证据链」存档：为什么改、实测数据、边界在哪。
 变更条目（新增 / 更改 / 破坏性变更 / 修复）本身仍留在 CHANGELOG.md。</p>
 </blockquote>
+<hr />
+<h4 id="ci-windows-二进制安全加固按版一次性自签--密码学擦除crypto-shredding">CI Windows 二进制安全加固：按版一次性自签 + 密码学擦除（crypto-shredding）</h4>
+<p><strong>用户诉求原文精神（2026-11-20）</strong>：</p>
+<blockquote>
+<p>CI 流程出来的 Windows 程序没有证书，太不安全了，不符合我们的哲学，所以给 CI 加个流程：
+先生成出一个证书、再一个私钥（长度尽可能多，能上到 2048 位就上，不行就 600 多位），
+给程序签好过后，再生成对称加密和非对称加密、相互交替，把私钥加密，然后销毁掉；
+发布时为保证可信度再把证书提交；切记私钥得按那个流程销毁。</p>
+</blockquote>
+<p><strong>先纠正两点认知偏差（避免做出「看着安全实则无害」的东西）</strong>：</p>
+<ol>
+<li>位数：Windows Authenticode 自 2021 年起要求 RSA ≥ 2048 位，600 多位不安全且被系统拒签/拒信，故直接用 2048（本地 openssl 3.0.13 完全支持）。</li>
+<li>方案取舍：设计助理曾建议「固定证书长期存 GitHub Secrets」，被用户否决——用户指出 Fixed 方案反而引入他担心的风险（私钥长期留存泄露、v1 证书签 v2）。用户的一次一密模型恰好防住三件事：私钥泄露、证书过期仍可用、低版本证书签高版本。验签策略用户选「失败即拒装」。</li>
+</ol>
+<p><strong>为什么一次一密 + 密码学擦除能防住这三件事</strong>：</p>
+<ul>
+<li><strong>私钥泄露</strong>：私钥只存在于当次 CI 内存/临时目录，签完即用数字信封密封并销毁全部明文与解密密钥（KEK）。密封密文即使随 Release 公开也解不开（KEK 已毁）——这是 crypto-shredding 的根基，安全性建立在密钥销毁而非物理擦除上（<code>cipher /w</code> 对 SSD 不保证物理不可恢复，已诚实声明）。</li>
+<li><strong>证书过期仍可用</strong>：证书有效期 365 天，签名<strong>故意不加 RFC3161 时间戳</strong>，签名随证书过期而失效；验签校验 <code>当前时间 &lt; NotAfter</code>，过期即拒装。</li>
+<li><strong>低版本证书签高版本</strong>：证书 CN 内嵌全版本 <code>dialc-sign-v&lt;版本&gt;</code>，验签校验 CN 版本 == 包内 BUILD_INFO 版本；v1 的密钥在 v1 发布时就已销毁，物理上也签不了 v2。</li>
+</ul>
+<p><strong>密码学流程（<code>tools/sign_windows_release.sh</code>，只调系统 openssl + signtool，不手搓）</strong>：</p>
+<ol>
+<li><code>genpkey</code> RSA-2048 签名私钥 → <code>req -new</code> CSR（CN 内嵌版本）→ <code>x509 -req -days 365 -extfile</code>（codeSigning EKU）。</li>
+<li><code>signtool sign /fd SHA256</code> 对 dialc.exe 做 Authenticode 签名（无时间戳），glob 定位 SDK 路径。</li>
+<li>另生成一次性 KEK（RSA-2048）→ <code>openssl cms -encrypt -aes-256-gcm</code>（GCM 不可用回退 CBC）把签名私钥封成 CMS EnvelopedData（AES-256-GCM 内容 + RSA-OAEP/SHA256 包裹 CEK）。</li>
+<li><code>shred</code>（无则随机覆写）删除 sign.key/sign.csr/cert.pem/sign.pfx/kek.key/kek.crt，Windows 上补 <code>cipher /w</code>；断言工作区无明文残留。</li>
+<li>产物仅 <code>dialc-code-sign.cer</code>（公钥，随 zip + Release）+ <code>dialc-sealed-v&lt;ver&gt;.cms</code>（审计密文，仅 Release）；CI 断言待发布目录无 <code>*.key/*.pfx/*.pem/kek.*</code>。</li>
+</ol>
+<p><strong>验签（<code>tools/verify_windows_signature.ps1</code> + 接入 <code>install-dial.ps1</code> 两处把关点）</strong>：</p>
+<ul>
+<li>自签证书在 OS 信任库里永不「Valid」，故不依赖 <code>Status -eq Valid</code>，而把信任锚绑定到随包 <code>.cer</code>：
+  ① OS <code>Get-AuthenticodeSignature</code> 查完整性（篡改即 HashMismatch/NotSigned）；
+  ② <code>SignerCertificate.RawData</code> 与随包 <code>.cer</code> 逐字节比对；
+  ③ CN 版本 == BUILD_INFO 版本；④ <code>当前时间 &lt; NotAfter</code>。任一失败 <code>Die</code> 拒装。提示全英文（Windows 控制台 codepage 安全）。</li>
+</ul>
+<p><strong>实机/门禁证据链</strong>：</p>
+<ul>
+<li>本地 openssl 3.0.13 实测密码学全流程：RSA-2048 私钥、CN 内嵌 <code>v1.10.0</code>、codeSigning EKU、notBefore/notAfter 精确；CMS 数字信封往返 SHA256 一致；密文无 <code>PRIVATE KEY</code> 字样；篡改 1 字节解密失败（exit=4）；销毁 KEK 后解密失败（exit=2）；ASN1 确认 <code>rsaesOaep</code> + <code>aes-256-gcm</code>。</li>
+<li><code>tools/verify_windows_signing.sh</code> 16 项断言全绿（证书结构 4 / 数字信封 2 / 机密性 1 / 完整性 1 / 擦除 2 / 版本绑定 2 / 过期 2 / 资产卫生 3），挂 <code>run_tests.sh</code> AP 段；缺 openssl 自动 skip。</li>
+<li><code>sign_windows_release.sh</code> 本地无 signtool 时跳过 PE 签名、仍产出密码学材料供门禁复现（signed_pe=0），产物自检通过。</li>
+<li>Authenticode 对 PE 的真实签名/验签只能在 CI（windows-2022 + signtool）实机验证，本地无 Windows/PowerShell 环境。</li>
+</ul>
+<p><strong>诚实边界</strong>：自签证书触发 Windows SmartScreen「未知发布者」，无法消除（除非购买 CA 证书，本方案不选）；信任锚随包分发能防 exe 被单独篡改与版本混签，无法防整个 zip 连证书一起被替换（该情形仍由 Release 页 HTTPS + 用户侧核对外层哈希兜底）；不宣称非对称信任链。ARCHITECTURE §5.2「不需要签名体系/信任根」已改写为「按版一次性自签 + 随包证书信任锚 + 密码学擦除，与分发/信任解耦不矛盾」。</p>
+<p><strong>护栏</strong>：LLVM 后端零改动、零新 Rust 依赖（仅系统 openssl + signtool，非代码依赖）、不引入长期 Secrets、版本 1.10.0、不打 tag。</p>
 <hr />
 <h4 id="新路线-p4dialpkg-从专用分发格式升为通用-c-包管理标准仅路线图零代码">新路线 P4：dialpkg 从「专用分发格式」升为「通用 C 包管理标准」（仅路线图，零代码）</h4>
 <p><strong>用户决策原文精神（2026-11-19）</strong>：</p>

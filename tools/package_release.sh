@@ -75,6 +75,14 @@ fi
 
 if [ "$SLUG" = "windows-x86_64" ]; then
   cp tools/install-dial.ps1 "$DEST/install-dial.ps1"
+  # 一次性自签证书（公钥）：tag 发布时由 sign_windows_release.sh 经 DIAL_SIGN_CER
+  # 传入，随包分发供 install-dial.ps1 验签（信任锚）。非 tag 冒烟构建无证书，跳过。
+  if [ -n "${DIAL_SIGN_CER:-}" ] && [ -f "$DIAL_SIGN_CER" ]; then
+    cp "$DIAL_SIGN_CER" "$DEST/dialc-code-sign.cer"
+    echo "   ✅ 已随包附带公钥证书 dialc-code-sign.cer（验签信任锚）"
+  else
+    echo "   ⚠️  未提供 DIAL_SIGN_CER（非发布构建，跳过证书嵌入）" >&2
+  fi
   # LLVM-C.dll：dialc.exe 运行期依赖（与官方 MSVC LLVM 18 的 C 接口配套）
   LLVM_DLL="${LLVM18_DIR:-C:/llvm18}/bin/LLVM-C.dll"
   if [ -f "$LLVM_DLL" ]; then
@@ -163,6 +171,11 @@ for f in LICENSE LICENSE-GPLv3 LICENSE-MIT LICENSE-APACHE "$BASENAME" stdlib run
 done
 if [ "$SLUG" = "windows-x86_64" ]; then
   echo "$LISTING" | grep -q "${PKG_ROOT}/install-dial.ps1" && echo "   ✅ 包内含 install-dial.ps1" || { echo "   ❌ 缺少 install-dial.ps1"; FAIL=1; }
+  # 发布构建（有 DIAL_SIGN_CER）必须把证书打进包；否则验签会失败。
+  if [ -n "${DIAL_SIGN_CER:-}" ]; then
+    echo "$LISTING" | grep -q "${PKG_ROOT}/dialc-code-sign.cer" \
+      && echo "   ✅ 包内含 dialc-code-sign.cer" || { echo "   ❌ 缺少 dialc-code-sign.cer（验签信任锚）"; FAIL=1; }
+  fi
 fi
 
 echo

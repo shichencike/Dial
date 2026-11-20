@@ -5099,6 +5099,13 @@ else
     fail=1
 fi
 
+echo "== AP) Windows 代码签名密码学门禁（一次性自签/数字信封/擦除/版本绑定）=="
+if bash tools/verify_windows_signing.sh; then
+    :   # 缺 openssl 时脚本自行 skip
+else
+    fail=1
+fi
+
 echo
 if [ $fail -eq 0 ]; then
     echo "== 全部测试通过 ✅ =="

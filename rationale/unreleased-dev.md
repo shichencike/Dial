@@ -5,6 +5,54 @@
 
 ---
 
+#### CI Windows 二进制安全加固：按版一次性自签 + 密码学擦除（crypto-shredding）
+
+**用户诉求原文精神（2026-11-20）**：
+
+> CI 流程出来的 Windows 程序没有证书，太不安全了，不符合我们的哲学，所以给 CI 加个流程：
+> 先生成出一个证书、再一个私钥（长度尽可能多，能上到 2048 位就上，不行就 600 多位），
+> 给程序签好过后，再生成对称加密和非对称加密、相互交替，把私钥加密，然后销毁掉；
+> 发布时为保证可信度再把证书提交；切记私钥得按那个流程销毁。
+
+**先纠正两点认知偏差（避免做出「看着安全实则无害」的东西）**：
+
+1. 位数：Windows Authenticode 自 2021 年起要求 RSA ≥ 2048 位，600 多位不安全且被系统拒签/拒信，故直接用 2048（本地 openssl 3.0.13 完全支持）。
+2. 方案取舍：设计助理曾建议「固定证书长期存 GitHub Secrets」，被用户否决——用户指出 Fixed 方案反而引入他担心的风险（私钥长期留存泄露、v1 证书签 v2）。用户的一次一密模型恰好防住三件事：私钥泄露、证书过期仍可用、低版本证书签高版本。验签策略用户选「失败即拒装」。
+
+**为什么一次一密 + 密码学擦除能防住这三件事**：
+
+- **私钥泄露**：私钥只存在于当次 CI 内存/临时目录，签完即用数字信封密封并销毁全部明文与解密密钥（KEK）。密封密文即使随 Release 公开也解不开（KEK 已毁）——这是 crypto-shredding 的根基，安全性建立在密钥销毁而非物理擦除上（`cipher /w` 对 SSD 不保证物理不可恢复，已诚实声明）。
+- **证书过期仍可用**：证书有效期 365 天，签名**故意不加 RFC3161 时间戳**，签名随证书过期而失效；验签校验 `当前时间 < NotAfter`，过期即拒装。
+- **低版本证书签高版本**：证书 CN 内嵌全版本 `dialc-sign-v<版本>`，验签校验 CN 版本 == 包内 BUILD_INFO 版本；v1 的密钥在 v1 发布时就已销毁，物理上也签不了 v2。
+
+**密码学流程（`tools/sign_windows_release.sh`，只调系统 openssl + signtool，不手搓）**：
+
+1. `genpkey` RSA-2048 签名私钥 → `req -new` CSR（CN 内嵌版本）→ `x509 -req -days 365 -extfile`（codeSigning EKU）。
+2. `signtool sign /fd SHA256` 对 dialc.exe 做 Authenticode 签名（无时间戳），glob 定位 SDK 路径。
+3. 另生成一次性 KEK（RSA-2048）→ `openssl cms -encrypt -aes-256-gcm`（GCM 不可用回退 CBC）把签名私钥封成 CMS EnvelopedData（AES-256-GCM 内容 + RSA-OAEP/SHA256 包裹 CEK）。
+4. `shred`（无则随机覆写）删除 sign.key/sign.csr/cert.pem/sign.pfx/kek.key/kek.crt，Windows 上补 `cipher /w`；断言工作区无明文残留。
+5. 产物仅 `dialc-code-sign.cer`（公钥，随 zip + Release）+ `dialc-sealed-v<ver>.cms`（审计密文，仅 Release）；CI 断言待发布目录无 `*.key/*.pfx/*.pem/kek.*`。
+
+**验签（`tools/verify_windows_signature.ps1` + 接入 `install-dial.ps1` 两处把关点）**：
+
+- 自签证书在 OS 信任库里永不「Valid」，故不依赖 `Status -eq Valid`，而把信任锚绑定到随包 `.cer`：
+  ① OS `Get-AuthenticodeSignature` 查完整性（篡改即 HashMismatch/NotSigned）；
+  ② `SignerCertificate.RawData` 与随包 `.cer` 逐字节比对；
+  ③ CN 版本 == BUILD_INFO 版本；④ `当前时间 < NotAfter`。任一失败 `Die` 拒装。提示全英文（Windows 控制台 codepage 安全）。
+
+**实机/门禁证据链**：
+
+- 本地 openssl 3.0.13 实测密码学全流程：RSA-2048 私钥、CN 内嵌 `v1.10.0`、codeSigning EKU、notBefore/notAfter 精确；CMS 数字信封往返 SHA256 一致；密文无 `PRIVATE KEY` 字样；篡改 1 字节解密失败（exit=4）；销毁 KEK 后解密失败（exit=2）；ASN1 确认 `rsaesOaep` + `aes-256-gcm`。
+- `tools/verify_windows_signing.sh` 16 项断言全绿（证书结构 4 / 数字信封 2 / 机密性 1 / 完整性 1 / 擦除 2 / 版本绑定 2 / 过期 2 / 资产卫生 3），挂 `run_tests.sh` AP 段；缺 openssl 自动 skip。
+- `sign_windows_release.sh` 本地无 signtool 时跳过 PE 签名、仍产出密码学材料供门禁复现（signed_pe=0），产物自检通过。
+- Authenticode 对 PE 的真实签名/验签只能在 CI（windows-2022 + signtool）实机验证，本地无 Windows/PowerShell 环境。
+
+**诚实边界**：自签证书触发 Windows SmartScreen「未知发布者」，无法消除（除非购买 CA 证书，本方案不选）；信任锚随包分发能防 exe 被单独篡改与版本混签，无法防整个 zip 连证书一起被替换（该情形仍由 Release 页 HTTPS + 用户侧核对外层哈希兜底）；不宣称非对称信任链。ARCHITECTURE §5.2「不需要签名体系/信任根」已改写为「按版一次性自签 + 随包证书信任锚 + 密码学擦除，与分发/信任解耦不矛盾」。
+
+**护栏**：LLVM 后端零改动、零新 Rust 依赖（仅系统 openssl + signtool，非代码依赖）、不引入长期 Secrets、版本 1.10.0、不打 tag。
+
+---
+
 #### 新路线 P4：dialpkg 从「专用分发格式」升为「通用 C 包管理标准」（仅路线图，零代码）
 
 **用户决策原文精神（2026-11-19）**：

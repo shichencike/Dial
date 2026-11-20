@@ -5059,11 +5059,24 @@ extern fn db_close(db: Db): void;
 </table>
 <p>这条决策与 Dial 的整体哲学一致：</p>
 <ul>
-<li><strong>不设账号 = 没有「谁可以发布这个包」的问题</strong>，也就不需要审核、签名体系、信任根。</li>
+<li><strong>不设账号 = 没有「谁可以发布这个包」的问题</strong>，因此不需要<strong>中心化的</strong>审核、账号信任根。</li>
 <li><strong>不用中央服务器 = 没有单点故障、没有带宽成本、没有「服务关停后生态归零」的风险。</strong></li>
 <li><strong>包的信任由哈希而非服务器担保</strong>：GitHub Releases 只负责「把字节送到你面前」，
   「这些字节是不是我要的那个」由 SHA256 独立回答。<strong>分发渠道与信任判定解耦</strong>——
   换任何一个 CDN 或镜像，都不影响安全性。</li>
+</ul>
+<p><strong>Windows 编译器二进制的一次性自签（v1.10 开发中增量，与去中心化不矛盾）</strong>：<code>.dialpkg</code> 包继续靠
+§25.4 的 SHA256 信任链；<code>dialc.exe</code> 这类平台二进制额外做 Authenticode 签名，但信任锚<strong>随包分发</strong>
+而非中心化 CA：</p>
+<ul>
+<li><strong>一次一密 + 密码学擦除</strong>：每个发布版本生成独立 RSA-2048 自签证书（365 天有效期），私钥签完 exe
+  后立即用数字信封（AES-256-GCM + RSA-OAEP）密封，再销毁全部明文与解密密钥——密封密文即使泄露也不可解。</li>
+<li><strong>验签失败即拒装</strong>：一键安装脚本用随包 <code>.cer</code> 逐字节比对签名证书、校验证书内嵌版本与包版本一致、
+  校验证书未过期，任一失败直接拒绝安装（Fail-Fast）。这防住私钥泄露、证书过期仍可用、旧版证书签新版。</li>
+<li><strong>诚实边界</strong>：自签证书会触发 SmartScreen「未知发布者」（点「更多信息→仍要运行」即可）；信任锚随包
+  分发能防 exe 被单独篡改与版本混签，无法防整个 zip 连证书一起被替换（该情形仍由 HTTPS + 用户侧核对
+  外层哈希兜底）。不引入新依赖，仅用系统 openssl + Windows SDK signtool。详见 ARCHITECTURE §5.2、
+  CHANGELOG 未发布段。</li>
 </ul>
 <h3 id="256-一键安装与无缝链接">25.6 一键安装与无缝链接</h3>
 <p><strong>一键安装</strong>（Linux / Termux：<code>install-dial.sh</code>；Windows：<code>install-dial.ps1</code>）：</p>

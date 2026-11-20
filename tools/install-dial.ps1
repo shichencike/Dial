@@ -151,6 +151,74 @@ function Warn { param([string]$m) Write-Host "  [!]  $m" }
 function Die  { param([string]$m) Write-Host "  [X]  $m" -ForegroundColor Red; exit 1 }
 
 # ---------------------------------------------------------------------------
+# Authenticode signature verification (per-release one-time self-signed cert).
+#   Companion of tools/sign_windows_release.sh. A self-signed cert is never
+#   "Valid" in the OS trust store, so we bind trust to the .cer shipped in the
+#   SAME release and verify: integrity + signer byte match + CN version + date.
+#   Any failure returns a short code; callers MUST refuse to install (fail-fast).
+# ---------------------------------------------------------------------------
+function Test-DialSignature {
+    param(
+        [string] $ExePath,
+        [string] $CerPath,
+        [string] $ExpectedVer
+    )
+    if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) { return "exe-missing" }
+    if (-not (Test-Path -LiteralPath $CerPath -PathType Leaf)) { return "cer-missing" }
+    $anchor = $null
+    try {
+        $anchor = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($CerPath)
+    } catch { return "cer-unreadable" }
+    $sig = $null
+    try { $sig = Get-AuthenticodeSignature -LiteralPath $ExePath } catch { return "sig-check-failed" }
+    # These statuses always mean the signed bytes are broken, regardless of trust.
+    if ($sig.Status -in @('HashMismatch','NotSigned','NotSupportedFileFormat','Incompatible')) {
+        return "integrity:$($sig.Status)"
+    }
+    $signer = $sig.SignerCertificate
+    if (-not $signer) { return "no-signer:$($sig.Status)" }
+    # Trust anchor = the exact public cert shipped in this release (byte-for-byte).
+    if ([Convert]::ToBase64String($anchor.RawData) -cne [Convert]::ToBase64String($signer.RawData)) {
+        return "cert-mismatch"
+    }
+    # Version binding: CN=dialc-sign-v<version> must equal the release version.
+    if ($ExpectedVer) {
+        $m = [regex]::Match($anchor.Subject, 'CN\s*=\s*dialc-sign-v(\d+\.\d+\.\d+)')
+        if (-not $m.Success) { return "cn-malformed" }
+        if ($m.Groups[1].Value -ne $ExpectedVer) { return "version-mismatch:$($m.Groups[1].Value)!=$ExpectedVer" }
+    }
+    # Validity: reject expired cert (NotBefore tolerated for clock skew).
+    if ((Get-Date) -gt $anchor.NotAfter) { return "cert-expired" }
+    return $null
+}
+
+# Read expected full version from a BUILD_INFO.txt (English "Version:" or Chinese one).
+function Get-BuildVersion {
+    param([string] $BuildInfo)
+    if (-not (Test-Path -LiteralPath $BuildInfo)) { return "" }
+    foreach ($line in (Get-Content -LiteralPath $BuildInfo)) {
+        $m = [regex]::Match($line, '(?:Version|版本)\s*[:：]\s*(\d+\.\d+\.\d+)')
+        if ($m.Success) { return $m.Groups[1].Value }
+    }
+    return ""
+}
+
+# Verify a release directory (contains dialc.exe + dialc-code-sign.cer + BUILD_INFO.txt).
+# Fail-fast: Die on any problem. $Root may be the zip root or a Dial/ subfolder.
+function Assert-DialSignature {
+    param([string] $Root, [string] $Label)
+    $exe  = if (Test-Path -LiteralPath (Join-Path $Root "dialc.exe")) { Join-Path $Root "dialc.exe" } else { Join-Path $Root "Dial\dialc.exe" }
+    $cer  = if (Test-Path -LiteralPath (Join-Path $Root "dialc-code-sign.cer")) { Join-Path $Root "dialc-code-sign.cer" } else { Join-Path $Root "Dial\dialc-code-sign.cer" }
+    $info = if (Test-Path -LiteralPath (Join-Path $Root "BUILD_INFO.txt")) { Join-Path $Root "BUILD_INFO.txt" } else { Join-Path $Root "Dial\BUILD_INFO.txt" }
+    $ver  = Get-BuildVersion -BuildInfo $info
+    $err  = Test-DialSignature -ExePath $exe -CerPath $cer -ExpectedVer $ver
+    if ($err) {
+        Die "Signature verification FAILED ($Label): $err. Refusing to install an unverified binary. Download the official release from $ReleaseLatest."
+    }
+    Ok "Signature verified ($Label, version $ver, cert bound and in date)"
+}
+
+# ---------------------------------------------------------------------------
 # Download helper: mirror-first, official-fallback, resume.
 # ---------------------------------------------------------------------------
 function Invoke-DialDownload {
@@ -221,6 +289,9 @@ function Invoke-Bootstrap {
         Die "Failed to download the Dial release (mirror and official both failed). Download manually: $official then run install-dial.ps1 from inside the zip."
     }
     Expand-Archive -Path $target -DestinationPath $work.FullName -Force
+    # Security gate: verify the freshly downloaded dialc.exe against the cert
+    # shipped in the SAME zip BEFORE running any installer code from it.
+    Assert-DialSignature -Root $work.FullName -Label "download"
     $inner = Get-ChildItem -Path $work.FullName -Recurse -File -Filter install-dial.ps1 | Select-Object -First 1
     if (-not $inner) { Die "install-dial.ps1 not found inside the release zip." }
     & powershell -ExecutionPolicy Bypass -File $inner.FullName @BootstrapArgs
@@ -253,6 +324,9 @@ if (-not (Test-Path $DialcBin)) {
         Die "Cannot find the dialc executable.`n  Place dialc.exe next to this script, or set it via:`n      `$env:DIALC_BIN = 'C:\path\to\dialc.exe'"
     }
 }
+# Security gate (local release mode): verify dialc.exe against the cert shipped
+# in this release package before copying/installing anything. Fail-fast.
+Assert-DialSignature -Root $DialcSrc -Label "local package"
 Ok "Compiler: $DialcBin"
 Resolve-DialVersion -Bin $DialcBin
 $shownVersion = if ($DialVersion) { $DialVersion } elseif ($script:LatestTag) { $script:LatestTag } else { "follow latest Release" }

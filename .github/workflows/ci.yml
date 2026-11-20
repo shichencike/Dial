@@ -417,18 +417,36 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: 打包发布 zip（windows-x86_64，含 LLVM-C.dll）
+      # 阶段 8：一次性自签证书 + Authenticode 签名 + 密码学擦除（安全加固）。
+      # 每个发布版本生成独立证书，私钥签完即毁（数字信封密封 + KEK 销毁），
+      # 杜绝私钥泄露与旧版证书签新版。仅在打 tag 发布时签名（PR/推送冒烟无需签名）。
+      - name: 一次性自签证书签名 dialc.exe（一版一密 + 密码学擦除）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          VER="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          echo "signing version: $VER"
+          bash tools/sign_windows_release.sh \
+            target/x86_64-pc-windows-gnu/release/dialc.exe "$VER" dist-sign
+
+      - name: 打包发布 zip（windows-x86_64，含 LLVM-C.dll + 验签证书）
         shell: bash
         env:
           GITHUB_SHA: ${{ github.sha }}
           LLVM18_DIR: C:\llvm18
         run: bash tools/package_release.sh windows-x86_64 target/x86_64-pc-windows-gnu/release/dialc.exe
 
-      - name: 上传发布产物
+      - name: 上传发布产物（zip + 公钥证书 + 审计密封密文）
         uses: actions/upload-artifact@v4
         with:
           name: dialc-windows-x86_64
-          path: dialc-v*-windows-x86_64.zip
+          path: |
+            dialc-v*-windows-x86_64.zip
+            dist-sign/dialc-code-sign.cer
+            dist-sign/dialc-sealed-*.cms
           if-no-files-found: error
           retention-days: 7
 
@@ -666,6 +684,8 @@ jobs:
         with:
           files: |
             dist/**/dialc-v*.zip
+            dist/**/dialc-code-sign.cer
+            dist/**/dialc-sealed-*.cms
             editors/vscode/dial-*.vsix
             dist-stdlib/stdlib.dialpkg
             dist/http-dialpkg/http.dialpkg
