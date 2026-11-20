@@ -4712,7 +4712,11 @@ uninstall/new 均支持 <code>--json</code>。<strong>P4.1 静态索引与搜索
 Fail-Fast 且不回退缓存）。<strong>P4.2 完整依赖管理于 2026-11-20 落地</strong>：<code>dial.toml [dependencies]</code>
 声明语义版本区间（<code>^</code>/<code>~</code>/精确/<code>*</code>），<code>dialc resolve</code> 解析传递依赖并仲裁（冲突可读报错）、
 生成 <code>dial.lock</code> 锁定精确版本+SHA256，<code>dialc install --locked</code> 按 lock 复现安装——§1 五维度
-至此全部达成。P4.3（下载层离线/镜像/增量）未启动。
+至此全部达成。<strong>P4.3 下载韧性与平台声明于 2026-11-20 落地</strong>：包下载缓存 + <code>dialc install
+&lt;url&gt; --offline</code>（只用缓存、缺失 Fail-Fast）+ <code>DIAL_MIRROR</code> 镜像重写 + curl 断点续传；
+<code>dial.toml platforms = "..."</code> 声明允许安装的平台，<strong>install 期</strong>校验 host、不匹配即拒绝
+并列出支持平台（零字节落盘）——平台兼容性此前仅在链接期由 <code>targets</code> 把关，现在提前到安装期。
+增量更新评估结论为本批不做（体积/收益不成正比 + 整包 SHA256 信任链优先）。至此 P4.0–P4.3 全部落地。
 本节 §25 其余内容描述的是 v1.10 分发格式（仍然有效、仍是新能力的地基）；「刻意不做」的
 边界以 §25.7 的转向注记为准。零脚本可审计、SHA256 信任链、项目目录零侵入等核心约束<strong>继续保留</strong>。</p>
 </blockquote>
@@ -5178,12 +5182,16 @@ Dial 目前<strong>没有</strong> <code>dialc uninstall</code> 命令，因为�
 <td>一律解压到 <code>~/.dial/packages/</code>，项目目录零侵入（§25.1）</td>
 </tr>
 <tr>
-<td>二进制差分 / 增量更新（保留，待评估）</td>
-<td>一个包几十 MB，一次下载即可；增量更新的复杂度远超收益。P4.3 先量化再决定</td>
+<td>二进制差分 / 增量更新（评估后不做）</td>
+<td>P4.3 量化结论：包体积 KB~MB 级，增量补丁元数据/重组复杂度与收益不成正比，且引入「补丁链完整性」新安全面违背零手写安全栈；断点续传已覆盖大文件中断痛点。待有明确体积/带宽数据再重启</td>
 </tr>
 <tr>
 <td>自建 CDN / 镜像站（部分转向）</td>
-<td>§25.5：直接用 GitHub 的免费 CDN。P4.3 评估镜像源配置，但自建 CDN 仍不做</td>
+<td>§25.5：直接用 GitHub 的免费 CDN。P4.3 已落地<strong>镜像源配置</strong> <code>DIAL_MIRROR=原前缀=镜像前缀</code>（重写下载 URL，仍强制 https），但<strong>自建 CDN 仍不做</strong></td>
+</tr>
+<tr>
+<td>包只能装到指定平台（已落地 P4.3）</td>
+<td><code>dial.toml platforms = "..."</code> 声明允许安装的 triple；install 期校验 host，不匹配即拒绝并列出支持平台（此前仅链接期由 <code>targets</code> 把关）；旧包无此字段则不限制，向后兼容</td>
 </tr>
 </tbody>
 </table>
@@ -5570,8 +5578,12 @@ SHA256 信任链从索引延伸到下载物。门禁 <code>tools/verify_p4_index
 <code>dialc resolve</code> 解析传递依赖并仲裁（冲突给可读路径）、生成 <code>dial.lock</code>（精确版本+SHA256），
 <code>dialc install --locked</code> 按 lock 复现安装；<code>--check</code> 校验 lock 一致性/篡改。索引 schema v2 增加
 每包 <code>deps</code> 字段（向后兼容 v1）。门禁 <code>tools/verify_p4_resolve.sh</code> 11/11 全绿。<strong>§1 五维度全部
-达成</strong>，dialpkg 产品定义闭环；P4.3（下载层离线/镜像/增量）未启动。详见
-<a href="rationale/dialpkg-roadmap.html"><code>rationale/dialpkg-roadmap.md</code></a> §7。</p>
+达成</strong>，dialpkg 产品定义闭环。</p>
+<p><strong>P4.3 已落地（2026-11-20）</strong>：下载缓存 + <code>dialc install &lt;url&gt; --offline</code>（只用缓存、缺失
+Fail-Fast）+ <code>DIAL_MIRROR</code> 镜像重写 + curl 断点续传；<code>dial.toml platforms = "..."</code> 声明可安装
+平台，install 期校验、不匹配拒绝并列出支持平台（索引 schema v3 供 <code>info</code> 展示）。增量更新评估
+结论为本批不做。门禁 <code>tools/verify_p4_offline.sh</code> 9/9、<code>tools/verify_p4_platform.sh</code> 11/11 全绿。
+至此 P4.0–P4.3 全部落地。详见 <a href="rationale/dialpkg-roadmap.html"><code>rationale/dialpkg-roadmap.md</code></a> §7。</p>
 <p>本章为<strong>生态规划</strong>，不含任何实现承诺与时间表。<strong>完整规范</strong>（平台矩阵、包内目录树、
 JSON 映射字典格式、安装流程、与旧草案的逐条修订记录、实现路线）见
 <strong><a href="https://github.com/shichencike/Dial/blob/main/ARCHITECTURE.md">ARCHITECTURE.md《Dial 标准库与包分发最终规范》</a></strong>。
