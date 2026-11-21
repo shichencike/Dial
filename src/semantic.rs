@@ -31,6 +31,9 @@ pub struct FuncInfo {
     /// 这是 FFI 特例：固定参数照常类型检查，尾部参数不检查类型、按 C varargs ABI 直传。
     /// Dial 自己定义的函数永远为 false —— 它的 `...xs: T` 已在 analyze 开头脱糖成 `T[]`。
     pub variadic: bool,
+    /// v1.21：`async fn` 标记。async 函数只能作为任务/协程入口被调用，
+    /// 普通函数体内直接调用 async 函数由语义层拒绝。
+    pub is_async: bool,
     /// FFI 导出（v1.04）：`exported` 为 true 表示该函数用 C 链接符号名（无 mangling）
     /// 与 C 调用约定对外暴露，可被 C 侧直接调用。语义层强制其签名仅含 C 兼容类型
     /// （标量 / rawptr / fnptr / extern struct 值），否则编译期拒绝。
@@ -222,6 +225,66 @@ fn lvalue_root(e: &Expr) -> Option<&str> {
     }
 }
 
+/// v1.21：校验一个「任务/协程入口函数」的签名（具名函数 + 8 字节槽约束）。
+/// `need_int`：pool_submit / spawn_async 要求入口返回 int（写入 result 槽）；
+///            coroutine 要求入口返回 void（yield 驱动，无返回值）。
+/// 复用 spawn 的所有约束：首参 FuncRef、无 struct 形参、实参数目/类型匹配。
+#[allow(clippy::too_many_arguments)]
+fn check_task_entry<V>(
+    name: &str,
+    args: &[Expr],
+    need_int: bool,
+    scopes: &Scopes<V>,
+    funcs: &HashMap<String, FuncInfo>,
+    structs: &StructTable,
+) -> Result<String> {
+    if args.is_empty() {
+        return Err(DialcError::new(
+            format!("语义错误：{} 至少需要 1 个参数（入口函数名）", name), 0, 0,
+        ));
+    }
+    let fname = match &args[0] {
+        Expr::FuncRef(n) => n.clone(),
+        _ => return Err(DialcError::new(
+            format!("语义错误：{} 的第一个参数必须是顶层具名函数（Dial 无闭包；任务入口 thunk 需按目标函数静态生成）", name), 0, 0,
+        )),
+    };
+    let target = funcs.get(&fname).ok_or_else(|| {
+        DialcError::new(format!("语义错误：{} 引用了未定义的函数 '{}'", name, fname), 0, 0)
+    })?;
+    let want_ret = if need_int { Type::Int } else { Type::Void };
+    if target.ret != want_ret {
+        return Err(DialcError::new(
+            format!("语义错误：{} 的入口函数 '{}' 必须返回 {}，实际为 {}",
+                name, fname, want_ret.name(), target.ret.name()), 0, 0,
+        ));
+    }
+    for pty in &target.params {
+        if matches!(pty, Type::Struct(_)) {
+            return Err(DialcError::new(
+                format!("语义错误：{} 的入口函数 '{}' 含 struct 形参（实参槽固定 8 字节，装不下值语义聚合体）",
+                    name, fname), 0, 0,
+            ));
+        }
+    }
+    if args.len() - 1 != target.params.len() {
+        return Err(DialcError::new(
+            format!("语义错误：{} 传给 '{}' 的实参个数为 {}，但该函数需要 {} 个参数",
+                name, fname, args.len() - 1, target.params.len()), 0, 0,
+        ));
+    }
+    for (i, pty) in target.params.iter().enumerate() {
+        let at = type_of(&args[i + 1], scopes, funcs, structs)?;
+        if !types_compatible(&at, pty) {
+            return Err(DialcError::new(
+                format!("语义错误：{} 传给 '{}' 的第 {} 个实参类型 {} 与形参 {} 不兼容",
+                    name, fname, i + 1, at.name(), pty.name()), 0, 0,
+            ));
+        }
+    }
+    Ok(fname)
+}
+
 /// 推导表达式静态类型。泛型 V 仅作用于作用域附加信息，类型推导只用类型部分。
 pub fn type_of<V>(
     expr: &Expr,
@@ -237,6 +300,18 @@ pub fn type_of<V>(
         Expr::CharLit(_) => Ok(Type::Char),
         Expr::ByteLit(_) => Ok(Type::Byte),
         Expr::StringLit(_) => Ok(Type::String),
+        // v1.21：`await task_expr` 的结果类型恒为 int（任务结果槽是 8 字节整数）。
+        // 操作数必须是 task 句柄；复杂结果请走 channel<T>。
+        Expr::Await(inner) => {
+            let t = type_of(inner, scopes, funcs, structs)?;
+            if t != Type::Task {
+                return Err(DialcError::new(
+                    format!("语义错误：await 的操作数必须是 task 句柄，实际为 {}", t.display()),
+                    0, 0,
+                ));
+            }
+            Ok(Type::Int)
+        }
         Expr::Slice(arr, from, to) => {
             let at = type_of(arr, scopes, funcs, structs)?;
             let ft = type_of(from, scopes, funcs, structs)?;
@@ -1591,6 +1666,75 @@ pub fn type_of<V>(
                     }
                     return Ok(Type::Thread);
                 }
+
+                // ==================================================================
+                //  协作式协程 / 有界线程池 / async（v1.21）
+                // ==================================================================
+                // threadpool(n: int) -> threadpool
+                "threadpool" => {
+                    if args.len() != 1 || type_of(&args[0], scopes, funcs, structs)? != Type::Int {
+                        return Err(DialcError::new(
+                            "语义错误：threadpool 需要 1 个 int 参数（worker 线程数）", 0, 0));
+                    }
+                    return Ok(Type::ThreadPool);
+                }
+                // pool_submit(pool, fn, args...) -> task；入口须返回 int（写 result 槽）。
+                "pool_submit" | "spawn_async" => {
+                    // pool_submit 首参是 pool，入口函数从第 2 个开始；spawn_async 从第 1 个开始。
+                    let entry_args = if name == "pool_submit" {
+                        if args.is_empty() || type_of(&args[0], scopes, funcs, structs)? != Type::ThreadPool {
+                            return Err(DialcError::new(
+                                "语义错误：pool_submit 的第一个参数必须是 threadpool 句柄", 0, 0));
+                        }
+                        &args[1..]
+                    } else {
+                        args
+                    };
+                    check_task_entry(name, entry_args, true, scopes, funcs, structs)?;
+                    return Ok(Type::Task);
+                }
+                // coroutine(fn, args...) -> coroutine；入口须返回 void。
+                "coroutine" => {
+                    check_task_entry(name, args, false, scopes, funcs, structs)?;
+                    return Ok(Type::Coroutine);
+                }
+                // co_resume(co) -> bool；co_status(co) -> int；co_free(co)
+                "co_resume" | "co_status" | "co_free" | "task_done" | "task_wait" | "task_result" | "task_free" => {
+                    if args.len() != 1 {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 1 个参数", name), 0, 0));
+                    }
+                    let want = match name.as_str() {
+                        "co_resume" | "co_status" | "co_free" => Type::Coroutine,
+                        _ => Type::Task,
+                    };
+                    let got = type_of(&args[0], scopes, funcs, structs)?;
+                    if got != want {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 的参数必须是 {}，实际为 {}", name, want.name(), got.name()), 0, 0));
+                    }
+                    return Ok(match name.as_str() {
+                        "co_resume" | "task_done" => Type::Bool,
+                        "co_status" | "task_result" => Type::Int,
+                        _ => Type::Void,
+                    });
+                }
+                // co_yield() / run_all() / pool_join(pool) / pool_close(pool) -> void
+                "co_yield" | "run_all" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 不接受参数", name), 0, 0));
+                    }
+                    return Ok(Type::Void);
+                }
+                "pool_join" | "pool_close" => {
+                    if args.len() != 1 || type_of(&args[0], scopes, funcs, structs)? != Type::ThreadPool {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 1 个 threadpool 参数", name), 0, 0));
+                    }
+                    return Ok(Type::Void);
+                }
+
                 "join" | "detach" => {
                     if args.len() != 1 {
                         return Err(DialcError::new(
@@ -2318,6 +2462,13 @@ pub fn type_of<V>(
                             0, 0,
                         ))
                     }
+                    // v1.21 并发句柄：同样是不透明指针，打印无可读语义。
+                    Type::ThreadPool | Type::Coroutine | Type::Task => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print threadpool / coroutine / task 句柄",
+                            0, 0,
+                        ))
+                    }
                     Type::Channel(_) => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print channel；请 recv 出元素后再打印",
@@ -2425,6 +2576,12 @@ pub fn type_of<V>(
                     Type::Thread => {
                         return Err(DialcError::new(
                             "语义错误：当前版本不支持直接 print_raw thread 句柄",
+                            0, 0,
+                        ))
+                    }
+                    Type::ThreadPool | Type::Coroutine | Type::Task => {
+                        return Err(DialcError::new(
+                            "语义错误：当前版本不支持直接 print_raw threadpool / coroutine / task 句柄",
                             0, 0,
                         ))
                     }
@@ -3658,6 +3815,10 @@ fn is_c_abi_field(t: &Type, cstruct_names: &[String]) -> bool {
 
 const RESERVED_NAMES: &[&str] = &[
     "spawn", "join", "detach", "channel", "recv", "move_to", "thread",
+    // v1.21 协作式并发：线程池 / 协程 / async 内建
+    "threadpool", "pool_submit", "pool_join", "pool_close",
+    "coroutine", "co_resume", "co_yield", "co_status", "co_free",
+    "spawn_async", "run_all", "task_done", "task_wait", "task_result", "task_free",
     // v0.81 通道收尾：close 早已是 file 的内建（本就在按名字匹配，只是此前未列入此表），
     // 一并补齐；closed / len / done / try_recv 为本次新增。
     "close", "closed", "len", "done", "try_recv",
@@ -3861,6 +4022,7 @@ pub fn analyze(
                 // Dial 自身函数的 `...xs: T` 已脱糖成 T[]；只有包 extern 才可能是 C 变参。
                 variadic: false,
                 exported: f.exported,
+                is_async: f.is_async,
             },
         );
     }
@@ -4055,6 +4217,23 @@ fn check_function(
     structs: &StructTable,
     goto_depths: &mut HashMap<String, usize>,
 ) -> Result<()> {
+    // v1.21 协作式并发：`await` 与 `co_yield` 只能在 async 函数体内出现。
+    // Expr 派生了 Debug，其格式化串中变体名必然出现，故用它做可靠检测（零维护成本）。
+    if !f.is_async {
+        let dbg = format!("{:?}", &f.body);
+        if dbg.contains("Await(") {
+            return Err(DialcError::new(
+                format!("语义错误：函数 '{}' 含 await，但只有 `async fn` 才能使用 await", f.name),
+                f.line, f.col,
+            ));
+        }
+        if dbg.contains("\"co_yield\"") {
+            return Err(DialcError::new(
+                format!("语义错误：函数 '{}' 调用 co_yield，但只有 `async fn`（协程入口）才能让出", f.name),
+                f.line, f.col,
+            ));
+        }
+    }
     // 形参类型良构性
     for (pname, pty) in &f.params {
         check_type_wellformed(

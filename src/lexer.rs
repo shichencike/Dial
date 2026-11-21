@@ -40,6 +40,10 @@ pub enum TokenKind {
     /// v1.21：`own var x: T = e;` 独占所有权声明（强制移动语义 + 确定 drop + use-after-move 检测）。
     Own,
     Fn,
+    /// v1.21 协作式并发：`async fn name(...) -> T` 声明一个可作为任务/协程入口的函数。
+    Async,
+    /// v1.21 协作式并发：`await task_expr` 等待一个 task 完成并取其 int 结果。
+    Await,
     Struct,
     If,
     Else,
@@ -558,6 +562,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 // 不引入借用检查器（无 &T / 生命周期）。
                 "own" => TokenKind::Own,
                 "fn" => TokenKind::Fn,
+                "async" => TokenKind::Async,
+                "await" => TokenKind::Await,
                 "if" => TokenKind::If,
                 "else" => TokenKind::Else,
                 "while" => TokenKind::While,

@@ -112,6 +112,13 @@ pub enum Type {
     File,   // 文件句柄（不透明指针，封装 C 的 FILE*；显式 open/close，不受 ARC 管理）
     Error,  // 可恢复异常（不透明指针，ARC 管理；由 throw 抛出、catch 捕获，见 §26）
     Thread, // 线程句柄（不透明指针；显式 join / detach，不受 ARC 管理，见 §27）
+    /// 线程池句柄（v1.21）：不透明指针，固定 worker 数；显式 join/close，不受 ARC 管理。
+    ThreadPool,
+    /// 有栈协程句柄（v1.21）：不透明指针；显式 resume/status/free，不受 ARC 管理。
+    Coroutine,
+    /// 任务句柄（v1.21）：不透明指针，携带一个 8 字节 int 结果槽；
+    /// 由 pool_submit / spawn_async 返回，await 等待完成并取结果。不受 ARC 管理。
+    Task,
     /// 通道（不透明指针；元素类型仅编译期可见，运行时已擦除）。
     /// 跨线程共享 -> 走**原子**引用计数 ARC；send/recv 是所有权移交，不做 retain/release。
     Channel(Box<Type>),
@@ -145,6 +152,9 @@ impl Type {
             Type::File => "file",
             Type::Error => "error",
             Type::Thread => "thread",
+            Type::ThreadPool => "threadpool",
+            Type::Coroutine => "coroutine",
+            Type::Task => "task",
             Type::Channel(_) => "channel",
             Type::Struct(_) => "struct",
             Type::Opaque(_) => "opaque",
@@ -301,6 +311,9 @@ pub enum Expr {
     /// `Type::FnPtr`），但 `spawn` 需要按目标函数静态生成 pthread thunk，
     /// 因此它的首参仍必须写成顶层具名函数字面量；函数指针变量请用回调传参。
     FuncRef(String),
+    /// v1.21：`await task_expr` —— 等待任务完成并取其 8 字节 int 结果。
+    /// 只能在 async 函数体内出现；结果类型是 int（复杂结果请走 channel<T>，符合 CSP 宪法）。
+    Await(Box<Expr>),
 }
 
 /// 语句。
@@ -595,6 +608,10 @@ pub struct Func {
     /// 与 C 调用约定对外暴露，可被 C 侧直接调用（详见 README §33.x）。
     /// 语义层强制其签名仅含 C 兼容类型（标量 / rawptr / fnptr），否则编译期拒绝。
     pub exported: bool,
+    /// v1.21 协作式并发：`async fn` 标记。async 函数体可含 `await`，且只能作为
+    /// 任务/协程入口（经 spawn_async / pool_submit / coroutine）在协程栈上运行。
+    /// 直接以普通函数方式调用 async fn 由语义层拒绝。
+    pub is_async: bool,
 }
 
 /// 结构体定义。

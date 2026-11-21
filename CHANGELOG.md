@@ -22,6 +22,30 @@
 
 ## [未发布]
 
+### Added（协作式线程池 / 协程 / async-await）
+
+- **线程池 / 有栈协程 / async-await**：补齐 §41 长期标注的「无线程池 / 无异步」缺口，
+  实现「够用即可」的协作式并发。**严格延续三条宪法铁律**：无闭包（入口一律具名函数 +
+  显式 argcell）、无用户可见可变全局状态（句柄显式 new→use→join/close/free）、无用户可见
+  原子类型（内部同步用 pthread mutex+cond，C 私有）。
+  - C 运行时 `stdlib/dial_async.{h,c}`：POSIX `<ucontext.h>` / Windows Fiber 有栈协程
+    （yield 可在任意调用深度发生，局部变量与 ARC 引用随栈帧保留）+ 有界线程池（固定 worker +
+    任务队列）+ 单线程协作式 async executor（round-robin resume，await 即让出）。
+  - 类型：`threadpool` / `coroutine` / `task`（不透明句柄，显式管理，不受 ARC）。
+  - 线程池内建：`threadpool(n)` / `pool_submit(pool, fn, args...) → task` /
+    `task_wait` / `task_result` / `task_free` / `pool_join` / `pool_close`。
+  - 协程内建：`coroutine(fn, args...)` / `co_resume → bool` / `co_yield` /
+    `co_status` / `co_free`。
+  - async 语法：`async fn` 声明 + `await task` 表达式（结果恒为 int，复杂结果走 channel<T>，
+    符合 CSP 宪法）。`spawn_async` / `run_all` 驱动协作调度。
+  - 双后端同源：asm 与 LLVM 均复用 `spawn` 的 argcell + 静态 `__dial_task_thunk_<fn>`
+    机制（slot[0]=result，slot[1..]=形参），零 ABI 分叉。顺带修复 `spawn` 无参入口
+    thunk 的 rdi 丢失隐患（params 恒为单个 `void* cell`）。
+  - Fail-Fast：await 只能在 async fn 内、co_yield 只能在 async fn 内、任务入口返回类型
+    静态校验（pool/spawn 入口须 int、coroutine 入口须 void）、无 struct 形参。
+  回归见 `tests/run_tests.sh` R19 段（双后端一致 + 4 项负向）；C 运行时独立 smoke 见
+  `tools/` 开发期验证。
+
 ### Added
 - **显式独占所有权 `own var`**（开发中）：新增 `own` 关键字，`own var x: T = e;`
   把编译期自动推断的 Move 策略升级为程序员显式声明的独占转移——强制接管即转移

@@ -2186,7 +2186,7 @@ print("");        // -> Hi
 | 数组/结构体字面量作为常量表达式 | 文件级 `const` 的数组字面量按 §37.1 的宪法裁决纳入只读常量；具体落地状态见 §37.4 批次表 |
 | `select` 语句级超时 | **已支持**（v1.10）：`select(ms) { ... timeout { ... } }` 可选块级超时，等待超过 ms 且无通道就绪时执行 timeout 分支（timeout 体可省略——省略则超时直接结束）。底层用 `pthread_cond_timedwait` + 绝对 deadline（epoch 多次变化不累计超时），事件驱动非轮询；与 `default` 并存时 default 优先（非阻塞，不触发超时）。单通道场景仍可用 `recv_timeout(ch, ms)` |
 | 通道关闭的「反向」操作（重新打开） | **永不提供**——关闭不可逆，这是 `done` 单调性的前提 |
-| 线程池、协程、异步 | 未实现 |
+| 线程池、协程、异步 | **已支持**（v1.21，见 [§27.11](#2711-协作式线程池--协程--asyncawait)）：有界线程池 + 有栈协程 + `async fn`/`await` 协作式调度；无闭包（具名函数 + 显式 argcell），复杂结果走 channel |
 | 原子类型、无锁数据结构 | **永不提供**（2026-11-19 宪法永久否决，见 §37.2）：与「可变全局状态永不提供」+ CSP channel/`move_to` 零竞争并发宪法冲突，无锁正确性违反 §19/§20 内存底线；底层同步需求走 §33 FFI 接 C11 atomics / pthread。不再是「未实现」，而是宪法层拒绝 |
 | `move_to` 到**已启动的**线程 | 编译期不支持——移交只能在 `spawn` 时完成（见 [§27.3](#273-零竞争移交与-o1-论证)） |
 | 通道元素为标量（`int` / `float` / `bool`） | 编译期拒绝（需装箱，见 [§27.2](#272-channelt-与所有权移交)） |
@@ -4162,8 +4162,85 @@ while (true) {
 | `select` 不支持表达式 | 它是**语句**：各 case 的绑定变量类型可以互不相同，没有统一返回类型 |
 | 无 `Option` 类型 | 「有没有取到」用 `is_null(x)` 判断；没有 `Some` / `None` 这类包装 |
 | 多消费者 | **已支持**（v0.9）。前提是消费者用 `recv` + `is_null` 判结束；用 `try_recv` 判结束会漏收。`select` 的 case 则永远拿不到空值 |
-| 无线程池 / 无异步 | 一个 `spawn` 就是一个真线程 |
+| 线程池 / 协程 / 异步 | **已支持**（v1.21，见 [§27.11](#2711-协作式线程池--协程--asyncawait)）：有界线程池 `threadpool(n)` / `pool_submit` 复用 worker 线程；有栈协程 `coroutine` + `co_resume`/`co_yield`；`async fn` + `await` 协作式调度。均不引入闭包，入口是具名函数 + 显式 argcell 状态 |
 | `join` 后句柄失效 | 二次 `join` / `detach` 触发 Fail-Fast 断言 |
+
+### 27.11 协作式线程池 / 协程 / async-await（v1.21）
+
+`spawn` 是「一个任务一个真线程」。v1.21 补齐**复用线程**与**协作式调度**两种能力，
+三者共用同一套并发宪法：**没有闭包**——入口永远是「顶层具名函数 + 显式 argcell 状态」，
+与 `spawn` 一字不差；状态绝不由编译器隐式捕获。
+
+**新增三种不透明句柄**（与 `thread` 同级，显式管理、**不受 ARC 管理**）：
+
+| 类型 | 取得方式 | 显式终结 |
+| --- | --- | --- |
+| `threadpool` | `threadpool(n)`（n 个固定 worker） | `pool_join(p)` 等全部任务 / `pool_close(p)` join+回收 |
+| `coroutine` | `coroutine(fn, args...)`（有栈协程，创建但不启动） | `co_free(c)`（须已结束） |
+| `task` | `pool_submit(p, fn, args...)` / `spawn_async(fn, args...)` | `task_wait(t)` / `task_free(t)` |
+
+**线程池**（任务跑在 worker 线程上，复用固定数量线程而非每任务一线程）：
+
+```dial
+fn square(x: int): int { return x * x; }
+fn main(): int {
+    let p: threadpool = threadpool(4);
+    let a: task = pool_submit(p, square, 3);   // 提交具名函数 + 显式实参
+    let b: task = pool_submit(p, square, 9);
+    task_wait(a);                              // 阻塞等待（句柄生命周期显式）
+    task_wait(b);
+    print(task_result(a), ",", task_result(b)); // 9,81
+    task_free(a);
+    task_free(b);
+    pool_close(p);
+    return 0;
+}
+```
+
+**协程**（有栈：POSIX `<ucontext.h>` / Windows Fiber）：`co_resume(c)` 运行到下一个
+`co_yield()` 或结束，返回是否已结束；`co_status(c)` 返回 0=ready / 2=suspended / 3=done。
+yield 可在任意调用深度发生，局部变量与 ARC 引用随栈帧自然保留（无需 CPS/状态机）。
+
+**async / await**（协作式单线程 executor）：
+
+```dial
+async fn producer(base: int): int {
+    print(base);
+    co_yield();            // 让出，调度器去跑别的任务
+    return base + 100;
+}
+async fn consumer(): int {
+    let t: task = spawn_async(producer, 5);  // 登记为协程任务
+    let r: int = await t;                     // 未完成则让出，完成后取 int 结果
+    print(r);
+    task_free(t);
+    return r;
+}
+fn main(): int {
+    let top: task = spawn_async(consumer);
+    run_all();             // round-robin 驱动所有 async 任务直到全部完成
+    print(task_result(top));
+    task_free(top);
+    return 0;
+}
+```
+
+**argcell 布局**：`slot[0] = result`（8 字节 int，入口返回 int 时写入，void 入口写 0），
+`slot[1 + i] = 第 i 个形参`。编译器为每个任务入口生成静态 `__dial_task_thunk_<fn>`，
+从槽取值、调用函数、写回结果——**asm 与 LLVM 两后端同源，零 ABI 分叉**。
+
+**静态约束（Fail-Fast）**：
+
+- `await` / `co_yield` 只能出现在 `async fn` 内，否则编译期拒绝；
+- `pool_submit` / `spawn_async` 的入口函数必须返回 `int`（结果写入 slot[0]）；
+- `coroutine` 的入口函数必须返回 `void`；
+- 与 `spawn` 一致：入口不得含 `struct` 形参（8 字节槽装不下值语义聚合体）；
+- `await` 的操作数必须是 `task`，结果类型恒为 `int`——**复杂结果请走 `channel<T>`**，
+  与全语言的 CSP 零竞争移交哲学一致。
+
+**宪法一致性**：无闭包（具名函数 + 显式状态）、无用户可见可变全局状态（句柄显式管理）、
+无用户可见原子类型（内部同步只用 C 私有的 pthread mutex + cond，不暴露 atomic/CAS）。
+回归见 §40 测试组的 R19 段（双后端逐字一致 + 负向 Fail-Fast）。
 
 ---
 

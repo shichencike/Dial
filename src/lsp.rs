@@ -949,6 +949,8 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::Let
         | TokenKind::Own
         | TokenKind::Fn
+        | TokenKind::Async
+        | TokenKind::Await
         | TokenKind::Struct
         | TokenKind::If
         | TokenKind::Else

@@ -276,6 +276,7 @@
 </ul>
 </li>
 <li><a href="#2710-当前边界">27.10 当前边界</a></li>
+<li><a href="#2711-协作式线程池--协程--async-awaitv121">27.11 协作式线程池 / 协程 / async-await（v1.21）</a></li>
 </ul>
 </li>
 <li><a href="#28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化">28. 语言服务器 dialc lsp（v0.94 骨架 → v0.95 增强 → v0.98 工业化）</a><ul>
@@ -3735,7 +3736,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>线程池、协程、异步</td>
-<td>未实现</td>
+<td><strong>已支持</strong>（v1.21，见 <a href="#2711-协作式线程池--协程--asyncawait">§27.11</a>）：有界线程池 + 有栈协程 + <code>async fn</code>/<code>await</code> 协作式调度；无闭包（具名函数 + 显式 argcell），复杂结果走 channel</td>
 </tr>
 <tr>
 <td>原子类型、无锁数据结构</td>
@@ -6632,8 +6633,8 @@ while (true) {
 <td><strong>已支持</strong>（v0.9）。前提是消费者用 <code>recv</code> + <code>is_null</code> 判结束；用 <code>try_recv</code> 判结束会漏收。<code>select</code> 的 case 则永远拿不到空值</td>
 </tr>
 <tr>
-<td>无线程池 / 无异步</td>
-<td>一个 <code>spawn</code> 就是一个真线程</td>
+<td>线程池 / 协程 / 异步</td>
+<td><strong>已支持</strong>（v1.21，见 <a href="#2711-协作式线程池--协程--asyncawait">§27.11</a>）：有界线程池 <code>threadpool(n)</code> / <code>pool_submit</code> 复用 worker 线程；有栈协程 <code>coroutine</code> + <code>co_resume</code>/<code>co_yield</code>；<code>async fn</code> + <code>await</code> 协作式调度。均不引入闭包，入口是具名函数 + 显式 argcell 状态</td>
 </tr>
 <tr>
 <td><code>join</code> 后句柄失效</td>
@@ -6641,6 +6642,91 @@ while (true) {
 </tr>
 </tbody>
 </table>
+<h3 id="2711-协作式线程池--协程--async-awaitv121">27.11 协作式线程池 / 协程 / async-await（v1.21）</h3>
+<p><code>spawn</code> 是「一个任务一个真线程」。v1.21 补齐<strong>复用线程</strong>与<strong>协作式调度</strong>两种能力，
+三者共用同一套并发宪法：<strong>没有闭包</strong>——入口永远是「顶层具名函数 + 显式 argcell 状态」，
+与 <code>spawn</code> 一字不差；状态绝不由编译器隐式捕获。</p>
+<p><strong>新增三种不透明句柄</strong>（与 <code>thread</code> 同级，显式管理、<strong>不受 ARC 管理</strong>）：</p>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>取得方式</th>
+<th>显式终结</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>threadpool</code></td>
+<td><code>threadpool(n)</code>（n 个固定 worker）</td>
+<td><code>pool_join(p)</code> 等全部任务 / <code>pool_close(p)</code> join+回收</td>
+</tr>
+<tr>
+<td><code>coroutine</code></td>
+<td><code>coroutine(fn, args...)</code>（有栈协程，创建但不启动）</td>
+<td><code>co_free(c)</code>（须已结束）</td>
+</tr>
+<tr>
+<td><code>task</code></td>
+<td><code>pool_submit(p, fn, args...)</code> / <code>spawn_async(fn, args...)</code></td>
+<td><code>task_wait(t)</code> / <code>task_free(t)</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>线程池</strong>（任务跑在 worker 线程上，复用固定数量线程而非每任务一线程）：</p>
+<pre><code class="language-dial">fn square(x: int): int { return x * x; }
+fn main(): int {
+    let p: threadpool = threadpool(4);
+    let a: task = pool_submit(p, square, 3);   // 提交具名函数 + 显式实参
+    let b: task = pool_submit(p, square, 9);
+    task_wait(a);                              // 阻塞等待（句柄生命周期显式）
+    task_wait(b);
+    print(task_result(a), &quot;,&quot;, task_result(b)); // 9,81
+    task_free(a);
+    task_free(b);
+    pool_close(p);
+    return 0;
+}
+</code></pre>
+<p><strong>协程</strong>（有栈：POSIX <code>&lt;ucontext.h&gt;</code> / Windows Fiber）：<code>co_resume(c)</code> 运行到下一个
+<code>co_yield()</code> 或结束，返回是否已结束；<code>co_status(c)</code> 返回 0=ready / 2=suspended / 3=done。
+yield 可在任意调用深度发生，局部变量与 ARC 引用随栈帧自然保留（无需 CPS/状态机）。</p>
+<p><strong>async / await</strong>（协作式单线程 executor）：</p>
+<pre><code class="language-dial">async fn producer(base: int): int {
+    print(base);
+    co_yield();            // 让出，调度器去跑别的任务
+    return base + 100;
+}
+async fn consumer(): int {
+    let t: task = spawn_async(producer, 5);  // 登记为协程任务
+    let r: int = await t;                     // 未完成则让出，完成后取 int 结果
+    print(r);
+    task_free(t);
+    return r;
+}
+fn main(): int {
+    let top: task = spawn_async(consumer);
+    run_all();             // round-robin 驱动所有 async 任务直到全部完成
+    print(task_result(top));
+    task_free(top);
+    return 0;
+}
+</code></pre>
+<p><strong>argcell 布局</strong>：<code>slot[0] = result</code>（8 字节 int，入口返回 int 时写入，void 入口写 0），
+<code>slot[1 + i] = 第 i 个形参</code>。编译器为每个任务入口生成静态 <code>__dial_task_thunk_&lt;fn&gt;</code>，
+从槽取值、调用函数、写回结果——<strong>asm 与 LLVM 两后端同源，零 ABI 分叉</strong>。</p>
+<p><strong>静态约束（Fail-Fast）</strong>：</p>
+<ul>
+<li><code>await</code> / <code>co_yield</code> 只能出现在 <code>async fn</code> 内，否则编译期拒绝；</li>
+<li><code>pool_submit</code> / <code>spawn_async</code> 的入口函数必须返回 <code>int</code>（结果写入 slot[0]）；</li>
+<li><code>coroutine</code> 的入口函数必须返回 <code>void</code>；</li>
+<li>与 <code>spawn</code> 一致：入口不得含 <code>struct</code> 形参（8 字节槽装不下值语义聚合体）；</li>
+<li><code>await</code> 的操作数必须是 <code>task</code>，结果类型恒为 <code>int</code>——<strong>复杂结果请走 <code>channel&lt;T&gt;</code></strong>，
+  与全语言的 CSP 零竞争移交哲学一致。</li>
+</ul>
+<p><strong>宪法一致性</strong>：无闭包（具名函数 + 显式状态）、无用户可见可变全局状态（句柄显式管理）、
+无用户可见原子类型（内部同步只用 C 私有的 pthread mutex + cond，不暴露 atomic/CAS）。
+回归见 §40 测试组的 R19 段（双后端逐字一致 + 负向 Fail-Fast）。</p>
 <hr />
 <h2 id="28-语言服务器-dialc-lspv094-骨架--v095-增强--v098-工业化">28. 语言服务器 <code>dialc lsp</code>（v0.94 骨架 → v0.95 增强 → v0.98 工业化）</h2>
 <pre><code class="language-bash">dialc lsp

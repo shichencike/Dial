@@ -4105,3 +4105,50 @@ own 参数跳过 `+1 retain`（退出仍 `-1 release`），所有权从调用方
 覆盖未打开文件 / references 跨 2 文件 / rename documentChanges 跨 2 文件 / 局部符号 rename 限本文件 /
 stdout 协议纯净）全部通过；三个既有 LSP 冒烟脚本（`lsp_smoke.py` / `lsp_full_smoke.py` /
 `check_lsp_stdout_purity.py`）零回归；新脚本挂入 run_tests.sh M 组。
+
+---
+
+#### 协作式线程池 / 协程 / async-await（v1.21，补齐 §41「无线程池/无异步」缺口）
+
+**缘起**：用户点名修复四项「⏳ 尚未实现」能力，本项（线程池/协程/异步）明确要求「全做含
+async/await」且「逐项完成并逐项提交」。宪法冲突边界先厘清：§25 闭包永久否决、§37.2
+原子类型永久否决、「可变全局状态永不提供」三条铁律**不动**；只修订 §27.10/§41 的
+「无线程池/无异步」现状声明。
+
+**设计选择：有栈协程 + 统一 task thunk**。核心决策是让 `await` 成为**普通函数调用**
+而非 CPS 变换/状态机：`async fn` 编译成普通函数运行在有栈协程上，`await t` lowers 成
+`dial_async_await(t)`（未完成则 swapcontext 让出，由单线程 executor round-robin 推进其它
+任务）+ `dial_task_result(t)`（读 slot[0]）。有栈让 yield 可在任意调用深度发生，局部变量
+与 ARC 引用随栈帧自然保留——规避了在无泛型/无闭包语言里实现状态机提升的巨大复杂度。
+
+**宪法落点**：三条铁律全部保持——① 无闭包：入口一律「顶层具名函数 + 显式 argcell」，
+与 `spawn` 同源；② 无用户可见可变全局状态：`threadpool`/`coroutine`/`task` 全是不透明句柄，
+显式 new→use→join/close/free，executor 活跃表是 C 私有 TLS；③ 无用户可见原子类型：内部
+同步只用 pthread mutex + cond。`await` 结果恒为 int，复杂结果走 `channel<T>`，与 CSP
+零竞争移交哲学一致。
+
+**C 运行时 `stdlib/dial_async.{h,c}`**：POSIX `<ucontext.h>`（每线程共享一个 scheduler
+锚点 + makecontext uc_link 自动回切）/ Windows Fiber（TLS 主 fiber + SwitchToFiber）双实现；
+有界线程池 = 固定 worker + mutex/cond 任务队列 + pending 计数；async executor = round-robin
+resume 活跃协程链表。独立 C smoke 实测：协程 3 步 yield/resume（result=30）、8 任务线程池
+加和全对、async A 与 await 它的 B 协作（111→112）三条路径全通过。
+
+**关键 bug 与修复**：
+
+1. **无参入口 thunk 的 rdi 丢失（P0，SIGSEGV）**：`async fn consumer()` 无形参时，
+   `gen_spawn_thunk`/`gen_task_thunk` 用 `sig.params` 生成 `params` 为空，prologue 不保存
+   rdi（cell 指针参数），thunk 从 `80(%rsp)` 读到垃圾 → 写 result 时 SIGSEGV（gdb 定位在
+   `__dial_task_thunk_consumer` 的 `movq %rax,(%r10)`）。修复：`params` 恒为单个 `void* cell`
+   （thunk 的真实 C 签名），`param_slots=[cell_slot]`。**顺带修好 spawn 无参入口的同类隐患**。
+2. **LLVM 后端 bool 返回值宽度不匹配**：`co_resume`/`task_done` 语义是 bool(i1)，C 返回
+   int64；直接把 i64 写 i1 槽破坏相邻栈槽（t4 报「status 了空协程句柄」）。修复：llvm
+   simple 分支对这两个内建用 `icmp ne 0` 收口成 i1（对齐既有 `closed`/`done` 口径）。asm
+   后端 bool 内部统一 I64，无此问题。
+
+**双后端零 ABI 分叉**：asm 与 LLVM 各自生成 `__dial_task_thunk_<fn>`，布局统一为
+`slot[0]=result(int)` / `slot[1+i]=形参`，读参→调函数→写结果→释放移交堆句柄，均与
+`spawn` 同源。四组 Dial 用例（pool / async-await / 协程 / 混合）双后端 stdout 逐字一致。
+
+**验证**：`tests/run_tests.sh` R19 段新增 7 项（线程池 / async-await / 协程三正向双后端一致
++ await 非 task、co_yield 非 async 各双后端拒绝）；含 R19 全量回归 EXIT=0 全绿；默认
+asm-only 构建 ldd 确认零 libLLVM。负向另测 4 项（入口返回类型、await 操作数）全部编译期拒绝。

@@ -3025,6 +3025,117 @@ done
 
 
 # ===========================================================================
+# R19) 协作式并发：线程池 / 协程 / async-await（v1.21）
+#     复用 spawn 的「具名函数 + argcell + 静态 thunk」机制（无闭包）。
+#     线程池任务结果走 slot[0]（int）；协程用有栈 ucontext/Fiber 让 await
+#     成为普通调用（无 CPS/状态机）。双后端逐字一致 + Fail-Fast 负向。
+# ===========================================================================
+echo "  -- R19) 线程池 / 协程 / async-await 双后端一致性（v1.21） --"
+ADIR19="${RDIR}/async"; mkdir -p "$ADIR19"
+# 用源码回退强制编入新增的 dial_async.c（避免命中旧 stdlib.dialpkg 缺符号）。
+export DIALC_STDLIB_DIR="${REPO_ROOT:-$PWD}"
+
+# 19a) 线程池：pool_submit + task_wait + task_result（确定性顺序）。
+cat > "${ADIR19}/pool.dial" <<'DIALEOF'
+fn square(x: int): int { return x * x; }
+fn main(): int {
+    let p: threadpool = threadpool(4);
+    let a: task = pool_submit(p, square, 3);
+    let b: task = pool_submit(p, square, 9);
+    task_wait(a);
+    task_wait(b);
+    print(task_result(a), ",", task_result(b));
+    task_free(a);
+    task_free(b);
+    pool_close(p);
+    return 0;
+}
+DIALEOF
+${DIALC} build "${ADIR19}/pool.dial" --backend llvm -o "${ADIR19}/pool_llvm" >/dev/null 2>&1 || rbad "R19 LLVM 编译 pool 失败"
+${DIALC} build "${ADIR19}/pool.dial" --backend asm  -o "${ADIR19}/pool_asm"  >/dev/null 2>&1 || rbad "R19 asm 编译 pool 失败"
+_p_llvm="$( ${ADIR19}/pool_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_p_asm="$( ${ADIR19}/pool_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+[ -n "$_p_llvm" ] && [ "$_p_asm" = "$_p_llvm" ] && [ "$_p_asm" = "9,81 " ] \
+    && rpass "线程池 pool_submit/task_wait/task_result：双后端一致且结果正确" \
+    || rbad "R19 pool 不一致或结果错误（llvm=[$_p_llvm] asm=[$_p_asm]）"
+
+# 19b) async/await 协作调度：consumer await producer（yield 让出后恢复）。
+cat > "${ADIR19}/await.dial" <<'DIALEOF'
+async fn producer(base: int): int {
+    print(base);
+    co_yield();
+    return base + 100;
+}
+async fn consumer(): int {
+    let t: task = spawn_async(producer, 5);
+    let r: int = await t;
+    print(r);
+    task_free(t);
+    return r;
+}
+fn main(): int {
+    let top: task = spawn_async(consumer);
+    run_all();
+    print(task_result(top));
+    task_free(top);
+    return 0;
+}
+DIALEOF
+${DIALC} build "${ADIR19}/await.dial" --backend llvm -o "${ADIR19}/await_llvm" >/dev/null 2>&1 || rbad "R19 LLVM 编译 await 失败"
+${DIALC} build "${ADIR19}/await.dial" --backend asm  -o "${ADIR19}/await_asm"  >/dev/null 2>&1 || rbad "R19 asm 编译 await 失败"
+_w_llvm="$( ${ADIR19}/await_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_w_asm="$( ${ADIR19}/await_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+[ -n "$_w_llvm" ] && [ "$_w_asm" = "$_w_llvm" ] && [ "$_w_asm" = "5 105 105 " ] \
+    && rpass "async/await 协作调度（yield 让出 + await 恢复）：双后端一致" \
+    || rbad "R19 await 不一致或结果错误（llvm=[$_w_llvm] asm=[$_w_asm]）"
+
+# 19c) 协程原语：co_resume / co_status / co_free。
+cat > "${ADIR19}/co.dial" <<'DIALEOF'
+async fn stepper(n: int): void {
+    print(n);
+    co_yield();
+    print(n + 1);
+}
+fn main(): int {
+    let c: coroutine = coroutine(stepper, 10);
+    print(co_status(c));
+    co_resume(c);
+    print(co_status(c));
+    co_resume(c);
+    print(co_status(c));
+    co_free(c);
+    return 0;
+}
+DIALEOF
+${DIALC} build "${ADIR19}/co.dial" --backend llvm -o "${ADIR19}/co_llvm" >/dev/null 2>&1 || rbad "R19 LLVM 编译 co 失败"
+${DIALC} build "${ADIR19}/co.dial" --backend asm  -o "${ADIR19}/co_asm"  >/dev/null 2>&1 || rbad "R19 asm 编译 co 失败"
+_c_llvm="$( ${ADIR19}/co_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_c_asm="$( ${ADIR19}/co_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+[ -n "$_c_llvm" ] && [ "$_c_asm" = "$_c_llvm" ] && [ "$_c_asm" = "0 10 2 11 3 " ] \
+    && rpass "协程 co_resume/co_status/co_free：双后端一致" \
+    || rbad "R19 co 不一致或结果错误（llvm=[$_c_llvm] asm=[$_c_asm]）"
+
+# 19d) Fail-Fast 负向：await 操作数非 task / co_yield 在普通函数（两后端均须拒绝）。
+cat > "${ADIR19}/bad_await.dial" <<'DIALEOF'
+async fn w(): int { let x: int = await 5; return x; }
+fn main(): int { return 0; }
+DIALEOF
+cat > "${ADIR19}/bad_yield.dial" <<'DIALEOF'
+fn w(): void { co_yield(); }
+fn main(): int { return 0; }
+DIALEOF
+for _be in llvm asm; do
+    for _case in bad_await bad_yield; do
+        if ${DIALC} build "${ADIR19}/${_case}.dial" --backend $_be -o "${ADIR19}/${_case}_${_be}" >/dev/null 2>&1; then
+            rbad "R19 负向 ${_case} 在 $_be 后端竟编译通过"
+        else
+            rpass "R19 负向 ${_case}（$_be）：编译期拒绝"
+        fi
+    done
+done
+unset DIALC_STDLIB_DIR
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

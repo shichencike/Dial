@@ -72,7 +72,10 @@
 <li><a href="#v120-发布tag-ci-签名阶段卡死-18-分钟定位与修复cipher-w">v1.20 发布：tag CI 签名阶段卡死 &gt;18 分钟定位与修复（cipher /w）</a></li>
 <li><a href="#own-独占所有权显式转移但不引入借用检查器">own 独占所有权：显式转移但不引入借用检查器</a></li>
 <li><a href="#方案-c-完整-consume-体系程序员视角对抗测试驱动的-p0-修复">方案 C 完整 consume 体系：程序员视角对抗测试驱动的 P0 修复</a></li>
-<li><a href="#跨工作区全量模块图补齐-lsp-长期缺口">跨工作区全量模块图：补齐 LSP 长期缺口</a></li>
+<li><a href="#跨工作区全量模块图补齐-lsp-长期缺口">跨工作区全量模块图：补齐 LSP 长期缺口</a><ul>
+<li><a href="#协作式线程池--协程--async-awaitv121补齐-41无线程池无异步缺口">协作式线程池 / 协程 / async-await（v1.21，补齐 §41「无线程池/无异步」缺口）</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -4150,7 +4153,46 @@ own 参数跳过 <code>+1 retain</code>（退出仍 <code>-1 release</code>）�
 <p><strong>验证</strong>：<code>tools/lsp_workspace_smoke.py</code>（黑盒 JSON-RPC：initialize 带 rootUri / workspace/symbol
 覆盖未打开文件 / references 跨 2 文件 / rename documentChanges 跨 2 文件 / 局部符号 rename 限本文件 /
 stdout 协议纯净）全部通过；三个既有 LSP 冒烟脚本（<code>lsp_smoke.py</code> / <code>lsp_full_smoke.py</code> /
-<code>check_lsp_stdout_purity.py</code>）零回归；新脚本挂入 run_tests.sh M 组。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+<code>check_lsp_stdout_purity.py</code>）零回归；新脚本挂入 run_tests.sh M 组。</p>
+<hr />
+<h4 id="协作式线程池--协程--async-awaitv121补齐-41无线程池无异步缺口">协作式线程池 / 协程 / async-await（v1.21，补齐 §41「无线程池/无异步」缺口）</h4>
+<p><strong>缘起</strong>：用户点名修复四项「⏳ 尚未实现」能力，本项（线程池/协程/异步）明确要求「全做含
+async/await」且「逐项完成并逐项提交」。宪法冲突边界先厘清：§25 闭包永久否决、§37.2
+原子类型永久否决、「可变全局状态永不提供」三条铁律<strong>不动</strong>；只修订 §27.10/§41 的
+「无线程池/无异步」现状声明。</p>
+<p><strong>设计选择：有栈协程 + 统一 task thunk</strong>。核心决策是让 <code>await</code> 成为<strong>普通函数调用</strong>
+而非 CPS 变换/状态机：<code>async fn</code> 编译成普通函数运行在有栈协程上，<code>await t</code> lowers 成
+<code>dial_async_await(t)</code>（未完成则 swapcontext 让出，由单线程 executor round-robin 推进其它
+任务）+ <code>dial_task_result(t)</code>（读 slot[0]）。有栈让 yield 可在任意调用深度发生，局部变量
+与 ARC 引用随栈帧自然保留——规避了在无泛型/无闭包语言里实现状态机提升的巨大复杂度。</p>
+<p><strong>宪法落点</strong>：三条铁律全部保持——① 无闭包：入口一律「顶层具名函数 + 显式 argcell」，
+与 <code>spawn</code> 同源；② 无用户可见可变全局状态：<code>threadpool</code>/<code>coroutine</code>/<code>task</code> 全是不透明句柄，
+显式 new→use→join/close/free，executor 活跃表是 C 私有 TLS；③ 无用户可见原子类型：内部
+同步只用 pthread mutex + cond。<code>await</code> 结果恒为 int，复杂结果走 <code>channel&lt;T&gt;</code>，与 CSP
+零竞争移交哲学一致。</p>
+<p><strong>C 运行时 <code>stdlib/dial_async.{h,c}</code></strong>：POSIX <code>&lt;ucontext.h&gt;</code>（每线程共享一个 scheduler
+锚点 + makecontext uc_link 自动回切）/ Windows Fiber（TLS 主 fiber + SwitchToFiber）双实现；
+有界线程池 = 固定 worker + mutex/cond 任务队列 + pending 计数；async executor = round-robin
+resume 活跃协程链表。独立 C smoke 实测：协程 3 步 yield/resume（result=30）、8 任务线程池
+加和全对、async A 与 await 它的 B 协作（111→112）三条路径全通过。</p>
+<p><strong>关键 bug 与修复</strong>：</p>
+<ol>
+<li><strong>无参入口 thunk 的 rdi 丢失（P0，SIGSEGV）</strong>：<code>async fn consumer()</code> 无形参时，
+   <code>gen_spawn_thunk</code>/<code>gen_task_thunk</code> 用 <code>sig.params</code> 生成 <code>params</code> 为空，prologue 不保存
+   rdi（cell 指针参数），thunk 从 <code>80(%rsp)</code> 读到垃圾 → 写 result 时 SIGSEGV（gdb 定位在
+   <code>__dial_task_thunk_consumer</code> 的 <code>movq %rax,(%r10)</code>）。修复：<code>params</code> 恒为单个 <code>void* cell</code>
+   （thunk 的真实 C 签名），<code>param_slots=[cell_slot]</code>。<strong>顺带修好 spawn 无参入口的同类隐患</strong>。</li>
+<li><strong>LLVM 后端 bool 返回值宽度不匹配</strong>：<code>co_resume</code>/<code>task_done</code> 语义是 bool(i1)，C 返回
+   int64；直接把 i64 写 i1 槽破坏相邻栈槽（t4 报「status 了空协程句柄」）。修复：llvm
+   simple 分支对这两个内建用 <code>icmp ne 0</code> 收口成 i1（对齐既有 <code>closed</code>/<code>done</code> 口径）。asm
+   后端 bool 内部统一 I64，无此问题。</li>
+</ol>
+<p><strong>双后端零 ABI 分叉</strong>：asm 与 LLVM 各自生成 <code>__dial_task_thunk_&lt;fn&gt;</code>，布局统一为
+<code>slot[0]=result(int)</code> / <code>slot[1+i]=形参</code>，读参→调函数→写结果→释放移交堆句柄，均与
+<code>spawn</code> 同源。四组 Dial 用例（pool / async-await / 协程 / 混合）双后端 stdout 逐字一致。</p>
+<p><strong>验证</strong>：<code>tests/run_tests.sh</code> R19 段新增 7 项（线程池 / async-await / 协程三正向双后端一致
++ await 非 task、co_yield 非 async 各双后端拒绝）；含 R19 全量回归 EXIT=0 全绿；默认
+asm-only 构建 ldd 确认零 libLLVM。负向另测 4 项（入口返回类型、await 操作数）全部编译期拒绝。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

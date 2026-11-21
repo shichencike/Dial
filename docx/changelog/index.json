@@ -8,7 +8,7 @@
       "label": "[未发布]",
       "date": "",
       "note": "",
-      "topic": "把编译期自动推断的 Move 策略升级为程序员显式声明的独占转移——强制接管即转移 （use-after-move 编译期报错）、离开作用域…",
+      "topic": "实现「够用即可」的协作式并发。",
       "file": "未发布.html",
       "newer": null,
       "older": "v1.20"

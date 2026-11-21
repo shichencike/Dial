@@ -545,7 +545,7 @@ pub fn reg_ir(t: &Type) -> IrType {
         Type::Bool => IrType::I64,
         Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::KvMap(..)
         | Type::Set(_) | Type::Error | Type::Channel(_) | Type::File | Type::Thread
-        | Type::Opaque(_) => IrType::Handle,
+        | Type::ThreadPool | Type::Coroutine | Type::Task | Type::Opaque(_) => IrType::Handle,
         Type::Struct(n) => IrType::Struct(n.clone()),
         Type::RawPtr(_) | Type::VolatilePtr(_) => IrType::Ptr,
         Type::FnPtr(..) => IrType::FnPtr,

@@ -92,6 +92,8 @@ pub fn lower_program(
         .collect();
     let mut spawn_targets: HashSet<String> = HashSet::new();
     let mut hof_thunks: Vec<(Type, Type, usize)> = Vec::new();
+    // v1.21：pool_submit / spawn_async / coroutine 引用的任务入口函数名集合。
+    let mut task_targets: HashSet<String> = HashSet::new();
     for func in &prog.functions {
         // M7-e3w：调试标记只在 -g 时插入。非 -g 的 IR 必须与 e3v 逐字节一致，
         // 否则 Line/DebugVar 会打断 e3p 折叠 / popcount 融合等 pass 的模式窗口。
@@ -99,6 +101,8 @@ pub fn lower_program(
         l.lower_function(func)?;
         // M7-e3am：收集本函数内 spawn 引用的线程入口目标（去重在生成阶段）。
         spawn_targets.extend(l.spawn_targets.drain());
+        // v1.21：收集本函数内任务入口目标（去重在生成阶段）。
+        task_targets.extend(l.task_targets.drain());
         // M7-e3an：收集本函数内高阶方法需要的回调 thunk 描述。
         hof_thunks.append(&mut l.hof_thunks);
     }
@@ -109,6 +113,12 @@ pub fn lower_program(
     targets.sort();
     for fname in &targets {
         gen_spawn_thunk(&mut ip, fname)?;
+    }
+    // v1.21：为所有任务/协程入口生成 __dial_task_thunk_<fn>（slot[0]=result）。
+    let mut ttargets: Vec<String> = task_targets.into_iter().collect();
+    ttargets.sort();
+    for fname in &ttargets {
+        gen_task_thunk(&mut ip, fname)?;
     }
     // M7-e3an：为所有高阶方法生成回调 thunk（对齐 LLVM gen_hof_thunk）。
     // Type 未实现 Hash，故先按 thunk 名字（elem码 + ret码 + arity，确定性）排序去重，
@@ -141,10 +151,11 @@ fn gen_spawn_thunk(ip: &mut IrProgram, fname: &str) -> Result<(), String> {
     let sig = ip.functions_sig.get(fname)
         .ok_or_else(|| format!("[asm 后端] spawn 目标函数 `{}` 无签名信息", fname))?
         .clone();
-    // 与 lower_function 一致：形参用 param_ir 声明（C ABI 宽度），prologue 按此填槽。
-    let params: Vec<(String, IrType)> = sig.params.iter().enumerate()
-        .map(|(i, t)| (format!("a{}", i), param_ir(t)))
-        .collect();
+    // thunk 的真实 C 签名只有一个 `void* cell`（所有入口统一 void(void*)），
+    // 因此 params 必须恒为 1 个 Ptr——与下方 param_slots=[cell_slot] 对应。
+    // 旧代码用 sig.params 生成，当入口无形参时 params 为空，prologue 不保存 rdi，
+    // thunk 从栈读到垃圾（spawn 无参入口 / 无参 async 任务的 SIGSEGV 根因）。
+    let params: Vec<(String, IrType)> = vec![("cell".to_string(), IrType::Ptr)];
     let mut f = IrFunction::new(thunk_name.clone(), params, IrType::Void, FuncLink::Private);
 
     // 手动构造 entry 块（IrFunction::new_block 返回 &mut IrBlock，这里直接 push）。
@@ -199,6 +210,90 @@ fn gen_spawn_thunk(ip: &mut IrProgram, fname: &str) -> Result<(), String> {
                 dst: slot, base: cell_v, off: Value::Imm(Imm::I64((i * 8) as i64)),
             });
             f.blocks[0].insts.push(IrInst::RcRelease { ptr: slot, kind: k });
+        }
+    }
+
+    f.blocks[0].term = Term::Return { val: None };
+    ip.functions.push(f);
+    Ok(())
+}
+
+/// v1.21：为 `pool_submit` / `spawn_async` / `coroutine` 生成统一任务入口 thunk：
+///   `void __dial_task_thunk_<fn>(ptr cell)`
+///
+/// 与 gen_spawn_thunk 同源，但 argcell 布局多一个 **slot[0] = result**：
+///   slot[0]        8 字节结果（入口返回 int 时写入；void 入口写 0）
+///   slot[1 + i]    第 i 个形参（8 字节槽）
+/// thunk 从 slot[1..] 读参、调用目标函数、把结果写回 slot[0]，并对移交进来的
+/// 堆句柄形参各做一次 RcRelease（与 spawn thunk 同款所有权会计）。
+fn gen_task_thunk(ip: &mut IrProgram, fname: &str) -> Result<(), String> {
+    let thunk_name = format!("__dial_task_thunk_{}", fname);
+    if ip.functions.iter().any(|f| f.name == thunk_name) {
+        return Ok(());
+    }
+    let sig = ip.functions_sig.get(fname)
+        .ok_or_else(|| format!("[asm 后端] 任务入口函数 `{}` 无签名信息", fname))?
+        .clone();
+    // thunk 的 C 签名恒为 void(void* cell)：params 必须只有 1 个 Ptr，
+    // 与 param_slots=[cell_slot] 对齐（无参入口也能正确接收 rdi）。
+    let params: Vec<(String, IrType)> = vec![("cell".to_string(), IrType::Ptr)];
+    let mut f = IrFunction::new(thunk_name.clone(), params, IrType::Void, FuncLink::Private);
+    f.blocks.push(IrBlock { id: 0, params: Vec::new(), insts: Vec::new(), term: Term::Unreachable });
+    f.entry = 0;
+    // cell 指针形参的栈槽（prologue 把第 0 个实参寄存器写进来）。
+    let cell_slot = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::Alloca { dst: cell_slot, bytes: 8 });
+    f.param_slots.push(cell_slot);
+    let cell_v = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::Load { dst: cell_v, ptr: cell_slot, ty: IrType::Ptr });
+
+    // slot[0] 结果槽地址（保存到最后写结果）。
+    let result_slot = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::PtrAdd {
+        dst: result_slot, base: cell_v, off: Value::Imm(Imm::I64(0)),
+    });
+
+    // 逐形参：从 slot[1 + i] 读实参（与写端布局一致）。
+    let mut arg_vals: Vec<Value> = Vec::new();
+    let mut arg_tys: Vec<IrType> = Vec::new();
+    let mut param_slots: Vec<(VReg, Type)> = Vec::new();
+    for (i, pty) in sig.params.iter().enumerate() {
+        let slot = f.new_reg(IrType::Ptr);
+        f.blocks[0].insts.push(IrInst::PtrAdd {
+            dst: slot, base: cell_v, off: Value::Imm(Imm::I64(((i + 1) * 8) as i64)),
+        });
+        let load_ty = match pty {
+            Type::Float => IrType::F64,
+            Type::Float32 => IrType::F32,
+            t if reg_ir(t) == IrType::Handle => IrType::Handle,
+            t if reg_ir(t) == IrType::Ptr => IrType::Ptr,
+            _ => IrType::I64,
+        };
+        let v = f.new_reg(load_ty.clone());
+        f.blocks[0].insts.push(IrInst::Load { dst: v, ptr: slot, ty: load_ty });
+        arg_vals.push(Value::Reg(v));
+        arg_tys.push(param_ir(pty));
+        param_slots.push((slot, pty.clone()));
+    }
+
+    // 调用目标函数。pool_submit / spawn_async 入口返回 int → 捕获返回值；
+    // coroutine 入口返回 void → dst None。
+    let has_result = sig.ret == Type::Int;
+    let call_dst = if has_result { Some(f.new_reg(reg_ir(&sig.ret))) } else { None };
+    f.blocks[0].insts.push(IrInst::Call {
+        dst: call_dst, func: fname.to_string(), args: arg_vals, arg_tys,
+        ret_ty: reg_ir(&sig.ret), linkage: CallLink::Dial,
+    });
+    // 结果写回 slot[0]（int 入口写真实值，void 入口写 0）。
+    let result_val = call_dst.map(Value::Reg).unwrap_or(Value::Imm(Imm::I64(0)));
+    f.blocks[0].insts.push(IrInst::Store {
+        ptr: result_slot, val: result_val, ty: IrType::I64,
+    });
+
+    // 释放写端移交的堆句柄形参（与 spawn thunk 同款所有权会计）。
+    for (slot, pty) in &param_slots {
+        if let Some(k) = rc_kind(pty) {
+            f.blocks[0].insts.push(IrInst::RcRelease { ptr: *slot, kind: k });
         }
     }
 
@@ -385,6 +480,9 @@ struct Lower<'a> {
     /// 当前函数体内生成（它是独立函数），故只记录名字，由 lower_program 在
     /// 遍历完所有函数后统一为每个目标生成 `__dial_thunk_<fn>` 追加到 ip.functions。
     spawn_targets: HashSet<String>,
+    /// v1.21：本编译单元内被 pool_submit / spawn_async / coroutine 引用的任务入口函数名。
+    /// 与 spawn_targets 同理，由 lower_program 统一生成 `__dial_task_thunk_<fn>`。
+    task_targets: HashSet<String>,
     /// M7-e3an：本编译单元内需要的高阶回调 thunk 描述 (elem, ret, arity)。
     /// 与 spawn_targets 同理（独立函数），由 lower_program 统一生成；Type 未实现
     /// Hash，故用 Vec 保存，生成时按 thunk 名字去重 + 排序保证 .s 确定性。
@@ -402,6 +500,7 @@ impl<'a> Lower<'a> {
             cur_pos: (0, 0),
             src_file: src_file.to_string(),
             spawn_targets: HashSet::new(),
+            task_targets: HashSet::new(),
             hof_thunks: Vec::new(),
             func: IrFunction::new(String::new(), Vec::new(), IrType::Void, FuncLink::Private),
             cur: 0,
@@ -1554,6 +1653,20 @@ impl<'a> Lower<'a> {
             Expr::BoolLit(v) => Ok((Value::Imm(Imm::I64(if *v { 1 } else { 0 })), false)),
             Expr::CharLit(v) => Ok((Value::Imm(Imm::I64(*v)), false)),
             Expr::ByteLit(v) => Ok((Value::Imm(Imm::I64(*v)), false)),
+            // v1.21：`await task` → dial_async_await(task) 让出等待，
+            // 完成后 dial_task_result(task) 读取 slot[0] 的 8 字节 int 结果。
+            Expr::Await(inner) => {
+                let (tv, _) = self.lower_expr(inner, &Type::Task)?;
+                let t = tv.as_reg();
+                self.emit(IrInst::Call { dst: None, func: "dial_async_await".to_string(),
+                    args: vec![Value::Reg(t)], arg_tys: vec![IrType::Handle],
+                    ret_ty: IrType::Void, linkage: CallLink::Runtime });
+                let r = self.new_reg(IrType::I64);
+                self.emit(IrInst::Call { dst: Some(r), func: "dial_task_result".to_string(),
+                    args: vec![Value::Reg(t)], arg_tys: vec![IrType::Handle],
+                    ret_ty: IrType::I64, linkage: CallLink::Runtime });
+                Ok((Value::Reg(r), false))
+            }
             Expr::StringLit(s) => {
                 let lit = self.ip.intern_string(s);
                 // 静态 immortal DialString：字面量编译期已知且字符串不可变，
@@ -2534,6 +2647,11 @@ impl<'a> Lower<'a> {
             // join/detach：C 调用 + 槽清零（join 另标 moved 防二次回收）。
             // 必须在此拦截——否则落到 lower_builtin 的 BKind::Unsupported。
             "spawn" | "join" | "detach" => return self.lower_thread_call(name, args),
+            // v1.21 协作式并发：线程池 / 协程 / async。
+            "threadpool" | "pool_submit" | "pool_join" | "pool_close"
+            | "coroutine" | "co_resume" | "co_yield" | "co_status" | "co_free"
+            | "spawn_async" | "run_all" | "task_done" | "task_wait" | "task_result" | "task_free"
+                => return self.lower_async_call(name, args),
             _ => {}
         }
         // functions_sig 只含用户函数与 extern 声明；按名字硬编码分派的内建
@@ -3129,6 +3247,133 @@ impl<'a> Lower<'a> {
             }
             _ => unreachable!("lower_channel_call 仅处理 channel 原语族"),
         }
+    }
+
+    /// v1.21 协作式并发内建：线程池 / 协程 / async。
+    /// 全部复用 spawn 的「具名函数 + argcell + 静态 thunk」机制（无闭包）。
+    /// argcell 布局：slot[0]=result（int），slot[1..]=形参，与 gen_task_thunk 对齐。
+    fn lower_async_call(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        // ---- 纯 C 薄封装：一参数、返回固定类型 ----
+        let simple: Option<(&str, IrType)> = match name {
+            "threadpool" => Some(("dial_pool_new", IrType::Handle)),
+            "pool_join" => Some(("dial_pool_join", IrType::Void)),
+            "pool_close" => Some(("dial_pool_close", IrType::Void)),
+            "co_resume" => Some(("dial_co_resume", IrType::I64)),
+            "co_status" => Some(("dial_co_status", IrType::I64)),
+            "co_yield" => Some(("dial_co_yield", IrType::Void)),
+            "co_free" => Some(("dial_co_free", IrType::Void)),
+            "run_all" => Some(("dial_run_all", IrType::Void)),
+            "task_done" => Some(("dial_task_done", IrType::I64)),
+            "task_wait" => Some(("dial_task_wait", IrType::Void)),
+            "task_result" => Some(("dial_task_result", IrType::I64)),
+            "task_free" => Some(("dial_task_free", IrType::Void)),
+            _ => None,
+        };
+        if let Some((sym, ret_ir)) = simple {
+            let mut cargs = Vec::new();
+            let mut ctys = Vec::new();
+            for a in args {
+                let at = self.expr_dt(a);
+                let (v, _) = self.lower_expr(a, &at)?;
+                cargs.push(v);
+                // threadpool(n) 的 n 是 I64；其余句柄参数是 Handle。
+                ctys.push(if name == "threadpool" { IrType::I64 } else { IrType::Handle });
+            }
+            let dst = if ret_ir == IrType::Void { None } else { Some(self.new_reg(ret_ir.clone())) };
+            self.emit(IrInst::Call { dst, func: sym.to_string(), args: cargs,
+                arg_tys: ctys, ret_ty: ret_ir.clone(), linkage: CallLink::Runtime });
+            return Ok((dst.map(Value::Reg).unwrap_or(Value::Imm(Imm::I64(0))), false));
+        }
+
+        // ---- 任务提交：pool_submit / spawn_async / coroutine ----
+        // pool_submit(pool, fn, args...)：首参 pool，入口从第 2 个起。
+        // spawn_async(fn, args...) / coroutine(fn, args...)：入口从第 1 个起。
+        let (pool_arg, entry_args) = if name == "pool_submit" {
+            let (pv, _) = self.lower_expr(&args[0], &Type::ThreadPool)?;
+            (Some(pv.as_reg()), &args[1..])
+        } else {
+            (None, args)
+        };
+        let fname = match &entry_args[0] {
+            Expr::FuncRef(n) => n.clone(),
+            _ => return self.err(&format!("{} 的第一个入口参数必须是具名函数", name)),
+        };
+        let sig = self.ip.functions_sig.get(&fname)
+            .ok_or_else(|| format!("{} 引用了未定义的函数 `{}`", name, fname))?
+            .clone();
+
+        // 1) 分配 argcell：n+1 槽（slot[0]=result + n 个形参）。
+        let nslots = (sig.params.len() + 1) as i64;
+        let cell = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call { dst: Some(cell), func: "dial_thread_argcell".to_string(),
+            args: vec![Value::Imm(Imm::I64(nslots))], arg_tys: vec![IrType::I64],
+            ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+        // slot[0] 结果清零。
+        let rslot = self.new_reg(IrType::Ptr);
+        self.emit(IrInst::PtrAdd { dst: rslot, base: cell, off: Value::Imm(Imm::I64(0)) });
+        self.emit(IrInst::Store { ptr: rslot, val: Value::Imm(Imm::I64(0)), ty: IrType::I64 });
+
+        // 2) 逐实参写入 slot[1+i]（与 spawn 同源的所有权会计）。
+        for (i, pty) in sig.params.iter().enumerate() {
+            let (v, _) = self.lower_expr(&entry_args[i + 1], pty)?;
+            let slot = self.new_reg(IrType::Ptr);
+            self.emit(IrInst::PtrAdd { dst: slot, base: cell,
+                off: Value::Imm(Imm::I64(((i + 1) * 8) as i64)) });
+            match pty {
+                Type::Channel(_) => {
+                    if let Some(k) = rc_kind(pty) { self.emit(IrInst::RcRetain { ptr: slot, kind: k }); }
+                    self.emit(IrInst::Store { ptr: slot, val: v, ty: IrType::Handle });
+                }
+                t if rc_kind(t).is_some() => {
+                    self.emit(IrInst::Store { ptr: slot, val: v, ty: IrType::Handle });
+                    if let Expr::Var(vn) = &entry_args[i + 1] {
+                        let slot_ptr = self.lookup(vn).map(|l| l.ptr);
+                        if let Some(p) = slot_ptr {
+                            self.emit(IrInst::Store { ptr: p, val: Value::Imm(Imm::I64(0)), ty: IrType::Handle });
+                            if let Some(l) = self.lookup_mut(vn) { l.moved = true; }
+                        }
+                    }
+                }
+                _ => {
+                    let sty = match pty {
+                        Type::Float => IrType::F64,
+                        Type::Float32 => IrType::F32,
+                        t2 => reg_ir(t2),
+                    };
+                    self.emit(IrInst::Store { ptr: slot, val: v, ty: sty });
+                }
+            }
+        }
+
+        // 3) 记录任务目标，取 thunk 地址。
+        self.task_targets.insert(fname.clone());
+        let thunk_name = format!("__dial_task_thunk_{}", fname);
+        let thunk_addr = self.new_reg(IrType::Ptr);
+        self.emit(IrInst::FuncAddr { dst: thunk_addr, func: thunk_name });
+
+        // 4) 调用对应的 C 运行时入口。
+        let (sym, cargs, ctys): (&str, Vec<Value>, Vec<IrType>) = match name {
+            "pool_submit" => (
+                "dial_pool_submit",
+                vec![Value::Reg(pool_arg.unwrap()), Value::Reg(thunk_addr), Value::Reg(cell)],
+                vec![IrType::Handle, IrType::Ptr, IrType::Handle],
+            ),
+            "spawn_async" => (
+                "dial_async_spawn",
+                vec![Value::Reg(thunk_addr), Value::Reg(cell)],
+                vec![IrType::Ptr, IrType::Handle],
+            ),
+            "coroutine" => (
+                "dial_co_new",
+                vec![Value::Reg(thunk_addr), Value::Reg(cell), Value::Imm(Imm::I64(0))],
+                vec![IrType::Ptr, IrType::Handle, IrType::I64],
+            ),
+            _ => unreachable!("lower_async_call 任务分支仅处理三种提交"),
+        };
+        let h = self.new_reg(IrType::Handle);
+        self.emit(IrInst::Call { dst: Some(h), func: sym.to_string(), args: cargs,
+            arg_tys: ctys, ret_ty: IrType::Handle, linkage: CallLink::Runtime });
+        Ok((Value::Reg(h), false))
     }
 
     /// M7-e3am：真多线程原语 spawn / join / detach，对齐 LLVM codegen.rs:5109/5139。

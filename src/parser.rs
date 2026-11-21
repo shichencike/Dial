@@ -896,6 +896,14 @@ impl Parser {
     /// （impl 接收者类型）。普通函数解析走 `parse_function()`（传 None），
     /// 行为一字未变，旧程序零影响。
     fn parse_function_with_self(&mut self, self_ty: Option<Type>) -> Result<Func> {
+        // v1.21 协作式并发：`async fn name(...)` 前缀标记该函数可作任务/协程入口。
+        // 只能修饰普通函数（impl 方法 / 导出函数无意义，语义层会拒绝）。
+        let is_async = if self.check(&TokenKind::Async) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         // v1.04 FFI 导出：`@export fn` 或 `export fn` 前缀标记该函数对外暴露为 C 符号。
         let exported = if self.check(&TokenKind::At) {
             self.advance();
@@ -1022,6 +1030,7 @@ impl Parser {
             line: nline,
             col: ncol,
             exported,
+            is_async,
         })
     }
 
@@ -1196,6 +1205,10 @@ impl Parser {
                     }
                     // thread：线程句柄（不透明指针，不是泛型）
                     "thread" => Type::Thread,
+                    // v1.21 协作式并发：三种不透明句柄（与 thread 同级，显式管理，不受 ARC）。
+                    "threadpool" => Type::ThreadPool,
+                    "coroutine" => Type::Coroutine,
+                    "task" => Type::Task,
                     _ => {
                         // 已导入包声明的不透明句柄优先于「当成结构体」：
                         // 它是包私有的不透明指针，用户拿不到布局（见 ast::Type::Opaque）。
@@ -2224,6 +2237,12 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr> {
+        // v1.21：`await task_expr` —— 等待任务完成并取 int 结果（前缀运算符）。
+        if self.check(&TokenKind::Await) {
+            self.advance();
+            let e = self.parse_unary()?;
+            return Ok(Expr::Await(Box::new(e)));
+        }
         if self.check(&TokenKind::Minus) {
             self.advance();
             let e = self.parse_unary()?;
@@ -2522,13 +2541,26 @@ impl Parser {
                         let field = self.expect_ident()?;
                         args.push(Expr::StringLit(field));
                     }
-                    // spawn 的首参是「函数引用」，不是表达式：线程入口 thunk 要按目标
+                    // 任务入口的首参是「函数引用」，不是表达式：入口 thunk 要按目标
                     // 函数静态生成，因此这里直接消费一个顶层具名函数字面量。
                     // （v1.03 起 Dial 已有函数指针，但那走普通标识符表达式 Expr::Var。）
-                    if name == "spawn" && !self.check(&TokenKind::RParen) {
-                        args.push(Expr::FuncRef(self.expect_ident()?));
-                        if self.check(&TokenKind::Comma) {
-                            self.advance();
+                    // spawn 的函数引用在第 1 参；pool_submit 在第 2 参（第 1 参是 pool 句柄）。
+                    let func_ref_pos = match name.as_str() {
+                        "spawn" | "spawn_async" | "coroutine" => Some(0),
+                        "pool_submit" => Some(1),
+                        _ => None,
+                    };
+                    if let Some(frp) = func_ref_pos {
+                        // 先把 frp 之前的普通实参解析掉（仅 pool_submit 的 pool 句柄）。
+                        for _ in 0..frp {
+                            args.push(self.parse_expr()?);
+                            if self.check(&TokenKind::Comma) { self.advance(); }
+                        }
+                        if !self.check(&TokenKind::RParen) {
+                            args.push(Expr::FuncRef(self.expect_ident()?));
+                            if self.check(&TokenKind::Comma) {
+                                self.advance();
+                            }
                         }
                     }
                     if !self.check(&TokenKind::RParen) {

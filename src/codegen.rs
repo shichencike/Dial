@@ -717,6 +717,23 @@ impl<'ctx> CodeGen<'ctx> {
         );
         self.decl_void("dial_thread_join", &[i8b.into()]);
         self.decl_void("dial_thread_detach", &[i8b.into()]);
+        // v1.21 协作式并发：线程池 / 协程 / async。
+        self.decl_func("dial_pool_new", i8b, &[self.context.i64_type().into()]);
+        self.decl_func("dial_pool_submit", i8b, &[i8b.into(), i8b.into(), i8b.into()]);
+        self.decl_void("dial_pool_join", &[i8b.into()]);
+        self.decl_void("dial_pool_close", &[i8b.into()]);
+        self.decl_func("dial_co_new", i8b, &[i8b.into(), i8b.into(), self.context.i64_type().into()]);
+        self.decl_func("dial_co_resume", self.context.i64_type().into(), &[i8b.into()]);
+        self.decl_func("dial_co_status", self.context.i64_type().into(), &[i8b.into()]);
+        self.decl_void("dial_co_yield", &[]);
+        self.decl_void("dial_co_free", &[i8b.into()]);
+        self.decl_func("dial_async_spawn", i8b, &[i8b.into(), i8b.into()]);
+        self.decl_void("dial_async_await", &[i8b.into()]);
+        self.decl_void("dial_run_all", &[]);
+        self.decl_func("dial_task_done", self.context.i64_type().into(), &[i8b.into()]);
+        self.decl_void("dial_task_wait", &[i8b.into()]);
+        self.decl_func("dial_task_result", self.context.i64_type().into(), &[i8b.into()]);
+        self.decl_void("dial_task_free", &[i8b.into()]);
         // 通道：send/recv 只搬运指针（所有权移交），retain/release 走原子引用计数。
         self.decl_func("dial_channel_new", i8b, &[self.context.i64_type().into(), i8b.into()]);
         self.decl_void("dial_channel_send", &[i8b.into(), i8b.into()]);
@@ -1002,6 +1019,7 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::File
             | Type::Error
             | Type::Thread
+            | Type::ThreadPool | Type::Coroutine | Type::Task
             | Type::Channel(_)
             | Type::Opaque(_)
             // 裸指针（v1.02）：不透明指针（元素类型由调用处的 gep 决定）
@@ -1364,6 +1382,7 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::File
             | Type::Error
             | Type::Thread
+            | Type::ThreadPool | Type::Coroutine | Type::Task
             | Type::Channel(_)
             | Type::Opaque(_)
             | Type::RawPtr(_) | Type::VolatilePtr(_)
@@ -2311,6 +2330,87 @@ impl<'ctx> CodeGen<'ctx> {
             self.builder.position_at_end(bb);
         }
         let _ = structs;
+        Ok(thunk)
+    }
+
+    /// v1.21：为 pool_submit / spawn_async / coroutine 生成统一任务入口 thunk：
+    ///   `void __dial_task_thunk_<fn>(i8* cell)`
+    /// argcell 布局：slot[0]=result（入口返回 int 时写入，void 入口写 0），slot[1+i]=形参。
+    /// 与 gen_spawn_thunk 同源的所有权会计（读参→调函数→写 result→释放移交的堆句柄）。
+    fn gen_task_thunk(
+        &self,
+        fname: &str,
+        params: &[Type],
+        ret: &Type,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+    ) -> Result<FunctionValue<'ctx>> {
+        let thunk_name = format!("__dial_task_thunk_{}", fname);
+        if let Some(existing) = self.module.get_function(&thunk_name) {
+            return Ok(existing);
+        }
+        let saved = self.builder.get_insert_block();
+        let ft = self.context.void_type().fn_type(&[self.i8ptr().into()], false);
+        let thunk = self.module.add_function(&thunk_name, ft, None);
+        let entry = self.context.append_basic_block(thunk, "entry");
+        self.builder.position_at_end(entry);
+        let cell = thunk.get_nth_param(0).unwrap().into_pointer_value();
+
+        // slot[0] 结果槽地址。
+        let rslot = unsafe {
+            self.builder.build_gep(self.context.i64_type(), cell,
+                &[self.context.i64_type().const_zero()], "th.result").unwrap()
+        };
+
+        let fv = *func_values.get(fname).ok_or_else(|| {
+            DialcError::new(format!("缺少函数 '{}' 的 LLVM 定义", fname), 0, 0)
+        })?;
+
+        let mut arg_vals: Vec<BasicValueEnum<'ctx>> = Vec::new();
+        let mut meta: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        for (i, pty) in params.iter().enumerate() {
+            // 形参在 slot[1+i]（slot[0] 是 result）。
+            let idx = self.context.i64_type().const_int((i + 1) as u64, false);
+            let v: BasicValueEnum<'ctx> = match pty {
+                Type::Float => {
+                    let slot = unsafe { self.builder.build_gep(self.context.f64_type(), cell, &[idx], "th.slot").unwrap() };
+                    self.builder.build_load(self.context.f64_type(), slot, "th.arg").unwrap()
+                }
+                Type::Bool => {
+                    let slot = unsafe { self.builder.build_gep(self.context.i64_type(), cell, &[idx], "th.slot").unwrap() };
+                    let w = self.builder.build_load(self.context.i64_type(), slot, "th.argw").unwrap().into_int_value();
+                    self.builder.build_int_truncate(w, self.context.bool_type(), "th.arg").unwrap().into()
+                }
+                Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..)
+                | Type::Error | Type::Channel(_) | Type::Opaque(_) => {
+                    let slot = unsafe { self.builder.build_gep(self.i8ptr(), cell, &[idx], "th.slot").unwrap() };
+                    self.builder.build_load(self.i8ptr(), slot, "th.arg").unwrap()
+                }
+                _ => {
+                    let slot = unsafe { self.builder.build_gep(self.context.i64_type(), cell, &[idx], "th.slot").unwrap() };
+                    self.builder.build_load(self.context.i64_type(), slot, "th.arg").unwrap()
+                }
+            };
+            let call_v = self.abi_adapt(v, v.get_type(), self.ffi_type_to_llvm(pty));
+            arg_vals.push(v);
+            meta.push(call_v.into());
+        }
+
+        // 调用目标函数；int 入口捕获结果写 slot[0]，void 入口写 0。
+        let call_ret = self.builder.build_call(fv, &meta, "th.call").unwrap().try_as_basic_value().basic();
+        let result = if *ret == Type::Int {
+            call_ret.unwrap_or(self.context.i64_type().const_int(0, false).into())
+        } else {
+            self.context.i64_type().const_int(0, false).into()
+        };
+        let result_i64 = result.into_int_value(); // 入口返回 int → i64；void 分支上面已造 i64 常量
+        self.builder.build_store(rslot, result_i64).unwrap();
+
+        // 释放移交的堆句柄（与 spawn thunk 同款所有权会计）。
+        for (pty, v) in params.iter().zip(arg_vals.iter()) {
+            self.release_value(pty, *v);
+        }
+        self.builder.build_return(None).unwrap();
+        if let Some(bb) = saved { self.builder.position_at_end(bb); }
         Ok(thunk)
     }
 
@@ -4081,6 +4181,12 @@ impl<'ctx> CodeGen<'ctx> {
             Expr::ByteLit(b) => Ok(self.context.i64_type().const_int(*b as u64, false).into()),
             Expr::FloatLit(f) => Ok(self.context.f64_type().const_float(*f).into()),
             Expr::BoolLit(b) => Ok(self.context.bool_type().const_int(if *b { 1 } else { 0 }, false).into()),
+            // v1.21：`await task` → dial_async_await(task) + dial_task_result(task)。
+            Expr::Await(inner) => {
+                let tv = self.gen_expr(inner, function, scopes, func_values, functions, structs)?;
+                self.call_c_void("dial_async_await", &[tv.into()]);
+                Ok(self.call_c("dial_task_result", &[tv.into()]))
+            }
             Expr::Interp(parts) => {
                 self.gen_interp(parts, function, scopes, func_values, functions, structs)
             }
@@ -5192,6 +5298,123 @@ impl<'ctx> CodeGen<'ctx> {
                             }
                         }
                         Ok(self.context.i64_type().const_int(0, false).into())
+                    }
+                    // ==================================================================
+                    // v1.21 协作式并发：线程池 / 协程 / async。
+                    // ==================================================================
+                    // 纯 C 薄封装内建：参数逐个 gen_expr，返回 i64 句柄/状态或 void。
+                    "threadpool" | "pool_join" | "pool_close" | "co_resume" | "co_status"
+                    | "co_yield" | "co_free" | "run_all" | "task_done" | "task_wait"
+                    | "task_result" | "task_free" => {
+                        let mut argv: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+                        for a in args {
+                            let v = self.gen_expr(a, function, scopes, func_values, functions, structs)?;
+                            argv.push(v.into());
+                        }
+                        let sym = match name.as_str() {
+                            "threadpool" => "dial_pool_new",
+                            "pool_join" => "dial_pool_join",
+                            "pool_close" => "dial_pool_close",
+                            "co_resume" => "dial_co_resume",
+                            "co_status" => "dial_co_status",
+                            "co_yield" => "dial_co_yield",
+                            "co_free" => "dial_co_free",
+                            "run_all" => "dial_run_all",
+                            "task_done" => "dial_task_done",
+                            "task_wait" => "dial_task_wait",
+                            "task_result" => "dial_task_result",
+                            "task_free" => "dial_task_free",
+                            _ => unreachable!(),
+                        };
+                        let void_ret = matches!(name.as_str(),
+                            "pool_join" | "pool_close" | "co_yield" | "co_free"
+                            | "run_all" | "task_wait" | "task_free");
+                        if void_ret {
+                            self.call_c_void(sym, &argv);
+                            Ok(self.context.i64_type().const_int(0, false).into())
+                        } else {
+                            let r = self.call_c(sym, &argv);
+                            // co_resume / task_done 语义层是 bool（i1）：C 返回 int64，
+                            // 需按 Dial 静态类型收口成 i1，否则写 bool 槽时宽度不匹配破坏相邻栈槽。
+                            if matches!(name.as_str(), "co_resume" | "task_done") {
+                                let b = self.builder.build_int_compare(
+                                    IntPredicate::NE, r.into_int_value(),
+                                    self.context.i64_type().const_zero(), "cobool").unwrap();
+                                Ok(b.into())
+                            } else {
+                                Ok(r)
+                            }
+                        }
+                    }
+                    // pool_submit / spawn_async / coroutine：具名入口 + argcell + task thunk。
+                    "pool_submit" | "spawn_async" | "coroutine" => {
+                        // pool_submit 首参是 pool 句柄，入口函数从第 2 个起；其余从第 1 个起。
+                        let (pool_v, entry_args): (Option<_>, &[Expr]) = if name == "pool_submit" {
+                            let pv = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                            (Some(pv), &args[1..])
+                        } else {
+                            (None, &args[..])
+                        };
+                        let fname = match &entry_args[0] {
+                            Expr::FuncRef(n) => n.clone(),
+                            _ => return Err(DialcError::new(
+                                "内部错误：任务入口首参必须是函数名", 0, 0)),
+                        };
+                        let target = functions.get(&fname).ok_or_else(|| {
+                            DialcError::new(format!("未定义的函数 '{}'", fname), 0, 0)
+                        })?;
+                        let (params, ret) = (target.params.clone(), target.ret.clone());
+                        let nslots = params.len() + 1; // slot[0]=result
+                        let cell = self.call_c("dial_thread_argcell",
+                            &[self.context.i64_type().const_int(nslots as u64, false).into()]);
+                        // slot[0] result 清零。
+                        let rslot = unsafe { self.builder.build_gep(self.context.i64_type(),
+                            cell.into_pointer_value(), &[self.context.i64_type().const_zero()], "th.result").unwrap() };
+                        self.builder.build_store(rslot, self.context.i64_type().const_zero()).unwrap();
+                        // 逐实参写 slot[1+i]。
+                        for (i, pty) in params.iter().enumerate() {
+                            let v = self.gen_expr(&entry_args[i + 1], function, scopes, func_values, functions, structs)?;
+                            let idx = self.context.i64_type().const_int((i + 1) as u64, false);
+                            let slot = unsafe {
+                                match pty {
+                                    Type::Float => self.builder.build_gep(self.context.f64_type(), cell.into_pointer_value(), &[idx], "tk.slot").unwrap(),
+                                    Type::Int | Type::Bool => self.builder.build_gep(self.context.i64_type(), cell.into_pointer_value(), &[idx], "tk.slot").unwrap(),
+                                    _ => self.builder.build_gep(self.i8ptr(), cell.into_pointer_value(), &[idx], "tk.slot").unwrap(),
+                                }
+                            };
+                            match pty {
+                                Type::String | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error => {
+                                    self.builder.build_store(slot, v).unwrap();
+                                    if let Expr::Var(s) = &entry_args[i + 1] {
+                                        if let Some(sp) = Self::lookup_slot(scopes, &s) {
+                                            self.builder.build_store(sp, self.i8ptr().const_null()).unwrap();
+                                            self.moved.borrow_mut().insert(sp);
+                                        }
+                                    }
+                                }
+                                Type::Channel(_) => {
+                                    self.retain(pty, v);
+                                    self.builder.build_store(slot, v).unwrap();
+                                }
+                                Type::Bool => {
+                                    let w = self.to_i64(v, &Type::Bool);
+                                    self.builder.build_store(slot, w).unwrap();
+                                }
+                                _ => { self.builder.build_store(slot, v).unwrap(); }
+                            }
+                        }
+                        let thunk = self.gen_task_thunk(&fname, &params, &ret, func_values)?;
+                        let thunk_ptr = thunk.as_global_value().as_pointer_value();
+                        let handle = match name.as_str() {
+                            "pool_submit" => self.call_c("dial_pool_submit",
+                                &[pool_v.unwrap().into(), thunk_ptr.into(), cell.into()]),
+                            "spawn_async" => self.call_c("dial_async_spawn",
+                                &[thunk_ptr.into(), cell.into()]),
+                            "coroutine" => self.call_c("dial_co_new",
+                                &[thunk_ptr.into(), cell.into(), self.context.i64_type().const_zero().into()]),
+                            _ => unreachable!(),
+                        };
+                        Ok(handle)
                     }
                     // spawn(fn, args...)：**先把实参全部写进 argcell，再创建线程**。
                     // 顺序是这个语言的并发安全基石——pthread_create 之前实参已就位，
@@ -6857,6 +7080,12 @@ impl<'ctx> CodeGen<'ctx> {
                 self.call_c_void("dial_print_string", &[msg.into()]);
             }
             // 句柄打印没有任何可读语义，且违反「不透明指针」契约（打印就等于泄露内部）。
+            Type::ThreadPool | Type::Coroutine | Type::Task => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print 并发句柄（threadpool/coroutine/task）",
+                    0, 0,
+                ));
+            }
             Type::Thread => {
                 return Err(DialcError::new(
                     "语义错误：当前版本不支持直接 print thread 句柄",
@@ -6997,6 +7226,12 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Error => {
                 let msg = self.call_c("dial_error_msg", &[val.into()]);
                 self.call_c_void("dial_print_raw", &[msg.into()]);
+            }
+            Type::ThreadPool | Type::Coroutine | Type::Task => {
+                return Err(DialcError::new(
+                    "语义错误：当前版本不支持直接 print_raw 并发句柄（threadpool/coroutine/task）",
+                    0, 0,
+                ));
             }
             Type::Thread => {
                 return Err(DialcError::new(

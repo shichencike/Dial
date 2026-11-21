@@ -1214,6 +1214,7 @@ pub fn resolve_imports(
                     variadic: f.variadic,
                     // 包外部函数由 C 侧提供，链接名就是它的符号名——等价于「已导出」。
                     exported: true,
+                    is_async: false,
                 },
             ));
         }
@@ -2407,6 +2408,7 @@ fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, Strin
                 variadic: e.variadic,
                 // 外部声明的函数体在 C 侧，符号名即链接名——等价于「已导出」。
                 exported: true,
+                is_async: false,
             },
         ));
     }
@@ -3530,6 +3532,7 @@ fn cmd_test(args: &[String]) {
             line: t.line,
             col: t.col,
             exported: false,
+            is_async: false,
         });
         // goto_depths 仅 asm-only 构建（无 llvm feature）的 codegen 分支使用。
         #[cfg_attr(feature = "llvm", allow(unused_variables))]
