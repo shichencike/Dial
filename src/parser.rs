@@ -1276,7 +1276,7 @@ impl Parser {
             }
         }
         match tok.kind {
-            TokenKind::Var | TokenKind::Let => self.parse_var_decl(),
+            TokenKind::Var | TokenKind::Let | TokenKind::Own => self.parse_var_decl(),
             TokenKind::If => self.parse_if(),
             TokenKind::While => self.parse_while(),
             TokenKind::For => self.parse_for(),
@@ -1483,8 +1483,28 @@ impl Parser {
 
     fn parse_var_decl(&mut self) -> Result<Stmt> {
         let start = self.peek().clone();
-        let mutable = matches!(start.kind, TokenKind::Var);
-        self.advance(); // 消费 var / let
+        // v1.21 独占所有权：`own var x: T = e;`。own 只能修饰 var（独占资源通常需要
+        // 可变性以移交/释放）；`own let` 给出明确诊断，而非静默接受。
+        let (mutable, owned) = if start.kind == TokenKind::Own {
+            let own_tok = self.advance(); // 消费 own
+            match self.peek().kind {
+                TokenKind::Var => {
+                    self.advance(); // 消费 var
+                    (true, true)
+                }
+                _ => {
+                    return Err(DialcError::new(
+                        "语法错误：`own` 只能修饰 var 声明（写 `own var x: T = e;`），不能修饰 let / 类型",
+                        own_tok.line,
+                        own_tok.col,
+                    ));
+                }
+            }
+        } else {
+            let mutable = matches!(start.kind, TokenKind::Var);
+            self.advance(); // 消费 var / let
+            (mutable, false)
+        };
         let (name, nline, ncol) = self.expect_ident_pos()?;
         self.reject_const_shadow(&name, nline, ncol)?;
         self.expect(TokenKind::Colon)?;
@@ -1524,6 +1544,7 @@ impl Parser {
             mutable,
             value,
             move_hint: false,
+            owned,
             line: start.line,
             col: start.col,
             name_line: nline,

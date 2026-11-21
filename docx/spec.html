@@ -138,6 +138,7 @@
 <li><a href="#141-不透明指针契约">14.1 不透明指针契约</a></li>
 <li><a href="#142-引用计数对象的布局">14.2 引用计数对象的布局</a></li>
 <li><a href="#143-编译期三种绑定策略">14.3 编译期三种绑定策略</a></li>
+<li><a href="#1431-显式独占所有权-own-var开发中">14.3.1 显式独占所有权 own var（开发中）</a></li>
 <li><a href="#144-栈分配与逃逸分析">14.4 栈分配与逃逸分析</a></li>
 <li><a href="#145-cow-的触发时机">14.5 COW 的触发时机</a></li>
 <li><a href="#146-自赋值安全">14.6 自赋值安全</a></li>
@@ -3174,6 +3175,26 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 <p>前两种在编译期即消除了运行时开销；只有第三种可能真的复制内存。</p>
 <p>判定"最后一次引用"时，位于循环或分支内的引用被视为<strong>不安全上下文</strong>，
 不参与移动判定（因为该语句可能被执行零次或多次）。</p>
+<h3 id="1431-显式独占所有权-own-var开发中">14.3.1 显式独占所有权 <code>own var</code>（开发中）</h3>
+<p>上面三种策略是<strong>编译器自动推断</strong>的：程序员无法强制「这个资源必须独占转移」。
+<code>own</code> 修饰符把 Move 策略升级为<strong>程序员显式声明的独占所有权</strong>：</p>
+<pre><code class="language-dial">own var buf: int[] = [1, 2, 3];   // buf 独占这块数组
+var src: string = &quot;data&quot;;
+own var moved: string = src;       // 强制把 src 的所有权转移给 moved
+print(src);                        // ❌ 编译错误：src 已转移，不可再用
+</code></pre>
+<p>规则（<strong>刻意不引入借用检查器</strong>——没有 <code>&amp;T</code>、没有生命周期、没有别名静态分析）：</p>
+<ul>
+<li><strong>独占转移</strong>：<code>own var x = y</code> 无论 <code>y</code> 之后是否还被引用，都当场把 <code>y</code> 标记为已转移；
+  此后对 <code>y</code> 的任何读写都在编译期被拒绝（use-after-move）。</li>
+<li><strong>确定 drop</strong>：own 变量离开作用域时确定释放（复用 §14.4 的 ARC 作用域清理），
+  也可显式 <code>drop(x)</code> 提前释放。</li>
+<li><strong>仅用于拥有资源的类型</strong>：<code>string</code> / <code>bytes</code> / 数组 / <code>map</code> / <code>file</code> / <code>thread</code> /
+  <code>rawptr</code> 等；对 <code>int</code> / 结构体等无需释放的值类型写 <code>own</code> 是编译错误。</li>
+<li><strong>只能修饰 <code>var</code></strong>：<code>own let</code> 是语法错误（独占资源通常需要可变性以便移交/释放）。</li>
+<li><strong>实现复用</strong>：<code>own</code> 在语义层强制 <code>move_hint</code> 与 <code>mark_moved</code>，两个后端（asm / LLVM）
+  读取同一份 <code>move_hint</code>，因此代码生成路径与已验证的 Move 策略完全一致，无需分叉。</li>
+</ul>
 <h3 id="144-栈分配与逃逸分析">14.4 栈分配与逃逸分析</h3>
 <ul>
 <li><strong>结构体</strong>：值类型，一律在栈上 <code>alloca</code>，字段访问是 <code>getelementptr</code>。

@@ -1,8 +1,18 @@
 {
   "source": "CHANGELOG.md",
   "index": "../changelog.html",
-  "count": 33,
+  "count": 34,
   "versions": [
+    {
+      "id": "未发布",
+      "label": "[未发布]",
+      "date": "",
+      "note": "",
+      "topic": "把编译期自动推断的 Move 策略升级为程序员显式声明的独占转移——强制接管即转移 （use-after-move 编译期报错）、离开作用域…",
+      "file": "未发布.html",
+      "newer": null,
+      "older": "v1.20"
+    },
     {
       "id": "v1.20",
       "label": "v1.20",
@@ -10,7 +20,7 @@
       "note": "2026-11-21",
       "topic": "只有 int/float/bool/string/ptr 五类，FFI 精确宽度标量 int32(栈槽低 4 字节)、byte(低 1 字节…",
       "file": "v1.20.html",
-      "newer": null,
+      "newer": "未发布",
       "older": "v1.10"
     },
     {

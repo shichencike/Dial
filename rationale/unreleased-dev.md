@@ -3995,3 +3995,41 @@ b12 互递归闭式、b08/b05 算术深度优化、b22 substring C runtime、GRA
 **结果**：tag run `44856668388` 全绿（WATCH_EXIT=0）——Linux 全量、Termux aarch64、Windows 核心冒烟、
 签名 #12、打包 #13、上传 #14、三平台 Release 全部 success。Release `v1.2` 发布为 Latest，
 12 个资产齐全（三平台 zip + VSIX + 签名 .cer/.cms + 6 个 dialpkg），版本映射 `v1.2 ↔ v1.20 ↔ 1.20.0`。
+
+---
+
+## own 独占所有权：显式转移但不引入借用检查器
+
+**需求**：用户要求「加入所有权，但不引入借用检查器」。
+
+**现状调查**：Dial 早已有完整的所有权机制但为**隐式 ARC + 值语义**形态——无 GC（README §19
+「宁可泄漏，不可悬垂」）、ARC+COW 三策略（Move/Share/COW，README §14.3）、`VarState.moved`
++ `check_moved_expr` 的 use-after-move 检测、`drop`/`defer`/`with` + 作用域末 `release_scope`
+自动释放。**从未有 `&T` / 生命周期 / 别名分析**（借用检查器）。因此真正的需求是把「编译期
+自动推断的 Move」升级为「程序员显式声明的独占所有权」。经用户确认采用**显式 `own var`
+声明**方案（零破坏、纯增量），而非全量重构为单一所有权。
+
+**实现**（刻意小，建立在已验证机制之上）：
+1. 词法/语法/AST：新增 `own` 关键字（`lexer.rs`）、`TokenKind::Own`、LSP/dialfmt 关键字表同步；
+   `Stmt::VarDecl` 加 `owned: bool`；parser 解析 `own var`（`own let` 明确报错）。
+2. 语义层（`semantic.rs`）：
+   - `VarState` 加 `owned` 位；`own var` 登记为独占状态；
+   - `check_moved_stmt`：own 声明接管变量时强制 `mark_moved(src)`——这是「显式转移」的核心，
+     无论源之后是否还被引用都当场禁用（use-after-move 编译期报错）；
+   - `set_moves`：own 声明强制 `move_hint=true`（覆盖自动推断）；
+   - own 只能修饰拥有资源的类型（复用 `is_copy_type` 排除标量/结构体），own let 语法拒绝；
+   - own 变量 use-after-move 给出专门诊断（区别普通 ARC move）。
+3. 后端**零改动**：asm 走 IR、LLVM 走 AST，但两者都读同一个 `move_hint`，own 的语义完全
+   由共享 sema 层表达，代码生成路径与已验证的 Move 策略逐字节一致。
+
+**为何不引入借用检查器**：用户明确要求。Dial 的 ARC+COW 已保证别名安全，追加 `&T` 生命周期
+分析只会增加复杂度并违背「零 GC 停顿、编译期确定性内存」的宪法。own 提供的是**转移语义**
+（谁拥有、何时释放、转移后禁用），不是**借用语义**（谁能借、借多久），二者边界清晰。
+
+**验证**：`cargo build --release`（asm-only）与 `--features llvm` 均零错误零警告；全量回归
+`EXIT=0`，1034 项全绿（新增 R12b 段 11 项：各资源类型双后端逐字一致、-O0..-O3/-g 稳定、
+20k 次创建/确定 drop 无 double free、4 类负向编译期拒绝）；own 数组/返回值移交 10~20 万次
+峰值 RSS 稳定无泄漏。
+
+**范围**：本次只交付代码 + 测试 + 文档（CHANGELOG `[未发布]`、README §14.3.1），**不单独发版**，
+版本号保持 v1.20，已发布的 tag v1.2 不受影响。

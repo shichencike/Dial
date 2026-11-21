@@ -50,11 +50,18 @@ pub type Scopes<V> = Vec<HashMap<String, (Type, V)>>;
 pub struct VarState {
     pub mutable: bool,
     pub moved: bool,
+    /// v1.21：`own var` 独占所有权标记。own 变量在接管资源时强制移动语义，
+    /// 之后任何读取/写入/再次移交都经 `moved` 位在编译期拦截（use-after-move）。
+    pub owned: bool,
 }
 
 impl VarState {
     pub fn new(mutable: bool) -> Self {
-        Self { mutable, moved: false }
+        Self { mutable, moved: false, owned: false }
+    }
+    /// 独占所有权变量：`own var x: T = e;`
+    pub fn new_owned() -> Self {
+        Self { mutable: true, moved: false, owned: true }
     }
 }
 
@@ -4155,21 +4162,33 @@ fn check_moved_stmt(
 ) -> Result<()> {
     let (line, col) = stmt_pos(stmt);
     match stmt {
-        Stmt::VarDecl { value, .. } => check_moved_expr(value, scopes, funcs, structs, line, col),
+        Stmt::VarDecl { value, owned, .. } => {
+            check_moved_expr(value, scopes, funcs, structs, line, col)?;
+            // v1.21 独占所有权：`own var x: T = y;` 强制把 y 的所有权转移给 x。
+            // 普通 `var x = y` 的三策略由 run_usage_analysis 自动推断（y 之后不再用
+            // 才 move）；own 则是程序员显式声明「我接管 y」，无论 y 之后是否还有引用，
+            // 都当场把 y 标 moved——此后对 y 的任何使用都会被 check_moved_expr 拒绝。
+            // 这正是「显式所有权转移」与「编译期优化提示」的分界。
+            if *owned {
+                if let Expr::Var(src) = value {
+                    mark_moved(scopes, src);
+                }
+            }
+            Ok(())
+        }
         Stmt::Assign { name, value, .. } => {
             // 写入目标同样受约束：给已转移的变量赋值，与读取它一样是错误。
-            if scopes
-                .iter()
-                .rev()
-                .find_map(|s| s.get(name))
-                .map(|v| v.1.moved)
-                .unwrap_or(false)
-            {
-                return Err(DialcError::new(
-                    format!("语义错误：变量 '{}' 已转移，无法使用", name),
-                    line,
-                    col,
-                ));
+            let st = scopes.iter().rev().find_map(|s| s.get(name)).map(|v| v.1);
+            if st.map(|s| s.moved).unwrap_or(false) {
+                let msg = if st.map(|s| s.owned).unwrap_or(false) {
+                    format!(
+                        "语义错误：独占变量 '{}' 的所有权已转移（own 声明），转移后不可再赋值",
+                        name
+                    )
+                } else {
+                    format!("语义错误：变量 '{}' 已转移，无法使用", name)
+                };
+                return Err(DialcError::new(msg, line, col));
             }
             check_moved_expr(value, scopes, funcs, structs, line, col)
         }
@@ -4243,18 +4262,20 @@ fn check_moved_expr(
 ) -> Result<()> {
     match e {
         Expr::Var(name) => {
-            let moved = scopes
-                .iter()
-                .rev()
-                .find_map(|s| s.get(name))
-                .map(|v| v.1.moved)
-                .unwrap_or(false);
+            let st = scopes.iter().rev().find_map(|s| s.get(name)).map(|v| v.1);
+            let moved = st.map(|s| s.moved).unwrap_or(false);
             if moved {
-                Err(DialcError::new(
-                    format!("语义错误：变量 '{}' 已转移，无法使用", name),
-                    line,
-                    col,
-                ))
+                // v1.21：own 独占变量被再次使用是典型的「所有权已移交却仍想访问」。
+                // 给出专门诊断，指明这是独占所有权的强制约束（而非普通 ARC move）。
+                let msg = if st.map(|s| s.owned).unwrap_or(false) {
+                    format!(
+                        "语义错误：独占变量 '{}' 的所有权已转移（own 声明），转移后不可再使用",
+                        name
+                    )
+                } else {
+                    format!("语义错误：变量 '{}' 已转移，无法使用", name)
+                };
+                Err(DialcError::new(msg, line, col))
             } else {
                 Ok(())
             }
@@ -4428,12 +4449,26 @@ fn check_stmt(
             ty,
             mutable,
             value,
+            owned,
             line,
             col,
             ..
         } => {
             // 声明类型必须先良构，再谈兼容
             check_type_wellformed(ty, &format!("变量 '{}'", name), *line, *col, structs)?;
+            // v1.21：own 独占所有权只对「拥有资源、需要释放」的类型有意义。
+            // 对 int/float/bool/struct 等 Copy 值声明 own 是错误的——它们没有所有权
+            // 可转移，写 own 只会误导读者。给出明确诊断而非静默接受。
+            if *owned && is_copy_type(ty) {
+                return Err(DialcError::new(
+                    format!(
+                        "语义错误：`own` 只能修饰拥有资源的类型（string / bytes / 数组 / map / file / thread / rawptr 等），'{}' 是无需释放的值类型",
+                        ty.display()
+                    ),
+                    *line,
+                    *col,
+                ));
+            }
             let vt = type_of(value, scopes, funcs, structs)?;
             if !types_compatible(&vt, ty) && !channel_placeholder_compat(&vt, ty) {
                 return Err(DialcError::new(
@@ -4457,10 +4492,12 @@ fn check_stmt(
             }
             // 可变性如实登记：var -> true，let -> false。
             // 绝不可一律记为 true，否则 let 的“不可变”承诺形同虚设。
+            // own var 走独占所有权状态（owned=true），供 use-after-move 等规则识别。
+            let state = if *owned { VarState::new_owned() } else { VarState::new(*mutable) };
             scopes
                 .last_mut()
                 .unwrap()
-                .insert(name.clone(), (ty.clone(), VarState::new(*mutable)));
+                .insert(name.clone(), (ty.clone(), state));
             Ok(())
         }
         Stmt::Assign {
@@ -5828,9 +5865,15 @@ fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, f
     for stmt in stmts.iter_mut() {
         let _unsafe_ctx = loop_d > 0 || cond_d > 0;
         match stmt {
-            Stmt::VarDecl { value, move_hint, .. } => {
+            Stmt::VarDecl { value, move_hint, owned, .. } => {
                 if let Expr::Var(src) = value {
-                    if let Some(f) = facts.get(src) {
+                    // v1.21：own 独占声明强制移动语义——无论源 y 之后是否还被引用，
+                    // 都直接转移所有权（use-after-move 已由 check_moved_stmt 保证）。
+                    // 这样两个后端（asm 走 IR / LLVM 走 AST）都读同一个 move_hint，
+                    // 自动跳过 retain，无需为 own 单独改代码生成。
+                    if *owned {
+                        *move_hint = true;
+                    } else if let Some(f) = facts.get(src) {
                         *move_hint = (f.last == *si) && !f.unsafe_ctx;
                     }
                 }

@@ -20,6 +20,16 @@
 
 ---
 
+## [未发布]
+
+### Added
+- **显式独占所有权 `own var`**（开发中）：新增 `own` 关键字，`own var x: T = e;`
+  把编译期自动推断的 Move 策略升级为程序员显式声明的独占转移——强制接管即转移
+  （use-after-move 编译期报错）、离开作用域确定 drop、只能修饰拥有资源的类型。
+  **刻意不引入借用检查器**（无 `&T` / 生命周期 / 别名分析）。语义层强制 `move_hint`
+  与 `mark_moved`，asm / LLVM 两后端复用既有 Move 路径、代码生成零分叉。
+  回归见 `tests/run_tests.sh` R12b 段。
+
 ## [v1.20] — 2026-11-21
 
 > 本版是 **LLVM 可选化 + 默认后端切 asm** 的交付版本：LLVM 变为可选 oracle（`--features llvm`），

@@ -37,6 +37,8 @@ pub enum TokenKind {
     // 关键字
     Var,
     Let,
+    /// v1.21：`own var x: T = e;` 独占所有权声明（强制移动语义 + 确定 drop + use-after-move 检测）。
+    Own,
     Fn,
     Struct,
     If,
@@ -551,6 +553,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
             let kind = match id.as_str() {
                 "var" => TokenKind::Var,
                 "let" => TokenKind::Let,
+                // v1.21：own 独占所有权声明修饰符（own var x: T = e;）。
+                // 把编译期自动推断的 Move 策略升级为程序员显式声明的独占转移，
+                // 不引入借用检查器（无 &T / 生命周期）。
+                "own" => TokenKind::Own,
                 "fn" => TokenKind::Fn,
                 "if" => TokenKind::If,
                 "else" => TokenKind::Else,

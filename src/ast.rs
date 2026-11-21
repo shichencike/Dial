@@ -315,6 +315,9 @@ pub enum Stmt {
         mutable: bool,
         value: Expr,
         move_hint: bool,
+        /// v1.21：`own var x: T = e;` 独占所有权声明。own 变量强制移动语义、
+        /// 离开作用域确定 drop、use-after-move 编译期报错；不引入借用检查器。
+        owned: bool,
         line: usize,
         col: usize,
         /// 标识符**本身**的位置（v0.95）：Hover / 跳转定义用，定位到名字而非语句起点。

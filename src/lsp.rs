@@ -907,6 +907,7 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         // 关键字
         TokenKind::Var
         | TokenKind::Let
+        | TokenKind::Own
         | TokenKind::Fn
         | TokenKind::Struct
         | TokenKind::If
@@ -1018,6 +1019,7 @@ fn fixed_text(kind: &TokenKind) -> Option<&'static str> {
         // ---- 关键字 ----
         TokenKind::Var => "var",
         TokenKind::Let => "let",
+        TokenKind::Own => "own",
         TokenKind::Fn => "fn",
         TokenKind::Struct => "struct",
         TokenKind::If => "if",

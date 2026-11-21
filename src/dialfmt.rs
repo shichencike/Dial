@@ -65,7 +65,7 @@ fn is_kw(s: &str) -> bool {
         s,
         "if" | "else" | "while" | "for" | "in" | "return" | "catch" | "throw" | "try"
             | "as" | "case" | "default" | "break" | "continue" | "fn" | "struct"
-            | "var" | "let" | "import" | "select" | "test"
+            | "var" | "let" | "own" | "import" | "select" | "test"
     )
 }
 

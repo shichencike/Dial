@@ -2332,6 +2332,108 @@ else
 fi
 
 
+# ---- R12b) own 独占所有权：显式转移 + 确定 drop + use-after-move（v1.21） ----
+# own var 把编译期自动推断的 Move 策略升级为程序员显式声明的独占转移：
+# 复用 move_hint 与两后端已验证的 ARC 路径，sema 强制接管即转移（mark_moved）。
+# 不引入借用检查器（无 &T / 生命周期）。覆盖各资源类型、优化级别与负向诊断。
+echo "  -- R12b) own 独占所有权（显式转移 / 确定 drop / use-after-move） --"
+ODIR="${RDIR}/own"; mkdir -p "$ODIR"
+
+cat > "${ODIR}/probe.dial" <<'DIALEOF'
+fn make(): string {
+    own var s: string = "owned-resource";
+    return s;
+}
+fn main(): int {
+    own var a: string = "direct-literal";
+    print(a);
+    var src: int[] = [10, 20, 30];
+    own var b: int[] = src;
+    print(b.get(1));
+    var r: string = make();
+    print(r);
+    own var m: map = new_map();
+    m.put(7, 70);
+    print(m.get(7));
+    print("done");
+    return 0;
+}
+DIALEOF
+
+# 1) 双后端 stdout 逐字一致（own 语义在共享 sema 层，两后端必须一致）。
+${DIALC} build "${ODIR}/probe.dial" --backend llvm -o "${ODIR}/probe_llvm" >/dev/null 2>&1 || rbad "R12b LLVM 编译 own 用例失败"
+${DIALC} build "${ODIR}/probe.dial" --backend asm  -o "${ODIR}/probe_asm"  >/dev/null 2>&1 || rbad "R12b asm 编译 own 用例失败"
+_o_llvm="$( ${ODIR}/probe_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_o_asm="$( ${ODIR}/probe_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_o_exp="direct-literal 20 owned-resource 70 done "
+[ -n "$_o_llvm" ] && [ "$_o_asm" = "$_o_llvm" ] \
+    && rpass "own 各资源类型（string/数组/map/返回值）：双后端 stdout 逐字一致" \
+    || rbad "R12b own 双后端不一致（llvm=[$_o_llvm] asm=[$_o_asm]）"
+[ "$_o_asm" = "$_o_exp" ] \
+    && rpass "own 独占资源的值正确（无 double free / UAF）" \
+    || rbad "R12b own 输出不符预期（got=[$_o_asm] exp=[$_o_exp]）"
+
+# 2) 各优化级别 own 不漂移。
+for _o_opt in "-O0" "-O1" "-O3" "-g -O3"; do
+    ${DIALC} build "${ODIR}/probe.dial" --backend asm -o "${ODIR}/opt_asm" $_o_opt >/dev/null 2>&1 || { rbad "R12b asm 编译 $_o_opt 失败"; continue; }
+    _o_ao="$( ${ODIR}/opt_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    [ "$_o_ao" = "$_o_exp" ] && rpass "own $_o_opt：输出稳定" || rbad "R12b own $_o_opt 输出漂移（got=[$_o_ao]）"
+done
+
+# 3) own 确定 drop：循环内大量创建/作用域末释放，内存与结果均正确。
+cat > "${ODIR}/stress.dial" <<'DIALEOF'
+fn make(): int {
+    own var arr: int[] = [1, 2, 3, 4, 5];
+    return arr.get(4);
+}
+fn main(): int {
+    var total: int = 0;
+    var i: int = 0;
+    while (i < 20000) {
+        total = total + make();
+        i = i + 1;
+    }
+    print(total);
+    return 0;
+}
+DIALEOF
+${DIALC} build "${ODIR}/stress.dial" -o "${ODIR}/stress" >/dev/null 2>&1 || rbad "R12b own stress 编译失败"
+_o_stress="$( ${ODIR}/stress 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+[ "$_o_stress" = "100000 " ] \
+    && rpass "own 20k 次创建/确定 drop：结果正确且无 double free" \
+    || rbad "R12b own stress 输出不符（got=[$_o_stress]）"
+
+# 4) 负向：own use-after-move / own let / own 标量 都必须被 check 拒绝。
+cat > "${ODIR}/bad_uam.dial" <<'DIALEOF'
+fn main(): int {
+    var src: string = "x";
+    own var dst: string = src;
+    print(src);
+    return 0;
+}
+DIALEOF
+cat > "${ODIR}/bad_let.dial" <<'DIALEOF'
+fn main(): int { own let x: string = "x"; return 0; }
+DIALEOF
+cat > "${ODIR}/bad_scalar.dial" <<'DIALEOF'
+fn main(): int { own var n: int = 1; return 0; }
+DIALEOF
+cat > "${ODIR}/bad_own_uam.dial" <<'DIALEOF'
+fn main(): int {
+    own var a: string = "x";
+    own var b: string = a;
+    print(a);
+    return 0;
+}
+DIALEOF
+for _o_bad in bad_uam bad_let bad_scalar bad_own_uam; do
+    if ${DIALC} check "${ODIR}/${_o_bad}.dial" >/dev/null 2>&1; then
+        rbad "R12b own 负向 ${_o_bad} 竟被接受"
+    else
+        rpass "own 负向 ${_o_bad}：编译期拒绝"
+    fi
+done
+
 # ===========================================================================
 echo
 echo "  -- R13) channel 原语族双后端一致性（单线程闭环） --"

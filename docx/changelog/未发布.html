@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 [未发布] · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../rationale.html">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#未发布">[未发布]</a><ul>
+<li><a href="#added">Added</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="未发布">[未发布]</h2>
+<h3 id="added">Added</h3>
+<ul>
+<li><strong>显式独占所有权 <code>own var</code></strong>（开发中）：新增 <code>own</code> 关键字，<code>own var x: T = e;</code>
+  把编译期自动推断的 Move 策略升级为程序员显式声明的独占转移——强制接管即转移
+  （use-after-move 编译期报错）、离开作用域确定 drop、只能修饰拥有资源的类型。
+  <strong>刻意不引入借用检查器</strong>（无 <code>&amp;T</code> / 生命周期 / 别名分析）。语义层强制 <code>move_hint</code>
+  与 <code>mark_moved</code>，asm / LLVM 两后端复用既有 Move 路径、代码生成零分叉。
+  回归见 <code>tests/run_tests.sh</code> R12b 段。</li>
+</ul><p class="note">← 更早：<a href="v1.20.html">v1.20</a> · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.20 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
