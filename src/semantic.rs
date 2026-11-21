@@ -20,6 +20,9 @@ use crate::error::{DialcError, Result};
 #[derive(Debug, Clone)]
 pub struct FuncInfo {
     pub params: Vec<Type>,
+    /// v1.21 consume：与 params 一一对应，true 表示该形参以 own 声明，
+    /// 调用点传实参后该实参变量被 mark_moved（函数接管所有权）。
+    pub own_params: Vec<bool>,
     pub ret: Type,
     /// 默认实参（v1.00）：与 `params` 一一对应；外部包函数一律为全 `None`。
     /// 必填参数个数 = 第一个 `Some` 的下标（默认值必须从末尾连续）。
@@ -3852,6 +3855,7 @@ pub fn analyze(
             f.name.clone(),
             FuncInfo {
                 params: f.params.iter().map(|(_, t)| t.clone()).collect(),
+                own_params: f.own_params.clone(),
                 ret: f.ret.clone(),
                 defaults: f.defaults.clone(),
                 // Dial 自身函数的 `...xs: T` 已脱糖成 T[]；只有包 extern 才可能是 C 变参。
@@ -3867,6 +3871,19 @@ pub fn analyze(
         let empty: Scopes<VarState> = vec![HashMap::new()];
         for (i, d) in f.defaults.iter().enumerate() {
             if let Some(e) = d {
+                // v1.21 Fail-Fast：`own` 形参不能有默认值——默认值是编译期常量，
+                // 调用点不传参时无「所有权」可移交，consume 语义无从成立。
+                if f.own_params.get(i).copied().unwrap_or(false) {
+                    return Err(DialcError::new(
+                        format!(
+                            "语义错误：函数 '{}' 第 {} 个形参声明为 `own`，不能有默认值\
+                             （默认值是常量，无可移交的所有权）",
+                            f.name,
+                            i + 1
+                        ),
+                        f.line, f.col,
+                    ));
+                }
                 let dt = type_of(e, &empty, &funcs, &structs)?;
                 let pt = &f.params[i].1;
                 if !types_compatible(&dt, pt) {
@@ -4058,9 +4075,23 @@ fn check_function(
     )?;
 
     let mut scopes: Scopes<VarState> = vec![HashMap::new()];
-    for (pname, pty) in &f.params {
-        // 形参一律按可变登记（与既有行为一致：形参可在函数体内被重新赋值）。
-        scopes[0].insert(pname.clone(), (pty.clone(), VarState::new(true)));
+    for (i, (pname, pty)) in f.params.iter().enumerate() {
+        // v1.21 own 形参：独占所有权只对拥有资源的类型有意义，标量/struct 拒绝。
+        if f.own_params.get(i).copied().unwrap_or(false) && is_copy_type(pty) {
+            return Err(DialcError::new(
+                format!(
+                    "语义错误：形参 '{}' 声明为 `own`，但类型 '{}' 是无需释放的值类型；\
+                     own 只能修饰拥有资源的类型（string / bytes / 数组 / map / file / rawptr 等）",
+                    pname, pty.display()
+                ),
+                f.line, f.col,
+            ));
+        }
+        // own 形参登记为独占状态：函数体内若被 move 给他人，`is_own` 能识别并强制转移。
+        // 普通形参一律按可变登记（与既有行为一致：形参可在函数体内被重新赋值）。
+        let is_own = f.own_params.get(i).copied().unwrap_or(false);
+        let state = if is_own { VarState::new_owned() } else { VarState::new(true) };
+        scopes[0].insert(pname.clone(), (pty.clone(), state));
     }
     // goto / label 的三条死锁在**函数级**统一校验（需要看到全部标签才能判断
     // 目标是否存在、是否同块、是否跨越 try / with 边界）。
@@ -4378,8 +4409,21 @@ fn check_moved_expr(
                 }
                 return Ok(());
             }
+            // 先校验全部实参此前未被转移（转移本身不能让非法使用蒙混过关）。
             for a in args {
                 check_moved_expr(a, scopes, funcs, structs, line, col)?;
+            }
+            // v1.21 consume 形参：查被调函数的 own_params，对相应位置的实参变量
+            // 当场 mark_moved（函数接管所有权，调用后实参不可再用）。
+            // 只对具名实参变量生效；表达式实参（字面量/临时）无需记账。
+            if let Some(fi) = funcs.get(name) {
+                for (i, a) in args.iter().enumerate() {
+                    if fi.own_params.get(i).copied().unwrap_or(false) {
+                        if let Expr::Var(v) = a {
+                            mark_moved(scopes, v);
+                        }
+                    }
+                }
             }
             Ok(())
         }

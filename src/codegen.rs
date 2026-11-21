@@ -2143,6 +2143,9 @@ impl<'ctx> CodeGen<'ctx> {
             );
         }
         for (i, (pname, pty)) in f.params.iter().enumerate() {
+            // v1.21 consume 形参：`own x: T` 由调用方移交所有权，入口**不** +1
+            // （普通参数共享所有权→入口 +1、退出 -1；own 直接接管调用方那份）。
+            let is_own_param = f.own_params.get(i).copied().unwrap_or(false);
             let llvm_ty = self.dialc_type_to_llvm(pty);
             let ptr = self.alloca_in_entry(function, llvm_ty, pname);
             // v1.04：入口把 C ABI 宽度（bool=i32 / byte=i8）转回 Dial 内部宽度
@@ -2156,11 +2159,13 @@ impl<'ctx> CodeGen<'ctx> {
             // 形参取得共享所有权（进入时对称 +1，退出时 -1）：
             //   - 字符串/数组形参：直接 retain 指针；
             //   - 结构体形参：值拷贝本身不带所有权，需递归 retain 其中的堆字段。
-            if Self::is_heap_type(pty) {
-                let v = self.builder.build_load(self.i8ptr(), ptr, "parm").unwrap();
-                self.retain(pty, v);
-            } else if matches!(pty, Type::Struct(_)) {
-                self.retain_struct_fields(pty, ptr, structs);
+            if !is_own_param {
+                if Self::is_heap_type(pty) {
+                    let v = self.builder.build_load(self.i8ptr(), ptr, "parm").unwrap();
+                    self.retain(pty, v);
+                } else if matches!(pty, Type::Struct(_)) {
+                    self.retain_struct_fields(pty, ptr, structs);
+                }
             }
         }
         for stmt in &f.body {
@@ -5429,6 +5434,16 @@ impl<'ctx> CodeGen<'ctx> {
                                 if let Expr::ArrayLit(_, Some(et)) = a {
                                     // `expect=Some` 是脱糖标记的临时数组（源码手写为 None）。
                                     temp_arrays.push((v, Type::Array(Box::new((**et).clone()))));
+                                }
+                                // v1.21 consume 形参：own 实参变量在调用点标 moved
+                                // （所有权随调用移交）。被调方入口对 own 参数跳过 +1
+                                // retain，退出时 -1，与此处「调用方不再释放」配对。
+                                if let Some(inf) = info {
+                                    if inf.own_params.get(i).copied().unwrap_or(false) {
+                                        if let Expr::Var(vn) = a {
+                                            self.mark_moved(scopes, vn);
+                                        }
+                                    }
                                 }
                                 arg_vals.push(v);
                             }

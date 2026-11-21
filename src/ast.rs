@@ -572,6 +572,10 @@ pub struct SelectArm {
 pub struct Func {
     pub name: String,
     pub params: Vec<(String, Type)>,
+    /// v1.21 完整 consume：与 `params` 一一对应，`true` 表示该形参以 `own` 声明
+    /// （函数接管实参所有权，调用点传参后实参变量被标记 moved，不可再用）。
+    /// 只影响 sema 的所有权记账，不改变 ABI（参数传递仍是既有 ARC 语义）。
+    pub own_params: Vec<bool>,
     /// 默认实参（v1.00）：与 `params` 一一对应，`None` 表示必填形参。
     /// 带默认值的形参必须连续位于参数列表末尾（parser 强制）；调用点按声明顺序补齐。
     pub defaults: Vec<Option<Expr>>,

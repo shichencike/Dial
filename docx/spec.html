@@ -138,7 +138,7 @@
 <li><a href="#141-不透明指针契约">14.1 不透明指针契约</a></li>
 <li><a href="#142-引用计数对象的布局">14.2 引用计数对象的布局</a></li>
 <li><a href="#143-编译期三种绑定策略">14.3 编译期三种绑定策略</a></li>
-<li><a href="#1431-显式独占所有权-own-var开发中">14.3.1 显式独占所有权 own var（开发中）</a></li>
+<li><a href="#1431-完整-consume-所有权体系-own开发中">14.3.1 完整 consume 所有权体系 own（开发中）</a></li>
 <li><a href="#144-栈分配与逃逸分析">14.4 栈分配与逃逸分析</a></li>
 <li><a href="#145-cow-的触发时机">14.5 COW 的触发时机</a></li>
 <li><a href="#146-自赋值安全">14.6 自赋值安全</a></li>
@@ -3175,25 +3175,42 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 <p>前两种在编译期即消除了运行时开销；只有第三种可能真的复制内存。</p>
 <p>判定"最后一次引用"时，位于循环或分支内的引用被视为<strong>不安全上下文</strong>，
 不参与移动判定（因为该语句可能被执行零次或多次）。</p>
-<h3 id="1431-显式独占所有权-own-var开发中">14.3.1 显式独占所有权 <code>own var</code>（开发中）</h3>
-<p>上面三种策略是<strong>编译器自动推断</strong>的：程序员无法强制「这个资源必须独占转移」。
-<code>own</code> 修饰符把 Move 策略升级为<strong>程序员显式声明的独占所有权</strong>：</p>
-<pre><code class="language-dial">own var buf: int[] = [1, 2, 3];   // buf 独占这块数组
+<h3 id="1431-完整-consume-所有权体系-own开发中">14.3.1 完整 consume 所有权体系 <code>own</code>（开发中）</h3>
+<p>上面三种策略是<strong>编译器自动推断</strong>的：<code>own</code> 把它升级为<strong>程序员显式声明的独占所有权</strong>。
+这是一套完整 consume 体系（<strong>刻意不引入借用检查器</strong>——没有 <code>&amp;T</code>、没有生命周期、没有别名静态分析）：</p>
+<pre><code class="language-dial">own var buf: int[] = [1, 2, 3];   // 独占变量
 var src: string = &quot;data&quot;;
-own var moved: string = src;       // 强制把 src 的所有权转移给 moved
-print(src);                        // ❌ 编译错误：src 已转移，不可再用
+own var moved: string = src;       // own 声明接管 → src 当场转移
+print(src);                        // ❌ 编译错误：src 已转移
+
+var alias: string = moved;         // own 变量被普通变量接管 → moved 当场转移（真独占）
+print(moved);                      // ❌ 编译错误：独占变量 moved 已转移
+
+fn consume(own s: string): string { return s + &quot;!&quot;; }
+var arg: string = &quot;hello&quot;;
+var out: string = consume(arg);    // own 形参接管 arg → arg 当场转移
+print(arg);                        // ❌ 编译错误：arg 已转移
 </code></pre>
-<p>规则（<strong>刻意不引入借用检查器</strong>——没有 <code>&amp;T</code>、没有生命周期、没有别名静态分析）：</p>
+<p>规则：</p>
 <ul>
-<li><strong>独占转移</strong>：<code>own var x = y</code> 无论 <code>y</code> 之后是否还被引用，都当场把 <code>y</code> 标记为已转移；
-  此后对 <code>y</code> 的任何读写都在编译期被拒绝（use-after-move）。</li>
+<li><strong>真独占（双向转移）</strong>：<code>own var x = y</code>（我接管 y）与 <code>var z = x</code>（x 是 own，他人接管）
+  都是所有权转移——源当场标 moved，此后任何读写编译期拒绝（use-after-move）。
+  这修复了早期版本「own 可被静默别名」的单向缺陷。</li>
+<li><strong>零开销</strong>：own 转移的汇编<strong>零 <code>retain</code></strong>（<code>need_retain = !move_hint &amp;&amp; ...</code>），
+  所有权随位模式直接移交；作用域末仅一次 <code>release</code>。同一修复也让普通变量的
+  「最后一次引用 move」优化在 asm 后端真正生效（此前被 <code>is_copy</code> 短路而失效）。</li>
+<li><strong>own 函数参数</strong>：<code>fn f(own x: T)</code> 声明 consume 形参——调用点实参变量当场转移，
+  被调方入口跳过 <code>+1 retain</code>（直接接管），退出时 <code>-1 release</code>，两后端配对无泄漏。
+  普通参数不受影响（入口 <code>+1</code>、退出 <code>-1</code>，调用后实参仍可用）。</li>
 <li><strong>确定 drop</strong>：own 变量离开作用域时确定释放（复用 §14.4 的 ARC 作用域清理），
   也可显式 <code>drop(x)</code> 提前释放。</li>
 <li><strong>仅用于拥有资源的类型</strong>：<code>string</code> / <code>bytes</code> / 数组 / <code>map</code> / <code>file</code> / <code>thread</code> /
-  <code>rawptr</code> 等；对 <code>int</code> / 结构体等无需释放的值类型写 <code>own</code> 是编译错误。</li>
-<li><strong>只能修饰 <code>var</code></strong>：<code>own let</code> 是语法错误（独占资源通常需要可变性以便移交/释放）。</li>
+  <code>rawptr</code> 等；对 <code>int</code> / 结构体等无需释放的值类型、own 默认参数写 <code>own</code> 是编译错误。</li>
+<li><strong>只能修饰 <code>var</code> 与函数形参</strong>：<code>own let</code> 是语法错误；Dial struct 为值语义，
+  字段不支持 <code>own</code>（整块可自由复制，字段独占无独立含义），写 <code>own</code> 字段 Fail-Fast 并给出替代方案。</li>
 <li><strong>实现复用</strong>：<code>own</code> 在语义层强制 <code>move_hint</code> 与 <code>mark_moved</code>，两个后端（asm / LLVM）
-  读取同一份 <code>move_hint</code>，因此代码生成路径与已验证的 Move 策略完全一致，无需分叉。</li>
+  读取同一份 <code>move_hint</code>，因此代码生成路径与已验证的 Move 策略完全一致，无需分叉。
+  回归见 <code>tests/run_tests.sh</code> R12b / R12c 段。</li>
 </ul>
 <h3 id="144-栈分配与逃逸分析">14.4 栈分配与逃逸分析</h3>
 <ul>

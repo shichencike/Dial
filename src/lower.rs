@@ -599,7 +599,11 @@ impl<'a> Lower<'a> {
             self.emit(IrInst::Load { dst: argv_v, ptr: v_ptr, ty: IrType::Ptr });
             self.emit(IrInst::EnvInit { argc: Value::Reg(argc_v), argv: Value::Reg(argv_v) });
         } else {
-            for (n, t) in &f.params {
+            for (i, (n, t)) in f.params.iter().enumerate() {
+                // v1.21 consume 形参：`own x: T` 由调用方移交所有权，入口**不** retain
+                // （普通参数是共享所有权→入口 +1、退出 -1；own 参数直接接管调用方那份）。
+                // 退出时 release_scope 仍会 -1，与调用方 mark_moved 后不再 release 正好配对。
+                let is_own_param = f.own_params.get(i).copied().unwrap_or(false);
                 // 内部宽度统一用 reg_ir（I64），栈槽 8 字节；emit 的 prologue 把
                 // 边界宽度的实参寄存器填进来（写 32/8 位会自动零扩展到 64 位）。
                 if let Type::Struct(sn) = t {
@@ -625,16 +629,22 @@ impl<'a> Lower<'a> {
                     // 值拷贝本身不带所有权：内容区里的堆字段需对称 +1（入口），
                     // 作用域退出时由 release_scope 递归 -1（与 LLVM 的
                     // retain_struct_fields / release_struct_fields 对称）。
-                    self.emit(IrInst::StructRetain { ptr: content, struct_name: sn.clone() });
+                    // own 形参跳过入口 +1（接管调用方那份）。
+                    if !is_own_param {
+                        self.emit(IrInst::StructRetain { ptr: content, struct_name: sn.clone() });
+                    }
                     continue;
                 }
                 let slot = self.emit_alloca(reg_ir(t));
                 let is_h = rc_kind(t).is_some();
                 self.declare(n, Local { ptr: slot, ty: reg_ir(t), dt: t.clone(), is_handle: is_h, moved: false });
                 self.param_slots.push(slot);
-                // 堆形参入口 retain（与调用方共享所有权，对称借用）。
-                if let Some(k) = rc_kind(t) {
-                    self.emit(IrInst::RcRetain { ptr: slot, kind: k });
+                // 堆形参入口 retain（与调用方共享所有权，对称借用）；
+                // own 形参跳过——所有权已由调用方移交，本函数退出时负责释放。
+                if !is_own_param {
+                    if let Some(k) = rc_kind(t) {
+                        self.emit(IrInst::RcRetain { ptr: slot, kind: k });
+                    }
                 }
             }
         }
@@ -2557,6 +2567,15 @@ impl<'a> Lower<'a> {
             } else {
                 sig.params.get(i).cloned().unwrap_or(Type::Int)
             };
+            // v1.21 consume 形参：own 实参变量在调用点标 moved（所有权随调用移交），
+            // 这样作用域退出时 release_scope 不再释放它——被调方入口接管（且不 +1
+            // retain），退出时 -1，正好配对。与 sema check_moved_expr 的 mark_moved
+            // 严格对应（那里负责拒绝调用后使用，这里负责 ARC 记账）。
+            if sig.own_params.get(i).copied().unwrap_or(false) {
+                if let Expr::Var(vn) = a {
+                    if let Some(l) = self.lookup_mut(vn) { l.moved = true; }
+                }
+            }
             let v = self.lower_call_arg(a, &at)?;
             arg_vals.push(v);
             arg_tys.push(param_ir(&at));

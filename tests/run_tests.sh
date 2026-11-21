@@ -2434,6 +2434,118 @@ for _o_bad in bad_uam bad_let bad_scalar bad_own_uam; do
     fi
 done
 
+# ---- R12c) 方案C 完整 consume：own 函数参数 + 真独占 + 零开销（v1.21） ----
+echo "  -- R12c) 完整 consume（own 参数 / 别名即转移 / 零 retain） --"
+
+# 1) own 函数参数：调用点移交实参所有权，函数内独占，双后端逐字一致。
+cat > "${ODIR}/param.dial" <<'DIALEOF'
+fn consume(own s: string): string { return s + "!"; }
+fn main(): int {
+    var data: string = "hello";
+    var r: string = consume(data);   // data 被 consume 接管
+    print(r);
+    return 0;
+}
+DIALEOF
+${DIALC} build "${ODIR}/param.dial" --backend llvm -o "${ODIR}/param_llvm" >/dev/null 2>&1 || rbad "R12c LLVM 编译 own 参数失败"
+${DIALC} build "${ODIR}/param.dial" --backend asm  -o "${ODIR}/param_asm"  >/dev/null 2>&1 || rbad "R12c asm 编译 own 参数失败"
+_p_llvm="$( ${ODIR}/param_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+_p_asm="$( ${ODIR}/param_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+[ -n "$_p_llvm" ] && [ "$_p_asm" = "$_p_llvm" ] && [ "$_p_asm" = "hello! " ] \
+    && rpass "own 函数参数：双后端逐字一致且值正确" \
+    || rbad "R12c own 参数不一致（llvm=[$_p_llvm] asm=[$_p_asm]）"
+
+# 2) 普通参数不被误伤：调用后实参仍可用（own 只约束显式声明者）。
+cat > "${ODIR}/shared.dial" <<'DIALEOF'
+fn peek(s: string): int { return 1; }
+fn main(): int {
+    var data: string = "hello";
+    var a: int = peek(data);
+    var b: int = peek(data);
+    print(data);
+    return 0;
+}
+DIALEOF
+${DIALC} build "${ODIR}/shared.dial" -o "${ODIR}/shared" >/dev/null 2>&1 || rbad "R12c 普通参数编译失败"
+[ "$( ${ODIR}/shared 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )" = "hello " ] \
+    && rpass "普通参数语义不误伤：调用后实参仍可用" \
+    || rbad "R12c 普通参数被 own 规则误伤"
+
+# 3) own 参数内存稳定：10k 次 consume 无 double-free / 泄漏增长。
+cat > "${ODIR}/param_stress.dial" <<'DIALEOF'
+fn make(s: string): string { return s + "x"; }
+fn consume(own s: string): string { return s + "!"; }
+fn main(): int {
+    var i: int = 0;
+    while (i < 10000) {
+        var src: string = make("base");
+        var r: string = consume(src);
+        i = i + 1;
+    }
+    print(i);
+    return 0;
+}
+DIALEOF
+${DIALC} build "${ODIR}/param_stress.dial" -o "${ODIR}/param_stress" >/dev/null 2>&1 || rbad "R12c own 参数 stress 编译失败"
+[ "$( ${ODIR}/param_stress 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )" = "10000 " ] \
+    && rpass "own 参数 10k 次移交：无 double-free，结果正确" \
+    || rbad "R12c own 参数 stress 结果异常"
+
+# 4) 零 retain 静态门禁：own 转移与普通 move 的汇编不得含 dial_string_retain。
+cat > "${ODIR}/zero_own.dial" <<'DIALEOF'
+fn main(): int {
+    var src: string = "payload";
+    own var dst: string = src;
+    print(dst);
+    return 0;
+}
+DIALEOF
+${DIALC} build "${ODIR}/zero_own.dial" -o "${ODIR}/zero_own" --no-link -O0 >/dev/null 2>&1 || rbad "R12c 零 retain 用例编译失败"
+# grep -c 无匹配时输出 "0" 且退出码 1；命令替换取的是 stdout，故不加 `|| echo`（
+# 否则会拼成 "0\n1"）。用 `|| true` 仅抑制 set -e 的干扰。
+_ret="$( grep -c 'call.*dial_string_retain' "${ODIR}/zero_own.s" 2>/dev/null || true )"
+[ "$_ret" = "0" ] \
+    && rpass "零开销：own 独占转移汇编零 dial_string_retain（假 move 已修）" \
+    || rbad "R12c own 转移仍 emit retain（计数=$_ret，假 move 回归）"
+
+# 5) 负向：own 参数调用后用实参 / 真独占别名后用源 / own 标量参数 / own struct 字段 / own 默认值。
+cat > "${ODIR}/bad_param_uam.dial" <<'DIALEOF'
+fn consume(own s: string): string { return s; }
+fn main(): int {
+    var data: string = "x";
+    var r: string = consume(data);
+    print(data);
+    return 0;
+}
+DIALEOF
+cat > "${ODIR}/bad_alias.dial" <<'DIALEOF'
+fn main(): int {
+    own var a: string = "x";
+    var alias: string = a;      // 独占资源被接管 → a 当场 moved（真独占）
+    print(a);
+    return 0;
+}
+DIALEOF
+cat > "${ODIR}/bad_param_scalar.dial" <<'DIALEOF'
+fn f(own x: int): int { return x; }
+fn main(): int { return f(1); }
+DIALEOF
+cat > "${ODIR}/bad_field.dial" <<'DIALEOF'
+struct Box { own var data: string; }
+fn main(): int { return 0; }
+DIALEOF
+cat > "${ODIR}/bad_param_default.dial" <<'DIALEOF'
+fn f(own s: string = "d"): int { return 0; }
+fn main(): int { return f(); }
+DIALEOF
+for _o_bad in bad_param_uam bad_alias bad_param_scalar bad_field bad_param_default; do
+    if ${DIALC} check "${ODIR}/${_o_bad}.dial" >/dev/null 2>&1; then
+        rbad "R12c 负向 ${_o_bad} 竟被接受"
+    else
+        rpass "完整 consume 负向 ${_o_bad}：编译期拒绝"
+    fi
+done
+
 # ===========================================================================
 echo
 echo "  -- R13) channel 原语族双后端一致性（单线程闭环） --"

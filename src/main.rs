@@ -1207,6 +1207,7 @@ pub fn resolve_imports(
                 f.name.clone(),
                 semantic::FuncInfo {
                     defaults: vec![None; params.len()],
+                    own_params: vec![false; params.len()], // extern C 无 Dial consume 语义
                     params,
                     ret,
                     // C 风格异构变参是 `.diali` 的 FFI 特例；Dial 自身函数永远为 false。
@@ -2400,6 +2401,7 @@ fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, Strin
             e.name.clone(),
             semantic::FuncInfo {
                 params: e.params.iter().map(|(_, t)| t.clone()).collect(),
+                own_params: vec![false; e.params.len()], // extern C 无 Dial consume 语义
                 ret: e.ret.clone(),
                 defaults: vec![None; e.params.len()],
                 variadic: e.variadic,
@@ -3519,6 +3521,7 @@ fn cmd_test(args: &[String]) {
         prog.functions.push(ast::Func {
             name: "main".to_string(),
             params: Vec::new(),
+            own_params: Vec::new(),
             defaults: Vec::new(),
             variadic: None,
             param_pos: Vec::new(),

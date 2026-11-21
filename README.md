@@ -1834,29 +1834,46 @@ Sema 阶段对每条 `let/var x = y;` 做数据流分析，判定下列三种策
 判定"最后一次引用"时，位于循环或分支内的引用被视为**不安全上下文**，
 不参与移动判定（因为该语句可能被执行零次或多次）。
 
-### 14.3.1 显式独占所有权 `own var`（开发中）
+### 14.3.1 完整 consume 所有权体系 `own`（开发中）
 
-上面三种策略是**编译器自动推断**的：程序员无法强制「这个资源必须独占转移」。
-`own` 修饰符把 Move 策略升级为**程序员显式声明的独占所有权**：
+上面三种策略是**编译器自动推断**的：`own` 把它升级为**程序员显式声明的独占所有权**。
+这是一套完整 consume 体系（**刻意不引入借用检查器**——没有 `&T`、没有生命周期、没有别名静态分析）：
 
 ```dial
-own var buf: int[] = [1, 2, 3];   // buf 独占这块数组
+own var buf: int[] = [1, 2, 3];   // 独占变量
 var src: string = "data";
-own var moved: string = src;       // 强制把 src 的所有权转移给 moved
-print(src);                        // ❌ 编译错误：src 已转移，不可再用
+own var moved: string = src;       // own 声明接管 → src 当场转移
+print(src);                        // ❌ 编译错误：src 已转移
+
+var alias: string = moved;         // own 变量被普通变量接管 → moved 当场转移（真独占）
+print(moved);                      // ❌ 编译错误：独占变量 moved 已转移
+
+fn consume(own s: string): string { return s + "!"; }
+var arg: string = "hello";
+var out: string = consume(arg);    // own 形参接管 arg → arg 当场转移
+print(arg);                        // ❌ 编译错误：arg 已转移
 ```
 
-规则（**刻意不引入借用检查器**——没有 `&T`、没有生命周期、没有别名静态分析）：
+规则：
 
-- **独占转移**：`own var x = y` 无论 `y` 之后是否还被引用，都当场把 `y` 标记为已转移；
-  此后对 `y` 的任何读写都在编译期被拒绝（use-after-move）。
+- **真独占（双向转移）**：`own var x = y`（我接管 y）与 `var z = x`（x 是 own，他人接管）
+  都是所有权转移——源当场标 moved，此后任何读写编译期拒绝（use-after-move）。
+  这修复了早期版本「own 可被静默别名」的单向缺陷。
+- **零开销**：own 转移的汇编**零 `retain`**（`need_retain = !move_hint && ...`），
+  所有权随位模式直接移交；作用域末仅一次 `release`。同一修复也让普通变量的
+  「最后一次引用 move」优化在 asm 后端真正生效（此前被 `is_copy` 短路而失效）。
+- **own 函数参数**：`fn f(own x: T)` 声明 consume 形参——调用点实参变量当场转移，
+  被调方入口跳过 `+1 retain`（直接接管），退出时 `-1 release`，两后端配对无泄漏。
+  普通参数不受影响（入口 `+1`、退出 `-1`，调用后实参仍可用）。
 - **确定 drop**：own 变量离开作用域时确定释放（复用 §14.4 的 ARC 作用域清理），
   也可显式 `drop(x)` 提前释放。
 - **仅用于拥有资源的类型**：`string` / `bytes` / 数组 / `map` / `file` / `thread` /
-  `rawptr` 等；对 `int` / 结构体等无需释放的值类型写 `own` 是编译错误。
-- **只能修饰 `var`**：`own let` 是语法错误（独占资源通常需要可变性以便移交/释放）。
+  `rawptr` 等；对 `int` / 结构体等无需释放的值类型、own 默认参数写 `own` 是编译错误。
+- **只能修饰 `var` 与函数形参**：`own let` 是语法错误；Dial struct 为值语义，
+  字段不支持 `own`（整块可自由复制，字段独占无独立含义），写 `own` 字段 Fail-Fast 并给出替代方案。
 - **实现复用**：`own` 在语义层强制 `move_hint` 与 `mark_moved`，两个后端（asm / LLVM）
   读取同一份 `move_hint`，因此代码生成路径与已验证的 Move 策略完全一致，无需分叉。
+  回归见 `tests/run_tests.sh` R12b / R12c 段。
 
 ### 14.4 栈分配与逃逸分析
 

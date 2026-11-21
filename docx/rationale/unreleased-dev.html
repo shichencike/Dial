@@ -71,6 +71,7 @@
 <li><a href="#v110-尝试并回退pow2-除法运行时符号快路径b08-负收益零留痕">v1.10 尝试并回退：pow2 除法运行时符号快路径（b08 负收益，零留痕）</a></li>
 <li><a href="#v120-发布tag-ci-签名阶段卡死-18-分钟定位与修复cipher-w">v1.20 发布：tag CI 签名阶段卡死 &gt;18 分钟定位与修复（cipher /w）</a></li>
 <li><a href="#own-独占所有权显式转移但不引入借用检查器">own 独占所有权：显式转移但不引入借用检查器</a></li>
+<li><a href="#方案-c-完整-consume-体系程序员视角对抗测试驱动的-p0-修复">方案 C 完整 consume 体系：程序员视角对抗测试驱动的 P0 修复</a></li>
 </ul>
 </li>
 </ul>
@@ -4091,7 +4092,39 @@ b12 互递归闭式、b08/b05 算术深度优化、b22 substring C runtime、GRA
 20k 次创建/确定 drop 无 double free、4 类负向编译期拒绝）；own 数组/返回值移交 10~20 万次
 峰值 RSS 稳定无泄漏。</p>
 <p><strong>范围</strong>：本次只交付代码 + 测试 + 文档（CHANGELOG <code>[未发布]</code>、README §14.3.1），<strong>不单独发版</strong>，
-版本号保持 v1.20，已发布的 tag v1.2 不受影响。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+版本号保持 v1.20，已发布的 tag v1.2 不受影响。</p>
+<hr />
+<h2 id="方案-c-完整-consume-体系程序员视角对抗测试驱动的-p0-修复">方案 C 完整 consume 体系：程序员视角对抗测试驱动的 P0 修复</h2>
+<p><strong>触发</strong>：用户要求「以程序员视角测试 own，看有什么问题与缺点」。写了 13 组对抗用例
+（别名/循环/分支/二次转移/defer/提前 return/数组元素/参数/字段），发现 own 是
+「名为独占、实为单向 move 标记」的半成品。</p>
+<p><strong>发现的两个 P0（已修）</strong>：
+1. <strong>假 move（零开销承诺落空）</strong>：asm 后端 <code>need_retain = is_copy || (borrowed &amp;&amp; !move_hint)</code>
+   中 <code>is_copy</code> 对 <code>Expr::Var/Field/Deref</code> 恒 true，短路 <code>move_hint</code>，own 转移与普通
+   最后引用 move 都仍 emit retain。汇编实证：own 转移 retain=1、三变量链 retain=2，
+   和普通变量绑定逐字节相同。对齐 LLVM <code>if !move_hint { retain_if_borrowed }</code>，改为
+   <code>need_retain = !move_hint &amp;&amp; (is_copy || borrowed)</code>。修复后 retain 计数 own/普通/链
+   全部归 0、release 恒 1。<strong>额外收益</strong>：修好了普通变量 move 优化在 asm 侧长期失效的 bug。
+2. <strong>单向独占（own 可被静默别名）</strong>：<code>own var a; var alias = a</code> 后 a 仍可用（输出两个
+   secret），own 退化为普通 var。根因：普通 var 接管 own 源时三策略自动推断（源后面还用
+   就不 move），且 sema/lowering 都没把 own 源标转移。新增完整 consume：
+   - sema <code>check_moved_stmt</code>：own 声明接管源、或 own 变量被赋值给他人 → 当场 <code>mark_moved</code> 源；
+   - <code>set_moves</code> + 新增 <code>collect_own_names</code>：源是 own → 强制 <code>move_hint=true</code>；
+   - 两套记账（sema moved 拒绝使用 / lowering move_hint 控制 retain 与 release 责任）严格配对。
+   实测 own→别名→返回 10 万次 RSS 稳定 40MB 无 double-free。</p>
+<p><strong>own 函数参数</strong>：AST <code>Func.own_params</code> / <code>FuncInfo.own_params</code>（与 params 一一对应的 bool
+向量），调用点 sema <code>mark_moved</code> 实参 + 两后端 lowering 标 <code>Local.moved</code>，被调方入口对
+own 参数跳过 <code>+1 retain</code>（退出仍 <code>-1 release</code>），所有权从调用方转移到被调方。own 标量参数
+/own 默认参数 Fail-Fast 拒绝。<strong>own struct 字段</strong>：Dial struct 为值语义（整块可自由复制，
+堆字段由 <code>retain_struct_fields</code> 整块管理），单字段独占无独立含义，parser 明确 Fail-Fast
+拒绝并给出替代方案（own var / own 参数），绝不静默接受虚假承诺。</p>
+<p><strong>为何不引入借用检查器</strong>：own 提供转移语义（谁拥有/何时释放/转移后禁用），不是借用语义
+（谁能借/借多久）。ARC+COW 已保证别名安全，追加 <code>&amp;T</code>/生命周期分析只增复杂度、违背
+「零 GC 停顿、编译期确定性内存」宪法。</p>
+<p><strong>验证</strong>：双配置编译零错误零警告；own 参数 10k 次移交双后端无 double-free；own 标量参数/
+字段/默认值/调用后用实参/别名后用源 5 类负向全部编译期拒绝；普通参数语义零回归；
+全量回归 EXIT=0、1044 项全绿（R12c 新增 13 项：own 参数双后端一致、普通参数不误伤、
+10k 次移交、零 retain 静态门禁、5 类负向）；版本/链接门禁全绿。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

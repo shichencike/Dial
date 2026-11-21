@@ -30,6 +30,25 @@
   与 `mark_moved`，asm / LLVM 两后端复用既有 Move 路径、代码生成零分叉。
   回归见 `tests/run_tests.sh` R12b 段。
 
+### Fixed / Added（方案 C：完整 consume 体系）
+
+- **修「假 move」——own 转移零开销承诺落空（P0）**：程序员视角对抗测试发现 asm 后端
+  `need_retain = is_copy || (borrowed && !move_hint)` 中 `is_copy` 对 `Expr::Var/Field/Deref`
+  恒为 true，短路了 `move_hint`，导致 own 转移与普通「最后引用 move」都仍 emit `retain`
+  （实测 own 转移 retain=1，与 LLVM 普通绑定无差异）。对齐 LLVM `if !move_hint` 改为
+  `need_retain = !move_hint && (is_copy || borrowed)`。实测 retain 计数：普通 move 1→0、
+  own move 1→0、三变量链 2→0，release 恒为 1。**顺带修好普通变量 move 优化在 asm 侧长期失效**。
+- **修「单向独占」——own 可被静默别名（P0）**：own 变量被普通 `var` 接管时源未标 moved，
+  之后仍可用，own 退化为普通 var。新增完整 consume：sema `check_moved_stmt` 在 own 声明接管
+  源、或 own 变量被赋值给他人时当场 `mark_moved` 源；`set_moves` 中源是 own 则强制
+  `move_hint=true`（新增 `collect_own_names` 从 AST 收集 own 集合）。sema moved 与 lowering
+  move_hint 两套记账严格配对，避免 double-free。实测 own→别名→返回 10 万次 RSS 稳定。
+- **own 函数参数**：`fn f(own x: T)` 声明 consume 形参（AST `Func.own_params` / `FuncInfo.own_params`
+  与 params 一一对应）。调用点 sema 对实参 `mark_moved`、两后端 lowering/gen_call 标 `Local.moved`
+  并让被调方入口跳过 `+1 retain`（退出 `-1 release`），所有权从调用方转移到被调方。
+  own 标量参数 / own 默认参数 / own struct 字段均 Fail-Fast 拒绝（后者因 Dial struct 值语义
+  无法维持字段独占）。普通参数语义零回归。回归见 `tests/run_tests.sh` R12c 段（新增 13 项）。
+
 ## [v1.20] — 2026-11-21
 
 > 本版是 **LLVM 可选化 + 默认后端切 asm** 的交付版本：LLVM 变为可选 oracle（`--features llvm`），

@@ -4033,3 +4033,42 @@ b12 互递归闭式、b08/b05 算术深度优化、b22 substring C runtime、GRA
 
 **范围**：本次只交付代码 + 测试 + 文档（CHANGELOG `[未发布]`、README §14.3.1），**不单独发版**，
 版本号保持 v1.20，已发布的 tag v1.2 不受影响。
+
+---
+
+## 方案 C 完整 consume 体系：程序员视角对抗测试驱动的 P0 修复
+
+**触发**：用户要求「以程序员视角测试 own，看有什么问题与缺点」。写了 13 组对抗用例
+（别名/循环/分支/二次转移/defer/提前 return/数组元素/参数/字段），发现 own 是
+「名为独占、实为单向 move 标记」的半成品。
+
+**发现的两个 P0（已修）**：
+1. **假 move（零开销承诺落空）**：asm 后端 `need_retain = is_copy || (borrowed && !move_hint)`
+   中 `is_copy` 对 `Expr::Var/Field/Deref` 恒 true，短路 `move_hint`，own 转移与普通
+   最后引用 move 都仍 emit retain。汇编实证：own 转移 retain=1、三变量链 retain=2，
+   和普通变量绑定逐字节相同。对齐 LLVM `if !move_hint { retain_if_borrowed }`，改为
+   `need_retain = !move_hint && (is_copy || borrowed)`。修复后 retain 计数 own/普通/链
+   全部归 0、release 恒 1。**额外收益**：修好了普通变量 move 优化在 asm 侧长期失效的 bug。
+2. **单向独占（own 可被静默别名）**：`own var a; var alias = a` 后 a 仍可用（输出两个
+   secret），own 退化为普通 var。根因：普通 var 接管 own 源时三策略自动推断（源后面还用
+   就不 move），且 sema/lowering 都没把 own 源标转移。新增完整 consume：
+   - sema `check_moved_stmt`：own 声明接管源、或 own 变量被赋值给他人 → 当场 `mark_moved` 源；
+   - `set_moves` + 新增 `collect_own_names`：源是 own → 强制 `move_hint=true`；
+   - 两套记账（sema moved 拒绝使用 / lowering move_hint 控制 retain 与 release 责任）严格配对。
+   实测 own→别名→返回 10 万次 RSS 稳定 40MB 无 double-free。
+
+**own 函数参数**：AST `Func.own_params` / `FuncInfo.own_params`（与 params 一一对应的 bool
+向量），调用点 sema `mark_moved` 实参 + 两后端 lowering 标 `Local.moved`，被调方入口对
+own 参数跳过 `+1 retain`（退出仍 `-1 release`），所有权从调用方转移到被调方。own 标量参数
+/own 默认参数 Fail-Fast 拒绝。**own struct 字段**：Dial struct 为值语义（整块可自由复制，
+堆字段由 `retain_struct_fields` 整块管理），单字段独占无独立含义，parser 明确 Fail-Fast
+拒绝并给出替代方案（own var / own 参数），绝不静默接受虚假承诺。
+
+**为何不引入借用检查器**：own 提供转移语义（谁拥有/何时释放/转移后禁用），不是借用语义
+（谁能借/借多久）。ARC+COW 已保证别名安全，追加 `&T`/生命周期分析只增复杂度、违背
+「零 GC 停顿、编译期确定性内存」宪法。
+
+**验证**：双配置编译零错误零警告；own 参数 10k 次移交双后端无 double-free；own 标量参数/
+字段/默认值/调用后用实参/别名后用源 5 类负向全部编译期拒绝；普通参数语义零回归；
+全量回归 EXIT=0、1044 项全绿（R12c 新增 13 项：own 参数双后端一致、普通参数不误伤、
+10k 次移交、零 retain 静态门禁、5 类负向）；版本/链接门禁全绿。

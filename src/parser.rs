@@ -647,6 +647,19 @@ impl Parser {
         let mut fields = Vec::new();
         let mut defaults = HashMap::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
+            // v1.21 Fail-Fast：Dial struct 是值语义（整块可自由复制，堆字段由 struct
+            // 整体 ARC/retain_struct_fields 管理），单个字段无法维持独占所有权。
+            // 故 `own` 字段在语法层明确拒绝，并给出正确替代方案，绝不静默接受一个
+            // 虚假的"独占"承诺（符合项目「不写进契约的未实现特性」铁律）。
+            if self.check(&TokenKind::Own) {
+                let t = self.peek().clone();
+                return Err(DialcError::new(
+                    "语义错误：Dial 结构体为值语义，字段不支持 `own` 独占声明；\
+                     如需独占资源请用 `own var x: T = ...` 或 `own` 函数参数 `fn f(own x: T)`",
+                    t.line,
+                    t.col,
+                ));
+            }
             let fname = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
             let fty = self.parse_type()?;
@@ -899,6 +912,7 @@ impl Parser {
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
         let mut param_pos = Vec::new();
+        let mut own_params: Vec<bool> = Vec::new(); // v1.21 consume 形参标记
         let mut defaults: Vec<Option<Expr>> = Vec::new();
         let mut seen_default = false;
         // 同类型变参 `...xs: T`（v1.03）：只记录标记，脱糖由 semantic 负责。
@@ -914,6 +928,7 @@ impl Parser {
                 let (pname, pline, pcol) = self.expect_ident_pos()?;
                 params.push((pname, sty.clone()));
                 param_pos.push((pline, pcol));
+                own_params.push(false); // self 不可声明 own
                 defaults.push(None);
                 if self.check(&TokenKind::Comma) {
                     self.advance(); // 后面还有形参，交给下面的常规循环
@@ -948,9 +963,18 @@ impl Parser {
                             vt.line, vt.col,
                         ));
                     }
+                    own_params.push(false); // 变参数组不可声明 own
                     variadic = Some((pname, elem, pline, pcol));
                     break;
                 }
+                // v1.21 consume 形参：`own x: T`。own 只能修饰拥有资源的形参；
+                // 类型合法性由 sema 用 is_copy_type 校验（标量 own 无意义，拒绝）。
+                let is_own_param = if self.check(&TokenKind::Own) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 let (pname, pline, pcol) = self.expect_ident_pos()?;
                 self.reject_const_shadow(&pname, pline, pcol)?;
                 self.expect(TokenKind::Colon)?;
@@ -972,6 +996,7 @@ impl Parser {
                 }
                 params.push((pname, pty));
                 param_pos.push((pline, pcol));
+                own_params.push(is_own_param);
                 defaults.push(default);
                 if self.check(&TokenKind::Comma) {
                     self.advance();
@@ -988,6 +1013,7 @@ impl Parser {
         Ok(Func {
             name,
             params,
+            own_params,
             defaults,
             param_pos,
             variadic,
