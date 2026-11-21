@@ -792,7 +792,12 @@ impl<'a> Lower<'a> {
                     // release 会把 rc 多减 1（`var row = m[i]` / `var row = m.get(i)`）。
                     // 用 yields_borrowed_ref(value) 兜住这一缺口；move 语义下所有权已转移，
                     // 不应 retain（对齐 LLVM 的 `!move_hint` 条件）。
-                    let need_retain = is_copy || (yields_borrowed_ref(value) && !*move_hint);
+                    // v1.21 修「假 move」：对齐 LLVM 后端 `if !move_hint { retain_if_borrowed }`。
+                    // 原 `is_copy || (borrowed && !move_hint)` 中 is_copy 对 Expr::Var/Field/Deref
+                    // 为 true，会短路 move_hint，导致 move（含 own 独占转移）仍 emit retain——
+                    // 于是「零开销独占」名不副实，普通 var 的最后引用 move 优化也失效。
+                    // 正确口径：move_hint 是总开关，move 时一律不 retain（所有权已随位模式移交）。
+                    let need_retain = !*move_hint && (is_copy || yields_borrowed_ref(value));
                     self.store_value(slot, v, need_retain, &dt, false);
                 }
                 let is_h = rc_kind(&dt).is_some();
@@ -819,7 +824,8 @@ impl<'a> Lower<'a> {
                 let dt = l.dt.clone();
                 let (v, is_copy) = self.lower_expr(value, &dt)?;
                 // M7-e3ap：同 VarDecl，补齐借用别名（Index/get/at）绑变量的 retain。
-                let need_retain = is_copy || (yields_borrowed_ref(value) && !*move_hint);
+                // v1.21 修「假 move」：同 VarDecl，move_hint 为总开关，move 时不再 retain。
+                let need_retain = !*move_hint && (is_copy || yields_borrowed_ref(value));
                 self.store_value(l.ptr, v, need_retain, &dt, true);
                 if let Some(sl) = self.scopes.last_mut().unwrap().get_mut(name) { sl.moved = *move_hint; }
                 if *move_hint {

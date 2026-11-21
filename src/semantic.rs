@@ -4103,6 +4103,17 @@ fn mark_moved(scopes: &mut Scopes<VarState>, name: &str) {
     }
 }
 
+/// v1.21：查询变量是否以 `own` 声明（独占所有权）。用于 consume 语义——
+/// own 变量被赋值给他人时，当场标记 moved（转移），此后不可再用。
+fn is_own(scopes: &Scopes<VarState>, name: &str) -> bool {
+    scopes
+        .iter()
+        .rev()
+        .find_map(|s| s.get(name))
+        .map(|(_, st)| st.owned)
+        .unwrap_or(false)
+}
+
 /// 语句级所有权检查：在类型检查**之前**执行。
 ///
 /// 被 `move_to` 移交、或被 `spawn` 当作堆类型实参移交的变量，此后任何引用
@@ -4164,13 +4175,14 @@ fn check_moved_stmt(
     match stmt {
         Stmt::VarDecl { value, owned, .. } => {
             check_moved_expr(value, scopes, funcs, structs, line, col)?;
-            // v1.21 独占所有权：`own var x: T = y;` 强制把 y 的所有权转移给 x。
-            // 普通 `var x = y` 的三策略由 run_usage_analysis 自动推断（y 之后不再用
-            // 才 move）；own 则是程序员显式声明「我接管 y」，无论 y 之后是否还有引用，
-            // 都当场把 y 标 moved——此后对 y 的任何使用都会被 check_moved_expr 拒绝。
-            // 这正是「显式所有权转移」与「编译期优化提示」的分界。
-            if *owned {
-                if let Expr::Var(src) = value {
+            // v1.21 完整 consume 的 sema 侧（与 set_moves 的 move_hint 侧严格配对）：
+            //   (a) `own var x = y`：我接管 y，无论 y 之后是否被引用都当场转移；
+            //   (b) `var alias = a`（a 是 own 变量）：独占资源被他人接管，a 当场 moved。
+            // 两者都让源在 sema scopes 里标 moved，此后任何使用被 check_moved_expr 拒绝。
+            // lowering 侧的 move_hint（set_moves 写）负责零 retain + release 责任转移，
+            // 两套记账必须同时发生，否则会 double-free 或泄漏。
+            if let Expr::Var(src) = value {
+                if *owned || is_own(scopes, src) {
                     mark_moved(scopes, src);
                 }
             }
@@ -4190,7 +4202,14 @@ fn check_moved_stmt(
                 };
                 return Err(DialcError::new(msg, line, col));
             }
-            check_moved_expr(value, scopes, funcs, structs, line, col)
+            check_moved_expr(value, scopes, funcs, structs, line, col)?;
+            // v1.21 完整 consume：own 变量被赋给他人 → 当场转移，之后源不可再用。
+            if let Expr::Var(src) = value {
+                if is_own(scopes, src) {
+                    mark_moved(scopes, src);
+                }
+            }
+            Ok(())
         }
         Stmt::AssignField { obj, value, .. } => {
             check_moved_expr(obj, scopes, funcs, structs, line, col)?;
@@ -5861,17 +5880,19 @@ fn collect_refs(stmts: &[Stmt], si: &mut usize, loop_d: usize, cond_d: usize, re
 }
 
 /// 第二遍：依据引用事实，对「Var 复制」形式的赋值写入 move_hint。
-fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, facts: &HashMap<String, VarFacts>) {
+fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, facts: &HashMap<String, VarFacts>, own_names: &std::collections::HashSet<String>) {
     for stmt in stmts.iter_mut() {
         let _unsafe_ctx = loop_d > 0 || cond_d > 0;
         match stmt {
             Stmt::VarDecl { value, move_hint, owned, .. } => {
                 if let Expr::Var(src) = value {
-                    // v1.21：own 独占声明强制移动语义——无论源 y 之后是否还被引用，
-                    // 都直接转移所有权（use-after-move 已由 check_moved_stmt 保证）。
-                    // 这样两个后端（asm 走 IR / LLVM 走 AST）都读同一个 move_hint，
-                    // 自动跳过 retain，无需为 own 单独改代码生成。
-                    if *owned {
+                    // v1.21 完整 consume：三种情况强制移动语义（都让两后端读同一个
+                    // move_hint，自动跳过 retain，无需改代码生成）：
+                    //   (a) 目标是 own 声明（我接管源）；
+                    //   (b) 源是 own 变量（别人接管独占资源，consume 语义）；
+                    //   (c) 普通最后引用 move（既有优化）。
+                    // use-after-move 由 check_moved_stmt 保证。
+                    if *owned || own_names.contains(src) {
                         *move_hint = true;
                     } else if let Some(f) = facts.get(src) {
                         *move_hint = (f.last == *si) && !f.unsafe_ctx;
@@ -5880,53 +5901,56 @@ fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, f
             }
             Stmt::Assign { value, move_hint, .. } => {
                 if let Expr::Var(src) = value {
-                    if let Some(f) = facts.get(src) {
+                    // own 源被赋给他人同样是 consume：强制转移（对齐 VarDecl）。
+                    if own_names.contains(src) {
+                        *move_hint = true;
+                    } else if let Some(f) = facts.get(src) {
                         *move_hint = (f.last == *si) && !f.unsafe_ctx;
                     }
                 }
             }
             Stmt::If { cond: _, then_branch, else_branch, .. } => {
-                set_moves(then_branch, si, loop_d, cond_d + 1, facts);
+                set_moves(then_branch, si, loop_d, cond_d + 1, facts, own_names);
                 if let Some(eb) = else_branch {
-                    set_moves(eb, si, loop_d, cond_d + 1, facts);
+                    set_moves(eb, si, loop_d, cond_d + 1, facts, own_names);
                 }
             }
             Stmt::While { body, .. } => {
-                set_moves(body, si, loop_d + 1, cond_d, facts);
+                set_moves(body, si, loop_d + 1, cond_d, facts, own_names);
             }
             Stmt::For { body, .. } => {
-                set_moves(body, si, loop_d + 1, cond_d, facts);
+                set_moves(body, si, loop_d + 1, cond_d, facts, own_names);
             }
             Stmt::ForEach { body, .. } | Stmt::ForEachMap { body, .. } => {
-                set_moves(body, si, loop_d + 1, cond_d, facts);
+                set_moves(body, si, loop_d + 1, cond_d, facts, own_names);
             }
             Stmt::DoWhile { body, .. } => {
-                set_moves(body, si, loop_d + 1, cond_d, facts);
+                set_moves(body, si, loop_d + 1, cond_d, facts, own_names);
             }
             Stmt::Match { arms, .. } => {
                 for arm in arms.iter_mut() {
-                    set_moves(&mut arm.body, si, loop_d, cond_d + 1, facts);
+                    set_moves(&mut arm.body, si, loop_d, cond_d + 1, facts, own_names);
                 }
             }
             Stmt::Defer(inner, ..) => {
-                set_moves(std::slice::from_mut(inner), si, loop_d, cond_d, facts);
+                set_moves(std::slice::from_mut(inner), si, loop_d, cond_d, facts, own_names);
             }
             Stmt::Try { body, catch, .. } => {
-                set_moves(body, si, loop_d, cond_d, facts);
-                set_moves(&mut catch.body, si, loop_d, cond_d, facts);
+                set_moves(body, si, loop_d, cond_d, facts, own_names);
+                set_moves(&mut catch.body, si, loop_d, cond_d, facts, own_names);
             }
             // select（v0.91；v1.10 增 timeout 分支）
             Stmt::Select {
                 arms, default_body, timeout_body, ..
             } => {
                 for arm in arms {
-                    set_moves(&mut arm.body, si, loop_d, cond_d, facts);
+                    set_moves(&mut arm.body, si, loop_d, cond_d, facts, own_names);
                 }
                 if let Some(db) = default_body {
-                    set_moves(db, si, loop_d, cond_d, facts);
+                    set_moves(db, si, loop_d, cond_d, facts, own_names);
                 }
                 if let Some(tb) = timeout_body {
-                    set_moves(tb, si, loop_d, cond_d, facts);
+                    set_moves(tb, si, loop_d, cond_d, facts, own_names);
                 }
             }
             _ => {}
@@ -5935,8 +5959,41 @@ fn set_moves(stmts: &mut [Stmt], si: &mut usize, loop_d: usize, cond_d: usize, f
     }
 }
 
+/// v1.21：递归收集函数体内所有 `own var` 声明的变量名。
+/// set_moves 在数据流写回阶段需要它来判定「源是 own → 强制 move」，
+/// 而该阶段已无 sema scopes，故从 AST 直接收集一次。
+fn collect_own_names(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+    for s in stmts {
+        match s {
+            Stmt::VarDecl { name, owned: true, .. } => { out.insert(name.clone()); }
+            Stmt::If { then_branch, else_branch, .. } => {
+                collect_own_names(then_branch, out);
+                if let Some(eb) = else_branch { collect_own_names(eb, out); }
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. }
+            | Stmt::DoWhile { body, .. } => collect_own_names(body, out),
+            Stmt::Block { body, .. } => collect_own_names(body, out),
+            Stmt::ForEach { body, .. } | Stmt::ForEachMap { body, .. } => collect_own_names(body, out),
+            Stmt::Match { arms, .. } => for a in arms { collect_own_names(&a.body, out); },
+            Stmt::Defer(inner, ..) => collect_own_names(std::slice::from_ref(inner.as_ref()), out),
+            Stmt::Try { body, catch, .. } => {
+                collect_own_names(body, out);
+                collect_own_names(&catch.body, out);
+            }
+            Stmt::Select { arms, default_body, timeout_body, .. } => {
+                for a in arms { collect_own_names(&a.body, out); }
+                if let Some(db) = default_body { collect_own_names(db, out); }
+                if let Some(tb) = timeout_body { collect_own_names(tb, out); }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// 对单个函数运行数据流分析：先收集引用，再写回 move_hint。
 fn run_usage_analysis(f: &mut Func, _structs: &StructTable) {
+    let mut own_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_own_names(&f.body, &mut own_names);
     let mut refs: HashMap<String, Vec<RefEntry>> = HashMap::new();
     let mut si = 0usize;
     collect_refs(&f.body, &mut si, 0, 0, &mut refs);
@@ -5957,5 +6014,5 @@ fn run_usage_analysis(f: &mut Func, _structs: &StructTable) {
     }
 
     let mut si2 = 0usize;
-    set_moves(&mut f.body, &mut si2, 0, 0, &facts);
+    set_moves(&mut f.body, &mut si2, 0, 0, &facts, &own_names);
 }
