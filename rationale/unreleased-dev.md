@@ -3964,3 +3964,34 @@ b12 互递归闭式、b08/b05 算术深度优化、b22 substring C runtime、GRA
 **结论**：b08 属 LLVM 深度值域分析（证明循环变量恒正→省 bias）优势，非发射层简单 pass
 可补；印证审计报告原文「除法微码主导、e3s 已证伪可从后端侧优化」的判断。量化搁置，不扩散。
 本轮无代码提交（仅文档记录证伪结论）。
+
+---
+
+## v1.20 发布：tag CI 签名阶段卡死 >18 分钟定位与修复（cipher /w）
+
+**背景**：默认切 asm + MS ABI + 浮点取模修复后，tag `v1.2` 的 CI 首次跑通「核心冒烟」，
+暴露出此前从未执行到的发布阶段签名步骤（#12）。该步骤连续多轮卡死/失败，逐一收口：
+
+1. **控制台 CN 格式 / MSYS 路径转换**：Git Bash 会把 `-subj /CN=...`、signtool `/f /p /fd`、
+   cipher `/w:` 等 `/` 前缀参数改写成 Windows 路径致 openssl 静默失败。修复：`MSYS_NO_PATHCONV=1`
+   + `MSYS2_ARG_CONV_EXCL='*'`；CN 校验改大小写不敏感固定串匹配（兼容 `CN = x` / `CN=x` / RFC2253）。
+2. **相对 OUT_DIR 在 cd 到临时目录后失效**：CI 传 `dist-sign`（相对路径），脚本 `cd "$WORK"` 后
+   `-out "$OUT_DIR/..."` 落到不存在的相对目录，写 `.cer` 处 exit 1（本地用绝对 `/tmp` 路径掩盖）。
+   修复：进入临时目录前先把 `EXE`/`OUT_DIR` 规范为绝对路径。
+3. **原生 Windows openssl 不认 MSYS 路径**：Git Bash 的 `pwd` 返回 `/d/a/...`，Git-for-Windows 的
+   原生 openssl 无法解析，绝对 `-out` 报 "cannot open file"。修复：`native_path()` 用 `cygpath -m`
+   转 `D:/...`，仅对传给原生 openssl 的绝对路径使用。
+4. **cipher /w 卡死 >18 分钟（本次根因）**：前几轮都在它之前失败，从未执行到。第 4 轮所有前置
+   检查全部通过，脚本首次走到 `cipher /w`，作业 #12 卡死 18 分钟以上、日志无新增输出。根因：
+   `cipher /w` 覆写**整个卷**的空闲空间，在 runner 大容量磁盘上耗时不可控。该步仅为 NTFS 卫生
+   的「尽力而为」（`|| true`），明文销毁的根本保证是上方 `shred_file` 逐文件覆写 + KEK 私钥销毁
+   （密文不可解）。修复：默认跳过，仅显式 `DIAL_CIPHER_WIPE=1` 才执行；CI 签名步骤同时加
+   `timeout-minutes: 10` 与 `bash -x`，任何后续卡点都能 fail-fast 且从日志精确定位。
+
+**可诊断性**：首轮失败只剩一行 `exit 1`，因所有 openssl 调用 `2>/dev/null` 吞掉错误。加 `ERR` trap
+打印失败行号 + genpkey 不吞 stderr + CI 用 `bash -x`，使每一轮失败都能从日志直接读到根因行，
+不再靠猜测迭代。
+
+**结果**：tag run `44856668388` 全绿（WATCH_EXIT=0）——Linux 全量、Termux aarch64、Windows 核心冒烟、
+签名 #12、打包 #13、上传 #14、三平台 Release 全部 success。Release `v1.2` 发布为 Latest，
+12 个资产齐全（三平台 zip + VSIX + 签名 .cer/.cms + 6 个 dialpkg），版本映射 `v1.2 ↔ v1.20 ↔ 1.20.0`。
