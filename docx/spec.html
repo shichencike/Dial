@@ -294,6 +294,7 @@
 <li><a href="#287-编辑器插件安装包v098">28.7 编辑器插件安装包（v0.98）</a><ul>
 <li><a href="#2871-当前-lsp-能力清单">28.7.1 当前 LSP 能力清单</a></li>
 <li><a href="#2872-v110诊断一体化--增量同步--文件监视--文档内高亮">28.7.2 v1.10：诊断一体化 / 增量同步 / 文件监视 / 文档内高亮</a></li>
+<li><a href="#2873-v121开发中跨工作区全量模块图">28.7.3 v1.21（开发中）：跨工作区全量模块图</a></li>
 </ul>
 </li>
 </ul>
@@ -3702,7 +3703,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>模块 / 包 / import</td>
-<td><strong>已支持</strong>（v1.04）：<code>import "包名";</code> + <code>dialc install &lt;本地文件\|URL&gt;</code>（v0.93 / v0.96，见 §25）；<strong>源码形式的模块拆分</strong>也已落地（<code>import "./util.dial";</code> 合并编译，无需 <code>mod</code> 关键字，见 §34）。<strong>尚未实现</strong>：跨工作区的全量模块图</td>
+<td><strong>已支持</strong>（v1.04）：<code>import "包名";</code> + <code>dialc install &lt;本地文件\|URL&gt;</code>（v0.93 / v0.96，见 §25）；<strong>源码形式的模块拆分</strong>也已落地（<code>import "./util.dial";</code> 合并编译，无需 <code>mod</code> 关键字，见 §34）。<strong>跨工作区全量 <code>.dial</code> 索引已支持</strong>（v1.21 开发中）：LSP 在 initialize 时扫描工作区根目录全部 <code>.dial</code>（含本地模块）建立全量索引，<code>workspace/symbol</code> 覆盖未打开文件。<strong>仍未实现</strong>：递归包内 <code>src/</code> 模块的 LSP 索引（§38.14）、显式 import 依赖图可视化</td>
 </tr>
 <tr>
 <td>泛型、接口、trait、闭包</td>
@@ -3762,7 +3763,7 @@ Fail-Fast 运行时检查（§20）、文件 IO（§24）、可恢复异常（§
 </tr>
 <tr>
 <td>LSP 的重命名 / 跨文件引用查找 / 格式化</td>
-<td><strong>已实现</strong>（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的<strong>引用边</strong>（<code>src/index.rs</code>），格式化只做「去行尾空白 + 末尾换行」这类<strong>绝不重排</strong>的非破坏性动作。能力清单见 <a href="#2871-当前-lsp-能力清单">§28.7.1</a>。另见 v1.04 新增的 <code>dialc fmt</code> 命令行格式化（§34）。<strong>尚未实现</strong>：跨工作区的<strong>全量</strong>引用图（当前只覆盖已打开文件与已加载包）</td>
+<td><strong>已实现</strong>（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的<strong>引用边</strong>（<code>src/index.rs</code>），格式化只做「去行尾空白 + 末尾换行」这类<strong>绝不重排</strong>的非破坏性动作。能力清单见 <a href="#2871-当前-lsp-能力清单">§28.7.1</a>。另见 v1.04 新增的 <code>dialc fmt</code> 命令行格式化（§34）。<strong>跨工作区全量引用图已支持</strong>（v1.21 开发中）：顶层函数 / struct 按全局唯一名跨文件解析，references / rename 覆盖工作区全部文件（<code>documentChanges</code> 每文件一条 <code>TextDocumentEdit</code>），局部符号仍限本文件；见 <a href="#2871-当前-lsp-能力清单">§28.7.1</a></td>
 </tr>
 <tr>
 <td>GUI 控件树 / 布局 / 信号槽</td>
@@ -7145,10 +7146,46 @@ If omitted the notification should not be sent.</em>」——纯数字形式里<
 <p><strong>边界不变</strong>：诊断仍只在 <code>didOpen</code> / <code>didSave</code> / <code>didChangeWatchedFiles</code> 发布（打字过程不刷屏）；
 stdout 协议流纯净性铁律不变（<code>check_lsp_stdout_purity.py</code> 静态守卫 +
 <code>lsp_full_smoke.py</code> 动态断言）；<code>$/cancelRequest</code> 仍是「接受但不打断」（请求都是微秒级）；
-跨工作区<strong>全量</strong>引用图、递归包内 <code>src/</code> 模块索引仍属已知边界（§28.7.1 / §38.14）。</p>
+递归包内 <code>src/</code> 模块的 LSP 索引、显式 import 依赖图可视化仍属已知边界（§28.7.1 / §38.14）；
+跨工作区全量 <code>.dial</code> 索引与全局符号跨文件 references / rename 已于 v1.21 开发中落地（<code>lsp_workspace_smoke.py</code>）。</p>
 <p><strong>回归</strong>：三个 LSP 冒烟脚本共新增 7 条断言（增量补丁生效与定位、码表同源、
 <code>codeDescription</code>、documentHighlight 命中 2 处、文件监视重诊、能力声明），
 全量 <code>bash tests/run_tests.sh</code> 实测 <strong>612 ✅ / 0 ❌ / 三十组</strong>。</p>
+<h4 id="2873-v121开发中跨工作区全量模块图">28.7.3 v1.21（开发中）：跨工作区全量模块图</h4>
+<blockquote>
+<p>补齐 §17.2 / §28.7.1 曾标注的「跨工作区全量引用图尚未实现」缺口。只改 <code>src/lsp.rs</code> /
+<code>src/index.rs</code>，不动编译语义、不动 ABI。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>做法</th>
+<th>边界</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>全量 <code>.dial</code> 索引</strong></td>
+<td><code>initialize</code> 读 <code>workspaceFolders[0]</code> / <code>rootUri</code> / <code>rootPath</code>，递归扫描根目录下全部 <code>.dial</code>（跳过隐藏目录与 <code>target</code> 等产物目录）建索引；<code>workspace/symbol</code> 覆盖未打开文件</td>
+<td>已打开文档以编辑器内文本为准，不被磁盘扫描覆盖</td>
+</tr>
+<tr>
+<td><strong>跨文件引用 / 重命名</strong></td>
+<td>顶层函数 / struct 按<strong>全局唯一名</strong>跨文件解析（<code>Ref.global_name</code> + <code>SymTarget::Global</code>）；references / rename 遍历全部已索引文件，rename 的 <code>documentChanges</code> 每文件一条带版本号的 <code>TextDocumentEdit</code></td>
+<td>局部 Var / Param 仍限本文件按 <code>symbol_index</code> 精确匹配（遮蔽正确）；Dial 顶层名全局唯一由 sema 保证</td>
+</tr>
+<tr>
+<td><strong>工作区文件夹变更</strong></td>
+<td><code>workspace/didChangeWorkspaceFolders</code>：added 扫描入库，removed 清索引（已打开文件保留）</td>
+<td>不主动注册全局 watcher，沿用客户端 watcher</td>
+</tr>
+</tbody>
+</table>
+<p><strong>仍有边界</strong>：递归包内 <code>src/</code> 模块的 LSP 索引（§38.14）与显式 import 依赖图可视化未实现——
+全量扫描按目录收集 <code>.dial</code>，不解析跨包 <code>src/</code> 映射。
+<strong>回归</strong>：<code>tools/lsp_workspace_smoke.py</code>（黑盒 JSON-RPC：全量索引 / 跨 2 文件 references / rename / 局部隔离 / 协议纯净）挂入 M 组；
+三个既有 LSP 冒烟脚本零回归。</p>
 <hr />
 <hr />
 <h2 id="29-v100语言特性补齐">29. v1.00：语言特性补齐</h2>

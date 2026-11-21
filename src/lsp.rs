@@ -166,6 +166,21 @@ fn handle<W: Write>(
                 .and_then(|c| c.pointer("/workspace/workspaceEdit/documentChanges"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            // v1.21 跨工作区：记录工作区根并扫描全量 .dial 建立模块图。
+            // 优先 workspaceFolders[0].uri，其次 rootUri，最后旧版 rootPath。
+            let root_uri = msg
+                .pointer("/params/workspaceFolders/0/uri")
+                .and_then(|v| v.as_str())
+                .or_else(|| msg.pointer("/params/rootUri").and_then(|v| v.as_str()))
+                .map(|s| s.to_string());
+            let root_path = root_uri
+                .as_deref()
+                .and_then(file_uri_to_path)
+                .or_else(|| msg.pointer("/params/rootPath").and_then(|v| v.as_str()).map(|s| s.to_string()));
+            if let Some(ref rp) = root_path {
+                ws.workspace_root = Some(rp.clone());
+                scan_workspace(ws, rp, docs);
+            }
             let result = json!({
                 "capabilities": negotiate_capabilities(client_caps),
                 "serverInfo": { "name": "dialc", "version": env!("CARGO_PKG_VERSION") }
@@ -262,6 +277,31 @@ fn handle<W: Write>(
             for (u, t) in snapshot {
                 index_document(ws, &u, &t);
                 publish_diagnostics(out, &u, &t)?;
+            }
+        }
+        // v1.21：工作区文件夹增删（LSP 3.6）。added 的目录扫描进全量图，
+        // removed 的目录清掉其索引（已打开文件保留——它们仍归编辑器所有）。
+        "workspace/didChangeWorkspaceFolders" => {
+            if let Some(added) = msg.pointer("/params/event/added").and_then(|v| v.as_array()) {
+                for f in added {
+                    if let Some(uri) = f.get("uri").and_then(|v| v.as_str()) {
+                        if let Some(path) = file_uri_to_path(uri) {
+                            scan_workspace(ws, &path, docs);
+                        }
+                    }
+                }
+            }
+            if let Some(removed) = msg.pointer("/params/event/removed").and_then(|v| v.as_array()) {
+                for f in removed {
+                    if let Some(uri) = f.get("uri").and_then(|v| v.as_str()) {
+                        if let Some(path) = file_uri_to_path(uri) {
+                            let root = path.trim_end_matches('/').to_string() + "/";
+                            ws.files.retain(|u, _| {
+                                !(u.starts_with(&path_to_file_uri(&root)) && !docs.contains_key(u))
+                            });
+                        }
+                    }
+                }
             }
         }
         "textDocument/documentHighlight" => {
@@ -1212,6 +1252,72 @@ fn selection_positions(msg: &Value) -> Option<(String, Vec<(u32, u32)>)> {
 }
 
 /// 把一份文档重新解析并写入 `ws.files`。解析失败（半成品代码）就移除旧索引。
+/// v1.21 跨工作区：file:// URI → 文件系统路径（轻量解码，不引入 url crate）。
+fn file_uri_to_path(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    let mut out = String::new();
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(a), Some(b)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((a * 16 + b) as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    Some(out)
+}
+
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 文件系统路径 → file:// URI（仅编码空格与百分号，覆盖常见工作区路径）。
+fn path_to_file_uri(path: &str) -> String {
+    let encoded = path.replace('%', "%25").replace(' ', "%20").replace('#', "%23").replace('?', "%3F");
+    format!("file://{}", encoded)
+}
+
+/// v1.21 跨工作区：递归扫描根目录下所有 `.dial` 文件并索引进 `ws.files`。
+/// 已打开的文档（在 `docs` 中）由调用方跳过——它们的文本以编辑器内为准。
+fn scan_workspace(ws: &mut WorkspaceIndex, root_path: &str, open_uris: &Docs) {
+    fn walk(dir: &std::path::Path, ws: &mut WorkspaceIndex, open_uris: &Docs) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for ent in entries.flatten() {
+            let path = ent.path();
+            if path.is_dir() {
+                // 跳过隐藏目录与常见构建产物目录，避免扫描无关文件。
+                let name = ent.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') || matches!(name.as_str(), "target" | "node_modules" | "dist" | "build") {
+                    continue;
+                }
+                walk(&path, ws, open_uris);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("dial") {
+                let uri = path_to_file_uri(&path.to_string_lossy());
+                if open_uris.contains_key(&uri) || ws.files.contains_key(&uri) {
+                    continue; // 已打开 / 已索引：以编辑器内文本为准，不覆盖
+                }
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    index_document(ws, &uri, &text);
+                }
+            }
+        }
+    }
+    walk(std::path::Path::new(root_path), ws, open_uris);
+}
+
 fn index_document(ws: &mut WorkspaceIndex, uri: &str, text: &str) {
     // 1) 词法
     let tokens = match lexer::lex(text) {
@@ -1250,6 +1356,7 @@ fn index_document(ws: &mut WorkspaceIndex, uri: &str, text: &str) {
     };
     let mut indexed = index::index_program(uri, &program, &program.imports);
     indexed.collect_references(text);
+    indexed.text = text.to_string(); // v1.21 跨工作区：缓存源码供跨文件 span 计算
     ws.files.insert(uri.to_string(), indexed);
 }
 
@@ -1579,6 +1686,48 @@ fn workspace_symbols(ws: &WorkspaceIndex, docs: &Docs, q: &str) -> Vec<Value> {
     out
 }
 
+/// v1.21 跨工作区：光标符号的身份。
+/// - Global(name)：顶层函数 / struct，按名字跨所有文件匹配（Dial 顶层名全局唯一）；
+/// - Local(index)：局部变量 / 参数（或无法归为全局者），仅本文件按 symbol_index 匹配。
+#[derive(Debug, Clone)]
+enum SymTarget {
+    Global(String),
+    Local(usize),
+}
+
+/// v1.21：解析光标下符号身份——先按本文件作用域链查找；若是本文件顶层全局符号，
+/// 归为 Global；若本文件无法解析，则查全工作区是否有同名顶层符号，有则 Global。
+fn symbol_target_at_cursor(
+    ws: &WorkspaceIndex,
+    docs: &Docs,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Option<SymTarget> {
+    let text = docs.get(uri)?;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line1 = line as usize + 1;
+    let line_text = lines.get(line as usize).copied().unwrap_or("");
+    let char1 = index::utf16_to_char_col(line_text, character as usize);
+    let name = index::identifier_at(text, line1, char1)?;
+    let indexed = ws.files.get(uri)?;
+    if let Some(scope_id) = indexed.scope_at((line1, char1)) {
+        if let Some(idx) = indexed.lookup_local_index(scope_id, &name) {
+            // 本文件解析到符号：顶层 Function/Struct 归为全局，其余为局部。
+            return Some(if indexed.is_global_symbol(idx) {
+                SymTarget::Global(name)
+            } else {
+                SymTarget::Local(idx)
+            });
+        }
+    }
+    // 本文件未解析：查全工作区是否存在同名顶层符号（跨文件调用 / 外部文件声明处）。
+    if ws.files.values().any(|f| f.global_symbol_names().contains(&name)) {
+        return Some(SymTarget::Global(name));
+    }
+    None
+}
+
 /// 取光标下符号在 `symbols` 中的下标（仅文件内符号；包符号返回 None，因为包只读不可重命名）。
 fn symbol_index_at_cursor(
     ws: &WorkspaceIndex,
@@ -1610,35 +1759,53 @@ fn references_at(
     character: u32,
     include_decl: bool,
 ) -> Vec<Value> {
-    let target = match symbol_index_at_cursor(ws, docs, uri, line, character) {
-        Some(i) => i,
+    let target = match symbol_target_at_cursor(ws, docs, uri, line, character) {
+        Some(t) => t,
         None => return Vec::new(),
     };
-    let file = match ws.files.get(uri) {
-        Some(f) => f,
-        None => return Vec::new(),
+    // 全局符号的声明 span（定义在哪个文件、哪个位置），供 includeDeclaration=false 排除。
+    let decl_span: Option<(&str, (usize, usize, usize, usize))> = match &target {
+        SymTarget::Global(name) => ws.files.iter().find_map(|(u, f)| {
+            f.symbols.iter()
+                .find(|s| s.scope_id == f.top_scope && s.name == *name)
+                .map(|s| (u.as_str(), s.span))
+        }),
+        SymTarget::Local(idx) => ws.files.get(uri)
+            .and_then(|f| f.symbols.get(*idx).map(|s| (uri, s.span))),
     };
-    let sym_span = file.symbols[target].span; // 声明位置，用于判断是否跳过声明
-    let text = docs.get(uri).cloned().unwrap_or_default();
-    let lines: Vec<&str> = text.split('\n').collect();
+    // v1.21 跨工作区：全局符号按名字跨所有文件匹配；局部符号限本文件按 index 匹配。
     let mut out = Vec::new();
-    for r in &file.references {
-        if r.symbol_index != target {
+    for (file_uri, file) in &ws.files {
+        if matches!(&target, SymTarget::Local(_)) && file_uri != uri {
             continue;
         }
-        if !include_decl && r.span == sym_span {
-            continue;
-        }
-        let l0 = (r.span.0 as u32).saturating_sub(1);
-        let line_text = lines.get(r.span.0.saturating_sub(1)).copied().unwrap_or("");
-        let (sc, ec) = char_span_to_lsp(line_text, r.span.1, r.span.3);
-        out.push(json!({
-            "uri": uri,
-            "range": {
-                "start": { "line": l0, "character": sc },
-                "end": { "line": l0, "character": ec }
+        let lines: Vec<&str> = file.text.split('\n').collect();
+        for r in &file.references {
+            let hit = match &target {
+                SymTarget::Global(name) => r.global_name.as_deref() == Some(name.as_str()),
+                SymTarget::Local(idx) => r.symbol_index == *idx,
+            };
+            if !hit {
+                continue;
             }
-        }));
+            if !include_decl {
+                if let Some((du, ds)) = decl_span {
+                    if du == file_uri && r.span == ds {
+                        continue;
+                    }
+                }
+            }
+            let l0 = (r.span.0 as u32).saturating_sub(1);
+            let line_text = lines.get(r.span.0.saturating_sub(1)).copied().unwrap_or("");
+            let (sc, ec) = char_span_to_lsp(line_text, r.span.1, r.span.3);
+            out.push(json!({
+                "uri": file_uri,
+                "range": {
+                    "start": { "line": l0, "character": sc },
+                    "end": { "line": l0, "character": ec }
+                }
+            }));
+        }
     }
     out
 }
@@ -1667,34 +1834,52 @@ fn rename_at(
     if new_name.is_empty() || !is_ident(new_name) {
         return Value::Null;
     }
-    let target = match symbol_index_at_cursor(ws, docs, uri, line, character) {
-        Some(i) => i,
+    let target = match symbol_target_at_cursor(ws, docs, uri, line, character) {
+        Some(t) => t,
         None => return Value::Null,
     };
-    let file = match ws.files.get(uri) {
-        Some(f) => f,
-        None => return Value::Null,
-    };
-    let text = docs.get(uri).cloned().unwrap_or_default();
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut edits = Vec::new();
-    for r in &file.references {
-        if r.symbol_index != target {
+    // v1.21 跨工作区：全局符号按名字跨所有文件改名；局部符号仅本文件。
+    // edits_by_file: uri -> 该文件的 TextEdit 列表（documentChanges 每文件一条）。
+    let mut edits_by_file: Vec<(String, Vec<Value>)> = Vec::new();
+    for (file_uri, file) in &ws.files {
+        if matches!(&target, SymTarget::Local(_)) && file_uri != uri {
             continue;
         }
-        let l0 = (r.span.0 as u32).saturating_sub(1);
-        let line_text = lines.get(r.span.0.saturating_sub(1)).copied().unwrap_or("");
-        let (sc, ec) = char_span_to_lsp(line_text, r.span.1, r.span.3);
-        edits.push(json!({
-            "range": {
-                "start": { "line": l0, "character": sc },
-                "end": { "line": l0, "character": ec }
-            },
-            "newText": new_name
-        }));
+        let lines: Vec<&str> = file.text.split('\n').collect();
+        let mut edits = Vec::new();
+        for r in &file.references {
+            let hit = match &target {
+                SymTarget::Global(name) => r.global_name.as_deref() == Some(name.as_str()),
+                SymTarget::Local(idx) => r.symbol_index == *idx,
+            };
+            if !hit {
+                continue;
+            }
+            let l0 = (r.span.0 as u32).saturating_sub(1);
+            let line_text = lines.get(r.span.0.saturating_sub(1)).copied().unwrap_or("");
+            let (sc, ec) = char_span_to_lsp(line_text, r.span.1, r.span.3);
+            edits.push(json!({
+                "range": {
+                    "start": { "line": l0, "character": sc },
+                    "end": { "line": l0, "character": ec }
+                },
+                "newText": new_name
+            }));
+        }
+        if !edits.is_empty() {
+            edits_by_file.push((file_uri.clone(), edits));
+        }
     }
-    if edits.is_empty() {
+    if edits_by_file.is_empty() {
         return Value::Null;
+    }
+    // 单个文件且客户端只支持 changes：走旧形状（向后兼容，冒烟脚本断言此形状）。
+    if !caps.workspace_edit_document_changes {
+        let mut changes = serde_json::Map::new();
+        for (file_uri, edits) in edits_by_file {
+            changes.insert(file_uri, json!(edits));
+        }
+        return json!({ "changes": changes });
     }
     // LSP 规范对 `WorkspaceEdit` 有两条规定，本实现**两条都照办**：
     //  1. `documentChanges` 里的 `TextDocumentEdit` 带**文档版本号**——版本号要如实填
@@ -1703,20 +1888,20 @@ fn rename_at(
     //     `workspace.workspaceEdit.resourceOperations`，那么**只有 `changes` 里的纯
     //     TextEdit 是被支持的**」——所以用哪个形状**由客户端能力决定**，
     //     不能我们单方面只发一种。
-    if caps.workspace_edit_document_changes {
-        let version = match versions.get(uri) {
+    // caps.workspace_edit_document_changes == true：每文件一条 TextDocumentEdit，
+    // 版本号如实填（未打开的工作区文件按规范填 null）。
+    let mut changes = Vec::new();
+    for (file_uri, edits) in edits_by_file {
+        let version = match versions.get(&file_uri) {
             Some(v) => json!(v),
             None => Value::Null,
         };
-        json!({
-            "documentChanges": [{
-                "textDocument": { "uri": uri, "version": version },
-                "edits": edits
-            }]
-        })
-    } else {
-        json!({ "changes": { uri: edits } })
+        changes.push(json!({
+            "textDocument": { "uri": file_uri, "version": version },
+            "edits": edits
+        }));
     }
+    json!({ "documentChanges": changes })
 }
 
 /// prepareRename：返回可重命名的区间与占位名；不可重命名处返回 null。

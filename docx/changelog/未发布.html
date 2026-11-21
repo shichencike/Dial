@@ -30,6 +30,7 @@
 <li><a href="#未发布">[未发布]</a><ul>
 <li><a href="#added">Added</a></li>
 <li><a href="#fixed--added方案-c完整-consume-体系">Fixed / Added（方案 C：完整 consume 体系）</a></li>
+<li><a href="#added跨工作区全量模块图开发中">Added（跨工作区全量模块图，开发中）</a></li>
 </ul>
 </li>
 </ul>
@@ -62,6 +63,18 @@
   并让被调方入口跳过 <code>+1 retain</code>（退出 <code>-1 release</code>），所有权从调用方转移到被调方。
   own 标量参数 / own 默认参数 / own struct 字段均 Fail-Fast 拒绝（后者因 Dial struct 值语义
   无法维持字段独占）。普通参数语义零回归。回归见 <code>tests/run_tests.sh</code> R12c 段（新增 13 项）。</li>
+</ul>
+<h3 id="added跨工作区全量模块图开发中">Added（跨工作区全量模块图，开发中）</h3>
+<ul>
+<li><strong>LSP 跨工作区全量模块图</strong>：补齐 §17.2 / §28.7.1 长期标注的「跨工作区全量引用图尚未实现」缺口。
+  <code>initialize</code> 读 <code>workspaceFolders</code> / <code>rootUri</code> / <code>rootPath</code> 并递归扫描根目录全部 <code>.dial</code> 建索引，
+  <code>workspace/symbol</code> 覆盖未打开文件；顶层函数 / struct 按<strong>全局唯一名</strong>跨文件解析（<code>Ref.global_name</code></li>
+<li><code>SymTarget::Global</code>），references / rename 遍历全工作区，rename 的 <code>documentChanges</code> 每文件一条
+  <code>TextDocumentEdit</code>；局部 Var / Param 仍限本文件按 <code>symbol_index</code> 精确匹配（遮蔽正确）；新增
+  <code>workspace/didChangeWorkspaceFolders</code> 增删索引。<strong>仍有边界</strong>：递归包内 <code>src/</code> 模块索引（§38.14）
+  与显式 import 依赖图可视化未实现。回归见 <code>tests/run_tests.sh</code> M 组新增 <code>tools/lsp_workspace_smoke.py</code>
+  （全量索引 / 跨 2 文件 references / rename / 局部隔离 / 协议纯净），三个既有 LSP 冒烟脚本零回归。
+  仅改 <code>src/lsp.rs</code> / <code>src/index.rs</code>，不动编译语义与 ABI。</li>
 </ul><p class="note">← 更早：<a href="v1.20.html">v1.20</a> · <a href="../changelog.html">版本索引</a></p></main></div>
 
 <footer class="site-footer">

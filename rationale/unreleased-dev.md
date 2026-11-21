@@ -4072,3 +4072,36 @@ own 参数跳过 `+1 retain`（退出仍 `-1 release`），所有权从调用方
 字段/默认值/调用后用实参/别名后用源 5 类负向全部编译期拒绝；普通参数语义零回归；
 全量回归 EXIT=0、1044 项全绿（R12c 新增 13 项：own 参数双后端一致、普通参数不误伤、
 10k 次移交、零 retain 静态门禁、5 类负向）；版本/链接门禁全绿。
+
+---
+
+## 跨工作区全量模块图：补齐 LSP 长期缺口
+
+**需求**：用户要求修复 README §17.2 / §28.7.1 标注的「跨工作区全量引用图尚未实现」。
+
+**现状调查**（Explore 深度调研）：`src/index.rs` 的 `Ref.symbol_index` 是**文件内** symbols 下标，
+跨文件不可比；`collect_references` 只用本文件作用域链解析；LSP `initialize` 完全不读
+`rootUri`/`workspaceFolders`，无工作区根概念；`references_at`/`rename_at` 只 `ws.files.get(uri)`
+遍历**单文件**；CLI 的 `collect_sources` 本地模块解析与 LSP 索引完全脱节。
+
+**实现**（只改 `src/lsp.rs` / `src/index.rs`，不动编译语义与 ABI）：
+1. `Ref` 加 `global_name: Option<String>`：本文件无法解析的标识符记为候选全局引用；
+   本文件顶层 Function/Struct 的声明处也打上 global_name（否则跨文件只能找到调用处、找不到定义）。
+2. `initialize` 读 workspaceFolders/rootUri/rootPath（含轻量 file:// 解码），递归扫描根目录
+   全部 `.dial`（跳过隐藏目录与 `target`/`node_modules` 等）建全量索引；已打开文档以编辑器文本为准。
+3. `SymTarget::{Global(name), Local(idx)}` 统一身份：顶层函数/struct 按全局唯一名跨文件匹配
+   （Dial sema 保证顶层名唯一），局部 Var/Param 限本文件按 symbol_index 精确匹配（遮蔽正确）。
+   references 跨文件返回每处位置，rename 的 `documentChanges` 每文件一条带版本号的 TextDocumentEdit。
+4. `IndexedFile` 缓存源码文本（工作区扫描的文件不在 docs 里，供跨文件 UTF-16 列计算）。
+5. 新增 `workspace/didChangeWorkspaceFolders`（added 扫描 / removed 清索引，已打开文件保留）。
+
+**为何按名字而非全局下标**：Dial 顶层函数/struct 名由 sema 保证全局唯一，天然是稳定身份；
+候选全局引用里未定义标识符的误记不会被任何真实符号查询命中，无害，故无需两遍扫描或缓存源码重收引用。
+
+**仍有边界**（如实记录，不过度声称）：递归包内 `src/` 模块的 LSP 索引（§38.14）与显式 import
+依赖图可视化未实现——全量扫描按目录收集 `.dial`，不解析跨包 `src/` 映射。
+
+**验证**：`tools/lsp_workspace_smoke.py`（黑盒 JSON-RPC：initialize 带 rootUri / workspace/symbol
+覆盖未打开文件 / references 跨 2 文件 / rename documentChanges 跨 2 文件 / 局部符号 rename 限本文件 /
+stdout 协议纯净）全部通过；三个既有 LSP 冒烟脚本（`lsp_smoke.py` / `lsp_full_smoke.py` /
+`check_lsp_stdout_purity.py`）零回归；新脚本挂入 run_tests.sh M 组。

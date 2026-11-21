@@ -49,6 +49,18 @@
   own 标量参数 / own 默认参数 / own struct 字段均 Fail-Fast 拒绝（后者因 Dial struct 值语义
   无法维持字段独占）。普通参数语义零回归。回归见 `tests/run_tests.sh` R12c 段（新增 13 项）。
 
+### Added（跨工作区全量模块图，开发中）
+
+- **LSP 跨工作区全量模块图**：补齐 §17.2 / §28.7.1 长期标注的「跨工作区全量引用图尚未实现」缺口。
+  `initialize` 读 `workspaceFolders` / `rootUri` / `rootPath` 并递归扫描根目录全部 `.dial` 建索引，
+  `workspace/symbol` 覆盖未打开文件；顶层函数 / struct 按**全局唯一名**跨文件解析（`Ref.global_name`
+  + `SymTarget::Global`），references / rename 遍历全工作区，rename 的 `documentChanges` 每文件一条
+  `TextDocumentEdit`；局部 Var / Param 仍限本文件按 `symbol_index` 精确匹配（遮蔽正确）；新增
+  `workspace/didChangeWorkspaceFolders` 增删索引。**仍有边界**：递归包内 `src/` 模块索引（§38.14）
+  与显式 import 依赖图可视化未实现。回归见 `tests/run_tests.sh` M 组新增 `tools/lsp_workspace_smoke.py`
+  （全量索引 / 跨 2 文件 references / rename / 局部隔离 / 协议纯净），三个既有 LSP 冒烟脚本零回归。
+  仅改 `src/lsp.rs` / `src/index.rs`，不动编译语义与 ABI。
+
 ## [v1.20] — 2026-11-21
 
 > 本版是 **LLVM 可选化 + 默认后端切 asm** 的交付版本：LLVM 变为可选 oracle（`--features llvm`），

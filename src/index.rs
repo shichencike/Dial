@@ -49,12 +49,17 @@ pub type SigInfo = (String, Vec<String>);
 pub struct Ref {
     /// 该引用解析到的符号在 `symbols` 中的下标。
     /// 与定义共用同一身份 → 天然正确处理「同名遮蔽」（内层的同名变量不会被误并进来）。
+    /// v1.21 跨工作区：对本文件作用域无法解析、但匹配全局顶层符号的引用，此值为 usize::MAX
+    /// （此时以 `global_name` 为身份）。
     pub symbol_index: usize,
     /// 标识符文本（冗余存储，便于断言 / 调试）。
     #[allow(dead_code)]
     pub name: String,
     /// 标识符本身的源码区间（1 起、char 列）：`(line1, char1, line1, char2)`。
     pub span: (usize, usize, usize, usize),
+    /// v1.21 跨工作区：若本引用解析到全局顶层符号（函数 / struct），记录其名字；
+    /// 局部符号为 None。全局引用按名字跨文件匹配（Dial 顶层符号名全局唯一）。
+    pub global_name: Option<String>,
 }
 
 /// 一个声明的符号。
@@ -103,6 +108,9 @@ pub struct IndexedFile {
     pub fn_bodies: HashMap<usize, usize>,
     /// 函数符号下标 → 签名信息（供 signatureHelp）。
     pub signatures: HashMap<usize, SigInfo>,
+    /// v1.21 跨工作区：缓存的源码文本，供跨文件 references/rename 计算 UTF-16 列。
+    /// 工作区扫描的文件不在 LSP docs 里，故随索引一并缓存。
+    pub text: String,
 }
 
 /// 一个已安装包导出的符号（来自 `.diali`）。
@@ -112,13 +120,15 @@ pub struct PackageSyms {
     pub fns: Vec<Symbol>,
 }
 
-/// 整个工作区索引：当前文件 + 已加载的包。
+/// 整个工作区索引：工作区内所有 `.dial` 文件 + 已加载的包。
 #[derive(Debug, Default)]
 pub struct WorkspaceIndex {
     pub files: HashMap<String, IndexedFile>,
     pub packages: HashMap<String, PackageSyms>,
     /// 外部函数名 → 签名信息（供 signatureHelp；来自已加载的 `.diali`）。
     pub package_sigs: HashMap<String, SigInfo>,
+    /// v1.21 跨工作区：工作区根路径（普通文件系统路径，非 URI），Some 表示已登记。
+    pub workspace_root: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +285,7 @@ pub fn index_program(uri: &str, program: &Program, imports: &[String]) -> Indexe
         references: Vec::new(),
         fn_bodies: ix.fn_bodies,
         signatures: ix.signatures,
+        text: String::new(),
     };
     f.finalize_spans();
     f
@@ -729,17 +740,62 @@ impl IndexedFile {
                 let line1 = tk.line;
                 let char1 = tk.col;
                 let char2 = tk.col + name.chars().count();
-                if let Some(scope_id) = self.scope_at((line1, char1)) {
-                    if let Some(sidx) = self.lookup_local_index(scope_id, name) {
+                let local = self.scope_at((line1, char1))
+                    .and_then(|sid| self.lookup_local_index(sid, name));
+                match local {
+                    // 本文件作用域解析到的符号：局部身份（遮蔽正确）。
+                    // v1.21：若它是本文件顶层全局符号（函数 / struct），同时打上 global_name，
+                    // 使跨文件查询能匹配到「定义处」本身（否则外部文件只能找到调用处、找不到定义）。
+                    Some(sidx) => {
+                        let gname = if self.is_global_symbol(sidx) {
+                            Some(self.symbols[sidx].name.clone())
+                        } else {
+                            None
+                        };
                         self.references.push(Ref {
                             symbol_index: sidx,
                             name: name.clone(),
                             span: (line1, char1, line1, char2),
+                            global_name: gname,
                         });
                     }
+                    // v1.21 跨工作区：本文件作用域无法解析的标识符，记为「候选全局引用」。
+                    // 查询时只对真实存在的全局顶层符号（函数 / struct）按名字匹配，
+                    // 故未定义标识符的误记不会被任何查询命中，无害；这样无需预扫描全局名，
+                    // 也无需缓存源码文本重收引用。注意：全局符号的**声明处**也会落到这条
+                    // （顶层符号虽在 top_scope，但 collect_references 按词法位置 scope_at
+                    // 可能落在函数体外的 top_scope——此时能解析到局部身份；两种情形都在
+                    // references_at 里按全局符号名统一匹配，覆盖定义文件）。
+                    None => self.references.push(Ref {
+                        symbol_index: usize::MAX,
+                        name: name.clone(),
+                        span: (line1, char1, line1, char2),
+                        global_name: Some(name.clone()),
+                    }),
                 }
             }
         }
+    }
+
+    /// v1.21：某符号下标是否顶层全局符号（函数 / struct，跨文件可见）。
+    pub fn is_global_symbol(&self, idx: usize) -> bool {
+        self.symbols
+            .get(idx)
+            .map(|s| s.scope_id == self.top_scope
+                && matches!(s.kind, SymbolKind::Function | SymbolKind::Struct))
+            .unwrap_or(false)
+    }
+
+    /// v1.21：本文件的顶层符号名（函数 / struct），用于跨工作区全局引用匹配。
+    #[allow(dead_code)]
+    pub fn global_symbol_names(&self) -> std::collections::HashSet<String> {
+        let mut set = std::collections::HashSet::new();
+        for s in &self.symbols {
+            if s.scope_id == self.top_scope {
+                set.insert(s.name.clone());
+            }
+        }
+        set
     }
 }
 

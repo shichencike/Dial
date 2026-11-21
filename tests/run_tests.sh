@@ -556,6 +556,13 @@ if command -v python3 >/dev/null 2>&1; then
     else
         fail=1
     fi
+    # v1.21 跨工作区全量模块图：workspace/symbol 覆盖未打开文件、跨文件
+    # references/rename、局部符号隔离（黑盒 JSON-RPC 往返）。
+    if python3 tools/lsp_workspace_smoke.py --dialc "$DIALC"; then
+        :
+    else
+        fail=1
+    fi
 else
     echo "  ⚠️  跳过（未找到 python3）"
 fi
