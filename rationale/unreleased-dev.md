@@ -24,6 +24,23 @@
 
 ---
 
+#### 首次 tag CI（v1.2）暴露的 5 处「本地绿 / 干净 CI 红」发布阻塞
+
+**缘起**：版本升级到 v1.20、打 annotated tag `v1.2` 并推送后，CI（run `44838067282`）在 Windows x64 与 Linux x86_64 两个 job 失败，打包/发布 job 被跳过。用户战略刚把默认后端切成 asm，这批缺陷此前被「默认 LLVM + 本地沙箱状态」双重掩盖，首次在 CI 真实环境暴露。按用户「有 bug 就得修，不慌发」要求逐项修复，两轮 CI 收敛（第二轮另暴露 2 处，见下）。
+
+**第一轮（run 44838067282）两处**：
+- **Linux semver 单测假失败**：`tools/verify_p4_deps.sh:236` 硬编码 `--manifest-path /workspace/dialc/Cargo.toml`——这是本地沙箱绝对路径，CI runner 工作目录是 `/home/runner/work/Dial/Dial`，`cargo test` 找不到清单而失败。脚本开头已 `cd "$(dirname "$0")/.."`（项目根），改 `--manifest-path Cargo.toml` 即可，两环境都对。
+- **Windows 汇编失败**：asm 后端无条件发射 `.section .note.GNU-stack,"",@progbits`（GNU ld 用于标记非可执行栈），这是 ELF 专用语法；MinGW/COFF 汇编器把段名 `.note.GNU-stack` 里的 `-` 当 junk，报 `line 31: Error: junk at end of line, first unrecognized character is '-'`（zig 交叉复现为 `unexpected token in directive`）。用编译期 `cfg!(windows)` 门控：Windows 构建跳过该段（COFF 默认非可执行栈无需标记），Linux 构建逐字节不变。
+
+**第二轮（run 44839830383，前两处修复生效后新暴露）三处**：
+- **Windows 链接失败**：修正 GNU-stack 后汇编通过，但链接报 `undefined reference to 'dial_env_init@PLT'`。asm 后端 `do_call()` 对所有外部 C 函数发 `call sym@PLT`（ELF PLT 重定位），Windows COFF 无 PLT 概念、把 `@PLT` 当符号名一部分。新增 `plt_suffix()` helper（`cfg!(windows)` → `""`，否则 `"@PLT"`），两处发射点（外部调用 + PGO dump）统一使用；Linux `.s` 仍逐字节不变。**验证**：`zig cc -target x86_64-windows-gnu` 汇编对照，带 `@PLT`+GNU-stack 失败、去掉后成功。
+- **R18 impl_gui_handle 双后端编译失败**：该用例 `import "gui"`，但全量脚本里 gui 包首次 pack/install 在 AA 组（约 3708 行），而 R18 组在 2731 行——本地因之前手工装过 gui 包而绿，干净 CI 必败。R18 前置幂等 `pack+install gui`，消除对后续组的顺序依赖。
+- **source 包未产出 .a**：`tools/verify_p4_pkg.sh` 四处硬编码 `/root/.dial/packages`（本地沙箱 HOME），CI 的 `$HOME=/home/runner` 下 `find` 找不到安装目录；但同段「import 运行正确」用的是 dialc 自己的 HOME 故通过——断言口径错。四处改 `$HOME/.dial`。
+
+**验证（关键：模拟干净环境）**：单纯本地 HOME 测试无法复现后两处（本地已装 gui、`HOME=/root`），故用**临时 HOME** 跑全量模拟 CI 干净环境——R18 与 source 包两断言均转绿；临时 HOME 下另有 2 处 cargo test 失败（rustup 工具链在临时 HOME 找不到），是模拟副作用，真实 CI（HOME=/home/runner，cargo 正常）首轮日志已证 semver 单测通过。正常 HOME 全量 `run_tests.sh` EXIT=0、1023 项全绿；check_version/check_links 全绿。护栏：Linux 发射逐字节不变、LLVM 后端零改动、零新 Rust 依赖、版本 1.20.0、发布标签 v1.2。
+
+---
+
 #### P4.6 AArch64 常量移位立即数折叠 + P4.3 下载门禁竞态修复
 
 **缘起**：延续用户「把 AArch64 相关补上」的要求。P4.5 已把 PGO / 内联汇编这两块 A 类能力缺口补齐，本轮继续盘点 AArch64 在**指令发射层**相对 x86 的对等性，发现常量移位是最后一块明确的、确定有收益且零风险的落后项。

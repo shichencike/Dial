@@ -2738,6 +2738,13 @@ echo "  -- R18) impl 方法调用与默认参数补齐双后端一致性 --"
 CDIR18="${TMP}/r18"
 mkdir -p "$CDIR18"
 
+# impl_gui_handle 用例 import "gui"，依赖 gui 包已安装。AA 组（约 3708 行）才首次
+# pack/install gui，本 R18 组在其之前——本地因手工装过 gui 而绿，干净 CI 环境必败。
+# 这里先幂等 pack+install gui，消除对后续组的顺序依赖（与 AA 组同口径）。
+"$DIALC" pack packages/gui -o "${TMP}/r18_gui.dialpkg" >/dev/null 2>&1 \
+    && "$DIALC" install "${TMP}/r18_gui.dialpkg" >/dev/null 2>&1 \
+    || rbad "R18 前置 gui 包 pack/install 失败"
+
 # 18a) impl 用例（含关联函数 impl_assoc）：asm 输出须匹配 .expected 且与 LLVM 一致
 for t in impl_struct impl_default impl_gui_handle impl_assoc; do
     if ${DIALC} build "tests/impl/$t.dial" --backend=asm -o "$CDIR18/${t}_a" >/dev/null 2>&1 \

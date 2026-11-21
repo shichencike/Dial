@@ -90,6 +90,14 @@ fn dwarf_enabled(debug_info: bool, _target: EmitTarget) -> bool {
     debug_info
 }
 
+/// x86-64 调用外部 C 函数时的 PLT 重定位后缀。ELF（Linux）用 `@PLT` 走过程链接表；
+/// Windows COFF（MinGW）没有 PLT 概念，符号名带 `@PLT` 会被链接器当成不同符号，
+/// 报 "undefined reference to `dial_env_init@PLT'"。用编译期 cfg! 判断：
+/// Linux 构建逐字节不变（仍 @PLT），Windows 构建返回空串（直接 call 符号名）。
+fn plt_suffix() -> &'static str {
+    if cfg!(windows) { "" } else { "@PLT" }
+}
+
 /// M7-e3w：生成手写 DWARF v5 CU（.debug_abbrev + .debug_info），供 gdb 源码级调试。
 /// 行表（.debug_line）由汇编器的 .file/.loc 自动生成（见 emit() 顶部），本函数
 /// 只负责建立 CU + subprogram + formal_parameter + variable + base_type DIE，
@@ -2165,7 +2173,7 @@ impl<'a> FnEmit<'a> {
                 for r in saved.iter() { self.line(&format!("\tpushq {}", self.r(r))); }
                 self.line("\tleaq dial_pgo_counters(%rip), %rdi");
                 self.line(&format!("\tmovl ${}, %esi", self.pgo.counter_count));
-                self.line("\tcall dial_pgo_dump@PLT");
+                self.line(&format!("\tcall dial_pgo_dump{}", plt_suffix()));
                 for r in saved.iter().rev() { self.line(&format!("\tpopq {}", self.r(r))); }
             }
             EmitTarget::AArch64 => {
@@ -3573,7 +3581,7 @@ impl<'a> FnEmit<'a> {
                 if self.local_funcs.contains(func) {
                     self.line(&format!("\tcall {}", func));
                 } else {
-                    self.line(&format!("\tcall {}@PLT", func));
+                    self.line(&format!("\tcall {}{}", func, plt_suffix()));
                 }
             }
             EmitTarget::AArch64 => self.line(&format!("\tbl {}", func)),

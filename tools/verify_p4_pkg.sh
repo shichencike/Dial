@@ -129,20 +129,20 @@ fi
 
 echo "== P4.0 5/10: 原子安装无残留 =="
 "$DIALC" install "$PB/pkg.dialpkg" >/dev/null 2>&1  # 覆盖安装
-leftover=$(find /root/.dial/packages -maxdepth 1 \( -name '.install-*' -o -name '.backup-*' \) 2>/dev/null | wc -l)
+leftover=$(find $HOME/.dial/packages -maxdepth 1 \( -name '.install-*' -o -name '.backup-*' \) 2>/dev/null | wc -l)
 [ "$leftover" -eq 0 ] && ok "全新/覆盖安装后无 .install/.backup 残留" || bad "残留临时目录 $leftover 个"
 
 echo "== P4.0 6/10: 哈希篡改拦截 + 旧包完好 =="
-oldh=$(sha256sum /root/.dial/packages/p4gate_prebuilt/p4gate_prebuilt.diali 2>/dev/null | cut -d' ' -f1)
+oldh=$(sha256sum $HOME/.dial/packages/p4gate_prebuilt/p4gate_prebuilt.diali 2>/dev/null | cut -d' ' -f1)
 TM="$TD/tamper"; mkdir -p "$TM"; ( cd "$TM" && unzip -q "$PB/pkg.dialpkg" && echo "// TAMPER" >> p4gate_prebuilt.diali && zip -q -r t.dialpkg manifest.txt p4gate_prebuilt.diali lib )
 "$DIALC" install "$TM/t.dialpkg" >/dev/null 2>&1 && bad "篡改包竟安装成功" || ok "篡改包被 SHA256 拒绝"
-newh=$(sha256sum /root/.dial/packages/p4gate_prebuilt/p4gate_prebuilt.diali 2>/dev/null | cut -d' ' -f1)
+newh=$(sha256sum $HOME/.dial/packages/p4gate_prebuilt/p4gate_prebuilt.diali 2>/dev/null | cut -d' ' -f1)
 [ "$oldh" = "$newh" ] && ok "篡改被拒后旧包完好" || bad "旧包被篡改包破坏"
 
 echo "== P4.0 7/10: source 模式 install 期就地编译 =="
 if "$DIALC" pack "$SRC" -o "$SRC/pkg.dialpkg" >/dev/null 2>&1 \
    && "$DIALC" install "$SRC/pkg.dialpkg" >/dev/null 2>&1; then
-    [ -n "$(find /root/.dial/packages/p4gate_source/lib -name '*.a' 2>/dev/null)" ] \
+    [ -n "$(find $HOME/.dial/packages/p4gate_source/lib -name '*.a' 2>/dev/null)" ] \
         && ok "source 包 install 期编译出本机 .a" || bad "source 包未产出 .a"
     cat > "$TD/use_src.dial" <<'EOF'
 import "p4gate_source";
