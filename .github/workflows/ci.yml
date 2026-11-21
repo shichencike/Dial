@@ -180,6 +180,13 @@ jobs:
             echo "--- $p.dialpkg 内容 ---"
             unzip -l "dist-$p/$p.dialpkg"
           done
+          # 版本号改写只用于 dialpkg 打包；打包完成后恢复仓库源文件版本。
+          # 否则后续「官网产物同步校验」的 build_web.py 会读到被改写为 $PKG_VER
+          # 的 dial.toml，重新生成的包介绍页版本与已提交 docx（仓库版本）不一致，
+          # 导致 git diff --exit-code -- docx/ 误报失败。dialpkg 已带上正确版本，
+          # 此处恢复不影响任何发布产物。
+          git checkout -- packages/http/dial.toml packages/text/dial.toml \
+            packages/json/dial.toml packages/crypto/dial.toml packages/gui/dial.toml
           # 归集其余四包到同一目录，便于用单个 artifact 上传（路径与 http 包对齐）
           mkdir -p dist-c11
           cp dist-text/text.dialpkg dist-json/json.dialpkg \
@@ -386,13 +393,16 @@ jobs:
       - name: 一次性自签证书签名 dialc.exe（一版一密 + 密码学擦除）
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
+        # 防御性超时：签名脚本本地秒级完成；若卡死（如 cipher /w 覆写大卷空闲空间）
+        # 必须在 10 分钟内 fail-fast，而不是拖死整个 tag 发布。默认已跳过 cipher /w。
+        timeout-minutes: 10
         env:
           GITHUB_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           VER="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
           echo "signing version: $VER"
-          bash tools/sign_windows_release.sh \
+          bash -x tools/sign_windows_release.sh \
             target/x86_64-pc-windows-gnu/release/dialc.exe "$VER" dist-sign
 
       - name: 打包发布 zip（windows-x86_64，零 LLVM + 验签证书）

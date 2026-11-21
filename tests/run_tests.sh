@@ -2467,7 +2467,9 @@ fn main(): int {
     let t2: thread = spawn(worker, "q", ch);
     var a: string = recv(ch);
     var b: string = recv(ch);
-    print(a, ",", b);
+    // 两个 worker 共享 channel，recv 先后取决于线程调度（p!,q! / q!,p! 都合法）。
+    // 按字典序打印，消除输出不确定性，避免双后端逐字比较因调度差异假红。
+    if (a == "p!") { print(a, ",", b); } else { print(b, ",", a); }
     join(t1);
     detach(t2);
     return 0;

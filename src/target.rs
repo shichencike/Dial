@@ -65,17 +65,35 @@ impl TargetCpu {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EmitTarget {
-    /// x86-64 System V AMD64 ABI（首版严格验证目标）。
+    /// x86-64 System V AMD64 ABI（Linux / macOS / BSD）。
     X86_64SysV,
+    /// x86-64 Microsoft ABI（Windows，含 MinGW-w64）。与 SysV 的关键差异：
+    /// 前 4 个参数走 rcx/rdx/r8/r9（统一位置槽，整浮二选一）、调用方须预留
+    /// 32 字节 shadow space、callee-saved 含 rdi/rsi/xmm6-15、变参浮点须镜像
+    /// 到对应 GP 寄存器（不用 %al）。见 codegen_asm.rs 各 target 分支。
+    X86_64Ms,
     /// AArch64 AAPCS（首版同构实现：所有结构体按指针 ByVal 传递，绕开 HFA 规则）。
     AArch64,
 }
 
 impl EmitTarget {
+    /// 是否 x86-64（SysV 或 MS ABI）——两者共享指令集、助记符、返回寄存器，
+    /// 仅 ABI（传参/栈/callee-saved）不同。用于把大量 `== X86_64SysV` 门控
+    /// 统一收口到「是 x86-64 即可」，避免新枚举漏判。
+    pub fn is_x86_64(self) -> bool {
+        matches!(self, EmitTarget::X86_64SysV | EmitTarget::X86_64Ms)
+    }
+
+    /// 是否 Windows MS ABI（需要 shadow space / 统一位置槽 / callee-saved rdi/rsi）。
+    pub fn is_ms_abi(self) -> bool {
+        matches!(self, EmitTarget::X86_64Ms)
+    }
+
     /// 整型 / 指针参数的传参寄存器（按顺序）。
     pub fn int_arg_regs(self) -> &'static [&'static str] {
         match self {
             EmitTarget::X86_64SysV => &["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+            EmitTarget::X86_64Ms => &["rcx", "rdx", "r8", "r9"],
             EmitTarget::AArch64 => &["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"],
         }
     }
@@ -84,6 +102,7 @@ impl EmitTarget {
     pub fn fp_arg_regs(self) -> &'static [&'static str] {
         match self {
             EmitTarget::X86_64SysV => &["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"],
+            EmitTarget::X86_64Ms => &["xmm0", "xmm1", "xmm2", "xmm3"],
             EmitTarget::AArch64 => &["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"],
         }
     }
@@ -92,11 +111,27 @@ impl EmitTarget {
     pub fn callee_saved_int(self) -> &'static [&'static str] {
         match self {
             EmitTarget::X86_64SysV => &["rbx", "r12", "r13", "r14", "r15"],
+            // MS ABI：rbx/rbp/rdi/rsi/r12-r15 均 callee-saved。
+            EmitTarget::X86_64Ms => &["rbx", "rbp", "rdi", "rsi", "r12", "r13", "r14", "r15"],
             EmitTarget::AArch64 => &["x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28"],
         }
     }
 
-    /// 调用时栈必须对齐到的字节数（两平台都是 16）。
+    /// 浮点 callee-saved 寄存器（MS ABI 的 xmm6-15 须由被调方保存）。
+    pub fn callee_saved_fp(self) -> &'static [&'static str] {
+        match self {
+            EmitTarget::X86_64Ms => &["xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"],
+            _ => &[],
+        }
+    }
+
+    /// shadow space 字节数：MS ABI 要求调用方为 4 个寄存器参数预留 32 字节；
+    /// SysV / AArch64 无此要求（红区另论，本后端不使用）。
+    pub fn shadow_space(self) -> u32 {
+        match self { EmitTarget::X86_64Ms => 32, _ => 0 }
+    }
+
+    /// 调用时栈必须对齐到的字节数（x86 16；AArch64 16）。
     pub fn call_align(self) -> u32 { 16 }
 
     /// 红区（red zone）：x86-64 为 128 字节（本后端不依赖它，恒 0 使用），AArch64 为 0。
@@ -104,21 +139,21 @@ impl EmitTarget {
 
     /// 返回寄存器：整型 / 指针 / 句柄。
     pub fn ret_int_reg(self) -> &'static str {
-        match self { EmitTarget::X86_64SysV => "rax", EmitTarget::AArch64 => "x0" }
+        match self { EmitTarget::AArch64 => "x0", _ => "rax" }
     }
     /// 返回寄存器：浮点。
     pub fn ret_fp_reg(self) -> &'static str {
-        match self { EmitTarget::X86_64SysV => "xmm0", EmitTarget::AArch64 => "v0" }
+        match self { EmitTarget::AArch64 => "v0", _ => "xmm0" }
     }
 
     /// 调用指令助记符（x86 `call` / aarch64 `blr`）。
     pub fn call_mnem(self) -> &'static str {
-        match self { EmitTarget::X86_64SysV => "call", EmitTarget::AArch64 => "blr" }
+        match self { EmitTarget::AArch64 => "blr", _ => "call" }
     }
 
-    /// 函数返回指令。
+    /// 函数返回指令（x86 与 AArch64 共用 `ret`）。
     pub fn ret_mnem(self) -> &'static str {
-        match self { EmitTarget::X86_64SysV => "ret", EmitTarget::AArch64 => "ret" }
+        "ret"
     }
 
     /// 把 IrType 映射为汇编里的「数据宽度后缀 / 操作宽度」：返回 (move_mnem, suffix)。

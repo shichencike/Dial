@@ -25,17 +25,22 @@ pub fn detect_target() -> Result<EmitTarget, String> {
     if let Ok(v) = std::env::var("DIAL_ASM_TARGET") {
         return match v.trim() {
             "x86_64" | "x86-64" => Ok(EmitTarget::X86_64SysV),
+            // MS ABI 显式覆盖值：供交叉检视 Windows .s、本地 CI 验证用。
+            "x86_64-ms" | "x86-64-ms" | "x86_64-windows" | "windows" => Ok(EmitTarget::X86_64Ms),
             "aarch64" | "arm64" => Ok(EmitTarget::AArch64),
             other => Err(format!(
-                "[asm 后端] 未知 DIAL_ASM_TARGET `{}`（可选 x86_64 / aarch64）", other
+                "[asm 后端] 未知 DIAL_ASM_TARGET `{}`（可选 x86_64 / x86_64-ms / aarch64）", other
             )),
         };
     }
+    // 宿主架构 + OS 共同决定 x86-64 的 ABI：Windows（含 MinGW 交叉编译目标）
+    // 用 MS ABI，其余用 SysV。cfg!(windows) 在 --target x86_64-pc-windows-gnu
+    // 交叉编译时也为 true（判断的是编译目标 OS，正是我们需要的）。
     match std::env::consts::ARCH {
-        "x86_64" => Ok(EmitTarget::X86_64SysV),
+        "x86_64" => Ok(if cfg!(windows) { EmitTarget::X86_64Ms } else { EmitTarget::X86_64SysV }),
         "aarch64" => Ok(EmitTarget::AArch64),
         other => Err(format!(
-            "[asm 后端] 暂不支持宿主架构 `{}`（首版仅 x86-64 SysV / AArch64）", other
+            "[asm 后端] 暂不支持宿主架构 `{}`（首版仅 x86-64 SysV/MS / AArch64）", other
         )),
     }
 }

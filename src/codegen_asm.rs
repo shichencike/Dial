@@ -21,8 +21,26 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Copy, Debug)]
 enum ArgLoc { Int(usize), Fp(usize), Stack(usize) }
 
-/// 按 C ABI 给一串参数分配位置：整型/指针与浮点各自独立编号，超限者按原顺序进栈。
+/// 按 C ABI 给一串参数分配位置。
+/// SysV：整型/指针与浮点各自独立编号（rdi,rsi,… / xmm0,xmm1,…），超限进栈。
+/// MS ABI：统一位置槽——第 i 个参数占槽 i（槽 0..3 是寄存器，整/浮二选一：
+///   整走 rcx/rdx/r8/r9、浮走 xmm0/xmm1/xmm2/xmm3），第 4 个起进栈。
+///   这是 Windows x64 与 SysV 最根本的 ABI 差异（寄存器不能"各自数"）。
 fn abi_assign(tys: &[IrType], target: EmitTarget) -> Vec<ArgLoc> {
+    if target.is_ms_abi() {
+        let gp_n = target.int_arg_regs().len();   // 4
+        let mut slot = 0usize;
+        let mut si = 0usize;
+        return tys.iter().map(|t| {
+            let i = slot;
+            slot += 1;
+            if i < gp_n {
+                if t.is_float() { ArgLoc::Fp(i) } else { ArgLoc::Int(i) }
+            } else {
+                let x = si; si += 1; ArgLoc::Stack(x)
+            }
+        }).collect();
+    }
     let int_n = target.int_arg_regs().len();
     let fp_n = target.fp_arg_regs().len();
     let (mut ii, mut fi, mut si) = (0usize, 0usize, 0usize);
@@ -107,7 +125,7 @@ fn plt_suffix() -> &'static str {
 /// 栈指针的 DWARF 寄存器号随目标不同——x86-64 rsp=7 (0x77)，AArch64 sp=31 (0x8f)。
 fn emit_dwarf_cu(funcs: &[FnDwarfInfo], src_path: &str, target: EmitTarget) -> String {
     let breg: u8 = match target {
-        EmitTarget::X86_64SysV => 0x77, // DW_OP_breg7 = rsp
+        EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => 0x77, // DW_OP_breg7 = rsp
         EmitTarget::AArch64 => 0x8f,   // DW_OP_breg31 = sp (DWARF for AArch64)
     };
     let mut o = String::new();
@@ -744,23 +762,25 @@ impl<'a> FnEmit<'a> {
 
     /// 寄存器名前缀：x86 用 `%`，AArch64 不加。调用方一律传「裸名」。
     fn r(&self, reg: &str) -> String {
-        match self.target { EmitTarget::X86_64SysV => format!("%{}", reg), EmitTarget::AArch64 => reg.to_string() }
+        match self.target { EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => format!("%{}", reg), EmitTarget::AArch64 => reg.to_string() }
     }
     fn slot(&self, v: VReg) -> i64 { self.reg_off[v as usize] }
     fn rty(&self, v: VReg) -> IrType { self.f.reg_ty[v as usize].clone() }
     fn vty(&self, v: Value) -> IrType { v.ty(&self.f.reg_ty) }
 
     // 固定的临时寄存器（都不属于 C ABI 传参寄存器，避免互相踩踏）。
-    fn g1(&self) -> &'static str { match self.target { EmitTarget::X86_64SysV => "rax", EmitTarget::AArch64 => "x9" } }
-    fn g2(&self) -> &'static str { match self.target { EmitTarget::X86_64SysV => "r10", EmitTarget::AArch64 => "x10" } }
-    fn g3(&self) -> &'static str { match self.target { EmitTarget::X86_64SysV => "r11", EmitTarget::AArch64 => "x11" } }
-    fn f1(&self) -> &'static str { match self.target { EmitTarget::X86_64SysV => "xmm8", EmitTarget::AArch64 => "d16" } }
-    fn f2(&self) -> &'static str { match self.target { EmitTarget::X86_64SysV => "xmm9", EmitTarget::AArch64 => "d17" } }
+    fn g1(&self) -> &'static str { match self.target { EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => "rax", EmitTarget::AArch64 => "x9" } }
+    fn g2(&self) -> &'static str { match self.target { EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => "r10", EmitTarget::AArch64 => "x10" } }
+    fn g3(&self) -> &'static str { match self.target { EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => "r11", EmitTarget::AArch64 => "x11" } }
+    // MS ABI：xmm6-xmm15 全是 callee-saved，固定 scratch 必须避开，改用
+    // volatile 的 xmm4/xmm5（xmm0-3 是参数/返回寄存器，不能在装载参数期间占用）。
+    fn f1(&self) -> &'static str { match self.target { EmitTarget::X86_64Ms => "xmm4", EmitTarget::X86_64SysV => "xmm8", EmitTarget::AArch64 => "d16" } }
+    fn f2(&self) -> &'static str { match self.target { EmitTarget::X86_64Ms => "xmm5", EmitTarget::X86_64SysV => "xmm9", EmitTarget::AArch64 => "d17" } }
 
     /// 32 位 / 8 位 / 浮点单精度视图。
     fn r32(&self, reg: &str) -> String {
         match self.target {
-            EmitTarget::X86_64SysV => match reg {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => match reg {
                 "rax" => "eax".into(), "rdi" => "edi".into(), "rsi" => "esi".into(),
                 "rdx" => "edx".into(), "rcx" => "ecx".into(), "r8" => "r8d".into(),
                 "r9" => "r9d".into(), "r10" => "r10d".into(), "r11" => "r11d".into(),
@@ -771,7 +791,7 @@ impl<'a> FnEmit<'a> {
     }
     fn r8(&self, reg: &str) -> String {
         match self.target {
-            EmitTarget::X86_64SysV => match reg {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => match reg {
                 "rax" => "al".into(), "rdi" => "dil".into(), "rsi" => "sil".into(),
                 "rdx" => "dl".into(), "rcx" => "cl".into(), "r8" => "r8b".into(),
                 "r9" => "r9b".into(), "r10" => "r10b".into(), "r11" => "r11b".into(),
@@ -783,7 +803,7 @@ impl<'a> FnEmit<'a> {
     }
     fn fs(&self, reg: &str) -> String {
         match self.target {
-            EmitTarget::X86_64SysV => reg.to_string(),         // movss 用 xmm 名
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => reg.to_string(),         // movss 用 xmm 名
             EmitTarget::AArch64 => reg.replacen('d', "s", 1),  // d16 -> s16
         }
     }
@@ -791,7 +811,7 @@ impl<'a> FnEmit<'a> {
     /// 把 64 位立即数装入整数寄存器（AArch64 用 movz/movk 拼接，不用 literal pool）。
     fn mov_imm64(&mut self, reg: &str, bits: u64) {
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 self.line(&format!("\tmovabsq ${}, {}", bits as i64, self.r(reg)));
             }
             EmitTarget::AArch64 => {
@@ -828,7 +848,7 @@ impl<'a> FnEmit<'a> {
                 }
                 let off = self.slot(r);
                 match self.target {
-                    EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}({}), {}", off, self.r("rsp"), self.r(reg))),
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovq {}({}), {}", off, self.r("rsp"), self.r(reg))),
                     EmitTarget::AArch64 => self.line(&format!("\tldr {}, [sp, #{}]", reg, off)),
                 }
             }
@@ -839,7 +859,7 @@ impl<'a> FnEmit<'a> {
     fn lf(&mut self, v: Value, reg: &str) {
         match v {
             Value::Imm(Imm::F64(bits)) => match self.target {
-                EmitTarget::X86_64SysV => {
+                EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                     self.line(&format!("\tmovabsq ${}, {}", bits as i64, self.r("rax")));
                     self.line(&format!("\tmovq {}, {}", self.r("rax"), self.r(reg)));
                 }
@@ -849,7 +869,7 @@ impl<'a> FnEmit<'a> {
                 }
             },
             Value::Imm(Imm::F32(bits)) => match self.target {
-                EmitTarget::X86_64SysV => {
+                EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                     self.line(&format!("\tmovl ${}, {}", bits as i32, self.r("eax")));
                     self.line(&format!("\tmovd {}, {}", self.r("eax"), self.r(reg)));
                 }
@@ -861,7 +881,7 @@ impl<'a> FnEmit<'a> {
             Value::Imm(i) => { // 整数常量出现在浮点上下文：按位模式搬移
                 let n = match i { Imm::I64(n) => n, Imm::I32(n) => n as i64, Imm::I8(n) => n as i64, Imm::I1(b) => b as i64, _ => 0 };
                 match self.target {
-                    EmitTarget::X86_64SysV => {
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                         self.line(&format!("\tmovabsq ${}, {}", n, self.r("rax")));
                         self.line(&format!("\tmovq {}, {}", self.r("rax"), self.r(reg)));
                     }
@@ -881,7 +901,7 @@ impl<'a> FnEmit<'a> {
                 }
                 let off = self.slot(r);
                 match self.target {
-                    EmitTarget::X86_64SysV => {
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                         let m = if f32 { "movss" } else { "movsd" };
                         self.line(&format!("\t{} {}({}), {}", m, off, self.r("rsp"), self.r(reg)));
                     }
@@ -910,7 +930,7 @@ impl<'a> FnEmit<'a> {
         if self.dead_defs.contains(&dst) { return; }
         let off = self.slot(dst);
         match self.target {
-            EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}, {}({})", self.r(reg), off, self.r("rsp"))),
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovq {}, {}({})", self.r(reg), off, self.r("rsp"))),
             EmitTarget::AArch64 => self.line(&format!("\tstr {}, [sp, #{}]", reg, off)),
         }
     }
@@ -929,7 +949,7 @@ impl<'a> FnEmit<'a> {
         }
         let off = self.slot(dst);
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 let m = if f32 { "movss" } else { "movsd" };
                 self.line(&format!("\t{} {}, {}({})", m, self.r(reg), off, self.r("rsp")));
             }
@@ -946,7 +966,7 @@ impl<'a> FnEmit<'a> {
         let off = self.slot(dst);
         let f32 = self.rty(dst) == IrType::F32;
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 let m = if f32 { "movss" } else { "movsd" };
                 self.line(&format!("\t{} {}, {}({})", m, self.r(reg), off, self.r("rsp")));
             }
@@ -962,7 +982,7 @@ impl<'a> FnEmit<'a> {
     fn sg_force_stack(&mut self, dst: VReg, reg: &str) {
         let off = self.slot(dst);
         match self.target {
-            EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}, {}({})", self.r(reg), off, self.r("rsp"))),
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovq {}, {}({})", self.r(reg), off, self.r("rsp"))),
             EmitTarget::AArch64 => self.line(&format!("\tstr {}, [sp, #{}]", reg, off)),
         }
     }
@@ -1024,7 +1044,7 @@ impl<'a> FnEmit<'a> {
     /// 取栈上某偏移的地址到整数寄存器。
     fn addr(&mut self, reg: &str, off: i64) {
         match self.target {
-            EmitTarget::X86_64SysV => self.line(&format!("\tleaq {}({}), {}", off, self.r("rsp"), self.r(reg))),
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tleaq {}({}), {}", off, self.r("rsp"), self.r(reg))),
             EmitTarget::AArch64 => {
                 self.mov_imm64("x12", off as u64);
                 self.line(&format!("\tadd {}, sp, x12", reg));
@@ -1061,7 +1081,7 @@ impl<'a> FnEmit<'a> {
     /// 从 `[addr_reg]` 按 ty 宽度读到 `reg`（整数用 g1，浮点用 f1）。
     fn load_mem(&mut self, addr_reg: &str, val_reg: &str, ty: IrType) {
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 let a = self.r(addr_reg);
                 match ty {
                     IrType::I1 | IrType::I8 => self.line(&format!("\tmovzbq ({}), {}", a, self.r(val_reg))),
@@ -1087,7 +1107,7 @@ impl<'a> FnEmit<'a> {
     /// 把 `val_reg` 按 ty 宽度写到 `[addr_reg]`。
     fn store_mem(&mut self, addr_reg: &str, val_reg: &str, ty: IrType) {
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 let a = self.r(addr_reg);
                 match ty {
                     IrType::I1 | IrType::I8 => self.line(&format!("\tmovb {}, ({})", self.r(&self.r8(val_reg)), a)),
@@ -2092,12 +2112,15 @@ impl<'a> FnEmit<'a> {
                 }
             }
         }
-        let outbound = (max_stack as i64) * 8;
+        // MS ABI：caller 必须为 4 个寄存器参数预留 32 字节 shadow space，即使
+        // 实参全部走寄存器。它位于出站区最底端 [rsp, rsp+32)，栈传参紧随其后。
+        // 被调方看到的栈参数偏移因此是 frame+8+32+k*8（见 prologue 的 extra）。
+        let outbound = (max_stack as i64) * 8 + self.target.shadow_space() as i64;
         // x86-64：固定预留 5 个 callee-saved 保存槽。固定大小让栈帧布局不依赖
         // 之后的块分析结果；用帧内 mov 保存而非 push，避免 rsp 变动令所有
         // off(%rsp) 偏移失效。
         let save_bytes = match self.target {
-            EmitTarget::X86_64SysV =>
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms =>
                 (RES_POOL.iter().filter(|p| is_callee_saved(p)).count() as i64) * 8,
             EmitTarget::AArch64 => 0,
         };
@@ -2122,7 +2145,7 @@ impl<'a> FnEmit<'a> {
         // x86-64 的 call/ret 走栈天然隔离，lr_slot 恒 -1、帧布局零变化。
         self.frame_size = match self.target {
             // 入口 rsp ≡ 8 (mod 16)；sub 后需 ≡ 0 (mod 16) 才能 call。
-            EmitTarget::X86_64SysV => align_up(total, 16) + 8,
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => align_up(total, 16) + 8,
             EmitTarget::AArch64 => {
                 self.lr_slot = total;
                 align_up(total + 8, 16).max(16)
@@ -2141,7 +2164,7 @@ impl<'a> FnEmit<'a> {
     fn pgo_counter_inc(&mut self, idx: usize) {
         if !self.pgo.instrument { return; }
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 self.line("\tpushfq");
                 self.line(&format!("\tincq dial_pgo_counters+{}(%rip)", idx * 8));
                 self.line("\tpopfq");
@@ -2168,11 +2191,13 @@ impl<'a> FnEmit<'a> {
     fn pgo_emit_dump(&mut self) {
         if !self.pgo.instrument || self.f.name != "main" { return; }
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 let saved = ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
                 for r in saved.iter() { self.line(&format!("\tpushq {}", self.r(r))); }
-                self.line("\tleaq dial_pgo_counters(%rip), %rdi");
-                self.line(&format!("\tmovl ${}, %esi", self.pgo.counter_count));
+                let a0 = self.target.int_arg_regs()[0];
+                let a1 = self.target.int_arg_regs()[1];
+                self.line(&format!("\tleaq dial_pgo_counters(%rip), {}", self.r(a0)));
+                self.line(&format!("\tmovl ${}, {}", self.pgo.counter_count, self.r(&self.r32(a1))));
                 self.line(&format!("\tcall dial_pgo_dump{}", plt_suffix()));
                 for r in saved.iter().rev() { self.line(&format!("\tpopq {}", self.r(r))); }
             }
@@ -2207,7 +2232,7 @@ impl<'a> FnEmit<'a> {
         let lbl = format!("{}:", f.name);
         self.line(&lbl);
         match self.target {
-            EmitTarget::X86_64SysV => self.line(&format!("\tsubq ${}, {}", self.frame_size, self.r("rsp"))),
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tsubq ${}, {}", self.frame_size, self.r("rsp"))),
             EmitTarget::AArch64 => {
                 self.mov_imm64("x12", self.frame_size as u64);
                 self.line("\tsub sp, sp, x12");
@@ -2220,7 +2245,7 @@ impl<'a> FnEmit<'a> {
         // 保存本函数用到的 callee-saved 寄存器（帧内槽，不动 rsp）。
         // 参数寄存器（rdi/rsi/...）不在池里，故保存动作不会踩到入参。
         let saved = self.used_phys.clone();
-        if matches!(self.target, EmitTarget::X86_64SysV) {
+        if self.target.is_x86_64() {
             for (k, p) in saved.iter().enumerate() {
                 let off = self.save_off + (k as i64) * 8;
                 self.line(&format!("\tmovq {}, {}({})", self.r(p), off, self.r("rsp")));
@@ -2250,12 +2275,16 @@ impl<'a> FnEmit<'a> {
                 ArgLoc::Fp(k) => src_reg = self.target.fp_arg_regs()[*k].to_string(),
                 ArgLoc::Stack(k) => {
                     // x86：call 压了返回地址，故被调函数看到的栈参数在 [rsp+frame+8+k*8]；
+                    // MS ABI 另有 32 字节 shadow space，栈参数在 [rsp+frame+8+32+k*8]；
                     // AArch64：bl 不动 sp，栈参数就在 [sp+frame+k*8]。
-                    let extra = match self.target { EmitTarget::X86_64SysV => 8, EmitTarget::AArch64 => 0 };
+                    let extra = match self.target {
+                        EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => 8 + self.target.shadow_space() as i64,
+                        EmitTarget::AArch64 => 0,
+                    };
                     let so = self.frame_size + extra + (*k as i64) * 8;
                     let g = self.g1().to_string();
                     match self.target {
-                        EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}({}), {}", so, self.r("rsp"), self.r(&g))),
+                        EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovq {}({}), {}", so, self.r("rsp"), self.r(&g))),
                         EmitTarget::AArch64 => self.line(&format!("\tldr {}, [sp, #{}]", g, so)),
                     }
                     self.sg(slot, &g);
@@ -2268,18 +2297,18 @@ impl<'a> FnEmit<'a> {
             //   · 一律写满 8 字节，绝不能只写 1/4 字节留下高字节垃圾。
             if ty.is_float() {
                 let fr = match self.target {
-                    EmitTarget::X86_64SysV => src_reg,
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => src_reg,
                     EmitTarget::AArch64 => src_reg.replacen('v', "d", 1),
                 };
                 match self.target {
-                    EmitTarget::X86_64SysV =>
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms =>
                         self.line(&format!("\tmovsd {}, {}({})", self.r(&fr), off, self.r("rsp"))),
                     EmitTarget::AArch64 =>
                         self.line(&format!("\tstr {}, [sp, #{}]", fr, off)),
                 }
             } else {
                 match self.target {
-                    EmitTarget::X86_64SysV => {
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                         match ty {
                             IrType::I32 =>
                                 self.line(&format!("\tmovl {}, {}", self.r(&self.r32(&src_reg)), self.r(&self.r32(&src_reg)))),
@@ -2304,14 +2333,14 @@ impl<'a> FnEmit<'a> {
 
     fn epilogue(&mut self) {
         let saved = self.used_phys.clone();
-        if matches!(self.target, EmitTarget::X86_64SysV) {
+        if self.target.is_x86_64() {
             for (k, p) in saved.iter().enumerate() {
                 let off = self.save_off + (k as i64) * 8;
                 self.line(&format!("\tmovq {}({}), {}", off, self.r("rsp"), self.r(p)));
             }
         }
         match self.target {
-            EmitTarget::X86_64SysV => self.line(&format!("\taddq ${}, {}", self.frame_size, self.r("rsp"))),
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\taddq ${}, {}", self.frame_size, self.r("rsp"))),
             EmitTarget::AArch64 => {
                 // 恢复 LR（必须与 prologue 的 str x30 配对，且在任何 sp 变动之前）。
                 if self.lr_slot >= 0 {
@@ -2355,7 +2384,7 @@ impl<'a> FnEmit<'a> {
             }
             IrInst::LeaLabel { dst, lit } => {
                 match self.target {
-                    EmitTarget::X86_64SysV => {
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                         self.line(&format!("\tleaq .Lstr{}({}), {}", lit, self.r("rip"), self.r(self.g2())));
                     }
                     EmitTarget::AArch64 => {
@@ -2369,7 +2398,7 @@ impl<'a> FnEmit<'a> {
             IrInst::LeaStaticString { dst, lit } => {
                 // 静态 immortal DialString 的对外句柄指向 len 字段 = 对象起点 +8。
                 match self.target {
-                    EmitTarget::X86_64SysV => {
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                         self.line(&format!("\tleaq .Ldstr{}+8({}), {}", lit, self.r("rip"), self.r(self.g2())));
                     }
                     EmitTarget::AArch64 => {
@@ -2387,7 +2416,7 @@ impl<'a> FnEmit<'a> {
                 let g = self.g2().to_string();
                 self.lg(Value::Reg(*base), &g);
                 match self.target {
-                    EmitTarget::X86_64SysV => self.line(&format!("\taddq ${}, {}", byte_off, self.r(&g))),
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\taddq ${}, {}", byte_off, self.r(&g))),
                     EmitTarget::AArch64 => {
                         self.mov_imm64("x12", byte_off as u64);
                         self.line(&format!("\tadd {}, {}, x12", g, g));
@@ -2402,7 +2431,7 @@ impl<'a> FnEmit<'a> {
                 self.lg(Value::Reg(*base), &b);
                 self.lg(*off, &o);
                 match self.target {
-                    EmitTarget::X86_64SysV => self.line(&format!("\taddq {}, {}", self.r(&o), self.r(&b))),
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\taddq {}, {}", self.r(&o), self.r(&b))),
                     // dst = base + off，且 sg(dst) 存的是 b：两条目标都要更新 b。
                     // 旧代码误写 `add o, b, b`（o=b+b、b 不变），既算错也没存对新地址
                     // ——实机 qemu 下 `p.offset(1)` 完全失效。修正为 b = b + o。
@@ -2536,7 +2565,7 @@ impl<'a> FnEmit<'a> {
                 // 取函数代码地址：leaq <符号>(%rip), %reg（PIE 位置无关）。
                 let g = self.g1().to_string();
                 match self.target {
-                    EmitTarget::X86_64SysV => self.line(&format!("\tleaq {}(%rip), {}", func, self.r(&g))),
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tleaq {}(%rip), {}", func, self.r(&g))),
                     EmitTarget::AArch64 => {
                         self.line(&format!("\tadrp {}, {}", g, func));
                         self.line(&format!("\tadd {}, {}, :lo12:{}", g, g, func));
@@ -2575,13 +2604,17 @@ impl<'a> FnEmit<'a> {
         // AArch64 x9/x10/x11/x12）与 callee-saved。
         let pool: Vec<&str> = match self.target {
             EmitTarget::X86_64SysV => vec!["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+            // MS ABI：rdi/rsi 是 callee-saved，绝不能当 asm 临时；rcx/rdx/r8/r9
+            // 是前 4 参数槽，r10/r11 是剩余 caller-saved，全部可安全独占。
+            EmitTarget::X86_64Ms => vec!["rcx", "rdx", "r8", "r9", "r10", "r11"],
             EmitTarget::AArch64 => vec!["x0", "x1", "x2", "x3", "x4", "x5"],
         };
         let fallback = match self.target {
             EmitTarget::X86_64SysV => "rdi",
+            EmitTarget::X86_64Ms => "rcx",
             EmitTarget::AArch64 => "x0",
         };
-        let is_x86 = matches!(self.target, EmitTarget::X86_64SysV);
+        let is_x86 = matches!(self.target, EmitTarget::X86_64SysV | EmitTarget::X86_64Ms);
 
         // 约束串解析：每项形如 "=r" / "=&r" / "+r" / "r" / "0"。
         // 提取每项的「绑定编号」：纯数字 = 与该编号操作数同寄存器；否则新分配。
@@ -2698,7 +2731,7 @@ impl<'a> FnEmit<'a> {
                         // ATT 的 `%` 前缀是 x86 语法；AArch64 GAS 用裸寄存器名
                         // （x0/w0/s0），任何 dialect 都不加 `%`。
                         let shown = match self.target {
-                            EmitTarget::X86_64SysV if dialect == AsmDialect::Att => format!("%{}", named),
+                            t if t.is_x86_64() && dialect == AsmDialect::Att => format!("%{}", named),
                             _ => named,
                         };
                         out.push_str(&shown);
@@ -2832,7 +2865,7 @@ impl<'a> FnEmit<'a> {
     fn emit_div_trap(&mut self) {
         let debug = self.safety == SafetyMode::Debug;
         match self.target {
-            EmitTarget::X86_64SysV => self.line(if debug { "\tint3" } else { "\tud2" }),
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(if debug { "\tint3" } else { "\tud2" }),
             EmitTarget::AArch64 => self.line(if debug { "\tbrk #1" } else { "\tbrk #0" }),
         }
     }
@@ -2942,7 +2975,7 @@ impl<'a> FnEmit<'a> {
         let simm = if matches!(op, ABin::Shl | ABin::Shr) { shift_imm(b) } else { None };
         if let Some(n) = simm {
             match self.target {
-                EmitTarget::X86_64SysV => {
+                EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                     let a_reg = self.r(&g1);
                     let m = if matches!(op, ABin::Shl) { "shlq" } else { "sarq" };
                     self.line(&format!("\t{} ${}, {}", m, n, a_reg));
@@ -2965,7 +2998,7 @@ impl<'a> FnEmit<'a> {
             let ok_lbl = format!(".{}_dchk_ok_{}", self.prefix, self.dchk_seq);
             self.dchk_seq += 1;
             match self.target {
-                EmitTarget::X86_64SysV => {
+                EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                     // 必须用 cmpq $0, r/m64：b_reg 可能是 `off(%rsp)` 内存操作数，
                     // testq b_reg,b_reg 在双内存操作数时是非法汇编。
                     self.line(&format!("\tcmpq $0, {}", b_reg));
@@ -2982,7 +3015,7 @@ impl<'a> FnEmit<'a> {
             }
         }
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 let a_reg = self.r(&g1);
                 match op {
                     ABin::Add => self.line(&format!("\taddq {}, {}", b_reg, a_reg)),
@@ -3062,7 +3095,7 @@ impl<'a> FnEmit<'a> {
         self.lf(a, &f1);
         let b_reg = self.bin_src(b, &f2, false, true);
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 let a_reg = self.r(&f1);
                 self.line(&format!("\t{}{} {}, {}", fop(op), suf, b_reg, a_reg));
                 self.sf(dst, &f1);
@@ -3103,7 +3136,7 @@ impl<'a> FnEmit<'a> {
         self.lg(a, &g1);
         let b_reg = self.bin_src(b, &g2, true, false);
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 self.line(&format!("\tcmpq {}, {}", b_reg, self.r(&g1)));
                 self.line(&format!("\t{} {}", x86_setcc(op), self.r("al")));
                 self.line(&format!("\tmovzbq {}, {}", self.r("al"), self.r(&g1)));
@@ -3122,7 +3155,7 @@ impl<'a> FnEmit<'a> {
         self.lf(a, &f1);
         let b_reg = self.bin_src(b, &f2, false, true);
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 self.line(&format!("\tucomisd {}, {}", b_reg, self.r(&f1)));
                 self.line(&format!("\t{} {}", x86_float_setcc(op), self.r("al")));
                 self.line(&format!("\tmovzbq {}, {}", self.r("al"), self.r(self.g1())));
@@ -3140,10 +3173,11 @@ impl<'a> FnEmit<'a> {
             let f1 = self.f1().to_string();
             self.lf(a, &f1);
             match self.target {
-                EmitTarget::X86_64SysV => {
+                EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
+                    let zero = self.f2().to_string(); // SysV xmm9 / MS xmm5（避开 callee-saved）
                     self.line(&format!("\tmovabsq $0, {}", self.r("rax")));
-                    self.line(&format!("\tmovq {}, {}", self.r("rax"), self.r("xmm9")));
-                    self.line(&format!("\tsubsd {}, {}", self.r("xmm9"), self.r(&f1)));
+                    self.line(&format!("\tmovq {}, {}", self.r("rax"), self.r(&zero)));
+                    self.line(&format!("\tsubsd {}, {}", self.r(&zero), self.r(&f1)));
                 }
                 EmitTarget::AArch64 => {
                     self.line("\tfmov d17, xzr");
@@ -3178,7 +3212,7 @@ impl<'a> FnEmit<'a> {
         let g1 = self.g1().to_string();
         self.lg(a, &g1);
         match self.target {
-            EmitTarget::X86_64SysV => match op {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => match op {
                 AUn::Neg => self.line(&format!("\tnegq {}", self.r(&g1))),
                 AUn::Not => { self.line(&format!("\ttestq {}, {}", self.r(&g1), self.r(&g1))); self.line(&format!("\tsete {}", self.r("al"))); self.line(&format!("\tmovzbq {}, {}", self.r("al"), self.r(&g1))); }
                 AUn::BitNot => self.line(&format!("\tnotq {}", self.r(&g1))),
@@ -3200,7 +3234,7 @@ impl<'a> FnEmit<'a> {
                 let f1 = self.f1().to_string();
                 self.lg(a, &g1);
                 match self.target {
-                    EmitTarget::X86_64SysV => {
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                         let m = if ty == IrType::F32 { "cvtsi2ssq" } else { "cvtsi2sdq" };
                         self.line(&format!("\t{} {}, {}", m, self.r(&g1), self.r(&f1)));
                     }
@@ -3216,7 +3250,7 @@ impl<'a> FnEmit<'a> {
                 let g1 = self.g1().to_string();
                 self.lf(a, &f1);
                 match self.target {
-                    EmitTarget::X86_64SysV => {
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                         let m = if src_ty == IrType::F32 { "cvttss2siq" } else { "cvttsd2siq" };
                         self.line(&format!("\t{} {}, {}", m, self.r(&f1), self.r(&g1)));
                     }
@@ -3231,7 +3265,7 @@ impl<'a> FnEmit<'a> {
                 let f1 = self.f1().to_string();
                 self.lf(a, &f1);
                 match self.target {
-                    EmitTarget::X86_64SysV => self.line(&format!("\tcvtss2sd {}, {}", self.r(&f1), self.r(&f1))),
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tcvtss2sd {}, {}", self.r(&f1), self.r(&f1))),
                     EmitTarget::AArch64 => self.line(&format!("\tfcvt {}, {}", f1, self.fs(&f1))),
                 }
                 self.sf(dst, &f1);
@@ -3240,7 +3274,7 @@ impl<'a> FnEmit<'a> {
                 let f1 = self.f1().to_string();
                 self.lf(a, &f1);
                 match self.target {
-                    EmitTarget::X86_64SysV => self.line(&format!("\tcvtsd2ss {}, {}", self.r(&f1), self.r(&f1))),
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tcvtsd2ss {}, {}", self.r(&f1), self.r(&f1))),
                     EmitTarget::AArch64 => self.line(&format!("\tfcvt {}, {}", self.fs(&f1), f1)),
                 }
                 self.sf(dst, &f1);
@@ -3253,11 +3287,11 @@ impl<'a> FnEmit<'a> {
                 if kind == AConv::Sext {
                     match src_ty {
                         IrType::I32 => match self.target {
-                            EmitTarget::X86_64SysV => self.line(&format!("\tmovslq {}, {}", self.r(&self.r32(&g1)), self.r(&g1))),
+                            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovslq {}, {}", self.r(&self.r32(&g1)), self.r(&g1))),
                             EmitTarget::AArch64 => self.line(&format!("\tsxtw {}, {}", g1, self.r32(&g1))),
                         },
                         IrType::I1 | IrType::I8 => match self.target {
-                            EmitTarget::X86_64SysV => self.line(&format!("\tmovsbq {}, {}", self.r(&self.r8(&g1)), self.r(&g1))),
+                            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovsbq {}, {}", self.r(&self.r8(&g1)), self.r(&g1))),
                             EmitTarget::AArch64 => self.line(&format!("\tsxtb {}, {}", g1, self.r32(&g1))),
                         },
                         _ => {}
@@ -3266,11 +3300,11 @@ impl<'a> FnEmit<'a> {
                 if kind == AConv::Trunc {
                     match ty {
                         IrType::I32 => match self.target {
-                            EmitTarget::X86_64SysV => self.line(&format!("\tmovl {}, {}", self.r(&self.r32(&g1)), self.r(&self.r32(&g1)))),
+                            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovl {}, {}", self.r(&self.r32(&g1)), self.r(&self.r32(&g1)))),
                             EmitTarget::AArch64 => self.line(&format!("\tmov {}, {}", self.r32(&g1), self.r32(&g1))),
                         },
                         IrType::I1 | IrType::I8 => match self.target {
-                            EmitTarget::X86_64SysV => self.line(&format!("\tandq $255, {}", self.r(&g1))),
+                            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tandq $255, {}", self.r(&g1))),
                             EmitTarget::AArch64 => self.line(&format!("\tand {}, {}, #255", g1, g1)),
                         },
                         _ => {}
@@ -3287,7 +3321,7 @@ impl<'a> FnEmit<'a> {
         self.lg(Value::Reg(ptr), &a); // 槽地址
         let sym = arc_symbol(kind, retain);
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 self.line(&format!("\tmovq ({}), {}", self.r(&a), self.r(self.target.int_arg_regs()[0])));
             }
             EmitTarget::AArch64 => {
@@ -3311,7 +3345,7 @@ impl<'a> FnEmit<'a> {
             let sym = arc_symbol(k, retain);
             let arg = self.target.int_arg_regs()[0].to_string();
             match self.target {
-                EmitTarget::X86_64SysV => {
+                EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                     self.line(&format!("\tmovq {}({}), {}", off, self.r(&a), self.r(&arg)));
                 }
                 EmitTarget::AArch64 => {
@@ -3415,18 +3449,19 @@ impl<'a> FnEmit<'a> {
         // 1) 先写栈传参（低位 outbound 区），避免后续寄存器装载踩到它。
         for (idx, loc) in locs.iter().enumerate() {
             if let ArgLoc::Stack(k) = loc {
-                let off = (*k as i64) * 8;
+                // MS ABI：shadow space 占据出站区底部 32 字节，栈传参从第 33 字节起。
+                let off = self.target.shadow_space() as i64 + (*k as i64) * 8;
                 if arg_tys[idx].is_float() {
                     let f = self.f1().to_string();
                     self.lf(args[idx], &f);
                     match self.target {
-                        EmitTarget::X86_64SysV => self.line(&format!("\tmovsd {}, {}({})", self.r(&f), off, self.r("rsp"))),
+                        EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovsd {}, {}({})", self.r(&f), off, self.r("rsp"))),
                         EmitTarget::AArch64 => self.line(&format!("\tstr {}, [sp, #{}]", f, off)),
                     }
                 } else {
                     self.lg(args[idx], &g1);
                     match self.target {
-                        EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}, {}({})", self.r(&g1), off, self.r("rsp"))),
+                        EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovq {}, {}({})", self.r(&g1), off, self.r("rsp"))),
                         EmitTarget::AArch64 => self.line(&format!("\tstr {}, [sp, #{}]", g1, off)),
                     }
                 }
@@ -3442,7 +3477,7 @@ impl<'a> FnEmit<'a> {
                 ArgLoc::Fp(k) => {
                     let raw = self.target.fp_arg_regs()[*k].to_string();
                     let reg = match self.target {
-                        EmitTarget::X86_64SysV => raw.clone(),
+                        EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => raw.clone(),
                         // AArch64 的 vN 在标量与双精度视图里用 dN。
                         EmitTarget::AArch64 => raw.replacen('v', "d", 1),
                     };
@@ -3454,6 +3489,21 @@ impl<'a> FnEmit<'a> {
                     let _ = reg;
                 }
                 ArgLoc::Stack(_) => {}
+            }
+        }
+        // 2b) MS ABI：位置槽 i (0..3) 上的浮点实参除了进 xmmN，还须镜像到
+        //     同一个槽的 GP 寄存器（rcx/rdx/r8/r9），这样 callee 用 va_arg 取
+        //     浮点时能从 GP 影子寄存器读到值。非变参调用写入也无害。
+        if self.target.is_ms_abi() {
+            for (idx, loc) in locs.iter().enumerate() {
+                if let ArgLoc::Fp(k) = loc {
+                    if *k < 4 {
+                        let xmm = self.target.fp_arg_regs()[*k];
+                        let gp = self.target.int_arg_regs()[*k];
+                        self.line(&format!("\tmovq {}, {}", self.r(xmm), self.r(gp)));
+                    }
+                }
+                let _ = idx;
             }
         }
         // 3) SysV variadic 约定：%al = 传给向量寄存器（xmm0-7）的参数个数。
@@ -3474,7 +3524,7 @@ impl<'a> FnEmit<'a> {
         if let Some(d) = dst {
             if ret_ty.is_float() {
                 let rr = match self.target {
-                    EmitTarget::X86_64SysV => "xmm0".to_string(),
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => "xmm0".to_string(),
                     EmitTarget::AArch64 => "d0".to_string(),
                 };
                 self.sf(d, &rr);
@@ -3500,18 +3550,19 @@ impl<'a> FnEmit<'a> {
         // 1) 栈传参（低位 outbound 区）
         for (idx, loc) in locs.iter().enumerate() {
             if let ArgLoc::Stack(k) = loc {
-                let off = (*k as i64) * 8;
+                // MS ABI：shadow space 占据出站区底部 32 字节，栈传参从第 33 字节起。
+                let off = self.target.shadow_space() as i64 + (*k as i64) * 8;
                 if arg_tys[idx].is_float() {
                     let f = self.f1().to_string();
                     self.lf(args[idx], &f);
                     match self.target {
-                        EmitTarget::X86_64SysV => self.line(&format!("\tmovsd {}, {}({})", self.r(&f), off, self.r("rsp"))),
+                        EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovsd {}, {}({})", self.r(&f), off, self.r("rsp"))),
                         EmitTarget::AArch64 => self.line(&format!("\tstr {}, [sp, #{}]", f, off)),
                     }
                 } else {
                     self.lg(args[idx], &g1);
                     match self.target {
-                        EmitTarget::X86_64SysV => self.line(&format!("\tmovq {}, {}({})", self.r(&g1), off, self.r("rsp"))),
+                        EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line(&format!("\tmovq {}, {}({})", self.r(&g1), off, self.r("rsp"))),
                         EmitTarget::AArch64 => self.line(&format!("\tstr {}, [sp, #{}]", g1, off)),
                     }
                 }
@@ -3527,7 +3578,7 @@ impl<'a> FnEmit<'a> {
                 ArgLoc::Fp(k) => {
                     let raw = self.target.fp_arg_regs()[*k].to_string();
                     let reg = match self.target {
-                        EmitTarget::X86_64SysV => raw.clone(),
+                        EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => raw.clone(),
                         EmitTarget::AArch64 => raw.replacen('v', "d", 1),
                     };
                     self.lf(args[idx], &reg);
@@ -3535,17 +3586,29 @@ impl<'a> FnEmit<'a> {
                 ArgLoc::Stack(_) => {}
             }
         }
+        // 2b) MS ABI 变参浮点镜像到同槽 GP 寄存器（见 inst_call 注释）。
+        if self.target.is_ms_abi() {
+            for loc in locs.iter() {
+                if let ArgLoc::Fp(k) = loc {
+                    if *k < 4 {
+                        let xmm = self.target.fp_arg_regs()[*k];
+                        let gp = self.target.int_arg_regs()[*k];
+                        self.line(&format!("\tmovq {}, {}", self.r(xmm), self.r(gp)));
+                    }
+                }
+            }
+        }
         // 3) 调用目标放进一个**不与实参寄存器冲突**的寄存器。
         //    x86-64 用 %r11（caller-saved，且不在 int_arg_regs 里）；
         //    AArch64 用 x16（IP0， caller-saved）。
         // 裸寄存器名（lg / sg 内部会自己加 '%' 前缀）。
         let call_reg = match self.target {
-            EmitTarget::X86_64SysV => "r11",
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => "r11",
             EmitTarget::AArch64 => "x16",
         };
         self.lg(Value::Reg(target), call_reg);
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 // SysV variadic 约定：%al = 传给向量寄存器（xmm0-7）的参数个数。
                 let n_fp = locs.iter().filter(|l| matches!(l, ArgLoc::Fp(_))).count();
                 if n_fp == 0 {
@@ -3563,7 +3626,7 @@ impl<'a> FnEmit<'a> {
         if let Some(d) = dst {
             if ret_ty.is_float() {
                 let rr = match self.target {
-                    EmitTarget::X86_64SysV => "xmm0".to_string(),
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => "xmm0".to_string(),
                     EmitTarget::AArch64 => "d0".to_string(),
                 };
                 self.sf(d, &rr);
@@ -3577,7 +3640,7 @@ impl<'a> FnEmit<'a> {
     /// 发一条调用：本编译单元内定义的 Dial 函数用直接 call，其余外部 C 符号走 PLT。
     fn do_call(&mut self, func: &str) {
         match self.target {
-            EmitTarget::X86_64SysV => {
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                 if self.local_funcs.contains(func) {
                     self.line(&format!("\tcall {}", func));
                 } else {
@@ -3592,7 +3655,7 @@ impl<'a> FnEmit<'a> {
 
     fn term(&mut self, block_id: u32, t: &Term) {
         let jmp_mnem = match self.target {
-            EmitTarget::X86_64SysV => "jmp",
+            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => "jmp",
             EmitTarget::AArch64 => "b",
         };
         match t {
@@ -3636,7 +3699,7 @@ impl<'a> FnEmit<'a> {
                     let g1 = self.g1().to_string();
                     self.lg(Value::Reg(*cond), &g1);
                     match self.target {
-                        EmitTarget::X86_64SysV => {
+                        EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
                             self.line(&format!("\ttestq {}, {}", self.r(&g1), self.r(&g1)));
                             self.line(&format!("\tjz {}", else_lbl));
                         }
@@ -3656,7 +3719,7 @@ impl<'a> FnEmit<'a> {
                 if let Some(v) = val {
                     if self.f.ret.is_float() {
                         let rr = match self.target {
-                            EmitTarget::X86_64SysV => "xmm0".to_string(),
+                            EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => "xmm0".to_string(),
                             EmitTarget::AArch64 => "d0".to_string(),
                         };
                         self.lf(*v, &rr);
@@ -3667,7 +3730,7 @@ impl<'a> FnEmit<'a> {
                 self.epilogue();
             }
             Term::Unreachable => match self.target {
-                EmitTarget::X86_64SysV => self.line("\tud2"),
+                EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => self.line("\tud2"),
                 EmitTarget::AArch64 => self.line("\tbrk #0"),
             },
         }

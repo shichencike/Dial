@@ -1850,8 +1850,23 @@ impl<'a> Lower<'a> {
                         _ => return self.err(&format!("[asm 后端] 向量不支持运算符 {:?}", op)),
                     };
                     if is_float {
-                        self.emit(IrInst::FBin { op: bin, dst: r, a: Value::Reg(a_lane),
-                            b: Value::Reg(b_lane), ty: IrType::F64 });
+                        if op == BinOp::Mod {
+                            // 浮点取模同标量：降为 libm fmod/fmodf 调用（LLVM frem 同构）。
+                            let (fname, fty) = if lane_ty == IrType::F32 {
+                                ("fmodf", IrType::F32)
+                            } else {
+                                ("fmod", IrType::F64)
+                            };
+                            self.emit(IrInst::Call {
+                                dst: Some(r), func: fname.to_string(),
+                                args: vec![Value::Reg(a_lane), Value::Reg(b_lane)],
+                                arg_tys: vec![fty.clone(), fty.clone()], ret_ty: fty,
+                                linkage: CallLink::Runtime,
+                            });
+                        } else {
+                            self.emit(IrInst::FBin { op: bin, dst: r, a: Value::Reg(a_lane),
+                                b: Value::Reg(b_lane), ty: IrType::F64 });
+                        }
                     } else {
                         self.emit(IrInst::Bin { op: bin, dst: r, a: Value::Reg(a_lane),
                             b: Value::Reg(b_lane), ty: IrType::I64 });
@@ -1939,7 +1954,26 @@ impl<'a> Lower<'a> {
                 };
                 let ty = if is_float { f_ty.clone() } else { IrType::I64 };
                 let r = self.new_reg(ty.clone());
-                if is_float {
+                if is_float && op == BinOp::Mod {
+                    // 浮点取模：x86 无标量 frem 指令，LLVM 把 float/double 的 `frem`
+                    // 降级为 libm 的 fmodf/fmod 调用（向零截断余数）。asm 后端此前
+                    // 误把 Mod 当 div（codegen_asm.rs 的 fop 映射 Mod→div），导致
+                    // `10.5 % 3.0` 输出 3.5（=10.5/3.0）。这里在 IR 层直接降为
+                    // fmod/fmodf 调用，复用 inst_call 完整的 ABI 发射（SysV/MS/AArch64
+                    // 参数寄存器、shadow space、PLT、返回值）——与 LLVM 语义对齐，
+                    // 且 -lm 已在链接层无条件加入（main.rs）。
+                    let (fname, fty) = if f_ty == IrType::F32 {
+                        ("fmodf", IrType::F32)
+                    } else {
+                        ("fmod", IrType::F64)
+                    };
+                    self.emit(IrInst::Call {
+                        dst: Some(r), func: fname.to_string(),
+                        args: vec![av, bv],
+                        arg_tys: vec![fty.clone(), fty.clone()], ret_ty: fty,
+                        linkage: CallLink::Runtime,
+                    });
+                } else if is_float {
                     self.emit(IrInst::FBin { op: abin(op), dst: r, a: av, b: bv, ty: f_ty });
                 } else {
                     self.emit(IrInst::Bin { op: abin(op), dst: r, a: av, b: bv, ty: IrType::I64 });
