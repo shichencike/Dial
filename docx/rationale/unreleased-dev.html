@@ -74,6 +74,7 @@
 <li><a href="#方案-c-完整-consume-体系程序员视角对抗测试驱动的-p0-修复">方案 C 完整 consume 体系：程序员视角对抗测试驱动的 P0 修复</a></li>
 <li><a href="#跨工作区全量模块图补齐-lsp-长期缺口">跨工作区全量模块图：补齐 LSP 长期缺口</a><ul>
 <li><a href="#协作式线程池--协程--async-awaitv121补齐-41无线程池无异步缺口">协作式线程池 / 协程 / async-await（v1.21，补齐 §41「无线程池/无异步」缺口）</a></li>
+<li><a href="#c--dial-反向回调v121推翻-gui绝不反向回调宪法">C → Dial 反向回调（v1.21，推翻 GUI「绝不反向回调」宪法）</a></li>
 </ul>
 </li>
 </ul>
@@ -4192,7 +4193,35 @@ resume 活跃协程链表。独立 C smoke 实测：协程 3 步 yield/resume（
 <code>spawn</code> 同源。四组 Dial 用例（pool / async-await / 协程 / 混合）双后端 stdout 逐字一致。</p>
 <p><strong>验证</strong>：<code>tests/run_tests.sh</code> R19 段新增 7 项（线程池 / async-await / 协程三正向双后端一致
 + await 非 task、co_yield 非 async 各双后端拒绝）；含 R19 全量回归 EXIT=0 全绿；默认
-asm-only 构建 ldd 确认零 libLLVM。负向另测 4 项（入口返回类型、await 操作数）全部编译期拒绝。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+asm-only 构建 ldd 确认零 libLLVM。负向另测 4 项（入口返回类型、await 操作数）全部编译期拒绝。</p>
+<hr />
+<h4 id="c--dial-反向回调v121推翻-gui绝不反向回调宪法">C → Dial 反向回调（v1.21，推翻 GUI「绝不反向回调」宪法）</h4>
+<p><strong>缘起</strong>：§41「尚未实现」四项之一。用户裁决「推翻宪法，真做反向回调」——即允许 C 侧（含平台线程）
+<strong>主动</strong>调用具名 Dial 函数。这不是简单开个后门：GUI 六层当初立这条宪法是为了守住
+「Dial 无 GC、ARC 归 Dial、C 线程绝不碰非原子 ARC 对象」的内存底线。因此本轮的设计目标是
+<strong>推翻否决条文，但原样保留内存底线</strong>，而不是放松它。</p>
+<p><strong>新宪法边界（五条，写进 §32.7）</strong>：① 仍无闭包——入口必须是具名函数 + 显式 <code>rawptr&lt;void&gt;</code>
+state；② C 主动调用——注册表持有 id，fire 由 C 发起；③ 仅标量过界——参数/结果都是 int 位模式，
+state 由用户 own；④ 回调线程绝不触碰非原子 <code>dial_rc_*</code> 对象，复杂数据走 <code>channel&lt;T&gt;</code>（原子 ARC）；
+⑤ C 注册表只存 <code>{thunk, state, result, done}</code>，不持有任何 Dial 堆对象。</p>
+<p><strong>C 运行时 <code>stdlib/dial_callback.{h,c}</code></strong>：mutex 保护的可增长注册表 <code>id → CbEntry</code>；
+<code>dial_callback_thread_fire</code> 在平台线程里 sleep(delay_ms) 后<strong>持锁拷贝 thunk/state、解锁后调用</strong>
+（避免持锁执行用户代码导致死锁/重入），结果写回 <code>result</code> 并置 <code>done</code>。argcell 三槽：
+<code>slot[0]=payload(int)</code> / <code>slot[1]=state(ptr)</code> / <code>slot[2]=result 回写</code>。C 独立 smoke 实测：
+注册 id=1、count=1、同步 result=42 done=1、线程 result=63 done=1、free 后 count=0。</p>
+<p><strong>双后端同源 thunk</strong>：asm <code>__dial_cb_thunk_&lt;fn&gt;</code>（lower.rs）与 LLVM 同名 thunk（codegen.rs）
+都做「读 slot[0]/slot[1] → 调 <code>fn(state, payload)</code> → 写 slot[2]」，三槽 8 字节对齐、调用约定
+SysV/Win64/AAPCS 由后端各自负责，零 ABI 分叉。state 槽按 <code>IrType::Ptr</code> / LLVM <code>i8ptr</code> 传递，
+与 <code>rawptr&lt;void&gt;</code> 的表示逐位对应。</p>
+<p><strong>编译错误与修复</strong>：LLVM feature 构建报 <code>Type::Callback</code> 在 <code>src/codegen.rs</code> 4 处 match 未覆盖
+（<code>dialc_type_to_llvm</code> / <code>default_value</code> / <code>emit_print</code> / <code>emit_print_raw</code>）。按 <code>ThreadPool/
+Coroutine/Task</code> 同类位置补齐：LLVM 类型映射 <code>i8ptr</code>、默认值 null ptr、print/print_raw 明确拒绝
+（不透明回调句柄无可读语义，打印等于泄露内部）；另在 <code>dial_type_name</code> 补 <code>callback</code> 名。</p>
+<p><strong>验证</strong>：三正向用例（同步 <code>1/21/21/sync-done/0</code>、线程 <code>63/thread-done</code>、state 透传 <code>107</code>）
+双后端 stdout 逐字一致；两个负向（入口签名 <code>fn(int):int</code>、state 传 <code>int</code>）双后端均编译期拒绝，
+诊断分别为「入口签名必须是 fn(rawptr<void>, int): int」「state 参数必须是 rawptr<void>」。
+默认 asm-only 与 llvm feature 双构建通过、ldd 零 libLLVM。R20 门禁挂入 <code>tests/run_tests.sh</code>，
+用 <code>DIALC_STDLIB_DIR</code> 强制源码回退编入新 C 运行时，避免旧缓存掩盖链接问题。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

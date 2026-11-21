@@ -4152,3 +4152,39 @@ resume 活跃协程链表。独立 C smoke 实测：协程 3 步 yield/resume（
 **验证**：`tests/run_tests.sh` R19 段新增 7 项（线程池 / async-await / 协程三正向双后端一致
 + await 非 task、co_yield 非 async 各双后端拒绝）；含 R19 全量回归 EXIT=0 全绿；默认
 asm-only 构建 ldd 确认零 libLLVM。负向另测 4 项（入口返回类型、await 操作数）全部编译期拒绝。
+
+---
+
+#### C → Dial 反向回调（v1.21，推翻 GUI「绝不反向回调」宪法）
+
+**缘起**：§41「尚未实现」四项之一。用户裁决「推翻宪法，真做反向回调」——即允许 C 侧（含平台线程）
+**主动**调用具名 Dial 函数。这不是简单开个后门：GUI 六层当初立这条宪法是为了守住
+「Dial 无 GC、ARC 归 Dial、C 线程绝不碰非原子 ARC 对象」的内存底线。因此本轮的设计目标是
+**推翻否决条文，但原样保留内存底线**，而不是放松它。
+
+**新宪法边界（五条，写进 §32.7）**：① 仍无闭包——入口必须是具名函数 + 显式 `rawptr<void>`
+state；② C 主动调用——注册表持有 id，fire 由 C 发起；③ 仅标量过界——参数/结果都是 int 位模式，
+state 由用户 own；④ 回调线程绝不触碰非原子 `dial_rc_*` 对象，复杂数据走 `channel<T>`（原子 ARC）；
+⑤ C 注册表只存 `{thunk, state, result, done}`，不持有任何 Dial 堆对象。
+
+**C 运行时 `stdlib/dial_callback.{h,c}`**：mutex 保护的可增长注册表 `id → CbEntry`；
+`dial_callback_thread_fire` 在平台线程里 sleep(delay_ms) 后**持锁拷贝 thunk/state、解锁后调用**
+（避免持锁执行用户代码导致死锁/重入），结果写回 `result` 并置 `done`。argcell 三槽：
+`slot[0]=payload(int)` / `slot[1]=state(ptr)` / `slot[2]=result 回写`。C 独立 smoke 实测：
+注册 id=1、count=1、同步 result=42 done=1、线程 result=63 done=1、free 后 count=0。
+
+**双后端同源 thunk**：asm `__dial_cb_thunk_<fn>`（lower.rs）与 LLVM 同名 thunk（codegen.rs）
+都做「读 slot[0]/slot[1] → 调 `fn(state, payload)` → 写 slot[2]」，三槽 8 字节对齐、调用约定
+SysV/Win64/AAPCS 由后端各自负责，零 ABI 分叉。state 槽按 `IrType::Ptr` / LLVM `i8ptr` 传递，
+与 `rawptr<void>` 的表示逐位对应。
+
+**编译错误与修复**：LLVM feature 构建报 `Type::Callback` 在 `src/codegen.rs` 4 处 match 未覆盖
+（`dialc_type_to_llvm` / `default_value` / `emit_print` / `emit_print_raw`）。按 `ThreadPool/
+Coroutine/Task` 同类位置补齐：LLVM 类型映射 `i8ptr`、默认值 null ptr、print/print_raw 明确拒绝
+（不透明回调句柄无可读语义，打印等于泄露内部）；另在 `dial_type_name` 补 `callback` 名。
+
+**验证**：三正向用例（同步 `1/21/21/sync-done/0`、线程 `63/thread-done`、state 透传 `107`）
+双后端 stdout 逐字一致；两个负向（入口签名 `fn(int):int`、state 传 `int`）双后端均编译期拒绝，
+诊断分别为「入口签名必须是 fn(rawptr<void>, int): int」「state 参数必须是 rawptr<void>」。
+默认 asm-only 与 llvm feature 双构建通过、ldd 零 libLLVM。R20 门禁挂入 `tests/run_tests.sh`，
+用 `DIALC_STDLIB_DIR` 强制源码回退编入新 C 运行时，避免旧缓存掩盖链接问题。

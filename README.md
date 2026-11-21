@@ -2186,7 +2186,7 @@ print("");        // -> Hi
 | 数组/结构体字面量作为常量表达式 | 文件级 `const` 的数组字面量按 §37.1 的宪法裁决纳入只读常量；具体落地状态见 §37.4 批次表 |
 | `select` 语句级超时 | **已支持**（v1.10）：`select(ms) { ... timeout { ... } }` 可选块级超时，等待超过 ms 且无通道就绪时执行 timeout 分支（timeout 体可省略——省略则超时直接结束）。底层用 `pthread_cond_timedwait` + 绝对 deadline（epoch 多次变化不累计超时），事件驱动非轮询；与 `default` 并存时 default 优先（非阻塞，不触发超时）。单通道场景仍可用 `recv_timeout(ch, ms)` |
 | 通道关闭的「反向」操作（重新打开） | **永不提供**——关闭不可逆，这是 `done` 单调性的前提 |
-| 线程池、协程、异步 | **已支持**（v1.21，见 [§27.11](#2711-协作式线程池--协程--asyncawait)）：有界线程池 + 有栈协程 + `async fn`/`await` 协作式调度；无闭包（具名函数 + 显式 argcell），复杂结果走 channel |
+| 线程池、协程、异步 | **已支持**（v1.21，见 [§27.11](#2711-协作式线程池--协程--async-awaitv121)）：有界线程池 + 有栈协程 + `async fn`/`await` 协作式调度；无闭包（具名函数 + 显式 argcell），复杂结果走 channel |
 | 原子类型、无锁数据结构 | **永不提供**（2026-11-19 宪法永久否决，见 §37.2）：与「可变全局状态永不提供」+ CSP channel/`move_to` 零竞争并发宪法冲突，无锁正确性违反 §19/§20 内存底线；底层同步需求走 §33 FFI 接 C11 atomics / pthread。不再是「未实现」，而是宪法层拒绝 |
 | `move_to` 到**已启动的**线程 | 编译期不支持——移交只能在 `spawn` 时完成（见 [§27.3](#273-零竞争移交与-o1-论证)） |
 | 通道元素为标量（`int` / `float` / `bool`） | 编译期拒绝（需装箱，见 [§27.2](#272-channelt-与所有权移交)） |
@@ -2195,7 +2195,7 @@ print("");        // -> Hi
 | `map.values()` 对非 `int` 值 | **已支持**（v1.10）：`values()` 支持 `V = int` / `string` / 标量字段结构体，返回对应快照数组；string 值返回 `string[]`（C 侧逐元素 retain，快照与原表互不影响）。`get_or()` 亦支持 string 值（返回值按已拥有语义，两端结算默认实参所有权，四象限计数平衡） |
 | LSP 的重命名 / 跨文件引用查找 / 格式化 | **已实现**（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的**引用边**（`src/index.rs`），格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作。能力清单见 [§28.7.1](#2871-当前-lsp-能力清单)。另见 v1.04 新增的 `dialc fmt` 命令行格式化（§34）。**跨工作区全量引用图已支持**（v1.21 开发中）：顶层函数 / struct 按全局唯一名跨文件解析，references / rename 覆盖工作区全部文件（`documentChanges` 每文件一条 `TextDocumentEdit`），局部符号仍限本文件；见 [§28.7.1](#2871-当前-lsp-能力清单) |
 | GUI 控件树 / 布局 / 信号槽 | **十五层已落地**（`gui.dialpkg`，见 [§38](#38-手搓-gui-地基包guidialpkg)）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13）+ 滚动视图层（视口裁剪 + 滚动条几何 / 命中 / 绘制 + 偏移推进，零 DISPLAY 依赖，见 §38.15）+ 右键上下文菜单层（复用第 7 层菜单 + 锚点 / 命中 / 悬停 / 选中 / 绘制，零 DISPLAY 依赖，见 §38.16）+ 悬浮提示层（文本 + 位置 + 尺寸 + 悬停计时，延迟由调用方推进、零时钟依赖，见 §38.17）+ 状态栏层（左 / 右文本 + 进度条槽位，进度值越界夹紧、零时钟依赖，见 §38.18）+ 通知气泡层（FIFO 消息队列，生命周期纯值推进、到期自动消隐、零时钟依赖，见 §38.19）+ 窗口级覆盖层自动集成（5 类覆盖层挂到窗口槽位，`win.draw()` 按固定 z-order 自动叠加、借用语义、空槽位零像素影响，见 §38.20）+ 快捷键 / 命令系统（KeyMap + 命令启用态，纯内存表、零 DISPLAY 依赖，
-  见 §38.21），共 **279 个 `extern fn`**（截至第 15 层；第 16 / 17 / 18 层追加见 §38.22 / §38.23 / §38.24，现共 **344 个**）；**第 8 层 Dial 侧 OO 封装**（`gui_oo.dial`，278 个 `impl` 方法，现 343 个，纯源码、随包 `src/` 分发（装包即用）、零 `extern fn` 增量，见 §38.14）。撤销重做 / 每控件主题覆写 / Slider 拖动 / Grid 自动换行已于第 17 层落地（见 §38.23）；高 DPI 整数放大 / ListBox 虚拟化 lazy load / IME 预编辑纯值事件 / GPU+原生平台纯值契约层已于第 18 层落地（见 §38.24）。**仍未实现**：真实 GPU 合成后端与原生弹窗/托盘/全局快捷键实机、IMM32/IBus/Fcitx 输入法平台采集、多行文本 / 富文本排版、C → Dial 反向回调、图片解码、可切换深色主题包。Win32 后端**仅交叉编译、未实机验证**（XTest 实机注入仅在 Linux/Xvfb 验收） |
+  见 §38.21），共 **279 个 `extern fn`**（截至第 15 层；第 16 / 17 / 18 层追加见 §38.22 / §38.23 / §38.24，现共 **344 个**）；**第 8 层 Dial 侧 OO 封装**（`gui_oo.dial`，278 个 `impl` 方法，现 343 个，纯源码、随包 `src/` 分发（装包即用）、零 `extern fn` 增量，见 §38.14）。撤销重做 / 每控件主题覆写 / Slider 拖动 / Grid 自动换行已于第 17 层落地（见 §38.23）；高 DPI 整数放大 / ListBox 虚拟化 lazy load / IME 预编辑纯值事件 / GPU+原生平台纯值契约层已于第 18 层落地（见 §38.24）。**仍未实现**：真实 GPU 合成后端与原生弹窗/托盘/全局快捷键实机、IMM32/IBus/Fcitx 输入法平台采集、多行文本 / 富文本排版、图片解码、可切换深色主题包。**C → Dial 反向回调已于 v1.21 受控开放**（具名函数 + 显式 rawptr state，见 §32.7）。Win32 后端**仅交叉编译、未实机验证**（XTest 实机注入仅在 Linux/Xvfb 验收） |
 | `impl` 方法块（B1） | **已支持**（v1.10 开发中增量）：`impl T { fn m(self, ...) }` 让用户 `struct` 与包不透明句柄（如 `GuiWindow` / `GuiMenu`）挂方法，`obj.m(args)` 编译期降级为静态调用（self 即首参），**ABI 不变、旧签名一字不动、不新增关键字**（`impl` 仍可作普通标识符），见 [§37.12](#3712-b1impl-方法块v110-开发中增补落地)。**关联函数（R3）**：`impl T { fn new(x: int): T }` 定义无 self 静态方法，`T::new(args)` 调用——parser 校验 T 已声明（支持前向引用）后脱糖为普通静态调用，双后端一致。**现役边界**：只支持具名类型（`Struct` / `Opaque`）；方法内 `self.f = ...` 因 Dial struct **值语义**只改副本、不回写调用者（与 Rust `&mut self` 不同）；暂不支持同类型变参 `...xs`、C ABI 导出、对标量/内建容器挂 impl。关联函数首参不可命名 self（那是实例方法保留规则）。B2 泛型 / B3 枚举 ADT / B4 闭包 / B5 重载维持原裁决 |
 
 ---
@@ -4162,7 +4162,7 @@ while (true) {
 | `select` 不支持表达式 | 它是**语句**：各 case 的绑定变量类型可以互不相同，没有统一返回类型 |
 | 无 `Option` 类型 | 「有没有取到」用 `is_null(x)` 判断；没有 `Some` / `None` 这类包装 |
 | 多消费者 | **已支持**（v0.9）。前提是消费者用 `recv` + `is_null` 判结束；用 `try_recv` 判结束会漏收。`select` 的 case 则永远拿不到空值 |
-| 线程池 / 协程 / 异步 | **已支持**（v1.21，见 [§27.11](#2711-协作式线程池--协程--asyncawait)）：有界线程池 `threadpool(n)` / `pool_submit` 复用 worker 线程；有栈协程 `coroutine` + `co_resume`/`co_yield`；`async fn` + `await` 协作式调度。均不引入闭包，入口是具名函数 + 显式 argcell 状态 |
+| 线程池 / 协程 / 异步 | **已支持**（v1.21，见 [§27.11](#2711-协作式线程池--协程--async-awaitv121)）：有界线程池 `threadpool(n)` / `pool_submit` 复用 worker 线程；有栈协程 `coroutine` + `co_resume`/`co_yield`；`async fn` + `await` 协作式调度。均不引入闭包，入口是具名函数 + 显式 argcell 状态 |
 | `join` 后句柄失效 | 二次 `join` / `detach` 触发 Fail-Fast 断言 |
 
 ### 27.11 协作式线程池 / 协程 / async-await（v1.21）
@@ -5242,6 +5242,65 @@ H 组回归同时锁定正向（int64 / double / bool 混传输出 `i=42 f=3.5 b
   句柄元素 / 非函数指针 / 状态参数类型；
 - H 组新增 C 变参 `extern fn` 的正向与负向回归；
 - `bash tests/run_tests.sh` A–O 全套通过。
+
+### 32.7 C → Dial 反向回调（v1.21：受控开放，推翻 GUI 层旧宪法）
+
+> **宪法裁决变更**：GUI 各层（§38）曾把「绝不 C → Dial 反向回调」列为永久宪法——
+> 为的是守住「Dial 无 GC、ARC 由 Dial 侧掌握；C 线程绝不碰非原子 ARC 对象」的内存底线。
+> v1.21 起**推翻这条否决**：允许 C 侧（含平台线程）**主动**回调具名 Dial 函数，
+> 但用一套受控边界把上面的内存底线原样保留下来。旧宪法在 GUI 各层的历史描述
+> （§38.x）保留原样，作为「为何 GUI 当初不用回调」的设计记录；本节是v1.21 起的新契约。
+
+**新边界（推翻宪法但不放宽内存底线）**：
+
+| 条款 | 约束 |
+| --- | --- |
+| 仍无闭包 | 回调入口是**具名函数 + 显式 `rawptr<void>` state**，不是捕获环境的闭包 |
+| C 主动调用 | C 侧（含自己创建的平台线程）持有回调 id，主动 fire；Dial 侧注册后即交出控制权 |
+| 仅标量过界 | 回调参数 / 结果一律是标量（`int` 位模式）；state 是 `rawptr<void>`，其生命周期由用户管理 |
+| 绝不碰 ARC | **回调线程绝不触碰非原子 `dial_rc_*` 对象**；跨线程要传复杂数据必须走 `channel<T>`（原子 ARC） |
+| 注册表不持堆对象 | C 注册表只存 `{thunk, state, result, done}`，thunk 是静态生成的 C 函数指针，state 由用户 own |
+
+**回调入口签名固定为**：
+
+```dial
+fn on_event(state: rawptr<void>, payload: int): int { ... }
+```
+
+**内建 API**（C 运行时 `stdlib/dial_callback.{h,c}`，双后端同源）：
+
+| 内建 | 签名 | 说明 |
+| --- | --- | --- |
+| `callback` | `(fn, rawptr<void>): callback` | 注册具名函数为回调，返回不透明句柄；入口签名强制校验 |
+| `callback_fire` | `(callback, int): int` | 同线程同步触发，直接返回入口结果 |
+| `callback_thread` | `(callback, int, delay_ms): thread` | 起一个 C 平台线程，sleep 后**主动回调 Dial**；返回 thread 句柄供 join |
+| `callback_result` / `callback_done` / `callback_wait` | `(callback): int` / `: bool` / `: void` | 读最近一次结果 / 非阻塞查询完成 / 阻塞等待 |
+| `callback_free` / `callback_count` | `(callback): void` / `(): int` | 注销回调 / 诊断当前注册数 |
+
+**最小示例**（同步 + 平台线程各一次，双后端输出逐字一致）：
+
+```dial
+fn on_event(state: rawptr<void>, payload: int): int {
+    return payload * 2 + 1;
+}
+fn main(): int {
+    let st: rawptr<void> = ptr_cast<rawptr<void>>(raw_alloc(8));
+    let cb: callback = callback(on_event, st);
+    print(callback_fire(cb, 10));            // 21（同步）
+    let t: thread = callback_thread(cb, 31, 5);
+    join(t);
+    print(callback_result(cb));              // 63（平台线程反向回调）
+    callback_free(cb);
+    return 0;
+}
+```
+
+**state 透传**：入口第 1 参就是注册时传入的 `rawptr<void>`，可 `ptr_cast` 后读写其指向的裸内存——
+这是「真反向回调」而非假的全局共享；回调线程若需要访问 ARC 对象，正确做法是把对象经
+`channel<T>` 移交给 Dial 主线程，回调只 fire 一个标量通知。
+
+**Fail-Fast**：入口签名非 `fn(rawptr<void>, int): int`、state 非 `rawptr<void>` 一律编译期拒绝
+（R20 负向门禁双后端锁定）。C 注册表用 mutex 保护，注销后句柄立即失效；未注册 id fire 直接 Fail-Fast。
 
 > **关于 `v1.0` 标签**：`v1.00` ~ `v1.03` 都是「v1.0 里程碑」达成过程中的分版记录
 > （CHANGELOG 里已收拢到该标题下）。回调、变参等收尾特性在 `[v1.03]` 全部完成并
@@ -7432,8 +7491,9 @@ XTest 实窗注入实测 `keys 2 / focus 2 / mouse 6 / act 2 / shift 1` 全绿�
   第 18 层已支持**高 DPI 整数放大**（见 §38.24.2）、**ListBox 虚拟化 lazy load**
   （见 §38.24.3）、**IME 预编辑纯值事件**（见 §38.24.4）、**GPU+原生平台纯值契约层**
   （见 §38.24.5）。
-  **仍未实现、也不写进契约**：C → Dial 反向回调（信号槽已由第 6 层以纯值信号
-  队列落地，**不是**回调）、富文本编辑（TextBox 只做单行）、图片解码、
+  **仍未实现、也不写进契约**：富文本编辑（TextBox 只做单行）、图片解码、
+  （信号槽由第 6 层以纯值信号队列落地，**不是**回调；通用层 C → Dial 反向回调
+  已于 v1.21 受控开放，见 §32.7）、
   多行文本 / 复杂文本排版（HarfBuzz 级 shaping）、**可切换深色主题包**（单控件覆写 ≠ 主题包切换）、
   编辑合并 / 跨控件全局历史 / 历史持久化、ComboBox 可编辑输入
   ——把未实现函数写进契约会让用户 `import` 后链接失败，那是制造漂移而非预留接口。

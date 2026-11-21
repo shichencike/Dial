@@ -85,6 +85,7 @@ fn dial_type_name(t: &Type) -> String {
         Type::Struct(n) => n.clone(),
         Type::RawPtr(e) => format!("rawptr<{}>", dial_type_name(e)),
         Type::Channel(e) => format!("channel<{}>", dial_type_name(e)),
+        Type::Callback => "callback".into(),
         Type::FnPtr(..) => "fnptr".into(),
         _ => "dial_object".into(),
     }
@@ -734,6 +735,18 @@ impl<'ctx> CodeGen<'ctx> {
         self.decl_void("dial_task_wait", &[i8b.into()]);
         self.decl_func("dial_task_result", self.context.i64_type().into(), &[i8b.into()]);
         self.decl_void("dial_task_free", &[i8b.into()]);
+        // v1.21 C→Dial 反向回调注册表。
+        self.decl_func("dial_callback_register", i8b, &[i8b.into(), i8b.into()]);
+        self.decl_func("dial_callback_fire_sync", self.context.i64_type().into(),
+            &[i8b.into(), self.context.i64_type().into()]);
+        self.decl_func("dial_callback_thread_fire", i8b,
+            &[i8b.into(), self.context.i64_type().into(), self.context.i64_type().into()]);
+        self.decl_void("dial_callback_join", &[i8b.into()]);
+        self.decl_func("dial_callback_result", self.context.i64_type().into(), &[i8b.into()]);
+        self.decl_func("dial_callback_done", self.context.i64_type().into(), &[i8b.into()]);
+        self.decl_void("dial_callback_wait", &[i8b.into()]);
+        self.decl_void("dial_callback_free", &[i8b.into()]);
+        self.decl_func("dial_callback_count", self.context.i64_type().into(), &[]);
         // 通道：send/recv 只搬运指针（所有权移交），retain/release 走原子引用计数。
         self.decl_func("dial_channel_new", i8b, &[self.context.i64_type().into(), i8b.into()]);
         self.decl_void("dial_channel_send", &[i8b.into(), i8b.into()]);
@@ -1019,7 +1032,7 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::File
             | Type::Error
             | Type::Thread
-            | Type::ThreadPool | Type::Coroutine | Type::Task
+            | Type::ThreadPool | Type::Coroutine | Type::Task | Type::Callback
             | Type::Channel(_)
             | Type::Opaque(_)
             // 裸指针（v1.02）：不透明指针（元素类型由调用处的 gep 决定）
@@ -1382,7 +1395,7 @@ impl<'ctx> CodeGen<'ctx> {
             | Type::File
             | Type::Error
             | Type::Thread
-            | Type::ThreadPool | Type::Coroutine | Type::Task
+            | Type::ThreadPool | Type::Coroutine | Type::Task | Type::Callback
             | Type::Channel(_)
             | Type::Opaque(_)
             | Type::RawPtr(_) | Type::VolatilePtr(_)
@@ -2409,6 +2422,47 @@ impl<'ctx> CodeGen<'ctx> {
         for (pty, v) in params.iter().zip(arg_vals.iter()) {
             self.release_value(pty, *v);
         }
+        self.builder.build_return(None).unwrap();
+        if let Some(bb) = saved { self.builder.position_at_end(bb); }
+        Ok(thunk)
+    }
+
+    /// v1.21：C→Dial 回调入口 thunk `void __dial_cb_thunk_<fn>(i8* cell)`。
+    /// argcell: slot[0]=payload(int), slot[1]=state(ptr), slot[2]=result(int 回写)。
+    /// 调 Dial 入口 fn(state, payload): int，结果写 slot[2]。
+    fn gen_callback_thunk(
+        &self,
+        fname: &str,
+        func_values: &HashMap<String, FunctionValue<'ctx>>,
+    ) -> Result<FunctionValue<'ctx>> {
+        let thunk_name = format!("__dial_cb_thunk_{}", fname);
+        if let Some(existing) = self.module.get_function(&thunk_name) {
+            return Ok(existing);
+        }
+        let saved = self.builder.get_insert_block();
+        let ft = self.context.void_type().fn_type(&[self.i8ptr().into()], false);
+        let thunk = self.module.add_function(&thunk_name, ft, None);
+        let entry = self.context.append_basic_block(thunk, "entry");
+        self.builder.position_at_end(entry);
+        let cell = thunk.get_nth_param(0).unwrap().into_pointer_value();
+        let z = self.context.i64_type().const_zero();
+        let one = self.context.i64_type().const_int(1, false);
+        let two = self.context.i64_type().const_int(2, false);
+
+        // slot[0]=payload, slot[1]=state, slot[2]=result 地址
+        let p_slot = unsafe { self.builder.build_gep(self.context.i64_type(), cell, &[z], "cb.payload").unwrap() };
+        let s_slot = unsafe { self.builder.build_gep(self.i8ptr(), cell, &[one], "cb.state.addr").unwrap() };
+        let r_slot = unsafe { self.builder.build_gep(self.context.i64_type(), cell, &[two], "cb.result").unwrap() };
+        let payload = self.builder.build_load(self.context.i64_type(), p_slot, "cb.payload.v").unwrap();
+        let state = self.builder.build_load(self.i8ptr(), s_slot, "cb.state.v").unwrap();
+
+        let fv = *func_values.get(fname).ok_or_else(|| {
+            DialcError::new(format!("缺少回调入口函数 '{}' 的 LLVM 定义", fname), 0, 0)
+        })?;
+        let call = self.builder.build_call(fv, &[state.into(), payload.into()], "cb.call").unwrap();
+        let result = call.try_as_basic_value().basic()
+            .unwrap_or(self.context.i64_type().const_zero().into());
+        self.builder.build_store(r_slot, result.into_int_value()).unwrap();
         self.builder.build_return(None).unwrap();
         if let Some(bb) = saved { self.builder.position_at_end(bb); }
         Ok(thunk)
@@ -5346,6 +5400,56 @@ impl<'ctx> CodeGen<'ctx> {
                             }
                         }
                     }
+                    // ==================================================================
+                    // v1.21 C→Dial 反向回调：注册 / 触发 / 平台线程 fire / 结果查询。
+                    // ==================================================================
+                    "callback" => {
+                        let fname = match &args[0] {
+                            Expr::FuncRef(n) => n.clone(),
+                            _ => return Err(DialcError::new("内部错误：callback 首参必须是函数名", 0, 0)),
+                        };
+                        let state = self.gen_expr(&args[1], function, scopes, func_values, functions, structs)?;
+                        let thunk = self.gen_callback_thunk(&fname, func_values)?;
+                        let thunk_ptr = thunk.as_global_value().as_pointer_value();
+                        Ok(self.call_c("dial_callback_register", &[thunk_ptr.into(), state.into()]))
+                    }
+                    "callback_fire" | "callback_thread" => {
+                        let mut argv: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+                        for a in args {
+                            let v = self.gen_expr(a, function, scopes, func_values, functions, structs)?;
+                            argv.push(v.into());
+                        }
+                        let sym = if name == "callback_fire" { "dial_callback_fire_sync" }
+                                  else { "dial_callback_thread_fire" };
+                        Ok(self.call_c(sym, &argv))
+                    }
+                    "callback_result" | "callback_done" | "callback_wait" | "callback_free" | "callback_count" => {
+                        let mut argv: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+                        if name != "callback_count" {
+                            let v = self.gen_expr(&args[0], function, scopes, func_values, functions, structs)?;
+                            argv.push(v.into());
+                        }
+                        let sym = match name.as_str() {
+                            "callback_result" => "dial_callback_result",
+                            "callback_done" => "dial_callback_done",
+                            "callback_wait" => "dial_callback_wait",
+                            "callback_free" => "dial_callback_free",
+                            "callback_count" => "dial_callback_count",
+                            _ => unreachable!(),
+                        };
+                        let void_ret = matches!(name.as_str(), "callback_wait" | "callback_free");
+                        if void_ret {
+                            self.call_c_void(sym, &argv);
+                            Ok(self.context.i64_type().const_zero().into())
+                        } else if name == "callback_done" {
+                            let r = self.call_c(sym, &argv);
+                            let b = self.builder.build_int_compare(IntPredicate::NE,
+                                r.into_int_value(), self.context.i64_type().const_zero(), "cbdone").unwrap();
+                            Ok(b.into())
+                        } else {
+                            Ok(self.call_c(sym, &argv))
+                        }
+                    }
                     // pool_submit / spawn_async / coroutine：具名入口 + argcell + task thunk。
                     "pool_submit" | "spawn_async" | "coroutine" => {
                         // pool_submit 首参是 pool 句柄，入口函数从第 2 个起；其余从第 1 个起。
@@ -7080,9 +7184,9 @@ impl<'ctx> CodeGen<'ctx> {
                 self.call_c_void("dial_print_string", &[msg.into()]);
             }
             // 句柄打印没有任何可读语义，且违反「不透明指针」契约（打印就等于泄露内部）。
-            Type::ThreadPool | Type::Coroutine | Type::Task => {
+            Type::ThreadPool | Type::Coroutine | Type::Task | Type::Callback => {
                 return Err(DialcError::new(
-                    "语义错误：当前版本不支持直接 print 并发句柄（threadpool/coroutine/task）",
+                    "语义错误：当前版本不支持直接 print 并发句柄/回调（threadpool/coroutine/task/callback）",
                     0, 0,
                 ));
             }
@@ -7227,9 +7331,9 @@ impl<'ctx> CodeGen<'ctx> {
                 let msg = self.call_c("dial_error_msg", &[val.into()]);
                 self.call_c_void("dial_print_raw", &[msg.into()]);
             }
-            Type::ThreadPool | Type::Coroutine | Type::Task => {
+            Type::ThreadPool | Type::Coroutine | Type::Task | Type::Callback => {
                 return Err(DialcError::new(
-                    "语义错误：当前版本不支持直接 print_raw 并发句柄（threadpool/coroutine/task）",
+                    "语义错误：当前版本不支持直接 print_raw 并发句柄/回调（threadpool/coroutine/task/callback）",
                     0, 0,
                 ));
             }

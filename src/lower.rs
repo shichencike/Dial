@@ -94,6 +94,8 @@ pub fn lower_program(
     let mut hof_thunks: Vec<(Type, Type, usize)> = Vec::new();
     // v1.21：pool_submit / spawn_async / coroutine 引用的任务入口函数名集合。
     let mut task_targets: HashSet<String> = HashSet::new();
+    // v1.21：callback 引用的回调入口函数名集合。
+    let mut callback_targets: HashSet<String> = HashSet::new();
     for func in &prog.functions {
         // M7-e3w：调试标记只在 -g 时插入。非 -g 的 IR 必须与 e3v 逐字节一致，
         // 否则 Line/DebugVar 会打断 e3p 折叠 / popcount 融合等 pass 的模式窗口。
@@ -103,6 +105,8 @@ pub fn lower_program(
         spawn_targets.extend(l.spawn_targets.drain());
         // v1.21：收集本函数内任务入口目标（去重在生成阶段）。
         task_targets.extend(l.task_targets.drain());
+        // v1.21：收集本函数内回调入口目标。
+        callback_targets.extend(l.callback_targets.drain());
         // M7-e3an：收集本函数内高阶方法需要的回调 thunk 描述。
         hof_thunks.append(&mut l.hof_thunks);
     }
@@ -119,6 +123,12 @@ pub fn lower_program(
     ttargets.sort();
     for fname in &ttargets {
         gen_task_thunk(&mut ip, fname)?;
+    }
+    // v1.21：为所有回调入口生成 __dial_cb_thunk_<fn>。
+    let mut cbtargets: Vec<String> = callback_targets.into_iter().collect();
+    cbtargets.sort();
+    for fname in &cbtargets {
+        gen_callback_thunk(&mut ip, fname)?;
     }
     // M7-e3an：为所有高阶方法生成回调 thunk（对齐 LLVM gen_hof_thunk）。
     // Type 未实现 Hash，故先按 thunk 名字（elem码 + ret码 + arity，确定性）排序去重，
@@ -297,6 +307,61 @@ fn gen_task_thunk(ip: &mut IrProgram, fname: &str) -> Result<(), String> {
         }
     }
 
+    f.blocks[0].term = Term::Return { val: None };
+    ip.functions.push(f);
+    Ok(())
+}
+
+/// v1.21：为 `callback(fn, state)` 生成 C→Dial 回调入口 thunk：
+///   `void __dial_cb_thunk_<fn>(ptr cell)`
+/// argcell 布局（由 C 侧 dial_callback.c 构造）：
+///   slot[0] = payload(int)，slot[1] = state(rawptr<void>)，slot[2] = result 回写槽。
+/// thunk 读 payload/state，调用 Dial 回调入口 fn(state, payload): int，结果写 slot[2]。
+/// 回调入口签名由语义层强制为 fn(rawptr<void>, int): int（无 ARC 跨线程）。
+fn gen_callback_thunk(ip: &mut IrProgram, fname: &str) -> Result<(), String> {
+    let thunk_name = format!("__dial_cb_thunk_{}", fname);
+    if ip.functions.iter().any(|f| f.name == thunk_name) {
+        return Ok(());
+    }
+    let sig = ip.functions_sig.get(fname)
+        .ok_or_else(|| format!("[asm 后端] 回调入口函数 `{}` 无签名信息", fname))?
+        .clone();
+    // thunk 的 C 签名恒为 void(void* cell)。
+    let params: Vec<(String, IrType)> = vec![("cell".to_string(), IrType::Ptr)];
+    let mut f = IrFunction::new(thunk_name.clone(), params, IrType::Void, FuncLink::Private);
+    f.blocks.push(IrBlock { id: 0, params: Vec::new(), insts: Vec::new(), term: Term::Unreachable });
+    f.entry = 0;
+    let cell_slot = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::Alloca { dst: cell_slot, bytes: 8 });
+    f.param_slots.push(cell_slot);
+    let cell_v = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::Load { dst: cell_v, ptr: cell_slot, ty: IrType::Ptr });
+
+    // slot[0] = payload (I64)
+    let p_slot = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::PtrAdd { dst: p_slot, base: cell_v, off: Value::Imm(Imm::I64(0)) });
+    let payload = f.new_reg(IrType::I64);
+    f.blocks[0].insts.push(IrInst::Load { dst: payload, ptr: p_slot, ty: IrType::I64 });
+    // slot[1] = state (Ptr)
+    let s_slot = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::PtrAdd { dst: s_slot, base: cell_v, off: Value::Imm(Imm::I64(8)) });
+    let state = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::Load { dst: state, ptr: s_slot, ty: IrType::Ptr });
+    // slot[2] = result 回写槽地址
+    let r_slot = f.new_reg(IrType::Ptr);
+    f.blocks[0].insts.push(IrInst::PtrAdd { dst: r_slot, base: cell_v, off: Value::Imm(Imm::I64(16)) });
+
+    // 调用 Dial 回调入口 fn(state, payload): int。
+    let ret = f.new_reg(IrType::I64);
+    f.blocks[0].insts.push(IrInst::Call {
+        dst: Some(ret), func: fname.to_string(),
+        args: vec![Value::Reg(state), Value::Reg(payload)],
+        arg_tys: vec![IrType::Ptr, IrType::I64],
+        ret_ty: IrType::I64, linkage: CallLink::Dial,
+    });
+    // 写回 result。
+    f.blocks[0].insts.push(IrInst::Store { ptr: r_slot, val: Value::Reg(ret), ty: IrType::I64 });
+    let _ = sig;
     f.blocks[0].term = Term::Return { val: None };
     ip.functions.push(f);
     Ok(())
@@ -483,6 +548,8 @@ struct Lower<'a> {
     /// v1.21：本编译单元内被 pool_submit / spawn_async / coroutine 引用的任务入口函数名。
     /// 与 spawn_targets 同理，由 lower_program 统一生成 `__dial_task_thunk_<fn>`。
     task_targets: HashSet<String>,
+    /// v1.21：被 callback(fn, state) 引用的回调入口函数名集合。
+    callback_targets: HashSet<String>,
     /// M7-e3an：本编译单元内需要的高阶回调 thunk 描述 (elem, ret, arity)。
     /// 与 spawn_targets 同理（独立函数），由 lower_program 统一生成；Type 未实现
     /// Hash，故用 Vec 保存，生成时按 thunk 名字去重 + 排序保证 .s 确定性。
@@ -501,6 +568,7 @@ impl<'a> Lower<'a> {
             src_file: src_file.to_string(),
             spawn_targets: HashSet::new(),
             task_targets: HashSet::new(),
+            callback_targets: HashSet::new(),
             hof_thunks: Vec::new(),
             func: IrFunction::new(String::new(), Vec::new(), IrType::Void, FuncLink::Private),
             cur: 0,
@@ -2652,6 +2720,10 @@ impl<'a> Lower<'a> {
             | "coroutine" | "co_resume" | "co_yield" | "co_status" | "co_free"
             | "spawn_async" | "run_all" | "task_done" | "task_wait" | "task_result" | "task_free"
                 => return self.lower_async_call(name, args),
+            // v1.21 C→Dial 反向回调
+            "callback" | "callback_fire" | "callback_thread" | "callback_result"
+            | "callback_done" | "callback_wait" | "callback_free" | "callback_count"
+                => return self.lower_callback_call(name, args),
             _ => {}
         }
         // functions_sig 只含用户函数与 extern 声明；按名字硬编码分派的内建
@@ -3247,6 +3319,73 @@ impl<'a> Lower<'a> {
             }
             _ => unreachable!("lower_channel_call 仅处理 channel 原语族"),
         }
+    }
+
+    /// v1.21 C→Dial 反向回调内建：注册 / 触发 / 平台线程 fire / 结果查询。
+    fn lower_callback_call(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
+        // callback(fn, state)：取回调 thunk 地址 + 显式 state，注册到 C 注册表。
+        if name == "callback" {
+            let fname = match &args[0] {
+                Expr::FuncRef(n) => n.clone(),
+                _ => return self.err("callback 的第 1 个参数必须是具名函数"),
+            };
+            let st = self.expr_dt(&args[1]);
+            let (sv, _) = self.lower_expr(&args[1], &st)?;
+            self.callback_targets.insert(fname.clone());
+            let thunk_name = format!("__dial_cb_thunk_{}", fname);
+            let thunk_addr = self.new_reg(IrType::Ptr);
+            self.emit(IrInst::FuncAddr { dst: thunk_addr, func: thunk_name });
+            let st_reg = sv.as_reg();
+            let id = self.new_reg(IrType::Handle);
+            self.emit(IrInst::Call { dst: Some(id), func: "dial_callback_register".to_string(),
+                args: vec![Value::Reg(thunk_addr), Value::Reg(st_reg)],
+                arg_tys: vec![IrType::Ptr, IrType::Handle], ret_ty: IrType::Handle,
+                linkage: CallLink::Runtime });
+            return Ok((Value::Reg(id), false));
+        }
+        // callback_fire(cb, payload) -> int
+        if name == "callback_fire" {
+            let (cv, _) = self.lower_expr(&args[0], &Type::Callback)?;
+            let (pv, _) = self.lower_expr(&args[1], &Type::Int)?;
+            let r = self.new_reg(IrType::I64);
+            self.emit(IrInst::Call { dst: Some(r), func: "dial_callback_fire_sync".to_string(),
+                args: vec![Value::Reg(cv.as_reg()), pv],
+                arg_tys: vec![IrType::Handle, IrType::I64], ret_ty: IrType::I64,
+                linkage: CallLink::Runtime });
+            return Ok((Value::Reg(r), false));
+        }
+        // callback_thread(cb, payload, delay_ms) -> thread（句柄）
+        if name == "callback_thread" {
+            let (cv, _) = self.lower_expr(&args[0], &Type::Callback)?;
+            let (pv, _) = self.lower_expr(&args[1], &Type::Int)?;
+            let (dv, _) = self.lower_expr(&args[2], &Type::Int)?;
+            let h = self.new_reg(IrType::Handle);
+            self.emit(IrInst::Call { dst: Some(h), func: "dial_callback_thread_fire".to_string(),
+                args: vec![Value::Reg(cv.as_reg()), pv, dv],
+                arg_tys: vec![IrType::Handle, IrType::I64, IrType::I64], ret_ty: IrType::Handle,
+                linkage: CallLink::Runtime });
+            return Ok((Value::Reg(h), false));
+        }
+        // result / done / wait / free / count
+        let (sym, ret_ir): (&str, IrType) = match name {
+            "callback_result" => ("dial_callback_result", IrType::I64),
+            "callback_done" => ("dial_callback_done", IrType::I64),
+            "callback_wait" => ("dial_callback_wait", IrType::Void),
+            "callback_free" => ("dial_callback_free", IrType::Void),
+            "callback_count" => ("dial_callback_count", IrType::I64),
+            _ => return self.err(&format!("未知回调内建 {}", name)),
+        };
+        let mut cargs = Vec::new();
+        let mut ctys = Vec::new();
+        if name != "callback_count" {
+            let (cv, _) = self.lower_expr(&args[0], &Type::Callback)?;
+            cargs.push(Value::Reg(cv.as_reg()));
+            ctys.push(IrType::Handle);
+        }
+        let dst = if ret_ir == IrType::Void { None } else { Some(self.new_reg(ret_ir.clone())) };
+        self.emit(IrInst::Call { dst, func: sym.to_string(), args: cargs, arg_tys: ctys,
+            ret_ty: ret_ir.clone(), linkage: CallLink::Runtime });
+        Ok((dst.map(Value::Reg).unwrap_or(Value::Imm(Imm::I64(0))), false))
     }
 
     /// v1.21 协作式并发内建：线程池 / 协程 / async。

@@ -3136,6 +3136,103 @@ done
 unset DIALC_STDLIB_DIR
 
 # ===========================================================================
+# R20) C → Dial 反向回调（v1.21）：推翻 GUI 层「绝不反向回调」宪法后的受控开放。
+#      C 侧（含平台线程）主动调用具名 Dial 函数；入口签名固定 fn(rawptr<void>, int): int，
+#      state 显式透传、回调线程绝不触碰非原子 ARC 对象。覆盖同步/线程/state 透传
+#      三个正向用例（双后端一致）+ 签名错误/state 非 rawptr 两个负向 Fail-Fast。
+# ===========================================================================
+echo "  -- R20) C→Dial 反向回调双后端一致性（v1.21） --"
+ADIR20="${RDIR}/callback"; mkdir -p "$ADIR20"
+export DIALC_STDLIB_DIR="${REPO_ROOT:-$PWD}"
+
+cat > "${ADIR20}/sync.dial" <<'DIALEOF'
+fn on_event(state: rawptr<void>, payload: int): int { return payload * 2 + 1; }
+fn main(): int {
+    let st: rawptr<void> = ptr_cast<rawptr<void>>(raw_alloc(8));
+    let cb: callback = callback(on_event, st);
+    print(callback_count());
+    let r: int = callback_fire(cb, 10);
+    print(r);
+    print(callback_result(cb));
+    if (callback_done(cb)) { print("sync-done"); }
+    callback_free(cb);
+    print(callback_count());
+    return 0;
+}
+DIALEOF
+cat > "${ADIR20}/thread.dial" <<'DIALEOF'
+fn on_event(state: rawptr<void>, payload: int): int { return payload * 2 + 1; }
+fn main(): int {
+    let st: rawptr<void> = ptr_cast<rawptr<void>>(raw_alloc(8));
+    let cb: callback = callback(on_event, st);
+    let t: thread = callback_thread(cb, 31, 5);
+    join(t);
+    print(callback_result(cb));
+    if (callback_done(cb)) { print("thread-done"); }
+    callback_free(cb);
+    return 0;
+}
+DIALEOF
+cat > "${ADIR20}/state.dial" <<'DIALEOF'
+fn add_state(state: rawptr<void>, payload: int): int {
+    let ip: rawptr<int> = ptr_cast<rawptr<int>>(state);
+    return *ip + payload;
+}
+fn main(): int {
+    let st_buf: rawptr<byte> = raw_alloc(8);
+    let sip: rawptr<int> = ptr_cast<rawptr<int>>(st_buf);
+    *sip = 100;
+    let st: rawptr<void> = ptr_cast<rawptr<void>>(st_buf);
+    let cb: callback = callback(add_state, st);
+    print(callback_fire(cb, 7));
+    callback_free(cb);
+    raw_free(st_buf);
+    return 0;
+}
+DIALEOF
+
+for _case in sync thread state; do
+    ${DIALC} build "${ADIR20}/${_case}.dial" --backend llvm -o "${ADIR20}/${_case}_llvm" >/dev/null 2>&1 || rbad "R20 LLVM 编译 ${_case} 失败"
+    ${DIALC} build "${ADIR20}/${_case}.dial" --backend asm  -o "${ADIR20}/${_case}_asm"  >/dev/null 2>&1 || rbad "R20 asm 编译 ${_case} 失败"
+    _r_llvm="$( ${ADIR20}/${_case}_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    _r_asm="$( ${ADIR20}/${_case}_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    case "${_case}" in
+        sync)   _want="1 21 21 sync-done 0 " ;;
+        thread) _want="63 thread-done " ;;
+        state)  _want="107 " ;;
+    esac
+    [ -n "$_r_llvm" ] && [ "$_r_asm" = "$_r_llvm" ] && [ "$_r_asm" = "$_want" ] \
+        && rpass "R20 ${_case}：双后端一致且结果正确" \
+        || rbad "R20 ${_case} 不一致或结果错误（llvm=[$_r_llvm] asm=[$_r_asm] want=[$_want]）"
+done
+
+cat > "${ADIR20}/bad_sig.dial" <<'DIALEOF'
+fn bad_entry(x: int): int { return x; }
+fn main(): int {
+    let st: rawptr<void> = ptr_cast<rawptr<void>>(raw_alloc(8));
+    let cb: callback = callback(bad_entry, st);
+    return 0;
+}
+DIALEOF
+cat > "${ADIR20}/bad_state.dial" <<'DIALEOF'
+fn on_event(state: rawptr<void>, payload: int): int { return payload; }
+fn main(): int {
+    let cb: callback = callback(on_event, 42);
+    return 0;
+}
+DIALEOF
+for _be in llvm asm; do
+    for _case in bad_sig bad_state; do
+        if ${DIALC} build "${ADIR20}/${_case}.dial" --backend $_be -o "${ADIR20}/${_case}_${_be}" >/dev/null 2>&1; then
+            rbad "R20 负向 ${_case} 在 $_be 后端竟编译通过"
+        else
+            rpass "R20 负向 ${_case}（$_be）：编译期拒绝"
+        fi
+    done
+done
+unset DIALC_STDLIB_DIR
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

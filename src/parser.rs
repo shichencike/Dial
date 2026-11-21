@@ -1209,6 +1209,7 @@ impl Parser {
                     "threadpool" => Type::ThreadPool,
                     "coroutine" => Type::Coroutine,
                     "task" => Type::Task,
+                    "callback" => Type::Callback,
                     _ => {
                         // 已导入包声明的不透明句柄优先于「当成结构体」：
                         // 它是包私有的不透明指针，用户拿不到布局（见 ast::Type::Opaque）。
@@ -2548,6 +2549,7 @@ impl Parser {
                     let func_ref_pos = match name.as_str() {
                         "spawn" | "spawn_async" | "coroutine" => Some(0),
                         "pool_submit" => Some(1),
+                        "callback" => Some(0),   // callback(fn, state)：入口函数是第 1 参
                         _ => None,
                     };
                     if let Some(frp) = func_ref_pos {

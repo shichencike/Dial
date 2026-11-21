@@ -1735,6 +1735,87 @@ pub fn type_of<V>(
                     return Ok(Type::Void);
                 }
 
+                // ==================================================================
+                //  C→Dial 反向回调（v1.21，推翻 GUI 层「绝不反向回调」宪法）
+                // ==================================================================
+                // callback(fn, state) -> callback：注册具名函数为回调。
+                // 入口签名强制 fn(rawptr<void>, int): int —— 显式状态 + 标量 payload，
+                // 回调线程绝不触碰非原子 ARC 对象（复杂数据走 channel）。
+                "callback" => {
+                    if args.len() < 2 {
+                        return Err(DialcError::new(
+                            "语义错误：callback 需要 2 个参数（入口函数名 fn, 显式状态 rawptr<void>）", 0, 0));
+                    }
+                    let fname = match &args[0] {
+                        Expr::FuncRef(n) => n.clone(),
+                        _ => return Err(DialcError::new(
+                            "语义错误：callback 的第 1 个参数必须是顶层具名函数（Dial 无闭包；回调 thunk 需静态生成）", 0, 0)),
+                    };
+                    let target = funcs.get(&fname).ok_or_else(|| {
+                        DialcError::new(format!("语义错误：callback 引用了未定义的函数 '{}'", fname), 0, 0)
+                    })?;
+                    // 入口固定 2 参：state(rawptr<void>) + payload(int)。
+                    let want_params = vec![
+                        Type::RawPtr(Box::new(Type::Void)), Type::Int,
+                    ];
+                    if target.params != want_params {
+                        return Err(DialcError::new(
+                            format!("语义错误：回调入口 '{}' 的签名必须是 fn(rawptr<void>, int): int，实际为 fn({}): {}",
+                                fname,
+                                target.params.iter().map(|t| t.display()).collect::<Vec<_>>().join(", "),
+                                target.ret.display()), 0, 0));
+                    }
+                    if target.ret != Type::Int {
+                        return Err(DialcError::new(
+                            format!("语义错误：回调入口 '{}' 必须返回 int（写回结果槽），实际为 {}",
+                                fname, target.ret.display()), 0, 0));
+                    }
+                    // state 实参必须是 rawptr<void>（显式状态，不捕获）。
+                    let st = type_of(&args[1], scopes, funcs, structs)?;
+                    if st != Type::RawPtr(Box::new(Type::Void)) {
+                        return Err(DialcError::new(
+                            format!("语义错误：callback 的 state 参数必须是 rawptr<void>，实际为 {}", st.display()), 0, 0));
+                    }
+                    return Ok(Type::Callback);
+                }
+                // callback_fire(cb, payload) -> int；callback_thread(cb, payload, delay_ms) -> thread
+                "callback_fire" | "callback_thread" => {
+                    if args.is_empty() || type_of(&args[0], scopes, funcs, structs)? != Type::Callback {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 的第 1 个参数必须是 callback 句柄", name), 0, 0));
+                    }
+                    let need = if name == "callback_fire" { 2 } else { 3 };
+                    if args.len() != need {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 {} 个参数", name, need), 0, 0));
+                    }
+                    for a in &args[1..] {
+                        if type_of(a, scopes, funcs, structs)? != Type::Int {
+                            return Err(DialcError::new(
+                                format!("语义错误：{} 的 payload / delay 参数必须是 int", name), 0, 0));
+                        }
+                    }
+                    return Ok(if name == "callback_fire" { Type::Int } else { Type::Thread });
+                }
+                // callback_result(cb) -> int；callback_done(cb) -> bool；callback_wait/free(cb)
+                "callback_result" | "callback_done" | "callback_wait" | "callback_free" => {
+                    if args.len() != 1 || type_of(&args[0], scopes, funcs, structs)? != Type::Callback {
+                        return Err(DialcError::new(
+                            format!("语义错误：{} 需要 1 个 callback 句柄参数", name), 0, 0));
+                    }
+                    return Ok(match name.as_str() {
+                        "callback_result" => Type::Int,
+                        "callback_done" => Type::Bool,
+                        _ => Type::Void,
+                    });
+                }
+                "callback_count" => {
+                    if !args.is_empty() {
+                        return Err(DialcError::new("语义错误：callback_count 不接受参数", 0, 0));
+                    }
+                    return Ok(Type::Int);
+                }
+
                 "join" | "detach" => {
                     if args.len() != 1 {
                         return Err(DialcError::new(
@@ -2463,9 +2544,9 @@ pub fn type_of<V>(
                         ))
                     }
                     // v1.21 并发句柄：同样是不透明指针，打印无可读语义。
-                    Type::ThreadPool | Type::Coroutine | Type::Task => {
+                    Type::ThreadPool | Type::Coroutine | Type::Task | Type::Callback => {
                         return Err(DialcError::new(
-                            "语义错误：当前版本不支持直接 print threadpool / coroutine / task 句柄",
+                            "语义错误：当前版本不支持直接 print 并发/回调句柄",
                             0, 0,
                         ))
                     }
@@ -2579,9 +2660,9 @@ pub fn type_of<V>(
                             0, 0,
                         ))
                     }
-                    Type::ThreadPool | Type::Coroutine | Type::Task => {
+                    Type::ThreadPool | Type::Coroutine | Type::Task | Type::Callback => {
                         return Err(DialcError::new(
-                            "语义错误：当前版本不支持直接 print_raw threadpool / coroutine / task 句柄",
+                            "语义错误：当前版本不支持直接 print_raw 并发/回调句柄",
                             0, 0,
                         ))
                     }
@@ -3819,6 +3900,9 @@ const RESERVED_NAMES: &[&str] = &[
     "threadpool", "pool_submit", "pool_join", "pool_close",
     "coroutine", "co_resume", "co_yield", "co_status", "co_free",
     "spawn_async", "run_all", "task_done", "task_wait", "task_result", "task_free",
+    // v1.21 C→Dial 反向回调
+    "callback", "callback_fire", "callback_thread", "callback_result", "callback_done",
+    "callback_wait", "callback_free", "callback_count",
     // v0.81 通道收尾：close 早已是 file 的内建（本就在按名字匹配，只是此前未列入此表），
     // 一并补齐；closed / len / done / try_recv 为本次新增。
     "close", "closed", "len", "done", "try_recv",

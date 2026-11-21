@@ -119,6 +119,9 @@ pub enum Type {
     /// 任务句柄（v1.21）：不透明指针，携带一个 8 字节 int 结果槽；
     /// 由 pool_submit / spawn_async 返回，await 等待完成并取结果。不受 ARC 管理。
     Task,
+    /// C→Dial 反向回调句柄（v1.21）：注册表 id（整数，不是指针）。
+    /// 由 callback(fn, state) 注册，C 侧（含平台线程）可主动回调 Dial 函数。
+    Callback,
     /// 通道（不透明指针；元素类型仅编译期可见，运行时已擦除）。
     /// 跨线程共享 -> 走**原子**引用计数 ARC；send/recv 是所有权移交，不做 retain/release。
     Channel(Box<Type>),
@@ -155,6 +158,7 @@ impl Type {
             Type::ThreadPool => "threadpool",
             Type::Coroutine => "coroutine",
             Type::Task => "task",
+            Type::Callback => "callback",
             Type::Channel(_) => "channel",
             Type::Struct(_) => "struct",
             Type::Opaque(_) => "opaque",

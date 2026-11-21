@@ -8,7 +8,7 @@
       "label": "[未发布]",
       "date": "",
       "note": "",
-      "topic": "实现「够用即可」的协作式并发。",
+      "topic": "推翻 GUI 层「绝不反向回调」旧宪法（用户明确裁决），但保留内存底线： 仍无闭包（具名函数 + 显式 rawptr<void> state…",
       "file": "未发布.html",
       "newer": null,
       "older": "v1.20"

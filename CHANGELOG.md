@@ -22,6 +22,27 @@
 
 ## [未发布]
 
+### Added（C → Dial 反向回调）
+
+- **C → Dial 反向回调**：补齐 §41 长期标注的「C → Dial 反向回调」缺口，
+  **推翻 GUI 层「绝不反向回调」旧宪法**（用户明确裁决），但保留内存底线：
+  仍无闭包（具名函数 + 显式 `rawptr<void>` state）、回调参数/结果限标量、
+  **回调线程绝不触碰非原子 ARC 对象**（复杂数据走 `channel<T>`）。
+  - C 运行时 `stdlib/dial_callback.{h,c}`：mutex 保护的注册表
+    `id → {thunk, state, result, done}`；`dial_callback_register` /
+    `dial_callback_fire_sync` / `dial_callback_thread_fire`（平台线程 sleep 后主动回调）/
+    `dial_callback_join` / `dial_callback_result` / `dial_callback_done` /
+    `dial_callback_wait` / `dial_callback_free` / `dial_callback_count`。
+  - 类型 `callback`（不透明句柄）+ 内建 `callback` / `callback_fire` /
+    `callback_thread` / `callback_result` / `callback_done` / `callback_wait` /
+    `callback_free` / `callback_count`。
+  - 回调入口签名强制 `fn(rawptr<void>, int): int`；静态 thunk `__dial_cb_thunk_<fn>`
+    经 argcell 三槽（payload / state / result 回写）转发，双后端同源、零 ABI 分叉。
+  - state 真实透传：入口可 `ptr_cast` 后读写其裸内存（R20 正向用例 100+7=107）。
+  - Fail-Fast：入口签名不符 / state 非 `rawptr<void>` 编译期拒绝；未注册 id fire 当场终止。
+  - 门禁 R20：同步 / 平台线程 / state 透传双后端一致 + 4 项负向拒绝，`DIALC_STDLIB_DIR`
+    强制源码回退编入新 C 运行时。README 新增 §32.7、两处「未实现」清单同步更新。
+
 ### Added（协作式线程池 / 协程 / async-await）
 
 - **线程池 / 有栈协程 / async-await**：补齐 §41 长期标注的「无线程池 / 无异步」缺口，
