@@ -50,6 +50,7 @@
 | P1 发布前 | Windows x64 Microsoft ABI、CVE 浮点取模修复 | 首次 tag CI 全绿，Release `v1.2` 12 资产 |
 | P2 功能 | select 超时、map string 值已落地；原子类型宪法永久否决；print(str) 两边都缺暂不管 | 四项终态，无未决 |
 | P3 工程化 | 过时结论清理 + struct 进容器 fuzz 盲区固化 | diff_fuzz 450 次 0 失败 |
+| P0 补漏（v1.21 审查） | 修复两类 ARC 泄漏（asm 出口 moved 污染 + LLVM 字面量堆分配）；补齐 asm 相对 LLVM 的 3 项 SIMD 缺口（变量 lane 索引 / bitcast simd / bitcast array） | R22（RSS 断言）、R23（双后端逐值一致 + 越界 Fail-Fast + O0-O3） |
 | **验收** | ①OPT-ENOUGH ②P0 清零 ③AArch64 语义+DWARF ④P2 全裁决 ⑤P3 收口 | **五项全绿，能力上已代替 LLVM** |
 
 ### 3.2 主线 B · dialpkg —— ✅ P4.0~P4.4 全部落地

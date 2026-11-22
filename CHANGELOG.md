@@ -22,6 +22,28 @@
 
 ## [未发布]
 
+### Fixed（asm 后端 SIMD 功能对等：补齐相对 LLVM 的 3 项缺口）
+
+- **以双后端实测核实并修复 asm 后端相对 LLVM 的 3 项功能缺口**（此前 ROADMAP §5 护栏
+  称「LLVM 能编译而 asm 拒绝的构造为零」，以 3 个最小用例证伪：LLVM 全部编译运行正确，
+  asm 全部 Fail-Fast 拒绝）：
+  - **A · SIMD 变量 lane 索引 `v[i]`**（`lower.rs:1832` 旧版仅接受整数字面量）：字面量走
+    原快速路径（既有 `.s` 逐字节零回归）；运行期索引新增动态路径——lower 索引 → 无符号
+    `ICmp Lt(idx, N)` 边界检查（对齐 LLVM `emit_bounds_check` 的 ULT 口径，负数位模式
+    巨大自然被拦截）→ 越界调 `dial_bounds_fail` 当场 trap → 正常则 `idx*8` 动态 `PtrAdd`
+    + `Load`。双后端合法索引逐值一致、越界都非零终止（LLVM SIGTRAP / asm SIGILL + 诊断）。
+  - **B · bitcast 到 simd 类型**（`lower.rs:3665` 旧版直接拒绝）：位宽口径改为
+    `N × 元素原生宽度 × 8`（对齐 LLVM `<N x T>` 的 `get_abi_size×8`，与布局内建同源）；
+    simd 值是栈段指针，simd↔simd 同为 `Ptr` 走恒等零拷贝返回，跨元素位重解释与 LLVM
+    逐值一致（`simd<int,4>→simd<float,4>` 输出 `0.000000`、→`simd<byte,32>` 输出 `1`）。
+    加类界限「simd 只能 simd↔simd」，与 LLVM 把向量归为聚合、拒绝向量↔整数/指针同口径。
+  - **C · bitcast 到 array 类型**（`lower.rs:3666` 旧版直接拒绝）：array 是 8 字节不透明
+    句柄（LLVM 侧擦除为 i8ptr），位宽按 64 计；array↔array（同 `Handle`）走恒等返回，
+    array↔整数/指针走既有位重解释路径，与 LLVM `ptrtoint`/`inttoptr` 语义一致。
+  - 新增 R23 门禁：综合正向（变量索引 + bitcast simd/array + 跨元素位重解释）双后端逐值
+    一致、越界 Fail-Fast 双后端非零终止、O0-O3 四级别输出一致。AArch64 发射经检视正确
+    （本地交叉汇编受工具链基线限制，与既有 golden 同口径）。
+
 ### Fixed（P0：ARC 泄漏，两个独立根因）
 
 - **以资深程序员视角压测发现并修复两类 ARC 泄漏**（审查报告初判「异常路径泄漏、LLVM

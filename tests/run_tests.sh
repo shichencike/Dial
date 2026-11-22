@@ -2068,7 +2068,7 @@ else
     rpass "LLVM IR verifier 拒绝聚合 bitcast（struct 项由 asm 单侧覆盖，非一致性差异）"
 fi
 
-# 负例：位宽不匹配 / ptr→struct / array —— asm 须 Fail-Fast。
+# 负例：位宽不匹配 / ptr→struct —— asm 须 Fail-Fast。
 for _bc_neg in bitcast_width_mismatch bitcast_ptr_to_struct; do
     if ${DIALC} build "tests/bad/${_bc_neg}.dial" --backend asm -o "${BDIR}/neg" >"${BDIR}/neg.log" 2>&1; then
         rbad "R9 ${_bc_neg} 应被 asm 拒绝却编译成功"
@@ -2078,15 +2078,22 @@ for _bc_neg in bitcast_width_mismatch bitcast_ptr_to_struct; do
         rbad "R9 ${_bc_neg} 拒绝但缺少 [asm 后端] 诊断"
     fi
 done
+# v1.21 功能补齐：array bitcast 从「asm 曾拒绝」升级为双后端一致（R23 亦覆盖）。
+# 旧版此处断言 asm 必须 Fail-Fast 拒绝 array——功能补齐后该断言已过时，改钉双后端一致。
 cat > "${BDIR}/arr.dial" <<'DIALEOF'
-fn main(): int { var a: int[] = [1, 2, 3]; print(bitcast<int>(a)); return 0; }
+fn main(): int { var a: int[] = [1, 2, 3]; var b: int[] = bitcast<int[]>(a); print(b[1]); return 0; }
 DIALEOF
-if ${DIALC} build "${BDIR}/arr.dial" --backend asm -o "${BDIR}/arr" >"${BDIR}/arr.log" 2>&1; then
-    rbad "R9 array bitcast 应被 asm 拒绝却编译成功"
-elif grep -q '\[asm 后端\].*array' "${BDIR}/arr.log"; then
-    rpass "array bitcast：asm Fail-Fast 拒绝（堆句柄无法同址重解释）"
+if ${DIALC} build "${BDIR}/arr.dial" --backend llvm -o "${BDIR}/arr_llvm" >/dev/null 2>&1 \
+   && ${DIALC} build "${BDIR}/arr.dial" --backend asm -o "${BDIR}/arr_asm" >/dev/null 2>&1; then
+    _r9_arr_llvm="$( ${BDIR}/arr_llvm 2>/dev/null | tr '\n' ' ' )"
+    _r9_arr_asm="$( ${BDIR}/arr_asm 2>/dev/null | tr '\n' ' ' )"
+    if [ "$_r9_arr_llvm" = "2 " ] && [ "$_r9_arr_asm" = "2 " ]; then
+        rpass "array bitcast：双后端一致（v1.21 补齐，asm 不再拒绝）"
+    else
+        rbad "R9 array bitcast 输出不一致（llvm=[$_r9_arr_llvm] asm=[$_r9_arr_asm]）"
+    fi
 else
-    rbad "R9 array bitcast 拒绝但缺少 [asm 后端] 诊断"
+    rbad "R9 array bitcast 双后端编译失败（v1.21 起应支持）"
 fi
 
 # ===========================================================================
@@ -3315,6 +3322,75 @@ for _be in asm llvm; do
         fi
     done
 done
+
+# R23) asm 后端 SIMD 功能对等（v1.21 补齐）：asm 侧此前相对 LLVM 缺 3 项——
+#      ① 变量 lane 索引 v[i]（i 非字面量）；② bitcast 到 simd 类型；③ bitcast 到
+#      array 类型。本组把三项与跨元素位重解释组合钉死「双后端逐值一致 + 越界
+#      Fail-Fast + O0-O3 全级别」，防止回退到「LLVM 能编译而 asm 拒绝」。
+echo "  -- R23) asm SIMD 功能对等工作量（变量 lane 索引 / bitcast simd·array） --"
+R23_DIR="${RDIR}/simd_gap"; mkdir -p "$R23_DIR"
+# 综合正向：变量索引 + bitcast simd（同构）+ bitcast array + 跨元素位重解释。
+cat > "${R23_DIR}/all.dial" <<'R23EOF'
+fn main(): int {
+    var a: simd<int, 4> = simd<int, 4>(10, 20, 30, 40);
+    var i: int = 2;
+    print(a[i]);                                  // 30：运行时 lane 索引
+    var b: simd<int, 4> = bitcast<simd<int, 4>>(a);
+    print(b[3]);                                  // 40：bitcast simd 恒等
+    var f: simd<float, 4> = bitcast<simd<float, 4>>(a);
+    print(f[0]);                                  // 0.000000：跨元素位重解释
+    var arr: int[] = [7, 8, 9];
+    var arr2: int[] = bitcast<int[]>(arr);
+    print(arr2[1]);                               // 8：bitcast array 恒等
+    return 0;
+}
+R23EOF
+if ${DIALC} build "${R23_DIR}/all.dial" --backend llvm -o "${R23_DIR}/all_llvm" >/dev/null 2>&1 \
+   && ${DIALC} build "${R23_DIR}/all.dial" --backend asm  -o "${R23_DIR}/all_asm"  >/dev/null 2>&1; then
+    _r23_llvm="$( ${R23_DIR}/all_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    _r23_asm="$( ${R23_DIR}/all_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    _r23_want="30 40 0.000000 8 "
+    if [ "$_r23_llvm" = "$_r23_want" ] && [ "$_r23_asm" = "$_r23_want" ]; then
+        rpass "R23 SIMD 补齐综合正向双后端逐值一致（变量索引/bitcast simd·array/跨元素）"
+    else
+        rbad "R23 SIMD 综合正向不一致（llvm=[$_r23_llvm] asm=[$_r23_asm] want=[$_r23_want]）"
+    fi
+else
+    rbad "R23 SIMD 综合正向用例双后端编译失败"
+fi
+# 越界 Fail-Fast：运行时索引超界，两后端都必须非零终止（不静默返回错误值）。
+cat > "${R23_DIR}/oob.dial" <<'R23EOF'
+fn main(): int {
+    var a: simd<int, 4> = simd<int, 4>(10, 20, 30, 40);
+    var i: int = 9;
+    print(a[i]);
+    return 0;
+}
+R23EOF
+for _r23_be in llvm asm; do
+    ${DIALC} build "${R23_DIR}/oob.dial" --backend $_r23_be -o "${R23_DIR}/oob_$_r23_be" >/dev/null 2>&1 || {
+        rbad "R23 越界用例 $_r23_be 编译失败"; continue; }
+    ${R23_DIR}/oob_$_r23_be >/dev/null 2>&1
+    _r23_rc=$?
+    if [ "$_r23_rc" -ne 0 ]; then
+        rpass "R23 越界 Fail-Fast（$_r23_be）：非零终止 exit=$_r23_rc"
+    else
+        rbad "R23 越界 Fail-Fast（$_r23_be）：竟正常退出（静默错误值）"
+    fi
+done
+# O0-O3 全级别：变量索引与 bitcast 在各优化级别输出一致。
+_r23_o_ok=1
+for _r23_o in 0 1 2 3; do
+    ${DIALC} build "${R23_DIR}/all.dial" --backend asm -O$_r23_o -o "${R23_DIR}/all_o$_r23_o" >/dev/null 2>&1 \
+        || { _r23_o_ok=0; break; }
+    _r23_o_out="$( ${R23_DIR}/all_o$_r23_o 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ' )"
+    [ "$_r23_o_out" = "30 40 0.000000 8 " ] || { _r23_o_ok=0; break; }
+done
+if [ "$_r23_o_ok" -eq 1 ]; then
+    rpass "R23 SIMD 补齐 O0-O3 四级别输出一致"
+else
+    rbad "R23 SIMD 补齐 O0-O3 某级别编译或输出异常"
+fi
 
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
