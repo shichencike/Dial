@@ -3278,6 +3278,45 @@ for _be in llvm asm; do
 done
 
 # ===========================================================================
+# R22) ARC 泄漏回归（v1.21 P0 修复）：两个独立根因
+#   A) asm 后端：出口（return/throw/break）的 release_locals_upto 曾把局部标记 moved，
+#      污染条件分支正常落穿路径 → 每次条件出口泄漏一份 try 作用域 ARC 局部。
+#   B) llvm 后端：Expr::StringLit 曾每次 dial_string_new 堆分配且不释放临时 →
+#      每个字面量每次求值泄漏一份（如 s = s + "x" 循环）。
+#   门禁：双后端跑压测用例，功能标记 + 峰值 RSS 断言（修复版 ~2-3MB，泄漏版 >20MB）。
+#   无 GNU time 的平台退化为「正常完成 + 输出标记」功能冒烟，不误报。
+echo "  -- R22) ARC 泄漏回归双后端（v1.21 P0 修复） --"
+_R22_RSS_LIMIT=12288   # 12MB：修复版有 4x 余量，泄漏版必超标
+for _be in asm llvm; do
+    for _case in scope literal; do
+        _src="tests/pkg/r22_arc_leak_${_case}.dial"
+        ${DIALC} build "$_src" --backend $_be -o "${TMP}/r22_${_case}_${_be}" >/dev/null 2>&1 \
+            || { rbad "R22 $_case/$_be 编译失败"; continue; }
+        _want="r22_$([ "$_case" = scope ] && echo a || echo b)_done"
+        if [ -x /usr/bin/time ]; then
+            /usr/bin/time -f '%M' -o "${TMP}/r22.rss" timeout 180 "${TMP}/r22_${_case}_${_be}" \
+                >"${TMP}/r22.out" 2>/dev/null
+            _r22_rc=$?
+            _r22_rss=$(cat "${TMP}/r22.rss" 2>/dev/null || echo 0)
+        else
+            timeout 180 "${TMP}/r22_${_case}_${_be}" >"${TMP}/r22.out" 2>/dev/null
+            _r22_rc=$?
+            _r22_rss=0
+        fi
+        _r22_out=$(grep -vE '^ℹ️' "${TMP}/r22.out" 2>/dev/null)
+        if [ "$_r22_rc" -eq 0 ] && printf '%s' "$_r22_out" | grep -qF "$_want"; then
+            if [ "$_r22_rss" -eq 0 ] || [ "$_r22_rss" -lt "$_R22_RSS_LIMIT" ]; then
+                rpass "R22 $_case/$_be：功能正确·峰值 RSS ${_r22_rss}KB < ${_R22_RSS_LIMIT}KB（无泄漏）"
+            else
+                rbad "R22 $_case/$_be：峰值 RSS ${_r22_rss}KB 超标（疑似 ARC 泄漏）"
+            fi
+        else
+            rbad "R22 $_case/$_be：退出码 $_r22_rc / 输出 [$_r22_out]（应正常完成并打印 $_want）"
+        fi
+    done
+done
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

@@ -1,0 +1,18 @@
+fn big(i: int): string {
+    var s: string = str(i);
+    var j: int = 0;
+    while (j < 64) { s = s + "0123456789abcdef0123456789abcdef"; j = j + 1; }
+    return s;
+}
+fn main(): int {
+    var i: int = 0;
+    while (i < 20000) {
+        try {
+            var b: string = big(i);
+            if (i % 2 == 0) { throw Error("x"); }
+        } catch { }
+        i = i + 1;
+    }
+    print("r22_a_done");
+    return 0;
+}

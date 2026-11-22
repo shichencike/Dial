@@ -1,0 +1,7 @@
+fn main(): int {
+    var s: string = "seed";
+    var i: int = 0;
+    while (i < 600000) { s = s + "x"; i = i + 1; }
+    if (s.length() == 600004) { print("r22_b_done"); }
+    return 0;
+}

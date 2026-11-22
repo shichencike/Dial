@@ -22,6 +22,27 @@
 
 ## [未发布]
 
+### Fixed（P0：ARC 泄漏，两个独立根因）
+
+- **以资深程序员视角压测发现并修复两类 ARC 泄漏**（审查报告初判「异常路径泄漏、LLVM
+  因 throw 漏更多、语言层通病」，经精细对照实验证明归因有误，真实是两个独立 bug）：
+  - **A · asm 后端 `release_locals_upto` 全局 moved 污染**：出口（return/throw/break/
+    continue/goto）释放局部时把编译期 `Local.moved=true`，该标记被条件分支的
+    else→merge **正常落穿路径**继承，令其 `leave_scope`/`release_scope` 误以为已释放而
+    跳过 → 每个条件出口泄漏一份 try/块作用域 ARC 局部。修复：出口释放不再写 moved；
+    `leave_scope` 在已终止块（出口路径）跳过 `release_scope`，正常落穿路径照常释放，
+    两条 CFG 路径互斥、无需全局标记。实测条件 throw 5000 次 6.3MB→2.0MB、条件 return
+    6.5MB→2.0MB，无 double-free。
+  - **B · LLVM 后端字符串字面量堆分配泄漏**：`Expr::StringLit` 每处求值都
+    `dial_string_new`（malloc+strlen+memcpy，rc=1），而 `StringLit` 不在
+    `yields_borrowed_ref`、concat 等又不释放右操作数 → 每个字面量每次求值泄漏一份
+    （`s = s + "x"` 每轮漏一个 "x"）。修复：新增 `immortal_string_lit`，生成
+    `[rc=INT64_MIN][len][data][\0]` 的 rodata 全局常量、句柄指向 +8 len 字段，与 asm
+    后端 `.Ldstr` 完全同构（zero alloc / zero release）。实测百万次拼接 36MB→3.8MB。
+  - 新增 R22 门禁：双后端压测用例 + 峰值 RSS 断言（修复版 ~2MB，泄漏版 >20MB），
+    无 GNU time 平台退化为功能冒烟。双后端字符串语义（比较/map 键/数组 COW/插值/
+    方法/传参返回）逐项一致。
+
 ### Added（真实 GPU 合成后端）
 
 - **真实 GPU 合成**：补齐 §41 四项缺口中最后一项。用户裁决「继续」（最小破例 +

@@ -650,32 +650,37 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// 释放 `down_to` 及以上所有作用域里的堆局部（Return / break / continue 用）。
+    /// 释放 `down_to` 及以上所有作用域里的堆局部（Return / break / continue / throw 用）。
     ///
     /// **只发射 release 指令，绝不 pop 作用域**：Return 之后同一函数里可能还有别的语句
     /// （例如 `if (c) { return x; }` 之后的收尾），它们仍需能 lookup 到参数；而 `If` /
-    /// `While` 的 `pop_scope().unwrap()` 也要求作用域结构完整。被释放的局部标记 moved，
-    /// 保证随后 pop_scope 时的 release_scope 不会二次释放。
+    /// `While` 的 `pop_scope().unwrap()` 也要求作用域结构完整。
+    ///
+    /// **P0 修复（路径不敏感的 moved 污染）**：这里**刻意不写 `Local.moved`**。出口
+    /// （return/throw/break/continue/goto）与正常落穿是互斥的 CFG 路径：出口在当前
+    /// （随即被 terminate 的）块里发射这批 release；随后同一已终止块里的 `leave_scope`
+    /// 由 `release_scope` 的 `cur_terminated()` 保护跳过，不会二次释放。若在此把局部
+    /// 标记 moved，该编译期标记会被条件分支的 else→merge 正常路径继承，令那条路径的
+    /// `leave_scope`/`release_scope` 误以为已释放而跳过 → 每次条件出口泄漏一份。
+    /// `Stmt::Throw` / `Stmt::Return` 对「正要抛出/返回」的 Error/句柄所设的 moved 是
+    /// 真实所有权转移（路径无关），保留不动。
     fn release_locals_upto(&mut self, down_to: usize) {
         if self.scopes.len() <= down_to { return; }
-        let mut items: Vec<(usize, String, VReg, Option<ArcKind>, Option<String>)> = Vec::new();
+        let mut items: Vec<(VReg, Option<ArcKind>, Option<String>)> = Vec::new();
         for si in down_to..self.scopes.len() {
-            for (name, l) in &self.scopes[si] {
+            for l in self.scopes[si].values() {
                 if l.is_handle && !l.moved {
                     let sn = if let Type::Struct(n) = &l.dt { Some(n.clone()) } else { None };
-                    items.push((si, name.clone(), l.ptr, rc_kind(&l.dt), sn));
+                    items.push((l.ptr, rc_kind(&l.dt), sn));
                 }
             }
         }
-        items.sort_by_key(|x| std::cmp::Reverse(x.2)); // 与 release_scope 一致：按槽地址逆序
-        for (si, name, ptr, k, sn) in items {
+        items.sort_by_key(|x| std::cmp::Reverse(x.0)); // 与 release_scope 一致：按槽地址逆序
+        for (ptr, k, sn) in items {
             if let Some(k) = k {
                 self.emit(IrInst::RcRelease { ptr, kind: k });
             } else if let Some(sn) = sn {
                 self.emit(IrInst::StructRelease { ptr, struct_name: sn });
-            }
-            if let Some(l) = self.scopes.get_mut(si).and_then(|s| s.get_mut(&name)) {
-                l.moved = true;
             }
         }
     }
@@ -710,8 +715,11 @@ impl<'a> Lower<'a> {
     fn leave_scope(&mut self) -> Result<(), String> {
         let d = self.scopes.len();
         // 当前块已终止（前一条是 return/break/continue/goto/throw）：正常落穿路径不可达，
-        // 该出口的 defer 已由 drain_defers_from 在跳转前发射过。此处只清理 defer 帧，
-        // 切勿再往已终止的块追加指令（否则 defer 被发射两次——goto_demo 的 cleanup 重复）。
+        // 该出口的 defer 已由 drain_defers_from 在跳转前发射过，堆局部也已由
+        // release_locals_upto/release_scopes_upto 在该块里发射过 release。此处只清理
+        // defer / 作用域帧，切勿再往已终止的块追加指令：
+        //   - defer 重复发射 → goto_demo 的 cleanup 出现两次；
+        //   - release 重复发射 → double free（C runtime DIAL_HEAP_ASSERT 当场终止）。
         // 对齐 LLVM codegen.rs:1426 的 is_terminated 保护。
         if !self.cur_terminated() {
             self.drain_defers_from(d)?;
@@ -719,7 +727,11 @@ impl<'a> Lower<'a> {
         // drain 只 clone 不消耗；此处（真正退出作用域）清理本层及更深的 defer。
         self.defers.retain(|(dep, _)| *dep < d);
         let sc = self.scopes.pop().unwrap();
-        self.release_scope(&sc);
+        // P0 修复：出口路径（块已终止）的局部已由出口释放，跳过以免 double free；
+        // 正常落穿路径（块未终止）照常释放，避免泄漏。两条路径互斥，无需全局 moved 标记。
+        if !self.cur_terminated() {
+            self.release_scope(&sc);
+        }
         Ok(())
     }
 

@@ -4228,3 +4228,49 @@ exact=1 / 源 CRC 3845929168 前后相等`；无则验证降级路径不误报 C
 用 `DIAL_GUI_GPU_FORCE_DEGRADE=1` 验证 `composite=-2 / exact=0 / 源像素不变`。asm 与 llvm 双后端
 stdout 逐字一致，旧 API `gpu_available=0` 不漂移。R21 门禁挂入 `tests/run_tests.sh`。
 README 新增 §38.24.7、§41 未实现清单移除本项、三处 344→350 计数同步。
+
+---
+
+#### P0 ARC 泄漏修复（v1.21）：审查归因被实验推翻，定位两个独立根因
+
+**缘起**：以资深程序员视角压测项目与「常用程序」，初版审查报告称「throw/catch 路径泄漏 try
+作用域 ARC 局部，LLVM 因 throw 漏更多（48.8MB vs 6.7MB），是语言层通病」。本轮修复要求
+「不凭猜测改代码」，用精细对照实验（e1~e6 / s1~s4 / t1~t4）重新定位，**证明该归因错误**。
+
+**实验推翻初判的关键数据**（峰值 RSS，N=5000）：
+- e1（无 try、无 throw、纯循环内分配大字符串）：asm 2.0MB **不漏**，llvm 48.5MB **漏**
+  → 泄漏与异常路径无关，llvm 存在独立 bug。
+- e3（try body 无条件 throw，无正常落穿路径）：两后端都 ~2MB **不漏**。
+- e4（try body 的 if 里条件 throw）：asm 6.3MB **漏**；e6（if 里条件 return）：asm 6.5MB **漏**
+  → asm 泄漏与「条件分支出口」强相关，无条件出口不漏。
+- t1（单层循环百万次 `s = s + "x"`）：llvm 36MB；s3（5000 次拼接）：llvm 2MB 不漏
+  → llvm 泄漏与「字面量拼接次数」成正比，非 throw。
+
+**根因 A · asm 出口 moved 污染**：`release_locals_upto`（lower.rs）在出口释放局部后写
+`Local.moved=true`。这个标记是**编译期全局作用域状态**，不区分 CFG 路径。当出口位于
+`if` 的 then 分支，出口块 terminate 后，if 的 else→merge 正常落穿路径上同一 Local 已被
+标记 moved，`leave_scope`→`release_scope` 见 `!l.moved` 为假 → 跳过释放 → 泄漏。无条件出口
+（e3）没有正常落穿路径，故不漏，完美印证。为何不直接删 moved 标记：出口块（已 terminate）
+里 `leave_scope` 会二次发射 release（codegen_asm 逐块发射全部 insts 再发 term，已终止块的
+指令仍执行），触发 C runtime `DIAL_HEAP_ASSERT` double-free。
+修复：① `release_locals_upto` 不再写 moved；② `leave_scope` 用现成的 `cur_terminated()`
+判断——出口路径（块已终止）跳过 `release_scope`（出口已释放），正常落穿路径（未终止）
+照常释放。两条路径互斥，无需跨路径标记。
+验证：e4 6.3MB→1.97MB，e6 6.5MB→1.93MB，14 项双后端语义测试一致，无 double-free trap。
+
+**根因 B · llvm 字面量堆分配**：`Expr::StringLit`（codegen.rs:4255）每处求值都
+`global_string`（生成 `char*` 常量）再 `dial_string_new`（malloc+strlen+memcpy，rc=1）。
+C runtime 的 `dial_string_new` 确实每次堆分配（对比 asm 的 `LeaStaticString`：rodata 里
+`.Ldstr` 静态对象 `[rc=INT64_MIN][len][data]`，句柄 `+8`，rc 哨兵让 retain/release/clone
+全 no-op，零分配零释放）。`StringLit` 不在 `yields_borrowed_ref` 里，concat 只产出新对象、
+不释放右操作数 → 每个字面量每次求值漏一个堆对象；`s = s + "x"` 每轮漏一个 "x"。
+修复：新增 `immortal_string_lit`，构造 `[i64 INT64_MIN][i64 len][data][\0]` 的 LLVM 全局
+常量（`set_constant(true)`），句柄指向 len 字段（对象起点 +8），与 asm `.Ldstr` 逐字节同构。
+踩坑：`build_gep` 首参须传 **pointee 元素类型 `i8`**，误传 `i8ptr` 会使句柄指向对象起点
+（rc 头）→ concat 的 memcpy 从错误偏移读 → SIGSEGV（gdb 定位 b=全局起点、len 读到 INT64_MIN
+的字节）；改对后 `abcd/4/xyz/3/true/b` 双后端一致。
+验证：t1 百万拼接 36MB→3.8MB，e1~e6 llvm 48MB→~2MB。
+
+**工程化**：R22 门禁（tests/pkg/r22_arc_leak_{scope,literal}.dial）双后端跑压测 + GNU time
+峰值 RSS 断言（阈值 12MB，修复版 2-3MB 有 4x 余量，泄漏版 >20MB）；无 GNU time 平台退化
+为功能冒烟，不误报 CI。CHANGELOG Fixed 段 + 本证据链同步。

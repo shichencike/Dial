@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
 <ul>
 <li><a href="#未发布">[未发布]</a><ul>
+<li><a href="#fixedp0arc-泄漏两个独立根因">Fixed（P0：ARC 泄漏，两个独立根因）</a></li>
 <li><a href="#added真实-gpu-合成后端">Added（真实 GPU 合成后端）</a></li>
 <li><a href="#addedc--dial-反向回调">Added（C → Dial 反向回调）</a></li>
 <li><a href="#added协作式线程池--协程--async-await">Added（协作式线程池 / 协程 / async-await）</a></li>
@@ -39,6 +40,27 @@
 </ul>
 </div>
 <h2 id="未发布">[未发布]</h2>
+<h3 id="fixedp0arc-泄漏两个独立根因">Fixed（P0：ARC 泄漏，两个独立根因）</h3>
+<ul>
+<li><strong>以资深程序员视角压测发现并修复两类 ARC 泄漏</strong>（审查报告初判「异常路径泄漏、LLVM
+  因 throw 漏更多、语言层通病」，经精细对照实验证明归因有误，真实是两个独立 bug）：</li>
+<li><strong>A · asm 后端 <code>release_locals_upto</code> 全局 moved 污染</strong>：出口（return/throw/break/
+    continue/goto）释放局部时把编译期 <code>Local.moved=true</code>，该标记被条件分支的
+    else→merge <strong>正常落穿路径</strong>继承，令其 <code>leave_scope</code>/<code>release_scope</code> 误以为已释放而
+    跳过 → 每个条件出口泄漏一份 try/块作用域 ARC 局部。修复：出口释放不再写 moved；
+    <code>leave_scope</code> 在已终止块（出口路径）跳过 <code>release_scope</code>，正常落穿路径照常释放，
+    两条 CFG 路径互斥、无需全局标记。实测条件 throw 5000 次 6.3MB→2.0MB、条件 return
+    6.5MB→2.0MB，无 double-free。</li>
+<li><strong>B · LLVM 后端字符串字面量堆分配泄漏</strong>：<code>Expr::StringLit</code> 每处求值都
+    <code>dial_string_new</code>（malloc+strlen+memcpy，rc=1），而 <code>StringLit</code> 不在
+    <code>yields_borrowed_ref</code>、concat 等又不释放右操作数 → 每个字面量每次求值泄漏一份
+    （<code>s = s + "x"</code> 每轮漏一个 "x"）。修复：新增 <code>immortal_string_lit</code>，生成
+    <code>[rc=INT64_MIN][len][data][\0]</code> 的 rodata 全局常量、句柄指向 +8 len 字段，与 asm
+    后端 <code>.Ldstr</code> 完全同构（zero alloc / zero release）。实测百万次拼接 36MB→3.8MB。</li>
+<li>新增 R22 门禁：双后端压测用例 + 峰值 RSS 断言（修复版 ~2MB，泄漏版 &gt;20MB），
+    无 GNU time 平台退化为功能冒烟。双后端字符串语义（比较/map 键/数组 COW/插值/
+    方法/传参返回）逐项一致。</li>
+</ul>
 <h3 id="added真实-gpu-合成后端">Added（真实 GPU 合成后端）</h3>
 <ul>
 <li><strong>真实 GPU 合成</strong>：补齐 §41 四项缺口中最后一项。用户裁决「继续」（最小破例 +

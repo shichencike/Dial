@@ -1524,6 +1524,46 @@ impl<'ctx> CodeGen<'ctx> {
             .unwrap()
     }
 
+    /// 生成一个静态 immortal DialString 字面量（与 asm 后端 `.Ldstr` 完全同构）。
+    ///
+    /// DialString 内存布局（runtime/dial_rt_mem.h）：`[i64 rc][i64 len][char data[]\0]`，
+    /// 对外句柄指向 len 字段（对象起点 +8）。refcount 用 `DIAL_RC_IMMORTAL = INT64_MIN`，
+    /// `dial_rc_retain/release/clone` 三处对它 no-op —— 于是字面量永不分配、永不释放、
+    /// 可被任意表达式借用/结算。
+    ///
+    /// **P0 修复（LLVM 字符串字面量泄漏）**：旧实现每个 `Expr::StringLit` 都调
+    /// `dial_string_new`（malloc + strlen + memcpy，rc=1），而 `StringLit` 不在
+    /// `yields_borrowed_ref` 中、concat 等操作又不释放其右操作数 → 每个字面量每次求值
+    /// 泄漏一个堆对象（如 `s = s + "x"` 循环里每轮漏一个 "x"）。改为静态对象后彻底归零。
+    fn immortal_string_lit(&self, name: &str, value: &str) -> PointerValue<'ctx> {
+        let len = value.len() as i64;
+        let mut bytes: Vec<u8> = Vec::with_capacity(8 + 8 + value.len() + 1);
+        bytes.extend_from_slice(&i64::MIN.to_le_bytes()); // rc = DIAL_RC_IMMORTAL
+        bytes.extend_from_slice(&len.to_le_bytes());       // len（字节数）
+        bytes.extend_from_slice(value.as_bytes());          // data
+        bytes.push(0);                                      // NUL 结尾（dial_string_cstr 依赖）
+        let arr_ty = self.context.i8_type().array_type(bytes.len() as u32);
+        let g = self.module.add_global(arr_ty, None, name);
+        g.set_initializer(&self.context.const_string(&bytes, false));
+        g.set_constant(true);
+        let base = self.builder
+            .build_pointer_cast(g.as_pointer_value(), self.i8ptr(), "imstr.base")
+            .unwrap();
+        // 句柄指向 len 字段 = 对象起点 +8（对齐 asm 的 LeaStaticString .Ldstr+8）。
+        // 注意 build_gep 首参是 pointee 元素类型（i8），不是指针类型；索引单位为元素数，
+        // 故对 i8* 加 8 个 i8 = +8 字节。若误传 i8* 类型，GEP 会按指针宽度算，句柄错位。
+        unsafe {
+            self.builder
+                .build_gep(
+                    self.context.i8_type(),
+                    base,
+                    &[self.context.i64_type().const_int(8, false)],
+                    "imstr.handle",
+                )
+                .unwrap()
+        }
+    }
+
     fn next_str_id(&self) -> u32 {
         let n = self.str_id.get();
         self.str_id.set(n + 1);
@@ -4254,8 +4294,9 @@ impl<'ctx> CodeGen<'ctx> {
             }
             Expr::StringLit(s) => {
                 let name = format!("dialc.str.{}", self.next_str_id());
-                let g = self.global_string(&name, s);
-                Ok(self.call_c("dial_string_new", &[g.into()]))
+                // P0 修复：字面量用静态 immortal 对象（zero alloc / zero release），
+                // 不再每次 dial_string_new 堆分配。语义等价（内容比较、不可变、无身份依赖）。
+                Ok(self.immortal_string_lit(&name, s).into())
             }
             Expr::Var(name) => {
                 let found = scopes

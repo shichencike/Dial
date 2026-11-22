@@ -76,6 +76,7 @@
 <li><a href="#协作式线程池--协程--async-awaitv121补齐-41无线程池无异步缺口">协作式线程池 / 协程 / async-await（v1.21，补齐 §41「无线程池/无异步」缺口）</a></li>
 <li><a href="#c--dial-反向回调v121推翻-gui绝不反向回调宪法">C → Dial 反向回调（v1.21，推翻 GUI「绝不反向回调」宪法）</a></li>
 <li><a href="#真实-gpu-合成后端v121第-19-层受控破例补齐-41-最后一项">真实 GPU 合成后端（v1.21，第 19 层受控破例，补齐 §41 最后一项）</a></li>
+<li><a href="#p0-arc-泄漏修复v121审查归因被实验推翻定位两个独立根因">P0 ARC 泄漏修复（v1.21）：审查归因被实验推翻，定位两个独立根因</a></li>
 </ul>
 </li>
 </ul>
@@ -4254,7 +4255,46 @@ x86_64-windows-gnu 300K）→ <code>dialc pack</code> → <code>dialc install</c
 exact=1 / 源 CRC 3845929168 前后相等</code>；无则验证降级路径不误报 CI），<code>use_gui_gpu_real_degrade.dial</code>
 用 <code>DIAL_GUI_GPU_FORCE_DEGRADE=1</code> 验证 <code>composite=-2 / exact=0 / 源像素不变</code>。asm 与 llvm 双后端
 stdout 逐字一致，旧 API <code>gpu_available=0</code> 不漂移。R21 门禁挂入 <code>tests/run_tests.sh</code>。
-README 新增 §38.24.7、§41 未实现清单移除本项、三处 344→350 计数同步。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+README 新增 §38.24.7、§41 未实现清单移除本项、三处 344→350 计数同步。</p>
+<hr />
+<h4 id="p0-arc-泄漏修复v121审查归因被实验推翻定位两个独立根因">P0 ARC 泄漏修复（v1.21）：审查归因被实验推翻，定位两个独立根因</h4>
+<p><strong>缘起</strong>：以资深程序员视角压测项目与「常用程序」，初版审查报告称「throw/catch 路径泄漏 try
+作用域 ARC 局部，LLVM 因 throw 漏更多（48.8MB vs 6.7MB），是语言层通病」。本轮修复要求
+「不凭猜测改代码」，用精细对照实验（e1~e6 / s1~s4 / t1~t4）重新定位，<strong>证明该归因错误</strong>。</p>
+<p><strong>实验推翻初判的关键数据</strong>（峰值 RSS，N=5000）：
+- e1（无 try、无 throw、纯循环内分配大字符串）：asm 2.0MB <strong>不漏</strong>，llvm 48.5MB <strong>漏</strong>
+  → 泄漏与异常路径无关，llvm 存在独立 bug。
+- e3（try body 无条件 throw，无正常落穿路径）：两后端都 ~2MB <strong>不漏</strong>。
+- e4（try body 的 if 里条件 throw）：asm 6.3MB <strong>漏</strong>；e6（if 里条件 return）：asm 6.5MB <strong>漏</strong>
+  → asm 泄漏与「条件分支出口」强相关，无条件出口不漏。
+- t1（单层循环百万次 <code>s = s + "x"</code>）：llvm 36MB；s3（5000 次拼接）：llvm 2MB 不漏
+  → llvm 泄漏与「字面量拼接次数」成正比，非 throw。</p>
+<p><strong>根因 A · asm 出口 moved 污染</strong>：<code>release_locals_upto</code>（lower.rs）在出口释放局部后写
+<code>Local.moved=true</code>。这个标记是<strong>编译期全局作用域状态</strong>，不区分 CFG 路径。当出口位于
+<code>if</code> 的 then 分支，出口块 terminate 后，if 的 else→merge 正常落穿路径上同一 Local 已被
+标记 moved，<code>leave_scope</code>→<code>release_scope</code> 见 <code>!l.moved</code> 为假 → 跳过释放 → 泄漏。无条件出口
+（e3）没有正常落穿路径，故不漏，完美印证。为何不直接删 moved 标记：出口块（已 terminate）
+里 <code>leave_scope</code> 会二次发射 release（codegen_asm 逐块发射全部 insts 再发 term，已终止块的
+指令仍执行），触发 C runtime <code>DIAL_HEAP_ASSERT</code> double-free。
+修复：① <code>release_locals_upto</code> 不再写 moved；② <code>leave_scope</code> 用现成的 <code>cur_terminated()</code>
+判断——出口路径（块已终止）跳过 <code>release_scope</code>（出口已释放），正常落穿路径（未终止）
+照常释放。两条路径互斥，无需跨路径标记。
+验证：e4 6.3MB→1.97MB，e6 6.5MB→1.93MB，14 项双后端语义测试一致，无 double-free trap。</p>
+<p><strong>根因 B · llvm 字面量堆分配</strong>：<code>Expr::StringLit</code>（codegen.rs:4255）每处求值都
+<code>global_string</code>（生成 <code>char*</code> 常量）再 <code>dial_string_new</code>（malloc+strlen+memcpy，rc=1）。
+C runtime 的 <code>dial_string_new</code> 确实每次堆分配（对比 asm 的 <code>LeaStaticString</code>：rodata 里
+<code>.Ldstr</code> 静态对象 <code>[rc=INT64_MIN][len][data]</code>，句柄 <code>+8</code>，rc 哨兵让 retain/release/clone
+全 no-op，零分配零释放）。<code>StringLit</code> 不在 <code>yields_borrowed_ref</code> 里，concat 只产出新对象、
+不释放右操作数 → 每个字面量每次求值漏一个堆对象；<code>s = s + "x"</code> 每轮漏一个 "x"。
+修复：新增 <code>immortal_string_lit</code>，构造 <code>[i64 INT64_MIN][i64 len][data][\0]</code> 的 LLVM 全局
+常量（<code>set_constant(true)</code>），句柄指向 len 字段（对象起点 +8），与 asm <code>.Ldstr</code> 逐字节同构。
+踩坑：<code>build_gep</code> 首参须传 <strong>pointee 元素类型 <code>i8</code></strong>，误传 <code>i8ptr</code> 会使句柄指向对象起点
+（rc 头）→ concat 的 memcpy 从错误偏移读 → SIGSEGV（gdb 定位 b=全局起点、len 读到 INT64_MIN
+的字节）；改对后 <code>abcd/4/xyz/3/true/b</code> 双后端一致。
+验证：t1 百万拼接 36MB→3.8MB，e1~e6 llvm 48MB→~2MB。</p>
+<p><strong>工程化</strong>：R22 门禁（tests/pkg/r22_arc_leak_{scope,literal}.dial）双后端跑压测 + GNU time
+峰值 RSS 断言（阈值 12MB，修复版 2-3MB 有 4x 余量，泄漏版 &gt;20MB）；无 GNU time 平台退化
+为功能冒烟，不误报 CI。CHANGELOG Fixed 段 + 本证据链同步。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
