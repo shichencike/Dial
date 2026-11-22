@@ -1824,17 +1824,62 @@ impl<'a> Lower<'a> {
                 // 元素类型必须按数组的真实类型取（此前硬编码 int[]，导致 string[]
                 // 的元素位模式没被按句柄还原——读出来是一串指针数值）。
                 let at = self.expr_dt(arr);
-                // M7-e3az：向量 lane 提取 `v[i]`。对齐 LLVM 4108 的 extractelement。
-                // lane 索引须为编译期整数常量（语义层已约束；这里尽力解析）。
+                // M7-e3az：向量 lane 提取 `v[i]`。对齐 LLVM codegen.rs:4371 的
+                // extractelement + emit_bounds_check。索引可为编译期整数字面量（快速路径，
+                // 零运行时开销、既有 .s 逐字节不变），也可为运行时 int 表达式——后者
+                // 生成动态字节偏移 + Fail-Fast 边界检查（与 LLVM ULT 检查同口径）。
                 if let Type::Simd(elem, n) = &at {
-                    let lane = match idx.as_ref() {
-                        Expr::IntLit(k) if *k >= 0 && (*k as u32) < *n => *k as u32,
-                        _ => return self.err(&format!(
-                            "[asm 后端] 向量 lane 索引必须是 0..{} 的整数字面量", n - 1)),
-                    };
                     let (av, _) = self.lower_expr(arr, &at)?;
-                    // lane 存的是 Dial 内部位模式，直接按标量宽度读出即可返回。
-                    let r = self.simd_load_lane(av.as_reg(), lane, simd_lane_ir(elem));
+                    let lane_ty = simd_lane_ir(elem);
+                    if let Expr::IntLit(k) = idx.as_ref() {
+                        // 快速路径：整数字面量，编译期校验 0<=k<n（越界=编译期 Fail-Fast）。
+                        if *k < 0 || *k as u64 >= *n as u64 {
+                            return self.err(&format!(
+                                "[asm 后端] 向量 lane 索引 {} 越界（合法范围 0..{}）", k, n - 1));
+                        }
+                        let r = self.simd_load_lane(av.as_reg(), *k as u32, lane_ty.clone());
+                        return Ok((Value::Reg(r), false));
+                    }
+                    // 运行时索引：lower 索引值（语义层已保证为 int/I64）。
+                    let (iv, _) = self.lower_expr(idx, &Type::Int)?;
+                    let idx_reg = match iv {
+                        Value::Reg(r) => r,
+                        Value::Imm(Imm::I64(k)) => {
+                            // 常量折叠残留：编译期直接校验并走快速路径。
+                            if k < 0 || k as u64 >= *n as u64 {
+                                return self.err(&format!(
+                                    "[asm 后端] 向量 lane 索引 {} 越界（合法范围 0..{}）", k, n - 1));
+                            }
+                            let r = self.simd_load_lane(av.as_reg(), k as u32, lane_ty.clone());
+                            return Ok((Value::Reg(r), false));
+                        }
+                        other => return self.err(&format!(
+                            "[asm 后端] 向量 lane 索引必须是 int，实际为 {:?}", other)),
+                    };
+                    // Fail-Fast 边界检查：无符号比较 idx < n（负数位模式巨大，自然 >= n 被拦截），
+                    // 与 LLVM emit_bounds_check 的 ULT 口径一致。越界调 dial_bounds_fail 当场 trap。
+                    let in_bounds = self.new_reg(IrType::I64);
+                    self.emit(IrInst::ICmp { op: ACmp::Lt, dst: in_bounds,
+                        a: Value::Reg(idx_reg), b: Value::Imm(Imm::I64(*n as i64)), ty: IrType::I64 });
+                    let ok_b = self.new_block(Vec::new());
+                    let fail_b = self.new_block(Vec::new());
+                    self.terminate(Term::Branch { cond: in_bounds, then_b: ok_b, else_b: fail_b,
+                        then_args: Vec::new(), else_args: Vec::new() });
+                    self.set_cur(fail_b);
+                    self.emit(IrInst::Call { dst: None, func: "dial_bounds_fail".to_string(),
+                        args: vec![Value::Reg(idx_reg), Value::Imm(Imm::I64(*n as i64))],
+                        arg_tys: vec![IrType::I64, IrType::I64], ret_ty: IrType::Void,
+                        linkage: CallLink::Runtime });
+                    self.terminate(Term::Unreachable);
+                    self.set_cur(ok_b);
+                    // 动态偏移 = idx*8（每个 lane 固定 8 字节栈槽），PtrAdd + Load。
+                    let off = self.new_reg(IrType::I64);
+                    self.emit(IrInst::Bin { op: ABin::Mul, dst: off,
+                        a: Value::Reg(idx_reg), b: Value::Imm(Imm::I64(8)), ty: IrType::I64 });
+                    let addr = self.new_reg(IrType::Ptr);
+                    self.emit(IrInst::PtrAdd { dst: addr, base: av.as_reg(), off: Value::Reg(off) });
+                    let r = self.new_reg(lane_ty.clone());
+                    self.emit(IrInst::Load { dst: r, ptr: addr, ty: lane_ty });
                     return Ok((Value::Reg(r), false));
                 }
                 let (av, _) = self.lower_expr(arr, &at)?;
@@ -3659,11 +3704,14 @@ impl<'a> Lower<'a> {
         let (v, _) = self.lower_expr(&args[1], &src_ty)?;
 
         // 位宽/尺寸校验（对齐 LLVM llvm_bit_width）：标量用 field_size×8；
-        // struct 用 layout_size_align（区分 packed）；simd/array 明确拒绝。
+        // struct 用 layout_size_align（区分 packed）；
+        // simd 用「N × 元素原生宽度 × 8」（对齐 LLVM `<N x T>` 的 get_abi_size×8，
+        //   与 layout_size_align 的向量 ABI 口径同源，见 e3az）；
+        // array 是 8 字节不透明句柄（LLVM 侧擦除为 i8ptr），位宽恒为 64。
         let bit_size = |t: &Type| -> Result<u64, String> {
             match t {
-                Type::Simd(..) => self.err("bitcast 暂不支持 simd 类型（LLVM 按向量宽度计算，自研后端无法对齐）"),
-                Type::Array(..) => self.err("bitcast 暂不支持 array 类型（数组是堆句柄，无法做同址位重解释）"),
+                Type::Simd(elem, n) => Ok(simd_elem_size(elem) as u64 * *n as u64 * 8),
+                Type::Array(..) => Ok(64),
                 Type::Struct(_) => Ok(self.layout_size_align(t)?.0 as u64 * 8),
                 _ => Ok(field_size(t) as u64 * 8),
             }
@@ -3676,9 +3724,9 @@ impl<'a> Lower<'a> {
                 src_ty.display(), src_bits, target.display(), dst_bits));
         }
 
-        // 类界限（对齐 LLVM codegen.rs:4888-4912）：聚合类型（struct）只能与同尺寸
-        // 聚合互转，不能与指针 / 整数 / 标量互转。位宽相同也不行——这是 LLVM 的
-        // 「指针 / 整数 / 聚合」三类硬界限。bit_size 已拒绝 array，这里只处理 struct。
+        // 类界限（对齐 LLVM codegen.rs:4888-4912）：聚合类型（struct / 向量）只能与
+        // 同尺寸同类聚合互转，不能与指针 / 整数 / 标量互转。位宽相同也不行——这是 LLVM 的
+        // 「指针 / 整数 / 聚合」三类硬界限。
         let src_is_struct = matches!(src_ty, Type::Struct(_));
         let dst_is_struct = matches!(target, Type::Struct(_));
         if src_is_struct != dst_is_struct {
@@ -3686,9 +3734,22 @@ impl<'a> Lower<'a> {
                 "bitcast 不能在结构体与非结构体之间转换（源 {} → 目标 '{}'）；请先用 rawptr 指向那块内存再按字段读取",
                 src_ty.display(), target.display()));
         }
+        // simd 是聚合（LLVM `<N x T>`），只能 simd↔simd。LLVM 侧把 simd 归为聚合，
+        // 拒绝与整数/指针互转；asm 侧 simd 值是「指向 N×8 栈段的 Ptr」，与标量/句柄
+        // 互转会破坏内存模型，故同口径强制拒绝。位宽校验已保证两侧总位宽相同。
+        let src_is_simd = matches!(src_ty, Type::Simd(..));
+        let dst_is_simd = matches!(target, Type::Simd(..));
+        if src_is_simd != dst_is_simd {
+            return self.err(&format!(
+                "bitcast 不能在向量与非向量之间转换（源 {} → 目标 '{}'）；请先用 rawptr 指向那块内存再按字段读取",
+                src_ty.display(), target.display()));
+        }
 
         // 同类型恒等（reg_ir 相同）：int↔byte↔char、bool↔bool、各 Ptr/Handle/FnPtr、
-        // 同名 struct 等——直接返回源值，零指令。与 LLVM src_ty==dst_ty 恒等分支等价。
+        // 同名 struct、simd↔simd（同为 Ptr，栈段首址）等——直接返回源值，零指令。
+        // 与 LLVM src_ty==dst_ty 恒等分支等价。
+        // 注：array↔array 同为 Handle、simd↔simd 同为 Ptr，均在此零拷贝返回，
+        // 位宽校验已确保两侧尺寸一致，下游按目标类型解读同一块位模式。
         if reg_ir(&src_ty) == reg_ir(&target) {
             return Ok((v, false));
         }
