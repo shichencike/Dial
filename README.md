@@ -2195,7 +2195,7 @@ print("");        // -> Hi
 | `map.values()` 对非 `int` 值 | **已支持**（v1.10）：`values()` 支持 `V = int` / `string` / 标量字段结构体，返回对应快照数组；string 值返回 `string[]`（C 侧逐元素 retain，快照与原表互不影响）。`get_or()` 亦支持 string 值（返回值按已拥有语义，两端结算默认实参所有权，四象限计数平衡） |
 | LSP 的重命名 / 跨文件引用查找 / 格式化 | **已实现**（v0.98 轮 2 / 轮 3）——重命名与引用查找基于索引器的**引用边**（`src/index.rs`），格式化只做「去行尾空白 + 末尾换行」这类**绝不重排**的非破坏性动作。能力清单见 [§28.7.1](#2871-当前-lsp-能力清单)。另见 v1.04 新增的 `dialc fmt` 命令行格式化（§34）。**跨工作区全量引用图已支持**（v1.21 开发中）：顶层函数 / struct 按全局唯一名跨文件解析，references / rename 覆盖工作区全部文件（`documentChanges` 每文件一条 `TextDocumentEdit`），局部符号仍限本文件；见 [§28.7.1](#2871-当前-lsp-能力清单) |
 | GUI 控件树 / 布局 / 信号槽 | **十五层已落地**（`gui.dialpkg`，见 [§38](#38-手搓-gui-地基包guidialpkg)）：地基层 + 控件框架层（Widget 树 / 绝对·VBox·HBox 布局 / 命中 / 主动分发）+ 成品控件外观层（Label / Button / CheckBox + 主题表驱动四态绘制 + 纯值事件推进）+ 输入层（TextBox 单行编辑 / 光标·选区 / 焦点链 / 统一功能键码 / XTest 实窗注入）+ 主题层/控件扩展（14 个可覆写颜色角色 + Radio / Slider / ProgressBar + value / range / group）+ 信号槽/控件事件订阅（6 类可订阅纯值信号 + 每树环形队列，见 §38.12）+ 菜单/对话框覆盖层（顶栏菜单 + 弹出菜单 + 模态对话框，复用纯值信号队列，见 §38.13）+ 滚动视图层（视口裁剪 + 滚动条几何 / 命中 / 绘制 + 偏移推进，零 DISPLAY 依赖，见 §38.15）+ 右键上下文菜单层（复用第 7 层菜单 + 锚点 / 命中 / 悬停 / 选中 / 绘制，零 DISPLAY 依赖，见 §38.16）+ 悬浮提示层（文本 + 位置 + 尺寸 + 悬停计时，延迟由调用方推进、零时钟依赖，见 §38.17）+ 状态栏层（左 / 右文本 + 进度条槽位，进度值越界夹紧、零时钟依赖，见 §38.18）+ 通知气泡层（FIFO 消息队列，生命周期纯值推进、到期自动消隐、零时钟依赖，见 §38.19）+ 窗口级覆盖层自动集成（5 类覆盖层挂到窗口槽位，`win.draw()` 按固定 z-order 自动叠加、借用语义、空槽位零像素影响，见 §38.20）+ 快捷键 / 命令系统（KeyMap + 命令启用态，纯内存表、零 DISPLAY 依赖，
-  见 §38.21），共 **279 个 `extern fn`**（截至第 15 层；第 16 / 17 / 18 层追加见 §38.22 / §38.23 / §38.24，现共 **344 个**）；**第 8 层 Dial 侧 OO 封装**（`gui_oo.dial`，278 个 `impl` 方法，现 343 个，纯源码、随包 `src/` 分发（装包即用）、零 `extern fn` 增量，见 §38.14）。撤销重做 / 每控件主题覆写 / Slider 拖动 / Grid 自动换行已于第 17 层落地（见 §38.23）；高 DPI 整数放大 / ListBox 虚拟化 lazy load / IME 预编辑纯值事件 / GPU+原生平台纯值契约层已于第 18 层落地（见 §38.24）。**仍未实现**：真实 GPU 合成后端与原生弹窗/托盘/全局快捷键实机、IMM32/IBus/Fcitx 输入法平台采集、多行文本 / 富文本排版、图片解码、可切换深色主题包。**C → Dial 反向回调已于 v1.21 受控开放**（具名函数 + 显式 rawptr state，见 §32.7）。Win32 后端**仅交叉编译、未实机验证**（XTest 实机注入仅在 Linux/Xvfb 验收） |
+  见 §38.21），共 **279 个 `extern fn`**（截至第 15 层；第 16 / 17 / 18 层追加见 §38.22 / §38.23 / §38.24，现共 **350 个**）；**第 8 层 Dial 侧 OO 封装**（`gui_oo.dial`，278 个 `impl` 方法，现 343 个，纯源码、随包 `src/` 分发（装包即用）、零 `extern fn` 增量，见 §38.14）。撤销重做 / 每控件主题覆写 / Slider 拖动 / Grid 自动换行已于第 17 层落地（见 §38.23）；高 DPI 整数放大 / ListBox 虚拟化 lazy load / IME 预编辑纯值事件 / GPU+原生平台纯值契约层已于第 18 层落地（见 §38.24）；真实 GPU 合成后端已于第 19 层落地（Linux EGL surfaceless 软件渲染，恒等 shader 离屏合成、逐字节精确不改源像素，见 §38.24.7）。**仍未实现**：原生弹窗/托盘/全局快捷键实机、IMM32/IBus/Fcitx 输入法平台采集、多行文本 / 富文本排版、图片解码、可切换深色主题包。**C → Dial 反向回调已于 v1.21 受控开放**（具名函数 + 显式 rawptr state，见 §32.7）。Win32 后端**仅交叉编译、未实机验证**（XTest 实机注入仅在 Linux/Xvfb 验收） |
 | `impl` 方法块（B1） | **已支持**（v1.10 开发中增量）：`impl T { fn m(self, ...) }` 让用户 `struct` 与包不透明句柄（如 `GuiWindow` / `GuiMenu`）挂方法，`obj.m(args)` 编译期降级为静态调用（self 即首参），**ABI 不变、旧签名一字不动、不新增关键字**（`impl` 仍可作普通标识符），见 [§37.12](#3712-b1impl-方法块v110-开发中增补落地)。**关联函数（R3）**：`impl T { fn new(x: int): T }` 定义无 self 静态方法，`T::new(args)` 调用——parser 校验 T 已声明（支持前向引用）后脱糖为普通静态调用，双后端一致。**现役边界**：只支持具名类型（`Struct` / `Opaque`）；方法内 `self.f = ...` 因 Dial struct **值语义**只改副本、不回写调用者（与 Rust `&mut self` 不同）；暂不支持同类型变参 `...xs`、C ABI 导出、对标量/内建容器挂 impl。关联函数首参不可命名 self（那是实例方法保留规则）。B2 泛型 / B3 枚举 ADT / B4 闭包 / B5 重载维持原裁决 |
 
 ---
@@ -7481,7 +7481,7 @@ XTest 实窗注入实测 `keys 2 / focus 2 / mouse 6 / act 2 / shift 1` 全绿�
   空槽位零像素影响、借用语义，见 §38.20）+ **快捷键 / 命令系统**（按键组合 →
   命令 id + 启用态，纯内存表、零 DISPLAY 依赖，见 §38.21）都已有真实现并写进
   `gui.diali`（共 **279 个 `extern fn`**，截至第 15 层；第 16 / 17 / 18 层追加见
-  §38.22 / §38.23 / §38.24，现共 **344 个**）；**第 8 层 Dial 侧 OO 封装层**
+  §38.22 / §38.23 / §38.24，现共 **350 个**）；**第 8 层 Dial 侧 OO 封装层**
   （`gui_oo.dial`，278 个 `impl` 方法，纯 Dial 源码、随包 `src/` 分发、零
   `extern fn` 增量，见 §38.14）也已落地（第 16 / 17 / 18 层同步扩到 **343 个方法**）。
   主题色仍以**进程级全局表**为默认真相源，但第 17 层已支持**每控件角色覆写**
@@ -8376,8 +8376,9 @@ GUI 平台符号、零反向回调；未打 tag、未发 Release。
 第 18 层回应社区对标的五个能力缺口：虚拟化视图（Model/View）、真实 GPU 渲染与动画、
 输入法与复杂文本排版、平台深度集成（原生文件框 / 系统托盘 / 全局快捷键）、高 DPI 多屏自适应；
 同时落地 Qt 对比里点名的两个编译器分发模式 `--tiny` / `--single-file`。本轮**只做纯值契约层**
-（能力探测 + Fail-Fast 参数校验 + 确定性降级码 `-2`），真实 GPU 合成、原生弹窗 / 托盘 / 快捷键实机、
-IMM32 / IBus / Fcitx 平台采集**有意留下一批**（见 §38.24.5 / §38.24.6）。
+（能力探测 + Fail-Fast 参数校验 + 确定性降级码 `-2`）；真实 GPU 合成已在第 19 层补上
+（见 §38.24.7），原生弹窗 / 托盘 / 快捷键实机、IMM32 / IBus / Fcitx 平台采集**有意留下一批**
+（见 §38.24.5 / §38.24.6）。
 
 契约从 **318 个 `extern fn`** 扩到 **344 个**（追加 26 个），OO 封装从 **317 个方法**
 扩到 **343 个**（追加 26 个方法 + 1 个入口 `dial_gui_app_new`，AD 审计口径 **343 / 343 / 344 / 0**）。
@@ -8464,8 +8465,9 @@ seq 自增 / clear / 越界，离屏 CRC 钉值 **1103561703**。
 
 AA 组 `use_gui_platform.dial`（30 条）覆盖 `gpu_available()` / `gpu_backend()` / 降级码 `-2` /
 参数 Fail-Fast / 不碰 framebuffer（离屏 CRC 前后不变），离屏 CRC 钉值 **2482968047**。
-**明确未实机验证**：真实 GPU 合成、原生弹窗 / 系统托盘 / 全局快捷键 / 原生文件框、IMM32/IBus/Fcitx
-输入法采集——本轮只把契约与降级码钉死，真实后端作为后续批次。
+**第 18 层纯值契约层明确未实机验证**：原生弹窗 / 系统托盘 / 全局快捷键 / 原生文件框、IMM32/IBus/Fcitx
+输入法采集——本轮只把契约与降级码钉死。**真实 GPU 合成已于第 19 层补上并实机验证**（Linux
+EGL surfaceless + Mesa 软件渲染，见 §38.24.7）；原生弹窗 / 系统托盘 / 全局快捷键仍未实机。
 
 #### 38.24.6 宪法破例声明
 
@@ -8479,3 +8481,35 @@ x86_64-pc-windows-gnu 296K），零链接期 GUI/GL 平台符号审计通过。
 三平台 `.a` 仍是零链接期 GUI/GL 平台符号（运行期动态装载符号仅 `dlopen`/`dlsym`/`LoadLibraryA`/`GetProcAddress`）；
 末打 tag、未发 Release。AA 组 5x~5z 四个 demo（scale / virtual / ime / platform）+ AE 组编译器两 flag
 随包回归全绿，第 1~17 层 21 个既有 demo `bad=0` 防漂移验证通过。
+
+#### 38.24.7 真实 GPU 合成后端（v1.21 新增，第 19 层受控破例）
+
+第 18 层的纯值契约层把「GPU 能力查询 + 确定性降级 -2 + 旧 9 个签名」钉死后，第 19 层补上
+**真实 GPU 合成**：用户裁决「继续」（采纳最小破例 + Linux 真合成、其余平台降级）后，
+只放宽一条宪法——**运行时 `dlopen` EGL/GLES 做离屏合成**；其余宪法原样保留：
+
+| 破例项 | 边界 |
+| --- | --- |
+| 只破例一条 | 运行时 `dlopen libEGL.so.1` / `libGLESv2.so.2`，零链接期平台符号（全部 `dlsym` 函数指针，不 include GL/EGL 头） |
+| 旧 ABI 冻结 | 旧 9 个 `dial_gui_gpu_*` 行为一字不动（`gpu_available()` 恒 0、`try_composite()` 恒 -2），仍被 `use_gui_platform.dial` 30 条断言钉死 |
+| 只追加新 API | 6 个 `dial_gui_gpu_real_*`：`available` / `backend` / `caps` / `composite` / `last_exact` / `degrade_reason`，不进 OO 封装层 |
+| 不改像素 | 恒等 shader 读回与源逐字节相等，**绝不写 `p->pixels`**，离屏 CRC 前后相同 |
+| 软降级 | `dlopen` / 初始化 / 合成不精确一律返 `-2`（不写错误槽），绝不因缺库让可执行文件加载失败 |
+| 诚实标注 | Windows/macOS/Termux 条件编译恒降级 -2，**未实机验证**，不假装跨平台通过 |
+| 无反向回调 / 无 GC 破坏 | 合成是纯同步调用，不回调 Dial，不触碰 ARC 对象 |
+
+**技术路径**：EGL 1.5 `eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA)` + GLES2 上下文，
+CPU framebuffer 上传为纹理 → 恒等 shader（`gl_FragColor = texture2D(t,v)`）→ 离屏 FBO →
+`glReadPixels` 读回 `memcmp` 逐字节校验。恒等变换 + 同一 `GL_RGBA` 解释 ⇒ 读回字节恰等于源字节
+（不 swizzle、不翻转）；NPOT 画布用 `GL_CLAMP_TO_EDGE` + `GL_NEAREST` 保证任意尺寸安全。
+Linux headless 无 `/dev/dri` 下靠 Mesa `swrast`/llvmpipe 软件渲染即可跑通。
+
+**验证**：R21 门禁双后端（asm/llvm）跑 `tests/pkg/use_gui_gpu_real.dial`，
+能力可用时实测 `available=1 / backend=egl-surfaceless-sw / caps=7 / composite=0 / exact=1 /
+源 CRC 前后相等（3845929168）`；`DIAL_GUI_GPU_FORCE_DEGRADE=1` 跑
+`use_gui_gpu_real_degrade.dial` 验证 `available=0 / backend=none / composite=-2 / exact=0 /
+源像素不变`。用例**能力自适应**：CI 无软件 GPU 时自动走降级路径、不误报失败。
+三平台 `.a` 重建（x86_64-linux-gnu 440K / aarch64-linux-musl 400K / x86_64-windows-gnu 300K），
+Windows `.a` 经 `nm -u` 确认零 `dlopen`/`dlsym` 依赖（走降级分支）。契约审计从 344 扩到
+**350 个签名**（343 OO + `app_new` + 6 第19层真实GPU），旧签名与 `abi=6`/`version=1.10.0` 不变。
+未打新 tag、未发新 Release（能力随 v1.21 未发布批次积累）。

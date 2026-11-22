@@ -1,0 +1,56 @@
+// gui.dialpkg 第 19 层：真实 GPU 合成后端（EGL surfaceless 软件渲染）。
+// 能力自适应：有软件 GPU 时验证恒等合成逐字节精确 + 源像素 CRC 不漂移；
+// 无软件 GPU（CI / 无 Mesa）时自动验证降级路径，不误报失败。
+// 无论哪条路径，旧 9 个契约 API（use_gui_platform.dial 的 30 条钉值）都不漂移。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    var avail: int = dial_gui_gpu_real_available();
+    print("real_env_available = " + str(avail));
+
+    if (avail == 1) {
+        expect_str(string_from_cstr(dial_gui_gpu_real_backend()), "egl-surfaceless-sw", "real_backend_sw");
+        expect_int(dial_gui_gpu_real_caps(), 7, "real_caps_7");
+        expect_str(string_from_cstr(dial_gui_gpu_real_degrade_reason()), "ok", "real_reason_ok");
+
+        var p: GuiPainter = dial_gui_painter_offscreen(64, 48);
+        expect(!is_null(p), "real_painter_new");
+        expect_int(dial_gui_set_aa(p, 1), 0, "real_aa_off");
+        expect_int(dial_gui_set_pixel(p, 1, 1, 4294967295), 0, "real_px1");
+        expect_int(dial_gui_set_pixel(p, 20, 30, 4278255615), 0, "real_px2");
+        var crc_before: int = dial_gui_painter_crc32(p);
+        var r: int = dial_gui_gpu_real_composite(p);
+        var crc_after: int = dial_gui_painter_crc32(p);
+        expect_int(r, 0, "real_composite_ok");
+        expect_int(dial_gui_gpu_real_last_exact(), 1, "real_exact_1");
+        expect_int(crc_before, crc_after, "real_framebuffer_untouched");
+        print("real_crc = " + str(crc_before));
+        dial_gui_painter_free(p);
+    } else {
+        expect_str(string_from_cstr(dial_gui_gpu_real_backend()), "none", "real_backend_none_unavail");
+        expect_int(dial_gui_gpu_real_caps(), 0, "real_caps_0_unavail");
+        expect(!(string_from_cstr(dial_gui_gpu_real_degrade_reason()) == ""), "real_reason_nonempty_unavail");
+        var q: GuiPainter = dial_gui_painter_offscreen(16, 16);
+        expect_int(dial_gui_gpu_real_composite(q), -2, "real_composite_degraded_unavail");
+        dial_gui_painter_free(q);
+    }
+
+    // 旧 9 个契约 API 行为一字不动（在分支外，两条路径都验证）
+    expect_int(dial_gui_gpu_available(), 0, "old_available_still_0");
+    dial_gui_clear_error();
+
+    print("real_done = true");
+    return 0;
+}

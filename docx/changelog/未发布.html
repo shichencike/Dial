@@ -28,6 +28,7 @@
 <div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
 <ul>
 <li><a href="#未发布">[未发布]</a><ul>
+<li><a href="#added真实-gpu-合成后端">Added（真实 GPU 合成后端）</a></li>
 <li><a href="#addedc--dial-反向回调">Added（C → Dial 反向回调）</a></li>
 <li><a href="#added协作式线程池--协程--async-await">Added（协作式线程池 / 协程 / async-await）</a></li>
 <li><a href="#added">Added</a></li>
@@ -38,6 +39,24 @@
 </ul>
 </div>
 <h2 id="未发布">[未发布]</h2>
+<h3 id="added真实-gpu-合成后端">Added（真实 GPU 合成后端）</h3>
+<ul>
+<li><strong>真实 GPU 合成</strong>：补齐 §41 四项缺口中最后一项。用户裁决「继续」（最小破例 +
+  Linux 真合成、其余平台降级）。只破例「运行时 dlopen EGL/GLES 做离屏合成」一条，
+  其余宪法（零链接期符号、无反向回调、逐像素 CRC 确定、旧 ABI 冻结）原样保留。</li>
+<li>C 层 <code>packages/gui/src/dial_gui_platform.c</code> 追加 6 个 <code>dial_gui_gpu_real_*</code> API
+    （<code>available</code> / <code>backend</code> / <code>caps</code> / <code>composite</code> / <code>last_exact</code> / <code>degrade_reason</code>），
+    <strong>旧 9 个 <code>dial_gui_gpu_*</code> 行为一字不动</strong>（仍被 AA 组 30 条钉值断言覆盖）。</li>
+<li>Linux EGL 1.5 <code>surfaceless</code> + GLES2 恒等 shader：framebuffer 上传纹理 → 离屏 FBO →
+    <code>glReadPixels</code> 读回逐字节校验，<strong>绝不写源像素</strong>（CRC 不漂移）；<code>CLAMP_TO_EDGE</code> +
+    <code>NEAREST</code> 支持 NPOT 任意尺寸；headless 下靠 Mesa 软件渲染可跑通。</li>
+<li>软降级：<code>dlopen</code>/初始化/合成不精确一律返 <code>-2</code>（不写错误槽），缺库不导致加载失败；
+    <code>DIAL_GUI_GPU_FORCE_DEGRADE=1</code> 可强制降级路径；Windows/macOS 条件编译恒 -2（未实机）。</li>
+<li>三平台 <code>.a</code> 重建，Windows <code>.a</code> 零 <code>dlopen</code>/<code>dlsym</code> 依赖；契约审计 344 → <strong>350 个签名</strong>
+    （343 OO + <code>app_new</code> + 6 第19层），<code>abi=6</code>/<code>version=1.10.0</code> 不变。</li>
+<li>门禁 R21：能力自适应双后端用例（有软件 GPU 验证逐字节精确 + 源 CRC 不变，无则验证
+    降级），强制降级双后端用例；README 新增 §38.24.7、§41 未实现清单同步移除本项。</li>
+</ul>
 <h3 id="addedc--dial-反向回调">Added（C → Dial 反向回调）</h3>
 <ul>
 <li><strong>C → Dial 反向回调</strong>：补齐 §41 长期标注的「C → Dial 反向回调」缺口，

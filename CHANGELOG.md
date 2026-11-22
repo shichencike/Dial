@@ -22,6 +22,24 @@
 
 ## [未发布]
 
+### Added（真实 GPU 合成后端）
+
+- **真实 GPU 合成**：补齐 §41 四项缺口中最后一项。用户裁决「继续」（最小破例 +
+  Linux 真合成、其余平台降级）。只破例「运行时 dlopen EGL/GLES 做离屏合成」一条，
+  其余宪法（零链接期符号、无反向回调、逐像素 CRC 确定、旧 ABI 冻结）原样保留。
+  - C 层 `packages/gui/src/dial_gui_platform.c` 追加 6 个 `dial_gui_gpu_real_*` API
+    （`available` / `backend` / `caps` / `composite` / `last_exact` / `degrade_reason`），
+    **旧 9 个 `dial_gui_gpu_*` 行为一字不动**（仍被 AA 组 30 条钉值断言覆盖）。
+  - Linux EGL 1.5 `surfaceless` + GLES2 恒等 shader：framebuffer 上传纹理 → 离屏 FBO →
+    `glReadPixels` 读回逐字节校验，**绝不写源像素**（CRC 不漂移）；`CLAMP_TO_EDGE` +
+    `NEAREST` 支持 NPOT 任意尺寸；headless 下靠 Mesa 软件渲染可跑通。
+  - 软降级：`dlopen`/初始化/合成不精确一律返 `-2`（不写错误槽），缺库不导致加载失败；
+    `DIAL_GUI_GPU_FORCE_DEGRADE=1` 可强制降级路径；Windows/macOS 条件编译恒 -2（未实机）。
+  - 三平台 `.a` 重建，Windows `.a` 零 `dlopen`/`dlsym` 依赖；契约审计 344 → **350 个签名**
+    （343 OO + `app_new` + 6 第19层），`abi=6`/`version=1.10.0` 不变。
+  - 门禁 R21：能力自适应双后端用例（有软件 GPU 验证逐字节精确 + 源 CRC 不变，无则验证
+    降级），强制降级双后端用例；README 新增 §38.24.7、§41 未实现清单同步移除本项。
+
 ### Added（C → Dial 反向回调）
 
 - **C → Dial 反向回调**：补齐 §41 长期标注的「C → Dial 反向回调」缺口，

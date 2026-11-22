@@ -1,0 +1,34 @@
+// 第 19 层真实 GPU 合成：强制软降级路径（DIAL_GUI_GPU_FORCE_DEGRADE=1）。
+// 验证无软件 GPU / 强制降级时能力恒 0、动作恒 -2、reason 可读、源像素不变。
+import "gui";
+
+fn expect(cond: bool, name: string): void {
+    if (cond) { print(name + " = ok"); } else { print(name + " = bad"); }
+}
+fn expect_int(actual: int, want: int, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad " + str(actual) + " want " + str(want)); }
+}
+fn expect_str(actual: string, want: string, name: string): void {
+    if (actual == want) { print(name + " = ok"); }
+    else { print(name + " = bad [" + actual + "]"); }
+}
+
+fn main(): int {
+    expect_int(dial_gui_gpu_real_available(), 0, "deg_available_0");
+    expect_str(string_from_cstr(dial_gui_gpu_real_backend()), "none", "deg_backend_none");
+    expect_int(dial_gui_gpu_real_caps(), 0, "deg_caps_0");
+    expect(!(string_from_cstr(dial_gui_gpu_real_degrade_reason()) == ""), "deg_reason_nonempty");
+
+    var p: GuiPainter = dial_gui_painter_offscreen(16, 16);
+    expect(!is_null(p), "deg_painter_new");
+    var crc_before: int = dial_gui_painter_crc32(p);
+    expect_int(dial_gui_gpu_real_composite(p), -2, "deg_composite_minus2");
+    var crc_after: int = dial_gui_painter_crc32(p);
+    expect_int(crc_before, crc_after, "deg_framebuffer_untouched");
+    expect_int(dial_gui_gpu_real_last_exact(), 0, "deg_exact_0");
+    dial_gui_painter_free(p);
+
+    print("deg_done = true");
+    return 0;
+}

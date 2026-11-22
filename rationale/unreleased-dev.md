@@ -4188,3 +4188,43 @@ Coroutine/Task` 同类位置补齐：LLVM 类型映射 `i8ptr`、默认值 null 
 诊断分别为「入口签名必须是 fn(rawptr<void>, int): int」「state 参数必须是 rawptr<void>」。
 默认 asm-only 与 llvm feature 双构建通过、ldd 零 libLLVM。R20 门禁挂入 `tests/run_tests.sh`，
 用 `DIALC_STDLIB_DIR` 强制源码回退编入新 C 运行时，避免旧缓存掩盖链接问题。
+
+---
+
+#### 真实 GPU 合成后端（v1.21，第 19 层受控破例，补齐 §41 最后一项）
+
+**缘起**：§41 四项「尚未实现」的最后一项。用户裁决「继续」——采纳最小破例（只 dlopen EGL/GLES
+做离屏合成）+ Linux 真合成、其余平台降级。难点不在 shader 本身，而在**不破坏已钉死的纯值契约层**：
+旧 9 个 `dial_gui_gpu_*` 被 `use_gui_platform.dial` 30 条断言钉住（`gpu_available=0`、
+`try_composite=-2`、离屏 CRC 钉值 2482968047），契约审计又硬编码「344 个签名」。因此真实合成
+只能以「追加 6 个新 extern fn、旧签名一字不动」落地，ABI 只增不改。
+
+**可行性 spike（先验证再动工）**：写独立 C spike（artifact/egl_spike.c），无 DISPLAY 下
+`dlopen libEGL.so.1/libGLESv2.so.2` → `eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA)` →
+GLES2 上下文 → 纹理上传 → 恒等 shader → FBO → `glReadPixels`，恒等比较 `fwd_err=0`（逐字节精确）。
+踩坑记录：① `eglGetPlatformDisplayEXT` 未导出，改用 EGL 1.5 core `eglGetPlatformDisplay`；
+② `glVertexAttribPointer` / `glFramebufferTexture2D` 的 typedef 参数个数写少（stride / level）；
+③ FBO attach 输出纹理后必须重绑输入纹理，否则 shader 采样空纹理读回全白。
+
+**C 层实现（dial_gui_platform.c 第 19 层段）**：延续 spike 的 dlsym 全函数指针（零链接期符号、
+不 include GL/EGL 头）。新增 NPOT 安全处理——GUI 画布尺寸任意（64×48 等），spike 的 4×2 是 POT
+未覆盖，必须 `GL_TEXTURE_WRAP_S/T = CLAMP_TO_EDGE` + `GL_NEAREST`。错误槽仍走 `gui_core_ok/set_err`，
+合成不精确/无库一律软降级 -2 不写错误槽。宏拼接踩坑：`DIAL_GL_FN(name)` 须生成 `fn_gl##name`
+（首版漏 `gl` 前缀致 27 处 undeclared）；typedef 名须与宏拼接一致（`PFN_glGenTextures` 非 `PFN_glGenTex`）。
+
+**C 级快速验证（先于整包构建）**：直接链接新 .o + 两枚 stub，手动构造 64×48 ARGB32 framebuffer，
+实测 `available=1 / backend=egl-surfaceless-sw / caps=7 / composite=0 / exact=1 / crc_same=1`；
+`DIAL_GUI_GPU_FORCE_DEGRADE=1` 下 `available=0 / composite=-2 / crc_same=1`。这一步把「shader 逻辑」
+与「整包工具链」解耦，避免带着编译错误跑 build.sh。
+
+**整包链路**：`build.sh` zig cc 三平台交叉编译（x86_64-linux-gnu 440K / aarch64-linux-musl 400K /
+x86_64-windows-gnu 300K）→ `dialc pack` → `dialc install`。Windows `.a` 用 `nm -u` 确认零
+`dlopen`/`dlsym` 依赖（条件编译走降级分支，诚实标注未实机）。契约审计从硬编码 344 改为 350，
+新 6 个 API 按 `app_new` 同类从 OO 覆盖审计中排除（`grep -v '^dial_gui_gpu_real_'`），343 个方法
+仍精确覆盖 343 个旧 extern fn。
+
+**端到端双后端验证**：`use_gui_gpu_real.dial` 能力自适应（有软件 GPU 验证 `composite=0 /
+exact=1 / 源 CRC 3845929168 前后相等`；无则验证降级路径不误报 CI），`use_gui_gpu_real_degrade.dial`
+用 `DIAL_GUI_GPU_FORCE_DEGRADE=1` 验证 `composite=-2 / exact=0 / 源像素不变`。asm 与 llvm 双后端
+stdout 逐字一致，旧 API `gpu_available=0` 不漂移。R21 门禁挂入 `tests/run_tests.sh`。
+README 新增 §38.24.7、§41 未实现清单移除本项、三处 344→350 计数同步。

@@ -3232,6 +3232,51 @@ for _be in llvm asm; do
 done
 unset DIALC_STDLIB_DIR
 
+# R21) 第 19 层真实 GPU 合成（v1.21）：Linux EGL surfaceless + GLES2 恒等 shader
+#      离屏合成，逐字节精确且源像素 CRC 不漂移；其余平台/无软件 GPU 软降级 -2。
+#      能力自适应：有软件 GPU 验证真实合成关键断言，无则验证降级路径，不误报 CI。
+#      pack/install 用当前 lib/（已含新 C 运行时），旧 9 个 API 行为由 AA 组钉值。
+echo "  -- R21) 真实 GPU 合成双后端一致性（v1.21） --"
+"$DIALC" pack packages/gui -o "${TMP}/r21_gui.dialpkg" >/dev/null 2>&1 \
+    && "$DIALC" install "${TMP}/r21_gui.dialpkg" >/dev/null 2>&1 \
+    || rbad "R21 gui 包 pack/install 失败"
+
+for _be in llvm asm; do
+    ${DIALC} build tests/pkg/use_gui_gpu_real.dial --backend $_be -o "${TMP}/r21_real_${_be}" >/dev/null 2>&1 \
+        || { rbad "R21 $_be 正向用例编译失败"; continue; }
+    _r21_real="$(env -u DISPLAY timeout 30 "${TMP}/r21_real_${_be}" 2>/dev/null | grep -vE '^ℹ️')"
+    _r21_real_bad=$(printf '%s\n' "$_r21_real" | grep -c ' = bad' || true)
+    if [ "$_r21_real_bad" -eq 0 ] && printf '%s' "$_r21_real" | grep -qF 'real_done = true'; then
+        if printf '%s' "$_r21_real" | grep -qF 'real_env_available = 1'; then
+            if printf '%s' "$_r21_real" | grep -qF 'real_composite_ok = ok' \
+               && printf '%s' "$_r21_real" | grep -qF 'real_exact_1 = ok' \
+               && printf '%s' "$_r21_real" | grep -qF 'real_framebuffer_untouched = ok'; then
+                rpass "R21 真实合成（$_be，软件 GPU 可用）：逐字节精确·源像素 CRC 不漂移"
+            else
+                rbad "R21 真实合成（$_be）关键断言失败: [$_r21_real]"
+            fi
+        else
+            rpass "R21 真实合成（$_be，无软件 GPU）：能力自适应降级路径通过"
+        fi
+    else
+        rbad "R21 正向（$_be）断言失败: [$_r21_real]"
+    fi
+done
+
+for _be in llvm asm; do
+    ${DIALC} build tests/pkg/use_gui_gpu_real_degrade.dial --backend $_be -o "${TMP}/r21_deg_${_be}" >/dev/null 2>&1 \
+        || { rbad "R21 $_be 降级用例编译失败"; continue; }
+    _r21_deg="$(env -u DISPLAY DIAL_GUI_GPU_FORCE_DEGRADE=1 timeout 30 "${TMP}/r21_deg_${_be}" 2>/dev/null | grep -vE '^ℹ️')"
+    _r21_deg_bad=$(printf '%s\n' "$_r21_deg" | grep -c ' = bad' || true)
+    if [ "$_r21_deg_bad" -eq 0 ] && printf '%s' "$_r21_deg" | grep -qF 'deg_done = true' \
+       && printf '%s' "$_r21_deg" | grep -qF 'deg_composite_minus2 = ok' \
+       && printf '%s' "$_r21_deg" | grep -qF 'deg_framebuffer_untouched = ok'; then
+        rpass "R21 强制软降级（$_be）：能力恒 0·composite=-2·源像素不变"
+    else
+        rbad "R21 降级（$_be）断言失败: [$_r21_deg]"
+    fi
+done
+
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
@@ -5240,17 +5285,19 @@ cp tests/oo/use_gui_oo.dial "$AD_DIR/"
     || { adbad "gui.dialpkg 打包或安装失败（AD 组）"; tail -6 "${TMP}/ad_pack.log" "${TMP}/ad_install.log"; }
 
 # 1) 契约防漂移审计：343 个方法恰好覆盖 343 个 extern fn（入口 app_new 除外），
-#    封装层不含任何 extern fn 声明（否则与 .diali 撞名），gui.diali 仍是 344 个签名。
+#    封装层不含任何 extern fn 声明（否则与 .diali 撞名）。gui.diali 现 350 个签名：
+#    343 OO 契约 + app_new + 6 个第19层真实 GPU 层（dial_gui_gpu_real_*，不进 OO
+#    封装层，按 app_new 同类从审计中排除）。旧 344 个签名与 ABI 一字不动。
 ad_diag=$(grep '^extern fn' packages/gui/gui.diali | sed -E 's/^extern fn ([A-Za-z0-9_]+).*/\1/' \
-          | grep -v '^dial_gui_app_new$' | sort -u)
+          | grep -v '^dial_gui_app_new$' | grep -v '^dial_gui_gpu_real_' | sort -u)
 ad_refs=$(grep '^    fn ' packages/gui/src/gui_oo.dial | grep -oE 'dial_gui_[A-Za-z0-9_]+' | sort -u)
 ad_methods=$(grep -c '^    fn ' packages/gui/src/gui_oo.dial)
 ad_diag_n=$(echo "$ad_diag" | wc -l)
 ad_iface_n=$(grep -c '^extern fn' packages/gui/gui.diali)
 ad_oo_decl=$(grep -c '^extern fn' packages/gui/src/gui_oo.dial || true)
-if [ "$ad_methods" -eq 343 ] && [ "$ad_diag_n" -eq 343 ] && [ "$ad_iface_n" -eq 344 ] \
+if [ "$ad_methods" -eq 343 ] && [ "$ad_diag_n" -eq 343 ] && [ "$ad_iface_n" -eq 350 ] \
    && [ "$ad_oo_decl" -eq 0 ] && [ "$ad_diag" = "$ad_refs" ]; then
-    adpass "契约审计：343 个 impl 方法全覆盖 343 个 extern fn、gui.diali 共 344 个签名、封装层零 extern 声明（ABI 不变）"
+    adpass "契约审计：343 个 impl 方法全覆盖 343 个 extern fn、gui.diali 共 350 个签名（343 OO + app_new + 6 第19层真实GPU，旧 344 不变）、封装层零 extern 声明（ABI 不变）"
 else
     adbad "契约审计不通过：methods=$ad_methods diag=$ad_diag_n iface=$ad_iface_n oo_decl=$ad_oo_decl"
     diff <(echo "$ad_diag") <(echo "$ad_refs") | head -20

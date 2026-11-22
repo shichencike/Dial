@@ -75,6 +75,7 @@
 <li><a href="#跨工作区全量模块图补齐-lsp-长期缺口">跨工作区全量模块图：补齐 LSP 长期缺口</a><ul>
 <li><a href="#协作式线程池--协程--async-awaitv121补齐-41无线程池无异步缺口">协作式线程池 / 协程 / async-await（v1.21，补齐 §41「无线程池/无异步」缺口）</a></li>
 <li><a href="#c--dial-反向回调v121推翻-gui绝不反向回调宪法">C → Dial 反向回调（v1.21，推翻 GUI「绝不反向回调」宪法）</a></li>
+<li><a href="#真实-gpu-合成后端v121第-19-层受控破例补齐-41-最后一项">真实 GPU 合成后端（v1.21，第 19 层受控破例，补齐 §41 最后一项）</a></li>
 </ul>
 </li>
 </ul>
@@ -4221,7 +4222,39 @@ Coroutine/Task</code> 同类位置补齐：LLVM 类型映射 <code>i8ptr</code>�
 双后端 stdout 逐字一致；两个负向（入口签名 <code>fn(int):int</code>、state 传 <code>int</code>）双后端均编译期拒绝，
 诊断分别为「入口签名必须是 fn(rawptr<void>, int): int」「state 参数必须是 rawptr<void>」。
 默认 asm-only 与 llvm feature 双构建通过、ldd 零 libLLVM。R20 门禁挂入 <code>tests/run_tests.sh</code>，
-用 <code>DIALC_STDLIB_DIR</code> 强制源码回退编入新 C 运行时，避免旧缓存掩盖链接问题。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
+用 <code>DIALC_STDLIB_DIR</code> 强制源码回退编入新 C 运行时，避免旧缓存掩盖链接问题。</p>
+<hr />
+<h4 id="真实-gpu-合成后端v121第-19-层受控破例补齐-41-最后一项">真实 GPU 合成后端（v1.21，第 19 层受控破例，补齐 §41 最后一项）</h4>
+<p><strong>缘起</strong>：§41 四项「尚未实现」的最后一项。用户裁决「继续」——采纳最小破例（只 dlopen EGL/GLES
+做离屏合成）+ Linux 真合成、其余平台降级。难点不在 shader 本身，而在<strong>不破坏已钉死的纯值契约层</strong>：
+旧 9 个 <code>dial_gui_gpu_*</code> 被 <code>use_gui_platform.dial</code> 30 条断言钉住（<code>gpu_available=0</code>、
+<code>try_composite=-2</code>、离屏 CRC 钉值 2482968047），契约审计又硬编码「344 个签名」。因此真实合成
+只能以「追加 6 个新 extern fn、旧签名一字不动」落地，ABI 只增不改。</p>
+<p><strong>可行性 spike（先验证再动工）</strong>：写独立 C spike（artifact/egl_spike.c），无 DISPLAY 下
+<code>dlopen libEGL.so.1/libGLESv2.so.2</code> → <code>eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA)</code> →
+GLES2 上下文 → 纹理上传 → 恒等 shader → FBO → <code>glReadPixels</code>，恒等比较 <code>fwd_err=0</code>（逐字节精确）。
+踩坑记录：① <code>eglGetPlatformDisplayEXT</code> 未导出，改用 EGL 1.5 core <code>eglGetPlatformDisplay</code>；
+② <code>glVertexAttribPointer</code> / <code>glFramebufferTexture2D</code> 的 typedef 参数个数写少（stride / level）；
+③ FBO attach 输出纹理后必须重绑输入纹理，否则 shader 采样空纹理读回全白。</p>
+<p><strong>C 层实现（dial_gui_platform.c 第 19 层段）</strong>：延续 spike 的 dlsym 全函数指针（零链接期符号、
+不 include GL/EGL 头）。新增 NPOT 安全处理——GUI 画布尺寸任意（64×48 等），spike 的 4×2 是 POT
+未覆盖，必须 <code>GL_TEXTURE_WRAP_S/T = CLAMP_TO_EDGE</code> + <code>GL_NEAREST</code>。错误槽仍走 <code>gui_core_ok/set_err</code>，
+合成不精确/无库一律软降级 -2 不写错误槽。宏拼接踩坑：<code>DIAL_GL_FN(name)</code> 须生成 <code>fn_gl##name</code>
+（首版漏 <code>gl</code> 前缀致 27 处 undeclared）；typedef 名须与宏拼接一致（<code>PFN_glGenTextures</code> 非 <code>PFN_glGenTex</code>）。</p>
+<p><strong>C 级快速验证（先于整包构建）</strong>：直接链接新 .o + 两枚 stub，手动构造 64×48 ARGB32 framebuffer，
+实测 <code>available=1 / backend=egl-surfaceless-sw / caps=7 / composite=0 / exact=1 / crc_same=1</code>；
+<code>DIAL_GUI_GPU_FORCE_DEGRADE=1</code> 下 <code>available=0 / composite=-2 / crc_same=1</code>。这一步把「shader 逻辑」
+与「整包工具链」解耦，避免带着编译错误跑 build.sh。</p>
+<p><strong>整包链路</strong>：<code>build.sh</code> zig cc 三平台交叉编译（x86_64-linux-gnu 440K / aarch64-linux-musl 400K /
+x86_64-windows-gnu 300K）→ <code>dialc pack</code> → <code>dialc install</code>。Windows <code>.a</code> 用 <code>nm -u</code> 确认零
+<code>dlopen</code>/<code>dlsym</code> 依赖（条件编译走降级分支，诚实标注未实机）。契约审计从硬编码 344 改为 350，
+新 6 个 API 按 <code>app_new</code> 同类从 OO 覆盖审计中排除（<code>grep -v '^dial_gui_gpu_real_'</code>），343 个方法
+仍精确覆盖 343 个旧 extern fn。</p>
+<p><strong>端到端双后端验证</strong>：<code>use_gui_gpu_real.dial</code> 能力自适应（有软件 GPU 验证 <code>composite=0 /
+exact=1 / 源 CRC 3845929168 前后相等</code>；无则验证降级路径不误报 CI），<code>use_gui_gpu_real_degrade.dial</code>
+用 <code>DIAL_GUI_GPU_FORCE_DEGRADE=1</code> 验证 <code>composite=-2 / exact=0 / 源像素不变</code>。asm 与 llvm 双后端
+stdout 逐字一致，旧 API <code>gpu_available=0</code> 不漂移。R21 门禁挂入 <code>tests/run_tests.sh</code>。
+README 新增 §38.24.7、§41 未实现清单移除本项、三处 344→350 计数同步。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">

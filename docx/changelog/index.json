@@ -8,7 +8,7 @@
       "label": "[未发布]",
       "date": "",
       "note": "",
-      "topic": "推翻 GUI 层「绝不反向回调」旧宪法（用户明确裁决），但保留内存底线： 仍无闭包（具名函数 + 显式 rawptr<void> state…",
+      "topic": "Linux 真合成、其余平台降级）。",
       "file": "未发布.html",
       "newer": null,
       "older": "v1.20"

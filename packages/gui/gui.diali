@@ -1366,3 +1366,18 @@ extern fn dial_gui_native_file_dialog(mode: int): int;
 extern fn dial_gui_global_hotkey_register(id: int, mods: int, key: int): int;
 extern fn dial_gui_platform_degrade_code(): int;
 
+// ---- 第 19 层：真实 GPU 合成后端（受控破例，只追加新 API，旧 9 个一字不动）--
+// Linux 运行时 dlopen libEGL.so.1 / libGLESv2.so.2，EGL 1.5 surfaceless +
+// GLES2 恒等 shader 离屏合成：上传 framebuffer → FBO → 读回逐字节校验，
+// 绝不写源像素（CRC 不漂移）。无软件 GPU / 设 DIAL_GUI_GPU_FORCE_DEGRADE=1
+// 时软降级 -2（不写错误槽）；Windows/macOS/Termux 条件编译恒降级 -2（未实机）。
+// 能力位 caps: bit0=纹理上传 bit1=FBO读回 bit2=恒等shader。
+// last_exact: 上次 composite 是否逐字节精确（1/0）。
+// 这 6 个是新契约，不进 gui_oo.dial 封装层（契约审计中作为第19层排除）。
+extern fn dial_gui_gpu_real_available(): int;
+extern fn dial_gui_gpu_real_backend(): rawptr<byte>;
+extern fn dial_gui_gpu_real_caps(): int;
+extern fn dial_gui_gpu_real_composite(p: GuiPainter): int;
+extern fn dial_gui_gpu_real_last_exact(): int;
+extern fn dial_gui_gpu_real_degrade_reason(): rawptr<byte>;
+
