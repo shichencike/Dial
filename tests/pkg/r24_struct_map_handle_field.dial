@@ -1,0 +1,21 @@
+// R24 正向：含句柄字段（string）的结构体可作 map 值。
+// v1.21 落地字段级 ARC：KV_STRUCT_ARC 值装箱为带 desc 表的 RC box，
+// 表 put/get/remove/get_or 全通路按字段结算，双后端逐字一致、无泄漏。
+struct Rec {
+    id: int = 0,
+    name: string = "x",
+}
+
+fn main(): int {
+    var m: map<string, Rec> = new_kv_map();
+    m.put("a", Rec{id: 1, name: "alpha"});
+    m.put("b", Rec{id: 2, name: "beta"});
+    var r: Rec = m.get("a");
+    print(r.id);
+    print(r.name);
+    var r2: Rec = m.get_or("z", Rec{id: 9, name: "default"});
+    print(r2.id);
+    print(r2.name);
+    print(m.size());
+    return 0;
+}

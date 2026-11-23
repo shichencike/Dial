@@ -1319,11 +1319,14 @@ pub fn type_of<V>(
                     } else {
                         kv_type_from_kind(vk)?
                     };
-                    // 结构体值：kind 必须是 KV_STRUCT(6)，且结构体须已定义、字段全为标量。
+                    // 结构体值：kind 为 KV_STRUCT(6)（字段全标量）或 KV_STRUCT_ARC(7)
+                    // （含句柄字段，v1.21 字段级 ARC），由 desugar_map_arc_kind 按字段修正。
                     if let Type::Struct(ref sn) = vt {
-                        if vk != 6 {
+                        let expected_vk = if struct_has_arc_fields(sn, structs) { 7 } else { 6 };
+                        if vk != expected_vk {
                             return Err(DialcError::new(
-                                "内部错误：new_kv_map 的结构体值 kind 与 KV_STRUCT 不符", 0, 0,
+                                format!("内部错误：new_kv_map 结构体值 kind={} 与期望 {} 不符", vk, expected_vk),
+                                0, 0,
                             ));
                         }
                         if !structs.contains_key(sn) {
@@ -1332,10 +1335,10 @@ pub fn type_of<V>(
                                 0, 0,
                             ));
                         }
-                        if !struct_has_only_scalar_fields(sn, structs) {
+                        if !struct_is_boxable(sn, structs) {
                             return Err(DialcError::new(
                                 format!(
-                                    "语义错误：结构体 '{}' 含句柄字段，暂不能作 map 值（装箱需字段级 ARC）",
+                                    "语义错误：结构体 '{}' 含不可装箱字段（如裸指针 / C ABI struct），不能作 map 值",
                                     sn
                                 ),
                                 0, 0,
@@ -3044,7 +3047,7 @@ fn is_array_elem_type(t: &Type, structs: &StructTable) -> bool {
             | Type::Error
             | Type::Channel(_)
             | Type::Opaque(_) => true,
-        Type::Struct(name) => struct_has_only_scalar_fields(name, structs),
+        Type::Struct(name) => struct_is_boxable(name, structs),
         _ => false,
     }
 }
@@ -3060,6 +3063,38 @@ fn struct_has_only_scalar_fields(name: &str, structs: &StructTable) -> bool {
             .iter()
             .all(|(_, ft)| matches!(ft, Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char)),
         // 未知结构体：不算通过（保守拒绝，由后续查表给出更具体的诊断）
+        None => false,
+    }
+}
+
+/// 字段是否是需要字段级 ARC 的句柄类型（v1.21）。
+/// 与 ir.rs::rc_kind / codegen_asm.rs::handle_arc_kind 的句柄集合保持一致。
+fn is_arc_handle_field(t: &Type) -> bool {
+    matches!(
+        t,
+        Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::Set(_)
+            | Type::KvMap(..) | Type::Error | Type::Channel(_)
+    )
+}
+
+/// 结构体是否「可安全装箱进容器」（v1.21 第一版）：字段要么是标量，要么是
+/// 需 ARC 的句柄。C ABI struct / rawptr / 函数指针 / 嵌套 struct 一律拒绝——
+/// desc 描述符表是扁平的，无法表达嵌套字段的相对偏移（那是后续增强）。
+fn struct_is_boxable(name: &str, structs: &StructTable) -> bool {
+    match structs.get(name) {
+        Some((fields, _)) => fields.iter().all(|(_, ft)| {
+            matches!(ft, Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char)
+                || is_arc_handle_field(ft)
+        }),
+        None => false,
+    }
+}
+
+/// 结构体是否含「需要字段级 ARC」的直接句柄字段——决定用 KV_STRUCT_ARC(7) /
+/// DIAL_ELEM_BOXARC(7) 而非标量的 6/1，并决定是否生成 desc 表。
+fn struct_has_arc_fields(name: &str, structs: &StructTable) -> bool {
+    match structs.get(name) {
+        Some((fields, _)) => fields.iter().any(|(_, ft)| is_arc_handle_field(ft)),
         None => false,
     }
 }
@@ -3613,7 +3648,7 @@ fn kvmap_method_type<V>(
         "get_or" => {
             let scalar_v = matches!(v, Type::Int | Type::Float | Type::Bool | Type::Byte | Type::Char);
             let struct_v = match v {
-                Type::Struct(name) => struct_has_only_scalar_fields(name, structs),
+                Type::Struct(name) => struct_is_boxable(name, structs),
                 _ => false,
             };
             if !scalar_v && !struct_v && !matches!(v, Type::String) {
@@ -3684,6 +3719,72 @@ fn kvmap_method_type<V>(
 /// 进入函数时 retain、函数返回时由编译器插入 release（见 codegen 的临时数组结算）。
 /// Dial 自己定义的函数**不允许异构变参**：数组字面量的元素类型一致性检查会拦下
 /// `f(1, "a")` 这类调用，并在诊断里引导用户显式使用结构体。
+/// v1.21 字段级 ARC：把「值类型含句柄字段 struct」的 map 值 kind 从 KV_STRUCT(6)
+/// 改写为 KV_STRUCT_ARC(7)。parser 无条件把 struct 编码为 6（它不持有 struct 表），
+/// 这里在语义分析前拿到完整 struct 定义后按字段内容修正。new_kv_map 只能出现在
+/// 带 map<K,V> 标注的 var 声明里（type_of 强制），故只需遍历 VarDecl.value。
+fn desugar_map_arc_kind(program: &mut Program) {
+    let struct_table: StructTable = program
+        .structs
+        .iter()
+        .map(|s| (s.name.clone(), (s.fields.clone(), s.field_defaults.clone())))
+        .collect();
+    for f in program.functions.iter_mut() {
+        desugar_map_arc_stmts(&mut f.body, &struct_table);
+    }
+}
+
+fn desugar_map_arc_stmts(stmts: &mut [Stmt], structs: &StructTable) {
+    for s in stmts.iter_mut() {
+        // new_kv_map 必在 VarDecl.value，且 parser 补的实参是 [kk, vk, struct_name]。
+        if let Stmt::VarDecl { value, .. } = s {
+            if let Expr::Call(name, args) = value {
+                if name == "new_kv_map" && args.len() == 3 {
+                    let sn = match &args[2] { Expr::StringLit(x) => Some(x.clone()), _ => None };
+                    if let Some(sn) = sn {
+                        if struct_has_arc_fields(&sn, structs) {
+                            if let Expr::IntLit(vk) = &mut args[1] {
+                                if *vk == 6 { *vk = 7; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 递归进入子语句块
+        desugar_map_arc_stmt_children(s, structs);
+    }
+}
+
+fn desugar_map_arc_stmt_children(s: &mut Stmt, structs: &StructTable) {
+    match s {
+        Stmt::If { then_branch, else_branch, .. } => {
+            desugar_map_arc_stmts(then_branch, structs);
+            if let Some(eb) = else_branch { desugar_map_arc_stmts(eb, structs); }
+        }
+        Stmt::While { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::ForEach { body, .. }
+        | Stmt::ForEachMap { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::With { body, .. } => desugar_map_arc_stmts(body, structs),
+        Stmt::Match { arms, .. } => {
+            for arm in arms.iter_mut() { desugar_map_arc_stmts(&mut arm.body, structs); }
+        }
+        Stmt::Defer(inner, ..) => desugar_map_arc_stmts(std::slice::from_mut(inner.as_mut()), structs),
+        Stmt::Try { body, catch, .. } => {
+            desugar_map_arc_stmts(body, structs);
+            desugar_map_arc_stmts(&mut catch.body, structs);
+        }
+        Stmt::Select { arms, default_body, timeout_body, .. } => {
+            for arm in arms.iter_mut() { desugar_map_arc_stmts(&mut arm.body, structs); }
+            if let Some(db) = default_body { desugar_map_arc_stmts(db, structs); }
+            if let Some(tb) = timeout_body { desugar_map_arc_stmts(tb, structs); }
+        }
+        _ => {}
+    }
+}
+
 fn desugar_varargs(program: &mut Program) -> Result<()> {
     // 结构体表（供变参元素类型校验：结构体作变参元素本期只放开标量字段结构体）
     let struct_table: StructTable = program
@@ -3946,6 +4047,9 @@ pub fn analyze(
     // v1.03：同类型变参先做 AST 脱糖。之后的类型检查 / LSP / codegen 都只看得见
     // 一个普通的 T[] 形参 —— 编译产物里没有任何变参专用的运行期机制。
     desugar_varargs(program)?;
+    // v1.21 字段级 ARC：修正含句柄字段 struct 的 map 值 kind（6 → 7）。
+    // 必须在类型检查前完成：type_of 读到 7 后才能还原出正确的 KvMap 类型。
+    desugar_map_arc_kind(program);
 
     // 0) 保留名校验（函数名与结构体名都不能撞内建）
     for f in &program.functions {
@@ -4220,7 +4324,7 @@ fn check_type_wellformed(
             // 未命中返回空指针，由编译器还原为零值结构体（不存在所有权移交歧义）。
             let ok_v = matches!(v.as_ref(), Type::Int | Type::Float | Type::Bool | Type::Char | Type::Byte | Type::String)
                 || match v.as_ref() {
-                    Type::Struct(name) => struct_has_only_scalar_fields(name, structs),
+                    Type::Struct(name) => struct_is_boxable(name, structs),
                     _ => false,
                 };
             if ok_k && ok_v {

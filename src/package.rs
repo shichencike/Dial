@@ -50,7 +50,11 @@ use crate::error::{DialcError, Result};
 /// 的程序才产生调用），但判据不变：装 abi=5 旧包的用户一旦写了 `eprint(...)`，
 /// 就会撞上 `undefined symbol: dial_eprint_int`。因此递增到 6，让旧包在链接期
 /// 被明确拦下并给出重装指引，而不是把 ABI 不匹配藏成一句难懂的链接错误。
-pub const STDLIB_ABI: u64 = 6;
+/// abi=7（v1.21 字段级 ARC）：新增 runtime 符号 `dial_struct_box_arc` /
+/// `dial_struct_box_arc_release`，并扩展数组元素 kind（DIAL_ELEM_BOXARC=7）
+/// 与 map 值 kind（KV_STRUCT_ARC=7）。装 abi=6 旧包的用户一旦让含句柄字段
+/// struct 进容器，就会撞上 `undefined symbol: dial_struct_box_arc`，故递增拦下。
+pub const STDLIB_ABI: u64 = 7;
 
 /// 全局包缓存根目录：`~/.dial/packages/`（Windows：`%USERPROFILE%\.dial\packages\`）。
 ///

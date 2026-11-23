@@ -65,7 +65,11 @@ fn rc_kind(dt: &Type) -> Option<ArcKind> {
         Type::Bytes => Some(ArcKind::Bytes),
         Type::Array(_) => Some(ArcKind::Array),
         Type::Error => Some(ArcKind::Error),
-        Type::Map | Type::KvMap(..) | Type::Set(_) | Type::Channel(_) => Some(ArcKind::Generic),
+        // v1.21：KvMap 必须走专用 release——通用 dial_rc_release 只减 buffer 的 rc，
+        // 不逐条目释放里面的值装箱（map<string,Struct> 的 ARC box 会泄漏）。
+        // 与 LLVM release_value 的 Type::KvMap => dial_kvmap_release 对齐。
+        Type::KvMap(..) => Some(ArcKind::KvMap),
+        Type::Map | Type::Set(_) | Type::Channel(_) => Some(ArcKind::Generic),
         _ => None,
     }
 }
@@ -640,7 +644,9 @@ impl<'a> Lower<'a> {
         let mut items: Vec<&Local> = scope.values().collect();
         items.sort_by_key(|l| l.ptr);
         for l in items.iter().rev() {
-            if l.is_handle && !l.moved {
+            // struct 局部（含句柄字段）虽 is_handle=false，但必须走字段级释放。
+            let is_struct = matches!(l.dt, Type::Struct(_));
+            if (l.is_handle || is_struct) && !l.moved {
                 if let Some(k) = rc_kind(&l.dt) {
                     self.emit(IrInst::RcRelease { ptr: l.ptr, kind: k });
                 } else if let Type::Struct(n) = &l.dt {
@@ -669,7 +675,8 @@ impl<'a> Lower<'a> {
         let mut items: Vec<(VReg, Option<ArcKind>, Option<String>)> = Vec::new();
         for si in down_to..self.scopes.len() {
             for l in self.scopes[si].values() {
-                if l.is_handle && !l.moved {
+                let is_struct = matches!(l.dt, Type::Struct(_));
+                if (l.is_handle || is_struct) && !l.moved {
                     let sn = if let Type::Struct(n) = &l.dt { Some(n.clone()) } else { None };
                     items.push((l.ptr, rc_kind(&l.dt), sn));
                 }
@@ -970,9 +977,15 @@ impl<'a> Lower<'a> {
                     self.emit(IrInst::DebugVar { name: name.clone(), slot, line: *line as u32, ty: dt.clone() });
                 }
                 let (v, is_copy) = self.lower_expr(value, &dt)?;
-                if let Type::Struct(_) = &dt {
+                if let Type::Struct(sn) = &dt {
                     // 值语义结构体：StructLit 返回一块临时栈区地址，整体拷进变量槽。
                     self.emit_memcpy(slot, v, self.struct_byte_size(&dt));
+                    // v1.21 字段级 ARC：对齐 LLVM gen_var_decl（2869）——borrowed 源
+                    // （get/at/Var/Field）绑到变量时字段 +1（值拷贝不带所有权）。
+                    // StructLit 例外：构造时字段已各自 retain，这里不再 +1。
+                    if !*move_hint && yields_borrowed_ref(value) {
+                        self.emit(IrInst::StructRetain { ptr: slot, struct_name: sn.clone() });
+                    }
                 } else {
                     // M7-e3ap：对齐 LLVM 后端 retain_if_borrowed（codegen.rs:1970）。
                     // lower_expr 返回的 is_copy 对 Expr::Var/Field 为 true，但对
@@ -1155,7 +1168,7 @@ impl<'a> Lower<'a> {
                 //     所有权应当移交给数组，故此处归还一份，否则每轮循环泄漏一次引用。
                 if matches!(&vdt, Type::Struct(_)) {
                     // v1.10 B6：struct 值 coerce 时无条件新建 box，array_set 又 +1，归还本地这份。
-                    self.release_box(bits.clone());
+                    self.release_box(bits.clone(), &vdt);
                 } else if let Some(k) = rc_kind(&vdt) {
                     if !yields_borrowed_ref(value) {
                         // RcRelease 作用于「槽地址」（内部 load 出句柄值再 release），
@@ -1924,7 +1937,7 @@ impl<'a> Lower<'a> {
                         None => Type::Int,
                     },
                 };
-                let kind = builtin::array_elem_kind(&elem_ty);
+                let kind = self.array_elem_kind_arc(&elem_ty);
                 let mut h = self.new_reg(IrType::Handle);
                 self.emit(IrInst::Call { dst: Some(h), func: "dial_array_new".to_string(),
                     args: vec![Value::Imm(Imm::I64(kind as i64))], arg_tys: vec![IrType::I64],
@@ -1941,9 +1954,17 @@ impl<'a> Lower<'a> {
                     // push 会为元素 retain 一份（数组成为持有者）。字面量自带的那一份
                     // 所有权本应直接移交数组，故此处归还——否则每个字面量元素泄漏一份引用。
                     if matches!(&ety, Type::Struct(_)) {
+                        // v1.21：borrowed struct（变量）的字段仍由变量持有，box 要独立
+                        // 存活须对 payload 字段补 +1，否则变量退出时字段被提前释放。
+                        if let Type::Struct(sn) = &ety {
+                            if self.struct_needs_arc(sn) && yields_borrowed_ref(el) {
+                                let bp = self.bits_as_ptr(bits.clone());
+                                self.emit(IrInst::StructRetain { ptr: bp.as_reg(), struct_name: sn.clone() });
+                            }
+                        }
                         // v1.10 B6：struct 值 coerce 时无条件新建 box（rc=1），push 又 +1，
                         // 归还本地这份（对齐 LLVM sink_elem_after_retain）。
-                        self.release_box(bits.clone());
+                        self.release_box(bits.clone(), &ety);
                     } else if let Some(k) = rc_kind(&ety) {
                         if !yields_borrowed_ref(el) {
                             let tmp = self.emit_alloca(reg_ir(&ety));
@@ -2451,11 +2472,22 @@ impl<'a> Lower<'a> {
                         }
                     }
                 } else if matches!(v.as_ref(), Type::Struct(_)) {
-                    // v1.10 B6：struct 默认值 coerce 时新建 box（rc=1）；C 侧 get_or 对
-                    // struct 不 retain，未命中返回的就是这份默认 box。解箱按值拷出后归还它
-                    // （命中时归还的是那份未被使用的默认 box，同样正确）。对齐 codegen.rs:6111。
+                    // v1.21 字段级 ARC：get_or 的 struct 返回值与 get 同样是**借用**——
+                    // 命中时 C 侧 dial_kvmap_get_or 对 ARC struct 不做 retain，返回的 bits
+                    // 指向表内 box；解箱副本 out 的句柄字段是与表内 box 共享的浅拷贝。
+                    // 绑定变量的作用域退出会 StructRelease 这些字段，若不在此 +1，就会把
+                    // 表内 box 的字段减到 0 → 提前 free → map 销毁（dial_kvmap_release
+                    // 逐条释放）二次释放（heap-use-after-free / double free）。
+                    // 未命中时返回 default 的 box：先 +1 让副本独立持有字段，再释放 default
+                    // box（其字段 -1），字段引用从 default 移交给返回值，计数平衡。
+                    // 对齐 LLVM codegen.rs get_or 分支的 retain_struct_fields。
+                    self.emit(IrInst::StructRetain {
+                        ptr: out.as_reg(),
+                        struct_name: struct_name_of(v.as_ref()),
+                    });
+                    // v1.10 B6：归还默认实参那份装箱（未命中时其字段已移交上面的副本）。
                     if let Some(def_bits) = coerced.get(1) {
-                        self.release_box(def_bits.clone());
+                        self.release_box(def_bits.clone(), v.as_ref());
                     }
                 }
             }
@@ -2466,7 +2498,7 @@ impl<'a> Lower<'a> {
         if method == "remove" {
             if let Type::KvMap(_, v) = &od {
                 if matches!(v.as_ref(), Type::Struct(_)) {
-                    self.release_box(raw_out);
+                    self.release_box(raw_out, v.as_ref());
                 }
             }
         }
@@ -2477,7 +2509,24 @@ impl<'a> Lower<'a> {
             if let Type::KvMap(_, v) = &od {
                 if matches!(v.as_ref(), Type::Struct(_)) {
                     if let Some(val_bits) = coerced.get(1) {
-                        self.release_box(val_bits.clone());
+                        self.release_box(val_bits.clone(), v.as_ref());
+                    }
+                }
+            }
+        }
+        // v1.21 B6：push 的 struct 值——与 put 同理，coerce 新建 box（rc=1），
+        // dial_array_push 内 elem_retain（rc=2），归还本地这份让数组独占（rc=1）。
+        // 此前这条通用 method 路径漏了 sink，导致含句柄字段 struct 的 box 永不归零（泄漏）。
+        // borrowed 源（变量）的字段仍由变量持有，须先对 box payload +1 让它独立存活。
+        if method == "push" {
+            if let Type::Array(e) = &od {
+                if let Type::Struct(sn) = e.as_ref() {
+                    if let Some(val_bits) = coerced.get(0) {
+                        if self.struct_needs_arc(sn) && yields_borrowed_ref(&args[0]) {
+                            let bp = self.bits_as_ptr(val_bits.clone());
+                            self.emit(IrInst::StructRetain { ptr: bp.as_reg(), struct_name: sn.clone() });
+                        }
+                        self.release_box(val_bits.clone(), e.as_ref());
                     }
                 }
             }
@@ -2576,7 +2625,7 @@ impl<'a> Lower<'a> {
                 _ => unreachable!(),
             };
             let out_elem = if method == "map" { &thunk_ret } else { &elem };
-            let out_kind = builtin::array_elem_kind(out_elem) as i64;
+            let out_kind = self.array_elem_kind_arc(out_elem) as i64;
             let dst = self.new_reg(IrType::Handle);
             self.emit(IrInst::Call {
                 dst: Some(dst),
@@ -4163,7 +4212,7 @@ impl<'a> Lower<'a> {
                 // 借来的值来源仍持有不得再释放；自带所有权的值须归还这一份。
                 if matches!(value_dt, Type::Struct(_)) {
                     // v1.10 B6：struct 值 coerce 时无条件新建 box，set_borrowed 又 +1，归还本地这份。
-                    self.release_box(bits.clone());
+                    self.release_box(bits.clone(), &value_dt);
                 } else if !is_borrowed {
                     if let Some(k) = rc_kind(value_dt) {
                         let tmp = self.emit_alloca(reg_ir(value_dt));
@@ -4182,16 +4231,29 @@ impl<'a> Lower<'a> {
         // 对齐 codegen.rs::to_elem_bits（codegen.rs:1300）的 dial_struct_box + ptr_to_int。
         // v 对 struct 是「内容区地址」Ptr vreg；dial_struct_box 把它拷进堆对象。
         // ret_ty=I64 直接拿整型返回寄存器的位模式（dial_struct_box 返回 void*，与 i64 同通道）。
-        if let Type::Struct(_) = dt {
+        if let Type::Struct(name) = dt {
             let size = self.struct_byte_size(dt);
             let sz = self.new_reg(IrType::I64);
             self.emit(IrInst::Conv { kind: AConv::Zext, dst: sz,
                 a: Value::Imm(Imm::I64(size)), ty: IrType::I64 });
             let boxed = self.new_reg(IrType::I64);
-            self.emit(IrInst::Call {
-                dst: Some(boxed), func: "dial_struct_box".to_string(),
-                args: vec![v, Value::Reg(sz)], arg_tys: vec![IrType::Ptr, IrType::I64],
-                ret_ty: IrType::I64, linkage: CallLink::Runtime });
+            if self.struct_needs_arc(name) {
+                // v1.21：含句柄字段 struct 用扩展 box（头带 desc 表）。名字来自
+                // LeaStaticData，emit 时落到 .rodata 的 .Ldarc_<name>。
+                let label = self.struct_arc_desc_label(name);
+                let desc = self.new_reg(IrType::Ptr);
+                self.emit(IrInst::LeaStaticData { dst: desc, label });
+                self.emit(IrInst::Call {
+                    dst: Some(boxed), func: "dial_struct_box_arc".to_string(),
+                    args: vec![v, Value::Reg(sz), Value::Reg(desc)],
+                    arg_tys: vec![IrType::Ptr, IrType::I64, IrType::Ptr],
+                    ret_ty: IrType::I64, linkage: CallLink::Runtime });
+            } else {
+                self.emit(IrInst::Call {
+                    dst: Some(boxed), func: "dial_struct_box".to_string(),
+                    args: vec![v, Value::Reg(sz)], arg_tys: vec![IrType::Ptr, IrType::I64],
+                    ret_ty: IrType::I64, linkage: CallLink::Runtime });
+            }
             return Ok(Value::Reg(boxed));
         }
         match reg_ir(dt) {
@@ -4785,6 +4847,59 @@ impl<'a> Lower<'a> {
         8
     }
 
+    /// v1.21：句柄字段 → C runtime desc 表的 kind（与 LLVM arc_desc_kind / C DAF_* 一致）。
+    fn arc_desc_kind(t: &Type) -> i64 {
+        use crate::ast::Type as T;
+        match t {
+            T::String => 1,
+            T::Bytes => 2,
+            T::Array(_) => 3,
+            T::Error => 4,
+            T::Map | T::Set(_) | T::KvMap(..) => 5,
+            T::Channel(_) => 6,
+            _ => 0,
+        }
+    }
+
+    /// 该 struct 是否含直接句柄字段（需 ARC 装箱）。
+    fn struct_needs_arc(&self, name: &str) -> bool {
+        self.ip.structs.get(name).map_or(false, |(fs, _)| {
+            fs.iter().any(|(_, ft)| Self::arc_desc_kind(ft) != 0)
+        })
+    }
+
+    /// 数组元素 kind（对齐 codegen.rs::array_elem_kind）：含句柄字段 struct 用 7，
+    /// 其余委托 builtin::array_elem_kind。
+    fn array_elem_kind_arc(&self, t: &Type) -> u64 {
+        if let Type::Struct(name) = t {
+            if self.struct_needs_arc(name) { return 7; }
+        }
+        builtin::array_elem_kind(t)
+    }
+
+    /// 登记并返回 struct 的 desc 表标签（如 `.Ldarc_Rec`）。
+    /// 表格式 `[nfields][(kind, offset) × n]`，字段 offset 用 asm 后端 struct_layout。
+    fn struct_arc_desc_label(&mut self, name: &str) -> String {
+        let label = format!(".Ldarc_{}", name);
+        if self.ip.arc_descs.iter().any(|(l, _)| l == &label) {
+            return label;
+        }
+        let (offs, _, _) = self.ip.struct_layout(name, false);
+        let fields = self.ip.structs.get(name).map(|(f, _)| f.clone()).unwrap_or_default();
+        let mut table = Vec::new();
+        let handle: Vec<(i64, i64)> = fields.iter().enumerate().filter_map(|(i, (_, ft))| {
+            let k = Self::arc_desc_kind(ft);
+            if k == 0 { None } else { Some((k, offs.get(i).copied().unwrap_or(0))) }
+        }).collect();
+        table.push(handle.len() as i64);
+        for (k, off) in handle {
+            table.push(k);
+            table.push(off);
+        }
+        self.ip.arc_descs.push((label.clone(), table));
+        label
+    }
+
     fn expr_dt(&self, e: &Expr) -> Type {
         match e {
             // char / byte 在**寄存器宽度**上与 int 同为 I64，但**类型层面**是独立的
@@ -4959,9 +5074,14 @@ impl<'a> Lower<'a> {
     /// dial_struct_box 造出 rc=1 的 box，容器 push/put 内部又 retain 一份（rc=2），
     /// 容器释放时只还它自己那份（rc=1）——本地这份若不还就泄漏。bits 是 box payload
     /// 指针的 i64 位模式，转成指针后 dial_rc_release。
-    fn release_box(&mut self, bits: Value) {
+    fn release_box(&mut self, bits: Value, dt: &Type) {
         let p = self.bits_as_ptr(bits);
-        self.emit(IrInst::Call { dst: None, func: "dial_rc_release".to_string(),
+        let func = if let Type::Struct(name) = dt {
+            if self.struct_needs_arc(name) { "dial_struct_box_arc_release" } else { "dial_rc_release" }
+        } else {
+            "dial_rc_release"
+        };
+        self.emit(IrInst::Call { dst: None, func: func.to_string(),
             args: vec![p], arg_tys: vec![IrType::Handle],
             ret_ty: IrType::Void, linkage: CallLink::Runtime });
     }

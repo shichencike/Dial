@@ -1,0 +1,19 @@
+// R24 正向：含句柄字段（string）的结构体可作数组元素。
+// v1.21 落地字段级 ARC：装箱为带 desc 表的 RC box，容器释放时逐字段 release。
+// 双后端（llvm / asm）输出须逐字一致，退出无泄漏 / 无 double-free。
+struct Rec {
+    id: int = 0,
+    name: string = "x",
+}
+
+fn main(): int {
+    var rs: Rec[] = [];
+    rs.push(Rec{id: 1, name: "alpha"});
+    rs.push(Rec{id: 2, name: "beta"});
+    var r: Rec = rs.get(0);
+    print(r.id);
+    print(r.name);
+    var r2: Rec = rs.get(1);
+    print(r2.name);
+    return 0;
+}

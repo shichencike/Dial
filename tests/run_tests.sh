@@ -3393,6 +3393,63 @@ else
 fi
 
 # ===========================================================================
+# R24) 字段级 ARC（v1.21）：含 string/句柄字段的 struct 进容器（数组 / map）。
+#      装箱为带 desc 表的 ARC box（[desc][rc][payload]），容器释放时按字段级联 release。
+#      门禁三层层层加严：
+#       1) 功能：3 个正向用例双后端（llvm / asm）输出逐字一致；
+#       2) 正确性：20 万次混合压测（数组 + map.put/get_or）双后端均正常完成——
+#          命中 get_or 返回表内 box 的字段借用，两端都须对解箱副本字段 +1，
+#          否则作用域退出提前释放 → 表销毁二次释放 → heap-use-after-free（exit=134）；
+#       3) 内存：峰值 RSS < 8MB（修复后 ~1.5MB 恒定；旧版泄漏/崩溃版 14~20MB）。
+#      无 GNU time 时退化为「正常完成 + 功能标记」，不误报。
+# ===========================================================================
+echo "  -- R24) 字段级 ARC 双后端（v1.21：句柄字段 struct 进容器） --"
+_R24_RSS_LIMIT=8192   # 8MB：修复版 ~1.5MB 有 5x 余量，泄漏版必超标
+
+# 1) 功能一致性：数组 / map 两个正向用例双后端逐字一致。
+for _r24_case in r24_struct_array_handle_field r24_struct_map_handle_field; do
+    _r24_src="tests/pkg/${_r24_case}.dial"
+    ${DIALC} build "$_r24_src" --backend llvm -o "${TMP}/${_r24_case}_llvm" >/dev/null 2>&1 \
+        || { rbad "R24 $_r24_case/llvm 编译失败"; continue; }
+    ${DIALC} build "$_r24_src" --backend asm -o "${TMP}/${_r24_case}_asm" >/dev/null 2>&1 \
+        || { rbad "R24 $_r24_case/asm 编译失败"; continue; }
+    _r24_l="$(${TMP}/${_r24_case}_llvm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ')"
+    _r24_a="$(${TMP}/${_r24_case}_asm 2>/dev/null | grep -vE '^ℹ️' | tr '\n' ' ')"
+    if [ "$_r24_l" = "$_r24_a" ] && [ -n "$_r24_l" ]; then
+        rpass "R24 $_r24_case 双后端逐字一致（[$_r24_l]）"
+    else
+        rbad "R24 $_r24_case 双后端不一致（llvm=[$_r24_l] asm=[$_r24_a]）"
+    fi
+done
+
+# 2+3) 混合压测：正常完成 + 功能标记 + RSS 上界（双后端）。
+for _r24_be in llvm asm; do
+    ${DIALC} build tests/pkg/r24_field_arc_leak.dial --backend $_r24_be \
+        -o "${TMP}/r24_leak_${_r24_be}" >/dev/null 2>&1 \
+        || { rbad "R24 泄漏压测/$_r24_be 编译失败"; continue; }
+    if [ -x /usr/bin/time ]; then
+        /usr/bin/time -f '%M' -o "${TMP}/r24.rss" timeout 180 "${TMP}/r24_leak_${_r24_be}" \
+            >"${TMP}/r24.out" 2>/dev/null
+        _r24_rc=$?
+        _r24_rss=$(cat "${TMP}/r24.rss" 2>/dev/null || echo 0)
+    else
+        timeout 180 "${TMP}/r24_leak_${_r24_be}" >"${TMP}/r24.out" 2>/dev/null
+        _r24_rc=$?
+        _r24_rss=0
+    fi
+    _r24_out=$(grep -vE '^ℹ️' "${TMP}/r24.out" 2>/dev/null)
+    if [ "$_r24_rc" -eq 0 ] && printf '%s' "$_r24_out" | grep -qF 'r24_done'; then
+        if [ "$_r24_rss" -eq 0 ] || [ "$_r24_rss" -lt "$_R24_RSS_LIMIT" ]; then
+            rpass "R24 字段级 ARC 压测/$_r24_be：正常完成·峰值 RSS ${_r24_rss}KB < ${_R24_RSS_LIMIT}KB（无泄漏/无 double-free）"
+        else
+            rbad "R24 字段级 ARC 压测/$_r24_be：峰值 RSS ${_r24_rss}KB 超标（疑似字段 ARC 泄漏）"
+        fi
+    else
+        rbad "R24 字段级 ARC 压测/$_r24_be：退出码 $_r24_rc / 输出 [$_r24_out]（double-free 会在此暴露）"
+    fi
+done
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。
@@ -3800,18 +3857,20 @@ elif grep -q "不匹配" "${TMP}/v_defmm.log"; then
     vpass "B8：默认值类型不匹配编译期拒绝（零隐式转换铁律）"
 else vbad "B8：类型不匹配被拒但诊断未说明原因"; fi
 
-# 7) B6 负向：含句柄字段的结构体不得进容器（装箱的字段级 ARC 未落地，宁可拒绝）。
-if "$DIALC" build tests/bad/struct_array_handle_field.dial -o "${TMP}/v_hf1" >"${TMP}/v_hf1.log" 2>&1; then
-    vbad "B6：含句柄字段的结构体竟可作数组元素（字段级 ARC 未落地）"
-elif grep -q "数组元素" "${TMP}/v_hf1.log"; then
-    vpass "B6：含句柄字段的结构体作数组元素编译期拒绝"
-else vbad "B6：数组元素被拒但诊断未说明原因"; fi
+# 7) B6 正向：含句柄字段的结构体可进容器（v1.21 字段级 ARC 已落地）。
+#    旧版这里是否向断言（字段级 ARC 未落地时宁可拒绝）；v1.21 装箱为带 desc 表的
+#    RC box，容器释放时按字段级联 release，正负向语义翻转。功能由 R24 组完整锁定。
+if "$DIALC" build tests/pkg/r24_struct_array_handle_field.dial -o "${TMP}/v_hf1" >"${TMP}/v_hf1.log" 2>&1; then
+    vpass "B6：含句柄字段的结构体可作数组元素（字段级 ARC 已落地）"
+else
+    vbad "B6：含句柄字段的结构体作数组元素编译失败（字段级 ARC 回归）"
+fi
 
-if "$DIALC" build tests/bad/struct_map_handle_field.dial -o "${TMP}/v_hf2" >"${TMP}/v_hf2.log" 2>&1; then
-    vbad "B6：含句柄字段的结构体竟可作 map 值（字段级 ARC 未落地）"
-elif grep -q "map<" "${TMP}/v_hf2.log"; then
-    vpass "B6：含句柄字段的结构体作 map 值编译期拒绝"
-else vbad "B6：map 值被拒但诊断未说明原因"; fi
+if "$DIALC" build tests/pkg/r24_struct_map_handle_field.dial -o "${TMP}/v_hf2" >"${TMP}/v_hf2.log" 2>&1; then
+    vpass "B6：含句柄字段的结构体可作 map 值（字段级 ARC 已落地）"
+else
+    vbad "B6：含句柄字段的结构体作 map 值编译失败（字段级 ARC 回归）"
+fi
 
 echo
 echo "== W) C11 独立包：http.dialpkg 端到端（HTTP/1.1 + TLS 1.3 + keep-alive + HTTP/2 h2c/h2 真并发多路复用，v1.04 增补） =="

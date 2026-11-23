@@ -17,9 +17,13 @@
  * dial_rc_* 引用计数，channel 则走原子引用计数。每个数组在头部记着自己的元素类别，
  * push/set/克隆/释放时据此对元素做对应的 retain/release，从而正确实现「按元素 ARC」。
  */
-#define DIAL_ELEM_INT    0
-#define DIAL_ELEM_RC     1
-#define DIAL_ELEM_ATOMIC 2
+#define DIAL_ELEM_INT     0
+#define DIAL_ELEM_RC      1
+#define DIAL_ELEM_ATOMIC  2
+/* v1.21 字段级 ARC：含句柄字段 struct 的 ARC box（头带 desc 表）。
+ * retain 走通用 dial_rc_retain（rc 仍在 p[-1]）；release 必须走
+ * dial_struct_box_arc_release（rc 归零时按 desc 级联释放句柄字段）。 */
+#define DIAL_ELEM_BOXARC  7
 
 static int64_t *a_meta(void *a) { return (int64_t *)a; }        /* [0]=kind [1]=len [2]=cap */
 static int64_t *a_elems(void *a) { return (int64_t *)((char *)a + 24); }
@@ -28,16 +32,20 @@ static size_t  a_size(int64_t cap) { return (size_t)(24 + cap * 8); }
 /* channel 元素走原子引用计数（与 string/map 的非原子 rc 分开，绝不能混用）。 */
 extern void dial_channel_retain(void *ch);
 extern void dial_channel_release(void *ch);
+/* v1.21 字段级 ARC box 的专用释放（rc 归零时级联释放句柄字段）。 */
+extern void dial_struct_box_arc_release(void *p);
 
-/* 元素析构：RC 句柄走 dial_rc_release，channel 走 dial_channel_release（原子）。 */
+/* 元素析构：RC 句柄走 dial_rc_release，channel 走 dial_channel_release（原子），
+ * 含句柄字段 struct 的 ARC box 走 dial_struct_box_arc_release。 */
 static void elem_retain(int64_t kind, int64_t v) {
     if (!v) return;
-    if (kind == DIAL_ELEM_RC)          dial_rc_retain((void *)v);
+    if (kind == DIAL_ELEM_RC || kind == DIAL_ELEM_BOXARC) dial_rc_retain((void *)v);
     else if (kind == DIAL_ELEM_ATOMIC) dial_channel_retain((void *)v);
 }
 static void elem_release(int64_t kind, int64_t v) {
     if (!v) return;
     if (kind == DIAL_ELEM_RC)          dial_rc_release((void *)v);
+    else if (kind == DIAL_ELEM_BOXARC) dial_struct_box_arc_release((void *)v);
     else if (kind == DIAL_ELEM_ATOMIC) dial_channel_release((void *)v);
 }
 

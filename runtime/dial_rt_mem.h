@@ -52,4 +52,36 @@ void *dial_rc_clone(void *p, int64_t payload_size);
  * 用于放进容器。仅拷贝标量位模式；含句柄字段的结构体须由调用处额外 retain。 */
 void *dial_struct_box(const void *src, int64_t size);
 
+/* ---------------------------------------------------------------------------
+ * 字段级 ARC 装箱（v1.21）：含句柄字段（string / bytes / array / map / set /
+ * kvmap / error / channel）的结构体进容器时使用。
+ *
+ * 普通 dial_struct_box 的 box 只管自己的 rc，容器释放它时仅 free 内存，
+ * 不知道 payload 里的句柄字段也需要 release——那会泄漏（或原 struct 先退出
+ * 时字段被提前释放导致悬垂）。为此扩展 box 头，携带一张「字段描述符表」：
+ *
+ *     普通 box:   [ int64 rc ][ payload ... ]
+ *                               ^ p
+ *     ARC  box:   [ desc* ][ int64 rc ][ payload ... ]
+ *                                       ^ p
+ *
+ * 对外句柄仍指向 payload 起点；refcount 恒在 p[-1]（紧邻 payload），因此容器
+ * COW / retain 走的通用 dial_rc_retain(p) 无需改动即正确。desc 指针在 p[-2]，
+ * 只有「释放」需要专用入口 dial_struct_box_arc_release：rc 归零时先按 desc
+ * 逐字段 release，再 free(p-16)。（注意 desc 绝不能放 p[-1]——通用 retain
+ * 会把 p[-1] 当 rc +1，从而把 desc 指针加 1。）
+ *
+ * desc 表是编译器按 struct 类型生成的静态只读数据，布局：
+ *     [ int64 nfields ][ (int64 kind, int64 offset) × nfields ]
+ * kind 与 ArcKind 一致：1=String 2=Bytes 3=Array 4=Error 5=Generic(rc)
+ *                       6=Channel(atomic)；offset 是字段相对 payload 起点的字节偏移。
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    int64_t kind;
+    int64_t offset;
+} DialArcFieldDesc;
+
+void *dial_struct_box_arc(const void *src, int64_t size, const void *desc);
+void dial_struct_box_arc_release(void *p);
+
 #endif /* DIAL_RT_MEM_H */

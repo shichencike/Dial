@@ -463,6 +463,12 @@ pub fn emit(ip: &IrProgram, target: EmitTarget, debug_info: bool, src_path: &str
             idx, s.as_bytes().len(), bytes.join(", ")
         ));
     }
+    // v1.21 字段级 ARC：struct 的 desc 表（[nfields][(kind,offset)×n]）。
+    // 与 runtime/dial_rt_mem.c 的 DialArcFieldDesc 口径一致，供 box 归零时逐字段释放。
+    for (label, table) in &ip.arc_descs {
+        let quads = table.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+        out.push_str(&format!("\t.balign 8\n{}:\n\t.quad {}\n", label, quads));
+    }
     // R4 阶段一：插桩计数器数组（.comm 零初始化、8 字节对齐）。
     if pgo.instrument {
         out.push_str(&format!(
@@ -2405,6 +2411,20 @@ impl<'a> FnEmit<'a> {
                         self.line(&format!("\tadrp {}, .Ldstr{}", self.g3(), lit));
                         self.line(&format!("\tadd {}, {}, :lo12:.Ldstr{}", self.g2(), self.g3(), lit));
                         self.line(&format!("\tadd {}, {}, #8", self.g2(), self.g2()));
+                    }
+                }
+                let g = self.g2().to_string();
+                self.sg(*dst, &g);
+            }
+            IrInst::LeaStaticData { dst, label } => {
+                // v1.21：取 .rodata 静态数据标签地址（ARC desc 表）。
+                match self.target {
+                    EmitTarget::X86_64SysV | EmitTarget::X86_64Ms => {
+                        self.line(&format!("\tleaq {}({}), {}", label, self.r("rip"), self.r(self.g2())));
+                    }
+                    EmitTarget::AArch64 => {
+                        self.line(&format!("\tadrp {}, {}", self.g3(), label));
+                        self.line(&format!("\tadd {}, {}, :lo12:{}", self.g2(), self.g3(), label));
                     }
                 }
                 let g = self.g2().to_string();
@@ -4855,6 +4875,10 @@ fn arc_symbol(kind: ArcKind, retain: bool) -> &'static str {
         (ArcKind::Bytes, false) => "dial_bytes_release",
         (ArcKind::Generic, true) => "dial_rc_retain",
         (ArcKind::Generic, false) => "dial_rc_release",
+        // v1.21：KvMap 走专用 ARC——release 逐条目释放值装箱，避免 map<string,Struct>
+        // 的 ARC box 泄漏。与 LLVM release_value 的 dial_kvmap_retain/release 对齐。
+        (ArcKind::KvMap, true) => "dial_kvmap_retain",
+        (ArcKind::KvMap, false) => "dial_kvmap_release",
     }
 }
 
@@ -4866,7 +4890,8 @@ fn handle_arc_kind(t: &crate::ast::Type) -> Option<ArcKind> {
         T::Bytes => Some(ArcKind::Bytes),
         T::Array(_) => Some(ArcKind::Array),
         T::Error => Some(ArcKind::Error),
-        T::Map | T::KvMap(..) | T::Set(_) | T::Channel(_) => Some(ArcKind::Generic),
+        T::KvMap(..) => Some(ArcKind::KvMap),
+        T::Map | T::Set(_) | T::Channel(_) => Some(ArcKind::Generic),
         _ => None,
     }
 }

@@ -134,6 +134,8 @@ pub struct CodeGen<'ctx> {
     builder: inkwell::builder::Builder<'ctx>,
     cfuns: HashMap<String, FunctionValue<'ctx>>,
     struct_types: HashMap<String, StructType<'ctx>>,
+    /// v1.21：结构体字段表（供字段级 ARC desc 表生成）。
+    structs: StructTable,
     str_id: std::cell::Cell<u32>,
     /// 已被“移动”的局部变量**栈槽指针**（转移所有权，跳过作用域结束时的 release）。
     ///
@@ -277,6 +279,7 @@ pub fn compile(
         builder: context.create_builder(),
         cfuns: HashMap::new(),
         struct_types: HashMap::new(),
+        structs: structs.clone(),
         str_id: std::cell::Cell::new(0),
         moved: RefCell::new(std::collections::HashSet::new()),
         // 注：HashSet<PointerValue> 无需按函数清空——每条 alloca 的 PointerValue 全局唯一，
@@ -758,6 +761,9 @@ impl<'ctx> CodeGen<'ctx> {
         // v1.04 B6：把值类型结构体装箱为引用计数对象（[int64 refcount][payload]），
         // 用于把结构体放进容器（数组 / map 值）。返回 payload 指针（同 Dial 堆对象布局）。
         self.decl_func("dial_struct_box", i8b, &[i8b.into(), i64b.into()]);
+        // v1.21 字段级 ARC：含句柄字段 struct 的装箱 / 专用释放。
+        self.decl_func("dial_struct_box_arc", i8b, &[i8b.into(), i64b.into(), i8b.into()]);
+        self.decl_void("dial_struct_box_arc_release", &[i8b.into()]);
         // v0.81 通道收尾：关闭 / 状态查询 / 非阻塞取出
         self.decl_func("dial_channel_try_recv", i8b, &[i8b.into()]);
         self.decl_void("dial_channel_close", &[i8b.into()]);
@@ -1292,9 +1298,82 @@ impl<'ctx> CodeGen<'ctx> {
             Type::String | Type::Bytes | Type::Array(_) | Type::Map | Type::Set(_) | Type::KvMap(..) | Type::Error | Type::Opaque(_) => {
                 1
             }
-            // 结构体装箱为 RC 句柄（指针），与 string/array 等同走 kind=1 的 retain/release。
-            Type::Struct(_) => 1,
+            // v1.21：含句柄字段 struct 用 ARC box（kind=7，释放时级联释放字段）；
+            // 标量字段 struct 仍是普通 box（kind=1）。
+            Type::Struct(name) => if self.struct_needs_arc(name) { 7 } else { 1 },
             _ => 0, // 理论上不可达：check_type_wellformed 已拒绝其它元素类型
+        }
+    }
+
+    /// v1.21 字段级 ARC：句柄字段 → C runtime desc 表的 kind 编码。
+    /// 与 runtime/dial_rt_mem.c 的 DAF_* 宏一致。
+    fn arc_desc_kind(t: &Type) -> i64 {
+        match t {
+            Type::String => 1,
+            Type::Bytes => 2,
+            Type::Array(_) => 3,
+            Type::Error => 4,
+            Type::Map | Type::Set(_) | Type::KvMap(..) => 5,
+            Type::Channel(_) => 6,
+            _ => 0,
+        }
+    }
+
+    /// 该 struct 是否含直接句柄字段（需 ARC 装箱）。
+    fn struct_needs_arc(&self, name: &str) -> bool {
+        self.structs.get(name).map_or(false, |(fs, _)| {
+            fs.iter().any(|(_, ft)| Self::arc_desc_kind(ft) != 0)
+        })
+    }
+
+    /// 为含句柄字段 struct 生成（或复用）静态 desc 表全局：
+    /// 布局 `[nfields i64][(kind i64, offset i64) × n]`，首元素 nfields，
+    /// 之后每个句柄字段一对 (kind, offset)。返回指向表首的 i8*。
+    /// 用 module 全局按名字缓存，避免同一 struct 重复生成。
+    fn struct_arc_desc(&self, name: &str) -> PointerValue<'ctx> {
+        let gname = format!("__dial_desc_{}", name);
+        if let Some(g) = self.module.get_global(gname.as_str()) {
+            return g.as_pointer_value();
+        }
+        let (fields, _) = self.structs.get(name).expect("desc 表 struct 应存在");
+        let sty = self.struct_types.get(name).expect("desc 表 struct LLVM 类型应存在");
+        let dl = self.module.get_data_layout();
+        let td = TargetData::create(dl.as_str().to_str().unwrap_or(""));
+        let i64t = self.context.i64_type();
+        let mut vals: Vec<IntValue<'ctx>> = Vec::new();
+        let handle_fields: Vec<(usize, i64)> = fields
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, ft))| {
+                let k = Self::arc_desc_kind(ft);
+                if k == 0 { None } else { Some((i, k)) }
+            })
+            .collect();
+        vals.push(i64t.const_int(handle_fields.len() as u64, false));
+        for (i, k) in &handle_fields {
+            let off = td.offset_of_element(sty, *i as u32).expect("字段索引有效");
+            vals.push(i64t.const_int(*k as u64, false));
+            vals.push(i64t.const_int(off, false));
+        }
+        let arr_ty = i64t.array_type(vals.len() as u32);
+        let arr_val = i64t.const_array(&vals);
+        let g = self.module.add_global(arr_ty, None, gname.as_str());
+        g.set_initializer(&arr_val);
+        g.set_constant(true);
+        g.set_linkage(Linkage::Private);
+        g.as_pointer_value()
+    }
+
+    /// 归还一个 struct box 的本地引用（bits 为 payload 指针位模式）。
+    /// 标量字段 struct 用通用 dial_rc_release；含句柄字段 struct 必须用
+    /// dial_struct_box_arc_release（rc 归零时按 desc 级联释放字段）。
+    fn release_struct_box(&self, ty: &Type, bits: IntValue<'ctx>) {
+        let name = match ty { Type::Struct(n) => n, _ => return };
+        let boxp = self.builder.build_int_to_ptr(bits, self.i8ptr(), "boxp").unwrap();
+        if self.struct_needs_arc(name) {
+            self.call_c_void("dial_struct_box_arc_release", &[boxp.into()]);
+        } else {
+            self.call_c_void("dial_rc_release", &[boxp.into()]);
         }
     }
 
@@ -1321,9 +1400,19 @@ impl<'ctx> CodeGen<'ctx> {
             let size = sty.size_of().expect("结构体应有确定尺寸");
             let tmp = self.alloca_in_entry(function, sty.into(), "sbox_src");
             self.builder.build_store(tmp, v).unwrap();
-            let boxp = self
-                .call_c("dial_struct_box", &[tmp.into(), size.into()])
-                .into_pointer_value();
+            let needs_arc = self.struct_needs_arc(name);
+            let boxp = if needs_arc {
+                // v1.21：含句柄字段 struct 用扩展 box（头带 desc 表）。这里**不**
+                // retain 字段——fresh 字面量的字段那份随 memcpy 转移给 box；borrowed
+                // 变量的字段那份由 sink_elem_after_retain 事后补 retain。box 归零时
+                // 由 dial_struct_box_arc_release 按 desc 逐一归还它持有的那份。
+                let desc = self.struct_arc_desc(name);
+                self.call_c("dial_struct_box_arc", &[tmp.into(), size.into(), desc.into()])
+                    .into_pointer_value()
+            } else {
+                self.call_c("dial_struct_box", &[tmp.into(), size.into()])
+                    .into_pointer_value()
+            };
             self.builder
                 .build_ptr_to_int(boxp, self.context.i64_type(), "box2bits")
                 .unwrap()
@@ -1359,7 +1448,11 @@ impl<'ctx> CodeGen<'ctx> {
                     .builder
                     .build_pointer_cast(boxp, self.context.ptr_type(AddressSpace::default()), "box2s")
                     .unwrap();
-                self.builder.build_load(sty, sp, "unbox").unwrap().into()
+                let loaded = self.builder.build_load(sty, sp, "unbox").unwrap();
+                // v1.21：解箱副本**不**在此 retain 字段——绑定到局部变量时，
+                // gen_var_decl（2869）已按 yields_borrowed_ref(get)=true 对字段 +1；
+                // 未绑定的临时表达式只是借用，无需 retain。此处再 retain 会双重计数导致泄漏。
+                loaded.into()
             }
             _ => v.into(), // Int / Byte / Char 都是 i64
         }
@@ -2059,9 +2152,19 @@ impl<'ctx> CodeGen<'ctx> {
         val: BasicValueEnum<'ctx>,
         bits: IntValue<'ctx>,
     ) {
-        if let Type::Struct(_) = ty {
-            let boxp = self.builder.build_int_to_ptr(bits, self.i8ptr(), "boxp").unwrap();
-            self.call_c_void("dial_rc_release", &[boxp.into()]);
+        if let Type::Struct(name) = ty {
+            // v1.21：borrowed 源的字段仍由变量持有，box 需要自己的一份——
+            // 归还 box 本地 rc 之前先对 payload 字段 +1。fresh 字面量的字段那份
+            // 已在装箱时随 memcpy 转移给 box，这里不补，避免每轮泄漏一份。
+            if self.struct_needs_arc(name) && yields_borrowed_ref(e) {
+                let boxp = self.builder.build_int_to_ptr(bits, self.i8ptr(), "boxp_borrow").unwrap();
+                let sp = self
+                    .builder
+                    .build_pointer_cast(boxp, self.context.ptr_type(AddressSpace::default()), "box2s_borrow")
+                    .unwrap();
+                self.retain_struct_fields(ty, sp, &self.structs);
+            }
+            self.release_struct_box(ty, bits);
         } else {
             self.settle_fresh_value(e, ty, val);
         }
@@ -6336,9 +6439,14 @@ impl<'ctx> CodeGen<'ctx> {
                 let size = sty.size_of().expect("结构体应有确定尺寸");
                 let tmp = self.alloca_in_entry(function, sty.into(), "sbox_src");
                 self.builder.build_store(tmp, v).unwrap();
-                let boxp = self
-                    .call_c("dial_struct_box", &[tmp.into(), size.into()])
-                    .into_pointer_value();
+                let boxp = if self.struct_needs_arc(name) {
+                    let desc = self.struct_arc_desc(name);
+                    self.call_c("dial_struct_box_arc", &[tmp.into(), size.into(), desc.into()])
+                        .into_pointer_value()
+                } else {
+                    self.call_c("dial_struct_box", &[tmp.into(), size.into()])
+                        .into_pointer_value()
+                };
                 self.builder
                     .build_ptr_to_int(boxp, self.context.i64_type(), "box2bits")
                     .unwrap()
@@ -6393,6 +6501,8 @@ impl<'ctx> CodeGen<'ctx> {
                     .build_pointer_cast(boxp, self.context.ptr_type(AddressSpace::default()), "box2s")
                     .unwrap();
                 let loaded = self.builder.build_load(sty, sp, "unbox").unwrap();
+                // v1.21：解箱副本不在此 retain 字段——绑定局部变量时 gen_var_decl 已
+                // 按 borrowed_ref(get)=true 对字段 +1；此处再 retain 会双重计数泄漏。
                 self.builder.build_unconditional_branch(cont_bb).unwrap();
                 // 合流
                 self.builder.position_at_end(cont_bb);
@@ -6459,10 +6569,7 @@ impl<'ctx> CodeGen<'ctx> {
                     // remove：被删条目的值所有权随返回值移交调用方
                     // （结构体值即那个装箱对象）——拷出副本后释放它。
                     if method == "remove" && matches!(v, Type::Struct(_)) {
-                        let boxp = self.builder
-                            .build_int_to_ptr(r.into_int_value(), self.i8ptr(), "boxp")
-                            .unwrap();
-                        self.call_c_void("dial_rc_release", &[boxp.into()]);
+                        self.release_struct_box(v, r.into_int_value());
                     }
                     Ok(out)
                 }
@@ -6480,10 +6587,21 @@ impl<'ctx> CodeGen<'ctx> {
                 self.settle_fresh_value(&args[0], k, ka);
                 let out = self.kv_from_bits(function, r.into_int_value(), v);
                 if matches!(v, Type::Struct(_)) {
-                    // 结构体默认值：先按值拷出（未命中时返回值就是本地这份装箱），
-                    // 再归还本地那份装箱——副本已是纯标量位，释放不影响已拷出的值。
-                    let boxp = self.builder.build_int_to_ptr(db, self.i8ptr(), "boxp").unwrap();
-                    self.call_c_void("dial_rc_release", &[boxp.into()]);
+                    // v1.21 字段级 ARC：get_or 的 struct 返回值与 get 同样是**借用**——
+                    // 命中时 C 侧 dial_kvmap_get_or 对 KV_STRUCT_ARC 不做 retain（只有
+                    // KV_STRING 做），返回的 bits 指向表内 box；解箱副本 out 的句柄字段
+                    // 是与表内 box 共享的浅拷贝。绑定变量的作用域退出会 release 这些字段，
+                    // 若不在此 +1，就会把表内 box 的字段减到 0 → 提前 free → map 销毁时
+                    // dial_struct_box_arc_release 二次释放（heap-use-after-free / double free）。
+                    // 未命中时返回 default 的 box：先 +1 让副本独立持有字段，再释放 default
+                    // box（其字段 -1），净效果字段引用从 default 移交给返回值，计数平衡。
+                    // 这与 gen_var_decl 对 borrowed=get 的 retain_struct_fields 同一口径。
+                    let sty = self.dialc_type_to_llvm(v);
+                    let tmp = self.alloca_in_entry(function, sty, "getor_ret");
+                    self.builder.build_store(tmp, out).unwrap();
+                    self.retain_struct_fields(v, tmp, structs);
+                    // 归还默认实参那份装箱（未命中时其内容字段已移交上面的副本）。
+                    self.release_struct_box(v, db);
                 } else if matches!(v, Type::String) {
                     // string 默认值：C 侧已对返回值 +1，这里归还默认实参的本地那份
                     // （字面量 rc=1 -> 归还；借用变量 no-op），引用计数平衡。
@@ -6799,7 +6917,19 @@ impl<'ctx> CodeGen<'ctx> {
                 if op == BinOp::Add && tl == Type::String && tr == Type::String {
                     let lval = self.gen_expr(l, function, scopes, func_values, functions, structs)?;
                     let rval = self.gen_expr(r, function, scopes, func_values, functions, structs)?;
-                    return Ok(self.call_c("dial_string_concat", &[lval.into(), rval.into()]));
+                    let result = self.call_c("dial_string_concat", &[lval.into(), rval.into()]);
+                    // dial_string_concat(a,b) 只读、不消费操作数（C 侧不 retain/release）。
+                    // 自带所有权的表达式临时（如 str(i)、嵌套拼接、dial_string_new）在
+                    // concat 后没有任何 Local 持有，作用域退出不会释放 → 每轮泄漏一份。
+                    // 借用引用（变量/字段/下标/get/at）由来源继续持有，不得释放（否则
+                    // 悬垂/双重释放）；字符串字面量是 immortal（release no-op）一并跳过
+                    // 以少发指令。与 asm 后端 lower.rs::release_string_temp 同一口径。
+                    for (opnd, expr) in [(lval, l), (rval, r)] {
+                        if !yields_borrowed_ref(expr) && !matches!(expr, Expr::StringLit(_)) {
+                            self.release_value(&Type::String, opnd);
+                        }
+                    }
+                    return Ok(result);
                 }
                 let lval = self.gen_expr(l, function, scopes, func_values, functions, structs)?;
                 let rval = self.gen_expr(r, function, scopes, func_values, functions, structs)?;

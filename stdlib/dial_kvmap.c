@@ -33,7 +33,9 @@
 enum { KV_INT = 0, KV_FLOAT = 1, KV_STRING = 2, KV_BOOL = 3, KV_CHAR = 4, KV_BYTE = 5,
        /* v1.04 B6：结构体值——值类型装不进 8 字节槽，故装箱为 RC 对象后存其指针位模式，
         * 与 KV_STRING 同走 retain/release（数组/表释放时逐条目释放装箱对象）。 */
-       KV_STRUCT = 6 };
+       KV_STRUCT = 6,
+       /* v1.21 字段级 ARC：含句柄字段 struct 的 ARC box（头带 desc 表）。 */
+       KV_STRUCT_ARC = 7 };
 enum { KV_EMPTY = 0, KV_USED = 1, KV_DELETED = 2 };
 
 typedef struct { int64_t key; int64_t val; int64_t state; } KEntry;
@@ -50,11 +52,15 @@ static int64_t  k_size(int64_t cap) { return 32 + cap * (int64_t)sizeof(KEntry);
 static int64_t f64_bits(double d) { union { double f; int64_t i; } u; u.f = d; return u.i; }
 static double  bits_f64(int64_t i) { union { double f; int64_t i; } u; u.i = i; return u.f; }
 
+extern void dial_struct_box_arc_release(void *p);
+
 static void kv_retain_kind(int64_t kind, int64_t bits) {
-    if (kind == KV_STRING || kind == KV_STRUCT) dial_rc_retain((void *)(intptr_t)bits);
+    if (kind == KV_STRING || kind == KV_STRUCT || kind == KV_STRUCT_ARC)
+        dial_rc_retain((void *)(intptr_t)bits);
 }
 static void kv_release_kind(int64_t kind, int64_t bits) {
     if (kind == KV_STRING || kind == KV_STRUCT) dial_rc_release((void *)(intptr_t)bits);
+    else if (kind == KV_STRUCT_ARC) dial_struct_box_arc_release((void *)(intptr_t)bits);
 }
 
 static void kv_release_entries(void *m) {
@@ -114,7 +120,8 @@ static int64_t kv_default(int64_t vk) {
         case KV_STRING: return (int64_t)(intptr_t)dial_string_empty_static();
         /* v1.04 B6：结构体值未命中返回 0（空指针）——由编译器还原为零值结构体，
          * 绝不解引用空指针（那会让「未命中」变成段错误而非可预期的值）。 */
-        case KV_STRUCT: return 0;
+        case KV_STRUCT:
+        case KV_STRUCT_ARC: return 0;   /* 结构体值未命中：零值由编译器还原 */
         default:        return -1;   /* int / char / byte 未命中返回 -1 */
     }
 }
@@ -179,11 +186,12 @@ static int64_t kv_count_deleted(void *m) {
 }
 
 DialKvMap dial_kvmap_new(int64_t key_kind, int64_t val_kind) {
-    /* 7 种 kind（0..6）对键与值都合法；string 值由编译期 check_type_wellformed
-     * 拦下（v1.00 不开放），C 侧保持对称以免把 bool/char/byte 值误判为非法。
-     * v1.04 B6：新增 KV_STRUCT(6)——结构体值装箱为 RC 对象后存指针位模式。 */
+    /* kind 0..6 对键与值都合法；string 值由编译期 check_type_wellformed 拦下。
+     * v1.04 B6：KV_STRUCT(6)——结构体值装箱为 RC 对象后存指针位模式。
+     * v1.21：KV_STRUCT_ARC(7)——含句柄字段 struct 的 ARC box。键不会是 7
+     * （含句柄字段 struct 作 key 由语义层决定，这里只放宽值一侧）。 */
     DIAL_ASSERT(key_kind >= KV_INT && key_kind <= KV_STRUCT &&
-                val_kind >= KV_INT && val_kind <= KV_STRUCT,
+                val_kind >= KV_INT && val_kind <= KV_STRUCT_ARC,
                 "dial_kvmap_new: 非法的键/值 kind");
     int64_t cap = 8;
     void *m = dial_rc_alloc(k_size(cap));
@@ -310,7 +318,9 @@ void *dial_kvmap_keys(DialKvMap mh) {
 void *dial_kvmap_values(DialKvMap mh) {
     void *m = (void *)mh;
     int64_t vk = v_kind(m);
-    DialArray out = dial_array_new((vk == KV_STRING || vk == KV_STRUCT) ? 1 : 0);
+    DialArray out = dial_array_new(
+        vk == KV_STRUCT_ARC ? 7 :
+        (vk == KV_STRING || vk == KV_STRUCT) ? 1 : 0);
     for (int64_t i = 0; i < k_cap(m); i++) {
         KEntry *e = &k_ents(m)[i];
         if (e->state == KV_USED) out = dial_array_push(out, e->val);

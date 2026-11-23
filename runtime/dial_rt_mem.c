@@ -42,6 +42,69 @@ void *dial_struct_box(const void *src, int64_t size) {
     return p;
 }
 
+/* ---- 字段级 ARC 装箱（v1.21）------------------------------------------- */
+/* 各句柄字段的 release 由 stdlib 提供（链接期解析）。用通用 dial_rc_release
+ * 之外的专用入口是为了尊重 immortal 短路与 channel 的原子 rc。 */
+extern void dial_string_release(void *);
+extern void dial_bytes_release(void *);
+extern void dial_array_release(void *);
+extern void dial_map_release(void *);
+extern void dial_kvmap_release(void *);
+extern void dial_error_release(void *);
+extern void dial_channel_release(void *);
+
+/* 描述符 kind（与编译器 ir.rs::ArcKind 的判别值一致）：
+ * 1=String 2=Bytes 3=Array 4=Error 5=Generic(map/set/kvmap) 6=Channel */
+#define DAF_STRING  1
+#define DAF_BYTES   2
+#define DAF_ARRAY   3
+#define DAF_ERROR   4
+#define DAF_GENERIC 5
+#define DAF_CHANNEL 6
+
+void *dial_struct_box_arc(const void *src, int64_t size, const void *desc) {
+    /* ARC box 头布局：[desc_ptr][rc][payload]，比普通 box 多 8 字节 desc 指针。
+     * 关键：refcount 必须紧邻 payload（p[-1]），因为容器 COW / retain 走的是
+     * 通用 dial_rc_retain(p)，它读 p[-1]。desc 放 p[-2]，只有专用 release 读它。
+     * 若把 desc 放 p[-1]，通用 retain 会把 desc 指针 +1 —— 灾难。 */
+    char *blk = (char *)malloc((size_t)(16 + size));
+    if (!blk) dial_assert_fail("内存分配失败（OOM）");
+    ((int64_t *)blk)[0] = (int64_t)desc;  /* p[-2] = desc */
+    ((int64_t *)blk)[1] = 1;              /* p[-1] = rc = 1 */
+    memcpy(blk + 16, src, (size_t)size);
+    return blk + 16;                       /* payload 指针 */
+}
+
+void dial_struct_box_arc_release(void *p) {
+    if (!p) return;
+    int64_t *rcp = (int64_t *)p - 1;   /* rcp[0] = rc（p[-1]，与通用 retain 同一位置） */
+    int64_t *descp = (int64_t *)p - 2; /* descp[0] = desc 指针（p[-2]） */
+    /* 静态 immortal 短路（ARC box 正常不会是 immortal，但保持与通用 release 同 idiom）。 */
+    if (rcp[0] == DIAL_RC_IMMORTAL) return;
+    DIAL_HEAP_ASSERT(rcp[0] > 0, "release 了引用计数已归零的 ARC box（double free）");
+    if (--rcp[0] != 0) return;
+
+    const int64_t *desc = (const int64_t *)descp[0];
+    if (desc) {
+        int64_t n = desc[0];
+        const DialArcFieldDesc *f = (const DialArcFieldDesc *)(desc + 1);
+        for (int64_t i = 0; i < n; i++) {
+            void *h = *(void **)((char *)p + f[i].offset);
+            if (!h) continue;
+            switch (f[i].kind) {
+                case DAF_STRING:  dial_string_release(h);  break;
+                case DAF_BYTES:   dial_bytes_release(h);   break;
+                case DAF_ARRAY:   dial_array_release(h);   break;
+                case DAF_ERROR:   dial_error_release(h);   break;
+                case DAF_GENERIC: dial_rc_release(h);      break;
+                case DAF_CHANNEL: dial_channel_release(h); break;
+                default: break;
+            }
+        }
+    }
+    free((char *)p - 16);
+}
+
 void *dial_rc_clone(void *p, int64_t payload_size) {
     if (!p) return NULL;
     // 静态 immortal 对象不可变：原样返回自身（配合 dial_string_clone 的

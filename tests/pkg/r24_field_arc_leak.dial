@@ -1,0 +1,25 @@
+// R24 泄漏压测：含句柄字段 struct 反复进容器（数组 + map），验证字段级 ARC
+// 无泄漏（修复前 asm 每轮漏一个 ARC box，20 万次即数十 MB）。
+// 功能标记 r24_done；RSS 门禁在 run_tests.sh 中按后端分别设阈。
+struct Rec {
+    id: int = 0,
+    name: string = "x",
+}
+
+fn main(): int {
+    var i: int = 0;
+    while (i < 200000) {
+        // 数组路径：fresh 字面量装箱 → push → 作用域退出释放 box + 字段
+        var rs: Rec[] = [];
+        rs.push(Rec{id: i, name: "app_" + str(i)});
+        var r: Rec = rs.get(0);
+
+        // map 路径：put/get_or/get/remove 的 box 结算
+        var m: map<string, Rec> = new_kv_map();
+        m.put("k", Rec{id: i, name: "map_" + str(i)});
+        var got: Rec = m.get_or("k", Rec{id: 0, name: "z"});
+        i = i + 1;
+    }
+    print("r24_done");
+    return 0;
+}

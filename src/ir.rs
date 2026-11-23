@@ -157,7 +157,7 @@ pub enum AConv {
 
 /// ARC 原语的种类，决定发射时落到哪个 `dial_*_retain/release`。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ArcKind { Generic, String, Array, Error, Bytes }
+pub enum ArcKind { Generic, String, Array, Error, Bytes, KvMap }
 
 /// 调用链接种类：Dial 内部函数 / 语言层 extern（FFI）/ 运行时 C 符号（`dial_*`）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -187,6 +187,9 @@ pub enum IrInst {
     /// 仅在自研 asm 后端使用：字面量编译期已知且不可变，静态化可省去循环内
     /// 每次求值的 dial_string_new（malloc+strlen+memcpy）与成对 release。
     LeaStaticString { dst: VReg, lit: u32 },
+    /// 取任意静态只读数据标签的地址（v1.21 字段级 ARC desc 表）。
+    /// label 是 emit 时发到 .rodata 的符号名（如 `.Ldarc_Rec`）。
+    LeaStaticData { dst: VReg, label: String },
     /// 指针加字节偏移：`dst = base + off`（off 为 64 位字节数）。
     /// 用于借出堆对象的内部数据区（如 string / bytes 的 payload 跳过 8 字节头）。
     PtrAdd { dst: VReg, base: VReg, off: Value },
@@ -265,6 +268,7 @@ impl IrInst {
             IrInst::Load { .. }
             | IrInst::LeaLabel { .. }
             | IrInst::LeaStaticString { .. }
+            | IrInst::LeaStaticData { .. }
             | IrInst::Bin { .. }
             | IrInst::Un { .. }
             | IrInst::FBin { .. }
@@ -296,6 +300,7 @@ impl IrInst {
             | IrInst::FieldAddr { dst, .. }
             | IrInst::LeaLabel { dst, .. }
             | IrInst::LeaStaticString { dst, .. }
+            | IrInst::LeaStaticData { dst, .. }
             | IrInst::FuncAddr { dst, .. }
             | IrInst::PtrAdd { dst, .. }
             | IrInst::Bin { dst, .. }
@@ -328,7 +333,7 @@ impl IrInst {
             | IrInst::FCmp { a, b, .. } => { push_val(*a, out); push_val(*b, out); }
             IrInst::Un { a, .. } | IrInst::Conv { a, .. } => push_val(*a, out),
             IrInst::PtrAdd { base, off, .. } => { out.push(*base); push_val(*off, out); }
-            IrInst::LeaLabel { .. } | IrInst::LeaStaticString { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => {}
+            IrInst::LeaLabel { .. } | IrInst::LeaStaticString { .. } | IrInst::LeaStaticData { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => {}
             IrInst::Call { args, .. } => for a in args { push_val(*a, out); }
             IrInst::CallIndirect { target, args, .. } => {
                 out.push(*target);
@@ -356,7 +361,7 @@ impl IrInst {
             IrInst::Un { a, .. } | IrInst::Conv { a, .. } => *a == Value::Reg(v),
             IrInst::Load { ptr, .. } | IrInst::FieldAddr { base: ptr, .. } => *ptr == v,
             IrInst::PtrAdd { base, off, .. } => *base == v || *off == Value::Reg(v),
-            IrInst::LeaLabel { .. } | IrInst::LeaStaticString { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => false,
+            IrInst::LeaLabel { .. } | IrInst::LeaStaticString { .. } | IrInst::LeaStaticData { .. } | IrInst::Alloca { .. } | IrInst::FuncAddr { .. } => false,
             IrInst::EnvInit { argc, argv } => *argc == Value::Reg(v) || *argv == Value::Reg(v),
             IrInst::Line(..) => false,
             IrInst::DebugVar { .. } => false,
@@ -433,6 +438,9 @@ pub struct IrProgram {
     pub functions: Vec<IrFunction>,
     /// 字符串字面量索引 → UTF-8 原文（emit 时加 `\0` 进 .rodata）。
     pub string_literals: Vec<String>,
+    /// v1.21 字段级 ARC：(标签名, desc 表 i64 序列)。emit 时发到 .rodata。
+    /// 表格式 `[nfields][(kind, offset) × n]`，与 runtime/dial_rt_mem.c 一致。
+    pub arc_descs: Vec<(String, Vec<i64>)>,
     /// 函数名 → 签名（来自 semantic 解析结果）。
     pub functions_sig: HashMap<String, FuncInfo>,
     /// 结构体名 → (字段(名,类型), 默认值)，复用 semantic 的 StructTable。
@@ -455,7 +463,7 @@ impl IrProgram {
         goto_depths: HashMap<String, usize>,
         cstruct_names: HashSet<String>,
     ) -> Self {
-        IrProgram { functions: Vec::new(), string_literals: Vec::new(), functions_sig, structs, cstruct_names, goto_depths }
+        IrProgram { functions: Vec::new(), string_literals: Vec::new(), arc_descs: Vec::new(), functions_sig, structs, cstruct_names, goto_depths }
     }
     /// 登记一个字符串字面量，返回其索引。
     pub fn intern_string(&mut self, s: &str) -> u32 {

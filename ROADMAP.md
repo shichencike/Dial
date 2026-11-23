@@ -1,7 +1,7 @@
 # Dial 编译器总路线图与当前进度
 
 > 本文件是**单一事实源**：一屏看清「总路线图是什么、现在走到哪、接下来做什么」。
-> 状态快照：**2026-11-22**。更细的证据链与历史裁决见 [`rationale/`](rationale/) 下各专题文档，
+> 状态快照：**2026-11-23**。更细的证据链与历史裁决见 [`rationale/`](rationale/) 下各专题文档，
 > 变更流水见 [`CHANGELOG.md`](CHANGELOG.md)。本文件只记结论与进度，不复述论证过程。
 
 ---
@@ -51,6 +51,7 @@
 | P2 功能 | select 超时、map string 值已落地；原子类型宪法永久否决；print(str) 两边都缺暂不管 | 四项终态，无未决 |
 | P3 工程化 | 过时结论清理 + struct 进容器 fuzz 盲区固化 | diff_fuzz 450 次 0 失败 |
 | P0 补漏（v1.21 审查） | 修复两类 ARC 泄漏（asm 出口 moved 污染 + LLVM 字面量堆分配）；补齐 asm 相对 LLVM 的 3 项 SIMD 缺口（变量 lane 索引 / bitcast simd / bitcast array） | R22（RSS 断言）、R23（双后端逐值一致 + 越界 Fail-Fast + O0-O3） |
+| P2 功能（v1.21 字段级 ARC） | 含句柄字段 struct 进数组/map（desc 表 ARC box，逐字段级联 release）；双后端 `get_or` 命中字段结算对齐；asm KvMap 走专用 release；LLVM string `+` 操作数结算补齐 | R24（双后端逐字一致 + 20 万次混合压测 RSS < 8MB + double-free 回归）；ASAN UAF+leak 双检全绿，RSS 10~40 万次恒定 ~1.5MB |
 | **验收** | ①OPT-ENOUGH ②P0 清零 ③AArch64 语义+DWARF ④P2 全裁决 ⑤P3 收口 | **五项全绿，能力上已代替 LLVM** |
 
 ### 3.2 主线 B · dialpkg —— ✅ P4.0~P4.4 全部落地

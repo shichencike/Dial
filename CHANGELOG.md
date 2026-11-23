@@ -22,6 +22,35 @@
 
 ## [未发布]
 
+### Added（v1.21 字段级 ARC：含句柄字段 struct 进容器）
+
+- **字段级 ARC 落地**：含 `string` / `array` / `map` 等句柄字段的 struct 现在可作为数组元素
+  与 map 值（此前语义层一律拒绝）。装箱为带 desc 表的 ARC box，布局 `[desc][rc][payload]`
+  （rc 紧邻 payload 以兼容通用 `dial_rc_retain(p)` 读 `p[-1]`；desc 在 `p[-2]`），
+  容器释放时按 desc 逐字段级联 release。desc 表 `[nfields][(kind,offset)×n]` 由两端
+  静态发射（LLVM 全局常量 / asm `.rodata .Ldarc_<Struct>`）。
+  - 新增 `dial_struct_box_arc` / `dial_struct_box_arc_release`（`runtime/dial_rt_mem.c`）。
+  - 容器元素 kind 扩展：数组 `DIAL_ELEM_BOXARC=7`、map `KV_STRUCT_ARC=7`；`STDLIB_ABI` 6→7。
+  - 语义层放开数组元素 / map 值 / `get_or` / 类型良构检查对可装箱 struct 的限制。
+  - B6 负向断言翻转为正向；新增 R24 门禁（双后端功能逐字一致 + 20 万次混合压测 +
+    峰值 RSS < 8MB）。
+
+### Fixed（v1.21 字段级 ARC 收口：双后端级联结算对齐）
+
+- **LLVM `get_or` 命中 double-free（heap-use-after-free）**：命中时 C 侧 `dial_kvmap_get_or`
+  对 ARC struct 不 retain，返回的是表内 box 的字段借用；LLVM 变量声明未对解箱副本字段 +1，
+  作用域退出提前释放字段 → map 销毁二次释放（exit=134）。修复：解箱副本按 `desc` 递归
+  retain 字段后再归还 default box（对齐 `get` 的 borrowed 口径）。
+- **LLVM string `+` 操作数泄漏**：`dial_string_concat(a,b)` 只读不消费操作数，LLVM 端缺失
+  对 owned 临时（如 `str(i)`、嵌套拼接）的结算，每轮泄漏一份；补齐与 asm
+  `release_string_temp` 同口径的操作数释放。修复后 10 万~40 万次压测 RSS 恒定 ~1.5MB。
+- **asm `KvMap` 走通用 `dial_rc_release` 不逐条释放值装箱**：新增 `ArcKind::KvMap`，
+  retain/release 分派到 `dial_kvmap_retain` / `dial_kvmap_release`，与 LLVM `release_value`
+  对齐。
+- **asm `get_or` 命中字段 double-release**：与 LLVM 同源；补 `StructRetain` 对解箱副本字段 +1。
+  （此前被 asm 漏逐条释放 box 掩盖为「仅泄漏」，修 KvMap release 后暴露，已一并修复。）
+- 全部经 ASAN（clang `-fsanitize=address`，UAF + leak 双检）与双后端 RSS 规模无关性验证。
+
 ### Fixed（asm 后端 SIMD 功能对等：补齐相对 LLVM 的 3 项缺口）
 
 - **以双后端实测核实并修复 asm 后端相对 LLVM 的 3 项功能缺口**（此前 ROADMAP §5 护栏
