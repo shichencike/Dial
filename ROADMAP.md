@@ -1,7 +1,7 @@
 # Dial 编译器总路线图与当前进度
 
 > 本文件是**单一事实源**：一屏看清「总路线图是什么、现在走到哪、接下来做什么」。
-> 状态快照：**2026-11-23**。更细的证据链与历史裁决见 [`rationale/`](rationale/) 下各专题文档，
+> 状态快照：**2026-11-24**。更细的证据链与历史裁决见 [`rationale/`](rationale/) 下各专题文档，
 > 变更流水见 [`CHANGELOG.md`](CHANGELOG.md)。本文件只记结论与进度，不复述论证过程。
 
 ---
@@ -53,6 +53,7 @@
 | P0 补漏（v1.21 审查） | 修复两类 ARC 泄漏（asm 出口 moved 污染 + LLVM 字面量堆分配）；补齐 asm 相对 LLVM 的 3 项 SIMD 缺口（变量 lane 索引 / bitcast simd / bitcast array） | R22（RSS 断言）、R23（双后端逐值一致 + 越界 Fail-Fast + O0-O3） |
 | P2 功能（v1.21 字段级 ARC） | 含句柄字段 struct 进数组/map（desc 表 ARC box，逐字段级联 release）；双后端 `get_or` 命中字段结算对齐；asm KvMap 走专用 release；LLVM string `+` 操作数结算补齐 | R24（双后端逐字一致 + 20 万次混合压测 RSS < 8MB + double-free 回归）；ASAN UAF+leak 双检全绿，RSS 10~40 万次恒定 ~1.5MB |
 | P2 功能（v1.22 调试裁剪） | `debug_print(...)` + `debug { ... }`：debug 构建正常输出/执行，release 构建在 analyze 前整块/整句裁剪（跳过类型检查 + 产物零残留）；LSP/test 保留完整 AST | R25（双后端 × debug/release 功能逐字一致 + 副作用开关 + `strings` 零残留 + release 跳过类型检查，10 项全绿） |
+| P3 工程化（v1.23 预处理阶段） | 独立 `src/preprocess.rs` 收拢源码收集/import 解析/AST 合并/extern-link 结算/debug 裁剪；`PreprocessOptions` 作为唯一扩展点（未来 cfg/宏）；`frontend` 瘦身为两步编排 | 行为不变重构：多文件合并+循环检测+DWARF+R25 裁剪 smoke 全过；4 项纯函数单测（共 22 项全绿）+ 全量回归 |
 | **验收** | ①OPT-ENOUGH ②P0 清零 ③AArch64 语义+DWARF ④P2 全裁决 ⑤P3 收口 | **五项全绿，能力上已代替 LLVM** |
 
 ### 3.2 主线 B · dialpkg —— ✅ P4.0~P4.4 全部落地

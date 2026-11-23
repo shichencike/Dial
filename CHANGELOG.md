@@ -22,6 +22,21 @@
 
 ## [未发布]
 
+### Added（v1.23 专门的预处理阶段）
+
+- 新增独立模块 `src/preprocess.rs`：编译流水线中**专门且唯一**的前置处理层，位于 token
+  收集与语义分析 `analyze` 之间。收拢源码收集（三级 import 解析 / 循环检测 / 去重）、
+  逐文件 parse + AST 合并（冲突检测）、语言层 extern/link 结算（魔数校验 / rpath）、
+  以及 v1.22 的 debug 裁剪到一处。
+- 阶段入口 `preprocess::run(src, log, &PreprocessOptions)` 返回 `PreprocessOutput`
+  （`program` = 裁剪后喂给 analyze 的 AST；`raw_program` = 裁剪前完整 AST 供 LSP/test）。
+- 扩展点：`PreprocessOptions` 是预处理行为的唯一配置入口，后续加条件编译（`cfg`）、
+  源码宏、特征开关只需加字段 + 一道 pass，build/run/check/test 调用方零改动。
+- `frontend()` 瘦身为「预处理 → 语义分析」两步编排；跨模块辅助函数以 `pub(crate) use`
+  保留原 crate 根路径，`toolchain.rs` / `lsp.rs` 零改动。
+- 行为完全不变的架构重构；新增 4 项预处理纯函数单元测试（共 22 项单元测试全绿），
+  全量回归通过。
+
 ### Added（v1.22 调试输出与调试代码块：编译期裁剪）
 
 - **`debug_print(...)` 调试输出**：`print` 的调试期别名，输出目标/参数规则/variadic 行为完全一致

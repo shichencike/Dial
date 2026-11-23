@@ -39,20 +39,25 @@ mod lexer;
 mod lsp;
 mod package;
 mod parser;
+// v1.23：专门的预处理阶段——源码收集/import 解析/AST 合并/extern-link 结算/debug 裁剪。
+mod preprocess;
 mod pkgbuild;
 mod registry;
 mod resolve;
 mod semantic;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use safety::SafetyMode;
 use semantic::analyze;
+
+// 预处理阶段的辅助函数保留 crate 根的公开路径，避免改动 toolchain.rs 的调用点。
+pub(crate) use preprocess::{import_specs, is_local_import, local_module_path};
+use preprocess::{PreprocessOptions, PreprocessOutput};
 
 /// 代码生成后端。`llvm` 是既有路径（默认，零改动），`asm` 是自研后端
 /// （专属 IR + Pass → x86-64 / AArch64 汇编 → cc -c → .o）。
@@ -1035,121 +1040,6 @@ pub fn first_missing_package(imports: &[String]) -> Option<String> {
 /// 的分帧解析错位（实测表现为「一打开 import 了包的文档就卡死」）。
 /// CLI 构建传 stdout（构建日志），LSP 传 `window/logMessage` 通知——由调用方决定，
 /// 函数本身无权替调用方选往哪儿写。
-/// v1.04 FFI：`link "...";` 声明的库种类。
-///
-/// 静态归档直接进链接器输入；动态共享库除了进输入，还要额外注入运行期查找路径
-/// （见 `final_link` 的 `-Wl,-rpath`）。`.dialpkg` 包分发走另一条链路
-/// （`package.rs` + J 组），仍强制静态，不受这里影响。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FfiLibKind {
-    Static,
-    Dynamic,
-}
-
-struct FfiLib {
-    path: PathBuf,
-    kind: FfiLibKind,
-}
-
-/// v1.04 FFI：校验并解析 `link "...";` 声明的库路径。
-///
-/// 五条硬约束：
-///  1. **后缀白名单**：静态 `.a` / `.lib`；动态 `.so`（含 `libx.so.1`）、`.dll`、`.dylib`。
-///     其余后缀一律拒绝——系统库（libc / libm / pthread）由 C 编译器按平台默认动态解析，
-///     不写 `link`，避免把庞大系统库塞进 LTO 链路。
-///  2. 相对路径以**源文件所在目录**为基准解析，并要求文件确实存在（Fail-Fast，
-///     绝不静默降级成「链接器自己去找」）。
-///  3. 按后缀校验**内容魔数**：静态 `!<arch>\n`；ELF `.so` 为 `\x7fELF`；PE `.dll`
-///     为 `MZ`；Mach-O `.dylib` 为 32/64 位或 fat 的 magic。后缀对但内容是文本
-///     一律当场拒绝——伪装库混进链接器只会换来一句莫名其妙的 ld 报错。
-///  4. 动态库按**扩展名**判定格式（而非宿主平台），交叉编译链接他平台库时同样成立。
-///  5. **包分发铁律不动**：`.dialpkg` 的 `targets` 仍只认 `.a` / `.lib`（J 组锁死）。
-///     语言层 `link` 动态库是源码作者显式选择，由其自行承担运行期依赖。
-fn resolve_ffi_link(spec: &str, src_path: &Path) -> Result<FfiLib, String> {
-    let file_part = Path::new(spec)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(spec);
-    let lower = file_part.to_ascii_lowercase();
-
-    let (kind, expected) = if lower.ends_with(".a") || lower.ends_with(".lib") {
-        (FfiLibKind::Static, "ar 归档")
-    } else if lower.ends_with(".so") || lower.contains(".so.") {
-        (FfiLibKind::Dynamic, "ELF 共享对象")
-    } else if lower.ends_with(".dll") {
-        (FfiLibKind::Dynamic, "PE 动态库")
-    } else if lower.ends_with(".dylib") {
-        (FfiLibKind::Dynamic, "Mach-O 动态库")
-    } else {
-        return Err(format!(
-            "link 的路径必须是静态归档 .a / .lib 或动态库 .so / .dll / .dylib，遇到 '{}'；\
-             系统库（libc / libm）由 C 编译器默认链接，不需要也不允许用 link 声明",
-            spec
-        ));
-    };
-
-    let raw = Path::new(spec);
-    let candidate = if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        let base = src_path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        base.join(raw)
-    };
-    let canonical = candidate.canonicalize().map_err(|e| {
-        format!(
-            "link 声明的库 '{}' 无法读取（解析为 {}）：{}",
-            spec,
-            candidate.display(),
-            e
-        )
-    })?;
-
-    let mut f = fs::File::open(&canonical)
-        .map_err(|e| format!("无法打开库 '{}'：{}", canonical.display(), e))?;
-    let mut magic = [0u8; 8];
-    f.read_exact(&mut magic).map_err(|_| {
-        format!(
-            "库 '{}' 内容不完整（不足 8 字节），不是合法的 {}",
-            canonical.display(),
-            expected
-        )
-    })?;
-
-    let m4 = &magic[..4];
-    let ok = match kind {
-        FfiLibKind::Static => &magic == b"!<arch>\n",
-        FfiLibKind::Dynamic => {
-            if lower.ends_with(".so") || lower.contains(".so.") {
-                m4 == &b"\x7fELF"[..]
-            } else if lower.ends_with(".dll") {
-                &magic[..2] == &b"MZ"[..]
-            } else {
-                // Mach-O：32/64 位薄二进制与 fat 二进制的大小端变体。
-                const MACHO: [[u8; 4]; 8] = [
-                    [0xfe, 0xed, 0xfa, 0xce], [0xce, 0xfa, 0xed, 0xfe],
-                    [0xfe, 0xed, 0xfa, 0xcf], [0xcf, 0xfa, 0xed, 0xfe],
-                    [0xca, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca],
-                    [0xca, 0xfe, 0xba, 0xbf], [0xbf, 0xba, 0xfe, 0xca],
-                ];
-                MACHO.iter().any(|m| m4 == &m[..])
-            }
-        }
-    };
-    if !ok {
-        return Err(format!(
-            "{} '{}' 缺少合法的{}魔数，后缀对了但内容不是真正的库（拒绝伪装文件）",
-            if kind == FfiLibKind::Static { "静态库" } else { "动态库" },
-            canonical.display(),
-            expected
-        ));
-    }
-
-    Ok(FfiLib { path: canonical, kind })
-}
-
 pub fn resolve_imports(
     imports: &[String],
     log: &mut dyn FnMut(&str),
@@ -2132,18 +2022,6 @@ fn dispatch_tool(command: &str, args: &[String]) {
 //  统一前端：本地源码模块收集 + 包解析 + 语义分析
 // ---------------------------------------------------------------------------
 
-struct SourceUnit {
-    path: PathBuf,
-    tokens: Vec<lexer::Token>,
-}
-
-struct SourceSet {
-    /// 深度优先收集到的所有源码文件，units[0] 恒为主源文件。
-    units: Vec<SourceUnit>,
-    /// 汇总后的**包名** import（本地源码项不在这里），已去重。
-    imports: Vec<String>,
-}
-
 struct Frontend {
     program: ast::Program,
     /// `analyze` 之前的 AST 副本。`dialc test` 要为每块测试重新 analyze，
@@ -2164,296 +2042,33 @@ struct Frontend {
     fn_origin: HashMap<String, String>,
 }
 
-/// 只从 token 流里抽 `import "..."` 的字符串，不做完整语法解析。
+/// build / run / check / test 共用的编译前端（两步编排）。
 ///
-/// 之所以用「扫 token」而不是 `parser::parse`：两阶段解析的本意就是先拿 import
-/// 列表、解析包（从而知道不透明类型名）后再正式解析；此时若强行完整 parse，
-/// 源码里用到包句柄类型的地方会在第一遍就失败。扫 token 天然免疫这个问题。
-fn import_specs(tokens: &[lexer::Token]) -> Vec<String> {
-    let mut out = Vec::new();
-    for i in 0..tokens.len() {
-        if matches!(&tokens[i].kind, lexer::TokenKind::Import) {
-            if let Some(n) = tokens.get(i + 1) {
-                if let lexer::TokenKind::StringLit(s) = &n.kind {
-                    out.push(s.clone());
-                }
-            }
-        }
-    }
-    out
-}
-
-/// 判断一条 import 是否指向**本地源码模块**。
-///
-/// 两种写法都算本地：
-///   - 显式相对路径：`import "./util.dial";` / `"../common/util"` / 任意 `.dial` 后缀；
-///   - 裸名且同目录确有 `<name>.dial`：`import "util";` 直接可用——这也是
-///     「普通程序员写日常程序」最直觉的写法（清单 A1 的原样复现）。
-///
-/// 其它裸名再依次交给 `collect_sources` 的第二级（已安装包 manifest 的 `src`
-/// 映射里声明的 Dial 源码模块）与第三级（按包名读 `.diali` + 选 `.a`）。
-/// 两类本地写法都不匹配时，resolve_imports 会给出「找不到已安装的包」。
-fn is_local_import(spec: &str, base: &Path) -> bool {
-    if spec.ends_with(".dial")
-        || spec.starts_with("./")
-        || spec.starts_with("../")
-        || spec.starts_with(".\\")
-        || spec.starts_with("..\\")
-    {
-        return true;
-    }
-    if !spec.contains('/') && !spec.contains('\\') {
-        return base.join(format!("{}.dial", spec)).is_file();
-    }
-    false
-}
-
-fn local_module_path(spec: &str, base: &Path) -> PathBuf {
-    let mut rel = PathBuf::from(spec);
-    if rel.extension().and_then(|e| e.to_str()) != Some("dial") {
-        rel.set_extension("dial");
-    }
-    if rel.is_absolute() {
-        rel
-    } else {
-        base.join(rel)
-    }
-}
-
-/// 递归收集源码模块，按**三级优先**解析每条 `import`：
-///
-/// 1. 本地源码模块（相对路径 / 同目录同名 `.dial`）——用户项目里的文件优先；
-/// 2. 已安装包 `src/` 里的 Dial 源码模块（`[src]` 段声明的裸名）——随包分发，
-///    装包即用，无需复制；
-/// 3. 包名（`~/.dial/packages/<name>/`）——读 `.diali` + 选 `.a`，原有语义。
-///
-/// 第 1、2 级都走同一套递归展开（循环引用检测 / `visited` 去重 / AST 合并），
-/// 只有第 3 级汇总进 `set.imports` 交给 `resolve_imports`。
-/// `stack` 用于循环引用检测，`visited` 保证同一文件被多个模块 import 时只展开一次
-/// （否则会重复定义函数）。错误一律带**文件路径**，多文件项目才排得清障。
-fn collect_sources(
-    root: &Path,
-    visited: &mut HashSet<PathBuf>,
-    stack: &mut Vec<PathBuf>,
-    set: &mut SourceSet,
-) -> Result<(), String> {
-    let canonical = root
-        .canonicalize()
-        .map_err(|e| format!("无法读取源文件 {}: {}", root.display(), e))?;
-    if stack.contains(&canonical) {
-        let chain: Vec<String> = stack
-            .iter()
-            .chain(std::iter::once(&canonical))
-            .map(|p| p.display().to_string())
-            .collect();
-        return Err(format!("本地源码 import 出现循环引用：{}", chain.join(" -> ")));
-    }
-    if visited.contains(&canonical) {
-        return Ok(());
-    }
-    visited.insert(canonical.clone());
-    stack.push(canonical.clone());
-
-    let source = fs::read_to_string(&canonical)
-        .map_err(|e| format!("无法读取 {}: {}", canonical.display(), e))?;
-    let tokens = lexer::lex(&source)
-        .map_err(|e| format!("{}：{}", canonical.display(), e))?;
-    let specs = import_specs(&tokens);
-    set.units.push(SourceUnit {
-        path: canonical.clone(),
-        tokens,
-    });
-
-    let base = canonical.parent().unwrap_or_else(|| Path::new("."));
-    for spec in specs {
-        if is_local_import(&spec, base) {
-            // 第一级：本地源码模块（相对路径 / 同目录同名 `.dial`）。
-            // 保持最高优先——用户项目里自己放的同名文件永远覆盖包内副本，
-            // 这样「改一份源码试试」不需要动已安装的包。
-            let child = local_module_path(&spec, base);
-            if !child.is_file() {
-                return Err(format!(
-                    "{}：本地源码 import '{}' 指向的文件不存在（解析为 {}）。\n\
-                     本地模块请写相对路径（如 import \"./util.dial\";）；\n\
-                     随包分发的 Dial 源码模块或已安装的包请写裸包名。",
-                    canonical.display(),
-                    spec,
-                    child.display()
-                ));
-            }
-            collect_sources(&child, visited, stack, set)?;
-        } else if let Some((pkg_dir, rel)) =
-            package::find_src_module(&spec).map_err(|e| e.to_string())?
-        {
-            // 第二级：包内 `src/` 的 Dial 源码模块（manifest 的 `src` 映射里
-            // 以该裸名声明）。与本地模块走**完全相同**的展开路径——同一套循环
-            // 引用检测 / visited 去重 / AST 合并，只是文件来自包缓存。
-            // 它不引入任何机器码，也不新增 extern fn；模块内部的 `import "包";`
-            // 会照常被汇总到第三级，由 resolve_imports 读 .diali + 选 .a。
-            let child = pkg_dir.join(&rel);
-            if !child.is_file() {
-                return Err(format!(
-                    "{}：包缓存 {} 声明了 Dial 源码模块 '{}'（src['{}'] = '{}'），\n\
-                     但文件不存在：{}。包可能已损坏，请重新安装。",
-                    canonical.display(),
-                    pkg_dir.display(),
-                    spec,
-                    spec,
-                    rel,
-                    child.display()
-                ));
-            }
-            collect_sources(&child, visited, stack, set)?;
-        } else if !set.imports.contains(&spec) {
-            // 第三级：按包名解析（读 .diali + 选 .a），v0.93 以来的原有语义。
-            set.imports.push(spec);
-        }
-    }
-    stack.pop();
-    Ok(())
-}
-
-/// build / run / check / test 共用的编译前端。
-///
-/// 顺序：递归收集源码 → 解析包（拿不透明类型）→ 逐个源码文件正式 parse →
-/// 合并 AST（含冲突检测）→ 语言层 extern/link 并入 → 语义分析。
-/// 合并时把每个文件 `link` 的相对路径按**该文件所在目录**绝对化，避免子模块
-/// 里的库被误当成相对主文件目录解析。
+/// 前置处理全部委托给专门的 [`preprocess`] 阶段（v1.23）：源码收集 / import 解析 /
+/// AST 合并 / extern-link 结算 / debug 裁剪都在那里完成。本函数只剩两件事：
+///   1. 调预处理阶段拿到干净的 AST；
+///   2. 跑语义分析 `analyze`。
 fn frontend(src_path: &str, log: &mut dyn FnMut(&str), keep_debug: bool) -> Result<Frontend, String> {
-    let mut set = SourceSet {
-        units: Vec::new(),
-        imports: Vec::new(),
-    };
-    let mut visited: HashSet<PathBuf> = HashSet::new();
-    let mut stack: Vec<PathBuf> = Vec::new();
-    collect_sources(Path::new(src_path), &mut visited, &mut stack, &mut set)?;
+    let mut pre: PreprocessOutput = preprocess::run(
+        src_path,
+        log,
+        &PreprocessOptions { keep_debug },
+    )?;
 
-    let (mut externs, mut pkg_libs, opaque_types) = resolve_imports(&set.imports, log).map_err(|e| {
-        // D6：旧诊断只说 dialc install，不解释「本地源码模块」这条路。
-        // 只在「找不到已安装的包」这一句上追加指引，ABI / 哈希等其它错误原样透出。
-        if e.contains("找不到已安装的包") {
-            format!(
-                "{}\n（提示：import 按三级解析——① 同目录 .dial 源码（写 import \"./xxx.dial\"; 或裸名 import \"xxx\";）；② 已安装包 src/ 里 [src] 段声明的 Dial 源码模块（裸名，装包即用、无需复制）；③ 包名（读 .diali + 链 .a）。① ② 都会自动合并编译。见 README §34）",
-                e
-            )
-        } else {
-            e
-        }
-    })?;
-
-    let mut program = ast::Program {
-        imports: set.imports.clone(),
-        structs: Vec::new(),
-        functions: Vec::new(),
-        externs: Vec::new(),
-        links: Vec::new(),
-        cstructs: Vec::new(),
-        tests: Vec::new(),
-    };
-    let mut fn_origin: HashMap<String, String> = HashMap::new();
-    let mut struct_origin: HashMap<String, String> = HashMap::new();
-
-    for unit in &set.units {
-        let mut p = parser::parse_with(unit.tokens.clone(), &opaque_types)
-            .map_err(|e| format!("{}：{}", unit.path.display(), e))?;
-        let origin = unit.path.display().to_string();
-        for f in &p.functions {
-            if let Some(prev) = fn_origin.get(&f.name) {
-                return Err(format!(
-                    "函数 '{}' 重复定义：{} 与 {}（本地源码模块合并后不允许同名函数）",
-                    f.name, prev, origin
-                ));
-            }
-            fn_origin.insert(f.name.clone(), origin.clone());
-        }
-        for st in &p.structs {
-            if let Some(prev) = struct_origin.get(&st.name) {
-                return Err(format!(
-                    "结构体 '{}' 重复定义：{} 与 {}",
-                    st.name, prev, origin
-                ));
-            }
-            struct_origin.insert(st.name.clone(), origin.clone());
-        }
-        let base = unit.path.parent().unwrap_or_else(|| Path::new("."));
-        for l in &mut p.links {
-            let raw = Path::new(&l.path);
-            if !raw.is_absolute() {
-                l.path = base.join(raw).to_string_lossy().into_owned();
-            }
-        }
-        program.structs.append(&mut p.structs);
-        program.functions.append(&mut p.functions);
-        program.externs.append(&mut p.externs);
-        program.links.append(&mut p.links);
-        program.cstructs.append(&mut p.cstructs);
-        program.tests.append(&mut p.tests);
-    }
-
-    // v1.04 FFI：语言层 extern fn 并入外部函数表（与包 .diali 一视同仁）。
-    for e in &program.externs {
-        if externs.iter().any(|(n, _)| n == &e.name) {
-            return Err(format!(
-                "外部函数 '{}' 重复声明（包 .diali 与源码 extern fn 撞名）",
-                e.name
-            ));
-        }
-        externs.push((
-            e.name.clone(),
-            semantic::FuncInfo {
-                params: e.params.iter().map(|(_, t)| t.clone()).collect(),
-                own_params: vec![false; e.params.len()], // extern C 无 Dial consume 语义
-                ret: e.ret.clone(),
-                defaults: vec![None; e.params.len()],
-                variadic: e.variadic,
-                // 外部声明的函数体在 C 侧，符号名即链接名——等价于「已导出」。
-                exported: true,
-                is_async: false,
-            },
-        ));
-    }
-
-    // v1.04 FFI：link 声明的库按后缀验魔数，动态库额外收集 rpath。
-    let mut ffi_rpaths: Vec<PathBuf> = Vec::new();
-    for l in &program.links {
-        match resolve_ffi_link(&l.path, Path::new(src_path)) {
-            Ok(lib) => {
-                if lib.kind == FfiLibKind::Dynamic {
-                    if let Some(dir) = lib.path.parent() {
-                        if !ffi_rpaths.iter().any(|d| d.as_path() == dir) {
-                            ffi_rpaths.push(dir.to_path_buf());
-                        }
-                    }
-                }
-                pkg_libs.push(lib.path);
-            }
-            Err(msg) => {
-                return Err(format!("第 {} 行 第 {} 列：{}", l.line, l.col, msg));
-            }
-        }
-    }
-
-    // v1.22：raw_program 始终是裁剪前的完整 AST（供 LSP / dialc test 看到全部调试代码）。
-    // release 构建（keep_debug=false）在语义分析之前删除 debug_print 语句与 debug 块，
-    // 使调试代码既不参与类型检查（用户裁决：release 跳过检查），也不进入任何后端产物。
-    let raw_program = program.clone();
-    if !keep_debug {
-        semantic::strip_debug_program(&mut program);
-    }
-    let (functions, structs, goto_depths) = analyze(&mut program, &externs)
+    let (functions, structs, goto_depths) = analyze(&mut pre.program, &pre.externs)
         .map_err(|e| format!("{}：{}", src_path, e))?;
 
     Ok(Frontend {
-        program,
-        raw_program,
+        program: pre.program,
+        raw_program: pre.raw_program,
         functions,
         structs,
         goto_depths,
-        externs,
-        pkg_libs,
-        ffi_rpaths,
+        externs: pre.externs,
+        pkg_libs: pre.pkg_libs,
+        ffi_rpaths: pre.ffi_rpaths,
         src_file: src_path.to_string(),
-        fn_origin,
+        fn_origin: pre.fn_origin,
     })
 }
 
