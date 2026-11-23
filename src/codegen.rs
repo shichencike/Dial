@@ -5759,7 +5759,9 @@ impl<'ctx> CodeGen<'ctx> {
                         Ok(self.call_c("dial_thread_new", &[thunk_ptr.into(), cell.into()]))
                     }
                     _ => {
-                        if name == "print" || name == "eprint" {
+                        if name == "print" || name == "eprint" || name == "debug_print" {
+                            // v1.22：debug_print 是 print 的调试期别名，输出目标同为 stdout。
+                            // build 路径下裁剪 pass 已改名为 print；LSP / test 直连时走此别名分支。
                             // variadic（v1.00）：中间实参按原样紧接输出（不换行），
                             // 只有最后一个补 '\n'。单实参时行为与旧版完全一致。
                             // v1.04 C8：eprint 走独立的 emit_eprint / emit_eprint_raw，

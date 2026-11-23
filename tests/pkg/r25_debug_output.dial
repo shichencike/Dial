@@ -1,0 +1,19 @@
+// R25 正向：调试输出（debug_print）与调试代码块（debug { ... }）。
+// debug 构建：debug_print 正常输出、debug 块执行（含副作用）；
+// release 构建：两者在语义分析前被整块/整句裁剪，不输出、不执行、零 residue。
+fn main(): int {
+    print("START");
+    debug_print("DBG_LINE");
+    var x: int = 1;
+    debug {
+        x = x + 100;
+        print("DBG_BLOCK");
+        debug_print("DBG_NESTED=" + str(x));
+        if (x == 101) {
+            print("DBG_IF");
+        }
+    }
+    print("X=" + str(x));
+    print("END");
+    return 0;
+}

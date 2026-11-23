@@ -1055,6 +1055,7 @@ v0.99 补齐三个内置，构成输出的最小完备集：
 | `print` | `print(x: int \| float \| bool \| char \| string \| error): void` | 标量或字符串 | **是**（`\n`） |
 | `print_raw` | `print_raw(x: int \| float \| bool \| char \| string \| error): void` | 同上，**原样**输出 | **否** |
 | `write_char` | `write_char(c: char): void` | 单个字符 | **否** |
+| `debug_print`（v1.22） | 与 `print` 完全相同 | 仅 debug 构建输出，release 构建整句删除 | **是**（`\n`） |
 
 **`print` 与 `print_raw` 的唯一差别就是结尾那个 `\n`**，其余完全一致：
 接受的类型集合相同、标量的文本形态相同（`print(42)` 与 `print_raw(42)` 都输出 `42`）、
@@ -1084,6 +1085,39 @@ print("");
 
 **`print_raw` 的返回值**：无（与 `print` 一致，都是**语句**而非表达式），
 不能出现在赋值右侧或 `return` 位置。
+
+#### 调试输出与调试代码块（v1.22）
+
+Dial 提供两个**编译期裁剪**的调试设施，让你把诊断代码直接写在源码里，发布时自动消失：
+
+- **`debug_print(...)`**：`print` 的调试期别名，参数规则、输出形态完全相同（stdout、末尾换行）。
+- **`debug { ... }`**：调试代码块，与普通裸块一样引入独立作用域（块内变量块外不可见）。
+
+```dial
+fn main(): int {
+    print("start");
+    debug_print("进入主流程");           // debug 输出，release 删除
+    var x: int = 1;
+    debug {
+        x = x + 100;                      // 块内副作用仅 debug 生效
+        debug_print("x=" + str(x));
+    }
+    print("x=" + str(x));                 // debug: x=101 / release: x=1
+    return 0;
+}
+```
+
+**裁剪规则**（由构建模式决定，见 `--safety`）：
+
+| 构建 | 条件 | debug_print / debug 块 |
+| --- | --- | --- |
+| Debug（**默认**） | `--safety debug` | 保留：正常输出、正常执行（含副作用） |
+| Release | `--release` / `--fast` / `--safety safe` / `--safety fast` | 在语义分析前整块/整句删除 |
+
+这意味着 release 构建：① 不检查调试代码里的类型错误（可放心写临时诊断代码）
+② 二进制里**不含**任何调试字符串或调用（零体积/信息残留）③ 零运行时开销。
+`dialc check` 作为纯类型检查工具，始终保留并校验调试代码；
+LSP 与 `dialc test` 同样看到完整源码。
 
 **`str(x)` 的类型分派**：`str()` 在 v0.99 起接受 `char` 实参，返回**只含这一个字符**的 UTF-8 字符串
 （ASCII 字符为 1 字节，多字节码点如 `'中'` 为 3 字节）。它让字符能直接参与字符串拼接：

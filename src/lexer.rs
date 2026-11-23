@@ -92,6 +92,9 @@ pub enum TokenKind {
     Asm,
     /// `simd<T, N>` 原生向量类型（v1.04 底层原语）。
     Simd,
+    /// `debug { ... }` 调试代码块（v1.22）：仅 debug 构建保留，release 构建在
+    /// 语义分析前整块裁剪掉（含内部语句，故 release 下不检查其中类型错误）。
+    Debug,
 
     // 类型关键字
     IntT,
@@ -585,6 +588,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
                 "not" => TokenKind::Not,
                 "match" => TokenKind::Match,
                 "defer" => TokenKind::Defer,
+                "debug" => TokenKind::Debug,
                 "do" => TokenKind::Do,
                 "step" => TokenKind::Step,
                 "const" => TokenKind::Const,

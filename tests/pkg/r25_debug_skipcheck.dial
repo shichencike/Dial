@@ -1,0 +1,11 @@
+// R25 语义：release 构建在语义分析前裁剪调试代码，故 debug 块内的类型错误
+// 在 release 下不报；debug 构建必须报出该类型错误。两端后端均为 analyze 前裁剪，行为一致。
+fn main(): int {
+    print("START");
+    debug {
+        var bogus: int = "TYPE_ERROR_STRING";
+        print(bogus);
+    }
+    print("END");
+    return 0;
+}

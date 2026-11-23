@@ -2728,7 +2728,10 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_call(&mut self, name: &str, args: &[Expr]) -> Result<(Value, bool), String> {
-        if name == "print" || name == "eprint" || name == "print_raw" || name == "eprint_raw" || name == "write_char" {
+        // v1.22：debug_print 是 print 的调试期别名（走 stdout，带换行）。build 路径下
+        // 裁剪 pass 已改名为 print；LSP / test 直连时走此别名分支。
+        if name == "print" || name == "eprint" || name == "print_raw" || name == "eprint_raw"
+            || name == "write_char" || name == "debug_print" {
             if args.is_empty() { return self.err(&format!("{} 至少需要一个参数", name)); }
             return self.lower_print(name, args);
         }

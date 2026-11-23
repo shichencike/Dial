@@ -530,6 +530,9 @@ pub enum Stmt {
         body: Vec<Stmt>,
         line: usize,
         col: usize,
+        /// v1.22：`debug { ... }` 调试块标记。普通裸块为 false。
+        /// true 时仅在 debug 构建保留；release 构建在语义分析前整块裁剪掉。
+        debug_only: bool,
     },
 }
 

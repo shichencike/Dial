@@ -652,7 +652,7 @@ fn main() {
     // 1~3) 词法 / 语法 / 语义（含本地源码模块合并、包解析、FFI 声明校验）
     //      统一交给 frontend()，让 build / run / check / test 共用同一条前端流水线——
     //      否则「检查通过」和「实际编译」可能因为两套解析逻辑而给出不同结论。
-    let fe = match frontend(&src_path, &mut |m| println!("{}", m)) {
+    let fe = match frontend(&src_path, &mut |m| println!("{}", m), safety == SafetyMode::Debug) {
         Ok(f) => f,
         Err(e) => {
             diagnostic::report(&e, &src_path);
@@ -2319,7 +2319,7 @@ fn collect_sources(
 /// 合并 AST（含冲突检测）→ 语言层 extern/link 并入 → 语义分析。
 /// 合并时把每个文件 `link` 的相对路径按**该文件所在目录**绝对化，避免子模块
 /// 里的库被误当成相对主文件目录解析。
-fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, String> {
+fn frontend(src_path: &str, log: &mut dyn FnMut(&str), keep_debug: bool) -> Result<Frontend, String> {
     let mut set = SourceSet {
         units: Vec::new(),
         imports: Vec::new(),
@@ -2433,7 +2433,13 @@ fn frontend(src_path: &str, log: &mut dyn FnMut(&str)) -> Result<Frontend, Strin
         }
     }
 
+    // v1.22：raw_program 始终是裁剪前的完整 AST（供 LSP / dialc test 看到全部调试代码）。
+    // release 构建（keep_debug=false）在语义分析之前删除 debug_print 语句与 debug 块，
+    // 使调试代码既不参与类型检查（用户裁决：release 跳过检查），也不进入任何后端产物。
     let raw_program = program.clone();
+    if !keep_debug {
+        semantic::strip_debug_program(&mut program);
+    }
     let (functions, structs, goto_depths) = analyze(&mut program, &externs)
         .map_err(|e| format!("{}：{}", src_path, e))?;
 
@@ -3129,7 +3135,8 @@ fn emit_registry_err(as_json: bool, msg: &str) {
 fn cmd_check(args: &[String]) {
     ensure_no_extra(args, 3);
     let src = one_arg(args, "check");
-    match frontend(&src, &mut |m| println!("{}", m)) {
+    // check 是纯类型检查工具：始终保留并校验全部调试代码（保持最严格的检查口径）。
+    match frontend(&src, &mut |m| println!("{}", m), true) {
         Ok(fe) => println!(
             "✅ 类型检查通过：{}（{} 个函数、{} 个 test 块）",
             src,
@@ -3487,7 +3494,8 @@ fn cmd_test(args: &[String]) {
         std::process::exit(1);
     }
     let src = files.remove(0);
-    let fe = match frontend(&src, &mut |_| {}) {
+    // dialc test 用 Debug 模式编译合成程序，便于断言里用 debug_print 输出诊断。
+    let fe = match frontend(&src, &mut |_| {}, true) {
         Ok(f) => f,
         Err(e) => {
             diagnostic::report(&e, &src);

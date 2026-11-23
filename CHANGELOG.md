@@ -22,6 +22,20 @@
 
 ## [未发布]
 
+### Added（v1.22 调试输出与调试代码块：编译期裁剪）
+
+- **`debug_print(...)` 调试输出**：`print` 的调试期别名，输出目标/参数规则/variadic 行为完全一致
+  （stdout、末尾换行）。debug 构建正常输出；release 构建在语义分析前整句删除。
+- **`debug { ... }` 调试代码块**：复用裸块作用域（块内变量块外不可见），debug 构建正常执行
+  （含副作用）；release 构建在语义分析前整块删除，块内语句（含副作用与资源分配）一概不执行。
+- **编译期裁剪 pass**（`semantic::strip_debug_program`）：仅在 release 构建、且位于 `analyze`
+  **之前**运行——因此 release ① 不检查调试代码类型错误（用户裁决）② 产物零调试字符串/调用残留
+  ③ 零运行时开销。`raw_program` 始终保留完整 AST，LSP / `dialc test` 照常看到全部调试代码。
+- **构建模式映射**：默认 `--safety debug` 保留调试代码；`--release` / `--fast` /
+  `--safety safe|fast` 均裁剪。`dialc check` 作为纯检查工具始终保留并校验调试代码。
+- 新增 R25 门禁：双后端 debug/release 功能逐字一致、副作用开关、release 产物零字符串残留、
+  release 跳过类型检查（10 项）。
+
 ### Added（v1.21 字段级 ARC：含句柄字段 struct 进容器）
 
 - **字段级 ARC 落地**：含 `string` / `array` / `map` 等句柄字段的 struct 现在可作为数组元素

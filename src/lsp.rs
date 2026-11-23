@@ -973,6 +973,7 @@ fn classify(kind: &TokenKind, lines: &[&str], line: usize, col: usize) -> (u32, 
         | TokenKind::Not
         | TokenKind::Match
         | TokenKind::Defer
+        | TokenKind::Debug
         | TokenKind::Do
         | TokenKind::Step | TokenKind::Const | TokenKind::Enum
         | TokenKind::With | TokenKind::Goto | TokenKind::Label

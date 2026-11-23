@@ -1335,7 +1335,14 @@ impl Parser {
             // 因此裸块可任意嵌套）。
             TokenKind::LBrace => {
                 let block = self.parse_block()?;
-                Ok(Stmt::Block { body: block, line: tok.line, col: tok.col })
+                Ok(Stmt::Block { body: block, line: tok.line, col: tok.col, debug_only: false })
+            }
+            // `debug { ... }`（v1.22）：调试代码块，与普通裸块共享 parse_block，
+            // 仅多打一个 debug_only 标记。裁剪 pass 在语义分析前按构建模式决定去留。
+            TokenKind::Debug => {
+                self.advance();
+                let block = self.parse_block()?;
+                Ok(Stmt::Block { body: block, line: tok.line, col: tok.col, debug_only: true })
             }
             TokenKind::Break => {
                 self.advance();

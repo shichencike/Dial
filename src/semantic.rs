@@ -2460,7 +2460,10 @@ pub fn type_of<V>(
             }
             // v1.04 C8：eprint 与 print 参数规则完全一致（连诊断文案都复用），
             // 唯一差别是输出目标 stderr。这里按名字并列识别，不新增一套校验逻辑。
-            if name == "print" || name == "eprint" {
+            // v1.22：debug_print 是 print 的调试期别名——build 路径下裁剪 pass 会在
+            // 语义分析前把它改名为 print；但 LSP / dialc test 直接 analyze 原始 AST，
+            // 故这里也按别名识别，保证两条路径诊断一致（诊断文案仍显示原名）。
+            if name == "print" || name == "eprint" || name == "debug_print" {
                 if args.is_empty() {
                     return Err(DialcError::new(
                         format!("语义错误：内置函数 {} 至少需要 1 个参数", name),
@@ -3976,6 +3979,90 @@ fn desugar_stmts(stmts: &mut [Stmt], map: &HashMap<String, (usize, Type)>) {
     }
 }
 
+// ===========================================================================
+// v1.22 调试代码裁剪（debug_print / debug 块）
+// ===========================================================================
+//
+// 语义：debug 构建保留调试代码并正常输出；release 构建在**语义分析之前**
+// 整块/整句删除，因此 release 下不对调试代码做类型检查（用户裁决：release 跳过检查）。
+//
+// 为什么放在 analyze 之前：
+//  - release 跳过检查 → 调试块里的类型错误不得影响发布构建；
+//  - 删除后 codegen/IR/链接产物里完全不出现调试字符串与调用（体积/信息零残留）；
+//  - LSP / dialc test 不调用本 pass，它们直接 analyze 原始 AST，调试代码照常可见。
+//
+// debug_print 作为 print 别名由 type_of + 两端 codegen 识别；本 pass 只负责「删除」，
+// 不需要在 debug 模式改写任何东西——别名分支天然产出与 print 完全相同的输出代码。
+
+/// release 构建：从程序中删除所有调试专用代码。debug 构建不要调用本函数。
+pub fn strip_debug_program(prog: &mut Program) {
+    for f in &mut prog.functions {
+        strip_debug_stmts(&mut f.body);
+    }
+    for t in &mut prog.tests {
+        strip_debug_stmts(&mut t.body);
+    }
+}
+
+/// 判断一条语句是否是调试专用的、应整体删除。
+fn stmt_is_debug_only(s: &Stmt) -> bool {
+    match s {
+        Stmt::Block { debug_only: true, .. } => true,
+        Stmt::Expr(Expr::Call(name, _), ..) if name == "debug_print" => true,
+        _ => false,
+    }
+}
+
+/// 递归进入一条语句的所有子语句块（结构与 desugar_stmts 对齐），
+/// 但不改写表达式——release 只需「删语句」，嵌套表达式里的 debug_print 因
+/// 返回 Void 不可能出现在合法值位置，无需处理。
+fn strip_debug_children(s: &mut Stmt) {
+    match s {
+        Stmt::If { then_branch, else_branch, .. } => {
+            strip_debug_stmts(then_branch);
+            if let Some(eb) = else_branch {
+                strip_debug_stmts(eb);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::For { body, .. }
+        | Stmt::ForEach { body, .. } | Stmt::ForEachMap { body, .. }
+        | Stmt::DoWhile { body, .. } | Stmt::With { body, .. }
+        | Stmt::Block { body, .. } => strip_debug_stmts(body),
+        Stmt::Match { arms, .. } => {
+            for arm in arms.iter_mut() {
+                strip_debug_stmts(&mut arm.body);
+            }
+        }
+        // defer 的目标是单条语句（Box<Stmt>），一般是有副作用的资源释放调用，
+        // 不会是 debug 块或 debug_print；若真出现，交由外层对 Defer 语句整体的处理。
+        Stmt::Defer(..) => {}
+        Stmt::Try { body, catch, .. } => {
+            strip_debug_stmts(body);
+            strip_debug_stmts(&mut catch.body);
+        }
+        Stmt::Select { arms, default_body, timeout_body, .. } => {
+            for arm in arms.iter_mut() {
+                strip_debug_stmts(&mut arm.body);
+            }
+            if let Some(db) = default_body {
+                strip_debug_stmts(db);
+            }
+            if let Some(tb) = timeout_body {
+                strip_debug_stmts(tb);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 删除本层的调试专用语句，并递归进所有保留语句的子块。
+fn strip_debug_stmts(stmts: &mut Vec<Stmt>) {
+    for s in stmts.iter_mut() {
+        strip_debug_children(s);
+    }
+    stmts.retain(|s| !stmt_is_debug_only(s));
+}
+
 /// 入口：收集函数签名 + 结构体表，校验 main，逐一检查函数体，最后跑数据流分析写入 move_hint。
 /// 保留名：这些标识符在 `type_of` 里按**名字**匹配为内建函数/类型，
 /// 与用户函数的查找是两条路。若允许用户定义同名函数，`Expr::Call` 的
@@ -4026,6 +4113,8 @@ const RESERVED_NAMES: &[&str] = &[
     // 注：其余按名字分派的历史内建（read_line / args / now / sleep 等）的保留名覆盖
     // 属独立的历史加固议题，本轮不扩大范围，见 ARCHITECTURE §14.5 的批次纪律。
     "print", "print_raw", "write_char", "eprint", "eprint_raw",
+    // v1.22：调试输出别名，按名字硬编码分派（type_of + 两端 codegen），必须设防。
+    "debug_print",
     // v1.04 第 2 批：C 组新增内建函数（同样按名字硬编码分派，必须设防）。
     // 漏列会让用户定义同名函数却在调用点被内建分支静默绕过（§20 Fail-Fast）。
     "parse_int", "parse_float", "is_int", "is_float", "format_float",

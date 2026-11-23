@@ -3450,6 +3450,101 @@ for _r24_be in llvm asm; do
 done
 
 # ===========================================================================
+# R25) 调试输出与调试代码块（v1.22）：编译期裁剪（debug_print / debug 块）。
+#      debug 构建（--safety debug，默认）：debug_print 正常输出、debug 块执行（含副作用）；
+#      release 构建（--release / --fast / --safety safe|fast）：在语义分析前整块/整句删除，
+#        因此 ① 不输出 ② 无副作用 ③ 不检查其中类型错误 ④ 产物零字符串/符号残留。
+#      两端后端共用 analyze 前的裁剪 pass，行为必须逐项一致。
+# ===========================================================================
+echo "  -- R25) 调试输出 / 调试块裁剪（v1.22） --"
+
+# 1) 功能 + 副作用 + 零残留：双后端 × debug/release 四种组合。
+for _r25_be in llvm asm; do
+    # debug 构建
+    ${DIALC} build tests/pkg/r25_debug_output.dial --backend $_r25_be \
+        -o "${TMP}/r25_dbg_${_r25_be}" >/dev/null 2>&1 \
+        || { rbad "R25 功能/debug 编译失败/$_r25_be"; continue; }
+    _r25_dbg_out=$("${TMP}/r25_dbg_${_r25_be}" 2>/dev/null | tr '\n' ' ')
+    # release 构建
+    ${DIALC} build tests/pkg/r25_debug_output.dial --backend $_r25_be --release \
+        -o "${TMP}/r25_rel_${_r25_be}" >/dev/null 2>&1 \
+        || { rbad "R25 功能/release 编译失败/$_r25_be"; continue; }
+    _r25_rel_out=$("${TMP}/r25_rel_${_r25_be}" 2>/dev/null | tr '\n' ' ')
+
+    # debug：须含全部调试标记 + 副作用生效（X=101）
+    if printf '%s' "$_r25_dbg_out" | grep -qF 'DBG_LINE' \
+       && printf '%s' "$_r25_dbg_out" | grep -qF 'DBG_BLOCK' \
+       && printf '%s' "$_r25_dbg_out" | grep -qF 'DBG_NESTED=101' \
+       && printf '%s' "$_r25_dbg_out" | grep -qF 'DBG_IF' \
+       && printf '%s' "$_r25_dbg_out" | grep -qF 'X=101' \
+       && printf '%s' "$_r25_dbg_out" | grep -qF 'END'; then
+        rpass "R25 debug 输出生效/$_r25_be（含副作用 X=101）"
+    else
+        rbad "R25 debug 输出缺失/$_r25_be（[$_r25_dbg_out]）"
+    fi
+
+    # release：须不含任何调试标记 + 副作用不发生（X=1）
+    # 注意 X=1 用带尾随空格匹配，避免被 debug 的 X=101 子串命中。
+    if printf '%s' "$_r25_rel_out" | grep -qF 'END' \
+       && printf '%s' "$_r25_rel_out" | grep -qF 'X=1 ' \
+       && ! printf '%s' "$_r25_rel_out" | grep -qF 'DBG_'; then
+        rpass "R25 release 裁剪生效/$_r25_be（无调试输出、副作用不发生 X=1）"
+    else
+        rbad "R25 release 裁剪失败/$_r25_be（[$_r25_rel_out]）"
+    fi
+
+    # 零残留：release 产物里不应出现调试字符串（strings 不可用时跳过该项，不误报）
+    if command -v strings >/dev/null 2>&1; then
+        if strings "${TMP}/r25_rel_${_r25_be}" 2>/dev/null | grep -qF 'DBG_LINE'; then
+            rbad "R25 release 产物有调试字符串残留/$_r25_be"
+        else
+            rpass "R25 release 产物零调试字符串残留/$_r25_be"
+        fi
+    fi
+done
+
+# 2) 双后端逐字一致：debug 与 release 各自两端输出必须相同。
+${DIALC} build tests/pkg/r25_debug_output.dial --backend llvm -o "${TMP}/r25_c_dbg_llvm" >/dev/null 2>&1
+${DIALC} build tests/pkg/r25_debug_output.dial --backend asm -o "${TMP}/r25_c_dbg_asm" >/dev/null 2>&1
+_r25_c_dbg_l=$("${TMP}/r25_c_dbg_llvm" 2>/dev/null | tr '\n' ' ')
+_r25_c_dbg_a=$("${TMP}/r25_c_dbg_asm" 2>/dev/null | tr '\n' ' ')
+${DIALC} build tests/pkg/r25_debug_output.dial --backend llvm --release -o "${TMP}/r25_c_rel_llvm" >/dev/null 2>&1
+${DIALC} build tests/pkg/r25_debug_output.dial --backend asm --release -o "${TMP}/r25_c_rel_asm" >/dev/null 2>&1
+_r25_c_rel_l=$("${TMP}/r25_c_rel_llvm" 2>/dev/null | tr '\n' ' ')
+_r25_c_rel_a=$("${TMP}/r25_c_rel_asm" 2>/dev/null | tr '\n' ' ')
+if [ "$_r25_c_dbg_l" = "$_r25_c_dbg_a" ] && [ -n "$_r25_c_dbg_l" ]; then
+    rpass "R25 debug 输出双后端逐字一致"
+else
+    rbad "R25 debug 输出双后端不一致（llvm=[$_r25_c_dbg_l] asm=[$_r25_c_dbg_a]）"
+fi
+if [ "$_r25_c_rel_l" = "$_r25_c_rel_a" ] && [ -n "$_r25_c_rel_l" ]; then
+    rpass "R25 release 输出双后端逐字一致"
+else
+    rbad "R25 release 输出双后端不一致（llvm=[$_r25_c_rel_l] asm=[$_r25_c_rel_a]）"
+fi
+
+# 3) release 跳过类型检查：debug 块内的类型错误 debug 报错、release 放行。
+${DIALC} build tests/pkg/r25_debug_skipcheck.dial -o "${TMP}/r25_sc_dbg" >"${TMP}/r25_sc_dbg.log" 2>&1
+_r25_sc_dbg_rc=$?
+${DIALC} build tests/pkg/r25_debug_skipcheck.dial --release -o "${TMP}/r25_sc_rel" >"${TMP}/r25_sc_rel.log" 2>&1
+_r25_sc_rel_rc=$?
+if [ "$_r25_sc_dbg_rc" -ne 0 ] && grep -q "类型" "${TMP}/r25_sc_dbg.log"; then
+    rpass "R25 debug 构建检查调试块类型错误（如期报错）"
+else
+    rbad "R25 debug 构建未报调试块类型错误（rc=$_r25_sc_dbg_rc）"
+fi
+if [ "$_r25_sc_rel_rc" -eq 0 ] && [ -x "${TMP}/r25_sc_rel" ]; then
+    _r25_sc_out=$("${TMP}/r25_sc_rel" 2>/dev/null | tr '\n' ' ')
+    if printf '%s' "$_r25_sc_out" | grep -qF 'START' && printf '%s' "$_r25_sc_out" | grep -qF 'END'; then
+        rpass "R25 release 跳过调试块类型检查（如期编译并运行）"
+    else
+        rbad "R25 release 裁剪后运行输出异常（[$_r25_sc_out]）"
+    fi
+else
+    rbad "R25 release 未跳过调试块类型检查（rc=$_r25_sc_rel_rc）"
+fi
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。
