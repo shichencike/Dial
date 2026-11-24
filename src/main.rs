@@ -41,6 +41,7 @@ mod package;
 mod parser;
 // v1.23：专门的预处理阶段——源码收集/import 解析/AST 合并/extern-link 结算/debug 裁剪。
 mod preprocess;
+mod directives;
 mod pkgbuild;
 mod registry;
 mod resolve;
@@ -369,6 +370,8 @@ fn main() {
     // v1.23：--cfg key[=value] 条件编译维度（可重复）。内置 debug/target_os/target_arch
     // 由预处理阶段注入，这里只收集用户自定义维度。
     let mut cfg_facts: HashMap<String, String> = HashMap::new();
+    // v1.24：`#` 预处理宏的命令行注入 -D NAME[=value]（可重复，等价源码顶部 #define）。
+    let mut pp_defines: Vec<(String, Option<String>)> = Vec::new();
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -543,6 +546,29 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            // v1.24：-D NAME / -D NAME=value（也接受 --define）。注入到 # 预处理宏表。
+            "-D" | "--define" => {
+                if i + 1 < args.len() {
+                    let spec = args[i + 1].clone();
+                    if spec.is_empty() {
+                        eprintln!("❌ -D 宏名不得为空");
+                        std::process::exit(1);
+                    }
+                    let (name, value) = match spec.split_once('=') {
+                        Some((k, v)) if !k.is_empty() => (k.to_string(), Some(v.to_string())),
+                        Some(_) => {
+                            eprintln!("❌ -D 宏名不得为空：'{}'", spec);
+                            std::process::exit(1);
+                        }
+                        None => (spec.clone(), None),
+                    };
+                    pp_defines.push((name, value));
+                    i += 2;
+                } else {
+                    eprintln!("选项 -D 缺少宏名（格式：-D NAME 或 -D NAME=value）");
+                    std::process::exit(1);
+                }
+            }
             "-o" => {
                 if i + 1 < args.len() {
                     out_path = Some(PathBuf::from(args[i + 1].clone()));
@@ -683,7 +709,7 @@ fn main() {
     // 1~3) 词法 / 语法 / 语义（含本地源码模块合并、包解析、FFI 声明校验）
     //      统一交给 frontend()，让 build / run / check / test 共用同一条前端流水线——
     //      否则「检查通过」和「实际编译」可能因为两套解析逻辑而给出不同结论。
-    let fe = match frontend(&src_path, &mut |m| println!("{}", m), safety == SafetyMode::Debug, &cfg_facts) {
+    let fe = match frontend(&src_path, &mut |m| println!("{}", m), safety == SafetyMode::Debug, &cfg_facts, &pp_defines) {
         Ok(f) => f,
         Err(e) => {
             diagnostic::report(&e, &src_path);
@@ -1846,6 +1872,8 @@ fn print_usage() {
     eprintln!("  --target-cpu <级别>          asm 后端高级指令集开关（默认 baseline=仅通用指令，零回归）：");
     eprintln!("                      baseline | x86-64-v2 | x86-64-v3 | x86-64-v4 | native（须目标 CPU 真实支持）");
     eprintln!("  run   <文件.dial> [同上]");
+    eprintln!("  -D NAME[=value] / --define   定义 `#` 预处理宏（可重复，等价源码顶部 #define，见 README §41）");
+    eprintln!("  --cfg key[=value]            条件编译维度（可重复，供 @cfg 判定，见 README §39）");
     eprintln!("  -g / --debug-info          生成标准 DWARF（GDB/LLDB 源码行断点 + print 变量名）");
     eprintln!("  --tiny                     体积模式：-Os + 函数/数据分段 + --gc-sections + strip（与 --fast/--pgo/-g 冲突）");
     eprintln!("  --single-file              便携模式：-static 全静态链接，产物不依赖宿主动态 libc");
@@ -2079,11 +2107,12 @@ fn frontend(
     log: &mut dyn FnMut(&str),
     keep_debug: bool,
     cfg_facts: &HashMap<String, String>,
+    defines: &[(String, Option<String>)],
 ) -> Result<Frontend, String> {
     let mut pre: PreprocessOutput = preprocess::run(
         src_path,
         log,
-        &PreprocessOptions::with_builtins(keep_debug, cfg_facts.clone()),
+        &PreprocessOptions::with_all(keep_debug, cfg_facts.clone(), defines.to_vec()),
     )?;
 
     let (functions, structs, goto_depths) = analyze(&mut pre.program, &pre.externs)
@@ -2782,7 +2811,7 @@ fn cmd_check(args: &[String]) {
     ensure_no_extra(args, 3);
     let src = one_arg(args, "check");
     // check 是纯类型检查工具：始终保留并校验全部调试代码（保持最严格的检查口径）。
-    match frontend(&src, &mut |m| println!("{}", m), true, &HashMap::new()) {
+    match frontend(&src, &mut |m| println!("{}", m), true, &HashMap::new(), &[]) {
         Ok(fe) => println!(
             "✅ 类型检查通过：{}（{} 个函数、{} 个 test 块）",
             src,
@@ -3141,7 +3170,7 @@ fn cmd_test(args: &[String]) {
     }
     let src = files.remove(0);
     // dialc test 用 Debug 模式编译合成程序，便于断言里用 debug_print 输出诊断。
-    let fe = match frontend(&src, &mut |_| {}, true, &HashMap::new()) {
+    let fe = match frontend(&src, &mut |_| {}, true, &HashMap::new(), &[]) {
         Ok(f) => f,
         Err(e) => {
             diagnostic::report(&e, &src);

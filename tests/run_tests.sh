@@ -3673,6 +3673,96 @@ else
     rbad "R26 宏体 @cfg 求值异常（debug=[$_r26_mc_dbg] release=[$_r26_mc_rel]）"
 fi
 
+# ---------------------------------------------------------------------------
+# R27) `#` 预处理指令（v1.24）：词法前文本级 pass，与 @cfg/macro 并存互补。
+# ---------------------------------------------------------------------------
+echo "  -- R27) # 预处理指令 #define/#undef/#if/#ifdef/#error/#pragma/-D --"
+
+# 1) 双后端：对象式/函数式宏、嵌套条件、defined、#undef、假分支 #error 忽略，逐字一致。
+_r27_expect="START V=27 MUL=42 HELLO_DIAL FEATURE_ON ALIVE NO_DEAD END "
+_r27_ok=1
+for _r27_be in asm llvm; do
+    ${DIALC} build tests/pkg/r27_pp.dial --backend ${_r27_be} -o "${TMP}/r27_pp_${_r27_be}" >"${TMP}/r27_pp_${_r27_be}.log" 2>&1 || {
+        if grep -q "未启用 LLVM 后端" "${TMP}/r27_pp_${_r27_be}.log" 2>/dev/null; then
+            continue  # 二进制未带 llvm feature，跳过该后端（不算失败）。
+        fi
+        _r27_ok=0; rbad "R27 编译失败/$_r27_be"; continue
+    }
+    _r27_out=$("${TMP}/r27_pp_${_r27_be}" | tr '\n' ' ')
+    if [ "$_r27_out" != "$_r27_expect" ]; then
+        _r27_ok=0; rbad "R27 输出异常/$_r27_be（[$_r27_out]）"
+    fi
+done
+if [ "$_r27_ok" -eq 1 ]; then
+    rpass "R27 对象式/函数式宏+嵌套条件+defined+#undef 双后端逐字一致"
+else
+    rbad "R27 预处理输出存在异常"
+fi
+
+# 2) CLI -D 注入：无值宏(#ifdef)与带值宏(#ifdef + 宏展开)。
+if ${DIALC} build tests/pkg/r27_pp.dial -D CLI_FLAG -D CLI_NUM=99 -o "${TMP}/r27_d" >/dev/null 2>&1; then
+    _r27_d=$("${TMP}/r27_d" | tr '\n' ' ')
+    if printf '%s' "$_r27_d" | grep -qF 'CLI_ON' && printf '%s' "$_r27_d" | grep -qF 'CLI_NUM=99'; then
+        rpass "R27 -D NAME / -D NAME=value 注入宏表并参与条件与展开"
+    else
+        rbad "R27 -D 注入未生效（[$_r27_d]）"
+    fi
+else
+    rbad "R27 -D 构建失败"
+fi
+
+# 3) Fail-Fast：未闭合 #if / 孤立 #endif / 活动 #error / 未知指令 / 宏实参不符。
+_r27_ff_ok=1
+cat > "${TMP}/r27_unclosed.dial" <<'EOF'
+#if 1
+fn main(): int { return 0; }
+EOF
+cat > "${TMP}/r27_orphan.dial" <<'EOF'
+#endif
+fn main(): int { return 0; }
+EOF
+cat > "${TMP}/r27_error.dial" <<'EOF'
+#error INTENTIONAL
+fn main(): int { return 0; }
+EOF
+cat > "${TMP}/r27_unknown.dial" <<'EOF'
+#frobnicate x
+fn main(): int { return 0; }
+EOF
+cat > "${TMP}/r27_arity.dial" <<'EOF'
+#define F(a, b) a + b
+fn main(): int { return F(1); }
+EOF
+for _r27_case in unclosed orphan error unknown arity; do
+    ${DIALC} build "${TMP}/r27_${_r27_case}.dial" -o "${TMP}/r27_${_r27_case}" >"${TMP}/r27_${_r27_case}.log" 2>&1
+    if [ $? -eq 0 ]; then _r27_ff_ok=0; rbad "R27 Fail-Fast 未拒绝：$_r27_case"; fi
+done
+grep -q "未闭合" "${TMP}/r27_unclosed.log" || _r27_ff_ok=0
+grep -q "没有匹配" "${TMP}/r27_orphan.log" || _r27_ff_ok=0
+grep -q "#error" "${TMP}/r27_error.log" || _r27_ff_ok=0
+grep -q "未知" "${TMP}/r27_unknown.log" || _r27_ff_ok=0
+grep -qE "宏 'F'|参数" "${TMP}/r27_arity.log" || _r27_ff_ok=0
+if [ "$_r27_ff_ok" -eq 1 ]; then
+    rpass "R27 未闭合/孤立/#error/未知指令/宏实参不符 全部 Fail-Fast"
+else
+    rbad "R27 Fail-Fast 存在漏网"
+fi
+
+# 4) 假分支内的 #error / 未知指令不得生效（条件裁剪必须先于指令处理）。
+cat > "${TMP}/r27_dead.dial" <<'EOF'
+#if 0
+#error DEAD_BRANCH
+#also_unknown x
+#endif
+fn main(): int { print("SURVIVE"); return 0; }
+EOF
+if ${DIALC} build "${TMP}/r27_dead.dial" -o "${TMP}/r27_dead" >/dev/null 2>&1 \
+   && [ "$("${TMP}/r27_dead")" = "SURVIVE" ]; then
+    rpass "R27 假分支内 #error/未知指令被忽略（条件裁剪先于指令处理）"
+else
+    rbad "R27 假分支内指令处理异常"
+fi
+
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付

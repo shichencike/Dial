@@ -37,17 +37,25 @@ pub struct PreprocessOptions {
     /// 其余来自 CLI `--cfg key[=value]`。`@cfg(name)` 查布尔（有键即 true，除非值为 "0"/"false"）；
     /// `@cfg(key = "value")` 查精确字符串相等。
     pub cfg_facts: HashMap<String, String>,
+    /// v1.24：`#` 预处理宏的命令行注入，等价源文件顶部 `#define NAME[=value]`。
+    /// 每项为 `(宏名, 可选值)`；无值时按 `1` 处理。与 `#define` 同名时以源文件最后一次为准。
+    pub defines: Vec<(String, Option<String>)>,
 }
 
 impl Default for PreprocessOptions {
     fn default() -> Self {
-        Self { keep_debug: true, cfg_facts: HashMap::new() }
+        Self { keep_debug: true, cfg_facts: HashMap::new(), defines: Vec::new() }
     }
 }
 
 impl PreprocessOptions {
-    /// 构造选项并注入内置 cfg 事实：debug / target_os / target_arch。
-    pub fn with_builtins(keep_debug: bool, extra: HashMap<String, String>) -> Self {
+    /// v1.24：构造选项并注入内置 cfg 事实（debug / target_os / target_arch）
+    /// 与 CLI 宏定义（`#define` / `-D`）。
+    pub fn with_all(
+        keep_debug: bool,
+        extra: HashMap<String, String>,
+        defines: Vec<(String, Option<String>)>,
+    ) -> Self {
         let mut cfg_facts = HashMap::new();
         // debug 维度与构建模式一致（与 keep_debug 同源）。
         cfg_facts.insert("debug".into(), if keep_debug { "1" } else { "0" }.into());
@@ -57,7 +65,7 @@ impl PreprocessOptions {
         cfg_facts.insert("target_os".into(), os);
         cfg_facts.insert("target_arch".into(), arch);
         cfg_facts.extend(extra);
-        Self { keep_debug, cfg_facts }
+        Self { keep_debug, cfg_facts, defines }
     }
 }
 
@@ -174,6 +182,8 @@ fn collect_sources(
     visited: &mut HashSet<PathBuf>,
     stack: &mut Vec<PathBuf>,
     set: &mut SourceSet,
+    defines: &[(String, Option<String>)],
+    log: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     let canonical = root
         .canonicalize()
@@ -194,7 +204,20 @@ fn collect_sources(
 
     let source = fs::read_to_string(&canonical)
         .map_err(|e| format!("无法读取 {}: {}", canonical.display(), e))?;
-    let tokens = lexer::lex(&source)
+
+    // v1.24 Pass 0：`#` 预处理指令（词法前的文本级 pass）。
+    //   先跑条件编译裁剪 + 收集 #define 宏（行号保持），再 lex，最后做 token 级宏展开。
+    //   宏展开必须在 import_specs 之前，使 -D/#define 能改写 import 字符串。
+    let directive_out = crate::directives::process_source(
+        &source,
+        &canonical.display().to_string(),
+        defines,
+        log,
+    )
+    .map_err(|e| format!("{}：{}", canonical.display(), e))?;
+    let tokens = lexer::lex(&directive_out.source)
+        .map_err(|e| format!("{}：{}", canonical.display(), e))?;
+    let tokens = crate::directives::expand_tokens(tokens, &directive_out.macros)
         .map_err(|e| format!("{}：{}", canonical.display(), e))?;
     let specs = import_specs(&tokens);
     set.units.push(SourceUnit {
@@ -216,7 +239,7 @@ fn collect_sources(
                     child.display()
                 ));
             }
-            collect_sources(&child, visited, stack, set)?;
+            collect_sources(&child, visited, stack, set, defines, log)?;
         } else if let Some((pkg_dir, rel)) =
             package::find_src_module(&spec).map_err(|e| e.to_string())?
         {
@@ -233,7 +256,7 @@ fn collect_sources(
                     child.display()
                 ));
             }
-            collect_sources(&child, visited, stack, set)?;
+            collect_sources(&child, visited, stack, set, defines, log)?;
         } else if !set.imports.contains(&spec) {
             set.imports.push(spec);
         }
@@ -694,7 +717,14 @@ pub fn run(
     };
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let mut stack: Vec<PathBuf> = Vec::new();
-    collect_sources(Path::new(src_path), &mut visited, &mut stack, &mut set)?;
+    collect_sources(
+        Path::new(src_path),
+        &mut visited,
+        &mut stack,
+        &mut set,
+        &options.defines,
+        log,
+    )?;
 
     let (mut externs, mut pkg_libs, opaque_types) = crate::resolve_imports(&set.imports, log)
         .map_err(|e| {

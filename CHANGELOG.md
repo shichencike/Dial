@@ -22,6 +22,27 @@
 
 ## [未发布]
 
+### Added（v1.24 `#` 预处理指令：文本级预处理层）
+
+- 新增独立模块 `src/directives.rs`：编译流水线**最前端**、词法之前的文本级预处理层，
+  与 §39 的 `@cfg` / `macro`（词法后的 AST 级 pass）并存互补、职责不重叠。首批三类指令：
+  - **宏 `#define` / `#undef`**：对象式（token 级替换，不误伤字符串字面量内部）与函数式
+    （形参替换 + 嵌套调用）。函数式须 `NAME(` 紧邻；自引用按 C 语义不再展开，深度上限 64
+    防间接递归。命令行 `-D NAME` / `-D NAME=value`（别名 `--define`，可重复）注入初始宏表。
+  - **条件编译 `#if` / `#ifdef` / `#ifndef` / `#elif` / `#else` / `#endif`**：支持 `defined()`、
+    C 运算符优先级、整数（`0x/0b/0o` + `_`）、字符串/字符字面量；未定义标识符为 0。
+    假分支整块裁剪（含其中的 `#error` / 未知指令），**裁掉的行以空行占位保持行号**，诊断不漂移。
+  - **诊断 `#error` / `#pragma`**：活跃分支 `#error` 立即 Fail-Fast（带路径行号）；
+    `#pragma once` 由模块去重天然满足、接受为空操作，未知 pragma 记日志忽略。
+- Fail-Fast：未闭合 `#if`、孤立 `#endif`/`#else`/`#elif`、重复 `#else`、`#define` 缺名/非法形参、
+  宏重定义内容不同、宏实参个数不符、`#if` 表达式错误/除零、未知指令——一律当场报错。
+- 挂接点：`preprocess::collect_sources` 中 lex 前跑文本 pass、lex 后做 token 宏展开（在
+  `import_specs` 之前，使 `-D`/`#define` 能改写 import 字符串）；`PreprocessOptions` 加
+  `defines` 字段；`main` 加 `-D/--define` 解析与 `mod directives`。
+- 验证：单测 40 项全绿（新增 16 项覆盖对象式/函数式/嵌套条件/defined/undef/-D/Fail-Fast 等）；
+  R27 门禁 4 组（双后端逐字一致 + `-D` 注入 + 五类 Fail-Fast + 假分支忽略），双后端一致。
+  文档见 README §41。
+
 ### Added（v1.23 条件编译 @cfg 与 AST 宏）
 
 - **条件编译 `@cfg(cond)`**：复用 `@` 注解前缀（零新增词法关键字），可作用于顶层

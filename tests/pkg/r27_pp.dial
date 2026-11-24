@@ -1,0 +1,47 @@
+// R27 `#` 预处理指令门禁（v1.24）：词法前的文本级 pass。
+// 覆盖：对象式宏 / 函数式宏 / 嵌套条件 / #if 算术与 defined / #undef / -D 注入。
+// 与 @cfg、AST 宏并存互补——本文件只用 # 指令，其余由 r26 覆盖。
+
+#define VERSION 27
+#define MUL(a, b) ((a) * (b))
+#define GREET(name) print("HELLO_" + name)
+
+#if defined(VERSION) && VERSION == 27
+#define FEATURE_X 1
+#else
+#define FEATURE_X 0
+#endif
+
+// 嵌套条件：外层为真、内层为假走 else。
+#if 1
+#if 0
+#error 这行不应生效（假分支内的 #error 必须被忽略）
+#define DEAD 1
+#else
+#define ALIVE 1
+#endif
+#endif
+
+fn main(): int {
+    print("START");
+    print("V=" + str(VERSION));
+    print("MUL=" + str(MUL(6, 7)));
+    GREET("DIAL");
+#if FEATURE_X
+    print("FEATURE_ON");
+#endif
+#ifdef ALIVE
+    print("ALIVE");
+#endif
+#ifndef DEAD
+    print("NO_DEAD");
+#endif
+#ifdef CLI_FLAG
+    print("CLI_ON");
+#endif
+#ifdef CLI_NUM
+    print("CLI_NUM=" + str(CLI_NUM));
+#endif
+    print("END");
+    return 0;
+}

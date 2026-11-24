@@ -8619,3 +8619,70 @@ fn main(): int {
 - 宏与条件编译可叠加：宏体里的 `@cfg` 在展开后参与求值。
 
 两端后端共用同一份展开后的 AST，`dialc test` 与 LSP 也看到展开结果。
+
+---
+
+## 41. `#` 预处理指令：文本级预处理层（v1.24，并入 `[未发布]`）
+
+编译流水线最前端新增一道**词法前的文本级预处理层**（`src/directives.rs`），在读取源码之后、
+`lexer` 之前运行。它与 §39 的 `@cfg` / `macro`（词法后的 AST 级 pass）**并存互补、职责不重叠**：
+
+| 层次 | 设施 | 查的是什么 | 作用时机 |
+|---|---|---|---|
+| 文本级（§40） | `#define` / `#if` 等 | 宏表（`#define` / `-D`） | 词法之前，按行裁剪源码 |
+| AST 级（§39） | `@cfg` / `macro` | cfg 事实（`debug` / `--cfg`） | 词法之后，按 AST 裁剪/展开 |
+
+### 40.1 宏：`#define` / `#undef`
+
+对象式宏在 token 级替换（**不误伤字符串字面量内部的同名文本**）；函数式宏支持形参替换与嵌套调用：
+
+```dial
+#define VERSION 27
+#define MUL(a, b) ((a) * (b))
+
+fn main(): int {
+    print("V=" + str(VERSION));   // V=27
+    print(str(MUL(6, 7)));         // 42
+    return 0;
+}
+```
+
+- 函数式宏名后必须**紧接** `(`（无空格）才是函数式；单独出现不带括号则原样保留。
+- `#undef NAME` 取消定义（未定义宏的 `#undef` 静默忽略）；同名宏内容不同时不许重定义，
+  须先 `#undef`（Fail-Fast）。
+- 宏自引用（`#define A A`）按 C 语义不再展开，保留标识符交给语义分析；深度上限 64
+  防间接递归挂死。
+- 命令行 `-D NAME` / `-D NAME=value`（别名 `--define`，可重复）等价源码顶部 `#define`，
+  无值时按 `1`。
+
+### 40.2 条件编译：`#if` / `#ifdef` / `#ifndef` / `#elif` / `#else` / `#endif`
+
+```dial
+#define FEATURE 2
+#if defined(FEATURE) && FEATURE >= 2
+print("ON");
+#elif FEATURE == 1
+print("MID");
+#else
+#error 不支持的特性等级
+#endif
+```
+
+- `#ifdef NAME` / `#ifndef NAME` 判定宏是否存在；`#if` / `#elif` 支持 C 运算符优先级：
+  `|| && | ^ & == != < <= > >= << >> + - * / % ! ~`、`defined(NAME)`、整数（含 `0x/0b/0o`
+  与 `_` 分隔）、字符串/字符字面量、括号。未定义标识符按 C 惯例求值为 `0`。
+- 假分支整块裁剪（含其中的 `#error` / 未知指令，均不生效），**裁掉的行以空行占位**，
+  保证后续 lexer 的行号与原文件一致、诊断定位不漂移。
+- 条件块必须闭合：未闭合 `#if`、孤立 `#endif` / `#else` / `#elif`、重复 `#else`、
+  `#elif` 出现在 `#else` 之后，一律 Fail-Fast 当场报错。
+
+### 40.3 诊断与指令
+
+- `#error message`：位于活跃分支时立即 Fail-Fast（带文件路径与行号）。
+- `#pragma once`：本编译器由 import 模块系统的去重集合天然保证，接受为空操作；
+  未知 `#pragma` 记日志提示后忽略（不阻断编译）。
+- 未知 `#` 指令、孤立 `#` 指令参数缺失等一律 Fail-Fast，绝不静默吞掉源码。
+
+回归见 §40 测试组的 R27 段（对象式/函数式宏、嵌套条件、`defined`、`-D` 注入、双后端逐字一致、
+五类 Fail-Fast）。不支持（明确边界）：`#include`（用 §34 的 `import`）、行尾续行 `\`、
+`#` / `##` 字符串化与连接、宏可变参数。
