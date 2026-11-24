@@ -1,0 +1,21 @@
+// R28 借用检查正向用例：合法的借用模式必须编译通过、输出正确。
+// 核心保证：借用检查器零生命周期标注，且 NLL（非词法生命周期）——
+// 借用指针最后一次使用之后，来源可自由释放，不算悬垂。
+fn main(): int {
+    // 1) 经典借用：来源在整个借用存活期内不被改动。
+    var s: string = "Hi";
+    var p: rawptr<byte> = s.as_c_str();
+    print(byte_to_int(*p));            // 72 ('H')
+
+    // 2) NLL：p 的最后一次使用在上一行；此后重新赋值 s 合法，不误拒。
+    s = "Bye";
+    print(s);                          // Bye
+
+    // 3) bytes.as_ptr() 借用；q 最后使用后再改来源 b，NLL 判定合法。
+    var b: bytes = bytes_from_string("abc");
+    var q: rawptr<byte> = b.as_ptr();
+    print(byte_to_int(*q));            // 97 ('a')
+    b = bytes_from_string("xyz");
+    print(bytes_to_string(b));         // xyz
+    return 0;
+}

@@ -342,6 +342,7 @@
 <li><a href="#315-实现落点">31.5 实现落点</a></li>
 <li><a href="#3151-标准库-abi-递增破坏性变更">31.5.1 标准库 ABI 递增（破坏性变更）</a></li>
 <li><a href="#316-测试">31.6 测试</a></li>
+<li><a href="#317-零标注借用检查器nll-悬垂检测">31.7 零标注借用检查器（NLL 悬垂检测）</a></li>
 </ul>
 </li>
 <li><a href="#32-v103回调函数指针与可变参数">32. v1.03：回调（函数指针）与可变参数</a><ul>
@@ -3245,7 +3246,7 @@ m.put(1, 1);   // ❌ 编译错误：let 不可调用原地修改方法
 不参与移动判定（因为该语句可能被执行零次或多次）。</p>
 <h3 id="1431-完整-consume-所有权体系-own开发中">14.3.1 完整 consume 所有权体系 <code>own</code>（开发中）</h3>
 <p>上面三种策略是<strong>编译器自动推断</strong>的：<code>own</code> 把它升级为<strong>程序员显式声明的独占所有权</strong>。
-这是一套完整 consume 体系（<strong>刻意不引入借用检查器</strong>——没有 <code>&amp;T</code>、没有生命周期、没有别名静态分析）：</p>
+这是一套完整 consume 体系（<strong>不引入 Rust 式借用类型与生命周期标注</strong>——没有 <code>&amp;T</code>、没有 <code>'a</code>；但 v1.21 后新增了<strong>零标注的静态借用检查器</strong>：基于 NLL 区域推断检测「借用指针仍在使用、来源却被移交/释放/重赋值」的悬垂，详见 <a href="#317-零标注借用检查器nll-悬垂检测">§31.7</a>）：</p>
 <pre><code class="language-dial">own var buf: int[] = [1, 2, 3];   // 独占变量
 var src: string = &quot;data&quot;;
 own var moved: string = src;       // own 声明接管 → src 当场转移
@@ -8240,6 +8241,34 @@ v1.01 ~ v1.03 的提交已随 <code>main</code> 推送；按版本号的发布�
 <li><code>bash tests/run_tests.sh</code> A–O 全套通过；H 组另加一条回归：<code>drop(不透明句柄)</code>
   必须报错并给出「不受 ARC 管理、请手动释放」的指引。</li>
 </ul>
+<h3 id="317-零标注借用检查器nll-悬垂检测">31.7 零标注借用检查器（NLL 悬垂检测）</h3>
+<p>v1.21 发布后补上一个<strong>零生命周期标注</strong>的静态借用检查器，在内存底线上再上一道保险。
+它不是 Rust 式借用系统——<strong>没有 <code>&amp;T</code>、没有 <code>'a</code>、不需要用户写任何生命周期标注</strong>，
+而是在语义分析阶段用内部数据流分析算出借用区域，纯增量、不改变现有 ARC 语义。</p>
+<p><strong>检查什么</strong>：从堆句柄借用数据缓冲区的两种写法——</p>
+<pre><code class="language-dial">var p: rawptr&lt;byte&gt; = s.as_c_str();   // 从 string 借用 C 字符串缓冲区
+var q: rawptr&lt;byte&gt; = b.as_ptr();     // 从 bytes 借用数据缓冲区
+</code></pre>
+<p>借用指针 <code>p</code>/<code>q</code> 指向来源（<code>s</code>/<code>b</code>）的堆 buffer。若在 <strong><code>p</code> 仍被使用期间</strong>，来源被
+<code>move_to</code> / <code>drop</code> / 重新赋值 / <code>spawn</code> 移交 / <code>own</code> 接管，底层 buffer 会被释放或易主，
+此时 <code>p</code> 悬垂——编译器在<strong>编译期</strong> Fail-Fast，错误码 <code>dialc.borrow.dangling</code>：</p>
+<pre><code class="language-dial">var s: string = &quot;hello&quot;;
+var p: rawptr&lt;byte&gt; = s.as_c_str();
+s = &quot;world&quot;;                          // ❌ s 底层 buffer 被 release
+print(byte_to_int(*p));               //    p 仍在使用 -&gt; 悬垂，编译期拒绝
+</code></pre>
+<p><strong>NLL（非词法生命周期）</strong>：借用区域由编译器算到<strong>借用指针最后一次使用</strong>为止，
+而非整个词法作用域。所以下面这段<strong>合法</strong>——<code>p</code> 用完之后再改 <code>s</code> 不构成悬垂：</p>
+<pre><code class="language-dial">var p: rawptr&lt;byte&gt; = s.as_c_str();
+print(byte_to_int(*p));               // p 的最后一次使用
+s = &quot;world&quot;;                          // ✅ 借用已结束，来源可自由释放
+</code></pre>
+<p><strong>为什么不检查 <code>&amp;x</code></strong>：<code>&amp;x</code> 是对<strong>栈上值类型</strong>取址，指向栈槽而非堆 buffer；
+重新赋值 <code>x</code> 只是改写栈槽内容、不释放存储，不会产生悬垂，故刻意跳过（零误拒）。</p>
+<p><strong>工程属性</strong>：纯分析 pass（只读 AST，不碰 IR / codegen），因此 asm 与 LLVM 双后端
+天然一致；错误码走结构化 <code>DialcError.code</code>，CLI 人读 / JSON 与 LSP 三处显示一致。
+门禁见 §40 测试组 R28 段：三类悬垂（reassign / drop / move_to）全部被拦截、
+合法借用（含 NLL 后半段释放）双后端逐字一致、零误拒。</p>
 <hr />
 <h2 id="32-v103回调函数指针与可变参数">32. v1.03：回调（函数指针）与可变参数</h2>
 <p>v1.03 补齐两个「正常程序绕不过去」的能力：<strong>把函数当值传递</strong>、<strong>写同类型变参函数</strong>。

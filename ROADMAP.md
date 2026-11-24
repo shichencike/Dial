@@ -56,6 +56,8 @@
 | P3 工程化（v1.23 预处理阶段） | 独立 `src/preprocess.rs` 收拢源码收集/import 解析/AST 合并/extern-link 结算/debug 裁剪；`PreprocessOptions` 作为唯一扩展点；`frontend` 瘦身为两步编排 | 行为不变重构：多文件合并+循环检测+DWARF+R25 裁剪 smoke 全过；单测全绿 + 全量回归 |
 | P2 功能（v1.23 条件编译 + AST 宏） | 在预处理扩展点上加两道 pass：`@cfg(cond)`（内置 debug/target_os/target_arch + CLI `--cfg`，顶层/语句级，假分支跳过类型检查）；`macro name($a){}` AST 宏（参数替换/嵌套/递归保护/遮蔽函数） | R26 门禁 7 项全绿（cfg 各维度+自定义+release 零残留+宏参数/嵌套/遮蔽+递归 Fail-Fast+孤立 cfg Fail-Fast+跳过检查+宏体 cfg，双后端逐字一致）；单测 24 项全绿 |
 | P2 功能（v1.24 `#` 预处理指令） | 词法前文本级层 `src/directives.rs`：`#define/#undef`（对象式 token 替换 + 函数式形参）、`#if/#ifdef/#else/#endif`（C 表达式 + defined + 嵌套 + 行号保持）、`#error/#pragma`、`-D` 注入；与 `@cfg/macro` 并存互补 | R27 门禁 4 组全绿（双后端逐字一致 + `-D` 注入 + 五类 Fail-Fast + 假分支忽略）；单测 40 项全绿 |
+| P0 补强（v1.21 后 · 借用检查器） | 零生命周期标注的静态借用检查（NLL 区域推断）：`as_c_str`/`as_ptr` 借用指针在用期间来源被 move/drop/重赋值 → 编译期 `dialc.borrow.dangling`；`&x` 栈借用跳过（零误拒）；frontend 保留结构化错误码，CLI 三处显示一致 | R28 门禁 2 项全绿（三类悬垂拦截 + 合法借用/NLL 双后端一致）；全量回归 1112 项、CVE 8/8 |
+| P3 工程（v1.21 后 · 门禁盲区） | cve_check 按 CI 同口径纳入本地 `run_tests.sh` AP3 段，消除「本地全绿、tag CI 才暴露」的发布事故盲区 | 全量回归末尾 CVE 8/8 全绿 |
 | **验收** | ①OPT-ENOUGH ②P0 清零 ③AArch64 语义+DWARF ④P2 全裁决 ⑤P3 收口 | **五项全绿，能力上已代替 LLVM** |
 
 ### 3.2 主线 B · dialpkg —— ✅ P4.0~P4.4 全部落地

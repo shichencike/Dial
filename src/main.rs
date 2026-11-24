@@ -712,7 +712,7 @@ fn main() {
     let fe = match frontend(&src_path, &mut |m| println!("{}", m), safety == SafetyMode::Debug, &cfg_facts, &pp_defines) {
         Ok(f) => f,
         Err(e) => {
-            diagnostic::report(&e, &src_path);
+            diagnostic::report_with_code(&e.msg, &src_path, &e.code);
             std::process::exit(1);
         }
     };
@@ -2102,21 +2102,32 @@ struct Frontend {
 /// AST 合并 / extern-link 结算 / debug 裁剪都在那里完成。本函数只剩两件事：
 ///   1. 调预处理阶段拿到干净的 AST；
 ///   2. 跑语义分析 `analyze`。
+/// 前端错误：保留结构化错误码，避免 CLI 只能从消息文本反解 code（缺陷 #5）。
+struct FrontendError {
+    msg: String,
+    code: String,
+}
+
 fn frontend(
     src_path: &str,
     log: &mut dyn FnMut(&str),
     keep_debug: bool,
     cfg_facts: &HashMap<String, String>,
     defines: &[(String, Option<String>)],
-) -> Result<Frontend, String> {
+) -> Result<Frontend, FrontendError> {
     let mut pre: PreprocessOutput = preprocess::run(
         src_path,
         log,
         &PreprocessOptions::with_all(keep_debug, cfg_facts.clone(), defines.to_vec()),
-    )?;
+    )
+    .map_err(|e| FrontendError { msg: format!("{}：{}", src_path, e), code: String::new() })?;
 
-    let (functions, structs, goto_depths) = analyze(&mut pre.program, &pre.externs)
-        .map_err(|e| format!("{}：{}", src_path, e))?;
+    let (functions, structs, goto_depths) = analyze(&mut pre.program, &pre.externs).map_err(|e| {
+        FrontendError {
+            msg: format!("{}：{}", src_path, e),
+            code: e.code.to_string(),
+        }
+    })?;
 
     Ok(Frontend {
         program: pre.program,
@@ -2819,7 +2830,7 @@ fn cmd_check(args: &[String]) {
             fe.program.tests.len()
         ),
         Err(e) => {
-            diagnostic::report(&e, &src);
+            diagnostic::report_with_code(&e.msg, &src, &e.code);
             std::process::exit(1);
         }
     }
@@ -3173,7 +3184,7 @@ fn cmd_test(args: &[String]) {
     let fe = match frontend(&src, &mut |_| {}, true, &HashMap::new(), &[]) {
         Ok(f) => f,
         Err(e) => {
-            diagnostic::report(&e, &src);
+            diagnostic::report_with_code(&e.msg, &src, &e.code);
             std::process::exit(1);
         }
     };

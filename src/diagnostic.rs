@@ -102,10 +102,27 @@ fn source_line(path: &str, line: usize) -> String {
 }
 
 /// 报告一条前端错误。人读模式保持原消息不变，只追加定位信息。
+///
+/// 兼容入口：code 从消息文本反解（历史行为）。
+/// 保留为公共 API；当前 CLI 统一走 `report_with_code`。
+#[allow(dead_code)]
 pub fn report(msg: &str, src_path: &str) {
+    report_with_code(msg, src_path, "");
+}
+
+/// 报告一条前端错误，并允许调用方传入**结构化错误码**（v1.21 缺陷 #5 修复）。
+///
+/// 当 `structured_code` 非空时优先采用它（来自 `DialcError.code`），
+/// 否则回退到 `stable_code` 的文本反解——这样 LSP 与 CLI 对同一错误
+/// 拿到完全相同的码，不再因「措辞改一次就废掉一个工具」而漂移。
+pub fn report_with_code(msg: &str, src_path: &str, structured_code: &str) {
     let (line, col) = parse_pos(msg);
     let snippet = source_line(src_path, line);
-    let code = stable_code(msg, "dialc.error");
+    let code = if structured_code.is_empty() {
+        stable_code(msg, "dialc.error")
+    } else {
+        structured_code.to_string()
+    };
     if is_json() {
         eprintln!(
             "{}",

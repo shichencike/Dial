@@ -4380,8 +4380,10 @@ pub fn analyze(
         check_function(f, &funcs, &structs, &mut goto_depths)?;
     }
 
-    // 3) 数据流分析：写入 move_hint
+    // 3) 借用检查 + 数据流分析：写入 move_hint
+    //    借用检查（NLL、零标注）是纯读取 AST，必须在 run_usage_analysis 写 move_hint 之前跑。
     for f in &mut program.functions {
+        check_borrow_lifetimes(f)?;
         run_usage_analysis(f, &structs);
     }
 
@@ -6515,4 +6517,265 @@ fn run_usage_analysis(f: &mut Func, _structs: &StructTable) {
 
     let mut si2 = 0usize;
     set_moves(&mut f.body, &mut si2, 0, 0, &facts, &own_names);
+}
+
+// ============================================================================
+// 借用检查器（NLL 式，零生命周期标注）——v1.21 内存安全强化
+// ============================================================================
+//
+// 设计要点（README §31.4 的静态强化，不改 ARC 语义）：
+//   - 用户**不写任何生命周期标注**；借用区域由编译器按 NLL（非词法生命周期）
+//     思想在内部计算：从借用指针创建处，到它最后一次被使用处为止。
+//   - 只检查「从堆句柄借用数据缓冲区」这一种真正会悬垂的模式：
+//       s.as_c_str() / s.as_ptr()   （来源必为 string/bytes 句柄，reassign 会 release 底层 buffer）
+//     `&x` 是对栈值类型的借用，重新赋值 x 不释放其存储，不产生悬垂，故跳过（零误拒）。
+//   - 在借用区域内，若来源被 move_to / drop / 重新赋值 / spawn 移交 / own 接管，
+//     底层 buffer 会被释放或易主，此时借用的裸指针即悬垂——编译期 Fail-Fast。
+//   - 检查是纯分析（只读 AST），不改动 IR / codegen，双后端天然一致。
+
+/// 借用事实：借用指针 `ptr` 在 `create`（语句序号）处从 `source` 派生。
+struct BorrowFact {
+    ptr: String,
+    source: String,
+    create: usize,
+}
+
+/// 识别「从堆句柄借用缓冲区」的表达式，返回来源变量名。
+fn borrow_source_of(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Method(obj, method, args)
+            if (method == "as_c_str" || method == "as_ptr") && args.is_empty() =>
+        {
+            if let Expr::Var(s) = &**obj {
+                Some(s.clone())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// 递归收集表达式中「消费来源所有权」的调用（move_to / drop / spawn）。
+fn collect_consumes_expr(
+    e: &Expr,
+    si: usize,
+    line: usize,
+    col: usize,
+    muts: &mut HashMap<String, Vec<(usize, usize, usize)>>,
+) {
+    match e {
+        Expr::Call(name, args) => {
+            match name.as_str() {
+                "move_to" | "drop" => {
+                    if let Some(Expr::Var(v)) = args.first() {
+                        muts.entry(v.clone()).or_default().push((si, line, col));
+                    }
+                }
+                "spawn" => {
+                    for a in args.iter().skip(1) {
+                        if let Expr::Var(v) = a {
+                            muts.entry(v.clone()).or_default().push((si, line, col));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for a in args {
+                collect_consumes_expr(a, si, line, col, muts);
+            }
+        }
+        Expr::Method(o, _, args) => {
+            collect_consumes_expr(o, si, line, col, muts);
+            for a in args {
+                collect_consumes_expr(a, si, line, col, muts);
+            }
+        }
+        Expr::Field(o, _) | Expr::Unary(_, o) | Expr::Await(o) => {
+            collect_consumes_expr(o, si, line, col, muts);
+        }
+        Expr::Index(o, i) => {
+            collect_consumes_expr(o, si, line, col, muts);
+            collect_consumes_expr(i, si, line, col, muts);
+        }
+        Expr::Slice(o, f, t) => {
+            collect_consumes_expr(o, si, line, col, muts);
+            collect_consumes_expr(f, si, line, col, muts);
+            collect_consumes_expr(t, si, line, col, muts);
+        }
+        Expr::Binary(l, _, r) => {
+            collect_consumes_expr(l, si, line, col, muts);
+            collect_consumes_expr(r, si, line, col, muts);
+        }
+        Expr::Ternary(c, a, b) => {
+            collect_consumes_expr(c, si, line, col, muts);
+            collect_consumes_expr(a, si, line, col, muts);
+            collect_consumes_expr(b, si, line, col, muts);
+        }
+        Expr::ArrayLit(items, _) => {
+            for it in items {
+                collect_consumes_expr(it, si, line, col, muts);
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                collect_consumes_expr(v, si, line, col, muts);
+            }
+        }
+        Expr::Interp(parts) => {
+            for p in parts {
+                if let crate::ast::InterpPart::Expr(inner) = p {
+                    collect_consumes_expr(inner, si, line, col, muts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 第一遍（借用检查）：遍历语句，收集借用创建点与来源破坏性操作。
+/// 语句序号口径与 `collect_refs` 完全一致（同一棵 AST、同样的递归顺序）。
+fn collect_borrow_facts(
+    stmts: &[Stmt],
+    si: &mut usize,
+    borrows: &mut Vec<BorrowFact>,
+    muts: &mut HashMap<String, Vec<(usize, usize, usize)>>,
+) {
+    for stmt in stmts {
+        let (line, col) = stmt_pos(stmt);
+        match stmt {
+            Stmt::VarDecl { name, value, owned, .. } => {
+                if let Some(src) = borrow_source_of(value) {
+                    borrows.push(BorrowFact { ptr: name.clone(), source: src, create: *si });
+                }
+                collect_consumes_expr(value, *si, line, col, muts);
+                // `own var q = s`：独占接管，来源 s 当场失去所有权。
+                if *owned {
+                    if let Expr::Var(v) = value {
+                        muts.entry(v.clone()).or_default().push((*si, line, col));
+                    }
+                }
+            }
+            Stmt::Assign { name, value, .. } => {
+                // 重新赋值来源 -> 旧 buffer 被 release -> 借用悬垂。
+                muts.entry(name.clone()).or_default().push((*si, line, col));
+                collect_consumes_expr(value, *si, line, col, muts);
+            }
+            Stmt::AssignField { obj, value, .. } => {
+                collect_consumes_expr(obj, *si, line, col, muts);
+                collect_consumes_expr(value, *si, line, col, muts);
+            }
+            Stmt::AssignIndex { arr, index, value, .. } => {
+                collect_consumes_expr(arr, *si, line, col, muts);
+                collect_consumes_expr(index, *si, line, col, muts);
+                collect_consumes_expr(value, *si, line, col, muts);
+            }
+            Stmt::AssignDeref { ptr, value, .. } => {
+                collect_consumes_expr(ptr, *si, line, col, muts);
+                collect_consumes_expr(value, *si, line, col, muts);
+            }
+            Stmt::If { cond, then_branch, else_branch, .. } => {
+                collect_consumes_expr(cond, *si, line, col, muts);
+                collect_borrow_facts(then_branch, si, borrows, muts);
+                if let Some(eb) = else_branch {
+                    collect_borrow_facts(eb, si, borrows, muts);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                collect_consumes_expr(cond, *si, line, col, muts);
+                collect_borrow_facts(body, si, borrows, muts);
+            }
+            Stmt::For { start, end, body, .. } => {
+                collect_consumes_expr(start, *si, line, col, muts);
+                collect_consumes_expr(end, *si, line, col, muts);
+                collect_borrow_facts(body, si, borrows, muts);
+            }
+            Stmt::ForEach { coll, body, .. } | Stmt::ForEachMap { coll, body, .. } => {
+                collect_consumes_expr(coll, *si, line, col, muts);
+                collect_borrow_facts(body, si, borrows, muts);
+            }
+            Stmt::DoWhile { cond, body, .. } => {
+                collect_consumes_expr(cond, *si, line, col, muts);
+                collect_borrow_facts(body, si, borrows, muts);
+            }
+            Stmt::Match { subject, arms, .. } => {
+                collect_consumes_expr(subject, *si, line, col, muts);
+                for arm in arms {
+                    collect_borrow_facts(&arm.body, si, borrows, muts);
+                }
+            }
+            Stmt::Defer(inner, ..) => {
+                collect_borrow_facts(std::slice::from_ref(inner), si, borrows, muts);
+            }
+            Stmt::Return(Some(e), ..) | Stmt::Throw(e, ..) | Stmt::Expr(e, ..) => {
+                collect_consumes_expr(e, *si, line, col, muts);
+            }
+            Stmt::Try { body, catch, .. } => {
+                collect_borrow_facts(body, si, borrows, muts);
+                collect_borrow_facts(&catch.body, si, borrows, muts);
+            }
+            Stmt::Select { arms, default_body, timeout, timeout_body, .. } => {
+                for arm in arms {
+                    collect_consumes_expr(&arm.chan, *si, line, col, muts);
+                    collect_borrow_facts(&arm.body, si, borrows, muts);
+                }
+                if let Some(db) = default_body {
+                    collect_borrow_facts(db, si, borrows, muts);
+                }
+                if let Some(te) = timeout {
+                    collect_consumes_expr(te, *si, line, col, muts);
+                }
+                if let Some(tb) = timeout_body {
+                    collect_borrow_facts(tb, si, borrows, muts);
+                }
+            }
+            Stmt::With { resource, .. } => {
+                collect_consumes_expr(resource, *si, line, col, muts);
+            }
+            _ => {}
+        }
+        *si += 1;
+    }
+}
+
+/// 借用检查主入口：NLL 区域 = [创建点, 最后一次使用点]，检测区域内来源破坏。
+/// 纯分析、零标注、双后端一致。
+fn check_borrow_lifetimes(f: &Func) -> Result<()> {
+    // 变量引用位置（复用 collect_refs 的口径，借用指针的最后使用点由此得出）。
+    let mut refs: HashMap<String, Vec<RefEntry>> = HashMap::new();
+    let mut si = 0usize;
+    collect_refs(&f.body, &mut si, 0, 0, &mut refs);
+
+    let mut borrows = Vec::new();
+    let mut muts: HashMap<String, Vec<(usize, usize, usize)>> = HashMap::new();
+    let mut si2 = 0usize;
+    collect_borrow_facts(&f.body, &mut si2, &mut borrows, &mut muts);
+
+    for b in borrows {
+        // NLL：借用到「最后一次使用」为止；此后来源可自由释放，不算悬垂。
+        let last_use = refs
+            .get(&b.ptr)
+            .and_then(|v| v.iter().filter(|e| e.stmt > b.create).map(|e| e.stmt).max());
+        let last_use = match last_use {
+            Some(x) => x,
+            None => continue, // 借用指针从未被使用 -> 无悬垂风险
+        };
+        if let Some(hits) = muts.get(&b.source) {
+            if let Some((_, ml, mc)) = hits
+                .iter()
+                .find(|(s, _, _)| *s > b.create && *s <= last_use)
+            {
+                return Err(DialcError::with_code(
+                    "dialc.borrow.dangling",
+                    format!(
+                        "语义错误：借用指针 '{}' 仍在使用，但其来源 '{}' 在第 {} 行被移交/释放/重新赋值，指针将悬垂（use-after-free）。Dial 借用检查在编译期拒绝，无需手写生命周期标注。",
+                        b.ptr, b.source, ml
+                    ),
+                    *ml,
+                    *mc,
+                ));
+            }
+        }
+    }
+    Ok(())
 }

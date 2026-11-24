@@ -1,0 +1,9 @@
+// 应当编译失败：借用指针 p 仍在用，来源 s 被重新赋值 -> 底层 buffer 释放 -> p 悬垂。
+// 借用检查器（NLL、零生命周期标注）必须在编译期 Fail-Fast。
+fn main(): int {
+    var s: string = "hello";
+    var p: rawptr<byte> = s.as_c_str();
+    s = "world";
+    print(byte_to_int(*p));
+    return 0;
+}

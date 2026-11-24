@@ -1,0 +1,8 @@
+// 应当编译失败：借用指针 q 仍在用，来源 b 被 drop -> 悬垂。
+fn main(): int {
+    var b: bytes = bytes_from_string("abc");
+    var q: rawptr<byte> = b.as_ptr();
+    drop(b);
+    print(byte_to_int(*q));
+    return 0;
+}

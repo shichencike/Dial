@@ -3764,6 +3764,60 @@ else
 fi
 
 # ===========================================================================
+# R28) 借用检查器门禁（v1.21 内存安全强化）：NLL + 零生命周期标注
+#      - 三类悬垂（reassign / drop / move_to）必须被 dialc.borrow.dangling 拦截
+#      - 合法借用（含 NLL 后半段释放来源）必须编译通过且输出一致
+#      - 双后端逐字一致
+# ===========================================================================
+echo
+echo "== R28) 借用检查器（NLL、零标注）：悬垂 Fail-Fast + 合法借用不误拒 =="
+_r28_bad_dir="${TMP}/r28bad"; mkdir -p "$_r28_bad_dir"
+_r28_ff_ok=1
+for _r28_case in borrow_dangling_reassign borrow_dangling_drop; do
+    if "$DIALC" build "tests/bad/${_r28_case}.dial" -o "$_r28_bad_dir/${_r28_case}" >"$_r28_bad_dir/${_r28_case}.log" 2>&1; then
+        rbad "R28 悬垂未拒绝：${_r28_case}"
+        _r28_ff_ok=0
+    elif ! grep -q "dialc.borrow.dangling" "$_r28_bad_dir/${_r28_case}.log"; then
+        rbad "R28 拒绝原因非借用检查：${_r28_case}"
+        _r28_ff_ok=0
+    fi
+done
+# move_to 移交来源后仍用借用指针（内联构造，避免 channel 泛型声明干扰）
+cat > "$_r28_bad_dir/move.dial" <<'R28EOF'
+fn main(): int {
+    var s: string = "hello";
+    var ch: channel<string> = channel(1);
+    var p: rawptr<byte> = s.as_c_str();
+    move_to(s, ch);
+    print(byte_to_int(*p));
+    return 0;
+}
+R28EOF
+if "$DIALC" build "$_r28_bad_dir/move.dial" -o "$_r28_bad_dir/move" >"$_r28_bad_dir/move.log" 2>&1; then
+    rbad "R28 悬垂未拒绝：move_to 后仍用借用指针"
+    _r28_ff_ok=0
+elif ! grep -q "dialc.borrow.dangling" "$_r28_bad_dir/move.log"; then
+    rbad "R28 move_to 拒绝原因非借用检查"
+    _r28_ff_ok=0
+fi
+if [ $_r28_ff_ok -eq 1 ]; then
+    rpass "R28 reassign/drop/move_to 三类悬垂均被 dialc.borrow.dangling 拦截"
+fi
+
+# 合法借用 + NLL 后半段释放来源：双后端输出一致
+if "$DIALC" build tests/pkg/r28_borrow_good.dial -o "$_r28_bad_dir/good_asm" --backend asm >/dev/null 2>&1 \
+   && "$DIALC" build tests/pkg/r28_borrow_good.dial -o "$_r28_bad_dir/good_llvm" --backend llvm >/dev/null 2>&1; then
+    if diff <("$_r28_bad_dir/good_asm") <("$_r28_bad_dir/good_llvm") >/dev/null 2>&1 \
+       && [ "$("$_r28_bad_dir/good_asm")" = "$(printf '72\nBye\n97\nxyz')" ]; then
+        rpass "R28 合法借用 + NLL 后半段释放来源：双后端逐字一致、零误拒"
+    else
+        rbad "R28 合法借用输出异常 / 双后端不一致"
+    fi
+else
+    rbad "R28 合法借用构建失败（借用检查误拒）"
+fi
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

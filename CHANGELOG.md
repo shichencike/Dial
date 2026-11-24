@@ -20,6 +20,28 @@
 
 ---
 
+## [未发布] — 开发中增量
+
+### Added（零标注借用检查器 + 门禁盲区修复）
+
+- **借用检查器（NLL、零生命周期标注）**：语义分析阶段新增纯分析 pass，基于内部数据流
+  计算借用区域，检测「借用指针（`s.as_c_str()` / `b.as_ptr()`）仍在使用、来源却被
+  `move_to` / `drop` / 重赋值 / `spawn` / `own` 接管」的悬垂 use-after-free，编译期
+  Fail-Fast，错误码 `dialc.borrow.dangling`。NLL：借用到指针最后一次使用为止，此后
+  释放来源合法；`&x` 栈值借用不检查（零误拒）。用户**无需写 `'a` 等任何生命周期标注**。
+  纯分析不改 IR / codegen，双后端天然一致。见 README §31.7、R28 门禁。
+- **本地门禁补齐 cve_check**：v1.21 发布事故（cve_check 只在 CI 跑、本地全绿却 tag CI
+  失败）的流程盲区修复——`tests/run_tests.sh` 按 CI 同口径纳入 CVE 暴力检测 AP3 段。
+
+### Fixed（结构化错误码 CLI 贯通）
+
+- **缺陷 #5 修复**：此前 frontend 把 `DialcError` 降级成 `String`，CLI 只能从消息文本
+  反解错误码，措辞一改工具就废。现 frontend 返回结构化 `FrontendError`（保留 `code`），
+  `diagnostic::report_with_code` 优先用结构化码；CLI 人读 / JSON 与 LSP 三处对同一错误
+  显示一致的 `dialc.borrow.dangling` 等码。
+
+验证：全量回归 1112 项通过（原 1099 + 新增），R28 门禁 2 项全绿，CVE 8/8，零误拒。
+
 ## [v1.21] — 2026-11-24
 
 > 本版是「预处理设施大补齐」的交付版本：字段级 ARC、调试期裁剪、专门的预处理阶段、

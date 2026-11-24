@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 未发布 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../rationale.html">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a> · <a href="../rationale/unreleased-dev.html">理由与证据链 →</a></p><div class="toc">
+<ul>
+<li><a href="#未发布--开发中增量">[未发布] — 开发中增量</a><ul>
+<li><a href="#added零标注借用检查器--门禁盲区修复">Added（零标注借用检查器 + 门禁盲区修复）</a></li>
+<li><a href="#fixed结构化错误码-cli-贯通">Fixed（结构化错误码 CLI 贯通）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="未发布--开发中增量">[未发布] — 开发中增量</h2>
+<h3 id="added零标注借用检查器--门禁盲区修复">Added（零标注借用检查器 + 门禁盲区修复）</h3>
+<ul>
+<li><strong>借用检查器（NLL、零生命周期标注）</strong>：语义分析阶段新增纯分析 pass，基于内部数据流
+  计算借用区域，检测「借用指针（<code>s.as_c_str()</code> / <code>b.as_ptr()</code>）仍在使用、来源却被
+  <code>move_to</code> / <code>drop</code> / 重赋值 / <code>spawn</code> / <code>own</code> 接管」的悬垂 use-after-free，编译期
+  Fail-Fast，错误码 <code>dialc.borrow.dangling</code>。NLL：借用到指针最后一次使用为止，此后
+  释放来源合法；<code>&amp;x</code> 栈值借用不检查（零误拒）。用户<strong>无需写 <code>'a</code> 等任何生命周期标注</strong>。
+  纯分析不改 IR / codegen，双后端天然一致。见 README §31.7、R28 门禁。</li>
+<li><strong>本地门禁补齐 cve_check</strong>：v1.21 发布事故（cve_check 只在 CI 跑、本地全绿却 tag CI
+  失败）的流程盲区修复——<code>tests/run_tests.sh</code> 按 CI 同口径纳入 CVE 暴力检测 AP3 段。</li>
+</ul>
+<h3 id="fixed结构化错误码-cli-贯通">Fixed（结构化错误码 CLI 贯通）</h3>
+<ul>
+<li><strong>缺陷 #5 修复</strong>：此前 frontend 把 <code>DialcError</code> 降级成 <code>String</code>，CLI 只能从消息文本
+  反解错误码，措辞一改工具就废。现 frontend 返回结构化 <code>FrontendError</code>（保留 <code>code</code>），
+  <code>diagnostic::report_with_code</code> 优先用结构化码；CLI 人读 / JSON 与 LSP 三处对同一错误
+  显示一致的 <code>dialc.borrow.dangling</code> 等码。</li>
+</ul>
+<p>验证：全量回归 1112 项通过（原 1099 + 新增），R28 门禁 2 项全绿，CVE 8/8，零误拒。</p><p class="note">← 更早：<a href="v1.21.html">v1.21</a> · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.21 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
