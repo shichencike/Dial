@@ -366,6 +366,9 @@ fn main() {
     // --target-cpu：asm 后端高级指令集总开关（baseline/v2/v3/v4），默认 baseline 零回归。
     // 仅作用于 asm 后端；LLVM 路径仍由 host_cpu() / --fast 自行决定微架构级别。
     let mut target_cpu = crate::target::TargetCpu::Baseline;
+    // v1.23：--cfg key[=value] 条件编译维度（可重复）。内置 debug/target_os/target_arch
+    // 由预处理阶段注入，这里只收集用户自定义维度。
+    let mut cfg_facts: HashMap<String, String> = HashMap::new();
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -517,6 +520,29 @@ fn main() {
                     }
                 }
             }
+            // v1.23：--cfg key[=value]（可重复）。无 = 时视为布尔真（值 "1"）。
+            "--cfg" => {
+                if i + 1 < args.len() {
+                    let spec = args[i + 1].clone();
+                    if let Some((k, v)) = spec.split_once('=') {
+                        if k.is_empty() || v.is_empty() {
+                            eprintln!("❌ --cfg 键值不得为空：'{}'", spec);
+                            std::process::exit(1);
+                        }
+                        cfg_facts.insert(k.to_string(), v.to_string());
+                    } else {
+                        if spec.is_empty() {
+                            eprintln!("❌ --cfg 键不得为空");
+                            std::process::exit(1);
+                        }
+                        cfg_facts.insert(spec.clone(), "1".to_string());
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("选项 --cfg 缺少值（格式：--cfg key 或 --cfg key=value）");
+                    std::process::exit(1);
+                }
+            }
             "-o" => {
                 if i + 1 < args.len() {
                     out_path = Some(PathBuf::from(args[i + 1].clone()));
@@ -657,7 +683,7 @@ fn main() {
     // 1~3) 词法 / 语法 / 语义（含本地源码模块合并、包解析、FFI 声明校验）
     //      统一交给 frontend()，让 build / run / check / test 共用同一条前端流水线——
     //      否则「检查通过」和「实际编译」可能因为两套解析逻辑而给出不同结论。
-    let fe = match frontend(&src_path, &mut |m| println!("{}", m), safety == SafetyMode::Debug) {
+    let fe = match frontend(&src_path, &mut |m| println!("{}", m), safety == SafetyMode::Debug, &cfg_facts) {
         Ok(f) => f,
         Err(e) => {
             diagnostic::report(&e, &src_path);
@@ -2048,11 +2074,16 @@ struct Frontend {
 /// AST 合并 / extern-link 结算 / debug 裁剪都在那里完成。本函数只剩两件事：
 ///   1. 调预处理阶段拿到干净的 AST；
 ///   2. 跑语义分析 `analyze`。
-fn frontend(src_path: &str, log: &mut dyn FnMut(&str), keep_debug: bool) -> Result<Frontend, String> {
+fn frontend(
+    src_path: &str,
+    log: &mut dyn FnMut(&str),
+    keep_debug: bool,
+    cfg_facts: &HashMap<String, String>,
+) -> Result<Frontend, String> {
     let mut pre: PreprocessOutput = preprocess::run(
         src_path,
         log,
-        &PreprocessOptions { keep_debug },
+        &PreprocessOptions::with_builtins(keep_debug, cfg_facts.clone()),
     )?;
 
     let (functions, structs, goto_depths) = analyze(&mut pre.program, &pre.externs)
@@ -2751,7 +2782,7 @@ fn cmd_check(args: &[String]) {
     ensure_no_extra(args, 3);
     let src = one_arg(args, "check");
     // check 是纯类型检查工具：始终保留并校验全部调试代码（保持最严格的检查口径）。
-    match frontend(&src, &mut |m| println!("{}", m), true) {
+    match frontend(&src, &mut |m| println!("{}", m), true, &HashMap::new()) {
         Ok(fe) => println!(
             "✅ 类型检查通过：{}（{} 个函数、{} 个 test 块）",
             src,
@@ -3110,7 +3141,7 @@ fn cmd_test(args: &[String]) {
     }
     let src = files.remove(0);
     // dialc test 用 Debug 模式编译合成程序，便于断言里用 debug_print 输出诊断。
-    let fe = match frontend(&src, &mut |_| {}, true) {
+    let fe = match frontend(&src, &mut |_| {}, true, &HashMap::new()) {
         Ok(f) => f,
         Err(e) => {
             diagnostic::report(&e, &src);
@@ -3156,6 +3187,7 @@ fn cmd_test(args: &[String]) {
             col: t.col,
             exported: false,
             is_async: false,
+            cfg: None,
         });
         // goto_depths 仅 asm-only 构建（无 llvm feature）的 codegen 分支使用。
         #[cfg_attr(feature = "llvm", allow(unused_variables))]

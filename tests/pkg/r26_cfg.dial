@@ -1,0 +1,19 @@
+// R26 条件编译门禁：内置维度（debug / target_os / target_arch）+ 自定义维度（--cfg）。
+// debug 模式（默认）：DEBUG_ON / 平台命中 / FEATURE 由 --cfg 决定。
+fn main(): int {
+    print("START");
+    @cfg(debug)
+    print("DEBUG_ON");
+    @cfg(!debug)
+    print("DEBUG_OFF");
+    @cfg(target_os = "linux")
+    print("OS_LINUX");
+    @cfg(any(target_os = "windows", target_os = "linux"))
+    print("OS_ANY");
+    @cfg(all(debug, target_os = "linux"))
+    print("ALL_HIT");
+    @cfg(my_feature)
+    print("FEATURE_ON");
+    print("END");
+    return 0;
+}

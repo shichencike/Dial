@@ -8547,3 +8547,75 @@ Linux headless 无 `/dev/dri` 下靠 Mesa `swrast`/llvmpipe 软件渲染即可�
 Windows `.a` 经 `nm -u` 确认零 `dlopen`/`dlsym` 依赖（走降级分支）。契约审计从 344 扩到
 **350 个签名**（343 OO + `app_new` + 6 第19层真实GPU），旧签名与 `abi=6`/`version=1.10.0` 不变。
 未打新 tag、未发新 Release（能力随 v1.21 未发布批次积累）。
+
+---
+
+## 39. 预处理：条件编译与 AST 宏（v1.23，并入 `[未发布]`）
+
+编译流水线在词法之后、语义分析之前有一道**专门的预处理阶段**（`src/preprocess.rs`）。
+它负责源码收集、import 解析、AST 合并，以及本节两个新设施：**条件编译**与 **AST 宏**。
+两者都在语义分析前完成求值/展开，因此被裁剪的代码不参与类型检查、不进入任何后端产物。
+
+### 39.1 条件编译 `@cfg(cond)`
+
+`@cfg(cond)` 复用已有的 `@` 注解前缀，可写在顶层 `fn` / `struct` 前，也可写在普通语句前：
+
+```dial
+@cfg(target_os = "linux")
+fn platform_name(): string { return "linux"; }
+
+fn main(): int {
+    @cfg(debug)
+    print("调试构建才输出");
+    @cfg(!debug)
+    print("发布构建才输出");
+    return 0;
+}
+```
+
+条件语法：
+
+| 写法 | 含义 |
+|---|---|
+| `@cfg(debug)` / `@cfg(my_flag)` | 布尔条件：该维度为真 |
+| `@cfg(target_os = "linux")` | 键值条件：精确相等 |
+| `@cfg(!cond)` | 取反 |
+| `@cfg(all(a, b))` / `@cfg(any(a, b))` | 合取 / 析取（可嵌套） |
+
+判定维度来源：
+
+- **内置**：`debug`（debug 构建为真，`--release` / `--fast` 为假）、`target_os`、`target_arch`
+  （取宿主 triple，可用环境变量 `DIAL_TARGET` 覆盖做交叉判定）。
+- **自定义**：命令行 `--cfg key` 或 `--cfg key=value`（可重复）。无 `=` 时视为布尔真
+  （值 `"1"`）；`@cfg(key = "value")` 做精确字符串匹配。
+
+条件为假的整块/整项被删除——**不参与类型检查**，产物里也搜不到它的字符串常量。
+调用一个被裁剪掉的函数会如期报「未定义函数」（Fail-Fast，不静默放行）。
+
+### 39.2 AST 宏 `macro name($a, ...) { ... }`
+
+宏用普通调用语法，预处理阶段做 **AST 展开**（参数按表达式替换，不是文本替换）：
+
+```dial
+macro twice($msg) {
+    print($msg);
+    print($msg);
+}
+macro add($a, $b) {
+    print("SUM=" + str($a + $b));   // $a/$b 出现在表达式里也会被替换
+}
+fn main(): int {
+    twice("HI");    // 展开成两条 print
+    add(3, 4);      // 输出 SUM=7
+    return 0;
+}
+```
+
+要点：
+
+- 形参以 `$` 开头（如 `$a`），调用时按顺序传实参；个数不符当场报错。
+- 宏体可调用其它宏，支持嵌套展开（深度上限 64，递归宏会 Fail-Fast 报错）。
+- **宏名遮蔽同名函数**：同名宏存在时优先展开宏。
+- 宏与条件编译可叠加：宏体里的 `@cfg` 在展开后参与求值。
+
+两端后端共用同一份展开后的 AST，`dialc test` 与 LSP 也看到展开结果。

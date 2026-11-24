@@ -547,6 +547,24 @@ pub fn lex(src: &str) -> Result<Vec<Token>> {
             continue;
         }
 
+        // v1.23 AST 宏形参占位符：`$a` / `$item` 词法为 Ident("$a")。
+        // 这样宏体里 `$a` 自然解析成 Expr::Var("$a")，预处理展开时按 `$` 前缀替换，
+        // 无需新增 Expr 变体（避免触碰语义/后端多处穷尽匹配）。`${` 插值已在字符串分支处理。
+        if c == '$' && i + 1 < chars.len() && (chars[i + 1].is_alphabetic() || chars[i + 1] == '_') {
+            let start_line = line;
+            let start_col = col;
+            i += 1;
+            col += 1;
+            let mut id = String::from("$");
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                id.push(chars[i]);
+                i += 1;
+                col += 1;
+            }
+            push(TokenKind::Ident(id), start_line, start_col, &mut tokens);
+            continue;
+        }
+
         // 标识符 / 关键字
         if c.is_alphabetic() || c == '_' {
             let start_line = line;

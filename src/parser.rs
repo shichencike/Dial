@@ -102,6 +102,7 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
         enum_names: std::collections::HashSet::new(),
         type_names: pre_type_names,
         impl_methods: pre_impl_methods,
+        pending_cfg: None,
     };
     let mut imports = Vec::new();
     let mut structs = Vec::new();
@@ -110,6 +111,7 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
     let mut links = Vec::new();
     let mut cstructs = Vec::new();
     let mut tests = Vec::new();
+    let mut macros = Vec::new();
     while !p.at_end() {
         if p.check(&TokenKind::Import) {
             imports.push(p.parse_import()?);
@@ -152,6 +154,28 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
                     ))
                 }
             }
+        } else if p.at_cfg_annot() {
+            // v1.23：顶层 `@cfg(cond)` 注解，暂存后由紧随的 fn / struct 取用。
+            let cfg_line = p.peek().line;
+            let cfg_col = p.peek().col;
+            let cond = p.parse_cfg_annot()?;
+            // Fail-Fast：`@cfg` 只可修饰 fn / async fn / struct / @export fn / export fn。
+            // 若其后是 const/import/macro 等不消费 pending_cfg 的项，标记会静默污染下一个函数，
+            // 必须当场拒绝（否则 release 下可能误删无辜的 main）。
+            let ok = matches!(
+                p.peek_kind(),
+                TokenKind::Fn | TokenKind::Async | TokenKind::Struct | TokenKind::At | TokenKind::Export
+            );
+            if !ok {
+                return Err(DialcError::new(
+                    "语法错误：@cfg(...) 只能修饰函数（fn / async fn / @export fn）或结构体（struct）",
+                    cfg_line, cfg_col,
+                ));
+            }
+            p.pending_cfg = Some(cond);
+        } else if p.at_macro_def() {
+            // v1.23：AST 宏定义 `macro name($a, ...) { ... }`。
+            macros.push(p.parse_macro_def()?);
         } else if p.check(&TokenKind::At) || p.check(&TokenKind::Export) {
             // v1.04 FFI 导出：`@export fn` 或 `export fn`。前缀由 parse_function 消费并置 exported。
             functions.push(p.parse_function()?);
@@ -194,6 +218,7 @@ pub fn parse_with(tokens: Vec<Token>, opaque_types: &[String]) -> Result<Program
         links,
         cstructs,
         tests,
+        macros,
     })
 }
 
@@ -216,6 +241,8 @@ struct Parser {
     type_names: std::collections::HashSet<String>,
     /// R3：每个类型已定义的关联函数/方法名，用于 `T::m()` 的友好诊断（"类型 X 没有关联函数 y"）。
     impl_methods: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// v1.23：`@cfg(cond)` 注解解析后暂存的条件，供紧随其后的 fn / struct / 语句取用。
+    pending_cfg: Option<crate::ast::CfgCond>,
 }
 
 impl Parser {
@@ -369,6 +396,136 @@ impl Parser {
             }
             _ => false,
         }
+    }
+
+    // ---- v1.23 条件编译注解 `@cfg(cond)` ------------------------------------
+
+    /// 当前是否是 `@cfg ( ... )` 注解（区别于 `@export fn`）。
+    fn at_cfg_annot(&self) -> bool {
+        matches!(self.peek_kind(), TokenKind::At)
+            && matches!(&self.peek_at(1).kind, TokenKind::Ident(s) if s == "cfg")
+            && matches!(&self.peek_at(2).kind, TokenKind::LParen)
+    }
+
+    /// 消费 `@cfg ( cond )`，返回条件。调用前须确保 `at_cfg_annot()` 为真。
+    fn parse_cfg_annot(&mut self) -> Result<crate::ast::CfgCond> {
+        self.advance(); // @
+        self.advance(); // cfg
+        self.expect(TokenKind::LParen)?;
+        let cond = self.parse_cfg_cond()?;
+        self.expect(TokenKind::RParen)?;
+        Ok(cond)
+    }
+
+    /// 解析 cfg 条件表达式（递归）：
+    ///   cond   := ident | ident = string | ! cond | all ( cond, ... ) | any ( cond, ... )
+    ///   ident  := 裸名布尔条件；`target_os = "linux"` 等键值条件用 Assign。
+    fn parse_cfg_cond(&mut self) -> Result<crate::ast::CfgCond> {
+        use crate::ast::CfgCond;
+        // 前缀 not：`!cond` 或 `not cond`
+        if matches!(self.peek_kind(), TokenKind::Not) {
+            self.advance();
+            return Ok(CfgCond::Not(Box::new(self.parse_cfg_cond()?)));
+        }
+        // 组合子：all(...) / any(...)
+        if let TokenKind::Ident(name) = self.peek_kind().clone() {
+            if (name == "all" || name == "any")
+                && matches!(&self.peek_at(1).kind, TokenKind::LParen)
+            {
+                self.advance(); // all / any
+                self.advance(); // (
+                let mut parts = Vec::new();
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        parts.push(self.parse_cfg_cond()?);
+                        if self.check(&TokenKind::Comma) {
+                            self.advance();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                return Ok(if name == "all" { CfgCond::All(parts) } else { CfgCond::Any(parts) });
+            }
+        }
+        // 普通条件：名字或 名字 = "value"。名字既可写标识符，也可写关键字（如 debug）。
+        let (name, line, col) = self.cfg_name()?;
+        if self.check(&TokenKind::Assign) {
+            self.advance();
+            let val = match self.peek_kind().clone() {
+                TokenKind::StringLit(s) => { self.advance(); s }
+                TokenKind::Ident(_) | TokenKind::Debug => {
+                    let (s, _, _) = self.cfg_name()?; s
+                }
+                other => return Err(DialcError::new(
+                    format!("@cfg 键值条件 '{} =' 后须是字符串或标识符，遇到 {:?}", name, other),
+                    line, col,
+                )),
+            };
+            Ok(CfgCond::Eq(name, val))
+        } else {
+            Ok(CfgCond::Name(name))
+        }
+    }
+
+    /// 读一个 cfg 名字：接受 Ident 或常见关键字 token（debug/export/…），统一转成字符串。
+    /// cfg 维度名与源码标识符共享命名空间，但 `debug` 等是 lexer 关键字，需特判。
+    fn cfg_name(&mut self) -> Result<(String, usize, usize)> {
+        let tok = self.peek().clone();
+        match tok.kind.clone() {
+            TokenKind::Ident(s) => { self.advance(); Ok((s, tok.line, tok.col)) }
+            TokenKind::Debug => { self.advance(); Ok(("debug".into(), tok.line, tok.col)) }
+            TokenKind::Export => { self.advance(); Ok(("export".into(), tok.line, tok.col)) }
+            other => Err(DialcError::new(
+                format!("@cfg 条件名须是标识符或关键字（如 debug），遇到 {:?}", other),
+                tok.line, tok.col,
+            )),
+        }
+    }
+
+    // ---- v1.23 AST 宏定义 `macro name($a, ...) { ... }` ----------------------
+
+    /// 当前是否是宏定义：`macro` + Ident + `(`。用上下文关键字，避免新增保留字。
+    fn at_macro_def(&self) -> bool {
+        matches!(self.peek_kind(), TokenKind::Ident(s) if s == "macro")
+            && matches!(&self.peek_at(1).kind, TokenKind::Ident(_))
+            && matches!(&self.peek_at(2).kind, TokenKind::LParen)
+    }
+
+    /// 解析宏定义：`macro name($a, $b) { ...stmts... }`。
+    /// 形参是 `$` 开头的 Ident（词法层已把 `$a` 收成 Ident("$a")）。
+    fn parse_macro_def(&mut self) -> Result<crate::ast::MacroDef> {
+        let kw = self.advance(); // macro
+        let (name, nline, ncol) = self.expect_ident_pos()?;
+        self.expect(TokenKind::LParen)?;
+        let mut params = Vec::new();
+        if !self.check(&TokenKind::RParen) {
+            loop {
+                let (pname, _pl, _pc) = self.expect_ident_pos()?;
+                if !pname.starts_with('$') {
+                    return Err(DialcError::new(
+                        format!("宏 '{}' 的形参必须以 $ 开头（如 $a），遇到 '{}'", name, pname),
+                        kw.line, kw.col,
+                    ));
+                }
+                params.push(pname);
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        let body = self.parse_block()?;
+        Ok(crate::ast::MacroDef {
+            name,
+            params,
+            body,
+            line: nline,
+            col: ncol,
+        })
     }
 
     /// `test "名字" { 语句... }`：块内就是普通语句（可直接用 `assert`）。
@@ -691,6 +848,7 @@ impl Parser {
             name_line: nline,
             name_col: ncol,
             packed,
+            cfg: self.pending_cfg.take(),
         })
     }
 
@@ -881,6 +1039,7 @@ impl Parser {
             enum_names: self.enum_names.clone(),
             type_names: self.type_names.clone(),
             impl_methods: self.impl_methods.clone(),
+            pending_cfg: None,
         };
         sub.parse_expr().map_err(|_| {
             DialcError::new("语法错误：字符串插值 ${...} 内的表达式语法错误", line, col)
@@ -1031,6 +1190,7 @@ impl Parser {
             col: ncol,
             exported,
             is_async,
+            cfg: self.pending_cfg.take(),
         })
     }
 
@@ -1330,19 +1490,33 @@ impl Parser {
             TokenKind::Try => self.parse_try(),
             TokenKind::Throw => self.parse_throw(),
             TokenKind::Select => self.parse_select(),
+            // v1.23：语句级 `@cfg(cond)` 注解——解析条件后，把紧随的语句包在一个
+            // 带 cfg 标记的 Block 里，复用统一的 cfg 裁剪逻辑。
+            TokenKind::At if self.at_cfg_annot() => {
+                let cond = self.parse_cfg_annot()?;
+                let inner = self.parse_stmt()?;
+                let (l, c) = (tok.line, tok.col);
+                Ok(Stmt::Block {
+                    body: vec![inner],
+                    line: l,
+                    col: c,
+                    debug_only: false,
+                    cfg: Some(cond),
+                })
+            }
             // 裸块 `{ ... }`：引入一个新的词法作用域（v0.98.next）。
             // 直接复用 parse_block（它负责消费配对的 { 与 }，并递归 parse_stmt 内部语句，
             // 因此裸块可任意嵌套）。
             TokenKind::LBrace => {
                 let block = self.parse_block()?;
-                Ok(Stmt::Block { body: block, line: tok.line, col: tok.col, debug_only: false })
+                Ok(Stmt::Block { body: block, line: tok.line, col: tok.col, debug_only: false, cfg: None })
             }
             // `debug { ... }`（v1.22）：调试代码块，与普通裸块共享 parse_block，
             // 仅多打一个 debug_only 标记。裁剪 pass 在语义分析前按构建模式决定去留。
             TokenKind::Debug => {
                 self.advance();
                 let block = self.parse_block()?;
-                Ok(Stmt::Block { body: block, line: tok.line, col: tok.col, debug_only: true })
+                Ok(Stmt::Block { body: block, line: tok.line, col: tok.col, debug_only: true, cfg: None })
             }
             TokenKind::Break => {
                 self.advance();

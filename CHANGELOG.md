@@ -22,6 +22,28 @@
 
 ## [未发布]
 
+### Added（v1.23 条件编译 @cfg 与 AST 宏）
+
+- **条件编译 `@cfg(cond)`**：复用 `@` 注解前缀（零新增词法关键字），可作用于顶层
+  `fn` / `struct` 与语句/块。条件语法：裸名布尔（`debug` / `my_flag`）、键值
+  （`target_os = "linux"` / `feature = "x"`）、`!cond`、`all(...)` / `any(...)`。
+  - 内置维度：`debug`（随构建模式）、`target_os` / `target_arch`（宿主 triple，
+    遵循 `DIAL_TARGET` 覆盖）；自定义维度来自 CLI `--cfg key[=value]`（可重复，
+    无 `=` 视为布尔真）。
+  - 在预处理阶段求值：假则整块/整项删除（**不参与类型检查**），真则清除标记；
+    release 产物零被裁剪分支的字符串/符号残留；调用被裁剪的函数如期报未定义（Fail-Fast）。
+- **AST 宏 `macro name($a, ...) { ... }` + `name(args)`**：普通调用语法，预处理阶段做
+  AST 展开（非文本替换）。`$a` 词法为 `Ident("$a")`，展开时按 `$` 前缀把实参表达式
+  替换进宏体的所有语句上下文（含嵌套表达式、子块）。支持宏体调用其它宏（递归展开，
+  深度上限 64 防自递归），宏名遮蔽同名函数，参数个数不符/重名宏当场 Fail-Fast。
+  - 两端共用同一份展开后的 AST，`dialc test` / LSP 亦看到展开结果。
+- 实现落点：`lexer`（`$name` → Ident）、`ast`（`CfgCond` / `MacroDef` + cfg/macros 字段）、
+  `parser`（注解/宏定义解析，均为上下文关键字不新增保留字）、`preprocess`（eval_cfg /
+  cfg_program + 宏展开两道 pass，位于 debug 裁剪之前）、`main`（`--cfg` 解析与透传）。
+- 验证：R26 门禁 7 项全绿（cfg 各维度 + `--cfg` + release 零残留 + 宏参数/嵌套/
+  遮蔽 + 递归宏 Fail-Fast + 孤立 @cfg Fail-Fast + cfg 假分支跳过检查 + 宏体 cfg 求值，
+  双后端逐字一致）；单测 24 项全绿（新增 cfg 求值、`$` 词法）。
+
 ### Added（v1.23 专门的预处理阶段）
 
 - 新增独立模块 `src/preprocess.rs`：编译流水线中**专门且唯一**的前置处理层，位于 token

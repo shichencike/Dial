@@ -33,12 +33,50 @@ pub struct PreprocessOptions {
     /// 是否保留 debug 代码（`debug_print(...)` 与 `debug { ... }`）。
     /// `true`（debug/check/test）保留；`false`（release 构建）在语义分析前删除。
     pub keep_debug: bool,
+    /// v1.23：条件编译事实表。内置维度（debug/target_os/target_arch）已预置，
+    /// 其余来自 CLI `--cfg key[=value]`。`@cfg(name)` 查布尔（有键即 true，除非值为 "0"/"false"）；
+    /// `@cfg(key = "value")` 查精确字符串相等。
+    pub cfg_facts: HashMap<String, String>,
 }
 
 impl Default for PreprocessOptions {
     fn default() -> Self {
-        Self { keep_debug: true }
+        Self { keep_debug: true, cfg_facts: HashMap::new() }
     }
+}
+
+impl PreprocessOptions {
+    /// 构造选项并注入内置 cfg 事实：debug / target_os / target_arch。
+    pub fn with_builtins(keep_debug: bool, extra: HashMap<String, String>) -> Self {
+        let mut cfg_facts = HashMap::new();
+        // debug 维度与构建模式一致（与 keep_debug 同源）。
+        cfg_facts.insert("debug".into(), if keep_debug { "1" } else { "0" }.into());
+        // 目标平台维度：复用 package::host_triple() 的判定（含 DIAL_TARGET 覆盖）。
+        let triple = package::host_triple();
+        let (os, arch) = split_triple_os_arch(&triple);
+        cfg_facts.insert("target_os".into(), os);
+        cfg_facts.insert("target_arch".into(), arch);
+        cfg_facts.extend(extra);
+        Self { keep_debug, cfg_facts }
+    }
+}
+
+/// 从形如 `x86_64-unknown-linux-gnu` 的 triple 中抽出 (os, arch)。
+/// 只取最有辨识度的两段，无法识别时回退到全文/空串（不会 panic）。
+fn split_triple_os_arch(triple: &str) -> (String, String) {
+    let parts: Vec<&str> = triple.split('-').collect();
+    let arch = parts.first().copied().unwrap_or("").to_string();
+    let os = parts
+        .iter()
+        .rev()
+        .find(|p| {
+            ["linux", "windows", "macos", "darwin", "android", "ios", "freebsd", "none"]
+                .iter().any(|k| p.contains(k))
+        })
+        .copied()
+        .unwrap_or("")
+        .to_string();
+    (os, arch)
 }
 
 /// 预处理阶段产物：`analyze` 所需的全部输入，已结算干净。
@@ -305,6 +343,338 @@ fn resolve_ffi_link(spec: &str, src_path: &Path) -> Result<FfiLib, String> {
 }
 
 // ---------------------------------------------------------------------------
+//  v1.23 Pass 1：条件编译求值（@cfg）
+// ---------------------------------------------------------------------------
+
+/// 求一个 cfg 条件的真假。
+///
+/// - `Name(k)`：查事实表，存在且值非 `0`/`false`/`` 即为真；不存在为 false。
+/// - `Eq(k, v)`：事实表中 `k == v` 为真。
+/// - `Not/All/Any`：标准布尔组合。
+fn eval_cfg(cond: &crate::ast::CfgCond, facts: &HashMap<String, String>) -> bool {
+    use crate::ast::CfgCond;
+    match cond {
+        CfgCond::Name(k) => facts
+            .get(k)
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "False" | "FALSE" | ""))
+            .unwrap_or(false),
+        CfgCond::Eq(k, v) => facts.get(k).map(|x| x == v).unwrap_or(false),
+        CfgCond::Not(c) => !eval_cfg(c, facts),
+        CfgCond::All(cs) => cs.iter().all(|c| eval_cfg(c, facts)),
+        CfgCond::Any(cs) => cs.iter().any(|c| eval_cfg(c, facts)),
+    }
+}
+
+/// 处理一条语句的 cfg：递归子语句 → 若本层带 cfg 且为假则删除、为真则清标记。
+fn cfg_stmts(stmts: &mut Vec<crate::ast::Stmt>, facts: &HashMap<String, String>) {
+    for s in stmts.iter_mut() {
+        cfg_stmt_children(s, facts);
+    }
+    stmts.retain(|s| {
+        let c = match s {
+            crate::ast::Stmt::Block { cfg, .. } => cfg.as_ref(),
+            _ => None,
+        };
+        c.map(|x| eval_cfg(x, facts)).unwrap_or(true)
+    });
+    // 保留下来的块清掉已求值的 cfg 标记（后续语义/后端不再关心）。
+    for s in stmts.iter_mut() {
+        if let crate::ast::Stmt::Block { cfg, .. } = s {
+            *cfg = None;
+        }
+    }
+}
+
+/// 递归进所有含子语句的 Stmt 变体（字段参照 semantic::desugar_stmts）。
+fn cfg_stmt_children(s: &mut crate::ast::Stmt, facts: &HashMap<String, String>) {
+    use crate::ast::Stmt;
+    match s {
+        Stmt::If { then_branch, else_branch, .. } => {
+            cfg_stmts(then_branch, facts);
+            if let Some(e) = else_branch { cfg_stmts(e, facts); }
+        }
+        Stmt::While { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::ForEach { body, .. }
+        | Stmt::ForEachMap { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::With { body, .. }
+        | Stmt::Block { body, .. } => cfg_stmts(body, facts),
+        Stmt::Match { arms, .. } => {
+            for arm in arms { cfg_stmts(&mut arm.body, facts); }
+        }
+        Stmt::Try { body, catch, .. } => {
+            cfg_stmts(body, facts);
+            cfg_stmts(&mut catch.body, facts);
+        }
+        Stmt::Select { arms, default_body, timeout_body, .. } => {
+            for arm in arms { cfg_stmts(&mut arm.body, facts); }
+            if let Some(d) = default_body { cfg_stmts(d, facts); }
+            if let Some(t) = timeout_body { cfg_stmts(t, facts); }
+        }
+        Stmt::Defer(inner, ..) => cfg_stmt_children(inner, facts),
+        _ => {}
+    }
+}
+
+/// 对整个 Program 跑条件编译：顶层函数/结构体/测试块 + 各自函数体。
+fn cfg_program(prog: &mut crate::ast::Program, facts: &HashMap<String, String>) {
+    // 顶层函数：条件为假者标记删除，为真者清标记并递归处理函数体。
+    for f in prog.functions.iter_mut() {
+        let keep = f.cfg.as_ref().map(|c| eval_cfg(c, facts)).unwrap_or(true);
+        if keep {
+            f.cfg = None;
+            cfg_stmts(&mut f.body, facts);
+        }
+    }
+    prog.functions.retain(|f| f.cfg.is_none());
+
+    for st in prog.structs.iter_mut() {
+        if st.cfg.as_ref().map(|c| eval_cfg(c, facts)).unwrap_or(true) {
+            st.cfg = None;
+        }
+    }
+    prog.structs.retain(|st| st.cfg.is_none());
+
+    for t in prog.tests.iter_mut() {
+        cfg_stmts(&mut t.body, facts);
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  v1.23 Pass 2：AST 宏展开
+// ---------------------------------------------------------------------------
+
+/// 宏调用最大递归深度（防御自递归宏导致无限展开）。
+const MACRO_MAX_DEPTH: usize = 64;
+
+type MacroTable = HashMap<String, crate::ast::MacroDef>;
+
+/// 用实参替换表达式里所有以 `$` 开头的形参占位符（Expr::Var("$x")）。
+fn subst_expr(e: &mut crate::ast::Expr, params: &[String], args: &[crate::ast::Expr]) {
+    use crate::ast::Expr;
+    match e {
+        Expr::Var(name) => {
+            if let Some(idx) = params.iter().position(|p| p == name) {
+                if let Some(arg) = args.get(idx) {
+                    *e = arg.clone();
+                }
+            }
+        }
+        Expr::Field(obj, ..) => subst_expr(obj, params, args),
+        Expr::Method(obj, _, a) => {
+            subst_expr(obj, params, args);
+            for x in a.iter_mut() { subst_expr(x, params, args); }
+        }
+        Expr::Index(obj, idx) => {
+            subst_expr(obj, params, args);
+            subst_expr(idx, params, args);
+        }
+        Expr::Slice(arr, from, to) => {
+            subst_expr(arr, params, args);
+            subst_expr(from, params, args);
+            subst_expr(to, params, args);
+        }
+        Expr::ArrayLit(xs, _) => {
+            for x in xs.iter_mut() { subst_expr(x, params, args); }
+        }
+        Expr::Interp(parts) => {
+            for part in parts.iter_mut() {
+                if let crate::ast::InterpPart::Expr(x) = part {
+                    subst_expr(x, params, args);
+                }
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, x) in fields.iter_mut() { subst_expr(x, params, args); }
+        }
+        Expr::Binary(l, _, r) => {
+            subst_expr(l, params, args);
+            subst_expr(r, params, args);
+        }
+        Expr::Ternary(c, a, b) => {
+            subst_expr(c, params, args);
+            subst_expr(a, params, args);
+            subst_expr(b, params, args);
+        }
+        Expr::Unary(_, x) | Expr::Await(x) => subst_expr(x, params, args),
+        Expr::Call(_, a) => {
+            for x in a.iter_mut() { subst_expr(x, params, args); }
+        }
+        // 字面量 / TypeLit / FuncRef 等无子表达式，无需处理。
+        _ => {}
+    }
+}
+
+/// 递归展开语句序列里的宏调用。
+///
+/// 宏调用表现为 `Stmt::Expr(Expr::Call(name, args), ..)`：若 `name` 命中宏表，
+/// 则把宏体（参数替换后）内联到调用点，替换这一条语句为多条语句。
+fn expand_macros_in_stmts(
+    stmts: &mut Vec<crate::ast::Stmt>,
+    table: &MacroTable,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > MACRO_MAX_DEPTH {
+        return Err(format!("AST 宏展开超过最大深度 {}（可能存在递归宏）", MACRO_MAX_DEPTH));
+    }
+    // 先递归处理每条语句的子块，再在本层做宏内联。
+    let mut out: Vec<crate::ast::Stmt> = Vec::with_capacity(stmts.len());
+    for stmt in stmts.drain(..) {
+        let mut s = stmt;
+        macro_children(&mut s, table, depth)?;
+        // 本层是否是宏调用？
+        let call = match &s {
+            crate::ast::Stmt::Expr(crate::ast::Expr::Call(name, args), line, col) => {
+                table.get(name).map(|d| (d.clone(), args.clone(), *line, *col))
+            }
+            _ => None,
+        };
+        if let Some((def, args, line, col)) = call {
+            if args.len() != def.params.len() {
+                return Err(format!(
+                    "第 {} 行 第 {} 列：宏 '{}' 需要 {} 个参数，实际 {} 个",
+                    line, col, def.name, def.params.len(), args.len()
+                ));
+            }
+            let mut body = def.body.clone();
+            for st in body.iter_mut() {
+                subst_stmt(st, &def.params, &args);
+            }
+            // 宏体本身可能调用其它宏：递归展开后再内联。
+            expand_macros_in_stmts(&mut body, table, depth + 1)?;
+            out.extend(body);
+        } else {
+            out.push(s);
+        }
+    }
+    *stmts = out;
+    Ok(())
+}
+
+/// 对单条语句递归进子块做宏展开（与 cfg_stmt_children 覆盖集一致）。
+fn macro_children(s: &mut crate::ast::Stmt, table: &MacroTable, depth: usize) -> Result<(), String> {
+    use crate::ast::Stmt;
+    match s {
+        Stmt::If { then_branch, else_branch, .. } => {
+            expand_macros_in_stmts(then_branch, table, depth)?;
+            if let Some(e) = else_branch { expand_macros_in_stmts(e, table, depth)?; }
+        }
+        Stmt::While { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::ForEach { body, .. }
+        | Stmt::ForEachMap { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::With { body, .. }
+        | Stmt::Block { body, .. } => expand_macros_in_stmts(body, table, depth)?,
+        Stmt::Match { arms, .. } => {
+            for arm in arms { expand_macros_in_stmts(&mut arm.body, table, depth)?; }
+        }
+        Stmt::Try { body, catch, .. } => {
+            expand_macros_in_stmts(body, table, depth)?;
+            expand_macros_in_stmts(&mut catch.body, table, depth)?;
+        }
+        Stmt::Select { arms, default_body, timeout_body, .. } => {
+            for arm in arms { expand_macros_in_stmts(&mut arm.body, table, depth)?; }
+            if let Some(d) = default_body { expand_macros_in_stmts(d, table, depth)?; }
+            if let Some(t) = timeout_body { expand_macros_in_stmts(t, table, depth)?; }
+        }
+        Stmt::Defer(inner, ..) => macro_children(inner, table, depth)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// 对单条语句里的所有表达式做形参替换（宏体内联前调用）。
+fn subst_stmt(s: &mut crate::ast::Stmt, params: &[String], args: &[crate::ast::Expr]) {
+    use crate::ast::Stmt;
+    match s {
+        Stmt::VarDecl { value, .. } => subst_expr(value, params, args),
+        Stmt::Assign { value, .. }
+        | Stmt::Throw(value, ..)
+        | Stmt::Expr(value, ..) => subst_expr(value, params, args),
+        Stmt::AssignDeref { ptr, value, .. } => {
+            subst_expr(ptr, params, args);
+            subst_expr(value, params, args);
+        }
+        Stmt::AssignField { obj, value, .. } => {
+            subst_expr(obj, params, args);
+            subst_expr(value, params, args);
+        }
+        Stmt::AssignIndex { arr, index, value, .. } => {
+            subst_expr(arr, params, args);
+            subst_expr(index, params, args);
+            subst_expr(value, params, args);
+        }
+        Stmt::If { cond, then_branch, else_branch, .. } => {
+            subst_expr(cond, params, args);
+            for x in then_branch.iter_mut() { subst_stmt(x, params, args); }
+            if let Some(e) = else_branch { for x in e.iter_mut() { subst_stmt(x, params, args); } }
+        }
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
+            subst_expr(cond, params, args);
+            for x in body.iter_mut() { subst_stmt(x, params, args); }
+        }
+        Stmt::For { start, end, step, body, .. } => {
+            subst_expr(start, params, args);
+            subst_expr(end, params, args);
+            if let Some(e) = step { subst_expr(e, params, args); }
+            for x in body.iter_mut() { subst_stmt(x, params, args); }
+        }
+        Stmt::ForEach { coll, body, .. } | Stmt::ForEachMap { coll, body, .. } => {
+            subst_expr(coll, params, args);
+            for x in body.iter_mut() { subst_stmt(x, params, args); }
+        }
+        Stmt::With { resource, body, .. } => {
+            subst_expr(resource, params, args);
+            for x in body.iter_mut() { subst_stmt(x, params, args); }
+        }
+        Stmt::Match { subject, arms, .. } => {
+            subst_expr(subject, params, args);
+            for arm in arms.iter_mut() { for x in arm.body.iter_mut() { subst_stmt(x, params, args); } }
+        }
+        Stmt::Try { body, catch, .. } => {
+            for x in body.iter_mut() { subst_stmt(x, params, args); }
+            for x in catch.body.iter_mut() { subst_stmt(x, params, args); }
+        }
+        Stmt::Select { arms, default_body, timeout, timeout_body, .. } => {
+            for arm in arms.iter_mut() {
+                subst_expr(&mut arm.chan, params, args);
+                for x in arm.body.iter_mut() { subst_stmt(x, params, args); }
+            }
+            if let Some(db) = default_body { for x in db.iter_mut() { subst_stmt(x, params, args); } }
+            if let Some(te) = timeout { subst_expr(te, params, args); }
+            if let Some(tb) = timeout_body { for x in tb.iter_mut() { subst_stmt(x, params, args); } }
+        }
+        Stmt::Block { body, .. } => { for x in body.iter_mut() { subst_stmt(x, params, args); } }
+        Stmt::Defer(inner, ..) => subst_stmt(inner, params, args),
+        Stmt::Return(None, ..) | Stmt::Break(..) | Stmt::Continue(..) | Stmt::Label(..) | Stmt::Goto(..) => {}
+        _ => {}
+    }
+}
+
+/// 对整个 Program 展开宏：构建宏表 → 展开各函数体/测试体 → 清空宏定义。
+fn expand_macros_program(prog: &mut crate::ast::Program) -> Result<(), String> {
+    if prog.macros.is_empty() { return Ok(()); }
+    // 重名宏检测（Fail-Fast）。
+    let mut table: MacroTable = HashMap::new();
+    for m in &prog.macros {
+        if table.insert(m.name.clone(), m.clone()).is_some() {
+            return Err(format!("第 {} 行 第 {} 列：宏 '{}' 重复定义", m.line, m.col, m.name));
+        }
+    }
+    for f in prog.functions.iter_mut() {
+        expand_macros_in_stmts(&mut f.body, &table, 0)?;
+    }
+    for t in prog.tests.iter_mut() {
+        expand_macros_in_stmts(&mut t.body, &table, 0)?;
+    }
+    // 宏展开完毕后从 program 移除定义（raw_program 保留，供 LSP 查看）。
+    prog.macros.clear();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 //  阶段入口
 // ---------------------------------------------------------------------------
 
@@ -346,6 +716,7 @@ pub fn run(
         links: Vec::new(),
         cstructs: Vec::new(),
         tests: Vec::new(),
+        macros: Vec::new(),
     };
     let mut fn_origin: HashMap<String, String> = HashMap::new();
     let mut struct_origin: HashMap<String, String> = HashMap::new();
@@ -385,6 +756,7 @@ pub fn run(
         program.links.append(&mut p.links);
         program.cstructs.append(&mut p.cstructs);
         program.tests.append(&mut p.tests);
+        program.macros.append(&mut p.macros);
     }
 
     // 语言层 extern fn 并入外部函数表（与包 .diali 一视同仁）。
@@ -429,7 +801,13 @@ pub fn run(
         }
     }
 
-    // raw_program 始终是裁剪前的完整 AST（供 LSP / dialc test 看到全部调试代码）。
+    // v1.23 Pass 1+2：宏展开与条件编译求值。二者必须在所有产物（含 dialc test 用的
+    // raw_program）上生效——否则 test 代码生成会遇到未展开的宏调用或未求值的 cfg 项。
+    // 顺序：先宏展开（可能引入新的 @cfg 块）→ 再 cfg 求值。
+    expand_macros_program(&mut program).map_err(|e| format!("{}：{}", src_path, e))?;
+    cfg_program(&mut program, &options.cfg_facts);
+
+    // raw_program = 宏已展开、cfg 已求值、但**保留 debug 代码**的 AST（供 dialc test）。
     let raw_program = program.clone();
     if !options.keep_debug {
         semantic::strip_debug_program(&mut program);
@@ -486,5 +864,38 @@ mod tests {
     fn import_specs_scans_tokens() {
         let tokens = lexer::lex("import \"a\"; import \"b\"; fn main() {}").unwrap();
         assert_eq!(import_specs(&tokens), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn cfg_eval_boolean_and_eq() {
+        use crate::ast::CfgCond;
+        let mut facts = HashMap::new();
+        facts.insert("debug".into(), "1".into());
+        facts.insert("off".into(), "0".into());
+        facts.insert("target_os".into(), "linux".into());
+        assert!(eval_cfg(&CfgCond::Name("debug".into()), &facts));
+        assert!(!eval_cfg(&CfgCond::Name("off".into()), &facts));
+        assert!(!eval_cfg(&CfgCond::Name("missing".into()), &facts));
+        assert!(eval_cfg(&CfgCond::Eq("target_os".into(), "linux".into()), &facts));
+        assert!(!eval_cfg(&CfgCond::Eq("target_os".into(), "windows".into()), &facts));
+        assert!(eval_cfg(&CfgCond::Not(Box::new(CfgCond::Name("off".into()))), &facts));
+        assert!(eval_cfg(
+            &CfgCond::All(vec![CfgCond::Name("debug".into()), CfgCond::Eq("target_os".into(), "linux".into())]),
+            &facts
+        ));
+        assert!(eval_cfg(
+            &CfgCond::Any(vec![CfgCond::Name("off".into()), CfgCond::Name("debug".into())]),
+            &facts
+        ));
+    }
+
+    #[test]
+    fn dollar_ident_lexes_as_macro_param() {
+        let tokens = lexer::lex("macro m($a, $item) { print($a); }").unwrap();
+        let idents: Vec<String> = tokens.iter().filter_map(|t| {
+            if let lexer::TokenKind::Ident(s) = &t.kind { Some(s.clone()) } else { None }
+        }).collect();
+        assert!(idents.contains(&"$a".to_string()));
+        assert!(idents.contains(&"$item".to_string()));
     }
 }

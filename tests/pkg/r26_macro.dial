@@ -1,0 +1,31 @@
+// R26 AST 宏门禁：定义 + 普通调用 + 参数替换（表达式上下文）+ 嵌套 + 遮蔽函数。
+macro twice($msg) {
+    print($msg);
+    print($msg);
+}
+macro add($a, $b) {
+    print("SUM=" + str($a + $b));
+}
+macro inner($x) {
+    print("IN=" + str($x));
+}
+macro outer($a) {
+    inner($a);
+    inner($a + 1);
+}
+// 宏遮蔽同名函数：宏存在时优先展开宏（输出 MACRO），不会调用下面的函数。
+macro shadow() {
+    print("MACRO");
+}
+fn shadow(): void {
+    print("FUNCTION");
+}
+fn main(): int {
+    print("START");
+    twice("HI");
+    add(3, 4);
+    outer(10);
+    shadow();
+    print("END");
+    return 0;
+}

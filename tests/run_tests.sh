@@ -3544,6 +3544,135 @@ else
     rbad "R25 release 未跳过调试块类型检查（rc=$_r25_sc_rel_rc）"
 fi
 
+# ---------------------------------------------------------------------------
+# R26) 条件编译 @cfg 与 AST 宏（v1.23）：预处理阶段求值 / 展开，双后端一致。
+# ---------------------------------------------------------------------------
+echo "  -- R26) 条件编译 @cfg 与 AST 宏（v1.23） --"
+
+# 1) cfg 内置维度：debug 在 debug 构建为真、release 为假；target_os/any/all 命中。
+# 2) cfg 自定义维度：--cfg my_feature 打开 FEATURE_ON。
+# 3) 双后端逐字一致。
+_r26_ok=1
+for _r26_be in llvm asm; do
+    ${DIALC} build tests/pkg/r26_cfg.dial --backend ${_r26_be} -o "${TMP}/r26c_dbg_${_r26_be}" >/dev/null 2>&1 || { _r26_ok=0; rbad "R26 cfg/debug 编译失败/$_r26_be"; continue; }
+    ${DIALC} build tests/pkg/r26_cfg.dial --backend ${_r26_be} --cfg my_feature -o "${TMP}/r26c_feat_${_r26_be}" >/dev/null 2>&1 || { _r26_ok=0; rbad "R26 cfg/feature 编译失败/$_r26_be"; continue; }
+    ${DIALC} build tests/pkg/r26_cfg.dial --backend ${_r26_be} --release -o "${TMP}/r26c_rel_${_r26_be}" >/dev/null 2>&1 || { _r26_ok=0; rbad "R26 cfg/release 编译失败/$_r26_be"; continue; }
+    _r26_dbg=$("${TMP}/r26c_dbg_${_r26_be}" | tr '\n' ' ')
+    _r26_feat=$("${TMP}/r26c_feat_${_r26_be}" | tr '\n' ' ')
+    _r26_rel=$("${TMP}/r26c_rel_${_r26_be}" | tr '\n' ' ')
+    if printf '%s' "$_r26_dbg" | grep -qF 'DEBUG_ON' \
+       && printf '%s' "$_r26_dbg" | grep -qF 'OS_LINUX' \
+       && printf '%s' "$_r26_dbg" | grep -qF 'ALL_HIT' \
+       && ! printf '%s' "$_r26_dbg" | grep -qF 'DEBUG_OFF' \
+       && ! printf '%s' "$_r26_dbg" | grep -qF 'FEATURE_ON'; then :; else
+        _r26_ok=0; rbad "R26 cfg/debug 维度判定异常/$_r26_be（[$_r26_dbg]）"
+    fi
+    if printf '%s' "$_r26_feat" | grep -qF 'FEATURE_ON'; then :; else
+        _r26_ok=0; rbad "R26 cfg/--cfg 自定义维度未生效/$_r26_be（[$_r26_feat]）"
+    fi
+    if printf '%s' "$_r26_rel" | grep -qF 'DEBUG_OFF' \
+       && ! printf '%s' "$_r26_rel" | grep -qF 'DEBUG_ON' \
+       && ! printf '%s' "$_r26_rel" | grep -qF 'ALL_HIT'; then :; else
+        _r26_ok=0; rbad "R26 cfg/release 裁剪异常/$_r26_be（[$_r26_rel]）"
+    fi
+done
+if [ "$_r26_ok" -eq 1 ]; then
+    rpass "R26 条件编译 debug/target_os/any/all/自定义/取反 双后端判定正确"
+else
+    rbad "R26 条件编译存在判定异常"
+fi
+# release 产物零 DEBUG_ON 字符串残留（在被裁剪的分支里）。
+if ! strings "${TMP}/r26c_rel_llvm" | grep -qF 'DEBUG_ON'; then
+    rpass "R26 release 产物零被裁剪分支字符串残留"
+else
+    rbad "R26 release 产物仍有被裁剪分支字符串"
+fi
+
+# 4) AST 宏：参数替换（表达式上下文 $a+$b）、重复内联、嵌套、遮蔽同名函数。
+_r26_m_ok=1
+for _r26_be in llvm asm; do
+    ${DIALC} build tests/pkg/r26_macro.dial --backend ${_r26_be} -o "${TMP}/r26m_${_r26_be}" >/dev/null 2>&1 || { _r26_m_ok=0; rbad "R26 宏编译失败/$_r26_be"; continue; }
+    _r26_m=$("${TMP}/r26m_${_r26_be}" | tr '\n' ' ')
+    if printf '%s' "$_r26_m" | grep -qF 'HI HI' \
+       && printf '%s' "$_r26_m" | grep -qF 'SUM=7' \
+       && printf '%s' "$_r26_m" | grep -qF 'IN=10 IN=11' \
+       && printf '%s' "$_r26_m" | grep -qF 'MACRO' \
+       && ! printf '%s' "$_r26_m" | grep -qF 'FUNCTION'; then :; else
+        _r26_m_ok=0; rbad "R26 宏展开异常/$_r26_be（[$_r26_m]）"
+    fi
+done
+if [ "$_r26_m_ok" -eq 1 ]; then
+    rpass "R26 AST 宏参数替换/重复内联/嵌套/遮蔽函数 双后端正确"
+else
+    rbad "R26 AST 宏展开存在异常"
+fi
+
+# 5) 递归宏 Fail-Fast + cfg 假分支调用 Fail-Fast。
+cat > "${TMP}/r26_rec.dial" <<'EOF'
+macro rec($x) { rec($x); }
+fn main(): int { rec(1); return 0; }
+EOF
+${DIALC} build "${TMP}/r26_rec.dial" -o "${TMP}/r26_rec" >"${TMP}/r26_rec.log" 2>&1
+_r26_rec_rc=$?
+if [ "$_r26_rec_rc" -ne 0 ] && grep -qE "递归|深度" "${TMP}/r26_rec.log"; then
+    rpass "R26 递归宏深度保护 Fail-Fast"
+else
+    rbad "R26 递归宏未触发深度保护（rc=$_r26_rec_rc）"
+fi
+
+# 6) 孤立 @cfg：其后若非 fn/struct，须当场拒绝（Fail-Fast，防止静默污染下一个函数）。
+cat > "${TMP}/r26_orphan.dial" <<'EOF'
+@cfg(debug)
+const ORPHAN_X: int = 5;
+fn main(): int { print(str(ORPHAN_X)); return 0; }
+EOF
+${DIALC} build "${TMP}/r26_orphan.dial" -o "${TMP}/r26_orphan" >"${TMP}/r26_orphan.log" 2>&1
+_r26_orphan_rc=$?
+if [ "$_r26_orphan_rc" -ne 0 ] && grep -qE "@cfg.*只能修饰|只能修饰" "${TMP}/r26_orphan.log"; then
+    rpass "R26 孤立 @cfg 修饰非 fn/struct 当场拒绝（Fail-Fast）"
+else
+    rbad "R26 孤立 @cfg 未当场拒绝（rc=$_r26_orphan_rc，可能静默污染后续函数）"
+fi
+
+# 7) cfg 假分支不参与类型检查；真分支 Fail-Fast（与 v1.22 debug 跳过检查同理）。
+cat > "${TMP}/r26_skipcheck.dial" <<'EOF'
+fn main(): int {
+    print("START");
+    @cfg(!debug)
+    print(undefined_in_cut_branch());
+    print("END");
+    return 0;
+}
+EOF
+${DIALC} build "${TMP}/r26_skipcheck.dial" -o "${TMP}/r26_skip_dbg" >"${TMP}/r26_skip_dbg.log" 2>&1
+_r26_skip_dbg_rc=$?
+${DIALC} build "${TMP}/r26_skipcheck.dial" --release -o "${TMP}/r26_skip_rel" >"${TMP}/r26_skip_rel.log" 2>&1
+_r26_skip_rel_rc=$?
+if [ "$_r26_skip_dbg_rc" -eq 0 ] && [ "$("${TMP}/r26_skip_dbg" | tr '\n' ' ')" = "START END " ] \
+   && [ "$_r26_skip_rel_rc" -ne 0 ] && grep -q "未定义" "${TMP}/r26_skip_rel.log"; then
+    rpass "R26 cfg 假分支跳过类型检查 / 真分支 Fail-Fast"
+else
+    rbad "R26 cfg 分支检查异常（debug rc=$_r26_skip_dbg_rc / release rc=$_r26_skip_rel_rc）"
+fi
+
+# 8) 宏体里的 @cfg 在宏展开后参与求值（先宏后 cfg 的 pass 顺序）。
+cat > "${TMP}/r26_macro_cfg.dial" <<'EOF'
+macro maybe($x) {
+    @cfg(debug)
+    print("MDBG=" + str($x));
+}
+fn main(): int { maybe(7); return 0; }
+EOF
+${DIALC} build "${TMP}/r26_macro_cfg.dial" -o "${TMP}/r26_mc_dbg" >/dev/null 2>&1
+_r26_mc_dbg=$("${TMP}/r26_mc_dbg" 2>/dev/null | tr '\n' ' ')
+${DIALC} build "${TMP}/r26_macro_cfg.dial" --release -o "${TMP}/r26_mc_rel" >/dev/null 2>&1
+_r26_mc_rel=$("${TMP}/r26_mc_rel" 2>/dev/null | tr '\n' ' ')
+if [ "$_r26_mc_dbg" = "MDBG=7 " ] && [ -z "$_r26_mc_rel" ]; then
+    rpass "R26 宏体 @cfg 展开后参与求值（debug 输出 / release 裁剪）"
+else
+    rbad "R26 宏体 @cfg 求值异常（debug=[$_r26_mc_dbg] release=[$_r26_mc_rel]）"
+fi
+
 # ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付

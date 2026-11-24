@@ -7,6 +7,46 @@
 
 use std::collections::HashMap;
 
+// ---------------------------------------------------------------------------
+// v1.23 预处理：条件编译与 AST 宏
+// ---------------------------------------------------------------------------
+
+/// 条件编译条件（`@cfg(cond)`）。
+///
+/// 在预处理阶段求值：为真则保留注解目标（并清除标记），为假则整块/整项删除。
+/// 求值所需的事实由 `PreprocessOptions` 提供（内置 debug/target_os/target_arch
+/// + CLI `--cfg key=value` 的自定义维度）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CfgCond {
+    /// 布尔条件：裸标识符，如 `@cfg(debug)` / `@cfg(my_flag)`。
+    /// 查 cfg 表中的布尔值（内置维度或 `--cfg key` 无值形式）。未定义求值为 false。
+    Name(String),
+    /// 键值条件：`@cfg(target_os = "linux")` / `@cfg(feature = "x")`。
+    Eq(String, String),
+    /// 逻辑非：`@cfg(!debug)`。
+    Not(Box<CfgCond>),
+    /// 合取：`@cfg(all(a, b))`。空集为 true。
+    All(Vec<CfgCond>),
+    /// 析取：`@cfg(any(a, b))`。空集为 false。
+    Any(Vec<CfgCond>),
+}
+
+/// AST 宏定义（v1.23）：`macro name($a, $b) { ...stmt... }`。
+///
+/// 在预处理阶段按 AST 展开（非文本替换）：调用 `name(x, y)` 会被展开成宏体语句，
+/// 其中 `Expr::Var("$a")` 这类以 `$` 开头的占位符替换为对应实参表达式。
+/// 展开支持递归（宏体调用其它宏），带深度上限防止无限递归。
+#[derive(Debug, Clone)]
+pub struct MacroDef {
+    pub name: String,
+    /// 形参名（含 `$` 前缀，如 `"$a"`），与调用实参按顺序一一对应。
+    pub params: Vec<String>,
+    /// 宏体语句序列（展开时整体内联到调用点）。
+    pub body: Vec<Stmt>,
+    pub line: usize,
+    pub col: usize,
+}
+
 /// dialc 类型。v0.2 已实现：Void/Int/Float/Bool/String/Array<T>/Struct(name)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
@@ -533,6 +573,9 @@ pub enum Stmt {
         /// v1.22：`debug { ... }` 调试块标记。普通裸块为 false。
         /// true 时仅在 debug 构建保留；release 构建在语义分析前整块裁剪掉。
         debug_only: bool,
+        /// v1.23：`@cfg(cond) { ... }` 条件编译标记。None 表示无条件。
+        /// 预处理阶段求值：假则整块删除、真则清除标记（置 None）。
+        cfg: Option<CfgCond>,
     },
 }
 
@@ -619,6 +662,9 @@ pub struct Func {
     /// 任务/协程入口（经 spawn_async / pool_submit / coroutine）在协程栈上运行。
     /// 直接以普通函数方式调用 async fn 由语义层拒绝。
     pub is_async: bool,
+    /// v1.23：`@cfg(cond) fn ...` 条件编译标记。None 表示无条件。
+    /// 预处理阶段求值：假则整函数删除、真则清除标记。
+    pub cfg: Option<CfgCond>,
 }
 
 /// 结构体定义。
@@ -637,6 +683,8 @@ pub struct StructDef {
     /// 紧凑布局（v1.04）：`packed struct` 不插入对齐 padding，字段紧密排列，
     /// 与 C 的 `__attribute__((packed))` / `#pragma pack` 逐字节一致（网络协议对齐刚需）。
     pub packed: bool,
+    /// v1.23：`@cfg(cond) struct ...` 条件编译标记。None 表示无条件。
+    pub cfg: Option<CfgCond>,
 }
 
 /// 语言层外部函数声明（v1.04 FFI）：`extern fn puts(s: rawptr<byte>): int;`
@@ -720,4 +768,7 @@ pub struct Program {
     pub cstructs: Vec<CStructDef>,
     /// 顶层 `test` 块（v1.04 工具链）：只在 `dialc test` 下编译运行。
     pub tests: Vec<TestDef>,
+    /// v1.23：AST 宏定义。预处理阶段展开后从 program 中清空（不进入语义/后端）。
+    /// `raw_program` 保留宏定义供 LSP 查看。
+    pub macros: Vec<MacroDef>,
 }
