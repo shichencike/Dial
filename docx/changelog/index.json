@@ -4,12 +4,12 @@
   "count": 34,
   "versions": [
     {
-      "id": "未发布",
-      "label": "[未发布]",
-      "date": "",
-      "note": "",
-      "topic": "因 throw 漏更多、语言层通病」，经精细对照实验证明归因有误，真实是两个独立 bug）：",
-      "file": "未发布.html",
+      "id": "v1.21",
+      "label": "v1.21",
+      "date": "2026-11-24",
+      "note": "2026-11-24",
+      "topic": "预处理大补齐：字段级 ARC（句柄字段 struct 进容器）+ 调试期裁剪（debug_print / debug 块）+ 专门预处理阶段 + 条件编译 @cfg 与 AST 宏 + `#` 文本级预处理指令（#define / #if / #error / -D）",
+      "file": "v1.21.html",
       "newer": null,
       "older": "v1.20"
     },
@@ -20,7 +20,7 @@
       "note": "2026-11-21",
       "topic": "只有 int/float/bool/string/ptr 五类，FFI 精确宽度标量 int32(栈槽低 4 字节)、byte(低 1 字节…",
       "file": "v1.20.html",
-      "newer": "未发布",
+      "newer": "v1.21",
       "older": "v1.10"
     },
     {

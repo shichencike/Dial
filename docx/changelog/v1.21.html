@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>更新日志 v1.21 · Dial 语言</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="logo">◆</span> Dial</a>
+    <nav class="topnav">
+      <a href="../index.html">首页</a>
+      <a href="../spec.html">语言规范</a>
+      <a href="../changelog.html" class="active">更新日志</a>
+      <a href="../rationale.html">理由与证据</a>
+      <a href="../packages.html">包</a>
+      <a href="../cve.html">安全公告</a>
+      <a href="../bench.html">性能基准</a>
+      <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub</a>
+      <a class="ext" href="https://www.llvm.org/" target="_blank" rel="noopener">LLVM</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout"><aside class="sidebar"></aside><main class="content"><p class="note"><a href="../changelog.html">← 版本索引</a> · <a href="overview.html">版本规则</a></p><div class="toc">
+<ul>
+<li><a href="#v121--2026-11-24">[v1.21] — 2026-11-24</a><ul>
+<li><a href="#added-预处理指令文本级预处理层">Added（# 预处理指令：文本级预处理层）</a></li>
+<li><a href="#added条件编译-cfg-与-ast-宏">Added（条件编译 @cfg 与 AST 宏）</a></li>
+<li><a href="#added专门的预处理阶段">Added（专门的预处理阶段）</a></li>
+<li><a href="#added调试输出与调试代码块编译期裁剪">Added（调试输出与调试代码块：编译期裁剪）</a></li>
+<li><a href="#added字段级-arc含句柄字段-struct-进容器">Added（字段级 ARC：含句柄字段 struct 进容器）</a></li>
+<li><a href="#fixed字段级-arc-收口双后端级联结算对齐">Fixed（字段级 ARC 收口：双后端级联结算对齐）</a></li>
+<li><a href="#fixedasm-后端-simd-功能对等补齐相对-llvm-的-3-项缺口">Fixed（asm 后端 SIMD 功能对等：补齐相对 LLVM 的 3 项缺口）</a></li>
+<li><a href="#fixedp0arc-泄漏两个独立根因">Fixed（P0：ARC 泄漏，两个独立根因）</a></li>
+<li><a href="#added真实-gpu-合成后端">Added（真实 GPU 合成后端）</a></li>
+<li><a href="#addedc--dial-反向回调">Added（C → Dial 反向回调）</a></li>
+<li><a href="#added协作式线程池--协程--async-await">Added（协作式线程池 / 协程 / async-await）</a></li>
+<li><a href="#added">Added</a></li>
+<li><a href="#fixed--added方案-c完整-consume-体系">Fixed / Added（方案 C：完整 consume 体系）</a></li>
+<li><a href="#added跨工作区全量模块图开发中">Added（跨工作区全量模块图，开发中）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<h2 id="v121--2026-11-24">[v1.21] — 2026-11-24</h2>
+<blockquote>
+<p>本版是「预处理设施大补齐」的交付版本：字段级 ARC、调试期裁剪、专门的预处理阶段、
+条件编译 <code>@cfg</code> 与 AST 宏、<code>#</code> 文本级预处理指令五批改动合并发布。按 README §23
+的「小功能 / 新语法 <code>+0.01</code>」标准，从 <code>v1.20</code> 递增到 <code>v1.21</code>（<strong>不按大版本 <code>+0.1</code>
+跳档</strong>）；发布标签 <strong><code>v1.21</code></strong>，资产名按版本号推导（<code>dialc-v1.21-*.zip</code> /
+<code>dial-1.21.0.vsix</code>）。端到端全量回归 1099 项全绿、单测 41 项全绿。</p>
+</blockquote>
+<h3 id="added-预处理指令文本级预处理层">Added（<code>#</code> 预处理指令：文本级预处理层）</h3>
+<ul>
+<li>新增独立模块 <code>src/directives.rs</code>：编译流水线<strong>最前端</strong>、词法之前的文本级预处理层，
+  与 §39 的 <code>@cfg</code> / <code>macro</code>（词法后的 AST 级 pass）并存互补、职责不重叠。首批三类指令：</li>
+<li><strong>宏 <code>#define</code> / <code>#undef</code></strong>：对象式（token 级替换，不误伤字符串字面量内部）与函数式
+    （形参替换 + 嵌套调用）。函数式须 <code>NAME(</code> 紧邻；自引用按 C 语义不再展开，深度上限 64
+    防间接递归。命令行 <code>-D NAME</code> / <code>-D NAME=value</code>（别名 <code>--define</code>，可重复）注入初始宏表。</li>
+<li><strong>条件编译 <code>#if</code> / <code>#ifdef</code> / <code>#ifndef</code> / <code>#elif</code> / <code>#else</code> / <code>#endif</code></strong>：支持 <code>defined()</code>、
+    C 运算符优先级、整数（<code>0x/0b/0o</code> + <code>_</code>）、字符串/字符字面量；未定义标识符为 0。
+    假分支整块裁剪（含其中的 <code>#error</code> / 未知指令），<strong>裁掉的行以空行占位保持行号</strong>，诊断不漂移。</li>
+<li><strong>诊断 <code>#error</code> / <code>#pragma</code></strong>：活跃分支 <code>#error</code> 立即 Fail-Fast（带路径行号）；
+    <code>#pragma once</code> 由模块去重天然满足、接受为空操作，未知 pragma 记日志忽略。</li>
+<li>Fail-Fast：未闭合 <code>#if</code>、孤立 <code>#endif</code>/<code>#else</code>/<code>#elif</code>、重复 <code>#else</code>、<code>#define</code> 缺名/非法形参、
+  宏重定义内容不同、宏实参个数不符、<code>#if</code> 表达式错误/除零、未知指令——一律当场报错。</li>
+<li>挂接点：<code>preprocess::collect_sources</code> 中 lex 前跑文本 pass、lex 后做 token 宏展开（在
+  <code>import_specs</code> 之前，使 <code>-D</code>/<code>#define</code> 能改写 import 字符串）；<code>PreprocessOptions</code> 加
+  <code>defines</code> 字段；<code>main</code> 加 <code>-D/--define</code> 解析与 <code>mod directives</code>。</li>
+<li>验证：单测 40 项全绿（新增 16 项覆盖对象式/函数式/嵌套条件/defined/undef/-D/Fail-Fast 等）；
+  R27 门禁 4 组（双后端逐字一致 + <code>-D</code> 注入 + 五类 Fail-Fast + 假分支忽略），双后端一致。
+  文档见 README §41。</li>
+</ul>
+<h3 id="added条件编译-cfg-与-ast-宏">Added（条件编译 @cfg 与 AST 宏）</h3>
+<ul>
+<li><strong>条件编译 <code>@cfg(cond)</code></strong>：复用 <code>@</code> 注解前缀（零新增词法关键字），可作用于顶层
+  <code>fn</code> / <code>struct</code> 与语句/块。条件语法：裸名布尔（<code>debug</code> / <code>my_flag</code>）、键值
+  （<code>target_os = "linux"</code> / <code>feature = "x"</code>）、<code>!cond</code>、<code>all(...)</code> / <code>any(...)</code>。</li>
+<li>内置维度：<code>debug</code>（随构建模式）、<code>target_os</code> / <code>target_arch</code>（宿主 triple，
+    遵循 <code>DIAL_TARGET</code> 覆盖）；自定义维度来自 CLI <code>--cfg key[=value]</code>（可重复，
+    无 <code>=</code> 视为布尔真）。</li>
+<li>在预处理阶段求值：假则整块/整项删除（<strong>不参与类型检查</strong>），真则清除标记；
+    release 产物零被裁剪分支的字符串/符号残留；调用被裁剪的函数如期报未定义（Fail-Fast）。</li>
+<li><strong>AST 宏 <code>macro name($a, ...) { ... }</code> + <code>name(args)</code></strong>：普通调用语法，预处理阶段做
+  AST 展开（非文本替换）。<code>$a</code> 词法为 <code>Ident("$a")</code>，展开时按 <code>$</code> 前缀把实参表达式
+  替换进宏体的所有语句上下文（含嵌套表达式、子块）。支持宏体调用其它宏（递归展开，
+  深度上限 64 防自递归），宏名遮蔽同名函数，参数个数不符/重名宏当场 Fail-Fast。</li>
+<li>两端共用同一份展开后的 AST，<code>dialc test</code> / LSP 亦看到展开结果。</li>
+<li>实现落点：<code>lexer</code>（<code>$name</code> → Ident）、<code>ast</code>（<code>CfgCond</code> / <code>MacroDef</code> + cfg/macros 字段）、
+  <code>parser</code>（注解/宏定义解析，均为上下文关键字不新增保留字）、<code>preprocess</code>（eval_cfg /
+  cfg_program + 宏展开两道 pass，位于 debug 裁剪之前）、<code>main</code>（<code>--cfg</code> 解析与透传）。</li>
+<li>验证：R26 门禁 7 项全绿（cfg 各维度 + <code>--cfg</code> + release 零残留 + 宏参数/嵌套/
+  遮蔽 + 递归宏 Fail-Fast + 孤立 @cfg Fail-Fast + cfg 假分支跳过检查 + 宏体 cfg 求值，
+  双后端逐字一致）；单测 24 项全绿（新增 cfg 求值、<code>$</code> 词法）。</li>
+</ul>
+<h3 id="added专门的预处理阶段">Added（专门的预处理阶段）</h3>
+<ul>
+<li>新增独立模块 <code>src/preprocess.rs</code>：编译流水线中<strong>专门且唯一</strong>的前置处理层，位于 token
+  收集与语义分析 <code>analyze</code> 之间。收拢源码收集（三级 import 解析 / 循环检测 / 去重）、
+  逐文件 parse + AST 合并（冲突检测）、语言层 extern/link 结算（魔数校验 / rpath）、
+  以及 v1.22 的 debug 裁剪到一处。</li>
+<li>阶段入口 <code>preprocess::run(src, log, &amp;PreprocessOptions)</code> 返回 <code>PreprocessOutput</code>
+  （<code>program</code> = 裁剪后喂给 analyze 的 AST；<code>raw_program</code> = 裁剪前完整 AST 供 LSP/test）。</li>
+<li>扩展点：<code>PreprocessOptions</code> 是预处理行为的唯一配置入口，后续加条件编译（<code>cfg</code>）、
+  源码宏、特征开关只需加字段 + 一道 pass，build/run/check/test 调用方零改动。</li>
+<li><code>frontend()</code> 瘦身为「预处理 → 语义分析」两步编排；跨模块辅助函数以 <code>pub(crate) use</code>
+  保留原 crate 根路径，<code>toolchain.rs</code> / <code>lsp.rs</code> 零改动。</li>
+<li>行为完全不变的架构重构；新增 4 项预处理纯函数单元测试（共 22 项单元测试全绿），
+  全量回归通过。</li>
+</ul>
+<h3 id="added调试输出与调试代码块编译期裁剪">Added（调试输出与调试代码块：编译期裁剪）</h3>
+<ul>
+<li><strong><code>debug_print(...)</code> 调试输出</strong>：<code>print</code> 的调试期别名，输出目标/参数规则/variadic 行为完全一致
+  （stdout、末尾换行）。debug 构建正常输出；release 构建在语义分析前整句删除。</li>
+<li><strong><code>debug { ... }</code> 调试代码块</strong>：复用裸块作用域（块内变量块外不可见），debug 构建正常执行
+  （含副作用）；release 构建在语义分析前整块删除，块内语句（含副作用与资源分配）一概不执行。</li>
+<li><strong>编译期裁剪 pass</strong>（<code>semantic::strip_debug_program</code>）：仅在 release 构建、且位于 <code>analyze</code>
+  <strong>之前</strong>运行——因此 release ① 不检查调试代码类型错误（用户裁决）② 产物零调试字符串/调用残留
+  ③ 零运行时开销。<code>raw_program</code> 始终保留完整 AST，LSP / <code>dialc test</code> 照常看到全部调试代码。</li>
+<li><strong>构建模式映射</strong>：默认 <code>--safety debug</code> 保留调试代码；<code>--release</code> / <code>--fast</code> /
+  <code>--safety safe|fast</code> 均裁剪。<code>dialc check</code> 作为纯检查工具始终保留并校验调试代码。</li>
+<li>新增 R25 门禁：双后端 debug/release 功能逐字一致、副作用开关、release 产物零字符串残留、
+  release 跳过类型检查（10 项）。</li>
+</ul>
+<h3 id="added字段级-arc含句柄字段-struct-进容器">Added（字段级 ARC：含句柄字段 struct 进容器）</h3>
+<ul>
+<li><strong>字段级 ARC 落地</strong>：含 <code>string</code> / <code>array</code> / <code>map</code> 等句柄字段的 struct 现在可作为数组元素
+  与 map 值（此前语义层一律拒绝）。装箱为带 desc 表的 ARC box，布局 <code>[desc][rc][payload]</code>
+  （rc 紧邻 payload 以兼容通用 <code>dial_rc_retain(p)</code> 读 <code>p[-1]</code>；desc 在 <code>p[-2]</code>），
+  容器释放时按 desc 逐字段级联 release。desc 表 <code>[nfields][(kind,offset)×n]</code> 由两端
+  静态发射（LLVM 全局常量 / asm <code>.rodata .Ldarc_&lt;Struct&gt;</code>）。</li>
+<li>新增 <code>dial_struct_box_arc</code> / <code>dial_struct_box_arc_release</code>（<code>runtime/dial_rt_mem.c</code>）。</li>
+<li>容器元素 kind 扩展：数组 <code>DIAL_ELEM_BOXARC=7</code>、map <code>KV_STRUCT_ARC=7</code>；<code>STDLIB_ABI</code> 6→7。</li>
+<li>语义层放开数组元素 / map 值 / <code>get_or</code> / 类型良构检查对可装箱 struct 的限制。</li>
+<li>B6 负向断言翻转为正向；新增 R24 门禁（双后端功能逐字一致 + 20 万次混合压测 +
+    峰值 RSS &lt; 8MB）。</li>
+</ul>
+<h3 id="fixed字段级-arc-收口双后端级联结算对齐">Fixed（字段级 ARC 收口：双后端级联结算对齐）</h3>
+<ul>
+<li><strong>LLVM <code>get_or</code> 命中 double-free（heap-use-after-free）</strong>：命中时 C 侧 <code>dial_kvmap_get_or</code>
+  对 ARC struct 不 retain，返回的是表内 box 的字段借用；LLVM 变量声明未对解箱副本字段 +1，
+  作用域退出提前释放字段 → map 销毁二次释放（exit=134）。修复：解箱副本按 <code>desc</code> 递归
+  retain 字段后再归还 default box（对齐 <code>get</code> 的 borrowed 口径）。</li>
+<li><strong>LLVM string <code>+</code> 操作数泄漏</strong>：<code>dial_string_concat(a,b)</code> 只读不消费操作数，LLVM 端缺失
+  对 owned 临时（如 <code>str(i)</code>、嵌套拼接）的结算，每轮泄漏一份；补齐与 asm
+  <code>release_string_temp</code> 同口径的操作数释放。修复后 10 万~40 万次压测 RSS 恒定 ~1.5MB。</li>
+<li><strong>asm <code>KvMap</code> 走通用 <code>dial_rc_release</code> 不逐条释放值装箱</strong>：新增 <code>ArcKind::KvMap</code>，
+  retain/release 分派到 <code>dial_kvmap_retain</code> / <code>dial_kvmap_release</code>，与 LLVM <code>release_value</code>
+  对齐。</li>
+<li><strong>asm <code>get_or</code> 命中字段 double-release</strong>：与 LLVM 同源；补 <code>StructRetain</code> 对解箱副本字段 +1。
+  （此前被 asm 漏逐条释放 box 掩盖为「仅泄漏」，修 KvMap release 后暴露，已一并修复。）</li>
+<li>全部经 ASAN（clang <code>-fsanitize=address</code>，UAF + leak 双检）与双后端 RSS 规模无关性验证。</li>
+</ul>
+<h3 id="fixedasm-后端-simd-功能对等补齐相对-llvm-的-3-项缺口">Fixed（asm 后端 SIMD 功能对等：补齐相对 LLVM 的 3 项缺口）</h3>
+<ul>
+<li><strong>以双后端实测核实并修复 asm 后端相对 LLVM 的 3 项功能缺口</strong>（此前 ROADMAP §5 护栏
+  称「LLVM 能编译而 asm 拒绝的构造为零」，以 3 个最小用例证伪：LLVM 全部编译运行正确，
+  asm 全部 Fail-Fast 拒绝）：</li>
+<li><strong>A · SIMD 变量 lane 索引 <code>v[i]</code></strong>（<code>lower.rs:1832</code> 旧版仅接受整数字面量）：字面量走
+    原快速路径（既有 <code>.s</code> 逐字节零回归）；运行期索引新增动态路径——lower 索引 → 无符号
+    <code>ICmp Lt(idx, N)</code> 边界检查（对齐 LLVM <code>emit_bounds_check</code> 的 ULT 口径，负数位模式
+    巨大自然被拦截）→ 越界调 <code>dial_bounds_fail</code> 当场 trap → 正常则 <code>idx*8</code> 动态 <code>PtrAdd</code><ul>
+<li><code>Load</code>。双后端合法索引逐值一致、越界都非零终止（LLVM SIGTRAP / asm SIGILL + 诊断）。</li>
+</ul>
+</li>
+<li><strong>B · bitcast 到 simd 类型</strong>（<code>lower.rs:3665</code> 旧版直接拒绝）：位宽口径改为
+    <code>N × 元素原生宽度 × 8</code>（对齐 LLVM <code>&lt;N x T&gt;</code> 的 <code>get_abi_size×8</code>，与布局内建同源）；
+    simd 值是栈段指针，simd↔simd 同为 <code>Ptr</code> 走恒等零拷贝返回，跨元素位重解释与 LLVM
+    逐值一致（<code>simd&lt;int,4&gt;→simd&lt;float,4&gt;</code> 输出 <code>0.000000</code>、→<code>simd&lt;byte,32&gt;</code> 输出 <code>1</code>）。
+    加类界限「simd 只能 simd↔simd」，与 LLVM 把向量归为聚合、拒绝向量↔整数/指针同口径。</li>
+<li><strong>C · bitcast 到 array 类型</strong>（<code>lower.rs:3666</code> 旧版直接拒绝）：array 是 8 字节不透明
+    句柄（LLVM 侧擦除为 i8ptr），位宽按 64 计；array↔array（同 <code>Handle</code>）走恒等返回，
+    array↔整数/指针走既有位重解释路径，与 LLVM <code>ptrtoint</code>/<code>inttoptr</code> 语义一致。</li>
+<li>新增 R23 门禁：综合正向（变量索引 + bitcast simd/array + 跨元素位重解释）双后端逐值
+    一致、越界 Fail-Fast 双后端非零终止、O0-O3 四级别输出一致。AArch64 发射经检视正确
+    （本地交叉汇编受工具链基线限制，与既有 golden 同口径）。</li>
+</ul>
+<h3 id="fixedp0arc-泄漏两个独立根因">Fixed（P0：ARC 泄漏，两个独立根因）</h3>
+<ul>
+<li><strong>以资深程序员视角压测发现并修复两类 ARC 泄漏</strong>（审查报告初判「异常路径泄漏、LLVM
+  因 throw 漏更多、语言层通病」，经精细对照实验证明归因有误，真实是两个独立 bug）：</li>
+<li><strong>A · asm 后端 <code>release_locals_upto</code> 全局 moved 污染</strong>：出口（return/throw/break/
+    continue/goto）释放局部时把编译期 <code>Local.moved=true</code>，该标记被条件分支的
+    else→merge <strong>正常落穿路径</strong>继承，令其 <code>leave_scope</code>/<code>release_scope</code> 误以为已释放而
+    跳过 → 每个条件出口泄漏一份 try/块作用域 ARC 局部。修复：出口释放不再写 moved；
+    <code>leave_scope</code> 在已终止块（出口路径）跳过 <code>release_scope</code>，正常落穿路径照常释放，
+    两条 CFG 路径互斥、无需全局标记。实测条件 throw 5000 次 6.3MB→2.0MB、条件 return
+    6.5MB→2.0MB，无 double-free。</li>
+<li><strong>B · LLVM 后端字符串字面量堆分配泄漏</strong>：<code>Expr::StringLit</code> 每处求值都
+    <code>dial_string_new</code>（malloc+strlen+memcpy，rc=1），而 <code>StringLit</code> 不在
+    <code>yields_borrowed_ref</code>、concat 等又不释放右操作数 → 每个字面量每次求值泄漏一份
+    （<code>s = s + "x"</code> 每轮漏一个 "x"）。修复：新增 <code>immortal_string_lit</code>，生成
+    <code>[rc=INT64_MIN][len][data][\0]</code> 的 rodata 全局常量、句柄指向 +8 len 字段，与 asm
+    后端 <code>.Ldstr</code> 完全同构（zero alloc / zero release）。实测百万次拼接 36MB→3.8MB。</li>
+<li>新增 R22 门禁：双后端压测用例 + 峰值 RSS 断言（修复版 ~2MB，泄漏版 &gt;20MB），
+    无 GNU time 平台退化为功能冒烟。双后端字符串语义（比较/map 键/数组 COW/插值/
+    方法/传参返回）逐项一致。</li>
+</ul>
+<h3 id="added真实-gpu-合成后端">Added（真实 GPU 合成后端）</h3>
+<ul>
+<li><strong>真实 GPU 合成</strong>：补齐 §41 四项缺口中最后一项。用户裁决「继续」（最小破例 +
+  Linux 真合成、其余平台降级）。只破例「运行时 dlopen EGL/GLES 做离屏合成」一条，
+  其余宪法（零链接期符号、无反向回调、逐像素 CRC 确定、旧 ABI 冻结）原样保留。</li>
+<li>C 层 <code>packages/gui/src/dial_gui_platform.c</code> 追加 6 个 <code>dial_gui_gpu_real_*</code> API
+    （<code>available</code> / <code>backend</code> / <code>caps</code> / <code>composite</code> / <code>last_exact</code> / <code>degrade_reason</code>），
+    <strong>旧 9 个 <code>dial_gui_gpu_*</code> 行为一字不动</strong>（仍被 AA 组 30 条钉值断言覆盖）。</li>
+<li>Linux EGL 1.5 <code>surfaceless</code> + GLES2 恒等 shader：framebuffer 上传纹理 → 离屏 FBO →
+    <code>glReadPixels</code> 读回逐字节校验，<strong>绝不写源像素</strong>（CRC 不漂移）；<code>CLAMP_TO_EDGE</code> +
+    <code>NEAREST</code> 支持 NPOT 任意尺寸；headless 下靠 Mesa 软件渲染可跑通。</li>
+<li>软降级：<code>dlopen</code>/初始化/合成不精确一律返 <code>-2</code>（不写错误槽），缺库不导致加载失败；
+    <code>DIAL_GUI_GPU_FORCE_DEGRADE=1</code> 可强制降级路径；Windows/macOS 条件编译恒 -2（未实机）。</li>
+<li>三平台 <code>.a</code> 重建，Windows <code>.a</code> 零 <code>dlopen</code>/<code>dlsym</code> 依赖；契约审计 344 → <strong>350 个签名</strong>
+    （343 OO + <code>app_new</code> + 6 第19层），<code>abi=6</code>/<code>version=1.10.0</code> 不变。</li>
+<li>门禁 R21：能力自适应双后端用例（有软件 GPU 验证逐字节精确 + 源 CRC 不变，无则验证
+    降级），强制降级双后端用例；README 新增 §38.24.7、§41 未实现清单同步移除本项。</li>
+</ul>
+<h3 id="addedc--dial-反向回调">Added（C → Dial 反向回调）</h3>
+<ul>
+<li><strong>C → Dial 反向回调</strong>：补齐 §41 长期标注的「C → Dial 反向回调」缺口，
+  <strong>推翻 GUI 层「绝不反向回调」旧宪法</strong>（用户明确裁决），但保留内存底线：
+  仍无闭包（具名函数 + 显式 <code>rawptr&lt;void&gt;</code> state）、回调参数/结果限标量、
+  <strong>回调线程绝不触碰非原子 ARC 对象</strong>（复杂数据走 <code>channel&lt;T&gt;</code>）。</li>
+<li>C 运行时 <code>stdlib/dial_callback.{h,c}</code>：mutex 保护的注册表
+    <code>id → {thunk, state, result, done}</code>；<code>dial_callback_register</code> /
+    <code>dial_callback_fire_sync</code> / <code>dial_callback_thread_fire</code>（平台线程 sleep 后主动回调）/
+    <code>dial_callback_join</code> / <code>dial_callback_result</code> / <code>dial_callback_done</code> /
+    <code>dial_callback_wait</code> / <code>dial_callback_free</code> / <code>dial_callback_count</code>。</li>
+<li>类型 <code>callback</code>（不透明句柄）+ 内建 <code>callback</code> / <code>callback_fire</code> /
+    <code>callback_thread</code> / <code>callback_result</code> / <code>callback_done</code> / <code>callback_wait</code> /
+    <code>callback_free</code> / <code>callback_count</code>。</li>
+<li>回调入口签名强制 <code>fn(rawptr&lt;void&gt;, int): int</code>；静态 thunk <code>__dial_cb_thunk_&lt;fn&gt;</code>
+    经 argcell 三槽（payload / state / result 回写）转发，双后端同源、零 ABI 分叉。</li>
+<li>state 真实透传：入口可 <code>ptr_cast</code> 后读写其裸内存（R20 正向用例 100+7=107）。</li>
+<li>Fail-Fast：入口签名不符 / state 非 <code>rawptr&lt;void&gt;</code> 编译期拒绝；未注册 id fire 当场终止。</li>
+<li>门禁 R20：同步 / 平台线程 / state 透传双后端一致 + 4 项负向拒绝，<code>DIALC_STDLIB_DIR</code>
+    强制源码回退编入新 C 运行时。README 新增 §32.7、两处「未实现」清单同步更新。</li>
+</ul>
+<h3 id="added协作式线程池--协程--async-await">Added（协作式线程池 / 协程 / async-await）</h3>
+<ul>
+<li><strong>线程池 / 有栈协程 / async-await</strong>：补齐 §41 长期标注的「无线程池 / 无异步」缺口，
+  实现「够用即可」的协作式并发。<strong>严格延续三条宪法铁律</strong>：无闭包（入口一律具名函数 +
+  显式 argcell）、无用户可见可变全局状态（句柄显式 new→use→join/close/free）、无用户可见
+  原子类型（内部同步用 pthread mutex+cond，C 私有）。</li>
+<li>C 运行时 <code>stdlib/dial_async.{h,c}</code>：POSIX <code>&lt;ucontext.h&gt;</code> / Windows Fiber 有栈协程
+    （yield 可在任意调用深度发生，局部变量与 ARC 引用随栈帧保留）+ 有界线程池（固定 worker +
+    任务队列）+ 单线程协作式 async executor（round-robin resume，await 即让出）。</li>
+<li>类型：<code>threadpool</code> / <code>coroutine</code> / <code>task</code>（不透明句柄，显式管理，不受 ARC）。</li>
+<li>线程池内建：<code>threadpool(n)</code> / <code>pool_submit(pool, fn, args...) → task</code> /
+    <code>task_wait</code> / <code>task_result</code> / <code>task_free</code> / <code>pool_join</code> / <code>pool_close</code>。</li>
+<li>协程内建：<code>coroutine(fn, args...)</code> / <code>co_resume → bool</code> / <code>co_yield</code> /
+    <code>co_status</code> / <code>co_free</code>。</li>
+<li>async 语法：<code>async fn</code> 声明 + <code>await task</code> 表达式（结果恒为 int，复杂结果走 channel<T>，
+    符合 CSP 宪法）。<code>spawn_async</code> / <code>run_all</code> 驱动协作调度。</li>
+<li>双后端同源：asm 与 LLVM 均复用 <code>spawn</code> 的 argcell + 静态 <code>__dial_task_thunk_&lt;fn&gt;</code>
+    机制（slot[0]=result，slot[1..]=形参），零 ABI 分叉。顺带修复 <code>spawn</code> 无参入口
+    thunk 的 rdi 丢失隐患（params 恒为单个 <code>void* cell</code>）。</li>
+<li>Fail-Fast：await 只能在 async fn 内、co_yield 只能在 async fn 内、任务入口返回类型
+    静态校验（pool/spawn 入口须 int、coroutine 入口须 void）、无 struct 形参。
+  回归见 <code>tests/run_tests.sh</code> R19 段（双后端一致 + 4 项负向）；C 运行时独立 smoke 见
+  <code>tools/</code> 开发期验证。</li>
+</ul>
+<h3 id="added">Added</h3>
+<ul>
+<li><strong>显式独占所有权 <code>own var</code></strong>（开发中）：新增 <code>own</code> 关键字，<code>own var x: T = e;</code>
+  把编译期自动推断的 Move 策略升级为程序员显式声明的独占转移——强制接管即转移
+  （use-after-move 编译期报错）、离开作用域确定 drop、只能修饰拥有资源的类型。
+  <strong>刻意不引入借用检查器</strong>（无 <code>&amp;T</code> / 生命周期 / 别名分析）。语义层强制 <code>move_hint</code>
+  与 <code>mark_moved</code>，asm / LLVM 两后端复用既有 Move 路径、代码生成零分叉。
+  回归见 <code>tests/run_tests.sh</code> R12b 段。</li>
+</ul>
+<h3 id="fixed--added方案-c完整-consume-体系">Fixed / Added（方案 C：完整 consume 体系）</h3>
+<ul>
+<li><strong>修「假 move」——own 转移零开销承诺落空（P0）</strong>：程序员视角对抗测试发现 asm 后端
+  <code>need_retain = is_copy || (borrowed &amp;&amp; !move_hint)</code> 中 <code>is_copy</code> 对 <code>Expr::Var/Field/Deref</code>
+  恒为 true，短路了 <code>move_hint</code>，导致 own 转移与普通「最后引用 move」都仍 emit <code>retain</code>
+  （实测 own 转移 retain=1，与 LLVM 普通绑定无差异）。对齐 LLVM <code>if !move_hint</code> 改为
+  <code>need_retain = !move_hint &amp;&amp; (is_copy || borrowed)</code>。实测 retain 计数：普通 move 1→0、
+  own move 1→0、三变量链 2→0，release 恒为 1。<strong>顺带修好普通变量 move 优化在 asm 侧长期失效</strong>。</li>
+<li><strong>修「单向独占」——own 可被静默别名（P0）</strong>：own 变量被普通 <code>var</code> 接管时源未标 moved，
+  之后仍可用，own 退化为普通 var。新增完整 consume：sema <code>check_moved_stmt</code> 在 own 声明接管
+  源、或 own 变量被赋值给他人时当场 <code>mark_moved</code> 源；<code>set_moves</code> 中源是 own 则强制
+  <code>move_hint=true</code>（新增 <code>collect_own_names</code> 从 AST 收集 own 集合）。sema moved 与 lowering
+  move_hint 两套记账严格配对，避免 double-free。实测 own→别名→返回 10 万次 RSS 稳定。</li>
+<li><strong>own 函数参数</strong>：<code>fn f(own x: T)</code> 声明 consume 形参（AST <code>Func.own_params</code> / <code>FuncInfo.own_params</code>
+  与 params 一一对应）。调用点 sema 对实参 <code>mark_moved</code>、两后端 lowering/gen_call 标 <code>Local.moved</code>
+  并让被调方入口跳过 <code>+1 retain</code>（退出 <code>-1 release</code>），所有权从调用方转移到被调方。
+  own 标量参数 / own 默认参数 / own struct 字段均 Fail-Fast 拒绝（后者因 Dial struct 值语义
+  无法维持字段独占）。普通参数语义零回归。回归见 <code>tests/run_tests.sh</code> R12c 段（新增 13 项）。</li>
+</ul>
+<h3 id="added跨工作区全量模块图开发中">Added（跨工作区全量模块图，开发中）</h3>
+<ul>
+<li><strong>LSP 跨工作区全量模块图</strong>：补齐 §17.2 / §28.7.1 长期标注的「跨工作区全量引用图尚未实现」缺口。
+  <code>initialize</code> 读 <code>workspaceFolders</code> / <code>rootUri</code> / <code>rootPath</code> 并递归扫描根目录全部 <code>.dial</code> 建索引，
+  <code>workspace/symbol</code> 覆盖未打开文件；顶层函数 / struct 按<strong>全局唯一名</strong>跨文件解析（<code>Ref.global_name</code></li>
+<li><code>SymTarget::Global</code>），references / rename 遍历全工作区，rename 的 <code>documentChanges</code> 每文件一条
+  <code>TextDocumentEdit</code>；局部 Var / Param 仍限本文件按 <code>symbol_index</code> 精确匹配（遮蔽正确）；新增
+  <code>workspace/didChangeWorkspaceFolders</code> 增删索引。<strong>仍有边界</strong>：递归包内 <code>src/</code> 模块索引（§38.14）
+  与显式 import 依赖图可视化未实现。回归见 <code>tests/run_tests.sh</code> M 组新增 <code>tools/lsp_workspace_smoke.py</code>
+  （全量索引 / 跨 2 文件 references / rename / 局部隔离 / 协议纯净），三个既有 LSP 冒烟脚本零回归。
+  仅改 <code>src/lsp.rs</code> / <code>src/index.rs</code>，不动编译语义与 ABI。</li>
+</ul><p class="note">← 更早：<a href="v1.20.html">v1.20</a> · <a href="../changelog.html">版本索引</a></p></main></div>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
+    <span class="muted">v1.21 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

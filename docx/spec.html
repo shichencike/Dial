@@ -27,7 +27,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v120">dialc — Dial 语言编译器 v1.20</a><ul>
+<li><a href="#dialc--dial-语言编译器-v121">dialc — Dial 语言编译器 v1.21</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -72,7 +72,10 @@
 <li><a href="#52-类型良构性约束">5.2 类型良构性约束</a></li>
 <li><a href="#53-类型转换">5.3 类型转换</a></li>
 <li><a href="#54-char单字符类型v092">5.4 char：单字符类型（v0.92）</a></li>
-<li><a href="#55-输出三件套连续输出v099">5.5 输出三件套：连续输出（v0.99）</a></li>
+<li><a href="#55-输出三件套连续输出v099">5.5 输出三件套：连续输出（v0.99）</a><ul>
+<li><a href="#调试输出与调试代码块v122">调试输出与调试代码块（v1.22）</a></li>
+</ul>
+</li>
 <li><a href="#56-byte单字节无符号值v099">5.6 byte：单字节无符号值（v0.99）</a></li>
 <li><a href="#57-bytes二进制缓冲区v099">5.7 bytes：二进制缓冲区（v0.99）</a></li>
 <li><a href="#58-int32--float32ffi-精确-32-位宽度标量v110-开发中增补">5.8 int32 / float32：FFI 精确 32 位宽度标量（v1.10 开发中增补）</a></li>
@@ -486,11 +489,22 @@
 </li>
 </ul>
 </li>
+<li><a href="#39-预处理条件编译与-ast-宏v121">39. 预处理：条件编译与 AST 宏（v1.21）</a><ul>
+<li><a href="#391-条件编译-cfgcond">39.1 条件编译 @cfg(cond)</a></li>
+<li><a href="#392-ast-宏-macro-namea----">39.2 AST 宏 macro name($a, ...) { ... }</a></li>
+</ul>
+</li>
+<li><a href="#41--预处理指令文本级预处理层v121">41. # 预处理指令：文本级预处理层（v1.21）</a><ul>
+<li><a href="#401-宏define--undef">40.1 宏：#define / #undef</a></li>
+<li><a href="#402-条件编译if--ifdef--ifndef--elif--else--endif">40.2 条件编译：#if / #ifdef / #ifndef / #elif / #else / #endif</a></li>
+<li><a href="#403-诊断与指令">40.3 诊断与指令</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v120">dialc — Dial 语言编译器 v1.20</h1>
+<h1 id="dialc--dial-语言编译器-v121">dialc — Dial 语言编译器 v1.21</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -765,7 +779,7 @@ irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.p
 <blockquote>
 <p><strong>关于 URL 稳定性与「零硬编码」</strong>：这两条命令取的是 <strong><code>main</code> 分支上 <code>tools/</code> 里的安装脚本</strong>（直出文件，脚本本身不走任何重定向）。脚本运行时通过 GitHub API 读取<strong>最新 Release 的真实资产清单</strong>，再用
 <code>https://github.com/shichencike/Dial/releases/latest/download/&lt;资产名&gt;</code> 下载——版本、标签、资产名<strong>都不写死在脚本里</strong>，发新版后无需改脚本即可自动跟上。</p>
-<p>之所以仍需解析资产名：GitHub 的 <code>latest/download/</code> 要求<strong>精确文件名</strong>，而本项目的 zip / vsix 名字带版本号（<code>dialc-v1.20-linux-x86_64.zip</code>、<code>dial-1.20.0.vsix</code>），靠重定向本身推不出来；脚本按平台 slug 与扩展名从清单里挑，<code>stdlib.dialpkg</code> 名字固定、且现在与 zip / vsix 挂在<strong>同一个 <code>v*</code> Release 页面</strong>，因此同样能被 latest 找到。</p>
+<p>之所以仍需解析资产名：GitHub 的 <code>latest/download/</code> 要求<strong>精确文件名</strong>，而本项目的 zip / vsix 名字带版本号（<code>dialc-v1.21-linux-x86_64.zip</code>、<code>dial-1.21.0.vsix</code>），靠重定向本身推不出来；脚本按平台 slug 与扩展名从清单里挑，<code>stdlib.dialpkg</code> 名字固定、且现在与 zip / vsix 挂在<strong>同一个 <code>v*</code> Release 页面</strong>，因此同样能被 latest 找到。</p>
 <p>需要复现旧环境或离线时，用 <code>DIAL_VERSION</code>（钉编译器版本）、<code>STDLIB_RELEASE</code>（钉旧 <code>stdlib-v*</code> 通道）、<code>STDLIB_URL</code> / <code>DIAL_VSIX_URL</code>（完全覆盖地址）即可；镜像优先 + 官方回退 + 失败原因可见的行为不变。安装脚本本身也随每个发布包一起分发。</p>
 <p>注意用 <code>bash</code> 而非 <code>sh</code>：<code>set -o pipefail</code> 与脚本里的数组语法在 Ubuntu 的 <code>sh</code>(dash)、Termux 的 <code>mksh</code> 下不被支持。Windows 侧用 <code>iex</code> 即可（PowerShell 原生）。</p>
 </blockquote>
@@ -2027,6 +2041,12 @@ C Runtime 会在打印时<strong>当场打印诊断并终止</strong>，绝不�
 <td>单个字符</td>
 <td><strong>否</strong></td>
 </tr>
+<tr>
+<td><code>debug_print</code>（v1.22）</td>
+<td>与 <code>print</code> 完全相同</td>
+<td>仅 debug 构建输出，release 构建整句删除</td>
+<td><strong>是</strong>（<code>\n</code>）</td>
+</tr>
 </tbody>
 </table>
 <p><strong><code>print</code> 与 <code>print_raw</code> 的唯一差别就是结尾那个 <code>\n</code></strong>，其余完全一致：
@@ -2053,6 +2073,50 @@ print(&quot;&quot;);
 </code></pre>
 <p><strong><code>print_raw</code> 的返回值</strong>：无（与 <code>print</code> 一致，都是<strong>语句</strong>而非表达式），
 不能出现在赋值右侧或 <code>return</code> 位置。</p>
+<h4 id="调试输出与调试代码块v122">调试输出与调试代码块（v1.22）</h4>
+<p>Dial 提供两个<strong>编译期裁剪</strong>的调试设施，让你把诊断代码直接写在源码里，发布时自动消失：</p>
+<ul>
+<li><strong><code>debug_print(...)</code></strong>：<code>print</code> 的调试期别名，参数规则、输出形态完全相同（stdout、末尾换行）。</li>
+<li><strong><code>debug { ... }</code></strong>：调试代码块，与普通裸块一样引入独立作用域（块内变量块外不可见）。</li>
+</ul>
+<pre><code class="language-dial">fn main(): int {
+    print(&quot;start&quot;);
+    debug_print(&quot;进入主流程&quot;);           // debug 输出，release 删除
+    var x: int = 1;
+    debug {
+        x = x + 100;                      // 块内副作用仅 debug 生效
+        debug_print(&quot;x=&quot; + str(x));
+    }
+    print(&quot;x=&quot; + str(x));                 // debug: x=101 / release: x=1
+    return 0;
+}
+</code></pre>
+<p><strong>裁剪规则</strong>（由构建模式决定，见 <code>--safety</code>）：</p>
+<table>
+<thead>
+<tr>
+<th>构建</th>
+<th>条件</th>
+<th>debug_print / debug 块</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Debug（<strong>默认</strong>）</td>
+<td><code>--safety debug</code></td>
+<td>保留：正常输出、正常执行（含副作用）</td>
+</tr>
+<tr>
+<td>Release</td>
+<td><code>--release</code> / <code>--fast</code> / <code>--safety safe</code> / <code>--safety fast</code></td>
+<td>在语义分析前整块/整句删除</td>
+</tr>
+</tbody>
+</table>
+<p>这意味着 release 构建：① 不检查调试代码里的类型错误（可放心写临时诊断代码）
+② 二进制里<strong>不含</strong>任何调试字符串或调用（零体积/信息残留）③ 零运行时开销。
+<code>dialc check</code> 作为纯类型检查工具，始终保留并校验调试代码；
+LSP 与 <code>dialc test</code> 同样看到完整源码。</p>
 <p><strong><code>str(x)</code> 的类型分派</strong>：<code>str()</code> 在 v0.99 起接受 <code>char</code> 实参，返回<strong>只含这一个字符</strong>的 UTF-8 字符串
 （ASCII 字符为 1 字节，多字节码点如 <code>'中'</code> 为 3 字节）。它让字符能直接参与字符串拼接：</p>
 <pre><code class="language-dial">let s: string = str('A') + &quot;BC&quot;;   // &quot;ABC&quot;
@@ -6986,7 +7050,7 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 <tr>
 <td><strong>VS Code</strong></td>
 <td>手写 LSP 客户端（无 npm 依赖）</td>
-<td><a href="https://github.com/shichencike/Dial/tree/main/editors/vscode/"><code>editors/vscode/dial-1.20.0.vsix</code></a>（<code>code --install-extension</code> 侧载）</td>
+<td><a href="https://github.com/shichencike/Dial/tree/main/editors/vscode/"><code>editors/vscode/dial-1.21.0.vsix</code></a>（<code>code --install-extension</code> 侧载）</td>
 <td>免 Node / npm / 联网；能力最全</td>
 </tr>
 <tr>
@@ -7012,8 +7076,8 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 还会<strong>自动下载并安装 VS Code 插件</strong>（从 Release 取 <code>dial-&lt;版本&gt;.vsix</code>，再用 <code>code --install-extension</code> 装上），
 不必再自己去 Release 页翻资产、手动侧载。</p>
 <ul>
-<li>版本只有一个来源：<code>DIAL_VERSION</code>（默认<strong>空</strong>：跟随最新 Release；钉版本写法如 <code>DIAL_VERSION=1.2</code>，对应发布标签 <code>v1.2</code>）——Release 标签（<code>v1.2</code>）与资产文件名
-  （<code>dial-1.20.0.vsix</code>）都由它推导，不会三处各说各话。</li>
+<li>版本只有一个来源：<code>DIAL_VERSION</code>（默认<strong>空</strong>：跟随最新 Release；钉版本写法如 <code>DIAL_VERSION=1.21</code>，对应发布标签 <code>v1.21</code>）——Release 标签（<code>v1.21</code>）与资产文件名
+  （<code>dial-1.21.0.vsix</code>）都由它推导，不会三处各说各话。</li>
 <li><strong>没装 VS Code / 离线时只告警、不阻断安装</strong>：编译器本体与包安装不受影响。</li>
 <li><strong>不加 <code>--force</code></strong>：用户若已装了更新版本的插件，不该在「一键安装」里被悄悄降级。</li>
 <li>下载地址可用 <code>DIAL_VSIX_URL</code> 覆盖（自建镜像 / 网络受限时用）。</li>
@@ -13121,12 +13185,166 @@ Linux headless 无 <code>/dev/dri</code> 下靠 Mesa <code>swrast</code>/llvmpip
 三平台 <code>.a</code> 重建（x86_64-linux-gnu 440K / aarch64-linux-musl 400K / x86_64-windows-gnu 300K），
 Windows <code>.a</code> 经 <code>nm -u</code> 确认零 <code>dlopen</code>/<code>dlsym</code> 依赖（走降级分支）。契约审计从 344 扩到
 <strong>350 个签名</strong>（343 OO + <code>app_new</code> + 6 第19层真实GPU），旧签名与 <code>abi=6</code>/<code>version=1.10.0</code> 不变。
-未打新 tag、未发新 Release（能力随 v1.21 未发布批次积累）。</p></main></div>
+未打新 tag、未发新 Release（能力随 v1.21 未发布批次积累）。</p>
+<hr />
+<h2 id="39-预处理条件编译与-ast-宏v121">39. 预处理：条件编译与 AST 宏（v1.21）</h2>
+<p>编译流水线在词法之后、语义分析之前有一道<strong>专门的预处理阶段</strong>（<code>src/preprocess.rs</code>）。
+它负责源码收集、import 解析、AST 合并，以及本节两个新设施：<strong>条件编译</strong>与 <strong>AST 宏</strong>。
+两者都在语义分析前完成求值/展开，因此被裁剪的代码不参与类型检查、不进入任何后端产物。</p>
+<h3 id="391-条件编译-cfgcond">39.1 条件编译 <code>@cfg(cond)</code></h3>
+<p><code>@cfg(cond)</code> 复用已有的 <code>@</code> 注解前缀，可写在顶层 <code>fn</code> / <code>struct</code> 前，也可写在普通语句前：</p>
+<pre><code class="language-dial">@cfg(target_os = &quot;linux&quot;)
+fn platform_name(): string { return &quot;linux&quot;; }
+
+fn main(): int {
+    @cfg(debug)
+    print(&quot;调试构建才输出&quot;);
+    @cfg(!debug)
+    print(&quot;发布构建才输出&quot;);
+    return 0;
+}
+</code></pre>
+<p>条件语法：</p>
+<table>
+<thead>
+<tr>
+<th>写法</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>@cfg(debug)</code> / <code>@cfg(my_flag)</code></td>
+<td>布尔条件：该维度为真</td>
+</tr>
+<tr>
+<td><code>@cfg(target_os = "linux")</code></td>
+<td>键值条件：精确相等</td>
+</tr>
+<tr>
+<td><code>@cfg(!cond)</code></td>
+<td>取反</td>
+</tr>
+<tr>
+<td><code>@cfg(all(a, b))</code> / <code>@cfg(any(a, b))</code></td>
+<td>合取 / 析取（可嵌套）</td>
+</tr>
+</tbody>
+</table>
+<p>判定维度来源：</p>
+<ul>
+<li><strong>内置</strong>：<code>debug</code>（debug 构建为真，<code>--release</code> / <code>--fast</code> 为假）、<code>target_os</code>、<code>target_arch</code>
+  （取宿主 triple，可用环境变量 <code>DIAL_TARGET</code> 覆盖做交叉判定）。</li>
+<li><strong>自定义</strong>：命令行 <code>--cfg key</code> 或 <code>--cfg key=value</code>（可重复）。无 <code>=</code> 时视为布尔真
+  （值 <code>"1"</code>）；<code>@cfg(key = "value")</code> 做精确字符串匹配。</li>
+</ul>
+<p>条件为假的整块/整项被删除——<strong>不参与类型检查</strong>，产物里也搜不到它的字符串常量。
+调用一个被裁剪掉的函数会如期报「未定义函数」（Fail-Fast，不静默放行）。</p>
+<h3 id="392-ast-宏-macro-namea----">39.2 AST 宏 <code>macro name($a, ...) { ... }</code></h3>
+<p>宏用普通调用语法，预处理阶段做 <strong>AST 展开</strong>（参数按表达式替换，不是文本替换）：</p>
+<pre><code class="language-dial">macro twice($msg) {
+    print($msg);
+    print($msg);
+}
+macro add($a, $b) {
+    print(&quot;SUM=&quot; + str($a + $b));   // $a/$b 出现在表达式里也会被替换
+}
+fn main(): int {
+    twice(&quot;HI&quot;);    // 展开成两条 print
+    add(3, 4);      // 输出 SUM=7
+    return 0;
+}
+</code></pre>
+<p>要点：</p>
+<ul>
+<li>形参以 <code>$</code> 开头（如 <code>$a</code>），调用时按顺序传实参；个数不符当场报错。</li>
+<li>宏体可调用其它宏，支持嵌套展开（深度上限 64，递归宏会 Fail-Fast 报错）。</li>
+<li><strong>宏名遮蔽同名函数</strong>：同名宏存在时优先展开宏。</li>
+<li>宏与条件编译可叠加：宏体里的 <code>@cfg</code> 在展开后参与求值。</li>
+</ul>
+<p>两端后端共用同一份展开后的 AST，<code>dialc test</code> 与 LSP 也看到展开结果。</p>
+<hr />
+<h2 id="41--预处理指令文本级预处理层v121">41. <code>#</code> 预处理指令：文本级预处理层（v1.21）</h2>
+<p>编译流水线最前端新增一道<strong>词法前的文本级预处理层</strong>（<code>src/directives.rs</code>），在读取源码之后、
+<code>lexer</code> 之前运行。它与 §39 的 <code>@cfg</code> / <code>macro</code>（词法后的 AST 级 pass）<strong>并存互补、职责不重叠</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>层次</th>
+<th>设施</th>
+<th>查的是什么</th>
+<th>作用时机</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>文本级（§40）</td>
+<td><code>#define</code> / <code>#if</code> 等</td>
+<td>宏表（<code>#define</code> / <code>-D</code>）</td>
+<td>词法之前，按行裁剪源码</td>
+</tr>
+<tr>
+<td>AST 级（§39）</td>
+<td><code>@cfg</code> / <code>macro</code></td>
+<td>cfg 事实（<code>debug</code> / <code>--cfg</code>）</td>
+<td>词法之后，按 AST 裁剪/展开</td>
+</tr>
+</tbody>
+</table>
+<h3 id="401-宏define--undef">40.1 宏：<code>#define</code> / <code>#undef</code></h3>
+<p>对象式宏在 token 级替换（<strong>不误伤字符串字面量内部的同名文本</strong>）；函数式宏支持形参替换与嵌套调用：</p>
+<pre><code class="language-dial">#define VERSION 27
+#define MUL(a, b) ((a) * (b))
+
+fn main(): int {
+    print(&quot;V=&quot; + str(VERSION));   // V=27
+    print(str(MUL(6, 7)));         // 42
+    return 0;
+}
+</code></pre>
+<ul>
+<li>函数式宏名后必须<strong>紧接</strong> <code>(</code>（无空格）才是函数式；单独出现不带括号则原样保留。</li>
+<li><code>#undef NAME</code> 取消定义（未定义宏的 <code>#undef</code> 静默忽略）；同名宏内容不同时不许重定义，
+  须先 <code>#undef</code>（Fail-Fast）。</li>
+<li>宏自引用（<code>#define A A</code>）按 C 语义不再展开，保留标识符交给语义分析；深度上限 64
+  防间接递归挂死。</li>
+<li>命令行 <code>-D NAME</code> / <code>-D NAME=value</code>（别名 <code>--define</code>，可重复）等价源码顶部 <code>#define</code>，
+  无值时按 <code>1</code>。</li>
+</ul>
+<h3 id="402-条件编译if--ifdef--ifndef--elif--else--endif">40.2 条件编译：<code>#if</code> / <code>#ifdef</code> / <code>#ifndef</code> / <code>#elif</code> / <code>#else</code> / <code>#endif</code></h3>
+<pre><code class="language-dial">#define FEATURE 2
+#if defined(FEATURE) &amp;&amp; FEATURE &gt;= 2
+print(&quot;ON&quot;);
+#elif FEATURE == 1
+print(&quot;MID&quot;);
+#else
+#error 不支持的特性等级
+#endif
+</code></pre>
+<ul>
+<li><code>#ifdef NAME</code> / <code>#ifndef NAME</code> 判定宏是否存在；<code>#if</code> / <code>#elif</code> 支持 C 运算符优先级：
+  <code>|| &amp;&amp; | ^ &amp; == != &lt; &lt;= &gt; &gt;= &lt;&lt; &gt;&gt; + - * / % ! ~</code>、<code>defined(NAME)</code>、整数（含 <code>0x/0b/0o</code>
+  与 <code>_</code> 分隔）、字符串/字符字面量、括号。未定义标识符按 C 惯例求值为 <code>0</code>。</li>
+<li>假分支整块裁剪（含其中的 <code>#error</code> / 未知指令，均不生效），<strong>裁掉的行以空行占位</strong>，
+  保证后续 lexer 的行号与原文件一致、诊断定位不漂移。</li>
+<li>条件块必须闭合：未闭合 <code>#if</code>、孤立 <code>#endif</code> / <code>#else</code> / <code>#elif</code>、重复 <code>#else</code>、
+  <code>#elif</code> 出现在 <code>#else</code> 之后，一律 Fail-Fast 当场报错。</li>
+</ul>
+<h3 id="403-诊断与指令">40.3 诊断与指令</h3>
+<ul>
+<li><code>#error message</code>：位于活跃分支时立即 Fail-Fast（带文件路径与行号）。</li>
+<li><code>#pragma once</code>：本编译器由 import 模块系统的去重集合天然保证，接受为空操作；
+  未知 <code>#pragma</code> 记日志提示后忽略（不阻断编译）。</li>
+<li>未知 <code>#</code> 指令、孤立 <code>#</code> 指令参数缺失等一律 Fail-Fast，绝不静默吞掉源码。</li>
+</ul>
+<p>回归见 §40 测试组的 R27 段（对象式/函数式宏、嵌套条件、<code>defined</code>、<code>-D</code> 注入、双后端逐字一致、
+五类 Fail-Fast）。不支持（明确边界）：<code>#include</code>（用 §34 的 <code>import</code>）、行尾续行 <code>\</code>、
+<code>#</code> / <code>##</code> 字符串化与连接、宏可变参数。</p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v1.20 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.21 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 
