@@ -6126,6 +6126,16 @@ else
     fail=1
 fi
 
+# v1.21 发布事故教训：cve_check 原先只在 CI 跑、不在本地 run_tests.sh，
+# 导致字段级 ARC 破坏 CVE-007 链接时"本地 1099 项全绿、tag CI 才暴露"的流程盲区。
+# 现与 CI（ci.yml 第 229 行）同口径纳入本地门禁，任一 CVE 仍可利用即 fail。
+echo "== AP3) CVE 暴力检测（8 个已登记漏洞，每例重复 10 次；与 CI 同口径）=="
+if python3 tools/cve_check.py --repeat 10 --quiet; then
+    :
+else
+    fail=1
+fi
+
 echo
 if [ $fail -eq 0 ]; then
     echo "== 全部测试通过 ✅ =="
