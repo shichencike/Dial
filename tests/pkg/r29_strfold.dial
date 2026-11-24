@@ -1,0 +1,37 @@
+// R29 字符串拼接常量折叠正确性测试。
+// 这些用例在 O2 下会被编译期折叠，输出必须与 O0（无折叠）逐字一致。
+fn concat_lit(): int {
+    // L1：字面量拼接，编译期合并成单个静态串
+    var s: string = "he" + "llo" + " " + "R29";
+    return s.length() * 100 + s.get(0) + s.get(s.length() - 1);
+}
+
+fn accum(): int {
+    // L2：字符串累加循环，编译期折叠整函数为常量（对标 gcc -O2 b20）
+    var x: string = "x";
+    for (i in 0..500) { x = x + "y"; }
+    var last: int = x.length() - 1;
+    return (x.length() * 31 + x.get(0) + x.get(last)) % 1000000007;
+}
+
+fn prefix_not_folded(): int {
+    // 保守：前缀追加（"y" + x），不满足累加骨架，保持运行时拼接
+    var x: string = "x";
+    for (i in 0..50) { x = "y" + x; }
+    return x.length() * 31 + x.get(0);
+}
+
+fn sidefx_not_folded(): int {
+    // 保守：循环体有 print 副作用，不得被折叠掉（否则 print 消失）
+    var x: string = "x";
+    for (i in 0..3) { x = x + "y"; print("TICK"); }
+    return x.length();
+}
+
+fn main(): int {
+    print(str(concat_lit()));
+    print(str(accum()));
+    print(str(prefix_not_folded()));
+    print(str(sidefx_not_folded()));
+    return 0;
+}

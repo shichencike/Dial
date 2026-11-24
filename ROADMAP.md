@@ -58,6 +58,7 @@
 | P2 功能（v1.24 `#` 预处理指令） | 词法前文本级层 `src/directives.rs`：`#define/#undef`（对象式 token 替换 + 函数式形参）、`#if/#ifdef/#else/#endif`（C 表达式 + defined + 嵌套 + 行号保持）、`#error/#pragma`、`-D` 注入；与 `@cfg/macro` 并存互补 | R27 门禁 4 组全绿（双后端逐字一致 + `-D` 注入 + 五类 Fail-Fast + 假分支忽略）；单测 40 项全绿 |
 | P0 补强（v1.21 后 · 借用检查器） | 零生命周期标注的静态借用检查（NLL 区域推断）：`as_c_str`/`as_ptr` 借用指针在用期间来源被 move/drop/重赋值 → 编译期 `dialc.borrow.dangling`；`&x` 栈借用跳过（零误拒）；frontend 保留结构化错误码，CLI 三处显示一致 | R28 门禁 2 项全绿（三类悬垂拦截 + 合法借用/NLL 双后端一致）；全量回归 1112 项、CVE 8/8 |
 | P3 工程（v1.21 后 · 门禁盲区） | cve_check 按 CI 同口径纳入本地 `run_tests.sh` AP3 段，消除「本地全绿、tag CI 才暴露」的发布事故盲区 | 全量回归末尾 CVE 8/8 全绿 |
+| P1 优化（v1.21 后 · M10 字符串折叠） | 对齐 gcc -O2：`fold_string_concat`（O1+ 字面量合并）+ `fold_string_accum`（O2+ x86-64 累加循环整函数折叠 return const）；严格骨架识别 + 符号执行验证 + 长度上限，前缀追加/副作用/非静态串一律放弃 | R29 门禁 3 项（O2/O0 逐字一致 + b20 折叠为 `mov $124272` 零字符串调用 + 双后端一致）；全量回归 1112 项零误拒 |
 | **验收** | ①OPT-ENOUGH ②P0 清零 ③AArch64 语义+DWARF ④P2 全裁决 ⑤P3 收口 | **五项全绿，能力上已代替 LLVM** |
 
 ### 3.2 主线 B · dialpkg —— ✅ P4.0~P4.4 全部落地

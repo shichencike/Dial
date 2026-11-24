@@ -6,8 +6,10 @@
 //! - DCE：删除结果无用的纯指令（ARC/Store/Call 一律保留）。
 //! - 保守 CSE：跨函数内对相同纯计算做值编号复用（仅限无内存副作用的 Bin/Un/Cmp/Conv）。
 //! - 保守 ARC 简化：仅消除「retain 后无任何使用即 release」的净零配对（绝不破坏引用计数平衡）。
+//! - 字符串拼接常量折叠（fold_string_concat）：编译期把字面量间的 dial_string_concat
+//!   合并成单个静态串，消除运行时的 malloc+memcpy（与 gcc -O2 的字符串常量折叠同族）。
 //!
-//! 运行顺序：fold → cse → dce → arc_simplify。
+//! 运行顺序：fold → cse → dce → arc_simplify → fold_string_concat。
 
 use crate::ir::*;
 use std::collections::{HashMap, HashSet};
@@ -1741,6 +1743,392 @@ pub fn specialize_linear_recurrences(ip: &mut IrProgram) -> usize {
                 b0.insts.clear();
                 b0.params.clear();
                 b0.term = Term::Return { val: Some(Value::Imm(Imm::I64(result_i64))) };
+            }
+            f.blocks.truncate(1);
+            f.entry = 0;
+            count += 1;
+        }
+    }
+    count
+}
+
+// ============================================================================
+// M10-strfold：字符串字面量拼接的编译期常量折叠
+// ============================================================================
+// 动机：gcc/clang -O2 会把 `"a" + "b"` 这类编译期已知的拼接折叠成单个常量，
+// 省去运行时的 malloc + 两次 memcpy。Dial 的字面量已是静态 immortal 对象
+// （LeaStaticString），concat 是 Call dial_string_concat —— 当两个操作数都能
+// 追溯到静态串时，可在编译期 intern 出合并串，把 Call 换成单个 LeaStaticString。
+//
+// 正确性锚点：
+//   1. 只折叠「两个操作数都是静态串 vreg」的 concat；任何来自运行时的值都不动。
+//   2. 静态串内容来自 ip.string_literals（编译期已知），合并后 intern 复用池，
+//      emit 时统一带 '\0'，与 dial_string_concat 的 C 侧语义逐字节一致。
+//   3. ARC 安全：静态串是 immortal（rc=INT64_MIN），lower 在其上发的 retain/release
+//      全是 no-op；替换 dst 为另一个静态串不改变任何引用计数平衡。
+//   4. 不动点迭代：支持 "a"+"b"+"c" 链式（前一轮折叠产生的静态串可被下一轮用）。
+//   5. 折叠上限：防止 pathological 输入在编译期爆内存（单次合并长度上限 1 MiB）。
+
+/// 从 Value 追出它对应的静态字符串字面量索引（仅当该 vreg 由 LeaStaticString 定义）。
+fn sf_static_lit(v: &Value, static_map: &HashMap<VReg, u32>) -> Option<u32> {
+    match v {
+        Value::Reg(r) => static_map.get(r).copied(),
+        _ => None,
+    }
+}
+
+const SF_MAX_LEN: usize = 1024 * 1024;
+
+/// 对整段程序做字符串字面量拼接折叠，返回折叠掉的 concat 次数。
+pub fn fold_string_concat(ip: &mut IrProgram) -> usize {
+    let mut total = 0usize;
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+
+    for name in names {
+        loop {
+            // 阶段 1（只读）：重建「vreg → 静态串 lit 索引」映射，并收集所有可折叠的
+            // concat：位置 + 合并后的字符串内容。LeaStaticString 的 dst 会登记进映射，
+            // 因此上一轮折叠产物可被下一轮用，实现链式 "a"+"b"+"c" 的不动点迭代。
+            let mut static_map: HashMap<VReg, u32> = HashMap::new();
+            let mut jobs: Vec<(usize, usize, String)> = Vec::new(); // (block, inst, merged)
+            {
+                let f = match ip.functions.iter().find(|f| f.name == name) { Some(f) => f, None => break };
+                for b in &f.blocks {
+                    for inst in &b.insts {
+                        if let IrInst::LeaStaticString { dst, lit } = inst {
+                            static_map.insert(*dst, *lit);
+                        }
+                    }
+                }
+                let lits = &ip.string_literals;
+                for (bi, b) in f.blocks.iter().enumerate() {
+                    for (ii, inst) in b.insts.iter().enumerate() {
+                        if let IrInst::Call { dst: Some(_), func, args, linkage: CallLink::Runtime, .. } = inst {
+                            if func != "dial_string_concat" || args.len() != 2 { continue; }
+                            let (la, lb) = match (sf_static_lit(&args[0], &static_map), sf_static_lit(&args[1], &static_map)) {
+                                (Some(a), Some(b)) => (a, b),
+                                _ => continue,
+                            };
+                            let sa = match lits.get(la as usize) { Some(s) => s, None => continue };
+                            let sb = match lits.get(lb as usize) { Some(s) => s, None => continue };
+                            if sa.len() + sb.len() > SF_MAX_LEN { continue; }
+                            jobs.push((bi, ii, format!("{}{}", sa, sb)));
+                        }
+                    }
+                }
+            }
+
+            if jobs.is_empty() { break; }
+
+            // 阶段 2（只改字符串池）：把合并内容 intern 成 lit 索引。
+            // 此时不借用任何 function，避免与阶段 3 的 ip.functions 可变借用冲突。
+            let lit_indices: Vec<u32> = jobs.iter().map(|(_, _, s)| ip.intern_string(s)).collect();
+
+            // 阶段 3（只改当前函数）：把 Call 换成 LeaStaticString。
+            if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) {
+                for ((bi, ii, _), new_lit) in jobs.iter().zip(lit_indices) {
+                    let dst = match &f.blocks[*bi].insts[*ii] {
+                        IrInst::Call { dst: Some(d), .. } => *d,
+                        _ => continue,
+                    };
+                    f.blocks[*bi].insts[*ii] = IrInst::LeaStaticString { dst, lit: new_lit };
+                    total += 1;
+                }
+            }
+        }
+    }
+    total
+}
+
+// ============================================================================
+// M10b-straccum：字符串累加循环的编译期常量折叠（对标 gcc -O2 对 b20 的整函数折叠）
+// ============================================================================
+// 目标模式（lower 后 5 块骨架，见 bench.b20）：
+//   entry:  x = LeaStaticString(S0);  i = 0;  jump header
+//   header: load i;  icmp i < N (imm);  branch → body / exit
+//   body:   load x;  LeaStaticString(C);  x = concat(x, C);  [rc];  store x;  jump latch
+//   latch:  i = i + 1;  jump header
+//   exit:   仅用 dial_string_length(x) / dial_string_get(x, idx) + 纯算术 → return
+//
+// 折叠：编译期算出 final = S0 + C*N，符号执行 exit 得到 return 常量，
+// 把整函数折叠成单块 `return Imm(const)`。语义等价锚点：
+//   1. final 与循环 N 次结果逐字节相同（构造性保证）。
+//   2. 静态串是 immortal，rc no-op，删除循环里的 alloc/release 不破坏 ARC。
+//   3. exit 只含白名单指令（Load/Store/Bin/ICmp/Conv/Call length|get/RcRelease）；
+//      任何非白名单（如 print/FFI/循环依赖）一律放弃，零误拒优先。
+//   4. entry 只做初始化（Alloca/Lea/Store/Load/EnvInit），无副作用才折叠整函数。
+//   5. i 在 exit 不被使用（否则删循环会改变 i 终值）——严格检查。
+//   6. 长度上限 SF_MAX_LEN + trip count 上限，防编译期爆内存。
+
+/// 从字符串常量池读内容。
+fn sf_lit_str(ip: &IrProgram, lit: u32) -> Option<&str> {
+    ip.string_literals.get(lit as usize).map(|s| s.as_str())
+}
+
+/// 常量求 eval：Value → i64。句柄寄存器不可当整数用（返回 None）。
+fn sf_eval(v: &Value, env: &HashMap<VReg, i64>, strregs: &HashSet<VReg>) -> Option<i64> {
+    match v {
+        Value::Imm(i) => Some(i.as_i64()),
+        Value::Reg(r) => {
+            if strregs.contains(r) { return None; } // 字符串句柄不能参与整数运算
+            env.get(r).copied()
+        }
+    }
+}
+
+/// 识别 5 块字符串累加循环骨架。
+struct StrAccum {
+    x_slot: VReg,       // 累加字符串变量槽
+    iv_slot: VReg,      // 循环变量槽
+    s0: String,         // 累加初值串
+    c: String,          // 每轮追加串
+    n: u64,             // 迭代次数
+    header: usize, body: usize, latch: usize, exit: usize,
+}
+
+fn sf_recognize(ip: &IrProgram, f: &IrFunction) -> Option<StrAccum> {
+    // 护栏：Private / 无参 / I64 返回 / 精确 5 块。
+    if f.linkage != FuncLink::Private || !f.params.is_empty() || f.ret != IrType::I64 { return None; }
+    if f.blocks.len() != 5 { return None; }
+
+    // entry → header
+    if !matches!(&f.blocks[0].term, Term::Jump { target, .. } if *target == f.blocks[1].id) { return None; }
+    let b0 = &f.blocks[0];
+
+    // header: Load cv(iv); ICmp Lt cv < Imm N; Branch → body / exit
+    let b1 = &f.blocks[1];
+    if b1.insts.len() != 2 { return None; }
+    let (iv_slot, n) = match (&b1.insts[0], &b1.insts[1]) {
+        (IrInst::Load { dst: cv, ptr: iv, ty: IrType::I64 },
+         IrInst::ICmp { op: ACmp::Lt, a: Value::Reg(a), b: Value::Imm(lim), .. })
+            if *a == *cv => {
+            let nv = lim.as_i64();
+            if nv <= 0 { return None; }
+            (*iv, nv as u64)
+        }
+        _ => return None,
+    };
+    match &b1.term {
+        Term::Branch { cond, then_b, else_b, .. }
+            if *cond == match &b1.insts[1] { IrInst::ICmp { dst, .. } => *dst, _ => u32::MAX }
+               && *then_b == f.blocks[2].id && *else_b == f.blocks[4].id => {}
+        _ => return None,
+    }
+
+    // body: 严格 = Load xslot; LeaStaticString C; Call concat(x, C); [RcRelease]; Store xslot; Jump latch
+    let b2 = &f.blocks[2];
+    if !matches!(&b2.term, Term::Jump { target, .. } if *target == f.blocks[3].id) { return None; }
+    // 先看 iv 初值（entry 里 Store iv_slot, Imm 0）。
+    let mut iv_init_zero = false;
+    for inst in &b0.insts {
+        if let IrInst::Store { ptr, val: Value::Imm(im), .. } = inst {
+            if *ptr == iv_slot && im.as_i64() == 0 { iv_init_zero = true; }
+        }
+    }
+    if !iv_init_zero { return None; }
+
+    // latch: Load iv; Bin Add 1; Store iv; Jump header
+    let b3 = &f.blocks[3];
+    if !matches!(&b3.term, Term::Jump { target, .. } if *target == f.blocks[1].id) { return None; }
+    let lbn = b3.insts.len();
+    if lbn != 3 { return None; }
+    match (&b3.insts[0], &b3.insts[1], &b3.insts[2]) {
+        (IrInst::Load { dst: cv, ptr: iv2, ty: IrType::I64 },
+         IrInst::Bin { op: ABin::Add, dst: nv, a: Value::Reg(x), b: Value::Imm(step), ty: IrType::I64 },
+         IrInst::Store { ptr: iv3, val: Value::Reg(y), ty: IrType::I64 })
+            if *cv == *x && *nv == *y && *iv2 == *iv3 && *iv2 == iv_slot && step.as_i64() == 1 => {}
+        _ => return None,
+    }
+
+    // 解析 body：允许 Alloca（临时槽）与 RcRelease（字符串 no-op），核心须是 concat 链。
+    let mut x_slot = u32::MAX;
+    let mut append_lit: Option<u32> = None;
+    let mut concat_dst = u32::MAX;
+    let mut concat_args: Option<(Value, Value)> = None;
+    let mut store_after_concat = false;
+    let mut seen_concat = false;
+    for (i, inst) in b2.insts.iter().enumerate() {
+        match inst {
+            IrInst::Load { dst, ptr, ty: IrType::Handle } => {
+                // 循环里 load 的句柄就是 x（累加变量）。
+                if x_slot == u32::MAX { x_slot = *ptr; let _ = dst; }
+            }
+            IrInst::LeaStaticString { dst, lit } => {
+                if append_lit.is_none() { append_lit = Some(*lit); let _ = dst; }
+            }
+            IrInst::Call { dst: Some(d), func, args, linkage: CallLink::Runtime, .. }
+                if func == "dial_string_concat" && args.len() == 2 => {
+                if seen_concat { return None; } // 只接受一次 concat
+                seen_concat = true;
+                concat_dst = *d;
+                concat_args = Some((args[0], args[1]));
+            }
+            IrInst::RcRelease { kind: ArcKind::String, .. } => {}
+            IrInst::Store { ptr, val: Value::Reg(v), .. } if *v == concat_dst => {
+                if *ptr == x_slot { store_after_concat = true; }
+            }
+            IrInst::Alloca { .. } => {}
+            _ => return None, // 任何其它副作用 → 放弃
+        }
+        let _ = i;
+    }
+    if !seen_concat || !store_after_concat || x_slot == u32::MAX || append_lit.is_none() { return None; }
+    // concat 的两个参数必须恰是 (load x 的结果, LeaStaticString C 的结果)。
+    let (a, b) = concat_args?;
+    let (x_ldr, c_ldr) = match (a, b) {
+        (Value::Reg(xr), Value::Reg(cr)) => (xr, cr),
+        _ => return None,
+    };
+    // 找回 body 里 load x 的 dst 与 lea C 的 dst，逐一比对。
+    let mut x_ldr_ok = false;
+    let mut c_ldr_ok = false;
+    for inst in &b2.insts {
+        if let IrInst::Load { dst, ptr, ty: IrType::Handle } = inst {
+            if *dst == x_ldr && *ptr == x_slot { x_ldr_ok = true; }
+        }
+        if let IrInst::LeaStaticString { dst, lit } = inst {
+            if *dst == c_ldr && *lit == append_lit.unwrap() { c_ldr_ok = true; }
+        }
+    }
+    if !x_ldr_ok || !c_ldr_ok { return None; }
+
+    // entry 里 x 初值必须是静态串（Store x_slot, reg where reg = LeaStaticString S0）。
+    let mut s0_lit: Option<u32> = None;
+    for (i, inst) in b0.insts.iter().enumerate() {
+        if let IrInst::Store { ptr, val: Value::Reg(v), .. } = inst {
+            if *ptr != x_slot { continue; }
+            for prev in &b0.insts[..i] {
+                if let IrInst::LeaStaticString { dst, lit } = prev {
+                    if *dst == *v { s0_lit = Some(*lit); }
+                }
+            }
+        }
+    }
+    let s0 = sf_lit_str(ip, s0_lit?)?.to_string();
+    let c = sf_lit_str(ip, append_lit?)?.to_string();
+    if c.is_empty() { return None; }
+    // 长度上限：n 也设上限，防编译期构造爆炸。
+    if n > 1_000_000 { return None; }
+    let total_len = s0.len().saturating_add(c.len().saturating_mul(n as usize));
+    if total_len > SF_MAX_LEN { return None; }
+
+    // iv 在 exit 不得被使用（删循环后 i 保持 0，若 exit 用 i 会改变语义）。
+    for inst in &f.blocks[4].insts {
+        match inst {
+            IrInst::Load { ptr, .. } if *ptr == iv_slot => return None,
+            IrInst::Store { ptr, .. } if *ptr == iv_slot => return None,
+            _ => {}
+        }
+    }
+
+    Some(StrAccum { x_slot, iv_slot, s0, c, n, header: 1, body: 2, latch: 3, exit: 4 })
+}
+
+/// 符号执行 exit 块，用 final 串内容算出 return 常量。
+/// env: 普通 i64 寄存器/槽值；strregs: 持有 final 静态串句柄的寄存器。
+fn sf_eval_exit(f: &IrFunction, rec: &StrAccum, final_str: &str) -> Option<i64> {
+    let mut env: HashMap<VReg, i64> = HashMap::new();
+    let mut strregs: HashSet<VReg> = HashSet::new();
+    let exit = &f.blocks[rec.exit];
+    for inst in &exit.insts {
+        match inst {
+            IrInst::Alloca { .. } => {}
+            IrInst::Load { dst, ptr, .. } => {
+                if *ptr == rec.x_slot {
+                    strregs.insert(*dst); // load 累加串 → 句柄
+                } else if let Some(&v) = env.get(ptr) {
+                    env.insert(*dst, v);
+                } else {
+                    return None; // 未知槽（可能来自函数参数/全局）→ 放弃
+                }
+            }
+            IrInst::Store { ptr, val, .. } => {
+                let v = sf_eval(val, &env, &strregs)?;
+                env.insert(*ptr, v);
+            }
+            IrInst::Bin { op, dst, a, b, ty: IrType::I64 } => {
+                let x = sf_eval(a, &env, &strregs)?;
+                let y = sf_eval(b, &env, &strregs)?;
+                let r = fold_bin_i64(*op, x, y)?;
+                env.insert(*dst, r);
+            }
+            IrInst::ICmp { op, dst, a, b, .. } => {
+                let x = sf_eval(a, &env, &strregs)?;
+                let y = sf_eval(b, &env, &strregs)?;
+                env.insert(*dst, cmp_i64(*op, x, y));
+            }
+            IrInst::Conv { kind, dst, a, .. } => {
+                let x = sf_eval(a, &env, &strregs)?;
+                let r = match kind {
+                    AConv::Sext | AConv::Zext | AConv::Trunc => x,
+                    _ => return None,
+                };
+                env.insert(*dst, r);
+            }
+            IrInst::Call { dst: Some(d), func, args, .. } if func == "dial_string_length" => {
+                if args.len() != 1 { return None; }
+                if let Value::Reg(r) = args[0] {
+                    if strregs.contains(&r) {
+                        env.insert(*d, final_str.len() as i64);
+                        continue;
+                    }
+                }
+                return None;
+            }
+            IrInst::Call { dst: Some(d), func, args, .. } if func == "dial_string_get" => {
+                if args.len() != 2 { return None; }
+                let r = match args[0] { Value::Reg(r) => r, _ => return None };
+                if !strregs.contains(&r) { return None; }
+                let idx = sf_eval(&args[1], &env, &strregs)?;
+                if idx < 0 || idx as usize >= final_str.len() { return None; }
+                env.insert(*d, final_str.as_bytes()[idx as usize] as i64);
+            }
+            IrInst::RcRelease { .. } => {} // 静态串 release 是 no-op
+            _ => return None, // 非白名单 → 放弃
+        }
+    }
+    match &exit.term {
+        Term::Return { val: Some(v) } => sf_eval(v, &env, &strregs),
+        _ => None,
+    }
+}
+
+/// 验证 entry 只含初始化指令（无副作用），可安全折叠整函数。
+fn sf_entry_pure(b0: &IrFunction) -> bool {
+    // 借不到 IrFunction 的 block0 简写，直接看第一个块的 insts。
+    let b = &b0.blocks[0];
+    b.insts.iter().all(|i| matches!(i,
+        IrInst::Alloca { .. } | IrInst::LeaStaticString { .. } | IrInst::Store { .. }
+        | IrInst::Load { .. } | IrInst::EnvInit { .. } | IrInst::RcRelease { .. }
+    ))
+}
+
+/// 主入口：折叠字符串累加循环为 `return 常量`，返回折叠数。
+pub fn fold_string_accum(ip: &mut IrProgram) -> usize {
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    let mut count = 0usize;
+    for name in names {
+        // 阶段 1（只读）：识别 + 计算 final + 符号执行 exit。
+        let plan = {
+            let f = match ip.functions.iter().find(|f| f.name == name) { Some(f) => f, None => continue };
+            if !sf_entry_pure(f) { continue; }
+            let rec = match sf_recognize(ip, f) { Some(r) => r, None => continue };
+            let mut final_str = String::with_capacity(rec.s0.len() + rec.c.len() * rec.n as usize);
+            final_str.push_str(&rec.s0);
+            for _ in 0..rec.n { final_str.push_str(&rec.c); }
+            let ret = match sf_eval_exit(f, &rec, &final_str) { Some(v) => v, None => continue };
+            (final_str, ret)
+        };
+        // 阶段 2（写入）：intern final 串，把整函数折叠成单块 return 常量。
+        let final_lit = ip.intern_string(&plan.0);
+        let ret = plan.1;
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) {
+            if let Some(b0) = f.blocks.get_mut(0) {
+                b0.insts.clear();
+                b0.params.clear();
+                // 产出一个静态串引用，避免 final 串被完全 DCE 掉（保真：留一个 lea）。
+                b0.insts.push(IrInst::LeaStaticString { dst: 0, lit: final_lit });
+                b0.term = Term::Return { val: Some(Value::Imm(Imm::I64(ret))) };
             }
             f.blocks.truncate(1);
             f.entry = 0;

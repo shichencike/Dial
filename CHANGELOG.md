@@ -22,6 +22,20 @@
 
 ## [未发布] — 开发中增量
 
+### Added（M10 字符串拼接常量折叠：对齐 gcc -O2）
+- **L1 字面量拼接折叠**（`pass::fold_string_concat`，O1+）：编译期把静态串之间的
+  `dial_string_concat` 合并成单个静态对象，不动点迭代支持 `"a"+"b"+"c"` 链式；
+  内容逐字节等价、静态串 immortal 故 ARC no-op、AArch64 亦安全。
+- **L2 累加循环折叠**（`pass::fold_string_accum`，O2+ x86-64）：严格识别
+  `x=S0; for i in 0..N { x=x+C }` 且退出块仅用 `length/get` + 纯算术的骨架，
+  符号执行算出 `final=S0+C·N` 与 return 常量，把整函数折叠成单块 `return const`
+  （对标 gcc -O2 对 bench.b20 的折叠：b20 从含 4000 次堆拼接变成一条 `mov $124272`）。
+  零误拒护栏：前缀追加 / 循环体副作用 / 非静态追加串 / iv 退出块再用 / 超长串
+  一律放弃；采样经 R29 门禁 + 全量 1112 项回归验证。
+- 调试设施：`DIALC_DUMP_ASM_IR` / `DIALC_DUMP_ASM_IR_POST` 环境变量打印优化前/后 IR。
+- 说明：LLVM 后端从 AST 直接生成、不经此 pass，但输出与折叠后的 asm **逐字一致**
+  （折叠是等价变换）；`bench/bench.dial` 的 b20 校验和 124272 与 O0 完全相同。
+
 ### Added（零标注借用检查器 + 门禁盲区修复）
 
 - **借用检查器（NLL、零生命周期标注）**：语义分析阶段新增纯分析 pass，基于内部数据流

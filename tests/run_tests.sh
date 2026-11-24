@@ -3818,6 +3818,56 @@ else
 fi
 
 # ===========================================================================
+# R29) 字符串拼接常量折叠（v1.22 M10）：O2 折叠与 O0 逐字一致 + 保守零误拒
+# ===========================================================================
+echo
+echo "== R29) 字符串拼接常量折叠（L1 字面量 + L2 累加循环，O2 vs O0 语义一致）=="
+_DIALC="$DIALC"
+# 1) O2/O0 输出逐字一致（含保守用例：前缀追加 + print 副作用，不得被误折叠）
+if "$_DIALC" build tests/pkg/r29_strfold.dial -O2 -o "$TMP/r29_o2" >/dev/null 2>&1 \
+   && "$_DIALC" build tests/pkg/r29_strfold.dial -O0 -o "$TMP/r29_o0" >/dev/null 2>&1; then
+    if diff <("$TMP/r29_o2") <("$TMP/r29_o0") >/dev/null; then
+        rpass "R29 拼接折叠 O2/O0 逐字一致（L1 字面量 + L2 累加 + 前缀/副作用保守不折叠）"
+    else
+        rbad "R29 O2/O0 输出不一致（折叠破坏了语义）"
+    fi
+else
+    rbad "R29 测试程序构建失败"
+fi
+# 2) b20 累加循环确实被编译期折叠：O2 汇编 b20 函数内无 concat/length/get 调用
+if "$_DIALC" build bench/bench.dial -O2 --no-link -o "$TMP/r29_bench.o" >/dev/null 2>&1; then
+    # -o 对 --no-link 可能被忽略，.s 落在源目录 bench/bench.s（with_extension("s")）。
+    _r29_s="bench/bench.s"
+    # 取 b20: 到下一个函数标签 b21: 之间的汇编（函数间无 .globl，不能用它截断）。
+    _r29_calls=$(awk '/^b20:/{p=1} /^b21:/{p=0} p{print}' "$_r29_s" 2>/dev/null | grep -cE "call.*dial_string_(concat|length|get)")
+    if [ "$_r29_calls" = "0" ]; then
+        rpass "R29 b20 累加循环编译期折叠为常量（O2 汇编零字符串调用）"
+    else
+        rbad "R29 b20 未被折叠（O2 仍有 $_r29_calls 处字符串调用）"
+    fi
+    # 校验和一致
+    "$_DIALC" build bench/bench.dial -O2 -o "$TMP/r29_b2" >/dev/null 2>&1
+    "$_DIALC" build bench/bench.dial -O0 -o "$TMP/r29_b0" >/dev/null 2>&1
+    if [ "$("$TMP/r29_b2" b20)" = "$("$TMP/r29_b0" b20)" ] && [ "$("$TMP/r29_b2" b20)" = "124272" ]; then
+        rpass "R29 b20 折叠后校验和 124272 与 O0 一致"
+    else
+        rbad "R29 b20 校验和异常"
+    fi
+else
+    rbad "R29 bench.dial -O2 构建失败"
+fi
+# 3) 双后端一致（LLVM 后端从 AST 生成、不折叠，但输出必须与 asm 逐字相同）
+if "$_DIALC" build tests/pkg/r29_strfold.dial --backend llvm -o "$TMP/r29_llvm" >/dev/null 2>&1; then
+    if diff <("$TMP/r29_o2") <("$TMP/r29_llvm") >/dev/null; then
+        rpass "R29 asm（折叠）/ LLVM（不折叠）双后端逐字一致"
+    else
+        rbad "R29 双后端输出不一致"
+    fi
+else
+    rbad "R29 LLVM 后端构建失败"
+fi
+
+# ===========================================================================
 # S) 性能基准套件（v1.04 增补）：秒级快速正确性校验
 #    完整 2 分钟计时采集交给 CI 独立步骤；这里只验证「4 语言等价实现 + 交付
 #    数据/网页配套」，避免拖慢常规回归。缺 gcc / go 时对应子项明确跳过。

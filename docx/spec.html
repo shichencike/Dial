@@ -892,7 +892,9 @@ dialc lsp
 <blockquote>
 <p><strong>自研后端 <code>--backend=asm</code>（实验性，默认 llvm）</strong>：不指定时走既有 LLVM 后端，
 行为与旧版逐字节一致。加上 <code>--backend=asm</code>（也可写 <code>--backend asm</code>）改用自研后端：
-专属 IR → 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化）→ x86-64 SysV 或
+专属 IR → 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化 / 字符串拼接常量折叠
+——字面量间 concat 编译期合并、以及 <code>x=S; for..{x=x+C}</code> 累加循环整函数折叠为常量，
+对标 gcc -O2 对 bench.b20 的折叠，见 CHANGELOG M10）→ x86-64 SysV 或
 AArch64 AAPCS 汇编 <code>.s</code> → 系统 <code>cc -c</code> 汇编成 <code>.o</code> → 复用既有链接流程。
 <strong>不发射 C 源码、不引第三方代码生成库、零新包依赖</strong>；FFI 包、<code>--tiny</code>、
 <code>--single-file</code> 因复用链接层而零改动生效。未覆盖的语言构造会明确报

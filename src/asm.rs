@@ -70,16 +70,29 @@ pub fn compile_asm(
         .unwrap_or_else(|_| src_path.to_string());
 
     let mut ip = lower::lower_program(prog, functions, structs, goto_depths, debug_info, src_path)?;
+    // 调试设施（对齐 codegen 的 DIALC_DUMP_IR）：设 DIALC_DUMP_ASM_IR=1 在优化前
+    // 打印自研后端 IR，便于检视 lower 产物与优化 Pass 的输入。
+    if std::env::var("DIALC_DUMP_ASM_IR").is_ok() {
+        eprintln!("{:#?}", ip);
+    }
     // M7-e3ac：优化级别分级。O2（默认）= 既有全部优化，逐字节零回归；
     // O0 跳过全部 Dial 级 IR pass（配合 -g 得到"所写即所得"的调试体验）；
     // O1 仅基础 IR pass；O3 在 O2 之上追加 LLVM InstCombine 风格代数恒等式。
     if opt_level >= OptLevel::O1 {
         pass::run_passes(&mut ip);
+        // M10-strfold：字符串字面量拼接的编译期常量折叠（对齐 gcc -O2 的常量折叠）。
+        // 只折叠静态串之间的 concat，内容等价 + ARC no-op，双后端语义一致；AArch64 亦安全。
+        pass::fold_string_concat(&mut ip);
     }
     // M7-e3p：过程间常量折叠（纯整数函数调用编译期求值）。O2+ 启用。
     // 仅 x86-64 启用：AArch64 保持既有发射路径，`.s` 零变化。
     if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV) {
         pass::fold_pure_calls(&mut ip);
+    }
+    // M10b-straccum：字符串累加循环编译期折叠（对标 gcc -O2 对 bench.b20 的整函数折叠）。
+    // 严格识别 + 符号执行验证 + 长度上限；O2+ 且仅 x86-64，低优化级 / AArch64 零变化。
+    if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV) {
+        pass::fold_string_accum(&mut ip);
     }
     // M8-recspec：递归纯函数闭式特化。O3 + x86-64 only——这是私有后端专属的
     // 语义级激进优化（LLVM 通用后端不会把互递归识别成奇偶闭式）。用探针解释
@@ -102,6 +115,10 @@ pub fn compile_asm(
     // M7-e3ad：LLVM InstCombine 风格代数恒等式（x*0→0、x+0→x 等）。O3 only，仅 x86-64。
     if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV) {
         pass::instcombine(&mut ip);
+    }
+    // 调试：设 DIALC_DUMP_ASM_IR_POST=1 在全部 Pass 后打印 IR。
+    if std::env::var("DIALC_DUMP_ASM_IR_POST").is_ok() {
+        eprintln!("{:#?}", ip);
     }
     let asm_text = codegen_asm::emit(&ip, target, debug_info, &src_abs, fn_origin, opt_level, safety, target_cpu, instrument, profile)?;
 

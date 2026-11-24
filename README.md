@@ -312,7 +312,9 @@ dialc lsp
 
 > **自研后端 `--backend=asm`（实验性，默认 llvm）**：不指定时走既有 LLVM 后端，
 > 行为与旧版逐字节一致。加上 `--backend=asm`（也可写 `--backend asm`）改用自研后端：
-> 专属 IR → 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化）→ x86-64 SysV 或
+> 专属 IR → 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化 / 字符串拼接常量折叠
+> ——字面量间 concat 编译期合并、以及 `x=S; for..{x=x+C}` 累加循环整函数折叠为常量，
+> 对标 gcc -O2 对 bench.b20 的折叠，见 CHANGELOG M10）→ x86-64 SysV 或
 > AArch64 AAPCS 汇编 `.s` → 系统 `cc -c` 汇编成 `.o` → 复用既有链接流程。
 > **不发射 C 源码、不引第三方代码生成库、零新包依赖**；FFI 包、`--tiny`、
 > `--single-file` 因复用链接层而零改动生效。未覆盖的语言构造会明确报
