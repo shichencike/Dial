@@ -193,6 +193,15 @@ int main(void) {
                             # 会被误判成「CVE 仍可利用」而阻断发布。
                             os.path.join(sl, "dial_array.c"),
                             os.path.join(sl, "dial_channel.c"),
+                            # v1.21 字段级 ARC：dial_rt_mem.c 的 desc 表逐字段释放分支
+                            # 覆盖 string/bytes/array/error/generic/channel 六种句柄，
+                            # 引用了这些 .c 里的 release 函数。链接清单必须把它们全带上，
+                            # 否则 ld 报 undefined symbol，会被误判成「CVE 仍可利用」而阻断发布。
+                            # （与 build_stdlib.sh 的「全量编译、链接器只取所需符号」同口径。）
+                            os.path.join(sl, "dial_bytes.c"),
+                            os.path.join(sl, "dial_exc.c"),
+                            os.path.join(sl, "dial_map.c"),
+                            os.path.join(sl, "dial_error.c"),
                             "-lpthread", "-o", exe]
         rc, out, err = run_capture(cmd)
         if rc != 0:
