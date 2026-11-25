@@ -27,7 +27,7 @@
 
 <div class="layout"><aside class="sidebar"></aside><main class="content"><div class="toc">
 <ul>
-<li><a href="#dialc--dial-语言编译器-v121">dialc — Dial 语言编译器 v1.21</a><ul>
+<li><a href="#dialc--dial-语言编译器-v122">dialc — Dial 语言编译器 v1.22</a><ul>
 <li><a href="#开源许可三重许可任选其一">开源许可：三重许可（任选其一）</a></li>
 <li><a href="#1-设计原则">1. 设计原则</a></li>
 <li><a href="#2-目录结构">2. 目录结构</a></li>
@@ -55,6 +55,7 @@
 <li><a href="#34-产物依赖契约">3.4 产物依赖契约</a><ul>
 <li><a href="#341-许可隔离标准库绝不以-gpl-链接进用户程序防法务传染">3.4.1 许可隔离：标准库绝不以 GPL 链接进用户程序（防法务传染）</a></li>
 <li><a href="#342---single-file显式全静态链接第-18-层">3.4.2 --single-file：显式全静态链接（第 18 层）</a></li>
+<li><a href="#343---shared产出动态链接库asm-后端">3.4.3 --shared：产出动态链接库（asm 后端）</a></li>
 </ul>
 </li>
 </ul>
@@ -505,7 +506,7 @@
 </li>
 </ul>
 </div>
-<h1 id="dialc--dial-语言编译器-v121">dialc — Dial 语言编译器 v1.21</h1>
+<h1 id="dialc--dial-语言编译器-v122">dialc — Dial 语言编译器 v1.22</h1>
 <p><a href="https://github.com/shichencike/Dial/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/shichencike/Dial/actions/workflows/ci.yml/badge.svg" /></a>
 <a href="https://github.com/shichencike/Dial/releases"><img alt="Release" src="https://img.shields.io/github/v/release/shichencike/Dial?label=%E5%8F%91%E5%B8%83" /></a></p>
 <blockquote>
@@ -780,7 +781,7 @@ irm https://raw.githubusercontent.com/shichencike/Dial/main/tools/install-dial.p
 <blockquote>
 <p><strong>关于 URL 稳定性与「零硬编码」</strong>：这两条命令取的是 <strong><code>main</code> 分支上 <code>tools/</code> 里的安装脚本</strong>（直出文件，脚本本身不走任何重定向）。脚本运行时通过 GitHub API 读取<strong>最新 Release 的真实资产清单</strong>，再用
 <code>https://github.com/shichencike/Dial/releases/latest/download/&lt;资产名&gt;</code> 下载——版本、标签、资产名<strong>都不写死在脚本里</strong>，发新版后无需改脚本即可自动跟上。</p>
-<p>之所以仍需解析资产名：GitHub 的 <code>latest/download/</code> 要求<strong>精确文件名</strong>，而本项目的 zip / vsix 名字带版本号（<code>dialc-v1.21-linux-x86_64.zip</code>、<code>dial-1.21.0.vsix</code>），靠重定向本身推不出来；脚本按平台 slug 与扩展名从清单里挑，<code>stdlib.dialpkg</code> 名字固定、且现在与 zip / vsix 挂在<strong>同一个 <code>v*</code> Release 页面</strong>，因此同样能被 latest 找到。</p>
+<p>之所以仍需解析资产名：GitHub 的 <code>latest/download/</code> 要求<strong>精确文件名</strong>，而本项目的 zip / vsix 名字带版本号（<code>dialc-v1.22-linux-x86_64.zip</code>、<code>dial-1.22.0.vsix</code>），靠重定向本身推不出来；脚本按平台 slug 与扩展名从清单里挑，<code>stdlib.dialpkg</code> 名字固定、且现在与 zip / vsix 挂在<strong>同一个 <code>v*</code> Release 页面</strong>，因此同样能被 latest 找到。</p>
 <p>需要复现旧环境或离线时，用 <code>DIAL_VERSION</code>（钉编译器版本）、<code>STDLIB_RELEASE</code>（钉旧 <code>stdlib-v*</code> 通道）、<code>STDLIB_URL</code> / <code>DIAL_VSIX_URL</code>（完全覆盖地址）即可；镜像优先 + 官方回退 + 失败原因可见的行为不变。安装脚本本身也随每个发布包一起分发。</p>
 <p>注意用 <code>bash</code> 而非 <code>sh</code>：<code>set -o pipefail</code> 与脚本里的数组语法在 Ubuntu 的 <code>sh</code>(dash)、Termux 的 <code>mksh</code> 下不被支持。Windows 侧用 <code>iex</code> 即可（PowerShell 原生）。</p>
 </blockquote>
@@ -894,7 +895,9 @@ dialc lsp
 行为与旧版逐字节一致。加上 <code>--backend=asm</code>（也可写 <code>--backend asm</code>）改用自研后端：
 专属 IR → 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化 / 字符串拼接常量折叠
 ——字面量间 concat 编译期合并、以及 <code>x=S; for..{x=x+C}</code> 累加循环整函数折叠为常量，
-对标 gcc -O2 对 bench.b20 的折叠，见 CHANGELOG M10）→ x86-64 SysV 或
+对标 gcc -O2 对 bench.b20 的折叠，见 CHANGELOG M10；以及通用函数内联 / LICM /
+保守 SCCP / 死函数消除 / 保守循环展开——对齐 C 工具链 O2/O3 主力优化，见 §优化级别表）
+→ x86-64 SysV 或
 AArch64 AAPCS 汇编 <code>.s</code> → 系统 <code>cc -c</code> 汇编成 <code>.o</code> → 复用既有链接流程。
 <strong>不发射 C 源码、不引第三方代码生成库、零新包依赖</strong>；FFI 包、<code>--tiny</code>、
 <code>--single-file</code> 因复用链接层而零改动生效。未覆盖的语言构造会明确报
@@ -1362,9 +1365,14 @@ dialc run   &lt;源文件.dial&gt; [-o 可执行文件]              [--safety d
 <td>极速编译</td>
 <td>强制 <code>-O0</code> 跳过 Dial IR pass、C stdlib 改 <code>-O0</code>、并复用按内容哈希的 stdlib 持久缓存（M7-e3an3）；与 <code>--fast</code> / <code>--pgo</code> / <code>--tiny</code> / 显式 <code>-O1..3</code> 目标相反，一律 Fail-Fast 拒绝（见 §38.24.2）</td>
 </tr>
+<tr>
+<td><code>--shared</code></td>
+<td>动态链接库</td>
+<td>链接期 <code>-shared</code>（macOS <code>-dynamiclib</code>、MinGW 产 <code>.dll</code>）产出 <code>.so</code>；C 运行时以 <code>-fPIC</code> 重编并走独立缓存分区（绕开非 PIC 的预编译归档）；<code>dlopen</code> 时经 <code>.init_array</code> constructor 自动 <code>dial_env_init</code>。与 <code>--single-file</code> / <code>--tiny</code> 目标相反，一律 Fail-Fast 拒绝（见 §3.4.3）</td>
+</tr>
 </tbody>
 </table>
-<p>三者中 <code>--tiny</code> 与 <code>--single-file</code> 可叠加，但 <code>-static</code> 会把 libc 静态段拉入产物，通常比 <code>--tiny</code> 单独使用更大——
+<p>产物形态开关中，<code>--tiny</code> 与 <code>--single-file</code> 可叠加，但 <code>-static</code> 会把 libc 静态段拉入产物，通常比 <code>--tiny</code> 单独使用更大——
 前者求「最小体积」、后者求「不依赖宿主」，编译器如实提示但不静默覆盖任何一侧。
 LLVM 侧（inkwell 无原生 <code>Oz</code> 档）保持 <code>O2</code>，体积压缩全部压在 C 侧与链接期；
 <strong>不承诺具体 KB 数</strong>，实测数据见 §38.24.1。</p>
@@ -1388,24 +1396,34 @@ LLVM 侧（inkwell 无原生 <code>Oz</code> 档）保持 <code>O2</code>，体�
 </tr>
 <tr>
 <td><code>-O1</code></td>
-<td>基础（fold / cse / dce / ARC 化简）</td>
+<td>基础（fold / cse / dce / ARC 化简）+ <strong>死函数消除</strong></td>
 <td>禁用（全 spill）</td>
 <td>无</td>
 </tr>
 <tr>
 <td><code>-O2</code>（<strong>默认</strong>）</td>
-<td>+ 过程间常量折叠 / 归纳变量强度削减</td>
+<td>+ 过程间常量折叠 / 字符串拼接折叠 / 归纳变量强度削减 / <strong>通用函数内联</strong> / <strong>LICM</strong> / <strong>保守 SCCP</strong></td>
 <td>启用（既有全部优化）</td>
 <td>无</td>
 </tr>
 <tr>
 <td><code>-O3</code></td>
-<td>同 <code>-O2</code></td>
+<td>+ <strong>保守循环展开</strong>（标准 for + 常量小上界 2..8）</td>
 <td>启用</td>
 <td><strong>启用</strong>（<code>a+0→a</code>、<code>a*1→a</code>、<code>a|0→a</code>、<code>a&lt;&lt;0→a</code>、<code>a&amp;-1→a</code> 等，仅 x86-64/整数）</td>
 </tr>
 </tbody>
 </table>
+<blockquote>
+<p><strong>M11~M15 对齐 C 工具链优化（v1.21 后增量）</strong>：新增五项 IR Pass——
+① <strong>M11 通用函数内联</strong>（对标 gcc/clang <code>-O2</code> inlining，Private 小函数体复制 + ARC 原样保留 + φ 回传返回值）；
+② <strong>M12 通用 LICM</strong>（循环不变纯计算外提到 preheader，严格别名/归零护栏）；
+③ <strong>M13 保守 SCCP</strong>（常量沿 CFG/φ 传播、常量条件分支折叠，不动 Call/Store/ARC）；
+④ <strong>M14 死函数消除</strong>（Private 零引用函数不动点删除，导出/入口/函数指针引用保留）；
+⑤ <strong>M15 保守循环展开</strong>（标准 for 骨架 + 常量上界 2..8 + 纯整数 body，O3 启用）。
+全部仅 x86-64，且排除 <code>-g</code>/PGO/插桩（DWARF 行号与 profile idx 对齐要求），AArch64/LLVM 路径零变化。
+门禁 R30~R34：O0/O1/O2/O3 逐字一致 + 双后端逐字一致 + 各 pass 生效证据 + 反例零误拒，全量回归零回归。</p>
+</blockquote>
 <p>默认 <code>-O2</code> = 既有全部优化，<strong>未指定 <code>-O</code> 的既有构建逐字节零回归</strong>；<code>-O0</code>/<code>-O1</code> 关驻留走全
 spill（低优化级别不跨指令保持值）；<code>-O3</code> 从 LLVM InstCombine 借鉴的代数恒等式仅对可证明
 等价的整数运算生效（不碰浮点 NaN、逻辑短路、除零语义），恒等式密集循环实测比 O2 快约
@@ -1635,6 +1653,34 @@ asm 默认布局已近最优，PGO 核心价值是功能完整性而非性能飞
 </table>
 <p>详见 <a href="#38241-编译器---tiny体积模式---single-file便携模式">§38.24.1</a>；AE 组把这四条形态、
 冲突矩阵与正交叠加全部做成回归断言。</p>
+<h4 id="343---shared产出动态链接库asm-后端">3.4.3 <code>--shared</code>：产出动态链接库（asm 后端）</h4>
+<p><code>dialc build foo.dial --shared -o libfoo.so</code> 让自研 asm 后端产出真正的 ELF 共享对象
+（<code>file</code> 显示 <code>shared object</code>），可供 <code>dlopen</code>/<code>dlsym</code> 或链接器 <code>-lfoo</code> 使用。只有源码里
+用 <code>export fn</code> 声明的函数会成为导出符号（对齐 FFI 契约；普通 <code>fn</code> 保持模块内私有）。</p>
+<pre><code class="language-dial">// libmath.dial
+export fn add(a: int, b: int): int { return a + b; }   // dlsym 可见
+fn helper(x: int): int { return x * 2; }               // 模块内私有，不导出
+fn main(): int { return 0; }                          // 动态库里 main 只是普通符号
+</code></pre>
+<pre><code class="language-bash">dialc build libmath.dial --shared -o libmath.so
+python3 -c &quot;import ctypes; l=ctypes.CDLL('./libmath.so'); l.add.restype=ctypes.c_int64; print(l.add(20,22))&quot;
+# → 42
+</code></pre>
+<p><strong>两个关键实现约束</strong>（都是实测踩坑后的 Fail-Fast 设计）：</p>
+<ol>
+<li><strong>C 运行时必须 <code>-fPIC</code></strong>：预编译的 <code>libdial_std.a</code> 是 <code>-O2</code> 烘焙、无 PIC，链进 <code>.so</code>
+   后有 2714 处 <code>R_X86_64_32S</code> 绝对重定位——<code>dlopen</code> 到任意基址后全局元数据错位，含
+   字符串拼接 / ARC 的导出函数会触发 Fail-Fast「double free」。<code>--shared</code> 强制走源码
+   编译路径加 <code>-fPIC</code>（无 TEXTREL），并存到独立缓存分区（key 含 <code>-fPIC</code>，不与默认归档混用）。</li>
+<li><strong><code>dlopen</code> 不跑 <code>main</code></strong>：可执行文件的 <code>main</code> 首句调 <code>dial_env_init(argc, argv)</code>，动态库
+   被装载时不会执行它，导致随机数种子 <code>g_rng_state=0</code>（xorshift 全零退化，<code>random()</code> 恒 0）。
+   <code>--shared</code> 额外链入一个带 <code>.init_array</code> constructor 的小对象，在库加载时自动调用
+   <code>dial_env_init(0, 0)</code>（种子由 <code>time(NULL)</code> 参与保证非零，argv 快照为空——库本无 argv）。</li>
+</ol>
+<p>与 <code>--single-file</code>（-static）和 <code>--tiny</code>（strip 符号表）<strong>互斥</strong>——前者与 <code>-shared</code> 的 ELF
+语义冲突，后者会删掉 <code>dlsym</code> 必需的导出符号，均 Fail-Fast 拒绝。可与 <code>-O0..3</code> 叠加。
+R35 门禁覆盖：ELF 类型 / 导出符号 / 无 TEXTREL / <code>dlopen</code> 调用（含 1000 次 ARC 循环与
+random 非退化）/ 冲突矩阵。</p>
 <hr />
 <h2 id="4-词法结构">4. 词法结构</h2>
 <h3 id="41-注释">4.1 注释</h3>
@@ -7053,7 +7099,7 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 <tr>
 <td><strong>VS Code</strong></td>
 <td>手写 LSP 客户端（无 npm 依赖）</td>
-<td><a href="https://github.com/shichencike/Dial/tree/main/editors/vscode/"><code>editors/vscode/dial-1.21.0.vsix</code></a>（<code>code --install-extension</code> 侧载）</td>
+<td><a href="https://github.com/shichencike/Dial/tree/main/editors/vscode/"><code>editors/vscode/dial-1.22.0.vsix</code></a>（<code>code --install-extension</code> 侧载）</td>
 <td>免 Node / npm / 联网；能力最全</td>
 </tr>
 <tr>
@@ -7079,8 +7125,8 @@ check_stmt(...).map_err(|e| if e.line == 0 &amp;&amp; e.col == 0 {
 还会<strong>自动下载并安装 VS Code 插件</strong>（从 Release 取 <code>dial-&lt;版本&gt;.vsix</code>，再用 <code>code --install-extension</code> 装上），
 不必再自己去 Release 页翻资产、手动侧载。</p>
 <ul>
-<li>版本只有一个来源：<code>DIAL_VERSION</code>（默认<strong>空</strong>：跟随最新 Release；钉版本写法如 <code>DIAL_VERSION=1.21</code>，对应发布标签 <code>v1.21</code>）——Release 标签（<code>v1.21</code>）与资产文件名
-  （<code>dial-1.21.0.vsix</code>）都由它推导，不会三处各说各话。</li>
+<li>版本只有一个来源：<code>DIAL_VERSION</code>（默认<strong>空</strong>：跟随最新 Release；钉版本写法如 <code>DIAL_VERSION=1.22</code>，对应发布标签 <code>v1.22</code>）——Release 标签（<code>v1.22</code>）与资产文件名
+  （<code>dial-1.22.0.vsix</code>）都由它推导，不会三处各说各话。</li>
 <li><strong>没装 VS Code / 离线时只告警、不阻断安装</strong>：编译器本体与包安装不受影响。</li>
 <li><strong>不加 <code>--force</code></strong>：用户若已装了更新版本的插件，不该在「一键安装」里被悄悄降级。</li>
 <li>下载地址可用 <code>DIAL_VSIX_URL</code> 覆盖（自建镜像 / 网络受限时用）。</li>
@@ -13375,7 +13421,7 @@ print(&quot;MID&quot;);
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v1.21 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.22 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 

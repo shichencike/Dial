@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>理由与证据链 未发布 · Dial 语言</title>
+<title>理由与证据链 v1.22 · Dial 语言</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
@@ -4294,12 +4294,12 @@ C runtime 的 <code>dial_string_new</code> 确实每次堆分配（对比 asm �
 验证：t1 百万拼接 36MB→3.8MB，e1~e6 llvm 48MB→~2MB。</p>
 <p><strong>工程化</strong>：R22 门禁（tests/pkg/r22_arc_leak_{scope,literal}.dial）双后端跑压测 + GNU time
 峰值 RSS 断言（阈值 12MB，修复版 2-3MB 有 4x 余量，泄漏版 &gt;20MB）；无 GNU time 平台退化
-为功能冒烟，不误报 CI。CHANGELOG Fixed 段 + 本证据链同步。</p><p class="note"></p></main></div>
+为功能冒烟，不误报 CI。CHANGELOG Fixed 段 + 本证据链同步。</p><p class="note">更新：<a href="roadmap-gap-analysis.html">roadmap-gap-analysis</a> → · <a href="../rationale.html">理由索引</a></p></main></div>
 
 <footer class="site-footer">
   <div class="wrap">
     <span>dialc — 静态强类型、显式标注、无 GC 的编译型语言</span>
-    <span class="muted">v1.21 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
+    <span class="muted">v1.22 · Rust + inkwell / LLVM 18 · 产物零 LLVM 依赖 · 三重许可 GPL-3.0 OR MIT OR Apache-2.0 · <a class="ext" href="https://github.com/shichencike/Dial" target="_blank" rel="noopener">GitHub 仓库</a></span>
   </div>
 </footer>
 
