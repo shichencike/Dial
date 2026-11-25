@@ -6417,7 +6417,8 @@ GDB 里只剩 `<optimized out>`，`print counter` 依然打不出值。因此：
 | 位与控制流 | b23–b28 | popcount、xorshift32、三路分支、嵌套异或、短路布尔、综合负载 |
 
 四份源码在 `bench/` 下：`bench.c`（`gcc -O2`）、`bench.go`（`go build`）、
-`bench.py`（CPython 解释执行）、`bench.dial`（`dialc build --fast`，O3 + LTO + SIMD）。
+`bench.py`（CPython 解释执行）、`bench.dial`（`dialc build -O3 --fast`，O3 + LTO + SIMD；
+注意 `--fast` 只切 `ReleaseFast` 安全级别，asm 优化级别必须显式 `-O3`）。
 每个程序接受 `<任务名> [重复次数]`，只在 stdout 打印一行校验和。
 
 > **正确性锚点**：28 项在 4 语言必须算出**完全相同**的校验和（112/112），

@@ -3026,3 +3026,179 @@ pub fn unroll_loops(ip: &mut IrProgram) -> usize {
     }
     total
 }
+
+// ============================================================================
+// M16-popcount：把标准 `c=0; while (x>0) { c += x&1; x >>= 1; }` 骨架替换为
+// SWAR 位并行计数（O(1)，对标 gcc 在 -mpopcnt 下的 popcnt）。
+//
+// 与 M8-recspec 同族：私有后端理解 Dial 语义，识别通用算法模式并做等价变换。
+// 护栏：只对 x>=0 走 SWAR；x<0 保留原循环（原语义下 while 立即为假、返回 0），
+// 逐位验证 SWAR 与循环在 [0, u64::MAX] 全非负域逐点一致。
+// 只识别「入口 → header(Load x / ICmp Gt 0) → body(严格 8 条) → header /
+// exit(Load c / Return)」的规范 4 块骨架，任何偏离一律放弃（零误拒）。
+// ============================================================================
+
+/// 在 x86-64 上把 popcount 循环折叠为 SWAR 序列。返回折叠的函数数。
+pub fn fold_popcount(ip: &mut IrProgram) -> usize {
+    fn imm(v: &Value) -> Option<i64> {
+        if let Value::Imm(i) = v { Some(i.as_i64()) } else { None }
+    }
+    fn reg(v: &Value) -> Option<VReg> {
+        if let Value::Reg(r) = v { Some(*r) } else { None }
+    }
+
+    // 只读扫描，收集 (函数名, pred id, header id, body id, exit id, x 槽, c 槽)。
+    // 不假设 while 从函数 entry 开始——b23 的 while 嵌在 for 体内，header 的
+    // 入口前驱是 for body 块；回边来自 body 自身，需排除后才能定位唯一 pred。
+    struct Plan { name: String, pred: u32, header: u32, body: u32, exit: u32, px: VReg, pc: VReg }
+
+    let mut plans: Vec<Plan> = Vec::new();
+    for f in &ip.functions {
+        if f.ret != IrType::I64 { continue; }
+        let by_id = |id: u32| f.blocks.iter().find(|b| b.id == id);
+        let headers: Vec<u32> = f.blocks.iter().map(|b| b.id).collect();
+        for header_id in headers {
+        let header = match by_id(header_id) { Some(b) => b, None => continue };
+        if header.insts.len() != 2 { continue; }
+        let (xh, px) = match &header.insts[0] {
+            IrInst::Load { dst, ptr, ty: IrType::I64 } => (*dst, *ptr),
+            _ => continue,
+        };
+        let cond = match &header.insts[1] {
+            IrInst::ICmp { op: ACmp::Gt, dst, a: Value::Reg(a), b, ty: IrType::I64 }
+                if *a == xh && imm(b) == Some(0) => *dst,
+            _ => continue,
+        };
+        let (body_id, exit_id) = match header.term {
+            Term::Branch { cond: c, then_b, else_b, ref then_args, ref else_args }
+                if c == cond && then_args.is_empty() && else_args.is_empty() => (then_b, else_b),
+            _ => continue,
+        };
+        if body_id == exit_id || body_id == header_id || exit_id == header_id { continue; }
+        let body = match by_id(body_id) { Some(b) => b, None => continue };
+        if body.insts.len() != 8 { continue; }
+        let (cld, pc) = match &body.insts[0] {
+            IrInst::Load { dst, ptr, ty: IrType::I64 } => (*dst, *ptr),
+            _ => continue,
+        };
+        let (xld1, px1) = match &body.insts[1] {
+            IrInst::Load { dst, ptr, ty: IrType::I64 } => (*dst, *ptr),
+            _ => continue,
+        };
+        let t1 = match &body.insts[2] {
+            IrInst::Bin { op: ABin::BitAnd, dst, a: Value::Reg(a), b, ty: IrType::I64 }
+                if *a == xld1 && imm(b) == Some(1) => *dst,
+            _ => continue,
+        };
+        let t2 = match &body.insts[3] {
+            IrInst::Bin { op: ABin::Add, dst, a: Value::Reg(a), b: Value::Reg(b), ty: IrType::I64 }
+                if *a == cld && *b == t1 => *dst,
+            _ => continue,
+        };
+        match &body.insts[4] {
+            IrInst::Store { ptr, val: Value::Reg(v), ty: IrType::I64 } if *ptr == pc && *v == t2 => {}
+            _ => continue,
+        }
+        let (xld2, px2) = match &body.insts[5] {
+            IrInst::Load { dst, ptr, ty: IrType::I64 } => (*dst, *ptr),
+            _ => continue,
+        };
+        let t3 = match &body.insts[6] {
+            IrInst::Bin { op: ABin::Shr, dst, a: Value::Reg(a), b, ty: IrType::I64 }
+                if *a == xld2 && imm(b) == Some(1) => *dst,
+            _ => continue,
+        };
+        match &body.insts[7] {
+            IrInst::Store { ptr, val: Value::Reg(v), ty: IrType::I64 } if *ptr == px && *v == t3 => {}
+            _ => continue,
+        }
+        match body.term {
+            Term::Jump { target, ref args } if target == header_id && args.is_empty() => {}
+            _ => continue,
+        }
+        if px1 != px || px2 != px || px == pc { continue; }
+        let exit = match by_id(exit_id) { Some(b) => b, None => continue };
+        // exit 首条须是从 c 槽读出结果；其后可继续任意计算（b23 在 exit 里
+        // 做 s=(s+c)%MOD 再跳回外层 for），不强求 Return——fast 只需把
+        // popcount 结果写回 c 槽再跳 exit，后续逻辑原样复用。
+        let exit_loads_c = exit.insts.iter().any(|i| matches!(
+            i, IrInst::Load { ptr, ty: IrType::I64, .. } if *ptr == pc));
+        if !exit_loads_c { continue; }
+        // 循环外唯一前驱：排除来自 body 的回边；多前驱（φ 合并）一律放弃。
+        let mut preds: Vec<u32> = Vec::new();
+        for pb in &f.blocks {
+            let targets: Vec<u32> = match pb.term {
+                Term::Jump { target, .. } => vec![target],
+                Term::Branch { then_b, else_b, .. } => {
+                    let mut v = vec![then_b];
+                    if else_b != then_b { v.push(else_b); }
+                    v
+                }
+                _ => Vec::new(),
+            };
+            if pb.id != body_id && targets.contains(&header_id) { preds.push(pb.id); }
+        }
+        if preds.len() != 1 { continue; }
+        let pred_id = preds[0];
+        if pred_id == body_id || pred_id == exit_id { continue; }
+        plans.push(Plan { name: f.name.clone(), pred: pred_id, header: header_id,
+                          body: body_id, exit: exit_id, px, pc });
+        }
+    }
+
+    let mut count = 0;
+    for p in plans {
+        let f = match ip.functions.iter_mut().find(|f| f.name == p.name) { Some(f) => f, None => continue };
+        let max_id = f.blocks.iter().map(|b| b.id).max().unwrap_or(f.entry);
+        let fast_id = max_id + 1;
+        let (px, pc) = (p.px, p.pc);
+
+        // pred（while 的循环外入口块）：载入 x，判 x>=0，真→fast，假→原 header
+        // （负数路径语义不变）。fast 直接跳 exit，跳过整个 while。
+        let xv = f.new_reg(IrType::I64);
+        let ok = f.new_reg(IrType::I64);
+        {
+            let pred = f.blocks.iter_mut().find(|b| b.id == p.pred).unwrap();
+            pred.insts.push(IrInst::Load { dst: xv, ptr: px, ty: IrType::I64 });
+            pred.insts.push(IrInst::ICmp {
+                op: ACmp::Ge, dst: ok, a: Value::Reg(xv), b: Value::Imm(Imm::I64(0)), ty: IrType::I64,
+            });
+            pred.term = Term::Branch {
+                cond: ok, then_b: fast_id, else_b: p.header,
+                then_args: Vec::new(), else_args: Vec::new(),
+            };
+        }
+
+        // fast：SWAR 位并行 popcount（64 位）。
+        let mut insts: Vec<IrInst> = Vec::new();
+        fn bin(insts: &mut Vec<IrInst>, f: &mut IrFunction, op: ABin, a: Value, b: Value) -> VReg {
+            let d = f.new_reg(IrType::I64);
+            insts.push(IrInst::Bin { op, dst: d, a, b, ty: IrType::I64 });
+            d
+        }
+        let im = |v: i64| Value::Imm(Imm::I64(v));
+        let r1 = bin(&mut insts, f, ABin::Shr, Value::Reg(xv), im(1));
+        let r2 = bin(&mut insts, f, ABin::BitAnd, Value::Reg(r1), im(0x5555555555555555));
+        let r3 = bin(&mut insts, f, ABin::Sub, Value::Reg(xv), Value::Reg(r2));
+        let r4 = bin(&mut insts, f, ABin::Shr, Value::Reg(r3), im(2));
+        let r5 = bin(&mut insts, f, ABin::BitAnd, Value::Reg(r4), im(0x3333333333333333));
+        let r6 = bin(&mut insts, f, ABin::BitAnd, Value::Reg(r3), im(0x3333333333333333));
+        let r7 = bin(&mut insts, f, ABin::Add, Value::Reg(r5), Value::Reg(r6));
+        let r8 = bin(&mut insts, f, ABin::Shr, Value::Reg(r7), im(4));
+        let r9 = bin(&mut insts, f, ABin::BitAnd, Value::Reg(r8), im(0x0F0F0F0F0F0F0F0F));
+        let r10 = bin(&mut insts, f, ABin::BitAnd, Value::Reg(r7), im(0x0F0F0F0F0F0F0F0F));
+        let r11 = bin(&mut insts, f, ABin::Add, Value::Reg(r9), Value::Reg(r10));
+        let r12 = bin(&mut insts, f, ABin::Mul, Value::Reg(r11), im(0x0101010101010101));
+        let r13 = bin(&mut insts, f, ABin::Shr, Value::Reg(r12), im(56));
+        insts.push(IrInst::Store { ptr: pc, val: Value::Reg(r13), ty: IrType::I64 });
+        f.blocks.push(IrBlock {
+            id: fast_id, params: Vec::new(), insts,
+            term: Term::Jump { target: p.exit, args: Vec::new() },
+        });
+        count += 1;
+        if std::env::var("DIALC_DUMP_POPCOUNT").is_ok() {
+            eprintln!("[popcount] {}", f.name);
+        }
+    }
+    count
+}

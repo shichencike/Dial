@@ -212,11 +212,14 @@ def build_all(dialc: pathlib.Path, tmp: pathlib.Path) -> dict[str, Lang]:
             artifact=out_go, source=BENCH / "bench.go",
             flags="go build（默认优化）"),
         "Dial": dict(
+            # --fast 只切 SafetyMode::ReleaseFast，不改变 asm 后端 opt_level
+            # （默认 O2）。文档/官网一直声称 Dial 档位是 O3，必须显式 -O3
+            # 才能让 M8 递归闭式特化 / M9 线性递推 / M15 循环展开等 O3 pass 生效。
             compile_argv=[str(dialc), "build", str(BENCH / "bench.dial"),
-                          "--fast", "-o", str(out_dial)],
+                          "-O3", "--fast", "-o", str(out_dial)],
             argv_fn=lambda t, r: [str(out_dial), t, str(r)],
             artifact=out_dial, source=BENCH / "bench.dial",
-            flags="dialc build --fast（O3 + LTO + 向量化）"),
+            flags="dialc build -O3 --fast（O3 + LTO + 向量化）"),
         "Python": dict(
             compile_argv=[py, "-m", "py_compile", str(BENCH / "bench.py")],
             argv_fn=lambda t, r: [py, str(BENCH / "bench.py"), t, str(r)],

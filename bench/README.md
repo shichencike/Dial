@@ -11,7 +11,7 @@
 | `bench.c` | C，`gcc -O2` | 28 项实现 + 命令行分派 |
 | `bench.go` | Go，`go build` | 同上 |
 | `bench.py` | CPython 3，解释执行 | 同上（兼作算法真值定义） |
-| `bench.dial` | Dial，`dialc build --fast`（O3 + LTO + SIMD） | 同上 |
+| `bench.dial` | Dial，`dialc build -O3 --fast`（O3 + LTO + SIMD） | 同上 |
 | `data.json` | — | 本地校准后的**权威数据快照**（采集器产出，随仓库提交） |
 
 每个程序用法：`<可执行文件/解释器> <任务名> [重复次数]`，只在 stdout 打印一行校验和。

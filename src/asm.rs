@@ -95,6 +95,13 @@ pub fn compile_asm(
     if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV) {
         pass::fold_string_accum(&mut ip);
     }
+    // M16-popcount：标准 `c=0; while(x>0){c+=x&1;x>>=1}` 骨架 → SWAR 位并行计数。
+    // O2+ / x86-64 only，置于内联前：内联会把 b23 的循环搬进 run，但骨架不变，
+    // 前后均可命中；放前面是为了让内联体直接携带 O(1) 计数而非逐位循环。
+    // 仅 x>=0 走 SWAR，负数保留原循环；AArch64 / 低优化级零变化。
+    if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV) {
+        pass::fold_popcount(&mut ip);
+    }
     // M13-sccp：保守条件常量传播 / 分支折叠。O2+ / x86-64，同内联护栏。
     // 置于内联前：先折叠常量分支简化 CFG，让后续 pass 处理更简单的结构。
     if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV)
