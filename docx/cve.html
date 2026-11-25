@@ -27,7 +27,7 @@
   <div class="wrap">
     <h1>Dial 安全公告</h1>
     <p class="tag">已登记漏洞集中存放处。每个条目标明<b>发现版本</b>、<b>存活周期</b>、<b>严重程度</b>、
-    <b>关联缺陷编号</b>与<b>修复版本</b>，并附带可复现的概念验证（PoC）与修复说明。
+    <b>内部追踪编号</b>与<b>修复版本</b>，并附带可复现的概念验证（PoC）与修复说明。
     所有漏洞均由 <a href="https://github.com/shichencike/Dial/blob/main/tools/cve_check.py" target="_blank" rel="noopener">tools/cve_check.py</a>
     暴力检测器在 CI 中持续回归。</p>
     <div class="cta">
@@ -69,8 +69,7 @@
       而本页的 <code>DIAL-00X</code> 后缀是本仓库内部用于追踪缺陷与修复的编号。
       之所以仍以 <code>CVE-</code> 开头，是为了让安全公告具备统一的检索前缀；
       但<b>请勿将它们当作已向 MITRE 登记的正式 CVE 引用</b>。
-      每一项对应的<b>真实缺陷编号</b>（GitHub issue，<code>#103</code> ~ <code>#111</code>）见总表「关联缺陷」列，
-      正式对外引用请以那些编号为准。
+      本页不关联任何外部 issue 编号，所有追踪均以此处 <code>DIAL-00X</code> 编号为准。
     </div>
 
     <h1 id="summary">概览</h1>
@@ -95,17 +94,17 @@
     <h2 id="registry">漏洞登记总表</h2>
     <table>
       <thead>
-        <tr><th>CVE 编号</th><th>标题</th><th>发现版本</th><th>存活周期</th><th>严重程度</th><th>关联缺陷</th><th>修复版本</th><th>状态</th></tr>
+        <tr><th>CVE 编号</th><th>标题</th><th>发现版本</th><th>存活周期</th><th>严重程度</th><th>修复版本</th><th>状态</th></tr>
       </thead>
       <tbody>
-        <tr><td>CVE-2026-DIAL-001</td><td>括号表达式解析错误</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>#103</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2026-DIAL-002</td><td>dialc run 相对路径执行失败</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>#104</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2026-DIAL-003</td><td>RC clone 污染 / 数据竞争</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-critical">严重</span></td><td>#105</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2026-DIAL-004</td><td>跨函数异常路由失败</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>#106</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2026-DIAL-005</td><td>缺失取模 % 运算符</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>#107</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2026-DIAL-006</td><td>缺失类型→字符串转换与拼接</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>#108</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2026-DIAL-007</td><td>channel release 泄漏残留元素</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>#110</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
-        <tr><td>CVE-2026-DIAL-008</td><td>缺失 DIAL_C_COMPILER / 安装脚本缺陷</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-low">低</span></td><td>#109</td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-001</td><td>括号表达式解析错误</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-002</td><td>dialc run 相对路径执行失败</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-003</td><td>RC clone 污染 / 数据竞争</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-critical">严重</span></td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-004</td><td>跨函数异常路由失败</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-005</td><td>缺失取模 % 运算符</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-006</td><td>缺失类型→字符串转换与拼接</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-medium">中</span></td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-007</td><td>channel release 泄漏残留元素</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-high">高</span></td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
+        <tr><td>CVE-2026-DIAL-008</td><td>缺失 DIAL_C_COMPILER / 安装脚本缺陷</td><td>v0.98.0</td><td>1 个发布版本</td><td><span class="badge badge-low">低</span></td><td>v0.98.1</td><td><span class="badge badge-fixed">已修复</span></td></tr>
       </tbody>
     </table>
 
@@ -114,7 +113,7 @@
     <!-- DIAL-001 -->
     <div class="cve-card" id="cve-001">
       <h3>CVE-2026-DIAL-001 <span class="badge badge-medium">中</span></h3>
-      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #103 · 修复版本 v0.98.1</div>
+      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p>解析器的 <code>parse_primary</code> 漏掉了 <code>LParen</code> 分支，导致任何以左括号开头的<b>分组表达式</b>
       <code>( … )</code> 都会报 <code>期望表达式，但遇到 LParen</code>。表达式语法缺少最基础的优先级分组能力。</p>
@@ -134,7 +133,7 @@
     <!-- DIAL-002 -->
     <div class="cve-card" id="cve-002">
       <h3>CVE-2026-DIAL-002 <span class="badge badge-high">高</span></h3>
-      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #104 · 修复版本 v0.98.1</div>
+      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p><code>dialc run &lt;文件&gt;</code> 在计算输出路径时，若传入<b>裸文件名</b>（无目录部分），
       <code>Path::parent()</code> 返回空路径。空路径被直接拼接进链接命令行，最终解析为
@@ -156,7 +155,7 @@ dialc run poc_002_run.dial     # 修复后输出: run relative path works</code>
     <!-- DIAL-003 -->
     <div class="cve-card" id="cve-003">
       <h3>CVE-2026-DIAL-003 <span class="badge badge-critical">严重</span></h3>
-      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #105 · 修复版本 v0.98.1</div>
+      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p><code>dial_rc_clone</code> 在引用计数为 1 时直接返回<b>同一个指针</b>却未执行 <code>retain</code>
       （refcount += 1）。于是“克隆”出的新变量与原变量共享同一块内存——这既是<b>数据污染</b>（改一处影响另一处），
@@ -186,7 +185,7 @@ dialc run poc_002_run.dial     # 修复后输出: run relative path works</code>
     <!-- DIAL-004 -->
     <div class="cve-card" id="cve-004">
       <h3>CVE-2026-DIAL-004 <span class="badge badge-high">高</span></h3>
-      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #106 · 修复版本 v0.98.1</div>
+      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p>异常机制依赖 <code>setjmp/longjmp</code> 实现零成本 <code>try/catch</code>，但跳转目标
       （<code>exbuf</code>）原本由<b>编译期</b>的全局/栈变量管理，无法跨栈帧 unwind。
@@ -219,7 +218,7 @@ fn main(): int {
     <!-- DIAL-005 -->
     <div class="cve-card" id="cve-005">
       <h3>CVE-2026-DIAL-005 <span class="badge badge-medium">中</span></h3>
-      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #107 · 修复版本 v0.98.1</div>
+      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p>语言缺失<b>取模运算符 <code>%</code></b>：词法分析、语法分析与语义/代码生成三层都未实现。
       整数与浮点的取模只能靠用户手写循环或调用 C，且缺少除零保护。</p>
@@ -241,7 +240,7 @@ fn main(): int {
     <!-- DIAL-006 -->
     <div class="cve-card" id="cve-006">
       <h3>CVE-2026-DIAL-006 <span class="badge badge-medium">中</span></h3>
-      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #108 · 修复版本 v0.98.1</div>
+      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p>缺失<b>基本类型 → 字符串</b>的转换能力：没有 <code>int_to_string</code> / <code>float_to_string</code>，
       也没有统一的 <code>str()</code> 函数；同时字符串<b>拼接只支持 <code>concat()</code> 方法</b>、
@@ -265,7 +264,7 @@ fn main(): int {
     <!-- DIAL-007 -->
     <div class="cve-card" id="cve-007">
       <h3>CVE-2026-DIAL-007 <span class="badge badge-high">高</span></h3>
-      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #110 · 修复版本 v0.98.1</div>
+      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p><code>dial_channel_release</code> 释放通道时，<b>环形缓冲区里尚未被消费的元素没有逐一析构</b>。
       每个元素本身都是 ARC 指针（如 string / array / 嵌套 channel），只释放通道外壳而不释放这些元素，
@@ -292,7 +291,7 @@ close(ch);
     <!-- DIAL-008 -->
     <div class="cve-card" id="cve-008">
       <h3>CVE-2026-DIAL-008 <span class="badge badge-low">低</span></h3>
-      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 关联缺陷 #109 · 修复版本 v0.98.1</div>
+      <div class="meta">发现版本 v0.98.0 · 存活 1 个发布版本 · 修复版本 v0.98.1</div>
       <h4>漏洞描述</h4>
       <p>三项工程化缺陷：(1) 编译器未尊重 <code>DIAL_C_COMPILER</code> 环境变量，用户无法指定替代的 C 编译器；
       (2) 打包脚本生成的 <code>BUILD_INFO.txt</code> 文案自相矛盾（同时出现本地与 CI 构建措辞）；

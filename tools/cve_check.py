@@ -32,16 +32,16 @@ DISCOVERED_VERSION = "0.98.0"
 FIXED_VERSION = "0.98.1"
 SURVIVAL = "1 个发布版本（v0.98.0 GA → v0.98.1 修复）"
 
-# 每个 CVE 的登记信息（id, 标题, 严重程度, 关联 Bug, 期望的固定后行为摘要）
+# 每个 CVE 的登记信息（id, 标题, 严重程度, 期望的固定后行为摘要）
 CVE_REGISTRY = [
-    ("CVE-2026-DIAL-001", "括号表达式解析错误",            "中", "#103", "分组表达式 ( … ) 可正常编译并求值"),
-    ("CVE-2026-DIAL-002", "dialc run 相对路径执行失败",    "高", "#104", "cwd 下的裸文件名可被正确定位执行"),
-    ("CVE-2026-DIAL-003", "RC clone 污染 / 数据竞争",      "严重", "#105", "clone 与原对象独立，互不污染且无悬垂"),
-    ("CVE-2026-DIAL-004", "跨函数异常路由失败",            "高", "#106", "子函数抛出的异常可被调用方 try/catch 捕获"),
-    ("CVE-2026-DIAL-005", "缺失取模 % 运算符",            "中", "#107", "整数/浮点取模均正确求值并做除零检查"),
-    ("CVE-2026-DIAL-006", "缺失类型→字符串转换与字符串连接", "中", "#108", "str()/int_to_string/float_to_string 与 string + 可用"),
-    ("CVE-2026-DIAL-007", "channel release 泄漏残留元素",  "高", "#110", "通道释放时残留未消费元素一并析构"),
-    ("CVE-2026-DIAL-008", "缺失 DIAL_C_COMPILER / 安装脚本缺陷", "低", "#109", "DIAL_C_COMPILER 被尊重；安装脚本支持续传/镜像"),
+    ("CVE-2026-DIAL-001", "括号表达式解析错误",            "中", "分组表达式 ( … ) 可正常编译并求值"),
+    ("CVE-2026-DIAL-002", "dialc run 相对路径执行失败",    "高", "cwd 下的裸文件名可被正确定位执行"),
+    ("CVE-2026-DIAL-003", "RC clone 污染 / 数据竞争",      "严重", "clone 与原对象独立，互不污染且无悬垂"),
+    ("CVE-2026-DIAL-004", "跨函数异常路由失败",            "高", "子函数抛出的异常可被调用方 try/catch 捕获"),
+    ("CVE-2026-DIAL-005", "缺失取模 % 运算符",            "中", "整数/浮点取模均正确求值并做除零检查"),
+    ("CVE-2026-DIAL-006", "缺失类型→字符串转换与字符串连接", "中", "str()/int_to_string/float_to_string 与 string + 可用"),
+    ("CVE-2026-DIAL-007", "channel release 泄漏残留元素",  "高", "通道释放时残留未消费元素一并析构"),
+    ("CVE-2026-DIAL-008", "缺失 DIAL_C_COMPILER / 安装脚本缺陷", "低", "DIAL_C_COMPILER 被尊重；安装脚本支持续传/镜像"),
 ]
 
 
@@ -127,7 +127,7 @@ def check_poc(dialc, cve_id, poc_name, expected, repeat, quiet):
 
 
 def check_002_run(dialc, repeat, quiet):
-    """#104：相对路径执行。把 poc 放进一个临时子目录，从子目录内以相对路径运行。"""
+    """相对路径执行。把 poc 放进一个临时子目录，从子目录内以相对路径运行。"""
     root = repo_root()
     poc_src = os.path.join(root, "tests", "cve", "poc_002_run.dial")
     with tempfile.TemporaryDirectory() as td:
@@ -146,7 +146,7 @@ def check_002_run(dialc, repeat, quiet):
 
 
 def check_110_leak(dialc, repeat, quiet):
-    """#110：通道释放泄漏残留元素。
+    """通道释放泄漏残留元素。
     用计数版 elem_release 编译一个 C 用例，断言通道 release 时对 3 个残留元素
     各调用一次 elem_release（确定性，不依赖 ASAN）。"""
     cc = c_compiler()
@@ -226,7 +226,7 @@ def run_capture_shell(cmd, timeout=120):
 
 
 def check_109_env(dialc, repeat, quiet):
-    """#109：DIAL_C_COMPILER 被尊重。注入一个记录调用的包装脚本。
+    """DIAL_C_COMPILER 被尊重。注入一个记录调用的包装脚本。
 
     dialc 的链接步骤每次运行都会调用 C 编译器，因此只要把 DIAL_C_COMPILER 指向
     一个“记录被调用”的包装脚本，再观察标记文件是否生成即可。环境变量以内联形式
@@ -285,11 +285,11 @@ def main() -> int:
     print("=" * 72)
 
     results = []
-    for cve_id, title, sev, bug, _ in CVE_REGISTRY:
+    for cve_id, title, sev, _ in CVE_REGISTRY:
         passed, detail = DETECTORS[cve_id](dialc, repeat, args.quiet)
-        results.append((cve_id, title, sev, bug, passed, detail))
+        results.append((cve_id, title, sev, passed, detail))
         status = "✅ 已修复" if passed else "❌ 仍可利用"
-        print(f"[{status}] {cve_id}  {title}  (严重度 {sev}, {bug})")
+        print(f"[{status}] {cve_id}  {title}  (严重度 {sev})")
         if not args.quiet:
             print(f"          └─ {detail}")
 

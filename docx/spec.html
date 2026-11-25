@@ -4735,7 +4735,7 @@ dialc build app.dial --safety debug  # 显式指定（debug / safe / fast）
    - 补丁号<strong>不能</strong>用来「抢」一个尚未发布的新档（例如 <code>v0.99</code> 未发布就不许写 <code>v0.99.1</code>）。</li>
 </ol>
 <blockquote>
-<p><strong>为什么要有这条例外</strong>：v0.98 之后发现了 CVE #103–#111 等必须修复的安全缺陷。
+<p><strong>为什么要有这条例外</strong>：v0.98 之后发现了 <code>CVE-2026-DIAL-001</code>~<code>008</code> 等必须修复的安全缺陷。
 若严格禁止第三位，就只能把修复混进 <code>v0.99</code>——但那会让 <code>v0.99</code> 同时包含
 「已发布的 v0.98 的全部内容」与「修复」，用户无法只取修复、不取新特性；
 更糟的是，等待新版本意味着<strong>缺陷版本仍在用户机器上留存更久</strong>。
@@ -10072,7 +10072,8 @@ GDB 里只剩 <code>&lt;optimized out&gt;</code>，<code>print counter</code> �
 </tbody>
 </table>
 <p>四份源码在 <code>bench/</code> 下：<code>bench.c</code>（<code>gcc -O2</code>）、<code>bench.go</code>（<code>go build</code>）、
-<code>bench.py</code>（CPython 解释执行）、<code>bench.dial</code>（<code>dialc build --fast</code>，O3 + LTO + SIMD）。
+<code>bench.py</code>（CPython 解释执行）、<code>bench.dial</code>（<code>dialc build -O3 --fast</code>，O3 + LTO + SIMD；
+注意 <code>--fast</code> 只切 <code>ReleaseFast</code> 安全级别，asm 优化级别必须显式 <code>-O3</code>）。
 每个程序接受 <code>&lt;任务名&gt; [重复次数]</code>，只在 stdout 打印一行校验和。</p>
 <blockquote>
 <p><strong>正确性锚点</strong>：28 项在 4 语言必须算出<strong>完全相同</strong>的校验和（112/112），
