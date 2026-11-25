@@ -1,0 +1,55 @@
+// R32 保守条件常量传播 / 分支折叠（SCCP）正确性测试。
+// O2 会把「条件可由编译期常量证明」的 Branch 折叠为 Jump；
+// O0 不优化。两者输出必须逐字一致。
+// 覆盖：常量比较条件、纯计算条件、块参数 φ 传播、运行时条件（不可折叠）。
+
+fn const_cond(): int {
+    var x: int = 0;
+    // 3 > 2 恒真，SCCP 应折叠为只走 then 分支。
+    if (3 > 2) {
+        x = 11;
+    } else {
+        x = 99; // 不可达，不应执行
+    }
+    return x;
+}
+
+fn computed_cond(): int {
+    var a: int = 6;
+    var b: int = 3;
+    var x: int = 0;
+    // a - b == 3 恒真（纯整数折叠 → 常量条件）。
+    if (a - b == 3) {
+        x = 22;
+    } else {
+        x = 88;
+    }
+    return x;
+}
+
+fn loop_phi_cond(n: int): int {
+    var acc: int = 0;
+    var i: int = 0;
+    while (i < n) {
+        // 循环内条件，依赖运行时 n，SCCP 不得误折叠。
+        if (i == 2) { acc = acc + 5; }
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn runtime_cond(n: int): int {
+    // 参数条件，运行时值，不可折叠。
+    if (n > 10) { return 33; }
+    return 44;
+}
+
+fn main(): int {
+    print(str(const_cond()));
+    print(str(computed_cond()));
+    print(str(loop_phi_cond(6)));
+    print(str(loop_phi_cond(1)));
+    print(str(runtime_cond(20)));
+    print(str(runtime_cond(3)));
+    return 0;
+}

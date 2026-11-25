@@ -2137,3 +2137,892 @@ pub fn fold_string_accum(ip: &mut IrProgram) -> usize {
     }
     count
 }
+
+// ============================================================================
+// M11-inline：通用 Dial 函数内联（对标 gcc/clang -O2 的 inlining）
+// ============================================================================
+//
+// 与 fold_pure_calls（编译期求值纯整数调用）互补：后者只吃「实参全常量」的
+// 纯函数；本 pass 吃一般调用点，把被调函数体复制进调用者，消除 call/ret 与
+// ABI 边界（prologue 写参 + 句柄 retain/release 配对仍逐字保留）。
+//
+// 正确性锚点（缺一不可，任一不满足即不内联）：
+//   1. 只内联 Private + 非 main + 非递归 + 体小的 Dial 函数；External /
+//      CallLink::Runtime / Extern / 间接调用一律不动。
+//   2. 复制被调函数体时，vreg 与 block id 全量重映射（两函数各自独立编号空间）；
+//      在复制后的 entry 块里，紧随每个形参 Alloca 之后**显式插入写参 Store**
+//      ——IR 里本来由 codegen 的 prologue 隐式写参，内联后没有 prologue，必须补回。
+//   3. 被调方入口的 RcRetain / struct retain、出口的 release / defer 结算全部原样
+//      复制（含顺序），故 ARC 配对与不内联时逐调用等价。own 形参不 retain 的语义
+//      同样原样保留。
+//   4. 每个 Return 改为 Jump 到新建的 continuation 块，返回值经块参数 φ 传回；
+//      Call.dst 的所有使用点用 subst_reg 改写为该 φ 参数（类型口径一致：
+//      callee.ret == call.ret_ty，均为 param_ir）。
+//   5. Line / DebugVar 不复制：内联体属被调函数的调试上下文，复制会污染 DWARF；
+//      它们不产生机器码，跳过不影响运行语义。
+//   6. 只 x86-64 / O2+ 挂接；AArch64 / LLVM 路径零变化（沿用既有优化守卫口径）。
+//   7. 每个 caller 最多内联 INLINE_MAX_SITES 次、callee 体不超过大小上限，
+//      防代码膨胀；多轮不动点让嵌套调用可被逐层内联。
+
+/// 被调函数体指令数上限（含 ARC / 控制流）：超过则放弃内联，防膨胀。
+const INLINE_MAX_CALLEE_INSTS: usize = 96;
+/// 被调函数块数上限。
+const INLINE_MAX_CALLEE_BLOCKS: usize = 16;
+/// 单个 caller 最多内联的调用点数。
+const INLINE_MAX_SITES: usize = 32;
+/// 内联不动点轮数（嵌套调用逐层展开）。
+const INLINE_MAX_ROUNDS: usize = 3;
+
+/// 判断一个函数是否「可安全内联」（只读）。
+fn inline_is_candidate(ip: &IrProgram, name: &str) -> bool {
+    let f = match ip.functions.iter().find(|f| f.name == name) { Some(f) => f, None => return false };
+    if f.linkage != FuncLink::Private || name == "main" { return false; }
+    if f.blocks.len() > INLINE_MAX_CALLEE_BLOCKS { return false; }
+    let insts: usize = f.blocks.iter().map(|b| b.insts.len()).sum();
+    if insts > INLINE_MAX_CALLEE_INSTS { return false; }
+    // 调用图：递归 / 互递归不可内联（否则内联不动点会无限增长）。
+    if inline_reaches(ip, name, name) { return false; }
+    for b in &f.blocks {
+        for i in &b.insts {
+            match i {
+                // 环境初始化、内联汇编、间接调用、函数地址外泄 → 放弃。
+                IrInst::EnvInit { .. } | IrInst::InlineAsm { .. }
+                | IrInst::CallIndirect { .. } | IrInst::FuncAddr { .. } => return false,
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
+/// 调用图中 `from` 是否可达 `target`（含自身，用于递归判定）。
+fn inline_reaches(ip: &IrProgram, from: &str, target: &str) -> bool {
+    fn dfs(ip: &IrProgram, cur: &str, target: &str, seen: &mut HashSet<String>) -> bool {
+        let f = match ip.functions.iter().find(|f| f.name == cur) { Some(f) => f, None => return false };
+        for b in &f.blocks {
+            for i in &b.insts {
+                if let IrInst::Call { func, linkage: CallLink::Dial, .. } = i {
+                    if func == target { return true; }
+                    if seen.insert(func.clone()) && dfs(ip, func, target, seen) { return true; }
+                }
+            }
+        }
+        false
+    }
+    let mut seen = HashSet::new();
+    dfs(ip, from, target, &mut seen)
+}
+
+/// 把被调函数的一条指令按 vmap 重映射到调用者编号空间。
+/// Line / DebugVar 返回 None（跳过，见上文锚点 5）。
+fn inline_remap_inst(inst: &IrInst, vmap: &[VReg]) -> Option<IrInst> {
+    let rv = |r: VReg| vmap[r as usize];
+    let rval = |v: Value| match v { Value::Reg(r) => Value::Reg(rv(r)), other => other };
+    Some(match inst {
+        IrInst::Line(_) | IrInst::DebugVar { .. } => return None,
+        IrInst::Alloca { dst, bytes } => IrInst::Alloca { dst: rv(*dst), bytes: *bytes },
+        IrInst::Load { dst, ptr, ty } => IrInst::Load { dst: rv(*dst), ptr: rv(*ptr), ty: ty.clone() },
+        IrInst::Store { ptr, val, ty } => IrInst::Store { ptr: rv(*ptr), val: rval(*val), ty: ty.clone() },
+        IrInst::FieldAddr { dst, base, struct_name, field } =>
+            IrInst::FieldAddr { dst: rv(*dst), base: rv(*base), struct_name: struct_name.clone(), field: *field },
+        IrInst::LeaLabel { dst, lit } => IrInst::LeaLabel { dst: rv(*dst), lit: *lit },
+        IrInst::LeaStaticString { dst, lit } => IrInst::LeaStaticString { dst: rv(*dst), lit: *lit },
+        IrInst::LeaStaticData { dst, label } => IrInst::LeaStaticData { dst: rv(*dst), label: label.clone() },
+        IrInst::PtrAdd { dst, base, off } =>
+            IrInst::PtrAdd { dst: rv(*dst), base: rv(*base), off: rval(*off) },
+        IrInst::Bin { op, dst, a, b, ty } =>
+            IrInst::Bin { op: *op, dst: rv(*dst), a: rval(*a), b: rval(*b), ty: ty.clone() },
+        IrInst::Un { op, dst, a, ty } =>
+            IrInst::Un { op: *op, dst: rv(*dst), a: rval(*a), ty: ty.clone() },
+        IrInst::FBin { op, dst, a, b, ty } =>
+            IrInst::FBin { op: *op, dst: rv(*dst), a: rval(*a), b: rval(*b), ty: ty.clone() },
+        IrInst::ICmp { op, dst, a, b, ty } =>
+            IrInst::ICmp { op: *op, dst: rv(*dst), a: rval(*a), b: rval(*b), ty: ty.clone() },
+        IrInst::FCmp { op, dst, a, b, ty } =>
+            IrInst::FCmp { op: *op, dst: rv(*dst), a: rval(*a), b: rval(*b), ty: ty.clone() },
+        IrInst::Conv { kind, dst, a, ty } =>
+            IrInst::Conv { kind: *kind, dst: rv(*dst), a: rval(*a), ty: ty.clone() },
+        IrInst::Call { dst, func, args, arg_tys, ret_ty, linkage } => IrInst::Call {
+            dst: dst.map(rv), func: func.clone(),
+            args: args.iter().map(|a| rval(*a)).collect(),
+            arg_tys: arg_tys.clone(), ret_ty: ret_ty.clone(), linkage: *linkage,
+        },
+        IrInst::CallIndirect { dst, target, args, arg_tys, ret_ty } => IrInst::CallIndirect {
+            dst: dst.map(rv), target: rv(*target),
+            args: args.iter().map(|a| rval(*a)).collect(),
+            arg_tys: arg_tys.clone(), ret_ty: ret_ty.clone(),
+        },
+        IrInst::InlineAsm { dst, template, constraints, dialect, args, arg_tys, ret_ty } =>
+            IrInst::InlineAsm {
+                dst: rv(*dst), template: template.clone(), constraints: constraints.clone(),
+                dialect: *dialect, args: args.iter().map(|a| rval(*a)).collect(),
+                arg_tys: arg_tys.clone(), ret_ty: ret_ty.clone(),
+            },
+        IrInst::RcRetain { ptr, kind } => IrInst::RcRetain { ptr: rv(*ptr), kind: *kind },
+        IrInst::RcRelease { ptr, kind } => IrInst::RcRelease { ptr: rv(*ptr), kind: *kind },
+        IrInst::StructRetain { ptr, struct_name } =>
+            IrInst::StructRetain { ptr: rv(*ptr), struct_name: struct_name.clone() },
+        IrInst::StructRelease { ptr, struct_name } =>
+            IrInst::StructRelease { ptr: rv(*ptr), struct_name: struct_name.clone() },
+        IrInst::EnvInit { argc, argv } =>
+            IrInst::EnvInit { argc: rval(*argc), argv: rval(*argv) },
+        IrInst::FuncAddr { dst, func } => IrInst::FuncAddr { dst: rv(*dst), func: func.clone() },
+    })
+}
+
+/// 把被调函数的一个 term 重映射；Return 改为 Jump 到 continuation（返回值走 φ）。
+fn inline_remap_term(
+    term: &Term, vmap: &[VReg], bmap: &HashMap<u32, u32>,
+    cont_id: u32, has_ret: bool,
+) -> Term {
+    let rv = |r: VReg| vmap[r as usize];
+    let rval = |v: Value| match v { Value::Reg(r) => Value::Reg(rv(r)), other => other };
+    match term {
+        Term::Jump { target, args } => Term::Jump {
+            target: *bmap.get(target).unwrap_or(target),
+            args: args.iter().map(|a| rval(*a)).collect(),
+        },
+        Term::Branch { cond, then_b, else_b, then_args, else_args } => Term::Branch {
+            cond: rv(*cond),
+            then_b: *bmap.get(then_b).unwrap_or(then_b),
+            else_b: *bmap.get(else_b).unwrap_or(else_b),
+            then_args: then_args.iter().map(|a| rval(*a)).collect(),
+            else_args: else_args.iter().map(|a| rval(*a)).collect(),
+        },
+        Term::Return { val } => Term::Jump {
+            target: cont_id,
+            args: if has_ret { val.map(rval).into_iter().collect() } else { Vec::new() },
+        },
+        Term::Unreachable => Term::Unreachable,
+    }
+}
+
+/// 对单个 caller 做一轮内联，返回本轮内联的调用点数。
+fn inline_round(ip: &mut IrProgram, caller_name: &str) -> usize {
+    // 只读收集本轮所有待内联点（避免边扫描边改 block 索引失效）。
+    struct Site { bi: usize, ii: usize, callee: String, dst: Option<VReg>, args: Vec<Value>, arg_tys: Vec<IrType>, ret_ty: IrType }
+    let mut sites: Vec<Site> = Vec::new();
+    {
+        let caller = match ip.functions.iter().find(|f| f.name == caller_name) { Some(f) => f, None => return 0 };
+        for (bi, b) in caller.blocks.iter().enumerate() {
+            for (ii, inst) in b.insts.iter().enumerate() {
+                if let IrInst::Call { dst, func, args, arg_tys, ret_ty, linkage: CallLink::Dial } = inst {
+                    if !inline_is_candidate(ip, func) { continue; }
+                    // 签名口径必须严格一致：callee.ret == call.ret_ty、
+                    // callee 形参 ABI 宽度 == call.arg_tys，否则跳过（防宽度错位）。
+                    let callee = match ip.functions.iter().find(|f| f.name == *func) { Some(f) => f, None => continue };
+                    if callee.ret != *ret_ty || callee.params.len() != arg_tys.len() { continue; }
+                    if callee.params.iter().zip(arg_tys).any(|((_, pt), at)| pt != at) { continue; }
+                    // 不允许把 caller 自己内联进自己（防 caller→callee→caller 环）。
+                    if func == caller_name { continue; }
+                    sites.push(Site {
+                        bi, ii, callee: func.clone(), dst: *dst,
+                        args: args.clone(), arg_tys: arg_tys.clone(), ret_ty: ret_ty.clone(),
+                    });
+                    if sites.len() >= INLINE_MAX_SITES { break; }
+                }
+            }
+        }
+    }
+    if sites.is_empty() { return 0; }
+
+    // 逐个应用。每个站点都会重塑 caller 的 blocks，故从后往前按块下标处理。
+    sites.sort_by(|a, b| (b.bi, b.ii).cmp(&(a.bi, a.ii)));
+    let mut done = 0usize;
+    for site in sites {
+        let callee_snapshot = match ip.functions.iter().find(|f| f.name == site.callee) {
+            Some(f) => f.clone(), None => continue,
+        };
+        let caller = match ip.functions.iter_mut().find(|f| f.name == caller_name) { Some(f) => f, None => continue };
+
+        // ① vreg 重映射表。
+        let vmap: Vec<VReg> = callee_snapshot.reg_ty.iter()
+            .map(|t| caller.new_reg(t.clone())).collect();
+        // ② block id 重映射表。
+        let max_id = caller.blocks.iter().map(|b| b.id).max().unwrap_or(0);
+        let mut bmap: HashMap<u32, u32> = HashMap::new();
+        for (i, b) in callee_snapshot.blocks.iter().enumerate() {
+            bmap.insert(b.id, max_id + 1 + i as u32);
+        }
+        let cont_id = max_id + 1 + callee_snapshot.blocks.len() as u32 + 1;
+        let has_ret = site.dst.is_some();
+
+        // ③ 把 caller 的调用块一切为二。
+        let bi = site.bi;
+        if bi >= caller.blocks.len() { continue; }
+        let ii = site.ii;
+        if ii >= caller.blocks[bi].insts.len() { continue; }
+        match &caller.blocks[bi].insts[ii] {
+            IrInst::Call { func, .. } if *func == site.callee => {}
+            _ => continue,
+        }
+        let after: Vec<IrInst> = caller.blocks[bi].insts.split_off(ii + 1);
+        let orig_term = caller.blocks[bi].term.clone();
+        caller.blocks[bi].insts.pop(); // 移除 Call 自身
+        let inl_entry = *bmap.get(&callee_snapshot.entry).unwrap_or(&cont_id);
+        caller.blocks[bi].term = Term::Jump { target: inl_entry, args: Vec::new() };
+
+        // ④ continuation 块：φ 接住返回值；Call.dst 的使用点随后 subst 到 φ。
+        let ret_param = if has_ret { Some(caller.new_reg(site.ret_ty.clone())) } else { None };
+        let cont_params = if let Some(rp) = ret_param { vec![(rp, site.ret_ty.clone())] } else { Vec::new() };
+        let cont = IrBlock { id: cont_id, params: cont_params, insts: after, term: orig_term };
+        caller.blocks.push(cont);
+
+        // ⑤ 复制 callee 的每个块。
+        for cb in &callee_snapshot.blocks {
+            let new_id = *bmap.get(&cb.id).unwrap_or(&cb.id);
+            let is_entry = cb.id == callee_snapshot.entry;
+            let mut insts: Vec<IrInst> = Vec::new();
+            for inst in &cb.insts {
+                if let Some(ri) = inline_remap_inst(inst, &vmap) { insts.push(ri); }
+                // 入口块：紧随形参 Alloca 之后插入写参 Store（补回 codegen prologue 的隐式写参）。
+                if is_entry {
+                    if let IrInst::Alloca { dst, .. } = inst {
+                        if let Some(pi) = callee_snapshot.param_slots.iter().position(|s| s == dst) {
+                            if let Some(arg) = site.args.get(pi) {
+                                insts.push(IrInst::Store {
+                                    ptr: vmap[*dst as usize], val: *arg, // 实参在 caller 编号空间，不映射
+                                    ty: site.arg_tys.get(pi).cloned().unwrap_or(IrType::I64),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            let term = inline_remap_term(&cb.term, &vmap, &bmap, cont_id, has_ret);
+            caller.blocks.push(IrBlock {
+                id: new_id,
+                params: cb.params.iter().map(|(r, t)| (vmap[*r as usize], t.clone())).collect(),
+                insts, term,
+            });
+        }
+
+        // ⑥ 把 Call.dst 的所有使用点改写为 continuation 的 φ 参数。
+        if let (Some(d), Some(rp)) = (site.dst, ret_param) {
+            subst_reg(caller, d, rp);
+        }
+        done += 1;
+    }
+    done
+}
+
+/// 对全程序跑通用函数内联（不动点）。返回内联的调用点总数。
+pub fn inline_calls(ip: &mut IrProgram) -> usize {
+    let mut total = 0usize;
+    for _ in 0..INLINE_MAX_ROUNDS {
+        let mut round_total = 0usize;
+        let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+        for name in names { round_total += inline_round(ip, &name); }
+        total += round_total;
+        if round_total == 0 { break; }
+    }
+    // 内联后清理：写参 Store 与 φ 搬运可能产生新的死纯指令，跑一次 DCE。
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for name in names {
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) { dce(f); }
+    }
+    total
+}
+
+// ============================================================================
+// M12-licm：通用循环不变代码外提（对标 gcc/clang -O2 LICM）
+// ============================================================================
+//
+// 与 IVR（归纳变量强度削减）互补：IVR 只吃一种固定模式（base*C+iv），
+// LICM 处理一般循环——把「操作数全在循环外定义、无副作用」的纯指令从循环体
+// 提到 preheader，每轮只算一次。
+//
+// 正确性锚点（缺一不可，任一不满足即不外提）：
+//   1. 自然循环用标准反向 DFS 识别（header 为回边目标、latch 为源）。
+//      若反向可达性把入口块 0 卷入循环（select / 复杂分支常见），说明并非真
+//      自然循环，整块跳过——否则会把入口指令"外提"到更晚的 preheader，
+//      破坏 SSA 支配关系（select_timeout SIGILL 回归的根因）。
+//      另要求 preheader 索引 < header 索引、且只外提定义块 >= preheader 的
+//      指令，保证外提恒为「向前搬」。
+//   2. 只外提 `is_pure()` 的纯指令；额外排除：
+//      - `Alloca`：外提会改变栈帧槽归属 / DWARF 位置；
+//      - `Div`/`Mod`：循环不执行时外提会把「原本不会发生的除零 trap」提前，
+//        改变可观察行为（Fail-Fast 语义）。
+//   3. `Load` 只在「ptr 槽在循环内完全不被修改」时可外提。修改集合涵盖：
+//      Store 写槽、ARC 原语（RcRelease/Retain/Struct* 会把句柄槽归零/改写，
+//      这是 select_timeout NULL-string 回归的根因）、FieldAddr/PtrAdd 别名、
+//      Call 实参逃逸。任一命中即不外提该槽的 Load（零误拒优先）。
+//      `FieldAddr`/`PtrAdd` 自身绝不外提（别名本就可能被循环内写）。
+//   4. 所有寄存器操作数（含块参数）定义在循环外；循环内定义的块参数一律视为
+//      循环变量，绝不外提依赖它的指令。
+//   5. 按原始 (块序, 指令序) 升序追加到 preheader，保证定义在使用前；
+//      不动点迭代让「依赖链」逐层外提（先提叶子，再提依赖它的）。
+//   6. 只 x86-64 / O2+ 且非 -g / 非 PGO / 非插桩挂接（同内联护栏理由）。
+
+#[derive(Clone, Debug)]
+struct LicmLoop {
+    header: usize,
+    blocks: HashSet<usize>,
+}
+
+/// 标准自然循环识别：对每条回边 (latch→header)，从 latch 反向 DFS 到 header
+/// （不越过 header），收集所有可达 latch 的块；同 header 的多回边合并。
+fn licm_find_loops(f: &IrFunction) -> Vec<LicmLoop> {
+    let n = f.blocks.len();
+    let mut id2idx: HashMap<u32, usize> = HashMap::new();
+    for (i, b) in f.blocks.iter().enumerate() { id2idx.insert(b.id, i); }
+    let mut pred: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut back_edges: Vec<(usize, usize)> = Vec::new();
+    for (i, b) in f.blocks.iter().enumerate() {
+        let succs: Vec<u32> = match &b.term {
+            Term::Jump { target, .. } => vec![*target],
+            Term::Branch { then_b, else_b, .. } => vec![*then_b, *else_b],
+            _ => Vec::new(),
+        };
+        for s in succs {
+            if let Some(&si) = id2idx.get(&s) {
+                pred[si].push(i);
+                if si <= i { back_edges.push((i, si)); } // 回边：目标索引 <= 源索引
+            }
+        }
+    }
+    let mut loops: Vec<LicmLoop> = Vec::new();
+    for (latch, header) in back_edges {
+        if latch == header { continue; }
+        let mut blocks = HashSet::new();
+        blocks.insert(header);
+        let mut work = vec![latch];
+        while let Some(x) = work.pop() {
+            if !blocks.insert(x) { continue; }
+            for &p in &pred[x] {
+                if p != header && p < n { work.push(p); }
+            }
+        }
+        if let Some(existing) = loops.iter_mut().find(|l| l.header == header) {
+            existing.blocks.extend(blocks);
+        } else {
+            loops.push(LicmLoop { header, blocks });
+        }
+    }
+    loops
+}
+
+/// 找循环 preheader：不在循环内、且有边直接跳到 header 的块（取索引最小者，稳定）。
+fn licm_preheader(f: &IrFunction, lp: &LicmLoop) -> Option<usize> {
+    let header_id = f.blocks[lp.header].id;
+    let mut candidates = Vec::new();
+    for (i, b) in f.blocks.iter().enumerate() {
+        if lp.blocks.contains(&i) { continue; }
+        if matches!(&b.term, Term::Jump { target, .. } if *target == header_id) {
+            candidates.push(i);
+        }
+    }
+    candidates.into_iter().min()
+}
+
+/// 一轮 LICM：对所有循环各做一次外提，返回外提指令数。
+/// 一轮只处理一个循环（保守收敛），由不动点 driver 反复调用处理剩余循环与依赖链。
+fn licm_round(f: &mut IrFunction) -> usize {
+    let loops = licm_find_loops(f);
+    if loops.is_empty() { return 0; }
+
+    for lp in &loops {
+        // 护栏：入口块（id 0 / 索引 0）被卷入循环说明是 select/复杂分支导致的
+        // 反向可达性膨胀，非真自然循环——直接跳过，避免把入口指令外提到后块。
+        if lp.blocks.contains(&0) { continue; }
+        let ph = match licm_preheader(f, lp) { Some(p) => p, None => continue };
+        // 合法 preheader 必须在 header 之前；否则外提目标比源还晚，破坏 SSA。
+        if ph >= lp.header { continue; }
+
+        // vreg → 定义块索引（含块参数）。
+        let mut defs: HashMap<VReg, usize> = HashMap::new();
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for inst in &b.insts { if let Some(d) = inst.def() { defs.insert(d, bi); } }
+            for (p, _) in &b.params { defs.insert(*p, bi); }
+        }
+        // 循环内被「修改 / 归零 / 取别名 / 逃逸」的槽集合——这些槽的 Load 绝不可外提。
+        let mut modified: HashSet<VReg> = HashSet::new();
+        let mut bset: Vec<usize> = lp.blocks.iter().copied().collect();
+        bset.sort_unstable();
+        for &bi in &bset {
+            for inst in &f.blocks[bi].insts {
+                match inst {
+                    IrInst::Store { ptr, .. }
+                    | IrInst::RcRetain { ptr, .. } | IrInst::RcRelease { ptr, .. }
+                    | IrInst::StructRetain { ptr, .. } | IrInst::StructRelease { ptr, .. }
+                    | IrInst::FieldAddr { base: ptr, .. } | IrInst::PtrAdd { base: ptr, .. }
+                    => { modified.insert(*ptr); }
+                    IrInst::Call { args, .. } | IrInst::CallIndirect { args, .. } => {
+                        for a in args { if let Value::Reg(r) = a { modified.insert(*r); } }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 收集可外提指令。
+        let mut hoist: Vec<(usize, usize, IrInst)> = Vec::new();
+        for &bi in &bset {
+            // 只外提定义块在 preheader 之后的指令：保证是「向前搬」，
+            // 绝不把入口/前序块的定义搬到更晚的 preheader（SSA 支配破坏）。
+            if bi < ph { continue; }
+            for (ii, inst) in f.blocks[bi].insts.iter().enumerate() {
+                if !inst.is_pure() { continue; }
+                match inst {
+                    // 地址别名 / 栈帧槽分配自身绝不外提（见锚点 3）。
+                    IrInst::Alloca { .. } | IrInst::FieldAddr { .. } | IrInst::PtrAdd { .. } => continue,
+                    IrInst::Bin { op, .. } if matches!(op, ABin::Div | ABin::Mod) => continue, // trap 位置
+                    // Load 仅当 ptr 槽在循环内完全未被修改/归零/取别名/逃逸时可外提。
+                    IrInst::Load { ptr, .. } => { if modified.contains(ptr) { continue; } }
+                    _ => {}
+                }
+                let mut uses: Vec<VReg> = Vec::new();
+                inst.reg_uses(&mut uses);
+                let ok = uses.iter().all(|u| match defs.get(u) {
+                    None => true,                       // 外部定义（如入口参数槽）
+                    Some(&db) => !lp.blocks.contains(&db),
+                });
+                if ok { hoist.push((bi, ii, inst.clone())); }
+            }
+        }
+        if hoist.is_empty() { continue; }
+
+        // 应用：按 (块序, 指令序) 升序追加到 preheader（保持定义→使用顺序）；
+        // 删除按降序，避免同块索引失效。
+        hoist.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        let moved: Vec<IrInst> = hoist.iter().map(|(_, _, i)| i.clone()).collect();
+        let mut to_del: Vec<(usize, usize)> = hoist.iter().map(|(bi, ii, _)| (*bi, *ii)).collect();
+        to_del.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+        for (bi, ii) in to_del { f.blocks[bi].insts.remove(ii); }
+        f.blocks[ph].insts.extend(moved);
+        return hoist.len();
+    }
+    0
+}
+
+/// 对全程序跑通用 LICM（不动点）。返回外提指令总数。
+pub fn licm(ip: &mut IrProgram) -> usize {
+    let mut total = 0usize;
+    const LICM_MAX_ROUNDS: usize = 8;
+    for _ in 0..LICM_MAX_ROUNDS {
+        let mut round_total = 0usize;
+        let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+        for name in names {
+            if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) {
+                round_total += licm_round(f);
+            }
+        }
+        total += round_total;
+        if round_total == 0 { break; }
+    }
+    // 调试设施（与 DIALC_DUMP_ASM_IR 同惯例）：设 DIALC_DUMP_LICM=1 打印外提指令数。
+    if std::env::var("DIALC_DUMP_LICM").is_ok() {
+        eprintln!("[licm] hoisted {} instructions", total);
+    }
+    // 外提后跑一次 DCE，清理循环内变成死代码的原指令。
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for name in names {
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) { dce(f); }
+    }
+    total
+}
+
+// ============================================================================
+// M13-sccp：保守条件常量传播 / 分支折叠（对标 gcc/clang -O2 SCCP）
+// ============================================================================
+//
+// 第一版范围极保守、零误拒优先：
+//   - 格：Option<Imm>，Some=编译期确定的常量，None=运行时值（Dial 无 UB，
+//     绝不引入 Undefined 假设）。不动点迭代到稳定。
+//   - 只信任可证明的常量来源：立即数、纯整数/比较/转换指令的常量折叠结果、
+//     块参数 φ（所有前驱传入同一常量）。Load/Call/Store/ARC/Lea/Alloca/
+//     FuncAddr 等定义一律 Unknown。
+//   - 唯一变换：把 `Branch{cond}` 在 cond 恒为整数常量时改为 `Jump` 到对应
+//     目标（带对应 args）。另一分支块保留不删，其中的 Call/Store/ARC 不执行
+//     本就正确（cond 恒真时那条边运行时不可达）；codegen 只为可达跳转发射，
+//     死块零副作用。绝不删除任何块 / Call / Store / ARC。
+//
+// 正确性锚点：
+//   1. 除零 / 浮点 NaN 语义保守：折叠失败即 Unknown，绝不假设。
+//   2. φ 只有在「全部前驱都传入同一常量」时才是常量；任一前驱非常量即放弃。
+//   3. 只折叠整数常量条件（Imm::I64/I32/I1/I8）；浮点/句柄条件不动。
+//   4. 只 x86-64 / O2+ 且非 -g/PGO/插桩挂接（同内联/LICM 护栏）。
+
+/// 从 Value 读常量（仅立即数，或从格中已确定的寄存器）。
+fn sccp_val(v: &Value, lattice: &HashMap<VReg, Imm>) -> Option<Imm> {
+    match v {
+        Value::Imm(i) => Some(*i),
+        Value::Reg(r) => lattice.get(r).copied(),
+    }
+}
+
+/// 对一条纯指令尝试求常量；失败返回 None（Unknown）。
+fn sccp_eval_inst(inst: &IrInst, lattice: &HashMap<VReg, Imm>) -> Option<Imm> {
+    match inst {
+        IrInst::Bin { op, a, b, ty, .. } => {
+            if *ty != IrType::I64 { return None; }
+            let x = sccp_val(a, lattice)?.as_i64();
+            let y = sccp_val(b, lattice)?.as_i64();
+            fold_bin_i64(*op, x, y).map(Imm::I64)
+        }
+        IrInst::FBin { op, a, b, ty, .. } => {
+            if *ty != IrType::F64 { return None; }
+            let x = val_f64(a)?;
+            let y = val_f64(b)?;
+            fold_bin_f64(*op, x, y).map(|r| Imm::F64(f64::to_bits(r)))
+        }
+        IrInst::ICmp { op, a, b, .. } => {
+            let x = sccp_val(a, lattice)?.as_i64();
+            let y = sccp_val(b, lattice)?.as_i64();
+            Some(Imm::I64(cmp_i64(*op, x, y)))
+        }
+        IrInst::FCmp { op, a, b, .. } => {
+            let x = val_f64(a)?;
+            let y = val_f64(b)?;
+            Some(Imm::I64(cmp_f64(*op, x, y)))
+        }
+        IrInst::Un { op, a, ty, .. } => {
+            if *ty != IrType::I64 { return None; }
+            let x = sccp_val(a, lattice)?.as_i64();
+            Some(Imm::I64(match op {
+                AUn::Neg => x.wrapping_neg(),
+                AUn::Not => (x == 0) as i64,
+                AUn::BitNot => !x,
+            }))
+        }
+        IrInst::Conv { kind, a, ty, .. } => {
+            // 仅整数扩展/截断，且结果类型整数（浮点转换的位模式语义复杂，放弃）。
+            if ty.is_float() || matches!(kind, AConv::FpSi | AConv::SiFp | AConv::FpExt | AConv::FpTrunc) {
+                return None;
+            }
+            let x = sccp_val(a, lattice)?.as_i64();
+            Some(match kind {
+                AConv::Sext | AConv::Zext => Imm::I64(x),
+                AConv::Trunc => Imm::I64(x), // 全 I64 口径，截断恒等
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// 求单个函数的常量格（不动点）。返回 vreg → 确定常量。
+fn sccp_lattice(f: &IrFunction) -> HashMap<VReg, Imm> {
+    let mut lattice: HashMap<VReg, Imm> = HashMap::new();
+    for _ in 0..16 {
+        let mut changed = false;
+        // ① 指令定义的 vreg。
+        for b in &f.blocks {
+            for inst in &b.insts {
+                if let Some(d) = inst.def() {
+                    if lattice.contains_key(&d) { continue; } // 单调：确定后不变
+                    if let Some(c) = sccp_eval_inst(inst, &lattice) {
+                        lattice.insert(d, c);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        // ② 块参数 φ：所有前驱传入同一常量才确定。
+        // 先收集每个块参数 vreg 的所有传入 Value。
+        for (bi, b) in f.blocks.iter().enumerate() {
+            if b.params.is_empty() { continue; }
+            for (pi, (pv, _)) in b.params.iter().enumerate() {
+                if lattice.contains_key(pv) { continue; }
+                let mut incoming: Vec<Value> = Vec::new();
+                for pb in &f.blocks {
+                    let args: &[Value] = match &pb.term {
+                        Term::Jump { target, args } if *target == b.id => args,
+                        Term::Branch { then_b, else_b, then_args, else_args, .. } => {
+                            if *then_b == b.id { then_args }
+                            else if *else_b == b.id { else_args }
+                            else { continue; }
+                        }
+                        _ => continue,
+                    };
+                    if let Some(v) = args.get(pi) { incoming.push(*v); }
+                }
+                if incoming.is_empty() { continue; }
+                let mut it = incoming.iter();
+                let first = sccp_val(it.next().unwrap(), &lattice);
+                let first = match first { Some(c) => c, None => continue };
+                // 同一常量判定：Imm 按位比较（I64 口径比较 as_i64，浮点按 bits）。
+                let same = it.all(|v| sccp_val(v, &lattice).map(|c| imm_bits(c) == imm_bits(first)).unwrap_or(false));
+                if same { lattice.insert(*pv, first); changed = true; }
+            }
+            let _ = bi;
+        }
+        if !changed { break; }
+    }
+    lattice
+}
+
+/// 对单函数做分支折叠。返回折叠的分支数。
+fn sccp_fold_fn(f: &mut IrFunction) -> usize {
+    let lattice = sccp_lattice(f);
+    let mut count = 0;
+    for b in &mut f.blocks {
+        if let Term::Branch { cond, then_b, else_b, then_args, else_args, .. } = &b.term {
+            let c = match lattice.get(cond) { Some(c) => *c, None => continue };
+            // 仅整数常量条件（浮点已在上面过滤；as_i64 对整数安全）。
+            let n = match c {
+                Imm::F64(_) | Imm::F32(_) => continue,
+                _ => c.as_i64(),
+            };
+            let (target, args) = if n != 0 { (*then_b, then_args.clone()) } else { (*else_b, else_args.clone()) };
+            b.term = Term::Jump { target, args };
+            count += 1;
+        }
+    }
+    count
+}
+
+/// 对全程序跑保守 SCCP（每函数独立）。返回折叠的分支数。
+pub fn sccp(ip: &mut IrProgram) -> usize {
+    let mut total = 0usize;
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for name in names {
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) {
+            total += sccp_fold_fn(f);
+        }
+    }
+    // 调试设施（与 DIALC_DUMP_ASM_IR 同惯例）：设 DIALC_DUMP_SCCP=1 打印折叠分支数。
+    if std::env::var("DIALC_DUMP_SCCP").is_ok() {
+        eprintln!("[sccp] folded {} branches", total);
+    }
+    if total > 0 {
+        // 折叠后跑 DCE/常量折叠，清理变成死代码的纯指令；不动点两轮足够。
+        let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+        for name in names {
+            if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) {
+                fold_constants(f);
+                dce(f);
+            }
+        }
+    }
+    total
+}
+
+// ============================================================================
+// M14-dce-fn：全程序死函数消除（对标 gcc/clang -O2 的 IPA 死代码消除）
+// ============================================================================
+//
+// 删除「Private + 非 main + 全程序无任何引用」的函数，减少产物体积与符号表。
+// 引用判定必须全面——漏判会把仍在用的函数删掉（undefined symbol）：
+//   - 直接调用 `Call{linkage: Dial, func}`
+//   - 取函数地址 `FuncAddr{func}`（函数指针 / 回调 / 闭包 thunk）
+//   - 入口 main、External（导出）、运行时符号一律保留。
+// 不动点：删除死函数后，它内部对其它函数的调用消失，可能暴露新的死函数。
+//
+// 注意：本 pass 在 LLVM 路径不跑（llvm 从 AST 直出，符号由链接器处理）；
+// 仅在 asm 后端 O1+ 挂接（不依赖调用点优化，纯符号级分析，零语义风险）。
+
+/// 统计全程序中被引用的函数名集合（Call + FuncAddr）。
+fn dead_fn_referenced(ip: &IrProgram) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    for f in &ip.functions {
+        for b in &f.blocks {
+            for inst in &b.insts {
+                match inst {
+                    IrInst::Call { func, .. } => { refs.insert(func.clone()); }
+                    IrInst::FuncAddr { func, .. } => { refs.insert(func.clone()); }
+                    _ => {}
+                }
+            }
+        }
+    }
+    refs
+}
+
+/// 删除全程序死函数，返回删除数。
+pub fn eliminate_dead_functions(ip: &mut IrProgram) -> usize {
+    let mut removed = 0usize;
+    loop {
+        let refs = dead_fn_referenced(ip);
+        let mut to_remove: Vec<String> = ip.functions.iter()
+            .filter(|f| {
+                f.linkage == FuncLink::Private
+                    && f.name != "main"
+                    && !refs.contains(&f.name)
+            })
+            .map(|f| f.name.clone())
+            .collect();
+        if to_remove.is_empty() { break; }
+        to_remove.sort();
+        ip.functions.retain(|f| !to_remove.contains(&f.name));
+        removed += to_remove.len();
+    }
+    removed
+}
+
+// ============================================================================
+// M15-unroll：保守循环完全展开（对标 gcc/clang -O3 loop unrolling）
+// ============================================================================
+//
+// 只展开「标准 for 循环 5 块骨架 + 常量小上界」这一种最安全形态，收益是消除
+// 循环控制的分支 / Load / 自增开销。第一版范围极保守、零误拒优先：
+//   1. 精确匹配 5 块骨架：entry→header(Load cv; ICmp cv<N; Branch body/exit)
+//      →body→latch(Load iv; Add iv,1; Store iv; Jump header)→exit；
+//      N 为整数立即数且 2≤N≤8；iv 初值 0、步长 1、比较 Lt。
+//   2. 所有循环块（header/body/latch）无 φ 参数——iv 用栈槽传递，展开后天然保持
+//      顺序语义。含任何块参数一律放弃。
+//   3. body 只含纯整数栈指令（Load/Store/Bin/ICmp/Conv/Un/Alloca/PtrAdd），
+//      任何 Call / ARC / 浮点 / 内联汇编 / LeaLabel 等一律放弃——副作用与
+//      句柄归零在展开后顺序敏感，保守不碰。
+//   4. 展开：把 body+latch 复制 N 份（vreg 全量重映射），每份含 iv 自增，串成链，
+//      末份跳 exit；header 与 latch 原块从 CFG 断开（改为 Unreachable，随后 DCE）。
+//   5. 只 O3 + x86-64 挂接，同 -g/PGO/插桩护栏。
+
+/// 识别可展开的标准 for 循环骨架（返回 N / 各块索引 / iv 槽）。
+struct UnrollPlan {
+    header: usize, body: usize, latch: usize, exit: usize,
+    n: u64, iv_slot: VReg,
+}
+
+fn unroll_recognize(f: &IrFunction) -> Option<UnrollPlan> {
+    if f.blocks.len() < 5 { return None; }
+    // 取前 5 块（lower 的 for 骨架连续）：entry(0), header(1), body(2), latch(3), exit(4)
+    let (b0, b1, b2, b3) = (&f.blocks[0], &f.blocks[1], &f.blocks[2], &f.blocks[3]);
+    if !matches!(&b0.term, Term::Jump { target, .. } if *target == b1.id) { return None; }
+    // header: Load cv, iv; ICmp Lt cv < N; Branch → body(2) / exit(4)
+    if b1.insts.len() != 2 || !b1.params.is_empty() { return None; }
+    let (iv_slot, n) = match (&b1.insts[0], &b1.insts[1]) {
+        (IrInst::Load { dst: cv, ptr: iv, ty: IrType::I64 },
+         IrInst::ICmp { op: ACmp::Lt, a: Value::Reg(a), b: Value::Imm(lim), .. })
+            if *a == *cv => {
+            let nv = lim.as_i64();
+            if nv < 2 || nv > 8 { return None; }
+            (*iv, nv as u64)
+        }
+        _ => return None,
+    };
+    if f.blocks.len() <= 4 { return None; }
+    let exit_id = f.blocks[4].id;
+    match &b1.term {
+        Term::Branch { cond, then_b, else_b, .. }
+            if *cond == match &b1.insts[1] { IrInst::ICmp { dst, .. } => *dst, _ => u32::MAX }
+               && *then_b == b2.id && *else_b == exit_id => {}
+        _ => return None,
+    }
+    // body: 无 φ、只跳 latch(3)、指令全在白名单。
+    if !b2.params.is_empty() || !matches!(&b2.term, Term::Jump { target, .. } if *target == b3.id) { return None; }
+    for inst in &b2.insts {
+        match inst {
+            IrInst::Load { .. } | IrInst::Store { .. } | IrInst::Bin { .. }
+            | IrInst::ICmp { .. } | IrInst::Conv { .. } | IrInst::Un { .. }
+            | IrInst::Alloca { .. } | IrInst::PtrAdd { .. } => {}
+            _ => return None,
+        }
+        // 浮点指令一律拒绝（Bin 可能承载 FBin？FBin 是独立变体已被上面拒绝）。
+        if let IrInst::Bin { ty, .. } = inst { if ty.is_float() { return None; } }
+    }
+    // latch: Load cv2, iv; Add nv, cv2, 1; Store iv, nv; Jump header(1)
+    if !b3.params.is_empty() || !matches!(&b3.term, Term::Jump { target, .. } if *target == b1.id) { return None; }
+    let lb = b3.insts.len();
+    if lb != 3 { return None; }
+    match (&b3.insts[0], &b3.insts[1], &b3.insts[2]) {
+        (IrInst::Load { dst: cv2, ptr: iv2, ty: IrType::I64 },
+         IrInst::Bin { op: ABin::Add, dst: nv, a: Value::Reg(x), b: Value::Imm(step), ty: IrType::I64 },
+         IrInst::Store { ptr: iv3, val: Value::Reg(y), ty: IrType::I64 })
+            if *cv2 == *x && *nv == *y && *iv2 == *iv3 && *iv2 == iv_slot && step.as_i64() == 1 => {}
+        _ => return None,
+    }
+    // iv 在 entry 初值必须是 0。
+    if !b0.insts.iter().any(|i| matches!(i,
+        IrInst::Store { ptr, val: Value::Imm(im), .. } if *ptr == iv_slot && im.as_i64() == 0)) {
+        return None;
+    }
+    Some(UnrollPlan { header: 1, body: 2, latch: 3, exit: 4, n, iv_slot })
+}
+
+/// 对单函数做一次循环展开，返回展开的循环数。
+fn unroll_fn(f: &mut IrFunction) -> usize {
+    let plan = match unroll_recognize(f) { Some(p) => p, None => return 0 };
+    let body_insts = f.blocks[plan.body].insts.clone();
+    let latch_insts = f.blocks[plan.latch].insts.clone();
+    // 需要重映射的 vreg：body + latch 里所有定义（含块参数，但已确认无 φ）。
+    let mut src_regs: Vec<VReg> = Vec::new();
+    for inst in body_insts.iter().chain(latch_insts.iter()) {
+        if let Some(d) = inst.def() { src_regs.push(d); }
+    }
+    src_regs.sort_unstable();
+    src_regs.dedup();
+
+    let max_id = f.blocks.iter().map(|b| b.id).max().unwrap_or(0);
+    let exit_id = f.blocks[plan.exit].id;
+    let header_id = f.blocks[plan.header].id;
+    let mut next_target = exit_id; // 末份跳 exit；从后往前构造链
+    let mut new_blocks: Vec<IrBlock> = Vec::new();
+
+    for k in (0..plan.n).rev() {
+        // 每份用独立 vreg 子集（避免跨份 SSA 冲突）。
+        let vmap: Vec<VReg> = src_regs.iter().map(|r| f.new_reg(f.reg_ty[*r as usize].clone())).collect();
+        let mut insts: Vec<IrInst> = Vec::new();
+        // body 指令重映射（复用 inline 的通用 remap：它按 vmap 数组索引，这里需按 src_regs 查表）。
+        for inst in body_insts.iter().chain(latch_insts.iter()) {
+            if let Some(ri) = unroll_remap_inst(inst, &src_regs, &vmap) { insts.push(ri); }
+        }
+        let bid = max_id + 1 + (plan.n - 1 - k) as u32;
+        new_blocks.push(IrBlock {
+            id: bid, params: Vec::new(), insts,
+            term: Term::Jump { target: next_target, args: Vec::new() },
+        });
+        next_target = bid;
+        let _ = (k, header_id);
+    }
+    // 新块是按 k 逆序构造的（链从末份→首份），现在反转成首份在前。
+    new_blocks.reverse();
+    // entry 原本 Jump header，改为 Jump 首份展开块。
+    let first_id = next_target;
+    for b in f.blocks.iter_mut() {
+        if let Term::Jump { target, .. } = &mut b.term {
+            if *target == header_id { *target = first_id; }
+        }
+        if let Term::Branch { then_b, else_b, .. } = &mut b.term {
+            if *then_b == header_id { *then_b = first_id; }
+            if *else_b == header_id { *else_b = first_id; }
+        }
+    }
+    // header/body/latch 断开为 Unreachable（后续 DCE 清理其纯指令；它们已无前驱）。
+    for idx in [plan.header, plan.body, plan.latch] {
+        f.blocks[idx].term = Term::Unreachable;
+    }
+    f.blocks.extend(new_blocks);
+    1
+}
+
+/// 展开时按 src_regs→vmap 查表重映射一条指令（Line/DebugVar 跳过）。
+fn unroll_remap_inst(inst: &IrInst, src: &[VReg], vmap: &[VReg]) -> Option<IrInst> {
+    let rv = |r: VReg| -> VReg {
+        if let Ok(pos) = src.binary_search(&r) { vmap[pos] } else { r }
+    };
+    let rval = |v: Value| match v { Value::Reg(r) => Value::Reg(rv(r)), other => other };
+    Some(match inst {
+        IrInst::Line(_) | IrInst::DebugVar { .. } => return None,
+        IrInst::Alloca { dst, bytes } => IrInst::Alloca { dst: rv(*dst), bytes: *bytes },
+        IrInst::Load { dst, ptr, ty } => IrInst::Load { dst: rv(*dst), ptr: rv(*ptr), ty: ty.clone() },
+        IrInst::Store { ptr, val, ty } => IrInst::Store { ptr: rv(*ptr), val: rval(*val), ty: ty.clone() },
+        IrInst::Bin { op, dst, a, b, ty } =>
+            IrInst::Bin { op: *op, dst: rv(*dst), a: rval(*a), b: rval(*b), ty: ty.clone() },
+        IrInst::ICmp { op, dst, a, b, ty } =>
+            IrInst::ICmp { op: *op, dst: rv(*dst), a: rval(*a), b: rval(*b), ty: ty.clone() },
+        IrInst::Conv { kind, dst, a, ty } =>
+            IrInst::Conv { kind: *kind, dst: rv(*dst), a: rval(*a), ty: ty.clone() },
+        IrInst::Un { op, dst, a, ty } =>
+            IrInst::Un { op: *op, dst: rv(*dst), a: rval(*a), ty: ty.clone() },
+        IrInst::PtrAdd { dst, base, off } =>
+            IrInst::PtrAdd { dst: rv(*dst), base: rv(*base), off: rval(*off) },
+        _ => return None, // 白名单外的指令不应出现（unroll_recognize 已挡）
+    })
+}
+
+/// 对全程序跑保守循环展开（每函数最多展开 1 个循环）。返回展开数。
+pub fn unroll_loops(ip: &mut IrProgram) -> usize {
+    let mut total = 0usize;
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for name in names {
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) {
+            if unroll_fn(f) > 0 {
+                dce(f);
+                if std::env::var("DIALC_DUMP_UNROLL").is_ok() { eprintln!("[unroll] {}", f.name); }
+                total += 1;
+            }
+        }
+    }
+    total
+}

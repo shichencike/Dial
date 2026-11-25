@@ -1,0 +1,55 @@
+// R31 通用循环不变代码外提（LICM）正确性测试。
+// O2 会把循环内「操作数全在循环外」的纯计算提到 preheader（每轮只算一次）；
+// O0 不优化。两者输出必须逐字一致。
+// 覆盖：标量循环不变量、循环内被写的槽（不可外提）、带副作用的循环。
+
+fn hoistable(n: int): int {
+    var acc: int = 0;
+    var base: int = 7;
+    var factor: int = 3;
+    // base*factor 是循环不变量（操作数都在循环外定义），应被外提到 preheader。
+    var i: int = 0;
+    while (i < n) {
+        acc = acc + base * factor + i;
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn mutable_slot(n: int): int {
+    var acc: int = 0;
+    var x: int = 2;
+    var i: int = 0;
+    while (i < n) {
+        // x 在循环内被写，不能当作不变量外提；语义必须正确。
+        acc = acc + x;
+        x = x + 1;
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn nested_work(n: int): int {
+    var total: int = 0;
+    var k: int = 11;
+    var i: int = 0;
+    while (i < n) {
+        var m: int = 0;
+        var inner: int = 0;
+        while (m < 4) {
+            inner = inner + k + m;   // k 在外层循环外定义，可外提
+            m = m + 1;
+        }
+        total = total + inner;
+        i = i + 1;
+    }
+    return total;
+}
+
+fn main(): int {
+    print(str(hoistable(100)));
+    print(str(hoistable(0)));
+    print(str(mutable_slot(50)));
+    print(str(nested_work(20)));
+    return 0;
+}

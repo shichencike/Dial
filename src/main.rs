@@ -355,6 +355,11 @@ fn main() {
     // --single-file 便携模式：链接期 -static，产物不依赖宿主动态 libc。
     let mut tiny = false;
     let mut single_file = false;
+    // --shared：产出动态链接库（.so / .dylib / .dll），而非可执行文件。
+    // 与 --single-file(-static) 目标相反，冲突矩阵中明确拒绝；要求 C 运行时以
+    // -fPIC 重编（见 resolve_stdlib_archive 的 PIC 缓存分区），否则全局元数据
+    // 用绝对重定位，dlopen 后 ARC 结构错位 → double free（已实测）。
+    let mut shared = false;
     // --fast-compile：极致编译速度（隐含强制 O0 + C stdlib -O0 + 最大化缓存复用）。
     let mut fast_compile = false;
     // 默认后端为自研 asm（代替 LLVM 的终局）：不指定 --backend 即走 asm。
@@ -482,6 +487,13 @@ fn main() {
             }
             "--single-file" => {
                 single_file = true;
+                i += 1;
+            }
+            // --shared：产出动态库。只置纯值，实际注入在 LinkOpts（链接期 -shared /
+            // -dynamiclib）与 resolve_stdlib_archive（C 运行时 -fPIC + 独立缓存），
+            // 冲突（与 -static）在下方集中 Fail-Fast。
+            "--shared" => {
+                shared = true;
                 i += 1;
             }
             // --fast-compile：极致编译速度（隐含强制 O0 + C stdlib -O0 + 缓存复用）。
@@ -657,6 +669,20 @@ fn main() {
     }
     if single_file {
         eprintln!("ℹ️  --single-file：将用 -static 全静态链接，产物不再依赖宿主动态 libc。");
+    }
+
+    // --shared 冲突矩阵：动态库与下列开关目标相反，Fail-Fast 拒绝而非静默覆盖。
+    if shared {
+        if single_file {
+            eprintln!("❌ --shared 与 --single-file 冲突：前者产动态库（-shared），后者 -static 全静态链接，");
+            eprintln!("   ELF 不能同时是 PIE 动态库与静态可执行。请二选一。");
+            std::process::exit(1);
+        }
+        if tiny {
+            eprintln!("❌ --shared 与 --tiny 冲突：--tiny 会 strip 掉符号表，而动态库必须保留导出符号供 dlopen/dlsym 解析。请二选一。");
+            std::process::exit(1);
+        }
+        eprintln!("ℹ️  --shared：产出动态链接库（C 运行时将以 -fPIC 重编，走独立缓存分区）。");
     }
 
     // --fast-compile 冲突矩阵：目标是编译速度优先（-O0 + 跳过 Dial pass + C stdlib -O0），
@@ -932,6 +958,7 @@ fn main() {
     let mode = LinkOpts {
         tiny,
         single_file,
+        shared,
         fast_compile,
         ..LinkOpts::default()
     };
@@ -1026,7 +1053,9 @@ fn main() {
 
     match command {
         "build" => {
-            if debug_info {
+            if shared {
+                println!("✅ 已生成动态链接库（可用 dlopen/dlsym 或链接器 -l 方式使用）: {}", exe_path.display());
+            } else if debug_info {
                 println!(
                     "✅ 已生成可执行文件（含 DWARF 调试信息，可用 gdb/lldb 调试）: {}",
                     exe_path.display()
@@ -1312,6 +1341,8 @@ struct LinkOpts {
     tiny: bool,
     /// 第 18 层 --single-file：链接期 -static，产物不依赖宿主动态 libc。
     single_file: bool,
+    /// --shared：链接期 -shared/-dynamiclib，产出动态链接库；C 运行时走 -fPIC 缓存分区。
+    shared: bool,
     /// --fast-compile：C stdlib 用 -O0 + 走独立的缓存分区（-O0 归档不与默认 -O2 混用）。
     /// 注：Dial 前端的 O0 由 opt_level 字段之外的 opt_level 变量控制（见 main）。
     fast_compile: bool,
@@ -1429,7 +1460,9 @@ fn resolve_stdlib_archive(safety: SafetyMode, opts: &LinkOpts) -> Result<Vec<Pat
     // 预编译 stdlib 包是 -O2 烘焙、且不带函数分段，--gc-sections 对它无效。
     // --fast-compile 必须让 C 侧 -O0 生效：预编译包是 -O2 烘焙，同样要绕过。
     // 故这两种模式强制走下方「源码实时编译（带缓存）」回退路径，绕过已安装包。
-    let installed = if tiny || opts.fast_compile {
+    // --shared 也必须绕过预编译包：安装包是 -O2 烘焙、无 -fPIC，链进 .so 会因
+    // 绝对重定位（R_X86_64_32S）导致 dlopen 后全局元数据错位（实测 double free）。
+    let installed = if tiny || opts.fast_compile || opts.shared {
         None
     } else {
         package::find_installed("stdlib").map_err(|e| e.to_string())?
@@ -1498,6 +1531,11 @@ fn resolve_stdlib_archive(safety: SafetyMode, opts: &LinkOpts) -> Result<Vec<Pat
         cflags.push("-O2".into());
     }
     cflags.push("-pthread".into()); // 并发运行时用 pthread，须生成线程安全代码
+    if opts.shared {
+        // 动态库必须位置无关：否则 C 运行时的全局变量（RC 头 / argc 快照等）
+        // 用绝对重定位，dlopen 到任意基址后错位 → double free（已实测）。
+        cflags.push("-fPIC".into());
+    }
     cflags.push(format!("-DDIAL_SAFETY={}", safety.as_c_macro())); // Fail-Fast 等级注入
 
     if !quiet {
@@ -1641,6 +1679,46 @@ fn static_link_cc() -> Result<(String, Vec<String>), String> {
     Err("--single-file 需要系统 gcc / clang / cc 之一做全静态链接，但都未找到".to_string())
 }
 
+/// --shared：生成一个带 ELF `.init_array` constructor 的小型 .o，在 dlopen 时
+/// 自动调用 `dial_env_init(0, 0)`。
+///
+/// 为何必需：可执行文件由生成的 `main` 首句调 `dial_env_init(argc, argv)`，但动态库
+/// 被 dlopen 时不会跑 main，导致 `dial_env.c` 的 g_rng_state / g_args / g_prog 全为
+/// 初始值——实测 `random()` 因 xorshift 全 0 退化恒返回 0，`args()` 也拿不到快照。
+/// constructor 用 0 参数初始化：种子仍由 time(NULL) 参与（非零安全），argv 快照为空
+/// （动态库本无 argv），语义正确。仅 --shared 生成，默认可执行路径零改动。
+fn make_shared_init_obj(cc: &str, cc_prefix: &[String]) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join(format!(
+        "dialc_shared_init_{}_{}",
+        std::process::id(),
+        package::sha256_str(&format!("{} {}", cc, cc_prefix.join(" ")))
+            .unwrap_or_default()
+            .chars()
+            .take(8)
+            .collect::<String>()
+    ));
+    fs::create_dir_all(&dir).map_err(|e| format!("创建动态库初始化临时目录失败: {}", e))?;
+    let src = dir.join("dial_shared_init.c");
+    let obj = dir.join("dial_shared_init.o");
+    // 只用 extern 声明，不 include 任何 Dial 头——避免 -I 路径依赖。
+    // int64_t argc=0、char **argv=NULL：dial_env_init 内部对 argc=0 安全（循环不执行，
+    // argv[0] 分支走 ""），且 g_rng_state 由 time(NULL) ^ 常数 保证非 0。
+    fs::write(
+        &src,
+        "extern void dial_env_init(long long, char **);\n\
+         __attribute__((constructor)) static void dial_shared_init(void) {\n\
+         \tdial_env_init(0, 0);\n\
+         }\n",
+    )
+    .map_err(|e| format!("写动态库初始化源失败: {}", e))?;
+    let mut cmd = Command::new(cc);
+    cmd.args(cc_prefix).arg("-fPIC").arg("-O2").arg("-c").arg(&src).arg("-o").arg(&obj);
+    if !run_ok(&mut cmd) {
+        return Err("编译动态库初始化 constructor 失败".to_string());
+    }
+    Ok(obj)
+}
+
 /// 最终链接：用户 .o + 标准库 .a（可能多份）+ C 运行时 .o（LTO 时）+ import 包 .a + 系统库 → 可执行文件。
 ///
 /// - 非 LTO：`stdlib_libs` 是归档 `.a`，直接链入。
@@ -1677,6 +1755,18 @@ fn final_link(
     // 的 dlopen 平台后端可共存（链接器给 warning 但 dlopen 仍可在运行期装载平台库）。
     if opts.single_file {
         link_cmd.arg("-static");
+    }
+    // --shared：产出动态链接库。macOS 用 -dynamiclib（等价于 -shared 但设置
+    // install_name 语义），Linux / MinGW 用 -shared（MinGW 据此产 .dll）。
+    // 与 -static 互斥（冲突矩阵已挡），故两条分支不会同时出现。
+    if opts.shared {
+        link_cmd.arg(if cfg!(target_os = "macos") { "-dynamiclib" } else { "-shared" });
+    }
+    // --shared：链入 constructor .o（dlopen 时自动 dial_env_init），保证 RNG/argv 初始化。
+    // 生成失败必须 Fail-Fast——静默产出一个 random() 恒 0 的动态库比报错更糟。
+    if opts.shared {
+        let init_obj = make_shared_init_obj(&cc, &cc_prefix)?;
+        link_cmd.arg(init_obj);
     }
     link_cmd.arg(obj);
     // C 运行时 .o（仅 LTO 模式存在）：与用户对象一起整体重排。
@@ -1769,7 +1859,7 @@ fn compile_runtime_lto(safety: SafetyMode, opts: &LinkOpts) -> Result<Vec<PathBu
     let build_dir = base
         .join(".dialc_build")
         .join(format!("safety-{}", safety.as_c_macro()))
-        .join("lto");
+        .join(if opts.shared { "lto-pic" } else { "lto" });
     fs::create_dir_all(&build_dir).map_err(|e| format!("创建 LTO 构建目录失败: {}", e))?;
 
     let mut entries: Vec<PathBuf> = Vec::new();
@@ -1794,7 +1884,11 @@ fn compile_runtime_lto(safety: SafetyMode, opts: &LinkOpts) -> Result<Vec<PathBu
             .arg("-march=native") // 与 inkwell 的 host_cpu() 对齐：让 C 运行时也吃到本机 SIMD
             .arg("-Wno-override-module")
             .arg("-pthread")
-            .arg(format!("-DDIAL_SAFETY={}", safety.as_c_macro()))
+            .arg(format!("-DDIAL_SAFETY={}", safety.as_c_macro()));
+        if opts.shared {
+            cmd.arg("-fPIC");
+        }
+        cmd
             .arg("-I")
             .arg(&runtime_dir)
             .arg("-I")
@@ -1877,6 +1971,7 @@ fn print_usage() {
     eprintln!("  -g / --debug-info          生成标准 DWARF（GDB/LLDB 源码行断点 + print 变量名）");
     eprintln!("  --tiny                     体积模式：-Os + 函数/数据分段 + --gc-sections + strip（与 --fast/--pgo/-g 冲突）");
     eprintln!("  --single-file              便携模式：-static 全静态链接，产物不依赖宿主动态 libc");
+    eprintln!("  --shared                   产物为动态链接库（.so/.dylib/.dll；C 运行时 -fPIC 重编）；与 --single-file/--tiny 冲突");
     eprintln!("  --fast-compile             极速编译：强制 -O0 + C stdlib -O0 + stdlib 缓存复用（与 --fast/--pgo/--tiny/显式 -O1..3 冲突）");
     eprintln!("  check <文件.dial>                只做词法/语法/语义检查，不产出文件");
     eprintln!("  test  <文件.dial> [--filter 名]  运行顶层 test \"名\" {{ ... }} 块");

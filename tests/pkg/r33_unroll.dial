@@ -1,0 +1,54 @@
+// R33 保守循环完全展开（O3）正确性测试。
+// O3 会把标准 for 循环（常量上界 2..8、纯整数 body）完全展开，消除循环控制；
+// O0 不优化。两者输出必须逐字一致。
+// 覆盖：可展开 for 循环、不可展开形态（运行时上界 / 上界过大 / 含字符串副作用）。
+
+fn sum_fixed(): int {
+    var acc: int = 0;
+    for (i in 0..5) {
+        acc = acc + i * 3 + 1;
+    }
+    return acc;
+}
+
+fn sum_small(): int {
+    var acc: int = 0;
+    for (i in 0..2) {
+        acc = acc + 10;
+    }
+    return acc;
+}
+
+fn sum_runtime(n: int): int {
+    var acc: int = 0;
+    for (i in 0..n) { // 运行时上界，不可展开
+        acc = acc + i;
+    }
+    return acc;
+}
+
+fn sum_large(): int {
+    var acc: int = 0;
+    for (i in 0..20) { // 上界 > 8，不可展开
+        acc = acc + 1;
+    }
+    return acc;
+}
+
+fn sum_sidefx(): int {
+    var acc: int = 0;
+    for (i in 0..4) {
+        acc = acc + i;
+        print("TICK"); // 含副作用调用，不可展开
+    }
+    return acc;
+}
+
+fn main(): int {
+    print(str(sum_fixed()));
+    print(str(sum_small()));
+    print(str(sum_runtime(7)));
+    print(str(sum_large()));
+    print(str(sum_sidefx()));
+    return 0;
+}

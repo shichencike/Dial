@@ -314,7 +314,9 @@ dialc lsp
 > 行为与旧版逐字节一致。加上 `--backend=asm`（也可写 `--backend asm`）改用自研后端：
 > 专属 IR → 优化 Pass（常量折叠 / DCE / CSE / 保守 ARC 简化 / 字符串拼接常量折叠
 > ——字面量间 concat 编译期合并、以及 `x=S; for..{x=x+C}` 累加循环整函数折叠为常量，
-> 对标 gcc -O2 对 bench.b20 的折叠，见 CHANGELOG M10）→ x86-64 SysV 或
+> 对标 gcc -O2 对 bench.b20 的折叠，见 CHANGELOG M10；以及通用函数内联 / LICM /
+> 保守 SCCP / 死函数消除 / 保守循环展开——对齐 C 工具链 O2/O3 主力优化，见 §优化级别表）
+> → x86-64 SysV 或
 > AArch64 AAPCS 汇编 `.s` → 系统 `cc -c` 汇编成 `.o` → 复用既有链接流程。
 > **不发射 C 源码、不引第三方代码生成库、零新包依赖**；FFI 包、`--tiny`、
 > `--single-file` 因复用链接层而零改动生效。未覆盖的语言构造会明确报
@@ -708,8 +710,9 @@ channel 原语族在双后端一致（M7-e3al，单线程部分）：`channel(ca
 | `--tiny` | 体积模式 | C 侧 `-Os -ffunction-sections -fdata-sections`、链接期 `-Wl,--gc-sections -s`（strip 掉 DWARF 与符号表），并强制走源码编译 stdlib 回退路径（绕开预编译 `-O2` 归档）；与 `--fast` / `--pgo` / `-g` 目标相反，一律 **Fail-Fast 拒绝**（见 §38.24.1） |
 | `--single-file` | 便携模式 | 链接期 `-static` 全静态链接，产物 `file` 显示 `statically linked`、`ldd` 显示 `not a dynamic executable`；可与 LTO / PGO / `-g` 叠加（见 §3.4.2） |
 | `--fast-compile` | 极速编译 | 强制 `-O0` 跳过 Dial IR pass、C stdlib 改 `-O0`、并复用按内容哈希的 stdlib 持久缓存（M7-e3an3）；与 `--fast` / `--pgo` / `--tiny` / 显式 `-O1..3` 目标相反，一律 Fail-Fast 拒绝（见 §38.24.2） |
+| `--shared` | 动态链接库 | 链接期 `-shared`（macOS `-dynamiclib`、MinGW 产 `.dll`）产出 `.so`；C 运行时以 `-fPIC` 重编并走独立缓存分区（绕开非 PIC 的预编译归档）；`dlopen` 时经 `.init_array` constructor 自动 `dial_env_init`。与 `--single-file` / `--tiny` 目标相反，一律 Fail-Fast 拒绝（见 §3.4.3） |
 
-三者中 `--tiny` 与 `--single-file` 可叠加，但 `-static` 会把 libc 静态段拉入产物，通常比 `--tiny` 单独使用更大——
+产物形态开关中，`--tiny` 与 `--single-file` 可叠加，但 `-static` 会把 libc 静态段拉入产物，通常比 `--tiny` 单独使用更大——
 前者求「最小体积」、后者求「不依赖宿主」，编译器如实提示但不静默覆盖任何一侧。
 LLVM 侧（inkwell 无原生 `Oz` 档）保持 `O2`，体积压缩全部压在 C 侧与链接期；
 **不承诺具体 KB 数**，实测数据见 §38.24.1。
@@ -720,9 +723,18 @@ LLVM 侧（inkwell 无原生 `Oz` 档）保持 `O2`，体积压缩全部压在 C
 | 级别 | Dial IR Pass | GRA 驻留 / ISA 融合 | LLVM InstCombine 恒等式 |
 | --- | --- | --- | --- |
 | `-O0` | 无（真·无优化，配合 `-g` 得到「所写即所得」） | 禁用（全 spill） | 无 |
-| `-O1` | 基础（fold / cse / dce / ARC 化简） | 禁用（全 spill） | 无 |
-| `-O2`（**默认**） | + 过程间常量折叠 / 归纳变量强度削减 | 启用（既有全部优化） | 无 |
-| `-O3` | 同 `-O2` | 启用 | **启用**（`a+0→a`、`a*1→a`、`a|0→a`、`a<<0→a`、`a&-1→a` 等，仅 x86-64/整数） |
+| `-O1` | 基础（fold / cse / dce / ARC 化简）+ **死函数消除** | 禁用（全 spill） | 无 |
+| `-O2`（**默认**） | + 过程间常量折叠 / 字符串拼接折叠 / 归纳变量强度削减 / **通用函数内联** / **LICM** / **保守 SCCP** | 启用（既有全部优化） | 无 |
+| `-O3` | + **保守循环展开**（标准 for + 常量小上界 2..8） | 启用 | **启用**（`a+0→a`、`a*1→a`、`a|0→a`、`a<<0→a`、`a&-1→a` 等，仅 x86-64/整数） |
+
+> **M11~M15 对齐 C 工具链优化（v1.21 后增量）**：新增五项 IR Pass——
+> ① **M11 通用函数内联**（对标 gcc/clang `-O2` inlining，Private 小函数体复制 + ARC 原样保留 + φ 回传返回值）；
+> ② **M12 通用 LICM**（循环不变纯计算外提到 preheader，严格别名/归零护栏）；
+> ③ **M13 保守 SCCP**（常量沿 CFG/φ 传播、常量条件分支折叠，不动 Call/Store/ARC）；
+> ④ **M14 死函数消除**（Private 零引用函数不动点删除，导出/入口/函数指针引用保留）；
+> ⑤ **M15 保守循环展开**（标准 for 骨架 + 常量上界 2..8 + 纯整数 body，O3 启用）。
+> 全部仅 x86-64，且排除 `-g`/PGO/插桩（DWARF 行号与 profile idx 对齐要求），AArch64/LLVM 路径零变化。
+> 门禁 R30~R34：O0/O1/O2/O3 逐字一致 + 双后端逐字一致 + 各 pass 生效证据 + 反例零误拒，全量回归零回归。
 
 默认 `-O2` = 既有全部优化，**未指定 `-O` 的既有构建逐字节零回归**；`-O0`/`-O1` 关驻留走全
 spill（低优化级别不跨指令保持值）；`-O3` 从 LLVM InstCombine 借鉴的代数恒等式仅对可证明
@@ -860,6 +872,41 @@ $ ldd examples/hello
 
 详见 [§38.24.1](#38241-编译器---tiny体积模式---single-file便携模式)；AE 组把这四条形态、
 冲突矩阵与正交叠加全部做成回归断言。
+
+#### 3.4.3 `--shared`：产出动态链接库（asm 后端）
+
+`dialc build foo.dial --shared -o libfoo.so` 让自研 asm 后端产出真正的 ELF 共享对象
+（`file` 显示 `shared object`），可供 `dlopen`/`dlsym` 或链接器 `-lfoo` 使用。只有源码里
+用 `export fn` 声明的函数会成为导出符号（对齐 FFI 契约；普通 `fn` 保持模块内私有）。
+
+```dial
+// libmath.dial
+export fn add(a: int, b: int): int { return a + b; }   // dlsym 可见
+fn helper(x: int): int { return x * 2; }               // 模块内私有，不导出
+fn main(): int { return 0; }                          // 动态库里 main 只是普通符号
+```
+
+```bash
+dialc build libmath.dial --shared -o libmath.so
+python3 -c "import ctypes; l=ctypes.CDLL('./libmath.so'); l.add.restype=ctypes.c_int64; print(l.add(20,22))"
+# → 42
+```
+
+**两个关键实现约束**（都是实测踩坑后的 Fail-Fast 设计）：
+
+1. **C 运行时必须 `-fPIC`**：预编译的 `libdial_std.a` 是 `-O2` 烘焙、无 PIC，链进 `.so`
+   后有 2714 处 `R_X86_64_32S` 绝对重定位——`dlopen` 到任意基址后全局元数据错位，含
+   字符串拼接 / ARC 的导出函数会触发 Fail-Fast「double free」。`--shared` 强制走源码
+   编译路径加 `-fPIC`（无 TEXTREL），并存到独立缓存分区（key 含 `-fPIC`，不与默认归档混用）。
+2. **`dlopen` 不跑 `main`**：可执行文件的 `main` 首句调 `dial_env_init(argc, argv)`，动态库
+   被装载时不会执行它，导致随机数种子 `g_rng_state=0`（xorshift 全零退化，`random()` 恒 0）。
+   `--shared` 额外链入一个带 `.init_array` constructor 的小对象，在库加载时自动调用
+   `dial_env_init(0, 0)`（种子由 `time(NULL)` 参与保证非零，argv 快照为空——库本无 argv）。
+
+与 `--single-file`（-static）和 `--tiny`（strip 符号表）**互斥**——前者与 `-shared` 的 ELF
+语义冲突，后者会删掉 `dlsym` 必需的导出符号，均 Fail-Fast 拒绝。可与 `-O0..3` 叠加。
+R35 门禁覆盖：ELF 类型 / 导出符号 / 无 TEXTREL / `dlopen` 调用（含 1000 次 ARC 循环与
+random 非退化）/ 冲突矩阵。
 
 ---
 

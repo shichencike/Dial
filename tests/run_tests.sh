@@ -1767,11 +1767,11 @@ fi
 ODIR="${RDIR}/opt"
 mkdir -p "$ODIR"
 cat > "${ODIR}/opt.dial" <<'DIALEOF'
-fn add(a: int, b: int): int {
+export fn add(a: int, b: int): int {
     let s: int = a + b;
     return s;
 }
-fn popcnt(v0: int): int {
+export fn popcnt(v0: int): int {
     var v: int = v0;
     var cnt: int = 0;
     while (v > 0) { cnt = cnt + (v & 1); v = v >> 1; }
@@ -1810,7 +1810,9 @@ ${DIALC} build "${ODIR}/opt.dial" --backend asm --no-link -o "${ODIR}/def" >/dev
 ${DIALC} build "${ODIR}/opt.dial" --backend asm -O2 --no-link -o "${ODIR}/o2" >/dev/null 2>&1; cp "${ODIR}/opt.s" "${ODIR}/o2.s"
 if cmp -s "${ODIR}/def.s" "${ODIR}/o2.s"; then rpass "asm 后端默认构建与 -O2 逐字节一致（零回归）"
 else rbad "asm 后端默认与 -O2 汇编不一致"; fi
-# O0/O1 禁用 GRA 驻留（无 callee-saved 寄存器），O2/O3 启用
+# O0/O1 禁用 GRA 驻留（无 callee-saved 寄存器），O2/O3 启用。
+# opt.dial 的 add/popcnt 用 export fn（External linkage）：不会被内联/死函数消除
+# 删掉，.s 里保留独立函数体供 GRA 形态观察（否则 O2 内联后消除，只剩 main）。
 ${DIALC} build "${ODIR}/opt.dial" --backend asm -O0 --no-link -o "${ODIR}/o0s" >/dev/null 2>&1; cp "${ODIR}/opt.s" "${ODIR}/o0s.s"
 if ! grep -qE '%r1[2345]|%rbx' "${ODIR}/o0s.s" && grep -qE '%r1[2345]|%rbx' "${ODIR}/o2.s"; then
     rpass "asm 后端 -O0 禁用 GRA 驻留、-O2 启用（优化级别真实生效）"
@@ -3865,6 +3867,262 @@ if "$_DIALC" build tests/pkg/r29_strfold.dial --backend llvm -o "$TMP/r29_llvm" 
     fi
 else
     rbad "R29 LLVM 后端构建失败"
+fi
+
+# ===========================================================================
+# R30) 通用函数内联（v1.21 后 M11）：O0/O2/O3 语义一致 + 内联生效 + 双后端一致
+# ===========================================================================
+echo
+echo "== R30) 通用函数内联（Private 小函数内联，O0/O2/O3 逐字一致、零误拒）=="
+_DIALC="$DIALC"
+if "$_DIALC" build tests/pkg/r30_inline.dial -O0 -o "$TMP/r30_o0" >/dev/null 2>&1 \
+   && "$_DIALC" build tests/pkg/r30_inline.dial -O2 -o "$TMP/r30_o2" >/dev/null 2>&1 \
+   && "$_DIALC" build tests/pkg/r30_inline.dial -O3 -o "$TMP/r30_o3" >/dev/null 2>&1; then
+    if diff <("$TMP/r30_o0") <("$TMP/r30_o2") >/dev/null \
+       && diff <("$TMP/r30_o0") <("$TMP/r30_o3") >/dev/null; then
+        rpass "R30 内联 O0/O2/O3 逐字一致（标量/多参/分支/句柄/递归/嵌套/多调用点）"
+    else
+        rbad "R30 O0/O2/O3 输出不一致（内联破坏了语义）"
+    fi
+else
+    rbad "R30 测试程序 O0/O2/O3 构建失败"
+fi
+# 内联确实生效：O2 汇编中私有小函数无 call 站点（O0 对照应有）。
+if "$_DIALC" build tests/pkg/r30_inline.dial -O2 --no-link -o "$TMP/r30.o" >/dev/null 2>&1; then
+    _r30_s="tests/pkg/r30_inline.s"
+    if grep -qE "call.*(add2|mix|branchy|strlen_wrap|compose)" "$_r30_s" 2>/dev/null; then
+        rbad "R30 O2 汇编仍有私有小函数 call（内联未生效）"
+    else
+        rpass "R30 O2 汇编中私有小函数零 call（内联生效，含嵌套/多调用点）"
+    fi
+else
+    rbad "R30 O2 --no-link 构建失败"
+fi
+# 双后端一致（LLVM 后端不内联，输出必须与 asm 内联后逐字相同）。
+if "$_DIALC" build tests/pkg/r30_inline.dial --backend llvm -o "$TMP/r30_llvm" >/dev/null 2>&1; then
+    if diff <("$TMP/r30_o2") <("$TMP/r30_llvm") >/dev/null; then
+        rpass "R30 asm（内联）/ LLVM（不内联）双后端逐字一致"
+    else
+        rbad "R30 双后端输出不一致"
+    fi
+else
+    echo "  ⏭️  R30 双后端一致（当前二进制未启用 LLVM feature，跳过）"
+fi
+
+# ===========================================================================
+# R31) 通用循环不变代码外提（v1.21 后 M12）：O0/O2/O3 一致 + 外提生效 + 双后端
+# ===========================================================================
+echo
+echo "== R31) 通用 LICM（循环不变纯计算外提，O0/O2/O3 逐字一致、零误拒）=="
+_DIALC="$DIALC"
+if "$_DIALC" build tests/pkg/r31_licm.dial -O0 -o "$TMP/r31_o0" >/dev/null 2>&1 \
+   && "$_DIALC" build tests/pkg/r31_licm.dial -O2 -o "$TMP/r31_o2" >/dev/null 2>&1 \
+   && "$_DIALC" build tests/pkg/r31_licm.dial -O3 -o "$TMP/r31_o3" >/dev/null 2>&1; then
+    if diff <("$TMP/r31_o0") <("$TMP/r31_o2") >/dev/null \
+       && diff <("$TMP/r31_o0") <("$TMP/r31_o3") >/dev/null; then
+        rpass "R31 LICM O0/O2/O3 逐字一致（可外提不变量 + 循环内写槽 + 嵌套循环）"
+    else
+        rbad "R31 O0/O2/O3 输出不一致（LICM 破坏了语义）"
+    fi
+else
+    rbad "R31 测试程序 O0/O2/O3 构建失败"
+fi
+# 外提确实生效：DIALC_DUMP_LICM 报告至少 1 条指令被外提。
+# （不用 IR dump 的块号判定——O2 下 hoistable 会被内联+死函数消除，块号不再稳定。）
+_r31_hoisted=$(DIALC_DUMP_LICM=1 "$_DIALC" build tests/pkg/r31_licm.dial -O2 --no-link -o "$TMP/r31.o" 2>&1 | grep -oE 'hoisted [0-9]+ instructions' | grep -oE '[0-9]+' | head -1)
+if [ -n "$_r31_hoisted" ] && [ "$_r31_hoisted" -ge 1 ]; then
+    rpass "R31 LICM 生效（外提 $_r31_hoisted 条循环不变指令）"
+else
+    rbad "R31 LICM 未生效（无循环不变指令被外提）"
+fi
+# 双后端一致。
+if "$_DIALC" build tests/pkg/r31_licm.dial --backend llvm -o "$TMP/r31_llvm" >/dev/null 2>&1; then
+    if diff <("$TMP/r31_o2") <("$TMP/r31_llvm") >/dev/null; then
+        rpass "R31 asm（LICM）/ LLVM（不优化）双后端逐字一致"
+    else
+        rbad "R31 双后端输出不一致"
+    fi
+else
+    echo "  ⏭️  R31 双后端一致（当前二进制未启用 LLVM feature，跳过）"
+fi
+
+# ===========================================================================
+# R32) 保守条件常量传播（v1.21 后 M13）：O0/O2/O3 一致 + 分支折叠生效 + 双后端
+# ===========================================================================
+echo
+echo "== R32) 保守 SCCP（常量条件分支折叠，O0/O2/O3 逐字一致、零误拒）=="
+_DIALC="$DIALC"
+if "$_DIALC" build tests/pkg/r32_sccp.dial -O0 -o "$TMP/r32_o0" >/dev/null 2>&1 \
+   && "$_DIALC" build tests/pkg/r32_sccp.dial -O2 -o "$TMP/r32_o2" >/dev/null 2>&1 \
+   && "$_DIALC" build tests/pkg/r32_sccp.dial -O3 -o "$TMP/r32_o3" >/dev/null 2>&1; then
+    if diff <("$TMP/r32_o0") <("$TMP/r32_o2") >/dev/null \
+       && diff <("$TMP/r32_o0") <("$TMP/r32_o3") >/dev/null; then
+        rpass "R32 SCCP O0/O2/O3 逐字一致（常量/纯计算条件 + 运行时条件不误折叠）"
+    else
+        rbad "R32 O0/O2/O3 输出不一致（SCCP 破坏了语义）"
+    fi
+else
+    rbad "R32 测试程序 O0/O2/O3 构建失败"
+fi
+# 折叠确实生效：DIALC_DUMP_SCCP 报告至少 1 个分支被折叠。
+_r32_folded=$(DIALC_DUMP_SCCP=1 "$_DIALC" build tests/pkg/r32_sccp.dial -O2 --no-link -o "$TMP/r32.o" 2>&1 | grep -oE 'folded [0-9]+ branches' | grep -oE '[0-9]+' | head -1)
+if [ -n "$_r32_folded" ] && [ "$_r32_folded" -ge 1 ]; then
+    rpass "R32 SCCP 生效（折叠 $_r32_folded 个常量条件分支）"
+else
+    rbad "R32 SCCP 未生效（常量条件分支未被折叠）"
+fi
+# 双后端一致。
+if "$_DIALC" build tests/pkg/r32_sccp.dial --backend llvm -o "$TMP/r32_llvm" >/dev/null 2>&1; then
+    if diff <("$TMP/r32_o2") <("$TMP/r32_llvm") >/dev/null; then
+        rpass "R32 asm（SCCP）/ LLVM 双后端逐字一致"
+    else
+        rbad "R32 双后端输出不一致"
+    fi
+else
+    echo "  ⏭️  R32 双后端一致（当前二进制未启用 LLVM feature，跳过）"
+fi
+
+# ===========================================================================
+# R33) 保守循环完全展开（v1.21 后 M15）：O0/O3 一致 + 展开生效 + 双后端
+# ===========================================================================
+echo
+echo "== R33) 保守循环展开（标准 for + 常量小上界，O0/O3 逐字一致、零误拒）=="
+_DIALC="$DIALC"
+if "$_DIALC" build tests/pkg/r33_unroll.dial -O0 -o "$TMP/r33_o0" >/dev/null 2>&1 \
+   && "$_DIALC" build tests/pkg/r33_unroll.dial -O3 -o "$TMP/r33_o3" >/dev/null 2>&1; then
+    if diff <("$TMP/r33_o0") <("$TMP/r33_o3") >/dev/null; then
+        rpass "R33 循环展开 O0/O3 逐字一致（可展开 for + 运行时/过大/副作用不可展开）"
+    else
+        rbad "R33 O0/O3 输出不一致（展开破坏了语义）"
+    fi
+else
+    rbad "R33 测试程序 O0/O3 构建失败"
+fi
+# 展开生效：DIALC_DUMP_UNROLL 报告 sum_fixed / sum_small 被展开。
+_r33_unrolled=$(DIALC_DUMP_UNROLL=1 "$_DIALC" build tests/pkg/r33_unroll.dial -O3 --no-link -o "$TMP/r33.o" 2>&1 | grep -c "\[unroll\] sum_fixed")
+if [ "$_r33_unrolled" -ge 1 ]; then
+    rpass "R33 循环展开生效（常量上界 for 被完全展开，反例零误拒）"
+else
+    rbad "R33 循环展开未生效"
+fi
+if "$_DIALC" build tests/pkg/r33_unroll.dial --backend llvm -o "$TMP/r33_llvm" >/dev/null 2>&1; then
+    if diff <("$TMP/r33_o3") <("$TMP/r33_llvm") >/dev/null; then
+        rpass "R33 asm（展开）/ LLVM 双后端逐字一致"
+    else
+        rbad "R33 双后端输出不一致"
+    fi
+else
+    echo "  ⏭️  R33 双后端一致（当前二进制未启用 LLVM feature，跳过）"
+fi
+
+# ===========================================================================
+# R34) 全程序死函数消除（v1.21 后 M14）：Private 零引用函数删除 + 引用函数保留
+# ===========================================================================
+echo
+echo "== R34) 全程序死函数消除（Private 零引用删除，引用/入口/导出保留）=="
+_DIALC="$DIALC"
+cat > "$TMP/r34_deadfn.dial" <<'R34EOF'
+fn used(x: int): int { return x + 1; }
+fn never_called(x: int): int { return x * 999; }
+fn also_dead(): int { return 42; }
+fn main(): int {
+    print(str(used(5)));
+    return 0;
+}
+R34EOF
+if "$_DIALC" build "$TMP/r34_deadfn.dial" -O1 --no-link -o "$TMP/r34.o" >/dev/null 2>&1; then
+    # O1（无内联）：后处理 IR 应保留 used + main，删除 never_called / also_dead。
+    DIALC_DUMP_ASM_IR_POST=1 "$_DIALC" build "$TMP/r34_deadfn.dial" -O1 --no-link -o "$TMP/r34.o" 2>"$TMP/r34_ir" >/dev/null
+    if grep -q 'name: "used"' "$TMP/r34_ir" && grep -q 'name: "main"' "$TMP/r34_ir" \
+       && ! grep -q 'name: "never_called"' "$TMP/r34_ir" && ! grep -q 'name: "also_dead"' "$TMP/r34_ir"; then
+        rpass "R34 死函数消除生效（零引用 Private 删除，被调用/入口函数保留）"
+    else
+        rbad "R34 死函数消除异常（引用函数误删或死函数残留）"
+    fi
+else
+    rbad "R34 测试程序 O1 构建失败"
+fi
+if "$_DIALC" build "$TMP/r34_deadfn.dial" -O0 -o "$TMP/r34_o0" >/dev/null 2>&1 \
+   && "$_DIALC" build "$TMP/r34_deadfn.dial" -O1 -o "$TMP/r34_o1" >/dev/null 2>&1; then
+    if diff <("$TMP/r34_o0") <("$TMP/r34_o1") >/dev/null; then
+        rpass "R34 死函数消除 O0/O1 输出逐字一致"
+    else
+        rbad "R34 O0/O1 输出不一致"
+    fi
+fi
+
+# ===========================================================================
+# R35) asm 后端动态链接库（v1.21 后 M16 --shared）：ELF 共享对象 + 导出符号 +
+#     PIC（无 TEXTREL）+ dlopen 调用正确（字符串 ARC / random 初始化）+ 冲突矩阵
+# ===========================================================================
+echo
+echo "== R35) asm --shared 动态库（ELF .so + PIC + dlopen 调用正确）=="
+_DIALC="$DIALC"
+cat > "$TMP/r35_dylib.dial" <<'R35EOF'
+export fn compute(a: int, b: int): int {
+    var s: string = "hello";
+    var t: string = s + "world";
+    return t.length() + a + b;
+}
+export fn rnd(): int { return random(); }
+fn main(): int { return 0; }
+R35EOF
+if "$_DIALC" build "$TMP/r35_dylib.dial" --backend asm -O2 --shared -o "$TMP/libr35.so" >/dev/null 2>&1; then
+    # (1) ELF 共享对象（不是可执行）
+    if file "$TMP/libr35.so" 2>/dev/null | grep -q "shared object"; then
+        rpass "R35 --shared 产出 ELF 共享对象（非可执行）"
+    else
+        rbad "R35 --shared 未产出共享对象"
+    fi
+    # (2) 导出符号可见（dlsym 能解析）
+    if nm -D "$TMP/libr35.so" 2>/dev/null | grep -q " T compute"; then
+        rpass "R35 export fn 导出符号对 dlsym 可见"
+    else
+        rbad "R35 导出符号缺失"
+    fi
+    # (3) PIC 干净：dynamic 段无 TEXTREL（否则 dlopen 到任意基址会错位）
+    if ! readelf -d "$TMP/libr35.so" 2>/dev/null | grep -q TEXTREL; then
+        rpass "R35 动态库 PIC 干净（无 TEXTREL，C 运行时 -fPIC 生效）"
+    else
+        rbad "R35 动态库含 TEXTREL（C 运行时非 PIC，ARC 会 double free）"
+    fi
+    # (4) dlopen 调用：compute 含字符串拼接/ARC，rnd 验证 constructor 初始化。
+    #     ctypes restype 必须显式 int64，否则 64 位返回值被截成 32 位有符号。
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$TMP/libr35.so" <<'PYEOF' >"$TMP/r35_dlopen.out" 2>"$TMP/r35_dlopen.err"
+import ctypes, sys
+lib = ctypes.CDLL(sys.argv[1])
+lib.compute.restype = ctypes.c_int64
+lib.rnd.restype = ctypes.c_int64
+ok = True
+if lib.compute(20, 22) != 52: ok = False          # len("helloworld")=10 + 20 + 22
+for i in range(1000):
+    if lib.compute(i, i) != 10 + 2 * i: ok = False
+rng = [lib.rnd() for _ in range(5)]
+if any(v == 0 for v in rng) or any(not (0 <= v < 2**63) for v in rng): ok = False
+print("OK" if ok else "FAIL")
+PYEOF
+        if grep -q "^OK$" "$TMP/r35_dlopen.out"; then
+            rpass "R35 dlopen 调用正确（compute 1000 次 ARC 稳定 + random 非退化）"
+        else
+            rbad "R35 dlopen 调用异常（$(head -1 "$TMP/r35_dlopen.err" 2>/dev/null)）"
+        fi
+    else
+        echo "  ⏭️  R35 dlopen 调用（无 python3，跳过运行时验证）"
+    fi
+else
+    rbad "R35 --shared 构建失败"
+fi
+# (5) 冲突矩阵：-static / --tiny 必须 Fail-Fast
+if "$_DIALC" build "$TMP/r35_dylib.dial" --shared --single-file -o "$TMP/x.so" 2>&1 | grep -q "冲突"; then
+    rpass "R35 --shared 与 --single-file 互斥（Fail-Fast）"
+else
+    rbad "R35 --shared/--single-file 未拒绝"
+fi
+if "$_DIALC" build "$TMP/r35_dylib.dial" --shared --tiny -o "$TMP/x.so" 2>&1 | grep -q "冲突"; then
+    rpass "R35 --shared 与 --tiny 互斥（Fail-Fast）"
+else
+    rbad "R35 --shared/--tiny 未拒绝"
 fi
 
 # ===========================================================================

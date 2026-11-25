@@ -22,6 +22,49 @@
 
 ## [未发布] — 开发中增量
 
+### Added（M16 asm 后端动态链接库 `--shared`）
+- **`--shared` 产物形态**（`dialc build foo.dial --shared -o libfoo.so`）：自研 asm
+  后端首次可产出 ELF 共享对象 / macOS dylib / MinGW dll，供 `dlopen`/`dlsym` 与
+  链接器 `-l` 使用。只有 `export fn` 成为导出符号（私有 `fn` 不导出）。与
+  `--single-file` / `--tiny` Fail-Fast 互斥；可与 `-O0..3` 叠加。
+- **C 运行时 PIC 重编**：`--shared` 绕过非 PIC 的预编译 `libdial_std.a`，强制 C
+  源码加 `-fPIC` 重编并存到独立缓存分区（key 含 `-fPIC`）。根因：默认归档有
+  2714 处 `R_X86_64_32S` 绝对重定位，`dlopen` 到任意基址后 ARC 元数据错位 →
+  实测含字符串拼接的导出函数 double free；PIC 重编后无 TEXTREL、500/1000 次
+  ARC 调用稳定。
+- **`dlopen` 自动初始化**：链接期注入带 `.init_array` constructor 的小对象，库加载
+  时自动调 `dial_env_init(0, 0)`。否则 `g_rng_state=0` 使 xorshift 退化、`random()`
+  恒返回 0（实测）。constructor 用 0 参数：种子由 `time(NULL)` 参与保证非零，argv
+  快照为空（库本无 argv）。
+- 输出提示文案区分「动态链接库」/「可执行文件」；usage 增补 `--shared`。
+- R35 门禁：ELF 共享对象类型 + 导出符号 + 无 TEXTREL + `dlopen` 调用（含 1000
+  次 ARC 循环 + random 非退化）+ 冲突矩阵；默认可执行路径零回归。
+
+### Added（M11~M15 对齐 C 工具链 O2/O3 优化）
+- **M11 通用函数内联**（`pass::inline_calls`，O2+ x86-64）：对标 gcc/clang `-O2`
+  inlining。Private 小函数（≤96 指令 / ≤16 块 / 非递归）体复制到调用点，vreg 与
+  block id 全量重映射、入口补回写参 `Store`（补 codegen prologue 的隐式写参）、
+  ARC retain/release 原样保留、`Return` 改 φ 回传到 continuation。不动点 3 轮。
+  排除 `-g`/PGO/插桩（DWARF 行号与 profile idx 对齐）；Line/DebugVar 不复制。
+- **M12 通用 LICM**（`pass::licm`，O2+ x86-64）：循环不变纯计算外提到 preheader。
+  标准自然循环识别（入口块被卷入则整块跳过）、只外提定义块 ≥ preheader 的指令
+  （保证向前搬）、`Load` 仅在 ptr 槽循环内未被 Store/ARC 归零/取别名/调用逃逸时
+  外提、`Div`/`Mod` 不外提（trap 位置）、不动点 8 轮 + DCE。
+- **M13 保守 SCCP**（`pass::sccp`，O2+ x86-64）：格 `Option<Imm>` 沿 CFG/块参数 φ
+  不动点传播，只信任立即数与纯整数/比较/转换折叠结果；把 `cond` 为整数常量的
+  `Branch` 改为 `Jump`，不删除任何块/Call/Store/ARC（零副作用变更）。
+- **M14 死函数消除**（`pass::eliminate_dead_functions`，O1+ x86-64）：Private 且
+  全程序零引用（Call/FuncAddr 均计引用）的函数不动点删除；main / 导出 / 函数指针
+  引用保留。
+- **M15 保守循环展开**（`pass::unroll_loops`，O3 x86-64）：精确匹配标准 for 5 块
+  骨架（上界常量 2..8、iv 0 步长 1、无 φ、body 仅纯整数栈指令），复制 N 份
+  body+latch 串成链、末份跳 exit。运行时上界 / 上界过大 / 含副作用一律放弃。
+- 调试设施：`DIALC_DUMP_LICM` / `DIALC_DUMP_SCCP` / `DIALC_DUMP_UNROLL` 打印各
+  pass 生效计数。
+- 门禁 R30~R34：O0/O1/O2/O3 逐字一致 + asm/LLVM 双后端逐字一致 + 各 pass 生效
+  证据 + 反例零误拒；GRA 驻留 / x86 移位形态门禁改用 `export fn` 测试目标以适配
+  内联+死函数消除（非真实回归）。全量回归零回归、单测 41 项、CVE 8/8。
+
 ### Added（M10 字符串拼接常量折叠：对齐 gcc -O2）
 - **L1 字面量拼接折叠**（`pass::fold_string_concat`，O1+）：编译期把静态串之间的
   `dial_string_concat` 合并成单个静态对象，不动点迭代支持 `"a"+"b"+"c"` 链式；

@@ -59,6 +59,8 @@
 | P0 补强（v1.21 后 · 借用检查器） | 零生命周期标注的静态借用检查（NLL 区域推断）：`as_c_str`/`as_ptr` 借用指针在用期间来源被 move/drop/重赋值 → 编译期 `dialc.borrow.dangling`；`&x` 栈借用跳过（零误拒）；frontend 保留结构化错误码，CLI 三处显示一致 | R28 门禁 2 项全绿（三类悬垂拦截 + 合法借用/NLL 双后端一致）；全量回归 1112 项、CVE 8/8 |
 | P3 工程（v1.21 后 · 门禁盲区） | cve_check 按 CI 同口径纳入本地 `run_tests.sh` AP3 段，消除「本地全绿、tag CI 才暴露」的发布事故盲区 | 全量回归末尾 CVE 8/8 全绿 |
 | P1 优化（v1.21 后 · M10 字符串折叠） | 对齐 gcc -O2：`fold_string_concat`（O1+ 字面量合并）+ `fold_string_accum`（O2+ x86-64 累加循环整函数折叠 return const）；严格骨架识别 + 符号执行验证 + 长度上限，前缀追加/副作用/非静态串一律放弃 | R29 门禁 3 项（O2/O0 逐字一致 + b20 折叠为 `mov $124272` 零字符串调用 + 双后端一致）；全量回归 1112 项零误拒 |
+| P1 优化（v1.21 后 · M11~M15 对齐 C 工具链） | 补齐 gcc/clang O2/O3 主力优化：**M11 通用函数内联**（Private 小函数体复制 + ARC 原样 + φ 回传）、**M12 通用 LICM**（循环不变纯计算外提 preheader，别名/归零护栏）、**M13 保守 SCCP**（常量沿 CFG/φ 传播 + 常量条件分支折叠）、**M14 死函数消除**（Private 零引用不动点删除）、**M15 保守循环展开**（标准 for + 上界 2..8 + 纯整数 body）；全部 x86-64 且排除 -g/PGO/插桩，AArch64/LLVM 零变化 | R30~R34 五项门禁（O0/O1/O2/O3 逐字一致 + 双后端逐字一致 + 各 pass 生效证据 + 反例零误拒）；`select_timeout`/GRA/移位形态门禁适配 export fn 后全量回归零回归；单测 41 项、CVE 8/8 |
+| P1 产物形态（v1.21 后 · M16 动态库） | asm 后端 `--shared` 产出 ELF .so / macOS dylib / MinGW dll：C 运行时 `-fPIC` 重编（独立缓存分区，绕开非 PIC 预编译归档）+ `.init_array` constructor 自动 `dial_env_init`；仅 `export fn` 导出；与 `--single-file`/`--tiny` Fail-Fast 互斥 | R35 门禁（ELF 类型 + dlsym 符号 + 无 TEXTREL + dlopen 调用含 1000 次 ARC + random 非退化 + 冲突矩阵）；默认可执行产物零回归 |
 | **验收** | ①OPT-ENOUGH ②P0 清零 ③AArch64 语义+DWARF ④P2 全裁决 ⑤P3 收口 | **五项全绿，能力上已代替 LLVM** |
 
 ### 3.2 主线 B · dialpkg —— ✅ P4.0~P4.4 全部落地

@@ -90,9 +90,33 @@ pub fn compile_asm(
         pass::fold_pure_calls(&mut ip);
     }
     // M10b-straccum：字符串累加循环编译期折叠（对标 gcc -O2 对 bench.b20 的整函数折叠）。
-    // 严格识别 + 符号执行验证 + 长度上限；O2+ 且仅 x86-64，低优化级 / AArch64 零变化。
+    // 严格识别 lower 的原始 5 块骨架 → 必须在 inline / licm 之前跑：后者会重塑块结构，
+    // 使骨架识别失败（b20 折叠失效回归的根因）。低优化级 / AArch64 零变化。
     if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV) {
         pass::fold_string_accum(&mut ip);
+    }
+    // M13-sccp：保守条件常量传播 / 分支折叠。O2+ / x86-64，同内联护栏。
+    // 置于内联前：先折叠常量分支简化 CFG，让后续 pass 处理更简单的结构。
+    if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV)
+        && !debug_info && profile.is_none() && !instrument
+    {
+        pass::sccp(&mut ip);
+    }
+    // M11-inline：通用 Dial 函数内联（对标 gcc -O2 inlining）。O2+ / x86-64 only。
+    // 置于 fold_pure_calls 之后：常量实参的纯调用先折叠为常量（连递归一并消掉），
+    // 剩余一般调用再内联，避免与折叠抢同一站点。严格候选护栏 + ARC 原样保留。
+    // 排除 -g / PGO（训练+优化 / 插桩）：
+    //   - -g：内联体的 Line/DebugVar 属被调函数上下文，复制会污染 DWARF 行号表，
+    //     使子模块源码断点错位（本后端未生成 DW_TAG_inlined_subroutine）；
+    //   - PGO/插桩：profile 的 idx 由 IR 纯函数重算，训练版与优化版必须结构一致，
+    //     内联改变块结构会让冷热归属错位。与 LLVM/GCC「train/use 同配置」惯例一致。
+    if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV)
+        && !debug_info && profile.is_none() && !instrument
+    {
+        pass::inline_calls(&mut ip);
+        // M12-licm：通用循环不变代码外提。置于内联后、IVR 前——先外提不变量，
+        // 可能暴露更多 IVR 可识别的 base*C+iv 模式。同内联的 -g/PGO/插桩护栏。
+        pass::licm(&mut ip);
     }
     // M8-recspec：递归纯函数闭式特化。O3 + x86-64 only——这是私有后端专属的
     // 语义级激进优化（LLVM 通用后端不会把互递归识别成奇偶闭式）。用探针解释
@@ -115,6 +139,21 @@ pub fn compile_asm(
     // M7-e3ad：LLVM InstCombine 风格代数恒等式（x*0→0、x+0→x 等）。O3 only，仅 x86-64。
     if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV) {
         pass::instcombine(&mut ip);
+    }
+    // M15-unroll：保守循环完全展开（标准 for 骨架 + 常量小上界 2..8 + 纯整数 body）。
+    // O3 + x86-64，同 -g/PGO/插桩护栏。
+    if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV)
+        && !debug_info && profile.is_none() && !instrument
+    {
+        pass::unroll_loops(&mut ip);
+    }
+    // M14-dce-fn：全程序死函数消除（Private + 零引用）。置于所有变换之后——
+    // 内联/折叠消掉调用点后才暴露出真正的死函数；不动点删除。O1+ / x86-64，
+    // 同内联的 -g/PGO/插桩护栏（函数集合变化影响 DWARF / profile idx 对齐）。
+    if opt_level >= OptLevel::O1 && matches!(target, EmitTarget::X86_64SysV)
+        && !debug_info && profile.is_none() && !instrument
+    {
+        pass::eliminate_dead_functions(&mut ip);
     }
     // 调试：设 DIALC_DUMP_ASM_IR_POST=1 在全部 Pass 后打印 IR。
     if std::env::var("DIALC_DUMP_ASM_IR_POST").is_ok() {

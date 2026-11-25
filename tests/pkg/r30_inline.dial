@@ -1,0 +1,49 @@
+// R30 通用函数内联正确性测试。
+// O2/O3 会内联私有小函数；O0 不内联。两者输出必须逐字一致。
+// 覆盖：标量参数/多参数、返回值、字符串句柄参数（ARC 配对）、
+//       递归函数（候选排除但语义仍正确）、多调用点、嵌套调用。
+
+fn add2(a: int, b: int): int {
+    return a + b;
+}
+
+fn mix(a: int, b: int, c: int): int {
+    var t: int = a * 3 + b;
+    return t - c;
+}
+
+fn branchy(n: int): int {
+    if (n < 0) { return 0 - n; }
+    if (n == 0) { return 7; }
+    return n * n;
+}
+
+fn strlen_wrap(s: string): int {
+    // 句柄形参：入口 retain、退出 release，内联后必须逐字保留配对。
+    return s.length() * 2 + 1;
+}
+
+fn fallback(n: int): int {
+    if (n <= 1) { return 1; }
+    return n * fallback(n - 1); // 递归，不可内联
+}
+
+fn compose(n: int): int {
+    // 嵌套调用：add2 内联后可暴露新的 add2 调用点（不动点）。
+    return add2(mix(n, 2, 1), branchy(3));
+}
+
+fn main(): int {
+    print(str(add2(10, 32)));
+    print(str(mix(5, 6, 7)));
+    print(str(branchy(0 - 3)));
+    print(str(branchy(0)));
+    print(str(branchy(4)));
+    print(str(strlen_wrap("abcd")));
+    print(str(strlen_wrap("x")));
+    print(str(fallback(6)));
+    print(str(compose(4)));
+    // 多调用点：同一 callee 在多个站点内联，验证 vreg 重映射独立。
+    print(str(add2(add2(1, 2), add2(3, 4))));
+    return 0;
+}

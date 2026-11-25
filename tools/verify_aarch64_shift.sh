@@ -55,11 +55,11 @@ RUN_TIMEOUT=15
 
 SRC="$TMP/shift.dial"
 cat > "$SRC" <<'DIALEOF'
-fn shl_const(x: int): int { return x << 3; }
-fn shr_const(x: int): int { return x >> 2; }
-fn shl0(x: int): int { return x << 0; }
-fn shl63(x: int): int { return x << 63; }
-fn shl_var(x: int, n: int): int { return x << n; }
+export fn shl_const(x: int): int { return x << 3; }
+export fn shr_const(x: int): int { return x >> 2; }
+export fn shl0(x: int): int { return x << 0; }
+export fn shl63(x: int): int { return x << 63; }
+export fn shl_var(x: int, n: int): int { return x << n; }
 fn main(): int {
     print(shl_const(1));    // 8
     print(shr_const(16));   // 4
@@ -117,7 +117,9 @@ fi
 
 echo '== L5 x86 零回归：常量仍为 shlq/sarq $n 立即数、非常量仍为 %cl 变址 =='
 X86S="$TMP/shift.s"
-# x86 复用同名 .s（重新编译覆盖），断言立即数/变址各归其位、形态不变
+# x86 复用同名 .s（重新编译覆盖），断言立即数/变址各归其位、形态不变。
+# shift 函数用 export fn（External linkage）：不会被内联/死函数消除删除，
+# .s 里保留独立函数体供形态断言（否则 O2 内联后消除，形态断言落空）。
 if "$DIALC" build "$SRC" --backend=asm -O2 --no-link -o "$TMP/x86nl" >"$TMP/x86nl.log" 2>&1 && [ -f "$X86S" ]; then
     grep -qE 'shlq \$3, ' "$X86S" && ok "x86 常量 << 3 仍为 shlq \$3" || bad "x86 常量左移形态回归"
     grep -qE 'sarq \$2, ' "$X86S" && ok "x86 常量 >> 2 仍为 sarq \$2" || bad "x86 常量右移形态回归"
