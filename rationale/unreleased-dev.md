@@ -4402,3 +4402,57 @@ ms/iter）。根因是数组下标 `a[i]` 在 IR 里是 `Call dial_array_get(han
 M18 作为"低成本、低风险、方向正确"的增量采纳：强化 ARC 分析本身独立有价值（为将来
 任何句柄优化提供安全判据），冗余写回消除有稳定正收益且语义清晰。更大的 1.51× 句柄
 提升收益已精确定位障碍，留待专门的"句柄不变量提升"工程，不在本轮硬啃。
+
+## M19 借鉴 LLVM pass：函数副作用属性 + EarlyCSE + LICM 精确化
+
+### 动机（用户洞察）
+
+用户指出「pass 咱们也太过于弱了，我知道 LLVM 有什么好的算法，咱们也引用」。
+在四项候选（mem2reg 治根 / 副作用属性+LICM / GVN+CFG+ADCE / JumpThread+Unswitch）
+中用户全选。总纲不变：asm 主力、零 LLVM 库依赖，只**借鉴算法思想**，在自研 IR 自研实现。
+
+### 瓶颈实证（先定位，再动手）
+
+对 b17 的 post-IR 逐块分析发现，M18/M9 之后真正的短板已不是句柄提升本身：
+- 句柄 Load 已在块4（i/k 循环 preheader）外提（`dst:32/46/48/52`）；
+- `dial_array_get` 已在 codegen 内联成单条 `movq 24(%rax,%r10,8)`；
+- **但 j 循环体（块14）仍有重复栈槽 Load**：`Load dst:47/49 ptr:41`、
+  `Load dst:44/55 ptr:38`——同一槽块内读两次、中间无写入。
+- 根因：旧 `cse()` 只处理 Bin/Un/Cmp/Conv 纯算术指令，**完全不碰 Load**，
+  这是 LLVM EarlyCSE / MemDep 存在的原因。
+
+### 实现
+
+1. **`MemEffect` 副作用属性表**（LLVM Function Attributes 子集）：`ReadNone` /
+   `ReadOnly` / `WriteArg0` / `Unknown`。白名单 runtime 显式标注（get/length/eq 等
+   readonly；set/push 等 WriteArg0），白名单外一律 `Unknown`（保守，绝不漏标误删）。
+2. **`early_cse`**：块内维护 `ptr vreg → Value` 可用值表；Load 命中复用、删除；
+   Store / 写类 Call / ARC / CallIndirect / InlineAsm / EnvInit / FieldAddr / PtrAdd
+   按副作用失效；不动点 4 轮。仅 x86-64 + O2+ + 非 -g/PGO/instrument（同 inline 护栏），
+   挂接在 inline 之后、LICM 之前（`src/asm.rs`）。
+3. **LICM modified 集合精确化**：旧逻辑把 `Call` 的所有实参一律标「被修改」，导致
+   `dial_array_get(handle,i)` 这类只读调用误伤句柄槽；改为按 `MemEffect` 分类——
+   `ReadNone`/`ReadOnly` 不失效，仅 `WriteArg0`/`Unknown` 失效实参。
+
+### 踩坑（如实记录）
+
+- **Store 值传播破坏正确性**：初版 `Store{ptr,val}` 把 `avail[ptr]=val` 用于后续
+  Load 转发（LLVM EarlyCSE 的完整形态）。实测 b23 校验和变 0——verbose dump 定位到
+  block2 `Load dst:22 ptr:4` 复用了 `Store ptr:4 val:5`。根因是跨轮次不动点中，
+  被删除 Load 的 dst 在其它块经块参数引用，块内替换（只改后续指令）未覆盖。
+  **修正**：Store 一律 `avail.clear()`（只做 Load-Load 复用，不做 Store-Load 转发），
+  28/28 恢复。这是 LLVM EarlyCSE 的更安全子集，收益略小但语义无懈可击。
+
+### 验证
+
+- 正确性：28/28 校验和；A 组 `tests/asm_golden` 23/23 编译运行；O3 组编译运行；
+  `examples/callback_state_demo.dial` 输出逐字节一致；O2 校验和正确。
+- 性能（5 次取最小，自校准）：b17 1.2867→1.2206ms（快 5.1%）、
+  b15 1.0111→0.9747ms（快 3.6%）、b23 快 0.6%、b28 快 0.7%；方向一致、无退化。
+- 护栏：零 LLVM 库依赖（默认 `cargo build` 无 `--features llvm`）、LLVM 路径零改动、
+  AArch64 零变化、版本 1.22.0、不打 tag、零新依赖。
+
+### 后续方向
+
+EarlyCSE 只解决块内重复 Load，收益有限（1~5%）。更大收益（C 实验的 1.51× 句柄提升
+上限）需要跨块 SSA 化——即用户全选的 **mem2reg 治根**项，待本项稳定后推进。

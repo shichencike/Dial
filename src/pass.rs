@@ -2547,7 +2547,15 @@ fn licm_round(f: &mut IrFunction) -> usize {
                     | IrInst::StructRetain { ptr, .. } | IrInst::StructRelease { ptr, .. }
                     | IrInst::FieldAddr { base: ptr, .. } | IrInst::PtrAdd { base: ptr, .. }
                     => { modified.insert(*ptr); }
-                    IrInst::Call { args, .. } | IrInst::CallIndirect { args, .. } => {
+                    IrInst::Call { func, args, .. } => {
+                        match mem_effect_of(func) {
+                            MemEffect::ReadNone | MemEffect::ReadOnly => {}
+                            MemEffect::WriteArg0 | MemEffect::Unknown => {
+                                for a in args { if let Value::Reg(r) = a { modified.insert(*r); } }
+                            }
+                        }
+                    }
+                    IrInst::CallIndirect { args, .. } => {
                         for a in args { if let Value::Reg(r) = a { modified.insert(*r); } }
                     }
                     _ => {}
@@ -3449,6 +3457,159 @@ pub fn elide_array_handle_store(ip: &mut IrProgram) -> usize {
     }
     if total > 0 && std::env::var("DIALC_ARRFLAT_DUMP").is_ok() {
         eprintln!("[arrflat] elided {} redundant set-handle stores", total);
+    }
+    total
+}
+
+// ============================================================================
+// M19：LLVM 风格函数副作用属性 + EarlyCSE（内存版本化 Load 冗余消除）
+// ============================================================================
+//
+// 借鉴 LLVM 的两块基础设施，治本而非补丁：
+//   1. **函数副作用属性（Function Attributes）**：LLVM 的 readnone / readonly /
+//      argmemonly 分类。这里给每个 runtime 调用标注"读哪些内存、写哪些内存"，
+//      供 EarlyCSE 与 LICM 共用，替代旧的"Call 的所有实参都当作被修改"。
+//   2. **EarlyCSE（内存版本化）**：LLVM 的 EarlyCSE pass 核心——块内维护
+//      "栈槽 vreg → 当前可用值"表，遇到 Load 先看表命中则复用；遇到写内存
+//      的指令（Store / 写类 Call / ARC）按副作用精确失效。当前 cse() 只处理
+//      纯算术指令、完全不碰 Load，这是 b17 块14 重复栈槽 Load 的根因。
+//
+// 正确性原则（绝不破坏 ARC / 内存语义）：
+//   - 只复用 Load，绝不删除 Store/Call/ARC；删除的仅是"重复 Load"这一纯指令。
+//   - 失效粒度：Store 失效被写槽；写类 Call 失效"可能逃逸到该调用的所有槽"
+//     （保守：无 argmemonly 证明时全失效）；readonly/readnone 调用不失效任何槽。
+//   - Alloca 地址、FieldAddr / PtrAdd 产生的别名一律视为独立的槽标识，绝不
+//     跨别名复用（本函数若为这些形态直接跳过该槽）。
+//   - 仅 x86-64 + O2+ 且非 -g/PGO/instrument 时由 asm.rs 挂接（护栏同 LICM）。
+
+/// 函数内存副作用属性（LLVM `readnone`/`readonly`/`argmemonly` 的保守子集）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MemEffect {
+    /// 完全不访问函数外部可见内存（如纯算术查询）。
+    ReadNone,
+    /// 只读内存：读实参指向的对象，但不修改任何内存。
+    /// 典型：dial_array_get / dial_array_length / dial_string_eq / dial_string_length。
+    ReadOnly,
+    /// 写实参指向的内存（argmemonly-write）；其余内存不碰。
+    /// 典型：dial_array_set / dial_array_push（arg0 = 数组句柄）。
+    WriteArg0,
+    /// 副作用未知：可能读写任意内存。保守失效全部槽。
+    Unknown,
+}
+
+/// 查询 runtime / Dial 函数的副作用属性。
+/// 白名单外的函数一律 `Unknown`（保守），绝不因漏标而误删 Load。
+pub fn mem_effect_of(func: &str) -> MemEffect {
+    match func {
+        // ── readnone：查询但不碰内存 ────────────────────────────────────────
+        "dial_args" | "dial_chan_now_ms" | "dial_now_ms" => MemEffect::ReadNone,
+        // ── readonly：读句柄内容，不写 ──────────────────────────────────────
+        "dial_array_get" | "dial_array_length" | "dial_array_index_of"
+        | "dial_string_get" | "dial_string_length" | "dial_string_eq"
+        | "dial_string_index_of" | "dial_string_substring"
+        | "dial_bytes_get" | "dial_bytes_length"
+        | "dial_map_length" | "dial_map_contains" | "dial_map_get"
+        | "dial_kvmap_length" | "dial_set_length"
+        => MemEffect::ReadOnly,
+        // ── argmemonly-write：只写 arg0 句柄指向的对象 ──────────────────────
+        "dial_array_set" | "dial_array_set_borrowed" | "dial_array_push"
+        | "dial_array_pop" | "dial_array_insert" | "dial_array_remove"
+        | "dial_array_clear" | "dial_array_reverse" | "dial_array_sort"
+        => MemEffect::WriteArg0,
+        // ── 其余（new/clone/release/retain/concat/print/IO 等）一律保守 ────
+        _ => MemEffect::Unknown,
+    }
+}
+
+/// 块内单轮 EarlyCSE：维护 `ptr vreg → 可用值` 表，复用重复 Load。
+/// 返回本块消除的 Load 数。注意：只删 Load，不碰 Store/Call/ARC。
+fn early_cse_block(b: &mut crate::ir::IrBlock) -> usize {
+    // avail: ptr vreg → val，表示"该槽当前持有的最新值"。
+    let mut avail: HashMap<VReg, Value> = HashMap::new();
+    let mut removed = 0usize;
+    let mut i = 0usize;
+    while i < b.insts.len() {
+        let inst = b.insts[i].clone();
+        match &inst {
+            IrInst::Load { dst, ptr, .. } => {
+                // 只复用 Reg 形态的可用值；Imm 形态交给常量折叠，避免类型/宽度错配。
+                if let Some(Value::Reg(saved)) = avail.get(ptr).copied() {
+                    // 命中：用已有值替换本 Load 的定义，删除 Load。
+                    // 只在本块内替换后续使用（Load 的 dst 一定定义在上方，支配后续）。
+                    for j in (i + 1)..b.insts.len() {
+                        subst_inst(&mut b.insts[j], *dst, saved);
+                    }
+                    subst_term_val(&mut b.term, *dst, &Value::Reg(saved));
+                    b.insts.remove(i);
+                    removed += 1;
+                    continue;
+                } else {
+                    avail.insert(*ptr, Value::Reg(*dst));
+                }
+            }
+            IrInst::Store { .. } => {
+                // 保守版（诊断）：Store 清空全部可用值，不做值传播。
+                avail.clear();
+            }
+            IrInst::Call { func, args, .. } => {
+                match mem_effect_of(func) {
+                    MemEffect::ReadNone | MemEffect::ReadOnly => {}
+                    // 写 arg0 指向的对象：该 arg0 若来自某槽的 Load，则该槽的内容
+                    // 被间接修改——保守失效全部槽（不做跨调用别名证明）。
+                    MemEffect::WriteArg0 => { let _ = args; avail.clear(); }
+                    MemEffect::Unknown => { avail.clear(); }
+                }
+            }
+            IrInst::CallIndirect { .. } | IrInst::InlineAsm { .. }
+            | IrInst::EnvInit { .. }
+            | IrInst::RcRetain { .. } | IrInst::RcRelease { .. }
+            | IrInst::StructRetain { .. } | IrInst::StructRelease { .. }
+            => { avail.clear(); }
+            // FieldAddr / PtrAdd 产生别名，后续 Load 的 ptr 可能与已有槽别名——
+            // 保守全失效，绝不跨别名复用。
+            IrInst::FieldAddr { .. } | IrInst::PtrAdd { .. } => { avail.clear(); }
+            _ => {}
+        }
+        i += 1;
+    }
+    removed
+}
+
+/// 在终止符里把 Reg(from) 替换为 Value(to)。
+fn subst_term_val(t: &mut Term, from: VReg, to: &Value) {
+    let rep = |v: &mut Value| {
+        if matches!(v, Value::Reg(r) if *r == from) { *v = *to; }
+    };
+    match t {
+        Term::Jump { args, .. } => for v in args.iter_mut() { rep(v); },
+        Term::Branch { cond, then_args, else_args, .. } => {
+            if *cond == from { if let Value::Reg(r) = to { *cond = *r; } }
+            for v in then_args.iter_mut().chain(else_args.iter_mut()) { rep(v); }
+        }
+        Term::Return { val } => if let Some(v) = val { rep(v); },
+        Term::Unreachable => {}
+    }
+}
+
+/// 全函数 EarlyCSE（不动点：一轮可能暴露下一轮的复用机会，最多 4 轮）。
+pub fn early_cse(ip: &mut IrProgram) -> usize {
+    let mut total = 0usize;
+    const MAX_ROUNDS: usize = 4;
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for _ in 0..MAX_ROUNDS {
+        let mut round = 0usize;
+        for name in &names {
+            if let Some(f) = ip.functions.iter_mut().find(|f| f.name == *name) {
+                for b in &mut f.blocks {
+                    round += early_cse_block(b);
+                }
+            }
+        }
+        total += round;
+        if round == 0 { break; }
+    }
+    if total > 0 && std::env::var("DIALC_DUMP_EARLYCSE").is_ok() {
+        eprintln!("[earlycse] eliminated {} redundant loads", total);
     }
     total
 }

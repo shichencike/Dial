@@ -131,6 +131,20 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
   零回归；`DIALC_GRA_LEGACY=1` 可回滚。护栏：非 x86-64 / -g / O0-O1 / 内联汇编 /
   longjmp(EnvInit) 函数均不启用。证据链见
   [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M9-gra-linear 条。
+- **M19 借鉴 LLVM pass：函数副作用属性 + EarlyCSE（内存版本化 Load CSE）**：用户指出
+  自研 pass 过弱、要求引入 LLVM 的成熟算法（零 LLVM 库依赖，仅借鉴思想）。首批落地两块
+  基础设施：① **`MemEffect` 副作用属性表**（LLVM `readnone`/`readonly`/`argmemonly` 的
+  保守子集）——给 runtime 调用标注读写语义，未标函数一律 `Unknown`；② **`early_cse`**
+  （LLVM EarlyCSE 的块内内存版本化子集）——维护「槽 vreg → 可用值」表，消除重复栈槽
+  Load（旧 `cse()` 只碰纯算术、完全不碰 Load，是 b17 块14 重复 `Load ptr:41/ptr:38` 的
+  根因）；③ **LICM modified 集合按属性精确化**——`readonly/readnone` 调用不再把实参误判
+  为「被修改」，不再无谓阻挡句柄 Load 外提。正确性：Store 一律清空 avail（实测 Store 值
+  传播在循环回边场景破坏 b23 校验和，故采用更安全变体），不动点 4 轮收敛。护栏：inline
+  后 / LICM 前挂接，O2+ / x86-64 / 非 -g/PGO/instrument（同 inline）。验证：28/28 校验、
+  A 组 23/23 + O3 组编译运行、callback_state_demo 逐字节一致、O2 校验和正确；
+  b17 1.287→1.221ms（快 5.1%）、b15 快 3.6%。零新依赖、LLVM 路径/AArch64 零改动、
+  版本 1.22.0、不打 tag。证据链见 [rationale/unreleased-dev.md](rationale/unreleased-dev.md)
+  M19 条。
 
 ## [v1.21] — 2026-11-24
 

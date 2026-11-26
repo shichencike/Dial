@@ -123,6 +123,12 @@ pub fn compile_asm(
         && !debug_info && profile.is_none() && !instrument
     {
         pass::inline_calls(&mut ip);
+        // M19-earlycse：LLVM 风格「函数副作用属性 + 内存版本化 Load CSE」。
+        // 消除块内重复栈槽 Load（当前 cse() 只碰纯算术指令、完全不碰 Load，
+        // 这是 b17 块14 重复 `Load ptr:41/ptr:38` 的根因）。置于 inline 后、
+        // LICM 前：内联暴露更多块内重复 Load，先合并再外提。同 inline 的
+        // -g/PGO/插桩护栏（改块内指令数会影响 DWARF / profile idx 对齐）。
+        pass::early_cse(&mut ip);
         // M18-arrflat：消除安全 int[] 的 dial_array_set 冗余句柄写回，让 LICM
         // 能把循环内的句柄 Load 提升为不变量（治根 b17）。必须在 inline 后
         // （数组访问完整暴露）、LICM 前（让 LICM 看到 slot 不再被修改）。
