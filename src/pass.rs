@@ -3613,3 +3613,130 @@ pub fn early_cse(ip: &mut IrProgram) -> usize {
     }
     total
 }
+
+// ============================================================================
+// M20：LLVM 风格 CFG 简化（SimplifyCFG）与激进死代码消除（ADCE）
+// ============================================================================
+//
+// 借鉴 LLVM 的 SimplifyCFG + ADCE pass 的核心子集：
+//   1. **ADCE / 不可达块消除**：从 entry 做可达性分析，删除不可达块（保留 id
+//      空洞——codegen 用 block.id 生成标签，空洞无害）。这同时清掉 unroll_loops /
+//      specialize_recursive_calls 用 `Term::Unreachable` 断边后遗留的死块。
+//   2. **SimplifyCFG / 跳转链折叠**：若块 A 的终止符是 `Jump{target:B}`，且 B
+//      无块参数、B 唯一前驱是 A、B 不是入口——则把 A 的终止符改为 B 的终止符，
+//      把 B 的指令并入 A，删除 B。消除纯跳转中继块，缩短控制流。
+//
+// 正确性铁律：
+//   - 块参数（phi）：任何涉及非空 `params` 的块一律不参与跳转折叠（传值语义复杂，
+//     保守跳过）；不可达块删除则天然安全（不可达块的 phi 传值永不执行）。
+//   - 不重编号：删除块后剩余块 id 不变，跳转目标仍按 id 解析。
+//   - 不动点：跳转链折叠可能连续多轮，最多 8 轮收敛。
+//   - 护栏：同 inline / EarlyCSE（O2+ / x86-64 / 非 -g/PGO/instrument）。
+
+/// 从 entry 做可达性分析，删除不可达块。返回删除的块数。
+/// 注意：只删块，不重编号（保留 id 空洞）。
+fn adce_unreachable_blocks(f: &mut IrFunction) -> usize {
+    let n = f.blocks.len();
+    if n == 0 { return 0; }
+    let id2idx: HashMap<u32, usize> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+    let entry_idx = f.blocks.iter().position(|b| b.id == f.entry).unwrap_or(0);
+    let mut reachable = vec![false; n];
+    let mut work = vec![entry_idx];
+    reachable[entry_idx] = true;
+    while let Some(i) = work.pop() {
+        let succ_ids: Vec<u32> = match &f.blocks[i].term {
+            Term::Jump { target, .. } => vec![*target],
+            Term::Branch { then_b, else_b, .. } => vec![*then_b, *else_b],
+            Term::Return { .. } | Term::Unreachable => Vec::new(),
+        };
+        for sid in succ_ids {
+            if let Some(&si) = id2idx.get(&sid) {
+                if !reachable[si] { reachable[si] = true; work.push(si); }
+            }
+        }
+    }
+    let before = n;
+    // 按索引重建，删除不可达块（保留剩余块 id 不变）。
+    let kept: Vec<IrBlock> = f.blocks.drain(..).enumerate()
+        .filter(|(i, _)| reachable[*i]).map(|(_, b)| b).collect();
+    f.blocks = kept;
+    before - f.blocks.len()
+}
+
+/// 跳转链折叠的一轮：把「A --Jump--> B（B 无参数、唯一前驱 A、B 非入口）」合并。
+/// 返回本轮折叠数。
+fn simplifycfg_jump_chain_round(f: &mut IrFunction) -> usize {
+    let n = f.blocks.len();
+    if n < 2 { return 0; }
+    // 统计每个块的前驱数（按跳转/分支目标，含重复边的去重）。
+    let mut pred_count = vec![0usize; n];
+    let id2idx: HashMap<u32, usize> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+    for i in 0..n {
+        let succ_ids: Vec<u32> = match &f.blocks[i].term {
+            Term::Jump { target, .. } => vec![*target],
+            Term::Branch { then_b, else_b, .. } => {
+                let mut v = vec![*then_b];
+                if *then_b != *else_b { v.push(*else_b); }
+                v
+            }
+            _ => Vec::new(),
+        };
+        for sid in succ_ids {
+            if let Some(&si) = id2idx.get(&sid) { pred_count[si] += 1; }
+        }
+    }
+    let mut folded = 0usize;
+    // 找可折叠的 A：term=Jump{target=B}, args 为空（A 侧无传值），
+    //   B 无块参数、B 非入口、B 唯一前驱是 A。
+    let mut plan: Option<(usize, usize)> = None;
+    for ai in 0..n {
+        let target_b = match &f.blocks[ai].term {
+            Term::Jump { target, args } if args.is_empty() => *target,
+            _ => continue,
+        };
+        let bi = match id2idx.get(&target_b) { Some(&x) => x, None => continue };
+        if bi == ai || f.blocks[bi].id == f.entry { continue; }
+        if !f.blocks[bi].params.is_empty() { continue; }
+        if pred_count[bi] != 1 { continue; }
+        plan = Some((ai, bi));
+        break; // 一轮只折一处，保守收敛
+    }
+    if let Some((ai, bi)) = plan {
+        // 把 B 的指令并入 A，A 的 term 改为 B 的 term。
+        let b_insts = f.blocks[bi].insts.clone();
+        let b_term = f.blocks[bi].term.clone();
+        f.blocks[ai].insts.extend(b_insts);
+        f.blocks[ai].term = b_term;
+        // 删除 B（保留其它块 id 不变）。
+        f.blocks.remove(bi);
+        folded += 1;
+    }
+    folded
+}
+
+/// LLVM 风格 CFG 简化 + ADCE 全程序入口。
+pub fn simplifycfg_adce(ip: &mut IrProgram) -> (usize, usize) {
+    const MAX_ROUNDS: usize = 8;
+    let mut total_fold = 0usize;
+    let mut total_dead = 0usize;
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for _ in 0..MAX_ROUNDS {
+        let mut round = 0usize;
+        for name in &names {
+            if let Some(f) = ip.functions.iter_mut().find(|f| f.name == *name) {
+                round += simplifycfg_jump_chain_round(f);
+            }
+        }
+        total_fold += round;
+        if round == 0 { break; }
+    }
+    for name in &names {
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == *name) {
+            total_dead += adce_unreachable_blocks(f);
+        }
+    }
+    if (total_fold > 0 || total_dead > 0) && std::env::var("DIALC_DUMP_SIMPLIFYCFG").is_ok() {
+        eprintln!("[simplifycfg] folded {} jump chains, adce removed {} blocks", total_fold, total_dead);
+    }
+    (total_fold, total_dead)
+}

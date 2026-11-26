@@ -4456,3 +4456,28 @@ M18 作为"低成本、低风险、方向正确"的增量采纳：强化 ARC 分
 
 EarlyCSE 只解决块内重复 Load，收益有限（1~5%）。更大收益（C 实验的 1.51× 句柄提升
 上限）需要跨块 SSA 化——即用户全选的 **mem2reg 治根**项，待本项稳定后推进。
+
+## M20 借鉴 LLVM pass：SimplifyCFG + ADCE（CFG 简化与不可达块消除）
+
+### 实现
+- **不可达块消除（ADCE 子集）**：从 entry 做可达性 DFS，删除不可达块。保留块 id 空洞
+  （codegen 按 `block.id` 生成标签，空洞无害）。同时清掉 `unroll_loops` /
+  `specialize_recursive_calls` 用 `Term::Unreachable` 断边后遗留的死块——这是个既有缺口：
+  旧 `dce()` 只删纯指令、从不删块。
+- **跳转链折叠（SimplifyCFG 子集）**：`A --Jump--> B`（B 无块参数、B 唯一前驱 A、
+  B 非入口）→ 把 B 指令并入 A、A 的 term 改为 B 的 term、删 B。涉及块参数（phi）
+  的块一律跳过（传值语义复杂，保守）。一轮只折一处，最多 8 轮不动点。
+- 护栏：O2+ / x86-64 / 非 -g/PGO/instrument（同 inline），置于所有 pass 之后。
+
+### 验证
+- `DIALC_DUMP_SIMPLIFYCFG=1` 实测：折叠 30 个跳转链、删除 25 个不可达块。
+- 正确性：28/28 校验和；A 组 23/23 编译运行；callback_state_demo 逐字节一致；
+  O2 校验和正确。
+- 性能：基本持平（b12/b28 略好、b17/b23 在噪声内波动）——CFG 简化主要清理
+  编译期生成的死结构，本身非提速主力，但为后续 GVN/mem2reg 创造规整 CFG。
+- 护栏：零 LLVM 库依赖、LLVM 路径/AArch64 零改动、版本 1.22.0、不打 tag、零新依赖。
+
+### 说明
+GVN（全局值编号）暂缓并入本项：当前 post-IR 有 350 个 Load，跨块 Load 复用需完整
+支配树 + 内存版本，风险高；且 mem2reg（用户全选的治根项）会从根上消除大量栈槽 Load，
+届时 GVN 才有更大空间。决定把 GVN 与 mem2reg 协同推进，避免重复造轮子。

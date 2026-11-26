@@ -145,6 +145,14 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
   b17 1.287→1.221ms（快 5.1%）、b15 快 3.6%。零新依赖、LLVM 路径/AArch64 零改动、
   版本 1.22.0、不打 tag。证据链见 [rationale/unreleased-dev.md](rationale/unreleased-dev.md)
   M19 条。
+- **M20 借鉴 LLVM pass：SimplifyCFG + ADCE**：CFG 简化（跳转链折叠：`Jump→B` 且 B 无块参数、
+  唯一前驱、非入口 → 并入前驱）与激进死代码消除（从 entry 可达性分析删不可达块，保留
+  id 空洞；顺带清掉 unroll/specialize 遗留的 `Unreachable` 死块）。涉块参数一律跳过、
+  一轮一处、8 轮不动点；O2+ / x86-64 / 非 -g/PGO/instrument，所有 pass 之后挂接。
+  实测折叠 30 链、删 25 块；28/28 校验、A 组 23/23、callback 逐字节一致、O2 正确；
+  性能基本持平（清理型 pass，为后续 GVN/mem2reg 铺路）。零 LLVM 库依赖、LLVM 路径/
+  AArch64 零改动、版本 1.22.0、不打 tag。证据链见
+  [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M20 条。
 
 ## [v1.21] — 2026-11-24
 

@@ -177,6 +177,15 @@ pub fn compile_asm(
     {
         pass::eliminate_dead_functions(&mut ip);
     }
+    // M20-simplifycfg-adce：LLVM 风格 CFG 简化（跳转链折叠）+ 激进死代码消除
+    // （不可达块删除）。置于所有变换之后——清理 unroll/LICM/specialize 用
+    // `Term::Unreachable` 断边后遗留的死块，并折叠纯跳转中继块。删块保留 id 空洞
+    // （codegen 按 block.id 生成标签，空洞无害）。同 -g/PGO/插桩护栏。
+    if opt_level >= OptLevel::O2 && matches!(target, EmitTarget::X86_64SysV)
+        && !debug_info && profile.is_none() && !instrument
+    {
+        pass::simplifycfg_adce(&mut ip);
+    }
     // 调试：设 DIALC_DUMP_ASM_IR_POST=1 在全部 Pass 后打印 IR。
     if std::env::var("DIALC_DUMP_ASM_IR_POST").is_ok() {
         eprintln!("{:#?}", ip);
