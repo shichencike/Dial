@@ -175,6 +175,14 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
   callback 逐字节、B 组 213/213、tests 8/8、7 形态循环 O0=O3；O2/ReleaseSafe
   零变化、AArch64 零改动。护栏 O3+ReleaseFast+x86-64，回退 `DIALC_NO_LOOP_IV=1`。
   证据链见 [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M22 条。
+- **perf(pass) — M23-e3r 跨无关栈 store 的冗余 reload 消除**：`elide_redundant_reloads`
+  原只消**紧邻**的 `movq %r,off(%rsp)` + `movq off(%rsp),%r`；反汇编发现 b17 内层
+  这对指令被一条写**别的槽**的 `movq %r2,other(%rsp)` 隔开，因而漏消。扩展为：中间
+  只允许「写别的槽且源寄存器≠待转发值」的纯栈 store（最多跨 4 条），任何算术 /
+  call / label / 改写该寄存器或该槽的指令一律不跨，零误判。全 bench 消 8 条 mov、
+  .text -112B，b17 +0.35%（其余在噪声内），28/28 校验 + 逐字节一致 + ReleaseSafe
+  28/28；`DIALC_NO_RELOAD_GAP=1` 可回退。证据链见
+  [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M23/M24 条。
 
 ## [v1.21] — 2026-11-24
 

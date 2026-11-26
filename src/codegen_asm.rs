@@ -4125,22 +4125,52 @@ fn parse_rsp_load(line: &str) -> Option<(&str, &str)> {
 ///   · 只认 `movq`——窄整型（movl/movzbq/movb）、浮点（movsd/movss）、
 ///     立即数（`$imm`）、AArch64（str/ldr）一律不动。
 /// 仅用于 x86-64；AArch64 原样返回。
+/// M23-e3r：判断一行是否是「可安全跨越的无关栈 store」——用于
+/// elide_redundant_reloads 跳过中间插着的、与目标槽/源寄存器无关的 store。
+/// 严格限定：必须是 `movq %reg, OFF(%rsp)`（纯 8 字节栈写），且
+///   · 写的槽 ≠ 目标槽（不会覆盖刚写入的值）；
+///   · 源寄存器 ≠ load 的目标寄存器（不会破坏待转发的值）；
+///   · 源寄存器 ≠ 目标槽 store 的源寄存器（同理）。
+/// 任何其它指令（算术 / call / label / 非栈写）一律返回 false，保证零误判。
+fn is_safe_skip_store(line: &str, target_off: &str, forward_reg: &str) -> bool {
+    if let Some((sreg, soff)) = parse_rsp_store(line) {
+        soff != target_off && sreg != forward_reg
+    } else { false }
+}
+
 fn elide_redundant_reloads(asm: &str) -> String {
     let lines: Vec<&str> = asm.lines().collect();
     let mut out = String::with_capacity(asm.len());
     let mut i = 0;
+    // M23-e3r：允许 store→load 之间跨越「无关栈 store」（默认启用）。
+    // 判据极保守（见 is_safe_skip_store）：中间只能是写别的槽、且源寄存器
+    // 不等于待转发值的纯 movq 栈写，故绝不会踩踏。DIALC_NO_RELOAD_GAP=1
+    // 可回退到旧的「仅紧邻」行为，供诊断 / 回归隔离用。
+    let gap_ok = std::env::var("DIALC_NO_RELOAD_GAP").is_err();
     while i < lines.len() {
-        let mut skip_next = false;
-        if i + 1 < lines.len() {
-            if let (Some((sreg, soff)), Some((loff, lreg))) =
-                (parse_rsp_store(lines[i]), parse_rsp_load(lines[i + 1]))
-            {
-                if sreg == lreg && soff == loff { skip_next = true; }
+        let mut skip = 0usize; // 要跳过的行数（含 store 本身）
+        if let Some((sreg, soff)) = parse_rsp_store(lines[i]) {
+            // 向后寻找匹配的 load：先尝试紧邻，再（开关下）跨越无关 store。
+            let mut j = i + 1;
+            if gap_ok {
+                while j < lines.len()
+                    && is_safe_skip_store(lines[j], soff, sreg)
+                    && j - i <= 4   // 最多跨 4 条，避免跨越过多指令放大误判面
+                {
+                    j += 1;
+                }
+            } else {
+                j = i + 1;
+            }
+            if j < lines.len() {
+                if let Some((loff, lreg)) = parse_rsp_load(lines[j]) {
+                    if sreg == lreg && soff == loff { skip = j - i + 1; }
+                }
             }
         }
         out.push_str(lines[i]);
         out.push('\n');
-        i += if skip_next { 2 } else { 1 };  // 保留 store、丢弃紧邻的冗余 load
+        i += if skip > 0 { skip } else { 1 }; // 保留 store、丢弃冗余 load
     }
     out
 }

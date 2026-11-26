@@ -4712,3 +4712,65 @@ j 内层每轮 51 条指令：栈 load 9 + 栈 store 11 + payload 解引用 2 + 
 纯 IR pass 与 GRA 分配器层的优化均已触及天花板。b17 4.49× 的根因在**语言/容器抽象层**，
 要根治须做"数组扁平化/值类型"（IR 类型系统级改造），风险与工程量远超单 pass。
 建议转向低风险确定收益项（如 b21 字符串算法内联，消 PLT 调用），或按用户意愿另立项。
+
+## M23-e3r：梭哈 A 方向的唯一真实交付 + 结构性天花板结论
+
+用户「梭哈是一种智慧」，全力投入数组治根。延续 M24 的死结认知，本轮把 A 方向
+剩余可能性逐一实证，最终落到一处真实、正确、可交付的小改进。
+
+### 七个方向的实证结论（全部实测，无一靠推测）
+
+1. set rc/kind 守卫 — 零收益（M23 已证伪，`DIALC_SET_NOCHECK` ±0.5%）。
+2. gcc 向量化 — 矩阵内层仍标量，SIMD 全在填充循环（M23 已证伪）。
+3. GRA 钉住句柄（M24 原型）— 负收益：只钉住 1 个值，预留 phys 挤压线性扫描
+   反而多出栈往返，b17 0.994×，已回退。
+4. **数组扁平化 / payload 指针提升** — 本轮深挖后**证伪「有冗余可消」的前提**：
+   runtime 布局 `[kind@0][len@8][cap@16][elems@24]`、`rc@-8`（dial_array.c:28-30）；
+   get 在 codegen_asm.rs:3709-3734 已内联成纯裸访存
+   `lg(a)→rax; lg(i)→r10; shlq $3; addq; movq 24(rax)` = `*(a+i*8+24)`。
+   **没有独立的 payload 指针解引用层可提**——"扁平化"在 asm 后端早已完成。
+   IR 里 `Call get/set` 不纯（`is_pure()`=false），LICM 看不穿；新增 ArrayLoad IR
+   类型需改两后端 + MemEffect + LICM（rationale:4385 已实测 PtrAdd+Load 无收益）。
+5. 扩大 callee-saved 池 — x86-64 SysV 硬限 6 个（rbx/rbp/r12-15）；r8/r9 是
+   caller-saved，b17 set 慢路径 call 会破坏，不能跨 call 持有；prologue 保存区
+   固定 6×8B，扩容需改帧布局。块14 活跃 ~16 vreg vs 6 池——**寄存器不够是硬约束**，
+   非软件可突破。
+6. 回滚全局驻留（DIALC_GRA_LEGACY=1）— b17 慢 4.4%、b18 慢 15%（M24 已证伪）。
+7. LEA 索引融合 — 现有 M7-e3l 只支持 scale∈{2,3,5,9}，b17 的 `i*64+j` 需
+   scale=64（SIB 硬件只支持 1/2/4/8），SHL 展开会重回多指令，无净收益。
+
+**结构性天花板**：b17 j 内层每轮 51 条 = 栈 load 9 + store 11 + payload 直访 2 +
+地址计算 8 + 真实算术 **1**；gcc 栈数组内层 2 条（`imulq`+`addq`）。差距根源是
+「堆句柄 + get/set 抽象 + 6 寄存器硬限」，单 pass / 分配器调参均只触及 0.3% 级。
+
+### 唯一真实交付：M23-e3r 跨无关栈 store 的冗余 reload 消除
+
+反汇编证据（b17 j 内层，prepass 原文）：
+```
+movq %r12, %rax
+movq %rax, 808(%rsp)     # store vreg
+movq %r12, 408(%rsp)     # ← 写别的槽，无关
+movq 808(%rsp), %rax     # 冗余 reload（被上面那条隔开，旧 pass 漏消）
+```
+旧 `elide_redundant_reloads` 只查紧邻 `lines[i+1]`，被隔开即失效。M23-e3r 扩展为
+向后最多跨 4 条、且每条必须是 `movq %other, DIFFERENT_off(%rsp)`（源寄存器≠待转发
+值、槽≠目标槽）；任何算术 / call / label / 改写该寄存器或槽的指令立即停止，零误判。
+
+实测：
+- 反汇编：b17 的 `0x328(%rsp)`(十进制 808) 引用 2→1；全 bench `mov` 指令 4014→4006
+  （消 8 条），`.text` 64719→64607（-112B）。
+- 精确校准测量（TARGET_MS=150、7 次取最小）：b17 +0.35%，b12 +0.34%，其余 ±1% 噪声。
+  b08 0.89× / b21 1.08× 经 objdump 证实 off/on 汇编完全相同，系环境噪声，非 pass 效果。
+- 正确性：28/28 校验和、28/28 逐字节输出一致、ReleaseSafe(DIAL_SAFETY=2) 28/28。
+- 对齐安全：pass 排在 `align_loop_headers`（M7-e3d 的 `.p2align 4` 兜底）之前，
+  删 load 的字节平移被 padding 吸收，无 M7-e3c 式循环退化。
+- 护栏：仅 x86-64 SysV + 非 -g；`DIALC_NO_RELOAD_GAP=1` 回退旧行为。
+
+基准刷新（2026-11-26，四语言校准法）：Dial/C 几何平均 0.8368×→**0.8334×**；
+b17 4.49×→**4.473×**、b13 2.14×→2.12×、b08 1.96×（噪声内）。再次印证 b17 结构性天花板。
+bench/data.json 与 docx/bench.html 已同步刷新，check_bench_data.py 校验通过。
+
+**结论**：收益微小但真实、正确、低风险，作为默认启用的净正向改进落地。b17 的
+4.49× 差距是结构性天花板，继续投入 GRA / IR pass 不会产生数量级改善；若追求
+b17/b21 的大幅提升，需转向语言/容器抽象层（值类型数组）或字符串算法内联（b21），
+属另一独立工程。
