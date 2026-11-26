@@ -153,6 +153,17 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
   性能基本持平（清理型 pass，为后续 GVN/mem2reg 铺路）。零 LLVM 库依赖、LLVM 路径/
   AArch64 零改动、版本 1.22.0、不打 tag。证据链见
   [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M20 条。
+- **M21 借鉴 LLVM mem2reg（安全子集：只读标量栈槽提升）**：C 对照实验先量化上限
+  （纯累加循环寄存器 vs volatile 栈槽差 2.33×）；完整 mem2reg 需支配树 + phi 重建循环
+  归纳变量，叠加 codegen 对栈槽的深层假设（M18 句柄槽段错误教训），按「正确性优先 +
+  先量化 ROI」暂不硬啃，只落地绝对安全子集：`promote_readonly_slots` 把 IR 内只读、
+  非句柄、地址不逃逸的标量槽之 Load 提升为入口单次 Load 的 SSA 值（无 phi）。
+  实测提升 17 次 Load；28/28 校验、A 组 23/23、callback 逐字节一致、O2 正确；
+  专门构造非编译期常量实参的 fib/addmul 测试 O3 与 O0 在 4 组输入下逐组一致。
+  bench 基本持平（递归函数已被常量折叠覆盖），价值在用户真实程序。护栏：inline 后 /
+  EarlyCSE 前、O2+ / x86-64 / 非 -g/PGO/instrument。零 LLVM 库依赖、LLVM 路径/
+  AArch64 零改动、版本 1.22.0、不打 tag。证据链见
+  [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M21 条。
 
 ## [v1.21] — 2026-11-24
 

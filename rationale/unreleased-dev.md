@@ -4481,3 +4481,47 @@ EarlyCSE 只解决块内重复 Load，收益有限（1~5%）。更大收益（C 
 GVN（全局值编号）暂缓并入本项：当前 post-IR 有 350 个 Load，跨块 Load 复用需完整
 支配树 + 内存版本，风险高；且 mem2reg（用户全选的治根项）会从根上消除大量栈槽 Load，
 届时 GVN 才有更大空间。决定把 GVN 与 mem2reg 协同推进，避免重复造轮子。
+
+## M21 mem2reg 安全子集：只读标量栈槽提升为 SSA + 完整 mem2reg 可行性评估
+
+### 动机与收益上限实验（先量化，遵循 e3x 纪律）
+
+用户全选 mem2reg 治根项。先做 C 对照实验量化上限：纯累加循环（`s += i`），
+寄存器版归纳变量 2.737ms vs volatile 强制栈槽版 6.385ms——**差 2.33×**，与 M18
+句柄提升实验同级别。证明"栈槽 Load/Store 消除"有巨大收益空间。
+
+### 完整 mem2reg 的可行性评估（诚实结论：暂不硬啃）
+
+当前 IR 诊断（10 函数 post-IR）：138 个栈槽、350 个 Load、235 个 Store；槽0（run
+的 `name` 参数）被 Load 55 次。完整 mem2reg 需把栈槽提升为 SSA + 块参数(phi)，
+处理循环归纳变量（每轮 Load iv / Store iv+1）的跨块数据流。三重高风险：
+1. codegen 对栈槽有深层假设（prologue 直接写 `alloca_off` 内存、GRA 驻留、phi 装载）；
+2. M18 教训：把句柄槽加入 GRA promotable 即 7 函数段错误（`dial_array_release`
+   对句柄槽二次解引用）；
+3. 350 个 Load 中大量是循环归纳变量，需完整支配树 + phi 重建，内核级工程。
+
+结论：完整 mem2reg 收益上限高但风险与工程量不匹配，按"正确性优先 + 先量化 ROI"
+纪律，**本轮只落地绝对安全子集**，完整版列为独立大工程待后续专门立项。
+
+### 安全子集实现（本批采纳）
+
+`promote_readonly_slots`：把满足全部判据的栈槽，其所有 Load 提升为入口处单次
+Load 的 SSA 值（无 phi、无跨块写）：
+1. 槽类型是标量（I64/I32/F64/F32/I1/I8），排除 Handle/Ptr/FnPtr/Struct（规避 M18）；
+2. IR 内无 `Store{ptr:slot}`（参数槽由 prologue 在 IR 外写；局部槽有 Store 则跳过）；
+3. 槽地址不逃逸（不作 PtrAdd/FieldAddr base、Call 实参、Store val、Return/Jump/Branch
+   args、ARC ptr）；
+4. entry 块首插一次 `Load`，替换全函数其余 Load 为 `Value::Reg(new)`。
+挂接：inline 后 / EarlyCSE 前，O2+ / x86-64 / 非 -g/PGO/instrument。
+
+### 验证
+
+- 实测提升 17 次 Load（fibR/treeR/evR/odR 的 I64 参数槽；run 的 Handle 槽按判据 1 排除）。
+- 正确性：28/28 校验；A 组 23/23；callback_state_demo 逐字节一致；O2 正确；
+  **专门构造非编译期常量的实参测试**（fib/addmul，`args()` 运行时读入）——O3 与 O0
+  在 n=5/10/12/15 下输出逐组一致，证明 prologue 写槽→入口 Load 读槽链路正确。
+- 性能：bench 基本持平（这些递归纯函数已被 `fold_pure_calls` 常量折叠覆盖，收益重叠）；
+  价值在用户真实程序（未被折叠的参数密集/递归函数）。
+- AArch64：本 pass 有 x86-64 护栏、零变化（某测试程序的 AArch64 报错经 stash 对比
+  确认为基线既有现象，与本批无关）。
+- 护栏：零 LLVM 库依赖、LLVM 路径零改动、版本 1.22.0、不打 tag、零新依赖。

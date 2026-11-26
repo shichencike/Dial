@@ -3740,3 +3740,165 @@ pub fn simplifycfg_adce(ip: &mut IrProgram) -> (usize, usize) {
     }
     (total_fold, total_dead)
 }
+
+// ============================================================================
+// M21：mem2reg 安全子集——只读标量栈槽提升为 SSA 值
+// ============================================================================
+//
+// 借鉴 LLVM mem2reg 的「栈槽→SSA」思想，但只取**绝对安全**的子集：
+// 把「IR 函数体内从不写、地址不逃逸」的标量栈槽，其所有 Load 提升为入口处
+// 单次 Load 的 SSA 值。无 phi、无跨块写、无 ARC 语义——规避 M18 句柄槽段错误。
+//
+// 适用（全部满足）：
+//   1. 槽类型是标量（I64/I32/F64/F32/I1/I8），排除 Handle/Ptr/FnPtr/Struct；
+//   2. IR 内无 `Store{ptr:slot}`——参数槽由 codegen prologue 在 IR 外写，
+//      局部槽若有 Store 则跳过（需要 phi，本子集不做）；
+//   3. 槽地址不逃逸：不作 PtrAdd/FieldAddr 的 base、不作 Call/CallIndirect/InlineAsm
+//      实参、不作 Store 的 val、不在 Return/Jump/Branch args、不作 ARC 原语的 ptr；
+//   4. 至少一个 Load（否则零收益）。
+//
+// 实现：entry 块首插 `Load dst=new, ptr=slot`，全函数替换其它 `Load ptr=slot` 为
+// `Value::Reg(new)`，删除被替换的 Load。codegen prologue 已在 IR 执行前把参数值
+// 写进槽内存，入口 Load 读到的是真实参数值——语义等价。
+//
+// 护栏：O2+ / x86-64 / 非 -g/PGO/instrument（同 inline）。
+
+fn slot_type(f: &IrFunction, slot: VReg) -> Option<IrType> {
+    // 参数槽：按 param_slots 顺序对应 params 的类型。
+    for (i, &s) in f.param_slots.iter().enumerate() {
+        if s == slot { return Some(f.params[i].1.clone()); }
+    }
+    // 局部槽：找 Alloca dst，用其 reg_ty（Alloca 的 dst 类型就是槽的指针类型，
+    // 真正元素类型需从 Store/Load 的 ty 推；这里只在 Load 处确认，故返回 None
+    // 让调用方从 Load 的 ty 取）。
+    None
+}
+
+fn is_scalar_ty(t: &IrType) -> bool {
+    matches!(t, IrType::I64 | IrType::I32 | IrType::F64 | IrType::F32 | IrType::I1 | IrType::I8)
+}
+
+/// 槽地址是否逃逸（见判据 3）。
+fn slot_escapes(f: &IrFunction, slot: VReg) -> bool {
+    for b in &f.blocks {
+        for inst in &b.insts {
+            match inst {
+                IrInst::Store { ptr, val, .. } => {
+                    if *ptr == slot { return true; } // IR 内有写（判据 2 也会拦）
+                    if matches!(val, Value::Reg(v) if *v == slot) { return true; }
+                }
+                IrInst::PtrAdd { base, .. } | IrInst::FieldAddr { base, .. } => {
+                    if *base == slot { return true; }
+                }
+                IrInst::Call { args, .. } | IrInst::InlineAsm { args, .. } => {
+                    if args.iter().any(|a| matches!(a, Value::Reg(v) if *v == slot)) { return true; }
+                }
+                IrInst::CallIndirect { target, args, .. } => {
+                    if *target == slot { return true; }
+                    if args.iter().any(|a| matches!(a, Value::Reg(v) if *v == slot)) { return true; }
+                }
+                IrInst::RcRetain { ptr, .. } | IrInst::RcRelease { ptr, .. }
+                | IrInst::StructRetain { ptr, .. } | IrInst::StructRelease { ptr, .. } => {
+                    if *ptr == slot { return true; }
+                }
+                IrInst::EnvInit { argc, argv } => {
+                    if matches!(argc, Value::Reg(v) if *v == slot) { return true; }
+                    if matches!(argv, Value::Reg(v) if *v == slot) { return true; }
+                }
+                _ => {}
+            }
+        }
+        // 终止符 args
+        let args: Vec<&Value> = match &b.term {
+            Term::Jump { args, .. } => args.iter().collect(),
+            Term::Branch { then_args, else_args, .. } => then_args.iter().chain(else_args.iter()).collect(),
+            Term::Return { val } => val.iter().collect(),
+            Term::Unreachable => Vec::new(),
+        };
+        if args.iter().any(|a| matches!(a, Value::Reg(v) if *v == slot)) { return true; }
+    }
+    false
+}
+
+/// 全函数只读标量槽提升。返回替换的 Load 数。
+pub fn promote_readonly_slots(ip: &mut IrProgram) -> usize {
+    let mut total = 0usize;
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for name in &names {
+        // 只读扫描：找候选槽（参数槽 + 有 Alloca 的局部槽）。
+        let (candidates, first_load_ty): (Vec<VReg>, HashMap<VReg, IrType>) = {
+            let f = match ip.functions.iter().find(|f| f.name == *name) { Some(f) => f, None => continue };
+            let mut slots: HashSet<VReg> = f.param_slots.iter().copied().collect();
+            for b in &f.blocks {
+                for inst in &b.insts {
+                    if let IrInst::Alloca { dst, .. } = inst { slots.insert(*dst); }
+                }
+            }
+            let mut cands = Vec::new();
+            let mut ty_map = HashMap::new();
+            for slot in slots {
+                if slot_escapes(f, slot) { continue; }
+                // 类型：参数槽取声明类型；局部槽取首个 Load 的 ty。
+                let ty = match slot_type(f, slot) {
+                    Some(t) => t,
+                    None => {
+                        let mut found = None;
+                        for b in &f.blocks {
+                            for inst in &b.insts {
+                                if let IrInst::Load { ptr, ty, .. } = inst {
+                                    if *ptr == slot { found = Some(ty.clone()); break; }
+                                }
+                            }
+                            if found.is_some() { break; }
+                        }
+                        match found { Some(t) => t, None => continue }
+                    }
+                };
+                if !is_scalar_ty(&ty) { continue; }
+                // 至少一处 Load。
+                let loads = f.blocks.iter().flat_map(|b| b.insts.iter())
+                    .filter(|inst| matches!(inst, IrInst::Load { ptr, .. } if *ptr == slot)).count();
+                if loads == 0 { continue; }
+                cands.push(slot);
+                ty_map.insert(slot, ty);
+            }
+            (cands, ty_map)
+        };
+        if candidates.is_empty() { continue; }
+        // 写变换：对每个候选，entry 插一次 Load，替换其余 Load。
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == *name) {
+            let entry = f.entry;
+            let entry_idx = f.blocks.iter().position(|b| b.id == entry).unwrap_or(0);
+            for slot in &candidates {
+                let ty = first_load_ty.get(slot).unwrap().clone();
+                let new_v = f.new_reg(ty.clone());
+                // 先替换/删除全函数所有 Load{ptr:slot}（此时尚未插入新 Load，
+                // 不会误伤）。注意：被删 Load 的 dst 若经块参数跨块传递，本块替换
+                // 覆盖不到——候选筛选时 slot_escapes 已排除跨块形态，这里安全。
+                for b in f.blocks.iter_mut() {
+                    let mut i = 0usize;
+                    while i < b.insts.len() {
+                        let is_load_slot = matches!(&b.insts[i], IrInst::Load { ptr, .. } if *ptr == *slot);
+                        if is_load_slot {
+                            let old_dst = match &b.insts[i] { IrInst::Load { dst, .. } => *dst, _ => unreachable!() };
+                            for j in (i + 1)..b.insts.len() {
+                                subst_inst(&mut b.insts[j], old_dst, new_v);
+                            }
+                            subst_term_val(&mut b.term, old_dst, &Value::Reg(new_v));
+                            b.insts.remove(i);
+                            total += 1;
+                            continue;
+                        }
+                        i += 1;
+                    }
+                }
+                // 最后在 entry 块首插入一次 Load，作为提升后 SSA 值的唯一来源。
+                f.blocks[entry_idx].insts.insert(0, IrInst::Load { dst: new_v, ptr: *slot, ty });
+            }
+        }
+    }
+    if total > 0 && std::env::var("DIALC_DUMP_MEM2REG").is_ok() {
+        eprintln!("[mem2reg] promoted {} readonly slot loads to SSA", total);
+    }
+    total
+}

@@ -123,6 +123,11 @@ pub fn compile_asm(
         && !debug_info && profile.is_none() && !instrument
     {
         pass::inline_calls(&mut ip);
+        // M21-mem2reg（安全子集）：把「IR 内只读、非句柄、地址不逃逸」的标量栈槽
+        // 提升为入口处单次 Load 的 SSA 值（LLVM mem2reg 思想的无 phi 子集）。
+        // 置于 inline 后、EarlyCSE 前：先消槽访问，再让 EarlyCSE 合并剩余重复 Load。
+        // 同 inline 的 -g/PGO/插桩护栏。句柄/Ptr/Struct 槽一律排除（规避 M18 段错误）。
+        pass::promote_readonly_slots(&mut ip);
         // M19-earlycse：LLVM 风格「函数副作用属性 + 内存版本化 Load CSE」。
         // 消除块内重复栈槽 Load（当前 cse() 只碰纯算术指令、完全不碰 Load，
         // 这是 b17 块14 重复 `Load ptr:41/ptr:38` 的根因）。置于 inline 后、
