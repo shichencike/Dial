@@ -4525,3 +4525,74 @@ Load 的 SSA 值（无 phi、无跨块写）：
 - AArch64：本 pass 有 x86-64 护栏、零变化（某测试程序的 AArch64 报错经 stash 对比
   确认为基线既有现象，与本批无关）。
 - 护栏：零 LLVM 库依赖、LLVM 路径零改动、版本 1.22.0、不打 tag、零新依赖。
+
+## M22 循环归纳变量 SSA 提升（LIVP — LLVM mem2reg 循环特化）
+
+### 动机：用户"根在 IR"判断的汇编实证
+
+用户指出「果然问题的根是在 ir 上面」。反汇编 b17 定量确认：396 条指令中 **87 条
+是栈内存访问（22%）**，`i` 循环头每轮 `mov 0x2c8(%rsp),%rax`，归纳变量全程在栈上。
+根因链条完整闭合：
+1. lower 把所有局部变量放栈槽，循环归纳变量全程 `Load/Store(ptr=slot)`；
+2. codegen 的驻留明确排除 `alloca_off` 地址槽（`!alloca_off.contains_key`）——
+   M9 块内 GRA 只驻留短命 vreg，**救不了跨块归纳变量**；
+3. 只要 IR 还有 `Load(ptr=slot)`，汇编就必然有栈访问，驻留消不掉 Load 本身。
+   这印证了之前 C 对照实验的 2.33× 收益空间，且机制在 Dial 里真实存在。
+
+### 可行性基础
+
+codegen 的 phi 基础设施完整：`write_block_args` 把跳转实参写进目标块 param 的槽，
+`compute_live_span` 让长命的循环携带 phi 优先占据物理寄存器，块入口装载一次后
+全程常驻（keep_flush 留空、p 全程权威）。IR 原生支持块参数（phi）——只是 lower
+从不为循环归纳变量生成（b17 的 16 个块全 `params=0`）。
+
+### 实现：promote_loop_ivs
+
+把教科书式循环归纳变量槽提升为 header 块参数 phi：
+`preheader: Store(slot,init); Jump header` / `header: Load(slot); ICmp; Branch` /
+`latch: Load(slot); Add(+step); Store(slot); Jump header`
+⇒ `preheader: Jump header(init)` / `header(phi): ICmp(phi); Branch` /
+`latch: Add(phi,+step); Jump header(newval)`。
+
+严格安全判据（全部满足才变换）：slot 为 I64 标量且地址不逃逸；header=Branch 且
+cond 来自 `ICmp(Load(slot))`；恰 2 前驱（preheader 有初始化 Store、latch 有
+`Load→Bin(Add/Sub)→Store` 更新链）；slot 的 Store 只在 preheader/latch 两块；
+**slot 的每个 Load 的 dst 不得跨块使用**（替换只能块内进行，跨块会悬空）；
+header 的 Load dst 只能被 ICmp 使用一次。挂接：O3 + ReleaseFast + x86-64 +
+非 -g/PGO/instrument，置于所有变换之后、simplifycfg_adce 之前。
+回退开关 `DIALC_NO_LOOP_IV=1`，诊断 `DIALC_DUMP_LOOP_IV=1`、
+`DIALC_LOOP_IV_SKIP=<header ids>`。
+
+### 踩坑（两轮真实 bug，如实记录）
+
+1. **b26 跨块使用悬空**（got 499500000≠511213536）：二分定位到 `run header=113`。
+   b26 内层 body 跨块使用外层 i 的 Load dst（块114 定义、块118 的 XOR 用），
+   删除 Load 后悬空。修复：加 `slot_loads_used_locally` 检查——任何 Load(slot) 的
+   dst 跨块使用即跳过该循环（b26 等嵌套跨块场景被保守跳过，47 vs 49 命中）。
+2. **kvmap 段错误**（rc=139）：header 的 Load dst 不仅喂 ICmp，还在 body 作
+   `dial_array_get` 索引（跨块）；原检查误跳过 header Load。修复：header Load dst
+   必须 `use_count==1`（仅 ICmp）且无跨块使用。
+3. **while 循环结果错误**（799534706≠499500）：latch 块有两个 `Load(slot)`
+   （`s+i` 用 dst=10、`i+1` 用 dst=13），原 apply 只替换更新链那个(dst=13)，
+   漏了 dst=10 读到未更新槽。修复：latch 内所有 `Load(slot)` 统一替换成 phi 并删除，
+   用值匹配（retain）而非固定索引避免删除漂移。
+
+### 验证
+
+- 反汇编：b17 栈访问 87→80（-8%）、指令 396→364、i 槽读 4→2。
+- 性能（5 次取最小）：b17 1.2239→1.1289ms（-7.8%）、b23 -3.5%、b15 -5.2%、
+  b16 -4.4%、b12 -2.5%；b26（跳过）持平。方向一致、无退化。
+- 正确性：28/28 校验和；A 组 65/65 逐字节；callback 逐字节；B 组 213/213；
+  tests 根目录 8/8；7 组纯常量嵌套循环（不同边界）O0=真值=O3；while/双计数器/
+  三重嵌套/倒序/条件累加/break 型 while 共 7 形态 O0=O3-LIVP=O3+LIVP；
+  kvmap_string_value_smoke 与基线逐字节一致（修复段错误后）。
+- 护栏：O2/ReleaseSafe 28/28（LIVP 仅 O3+ReleaseFast）；AArch64 零变化（该目标
+  既有栈对齐报错经开关对比确认与本次无关）；零 LLVM 库依赖、版本 1.22.0、
+  不打 tag、零新依赖。
+
+### 说明
+
+LIVP 兑现了"IR 层治根"，但实测收益（b17 -7.8%）低于 C 实验的 2.33× 上限——
+原因是 codegen 的 phi 实参在**每个块边界仍强制写一次槽**（write_block_args →
+sg_force_stack），只消掉了循环体内的重复 Load。要进一步逼近上限需改 codegen 的
+phi 边界协议（让 phi 全程驻留寄存器、块边界不落栈），风险更高，列为后续方向。

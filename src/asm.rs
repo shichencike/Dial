@@ -182,6 +182,19 @@ pub fn compile_asm(
     {
         pass::eliminate_dead_functions(&mut ip);
     }
+    // M22-loopiv：循环归纳变量 SSA 提升（LLVM mem2reg 循环特化）。把教科书式
+    // for 循环的归纳变量槽提升为 header 块参数 phi，消除热循环里每轮的
+    // `Load/Store(ptr=slot)`（M9 块内 GRA 排除 alloca 槽、救不了跨块归纳变量）。
+    // 置于所有变换之后：此时 IR 已稳定，LIVP 引入的 phi 不会被 IVR/unroll 误判；
+    // 早于 simplifycfg_adce（后者折叠跳转链，需看到 phi 的真实 CFG）。
+    // O3 + ReleaseFast + x86-64 + 非 -g/PGO/插桩护栏；DIALC_NO_LOOP_IV=1 可回退。
+    if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV)
+        && matches!(safety, SafetyMode::ReleaseFast)
+        && !debug_info && profile.is_none() && !instrument
+        && std::env::var("DIALC_NO_LOOP_IV").is_err()
+    {
+        pass::promote_loop_ivs(&mut ip);
+    }
     // M20-simplifycfg-adce：LLVM 风格 CFG 简化（跳转链折叠）+ 激进死代码消除
     // （不可达块删除）。置于所有变换之后——清理 unroll/LICM/specialize 用
     // `Term::Unreachable` 断边后遗留的死块，并折叠纯跳转中继块。删块保留 id 空洞

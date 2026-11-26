@@ -3902,3 +3902,410 @@ pub fn promote_readonly_slots(ip: &mut IrProgram) -> usize {
     }
     total
 }
+
+// ============================================================================
+// M22：循环归纳变量 SSA 提升（LIVP — Loop Induction Variable Promotion）
+// ============================================================================
+//
+// 借鉴 LLVM mem2reg 在循环上的特化，治 IR 抽象过高的根：lower 把所有局部
+// 变量放栈槽，循环归纳变量 i 全程 `Load(ptr=slot)` / `Store(ptr=slot, i+1)`，
+// 而 M9 的块内 GRA 排除 alloca 地址槽、驻留不了它——汇编里每轮
+// `mov 0x2c8(%rsp),%rax`（b17 实测 87 条栈访问的主因）。
+//
+// 本 pass 把教科书式 for 循环的归纳变量槽提升为 header 的块参数 phi：
+//   preheader: Store(slot, init); Jump header
+//   header:    Load(slot); ICmp; Branch body/exit
+//   body:      ...Load(slot)...
+//   latch:     Load(slot); Add(+step); Store(slot); Jump header
+// ⇒
+//   preheader: Jump header(init)
+//   header(phi): ICmp(phi); Branch body/exit
+//   body:      ...用 phi...
+//   latch:     Add(phi, +step); Jump header(newval)
+//
+// codegen 的 phi 基础设施（write_block_args + 跨块驻留绑定 + 强制落栈）会把
+// phi 实参在块边界写一次槽、块入口装载到寄存器后全程常驻——消除循环体里每轮
+// 的重复 Load/Store。
+//
+// 安全判据（全部满足才变换，否则跳过该循环）：
+//   1. slot 类型 I64 标量，地址不逃逸（不作 PtrAdd/FieldAddr base、Call 实参、
+//      Store 的 val、ARC ptr、Return/Jump/Branch args、其它槽的地址）；
+//   2. header term=Branch，cond 来自 `ICmp(Load(slot), bound)`；
+//   3. header 恰有 2 前驱：一个 preheader（其末尾 `Store(slot, init)`），
+//      一个 latch（其末尾 `Load(slot)→Bin(Add/Sub)→Store(slot)` 更新链）；
+//   4. slot 的所有 Load/Store 只出现在 {preheader, header, body/latch} 这些块，
+//      且 preheader 只有那一个初始化 Store、latch 只有那一个更新 Store；
+//   5. 只有 loop 的两个前驱跳到 header（无额外入口）。
+//
+// 护栏：O3 + ReleaseFast + x86-64 + 非 -g/PGO/instrument（由 asm.rs 挂接控制）。
+
+/// 判断一个 vreg 是否可能作为归纳变量槽被提升（收集候选的 header + slot）。
+#[derive(Clone, Debug)]
+struct IvCandidate {
+    header_id: u32,
+    slot: VReg,
+    preheader_id: u32,
+    latch_id: u32,
+    init: Value,
+    update_dst: VReg,
+    /// header 内喂给 ICmp 的 Load 指令索引
+    header_load_idx: usize,
+    /// preheader 内初始化 Store 的索引
+    preheader_store_idx: usize,
+}
+
+/// 安全检查：slot 的所有 Load 的 dst，其使用点是否都在各自的定义块内。
+/// 若任一 Load 的 dst 被跨块使用，提升后会悬空（替换只能块内进行），返回 false。
+/// 例外：header 内喂 ICmp 的那个 Load 由 apply_loop_iv 特殊处理，不计入。
+fn slot_loads_used_locally(f: &IrFunction, slot: VReg, header_id: u32) -> bool {
+    // 收集每个 Load(slot) 的 (block_id, dst)
+    let mut loads: Vec<(u32, VReg)> = Vec::new();
+    for b in &f.blocks {
+        for ins in &b.insts {
+            if let IrInst::Load { dst, ptr, .. } = ins {
+                if *ptr == slot { loads.push((b.id, *dst)); }
+            }
+        }
+    }
+    for (def_block, dst) in loads {
+        // 统计 dst 的所有使用点：总数 + 是否有跨块使用。
+        let mut use_count = 0usize;
+        let mut cross_block = false;
+        for b in &f.blocks {
+            for ins in &b.insts {
+                let mut uses = Vec::new();
+                ins.reg_uses(&mut uses); // reg_uses 不含 def，故不会把 Load 自身算进来
+                for u in uses {
+                    if u == dst {
+                        use_count += 1;
+                        if b.id != def_block { cross_block = true; }
+                    }
+                }
+            }
+            let mut tu: Vec<Value> = Vec::new();
+            match &b.term {
+                Term::Jump { args, .. } => tu.extend(args.iter().copied()),
+                Term::Branch { cond, then_args, else_args, .. } => {
+                    tu.push(Value::Reg(*cond));
+                    tu.extend(then_args.iter().copied());
+                    tu.extend(else_args.iter().copied());
+                }
+                Term::Return { val } => { if let Some(v) = val { tu.push(*v); } }
+                Term::Unreachable => {}
+            }
+            for v in &tu {
+                if matches!(v, Value::Reg(r) if *r == dst) {
+                    use_count += 1;
+                    if b.id != def_block { cross_block = true; }
+                }
+            }
+        }
+        // 任何跨块使用都会因「替换只能块内进行」而悬空 → 拒绝该候选。
+        if cross_block { return false; }
+        // header 里的 Load(slot) 会被删除、其 dst 仅 ICmp 改为 phi；
+        // 若它还被 header 内其它指令使用（use_count > 1），删除后悬空 → 拒绝。
+        if def_block == header_id && use_count != 1 { return false; }
+        // 其它块里的 Load：dst 必须在同块被使用至少一次（否则本就是死 Load，
+        // 删掉无害，无需特别处理；这里不拒绝）。
+    }
+    true
+}
+
+fn slot_escapes_general(f: &IrFunction, slot: VReg) -> bool {
+    for b in &f.blocks {
+        for inst in &b.insts {
+            match inst {
+                IrInst::Store { ptr, val, .. } => {
+                    if *ptr == slot { continue; } // 对自身槽的读写是正常访问
+                    if matches!(val, Value::Reg(v) if *v == slot) { return true; }
+                }
+                IrInst::Load { ptr, .. } => { if *ptr == slot { continue; } }
+                IrInst::PtrAdd { base, .. } | IrInst::FieldAddr { base, .. } => {
+                    if *base == slot { return true; }
+                }
+                IrInst::Call { args, .. } | IrInst::InlineAsm { args, .. } => {
+                    if args.iter().any(|a| matches!(a, Value::Reg(v) if *v == slot)) { return true; }
+                }
+                IrInst::CallIndirect { target, args, .. } => {
+                    if *target == slot { return true; }
+                    if args.iter().any(|a| matches!(a, Value::Reg(v) if *v == slot)) { return true; }
+                }
+                IrInst::RcRetain { ptr, .. } | IrInst::RcRelease { ptr, .. }
+                | IrInst::StructRetain { ptr, .. } | IrInst::StructRelease { ptr, .. } => {
+                    if *ptr == slot { return true; }
+                }
+                IrInst::EnvInit { argc, argv } => {
+                    if matches!(argc, Value::Reg(v) if *v == slot) { return true; }
+                    if matches!(argv, Value::Reg(v) if *v == slot) { return true; }
+                }
+                IrInst::Alloca { dst, .. } => { if *dst == slot { continue; } }
+                _ => {}
+            }
+        }
+        let args: Vec<&Value> = match &b.term {
+            Term::Jump { args, .. } => args.iter().collect(),
+            Term::Branch { then_args, else_args, .. } => then_args.iter().chain(else_args.iter()).collect(),
+            Term::Return { val } => val.iter().collect(),
+            Term::Unreachable => Vec::new(),
+        };
+        if args.iter().any(|a| matches!(a, Value::Reg(v) if *v == slot)) { return true; }
+    }
+    false
+}
+
+/// 分析函数，找出所有可提升的归纳变量候选（只读，不改 IR）。
+fn analyze_loop_ivs(f: &IrFunction) -> Vec<IvCandidate> {
+    let mut out = Vec::new();
+    let id2idx: HashMap<u32, usize> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+    // 前驱块 id 表
+    let mut preds: HashMap<u32, Vec<u32>> = HashMap::new();
+    for b in &f.blocks {
+        let succ: Vec<u32> = match &b.term {
+            Term::Jump { target, .. } => vec![*target],
+            Term::Branch { then_b, else_b, .. } => vec![*then_b, *else_b],
+            _ => Vec::new(),
+        };
+        for s in succ { preds.entry(s).or_default().push(b.id); }
+    }
+    // 枚举每个 header 候选
+    for hb in &f.blocks {
+        let hid = hb.id;
+        // header 必须是 Branch，cond 来自 ICmp
+        let cond = match &hb.term { Term::Branch { cond, .. } => *cond, _ => continue };
+        if !id2idx.contains_key(&hid) { continue; }
+        // 找 header 里定义 cond 的 ICmp
+        let icmp_idx = hb.insts.iter().position(|ins| {
+            matches!(ins, IrInst::ICmp { dst, .. } if *dst == cond)
+        });
+        let icmp_idx = match icmp_idx { Some(x) => x, None => continue };
+        // ICmp 的 a 必须是 Reg，且该 Reg 由 header 内的 Load(slot) 定义
+        let (a_reg, _b) = match &hb.insts[icmp_idx] {
+            IrInst::ICmp { a, b, .. } => (*a, *b), _ => continue,
+        };
+        let a_v = match a_reg { Value::Reg(r) => r, _ => continue };
+        let header_load_idx = hb.insts.iter().position(|ins| {
+            matches!(ins, IrInst::Load { dst, .. } if *dst == a_v)
+        });
+        let header_load_idx = match header_load_idx { Some(x) => x, None => continue };
+        let slot = match &hb.insts[header_load_idx] {
+            IrInst::Load { ptr, ty, .. } => {
+                if *ty != IrType::I64 { continue; }
+                *ptr
+            }
+            _ => continue,
+        };
+        // 槽地址不逃逸
+        if slot_escapes_general(f, slot) { continue; }
+        // 安全：slot 的 Load dst 不得跨块使用（提升后替换只能块内进行，跨块会悬空）
+        if !slot_loads_used_locally(f, slot, hid) { continue; }
+        // header 必须恰有 2 个不同前驱
+        let hp = match preds.get(&hid) { Some(p) => p, None => continue };
+        if hp.len() != 2 { continue; }
+        let p0 = hp[0]; let p1 = hp[1];
+        // 区分 preheader（有 Store(slot, init)）和 latch（有更新链）
+        let mut pre = None; let mut latch = None;
+        for &pid in &[p0, p1] {
+            let pi = match id2idx.get(&pid) { Some(&x) => x, None => continue };
+            let pb = &f.blocks[pi];
+            // preheader：末尾附近（最后一条 Store）有 Store(slot, init)
+            let init_store = pb.insts.iter().rposition(|ins| {
+                matches!(ins, IrInst::Store { ptr, .. } if *ptr == slot)
+            });
+            // latch：末尾 Load(slot)→Bin(Add/Sub)→Store(slot)
+            let n = pb.insts.len();
+            let mut upd = None;
+            if n >= 3 {
+                let s_idx = n - 1; // Store 通常是最后一条
+                if let IrInst::Store { ptr, val, .. } = &pb.insts[s_idx] {
+                    if *ptr == slot {
+                        if let Value::Reg(bin_dst) = val {
+                            // bin_dst 由 Bin(Add/Sub) 定义，其 a 来自 Load(slot)
+                            if let Some(bi) = pb.insts.iter().position(|ins| {
+                                matches!(ins, IrInst::Bin { dst, op, .. } if *dst == *bin_dst && matches!(op, ABin::Add | ABin::Sub))
+                            }) {
+                                if let IrInst::Bin { a, b, .. } = &pb.insts[bi] {
+                                    let a_v = match a { Value::Reg(r) => *r, _ => continue };
+                                    if let Some(li) = pb.insts.iter().position(|ins| {
+                                        matches!(ins, IrInst::Load { dst, ptr, .. } if *dst == a_v && *ptr == slot)
+                                    }) {
+                                        upd = Some((li, bi, s_idx, *bin_dst, *b, match &pb.insts[bi] { IrInst::Bin { op, .. } => *op, _ => unreachable!() }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((li, bi, si, ud, step, op)) = upd {
+                latch = Some((pid, pi, li, bi, si, ud, step, op));
+            } else if let Some(si) = init_store {
+                // 确认是 Init：Store 的值不是本槽 Load 派生（简单判据：preheader 里该 slot 只有这一个 Store）
+                let scount = pb.insts.iter().filter(|ins| matches!(ins, IrInst::Store { ptr, .. } if *ptr == slot)).count();
+                if scount == 1 {
+                    let init = match &pb.insts[si] { IrInst::Store { val, .. } => *val, _ => continue };
+                    pre = Some((pid, pi, si, init));
+                }
+            }
+        }
+        let (pre_id, _pre_idx, pre_si, init) = match pre { Some(x) => x, None => continue };
+        let (lat_id, _lat_idx, _lat_li, _lat_bi, _lat_si, upd_dst, _step, _step_op) = match latch { Some(x) => x, None => continue };
+        // preheader 与 latch 必须不同，且都不是 header
+        if pre_id == lat_id || pre_id == hid || lat_id == hid { continue; }
+        // 关键安全：slot 的所有 Load/Store 必须只在 {preheader, header, latch} 三个块里。
+        // （body 若也访问 slot，本版本保守跳过——b17 的 i 槽 body 里 Read 用于算下标，
+        //   这些 Load 会被统一替换成 phi，所以其实可以允许；但 Store 只允许在 pre/latch。）
+        let mut store_blocks: HashSet<u32> = HashSet::new();
+        for b in &f.blocks {
+            for ins in &b.insts {
+                if let IrInst::Store { ptr, .. } = ins {
+                    if *ptr == slot { store_blocks.insert(b.id); }
+                }
+            }
+        }
+        if store_blocks.len() != 2 || !store_blocks.contains(&pre_id) || !store_blocks.contains(&lat_id) {
+            continue;
+        }
+        out.push(IvCandidate {
+            header_id: hid, slot, preheader_id: pre_id, latch_id: lat_id,
+            init, update_dst: upd_dst,
+            header_load_idx, preheader_store_idx: pre_si,
+        });
+    }
+    out
+}
+
+/// 执行归纳变量提升（对一个候选）。返回是否成功。
+fn apply_loop_iv(f: &mut IrFunction, c: &IvCandidate) -> bool {
+    let hi = match f.blocks.iter().position(|b| b.id == c.header_id) { Some(x) => x, None => return false };
+    let li = match f.blocks.iter().position(|b| b.id == c.latch_id) { Some(x) => x, None => return false };
+    let pi = match f.blocks.iter().position(|b| b.id == c.preheader_id) { Some(x) => x, None => return false };
+    // 新 phi vreg
+    let phi = f.new_reg(IrType::I64);
+    // 1) header.params 追加 phi
+    f.blocks[hi].params.push((phi, IrType::I64));
+    // 2) header：删除喂 ICmp 的 Load(slot)，把 ICmp 的 a 改为 Reg(phi)
+    let hb = &mut f.blocks[hi];
+    // 先把 ICmp 里的 a_v 换成 phi
+    let a_v = match &hb.insts[c.header_load_idx] { IrInst::Load { dst, .. } => *dst, _ => return false };
+    for ins in &mut hb.insts {
+        if let IrInst::ICmp { a, .. } = ins {
+            if matches!(a, Value::Reg(r) if *r == a_v) { *a = Value::Reg(phi); }
+        }
+    }
+    hb.insts.remove(c.header_load_idx);
+    // 3) 所有到 header 的跳转：args 追加对应值
+    //    preheader → init；latch → update_dst
+    for b in f.blocks.iter_mut() {
+        let is_pre = b.id == c.preheader_id;
+        let is_lat = b.id == c.latch_id;
+        if !is_pre && !is_lat { continue; }
+        let arg = if is_pre { c.init } else { Value::Reg(c.update_dst) };
+        match &mut b.term {
+            Term::Jump { target, args } if *target == c.header_id => args.push(arg),
+            Term::Branch { then_b, then_args, else_b, else_args, .. } => {
+                if *then_b == c.header_id { then_args.push(arg); }
+                if *else_b == c.header_id { else_args.push(arg); }
+            }
+            _ => {}
+        }
+    }
+    // 4) latch：把 latch 内【所有】Load(slot) 的 dst 替换为 phi 并删除这些 Load，
+    //    再删除更新链的 Store(slot)。更新链的 Bin dst（回边实参）保留，其 a 会被换成 phi。
+    //    用「收集 dst → 值匹配删除」而非固定索引，避免多次删除导致索引漂移。
+    {
+        let lb = &mut f.blocks[li];
+        // 收集 latch 内所有 Load(ptr=slot) 的 dst
+        let mut ldsts: Vec<VReg> = Vec::new();
+        for ins in &lb.insts {
+            if let IrInst::Load { dst, ptr, .. } = ins {
+                if *ptr == c.slot { ldsts.push(*dst); }
+            }
+        }
+        if ldsts.is_empty() { return false; }
+        // 把所有 Load(slot) 的 dst 使用替换为 phi（含更新链 dst 与 body 里的其它 dst）
+        for ins in &mut lb.insts {
+            for d in &ldsts { substitute_inst_reg(ins, *d, phi); }
+        }
+        // 删除所有 Load(slot) 与更新链 Store(slot)
+        lb.insts.retain(|ins| match ins {
+            IrInst::Load { ptr, .. } if *ptr == c.slot => false,
+            IrInst::Store { ptr, .. } if *ptr == c.slot => false,
+            _ => true,
+        });
+    }
+    // 5) preheader：删除初始化 Store(slot)
+    {
+        let pb = &mut f.blocks[pi];
+        pb.insts.remove(c.preheader_store_idx);
+    }
+    // 6) 全函数其它 Load(slot)（body 里算下标的）替换为 Reg(phi)。
+    //    注意：header/latch 的已处理，这里处理其余块。
+    for b in f.blocks.iter_mut() {
+        if b.id == c.header_id || b.id == c.latch_id || b.id == c.preheader_id { continue; }
+        let mut i = 0usize;
+        while i < b.insts.len() {
+            if let IrInst::Load { dst, ptr, .. } = &b.insts[i] {
+                if *ptr == c.slot {
+                    let old = *dst;
+                    for ins in &mut b.insts[i+1..] { substitute_inst_reg(ins, old, phi); }
+                    b.insts.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    true
+}
+
+/// 把指令里的 Reg(from) 全部替换为 Reg(to)。
+fn substitute_inst_reg(ins: &mut IrInst, from: VReg, to: VReg) {
+    let rep = |v: &mut Value| { if matches!(v, Value::Reg(r) if *r == from) { *v = Value::Reg(to); } };
+    match ins {
+        IrInst::Bin { a, b, .. } | IrInst::FBin { a, b, .. }
+        | IrInst::ICmp { a, b, .. } | IrInst::FCmp { a, b, .. } => { rep(a); rep(b); }
+        IrInst::Load { ptr, .. } => { if *ptr == from { *ptr = to; } }
+        IrInst::Store { ptr, val, .. } => { if *ptr == from { *ptr = to; } rep(val); }
+        IrInst::Conv { a, .. } | IrInst::Un { a, .. } => rep(a),
+        IrInst::Call { args, .. } | IrInst::InlineAsm { args, .. } => for a in args { rep(a); },
+        IrInst::PtrAdd { base, off, .. } => { if *base == from { *base = to; } rep(off); }
+        IrInst::FieldAddr { base, .. } => { if *base == from { *base = to; } }
+        _ => {}
+    }
+}
+
+/// 全程序归纳变量提升。返回提升的循环数。
+pub fn promote_loop_ivs(ip: &mut IrProgram) -> usize {
+    let mut total = 0usize;
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for name in &names {
+        // 分析阶段（不可变借用）
+        let cands = {
+            let f = match ip.functions.iter().find(|f| f.name == *name) { Some(f) => f, None => continue };
+            analyze_loop_ivs(f)
+        };
+        if cands.is_empty() { continue; }
+        if std::env::var("DIALC_DUMP_LOOP_IV").is_ok() {
+            for c in &cands { eprintln!("[loopiv] {} header={} slot={} pre={} lat={}", name, c.header_id, c.slot, c.preheader_id, c.latch_id); }
+        }
+        // 诊断：DIALC_LOOP_IV_SKIP="h1,h2,..." 按 header id 跳过，便于二分定位回归。
+        let skip: HashSet<u32> = std::env::var("DIALC_LOOP_IV_SKIP").unwrap_or_default()
+            .split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        // 变换阶段（可变借用），逐个候选；每次重新分析以避免索引失效
+        for _ in 0..cands.len() {
+            let cands_now = {
+                let f = match ip.functions.iter().find(|f| f.name == *name) { Some(f) => f, None => break };
+                analyze_loop_ivs(f).into_iter().filter(|c| !skip.contains(&c.header_id)).collect::<Vec<_>>()
+            };
+            let c = match cands_now.first() { Some(c) => c.clone(), None => break };
+            let ok = if let Some(f) = ip.functions.iter_mut().find(|f| f.name == *name) {
+                apply_loop_iv(f, &c)
+            } else { false };
+            if ok { total += 1; } else { break; }
+        }
+    }
+    if total > 0 && std::env::var("DIALC_DUMP_LOOP_IV").is_ok() {
+        eprintln!("[loopiv] promoted {} loops", total);
+    }
+    total
+}

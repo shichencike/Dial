@@ -164,6 +164,17 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
   EarlyCSE 前、O2+ / x86-64 / 非 -g/PGO/instrument。零 LLVM 库依赖、LLVM 路径/
   AArch64 零改动、版本 1.22.0、不打 tag。证据链见
   [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M21 条。
+- **perf(pass) — M22 循环归纳变量 SSA 提升（LIVP，LLVM mem2reg 循环特化）**：
+  把教科书式循环归纳变量槽提升为 header 块参数 phi，消除热循环每轮的
+  `Load/Store(ptr=slot)`（M9 块内 GRA 排除 alloca 槽、救不了跨块归纳变量——反汇编
+  实证 b17 87/396 条是栈访问）。严格安全判据：I64 标量、地址不逃逸、header cond
+  来自 `ICmp(Load(slot))`、恰 2 前驱（preheader 初始化 + latch 更新链）、Load dst
+  不得跨块使用。修两轮真实 bug：b26 跨块使用悬空、kvmap header Load 跨块致段错误、
+  while latch 多 Load 漏替换。实测提升 47 个循环；b17 栈访问 -8%、快 7.8%，
+  b23 -3.5%、b15 -5.2%、b16 -4.4%，b26（跳过）持平。28/28 校验、A 组 65/65、
+  callback 逐字节、B 组 213/213、tests 8/8、7 形态循环 O0=O3；O2/ReleaseSafe
+  零变化、AArch64 零改动。护栏 O3+ReleaseFast+x86-64，回退 `DIALC_NO_LOOP_IV=1`。
+  证据链见 [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M22 条。
 
 ## [v1.21] — 2026-11-24
 
