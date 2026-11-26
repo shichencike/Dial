@@ -609,9 +609,27 @@ fn promotable_ty(t: &IrType) -> bool {
     matches!(t, IrType::I64 | IrType::Ptr | IrType::Handle | IrType::FnPtr)
 }
 
+/// M9-gra-linear：一次「动态驻留段」。在指令下标 `[from_ii, ..)` 期间，
+/// `resident` 生效；进入段时按 `loads` 从栈槽装载 vreg 到其 phys。
+/// 离开段的写回由发射期基于「当前 resident 中仍 dirty 的值」实时决定
+/// （见 sync_dyn），不依赖静态 spills——因为同一 phys 在后续段可能被别的
+/// vreg 复用，静态记录的 phys 此刻已非原持有者。
+/// 线性扫描让多个 live range 不重叠的 vreg 复用同一物理寄存器。
+#[derive(Clone, Default)]
+struct DynSeg {
+    from_ii: usize,
+    resident: HashMap<VReg, &'static str>,
+    loads: Vec<(VReg, &'static str)>,
+    /// 仅编译期诊断保留；发射期写回走当前 resident（见 sync_dyn）。
+    #[allow(dead_code)]
+    spills: Vec<(VReg, &'static str)>,
+}
+
 /// 一个基本块的寄存器驻留方案（编译期确定，emit 时按块装载 / 回写）。
 #[derive(Clone, Default)]
 struct BlockPlan {
+    /// M9-gra-linear：块内动态驻留段（空表示走原静态 resident 路径）。
+    dyn_segments: Vec<DynSeg>,
     /// vreg → 物理寄存器（裸名，不含 `%`）。
     resident: HashMap<VReg, &'static str>,
     /// 块入口需从栈槽装载的 (vreg, 物理寄存器)，按 vreg 升序。
@@ -724,6 +742,14 @@ struct FnEmit<'a> {
     pgo: &'a PgoPlan<'a>,
     /// R4：本函数是否热（baseline/instrument 恒 true）。
     pgo_hot: bool,
+    /// M9-gra-linear：本函数是否启用块内线性扫描动态驻留（仅 x86-64 with_calls + O2+ + 非g/PGO 且通过门槛）。
+    gra_linear: bool,
+    /// M9-gra-linear：当前块动态段的下标与是否已装载。
+    dyn_seg_idx: usize,
+    /// M9-gra-linear：当前块下标（供 sync_dyn 取段）。
+    cur_block: usize,
+    /// M9-gra-linear：当前段是否已装载（避免同段重复 load）。
+    dyn_seg_loaded: bool,
 }
 
 /// M7-e3n：xorshift 一步的融合计划。`slot` 是 x 的 Alloca 槽 vreg（驻留在
@@ -758,7 +784,7 @@ impl<'a> FnEmit<'a> {
             lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
             popcnt_fuse: HashMap::new(), popcnt_native: HashSet::new(),
             xorshift_fuse: HashMap::new(), gra_blocked, opt_level, debug_info, file_index,
-            safety, dchk_seq: 0,
+            safety, dchk_seq: 0, gra_linear: false, dyn_seg_idx: 0, cur_block: 0, dyn_seg_loaded: false,
         }
     }
 
@@ -1587,6 +1613,7 @@ impl<'a> FnEmit<'a> {
     /// 循环在所有变量上等价且不改 CFG。scratch 用 g1(rax)，须与 rc/rx 都不同，
     /// 否则退回 e3m 逐位路径（x86-64 驻留池是 callee-saved，rax 恒空闲）。
     fn inst_popcnt_fused(&mut self, pc: VReg, px: VReg, native: bool) -> bool {
+        if self.gra_linear { return false; }
         if !matches!(self.target, EmitTarget::X86_64SysV) || !self.residency_on { return false; }
         let (rc, rx) = match (self.phys(pc), self.phys(px)) {
             (Some(a), Some(b)) if a != b => (a, b),
@@ -1679,6 +1706,7 @@ impl<'a> FnEmit<'a> {
     /// 注意 x 的两个 Load 读到同一值（窗口内两 Load 之间无 Store），故用
     /// rx 的当前值既作 xor 左操作数、又作移位源，与原 IR 完全等价。
     fn inst_xorshift_fused(&mut self, plan: XorshiftPlan) -> bool {
+        if self.gra_linear { return false; }
         if !matches!(self.target, EmitTarget::X86_64SysV) || !self.residency_on { return false; }
         let slot = plan_slot(&plan);
         let rx = match self.phys(slot) { Some(p) => p.to_string(), None => return false };
@@ -1732,6 +1760,14 @@ impl<'a> FnEmit<'a> {
             && !self.f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, IrInst::EnvInit { .. })))
         {
             self.analyze_unified_with_calls();
+            // M9-gra-linear：含-call 函数改用基于 live interval 的线性扫描动态
+            // 驻留（默认启用）。先跑静态绑定以获得 used_phys 的正确初始化，再由
+            // 线性扫描覆盖 plans。DIALC_GRA_LEGACY=1 可回滚到原静态 top-N 绑定，
+            // 供诊断/回归隔离用。
+            if std::env::var("DIALC_GRA_LEGACY").is_err() {
+                self.gra_linear = false;
+                self.build_linear_plans();
+            }
         } else {
             self.analyze_per_block();
         }
@@ -1872,6 +1908,226 @@ impl<'a> FnEmit<'a> {
     /// call 的实参由 lg 从绑定寄存器读取、返回值由 sg 写回绑定寄存器，
     /// 且实参寄存器 (rdi/rsi/...) 与临时寄存器 (rax/r10/...) 均不在绑定池，
     /// 不会踩踏驻留值。AArch64 不进此路径（analyze_residency 已挡）。
+
+    // ========================================================================
+    // M9-gra-linear：基于 live interval 的线性扫描寄存器分配（治根方案）。
+    //
+    // 静态 top-N 绑定的根本缺陷：一个物理寄存器永久绑定一个 vreg，即使该 vreg
+    // 的 live range 只覆盖块内 2~3 条指令。b17 内层块有 13 个短命临时值、峰值
+    // 同时活跃仅 4 个，静态绑定却只给 6 个名额，其余全走栈槽 → 大量 store/load。
+    //
+    // 线性扫描：把每个候选 vreg 的块内 live range [def_ii, last_use_ii] 映射到
+    // 物理寄存器，live range 不重叠的 vreg 复用同一寄存器。只用 callee-saved
+    // 池（跨 call 安全），绝不碰 caller-saved——从根上避免 call 破坏驻留值。
+    //
+    // 段（DynSeg）表示一段指令区间内生效的 resident 映射；进入段时 loads 把
+    // 值从栈槽装进 phys，离开时 spills 把脏值写回。emit 主循环在每条指令前
+    // 调用 sync_dyn(ii) 切换段。
+    // ========================================================================
+
+    /// vreg 是否参与线性扫描驻留：非浮点普通 vreg，或可提升的栈槽。
+    /// 关键：Alloca 的 dst vreg 存的是**栈槽地址**，即便其值槽被 promotable
+    /// 提升，也绝不能线性驻留——Alloca 指令不往 phys 写值，段首 def_at_from
+    /// 会误判为「已定义」而跳过 load，使 phys 保留垃圾被当成值读取（见
+    /// callback_state_demo 段错误）。地址槽与 val_phys 的口径一致，一律排除。
+    fn linear_candidate(&self, v: VReg) -> bool {
+        if self.alloca_off.contains_key(&v) { return false; }
+        self.residency_candidate(v) || self.promotable.contains(&v)
+    }
+
+    /// 计算某块内候选 vreg 的 live range：首次出现（def 或 use）到最后一次 use。
+    /// 返回 `HashMap<vreg, (start_ii, end_ii)>`（闭区间）。
+    fn block_live_ranges(&self, b: &IrBlock) -> HashMap<VReg, (usize, usize)> {
+        let mut ranges: HashMap<VReg, (usize, usize)> = HashMap::new();
+        // 块参数视为在指令 0 之前就活跃（start=0）。
+        for (pv, _) in &b.params {
+            if self.linear_candidate(*pv) {
+                ranges.entry(*pv).or_insert((0, 0));
+            }
+        }
+        for (ii, inst) in b.insts.iter().enumerate() {
+            let mut uses = Vec::new();
+            inst.reg_uses(&mut uses);
+            // 提升槽：Load/Store 的 ptr 即被提升的值本身。
+            match inst {
+                IrInst::Load { ptr, .. } | IrInst::Store { ptr, .. } => {
+                    if self.promotable.contains(ptr) { uses.push(*ptr); }
+                }
+                IrInst::FieldAddr { .. } | IrInst::PtrAdd { .. } => {}
+                _ => {}
+            }
+            for u in uses {
+                if self.linear_candidate(u) {
+                    let e = ranges.entry(u).or_insert((ii, ii));
+                    e.1 = ii; // 更新最后使用点
+                }
+            }
+            if let Some(d) = inst.def() {
+                if self.linear_candidate(d) {
+                    let e = ranges.entry(d).or_insert((ii, ii));
+                    e.0 = e.0.min(ii); // def 可能早于首次 use；start 取最早
+                }
+            }
+        }
+        // term 中的使用（cond / phi args / return）也计入最后使用点。
+        let n = b.insts.len();
+        let mut tu = Vec::new();
+        match &b.term {
+            Term::Jump { args, .. } => for a in args { if let crate::ir::Value::Reg(r) = a { tu.push(*r); } },
+            Term::Branch { cond, then_args, else_args, .. } => {
+                tu.push(*cond);
+                for a in then_args.iter().chain(else_args.iter()) {
+                    if let crate::ir::Value::Reg(r) = a { tu.push(*r); }
+                }
+            }
+            Term::Return { val } => if let Some(crate::ir::Value::Reg(r)) = val { tu.push(*r); },
+            Term::Unreachable => {}
+        }
+        for v in tu {
+            if self.linear_candidate(v) {
+                let e = ranges.entry(v).or_insert((n.saturating_sub(1), n));
+                e.1 = n; // 在块尾使用
+            }
+        }
+        ranges
+    }
+
+    /// 线性扫描分配：只复用 callee-saved 池。返回每块的 DynSeg 列表。
+    fn build_linear_plans(&mut self) {
+        // 全局跨块活跃集合：vreg 在 >1 个块出现 ⇒ 块边界需回写/装载。
+        let mut block_count: HashMap<VReg, usize> = HashMap::new();
+        for b in &self.f.blocks {
+            let mut here: HashSet<VReg> = HashSet::new();
+            for inst in &b.insts {
+                let mut u = Vec::new();
+                inst.reg_uses(&mut u);
+                for v in u { here.insert(v); }
+                if let Some(d) = inst.def() { here.insert(d); }
+            }
+            for (pv, _) in &b.params { here.insert(*pv); }
+            for v in here { *block_count.entry(v).or_insert(0) += 1; }
+        }
+        let cross_block = |v: VReg| block_count.get(&v).copied().unwrap_or(0) > 1;
+
+        let mut all_plans: Vec<Vec<DynSeg>> = Vec::new();
+        let mut used_phys: HashSet<&'static str> = HashSet::new();
+
+        for b in &self.f.blocks {
+            let ranges = self.block_live_ranges(b);
+            let n = b.insts.len();
+            // 按 start 排序，start 相同按 (end 降序, vreg 升序)——长区间优先占位（first-fit 近似 optimal）。
+            let mut order: Vec<VReg> = ranges.keys().copied().collect();
+            order.sort_by_key(|v| {
+                let (s, e) = ranges[v];
+                (s, std::cmp::Reverse(e), *v)
+            });
+
+            // 物理寄存器 → 当前占用的 (vreg, end_ii)。
+            let mut owner: HashMap<&'static str, (VReg, usize)> = HashMap::new();
+            // vreg → (phys, start, end)。
+            let mut alloc: HashMap<VReg, (&'static str, usize, usize)> = HashMap::new();
+
+            for &v in &order {
+                let (s, e) = ranges[&v];
+                // 找一个在 s 处空闲的 callee-saved：占用者 end < s 即视为释放。
+                let mut chosen: Option<&'static str> = None;
+                for p in CALLEE_SAVED_POOL.iter() {
+                    match owner.get(p) {
+                        None => { chosen = Some(*p); break; }
+                        Some(&(_, pend)) if pend < s => { chosen = Some(*p); break; }
+                        _ => {}
+                    }
+                }
+                if let Some(p) = chosen {
+                    owner.insert(p, (v, e));
+                    alloc.insert(v, (p, s, e));
+                    used_phys.insert(p);
+                }
+                // 无空闲 phys：v 不驻留，走栈槽（保证正确性，零误驻留）。
+            }
+
+            if alloc.is_empty() {
+                all_plans.push(Vec::new());
+                continue;
+            }
+
+            // 生成段边界：所有 start 与 end+1。
+            let mut bounds: HashSet<usize> = HashSet::new();
+            bounds.insert(0);
+            for &(_, s, e) in alloc.values() {
+                bounds.insert(s);
+                bounds.insert(e + 1);
+            }
+            bounds.insert(n);
+            let mut bounds: Vec<usize> = bounds.into_iter().collect();
+            bounds.sort_unstable();
+
+            let mut segs: Vec<DynSeg> = Vec::new();
+            let mut prev_resident: HashMap<VReg, &'static str> = HashMap::new();
+
+            for w in bounds.windows(2) {
+                let from = w[0];
+                let _to = w[1];
+                if from >= n && from > 0 { break; }
+                // 当前段生效的 resident：live range 覆盖 [from, to-1] 的 vreg。
+                let mut resident: HashMap<VReg, &'static str> = HashMap::new();
+                for (&v, &(p, s, e)) in &alloc {
+                    if s <= from && from <= e { resident.insert(v, p); }
+                }
+                // loads：本段新出现的 vreg（上一段不在、本段在）——从栈槽装入 phys。
+                //   例外：该 vreg 的 def 恰在 from 处（def 会直接写 phys，无需 load）。
+                let mut loads: Vec<(VReg, &'static str)> = Vec::new();
+                for (&v, &p) in &resident {
+                    if !prev_resident.contains_key(&v) {
+                        let def_at_from = b.insts.get(from).and_then(|i| i.def()) == Some(v);
+                        if !def_at_from {
+                            loads.push((v, p));
+                        }
+                    }
+                }
+                // spills：上一段有、本段无的 vreg——若跨块活跃且被弄脏需写回。
+                //   发射期还会再确认 dirty，避免无谓写回。
+                let mut spills: Vec<(VReg, &'static str)> = Vec::new();
+                for (&v, &p) in &prev_resident {
+                    if !resident.contains_key(&v) && cross_block(v) {
+                        spills.push((v, p));
+                    }
+                }
+                loads.sort_by_key(|(v, _)| *v);
+                spills.sort_by_key(|(v, _)| *v);
+                segs.push(DynSeg { from_ii: from, resident: resident.clone(), loads, spills });
+                prev_resident = resident;
+            }
+            // 末段后：把块尾仍活跃且跨块的脏值写回（发射期在 term 前调用 sync_dyn(n)）。
+            if let Some(_last) = segs.last_mut() {
+                let mut tail: Vec<(VReg, &'static str)> = prev_resident.iter()
+                    .filter(|(v, _)| cross_block(**v))
+                    .map(|(&v, &p)| (v, p)).collect();
+                tail.sort_by_key(|(v, _)| *v);
+                // 存进一个 from_ii=n 的收尾段。
+                segs.push(DynSeg {
+                    from_ii: n,
+                    resident: HashMap::new(),
+                    loads: Vec::new(),
+                    spills: tail,
+                });
+            }
+            all_plans.push(segs);
+        }
+
+        for p in used_phys {
+            if is_callee_saved(p) && !self.used_phys.contains(&p) { self.used_phys.push(p); }
+        }
+        for (plan, segs) in self.plans.iter_mut().zip(all_plans.into_iter()) {
+            // 线性模式：静态 resident/loads 必须清空，全部由动态段接管。
+            plan.resident.clear();
+            plan.loads.clear();
+            plan.keep_flush.clear();
+            plan.dyn_segments = segs;
+        }
+        self.gra_linear = true;
+    }
+
     fn analyze_unified_with_calls(&mut self) {
         let id_to_idx: HashMap<u32, usize> = self.f.blocks.iter().enumerate()
             .map(|(i, b)| (b.id, i)).collect();
@@ -2054,7 +2310,16 @@ impl<'a> FnEmit<'a> {
         self.flush_mask.clear();
         self.fp_resident.clear();
         self.fp_flush_mask.clear();
+        self.cur_block = idx;
+        self.dyn_seg_idx = 0;
+        self.dyn_seg_loaded = false;
         let plan = self.plans.get(idx).cloned().unwrap_or_default();
+        // M9-gra-linear：线性模式由动态段接管驻留，静态 resident/loads 已清空。
+        if self.gra_linear && !plan.dyn_segments.is_empty() {
+            self.residency_on = true;
+            self.sync_dyn(0);
+            return;
+        }
         if plan.resident.is_empty() && plan.fp_resident.is_empty() { return; }
         for (v, p) in &plan.loads {
             let off = self.resident_off(*v);
@@ -2075,6 +2340,50 @@ impl<'a> FnEmit<'a> {
         self.residency_on = true;
     }
 
+    /// M9-gra-linear：把动态驻留段推进到覆盖指令 `ii` 的那一段。
+    /// 切换段时：先把上一段声明的 spills（脏值）写回栈槽，再把新段的 loads
+    /// 从栈槽装进物理寄存器，最后替换 resident 映射。段内 resident 稳定，
+    /// 与现有 phys/val_phys 查询语义完全一致。
+    fn sync_dyn(&mut self, ii: usize) {
+        if !self.gra_linear { return; }
+        // 一次性克隆全部段，释放 self.plans 借用后再发射（避免借用冲突）。
+        let segs: Vec<DynSeg> = match self.plans.get(self.cur_block) {
+            Some(p) if !p.dyn_segments.is_empty() => p.dyn_segments.clone(),
+            _ => return,
+        };
+        // 目标段 = from_ii <= ii 的最后一段。
+        let mut target = 0usize;
+        for (k, s) in segs.iter().enumerate() {
+            if s.from_ii <= ii { target = k; } else { break; }
+        }
+        // 若目标段尚未装载，执行段切换。
+        if target == self.dyn_seg_idx && self.dyn_seg_loaded { return; }
+        // 离开旧段：回写当前 resident 中的 dirty 值到栈槽。
+        // 不用静态规划的 segs[k].spills——当同一 phys 在后续段被复用时，
+        // 静态 spills 记录的 phys 此刻可能已被别的 vreg 覆盖，写回的是垃圾。
+        // 当前 resident 里的 (v,p) 才是此刻 phys 的真实持有者，最稳。
+        // 优化：若 v 在新段仍以同一 phys 驻留，其值已在该 phys 中，跳过回写
+        //（每个 vreg 的 live range 内 phys 固定，故「同 phys 驻留」⇔值未离开）。
+        let new_resident = &segs[target].resident;
+        let mut items: Vec<(VReg, &'static str)> =
+            self.resident.iter().map(|(v, p)| (*v, *p)).collect();
+        items.sort_by_key(|(v, _)| *v);
+        for (v, p) in items {
+            if !self.dirty.contains(&v) { continue; }
+            if new_resident.get(&v) == Some(&p) { continue; }
+            let off = self.resident_off(v);
+            self.line(&format!("\tmovq {}, {}({})", self.r(p), off, self.r("rsp")));
+        }
+        // 进入目标段：装载其 loads（从栈槽到 phys）。
+        for (v, p) in &segs[target].loads {
+            let off = self.resident_off(*v);
+            self.line(&format!("\tmovq {}({}), {}", off, self.r("rsp"), self.r(p)));
+        }
+        self.resident = segs[target].resident.clone();
+        self.dyn_seg_idx = target;
+        self.dyn_seg_loaded = true;
+    }
+
     /// 块尾只回写 plan.keep_flush 里、且确实被弄脏的位置。
     /// M7-b 统一寄存器文件模式下该集合为空——p 是全程权威，块与块之间
     /// 直接继承，零回写；逐块模式下则含提升槽与跨块活跃的普通 vreg。
@@ -2085,7 +2394,11 @@ impl<'a> FnEmit<'a> {
             self.resident.iter().map(|(v, p)| (*v, *p)).collect();
         items.sort_by_key(|(v, _)| *v);
         for (v, p) in items {
-            if self.dirty.contains(&v) && self.flush_mask.contains(&v) {
+            // M9-gra-linear：线性模式下静态 flush_mask 已清空，且当前 resident
+            // 是末段仍活跃的映射——它们都是从栈槽装载的镜像，块尾凡 dirty 必须
+            // 回写，供下一段/下一块的装载读到最新值（否则跨块累加器丢失）。
+            let need = if self.gra_linear { true } else { self.flush_mask.contains(&v) };
+            if self.dirty.contains(&v) && need {
                 let off = self.resident_off(v);
                 self.line(&format!("\tmovq {}, {}({})", self.r(p), off, self.r("rsp")));
             }
@@ -4997,6 +5310,8 @@ fn emit_function(
         let mut skip = 0usize;
         for (ii, inst) in b.insts.iter().enumerate() {
             if skip > 0 { skip -= 1; continue; }
+            // M9-gra-linear：推进动态驻留段到覆盖本条指令的段。
+            e.sync_dyn(ii);
             if let Some((pc, px)) = e.popcnt_fuse.get(&(idx, ii)).copied() {
                 let native = e.popcnt_native.contains(&(idx, ii));
                 if e.inst_popcnt_fused(pc, px, native) { skip = 7; continue; }
@@ -5010,6 +5325,8 @@ fn emit_function(
         // 直接从物理寄存器读，随后才关闭驻留。
         e.flush_residency();
         e.term(b.id, &b.term);
+        // M9-gra-linear：term 发射完毕后触发末段 spills（回写跨块脏值）。
+        e.sync_dyn(b.insts.len());
         e.end_block();
     }
     // M7-c2 / M7-e1 / M7-e2 / M7-e3a / M7-e3d：x86-64 发射末尾依次做六个纯文本

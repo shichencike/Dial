@@ -116,6 +116,22 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
 - **已知短板**：b17 矩阵乘 7.01×、b12 互递归 3.71×、b23 popcount 3.32×（asm
   后端未做向量化/更激进的循环优化），列为后续方向，不影响本版功能交付。
 
+### v1.22 发布后性能增量（不计入本版发布数据）
+
+- **基准配置修正 + M16 popcount SWAR**：`bench_harness` 的 Dial 档位显式 `-O3`
+  （原先 `--fast` 只切安全级别、实际仍 O2，导致 O3 pass 全程未生效）；新增 popcount
+  循环 SWAR 位并行折叠（负数路径保留原循环）。b12 互递归 3.71×→0.53×，
+  b23 popcount 3.33×→0.92×；28 项 O0~O3 校验和逐项一致。
+- **M9-gra-linear 线性扫描寄存器分配（治根 b17）**：asm 后端含-call 函数的 GRA
+  从静态 top-N 绑定改为基于 live interval 的线性扫描——块内 live range 不重叠的
+  临时值复用同一 callee-saved 寄存器，配合动态驻留段 + 基于当前 resident 的实时写回，
+  从架构层解决 b17 内层 15+ 个等权短命临时值竞争 6 个名额的问题。b17 0.821×
+  （较基线快 18%），11 项代表任务几何平均 0.866×（快 13.4%）；b14（cache-bound
+  随机访存）1.164× 小幅退化，为已知权衡。28 项校验和全绿、A 组 65/65 正向 golden
+  零回归；`DIALC_GRA_LEGACY=1` 可回滚。护栏：非 x86-64 / -g / O0-O1 / 内联汇编 /
+  longjmp(EnvInit) 函数均不启用。证据链见
+  [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M9-gra-linear 条。
+
 ## [v1.21] — 2026-11-24
 
 > 本版是「预处理设施大补齐」的交付版本：字段级 ARC、调试期裁剪、专门的预处理阶段、

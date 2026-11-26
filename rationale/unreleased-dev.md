@@ -4274,3 +4274,69 @@ C runtime 的 `dial_string_new` 确实每次堆分配（对比 asm 的 `LeaStati
 **工程化**：R22 门禁（tests/pkg/r22_arc_leak_{scope,literal}.dial）双后端跑压测 + GNU time
 峰值 RSS 断言（阈值 12MB，修复版 2-3MB 有 4x 余量，泄漏版 >20MB）；无 GNU time 平台退化
 为功能冒烟，不误报 CI。CHANGELOG Fixed 段 + 本证据链同步。
+
+---
+
+## M9-gra-linear：含-call 函数改为基于 live interval 的线性扫描寄存器分配（治根 b17）
+
+### 背景与动机
+
+b17（64×64 矩阵乘）长期是 asm 后端相对 GCC 的典型短板。诊断确认其根因不是寄存器
+**数量**而是**分配架构**：b17 内层块有 15+ 个等权（score 全为 128）热 SSA 临时值，
+含-call 路径只能用 6 个 callee-saved 寄存器，静态 top-N 绑定只让 1 个临时值进名额，
+其余全走栈槽 → 每轮迭代大量 store/load 往返。此前 5 个受控实验（扩池 6→10、
+提升槽优先、score top20 诊断等）证明：在静态绑定架构内调参对 b17 无收益，
+且扩池到 caller-saved 会因 call 破坏驻留值导致 b22 段错误。结论：**必须改架构**。
+
+前序实验记录见任务 #800；本条为治根实现（任务 #803）。
+
+### 方案
+
+在 `codegen_asm.rs` 新增 `build_linear_plans()`，对 `analyze_unified_with_calls`
+（含-call 函数）的 plans 做覆盖：
+
+1. **块内 live interval**：`block_live_ranges` 计算每个候选 vreg 的 `[def_ii, last_use_ii]`，
+   含 term 中的 cond/phi/return 使用点；块参数视为 start=0。
+2. **线性扫描 first-fit**：按 `(start, end 降序, vreg)` 排序，为每个 vreg 找一个在 start
+   处空闲的 callee-saved（占用者 end < start 即释放）。**只用 callee-saved 池**——跨 call
+   安全，从根上避免 call 破坏驻留值（这是前序扩池实验段错误的直接教训）。放不下的 vreg
+   走栈槽，零误驻留。
+3. **动态驻留段 `DynSeg`**：把每个块的指令区间按所有 start/end+1 切成段，每段记录生效的
+   `resident` 映射与进入该段要执行的 `loads`。emit 主循环每条指令前 `sync_dyn(ii)` 推进段。
+4. **写回基于当前 resident 实时决定**（关键修正）：段切换时回写"当前 resident 中仍
+   dirty 且即将离开"的值，不依赖静态 `spills`——因为同一 phys 在后续段可能被别的 vreg
+   复用，静态记录的 phys 此刻已非原持有者，用它写回会把垃圾写进栈槽。每个 vreg 的
+   live range 内 phys 固定，故"在新段仍以同 phys 驻留"的值跳过回写（值已在该 phys 中）。
+
+### 踩坑（三次正确性失败，逐一定位）
+
+1. **b17 rc=137 / b22 结果=0**：`flush_residency` 在 term 前清空 dirty，但线性模式
+   `flush_mask` 被清空导致什么都没写回，随后 `sync_dyn(n)` 检查 dirty 时已空 → 跨块
+   累加器丢失。修复：线性模式下块尾对当前 resident 所有 dirty 值无条件回写。
+2. **off-by-one 段切换**：`segs[k].spills` 语义是"从 seg[k-1] 切到 seg[k] 时写回"，
+   原代码执行 `[dyn_seg_idx, target)` 漏掉目标段、多执行当前段（phys 已被覆盖）→
+   b17 归零。修复过程中进一步发现静态 spills 在 phys 复用时天然不可靠，改为方案第 4 点
+   的"基于当前 resident 实时写回"，彻底移除对 spills 时机与 off-by-one 的依赖。
+3. **callback_state_demo 段错误（A 组 1/65）**：`linear_candidate` 把 **Alloca 地址槽的
+   dst vreg**经 `promotable` 纳入线性扫描；段首 `def_at_from` 误判 Alloca 指令为"已定义
+   该 vreg"而跳过 load，但 Alloca 不往 phys 写值 → phys 保留垃圾被当值读取。修复：
+   `linear_candidate` 显式排除 `alloca_off` 里的所有地址槽（与 `val_phys` 口径一致）。
+
+### 验证
+
+- **正确性**：28 项校验和全绿（每项独立真值）；A 组 65/65 正向 golden + B 组负向 +
+  D 组 Fail-Fast 零回归；callback_state_demo（函数指针回调 + 裸指针状态）修复后输出
+  `10/10`。`DIALC_GRA_LEGACY=1` 回滚开关可精确隔离本改动。
+- **护栏**：入口已挡非 x86-64 / -g / O0-O1 / has_inline_asm；含 EnvInit(longjmp) 与
+  `gra_blocked` 函数退回逐块模式；PGO/instrument 态正交（计数器 clobber caller-saved，
+  入口计数在驻留开启前），零变化。
+- **A/B（两轮交替，各任务自校准 rep、5 次取最小，几何平均）**：11 个代表任务
+  几何平均 **0.866x（快 13.4%）**，b17 **0.821x（快 18%）**，b07 0.625x、b06 0.683x、
+  b23 0.717x、b18 0.865x、b05 0.851x；b04/b12 持平；b14（cache-bound 随机访存）1.164x、
+  b08 1.022x 小幅退化——段切换开销在访存主导场景凸显，作为已知权衡记录，整体方向正收益。
+
+### 决策
+
+默认启用（O2+ x86-64 含-call 函数），保留 `DIALC_GRA_LEGACY=1` 回滚开关供诊断隔离。
+这是 asm 后端首个真正的 live-interval 线性扫描分配器，替代静态 top-N 绑定，
+从架构层面解决 b17 类"大量等权短命临时值竞争少数寄存器"的短板。
