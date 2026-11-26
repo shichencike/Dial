@@ -183,6 +183,17 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
   .text -112B，b17 +0.35%（其余在噪声内），28/28 校验 + 逐字节一致 + ReleaseSafe
   28/28；`DIALC_NO_RELOAD_GAP=1` 可回退。证据链见
   [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M23/M24 条。
+- **perf(codegen) — M25 内联 `dial_string_index_of`，消除 b21 的 PLT 跨 TU 调用**：
+  "换条路"后转向字符串算法内联。此前 b21 每轮 `S.index_of(sub)` 都 `call dial_string_index_of@PLT`
+  （跨 TU + 逐位置 memcmp），C 对照组 `find_sub` 是内联逐字节扫描，差 3.13×。在 `inst_call`
+  仿照 array_get/set 加内联分支：逐字节 `movzbl+cmpb`（恰好 sublen 字节，二进制安全，内嵌 NUL
+  正确），完整复现 runtime 边界语义（`!s||!sub→-1`、`sublen==0→0`、`sublen>slen→-1`、未找到 `-1`）。
+  反汇编证明调用点消失（off 版 1 处 `call`、on 版 0 处）；精确校准 3 轮交叉验证 **b21 2.81×**
+  （1138µs→405µs），其余基准在噪声内。门禁：28/28 校验 + 28/28 逐字节 + 9 种边界语义
+  （中间命中/未找到/超长/首尾/空串/自匹配/内嵌 NUL）+ O0=O3 逐字节 + A 组 65/65 +
+  ReleaseSafe（守卫跳过内联、保留 call）28/28 + C 组契约零 libLLVM。护栏 O3+SysV+ReleaseFast+
+  非 float，`DIALC_NO_STRING_INDEX_INLINE=1` 回退。证据链见
+  [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M25 条。
 
 ## [v1.21] — 2026-11-24
 

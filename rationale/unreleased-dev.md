@@ -4774,3 +4774,54 @@ bench/data.json 与 docx/bench.html 已同步刷新，check_bench_data.py 校验
 4.49× 差距是结构性天花板，继续投入 GRA / IR pass 不会产生数量级改善；若追求
 b17/b21 的大幅提升，需转向语言/容器抽象层（值类型数组）或字符串算法内联（b21），
 属另一独立工程。
+
+## M25：换条路——字符串算法内联，b21 2.81×（首个数量级收益）
+
+用户「换条路继续」。梭哈 A（数组/GRA）已钉死为结构性天花板，本轮转向此前记录的
+第二条路：**b21 字符串算法内联**。这是至今唯一拿到数量级收益的优化。
+
+### 方向选择依据
+- b21 差 3.13×，根因明确且范围窄：每轮 `S.index_of(subs[k%4])` 走
+  `call dial_string_index_of@PLT`（跨 TU、无法 LTO 内联），C 对照 `find_sub`
+  是内联逐字节扫描（`bench.c:186`）。
+- 与 b17 不同：b21 的瓶颈是**一次调用开销**（可精确消除），不是容器抽象的结构性成本。
+- `dial_string_index_of` 是纯函数（`pass.rs:3509` 标 ReadOnly），无 COW/ARC 副作用，
+  内联语义风险远低于数组 set。
+
+### 实现（inst_call 内联分支，约 60 行）
+仿照 array_get/set 的既有范式（`codegen_asm.rs:3743`），在通用 call 路径前加
+`func=="dial_string_index_of"` 分支：
+- string payload 布局 `[int64 len@0][char data@8\0]`，句柄位模式即 payload 地址。
+- 逐字节比较：`movzbl (%r11,%rax,1),%r10d` + `cmpb %r10b,(%r8,%rax,1)`，
+  恰好比 sublen 字节——**与 runtime `memcmp` 精确等价，二进制安全**（内嵌 NUL 正确）。
+  不能当成 C 的 `'\0'` 终止扫描。
+- 完整边界语义：`!s||!sub→-1`、`sublen==0→0`、`sublen>slen→-1`、最小匹配 i、未找到 `-1`。
+- scratch 用 `rax/r10/r11/rdx/rcx/r8/r9`，均不在 GRA 驻留池；含 call 的块
+  `block_can_reside=false`、residency 关闭，vreg 全在栈槽，故不会踩踏驻留值。
+- 守卫：x86-64 SysV + ReleaseFast + `[Handle,Handle]→非float`；safe/debug 保留原 call
+  （Fail-Fast 零改动），AArch64 原样。`DIALC_NO_STRING_INDEX_INLINE=1` 完全回退。
+
+### 实测证据（全部实证）
+- **反汇编**：off 版 1 处 `call dial_string_index_of`（`1009b64`），on 版 0 处调用点，
+  b21 内联序列出现 `movzbl`+`cmpb` 字节比较循环（全局 movzbl 50→51）。
+- **性能**（精确校准 TARGET_MS=150、7 次取最小，3 轮交叉验证完全一致）：
+  b21 off=1138µs → on=405µs = **2.81×**；b08 的 1.035× 经源码确认不含 index_of，
+  系噪声；b17/b18/b12/b13/b16/b14/b01/b05/b23 均在 ±1% 噪声内。
+  这是 M18~M24 以来首个数量级收益，证明"换对路"比"硬啃结构性天花板"有效。
+- **正确性门禁**：
+  - 28/28 校验和（on/off 两版）；28/28 逐字节输出一致（on vs off）。
+  - 9 种边界语义专门用例逐字节一致：中间命中、未找到、sublen>slen、开头/结尾匹配、
+    空子串、空 haystack、自匹配、含 NUL 二进制串（`"ab\0cd".index_of("\0cd")=2`）。
+  - ReleaseSafe（`-DDIAL_SAFETY=2`）：守卫正确跳过内联、保留 1 处 call，28/28 通过。
+  - O0 vs O3 逐字节 28/28；A 组 golden 65/65；C 组契约零 libLLVM。
+
+### 结论与后续
+字符串方法族（`index_of` 已内联，`contains` 内部也调 `dial_string_index_of`）是当前
+asm 后端 ROI 最高的未开发富矿：`starts_with`/`ends_with`/`substring`/`replace`/`split`
+等仍走 PLT 调用，可依同样范式逐个内联。下一轮可优先扫这批，每个单独量化验证。
+b17 的结构性天花板结论不变（见 M23/M24），但"换条路"证明绕开它同样能拿到大收益。
+
+### 基准刷新（2026-11-27，四语言校准法）
+Dial/C 几何平均 0.8334×→**0.7935×**；b21 Dial/C 3.13×→**1.03×**（Dial 0.405ms vs
+C 0.394ms，几乎追平），b17 4.49×→4.485×（结构性天花板，不动）、b14 1.21×、b18 1.25×
+均在噪声内。`bench/data.json` + `docx/bench.html` 已同步，`check_bench_data.py` 通过。

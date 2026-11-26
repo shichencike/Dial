@@ -3776,6 +3776,82 @@ impl<'a> FnEmit<'a> {
             self.sg(dst.unwrap(), &"rax".to_string());
             return;
         }
+        // M25：内联 dial_string_index_of(s, sub)，消除 b21 每轮的 PLT 跨 TU 调用。
+        // runtime（stdlib/dial_string.c:119）语义，与 SafetyMode 无关（纯逻辑，无诊断宏）：
+        //   !s||!sub → -1；sublen==0 → 0；sublen>slen → -1；
+        //   否则返回最小 i∈[0,slen-sublen] 使 s_data[i..i+sublen]==sub_data[0..sublen]，无则 -1。
+        // string payload 布局 [int64 len@0][char data@8\0]，句柄位模式即 payload 地址。
+        // 逐字节比较（movzbl+cmpb，恰好 sublen 字节）与 runtime memcmp 精确等价——
+        // 不能当成 C 的 '\0' 终止扫描（string 可含内嵌 NUL，二进制安全）。
+        // scratch 用 rax/r10/r11/rdx/rcx/r8/r9：均不在 GRA 驻留池，且含 call 的块
+        // residency 关闭（block_can_reside=false），故不会踩踏任何驻留 vreg。
+        // 只在 x86-64 SysV + ReleaseFast + [Handle,Handle]->非float 时内联；
+        // safe/debug 保留原 call（Fail-Fast 语义零改动），AArch64 原样。
+        // DIALC_NO_STRING_INDEX_INLINE=1 可完全回退到原 PLT 调用。
+        if func == "dial_string_index_of"
+            && self.target == EmitTarget::X86_64SysV
+            && self.safety == SafetyMode::ReleaseFast
+            && std::env::var("DIALC_NO_STRING_INDEX_INLINE").is_err()
+            && dst.is_some()
+            && args.len() == 2
+            && arg_tys.len() == 2
+            && arg_tys[0] == IrType::Handle
+            && arg_tys[1] == IrType::Handle
+            && !ret_ty.is_float()
+        {
+            let nf    = format!(".{}_sidx_nf_{}", self.prefix, self.dchk_seq);
+            let zero  = format!(".{}_sidx_zero_{}", self.prefix, self.dchk_seq + 1);
+            let outer = format!(".{}_sidx_outer_{}", self.prefix, self.dchk_seq + 2);
+            let inner = format!(".{}_sidx_inner_{}", self.prefix, self.dchk_seq + 3);
+            let mtch  = format!(".{}_sidx_match_{}", self.prefix, self.dchk_seq + 4);
+            let mis   = format!(".{}_sidx_mis_{}", self.prefix, self.dchk_seq + 5);
+            let done  = format!(".{}_sidx_done_{}", self.prefix, self.dchk_seq + 6);
+            self.dchk_seq += 7;
+            // rax=s（haystack payload），r10=sub（needle payload）
+            self.lg(args[0], &"rax".to_string());
+            self.lg(args[1], &"r10".to_string());
+            self.line("\ttestq %rax, %rax");
+            self.line(&format!("\tjz {}", nf));
+            self.line("\ttestq %r10, %r10");
+            self.line(&format!("\tjz {}", nf));
+            self.line("\tmovq (%rax), %rdx");          // rdx = slen
+            self.line("\tmovq (%r10), %rcx");          // rcx = sublen
+            self.line("\ttestq %rcx, %rcx");
+            self.line(&format!("\tjz {}", zero));      // sublen == 0 → 0
+            self.line("\tcmpq %rdx, %rcx");
+            self.line(&format!("\tjg {}", nf));        // sublen > slen → -1
+            self.line("\tsubq %rcx, %rdx");            // rdx = limit = slen - sublen
+            self.line("\tleaq 8(%rax), %r8");          // r8 = d = s + 8（窗口起点）
+            self.line("\tleaq 8(%r10), %r11");         // r11 = needle = sub + 8
+            self.line("\txorl %r9d, %r9d");            // r9 = i = 0
+            self.line(&format!("{}:", outer));
+            self.line("\tcmpq %rdx, %r9");
+            self.line(&format!("\tjg {}", nf));        // i > limit → not found
+            self.line("\txorl %eax, %eax");            // rax = j = 0（s 已不再需要）
+            self.line(&format!("{}:", inner));
+            self.line("\tcmpq %rcx, %rax");
+            self.line(&format!("\tjge {}", mtch));     // j >= sublen → 全匹配
+            self.line("\tmovzbl (%r11,%rax,1), %r10d");// needle[j]（sub payload 已不需要）
+            self.line("\tcmpb %r10b, (%r8,%rax,1)");   // vs d_window[j]
+            self.line(&format!("\tjne {}", mis));
+            self.line("\tincq %rax");                  // j++
+            self.line(&format!("\tjmp {}", inner));
+            self.line(&format!("{}:", mtch));
+            self.line("\tmovq %r9, %rax");             // 返回 i
+            self.line(&format!("\tjmp {}", done));
+            self.line(&format!("{}:", mis));
+            self.line("\tincq %r9");                   // i++
+            self.line("\tincq %r8");                   // 窗口前移 1 字节
+            self.line(&format!("\tjmp {}", outer));
+            self.line(&format!("{}:", zero));
+            self.line("\txorl %eax, %eax");            // 返回 0
+            self.line(&format!("\tjmp {}", done));
+            self.line(&format!("{}:", nf));
+            self.line("\tmovq $-1, %rax");             // 返回 -1
+            self.line(&format!("{}:", done));
+            self.sg(dst.unwrap(), &"rax".to_string());
+            return;
+        }
         let locs = abi_assign(arg_tys, self.target);
         let g1 = self.g1().to_string();
 
