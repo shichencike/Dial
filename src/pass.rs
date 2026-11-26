@@ -3202,3 +3202,253 @@ pub fn fold_popcount(ip: &mut IrProgram) -> usize {
     }
     count
 }
+
+// ============================================================================
+// M18-arrflat：强化的 ARC / 逃逸分析 + 局部 int[] 句柄扁平化（治根 b17）
+// ============================================================================
+//
+// 背景：数组下标 a[i] 在 IR 里是 `Call dial_array_get(handle, i)`，抽象过高——
+// LICM/IVR/CSE 看不穿它是访存，导致循环内每轮都重新 `Load handle_slot` 并
+// 解引用 payload（codegen 虽内联为裸 load，但句柄槽的重复 load 无法消除）。
+// b17 的 A/B/C 是「函数局部、非逃逸、kind=0（纯 int 元素）」的数组，其 payload
+// 基址在循环内恒定，可提升为循环不变量，让内层只剩 addr 计算 + 访存。
+//
+// 安全判据（全部满足才扁平化，否则零变化）：
+//   1. 由 `dial_array_new(kind=0)` 创建（纯 int 元素 → set/push 无元素 ARC，快路径成立）；
+//   2. 句柄只存回自己的栈槽（set/push 的返回值写回同一 slot），不逃到别处；
+//   3. 句柄 vreg 只出现在白名单 runtime 调用（get/set/length/push/retain/release）
+//      的参数位、或 Load/Store 自己的槽；绝不出现在 Return / 其它 Call / 字段地址 /
+//      函数指针 / 间接调用 / 作为下标；
+//   4. ReleaseFast + x86-64 + O3 + 非 -g / 非 PGO / 非 instrument（在 asm.rs 挂接处护栏）。
+
+/// 一个被证明安全的局部 int[] 句柄槽。
+#[derive(Clone, Debug)]
+pub struct LocalIntArray {
+    pub slot: VReg,          // 存句柄的栈槽
+    pub payload_off: i64,    // payload 基址相对句柄的偏移（elems@24）
+}
+
+/// 白名单 runtime 函数：句柄作为参数出现是安全的（不改变"句柄身份"的逃逸）。
+fn arrflat_whitelist(fn_name: &str) -> bool {
+    matches!(fn_name,
+        "dial_array_get" | "dial_array_set" | "dial_array_length"
+        | "dial_array_push" | "dial_array_retain" | "dial_array_release")
+}
+
+/// 指令是否把 `v` 当作句柄使用（需要检查逃逸）。返回所有被使用的寄存器。
+fn arrflat_collect_uses(inst: &IrInst, out: &mut Vec<VReg>) {
+    inst.reg_uses(out);
+}
+
+/// 分析函数内所有"安全局部 int[] 句柄槽"。保守：任何不确定一律排除。
+pub fn analyze_local_int_arrays(f: &IrFunction) -> Vec<LocalIntArray> {
+    // ---- 步骤 1：找候选（dial_array_new(0) → Store 到槽）----
+    let mut candidates: Vec<(VReg, VReg)> = Vec::new(); // (slot, init_handle)
+    for b in &f.blocks {
+        for (ii, inst) in b.insts.iter().enumerate() {
+            if let IrInst::Call { dst: Some(h), func, args, arg_tys, ret_ty, .. } = inst {
+                if func == "dial_array_new" && *ret_ty == IrType::Handle
+                    && args.len() == 1 && arg_tys.len() == 1
+                {
+                    // kind 必须是立即数 0（INT 元素）。
+                    if let (Value::Imm(Imm::I64(0)), IrType::I64) = (args[0], &arg_tys[0]) {
+                        // 紧跟一条 Store{ptr:slot, val:h}（允许中间夹 Line/DebugVar）。
+                        let mut j = ii + 1;
+                        while j < b.insts.len() {
+                            match &b.insts[j] {
+                                IrInst::Store { ptr, val: Value::Reg(v), ty: IrType::Handle }
+                                    if *v == *h => { candidates.push((*ptr, *h)); break; }
+                                IrInst::Line(_) | IrInst::DebugVar { .. } => { j += 1; continue; }
+                                _ => break,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if candidates.is_empty() { return Vec::new(); }
+
+    let mut out: Vec<LocalIntArray> = Vec::new();
+    for (slot, init_h) in candidates {
+        // ---- 步骤 2：求句柄别名闭包 H（init + 从槽 load 出的 + set/push 返回值写回槽的）----
+        let mut hset: HashSet<VReg> = HashSet::new();
+        hset.insert(init_h);
+        loop {
+            let mut grew = false;
+            // 从 slot 的 Load 出来的 vreg 加入 H
+            for b in &f.blocks {
+                for inst in &b.insts {
+                    if let IrInst::Load { dst, ptr, ty: IrType::Handle } = inst {
+                        if *ptr == slot && !hset.contains(dst) { hset.insert(*dst); grew = true; }
+                    }
+                    // set/push 返回值 h' 若 Store 回同一槽，h' 也是合法句柄别名
+                    if let IrInst::Store { ptr, val: Value::Reg(v), ty: IrType::Handle } = inst {
+                        if *ptr == slot && !hset.contains(v) {
+                            // 确认 v 是 set/push 的 dst
+                            if is_arr_handle_producer(f, *v) { hset.insert(*v); grew = true; }
+                        }
+                    }
+                }
+            }
+            if !grew { break; }
+        }
+
+        // ---- 步骤 3：逃逸检查 ----
+        let mut escaped = false;
+        // 3a. 终止符（Return / 分支传参）里出现句柄 → 逃逸
+        for b in &f.blocks {
+            let mut tu: Vec<VReg> = Vec::new();
+            match &b.term {
+                Term::Return { val: Some(Value::Reg(v)) } => tu.push(*v),
+                Term::Jump { args, .. } => for a in args { if let Value::Reg(v) = a { tu.push(*v); } },
+                Term::Branch { then_args, else_args, .. } => {
+                    for a in then_args.iter().chain(else_args.iter()) { if let Value::Reg(v) = a { tu.push(*v); } }
+                }
+                _ => {}
+            }
+            if tu.iter().any(|v| hset.contains(v)) { escaped = true; break; }
+        }
+        if escaped { continue; }
+
+        // 3b. 逐指令检查句柄使用是否都在白名单边界内
+        for b in &f.blocks {
+            for inst in &b.insts {
+                match inst {
+                    IrInst::Call { dst, func, args, linkage, .. } => {
+                        // 句柄作为 Call 参数：仅白名单 runtime 安全；其它一律逃逸。
+                        // 注意：get 的第二参数（index）若命中 H 也是逃逸（句柄当整数用）。
+                        for (ai, a) in args.iter().enumerate() {
+                            if let Value::Reg(v) = a {
+                                if hset.contains(v) {
+                                    let safe_pos = arrflat_whitelist(func) && !(func == "dial_array_get" && ai == 1)
+                                        && !(func == "dial_array_set" && ai != 0);
+                                    if !safe_pos { escaped = true; }
+                                }
+                            }
+                        }
+                        // 句柄作为非白名单 Call 的 dst（产生新句柄但不在 H 管控）不算逃逸，跳过。
+                        let _ = (dst, linkage);
+                    }
+                    IrInst::CallIndirect { target, args, .. } => {
+                        if hset.contains(target) { escaped = true; }
+                        for a in args { if let Value::Reg(v) = a { if hset.contains(v) { escaped = true; } } }
+                    }
+                    IrInst::Store { ptr, val, .. } => {
+                        // 句柄作为值 Store 到别的槽 → 逃逸；写回自己的槽 → 安全。
+                        if let Value::Reg(v) = val { if hset.contains(v) && *ptr != slot { escaped = true; } }
+                        // 句柄作为地址 ptr（把句柄当指针写）→ 逃逸。
+                        if hset.contains(ptr) { escaped = true; }
+                    }
+                    IrInst::FieldAddr { base, .. } | IrInst::PtrAdd { base, .. } => {
+                        if hset.contains(base) { escaped = true; }
+                    }
+                    IrInst::FuncAddr { .. } => {}
+                    IrInst::InlineAsm { args, .. } => {
+                        for a in args { if let Value::Reg(v) = a { if hset.contains(v) { escaped = true; } } }
+                    }
+                    IrInst::EnvInit { argc, argv } => {
+                        for v in [argc, argv] { if let Value::Reg(r) = v { if hset.contains(r) { escaped = true; } } }
+                    }
+                    // Load / Bin / ICmp / Conv 等：句柄若作算术/比较操作数 → 逃逸。
+                    IrInst::Bin { a, b, .. } | IrInst::FBin { a, b, .. }
+                    | IrInst::ICmp { a, b, .. } | IrInst::FCmp { a, b, .. } => {
+                        for v in [a, b] { if let Value::Reg(r) = v { if hset.contains(r) { escaped = true; } } }
+                    }
+                    IrInst::Un { a, .. } | IrInst::Conv { a, .. } => {
+                        if let Value::Reg(r) = a { if hset.contains(r) { escaped = true; } }
+                    }
+                    _ => {}
+                }
+                if escaped { break; }
+            }
+            if escaped { break; }
+        }
+        if escaped { continue; }
+
+        out.push(LocalIntArray { slot, payload_off: 24 });
+    }
+    out
+}
+
+/// v 是否是 dial_array_set/push 的 dst（句柄生产者）。
+fn is_arr_handle_producer(f: &IrFunction, v: VReg) -> bool {
+    for b in &f.blocks {
+        for inst in &b.insts {
+            if let IrInst::Call { dst: Some(d), func, .. } = inst {
+                if *d == v && matches!(func.as_str(), "dial_array_set" | "dial_array_push") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 诊断：打印识别到的安全局部 int[]（仅 DIALC_ARRFLAT_DUMP=1）。
+pub fn analyze_arrays_diag(ip: &IrProgram) -> usize {
+    let mut total = 0;
+    for f in &ip.functions {
+        let arrs = analyze_local_int_arrays(f);
+        if !arrs.is_empty() {
+            if std::env::var("DIALC_ARRFLAT_DUMP").is_ok() {
+                eprintln!("[arrflat] fn={} safe_local_int_arrays={:?}", f.name,
+                    arrs.iter().map(|a| a.slot).collect::<Vec<_>>());
+            }
+        }
+        total += arrs.len();
+    }
+    total
+}
+
+/// 消除安全 int[] 的 `dial_array_set` 冗余句柄写回。
+///
+/// 对 kind=0 局部独占数组，`dial_array_set(a,i,v)` 恒等返回 a（rc==1、kind==0，
+/// 既不 COW 也不 realloc）。lower 生成的 `Store handle_slot, set_ret` 是冗余的，
+/// 且它让 LICM 误判「句柄槽在循环内被修改」而无法提升循环不变量的句柄 Load。
+/// 删除该 Store 后，LICM 即可把 `Load handle` 提到循环外，消除每轮栈槽往返。
+///
+/// 安全性完全依赖 `analyze_local_int_arrays` 的证明（局部/非逃逸/kind=0）。
+/// 返回删除的 Store 数。
+pub fn elide_array_handle_store(ip: &mut IrProgram) -> usize {
+    let mut total = 0;
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for name in names {
+        let safe_slots: HashSet<VReg> = {
+            let f = ip.functions.iter().find(|f| f.name == name).unwrap();
+            analyze_local_int_arrays(f).into_iter().map(|a| a.slot).collect()
+        };
+        if safe_slots.is_empty() { continue; }
+        if let Some(f) = ip.functions.iter_mut().find(|f| f.name == name) {
+            for b in &mut f.blocks {
+                let mut i = 0;
+                while i < b.insts.len() {
+                    // 找 dial_array_set 的 dst
+                    let set_ret = match &b.insts[i] {
+                        IrInst::Call { dst: Some(d), func, .. } if func == "dial_array_set" => *d,
+                        _ => { i += 1; continue; }
+                    };
+                    // 紧跟（允许 Line/DebugVar）一条 Store{ptr:safe_slot, val:set_ret}
+                    let mut j = i + 1;
+                    while j < b.insts.len() {
+                        match &b.insts[j] {
+                            IrInst::Line(_) | IrInst::DebugVar { .. } => { j += 1; continue; }
+                            IrInst::Store { ptr, val: Value::Reg(v), ty: IrType::Handle }
+                                if safe_slots.contains(ptr) && *v == set_ret => {
+                                b.insts.remove(j); // 删冗余写回
+                                total += 1;
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+    if total > 0 && std::env::var("DIALC_ARRFLAT_DUMP").is_ok() {
+        eprintln!("[arrflat] elided {} redundant set-handle stores", total);
+    }
+    total
+}

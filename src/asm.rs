@@ -78,6 +78,8 @@ pub fn compile_asm(
     // M7-e3ac：优化级别分级。O2（默认）= 既有全部优化，逐字节零回归；
     // O0 跳过全部 Dial 级 IR pass（配合 -g 得到"所写即所得"的调试体验）；
     // O1 仅基础 IR pass；O3 在 O2 之上追加 LLVM InstCombine 风格代数恒等式。
+    // M18-arrflat 诊断：强化 ARC/逃逸分析识别的安全局部 int[]（仅 dump 时输出）。
+    pass::analyze_arrays_diag(&ip);
     if opt_level >= OptLevel::O1 {
         pass::run_passes(&mut ip);
         // M10-strfold：字符串字面量拼接的编译期常量折叠（对齐 gcc -O2 的常量折叠）。
@@ -121,6 +123,13 @@ pub fn compile_asm(
         && !debug_info && profile.is_none() && !instrument
     {
         pass::inline_calls(&mut ip);
+        // M18-arrflat：消除安全 int[] 的 dial_array_set 冗余句柄写回，让 LICM
+        // 能把循环内的句柄 Load 提升为不变量（治根 b17）。必须在 inline 后
+        // （数组访问完整暴露）、LICM 前（让 LICM 看到 slot 不再被修改）。
+        // 额外要求 O3 + ReleaseFast：独占快路径（rc==1/kind==0）才恒等返回。
+        if opt_level >= OptLevel::O3 && safety == SafetyMode::ReleaseFast {
+            pass::elide_array_handle_store(&mut ip);
+        }
         // M12-licm：通用循环不变代码外提。置于内联后、IVR 前——先外提不变量，
         // 可能暴露更多 IVR 可识别的 base*C+iv 模式。同内联的 -g/PGO/插桩护栏。
         pass::licm(&mut ip);
