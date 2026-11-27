@@ -4825,3 +4825,48 @@ b17 的结构性天花板结论不变（见 M23/M24），但"换条路"证明绕
 Dial/C 几何平均 0.8334×→**0.7935×**；b21 Dial/C 3.13×→**1.03×**（Dial 0.405ms vs
 C 0.394ms，几乎追平），b17 4.49×→4.485×（结构性天花板，不动）、b14 1.21×、b18 1.25×
 均在噪声内。`bench/data.json` + `docx/bench.html` 已同步，`check_bench_data.py` 通过。
+
+## M26：字符串内联第二刀——length/get 内联，b22 1.24×
+
+延续 M25"换条路"的成功，扫字符串方法族下一个热点：b22（Dial/C 1.41×）。
+
+### 热点定位（反汇编实证）
+b22 函数内联进 run 后，内层每轮（10000 次）调用链：
+- `dial_string_substring`（100974a）：分配新 string + memcpy
+- `dial_string_length`（1009805）：每轮 1 次
+- `dial_string_get`（100983c）：内层循环每轮 10 次
+全程序统计：get 3 处、length 2 处、substring 1 处。C 对照 `b22` 用裸 `char base[128]`
+直接索引 `base[c]`，零调用零分配。
+
+### 实现（inst_call 两个内联分支，约 45 行）
+ReleaseFast 下两函数语义退化为纯访存（stdlib/dial_string.c）：
+- `length`：`DIAL_ASSERT(len>=0)` 编译期消除 → `return s[0]`（一条 `movq (s),s`）
+- `get`：`DIAL_CHECK_BOUNDS` 编译期消除 → `return (unsigned char)(s+8)[i]`
+  → `movzbl 8(s,i,1), %eax`（**必须零扩展**，与 C 侧 `(unsigned char)` 一致）
+签名 `length:[Handle]->I64`、`get:[Handle,I64]->I64`；scratch 用 g1/g2（rax/r10，不在
+GRA 池）。守卫 x86-64 SysV + ReleaseFast + 严格类型；safe/debug 保留原 call（保住断言/
+边界检查），AArch64 原样。`DIALC_NO_STRING_INLINE=1` 完全回退。
+
+### 实测证据
+- **反汇编**：off 版 3 处 get + 2 处 length + 1 处 substring；on 版仅剩 1 处 substring
+  （length/get 调用全消）。
+- **性能**（精确校准 7×取最小，3 轮交叉验证）：b22 off=466µs → on=375µs = **1.24×**
+  （轮间 1.227~1.248×，稳定）；b21/b19/b17/b13/b08/b01 均在 ±1% 噪声内。
+- **正确性**：28/28 校验 + 28/28 逐字节（on vs off）+ 高位字节边界
+  (`"\xff\x80\xfe\x7f".get()` 返回 255/128/254/127，验证 movzbl 零扩展非符号扩展)
+  + 空串 length=0 + O0=O3 逐字节 + A 组 65/65 + ReleaseSafe（守卫跳过、保留 5 处 call）
+  28/28 + 契约零 libLLVM。
+
+### 未触碰部分与后续
+`dial_string_substring`（b22 剩余 1 处/轮）仍未内联：它涉及 `dial_rc_alloc` 堆分配 +
+memcpy + ARC，语义风险远高于纯访存函数。要消除需把 `substring` 变成"零分配切片视图"
+（返回 base payload 指针 + 偏移，get 基于偏移访问），这是 IR 层改造，属独立高风险评估。
+本轮先交付低风险确定收益的 length/get。字符串族剩余富矿：substring/starts_with/
+ends_with/replace/split/contains（其中 contains 内部已调 index_of，M25 已间接受益）。
+
+### 基准刷新（2026-11-27，四语言校准法）
+同批次 Dial/C：b22 1.41×→**1.14×**（Dial 0.373ms vs C 0.328ms）、b21 1.03×（M25
+收益保持）、b17 4.47×（结构性天花板不动）。几何平均 0.7950× —— 与 M25 批次的
+0.7935× 基本持平；注意**跨批次的绝对时间受机器负载影响不可直接比**（本批整体更快），
+可信度量是同批次内的 Dial/C 比值。`bench/data.json` + `docx/bench.html` 已同步，
+`check_bench_data.py` 通过。

@@ -194,6 +194,16 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
   ReleaseSafe（守卫跳过内联、保留 call）28/28 + C 组契约零 libLLVM。护栏 O3+SysV+ReleaseFast+
   非 float，`DIALC_NO_STRING_INDEX_INLINE=1` 回退。证据链见
   [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M25 条。
+- **perf(codegen) — M26 内联 `dial_string_length` / `dial_string_get`**：b22 每轮
+  `base.substring(...)` 后 `t.length()` + 10× `t.get(c)` 共 11 次 PLT 调用，C 对照是裸
+  `base[c]`。ReleaseFast 下两函数语义退化为纯访存：`length = s[0]`（一条 load）、
+  `get = (unsigned char)(s+8)[i]`（`movzbl` 零扩展）。在 `inst_call` 加两个内联分支，
+  反汇编证明 length/get 调用全部消失（off 3+2 处→on 0 处，仅剩 substring 1 处）；
+  精确校准 3 轮交叉验证 **b22 1.24×**（466µs→375µs）。门禁：28/28 校验 + 逐字节 +
+  高位字节(255/128/254 验证零扩展)+ 空串边界 + O0=O3 + A 组 65/65 + ReleaseSafe
+  （守卫跳过、保留 5 处 call）28/28 + 契约零 libLLVM。护栏 O3+SysV+ReleaseFast，
+  `DIALC_NO_STRING_INLINE=1` 回退。证据链见
+  [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M26 条。
 
 ## [v1.21] — 2026-11-24
 

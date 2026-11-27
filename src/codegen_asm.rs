@@ -3852,6 +3852,50 @@ impl<'a> FnEmit<'a> {
             self.sg(dst.unwrap(), &"rax".to_string());
             return;
         }
+        // M26：内联 dial_string_length(s) → s[0]（payload 头 8 字节即长度）。
+        // runtime（stdlib/dial_string.c）body 为 `DIAL_ASSERT(len>=0); return s[0]`；
+        // ReleaseFast 下 DIAL_ASSERT 编译期消除，语义恰为一条 load。
+        // scratch 用 g1(rax)，不在 GRA 池。safe/debug 保留 call（保住断言），AArch64 原样。
+        if func == "dial_string_length"
+            && self.target == EmitTarget::X86_64SysV
+            && self.safety == SafetyMode::ReleaseFast
+            && std::env::var("DIALC_NO_STRING_INLINE").is_err()
+            && dst.is_some()
+            && args.len() == 1
+            && arg_tys.len() == 1
+            && arg_tys[0] == IrType::Handle
+            && ret_ty == IrType::I64
+        {
+            let g1 = self.g1().to_string();
+            self.lg(args[0], &g1);            // rax = s（payload 指针）
+            self.line(&format!("\tmovq ({}), {}", self.r(&g1), self.r(&g1))); // len = s[0]
+            self.sg(dst.unwrap(), &g1);
+            return;
+        }
+        // M26：内联 dial_string_get(s, i) → (unsigned char)s_data(s)[i]。
+        // runtime 在 ReleaseFast 下 DIAL_CHECK_BOUNDS 消除，恰是零扩展字节读取；
+        // 用 movzbl（非零扩展）保证与 C 侧 `(unsigned char)` 一致。
+        // 签名 [Handle, I64] -> I64；scratch 用 g1/g2（rax/r10），不在 GRA 池。
+        if func == "dial_string_get"
+            && self.target == EmitTarget::X86_64SysV
+            && self.safety == SafetyMode::ReleaseFast
+            && std::env::var("DIALC_NO_STRING_INLINE").is_err()
+            && dst.is_some()
+            && args.len() == 2
+            && arg_tys.len() == 2
+            && arg_tys[0] == IrType::Handle
+            && arg_tys[1] == IrType::I64
+            && ret_ty == IrType::I64
+        {
+            let g1 = self.g1().to_string();
+            let g2 = self.g2().to_string();
+            self.lg(args[0], &g1);            // rax = s
+            self.lg(args[1], &g2);            // r10 = i
+            // rax = movzbl byte [s + 8 + i]（跳过 [len@0]，data 从 +8 起）
+            self.line(&format!("\tmovzbl 8({},{},1), %eax", self.r(&g1), self.r(&g2)));
+            self.sg(dst.unwrap(), &g1);
+            return;
+        }
         let locs = abi_assign(arg_tys, self.target);
         let g1 = self.g1().to_string();
 
