@@ -4924,3 +4924,44 @@ Dial/C 几何平均 0.7950×→**0.7881×**（越低越好，改善 0.9%）。
 - **b08 1.898×→1.749×**：3n+1 改善 7.9%（Dial 3.48ms）。
 - b22 1.137×→1.121× 小幅改善；b18/b16/b28 各 1~2% 小回退（数组累加器）。
 `bench/data.json` + `docx/bench.html` 已同步，`check_bench_data.py` 通过。
+
+## M28：修复 EarlyCSE 跨块悬空引用——同一变量传两次的垃圾值 bug（正确性）
+
+"继续 + 提升必有下降"的提示下，先跑全量回归寻找 M27 的隐性代价，结果在差分 fuzz
+里发现 6 个 asm/llvm 输出不一致（如 `dfn(i1,i1)` 应得 2、asm 给 `2183040526`
+等垃圾值）。用 `DIALC_NO_LOOP_SCALAR=1` 回退 M27 后错误依旧 → **确认是既有 bug，
+非本轮引入**。按"正确性优先"，转去治这个根。
+
+### 根因（三层剥离）
+1. 最小复现：`add2(a, a)`（同一变量传两次给自定义函数）O0 正确、O2/O3 给垃圾值；
+   `add2(a, 1)` / `id(a)` 都正确。
+2. O1（无内联）IR 正确：`add2` 的两个实参是两次独立的 `Load(ptr=slot_a)`（Reg9/Reg10）。
+3. O2 IR 中 Reg10 **被使用**（内联生成 `Store param2_slot ← Reg10`）但**无定义**——
+   某 pass 删掉了 `Load dst:10` 却没替换跨块使用点。
+
+### 定位：`inline_calls` + `early_cse_block` 的组合
+- `inline_calls` 把 callee 体复制进 caller、重塑 CFG：原本与实参 Load 同块的调用点
+  被拆成多块，`Reg10` 的使用点（内联体的写参 Store）落到了**别的块**。
+- `early_cse_block` 消除重复 Load（Reg9/Reg10 都是 `Load(slot_a)`）时，只把
+  `Reg10→Reg9` 替换到**本块后续指令**（原注释假设"Load dst 支配本块后续"）——
+  该假设在内联重塑 CFG 后失效，跨块使用点留下悬空引用 → 读未初始化栈 → 垃圾值。
+
+### 修复（pass.rs，约 22 行）
+`early_cse_block` 改为返回 `(removed, Vec<(被删 dst, 复用 reg)>)`；`early_cse`
+在每轮所有块处理完后，**全函数应用**替换对（含 term）。new 值是同块更早的
+Load dst（支配全函数），全函数替换才是正确语义；链式 a→b→c 由 4 轮不动点收敛。
+先试过给 `promote_readonly_slots`（M21 mem2reg）做同样的全函数替换，实证无效——
+真凶是 EarlyCSE，已回退该尝试，工作区只留 EarlyCSE 修复。
+
+### 验证
+- 6 个 fuzz 最小用例 asm 输出全部回到 llvm 期望值（seed40007=-69120、
+  seed40018=2、seed40025=77520）。
+- `run_diff_fuzz_gate.sh --quick`：`DIFF=0`、`RUN_FAIL=0`（剩余 `BUILD_FAIL_LLVM=180`
+  是本机无 libLLVM 致 LLVM 后端编不过，属环境限制，与 M27 之前 asm golden 失败同源）。
+- 28/28 checksum + 修复前后逐字节 28/28（正常形态不受影响，只修此前出错的形态）
+  + O0=O3 28/28 + 单测 41/41。
+
+### 净赢说明
+这是纯正确性修复：不改正常程序的性能，只消除"同一变量多次传参给内联函数"的
+错误输出。呼应提示——M27 的加速有数组循环的 1~2% 小代价，但查这笔账时顺带
+挖出一个更大的既有正确性漏洞，修它无需任何性能交换，是真净赢。

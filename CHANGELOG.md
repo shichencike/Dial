@@ -216,6 +216,15 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
   （无简单结构判据可分，保留全量换大收益）。门禁：28/28 checksum + on/off 逐字节
   28/28 + O0=O3 + ReleaseSafe 零变化 + C 组零 libLLVM。证据链见
   [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M27 条。
+- **fix(pass) — 修复 EarlyCSE 跨块悬空引用（既有正确性 bug）**：差分 fuzz 发现 6 个
+  asm/llvm 输出不一致——同一变量传两次给自定义函数（如 `add2(a, a)`）O0 正确、
+  O2/O3 返回垃圾值（`2183040526`）。三层剥离定位：`inline_calls` 重塑 CFG 后，
+  实参 Load 的 dst 使用点散到别的块；`early_cse_block` 消除重复 Load 时只把替换
+  应用到本块，留下跨块悬空引用 → 读未初始化栈。修复：块内只收集 `(被删 dst,
+  复用 reg)` 替换对，`early_cse` 每轮全函数应用（含 term），4 轮不动点收敛链式。
+  验证：6 个 fuzz 用例全部回到 llvm 期望值、diff fuzz `DIFF=0`、28/28 checksum +
+  逐字节 + O0=O3 + 单测 41/41。纯正确性修复，正常程序性能零变化。证据链见
+  [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M28 条。
 
 ## [v1.21] — 2026-11-24
 

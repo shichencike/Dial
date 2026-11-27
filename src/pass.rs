@@ -3522,11 +3522,15 @@ pub fn mem_effect_of(func: &str) -> MemEffect {
 }
 
 /// 块内单轮 EarlyCSE：维护 `ptr vreg → 可用值` 表，复用重复 Load。
-/// 返回本块消除的 Load 数。注意：只删 Load，不碰 Store/Call/ARC。
-fn early_cse_block(b: &mut crate::ir::IrBlock) -> usize {
+/// 返回 (删除的 Load 数, Vec<(被删 dst, 复用 reg)>)。只删 Load，不碰 Store/Call/ARC。
+/// 替换对交由 early_cse 全函数应用——inline 重塑 CFG 后，同一 Load 的 dst 使用点
+/// 可能散到其它块（如 add2(a,a) 两个实参），只在本块替换会留下悬空引用 → 垃圾值。
+/// 这是 M28 修复的既有正确性 bug：`build_fail`/`DIFF` fuzz 曾据此产出垃圾值。
+fn early_cse_block(b: &mut crate::ir::IrBlock) -> (usize, Vec<(VReg, VReg)>) {
     // avail: ptr vreg → val，表示"该槽当前持有的最新值"。
     let mut avail: HashMap<VReg, Value> = HashMap::new();
     let mut removed = 0usize;
+    let mut subs: Vec<(VReg, VReg)> = Vec::new();
     let mut i = 0usize;
     while i < b.insts.len() {
         let inst = b.insts[i].clone();
@@ -3534,12 +3538,8 @@ fn early_cse_block(b: &mut crate::ir::IrBlock) -> usize {
             IrInst::Load { dst, ptr, .. } => {
                 // 只复用 Reg 形态的可用值；Imm 形态交给常量折叠，避免类型/宽度错配。
                 if let Some(Value::Reg(saved)) = avail.get(ptr).copied() {
-                    // 命中：用已有值替换本 Load 的定义，删除 Load。
-                    // 只在本块内替换后续使用（Load 的 dst 一定定义在上方，支配后续）。
-                    for j in (i + 1)..b.insts.len() {
-                        subst_inst(&mut b.insts[j], *dst, saved);
-                    }
-                    subst_term_val(&mut b.term, *dst, &Value::Reg(saved));
+                    // 命中：记录替换对、删除本 Load；实际替换在全函数层做。
+                    subs.push((*dst, saved));
                     b.insts.remove(i);
                     removed += 1;
                     continue;
@@ -3572,7 +3572,7 @@ fn early_cse_block(b: &mut crate::ir::IrBlock) -> usize {
         }
         i += 1;
     }
-    removed
+    (removed, subs)
 }
 
 /// 在终止符里把 Reg(from) 替换为 Value(to)。
@@ -3598,10 +3598,23 @@ pub fn early_cse(ip: &mut IrProgram) -> usize {
     let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
     for _ in 0..MAX_ROUNDS {
         let mut round = 0usize;
+        let mut all_subs: Vec<(String, VReg, VReg)> = Vec::new();
         for name in &names {
             if let Some(f) = ip.functions.iter_mut().find(|f| f.name == *name) {
                 for b in &mut f.blocks {
-                    round += early_cse_block(b);
+                    let (n, subs) = early_cse_block(b);
+                    round += n;
+                    for (d, s) in subs { all_subs.push((name.clone(), d, s)); }
+                }
+            }
+        }
+        // 全函数应用替换对：dst 的使用点可能已在别的块（内联重塑 CFG 所致）。
+        // 按收集顺序 subst，链式（a→b, b→c）经不动点多轮收敛。
+        for (name, d, s) in &all_subs {
+            if let Some(f) = ip.functions.iter_mut().find(|f| f.name == *name) {
+                for b in &mut f.blocks {
+                    for ins in &mut b.insts { subst_inst(ins, *d, *s); }
+                    subst_term_val(&mut b.term, *d, &Value::Reg(*s));
                 }
             }
         }
