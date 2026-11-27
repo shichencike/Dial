@@ -4309,3 +4309,328 @@ pub fn promote_loop_ivs(ip: &mut IrProgram) -> usize {
     }
     total
 }
+
+// ============================================================================
+// M27：循环标量槽 SSA 提升（LLVM mem2reg 的循环特化，块参数 phi）
+//
+// M22 promote_loop_ivs 只覆盖「教科书式 for 归纳变量」（preheader Store +
+// header Load→ICmp + latch Load→Bin→Store），而 while 循环里被 read-modify-write
+// 的普通标量槽（如 b08 的 collatz x / 步数 st）每轮都要 Load/Store 栈往返：
+// objdump 实测 b08 内层 ~18 条指令里 x 独占 6 条 load/store、st 另 2 条。
+// 本 pass 对自然循环做受限但通用的 mem2reg：把循环携带的 I64 标量槽替换为
+// header 块参数 phi，read-modify-write 块用块参数把新值传到 merge/latch。
+// ============================================================================
+
+#[derive(Clone, Debug)]
+struct ScalarLoopCand {
+    header_id: u32,
+    preheader_id: u32,
+    loop_blocks: Vec<u32>,
+    slot: VReg,
+}
+
+/// 支配集合（小函数迭代 dataflow，足够快）。
+fn scalar_dominators(f: &IrFunction) -> HashMap<u32, HashSet<u32>> {
+    let all: HashSet<u32> = f.blocks.iter().map(|b| b.id).collect();
+    let mut preds: HashMap<u32, Vec<u32>> = HashMap::new();
+    for b in &f.blocks {
+        let succ: Vec<u32> = match &b.term {
+            Term::Jump { target, .. } => vec![*target],
+            Term::Branch { then_b, else_b, .. } => vec![*then_b, *else_b],
+            _ => Vec::new(),
+        };
+        for s in succ { preds.entry(s).or_default().push(b.id); }
+    }
+    let mut dom: HashMap<u32, HashSet<u32>> = HashMap::new();
+    for &id in &all {
+        dom.insert(id, if id == f.entry { HashSet::from([id]) } else { all.clone() });
+    }
+    loop {
+        let mut changed = false;
+        for b in &f.blocks {
+            if b.id == f.entry { continue; }
+            let ps = match preds.get(&b.id) { Some(p) if !p.is_empty() => p.clone(), _ => continue };
+            let mut nd: Option<HashSet<u32>> = None;
+            for p in &ps {
+                let pd = dom.get(p).cloned().unwrap_or_else(|| all.clone());
+                nd = Some(match nd { None => pd, Some(x) => x.intersection(&pd).copied().collect() });
+            }
+            let mut nd = nd.unwrap_or_else(|| all.clone());
+            nd.insert(b.id);
+            if dom.get(&b.id) != Some(&nd) { dom.insert(b.id, nd); changed = true; }
+        }
+        if !changed { break; }
+    }
+    dom
+}
+
+/// 严格模式（DIALC_LOOP_SCALAR_STRICT=1）：只提升「循环控制变量」——即在 header
+/// 里被 Load 且该 Load 的 dst 直接喂给 header 的 ICmp（Branch cond 比较输入）。
+/// 这类槽通常是非线性更新的 while 变量（M22 LIVP 只认线性 Add/Sub，覆盖不到），
+/// 提升收益确定；而纯累加器槽（如 b18/b28 的 s）提升后块参数走栈反而拖慢。
+fn slot_feeds_header_cond(f: &IrFunction, slot: VReg, hid: u32) -> bool {
+    let hb = match f.blocks.iter().find(|b| b.id == hid) { Some(b) => b, None => return false };
+    let cond = match hb.term { Term::Branch { cond, .. } => cond, _ => return false };
+    // header 里 Load(slot) 的 dst 集合
+    let mut loads: HashSet<VReg> = HashSet::new();
+    for ins in &hb.insts {
+        if let IrInst::Load { dst, ptr, .. } = ins {
+            if *ptr == slot { loads.insert(*dst); }
+        }
+    }
+    if loads.is_empty() { return false; }
+    // ICmp 定义 cond，检查其 a/b 是否来自上述 Load
+    for ins in &hb.insts {
+        if let IrInst::ICmp { dst, a, b, .. } = ins {
+            if *dst == cond {
+                let hit = |v: &Value| matches!(v, Value::Reg(r) if loads.contains(r));
+                return hit(a) || hit(b);
+            }
+        }
+    }
+    false
+}
+
+fn find_scalar_loop_cands(f: &IrFunction) -> Vec<ScalarLoopCand> {
+    let mut out = Vec::new();
+    let dom = scalar_dominators(f);
+    let mut preds: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut succs: HashMap<u32, Vec<u32>> = HashMap::new();
+    for b in &f.blocks {
+        let succ: Vec<u32> = match &b.term {
+            Term::Jump { target, .. } => vec![*target],
+            Term::Branch { then_b, else_b, .. } => vec![*then_b, *else_b],
+            _ => Vec::new(),
+        };
+        succs.insert(b.id, succ.clone());
+        for s in succ { preds.entry(s).or_default().push(b.id); }
+    }
+    for b in &f.blocks {
+        for &s in succs.get(&b.id).map(|v| v.as_slice()).unwrap_or(&[]) {
+            // 回边：s（后继/header）支配 b（当前块/latch），即 s ∈ dom[b]
+            if !dom.get(&b.id).map_or(false, |ds| ds.contains(&s)) { continue; }
+            let hid = s;
+            let hb = match f.blocks.iter().find(|x| x.id == hid) { Some(x) => x, None => continue };
+            if !matches!(hb.term, Term::Branch { .. }) { continue; }
+            let hp = match preds.get(&hid) { Some(p) => p, None => continue };
+            if hp.len() != 2 { continue; }
+            // 自然循环：从 latch 反向收集
+            let mut lset: HashSet<u32> = HashSet::new();
+            lset.insert(hid);
+            let mut work = vec![b.id];
+            while let Some(bid) = work.pop() {
+                if !lset.insert(bid) { continue; }
+                if let Some(ps) = preds.get(&bid) {
+                    for &p in ps { if !lset.contains(&p) { work.push(p); } }
+                }
+            }
+            let pre = match hp.iter().find(|&&p| !lset.contains(&p)) { Some(&p) => p, None => continue };
+            let hsucc: Vec<u32> = succs.get(&hid).cloned().unwrap_or_default();
+            // 候选槽：在循环块内被 Store 的 I64 标量
+            let mut slots: Vec<VReg> = Vec::new();
+            for bid in &lset {
+                let pb = match f.blocks.iter().find(|x| x.id == *bid) { Some(x) => x, None => continue };
+                for ins in &pb.insts {
+                    if let IrInst::Store { ptr, ty, .. } = ins {
+                        if *ty == IrType::I64 && !slots.contains(ptr) { slots.push(*ptr); }
+                    }
+                }
+            }
+            for slot in slots {
+                if slot_escapes_general(f, slot) { continue; }
+                if !slot_loads_used_locally(f, slot, hid) { continue; }
+                // 严格模式：只提升循环控制变量（喂 header ICmp 的 Load 源）
+                if std::env::var("DIALC_LOOP_SCALAR_STRICT").is_ok()
+                    && !slot_feeds_header_cond(f, slot, hid) { continue; }
+                // preheader 必须对该槽有初始化 Store：排除外层循环把内层循环槽
+                // （在循环体内初始化、preheader 无 Store）误当循环携带值。
+                let pre_has_store = f.blocks.iter().find(|x| x.id == pre)
+                    .map_or(false, |pb| pb.insts.iter().any(|ins| matches!(ins, IrInst::Store { ptr, .. } if *ptr == slot)));
+                if !pre_has_store { continue; }
+                // 所有访问块必须在 loop ∪ {pre} ∪ {header 直接后继}
+                let mut ok = true;
+                for pb in &f.blocks {
+                    for ins in &pb.insts {
+                        let touches = matches!(ins, IrInst::Load { ptr, .. } | IrInst::Store { ptr, .. } if *ptr == slot);
+                        if touches && pb.id != pre && !lset.contains(&pb.id) && !hsucc.contains(&pb.id) {
+                            ok = false;
+                        }
+                    }
+                }
+                if !ok { continue; }
+                out.push(ScalarLoopCand {
+                    header_id: hid, preheader_id: pre,
+                    loop_blocks: lset.iter().copied().collect(), slot,
+                });
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone)]
+struct SlotAccess {
+    bidx: usize,
+    load_dst: Option<VReg>,
+    load_idx: Option<usize>,
+    store_val: Option<Value>,
+    store_idx: Option<usize>,
+}
+
+fn substitute_inst_value(ins: &mut IrInst, from: VReg, to: Value) {
+    let rep = |v: &mut Value| { if matches!(v, Value::Reg(r) if *r == from) { *v = to; } };
+    match ins {
+        IrInst::Bin { a, b, .. } | IrInst::FBin { a, b, .. }
+        | IrInst::ICmp { a, b, .. } | IrInst::FCmp { a, b, .. } => { rep(a); rep(b); }
+        IrInst::Un { a, .. } | IrInst::Conv { a, .. } => rep(a),
+        IrInst::Store { val, .. } => rep(val),
+        IrInst::Call { args, .. } | IrInst::InlineAsm { args, .. } => for a in args { rep(a); },
+        IrInst::PtrAdd { off, .. } => rep(off),
+        _ => {}
+    }
+}
+
+fn apply_scalar_loop(f: &mut IrFunction, c: &ScalarLoopCand) -> bool {
+    let slot = c.slot;
+    // 1) 每块访问形态：至多 1 Load + 1 Store，且 Load 在 Store 前
+    let mut acc: HashMap<u32, SlotAccess> = HashMap::new();
+    for (bidx, b) in f.blocks.iter().enumerate() {
+        let mut a = SlotAccess { bidx, load_dst: None, load_idx: None, store_val: None, store_idx: None };
+        for (i, ins) in b.insts.iter().enumerate() {
+            match ins {
+                IrInst::Load { dst, ptr, .. } if *ptr == slot => {
+                    if a.load_dst.is_some() { return false; }
+                    a.load_dst = Some(*dst); a.load_idx = Some(i);
+                }
+                IrInst::Store { ptr, val, .. } if *ptr == slot => {
+                    if a.store_val.is_some() { return false; }
+                    a.store_val = Some(*val); a.store_idx = Some(i);
+                }
+                _ => {}
+            }
+        }
+        if a.load_dst.is_some() || a.store_val.is_some() { acc.insert(b.id, a); }
+    }
+    for (&bid, a) in &acc {
+        if let (Some(li), Some(si)) = (a.load_idx, a.store_idx) {
+            if li > si { return false; }
+            if a.store_val == Some(Value::Reg(a.load_dst.unwrap())) { return false; }
+        }
+        if bid == c.header_id && a.store_val.is_some() { return false; }
+        if bid == c.preheader_id && a.load_dst.is_some() { return false; }
+    }
+    // 2) 前驱/后继
+    let mut preds: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut succs: HashMap<u32, Vec<u32>> = HashMap::new();
+    for b in &f.blocks {
+        let succ: Vec<u32> = match &b.term {
+            Term::Jump { target, .. } => vec![*target],
+            Term::Branch { then_b, else_b, .. } => vec![*then_b, *else_b],
+            _ => Vec::new(),
+        };
+        succs.insert(b.id, succ.clone());
+        for s in succ { preds.entry(s).or_default().push(b.id); }
+    }
+    // 3) phi 块：header + 循环内 ≥2 前驱的块（merge 点）
+    let mut phi_blocks: Vec<u32> = vec![c.header_id];
+    for &bid in &c.loop_blocks {
+        if bid == c.header_id { continue; }
+        if preds.get(&bid).map_or(false, |p| p.len() >= 2) { phi_blocks.push(bid); }
+    }
+    let mut phi_reg: HashMap<u32, VReg> = HashMap::new();
+    for &bid in &phi_blocks {
+        let ph = f.new_reg(IrType::I64);
+        phi_reg.insert(bid, ph);
+    }
+    // 4) in/out value 定点
+    let mut in_val: HashMap<u32, Value> = HashMap::new();
+    for (&bid, &ph) in &phi_reg { in_val.insert(bid, Value::Reg(ph)); }
+    let mut out_val: HashMap<u32, Value> = HashMap::new();
+    for _ in 0..(f.blocks.len() + 2) {
+        out_val.clear();
+        for b in &f.blocks {
+            let v = match acc.get(&b.id).and_then(|a| a.store_val) {
+                Some(sv) => Some(sv),
+                None => in_val.get(&b.id).copied(),
+            };
+            if let Some(v) = v { out_val.insert(b.id, v); }
+        }
+        let mut changed = false;
+        for b in &f.blocks {
+            if phi_reg.contains_key(&b.id) { continue; }
+            let ps = match preds.get(&b.id) { Some(p) if p.len() == 1 => p, _ => continue };
+            if let Some(v) = out_val.get(&ps[0]) {
+                if in_val.get(&b.id) != Some(v) { in_val.insert(b.id, *v); changed = true; }
+            }
+        }
+        if !changed { break; }
+    }
+    for (&bid, _) in &acc {
+        if bid != c.preheader_id && !in_val.contains_key(&bid) { return false; }
+    }
+    // 5) 重写 Load → phi，删除 Load/Store
+    for b in f.blocks.iter_mut() {
+        let a = match acc.get(&b.id) { Some(a) => a.clone(), None => continue };
+        if let Some(d) = a.load_dst {
+            if let Some(inv) = in_val.get(&b.id).copied() {
+                for ins in &mut b.insts { substitute_inst_value(ins, d, inv); }
+                subst_term_val(&mut b.term, d, &inv);
+            }
+        }
+        b.insts.retain(|ins| match ins {
+            IrInst::Load { ptr, .. } if *ptr == slot => false,
+            IrInst::Store { ptr, .. } if *ptr == slot => false,
+            _ => true,
+        });
+    }
+    // 6) 追加 phi params（params 与 args 顺序一致）
+    for b in f.blocks.iter_mut() {
+        if let Some(&ph) = phi_reg.get(&b.id) {
+            b.params.push((ph, IrType::I64));
+        }
+    }
+    for b in f.blocks.iter_mut() {
+        let ov = out_val.get(&b.id).copied();
+        let push = |target: u32, args: &mut Vec<Value>| -> bool {
+            if phi_reg.contains_key(&target) {
+                match ov { Some(v) => args.push(v), None => return false }
+            }
+            true
+        };
+        match &mut b.term {
+            Term::Jump { target, args } => { if !push(*target, args) { return false; } }
+            Term::Branch { then_b, then_args, else_b, else_args, .. } => {
+                if !push(*then_b, then_args) { return false; }
+                if !push(*else_b, else_args) { return false; }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// 全程序循环标量槽提升。返回提升次数。
+pub fn promote_loop_scalars(ip: &mut IrProgram) -> usize {
+    let mut total = 0usize;
+    let names: Vec<String> = ip.functions.iter().map(|f| f.name.clone()).collect();
+    for name in &names {
+        // 每次重分析并只应用第一个候选，避免索引失效；上限防止病态循环。
+        for _ in 0..16 {
+            let cands = {
+                let f = match ip.functions.iter().find(|f| f.name == *name) { Some(f) => f, None => break };
+                find_scalar_loop_cands(f)
+            };
+            if std::env::var("DIALC_DUMP_LOOP_SCALAR").is_ok() {
+                for c in &cands {
+                    eprintln!("[loopscalar] {} h={} pre={} slot={}", name, c.header_id, c.preheader_id, c.slot);
+                }
+            }
+            let c = match cands.first() { Some(c) => c.clone(), None => break };
+            let ok = if let Some(f) = ip.functions.iter_mut().find(|f| f.name == *name) {
+                apply_scalar_loop(f, &c)
+            } else { false };
+            if ok { total += 1; } else { break; }
+        }
+    }
+    total
+}

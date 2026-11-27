@@ -195,6 +195,19 @@ pub fn compile_asm(
     {
         pass::promote_loop_ivs(&mut ip);
     }
+    // M27-loopscalar：循环标量槽 SSA 提升（LLVM mem2reg 循环特化，带 phi）。
+    // M22 只覆盖教科书式 for 归纳变量；b08 这类 while 循环里的 collatz x / 步数 st
+    // 每轮仍要 Load/Store 栈往返（objdump: 内层 18 条里 8 条是栈访问）。本 pass
+    // 把循环携带的 I64 槽换成 header 块参数 phi，read-modify-write 块用块参数传值。
+    // 置于 M22 之后、simplifycfg 之前；同 O3 + ReleaseFast + x86-64 护栏，
+    // DIALC_NO_LOOP_SCALAR=1 可整体回退。
+    if opt_level >= OptLevel::O3 && matches!(target, EmitTarget::X86_64SysV)
+        && matches!(safety, SafetyMode::ReleaseFast)
+        && !debug_info && profile.is_none() && !instrument
+        && std::env::var("DIALC_NO_LOOP_SCALAR").is_err()
+    {
+        pass::promote_loop_scalars(&mut ip);
+    }
     // M20-simplifycfg-adce：LLVM 风格 CFG 简化（跳转链折叠）+ 激进死代码消除
     // （不可达块删除）。置于所有变换之后——清理 unroll/LICM/specialize 用
     // `Term::Unreachable` 断边后遗留的死块，并折叠纯跳转中继块。删块保留 id 空洞

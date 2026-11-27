@@ -204,6 +204,18 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
   （守卫跳过、保留 5 处 call）28/28 + 契约零 libLLVM。护栏 O3+SysV+ReleaseFast，
   `DIALC_NO_STRING_INLINE=1` 回退。证据链见
   [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M26 条。
+- **perf(pass) — M27 循环标量槽 SSA 提升（LLVM mem2reg 循环特化）**：b08（3n+1）
+  内层 ~18 条指令里 collatz 变量 x 独占 6 条栈 load/store、步数 st 另 2 条，根因是
+  循环携带标量未驻留寄存器（已排除除 2 幂强度削减假设：`%2`/`/2` 早已优化成
+  `test`/`sar`）。新增 pass：支配分析找自然循环，把 loop-carried I64 槽换成 header
+  块参数 phi，read-modify-write 块用块参数传新值，in/out value 定点收敛后删除
+  Load/Store。守卫槽不逃逸、Load dst 不跨块、preheader 有初始化 Store；置于 M22
+  之后，O3+ReleaseFast+x86-64 护栏，`DIALC_NO_LOOP_SCALAR=1` 回退。同一编译器二进制
+  + 开关 A/B（多 rep 交叉取最小）：**b21 1.295×**（M25 内联 index_of 后字节循环索引
+  槽也受益）、**b08 1.08×**、b22 +2~4%；数组累加循环 b18/b28/b16/b27 有 1~2% 小回退
+  （无简单结构判据可分，保留全量换大收益）。门禁：28/28 checksum + on/off 逐字节
+  28/28 + O0=O3 + ReleaseSafe 零变化 + C 组零 libLLVM。证据链见
+  [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M27 条。
 
 ## [v1.21] — 2026-11-24
 

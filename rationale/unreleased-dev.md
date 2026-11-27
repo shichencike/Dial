@@ -4870,3 +4870,57 @@ ends_with/replace/split/contains（其中 contains 内部已调 index_of，M25 �
 0.7935× 基本持平；注意**跨批次的绝对时间受机器负载影响不可直接比**（本批整体更快），
 可信度量是同批次内的 Dial/C 比值。`bench/data.json` + `docx/bench.html` 已同步，
 `check_bench_data.py` 通过。
+
+## M27：循环标量槽 SSA 提升（LLVM mem2reg 循环特化）—— b08 1.08× / b21 1.29×
+
+"梭哈"方向：M22 LIVP 只覆盖教科书式 for 归纳变量（preheader Store + header Load→ICmp
++ latch Load→Bin/Add→Store 的线性更新链），而 while 循环里被 read-modify-write 的
+普通标量槽每轮都要 Load/Store 栈往返。
+
+### 热点定位（反汇编实证）
+b08（3n+1，Dial/C 1.90×）内层 while 每轮 ~18 条指令，其中 collatz 变量 x 独占 6 条
+`mov x(%rsp)` load/store、步数 st 另 2 条；真实算术仅 `test $1`/`sar`/`lea` 各一条。
+`%2`→`test $1`、`/2`→`sar` 修正序列、`%MOD`→magic number 都已被既有后端优化，
+**排除**"除 2 幂强度削减"假设（9 个 idiv 全在 stdlib C 代码，不在热点）。根因是
+x/st 未驻留寄存器，与 b17 同源，但 b08 是纯标量循环（无数组句柄），可治。
+
+### 实现（pass.rs 新 pass，约 260 行）
+对函数做支配分析 → 找自然循环（回边 header 支配 latch）→ 收集循环携带的 I64 标量槽：
+- 守卫：槽地址不逃逸、Load dst 不跨块使用、preheader 有初始化 Store（排除外层循环
+  把内层槽误当循环携带值）、所有访问块在 loop ∪ {pre} ∪ {header 直接后继}。
+- 变换：header 加块参数 phi；read-modify-write 块（含 merge 点）加块参数传新值；
+  删除所有 Load(slot)/Store(slot)，把 dst 引用换成对应块的 in-value（phi 或前驱 out-value）；
+  in/out value 用定点迭代求到收敛。
+- 置于 M22 LIVP 之后、simplifycfg 之前；O3 + ReleaseFast + x86-64 + 非 -g/PGO 护栏，
+  `DIALC_NO_LOOP_SCALAR=1` 整体回退。
+
+### 探索过的判据（均证伪，保留记录）
+- **严格模式**（只提升喂 header ICmp 的控制变量）：b08/b21 收益全部消失 → 收益其实
+  来自非控制变量槽（st 累加器、index_of 内联后的索引槽），控制变量 x 本身贡献很小。
+- **局部累加器判据**（Store 块不得含对其它槽的 Load）：没能分开 b08/b28（b28 的 s
+  更新块恰好也只 Load 自身），且会误杀 b21 的关键槽 → 放弃。
+- 结论：收益项（b08/b21 标量/字符串循环）与回退项（b18/b28 数组累加循环）无简单
+  结构判据可分；保留全量提升，接受 b18/b28/b16/b27 的 1~2% 小回退，换 b21 +29%、
+  b08 +8% 的确定大收益。
+
+### 实测证据（同一编译器二进制 + 回退开关 A/B，7~9 次交叉取最小，多 rep 一致）
+- **b21**：off 49.4ms → on 38.2ms = **1.295×**（rep 30/146/300 三档 1.275~1.295 稳定）。
+  根因：M25 内联 index_of 后，字节比较循环的索引槽被 M27 提升，消除每轮栈往返——
+  字符串内联路线的延续红利。
+- **b08**：off 550ms → on 510ms = **1.08×**（rep 30/146/300 三档 1.073~1.081 稳定）。
+- b22 +2~4%；b18 -2.2%、b28 -1.7%、b16 -1.5%、b27 -1%（数组累加器小回退）。
+- 全 28 项几何平均 **1.0057×**（+0.57%，见下方基准刷新）。
+
+### 门禁
+28/28 checksum 一致 + M27 on/off 逐字节 28/28 + O0=O3 checksum 一致 + ReleaseSafe
+下 on/off 逐字节一致（护栏生效、零变化）+ C 组零 libLLVM（`verify_no_llvm_toolchain.sh`
+通过，隔离 PATH 下 23 用例）+ 零 stdcpp 动态依赖。asm golden 双后端门禁因本机无
+libLLVM、LLVM 后端不可编译而无法运行（属环境限制，非 pass 回归）。
+
+### 基准刷新（2026-11-27，四语言校准法）
+Dial/C 几何平均 0.7950×→**0.7881×**（越低越好，改善 0.9%）。
+- **b21 1.013×→0.783×**：Dial 0.337ms→0.258ms，从略输 C 变成领先 C 22%——
+  M25（内联 index_of）+ M27（提升内联后字节循环索引槽）组合拳彻底拿下。
+- **b08 1.898×→1.749×**：3n+1 改善 7.9%（Dial 3.48ms）。
+- b22 1.137×→1.121× 小幅改善；b18/b16/b28 各 1~2% 小回退（数组累加器）。
+`bench/data.json` + `docx/bench.html` 已同步，`check_bench_data.py` 通过。
