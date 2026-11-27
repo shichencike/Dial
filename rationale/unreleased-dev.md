@@ -4965,3 +4965,42 @@ Load dst（支配全函数），全函数替换才是正确语义；链式 a→b
 这是纯正确性修复：不改正常程序的性能，只消除"同一变量多次传参给内联函数"的
 错误输出。呼应提示——M27 的加速有数组循环的 1~2% 小代价，但查这笔账时顺带
 挖出一个更大的既有正确性漏洞，修它无需任何性能交换，是真净赢。
+
+## M29（未采纳）：substring→length/get 消费融合 — 单项有效但整体净亏，已回退
+
+### 动机与实证
+b22 内层 `var t = base.substring(f, f+10); for c in 0..t.length() { s += t.get(c) }`
+每轮一次 `dial_rc_alloc` + memcpy + ARC，而 C 侧等价物完全不物化子串
+（`for (c=f; c<f+10; c++) s += base[c]`）。构造 A/B 对照放大 50 倍循环实测：
+substring 模式 vs 手动融合 = **1.206×**——收益真实、非猜测。
+
+### 实现（严格 IR pass，已回退）
+`fuse_substring_consumers`（pass.rs）：识别「substring 结果只存唯一槽、该槽只被
+length/get 消费且只 release 一次、所有消费块被 substring 块支配」的严格形态，
+改写为 `length(t)→to-from`、`get(t,i)→get(base, from+i)`（后者仍走 M26 内联 movzbl），
+删除 substring Call / Store / Load / Alloca / RcRelease。守卫含
+`DIALC_NO_SUBSTR_FUSE=1` 回退。仅 O3+ReleaseFast+x86-64。
+
+### 验证（功能全绿）
+b22 单项 1.119×、substring PLT 1→0、checksum 28/28 + 逐字节 28/28（on/off）、
+O0=O3 一致、ReleaseSafe 零变化（护栏）、单测 41/41。**功能完全正确。**
+
+### 否决理由：布局效应导致净亏
+同编译器 + 回退开关 A/B：b22 +11.9%，但 **b21 -22%**、b08 -7%。
+关键判别：单独编译 b21 时 off/on 指令数完全相同（284=284）、性能 1.008（噪声）——
+说明 pass **不改 b21 代码本身**，回退源自删除 b22 的 substring PLT 后 `run()`
+分发函数整体重排、b21 的 index_of 字节循环落到更差的 i-cache 对齐位置。
+完整四语言基准裁决：整体 Dial/C 几何平均 **0.7881 → 0.7891（净亏 0.001）**，
+b21 0.783→1.014、b22 1.121→1.009 相抵仍有赤字。
+
+### 结论
+呼应「提升必有下降」：这是教科书级的融合机会、功能无可挑剔，但二进制布局的
+隐性代价吃掉了单项收益。按净赢纪律**完全回退**，工作区恢复干净，未提交。
+若将来要重做，需同时稳定 `run()` 的函数布局（如独立段对齐），否则单项收益不可信。
+
+### 附带：大规模正确性回归（本轮坐实 M28）
+`diff_fuzz.py --seeds 400 --jobs 4 --opt-levels O0 O2 O3`（1200 次）：
+`DIFF=0`、`RUN_FAIL=0`、`BUILD_FAIL_ASM=0`、`NO_ASM_EMIT=0`。
+所有 `BUILD_FAIL_LLVM`（含 177 个 struct-进-容器用例）均因本机 dialc 未带
+`--features llvm`（"此 dialc 构建未启用 LLVM 后端"），属环境限制非正确性缺陷。
+M28 的 EarlyCSE 跨块修复在 1200 次检验下稳健。
