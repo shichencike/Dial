@@ -5144,3 +5144,47 @@ b21 正常水平，**当前 data.json 的 0.78× 优势来自一次偶然落位�
   transform，收益会被 uop cache 布局假象吞掉；按函数规模隔离是低成本稳健解法。
 - caller-saved 全开（消除所有 call 后扩寄存器池）仍未做——M24 已证伪预留 callee-saved
   钉住路线；真正的 6→14 寄存器扩张是后续更深的架构工程，不在本轮。
+
+## 本轮排查（未采纳）：GRA 治根剩余路径证伪 — b17 跨块驻留是硬天花板
+
+### 动机：承接 M30 继续「架构级治根」
+M30 已把逃逸分析证据传导到 codegen、消除独立函数 set 慢路径 call，热循环内
+已无 set call。本轮尝试攻克 b17 残留的跨块驻留瓶颈：内层 j 循环每轮仍有
+8 次栈重载 + 2 次写回（反汇编 0x1007ad0-1007b84：`0x1e0(%rsp)` aik、
+`0x1d0` B base、`0x1a0` C base、`0x2c8` j、`0x188` i*64 等），真实算术
+仅 1 条 `imul`。这些值在 IR 层已被 LICM/SSA 提升到正确位置，瓶颈纯在
+codegen 的 GRA 按块切段 → 块边界 spill/reload。
+
+### 探针 1：线性扫描扩池 6→10（RES_POOL）— 证伪
+临时把 `build_linear_plans` 的 `CALLEE_SAVED_POOL` 换成 `RES_POOL`（10 phys）。
+checksum 28/28 仍全绿，但反汇编对比：b17 栈访问次数 **76→76 完全不变**，
+caller-saved 仅参与 2 处（非驻留热点）；性能 b17 **慢 4.5%**（布局噪声）。
+结论：b17 峰值同时活跃值 ≤6，6 个 callee-saved 已够，扩池无收益。已回退。
+
+### 探针 2：强制小型函数走 analyze_unified（10 phys 全局绑定）— 证伪且危险
+M30 让 b17 的 9 个 call（3×new + 3×push + 3×release）全在序言/尾声、热循环
+内无 call。据此假设 caller-saved 可全程驻留，加 `DIALC_GRA_FORCE_UNIFIED=1`
+跳过 `block_can_reside` 检查（限 <=150 指令的独立函数，复用 M30 规模守卫）。
+结果：**b16/b17/b18 三条 checksum 全部错误**（214049468≠725990386、
+b17 输出为空疑似崩溃、331082798≠402252332）。证明 `analyze_unified` 的
+「phys 全程权威」前提在有 call 函数里不成立——序言/尾声 call 踩踏了
+r8/r9/rsi/rdi，重现 M24 时代「扩池到 caller-saved 导致段错误」教训。已回退。
+
+### 全局判断：GRA 四条主要路径全部证伪
+| 路径 | 结果 | 证据 |
+|---|---|---|
+| M24 预留 phys 钉住句柄 | 负收益，仅钉住 1 值 | rationale M24 |
+| legacy 静态 top-N 全局绑定 | b17 慢 4.4~10% | M24 + 本轮复测 |
+| 线性扫描扩池 6→10 | b17 慢 4.5%，栈访问数不变 | 本轮探针 1 |
+| 强制 10 phys 绕过 call 检查 | checksum 错/崩溃 | 本轮探针 2 |
+
+b17 跨块驻留的唯一剩余理论解是**完整 Greedy RA**：为每个 vreg 计算跨块
+live interval，在每个 call 点切断 caller-saved 区间（spill/reload），做全局
+一致的 phys 分配（含块边界零回写）。这是 LLVM 级的架构工程，正确性风险高、
+周期长，非增量改动可及。本轮未实现，工作区干净、二进制重建回 M30 状态。
+
+### 结论含义
+- 当前 0.7860 是经多轮验证的稳定平衡点；b17 的 4.4× 差距是当前 IR/后端抽象
+  （堆句柄 + get/set + GRA 按块切段）的结构性天花板，增量 pass 已无净赢空间。
+- 继续在 GRA 上试错只会产出负结果；下一轮需架构级立项（完整 Greedy RA）或
+  换方向（基准测量架构 / 收尾发布），由用户决策。
