@@ -5251,3 +5251,50 @@ j 块短命值占满，aik 被挤出走栈。扩池实验已证峰值活跃 <=6�
   精确划定其范围（emit 状态机重构是核心难点），为后续投入提供实证边界。
 - 当前 0.7860 仍是稳定平衡点；所有增量方向（GRA 四探针 + 禁用内联 + Greedy
   Phase 1）均已证伪留痕。
+
+---
+
+## M32（立项探索，未采纳）：完整 Greedy RA Phase 2 — loop-invariant 全局 pin 证伪 + 根因精确锁定
+
+### 背景：接续 M31 Phase 1，换「精准 pin」路线避开全局 first-fit 的两处退化
+
+M31 Phase 1（全局 phys first-fit + 跨块继承）已证伪：保守长区间占满 phys、
+段切换反增回写（b17 +20%）；加继承则 phi 边界 phys 归属冲突（17/28 checksum）。
+本轮尝试 Phase 2：不做全局分配，改为只 pin **严格单一定义、非 phi、跨≥2 块**
+的 SSA vreg 到固定 callee-saved phys——写时双写栈槽 + phys，读时恒走 phys
+（`phys()` 全程有效、不受 `residency_on` 约束），块边界清空 resident 不影响。
+正确性论证：单一定义保证值全程不变，双写保证未 pin 路径读到最新值，从候选
+定义上排除「多 def 汇合 / phi 归属冲突」。开关 `DIALC_PIN_INVARIANTS=1` 隔离。
+
+### 实现与实证
+
+1. FnEmit 新增 `pin_invariants` / `pin_phys`，三处 phys 分配循环跳过 pin 占用的
+   callee-saved；`sg()` 对 pin 值双写、`phys()` 优先返回 pin phys。
+2. checksum 28/28 一致（正确性 OK）；但快速计时六项全部 ≈1.000（b17 1.003/
+   b16 0.997/b18 1.004/b14 1.004）——**零收益**。
+3. 诊断（`DIALC_PIN_DEBUG`）揭示根因：b17/b16/b18 的跨块值 **没有一个满足
+   「单一 def 普通 vreg」候选**。跨块 vreg（b17 的 4/0/2）全是 Alloca 地址槽
+   （alloca=true, notres=true），`promotable=0`；单 Store + 多 Load 的 SLSA 槽
+   也为 0。b17 的 `aik` / `B base` / `C base` / `i*64` 都是**循环内多次 Store
+   的栈槽**（k 循环体每轮写，j 循环体每轮读），不是全程 invariant。
+
+### 反汇编实证（b17 j 内层循环体，独立 b17.s b14 块）
+
+39 行循环体含 **6 次 load + 2 次 store** 栈访问：
+`392(i*64)` / `712(j)` / `416(B base)` / `480(C base)` / `464(aik)` / `456(B')`
+每轮 reload，`816(pos)` / `712(j)` 每轮写回。j 循环执行 64×64×64=262144 次，
+即约 210 万次冗余栈访问 —— 这是 b17 3.96× 的结构性瓶颈。
+其中 `416/480/464/456/392` 在 j 循环内不变（j 循环 invariant），但由外层 k
+循环每轮重写，故不满足「全程单一定义」，无法被全局 pin 直接覆盖。
+
+### 关键结论：根因锁定为「loop-invariant 栈槽未 SSA 化」
+
+- **全局 phys 分配（Phase 1）与 SSA 单一定义 pin（Phase 2）两条路都证伪**：
+  前者分配策略错，后者候选根本不存在——b17 的跨块值全是循环内重写的栈槽。
+- **真正解法是 LLVM 的 loop-invariant code motion + mem2reg**：把 j 循环内的
+  `Load aik/B/C/i*64` 识别为循环不变量、提到 j 循环外并 SSA 化。现有 M19 LICM
+  不提升 alloca 槽的 Load（别名顾虑），M27 只覆盖「循环内 read-modify-write
+  的携带槽」（preheader 有 Store），均不覆盖本形态。这确属 LLVM 级架构工程。
+- 本轮未采纳，工作区干净、二进制重建回 M30 状态（几何平均 0.7849，checksum
+  28/28）。完整 Greedy RA 的剩余唯一路径 = 精确的循环不变量栈槽 SSA 提升，
+  已作为明确边界留给后续专项立项。
