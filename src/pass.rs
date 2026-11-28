@@ -3234,6 +3234,9 @@ pub fn fold_popcount(ip: &mut IrProgram) -> usize {
 pub struct LocalIntArray {
     pub slot: VReg,          // 存句柄的栈槽
     pub payload_off: i64,    // payload 基址相对句柄的偏移（elems@24）
+    /// 句柄别名闭包：init 句柄 + 从槽 load 出的 + set/push 返回值写回槽的。
+    /// 逃逸检查已证明这些值恒指向该局部独占数组（rc==1、kind==0）。
+    pub handles: Vec<VReg>,
 }
 
 /// 白名单 runtime 函数：句柄作为参数出现是安全的（不改变"句柄身份"的逃逸）。
@@ -3374,7 +3377,7 @@ pub fn analyze_local_int_arrays(f: &IrFunction) -> Vec<LocalIntArray> {
         }
         if escaped { continue; }
 
-        out.push(LocalIntArray { slot, payload_off: 24 });
+        out.push(LocalIntArray { slot, payload_off: 24, handles: hset.into_iter().collect() });
     }
     out
 }

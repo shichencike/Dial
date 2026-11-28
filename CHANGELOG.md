@@ -225,6 +225,17 @@ CPython 3.11 / **dialc 1.22.0 `--fast`**。
   验证：6 个 fuzz 用例全部回到 llvm 期望值、diff fuzz `DIFF=0`、28/28 checksum +
   逐字节 + O0=O3 + 单测 41/41。纯正确性修复，正常程序性能零变化。证据链见
   [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M28 条。
+- **perf(codegen) — M30 局部独占 int[] 的 set 消除 COW 检查与慢路径 call**：把 M18
+  `analyze_local_int_arrays` 的逃逸分析证据（函数局部、非逃逸、kind=0、rc==1）首次
+  从 IR pass 层传导到 codegen：对指向这些句柄的 `dial_array_set`，运行时 rc/kind 检查
+  与 COW 慢路径 `call` 均为死代码，直接发射一条裸 `mov v,24(a,i,8)` + 返回 a（runtime
+  独占分支的精确等价）。**规模守卫**跳过巨型内联函数（如基准的 `run()`，587 指令）：
+  在那种函数里删指令会整体平移后续热循环入口、跨 32B uop cache 边界造成 6%~33% 的
+  布局假象退化。仅 O3 + ReleaseFast + x86-64 + 非 -g/PGO/插桩；`DIALC_NO_ARRAY_SET_NOCHK=1`
+  回退。验证：28/28 checksum + 逐字节 + O0=O3 + ReleaseSafe + fuzz `DIFF=0`。
+  四语言基准 Dial/C 几何平均 **0.7881×→0.7860×**（b17 快 11.3%、b16 快 5.1%、b18 快
+  3.4%，两轮复测一致）。证据链见
+  [rationale/unreleased-dev.md](rationale/unreleased-dev.md) M30 条。
 
 ## [v1.21] — 2026-11-24
 

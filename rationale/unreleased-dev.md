@@ -5086,3 +5086,61 @@ b21 正常水平，**当前 data.json 的 0.78× 优势来自一次偶然落位�
 - 真正的治根需要函数级 section 隔离 / PGO 布局稳定，投入产出比极低，
   且属 benchmark harness 结构问题而非编译器缺陷。不再硬造负收益改动。
 - 当前 0.7881 仍是有效平衡点；data.json 与编译器 checksum 28/28 一致。
+
+## M30（采纳）：局部独占 int[] 的 set 消除 COW 检查 —— 治根传导 + 规模守卫
+
+### 动机：用户选「架构级治根」
+连续多轮（M24 GRA 钉住 / M29 substring 融合 / b14-b18 CSE / 上轮 32B 对齐）撞
+结构性天花板。用户明确选择架构级治根，要求把 IR 层已证明的语义传到 codegen。
+
+### 摸底：定位唯一未被证伪的架构级切入点
+- b17 4.49× 的真因（M23/M24 结论）：j 内层每轮 51 条指令，栈 load 9 + store 11 +
+  payload 直访 2 + 地址计算 8 + 真实算术 1；gcc 栈数组内层 2 条。根因是堆句柄 +
+  get/set 抽象 + 6 个 callee-saved 硬限。M24 钉住、M23 扁平化均已证伪。
+- 但反汇编发现 b17 j 内层残留**一条 `call dial_array_set` 慢路径**（COW/realloc 回退，
+  0x1007bb1）。而 M18 已严格证明 b17 的 A/B/C 是「函数局部、非逃逸、kind=0」数组，
+  set 恒等返回 a、永不走慢路径（C runtime `dial_array_set` 独占分支就是裸写，
+  stdlib/dial_array.c:138-166，elem_retain/release 对 int 是 no-op）。
+- **治根点**：把 M18 的逃逸分析证据从 IR pass 层传导到 codegen，对已证独占的 set
+  发射无检查、无慢路径 call 的纯裸 store。这是「IR 抽象过高、优化器看不穿」的真正
+  架构级修复——此前 M18 的证据只用于删冗余写回，没传到指令选择层。
+
+### 实现（48 行，含完整护栏）
+1. `LocalIntArray` 增 `handles: Vec<VReg>` 字段，`analyze_local_int_arrays` 暴露句柄
+   别名闭包（init + 槽 load + set/push 写回），逃逸检查已保证这些值恒指向独占数组。
+2. `FnEmit` 增 `local_int_set_handles`，`new` 里在满足护栏时调用分析填入。
+3. `inst_call` 的 set 内联分支前加静态可证快路径：`args[0] ∈ local_int_set_handles`
+   → `lg(a/i/v); movq %rdx,24(%rdi,%rsi,8); movq %rdi,%rax; sg(dst,rax)`。
+- 护栏：O3 + ReleaseFast + x86-64 SysV + 非 -g/PGO/instrument；
+  `DIALC_NO_ARRAY_SET_NOCHK=1` 回退。
+
+### 关键转折：规模守卫（本轮最重要的教训）
+首版无规模守卫的 A/B：array 类真快（b17 0.874、b15 0.880、b14 0.936、b16 0.949），
+但整体几何平均 **0.7881→0.7938 净亏**。逐项归因：
+- b21 +32.9% / b02 +18% / b08 +11.4% / b23 +6.7% —— 这四项**完全不用 array set**，
+  M30 对它们零代码影响，回退是纯布局假象。
+- 反汇编定位：`nm` 显示只有 b16/b17/b18 是独立函数，**其余 25 项全内联进 `run()`**
+  （587 指令 / 267 块）。删 run() 内指令平移了后续热循环入口，跨 32B uop cache 边界
+  ——与上轮「b21 黄金布局」发现完全同源。
+- **规模守卫**：`func_inst_count <= 150` 才启用 M30。统计全部函数：只有 run()=587
+  超过，第二大 b17=57，裕量充足。这样只优化 3 个独立函数、run() 内代码一字不动。
+- 效果：估算几何平均 0.7881→0.7822，假象全消。
+
+### 验证（全绿）
+- 正确性：28/28 checksum + 逐字节 + O0=O3=真值 28/28 + ReleaseSafe 28/28；
+  fuzz `DIFF=0`/`RUN_FAIL=0`/`BUILD_FAIL_ASM=0`（`BUILD_FAIL_LLVM=180` 是本机无
+  `--features llvm`，环境限制非缺陷）；O2 护栏 set call 保持 9（M30 不启用）。
+- 反汇编：全程序 set 慢路径 call 9→4；b17 独立函数内 set_slow/call=0、裸 store=1。
+- 性能（四语言校准法，两轮独立复测，5 次取最小）：
+  - 第 1 轮 Dial/C 几何平均 0.7881→**0.7862**（-0.0019）
+  - 第 2 轮 0.7881→**0.7860**（-0.0021）
+  - 稳定收益项：b17 4.487→3.96（快 11.3%）、b16 1.378→1.307（快 5.1%）、
+    b18 1.281→1.238（快 3.4%）。b08 残留 ±11% 是 run() 内噪声（代码未变）。
+- data.json / docx/bench.html 已刷新，`check_bench_data.py` 与 `build_bench_web.py` 全绿。
+
+### 结论与决策含义
+- 净赢虽小（-0.002），但方向正确：首次把逃逸分析证据传导到指令选择，消除 COW 死代码。
+- **规模守卫是本轮一般性教训**：在含大量内联热循环的巨型函数里做改变代码长度的
+  transform，收益会被 uop cache 布局假象吞掉；按函数规模隔离是低成本稳健解法。
+- caller-saved 全开（消除所有 call 后扩寄存器池）仍未做——M24 已证伪预留 callee-saved
+  钉住路线；真正的 6→14 寄存器扩张是后续更深的架构工程，不在本轮。

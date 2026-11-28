@@ -684,6 +684,10 @@ struct FnEmit<'a> {
     promotable: HashSet<VReg>,
     /// 当前块需要回写栈槽的普通 vreg（跨块活跃集合）。
     flush_mask: HashSet<VReg>,
+    /// M30：已证明「函数局部、非逃逸、kind=0、独占」的 int[] 句柄别名集合。
+    /// 对指向这些句柄的 dial_array_set，rc/kind 检查与 COW 慢路径 call 都是死代码
+    /// （恒 rc==1/kind==0、恒等返回 a），可发射纯裸 store。空集合表示不启用本优化。
+    local_int_set_handles: HashSet<VReg>,
     /// M7-e1：定义了但全函数从未被读取的普通 vreg——其 spill store 可整条省略。
     dead_defs: HashSet<VReg>,
     /// M7-e3b：ICmp 结果「全函数仅被一处 Branch.cond 使用」时，可免物化，
@@ -770,6 +774,29 @@ impl<'a> FnEmit<'a> {
             let s: String = f.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
             s
         });
+        // M30：局部独占 int[] 句柄集合。仅 O3 + ReleaseFast + x86-64 SysV + 非 -g /
+        // 非 PGO / 非 instrument；DIALC_NO_ARRAY_SET_NOCHK=1 可整体回退。分析本身有
+        // 严格逃逸守卫（M18，已在生产用于 elide_array_handle_store），零误报。
+        //
+        // 规模守卫：跳过「巨型内联函数」（如 benchmark 的 run()：28 路分发 + 数十个
+        // 被内联的热点函数，数百条指令）。在这些函数里删检查指令会整体平移后续热循环
+        // 的入口，跨 32B uop cache 边界造成 -6%~-33% 的布局假象退化（本轮实证：b21
+        // 的 0.78× 本就是偶然落位的黄金布局，175ms 才是常态）。局部独占 set 的语义
+        // 优化保留给小型独立函数（b16/b17/b18 等 35~57 条指令），那里收益是真实的、不
+        // 会波及别的循环。阈值 150 远高于普通函数、远低于 run() 的 587，留足裕量。
+        let func_inst_count: usize = f.blocks.iter().map(|b| b.insts.len()).sum();
+        let mut local_int_set_handles: HashSet<VReg> = HashSet::new();
+        if opt_level >= OptLevel::O3
+            && matches!(target, EmitTarget::X86_64SysV)
+            && matches!(safety, SafetyMode::ReleaseFast)
+            && !debug_info && pgo.profile.is_none() && !pgo.instrument
+            && func_inst_count <= 150
+            && std::env::var("DIALC_NO_ARRAY_SET_NOCHK").is_err()
+        {
+            for arr in crate::pass::analyze_local_int_arrays(f) {
+                for h in arr.handles { local_int_set_handles.insert(h); }
+            }
+        }
         FnEmit {
             ip, f, target, local_funcs: local,
             pgo, pgo_hot,
@@ -779,6 +806,7 @@ impl<'a> FnEmit<'a> {
             fp_resident: HashMap::new(), fp_flush_mask: HashSet::new(),
             plans: Vec::new(), used_phys: Vec::new(), save_off: 0, lr_slot: -1,
             promotable: HashSet::new(), flush_mask: HashSet::new(),
+            local_int_set_handles,
             dead_defs: HashSet::new(), fusable: HashMap::new(),
             pow2_mod_test: HashMap::new(), skip_pow2_mod: HashSet::new(),
             lea_fuse: HashMap::new(), skip_lea_mul: HashSet::new(),
@@ -3751,6 +3779,22 @@ impl<'a> FnEmit<'a> {
             && arg_tys[2] == IrType::I64
             && !ret_ty.is_float()
         {
+            // M30：静态已证「局部独占 int[]」（rc==1、kind==0、恒等返回 a）时，
+            // rc/kind 检查与 COW 慢路径 call 都是死代码——直接发纯裸 store。
+            // 这消除热循环里最后一条 call，为 caller-saved 驻留扫清障碍。
+            let is_local_exclusive = match args[0] {
+                Value::Reg(r) => self.local_int_set_handles.contains(&r),
+                _ => false,
+            };
+            if is_local_exclusive {
+                self.lg(args[0], &"rdi".to_string());
+                self.lg(args[1], &"rsi".to_string());
+                self.lg(args[2], &"rdx".to_string());
+                self.line("\tmovq %rdx, 24(%rdi,%rsi,8)");
+                self.line("\tmovq %rdi, %rax"); // 恒等返回 a
+                self.sg(dst.unwrap(), &"rax".to_string());
+                return;
+            }
             let slow = format!(".{}_set_slow_{}", self.prefix, self.dchk_seq);
             let done = format!(".{}_set_done_{}", self.prefix, self.dchk_seq + 1);
             self.dchk_seq += 2;
