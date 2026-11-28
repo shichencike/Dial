@@ -5209,3 +5209,45 @@ live interval，在每个 call 点切断 caller-saved 区间（spill/reload）�
 - 禁用内联虽让 b14/b15 拿到 M30 收益，但损失远超收益——印证 M30 规模守卫
   （跳过 run() 内 transform）已是此方向的最优折中。
 - 至此本轮三条架构级探针（扩池 / 强制统一 GRA / 禁用内联）全部证伪。
+
+## M31（立项探索，未采纳）：完整 Greedy RA Phase 1 — 全局 phys 分配证伪，配套 emit 重构是硬骨头
+
+### 背景：用户立项「完整 Greedy RA」
+用户明确选择架构级治根，立项完整 Greedy RA（跨块 live interval + call 点切断 +
+全局 phys 分配）。本轮实现 Phase 1 最小原型验证核心假设。
+
+### 根因诊断（反汇编实证）
+b17 j 内层循环体是**单块**（`jmp` 回自身），每轮仍有 8 次栈重载 + 2 次写回：
+`0x1e0(%rsp)` aik、`0x1d0` B base、`0x1a0` C base、`0x2c8` j、`0x188` i*64。
+这些值在 IR 层已被 LICM/SSA 提升，但 `build_linear_plans` **按块独立 first-fit**：
+aik 定义在 k 循环块、use 在 j 循环块，在 j 块的 range 是单点，6 个 phys 被
+j 块短命值占满，aik 被挤出走栈。扩池实验已证峰值活跃 <=6，故瓶颈是分配策略
+而非 phys 数量。
+
+### 实现：build_global_linear_plans（DIALC_GRA_GREEDY 开关）
+1. 全局指令序号（每块 base + 局部 ii），全函数算每个候选 vreg 的 live interval
+   （首次出现到末次出现，保守近似）。
+2. 全函数一次 first-fit：长 interval 优先占固定 phys，同一 vreg 全程同 phys。
+3. 每块段用全局分配的 phys，段内 from_ii 仍是块内局部序号。
+
+### 三个版本实证
+| 版本 | checksum | 性能 | 结论 |
+|---|---|---|---|
+| 全局分配（块边界机制不变） | 28/28 ✅ | b17 +20%、b18 +23%、b15 +26% ❌ | 栈访问 79→118，保守长区间占满 phys、段切换反增回写 |
+| 全局分配 + 跨块 resident 继承（块尾不 flush / 块首不清空） | 17/28 ❌ | 6 项崩溃/错误 | phi 边界与分支汇合处 phys 归属冲突，正确性崩塌 |
+| 纯全局分配（回退继承） | 28/28 ✅ | 全面变慢 | 同上第一版 |
+
+### 关键结论：Greedy RA 的真正难点
+- **全局 phys 分配单独无效**：必须配套重构 emit 块边界状态机（flush_residency /
+  begin_block / end_block / sync_dyn），让 resident 安全跨块继承。
+- **跨块继承在现有架构下不安全**：`write_block_args` 的 phi 走栈、`flush_residency`
+  块尾回写、`begin_block` 清空 resident 三者耦合；去掉回写会导致 phi/汇合处读到
+  旧值。这正是 LLVM Greedy RA 需要「live interval 精确切分 + phi 感知 + call 点
+  spill/reload」的理由，是 LLVM 级架构工程，非增量改动可及。
+- 本轮未采纳，工作区干净、二进制重建回 M30 状态（0.7860）。
+
+### 决策含义
+- 完整 Greedy RA 是一个需专门立项、可能多轮无净赢的大工程；本轮 Phase 1 已
+  精确划定其范围（emit 状态机重构是核心难点），为后续投入提供实证边界。
+- 当前 0.7860 仍是稳定平衡点；所有增量方向（GRA 四探针 + 禁用内联 + Greedy
+  Phase 1）均已证伪留痕。
